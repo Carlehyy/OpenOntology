@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import queue
 import threading
 import time
@@ -1248,6 +1249,19 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 all_text.append("已达到工具调用轮次上限。")
 
         final_content = "".join(all_text) or "模型没有返回可显示的内容。"
+        if delegation_schemas and not any(
+            step.get("toolName") == delegation.DELEGATION_TOOL_NAME
+            for step in steps
+        ) and re.search(
+            r"已委派|已询问|子助手(答复|返回|回复|说|表示)|已在同一子会话",
+            final_content,
+        ):
+            # 观测告警（只记日志）：内容声称有子助手结果但本消息没有任何
+            # delegate_to_assistant 步骤——提示词层反虚构约束失效的信号
+            logger.warning(
+                "疑似虚构委派：消息无 delegate_to_assistant 步骤但内容声称子助手结果 conversation=%s message=%s",
+                conversation_id, assistant_message.id,
+            )
         if agent_mode:
             final_content = _strip_goal_markers(final_content) or "模型没有返回可显示的内容。"
         assistant_message.content = final_content
