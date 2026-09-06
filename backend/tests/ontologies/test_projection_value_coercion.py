@@ -122,3 +122,20 @@ def test_empty_string_still_means_null_for_typed_props():
     assert props["d"] is None
     assert props["flag"] is None
     assert props["name"] == ""  # string 保留业务文本
+
+
+def test_giant_int_rejected_by_instance_contract_not_crash():
+    """对抗回归 A2：巨型 int 在实例契约处按"数值超域"拒绝（False），
+    而不是 float() OverflowError 未捕获击穿校验。"""
+    from app.ontologies.formal_modeling.validation import _is_value_of_type
+
+    assert _is_value_of_type(10 ** 400, "number") is False
+    assert _is_value_of_type(9007199254740993, "number") is True
+
+
+def test_deeply_nested_json_payload_raises_actionable_error():
+    """对抗回归 A5：深嵌套 JSON 载荷从 json.loads 逃出的 RecursionError
+    必须被翻译成带属性名的 ValueError，而不是击穿投影。"""
+    payload = "[" * 10000 + "]" * 10000
+    with pytest.raises(ValueError, match="tags"):
+        _coerce_props_to_type({"tags": payload}, _typed(tags="array"))

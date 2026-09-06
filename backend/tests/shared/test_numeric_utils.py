@@ -49,3 +49,17 @@ def test_parse_numeric_text_rejects_garbage():
 def test_parse_numeric_text_strips_thousand_separators():
     # "1," 经千分位剥离为 "1"，与既有 float 路径语义一致
     assert parse_numeric_text("1,") == 1
+
+
+def test_parse_numeric_text_giant_digits_do_not_breach_contract():
+    """对抗回归：数百位数字串不得以巨型 int 击穿实例契约的 float() 转换
+    （OverflowError 未捕获会让投影以未分类异常崩溃），照旧转 inf 拒绝。"""
+    import math
+
+    for length in (400, 4300, 5000):
+        assert math.isinf(parse_numeric_text("9" * length))
+
+
+def test_parse_numeric_text_rejects_overlong_input():
+    with pytest.raises(ValueError, match="超长"):
+        parse_numeric_text("9" * 1_000_001)

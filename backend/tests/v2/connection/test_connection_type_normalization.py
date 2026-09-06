@@ -522,7 +522,7 @@ def test_sync_rejects_float_primary_key_with_warning(db, monkeypatch, caplog):
         Dataset.source_connection_id == connection.id).one()
     assert "primary_key" not in dataset.schema_json
     assert any(
-        "浮点列" in record.getMessage() for record in caplog.records)
+        "无法安全编码" in record.getMessage() for record in caplog.records)
 
 
 def test_sql_connector_max_rows_guard(monkeypatch, caplog):
@@ -683,3 +683,93 @@ def test_identity_value_is_stable_across_pk_textualization():
     comp_str = service._row_identity_value({"a": "1", "b": "x"}, "a,b")
     assert comp_int == comp_str
     assert uuid_module.uuid5(uuid_module.NAMESPACE_URL, comp_int)
+
+
+# ---- PR-D：对抗式审查修复的回归 ----
+
+
+def test_normalize_cell_nonfinite_floats_become_null():
+    """对抗回归：NaN/Inf 是非法 JSON 字面量，一个单元格不能毒化整个
+    数据集的前端消费，按业务空值归一。"""
+    assert tn.normalize_cell(float("nan")) is None
+    assert tn.normalize_cell(float("inf")) is None
+    assert tn.normalize_cell(float("-inf")) is None
+    assert tn.normalize_cell(1.5) == 1.5
+    assert tn.normalize_cell({"scores": [float("nan"), 0.5]}) == {
+        "scores": [None, 0.5]}
+    # 归一化后必须是严格合法 JSON
+    json.dumps(tn.normalize_rows([{"score": float("nan"), "ok": 1.0}]))
+
+
+def test_sql_connector_max_rows_has_platform_ceiling():
+    from app.data_channel.connections.sql_connector import SQLConnector
+
+    assert SQLConnector({"max_rows": 10 ** 12})._effective_max_rows() \
+        == SQLConnector._MAX_ROWS_CEILING
+    # JSON 合法的无穷字面量（1e999 → inf）：int(inf) OverflowError 被捕获
+    assert SQLConnector({"max_rows": float("inf")})._effective_max_rows() \
+        == SQLConnector._DEFAULT_MAX_ROWS
+
+
+def test_rest_pull_full_has_total_rows_ceiling(monkeypatch, caplog):
+    from app.data_channel.connections.rest_connector import RestConnector
+
+    class _RespList:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            # dict + next=true 形态：分页循环持续翻页直到总量护栏触发
+            return {"data": [{"id": i} for i in range(500)], "next": True}
+
+    class _Session:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, _resource, params=None):
+            self.calls += 1
+            return _RespList()
+
+    connector = RestConnector({"base_url": "http://x", "endpoints": ["/e"]})
+    monkeypatch.setattr(RestConnector, "_get_session", lambda self: _Session())
+    monkeypatch.setattr(RestConnector, "_TOTAL_ROWS_CEILING", 1_200)
+    with caplog.at_level(logging.WARNING):
+        rows = connector.pull_full("/e")
+
+    assert len(rows) == 1_500  # 3 页 × 500 后触发总量护栏
+    assert any("总量护栏" in r.getMessage() or "上限" in r.getMessage()
+               for r in caplog.records)
+
+
+class _UnsafePkConnector(_PkConnector):
+    def introspect_primary_key(self, _resource):
+        return ["x,y"]  # 含逗号的合法带引号标识符（对抗 PoC 实证形态）
+
+
+class _ColonPkConnector(_PkConnector):
+    def introspect_primary_key(self, _resource):
+        return ["id:x"]
+
+
+@pytest.mark.parametrize("connector_cls", [_UnsafePkConnector, _ColonPkConnector])
+def test_sync_rejects_unsafe_pk_names(db, monkeypatch, caplog, connector_cls):
+    """对抗回归：主键列名含逗号（split_pk 错拆）/冒号（单列身份拼接
+    歧义可构造跨数据集实例碰撞）时拒绝写入主键契约并告警。"""
+    connection = _make_connection(db, f"conn-unsafe-{connector_cls.__name__}")
+    monkeypatch.setattr(
+        "app.services.connection.registry.get_connector",
+        lambda _kind, _config: connector_cls(),
+    )
+    with caplog.at_level(logging.WARNING, logger="app.tasks.v2.connection_sync"):
+        result = sync_connection(connection.id, db=db)
+
+    assert result["status"] == "ok"  # 不阻断入湖
+    dataset = db.query(Dataset).filter(
+        Dataset.source_connection_id == connection.id).one()
+    assert "primary_key" not in dataset.schema_json
+    assert any(
+        "无法安全编码" in record.getMessage() for record in caplog.records)

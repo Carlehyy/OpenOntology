@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import decimal
+import math
 import uuid as uuid_module
 
 # 基础类型名（lower + 去括号参数 + 去数组标记后）→ (湖类型, 标志)
@@ -239,8 +240,13 @@ def normalize_cell(value):
     一致），Decimal 保留字符串原文（不丢精度，采样期再按 float 解析），
     bytes 转 base64 文本（列级 binary 标志见 map_sql_type）。
     """
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, int, str)):
         return value
+    if isinstance(value, float):
+        # NaN/±Inf 是非法 JSON 字面量（json.dumps 默认放行产出 NaN/Infinity
+        # 文本，前端 JSON.parse 整体抛错且版本内容不可变无法自愈）——单个
+        # 单元格不能毒化整个数据集，按业务空值归一为 None
+        return value if math.isfinite(value) else None
     if isinstance(value, decimal.Decimal):
         return str(value)
     if isinstance(value, dt.datetime):  # 必须在 date 之前判断（子类关系）

@@ -78,8 +78,14 @@ def _is_value_of_type(value: Any, property_type: str) -> bool:
     if property_type == "string":
         return isinstance(value, str)
     if property_type == "number":
-        return (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(float(value)))
+        if not (isinstance(value, (int, float)) and not isinstance(value, bool)):
+            return False
+        try:
+            # 超过 float64 量级的巨型 int 会 OverflowError——按"数值超域"拒绝，
+            # 不能让单个畸形值以未分类异常击穿整批投影校验
+            return math.isfinite(float(value))
+        except OverflowError:
+            return False
     if property_type == "boolean":
         return isinstance(value, bool)
     if property_type == "array":
