@@ -696,7 +696,9 @@ export default function SuperAssistantPage() {
   )
 
   return (
-    <div className="relative flex h-full min-h-0 overflow-hidden bg-white">
+    /* AI 原生前台外壳：灰画布全幅铺底，右侧主体成为内嵌圆角内容卡，
+       画布从侧栏四周延伸包裹卡片（对齐 DESIGN.md 画布/卡片分层，区别于后台 Layout 贴边结构） */
+    <div className="relative flex h-full min-h-0 gap-2 overflow-hidden bg-background p-2">
       <WorkbenchSidebar
         conversations={conversations}
         selectedId={selectedId}
@@ -712,7 +714,8 @@ export default function SuperAssistantPage() {
         onOpenSearch={() => setSearchOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
       />
-      <section className="flex min-w-0 flex-1 flex-col bg-white">
+      {/* 内嵌内容卡（大组件）：分隔符上方是常用功能工具条，下方是主体内容区 */}
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-card shadow-sm">
         <header className="relative z-10 flex h-[4.3125rem] shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3 sm:px-4">
           <button
             type="button"
