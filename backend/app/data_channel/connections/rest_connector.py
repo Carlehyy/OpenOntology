@@ -185,8 +185,9 @@ class RestConnector(ConnectorBase):
             # 总量护栏：页数有 100 页上限，但第三方服务端单页可无视
             # page_size 返回任意多条（100×N 放大），累计行数封顶截断
             if len(all_records) >= self._TOTAL_ROWS_CEILING:
+                all_records = all_records[:self._TOTAL_ROWS_CEILING]
                 logger.warning(
-                    "REST 拉取累计行数达到 %d 上限已截断（端点 %s 单页返回"
+                    "REST 拉取达到累计行数上限 %d 已截断（端点 %s 单页返回"
                     "不受 page_size 约束）；如需完整同步请缩小上游分页",
                     self._TOTAL_ROWS_CEILING, resource)
                 break

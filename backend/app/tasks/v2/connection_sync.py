@@ -217,6 +217,12 @@ def sync_connection(connection_id: str, mode: str = "full",
             content = json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8")
             rowcount = len(rows)
             kind = "structured"
+            if not rows:
+                # 与截断告警对称：空版本是合法结果（可触发下游"权威全删"语义），
+                # 但静默 status=ok 会让排障失去线索
+                logger.warning(
+                    "连接 %s 资源 %s 本次同步结果为 0 行——将落一个空版本；"
+                    "若源端不应为空请检查端点/查询/权限", connection_id, res)
             schema_json = _structured_schema_json(connector, res, rows, pk_columns)
         else:
             content = json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8")

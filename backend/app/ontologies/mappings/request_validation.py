@@ -509,6 +509,21 @@ def _canonical_primary_key(db: Session, dataset_id: str) -> str:
                 ),
             },
         )
+    # 统一拦截所有主键写入方（连接内省已在同步侧拒绝，人工声明入口在此兜底）：
+    # 冒号与单列实例身份 f"{col}:{value}" 的分隔符产生拼接歧义，可构造跨数据集
+    # 实例碰撞（对抗审查实证），必须在消费边界 fail-closed
+    colon_columns = [c for c in columns if ":" in c]
+    if colon_columns:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "invalid_primary_key_contract",
+                "message": (
+                    f"数据集「{dataset.name}」的主键列 {colon_columns} 含冒号："
+                    "冒号与实例身份编码冲突，请改用无冒号列或经流水线派生稳定键。"
+                ),
+            },
+        )
     if len(columns) != len(set(columns)):
         raise HTTPException(
             400,

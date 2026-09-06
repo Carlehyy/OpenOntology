@@ -197,6 +197,12 @@ def _property_data_binding(
     return binding
 
 
+def _display_value(value, limit: int = 100) -> str:
+    """报错用值展示：截断超长载荷，错误消息不被对抗性巨型输入放大。"""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…(截断)"
+
+
 def _coerce_props_to_type(props: dict, type_props: list[dict]) -> dict:
     """按类型的属性定义做值转换（CSV 来的全是字符串——number 属性不转数字，
     哨兵的数值条件、派生函数、动作校验会整体失灵）。声明过的类型转换失败
@@ -244,7 +250,8 @@ def _coerce_props_to_type(props: dict, type_props: list[dict]) -> dict:
                 elif low in ("false", "0", "no", "否"):
                     out[k] = False
                 elif s:
-                    raise ValueError(f"属性 {k} 的值 {v!r} 无法转换为 boolean")
+                    raise ValueError(
+                        f"属性 {k} 的值 {_display_value(v)!r} 无法转换为 boolean")
             elif t in ("date", "datetime"):
                 parsed = parse_temporal_text(s)
                 out[k] = (parsed.date().isoformat() if t == "date"
@@ -257,16 +264,16 @@ def _coerce_props_to_type(props: dict, type_props: list[dict]) -> dict:
                     out[k] = decoded
                 else:
                     raise ValueError(
-                        f"属性 {k} 的值 {v!r} 无法转换为 {t}")
+                        f"属性 {k} 的值 {_display_value(v)!r} 无法转换为 {t}")
         except (ValueError, TypeError, ArithmeticError, RecursionError) as exc:
             # ArithmeticError/RecursionError：巨型 Decimal/深嵌套 JSON 等对抗
             # 载荷会从解析器逃出这两族异常——必须翻译成带属性名的业务报错，
             # 不能以未分类异常击穿整批投影
             raise ValueError(
-                f"属性 {k} 的值 {v!r} 无法转换为 {t}"
+                f"属性 {k} 的值 {_display_value(v)!r} 无法转换为 {t}"
                 f"（{t} 需要 ISO 格式，如 2026-01-15 或 2026-01-15T10:30:00）"
                 if t in ("date", "datetime") else
-                f"属性 {k} 的值 {v!r} 无法转换为 {t}"
+                f"属性 {k} 的值 {_display_value(v)!r} 无法转换为 {t}"
             ) from exc
     return out
 

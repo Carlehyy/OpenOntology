@@ -31,6 +31,7 @@ from app.ontologies.mappings.formal_projection_contract import (
     _RESERVED_PROP_KEYS,
     _build_object_type_properties,
     _coerce_props_to_type,
+    _display_value,
     _infer_property_type,
     _merge_properties,
     _pick_first,
