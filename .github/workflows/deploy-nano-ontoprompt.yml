@@ -56,10 +56,10 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     # xdist 并行 + 测试环境低 bcrypt 轮次 + pytest-split 按时长六分片后，单片
-    # 回归在 4 vCPU runner 上约 5-7 分钟（套件随功能持续增长，分片配平数据见
-    # backend/.test_durations，新增测试需全量跑一次 --store-durations 再合入，
-    # 否则无时长记录的测试会集中落到个别分片）；上限留到 25 分钟，既覆盖
-    # runner 波动余量，又能及时掐断真正卡死的任务。
+    # 回归在 4 vCPU runner 上实测约 5-13 分钟（套件随功能持续增长，分片配平
+    # 数据见 backend/.test_durations；新增测试须全量跑一次 --store-durations
+    # 再合入，shard 1 的时长覆盖守卫会强制拦截漏记）；上限留到 25 分钟，
+    # 既覆盖 runner 波动余量，又能及时掐断真正卡死的任务。
     timeout-minutes: 25
     services:
       postgres:
@@ -88,6 +88,30 @@ jobs:
 
       - name: Install backend dependencies
         run: uv sync --frozen --group dev
+        working-directory: backend
+
+      # 新增测试缺时长记录会让 pytest-split 配平失真（已两次导致单片撞
+      # timeout 被 cancel、deploy 被跳过），在回归前用收集集差集强制拦截
+      - name: Test durations coverage guard
+        if: matrix.shard == 1
+        run: |
+          uv run python - <<'PY'
+          import json, subprocess
+          collected = subprocess.run(
+              ["uv", "run", "pytest", "--collect-only", "-q",
+               "--ignore", "tests/v2/perf"],
+              capture_output=True, text=True, check=True,
+          ).stdout
+          ids = {line.strip() for line in collected.splitlines() if "::" in line}
+          known = set(json.load(open(".test_durations", encoding="utf-8")))
+          missing = sorted(ids - known)
+          assert not missing, (
+              f"{len(missing)} 个测试缺时长记录：全量跑一次 "
+              f"`pytest --store-durations [--clean-durations]` 再合入。"
+              f"示例：{missing[:5]}"
+          )
+          print(f"durations guard OK: {len(ids)} 个测试全部有时长记录")
+          PY
         working-directory: backend
 
       - name: Backend regression suite
