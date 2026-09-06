@@ -4,8 +4,8 @@
 子会话的追加式历史（resume 取最近一条；session=new 轮转新线）。对
 status='running' 建部分唯一索引防并发残留竞态。无数据回填需求。
 
-Revision ID: 0096_super_assistant_delegations
-Revises: 0095_super_assistant_multica_workspace_name
+Revision ID: 0098_super_assistant_delegations
+Revises: 0097_sentinel_pattern
 Create Date: 2026-09-06
 """
 
@@ -54,7 +54,7 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("id"),
         )
         op.create_index(
-            "ix_sa_delegations_owner", _TABLE, ["owner_id"], unique=False,
+            "ix_super_assistant_delegations_owner_id", _TABLE, ["owner_id"], unique=False,
         )
         op.create_index(
             "ix_sa_delegations_conv_key_last",

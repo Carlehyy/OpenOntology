@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Protocol, runtime_checkable
+from typing import Any, Iterator, Literal, Protocol, runtime_checkable
 
-STATUS_ANSWERED = "answered"
-STATUS_FAILED = "failed"
-STATUS_CANCELLED = "cancelled"
+TurnStatus = Literal["answered", "failed", "cancelled"]
+
+STATUS_ANSWERED: TurnStatus = "answered"
+STATUS_FAILED: TurnStatus = "failed"
+STATUS_CANCELLED: TurnStatus = "cancelled"
 
 
 class AssistantHubError(Exception):
@@ -50,7 +52,7 @@ class TurnEvent:
 class TurnResult:
     """回合终态：run_turn 生成器的最后一个产物必须是本类型。"""
 
-    status: str
+    status: TurnStatus
     content: str = ""
     # 本回合结束后的子会话引用（可能因新建/漂移降级与传入引用不同）
     conversation_ref: str | None = None

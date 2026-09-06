@@ -1,16 +1,20 @@
 """超级助手委派执行器 — 引擎侧，零助手知识。
 
 工作模型（对齐 runtime._chat_round 的线程+队列先例）：
-- 子回合在守护线程 + 独立 SessionLocal 中执行：子域编排器内部 commit，
-  绝不与 stream_chat 主会话共用事务（父取消/失败时子回合已提交的消息
-  天然保留，这正是"子会话可复用"的产品语义）；
+- 子回合在守护线程 + 独立 SessionLocal 中执行（含以子会话自取的 user）：
+  子域编排器内部 commit，绝不与 stream_chat 主会话共用事务（父取消/失败
+  时子回合已提交的消息天然保留，这正是"子会话可复用"的产品语义）；
 - 主生成器每 0.5s 轮询事件队列：查父取消、查超时、周期性产出 SSE 注释
   心跳（``": ping"`` 是注释不是事件，不触碰固定 10 种事件的 SSE 契约）；
-- 取消 = 停止等待并把委派行转终态；能协作取消的子助手经 adapter 桥接
-  真正停下（如本体助手），不能的（如业务探索）在后台跑到终态，由工作
-  线程按 only-if-running 收尾行状态；
-- 舱壁：模块级信号量限并发（每委派占 1 线程 + 1 DB 连接），超限立即
-  返回"通道忙"，不排队放大资源占用。
+- 行状态收尾是双写者竞争、单值落定：消费侧（取消/超时/完成）与工作线程
+  都只做 only-if-running 的原子 UPDATE；conversation_ref 独立按
+  only-if-NULL 回填——首回合取消/超时后子会话引用不丢，resume 不退化；
+- 孤儿 running 行兜底：SSE 断开时生成器 finally 置 cancel_event 尽快停
+  子回合；进程崩溃残留由下次委派前的陈旧行回收（interrupted）清理，
+  避免部分唯一索引把该 (会话, 助手) 的后续委派永久毒化；
+- 舱壁：模块级信号量限"同时在等待委派结果"的请求数（每委派占 1 等待
+  线程 + 1 子会话连接），超限立即返回"通道忙"；超时/取消返回即释放额度，
+  不可协作取消的子回合线程可能仍在后台跑到终态（由工作线程收尾）。
 
 会话引用（conversation_ref）由委派表独占，绝不进入 LLM 可见上下文：
 resume 解析 = 按 (super_conversation_id, assistant_key) 查最近一条。
@@ -22,11 +26,15 @@ import logging
 import queue
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
+
+from sqlalchemy import update
 
 from app.assistant_hub import registry as assistant_registry
 from app.assistant_hub.contract import (
+    STATUS_ANSWERED,
+    STATUS_CANCELLED,
     STATUS_FAILED,
     AssistantHubError,
     TurnResult,
@@ -49,6 +57,9 @@ SYSTEM_PROMPT_RULE = """你已接入平台内其他助手（见 delegate_to_assi
 - 同一会话内再次委派同一助手默认续用上次子会话，不要重述全部背景；确需另起一条线时传 session=new。
 - 如实转述子助手的结果与失败原因，不替它编造内容。"""
 
+# 允许写入 delegations.status 的终态集合（含回收态 interrupted）
+_TERMINAL_STATUSES = frozenset({STATUS_ANSWERED, STATUS_FAILED, STATUS_CANCELLED})
+
 _semaphore: threading.Semaphore | None = None
 _semaphore_lock = threading.Lock()
 
@@ -65,6 +76,15 @@ def _delegation_semaphore() -> threading.Semaphore:
 
 def _result_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _capped_content(content: str) -> str:
+    """预截子助手内容，保证外层统一截断（super_assistant_tool_result_chars）
+    不会切掉结果 JSON 的尾部字段（usage/resumed 等），LLM 永远拿到合法 JSON。"""
+    cap = max(1_000, settings.super_assistant_tool_result_chars - 2_000)
+    if len(content) <= cap:
+        return content
+    return content[:cap] + "\n…[子助手结果已截断，可在对应助手会话中查看全文]"
 
 
 def delegation_tools(db, owner_id: str) -> list[dict[str, Any]]:
@@ -96,25 +116,99 @@ def _latest_delegation(
     )
 
 
+def _reclaim_stale_running(
+    db, owner_id: str, conversation_id: str, assistant_key: str,
+) -> int:
+    """回收进程崩溃等残留的陈旧 running 行（转 interrupted）。
+
+    部分唯一索引只允许每 (会话, 助手) 一条 running 行；不回收则后续委派
+    的 INSERT 必然撞唯一索引且无自愈路径。窗口取 超时+60s：仍在超时窗内
+    的 running 行可能是真实在跑的子回合（其工作线程会自行收尾）。
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        seconds=max(1, settings.super_assistant_delegation_timeout_seconds) + 60
+    )
+    result = db.execute(
+        update(SuperAssistantDelegation)
+        .where(
+            SuperAssistantDelegation.owner_id == owner_id,
+            SuperAssistantDelegation.super_conversation_id == conversation_id,
+            SuperAssistantDelegation.assistant_key == assistant_key,
+            SuperAssistantDelegation.status == "running",
+            SuperAssistantDelegation.last_turn_at < cutoff,
+        )
+        .values(status="interrupted", summary="进程中断残留回收")
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 def _transition_if_running(
     db, delegation_id: str, *, status: str,
     summary: str = "", conversation_ref: str | None = None,
 ) -> bool:
-    """only-if-running 的终态转移：父级（取消/超时）与工作线程竞争收尾。"""
-    row = db.query(SuperAssistantDelegation).filter(
-        SuperAssistantDelegation.id == delegation_id,
-        SuperAssistantDelegation.status == "running",
-    ).first()
-    if row is None:
-        return False
-    row.status = status
+    """消费侧终态转移：单条原子 UPDATE only-if-running（与工作线程竞争收尾）。"""
+    values: dict[str, Any] = {"status": status, "last_turn_at": datetime.now(timezone.utc)}
     if summary:
-        row.summary = summary[:200]
+        values["summary"] = summary[:200]
     if conversation_ref:
-        row.conversation_ref = conversation_ref
-    row.last_turn_at = datetime.now(timezone.utc)
+        values["conversation_ref"] = conversation_ref
+    result = db.execute(
+        update(SuperAssistantDelegation)
+        .where(
+            SuperAssistantDelegation.id == delegation_id,
+            SuperAssistantDelegation.status == "running",
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
     db.commit()
-    return True
+    return bool(result.rowcount)
+
+
+def _worker_finalize(
+    child_db, delegation_id: str, *, status: str,
+    summary: str = "", conversation_ref: str | None = None,
+) -> None:
+    """工作线程侧收尾（best-effort，失败只记日志）：
+
+    1. conversation_ref 按 only-if-NULL 回填——即使消费侧已因超时/取消
+       把行转终态，子会话引用也不丢（首回合 ref 只在这里产生）；
+    2. 终态转移 only-if-running——消费侧已收尾则不覆盖（如 timeout 不被
+       answered 覆盖）。失败时由下次委派前的陈旧行回收兜底。
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        if conversation_ref:
+            child_db.execute(
+                update(SuperAssistantDelegation)
+                .where(
+                    SuperAssistantDelegation.id == delegation_id,
+                    SuperAssistantDelegation.conversation_ref.is_(None),
+                )
+                .values(conversation_ref=conversation_ref, last_turn_at=now)
+                .execution_options(synchronize_session=False)
+            )
+        child_db.execute(
+            update(SuperAssistantDelegation)
+            .where(
+                SuperAssistantDelegation.id == delegation_id,
+                SuperAssistantDelegation.status == "running",
+            )
+            .values(
+                status=status,
+                summary=(summary or "")[:200],
+                last_turn_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        child_db.commit()
+    except Exception:  # noqa: BLE001 — 收尾失败不拖垮子回合结果回传
+        child_db.rollback()
+        logger.warning(
+            "委派行工作线程收尾失败 delegation_id=%s", delegation_id, exc_info=True,
+        )
 
 
 def run_delegation_tool(
@@ -160,17 +254,20 @@ def run_delegation_tool(
             ),
         })
 
+    cancel_event = threading.Event()
     try:
         resume_row = (
             None
             if session_policy == "new"
             else _latest_delegation(db, owner_id, conversation_id, assistant_key)
         )
+        _reclaim_stale_running(db, owner_id, conversation_id, assistant_key)
         row = SuperAssistantDelegation(
             owner_id=owner_id,
             super_conversation_id=conversation_id,
             assistant_key=assistant_key,
-            conversation_ref=resume_row.conversation_ref if resume_row else None,
+            # ref 只以纯字符串进出线程，绝不跨线程读 ORM 属性
+            conversation_ref=str(resume_row.conversation_ref) if resume_row and resume_row.conversation_ref else None,
             status="running",
             summary="",
             last_turn_at=datetime.now(timezone.utc),
@@ -178,33 +275,53 @@ def run_delegation_tool(
         db.add(row)
         db.commit()
         db.refresh(row)
+        initial_ref: str | None = row.conversation_ref
+        delegation_id = row.id
 
         events: queue.Queue = queue.Queue()
-        cancel_event = threading.Event()
         sentinel = object()
 
         def _work() -> None:
             child_db = SessionLocal()
+            final_status, final_summary, final_ref = STATUS_FAILED, "", initial_ref
             try:
-                ref = row.conversation_ref
+                # 子线程自取 user：父会话实例非线程安全，绝不跨线程共享
+                worker_user = child_db.get(User, owner_id)
+                if worker_user is None:
+                    events.put(("hub_error", "用户不存在"))
+                    final_summary = "用户不存在"
+                    return
+                ref = initial_ref
                 if ref is None:
-                    ref = assistant.start(child_db, user, context=context)
+                    ref = assistant.start(child_db, worker_user, context=context)
+                final_ref = ref
                 result: TurnResult | None = None
                 for item in assistant.run_turn(
-                    child_db, user, ref, task, cancel_event=cancel_event,
+                    child_db, worker_user, ref, task, cancel_event=cancel_event,
                 ):
                     if isinstance(item, TurnResult):
                         result = item
                     events.put(("event", item))
                 if result is None:
                     result = TurnResult(status=STATUS_FAILED, content="子助手未返回终态")
+                final_status = (
+                    result.status if result.status in _TERMINAL_STATUSES else STATUS_FAILED
+                )
+                final_summary = result.content
                 events.put(("done", (result, ref)))
             except AssistantHubError as exc:
+                final_summary = str(exc)
                 events.put(("hub_error", str(exc)))
             except Exception:  # noqa: BLE001 — 工作线程异常经队列回传，不裸死
                 logger.exception("委派子回合线程异常 assistant=%s", assistant_key)
+                final_summary = "子助手执行线程异常"
                 events.put(("hub_error", "子助手执行线程异常"))
             finally:
+                _worker_finalize(
+                    child_db, delegation_id,
+                    status=final_status, summary=final_summary,
+                    conversation_ref=final_ref,
+                )
                 child_db.close()
                 events.put(sentinel)
 
@@ -224,7 +341,7 @@ def run_delegation_tool(
                 if idle_polls % 2 == 0 and should_cancel():
                     cancel_event.set()
                     _transition_if_running(
-                        db, row.id, status="cancelled", summary="用户停止生成",
+                        db, delegation_id, status="cancelled", summary="用户停止生成",
                     )
                     return _result_json({
                         "status": "cancelled",
@@ -234,7 +351,7 @@ def run_delegation_tool(
                 if time.monotonic() > deadline:
                     cancel_event.set()
                     _transition_if_running(
-                        db, row.id, status="timeout", summary="委派超时",
+                        db, delegation_id, status="timeout", summary="委派超时",
                     )
                     return _result_json({
                         "status": "failed",
@@ -255,29 +372,32 @@ def run_delegation_tool(
                 result, ref_used = payload
                 _transition_if_running(
                     db,
-                    row.id,
-                    status=result.status,
+                    delegation_id,
+                    status=result.status if result.status in _TERMINAL_STATUSES else STATUS_FAILED,
                     summary=result.content,
                     conversation_ref=result.conversation_ref or ref_used,
                 )
                 return _result_json({
                     "status": result.status,
                     "assistant": assistant.spec().label,
-                    "content": result.content,
+                    "content": _capped_content(result.content),
                     "note": result.note,
                     "createdNewConversation": result.created_new_conversation,
-                    "resumed": resume_row is not None,
+                    "resumed": resume_row is not None and session_policy != "new",
                     "usage": result.usage,
                 })
             if kind == "hub_error":
                 _transition_if_running(
-                    db, row.id, status="failed", summary=str(payload),
+                    db, delegation_id, status="failed", summary=str(payload),
                 )
                 return _result_json({
                     "status": "failed",
                     "assistant": assistant.spec().label,
-                    "error": str(payload),
+                    "error": str(payload)[:1_000],
                 })
             # kind == "event"：进度事件只驱动心跳节奏，不进入 LLM 上下文
     finally:
+        # 客户端断开（GeneratorExit）/正常退出统一路径：通知子回合尽快到终态，
+        # 由工作线程收尾行状态；额度即时释放（不可协作取消的子回合后台跑完）
+        cancel_event.set()
         semaphore.release()

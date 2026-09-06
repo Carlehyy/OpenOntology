@@ -133,9 +133,9 @@ class OntologyAgentAdapter:
                 chat_cancel_registry.request_cancel(run_id)
             event_type = str(event.get("type") or "")
             if event_type == "meta":
-                new_conversation_id = (
-                    str(event.get("conversationId")) or new_conversation_id
-                )
+                meta_conversation_id = event.get("conversationId")
+                if meta_conversation_id:
+                    new_conversation_id = str(meta_conversation_id)
             elif event_type == "answer":
                 answer_content = str(event.get("content") or "")
                 usage = event.get("usage")

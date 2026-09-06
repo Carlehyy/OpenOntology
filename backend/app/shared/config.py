@@ -147,9 +147,10 @@ class Settings(BaseSettings):
     super_assistant_tool_deny: str = ""
     # 子代理：隔离子上下文的工具轮次上限（深度固定 1）
     super_assistant_subagent_max_rounds: int = 8
-    # 平台助手委派（delegate_to_assistant）：并发舱壁与单回合超时。每委派
-    # 占 1 工作线程 + 1 独立 DB 会话，超限立即拒绝不排队；超时/取消 = 停止
-    # 等待，不可协作取消的子助手在后台跑到终态并落库
+    # 平台助手委派（delegate_to_assistant）：并发舱壁=同时在等待委派结果的
+    # 请求数上限（每委派占 1 等待线程 + 1 子回合独立会话），超限立即拒绝不
+    # 排队；单回合超时。超时/取消 = 停止等待并释放额度，不可协作取消的子
+    # 助手线程在后台跑到终态，由工作线程收尾委派行
     super_assistant_delegation_max_concurrent: int = 2
     super_assistant_delegation_timeout_seconds: int = 600
     # web 工具：fetch 默认开启（SSRF 校验复用 MCP 规则）；search 需显式配置后端

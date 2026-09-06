@@ -1,4 +1,4 @@
-"""0096 超级助手委派映射表迁移。"""
+"""0098 超级助手委派映射表迁移。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -52,7 +52,7 @@ def test_upgrade_creates_table_with_partial_unique_running_index(tmp_path, monke
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.begin() as connection:
         # 全新库经 0003 的 create_all 以当前模型建表（时间戳 NOT NULL、无
-        # server 默认，与 0093-0095 的既有行为一致）；存量库走 0096 静态 DDL
+        # server 默认，与 0093-0095 的既有行为一致）；存量库走 0098 静态 DDL
         base_insert = (
             "INSERT INTO super_assistant_delegations"
             " (id, owner_id, super_conversation_id, assistant_key, status,"
@@ -96,5 +96,5 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    # 0096 委派映射表在本迁移之后线性追加，head 随之演进
+    # 0098 委派映射表在本迁移之后线性追加，head 随之演进
     assert heads == ["0098_super_assistant_delegations"]

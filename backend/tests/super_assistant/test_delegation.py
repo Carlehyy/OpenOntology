@@ -326,6 +326,82 @@ def _iter_chunks(generator):
             return
 
 
+def _wait_row(db, predicate, timeout=5.0):
+    """轮询委派行直到谓词成立（工作线程异步收尾）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        db.expire_all()
+        if predicate(db.query(SuperAssistantDelegation).order_by(
+                SuperAssistantDelegation.created_at.desc()).first()):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_client_disconnect_finalizes_row_and_keeps_channel_usable(tmp_path, monkeypatch):
+    """SSE 断开（GeneratorExit）：额度即释、子回合由工作线程收尾、通道不毒化。"""
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "disconnect")
+    gate = threading.Event()
+    fake = _FakeAssistant(gate=gate)
+    _fake_registry(monkeypatch, fake)
+    _fast_polls(monkeypatch)
+    monkeypatch.setattr(delegation, "_semaphore", threading.Semaphore(1))
+
+    with TestingSession() as db:
+        generator = delegation.run_delegation_tool(
+            db, owner_id=ids["owner_id"], conversation_id=ids["conversation_id"],
+            arguments={"assistant": "ontology_agent", "task": "慢任务"},
+            should_cancel=lambda: False,
+        )
+        next(chunk for chunk in _iter_chunks(generator) if chunk)  # 第一条心跳
+        generator.close()  # 模拟客户端断开注入 GeneratorExit
+        # 额度已释放：新委派可立即获得额度（不会通道假死）
+        gate.set()
+        _, output = _run_once(db, ids, arguments={
+            "assistant": "ontology_agent", "task": "断开后的新委派",
+        })
+        assert json.loads(output)["status"] == "answered"
+        # 断开那次的委派行由工作线程收尾（only-if-running），并回填 ref
+        assert _wait_row(
+            db,
+            lambda r: r is not None and r.conversation_ref is not None,
+        )
+        rows = db.query(SuperAssistantDelegation).order_by(
+            SuperAssistantDelegation.created_at).all()
+        assert rows[0].status == "answered"  # 断开行最终也被收尾
+
+
+def test_stale_running_row_is_reclaimed_before_insert(tmp_path, monkeypatch):
+    """进程崩溃残留的 running 行在下次委派前被回收，部分唯一索引不毒化通道。"""
+    from datetime import datetime, timedelta, timezone as tz
+
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "stale")
+    _fake_registry(monkeypatch, _FakeAssistant())
+    _fast_polls(monkeypatch)
+
+    with TestingSession() as db:
+        stale = SuperAssistantDelegation(
+            owner_id=ids["owner_id"],
+            super_conversation_id=ids["conversation_id"],
+            assistant_key="ontology_agent",
+            conversation_ref=None,
+            status="running",
+            last_turn_at=datetime.now(tz.utc) - timedelta(hours=1),
+        )
+        db.add(stale)
+        db.commit()
+
+        _, output = _run_once(db, ids, arguments={
+            "assistant": "ontology_agent", "task": "崩溃后的第一次委派",
+        })
+        assert json.loads(output)["status"] == "answered"
+        db.expire_all()
+        rows = db.query(SuperAssistantDelegation).order_by(
+            SuperAssistantDelegation.created_at).all()
+        assert rows[0].status == "interrupted"
+        assert rows[1].status == "answered"
+
+
 def test_timeout_stops_waiting_and_row_marks_timeout(tmp_path, monkeypatch):
     TestingSession, ids = _seed(tmp_path, monkeypatch, "timeout")
     fake = _FakeAssistant(delay=1.5)  # 不响应取消：模拟无协作取消的子助手
@@ -342,12 +418,22 @@ def test_timeout_stops_waiting_and_row_marks_timeout(tmp_path, monkeypatch):
         assert "未完成" in payload["error"]
         row = db.query(SuperAssistantDelegation).one()
         assert row.status == "timeout"
-        # 后台线程跑完后的 done 转移不得覆盖 timeout 终态（only-if-running）
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and fake.run_refs == []:
-            time.sleep(0.05)
+        # 后台线程跑完后的 done 转移不得覆盖 timeout 终态（only-if-running），
+        # 但 conversation_ref 必须被工作线程按 only-if-NULL 回填——否则下次
+        # resume 会静默退化为永远新建子会话
+        assert _wait_row(db, lambda r: r.conversation_ref is not None)
         db.expire_all()
         assert db.query(SuperAssistantDelegation).one().status == "timeout"
+
+        # 超时后 resume：续用同一条子会话（start 不再被调、ref 不变）
+        fake.delay = 0  # 第二回合不再拖时间，验证 resume 语义本身
+        _, second = _run_once(db, ids, arguments={
+            "assistant": "ontology_agent", "task": "继续刚才的问题",
+        })
+        second_payload = json.loads(second)
+        assert second_payload["resumed"] is True
+        assert fake.start_calls == 1
+        assert fake.run_refs[0] == fake.run_refs[1]
 
 
 def test_cancel_stops_waiting_and_marks_cancelled(tmp_path, monkeypatch):
