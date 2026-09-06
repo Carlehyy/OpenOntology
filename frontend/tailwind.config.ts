@@ -71,6 +71,13 @@ const config: Config = {
           DEFAULT: 'var(--destructive)',
           foreground: 'var(--destructive-foreground)',
         },
+        // 语义成功色（DESIGN.md §2.3）：DEFAULT 为深字/实心，bg 为浅底，
+        // 取值事实源 tokens.css 的 --color-success*（明暗成对自适应）
+        success: {
+          DEFAULT: 'var(--color-success)',
+          hover: 'var(--color-success-hover)',
+          bg: 'var(--color-success-bg)',
+        },
         border: 'var(--border)',
         input: 'var(--input)',
         ring: 'var(--ring)',

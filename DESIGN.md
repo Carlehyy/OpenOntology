@@ -66,6 +66,8 @@ description: >-
 
 success `--color-success #2d8a4e` · warning `#c9861a` · danger
 `--destructive #c23b3b`（深 `#e5534b`）· info `#2563eb`；各自配 *-bg 浅底。
+success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引用
+（映射见 `tailwind.config.ts`，取值明暗自适应），勿用绿色族原生色板类。
 状态表达优先「浅底 + 深字」组合，而非大面积实色。
 代码/命令展示块统一用深色面板 `--color-code-bg` / `--color-code-fg`
 （明暗两态近同的近黑底），替代页域私设的 `bg-slate-950` 类色板。
