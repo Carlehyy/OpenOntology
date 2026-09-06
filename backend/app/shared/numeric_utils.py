@@ -7,6 +7,7 @@ vs float without a float64 round-trip, because large integral values
 from __future__ import annotations
 
 import decimal
+import math
 from decimal import Decimal
 
 # 与 float64 可表示量级对齐的上限：超过此量级的整值不做 int 精确路径，
@@ -40,13 +41,18 @@ def parse_numeric_text(text: str) -> int | float:
     else:
         if -_INT_LIMIT <= value <= _INT_LIMIT:
             return value
+    # Decimal 判定块整体纳入捕获：abs()/比较在默认 context（Emax=999999）
+    # 下是上下文敏感运算，37 字符的科学计数载荷即可触发 decimal.Overflow
     try:
         dec = Decimal(cleaned)
+        integral = (dec.is_finite() and dec == dec.to_integral_value()
+                    and abs(dec) <= _FLOAT64_LIMIT)
     except decimal.DecimalException:
-        dec = None
-    if (dec is not None and dec.is_finite()
-            and dec == dec.to_integral_value()
-            and abs(dec) <= _FLOAT64_LIMIT):
+        integral = False
+    if integral:
         return int(dec)
     f = float(cleaned)
-    return int(f) if f.is_integer() else f
+    # isfinite 同时消除对 Python 版本的依赖（<=3.11 的 inf.is_integer() 为 True）
+    if not math.isfinite(f) or not f.is_integer():
+        return f
+    return int(f)

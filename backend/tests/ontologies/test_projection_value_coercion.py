@@ -139,3 +139,13 @@ def test_deeply_nested_json_payload_raises_actionable_error():
     payload = "[" * 10000 + "]" * 10000
     with pytest.raises(ValueError, match="tags"):
         _coerce_props_to_type({"tags": payload}, _typed(tags="array"))
+
+
+def test_coercion_error_message_truncates_giant_payload():
+    """对抗复核回归：报错消息不得无界嵌入完整载荷（百万字符垃圾会经
+    trial errors 列表原样返回 API）。"""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="amount") as exc_info:
+        _coerce_props_to_type({"amount": "x" * 5000}, _typed(amount="number"))
+    assert len(str(exc_info.value)) < 300

@@ -26,6 +26,7 @@ EXTRACTED_CONTRACT_FUNCTIONS = {
     "_pick_first",
     "_property_data_binding",
     "_coerce_props_to_type",
+    "_display_value",
     "_merge_properties",
     "_build_object_type_properties",
 }

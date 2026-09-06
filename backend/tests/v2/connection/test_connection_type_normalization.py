@@ -697,8 +697,13 @@ def test_normalize_cell_nonfinite_floats_become_null():
     assert tn.normalize_cell(1.5) == 1.5
     assert tn.normalize_cell({"scores": [float("nan"), 0.5]}) == {
         "scores": [None, 0.5]}
-    # 归一化后必须是严格合法 JSON
-    json.dumps(tn.normalize_rows([{"score": float("nan"), "ok": 1.0}]))
+    assert tn.normalize_cell(decimal.Decimal("NaN")) is None
+    assert tn.normalize_cell(decimal.Decimal("Infinity")) is None
+    assert tn.normalize_cell(decimal.Decimal("1.5")) == "1.5"
+    # 归一化后必须是严格合法 JSON（allow_nan=False 是判定本身：
+    # 若回归（NaN 不再归一），默认参数会静默产出 NaN 字面量造成假阴性）
+    json.dumps(tn.normalize_rows(
+        [{"score": float("nan"), "ok": 1.0}]), allow_nan=False)
 
 
 def test_sql_connector_max_rows_has_platform_ceiling():
@@ -740,9 +745,9 @@ def test_rest_pull_full_has_total_rows_ceiling(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         rows = connector.pull_full("/e")
 
-    assert len(rows) == 1_500  # 3 页 × 500 后触发总量护栏
-    assert any("总量护栏" in r.getMessage() or "上限" in r.getMessage()
-               for r in caplog.records)
+    # 3 页 × 500 触发护栏后真截断到上限（与"已截断"文案一致，不超发一页）
+    assert len(rows) == 1_200
+    assert any("上限" in r.getMessage() for r in caplog.records)
 
 
 class _UnsafePkConnector(_PkConnector):
@@ -773,3 +778,27 @@ def test_sync_rejects_unsafe_pk_names(db, monkeypatch, caplog, connector_cls):
     assert "primary_key" not in dataset.schema_json
     assert any(
         "无法安全编码" in record.getMessage() for record in caplog.records)
+
+
+def test_sync_empty_result_logs_warning(db, monkeypatch, caplog):
+    """对抗复核回归：空版本（可触发下游"权威全删"语义）与截断告警对称，
+    不得静默 status=ok。"""
+
+    class _EmptyConnector:
+        def list_resources(self):
+            return ["orders"]
+
+        def pull_full(self, _resource):
+            return []
+
+    connection = _make_connection(db, "conn-empty")
+    monkeypatch.setattr(
+        "app.services.connection.registry.get_connector",
+        lambda _kind, _config: _EmptyConnector(),
+    )
+    with caplog.at_level(logging.WARNING, logger="app.tasks.v2.connection_sync"):
+        result = sync_connection(connection.id, db=db)
+
+    assert result["status"] == "ok"
+    assert result["rows"] == 0
+    assert any("0 行" in r.getMessage() for r in caplog.records)

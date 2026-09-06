@@ -248,7 +248,9 @@ def normalize_cell(value):
         # 单元格不能毒化整个数据集，按业务空值归一为 None
         return value if math.isfinite(value) else None
     if isinstance(value, decimal.Decimal):
-        return str(value)
+        # 与 float 同口径：非有限 Decimal（PG numeric 'NaN' 等）按业务空值归一，
+        # 不产 "NaN" 文本入湖
+        return str(value) if value.is_finite() else None
     if isinstance(value, dt.datetime):  # 必须在 date 之前判断（子类关系）
         return value.isoformat()
     if isinstance(value, dt.date):

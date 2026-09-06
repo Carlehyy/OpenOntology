@@ -63,3 +63,12 @@ def test_parse_numeric_text_giant_digits_do_not_breach_contract():
 def test_parse_numeric_text_rejects_overlong_input():
     with pytest.raises(ValueError, match="超长"):
         parse_numeric_text("9" * 1_000_001)
+
+
+def test_parse_numeric_text_context_overflow_payload_returns_inf():
+    """对抗复核回归：37 字符的科学计数载荷（28 个 9 + e999999）让 abs(dec)
+    在默认 context 下抛 decimal.Overflow——运算块必须整体纳入捕获，照旧
+    返回 inf 交给契约拒绝，而不是逃出未捕获异常。"""
+    import math
+
+    assert math.isinf(parse_numeric_text("9." + "9" * 27 + "e999999"))
