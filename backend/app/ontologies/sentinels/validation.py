@@ -12,6 +12,8 @@ from app.ontologies.formal_modeling.models import (
     LinkType as FoLinkType,
     ObjectType as FoObjectType,
 )
+from app.ontologies.sentinels.cep import contract as cep_contract
+from app.ontologies.sentinels.cep import temporal_ops
 from app.ontologies.sentinels.evaluator import RESERVED_SENTINEL_ALIASES
 from app.ontologies.sentinels.models import Sentinel
 
@@ -160,6 +162,63 @@ def _sentinel_expression_property_errors(
     return errors
 
 
+def _temporal_expression_errors(
+        expression: Any,
+        alias_properties: dict[str, set[str]],
+        *,
+        sentinel_id: str,
+        sentinel_name: str,
+        field: str,
+        allow_temporal: bool,
+) -> list[dict]:
+    """Validate CEP temporal operators (changed_within/prev) statically.
+
+    时间算子只允许出现在哨兵 condition：filter 在元组解析阶段逐绑定求值，
+    没有整批候选元组可供批量预取，运行期必然 fail-closed——因此发布
+    门禁必须直接拒绝，而不是留到运行期静默不命中。
+    """
+    raw = str(expression or "").strip().rstrip(";").strip()
+    if not raw or not any(
+            f"{name}(" in raw for name in cep_contract.TEMPORAL_FUNCTIONS):
+        return []
+    refs, shape_errors = temporal_ops.extract_temporal_refs(raw)
+    errors: list[dict] = []
+
+    def _gate(code: str, message: str) -> None:
+        errors.append(_gate_error(
+            code, "sentinel", message,
+            item_id=sentinel_id, name=sentinel_name, field=field))
+
+    if not allow_temporal:
+        _gate(
+            "sentinel_temporal_in_filter_forbidden",
+            f"哨兵「{sentinel_name}」的 {field} 不允许使用时间算子"
+            "（changed_within/prev 仅支持 condition）")
+        return errors
+    for message in shape_errors:
+        _gate("sentinel_temporal_expression_invalid", message)
+    for ref in refs:
+        if ref.alias not in alias_properties:
+            _gate(
+                "sentinel_temporal_alias_not_found",
+                f"哨兵「{sentinel_name}」时间算子引用了未声明的 alias: "
+                f"{ref.alias}")
+        elif ref.key not in alias_properties[ref.alias]:
+            _gate(
+                "sentinel_temporal_property_not_found",
+                f"哨兵「{sentinel_name}」时间算子引用了发布版本中不存在的"
+                f"属性: {ref.alias}.{ref.key}")
+        if ref.seconds is not None and (
+                not temporal_ops.window_seconds_in_range(ref.seconds)):
+            _gate(
+                "sentinel_temporal_window_out_of_range",
+                f"哨兵「{sentinel_name}」changed_within 窗口必须在 "
+                f"{cep_contract.TEMPORAL_WINDOW_MIN_SECONDS}~"
+                f"{cep_contract.TEMPORAL_WINDOW_MAX_SECONDS} 秒之间: "
+                f"{ref.seconds}")
+    return errors
+
+
 def validate_sentinels(
     sentinels: list[Sentinel],
     object_types: list[FoObjectType],
@@ -251,6 +310,14 @@ def validate_sentinels(
                         sentinel_name=label,
                         field=f"bindings[{index}].filter",
                     ))
+                    errors.extend(_temporal_expression_errors(
+                        binding_filter,
+                        {alias: property_names, "obj": property_names},
+                        sentinel_id=sid,
+                        sentinel_name=label,
+                        field=f"bindings[{index}].filter",
+                        allow_temporal=False,
+                    ))
 
         primary_alias = str(sentinel.primary_alias or "").strip()
         if not primary_alias or primary_alias not in aliases:
@@ -266,7 +333,10 @@ def validate_sentinels(
 
                 validate_safe_expression(
                     str(sentinel.condition),
-                    set(aliases),
+                    # CEP 时间算子按 per-evaluation scope 注入 condition；
+                    # filter 校验（上方）不含它们，发布门禁直接拒绝 filter
+                    # 内的时间算子使用。
+                    set(aliases) | set(cep_contract.TEMPORAL_FUNCTIONS),
                 )
             except Exception as exc:
                 errors.append(_gate_error(
@@ -290,6 +360,14 @@ def validate_sentinels(
                 sentinel_id=sid,
                 sentinel_name=label,
                 field="condition",
+            ))
+            errors.extend(_temporal_expression_errors(
+                sentinel.condition,
+                alias_properties,
+                sentinel_id=sid,
+                sentinel_name=label,
+                field="condition",
+                allow_temporal=True,
             ))
 
         links = sentinel.links or []

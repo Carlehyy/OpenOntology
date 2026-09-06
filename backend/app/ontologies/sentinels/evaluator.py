@@ -43,6 +43,7 @@ from app.ontologies.release_context import (
     runtime_release_identity,
     runtime_release_version,
 )
+from app.ontologies.sentinels.cep import temporal_ops
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,8 @@ RESERVED_SENTINEL_ALIASES = frozenset({
     "sum", "avg", "count", "len", "min", "max", "round", "abs",
     "lower", "upper", "contains", "now",
     "True", "False", "None", "true", "false", "null",
+    # CEP 时间算子按 per-evaluation scope 注入；业务别名不得遮蔽。
+    "changed_within", "prev",
 })
 _RESERVED_ALIASES = RESERVED_SENTINEL_ALIASES
 
@@ -718,9 +721,14 @@ def _resolve_tuples(db: Session, ontology_id: str, sentinel: Sentinel,
     return tuples
 
 
-def _holds(expr: str | None, tup: dict, errors: list[str] | None = None) -> bool:
+def _holds(expr: str | None, tup: dict, errors: list[str] | None = None,
+           temporal: dict | None = None) -> bool:
     """条件求值。求值失败视为不命中（fail-closed），但错误必须被记录并
-    展示到触发日志——写错的条件不能表现为"永远静默 no_match"。"""
+    展示到触发日志——写错的条件不能表现为"永远静默 no_match"。
+
+    ``temporal`` 为该元组的时间算子闭包（changed_within/prev，见
+    temporal_ops）；仅哨兵 condition 携带时间引用时注入。
+    """
     if not expr:
         return True
     if not isinstance(expr, str):
@@ -728,6 +736,8 @@ def _holds(expr: str | None, tup: dict, errors: list[str] | None = None) -> bool
             errors.append("哨兵 condition 必须是字符串表达式")
         return False
     scope = {alias: _instance_values(inst) for alias, inst in tup.items()}
+    if temporal:
+        scope.update(temporal)
     missing = _missing_expression_properties(expr, scope)
     if missing:
         if errors is not None and len(errors) < 5:
@@ -906,7 +916,8 @@ def preview_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
         db, ontology_id, sentinel, errors,
         release_id=release_id, metadata=metadata,
     )
-    matched = [item for item in tuples if _holds(sentinel.condition, item, errors)]
+    matched = _match_tuples_with_temporal(
+        db, sentinel.condition, tuples, errors)
     primary = sentinel.primary_alias or (
         sentinel.bindings[0].get("alias") if sentinel.bindings else None)
     try:
@@ -1869,6 +1880,31 @@ def evaluate_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
         return firing
 
 
+def _match_tuples_with_temporal(
+        db: Session, condition, tuples: list[dict],
+        errors: list[str] | None = None) -> list[dict]:
+    """按 condition 过滤候选元组；携带时间算子时批量预取时间事实。
+
+    时间算子形态非法属于配置错误：并入 eval_errors 后整轮观察作废
+    （与现有 fail-closed 不变量一致），绝不静默降级为"永不命中"。
+    """
+    refs, temporal_errors = temporal_ops.extract_temporal_refs(condition)
+    if temporal_errors:
+        if errors is not None:
+            errors.extend(temporal_errors)
+        return []
+    if not refs:
+        return [t for t in tuples if _holds(condition, t, errors)]
+    facts = temporal_ops.prefetch_temporal_facts(
+        db, refs, tuples, now=_now())
+    matched: list[dict] = []
+    for tup in tuples:
+        temporal = temporal_ops.build_temporal_scope(refs, facts, tup)
+        if _holds(condition, tup, errors, temporal=temporal):
+            matched.append(tup)
+    return matched
+
+
 def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
                     source: str, start: float,
                     release_version: str | None,
@@ -1883,7 +1919,8 @@ def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
     tuples = _resolve_tuples(
         db, ontology_id, sentinel, eval_errors, release_id=release_id,
         metadata=metadata)
-    matched = [t for t in tuples if _holds(sentinel.condition, t, eval_errors)]
+    matched = _match_tuples_with_temporal(
+        db, sentinel.condition, tuples, eval_errors)
     # 命中键 → 元组(同键去重,保留首个)
     current: dict[str, dict] = {}
     for t in matched:
