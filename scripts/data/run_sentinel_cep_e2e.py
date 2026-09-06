@@ -12,6 +12,15 @@ rejected only when ``settings.environment == "production"``; run this
 script against an isolated staging/canary environment (真实环境 E2E 门禁),
 never against production.  Evidence belongs in ``.artifacts/``.
 
+治理前置（当前脚本尚未自动化，跑通前需人工补齐或改用既有发布本体
++ 动态哨兵链路验证）：
+  1. trial_object_mapping_required —— 草稿需要至少一个绑定数据集并完成
+     全部存储属性映射的对象实体（参照 run_sentinel_real_data_e2e.py 的
+     create_table + upload + mapping 流程）；
+  2. semantic_business_missing —— 试跑/发布门禁要求业务语义层
+     （snapshot_semantic，探索 apply 正门写入）；全新 API 直建的本体
+     语义层为空，结构会被全部计为缺失。
+
 Covered invariants:
   M1  changed_within / prev 时间算子按事件日志判定（UTC 基准）；
   M2  序列模式完成即触发一次、水位幂等（手动重跑不再放炮）、

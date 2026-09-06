@@ -75,9 +75,17 @@ def snapshot_sentinel_models(
             bindings=item.get("bindings") or [],
             links=item.get("links") or [],
             condition=item.get("condition"),
+            # CEP 模式定义与触发开关/扫描间隔必须随行——共享发布门禁的
+            # pattern 深度校验（含窗口≥扫描间隔）依赖它们。
+            pattern=item.get("pattern") if isinstance(
+                item.get("pattern"), dict) else None,
             primary_alias=item.get("primaryAlias"),
             action_ids=item.get("actionIds") or [],
             action_parameters=item.get("actionParameters") or {},
+            on_change=bool(item.get("onChange", True)),
+            on_schedule=bool(item.get("onSchedule", False)),
+            scan_interval_seconds=int(
+                item.get("scanIntervalSeconds") or 300),
             trigger_mode=item.get("triggerMode") or "on_enter",
         ))
     return result

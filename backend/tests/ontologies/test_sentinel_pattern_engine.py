@@ -748,3 +748,64 @@ def test_validation_detects_spaced_temporal_call_in_filter(db):
     })
     codes = _gate_codes(sentinel, object_types)
     assert "sentinel_temporal_in_filter_forbidden" in codes, codes
+
+def test_trial_gate_sentinel_models_carry_pattern(db):
+    """云端验证回归：试跑门禁经 snapshot_sentinel_models 物化哨兵模型，
+    pattern/触发开关/扫描间隔必须随行，否则 on_pattern 哨兵在试跑前
+    就被 invalid_sentinel_pattern 拒绝（曾在线上暴露）。"""
+    from app.ontologies.versions.evolution_service import complete_snapshot
+    from app.ontologies.versions.release_service import (
+        snapshot_sentinel_models,
+    )
+    from app.ontologies.versions.snapshot_contract import snapshot_models
+
+    ontology_id = "cep-trial-gate"
+    _project(db, ontology_id)
+    order_type = _object_type(db, ontology_id, "order", _order_type_props())
+    db.commit()
+    snap = complete_snapshot({
+        "objectTypes": [{
+            "id": "order", "name": "order", "displayName": "订单",
+            "primaryKey": "id", "properties": _order_type_props(),
+        }],
+        "sentinels": [{
+            "id": "cep-trial-seq",
+            "name": "cep_trial_seq",
+            "displayName": "试跑门禁序列",
+            "bindings": [
+                {"alias": "a", "objectTypeId": "order", "filter": None},
+                {"alias": "b", "objectTypeId": "order", "filter": None},
+            ],
+            "links": [],
+            "condition": None,
+            "pattern": {
+                "stages": [
+                    {"alias": "a", "objectTypeId": "order",
+                     "filter": "a.status == 'submitted'"},
+                    {"alias": "b", "objectTypeId": "order",
+                     "filter": "b.status == 'approved'", "within": 3600},
+                ],
+                "absence": {"enabled": True},
+                "within": 3600,
+            },
+            "primaryAlias": "a",
+            "actionIds": [], "actionParameters": {},
+            "onChange": True, "onSchedule": True,
+            "scanIntervalSeconds": 300,
+            "triggerMode": "on_pattern",
+        }],
+    })
+    models = snapshot_sentinel_models(snap)
+    assert len(models) == 1
+    assert isinstance(models[0].pattern, dict)
+    assert models[0].pattern["stages"][0]["alias"] == "a"
+    assert models[0].on_change is True and models[0].on_schedule is True
+    assert models[0].scan_interval_seconds == 300
+
+    graph = snapshot_models(snap)
+    errors = validate_sentinels(
+        [models[0]], graph["objectTypes"], graph["linkTypes"],
+        graph["actions"])
+    codes = {error.get("code") for error in errors}
+    assert "invalid_sentinel_pattern" not in codes, codes
+    assert codes == set(), codes
