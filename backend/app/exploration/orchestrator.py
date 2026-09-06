@@ -2,17 +2,23 @@
 
 事件流协议（SSE 每条 data 一个 JSON）：
   {"type": "meta",   "sessionId", "model"}
+  {"type": "text_delta", "delta"}                                        ← 流式正文增量
   {"type": "step",   "tool", "arguments", "summary", "durationMs", "error"?, "diagram"?}
+  {"type": "plan",   "items": [{content, status}]}                       ← todo_write 成功后推送
   {"type": "canvas", "canvas", "version", "completeness", "readiness"}   ← 画布被工具修改后推送
   {"type": "answer", "content", "usage"}
   {"type": "error",  "message"}
   {"type": "done"}
 
-引导策略（借鉴「AI需求分析师四阶段交互」方法论）：
-  - A/B 类信息分工：行业常识 AI 自主补全并登记 advisory 待确认；
-    企业特有口径（阈值/枚举/审批线/基数/主键）登记 blocking，必须用户拍板
+代理策略（自主建模代理，参照超级助手 agent 模式的交互契约）：
+  - 自主推进：接目标后 PLAN(todo_write)→EXECUTE→VERIFY，直到质量门全过并产出
+    文档与草稿；不逐步请示、不问「是否继续」
+  - A/B 类信息分工：行业常识 AI 自主补全并登记 advisory 待确认；企业特有口径
+    （阈值/枚举/审批线/基数/主键）登记 blocking，必须用户拍板
+  - 批量检查点：B 类口径不阻塞建模 —— 用显式标注的假设值继续，回合结束一次性
+    批量列出全部待拍板问题（带选项），用户点选即答（委托式销账已支持）
   - 定量铁律：模糊表述不入册 —— resolve_questions 会拒绝未定量的堵门结论
-  - 质量门驱动：readiness 报告注入每回合系统提示，未过门项就是追问优先级
+  - 质量门驱动：readiness 报告注入每回合系统提示，未过门项就是待办优先级
   - 看图挑错：关键节点用 show_diagram 出 ER/流程/时序/状态图，让用户对图纠错
 """
 from __future__ import annotations
@@ -46,7 +52,10 @@ from app.shared.web_search import WEB_SEARCH_TOOL, WebSearchError, search_web
 
 logger = logging.getLogger(__name__)
 
-_MAX_STEPS = 8
+# 自主建模代理的回合工具预算：读→写→出图→修复的完整循环需要空间
+# （超级助手普通对话 25 轮 / agent 模式 50 轮作参照；探索回合含重量级
+# canonical 读取与出图，24 为成本与自主性的平衡点）
+_MAX_STEPS = 24
 _MAX_WEB_SEARCHES = 3
 _RECENT_HISTORY_KEEP = 16
 _HISTORY_QUERY_CAP = 1000
@@ -153,7 +162,7 @@ def _system_prompt(
             history_summary, max(32, int(summary_max_tokens)),
             marker="\n…（更早的压缩摘要因本模型窗口较小而省略）…\n",
         )
-    return f"""你是「业务探索」引导师，运行在 OntoPrompt 平台。你的使命：通过对话把用户的业务**彻底澄清** —— 所有关键口径都被定量（明确数值/枚举/边界），没有任何模棱两可或多种理解 —— 并把已确认的知识实时沉淀为七类结构化模型。这些模型最终转化为需求文档与本体（对象类型/链接/动作/激活函数草稿/哨兵草稿），供图谱编辑器直接使用。
+    return f"""你是「业务探索」自主建模代理，运行在 OntoPrompt 平台。你的使命：基于用户材料与对话，**自主完成**业务建模 —— 把关键口径定量化（明确数值/枚举/边界），把已确认的知识实时沉淀为七类结构化模型，走通「画布 → 质量门 → 需求文档 → 本体草稿」整条管线。企业特有口径必须用户拍板（批量检查点提问），其余一律自主推进。这些模型最终转化为需求文档与本体（对象类型/链接/动作/激活函数草稿/哨兵草稿），供图谱编辑器直接使用。
 
 # 七类模型的分工
 - 对象模型(object)：业务里的「东西」及其属性、业务主键、对象间关系（必须带基数）
@@ -198,15 +207,16 @@ def _system_prompt(
 # 联网检索
 {_web_search_prompt(web_search_enabled)}
 
-# 工作方式
-1. 每回合聚焦 1-2 个堵门问题，循序渐进；不要一次抛出问题清单轰炸用户。
-2. 用户每确认一条信息，立即用 upsert_elements 沉淀 —— 不要攒到最后。修改已有元素前先核对下方 canonical 快照；若快照 complete=false，或要修改 attributes/relations/inputs/branches/steps/metrics，先调用 get_canvas_elements 读取目标元素。结构化子项使用 id 做增量补丁，禁止凭摘要重写整表；只有用户明确要求清空时才传 []，删除单个子项用 _delete=true。子项定位自然键：branch 按 from_step+condition，step 按 seq+name（seq 是排序键），metric 按 name；场景用 process_ref 填流程 name/id 挂接。
-3. 建议探索顺序（质量门的「当前阶段」已给出）：流程或场景与主体定边界 → 对象与属性/主键 → 关系与基数 → 行为 → 规则与事件定量 → 流程编排（步骤/分支/异常路径/度量）→ 清账与验收；但跟随用户的表达，不要机械执行。
-4. 概念含糊或互相冲突时先澄清再落库；用户否定的概念用 remove_elements 移除。
-5. name 一律用英文标识符（snake_case 或 PascalCase），中文名放 display_name。
-6. 回答用中文，简洁。每回合结尾汇报进度并提出下一个问题，格式如：「已记录 X；还差 N 项定量：金额阈值、超时时限」。
-7. 全部质量门通过后，主动调用 generate_document 生成需求文档，再调用 generate_draft 生成本体草稿，并引导用户到「需求文档」视图审阅与应用（应用必须由用户人工确认，你不能代替用户 apply）。
-8. 只有工具返回的成功结果才能证明写入/出图/销账已发生；本回合尚未调用的动作只能用计划口吻表述（「接下来将…」），严禁声称已完成。引用过往回合的执行事实时注明「上回合」。
+# 工作方式（自主建模代理）
+1. 自主推进：你是自主建模代理，不是访谈主持人。接到建模目标先用 todo_write 拆解步骤清单（PLAN），然后逐步执行（EXECUTE），完成后自查质量门并核对计划（VERIFY），直到质量门全过并产出需求文档与本体草稿。不要等待用户逐步下达指令，不要提出「是否同意继续 / 要不要我…」类求确认问题 —— 续跑是默认，只有下述检查点才向用户提问。
+2. 批量检查点澄清：遇到 B 类企业特有口径，用 raise_questions 登记，然后**继续建模其余部分**——缺失的定量可先用显式标注的假设值占位（在元素 constraints/description 注明「假设，待用户确认」）。回合结束时把全部待拍板问题**一次性批量**列出（每题 2-4 个互斥选项，用户点选即答；「按选项B/按默认」这类委托答复可直接销账）。只有缺某个口径导致完全无法继续建模时，才在回合中立即提问。A 类行业常识直接补全并登记 advisory，不问。
+3. 用户每确认一条信息，立即用 upsert_elements 沉淀 —— 不要攒到最后。修改已有元素前先核对下方 canonical 快照；若快照 complete=false，或要修改 attributes/relations/inputs/branches/steps/metrics，先调用 get_canvas_elements 读取目标元素。结构化子项使用 id 做增量补丁，禁止凭摘要重写整表；只有用户明确要求清空时才传 []，删除单个子项用 _delete=true。子项定位自然键：branch 按 from_step+condition，step 按 seq+name（seq 是排序键），metric 按 name；场景用 process_ref 填流程 name/id 挂接。
+4. 建模次序参考质量门「当前阶段」（边界 → 对象/主键 → 关系 → 行为 → 规则/事件 → 流程编排 → 清账验收），但不机械执行：目标是整条管线走通，不是按序访谈。
+5. 概念含糊或互相冲突时先澄清再落库；用户否定的概念用 remove_elements 移除。
+6. name 一律用英文标识符（snake_case 或 PascalCase），中文名放 display_name。
+7. 回答用中文，简洁。回合收尾格式：①本回合进展（对照计划勾项）；②全部待拍板问题（带选项，一次性列出，无则省略）；③下一步你将做什么（陈述句，不问许可）。
+8. 全部质量门通过后，主动调用 generate_document 生成需求文档，再调用 generate_draft 生成本体草稿，并引导用户到「需求文档」视图审阅与应用（应用必须由用户人工确认，你不能代替用户 apply）。
+9. 只有工具返回的成功结果才能证明写入/出图/销账已发生；本回合尚未调用的动作只能用计划口吻表述（「接下来将…」），严禁声称已完成。引用过往回合的执行事实时注明「上回合」。
 
 # 已压缩的早期会话
 {history_summary}
@@ -694,6 +704,10 @@ def _summarize(name: str, result: dict) -> str:
                 f"{C.KIND_LABELS.get(result.get('kind', ''), result.get('kind', ''))}"
                 f" canonical 元素（画布 v{result.get('canvasVersion', '?')}）")
     label = C.KIND_LABELS.get(result.get("kind", ""), result.get("kind", ""))
+    if name == "todo_write":
+        return f"更新建模计划（{result.get('done', 0)}/{result.get('total', 0)} 完成）"
+    if name == "todo_read":
+        return "读取建模计划"
     if name == "upsert_elements":
         s = f"沉淀 {result.get('applied', 0)} 个{label}模型元素"
         if result.get("errors"):
@@ -1131,6 +1145,33 @@ def run_exploration_turn(db: Session, session_id: str, user, message: str,
         yield {"type": "done"}
 
 
+def _stream_llm_round(call_kwargs: dict, provider_messages: list[dict],
+                      tools: list[dict]) -> Iterator[dict]:
+    """一次 LLM 回合：优先流式（delta 增量），不支持流式或流前失败时回退 chat。
+
+    产出 {"delta": str}* → {"final": resp}。llm_bridge 经 sys.modules 别名即
+    gateway 模块本体 —— 测试 monkeypatch 的 chat 属性对回退路径自然生效。
+    已外发增量后流中断则上抛 LLMError（不重复计费重试整回合）。
+    """
+    stream_fn = getattr(llm_bridge, "chat_stream", None)
+    emitted = 0
+    if stream_fn is not None:
+        try:
+            for event in stream_fn(call_kwargs, provider_messages, tools):
+                if event.get("unsupported_stream"):
+                    break
+                if "delta" in event and event["delta"]:
+                    emitted += 1
+                    yield {"delta": event["delta"]}
+                elif "final" in event:
+                    yield {"final": event["final"]}
+                    return
+        except llm_bridge.LLMError:
+            if emitted:
+                raise
+    yield {"final": llm_bridge.chat(call_kwargs, provider_messages, tools)}
+
+
 def _run(db: Session, session_id: str, user, message: str,
          model_id: Optional[str], web_search: bool) -> Iterator[dict]:
     session = db.query(ExplorationSession).filter(ExplorationSession.id == session_id).first()
@@ -1215,7 +1256,17 @@ def _run(db: Session, session_id: str, user, message: str,
                 estimated_call,
             )
             session.context_stats = stats
-            resp = llm_bridge.chat(call_kwargs, provider_messages, tools)
+            resp: Optional[dict] = None
+            # 流式回合：text_delta 实时外发（对旧客户端为可忽略的新增事件类型）；
+            # provider 不支持流式或失败且尚未外发增量时，内部回退一次性 chat。
+            for stream_event in _stream_llm_round(
+                    call_kwargs, provider_messages, tools):
+                if "delta" in stream_event and stream_event["delta"]:
+                    yield {"type": "text_delta", "delta": stream_event["delta"]}
+                elif "final" in stream_event:
+                    resp = stream_event["final"]
+            if resp is None:
+                resp = llm_bridge.chat(call_kwargs, provider_messages, tools)
         except ExplorationContextBudgetError as exc:
             answer = (
                 _tool_budget_fallback(session, steps)
@@ -1324,6 +1375,9 @@ def _run(db: Session, session_id: str, user, message: str,
                 step["diagram"] = runner.last_diagram
             steps.append(step)
             yield {"type": "step", **step}
+            if tc["name"] == "todo_write" and "error" not in result:
+                # 计划清单实时推给前端（历史回放从持久化 step 参数重建）
+                yield {"type": "plan", "items": list(runner.todo)}
             if runner.canvas_dirty:
                 yield _canvas_event(session)
 

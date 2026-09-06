@@ -10,12 +10,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Bot, Boxes, Check, CircleHelp, Compass, Copy, Download, ExternalLink, Files, FileText, FlaskConical, GitBranch, Globe2, History, Layers, Link2, List,
+  Bot, Boxes, Check, CircleHelp, Compass, Copy, Download, ExternalLink, Files, FileText, FlaskConical, GitBranch, Globe2, History, Layers, Link2, List, ListTodo,
   Loader2, Paperclip, Plus, Send, Trash2, User, Wrench, X,
 } from 'lucide-react'
 import {
   explorationApi, streamExplorationChat,
-  type BusinessCanvas, type BxAttachment, type BxDraft, type BxQuestion, type BxStep,
+  type BusinessCanvas, type BxAttachment, type BxDraft, type BxPlanItem, type BxQuestion, type BxStep,
   type BxSession, type Completeness, type Readiness,
 } from '@/api/exploration'
 import { modelApi, ontologyApi } from '@/api/ontologies'
@@ -27,6 +27,7 @@ import { writeTextToClipboard } from '@/utils/clipboard'
 import Md from './Md'
 import CanvasPanel from './CanvasPanel'
 import ConsistencyPanel from './ConsistencyPanel'
+import { derivePlanFromSteps, foldStep, foldTextDelta } from './messageViews'
 import DocumentsView from './DocumentsView'
 import DraftReviewDrawer from './DraftReviewDrawer'
 import FileWorkspaceDrawer from './FileWorkspaceDrawer'
@@ -51,6 +52,10 @@ interface ChatMsg {
   steps: BxStep[]
   streaming?: boolean
   createdAt?: string
+  /** 工具步骤前的流式叙述块（仅会话内实时态；不持久化，历史回放为空） */
+  narrations?: string[]
+  /** 本回合建模计划（todo_write 维护；历史消息从 steps 推导） */
+  plan?: BxPlanItem[] | null
 }
 
 let _mid = 0
@@ -89,6 +94,50 @@ const STEP_LABELS: Record<string, string> = {
   show_diagram: '生成图表',
   use_skill: '激活技能',
   web_search: '联网检索',
+}
+
+/** 建模计划清单（todo_write 维护）：实时与历史回放同构的进度勾选视图 */
+function PlanTrace({ items }: { items: BxPlanItem[] }) {
+  const done = items.filter(i => i.status === 'done').length
+  return (
+    <div className="mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2.5" data-testid="explore-plan-trace">
+      <div className="mb-1.5 flex items-center gap-2 text-xs font-medium text-[var(--color-text-secondary)]">
+        <ListTodo size={12} />
+        建模计划
+        <span className="font-normal text-[var(--color-text-tertiary)]">{done}/{items.length} 完成</span>
+      </div>
+      <ol className="space-y-1">
+        {items.map((item, index) => (
+          <li key={index} className="flex items-start gap-2 text-xs leading-5">
+            {item.status === 'done'
+              ? <Check size={12} className="mt-1 shrink-0 text-[var(--color-success)]" />
+              : item.status === 'in_progress'
+                ? <Loader2 size={12} className="mt-1 shrink-0 animate-spin text-brand-ink" />
+                : <CircleHelp size={12} className="mt-1 shrink-0 text-[var(--color-text-tertiary)]" />}
+            <span className={item.status === 'done'
+              ? 'text-[var(--color-text-tertiary)] line-through decoration-[var(--color-text-tertiary)]/60'
+              : 'text-[var(--color-text-primary)]'}>
+              {item.content}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
+/** 工具步骤之前的流式叙述回放块（浅灰；只在实时会话中出现） */
+function NarrationTrace({ narrations }: { narrations: string[] }) {
+  if (narrations.length === 0) return null
+  return (
+    <div className="mb-2 space-y-1">
+      {narrations.map((text, index) => (
+        <p key={index} className="whitespace-pre-wrap rounded-md bg-[var(--color-bg-base)] border border-[var(--color-border)] px-2.5 py-1.5 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+          {text}
+        </p>
+      ))}
+    </div>
+  )
 }
 
 function StepTrace({ steps, running }: { steps: BxStep[]; running?: boolean }) {
@@ -401,6 +450,8 @@ export default function ExplorationPage() {
       if (requestId !== sessionRequestRef.current || sidRef.current !== id) return
       setMessages((detail.messages || []).map(m => ({
         id: m.id, role: m.role, content: m.content, steps: m.steps || [], createdAt: m.createdAt,
+        // 建模计划从持久化的 todo_write 步骤参数重建（最后一次成功写入生效）
+        plan: m.role === 'assistant' ? derivePlanFromSteps(m.steps || []) : null,
       })))
       setCanvas(detail.canvas)
       setCompleteness(detail.completeness)
@@ -655,18 +706,34 @@ export default function ExplorationPage() {
           webSearch,
         }, e => {
           if (!ownsCurrentView()) return
-          if (e.type === 'step') {
+          if (e.type === 'text_delta') {
+            patchAssistant(m => ({ ...m, content: foldTextDelta(
+              { content: m.content, narrations: m.narrations ?? [], plan: null },
+              e.delta).content }))
+          } else if (e.type === 'step') {
             const step: BxStep = {
               tool: e.tool, arguments: e.arguments, summary: e.summary,
               durationMs: e.durationMs, error: e.error, diagram: e.diagram,
               searchResults: e.searchResults,
             }
-            patchAssistant(m => ({ ...m, steps: [...m.steps, step] }))
+            // 工具步骤前的流式叙述定格为回放块，正文清空等待后续内容
+            patchAssistant(m => {
+              const folded = foldStep(
+                { content: m.content, narrations: m.narrations ?? [], plan: null })
+              return {
+                ...m,
+                narrations: folded.narrations,
+                content: '',
+                steps: [...m.steps, step],
+              }
+            })
             // agent 生成了文档/草稿 → 立即刷新文档列表（与「需求文档」视图
             // 共用 queryKey），避免 agent 说「已生成」而列表仍旧
             if (step.tool === 'generate_document' || step.tool === 'generate_draft') {
               void queryClient.invalidateQueries({ queryKey: ['bx-documents', targetSid] })
             }
+          } else if (e.type === 'plan') {
+            patchAssistant(m => ({ ...m, plan: e.items }))
           } else if (e.type === 'canvas') {
             setCanvas(e.canvas)
             setCompleteness(e.completeness)
@@ -1119,6 +1186,12 @@ export default function ExplorationPage() {
                     {m.role === 'user' ? <User size={14} /> : <Bot size={14} />}
                   </div>
                   <div className={`min-w-0 max-w-[85%] ${m.role === 'user' ? 'text-right' : ''}`}>
+                    {m.role === 'assistant' && m.plan && m.plan.length > 0 && (
+                      <PlanTrace items={m.plan} />
+                    )}
+                    {m.role === 'assistant' && (m.narrations?.length || 0) > 0 && (
+                      <NarrationTrace narrations={m.narrations!} />
+                    )}
                     {m.role === 'assistant' && <StepTrace steps={m.steps} running={m.streaming} />}
                     {m.content && (
                       <>

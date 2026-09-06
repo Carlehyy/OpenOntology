@@ -143,6 +143,203 @@ def _strip_think(result: dict) -> dict:
     return result
 
 
+def _to_openai_messages(messages: list[dict]) -> list[dict]:
+    """中立消息格式 → OpenAI tools 协议（chat 与 chat_stream 共用）。"""
+    oai_msgs = []
+    for m in messages:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            oai_msgs.append({
+                "role": "assistant",
+                "content": m.get("content") or None,
+                "tool_calls": [{
+                    "id": tc["id"], "type": "function",
+                    "function": {"name": tc["name"],
+                                 "arguments": json.dumps(tc.get("arguments") or {}, ensure_ascii=False)},
+                } for tc in m["tool_calls"]],
+            })
+        elif m["role"] == "tool":
+            oai_msgs.append({"role": "tool", "tool_call_id": m["tool_call_id"],
+                             "content": m["content"]})
+        else:
+            oai_msgs.append({"role": m["role"], "content": m.get("content") or ""})
+    return oai_msgs
+
+
+def chat_stream(call_kwargs: dict, messages: list[dict], tools: list[dict]):
+    """流式对话：逐段产出 {"delta": str}，最后产出 {"final": {content, tool_calls, usage}}。
+
+    能力判定（与测试/托管环境兼容的关键）：
+    - anthropic 或未配置自建 api_base 的 provider → 不试流式，产出
+      {"unsupported_stream": True}，由调用方回退到 chat()；
+    - openai 兼容 + api_base → 真流式：text_delta 增量 + tool_calls 分片组装
+      + usage（stream_options.include_usage，provider 不支持时自动降级重建）。
+    流中 think 块实时过滤（<think>…</think> 不外发，含跨 delta 的半标签缓冲）。
+    """
+    provider = (call_kwargs.get("provider") or "openai").lower()
+    streamable = provider != "anthropic" and bool(call_kwargs.get("api_base"))
+    if not streamable:
+        yield {"unsupported_stream": True}
+        return
+
+    model_name = call_kwargs.get("model", "unknown")
+    model_config_id = call_kwargs.get("model_config_id")
+    started = time.monotonic()
+    status = "success"
+    error_msg = None
+    from app.shared import perf_spans
+
+    span = perf_spans.begin_span(
+        "llm", name="chat.completions.stream", target=f"{provider}/{model_name}")
+    try:
+        import openai
+
+        client_kwargs: dict = {
+            "api_key": call_kwargs.get("api_key") or "sk-none",
+            "timeout": int(call_kwargs.get("timeout_seconds") or 120),
+        }
+        if call_kwargs.get("api_base"):
+            client_kwargs["base_url"] = call_kwargs["api_base"]
+        client = openai.OpenAI(**client_kwargs)
+
+        create_kwargs: dict = {
+            "model": call_kwargs["model"],
+            "messages": _to_openai_messages(messages),
+            "temperature": 0.2,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        max_output = call_kwargs.get("max_output_tokens")
+        if max_output:
+            create_kwargs["max_tokens"] = int(max_output)
+        if tools:
+            create_kwargs["tools"] = [
+                {"type": "function",
+                 "function": {"name": t["name"], "description": t["description"],
+                              "parameters": t["parameters"]}}
+                for t in tools
+            ]
+        try:
+            stream = client.chat.completions.create(**create_kwargs)
+        except Exception:  # noqa: BLE001 — 部分兼容端点不支持 stream_options
+            create_kwargs.pop("stream_options", None)
+            stream = client.chat.completions.create(**create_kwargs)
+
+        raw_parts: list[str] = []
+        tool_acc: dict[int, dict] = {}
+        usage = None
+        think_state: dict = {}
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            if not getattr(chunk, "choices", None):
+                continue
+            choice = chunk.choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            piece = getattr(delta, "content", None)
+            if piece:
+                raw_parts.append(piece)
+                for safe in _filter_think_deltas(piece, think_state):
+                    if safe:
+                        yield {"delta": safe}
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                index = getattr(tc, "index", 0) or 0
+                slot = tool_acc.setdefault(
+                    index, {"id": "", "name": "", "arguments": ""})
+                if getattr(tc, "id", None):
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["name"] += fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["arguments"] += fn.arguments
+
+        tool_calls = []
+        for index in sorted(tool_acc):
+            slot = tool_acc[index]
+            if not slot["name"]:
+                continue
+            try:
+                args = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": slot["arguments"]}
+            tool_calls.append({"id": slot["id"] or f"call_{index}",
+                               "name": slot["name"], "arguments": args})
+        yield {"final": _strip_think({
+            "content": "".join(raw_parts) or None,
+            "tool_calls": tool_calls,
+            "usage": {"inputTokens": getattr(usage, "prompt_tokens", None),
+                      "outputTokens": getattr(usage, "completion_tokens", None)}
+            if usage else None,
+        })}
+    except LLMError as e:
+        status = _failure_status(e)
+        error_msg = str(e)
+        raise
+    except Exception as e:  # noqa: BLE001 — provider SDK 的异常统一收口
+        status = _failure_status(e)
+        error_msg = str(e)
+        raise LLMError(
+            f"LLM 流式调用失败({provider}/{model_name}): {e}") from e
+    finally:
+        try:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            if model_config_id:
+                _record_call(model_config_id, model_name, provider, status,
+                             latency_ms, _safe_error_message(error_msg))
+            perf_spans.end_span(span, status=status)
+        except Exception:
+            pass  # 统计记录失败不影响主流程
+
+
+# 流式 think 过滤器：与 strip_think_content 同语义 —— 只处理位于正文开头的
+# <think>…</think> 完整思考块；正文中的 "<" 一旦确认不是块开头即原样放行。
+_THINK_OPEN_TAG = "<think>"
+_THINK_CLOSE_TAG = "</think>"
+
+
+def _filter_think_deltas(piece: str, state: dict):
+    """增量过滤开头 think 块：产出可安全外发的文本片段。
+
+    state 为 {"mode": "detect"|"think"|"pass", "buf": str}，由调用方跨 delta 保持。
+    - detect：正文尚未开始，开头可能构成 <think> 的字符全部滞留直到可判定；
+    - think：处于思考块内，等待 </think>（末尾疑似半个闭标签的字符滞留）；
+    - pass：已确认非 think 开头，后续一切原样放行。
+    开头块之外的 <think> 视为普通文本（与历史语义一致：剥离只针对开头思考块）。
+    """
+    mode = state.get("mode", "detect")
+    buf = state.get("buf", "") + piece
+    out: list[str] = []
+
+    while buf:
+        if mode == "detect":
+            if _THINK_OPEN_TAG.startswith(buf) and len(buf) < len(_THINK_OPEN_TAG):
+                break  # 仍是可能的开头前缀，继续滞留等待下一个 delta
+            if buf.startswith(_THINK_OPEN_TAG):
+                mode = "think"
+                buf = buf[len(_THINK_OPEN_TAG):]
+                continue
+            mode = "pass"  # 开头已不可能构成 <think>
+            continue
+        if mode == "think":
+            idx = buf.find(_THINK_CLOSE_TAG)
+            if idx < 0:
+                keep = max(0, len(buf) - (len(_THINK_CLOSE_TAG) - 1))
+                buf = buf[keep:]
+                break  # 滞留可能是半个闭标签的尾巴
+            buf = buf[idx + len(_THINK_CLOSE_TAG):]
+            mode = "pass"
+            continue
+        out.append(buf)
+        buf = ""
+
+    state["mode"] = mode
+    state["buf"] = buf
+    return out
+
+
 def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
     import openai
 

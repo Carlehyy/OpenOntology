@@ -906,6 +906,15 @@ def state_model_analysis(canvas, target: str | None = None) -> dict:
     isolated = [value for value in states if value not in connected]
     if edges and isolated:
         issues.append("存在无任何迁入/迁出的孤立状态：" + "、".join(isolated[:8]))
+        carriers = _cross_object_transition_carriers(c, obj, object_names, by_norm)
+        if carriers:
+            issues.append(
+                "以下行为描述了本对象的状态迁移但未挂载在本对象上（"
+                + "；".join(carriers[:3])
+                + f"）—— 请把这些行为的 object 改为「{_slabel(obj)}」，"
+                "或把对应状态迁移拆到本对象的独立行为上（生产事故：迁移承载行为"
+                "挂在别的对象上，本对象生命周期永远缺少该迁入边，报错却只说"
+                "「孤立状态」让人误判为解析问题）")
 
     sources = {src for src, _, _ in edges}
     destinations = {dst for _, dst, _ in edges}
@@ -919,6 +928,49 @@ def state_model_analysis(canvas, target: str | None = None) -> dict:
         "edges": sorted(edges, key=lambda edge: (norm_name(edge[0]), norm_name(edge[1]), edge[2])),
         "initial": initial, "isolated": isolated, "issues": issues, "warnings": warnings,
     }
+
+
+def _cross_object_transition_carriers(c: dict, obj: dict, object_names: set[str],
+                                      by_norm: dict) -> list[str]:
+    """找出叙述了本对象状态迁移、但 object 挂在别的对象上的行为。
+
+    状态分析只扫描挂载在本对象上的行为；迁移承载行为挂错对象会让目标状态
+    表现为「孤立」，且原报错不解释原因（生产：verify_repair 挂在
+    repair_verification 上，vuln_alert 的「已闭环」因此永远孤立）。
+    判定须同时满足：① 迁移端点/状态值命中本对象枚举；② 文本提及本对象
+    名称 —— 两个条件叠加避免不同对象共享同名状态时的误报。
+    """
+    aliases = {
+        str(obj.get(key) or "").strip()
+        for key in ("name", "display_name")
+    }
+    aliases.discard("")
+    carriers: list[str] = []
+    for behavior in c["behaviors"]:
+        if norm_name(behavior.get("object", "")) in object_names:
+            continue
+        blob = "；".join(str(behavior.get(key) or "")
+                        for key in ("outcome", "description", "trigger"))
+        if not any(alias in blob for alias in aliases):
+            continue
+        hit = False
+        for match in _FROM_TRANSITION_RE.finditer(blob):
+            src = _resolve_state_value(_clean_state_value(match.group(1)), by_norm)
+            dst = _resolve_state_value(_clean_state_value(match.group(2)), by_norm)
+            if src or dst:
+                hit = True
+                break
+        if not hit:
+            for match in _STATUS_VALUE_RE.finditer(blob):
+                raw = _clean_state_value(match.group(1))
+                if raw and norm_name(raw) in by_norm:
+                    hit = True
+                    break
+        if hit:
+            carriers.append(
+                f"行为「{_slabel(behavior)}」({behavior.get('name') or '?'})"
+                f"当前 object={behavior.get('object') or '?'}")
+    return carriers
 
 
 def state_mermaid(canvas, target: str | None = None) -> tuple[str, str, list[str]]:

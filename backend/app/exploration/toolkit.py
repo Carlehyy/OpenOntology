@@ -133,6 +133,42 @@ _FIELD_DOC = """元素字段约定（name 用英文 snake_case/PascalCase 标识
 
 TOOL_DEFS = [
     {
+        "name": "todo_write",
+        "description": (
+            "覆盖式更新本回合建模计划清单（PLAN→EXECUTE→VERIFY 的载体）。"
+            "接到建模目标先拆解为可核验的步骤（每项一句话，3-8 项为宜）；"
+            "执行中随进度更新状态（pending→in_progress→done）；全部完成自查后再收尾。"
+            "计划会实时展示给用户。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "一句话步骤（≤160 字）"},
+                            "status": {"type": "string",
+                                       "enum": ["pending", "in_progress", "done"]},
+                        },
+                        "required": ["content", "status"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+    {
+        "name": "todo_read",
+        "description": "读取当前建模计划清单（忘了进度时用；正常情况下你刚更新过无需读取）。",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "generate_document",
         "description": (
             "把当前画布转成需求文档（一次性耗时调用，内部含叙述生成的 LLM 调用）。"
@@ -487,9 +523,15 @@ class ExplorationToolRunner:
         self._own_versions: set[int] = set()
         # generate_draft 是昂贵操作（嵌套 LLM 调用），每回合限次防重试风暴
         self._draft_attempts = 0
+        # 本回合建模计划（todo_write 覆盖式更新；orchestrator 据此推送 plan 事件）
+        self.todo: list[dict] = []
 
     def run(self, name: str, args: dict) -> dict:
         self.last_diagram = None
+        if name == "todo_write":
+            return self._todo_write(args)
+        if name == "todo_read":
+            return self._todo_read()
         if name == "generate_document":
             return self._generate_document(args)
         if name == "generate_draft":
@@ -543,6 +585,32 @@ class ExplorationToolRunner:
         if name == "use_skill":
             return self._use_skill(args)
         return {"error": f"未知工具: {name}"}
+
+    def _todo_write(self, args: dict) -> dict:
+        """覆盖式更新建模计划；纯内存态（不落画布），随 step 事件可回放。"""
+        raw_items = args.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            return {"error": "items 必须是非空数组（每项 {content, status}）"}
+        items: list[dict] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                return {"error": f"计划项必须是对象，收到: {type(raw).__name__}"}
+            content = str(raw.get("content") or "").strip()
+            status = str(raw.get("status") or "pending").strip()
+            if not content:
+                return {"error": "计划项缺少 content（一句话步骤）"}
+            if status not in ("pending", "in_progress", "done"):
+                return {"error": f"计划项 status 只能是 pending/in_progress/done，收到: {status}"}
+            items.append({"content": content[:160], "status": status})
+        if len(items) > 20:
+            return {"error": "计划清单最多 20 项，请合并粒度"}
+        self.todo = items
+        done = sum(1 for item in items if item["status"] == "done")
+        return {"items": self.todo, "total": len(items), "done": done,
+                "note": "计划已更新并展示给用户"}
+
+    def _todo_read(self) -> dict:
+        return {"items": self.todo}
 
     def _latest_document(self) -> ExplorationDocument | None:
         return (self.db.query(ExplorationDocument)
