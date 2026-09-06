@@ -77,6 +77,22 @@ class SQLConnector(ConnectorBase):
         inspector = inspect(self._get_engine())
         return inspector.get_table_names()
 
+    def introspect_schema(self, resource: str) -> list[dict]:
+        """基于数据库元数据反射的列清单（MySQL/PostgreSQL 方言归一化）。"""
+        from app.data_channel.connections.type_normalization import (
+            normalize_sql_column,
+        )
+
+        columns = inspect(self._get_engine()).get_columns(self._safe_ident(resource))
+        result = [
+            normalize_sql_column(column.get("name"), column.get("type"))
+            for column in columns
+            if column.get("name")
+        ]
+        if not result:
+            raise ValueError(f"资源 {resource!r} 未反射出任何列")
+        return result
+
     def pull_sample(self, resource: str, limit: int = 100) -> list[dict]:
         """从表中查询样本数据"""
         with self._get_engine().connect() as conn:

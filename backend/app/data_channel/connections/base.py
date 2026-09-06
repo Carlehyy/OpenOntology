@@ -30,3 +30,14 @@ class ConnectorBase(ABC):
     def pull_delta(self, resource: str, since: str | None = None) -> Any:
         """增量数据查询。默认实现与 pull_full 相同。"""
         return self.pull_full(resource)
+
+    def introspect_schema(self, resource: str) -> list[dict]:
+        """资源列清单元数据：[{name, type(湖词表), source_type, flags}]。
+
+        实现必须基于数据源元数据反射（如 information_schema）而不是值采样；
+        失败要抛异常，禁止吞掉后返回空清单——空清单会被上游当成「资源没有
+        列」。不支持内省的连接器保持默认 NotImplementedError，由调用方决定
+        采样兜底。
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} 不支持 schema 内省")
