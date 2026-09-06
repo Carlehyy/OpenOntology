@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
 
-revision = "0096_super_assistant_delegations"
-down_revision = "0095_super_assistant_multica_workspace_name"
+revision = "0098_super_assistant_delegations"
+down_revision = "0097_sentinel_pattern"
 branch_labels = None
 depends_on = None
 
