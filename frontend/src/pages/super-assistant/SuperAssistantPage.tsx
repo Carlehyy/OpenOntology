@@ -85,7 +85,9 @@ export default function SuperAssistantPage() {
   const [searchOpen, setSearchOpen] = useState(false)
   // 全局搜索选中消息命中后：先切会话，待消息加载完成再滚动定位
   const [pendingJumpId, setPendingJumpId] = useState<string | null>(null)
-  const [configOpen, setConfigOpen] = useState(false)
+  // 助手配置在 ≥1280 视口默认展开（右上角按钮呈选中态）；更窄的 lg 档与移动端
+  // 默认收起——面板常驻会挤占聊天区头部的最小可用宽度
+  const [configOpen, setConfigOpen] = useState(() => window.matchMedia('(min-width: 1280px)').matches)
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [savingTitle, setSavingTitle] = useState(false)
@@ -777,7 +779,12 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {!loading && selectedConversation && <ContextUsage messages={messages} model={selectedModel} />}
+          {/* 面板展开时头部宽度吃紧：上下文胶囊仅在 ≥2xl 视口展示（2xl 以上面板展开仍放得下） */}
+          {!loading && selectedConversation && (
+            <div className={configOpen ? 'hidden shrink-0 2xl:block' : 'shrink-0'}>
+              <ContextUsage messages={messages} model={selectedModel} />
+            </div>
+          )}
           <Select
             value={selectedModelId}
             onValueChange={value => {
@@ -790,7 +797,7 @@ export default function SuperAssistantPage() {
             {/* 与左侧「上下文」框同一语言：1px 绿色细边框、浅绿底、无阴影 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-48 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus:border-brand sm:w-64 xl:w-80"
+              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus:border-brand sm:w-48 xl:w-60"
             >
               <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'} />
             </SelectTrigger>
