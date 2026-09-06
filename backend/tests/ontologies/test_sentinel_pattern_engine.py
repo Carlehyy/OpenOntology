@@ -636,3 +636,115 @@ def test_validation_cross_object_requires_links(db):
     }, links=[])
     codes = _gate_codes(sentinel, object_types)
     assert "sentinel_pattern_link_missing" in codes, codes
+
+def test_absence_condition_referencing_later_stage_skips_not_errors(db, monkeypatch):
+    """P1-1 回归：absence 完成只带已进入阶段快照，condition 引用后续
+    stage 别名时判否跳过——不得报错死循环，水位必须推进。"""
+    from app.ontologies.sentinels.cep import pattern as cep_pattern
+    ontology_id = "cep-absence-cond"
+    _project(db, ontology_id)
+    _object_type(db, ontology_id, "order", _order_type_props())
+    order = _instance(ontology_id, "order", "order-ac",
+                      {"id": "order-ac", "status": "submitted", "amount": 1})
+    sentinel = _pattern_sentinel(ontology_id, "absence-cond-sentinel", {
+        "stages": [
+            {"alias": "a", "objectTypeId": "order",
+             "filter": "a.status == 'submitted'"},
+            {"alias": "b", "objectTypeId": "order",
+             "filter": "b.status == 'approved'"},
+        ],
+        "absence": {"enabled": True},
+        "within": 120,
+        "condition": "b.amount > 0",
+    })
+    db.add_all([order, sentinel])
+    db.commit()
+
+    real_now = _now()
+    monkeypatch.setattr(cep_pattern, "_now", lambda: real_now)
+    _seed_event(db, ontology_id, "order", "order-ac", "status",
+                "draft", "submitted", occurred_at=real_now - timedelta(seconds=30))
+    evaluator.evaluate_sentinel(db, ontology_id, sentinel, "schedule")
+
+    monkeypatch.setattr(
+        cep_pattern, "_now", lambda: real_now + timedelta(minutes=10))
+    second = evaluator.evaluate_sentinel(db, ontology_id, sentinel, "schedule")
+    assert second.status == "no_match", (
+        f"condition 引用缺失别名必须跳过而非报错: {second.error}")
+    assert db.query(SentinelMatchState).filter_by(
+        sentinel_id=sentinel.id).count() == 0
+    # 水位已推进：再次评估不重放、不重复报错。
+    third = evaluator.evaluate_sentinel(db, ontology_id, sentinel, "schedule")
+    assert third.status == "no_match"
+    assert db.query(SentinelFiring).filter_by(
+        sentinel_id=sentinel.id, status="error").count() == 0
+
+
+def test_preview_aggregate_with_events_does_not_crash_on_sqlite(db):
+    """P1-2 回归：聚合模式试跑回放在 SQLite（naive datetime）不崩。"""
+    from app.ontologies.sentinels.cep import pattern as cep_pattern
+    from app.ontologies.sentinels import evaluator as ev
+    ontology_id = "cep-preview-agg"
+    _project(db, ontology_id)
+    _object_type(db, ontology_id, "device", [
+        {"id": "temp", "name": "temp", "type": "number"},
+    ])
+    device = _instance(ontology_id, "device", "device-pv",
+                       {"id": "device-pv", "temp": 90})
+    sentinel = _pattern_sentinel(ontology_id, "preview-agg-sentinel", {
+        "stages": [{"alias": "a", "objectTypeId": "device",
+                    "filter": "a.temp > 80"}],
+        "aggregate": {"property": "temp", "function": "count",
+                      "window": 300, "threshold": 3, "comparison": "gte"},
+    })
+    db.add_all([device, sentinel])
+    db.commit()
+    for old, new in ((70, 85), (85, 90), (90, 88)):
+        _seed_event(db, ontology_id, "device", "device-pv", "temp", old, new)
+
+    report = ev.preview_sentinel(db, ontology_id, sentinel, "rel-x")
+
+    assert report["passed"] is True, report["errors"]
+    assert report["matchCount"] >= 1
+    assert report["replayCoverage"] in {"full", "partial"}
+
+
+def test_validation_rejects_absence_dead_config(db):
+    """P2-2 回归：absence 在单 stage/聚合模式下是死配置，门禁拒绝。"""
+    ontology_id = "cep-validate-absence"
+    _project(db, ontology_id)
+    order_type = _object_type(db, ontology_id, "order", _order_type_props())
+    db.commit()
+    object_types = [SimpleNamespace(
+        id=order_type.id, ontology_id=ontology_id,
+        properties=order_type.properties)]
+    sentinel = _pattern_sentinel(ontology_id, "v-absence-agg", {
+        "stages": [{"alias": "a", "objectTypeId": "order",
+                    "filter": "a.status == 'submitted'"}],
+        "absence": {"enabled": True},
+        "aggregate": {"property": "status", "function": "count",
+                      "window": 300, "threshold": 3},
+    })
+    codes = _gate_codes(sentinel, object_types)
+    assert "sentinel_pattern_absence_invalid" in codes, codes
+
+
+def test_validation_detects_spaced_temporal_call_in_filter(db):
+    """P2-5 回归：带空格的时间算子调用也必须被发布门禁识别。"""
+    ontology_id = "cep-validate-spaced"
+    _project(db, ontology_id)
+    order_type = _object_type(db, ontology_id, "order", _order_type_props())
+    db.commit()
+    object_types = [SimpleNamespace(
+        id=order_type.id, ontology_id=ontology_id,
+        properties=order_type.properties)]
+    sentinel = _pattern_sentinel(ontology_id, "v-spaced", {
+        "stages": [
+            {"alias": "a", "objectTypeId": "order",
+             "filter": "changed_within ( 'a.status', 300 )"},
+            {"alias": "b", "objectTypeId": "order"},
+        ],
+        "within": 3600,
+    })
+    codes = _gate_codes(sentinel, object_types)
+    assert "sentinel_temporal_in_filter_forbidden" in codes, codes

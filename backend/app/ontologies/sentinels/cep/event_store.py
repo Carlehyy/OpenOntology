@@ -20,6 +20,7 @@ from app.ontologies.sentinels.cep.contract import (
     EVENT_LOG_PRUNE_BATCH,
     EVENT_LOG_RETENTION_SECONDS,
     EVENT_SOURCE_ORGANIC,
+    EVENT_SOURCE_RELEASE_ACTIVATION,
     PREVIOUS_VALUES_QUERY_CAP,
     chunk_ids,
 )
@@ -113,6 +114,23 @@ def capture_instance_changes(
         if (change_kind == EVENT_KIND_CREATED
                 and row.change_kind != EVENT_KIND_CREATED):
             row.change_kind = EVENT_KIND_CREATED
+
+
+def relabel_pending_as_activation(session: Session, ontology_id: str) -> None:
+    """发布切换事务内回溯改标本事务已捕获的实例事件为 release_activation。
+
+    晋级/回滚把新投影物化（实例重建的事件在早前 flush 已按 organic 落行）
+    之后才切换指针——捕获时刻无法得知自己属于激活窗口。本函数在指针切换
+    的 before_flush 里调用：行对象仍在 session 中，置脏后随当前 flush 一并
+    UPDATE，保证激活窗口的事件不参与时间算子/模式推进（核心不变量）。
+    """
+    pending = session.info.get(_EVENT_PENDING_KEY)
+    if not pending:
+        return
+    for entry in pending.values():
+        for row in entry.get("rows", {}).values():
+            if str(getattr(row, "ontology_id", "")) == str(ontology_id):
+                row.source = EVENT_SOURCE_RELEASE_ACTIVATION
 
 
 def deleted_change_marker() -> tuple:

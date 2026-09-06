@@ -149,7 +149,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "POST", "/api/v1/ontologies",
             json={
                 "name": f"哨兵CEP真实闭环-{suffix}",
-                "domain": "物联网",
+                "domain": "制造",
                 "description": "Sentinel CEP production-path verification",
             },
         )
@@ -398,7 +398,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             len(seq_fired) == 1,
             f"sequence should fire exactly once: {seq_fired}")
         require(
-            all(not key.startswith("pattern:") or ":" in key
+            all(
+                key.startswith("pattern:") and key.count(":") >= 2
                 for row in seq_fired for key in row.get("entered") or []),
             f"sequence firing keys malformed: {seq_fired}")
         # 动作标记已写入（update_property 把 status 改为 cep_seen）。
@@ -435,7 +436,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 row for row in firings_of(
                     api, ontology_id, sequence_sentinel_id)
                 if row.get("status") == "fired"
-                and row.get("triggerSource") == "schedule"
+                # 定时扫描触发的 trigger_source 是 "sch:<hex>" 控制源。
+                and str(row.get("triggerSource") or "").startswith("sch:")
                 and any(
                     key.startswith(f"pattern:{device2}:")
                     for key in row.get("entered") or [])

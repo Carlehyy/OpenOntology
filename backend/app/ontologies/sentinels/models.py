@@ -423,7 +423,8 @@ class SentinelPatternState(Base):
         Integer, nullable=False, default=1, server_default="1")
     # same_instance 模式 = 锚实例 id；跨对象模式 = primary 别名锚实例 id。
     correlation_key: Mapped[str] = mapped_column(String, nullable=False)
-    # 当前推进到的 stage（0 基）。
+    # 下一个期望 stage 的索引（0 基）：stage0 事件命中后即为 1；
+    # 聚合滞回态恒为 0。
     stage_index: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0")
     started_at: Mapped[datetime] = mapped_column(

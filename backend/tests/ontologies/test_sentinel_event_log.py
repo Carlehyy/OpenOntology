@@ -487,3 +487,34 @@ def test_prune_event_log_removes_rows_beyond_retention(db, monkeypatch):
     remaining = db.query(SentinelEventLog).filter(
         SentinelEventLog.instance_id == "new-1").count()
     assert remaining == 1
+
+def test_promotion_flush_order_relables_events_as_activation(db):
+    """P0-1 回归：晋级先重建投影（flush 1）后切指针（flush 2）。
+
+    捕获发生在指针切换前，靠 _merge_pointer_switch_deltas 的回溯改标
+    保证激活窗口事件不按 organic 参与时间算子/模式推进。
+    """
+    cdc.register_cdc(start_worker=False)
+    ontology_id = "cep-promotion-order"
+    db.add(OntologyProject(
+        id=ontology_id, name=ontology_id, domain="d", created_by="t",
+        status="published", version="v1", current_release_id="rel-old"))
+    db.commit()
+    object_type = _object_type(db, ontology_id, "device")
+    db.commit()
+
+    # flush 1：新 release 投影物化（实例重建，此时 scope 尚未设置）。
+    db.add(_instance(ontology_id, object_type.id, "device-promo",
+                     {"temp": 1}))
+    db.flush()
+    # flush 2：指针切换。
+    project = db.query(OntologyProject).filter_by(id=ontology_id).one()
+    db.refresh(project)
+    project.current_release_id = RELEASE_ID
+    db.commit()
+
+    rows = _events(db, "device-promo")
+    assert rows, "晋级窗口的实例重建事件必须被捕获"
+    assert all(
+        row.source == cep_contract.EVENT_SOURCE_RELEASE_ACTIVATION
+        for row in rows), [row.source for row in rows]

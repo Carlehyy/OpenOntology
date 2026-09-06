@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import ast
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -713,20 +714,40 @@ def _match_key(completion: dict) -> str:
 
 def _drop_aggregate_match_states(db: Session, sentinel, states: dict) -> None:
     """聚合回落：删除该哨兵对应实例已完成的聚合命中行，允许再次上穿触发。"""
+    def _escape_like(value: str) -> str:
+        return (
+            value.replace("\\", "\\\\")
+            .replace("%", "\\%").replace("_", "\\_"))
+
     prefixes = [
-        f"pattern:{state['correlation_key']}:%"
+        f"pattern:{_escape_like(str(state['correlation_key']))}:%"
         for state in states.values() if state.get("drop")
     ]
     if not prefixes:
         return
     from sqlalchemy import or_
     conditions = [
-        SentinelMatchState.match_key.like(prefix) for prefix in prefixes]
+        SentinelMatchState.match_key.like(prefix, escape="\\")
+        for prefix in prefixes]
     db.query(SentinelMatchState).filter(
         SentinelMatchState.sentinel_id == sentinel.id,
         SentinelMatchState.runtime_status == "completed",
         or_(*conditions),
     ).delete(synchronize_session=False)
+
+
+def _condition_business_aliases(condition: str) -> set[str] | None:
+    """condition 引用的业务别名集合；语法错误返回 None（编译层已报）。"""
+    try:
+        tree = ast.parse(
+            condition.strip().rstrip(";").strip(), mode="eval")
+    except SyntaxError:
+        return None
+    return {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    } - cep_contract.NON_ALIAS_NAMES - set(
+        cep_contract.TEMPORAL_FUNCTIONS)
 
 
 def _filter_completions_by_condition(
@@ -736,11 +757,11 @@ def _filter_completions_by_condition(
     condition = definition.get("condition")
     if not condition or not completions:
         return completions
+    stage_aliases = {stage["alias"] for stage in definition["stages"]}
     try:
         validate_safe_expression(
             condition,
-            set(completions[0]["snapshots"] or {})
-            | set(cep_contract.TEMPORAL_FUNCTIONS))
+            stage_aliases | set(cep_contract.TEMPORAL_FUNCTIONS))
     except SafeEvalError as exc:
         errors.append(f"模式条件「{condition}」无法编译: {exc}")
         return []
@@ -748,8 +769,17 @@ def _filter_completions_by_condition(
     if temporal_errors:
         errors.extend(temporal_errors)
         return []
+    required = _condition_business_aliases(condition) or set()
     kept: list[dict] = []
     for completion in completions:
+        present = {
+            alias for alias in (completion["snapshots"] or {})
+            if not str(alias).startswith("__")
+        }
+        # 缺失别名的完成（典型：absence 只携带已进入阶段的快照）条件不可能
+        # 成立——判否跳过而不是报错，否则水位停滞会造成 error firing 死循环。
+        if not required <= present:
+            continue
         tup = {
             alias: _snapshot_instance(snapshot, ontology_id)
             for alias, snapshot in (completion["snapshots"] or {}).items()
@@ -898,7 +928,7 @@ def preview_pattern(db: Session, ontology_id: str, sentinel,
                 if str(event.instance_id) == change.instance_id
                 and str(event.key) == aggregate["property"]
                 and int(event.id) <= change.max_event_id
-                and (event.occurred_at or now) >= window_start
+                and (_aware(event.occurred_at) or now) >= window_start
             ]
             property_values = [row.new_value for row in sample_rows]
         completions.extend(process_change_set(

@@ -444,6 +444,9 @@ def _merge_pointer_switch_deltas(
     """
     session.info.setdefault(_RELEASE_SWITCH_SCOPES_KEY, set()).add(
         str(ontology_id))
+    # 本事务早前 flush 已按 organic 落行的实例事件（晋级先重建投影、后切
+    # 指针）回溯改标为 release_activation，与 outbox 的合并处置对齐。
+    event_store.relabel_pending_as_activation(session, ontology_id)
     changes = session.info.get(_KEY, {})
     for key in list(changes):
         if str(key[0]) == str(ontology_id):

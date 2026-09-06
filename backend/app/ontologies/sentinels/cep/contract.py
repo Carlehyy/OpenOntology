@@ -54,6 +54,14 @@ EVENT_LOG_RETENTION_SECONDS = 7 * 24 * 3600
 EVENT_LOG_MAX_ROWS = 1_000_000
 EVENT_LOG_PRUNE_BATCH = 5000
 
+# 条件表达式里永远可解析的非业务别名（safe_eval 全局名 + 字面量），
+# 模式完成条件按 completion 快照集合做别名预检时排除。
+NON_ALIAS_NAMES = frozenset({
+    "True", "False", "None", "true", "false", "null", "utils",
+    "sum", "avg", "count", "len", "min", "max", "round", "abs",
+    "lower", "upper", "contains", "now",
+})
+
 # prev() 批量回捞的单次行数上限：超出后未覆盖的引用返回 None
 # （fail-closed：条件自然判否，不制造假命中）。
 PREVIOUS_VALUES_QUERY_CAP = 20000

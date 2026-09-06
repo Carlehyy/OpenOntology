@@ -178,8 +178,20 @@ def _temporal_expression_errors(
     门禁必须直接拒绝，而不是留到运行期静默不命中。
     """
     raw = str(expression or "").strip().rstrip(";").strip()
-    if not raw or not any(
-            f"{name}(" in raw for name in cep_contract.TEMPORAL_FUNCTIONS):
+    if not raw:
+        return []
+    try:
+        tree = ast.parse(raw, mode="eval")
+    except SyntaxError:
+        # validate_safe_expression owns the canonical syntax error.
+        return []
+    # AST 级探测（"changed_within ('a.x', 60)" 这类带空格的写法也必须命中，
+    # 不能靠字符串包含判断）。
+    if not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in cep_contract.TEMPORAL_FUNCTIONS
+            for node in ast.walk(tree)):
         return []
     refs, shape_errors = temporal_ops.extract_temporal_refs(raw)
     errors: list[dict] = []
@@ -323,6 +335,16 @@ def _pattern_definition_errors(
                     f"({within}s) 不得小于扫描间隔 ({scan_interval}s)，"
                     "否则超时判定形同虚设",
                     field=f"pattern.stages[{index}].within")
+
+    # 缺失分支只在"等待下一 stage"的形态下有意义：单阶段（事件即完成，
+    # 无等待期）与聚合（无 deadline）下 absence.enabled 是永不触发的死配置。
+    if definition["absence"].get("enabled") and (
+            len(stages) < 2 or definition.get("aggregate")):
+        _gate(
+            "sentinel_pattern_absence_invalid",
+            f"哨兵「{label}」缺失分支（absence）只在≥2 个 stage 的序列"
+            "模式下有意义；单 stage 或聚合模式下为永不触发的死配置",
+            field="pattern.absence")
 
     aggregate = definition.get("aggregate")
     if aggregate:
