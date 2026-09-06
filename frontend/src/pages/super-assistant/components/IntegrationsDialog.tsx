@@ -147,7 +147,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
                 <p className="text-xs font-semibold text-[var(--color-text-primary)]">multica</p>
-                <span className={`h-2 w-2 rounded-full ${config?.last_test_status === 'success' ? 'bg-brand' : config?.last_test_status === 'error' ? 'bg-red-500' : 'bg-slate-300'}`} />
+                <span className={`h-2 w-2 rounded-full ${config?.last_test_status === 'success' ? 'bg-success' : config?.last_test_status === 'error' ? 'bg-red-500' : 'bg-slate-300'}`} />
                 {config?.enabled && <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[9px] text-brand-ink">已启用</span>}
               </div>
               <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
