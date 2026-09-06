@@ -415,3 +415,30 @@ class SuperAssistantDelegation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
     last_turn_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+class SuperAssistantRemoteAgent(Base):
+    """用户自配的远程助手（声明式注册：填 key/名称/描述/端点即入委派目录）。
+
+    远程助手走 OpenOntology 远程助手 HTTP 契约（见 remote_agent_service）：
+    单端点回合制，session_ref 由远端签发、经委派表 conversation_ref 透传
+    续用。token 加密存储永不回显；menu_keys 为空（不映射平台菜单，归属
+    即权限）。key 命名空间 remote.* 与平台内置助手隔离。
+    """
+
+    __tablename__ = "super_assistant_remote_agents"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "key", name="uq_sa_remote_agent_owner_key"),
+        Index("ix_sa_remote_agents_owner_enabled", "owner_id", "enabled"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    key: Mapped[str] = mapped_column(String(50), nullable=False)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    endpoint: Mapped[str] = mapped_column(String(1000), nullable=False)
+    token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)

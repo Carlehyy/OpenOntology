@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,7 @@ from app.assistant_hub.registry import DELEGATION_TOOL_NAME
 from app.auth.models import User
 from app.shared.config import settings
 from app.shared.database import SessionLocal
+from app.super_assistant import remote_agent_service  # noqa: F401 导入即注册动态助手 provider
 from app.super_assistant.models import SuperAssistantDelegation
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,47 @@ def _delegation_semaphore() -> threading.Semaphore:
 
 def _result_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
+
+
+# 虚构委派的完成时声称模式（观测告警与下一轮提醒注入共用）
+FABRICATION_CLAIM_PATTERN = re.compile(
+    r"已委派|已询问|已在同一子会话|助手(答复|返回|回复|说|表示)"
+)
+
+
+def suspected_fabrication_reminder(messages) -> str:
+    """上一条 assistant 消息声称了子助手结果、且本会话从未真正委派过时，
+    返回注入下一轮 system 提示的定向提醒；其余情况返回空串。
+
+    "会话从未委派过"是关键判别：真实委派过之后的后续消息里合理地引用
+    "本体助手说过…"不属于虚构，不注入。
+    """
+    if not messages:
+        return ""
+    ever_delegated = any(
+        any(
+            step.get("toolName") == DELEGATION_TOOL_NAME
+            for step in (getattr(message, "steps", None) or [])
+        )
+        for message in messages
+        if getattr(message, "role", None) == "assistant"
+    )
+    if ever_delegated:
+        return ""
+    last_assistant = next(
+        (message for message in reversed(messages)
+         if getattr(message, "role", None) == "assistant"),
+        None,
+    )
+    if last_assistant is None:
+        return ""
+    if FABRICATION_CLAIM_PATTERN.search(getattr(last_assistant, "content", "") or ""):
+        return (
+            "提醒：上一条回复声称了子助手结果，但本会话从未调用过 "
+            "delegate_to_assistant。本轮若要转述任何子助手内容，必须先实际调用"
+            "该工具；否则直接以自己的口吻回答，不要提及子助手。"
+        )
+    return ""
 
 
 def _capped_content(content: str) -> str:
@@ -230,13 +273,22 @@ def run_delegation_tool(
     raw_context = arguments.get("context")
     context = raw_context if isinstance(raw_context, dict) else {}
 
-    assistant = assistant_registry.get_assistant(assistant_key)
     user = db.get(User, owner_id)
+    # 动态条目（用户自配远程助手）需带 db+user 解析；引擎流程不变
+    assistant = assistant_registry.get_assistant(assistant_key, db=db, user=user)
     # 执行时权限重验：assistant 是自由字符串，注入时过滤只决定可见性
+    permitted_keys = (
+        None
+        if assistant is None or user is None
+        else {
+            item.spec().key
+            for item in assistant_registry.permitted_assistants(db, user)
+        }
+    )
     if (
         assistant is None
         or user is None
-        or assistant not in assistant_registry.permitted_assistants(db, user)
+        or assistant.spec().key not in (permitted_keys or set())
     ):
         return _result_json({
             "status": "failed",
@@ -309,6 +361,9 @@ def run_delegation_tool(
                     result.status if result.status in _TERMINAL_STATUSES else STATUS_FAILED
                 )
                 final_summary = result.content
+                # 收尾引用以结果为准：本回合可能新建/轮换了子会话（如远程助手
+                # 首回合签发 session_ref），worker 侧先落库时不能只回填传入引用
+                final_ref = result.conversation_ref or ref
                 events.put(("done", (result, ref)))
             except AssistantHubError as exc:
                 final_summary = str(exc)

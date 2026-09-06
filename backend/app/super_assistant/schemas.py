@@ -254,6 +254,44 @@ class MulticaConfigOut(BaseModel):
     last_tested_at: datetime | None
 
 
+class RemoteAgentOut(BaseModel):
+    id: str
+    key: str
+    label: str
+    description: str
+    endpoint: str
+    token_set: bool
+    enabled: bool
+    timeout_seconds: int
+
+
+class RemoteAgentCreate(BaseModel):
+    # key 命名空间 remote.* 与平台内置助手隔离（校验见 remote_agent_service）
+    key: str = Field(min_length=1, max_length=50)
+    label: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=2000)
+    endpoint: str = Field(min_length=1, max_length=1000)
+    # token 加密存储、永不回显
+    token: str | None = Field(default=None, max_length=2000)
+    enabled: bool = True
+    timeout_seconds: int = 120
+
+
+class RemoteAgentUpdate(BaseModel):
+    # 全部可选：缺省/None 表示不修改；token 留空表示保留已存凭据
+    label: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    endpoint: str | None = Field(default=None, min_length=1, max_length=1000)
+    token: str | None = Field(default=None, max_length=2000)
+    enabled: bool | None = None
+    timeout_seconds: int | None = Field(default=None, ge=10, le=600)
+
+
+class RemoteAgentTestOut(BaseModel):
+    ok: bool
+    message: str
+
+
 class MulticaConfigUpdate(BaseModel):
     base_url: str = Field(min_length=1, max_length=500)
     # token 留空/缺省表示保留已保存凭据（不回显、不覆盖）

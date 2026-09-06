@@ -273,6 +273,14 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 远程助手（声明式注册目录：CRUD/连接测试）：同前缀同守卫的独立子路由
+from app.super_assistant import remote_agents as super_assistant_remote_agents
+app.include_router(
+    super_assistant_remote_agents.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 悬浮助手页面可见范围配置：GET 面向全体登录用户（不受 super_assistant 菜单权限约束），
 # PUT 仅管理员，鉴权在路由级声明，故此处不挂 menu_guard。
 from app.super_assistant import widget_config as super_assistant_widget_config

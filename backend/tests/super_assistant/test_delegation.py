@@ -116,7 +116,7 @@ def _fake_registry(monkeypatch, fake: _FakeAssistant):
     from app.assistant_hub import registry
 
     monkeypatch.setattr(registry, "get_assistant",
-                        lambda key: fake if key == fake.key else None)
+                        lambda key, db=None, user=None: fake if key == fake.key else None)
     monkeypatch.setattr(registry, "permitted_assistants",
                         lambda db, user: [fake])
 
@@ -237,7 +237,7 @@ def test_permission_recheck_at_execution_time(tmp_path, monkeypatch):
 
     TestingSession, ids = _seed(tmp_path, monkeypatch, "perm")
     fake = _FakeAssistant()
-    monkeypatch.setattr(registry, "get_assistant", lambda key: fake)
+    monkeypatch.setattr(registry, "get_assistant", lambda key, db=None, user=None: fake)
     monkeypatch.setattr(registry, "permitted_assistants", lambda db, user: [])
 
     with TestingSession() as db:

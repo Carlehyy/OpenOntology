@@ -752,9 +752,12 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 目录一等公民新增 /palace/folders、/palace/folders/{id}、
     # /palace/files/notes 三条路径（PATCH /palace/files/{id} 复用旧路径），
     # 共 6 个新操作：folders list/create、folders/{id} rename/delete、
-    # files/notes POST、files/{id} PATCH（拖拽移动）
-    assert len(paths) == 45
-    assert sum(len(item) for item in paths.values()) == 64
+    # files/notes POST、files/{id} PATCH（拖拽移动）；
+    # 远程助手声明式注册新增 /remote-agents 的 list/create、
+    # /remote-agents/{id} 的 put/delete、/remote-agents/{id}/test 的 post
+    # 共 5 个操作（3 条路径）
+    assert len(paths) == 48
+    assert sum(len(item) for item in paths.values()) == 69
     assert hashlib.sha256(payload).hexdigest() == (
-        "8f1ad05e04e47f5dde51232f62cc3d217132e89cb3529be803148649ad271f7c"
+        "6556a86503c6e7b94d7abe8500742aeeacb1795b15e526188f077e011c32e0a4"
     )
