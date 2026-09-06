@@ -262,5 +262,32 @@ def normalize_cell(value):
     return str(value)
 
 
-def normalize_rows(rows: list) -> list:
-    return [normalize_cell(row) for row in rows]
+def normalize_rows(rows: list, primary_key_columns: tuple | list = ()) -> list:
+    """整表归一化；主键列的值额外文本化（见 normalize_primary_key_value）。"""
+    pk_columns = [str(column) for column in (primary_key_columns or ())]
+    out = []
+    for row in rows:
+        normalized = normalize_cell(row)
+        if pk_columns and isinstance(normalized, dict):
+            for column in pk_columns:
+                if column in normalized:
+                    normalized[column] = normalize_primary_key_value(
+                        normalized[column])
+        out.append(normalized)
+    return out
+
+
+def normalize_primary_key_value(value):
+    """主键列值 → 文本身份。
+
+    数值型 ID 统一转字符串：跨源 join 需要文本口径（Mongo _id 是文本、
+    MySQL id 是整数，类型不同永不相交），投影侧 2^53 之上也不会再受
+    float64 表示影响；与 Foundry 等本体检平台「数值 ID 先 cast string
+    再做主键」的通行做法一致。None 表示业务空值，交由非空校验拦截。
+    """
+    normalized = normalize_cell(value)
+    if normalized is None:
+        return None
+    if not isinstance(normalized, str):
+        return str(normalized)
+    return normalized
