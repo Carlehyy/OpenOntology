@@ -7,6 +7,8 @@
  *   否则 `npm run check:color-tokens` 报“棘轮可下沉”。
  *   ESLint 的 hex/rgba 约束同样从本清单派生豁免，迁移 TSX 文件后
  *   无需另改 eslint.config.js。
+ * - LEGACY_PALETTE_LIMITS：存量绿色族 Tailwind 色板类登记
+ *   （teal/emerald/cyan/green/lime-*，登记规则同上，见文件尾部说明）。
  */
 export const TOKEN_SOURCE_FILES = [
   'styles/tokens.css',
@@ -104,4 +106,56 @@ export const LEGACY_COLOR_LIMITS = {
   'palantir-graph/store/tradeErpDemo.ts':                            40,
   'styles/animations.css':                                           3,
   'styles/dark-fallback.css':                                        39,
+}
+
+/**
+ * 绿色族 Tailwind 色板类存量棘轮（DESIGN.md §2.4/§8 色板条款的配套债务台账）。
+ *
+ * 与品牌强调色争抢色相的原生色板类（teal/emerald/cyan/green/lime-*）不得
+ * 新增；本表锁定存量，迁移后同步改小或移除登记，否则 check:color-tokens
+ * 报「棘轮可下沉」。ESLint 的色板约束同样从本表派生豁免，迁移后无需另改
+ * eslint.config.js。
+ */
+export const LEGACY_PALETTE_LIMITS = {
+  'api/tickets.ts':                                                 3,
+  'components/assistant-widget/AssistantWidgetPanel.tsx':           9,
+  'components/assistant-widget/FloatingAssistantWidget.tsx':        2,
+  'components/ConfidenceBar.tsx':                                   1,
+  'components/ConfirmDialog.tsx':                                   2,
+  'components/InteractiveViewport.tsx':                             4,
+  'components/MermaidBlock.tsx':                                    6,
+  'components/ontology/TrialActionPlanReview.tsx':                  14,
+  'components/OntologyAvatar.tsx':                                  8,
+  'components/pipelines/FileRefActions.tsx':                        10,
+  'components/SessionHistoryPopover.tsx':                           10,
+  'components/tickets/TicketFormModal.tsx':                         24,
+  'components/ZoomableImage.tsx':                                   2,
+  'hooks/useSplitLayout.tsx':                                       1,
+  'palantir-graph/components/Canvas.tsx':                           3,
+  'palantir-graph/components/ConnectLinkDialog.tsx':                4,
+  'palantir-graph/components/editors/FunctionPanel.tsx':            20,
+  'palantir-graph/components/editors/FunctionParameterEditor.tsx':  3,
+  'palantir-graph/components/editors/ObjectTypePanel.tsx':          2,
+  'palantir-graph/components/editors/RuleEditor.tsx':               11,
+  'palantir-graph/components/FloatingMenu.tsx':                     9,
+  'palantir-graph/components/Header.tsx':                           18,
+  'palantir-graph/components/panels/ActionList.tsx':                3,
+  'palantir-graph/components/panels/ActionRunner.tsx':              8,
+  'palantir-graph/components/panels/AutonomyPanel.tsx':             11,
+  'palantir-graph/components/panels/FunctionList.tsx':              10,
+  'palantir-graph/components/panels/FunctionTester.tsx':            17,
+  'palantir-graph/components/panels/GraphDatabaseView.tsx':         24,
+  'palantir-graph/components/panels/HelpGuide.tsx':                 33,
+  'palantir-graph/components/panels/InstanceBrowser.tsx':           9,
+  'palantir-graph/components/panels/InstanceFactsDrawer.tsx':       6,
+  'palantir-graph/components/panels/LinkList.tsx':                  4,
+  'palantir-graph/components/panels/RunHistoryPanel.tsx':           18,
+  'palantir-graph/components/panels/SentinelDefinitionList.tsx':    3,
+  'palantir-graph/components/panels/SentinelFiringHistory.tsx':     2,
+  'palantir-graph/components/panels/SentinelFiringSummary.tsx':     4,
+  'palantir-graph/components/panels/SentinelRuntimeStatus.tsx':     3,
+  'palantir-graph/components/ReadonlyDefinitionPanel.tsx':          5,
+  'palantir-graph/components/SearchPalette.tsx':                    1,
+  'palantir-graph/components/Toolbar.tsx':                          15,
+  'palantir-graph/GraphWorkspace.tsx':                              6,
 }

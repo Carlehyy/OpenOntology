@@ -22,7 +22,7 @@ function ToolSteps({ steps }: { steps: ToolStep[] }) {
             {step.status === 'running' || step.status === 'awaiting_confirmation'
               ? <Loader2 size={13} className="animate-spin text-brand-ink" />
               : step.status === 'success'
-                ? <Check size={13} className="text-brand-ink" />
+                ? <Check size={13} className="text-success" />
                 : <CircleAlert size={13} className="text-amber-600" />}
             <span className="font-medium">{step.toolName}</span>
             <span className="ml-auto text-[10px] text-[var(--color-text-tertiary)]">{step.status}</span>

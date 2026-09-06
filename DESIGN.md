@@ -31,8 +31,8 @@ description: >-
 ## 1. 设计原则（源自 Supabase 模板）
 
 1. **近单色画布 + 单一彩色强调**：界面主体由白/近黑墨/灰阶构成，唯一的彩色事件是
-   teal 强调（导航、焦点环、主操作、图表主序列）。一个视图内不要出现第二种
-   抢眼色相的装饰性用法。
+   祖母绿（emerald）强调（导航、焦点环、主操作、图表主序列）。一个视图内不要
+   出现第二种抢眼色相的装饰性用法。
 2. **克制的 chrome**：发丝边框 + 极浅阴影区分层级，不用重投影、大圆角或渐变堆砌。
 3. **数据密度优先**：这是 B 端数据产品——表格、图、日志是主角。留白服务于扫描效率，
    而非营销式的大标题节奏。
@@ -66,6 +66,8 @@ description: >-
 
 success `--color-success #2d8a4e` · warning `#c9861a` · danger
 `--destructive #c23b3b`（深 `#e5534b`）· info `#2563eb`；各自配 *-bg 浅底。
+success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引用
+（映射见 `tailwind.config.ts`，取值明暗自适应），勿用绿色族原生色板类。
 状态表达优先「浅底 + 深字」组合，而非大面积实色。
 代码/命令展示块统一用深色面板 `--color-code-bg` / `--color-code-fg`
 （明暗两态近同的近黑底），替代页域私设的 `bg-slate-950` 类色板。
@@ -78,7 +80,10 @@ success `--color-success #2d8a4e` · warning `#c9861a` · danger
 
 - 一切界面颜色经 Tailwind 语义类（`bg-background` / `text-muted-foreground` /
   `border-border`…，见 `tailwind.config.ts` 的 shadcn 映射）或 `var(--token)` 引用；
-- **禁止**在页面 TSX/CSS 新增硬编码 hex；图表数据序列例外，见第 5 节；
+- **禁止**在页面 TSX/CSS 新增硬编码 hex；也**禁止**直接使用 Tailwind 原生彩色
+  色板类（绿色族 `teal-*`/`emerald-*`/`cyan-*`/`green-*`/`lime-*`）——强调色一律
+  `brand-*` 语义色阶或语义 token，存量以色板棘轮登记为准、只减不增
+  （`npm run check:color-tokens`）；图表数据序列例外，见第 5 节；
 - 需要新颜色时：先进 `tokens.css`（`:root` 与 `.dark` 成对），再使用。
 
 ## 3. 字体与排版
@@ -117,7 +122,7 @@ success `--color-success #2d8a4e` · warning `#c9861a` · danger
 - **Tremor**：自带 `tremor-*` 类命名空间与灰阶体系，**不得原样入库**。布局结构可
   参考，颜色一律映射：`text-gray-900`→`text-foreground`、`dark:text-gray-50`→
   深色前景、`bg-tremor-background-muted`→`bg-muted`、`tremor-border`→`border-border`；
-  其品牌蓝/青一律替换为平台 teal 或语义色。
+  其品牌蓝/青一律替换为平台品牌强调（祖母绿）或语义色。
 - 任何第三方组件自带的「第二套色板」都不允许进入全局样式层。
 
 ### 4.3 基础件要点
@@ -172,7 +177,7 @@ ECharts 关系图能力不足时可选 G6（图可视化）/X6（图编辑），
 
 - 4px 栅格（`--space-1..12`）；圆角阶梯 sm4/md8/lg12/xl16/full；阴影三级
   （sm/md/lg，均为极浅投影）。
-- 页面骨架：顶部导航（teal）→ 页头（标题 + 主操作右置）→ 卡片栅格；
+- 页面骨架：顶部导航（品牌祖母绿）→ 页头（标题 + 主操作右置）→ 卡片栅格；
   列表/表格页保持行高紧凑（约 40px 行高量级）。
 - 空态：一句话说明 + 可选主操作；加载态用既有 LoadingState/skeleton 惯例，
   不自造转圈。
@@ -198,6 +203,9 @@ ECharts 关系图能力不足时可选 G6（图可视化）/X6（图编辑），
 6. 新增 motion-ui/availability-scheduler（beUI 例外层）消费方，或在白名单外
    新文件使用原生 `<select>`——由 `check:component-convergence` CI 强制，
    选型一律查 `component-catalog.ts`。
+7. 在 TSX 中直接写 Tailwind 原生绿色族色板类（`teal-*`/`emerald-*`/`cyan-*`/
+   `green-*`/`lime-*`）表达强调色或任意界面颜色——由 `check:color-tokens`
+   的色板棘轮与 ESLint 同源约束强制，存量只减不增。
 
 ## 9. 变更方式
 

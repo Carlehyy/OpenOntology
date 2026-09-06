@@ -671,7 +671,7 @@ export default function ConfigurationPanel({ open, onClose, skills, servers, ref
                     <div className="flex items-start gap-2">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><PlugZap size={16} /></div>
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5"><p className="truncate text-xs font-semibold text-[var(--color-text-primary)]">{server.name}</p><span className={`h-2 w-2 rounded-full ${server.last_test_status === 'success' ? 'bg-brand' : server.last_test_status === 'error' ? 'bg-red-500' : 'bg-slate-300'}`} /></div>
+                        <div className="flex items-center gap-1.5"><p className="truncate text-xs font-semibold text-[var(--color-text-primary)]">{server.name}</p><span className={`h-2 w-2 rounded-full ${server.last_test_status === 'success' ? 'bg-success' : server.last_test_status === 'error' ? 'bg-red-500' : 'bg-slate-300'}`} /></div>
                         <p className="mt-1 truncate text-[10px] text-[var(--color-text-tertiary)]">{server.transport === 'stdio' ? `${server.command} ${server.args.join(' ')}` : server.url}</p>
                       </div>
                     </div>
