@@ -56,11 +56,13 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     # xdist 并行 + 测试环境低 bcrypt 轮次 + pytest-split 按时长六分片后，单片
-    # 回归在 4 vCPU runner 上实测约 5-13 分钟（套件随功能持续增长，分片配平
+    # 回归的墙钟由 runner 侧方差主导（--dist loadfile 整文件打包 + 重文件族
+    # 在 CI 放大）：配平表预测约 5 分钟/片，实测 5-13 分钟、重负载时 30+
+    # 分钟（09:25 run shard 3 匀速跑满 25 分钟被取消，无单测卡死）。分片配平
     # 数据见 backend/.test_durations；新增测试须全量跑一次 --store-durations
-    # 再合入，shard 1 的时长覆盖守卫会强制拦截漏记）；上限留到 25 分钟，
-    # 既覆盖 runner 波动余量，又能及时掐断真正卡死的任务。
-    timeout-minutes: 25
+    # 再合入（shard 1 的时长覆盖守卫强制拦截漏记）。上限 40 分钟：覆盖实测
+    # 最坏分布，同时仍能掐断真正卡死的任务（真卡死不会被 40 分钟放过来）。
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:16-alpine
