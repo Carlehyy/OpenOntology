@@ -27,7 +27,42 @@ const sentinel = {
   status: 'published',
 }
 
+const patternSentinel = {
+  ...sentinel,
+  id: 'sentinel-pattern-seq',
+  name: 'order_status_sequence',
+  displayName: '订单状态变迁模式',
+  condition: null,
+  pattern: {
+    stages: [
+      { alias: 'a', objectTypeId: 'object-order', filter: "a.status == 'submitted'" },
+      { alias: 'b', objectTypeId: 'object-order', filter: "b.status == 'paid'", within: 7200 },
+    ],
+    within: 3600,
+    absence: { enabled: true },
+  },
+  triggerMode: 'on_pattern',
+  onSchedule: true,
+  scanIntervalSeconds: 120,
+}
+
 const firings = [
+  {
+    id: 'firing-pattern-absence',
+    sentinelId: patternSentinel.id,
+    sentinelName: patternSentinel.displayName,
+    triggerSource: 'schedule',
+    status: 'fired',
+    matchCount: 1,
+    matches: [{ a: 'order-2001' }],
+    entered: ['pattern:order-2001:2026-07-26T09:50:00+00:00'],
+    left: [],
+    actionResults: [{ status: 'success', effects: [] }],
+    durationMs: 15,
+    ontologyVersion: 'v1',
+    ontologyReleaseId: 'release-v1',
+    createdAt: '2026-07-26T10:00:30Z',
+  },
   {
     id: 'firing-enter',
     sentinelId: sentinel.id,
@@ -164,7 +199,7 @@ async function mockPublishedGraph(page: Page) {
   await page.route(/^https?:\/\/[^/]+\/api\/v1\//, route => {
     const path = new URL(route.request().url()).pathname
     const base = `/api/v1/ontologies/${ontologyId}/sentinels`
-    if (path === `${base}/`) return ok(route, [sentinel])
+    if (path === `${base}/`) return ok(route, [sentinel, patternSentinel])
     if (path === `${base}/firings`) return ok(route, firingHistory)
     if (path === `${base}/run` && route.request().method() === 'POST') {
       const current = {
@@ -262,7 +297,7 @@ test('发布态的哨兵面板和运行历史都明确展示进入、离开与�
   await expect(page.getByText(/当前发布 v1/)).toBeVisible()
   await page.getByTitle('打开菜单').click()
   await page.getByTestId('graph-runtime-tool-sentinel').click()
-  await page.getByRole('button', { name: '触发日志 (4)' }).click()
+  await page.getByRole('button', { name: '触发日志 (5)' }).click()
   await expectDeltaSemantics(page)
   await page.getByRole('button', { name: '关闭哨兵引擎' }).click()
 
@@ -280,7 +315,7 @@ test('手动触发后只把本次新日志标为本次，并显示可辨认的�
 
   await page.getByTitle('打开菜单').click()
   await page.getByTestId('graph-runtime-tool-sentinel').click()
-  await page.getByRole('button', { name: '触发日志 (4)' }).click()
+  await page.getByRole('button', { name: '触发日志 (5)' }).click()
 
   const historical = page.getByTestId('sentinel-firing-firing-no-change')
   await expect(historical.locator('time'))
@@ -301,4 +336,21 @@ test('手动触发后只把本次新日志标为本次，并显示可辨认的�
   await expect(
     historical.locator('[data-testid^="sentinel-current-manual-run-"]'),
   ).toHaveCount(0)
+})
+
+test('模式哨兵及其缺失分支触发记录在面板与历史中如实展示', async ({ page }) => {
+  await mockPublishedGraph(page)
+  await page.goto(`/#/ontologies/${ontologyId}/graph`, { waitUntil: 'domcontentloaded' })
+  await page.getByTitle('打开菜单').click()
+  await page.getByTestId('graph-runtime-tool-sentinel').click()
+
+  await expect(page.getByRole('heading', { name: '哨兵引擎' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '哨兵 (2)' }))
+    .toBeVisible({ timeout: 5_000 })
+  await expect(page.getByText('订单状态变迁模式')).toBeVisible()
+  // 缺失分支触发的记录必须出现在触发历史（schedule 来源、fired 状态）。
+  await page.getByRole('button', { name: '触发日志 (5)' }).click()
+  await expect(page.getByTestId('sentinel-firing-firing-pattern-absence'))
+    .toBeVisible({ timeout: 5_000 })
+  await expect(page.getByText('订单状态变迁模式').first()).toBeVisible()
 })

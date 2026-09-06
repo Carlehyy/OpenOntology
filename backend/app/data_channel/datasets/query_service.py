@@ -345,7 +345,14 @@ def get_schema(dataset_id: str, db: Session):
     def _build() -> dict:
         if (
             schema_json.get("types_source")
-            in {"declared", "published_pipeline_contract"}
+            in {
+                "declared",
+                "published_pipeline_contract",
+                # 连接同步写入的列契约：元数据内省/全量采样，比预览 10 行的
+                # 现场推断更可信（connection_sync._structured_schema_json）。
+                "connector_introspection",
+                "sample_inference",
+            }
             and schema_json.get("columns_typed")
         ):
             rows = svc.preview(dataset_id, None, limit=10)

@@ -98,8 +98,11 @@ class DynamicSentinelDefinition(_StrictDynamicModel):
     scan_interval_seconds: conint(strict=True, ge=60, le=86400) = 300
     trigger_mode: str = Field(
         default="on_enter",
-        pattern=r"^(on_enter|on_enter_leave|run_on_all)$",
+        pattern=r"^(on_enter|on_enter_leave|run_on_all|on_pattern)$",
     )
+    # CEP 模式定义（triggerMode='on_pattern' 时必填；深度结构由共享
+    # validate_sentinels 校验，Pydantic 只做存在性门禁）。
+    pattern: Optional[dict[str, Any]] = None
     muted: StrictBool = False
 
     @field_validator("name", "display_name")
@@ -118,6 +121,16 @@ class DynamicSentinelDefinition(_StrictDynamicModel):
             raise ValueError("primaryAlias 必须引用已声明的 binding alias")
         if len(self.action_ids) != len(set(self.action_ids)):
             raise ValueError("actionIds 不允许重复")
+        if self.trigger_mode == "on_pattern":
+            if not isinstance(self.pattern, dict) or not self.pattern:
+                raise ValueError(
+                    "triggerMode=on_pattern 时必须携带 pattern 模式定义")
+            if not self.on_change or not self.on_schedule:
+                raise ValueError(
+                    "模式哨兵必须同时开启变化触发与定时扫描"
+                    "（onChange/onSchedule）")
+        elif self.pattern:
+            raise ValueError("pattern 仅在 triggerMode=on_pattern 时允许出现")
         if self.condition_rows:
             raise ValueError("助手动态哨兵只接受 condition 作为唯一执行条件，conditionRows 必须为空")
         return self

@@ -29,6 +29,8 @@ from app.models.ontology_formal import LinkInstance, ObjectInstance
 from app.models.ontology import OntologyProject
 from app.models.ontology_version import OntologyVersion
 from app.models.sentinel import Sentinel, SentinelCdcOutbox, SentinelMatchState
+from app.ontologies.sentinels.cep import contract as cep_contract
+from app.ontologies.sentinels.cep import event_store
 from app.ontologies.sentinels.evaluator import in_sentinel_run
 
 logger = logging.getLogger(__name__)
@@ -401,6 +403,33 @@ def _record_link(session: Session, target: LinkInstance) -> None:
         session, target.ontology_id, target.ontology_release_id)
 
 
+def _record_event_log(session: Session, target: ObjectInstance,
+                      change_kind: str, changes: dict) -> None:
+    """实例级事件事实与 outbox 同点捕获（键级行，携带 old→new 值）。
+
+    事实不受编辑器保存抑制影响：outbox 被抑制时评估由保存路径同步完成，
+    但"发生过什么"仍需入日志供 changed_within/prev 与模式匹配消费。
+    发布切换事务内的投影重建标记为 release_activation，不参与时间算子。
+    """
+    if not changes:
+        return
+    release_id = _captured_release_id(
+        session, target.ontology_id, target.ontology_release_id)
+    if release_id is None:
+        return
+    source = (
+        cep_contract.EVENT_SOURCE_RELEASE_ACTIVATION
+        if str(target.ontology_id) in session.info.get(
+            _RELEASE_SWITCH_SCOPES_KEY, set())
+        else cep_contract.EVENT_SOURCE_ORGANIC
+    )
+    event_store.capture_instance_changes(
+        session, target,
+        release_id=release_id, change_kind=change_kind, changes=changes,
+        source=source, cascade_depth=_event_depth(),
+        chain_id=_session_chain_id(session))
+
+
 def _merge_pointer_switch_deltas(
         session: Session, ontology_id: str, release_id: str,
         activation_event_id: str | None) -> None:
@@ -415,6 +444,9 @@ def _merge_pointer_switch_deltas(
     """
     session.info.setdefault(_RELEASE_SWITCH_SCOPES_KEY, set()).add(
         str(ontology_id))
+    # 本事务早前 flush 已按 organic 落行的实例事件（晋级先重建投影、后切
+    # 指针）回溯改标为 release_activation，与 outbox 的合并处置对齐。
+    event_store.relabel_pending_as_activation(session, ontology_id)
     changes = session.info.get(_KEY, {})
     for key in list(changes):
         if str(key[0]) == str(ontology_id):
@@ -499,6 +531,12 @@ def _before_flush(session: Session, flush_context, instances) -> None:
                 set((obj.properties or {}).keys())
                 | set((obj.computed or {}).keys())
             ))
+            created_values = {
+                **(obj.properties or {}), **(obj.computed or {})}
+            _record_event_log(session, obj, cep_contract.EVENT_KIND_CREATED, {
+                str(key): (None, value)
+                for key, value in created_values.items()
+            })
         elif isinstance(obj, LinkInstance):
             if obj.id is None:
                 obj.id = str(uuid.uuid4())
@@ -506,6 +544,8 @@ def _before_flush(session: Session, flush_context, instances) -> None:
     for obj in list(session.deleted):
         if isinstance(obj, ObjectInstance):
             _record(session, obj, ["__deleted__"])
+            _record_event_log(session, obj, cep_contract.EVENT_KIND_DELETED, {
+                cep_contract.DELETED_EVENT_KEY: (None, None)})
         elif isinstance(obj, LinkInstance):
             _record_link(session, obj)
     for obj in list(session.dirty):
@@ -519,6 +559,7 @@ def _before_flush(session: Session, flush_context, instances) -> None:
             ):
                 continue
             changed: set[str] = set()
+            key_changes: dict[str, tuple] = {}
             for history, current in (
                 (properties_history, obj.properties or {}),
                 (computed_history, obj.computed or {}),
@@ -527,11 +568,16 @@ def _before_flush(session: Session, flush_context, instances) -> None:
                     continue
                 previous = (
                     history.deleted[0] if history.deleted else {})
-                changed.update(
-                    str(key) for key in set(previous) | set(current)
-                    if (previous or {}).get(key) != (current or {}).get(key)
-                )
+                for key in set(previous) | set(current):
+                    old_value = (previous or {}).get(key)
+                    new_value = (current or {}).get(key)
+                    if old_value == new_value:
+                        continue
+                    changed.add(str(key))
+                    key_changes[str(key)] = (old_value, new_value)
             _record(session, obj, sorted(changed))
+            _record_event_log(
+                session, obj, cep_contract.EVENT_KIND_UPDATED, key_changes)
         elif isinstance(obj, LinkInstance):
             watched = (
                 "ontology_id", "ontology_release_id", "link_type_id",
@@ -1485,6 +1531,7 @@ def _dispatch_loop() -> None:
             current = time.monotonic()
             if current - _last_prune_monotonic >= 60:
                 prune_completed_outbox()
+                event_store.prune_event_log()
                 _last_prune_monotonic = current
         except Exception as exc:  # noqa: BLE001
             _last_dispatch_error = str(exc)
@@ -1920,6 +1967,7 @@ def _after_commit(session: Session) -> None:
     session.info.pop(_OUTBOX_ROWS_KEY, None)
     session.info.pop(_CONTROL_ROWS_KEY, None)
     session.info.pop(_RELEASE_SWITCH_SCOPES_KEY, None)
+    event_store.discard_pending(session)
     outbox_ids = set(session.info.pop(_OUTBOX_IDS_KEY, set()))
     synchronous_ids = set(session.info.pop(
         "_sentinel_synchronous_control_ids", set()))
@@ -1951,6 +1999,7 @@ def _after_rollback(session: Session) -> None:
     session.info.pop(_RELEASE_SWITCH_SCOPES_KEY, None)
     session.info.pop(_OUTBOX_IDS_KEY, None)
     session.info.pop("_sentinel_synchronous_control_ids", None)
+    event_store.discard_pending(session)
     if not session.info.get(CAPTURE_SUPPRESSED_KEY):
         session.info.pop(_CHAIN_KEY, None)
 
@@ -2252,6 +2301,7 @@ def discard_captured_changes(session: Session) -> None:
     session.info.pop(CAPTURE_SUPPRESSED_KEY, None)
     session.info.pop(SUPPRESS_KEY, None)
     session.info.pop(MAPPING_SCOPE_KEY, None)
+    event_store.discard_pending(session)
 
 
 _REGISTERED = False

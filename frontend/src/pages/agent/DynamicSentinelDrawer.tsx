@@ -86,6 +86,7 @@ export function DynamicSentinelDrawer({
       actionParameters: { ...row.actionParameters }, onChange: row.onChange,
       onSchedule: row.onSchedule, scanIntervalSeconds: row.scanIntervalSeconds,
       triggerMode: row.triggerMode, muted: row.muted,
+      pattern: row.pattern ?? null,
     })
     setError('')
   }
@@ -250,6 +251,32 @@ export function DynamicSentinelDrawer({
               </div>
             </section>
 
+            {draft.triggerMode === 'on_pattern' && (
+              <section>
+                <h3 className="mb-2 text-xs font-semibold text-foreground">事件模式定义 <span className="font-normal text-[var(--color-text-tertiary)]">（stages 需与监听对象镜像；服务端将强校验）</span></h3>
+                <textarea
+                  aria-label="事件模式 JSON"
+                  className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus:border-brand"
+                  placeholder={'{ "stages": [ { "alias": "a", "objectTypeId": "...", "filter": "a.status == \'submitted\'" }, { "alias": "b", "objectTypeId": "...", "within": 7200 } ], "absence": { "enabled": true } }'}
+                  defaultValue={draft.pattern ? JSON.stringify(draft.pattern, null, 2) : ''}
+                  onBlur={event => {
+                    const raw = event.target.value.trim()
+                    if (!raw) {
+                      setDraft({ ...draft, pattern: null })
+                      event.target.setCustomValidity('')
+                      return
+                    }
+                    try {
+                      setDraft({ ...draft, pattern: JSON.parse(raw) })
+                      event.target.setCustomValidity('')
+                    } catch {
+                      event.target.setCustomValidity('事件模式必须是合法 JSON')
+                    }
+                  }}
+                />
+              </section>
+            )}
+
             <section>
               <h3 className="mb-2 text-xs font-semibold text-foreground">最终触发条件</h3>
               <textarea value={draft.condition || ''} onChange={event => setDraft({ ...draft, condition: event.target.value || null, conditionRows: [] })}
@@ -283,9 +310,14 @@ export function DynamicSentinelDrawer({
               <label className="flex items-center gap-2 text-xs text-foreground"><input type="checkbox" checked={draft.onChange} onChange={event => setDraft({ ...draft, onChange: event.target.checked })} />对象变化时评估</label>
               <label className="flex items-center gap-2 text-xs text-foreground"><input type="checkbox" checked={draft.onSchedule} onChange={event => setDraft({ ...draft, onSchedule: event.target.checked })} />定时全量扫描</label>
               <label className="text-xs text-muted-foreground">触发模式
-                <select value={draft.triggerMode} onChange={event => setDraft({ ...draft, triggerMode: event.target.value as DynamicSentinelDefinition['triggerMode'] })}
+                <select value={draft.triggerMode} onChange={event => setDraft({
+                  ...draft,
+                  triggerMode: event.target.value as DynamicSentinelDefinition['triggerMode'],
+                  onChange: event.target.value === 'on_pattern' ? true : draft.onChange,
+                  onSchedule: event.target.value === 'on_pattern' ? true : draft.onSchedule,
+                })}
                   className="mt-1 h-8 w-full rounded-md border border-border bg-card px-2 text-xs">
-                  <option value="on_enter">仅新进入时</option><option value="on_enter_leave">进入和离开</option><option value="run_on_all">每轮全部命中</option>
+                  <option value="on_enter">仅新进入时</option><option value="on_enter_leave">进入和离开</option><option value="run_on_all">每轮全部命中</option><option value="on_pattern">事件模式（CEP 序列/窗口聚合）</option>
                 </select>
               </label>
               <label className="text-xs text-muted-foreground">扫描间隔（秒）
@@ -330,7 +362,7 @@ export function DynamicSentinelDrawer({
                         <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate text-sm font-semibold text-foreground">{row.displayName}</h3>
                           <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${row.enabled ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-muted text-muted-foreground'}`}>{row.enabled ? '已启用' : '已停用'}</span>
                           {row.validationReport?.compatibility === 'review_required' && <span className="rounded-full bg-[var(--color-warning-bg)] px-2 py-0.5 text-[10px] text-[var(--color-warning)]">版本变化待复核</span>}
-                        </div><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{row.description || row.condition || '未填写说明'}</p></div>
+                        </div><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{row.description || (row.triggerMode === 'on_pattern' && row.pattern ? `事件模式：${row.pattern.stages.map(stage => stage.alias).join(' → ')}${row.pattern.absence?.enabled ? '（含缺失分支）' : ''}${row.pattern.aggregate ? `（聚合 ${row.pattern.aggregate.function}）` : ''}` : row.condition) || '未填写说明'}</p></div>
                         <button type="button" onClick={() => startEdit(row)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] hover:bg-muted hover:text-foreground" aria-label={`编辑${row.displayName}`}><Pencil size={14} /></button>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">

@@ -1,4 +1,7 @@
-import type { SentinelLink } from '../../../api/sentinelApi'
+import type {
+  SentinelLink,
+  SentinelPatternAggregate,
+} from '../../../api/sentinelApi'
 
 export type DefinitionLoadState = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -10,6 +13,22 @@ export interface SentinelConditionRow {
   rightAlias?: string
   rightProp?: string
   rightValue?: string
+}
+
+export interface SentinelPatternStageDraft {
+  alias: string
+  objectTypeId: string
+  filter?: string | null
+  // null = 使用 pattern 级缺省窗口。
+  within?: number | null
+}
+
+export interface SentinelPatternDraft {
+  stages: SentinelPatternStageDraft[]
+  within: number
+  absenceEnabled: boolean
+  aggregate: SentinelPatternAggregate | null
+  condition: string
 }
 
 export interface SentinelDraft {
@@ -24,12 +43,15 @@ export interface SentinelDraft {
   condLogic: 'and' | 'or'
   advanced: boolean
   conditionRaw: string
+  // CEP 事件模式（triggerMode='on_pattern'）；stages 与 bindings 镜像，
+  // 由 syncPatternStages 保持同步（绑定即阶段，filter 复用 binding.filter）。
+  pattern: SentinelPatternDraft
   actionIds: string[]
   actionParameters: Record<string, Record<string, unknown>>
   onChange: boolean
   onSchedule: boolean
   scanIntervalSeconds: number
-  triggerMode: 'on_enter' | 'on_enter_leave' | 'run_on_all'
+  triggerMode: 'on_enter' | 'on_enter_leave' | 'run_on_all' | 'on_pattern'
   muted: boolean
   enabled: boolean
 }
@@ -93,6 +115,13 @@ export const createEmptySentinelDraft = (): SentinelDraft => ({
   condLogic: 'and',
   advanced: false,
   conditionRaw: '',
+  pattern: {
+    stages: [{ alias: 'a', objectTypeId: '', filter: null, within: null }],
+    within: 3600,
+    absenceEnabled: false,
+    aggregate: null,
+    condition: '',
+  },
   actionIds: [],
   actionParameters: {},
   onChange: true,
@@ -102,3 +131,34 @@ export const createEmptySentinelDraft = (): SentinelDraft => ({
   muted: false,
   enabled: true,
 })
+
+/**
+ * 把 pattern.stages 与 bindings 重新镜像（发布门禁的硬约束）。
+ * 绑定即阶段：alias/objectTypeId 跟随 bindings，within 按别名保留；
+ * filter 保留 stage 自身的值（助手往返时 stage.filter 是权威），
+ * 仅当编辑器显式修改某别名的过滤时通过 filterPatch 覆写。
+ */
+export function syncPatternStages(
+  bindings: SentinelDraft['bindings'],
+  pattern: SentinelPatternDraft,
+  filterPatch?: { alias: string; filter: string | null },
+): SentinelPatternDraft {
+  const stageByAlias = new Map(
+    pattern.stages.map(stage => [stage.alias, stage]),
+  )
+  return {
+    ...pattern,
+    stages: bindings.map(binding => {
+      const stage = stageByAlias.get(binding.alias)
+      const filter = filterPatch && filterPatch.alias === binding.alias
+        ? filterPatch.filter
+        : stage?.filter ?? binding.filter ?? null
+      return {
+        alias: binding.alias,
+        objectTypeId: binding.objectTypeId,
+        filter,
+        within: stage?.within ?? null,
+      }
+    }),
+  }
+}

@@ -41,6 +41,7 @@ def snapshot_release_sentinel(item: Sentinel) -> dict:
         "bindings": item.bindings or [],
         "links": item.links or [],
         "condition": item.condition,
+        "pattern": item.pattern if isinstance(item.pattern, dict) else None,
         "conditionRows": item.condition_rows or [],
         "conditionLogic": item.condition_logic or "and",
         "primaryAlias": item.primary_alias,

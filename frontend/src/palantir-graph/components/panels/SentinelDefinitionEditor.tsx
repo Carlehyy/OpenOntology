@@ -16,6 +16,7 @@ import {
   createEmptySentinelConditionRow,
   nextSentinelAlias,
   SENTINEL_OPERATOR_LABELS,
+  syncPatternStages,
   type SentinelConditionRow,
   type SentinelDraft,
 } from './sentinelDefinitionModel'
@@ -34,6 +35,21 @@ interface SentinelDefinitionEditorProps {
   onCancel: () => void
 }
 
+const AGGREGATE_FUNCTION_LABELS: Record<string, string> = {
+  count: '次数',
+  avg: '平均值',
+  sum: '求和',
+  min: '最小值',
+  max: '最大值',
+}
+
+const AGGREGATE_COMPARISON_LABELS: Record<string, string> = {
+  gte: '≥ 达到',
+  gt: '> 严格超过',
+  lte: '≤ 降至',
+  lt: '< 低于',
+}
+
 export function SentinelDefinitionEditor({
   draft,
   busy,
@@ -46,6 +62,8 @@ export function SentinelDefinitionEditor({
   onSave,
   onCancel,
 }: SentinelDefinitionEditorProps) {
+  const patternMode = draft.triggerMode === 'on_pattern'
+
   // 条件里对象的可读称谓：用对象类型中文名；同类型多个时附代号区分。
   const subjectLabel = (alias: string) => {
     const binding = draft.bindings.find(item => item.alias === alias)
@@ -186,6 +204,17 @@ export function SentinelDefinitionEditor({
             link.from !== previous.alias && link.to !== previous.alias
           ))
         : draft.links,
+      // 模式哨兵：stages 与 bindings 镜像（发布门禁硬约束）；
+      // filter 显式修改时覆写对应 stage。
+      pattern: patternMode
+        ? syncPatternStages(
+            bindings,
+            draft.pattern,
+            patch.filter !== undefined && previous
+              ? { alias: previous.alias, filter: patch.filter ?? null }
+              : undefined,
+          )
+        : draft.pattern,
     })
   }
 
@@ -203,6 +232,38 @@ export function SentinelDefinitionEditor({
       primaryAlias: draft.primaryAlias === alias
         ? (bindings[0]?.alias || '')
         : draft.primaryAlias,
+      pattern: patternMode ? syncPatternStages(bindings, draft.pattern) : draft.pattern,
+    })
+  }
+
+  const addPatternBinding = () => {
+    const bindings = [
+      ...draft.bindings,
+      {
+        alias: nextSentinelAlias(draft.bindings),
+        objectTypeId: '',
+        filter: null,
+      },
+    ]
+    onChange({
+      ...draft,
+      bindings,
+      pattern: syncPatternStages(bindings, draft.pattern),
+    })
+  }
+
+  const setStageWithin = (alias: string, raw: string) => {
+    const parsed = raw === '' ? null : Number(raw)
+    onChange({
+      ...draft,
+      pattern: {
+        ...draft.pattern,
+        stages: draft.pattern.stages.map(stage => (
+          stage.alias === alias
+            ? { ...stage, within: parsed }
+            : stage
+        )),
+      },
     })
   }
 
@@ -233,7 +294,7 @@ export function SentinelDefinitionEditor({
             <div className="text-[10px] text-surface-500">给每个对象类型起个代号，下方条件里用代号引用它的属性</div>
           </div>
           <button className="text-rose-400 whitespace-nowrap"
-            onClick={() => onChange({
+            onClick={() => (patternMode ? addPatternBinding() : onChange({
               ...draft,
               bindings: [
                 ...draft.bindings,
@@ -243,7 +304,7 @@ export function SentinelDefinitionEditor({
                   filter: null,
                 },
               ],
-            })}>+ 加对象</button>
+            }))}>+ 加阶段对象</button>
         </div>
         {draft.bindings.map((binding, index) => (
           <div key={index} className="flex items-center gap-2">
@@ -263,6 +324,31 @@ export function SentinelDefinitionEditor({
             </select>
             {draft.bindings.length > 1 && (
               <button className="text-red-400 px-1" onClick={() => removeBinding(binding.alias)}>×</button>
+            )}
+            {patternMode && (
+              <div className="flex items-center gap-2 w-full pl-8">
+                <span className="text-[10px] text-surface-500 whitespace-nowrap">
+                  阶段 {index + 1} 事件条件
+                </span>
+                <input className="inp flex-1 font-mono"
+                  placeholder={index === 0
+                    ? "如 a.status == 'submitted'（空=该对象任意变更）"
+                    : "如 b.status == 'approved'（空=该对象任意变更）"}
+                  value={binding.filter || ''}
+                  onChange={event => setBinding(index, { filter: event.target.value || null })} />
+                {index > 0 && (
+                  <span className="flex items-center gap-1 text-[10px] text-surface-500 whitespace-nowrap">
+                    限时
+                    <input type="number" className="inp w-20"
+                      placeholder={`${draft.pattern.within}`}
+                      value={draft.pattern.stages.find(
+                        stage => stage.alias === binding.alias,
+                      )?.within ?? ''}
+                      onChange={event => setStageWithin(binding.alias, event.target.value)} />
+                    秒
+                  </span>
+                )}
+              </div>
             )}
           </div>
         ))}
@@ -333,7 +419,141 @@ export function SentinelDefinitionEditor({
         </div>
       )}
 
-      {/* 3. 触发条件 — 句子式逐行，AND/OR，属性比常量/属性 */}
+      {/* 3. 触发条件 — 句子式逐行，AND/OR，属性比常量/属性（模式模式隐藏） */}
+      {patternMode ? (
+        <div className="rounded-lg border border-rose-500/40 p-3 space-y-3">
+          <div>
+            <div className="text-surface-200">事件模式 <span className="text-[10px] text-surface-500 ml-1">按阶段顺序匹配事件序列；上方每个阶段对象即一个阶段（第 1 个为起点）</span></div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-surface-400">
+              <span>缺省限时</span>
+              <span className="flex items-center gap-1">
+                <input type="number" className="inp w-20" value={draft.pattern.within}
+                  onChange={event => onChange({
+                    ...draft,
+                    pattern: { ...draft.pattern, within: Number(event.target.value) || 3600 },
+                  })} /> 秒
+              </span>
+              <label className="flex items-center gap-1">
+                <input type="checkbox" checked={draft.pattern.absenceEnabled}
+                  onChange={event => onChange({
+                    ...draft,
+                    pattern: { ...draft.pattern, absenceEnabled: event.target.checked },
+                  })} />
+                缺失分支（限时内下一阶段未发生也触发，事件边沿为 absence）
+              </label>
+            </div>
+          </div>
+          <div className="border-t border-surface-700/60 pt-2 space-y-2">
+            <div className="text-surface-300">窗口聚合 <span className="text-[10px] text-surface-500 ml-1">可选；启用后仅允许上方第 1 个阶段对象，按窗口统计事件</span></div>
+            {draft.pattern.aggregate ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <select className="inp-inline" value={draft.pattern.aggregate.function}
+                  onChange={event => onChange({
+                    ...draft,
+                    pattern: {
+                      ...draft.pattern,
+                      aggregate: {
+                        ...draft.pattern.aggregate!,
+                        function: event.target.value as any,
+                      },
+                    },
+                  })}>
+                  {Object.entries(AGGREGATE_FUNCTION_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                <select className="inp-inline" value={draft.pattern.aggregate.comparison || 'gte'}
+                  onChange={event => onChange({
+                    ...draft,
+                    pattern: {
+                      ...draft.pattern,
+                      aggregate: {
+                        ...draft.pattern.aggregate!,
+                        comparison: event.target.value as any,
+                      },
+                    },
+                  })}>
+                  {Object.entries(AGGREGATE_COMPARISON_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                <input type="number" className="inp-inline w-20" value={draft.pattern.aggregate.threshold}
+                  onChange={event => onChange({
+                    ...draft,
+                    pattern: {
+                      ...draft.pattern,
+                      aggregate: {
+                        ...draft.pattern.aggregate!,
+                        threshold: Number(event.target.value),
+                      },
+                    },
+                  })} />
+                <span className="text-surface-500">时触发；属性</span>
+                <select className="inp-inline"
+                  value={draft.pattern.aggregate.property}
+                  onChange={event => onChange({
+                    ...draft,
+                    pattern: {
+                      ...draft.pattern,
+                      aggregate: {
+                        ...draft.pattern.aggregate!,
+                        property: event.target.value,
+                      },
+                    },
+                  })}>
+                  <option value="">选择属性</option>
+                  {propertiesOf(draft.bindings[0]?.objectTypeId || '').map(property => (
+                    <option key={property.id} value={property.name}>{property.displayName}</option>
+                  ))}
+                </select>
+                <span className="flex items-center gap-1 text-surface-500">窗口
+                  <input type="number" className="inp-inline w-20" value={draft.pattern.aggregate.window}
+                    onChange={event => onChange({
+                      ...draft,
+                      pattern: {
+                        ...draft.pattern,
+                        aggregate: {
+                          ...draft.pattern.aggregate!,
+                          window: Number(event.target.value),
+                        },
+                      },
+                    })} /> 秒
+                </span>
+                <button className="text-surface-500 hover:text-red-400 px-1"
+                  onClick={() => onChange({
+                    ...draft,
+                    pattern: { ...draft.pattern, aggregate: null },
+                  })}>× 移除聚合</button>
+              </div>
+            ) : (
+              <button className="text-rose-400 text-[11px]"
+                onClick={() => onChange({
+                  ...draft,
+                  pattern: {
+                    ...draft.pattern,
+                    aggregate: {
+                      property: '',
+                      function: 'count',
+                      window: 300,
+                      threshold: 3,
+                      comparison: 'gte',
+                    },
+                  },
+                })}>+ 启用窗口聚合</button>
+            )}
+          </div>
+          <div className="border-t border-surface-700/60 pt-2">
+            <div className="text-surface-300 mb-1">模式完成条件 <span className="text-[10px] text-surface-500 ml-1">可选；序列全部完成时对阶段快照求值，支持 changed_within('a.属性', 秒) / prev('a.属性') 时间算子</span></div>
+            <textarea className="inp font-mono h-16 resize-none"
+              placeholder="如 a.amount > 1000 and prev('a.status') == 'submitted'（留空=不附加条件）"
+              value={draft.pattern.condition}
+              onChange={event => onChange({
+                ...draft,
+                pattern: { ...draft.pattern, condition: event.target.value },
+              })} />
+          </div>
+        </div>
+      ) : (
       <div className="rounded-lg border border-surface-700 p-3 space-y-2">
         <div className="flex items-center justify-between">
           <div className="text-surface-200">触发条件 <span className="text-[10px] text-surface-500 ml-1">满足下列条件时触发</span></div>
@@ -479,6 +699,7 @@ export function SentinelDefinitionEditor({
           </>
         )}
       </div>
+      )}
 
       {/* 命中后执行的动作 — 无内部滚轮 */}
       <SentinelActionBindingsEditor
@@ -494,8 +715,8 @@ export function SentinelDefinitionEditor({
         <div>
           <div className="text-surface-200 mb-2">触发时机</div>
           <div className="flex flex-wrap items-center gap-4">
-            <label className="flex items-center gap-1.5"><input type="checkbox" checked={draft.onChange} onChange={event => onChange({ ...draft, onChange: event.target.checked })} /> 数据变化时</label>
-            <label className="flex items-center gap-1.5"><input type="checkbox" checked={draft.onSchedule} onChange={event => onChange({ ...draft, onSchedule: event.target.checked })} /> 定期扫描</label>
+            <label className="flex items-center gap-1.5"><input type="checkbox" disabled={patternMode} checked={patternMode || draft.onChange} onChange={event => onChange({ ...draft, onChange: event.target.checked })} /> 数据变化时{patternMode && <span className="text-[10px] text-surface-500">（模式必需）</span>}</label>
+            <label className="flex items-center gap-1.5"><input type="checkbox" disabled={patternMode} checked={patternMode || draft.onSchedule} onChange={event => onChange({ ...draft, onSchedule: event.target.checked })} /> 定期扫描{patternMode && <span className="text-[10px] text-surface-500">（超时兜底必需）</span>}</label>
             {draft.onSchedule && (
               <span className="flex items-center gap-1">每
                 <input type="number" className="inp w-16" value={draft.scanIntervalSeconds}
@@ -507,10 +728,24 @@ export function SentinelDefinitionEditor({
         <div>
           <div className="text-surface-200 mb-1">触发方式 <span className="text-[10px] text-surface-500 ml-1">条件持续满足时是否重复触发</span></div>
           <select className="inp" value={draft.triggerMode}
-            onChange={event => onChange({ ...draft, triggerMode: event.target.value as SentinelDraft['triggerMode'] })}>
+            onChange={event => {
+              const mode = event.target.value as SentinelDraft['triggerMode']
+              onChange({
+                ...draft,
+                triggerMode: mode,
+                // 模式哨兵依赖事件驱动推进 + 定时扫描兜底超时判定，
+                // 后端门禁同样强制两者开启。
+                onChange: mode === 'on_pattern' ? true : draft.onChange,
+                onSchedule: mode === 'on_pattern' ? true : draft.onSchedule,
+                pattern: mode === 'on_pattern'
+                  ? syncPatternStages(draft.bindings, draft.pattern)
+                  : draft.pattern,
+              })
+            }}>
             <option value="on_enter">仅在"刚满足"时触发一次（推荐，避免重复）</option>
             <option value="on_enter_leave">满足时触发 + 条件消除时也触发（用于收尾）</option>
             <option value="run_on_all">每次都对所有满足的对象执行（电平/批量）</option>
+            <option value="on_pattern">事件模式（CEP）：按阶段序列/时间窗/聚合匹配事件</option>
           </select>
         </div>
         <label className="flex items-center gap-1.5 text-surface-300">

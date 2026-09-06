@@ -43,6 +43,10 @@ from app.ontologies.release_context import (
     runtime_release_identity,
     runtime_release_version,
 )
+from app.ontologies.sentinels.cep import contract as cep_contract
+from app.ontologies.sentinels.cep import pattern as cep_pattern
+from app.ontologies.sentinels.cep import temporal_ops
+from app.ontologies.sentinels.cep.contract import in_sentinel_run  # noqa: F401 — cdc 经本模块导入同一对象
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +55,7 @@ _ACTIVE_MATCH_STATUSES = {
 }
 
 # 执行哨兵动作期间为 True；CDC 用它抑制级联即时再触发(断环)。
-in_sentinel_run: ContextVar[bool] = ContextVar("in_sentinel_run", default=False)
+# 对象本体在 cep.contract（叶子契约），顶部统一导入并再导出。
 
 MAX_TUPLES = 1000  # 跨对象匹配元组上限，防组合爆炸
 _MATCH_SNAPSHOTS_KEY = "__snapshots__"
@@ -68,6 +72,8 @@ RESERVED_SENTINEL_ALIASES = frozenset({
     "sum", "avg", "count", "len", "min", "max", "round", "abs",
     "lower", "upper", "contains", "now",
     "True", "False", "None", "true", "false", "null",
+    # CEP 时间算子按 per-evaluation scope 注入；业务别名不得遮蔽。
+    "changed_within", "prev",
 })
 _RESERVED_ALIASES = RESERVED_SENTINEL_ALIASES
 
@@ -718,9 +724,14 @@ def _resolve_tuples(db: Session, ontology_id: str, sentinel: Sentinel,
     return tuples
 
 
-def _holds(expr: str | None, tup: dict, errors: list[str] | None = None) -> bool:
+def _holds(expr: str | None, tup: dict, errors: list[str] | None = None,
+           temporal: dict | None = None) -> bool:
     """条件求值。求值失败视为不命中（fail-closed），但错误必须被记录并
-    展示到触发日志——写错的条件不能表现为"永远静默 no_match"。"""
+    展示到触发日志——写错的条件不能表现为"永远静默 no_match"。
+
+    ``temporal`` 为该元组的时间算子闭包（changed_within/prev，见
+    temporal_ops）；仅哨兵 condition 携带时间引用时注入。
+    """
     if not expr:
         return True
     if not isinstance(expr, str):
@@ -728,6 +739,8 @@ def _holds(expr: str | None, tup: dict, errors: list[str] | None = None) -> bool
             errors.append("哨兵 condition 必须是字符串表达式")
         return False
     scope = {alias: _instance_values(inst) for alias, inst in tup.items()}
+    if temporal:
+        scope.update(temporal)
     missing = _missing_expression_properties(expr, scope)
     if missing:
         if errors is not None and len(errors) < 5:
@@ -898,7 +911,20 @@ def preview_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
     the complete action plan without ActionLog/Fact/Notification/network writes.
     Cross-object combinations retain the engine's hard safety cap; hitting it
     makes the trial fail instead of presenting a partial run as complete.
+
+    模式哨兵（on_pattern）走事件日志回放预演：不写状态/不执行动作，
+    replayCoverage 标注历史覆盖情况（回放窗口超出事件保留期时为 partial，
+    空日志为 empty）。
     """
+    if cep_pattern.is_pattern_sentinel(sentinel):
+        report = cep_pattern.preview_pattern(
+            db, ontology_id, sentinel, release_id)
+        report.setdefault("releaseId", release_id)
+        report.setdefault("plannedActionCount", 0)
+        report.setdefault("plannedActions", [])
+        report.setdefault("candidateCount", report.get("activeStates", 0))
+        report.setdefault("sideEffects", "none")
+        return report
     started = time.time()
     errors: list[str] = []
     metadata: dict = {"candidateCapReached": False}
@@ -906,7 +932,8 @@ def preview_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
         db, ontology_id, sentinel, errors,
         release_id=release_id, metadata=metadata,
     )
-    matched = [item for item in tuples if _holds(sentinel.condition, item, errors)]
+    matched = _match_tuples_with_temporal(
+        db, sentinel.condition, tuples, errors)
     primary = sentinel.primary_alias or (
         sentinel.bindings[0].get("alias") if sentinel.bindings else None)
     try:
@@ -1091,8 +1118,13 @@ def _run_actions(db: Session, ontology_id: str, sentinel: Sentinel,
                  tup: dict, primary: str | None, edge: str,
                  match_key: str, state: SentinelMatchState,
                  results: list, *,
-                 expected_release_id: str | None = None) -> tuple[bool, str]:
-    """Run one edge fail-fast; only all-success may consume match state."""
+                 expected_release_id: str | None = None,
+                 event_overrides: dict | None = None) -> tuple[bool, str]:
+    """Run one edge fail-fast; only all-success may consume match state.
+
+    ``event_overrides`` 供模式哨兵的缺失分支把事件身份覆写为
+    edge='absence'（结构性 edge 仍走 enter 语义的 claim/幂等链）。
+    """
     action_ids = list(sentinel.action_ids or [])
     if not action_ids:
         return True, "no_actions"
@@ -1133,6 +1165,8 @@ def _run_actions(db: Session, ontology_id: str, sentinel: Sentinel,
         "sentinelId": sentinel.id,
         "sentinelName": sentinel.display_name,
     }
+    if event_overrides:
+        event.update(event_overrides)
     entries: list[tuple[str, ActionType, SimpleNamespace]] = []
     frozen_actions: dict[str, ActionType] | None = None
     if expected_release_id is not None:
@@ -1278,7 +1312,8 @@ def _run_actions(db: Session, ontology_id: str, sentinel: Sentinel,
 def _claim_match_state(db: Session, ontology_id: str, sentinel: Sentinel,
                        key: str, tup: dict, now: datetime,
                        *, new_cycle: bool = False,
-                       expected_release_id: str | None = None
+                       expected_release_id: str | None = None,
+                       event_overrides: dict | None = None,
                        ) -> SentinelMatchState | None:
     """Claim/recover an enter edge; uniqueness arbitrates concurrent workers."""
     existing = db.query(SentinelMatchState).filter(
@@ -1297,7 +1332,7 @@ def _claim_match_state(db: Session, ontology_id: str, sentinel: Sentinel,
             tup, edge="enter", match_key=key, occurred_at=now,
             previous_event=previous_event,
             expected_release_id=expected_release_id,
-            sentinel=sentinel)
+            sentinel=sentinel, event_overrides=event_overrides)
         existing.last_seen_at = now
         db.commit()
         db.refresh(existing)
@@ -1308,7 +1343,7 @@ def _claim_match_state(db: Session, ontology_id: str, sentinel: Sentinel,
         match_detail=_snapshot_match_detail(
             tup, edge="enter", match_key=key, occurred_at=now,
             expected_release_id=expected_release_id,
-            sentinel=sentinel),
+            sentinel=sentinel, event_overrides=event_overrides),
         runtime_status="processing_enter", execution_epoch=0,
         first_seen_at=now, last_seen_at=now)
     db.add(state)
@@ -1348,7 +1383,8 @@ def _snapshot_match_detail(tup: dict, *, edge: str,
                            match_key: str, occurred_at: datetime,
                            previous_event: dict | None = None,
                            expected_release_id: str | None = None,
-                           sentinel: Sentinel | None = None) -> dict:
+                           sentinel: Sentinel | None = None,
+                           event_overrides: dict | None = None) -> dict:
     detail: dict = {alias: instance.id for alias, instance in tup.items()}
     detail[_MATCH_SNAPSHOTS_KEY] = {
         alias: {
@@ -1385,6 +1421,8 @@ def _snapshot_match_detail(tup: dict, *, edge: str,
             "sentinelDefinitionRevision": int(
                 getattr(sentinel, "definition_revision", 1) or 1),
         })
+    if event_overrides:
+        event.update(event_overrides)
     detail[_MATCH_EVENT_KEY] = event
     return detail
 
@@ -1869,10 +1907,46 @@ def evaluate_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
         return firing
 
 
+def _match_tuples_with_temporal(
+        db: Session, condition, tuples: list[dict],
+        errors: list[str] | None = None) -> list[dict]:
+    """按 condition 过滤候选元组；携带时间算子时批量预取时间事实。
+
+    时间算子形态非法属于配置错误：并入 eval_errors 后整轮观察作废
+    （与现有 fail-closed 不变量一致），绝不静默降级为"永不命中"。
+    """
+    refs, temporal_errors = temporal_ops.extract_temporal_refs(condition)
+    if temporal_errors:
+        if errors is not None:
+            errors.extend(temporal_errors)
+        return []
+    if not refs:
+        return [t for t in tuples if _holds(condition, t, errors)]
+    facts = temporal_ops.prefetch_temporal_facts(
+        db, refs, tuples, now=_now())
+    matched: list[dict] = []
+    for tup in tuples:
+        temporal = temporal_ops.build_temporal_scope(refs, facts, tup)
+        if _holds(condition, tup, errors, temporal=temporal):
+            matched.append(tup)
+    return matched
+
+
 def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
                     source: str, start: float,
                     release_version: str | None,
                     release_id: str | None) -> SentinelFiring:
+    # 模式哨兵（CEP）硬隔离：不进入快照差分路径，由水位驱动的
+    # pattern 匹配器处理；命中合成普通 match_state 复用动作 claim 链。
+    if cep_pattern.is_pattern_sentinel(sentinel):
+        return cep_pattern.evaluate_pattern(
+            db, ontology_id, sentinel, source,
+            release_id=release_id, release_version=release_version,
+            start_time=start,
+            hooks=cep_pattern.PatternHooks(
+                run_actions=_run_actions,
+                claim_match_state=_claim_match_state,
+                record_edge_outcome=_record_edge_outcome))
     primary = sentinel.primary_alias or (sentinel.bindings[0]["alias"]
                                          if sentinel.bindings else None)
     mode = sentinel.trigger_mode or "on_enter"
@@ -1883,7 +1957,8 @@ def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
     tuples = _resolve_tuples(
         db, ontology_id, sentinel, eval_errors, release_id=release_id,
         metadata=metadata)
-    matched = [t for t in tuples if _holds(sentinel.condition, t, eval_errors)]
+    matched = _match_tuples_with_temporal(
+        db, sentinel.condition, tuples, eval_errors)
     # 命中键 → 元组(同键去重,保留首个)
     current: dict[str, dict] = {}
     for t in matched:

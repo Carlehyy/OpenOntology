@@ -86,6 +86,27 @@ export interface AgentActionProposal {
   effects: { type: string; description?: string; [k: string]: unknown }[]
 }
 
+export interface DynamicSentinelPatternStage {
+  alias: string
+  objectTypeId: string
+  filter?: string | null
+  within?: number | null
+}
+
+export interface DynamicSentinelPattern {
+  stages: DynamicSentinelPatternStage[]
+  within?: number
+  absence?: { enabled: boolean }
+  aggregate?: {
+    property: string
+    function: 'count' | 'avg' | 'sum' | 'min' | 'max'
+    window: number
+    threshold: number
+    comparison?: 'gte' | 'gt' | 'lte' | 'lt'
+  }
+  condition?: string | null
+}
+
 export interface DynamicSentinelDefinition {
   name: string
   displayName: string
@@ -93,6 +114,7 @@ export interface DynamicSentinelDefinition {
   bindings: { alias: string; objectTypeId: string; filter?: string | null }[]
   links: { from: string; linkTypeId: string; to: string }[]
   condition?: string | null
+  pattern?: DynamicSentinelPattern | null
   conditionRows?: Record<string, unknown>[]
   conditionLogic?: 'and' | 'or'
   primaryAlias: string
@@ -101,13 +123,16 @@ export interface DynamicSentinelDefinition {
   onChange: boolean
   onSchedule: boolean
   scanIntervalSeconds: number
-  triggerMode: 'on_enter' | 'on_enter_leave' | 'run_on_all'
+  triggerMode: 'on_enter' | 'on_enter_leave' | 'run_on_all' | 'on_pattern'
   muted: boolean
 }
 
 export interface DynamicSentinelTrialReport {
   passed: boolean
   releaseId: string
+  replayCoverage?: 'full' | 'partial' | 'empty' | 'invalid'
+  replayWindowSeconds?: number
+  activeStates?: number
   candidateCount: number
   matchCount: number
   plannedActionCount: number

@@ -30,6 +30,57 @@ def _decrypt_config(conn) -> dict:
         return conn.config or {}
 
 
+def _structured_schema_json(connector, resource: str, rows: list) -> dict:
+    """结构化连接数据集的列契约：连接器元数据内省优先，值采样兜底。
+
+    内省失败不阻断同步（与 lake_gate「类型推断永不阻断入湖」一致），但
+    降级必须留痕：types_source 记录类型来源，source_schema 仅内省成功时
+    存在。columns_typed 保持 {name, type} 瘦形态——persist_contract /
+    normalize_definitions 按白名单重建列清单，塞进额外字段会被剥掉，
+    源类型与方言标志因此走 schema_json["source_schema"] 平行键。
+    """
+    from app.data_channel.connections.type_normalization import (
+        introspected_columns_typed,
+    )
+    from app.data_channel.datasets.lake_gate import infer_columns_typed
+
+    columns = None
+    introspect = getattr(connector, "introspect_schema", None)
+    if introspect is not None:
+        try:
+            columns = introspect(resource)
+        except NotImplementedError:
+            # 不支持内省的连接器（rest/file/aihot 及存量实现）静默走采样，
+            # 这不是故障；只有「声明支持但执行失败」才值得告警留痕。
+            columns = None
+        except Exception as exc:  # noqa: BLE001 — 内省失败降级采样，但必须留痕
+            logger.warning(
+                "schema introspection failed for %r (%s); "
+                "falling back to sample inference",
+                resource, exc,
+            )
+
+    if columns:
+        typed, source_schema = introspected_columns_typed(columns)
+        return {
+            "columns": [column["name"] for column in typed],
+            "columns_typed": typed,
+            "types_source": "connector_introspection",
+            "source_schema": source_schema,
+        }
+
+    # REST 端点可能返回标量数组（['a', 1]）——infer_columns_typed 只接受
+    # dict 行，非 dict 行混入会让同步本身崩溃（父提交可正常同步）。
+    # 标量载荷没有列概念，落空契约即可，绝不阻断入湖。
+    typed = infer_columns_typed(
+        [row for row in rows if isinstance(row, dict)])
+    return {
+        "columns": [column["name"] for column in typed],
+        "columns_typed": typed,
+        "types_source": "sample_inference",
+    }
+
+
 def sync_connection(connection_id: str, mode: str = "full",
                     resource: str | None = None, db=None) -> dict:
     """
@@ -113,15 +164,22 @@ def sync_connection(connection_id: str, mode: str = "full",
             db.commit()
             return {"status": "error", "error": f"pull failed: {e}"}
 
-        # 归一化为行列表
+        # 归一化为行列表。datetime/Decimal/bytes 等数据库原生对象必须先做
+        # 值规范化——json.dumps 对它们直接 TypeError，含日期/金额/二进制列
+        # 的表曾因此整次同步失败（default=str 只兜底剩余未知类型）。
+        schema_json = None
         if isinstance(rows, bytes):
             content = rows
             rowcount = None
             kind = "unstructured"
         elif isinstance(rows, list):
-            content = json.dumps(rows, ensure_ascii=False).encode("utf-8")
+            from app.data_channel.connections.type_normalization import normalize_rows
+
+            rows = normalize_rows(rows)
+            content = json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8")
             rowcount = len(rows)
             kind = "structured"
+            schema_json = _structured_schema_json(connector, res, rows)
         else:
             content = json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8")
             rowcount = None
@@ -156,7 +214,8 @@ def sync_connection(connection_id: str, mode: str = "full",
                         f"dataset::{ds.id}", bind=db.get_bind(), wait_timeout=30)
                 with version_guard:
                     ver = ds_svc.create_version(
-                        ds.id, content, rowcount=rowcount, _lock_held=True)
+                        ds.id, content, rowcount=rowcount,
+                        schema_json=schema_json, _lock_held=True)
         except Exception:
             db.rollback()
             failed_conn = db.query(Connection).filter(

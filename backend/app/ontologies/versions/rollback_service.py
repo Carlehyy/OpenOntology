@@ -64,6 +64,18 @@ def _restore_formal_snapshot(
             SentinelMatchState.ontology_id == ontology_id,
             SentinelMatchState.sentinel_id.in_(builtin_ids or [""]),
         ).delete(synchronize_session=False)
+        from app.ontologies.sentinels.models import (
+            SentinelPatternCursor,
+            SentinelPatternState,
+        )
+        db.query(SentinelPatternState).filter(
+            SentinelPatternState.ontology_id == ontology_id,
+            SentinelPatternState.sentinel_id.in_(builtin_ids or [""]),
+        ).delete(synchronize_session=False)
+        db.query(SentinelPatternCursor).filter(
+            SentinelPatternCursor.ontology_id == ontology_id,
+            SentinelPatternCursor.sentinel_id.in_(builtin_ids or [""]),
+        ).delete(synchronize_session=False)
         db.query(Sentinel).filter(
             Sentinel.ontology_id == ontology_id,
             Sentinel.origin == "release_builtin",
@@ -78,6 +90,8 @@ def _restore_formal_snapshot(
                 bindings=_json_safe(item.get("bindings") or []),
                 links=_json_safe(item.get("links") or []),
                 condition=item.get("condition"),
+                pattern=_json_safe(item.get("pattern"))
+                if isinstance(item.get("pattern"), dict) else None,
                 condition_rows=_json_safe(item.get("conditionRows") or []),
                 condition_logic=item.get("conditionLogic") or "and",
                 primary_alias=item.get("primaryAlias"),

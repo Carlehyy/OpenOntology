@@ -54,7 +54,7 @@ from app.ontologies.versions.models import (
 
 MAX_SENTINEL_TUPLES = 1000
 BUILTIN_SENTINEL_TRIGGER_MODES = frozenset({
-    "on_enter", "on_enter_leave", "run_on_all",
+    "on_enter", "on_enter_leave", "run_on_all", "on_pattern",
 })
 BUILTIN_SENTINEL_SCAN_INTERVAL_MIN = 60
 BUILTIN_SENTINEL_SCAN_INTERVAL_MAX = 86_400
@@ -170,6 +170,34 @@ def validate_builtin_sentinel_contract(sentinels: Any) -> list[dict]:
                     + "、".join(sorted(BUILTIN_SENTINEL_TRIGGER_MODES))
                 ),
                 index=index, item=item, field="triggerMode",
+            )
+
+        pattern = item.get("pattern")
+        if trigger_mode == "on_pattern":
+            # 深度结构校验在共享发布门禁（validate_sentinels）执行；
+            # 信封层只做形状防御，避免非法结构进入试跑/快照。
+            from app.ontologies.sentinels.cep import pattern as cep_pattern
+            if not isinstance(pattern, dict) or (
+                    cep_pattern.normalize_pattern(pattern) is None):
+                add_error(
+                    "invalid_sentinel_pattern",
+                    "triggerMode=on_pattern 时 pattern 必须是合法的模式定义"
+                    "（stages/absence/within/aggregate/condition）",
+                    index=index, item=item, field="pattern",
+                )
+            if item.get("onChange") is not True or (
+                    item.get("onSchedule") is not True):
+                add_error(
+                    "invalid_sentinel_pattern_trigger_flags",
+                    "模式哨兵必须同时开启 onChange 与 onSchedule"
+                    "（事件驱动推进 + 定时扫描兜底超时判定）",
+                    index=index, item=item, field="onChange",
+                )
+        elif pattern is not None:
+            add_error(
+                "invalid_sentinel_pattern_mode",
+                "pattern 仅在 triggerMode=on_pattern 时允许出现",
+                index=index, item=item, field="pattern",
             )
 
         interval = item.get("scanIntervalSeconds", 300)

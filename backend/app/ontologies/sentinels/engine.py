@@ -136,6 +136,9 @@ def _released_builtin(
         bindings=raw.get("bindings") or [],
         links=raw.get("links") or [],
         condition=raw.get("condition"),
+        # CEP 模式定义（triggerMode='on_pattern' 时存在），随快照冻结。
+        pattern=raw.get("pattern") if isinstance(
+            raw.get("pattern"), dict) else None,
         condition_rows=raw.get("conditionRows") or [],
         condition_logic=raw.get("conditionLogic") or "and",
         primary_alias=raw.get("primaryAlias"),
