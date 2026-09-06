@@ -956,6 +956,15 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 delegation_enabled=bool(delegation_schemas),
             )}
         ]
+        # 虚构委派的下一轮定向提醒（代码层兜底）：上条声称子助手结果而会话
+        # 从未委派过时，本轮注入一次纠偏指令；真实委派过的引用不受影响
+        fabrication_reminder = (
+            delegation.suspected_fabrication_reminder(stored_messages)
+            if delegation_schemas
+            else ""
+        )
+        if fabrication_reminder:
+            messages[0]["content"] += f"\n\n{fabrication_reminder}"
         messages.extend({"role": item.role, "content": item.content} for item in stored_messages if item.role in {"user", "assistant"})
         permission_checker = ToolPermissionChecker.from_settings()
         steps: list[dict[str, Any]] = []
@@ -1252,10 +1261,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         if delegation_schemas and not any(
             step.get("toolName") == delegation.DELEGATION_TOOL_NAME
             for step in steps
-        ) and re.search(
-            r"已委派|已询问|子助手(答复|返回|回复|说|表示)|已在同一子会话",
-            final_content,
-        ):
+        ) and delegation.FABRICATION_CLAIM_PATTERN.search(final_content):
             # 观测告警（只记日志）：内容声称有子助手结果但本消息没有任何
             # delegate_to_assistant 步骤——提示词层反虚构约束失效的信号
             logger.warning(
