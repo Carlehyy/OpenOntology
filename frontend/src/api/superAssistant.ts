@@ -282,6 +282,35 @@ const streamChat = async (
   if (buffer.trim()) dispatch(buffer)
 }
 
+/** 远程助手（声明式注册，每用户多条）：key 命名空间 remote.*，配置后经
+ *  委派目录进入 delegate_to_assistant 工具枚举；token 加密存储、只回显
+ *  token_set 标志。 */
+export interface RemoteAgent {
+  id: string
+  key: string
+  label: string
+  description: string
+  endpoint: string
+  token_set: boolean
+  enabled: boolean
+  timeout_seconds: number
+}
+
+export interface RemoteAgentPayload {
+  key?: string
+  label?: string
+  description?: string
+  endpoint?: string
+  token?: string | null
+  enabled?: boolean
+  timeout_seconds?: number
+}
+
+export interface RemoteAgentTestResult {
+  ok: boolean
+  message: string
+}
+
 /** multica 外部集成配置（每用户一条）：commands 由后端下发，未配置/未启用时为空，
  *  输入框据此决定是否展示 /multica: 命令提示 */
 export interface MulticaCommand {
@@ -525,4 +554,14 @@ export const superAssistantApi = {
     apiClientV2.put<MulticaConfig>('/super-assistant/multica/config', body),
   testMultica: (body: { base_url?: string | null; token?: string | null } = {}) =>
     apiClientV2.post<MulticaTestResult>('/super-assistant/multica/test', body),
+
+  listRemoteAgents: () => apiClientV2.get<RemoteAgent[]>('/super-assistant/remote-agents'),
+  createRemoteAgent: (body: RemoteAgentPayload) =>
+    apiClientV2.post<RemoteAgent>('/super-assistant/remote-agents', body),
+  updateRemoteAgent: (id: string, body: RemoteAgentPayload) =>
+    apiClientV2.put<RemoteAgent>(`/super-assistant/remote-agents/${id}`, body),
+  deleteRemoteAgent: (id: string) =>
+    apiClientV2.delete(`/super-assistant/remote-agents/${id}`),
+  testRemoteAgent: (id: string) =>
+    apiClientV2.post<RemoteAgentTestResult>(`/super-assistant/remote-agents/${id}/test`, {}),
 }
