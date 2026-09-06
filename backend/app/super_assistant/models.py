@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.shared.database import Base
@@ -373,3 +373,45 @@ class SuperAssistantWidgetConfig(Base):
     hidden_menu_keys: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     updated_by: Mapped[str | None] = mapped_column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantDelegation(Base):
+    """超级会话 → 平台助手子会话的委派映射（追加式历史，latest=active）。
+
+    同一 (super_conversation_id, assistant_key) 允许多行：session=new 轮转
+    新线，resume 永远取最近一条。仅对 status='running' 建部分唯一索引，
+    防残留 running 行的并发竞态；子会话本体归各助手域（assistant_hub），
+    本表只存不透明引用 conversation_ref。
+    """
+
+    __tablename__ = "super_assistant_delegations"
+    __table_args__ = (
+        Index(
+            "uq_sa_delegation_running",
+            "super_conversation_id", "assistant_key",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
+        ),
+        Index(
+            "ix_sa_delegations_conv_key_last",
+            "super_conversation_id", "assistant_key", "last_turn_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    super_conversation_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("super_assistant_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    assistant_key: Mapped[str] = mapped_column(String(50), nullable=False)
+    # assistant_hub 的不透明会话引用（首回合前为空，start 后回填）
+    conversation_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # running / answered / failed / cancelled / timeout
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+    last_turn_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)

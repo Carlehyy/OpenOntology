@@ -23,8 +23,8 @@ from app.assistant_hub.contract import (
     parse_ref,
 )
 from app.auth.permissions import user_has_menu_access
-from app.exploration import schemas as exploration_schemas
 from app.exploration.orchestrator import run_exploration_turn
+from app.exploration.schemas import SessionCreate
 from app.exploration.session_service import _require_session, create_session
 
 _KEY = "exploration"
@@ -68,7 +68,7 @@ class ExplorationAdapter:
         title_hint = str((context or {}).get("title_hint") or "").strip()[:40]
         title = f"[委派] {title_hint}" if title_hint else "[委派] 超级助手探索"
         payload = create_session(
-            exploration_schemas.SessionCreate(title=title),
+            SessionCreate(title=title),
             db,
             user,
             ok_fn=lambda data: data,

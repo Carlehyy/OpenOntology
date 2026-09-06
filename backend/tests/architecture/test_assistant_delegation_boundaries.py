@@ -78,3 +78,71 @@ def test_super_assistant_does_not_import_ontology_or_exploration():
         "business modules; delegate platform assistants via "
         "app.assistant_hub instead:\n" + "\n".join(violations)
     )
+
+
+# 规则 3：adapter 只许 import 白名单符号——防腐化成对各助手域内部的
+# 任意调用面；新增依赖 = 显式修改本白名单并经域 owner review。
+_ADAPTER_IMPORT_WHITELIST: dict[str, set[str]] = {
+    "assistant_hub/adapters/ontology_agent.py": {
+        "app.assistant_hub.contract",
+        "app.auth.permissions",
+        "app.ontologies.access",
+        "app.ontologies.agent_runtime.chat_cancel",
+        "app.ontologies.agent_runtime.models",
+        "app.ontologies.agent_runtime.orchestrator",
+    },
+    "assistant_hub/adapters/exploration.py": {
+        "app.assistant_hub.contract",
+        "app.auth.permissions",
+        "app.exploration.orchestrator",
+        "app.exploration.schemas",
+        "app.exploration.session_service",
+    },
+    "assistant_hub/registry.py": {
+        "app.assistant_hub.adapters",
+        "app.assistant_hub.adapters.exploration",
+        "app.assistant_hub.adapters.ontology_agent",
+        "app.assistant_hub.contract",
+        "app.auth.permissions",
+    },
+}
+
+
+def test_assistant_hub_adapters_import_whitelist_only():
+    hub_dir = APP_DIR / "assistant_hub"
+    assert hub_dir.exists(), "assistant_hub 域必须存在（见 AGENTS.md 域表）"
+    for relative_path, allowed in _ADAPTER_IMPORT_WHITELIST.items():
+        path = hub_dir / relative_path.split("/", 1)[1]
+        assert path.exists(), f"缺少 {relative_path}"
+        violations = [
+            f"{path.relative_to(BACKEND_DIR)}:{line} imports {module}"
+            for line, module in _absolute_imports(path)
+            if module.startswith("app.") and module not in allowed
+        ]
+        assert not violations, (
+            f"{relative_path} 只允许 import 白名单符号；新增依赖需显式修改"
+            " _ADAPTER_IMPORT_WHITELIST 并经域 owner review:\n"
+            + "\n".join(violations)
+        )
+
+
+def test_assistant_hub_does_not_import_super_assistant():
+    """hub 保持中立：反向依赖会让"委派映射归 super_assistant"的归属失效。"""
+    files = sorted((APP_DIR / "assistant_hub").rglob("*.py"))
+    violations = _forbidden_imports(files, ("app.super_assistant",))
+
+    assert not violations, (
+        "assistant_hub is the neutral delegation registry and must not "
+        "depend on super_assistant:\n" + "\n".join(violations)
+    )
+
+
+def test_assistant_domains_do_not_import_assistant_hub():
+    """被委派域不得反向感知委派枢纽（依赖方向单向：hub → 域）。"""
+    for domain in ("ontologies", "exploration", "scenes", "data_channel"):
+        files = sorted((APP_DIR / domain).rglob("*.py"))
+        violations = _forbidden_imports(files, ("app.assistant_hub",))
+        assert not violations, (
+            f"{domain} must not depend on app.assistant_hub "
+            "(delegation is caller-side only):\n" + "\n".join(violations)
+        )

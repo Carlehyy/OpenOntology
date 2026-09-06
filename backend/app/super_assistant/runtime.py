@@ -16,7 +16,7 @@ from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
 from app.settings.object_storage.service import execute_minio_tool
 from app.shared.config import settings
 from app.shared.database import SessionLocal
-from app.super_assistant import files_workspace, memory_service, multica_service, palace_service, provider, reflection_service, web_tools
+from app.super_assistant import delegation, files_workspace, memory_service, multica_service, palace_service, provider, reflection_service, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -112,6 +112,7 @@ def _system_prompt(
     file_section: str = "",
     palace_section: str = "",
     multica_enabled: bool = False,
+    delegation_enabled: bool = False,
 ) -> str:
     catalog = "\n".join(
         f"- {skill.name}: {skill.description}"
@@ -145,6 +146,8 @@ def _system_prompt(
             "（写操作，平台会要求用户确认后执行）；用户消息以 /multica: 命令开头时，"
             "系统会强制指定对应工具，请照做。\n"
         )
+    if delegation_enabled:
+        prompt = f"{prompt}\n{delegation.SYSTEM_PROMPT_RULE}\n"
     if memory_section:
         prompt = f"{prompt}\n{memory_section}\n"
     if file_section:
@@ -902,6 +905,10 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         multica_config = multica_service.active_config(db, owner_id)
         if multica_config is not None:
             tools.extend(multica_service.tool_schemas())
+        # 平台助手委派：按用户菜单权限注入通用委派工具（目录来自 assistant_hub 注册表）
+        delegation_schemas = delegation.delegation_tools(db, owner_id)
+        if delegation_schemas:
+            tools.extend(delegation_schemas)
         # 自主 agent 模式的 todo 清单状态：仅存活于本次 stream_chat，不落库
         todo_state: dict[str, list[str]] | None = {"items": []} if agent_mode else None
         max_rounds = (
@@ -945,6 +952,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 skills, memory_section, agent_mode,
                 file_section=file_section, palace_section=palace_section,
                 multica_enabled=multica_config is not None,
+                delegation_enabled=bool(delegation_schemas),
             )}
         ]
         messages.extend({"role": item.role, "content": item.content} for item in stored_messages if item.role in {"user", "assistant"})
@@ -1160,6 +1168,16 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                                 tool_name=original_name,
                                 arguments=item["arguments"],
                             ))
+                    elif item["name"] == delegation.DELEGATION_TOOL_NAME:
+                        # 委派是长耗时串行工具（写子会话，绝不进只读并行池）：
+                        # 执行器为生成器，等待期间产出 SSE 注释心跳保活
+                        output = yield from delegation.run_delegation_tool(
+                            db,
+                            owner_id=owner_id,
+                            conversation_id=conversation_id,
+                            arguments=item["arguments"],
+                            should_cancel=lambda: _run_cancelled(db, assistant_message),
+                        )
                     else:
                         output = _execute_builtin_tool(
                             db, name=item["name"], arguments=item["arguments"],
