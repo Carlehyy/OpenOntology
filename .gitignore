@@ -15,6 +15,8 @@ build/
 *.db-shm
 *.db-wal
 config/generated/
+# 生产依赖清单只在 runner/服务器上从 Repository secrets 物化，本地副本不入库
+deploy/production.dependencies.env
 
 # Uploads
 uploads/

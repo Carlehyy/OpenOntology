@@ -76,17 +76,22 @@ if ! grep -Fq \
   printf 'deployment workflow must use the tested runtime archive builder\n' >&2
   exit 1
 fi
-if ! git -C "$REPO_ROOT" ls-files --error-unmatch \
-    deploy/production.dependencies.env >/dev/null 2>&1 \
-    || [ ! -s "$REPO_ROOT/deploy/production.dependencies.env" ]; then
-  printf 'the current deployment contract requires the tracked production dependency manifest\n' >&2
+if git -C "$REPO_ROOT" ls-files --error-unmatch \
+    deploy/production.dependencies.env >/dev/null 2>&1; then
+  printf 'the production dependency manifest must not be tracked; it is materialized from Repository secrets on the runner\n' >&2
+  exit 1
+fi
+manifest_materialize_step_count="$(
+  grep -cF 'bash scripts/ci/materialize-production-dependencies.sh' \
+    "$DEPLOY_WORKFLOW"
+)"
+if [ "$manifest_materialize_step_count" -lt 2 ]; then
+  printf 'verification and deploy must both materialize the production dependency manifest from Repository secrets\n' >&2
   exit 1
 fi
 if grep -Eq '^[[:space:]]+environment:[[:space:]]+production[[:space:]]*$' \
-    "$DEPLOY_WORKFLOW" \
-    || grep -Fq '${{ vars.' "$DEPLOY_WORKFLOW" \
-    || grep -Fq 'materialize-production-dependencies.sh' "$DEPLOY_WORKFLOW"; then
-  printf 'deployment configuration source changed without an explicit migration\n' >&2
+    "$DEPLOY_WORKFLOW"; then
+  printf 'deployment workflow must not hardcode a production environment block\n' >&2
   exit 1
 fi
 

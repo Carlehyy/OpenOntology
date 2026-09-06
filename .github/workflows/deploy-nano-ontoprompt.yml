@@ -283,9 +283,29 @@ jobs:
         working-directory: config
 
       - name: Production dependency configuration gate
+        # 生产依赖清单不再进入 Git：runner 上由 Repository secrets/variables
+        # 原子物化（0600），校验逻辑与 tracked 时代完全一致。
+        env:
+          PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          PROD_REDIS_URL: ${{ secrets.PROD_REDIS_URL }}
+          PROD_POSTGRES_PASSWORD: ${{ secrets.PROD_POSTGRES_PASSWORD }}
+          PROD_NEO4J_URI: ${{ secrets.PROD_NEO4J_URI }}
+          PROD_NEO4J_PASSWORD: ${{ secrets.PROD_NEO4J_PASSWORD }}
+          PROD_NEO4J_AUTH: ${{ secrets.PROD_NEO4J_AUTH }}
+          PROD_MINIO_ENDPOINT: ${{ secrets.PROD_MINIO_ENDPOINT }}
+          PROD_MINIO_ACCESS_KEY: ${{ secrets.PROD_MINIO_ACCESS_KEY }}
+          PROD_MINIO_SECRET_KEY: ${{ secrets.PROD_MINIO_SECRET_KEY }}
+          PROD_N8N_API_URL: ${{ secrets.PROD_N8N_API_URL }}
+          PROD_N8N_API_KEY: ${{ secrets.PROD_N8N_API_KEY }}
+          PROD_POSTGRES_DB: ${{ vars.PROD_POSTGRES_DB }}
+          PROD_POSTGRES_USER: ${{ vars.PROD_POSTGRES_USER }}
+          PROD_NEO4J_USER: ${{ vars.PROD_NEO4J_USER }}
+          PROD_PUBLIC_PORT: ${{ vars.PROD_PUBLIC_PORT }}
+          PROD_MINIO_USE_SSL: ${{ vars.PROD_MINIO_USE_SSL }}
         run: |
+          bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env
-          trap 'rm -f .env' EXIT
+          trap 'rm -f .env deploy/production.dependencies.env' EXIT
           APP_DIR="${GITHUB_WORKSPACE}" \
             SKIP_GIT=1 \
             BOOTSTRAP_PRODUCTION_ENV=1 \
@@ -355,6 +375,30 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -T 15 -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+
+      - name: Materialize production dependency manifest
+        # 归档脚本与远端替换继续要求 deploy/production.dependencies.env 存在；
+        # 在 runner 上从 Repository secrets/variables 物化，仓库本体不再携带。
+        env:
+          PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          PROD_REDIS_URL: ${{ secrets.PROD_REDIS_URL }}
+          PROD_POSTGRES_PASSWORD: ${{ secrets.PROD_POSTGRES_PASSWORD }}
+          PROD_NEO4J_URI: ${{ secrets.PROD_NEO4J_URI }}
+          PROD_NEO4J_PASSWORD: ${{ secrets.PROD_NEO4J_PASSWORD }}
+          PROD_NEO4J_AUTH: ${{ secrets.PROD_NEO4J_AUTH }}
+          PROD_MINIO_ENDPOINT: ${{ secrets.PROD_MINIO_ENDPOINT }}
+          PROD_MINIO_ACCESS_KEY: ${{ secrets.PROD_MINIO_ACCESS_KEY }}
+          PROD_MINIO_SECRET_KEY: ${{ secrets.PROD_MINIO_SECRET_KEY }}
+          PROD_N8N_API_URL: ${{ secrets.PROD_N8N_API_URL }}
+          PROD_N8N_API_KEY: ${{ secrets.PROD_N8N_API_KEY }}
+          PROD_POSTGRES_DB: ${{ vars.PROD_POSTGRES_DB }}
+          PROD_POSTGRES_USER: ${{ vars.PROD_POSTGRES_USER }}
+          PROD_NEO4J_USER: ${{ vars.PROD_NEO4J_USER }}
+          PROD_PUBLIC_PORT: ${{ vars.PROD_PUBLIC_PORT }}
+          PROD_MINIO_USE_SSL: ${{ vars.PROD_MINIO_USE_SSL }}
+        run: |
+          bash scripts/ci/materialize-production-dependencies.sh
+          test -s deploy/production.dependencies.env
 
       - name: Upload source to server
         timeout-minutes: 10
@@ -467,7 +511,7 @@ jobs:
 
       - name: Remove runner deployment archive
         if: ${{ always() }}
-        run: rm -f /tmp/openontology.tar.gz
+        run: rm -f /tmp/openontology.tar.gz deploy/production.dependencies.env
 
   report:
     if: ${{ always() }}

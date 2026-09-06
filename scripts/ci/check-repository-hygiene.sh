@@ -83,6 +83,10 @@ while IFS= read -r -d '' ignored_tracked_file; do
   fi
 done < <(git ls-files -ci --exclude-standard -z)
 
+if git ls-files --error-unmatch deploy/production.dependencies.env >/dev/null 2>&1; then
+  report_error "production dependency manifest must stay untracked; it is materialized from Repository secrets at deploy time"
+fi
+
 required_lockfiles=(
   "backend/uv.lock"
   "config/uv.lock"

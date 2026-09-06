@@ -21,8 +21,8 @@
    为准，时长数据见 `backend/.test_durations`；测试环境使用最低 bcrypt
    轮次）与配置中心回归；
 2. 运行 Alembic 新库升级与单 head 检查；
-3. 使用当前已跟踪的生产依赖清单验证 PostgreSQL、Redis、
-   Neo4j、MinIO、n8n 和 Chromium CDP 配置；
+3. 使用从 Repository secrets/variables 物化的生产依赖清单验证
+   PostgreSQL、Redis、Neo4j、MinIO、n8n 和 Chromium CDP 配置；
 4. 执行文档链接、目录索引与仓库卫生守卫；
 5. 执行前端单元测试、feature boundary、E2E 分类、lint、生产构建和离线
    Playwright 回归；通过门禁的 `frontend/dist` 作为本次部署的静态产物
@@ -32,7 +32,8 @@
    前端镜像前需先在 `frontend/` 下执行 `npm ci && npm run build`；
 7. 将本次作业扫描到的 SSH host key 写入 `known_hosts` 并强制
    校验，同时在任何远端命令前校验部署目录；
-8. 将当前版本中的 `deploy/production.dependencies.env` 作为受控部署输入；
+8. 在 runner 上从 `PROD_*` Repository secrets/variables 物化
+   `deploy/production.dependencies.env` 作为受控部署输入；
 9. 通过受测试的运行时白名单生成部署包（含 CI 构建的 `frontend/dist`）并
    先上传；远端替换源码时始终原地保留
    服务器 `.env`，不把秘密复制到固定 `/tmp` 文件；
@@ -41,7 +42,7 @@
    Compose 启动；
 11. 检查 API 深度 readiness、pipeline executor、PostgreSQL、
    Redis、Neo4j、MinIO、n8n、Chromium CDP 和前端静态资源；
-12. 无论成功失败，清理 runner 上的上传压缩包。
+12. 无论成功失败，清理 runner 上的上传压缩包与物化清单。
 
 PR 到 `nano-ontoprompt` 时，独立的 `.github/workflows/ci.yml` 会并行执行
 文档/仓库卫生、后端、配置中心和前端门禁，但不会执行部署。
@@ -206,7 +207,8 @@ backend 和 frontend，且不得在旧 API 仍可访问数据库时
 
 ## 部署前检查
 
-- 当前版本中的 `deploy/production.dependencies.env` 存在且通过只读配置校验；
+- `PROD_*` Repository secrets/variables 齐全，物化出的生产依赖清单通过只读
+  配置校验；
 - 服务器 `.env` 是可恢复的普通 `0600` 文件，而不是软链接；
 - 非首次安装确认服务器原 `.env` 可恢复；只有已证明全部持久存储为空的首次安装
   才手工勾选 `bootstrap_production_env`；

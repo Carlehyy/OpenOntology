@@ -259,15 +259,17 @@ npm run test:e2e:mocked
 
 ## 6. 安全与仓库卫生
 
-- 除仓库所有者已明确批准的现有 `deploy/production.dependencies.env` 临时兼容例外
-  外，禁止提交真实密码、token、API key、Cookie、证书或生产连接串。
+- 禁止提交真实密码、token、API key、Cookie、证书或生产连接串；生产依赖清单
+  `deploy/production.dependencies.env` 不进入 Git，部署时由 GitHub Actions 在
+  runner 上从 Repository secrets/variables 经
+  `scripts/ci/materialize-production-dependencies.sh` 物化生成。
 - 禁止提交个人绝对路径、个人 launch 配置和历史 worktree 路径。
-- 日常功能或重构不得修改、复制、回显 `deploy/production.dependencies.env`；后续
-  迁移和历史处理必须作为独立运维变更执行，不能混入普通功能提交。
+- 不得在任何文件、日志、PR 或工单中修改、复制、回显物化清单的真实值；清单在
+  Git 历史中的旧值清理作为独立运维变更另行协调。
 - fixture 必须确定、最小且脱敏；真实业务数据不得进入测试目录。
 - 截图、trace、HTML report、coverage 和结果 JSON 写入 `.artifacts/`。
-- 发现上述临时例外之外的新秘密进入 Git 后，立即停止传播并通知维护者轮换；
-  仅删除当前文件不等于完成处置，历史清理必须单独协调。
+- 发现新秘密进入 Git 后，立即停止传播并通知维护者轮换；仅删除当前文件不等
+  于完成处置，历史清理必须单独协调。
 
 ## 7. 文档责任
 

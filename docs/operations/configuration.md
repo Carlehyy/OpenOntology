@@ -5,13 +5,14 @@
 - `.env.example`：本地开发与 Compose 的无秘密模板；
 - `config/generated/local/.env`：本地配置中心生成，不进入 Git；
 - `backend/.env`：旧本地兼容入口，不应作为新配置源；
-- `deploy/production.dependencies.env`：当前自动部署读取的生产第三方依赖清单；
-- `deploy/production.dependencies.example.env`：不含秘密的人工校验与后续迁移模板。
+- `deploy/production.dependencies.env`：部署时由 Actions 在 runner 上从
+  Repository secrets/variables 物化生成，不进入 Git；
+- `deploy/production.dependencies.example.env`：不含秘密的人工校验模板。
 
 直接启动应用进程时，系统环境变量仍按框架规则具有最高优先级。本地完整模式由
-配置中心生成统一环境文件；生产部署则先保留服务器已有 `.env`，再把当前版本
-中的 `deploy/production.dependencies.env` 合并进去，并以合并后的 `.env` 作为唯一
-Compose 权威。`deploy/deploy-prod.sh` 的所有 Compose 调用都会清除宿主 shell
+配置中心生成统一环境文件；生产部署则先保留服务器已有 `.env`，再把部署时在
+runner 上物化的 `deploy/production.dependencies.env` 合并进去，并以合并后的
+`.env` 作为唯一 Compose 权威。`deploy/deploy-prod.sh` 的所有 Compose 调用都会清除宿主 shell
 中同名的环境、端口、依赖、镜像及严格镜像校验变量，避免已验证配置被临时
 `export` 静默覆盖。
 
@@ -186,22 +187,16 @@ node/npm/npx，覆盖 PyPI 与 npm 两大主流 MCP 分发形态；MCP SDK 启�
 `deploy/production.dependencies.env` 或服务器 `.env` 配置后，随下一次部署
 生效；关闭开关或清空白名单即可随时回退。
 
-## 当前自动部署兼容策略
+## 当前自动部署配置源
 
-仓库所有者已明确决定在持续频繁开发期间暂时保留现有生产依赖清单。因此本轮
-目录治理不迁移它的配置来源，也不要求新建 GitHub `production`
-Environment。工作流继续使用：
-
-- 仓库中已跟踪的 `deploy/production.dependencies.env` 作为依赖事实源；
-- GitHub Repository Secrets 中已有的 SSH 参数负责传输和远端执行；
-- `deploy/deploy-prod.sh` 在日志中只报告应用字段数，不打印字段值；
-- 部署包仍以 `0600` 权限应用清单，并保留服务器已有 `.env`。
-
-日常功能、重构和文档 PR 不得修改、复制或回显该文件。后续迁移到逐项 GitHub
-Environment Secrets/Variables 时，使用
-`deploy/production.dependencies.example.env` 和
-`scripts/ci/materialize-production-dependencies.sh` 作为迁移工具，并在独立
-运维变更中验证审批、端口、严格模式和回滚，不能与目录整理混在一起。
+生产依赖清单已随开源前置变更迁出 Git：`verify-gates` 与 `deploy` 两个作业
+都调用 `scripts/ci/materialize-production-dependencies.sh`，从「GitHub 部署
+传输参数」一节列出的 `PROD_*` Repository secrets/variables 原子物化权限
+`0600` 的 `deploy/production.dependencies.env`；后续校验、归档、上传与服务
+器合并逻辑与 tracked 时代完全一致，服务器 `.env` 仍是唯一运行时权威。
+`scripts/ci/test-deploy-guards.sh` 与
+`scripts/ci/check-repository-hygiene.sh` 锁定两条契约事实：清单不得被跟踪、
+两个作业都必须物化。清单在 Git 历史中的旧值清理作为独立运维变更另行执行。
 
 ## GitHub 部署传输参数
 
@@ -218,10 +213,19 @@ Environment Secrets/Variables 时，使用
 `DEPLOY_HEALTH_URL` 未设置时，`PUBLIC_PORT=80` 使用
 `http://${DEPLOY_HOST}/`，其他端口使用
 `http://${DEPLOY_HOST}:${PUBLIC_PORT}/`。这里的 `${...}` 表示工作流运行时
-取值，不是要求把字面量保存为 Secret。当前已跟踪清单继续使用 `8088`，因此
-本轮整理不会改变现有公网端口。
+取值，不是要求把字面量保存为 Secret。生产 `PROD_PUBLIC_PORT` 当前为
+`8088`，本轮迁移不改变现有公网端口。
 显式 `DEPLOY_HEALTH_URL` 必须是无空白、无原始单引号的 HTTP(S) URL；不合法值
 会在发起 SSH 前失败。
+
+生产依赖 `PROD_*` 配置由 verify 与 deploy 作业在 runner 上物化清单时读取：
+Secrets 为 `PROD_DATABASE_URL`、`PROD_REDIS_URL`、`PROD_POSTGRES_PASSWORD`、
+`PROD_NEO4J_URI`、`PROD_NEO4J_PASSWORD`、`PROD_NEO4J_AUTH`、
+`PROD_MINIO_ENDPOINT`、`PROD_MINIO_ACCESS_KEY`、`PROD_MINIO_SECRET_KEY`、
+`PROD_N8N_API_URL`、`PROD_N8N_API_KEY`；Variables 为 `PROD_POSTGRES_DB`、
+`PROD_POSTGRES_USER`、`PROD_NEO4J_USER`、`PROD_PUBLIC_PORT`、
+`PROD_MINIO_USE_SSL`。任一必需项缺失时物化脚本立即失败，不会生成部分清单，
+`N8N_TIMEOUT_SECONDS` 未配置时默认 30 秒。
 
 `DEPLOY_APP_DIR` 为空时使用 `/opt/openontology`。自定义值必须是规范化的
 绝对路径，并位于某个顶层目录之下；根目录、顶层目录本身、`.`/`..` 段、重复
@@ -289,11 +293,11 @@ spans_truncated，旧版本记录的慢请求无 spans 数组仍可正常展示�
 ## 安全要求
 
 - 不在 PR、Issue、日志或迭代文档中粘贴真实值；
-- 现有跟踪清单只作为仓库所有者批准的临时兼容例外，不得复制到其他文件；
+- 物化生成的生产依赖清单只存在于 runner 与服务器上，不得复制到其他文件或回显；
 - 新增或轮换凭据时应优先规划逐项 Secret，使其可独立轮换和撤销；
 - 生产依赖变化必须同时更新部署验证和本说明；
 - 内置 Redis 的 `REDIS_URL` 与 `requirepass` 必须由部署脚本一次性规范化，
   禁止在服务器 `.env` 中手工维护两份不一致的密码；
 - 不得用测试 SQLite、API Hub SQLite 或历史 `local://` 兼容路径绕过必需依赖；
-- 删除当前文件前必须先完成新配置源迁移和部署验证；删除工作树文件不会清理
-  Git 历史。
+- 新配置源迁移已完成并经部署验证；清单在 Git 历史中的旧值清理作为独立运维
+  变更执行，删除工作树文件不会清理 Git 历史。
