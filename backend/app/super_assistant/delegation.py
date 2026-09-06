@@ -29,7 +29,6 @@ from app.assistant_hub import registry as assistant_registry
 from app.assistant_hub.contract import (
     STATUS_FAILED,
     AssistantHubError,
-    TurnEvent,
     TurnResult,
 )
 from app.assistant_hub.registry import DELEGATION_TOOL_NAME
