@@ -1,9 +1,0 @@
-supplier_id,name,category,contact,phone,email,rating,annual_volume,certified
-SUP-001,天钢原材料有限公司,金属原材料,张经理,021-88001234,zhangm@tiangangsteel.com,A,500吨,ISO9001
-SUP-002,芯联电子科技,电子元器件,李总,0755-66789012,li@xinlian-elec.com,A+,100万件,IATF16949
-SUP-003,包联包装,包装材料,王主任,0512-55667788,wang@baolian-pack.com,B+,20万件,ISO9001
-SUP-004,鑫华化工,化工原料,陈工,022-44556677,chen@xinhua-chem.com,B,50吨,REACH认证
-SUP-005,速达物流,物流服务,刘总,010-33445566,liu@suda-logistics.com,A,—,ISO14001
-SUP-006,精密模具厂,模具定制,赵师傅,0571-22334455,zhao@jingmi-mold.com,B+,200件,—
-SUP-007,光明纺织,纺织原料,孙经理,025-11223344,sun@guangming-tex.com,A,30吨,OEKO-TEX
-SUP-008,海德润滑,润滑油脂,周工,0532-99887766,zhou@haide-lub.com,B,10吨,ISO9001

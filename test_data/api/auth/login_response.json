@@ -1,7 +1,0 @@
-{
-  "data": {
-    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example",
-    "token_type": "bearer"
-  },
-  "message": "ok"
-}

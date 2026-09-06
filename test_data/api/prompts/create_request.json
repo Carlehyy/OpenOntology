@@ -1,6 +1,0 @@
-{
-  "name": "供应链本体提取",
-  "domain": "supply_chain",
-  "version": "v1.0",
-  "content": "你是一个供应链领域的本体专家。从以下文本中提取供应链相关实体和关系。\n\n文本:\n{text}\n\n请以JSON格式返回，包含以下字段:\n{\n  \"entities\": [\n    {\"name_zh\": \"中文名\", \"name_en\": \"EnglishName\", \"type\": \"实体类型\", \"confidence\": 0.9}\n  ],\n  \"relations\": [\n    {\"source\": \"实体1\", \"target\": \"实体2\", \"label\": \"关系名称\", \"confidence\": 0.85}\n  ],\n  \"logic_rules\": [],\n  \"actions\": []\n}"
-}

@@ -1,6 +1,0 @@
-{
-  "rule_text": "IF 供应商.tier = 'tier-1' AND 采购订单.amount > 100000 THEN 需要审批",
-  "rule_type": "constraint",
-  "confidence": 0.9,
-  "description": "高价值订单需要额外审批"
-}
