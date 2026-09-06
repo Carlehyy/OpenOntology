@@ -41,3 +41,11 @@ class ConnectorBase(ABC):
         """
         raise NotImplementedError(
             f"{type(self).__name__} 不支持 schema 内省")
+
+    def introspect_primary_key(self, resource: str) -> list[str]:
+        """资源主键列清单（复合主键按定义顺序），无主键返回空列表。
+
+        失败必须抛异常；不支持内省的连接器保持 NotImplementedError。
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} 不支持主键内省")

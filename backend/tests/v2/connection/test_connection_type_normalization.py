@@ -406,3 +406,280 @@ def test_sync_unstructured_payload_keeps_schema_untouched(db, monkeypatch):
         Dataset.source_connection_id == connection.id).one()
     assert dataset.kind == "unstructured"
     assert dataset.schema_json in (None, {})
+
+
+# ---- PR-B：主键内省、主键文本化与拉取护栏 ----
+
+
+def test_normalize_primary_key_value_textualizes_ids():
+    assert tn.normalize_primary_key_value(123) == "123"
+    assert tn.normalize_primary_key_value(9007199254740993) == "9007199254740993"
+    assert tn.normalize_primary_key_value(decimal.Decimal("5.00")) == "5.00"
+    assert tn.normalize_primary_key_value("abc") == "abc"
+    assert tn.normalize_primary_key_value(None) is None
+    assert tn.normalize_primary_key_value(
+        dt.datetime(2026, 9, 6, 10, 30)) == "2026-09-06T10:30:00"
+
+
+def test_normalize_rows_stringifies_only_pk_columns():
+    rows = tn.normalize_rows(
+        [{"id": 123, "qty": 5, "price": decimal.Decimal("1.5")}],
+        primary_key_columns=["id"])
+    assert rows == [{"id": "123", "qty": 5, "price": "1.5"}]
+
+
+def test_sql_connector_introspects_primary_key(monkeypatch):
+    engine = create_engine("sqlite://")
+    with engine.connect() as conn:
+        conn.execute(text(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, sku TEXT, seq INTEGER)"))
+        conn.execute(text(
+            "CREATE TABLE link (a TEXT, b TEXT, PRIMARY KEY (a, b))"))
+        conn.commit()
+    connector = SQLConnector({})
+    monkeypatch.setattr(SQLConnector, "_get_engine", lambda self: engine)
+
+    assert connector.introspect_primary_key("orders") == ["id"]
+    assert connector.introspect_primary_key("link") == ["a", "b"]
+
+
+class _PkConnector:
+    """带主键/列元数据内省的连接器，主键值为数据库原生整型。"""
+
+    def list_resources(self):
+        return ["orders"]
+
+    def pull_full(self, _resource):
+        return [
+            {"id": 1, "amount": decimal.Decimal("9.50"),
+             "created_at": dt.datetime(2026, 9, 6, 10, 30)},
+            {"id": 2, "amount": decimal.Decimal("1.25"),
+             "created_at": dt.datetime(2026, 9, 6, 11, 0)},
+        ]
+
+    def introspect_schema(self, _resource):
+        return [
+            {"name": "id", "type": "integer", "source_type": "BIGINT", "flags": []},
+            {"name": "amount", "type": "float",
+             "source_type": "DECIMAL(10,2)", "flags": ["lossy"]},
+            {"name": "created_at", "type": "timestamp",
+             "source_type": "DATETIME", "flags": []},
+        ]
+
+    def introspect_primary_key(self, _resource):
+        return ["id"]
+
+
+class _FloatPkConnector(_PkConnector):
+    def introspect_schema(self, _resource):
+        return [
+            {"name": "id", "type": "float", "source_type": "DOUBLE", "flags": []},
+            {"name": "amount", "type": "float",
+             "source_type": "DECIMAL(10,2)", "flags": ["lossy"]},
+        ]
+
+
+def test_sync_persists_primary_key_contract_and_textualizes_pk(db, monkeypatch):
+    connection = _make_connection(db, "conn-pk")
+    monkeypatch.setattr(
+        "app.services.connection.registry.get_connector",
+        lambda _kind, _config: _PkConnector(),
+    )
+
+    result = sync_connection(connection.id, db=db)
+
+    assert result["status"] == "ok"
+    dataset = db.query(Dataset).filter(
+        Dataset.source_connection_id == connection.id).one()
+    schema = dataset.schema_json
+    # 主键契约写入 = 映射创建（primary_key_required 400）被解锁
+    assert schema["primary_key"] == "id"
+    version = db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset.id).one()
+    rows = json.loads(bytes(version.data_blob).decode("utf-8"))
+    assert [row["id"] for row in rows] == ["1", "2"]  # 主键文本化
+    assert rows[0]["amount"] == "9.50"  # 非主键 Decimal 照旧走字符串原文
+
+    # 幂等：二次同步主键口径稳定，版本递增
+    second = sync_connection(connection.id, db=db)
+    assert second["status"] == "ok"
+    assert second["dataset_id"] == dataset.id
+    assert second["version_no"] == 2
+
+
+def test_sync_rejects_float_primary_key_with_warning(db, monkeypatch, caplog):
+    connection = _make_connection(db, "conn-float-pk")
+    monkeypatch.setattr(
+        "app.services.connection.registry.get_connector",
+        lambda _kind, _config: _FloatPkConnector(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.tasks.v2.connection_sync"):
+        result = sync_connection(connection.id, db=db)
+
+    assert result["status"] == "ok"
+    dataset = db.query(Dataset).filter(
+        Dataset.source_connection_id == connection.id).one()
+    assert "primary_key" not in dataset.schema_json
+    assert any(
+        "浮点列" in record.getMessage() for record in caplog.records)
+
+
+def test_sql_connector_max_rows_guard(monkeypatch, caplog):
+    engine = create_engine("sqlite://")
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE big (id INTEGER)"))
+        for i in range(1, 6):
+            conn.execute(text("INSERT INTO big (id) VALUES (:i)"), {"i": i})
+        conn.commit()
+    monkeypatch.setattr(SQLConnector, "_get_engine", lambda self: engine)
+
+    guarded = SQLConnector({"max_rows": 3})
+    with caplog.at_level(
+            logging.WARNING,
+            logger="app.data_channel.connections.sql_connector"):
+        rows = guarded.pull_full("big")
+    assert [row["id"] for row in rows] == [1, 2, 3]
+    assert any(
+        "max_rows=3" in record.getMessage() for record in caplog.records)
+
+    # 未达上限：不产生截断告警
+    caplog.clear()
+    unguarded = SQLConnector({"max_rows": 10})
+    rows = unguarded.pull_full("big")
+    assert len(rows) == 5
+    assert not caplog.records
+
+    # 自定义 query 的窗口由查询本身负责，不注入护栏
+    custom = SQLConnector({"query": "SELECT * FROM big", "max_rows": 2})
+    assert len(custom.pull_full("big")) == 5
+
+
+def test_sql_connector_delta_guard_orders_by_watermark_and_self_heals(
+        monkeypatch, caplog):
+    """delta 截断必须携带最小水位段：调用方推进水位到本批上界后，
+    下一轮 > since 从断点续拉，增量行不会因截断被永久跳过。"""
+    engine = create_engine("sqlite://")
+    with engine.connect() as conn:
+        conn.execute(text(
+            "CREATE TABLE events (id INTEGER, updated_at INTEGER)"))
+        for i in range(1, 11):
+            conn.execute(text(
+                "INSERT INTO events (id, updated_at) VALUES (:i, :i)"),
+                {"i": i})
+        conn.commit()
+    monkeypatch.setattr(SQLConnector, "_get_engine", lambda self: engine)
+
+    connector = SQLConnector({"watermark_column": "updated_at", "max_rows": 3})
+    with caplog.at_level(
+            logging.WARNING,
+            logger="app.data_channel.connections.sql_connector"):
+        batch = connector.pull_delta("events", since=0)
+
+    # 截断批 = 最小水位段（1,2,3），且告警留痕
+    assert [row["updated_at"] for row in batch] == [1, 2, 3]
+    assert any(
+        "max_rows=3" in record.getMessage() for record in caplog.records)
+
+    # 模拟调用方按本批上界推进水位后的下一轮：从断点续拉，无丢行
+    next_batch = connector.pull_delta("events", since=3)
+    assert [row["updated_at"] for row in next_batch] == [4, 5, 6]
+
+
+def test_sql_connector_guard_does_not_warn_at_exact_boundary(
+        monkeypatch, caplog):
+    engine = create_engine("sqlite://")
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE exact (id INTEGER)"))
+        for i in range(1, 4):
+            conn.execute(text("INSERT INTO exact (id) VALUES (:i)"), {"i": i})
+        conn.commit()
+    monkeypatch.setattr(SQLConnector, "_get_engine", lambda self: engine)
+
+    caplog.clear()
+    with caplog.at_level(
+            logging.WARNING,
+            logger="app.data_channel.connections.sql_connector"):
+        rows = SQLConnector({"max_rows": 3}).pull_full("exact")
+    assert len(rows) == 3
+    assert not caplog.records  # 行数恰等于上限 ≠ 截断
+
+
+@pytest.mark.parametrize("raw_max_rows", [0, -5, "abc", None, ""])
+def test_sql_connector_invalid_max_rows_falls_back_to_default(
+        monkeypatch, raw_max_rows):
+    connector = SQLConnector({"max_rows": raw_max_rows})
+    assert connector._effective_max_rows() == SQLConnector._DEFAULT_MAX_ROWS
+
+
+class _CompositePkConnector(_PkConnector):
+    def pull_full(self, _resource):
+        return [{"a": 1, "b": "x", "qty": 7}, {"a": 2, "b": "y", "qty": 8}]
+
+    def introspect_schema(self, _resource):
+        return [
+            {"name": "a", "type": "integer", "source_type": "INT", "flags": []},
+            {"name": "b", "type": "string", "source_type": "VARCHAR(10)", "flags": []},
+            {"name": "qty", "type": "integer", "source_type": "INT", "flags": []},
+        ]
+
+    def introspect_primary_key(self, _resource):
+        return ["a", "b"]
+
+
+def test_sync_persists_composite_primary_key_contract(db, monkeypatch):
+    connection = _make_connection(db, "conn-composite-pk")
+    monkeypatch.setattr(
+        "app.services.connection.registry.get_connector",
+        lambda _kind, _config: _CompositePkConnector(),
+    )
+
+    result = sync_connection(connection.id, db=db)
+
+    assert result["status"] == "ok"
+    dataset = db.query(Dataset).filter(
+        Dataset.source_connection_id == connection.id).one()
+    schema = dataset.schema_json
+    # 复合主键按定义序写入逗号口径（split_pk）
+    assert schema["primary_key"] == "a,b"
+    version = db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset.id).one()
+    rows = json.loads(bytes(version.data_blob).decode("utf-8"))
+    # 两个主键分量都文本化，非主键数值列保持原生类型
+    assert [(row["a"], row["b"]) for row in rows] == [("1", "x"), ("2", "y")]
+    assert all(row["qty"] == 7 or row["qty"] == 8 for row in rows)
+
+
+def test_integer_pk_column_cannot_map_to_string_property():
+    """矩阵锁定：湖 integer 主键列 → 语义 string 属性仍被拒。
+
+    PR-B 只统一了主键的值口径（湖内文本），列契约类型保持 integer；
+    类型级统一（string 属性建模主键 / 跨源端点严格相等的解除）需要
+    连带 FK 列口径设计，作为后续 PR——本测试钉住现状防止静默漂移。"""
+    from app.ontologies.mappings.request_validation import (
+        _mapping_types_compatible,
+        _normal_mapping_type,
+    )
+
+    assert _mapping_types_compatible(
+        _normal_mapping_type("integer"), _normal_mapping_type("string")) is False
+    assert _mapping_types_compatible(
+        _normal_mapping_type("integer"), _normal_mapping_type("number")) is True
+
+
+def test_identity_value_is_stable_across_pk_textualization():
+    """单列主键身份对 int/str 同形（f-string 隐式文本化）；复合主键分量
+    显式文本化后，原生值与文本值产生同一身份（uuid5 稳定）。"""
+    import uuid as uuid_module
+
+    from app.ontologies.mappings.identity_metadata import IdentityMetadataMixin
+
+    service = IdentityMetadataMixin()
+    single_int = service._row_identity_value({"id": 123}, "id")
+    single_str = service._row_identity_value({"id": "123"}, "id")
+    assert single_int == single_str == "id:123"
+
+    comp_int = service._row_identity_value({"a": 1, "b": "x"}, "a,b")
+    comp_str = service._row_identity_value({"a": "1", "b": "x"}, "a,b")
+    assert comp_int == comp_str
+    assert uuid_module.uuid5(uuid_module.NAMESPACE_URL, comp_int)

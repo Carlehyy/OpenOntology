@@ -30,7 +30,8 @@ def _decrypt_config(conn) -> dict:
         return conn.config or {}
 
 
-def _structured_schema_json(connector, resource: str, rows: list) -> dict:
+def _structured_schema_json(connector, resource: str, rows: list,
+                            primary_key_columns: list[str] | None = None) -> dict:
     """结构化连接数据集的列契约：连接器元数据内省优先，值采样兜底。
 
     内省失败不阻断同步（与 lake_gate「类型推断永不阻断入湖」一致），但
@@ -38,6 +39,9 @@ def _structured_schema_json(connector, resource: str, rows: list) -> dict:
     存在。columns_typed 保持 {name, type} 瘦形态——persist_contract /
     normalize_definitions 按白名单重建列清单，塞进额外字段会被剥掉，
     源类型与方言标志因此走 schema_json["source_schema"] 平行键。
+
+    主键契约（comma 分隔，split_pk 口径）在内省出主键列时写入；浮点列
+    不做主键（精度语义，Foundry 同款规则），拒绝并告警而不是静默放行。
     """
     from app.data_channel.connections.type_normalization import (
         introspected_columns_typed,
@@ -62,23 +66,35 @@ def _structured_schema_json(connector, resource: str, rows: list) -> dict:
 
     if columns:
         typed, source_schema = introspected_columns_typed(columns)
-        return {
+        schema = {
             "columns": [column["name"] for column in typed],
             "columns_typed": typed,
             "types_source": "connector_introspection",
             "source_schema": source_schema,
         }
+    else:
+        # REST 端点可能返回标量数组（['a', 1]）——infer_columns_typed 只接受
+        # dict 行，非 dict 行混入会让同步本身崩溃（父提交可正常同步）。
+        # 标量载荷没有列概念，落空契约即可，绝不阻断入湖。
+        typed = infer_columns_typed(
+            [row for row in rows if isinstance(row, dict)])
+        schema = {
+            "columns": [column["name"] for column in typed],
+            "columns_typed": typed,
+            "types_source": "sample_inference",
+        }
 
-    # REST 端点可能返回标量数组（['a', 1]）——infer_columns_typed 只接受
-    # dict 行，非 dict 行混入会让同步本身崩溃（父提交可正常同步）。
-    # 标量载荷没有列概念，落空契约即可，绝不阻断入湖。
-    typed = infer_columns_typed(
-        [row for row in rows if isinstance(row, dict)])
-    return {
-        "columns": [column["name"] for column in typed],
-        "columns_typed": typed,
-        "types_source": "sample_inference",
-    }
+    pk = [str(column) for column in (primary_key_columns or []) if str(column)]
+    if pk:
+        lake_types = {c.get("name"): c.get("type") for c in schema["columns_typed"]}
+        float_pks = [c for c in pk if lake_types.get(c) == "float"]
+        if float_pks:
+            logger.warning(
+                "浮点列 %s 不适合作为主键契约（精度语义），未写入 primary_key；"
+                "请改用整型/文本主键，或经流水线派生稳定键", float_pks)
+        else:
+            schema["primary_key"] = ",".join(pk)
+    return schema
 
 
 def sync_connection(connection_id: str, mode: str = "full",
@@ -164,9 +180,23 @@ def sync_connection(connection_id: str, mode: str = "full",
             db.commit()
             return {"status": "error", "error": f"pull failed: {e}"}
 
+        # 主键内省（元数据优先）：失败/不支持不阻断同步，映射创建时会以
+        # 「尚未声明主键契约」明确提示。
+        pk_columns: list[str] = []
+        pk_introspect = getattr(connector, "introspect_primary_key", None)
+        if pk_introspect is not None:
+            try:
+                pk_columns = [str(c) for c in (pk_introspect(res) or [])]
+            except NotImplementedError:
+                pass
+            except Exception as exc:  # noqa: BLE001 — 主键内省失败降级，但必须留痕
+                logger.warning(
+                    "primary key introspection failed for %r (%s)", res, exc)
+
         # 归一化为行列表。datetime/Decimal/bytes 等数据库原生对象必须先做
         # 值规范化——json.dumps 对它们直接 TypeError，含日期/金额/二进制列
-        # 的表曾因此整次同步失败（default=str 只兜底剩余未知类型）。
+        # 的表曾因此整次同步失败（default=str 只兜底剩余未知类型）。主键列
+        # 的值同步文本化（跨源 join 口径 + 投影侧不受 float64 表示影响）。
         schema_json = None
         if isinstance(rows, bytes):
             content = rows
@@ -175,11 +205,11 @@ def sync_connection(connection_id: str, mode: str = "full",
         elif isinstance(rows, list):
             from app.data_channel.connections.type_normalization import normalize_rows
 
-            rows = normalize_rows(rows)
+            rows = normalize_rows(rows, primary_key_columns=pk_columns)
             content = json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8")
             rowcount = len(rows)
             kind = "structured"
-            schema_json = _structured_schema_json(connector, res, rows)
+            schema_json = _structured_schema_json(connector, res, rows, pk_columns)
         else:
             content = json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8")
             rowcount = None

@@ -277,10 +277,15 @@ class IdentityMetadataMixin:
         if columns and self._has_complete_pk(row, pk_col):
             if len(columns) == 1:
                 # Preserve IDs already materialized for single-column keys.
+                # f-string 的隐式文本化让 int/str 主键值产生同一身份，
+                # 这是跨源 join 与主键文本化（type_normalization）的口径基础。
                 return f"{columns[0]}:{row.get(columns[0])}"
+            # 复合主键的分值显式文本化：湖侧主键文本化（PR-B）之后原生
+            # int 与文本 "1" 不能再产生两套身份；与 _lookup_identity_value
+            # 的 join 侧序列化保持同一形态。
             payload = {
                 "columns": columns,
-                "values": [row.get(col) for col in columns],
+                "values": [str(row.get(col)) for col in columns],
             }
             return "composite_pk:" + json.dumps(
                 payload, ensure_ascii=False, sort_keys=True,
@@ -293,7 +298,7 @@ class IdentityMetadataMixin:
             return f"{columns[0]}:{value}"
         if len(columns) > 1 and isinstance(value, (list, tuple)) and len(value) == len(columns):
             return "composite_pk:" + json.dumps(
-                {"columns": columns, "values": list(value)},
+                {"columns": columns, "values": [str(item) for item in value]},
                 ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 default=str)
         return value
