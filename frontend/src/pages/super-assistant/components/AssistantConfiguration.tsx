@@ -467,14 +467,19 @@ function SettingSwitch({ label, ariaLabel, checked, busy, onToggle }: {
 
 /** 配置面板宽度边界：默认 26rem，拖拽/键盘在 [288, min(600, 视口-720)] 内调整，
     为聊天卡头部（品牌区已让出）与标题保底最小可用宽度 */
-const DEFAULT_PANEL_WIDTH = 416
+export const DEFAULT_CONFIG_PANEL_WIDTH = 416
 const MIN_PANEL_WIDTH = 288
 const maxPanelWidth = () => Math.max(MIN_PANEL_WIDTH, Math.min(600, window.innerWidth - 720))
 const clampPanelWidth = (width: number) => Math.min(Math.max(width, MIN_PANEL_WIDTH), maxPanelWidth())
 
-export default function ConfigurationPanel({ open, onClose, skills, servers, refreshSkills, refreshServers, conversationId }: {
+export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, refreshSkills, refreshServers, conversationId }: {
   open: boolean
   onClose: () => void
+  /** 面板宽度（px）：受控于页面级状态（聊天列据此让位），拖拽/键盘经 onWidthResize 回写 */
+  width: number
+  onWidthResize: (width: number) => void
+  /** 拖拽中同步给页面：聊天列让位的 padding 过渡需在拖拽期间禁用，保证跟手 */
+  onDraggingChange: (dragging: boolean) => void
   skills: SuperSkill[]
   servers: SuperMcpServer[]
   refreshSkills: () => Promise<void>
@@ -482,8 +487,6 @@ export default function ConfigurationPanel({ open, onClose, skills, servers, ref
   conversationId: string | null
 }) {
   const [tab, setTab] = useState<'skills' | 'mcp' | 'approval' | 'memory'>('skills')
-  // 面板宽度仅桌面端可拖拽：经 CSS 变量 --config-w 供 lg 档类引用，移动端抽屉宽度类不受影响
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL_WIDTH)
   const [dragging, setDragging] = useState(false)
   const [creatingSkill, setCreatingSkill] = useState(false)
   const [editingSkill, setEditingSkill] = useState<SuperSkill | null>(null)
@@ -581,10 +584,9 @@ export default function ConfigurationPanel({ open, onClose, skills, servers, ref
       <aside
         aria-hidden={!open}
         inert={!open}
-        style={{ '--config-w': `${panelWidth}px` } as React.CSSProperties}
-        className={`absolute inset-y-0 right-0 z-30 w-[min(26rem,100%)] overflow-hidden transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none lg:relative lg:inset-auto lg:z-auto ${open
-          ? 'pointer-events-auto lg:w-[var(--config-w,26rem)]'
-          : 'pointer-events-none lg:w-0'} ${dragging ? 'transition-none' : ''}`}
+        className={`absolute inset-y-0 right-0 z-30 overflow-hidden transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${open
+          ? 'pointer-events-auto w-[min(26rem,100%)] lg:w-[var(--config-w,26rem)]'
+          : 'pointer-events-none w-0'} ${dragging ? 'transition-none' : ''}`}
       >
         {/* 拖拽手柄：贴面板左缘的窄条，悬停显指示线；面板收起时随 aside inert 一并失效 */}
         <div
@@ -596,32 +598,37 @@ export default function ConfigurationPanel({ open, onClose, skills, servers, ref
             event.preventDefault()
             event.currentTarget.setPointerCapture(event.pointerId)
             setDragging(true)
+            onDraggingChange(true)
           }}
           onPointerMove={event => {
-            if (dragging) setPanelWidth(clampPanelWidth(window.innerWidth - event.clientX))
+            if (dragging) onWidthResize(clampPanelWidth(window.innerWidth - event.clientX))
           }}
           onPointerUp={event => {
             event.currentTarget.releasePointerCapture(event.pointerId)
             setDragging(false)
+            onDraggingChange(false)
           }}
-          onPointerCancel={() => setDragging(false)}
+          onPointerCancel={() => {
+            setDragging(false)
+            onDraggingChange(false)
+          }}
           onKeyDown={event => {
             // 面板锚定右侧：← 加宽、→ 收窄
-            if (event.key === 'ArrowLeft') setPanelWidth(width => clampPanelWidth(width + 16))
-            if (event.key === 'ArrowRight') setPanelWidth(width => clampPanelWidth(width - 16))
+            if (event.key === 'ArrowLeft') onWidthResize(clampPanelWidth(width + 16))
+            if (event.key === 'ArrowRight') onWidthResize(clampPanelWidth(width - 16))
           }}
-          className="group absolute inset-y-0 left-0 z-10 hidden w-2 cursor-col-resize items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset lg:flex"
+          className="group absolute inset-y-0 left-0 z-10 hidden w-1.5 cursor-col-resize items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset lg:flex"
         >
           <span
             aria-hidden
-            className={`h-10 w-0.5 rounded-full transition-colors duration-150 ${dragging
+            className={`h-8 w-px rounded-full transition-colors duration-150 ${dragging
               ? 'bg-brand'
               : 'bg-[var(--color-border)] group-hover:bg-[var(--color-border-hover)]'}`}
           />
         </div>
         <section
           aria-label="助手配置"
-          className={`absolute inset-y-0 right-0 flex w-[min(var(--config-w,26rem),100vw)] min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-card shadow-sm transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none lg:translate-x-0 ${open ? 'translate-x-0' : 'translate-x-full'}`}
+          className="absolute inset-y-0 right-0 flex w-[min(var(--config-w,26rem),100vw)] min-h-0 flex-col overflow-hidden border-l border-[var(--color-border)] bg-card"
         >
           <header className="flex shrink-0 items-start justify-between border-b border-[var(--color-border)] px-4 py-3.5">
             <div className="min-w-0">
