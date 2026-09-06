@@ -23,11 +23,16 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from app.exploration import canvas as C
 from app.exploration import diagram as D
+from app.exploration import document_service
+from app.exploration import draft_service
 from app.exploration import questions as Q
 from app.exploration import readiness as R
+from app.exploration import schemas as S
 from app.exploration import workspace as W
 from app.exploration import officecli as O
-from app.exploration.models import ExplorationAttachment, ExplorationSession
+from app.exploration.document import document_source_state
+from app.exploration.models import (ExplorationAttachment, ExplorationDocument,
+                                    ExplorationSession)
 from app.exploration.skills import ExplorationSkill
 
 
@@ -128,6 +133,38 @@ _FIELD_DOC = """元素字段约定（name 用英文 snake_case/PascalCase 标识
 
 TOOL_DEFS = [
     {
+        "name": "generate_document",
+        "description": (
+            "把当前画布转成需求文档（一次性耗时调用，内部含叙述生成的 LLM 调用）。"
+            "仅在画布已有元素时调用；画布与最新文档一致时服务端会直接复用既有文档。"
+            "生成需求文档是「生成本体草稿」的前置步骤。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "generate_draft",
+        "description": (
+            "把最新需求文档转成本体草稿（对象类型/链接/动作/函数草稿/哨兵草稿），"
+            "供用户在「需求文档」视图的草稿审阅抽屉勾选并应用。一次性耗时调用，"
+            "每回合最多 2 次。前置条件：活画布质量门全部通过、需求文档未过期"
+            "（画布变化后需先重新 generate_document）。被拒时返回堵门项清单，"
+            "按清单继续澄清修图即可，不要反复重试。应用（apply）必须由用户人工"
+            "确认，本工具不提供 force 越权。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "document_id": {
+                    "type": "string",
+                    "description": "可选；缺省使用会话最新需求文档",
+                },
+            },
+        },
+    },
+    {
         "name": "get_canvas_elements",
         "description": (
             "读取当前业务画布的权威 canonical 元素（含所有已确认字段与子项 id）。"
@@ -181,7 +218,9 @@ TOOL_DEFS = [
                              "description": "元素数组，字段见工具描述"},
                 "expected_canvas_version": {
                     "type": "integer", "minimum": 0,
-                    "description": "可选乐观锁；使用 get_canvas_elements 返回的 canvasVersion",
+                    "description": ("可选乐观锁；使用 get_canvas_elements 返回的 canvasVersion。"
+                                    "同一条消息内连续多次写调用时，后续调用可省略该参数"
+                                    "（服务端按回合内最新版本对齐）"),
                 },
             },
             "required": ["kind", "elements"],
@@ -200,7 +239,9 @@ TOOL_DEFS = [
                         "description": "元素 id 或名称列表"},
                 "expected_canvas_version": {
                     "type": "integer", "minimum": 0,
-                    "description": "可选乐观锁；使用 get_canvas_elements 返回的 canvasVersion",
+                    "description": ("可选乐观锁；使用 get_canvas_elements 返回的 canvasVersion。"
+                                    "同一条消息内连续多次写调用时，后续调用可省略该参数"
+                                    "（服务端按回合内最新版本对齐）"),
                 },
             },
             "required": ["kind", "ids"],
@@ -233,7 +274,9 @@ TOOL_DEFS = [
                 },
                 "expected_canvas_version": {
                     "type": "integer", "minimum": 0,
-                    "description": "可选乐观锁；使用最近工具结果的 canvasVersion",
+                    "description": ("可选乐观锁；使用最近工具结果的 canvasVersion。"
+                                    "同一条消息内连续多次写调用时，后续调用可省略该参数"
+                                    "（服务端按回合内最新版本对齐）"),
                 },
             },
             "required": ["questions"],
@@ -243,6 +286,8 @@ TOOL_DEFS = [
         "name": "resolve_questions",
         "description": ("用户给出明确答复后销账。resolution 必须是定量结论"
                         "（数字+单位 / 枚举清单 / 明确边界），blocking 问题含模糊表述且无数值会被拒绝。"
+                        "用户答复「按选项B/第2个/按默认」这类委托时可直接作为 resolution 传入，"
+                        "服务端会展开为对应候选的字面定量值；开放式放权（都可以/你定）会被拒绝。"
                         "status=dismissed 表示用户明确表示暂不关心（resolution 写明原因）。"
                         "销账后记得把结论 upsert 进画布对应元素 —— 同一回合完成，不要遗留。"),
         "parameters": {
@@ -262,7 +307,9 @@ TOOL_DEFS = [
                 },
                 "expected_canvas_version": {
                     "type": "integer", "minimum": 0,
-                    "description": "可选乐观锁；使用最近工具结果的 canvasVersion",
+                    "description": ("可选乐观锁；使用最近工具结果的 canvasVersion。"
+                                    "同一条消息内连续多次写调用时，后续调用可省略该参数"
+                                    "（服务端按回合内最新版本对齐）"),
                 },
             },
             "required": ["items"],
@@ -424,18 +471,29 @@ class ExplorationToolRunner:
 
     def __init__(self, db: Session, session: ExplorationSession,
                  skills: dict[str, ExplorationSkill] | None = None,
-                 user_message: str = ""):
+                 user_message: str = "", user=None):
         self.db = db
         self.session = session
         self.skills = skills or {}
         self.user_message = str(user_message or "")
+        self.user = user
         self.canvas_dirty = False
         self.last_diagram: dict | None = None
         self._known_canvas_version = int(session.canvas_version or 0)
         self._write_base_version: int | None = None
+        # 本回合经 _commit_canvas 写出的版本号集合：用于区分「自身写入造成的
+        # 版本推进」（LLM 批量调用携带同一旧版本，应对齐而非报冲突）与真正的
+        # 外部并发写入（必须保持硬冲突）。
+        self._own_versions: set[int] = set()
+        # generate_draft 是昂贵操作（嵌套 LLM 调用），每回合限次防重试风暴
+        self._draft_attempts = 0
 
     def run(self, name: str, args: dict) -> dict:
         self.last_diagram = None
+        if name == "generate_document":
+            return self._generate_document(args)
+        if name == "generate_draft":
+            return self._generate_draft(args)
         if name == "get_canvas_elements":
             return self._get_canvas_elements(args)
         if name == "upsert_elements":
@@ -485,6 +543,143 @@ class ExplorationToolRunner:
         if name == "use_skill":
             return self._use_skill(args)
         return {"error": f"未知工具: {name}"}
+
+    def _latest_document(self) -> ExplorationDocument | None:
+        return (self.db.query(ExplorationDocument)
+                .filter(ExplorationDocument.session_id == self.session.id)
+                .order_by(ExplorationDocument.version.desc())
+                .first())
+
+    def _generate_document(self, args: dict) -> dict:
+        """画布 → 需求文档。复用 document_service（与手动按钮同一实现与门禁）。
+
+        指纹去重：画布与最新文档一致时复用既有文档，防止 LLM 重试风暴刷
+        bx_documents 行。force 越权不存在于文档生成，但显式拒绝任何 force
+        形参以防模型混用草稿接口的习惯。
+        """
+        if args.get("force") is not None:
+            return {"error": "本工具不支持 force 参数；越权操作只能由用户在界面上进行"}
+        if self.user is None:
+            return {"error": "当前上下文缺少用户身份，无法生成需求文档"}
+        self._refresh_canvas()
+        completeness = C.completeness(self.session.canvas)
+        if not any(completeness["counts"].values()):
+            return {"error": "画布还是空的 —— 先通过对话沉淀业务模型再生成文档"}
+        latest = self._latest_document()
+        if latest is not None:
+            state = document_source_state(latest, self.session)
+            if not state["is_stale"]:
+                return {"documentId": latest.id, "title": latest.title,
+                        "version": latest.version, "reused": True,
+                        "note": "画布与最新文档一致，已复用既有文档（未新建版本）",
+                        **self._state()}
+        try:
+            result = document_service.create_document(
+                self.session.id, S.GenerateDocumentRequest(), self.db, self.user)
+        except HTTPException as error:
+            detail = error.detail
+            message = detail if isinstance(detail, str) else str(
+                (detail or {}).get("message") or detail)
+            return {"error": f"生成需求文档被拒：{message}",
+                    "code": str(error.status_code)}
+        payload = (result or {}).get("data") or {}
+        return {"documentId": payload.get("id"), "title": payload.get("title"),
+                "version": payload.get("version"), "reused": False,
+                "note": "需求文档已生成；可继续 generate_draft 或引导用户到「需求文档」视图查看",
+                **self._state()}
+
+    def _compact_blocking_items(self, readiness: dict, limit: int = 8) -> list[str]:
+        return [
+            str(item)[:300]
+            for gate in readiness.get("gates") or []
+            for item in gate.get("blockingItems") or []
+        ][:limit]
+
+    def _generate_draft(self, args: dict) -> dict:
+        """需求文档 → 本体草稿。复用 draft_service（与手动按钮同一门禁）。
+
+        关键防环设计：draft_service 的门禁评估基于文档快照，若模型按活画布
+        修复后重试会拿到陈旧堵门项死循环 —— 因此先对活画布预检，未达标直接
+        返回活画布堵门项、不调用服务；文档过期时引导先重新生成文档。
+        """
+        if args.get("force") is not None:
+            return {"error": "本工具不支持 force；质量门越权只能由用户在界面上显式操作并留痕"}
+        if self.user is None:
+            return {"error": "当前上下文缺少用户身份，无法生成本体草稿"}
+        if not self.session.ontology_id:
+            return {"error": "会话未绑定本体版本 —— 请引导用户从本体版本的「业务探索」入口进入后再生成草稿",
+                    "bindingRequired": True}
+        self._draft_attempts += 1
+        if self._draft_attempts > 2:
+            return {"error": "本回合生成草稿次数已达上限（2 次）；请让用户在「需求文档」视图人工处理"}
+        self._refresh_canvas()
+        readiness = R.evaluate(self.session.canvas)
+        if not readiness["ready"]:
+            return {
+                "error": (f"活画布质量门未通过（{readiness['gatesPassed']}/"
+                          f"{readiness['gatesTotal']} 门，剩余 "
+                          f"{readiness['blockingCount']} 项堵门）。请先按清单继续澄清修图，"
+                          "不要重试 generate_draft"),
+                "blockingItems": self._compact_blocking_items(readiness),
+                "liveCanvasVersion": self._known_canvas_version,
+            }
+        document_id = str(args.get("document_id") or "").strip()
+        if document_id:
+            document = (self.db.query(ExplorationDocument)
+                        .filter(ExplorationDocument.id == document_id).first())
+            if document is None or document.session_id != self.session.id:
+                return {"error": f"需求文档「{document_id[:24]}」不存在或不属于当前会话"}
+        else:
+            document = self._latest_document()
+            if document is None:
+                return {"error": "还没有需求文档 —— 请先调用 generate_document",
+                        "documentRequired": True}
+        state = document_source_state(document, self.session)
+        if state["is_stale"]:
+            return {
+                "error": (f"需求文档基于旧画布（文档来源 v{state['source_canvas_version']}，"
+                          f"当前画布 v{state['current_canvas_version']}）—— 请先重新调用 "
+                          "generate_document 刷新文档，再生成草稿"),
+                "documentCanvasVersion": state["source_canvas_version"],
+                "liveCanvasVersion": state["current_canvas_version"],
+                "staleDocument": True,
+            }
+        try:
+            result = draft_service.create_draft(
+                document.id,
+                S.GenerateDraftRequest(target_ontology_id=self.session.ontology_id),
+                self.db, self.user)
+        except HTTPException as error:
+            detail = error.detail if isinstance(error.detail, dict) else {}
+            payload = {
+                "error": (f"生成草稿被拒（{error.status_code}"
+                          f"{':' + detail['code'] if detail.get('code') else ''}）："
+                          f"{detail.get('message') or error.detail}"),
+                "code": detail.get("code") or str(error.status_code),
+            }
+            if detail.get("code") == "quality_gate_blocked":
+                payload["blockingItems"] = self._compact_blocking_items(
+                    detail.get("readiness") or {})
+            return payload
+        data = (result or {}).get("data") or {}
+        report = data.get("report") or {}
+        draft = data.get("draft") or {}
+        counts = {key: len(value) for key, value in draft.items()
+                  if isinstance(value, list)}
+        stats = dict(self.session.context_stats or {})
+        stats["toolNestedLlmCalls"] = int(stats.get("toolNestedLlmCalls") or 0) + 1
+        self.session.context_stats = stats
+        return {
+            "draftId": data.get("id"),
+            "documentId": document.id,
+            "targetOntologyId": self.session.ontology_id,
+            "counts": counts,
+            "conflicts": len(report.get("conflicts") or []),
+            "warnings": len(report.get("warnings") or []),
+            "note": ("草稿已生成。请引导用户到「需求文档」视图的草稿审阅抽屉勾选并应用 —— "
+                     "应用必须由用户人工确认，你不能代替用户 apply"),
+            **self._state(),
+        }
 
     def _use_skill(self, args: dict) -> dict:
         name = str(args.get("name") or "").strip()
@@ -536,6 +731,7 @@ class ExplorationToolRunner:
         set_committed_value(self.session, "canvas", new_canvas)
         set_committed_value(self.session, "canvas_version", next_version)
         self._known_canvas_version = next_version
+        self._own_versions.add(next_version)
         self._write_base_version = None
         self.canvas_dirty = True
         return None
@@ -590,6 +786,16 @@ class ExplorationToolRunner:
         if parsed != self._known_canvas_version:
             self._refresh_canvas()
             if parsed != self._known_canvas_version:
+                # 期望版本落后，但当前版本是本回合自己写出的（LLM 在同一条消息
+                # 里并行发出多个携带同一旧版本的写调用）：对齐到已知版本继续，
+                # 等价于"省略 expected 版本"路径，不烧工具预算。
+                if (parsed < self._known_canvas_version
+                        and self._known_canvas_version in self._own_versions):
+                    stats = dict(self.session.context_stats or {})
+                    stats["canvasRebases"] = int(stats.get("canvasRebases") or 0) + 1
+                    self.session.context_stats = stats
+                    self._write_base_version = self._known_canvas_version
+                    return None
                 return self._conflict_response(parsed)
         self._write_base_version = parsed
         return None

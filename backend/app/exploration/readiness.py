@@ -270,8 +270,10 @@ def evaluate(canvas: Any) -> dict:
             blk.append(f"堵门问题被搁置但尚未解决：{q.get('question')}（{reason}）")
         else:
             blk.append(f"开放堵门问题：{q.get('question')}")
-    blk.extend(resolved_question_issues(canvas))
+    resolved_blk, resolved_adv = resolved_question_issues(canvas)
+    blk.extend(resolved_blk)
     adv = [f"AI 建议待确认：{q.get('question')}" for q in opens_a]
+    adv.extend(resolved_adv)
     gate("questions", blk, adv)
 
     # -- coverage：场景是端到端验收器，不接受只有名字的空壳场景；

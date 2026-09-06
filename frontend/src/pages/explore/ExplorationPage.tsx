@@ -30,6 +30,7 @@ import ConsistencyPanel from './ConsistencyPanel'
 import DocumentsView from './DocumentsView'
 import DraftReviewDrawer from './DraftReviewDrawer'
 import FileWorkspaceDrawer from './FileWorkspaceDrawer'
+import { PipelinePositionHint } from './PipelinePositionHint'
 import TrialPreflightDialog from './TrialPreflightDialog'
 import { EXPLORE_VIEWS, parseExploreView, parsePendingNewSession, parseSessionBinding, resolveBoundSession, sessionBindingKey, shouldAutoSelectLatestSession, type ExploreView } from './sessionBinding'
 import { SplitHandle, useSplitLayout } from '@/hooks/useSplitLayout'
@@ -528,6 +529,21 @@ export default function ExplorationPage() {
   })
   const semanticIssueCount = (workbenchSemantic?.issues || []).length
 
+  // 本体模型空视图的管线位置提示：结构快照计数（objectTypes/linkTypes/actions
+  // 等合计）为 0 时说明画布成果尚未经「文档 → 草稿 → 应用」写入版本。
+  // 文档列表与「需求文档」视图共用 queryKey 缓存，仅在模型视图挂载时请求。
+  const structureCounts = workbenchSemantic?.overview?.structureCounts
+  const structureTotal = structureCounts
+    ? structureCounts.objectTypes + structureCounts.linkTypes
+      + structureCounts.actions + structureCounts.functions
+      + structureCounts.sentinels
+    : null
+  const { data: modelViewDocs = [] } = useQuery({
+    queryKey: ['bx-documents', sid],
+    queryFn: () => explorationApi.documents(sid!),
+    enabled: view === 'model' && Boolean(sid),
+  })
+
   // 绑定版本生命周期（版本树口径）：仅 editing 草稿提供「转为试跑态」入口；
   // 试跑成功后 lifecycle 变化会同步进 GraphWorkspace 的 key，强制重挂以按试跑态只读重读。
   const workbenchVersionNode = boundVersionTree?.versions.find(v => v.id === workbenchVersionId) || null
@@ -646,6 +662,11 @@ export default function ExplorationPage() {
               searchResults: e.searchResults,
             }
             patchAssistant(m => ({ ...m, steps: [...m.steps, step] }))
+            // agent 生成了文档/草稿 → 立即刷新文档列表（与「需求文档」视图
+            // 共用 queryKey），避免 agent 说「已生成」而列表仍旧
+            if (step.tool === 'generate_document' || step.tool === 'generate_draft') {
+              void queryClient.invalidateQueries({ queryKey: ['bx-documents', targetSid] })
+            }
           } else if (e.type === 'canvas') {
             setCanvas(e.canvas)
             setCompleteness(e.completeness)
@@ -780,6 +801,13 @@ export default function ExplorationPage() {
                       )}
                     </div>
                   </div>
+                )}
+                {structureTotal === 0 && (
+                  <PipelinePositionHint
+                    readiness={readiness}
+                    hasDocument={modelViewDocs.length > 0}
+                    documentVersion={modelViewDocs[0]?.version ?? null}
+                  />
                 )}
                 <div className="min-h-0 flex-1 overflow-hidden">
                   <Suspense fallback={viewLoadingFallback}>

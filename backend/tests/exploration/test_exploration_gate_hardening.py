@@ -196,13 +196,13 @@ def test_resolved_target_field_must_match_canvas_and_threshold_must_be_materiali
         "resolution": "customer_no",
     }])
     assert done and not errors
-    issues = Q.resolved_question_issues(canvas)
+    issues, _ = Q.resolved_question_issues(canvas)
     assert any("尚未写入" in issue and "key_attribute" in issue for issue in issues)
     assert R.evaluate(canvas)["ready"] is False
 
     matching = copy.deepcopy(canvas)
     matching["questions"][0]["resolution"] = "订单号"
-    assert not Q.resolved_question_issues(matching)
+    assert not any(Q.resolved_question_issues(matching))
     assert R.evaluate(matching)["ready"] is True
 
     threshold = _ready_canvas()
@@ -216,7 +216,8 @@ def test_resolved_target_field_must_match_canvas_and_threshold_must_be_materiali
         "resolution": "≥50000元",
     }])
     assert done and not errors
-    assert any("尚未写入" in issue for issue in Q.resolved_question_issues(threshold))
+    threshold_issues, _ = Q.resolved_question_issues(threshold)
+    assert any("尚未写入" in issue for issue in threshold_issues)
     assert R.evaluate(threshold)["ready"] is False
 
     threshold, _, errors = C.upsert_elements(threshold, "rule", [{
@@ -227,9 +228,8 @@ def test_resolved_target_field_must_match_canvas_and_threshold_must_be_materiali
         "statement": "订单金额 ≥ 50000 元时必须审批",
     }])
     assert not errors
-    assert not Q.resolved_question_issues(threshold)
+    assert not any(Q.resolved_question_issues(threshold))
     assert R.evaluate(threshold)["ready"] is True
-
 
 def test_resolved_question_with_broken_target_path_blocks_readiness():
     canvas = _ready_canvas()
@@ -243,6 +243,78 @@ def test_resolved_question_with_broken_target_path_blocks_readiness():
         "resolution": "50000元",
     }])
     assert done and not errors
-    issues = Q.resolved_question_issues(canvas)
+    issues, _ = Q.resolved_question_issues(canvas)
     assert any("无法解析到画布字段" in issue for issue in issues)
     assert R.evaluate(canvas)["ready"] is False
+
+
+def test_resolved_question_with_vanished_target_root_no_longer_blocks():
+    """销账 target 根元素已被删除/合并 → 降级 advisory，存量卡死会话零迁移自愈。
+
+    生产事故回归：「已销账问题…target 根元素『探索起点』不存在」永久堵住
+    questions 质量门，agent 无法自愈。
+    """
+    canvas = _ready_canvas()
+    canvas, ids, _ = Q.raise_questions(canvas, [{
+        "question": "探索起点选哪个场景？",
+        "kind": "blocking",
+        "target": "探索起点",
+        "options": ["A. 全流程", "B. 单场景"],
+    }])
+    canvas, done, errors = Q.resolve_questions(canvas, [{
+        "id": ids[0],
+        "resolution": "A. 全流程",
+    }])
+    assert done and not errors
+
+    issues, advisories = Q.resolved_question_issues(canvas)
+    assert not issues
+    assert any("target 根元素" in item and "不再堵门" in item for item in advisories)
+    # readiness 不再被该存量死锁挡住
+    gate = next(g for g in R.evaluate(canvas)["gates"] if g["id"] == "questions")
+    assert not any("探索起点" in item for item in gate["blockingItems"])
+
+
+def _question_canvas(options=None, suggestion=None) -> tuple[dict, str]:
+    canvas = _ready_canvas()
+    canvas, ids, errors = Q.raise_questions(canvas, [{
+        "question": "大额订单审批的金额门槛是多少？",
+        "kind": "blocking",
+        "target": "Order.amount",
+        "options": options or [],
+        "suggestion": suggestion,
+    }])
+    assert not errors
+    return canvas, ids[0]
+
+
+def test_delegated_resolution_expands_option_and_default():
+    """「按选项B/第1个/按默认」展开为候选字面值后落账；定量铁律不放松。"""
+    options = ["A. ≥50000元", "B. ≥100000元（默认）"]
+    for phrase, expected in [
+        ("按选项B", "B. ≥100000元（默认）"),
+        ("选B", "B. ≥100000元（默认）"),
+        ("第1个", "A. ≥50000元"),
+        ("按默认来", "B. ≥100000元（默认）"),
+    ]:
+        canvas, qid = _question_canvas(options=options)
+        canvas, done, errors = Q.resolve_questions(canvas, [
+            {"id": qid, "resolution": phrase}])
+        assert not errors, (phrase, errors)
+        assert done and done[0]["resolution"] == expected
+        # 展开后的字面值必须通过全部复核（定量 + 金额单位 + 证据匹配另行落库）
+        assert Q.is_quantified(done[0]["resolution"])
+
+
+def test_delegated_resolution_refuses_abdication_and_missing_default():
+    """开放式放权与无法定位的「默认」不能销账 —— 拍板权不放松。"""
+    canvas, qid = _question_canvas(options=["A. ≥50000元", "B. ≥100000元"])
+    canvas, done, errors = Q.resolve_questions(canvas, [
+        {"id": qid, "resolution": "都可以"}])
+    assert not done and any("开放式放权" in e for e in errors)
+
+    # 候选没有标注「默认」也没有定量 suggestion → 按默认销账被拒
+    canvas2, qid2 = _question_canvas(options=["A. ≥50000元", "B. ≥100000元"])
+    canvas2, done2, errors2 = Q.resolve_questions(canvas2, [
+        {"id": qid2, "resolution": "按默认来"}])
+    assert not done2 and any("无法按默认销账" in e for e in errors2)
