@@ -13,7 +13,7 @@ class RestConnector(ConnectorBase):
     """
     REST API 数据源连接器。
 
-    config 示例:
+    config 示例：
     {
         "base_url": "https://api.example.com/v1",
         "endpoints": ["/orders", "/customers"],   # list_resources() 返回该列表
@@ -31,6 +31,9 @@ class RestConnector(ConnectorBase):
         "delta_param": "since"    # 增量参数名, GET 请求附加 ?since=<timestamp>
     }
     """
+
+    # 分页全量拉取的累计行数护栏（单页大小不受本端控制，见 pull_full）
+    _TOTAL_ROWS_CEILING = 100_000
 
     def __init__(self, config: dict):
         self._config = self._normalize_config(config)
@@ -179,6 +182,14 @@ class RestConnector(ConnectorBase):
             if not records:
                 break
             all_records.extend(records)
+            # 总量护栏：页数有 100 页上限，但第三方服务端单页可无视
+            # page_size 返回任意多条（100×N 放大），累计行数封顶截断
+            if len(all_records) >= self._TOTAL_ROWS_CEILING:
+                logger.warning(
+                    "REST 拉取累计行数达到 %d 上限已截断（端点 %s 单页返回"
+                    "不受 page_size 约束）；如需完整同步请缩小上游分页",
+                    self._TOTAL_ROWS_CEILING, resource)
+                break
             # 检查是否存在下一页
             if isinstance(data, dict):
                 if not data.get("next") and len(records) < 100:

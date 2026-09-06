@@ -34,6 +34,9 @@ class SQLConnector(ConnectorBase):
 
     # 表名直查的默认行数护栏（连接配置 max_rows 可调）
     _DEFAULT_MAX_ROWS = 100_000
+    # max_rows 的平台侧硬上限：护栏是防误操作不是防蓄意（蓄意者持有连接
+    # 串可直连源库），配置不得把护栏完全解除
+    _MAX_ROWS_CEILING = 10_000_000
 
     def __init__(self, config: dict):
         self._config = config
@@ -157,10 +160,13 @@ class SQLConnector(ConnectorBase):
             return self._DEFAULT_MAX_ROWS
         try:
             value = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError：JSON 允许 1e999 这类无穷字面量，int(inf) 溢出
             return self._DEFAULT_MAX_ROWS
         # 0/负数视为无效配置回落默认值，而不是退化成「拉 1 行」
-        return value if value > 0 else self._DEFAULT_MAX_ROWS
+        if value <= 0:
+            return self._DEFAULT_MAX_ROWS
+        return min(value, self._MAX_ROWS_CEILING)
 
     def pull_delta(self, resource: str, since: str | None = None) -> list[dict]:
         """增量数据查询 (基于 watermark_column)。
