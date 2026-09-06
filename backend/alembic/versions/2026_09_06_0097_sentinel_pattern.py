@@ -29,12 +29,17 @@ CURSOR_TABLE = "sentinel_pattern_cursor"
 def upgrade() -> None:
     inspector = inspect(op.get_bind())
 
-    sentinels_columns = {
-        column["name"] for column in inspector.get_columns(SENTINELS_TABLE)
-    }
-    if "pattern" not in sentinels_columns:
-        with op.batch_alter_table(SENTINELS_TABLE) as batch:
-            batch.add_column(sa.Column("pattern", sa.JSON(), nullable=True))
+    # 哨兵表由 bootstrap create_all 建表而非迁移链；纯 Alembic 升级库可能
+    # 尚无该表，此时列添加留给应用启动时的 create_all 补齐。
+    if inspector.has_table(SENTINELS_TABLE):
+        sentinels_columns = {
+            column["name"]
+            for column in inspector.get_columns(SENTINELS_TABLE)
+        }
+        if "pattern" not in sentinels_columns:
+            with op.batch_alter_table(SENTINELS_TABLE) as batch:
+                batch.add_column(
+                    sa.Column("pattern", sa.JSON(), nullable=True))
 
     if not inspector.has_table(STATE_TABLE):
         op.create_table(
@@ -106,19 +111,20 @@ def downgrade() -> None:
 
     # 先复位数据：老代码枚举校验不接受 on_pattern，残留值会让后续快照
     # 校验直接失败（0052 的"先改值再收结构"次序）。
-    sentinels_columns = {
-        column["name"] for column in inspector.get_columns(SENTINELS_TABLE)
-    }
-    if "trigger_mode" in sentinels_columns and "pattern" in sentinels_columns:
-        op.execute(
-            "UPDATE sentinels SET trigger_mode = 'on_enter', "
-            "pattern = NULL WHERE trigger_mode = 'on_pattern'")
+    if inspector.has_table(SENTINELS_TABLE):
+        sentinels_columns = {
+            column["name"]
+            for column in inspector.get_columns(SENTINELS_TABLE)
+        }
+        if "trigger_mode" in sentinels_columns and "pattern" in sentinels_columns:
+            op.execute(
+                "UPDATE sentinels SET trigger_mode = 'on_enter', "
+                "pattern = NULL WHERE trigger_mode = 'on_pattern'")
+        if "pattern" in sentinels_columns:
+            with op.batch_alter_table(SENTINELS_TABLE) as batch:
+                batch.drop_column("pattern")
 
     if inspector.has_table(STATE_TABLE):
         op.drop_table(STATE_TABLE)
     if inspector.has_table(CURSOR_TABLE):
         op.drop_table(CURSOR_TABLE)
-
-    if "pattern" in sentinels_columns:
-        with op.batch_alter_table(SENTINELS_TABLE) as batch:
-            batch.drop_column("pattern")

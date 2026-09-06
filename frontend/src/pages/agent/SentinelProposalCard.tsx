@@ -82,6 +82,19 @@ export function SentinelProposalCard({ oid, proposal }: {
             <span className="break-all">{proposal.definition.name}</span>
             <span className="text-[var(--color-text-tertiary)]">监听对象</span>
             <span>{proposal.definition.bindings.map(item => item.alias).join('、')}</span>
+            {(proposal.definition as any).triggerMode === 'on_pattern' && (proposal.definition as any).pattern && (
+              <>
+                <span className="text-[var(--color-text-tertiary)]">事件模式</span>
+                <span className="break-all">
+                  {((proposal.definition as any).pattern.stages || [])
+                    .map((stage: any) => stage.alias).join(' → ')}
+                  {((proposal.definition as any).pattern.absence || {}).enabled ? '（含缺失分支）' : ''}
+                  {(proposal.definition as any).pattern.aggregate
+                    ? `（聚合 ${(proposal.definition as any).pattern.aggregate.function}）`
+                    : ''}
+                </span>
+              </>
+            )}
             <span className="text-[var(--color-text-tertiary)]">触发动作</span>
             <span>{proposal.definition.actionIds.length} 个</span>
           </div>

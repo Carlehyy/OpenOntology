@@ -20,6 +20,30 @@ export type SentinelParameterBinding =
   | SentinelParameterBinding[]
   | { [key: string]: SentinelParameterBinding }
 
+export interface SentinelPatternStage {
+  alias: string
+  objectTypeId: string
+  filter?: string | null
+  within?: number | null
+}
+
+export interface SentinelPatternAggregate {
+  property: string
+  function: 'count' | 'avg' | 'sum' | 'min' | 'max'
+  window: number
+  threshold: number
+  comparison?: 'gte' | 'gt' | 'lte' | 'lt'
+}
+
+/** CEP 事件模式（triggerMode='on_pattern' 时必填）。 */
+export interface SentinelPattern {
+  stages: SentinelPatternStage[]
+  within?: number
+  absence?: { enabled: boolean }
+  aggregate?: SentinelPatternAggregate
+  condition?: string | null
+}
+
 export interface Sentinel {
   id: string
   ontologyId: string
@@ -29,6 +53,7 @@ export interface Sentinel {
   bindings: SentinelBinding[]
   links: SentinelLink[]
   condition?: string
+  pattern?: SentinelPattern | null
   conditionRows?: any[]
   conditionLogic?: string
   primaryAlias?: string
@@ -38,7 +63,7 @@ export interface Sentinel {
   onSchedule: boolean
   scanIntervalSeconds: number
   lastScannedAt?: string
-  triggerMode?: 'on_enter' | 'on_enter_leave' | 'run_on_all'
+  triggerMode?: 'on_enter' | 'on_enter_leave' | 'run_on_all' | 'on_pattern'
   muted: boolean
   enabled: boolean
   releaseId?: string | null

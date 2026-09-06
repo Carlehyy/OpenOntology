@@ -123,4 +123,5 @@ NetworkX/SQL、对象写入失败不切本地目录。关键词搜索应验证 P
 - 探索真实 LLM：`backend/scripts/exploration_live_e2e.py`；
 - 文件网关/MinIO：`backend/scripts/steward_file_asset_live_e2e.py`；
 - Sentinel：`scripts/data/run_sentinel_real_data_e2e.py`；
+- Sentinel CEP（事件日志/时间算子/序列缺失/窗口聚合）：`scripts/data/run_sentinel_cep_e2e.py`（须在隔离 staging 运行，直写实例在 production 环境被拒绝）；
 - MinIO：`backend/tests/object_storage/test_minio_live.py`。
