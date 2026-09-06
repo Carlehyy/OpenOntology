@@ -70,3 +70,5 @@ test_data/screenshots/
 .playwright-mcp/
 .codegraph/
 .zcode/
+.v2c/
+.video_agent/
