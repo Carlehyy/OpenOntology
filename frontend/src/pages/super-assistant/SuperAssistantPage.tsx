@@ -28,7 +28,7 @@ import { pickInitialConversationId } from '@/components/assistant-widget/logic'
 import { hasMenuAccess } from '@/config/navigation'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
-import ConfigurationPanel, { errorText } from './components/AssistantConfiguration'
+import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './components/AssistantConfiguration'
 import ConfirmActionDialog from './components/ConfirmActionDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
@@ -88,6 +88,10 @@ export default function SuperAssistantPage() {
   // 助手配置在 ≥1280 视口默认展开（右上角按钮呈选中态）；更窄的 lg 档与移动端
   // 默认收起——面板常驻会挤占聊天区头部的最小可用宽度
   const [configOpen, setConfigOpen] = useState(() => window.matchMedia('(min-width: 1280px)').matches)
+  // 面板宽度（px）：单一卡片结构下聊天列经 --config-w 让位，宽度状态提升到页面级；
+  // 拖拽中禁用 padding 过渡，聊天列跟手移动，松手后才恢复开合动画
+  const [configPanelWidth, setConfigPanelWidth] = useState(DEFAULT_CONFIG_PANEL_WIDTH)
+  const [configPanelDragging, setConfigPanelDragging] = useState(false)
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [savingTitle, setSavingTitle] = useState(false)
@@ -716,9 +720,12 @@ export default function SuperAssistantPage() {
         onOpenSearch={() => setSearchOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
       />
-      {/* 内嵌内容卡（大组件）：16px 圆角（阶梯顶 --radius-xl）让画布包裹感更柔和；
-          分隔符上方是常用功能工具条，下方是主体内容区 */}
-      <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-card shadow-sm">
+      {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
+          面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}
+      <section
+        style={{ '--config-w': `${configPanelWidth}px` } as React.CSSProperties}
+        className={`relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-card shadow-sm motion-reduce:transition-none ${configPanelDragging ? 'transition-none' : 'transition-[padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]'} ${configOpen ? 'lg:pr-[var(--config-w,26rem)]' : 'lg:pr-0'}`}
+      >
         <header className="relative z-10 flex h-[4.3125rem] shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3 sm:px-4">
           <button
             type="button"
@@ -865,17 +872,21 @@ export default function SuperAssistantPage() {
             </footer>
           )}
         </ConfigProvider>
-      </section>
 
+      {/* 助手配置面板：单一大卡内的右侧栏（移动端为卡内覆盖抽屉） */}
       <ConfigurationPanel
         open={configOpen}
         onClose={() => setConfigOpen(false)}
+        width={configPanelWidth}
+        onWidthResize={setConfigPanelWidth}
+        onDraggingChange={setConfigPanelDragging}
         skills={skills}
         servers={servers}
         refreshSkills={refreshSkills}
         refreshServers={refreshServers}
         conversationId={selectedId}
       />
+      </section>
 
       <GlobalSearchPalette
         open={searchOpen}
