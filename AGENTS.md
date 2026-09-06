@@ -14,6 +14,7 @@ OpenOntology 是“本体即服务”平台。前端导航是代码发现入口�
 |---|---|
 | 平台概览 | `backend/app/platform/` |
 | 超级助手 | `backend/app/super_assistant/` |
+| 助手委派枢纽（平台助手目录与统一委派契约） | `backend/app/assistant_hub/` |
 | 助手会话评估（admin 旁路质量评估） | `backend/app/assistant_evaluation/` |
 | 三维场景（白模场景管理与建模） | `backend/app/scenes/` |
 | 业务探索 | `backend/app/exploration/` |

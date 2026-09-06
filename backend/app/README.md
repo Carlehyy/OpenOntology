@@ -11,6 +11,7 @@ app/
 ├── bootstrap/         FastAPI 健康检查、生命周期与启动 seed
 ├── platform/          平台概览
 ├── super_assistant/   超级助手、Skill 与 MCP
+├── assistant_hub/     平台助手目录与统一委派契约（超级助手经此委派其他助手）
 ├── assistant_evaluation/  助手会话质量旁路评估（admin）
 ├── exploration/       业务探索
 ├── ontologies/        本体、映射、图、Agent 与 Sentinel
