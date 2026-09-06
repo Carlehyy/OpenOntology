@@ -257,6 +257,76 @@ def test_canvas_commit_uses_atomic_compare_and_swap(db):
     assert [item["name"] for item in session.canvas["objects"]] == ["ConcurrentWinner"]
 
 
+def test_in_turn_stale_version_rebases_without_conflict(db):
+    """LLM 批量携带同一旧版本：自身写入造成的推进对齐继续，不烧工具预算。"""
+    session = ExplorationSession(
+        id=str(uuid.uuid4()), title="rebase", canvas=C.empty_canvas(), canvas_version=0)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    runner = ExplorationToolRunner(db, session)
+
+    first = runner.run("upsert_elements", {
+        "kind": "actor", "expected_canvas_version": 0,
+        "elements": [{"name": "Employee", "displayName": "员工", "kind": "role"}],
+    })
+    assert "error" not in first and first["canvasVersion"] == 1
+
+    # 模型在同一条消息里并行发出的第二个写调用仍带 expected v0 —— 服务端
+    # 对齐到本回合已写出的 v1，继续落库而不是报画布版本冲突。
+    second = runner.run("upsert_elements", {
+        "kind": "actor", "expected_canvas_version": 0,
+        "elements": [{"name": "Admin", "displayName": "管理员", "kind": "role"}],
+    })
+    assert "error" not in second and second["canvasVersion"] == 2
+    assert {a["name"] for a in session.canvas["actors"]} == {"Employee", "Admin"}
+    assert session.context_stats.get("canvasRebases") == 1
+
+
+def test_external_concurrent_write_still_conflicts_after_rebase(db):
+    """回合外部的真实并发写入不被 rebase 吞掉：CAS 硬冲突保持不变。"""
+    session = ExplorationSession(
+        id=str(uuid.uuid4()), title="ext", canvas=C.empty_canvas(), canvas_version=0)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    runner = ExplorationToolRunner(db, session)
+    own = runner.run("upsert_elements", {
+        "kind": "actor", "expected_canvas_version": 0,
+        "elements": [{"name": "Employee", "kind": "role"}],
+    })
+    assert own["canvasVersion"] == 1
+    # 生产时序对齐：回合内写入随后即提交（_persist/_prepare_history 都会 commit），
+    # 释放写锁后再模拟另一请求的外部写入。
+    db.commit()
+
+    OtherSession = sessionmaker(bind=db.get_bind())
+    other = OtherSession()
+    try:
+        current = other.query(ExplorationSession).filter_by(id=session.id).one()
+        external, applied, errors = C.upsert_elements(
+            current.canvas, "actor", [{"name": "Concurrent", "kind": "role"}])
+        assert applied and not errors
+        current.canvas = external
+        current.canvas_version = 2
+        other.commit()
+    finally:
+        other.close()
+
+    # 旧版本（甚至本回合已知的 v1）写入都必须硬冲突 —— v2 不是本 runner 写出的
+    conflict = runner.run("upsert_elements", {
+        "kind": "actor", "expected_canvas_version": 0,
+        "elements": [{"name": "Late", "kind": "role"}],
+    })
+    assert conflict.get("conflict") is True
+    assert conflict["canvasVersion"] == 2
+    late_conflict = runner.run("upsert_elements", {
+        "kind": "actor", "expected_canvas_version": 1,
+        "elements": [{"name": "Late2", "kind": "role"}],
+    })
+    assert late_conflict.get("conflict") is True
+
+
 def test_uploaded_text_remains_user_owned_after_authorized_agent_edit(
         db, tmp_path, monkeypatch):
     """一次获授权编辑不能把用户文件永久降级为后续回合可任意修改的 agent 文件。"""

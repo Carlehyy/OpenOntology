@@ -232,6 +232,278 @@ def test_chat_retries_one_empty_model_response(client, auth_headers, session,
     assert response.json()["data"]["content"] == "已恢复并继续处理。"
 
 
+def test_chat_fabricated_write_claims_trigger_corrective_retry(
+        client, auth_headers, session, db, admin_user, monkeypatch):
+    """零工具调用却声称写入/版本推进 → 纠偏重试一次；改口为计划口吻后放行。
+
+    生产事故回归：MiniMax-M3 在长会话里直接输出「已成功写入（v12 → v22）、
+    8 次工具调用成功」而 steps 为空、画布停在 v12。
+    """
+    _fake_model_config(db, admin_user)
+    calls = {"n": 0}
+
+    def fake_chat(_call_kwargs, messages, _tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"content": "已成功写入 5 个对象（画布 v0 → v3），本回合 6 次工具调用全部完成。",
+                    "tool_calls": [], "usage": None}
+        assert "服务端核对" in messages[-1]["content"]
+        assert "禁止声称未通过工具执行" in messages[-1]["content"]
+        return {"content": "修正：改为计划 —— 接下来我将调用 upsert_elements 写入 5 个对象。",
+                "tool_calls": [], "usage": None}
+
+    from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
+                    json={"message": "帮我建模", "stream": False})
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 2
+    content = r.json()["data"]["content"]
+    assert "接下来我将" in content and "已成功写入" not in content
+
+    row = (db.query(ExplorationSession)
+           .filter(ExplorationSession.id == session["id"]).one())
+    assert row.context_stats.get("fabricationRetries") == 1
+
+
+def test_chat_persistent_fabrication_gets_server_fact_banner(
+        client, auth_headers, session, db, admin_user, monkeypatch):
+    """纠偏重试后仍虚构：附服务端事实横幅放行，绝不静默吞掉。"""
+    _fake_model_config(db, admin_user)
+    calls = {"n": 0}
+
+    def fake_chat(_call_kwargs, _messages, _tools):
+        calls["n"] += 1
+        return {"content": "已成功写入画布并生成 ER 图。",
+                "tool_calls": [], "usage": None}
+
+    from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
+                    json={"message": "帮我建模", "stream": False})
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 2                       # 纠偏只重试一次
+    content = r.json()["data"]["content"]
+    assert "已成功写入画布" in content            # 原文保留
+    assert "[服务端核对]" in content              # 横幅附上权威事实
+    assert "本回合实际工具调用 0 次" in content
+
+
+def test_chat_truthful_previous_turn_recap_not_flagged(
+        client, auth_headers, session, db, admin_user, monkeypatch):
+    """「上回合已写入…」的 truthful 回顾不触发守卫（由历史检查点提供事实）。"""
+    _fake_model_config(db, admin_user)
+    db.add(ExplorationMessage(
+        session_id=session["id"], role="assistant", content="已沉淀订单对象。",
+        steps=[{"tool": "upsert_elements", "arguments": {}, "summary": "x",
+                "durationMs": 3}]))
+    db.commit()
+    calls = {"n": 0}
+
+    def fake_chat(_call_kwargs, _messages, _tools):
+        calls["n"] += 1
+        return {"content": "上回合已成功写入订单对象；本回合无新增，请补充金额口径。",
+                "tool_calls": [], "usage": None}
+
+    from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
+                    json={"message": "继续", "stream": False})
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 1                        # 未触发纠偏
+    assert r.json()["data"]["content"] == "上回合已成功写入订单对象；本回合无新增，请补充金额口径。"
+
+
+def test_chat_planning_language_not_flagged(
+        client, auth_headers, session, db, admin_user, monkeypatch):
+    """计划口吻（"接下来将…推进到 vN"）不算已完成声明。"""
+    _fake_model_config(db, admin_user)
+    calls = {"n": 0}
+
+    def fake_chat(_call_kwargs, _messages, _tools):
+        calls["n"] += 1
+        return {"content": "计划：本回合将把画布从 v0 推进到 v3，接下来将写入 3 个对象。",
+                "tool_calls": [], "usage": None}
+
+    from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
+                    json={"message": "说说计划", "stream": False})
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 1
+    assert "[服务端核对]" not in r.json()["data"]["content"]
+
+
+def test_chat_history_tool_checkpoint_injected(
+        client, auth_headers, session, db, admin_user, monkeypatch):
+    """跨回合历史要携带服务端权威的工具执行检查点（反虚构的结构层）。"""
+    _fake_model_config(db, admin_user)
+    db.add(ExplorationMessage(
+        session_id=session["id"], role="user", content="建对象"))
+    db.add(ExplorationMessage(
+        session_id=session["id"], role="assistant", content="已沉淀订单对象。",
+        steps=[
+            {"tool": "upsert_elements", "arguments": {}, "summary": "沉淀 1 个",
+             "durationMs": 3},
+            {"tool": "show_diagram", "arguments": {}, "summary": "x",
+             "durationMs": 1, "error": "状态图质量校验未通过"},
+        ]))
+    db.commit()
+    captured: dict = {}
+
+    def fake_chat(_call_kwargs, messages, _tools):
+        captured["system"] = messages[0]["content"]
+        return {"content": "收到。", "tool_calls": [], "usage": None}
+
+    from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
+                    json={"message": "继续", "stream": False})
+    assert r.status_code == 200, r.text
+    system = captured["system"]
+    assert "历史回合工具执行记录" in system
+    assert "upsert_elements×1" in system
+    assert "show_diagram×1（成0/败1）" in system
+    assert "叙述不等于执行" in system
+    # 检查点只进模型视图，不改写持久化消息
+    detail = client.get(f"{BASE}/sessions/{session['id']}",
+                        headers=auth_headers).json()["data"]
+    assert detail["messages"][1]["content"] == "已沉淀订单对象。"
+
+
+# ---------------------------------------------------------------- 管线工具（agent 最后一公里）
+
+
+def _pipeline_ready_canvas() -> dict:
+    """十门全过的小画布（供 generate_document/generate_draft 工具测试）。"""
+    from app.exploration import readiness as R
+    canvas = C.empty_canvas()
+    canvas, _, errors = C.upsert_elements(canvas, "object", [{
+        "name": "Order", "displayName": "订单", "keyAttribute": "order_no",
+        "attributes": [
+            {"name": "order_no", "displayName": "订单号", "typeHint": "文本",
+             "required": True},
+            {"name": "amount", "displayName": "金额", "typeHint": "金额"},
+        ],
+    }])
+    assert not errors
+    canvas, _, errors = C.upsert_elements(canvas, "actor", [
+        {"name": "Approver", "displayName": "审批人", "kind": "role"}])
+    assert not errors
+    canvas, _, errors = C.upsert_elements(canvas, "behavior", [{
+        "name": "approve_order", "displayName": "审批订单", "actor": "Approver",
+        "object": "Order", "trigger": "订单提交审批", "outcome": "记录审批结论",
+    }])
+    assert not errors
+    canvas, _, errors = C.upsert_elements(canvas, "scenario", [{
+        "name": "approval_flow", "displayName": "订单审批流程", "goal": "完成订单审批",
+        "actors": ["Approver"], "steps": ["审批人审批订单并记录结论"],
+        "objects": ["Order"], "behaviors": ["approve_order"],
+        "expectedOutcome": "订单获得明确审批结论",
+    }])
+    assert not errors
+    assert R.evaluate(canvas)["ready"] is True
+    return canvas
+
+
+def _tool_session(db, *, ontology_id=None, canvas=None):
+    row = ExplorationSession(
+        id=str(uuid.uuid4()), title="pipeline-tools",
+        canvas=canvas if canvas is not None else C.empty_canvas(),
+        canvas_version=1, ontology_id=ontology_id)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def test_generate_document_tool_rejects_force_and_empty_canvas(db, admin_user):
+    from app.exploration.models import ExplorationDocument
+    from app.exploration.toolkit import ExplorationToolRunner
+    row = _tool_session(db)
+    runner = ExplorationToolRunner(db, row, user=admin_user)
+    r1 = runner.run("generate_document", {"force": True})
+    assert "不支持 force" in r1["error"]
+    r2 = runner.run("generate_document", {})
+    assert "画布还是空的" in r2["error"]
+    assert db.query(ExplorationDocument).filter_by(session_id=row.id).count() == 0
+
+
+def test_generate_document_tool_reuses_fresh_document(db, admin_user):
+    from app.exploration.models import ExplorationDocument
+    from app.exploration.toolkit import ExplorationToolRunner
+    row = _tool_session(db, canvas=_pipeline_ready_canvas())
+    runner = ExplorationToolRunner(db, row, user=admin_user)
+    first = runner.run("generate_document", {})
+    assert first.get("documentId") and first["reused"] is False
+    # 画布未变 → 复用既有文档，不刷 bx_documents 行（防 LLM 重试风暴）
+    second = runner.run("generate_document", {})
+    assert second["reused"] is True
+    assert second["documentId"] == first["documentId"]
+    assert db.query(ExplorationDocument).filter_by(session_id=row.id).count() == 1
+
+
+def test_generate_draft_tool_binding_then_live_gate(db, admin_user):
+    from app.exploration.models import ExplorationDocument
+    from app.exploration.toolkit import ExplorationToolRunner
+    row = _tool_session(db, canvas=_pipeline_ready_canvas())
+    runner = ExplorationToolRunner(db, row, user=admin_user)
+    assert runner.run("generate_draft", {}).get("bindingRequired") is True
+
+    row.ontology_id = str(uuid.uuid4())
+    row.canvas = C.empty_canvas()          # 绑定但活画布未过门
+    db.commit()
+    result = runner.run("generate_draft", {})
+    assert "活画布质量门未通过" in result["error"]
+    assert result.get("blockingItems")
+    assert "不要重试" in result["error"]
+    # 活画布预检挡在服务调用之前 —— 没有任何文档/草稿产生
+    assert db.query(ExplorationDocument).filter_by(session_id=row.id).count() == 0
+
+
+def test_generate_draft_tool_stale_document_guides_regeneration(db, admin_user):
+    from app.exploration.toolkit import ExplorationToolRunner
+    row = _tool_session(db, ontology_id=str(uuid.uuid4()),
+                        canvas=_pipeline_ready_canvas())
+    runner = ExplorationToolRunner(db, row, user=admin_user)
+    assert runner.run("generate_document", {}).get("documentId")
+    new_canvas, _, errors = C.upsert_elements(row.canvas, "scenario", [
+        {"name": "approval_flow", "expectedOutcome": "订单获得明确审批结论并归档"}])
+    assert not errors
+    row.canvas = new_canvas
+    row.canvas_version += 1
+    db.commit()
+    result = runner.run("generate_draft", {})
+    assert result.get("staleDocument") is True
+    assert "重新调用 generate_document" in result["error"]
+
+
+def test_generate_draft_tool_happy_path_and_attempt_cap(db, admin_user, ontology):
+    from app.exploration.models import ExplorationDraft
+    from app.exploration.toolkit import ExplorationToolRunner
+    row = _tool_session(db, ontology_id=ontology["id"],
+                        canvas=_pipeline_ready_canvas())
+    runner = ExplorationToolRunner(db, row, user=admin_user)
+    assert runner.run("generate_document", {}).get("documentId")
+
+    first = runner.run("generate_draft", {})
+    assert first.get("draftId")
+    assert first["counts"].get("objectTypes", 0) >= 1
+    assert "人工确认" in first["note"]
+    stored = db.query(ExplorationDraft).filter_by(id=first["draftId"]).one()
+    assert stored.status == "draft"
+
+    second = runner.run("generate_draft", {})
+    assert second.get("draftId")           # 第 2 次允许
+    third = runner.run("generate_draft", {})
+    assert "上限" in third["error"]         # 第 3 次封顶
+
+
 def test_chat_invalid_elements_rejected(client, auth_headers, session, db, admin_user, monkeypatch):
     _fake_model_config(db, admin_user)
     calls = {"n": 0}
