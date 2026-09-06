@@ -357,7 +357,30 @@ TOOL_DEFS: list[dict] = [
                         "onChange": {"type": "boolean"},
                         "onSchedule": {"type": "boolean"},
                         "scanIntervalSeconds": {"type": "integer"},
-                        "triggerMode": {"type": "string", "enum": ["on_enter", "on_enter_leave", "run_on_all"]},
+                        "triggerMode": {"type": "string", "enum": ["on_enter", "on_enter_leave", "run_on_all", "on_pattern"]},
+                        "pattern": {
+                            "type": "object",
+                            "description": "triggerMode=on_pattern 时必填的 CEP 事件模式；stages 的 alias/objectTypeId 必须与 bindings 镜像一致，onChange/onSchedule 必须同时为 true，窗口不得小于 scanIntervalSeconds",
+                            "properties": {
+                                "stages": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "object", "properties": {
+                                    "alias": {"type": "string"},
+                                    "objectTypeId": {"type": "string"},
+                                    "filter": {"type": "string", "description": "如 \"a.status == 'submitted'\"；在事件时刻求值，应引用被监听的变更属性"},
+                                    "within": {"type": "integer", "description": "完成本 stage 允许的秒数窗口（60~604800），缺省用 pattern.within"}
+                                }, "required": ["alias", "objectTypeId"]}},
+                                "within": {"type": "integer", "description": "缺省窗口秒数，默认 3600"},
+                                "absence": {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"], "description": "缺失分支：stage 超时未完成时以 edge=absence 触发"},
+                                "aggregate": {"type": "object", "description": "单 stage 窗口聚合（count/avg/sum/min/max），带滞回防抖", "properties": {
+                                    "property": {"type": "string"},
+                                    "function": {"type": "string", "enum": ["count", "avg", "sum", "min", "max"]},
+                                    "window": {"type": "integer"},
+                                    "threshold": {"type": "number"},
+                                    "comparison": {"type": "string", "enum": ["gte", "lte", "gt", "lt"]}
+                                }, "required": ["property", "function", "window", "threshold"]},
+                                "condition": {"type": "string", "description": "模式级最终条件，可引用各 stage 别名；支持 changed_within('a.prop',秒)/prev('a.prop') 时间算子"}
+                            },
+                            "required": ["stages"]
+                        },
                         "muted": {"type": "boolean"}
                     },
                     "additionalProperties": False

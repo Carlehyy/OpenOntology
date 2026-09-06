@@ -7,6 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models.sentinel import Sentinel, SentinelMatchState
+from app.ontologies.sentinels.models import (
+    SentinelPatternCursor,
+    SentinelPatternState,
+)
 from app.ontologies.sentinels.dynamic_service import ORIGIN_BUILTIN
 
 
@@ -134,5 +138,13 @@ def delete_sentinel(
             .filter(SentinelMatchState.sentinel_id == sentinel_id)
             .delete(synchronize_session=False)
         )
+        (
+            db.query(SentinelPatternState)
+            .filter(SentinelPatternState.sentinel_id == sentinel_id)
+            .delete(synchronize_session=False)
+        )
+        db.query(SentinelPatternCursor).filter(
+            SentinelPatternCursor.sentinel_id == sentinel_id,
+        ).delete(synchronize_session=False)
         db.delete(sentinel)
         db.commit()

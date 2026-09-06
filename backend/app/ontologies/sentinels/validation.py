@@ -219,6 +219,167 @@ def _temporal_expression_errors(
     return errors
 
 
+def _pattern_definition_errors(
+        sentinel, aliases: dict[str, str],
+        alias_properties: dict[str, set[str]], links: list[dict],
+        *, sentinel_id: str, sentinel_name: str) -> list[dict]:
+    """CEP 模式哨兵（trigger_mode='on_pattern'）的深度结构校验。
+
+    形状/边界权威在 ``cep.pattern.normalize_pattern``；此处叠加需要发布
+    图谱上下文的校验：stages 与 bindings 镜像一致、stage filter 引用发布
+    属性且禁用时间算子（事件时刻单别名求值没有批量预取上下文）、跨对象
+    相邻 stage 必须有 links 关联、窗口 ≥ 扫描间隔（否则超时判定形同虚设）、
+    聚合属性存在、模式级 condition 可编译。
+    """
+    from app.ontologies.sentinels.cep import pattern as cep_pattern
+
+    errors: list[dict] = []
+    sid, label = sentinel_id, sentinel_name
+    mode = str(getattr(sentinel, "trigger_mode", "") or "")
+    pattern = getattr(sentinel, "pattern", None)
+    is_pattern_mode = mode == cep_contract.PATTERN_TRIGGER_MODE
+
+    def _gate(code: str, message: str, field: str = "pattern") -> None:
+        errors.append(_gate_error(
+            code, "sentinel", message, item_id=sid, name=label,
+            field=field))
+
+    if not is_pattern_mode:
+        if pattern is not None:
+            _gate(
+                "invalid_sentinel_pattern_mode",
+                f"哨兵「{label}」pattern 仅在 triggerMode=on_pattern 时允许出现")
+        return errors
+    definition = cep_pattern.normalize_pattern(pattern)
+    if definition is None:
+        _gate(
+            "invalid_sentinel_pattern",
+            f"哨兵「{label}」triggerMode=on_pattern 时必须携带结构合法的 "
+            "pattern（stages 1~4、窗口 60s~7d、聚合字段白名单）")
+        return errors
+    if not (getattr(sentinel, "on_change", False)
+            and getattr(sentinel, "on_schedule", False)):
+        _gate(
+            "invalid_sentinel_pattern_trigger_flags",
+            f"哨兵「{label}」模式哨兵必须同时开启 onChange 与 onSchedule",
+            field="onChange")
+    scan_interval = int(getattr(sentinel, "scan_interval_seconds", 300) or 300)
+    stages = definition["stages"]
+    stage_by_alias = {stage["alias"]: stage for stage in stages}
+
+    # stages 必须与 bindings 镜像（同别名、同对象类型），保证引擎按对象
+    # 类型筛选哨兵的既有路径对模式哨兵同样成立。
+    if set(stage_by_alias) != set(aliases):
+        _gate(
+            "sentinel_pattern_bindings_mismatch",
+            f"哨兵「{label}」pattern.stages 的 alias 集合必须与 bindings "
+            "完全一致（镜像约束）")
+        return errors
+    for alias, stage in stage_by_alias.items():
+        if alias in aliases and aliases[alias] != stage["objectTypeId"]:
+            _gate(
+                "sentinel_pattern_bindings_mismatch",
+                f"哨兵「{label}」stage「{alias}」的对象类型必须与 bindings "
+                "中同名别名一致")
+    primary = str(getattr(sentinel, "primary_alias", "") or "")
+    if primary and primary not in stage_by_alias:
+        _gate(
+            "invalid_sentinel_primary_alias",
+            f"哨兵「{label}」模式哨兵的 primaryAlias 必须指向某个 stage 别名",
+            field="primaryAlias")
+
+    for index, stage in enumerate(stages):
+        props = alias_properties.get(stage["alias"], set())
+        filter_expr = stage.get("filter")
+        if filter_expr:
+            try:
+                from app.ontologies.formal_modeling.safe_eval import (
+                    validate_safe_expression,
+                )
+                validate_safe_expression(
+                    filter_expr, {stage["alias"], "obj"})
+            except Exception as exc:
+                _gate(
+                    "sentinel_pattern_filter_invalid",
+                    f"哨兵「{label}」stage「{stage['alias']}」的 filter 无法"
+                    f"编译: {exc}", field=f"pattern.stages[{index}].filter")
+            errors.extend(_sentinel_expression_property_errors(
+                filter_expr,
+                {stage["alias"]: props, "obj": props},
+                sentinel_id=sid, sentinel_name=label,
+                field=f"pattern.stages[{index}].filter"))
+            errors.extend(_temporal_expression_errors(
+                filter_expr,
+                {stage["alias"]: props, "obj": props},
+                sentinel_id=sid, sentinel_name=label,
+                field=f"pattern.stages[{index}].filter",
+                allow_temporal=False))
+        if index > 0:
+            within = cep_pattern.stage_window(definition, index)
+            if within < scan_interval:
+                _gate(
+                    "sentinel_pattern_window_below_scan",
+                    f"哨兵「{label}」stage「{stage['alias']}」的窗口 "
+                    f"({within}s) 不得小于扫描间隔 ({scan_interval}s)，"
+                    "否则超时判定形同虚设",
+                    field=f"pattern.stages[{index}].within")
+
+    aggregate = definition.get("aggregate")
+    if aggregate:
+        props = alias_properties.get(stages[0]["alias"], set())
+        if aggregate["property"] not in props:
+            _gate(
+                "sentinel_pattern_aggregate_property_not_found",
+                f"哨兵「{label}」聚合属性 {aggregate['property']} 在发布"
+                "版本中不存在",
+                field="pattern.aggregate.property")
+        if aggregate["window"] < scan_interval:
+            _gate(
+                "sentinel_pattern_window_below_scan",
+                f"哨兵「{label}」聚合窗口 ({aggregate['window']}s) 不得小于"
+                f"扫描间隔 ({scan_interval}s)",
+                field="pattern.aggregate.window")
+
+    # 跨对象模式：相邻 stage 必须有 links 关联（同对象类型时走同实例关联）。
+    if not definition.get("same_instance", True):
+        for previous, stage in zip(stages, stages[1:]):
+            connected = any(
+                {link.get("from"), link.get("to")}
+                == {previous["alias"], stage["alias"]}
+                for link in links if isinstance(link, dict)
+            )
+            if not connected:
+                _gate(
+                    "sentinel_pattern_link_missing",
+                    f"哨兵「{label}」跨对象相邻 stage "
+                    f"「{previous['alias']}」→「{stage['alias']}」"
+                    "必须声明 links 关联")
+
+    condition = definition.get("condition")
+    if condition:
+        try:
+            from app.ontologies.formal_modeling.safe_eval import (
+                validate_safe_expression,
+            )
+            validate_safe_expression(
+                condition,
+                set(stage_by_alias) | set(cep_contract.TEMPORAL_FUNCTIONS))
+        except Exception as exc:
+            _gate(
+                "sentinel_pattern_condition_invalid",
+                f"哨兵「{label}」模式级 condition 无法编译: {exc}",
+                field="pattern.condition")
+        errors.extend(_sentinel_expression_property_errors(
+            condition, alias_properties,
+            sentinel_id=sid, sentinel_name=label,
+            field="pattern.condition"))
+        errors.extend(_temporal_expression_errors(
+            condition, alias_properties,
+            sentinel_id=sid, sentinel_name=label,
+            field="pattern.condition", allow_temporal=True))
+    return errors
+
+
 def validate_sentinels(
     sentinels: list[Sentinel],
     object_types: list[FoObjectType],
@@ -325,6 +486,19 @@ def validate_sentinels(
                 "invalid_sentinel_primary_alias", "sentinel",
                 f"哨兵「{label}」的 primaryAlias 必须指向已声明且唯一的 alias",
                 item_id=sid, name=label, field="primaryAlias"))
+        # 别名 → 发布属性集合：condition 校验与 pattern 深度校验共用，
+        # 无条件构建（pattern 哨兵可以没有顶层 condition）。
+        alias_properties = {}
+        for alias, object_type_id in aliases.items():
+            object_type = object_by_id.get(object_type_id)
+            alias_properties[alias] = {
+                str(item.get("name"))
+                for item in (
+                    (object_type.properties or [])
+                    if object_type is not None else []
+                )
+                if isinstance(item, dict) and item.get("name")
+            }
         if sentinel.condition:
             try:
                 from app.ontologies.formal_modeling.safe_eval import (
@@ -343,17 +517,6 @@ def validate_sentinels(
                     "invalid_sentinel_condition", "sentinel",
                     f"哨兵「{label}」的 condition 无法编译: {exc}",
                     item_id=sid, name=label, field="condition"))
-            alias_properties = {}
-            for alias, object_type_id in aliases.items():
-                object_type = object_by_id.get(object_type_id)
-                alias_properties[alias] = {
-                    str(item.get("name"))
-                    for item in (
-                        (object_type.properties or [])
-                        if object_type is not None else []
-                    )
-                    if isinstance(item, dict) and item.get("name")
-                }
             errors.extend(_sentinel_expression_property_errors(
                 sentinel.condition,
                 alias_properties,
@@ -407,6 +570,10 @@ def validate_sentinels(
                     "sentinel_link_endpoint_mismatch", "sentinel",
                     f"哨兵「{label}」的 link 端点类型与关系类型方向不匹配",
                     item_id=sid, name=label, field=f"links[{index}]"))
+
+        errors.extend(_pattern_definition_errors(
+            sentinel, aliases, alias_properties, links,
+            sentinel_id=sid, sentinel_name=label))
 
         action_ids = sentinel.action_ids or []
         if not isinstance(action_ids, list):

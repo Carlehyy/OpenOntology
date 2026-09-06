@@ -33,6 +33,8 @@ def _dict(sentinel: Sentinel) -> dict[str, Any]:
         "onSchedule": sentinel.on_schedule,
         "scanIntervalSeconds": sentinel.scan_interval_seconds,
         "triggerMode": sentinel.trigger_mode,
+        "pattern": sentinel.pattern if isinstance(
+            sentinel.pattern, dict) else None,
         "muted": sentinel.muted,
         "lastScannedAt": utc_iso(sentinel.last_scanned_at),
         "enabled": sentinel.enabled,
@@ -84,6 +86,8 @@ def _released_dict(
             raw.get("scanIntervalSeconds") or 300
         ),
         "triggerMode": raw.get("triggerMode") or "on_enter",
+        "pattern": raw.get("pattern") if isinstance(
+            raw.get("pattern"), dict) else None,
         "muted": (
             bool(operational.muted)
             if operational is not None

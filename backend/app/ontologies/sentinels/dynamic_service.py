@@ -41,7 +41,7 @@ _DEFINITION_KEYS = {
     "action_ids", "actions", "actionParameters", "action_parameters",
     "onChange", "on_change", "onSchedule", "on_schedule",
     "scanIntervalSeconds", "scan_interval_seconds", "triggerMode",
-    "trigger_mode", "muted",
+    "trigger_mode", "muted", "pattern",
 }
 _BINDING_KEYS = {
     "alias", "objectTypeId", "object_type_id", "objectType", "object_type", "filter",
@@ -214,6 +214,9 @@ def normalize_candidate(raw: dict, scope) -> dict:
         "scanIntervalSeconds": raw.get(
             "scanIntervalSeconds", raw.get("scan_interval_seconds", 300)),
         "triggerMode": raw.get("triggerMode", raw.get("trigger_mode", "on_enter")),
+        "pattern": (
+            raw.get("pattern")
+            if isinstance(raw.get("pattern"), dict) else None),
         "muted": _strict_bool(raw, "muted", "muted", False),
     }
 
@@ -394,9 +397,15 @@ def validate_definition(db: Session, context: CurrentReleaseContext, scope,
             bindings=definition["bindings"],
             links=definition["links"],
             condition=definition.get("condition"),
+            pattern=definition.get("pattern"),
             primary_alias=definition["primaryAlias"],
             action_ids=definition["actionIds"],
             action_parameters=definition["actionParameters"],
+            on_change=bool(definition.get("onChange")),
+            on_schedule=bool(definition.get("onSchedule")),
+            scan_interval_seconds=int(
+                definition.get("scanIntervalSeconds") or 300),
+            trigger_mode=definition.get("triggerMode") or "on_enter",
         )
         errors.extend(validate_sentinels(
             [candidate], models["objectTypes"], models["linkTypes"], models["actions"]))
@@ -434,6 +443,7 @@ def definition_from_row(row: Sentinel) -> dict:
         "onSchedule": bool(row.on_schedule),
         "scanIntervalSeconds": int(row.scan_interval_seconds or 300),
         "triggerMode": row.trigger_mode or "on_enter",
+        "pattern": row.pattern if isinstance(row.pattern, dict) else None,
         "muted": bool(row.muted),
     }
 
@@ -454,7 +464,26 @@ def _apply_definition(row: Sentinel, definition: dict) -> None:
     row.on_schedule = definition["onSchedule"]
     row.scan_interval_seconds = definition["scanIntervalSeconds"]
     row.trigger_mode = definition["triggerMode"]
+    row.pattern = (
+        definition.get("pattern")
+        if isinstance(definition.get("pattern"), dict) else None)
     row.muted = definition["muted"]
+
+
+def _clear_runtime_states(db: Session, sentinel_id: str) -> None:
+    """清理哨兵运行态：命中集、CEP 在途状态与事件水位一起作废。"""
+    from app.ontologies.sentinels.models import (
+        SentinelPatternCursor, SentinelPatternState,
+    )
+    db.query(SentinelPatternState).filter(
+        SentinelPatternState.sentinel_id == sentinel_id).delete(
+            synchronize_session=False)
+    db.query(SentinelPatternCursor).filter(
+        SentinelPatternCursor.sentinel_id == sentinel_id).delete(
+            synchronize_session=False)
+    db.query(SentinelMatchState).filter(
+        SentinelMatchState.sentinel_id == sentinel_id).delete(
+            synchronize_session=False)
 
 
 def dynamic_row(db: Session, ontology_id: str, sentinel_id: str,
@@ -555,9 +584,7 @@ def reconcile_release(db: Session, context: CurrentReleaseContext, scope) -> Non
                 row.last_trial_release_id = None
                 row.last_trial_revision = None
                 row.last_trial_report = None
-                db.query(SentinelMatchState).filter(
-                    SentinelMatchState.sentinel_id == row.id).delete(
-                        synchronize_session=False)
+                _clear_runtime_states(db, row.id)
             elif previous.get("passed"):
                 # Same release, current trial, deep validation still passes:
                 # there is no state transition to persist.
@@ -636,9 +663,7 @@ def update_dynamic(db: Session, context: CurrentReleaseContext, scope,
         row.last_trial_release_id = None
         row.last_trial_revision = None
         row.last_trial_report = None
-        db.query(SentinelMatchState).filter(
-            SentinelMatchState.sentinel_id == row.id).delete(
-                synchronize_session=False)
+        _clear_runtime_states(db, row.id)
         db.commit()
         db.refresh(row)
         return row
@@ -731,9 +756,7 @@ def set_enabled(db: Session, context: CurrentReleaseContext, scope,
                     "message": "动态哨兵初始化任务无法持久化，启用已回滚",
                 })
         elif not enabled:
-            db.query(SentinelMatchState).filter(
-                SentinelMatchState.sentinel_id == row.id).delete(
-                    synchronize_session=False)
+            _clear_runtime_states(db, row.id)
         db.commit()
         db.refresh(row)
         return row
@@ -754,9 +777,7 @@ def retire_dynamic(db: Session, context: CurrentReleaseContext, sentinel_id: str
         row.enabled = False
         row.retired_at = _now()
         row.definition_revision += 1
-        db.query(SentinelMatchState).filter(
-            SentinelMatchState.sentinel_id == row.id).delete(
-                synchronize_session=False)
+        _clear_runtime_states(db, row.id)
         db.commit()
 
 

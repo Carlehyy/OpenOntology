@@ -58,6 +58,9 @@ class Sentinel(Base):
 
     # —— 监听范围(可跨对象) ——
     bindings: Mapped[list] = mapped_column(JSON, default=list)          # [{alias, objectTypeId, filter}]
+    # CEP 模式定义（trigger_mode='on_pattern' 时必有）：stages/absence/
+    # aggregate/condition。结构校验见 validation.py + cep/contract.py。
+    pattern: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     links: Mapped[list] = mapped_column(JSON, default=list)            # [{from, linkTypeId, to}]
     condition: Mapped[str] = mapped_column(Text, nullable=True)         # 跨别名表达式(求值用，前端编译)
     condition_rows: Mapped[list] = mapped_column(JSON, default=list)    # 结构化条件行(回显用) [{left,op,right,rightKind}]
@@ -372,3 +375,73 @@ class SentinelEventLog(Base):
         DateTime(timezone=True), nullable=False, default=_now)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now)
+
+
+class SentinelPatternCursor(Base):
+    """模式哨兵的事件水位 — 每哨兵已消费到的最大事件日志 id。
+
+    事件日志是唯一时间事实源；CDC outbox/定时扫描/保存路径只是"唤醒"
+    信号。水位推进与状态机推进同事务提交，天然幂等且崩溃可恢复——
+    outbox 重放不会重复消费事件，乱序回灌也无法破坏定序（按 id 升序拉取）。
+    """
+    __tablename__ = "sentinel_pattern_cursor"
+
+    sentinel_id: Mapped[str] = mapped_column(String, primary_key=True)
+    ontology_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    event_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now)
+
+
+class SentinelPatternState(Base):
+    """模式哨兵的在途状态机行 — 哨兵 × 关联键（过程状态，不是命中结果）。
+
+    pattern_state 是"过程"，SentinelMatchState 是"结果"：模式完整匹配/
+    缺失超时后合成普通 match_state 行，复用既有动作 claim/幂等/HITL 链；
+    两张表之间只有单向产出，不存在一致性难题。完成即删除本行，
+    触发记录由 SentinelFiring 承担。
+    """
+    __tablename__ = "sentinel_pattern_state"
+    __table_args__ = (
+        Index(
+            "ix_sentinel_pattern_state_active",
+            "sentinel_id", "status", "deadline",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    ontology_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    sentinel_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # 身份冻结（对齐动态哨兵执行边界先例）：release 切换/定义代次变更后，
+    # 旧状态不得用新定义继续推进。
+    ontology_release_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    definition_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1")
+    enable_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1")
+    # same_instance 模式 = 锚实例 id；跨对象模式 = primary 别名锚实例 id。
+    correlation_key: Mapped[str] = mapped_column(String, nullable=False)
+    # 当前推进到的 stage（0 基）。
+    stage_index: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now)
+    stage_entered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now)
+    # 下一 stage 的截止时刻（stage_entered_at + within），超时由扫描驱动判定。
+    deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # 各已完成 stage 的实例快照 {alias: {id, objectTypeId, properties, computed}}。
+    snapshots: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # active | completed（completed 短暂驻留后删除，仅为事务窗口保留）
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active")
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now,
+        onupdate=_now)

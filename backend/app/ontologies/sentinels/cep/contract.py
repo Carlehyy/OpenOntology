@@ -1,9 +1,17 @@
-"""CEP 层共享契约：常量、枚举与边界值。
+"""CEP 层共享契约：常量、枚举、边界值与跨模块运行原语。
 
-只放纯常量与纯函数，不 import sentinels 域其他模块（叶子契约，
-evaluator 与 cep 内部共同依赖，避免任何方向的反向导入）。
+只放纯常量、纯函数与跨模块共享的运行原语（如 in_sentinel_run
+ContextVar——哨兵动作断环标记由 evaluator 定义、cdc 与 cep/pattern 共用，
+下沉到叶子契约保证对象身份唯一），不 import sentinels 域其他模块。
 """
 from __future__ import annotations
+
+from contextvars import ContextVar
+
+# 执行哨兵动作期间为 True；CDC 用它抑制级联即时再触发（断环）。
+# 对象身份唯一：evaluator 再导出本对象，cdc/cep 经任一路径取到同一实例。
+in_sentinel_run: ContextVar[bool] = ContextVar(
+    "in_sentinel_run", default=False)
 
 # ---------------------------------------------------------------------------
 # 时间算子（仅允许出现在哨兵 condition，禁止出现在绑定 filter）
@@ -49,6 +57,39 @@ EVENT_LOG_PRUNE_BATCH = 5000
 # prev() 批量回捞的单次行数上限：超出后未覆盖的引用返回 None
 # （fail-closed：条件自然判否，不制造假命中）。
 PREVIOUS_VALUES_QUERY_CAP = 20000
+
+# ---------------------------------------------------------------------------
+# 模式哨兵（trigger_mode='on_pattern'）
+# ---------------------------------------------------------------------------
+PATTERN_TRIGGER_MODE = "on_pattern"
+
+# 序列 stage 数边界：1（单 stage+聚合）~ 4。
+PATTERN_STAGES_MIN = 1
+PATTERN_STAGES_MAX = 4
+
+# stage 间隔窗口与聚合窗口共用边界：1 分钟 ~ 7 天（与保留期对齐）。
+PATTERN_WITHIN_MIN_SECONDS = 60
+PATTERN_WITHIN_MAX_SECONDS = 7 * 24 * 3600
+# 未显式声明 within 时的缺省窗口（1 小时）。
+PATTERN_WITHIN_DEFAULT_SECONDS = 3600
+
+# 聚合函数与比较算子白名单。
+PATTERN_AGGREGATE_FUNCTIONS = frozenset({
+    "count", "avg", "sum", "min", "max",
+})
+PATTERN_AGGREGATE_COMPARISONS = frozenset({
+    "gte", "lte", "gt", "lt",
+})
+
+# 模式哨兵强制 on_schedule 的扫描间隔下限：超时判定精度由扫描驱动，
+# 窗口必须 ≥ 扫描间隔，否则超时形同虚设。
+PATTERN_MIN_SCAN_INTERVAL_SECONDS = 60
+
+# 状态机每次水位推进拉取的事件上限。
+PATTERN_EVENT_BATCH_LIMIT = 2000
+
+# in-flight 状态行上限（哨兵×本体级 fail-closed，防状态爆炸）。
+PATTERN_MAX_ACTIVE_STATES = 10000
 
 # IN 列表分片上限（SQLite 旧版绑定变量数保守值）。
 _ID_CHUNK_SIZE = 500

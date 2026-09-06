@@ -72,6 +72,7 @@ class SentinelIn(CamelModel):
     on_schedule: bool = False
     scan_interval_seconds: int = 300
     trigger_mode: str = "on_enter"
+    pattern: Optional[dict] = None
     muted: bool = False
     enabled: bool = True
     # 本体 release 是唯一上线边界；客户端不能把未校验定义直接标成 published。
@@ -94,6 +95,7 @@ class SentinelUpdate(CamelModel):
     on_schedule: Optional[bool] = None
     scan_interval_seconds: Optional[int] = None
     trigger_mode: Optional[str] = None
+    pattern: Optional[dict] = None
     muted: Optional[bool] = None
     enabled: Optional[bool] = None
 
