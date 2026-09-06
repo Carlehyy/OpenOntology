@@ -139,8 +139,9 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
           ))}
         </nav>
         {tab === 'multica' ? (
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6">
-            <section data-testid="multica-config-card" className="rounded-xl border border-[var(--color-border)] p-4">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6">
+              <section data-testid="multica-config-card" className="rounded-xl border border-[var(--color-border)] p-4">
           <div className="flex items-start gap-2">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><PlugZap size={16} /></div>
             <div className="min-w-0 flex-1">
@@ -233,7 +234,20 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
             )}
           </div>
             </section>
-            {error && <p role="alert" className="mt-4 text-xs text-red-600">{error}</p>}
+              {error && <p role="alert" className="mt-4 text-xs text-red-600">{error}</p>}
+            </div>
+            {/* 操作按钮归属各集成面板：每个集成独立保存，互不干扰 */}
+            <footer className="flex shrink-0 justify-center gap-3 border-t border-[var(--color-border)] px-5 py-4">
+              <button onClick={onClose} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]">取消</button>
+              <button
+                onClick={() => void save()}
+                data-testid="multica-save-button"
+                disabled={saving || !baseUrl.trim()}
+                className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep disabled:opacity-50"
+              >
+                {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
+              </button>
+            </footer>
           </div>
         ) : (
           <div data-testid="integrations-github-placeholder" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
@@ -245,19 +259,6 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
           </div>
         )}
       </div>
-      <footer className="flex shrink-0 justify-center gap-3 border-t border-[var(--color-border)] px-5 py-4">
-        <button onClick={onClose} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]">取消</button>
-        {tab === 'multica' && (
-          <button
-            onClick={() => void save()}
-            data-testid="multica-save-button"
-            disabled={saving || !baseUrl.trim()}
-            className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep disabled:opacity-50"
-          >
-            {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
-          </button>
-        )}
-      </footer>
     </DialogShell>
   )
 }
