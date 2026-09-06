@@ -181,8 +181,8 @@ export default function WorkbenchSidebar({
 
   const content = (
     <>
-      {/* 品牌（h-[4.3125rem] 与右侧会话头部同高，两条分割线水平对齐） */}
-      <div className="flex h-[4.3125rem] shrink-0 items-center gap-3 border-b border-[var(--color-border)] px-4">
+      {/* 品牌区（h-[4.3125rem] 与右侧会话头部同高；桌面端直接坐在画布上，不再画分割线） */}
+      <div className="flex h-[4.3125rem] shrink-0 items-center gap-3 px-4">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg" style={{ background: 'var(--color-nav-bg)' }}>
           <Network size={18} className="text-white" />
         </div>
@@ -347,7 +347,8 @@ export default function WorkbenchSidebar({
           className="fixed inset-0 z-40 bg-black/30 md:hidden"
         />
       )}
-      <aside className={`${mobileOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 flex w-64 shrink-0 flex-col border-r border-[var(--color-border)] bg-white transition-transform duration-300 md:static md:z-auto md:translate-x-0`}>
+      {/* 移动端抽屉保持实底卡片；桌面端融入画布（与内容卡之间靠画布缝隙分隔，不画边线） */}
+      <aside className={`${mobileOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 flex w-64 shrink-0 flex-col border-r border-[var(--color-border)] bg-card transition-transform duration-300 md:static md:z-auto md:border-r-0 md:translate-x-0 md:bg-transparent`}>
         {content}
       </aside>
 

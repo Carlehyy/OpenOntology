@@ -124,7 +124,9 @@ test('超级助手：待审批与记忆面板全链路', async ({ page }) => {
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: '打开助手配置' }).click()
+  // 配置面板桌面端默认展开：仅在收起时点击展开
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
 
   // 待审批：接受一条 memory 候选
   await page.getByRole('button', { name: '待审批' }).click()
@@ -254,7 +256,9 @@ test('超级助手：蒸馏收敛与 Skill 常驻', async ({ page }) => {
   // 自主模式已内置：输入区不再提供切换开关
   await expect(page.getByTestId('agent-mode-toggle')).toHaveCount(0)
 
-  await page.getByRole('button', { name: '打开助手配置' }).click()
+  // 配置面板桌面端默认展开：仅在收起时点击展开
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
 
   // Skill 治理：未使用标记 + 「常驻」开关触发 PATCH 并刷新卡片
   await expect(page.getByText('未使用')).toBeVisible()

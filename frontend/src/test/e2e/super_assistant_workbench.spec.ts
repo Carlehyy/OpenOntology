@@ -883,7 +883,9 @@ test('助手配置面板为白色背景', async ({ page }) => {
   await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
 
-  await page.getByRole('button', { name: '打开助手配置' }).click()
+  // 配置面板桌面端默认展开：仅在收起时点击展开
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
   const panel = page.locator('section[aria-label="助手配置"]')
   await expect(panel).toBeVisible()
   await expect.poll(() => panel.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(255, 255, 255)')

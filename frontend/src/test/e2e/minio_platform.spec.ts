@@ -70,7 +70,9 @@ test('超级助手配置隐藏平台内置 MinIO，只展示可用的外部 MCP'
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: '打开助手配置' }).click()
+  // 配置面板桌面端默认展开：仅在收起时点击展开
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
   await page.getByRole('button', { name: /^MCP/ }).click()
 
   await expect(page.getByRole('button', { name: 'MCP 1' })).toBeVisible()

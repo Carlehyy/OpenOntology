@@ -112,7 +112,8 @@ async function mockSuperAssistant(page: Page) {
 
 test('渲染 Markdown 主体并在顶栏展示上下文用量', async ({ page }) => {
   await mockSuperAssistant(page)
-  await page.setViewportSize({ width: 1280, height: 900 })
+  // 上下文胶囊仅在面板展开时的 ≥2xl 视口展示，用宽视口验证
+  await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto('/#/super-assistant')
 
   await expect(page.getByRole('heading', { name: '三级标题' })).toBeVisible()
@@ -134,14 +135,16 @@ test('渲染 Markdown 主体并在顶栏展示上下文用量', async ({ page })
 
 test('标题编辑与顶部工具默认使用可识别的状态色', async ({ page }) => {
   await mockSuperAssistant(page)
-  await page.setViewportSize({ width: 1280, height: 900 })
+  // 上下文胶囊仅在面板展开时的 ≥2xl 视口展示，用宽视口验证
+  await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto('/#/super-assistant')
 
   const contextUsage = page.getByTestId('super-assistant-context-usage')
-  const configButton = page.getByRole('button', { name: '打开助手配置' })
+  // 配置面板桌面端默认展开，按钮呈选中态（brand-soft 浅绿底），以静态 title 定位
+  const configButton = page.locator('button[title="助手配置"]')
 
   await expect(contextUsage).toHaveCSS('background-color', 'rgba(240, 253, 250, 0.8)')
-  await expect(configButton).toHaveCSS('background-color', 'rgb(255, 251, 235)')
+  await expect(configButton).toHaveCSS('background-color', 'rgb(236, 253, 245)')
 
   const contextBox = await contextUsage.boundingBox()
   const configBox = await configButton.boundingBox()
@@ -162,7 +165,9 @@ test('打开助手配置时工作台侧栏保持可用', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '打开助手配置' }).click()
+  // 配置面板桌面端默认展开：仅在收起时点击展开
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
   await expect(page.getByRole('heading', { name: '助手配置' })).toBeVisible()
 
   // 历史会话已迁入左侧工作台常驻时间线，不再是顶栏浮层
