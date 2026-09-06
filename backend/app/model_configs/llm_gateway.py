@@ -106,8 +106,27 @@ def _record_call(model_config_id: str, model_name: str, provider: str,
         db.close()
 
 
-# 闭合标签容忍命名空间变体（GLM/mm 系残留 </mm:think>；DeepSeek-R1/MiniMax 为 </think>）
-_THINK_CLOSE_RE = re.compile(r"</(?:[A-Za-z0-9_.-]+:)?think>", re.IGNORECASE)
+# 命名空间闭合变体（GLM/mm 系）：推理体被上游 reasoning 通道剥离后，
+# content 开头可能残留 </mm:think> 等标签。仅清开头残留；正文中部出现视为
+# 普通文本（教程/JSON 字面量不误伤）；大小写敏感（无大写变体生产证据）
+_THINK_CLOSE_VARIANT_RE = re.compile(r"\s*</[A-Za-z0-9_.-]+:think>")
+
+
+def strip_think_content(content: str) -> str:
+    """统一 think 清洗语义（本网关与超级助手 provider 共用同一实现）。
+
+    - 精确 ``</think>``：任意位置出现取其后文本（历史语义，覆盖
+      DeepSeek-R1/MiniMax 的完整思考块 ``<think>…</think>正文``）；
+    - 命名空间变体（``</mm:think>`` 等）：仅当位于 content 开头时剥离
+      残留闭合标签（生产实测形态），正文中部不截断；
+    - 其余原样返回。
+    """
+    if "</think>" in content:
+        return content.split("</think>", 1)[1].strip()
+    match = _THINK_CLOSE_VARIANT_RE.match(content)
+    if match:
+        return content[match.end():].strip()
+    return content
 
 
 def _strip_think(result: dict) -> dict:
@@ -116,15 +135,11 @@ def _strip_think(result: dict) -> dict:
     模型有时会在正文前附加思考过程，形如：
       <think>用户说 ping，我应该回 pong</think> Pong! ...
 
-    这里提取闭合标签之后的纯文本作为实际回复。部分模型（GLM/mm 系）的
-    推理体已被上游 reasoning 通道剥离，仅在 content 开头残留命名空间变体
-    闭合标签（如 ``</mm:think>答案``），同样一并清除。
+    具体语义见 strip_think_content。
     """
     content = result.get("content")
     if content and isinstance(content, str):
-        match = _THINK_CLOSE_RE.search(content)
-        if match:
-            result["content"] = content[match.end():].strip()
+        result["content"] = strip_think_content(content)
     return result
 
 

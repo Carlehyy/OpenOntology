@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any
 
+from app.model_configs.llm_gateway import strip_think_content
 from app.shared.config import settings
 
 
@@ -107,8 +109,9 @@ def chat(call_kwargs: dict[str, Any], messages: list[dict[str, Any]],
     finally:
         perf_spans.end_span(span, status=status)
     content = result.get("content")
-    if isinstance(content, str) and "</think>" in content:
-        result["content"] = content.split("</think>", 1)[1].strip()
+    if isinstance(content, str):
+        # think 清洗与 llm_gateway 共用同一语义（含 GLM/mm 系开头残留变体）
+        result["content"] = strip_think_content(content)
     return result
 
 
@@ -231,13 +234,16 @@ class _ThinkPrefixFilter:
 
     前缀窗口（至多 512 字符）内出现 ``<think>`` 则持续缓冲直到 ``</think>``
     出现，之后的增量才开始透传；窗口内没有 ``<think>`` 则冲刷缓冲并透传
-    后续全部增量；流结束仍停在 think 段内的内容不透传。已知边界：开标签
-    恰好横跨 512 字符边界时可能透出标签片段，真实模型的 think 前缀总是
-    从回复开头出现，不受影响。
+    后续全部增量；流结束仍停在 think 段内的内容不透传。GLM/mm 系模型的
+    推理体被上游剥离后，开头残留的命名空间闭合变体（``</mm:think>`` 等，
+    支持跨增量拼接）同样在 prefix 状态剥离。已知边界：开标签恰好横跨
+    512 字符边界、或变体闭合标签被截断在流末尾时可能透出标签片段，
+    真实模型的 think 前缀总是从回复开头出现，不受影响。
     """
 
     _OPEN = "<think>"
     _CLOSE = "</think>"
+    _VARIANT_CLOSE_RE = re.compile(r"^\s*</[A-Za-z0-9_.-]+:think>")
 
     def __init__(self, emit: Callable[[str], None]) -> None:
         self._emit = emit
@@ -252,6 +258,23 @@ class _ThinkPrefixFilter:
             return
         self._buffer += delta
         if self._state == "prefix":
+            variant = self._VARIANT_CLOSE_RE.match(self._buffer)
+            if variant:
+                # GLM/mm 系：推理体已被上游剥离，开头残留变体闭合标签
+                remainder = self._buffer[variant.end():]
+                self._state = "open"
+                self._buffer = ""
+                if remainder:
+                    self._emit(remainder)
+                return
+            stripped = self._buffer.lstrip()
+            if (
+                stripped.startswith("</")
+                and ">" not in stripped
+                and len(stripped) < 64
+            ):
+                # 可能仍在拼出跨增量的变体闭合标签，继续缓冲
+                return
             if self._OPEN in self._buffer:
                 self._state = "think"
                 self._buffer = self._buffer.split(self._OPEN, 1)[1]
@@ -306,15 +329,15 @@ def chat_stream(call_kwargs: dict[str, Any], messages: list[dict[str, Any]],
     except Exception:
         result = _chat_fallback(call_kwargs, messages, tools, provider_name)
         fallback_content = result.get("content")
-        if isinstance(fallback_content, str) and "</think>" in fallback_content:
-            fallback_content = fallback_content.split("</think>", 1)[1].strip()
+        if isinstance(fallback_content, str):
+            fallback_content = strip_think_content(fallback_content)
             result["content"] = fallback_content
         if on_delta and fallback_content:
             on_delta(fallback_content)
         return result
     content = result.get("content")
-    if isinstance(content, str) and "</think>" in content:
-        result["content"] = content.split("</think>", 1)[1].strip()
+    if isinstance(content, str):
+        result["content"] = strip_think_content(content)
     return result
 
 

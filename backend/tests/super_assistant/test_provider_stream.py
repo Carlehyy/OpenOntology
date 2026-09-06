@@ -92,6 +92,30 @@ def test_openai_stream_filters_think_prefix_across_chunks(monkeypatch):
     assert deltas == ["答", "案"]
 
 
+def test_openai_stream_strips_leading_variant_close_across_chunks(monkeypatch):
+    """GLM/mm 系：推理体被上游剥离、流首残留 </mm:think> 变体闭合标签。"""
+    _patch_openai(monkeypatch, _FakeCompletions(stream_chunks=[
+        _chunk(content="</mm:th"),
+        _chunk(content="ink>你"),
+        _chunk(content="好"),
+    ]))
+    deltas: list[str] = []
+    result = provider.chat_stream(_CALL_KWARGS, _MESSAGES, [], deltas.append)
+    assert result["content"] == "你好"
+    assert "".join(deltas) == "你好"
+
+
+def test_openai_stream_keeps_midtext_variant_close(monkeypatch):
+    """负例：变体闭合标签出现在正文中部时透传（与网关清洗语义一致）。"""
+    _patch_openai(monkeypatch, _FakeCompletions(stream_chunks=[
+        _chunk(content="闭合标签写作"),
+        _chunk(content=" </mm:think> 即可"),
+    ]))
+    deltas: list[str] = []
+    result = provider.chat_stream(_CALL_KWARGS, _MESSAGES, [], deltas.append)
+    assert result["content"] == "闭合标签写作 </mm:think> 即可"
+
+
 def test_openai_stream_flushes_buffer_when_no_think_within_prefix(monkeypatch):
     payload = "正文" * 300  # 600 个 CJK 字符，超过 512 前缀窗口
     _patch_openai(monkeypatch, _FakeCompletions(stream_chunks=[_chunk(content=payload)]))
