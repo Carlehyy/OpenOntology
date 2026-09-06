@@ -110,4 +110,4 @@ def test_head_is_single_and_follows_token_version(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     heads = ScriptDirectory.from_config(cfg).get_heads()
     # 0094 palace folders 在本迁移之后线性追加，head 随之演进
-    assert heads == ["0095_super_assistant_multica_workspace_name"]
+    assert heads == ["0096_super_assistant_delegations"]
