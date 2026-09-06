@@ -8,7 +8,7 @@ from __future__ import annotations
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.auth.models import User
+from app.auth.models import RoleMenuPermission, User
 from app.model_configs.models import ModelConfig
 from app.shared.config import settings
 from app.shared.database import Base
@@ -30,6 +30,7 @@ from app.super_assistant.skill_store import render_skill_markdown, skill_directo
 
 _TABLES = [
     User.__table__, ModelConfig.__table__,
+    RoleMenuPermission.__table__,  # 委派目录注入的菜单权限查询
     SuperAssistantConversation.__table__, SuperAssistantSkill.__table__,
     SuperAssistantMcpServer.__table__, SuperAssistantMessage.__table__,
     SuperAssistantToolRun.__table__, SuperAssistantMemory.__table__,

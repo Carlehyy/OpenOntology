@@ -5,7 +5,7 @@ import json
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.auth.models import User
+from app.auth.models import RoleMenuPermission, User
 from app.model_configs.models import ModelConfig
 from app.shared.config import settings
 from app.shared.database import Base
@@ -28,6 +28,7 @@ from app.super_assistant.skill_store import build_manifest, create_skill_folder,
 # （content 非空时同步触发 on_delta，模拟真流式增量）。
 _RUNTIME_TABLES = [
     User.__table__, ModelConfig.__table__,
+    RoleMenuPermission.__table__,  # 委派目录注入的菜单权限查询
     SuperAssistantConversation.__table__, SuperAssistantSkill.__table__,
     SuperAssistantMcpServer.__table__, SuperAssistantMessage.__table__,
     SuperAssistantToolRun.__table__, SuperAssistantMemory.__table__,
