@@ -714,8 +714,9 @@ export default function SuperAssistantPage() {
         onOpenSearch={() => setSearchOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
       />
-      {/* 内嵌内容卡（大组件）：分隔符上方是常用功能工具条，下方是主体内容区 */}
-      <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-card shadow-sm">
+      {/* 内嵌内容卡（大组件）：16px 圆角（阶梯顶 --radius-xl）让画布包裹感更柔和；
+          分隔符上方是常用功能工具条，下方是主体内容区 */}
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-card shadow-sm">
         <header className="relative z-10 flex h-[4.3125rem] shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3 sm:px-4">
           <button
             type="button"
