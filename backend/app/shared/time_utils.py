@@ -31,3 +31,18 @@ def utc_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
     return as_utc(value).isoformat().replace("+00:00", "Z")
+
+
+def parse_temporal_text(text: str) -> datetime:
+    """Parse ISO-ish temporal text with pragmatic normalization.
+
+    Database drivers and CSV sources commonly emit ``2026-01-15 10:30:00``
+    (space separator) or a trailing ``Z``; strict ``datetime.fromisoformat``
+    consumers need the canonical ``T`` separator and an explicit offset, so
+    normalize before parsing.  Raises ``ValueError`` on non-ISO input.
+    """
+    normalized = text.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    normalized = normalized.replace(" ", "T", 1)
+    return datetime.fromisoformat(normalized)
