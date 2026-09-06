@@ -411,6 +411,70 @@ def _new_element(model: type[_El], kind: str, raw: dict) -> dict:
     return data
 
 
+# 引用字段的占位词：写进画布会让质量门报「引用未定义」，反过来消耗回合清理
+# （生产事故：流程 objects 写入「（待补）」）。引用必须真实，占位词在写入时拒绝。
+_PLACEHOLDER_REF_RE = re.compile(r"待补|待定|TODO|TBD", re.IGNORECASE)
+
+
+def _iter_reference_values(kind: str, element: dict):
+    """产出 (字段名, 引用值)；只覆盖跨元素引用字段，不碰自由文本描述。"""
+
+    def values(field: str):
+        raw = element.get(field)
+        if isinstance(raw, str) and raw.strip():
+            yield field, raw
+        elif isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    yield field, item
+
+    if kind == "object":
+        for rel in element.get("relations") or []:
+            if isinstance(rel, dict):
+                target = str(rel.get("target") or "")
+                if target.strip():
+                    yield "relations.target", target
+    elif kind == "behavior":
+        yield from values("actor")
+        yield from values("object")
+    elif kind == "event":
+        yield from values("source")
+    elif kind == "rule":
+        yield from values("applies_to")
+    elif kind == "process":
+        yield from values("objects")
+        for step in element.get("steps") or []:
+            if isinstance(step, dict):
+                for field in ("actor", "behavior"):
+                    value = str(step.get(field) or "")
+                    if value.strip():
+                        yield f"steps.{field}", value
+        for metric in element.get("metrics") or []:
+            if isinstance(metric, dict):
+                for source in metric.get("source_objects") or []:
+                    if isinstance(source, str) and source.strip():
+                        yield "metrics.source_objects", source
+    elif kind == "scenario":
+        for field in ("actors", "objects", "behaviors"):
+            yield from values(field)
+        yield from values("process_ref")
+
+
+def _reference_placeholder_errors(kind: str, element: dict) -> list[str]:
+    hits = [
+        f"{field}「{value}」"
+        for field, value in _iter_reference_values(kind, element)
+        if _PLACEHOLDER_REF_RE.search(value)
+    ]
+    if not hits:
+        return []
+    return [
+        f"元素「{element.get('name', '?')}」的引用字段含占位词（{'、'.join(hits[:3])}）——"
+        "引用必须写真实对象/主体/行为名；未确认的引用先省略该字段或先向用户澄清。"
+        "写入「待补/待定」会让质量门报「引用未定义」，再反过来消耗回合清理"
+    ]
+
+
 def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict, list[str], list[str]]:
     """按 id（其次归一化 name）upsert；返回 (新画布, 生效元素 id 列表, 错误列表)。
 
@@ -503,6 +567,10 @@ def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict,
                 errors.append(f"元素「{raw_name or '?'}」不合法: {_validation_message(error)}")
                 continue
             items.append(data)
+        placeholder_errors = _reference_placeholder_errors(kind, data)
+        if placeholder_errors:
+            errors.extend(placeholder_errors)
+            continue
         applied.append(data["id"])
 
     out[key] = items

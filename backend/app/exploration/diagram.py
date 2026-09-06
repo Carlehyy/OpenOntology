@@ -768,8 +768,10 @@ def _sequence_render(c: dict, picked: list[dict]) -> str:
 
 # ---------------------------------------------------------------- 状态图
 
+# 源端禁止吞并叙述（逗号/分号/引号/括号都是"从…变为…"短语的边界），
+# 否则「从无到有，初始创建后…」会把整句叙述当成源状态（生产实发）。
 _FROM_TRANSITION_RE = re.compile(
-    r"从\s*[「『\"']?(.{1,40}?)[」』\"']?\s*"
+    r"从\s*[「『\"']?([^，。；;\n「」『』()（）]{1,40}?)[」』\"']?\s*"
     r"(?:变更为|变为|改为|置为|转为|流转到)\s*"
     r"[「『\"']?([^，。；;\n]{1,40}?)[」』\"']?(?=，|。|；|;|\n|$)")
 _STATUS_VALUE_RE = re.compile(
@@ -830,6 +832,27 @@ def _clean_state_value(value: str) -> str:
     return text.strip(" \t\r\n「」『』\"'`()[]{}：:")
 
 
+def _resolve_state_value(raw: str, by_norm: dict) -> str | None:
+    """把捕获值解析到状态枚举；容忍目标状态后紧跟的括号/引号补充说明。
+
+    生产文本常见「从『修复中』变为『已闭环』（验证结果为…）」：正则目的端
+    会连同括号说明一起捕获成『已闭环』（验证结果为…）。逐个闭合符截断、
+    取第一个命中枚举的前缀 —— 既不丢真实迁移，也不把括号说明误报为未知
+    状态（那会让 lifecycles 质量门出现模型无法清掉的孤立状态误报）。
+    """
+    text = str(raw or "")
+    direct = by_norm.get(norm_name(_clean_state_value(text)))
+    if direct:
+        return direct
+    for idx, ch in enumerate(text):
+        if ch in "」』\"')）":
+            candidate = by_norm.get(
+                norm_name(_clean_state_value(text[:idx + 1])))
+            if candidate:
+                return candidate
+    return None
+
+
 def state_model_analysis(canvas, target: str | None = None) -> dict:
     """分析生命周期的一致性；结果同时供质量门和状态图生成器使用。"""
     c = _ensure_canvas(canvas)
@@ -850,8 +873,8 @@ def state_model_analysis(canvas, target: str | None = None) -> dict:
         for match in _FROM_TRANSITION_RE.finditer(blob):
             raw_src = _clean_state_value(match.group(1))
             raw_dst = _clean_state_value(match.group(2))
-            src = by_norm.get(norm_name(raw_src))
-            dst = by_norm.get(norm_name(raw_dst))
+            src = _resolve_state_value(raw_src, by_norm)
+            dst = _resolve_state_value(raw_dst, by_norm)
             prefix = blob[max(0, match.start() - 40):match.start()]
             explicit_status = bool(re.search(
                 r"(?:\bstatus\b|\bstate\b|状态|阶段)\s*$", prefix, re.IGNORECASE))
@@ -906,8 +929,13 @@ def state_mermaid(canvas, target: str | None = None) -> tuple[str, str, list[str
     states = analysis["states"]
     if analysis["issues"]:
         detail = "；".join(analysis["issues"][:6])
-        raise DiagramError("状态图质量校验未通过：" + detail
-                           + "。请先修复画布后重试；校验错误会回填给 AI 继续补齐。")
+        raise DiagramError(
+            "状态图质量校验未通过：" + detail
+            + "。请先修复画布后重试；校验错误会回填给 AI 继续补齐。"
+            "规范写法：行为 outcome 中每次状态迁移单独成句，形如"
+            "「状态从『已确认』变为『规避中』」，状态名与枚举完全一致；"
+            "括号补充说明必须另起一句（用分号隔开），不得紧跟在目标状态之后；"
+            "多源迁移（从A或B变为C）拆成「从A变为C」「从B变为C」两句。")
     ids = {v: f"st{i}" for i, v in enumerate(states)}
 
     lines = ["stateDiagram-v2", "    direction LR"]

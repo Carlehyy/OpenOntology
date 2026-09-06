@@ -40,7 +40,7 @@ _VAGUE_TERMS = (
     "过高", "过低", "太久", "太多", "太少", "超时",
     # 未绑定的占位口径。仅出现这些词并不等于给出了规则参数。
     "阈值", "门槛", "上限", "下限", "规定时间", "一定期限", "满足条件", "符合条件",
-    "待定", "tbd",
+    "待定", "tbd", "待补",
 )
 # 数量信号：阿拉伯/全角数字、中文数词（含"两"）、比较/枚举记号
 _QUANT_RE = re.compile(r"[0-9０-９]|[一二两三四五六七八九十百千万亿]|[≥≤><=%％]")
@@ -513,9 +513,16 @@ def _resolution_matches_evidence(resolution: str, evidence: list[str]) -> bool:
     )
 
 
-def resolved_question_issues(canvas: Any) -> list[str]:
-    """复核已销账 blocking 的答案质量及其是否真正落入 target 画布。"""
+def resolved_question_issues(canvas: Any) -> tuple[list[str], list[str]]:
+    """复核已销账 blocking 的答案质量及其是否真正落入 target 画布。
+
+    返回 (blocking, advisory)。target 根元素已不存在（概念被合并/删除的存量
+    数据）降级为 advisory：结论无处落字不是质量问题，硬堵会让 questions 门
+    永久无法清零（生产死锁：销账 target「探索起点」元素不存在）。其余复核
+    （未定量/答非所问/结论未写入画布）保持 blocking。
+    """
     issues: list[str] = []
+    advisories: list[str] = []
     for q in get_questions(canvas):
         if (q.get("kind") or KIND_BLOCKING) != KIND_BLOCKING or q.get("status") != "resolved":
             continue
@@ -536,7 +543,12 @@ def resolved_question_issues(canvas: Any) -> list[str]:
             continue
         root, value, direct, error = _target_resolution(canvas, target, label)
         if error:
-            issues.append(f"已销账问题「{label}」的 {error}")
+            if error.startswith("target 根元素"):
+                advisories.append(
+                    f"已销账问题「{label}」的 {error}（元素已变更/移除，"
+                    "结论待人工核对，不再堵门）")
+            else:
+                issues.append(f"已销账问题「{label}」的 {error}")
             continue
         assert root is not None
         evidence = _value_evidence(canvas, root, value) if direct else _linked_evidence(canvas, root)
@@ -544,7 +556,7 @@ def resolved_question_issues(canvas: Any) -> list[str]:
             issues.append(
                 f"已销账问题「{label}」的结论「{resolution}」尚未写入 target「{target}」对应画布字段"
             )
-    return issues
+    return issues, advisories
 
 
 def _with_questions(canvas: Any, items: list[dict]) -> dict:
@@ -593,6 +605,49 @@ def raise_questions(canvas: Any, raw_items: list[dict]) -> tuple[dict, list[str]
     return _with_questions(canvas, items), ids, errors
 
 
+_DELEGATION_OPTION_RE = re.compile(
+    r"^(?:按|选|就按|按照)?\s*(?:选项\s*|第\s*)?(?P<opt>[A-Da-d1-4１-４])\s*"
+    r"(?:个|来|执行|办|处理|即可|就行|可以)?$")
+_DELEGATION_DEFAULT_RE = re.compile(
+    r"^(?:按|就按|按照)?\s*(?:默认|建议|推荐)(?:值)?\s*"
+    r"(?:来|执行|办|处理|即可|就行|可以)?$")
+_ABDICATION_RE = re.compile(
+    r"^(?:都?可以|都行|随便|无所谓|你来?定|你决定|你看着办|由你|你选)$")
+
+_OPTION_INDEX = {"a": 0, "b": 1, "c": 2, "d": 3,
+                 "1": 0, "2": 1, "3": 2, "4": 3,
+                 "１": 0, "２": 1, "３": 2, "４": 3}
+
+
+def _expand_delegated_resolution(question: Any, resolution: str) -> Optional[str]:
+    """把「按选项B/第2个/按默认」展开为所引用候选的字面定量值。
+
+    生产实测：用户答「可以的，都按默认来」被销账拒绝，agent 只能再问一轮。
+    委托指向的候选本身已定量时，落账存候选字面值（证据匹配依赖具体数值，
+    见 resolved_question_issues）。拍板权不放松：开放式放权不展开、找不到
+    所指候选时不展开，交由调用方给出明确拒绝。
+    """
+    answer = _normalized_text(resolution)
+    options = [str(o).strip() for o in (question.get("options") or [])
+               if str(o).strip()]
+    if not options:
+        return None
+    opt_match = _DELEGATION_OPTION_RE.match(answer)
+    if opt_match is not None:
+        idx = _OPTION_INDEX.get(opt_match.group("opt").lower())
+        if idx is not None and idx < len(options):
+            return options[idx]
+        return None
+    if _DELEGATION_DEFAULT_RE.match(answer):
+        marked = next((o for o in options if "默认" in o), None)
+        if marked is not None:
+            return marked
+        suggestion = str(question.get("suggestion") or "").strip()
+        if suggestion and is_quantified(suggestion):
+            return suggestion
+    return None
+
+
 def resolve_questions(canvas: Any, raw_items: list[dict]) -> tuple[dict, list[dict], list[str]]:
     """销账。blocking 问题的 resolution 必须定量，否则拒绝该条并回填原因。
 
@@ -623,16 +678,34 @@ def resolve_questions(canvas: Any, raw_items: list[dict]) -> tuple[dict, list[di
                           f"（{'搁置也要写明原因' if status == 'dismissed' else '请写入定量结论'}）")
             continue
         if status == "resolved" and (q.get("kind") or KIND_BLOCKING) == KIND_BLOCKING:
+            label = str(q.get("question", ""))[:40]
+            if _ABDICATION_RE.match(_normalized_text(resolution)):
+                errors.append(
+                    f"问题「{label}」：开放式放权（都可以/你定）不能作为堵门结论"
+                    " —— 请让用户在候选中明确拍板")
+                continue
+            if _DELEGATION_DEFAULT_RE.match(_normalized_text(resolution)):
+                expanded = _expand_delegated_resolution(q, resolution)
+                if expanded is None:
+                    errors.append(
+                        f"问题「{label}」：候选中没有标注「默认」的选项，无法按默认销账"
+                        " —— 请让用户在候选中明确选择")
+                    continue
+                resolution = expanded
+            else:
+                expanded = _expand_delegated_resolution(q, resolution)
+                if expanded is not None:
+                    resolution = expanded
             if not is_quantified(resolution):
                 hits = "、".join(vague_terms_in(resolution)[:3]) or "未给出明确结论"
                 errors.append(
-                    f"问题「{q.get('question', '')[:40]}」的结论仍未定量或含未绑定口径（{hits}）"
+                    f"问题「{label}」的结论仍未定量或含未绑定口径（{hits}）"
                     f"—— 请追问用户拿到与问题匹配的数字+单位、明确边界或枚举值后再销账"
                 )
                 continue
             relevance = resolution_relevance_issue(q, resolution)
             if relevance:
-                errors.append(f"问题「{q.get('question', '')[:40]}」答复不匹配：{relevance}")
+                errors.append(f"问题「{label}」答复不匹配：{relevance}")
                 continue
         q["status"] = status
         q["resolution"] = resolution

@@ -220,3 +220,82 @@ def test_scenario_diagrams_and_error_messages_unchanged():
     cv["scenarios"][0]["behaviors"] = ["missing_behavior"]
     with pytest.raises(D.DiagramError, match="未定义行为"):
         D.build_diagram(cv, "sequence", "支付流程")
+
+
+# ---------------------------------------------------------------- 状态迁移解析
+
+
+def _vuln_alert_canvas() -> dict:
+    """生产实况画布：漏洞告警单生命周期 + 真实事故中的 outcome 文本形态。"""
+    cv = C.empty_canvas()
+    cv, _, errors = C.upsert_elements(cv, "object", [{
+        "name": "vuln_alert", "displayName": "漏洞告警单",
+        "keyAttribute": "alert_id",
+        "attributes": [
+            {"name": "alert_id", "displayName": "告警单号", "typeHint": "文本",
+             "required": True},
+            {"name": "status", "displayName": "状态", "typeHint": "枚举",
+             "required": True,
+             "enum": ["已通报", "已确认", "规避中", "修复中", "已闭环",
+                      "已超期未修复"]},
+        ],
+    }])
+    assert not errors
+    cv, _, _ = C.upsert_elements(cv, "behavior", [
+        # 事故 1：目标状态后紧跟括号补充说明 —— 旧解析把「已闭环」（验证…）
+        # 整段吞成目的端，边丢失 → 「已闭环」被误判孤立、lifecycles 门永久堵死
+        {"name": "verify_repair", "displayName": "验证漏洞修复结果",
+         "actor": "vuln_repair_owner", "object": "vuln_alert",
+         "outcome": ("漏洞告警单状态从「修复中」变为「已闭环」"
+                     "（验证结果为「通过（已闭环）」）；"
+                     "若验证不通过则触发返工重新走修复流程")},
+        # 事故 2：叙事式「从无到有」把后续整句吞成伪源状态（40 字符垃圾）
+        {"name": "improve", "displayName": "立项改进",
+         "actor": "vuln_repair_owner", "object": "vuln_alert",
+         "outcome": ("改进措施落地情况状态从无到有，初始创建后标记为「已立项」；"
+                     "当开始实施时状态从「已立项」变为「修复中」")},
+        {"name": "confirm", "displayName": "分析确认告警",
+         "actor": "vuln_repair_owner", "object": "vuln_alert",
+         "outcome": "漏洞告警单状态从「已通报」变为「已确认」"},
+    ])
+    return cv
+
+
+def test_state_transition_survives_parenthetical_suffix():
+    """「从X变为Y（补充说明）」必须解析出真实迁移，不得误报孤立状态。"""
+    analysis = D.state_model_analysis(_vuln_alert_canvas(), "vuln_alert")
+    edges = {(src, dst) for src, dst, _ in analysis["edges"]}
+    assert ("修复中", "已闭环") in edges
+    assert ("已通报", "已确认") in edges
+    # 终态「已闭环」已由真实迁入边接通，不再是孤立状态
+    assert "已闭环" not in set(analysis["isolated"])
+
+
+def test_state_transition_narrative_not_swallowed_as_state():
+    """「从无到有，…」叙事不得吞并后续句子成为伪状态；真实未知引用仍要报。"""
+    analysis = D.state_model_analysis(_vuln_alert_canvas(), "vuln_alert")
+    issues_text = "；".join(analysis["issues"])
+    # 「已立项」不在枚举内 —— 这是真实的未知引用，必须继续暴露给模型修复
+    assert "已立项" in issues_text
+    # 旧解析吞出的 40 字符垃圾状态不允许再出现
+    assert "无到有" not in issues_text
+    assert "初始创建后标记" not in issues_text
+
+
+def test_state_diagram_error_teaches_canonical_phrasing():
+    """校验失败的报错要教会模型规范写法，让对话期修复回路可收敛。"""
+    cv = C.empty_canvas()
+    cv, _, errors = C.upsert_elements(cv, "object", [{
+        "name": "doc", "displayName": "单据",
+        "attributes": [{"name": "status", "displayName": "状态", "typeHint": "枚举",
+                        "enum": ["草稿", "生效"]}],
+    }])
+    assert not errors
+    cv, _, _ = C.upsert_elements(cv, "behavior", [{
+        "name": "approve", "actor": "clerk", "object": "doc",
+        "outcome": "单据被审批通过",
+    }])
+    with pytest.raises(D.DiagramError, match="规范写法") as exc_info:
+        D.build_diagram(cv, "state", "doc")
+    assert "单独成句" in str(exc_info.value)
+    assert "分号" in str(exc_info.value)
