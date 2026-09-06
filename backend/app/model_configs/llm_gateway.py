@@ -106,17 +106,25 @@ def _record_call(model_config_id: str, model_name: str, provider: str,
         db.close()
 
 
+# 闭合标签容忍命名空间变体（GLM/mm 系残留 </mm:think>；DeepSeek-R1/MiniMax 为 </think>）
+_THINK_CLOSE_RE = re.compile(r"</(?:[A-Za-z0-9_.-]+:)?think>", re.IGNORECASE)
+
+
 def _strip_think(result: dict) -> dict:
     """清洗模型返回的 <think>...</think> 标签（MiniMax / DeepSeek-R1 等推理模型）。
 
     模型有时会在正文前附加思考过程，形如：
       <think>用户说 ping，我应该回 pong</think> Pong! ...
 
-    这里提取 </think> 之后的纯文本作为实际回复。
+    这里提取闭合标签之后的纯文本作为实际回复。部分模型（GLM/mm 系）的
+    推理体已被上游 reasoning 通道剥离，仅在 content 开头残留命名空间变体
+    闭合标签（如 ``</mm:think>答案``），同样一并清除。
     """
     content = result.get("content")
-    if content and isinstance(content, str) and "</think>" in content:
-        result["content"] = content.split("</think>", 1)[1].strip()
+    if content and isinstance(content, str):
+        match = _THINK_CLOSE_RE.search(content)
+        if match:
+            result["content"] = content[match.end():].strip()
     return result
 
 

@@ -55,7 +55,8 @@ SYSTEM_PROMPT_RULE = """你已接入平台内其他助手（见 delegate_to_assi
 - 委派的 task 必须自包含（子助手看不到本会话历史），关键背景不足时先向用户确认。
 - 子助手答复中的澄清问题：能依据本会话上下文回答，就直接再次委派作答；答不了再转述给用户等待答复。
 - 同一会话内再次委派同一助手默认续用上次子会话，不要重述全部背景；确需另起一条线时传 session=new。
-- 如实转述子助手的结果与失败原因，不替它编造内容。"""
+- 如实转述子助手的结果与失败原因，不替它编造内容。
+- 在没有实际调用 delegate_to_assistant 的情况下，绝不声称已经询问或委派过子助手；任何子助手相关的事实必须来自该工具的返回。"""
 
 # 允许写入 delegations.status 的终态集合（含回收态 interrupted）
 _TERMINAL_STATUSES = frozenset({STATUS_ANSWERED, STATUS_FAILED, STATUS_CANCELLED})
