@@ -299,3 +299,35 @@ def test_state_diagram_error_teaches_canonical_phrasing():
         D.build_diagram(cv, "state", "doc")
     assert "单独成句" in str(exc_info.value)
     assert "分号" in str(exc_info.value)
+
+
+def test_isolated_state_error_names_cross_object_carrier():
+    """迁移承载行为挂在别的对象上 → 孤立状态报错必须点名行为与其挂载对象。
+
+    生产事故：verify_repair 挂在 repair_verification 上，vuln_alert 的
+    「已闭环」因此永远孤立；旧报错只说「孤立状态」，模型误判为解析局限。
+    """
+    cv = _vuln_alert_canvas()
+    cv, _, errors = C.upsert_elements(cv, "object", [
+        {"name": "repair_verification", "displayName": "修复验证记录",
+         "attributes": [{"name": "vid", "displayName": "验证ID", "typeHint": "文本"}]}])
+    assert not errors
+    cv, _, errors = C.upsert_elements(cv, "behavior", [
+        {"name": "verify_repair", "object": "repair_verification"}])
+    assert not errors
+
+    analysis = D.state_model_analysis(cv, "vuln_alert")
+    issues_text = "；".join(analysis["issues"])
+    # fixture 仅含 3 个行为：重挂后仅剩 confirm 的已通报→已确认边，
+    # 「已闭环」在内的其余状态孤立（实现按聚合文案列出）
+    assert "已闭环" in set(analysis["isolated"])
+    assert "孤立状态" in issues_text
+    assert "未挂载在本对象上" in issues_text
+    assert "verify_repair" in issues_text
+    assert "repair_verification" in issues_text
+
+    # 修复路径：行为改挂回本对象后，点名信息消失、孤立状态清零
+    cv, _, _ = C.upsert_elements(cv, "behavior", [{"name": "verify_repair", "object": "vuln_alert"}])
+    fixed = D.state_model_analysis(cv, "vuln_alert")
+    assert "已闭环" not in set(fixed["isolated"])
+    assert not any("未挂载在本对象上" in issue for issue in fixed["issues"])

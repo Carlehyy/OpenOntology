@@ -504,6 +504,37 @@ def test_generate_draft_tool_happy_path_and_attempt_cap(db, admin_user, ontology
     assert "上限" in third["error"]         # 第 3 次封顶
 
 
+def test_todo_write_validates_and_tracks_progress(db):
+    """todo_write：覆盖式更新建模计划，非法 status/超限拒绝，todo_read 回读。"""
+    from app.exploration.toolkit import ExplorationToolRunner
+    row = _tool_session(db)
+    runner = ExplorationToolRunner(db, row)
+
+    assert "非空数组" in runner.run("todo_write", {"items": []})["error"]
+    assert "status 只能是" in runner.run("todo_write", {
+        "items": [{"content": "x", "status": "finished"}]})["error"]
+    assert "缺少 content" in runner.run("todo_write", {
+        "items": [{"status": "done"}]})["error"]
+    assert "最多 20 项" in runner.run("todo_write", {
+        "items": [{"content": f"步骤{i}", "status": "pending"} for i in range(21)]})["error"]
+
+    ok = runner.run("todo_write", {"items": [
+        {"content": "建对象", "status": "done"},
+        {"content": "建行为", "status": "in_progress"},
+        {"content": "出图", "status": "pending"},
+    ]})
+    assert ok["total"] == 3 and ok["done"] == 1
+    assert runner.run("todo_read", {})["items"] == [
+        {"content": "建对象", "status": "done"},
+        {"content": "建行为", "status": "in_progress"},
+        {"content": "出图", "status": "pending"},
+    ]
+    # 覆盖式语义：再次写入整体替换
+    replaced = runner.run("todo_write", {"items": [
+        {"content": "全部完成", "status": "done"}]})
+    assert replaced["total"] == 1 and replaced["done"] == 1
+
+
 def test_chat_invalid_elements_rejected(client, auth_headers, session, db, admin_user, monkeypatch):
     _fake_model_config(db, admin_user)
     calls = {"n": 0}
@@ -1622,7 +1653,7 @@ def test_context_compaction_keeps_recent_messages_and_canvas_authority(db, sessi
 def test_small_context_budgets_every_provider_call_and_final_summary(
     client, auth_headers, session, db, admin_user, monkeypatch,
 ):
-    """8K 窗口 + 连续 8 个近 6000 字结果：每次调用（含第 9 次总结）都不得超窗。"""
+    """8K 窗口 + 连续 _MAX_STEPS 个近 6000 字结果：每次调用（含收尾总结）都不得超窗。"""
     from app.models.model_config import ModelConfig
     from app.exploration import orchestrator as OR
     from app.exploration.models import ExplorationSession
@@ -1675,7 +1706,7 @@ def test_small_context_budgets_every_provider_call_and_final_summary(
             assert payload["nextOffset"] == (
                 payload["offset"] + len(payload["content"]))
             saw_visible_page["value"] = True
-        if len(calls) <= 8:
+        if len(calls) <= OR._MAX_STEPS:
             return {
                 "content": None,
                 "usage": None,
@@ -1704,8 +1735,8 @@ def test_small_context_budgets_every_provider_call_and_final_summary(
     data = response.json()["data"]
     assert data["error"] is None
     assert data["content"] == "已基于预算内的权威检查点完成最终总结。"
-    assert len(data["steps"]) == 8
-    assert len(calls) == 9
+    assert len(data["steps"]) == OR._MAX_STEPS
+    assert len(calls) == OR._MAX_STEPS + 1
     assert saw_visible_page["value"] is True
 
     persisted = db.query(ExplorationSession).filter_by(id=session["id"]).one()

@@ -519,3 +519,94 @@ def test_next_llm_step_sees_latest_version_readiness_and_canonical_element(db, m
     assert calls["count"] == 2
     assert any(event["type"] == "canvas" and event["version"] == 1 for event in events)
     assert next(event for event in events if event["type"] == "answer")["content"] == "已记录。"
+
+
+def test_turn_streams_text_deltas_and_plan_events(db, monkeypatch):
+    """流式回合契约：text_delta 实时外发；todo_write 成功后推送 plan 事件。"""
+    session = ExplorationSession(
+        id=str(uuid.uuid4()), title="stream", canvas=C.empty_canvas(), canvas_version=0)
+    db.add(session)
+    db.commit()
+    monkeypatch.setattr(OR, "select_llm_model_config", lambda db, model_id=None: object())
+    monkeypatch.setattr(OR, "llm_call_kwargs", lambda cfg: {"model": "fake"})
+    calls = {"n": 0}
+
+    def fake_chat(_ck, _messages, _tools):
+        return {"content": "兜底。", "tool_calls": [], "usage": None}
+
+    def fake_chat_stream(_ck, _messages, _tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {"delta": "先定计划，"}
+            yield {"delta": "再写画布。"}
+            yield {"final": {
+                "content": "先定计划，再写画布。",
+                "tool_calls": [{
+                    "id": "t1", "name": "todo_write",
+                    "arguments": {"items": [
+                        {"content": "建对象", "status": "in_progress"},
+                        {"content": "出图", "status": "pending"},
+                    ]},
+                }],
+                "usage": None}}
+        else:
+            yield {"delta": "完成"}
+            yield {"final": {"content": "完成", "tool_calls": [], "usage": None}}
+
+    monkeypatch.setattr(OR.llm_bridge, "chat", fake_chat)
+    monkeypatch.setattr(OR.llm_bridge, "chat_stream", fake_chat_stream)
+
+    events = list(OR.run_exploration_turn(
+        db, session.id, user=object(), message="建模"))
+    deltas = [e["delta"] for e in events if e.get("type") == "text_delta"]
+    assert "".join(deltas) == "先定计划，再写画布。完成"
+    plan = next(e for e in events if e.get("type") == "plan")
+    assert plan["items"] == [
+        {"content": "建对象", "status": "in_progress"},
+        {"content": "出图", "status": "pending"},
+    ]
+    assert next(e for e in events if e["type"] == "answer")["content"] == "完成"
+    # 持久化消息含 todo_write 步骤（历史回放据此重建计划）
+    row = db.query(ExplorationSession).filter_by(id=session.id).one()
+    assert row.context_stats.get("recentMessages") is not None
+
+
+def test_stream_unsupported_falls_back_to_single_chat(db, monkeypatch):
+    """provider 不支持流式（无 api_base）→ unsupported 信号 → 一次性 chat 兜底。"""
+    session = ExplorationSession(
+        id=str(uuid.uuid4()), title="fallback", canvas=C.empty_canvas(), canvas_version=0)
+    db.add(session)
+    db.commit()
+    monkeypatch.setattr(OR, "select_llm_model_config", lambda db, model_id=None: object())
+    monkeypatch.setattr(OR, "llm_call_kwargs", lambda cfg: {"model": "fake"})
+
+    def fake_chat(_ck, _messages, _tools):
+        return {"content": "非流式结果。", "tool_calls": [], "usage": None}
+
+    def fake_chat_stream(_ck, _messages, _tools):
+        yield {"unsupported_stream": True}
+        raise AssertionError("unsupported 后不应继续消费流")
+
+    monkeypatch.setattr(OR.llm_bridge, "chat", fake_chat)
+    monkeypatch.setattr(OR.llm_bridge, "chat_stream", fake_chat_stream)
+
+    events = list(OR.run_exploration_turn(
+        db, session.id, user=object(), message="你好"))
+    assert not any(e.get("type") == "text_delta" for e in events)
+    assert next(e for e in events if e["type"] == "answer")["content"] == "非流式结果。"
+
+
+def test_system_prompt_encodes_autonomous_agent_contract():
+    """E2 自主建模代理契约与回合预算：禁求确认、批量检查点、PLAN 工具、24 步。"""
+    assert OR._MAX_STEPS == 24
+    session = ExplorationSession(
+        id="prompt-contract", title="t", canvas=C.empty_canvas(), canvas_version=0)
+    prompt = OR._system_prompt(session)
+    assert "自主建模代理" in prompt
+    assert "不要提出「是否同意继续" in prompt
+    assert "一次性批量" in prompt
+    assert "todo_write" in prompt
+    assert "generate_document" in prompt and "generate_draft" in prompt
+    # 反虚构纪律与定量铁律保留
+    assert "严禁声称已完成" in prompt
+    assert "定量铁律" in prompt

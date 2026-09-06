@@ -93,6 +93,12 @@ export interface BxStep {
   diagram?: BxDiagram
 }
 
+/** 建模计划清单项（todo_write 覆盖式维护，随 plan 事件 / 历史步骤回放）。 */
+export interface BxPlanItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'done'
+}
+
 export interface BxMessage {
   id: string
   role: 'user' | 'assistant'
@@ -134,7 +140,9 @@ export interface BxDraftOntology {
 
 export type ExploreEvent =
   | { type: 'meta'; sessionId: string; model: string }
+  | { type: 'text_delta'; delta: string }
   | ({ type: 'step' } & BxStep)
+  | { type: 'plan'; items: BxPlanItem[] }
   | { type: 'canvas'; canvas: BusinessCanvas; version: number; completeness: Completeness; readiness: Readiness }
   | { type: 'answer'; content: string; usage?: unknown }
   | { type: 'error'; message: string }
