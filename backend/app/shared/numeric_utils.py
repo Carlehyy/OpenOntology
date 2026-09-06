@@ -6,11 +6,15 @@ vs float without a float64 round-trip, because large integral values
 """
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+import decimal
+from decimal import Decimal
 
-# 与 float64 可表示量级对齐的上限：超过此量级的整值不走 int 精确路径，
+# 与 float64 可表示量级对齐的上限：超过此量级的整值不做 int 精确路径，
 # 照旧落 float，由实例契约的 isfinite 校验按旧行为拦截。
 _FLOAT64_LIMIT = Decimal("1e308")
+_INT_LIMIT = int(_FLOAT64_LIMIT)
+# 数值文本长度上限：超长输入（对抗载荷/脏数据）直接判非法，不进入解析。
+_MAX_TEXT_LENGTH = 1_000_000
 
 
 def parse_numeric_text(text: str) -> int | float:
@@ -20,15 +24,25 @@ def parse_numeric_text(text: str) -> int | float:
     Decimal 任意精度，不经 float64 中转）；"123.45" → float；
     "nan"/"inf"/garbage 遵循 float() 语义，由下游契约校验按旧行为处理。
     非数值文本抛 ValueError。
+
+    所有整值路径都受 _FLOAT64_LIMIT 量级守卫：对抗性巨型数字串（数百位
+    以上）不会以巨型 int 击穿实例契约校验（float() 转换 OverflowError），
+    而是照旧转 inf 被契约拒绝。
     """
     cleaned = str(text).strip().replace(",", "")
+    if len(cleaned) > _MAX_TEXT_LENGTH:
+        raise ValueError(
+            f"数值文本超长（{len(cleaned)} > {_MAX_TEXT_LENGTH} 字符）")
     try:
-        return int(cleaned)
+        value = int(cleaned)
     except ValueError:
         pass
+    else:
+        if -_INT_LIMIT <= value <= _INT_LIMIT:
+            return value
     try:
         dec = Decimal(cleaned)
-    except InvalidOperation:
+    except decimal.DecimalException:
         dec = None
     if (dec is not None and dec.is_finite()
             and dec == dec.to_integral_value()

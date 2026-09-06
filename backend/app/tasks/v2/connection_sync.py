@@ -46,7 +46,7 @@ def _structured_schema_json(connector, resource: str, rows: list,
     from app.data_channel.connections.type_normalization import (
         introspected_columns_typed,
     )
-    from app.data_channel.datasets.lake_gate import infer_columns_typed
+    from app.data_channel.datasets.lake_gate import infer_columns_typed, split_pk
 
     columns = None
     introspect = getattr(connector, "introspect_schema", None)
@@ -84,14 +84,22 @@ def _structured_schema_json(connector, resource: str, rows: list,
             "types_source": "sample_inference",
         }
 
-    pk = [str(column) for column in (primary_key_columns or []) if str(column)]
+    pk = [str(column).strip() for column in (primary_key_columns or [])
+          if str(column).strip()]
     if pk:
         lake_types = {c.get("name"): c.get("type") for c in schema["columns_typed"]}
         float_pks = [c for c in pk if lake_types.get(c) == "float"]
-        if float_pks:
+        # 主键列名防呆：含 "," 会被 split_pk 错拆出幻影列、含 ":" 会与单列
+        # 身份 f"{col}:{value}" 的分隔符产生拼接歧义（对抗审查实证可构造
+        # 跨数据集实例碰撞）；split_pk 往返校验兜底其余不可编码形态。
+        unsafe_pks = [c for c in pk if ("," in c or ":" in c)]
+        if not unsafe_pks and split_pk(",".join(pk)) != pk:
+            unsafe_pks = pk
+        if float_pks or unsafe_pks:
             logger.warning(
-                "浮点列 %s 不适合作为主键契约（精度语义），未写入 primary_key；"
-                "请改用整型/文本主键，或经流水线派生稳定键", float_pks)
+                "主键列 %s 无法安全编码进主键契约（浮点精度语义 或 列名含 "
+                "逗号/冒号），未写入 primary_key；请改用整型/文本主键，或经"
+                "流水线派生稳定键", float_pks or unsafe_pks)
         else:
             schema["primary_key"] = ",".join(pk)
     return schema

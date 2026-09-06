@@ -258,7 +258,10 @@ def _coerce_props_to_type(props: dict, type_props: list[dict]) -> dict:
                 else:
                     raise ValueError(
                         f"属性 {k} 的值 {v!r} 无法转换为 {t}")
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, ArithmeticError, RecursionError) as exc:
+            # ArithmeticError/RecursionError：巨型 Decimal/深嵌套 JSON 等对抗
+            # 载荷会从解析器逃出这两族异常——必须翻译成带属性名的业务报错，
+            # 不能以未分类异常击穿整批投影
             raise ValueError(
                 f"属性 {k} 的值 {v!r} 无法转换为 {t}"
                 f"（{t} 需要 ISO 格式，如 2026-01-15 或 2026-01-15T10:30:00）"
