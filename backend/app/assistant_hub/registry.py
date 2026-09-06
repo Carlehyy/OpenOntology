@@ -1,12 +1,15 @@
 """平台助手注册表：全平台唯一的助手清单来源。
 
-超级助手侧只读本注册表（零硬编码名单的落点）；新增/下线助手只改
-adapters/ 与本文件，委派引擎与工具 schema 自动跟随。注册表不得登记
-超级助手自身（防自递归委派）。
+静态清单 = 平台内置助手（adapters/ + 本文件）；动态清单 = 经
+``register_dynamic_provider`` 注入的按用户解析 provider（如超级助手侧
+用户自配的远程 agent——配置归 super_assistant 域，hub 仍不持有自有数据
+模型，依赖方向保持 super_assistant → hub 单向）。委派引擎与工具 schema
+只经本注册表取目录，新增/下线助手对引擎零改动。注册表不得登记超级助手
+自身（防自递归委派）。
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -17,26 +20,57 @@ from app.auth.permissions import user_has_menu_access
 
 DELEGATION_TOOL_NAME = "delegate_to_assistant"
 
+# 动态目录 provider：(db, user) -> 该用户可用的额外助手（自行负责归属过滤）
+DynamicAssistantsProvider = Callable[[Session, Any], list[PlatformAssistant]]
+
 _REGISTRY: tuple[PlatformAssistant, ...] = (
     ontology_agent_adapter.OntologyAgentAdapter(),
     exploration_adapter.ExplorationAdapter(),
 )
 
+_dynamic_providers: list[DynamicAssistantsProvider] = []
+
+
+def register_dynamic_provider(provider: DynamicAssistantsProvider) -> None:
+    """注册动态目录 provider（幂等：重复注册同一函数不叠加）。"""
+    if provider not in _dynamic_providers:
+        _dynamic_providers.append(provider)
+
+
+def _dynamic_assistants(db: Optional[Session], user) -> list[PlatformAssistant]:
+    if db is None or user is None or not _dynamic_providers:
+        return []
+    merged: list[PlatformAssistant] = []
+    for provider in _dynamic_providers:
+        merged.extend(provider(db, user))
+    return merged
+
 
 def list_assistants() -> tuple[PlatformAssistant, ...]:
+    """静态清单（平台内置助手）。"""
     return _REGISTRY
 
 
-def get_assistant(key: str) -> PlatformAssistant | None:
+def get_assistant(
+    key: str, db: Optional[Session] = None, user: Any = None,
+) -> PlatformAssistant | None:
+    """按键解析助手；动态条目需带 db+user（执行路径总会提供）。"""
     for assistant in _REGISTRY:
+        if assistant.spec().key == key:
+            return assistant
+    for assistant in _dynamic_assistants(db, user):
         if assistant.spec().key == key:
             return assistant
     return None
 
 
 def permitted_assistants(db: Session, user) -> list[PlatformAssistant]:
-    """按用户菜单权限过滤（执行时还会重验，这里同时驱动工具目录可见性）。"""
-    return [
+    """按用户菜单权限过滤（执行时还会重验，这里同时驱动工具目录可见性）。
+
+    动态条目由 provider 自行按归属（owner）过滤；菜单检查同样适用——
+    用户自配远程助手 menu_keys 为空（不映射平台菜单），恒通过。
+    """
+    static = [
         assistant
         for assistant in _REGISTRY
         if all(
@@ -44,6 +78,15 @@ def permitted_assistants(db: Session, user) -> list[PlatformAssistant]:
             for menu_key in assistant.spec().menu_keys
         )
     ]
+    dynamic = [
+        assistant
+        for assistant in _dynamic_assistants(db, user)
+        if all(
+            user_has_menu_access(db, user, menu_key)
+            for menu_key in assistant.spec().menu_keys
+        )
+    ]
+    return static + dynamic
 
 
 def delegation_tool_schema(
