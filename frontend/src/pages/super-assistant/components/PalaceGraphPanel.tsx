@@ -213,7 +213,7 @@ export default function PalaceGraphPanel({
 
   return (
     <section
-      aria-label="记忆宫殿知识图谱"
+      aria-label="知识图谱"
       data-testid="super-assistant-palace-graph"
       className="flex min-h-0 flex-1 flex-col"
     >

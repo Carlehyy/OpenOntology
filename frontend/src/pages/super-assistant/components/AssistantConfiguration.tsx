@@ -32,12 +32,16 @@ export { errorText }
 // 薄封装 ui/dialog：统一配置域弹层的头部与尺寸语言；
 // 遮罩、Esc 关闭与焦点管理交给 Radix，不再自绘 fixed 弹层和焦点陷阱。
 // （外部集成弹层等同语言复用，故导出）
-export function DialogShell({ title, description, size = 'default', onClose, children }: {
+export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus }: {
   title: string
   description?: string
   size?: 'default' | 'large' | 'wide'
   onClose: () => void
   children: React.ReactNode
+  /** 追加到弹层根节点的类（如外部集成的固定高度） */
+  contentClassName?: string
+  /** 覆盖 Radix 默认的首个可聚焦元素聚焦（如聚焦首个输入框而非左栏 tab） */
+  onOpenAutoFocus?: (event: Event) => void
 }) {
   const sizeClass = {
     default: 'max-h-[90dvh] w-[min(92vw,36rem)]',
@@ -47,7 +51,10 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
 
   return (
     <Dialog open onOpenChange={value => { if (!value) onClose() }}>
-      <DialogContent className={`flex flex-col overflow-hidden p-0 ${sizeClass}`}>
+      <DialogContent
+        onOpenAutoFocus={onOpenAutoFocus}
+        className={`flex flex-col overflow-hidden p-0 ${sizeClass} ${contentClassName ?? ''}`}
+      >
         <DialogHeader className="mb-0 shrink-0 border-b border-[var(--color-border)] px-5 py-4 pr-12">
           <div>
             <DialogTitle className="text-sm">{title}</DialogTitle>
@@ -511,7 +518,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   }
 
   const toggleSkill = async (skill: SuperSkill) => {
-    if (updatingSkillId) return
+    // busy/防重入按 skill.id 粒度：单个开关保存中不连坐禁用其它卡片
+    if (updatingSkillId === skill.id) return
     setUpdatingSkillId(skill.id)
     try {
       await superAssistantApi.updateSkill(skill.id, { enabled: !skill.enabled })
@@ -524,7 +532,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   }
 
   const toggleSkillAlwaysActive = async (skill: SuperSkill) => {
-    if (updatingSkillId) return
+    if (updatingSkillId === skill.id) return
     setUpdatingSkillId(skill.id)
     try {
       await superAssistantApi.updateSkill(skill.id, { always_active: !skill.always_active })
@@ -559,7 +567,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
     setting: 'enabled' | 'require_confirmation',
     value: boolean,
   ) => {
-    if (updatingServerSetting) return
+    // busy/防重入按 server.id:setting 粒度：单个开关保存中不连坐禁用其它卡片
+    if (updatingServerSetting === `${server.id}:${setting}`) return
     setUpdatingServerSetting(`${server.id}:${setting}`)
     try {
       const patch = setting === 'enabled' ? { enabled: value } : { require_confirmation: value }
@@ -693,14 +702,14 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
                           label="启用"
                           ariaLabel={`${skill.enabled ? '停用' : '启用'} Skill ${skill.name}`}
                           checked={skill.enabled}
-                          busy={updatingSkillId !== null}
+                          busy={updatingSkillId === skill.id}
                           onToggle={() => void toggleSkill(skill)}
                         />
                         <SettingSwitch
                           label="常驻"
                           ariaLabel={`${skill.always_active ? '取消' : '设为'}常驻 Skill ${skill.name}`}
                           checked={skill.always_active}
-                          busy={updatingSkillId !== null}
+                          busy={updatingSkillId === skill.id}
                           onToggle={() => void toggleSkillAlwaysActive(skill)}
                         />
                       </div>
@@ -736,10 +745,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
                     <div className="mt-2 flex items-center justify-between gap-2">
                       <div className="flex min-w-0 items-center gap-3">
                         <SettingSwitch label="启用" ariaLabel={`${server.enabled ? '停用' : '启用'} MCP ${server.name}`} checked={server.enabled}
-                          busy={updatingServerSetting !== null}
+                          busy={updatingServerSetting === `${server.id}:enabled`}
                           onToggle={() => void updateServerSetting(server, 'enabled', !server.enabled)} />
                         <SettingSwitch label="自动执行" ariaLabel={`${server.require_confirmation ? '开启' : '关闭'} ${server.name} 自动执行`} checked={!server.require_confirmation}
-                          busy={updatingServerSetting !== null}
+                          busy={updatingServerSetting === `${server.id}:require_confirmation`}
                           onToggle={() => void updateServerSetting(server, 'require_confirmation', !server.require_confirmation)} />
                       </div>
                       <div className="flex shrink-0 items-center gap-1">

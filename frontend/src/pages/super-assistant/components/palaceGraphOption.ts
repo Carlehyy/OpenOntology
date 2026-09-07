@@ -102,7 +102,7 @@ export function palaceGraphOption(
     ...base,
     aria: {
       enabled: true,
-      description: '记忆宫殿知识图谱：节点为用户文档中抽取的实体，连线为实体间关系',
+      description: '知识图谱：节点为用户文档中抽取的实体，连线为实体间关系',
     },
     legend: {
       show: nodeData.length > 0,

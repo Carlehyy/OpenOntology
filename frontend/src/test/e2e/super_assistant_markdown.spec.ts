@@ -140,7 +140,7 @@ test('标题编辑与顶部工具默认使用可识别的状态色', async ({ pa
   await page.goto('/#/super-assistant')
 
   const contextUsage = page.getByTestId('super-assistant-context-usage')
-  // 配置面板桌面端默认展开，按钮呈选中态（brand-soft 浅绿底），以静态 title 定位
+  // 配置面板默认收起，按钮恒为选中态（brand-soft 浅绿底），以静态 title 定位
   const configButton = page.locator('button[title="助手配置"]')
 
   await expect(contextUsage).toHaveCSS('background-color', 'rgba(240, 253, 250, 0.8)')
@@ -165,7 +165,7 @@ test('打开助手配置时工作台侧栏保持可用', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.goto('/#/super-assistant')
 
-  // 配置面板桌面端默认展开：仅在收起时点击展开
+  // 配置面板默认收起：点击展开
   const configToggle = page.locator('button[title="助手配置"]')
   if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
   await expect(page.getByRole('heading', { name: '助手配置' })).toBeVisible()

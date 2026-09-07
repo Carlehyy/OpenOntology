@@ -85,9 +85,9 @@ export default function SuperAssistantPage() {
   const [searchOpen, setSearchOpen] = useState(false)
   // 全局搜索选中消息命中后：先切会话，待消息加载完成再滚动定位
   const [pendingJumpId, setPendingJumpId] = useState<string | null>(null)
-  // 助手配置在 ≥1280 视口默认展开（右上角按钮呈选中态）；更窄的 lg 档与移动端
-  // 默认收起——面板常驻会挤占聊天区头部的最小可用宽度
-  const [configOpen, setConfigOpen] = useState(() => window.matchMedia('(min-width: 1280px)').matches)
+  // 助手配置面板默认收起，由用户点击右上角按钮展开/收起；
+  // 按钮保持绿色选中态外观（仅卡片显隐变化），避免进页即展开挤占聊天区
+  const [configOpen, setConfigOpen] = useState(false)
   // 面板宽度（px）：单一卡片结构下聊天列经 --config-w 让位，宽度状态提升到页面级；
   // 拖拽中禁用 padding 过渡，聊天列跟手移动，松手后才恢复开合动画
   const [configPanelWidth, setConfigPanelWidth] = useState(DEFAULT_CONFIG_PANEL_WIDTH)
@@ -801,10 +801,12 @@ export default function SuperAssistantPage() {
             }}
             disabled={!selectedId || runningHere}
           >
-            {/* 与左侧「上下文」框同一语言：1px 绿色细边框、浅绿底、无阴影 */}
+            {/* 与左侧「上下文」框同一语言：1px 绿色细边框、浅绿底、无阴影。
+                选完模型焦点留在触发器上（Radix/Chromium 下鼠标选中也会命中 :focus-visible），
+                一律去粗焦点环只保留细边——细边即焦点指示，键盘操作同样可见 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus:border-brand sm:w-48 xl:w-60"
+              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus:border-brand focus:ring-0 sm:w-48 xl:w-60"
             >
               <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'} />
             </SelectTrigger>
@@ -827,9 +829,7 @@ export default function SuperAssistantPage() {
             aria-label={configOpen ? '关闭助手配置' : '打开助手配置'}
             aria-expanded={configOpen}
             title="助手配置"
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${configOpen
-              ? 'border-brand bg-brand-soft text-brand-ink'
-              : 'border-slate-200 bg-white text-slate-500 hover:border-brand hover:bg-brand-soft hover:text-brand-ink'}`}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand bg-brand-soft text-brand-ink transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Settings2 size={15} />
           </button>

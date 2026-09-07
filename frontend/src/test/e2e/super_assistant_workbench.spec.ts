@@ -1,11 +1,11 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
-// AI 原生工作台（前台）：登录默认落地、七项入口、历史会话分组时间线、归档流转、
+// AI 原生工作台（前台）：登录默认落地、七项入口、近期会话单列表、归档流转、
 // 本体治理跳后台并返回。全部接口本地 mock，不触真实后端。
 // 本 spec 另覆盖：分组限量展开、naive UTC 时区显示、行悬停不抖动、
 // 会话附件上传/移除/位于输入框上方与跨会话隔离、流式生成跨会话隔离、ReUI 模型选择器、
 // 删除确认弹窗、新建任务空会话去重、空态品牌文案与占位符、配置面板白底、
-// 重命名 blur 取消、记忆宫殿页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
+// 重命名 blur 取消、知识图谱页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
 // 知识图谱过滤/节点详情/邻域检索高亮）、外部集成（multica 配置弹窗 + /multica:
 // 命令提示的配置门控）、⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、
 // 全局搜索 Command 面板检索与跳转、历史分组 shadcn Sidebar 原语、空态品牌字号。
@@ -187,7 +187,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         return route.fulfill({ status: 204 })
       }
     }
-    // 记忆宫殿：文件库 / 图谱 / 上传 / 删除 / 重建 / 目录 / 笔记 / 移动
+    // 知识图谱：文件库 / 图谱 / 上传 / 删除 / 重建 / 目录 / 笔记 / 移动
     if (path === '/api/v2/super-assistant/palace/files') {
       if (request.method() === 'GET') return json(route, palaceFiles)
       if (request.method() === 'POST') {
@@ -516,7 +516,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   }
 }
 
-test('工作台骨架：七项入口齐备，历史会话按今日/昨日/历史分组，归档折叠', async ({ page }) => {
+test('工作台骨架：七项入口齐备，近期会话单列表，归档折叠', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
@@ -524,18 +524,16 @@ test('工作台骨架：七项入口齐备，历史会话按今日/昨日/历史
   await expect(page.getByRole('button', { name: '新建任务' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
-  await expect(page.getByRole('button', { name: '记忆宫殿' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '知识图谱' })).toBeVisible()
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
   await expect(page.getByRole('button', { name: '外部集成' })).toBeVisible()
   await expect(page.getByRole('button', { name: /退出登录/ })).toBeVisible()
 
-  await expect(page.locator('[data-workbench-group="today"] [data-workbench-conversation="c-today"]')).toHaveCount(1)
-  await expect(page.locator('[data-workbench-group="yesterday"] [data-workbench-conversation="c-yesterday"]')).toHaveCount(1)
-  await expect(page.locator('[data-workbench-group="earlier"] [data-workbench-conversation="c-earlier"]')).toHaveCount(1)
-  // 历史分组采用 shadcn Sidebar 展示原语（组标签 + 菜单列表）
-  await expect(page.locator('[data-workbench-group="today"] [data-slot="sidebar-group-label"]')).toHaveText('今日对话')
-  await expect(page.locator('[data-workbench-group="today"] ul[data-slot="sidebar-menu"]')).toHaveCount(1)
-  await expect(page.locator('[data-workbench-group="yesterday"] [data-slot="sidebar-group-label"]')).toHaveText('昨日对话')
+  // 近期会话合并为单列表（不再有今日/昨日/历史分组标签）
+  await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(1)
+  await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-yesterday"]')).toHaveCount(1)
+  await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-earlier"]')).toHaveCount(1)
+  await expect(page.locator('[data-slot="sidebar-group-label"]')).toHaveCount(0)
   // 归档区默认折叠：标题含计数，条目不可见
   await expect(page.getByRole('button', { name: /归档会话（1）/ })).toBeVisible()
   await expect(page.locator('[data-workbench-group="archived"] [data-workbench-conversation="c-archived"]')).toHaveCount(0)
@@ -555,7 +553,7 @@ test('归档流转：会话移入归档区且 PATCH 携带 status', async ({ pag
 
   await expect.poll(() => patchBodies.length).toBe(1)
   expect(JSON.parse(patchBodies[0])).toMatchObject({ status: 'archived' })
-  await expect(page.locator('[data-workbench-group="today"] [data-workbench-conversation="c-today"]')).toHaveCount(0)
+  await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /归档会话（2）/ })).toBeVisible()
 
   // 展开归档区后可恢复
@@ -566,7 +564,7 @@ test('归档流转：会话移入归档区且 PATCH 携带 status', async ({ pag
   await archivedRow.getByRole('button', { name: '恢复会话 今日需求梳理' }).click()
   await expect.poll(() => patchBodies.length).toBe(2)
   expect(JSON.parse(patchBodies[1])).toMatchObject({ status: 'active' })
-  await expect(page.locator('[data-workbench-group="today"] [data-workbench-conversation="c-today"]')).toHaveCount(1)
+  await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(1)
 })
 
 test('本体治理跳转后台：左栏「超级助手」位于「三维场景」上方，可经其或悬浮助手返回工作台', async ({ page }) => {
@@ -658,7 +656,7 @@ test('multica 命令提示：输入 / 即列出全部，前缀收窄、点选填
   await expect(page.getByTestId('multica-command-hints')).toHaveCount(0)
 })
 
-test('历史分组默认限量 10 条，展开全部后显示完整列表且可收起', async ({ page }) => {
+test('近期会话默认限量 10 条，展开全部后显示完整列表且可收起', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   const many = Array.from({ length: 13 }, (_, index) => ({
@@ -672,17 +670,17 @@ test('历史分组默认限量 10 条，展开全部后显示完整列表且可�
   })
   await page.goto('/#/super-assistant')
 
-  const today = page.locator('[data-workbench-group="today"]')
-  await expect(today.locator('[data-workbench-conversation]')).toHaveCount(10)
-  const toggle = page.locator('[data-workbench-group-toggle="today"]')
+  const recent = page.locator('[data-workbench-group="recent"]')
+  await expect(recent.locator('[data-workbench-conversation]')).toHaveCount(10)
+  const toggle = page.locator('[data-workbench-group-toggle="recent"]')
   await expect(toggle).toHaveText('展开全部（还有 3 条）')
 
   await toggle.click()
-  await expect(today.locator('[data-workbench-conversation]')).toHaveCount(13)
+  await expect(recent.locator('[data-workbench-conversation]')).toHaveCount(13)
   await expect(toggle).toHaveText('收起')
 
   await toggle.click()
-  await expect(today.locator('[data-workbench-conversation]')).toHaveCount(10)
+  await expect(recent.locator('[data-workbench-conversation]')).toHaveCount(10)
 })
 
 test('会话时间按本地时区显示：naive UTC 串按 UTC 解析', async ({ page }) => {
@@ -713,7 +711,7 @@ test('会话行悬停时行高与相邻组位置不变（无抖动）', async ({
   await page.goto('/#/super-assistant')
 
   const row = page.locator('[data-workbench-conversation="c-today"]')
-  const nextGroup = page.locator('[data-workbench-group="yesterday"]')
+  const nextGroup = page.locator('[data-workbench-group="archived"]')
   const beforeBox = await row.boundingBox()
   const beforeY = (await nextGroup.boundingBox())?.y
 
@@ -883,7 +881,7 @@ test('助手配置面板为白色背景', async ({ page }) => {
   await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
 
-  // 配置面板桌面端默认展开：仅在收起时点击展开
+  // 配置面板默认收起：点击展开
   const configToggle = page.locator('button[title="助手配置"]')
   if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
   const panel = page.locator('section[aria-label="助手配置"]')
@@ -915,15 +913,16 @@ test('重命名会话：点击其它处自动取消，Enter 仍可保存', async
   expect(JSON.parse(mocks.patchBodies[0])).toMatchObject({ title: '新名称' })
 })
 
-test('记忆宫殿：三栏工作台（文件树|内容|图谱），上传删除联动，外部集成打开 multica 配置弹窗', async ({ page }) => {
+test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除联动，外部集成打开 multica 配置弹窗', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '记忆宫殿' }).click()
+  await page.getByRole('button', { name: '知识图谱' }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByRole('heading', { name: '记忆宫殿' })).toBeVisible()
+  // level:2 消歧：弹窗标题 h2 与图谱面板 h3 同名「知识图谱」
+  await expect(dialog.getByRole('heading', { name: '知识图谱', level: 2 })).toBeVisible()
 
   // 三栏同时可见：左树（含目录「设计图」）、中栏空态、右侧图谱画布
   const filesPane = dialog.getByTestId('super-assistant-palace-files')
@@ -971,11 +970,20 @@ test('记忆宫殿：三栏工作台（文件树|内容|图谱），上传删除
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
   await expect(multicaTab).toHaveAttribute('aria-selected', 'true')
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
+  // 等入场缩放动画结束再量尺寸，避免动画中的包围盒参与比较
+  await page.waitForTimeout(300)
 
   // GitHub tab 为结构化占位：切过去显示规划中，切回 multica 表单仍在
+  const shellBefore = await integrationsDialog.boundingBox()
   await integrationsDialog.locator('[data-integrations-tab="github"]').click()
   await expect(integrationsDialog.getByTestId('integrations-github-placeholder')).toBeVisible()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toHaveCount(0)
+  // 弹窗固定宽高：切 tab 前后尺寸不变；左栏加宽后 GitHub 全名不截断
+  const shellAfter = await integrationsDialog.boundingBox()
+  expect(Math.abs(shellBefore!.height - shellAfter!.height)).toBeLessThanOrEqual(1)
+  expect(Math.abs(shellBefore!.width - shellAfter!.width)).toBeLessThanOrEqual(1)
+  const githubLabel = integrationsDialog.locator('[data-integrations-tab="github"]').locator('span').first()
+  expect(await githubLabel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   await multicaTab.click()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
 
@@ -1002,12 +1010,12 @@ test('记忆宫殿：三栏工作台（文件树|内容|图谱），上传删除
   await expect(integrationsDialog).toHaveCount(0)
 })
 
-test('记忆宫殿：选中即预览，md 在线编辑保存触发 PUT content，图片走原图预览', async ({ page }) => {
+test('知识图谱：选中即预览，md 在线编辑保存触发 PUT content，图片走原图预览', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '记忆宫殿' }).click()
+  await page.getByRole('button', { name: '知识图谱' }).click()
   const dialog = page.getByRole('dialog')
   const filesPane = dialog.getByTestId('super-assistant-palace-files')
   const contentPane = dialog.locator('section[aria-label="文档内容"]')
@@ -1050,12 +1058,12 @@ test('记忆宫殿：选中即预览，md 在线编辑保存触发 PUT content�
   await expect(dialog.getByTestId('palace-file-preview')).toBeVisible()
 })
 
-test('记忆宫殿：ZIP 导入按压缩包名建顶层目录并展示跳过原因', async ({ page }) => {
+test('知识图谱：ZIP 导入按压缩包名建顶层目录并展示跳过原因', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '记忆宫殿' }).click()
+  await page.getByRole('button', { name: '知识图谱' }).click()
   const dialog = page.getByRole('dialog')
   const filesPane = dialog.getByTestId('super-assistant-palace-files')
 
@@ -1079,12 +1087,12 @@ test('记忆宫殿：ZIP 导入按压缩包名建顶层目录并展示跳过原�
   await expect(tree.locator('[data-palace-file="pf-zip-1"]')).toBeVisible()
 })
 
-test('记忆宫殿：图谱过滤、节点详情、点节点定位来源文档与聚焦联动', async ({ page }) => {
+test('知识图谱：图谱过滤、节点详情、点节点定位来源文档与聚焦联动', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '记忆宫殿' }).click()
+  await page.getByRole('button', { name: '知识图谱' }).click()
   const dialog = page.getByRole('dialog')
   const filesPane = dialog.getByTestId('super-assistant-palace-files')
   const contentPane = dialog.locator('section[aria-label="文档内容"]')
@@ -1154,8 +1162,20 @@ test('全局搜索：检索会话标题与消息内容，命中消息可跳转�
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
 
+  // 检索请求悬挂 500ms：断言检索中只有一个「正在搜索…」且在列表区垂直居中（输入框 44px + 行 min-h 264px）
+  await page.route('**/api/v2/super-assistant/search/conversations**', async route => {
+    await new Promise(resolve => setTimeout(resolve, 500))
+    return route.fallback()
+  })
+
   // 输入关键词（防抖 300ms 后发出检索请求）
   await page.getByPlaceholder('搜索会话标题与消息内容…').fill('需求')
+  await expect(page.getByText('正在搜索…')).toHaveCount(1)
+  const searchingBox = await page.getByText('正在搜索…').boundingBox()
+  const dialogBox = await dialog.boundingBox()
+  expect(searchingBox && dialogBox).toBeTruthy()
+  expect(Math.abs((searchingBox!.y + searchingBox!.height / 2) - (dialogBox!.y + 44 + 132))).toBeLessThan(8)
+
   await expect.poll(() => mocks.searchQueries.length).toBeGreaterThan(0)
   await expect.poll(() => mocks.searchQueries.at(-1)).toBe('需求')
 
@@ -1204,12 +1224,12 @@ test('输入草稿按会话缓存：切换会话不丢内容，发送后清空',
   await expect(textbox).toHaveValue('')
 })
 
-test('记忆宫殿：弹窗全屏切换与图谱缩放控制', async ({ page }) => {
+test('知识图谱：弹窗全屏切换与图谱缩放控制', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '记忆宫殿' }).click()
+  await page.getByRole('button', { name: '知识图谱' }).click()
   const dialog = page.getByRole('dialog')
   const filesPane = dialog.getByTestId('super-assistant-palace-files')
   const contentPane = dialog.locator('section[aria-label="文档内容"]')
@@ -1252,12 +1272,12 @@ test('记忆宫殿：弹窗全屏切换与图谱缩放控制', async ({ page }) 
   await expect(statsBar).toContainText('已建图文档 2/3')
 })
 
-test('记忆宫殿：目录一等公民——新建目录/笔记、重命名与空目录删除', async ({ page }) => {
+test('知识图谱：目录一等公民——新建目录/笔记、重命名与空目录删除', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '记忆宫殿' }).click()
+  await page.getByRole('button', { name: '知识图谱' }).click()
   const dialog = page.getByRole('dialog')
   const filesPane = dialog.getByTestId('super-assistant-palace-files')
   const contentPane = dialog.locator('section[aria-label="文档内容"]')
@@ -1323,12 +1343,12 @@ const dragByDnd = async (page: Page, source: Locator, target: Locator) => {
   await source.dispatchEvent('dragend', { dataTransfer })
 }
 
-test('记忆宫殿：拖拽文件至目录归位与画布下统计条', async ({ page }) => {
+test('知识图谱：拖拽文件至目录归位与画布下统计条', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '记忆宫殿' }).click()
+  await page.getByRole('button', { name: '知识图谱' }).click()
   const dialog = page.getByRole('dialog')
   const filesPane = dialog.getByTestId('super-assistant-palace-files')
   const graphSection = dialog.getByTestId('super-assistant-palace-graph')

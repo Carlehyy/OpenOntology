@@ -345,16 +345,17 @@ export function MemoryTab() {
         </button>
       </div>
 
+      {/* 面板宽度有限（约 384px）：检索一行、动作按钮一行，避免四控件挤成一坨 */}
       <div className="flex gap-2">
         <input
           value={query}
           onChange={event => setQuery(event.target.value)}
           placeholder="搜索记忆内容或标签…"
-          className="min-h-9 flex-1 rounded-lg border border-[var(--color-border)] bg-transparent px-3 text-xs outline-none focus:border-brand-deep"
+          className="min-h-9 min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-transparent px-3 text-xs outline-none focus:border-brand-deep"
         />
         {/* Radix Select 不允许空字符串 value，「全部分区」用哨兵值 __all__ 映射为空 */}
         <Select value={zone || '__all__'} onValueChange={value => setZone(value === '__all__' ? '' : value)}>
-          <SelectTrigger aria-label="分区筛选" className="min-h-9 w-auto px-2 text-xs">
+          <SelectTrigger aria-label="分区筛选" className="min-h-9 w-auto shrink-0 px-2 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -362,6 +363,8 @@ export function MemoryTab() {
             {zones.map(item => <SelectItem key={item} value={item}>{zoneLabel(item)}</SelectItem>)}
           </SelectContent>
         </Select>
+      </div>
+      <div className="flex items-center justify-end gap-2">
         <button
           type="button"
           onClick={openDistill}
@@ -418,7 +421,7 @@ export function MemoryTab() {
 
       {settings && (settings.palace_index || settings.profile) && (
         <details className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-4">
-          <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-primary)]">记忆宫殿索引</summary>
+          <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-primary)]">知识图谱索引</summary>
           <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] leading-4 text-[var(--color-text-secondary)]">
             {settings.palace_index || settings.profile}
           </pre>

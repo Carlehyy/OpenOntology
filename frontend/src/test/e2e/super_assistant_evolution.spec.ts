@@ -124,7 +124,7 @@ test('超级助手：待审批与记忆面板全链路', async ({ page }) => {
   })
 
   await page.goto('/#/super-assistant')
-  // 配置面板桌面端默认展开：仅在收起时点击展开
+  // 配置面板默认收起：点击展开
   const configToggle = page.locator('button[title="助手配置"]')
   if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
 
@@ -256,7 +256,7 @@ test('超级助手：蒸馏收敛与 Skill 常驻', async ({ page }) => {
   // 自主模式已内置：输入区不再提供切换开关
   await expect(page.getByTestId('agent-mode-toggle')).toHaveCount(0)
 
-  // 配置面板桌面端默认展开：仅在收起时点击展开
+  // 配置面板默认收起：点击展开
   const configToggle = page.locator('button[title="助手配置"]')
   if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
 
@@ -281,4 +281,80 @@ test('超级助手：蒸馏收敛与 Skill 常驻', async ({ page }) => {
   await expect(dialog.getByText('没有可收敛的相似记忆簇')).toBeVisible()
   await expect(page.getByTestId('memory-item')).toHaveCount(1)
   await expect(page.getByText('用户偏好简洁的中文回答（合并）')).toBeVisible()
+})
+
+test('MCP 开关按卡片粒度 busy：任一开关保存中不连坐禁用其它卡片', async ({ page }) => {
+  await seedAuth(page)
+
+  const server = (id: string, name: string) => ({
+    id, name, builtin_key: null, transport: 'streamable_http',
+    url: `https://${id}.example.com/mcp`, command: null, args: [],
+    headers: {}, header_names: [], env: {}, env_names: [],
+    tool_manifest: [], enabled: true, require_confirmation: true,
+    last_test_status: 'success', last_test_message: 'ok',
+    created_at: now, updated_at: now,
+  })
+  const alpha = server('alpha', 'alpha')
+  const beta = server('beta', 'beta')
+  const patches: Array<{ id: string; body: Record<string, unknown> }> = []
+
+  await page.route('**/api/v1/models', route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v1/models') return json(route, [{
+      id: 'model-1', name: 'Fake model', config_type: 'llm', provider: 'openai',
+      api_base: 'https://example.com', has_api_key: true, enabled: true, is_default: true,
+      last_test_status: 'success', last_tested_at: now, last_test_message: 'ok',
+      models: ['fake-model'], options: {}, created_by: 'admin',
+      created_at: now, updated_at: now,
+    }])
+    return route.continue()
+  })
+
+  await page.route('**/api/v2/super-assistant/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    const method = route.request().method()
+    if (path === '/api/v2/super-assistant/conversations') return json(route, [])
+    if (path === '/api/v2/super-assistant/mcp-servers' && method === 'GET') return json(route, [alpha, beta])
+    if (path === '/api/v2/super-assistant/mcp-servers/alpha' && method === 'PATCH') {
+      // alpha 的保存悬挂 800ms：期间 beta 的开关必须保持可点
+      await new Promise(resolve => setTimeout(resolve, 800))
+      const body = route.request().postDataJSON() as Record<string, unknown>
+      patches.push({ id: 'alpha', body })
+      if (typeof body.enabled === 'boolean') alpha.enabled = body.enabled
+      return json(route, alpha)
+    }
+    if (path === '/api/v2/super-assistant/mcp-servers/beta' && method === 'PATCH') {
+      const body = route.request().postDataJSON() as Record<string, unknown>
+      patches.push({ id: 'beta', body })
+      if (typeof body.enabled === 'boolean') beta.enabled = body.enabled
+      return json(route, beta)
+    }
+    if (path === '/api/v2/super-assistant/skills') return json(route, [])
+    if (path === '/api/v2/super-assistant/reflection/candidates') return json(route, [])
+    if (path === '/api/v2/super-assistant/reflection/settings') {
+      return json(route, { auto_accept_enabled: true, palace_index: null, profile: null, memory_count: 0, pending_count: 0 })
+    }
+    return route.fulfill({ status: 404, body: '{}' })
+  })
+
+  await page.goto('/#/super-assistant')
+  // 配置面板默认收起：点击展开
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
+  await page.getByRole('button', { name: /^MCP/ }).click()
+
+  const betaSwitch = page.getByRole('switch', { name: '停用 MCP beta' })
+  await expect(betaSwitch).toBeVisible()
+
+  // 点击 alpha 启用开关（进入 800ms 保存中）：beta 开关不禁用、不忙碌，且可立即点击
+  await page.getByRole('switch', { name: '停用 MCP alpha' }).click()
+  await expect(betaSwitch).not.toBeDisabled()
+  await expect(betaSwitch).not.toHaveAttribute('aria-busy', 'true')
+  await betaSwitch.click()
+
+  // 两个 PATCH 都到达（beta 未被吞掉；beta 无延迟先返回），刷新后两卡开关同步为停用态
+  await expect.poll(() => patches.map(item => item.id).sort()).toEqual(['alpha', 'beta'])
+  expect(patches[0].body).toMatchObject({ enabled: false })
+  expect(patches[1].body).toMatchObject({ enabled: false })
+  await expect(page.getByRole('switch', { name: '启用 MCP beta' })).toBeVisible()
 })
