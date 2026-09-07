@@ -567,23 +567,18 @@ test('归档流转：会话移入归档区且 PATCH 携带 status', async ({ pag
   await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(1)
 })
 
-test('本体治理跳转后台：左栏「超级助手」位于「三维场景」上方，可经其或悬浮助手返回工作台', async ({ page }) => {
+test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级助手或悬浮助手返回工作台', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
   await page.getByRole('link', { name: '本体治理' }).click()
-  await page.waitForURL('**/#/overview')
+  await page.waitForURL('**/#/ontologies')
 
-  // 后台左侧平台导航提供「超级助手」入口，且位于「三维场景」上方
+  // 后台左侧平台导航提供「超级助手」入口；三维场景已暂时隐藏出导航
   const assistantLink = page.getByRole('link', { name: '超级助手', exact: true })
-  const scenesLink = page.getByRole('link', { name: '三维场景', exact: true })
   await expect(assistantLink).toBeVisible()
-  await expect(scenesLink).toBeVisible()
-  const assistantBox = await assistantLink.boundingBox()
-  const scenesBox = await scenesLink.boundingBox()
-  if (!assistantBox || !scenesBox) throw new Error('bounding box missing')
-  expect(assistantBox.y).toBeLessThan(scenesBox.y)
+  await expect(page.getByRole('link', { name: '三维场景', exact: true })).toHaveCount(0)
 
   // 经左栏「超级助手」返回工作台
   await assistantLink.click()
@@ -592,7 +587,7 @@ test('本体治理跳转后台：左栏「超级助手」位于「三维场景�
 
   // 右下角悬浮助手仍是第二条返回路径
   await page.getByRole('link', { name: '本体治理' }).click()
-  await page.waitForURL('**/#/overview')
+  await page.waitForURL('**/#/ontologies')
   await page.getByTestId('assistant-widget-fab').click()
   await page.getByTestId('assistant-widget-open-full').click()
   await page.waitForURL(/#\/super-assistant/)

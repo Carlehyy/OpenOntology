@@ -88,7 +88,9 @@
   background: var(--glass-bg-strong);
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
-  border: 1px solid var(--glass-border);
+  /* 与 .onto-glass-card / 总览 overview-panel 的实线边框同口径（语义令牌）：
+     半透明白玻璃边在浅底上近乎不可见，导航卡需要可见的外边框锚点。 */
+  border: 1px solid var(--border);
   border-radius: 18px;
   box-shadow: var(--glass-shadow);
 }

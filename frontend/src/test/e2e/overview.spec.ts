@@ -118,7 +118,7 @@ test.describe('平台概览迁移契约', () => {
     await expect(page.getByRole('heading', { name: '本体治理中枢' })).toBeVisible()
     const navigation = page.getByRole('navigation')
     await expect(navigation.getByRole('link', { name: '平台概览' })).toHaveCount(0)
-    // 超级助手已在左栏露出（位于「三维场景」上方），平台概览仍保持隐藏
+    // 超级助手已在左栏露出（三维场景已暂时隐藏出导航），平台概览仍保持隐藏
     await expect(navigation.getByRole('link', { name: '超级助手' })).toBeVisible()
 
     await page.getByTestId('overview-flow-stage-model').click()

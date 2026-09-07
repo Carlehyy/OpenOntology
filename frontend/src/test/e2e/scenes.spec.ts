@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 import type { SceneSummary } from '@/types/scene'
 
-// 三维场景（阶段一）：导航可见性、卡片列表 CRUD/克隆、详情三标签深链、角色授权。
+// 三维场景（阶段一）：导航暂时隐藏（hiddenFromNavigation，深链仍可达）、卡片列表 CRUD/克隆、详情三标签深链、角色授权。
 // 全部 API 本地 mock，属 mocked 套件。
 
 const now = '2026-08-24T08:00:00+00:00'
@@ -119,24 +119,16 @@ async function mockScenesApi(page: Page, options: { listItems?: SceneSummary[] }
   await page.route(/\/api\/v2\/scenes\/scn-1(\?.*)?$/, route => json(route, { ...sceneA, version_count: 2 }))
 }
 
-test('admin 左侧导航出现「三维场景」且位于「本体助手」之前', async ({ page }) => {
+test('admin 左侧导航暂时隐藏「三维场景」，深链仍可达且「本体助手」保持可见', async ({ page }) => {
   await seedAuth(page)
   await mockPlatformShell(page)
   await mockScenesApi(page)
   await page.goto('/#/scenes')
   const nav = page.locator('nav')
-  await expect(nav.getByText('三维场景', { exact: true })).toBeVisible()
+  // hiddenFromNavigation 只隐藏导航渲染：深链 /#/scenes 仍按 menu 权限放行（下方新建按钮可见）
+  await expect(nav.getByText('三维场景', { exact: true })).toHaveCount(0)
   await expect(nav.getByText('本体助手', { exact: true })).toBeVisible()
-  const sceneOrder = await nav.getByText('三维场景', { exact: true }).evaluate(el => {
-    const navEl = el.closest('nav')
-    return Array.from(navEl?.querySelectorAll('a, button') ?? []).findIndex(x => x.textContent?.includes('三维场景'))
-  })
-  const agentOrder = await nav.getByText('本体助手', { exact: true }).evaluate(el => {
-    const navEl = el.closest('nav')
-    return Array.from(navEl?.querySelectorAll('a, button') ?? []).findIndex(x => x.textContent?.includes('本体助手'))
-  })
-  expect(sceneOrder).toBeGreaterThanOrEqual(0)
-  expect(agentOrder).toBeGreaterThan(sceneOrder)
+  await expect(page.getByRole('button', { name: '新建场景' })).toBeVisible()
 })
 
 test('列表页渲染卡片并支持新建场景', async ({ page }) => {

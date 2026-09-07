@@ -330,9 +330,9 @@ test('左侧导航折叠态：一级导航全部可点击，分组直达第一�
     await expect(page).toHaveURL(url)
   }
 
-  // 叶子项在折叠态本就可达，一并回归
-  await nav.getByRole('link', { name: '三维场景' }).click()
-  await expect(page).toHaveURL(/\/#\/scenes$/)
+  // 叶子项在折叠态本就可达，一并回归（三维场景已 hiddenFromNavigation，改用本体助手叶子）
+  await nav.getByRole('link', { name: '本体助手' }).click()
+  await expect(page).toHaveURL(/\/#\/agent$/)
   await nav.getByRole('link', { name: '事件登记' }).click()
   await expect(page).toHaveURL(/\/#\/events$/)
 })

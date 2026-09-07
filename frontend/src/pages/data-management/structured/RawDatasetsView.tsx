@@ -289,18 +289,18 @@ export default function RawDatasetsView({
       </div>
 
       {/* 列表 — 可滚动 */}
-      <div className="flex-1 overflow-y-auto px-5 py-3">
+      <div className="flex-1 overflow-auto">
       {loading ? (
         <div className="text-[var(--color-text-tertiary)] text-sm p-8 text-center">加载中...</div>
       ) : loadError && items.length === 0 ? (
-        <div className="rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] p-10 text-center text-[var(--color-danger)]">
+        <div className="m-5 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] p-10 text-center text-[var(--color-danger)]">
           <XCircle size={28} className="mx-auto mb-2 opacity-70" />
           <p className="text-sm font-medium">无法加载{isSync ? '连接同步数据集' : '人工数据集'}</p>
           <p className="mt-1 text-xs text-[var(--color-danger)]">{loadError}</p>
           <button type="button" onClick={load} className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs hover:bg-[var(--color-danger-bg)]">重新加载</button>
         </div>
       ) : items.length === 0 ? (
-        <div className="border-2 border-dashed rounded-xl p-12 text-center text-[var(--color-text-tertiary)] space-y-2">
+        <div className="m-5 border-2 border-dashed rounded-xl p-12 text-center text-[var(--color-text-tertiary)] space-y-2">
           <Database size={32} className="mx-auto opacity-30" />
           <p className="text-sm font-medium">
             {searchQuery
@@ -326,9 +326,8 @@ export default function RawDatasetsView({
           )}
         </div>
       ) : (
-        <div className="border rounded-xl overflow-hidden bg-card">
-          <table className="w-full text-sm">
-            <thead className="bg-muted border-b">
+        <table className="w-full text-sm">
+            <thead className="bg-card border-b">
               <tr>
                 <th className="text-left px-4 py-2.5 font-medium text-muted-foreground text-xs">名称</th>
                 <th className="px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">版本号</th>
@@ -419,12 +418,11 @@ export default function RawDatasetsView({
               ))}
             </tbody>
           </table>
-        </div>
       )}
       </div>
 
       {!loading && !loadError && total > 0 && (
-        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border bg-muted px-5 py-2.5">
+        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border bg-card px-5 py-2.5">
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             每页
             <PageSizeSelect
