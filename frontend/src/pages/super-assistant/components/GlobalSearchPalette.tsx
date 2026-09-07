@@ -78,6 +78,7 @@ export default function GlobalSearchPalette({ open, onOpenChange, onSelectConver
   const keyword = query.trim()
   const titleHits = results.filter(item => item.titleMatched)
   const messageHits = results.filter(item => item.messageHits.length > 0)
+  const hasHits = titleHits.length > 0 || messageHits.length > 0
 
   const pick = (conversationId: string, messageId?: string) => {
     onOpenChange(false)
@@ -99,15 +100,19 @@ export default function GlobalSearchPalette({ open, onOpenChange, onSelectConver
         aria-label="全局搜索关键词"
       />
       <CommandList>
-        <CommandEmpty>
-          {failed
-            ? '搜索失败，请稍后重试'
-            : keyword
-              ? (searching ? '正在搜索…' : '没有匹配的会话或消息')
-              : '输入关键词，检索会话标题与消息内容'}
-        </CommandEmpty>
+        {/* 检索中不渲染 Empty（cmdk 仍会渲染 py-8 空占位把检索行顶偏），下方检索行唯一展示「正在搜索…」 */}
+        {!searching && (
+          <CommandEmpty>
+            {failed
+              ? '搜索失败，请稍后重试'
+              : keyword
+                ? '没有匹配的会话或消息'
+                : '输入关键词，检索会话标题与消息内容'}
+          </CommandEmpty>
+        )}
+        {/* 检索行：尚无结果时在列表区垂直居中，避免顶部悬空 */}
         {searching && (
-          <div className="flex items-center justify-center gap-2 py-3 text-xs text-[var(--color-text-tertiary)]">
+          <div className={`flex items-center justify-center gap-2 text-xs text-[var(--color-text-tertiary)] ${hasHits ? 'py-3' : 'min-h-[264px]'}`}>
             <Loader2 size={13} className="animate-spin" /> 正在搜索…
           </div>
         )}

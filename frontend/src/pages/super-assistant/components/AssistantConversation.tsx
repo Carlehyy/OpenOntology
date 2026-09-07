@@ -297,7 +297,7 @@ export function ContextUsage({ messages, model }: { messages: SuperMessage[]; mo
       data-testid="super-assistant-context-usage"
       aria-label={`${sourceLabel}占比 ${percentageLabel}，${formatTokenCount(used)} / ${formatTokenCount(limit)}`}
       title={sourceDescription}
-      className="flex h-9 w-40 shrink-0 flex-col justify-center rounded-lg border border-brand-line bg-brand-soft/80 px-2.5 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.55)] xl:w-48"
+      className="flex h-9 w-40 shrink-0 cursor-default flex-col justify-center rounded-lg border border-brand-line bg-brand-soft/80 px-2.5 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.55)] transition-colors hover:border-brand xl:w-48"
     >
       <div className="flex min-w-0 items-center gap-1.5 text-[10px] leading-none">
         <Gauge size={11} className="shrink-0 text-brand-ink" aria-hidden="true" />

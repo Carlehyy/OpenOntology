@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Bot, GitPullRequest, Loader2, PlugZap, Plus, Save, ShieldCheck, Trash2 } from 'lucide-react'
 
 import {
@@ -268,7 +268,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
           )}
         </section>
       </div>
-      <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4 pt-2">
+      <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
         <button onClick={() => setForm(null)} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]">取消</button>
         <button
           onClick={() => void save()}
@@ -302,6 +302,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const baseUrlInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     setError('')
@@ -380,9 +381,16 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
       title="外部集成"
       description="把外部平台接入超级助手；配置生效后可在输入框使用对应命令。"
       onClose={onClose}
+      /* 固定宽高：切换 tab 不改变弹窗大小，垂直超出经内容区滚轮滚动 */
+      contentClassName="h-[min(82dvh,44rem)]"
+      /* 焦点落服务地址输入框，避免左栏 tab/底部按钮被默认聚焦呈现选中态 */
+      onOpenAutoFocus={event => {
+        event.preventDefault()
+        baseUrlInputRef.current?.focus()
+      }}
     >
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="集成类型" className="flex w-28 shrink-0 flex-col gap-1 border-r border-[var(--color-border)] p-2 sm:w-32">
+        <nav aria-label="集成类型" className="flex w-40 shrink-0 flex-col gap-1 border-r border-[var(--color-border)] p-2">
           {INTEGRATION_TABS.map(item => (
             <button
               key={item.key}
@@ -422,6 +430,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
           <div className="mt-3 space-y-3">
             <label className="block text-xs text-[var(--color-text-secondary)]">服务地址 <span className="text-red-500">*</span>
               <input
+                ref={baseUrlInputRef}
                 data-testid="multica-base-url"
                 value={baseUrl}
                 onChange={event => setBaseUrl(event.target.value)}
@@ -462,7 +471,8 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
                 </SelectContent>
               </Select>
             </label>
-            <div className="flex items-center justify-between gap-2">
+            {/* 操作控件同行靠左，不做两端分置 */}
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 data-testid="multica-test-button"
@@ -500,8 +510,8 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
               {error && <p role="alert" className="mt-4 text-xs text-red-600">{error}</p>}
             </div>
             {/* 操作按钮归属各集成面板：每个集成独立保存，互不干扰。
-                不加分割线——内容不足一屏时它悬在空白里，左边又被导航截断 */}
-            <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4 pt-2">
+                紧贴内容区不留隔离边距，弹窗高度固定后按钮位置稳定 */}
+            <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
               <button onClick={onClose} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]">取消</button>
               <button
                 onClick={() => void save()}

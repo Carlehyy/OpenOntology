@@ -15,7 +15,6 @@ import {
 import {
   SidebarGroup,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuItem,
 } from '@/components/ui/sidebar'
@@ -24,7 +23,6 @@ import { useAuthStore } from '@/stores/authStore'
 import { formatSessionTime } from '@/utils/datetime'
 import {
   capGroupItems,
-  CONVERSATION_GROUP_SECTIONS,
   CONVERSATION_GROUP_VISIBLE_LIMIT,
   groupConversations,
 } from '../conversationGroups'
@@ -149,7 +147,11 @@ export default function WorkbenchSidebar({
   }, [onOpenSearch])
 
   const groups = groupConversations(conversations)
-  const activeCount = groups.today.length + groups.yesterday.length + groups.earlier.length
+  const activeCount = groups.recent.length
+  const { visible: recentVisible, hiddenCount: recentHidden } = capGroupItems(
+    groups.recent,
+    expandedGroups.recent ?? false,
+  )
 
   const toggleGroupExpanded = (key: string) => {
     setExpandedGroups(current => ({ ...current, [key]: !current[key] }))
@@ -177,7 +179,8 @@ export default function WorkbenchSidebar({
     onCloseMobile()
   }
 
-  const actionItemClass = 'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]'
+  // 侧栏统一左缘：功能项与会话列表的图标/文字左缘都对齐到 16px（容器 px-2 + 条目 px-2）
+  const actionItemClass = 'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]'
 
   const content = (
     <>
@@ -186,7 +189,7 @@ export default function WorkbenchSidebar({
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg" style={{ background: 'var(--color-nav-bg)' }}>
           <Network size={18} className="text-white" />
         </div>
-        <span className="text-sm font-semibold tracking-tight text-[var(--color-text-primary)]">OpenOntology</span>
+        <span className="text-2xl font-semibold tracking-tight text-[var(--color-text-primary)]">OpenOntology</span>
         <button
           type="button"
           onClick={onCloseMobile}
@@ -198,7 +201,7 @@ export default function WorkbenchSidebar({
       </div>
 
       {/* 新建任务 */}
-      <div className="shrink-0 px-3 pt-3">
+      <div className="shrink-0 px-2 pt-3">
         <button
           type="button"
           onClick={() => { void onCreate(); onCloseMobile() }}
@@ -210,22 +213,22 @@ export default function WorkbenchSidebar({
       </div>
 
       {/* 功能项 */}
-      <nav className="shrink-0 space-y-1 px-3 py-3" aria-label="工作台功能">
+      <nav className="shrink-0 space-y-1 px-2 py-3" aria-label="工作台功能">
         <button type="button" onClick={onOpenSearch} className={actionItemClass}>
-          <Search size={17} className="shrink-0" /> 全局搜索
+          <Search size={16} className="shrink-0" /> 全局搜索
           <kbd className="ml-auto rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] leading-none text-[var(--color-text-tertiary)]">
             {isMac ? '⌘K' : 'Ctrl K'}
           </kbd>
         </button>
         <button type="button" onClick={() => setPlaceholder('tasks')} className={actionItemClass}>
-          <Clock size={17} className="shrink-0" /> 定时任务
+          <Clock size={16} className="shrink-0" /> 定时任务
         </button>
         <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
-          <Brain size={17} className="shrink-0" /> 记忆宫殿
+          <Brain size={16} className="shrink-0" /> 知识图谱
         </button>
         {hasMenuAccess(user, 'overview') && (
           <Link to="/overview" onClick={onCloseMobile} className={actionItemClass} data-workbench-governance>
-            <LayoutDashboard size={17} className="shrink-0" /> 本体治理
+            <LayoutDashboard size={16} className="shrink-0" /> 本体治理
           </Link>
         )}
         <button
@@ -234,15 +237,15 @@ export default function WorkbenchSidebar({
           className={actionItemClass}
           data-workbench-integrations
         >
-          <Plug size={17} className="shrink-0" /> 外部集成
+          <Plug size={16} className="shrink-0" /> 外部集成
         </button>
       </nav>
 
-      {/* 历史会话分组时间线：shadcn Sidebar 分组原语（Group/GroupLabel/Menu）呈现区块 */}
+      {/* 会话时间线：近期会话单列表 + 归档折叠区，shadcn Sidebar 分组原语呈现 */}
       <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--color-border)]">
         <div className="flex shrink-0 items-center gap-2 px-4 pb-1 pt-3">
           <History size={13} className="text-[var(--color-text-tertiary)]" />
-          <span className="text-xs font-medium text-[var(--color-text-secondary)]">历史会话</span>
+          <span className="text-xs font-medium text-[var(--color-text-secondary)]">近期会话</span>
           <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)]">共 {activeCount} 个</span>
         </div>
         {/* 长列表滚动但隐藏滚动条（scrollbar-none 为 index.css 全局工具类） */}
@@ -252,33 +255,27 @@ export default function WorkbenchSidebar({
               还没有会话，点击上方「新建任务」开始。
             </p>
           )}
-          {CONVERSATION_GROUP_SECTIONS.map(section => {
-            const items = groups[section.key]
-            if (items.length === 0) return null
-            const { visible, hiddenCount } = capGroupItems(items, expandedGroups[section.key] ?? false)
-            return (
-              <SidebarGroup key={section.key} data-workbench-group={section.key}>
-                <SidebarGroupLabel>{section.label}</SidebarGroupLabel>
-                <SidebarGroupContent>
-                  <SidebarMenu>
-                    {visible.map(item => (
-                      <SidebarMenuItem key={item.id}>
-                        <ConversationRow
-                          item={item}
-                          current={item.id === selectedId}
-                          archived={false}
-                          onSelect={handleSelect}
-                          onDelete={onDelete}
-                          onSetArchived={onSetArchived}
-                        />
-                      </SidebarMenuItem>
-                    ))}
-                  </SidebarMenu>
-                </SidebarGroupContent>
-                {renderGroupToggle(section.key, items.length, hiddenCount)}
-              </SidebarGroup>
-            )
-          })}
+          {groups.recent.length > 0 && (
+            <SidebarGroup data-workbench-group="recent">
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {recentVisible.map(item => (
+                    <SidebarMenuItem key={item.id}>
+                      <ConversationRow
+                        item={item}
+                        current={item.id === selectedId}
+                        archived={false}
+                        onSelect={handleSelect}
+                        onDelete={onDelete}
+                        onSetArchived={onSetArchived}
+                      />
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+              {renderGroupToggle('recent', groups.recent.length, recentHidden)}
+            </SidebarGroup>
+          )}
           {groups.archived.length > 0 && (
             <SidebarGroup data-workbench-group="archived">
               <button

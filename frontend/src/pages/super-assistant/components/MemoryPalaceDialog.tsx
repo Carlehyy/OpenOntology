@@ -121,7 +121,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       setFolders(folderRows)
       setGraph(graphData)
     } catch (err) {
-      showError(err, '记忆宫殿加载失败')
+      showError(err, '知识图谱加载失败')
     } finally {
       setLoading(false)
     }
@@ -564,7 +564,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
         </button>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Brain size={16} className="text-brand-ink" /> 记忆宫殿
+            <Brain size={16} className="text-brand-ink" /> 知识图谱
             {building && (
               <span className="ml-2 flex items-center gap-1 text-xs font-normal text-amber-600">
                 <Loader2 size={12} className="animate-spin" /> 图谱构建中…
@@ -584,7 +584,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
 
           {/* 左：文件树 */}
           <aside
-            aria-label="记忆宫殿文件库"
+            aria-label="知识图谱文件库"
             data-testid="super-assistant-palace-files"
             className="flex min-h-[240px] flex-col rounded-xl border border-[var(--color-border)] bg-white lg:min-h-0"
           >
@@ -869,7 +869,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
 
           {/* 右：知识图谱 */}
           <aside
-            aria-label="记忆宫殿知识图谱面板"
+            aria-label="知识图谱面板"
             className="flex min-h-[360px] flex-col rounded-xl border border-[var(--color-border)] bg-white p-2 lg:min-h-0 lg:p-3"
           >
             <PalaceGraphPanel

@@ -313,7 +313,7 @@ export default function PalaceFileTree({
   return (
     <Tree
       tree={tree}
-      label="记忆宫殿文件树"
+      label="知识图谱文件树"
       indent={16}
       data-testid="palace-file-tree"
       className="min-h-0 flex-1 overflow-y-auto pe-1"
