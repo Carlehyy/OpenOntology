@@ -88,7 +88,6 @@ def _configure_isolated_process(root: Path) -> tuple[str, str]:
         "SECRET_KEY": "steward-context-live-e2e-secret-key-32chars",
         "FIRST_ADMIN_USER": admin_user,
         "FIRST_ADMIN_PASSWORD": admin_password,
-        "ALLOW_PUBLIC_REGISTRATION": "false",
         # Never let a developer's .env point this test at their Redis/Neo4j.
         # Port 1 on loopback fails locally and cannot reach an external service.
         "REDIS_URL": "redis://127.0.0.1:1/15",

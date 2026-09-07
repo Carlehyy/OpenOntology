@@ -427,7 +427,6 @@ def render_env(profile: ConfigProfile) -> str:
                 ("FIRST_ADMIN_PASSWORD", profile.platform.first_admin_password),
                 ("ACCESS_TOKEN_EXPIRE_MINUTES", 1440),
                 ("CORS_ALLOWED_ORIGINS", ""),
-                ("ALLOW_PUBLIC_REGISTRATION", True),
             ],
         ),
         (

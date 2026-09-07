@@ -7,17 +7,6 @@ def test_login_wrong_password(client, admin_user):
     r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "wrong"})
     assert r.status_code == 401
 
-def test_register(client):
-    r = client.post("/api/v1/auth/register",
-                    json={"username": "newuser", "email": "new@test.com", "password": "pass123"})
-    assert r.status_code == 201
-    assert r.json()["data"]["username"] == "newuser"
-
-def test_register_duplicate(client, admin_user):
-    r = client.post("/api/v1/auth/register",
-                    json={"username": "admin", "email": "other@test.com", "password": "pass123"})
-    assert r.status_code == 409
-
 def test_profile_requires_auth(client):
     r = client.get("/api/v1/auth/profile")
     assert r.status_code == 403
@@ -89,24 +78,12 @@ def test_legacy_token_without_ver_claim_still_accepted(client, admin_user, auth_
     r = client.get("/api/v1/auth/profile", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
 
-def test_register_closed_requires_admin(client, admin_user, auth_headers, monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "allow_public_registration", False)
-    body = {"username": "closeduser", "email": "closed@test.com", "password": "pass123"}
-
-    assert client.post("/api/v1/auth/register", json=body).status_code == 403
-
-    created = client.post("/api/v1/users", headers=auth_headers, json={
-        "username": "plainuser",
-        "email": "plain@test.com",
-        "password": "plain123",
-        "role": "viewer",
-    })
-    assert created.status_code == 201
-    login = client.post("/api/v1/auth/login",
-                        json={"username": "plainuser", "password": "plain123"})
-    viewer_headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
-    assert client.post("/api/v1/auth/register", json=body, headers=viewer_headers).status_code == 403
-
-    assert client.post("/api/v1/auth/register", json=body, headers=auth_headers).status_code == 201
+def test_user_management_and_register_endpoints_are_retired(client, auth_headers):
+    # 单用户平台：用户管理 CRUD 与自注册端点已退役，账号唯一来源是启动
+    # seed_admin。锁定 404，防止后续改动无意间重新挂载特权接口。
+    assert client.post("/api/v1/auth/register",
+                       json={"username": "x", "email": "x@test.com", "password": "pass123"}).status_code == 404
+    assert client.get("/api/v1/users", headers=auth_headers).status_code == 404
+    assert client.post("/api/v1/users", headers=auth_headers, json={}).status_code == 404
+    assert client.get("/api/v1/users/roles/menu-permissions",
+                      headers=auth_headers).status_code == 404

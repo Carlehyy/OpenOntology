@@ -89,7 +89,6 @@ export const LEGACY_COLOR_LIMITS = {
   'pages/scenes/detail/SceneDetailPage.tsx':                         3,
   'pages/scenes/modeling/SceneModelingPage.tsx':                     3,
   'pages/scenes/modeling/TargetSceneSelector.tsx':                   1,
-  'pages/settings/UserManagementPanel.tsx':                          2,
   'pages/settings/tabs/AssistantWidgetTab.tsx':                      1,
   'pages/super-assistant/SuperAssistantPage.tsx':                    4,
   'pages/super-assistant/components/AssistantConversation.tsx':      3,

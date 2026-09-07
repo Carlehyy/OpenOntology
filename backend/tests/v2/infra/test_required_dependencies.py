@@ -85,7 +85,6 @@ def _required_settings(**updates) -> Settings:
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
-        "allow_public_registration": False,
     }
     values.update(updates)
     return Settings(**values)

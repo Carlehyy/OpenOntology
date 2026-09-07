@@ -19,31 +19,29 @@ test.describe('Settings Page', () => {
     await page.goto('/#/settings')
   })
 
-  test('defaults to the surviving user-management module', async ({ page }) => {
-    await expect(page).toHaveURL(/\/#\/settings\/users$/)
-    await expect(page.getByRole('button', { name: '用户账号', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: '新增用户', exact: true })).toBeVisible()
+  test('defaults to the domain settings module', async ({ page }) => {
+    await expect(page).toHaveURL(/\/#\/settings\/domains$/)
+    await expect(page.getByRole('heading', { name: '领域设置' })).toBeVisible()
   })
 
   test('keeps the remaining settings navigation', async ({ page }) => {
     const navigation = page.getByRole('navigation')
-    await expect(navigation.getByText('用户管理', { exact: true })).toBeVisible()
     await expect(navigation.getByText('领域设置', { exact: true })).toBeVisible()
+    await expect(navigation.getByText('运行监控', { exact: true })).toBeVisible()
   })
 
   test('does not expose retired settings entries', async ({ page }) => {
-    await expect(page.getByText('规则设置', { exact: true })).toHaveCount(0)
-    await expect(page.getByText('提示词模板', { exact: true })).toHaveCount(0)
-    await expect(page.getByText('开放接口', { exact: true })).toHaveCount(0)
-    await expect(page.getByText('MinIO 存储', { exact: true })).toHaveCount(0)
-    await expect(page.getByText('工作流配置', { exact: true })).toHaveCount(0)
-    await expect(page.getByText('智能体配置', { exact: true })).toHaveCount(0)
+    const retired = ['用户管理', '规则设置', '提示词模板', '开放接口', 'MinIO 存储', '工作流配置', '智能体配置']
+    for (const label of retired) {
+      await expect(page.getByText(label, { exact: true })).toHaveCount(0)
+    }
   })
 
-  test('legacy settings deep links resolve to user management', async ({ page }) => {
-    for (const retired of ['extraction', 'rules', 'prompts', 'open-interfaces', 'minio', 'workflows', 'agents']) {
-      await page.goto(`/#/settings/${retired}`)
-      await expect(page).toHaveURL(/\/#\/settings\/users$/)
+  test('legacy settings deep links resolve to domain settings', async ({ page }) => {
+    const retired = ['users', 'extraction', 'rules', 'prompts', 'open-interfaces', 'minio', 'workflows', 'agents']
+    for (const tab of retired) {
+      await page.goto(`/#/settings/${tab}`)
+      await expect(page).toHaveURL(/\/#\/settings\/domains$/)
     }
   })
 })

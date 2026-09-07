@@ -17,7 +17,7 @@ from app.config import settings
 from app.bootstrap import health as bootstrap_health
 from app.bootstrap.lifecycle import application_lifespan
 from app.bootstrap.seeding import seed_database
-from app.routers import auth, users, ontologies, entities, logic, actions, graph, settings as settings_router, export, domains
+from app.routers import auth, ontologies, entities, logic, actions, graph, settings as settings_router, export, domains
 from app.model_configs.router import router as model_configs_router
 from app.platform.router import router as overview_router
 from app.routers import formal as formal_router
@@ -135,7 +135,6 @@ events_guard = menu_guard("events")
 admin_guard = [Depends(require_admin)]
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
 app.include_router(
     overview_router,
     prefix="/api/v1/overview",

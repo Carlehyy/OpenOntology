@@ -32,16 +32,15 @@ ALL_MENU_KEYS = (
     "models",
 )
 
-MANAGED_ROLES = ("editor", "viewer", "custom")
-
 # Preserve the former non-admin experience on upgrade: regular users keep all
 # product areas that were previously visible, while API Hub remains opt-in.
 DEFAULT_NON_ADMIN_MENU_KEYS = tuple(
     key for key in ALL_MENU_KEYS if not key.startswith("api_hub")
 )
 
-# A newly assigned custom role starts from the smallest useful surface. The
-# administrator can then grant its exact menu range from User Management.
+# A newly assigned custom role starts from the smallest useful surface. Its
+# exact menu range lives in role_menu_permissions; with user management
+# retired the table is maintained directly in the database.
 DEFAULT_CUSTOM_MENU_KEYS = ("overview",)
 
 PARENT_MENU_KEYS = {
@@ -98,30 +97,6 @@ def get_role_menu_keys(db: Session, role: str) -> list[str]:
             return list(DEFAULT_CUSTOM_MENU_KEYS)
         return list(DEFAULT_NON_ADMIN_MENU_KEYS)
     return normalize_menu_keys(record.menu_keys or [])
-
-
-def set_role_menu_keys(
-    db: Session,
-    *,
-    role: str,
-    menu_keys: list[str],
-    updated_by: str,
-) -> RoleMenuPermission:
-    if role not in MANAGED_ROLES:
-        raise ValueError("Only non-admin roles can be configured")
-    normalized = normalize_menu_keys(menu_keys)
-    record = db.query(RoleMenuPermission).filter(
-        RoleMenuPermission.role == role,
-    ).first()
-    if record is None:
-        record = RoleMenuPermission(role=role, menu_keys=normalized)
-        db.add(record)
-    else:
-        record.menu_keys = normalized
-    record.updated_by = updated_by
-    db.commit()
-    db.refresh(record)
-    return record
 
 
 def user_has_menu_access(db: Session, user: User, menu_key: str) -> bool:

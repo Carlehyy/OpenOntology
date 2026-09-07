@@ -357,7 +357,6 @@ bootstrap_production_env() {
   # are always sent to MinIO and never fall back to this directory.
   set_env_value_in_file STORAGE_LOCAL_DIR \
     /uploads/object-storage "$bootstrap_tmp_path"
-  set_env_value_in_file ALLOW_PUBLIC_REGISTRATION false "$bootstrap_tmp_path"
   set_env_value_in_file API_HUB_SYSTEM_MCP_TOKEN \
     "$(random_hex 32)" "$bootstrap_tmp_path"
   set_env_value_in_file PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \

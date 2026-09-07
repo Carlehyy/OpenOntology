@@ -17,7 +17,7 @@ pages/
 ├── api-hub/           接口定义、发布、代理和调用记录
 ├── community/         Plugin MCP 管理；Skill 页面当前为维护中占位
 ├── models/            模型提供商配置
-├── settings/          用户、Agent、工作流、领域与存储设置
+├── settings/          领域设置、运行监控、助手评估与悬浮助手配置
 ├── inbox/             跨业务收件箱
 ├── login|errors/      登录和授权错误页
 ├── design/            组件预览页（components/ 共享组件的可达挂载点，不进导航）

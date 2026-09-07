@@ -1,7 +1,11 @@
 import hashlib
 import io
+import uuid
+
 import pytest
 
+from app.auth.models import User
+from app.auth.service import hash_password
 from app.data_channel.datasets.sharing_models import ManualDatasetChange, ManualDatasetShare
 from app.data_channel.datasets import router as datasets_module
 from app.data_channel.datasets import sharing_router as sharing_module
@@ -283,14 +287,11 @@ def _login_user(api, username, password):
     return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
 
 
-def _create_user(api, auth_headers, username, password, role):
-    created = api.post("/api/v1/users", headers=auth_headers, json={
-        "username": username,
-        "email": f"{username}@test.com",
-        "password": password,
-        "role": role,
-    })
-    assert created.status_code == 201
+def _create_user(db, api, username, password, role):
+    # 用户管理 API 已退役；测试用户直写数据库后走真实登录链路拿 token
+    db.add(User(id=str(uuid.uuid4()), username=username, email=f"{username}@test.com",
+                password_hash=hash_password(password), role=role))
+    db.commit()
     return _login_user(api, username, password)
 
 
@@ -300,9 +301,9 @@ def test_share_listing_and_revocation_are_scoped_to_creator_or_admin(api, auth_h
     dataset_id = _dataset(api, auth_headers)
     admin_share = _share(api, auth_headers, dataset_id, "view")
 
-    editor_headers = _create_user(api, auth_headers, "share_editor", "editor123", "editor")
+    editor_headers = _create_user(db, api, "share_editor", "editor123", "editor")
     editor_share = _share(api, editor_headers, dataset_id, "view")
-    viewer_headers = _create_user(api, auth_headers, "share_viewer", "viewer123", "viewer")
+    viewer_headers = _create_user(db, api, "share_viewer", "viewer123", "viewer")
 
     # viewer（只读）枚举不到任何他人分享与 token
     viewer_listed = api.get(

@@ -361,8 +361,8 @@ test('本体助手未选本体时悬浮窗盖过拓扑卡片轮播（层级回�
 test('管理员配置的隐藏目录不再渲染悬浮入口', async ({ page }) => {
   await seedAuth(page)
   await mockPlatformShell(page)
-  // 平台级配置：事件登记（一级）、模型配置（一级）、用户管理（二级）隐藏悬浮助手
-  await mockSuperAssistant(page, { hiddenMenuKeys: ['events', 'models', 'settings.users'] })
+  // 平台级配置：事件登记（一级）、模型配置（一级）、领域设置（二级）隐藏悬浮助手
+  await mockSuperAssistant(page, { hiddenMenuKeys: ['events', 'models', 'settings.domains'] })
   await page.setViewportSize({ width: 1280, height: 900 })
 
   const fab = page.getByTestId('assistant-widget-fab')
@@ -378,7 +378,7 @@ test('管理员配置的隐藏目录不再渲染悬浮入口', async ({ page }) 
   await expect(fab).toHaveCount(0)
 
   // 隐藏的二级目录同样生效（其余系统设置页不受影响）
-  await page.goto('/#/settings/users')
+  await page.goto('/#/settings/domains')
   await expect(fab).toHaveCount(0)
 
   // 超级助手页为 AI 工作台前台（裸布局），不挂载悬浮入口

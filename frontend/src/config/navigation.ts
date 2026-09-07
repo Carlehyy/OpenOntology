@@ -110,7 +110,6 @@ export const PLATFORM_NAV_ITEMS: PlatformNavItem[] = [
   { key: 'models', to: '/models', icon: Cpu, label: '模型配置', description: '模型提供商与运行配置' },
   {
     key: 'system_settings', to: '/settings', icon: Settings, label: '系统设置', adminOnly: true, subItems: [
-      { key: 'settings.users', to: '/settings/users', icon: Network, label: '用户管理', adminOnly: true },
       { key: 'settings.domains', to: '/settings/domains', icon: Globe, label: '领域设置', adminOnly: true },
       { key: 'settings.monitoring', to: '/settings/monitoring', icon: Activity, label: '运行监控', description: '接口性能与平台运行健康度', adminOnly: true },
       { key: 'settings.assistant-eval', to: '/settings/assistant-eval', icon: FlaskConical, label: '助手评估', description: '基于 OpenJudge 的助手会话质量评估与报告', adminOnly: true },

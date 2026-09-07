@@ -58,7 +58,6 @@ def _configure_process(temp_root: Path) -> None:
     os.environ["STORAGE_LOCAL_DIR"] = str(temp_root / "storage")
     os.environ["SECRET_KEY"] = "steward-live-e2e-secret-key-32-bytes-minimum"
     os.environ["FIRST_ADMIN_PASSWORD"] = "steward-live-e2e-admin-password"
-    os.environ["ALLOW_PUBLIC_REGISTRATION"] = "false"
 
 
 def _tool_protocol_probe(model: str, api_base: str, api_key: str) -> dict:

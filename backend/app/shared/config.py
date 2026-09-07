@@ -297,10 +297,6 @@ class Settings(BaseSettings):
         "png,jpg,jpeg,gif,webp,svg,zip,gz,tar"
     )
 
-    # Development can expose self-registration. Production must disable it and
-    # provision users through authenticated administrative flows.
-    allow_public_registration: bool = True
-
     # API 性能监控（平台运行健康度）。默认开启；出现问题时可用
     # API_PERF_ENABLED=false 整体关闭。慢阈值按部署环境可调。
     api_perf_enabled: bool = True
@@ -528,8 +524,6 @@ def production_config_errors(current: Settings) -> list[str]:
             _insecure.append(
                 f"{key} must use a browser-reachable public host in production"
             )
-    if current.allow_public_registration:
-        _insecure.append("ALLOW_PUBLIC_REGISTRATION=false")
     return _insecure
 
 

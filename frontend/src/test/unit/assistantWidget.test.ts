@@ -260,7 +260,7 @@ const navFixture = [
   { key: 'models', to: '/models' },
   {
     key: 'system_settings', to: '/settings', subItems: [
-      { key: 'settings.users', to: '/settings/users' },
+      { key: 'settings.domains', to: '/settings/domains' },
       { key: 'settings.assistant-widget', to: '/settings/assistant-widget' },
     ],
   },
@@ -278,7 +278,7 @@ describe('widgetNavLeafKey', () => {
     assert.equal(widgetNavLeafKey('/ontologies', navFixture), 'ontologies')
     assert.equal(widgetNavLeafKey('/ontologies/ontology-1/graph', navFixture), 'ontologies')
     assert.equal(widgetNavLeafKey('/ontology-model/network', navFixture), 'ontology_model.network')
-    assert.equal(widgetNavLeafKey('/settings/users', navFixture), 'settings.users')
+    assert.equal(widgetNavLeafKey('/settings/domains', navFixture), 'settings.domains')
     assert.equal(widgetNavLeafKey('/settings/assistant-widget', navFixture), 'settings.assistant-widget')
   })
 
@@ -323,7 +323,7 @@ describe('widgetVisibleOnPath', () => {
   it('defaults to visible everywhere when nothing is hidden', () => {
     const hidden = new Set<string>()
     assert.equal(widgetVisibleOnPath('/events', navFixture, hidden), true)
-    assert.equal(widgetVisibleOnPath('/settings/users', navFixture, hidden), true)
+    assert.equal(widgetVisibleOnPath('/settings/domains', navFixture, hidden), true)
   })
 
   it('keeps paths outside the navigation tree always visible', () => {
