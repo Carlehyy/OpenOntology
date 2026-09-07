@@ -556,21 +556,24 @@ export default function SyncTasksTab() {
               </div>
             )}
 
-            <div className="min-h-0 flex-1 overflow-auto px-5 py-3 scrollbar-thin">
+            <div className="min-h-0 flex-1 overflow-auto scrollbar-thin">
               {loading ? (
-                <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
-                  <Loader2 size={18} className="animate-spin text-brand-ink" />
-                  <span className="text-xs">加载任务...</span>
+                <div className="h-full px-5 py-3">
+                  <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
+                    <Loader2 size={18} className="animate-spin text-brand-ink" />
+                    <span className="text-xs">加载任务...</span>
+                  </div>
                 </div>
               ) : tasks.length === 0 ? (
-                <EmptyState activeTab={activeTab} hasSearch={!!search || !!filterPipelineId} onClear={clearFilters} onCreate={handleCreate} />
+                <div className="h-full px-5 py-3">
+                  <EmptyState activeTab={activeTab} hasSearch={!!search || !!filterPipelineId} onClear={clearFilters} onCreate={handleCreate} />
+                </div>
               ) : (
-                <div className="min-w-full overflow-hidden rounded-xl border border-border bg-card">
-                  <div data-testid="task-table-scroll" className="overflow-x-auto overscroll-x-contain scrollbar-thin">
+                <div data-testid="task-table-scroll" className="w-full overflow-x-auto overscroll-x-contain scrollbar-thin">
                     <table className="w-max min-w-[1840px] table-auto text-center text-sm">
-                      <thead className="bg-muted">
+                      <thead className="bg-card">
                         <tr className="border-b border-border text-xs text-muted-foreground">
-                          <th scope="col" data-column="task-name" className="sticky left-0 z-20 min-w-[200px] border-r border-border bg-muted px-4 py-2.5 text-center font-medium shadow-[10px_0_14px_-14px_rgba(15,23,42,0.35)]">任务名称</th>
+                          <th scope="col" data-column="task-name" className="sticky left-0 z-20 min-w-[200px] border-r border-border bg-card px-4 py-2.5 text-center font-medium shadow-[10px_0_14px_-14px_rgba(15,23,42,0.35)]">任务名称</th>
                           <th scope="col" data-column="run-status" className="min-w-[105px] px-4 py-2.5 text-center font-medium">运行状态</th>
                           <th scope="col" data-column="enabled" className="min-w-[105px] px-4 py-2.5 text-center font-medium">启停</th>
                           <th scope="col" data-column="pipeline" className="min-w-[240px] px-4 py-2.5 text-center font-medium">关联流水线</th>
@@ -581,7 +584,7 @@ export default function SyncTasksTab() {
                           <th scope="col" data-column="write-mode" className="min-w-[210px] px-4 py-2.5 text-center font-medium">入库策略</th>
                           <th scope="col" data-column="schedule-rule" className="min-w-[160px] px-4 py-2.5 text-center font-medium">调度规则</th>
                           <th scope="col" data-column="description" className="min-w-[240px] px-4 py-2.5 text-center font-medium">任务描述</th>
-                          <th scope="col" data-column="actions" className="sticky right-0 z-20 min-w-[150px] border-l border-border bg-muted px-4 py-2.5 text-center font-medium shadow-[-10px_0_14px_-14px_rgba(15,23,42,0.35)]">操作</th>
+                          <th scope="col" data-column="actions" className="sticky right-0 z-20 min-w-[150px] border-l border-border bg-card px-4 py-2.5 text-center font-medium shadow-[-10px_0_14px_-14px_rgba(15,23,42,0.35)]">操作</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y border-border">
@@ -723,13 +726,12 @@ export default function SyncTasksTab() {
                         })}
                       </tbody>
                     </table>
-                  </div>
                 </div>
               )}
             </div>
 
             {!loading && total > 0 && (
-              <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border bg-muted px-5 py-2.5">
+              <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border bg-card px-5 py-2.5">
                 <span className="mr-auto text-xs tabular-nums text-[var(--color-text-tertiary)]">共 {total} 条任务</span>
                 <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   每页

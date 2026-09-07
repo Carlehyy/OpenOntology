@@ -658,20 +658,20 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
       )}
 
       {/* 表格 — 可滚动 */}
-      <div className="flex-1 overflow-y-auto px-5 py-3">
+      <div className="flex-1 overflow-auto">
       {loading ? (
         <div className="flex items-center justify-center gap-2 p-12 text-sm text-[var(--color-text-tertiary)]">
           <Loader2 size={16} className="animate-spin" /> 加载数据集...
         </div>
       ) : curatedLoadFailed && curated.length === 0 ? (
-        <div className="rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] p-10 text-center text-[var(--color-danger)]">
+        <div className="m-5 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] p-10 text-center text-[var(--color-danger)]">
           <AlertTriangle size={28} className="mx-auto mb-2 opacity-70" />
           <p className="text-sm font-medium">成品数据集加载失败</p>
           <p className="mt-1 text-xs text-[var(--color-danger)]">{loadError}</p>
           <button type="button" onClick={load} className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs hover:bg-[var(--color-danger-bg)]">重新加载</button>
         </div>
       ) : allRows.length === 0 ? (
-        <div className="border-2 border-dashed rounded-xl p-12 text-center text-[var(--color-text-tertiary)] space-y-2">
+        <div className="m-5 border-2 border-dashed rounded-xl p-12 text-center text-[var(--color-text-tertiary)] space-y-2">
           <Table2 size={32} className="mx-auto opacity-30" />
           <p className="text-sm font-medium">暂无成品数据集</p>
           <p className="text-xs">运行数据流水线后，加工产物会自动出现在这里</p>
@@ -683,11 +683,10 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
           </button>
         </div>
       ) : filtered.length === 0 ? (
-        <div className="border rounded-xl p-8 text-center text-[var(--color-text-tertiary)] text-sm">没有匹配的数据集</div>
+        <div className="m-5 border rounded-xl p-8 text-center text-[var(--color-text-tertiary)] text-sm">没有匹配的数据集</div>
       ) : (
-        <div className="overflow-x-auto rounded-xl border bg-card">
-          <table className="w-full min-w-[1040px] text-sm">
-            <thead className="bg-muted border-b">
+        <table className="w-full min-w-[1040px] text-sm">
+            <thead className="bg-card border-b">
               <tr>
                 <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">数据集</th>
                 <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">来源流水线</th>
@@ -792,12 +791,11 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
               ))}
             </tbody>
           </table>
-        </div>
       )}
       </div>
 
       {!loading && !curatedLoadFailed && total > 0 && filtered.length > 0 && (
-        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border bg-muted px-5 py-2.5">
+        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border bg-card px-5 py-2.5">
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             每页
             <PageSizeSelect

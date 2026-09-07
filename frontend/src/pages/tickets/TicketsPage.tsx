@@ -148,7 +148,7 @@ export default function TicketsPage() {
         <div className="thin-scroll min-h-0 flex-1 overflow-auto">
           <table className="w-full min-w-[880px] table-fixed text-sm">
             <thead>
-              <tr className="sticky top-0 z-10 border-b border-border bg-muted text-sm text-muted-foreground">
+              <tr className="sticky top-0 z-10 border-b border-border bg-card text-sm text-muted-foreground">
                 <th className="w-[30%] px-4 py-3 text-left font-medium">工单</th>
                 <th className="w-[14%] px-3 py-3 text-center font-medium">提交人</th>
                 <th className="w-[11%] px-3 py-3 text-center font-medium">状态</th>

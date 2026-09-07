@@ -35,7 +35,7 @@ export const LEGACY_COLOR_LIMITS = {
   'pages/agent/ReportStudioPage.tsx':                                27,
   'pages/agent/components/AgentWorkbenchPresentation.tsx':           4,
   'pages/agent/components/OntologyCardCarousel.tsx':                 7,
-  'pages/agent/components/OntologyNetworkView.tsx':                  35,
+  'pages/agent/components/OntologyNetworkView.tsx':                  34,
   'pages/api-hub/RunHistory.tsx':                                    1,
   'pages/community/SkillCommunityPage.tsx':                          2,
   'pages/data-management/structured/CreateTableModal.tsx':           1,

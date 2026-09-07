@@ -359,7 +359,7 @@ export default function EventRegistryPage() {
           <div className="flex-1 min-h-0 overflow-auto thin-scroll">
             <table className="w-full min-w-[960px] table-fixed text-sm">
               <thead>
-                <tr className="sticky top-0 z-10 border-b border-border bg-muted text-sm text-muted-foreground">
+                <tr className="sticky top-0 z-10 border-b border-border bg-card text-sm text-muted-foreground">
                   <th className="w-[22%] px-4 py-3 text-left font-medium">事件</th>
                   <th className="w-[13%] px-3 py-3 text-center font-medium">来源</th>
                   <th className="w-[9%] px-3 py-3 text-center font-medium">级别</th>

@@ -367,9 +367,6 @@ export function OntologyNetworkView({
         }}
       >
         <defs>
-          <pattern id="ontology-grid" width="56" height="56" patternUnits="userSpaceOnUse">
-            <path d="M 56 0 L 0 0 0 56" fill="none" stroke="#e2e8f0" strokeWidth="1" opacity="0.55" />
-          </pattern>
           <marker id="ontology-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
             <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8" />
           </marker>
@@ -377,7 +374,6 @@ export function OntologyNetworkView({
             <feDropShadow dx="0" dy="10" stdDeviation="12" floodColor="#0f172a" floodOpacity="0.12" />
           </filter>
         </defs>
-        <rect width={graph.width} height={graph.height} fill="url(#ontology-grid)" opacity="0.55" />
         <g data-testid="ontology-network-viewport" transform={`translate(${pan.x} ${pan.y}) translate(${graph.cx} ${graph.cy}) scale(${zoom}) translate(${-graph.cx} ${-graph.cy})`}>
           {linkTypes.map((link, index) => {
             const source = graph.positions.get(link.sourceObjectTypeId)

@@ -226,8 +226,8 @@ export default function WorkbenchSidebar({
         <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
           <Brain size={16} className="shrink-0" /> 知识图谱
         </button>
-        {hasMenuAccess(user, 'overview') && (
-          <Link to="/overview" onClick={onCloseMobile} className={actionItemClass} data-workbench-governance>
+        {hasMenuAccess(user, 'ontologies') && (
+          <Link to="/ontologies" onClick={onCloseMobile} className={actionItemClass} data-workbench-governance>
             <LayoutDashboard size={16} className="shrink-0" /> 本体治理
           </Link>
         )}

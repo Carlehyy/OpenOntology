@@ -71,7 +71,7 @@ export const DEFAULT_CUSTOM_MENU_KEYS = ['overview']
 export const PLATFORM_NAV_ITEMS: PlatformNavItem[] = [
   { key: 'overview', to: '/overview', icon: LayoutDashboard, label: '平台概览', description: '平台运行与数据总览', hiddenFromNavigation: true },
   { key: 'super_assistant', to: '/super-assistant', icon: BrainCircuit, label: '超级助手', description: '通用智能协作入口' },
-  { key: 'scenes', to: '/scenes', icon: Axis3d, label: '三维场景', description: '白模三维场景管理与建模' },
+  { key: 'scenes', to: '/scenes', icon: Axis3d, label: '三维场景', description: '白模三维场景管理与建模', hiddenFromNavigation: true },
   { key: 'agent', to: '/agent', icon: Bot, label: '本体助手', description: '本体智能体与分析报告' },
   {
     key: 'ontology_model', to: '/ontology-model', icon: Boxes, label: '本体模型', description: '本体管理、业务澄清与本体网络', subItems: [
