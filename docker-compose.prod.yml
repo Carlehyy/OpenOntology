@@ -116,7 +116,6 @@ services:
       # Retained only so historical local:// objects remain readable during
       # migration. New object writes always require MinIO.
       STORAGE_LOCAL_DIR: /uploads/object-storage
-      ALLOW_PUBLIC_REGISTRATION: "false"
       DATABASE_URL: ${DATABASE_URL:-postgresql://ontoprompt:ontoprompt@db:5432/ontoprompt}
       REDIS_URL: ${REDIS_URL:-redis://:ontopromptredis123@redis:6379/0}
       # 流水线任务派发通道，仅 compose 内网可达，不进入生产依赖清单。
@@ -193,7 +192,6 @@ services:
       # Retained only so historical local:// objects remain readable during
       # migration. New object writes always require MinIO.
       STORAGE_LOCAL_DIR: /uploads/object-storage
-      ALLOW_PUBLIC_REGISTRATION: "false"
       DATABASE_URL: ${DATABASE_URL:-postgresql://ontoprompt:ontoprompt@db:5432/ontoprompt}
       REDIS_URL: ${REDIS_URL:-redis://:ontopromptredis123@redis:6379/0}
       # 流水线任务派发通道，仅 compose 内网可达，不进入生产依赖清单。

@@ -1,9 +1,8 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Response
-from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from app.deps import bearer, get_db, get_current_user
+from app.deps import get_db, get_current_user
 from app.config import settings
 from app.auth.schemas import (
     LoginRequest,
@@ -11,7 +10,6 @@ from app.auth.schemas import (
     PrivacyReport,
     PrivacyVarCreate,
     ProfileUpdate,
-    RegisterRequest,
     TokenResponse,
     UserEnvVarsReplace,
     UserOut,
@@ -28,7 +26,6 @@ from app.auth.crypto import (
     hybrid_decrypt,
     rsa_decrypt,
 )
-import uuid
 
 router = APIRouter()
 
@@ -40,30 +37,6 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     token = create_access_token(
         {"sub": user.id, "role": user.role, "ver": user.token_version})
     return {"data": {"access_token": token, "token_type": "bearer"}, "message": "ok"}
-
-@router.post("/register", status_code=201)
-def register(
-    body: RegisterRequest,
-    db: Session = Depends(get_db),
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-):
-    if not settings.allow_public_registration:
-        current_user = get_current_user(credentials=credentials, db=db)
-        if current_user.role != "admin":
-            raise HTTPException(status_code=403, detail="Admin required")
-    if db.query(User).filter((User.username == body.username) | (User.email == body.email)).first():
-        raise HTTPException(status_code=409, detail="Username or email already exists")
-    user = User(
-        id=str(uuid.uuid4()),
-        username=body.username,
-        email=body.email,
-        password_hash=hash_password(body.password),
-        role="viewer",
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return {"data": UserOut.model_validate(user).model_dump(), "message": "ok"}
 
 @router.get("/profile")
 def profile(

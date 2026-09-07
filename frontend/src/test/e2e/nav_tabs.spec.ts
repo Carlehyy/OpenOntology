@@ -234,10 +234,10 @@ test('标签可见标题使用平台导航的一级/二级菜单标签，不使�
   await expect(tabList.getByRole('tab', { name: '图谱' })).toHaveCount(0)
 
   // 系统设置子页：一级 · 二级菜单标签
-  await page.goto('/#/settings/users')
-  const settingsTab = tabList.getByRole('tab', { name: '系统设置 · 用户管理' })
+  await page.goto('/#/settings/domains')
+  const settingsTab = tabList.getByRole('tab', { name: '系统设置 · 领域设置' })
   await expect(settingsTab).toBeVisible()
-  await expect(settingsTab).toHaveAttribute('title', '系统设置 · 用户管理')
+  await expect(settingsTab).toHaveAttribute('title', '系统设置 · 领域设置')
 
   // 世界模型列表页：一级 · 二级菜单标签
   await page.goto('/#/world-model/models')
@@ -323,7 +323,7 @@ test('左侧导航折叠态：一级导航全部可点击，分组直达第一�
     ['数据集成', /\/#\/data\/pipelines$/],
     ['接口代理', /\/#\/api-hub\/interfaces$/],
     ['开放社区', /\/#\/community\/skills$/],
-    ['系统设置', /\/#\/settings\/users$/],
+    ['系统设置', /\/#\/settings\/domains$/],
   ]
   for (const [name, url] of groups) {
     await nav.getByRole('button', { name, exact: true }).click()

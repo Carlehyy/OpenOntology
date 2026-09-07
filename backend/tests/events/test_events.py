@@ -2,9 +2,12 @@ import csv
 import hashlib
 import io
 import tempfile
+import uuid
 import zipfile
 from datetime import datetime, timezone
 
+from app.auth.models import User
+from app.auth.service import hash_password
 from app.events import models as event_models
 from app.events import router as event_router
 from app.events.models import EventAttachment, EventIngestKey, RegisteredEvent
@@ -431,11 +434,10 @@ def test_event_write_paths_full_lifecycle(client, admin_user, auth_headers, db):
     assert len(actions) == 3
 
     # 物理删除仅 admin；viewer 走 soft-delete 语义但 hard=true 被拒
-    viewer = client.post("/api/v1/users", headers=auth_headers, json={
-        "username": "evt_viewer", "email": "evt_viewer@test.com",
-        "password": "viewer123", "role": "viewer",
-    })
-    assert viewer.status_code == 201
+    # （用户管理 API 已退役，测试用户直写数据库，与 conftest 夹具同款）
+    db.add(User(id=str(uuid.uuid4()), username="evt_viewer", email="evt_viewer@test.com",
+                password_hash=hash_password("viewer123"), role="viewer"))
+    db.commit()
     login = client.post(
         "/api/v1/auth/login",
         json={"username": "evt_viewer", "password": "viewer123"},

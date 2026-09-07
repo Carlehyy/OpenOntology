@@ -225,15 +225,16 @@ export default function App() {
           <Route path="/scenes/modeling" element={<ProtectedRoute><SceneModelingPage /></ProtectedRoute>} />
           <Route path="/scenes/:id" element={<ProtectedRoute><SceneDetailPage /></ProtectedRoute>} />
           <Route path="/rag" element={<Navigate to="/agent" replace />} />
-          <Route path="/settings" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/skills" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/extraction" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/rules" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/prompts" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/open-interfaces" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/minio" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/workflows" element={<Navigate to="/settings/users" replace />} />
-          <Route path="/settings/agents" element={<Navigate to="/settings/users" replace />} />
+          <Route path="/settings" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/users" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/skills" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/extraction" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/rules" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/prompts" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/open-interfaces" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/minio" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/workflows" element={<Navigate to="/settings/domains" replace />} />
+          <Route path="/settings/agents" element={<Navigate to="/settings/domains" replace />} />
           <Route path="/settings/:tab" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
           {/* 组件预览（components/ 共享组件的可达挂载点；不进入导航，仅要求登录） */}
           <Route

@@ -158,7 +158,6 @@ def _configure_isolation(root: Path) -> tuple[Path, Path]:
         "DATABASE_URL": f"sqlite:///{database}",
         "UPLOADS_DIR": str(uploads),
         "SECRET_KEY": secrets.token_urlsafe(48),
-        "ALLOW_PUBLIC_REGISTRATION": "false",
         # 不允许开发机 .env 把本脚本带到真实基础设施。
         "REDIS_URL": "redis://127.0.0.1:1/15",
         "NEO4J_URI": "bolt://127.0.0.1:1",

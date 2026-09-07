@@ -446,7 +446,7 @@ class WidgetConfigOut(ORMModel):
 
 class WidgetConfigUpdate(BaseModel):
     # 隐藏名单语义见 models.SuperAssistantWidgetConfig；菜单键是前端 navigation.ts
-    # 的叶子菜单键（如 ontologies、data.pipelines、settings.users）
+    # 的叶子菜单键（如 ontologies、data.pipelines、settings.domains）
     hidden_menu_keys: list[str] = Field(max_length=200)
 
     @field_validator("hidden_menu_keys")

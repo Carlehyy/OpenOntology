@@ -8,7 +8,7 @@ describe('menuKeyForPath', () => {
     assert.equal(menuKeyForPath('/ontologies/123'), 'ontologies')
     assert.equal(menuKeyForPath('/ontology-model/network'), 'ontology_model.network')
     assert.equal(menuKeyForPath('/ontology-model'), 'ontology_model')
-    assert.equal(menuKeyForPath('/settings/users'), 'system_settings')
+    assert.equal(menuKeyForPath('/settings/domains'), 'system_settings')
     assert.equal(menuKeyForPath('/world-model/models/m1/develop'), 'world_model.models')
     assert.equal(menuKeyForPath('/world-model/services'), 'world_model.services')
     assert.equal(menuKeyForPath('/world-model/services/svc-1'), 'world_model.services')

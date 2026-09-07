@@ -76,7 +76,6 @@ def _configure_process(temp_root: Path, proxy_token: str, credential_name: str) 
         "API_HUB_INTERNAL_PROXY_TOKEN": proxy_token,
         "SECRET_KEY": "steward-api-hub-live-e2e-secret-key",
         "FIRST_ADMIN_PASSWORD": "steward-api-hub-live-e2e-admin-password",
-        "ALLOW_PUBLIC_REGISTRATION": "false",
         "STEWARD_PROXY_CREDENTIAL_NAME": credential_name,
     })
 

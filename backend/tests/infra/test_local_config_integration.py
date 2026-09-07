@@ -82,7 +82,6 @@ def test_clean_checkout_production_uses_process_environment(
         "PYTHON_KERNEL_GATEWAY_AUTH_TOKEN": "a-secure-kernel-gateway-token",
         "PIPELINE_FILE_PUBLIC_APP_BASE_URL": "https://app.example.test",
         "PIPELINE_FILE_PUBLIC_API_BASE_URL": "https://api.example.test",
-        "ALLOW_PUBLIC_REGISTRATION": "false",
     }
     for key, value in process_values.items():
         monkeypatch.setenv(key, value)
