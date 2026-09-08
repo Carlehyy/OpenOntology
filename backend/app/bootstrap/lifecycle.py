@@ -36,8 +36,9 @@ async def application_lifespan(
 
         if settings.environment != "test":
             # Probe every configured integration before starting any owned
-            # background thread. Chromium CDP is handled as advisory by this
-            # probe; PostgreSQL, Redis, Neo4j, MinIO and n8n fail closed.
+            # background thread. Chromium CDP and (outside production) n8n
+            # are handled as advisory by this probe; PostgreSQL, Redis,
+            # Neo4j, MinIO and production n8n fail closed.
             from app.shared.dependency_probe import (
                 probe_startup_dependencies,
             )

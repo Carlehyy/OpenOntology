@@ -1,0 +1,70 @@
+# 真实后端 E2E 的隔离基础设施（AGENTS.md §5 真实环境验收的本地形态）。
+# 仅包含五个基础服务，端口全部错开常用端口，避免与本机已在监听的
+# 5432/6379/9000 等冲突；后端用宿主机 dev_server 起在 8000，前端由
+# Playwright 的 webServer 自行拉起。完整用法见
+# docs/development/testing.md 的「隔离 E2E 栈」一节。
+name: ontoprompt-e2e
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ontoprompt
+      POSTGRES_USER: ontoprompt
+      POSTGRES_PASSWORD: ontoprompt
+    ports: ["15432:5432"]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ontoprompt"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: ontopromptredis123
+    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD}\""]
+    ports: ["16379:6379"]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  nats:
+    image: nats:alpine
+    command: ["-js", "--store_dir", "/data", "-m", "8222"]
+    ports: ["14222:4222"]
+    volumes: [nats_data:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  neo4j:
+    image: neo4j:5.20-community
+    ports: ["17474:7474", "17687:7687"]
+    environment:
+      NEO4J_AUTH: neo4j/ontoprompt123
+    volumes: [neo4j_data:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+  minio:
+    image: minio/minio:latest
+    ports: ["19000:9000", "19001:9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes: [minio_data:/data]
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+volumes:
+  pg_data:
+  nats_data:
+  neo4j_data:
+  minio_data:

@@ -42,6 +42,10 @@ npm --prefix frontend ci
 npm --prefix frontend run dev
 ```
 
+注意：`dev_server` 带 uvicorn `--reload`，应用启动失败（如依赖探针拦截）
+后 reloader 父进程会驻留并占用端口等待文件变更重试；重新启动前先
+`pkill -f app.dev_server` 清理残留进程，否则会遇到 `Address already in use`。
+
 Python 脚本流水线（可选能力）还需要一个 Jupyter Kernel Gateway 执行网关，
 Windows 原生可跑、无需 Docker：
 
@@ -70,7 +74,10 @@ executor 被打断的执行由数据库租约兜底：租约最长 6 小时过�
 Celery worker PONG。复检未通过时平台不算启动完成。
 
 n8n 地址、API Key 和超时由配置中心生成的启动环境统一托管，连通性由
-`/health/ready` 实时探测；修改 n8n 后需重启 API 与 worker。测试代码只有在
+`/health/ready` 实时探测；修改 n8n 后需重启 API 与 worker。生产环境 n8n
+不可达会在启动探针处 fail-closed；开发环境的 n8n 探针为提示性（与
+Chromium CDP 同等待遇）：没有 n8n 的开发机可以正常启动 API 进行诊断，
+深度 readiness 保持失败，工作流相关能力在使用点明确报错。测试代码只有在
 `ENVIRONMENT=test` 下才可注入隔离配置。
 
 API、worker 和前端都启动后，再由管理员登录“模型配置”页面，按需配置 LLM

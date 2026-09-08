@@ -189,6 +189,9 @@ bash scripts/ci/check-repository-hygiene.sh
 cd backend
 uv sync --frozen --group dev
 uv run pytest -q --disable-warnings --ignore tests/v2/perf
+# 新增或删除测试后必须重录 pytest-split 时长表（本地时长守卫与部署工作流
+# 的 Test durations coverage guard 同步拦截）：
+# uv run pytest -q --disable-warnings --ignore tests/v2/perf --store-durations --clean-durations
 
 cd ../config
 uv sync --frozen --group dev
