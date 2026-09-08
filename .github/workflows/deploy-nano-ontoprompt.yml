@@ -116,11 +116,17 @@ jobs:
           PY
         working-directory: backend
 
+      # !cancelled()：shard 1 时长守卫失败时回归仍要执行——本 job 末尾会把
+      # 分片实测时长上传给 durations-refresh 自愈（守卫失败恰恰意味着时长表
+      # 缺录，正是需要实测数据开自愈 PR 的场景）。--store-durations 写入的是
+      # 分片私有文件，不会触碰入库的 backend/.test_durations。
       - name: Backend regression suite
+        if: ${{ !cancelled() }}
         run: >-
           uv run pytest -q --disable-warnings -n auto --dist loadfile
           --ignore tests/v2/perf --splits=6 --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
+          --store-durations --durations-path .test_durations.shard${{ matrix.shard }}
         working-directory: backend
 
       # 性能套件测量耗时，保持串行运行以避免并行负载干扰读数。
@@ -164,6 +170,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # 分片实测时长（含回归失败时的数据）：durations-refresh 的自愈原料。
+      # continue-on-error + warn：上传问题绝不影响验证结论。
+      - name: Upload shard test durations
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-shard-${{ matrix.shard }}
+          path: backend/.test_durations.shard${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 3
+
   verify-frontend:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -194,6 +212,12 @@ jobs:
 
       - name: Frontend feature-boundary gate
         run: npm run check:feature-boundaries
+        working-directory: frontend
+
+      # 像素尺寸断言规范：禁止对 boundingBox 宽高做精确相等断言
+      # （CI Linux 浮点舍入差会误报，先例 6596ffa7）。
+      - name: Frontend E2E assertion-convention gate
+        run: npm run check:e2e-assertions
         working-directory: frontend
 
       - name: Frontend component-convergence gate
@@ -512,6 +536,76 @@ jobs:
       - name: Remove runner deployment archive
         if: ${{ always() }}
         run: rm -f /tmp/openontology.tar.gz deploy/production.dependencies.env
+
+  durations-refresh:
+    # 时长表自愈：合并 verify-backend 各分片的实测时长，仅当测试集键集发生
+    # 结构变化（新增缺录/已删残留）时回写 .test_durations 并维护一个滚动 PR。
+    # 刻意独立于 deploy/report 关键路径：本 job 任何失败都不阻塞部署（job 级
+    # continue-on-error），且未列入 report 的结果聚合。分支推送不触发部署
+    # 工作流（on.push 仅 nano-ontoprompt），PR 合并才随正常流程生效。
+    needs: [changes, verify-backend]
+    if: ${{ always() && needs.changes.outputs.code == 'true' && needs.verify-backend.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shard durations
+        uses: actions/download-artifact@v4
+        with:
+          pattern: durations-shard-*
+          path: shard-durations
+          merge-multiple: true
+
+      - name: Merge shard durations and detect structural drift
+        id: merge
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import glob, json, os, sys
+          files = sorted(glob.glob('shard-durations/.test_durations.shard*'))
+          if len(files) != 6:
+              print(f'分片时长不完整（{len(files)}/6，可能有分片未跑到回归），跳过自愈')
+              sys.exit(0)
+          merged = {}
+          for path in files:
+              merged.update(json.load(open(path, encoding='utf-8')))
+          committed = json.load(open('backend/.test_durations', encoding='utf-8'))
+          added = sorted(set(merged) - set(committed))
+          removed = sorted(set(committed) - set(merged))
+          if not added and not removed:
+              print('时长表键集无结构变化（纯数值漂移不回写），跳过')
+              sys.exit(0)
+          with open('backend/.test_durations', 'w', encoding='utf-8') as f:
+              json.dump(merged, f, indent=2, sort_keys=True)
+              f.write('\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write('refresh=true\n')
+          print(f'结构变化：新增缺录 {len(added)} / 已删残留 {len(removed)}，回写 {len(merged)} 条实测时长')
+          PY
+
+      - name: Open rolling refresh PR
+        if: steps.merge.outputs.refresh == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          git config user.name "openontology-ci"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -B chore/durations-auto-refresh
+          git add backend/.test_durations
+          git commit -m "ci(test): 自动回写 CI 实测测试时长表（测试集结构变化触发）"
+          git push --force origin chore/durations-auto-refresh
+          gh pr create \
+            --head chore/durations-auto-refresh \
+            --base nano-ontoprompt \
+            --title "ci(test): 自动回写测试时长表（结构变化）" \
+            --body "verify-backend 六分片实测时长的自动合并回写。仅当测试集键集出现结构变化（新增缺录/已删残留）时更新；合并后时长守卫与分片配平恢复一致。纯数值漂移不触发本 PR。" \
+            || echo "滚动 PR 已存在，分支已强推更新"
 
   report:
     if: ${{ always() }}
