@@ -99,7 +99,7 @@
     background-color: var(--card);
   }
 
-  /* 业务探索工作区（#/explore）页级底色：浅色下比全局底色(#eef1f5)加深一档，
+  /* 业务探索工作区（#/explore）页级底色：浅色下比全局底色(#f8fbfa)加深一档，
      与浅色面板(#f8fbff)拉开层次；深色下维持主题底色不变。仅作用于本页容器。 */
   .explore-shell {
     background-color: #e2e6ee;

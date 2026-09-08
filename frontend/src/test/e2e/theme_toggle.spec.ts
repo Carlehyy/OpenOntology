@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
-const LIGHT_BODY_BG = 'rgb(248, 250, 252)'
+const LIGHT_BODY_BG = 'rgb(248, 251, 250)'
 const DARK_BODY_BG = 'rgb(13, 17, 23)'
 
 async function mockPlatformShell(page: Page) {
