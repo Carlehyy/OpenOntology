@@ -332,10 +332,12 @@ class _ScriptedCompletions:
         self._steps = list(steps)
         self.calls = 0
         self.stream_calls = 0
+        self.stream_kwargs = []
 
     def create(self, **kwargs):
         if kwargs.get("stream"):
             self.stream_calls += 1
+            self.stream_kwargs.append(kwargs)
         else:
             self.calls += 1
         step = self._steps.pop(0)
@@ -481,6 +483,54 @@ def test_openai_stream_midstream_error_is_not_retried(monkeypatch, sleeps):
     assert completions.calls == 1  # 维持既有非流式回退
     assert sleeps == []
     assert deltas == ["回退内容"]  # 半截内容滞留 think 前缀缓冲，未提前透出
+
+
+def test_openai_stream_requests_usage_via_stream_options(monkeypatch):
+    """OpenAI 规范下流式 usage 需显式请求：不发送 stream_options 则对端不给。"""
+    completions = _ScriptedCompletions([
+        lambda: iter([
+            _chunk(content="你好"),
+            SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7)),
+        ]),
+    ])
+    _patch_openai(monkeypatch, completions)
+    result = provider.chat_stream(_CALL_KWARGS, _MESSAGES, [], None)
+    assert completions.stream_kwargs[0]["stream_options"] == {"include_usage": True}
+    assert result["usage"] == {"inputTokens": 11, "outputTokens": 7}
+
+
+def test_openai_stream_retries_without_stream_options_when_rejected(monkeypatch):
+    """不识别 stream_options 的网关以非瞬态 4xx 拒绝时，去字段重试仍走流式。"""
+    import openai
+
+    completions = _ScriptedCompletions([
+        _status_error(openai.BadRequestError, 400),
+        lambda: iter([_chunk(content="降级后流式成功")]),
+    ])
+    _patch_openai(monkeypatch, completions)
+    result = provider.chat_stream(_CALL_KWARGS, _MESSAGES, [], None)
+    assert result["content"] == "降级后流式成功"
+    assert completions.stream_calls == 2
+    assert completions.calls == 0  # 仍走流式，未触发非流式回退
+    assert "stream_options" not in completions.stream_kwargs[1]
+
+
+def test_openai_stream_transient_error_not_retried_without_stream_options(monkeypatch, sleeps):
+    """瞬态建连错误只重试带 stream_options 的请求：不触发去字段重试，维持非流式回退。"""
+    import openai
+
+    completions = _ScriptedCompletions([
+        _status_error(openai.RateLimitError, 429),
+        _status_error(openai.RateLimitError, 429),
+        _status_error(openai.RateLimitError, 429),
+        _completion("回退内容"),
+    ])
+    _patch_openai(monkeypatch, completions)
+    result = provider.chat_stream(_CALL_KWARGS, _MESSAGES, [], None)
+    assert result["content"] == "回退内容"
+    assert completions.stream_calls == 3
+    assert all("stream_options" in kwargs for kwargs in completions.stream_kwargs)
+    assert completions.calls == 1
 
 
 _SYSTEM_MESSAGES = [

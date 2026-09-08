@@ -420,12 +420,23 @@ def _chat_stream_openai(kw: dict[str, Any], messages: list[dict[str, Any]],
                         tools: list[dict[str, Any]],
                         on_delta: Callable[[str], None] | None) -> dict[str, Any]:
     client = _openai_client(kw)
-    # 不发送 stream_options：部分 OpenAI 兼容网关不识别该字段；usage 在
-    # 对端主动给出时顺手采集，否则与非流式一样返回空 dict。
-    # 只有建连（create 本身）走重试；迭代中途断线不重试，避免重复产出 delta。
-    stream = _with_retry(lambda: client.chat.completions.create(
-        **_openai_create_kwargs(kw, messages, tools), stream=True,
-    ))
+    create_kwargs = _openai_create_kwargs(kw, messages, tools)
+    # OpenAI 规范下流式 usage 只在 stream_options.include_usage 显式请求时
+    # 随末块返回（MiniMax 等兼容端点同此），不请求则 token_usage 恒为空。
+    # 部分网关不识别该字段：非瞬态拒绝时去掉字段重试一次流式建连，保持
+    # 流式通道可用；瞬态错误语义不变。只有建连（create 本身）走重试；
+    # 迭代中途断线不重试，避免重复产出 delta。
+    try:
+        stream = _with_retry(lambda: client.chat.completions.create(
+            **create_kwargs, stream=True,
+            stream_options={"include_usage": True},
+        ))
+    except Exception as exc:
+        if isinstance(exc, _transient_error_types()):
+            raise
+        stream = _with_retry(lambda: client.chat.completions.create(
+            **create_kwargs, stream=True,
+        ))
     think_filter = _ThinkPrefixFilter(on_delta or (lambda _delta: None))
     content_parts: list[str] = []
     pending_calls: dict[int, dict[str, Any]] = {}
