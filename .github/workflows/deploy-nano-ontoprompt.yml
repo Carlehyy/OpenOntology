@@ -116,17 +116,24 @@ jobs:
           PY
         working-directory: backend
 
-      # !cancelled()：shard 1 时长守卫失败时回归仍要执行——本 job 末尾会把
-      # 分片实测时长上传给 durations-refresh 自愈（守卫失败恰恰意味着时长表
-      # 缺录，正是需要实测数据开自愈 PR 的场景）。--store-durations 写入的是
-      # 分片私有文件，不会触碰入库的 backend/.test_durations。
+      # --store-durations 走默认路径：读入库的 backend/.test_durations 做配平
+      # 分片，执行后把本分片实测时长写回（未执行条目保留旧值，结果仍是全表），
+      # 随后复制为不带点头的分片文件供 durations-refresh 合并——upload-artifact
+      # 对点开头文件有吞没行为，命名必须避开。!cancelled()：shard 1 守卫失败时
+      # 回归仍要执行——守卫失败恰恰意味着时长表缺录，正是需要实测数据自愈的
+      # 场景。runner 工作区一次性的，覆写 .test_durations 不影响仓库。
       - name: Backend regression suite
         if: ${{ !cancelled() }}
         run: >-
           uv run pytest -q --disable-warnings -n auto --dist loadfile
           --ignore tests/v2/perf --splits=6 --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
-          --store-durations --durations-path .test_durations.shard${{ matrix.shard }}
+          --store-durations
+        working-directory: backend
+
+      - name: Stage shard durations for self-heal
+        if: ${{ !cancelled() }}
+        run: cp .test_durations "test-durations.shard${{ matrix.shard }}.json"
         working-directory: backend
 
       # 性能套件测量耗时，保持串行运行以避免并行负载干扰读数。
@@ -178,7 +185,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: durations-shard-${{ matrix.shard }}
-          path: backend/.test_durations.shard${{ matrix.shard }}
+          path: backend/test-durations.shard${{ matrix.shard }}.json
           if-no-files-found: warn
           retention-days: 3
 
@@ -567,7 +574,7 @@ jobs:
           set -Eeuo pipefail
           python3 - <<'PY'
           import glob, json, os, sys
-          files = sorted(glob.glob('shard-durations/.test_durations.shard*'))
+          files = sorted(glob.glob('shard-durations/test-durations.shard*.json'))
           if len(files) != 6:
               print(f'分片时长不完整（{len(files)}/6，可能有分片未跑到回归），跳过自愈')
               sys.exit(0)
