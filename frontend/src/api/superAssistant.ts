@@ -342,6 +342,11 @@ export interface MulticaTestResult {
   workspaces: Array<{ id: string; name: string; slug: string }>
 }
 
+/** 已保存配置的实时工作区列表（GET /super-assistant/multica/workspaces） */
+export interface MulticaWorkspacesResult {
+  workspaces: MulticaTestResult['workspaces']
+}
+
 export interface SuperMemory {
   id: string
   content: string
@@ -554,6 +559,8 @@ export const superAssistantApi = {
     apiClientV2.put<MulticaConfig>('/super-assistant/multica/config', body),
   testMultica: (body: { base_url?: string | null; token?: string | null } = {}) =>
     apiClientV2.post<MulticaTestResult>('/super-assistant/multica/test', body),
+  multicaWorkspaces: () =>
+    apiClientV2.get<MulticaWorkspacesResult>('/super-assistant/multica/workspaces'),
 
   listRemoteAgents: () => apiClientV2.get<RemoteAgent[]>('/super-assistant/remote-agents'),
   createRemoteAgent: (body: RemoteAgentPayload) =>

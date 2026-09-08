@@ -341,6 +341,12 @@ class MulticaTestOut(BaseModel):
     workspaces: list[MulticaWorkspaceOut] = Field(default_factory=list)
 
 
+class MulticaWorkspacesOut(BaseModel):
+    # 已保存配置的实时工作区列表（GET /multica/workspaces）：
+    # 配置弹窗打开即拉取，替代"只显示已保存单条"的兜底
+    workspaces: list[MulticaWorkspaceOut] = Field(default_factory=list)
+
+
 class MemoryCreate(BaseModel):
     content: str = Field(min_length=1, max_length=50_000)
     zone: str = Field(default="general", min_length=1, max_length=50)

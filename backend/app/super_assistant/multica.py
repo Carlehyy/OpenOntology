@@ -17,6 +17,7 @@ from app.super_assistant.schemas import (
     MulticaConfigUpdate,
     MulticaTestOut,
     MulticaTestRequest,
+    MulticaWorkspacesOut,
 )
 
 router = APIRouter()
@@ -43,6 +44,20 @@ def update_multica_config(
     except (MulticaClientError, multica_service.MulticaServiceError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return multica_service.config_view(config)
+
+
+@router.get("/multica/workspaces", response_model=MulticaWorkspacesOut)
+def list_multica_workspaces(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> MulticaWorkspacesOut:
+    try:
+        return multica_service.list_config_workspaces(db, current_user.id)
+    except multica_service.MulticaServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MulticaClientError as exc:
+        # 上游 multica 实例不可达：网关侧失败，前端回落已保存工作区兜底
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/multica/test", response_model=MulticaTestOut)

@@ -45,7 +45,7 @@ description: >-
 
 | 令牌 | 浅色 | 深色 | 用途 |
 |---|---|---|---|
-| `--background` | `#eef1f5` | `#0d1117` | 页面底色 |
+| `--background` | `#f8fbfa` | `#0d1117` | 页面底色 |
 | `--card` | `#ffffff` | `#161c26` | 卡片/面板 |
 | `--foreground` | `#1a1a2e` | `#e6e9ef` | 正文墨色 |
 | `--primary` | `#059669` | `#3ecf8e` | 主按钮/主操作 |
