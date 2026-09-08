@@ -26,6 +26,8 @@ from app.super_assistant.schemas import (
     MulticaConfigOut,
     MulticaConfigUpdate,
     MulticaTestOut,
+    MulticaWorkspaceOut,
+    MulticaWorkspacesOut,
 )
 
 
@@ -292,6 +294,29 @@ def test_connection(
         account_name=account_name or None,
         workspaces=[
             {"id": str(item.get("id") or ""), "name": str(item.get("name") or ""), "slug": str(item.get("slug") or "")}
+            for item in workspaces
+        ],
+    )
+
+
+def list_config_workspaces(db: Session, owner_id: str) -> MulticaWorkspacesOut:
+    """已保存配置的实时工作区列表（配置弹窗打开即拉取）。
+
+    工作区列表不持久化：弹窗每次打开用它取全量下拉，替代"只显示已保存
+    单条"的前端兜底。不写 last_test_*，未配置按请求错误上抛；上游连通性
+    失败由 MulticaClientError 原样抛给路由层翻译（HTTP 502）。
+    """
+    config = get_config(db, owner_id)
+    if config is None or not (config.base_url.strip() and config.token_encrypted):
+        raise MulticaServiceError("multica 尚未配置完整，请先保存服务地址与 API Token")
+    workspaces = multica_client.list_workspaces(config.base_url, decrypt_token(config))
+    return MulticaWorkspacesOut(
+        workspaces=[
+            MulticaWorkspaceOut(
+                id=str(item.get("id") or ""),
+                name=str(item.get("name") or ""),
+                slug=str(item.get("slug") or ""),
+            )
             for item in workspaces
         ],
     )

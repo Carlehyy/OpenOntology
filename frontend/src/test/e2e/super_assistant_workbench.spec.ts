@@ -108,6 +108,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const createdConvs: Array<Record<string, unknown>> = []
   const multicaPuts: Array<Record<string, unknown>> = []
   const multicaTests: Array<Record<string, unknown>> = []
+  const multicaWorkspaceCalls: string[] = []
   let chatDone = false
   const filesByConv: Record<string, Array<Record<string, unknown>>> = {
     'c-today': [{
@@ -467,6 +468,16 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         ],
       })
     }
+    // 已保存配置的实时工作区列表：弹窗打开即拉取（与测试连接同一后端数据源）
+    if (path === '/api/v2/super-assistant/multica/workspaces') {
+      multicaWorkspaceCalls.push(request.url())
+      return json(route, {
+        workspaces: [
+          { id: 'ws-1', name: 'My Workspace', slug: 'my-workspace' },
+          { id: 'ws-2', name: 'E2E 工作区', slug: 'e2e' },
+        ],
+      })
+    }
     // 全局搜索：会话标题 + 消息内容（查询词含「需求」时命中 c-today 的标题与一条消息）
     if (path === '/api/v2/super-assistant/search/conversations') {
       const q = new URL(request.url()).searchParams.get('q') || ''
@@ -504,6 +515,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     searchQueries,
     multicaPuts,
     multicaTests,
+    multicaWorkspaceCalls,
     palaceUploads,
     palaceDeletes,
     palacePreviews,
@@ -1019,7 +1031,7 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   await expect.poll(() => mocks.multicaTests.length).toBe(1)
   expect(mocks.multicaTests[0]).toMatchObject({ base_url: 'http://127.0.0.1:8080', token: 'mul-e2e-token' })
 
-  await integrationsDialog.getByRole('combobox', { name: 'multica 工作区' }).click()
+  await integrationsDialog.getByRole('combobox', { name: 'Multica 工作区' }).click()
   await page.getByRole('option', { name: 'E2E 工作区' }).click()
   await integrationsDialog.getByRole('checkbox', { name: '启用集成' }).check()
   await integrationsDialog.getByTestId('multica-save-button').click()
@@ -1033,6 +1045,25 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
     enabled: true,
   })
   await expect(integrationsDialog).toHaveCount(0)
+})
+
+test('multica 配置弹窗：已配置时打开即拉取全量工作区，无需先点测试连接', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page, { multicaConfig: multicaEnabledFixture })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: '外部集成' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
+  await expect(dialog.getByTestId('multica-config-card')).toBeVisible()
+
+  // 打开弹窗即请求工作区列表（此前只有单条已保存兜底，掩盖其余可选工作区）；
+  // StrictMode 开发态 effect 双触发，调用数按 ≥1 断言
+  await expect.poll(() => mocks.multicaWorkspaceCalls.length).toBeGreaterThanOrEqual(1)
+  await expect(mocks.multicaTests.length).toBe(0)
+  await dialog.getByRole('combobox', { name: 'Multica 工作区' }).click()
+  await expect(page.getByRole('option', { name: 'My Workspace' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'E2E 工作区' })).toBeVisible()
 })
 
 test('知识图谱：选中即预览，md 在线编辑保存触发 PUT content，图片走原图预览', async ({ page }) => {

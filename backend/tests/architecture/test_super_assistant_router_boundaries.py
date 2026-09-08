@@ -167,6 +167,7 @@ ROUTE_PARAMETERS = {
         "db",
         "current_user",
     ),
+    "list_multica_workspaces": ("db", "current_user"),
     "list_memories": (
         "zone",
         "include_superseded",
@@ -376,6 +377,10 @@ DELEGATES = {
     "test_multica_connection": (
         "multica_service",
         "test_connection",
+    ),
+    "list_multica_workspaces": (
+        "multica_service",
+        "list_config_workspaces",
     ),
     "list_memories": ("memory_service", "list_memories"),
     "create_memory": ("memory_service", "create_memory"),
@@ -755,9 +760,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # files/notes POST、files/{id} PATCH（拖拽移动）；
     # 远程助手声明式注册新增 /remote-agents 的 list/create、
     # /remote-agents/{id} 的 put/delete、/remote-agents/{id}/test 的 post
-    # 共 5 个操作（3 条路径）
-    assert len(paths) == 48
-    assert sum(len(item) for item in paths.values()) == 69
+    # 共 5 个操作（3 条路径）；multica 配置弹窗打开即拉取工作区列表，
+    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）
+    assert len(paths) == 49
+    assert sum(len(item) for item in paths.values()) == 70
     assert hashlib.sha256(payload).hexdigest() == (
-        "6556a86503c6e7b94d7abe8500742aeeacb1795b15e526188f077e011c32e0a4"
+        "1df9a7a59e105004f771cbded5241b7d5f6a4dbea5468a427fc099cfa44d2dfc"
     )

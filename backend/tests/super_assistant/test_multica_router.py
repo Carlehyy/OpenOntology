@@ -142,3 +142,49 @@ def test_post_test_maps_invalid_url_to_400(tmp_path):
         "base_url": "not a url",
     })
     assert response.status_code == 400
+
+
+def test_get_workspaces_lists_saved_config_workspaces(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    client.put("/api/v2/super-assistant/multica/config", json={
+        "base_url": "http://127.0.0.1:8080",
+        "token": "mul-secret",
+        "workspace_id": "ws-1",
+        "enabled": True,
+    })
+    monkeypatch.setattr(
+        multica_client, "list_workspaces",
+        lambda base_url, token: [
+            {"id": "ws-1", "name": "My Workspace", "slug": "my"},
+            {"id": "ws-2", "name": "E2E 工作区", "slug": "e2e"},
+        ],
+    )
+    result = client.get("/api/v2/super-assistant/multica/workspaces")
+    assert result.status_code == 200, result.text
+    assert [item["id"] for item in result.json()["workspaces"]] == ["ws-1", "ws-2"]
+
+
+def test_get_workspaces_maps_unconfigured_to_400_and_upstream_error_to_502(
+    tmp_path, monkeypatch,
+):
+    client = _client(tmp_path)
+    # 未保存配置：按请求错误返回 400
+    unconfigured = client.get("/api/v2/super-assistant/multica/workspaces")
+    assert unconfigured.status_code == 400
+
+    client.put("/api/v2/super-assistant/multica/config", json={
+        "base_url": "http://127.0.0.1:8080",
+        "token": "mul-secret",
+        "workspace_id": "ws-1",
+        "enabled": True,
+    })
+
+    def _boom(base_url, token):
+        raise multica_client.MulticaClientError(
+            "multica 请求失败（/api/workspaces）：HTTP 503 upstream unavailable",
+        )
+
+    monkeypatch.setattr(multica_client, "list_workspaces", _boom)
+    upstream = client.get("/api/v2/super-assistant/multica/workspaces")
+    assert upstream.status_code == 502
+    assert "503" in upstream.json()["detail"]

@@ -17,7 +17,7 @@ import { DialogShell } from './AssistantConfiguration'
 type IntegrationTab = 'multica' | 'remote-agents' | 'github'
 
 const INTEGRATION_TABS: Array<{ key: IntegrationTab; label: string; soon?: boolean }> = [
-  { key: 'multica', label: 'multica' },
+  { key: 'multica', label: 'Multica' },
   { key: 'remote-agents', label: '远程助手' },
   { key: 'github', label: 'GitHub', soon: true },
 ]
@@ -31,6 +31,11 @@ const EMPTY_FORM = {
   token: '',
   enabled: true,
   timeoutSeconds: 120,
+}
+
+/** 已保存工作区的兜底选项：优先显示回填名称，历史行无名称时回落 ID */
+function savedWorkspaceOption(config: MulticaConfig) {
+  return { id: config.workspace_id, name: config.workspace_name || config.workspace_id, slug: '' }
 }
 
 /** 远程助手面板：声明式注册目录（每用户多条）。列表 + 单条内联编辑表单；
@@ -317,8 +322,20 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
         // 已保存配置的兜底选项：优先显示回填的工作区名，历史行无名称时
         // 回落显示 ID（下次测试连接/保存即补齐名称）
         setWorkspaces(data.configured && data.workspace_id
-          ? [{ id: data.workspace_id, name: data.workspace_name || data.workspace_id, slug: '' }]
+          ? [savedWorkspaceOption(data)]
           : [])
+        // 已配置且已存凭据时打开即实时拉取全量工作区（工作区列表不持久化，
+        // 仅靠上面的单条兜底会掩盖其余可选工作区）；拉取失败静默回落兜底。
+        // 实时列表缺失已保存项时补一条，保证当前选中仍以名称展示。
+        if (data.configured && data.token_set && data.base_url) {
+          superAssistantApi.multicaWorkspaces()
+            .then(result => {
+              setWorkspaces(data.workspace_id && !result.workspaces.some(item => item.id === data.workspace_id)
+                ? [...result.workspaces, savedWorkspaceOption(data)]
+                : result.workspaces)
+            })
+            .catch(() => {})
+        }
       })
       .catch(err => setError(errorText(err, '配置加载失败')))
   }, [])
@@ -364,7 +381,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
       })
       setConfig(saved)
       await onSaved?.()
-      toast.success('multica 配置已保存', {
+      toast.success('Multica 配置已保存', {
         description: saved.enabled ? '现在可以在输入框使用 /multica: 命令' : '集成已停用',
       })
       onClose()
@@ -417,7 +434,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><PlugZap size={16} /></div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <p className="text-xs font-semibold text-[var(--color-text-primary)]">multica</p>
+                <p className="text-xs font-semibold text-[var(--color-text-primary)]">Multica</p>
                 <span className={`h-2 w-2 rounded-full ${config?.last_test_status === 'success' ? 'bg-success' : config?.last_test_status === 'error' ? 'bg-red-500' : 'bg-slate-300'}`} />
                 {config?.enabled && <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[9px] text-brand-ink">已启用</span>}
               </div>
@@ -447,7 +464,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
                 type="password"
                 value={token}
                 onChange={event => setToken(event.target.value)}
-                placeholder={config?.token_set ? '已保存（留空保留）' : 'mul_…（在 multica 网页 Settings → API Token 创建）'}
+                placeholder={config?.token_set ? '已保存（留空保留）' : 'mul_…（在 Multica 网页 Settings → API Token 创建）'}
                 className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
               />
               <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
@@ -456,7 +473,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
             </label>
             <label className="block text-xs text-[var(--color-text-secondary)]">工作区 <span className="text-red-500">*</span>
               <Select value={workspaceId} onValueChange={setWorkspaceId}>
-                <SelectTrigger aria-label="multica 工作区" className="mt-1.5 min-h-11 text-sm">
+                <SelectTrigger aria-label="Multica 工作区" className="mt-1.5 min-h-11 text-sm">
                   <SelectValue placeholder="连接测试后选择" />
                 </SelectTrigger>
                 <SelectContent>

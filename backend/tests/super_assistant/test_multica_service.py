@@ -201,6 +201,37 @@ def test_connection_requires_url_and_token(session):
 
 
 # ---------------------------------------------------------------------------
+# 已保存配置的工作区列表（配置弹窗打开即拉取）
+# ---------------------------------------------------------------------------
+
+def test_list_config_workspaces_returns_live_list_without_test_side_effects(
+    session, monkeypatch,
+):
+    config = _enabled_config(session)
+    monkeypatch.setattr(
+        multica_client, "list_workspaces",
+        lambda base_url, token: [
+            {"id": "ws-1", "name": "My Workspace", "slug": "my"},
+            {"id": "ws-2", "name": "E2E 工作区", "slug": "e2e"},
+        ],
+    )
+    result = multica_service.list_config_workspaces(session, "user-1")
+    assert [item.id for item in result.workspaces] == ["ws-1", "ws-2"]
+    assert result.workspaces[1].name == "E2E 工作区"
+    # 只读拉取：不写连接测试状态列（区别于 test_connection）
+    assert config.last_test_status is None
+
+
+def test_list_config_workspaces_requires_complete_config(session):
+    with pytest.raises(multica_service.MulticaServiceError, match="尚未配置"):
+        multica_service.list_config_workspaces(session, "user-1")
+    # 已保存地址但缺凭据同样视为未配置完整
+    _enabled_config(session, token_encrypted=None)
+    with pytest.raises(multica_service.MulticaServiceError, match="尚未配置"):
+        multica_service.list_config_workspaces(session, "user-1")
+
+
+# ---------------------------------------------------------------------------
 # 工具执行
 # ---------------------------------------------------------------------------
 
