@@ -52,6 +52,35 @@ npm run test:e2e:mocked
 由对应 spec 和运行手册明确提供。截图、trace、video 和 HTML 报告写入
 `.artifacts/playwright/` 或 CI artifact。
 
+### 隔离 E2E 栈（本地真实后端）
+
+`stack` 套件的本地执行方式：`docker-compose.e2e.yml` 提供五个错端口的基础
+服务（db/redis/nats/neo4j/minio，端口避开本机常用的 5432/6379/9000），
+后端在宿主机以 `dev_server` 起在 8000，前端由 Playwright 的 webServer 自行
+拉起并经 Vite 代理指向 8000。开发环境的 n8n 探针是提示性的，
+`N8N_API_URL` 指向不可达地址不影响 API 启动：
+
+```bash
+docker compose -f docker-compose.e2e.yml up -d --wait
+cd backend && env \
+  ENVIRONMENT=development \
+  SECRET_KEY=e2e-secret-key-0123456789abcdef0123456789abcdef \
+  FIRST_ADMIN_USER=admin FIRST_ADMIN_PASSWORD=admin123 \
+  DATABASE_URL=postgresql://ontoprompt:ontoprompt@127.0.0.1:15432/ontoprompt \
+  REDIS_URL=redis://:ontopromptredis123@127.0.0.1:16379/0 \
+  NATS_URL=nats://127.0.0.1:14222 \
+  NEO4J_URI=bolt://127.0.0.1:17687 NEO4J_USER=neo4j NEO4J_PASSWORD=ontoprompt123 \
+  MINIO_ENDPOINT=127.0.0.1:19000 MINIO_ACCESS_KEY=minioadmin MINIO_SECRET_KEY=minioadmin \
+  N8N_API_URL=http://127.0.0.1:5678 N8N_API_KEY=e2e-dummy-n8n-key \
+  uv run python -m app.dev_server
+cd ../frontend && npx playwright test --config=playwright.stack.config.ts src/test/e2e/<受影响spec>
+```
+
+用完清理：`pkill -f app.dev_server` 终止后端，
+`docker compose -f docker-compose.e2e.yml down -v` 连卷销毁数据。首次在新库
+上启动时 `dev_server` 会自动执行 `alembic upgrade head` 并 seed 管理员
+（admin / 上述 FIRST_ADMIN_PASSWORD）。
+
 当前没有引入 Vitest/React Testing Library。需要 DOM 的组件行为继续进入
 Playwright；这不是跳过纯逻辑单元测试的理由。
 

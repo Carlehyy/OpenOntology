@@ -121,15 +121,20 @@ def probe_startup_dependencies() -> None:
 
     CDP is deliberately advisory: its endpoint must be configured, and deep
     readiness reports it, but a temporarily unavailable browser must not hide
-    the API diagnostics needed to repair that browser. All other configured
-    services are part of the process-start contract.
+    the API diagnostics needed to repair that browser. n8n gets the same
+    advisory treatment outside production so a developer without an n8n
+    instance can still boot the API; production keeps n8n fail-closed.
+    All other configured services are part of the process-start contract.
     """
     failed: list[str] = []
     for name, probe in PROBES:
         try:
             probe()
         except Exception as exc:
-            if name in NON_BLOCKING_PROBES:
+            advisory = name in NON_BLOCKING_PROBES or (
+                name == "n8n" and settings.environment != "production"
+            )
+            if advisory:
                 logger.warning(
                     "%s is unavailable during startup (%s); "
                     "API startup will continue but deep readiness will fail",

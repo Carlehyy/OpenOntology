@@ -388,6 +388,32 @@ def test_startup_dependency_probe_treats_cdp_as_advisory(monkeypatch):
     dependency_probe.probe_startup_dependencies()
 
 
+def test_startup_dependency_probe_treats_n8n_as_advisory_outside_production(monkeypatch):
+    from app.shared import dependency_probe
+
+    def reject_n8n():
+        raise RuntimeError("unavailable")
+
+    monkeypatch.setattr(dependency_probe, "PROBES", (("n8n", reject_n8n),))
+    monkeypatch.setattr(dependency_probe.settings, "environment", "development")
+
+    dependency_probe.probe_startup_dependencies()
+
+
+def test_startup_dependency_probe_fails_closed_for_n8n_in_production(monkeypatch):
+    from app.shared import dependency_probe
+
+    def reject_n8n():
+        raise RuntimeError("unavailable")
+
+    monkeypatch.setattr(dependency_probe, "PROBES", (("n8n", reject_n8n),))
+    monkeypatch.setattr(dependency_probe.settings, "environment", "production")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dependency_probe.probe_startup_dependencies()
+    assert "n8n" in str(exc_info.value)
+
+
 def test_environment_minio_is_always_authoritative(monkeypatch):
     from app.shared import storage
 
