@@ -586,13 +586,15 @@ test('左下角头像打开个人资料弹窗：分区 tab 与固定尺寸', asy
   await expect(dialog.getByRole('tab', { name: '环境变量' })).toBeVisible()
   await expect(dialog.getByRole('tab', { name: '隐私变量' })).toBeVisible()
 
-  // 固定尺寸：切 tab 弹窗宽高不变，面板内容在弹窗内滚动
+  // 固定尺寸：切 tab 弹窗宽高不变，面板内容在弹窗内滚动。
+  // dvh 推导的分数像素在两次布局间存在浮点舍入差（CI 实测 ~2e-5px），
+  // 用容差断言吸收亚像素噪声，不放宽"尺寸固定"的语义。
   const before = await dialog.boundingBox()
   await dialog.getByRole('tab', { name: '隐私变量' }).click()
   await expect(dialog.getByRole('tabpanel', { name: '隐私变量' })).toBeVisible()
   const after = await dialog.boundingBox()
-  expect(after?.height).toBe(before?.height)
-  expect(after?.width).toBe(before?.width)
+  expect(after?.height).toBeCloseTo(before?.height ?? 0, 1)
+  expect(after?.width).toBeCloseTo(before?.width ?? 0, 1)
 })
 
 test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级助手或悬浮助手返回工作台', async ({ page }) => {
