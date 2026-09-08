@@ -11,6 +11,7 @@
     "check:feature-boundaries": "node scripts/check-feature-boundaries.mjs",
     "check:component-convergence": "node scripts/check-component-convergence.mjs",
     "check:color-tokens": "node scripts/check-color-tokens.mjs",
+    "check:e2e-assertions": "node scripts/check-e2e-geometry-assertions.mjs",
     "test": "npm run test:unit && npm run test:e2e:mocked",
     "test:unit": "node scripts/run-unit-tests.mjs",
     "test:e2e:classification": "node scripts/check-e2e-classification.mjs",

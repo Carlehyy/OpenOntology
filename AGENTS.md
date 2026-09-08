@@ -204,6 +204,7 @@ npm run check:feature-boundaries
 npm run check:component-convergence
 npm run check:color-tokens
 npm run test:e2e:classification
+npm run check:e2e-assertions
 npm run lint
 npm run build
 npm run test:e2e:mocked

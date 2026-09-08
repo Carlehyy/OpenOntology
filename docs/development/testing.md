@@ -52,6 +52,15 @@ npm run test:e2e:mocked
 由对应 spec 和运行手册明确提供。截图、trace、video 和 HTML 报告写入
 `.artifacts/playwright/` 或 CI artifact。
 
+### 像素尺寸断言规范
+
+对 boundingBox 的宽高/坐标做「尺寸/位置不变」类断言时，禁止 `toBe/toEqual`
+精确相等：dvh/rem 推导的分数像素在两次布局间存在浮点舍入差（CI Linux 实测
+~2e-5px，先例 6596ffa7 的 590.390625 vs 590.3906478），精确相等会间歇性
+误报。宽高统一使用 `src/test/e2e/support/geometry.ts` 的
+`expectSameBoundingBox`，坐标用 `toBeCloseTo`（亚像素容差）；
+`npm run check:e2e-assertions` 在本地与 CI 强制拦截违例写法。
+
 ### 隔离 E2E 栈（本地真实后端）
 
 `stack` 套件的本地执行方式：`docker-compose.e2e.yml` 提供五个错端口的基础

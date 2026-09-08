@@ -78,7 +78,8 @@ test.describe('数据流水线列表页', () => {
     await expect(pythonBadge).toBeVisible()
     const n8nBox = await n8nBadge.boundingBox()
     const pythonBox = await pythonBadge.boundingBox()
-    expect(n8nBox?.width).toBe(pythonBox?.width)
+    // 徽章宽度对齐：亚像素容差（dvh/rem 分数像素两次布局有浮点舍入差）
+    expect(n8nBox?.width).toBeCloseTo(pythonBox?.width ?? 0, 1)
   })
 
   test('克隆需二次确认，确认后副本以「_复制」尾缀加入列表', async ({ page }) => {

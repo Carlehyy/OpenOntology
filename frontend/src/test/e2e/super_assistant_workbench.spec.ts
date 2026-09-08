@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
+import { expectSameBoundingBox } from './support/geometry'
+
 // AI 原生工作台（前台）：登录默认落地、七项入口、近期会话单列表、归档流转、
 // 本体治理跳后台并返回。全部接口本地 mock，不触真实后端。
 // 本 spec 另覆盖：分组限量展开、naive UTC 时区显示、行悬停不抖动、
@@ -586,15 +588,13 @@ test('左下角头像打开个人资料弹窗：分区 tab 与固定尺寸', asy
   await expect(dialog.getByRole('tab', { name: '环境变量' })).toBeVisible()
   await expect(dialog.getByRole('tab', { name: '隐私变量' })).toBeVisible()
 
-  // 固定尺寸：切 tab 弹窗宽高不变，面板内容在弹窗内滚动。
-  // dvh 推导的分数像素在两次布局间存在浮点舍入差（CI 实测 ~2e-5px），
-  // 用容差断言吸收亚像素噪声，不放宽"尺寸固定"的语义。
+  // 固定尺寸：切 tab 弹窗宽高不变，面板内容在弹窗内滚动
+  // （expectSameBoundingBox 内置亚像素容差，见 support/geometry.ts）
   const before = await dialog.boundingBox()
   await dialog.getByRole('tab', { name: '隐私变量' }).click()
   await expect(dialog.getByRole('tabpanel', { name: '隐私变量' })).toBeVisible()
   const after = await dialog.boundingBox()
-  expect(after?.height).toBeCloseTo(before?.height ?? 0, 1)
-  expect(after?.width).toBeCloseTo(before?.width ?? 0, 1)
+  expectSameBoundingBox(before, after, '个人资料弹窗')
 })
 
 test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级助手或悬浮助手返回工作台', async ({ page }) => {
@@ -745,8 +745,8 @@ test('会话行悬停时行高与相邻组位置不变（无抖动）', async ({
   await expect(row.getByRole('button', { name: '删除会话 今日需求梳理' })).toBeVisible()
   const hoverBox = await row.boundingBox()
 
-  expect(hoverBox?.height).toBe(beforeBox?.height)
-  expect((await nextGroup.boundingBox())?.y).toBe(beforeY)
+  expectSameBoundingBox(beforeBox, hoverBox, '会话行')
+  expect((await nextGroup.boundingBox())?.y).toBeCloseTo(beforeY ?? 0, 1)
 })
 
 test('会话附件：上传/展示/移除，且跨会话不可见', async ({ page }) => {
