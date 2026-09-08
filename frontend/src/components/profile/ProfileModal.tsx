@@ -24,6 +24,8 @@ import { writeTextToClipboard } from '@/utils/clipboard'
 /**
  * 个人资料弹窗（用户头像下拉 → 个人资料，MYW-56）。
  *
+ * 弹窗为固定宽高（同外部集成弹窗的尺寸语言）：左侧竖向 tab 栏常驻、
+ * 右侧分区内容独立滚动，切换 tab 不改变弹窗大小。
  * 左侧竖向 tab 导航（验收反馈：按分区组织内容与允许的操作）：
  * - 「账号信息」：用户名（唯一标识，只读）、邮箱自助修改（成功后同步
  *   auth-store）、修改密码（走既有 PUT /auth/password，需验证当前密码）；
@@ -351,12 +353,15 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       onClose={onClose}
       title="个人资料"
       description="维护账号信息、登录密码、私有环境变量与隐私变量"
-      size="xl"
+      size="3xl"
       headerIcon={<CircleUserRound size={19} />}
       disableClose={busy}
+      /* 固定宽高（同外部集成弹窗）：切 tab 弹窗不缩放，内容区各自滚动 */
+      panelClassName="h-[min(82dvh,44rem)] w-[min(94vw,48rem)]"
+      contentClassName="flex min-h-0 flex-col overflow-hidden p-0"
     >
       {notice && (
-        <div role="status" aria-live="polite" className={`mb-4 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
+        <div role="status" aria-live="polite" className={`mx-6 mt-4 flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
           notice.kind === 'success'
             ? 'border-[var(--color-success)]/30 bg-[var(--color-success)]/10 text-[var(--color-success)]'
             : 'border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 text-[var(--color-danger)]'
@@ -365,12 +370,12 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
         </div>
       )}
 
-      <div className="grid min-h-[30rem] grid-cols-[128px_minmax(0,1fr)] items-start gap-5">
+      <div className="grid min-h-0 flex-1 grid-cols-[10rem_minmax(0,1fr)]">
         <nav
           role="tablist"
           aria-label="个人资料分区"
           aria-orientation="vertical"
-          className="flex flex-col gap-1 border-r border-[var(--color-border)] pr-3"
+          className="flex min-h-0 flex-col gap-1 border-r border-[var(--color-border)] p-2"
           onKeyDown={onTablistKeyDown}
         >
           {PROFILE_TABS.map((tab, index) => {
@@ -387,14 +392,14 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
                 aria-controls={`profile-panel-${tab.key}`}
                 tabIndex={active ? 0 : -1}
                 onClick={() => setActiveTab(tab.key)}
-                className={`flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${
+                className={`flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                   active
-                    ? 'bg-[var(--color-nav-light)] font-medium text-[var(--color-nav-bg)]'
+                    ? 'bg-brand-soft font-medium text-brand-ink'
                     : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
                 }`}
               >
-                <Icon size={15} className="shrink-0" aria-hidden="true" />
-                {tab.label}
+                <Icon size={14} className="shrink-0" aria-hidden="true" />
+                <span className="min-w-0 truncate">{tab.label}</span>
               </button>
             )
           })}
@@ -402,7 +407,12 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
 
         {/* 右侧分区内容 */}
         {activeTab === 'account' && (
-          <div role="tabpanel" id="profile-panel-account" aria-labelledby="profile-tab-account">
+          <div
+            role="tabpanel"
+            id="profile-panel-account"
+            aria-labelledby="profile-tab-account"
+            className="min-h-0 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6"
+          >
             <section aria-label="账号信息">
               <p className="text-xs text-[var(--color-text-tertiary)]">
                 用户名是区分不同用户的唯一标识，不支持修改
@@ -466,7 +476,12 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
         )}
 
         {activeTab === 'env' && (
-          <div role="tabpanel" id="profile-panel-env" aria-labelledby="profile-tab-env">
+          <div
+            role="tabpanel"
+            id="profile-panel-env"
+            aria-labelledby="profile-tab-env"
+            className="min-h-0 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6"
+          >
             <section aria-label="私有环境变量">
               <p className="text-xs text-[var(--color-text-tertiary)]">
                 仅本人可见，值加密存储。可在接口代理的「URL / 请求头 / 请求体」中以 {'{{env:变量名}}'} 占位符引用，调用时平台以你的身份解析替换（最多 {ENV_VAR_MAX_ITEMS} 条）
@@ -527,7 +542,12 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
         )}
 
         {activeTab === 'privacy' && (
-          <div role="tabpanel" id="profile-panel-privacy" aria-labelledby="profile-tab-privacy">
+          <div
+            role="tabpanel"
+            id="profile-panel-privacy"
+            aria-labelledby="profile-tab-privacy"
+            className="min-h-0 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6"
+          >
             <section aria-label="隐私变量">
               <p className="text-xs text-[var(--color-text-tertiary)]">
                 本地脚本用公钥加密上报，平台私钥解密后加密存储；适合依赖本地环境才能生成的凭据（如本地

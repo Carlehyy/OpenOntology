@@ -826,7 +826,9 @@ def raw_file(db: Session, owner_id: str, file_id: str) -> tuple[Path, str, str]:
 
 
 def preview_file(db: Session, owner_id: str, file_id: str, max_chars: int) -> dict:
-    """内容预览：口径与会话附件 preview 一致（截断标记 + previewable）。"""
+    """内容预览：截断标记 + previewable。previewable 表示「该文件可作为文本
+    预览/编辑」：抽取文本非空即可预览；md/txt 即使内容为空（新建草稿笔记）
+    也视为可预览——空内容可在线编辑，否则新建笔记无法写入第一行内容。"""
     row = _owned_file(db, owner_id, file_id)
     try:
         content = palace_workspace.user_workspace(owner_id).extracted_text(
@@ -838,7 +840,7 @@ def preview_file(db: Session, owner_id: str, file_id: str, max_chars: int) -> di
         "file": _file_dict(row),
         "content": content,
         "truncated": len(content) >= max_chars,
-        "previewable": bool(content),
+        "previewable": bool(content) or _is_editable(row.filename),
     }
 
 
@@ -1182,7 +1184,7 @@ def move_file(db: Session, owner_id: str, file_id: str, raw_folder_path: str) ->
 
 
 def create_note(db: Session, current_user: User, body: PalaceNoteCreate) -> dict:
-    """新建 md/txt 空笔记并落入选中目录。
+    """新建 .md 空笔记并落入选中目录（笔记创建仅 md；txt 仍可上传与编辑）。
 
     空文本建图必然失败（run_build 对空内容置 failed），因此 status=draft
     不派发抽取；首次保存内容走 update_file_content 的既有重建链路。
@@ -1193,8 +1195,8 @@ def create_note(db: Session, current_user: User, body: PalaceNoteCreate) -> dict
         raise HTTPException(400, "文件名不能为空")
     if "/" in filename or "\\" in filename:
         raise HTTPException(400, "文件名不能包含路径分隔符")
-    if _extension_of(filename) not in _EDITABLE_EXTENSIONS:
-        raise HTTPException(400, "仅支持新建 .md/.txt 笔记")
+    if _extension_of(filename) != "md":
+        raise HTTPException(400, "仅支持新建 .md 笔记（文件名无需带后缀时由前端自动补 .md）")
     folder_path = _validate_folder_path(_normalize_folder_path(body.folder_path), allow_root=True)
     if folder_path:
         _ensure_folder_rows(db, owner_id, folder_path, include_self=True)
@@ -1205,7 +1207,7 @@ def create_note(db: Session, current_user: User, body: PalaceNoteCreate) -> dict
             filename,
             io.BytesIO(b""),
             source="palace-note",
-            mime_type="text/markdown" if _extension_of(filename) == "md" else "text/plain",
+            mime_type="text/markdown",
             extract=True,
         )
     except WorkspaceError as exc:

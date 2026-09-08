@@ -269,12 +269,12 @@ function RemoteAgentsPanel({ onError, onChanged }: {
         </section>
       </div>
       <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
-        <button onClick={() => setForm(null)} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]">取消</button>
+        <button onClick={() => setForm(null)} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">取消</button>
         <button
           onClick={() => void save()}
           data-testid="remote-agent-save-button"
           disabled={saving || !form}
-          className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep disabled:opacity-50"
+          className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
         </button>
@@ -512,12 +512,12 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
             {/* 操作按钮归属各集成面板：每个集成独立保存，互不干扰。
                 紧贴内容区不留隔离边距，弹窗高度固定后按钮位置稳定 */}
             <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
-              <button onClick={onClose} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]">取消</button>
+              <button onClick={onClose} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">取消</button>
               <button
                 onClick={() => void save()}
                 data-testid="multica-save-button"
                 disabled={saving || !baseUrl.trim()}
-                className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep disabled:opacity-50"
+                className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
               >
                 {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
               </button>

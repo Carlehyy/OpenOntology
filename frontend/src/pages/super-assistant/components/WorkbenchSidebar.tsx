@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
-  Archive, ArchiveRestore, Brain, Clock, History, LayoutDashboard, LogOut,
+  Archive, ArchiveRestore, Brain, ChevronRight, Clock, History, LayoutDashboard, LogOut,
   Network, Plug, Plus, Search, Trash2, X,
 } from 'lucide-react'
 
@@ -19,6 +19,7 @@ import {
   SidebarMenuItem,
 } from '@/components/ui/sidebar'
 import { hasMenuAccess } from '@/config/navigation'
+import ProfileModal from '@/components/profile/ProfileModal'
 import { useAuthStore } from '@/stores/authStore'
 import { formatSessionTime } from '@/utils/datetime'
 import {
@@ -130,6 +131,7 @@ export default function WorkbenchSidebar({
   const [placeholder, setPlaceholder] = useState<PlaceholderFeature | null>(null)
   const [palaceOpen, setPalaceOpen] = useState(false)
   const [integrationsOpen, setIntegrationsOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
 
@@ -241,12 +243,12 @@ export default function WorkbenchSidebar({
         </button>
       </nav>
 
-      {/* 会话时间线：近期会话单列表 + 归档折叠区，shadcn Sidebar 分组原语呈现 */}
+      {/* 会话时间线：近期会话单列表 + 归档折叠区，shadcn Sidebar 分组原语呈现。
+          分组标题与上方功能项同一套视觉指标（16px 图标 + text-sm + 统一左缘） */}
       <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--color-border)]">
         <div className="flex shrink-0 items-center gap-2 px-4 pb-1 pt-3">
-          <History size={13} className="text-[var(--color-text-tertiary)]" />
-          <span className="text-xs font-medium text-[var(--color-text-secondary)]">近期会话</span>
-          <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)]">共 {activeCount} 个</span>
+          <History size={16} className="shrink-0 text-[var(--color-text-secondary)]" />
+          <span className="text-sm text-[var(--color-text-secondary)]">近期会话</span>
         </div>
         {/* 长列表滚动但隐藏滚动条（scrollbar-none 为 index.css 全局工具类） */}
         <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto pb-2">
@@ -282,10 +284,15 @@ export default function WorkbenchSidebar({
                 type="button"
                 onClick={() => setArchivedOpen(value => !value)}
                 aria-expanded={archivedOpen}
-                className="flex h-8 w-full items-center gap-1.5 rounded-md px-2 text-xs font-medium text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
               >
-                <Archive size={12} />
-                归档会话（{groups.archived.length}）
+                <Archive size={16} className="shrink-0" />
+                归档会话
+                <ChevronRight
+                  size={14}
+                  aria-hidden
+                  className={`ml-auto shrink-0 text-[var(--color-text-tertiary)] transition-transform ${archivedOpen ? 'rotate-90' : ''}`}
+                />
               </button>
               {archivedOpen && (() => {
                 const { visible, hiddenCount } = capGroupItems(groups.archived, expandedGroups.archived ?? false)
@@ -316,12 +323,21 @@ export default function WorkbenchSidebar({
         </div>
       </div>
 
-      {/* 底部用户区 */}
+      {/* 底部用户区：头像/用户名点击打开个人资料弹窗（与后台 Layout 头像入口同一弹窗） */}
       <div className="flex h-12 shrink-0 items-center gap-2 border-t border-[var(--color-border)] px-3">
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-semibold text-white" style={{ background: 'var(--color-nav-bg)' }}>
-          {(user?.username || 'U').slice(0, 1).toUpperCase()}
-        </div>
-        <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{user?.username || '未知用户'}</span>
+        <button
+          type="button"
+          onClick={() => setProfileOpen(true)}
+          title="个人资料"
+          aria-label="个人资料"
+          data-workbench-profile
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg py-1 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+        >
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-semibold text-white" style={{ background: 'var(--color-nav-bg)' }}>
+            {(user?.username || 'U').slice(0, 1).toUpperCase()}
+          </div>
+          <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{user?.username || '未知用户'}</span>
+        </button>
         <button
           type="button"
           onClick={() => { logout(); navigate('/login') }}
@@ -367,6 +383,7 @@ export default function WorkbenchSidebar({
           onSaved={onIntegrationsSaved}
         />
       )}
+      <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
     </>
   )
 }

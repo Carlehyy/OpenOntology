@@ -308,9 +308,12 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
   }
 
   const handleCreateNote = async (dirPath: string, filename: string) => {
+    // 笔记创建仅 md：只填笔记名即可——.txt 后缀归一为 .md，缺失后缀自动补 .md
+    const baseName = filename.replace(/\.txt$/i, '')
+    const noteName = /\.md$/i.test(baseName) ? baseName : `${baseName}.md`
     setBusy(true)
     try {
-      const created = await superAssistantApi.createPalaceNote(filename, dirPath)
+      const created = await superAssistantApi.createPalaceNote(noteName, dirPath)
       await refresh()
       setSelectedFileId(created.id)
       setSelectedDirPath(created.path)
@@ -514,6 +517,9 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
             </p>
           ) : !preview.data || !preview.data.previewable ? (
             <p className="text-xs text-[var(--color-text-tertiary)]">该格式暂不支持文本预览，可下载替换或重建图谱。</p>
+          ) : !preview.data.content ? (
+            /* 可预览但内容为空（新建草稿笔记）：给出行动指引而非空白 */
+            <p className="text-xs text-[var(--color-text-tertiary)]">空笔记，点击右上「编辑」开始书写；保存后自动重建图谱。</p>
           ) : (
             <>
               {isMarkdown ? (
@@ -660,7 +666,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 className="h-6 w-6 text-slate-400 hover:text-[var(--color-text-primary)]"
                 onClick={() => setInline({ kind: 'new-note', targetPath: selectedDirPath })}
                 disabled={busy || inline !== null}
-                title="在当前目录下新建 md/txt 笔记"
+                title="在当前目录下新建 md 笔记（文件名自动补 .md）"
                 aria-label="新建笔记"
                 data-testid="palace-new-note"
               >

@@ -8,7 +8,8 @@ import { expect, test, type Locator, type Page, type Route } from '@playwright/t
 // 重命名 blur 取消、知识图谱页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
 // 知识图谱过滤/节点详情/邻域检索高亮）、外部集成（multica 配置弹窗 + /multica:
 // 命令提示的配置门控）、⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、
-// 全局搜索 Command 面板检索与跳转、历史分组 shadcn Sidebar 原语、空态品牌字号。
+// 全局搜索 Command 面板检索与跳转、历史分组 shadcn Sidebar 原语、空态品牌字号、
+// 左下角头像个人资料弹窗（固定尺寸、分区 tab 与后台同一弹窗）。
 
 const json = (route: Route, data: unknown, status = 200) => route.fulfill({
   status,
@@ -208,7 +209,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         return json(route, palaceFiles[0], 201)
       }
     }
-    // 新建 md/txt 笔记：draft 态，不触发抽取
+    // 新建 md 笔记：draft 态，不触发抽取
     if (path === '/api/v2/super-assistant/palace/files/notes' && request.method() === 'POST') {
       const body = JSON.parse(request.postData() || '{}')
       const row = {
@@ -333,9 +334,11 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       const row = palaceFiles.find(item => item.id === palacePreviewMatch[1])
       if (!row) return json(route, { detail: '文件不存在' }, 404)
       const isText = row.mimeType === 'text/markdown' || String(row.filename).endsWith('.txt')
+      // 与后端口径一致：md/txt 即使内容为空（draft 笔记）也 previewable=true
+      const draft = row.status === 'draft'
       return json(route, {
         file: row,
-        content: isText ? `# ${row.filename}\n\n张三 任职 ACME，正在研究知识图谱。` : '',
+        content: draft ? '' : isText ? `# ${row.filename}\n\n张三 任职 ACME，正在研究知识图谱。` : '',
         truncated: false,
         previewable: isText,
       })
@@ -534,8 +537,8 @@ test('工作台骨架：七项入口齐备，近期会话单列表，归档折�
   await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-yesterday"]')).toHaveCount(1)
   await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-earlier"]')).toHaveCount(1)
   await expect(page.locator('[data-slot="sidebar-group-label"]')).toHaveCount(0)
-  // 归档区默认折叠：标题含计数，条目不可见
-  await expect(page.getByRole('button', { name: /归档会话（1）/ })).toBeVisible()
+  // 归档区默认折叠：标题不再带计数，条目不可见
+  await expect(page.getByRole('button', { name: '归档会话', exact: true })).toBeVisible()
   await expect(page.locator('[data-workbench-group="archived"] [data-workbench-conversation="c-archived"]')).toHaveCount(0)
 
   // 聊天区就绪（输入框占位符来自模型加载成功分支）
@@ -554,10 +557,10 @@ test('归档流转：会话移入归档区且 PATCH 携带 status', async ({ pag
   await expect.poll(() => patchBodies.length).toBe(1)
   expect(JSON.parse(patchBodies[0])).toMatchObject({ status: 'archived' })
   await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /归档会话（2）/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: '归档会话', exact: true })).toBeVisible()
 
   // 展开归档区后可恢复
-  await page.getByRole('button', { name: /归档会话（2）/ }).click()
+  await page.getByRole('button', { name: '归档会话', exact: true }).click()
   const archivedRow = page.locator('[data-workbench-group="archived"] [data-workbench-conversation="c-today"]')
   await expect(archivedRow).toHaveCount(1)
   await archivedRow.hover()
@@ -565,6 +568,31 @@ test('归档流转：会话移入归档区且 PATCH 携带 status', async ({ pag
   await expect.poll(() => patchBodies.length).toBe(2)
   expect(JSON.parse(patchBodies[1])).toMatchObject({ status: 'active' })
   await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(1)
+})
+
+test('左下角头像打开个人资料弹窗：分区 tab 与固定尺寸', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.locator('[data-workbench-profile]').click()
+  const dialog = page.getByRole('dialog', { name: '个人资料' })
+  await expect(dialog).toBeVisible()
+
+  // 与后台 Layout 头像入口同一弹窗：默认账号信息 tab，用户名只读回显
+  await expect(dialog.getByRole('tab', { name: '账号信息' })).toHaveAttribute('aria-selected', 'true')
+  await expect(dialog.getByLabel('用户名')).toBeDisabled()
+  await expect(dialog.getByLabel('用户名')).toHaveValue('workbench-tester')
+  await expect(dialog.getByRole('tab', { name: '环境变量' })).toBeVisible()
+  await expect(dialog.getByRole('tab', { name: '隐私变量' })).toBeVisible()
+
+  // 固定尺寸：切 tab 弹窗宽高不变，面板内容在弹窗内滚动
+  const before = await dialog.boundingBox()
+  await dialog.getByRole('tab', { name: '隐私变量' }).click()
+  await expect(dialog.getByRole('tabpanel', { name: '隐私变量' })).toBeVisible()
+  const after = await dialog.boundingBox()
+  expect(after?.height).toBe(before?.height)
+  expect(after?.width).toBe(before?.width)
 })
 
 test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级助手或悬浮助手返回工作台', async ({ page }) => {
@@ -1289,17 +1317,21 @@ test('知识图谱：目录一等公民——新建目录/笔记、重命名与�
   expect(mocks.palaceFolderCreates[0]).toBe('项目资料')
   await expect(filesPane.locator('[data-palace-dir="项目资料"]')).toBeVisible()
 
-  // 在新建目录下新建 md 笔记：POST notes（draft），自动进入编辑态
+  // 在新建目录下新建 md 笔记：POST notes（draft），自动进入编辑态。
+  // 只填笔记名不带后缀：前端归一化补 .md 后提交
   await filesPane.locator('[data-palace-dir="项目资料"]').click()
   await expect(toolbar).toContainText('当前目录：/项目资料')
   await toolbar.getByTestId('palace-new-note').click()
   const noteInput = filesPane.getByTestId('palace-inline-input')
-  await noteInput.fill('会议纪要.md')
+  await expect(noteInput).toHaveAttribute('placeholder', '笔记名（自动存为 .md）')
+  await noteInput.fill('会议纪要')
   await noteInput.press('Enter')
   await expect.poll(() => mocks.palaceNotes.length).toBe(1)
   expect(mocks.palaceNotes[0]).toBe('会议纪要.md@项目资料')
   const editorPanel = dialog.getByTestId('palace-file-editor')
   await expect(editorPanel).toBeVisible()
+  // 空 draft 笔记内容为空也可编辑（previewable 不随空内容翻转）：编辑器给出空文本域
+  await expect(editorPanel.locator('textarea')).toHaveValue('')
   await expect(filesPane.locator('[data-palace-file="pf-note-1"]')).toBeVisible()
 
   // 草稿保存内容 → PUT content → pending（进入既有抽取链路）

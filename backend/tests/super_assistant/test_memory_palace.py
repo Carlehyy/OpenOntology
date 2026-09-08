@@ -1132,8 +1132,16 @@ def test_note_create_draft_then_first_save_dispatches(env, monkeypatch):
     with env.session() as db:
         assert db.query(SuperAssistantPalaceBuild).count() == 0
 
-    # 仅支持 md/txt；文件名不能带路径分隔符
+    # 新建草稿笔记内容为空也必须可预览/可编辑（previewable 不随内容为空翻转），
+    # 否则前端编辑器把空 md 判为「格式不支持在线编辑」，笔记写不进第一行
+    draft_preview = client.get(f"{_PREFIX}/palace/files/{row['id']}/preview")
+    assert draft_preview.status_code == 200
+    assert draft_preview.json()["previewable"] is True
+    assert draft_preview.json()["content"] == ""
+
+    # 笔记创建仅 md（txt 仍可上传与编辑）；文件名不能带路径分隔符
     assert client.post(f"{_PREFIX}/palace/files/notes", json={"filename": "a.pdf"}).status_code == 400
+    assert client.post(f"{_PREFIX}/palace/files/notes", json={"filename": "a.txt"}).status_code == 400
     assert client.post(f"{_PREFIX}/palace/files/notes", json={"filename": "a/b.md"}).status_code == 400
 
     # draft 不可重建（空文本建图必然失败）
