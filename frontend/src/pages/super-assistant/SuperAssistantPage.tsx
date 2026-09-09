@@ -63,8 +63,9 @@ export default function SuperAssistantPage() {
   const dark = useThemeStore(state => state.theme === 'dark')
   const navigate = useNavigate()
   const user = useAuthStore(state => state.user)
-  const [searchParams] = useSearchParams()
-  // 悬浮窗跳转携带的 ?conversation=：初次加载时优先选中，后续参数变化继续跟随
+  const [searchParams, setSearchParams] = useSearchParams()
+  // ?conversation= 双向绑定：悬浮窗跳转可携带（初次加载优先选中，参数变化继续跟随）；
+  // 页内选中的会话也回写参数，地址栏始终标识当前会话，复制到其它浏览器可直达
   const initialRequestedIdRef = useRef(searchParams.get('conversation'))
   const requestedConversationId = searchParams.get('conversation')
   const [conversations, setConversations] = useState<SuperConversation[]>([])
@@ -207,8 +208,24 @@ export default function SuperAssistantPage() {
   // 用 lastAppliedParamRef 记录已消费的参数值：只在参数“变化”时跟随，
   // 避免用户在页面内手动切换会话后被残留参数强制拉回。
   const lastAppliedParamRef = useRef<string | null>(null)
+  // 选中会话回写地址栏 ?conversation=：复制 URL 到其它浏览器可直达同一会话。
+  // replace 不产生历史记录；装载完成前不回写，避免会话列表未就绪时把深链参数
+  // 误清成无参；selectedId 为 null（未落地的新会话视图）时移除参数。
+  // writtenParamRef 记录已回写值：setSearchParams 的函数身份随 URL 变化，
+  // 外部导航（悬浮窗跳转/深链）也会触发本 effect 重跑，此时不得用旧选中抢写参数。
+  const writtenParamRef = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (loading || writtenParamRef.current === selectedId) return
+    writtenParamRef.current = selectedId
+    setSearchParams(selectedId ? { conversation: selectedId } : {}, { replace: true })
+  }, [selectedId, loading, setSearchParams])
   useEffect(() => {
     if (!requestedConversationId || requestedConversationId === lastAppliedParamRef.current) return
+    // 参数与当前选中一致（含页内切换后 URL 回写的滞后到达）：视为已消费
+    if (requestedConversationId === selectedIdRef.current) {
+      lastAppliedParamRef.current = requestedConversationId
+      return
+    }
     if (conversations.some(item => item.id === requestedConversationId)) {
       lastAppliedParamRef.current = requestedConversationId
       setSelectedId(requestedConversationId)

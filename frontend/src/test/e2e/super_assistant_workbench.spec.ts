@@ -559,6 +559,25 @@ test('工作台骨架：七项入口齐备，近期会话单列表，归档折�
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
 })
 
+test('会话选中回写地址栏：切会话 URL 跟随，深链直达指定会话', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  // 会话列表就绪后，默认选中的最新会话回写为 ?conversation=c-today
+  await expect(page).toHaveURL(/#\/super-assistant\?conversation=c-today$/)
+
+  // 页内切换会话 → 地址栏跟随（复制链接即可在其它浏览器打开同一会话）
+  await page.locator('[data-workbench-conversation="c-earlier"] button').first().click()
+  await expect(page).toHaveURL(/#\/super-assistant\?conversation=c-earlier$/)
+  await expect(page.locator('[data-workbench-conversation="c-earlier"]')).toHaveClass(/bg-brand-soft/)
+
+  // 深链直达：携带 ?conversation= 打开即选中该会话，参数不被清除
+  await page.goto('/#/super-assistant?conversation=c-yesterday')
+  await expect(page).toHaveURL(/#\/super-assistant\?conversation=c-yesterday$/)
+  await expect(page.locator('[data-workbench-conversation="c-yesterday"]')).toHaveClass(/bg-brand-soft/)
+})
+
 test('归档流转：会话移入归档区且 PATCH 携带 status', async ({ page }) => {
   await seedAuth(page)
   const { patchBodies } = await mockApis(page)
