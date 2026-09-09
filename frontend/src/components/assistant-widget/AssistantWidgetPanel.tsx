@@ -65,7 +65,7 @@ function AssistantContent({ message }: { message: SuperMessage }) {
 /** MCP 工具调用的行内人工确认卡片（迷你版 ConfirmationCard，token 配色兼容 dark） */
 function PendingConfirmationCard() {
   const pending = useAssistantWidgetStore(state => state.pending)
-  const decisionBusy = useAssistantWidgetStore(state => state.decisionBusy)
+  const busyDecision = useAssistantWidgetStore(state => state.busyDecision)
   const decide = useAssistantWidgetStore(state => state.decide)
   if (!pending) return null
   return (
@@ -82,19 +82,19 @@ function PendingConfirmationCard() {
       <div className="mt-2 flex justify-end gap-2">
         <button
           type="button"
-          disabled={decisionBusy}
+          disabled={busyDecision !== null}
           onClick={() => void decide('deny')}
-          className="min-h-8 rounded-lg border border-[var(--color-border)] px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50"
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50"
         >
-          拒绝
+          {busyDecision === 'deny' && <Loader2 size={12} className="animate-spin" />} 拒绝
         </button>
         <button
           type="button"
-          disabled={decisionBusy}
+          disabled={busyDecision !== null}
           onClick={() => void decide('approve')}
           className="inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-amber-700 px-3 text-xs font-medium text-white transition-colors hover:bg-amber-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50"
         >
-          {decisionBusy && <Loader2 size={12} className="animate-spin" />} 确认执行
+          {busyDecision === 'approve' && <Loader2 size={12} className="animate-spin" />} 确认执行
         </button>
       </div>
     </div>

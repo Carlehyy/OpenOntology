@@ -80,7 +80,8 @@ export default function SuperAssistantPage() {
   const [streamingIds, setStreamingIds] = useState<ReadonlySet<string>>(new Set())
   const [stopping, setStopping] = useState(false)
   const [pendingByConv, setPendingByConv] = useState<Record<string, PendingConfirmation>>({})
-  const [decisionBusy, setDecisionBusy] = useState(false)
+  // 审批请求进行中的动作：仅被点击的按钮转圈，两个按钮在请求期间都禁用防重复提交
+  const [pendingDecision, setPendingDecision] = useState<'approve' | 'deny' | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showMessageHistory, setShowMessageHistory] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -530,7 +531,7 @@ export default function SuperAssistantPage() {
   const decide = async (decision: 'approve' | 'deny') => {
     const pending = pendingHere
     if (!pending || !selectedId) return
-    setDecisionBusy(true)
+    setPendingDecision(decision)
     try {
       await superAssistantApi.decideToolRun(pending.toolRunId, decision)
       setPendingByConv(current => {
@@ -541,7 +542,7 @@ export default function SuperAssistantPage() {
       })
     }
     catch (error) { toast.error('确认失败', { description: errorText(error) }) }
-    finally { setDecisionBusy(false) }
+    finally { setPendingDecision(null) }
   }
 
   const canSend = input.trim().length > 0 && !runningHere && models.length > 0
@@ -874,7 +875,7 @@ export default function SuperAssistantPage() {
               <div className="h-full overflow-y-auto">
                 <div className="mx-auto w-full max-w-4xl space-y-7 px-4 pb-28 pt-6 sm:px-8">
                   {messages.map(message => <ChatMessage key={message.id} message={message} />)}
-                  {pendingHere && <ConfirmationCard pending={pendingHere} busy={decisionBusy} onDecision={decision => void decide(decision)} />}
+                  {pendingHere && <ConfirmationCard pending={pendingHere} busyDecision={pendingDecision} onDecision={decision => void decide(decision)} />}
                   <div ref={messagesEndRef} />
                 </div>
               </div>

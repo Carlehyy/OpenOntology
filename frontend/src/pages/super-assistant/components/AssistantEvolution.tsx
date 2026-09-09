@@ -46,7 +46,9 @@ function ConfidenceTag({ confidence }: { confidence: string }) {
 export function ApprovalTab({ conversationId }: { conversationId: string | null }) {
   const [candidates, setCandidates] = useState<ReflectionCandidate[]>([])
   const [loading, setLoading] = useState(true)
-  const [busyId, setBusyId] = useState<string | null>(null)
+  // 进行中的审批键 `${candidateId}:${decision}`：仅被点击的按钮转圈，
+  // 该候选卡其余按钮在请求期间保持禁用防重复提交，不连坐其它候选卡
+  const [busyKey, setBusyKey] = useState<string | null>(null)
   const [reflecting, setReflecting] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -67,8 +69,8 @@ export function ApprovalTab({ conversationId }: { conversationId: string | null 
   }, [refresh])
 
   const decide = async (candidate: ReflectionCandidate, decision: string) => {
-    if (busyId) return
-    setBusyId(candidate.id)
+    if (busyKey) return
+    setBusyKey(`${candidate.id}:${decision}`)
     try {
       await superAssistantApi.decideReflectionCandidate(candidate.id, decision)
       toast.success(decision === 'accept' || decision === 'new_supersedes' ? '已接受' : '已处理')
@@ -76,7 +78,7 @@ export function ApprovalTab({ conversationId }: { conversationId: string | null 
     } catch (error) {
       toast.error('审批操作失败', { description: errorText(error) })
     } finally {
-      setBusyId(null)
+      setBusyKey(null)
     }
   }
 
@@ -96,20 +98,23 @@ export function ApprovalTab({ conversationId }: { conversationId: string | null 
 
   const actions = (candidate: ReflectionCandidate) => (
     <div className="mt-3 flex flex-wrap gap-2">
-      {candidateActions(candidate.kind).map(option => (
-        <button
-          key={option.decision}
-          type="button"
-          disabled={busyId === candidate.id}
-          onClick={() => decide(candidate, option.decision)}
-          className={option.primary
-            ? 'flex min-h-8 items-center gap-1 rounded-lg bg-brand px-3 text-xs font-medium text-white transition-colors hover:bg-brand-deep disabled:opacity-50'
-            : 'flex min-h-8 items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] disabled:opacity-50'}
-        >
-          {busyId === candidate.id ? <Loader2 size={12} className="animate-spin" /> : option.primary ? <Check size={12} /> : <X size={12} />}
-          {option.label}
-        </button>
-      ))}
+      {candidateActions(candidate.kind).map(option => {
+        const busyHere = busyKey === `${candidate.id}:${option.decision}`
+        return (
+          <button
+            key={option.decision}
+            type="button"
+            disabled={busyKey?.startsWith(`${candidate.id}:`) ?? false}
+            onClick={() => decide(candidate, option.decision)}
+            className={option.primary
+              ? 'flex min-h-8 items-center gap-1 rounded-lg bg-brand px-3 text-xs font-medium text-white transition-colors hover:bg-brand-deep disabled:opacity-50'
+              : 'flex min-h-8 items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] disabled:opacity-50'}
+          >
+            {busyHere ? <Loader2 size={12} className="animate-spin" /> : option.primary ? <Check size={12} /> : <X size={12} />}
+            {option.label}
+          </button>
+        )
+      })}
     </div>
   )
 

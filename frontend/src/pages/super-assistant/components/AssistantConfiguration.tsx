@@ -671,7 +671,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
               记忆
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {/* scrollbar-none：内容超长时仍可滚轮/拖拽滚动，仅不显示滚动条 */}
+          <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-4">
           {tab === 'approval' ? (
             <ApprovalTab conversationId={conversationId} />
           ) : tab === 'memory' ? (
@@ -763,26 +764,30 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             </>
           )}
           </div>
-          <footer className="shrink-0 border-t border-[var(--color-border)] bg-white p-3">
-            {tab === 'skills' ? (
-              <div className="grid grid-cols-2 gap-2">
-                <button type="button" onClick={() => setCreatingSkill(true)}
-                  className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                  <Plus size={14} /> 新建 Skill
+          {/* 仅 skills/mcp tab 有底部动作；approval/memory tab 不渲染空 footer，
+              避免面板底部出现一条无内容的分割线 */}
+          {(tab === 'skills' || tab === 'mcp') && (
+            <footer className="shrink-0 border-t border-[var(--color-border)] bg-white p-3">
+              {tab === 'skills' ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => setCreatingSkill(true)}
+                    className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    <Plus size={14} /> 新建 Skill
+                  </button>
+                  <button type="button" onClick={() => uploadRef.current?.click()}
+                    className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    <Upload size={14} /> 导入 ZIP
+                  </button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setEditingMcp('new')}
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <Plus size={14} /> 添加 MCP
                 </button>
-                <button type="button" onClick={() => uploadRef.current?.click()}
-                  className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                  <Upload size={14} /> 导入 ZIP
-                </button>
-              </div>
-            ) : tab === 'mcp' ? (
-              <button type="button" onClick={() => setEditingMcp('new')}
-                className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                <Plus size={14} /> 添加 MCP
-              </button>
-            ) : null}
-            <input ref={uploadRef} type="file" accept=".zip,application/zip" className="hidden" onChange={event => void importZip(event.target.files?.[0])} />
-          </footer>
+              )}
+              <input ref={uploadRef} type="file" accept=".zip,application/zip" className="hidden" onChange={event => void importZip(event.target.files?.[0])} />
+            </footer>
+          )}
         </section>
       </aside>
       {creatingSkill && <SkillCreateDialog onClose={() => setCreatingSkill(false)} onSaved={refreshSkills} />}

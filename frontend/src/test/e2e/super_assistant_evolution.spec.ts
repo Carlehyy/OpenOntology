@@ -112,6 +112,8 @@ test('超级助手：待审批与记忆面板全链路', async ({ page }) => {
     if (path.startsWith('/api/v2/super-assistant/reflection/candidates/') && method === 'POST') {
       const body = request.postDataJSON() as { decision: string }
       decisions.push(body)
+      // 人为延迟响应：给 busy 粒度断言留出观察窗口
+      await new Promise(resolve => setTimeout(resolve, 600))
       candidatePending = false
       pendingCount = 0
       return json(route, {
@@ -133,6 +135,14 @@ test('超级助手：待审批与记忆面板全链路', async ({ page }) => {
   await expect(page.getByTestId('candidate-memory')).toBeVisible()
   await expect(page.getByText('用户正在评估知识库收敛方案')).toBeVisible()
   await page.getByRole('button', { name: '接受', exact: true }).click()
+
+  // busy 粒度按 `${候选id}:${decision}`：请求进行中仅被点击的按钮转圈，
+  // 同卡另一按钮禁用但不转圈（点确认/拒绝不再两颗一起刷新）
+  const rejectButton = page.getByRole('button', { name: '拒绝', exact: true })
+  await expect(rejectButton).toBeDisabled()
+  await expect(rejectButton.locator('.animate-spin')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '接受', exact: true }).locator('.animate-spin')).toBeVisible()
+
   await expect(page.getByText('没有待审批的候选')).toBeVisible()
   expect(decisions).toEqual([{ decision: 'accept' }])
 

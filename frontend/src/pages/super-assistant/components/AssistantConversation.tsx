@@ -325,11 +325,13 @@ export interface PendingConfirmation {
   arguments: Record<string, unknown>
 }
 
-export function ConfirmationCard({ pending, busy, onDecision }: {
+export function ConfirmationCard({ pending, busyDecision, onDecision }: {
   pending: PendingConfirmation
-  busy: boolean
+  /** 进行中的审批动作：仅被点击的按钮转圈，两个按钮在请求期间都禁用 */
+  busyDecision: 'approve' | 'deny' | null
   onDecision: (decision: 'approve' | 'deny') => void
 }) {
+  const busy = busyDecision !== null
   return (
     <div role="alert" className="ml-11 max-w-3xl rounded-xl border border-amber-200 bg-amber-50/80 p-4">
       <div className="flex items-start gap-3">
@@ -344,12 +346,12 @@ export function ConfirmationCard({ pending, busy, onDecision }: {
           </pre>
           <div className="mt-3 flex gap-2">
             <button type="button" disabled={busy} onClick={() => onDecision('deny')}
-              className="min-h-10 rounded-lg border border-amber-300 px-4 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50">
-              拒绝
+              className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-amber-300 px-4 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50">
+              {busyDecision === 'deny' && <Loader2 size={13} className="animate-spin" />} 拒绝
             </button>
             <button type="button" disabled={busy} onClick={() => onDecision('approve')}
               className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-amber-700 px-4 text-xs font-medium text-white transition-colors hover:bg-amber-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 disabled:opacity-50">
-              {busy && <Loader2 size={13} className="animate-spin" />} 确认执行
+              {busyDecision === 'approve' && <Loader2 size={13} className="animate-spin" />} 确认执行
             </button>
           </div>
         </div>

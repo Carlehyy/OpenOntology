@@ -42,7 +42,8 @@ interface AssistantWidgetState {
   streamingConversationId: string | null
   thinkingRound: number | null
   pending: PendingConfirmation | null
-  decisionBusy: boolean
+  /** 进行中的审批动作：仅被点击的按钮转圈，两个按钮在请求期间都禁用 */
+  busyDecision: 'approve' | 'deny' | null
   /** 输入框草稿，关闭弹窗后保留 */
   draft: string
 
@@ -75,7 +76,7 @@ export const useAssistantWidgetStore = create<AssistantWidgetState>()((set, get)
   streamingConversationId: null,
   thinkingRound: null,
   pending: null,
-  decisionBusy: false,
+  busyDecision: null,
   draft: '',
 
   setOpen: (open) => {
@@ -253,15 +254,15 @@ export const useAssistantWidgetStore = create<AssistantWidgetState>()((set, get)
 
   decide: async (decision) => {
     const pending = get().pending
-    if (!pending || get().decisionBusy) return
-    set({ decisionBusy: true })
+    if (!pending || get().busyDecision) return
+    set({ busyDecision: decision })
     try {
       await superAssistantApi.decideToolRun(pending.toolRunId, decision)
       set({ pending: null })
     } catch (error) {
       set({ actionError: errorMessage(error, '确认失败') })
     } finally {
-      set({ decisionBusy: false })
+      set({ busyDecision: null })
     }
   },
 }))
