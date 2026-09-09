@@ -21,6 +21,7 @@ import { Modal } from '@/components/ui/Modal'
 import { authApi, type PrivacyVar, type UserEnvVar } from '@/api/auth'
 import { useAuthStore } from '@/stores/authStore'
 import { writeTextToClipboard } from '@/utils/clipboard'
+import { toast } from 'sonner'
 /**
  * 个人资料弹窗（用户头像下拉 → 个人资料，MYW-56）。
  *
@@ -50,8 +51,6 @@ const PROFILE_TABS: Array<{ key: ProfileTab; label: string; icon: typeof CircleU
   { key: 'env', label: '环境变量', icon: Braces },
   { key: 'privacy', label: '隐私变量', icon: ShieldCheck },
 ]
-
-type Notice = { kind: 'success' | 'error'; text: string }
 
 function errorMessage(error: any, fallback: string) {
   const detail = error?.detail ?? error?.message
@@ -113,13 +112,12 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
   const [revealing, setRevealing] = useState(false)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
-  const [notice, setNotice] = useState<Notice | null>(null)
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
 
   const busy = savingProfile || savingPassword || savingEnvVars || privacyBusy
 
   // 仅在弹窗打开时初始化/加载。刻意不把 user 放进依赖：保存邮箱会更新
-  // auth-store 里的 user，若依赖它，成功提示会被这次重置立即吞掉。
+  // auth-store 里的 user，若依赖它，正在编辑的表单会被这次重置打断。
   useEffect(() => {
     if (!open) return
     setActiveTab('account')
@@ -128,29 +126,23 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
     setCurrentPassword('')
     setNewPassword('')
     setPrivacyNewKey('')
-    setNotice(null)
     let cancelled = false
     setEnvLoading(true)
     authApi.listEnvVars()
       .then(items => { if (!cancelled) setEnvVars(Array.isArray(items) ? items : []) })
       .catch(error => {
-        if (!cancelled) setNotice({ kind: 'error', text: errorMessage(error, '环境变量加载失败') })
+        if (!cancelled) toast.error(errorMessage(error, '环境变量加载失败'))
       })
       .finally(() => { if (!cancelled) setEnvLoading(false) })
     setPrivacyLoading(true)
     authApi.listPrivacyVars()
       .then(items => { if (!cancelled) setPrivacyVars(Array.isArray(items) ? items : []) })
       .catch(error => {
-        if (!cancelled) setNotice({ kind: 'error', text: errorMessage(error, '隐私变量加载失败') })
+        if (!cancelled) toast.error(errorMessage(error, '隐私变量加载失败'))
       })
       .finally(() => { if (!cancelled) setPrivacyLoading(false) })
     return () => { cancelled = true }
   }, [open])
-
-  const showToast = (kind: Notice['kind'], text: string) => {
-    setNotice({ kind, text })
-    window.setTimeout(() => setNotice(current => current?.text === text ? null : current), 3200)
-  }
 
   // 竖向 tab 的方向键导航：↑/↓ 在分区之间移动焦点并切换
   const onTablistKeyDown = (event: React.KeyboardEvent) => {
@@ -165,30 +157,30 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
 
   const saveProfile = async () => {
     const email = emailDraft.trim()
-    if (!email) { showToast('error', '请填写邮箱'); return }
+    if (!email) { toast.error('请填写邮箱'); return }
     setSavingProfile(true)
     try {
       const updated = await authApi.updateProfile(email)
       if (token && updated) setAuth(updated, token)
-      showToast('success', '资料已更新')
+      toast.success('资料已更新')
     } catch (error) {
-      showToast('error', errorMessage(error, '保存资料失败'))
+      toast.error(errorMessage(error, '保存资料失败'))
     } finally {
       setSavingProfile(false)
     }
   }
 
   const savePassword = async () => {
-    if (!currentPassword) { showToast('error', '请输入当前密码'); return }
-    if (newPassword.length < 6) { showToast('error', '新密码至少需要 6 个字符'); return }
+    if (!currentPassword) { toast.error('请输入当前密码'); return }
+    if (newPassword.length < 6) { toast.error('新密码至少需要 6 个字符'); return }
     setSavingPassword(true)
     try {
       await authApi.changePassword(currentPassword, newPassword)
       setCurrentPassword('')
       setNewPassword('')
-      showToast('success', '密码已更新')
+      toast.success('密码已更新')
     } catch (error) {
-      showToast('error', errorMessage(error, '修改密码失败'))
+      toast.error(errorMessage(error, '修改密码失败'))
     } finally {
       setSavingPassword(false)
     }
@@ -198,14 +190,14 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
     const seen = new Set<string>()
     for (const item of envVars) {
       const key = item.key.trim()
-      if (!key) { showToast('error', '环境变量名不能为空'); return null }
+      if (!key) { toast.error('环境变量名不能为空'); return null }
       if (!ENV_VAR_KEY_PATTERN.test(key)) {
-        showToast('error', '变量名仅允许字母、数字、下划线、连字符和点')
+        toast.error('变量名仅允许字母、数字、下划线、连字符和点')
         return null
       }
-      if (seen.has(key)) { showToast('error', `环境变量名重复：${key}`); return null }
+      if (seen.has(key)) { toast.error(`环境变量名重复：${key}`); return null }
       if (item.value.length > ENV_VAR_VALUE_MAX_LENGTH) {
-        showToast('error', `变量 ${key} 的值超过 4096 字符上限`)
+        toast.error(`变量 ${key} 的值超过 4096 字符上限`)
         return null
       }
       seen.add(key)
@@ -220,9 +212,9 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
     try {
       const saved = await authApi.saveEnvVars(payload)
       setEnvVars(Array.isArray(saved) ? saved : payload)
-      showToast('success', '环境变量已保存')
+      toast.success('环境变量已保存')
     } catch (error) {
-      showToast('error', errorMessage(error, '保存环境变量失败'))
+      toast.error(errorMessage(error, '保存环境变量失败'))
     } finally {
       setSavingEnvVars(false)
     }
@@ -236,17 +228,17 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
 
   const createPrivacyVar = async () => {
     const key = privacyNewKey.trim()
-    if (!key) { showToast('error', '请填写变量名'); return }
+    if (!key) { toast.error('请填写变量名'); return }
     if (!PRIVACY_VAR_KEY_PATTERN.test(key)) {
-      showToast('error', '变量名仅允许字母、数字、下划线、连字符和点')
+      toast.error('变量名仅允许字母、数字、下划线、连字符和点')
       return
     }
     if (privacyVars.some(v => v.key === key)) {
-      showToast('error', `变量名已存在：${key}`)
+      toast.error(`变量名已存在：${key}`)
       return
     }
     if (privacyVars.length >= PRIVACY_VAR_MAX_ITEMS) {
-      showToast('error', `隐私变量上限 ${PRIVACY_VAR_MAX_ITEMS} 条`)
+      toast.error(`隐私变量上限 ${PRIVACY_VAR_MAX_ITEMS} 条`)
       return
     }
     setPrivacyBusy(true)
@@ -256,16 +248,16 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       setPrivacyNewKey('')
       // 首次创建返回 report_token：仅此一次可见，如实提示并给出复制兜底。
       if (created.report_token) {
-        showToast('success', '已创建。上报 token 仅此一次展示，请立即复制保存')
+        toast.success('已创建。上报 token 仅此一次展示，请立即复制保存')
         // 用 prompt 作为复制兜底（剪贴板 API 在非 HTTPS/非聚焦下不可靠）。
         window.setTimeout(() => {
           window.prompt('上报 token（仅此一次，请立即保存）：', created.report_token)
         }, 100)
       } else {
-        showToast('success', '已创建')
+        toast.success('已创建')
       }
     } catch (error) {
-      showToast('error', errorMessage(error, '创建隐私变量失败'))
+      toast.error(errorMessage(error, '创建隐私变量失败'))
     } finally {
       setPrivacyBusy(false)
     }
@@ -276,9 +268,9 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
     try {
       await authApi.deletePrivacyVar(key)
       setPrivacyVars(current => current.filter(v => v.key !== key))
-      showToast('success', '已删除')
+      toast.success('已删除')
     } catch (error) {
-      showToast('error', errorMessage(error, '删除隐私变量失败'))
+      toast.error(errorMessage(error, '删除隐私变量失败'))
     } finally {
       setPrivacyBusy(false)
     }
@@ -288,12 +280,12 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
     setPrivacyBusy(true)
     try {
       const result = await authApi.resetReportToken()
-      showToast('success', '已重置。新 token 仅此一次展示，请立即复制保存')
+      toast.success('已重置。新 token 仅此一次展示，请立即复制保存')
       window.setTimeout(() => {
         window.prompt('新上报 token（仅此一次，请立即保存；旧 token 已失效）：', result.report_token)
       }, 100)
     } catch (error) {
-      showToast('error', errorMessage(error, '重置上报 token 失败'))
+      toast.error(errorMessage(error, '重置上报 token 失败'))
     } finally {
       setPrivacyBusy(false)
     }
@@ -313,7 +305,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       setRevealedKey(item.key)
       setRevealedValue(data.value)
     } catch (error) {
-      showToast('error', errorMessage(error, '取回明文失败'))
+      toast.error(errorMessage(error, '取回明文失败'))
     } finally {
       setRevealing(false)
     }
@@ -327,9 +319,9 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       // 可能静默失败，提示文案如实（"已尝试复制"），不依据中间返回值宣称已复制。
       setCopiedKey(key)
       window.setTimeout(() => setCopiedKey(current => current === key ? null : current), 1600)
-      showToast('success', '已尝试复制到剪贴板')
+      toast.success('已尝试复制到剪贴板')
     } catch (error) {
-      showToast('error', errorMessage(error, '复制失败，请手动选中复制'))
+      toast.error(errorMessage(error, '复制失败，请手动选中复制'))
     }
   }
 
@@ -339,9 +331,9 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       const blob = await authApi.downloadReporterScript()
       // 提示文案如实（AGENTS.md §5：不依据中间信号宣称已下载）。
       saveBlob(blob, 'privacy_reporter.py')
-      showToast('success', '已尝试下载脚本，请检查浏览器下载')
+      toast.success('已尝试下载脚本，请检查浏览器下载')
     } catch (error) {
-      showToast('error', errorMessage(error, '下载脚本失败'))
+      toast.error(errorMessage(error, '下载脚本失败'))
     } finally {
       setPrivacyBusy(false)
     }
@@ -360,16 +352,6 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       panelClassName="h-[min(82dvh,44rem)] w-[min(94vw,48rem)]"
       contentClassName="flex min-h-0 flex-col overflow-hidden p-0"
     >
-      {notice && (
-        <div role="status" aria-live="polite" className={`mx-6 mt-4 flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
-          notice.kind === 'success'
-            ? 'border-[var(--color-success)]/30 bg-[var(--color-success)]/10 text-[var(--color-success)]'
-            : 'border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 text-[var(--color-danger)]'
-        }`}>
-          {notice.text}
-        </div>
-      )}
-
       <div className="grid min-h-0 flex-1 grid-cols-[10rem_minmax(0,1fr)]">
         <nav
           role="tablist"

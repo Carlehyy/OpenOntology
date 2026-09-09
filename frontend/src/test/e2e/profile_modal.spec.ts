@@ -20,6 +20,11 @@ const json = (route: Route, data: unknown, status = 200) => route.fulfill({
   body: JSON.stringify({ data, message: 'ok' }),
 })
 
+// 成功/失败提示走全局 Sonner toast：渲染在 dialog 外的 portal（[data-sonner-toast]），
+// 断言须经 toast 区域而非 dialog 作用域；.first() 兜底同文案 toast 叠加时的 strict mode
+const toastItem = (page: Page, text: string) =>
+  page.locator('[data-sonner-toast]').filter({ hasText: text }).first()
+
 async function mockPlatformShell(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
@@ -100,7 +105,7 @@ test('个人资料弹窗展示只读用户名，修改邮箱后同步本地登�
   await dialog.getByRole('button', { name: '保存资料' }).click()
 
   await expect(profilePutBody).toEqual({ email: 'renamed@example.com' })
-  await expect(dialog.getByText('资料已更新')).toBeVisible()
+  await expect(toastItem(page, '资料已更新')).toBeVisible()
 
   // PUT 返回的用户写回持久化的 auth-store，下次进入平台无需重新拉取
   const storedEmail = await page.evaluate(
@@ -135,11 +140,11 @@ test('修改密码时验证当前密码，失败提示错误、成功后清空�
   await dialog.getByLabel('当前密码').fill('wrong-pass')
   await dialog.getByLabel('新密码').fill('newpass123')
   await dialog.getByRole('button', { name: '更新密码' }).click()
-  await expect(dialog.getByText('当前密码不正确')).toBeVisible()
+  await expect(toastItem(page, '当前密码不正确')).toBeVisible()
 
   await dialog.getByLabel('当前密码').fill('right-pass')
   await dialog.getByRole('button', { name: '更新密码' }).click()
-  await expect(dialog.getByText('密码已更新')).toBeVisible()
+  await expect(toastItem(page, '密码已更新')).toBeVisible()
   await expect(dialog.getByLabel('当前密码')).toHaveValue('')
   await expect(dialog.getByLabel('新密码')).toHaveValue('')
   expect(passwordBodies).toHaveLength(2)
@@ -163,7 +168,7 @@ test('私有环境变量支持增删改并全量保存', async ({ page }) => {
   })
 
   await page.goto('/#/inbox', { waitUntil: 'domcontentloaded' })
-  const dialog = await openProfileDialog(page)
+  await openProfileDialog(page)
   const panel = await openEnvVarsTab(page)
 
   // 存量变量回显
@@ -175,7 +180,7 @@ test('私有环境变量支持增删改并全量保存', async ({ page }) => {
   await panel.getByLabel('第 2 个变量值').fill('new-value')
 
   await panel.getByRole('button', { name: '保存变量' }).click()
-  await expect(dialog.getByText('环境变量已保存')).toBeVisible()
+  await expect(toastItem(page, '环境变量已保存')).toBeVisible()
   expect(captured.envPut?.items).toEqual([
     { key: 'EXISTING_KEY', value: 'existing-value' },
     { key: 'NEW_KEY', value: 'new-value' },
@@ -184,7 +189,7 @@ test('私有环境变量支持增删改并全量保存', async ({ page }) => {
   // 删除一行后再次保存，列表按全量语义更新
   await panel.getByRole('button', { name: '删除变量 EXISTING_KEY' }).click()
   await panel.getByRole('button', { name: '保存变量' }).click()
-  await expect(dialog.getByText('环境变量已保存')).toBeVisible()
+  await expect(toastItem(page, '环境变量已保存')).toBeVisible()
   await expect(panel.getByLabel('第 1 个变量名')).toHaveValue('NEW_KEY')
 })
 
@@ -254,7 +259,7 @@ test('隐私变量支持创建、列表回显、下载脚本与重置token', asy
   // 创建一个变量
   await panel.getByLabel('新建隐私变量名').fill('MY_LOCAL_COOKIE')
   await panel.getByRole('button', { name: '创建' }).click()
-  await expect(dialog.getByText('已创建')).toBeVisible()
+  await expect(toastItem(page, '已创建')).toBeVisible()
   // 列表回显
   await expect(panel.getByText('MY_LOCAL_COOKIE')).toBeVisible()
 
@@ -279,7 +284,7 @@ test('隐私变量支持创建、列表回显、下载脚本与重置token', asy
     return route.continue()
   })
   await panel.getByRole('button', { name: '重置上报 token' }).click()
-  await expect(dialog.getByText('已重置')).toBeVisible()
+  await expect(toastItem(page, '已重置')).toBeVisible()
   expect(captured.resetCalled).toBe(true)
 })
 
@@ -342,7 +347,7 @@ test('隐私变量支持查看明文值并复制到剪贴板', async ({ page }) 
   // 复制：断言真实剪贴板内容（非中间提示，AGENTS.md §5）
   await panel.getByRole('button', { name: '复制' }).click()
   // 等待复制完成（"已尝试复制"提示出现作为时序信号，但断言以剪贴板真实内容为准）
-  await expect(dialog.getByText('已尝试复制到剪贴板')).toBeVisible()
+  await expect(toastItem(page, '已尝试复制到剪贴板')).toBeVisible()
   const clipboardText = await page.evaluate(() => navigator.clipboard.readText())
   expect(clipboardText).toBe(plaintextValue)
 
