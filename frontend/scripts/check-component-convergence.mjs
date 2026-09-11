@@ -32,7 +32,6 @@ const MOTION_UI_ALLOWLIST = new Set([
   'pages/ontologies/detail/tabs/OverviewDashboard.tsx',
   'pages/ontologies/detail/tabs/StructureDocDialog.tsx',
   'pages/world-model/StatCard.tsx',
-  'pages/world-model/WorldModelCallsPage.tsx',
   'pages/world-model/WorldModelModelsPage.tsx',
   'pages/world-model/WorldModelServicesPage.tsx',
 ])
