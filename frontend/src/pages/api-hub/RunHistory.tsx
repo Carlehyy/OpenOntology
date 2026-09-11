@@ -310,7 +310,7 @@ export default function RunHistory() {
                 <th className="min-w-56 border-b border-border px-4 py-3 text-center font-medium">诊断</th>
                 <th className="w-28 border-b border-border px-4 py-3 text-center font-medium">请求</th>
                 <th className="w-40 border-b border-border px-4 py-3 text-center font-medium">调用时间</th>
-                <th className="w-44 border-b border-border px-4 py-3 text-center font-medium">耗时</th>
+                <th className="w-44 border-b border-border px-4 py-3 text-right font-medium">耗时</th>
                 <th className="w-32 border-b border-border px-4 py-3 text-center font-medium">认证恢复</th>
                 <th className="w-20 border-b border-border px-4 py-3 text-center font-medium">详情</th>
               </tr>
@@ -722,8 +722,8 @@ function HistoryRow({
         <p className="text-muted-foreground">{time.date}</p>
         <p className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">{time.time}</p>
       </td>
-      <td className="px-4 py-2.5 text-center">
-        <div className="flex items-center justify-center gap-2">
+      <td className="px-4 py-2.5 text-right">
+        <div className="flex items-center justify-end gap-2">
           <span className={`w-14 tabular-nums ${slow ? 'font-medium text-[var(--color-warning)]' : 'text-muted-foreground'}`}>
             {formatElapsed(item.elapsed_ms)}
           </span>
