@@ -1,4 +1,4 @@
-"""0099 远程助手声明式注册表迁移。"""
+"""0100 内置工具启停设置表迁移。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,48 +20,50 @@ def _table_exists(db_path: Path) -> bool:
     with engine.connect() as connection:
         found = connection.execute(text(
             "SELECT name FROM sqlite_master WHERE type='table'"
-            " AND name='super_assistant_remote_agents'"
+            " AND name='super_assistant_tool_settings'"
         )).first()
     engine.dispose()
     return found is not None
 
 
-def test_upgrade_creates_table_with_owner_key_unique(tmp_path, monkeypatch):
+def test_upgrade_creates_table_with_owner_primary_key(tmp_path, monkeypatch):
     backend = Path(__file__).resolve().parents[2]
-    db_path = tmp_path / "remote-agents.db"
+    db_path = tmp_path / "tool-settings.db"
     monkeypatch.delenv("DATABASE_URL", raising=False)
     command.upgrade(_alembic_config(backend, db_path), "head")
 
     assert _table_exists(db_path)
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.begin() as connection:
-        # 全新库经 0003 create_all 以当前模型建表（时间戳 NOT NULL、无 server
-        # 默认，与 0093-0098 的既有行为一致）；存量库走 0099 静态 DDL
-        insert = (
-            "INSERT INTO super_assistant_remote_agents"
-            " (id, owner_id, key, label, description, endpoint, enabled, timeout_seconds,"
-            "  created_at, updated_at)"
-            " VALUES ('{id}', 'u1', '{key}', 'n', 'd', 'http://127.0.0.1:9/turn', 1, 30,"
-            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-        )
-        connection.execute(text(insert.format(id="a1", key="remote.one")))
-        connection.execute(text(insert.format(id="a2", key="remote.two")))
-    # 同 owner 同 key 唯一约束
+        # 全新库经 0003 create_all 以当前模型建表（缺行=全启用语义由应用层
+        # 保证，列只存禁用名单）；存量库走 0100 静态 DDL
+        connection.execute(text(
+            "INSERT INTO super_assistant_tool_settings (owner_id, disabled_tools, updated_at)"
+            " VALUES ('u1', '[\"web_search\"]', CURRENT_TIMESTAMP)"
+        ))
+        row = connection.execute(text(
+            "SELECT disabled_tools FROM super_assistant_tool_settings WHERE owner_id = 'u1'"
+        )).scalar()
+    assert row == '["web_search"]'
+    # owner 是主键：同用户第二行被拒（每用户一行名单）
     import pytest
-    with pytest.raises(Exception, match="UNIQUE"):
+    with pytest.raises(Exception, match="UNIQUE|PRIMARY"):
         with engine.begin() as connection:
-            connection.execute(text(insert.format(id="a3", key="remote.one")))
+            connection.execute(text(
+                "INSERT INTO super_assistant_tool_settings (owner_id, disabled_tools, updated_at)"
+                " VALUES ('u1', '[]', CURRENT_TIMESTAMP)"
+            ))
     engine.dispose()
 
 
 def test_downgrade_drops_table(tmp_path, monkeypatch):
     backend = Path(__file__).resolve().parents[2]
-    db_path = tmp_path / "remote-agents-downgrade.db"
+    db_path = tmp_path / "tool-settings-downgrade.db"
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _alembic_config(backend, db_path)
     command.upgrade(cfg, "head")
     assert _table_exists(db_path)
-    command.downgrade(cfg, "0098_super_assistant_delegations")
+    command.downgrade(cfg, "0099_super_assistant_remote_agents")
     assert not _table_exists(db_path)
 
 

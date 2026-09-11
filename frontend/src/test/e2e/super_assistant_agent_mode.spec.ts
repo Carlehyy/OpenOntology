@@ -51,6 +51,7 @@ test('自主模式默认开启：无切换开关，发送请求携带 agent_mode
     if (path === '/api/v2/super-assistant/conversations/c-1/messages') return json(route, [])
     if (path === '/api/v2/super-assistant/skills') return json(route, [])
     if (path === '/api/v2/super-assistant/mcp-servers') return json(route, [])
+    if (path === '/api/v2/super-assistant/tools') return json(route, [])
     if (path === '/api/v2/super-assistant/conversations/c-1/chat') {
       chatBodies.push(route.request().postData() || '')
       return route.fulfill({

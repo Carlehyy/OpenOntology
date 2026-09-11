@@ -5,8 +5,8 @@ super_assistant_palace_ontology_documents 平台级共享镜像表（按 ontolog
 幂等 upsert，由 ontology.documents.published 事件驱动），树中呈现为只读的
 「本体文档」目录；图谱贡献写入系统作用域，与用户图谱 UNION 展示。
 
-Revision ID: 0100_palace_ontology_documents
-Revises: 0099_super_assistant_remote_agents
+Revision ID: 0104_palace_ontology_documents
+Revises: 0102_super_assistant_palace_sync_token
 Create Date: 2026-09-11
 """
 
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
 
-revision = "0100_palace_ontology_documents"
-down_revision = "0099_super_assistant_remote_agents"
+revision = "0104_palace_ontology_documents"
+down_revision = "0102_super_assistant_palace_sync_token"
 branch_labels = None
 depends_on = None
 

@@ -89,6 +89,10 @@ from app.super_assistant.multica import (  # noqa: F401  # 再导出供架构测
     test_multica_connection,
     update_multica_config,
 )
+from app.super_assistant.tools import (  # noqa: F401  # 再导出供架构测试签名守卫
+    list_assistant_tools,
+    update_assistant_tool_enabled,
+)
 from app.settings.object_storage.service import (
     get_workspace_minio_service,
     minio_tool_manifest,

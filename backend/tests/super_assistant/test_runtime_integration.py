@@ -26,6 +26,7 @@ from app.super_assistant.models import (
     SuperAssistantReflectionRun,
     SuperAssistantSkill,
     SuperAssistantToolRun,
+    SuperAssistantToolSetting,
 )
 
 _TABLES = [
@@ -33,7 +34,7 @@ _TABLES = [
     RoleMenuPermission.__table__,  # 委派目录注入的菜单权限查询
     SuperAssistantConversation.__table__, SuperAssistantSkill.__table__,
     SuperAssistantMcpServer.__table__, SuperAssistantMessage.__table__,
-    SuperAssistantToolRun.__table__, SuperAssistantMemory.__table__,
+    SuperAssistantToolRun.__table__, SuperAssistantToolSetting.__table__, SuperAssistantMemory.__table__,
     SuperAssistantMulticaConfig.__table__,
     SuperAssistantMemoryProfile.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
