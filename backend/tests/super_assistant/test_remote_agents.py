@@ -16,7 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.assistant_hub import contract, registry
-from app.assistant_hub.contract import STATUS_ANSWERED, TurnResult
+from app.assistant_hub.contract import STATUS_ANSWERED, STATUS_FAILED, TurnResult
 from app.auth.models import RoleMenuPermission, User
 from app.model_configs.models import ModelConfig
 from app.shared.config import settings
@@ -31,10 +31,12 @@ from app.super_assistant.models import (
     SuperAssistantMessage,
     SuperAssistantMulticaConfig,
     SuperAssistantRemoteAgent,
+    SuperAssistantRemoteAgentTask,
     SuperAssistantSkill,
     SuperAssistantToolRun,
     SuperAssistantToolSetting,
 )
+from app.super_assistant.schemas import RemoteAgentTaskResultIn
 
 _TABLES = [
     User.__table__, RoleMenuPermission.__table__, ModelConfig.__table__,
@@ -367,3 +369,229 @@ def test_stream_injects_reminder_after_suspected_fabrication(tmp_path, monkeypat
         requested_model_id=None,
     ))
     assert "从未调用过" not in captured2["system"]
+
+
+# ------------------------------------------------------------- 回连模式
+
+
+def _add_pull_agent(db, owner_id, *, key="remote.pull", timeout_seconds=30):
+    row = SuperAssistantRemoteAgent(
+        owner_id=owner_id, key=key, label="回连帮手",
+        description="测试用回连远程助手", endpoint="",
+        token_encrypted=None, enabled=True, timeout_seconds=timeout_seconds,
+        mode="pull",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+class _FakeAgentSide:
+    """模拟回连远端：独立会话轮询认领任务并回传结果（记录收到的载荷）。"""
+
+    def __init__(self, engine, agent_id, *, result="done", session_ref="s-1"):
+        self._sessionmaker = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+        self._agent_id = agent_id
+        self._result = result
+        self._session_ref = session_ref
+        self.received: list[dict] = []
+
+    def __call__(self):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            with self._sessionmaker() as adb:
+                task = remote_agent_service.claim_next_task(adb, self._agent_id)
+                if task is None:
+                    time.sleep(0.02)
+                    continue
+                self.received.append({"message": task.message, "session_ref": task.session_ref})
+                remote_agent_service.submit_task_result(adb, self._agent_id, task.id, RemoteAgentTaskResultIn(
+                    status="answered" if self._result == "done" else "failed",
+                    content="pong" if self._result == "done" else "bad",
+                    session_ref=self._session_ref,
+                ))
+                return
+            time.sleep(0.02)
+
+
+def test_pull_roundtrip_answers_and_resumes_session(db, admin_user, monkeypatch):
+    monkeypatch.setattr(remote_agent_service, "_TASK_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(remote_agent_service, "_TASK_RESULT_GRACE_SECONDS", 1.0)
+    row = _add_pull_agent(db, admin_user.id)
+    side = _FakeAgentSide(db.get_bind(), row.id)
+    worker = threading.Thread(target=side)
+    worker.start()
+
+    adapter = remote_agent_service.RemoteAgentAdapter(row)
+    ref = adapter.start(db, None)
+    first = [item for item in adapter.run_turn(db, None, ref, "ping") if isinstance(item, TurnResult)]
+    worker.join(timeout=8)
+
+    assert first[-1].status == STATUS_ANSWERED
+    assert "pong" in first[-1].content
+    assert side.received[0]["message"] == "ping"
+    assert side.received[0]["session_ref"] is None
+    # 回合开始即刷新活动信号（直连/回连共用口径）
+    db.refresh(row)
+    assert row.last_turn_at is not None
+    # 首回合远端签发 session_ref → created_new_conversation 置位（续聊接线同直连）
+    assert first[-1].created_new_conversation is True
+    from app.assistant_hub.contract import parse_ref
+    assert parse_ref(row.key, first[-1].conversation_ref)["remote_session"] == "s-1"
+
+    # 第二轮：上一回合签发的 session_ref 原样带给远端
+    side2 = _FakeAgentSide(db.get_bind(), row.id)
+    worker2 = threading.Thread(target=side2)
+    worker2.start()
+    second = [item for item in adapter.run_turn(db, None, first[-1].conversation_ref, "again")
+              if isinstance(item, TurnResult)]
+    worker2.join(timeout=8)
+    assert second[-1].status == STATUS_ANSWERED
+    assert side2.received[0]["session_ref"] == "s-1"
+    assert second[-1].created_new_conversation is False
+
+
+def test_pull_timeout_when_agent_offline(db, admin_user, monkeypatch):
+    monkeypatch.setattr(remote_agent_service, "_TASK_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(remote_agent_service, "_TASK_RESULT_GRACE_SECONDS", 0.0)
+    row = _add_pull_agent(db, admin_user.id, timeout_seconds=1)
+
+    adapter = remote_agent_service.RemoteAgentAdapter(row)
+    ref = adapter.start(db, None)
+    results = [item for item in adapter.run_turn(db, None, ref, "ping") if isinstance(item, TurnResult)]
+
+    assert results[-1].status == STATUS_FAILED
+    assert "超时" in results[-1].content
+    task = db.query(SuperAssistantRemoteAgentTask).one()
+    assert task.status == "expired"
+
+
+def test_key_length_capped_to_column_width(db, admin_user):
+    # 正则允许的总长上限 49（列宽 50）：50 字符 key 在 PG 上会触发截断 500
+    from app.super_assistant.schemas import RemoteAgentCreate
+
+    long_key = "remote." + "a" * 43  # 总长 50
+    with pytest.raises(remote_agent_service.RemoteAgentServiceError, match="总长"):
+        remote_agent_service.create_agent(db, admin_user.id, RemoteAgentCreate(
+            key=long_key, label="x", endpoint="http://127.0.0.1:9101/turn",
+        ))
+    ok = remote_agent_service.create_agent(db, admin_user.id, RemoteAgentCreate(
+        key="remote." + "a" * 42, label="x", endpoint="http://127.0.0.1:9101/turn",
+    ))
+    assert ok.key == "remote." + "a" * 42
+
+
+def test_corrupt_token_ciphertext_degrades_instead_of_poisoning(db, admin_user):
+    row = _add_agent(db, admin_user.id, key="remote.bad-secret", endpoint="http://127.0.0.1:9103/turn")
+    row.token_encrypted = "gibberish-not-fernet"
+    db.commit()
+
+    adapter = remote_agent_service.RemoteAgentAdapter(row)
+    assert adapter._token == ""  # 解密失败退化为无凭据，不抛异常
+    # 动态目录（委派工具 schema 构建）不受坏行影响
+    listing = remote_agent_service.dynamic_assistants(db, SimpleNamespace(id=admin_user.id))
+    assert any(a.spec().key == "remote.bad-secret" for a in listing)
+
+
+def test_direct_mode_caps_oversized_session_ref(db, admin_user, monkeypatch):
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    row = _add_agent(db, admin_user.id, key="remote.long-ref", endpoint="http://127.0.0.1:9103/turn")
+    monkeypatch.setattr(
+        remote_agent_service, "_request",
+        lambda *a, **k: _fake_response(200, {
+            "status": "answered", "content": "ok",
+            "session_ref": "s" * 900, "note": "n" * 3000,
+        }),
+    )
+    adapter = remote_agent_service.RemoteAgentAdapter(row)
+    ref = adapter.start(db, None)
+    results = [item for item in adapter.run_turn(db, None, ref, "hi") if isinstance(item, TurnResult)]
+    assert results[-1].status == STATUS_ANSWERED
+    from app.assistant_hub.contract import parse_ref
+    stored = parse_ref(row.key, results[-1].conversation_ref)["remote_session"]
+    assert len(stored) == 255  # 截断到列宽，写入委派表不再溢出
+    assert len(results[-1].note) == 2000
+
+
+def test_pull_mode_honors_cancel_event(db, admin_user, monkeypatch):
+    monkeypatch.setattr(remote_agent_service, "_TASK_POLL_INTERVAL", 0.02)
+    row = _add_pull_agent(db, admin_user.id, timeout_seconds=30)
+    cancel = threading.Event()
+    cancel.set()
+    adapter = remote_agent_service.RemoteAgentAdapter(row)
+    ref = adapter.start(db, None)
+    results = [item for item in adapter.run_turn(
+        db, None, ref, "hi", cancel_event=cancel,
+    ) if isinstance(item, TurnResult)]
+    assert results[-1].status == STATUS_FAILED
+    assert "取消" in results[-1].content
+    task = db.query(SuperAssistantRemoteAgentTask).one()
+    assert task.status == "expired"
+
+
+def test_test_agent_fails_fast_for_offline_pull_agent(db, admin_user, monkeypatch):
+    monkeypatch.setattr(remote_agent_service, "_TASK_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(remote_agent_service, "_TASK_RESULT_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(remote_agent_service, "_TEST_TURN_TIMEOUT_SECONDS", 1)
+    row = _add_pull_agent(db, admin_user.id, key="remote.offline", timeout_seconds=600)
+
+    started = time.monotonic()
+    result = remote_agent_service.test_agent(db, admin_user.id, row.id)
+    elapsed = time.monotonic() - started
+
+    assert result.ok is False
+    assert elapsed < 10  # 600 秒超时的离线助手在秒级失败，不再挂满请求
+
+
+def test_claim_next_task_is_exclusive(db, admin_user):
+    row = _add_pull_agent(db, admin_user.id)
+    remote_agent_service.enqueue_task(db, row.id, "only-one", None, 60)
+
+    first = remote_agent_service.claim_next_task(db, row.id)
+    second = remote_agent_service.claim_next_task(db, row.id)
+    assert first is not None and first.message == "only-one"
+    assert second is None  # 已认领不再派发
+
+
+def test_task_gc_prunes_only_past_retention(db, admin_user, monkeypatch):
+    from datetime import timedelta
+
+    from app.super_assistant import remote_agent_task_gc
+    from app.super_assistant.remote_agent_service import _utcnow
+
+    row = _add_pull_agent(db, admin_user.id)
+    stale = _utcnow() - timedelta(days=8)
+    # done/expired/孤儿 pending（进程崩溃遗留、过期后对认领不可见）三类同口径回收
+    for status in ("done", "expired", "pending"):
+        db.add(SuperAssistantRemoteAgentTask(
+            agent_id=row.id, status=status, message=f"stale-{status}",
+            created_at=stale, expires_at=stale,
+        ))
+    db.add(SuperAssistantRemoteAgentTask(
+        agent_id=row.id, status="done", message="fresh",
+        created_at=_utcnow(), expires_at=_utcnow() + timedelta(seconds=60),
+    ))
+    db.commit()
+
+    from app.super_assistant.models import SuperAssistantRemoteAgentInvite
+    old_invite_expiry = _utcnow() - timedelta(days=40)
+    db.add(SuperAssistantRemoteAgentInvite(
+        owner_id=admin_user.id, token_hash="h-old", token_encrypted="x",
+        expires_at=old_invite_expiry, consumed_at=old_invite_expiry,
+    ))
+    db.add(SuperAssistantRemoteAgentInvite(
+        owner_id=admin_user.id, token_hash="h-kept", token_encrypted="y",
+        expires_at=_utcnow() + timedelta(hours=23),
+    ))
+    db.commit()
+
+    testing_session = sessionmaker(bind=db.get_bind(), autocommit=False, autoflush=False)
+    monkeypatch.setattr(remote_agent_task_gc, "SessionLocal", testing_session)
+    removed = remote_agent_task_gc.prune_once()
+
+    assert removed == 3
+    remaining = db.query(SuperAssistantRemoteAgentTask).all()
+    assert len(remaining) == 1 and remaining[0].message == "fresh"
+    invites = db.query(SuperAssistantRemoteAgentInvite).all()
+    assert [i.token_hash for i in invites] == ["h-kept"]  # 过期 30 天外的邀请连同令牌清除

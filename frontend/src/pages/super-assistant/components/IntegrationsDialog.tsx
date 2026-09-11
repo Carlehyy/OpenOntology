@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, Copy, Download, FolderSync, GitPullRequest, KeyRound, Loader2, PlugZap, Plus, RotateCcw, Save, ShieldCheck, Trash2 } from 'lucide-react'
+import {
+  Bot, Copy, Download, FolderSync, GitPullRequest, KeyRound, Loader2,
+  MailPlus, PlugZap, RotateCcw, Save, ShieldCheck, SlidersHorizontal, Trash2,
+} from 'lucide-react'
 
 import {
   superAssistantApi,
   type MulticaConfig,
   type MulticaTestResult,
   type RemoteAgent,
+  type RemoteAgentInvite,
 } from '@/api/superAssistant'
 import { toast } from 'sonner'
+import { Badge } from '@/components/ui/Badge'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -23,17 +28,6 @@ const INTEGRATION_TABS: Array<{ key: IntegrationTab; label: string; soon?: boole
   { key: 'folder-sync', label: '文件夹同步' },
   { key: 'github', label: 'GitHub', soon: true },
 ]
-
-const EMPTY_FORM = {
-  id: '' as string,
-  key: 'remote.',
-  label: '',
-  description: '',
-  endpoint: '',
-  token: '',
-  enabled: true,
-  timeoutSeconds: 120,
-}
 
 /** 已保存工作区的兜底选项：优先显示回填名称，历史行无名称时回落 ID */
 function savedWorkspaceOption(config: MulticaConfig) {
@@ -185,30 +179,220 @@ function FolderSyncPanel() {
   )
 }
 
-/** 远程助手面板：声明式注册目录（每用户多条）。列表 + 单条内联编辑表单；
- *  保存后立即进入 delegate_to_assistant 工具目录，无需重启。 */
+/** 直连模式回合契约（与后端 remote_agent_service 文档同源，手动配置参考）。 */
+const REMOTE_AGENT_CONTRACT = `POST {endpoint}
+Authorization: Bearer <token>            # 配置了 token 时携带
+{"message": "<任务文本>", "session_ref": null}
+
+200 ->
+{"status": "answered" | "failed",
+ "content": "<答复文本>",
+ "session_ref": "<首回合由远端签发，之后原样回传>",
+ "note": "<可选附注>"}`
+
+const EMPTY_FORM = {
+  id: '' as string,
+  key: '',
+  label: '',
+  description: '',
+  endpoint: '',
+  token: '',
+  enabled: true,
+  timeoutSeconds: 120,
+  mode: 'direct' as 'direct' | 'pull',
+}
+
+function inviteStatusMeta(status: RemoteAgentInvite['status']) {
+  switch (status) {
+    case 'pending': return { label: '待使用', variant: 'default' as const }
+    case 'used': return { label: '已接入', variant: 'success' as const }
+    case 'expired': return { label: '已过期', variant: 'warning' as const }
+    default: return { label: '已撤销', variant: 'secondary' as const }
+  }
+}
+
+function inviteExpiryText(iso: string): string {
+  const seconds = (parseBackendTime(iso) - Date.now()) / 1000
+  if (seconds <= 0) return '已到期'
+  if (seconds < 3600) return `剩 ${Math.max(1, Math.floor(seconds / 60))} 分钟`
+  return `剩 ${Math.floor(seconds / 3600)} 小时`
+}
+
+/** 解析后端时间戳：后端输出无偏移的 UTC 串，JS 默认按本地解析会差出
+ *  时区数（东八区“在线”永不亮），无偏移时补 Z 按 UTC 解。 */
+function parseBackendTime(iso: string): number {
+  return new Date(/Z$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`).getTime()
+}
+
+/** 相对时间文案：距今多久（在线状态与上次委派共用）。 */
+function relativeSince(iso: string | null): string | null {
+  if (!iso) return null
+  const seconds = (Date.now() - parseBackendTime(iso)) / 1000
+  if (seconds < 120) return '刚刚'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`
+  return '超过一天前'
+}
+
+/** 回连助手在线状态：最近一次轮询距今多久。 */
+function lastSeenText(iso: string | null): string | null {
+  if (!iso) return '未连接过'
+  if ((Date.now() - new Date(iso).getTime()) / 1000 < 120) return '在线'
+  return `${relativeSince(iso)}活跃过`
+}
+
+/** 直连助手活动信号：最近一次被委派距今多久。 */
+function lastTurnText(iso: string | null): string {
+  const since = relativeSince(iso)
+  return since ? `上次委派 ${since}` : '尚未委派'
+}
+
+/** 邀请函弹层：全文常驻展示 + 自动全选 + 复制/下载兜底（剪贴板副作用
+ *  验收规范：不依赖单一剪贴板路径，绝不假报“已复制”）。 */
+function InvitePromptModal({ promptText, onClose }: {
+  promptText: string
+  onClose: () => void
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [copying, setCopying] = useState(false)
+
+  const selectAll = () => {
+    const node = textareaRef.current
+    if (!node) return
+    node.focus({ preventScroll: true })
+    node.select()
+    node.setSelectionRange(0, promptText.length)
+  }
+
+  const copy = async () => {
+    if (copying) return
+    setCopying(true)
+    try {
+      await writeTextToClipboard(promptText)
+      toast.success('已尝试写入剪贴板', {
+        description: '若粘贴没有内容，请在文本框中按 ⌘C / Ctrl+C 手动复制（文本已全选）',
+      })
+    } catch {
+      toast.warning('自动复制不可用', {
+        description: '请在文本框中使用 ⌘C / Ctrl+C 复制，或下载 .txt 文件',
+      })
+    } finally {
+      setCopying(false)
+    }
+  }
+
+  const download = () => {
+    const blob = new Blob([promptText], { type: 'text/plain;charset=utf-8' })
+    saveBlob(blob, `openontology-远程助手邀请函-${new Date().toISOString().slice(0, 10)}.txt`)
+  }
+
+  return (
+    <DialogShell
+      title="邀请函 · 远程助手接入指引"
+      description="把下面这段话完整发给你要接入的 AI 助手（粘贴到它的对话框发送），它会自己完成接入。"
+      size="wide"
+      onClose={onClose}
+      contentClassName="h-[min(82dvh,42rem)]"
+      onOpenAutoFocus={event => { event.preventDefault(); setTimeout(selectAll, 0) }}
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-3 p-5">
+        <textarea
+          ref={textareaRef}
+          readOnly
+          value={promptText}
+          data-testid="remote-agent-invite-prompt"
+          onFocus={selectAll}
+          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-code-bg)] p-3 font-mono text-xs leading-5 text-[var(--color-code-fg)] outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+        />
+        <p className="text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+          邀请码 24 小时内有效、一次性，仅发给要接入的助手。对方在内网 / NAT 后时会自动选择「回连」方式接入，无需暴露端口。
+        </p>
+      </div>
+      <footer className="flex shrink-0 justify-center gap-3 border-t border-[var(--color-border)] px-5 py-3.5">
+        <button
+          type="button"
+          onClick={download}
+          className="inline-flex min-h-10 min-w-28 items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] bg-white px-4 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Download size={13} /> 下载 .txt
+        </button>
+        <button
+          type="button"
+          onClick={() => void copy()}
+          data-testid="remote-agent-invite-copy"
+          disabled={copying}
+          className="inline-flex min-h-10 min-w-28 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+        >
+          {copying ? <Loader2 size={13} className="animate-spin" /> : <Copy size={13} />} 复制邀请函
+        </button>
+      </footer>
+    </DialogShell>
+  )
+}
+
+/** 远程助手面板：主路径 = 邀请函自助接入（远端 agent 凭一次性邀请码注册，
+ *  直连/回连双模式自选）；手动配置为高级路径（直连声明式注册）。
+ *  列表与邀请状态 5s 轮询：对方接入后无需手动刷新即出现。 */
 function RemoteAgentsPanel({ onError, onChanged }: {
   onError: (message: string) => void
   onChanged: () => void
 }) {
   const [agents, setAgents] = useState<RemoteAgent[]>([])
+  const [invites, setInvites] = useState<RemoteAgentInvite[]>([])
   const [loaded, setLoaded] = useState(false)
+  const [creatingInvite, setCreatingInvite] = useState(false)
+  const [invitePromptText, setInvitePromptText] = useState<string | null>(null)
   const [form, setForm] = useState<typeof EMPTY_FORM | null>(null)
   const [saving, setSaving] = useState(false)
   const [testingId, setTestingId] = useState('')
   const [testMessage, setTestMessage] = useState('')
+  const [contractOpen, setContractOpen] = useState(false)
 
-  const reload = () => {
+  const reload = (silent = false) => {
     superAssistantApi.listRemoteAgents()
       .then(data => { setAgents(data); setLoaded(true) })
-      .catch(err => onError(errorText(err, '远程助手加载失败')))
+      .catch(err => { if (!silent) onError(errorText(err, '远程助手加载失败')) })
+    superAssistantApi.listRemoteAgentInvites()
+      .then(setInvites)
+      .catch(err => { if (!silent) onError(errorText(err, '邀请加载失败')) })
   }
 
-  useEffect(reload, [])
+  useEffect(() => {
+    reload()
+    const timer = setInterval(() => reload(true), 5000)
+    return () => clearInterval(timer)
+  }, [])
 
-  const startCreate = () => {
-    setTestMessage('')
-    setForm({ ...EMPTY_FORM })
+  const createInvite = async () => {
+    if (creatingInvite) return
+    setCreatingInvite(true)
+    try {
+      const created = await superAssistantApi.createRemoteAgentInvite()
+      setInvitePromptText(created.prompt_text)
+      reload(true)
+    } catch (err) {
+      onError(errorText(err, '邀请生成失败'))
+    } finally {
+      setCreatingInvite(false)
+    }
+  }
+
+  const redispatchInvite = async (invite: RemoteAgentInvite) => {
+    try {
+      setInvitePromptText(await superAssistantApi.remoteAgentInvitePrompt(invite.id))
+    } catch (err) {
+      onError(errorText(err, '邀请函加载失败'))
+    }
+  }
+
+  const revokeInvite = async (invite: RemoteAgentInvite) => {
+    try {
+      await superAssistantApi.revokeRemoteAgentInvite(invite.id)
+      toast.success('邀请已撤销')
+      reload(true)
+    } catch (err) {
+      onError(errorText(err, '撤销失败'))
+    }
   }
 
   const startEdit = (agent: RemoteAgent) => {
@@ -222,31 +406,33 @@ function RemoteAgentsPanel({ onError, onChanged }: {
       token: '',
       enabled: agent.enabled,
       timeoutSeconds: agent.timeout_seconds,
+      mode: agent.mode ?? 'direct',
     })
   }
 
   const save = async () => {
     if (!form || saving) return
-    if (!form.key.trim() || !form.label.trim() || !form.endpoint.trim()) {
-      onError('请填写 key、名称与服务地址')
+    const isDirect = form.mode === 'direct'
+    if (!form.label.trim() || (isDirect && !form.endpoint.trim())) {
+      onError('请填写名称与服务地址（key 可留空自动生成）')
       return
     }
     setSaving(true)
     try {
       const payload = {
-        key: form.key.trim(),
+        key: form.key.trim() || undefined,
         label: form.label.trim(),
         description: form.description.trim(),
-        endpoint: form.endpoint.trim(),
         enabled: form.enabled,
         timeout_seconds: form.timeoutSeconds,
-        ...(form.token.trim() ? { token: form.token.trim() } : {}),
+        ...(isDirect ? { endpoint: form.endpoint.trim() } : {}),
+        ...(isDirect && form.token.trim() ? { token: form.token.trim() } : {}),
       }
       const saved = form.id
         ? await superAssistantApi.updateRemoteAgent(form.id, payload)
         : await superAssistantApi.createRemoteAgent(payload)
       setForm(null)
-      reload()
+      reload(true)
       onChanged()
       toast.success('远程助手已保存', {
         description: `${saved.label}（${saved.key}）${saved.enabled ? '已进入委派目录' : '已停用'}`,
@@ -261,7 +447,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
   const remove = async (agent: RemoteAgent) => {
     try {
       await superAssistantApi.deleteRemoteAgent(agent.id)
-      reload()
+      reload(true)
       onChanged()
       toast.success(`已删除远程助手 ${agent.label}`)
     } catch (err) {
@@ -292,64 +478,142 @@ function RemoteAgentsPanel({ onError, onChanged }: {
             <div className="min-w-0 flex-1">
               <p className="text-xs font-semibold text-[var(--color-text-primary)]">远程助手</p>
               <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-                声明式注册外部 agent：填写 key/名称/端点即进入超级助手的委派目录，
-                以 <code className="font-mono">delegate_to_assistant</code> 调用并按会话续聊。契约与安全策略见端点字段说明。
+                把其他 AI 助手接进来，超级助手就能把合适的任务委派给它们。生成一封邀请函发给对方即可自动接入；
+                对方在内网时也能用「回连」方式接入，无需暴露端口。
               </p>
             </div>
-            <button
-              type="button"
-              onClick={startCreate}
-              className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg border border-[var(--color-border)] bg-white px-2.5 text-xs text-brand-ink transition-colors hover:bg-brand-soft"
-            >
-              <Plus size={13} /> 新增
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setForm(form ? null : { ...EMPTY_FORM })}
+                className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-[var(--color-border)] bg-white px-2.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
+              >
+                <SlidersHorizontal size={13} /> {form ? '收起手动配置' : '手动配置'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void createInvite()}
+                data-testid="remote-agent-invite-create"
+                disabled={creatingInvite}
+                className="inline-flex min-h-9 items-center gap-1 rounded-lg bg-brand px-3 text-xs font-medium text-white transition-colors hover:bg-brand-deep disabled:opacity-50"
+              >
+                {creatingInvite ? <Loader2 size={13} className="animate-spin" /> : <MailPlus size={13} />} 邀请 AI 助手接入
+              </button>
+            </div>
           </div>
+
+          {invites.length > 0 && (
+            <div className="mt-3 space-y-2" data-testid="remote-agent-invite-list">
+              {invites.map(invite => {
+                const meta = inviteStatusMeta(invite.status)
+                const dimmed = invite.status !== 'pending'
+                return (
+                  <div
+                    key={invite.id}
+                    className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${dimmed ? 'border-[var(--color-border)] opacity-70' : 'border-brand/30 bg-brand-soft/40'}`}
+                  >
+                    <Badge variant={meta.variant} className="shrink-0 text-[10px]">{meta.label}</Badge>
+                    <p className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-secondary)]">
+                      {invite.status === 'pending' && <>邀请码{inviteExpiryText(invite.expires_at)}后失效 · 发出邀请函后，等对方接入即可</>}
+                      {invite.status === 'used' && (invite.redeemed_agent_label
+                        ? `已接入：${invite.redeemed_agent_label}（${invite.redeemed_agent_key}）`
+                        : '已使用')}
+                      {invite.status === 'expired' && '邀请已过期，可重新生成'}
+                      {invite.status === 'revoked' && '邀请已撤销'}
+                    </p>
+                    {invite.status === 'pending' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void redispatchInvite(invite)}
+                          className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft"
+                        >
+                          邀请函
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void revokeInvite(invite)}
+                          className="min-h-9 rounded-lg px-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
+                        >
+                          撤销
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
 
           <div className="mt-3 space-y-2" data-testid="remote-agent-list">
             {loaded && agents.length === 0 && (
               <p className="rounded-lg bg-[var(--color-bg-base)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
-                还没有注册远程助手。点「新增」填写端点即可让超级助手委派它。
+                还没有接入远程助手。点「邀请 AI 助手接入」生成邀请函，发给对方即可；接入成功后会自动出现在这里。
               </p>
             )}
-            {agents.map(agent => (
-              <div key={agent.id} className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-2">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{agent.label}</p>
-                    <code className="shrink-0 rounded bg-brand-soft px-1 py-0.5 font-mono text-[10px] text-brand-ink">{agent.key}</code>
-                    {!agent.enabled && <span className="shrink-0 rounded bg-slate-100 px-1 py-0.5 text-[9px] text-slate-400">已停用</span>}
-                    {agent.token_set && <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">已配凭据</span>}
+            {agents.map(agent => {
+              const isPull = agent.mode === 'pull'
+              const seen = isPull ? lastSeenText(agent.last_seen_at) : null
+              const online = seen === '在线'
+              const lastTurn = isPull ? null : lastTurnText(agent.last_turn_at)
+              return (
+                <div key={agent.id} className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{agent.label}</p>
+                      <code className="shrink-0 rounded bg-brand-soft px-1 py-0.5 font-mono text-[10px] text-brand-ink">{agent.key}</code>
+                      <Badge variant={isPull ? 'info' : 'outline'} className="shrink-0 px-1.5 py-0 text-[10px]">
+                        {isPull ? '回连' : '直连'}
+                      </Badge>
+                      {isPull ? (
+                        <span className="flex shrink-0 items-center gap-1 text-[10px] text-[var(--color-text-tertiary)]">
+                          <span className={`h-1.5 w-1.5 rounded-full ${online ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-tertiary)]'}`} />
+                          {seen}
+                        </span>
+                      ) : (
+                        <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">{lastTurn}</span>
+                      )}
+                      {!agent.enabled && <span className="shrink-0 rounded bg-slate-100 px-1 py-0.5 text-[9px] text-slate-400">已停用</span>}
+                      {agent.token_set && <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">已配凭据</span>}
+                    </div>
+                    {agent.endpoint
+                      ? <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{agent.endpoint}</p>
+                      : <p className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]">{agent.description || '（未填写能力描述）'}</p>}
                   </div>
-                  <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{agent.endpoint}</p>
+                  <button type="button" onClick={() => test(agent)} disabled={testingId === agent.id}
+                    className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50">
+                    {testingId === agent.id ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} 测试
+                  </button>
+                  <button type="button" onClick={() => startEdit(agent)}
+                    className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft">编辑</button>
+                  <button type="button" onClick={() => void remove(agent)} aria-label={`删除 ${agent.label}`}
+                    className="min-h-9 rounded-lg px-2 text-xs text-red-600 transition-colors hover:bg-red-50">
+                    <Trash2 size={12} />
+                  </button>
                 </div>
-                <button type="button" onClick={() => test(agent)} disabled={testingId === agent.id}
-                  className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50">
-                  {testingId === agent.id ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} 测试
-                </button>
-                <button type="button" onClick={() => startEdit(agent)}
-                  className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft">编辑</button>
-                <button type="button" onClick={() => void remove(agent)} aria-label={`删除 ${agent.label}`}
-                  className="inline-flex min-h-9 items-center rounded-lg px-2 text-xs text-red-600 transition-colors hover:bg-red-50">
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))}
+              )
+            })}
           </div>
 
           {form && (
             <div className="mt-3 space-y-3 rounded-lg bg-[var(--color-bg-base)] p-3" data-testid="remote-agent-form">
+              <p className="text-[11px] text-[var(--color-text-tertiary)]">
+                {form.id && form.mode === 'pull'
+                  ? '回连助手经邀请函接入，无需端点与凭据；这里只调整名称、描述与超时。'
+                  : '手动配置适合已经有现成 HTTP 服务的助手（直连）。普通 AI 助手推荐用上方「邀请 AI 助手接入」。'}
+              </p>
               <div className="grid gap-3 sm:grid-cols-2">
-                <label className="block text-xs text-[var(--color-text-secondary)]">key <span className="text-red-500">*</span>
+                <label className="block text-xs text-[var(--color-text-secondary)]">key（留空自动生成）
                   <input
                     data-testid="remote-agent-key"
                     value={form.key}
                     disabled={!!form.id}
                     onChange={event => setForm({ ...form, key: event.target.value })}
                     placeholder="remote.my-agent"
-                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10 disabled:opacity-60"
                   />
                   <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-                    以 remote. 开头（小写字母/数字/-/_），创建后不可改。
+                    以 remote. 开头（小写字母/数字/-/_），创建后不可改；留空按名称自动生成。
                   </span>
                 </label>
                 <label className="block text-xs text-[var(--color-text-secondary)]">名称 <span className="text-red-500">*</span>
@@ -358,7 +622,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                     value={form.label}
                     onChange={event => setForm({ ...form, label: event.target.value })}
                     placeholder="例如：客服知识库助手"
-                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
                   />
                 </label>
               </div>
@@ -368,41 +632,74 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                   value={form.description}
                   onChange={event => setForm({ ...form, description: event.target.value })}
                   placeholder="它擅长什么、适合什么任务（子助手看不到对话历史，描述要自包含）"
-                  className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                  className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
                 />
               </label>
-              <label className="block text-xs text-[var(--color-text-secondary)]">回合端点 <span className="text-red-500">*</span>
-                <input
-                  data-testid="remote-agent-endpoint"
-                  value={form.endpoint}
-                  onChange={event => setForm({ ...form, endpoint: event.target.value })}
-                  placeholder="https://agent.example.com/turn"
-                  className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
-                />
-                <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-                  POST JSON：{"{ message, session_ref }"} → {"{ status, content, session_ref }"}（首回合由远端签发
-                  session_ref 续聊复用）。生产环境按 SSRF 策略拒绝内网地址。
-                </span>
-              </label>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="block text-xs text-[var(--color-text-secondary)]">Bearer Token
-                  <input
-                    data-testid="remote-agent-token"
-                    type="password"
-                    value={form.token}
-                    onChange={event => setForm({ ...form, token: event.target.value })}
-                    placeholder={form.id && agents.find(a => a.id === form.id)?.token_set ? '已保存（留空保留）' : '可留空'}
-                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
-                  />
-                  <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">加密存储、永不回显。</span>
-                </label>
+              {form.mode === 'direct' && (
+                <>
+                  <label className="block text-xs text-[var(--color-text-secondary)]">回合端点 <span className="text-red-500">*</span>
+                    <input
+                      data-testid="remote-agent-endpoint"
+                      value={form.endpoint}
+                      onChange={event => setForm({ ...form, endpoint: event.target.value })}
+                      placeholder="https://agent.example.com/turn"
+                      className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                    />
+                    <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                      平台将向该地址 POST 任务并等待答复；生产环境按 SSRF 策略拒绝内网地址。
+                    </span>
+                  </label>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setContractOpen(!contractOpen)}
+                      className="text-[10px] text-brand-ink underline-offset-2 transition-colors hover:bg-brand-soft hover:underline"
+                    >
+                      {contractOpen ? '收起技术契约' : '查看技术契约'}
+                    </button>
+                    {contractOpen && (
+                      <pre className="mt-1.5 overflow-x-auto rounded-lg bg-[var(--color-code-bg)] p-3 font-mono text-[10px] leading-4 text-[var(--color-code-fg)]">
+                        {REMOTE_AGENT_CONTRACT}
+                      </pre>
+                    )}
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-xs text-[var(--color-text-secondary)]">Bearer Token
+                      <input
+                        data-testid="remote-agent-token"
+                        type="password"
+                        value={form.token}
+                        onChange={event => setForm({ ...form, token: event.target.value })}
+                        placeholder={form.id && agents.find(a => a.id === form.id)?.token_set ? '已保存（留空保留）' : '可留空'}
+                        className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                      />
+                      <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">加密存储、永不回显。</span>
+                    </label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="block text-xs text-[var(--color-text-secondary)]">超时（秒）
+                        <input
+                          type="number" min={10} max={600}
+                          value={form.timeoutSeconds}
+                          onChange={event => setForm({ ...form, timeoutSeconds: Number(event.target.value) || 120 })}
+                          className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                        />
+                      </label>
+                      <label className="flex items-end pb-1 text-xs text-[var(--color-text-secondary)]">
+                        <input type="checkbox" checked={form.enabled} onChange={event => setForm({ ...form, enabled: event.target.checked })} className="mr-2 h-4 w-4 accent-brand" />
+                        启用
+                      </label>
+                    </div>
+                  </div>
+                </>
+              )}
+              {form.mode === 'pull' && (
                 <div className="grid grid-cols-2 gap-3">
                   <label className="block text-xs text-[var(--color-text-secondary)]">超时（秒）
                     <input
                       type="number" min={10} max={600}
                       value={form.timeoutSeconds}
                       onChange={event => setForm({ ...form, timeoutSeconds: Number(event.target.value) || 120 })}
-                      className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                      className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
                     />
                   </label>
                   <label className="flex items-end pb-1 text-xs text-[var(--color-text-secondary)]">
@@ -410,7 +707,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                     启用
                   </label>
                 </div>
-              </div>
+              )}
             </div>
           )}
           {testMessage && (
@@ -420,17 +717,25 @@ function RemoteAgentsPanel({ onError, onChanged }: {
           )}
         </section>
       </div>
-      <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
-        <button onClick={() => setForm(null)} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">取消</button>
-        <button
-          onClick={() => void save()}
-          data-testid="remote-agent-save-button"
-          disabled={saving || !form}
-          className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-        >
-          {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
-        </button>
-      </footer>
+      {invitePromptText && (
+        <InvitePromptModal
+          promptText={invitePromptText}
+          onClose={() => setInvitePromptText(null)}
+        />
+      )}
+      {form && (
+        <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
+          <button onClick={() => setForm(null)} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">取消</button>
+          <button
+            onClick={() => void save()}
+            data-testid="remote-agent-save-button"
+            disabled={saving || !form}
+            className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          >
+            {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
+          </button>
+        </footer>
+      )}
     </div>
   )
 }
@@ -599,7 +904,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
                 value={baseUrl}
                 onChange={event => setBaseUrl(event.target.value)}
                 placeholder="http://127.0.0.1:8080"
-                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
               />
               <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
                 自托管实例的 API 地址（默认端口 8080）；生产环境按 SSRF 策略拒绝内网地址。
@@ -612,7 +917,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
                 value={token}
                 onChange={event => setToken(event.target.value)}
                 placeholder={config?.token_set ? '已保存（留空保留）' : 'mul_…（在 Multica 网页 Settings → API Token 创建）'}
-                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
               />
               <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
                 加密存储、永不回显；只用 PAT，不保存登录验证码。

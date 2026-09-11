@@ -111,4 +111,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0103_ontology_readpath_perf_indexes"]
+    assert heads == ["0104_super_assistant_remote_agent_invites"]
