@@ -93,7 +93,7 @@ export function Modal({
 
         {(title || description) && (
           <header className={cn(
-            'flex shrink-0 items-start gap-3 px-6 pb-3 pt-5 pr-14',
+            'flex shrink-0 items-center gap-3 px-6 pb-3 pt-5 pr-14',
             headerClassName,
           )}>
             {headerIcon && (
@@ -101,7 +101,7 @@ export function Modal({
                 {headerIcon}
               </div>
             )}
-            <div className="min-w-0 pt-2">
+            <div className="min-w-0">
               {title && (
                 <h3 id={titleId} className="text-base font-semibold tracking-[-0.01em] text-[var(--color-text-primary)]">
                   {title}

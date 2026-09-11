@@ -71,12 +71,14 @@ function DialogHeader({
   ...props
 }: React.HTMLAttributes<HTMLDivElement> & {
   /** 标准图标盒（h-10 w-10 rounded-xl，默认品牌底）；传入后 children 自动进入
-      文字列并对齐光学中心：标题行(leading-6=24px) + pt-2(8px) 与 40px 图标盒同心 */
+      文字列，行 items-center 使图标盒垂直居中于「标题+描述」整块：
+      标准两行块高 52px，(52-40)/2=6px 上下对称；纯标题块(24px)时行高撑到
+      40px，标题行中心仍与图标盒中心重合 */
   icon?: React.ReactNode
   iconClassName?: string
 }) {
   return (
-    <div className={cn('mb-4 flex items-start gap-3 pr-14', className)} {...props}>
+    <div className={cn('mb-4 flex items-center gap-3 pr-14', className)} {...props}>
       {icon && (
         <div
           className={cn(
@@ -87,7 +89,7 @@ function DialogHeader({
           {icon}
         </div>
       )}
-      {icon ? <div className="min-w-0 pt-2">{children}</div> : children}
+      {icon ? <div className="min-w-0">{children}</div> : children}
     </div>
   )
 }

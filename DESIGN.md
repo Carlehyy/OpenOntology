@@ -151,10 +151,12 @@ success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引�
 ### 4.5 弹窗头部（图标 + 标题 + 描述唯一模板）
 
 - **几何唯一**（`DialogHeader` 的 `icon` props 与 `Modal` 内建头部同规格）：
-  头部行 `flex items-start gap-3 pr-14`（pr-14 为右上角关闭符预留安全区）；
+  头部行 `flex items-center gap-3 pr-14`（pr-14 为右上角关闭符预留安全区）；
   图标盒 `h-10 w-10 rounded-xl`、图形统一 lucide `size={18}`；
-  文字列 `min-w-0 pt-2`——标题行高 24px，(40−24)/2=8px 使标题行光学中心
-  与图标盒中心精确重合；标题 `text-base font-semibold leading-6`，
+  文字列 `min-w-0`——行 items-center 使**图标盒垂直居中于「标题+描述」
+  整块**：标准两行块高 52px，图标盒上下各留 (52−40)/2=6px；纯标题块
+  （24px）时行高撑到 40px，标题行中心仍与图标盒中心重合。
+  标题 `text-base font-semibold leading-6`，
   描述 `text-sm leading-6 mt-1`。
 - **色彩语义**：图标盒底色按弹窗语义选择并经 `iconClassName` 传入——
   创建/发布类默认品牌底 `bg-brand-soft text-brand-ink`；危险/警告/信息
