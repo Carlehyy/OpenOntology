@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import desc
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.config import settings
 from app.ontologies import cache as ontology_cache
@@ -96,6 +96,45 @@ def _version_payload(version: OntologyVersion, latest_trial: OntologyTrialRun | 
 def _json_safe(value: Any) -> Any:
     """快照只保留 JSON 值；不把 ORM/时间对象渗入 JSON 列。"""
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+# 版本树/版本列表只消费标量元数据与 change_summary/snapshot_semantic 摘要，
+# 六个全量快照 JSON 列在加载时 defer，避免逐行解压大 TOAST 载荷。
+_VERSION_LISTING_DEFERS = (
+    defer(OntologyVersion.snapshot_entities),
+    defer(OntologyVersion.snapshot_relations),
+    defer(OntologyVersion.snapshot_logic),
+    defer(OntologyVersion.snapshot_actions),
+    defer(OntologyVersion.snapshot_formal),
+    defer(OntologyVersion.canvas_layout),
+)
+
+
+def _latest_trials_by_version(
+    db: Session,
+    ontology_id: str,
+    version_ids: list[str] | None = None,
+) -> dict[str, OntologyTrialRun]:
+    """每个版本只保留最近一次试跑。
+
+    两段式加载：先用窄列 (id, version_id) 按时间倒序选出每个版本的最近
+    试跑，再只对入选行做整行加载——历史试跑不再解压 result_json 大列。
+    """
+    query = db.query(
+        OntologyTrialRun.id,
+        OntologyTrialRun.version_id,
+    ).filter(OntologyTrialRun.ontology_id == ontology_id)
+    if version_ids is not None:
+        query = query.filter(OntologyTrialRun.version_id.in_(version_ids))
+    latest_ids: dict[str, str] = {}
+    for run_id, version_id in query.order_by(
+            desc(OntologyTrialRun.created_at)).all():
+        latest_ids.setdefault(version_id, run_id)
+    if not latest_ids:
+        return {}
+    runs = db.query(OntologyTrialRun).filter(
+        OntologyTrialRun.id.in_(latest_ids.values())).all()
+    return {run.version_id: run for run in runs}
 
 
 def _with_canvas_layout(snapshot: dict | None, layout: dict | None) -> dict:
@@ -446,22 +485,23 @@ def list_versions(
     total = db.query(OntologyVersion).filter(
         OntologyVersion.ontology_id == ontology_id
     ).count()
-    versions = db.query(OntologyVersion).filter(
+    versions = db.query(OntologyVersion).options(
+        *_VERSION_LISTING_DEFERS,
+    ).filter(
         OntologyVersion.ontology_id == ontology_id
     ).order_by(desc(OntologyVersion.created_at)).offset(offset).limit(limit).all()
-    trial_by_version: dict[str, OntologyTrialRun] = {}
-    if versions:
-        for run in db.query(OntologyTrialRun).filter(
-                OntologyTrialRun.version_id.in_([item.id for item in versions])
-        ).order_by(desc(OntologyTrialRun.created_at)).all():
-            trial_by_version.setdefault(run.version_id, run)
-    db.commit()
-    return {
+    trial_by_version = _latest_trials_by_version(
+        db, ontology_id, [item.id for item in versions]) if versions else {}
+    payload = {
         "data": [_version_payload(v, trial_by_version.get(v.id)) for v in versions],
         "total": total, "limit": limit, "offset": offset,
         "current_release_id": current.id,
         "current_release_version": current.version_number,
     }
+    # payload 必须在 commit 前构建：expire_on_commit 会让后续属性访问
+    # 触发逐行整列刷新（版本行等于被加载两遍）。
+    db.commit()
+    return payload
 
 
 def get_current_release_workspace(
@@ -504,22 +544,23 @@ def get_version_tree(
         if project is None:
             raise HTTPException(404, "Ontology not found")
         current = _current_release(db, project)
-        versions = db.query(OntologyVersion).filter(
+        versions = db.query(OntologyVersion).options(
+            *_VERSION_LISTING_DEFERS,
+        ).filter(
             OntologyVersion.ontology_id == ontology_id,
         ).order_by(OntologyVersion.created_at.asc()).all()
-        latest_trials: dict[str, OntologyTrialRun] = {}
-        for run in db.query(OntologyTrialRun).filter(
-                OntologyTrialRun.ontology_id == ontology_id,
-        ).order_by(desc(OntologyTrialRun.created_at)).all():
-            latest_trials.setdefault(run.version_id, run)
-        db.commit()
-        return {"data": {
+        latest_trials = _latest_trials_by_version(db, ontology_id)
+        payload = {"data": {
             "current_release_id": current.id,
             "current_release_number": current.version_number,
             "current_release_version": current.version_number,
             "versions": [_version_payload(item, latest_trials.get(item.id))
                          for item in versions],
         }}
+        # payload 必须在 commit 前构建：expire_on_commit 会让后续属性访问
+        # 触发逐行整列刷新（版本行等于被加载两遍）。
+        db.commit()
+        return payload
 
     # 详情页版本树高频入口：短 TTL 响应缓存 + 版本行写路径 bump 换键
     # （fail-open）。jsonable_encoder 归一，缓存命中与直查逐字节一致；
