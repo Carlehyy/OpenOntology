@@ -837,7 +837,7 @@ export default function SuperAssistantPage() {
             <SelectContent>
               {models.map(model => (
                 <SelectItem key={model.id} value={model.id} className="text-xs">
-                  {model.name} · {model.models?.[0]}
+                  {model.models?.[0] && model.name !== model.models[0] ? `${model.name} · ${model.models[0]}` : model.name}
                 </SelectItem>
               ))}
               {hasMenuAccess(user, 'models') && (

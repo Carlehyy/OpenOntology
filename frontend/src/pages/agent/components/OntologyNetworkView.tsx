@@ -51,7 +51,7 @@ const NETWORK_CARD_WIDTH = 316
 /**
  * 卡片设计高度。内容自上而下：头部 / 属性区（至多 4 行，见 visibleProperties）/
  * 底部关系·动作·函数三行。368 时代属性区满配时内容实测溢出约 10px，
- * 底部「激活函数」行被 overflow-hidden 裁掉；392 给真实环境字体度量差异留出余量，
+ * 底部「计算函数」行被 overflow-hidden 裁掉；392 给真实环境字体度量差异留出余量，
  * dagre 布局消费同一常量，间距自动跟随。
  */
 const NETWORK_CARD_HEIGHT = 392
@@ -286,7 +286,7 @@ export function OntologyNetworkView({
           { icon: Boxes, label: `${objectTypes.length} 对象实体`, className: 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-card text-[var(--color-info)]' },
           { icon: Link2, label: `${linkTypes.length} 实体关系`, className: 'border-viz-cyan-soft bg-card text-viz-cyan' },
           { icon: Zap, label: `${actions.length} 执行动作`, className: 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-card text-[var(--color-warning)]' },
-          { icon: FunctionSquare, label: `${functions.length} 激活函数`, className: 'border-viz-violet-soft bg-card text-viz-violet' },
+          { icon: FunctionSquare, label: `${functions.length} 计算函数`, className: 'border-viz-violet-soft bg-card text-viz-violet' },
         ].map(stat => (
           <span key={stat.label} className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-medium shadow-sm backdrop-blur ${stat.className}`}>
             <stat.icon size={12} />{stat.label}
@@ -432,7 +432,7 @@ export function OntologyNetworkView({
             const degree = degreeByObject.get(objectType.id) || 0
             const instances = instancesCount(objectType.id)
             // 属性区至多占 4 行：超过 4 个属性时展示 3 行 + 「+N 更多」，属性块高度
-            // 恒定有界（MYW-61：4 行 + 更多行的满配内容曾把底部「激活函数」行挤出卡片）。
+            // 恒定有界（MYW-61：4 行 + 更多行的满配内容曾把底部「计算函数」行挤出卡片）。
             const propertyLineCap = objectType.properties.length > 4 ? 3 : 4
             const visibleProperties = objectType.properties.slice(0, propertyLineCap)
             const remainingProperties = objectType.properties.length - visibleProperties.length
@@ -541,14 +541,14 @@ export function OntologyNetworkView({
                     </div>
                     <div className="flex min-w-0 items-center gap-1.5">
                       <FunctionSquare size={12} className="shrink-0 text-viz-violet" />
-                      <span className="shrink-0 text-[10px] font-semibold text-[var(--color-text-tertiary)]">激活函数</span>
+                      <span className="shrink-0 text-[10px] font-semibold text-[var(--color-text-tertiary)]">计算函数</span>
                       <div className="flex min-w-0 flex-1 gap-1 overflow-hidden">
                         {functionItems.slice(0, 2).map(fn => (
                           <span key={fn.id} className="truncate rounded-full border border-viz-violet-soft bg-viz-violet-soft px-2 py-0.5 text-[10px] font-medium text-viz-violet">
                             {trimLabel(itemLabel(fn), 8)}
                           </span>
                         ))}
-                        {functionItems.length === 0 && <span className="text-[10px] text-[var(--color-text-tertiary)]">暂无激活函数</span>}
+                        {functionItems.length === 0 && <span className="text-[10px] text-[var(--color-text-tertiary)]">暂无计算函数</span>}
                         {functionItems.length > 2 && <span className="text-[10px] font-medium text-[var(--color-text-tertiary)]">+{functionItems.length - 2}</span>}
               </div>
             </div>

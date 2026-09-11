@@ -202,7 +202,7 @@ function DependencyPicker({
   const selected = items.find(item => item.id === value)
   const isFunction = kind === 'function'
   const Icon = isFunction ? FunctionSquare : ShieldCheck
-  const title = isFunction ? '激活函数' : '哨兵规则'
+  const title = isFunction ? '计算函数' : '哨兵规则'
   const helper = isFunction ? '选择后高亮直接使用该函数的对象、属性和动作' : '选择后查看规则绑定、条件属性与动作覆盖范围'
   const builtInCount = items.filter(item => item.source === 'release_builtin').length
   const dynamicCount = items.filter(item => item.source === 'assistant_dynamic').length
@@ -249,7 +249,7 @@ function DependencyPicker({
       <button
         ref={triggerRef}
         type="button"
-        aria-label={isFunction ? '查看激活函数使用关系' : '查看哨兵规则覆盖范围'}
+        aria-label={isFunction ? '查看计算函数使用关系' : '查看哨兵规则覆盖范围'}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => onOpenChange(!open)}
@@ -260,7 +260,7 @@ function DependencyPicker({
         className={`inline-flex h-9 w-[224px] items-center gap-2 rounded-lg border px-2.5 text-left text-xs outline-none transition-all duration-200 focus-visible:ring-2 focus-visible:ring-offset-1 ${open || selected ? tone.active : 'border-border bg-card text-muted-foreground hover:border-border hover:bg-muted focus-visible:ring-ring'}`}
       >
         <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ring-1 ${tone.icon}`}><Icon size={13} /></span>
-        <span className="min-w-0 flex-1 truncate">{selected?.label || (isFunction ? '激活函数 · 查看使用关系' : '哨兵规则 · 查看覆盖范围')}</span>
+        <span className="min-w-0 flex-1 truncate">{selected?.label || (isFunction ? '计算函数 · 查看使用关系' : '哨兵规则 · 查看覆盖范围')}</span>
         <ChevronDown size={13} className={`shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
       </button>
 
@@ -402,7 +402,7 @@ function DetailPanel({ workspace, selection, onClose }: {
       title: item.displayName || item.name,
       technicalName: item.name,
       icon: <Braces size={17} />,
-      content: <dl><DetailRow label="类型" value="实体属性" /><DetailRow label="所属对象" value={parent.displayName || parent.name} /><DetailRow label="数据类型" value={<Pill tone="violet">{item.type || 'unknown'}</Pill>} /><DetailRow label="是否必填" value={item.required ? '是' : '否'} /><DetailRow label="来源" value={item.source === 'computed' ? '函数派生' : '存储字段'} /><DetailRow label="激活函数" value={fn?.displayName || fn?.name} /><DetailRow label="描述" value={item.description} /></dl>,
+      content: <dl><DetailRow label="类型" value="实体属性" /><DetailRow label="所属对象" value={parent.displayName || parent.name} /><DetailRow label="数据类型" value={<Pill tone="violet">{item.type || 'unknown'}</Pill>} /><DetailRow label="是否必填" value={item.required ? '是' : '否'} /><DetailRow label="来源" value={item.source === 'computed' ? '函数派生' : '存储字段'} /><DetailRow label="计算函数" value={fn?.displayName || fn?.name} /><DetailRow label="描述" value={item.description} /></dl>,
     }
   } else {
     const item = workspace.actions.find(action => action.id === selection.id)

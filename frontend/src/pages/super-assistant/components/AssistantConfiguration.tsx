@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FileCode2, FileText, Folder, Loader2, Pencil, PlugZap, Plus,
-  Save, Trash2, Upload, Wrench, X,
+  Save, Sparkles, Trash2, Upload, Wrench, X,
 } from 'lucide-react'
 
 import {
@@ -34,7 +34,7 @@ export { errorText }
 // 薄封装 ui/dialog：统一配置域弹层的头部与尺寸语言；
 // 遮罩、Esc 关闭与焦点管理交给 Radix，不再自绘 fixed 弹层和焦点陷阱。
 // （外部集成弹层等同语言复用，故导出）
-export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus }: {
+export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, icon }: {
   title: string
   description?: string
   size?: 'default' | 'large' | 'wide'
@@ -44,6 +44,8 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
   contentClassName?: string
   /** 覆盖 Radix 默认的首个可聚焦元素聚焦（如聚焦首个输入框而非左栏 tab） */
   onOpenAutoFocus?: (event: Event) => void
+  /** 标准头部图标盒（DESIGN.md §4.5：h-10 w-10 rounded-xl 品牌底 + 18px lucide） */
+  icon?: React.ReactNode
 }) {
   const sizeClass = {
     default: 'max-h-[90dvh] w-[min(92vw,36rem)]',
@@ -57,10 +59,13 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
         onOpenAutoFocus={onOpenAutoFocus}
         className={`flex flex-col overflow-hidden p-0 ${sizeClass} ${contentClassName ?? ''}`}
       >
-        <DialogHeader className="mb-0 shrink-0 border-b border-[var(--color-border)] px-5 py-4 pr-12">
+        <DialogHeader
+          icon={icon}
+          className="mb-0 shrink-0 border-b border-[var(--color-border)] px-5 py-4 pr-12"
+        >
           <div>
-            <DialogTitle className="text-sm">{title}</DialogTitle>
-            {description && <DialogDescription className="text-xs">{description}</DialogDescription>}
+            <DialogTitle className="text-base font-semibold leading-6">{title}</DialogTitle>
+            {description && <DialogDescription className="mt-1 text-sm leading-6">{description}</DialogDescription>}
           </div>
         </DialogHeader>
         {children}
@@ -97,7 +102,7 @@ function SkillCreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved:
   }
 
   return (
-    <DialogShell title="新建 Skill" description="系统会生成标准 SKILL.md，并在独立目录中保存该技能。" onClose={onClose}>
+    <DialogShell title="新建 Skill" description="系统会生成标准 SKILL.md，并在独立目录中保存该技能。" onClose={onClose} icon={<Sparkles size={18} />}>
       <div className="flex-1 space-y-4 overflow-y-auto p-5">
         <label className="block text-xs text-[var(--color-text-secondary)]">技能名称 <span className="text-red-500">*</span>
           <input value={name} onChange={event => setName(event.target.value.toLowerCase().replace(/[_\s]+/g, '-'))} placeholder="research-helper"
@@ -809,7 +814,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
                       <div className="min-w-0 flex-1">
                         <p className="truncate font-mono text-xs font-semibold text-[var(--color-text-primary)]">{skill.name}</p>
                         <p className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]">
-                          r{skill.revision} · {skill.manifest.length} files · {skill.use_count > 0 ? `使用 ${skill.use_count} 次` : '未使用'}
+                          r{skill.revision} · {skill.manifest.length} 个文件 · {skill.use_count > 0 ? `使用 ${skill.use_count} 次` : '未使用'}
                         </p>
                       </div>
                     </div>
