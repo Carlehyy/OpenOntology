@@ -562,6 +562,14 @@ export const superAssistantApi = {
   multicaWorkspaces: () =>
     apiClientV2.get<MulticaWorkspacesResult>('/super-assistant/multica/workspaces'),
 
+  // 文件夹同步（记忆宫殿）：重置长效同步令牌（明文仅此一次返回）与下载
+  // 内嵌平台地址 + 当前令牌的同步脚本（Blob）。下载依赖浏览器副作用，按
+  // AGENTS.md §5：E2E 必须断言下载文件内容，不能只断言"提示出现"。
+  resetPalaceSyncToken: () =>
+    apiClientV2.post<{ token: string }>('/super-assistant/palace/sync/token'),
+  downloadPalaceSyncScript: () =>
+    apiClientV2.get('/super-assistant/palace/sync/script', { responseType: 'blob' }) as Promise<Blob>,
+
   listRemoteAgents: () => apiClientV2.get<RemoteAgent[]>('/super-assistant/remote-agents'),
   createRemoteAgent: (body: RemoteAgentPayload) =>
     apiClientV2.post<RemoteAgent>('/super-assistant/remote-agents', body),

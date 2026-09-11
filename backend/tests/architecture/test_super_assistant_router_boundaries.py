@@ -761,9 +761,15 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 远程助手声明式注册新增 /remote-agents 的 list/create、
     # /remote-agents/{id} 的 put/delete、/remote-agents/{id}/test 的 post
     # 共 5 个操作（3 条路径）；multica 配置弹窗打开即拉取工作区列表，
-    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）
-    assert len(paths) == 49
-    assert sum(len(item) for item in paths.values()) == 70
+    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）；
+    # 文件夹同步（palace_sync.py 子路由）新增 /palace/sync/files 的
+    # list/upload、/palace/sync/files/{id} 的 delete、/palace/sync/files/{id}
+    # 的 replace、/palace/sync/folders 的 list/create、/palace/sync/folders
+    # /{id} 的 delete 共 7 个操作（5 条路径，X-Palace-Sync-Token 令牌鉴权），
+    # 以及 /palace/sync/script 的 GET 与 /palace/sync/token 的 POST 共 2 个
+    # 操作（2 条路径，浏览器侧 JWT 鉴权）
+    assert len(paths) == 56
+    assert sum(len(item) for item in paths.values()) == 79
     assert hashlib.sha256(payload).hexdigest() == (
-        "1df9a7a59e105004f771cbded5241b7d5f6a4dbea5468a427fc099cfa44d2dfc"
+        "cbb2671113c052cef0679f94c7cacd034520de70f45acc4ff7ebeb810d73f656"
     )
