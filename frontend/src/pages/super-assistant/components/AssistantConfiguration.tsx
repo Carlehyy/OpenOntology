@@ -26,6 +26,7 @@ import {
 import { ApprovalTab, EvolutionPendingBadge, MemoryTab } from './AssistantEvolution'
 import { errorText } from './assistantPanelUtils'
 import ConfirmActionDialog from './ConfirmActionDialog'
+import { groupAssistantTools } from './toolLogic'
 
 export { errorText }
 
@@ -525,39 +526,52 @@ function ToolsTab({ tools, refreshTools }: {
   }
 
   const disabledCount = tools.filter(tool => !tool.enabled).length
+  const groups = groupAssistantTools(tools)
   return (
-    <div className="grid gap-3" data-testid="tools-tab">
+    <div className="grid gap-4" data-testid="tools-tab">
       <p className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
         内置工具 {tools.length} 个{disabledCount > 0 ? ` · 已禁用 ${disabledCount} 个` : ''}。禁用后工具不进入对话目录；MCP 工具请在 MCP 标签页按 Server 管理。
       </p>
-      {tools.map(tool => (
-        <article key={tool.name} data-testid={`tool-card-${tool.name}`} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-4 transition-colors hover:border-brand-line">
-          <div className="flex items-start gap-2">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink"><Wrench size={16} /></div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate font-mono text-xs font-semibold text-[var(--color-text-primary)]">{tool.name}</p>
-              <p className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">{TOOL_CATEGORY_LABELS[tool.category]}</p>
-            </div>
-            <SettingSwitch
-              label="启用"
-              ariaLabel={`${tool.enabled ? '禁用' : '启用'}工具 ${tool.name}`}
-              checked={tool.enabled}
-              busy={updatingName === tool.name}
-              onToggle={() => void toggleTool(tool)}
-            />
+      {groups.map(group => (
+        <section key={group.key} data-testid={`tool-group-${group.key}`}>
+          <h4 className="mb-2 flex items-baseline gap-1.5 text-[11px] font-semibold text-[var(--color-text-primary)]">
+            {group.label}
+            <span className="text-[10px] font-normal tabular-nums text-[var(--color-text-tertiary)]">
+              {group.tools.length} 个{group.disabledCount > 0 ? ` · 已禁用 ${group.disabledCount}` : ''}
+            </span>
+          </h4>
+          <div className="grid gap-3">
+            {group.tools.map(tool => (
+              <article key={tool.name} data-testid={`tool-card-${tool.name}`} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-4 transition-colors hover:border-brand-line">
+                <div className="flex items-start gap-2">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink"><Wrench size={16} /></div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-xs font-semibold text-[var(--color-text-primary)]">{tool.name}</p>
+                    <p className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">{TOOL_CATEGORY_LABELS[tool.category]}</p>
+                  </div>
+                  <SettingSwitch
+                    label="启用"
+                    ariaLabel={`${tool.enabled ? '禁用' : '启用'}工具 ${tool.name}`}
+                    checked={tool.enabled}
+                    busy={updatingName === tool.name}
+                    onToggle={() => void toggleTool(tool)}
+                  />
+                </div>
+                <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-[var(--color-text-secondary)]">{tool.description || '暂无描述'}</p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {!tool.available && tool.unavailable_reason && (
+                    <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] text-amber-800">{tool.unavailable_reason}</span>
+                  )}
+                  {!tool.enabled && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500">已禁用</span>}
+                </div>
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-[11px] text-brand-ink transition-colors hover:text-brand-deep">查看参数</summary>
+                  <ToolParameters parameters={tool.parameters} />
+                </details>
+              </article>
+            ))}
           </div>
-          <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-[var(--color-text-secondary)]">{tool.description || '暂无描述'}</p>
-          <div className="mt-2 flex flex-wrap gap-1">
-            {!tool.available && tool.unavailable_reason && (
-              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] text-amber-800">{tool.unavailable_reason}</span>
-            )}
-            {!tool.enabled && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500">已禁用</span>}
-          </div>
-          <details className="mt-2">
-            <summary className="cursor-pointer text-[11px] text-brand-ink transition-colors hover:text-brand-deep">查看参数</summary>
-            <ToolParameters parameters={tool.parameters} />
-          </details>
-        </article>
+        </section>
       ))}
     </div>
   )

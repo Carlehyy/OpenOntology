@@ -994,21 +994,28 @@ test('工具标签页：查看内置工具目录、可用性标注与启停切�
   await expect(page.getByTestId('tool-card-multica_create_task')).toContainText('写操作 · 执行前审批')
   // 条件不可用如实标注，与用户启停是两个维度
   await expect(page.getByTestId('tool-card-web_search')).toContainText('平台未配置搜索后端')
+  // 业务域分组：组头带数量（mock 夹具 memory 组仅 1 个），卡片归属正确组
+  await expect(page.getByTestId('tool-group-memory')).toContainText('记忆')
+  await expect(page.getByTestId('tool-group-memory')).toContainText('1 个')
+  await expect(page.getByTestId('tool-group-web')).toContainText('web_search')
+  await expect(page.getByTestId('tool-group-multica')).toContainText('multica_create_task')
 
   // 查看参数：展开后可见参数名与必填标记
   await page.getByTestId('tool-card-memory_search').getByText('查看参数').click()
   await expect(page.getByTestId('tool-card-memory_search').getByText('query')).toBeVisible()
 
-  // 启停切换：PATCH 落库后目录刷新，「已禁用」徽章出现
+  // 启停切换：PATCH 落库后目录刷新，「已禁用」徽章出现；组头禁用计数联动
   await page.getByRole('switch', { name: '禁用工具 memory_search' }).click()
   await expect.poll(() => mocks.toolPatchCalls).toEqual([
     { name: 'memory_search', body: { enabled: false } },
   ])
   await expect(page.getByTestId('tool-card-memory_search')).toContainText('已禁用')
+  await expect(page.getByTestId('tool-group-memory')).toContainText('已禁用 1')
   // 再启用：徽章消失
   await page.getByRole('switch', { name: '启用工具 memory_search' }).click()
   await expect.poll(() => mocks.toolPatchCalls).toHaveLength(2)
   await expect(page.getByTestId('tool-card-memory_search')).not.toContainText('已禁用')
+  await expect(page.getByTestId('tool-group-memory')).not.toContainText('已禁用')
 })
 
 test('重命名会话：点击其它处自动取消，Enter 仍可保存', async ({ page }) => {
