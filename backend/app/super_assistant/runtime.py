@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from sqlalchemy.exc import IntegrityError
+
 from app.data_channel.pipeline_tasks.dispatch import dispatch_super_assistant_reflection
 from app.data_channel.steward.workspace import WorkspaceError
 from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
@@ -344,9 +346,10 @@ def _builtin_tools(agent_mode: bool = False) -> list[dict[str, Any]]:
             },
         ])
     if settings.super_assistant_web_fetch_enabled:
-        tools.append(_WEB_FETCH_TOOL_SCHEMA)
+        # 拷贝入目录：模块级常量是跨请求共享对象，禁止原地修改泄漏
+        tools.append(dict(_WEB_FETCH_TOOL_SCHEMA))
     if str(settings.super_assistant_web_search_backend or "").strip():
-        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
+        tools.append(dict(_WEB_SEARCH_TOOL_SCHEMA))
     return tools
 
 
@@ -378,9 +381,16 @@ class UnknownBuiltinToolError(Exception):
 
 
 def _disabled_builtin_tools(db, owner_id: str) -> set[str]:
-    """用户级禁用名单：缺行或空名单=全部启用（与功能上线前行为一致）。"""
+    """用户级禁用名单：缺行或空名单=全部启用（与功能上线前行为一致）。
+
+    JSON 列做类型收敛防御：库外写入的非 list / 非 str 元素静默剔除，
+    不得让单个用户的脏数据打挂 GET /tools 或整条聊天流。
+    """
     setting = db.get(SuperAssistantToolSetting, owner_id)
-    return set(setting.disabled_tools or []) if setting else set()
+    raw = setting.disabled_tools if setting is not None else None
+    if not isinstance(raw, list):
+        return set()
+    return {item for item in raw if isinstance(item, str)}
 
 
 def builtin_tool_catalog(db, owner_id: str) -> list[dict[str, Any]]:
@@ -425,9 +435,9 @@ def builtin_tool_catalog(db, owner_id: str) -> list[dict[str, Any]]:
         seen.add(name)
     # settings 未启用时补全联网工具声明（展示为条件不可用，可预先禁用）
     if "web_fetch" not in seen:
-        catalog.append(_entry(_WEB_FETCH_TOOL_SCHEMA, available=False, reason="平台未开启网页抓取"))
+        catalog.append(_entry(dict(_WEB_FETCH_TOOL_SCHEMA), available=False, reason="平台未开启网页抓取"))
     if "web_search" not in seen:
-        catalog.append(_entry(_WEB_SEARCH_TOOL_SCHEMA, available=False, reason="平台未配置搜索后端"))
+        catalog.append(_entry(dict(_WEB_SEARCH_TOOL_SCHEMA), available=False, reason="平台未配置搜索后端"))
     multica_available = multica_service.active_config(db, owner_id) is not None
     multica_reason = None if multica_available else "未配置或未启用 multica 集成"
     catalog.extend(
@@ -447,22 +457,47 @@ def builtin_tool_catalog(db, owner_id: str) -> list[dict[str, Any]]:
 
 
 def set_builtin_tool_enabled(db, owner_id: str, tool_name: str, enabled: bool) -> dict[str, Any]:
-    """切换一个内置工具的启停并返回其目录项（条件性工具也允许预先禁用）。"""
-    catalog = builtin_tool_catalog(db, owner_id)
-    if not any(entry["name"] == tool_name for entry in catalog):
+    """切换一个内置工具的启停并返回其目录项（条件性工具也允许预先禁用）。
+
+    读-改-写对行加 FOR UPDATE（SQLite 退化为写锁语义）；并发首写撞
+    owner 主键时回滚重放一次，保证不静默丢失另一路开关、不对客户端
+    抛 500。重放仍失败则交由上层 500（属库级异常，不再兜底）。
+    """
+    if not any(entry["name"] == tool_name for entry in builtin_tool_catalog(db, owner_id)):
         raise UnknownBuiltinToolError(tool_name)
-    disabled = _disabled_builtin_tools(db, owner_id)
-    if enabled:
-        disabled.discard(tool_name)
-    else:
-        disabled.add(tool_name)
-    setting = db.get(SuperAssistantToolSetting, owner_id)
-    if setting is None:
-        db.add(SuperAssistantToolSetting(owner_id=owner_id, disabled_tools=sorted(disabled)))
-    else:
-        setting.disabled_tools = sorted(disabled)
-    db.commit()
-    return next(entry for entry in builtin_tool_catalog(db, owner_id) if entry["name"] == tool_name)
+
+    for attempt in range(2):
+        setting = (
+            db.query(SuperAssistantToolSetting)
+            .filter(SuperAssistantToolSetting.owner_id == owner_id)
+            .with_for_update()
+            .first()
+        )
+        disabled = _disabled_builtin_tools(db, owner_id)
+        if enabled:
+            disabled.discard(tool_name)
+        else:
+            disabled.add(tool_name)
+        try:
+            if setting is None:
+                db.add(SuperAssistantToolSetting(owner_id=owner_id, disabled_tools=sorted(disabled)))
+            else:
+                setting.disabled_tools = sorted(disabled)
+            db.commit()
+            break
+        except IntegrityError:
+            db.rollback()
+            if attempt == 1:
+                raise
+    # 两次目录调用之间工具可能因配置变化消失（如委派目录清空）：
+    # 按未知工具语义返回 404，而不是抛 StopIteration
+    entry = next(
+        (item for item in builtin_tool_catalog(db, owner_id) if item["name"] == tool_name),
+        None,
+    )
+    if entry is None:
+        raise UnknownBuiltinToolError(tool_name)
+    return entry
 
 
 def _run_cancelled(db, message: SuperAssistantMessage) -> bool:
@@ -538,6 +573,7 @@ def _execute_builtin_tool(
     name: str,
     arguments: dict[str, Any],
     todo_state: dict[str, list[str]] | None = None,
+    disabled_tools: set[str] | None = None,
 ) -> str:
     """全部内置工具的统一分派（含记忆/宫殿/web/子代理）。
 
@@ -746,7 +782,7 @@ def _execute_builtin_tool(
         task = str(arguments.get("task") or "").strip()
         if not task:
             return json.dumps({"error": "task 不能为空"}, ensure_ascii=False)
-        return run_subagent(db, owner_id, call_kwargs, task)
+        return run_subagent(db, owner_id, call_kwargs, task, disabled_tools=disabled_tools)
     if name in {"multica_list_agents", "multica_list_tasks", "multica_create_task"}:
         return multica_service.execute_tool(db, owner_id, name, arguments)
     return json.dumps({"error": f"未知工具 {name}"}, ensure_ascii=False)
@@ -1015,6 +1051,11 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         disabled_builtin_tools = _disabled_builtin_tools(db, owner_id)
         if disabled_builtin_tools:
             tools = [entry for entry in tools if entry.get("name") not in disabled_builtin_tools]
+        # 委派提示与反虚构观测用过滤后的目录判定：禁用 delegate_to_assistant
+        # 后不再向系统提示注入委派规则（否则模型被鼓励调用不存在的工具）
+        delegation_enabled = any(
+            entry.get("name") == delegation.DELEGATION_TOOL_NAME for entry in tools
+        )
         # 自主 agent 模式的 todo 清单状态：仅存活于本次 stream_chat，不落库
         todo_state: dict[str, list[str]] | None = {"items": []} if agent_mode else None
         max_rounds = (
@@ -1058,14 +1099,14 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 skills, memory_section, agent_mode,
                 file_section=file_section, palace_section=palace_section,
                 multica_enabled=multica_config is not None,
-                delegation_enabled=bool(delegation_schemas),
+                delegation_enabled=delegation_enabled,
             )}
         ]
         # 虚构委派的下一轮定向提醒（代码层兜底）：上条声称子助手结果而会话
         # 从未委派过时，本轮注入一次纠偏指令；真实委派过的引用不受影响
         fabrication_reminder = (
             delegation.suspected_fabrication_reminder(stored_messages)
-            if delegation_schemas
+            if delegation_enabled
             else ""
         )
         if fabrication_reminder:
@@ -1233,6 +1274,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 "assistant_message_id": assistant_message.id,
                 "call_kwargs": call_kwargs,
                 "todo_state": todo_state,
+                "disabled_tools": disabled_builtin_tools,
             }
 
             if parallel_items:
@@ -1274,6 +1316,15 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     if decision != "approved":
                         output = json.dumps({"error": "用户拒绝或确认已超时", "decision": decision}, ensure_ascii=False)
                         executed[item["id"]] = (output, decision, None)
+                        continue
+                    if (
+                        server_tuple is None
+                        and tool_run.tool_name in _disabled_builtin_tools(db, owner_id)
+                    ):
+                        # 审批等待是用户交互窗口：批准时刻复核工具启停，
+                        # 期间在配置面板禁用的内置工具不再执行
+                        output = json.dumps({"error": "工具已被用户禁用", "decision": "denied"}, ensure_ascii=False)
+                        executed[item["id"]] = (output, "denied", None)
                         continue
 
                 started = time.monotonic()

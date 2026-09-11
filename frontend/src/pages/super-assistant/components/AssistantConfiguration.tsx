@@ -532,6 +532,11 @@ function ToolsTab({ tools, refreshTools }: {
       <p className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
         内置工具 {tools.length} 个{disabledCount > 0 ? ` · 已禁用 ${disabledCount} 个` : ''}。禁用后工具不进入对话目录；MCP 工具请在 MCP 标签页按 Server 管理。
       </p>
+      {groups.length === 0 && (
+        <div className="rounded-xl border border-dashed border-[var(--color-border)] p-10 text-center text-xs text-[var(--color-text-tertiary)]">
+          <Wrench size={22} className="mx-auto mb-2" />暂无工具目录
+        </div>
+      )}
       {groups.map(group => (
         <section key={group.key} data-testid={`tool-group-${group.key}`}>
           <h4 className="mb-2 flex items-baseline gap-1.5 text-[11px] font-semibold text-[var(--color-text-primary)]">
