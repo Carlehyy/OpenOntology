@@ -11,7 +11,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { ConfirmDialog } from './ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { ProxyKeysModal, SystemDataModal } from './InterfaceDataModals'
 import { HttpPublicationModal } from './HttpPublicationModal'
@@ -432,7 +432,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-card shadow-sm">
         <div className="flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
           <div className="flex min-w-[430px] flex-[1_1_430px] items-center gap-2">
-            <input value={draft.name} onChange={event => patchDraft('name', event.target.value)} className="h-8 min-w-[180px] max-w-md flex-1 rounded-md border border-[var(--color-border)] bg-card px-3 text-sm font-semibold outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] hover:border-[var(--color-border-hover)] focus:border-ring focus:ring-2 focus:ring-ring" placeholder="接口名称" />
+            <input value={draft.name} onChange={event => patchDraft('name', event.target.value)} className="h-8 min-w-[180px] max-w-md flex-1 rounded-md border border-[var(--color-border)] bg-card px-3 text-sm font-semibold outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] hover:border-[var(--color-border-hover)] focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" placeholder="接口名称" />
             <Select value={draft.group_name || '__default__'} onValueChange={changeGroup}>
               <SelectTrigger className="h-8 w-40 shrink-0 rounded-md bg-card text-xs" title="选择或新增分类" aria-label="选择或新增分类">
                 <SelectValue />
@@ -459,7 +459,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
         <div className="shrink-0 p-4 pb-3">
           <div className={`flex overflow-hidden rounded-md border border-border bg-card focus-within:border-[var(--color-nav-bg)] ${urlError ? 'border-[color-mix(in_srgb,var(--color-danger)_40%,transparent)]' : ''}`}>
             <Select value={draft.method} onValueChange={value => patchDraft('method', value)}>
-              <SelectTrigger aria-label="请求方法" className="h-10 w-28 shrink-0 rounded-none border-0 border-r border-border bg-transparent px-3 text-xs font-bold shadow-none focus:border-ring focus:ring-0">
+              <SelectTrigger aria-label="请求方法" className="h-10 w-28 shrink-0 rounded-none border-0 border-r border-border bg-transparent px-3 text-xs font-bold shadow-none focus-visible:border-ring">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -502,7 +502,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       <Dialog open={newGroupOpen} onOpenChange={next => { if (!next) closeNewGroup() }}>
         <DialogContent className="w-[min(92vw,26rem)]">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>新增分类</DialogTitle>
               <DialogDescription>输入新的分类名称，添加后当前接口会立即选中该分类。</DialogDescription>
             </div>
@@ -510,7 +510,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           <div className="space-y-3">
           <div className="rounded-lg border border-brand-line bg-brand-soft px-3 py-2.5 text-xs leading-5 text-muted-foreground">分类会先保留在本次编辑会话中，保存当前接口后正式生效。</div>
           <label htmlFor="api-hub-new-group" className="block text-xs font-semibold text-foreground">分类名称</label>
-          <input id="api-hub-new-group" autoFocus autoComplete="off" value={newGroupName} onChange={event => { setNewGroupName(event.target.value); if (newGroupError) setNewGroupError('') }} onKeyDown={event => { if (event.key === 'Enter') addNewGroup() }} className={`h-10 w-full rounded-lg border bg-card px-3 text-sm outline-none transition-colors focus:ring-2 ${newGroupError ? 'border-[color-mix(in_srgb,var(--color-danger)_40%,transparent)] focus:border-destructive focus:ring-[var(--color-danger-bg)]' : 'border-[var(--color-border)] focus:border-ring focus:ring-ring'}`} placeholder="例如：用户中心 / 订单服务" />
+          <input id="api-hub-new-group" autoFocus autoComplete="off" value={newGroupName} onChange={event => { setNewGroupName(event.target.value); if (newGroupError) setNewGroupError('') }} onKeyDown={event => { if (event.key === 'Enter') addNewGroup() }} className={`h-10 w-full rounded-lg border bg-card px-3 text-sm outline-none transition-colors focus-visible:ring-2 ${newGroupError ? 'border-[color-mix(in_srgb,var(--color-danger)_40%,transparent)] focus-visible:border-destructive focus-visible:ring-ring' : 'border-[var(--color-border)] focus-visible:border-ring focus-visible:ring-ring'}`} placeholder="例如：用户中心 / 订单服务" />
           {newGroupError && <div role="alert" className="rounded-md bg-[var(--color-danger-bg)] px-3 py-2 text-xs text-[var(--color-danger)]">{newGroupError}</div>}
           </div>
           <DialogFooter>
@@ -525,7 +525,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       >
         <DialogContent className="w-[min(92vw,37.5rem)]">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>上游调试 cURL</DialogTitle>
             </div>
           </DialogHeader>
@@ -682,7 +682,7 @@ function BodyEditor({
         <div className="grid gap-3 lg:grid-cols-[minmax(240px,0.9fr)_minmax(360px,1.4fr)]">
           <label className="block">
             <span className="mb-1.5 block text-[11px] font-semibold text-foreground">文本字段</span>
-            <textarea value={draft.body_content} onChange={event => patchDraft('body_content', event.target.value)} className="h-32 w-full resize-none rounded-md border border-border bg-card p-3 font-mono text-xs outline-none focus:border-ring focus:ring-2 focus:ring-ring" placeholder={'description=说明\ncategory=document'} />
+            <textarea value={draft.body_content} onChange={event => patchDraft('body_content', event.target.value)} className="h-32 w-full resize-none rounded-md border border-border bg-card p-3 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" placeholder={'description=说明\ncategory=document'} />
             <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">每行一个 key=value，调用时与文件一起组成 multipart/form-data。</span>
           </label>
           <div>
@@ -696,8 +696,8 @@ function BodyEditor({
                 return (
                   <div key={index} className="rounded-lg border border-border bg-muted p-2.5">
                     <div className="flex flex-wrap items-center gap-2">
-                      <input aria-label={`第 ${index + 1} 个文件字段名`} value={field.key} onChange={event => updateFileField(index, { key: event.target.value })} className="h-8 min-w-[110px] flex-1 rounded-md border border-border bg-card px-2.5 font-mono text-xs outline-none focus:border-ring" placeholder="字段名，例如 file" />
-                      <input aria-label={`${field.key || `第 ${index + 1} 个字段`}允许的文件类型`} value={field.accept} onChange={event => updateFileField(index, { accept: event.target.value })} className="h-8 min-w-[150px] flex-[1.3] rounded-md border border-border bg-card px-2.5 font-mono text-[11px] outline-none focus:border-ring" placeholder=".pdf,image/*（可选）" />
+                      <input aria-label={`第 ${index + 1} 个文件字段名`} value={field.key} onChange={event => updateFileField(index, { key: event.target.value })} className="h-8 min-w-[110px] flex-1 rounded-md border border-border bg-card px-2.5 font-mono text-xs outline-none focus-visible:border-ring" placeholder="字段名，例如 file" />
+                      <input aria-label={`${field.key || `第 ${index + 1} 个字段`}允许的文件类型`} value={field.accept} onChange={event => updateFileField(index, { accept: event.target.value })} className="h-8 min-w-[150px] flex-[1.3] rounded-md border border-border bg-card px-2.5 font-mono text-[11px] outline-none focus-visible:border-ring" placeholder=".pdf,image/*（可选）" />
                       <label className="flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-brand-line bg-card px-2.5 text-[11px] font-medium text-brand-ink hover:bg-brand-soft focus-within:ring-2 focus-within:ring-ring">
                         <FileUp size={13} />选择文件
                         <input type="file" accept={field.accept || undefined} multiple={field.multiple} className="sr-only" onChange={event => { chooseFiles(index, event.target.files); event.currentTarget.value = '' }} />

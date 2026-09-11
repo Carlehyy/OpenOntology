@@ -63,7 +63,7 @@ export default function TargetSceneSelector({
         aria-expanded={open}
         disabled={disabled}
         onClick={() => setOpen(value => !value)}
-        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2 text-xs text-foreground transition-colors hover:border-brand-line focus:border-brand focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2 text-xs text-foreground transition-colors hover:border-brand-line focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
         title={selectedScene ? selectedScene.name : '选择草稿场景'}
       >
         <span className="max-w-[10rem] truncate">{selectedScene ? selectedScene.name : '从零新建'}</span>
@@ -99,7 +99,7 @@ export default function TargetSceneSelector({
                     }
                   }}
                   placeholder="搜索草稿场景…"
-                  className="h-8 w-full rounded-lg border border-border bg-muted pl-8 pr-2 text-xs text-foreground outline-none transition focus:border-brand focus:bg-card"
+                  className="h-8 w-full rounded-lg border border-border bg-muted pl-8 pr-2 text-xs text-foreground outline-none transition focus-visible:border-ring focus:bg-card"
                 />
               </div>
             </div>

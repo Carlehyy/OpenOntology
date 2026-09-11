@@ -57,7 +57,7 @@ export default function SessionHistoryPopover<T extends SessionHistoryItem>({
           <button
             type="button"
             onClick={() => void onCreate()}
-            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-lg bg-teal-600 px-3 text-xs font-medium text-white transition-all hover:bg-teal-700 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
+            className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-lg bg-teal-600 px-3 text-xs font-medium text-white transition-all hover:bg-teal-700 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Plus size={13} /> 新建
           </button>
@@ -119,7 +119,7 @@ export default function SessionHistoryPopover<T extends SessionHistoryItem>({
                           onClick={() => void onExport(item.id)}
                           title={`导出会话 ${title} 的完整 JSON`}
                           aria-label={`导出会话 ${title} 的完整 JSON`}
-                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 opacity-100 transition-all hover:bg-sky-50 hover:text-sky-600 disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 opacity-100 transition-all hover:bg-sky-50 hover:text-sky-600 disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                         >
                           {exportingId === item.id
                             ? <Loader2 size={14} className="animate-spin" />
@@ -132,7 +132,7 @@ export default function SessionHistoryPopover<T extends SessionHistoryItem>({
                           onClick={() => void onDelete(item.id)}
                           title={`删除会话 ${title}`}
                           aria-label={`删除会话 ${title}`}
-                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 opacity-100 transition-all hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 opacity-100 transition-all hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                         >
                           <Trash2 size={14} />
                         </button>

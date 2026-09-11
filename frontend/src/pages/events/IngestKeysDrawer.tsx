@@ -34,7 +34,7 @@ function CopyBtn({ text, small }: { text: string; small?: boolean }) {
           window.setTimeout(() => setDone(false), 1500)
         }).catch(() => setDone(false))
       }}
-      className={`inline-flex items-center gap-1 rounded-md text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)] ${small ? 'text-xs' : 'text-sm'}`}
+      className={`inline-flex items-center gap-1 rounded-md text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${small ? 'text-xs' : 'text-sm'}`}
     >
       {done ? <Check size={13} /> : <Copy size={13} />}{done ? '已复制' : '复制'}
     </button>
@@ -136,7 +136,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
           <button
             type="button"
             onClick={onClose}
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]"
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label="关闭接入管理"
           >
             <X size={20} />
@@ -212,7 +212,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
                   value={search}
                   onChange={event => setSearch(event.target.value)}
                   placeholder="搜索名称、前缀或来源"
-                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-xs text-foreground outline-none transition focus:border-[var(--color-success)] focus:ring-2 focus:ring-[var(--color-success)]"
+                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-xs text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
                 />
               </label>
               <Select
@@ -232,7 +232,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
                 value={sourceSystem}
                 onChange={event => setSourceSystem(event.target.value)}
                 placeholder="来源系统，如 MES"
-                className="h-9 rounded-lg border border-border bg-card px-3 text-xs text-foreground outline-none transition focus:border-[var(--color-success)] focus:ring-2 focus:ring-[var(--color-success)]"
+                className="h-9 rounded-lg border border-border bg-card px-3 text-xs text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
               />
               <button
                 type="button"

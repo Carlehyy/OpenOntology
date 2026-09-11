@@ -332,7 +332,7 @@ export default function OntologyDetailPage() {
       <Dialog open={showVersionModal} onOpenChange={next => { if (!next) closeVersionModal() }}>
         <DialogContent className="flex h-[min(86dvh,820px)] w-[min(92vw,64rem)] flex-col">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>本体版本演进</DialogTitle>
             </div>
           </DialogHeader>

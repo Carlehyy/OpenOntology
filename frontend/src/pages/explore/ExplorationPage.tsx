@@ -861,7 +861,7 @@ export default function ExplorationPage() {
                           data-testid="explore-trial-entry"
                           onClick={() => setPreflightOpen(true)}
                           title="权威预检通过后把草稿转为试跑态（快照冻结，真实数据仅写入隔离空间）"
-                          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-warning)] bg-[var(--color-warning)] px-3 text-xs font-medium text-[var(--color-text-inverse)] transition-colors hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-warning)]"
+                          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-warning)] bg-[var(--color-warning)] px-3 text-xs font-medium text-[var(--color-text-inverse)] transition-colors hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           <FlaskConical size={13} /> 转为试跑态
                         </button>
@@ -988,7 +988,7 @@ export default function ExplorationPage() {
                 data-testid="workspace-files-button"
                 title="查看会话文件"
                 aria-label="查看会话文件"
-                className="group relative inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] px-2 text-[11px] font-medium text-[var(--color-info)] transition-colors hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] hover:text-[var(--color-info)] active:scale-[0.98] disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-info)]"
+                className="group relative inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] px-2 text-[11px] font-medium text-[var(--color-info)] transition-colors hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] hover:text-[var(--color-info)] active:scale-[0.98] disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Files size={15} />
                 <span>会话文件</span>
@@ -1006,7 +1006,7 @@ export default function ExplorationPage() {
                   aria-label="查看历史会话"
                   aria-expanded={showSessionHistory}
                   data-testid="session-history-button"
-                  className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-viz-violet ${showSessionHistory
+                  className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${showSessionHistory
                     ? 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet'
                     : 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet hover:border-viz-violet-soft hover:bg-viz-violet-soft hover:text-viz-violet'}`}
                 >
@@ -1072,7 +1072,7 @@ export default function ExplorationPage() {
                               onClick={() => setDeleteSessionTarget(session)}
                               title={`删除会话 ${session.title}`}
                               aria-label={`删除会话 ${session.title}`}
-                              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] opacity-0 transition-all hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)]"
+                              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] opacity-0 transition-all hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             >
                               <Trash2 size={14} />
                             </button>

@@ -17,10 +17,12 @@ import {
 } from '@/api/superAssistant'
 import { ontologyApi, type OntologyPublishedDocument } from '@/api/ontologies'
 import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from 'sonner'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -227,23 +229,46 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       : mergedOntologyDocs.find(doc => doc.ontologyId === selectedOntologyId) ?? null
   const editorDirty = editor !== null && !editor.loading && editor.unsupported === null && editor.draft !== editor.initial
 
-  /** 编辑器有未保存修改时先确认；返回是否允许离开（同时关闭编辑器） */
-  const requestLeaveEditor = () => {
-    if (!editor) return true
-    if (editorDirty && !window.confirm('当前编辑内容尚未保存，确定离开吗？离开后未保存的修改将丢失。')) return false
+  /** 编辑器有未保存修改时先经确认弹窗；确认后关闭编辑器并继续 proceed（替代原 window.confirm 同步守卫） */
+  const [leaveEditorOpen, setLeaveEditorOpen] = useState(false)
+  const leaveProceedRef = useRef<(() => void) | null>(null)
+  const requestLeaveEditor = (proceed: () => void) => {
+    if (!editor) { proceed(); return }
+    if (editorDirty) {
+      leaveProceedRef.current = proceed
+      setLeaveEditorOpen(true)
+      return
+    }
     setEditor(null)
-    return true
+    proceed()
+  }
+  const confirmLeaveEditor = () => {
+    const proceed = leaveProceedRef.current
+    leaveProceedRef.current = null
+    setLeaveEditorOpen(false)
+    setEditor(null)
+    proceed?.()
   }
 
   const handleDialogOpenChange = (next: boolean) => {
-    if (!next && !requestLeaveEditor()) return
-    onOpenChange(next)
+    if (next) {
+      onOpenChange(next)
+      return
+    }
+    requestLeaveEditor(() => onOpenChange(false))
   }
 
   /** 选中文件（树点击 / 图谱节点定位 / 上传后自动选中）；切换前守住未保存编辑 */
   const handleSelectFile = useCallback((file: PalaceFile) => {
-    if (editor && editor.fileId !== file.id && !requestLeaveEditor()) return
-    setSelectedOntologyId(null)
+    if (editor && editor.fileId !== file.id) {
+      requestLeaveEditor(() => {
+        setSelectedOntologyId(null)
+        setSelectedFileId(file.id)
+        // 选中文件即把「当前目录」对齐到其归属目录（新建/上传落点跟随）
+        setSelectedDirPath(file.path ?? '')
+      })
+      return
+    }
     setSelectedFileId(file.id)
     // 选中文件即把「当前目录」对齐到其归属目录（新建/上传落点跟随）
     setSelectedDirPath(file.path ?? '')
@@ -251,10 +276,11 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
 
   /** 选中本体文档（只读）：清掉文件选中，落点对齐「本体文档」虚拟目录 */
   const handleSelectOntologyDoc = useCallback((doc: PalaceOntologyDocRow) => {
-    if (editor && !requestLeaveEditor()) return
-    setSelectedFileId(null)
-    setSelectedOntologyId(doc.ontologyId)
-    setSelectedDirPath(PALACE_ONTOLOGY_DOCS_DIR_PATH)
+    requestLeaveEditor(() => {
+      setSelectedFileId(null)
+      setSelectedOntologyId(doc.ontologyId)
+      setSelectedDirPath(PALACE_ONTOLOGY_DOCS_DIR_PATH)
+    })
   }, [editor])
 
   /** 选中目录（树点击）：清掉文件/本体文档选中，中间栏回到空态 */
@@ -349,8 +375,11 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
     }
   }
 
-  const handleEdit = async (file: PalaceFile) => {
-    if (!requestLeaveEditor()) return
+  const handleEdit = (file: PalaceFile) => {
+    requestLeaveEditor(() => { void beginEdit(file) })
+  }
+
+  const beginEdit = async (file: PalaceFile) => {
     setEditor({ fileId: file.id, filename: file.filename, loading: true, unsupported: null, draft: '', initial: '', saving: false })
     try {
       const data = await superAssistantApi.palaceFilePreview(file.id)
@@ -430,10 +459,15 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
     }
   }
 
-  const handleDeleteFolder = async () => {
+  const [deleteFolderRow, setDeleteFolderRow] = useState<NonNullable<typeof selectedDirRow> | null>(null)
+
+  const handleDeleteFolder = () => {
     const row = selectedDirRow
     if (!row) return
-    if (!window.confirm(`确定删除目录「${row.path}」吗？目录下仍有文件或子目录时将无法删除。`)) return
+    setDeleteFolderRow(row)
+  }
+
+  const doDeleteFolder = async (row: NonNullable<typeof selectedDirRow>) => {
     setBusy(true)
     try {
       await superAssistantApi.deletePalaceFolder(row.id)
@@ -575,7 +609,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 value={editor.draft}
                 spellCheck={false}
                 onChange={event => setEditor(prev => prev ? { ...prev, draft: event.target.value } : prev)}
-                className="min-h-[220px] flex-1 w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-2 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]"
+                className="min-h-[220px] flex-1 w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-2 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
               <div className="flex items-center gap-2">
                 <Button
@@ -586,7 +620,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 >
                   保存并重建图谱
                 </Button>
-                <Button variant="outline" size="sm" onClick={requestLeaveEditor} disabled={editor.saving}>
+                <Button variant="outline" size="sm" onClick={() => requestLeaveEditor(() => {})} disabled={editor.saving}>
                   取消
                 </Button>
                 {editorDirty && <span className="text-[11px] text-amber-600">有未保存修改</span>}
@@ -675,19 +709,19 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
         >
           {maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </button>
-        <DialogHeader>
+        <DialogHeader icon={<Brain size={18} />}>
           <DialogTitle className="flex items-center gap-2">
-            <Brain size={16} className="text-brand-ink" /> 知识图谱
+            知识图谱
             {building && (
               <span className="ml-2 flex items-center gap-1 text-xs font-normal text-amber-600">
                 <Loader2 size={12} className="animate-spin" /> 图谱构建中…
               </span>
             )}
           </DialogTitle>
+          <DialogDescription>
+            上传的文档与本体发布文档共同沉淀为跨会话长期知识：自动抽取实体关系构建图谱，选中文件可阅读编辑，图谱与文档双向联动。
+          </DialogDescription>
         </DialogHeader>
-        <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-          上传的文档与本体发布文档共同沉淀为跨会话长期知识：自动抽取实体关系构建图谱，选中文件可阅读编辑，图谱与文档双向联动。
-        </p>
 
         <div className={`grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto lg:overflow-hidden ${
             maximized
@@ -1023,7 +1057,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                           type="button"
                           aria-pressed={previewMode === value}
                           onClick={() => setPreviewMode(value)}
-                          className={`h-5 rounded-md px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${
+                          className={`h-5 rounded-md px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                             previewMode === value
                               ? 'bg-white text-[var(--color-text-primary)] shadow-sm'
                               : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
@@ -1123,6 +1157,24 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
           </aside>
         </div>
       </DialogContent>
+      <ConfirmDialog
+        open={leaveEditorOpen}
+        onClose={() => { setLeaveEditorOpen(false); leaveProceedRef.current = null }}
+        onConfirm={confirmLeaveEditor}
+        title="放弃未保存的编辑？"
+        description="当前编辑内容尚未保存，确定离开吗？离开后未保存的修改将丢失。"
+        confirmText="放弃并离开"
+        variant="warning"
+      />
+      <ConfirmDialog
+        open={deleteFolderRow !== null}
+        onClose={() => setDeleteFolderRow(null)}
+        onConfirm={() => { const row = deleteFolderRow; setDeleteFolderRow(null); if (row) void doDeleteFolder(row) }}
+        title={deleteFolderRow ? `删除目录「${deleteFolderRow.path}」` : '删除目录'}
+        description="目录下仍有文件或子目录时将无法删除。"
+        confirmText="删除"
+        variant="danger"
+      />
     </Dialog>
   )
 }

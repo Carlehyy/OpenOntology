@@ -447,7 +447,7 @@ export default function DataStewardPage() {
                 onClick={openBrowser}
                 title={browserDisplay === 'pip' ? '恢复实时浏览器大窗口' : '打开实时浏览器'}
                 aria-label={browserDisplay === 'pip' ? '恢复实时浏览器大窗口' : '打开实时浏览器'}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] transition-colors hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-info)]"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] transition-colors hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Monitor size={15} />
               </button>
@@ -461,7 +461,7 @@ export default function DataStewardPage() {
                   title="查看会话记录"
                   aria-label="查看会话记录"
                   aria-expanded={showHistory}
-                  className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-viz-violet ${showHistory
+                  className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${showHistory
                     ? 'border-viz-violet bg-viz-violet-soft text-viz-violet'
                     : 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet hover:border-viz-violet-soft hover:bg-viz-violet-soft'}`}
                 >

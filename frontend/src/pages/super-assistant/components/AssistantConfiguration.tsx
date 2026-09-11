@@ -25,7 +25,7 @@ import {
 } from '@/lib/mcpClientConfig'
 import { ApprovalTab, EvolutionPendingBadge, MemoryTab } from './AssistantEvolution'
 import { errorText } from './assistantPanelUtils'
-import ConfirmActionDialog from './ConfirmActionDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { groupAssistantTools } from './toolLogic'
 
 export { errorText }
@@ -101,17 +101,17 @@ function SkillCreateDialog({ onClose, onSaved }: { onClose: () => void; onSaved:
       <div className="flex-1 space-y-4 overflow-y-auto p-5">
         <label className="block text-xs text-[var(--color-text-secondary)]">技能名称 <span className="text-red-500">*</span>
           <input value={name} onChange={event => setName(event.target.value.toLowerCase().replace(/[_\s]+/g, '-'))} placeholder="research-helper"
-            className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+            className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
           <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">用于技能包目录和调用标识，仅支持小写字母、数字和连字符。</span>
         </label>
         <label className="block text-xs text-[var(--color-text-secondary)]">技能描述 <span className="text-red-500">*</span>
           <textarea value={description} onChange={event => setDescription(event.target.value)} rows={2}
             placeholder="说明这个技能做什么，以及什么情况下应使用它"
-            className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+            className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
         </label>
         <label className="block text-xs text-[var(--color-text-secondary)]">具体内容 <span className="text-red-500">*</span>
           <textarea value={content} onChange={event => setContent(event.target.value)} rows={10} placeholder="# 工作流程&#10;&#10;1. …"
-            className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+            className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
         </label>
         <label className="flex min-h-11 items-center justify-between rounded-lg border border-[var(--color-border)] px-3 text-xs text-[var(--color-text-secondary)]">
           常驻系统提示
@@ -190,7 +190,7 @@ function SkillEditor({ skill, onClose, onSaved }: { skill: SuperSkill; onClose: 
             <label className="text-[11px] text-[var(--color-text-secondary)]">新建相对路径</label>
             <div className="mt-1 flex gap-1.5">
               <input value={newPath} onChange={event => setNewPath(event.target.value)} onKeyDown={event => event.key === 'Enter' && startNewFile()}
-                placeholder="references/guide.md" className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs outline-none focus:border-brand-deep" />
+                placeholder="references/guide.md" className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs outline-none focus-visible:border-ring" />
               <button onClick={startNewFile} aria-label="新建文件" className="flex h-10 w-10 items-center justify-center rounded-md border border-[var(--color-border)] bg-white hover:bg-brand-soft"><Plus size={14} /></button>
             </div>
           </div>
@@ -221,19 +221,21 @@ function SkillEditor({ skill, onClose, onSaved }: { skill: SuperSkill; onClose: 
             <div className="flex flex-1 items-center justify-center"><Loader2 size={20} className="animate-spin text-brand-ink" /></div>
           ) : (
             <textarea aria-label={`编辑 ${selectedPath}`} value={content} onChange={event => setContent(event.target.value)} spellCheck={false}
-              className="min-h-[360px] flex-1 resize-none bg-[var(--color-bg-elevated)] p-4 font-mono text-xs leading-6 text-[var(--color-text-primary)] outline-none focus:ring-2 focus:ring-inset focus:ring-ring" />
+              className="min-h-[360px] flex-1 resize-none bg-[var(--color-bg-elevated)] p-4 font-mono text-xs leading-6 text-[var(--color-text-primary)] outline-none focus-visible:ring-2 focus:ring-inset focus-visible:ring-ring" />
           )}
           {error && <p role="alert" className="border-t border-red-100 bg-red-50 px-4 py-2 text-xs text-red-700">{error}</p>}
         </div>
       </div>
     </DialogShell>
-    <ConfirmActionDialog
+    <ConfirmDialog
       open={confirmingRemove}
       title="删除文件"
-      message={`确定删除 ${selectedPath}？`}
-      busy={removing}
+      description={`确定删除 ${selectedPath}？`}
+      confirmText="删除"
+      variant="danger"
+      loading={removing}
       onConfirm={() => void removeFile()}
-      onCancel={() => setConfirmingRemove(false)}
+      onClose={() => setConfirmingRemove(false)}
     />
     </>
   )
@@ -359,7 +361,7 @@ function McpDialog({ server, onClose, onSaved }: {
             }} rows={8}
               aria-label="MCP 客户端 JSON"
               placeholder={'{\n  "mcpServers": {\n    "api-hub": {\n      "command": "npx",\n      "args": ["-y", "mcp-remote", "https://example.com/mcp"]\n    }\n  }\n}'}
-              className="w-full resize-none overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 font-mono text-xs leading-5 outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+              className="w-full resize-none overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
             <button type="button" onClick={applyClientConfig} disabled={!clientConfig.trim()}
               className="min-h-9 rounded-md border border-[var(--color-border)] bg-white px-3 text-xs text-brand-ink hover:bg-brand-soft disabled:opacity-50">解析并填入下方表单</button>
             <p className="text-[10px] leading-5 text-[var(--color-text-tertiary)]">
@@ -392,7 +394,7 @@ function McpDialog({ server, onClose, onSaved }: {
         </details>}
         <label className="block text-xs text-[var(--color-text-secondary)]">名称 <span className="text-red-500">*</span>
           <input value={name} disabled={!!server} onChange={event => setName(event.target.value)} placeholder="knowledge_search"
-            className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10 disabled:opacity-60" />
+            className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60" />
         </label>
         <label className="block text-xs text-[var(--color-text-secondary)]">传输方式 <span className="text-red-500">*</span>
           <Select value={transport} onValueChange={value => setTransport(value as McpTransport)}>
@@ -409,26 +411,26 @@ function McpDialog({ server, onClose, onSaved }: {
         {transport === 'stdio' ? <>
           <label className="block text-xs text-[var(--color-text-secondary)]">command <span className="text-red-500">*</span>
             <input value={command} onChange={event => setCommand(event.target.value)} placeholder="npx"
-              className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+              className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
           <label className="block text-xs text-[var(--color-text-secondary)]">args JSON
             <textarea value={args} onChange={event => setArgs(event.target.value)} rows={4} placeholder={'["-y", "@example/mcp-server"]'}
-              className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+              className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
           <label className="block text-xs text-[var(--color-text-secondary)]">env JSON
             <textarea value={env} onChange={event => setEnv(event.target.value)} rows={4} placeholder={server ? `留空保持现有环境变量（${server.env_names.join(', ') || '无'}）` : '{\n  "API_KEY": "…"\n}'}
-              className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+              className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
           <p className="rounded-lg bg-amber-50 p-3 text-[11px] leading-5 text-amber-800">stdio 会在后端容器内启动进程，部署方必须显式启用并允许该 command。env 会加密存储且不回显。</p>
         </> : <>
           <label className="block text-xs text-[var(--color-text-secondary)]">MCP URL <span className="text-red-500">*</span>
             <input type="url" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://mcp.example.com/mcp"
-              className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+              className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
             <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">公网地址可直接连接；生产环境会拒绝环回、内网和链路本地地址。</span>
           </label>
           <label className="block text-xs text-[var(--color-text-secondary)]">请求头 JSON
             <textarea value={headers} onChange={event => setHeaders(event.target.value)} rows={4} placeholder={server ? `留空保持现有请求头（${server.header_names.join(', ') || '无'}）` : '{\n  "Authorization": "Bearer …"\n}'}
-              className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10" />
+              className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
         </>}
         <label className="flex min-h-11 items-center justify-between rounded-lg border border-[var(--color-border)] px-3 text-xs text-[var(--color-text-secondary)]">
@@ -464,7 +466,7 @@ function SettingSwitch({ label, ariaLabel, checked, busy, onToggle }: {
     <div className="inline-flex items-center gap-1.5">
       <span className="text-[10px] text-[var(--color-text-secondary)]">{label}</span>
       <button type="button" role="switch" aria-label={ariaLabel} aria-checked={checked} aria-busy={busy} disabled={busy} onClick={onToggle}
-        className="relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60">
+        className="relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60">
         <span aria-hidden="true" className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors motion-reduce:transition-none ${busy ? 'animate-pulse motion-reduce:animate-none' : ''} ${checked ? 'bg-brand' : 'bg-slate-300'}`}>
           <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none ${checked ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
         </span>
@@ -912,21 +914,25 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
       {creatingSkill && <SkillCreateDialog onClose={() => setCreatingSkill(false)} onSaved={refreshSkills} />}
       {editingSkill && <SkillEditor skill={editingSkill} onClose={() => setEditingSkill(null)} onSaved={refreshSkills} />}
       {editingMcp && <McpDialog server={editingMcp === 'new' ? undefined : editingMcp} onClose={() => setEditingMcp(null)} onSaved={refreshServers} />}
-      <ConfirmActionDialog
+      <ConfirmDialog
         open={removingSkill !== null}
         title="删除 Skill"
-        message={removingSkill ? `确定删除 Skill「${removingSkill.name}」及其整个文件夹？` : ''}
-        busy={removeBusy}
+        description={removingSkill ? `确定删除 Skill「${removingSkill.name}」及其整个文件夹？` : ''}
+        confirmText="删除"
+        variant="danger"
+        loading={removeBusy}
         onConfirm={() => { if (removingSkill) void removeSkill(removingSkill) }}
-        onCancel={() => setRemovingSkill(null)}
+        onClose={() => setRemovingSkill(null)}
       />
-      <ConfirmActionDialog
+      <ConfirmDialog
         open={removingServer !== null}
         title="删除 MCP Server"
-        message={removingServer ? `确定删除 MCP Server「${removingServer.name}」？` : ''}
-        busy={removeBusy}
+        description={removingServer ? `确定删除 MCP Server「${removingServer.name}」？` : ''}
+        confirmText="删除"
+        variant="danger"
+        loading={removeBusy}
         onConfirm={() => { if (removingServer) void removeServer(removingServer) }}
-        onCancel={() => setRemovingServer(null)}
+        onClose={() => setRemovingServer(null)}
       />
     </>
   )

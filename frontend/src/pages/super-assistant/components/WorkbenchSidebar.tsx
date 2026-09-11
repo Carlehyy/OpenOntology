@@ -95,7 +95,7 @@ function ConversationRow({ item, current, archived, onSelect, onDelete, onSetArc
           onClick={() => onSetArchived(item.id, !archived)}
           title={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
           aria-label={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
         </button>
@@ -104,7 +104,7 @@ function ConversationRow({ item, current, archived, onSelect, onDelete, onSetArc
           onClick={() => onDelete(item.id)}
           title={`删除会话 ${title}`}
           aria-label={`删除会话 ${title}`}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <Trash2 size={13} />
         </button>
@@ -169,7 +169,7 @@ export default function WorkbenchSidebar({
         data-workbench-group-toggle={key}
         aria-expanded={expanded}
         onClick={() => toggleGroupExpanded(key)}
-        className="mt-0.5 flex w-full items-center justify-center rounded-lg px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+        className="mt-0.5 flex w-full items-center justify-center rounded-lg px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {expanded ? '收起' : `展开全部（还有 ${hiddenCount} 条）`}
       </button>
@@ -182,7 +182,7 @@ export default function WorkbenchSidebar({
   }
 
   // 侧栏统一左缘：功能项与会话列表的图标/文字左缘都对齐到 16px（容器 px-2 + 条目 px-2）
-  const actionItemClass = 'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]'
+  const actionItemClass = 'flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
 
   const content = (
     <>
@@ -207,7 +207,7 @@ export default function WorkbenchSidebar({
         <button
           type="button"
           onClick={() => { void onCreate(); onCloseMobile() }}
-          className="flex h-10 w-full items-center justify-center gap-2 rounded-xl text-sm font-medium text-white shadow-sm transition-all hover:opacity-95 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+          className="flex h-10 w-full items-center justify-center gap-2 rounded-xl text-sm font-medium text-white shadow-sm transition-all hover:opacity-95 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           style={{ background: 'var(--color-nav-bg)' }}
         >
           <Plus size={16} /> 新建任务
@@ -284,7 +284,7 @@ export default function WorkbenchSidebar({
                 type="button"
                 onClick={() => setArchivedOpen(value => !value)}
                 aria-expanded={archivedOpen}
-                className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Archive size={16} className="shrink-0" />
                 归档会话
@@ -331,7 +331,7 @@ export default function WorkbenchSidebar({
           title="个人资料"
           aria-label="个人资料"
           data-workbench-profile
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg py-1 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg py-1 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-semibold text-white" style={{ background: 'var(--color-nav-bg)' }}>
             {(user?.username || 'U').slice(0, 1).toUpperCase()}
@@ -341,7 +341,7 @@ export default function WorkbenchSidebar({
         <button
           type="button"
           onClick={() => { logout(); navigate('/login') }}
-          className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+          className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <LogOut size={13} /> 退出登录
         </button>

@@ -127,7 +127,7 @@ function TreeItem<T = any>({
           } as React.CSSProperties
         }
         className={cn(
-          'group/tree-item relative z-10 flex w-full select-none ps-[var(--tree-padding)] text-left outline-none focus:z-20 focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]',
+          'group/tree-item relative z-10 flex w-full select-none ps-[var(--tree-padding)] text-left outline-none focus:z-20 focus-visible:ring-2 focus-visible:ring-ring',
           className,
         )}
         {...restProps}

@@ -493,9 +493,10 @@ test('开发页：历史版本可先查看脚本与入参，恢复时一并回�
 
   // 确认恢复：编辑器与测试入参一并回退到该版
   await page.getByRole('button', { name: '恢复' }).first().click()
-  await expect(page.getByText('恢复到该历史版本？')).toBeVisible()
-  // 确认框覆盖层内的「恢复」（抽屉列表项同名按钮仍在 DOM 中，需按覆盖层收敛）
-  await page.locator('div.fixed.inset-0').getByRole('button', { name: '恢复', exact: true }).click()
+  const restoreConfirm = page.getByRole('dialog', { name: '恢复到该历史版本？' })
+  await expect(restoreConfirm).toBeVisible()
+  // 标准确认弹窗内的「恢复」（抽屉列表项同名按钮仍在 DOM 中，需按弹窗收敛）
+  await restoreConfirm.getByRole('button', { name: '恢复', exact: true }).click()
   await expect(page.getByText('已恢复 v1 的脚本内容')).toBeVisible()
   const editor = page.locator('.cm-content').first()
   await expect(editor).toContainText('return {"trajectory": [9, 9]}')

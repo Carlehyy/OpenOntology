@@ -23,7 +23,7 @@ export default function ZoomableImage({ src, alt }: { src?: string; alt?: string
       <button
         type="button"
         onClick={() => setPreview(true)}
-        className="group/image relative my-2 block max-w-full overflow-hidden rounded-lg border border-[var(--color-border)] bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+        className="group/image relative my-2 block max-w-full overflow-hidden rounded-lg border border-[var(--color-border)] bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label={`预览图片：${label}`}
       >
         <img
@@ -52,7 +52,7 @@ export default function ZoomableImage({ src, alt }: { src?: string; alt?: string
           >
             <header className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
               <h3 className="truncate pr-4 text-sm font-semibold text-[var(--color-text-primary)]">{label}</h3>
-              <button type="button" aria-label="关闭图片预览" onClick={() => setPreview(false)} className="rounded-md p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
+              <button type="button" aria-label="关闭图片预览" onClick={() => setPreview(false)} className="rounded-md p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <X size={16} />
               </button>
             </header>

@@ -370,7 +370,7 @@ test('在线新建表格校验字段标识唯一，并让数据样例自适应�
     element => element.scrollWidth - element.clientWidth,
   )).toBeLessThanOrEqual(2)
 
-  await dialog.getByRole('button', { name: '关闭在线新建表格' }).click()
+  await dialog.getByRole('button', { name: '关闭' }).click()
 
   const wideColumns = Array.from({ length: 18 }, (_, index) => ({
     name: `field_${index + 1}`,

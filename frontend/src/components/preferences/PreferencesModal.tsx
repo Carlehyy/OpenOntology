@@ -55,7 +55,7 @@ export default function PreferencesModal({
                 aria-checked={active}
                 onClick={() => setTheme(option.value)}
                 className={cn(
-                  'relative flex flex-col items-center gap-2 rounded-xl border px-3 py-4 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]',
+                  'relative flex flex-col items-center gap-2 rounded-xl border px-3 py-4 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                   active
                     ? 'border-[var(--color-nav-bg)] bg-[var(--color-nav-light)] text-[var(--color-nav-bg)]'
                     : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-hover)] hover:bg-[var(--color-bg-hover)]',

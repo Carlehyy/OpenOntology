@@ -75,7 +75,7 @@ function SidebarMenuButton({
       data-active={isActive}
       className={cn(
         'flex w-full items-center gap-2 overflow-hidden rounded-lg px-2 py-1.5 text-left text-sm outline-none transition-colors',
-        'hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]',
+        'hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 focus-visible:ring-ring',
         'disabled:pointer-events-none disabled:opacity-50 [&>svg]:h-4 [&>svg]:w-4 [&>svg]:shrink-0',
         isActive && 'bg-[var(--color-bg-hover)] font-medium',
         className,

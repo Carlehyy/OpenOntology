@@ -565,7 +565,7 @@ export default function MonitoringTab() {
               setSlowPage(1)
             }}
             placeholder="按接口路径筛选"
-            className="px-2.5 py-1 border border-border rounded-lg text-xs w-56 bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-ring/40"
+            className="px-2.5 py-1 border border-border rounded-lg text-xs w-56 bg-card text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
         <Table
@@ -641,7 +641,7 @@ export default function MonitoringTab() {
           value={promptText ?? ''}
           autoFocus
           onFocus={event => event.currentTarget.select()}
-          className="h-96 w-full resize-none rounded-lg border border-border bg-muted p-3 font-mono text-[11px] leading-relaxed text-foreground outline-none focus:ring-2 focus:ring-ring/40"
+          className="h-96 w-full resize-none rounded-lg border border-border bg-muted p-3 font-mono text-[11px] leading-relaxed text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
       </Modal>
     </div>

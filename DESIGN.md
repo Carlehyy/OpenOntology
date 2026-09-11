@@ -131,6 +131,58 @@ success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引�
 `--color-bg-overlay`；全局消息提示（sonner）统一顶部居中，层级
 `--z-toast: 1100`（高于 antd 弹层，低于悬浮助手）。
 
+### 4.4 焦点环（全站唯一规格）
+
+- **颜色唯一**：一切焦点环只用 `--ring` 令牌（Tailwind 类 `ring-ring`，
+  配套边框 `border-ring`）；禁止 focus 态使用语义色/色板类/裸 hex 环。
+- **宽度唯一**：`ring-2`（2px）一档。#059669/#3ecf8e 对页面底色非文本对比
+  约 3.7:1 / 9.4:1（≥3:1 达标），1px 在浅底下过细不可靠，4px 光晕过粗；
+  2px 同时满足 WCAG 2.4.13 焦点外观建议。
+- **触发唯一**：`focus-visible`（文本输入类控件点击聚焦等价键盘输入、行为
+  不变；按钮/选择器仅键盘导航出环，消除鼠标点击后的残留边框）。
+- **校验态**：错误/警告只改边框色（`border-destructive`/
+  `border-[var(--color-warning)]`），环色仍 `ring-ring`，不做双色环。
+- **非焦点状态环不属此规范**：选中节点（`ring-viz-*`）、状态圆点、表格单元格
+  高亮（`ring-inset` + 语义色）是状态标记，保持其语义色。
+- 存量清理记录（2026-09）：App.css 残留 outline、animations.css `.focus-ring`
+  双环已删除；mapping-overview/overview-dashboard/mapping-configuration/login
+  页域 CSS 的焦点 outline/光晕统一为 `var(--color-ring)`。
+
+### 4.5 弹窗头部（图标 + 标题 + 描述唯一模板）
+
+- **几何唯一**（`DialogHeader` 的 `icon` props 与 `Modal` 内建头部同规格）：
+  头部行 `flex items-start gap-3 pr-14`（pr-14 为右上角关闭符预留安全区）；
+  图标盒 `h-10 w-10 rounded-xl`、图形统一 lucide `size={18}`；
+  文字列 `min-w-0 pt-2`——标题行高 24px，(40−24)/2=8px 使标题行光学中心
+  与图标盒中心精确重合；标题 `text-base font-semibold leading-6`，
+  描述 `text-sm leading-6 mt-1`。
+- **色彩语义**：图标盒底色按弹窗语义选择并经 `iconClassName` 传入——
+  创建/发布类默认品牌底 `bg-brand-soft text-brand-ink`；危险/警告/信息
+  确认类用对应语义浅底深字（`bg-[var(--color-danger-bg)]` 等）。
+- **用法**：Radix `Dialog` 一律经 `DialogHeader`（icon 可选）组装头部，
+  禁止手写图标盒或把图标内联进 `DialogTitle`；`Modal` 继续走内建
+  `headerIcon`。无图标头部为合法形态（纯文字列，不加光学补偿）。
+- 超级助手工作台内的紧凑面板弹窗（AssistantConfiguration/Evolution）允许
+  经 className 覆盖为小字号密度变体，但几何与间距仍走本模板。
+- 手写 overlay 一律收敛回 `ui/dialog` / `ui/Modal` 标准壳（2026-09 已完成
+  CreateTableModal 迁移）。
+
+### 4.6 消息提示（瞬态 / 持久二分）
+
+- **瞬态操作反馈**（保存成功、删除完成、请求失败等看完即走）：统一全局
+  Sonner（`import { toast } from 'sonner'`，`App.tsx` 挂载 top-center），
+  按 success/error/warning/info 选用语义图标；**不开启全局 closeButton**
+  （居中位置下关闭符落在 toast 左缘、悬浮于弹窗之上，易被误读为弹窗的
+  一部分；toast 点击本体或 4s 自动消失即达关闭目的）。禁止页内自建
+  fixed 定位 toast、平行 toast 库与 `window.alert`。
+- **持久上下文信息**（表单校验、试跑前置检查等需停留阅读）：统一
+  `components/ui/Alert` 四档语义浅底（info/success/warning/danger）；
+  `role="alert"` 等可达性属性由调用方按语义传入。禁止语义色手写横幅
+  再扩散（存量由色板/颜色棘轮锁定只减不增）。
+- **确认动作**（删除、废弃等需明确意图）：统一 `components/ui/ConfirmDialog`
+  （danger/warning/default 三档语义图标与按钮）；禁止 `window.confirm`/
+  `window.prompt` 与域内自建确认框。
+
 ## 5. 图表规范（ECharts 为主要标准）
 
 ### 5.1 唯一主题来源 `frontend/src/lib/echartsTheme.ts`
@@ -206,6 +258,8 @@ ECharts 关系图能力不足时可选 G6（图可视化）/X6（图编辑），
 7. 在 TSX 中直接写 Tailwind 原生绿色族色板类（`teal-*`/`emerald-*`/`cyan-*`/
    `green-*`/`lime-*`）表达强调色或任意界面颜色——由 `check:color-tokens`
    的色板棘轮与 ESLint 同源约束强制，存量只减不增。
+8. 焦点环偏离 §4.4 唯一规格：focus 触发的环使用 `ring-2`/`ring-ring` 之外的
+   宽度或颜色（含色板类、语义 var、透明度修饰符如 `ring-ring/10`）。
 
 ## 9. 变更方式
 

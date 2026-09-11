@@ -134,7 +134,7 @@ export default function MermaidBlock({ chart, title = '业务建模图', warning
     <button
       type="button"
       data-testid="diagram-thumbnail"
-      className="block max-h-[260px] w-full cursor-zoom-in overflow-hidden rounded-lg bg-white p-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 [&_svg]:mx-auto [&_svg]:block [&_svg]:h-auto [&_svg]:max-h-[228px] [&_svg]:max-w-full"
+      className="block max-h-[260px] w-full cursor-zoom-in overflow-hidden rounded-lg bg-white p-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&_svg]:mx-auto [&_svg]:block [&_svg]:h-auto [&_svg]:max-h-[228px] [&_svg]:max-w-full"
       onClick={() => setPreview(true)}
       aria-label={`打开${title}完整预览`}
       dangerouslySetInnerHTML={{ __html: svg }}
@@ -162,7 +162,7 @@ export default function MermaidBlock({ chart, title = '业务建模图', warning
             </div>
           </div>
           {compact ? thumbnail : interactiveDiagram(false)}
-          {compact && <button type="button" onClick={() => setPreview(true)} className="block w-full border-t border-slate-100 bg-slate-50/60 px-3 py-1.5 text-center text-[10px] text-slate-500 hover:text-teal-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500">点击查看完整图 · 滚轮缩放 · 拖拽移动</button>}
+          {compact && <button type="button" onClick={() => setPreview(true)} className="block w-full border-t border-slate-100 bg-slate-50/60 px-3 py-1.5 text-center text-[10px] text-slate-500 hover:text-teal-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">点击查看完整图 · 滚轮缩放 · 拖拽移动</button>}
           {warnings.length > 0 && (
             <div className="border-t border-amber-100 bg-amber-50/70 px-3 py-2">
               {warnings.map((warning, index) => <div key={index} className="text-[10px] leading-4 text-amber-800">· {warning}</div>)}

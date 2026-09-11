@@ -597,7 +597,7 @@ export default function AgentWorkbenchPage() {
                   value={oid}
                   onChange={e => selectOntology(e.target.value)}
                   aria-label="选择本体"
-                  className="h-8 min-w-[180px] cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-3 pr-8 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-ring"
+                  className="h-8 min-w-[180px] cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-3 pr-8 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
                   style={{ backgroundImage: selectArrow, backgroundPosition: 'right 10px center' }}
                 >
                   {releasedOntologyList.length === 0 && <option value="">无已发布本体</option>}
@@ -727,7 +727,7 @@ export default function AgentWorkbenchPage() {
                   onChange={e => setModelId(e.target.value)}
                   aria-label="选择对话模型"
                   disabled={!oid}
-                  className="h-8 w-44 cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-2 pr-7 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-ring disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="h-8 w-44 cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-2 pr-7 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:cursor-not-allowed"
                   style={{ backgroundImage: selectArrow, backgroundPosition: 'right 6px center', backgroundSize: '10px' }}
                 >
                   {llmModels.map((m: any) => <option key={m.id} value={m.id}>{m.name}</option>)}
@@ -949,7 +949,7 @@ export default function AgentWorkbenchPage() {
           {/* pt/pb 取 2.5 使输入栏高度精确为 67px：顶部分割线距视口底部 72px
               （历史取值沿用，侧边栏底栏移除后保持输入栏高度不变）。 */}
           <div data-testid="agent-input-bar" className="border-t border-[var(--color-border)] bg-card px-4 pb-2.5 pt-2.5">
-            <div className="relative flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5 transition-all focus-within:border-brand focus-within:ring-2 focus-within:ring-ring">
+            <div className="relative flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5 transition-all focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
               <input
                 placeholder={oid ? (busy ? '可继续输入，回车进入追问队列…' : '问业务问题，或让它帮你预演一个操作…') : '请先选择一个本体'}
                 value={input}

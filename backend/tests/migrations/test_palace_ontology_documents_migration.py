@@ -47,7 +47,7 @@ def test_upgrade_downgrade_roundtrip(tmp_path, monkeypatch):
     }
     assert ("ontology_id",) in unique
 
-    command.downgrade(cfg, "0102_super_assistant_palace_sync_token")
+    command.downgrade(cfg, "0103_ontology_readpath_perf_indexes")
     assert "super_assistant_palace_ontology_documents" not in inspect(engine).get_table_names()
 
     command.upgrade(cfg, "head")

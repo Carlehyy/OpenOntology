@@ -91,7 +91,7 @@ export default function InboxPopover({
       <button
         type="button"
         onClick={() => onOpenChange(!open)}
-        className={`relative grid h-11 w-11 place-items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${
+        className={`relative grid h-11 w-11 place-items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
           open
             ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
@@ -133,7 +133,7 @@ export default function InboxPopover({
               type="button"
               onClick={() => void list.refetch()}
               disabled={list.isFetching}
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[var(--color-text-tertiary)] transition-colors duration-200 hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[var(--color-text-tertiary)] transition-colors duration-200 hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="刷新收件箱"
             >
               <RefreshCw size={16} className={list.isFetching ? 'animate-spin motion-reduce:animate-none' : ''} />
@@ -159,7 +159,7 @@ export default function InboxPopover({
                 <AlertTriangle size={24} className="mb-2 text-[var(--color-danger)]" />
                 <p className="text-sm font-medium text-[var(--color-text-primary)]">收件箱加载失败</p>
                 <p className="mt-1 text-xs text-[var(--color-text-secondary)]">请检查网络后重新加载</p>
-                <button type="button" onClick={() => void list.refetch()} className="mt-3 inline-flex h-11 items-center gap-1.5 rounded-lg bg-[var(--color-bg-hover)] px-3.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]">
+                <button type="button" onClick={() => void list.refetch()} className="mt-3 inline-flex h-11 items-center gap-1.5 rounded-lg bg-[var(--color-bg-hover)] px-3.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <RefreshCw size={13} />重新加载
                 </button>
               </div>
@@ -190,7 +190,7 @@ export default function InboxPopover({
           <button
             type="button"
             onClick={() => { onOpenChange(false); onNavigate('/inbox') }}
-            className="group flex h-12 w-full items-center justify-between border-t border-[var(--color-border)] px-4 text-xs font-medium text-[var(--color-nav-bg)] transition-colors duration-200 hover:bg-[var(--color-nav-light)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-ring)]"
+            className="group flex h-12 w-full items-center justify-between border-t border-[var(--color-border)] px-4 text-xs font-medium text-[var(--color-nav-bg)] transition-colors duration-200 hover:bg-[var(--color-nav-light)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
           >
             <span>查看全部消息</span>
             <span className="inline-flex items-center gap-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors group-hover:text-[var(--color-nav-bg)]">
@@ -263,7 +263,7 @@ function InboxPopoverItem({
         type="button"
         onClick={onOpen}
         aria-label={`打开消息：${item.title}`}
-        className="grid w-full grid-cols-[40px_minmax(0,1fr)] gap-3 px-4 pb-2 pt-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-ring)]"
+        className="grid w-full grid-cols-[40px_minmax(0,1fr)] gap-3 px-4 pb-2 pt-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <span className={`relative grid h-10 w-10 shrink-0 place-items-center rounded-xl ${iconTone}`}>
           {isOpen
@@ -334,7 +334,7 @@ function InboxPopoverItem({
                 type="button"
                 disabled={busy}
                 onClick={onMarkRead}
-                className="inline-flex h-11 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors duration-200 hover:bg-[var(--color-popover)] hover:text-[var(--color-text-primary)] hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-11 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors duration-200 hover:bg-[var(--color-popover)] hover:text-[var(--color-text-primary)] hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={`将“${item.title}”标为已读`}
               >
                 <MailOpen size={13} aria-hidden="true" />
@@ -346,7 +346,7 @@ function InboxPopoverItem({
                 type="button"
                 disabled={busy}
                 onClick={onArchive}
-                className="inline-flex h-11 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors duration-200 hover:bg-[var(--color-popover)] hover:text-[var(--color-text-primary)] hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-11 items-center gap-1.5 rounded-lg px-2.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors duration-200 hover:bg-[var(--color-popover)] hover:text-[var(--color-text-primary)] hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={`归档“${item.title}”`}
               >
                 <Archive size={13} aria-hidden="true" />

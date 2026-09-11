@@ -159,7 +159,7 @@ export default function EventAttachmentsModal({
               <button
                 type="button"
                 onClick={() => void eventQuery.refetch()}
-                className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]"
+                className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <RefreshCw size={14} /> 重新加载
               </button>
@@ -197,7 +197,7 @@ export default function EventAttachmentsModal({
                       type="button"
                       onClick={() => void download(attachment)}
                       disabled={isDownloading || downloadingAll}
-                      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 text-sm font-medium text-muted-foreground transition-all hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:text-[var(--color-success)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 text-sm font-medium text-muted-foreground transition-all hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:text-[var(--color-success)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`下载 ${attachment.filename}`}
                     >
                       {isDownloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}

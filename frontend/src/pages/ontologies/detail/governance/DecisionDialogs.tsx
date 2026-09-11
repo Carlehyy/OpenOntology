@@ -71,16 +71,14 @@ export function RejectDialog({
   return (
     <Dialog open={Boolean(target)} onOpenChange={open => { if (!open && !busy) onClose() }}>
       <DialogContent>
-        <DialogHeader>
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--color-danger-bg)] text-[var(--color-danger)]">
-            <XCircle size={19} />
-          </span>
-          <div>
-            <DialogTitle>{target ? `拒绝动作：${target.actionName || target.actionId}` : '拒绝动作'}</DialogTitle>
-            <DialogDescription>
-              本次操作只会写入人工拒绝的决策事实，不会执行动作，也不会修改目标对象。
-            </DialogDescription>
-          </div>
+        <DialogHeader
+          icon={<XCircle size={18} />}
+          iconClassName="bg-[var(--color-danger-bg)] text-[var(--color-danger)]"
+        >
+          <DialogTitle>{target ? `拒绝动作：${target.actionName || target.actionId}` : '拒绝动作'}</DialogTitle>
+          <DialogDescription>
+            本次操作只会写入人工拒绝的决策事实，不会执行动作，也不会修改目标对象。
+          </DialogDescription>
         </DialogHeader>
         {target && (
           <div className="space-y-4">
@@ -100,10 +98,10 @@ export function RejectDialog({
                 aria-describedby={`governance-reject-reason-help${error ? ' governance-reject-error' : ''}`}
                 aria-invalid={Boolean(error)}
                 placeholder="例如：当前风险信息不足，请补充证据后重新提交"
-                className={`min-h-24 w-full resize-y rounded-lg border bg-card px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition focus:ring-2 disabled:cursor-wait disabled:bg-muted ${
+                className={`min-h-24 w-full resize-y rounded-lg border bg-card px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition focus-visible:ring-2 disabled:cursor-wait disabled:bg-muted ${
                   error
-                    ? 'border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] focus:border-[var(--color-danger)] focus:ring-[var(--color-danger)]'
-                    : 'border-border focus:border-brand focus:ring-ring'
+                    ? 'border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] focus:border-[var(--color-danger)] focus-visible:ring-ring'
+                    : 'border-border focus-visible:border-ring focus-visible:ring-ring'
                 }`}
               />
               <p id="governance-reject-reason-help" className="mt-1.5 text-xs leading-5 text-muted-foreground">
@@ -153,16 +151,11 @@ export function ApproveDialog({
   return (
     <Dialog open={Boolean(target)} onOpenChange={open => { if (!open && !busy) onClose() }}>
       <DialogContent>
-        <DialogHeader>
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-ink">
-            <CheckCircle2 size={19} />
-          </span>
-          <div>
-            <DialogTitle>{target ? `批准动作：${target.actionName || target.actionId}` : '批准动作'}</DialogTitle>
-            <DialogDescription>
-              确认后将立即执行该动作，执行结果会自动同步到哨兵与事实流。
-            </DialogDescription>
-          </div>
+        <DialogHeader icon={<CheckCircle2 size={18} />}>
+          <DialogTitle>{target ? `批准动作：${target.actionName || target.actionId}` : '批准动作'}</DialogTitle>
+          <DialogDescription>
+            确认后将立即执行该动作，执行结果会自动同步到哨兵与事实流。
+          </DialogDescription>
         </DialogHeader>
         {target && (
           <div className="space-y-4">

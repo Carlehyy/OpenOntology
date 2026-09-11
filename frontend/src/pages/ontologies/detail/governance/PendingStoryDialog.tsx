@@ -41,18 +41,16 @@ export default function PendingStoryDialog({
   return (
     <Dialog open={Boolean(target)} onOpenChange={open => { if (!open) onClose() }}>
       <DialogContent className="max-h-[92vh] w-[min(94vw,46rem)] overflow-y-auto">
-        <DialogHeader>
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--color-info-bg)] text-[var(--color-info)]">
-            <HandMetal size={19} />
-          </span>
-          <div>
-            <DialogTitle>
-              {target ? `待审批详情：${target.actionName || target.actionId}` : '待审批详情'}
-            </DialogTitle>
-            <DialogDescription>
-              三幕故事看懂这条动作的来龙去脉,看明白再裁决;批准/拒绝都会写入事实流留痕。
-            </DialogDescription>
-          </div>
+        <DialogHeader
+          icon={<HandMetal size={18} />}
+          iconClassName="bg-[var(--color-info-bg)] text-[var(--color-info)]"
+        >
+          <DialogTitle>
+            {target ? `待审批详情：${target.actionName || target.actionId}` : '待审批详情'}
+          </DialogTitle>
+          <DialogDescription>
+            三幕故事看懂这条动作的来龙去脉,看明白再裁决;批准/拒绝都会写入事实流留痕。
+          </DialogDescription>
         </DialogHeader>
         {target && (
           <PendingStoryChapters

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { toast } from 'sonner'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -16,7 +17,7 @@ import datasetsApi from '@/api/v2/datasets'
 import CuratedDetailPanel from './CuratedDetailPanel'
 import RawDatasetsView from './RawDatasetsView'
 import MigrationTasksModal from './MigrationTasksModal'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 interface Row {
   pipelineId: string
@@ -353,11 +354,9 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
   const [panelRow, setPanelRow] = useState<Row | null>(null)
   const [deleteRow, setDeleteRow] = useState<Row | null>(null)
   const [deleting, setDeleting] = useState(false)
-  const [deleteErr, setDeleteErr] = useState('')
   // 成品 → 人工数据集异步迁移
   const [migrateRow, setMigrateRow] = useState<Row | null>(null)
   const [migrating, setMigrating] = useState(false)
-  const [migrateErr, setMigrateErr] = useState('')
   const [migrationNotice, setMigrationNotice] = useState('')
   const [tasksOpen, setTasksOpen] = useState(false)
 
@@ -529,14 +528,13 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
   const handleQuickDelete = async () => {
     if (!deleteRow?.curatedId) return
     setDeleting(true)
-    setDeleteErr('')
     try {
       await curatedApi.delete(deleteRow.curatedId)
       handleDeleted(deleteRow.curatedId)
       setDeleteRow(null)
     } catch (error: unknown) {
       const raw = errorText(error, '删除失败')
-      setDeleteErr(raw === 'Admin required' ? '删除数据集需要管理员权限' : String(raw))
+      toast.error(raw === 'Admin required' ? '删除数据集需要管理员权限' : String(raw))
       setDeleteRow(null)
     } finally {
       setDeleting(false)
@@ -546,7 +544,6 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
   const handleQuickMigrate = async () => {
     if (!migrateRow?.curatedId) return
     setMigrating(true)
-    setMigrateErr('')
     try {
       await datasetsApi.migrateCurated(migrateRow.curatedId)
       setMigrationNotice(
@@ -554,7 +551,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
       setMigrateRow(null)
     } catch (error: unknown) {
       const raw = errorText(error, '迁移任务提交失败')
-      setMigrateErr(String(raw))
+      toast.error(String(raw))
       setMigrateRow(null)
     } finally {
       setMigrating(false)
@@ -767,7 +764,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                       {row.curatedId && (
                         <button
                           type="button"
-                          onClick={() => { setMigrateErr(''); setMigrationNotice(''); setMigrateRow(row) }}
+                          onClick={() => { setMigrationNotice(''); setMigrateRow(row) }}
                           disabled={migrating}
                           className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
                           title="异步拷贝为人工数据集（结构与当前数据一致）"
@@ -779,7 +776,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                         <button
                           type="button"
                           onClick={() => setDeleteRow(row)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-2.5 py-1.5 text-xs font-medium text-[var(--color-danger)] transition hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)] active:scale-[0.98]"
+                          className="inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-2.5 py-1.5 text-xs font-medium text-[var(--color-danger)] transition hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98]"
                           title="完整删除数据集"
                         >
                           <Trash2 size={12} /> 删除
@@ -835,21 +832,21 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
       <ConfirmDialog
         open={!!deleteRow}
         title="删除数据集"
-        message={`确认完整删除「${deleteRow?.curatedName}」？该数据集、全部历史版本、审核记录和行级审核修改都将被永久删除，且不可恢复。若已被流水线或本体映射引用，删除会被拦截。`}
-        confirmLabel={deleting ? '删除中...' : '确认删除'}
+        description={`确认完整删除「${deleteRow?.curatedName}」？该数据集、全部历史版本、审核记录和行级审核修改都将被永久删除，且不可恢复。若已被流水线或本体映射引用，删除会被拦截。`}
+        confirmText={deleting ? '删除中...' : '确认删除'}
+        variant="danger"
         onConfirm={handleQuickDelete}
-        onCancel={() => setDeleteRow(null)}
+        onClose={() => setDeleteRow(null)}
       />
 
       {/* 迁移确认：异步拷贝，不改动源成品数据集 */}
       <ConfirmDialog
         open={!!migrateRow}
-        tone="primary"
         title="迁移到人工数据集"
-        message={`确认把成品数据集「${migrateRow?.curatedName}」迁移到人工数据集？平台将在后台拷贝当前最新数据的结构与全部行，生成「${migrateRow?.curatedName}（人工副本）」；源成品数据集与审核状态保持不变，完成后可在人工数据集页签在线维护。`}
-        confirmLabel={migrating ? '提交中...' : '确认迁移'}
+        description={`确认把成品数据集「${migrateRow?.curatedName}」迁移到人工数据集？平台将在后台拷贝当前最新数据的结构与全部行，生成「${migrateRow?.curatedName}（人工副本）」；源成品数据集与审核状态保持不变，完成后可在人工数据集页签在线维护。`}
+        confirmText={migrating ? '提交中...' : '确认迁移'}
         onConfirm={handleQuickMigrate}
-        onCancel={() => { if (!migrating) setMigrateRow(null) }}
+        onClose={() => { if (!migrating) setMigrateRow(null) }}
       />
 
       {/* 迁移任务进度弹窗 */}
@@ -860,19 +857,6 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
         />
       )}
 
-      {deleteErr && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] max-w-md px-4 py-2.5 bg-[var(--color-danger)] text-[var(--color-text-inverse)] text-sm rounded-lg shadow-lg flex items-start gap-2">
-          <span className="flex-1">{deleteErr}</span>
-          <button onClick={() => setDeleteErr('')} className="text-[var(--color-text-inverse)] hover:text-[var(--color-text-inverse)] shrink-0">×</button>
-        </div>
-      )}
-
-      {migrateErr && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] max-w-md px-4 py-2.5 bg-[var(--color-danger)] text-[var(--color-text-inverse)] text-sm rounded-lg shadow-lg flex items-start gap-2">
-          <span className="flex-1">{migrateErr}</span>
-          <button onClick={() => setMigrateErr('')} className="text-[var(--color-text-inverse)] hover:text-[var(--color-text-inverse)] shrink-0">×</button>
-        </div>
-      )}
     </div>
   )
 }

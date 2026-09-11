@@ -67,7 +67,7 @@ export default function TicketPopover({
       <button
         type="button"
         onClick={() => onOpenChange(!open)}
-        className={`relative grid h-11 w-11 place-items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${
+        className={`relative grid h-11 w-11 place-items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
           open
             ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]'
             : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
@@ -105,7 +105,7 @@ export default function TicketPopover({
               type="button"
               onClick={() => void list.refetch()}
               disabled={list.isFetching}
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[var(--color-text-tertiary)] transition-colors duration-200 hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-[var(--color-text-tertiary)] transition-colors duration-200 hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="刷新工单"
             >
               <RefreshCw size={16} className={list.isFetching ? 'animate-spin motion-reduce:animate-none' : ''} />
@@ -131,7 +131,7 @@ export default function TicketPopover({
                 <Megaphone size={24} className="mb-2 text-[var(--color-danger)]" />
                 <p className="text-sm font-medium text-[var(--color-text-primary)]">工单加载失败</p>
                 <p className="mt-1 text-xs text-[var(--color-text-secondary)]">请检查网络后重新加载</p>
-                <button type="button" onClick={() => void list.refetch()} className="mt-3 inline-flex h-11 items-center gap-1.5 rounded-lg bg-[var(--color-bg-hover)] px-3.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]">
+                <button type="button" onClick={() => void list.refetch()} className="mt-3 inline-flex h-11 items-center gap-1.5 rounded-lg bg-[var(--color-bg-hover)] px-3.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <RefreshCw size={13} />重新加载
                 </button>
               </div>
@@ -150,7 +150,7 @@ export default function TicketPopover({
                     <button
                       type="button"
                       onClick={() => openTicket(ticket)}
-                      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-2 px-4 py-3 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-ring)]"
+                      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-2 px-4 py-3 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                       aria-label={`打开工单：${ticket.title}`}
                     >
                     <span className="min-w-0">
@@ -191,14 +191,14 @@ export default function TicketPopover({
             <button
               type="button"
               onClick={() => { onOpenChange(false); setFormOpen(true) }}
-              className="inline-flex h-10 items-center gap-1 rounded-lg px-3 text-xs font-medium text-[var(--color-nav-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+              className="inline-flex h-10 items-center gap-1 rounded-lg px-3 text-xs font-medium text-[var(--color-nav-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <Plus size={14} />提交工单
             </button>
             <button
               type="button"
               onClick={() => { onOpenChange(false); onNavigate('/tickets') }}
-              className="inline-flex h-10 items-center gap-1 rounded-lg px-3 text-xs font-medium text-[var(--color-nav-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+              className="inline-flex h-10 items-center gap-1 rounded-lg px-3 text-xs font-medium text-[var(--color-nav-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               查看全部工单
               <ChevronRight size={14} aria-hidden="true" />

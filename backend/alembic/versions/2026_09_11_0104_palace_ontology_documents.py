@@ -6,7 +6,7 @@ super_assistant_palace_ontology_documents 平台级共享镜像表（按 ontolog
 「本体文档」目录；图谱贡献写入系统作用域，与用户图谱 UNION 展示。
 
 Revision ID: 0104_palace_ontology_documents
-Revises: 0102_super_assistant_palace_sync_token
+Revises: 0103_ontology_readpath_perf_indexes
 Create Date: 2026-09-11
 """
 
@@ -16,7 +16,7 @@ from sqlalchemy import inspect as sa_inspect
 
 
 revision = "0104_palace_ontology_documents"
-down_revision = "0102_super_assistant_palace_sync_token"
+down_revision = "0103_ontology_readpath_perf_indexes"
 branch_labels = None
 depends_on = None
 

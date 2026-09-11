@@ -810,7 +810,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
         <button
           type="button"
           onClick={() => void data.refetch()}
-          className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)]"
+          className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           重新加载
         </button>
@@ -1020,7 +1020,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
       <Dialog open={reconcileTarget !== null} onOpenChange={next => { if (!next) setReconcileTarget(null) }}>
         <DialogContent className="w-[min(92vw,26rem)]">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>确认重新灌入数据</DialogTitle>
             </div>
           </DialogHeader>

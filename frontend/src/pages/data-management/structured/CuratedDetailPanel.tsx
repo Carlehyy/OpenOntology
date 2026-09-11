@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import curatedApi, { type ReviewDiff, type ReviewRowEdit } from '@/api/v2/curated'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import datasetsApi, { FIELD_TYPE_LABELS, type DatasetSchemaColumn } from '@/api/v2/datasets'
 
 interface Props {
@@ -268,8 +269,8 @@ function EditableReviewTable({
                           title={!rowPk ? '该行主键为空，系统拒绝猜测行身份' : undefined}
                           className={`h-8 w-full min-w-[150px] rounded-md border px-2.5 text-xs text-foreground outline-none transition ${
                             edit
-                              ? 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] font-medium focus:border-[var(--color-warning)] focus:ring-2 focus:ring-[var(--color-warning)]'
-                              : 'border-transparent bg-transparent hover:border-border hover:bg-card focus:border-brand focus:bg-card focus:ring-2 focus:ring-ring'
+                              ? 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] font-medium focus:border-[var(--color-warning)] focus-visible:ring-2 focus-visible:ring-ring'
+                              : 'border-transparent bg-transparent hover:border-border hover:bg-card focus-visible:border-ring focus:bg-card focus-visible:ring-2 focus-visible:ring-ring'
                           } disabled:cursor-not-allowed disabled:bg-muted disabled:text-[var(--color-text-tertiary)]`}
                         />
                       )}
@@ -389,6 +390,7 @@ export default function CuratedDetailPanel({
   const [pendingEdits, setPendingEdits] = useState<ReviewRowEdit[]>([])
   const [savingEdits, setSavingEdits] = useState(false)
   const [editMessage, setEditMessage] = useState('')
+  const [pendingConfirm, setPendingConfirm] = useState<null | { title: string; description: string; action: () => void }>(null)
 
   const reviewPending = isPendingReview(status)
   const hasUnsavedEdits = pendingEdits.length > 0
@@ -403,7 +405,14 @@ export default function CuratedDetailPanel({
     && (diff?.current_row_pks?.length ?? -1) === (diff?.current?.rows.length ?? 0)
   )
   const requestClose = useCallback(() => {
-    if (hasUnsavedEdits && !window.confirm('还有未保存的审核修改，关闭后将丢失。确认关闭吗？')) return
+    if (hasUnsavedEdits) {
+      setPendingConfirm({
+        title: '关闭并放弃未保存修改',
+        description: '还有未保存的审核修改，关闭后将丢失。确认关闭吗？',
+        action: () => { onClose() },
+      })
+      return
+    }
     onClose()
   }, [hasUnsavedEdits, onClose])
 
@@ -585,8 +594,7 @@ export default function CuratedDetailPanel({
     } finally { setReviewAction(null) }
   }
 
-  const handleSwitchToLatestReview = async () => {
-    if (hasUnsavedEdits && !window.confirm('切换版本会丢弃当前未保存的修改，确认继续吗？')) return
+  const doSwitchToLatestReview = async () => {
     setSwitchingReview(true)
     setActionError('')
     try {
@@ -601,6 +609,18 @@ export default function CuratedDetailPanel({
     } finally {
       setSwitchingReview(false)
     }
+  }
+
+  const handleSwitchToLatestReview = () => {
+    if (hasUnsavedEdits) {
+      setPendingConfirm({
+        title: '切换版本并放弃修改',
+        description: '切换版本会丢弃当前未保存的修改，确认继续吗？',
+        action: () => { void doSwitchToLatestReview() },
+      })
+      return
+    }
+    void doSwitchToLatestReview()
   }
 
   const handleExport = async (format: 'csv' | 'xlsx') => {
@@ -940,7 +960,7 @@ export default function CuratedDetailPanel({
                             type="button"
                             onClick={() => void handleSaveEdits()}
                             disabled={savingEdits || Boolean(reviewAction)}
-                            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-card px-3 text-xs font-semibold text-[var(--color-warning)] transition hover:bg-[var(--color-warning-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-warning)] disabled:cursor-not-allowed disabled:opacity-45"
+                            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-card px-3 text-xs font-semibold text-[var(--color-warning)] transition hover:bg-[var(--color-warning-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-45"
                           >
                             {savingEdits ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
                             保存 {pendingEdits.length} 处修改
@@ -959,13 +979,13 @@ export default function CuratedDetailPanel({
                 </button>
                 <button type="button" onClick={handleReject} disabled={Boolean(reviewAction) || reviewIsStale || loading || savingEdits || hasUnsavedEdits}
                   title={reviewIsStale ? '审核版本已过期，请先切换到最新版本' : hasUnsavedEdits ? '请先保存或还原当前修改' : '拒绝当前审核版本'}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-viz-rose-soft bg-card px-3.5 text-xs font-medium text-viz-rose transition hover:border-viz-rose-soft hover:bg-viz-rose-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-viz-rose active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45">
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-viz-rose-soft bg-card px-3.5 text-xs font-medium text-viz-rose transition hover:border-viz-rose-soft hover:bg-viz-rose-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45">
                   {reviewAction === 'reject' ? <Loader2 size={13} className="animate-spin" /> : <AlertTriangle size={13} />}
                   拒绝本次数据
                 </button>
                 <button type="button" onClick={handleApprove} disabled={Boolean(reviewAction) || reviewIsStale || loading || savingEdits || hasUnsavedEdits}
                   title={reviewIsStale ? '审核版本已过期，请先切换到最新版本' : hasUnsavedEdits ? '请先保存或还原当前修改' : '通过当前审核版本'}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[var(--color-success)] px-4 text-xs font-semibold text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45">
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[var(--color-success)] px-4 text-xs font-semibold text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45">
                   {reviewAction === 'approve' ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle size={13} />}
                   通过审核
                 </button>
@@ -1010,6 +1030,14 @@ export default function CuratedDetailPanel({
         </div>
       </div>
 
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        onClose={() => setPendingConfirm(null)}
+        onConfirm={() => { const c = pendingConfirm; setPendingConfirm(null); c?.action() }}
+        title={pendingConfirm?.title ?? ''}
+        description={pendingConfirm?.description}
+        variant="warning"
+      />
     </>
   )
 }

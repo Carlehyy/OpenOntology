@@ -30,7 +30,7 @@ import { hasMenuAccess } from '@/config/navigation'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
 import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './components/AssistantConfiguration'
-import ConfirmActionDialog from './components/ConfirmActionDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import {
@@ -579,7 +579,7 @@ export default function SuperAssistantPage() {
       />
       <div
         data-testid="super-assistant-composer"
-        className={`relative overflow-visible rounded-xl border border-brand bg-white ring-1 ring-brand-mist transition-colors focus-within:border-brand-deep focus-within:ring-2 focus-within:ring-ring/30 ${prominent
+        className={`relative overflow-visible rounded-xl border border-brand bg-white ring-1 ring-brand-mist transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring ${prominent
           ? 'shadow-[0_18px_50px_rgba(5,150,105,0.12)]'
           : 'shadow-[0_8px_28px_rgba(15,23,42,0.08)]'}`}
       >
@@ -755,7 +755,7 @@ export default function SuperAssistantPage() {
             type="button"
             onClick={() => setSidebarOpen(true)}
             aria-label="打开工作台导航"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] md:hidden"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
           >
             <Menu size={18} />
           </button>
@@ -789,7 +789,7 @@ export default function SuperAssistantPage() {
                 <button type="button" onClick={() => setEditingTitle(false)} aria-label="取消编辑会话名称"
                   title="取消编辑"
                   onMouseDown={event => event.preventDefault()}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <X size={14} />
                 </button>
               </form>
@@ -830,7 +830,7 @@ export default function SuperAssistantPage() {
                 一律去粗焦点环只保留细边——细边即焦点指示，键盘操作同样可见 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus:border-brand focus:ring-0 sm:w-48 xl:w-60"
+              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
             >
               <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'} />
             </SelectTrigger>
@@ -920,15 +920,16 @@ export default function SuperAssistantPage() {
         onSelectConversation={handleSearchSelect}
       />
 
-      <ConfirmActionDialog
+      <ConfirmDialog
         open={deletingConversation !== null}
         title="删除会话"
-        message={deletingConversation
+        description={deletingConversation
           ? `确定删除会话「${deletingConversation.title}」？会话内消息与附件将一并删除。`
           : ''}
-        confirmLabel="删除"
+        confirmText="删除"
+        variant="danger"
         onConfirm={() => void deleteConversation()}
-        onCancel={() => setDeletingConversation(null)}
+        onClose={() => setDeletingConversation(null)}
       />
     </div>
   )

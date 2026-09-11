@@ -807,7 +807,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
         />
         <div className="relative w-[240px] min-w-[170px] shrink">
           <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
-          <input ref={searchInputRef} value={searchText} onChange={event => { setSearchText(event.target.value); setSearchOpen(true); setSearchFocus(null) }} onFocus={() => setSearchOpen(true)} onKeyDown={event => { if (event.key === 'Enter' && searchResults[0]) chooseSearchResult(searchResults[0]); if (event.key === 'Escape') setSearchOpen(false) }} placeholder={level === 1 ? '搜索对象实体或实体关系' : '搜索对象、关系、属性或动作'} aria-label="搜索本体结构" role="combobox" aria-autocomplete="list" aria-controls="structure-search-results" aria-expanded={searchResultsVisible} autoComplete="off" className="h-9 w-full rounded-lg border border-border bg-muted pl-9 pr-8 text-xs text-foreground outline-none transition focus:border-brand focus:bg-card focus:ring-2 focus:ring-ring" />
+          <input ref={searchInputRef} value={searchText} onChange={event => { setSearchText(event.target.value); setSearchOpen(true); setSearchFocus(null) }} onFocus={() => setSearchOpen(true)} onKeyDown={event => { if (event.key === 'Enter' && searchResults[0]) chooseSearchResult(searchResults[0]); if (event.key === 'Escape') setSearchOpen(false) }} placeholder={level === 1 ? '搜索对象实体或实体关系' : '搜索对象、关系、属性或动作'} aria-label="搜索本体结构" role="combobox" aria-autocomplete="list" aria-controls="structure-search-results" aria-expanded={searchResultsVisible} autoComplete="off" className="h-9 w-full rounded-lg border border-border bg-muted pl-9 pr-8 text-xs text-foreground outline-none transition focus-visible:border-ring focus:bg-card focus-visible:ring-2 focus-visible:ring-ring" />
           {searchText && <button type="button" aria-label="清空搜索" onClick={() => { setSearchText(''); setSearchFocus(null); setSearchOpen(false) }} className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-active)]"><X size={12} /></button>}
           {searchResultsVisible && createPortal(
             <div ref={searchResultsRef} id="structure-search-results" role="listbox" aria-label="本体结构搜索候选" className="fixed z-[80] max-h-72 overflow-auto rounded-xl border border-border bg-card p-1.5 shadow-[0_18px_52px_rgba(15,23,42,0.16)]" style={searchPosition}>
@@ -963,14 +963,14 @@ export default function ModelStructureView({ ontologyId, ontologyName }: {
   if (releaseQuery.isError || !releaseQuery.data?.isCurrentRelease || releaseQuery.data.workspaceMode !== 'release' || releaseQuery.data.editable !== false) return (
     <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--color-danger-bg)] text-sm text-[var(--color-danger)]" role="alert">
       <p className="inline-flex items-center gap-2"><AlertCircle size={18} />当前发布快照读取失败，已停止展示可变模型数据。</p>
-      <button type="button" onClick={() => void releaseQuery.refetch()} className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-2 text-xs font-semibold text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)]">重新加载</button>
+      <button type="button" onClick={() => void releaseQuery.refetch()} className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-2 text-xs font-semibold text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">重新加载</button>
     </div>
   )
   if (dynamicSentinelsQuery.isError) return (
     <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--color-warning-bg)] px-6 text-center text-sm text-[var(--color-warning)]" role="alert">
       <AlertCircle size={20} />
       <p>动态哨兵读取失败，已停止展示不完整的哨兵覆盖数据。</p>
-      <button type="button" onClick={() => void dynamicSentinelsQuery.refetch()} className="rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-card px-3 py-2 text-xs font-semibold text-[var(--color-warning)] transition-colors hover:bg-[var(--color-warning-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-warning)]">重新加载</button>
+      <button type="button" onClick={() => void dynamicSentinelsQuery.refetch()} className="rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-card px-3 py-2 text-xs font-semibold text-[var(--color-warning)] transition-colors hover:bg-[var(--color-warning-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">重新加载</button>
     </div>
   )
   if (releaseQuery.data.objectTypes.length === 0) return <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground"><span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-muted"><Database size={22} /></span><p className="text-sm">当前发布版还没有对象实体</p></div>

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Select as FormSelect, SelectContent as FormSelectContent, SelectItem as FormSelectItem, SelectTrigger as FormSelectTrigger, SelectValue as FormSelectValue } from '@/components/ui/select'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, FilePlus2, Loader2, Paperclip, RefreshCcw, Trash2, Undo2, Upload } from 'lucide-react'
+import { Alert } from '@/components/ui/Alert'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { toast } from 'sonner'
 import { ontologyApi } from '@/api/ontologies'
@@ -190,7 +191,7 @@ export default function EventFormModal({
   }
 
   const labelClass = 'mb-1.5 block text-sm font-medium text-foreground'
-  const controlClass = 'h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-success)] focus:outline-none focus:ring-2 focus:ring-[var(--color-success)]'
+  const controlClass = 'h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
   const visibleExistingCount = existingAttachments.filter(attachment => !removedAttachmentIds.has(attachment.id)).length
 
   return (
@@ -199,20 +200,15 @@ export default function EventFormModal({
         className="flex max-h-[min(88dvh,900px)] w-[min(92vw,64rem)] flex-col"
         dismissible={!mutation.isPending}
       >
-        <DialogHeader>
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--color-success-bg)] text-[var(--color-success)]">
-            <FilePlus2 size={19} />
-          </div>
-          <div className="min-w-0 pt-0.5">
-            <DialogTitle>{isEdit ? '编辑事件' : '登记事件'}</DialogTitle>
-            {!isEdit && <DialogDescription>记录一条业务事件，供后续本体优化挖掘</DialogDescription>}
-          </div>
+        <DialogHeader icon={<FilePlus2 size={18} />}>
+          <DialogTitle>{isEdit ? '编辑事件' : '登记事件'}</DialogTitle>
+          {!isEdit && <DialogDescription>记录一条业务事件，供后续本体优化挖掘</DialogDescription>}
         </DialogHeader>
       <div className="max-h-[68vh] space-y-5 overflow-y-auto px-1 pb-1 pr-2">
         {error && (
-          <div className="flex items-center gap-2 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-3 py-2 text-sm text-[var(--color-danger)]">
-            <AlertTriangle size={15} /> {error}
-          </div>
+          <Alert variant="danger" role="alert" className="items-center">
+            {error}
+          </Alert>
         )}
 
         <div>
@@ -277,7 +273,7 @@ export default function EventFormModal({
             value={description}
             onChange={event => setDescription(event.target.value)}
             rows={4}
-            className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-success)] focus:outline-none focus:ring-2 focus:ring-[var(--color-success)]"
+            className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             placeholder="事件的完整经过、背景、影响……"
           />
         </div>
@@ -299,7 +295,7 @@ export default function EventFormModal({
               </span>
             )}
           </div>
-          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] px-4 py-4 text-sm font-medium text-[var(--color-success)] transition-all hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] focus-within:ring-2 focus-within:ring-[var(--color-success)]">
+          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] px-4 py-4 text-sm font-medium text-[var(--color-success)] transition-all hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] focus-within:ring-2 focus-within:ring-ring">
             <Upload size={16} /> 选择多个附件
             <input
               type="file"

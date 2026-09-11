@@ -90,7 +90,7 @@
   background: #f7f9f9;
   transition: .16s ease;
 }
-.dmc-global-search:focus-within { border-color: #7dbab4; background: #fff; box-shadow: 0 0 0 3px rgba(22,143,131,.08); }
+.dmc-global-search:focus-within { border-color: var(--color-ring); background: #fff; box-shadow: 0 0 0 2px var(--color-ring); }
 .dmc-global-search input { min-width: 0; width: 100%; border: 0; outline: 0; color: #42505c; background: transparent; font-size: 12px; }
 .dmc-global-search input::placeholder,
 .dmc-side-search input::placeholder { color: #a2adb5; }
@@ -198,7 +198,7 @@
 .dmc-sidebar-title small { margin-top: 2px; color: #929da6; font-size: 10px; }
 .dmc-sidebar-title em { padding: 3px 7px; border-radius: 99px; color: #687681; background: #eef3f3; font-size: 10px; font-style: normal; font-weight: 700; }
 .dmc-side-search { height: 33px; margin: 10px 10px 7px; padding: 0 9px; border: 1px solid #dfe7e9; border-radius: 9px; display: flex; align-items: center; gap: 6px; color: #929ea7; background: #f7f9f9; transition: .16s ease; }
-.dmc-side-search:focus-within { border-color: #8ec4be; background: #fff; box-shadow: 0 0 0 3px rgba(22,143,131,.06); }
+.dmc-side-search:focus-within { border-color: var(--color-ring); background: #fff; box-shadow: 0 0 0 2px var(--color-ring); }
 .dmc-side-search input { min-width: 0; width: 100%; border: 0; outline: 0; color: #4d5a65; background: transparent; font-size: 11px; }
 .dmc-side-list { flex: 1 1 0; min-height: 0; padding: 4px 7px 9px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #b9c8cb transparent; }
 .dmc-side-list::-webkit-scrollbar { width: 7px; }

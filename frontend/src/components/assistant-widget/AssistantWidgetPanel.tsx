@@ -84,7 +84,7 @@ function PendingConfirmationCard() {
           type="button"
           disabled={busyDecision !== null}
           onClick={() => void decide('deny')}
-          className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50"
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           {busyDecision === 'deny' && <Loader2 size={12} className="animate-spin" />} 拒绝
         </button>
@@ -92,7 +92,7 @@ function PendingConfirmationCard() {
           type="button"
           disabled={busyDecision !== null}
           onClick={() => void decide('approve')}
-          className="inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-amber-700 px-3 text-xs font-medium text-white transition-colors hover:bg-amber-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50"
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-amber-700 px-3 text-xs font-medium text-white transition-colors hover:bg-amber-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           {busyDecision === 'approve' && <Loader2 size={12} className="animate-spin" />} 确认执行
         </button>
@@ -115,7 +115,7 @@ function WidgetEmptyState() {
   )
 }
 
-const headerButtonClass = 'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 disabled:cursor-not-allowed disabled:opacity-40'
+const headerButtonClass = 'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40'
 
 /**
  * 悬浮 AI 助手面板（懒加载 chunk，承载全部 antd / Ant Design X 依赖）。
@@ -299,7 +299,7 @@ export default function AssistantWidgetPanel() {
                 <button
                   type="button"
                   onClick={() => void ensureInitialized()}
-                  className="mt-3 min-h-8 rounded-lg bg-teal-700 px-4 text-xs font-medium text-white transition-colors hover:bg-teal-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
+                  className="mt-3 min-h-8 rounded-lg bg-teal-700 px-4 text-xs font-medium text-white transition-colors hover:bg-teal-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   重试
                 </button>

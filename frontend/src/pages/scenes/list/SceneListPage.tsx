@@ -232,7 +232,7 @@ export default function SceneListPage() {
             onChange={event => setNameFilter(event.target.value)}
             placeholder="搜索场景名称或描述"
             aria-label="按场景名称或描述筛选"
-            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus:border-brand focus:outline-none focus:ring-2 focus:ring-ring"
+            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           {nameFilter && (
             <button
@@ -301,7 +301,7 @@ export default function SceneListPage() {
             <button
               type="button"
               onClick={() => void refetch()}
-              className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)]"
+              className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               重新加载
             </button>

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Database, FileUp, Globe, X, Loader2, RefreshCw, Table2 } from 'lucide-react'
 import { apiClientV2 } from '@/api/client'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 interface Connection {
   id: string
@@ -219,7 +219,7 @@ export default function ConnectionsTab() {
               value={formName}
               onChange={e => setFormName(e.target.value)}
               placeholder="例：ERP 订单数据库"
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-black"
+              className="w-full border rounded-lg px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </div>
 
@@ -252,7 +252,7 @@ export default function ConnectionsTab() {
                   value={formConfig[f.key] || ''}
                   onChange={e => setFormConfig(p => ({ ...p, [f.key]: e.target.value }))}
                   placeholder={f.placeholder}
-                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-black"
+                  className="w-full border rounded-lg px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 />
               </div>
             ))}
@@ -364,9 +364,11 @@ export default function ConnectionsTab() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="删除连接"
-        message={`确认删除连接「${deleteTarget?.name}」？依赖该连接的同步任务将无法执行。`}
+        description={`确认删除连接「${deleteTarget?.name}」？依赖该连接的同步任务将无法执行。`}
+        confirmText="确认删除"
+        variant="danger"
         onConfirm={handleDelete}
-        onCancel={() => setDeleteTarget(null)}
+        onClose={() => setDeleteTarget(null)}
       />
     </div>
   )

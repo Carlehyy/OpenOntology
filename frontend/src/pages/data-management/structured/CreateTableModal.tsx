@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 import {
@@ -388,19 +389,23 @@ export default function CreateTableModal({ onClose, onCreated }: {
   const progressFailed = importStatus === 'failed'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]">
-      <div className="flex max-h-[86vh] w-[min(96vw,1120px)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
-        role="dialog" aria-modal="true" aria-labelledby="create-table-title">
-        <header className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-soft text-brand-ink"><Table2 size={16} /></span>
-          <div className="min-w-0 flex-1">
-            <h3 id="create-table-title" className="text-sm font-semibold text-foreground">在线新建表格</h3>
-            <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">上传一个现有表格自动识别名称与字段，或直接定义一张空表；创建前可统一检查字段契约。</p>
-          </div>
-          <button type="button" onClick={onClose} disabled={submitting || parsing}
-            className="grid h-8 w-8 place-items-center rounded-lg text-[var(--color-text-tertiary)] transition hover:bg-muted hover:text-foreground disabled:opacity-40"
-            aria-label="关闭在线新建表格"><X size={16} /></button>
-        </header>
+    <Dialog
+      open
+      onOpenChange={next => { if (!next && !submitting && !parsing) onClose() }}
+    >
+      <DialogContent
+        className="flex max-h-[86vh] w-[min(96vw,1120px)] flex-col p-0"
+        dismissible={!(submitting || parsing)}
+      >
+        <DialogHeader
+          className="mb-0 shrink-0 border-b border-border px-5 pb-3 pt-4"
+          icon={<Table2 size={18} />}
+        >
+          <DialogTitle>在线新建表格</DialogTitle>
+          <DialogDescription>
+            上传一个现有表格自动识别名称与字段，或直接定义一张空表；创建前可统一检查字段契约。
+          </DialogDescription>
+        </DialogHeader>
 
         <main className="min-h-0 flex-1 overflow-auto">
           <section className="border-b border-border px-5 py-4">
@@ -457,7 +462,7 @@ export default function CreateTableModal({ onClose, onCreated }: {
               <section className="border-b border-border px-5 py-4">
                 <label className="mb-1.5 block text-xs font-semibold text-foreground">数据集名称</label>
                 <input value={name} onChange={event => setName(event.target.value)} placeholder="例如：设备台账"
-                  className="h-9 w-full rounded-lg border border-border px-3 text-sm outline-none transition focus:border-brand focus:ring-2 focus:ring-ring" />
+                  className="h-9 w-full rounded-lg border border-border px-3 text-sm outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
               </section>
 
               <section className="border-b border-border px-5 py-4">
@@ -477,8 +482,8 @@ export default function CreateTableModal({ onClose, onCreated }: {
                     </tr></thead>
                     <tbody className="divide-y border-border">{columns.map((column, index) => (
                       <tr key={column.id} className="hover:bg-muted">
-                        <td className="p-1.5"><input value={column.displayName} onChange={event => setColumn(index, { displayName: event.target.value })} placeholder="例如：设备名称" className="h-8 w-full min-w-36 rounded-md border border-border px-2 outline-none focus:border-brand" /></td>
-                        <td className="p-1.5"><div><input value={column.name} onChange={event => setColumn(index, { name: event.target.value })} placeholder="例如：device_name" autoCapitalize="none" autoCorrect="off" spellCheck={false} title="字段标识必须唯一；以小写字母开头，仅允许小写字母、数字和下划线" aria-invalid={duplicateFieldKeys.has(column.name.trim()) || undefined} aria-describedby={duplicateFieldKeys.has(column.name.trim()) ? `field-key-error-${column.id}` : undefined} className={`h-8 w-full min-w-36 rounded-md border px-2 font-mono outline-none transition ${duplicateFieldKeys.has(column.name.trim()) ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus:border-[var(--color-danger)] focus:ring-2 focus:ring-[var(--color-danger)]' : 'border-border focus:border-brand'}`} />{duplicateFieldKeys.has(column.name.trim()) && <p id={`field-key-error-${column.id}`} className="mt-1 text-[10px] text-[var(--color-danger)]" role="alert">字段标识重复，请为每一列使用唯一标识</p>}</div></td>
+                        <td className="p-1.5"><input value={column.displayName} onChange={event => setColumn(index, { displayName: event.target.value })} placeholder="例如：设备名称" className="h-8 w-full min-w-36 rounded-md border border-border px-2 outline-none focus-visible:border-ring" /></td>
+                        <td className="p-1.5"><div><input value={column.name} onChange={event => setColumn(index, { name: event.target.value })} placeholder="例如：device_name" autoCapitalize="none" autoCorrect="off" spellCheck={false} title="字段标识必须唯一；以小写字母开头，仅允许小写字母、数字和下划线" aria-invalid={duplicateFieldKeys.has(column.name.trim()) || undefined} aria-describedby={duplicateFieldKeys.has(column.name.trim()) ? `field-key-error-${column.id}` : undefined} className={`h-8 w-full min-w-36 rounded-md border px-2 font-mono outline-none transition ${duplicateFieldKeys.has(column.name.trim()) ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus:border-[var(--color-danger)] focus-visible:ring-2 focus-visible:ring-ring' : 'border-border focus-visible:border-ring'}`} />{duplicateFieldKeys.has(column.name.trim()) && <p id={`field-key-error-${column.id}`} className="mt-1 text-[10px] text-[var(--color-danger)]" role="alert">字段标识重复，请为每一列使用唯一标识</p>}</div></td>
                         <td className="p-1.5"><Select value={column.type} onValueChange={value => setColumn(index, { type: value })}><SelectTrigger className="h-8 w-full rounded-md bg-card px-2 text-xs" aria-label={`${column.name} 字段类型`}><SelectValue /></SelectTrigger><SelectContent>{CONTRACT_FIELD_TYPES.map(type => <SelectItem key={type} value={type}>{FIELD_TYPE_LABELS[type] ?? type}（{type}）</SelectItem>)}</SelectContent></Select></td>
                         <td className="p-1.5 text-center"><input type="checkbox" checked={!column.nullable || column.pk} disabled={column.pk} onChange={event => setColumn(index, { nullable: !event.target.checked })} className="accent-[var(--color-nav-bg)]" aria-label={`${column.name} 非空`} /></td>
                         <td className="p-1.5 text-center"><input type="checkbox" checked={column.pk} onChange={event => setColumn(index, { pk: event.target.checked, nullable: event.target.checked ? false : column.nullable })} className="accent-[var(--color-warning)]" aria-label={`${column.name} 主键`} /></td>
@@ -508,7 +513,7 @@ export default function CreateTableModal({ onClose, onCreated }: {
           <button type="button" onClick={onClose} disabled={submitting} className="h-8 rounded-lg border border-border bg-card px-3 text-xs font-medium text-muted-foreground transition hover:bg-muted disabled:opacity-40">取消</button>
           <button type="button" onClick={() => void handleSubmit()} disabled={submitting || parsing || !hasSource || duplicateFieldKeys.size > 0} className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand-deep px-4 text-xs font-medium text-[var(--color-text-inverse)] transition hover:bg-brand-deep disabled:opacity-40">{submitting ? <Loader2 size={12} className="animate-spin" /> : file ? <Upload size={12} /> : <Table2 size={12} />}{file ? '导入并创建' : '创建空表'}</button>
         </footer>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

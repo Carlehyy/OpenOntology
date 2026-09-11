@@ -103,6 +103,8 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
 
   // 隐私变量状态
   const [privacyVars, setPrivacyVars] = useState<PrivacyVar[]>([])
+  // 上报 token 一次性展示弹窗（替代 window.prompt：自动全选 + 复制按钮 + 手动 Cmd+C 兜底）
+  const [tokenReveal, setTokenReveal] = useState<null | { title: string; token: string }>(null)
   const [privacyLoading, setPrivacyLoading] = useState(false)
   const [privacyNewKey, setPrivacyNewKey] = useState('')
   const [privacyBusy, setPrivacyBusy] = useState(false)
@@ -249,10 +251,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       // 首次创建返回 report_token：仅此一次可见，如实提示并给出复制兜底。
       if (created.report_token) {
         toast.success('已创建。上报 token 仅此一次展示，请立即复制保存')
-        // 用 prompt 作为复制兜底（剪贴板 API 在非 HTTPS/非聚焦下不可靠）。
-        window.setTimeout(() => {
-          window.prompt('上报 token（仅此一次，请立即保存）：', created.report_token)
-        }, 100)
+        setTokenReveal({ title: '上报 token', token: created.report_token })
       } else {
         toast.success('已创建')
       }
@@ -281,9 +280,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
     try {
       const result = await authApi.resetReportToken()
       toast.success('已重置。新 token 仅此一次展示，请立即复制保存')
-      window.setTimeout(() => {
-        window.prompt('新上报 token（仅此一次，请立即保存；旧 token 已失效）：', result.report_token)
-      }, 100)
+      setTokenReveal({ title: '新上报 token（旧 token 已失效）', token: result.report_token })
     } catch (error) {
       toast.error(errorMessage(error, '重置上报 token 失败'))
     } finally {
@@ -656,6 +653,39 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
           </div>
         )}
       </div>
+      {tokenReveal && (
+        <Modal
+          open
+          onClose={() => setTokenReveal(null)}
+          title={tokenReveal.title}
+          description="仅此一次展示，关闭后无法再次查看，请立即复制保存。"
+          size="sm"
+          headerIcon={<KeyRound size={18} className="text-[var(--color-nav-bg)]" />}
+          footer={(
+            <>
+              <Button variant="outline" onClick={() => setTokenReveal(null)}>关闭</Button>
+              <Button
+                onClick={() => {
+                  writeTextToClipboard(tokenReveal.token)
+                    .then(() => toast.success('已复制到剪贴板'))
+                    .catch(() => toast.error('自动复制失败，请手动全选后按 Cmd+C / Ctrl+C 复制'))
+                }}
+              >
+                <Copy size={14} /> 复制 token
+              </Button>
+            </>
+          )}
+        >
+          <input
+            readOnly
+            value={tokenReveal.token}
+            autoFocus
+            onFocus={event => event.currentTarget.select()}
+            aria-label="上报 token"
+            className="h-9 w-full rounded-md border border-border bg-[var(--color-bg-elevated)] px-3 font-mono text-sm text-foreground"
+          />
+        </Modal>
+      )}
     </Modal>
   )
 }

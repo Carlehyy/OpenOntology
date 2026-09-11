@@ -858,7 +858,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
               className="rounded bg-[var(--color-warning-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-warning)]">HTTP 兼容模式</span>
           )}
           <input value={url} onChange={e => setUrl(e.target.value)} onKeyDown={e => e.key === 'Enter' && void open()}
-            className="h-8 min-w-0 flex-1 rounded-lg border bg-card px-3 font-mono text-xs outline-none focus:border-brand" />
+            className="h-8 min-w-0 flex-1 rounded-lg border bg-card px-3 font-mono text-xs outline-none focus-visible:border-ring" />
           <button onClick={() => void open()} disabled={busy}
             className="flex h-8 items-center gap-1.5 rounded-lg bg-brand px-3 text-xs text-[var(--color-text-inverse)] disabled:opacity-50">
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />} 打开
@@ -953,10 +953,10 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
                 <button onClick={() => setSourceType('remote_cdp')} className={`rounded-lg border px-3 py-1.5 text-xs ${sourceType === 'remote_cdp' ? 'border-brand-line bg-brand-soft text-brand-ink' : 'bg-card text-muted-foreground'}`}>远程 CDP（管理员）</button>
               </div>
               <div className="mt-3 grid gap-2">
-                <input value={sourceName} onChange={event => setSourceName(event.target.value)} placeholder="来源名称" className="h-8 rounded-lg border bg-card px-3 text-xs outline-none focus:border-brand" />
+                <input value={sourceName} onChange={event => setSourceName(event.target.value)} placeholder="来源名称" className="h-8 rounded-lg border bg-card px-3 text-xs outline-none focus-visible:border-ring" />
                 {sourceType === 'remote_cdp' && <>
-                  <input value={endpointUrl} onChange={event => setEndpointUrl(event.target.value)} placeholder="https://browser.example.com/cdp" className="h-8 rounded-lg border bg-card px-3 font-mono text-xs outline-none focus:border-brand" />
-                  <textarea value={headerJson} onChange={event => setHeaderJson(event.target.value)} placeholder='{"Authorization":"Bearer …"}' className="h-16 resize-none rounded-lg border bg-card p-2 font-mono text-[11px] outline-none focus:border-brand" />
+                  <input value={endpointUrl} onChange={event => setEndpointUrl(event.target.value)} placeholder="https://browser.example.com/cdp" className="h-8 rounded-lg border bg-card px-3 font-mono text-xs outline-none focus-visible:border-ring" />
+                  <textarea value={headerJson} onChange={event => setHeaderJson(event.target.value)} placeholder='{"Authorization":"Bearer …"}' className="h-16 resize-none rounded-lg border bg-card p-2 font-mono text-[11px] outline-none focus-visible:border-ring" />
                 </>}
                 <button onClick={() => void createSource()} disabled={sourceBusy || (sourceType === 'remote_cdp' && !endpointUrl.trim())} className="h-8 rounded-lg bg-brand px-3 text-xs font-medium text-[var(--color-text-inverse)] disabled:opacity-40">{sourceType === 'companion' ? '生成一次性配对信息' : '保存远程浏览器'}</button>
               </div>
@@ -979,7 +979,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
           <div className="flex min-w-0 flex-1 items-center justify-center overflow-auto p-2">
             {frame ? (
               <img ref={imageRef} data-testid="steward-live-browser-frame" src={frame} draggable={false} tabIndex={0} alt="会话浏览器协作画面"
-                className="max-h-full max-w-full select-none outline-none ring-ring focus:ring-2"
+                className="max-h-full max-w-full select-none outline-none ring-ring focus-visible:ring-2"
                 onMouseDown={e => { e.currentTarget.focus(); send({ type: 'mouse', action: 'down', ...point(e), button: e.button === 2 ? 'right' : 'left' }) }}
                 onMouseUp={e => send({ type: 'mouse', action: 'up', ...point(e), button: e.button === 2 ? 'right' : 'left' })}
                 onDoubleClick={e => send({ type: 'mouse', action: 'click', ...point(e), clickCount: 2 })}

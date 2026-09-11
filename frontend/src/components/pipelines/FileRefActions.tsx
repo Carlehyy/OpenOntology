@@ -88,7 +88,7 @@ export default function FileRefActions({ file }: { file: PipelineFileRef }) {
           disabled={disabled}
           onClick={() => void download()}
           aria-label={`下载附件 ${file.name}`}
-          className="inline-flex min-h-8 items-center gap-1 rounded-md border border-teal-200 bg-white px-2 text-[10px] font-medium text-teal-800 transition hover:border-teal-300 hover:bg-teal-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:cursor-wait disabled:opacity-60"
+          className="inline-flex min-h-8 items-center gap-1 rounded-md border border-teal-200 bg-white px-2 text-[10px] font-medium text-teal-800 transition hover:border-teal-300 hover:bg-teal-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
         >
           {pending === 'download'
             ? <Loader2 size={11} className="animate-spin" aria-hidden="true" />
@@ -101,7 +101,7 @@ export default function FileRefActions({ file }: { file: PipelineFileRef }) {
           onClick={() => void copyAuthenticated()}
           title="复制跨设备登录后下载地址"
           aria-label={`复制 ${file.name} 的登录下载地址`}
-          className="inline-flex min-h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[10px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 disabled:cursor-wait disabled:opacity-60"
+          className="inline-flex min-h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[10px] font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
         >
           {pending === 'authenticated'
             ? <Loader2 size={11} className="animate-spin" aria-hidden="true" />
@@ -114,7 +114,7 @@ export default function FileRefActions({ file }: { file: PipelineFileRef }) {
           onClick={() => void copyAnonymous()}
           title="复制长期有效、无需登录且可吊销的匿名分享地址"
           aria-label={`复制 ${file.name} 的匿名分享地址`}
-          className="inline-flex min-h-8 items-center gap-1 rounded-md border border-sky-200 bg-white px-2 text-[10px] font-medium text-sky-800 transition hover:border-sky-300 hover:bg-sky-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 disabled:cursor-wait disabled:opacity-60"
+          className="inline-flex min-h-8 items-center gap-1 rounded-md border border-sky-200 bg-white px-2 text-[10px] font-medium text-sky-800 transition hover:border-sky-300 hover:bg-sky-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
         >
           {pending === 'anonymous'
             ? <Loader2 size={11} className="animate-spin" aria-hidden="true" />
@@ -130,7 +130,7 @@ export default function FileRefActions({ file }: { file: PipelineFileRef }) {
             onClick={() => void revokeAnonymous()}
             title="立即使当前匿名分享地址失效"
             aria-label={`吊销 ${file.name} 的匿名分享地址`}
-            className="inline-flex min-h-8 items-center gap-1 rounded-md border border-rose-200 bg-white px-2 text-[10px] font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:cursor-wait disabled:opacity-60"
+            className="inline-flex min-h-8 items-center gap-1 rounded-md border border-rose-200 bg-white px-2 text-[10px] font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
           >
             {pending === 'revoke' && <Loader2 size={11} className="animate-spin" aria-hidden="true" />}
             吊销

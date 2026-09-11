@@ -264,9 +264,9 @@
 
 .ontology-login__input-wrap:focus-within {
   color: var(--login-mint-dark);
-  border-color: rgba(36, 169, 132, 0.72);
+  border-color: var(--color-ring);
   background: #fff;
-  box-shadow: 0 0 0 4px rgba(36, 169, 132, 0.1);
+  box-shadow: 0 0 0 2px var(--color-ring);
 }
 
 .ontology-login__input-wrap > svg {
@@ -313,8 +313,8 @@
 
 .ontology-login__visibility:focus-visible,
 .ontology-login__submit:focus-visible {
-  outline: 3px solid rgba(36, 169, 132, 0.28);
-  outline-offset: 3px;
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
 }
 
 .ontology-login__error {

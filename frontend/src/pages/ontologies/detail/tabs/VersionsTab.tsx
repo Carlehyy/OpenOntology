@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
 import { LoadingState } from '@/components/ui/LoadingState'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { ConfirmDialog } from '../../ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import TrialActionPlanReview, {
   redactTrialText,
   sanitizeTrialValue,
@@ -82,9 +82,9 @@ const STAGE_META: Record<VersionStage, { label: string; badge: 'success' | 'warn
 }
 
 const VERSION_ACTION_BUTTON = {
-  editor: 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet shadow-sm hover:border-viz-violet-soft hover:bg-viz-violet-soft focus-visible:ring-2 focus-visible:ring-viz-violet',
-  mapping: 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] shadow-sm hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] focus-visible:ring-2 focus-visible:ring-[var(--color-info)]',
-  trial: 'border-[var(--color-warning)] bg-[var(--color-warning)] text-[var(--color-text-inverse)] shadow-sm hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:ring-2 focus-visible:ring-[var(--color-warning)]',
+  editor: 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet shadow-sm hover:border-viz-violet-soft hover:bg-viz-violet-soft focus-visible:ring-2 focus-visible:ring-ring',
+  mapping: 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] shadow-sm hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] focus-visible:ring-2 focus-visible:ring-ring',
+  trial: 'border-[var(--color-warning)] bg-[var(--color-warning)] text-[var(--color-text-inverse)] shadow-sm hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:ring-2 focus-visible:ring-ring',
   release: 'border-brand bg-brand-deep text-[var(--color-text-inverse)] shadow-sm hover:border-brand hover:bg-brand-deep focus-visible:ring-2 focus-visible:ring-ring',
 } as const
 
@@ -698,7 +698,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         <Dialog open onOpenChange={next => { if (!next) setSource(null) }}>
           <DialogContent className="w-[min(92vw,26rem)]">
             <DialogHeader>
-              <div className="min-w-0 pt-0.5">
+              <div className="min-w-0">
                 <DialogTitle>{source.node_kind === 'release' && source.id !== currentReleaseId
                   ? `从 ${source.version_number} 创建恢复草稿`
                   : `从 ${source.version_number} 创建完整分支`}</DialogTitle>
@@ -738,7 +738,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         <Dialog open onOpenChange={next => { if (!next) setTrialDetail(null) }}>
           <DialogContent className="flex h-[min(88dvh,860px)] w-[min(92vw,64rem)] flex-col">
             <DialogHeader>
-              <div className="min-w-0 pt-0.5">
+              <div className="min-w-0">
                 <DialogTitle>隔离试跑结果</DialogTitle>
                 <DialogDescription>先审查试跑将产生的动作计划，再决定是否进入发布。</DialogDescription>
               </div>
@@ -791,7 +791,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
                   <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${blocked ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]' : 'bg-[var(--color-success-bg)] text-[var(--color-success)]'}`}>
                     {blocked ? <CircleAlert size={20} /> : <ShieldCheck size={20} />}
                   </div>
-                  <div className="min-w-0 pt-0.5">
+                  <div className="min-w-0">
                     <DialogTitle>{`发布前检查 · ${promotion.node.version_number}`}</DialogTitle>
                   </div>
                 </DialogHeader>

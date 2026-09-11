@@ -396,7 +396,7 @@ export default function WorldModelServicesPage() {
             onKeyDown={event => { if (event.key === 'Enter') applyFilters() }}
             placeholder="搜索服务名称或描述"
             aria-label="按服务名称或描述筛选"
-            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-brand focus:outline-none focus:ring-2 focus:ring-ring"
+            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
         <Select
@@ -639,7 +639,7 @@ export default function WorldModelServicesPage() {
               onChange={event => handleInvokeInputChange(event.target.value)}
               spellCheck={false}
               rows={8}
-              className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2 font-mono text-xs leading-5 text-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+              className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2 font-mono text-xs leading-5 text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               aria-label="试调用测试入参 JSON"
               aria-invalid={!!jsonIssue}
             />

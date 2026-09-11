@@ -172,7 +172,7 @@ export default function InteractiveViewport({
       role="region"
       aria-label={ariaLabel}
       tabIndex={0}
-      className={`group/viewport relative isolate overflow-hidden bg-white outline-none touch-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-500 ${dragging ? 'cursor-grabbing' : 'cursor-grab'} ${className}`}
+      className={`group/viewport relative isolate overflow-hidden bg-white outline-none touch-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${dragging ? 'cursor-grabbing' : 'cursor-grab'} ${className}`}
       onWheel={onWheel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -201,14 +201,14 @@ export default function InteractiveViewport({
         <span className="hidden items-center gap-1 px-1.5 text-[10px] text-slate-500 sm:inline-flex">
           <Move size={11} /> 拖拽移动
         </span>
-        <button type="button" aria-label="缩小" title="缩小（-）" onClick={() => zoomAt(view.scale / 1.2)} className="rounded p-1.5 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
+        <button type="button" aria-label="缩小" title="缩小（-）" onClick={() => zoomAt(view.scale / 1.2)} className="rounded p-1.5 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <Minus size={13} />
         </button>
         <span className="w-11 text-center font-mono text-[10px] tabular-nums text-slate-500">{Math.round(view.scale * 100)}%</span>
-        <button type="button" aria-label="放大" title="放大（+）" onClick={() => zoomAt(view.scale * 1.2)} className="rounded p-1.5 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
+        <button type="button" aria-label="放大" title="放大（+）" onClick={() => zoomAt(view.scale * 1.2)} className="rounded p-1.5 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <Plus size={13} />
         </button>
-        <button type="button" aria-label="适应窗口" title="适应窗口（0 / Home / 双击）" onClick={reset} className="rounded p-1.5 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500">
+        <button type="button" aria-label="适应窗口" title="适应窗口（0 / Home / 双击）" onClick={reset} className="rounded p-1.5 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <Maximize size={13} />
         </button>
       </div>
