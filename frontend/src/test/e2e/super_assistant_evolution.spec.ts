@@ -66,6 +66,7 @@ test('超级助手：待审批与记忆面板全链路', async ({ page }) => {
       }])
     }
     if (path === '/api/v2/super-assistant/mcp-servers') return json(route, [])
+    if (path === '/api/v2/super-assistant/tools') return json(route, [])
     if (path === '/api/v2/super-assistant/skills') return json(route, [])
     if (path === '/api/v2/super-assistant/memories' && method === 'GET') {
       return json(route, memories)
@@ -223,6 +224,7 @@ test('超级助手：蒸馏收敛与 Skill 常驻', async ({ page }) => {
     }
     if (path === '/api/v2/super-assistant/conversations/conv-1/messages') return json(route, [])
     if (path === '/api/v2/super-assistant/mcp-servers') return json(route, [])
+    if (path === '/api/v2/super-assistant/tools') return json(route, [])
     if (path === '/api/v2/super-assistant/skills' && method === 'GET') {
       return json(route, [{ ...skill, always_active: alwaysActive }])
     }
@@ -325,6 +327,7 @@ test('MCP 开关按卡片粒度 busy：任一开关保存中不连坐禁用其�
     const method = route.request().method()
     if (path === '/api/v2/super-assistant/conversations') return json(route, [])
     if (path === '/api/v2/super-assistant/mcp-servers' && method === 'GET') return json(route, [alpha, beta])
+    if (path === '/api/v2/super-assistant/tools') return json(route, [])
     if (path === '/api/v2/super-assistant/mcp-servers/alpha' && method === 'PATCH') {
       // alpha 的保存悬挂 800ms：期间 beta 的开关必须保持可点
       await new Promise(resolve => setTimeout(resolve, 800))

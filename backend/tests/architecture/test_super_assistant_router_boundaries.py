@@ -156,6 +156,13 @@ ROUTE_PARAMETERS = {
         "current_user",
     ),
     "install_platform_minio_mcp": ("db", "current_user"),
+    "list_assistant_tools": ("db", "current_user"),
+    "update_assistant_tool_enabled": (
+        "tool_name",
+        "body",
+        "db",
+        "current_user",
+    ),
     "get_multica_config": ("db", "current_user"),
     "update_multica_config": (
         "body",
@@ -366,6 +373,11 @@ DELEGATES = {
         "mcp_server_service",
         "install_platform_minio_mcp",
     ),
+    "list_assistant_tools": ("runtime", "builtin_tool_catalog"),
+    "update_assistant_tool_enabled": (
+        "runtime",
+        "set_builtin_tool_enabled",
+    ),
     "get_multica_config": (
         "multica_service",
         "get_config",
@@ -446,6 +458,7 @@ BODY_TYPES = {
     "put_skill_file": schemas.SkillFileContent,
     "create_mcp_server": schemas.McpServerCreate,
     "update_mcp_server": schemas.McpServerUpdate,
+    "update_assistant_tool_enabled": schemas.AssistantToolEnabledUpdate,
     "update_multica_config": schemas.MulticaConfigUpdate,
     "test_multica_connection": schemas.MulticaTestRequest,
     "create_memory": schemas.MemoryCreate,
@@ -559,7 +572,7 @@ def test_super_assistant_handlers_delegate_without_orm_or_transactions():
     # router.py 已贴近行数上限，新端点（如搜索、multica 外部集成）落在独立
     # 子路由模块；委托与事务禁令对两者同样生效。
     functions = {}
-    for filename in ("router.py", "search.py", "multica.py"):
+    for filename in ("router.py", "search.py", "multica.py", "tools.py"):
         path = ASSISTANT_DIR / filename
         tree = ast.parse(
             path.read_text(encoding="utf-8"),
@@ -761,9 +774,17 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 远程助手声明式注册新增 /remote-agents 的 list/create、
     # /remote-agents/{id} 的 put/delete、/remote-agents/{id}/test 的 post
     # 共 5 个操作（3 条路径）；multica 配置弹窗打开即拉取工作区列表，
-    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）
-    assert len(paths) == 49
-    assert sum(len(item) for item in paths.values()) == 70
+    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）；
+    # 内置工具目录与用户级启停新增 /tools 的 GET、/tools/{tool_name} 的
+    # PATCH 共 2 个操作（2 条路径，tools.py 子路由）；
+    # 文件夹同步（palace_sync.py 子路由）新增 /palace/sync/files 的
+    # list/upload、/palace/sync/files/{id} 的 delete、/palace/sync/files/{id}
+    # 的 replace、/palace/sync/folders 的 list/create、/palace/sync/folders
+    # /{id} 的 delete 共 7 个操作（5 条路径，X-Palace-Sync-Token 令牌鉴权），
+    # 以及 /palace/sync/script 的 GET 与 /palace/sync/token 的 POST 共 2 个
+    # 操作（2 条路径，浏览器侧 JWT 鉴权）
+    assert len(paths) == 58
+    assert sum(len(item) for item in paths.values()) == 81
     assert hashlib.sha256(payload).hexdigest() == (
-        "1df9a7a59e105004f771cbded5241b7d5f6a4dbea5468a427fc099cfa44d2dfc"
+        "1e7be5dff399c4c1a65d6ba220bb7d183240efb4989d60e7acbd106c1c71a9a8"
     )

@@ -10,6 +10,7 @@ import {
 import { modelApi } from '@/api/ontologies'
 import {
   superAssistantApi,
+  type AssistantTool,
   type MulticaConfig,
   type SuperConversation,
   type SuperConversationFile,
@@ -74,6 +75,7 @@ export default function SuperAssistantPage() {
   const [models, setModels] = useState<ModelConfig[]>([])
   const [skills, setSkills] = useState<SuperSkill[]>([])
   const [servers, setServers] = useState<SuperMcpServer[]>([])
+  const [tools, setTools] = useState<AssistantTool[]>([])
   const [multicaConfig, setMulticaConfig] = useState<MulticaConfig | null>(null)
   const [input, setInput] = useState('')
   // 流式生成按会话隔离：只有「当前选中会话正在生成」时，输入区才表现为发送中
@@ -124,6 +126,7 @@ export default function SuperAssistantPage() {
   }, [])
   const refreshSkills = useCallback(async () => setSkills(await superAssistantApi.skills()), [])
   const refreshServers = useCallback(async () => setServers(await superAssistantApi.mcpServers()), [])
+  const refreshTools = useCallback(async () => setTools(await superAssistantApi.assistantTools()), [])
   // multica 外部集成：commands 由后端下发；未配置/未启用时不提供任何命令提示。
   // 加载失败不打扰工作台（配置入口在「外部集成」弹层内，会单独报错）。
   const refreshMulticaConfig = useCallback(async () => {
@@ -140,7 +143,8 @@ export default function SuperAssistantPage() {
       modelApi.list(),
       superAssistantApi.skills(),
       superAssistantApi.mcpServers(),
-    ]).then(([conversationResult, modelResult, skillResult, serverResult]) => {
+      superAssistantApi.assistantTools(),
+    ]).then(([conversationResult, modelResult, skillResult, serverResult, toolResult]) => {
       if (!alive) return
       const failures: string[] = []
 
@@ -162,9 +166,11 @@ export default function SuperAssistantPage() {
       else failures.push(`Skills：${errorText(skillResult.reason, '加载失败')}`)
       if (serverResult.status === 'fulfilled') setServers(serverResult.value)
       else failures.push(`MCP：${errorText(serverResult.reason, '加载失败')}`)
+      if (toolResult.status === 'fulfilled') setTools(toolResult.value)
+      else failures.push(`Tools：${errorText(toolResult.reason, '加载失败')}`)
 
       if (failures.length) {
-        toast.error(failures.length === 4 ? '超级助手加载失败' : '超级助手部分功能加载失败', { description: failures.join('；') })
+        toast.error(failures.length === 5 ? '超级助手加载失败' : '超级助手部分功能加载失败', { description: failures.join('；') })
       }
     })
       .finally(() => alive && setLoading(false))
@@ -900,8 +906,10 @@ export default function SuperAssistantPage() {
         onDraggingChange={setConfigPanelDragging}
         skills={skills}
         servers={servers}
+        tools={tools}
         refreshSkills={refreshSkills}
         refreshServers={refreshServers}
+        refreshTools={refreshTools}
         conversationId={selectedId}
       />
       </section>

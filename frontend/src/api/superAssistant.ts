@@ -186,6 +186,19 @@ export interface McpTool {
 
 export type McpTransport = 'stdio' | 'sse' | 'streamable_http'
 
+/** 内置工具目录项（GET /super-assistant/tools）。
+ *  available 是平台/配置条件可用性（如 web_search 平台未配后端），
+ *  enabled 是用户启停状态，两者独立。 */
+export interface AssistantTool {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  category: 'read_only' | 'confirmation_required' | 'standard'
+  available: boolean
+  unavailable_reason: string | null
+  enabled: boolean
+}
+
 export interface SuperMcpServer {
   id: string
   name: string
@@ -524,6 +537,10 @@ export const superAssistantApi = {
     `/super-assistant/mcp-servers/${id}/test`,
   ),
 
+  assistantTools: () => apiClientV2.get<AssistantTool[]>('/super-assistant/tools'),
+  updateAssistantTool: (name: string, enabled: boolean) =>
+    apiClientV2.patch<AssistantTool>(`/super-assistant/tools/${encodeURIComponent(name)}`, { enabled }),
+
   memories: (params: { zone?: string; include_superseded?: boolean } = {}) => {
     const search = new URLSearchParams()
     if (params.zone) search.set('zone', params.zone)
@@ -561,6 +578,14 @@ export const superAssistantApi = {
     apiClientV2.post<MulticaTestResult>('/super-assistant/multica/test', body),
   multicaWorkspaces: () =>
     apiClientV2.get<MulticaWorkspacesResult>('/super-assistant/multica/workspaces'),
+
+  // 文件夹同步（记忆宫殿）：重置长效同步令牌（明文仅此一次返回）与下载
+  // 内嵌平台地址 + 当前令牌的同步脚本（Blob）。下载依赖浏览器副作用，按
+  // AGENTS.md §5：E2E 必须断言下载文件内容，不能只断言"提示出现"。
+  resetPalaceSyncToken: () =>
+    apiClientV2.post<{ token: string }>('/super-assistant/palace/sync/token'),
+  downloadPalaceSyncScript: () =>
+    apiClientV2.get('/super-assistant/palace/sync/script', { responseType: 'blob' }) as Promise<Blob>,
 
   listRemoteAgents: () => apiClientV2.get<RemoteAgent[]>('/super-assistant/remote-agents'),
   createRemoteAgent: (body: RemoteAgentPayload) =>

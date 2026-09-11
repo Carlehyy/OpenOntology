@@ -466,3 +466,23 @@ class WidgetConfigUpdate(BaseModel):
             if key not in normalized:
                 normalized.append(key)
         return normalized
+
+
+class AssistantToolOut(BaseModel):
+    """内置工具目录项：声明（描述/参数）+ 分类 + 条件可用性 + 用户启停。
+
+    available=False 表示平台/配置条件不满足（如 web_search 平台未配置
+    搜索后端），与用户主动禁用（enabled=False）是两回事，前端须分别呈现。
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    category: Literal["read_only", "confirmation_required", "standard"]
+    available: bool
+    unavailable_reason: str | None = None
+    enabled: bool
+
+
+class AssistantToolEnabledUpdate(BaseModel):
+    enabled: bool
