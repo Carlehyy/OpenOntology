@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { motion, useReducedMotion } from 'motion/react'
+import { useListEntryInitial } from '@/hooks/useListEntryInitial'
 import {
   AlertCircle, AlertTriangle, ArrowRight, Boxes, CheckCircle2, ChevronLeft,
   ChevronRight, Database, Eye, ExternalLink, GitBranch, Link2, List, Loader2,
@@ -785,6 +786,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
     [flowRows],
   )
   const reduce = useReducedMotion() ?? false
+  const entryInitial = useListEntryInitial()
   const readinessTitle = allHealthy
     ? '当前数据链路可用'
     : reviewOnlyIssue
@@ -829,22 +831,22 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
           </div>
         </div>
         <div className="dmo-kpis" aria-label="映射关键指标">
-          <motion.div initial={reduce ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.05 }}>
+          <motion.div initial={entryInitial} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.05 }}>
             <span>可用链路</span><b><AnimatedNumber value={readyCount} duration={0.9} /><i> / {mappingRows.length}</i></b>
           </motion.div>
           {totalTargetFields > 0 ? (
-            <motion.div initial={reduce ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.1 }}>
+            <motion.div initial={entryInitial} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.1 }}>
               <span>字段已连接</span><b><AnimatedNumber value={fieldCoverage} duration={0.9} /><i>%</i></b><small>{mappedFields} / {totalTargetFields} 个字段</small>
             </motion.div>
           ) : (
-            <motion.div initial={reduce ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.1 }}>
+            <motion.div initial={entryInitial} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.1 }}>
               <span>字段已连接</span><b>—</b><small>暂无可连接字段</small>
             </motion.div>
           )}
-          <motion.div initial={reduce ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.15 }}>
+          <motion.div initial={entryInitial} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.15 }}>
             <span>实例已产出</span><b><AnimatedNumber value={totalInstances} duration={0.9} /></b><small>对象与关系实例</small>
           </motion.div>
-          <motion.div initial={reduce ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.2 }}>
+          <motion.div initial={entryInitial} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : 0.2 }}>
             <span>来源数据资产</span><b><AnimatedNumber value={usedDatasetIds.size} duration={0.9} /></b><small>{usedDatasetIds.size > 0 ? `成品 ${usedCuratedCount} · 人工 ${usedManualCount}` : '尚未连接数据资产'}</small>
           </motion.div>
         </div>
@@ -930,7 +932,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
                   className="dmo-map-row"
                   data-selected={active}
                   key={row.key}
-                  initial={reduce ? false : { opacity: 0, y: 6 }}
+                  initial={entryInitial}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ ...SPRING_LAYOUT, delay: reduce ? 0 : Math.min(index * 0.035, 0.35) }}
                   onClick={() => selectElement(row.selection)}

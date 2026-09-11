@@ -2,6 +2,7 @@ import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, useReducedMotion } from 'motion/react'
+import { useListEntryInitial } from '@/hooks/useListEntryInitial'
 import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import {
   Activity,
@@ -74,6 +75,7 @@ function statusBadge(status: string) {
 
 export default function WorldModelServicesPage() {
   const reduce = useReducedMotion() ?? false
+  const entryInitial = useListEntryInitial()
   const navigate = useNavigate()
   const [items, setItems] = useState<WorldModelServiceSummary[]>([])
   const [total, setTotal] = useState(0)
@@ -461,7 +463,7 @@ export default function WorldModelServicesPage() {
                   <th className="px-4 py-2.5 font-medium">所属模型</th>
                   <th className="px-4 py-2.5 font-medium">版本</th>
                   <th className="px-4 py-2.5 font-medium">状态</th>
-                  <th className="px-4 py-2.5 font-medium">调用</th>
+                  <th className="px-4 py-2.5 text-right font-medium">调用</th>
                   <th className="px-4 py-2.5 font-medium">更新时间</th>
                   <th className="px-4 py-2.5 text-right font-medium">操作</th>
                 </tr>
@@ -470,7 +472,7 @@ export default function WorldModelServicesPage() {
                 {items.map((item, index) => (
                   <motion.tr
                     key={item.id}
-                    initial={reduce ? false : { opacity: 0, y: 6 }}
+                    initial={entryInitial}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ ...SPRING_LAYOUT, delay: Math.min(index * 0.035, 0.35) }}
                     className="border-b border-border transition-colors hover:bg-muted">
@@ -492,7 +494,7 @@ export default function WorldModelServicesPage() {
                     </td>
                     <td className="px-4 py-2.5 tabular-nums text-muted-foreground">{item.version_no !== null ? 'v' + item.version_no : '—'}</td>
                     <td className="px-4 py-2.5">{statusBadge(item.status)}</td>
-                    <td className="px-4 py-2.5 tabular-nums text-muted-foreground">
+                    <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
                       <span className={item.failed_count > 0 ? 'text-destructive' : 'text-brand-ink'}>
                         {item.call_count - item.failed_count}
                       </span>

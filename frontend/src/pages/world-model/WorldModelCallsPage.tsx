@@ -2,6 +2,7 @@ import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion, useReducedMotion } from 'motion/react'
+import { useListEntryInitial } from '@/hooks/useListEntryInitial'
 import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import {
   AlertCircle,
@@ -49,6 +50,7 @@ const EMPTY_FILTERS: AppliedFilters = { keyword: '', start: '', end: '', result:
 
 export default function WorldModelCallsPage() {
   const reduce = useReducedMotion() ?? false
+  const entryInitial = useListEntryInitial()
   const [searchParams] = useSearchParams()
   const [items, setItems] = useState<CallRecordItem[]>([])
   const [overview, setOverview] = useState<CallRecordOverview | null>(null)
@@ -314,7 +316,7 @@ export default function WorldModelCallsPage() {
                 {items.map((item, index) => (
                   <motion.tr
                     key={item.id}
-                    initial={reduce ? false : { opacity: 0, y: 6 }}
+                    initial={entryInitial}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ ...SPRING_LAYOUT, delay: Math.min(index * 0.035, 0.35) }}
                     onClick={() => void openDetail(item)}

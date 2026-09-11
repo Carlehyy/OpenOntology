@@ -29,6 +29,7 @@ import { Input } from '@/components/ui/Input'
 import { toast } from 'sonner'
 import { useDebouncedValue } from '@/utils/useDebouncedValue'
 import { motion, useReducedMotion } from 'motion/react'
+import { useListEntryInitial } from '@/hooks/useListEntryInitial'
 import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip } from '@/components/motion-ui/tooltip'
@@ -213,6 +214,7 @@ function ProjectCard({
   onOpenService: () => void
 }) {
   const reduce = useReducedMotion() ?? false
+  const entryInitial = useListEntryInitial()
   return (
     <TiltCard className="h-full" max={8} glare={false}>
       <article className="flex h-full min-h-[190px] flex-col rounded-2xl border border-border bg-card p-5 shadow-sm/50 transition-shadow hover:shadow-md">
@@ -296,6 +298,7 @@ function ProjectCard({
 
 export default function WorldModelModelsPage() {
   const reduce = useReducedMotion() ?? false
+  const entryInitial = useListEntryInitial()
   const [nameFilter, setNameFilter] = useState('')
   const [engineFilter, setEngineFilter] = useState('')
   const [page, setPage] = useState(1)
@@ -489,7 +492,7 @@ export default function WorldModelModelsPage() {
           items.map((item, index) => (
             <motion.div
               key={item.id}
-              initial={reduce ? false : { opacity: 0, y: 10 }}
+              initial={entryInitial}
               animate={{ opacity: 1, y: 0 }}
               transition={{ ...SPRING_LAYOUT, delay: Math.min(index * 0.04, 0.24) }}
             >
