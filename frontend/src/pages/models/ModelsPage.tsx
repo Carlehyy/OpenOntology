@@ -4,7 +4,7 @@ import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import {
   Plus, Trash2, TestTube2, Pencil, X, Loader2, CheckCircle2, XCircle,
-  Star, Search, Upload, Download, Settings2, FileClock,
+  Star, Search, Upload, Download, Settings2, FileClock, Cpu,
 } from 'lucide-react'
 import type { ModelConfig } from '@/types/ontology'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -733,9 +733,20 @@ export default function ModelsPage() {
 /** Model Form Modal (Create) */
 function ModelFormModal({ title, onClose, onSubmit, register, handleSubmit, configType, setValue }: any) {
   return (
-    <div className="fixed inset-0 bg-[var(--color-bg-overlay)] backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-card rounded-xl shadow-2xl p-6 w-[560px] max-h-[88vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-        <h3 className="font-semibold text-foreground mb-5">{title}</h3>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      className="fixed inset-0 bg-[var(--color-bg-overlay)] backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      onClick={() => onClose()}
+    >
+      <div className="bg-card rounded-xl shadow-2xl p-6 w-[min(92vw,32rem)] max-h-[88vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="mb-5 flex items-center gap-3 pr-12">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-ink">
+            <Cpu size={18} />
+          </div>
+          <h3 className="text-base font-semibold leading-6 text-foreground">{title}</h3>
+        </div>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
