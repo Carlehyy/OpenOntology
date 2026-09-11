@@ -27,8 +27,18 @@ describe('formatSuccessRate', () => {
 })
 
 describe('formatDurationMs', () => {
-  it('统一带 ms 单位', () => {
+  it('非整数取整，<1s 带整数百毫秒单位', () => {
     assert.equal(formatDurationMs(0), '0 ms')
-    assert.equal(formatDurationMs(1072), '1072 ms')
+    assert.equal(formatDurationMs(72.59249167787493), '73 ms')
+    assert.equal(formatDurationMs(999.4), '999 ms')
+  })
+  it('≥1s 转秒并保留一位小数、去尾 .0', () => {
+    assert.equal(formatDurationMs(1072), '1.1 s')
+    assert.equal(formatDurationMs(3442), '3.4 s')
+    assert.equal(formatDurationMs(1000), '1 s')
+    assert.equal(formatDurationMs(2999.6), '3 s')
+  })
+  it('非有限值返回占位符', () => {
+    assert.equal(formatDurationMs(Number.NaN), '—')
   })
 })

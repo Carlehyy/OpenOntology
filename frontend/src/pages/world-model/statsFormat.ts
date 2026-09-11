@@ -7,7 +7,10 @@ export function formatSuccessRate(success: number, total: number): string {
   return `${(rate * 100).toFixed(1).replace(/\.0$/, '')}%`
 }
 
-/** 耗时展示：统一带 ms 单位 */
+/** 耗时展示：非整数先取整；≥1000ms 转秒（一位小数，去尾 .0），否则整数百毫秒 */
 export function formatDurationMs(value: number): string {
-  return `${value} ms`
+  if (!Number.isFinite(value)) return '—'
+  const rounded = Math.round(value)
+  if (rounded >= 1000) return `${(rounded / 1000).toFixed(1).replace(/\.0$/, '')} s`
+  return `${rounded} ms`
 }

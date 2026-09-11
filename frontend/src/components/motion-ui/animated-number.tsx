@@ -26,18 +26,25 @@ export function AnimatedNumber({
   const ref = useRef<HTMLSpanElement>(null);
   const inView = useInView(ref, { once: true, amount: 0.6 });
   const reduce = useReducedMotion();
-  const [display, setDisplay] = useState(0);
-  const fromRef = useRef(0);
+  // 首帧即真实值：KPI 数字可信优先，禁止先显示 0 再滚动（会被读成假数据）。
+  const [display, setDisplay] = useState(value);
+  const fromRef = useRef(value);
+  // 数值变化时的补间上限 200ms：只做轻微过渡，不做长滚动动画。
+  const DURATION_CAP = 0.2;
 
   useEffect(() => {
-    if (startOnView && !inView) return;
+    if (startOnView && !inView) {
+      fromRef.current = value;
+      setDisplay(value);
+      return;
+    }
     if (reduce) {
       fromRef.current = value;
       setDisplay(value);
       return;
     }
     const controls = animate(fromRef.current, value, {
-      duration,
+      duration: Math.min(duration, DURATION_CAP),
       ease: EASE_OUT,
       onUpdate: (v) => setDisplay(v),
     });

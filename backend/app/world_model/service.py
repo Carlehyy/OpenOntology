@@ -700,7 +700,7 @@ def call_records_daily(
         .all()
     )
     by_day = {
-        str(day): (int(total), int(failed), int(avg))
+        str(day): (int(total), int(failed), round(float(avg)))
         for day, total, failed, avg in rows
     }
     buckets: list[schemas.CallRecordDailyBucket] = []
