@@ -4,7 +4,7 @@
 // 误导业务判断。仅命中带时刻与可选时区的完整 ISO 形式,避免误伤
 // '2026-08'、编号等普通文本。
 
-import { formatDateTime } from '@/utils/datetime'
+import { formatDateTime } from '../../../../utils/datetime.ts'
 export type InstanceValueDisplay =
   | { kind: 'empty' }
   | { kind: 'array'; text: string }

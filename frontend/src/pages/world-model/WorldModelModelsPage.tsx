@@ -1,4 +1,5 @@
 import { formatDateTime } from '@/utils/datetime'
+import { useReducedMotion } from 'motion/react'
 import { useEffect, useMemo, useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -28,9 +29,6 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { toast } from 'sonner'
 import { useDebouncedValue } from '@/utils/useDebouncedValue'
-import { motion, useReducedMotion } from 'motion/react'
-import { useListEntryInitial } from '@/hooks/useListEntryInitial'
-import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip } from '@/components/motion-ui/tooltip'
 import { IconButton } from '@/components/motion-ui/icon-button'
@@ -214,7 +212,6 @@ function ProjectCard({
   onOpenService: () => void
 }) {
   const reduce = useReducedMotion() ?? false
-  const entryInitial = useListEntryInitial()
   return (
     <TiltCard className="h-full" max={8} glare={false}>
       <article className="flex h-full min-h-[190px] flex-col rounded-2xl border border-border bg-card p-5 shadow-sm/50 transition-shadow hover:shadow-md">
@@ -297,9 +294,8 @@ function ProjectCard({
 }
 
 export default function WorldModelModelsPage() {
-  const reduce = useReducedMotion() ?? false
-  const entryInitial = useListEntryInitial()
-  const [nameFilter, setNameFilter] = useState('')
+
+    const [nameFilter, setNameFilter] = useState('')
   const [engineFilter, setEngineFilter] = useState('')
   const [page, setPage] = useState(1)
   const [createOpen, setCreateOpen] = useState(false)
@@ -445,12 +441,9 @@ export default function WorldModelModelsPage() {
         ) : items.length === 0 ? (
           keyword || engineFilter ? (
             <div className="flex min-h-[300px] flex-col items-center justify-center rounded-2xl border border-border bg-card px-6 text-center sm:col-span-1 lg:col-span-2 xl:col-span-3">
-              <motion.div
-                animate={reduce ? undefined : { y: [0, -6, 0] }}
-                transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-              >
+              <div>
                 <Boxes size={28} className="text-muted-foreground" />
-              </motion.div>
+              </div>
               <p className="mt-3 text-sm font-medium text-muted-foreground">没有符合条件的推演模型</p>
               <p className="mt-1 text-xs text-muted-foreground">请调整名称或引擎类型筛选条件</p>
             </div>
@@ -489,12 +482,9 @@ export default function WorldModelModelsPage() {
             </div>
           )
         ) : (
-          items.map((item, index) => (
-            <motion.div
+          items.map((item, _index) => (
+            <div
               key={item.id}
-              initial={entryInitial}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ ...SPRING_LAYOUT, delay: Math.min(index * 0.04, 0.24) }}
             >
               <ProjectCard
                 item={item}
@@ -503,7 +493,7 @@ export default function WorldModelModelsPage() {
                 onDelete={() => setDeleteTarget(item)}
                 onOpenService={() => navigate('/world-model/services')}
               />
-            </motion.div>
+            </div>
           ))
         )}
       </div>

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { motion, useReducedMotion } from 'motion/react'
-import { useListEntryInitial } from '@/hooks/useListEntryInitial'
+import { useReducedMotion } from 'motion/react'
 import {
   CheckCircle2,
   CircleAlert,
@@ -38,7 +37,6 @@ import {
   MultiSelectTrigger,
   MultiSelectValue,
 } from '@/components/motion-ui/multi-select'
-import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import { Tooltip } from '@/components/motion-ui/tooltip'
 import { Modal } from '@/components/ui/Modal'
 import { toast } from 'sonner'
@@ -102,8 +100,6 @@ const jsonRpcExample = (tool: McpTool) => JSON.stringify({
   params: { name: tool.name, arguments: argumentsTemplate(tool.input_schema) },
 }, null, 2)
 
-/** 行错峰入场延迟：与平台 beUI 页保持一致的节奏（0.035s 步进、0.28s 封顶） */
-const rowDelay = (index: number) => Math.min(index * 0.035, 0.28)
 
 function TestStatus({ server }: { server: SuperMcpServer }) {
   if (server.last_test_status === 'success') {
@@ -137,7 +133,6 @@ function StatCard({ icon, label, value, tone }: {
 }
 
 function ToolManifestDialog({ server, onClose }: { server: SuperMcpServer; onClose: () => void }) {
-  const reduce = useReducedMotion() ?? false
   const tools = server.tool_manifest || []
   return (
     <Modal
@@ -165,12 +160,9 @@ function ToolManifestDialog({ server, onClose }: { server: SuperMcpServer; onClo
         </div>
       ) : (
         <div className="mt-3 space-y-3">
-          {tools.map((tool: McpTool, index: number) => (
-            <motion.article
+          {tools.map((tool: McpTool, _index: number) => (
+            <article
               key={tool.name}
-              initial={reduce ? false : { opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ ...SPRING_LAYOUT, delay: rowDelay(index) }}
               className="rounded-xl border border-border bg-muted p-4"
             >
               <div className="flex items-start gap-3">
@@ -188,7 +180,7 @@ function ToolManifestDialog({ server, onClose }: { server: SuperMcpServer; onClo
                   </details>
                 </div>
               </div>
-            </motion.article>
+            </article>
           ))}
         </div>
       )}
@@ -197,7 +189,6 @@ function ToolManifestDialog({ server, onClose }: { server: SuperMcpServer; onClo
 }
 
 function ExportToolsDialog({ server, onClose, onDone }: { server: SuperMcpServer; onClose: () => void; onDone: () => void }) {
-  const reduce = useReducedMotion() ?? false
   const tools = server.tool_manifest || []
   const [selected, setSelected] = useState<Set<string>>(() => new Set(tools.map(tool => tool.name)))
   const [busy, setBusy] = useState(false)
@@ -248,12 +239,9 @@ function ExportToolsDialog({ server, onClose, onDone }: { server: SuperMcpServer
         </header>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-5">
           <p className="rounded-lg border border-[color:var(--color-warning)]/30 bg-[var(--color-warning-bg)] px-3 py-2 text-[11px] leading-5 text-[var(--color-warning)]">{exportHint(server)}</p>
-          {tools.map((tool, index) => (
-            <motion.div
+          {tools.map((tool, _index) => (
+            <div
               key={tool.name}
-              initial={reduce ? false : { opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ ...SPRING_LAYOUT, delay: rowDelay(index) }}
               className="flex items-start gap-3 rounded-xl border border-border bg-card p-3 text-xs transition-colors hover:border-brand-mist"
             >
               <Checkbox
@@ -266,7 +254,7 @@ function ExportToolsDialog({ server, onClose, onDone }: { server: SuperMcpServer
                 <span className="block break-all font-mono font-semibold text-foreground">{tool.name}</span>
                 <span className="mt-0.5 block leading-5 text-muted-foreground">{tool.description || '暂无工具描述'}</span>
               </span>
-            </motion.div>
+            </div>
           ))}
           {error && <p role="alert" className="rounded-xl border border-destructive/30 bg-[var(--color-danger-bg)] px-4 py-3 text-xs leading-5 text-destructive">{error}</p>}
         </div>
@@ -325,8 +313,7 @@ function EmptyGuide({ onAdd }: { onAdd: () => void }) {
 
 export default function PluginCommunityPage() {
   const reduce = useReducedMotion() ?? false
-  const rowEntryInitial = useListEntryInitial()
-  const [servers, setServers] = useState<SuperMcpServer[]>([])
+    const [servers, setServers] = useState<SuperMcpServer[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusKey[]>([])
@@ -514,12 +501,9 @@ export default function PluginCommunityPage() {
       ) : filteredServers.length === 0 ? (
         servers.length ? (
           <div className="flex min-h-64 flex-1 flex-col items-center justify-center rounded-2xl border border-border bg-card px-6 text-center">
-            <motion.div
-              animate={reduce ? undefined : { y: [0, -6, 0] }}
-              transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-            >
+            <div>
               <PlugZap size={28} className="text-muted-foreground" />
-            </motion.div>
+            </div>
             <p className="mt-3 text-sm font-medium text-muted-foreground">没有匹配的 MCP Server</p>
             <p className="mt-1 text-xs text-muted-foreground">请调整搜索词或状态筛选后重试。</p>
           </div>
@@ -541,12 +525,9 @@ export default function PluginCommunityPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {filteredServers.map((server, index) => (
-                    <motion.tr
+                  {filteredServers.map((server, _index) => (
+                    <tr
                       key={server.id}
-                      initial={rowEntryInitial === false ? false : { opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      transition={{ ...SPRING_LAYOUT, delay: rowDelay(index) }}
                       className="transition-colors hover:bg-muted/60"
                     >
                       <td className="px-4 py-3 align-middle">
@@ -562,7 +543,7 @@ export default function PluginCommunityPage() {
                       <td className="px-4 py-3 text-center align-middle"><button type="button" onClick={() => setManifestTarget(server)} aria-label={`查看 ${serverTitle(server)} 的工具清单`} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Code2 size={13} /> 共 {server.tool_manifest.length} 个</button></td>
                       <td className="px-4 py-3 text-center align-middle"><TestStatus server={server} /></td>
                       <td className="px-2 py-2 align-middle">{renderActions(server)}</td>
-                    </motion.tr>
+                    </tr>
                   ))}
                 </tbody>
               </table>
@@ -570,12 +551,9 @@ export default function PluginCommunityPage() {
           </section>
 
           <div className="grid gap-3 md:hidden">
-            {filteredServers.map((server, index) => (
-              <motion.article
+            {filteredServers.map((server, _index) => (
+              <article
                 key={server.id}
-                initial={reduce ? false : { opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ ...SPRING_LAYOUT, delay: rowDelay(index) }}
                 className="rounded-2xl border border-border bg-card p-4 shadow-sm/50"
               >
                 <div className="flex items-start gap-3">
@@ -586,7 +564,7 @@ export default function PluginCommunityPage() {
                 <div className="mt-3 flex flex-wrap gap-1.5"><span className="rounded-lg bg-muted px-2 py-1 text-[10px] text-muted-foreground">{transportLabel(server)}</span><button type="button" onClick={() => setManifestTarget(server)} className="inline-flex min-h-8 items-center gap-1 rounded-lg bg-brand-soft px-2 text-[10px] font-medium text-brand-ink"><Code2 size={11} /> 共 {server.tool_manifest.length} 个工具</button></div>
                 {server.last_test_message && <p className="mt-3 line-clamp-2 text-xs leading-5 text-muted-foreground">{server.last_test_message}</p>}
                 <div className="mt-3 border-t border-border pt-2">{renderActions(server)}</div>
-              </motion.article>
+              </article>
             ))}
           </div>
         </>

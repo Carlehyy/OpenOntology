@@ -1,9 +1,6 @@
 import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { motion, useReducedMotion } from 'motion/react'
-import { useListEntryInitial } from '@/hooks/useListEntryInitial'
-import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import {
   Activity,
   AlertTriangle,
@@ -74,9 +71,7 @@ function statusBadge(status: string) {
 }
 
 export default function WorldModelServicesPage() {
-  const reduce = useReducedMotion() ?? false
-  const entryInitial = useListEntryInitial()
-  const navigate = useNavigate()
+    const navigate = useNavigate()
   const [items, setItems] = useState<WorldModelServiceSummary[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -441,12 +436,9 @@ export default function WorldModelServicesPage() {
           </div>
         ) : items.length === 0 ? (
           <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
-            <motion.div
-              animate={reduce ? undefined : { y: [0, -6, 0] }}
-              transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-            >
+            <div>
               <Rocket size={28} className="text-muted-foreground" />
-            </motion.div>
+            </div>
             <p className="mt-3 text-sm font-medium text-muted-foreground">{keyword || status ? '没有符合条件的推演服务' : '暂无推演服务'}</p>
             <p className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">
               {keyword || status
@@ -469,12 +461,9 @@ export default function WorldModelServicesPage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((item, index) => (
-                  <motion.tr
+                {items.map((item, _index) => (
+                  <tr
                     key={item.id}
-                    initial={entryInitial}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ ...SPRING_LAYOUT, delay: Math.min(index * 0.035, 0.35) }}
                     className="border-b border-border transition-colors hover:bg-muted">
                     <td className="max-w-[240px] px-4 py-2.5">
                       <p className="truncate font-medium text-foreground" title={item.name}>{item.name}</p>
@@ -554,7 +543,7 @@ export default function WorldModelServicesPage() {
                         </Tooltip>
                       </span>
                     </td>
-                  </motion.tr>
+                  </tr>
                 ))}
               </tbody>
             </table>

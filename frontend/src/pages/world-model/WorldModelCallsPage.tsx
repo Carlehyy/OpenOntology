@@ -1,9 +1,6 @@
 import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { motion, useReducedMotion } from 'motion/react'
-import { useListEntryInitial } from '@/hooks/useListEntryInitial'
-import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import {
   AlertCircle,
   CheckCircle2,
@@ -49,9 +46,7 @@ interface AppliedFilters {
 const EMPTY_FILTERS: AppliedFilters = { keyword: '', start: '', end: '', result: 'all' }
 
 export default function WorldModelCallsPage() {
-  const reduce = useReducedMotion() ?? false
-  const entryInitial = useListEntryInitial()
-  const [searchParams] = useSearchParams()
+    const [searchParams] = useSearchParams()
   const [items, setItems] = useState<CallRecordItem[]>([])
   const [overview, setOverview] = useState<CallRecordOverview | null>(null)
   const [total, setTotal] = useState(0)
@@ -289,12 +284,9 @@ export default function WorldModelCallsPage() {
           </div>
         ) : items.length === 0 ? (
           <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
-            <motion.div
-              animate={reduce ? undefined : { y: [0, -6, 0] }}
-              transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-            >
+            <div>
               <ScrollText size={28} className="text-muted-foreground" />
-            </motion.div>
+            </div>
             <p className="mt-3 text-sm font-medium text-muted-foreground">暂无调用记录</p>
             <p className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">
               发布推演服务后，每次经 HTTP 接口或 Agent 调用都会在此留下含输入快照、耗时与结果的审计记录。
@@ -313,12 +305,9 @@ export default function WorldModelCallsPage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((item, index) => (
-                  <motion.tr
+                {items.map((item, _index) => (
+                  <tr
                     key={item.id}
-                    initial={entryInitial}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ ...SPRING_LAYOUT, delay: Math.min(index * 0.035, 0.35) }}
                     onClick={() => void openDetail(item)}
                     className="cursor-pointer border-b border-border transition-colors hover:bg-muted"
                   >
@@ -331,7 +320,7 @@ export default function WorldModelCallsPage() {
                         : <span className="inline-flex items-center gap-1 text-xs text-destructive"><XCircle size={13} /> 失败</span>}
                     </td>
                     <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{item.duration_ms} ms</td>
-                  </motion.tr>
+                  </tr>
                 ))}
               </tbody>
             </table>

@@ -1,4 +1,4 @@
-import { formatDateTime } from '@/utils/datetime'
+import { formatDateTime } from '../../../utils/datetime.ts'
 import type { SlowRequestItem, TraceSpan } from '@/api/monitoring'
 
 const LAYER_NAMES: Record<string, string> = {
