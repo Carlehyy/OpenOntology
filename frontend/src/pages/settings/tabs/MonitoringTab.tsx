@@ -1,3 +1,4 @@
+import { formatDateTime, formatShortDate, formatTime } from '@/utils/datetime'
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, Drawer, Empty, Modal, Segmented, Table, Tag, Tooltip } from 'antd'
@@ -31,18 +32,11 @@ import { buildAnalysisPrompt } from './traceAnalysisPrompt'
 
 const REFRESH_MS = 30_000
 
-function formatTime(value: string | null): string {
+function formatLogTime(value: string | null): string {
   if (!value) return '-'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', {
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  })
+  return formatDateTime(date, { seconds: true })
 }
 
 type KpiTone = 'neutral' | 'success' | 'warning' | 'danger'
@@ -345,8 +339,8 @@ export default function MonitoringTab() {
             const date = new Date(value)
             if (Number.isNaN(date.getTime())) return ''
             return window === '24h'
-              ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
-              : date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+              ? formatTime(date, { seconds: true })
+              : formatShortDate(date)
           },
           hideOverlap: true,
         },
@@ -398,7 +392,7 @@ export default function MonitoringTab() {
   ]
 
   const slowColumns: ColumnsType<SlowRequestItem> = [
-    { title: '时间', dataIndex: 'created_at', key: 'created_at', width: 150, render: formatTime },
+    { title: '时间', dataIndex: 'created_at', key: 'created_at', width: 150, render: formatLogTime },
     { title: '接口', dataIndex: 'route', key: 'route', ellipsis: true, render: (_, row) => <span className="font-mono text-xs">{row.method} {row.route}</span> },
     { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 110, align: 'right', sorter: (a, b) => a.duration_ms - b.duration_ms, render: value => <span className="text-[var(--color-danger)] font-medium">{(value / 1000).toFixed(2)}s</span> },
     { title: '状态', dataIndex: 'status_code', key: 'status_code', width: 70, align: 'center' },

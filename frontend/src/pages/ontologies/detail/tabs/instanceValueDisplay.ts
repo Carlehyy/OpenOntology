@@ -4,6 +4,7 @@
 // 误导业务判断。仅命中带时刻与可选时区的完整 ISO 形式,避免误伤
 // '2026-08'、编号等普通文本。
 
+import { formatDateTime } from '@/utils/datetime'
 export type InstanceValueDisplay =
   | { kind: 'empty' }
   | { kind: 'array'; text: string }
@@ -21,15 +22,7 @@ const ISO_DATE_PREFIX_RE = /^(\d{4})-(\d{2})-(\d{2})/
 export function formatInstanceDateTime(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  })
+  return formatDateTime(date, { seconds: true })
 }
 
 export function resolveInstanceValueDisplay(value: unknown, type?: string): InstanceValueDisplay {

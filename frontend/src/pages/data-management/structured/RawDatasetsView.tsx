@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Upload, RefreshCw, Trash2, Loader2,
@@ -24,9 +25,7 @@ const notifyAssetChanged = () => window.dispatchEvent(
 function formatTime(iso?: string | null): string {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleString('zh-CN', {
-      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    })
+    return formatDateTime(new Date(iso))
   } catch { return iso }
 }
 

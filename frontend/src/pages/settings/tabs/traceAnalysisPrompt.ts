@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import type { SlowRequestItem, TraceSpan } from '@/api/monitoring'
 
 const LAYER_NAMES: Record<string, string> = {
@@ -14,7 +15,7 @@ function formatTime(value: string | null): string {
   if (!value) return '-'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', { hour12: false }) + ' / ' + value
+  return formatDateTime(date, { seconds: true }) + ' / ' + value
 }
 
 /**

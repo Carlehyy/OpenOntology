@@ -1,3 +1,4 @@
+import { formatDateTime, formatTime } from '@/utils/datetime'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import CodeMirror from '@uiw/react-codemirror'
@@ -76,18 +77,7 @@ function cellText(value: unknown): string {
 function formatClock(iso?: string): string {
   if (!iso) return ''
   try {
-    return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  } catch {
-    return iso
-  }
-}
-
-function formatDateTime(iso?: string | null): string {
-  if (!iso) return '-'
-  try {
-    return new Date(iso).toLocaleString('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    })
+    return formatTime(new Date(iso), { seconds: true })
   } catch {
     return iso
   }
@@ -850,7 +840,7 @@ function VersionsDrawer({
                     {index === 0 && (
                       <span className="rounded border border-brand-line bg-brand-soft px-1.5 py-0.5 text-[10px] font-medium text-brand-ink">当前</span>
                     )}
-                    <span className="text-xs text-muted-foreground">{formatDateTime(version.created_at)}</span>
+                    <span className="text-xs text-muted-foreground">{formatDateTime(version.created_at, { fallback: '-' })}</span>
                     <span className="ml-auto text-[11px] text-[var(--color-text-tertiary)]">
                       {version.row_count.toLocaleString()} 行 · {version.output_columns.length} 列 · {(version.duration_ms / 1000).toFixed(1)}s
                     </span>

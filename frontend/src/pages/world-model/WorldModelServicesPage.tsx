@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, useReducedMotion } from 'motion/react'
@@ -64,17 +65,6 @@ function buildCurlExample(url: string, inputText: string): string {
 }
 
 type StatusFilter = '' | 'online' | 'offline'
-
-function formatDateTime(iso?: string | null): string {
-  if (!iso) return '-'
-  try {
-    return new Date(iso).toLocaleString('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    })
-  } catch {
-    return iso
-  }
-}
 
 function statusBadge(status: string) {
   return status === 'online'
@@ -515,7 +505,7 @@ export default function WorldModelServicesPage() {
                         {formatSuccessRate(item.call_count - item.failed_count, item.call_count)}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 tabular-nums text-muted-foreground">{formatDateTime(item.updated_at)}</td>
+                    <td className="px-4 py-2.5 tabular-nums text-muted-foreground">{formatDateTime(item.updated_at, { fallback: '-' })}</td>
                     <td className="px-4 py-2.5">
                       <span className="flex items-center justify-end gap-1">
                         <Tooltip content={item.status === 'online' ? '试调用该推演服务' : '服务已下线，无法调用'}>
@@ -829,7 +819,7 @@ export default function WorldModelServicesPage() {
                         <tbody>
                           {serviceCalls.map(call => (
                             <tr key={call.id} className="border-b border-border">
-                              <td className="px-3 py-2 tabular-nums text-muted-foreground">{formatDateTime(call.created_at)}</td>
+                              <td className="px-3 py-2 tabular-nums text-muted-foreground">{formatDateTime(call.created_at, { fallback: '-' })}</td>
                               <td className="px-3 py-2 text-muted-foreground">{call.caller || '—'}</td>
                               <td className="px-3 py-2">
                                 {call.ok

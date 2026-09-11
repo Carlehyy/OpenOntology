@@ -1,5 +1,6 @@
 /* 事实流 →「全量留痕」:每一个变化的出处与因果,追加不修改。
    渲染逻辑与原治理页一致,仅排版融入叙事时间线风格。 */
+import { formatDateTime } from '@/utils/datetime'
 import { formatDecisionValue, formatFactSource } from '../tabs/governanceFormat'
 
 export interface FactRow {
@@ -27,7 +28,7 @@ export const KIND_META: Record<string, { label: string; cls: string; title: stri
 }
 
 const fmtTime = (iso?: string | null) => iso
-  ? new Date(iso).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  ? formatDateTime(new Date(iso))
   : '-'
 const fmtVal = (v: unknown) => {
   if (v === null || v === undefined) return '∅'

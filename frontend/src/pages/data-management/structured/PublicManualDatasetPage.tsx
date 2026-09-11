@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -10,7 +11,7 @@ type CellMap = Record<string, string>
 type EditRow = { orig: CellMap; cur: CellMap; deleted: boolean }
 
 const str = (value: unknown) => value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)
-const fmt = (iso?: string | null) => iso ? new Date(iso).toLocaleString('zh-CN') : '—'
+const fmt = (iso?: string | null) => formatDateTime(iso, { fallback: '—' })
 
 function validateValue(column: string, type: string, value: string): string | null {
   if (value === '') return null

@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import type { SentinelFiring } from '../../../api/sentinelApi'
 import {
   SentinelFiringSummary,
@@ -13,13 +14,7 @@ const formatSentinelFiringTime = (iso?: string) => {
   if (!iso) return ''
   const value = new Date(iso)
   if (Number.isNaN(value.getTime())) return iso
-  return value.toLocaleString('zh-CN', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
+  return formatDateTime(value, { seconds: true })
 }
 
 export function SentinelFiringHistory({

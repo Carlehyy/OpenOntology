@@ -2,6 +2,7 @@
    每幕 = 大字叙事标题 + 一句结论 + 精简化证据(实例卡/条件卡/效果清单),
    幕间以连接线串成故事线——先看懂故事,再看到数据。
    数据查询(目标类型实例、目标实例最近事实)仅在 active 时发起。 */
+import { formatDateTime } from '@/utils/datetime'
 import {
   ArrowRight, Bolt, Database, Eye, Loader2, ShieldAlert, Sparkles,
 } from 'lucide-react'
@@ -35,7 +36,7 @@ interface InstanceFactLite {
 }
 
 const fmtTime = (iso?: string | null) => iso
-  ? new Date(iso).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  ? formatDateTime(new Date(iso))
   : '-'
 
 const fmtVal = (v: unknown) => {

@@ -1,3 +1,4 @@
+import { formatDate, formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertCircle,
@@ -1049,8 +1050,8 @@ function formatTimeParts(iso?: string | null) {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return { date: iso, time: '' }
   return {
-    date: date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }),
-    time: date.toLocaleTimeString('zh-CN', { hour12: false }),
+    date: formatDate(date),
+    time: formatDateTime(date, { seconds: true }),
   }
 }
 
@@ -1059,7 +1060,7 @@ function formatFullTime(iso?: string | null) {
   const date = new Date(iso)
   return Number.isNaN(date.getTime())
     ? iso
-    : date.toLocaleString('zh-CN', { hour12: false })
+    : formatDateTime(date, { seconds: true })
 }
 
 function formatElapsed(value?: number | null) {

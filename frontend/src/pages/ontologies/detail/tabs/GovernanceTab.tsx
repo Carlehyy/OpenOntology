@@ -1,3 +1,4 @@
+import { formatTime } from '@/utils/datetime'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiClientV2 } from '@/api/client'
@@ -451,9 +452,7 @@ export default function GovernanceTab({
   }
 
   const lastRefreshText = lastUpdatedAt
-    ? new Date(lastUpdatedAt).toLocaleTimeString('zh-CN', {
-        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-      })
+    ? formatTime(new Date(lastUpdatedAt), { seconds: true })
     : '尚未完成'
 
   if (!currentReleaseId) {

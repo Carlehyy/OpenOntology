@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useEffect, useMemo, useState } from 'react';
 import {
   XMarkIcon,
@@ -74,9 +75,7 @@ export default function InstanceFactsDrawer({ instanceId, instanceLabel, onClose
 
   const fmtTime = (iso?: string | null) => {
     if (!iso) return '-';
-    return new Date(iso).toLocaleString('zh-CN', {
-      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
-    });
+    return formatDateTime(new Date(iso), { seconds: true });
   };
   const fmtVal = (v: unknown) => {
     if (v === null || v === undefined) return '∅';

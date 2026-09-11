@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -27,7 +28,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50]
 
 function formatDate(iso: string | null): string {
   if (!iso) return '-'
-  try { return new Date(iso).toLocaleString('zh-CN') } catch { return iso }
+  return formatDateTime(iso, { fallback: iso })
 }
 
 function formatDuration(start: string | null, end: string | null): string {

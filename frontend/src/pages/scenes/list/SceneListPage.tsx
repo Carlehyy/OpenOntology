@@ -3,6 +3,7 @@
  * 筛选条 / 四列卡片网格 / 新建卡 / 统计瓦片 / 底部操作行。
  * 草稿态负责场景生成，发布态对外生效；支持新建/编辑/快照克隆/删除。
  */
+import { formatDateTime } from '@/utils/datetime'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -19,10 +20,7 @@ function formatChangedAt(value: string | null) {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(date)
+  return formatDateTime(date)
 }
 
 function CreateSceneCard({ onCreate }: {
@@ -139,7 +137,7 @@ function SceneCard({ scene, onEdit, onDetail, onClone, onDelete }: {
           </button>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
-          <span className="hidden shrink-0 whitespace-nowrap text-[11px] tabular-nums text-[var(--color-text-tertiary)] min-[1400px]:inline" title={'最近更新：' + new Date(scene.updated_at || '').toLocaleString('zh-CN')}>
+          <span className="hidden shrink-0 whitespace-nowrap text-[11px] tabular-nums text-[var(--color-text-tertiary)] min-[1400px]:inline" title={'最近更新：' + formatDateTime(scene.updated_at)}>
             {formatChangedAt(scene.updated_at)}
           </span>
           <button

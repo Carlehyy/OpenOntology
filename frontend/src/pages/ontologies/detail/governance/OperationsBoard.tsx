@@ -3,6 +3,7 @@
    绑定哨兵状态(在线脉冲/影子/停用 + 最近命中)、待审批条目(点击开详情弹窗)、
    近期批准率(含晋升线)、近期执行履历点阵。
    有待审批的行排在最前并以琥珀色标出,先看要裁决的。 */
+import { formatDateTime } from '@/utils/datetime'
 import {
   ArrowDownCircle, ArrowUpCircle, Bolt, Eye, HandMetal, Rocket,
 } from 'lucide-react'
@@ -34,7 +35,7 @@ const SENTINEL_STATUS_META = {
 
 const pct = (v: number | null) => (v === null ? '—' : `${Math.round(v * 100)}%`)
 const fmtTime = (iso?: string | null) => iso
-  ? new Date(iso).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  ? formatDateTime(new Date(iso))
   : '-'
 
 function LevelStepper({ level }: { level: AutonomyLevelKey }) {

@@ -1,3 +1,4 @@
+import { formatDate, formatDateTime } from '@/utils/datetime'
 import { useEffect } from 'react'
 import { Pencil, Plus, Search, Trash2, X } from 'lucide-react'
 
@@ -141,8 +142,8 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
                           <Badge variant="outline">无描述</Badge>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-[var(--color-text-tertiary)]" title={d.updated_at ? new Date(d.updated_at).toLocaleString('zh-CN') : ''}>
-                        {d.updated_at ? new Date(d.updated_at).toLocaleDateString('zh-CN') : '—'}
+                      <td className="px-4 py-3 text-[var(--color-text-tertiary)]" title={d.updated_at ? formatDateTime(d.updated_at) : ''}>
+                        {d.updated_at ? formatDate(new Date(d.updated_at)) : '—'}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-end gap-1">

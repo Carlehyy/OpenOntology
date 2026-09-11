@@ -5,6 +5,7 @@
  * 四视图切换），右侧探索对话（SSE 流式 + 工具轨迹）随对话实时沉淀画布。
  * 定位：服务指定本体草稿版本的集中配置，不再承担从零创建本体。
  */
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Suspense } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -1062,7 +1063,7 @@ export default function ExplorationPage() {
                                   {session.title}
                                 </p>
                                 <p className="mt-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                                  {new Date(session.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                  {formatDateTime(new Date(session.updatedAt))}
                                 </p>
                               </div>
                               {session.id === sid && <span className="rounded-md bg-card px-2 py-1 text-[10px] font-medium text-brand-ink">当前</span>}

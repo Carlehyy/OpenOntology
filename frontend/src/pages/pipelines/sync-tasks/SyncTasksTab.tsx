@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useState, useEffect, useCallback, useRef, useMemo, type ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactECharts from 'echarts-for-react'
@@ -986,13 +987,7 @@ function EmptyState({ activeTab, hasSearch, onClear, onCreate }: {
 
 function formatFeedTime(iso: string | null): string {
   if (!iso) return '刚刚'
-  try {
-    const diff = Math.max(0, Date.now() - toLocalDate(iso).getTime())
-    if (diff < 60_000) return '刚刚'
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-    return `${Math.floor(diff / 86_400_000)} 天前`
-  } catch { return iso }
+  return formatDateTime(iso, { fallback: iso })
 }
 
 function RecentRunFeed({ runs }: { runs: PipelineTaskRecentRun[] }) {

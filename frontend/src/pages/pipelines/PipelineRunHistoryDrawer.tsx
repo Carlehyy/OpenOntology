@@ -5,6 +5,7 @@
  * 起止时间）；失败记录的错误日志在展开该行时才按需调 `pipelinesApi.getRun`
  * 获取，避免打开抽屉就发 N 个详情请求。容器复用 components/ui/sheet.tsx。
  */
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import {
   CheckCircle2, XCircle, Loader2, Clock, ChevronDown, ChevronUp, AlertCircle,
@@ -26,7 +27,7 @@ const statusMeta = (status: string) => STATUS_META[status] ?? {
 
 function formatDate(iso: string | null): string {
   if (!iso) return '-'
-  try { return new Date(iso).toLocaleString('zh-CN') } catch { return iso }
+  return formatDateTime(iso, { fallback: iso })
 }
 
 function formatDuration(start: string | null, end: string | null): string {

@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -46,7 +47,7 @@ const disagreementLabel = (value?: string) => (
 const dateTime = (value?: string | null) => {
   if (!value) return '—'
   const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN', { hour12: false })
+  return Number.isNaN(parsed.getTime()) ? value : formatDateTime(parsed, { seconds: true })
 }
 
 function Metric({ label, value, detail }: { label: string; value: string; detail?: string }) {

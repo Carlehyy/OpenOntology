@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useState, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -481,7 +482,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                   <Info size={12} />
                   <span>
                     已发布流水线不在此处重新执行（避免触发生产工作流）。
-                    {typeof lastRun === 'object' && lastRun.at ? `下方为最近一次执行（${new Date(lastRun.at).toLocaleString('zh-CN')}）的输出样本。` : ''}
+                    {typeof lastRun === 'object' && lastRun.at ? `下方为最近一次执行（${formatDateTime(lastRun.at)}）的输出样本。` : ''}
                   </span>
                 </div>
               )}

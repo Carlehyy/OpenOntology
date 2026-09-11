@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -13,14 +14,7 @@ const IN_PROGRESS_STATUSES = 'pending,verifying,accepted'
 const RECENT_LIMIT = 10
 
 function formatRelativeTime(value: string): string {
-  const time = new Date(value).getTime()
-  if (!Number.isFinite(time)) return value
-  const diff = Math.max(0, Date.now() - time)
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`
-  return new Date(value).toLocaleDateString('zh-CN')
+  return formatDateTime(value, { fallback: value })
 }
 
 /**

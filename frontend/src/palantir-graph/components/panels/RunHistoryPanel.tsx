@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react';
 import {
   XMarkIcon,
@@ -88,7 +89,7 @@ export default function RunHistoryPanel({ isOpen, onClose }: Props) {
   const fmtTime = (iso?: string | null) => {
     if (!iso) return '-';
     const d = new Date(iso);
-    return d.toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return formatDateTime(d, { seconds: true });
   };
 
   const handleDecide = async (log: ActionExecutionLog, decision: 'approved' | 'rejected') => {

@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useState, useCallback, useEffect } from 'react'
 import type { ModelConfig } from '@/types/ontology'
 import { modelApi } from '@/api/ontologies'
@@ -54,15 +55,8 @@ function emptySummary(model: ModelConfig | undefined): ModelSummary {
 }
 
 function formatLastCall(iso: string | null): string {
-  if (!iso) return '—'
-  // 后端时间戳存的是 UTC。若序列化结果不带时区信息（SQLite 读回为 naive），
-  // 按 UTC 解析，避免被 new Date 当成本地时间导致 8 小时偏差。
-  const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso)
-  const d = new Date(hasTz ? iso : `${iso}Z`)
-  if (Number.isNaN(d.getTime())) return '—'
-  const p = (n: number) => String(n).padStart(2, '0')
-  // 展示为本地时区的绝对时间，精确到秒
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  // 展示为本地时区的绝对时间，精确到秒（UTC 解析规则由 parseServerTime 统一处理）
+  return formatDateTime(iso, { seconds: true })
 }
 
 export function useMockModels() {

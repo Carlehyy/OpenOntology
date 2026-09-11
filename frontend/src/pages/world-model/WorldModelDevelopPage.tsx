@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import CodeMirror from '@uiw/react-codemirror'
@@ -92,17 +93,6 @@ function readDraft(projectId: string): Draft | null {
     return typeof parsed?.script === 'string' ? parsed : null
   } catch {
     return null
-  }
-}
-
-function formatDateTime(iso?: string | null): string {
-  if (!iso) return '-'
-  try {
-    return new Date(iso).toLocaleString('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    })
-  } catch {
-    return iso
   }
 }
 

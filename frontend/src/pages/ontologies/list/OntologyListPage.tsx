@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -58,14 +59,7 @@ function errorMessage(error: unknown, fallback: string) {
 function formatChangedAt(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(date)
+  return formatDateTime(date)
 }
 
 function OntologyFormModal({
@@ -305,8 +299,8 @@ function OntologyCard({
   const hasUpdate = Boolean(item.updated_at) && item.updated_at !== item.created_at
   const timeText = `${hasUpdate ? '更新于' : '创建于'} ${formatChangedAt(hasUpdate ? item.updated_at! : item.created_at)}`
   const timeTitle = hasUpdate
-    ? `最近更新：${new Date(item.updated_at!).toLocaleString('zh-CN')}`
-    : `创建时间：${new Date(item.created_at).toLocaleString('zh-CN')}`
+    ? `最近更新：${formatDateTime(item.updated_at!)}`
+    : `创建时间：${formatDateTime(item.created_at)}`
 
   return (
     <article

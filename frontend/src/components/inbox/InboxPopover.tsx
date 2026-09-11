@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -18,20 +19,13 @@ import { inboxApi, type InboxDelivery } from '@/api/inbox'
 
 
 function formatRelativeTime(value: string): string {
-  const time = new Date(value).getTime()
-  if (!Number.isFinite(time)) return value
-  const diff = Math.max(0, Date.now() - time)
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`
-  return new Date(value).toLocaleDateString('zh-CN')
+  return formatDateTime(value, { fallback: value })
 }
 
 function formatExactTime(value: string): string {
   const date = new Date(value)
   return Number.isFinite(date.getTime())
-    ? date.toLocaleString('zh-CN', { hour12: false })
+    ? formatDateTime(date, { seconds: true })
     : value
 }
 

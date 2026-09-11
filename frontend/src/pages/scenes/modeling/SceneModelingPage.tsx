@@ -8,6 +8,7 @@
  * 「回滚为当前」入口。目标场景与对话模型作为发送上下文放在右侧对话框的
  * 工具条上；历史会话仍在对话框顶栏。
  */
+import { formatDateTime } from '@/utils/datetime'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -48,9 +49,7 @@ function formatVersionTime(value: string | null): string {
   if (!value) return '时间未知'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '时间未知'
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  })
+  return formatDateTime(date)
 }
 
 function messagesToTimeline(messages: ConversationMessage[]): TimelineItem[] {

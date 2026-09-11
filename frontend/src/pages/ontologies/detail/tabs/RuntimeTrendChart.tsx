@@ -1,3 +1,4 @@
+import { formatShortDate } from '@/utils/datetime'
 import { useMemo } from 'react'
 import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
@@ -16,7 +17,7 @@ interface RuntimeDay {
 const formatDay = (date: string) => {
   const value = new Date(`${date}T00:00:00`)
   if (Number.isNaN(value.getTime())) return date
-  return value.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+  return formatShortDate(value)
 }
 
 const SERIES = [

@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -242,7 +243,7 @@ export default function EntityDetailPage() {
     updateActionLinkMut.mutate({ aid: action.id, linked_entities: next })
   }
 
-  const formatDate = (s: string) => new Date(s).toLocaleString('zh-CN')
+  const formatDate = (s: string) => formatDateTime(s)
 
   return (
     <div className="space-y-6">

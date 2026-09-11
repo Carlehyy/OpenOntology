@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useMemo, useState, type ReactNode } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -27,7 +28,7 @@ const TABS: Array<{ key: InboxTab; label: string }> = [
 function formatTime(value: string): string {
   const date = new Date(value)
   return Number.isFinite(date.getTime())
-    ? date.toLocaleString('zh-CN', { hour12: false })
+    ? formatDateTime(date, { seconds: true })
     : value
 }
 

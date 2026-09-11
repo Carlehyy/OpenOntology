@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import {
   CheckCircle2, ChevronLeft, ChevronRight, Clock, FilterX, History,
@@ -24,7 +25,7 @@ const STATUS_META: Record<string, { label: string; className: string; icon: 'suc
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—'
-  try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }) } catch { return iso }
+  try { return formatDateTime(new Date(iso), { seconds: true }) } catch { return iso }
 }
 
 function formatDuration(start: string | null, end: string | null): string {

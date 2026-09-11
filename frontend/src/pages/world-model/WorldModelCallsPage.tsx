@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion, useReducedMotion } from 'motion/react'
@@ -45,17 +46,6 @@ interface AppliedFilters {
 }
 
 const EMPTY_FILTERS: AppliedFilters = { keyword: '', start: '', end: '', result: 'all' }
-
-function formatDateTime(iso?: string | null): string {
-  if (!iso) return '-'
-  try {
-    return new Date(iso).toLocaleString('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-    })
-  } catch {
-    return iso
-  }
-}
 
 export default function WorldModelCallsPage() {
   const reduce = useReducedMotion() ?? false
@@ -330,7 +320,7 @@ export default function WorldModelCallsPage() {
                     onClick={() => void openDetail(item)}
                     className="cursor-pointer border-b border-border transition-colors hover:bg-muted"
                   >
-                    <td className="px-4 py-2.5 tabular-nums text-muted-foreground">{formatDateTime(item.created_at)}</td>
+                    <td className="px-4 py-2.5 tabular-nums text-muted-foreground">{formatDateTime(item.created_at, { fallback: '-' })}</td>
                     <td className="px-4 py-2.5 text-foreground">{item.service_name || '—'}</td>
                     <td className="px-4 py-2.5 text-muted-foreground">{item.caller || '—'}</td>
                     <td className="px-4 py-2.5">

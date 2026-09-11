@@ -4,6 +4,7 @@
  * 结构：发起评估表单（单一提交边界）→ 评估任务列表（对象携带状态）→
  * 报告详情抽屉（总览 / 维度得分 / 会话明细下钻 / 导出）。
  */
+import { formatDateTime } from '@/utils/datetime'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -58,13 +59,7 @@ function formatTime(value: string | null): string {
   if (!value) return '-'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', {
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
+  return formatDateTime(date)
 }
 
 const STATUS_TAG: Record<string, { color: string; label: string }> = {

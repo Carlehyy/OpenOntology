@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -72,9 +73,7 @@ function mergePipeline(current: Pipeline, updated: Pipeline): Pipeline {
 function formatTime(iso?: string | null): string {
   if (!iso) return '-'
   try {
-    return new Date(iso).toLocaleString('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-    })
+    return formatDateTime(new Date(iso))
   } catch { return iso }
 }
 

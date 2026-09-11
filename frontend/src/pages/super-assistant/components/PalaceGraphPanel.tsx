@@ -5,7 +5,7 @@ import { AlertCircle, Brain, Crosshair, Loader2, Maximize, Minus, RefreshCw, Rot
 import { superAssistantApi, type PalaceFile, type PalaceGraph, type PalaceGraphNode } from '@/api/superAssistant'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
-import { parseServerTime } from '@/utils/datetime'
+import { formatDateTime, parseServerTime } from '@/utils/datetime'
 import { filterPalaceGraph, palaceFileNodeIds, palaceOneHopNeighbors } from './palaceGraphFilter'
 import { palaceGraphOption } from './palaceGraphOption'
 import type { PalaceOntologyDocRow } from './palaceTreeModel'
@@ -41,9 +41,7 @@ const formatStatTime = (iso: string | null): string => {
   if (!iso) return '—'
   const date = parseServerTime(iso)
   if (!date) return '—'
-  return date.toLocaleString('zh-CN', {
-    hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  })
+  return formatDateTime(date)
 }
 
 /**

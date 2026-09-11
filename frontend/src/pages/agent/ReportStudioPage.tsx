@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/datetime'
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -42,7 +43,7 @@ function errorText(error: unknown, fallback: string): string {
 
 function formatTime(value?: string | null): string {
   if (!value) return '—'
-  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+  return formatDateTime(new Date(value), { seconds: true })
 }
 
 function statusLabel(status: AnalysisReportTemplate['status']): string {
