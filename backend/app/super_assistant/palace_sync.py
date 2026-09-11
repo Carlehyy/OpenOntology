@@ -18,7 +18,7 @@ import hashlib
 import secrets
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
 
@@ -195,6 +195,24 @@ def sync_delete_palace_folder(
     palace_service.delete_folder(db, user.id, folder_id)
 
 
+def _derive_public_base_url(request: Request) -> str:
+    """从下载请求本身推导平台对外可达地址，静态配置仅作兜底。
+
+    用户浏览器正在使用的地址（X-Forwarded-Host / Host 头）就是同步脚本
+    在用户机器上可用的地址：端口、域名、协议（含外部 TLS 终结）变更与
+    多入口访问都自动正确，无需运维维护任何配置。标准部署由仓库 nginx
+    转发 X-Forwarded-Host $http_host（$host 不含端口，不能直接用）；
+    多级代理链按规范取首个值。头都缺失时回落
+    PIPELINE_FILE_PUBLIC_API_BASE_URL，再缺失则留空由脚本启动时报错引导。
+    """
+    scheme = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").strip()
+    forwarded = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    host = forwarded or (request.headers.get("host") or "").strip()
+    if host:
+        return f"{scheme}://{host}".rstrip("/")
+    return (getattr(settings, "pipeline_file_public_api_base_url", "") or "").strip().rstrip("/")
+
+
 # ---------------------------------------------------------------------------
 # 浏览器侧：令牌管理 + 脚本下发（JWT 鉴权）
 # ---------------------------------------------------------------------------
@@ -212,6 +230,7 @@ def reset_palace_sync_token(
 
 @management_router.get("/palace/sync/script")
 def download_palace_sync_script(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -221,9 +240,8 @@ def download_palace_sync_script(
     必须断言下载文件内容，不能只断言"提示出现"。
     """
     token = current_sync_token(db, current_user.id)
-    base_url = (getattr(settings, "pipeline_file_public_api_base_url", "") or "").strip().rstrip("/")
     script = render_sync_script(
-        base_url=base_url,
+        base_url=_derive_public_base_url(request),
         token=token,
         allowed_extensions=sorted(palace_service._palace_allowed_extensions()),
         max_upload_mb=int(settings.max_upload_mb),

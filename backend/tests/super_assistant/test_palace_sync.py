@@ -206,7 +206,8 @@ def test_script_download_embeds_token_and_compiles(env):
     assert first.headers.get("cache-control") == "no-store"
     body = first.text
     assert "pal_sync_" in body
-    assert settings.pipeline_file_public_api_base_url.rstrip("/") in body
+    # 无代理头时按请求 Host 推导（TestClient 默认 host=testserver）
+    assert "http://testserver" in body
     compile(body, "palace_sync.py", "exec")
 
     # 重置后再次下载：脚本内嵌的是新令牌（重复下载本身不轮换）
@@ -214,6 +215,29 @@ def test_script_download_embeds_token_and_compiles(env):
     second = env.client.get(f"{_PREFIX}/palace/sync/script").text
     assert reset in second
     assert reset not in body
+
+
+def test_script_download_derives_base_url_from_request(env):
+    """BASE_URL 优先取下载请求实际使用的地址：换端口/域名/协议零配置。"""
+    # X-Forwarded-Host（含端口）+ X-Forwarded-Proto 优先
+    forwarded = env.client.get(
+        f"{_PREFIX}/palace/sync/script",
+        headers={"X-Forwarded-Host": "example.com:8443", "X-Forwarded-Proto": "https"},
+    )
+    assert "https://example.com:8443" in forwarded.text
+    assert "example.com:8443" in forwarded.text
+
+    # 多级代理链取首个值（用户原始 Host 在最前，后续跳点追加在后）；
+    # 协议未转发时回落请求 scheme
+    chained = env.client.get(
+        f"{_PREFIX}/palace/sync/script",
+        headers={"X-Forwarded-Host": "original-host:9000, internal-hop"},
+    )
+    assert "http://original-host:9000" in chained.text
+
+    # 无任何代理头时用 Host 兜底，不再依赖静态配置
+    plain = env.client.get(f"{_PREFIX}/palace/sync/script")
+    assert "http://testserver" in plain.text
 
 
 def test_filename_override_rejects_overlong(env):
