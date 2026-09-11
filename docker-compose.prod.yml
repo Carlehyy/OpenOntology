@@ -139,6 +139,9 @@ services:
       PIPELINE_FILE_GATEWAY_BASE_URL: ${PIPELINE_FILE_GATEWAY_BASE_URL:-http://backend:8000/api/v2/file-transfer}
       PIPELINE_FILE_PUBLIC_APP_BASE_URL: ${PIPELINE_FILE_PUBLIC_APP_BASE_URL:-http://localhost:5173}
       PIPELINE_FILE_PUBLIC_API_BASE_URL: ${PIPELINE_FILE_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      # 远程助手邀请函/回连契约下发给外部 agent 的平台 API 公网地址
+      #（deploy-prod.sh 未显式配置时从部署健康地址自动推导）
+      SUPER_ASSISTANT_PUBLIC_API_BASE_URL: ${SUPER_ASSISTANT_PUBLIC_API_BASE_URL:-http://localhost:8000}
       PYTHON_KERNEL_GATEWAY_URL: http://python_kernel_gateway:8088
       PYTHON_KERNEL_GATEWAY_AUTH_TOKEN: ${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}
     depends_on:
@@ -215,6 +218,9 @@ services:
       PIPELINE_FILE_GATEWAY_BASE_URL: ${PIPELINE_FILE_GATEWAY_BASE_URL:-http://backend:8000/api/v2/file-transfer}
       PIPELINE_FILE_PUBLIC_APP_BASE_URL: ${PIPELINE_FILE_PUBLIC_APP_BASE_URL:-http://localhost:5173}
       PIPELINE_FILE_PUBLIC_API_BASE_URL: ${PIPELINE_FILE_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      # 远程助手邀请函/回连契约下发给外部 agent 的平台 API 公网地址
+      #（deploy-prod.sh 未显式配置时从部署健康地址自动推导）
+      SUPER_ASSISTANT_PUBLIC_API_BASE_URL: ${SUPER_ASSISTANT_PUBLIC_API_BASE_URL:-http://localhost:8000}
       # executor 会执行整条流水线（含 python 脚本引擎），需要内核网关地址
       PYTHON_KERNEL_GATEWAY_URL: http://python_kernel_gateway:8088
       PYTHON_KERNEL_GATEWAY_AUTH_TOKEN: ${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}

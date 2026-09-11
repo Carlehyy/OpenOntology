@@ -81,6 +81,7 @@ compose_environment() {
     -u PIPELINE_FILE_GATEWAY_BASE_URL \
     -u PIPELINE_FILE_PUBLIC_APP_BASE_URL \
     -u PIPELINE_FILE_PUBLIC_API_BASE_URL \
+    -u SUPER_ASSISTANT_PUBLIC_API_BASE_URL \
     -u STEWARD_BROWSER_HTTP_LEASE_SECONDS \
     -u STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS \
     -u STEWARD_BROWSER_MAX_SESSIONS \
@@ -975,6 +976,10 @@ configure_pipeline_file_public_base \
   PIPELINE_FILE_PUBLIC_APP_BASE_URL http://localhost:5173
 configure_pipeline_file_public_base \
   PIPELINE_FILE_PUBLIC_API_BASE_URL http://localhost:8000
+# 远程助手邀请自助接入：邀请函内的兑换/回连地址必须从外部可达，
+# 与附件公网地址同一口径——未显式配置时从部署健康地址推导。
+configure_pipeline_file_public_base \
+  SUPER_ASSISTANT_PUBLIC_API_BASE_URL http://localhost:8000
 require_secret() {
   local key="$1"
   local value
