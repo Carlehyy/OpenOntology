@@ -158,6 +158,13 @@ class SentinelMatchState(Base):
 class SentinelFiring(Base):
     """哨兵触发日志。"""
     __tablename__ = "sentinel_firings"
+    __table_args__ = (
+        # 总览/运行汇总按 (本体, 发布血缘, 时间窗) 聚合统计；无该复合索引时
+        # 单发布评估行的回表过滤随表增长线性变慢。
+        Index(
+            "ix_sentinel_firings_release_time",
+            "ontology_id", "ontology_release_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     ontology_id: Mapped[str] = mapped_column(String, nullable=False, index=True)

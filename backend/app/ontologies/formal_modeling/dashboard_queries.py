@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.ontology_formal import (
@@ -98,7 +99,12 @@ def _runtime_daily_summary_uncached(ontology_id: str, start_iso: str, end_iso: s
     if sentinel_ids and effective_start < effective_end:
         try:
             from app.models.sentinel import SentinelFiring
-            firings = db.query(SentinelFiring).filter(
+            # 只取统计需要的两个标量列：整行 hydration 会连带解压
+            # matches/entered/left/action_results 四个 JSON 大列。
+            firings = db.query(
+                SentinelFiring.status,
+                SentinelFiring.created_at,
+            ).filter(
                 SentinelFiring.ontology_id == ontology_id,
                 SentinelFiring.ontology_release_id == release.id,
                 SentinelFiring.sentinel_id.in_(sentinel_ids),
@@ -109,17 +115,20 @@ def _runtime_daily_summary_uncached(ontology_id: str, start_iso: str, end_iso: s
             db.rollback()
             logger.warning("运行汇总哨兵统计失败,已降级为空统计(ontology=%s)", ontology_id, exc_info=True)
             firings = []
-        for firing in firings:
-            day = runtime_by_date.get(firing.created_at.date().isoformat())
-            if day and firing.status in ("fired", "error"):
-                day["firings"][firing.status] += 1
+        for firing_status, firing_created_at in firings:
+            day = runtime_by_date.get(firing_created_at.date().isoformat())
+            if day and firing_status in ("fired", "error"):
+                day["firings"][firing_status] += 1
 
     # 动作执行：显式发布版本血缘 + 非 dry-run + 已出结果
     action_ids = {
         str(item.get("id")) for item in snapshot["actions"] if item.get("id")
     }
     if action_ids and effective_start < effective_end:
-        runs = db.query(ActionExecutionLog).filter(
+        runs = db.query(
+            ActionExecutionLog.status,
+            ActionExecutionLog.executed_at,
+        ).filter(
             ActionExecutionLog.ontology_id == ontology_id,
             ActionExecutionLog.ontology_release_id == release.id,
             ActionExecutionLog.action_id.in_(action_ids),
@@ -128,10 +137,10 @@ def _runtime_daily_summary_uncached(ontology_id: str, start_iso: str, end_iso: s
             ActionExecutionLog.executed_at < effective_end,
             ActionExecutionLog.status.in_(("success", "failed")),
         ).all()
-        for log in runs:
-            day = runtime_by_date.get(log.executed_at.date().isoformat())
+        for run_status, run_executed_at in runs:
+            day = runtime_by_date.get(run_executed_at.date().isoformat())
             if day:
-                day["actionRuns"][log.status] += 1
+                day["actionRuns"][run_status] += 1
 
     return _ok({
         "start": start_iso,
@@ -191,7 +200,12 @@ def _ontology_overview_uncached(ontology_id: str, db: Session):
             Sentinel.id.in_(sentinel_ids),
         ).all() if sentinel_ids else []
         live_sentinel_by_id = {item.id: item for item in live_sentinels}
-        firings_7d = (db.query(SentinelFiring).filter(
+        # 只取统计需要的两个标量列：整行 hydration 会连带解压
+        # matches/entered/left/action_results 四个 JSON 大列。
+        firings_7d = (db.query(
+            SentinelFiring.status,
+            SentinelFiring.created_at,
+        ).filter(
             SentinelFiring.ontology_id == ontology_id,
             SentinelFiring.ontology_release_id == release.id,
             SentinelFiring.sentinel_id.in_(sentinel_ids),
@@ -208,15 +222,26 @@ def _ontology_overview_uncached(ontology_id: str, db: Session):
         return bool(getattr(live, field)) if live is not None else bool(item.get(field, default))
 
     # —— 当前运行投影：只接收发布结构中仍然存在的类型 ——
-    instances = (db.query(ObjectInstance).filter(
+    # 计数在 SQL 端 GROUP BY 聚合：整行 hydration 会连带解压
+    # properties/computed 两个 JSON 大列。
+    instance_rows = (db.query(
+        ObjectInstance.object_type_id,
+        ObjectInstance.source,
+        func.count(),
+    ).filter(
         ObjectInstance.ontology_id == ontology_id,
         ObjectInstance.object_type_id.in_(object_type_ids),
+    ).group_by(
+        ObjectInstance.object_type_id,
+        ObjectInstance.source,
     ).all()) if object_type_ids else []
+    instances_n = 0
     by_source: dict[str, int] = {}
     inst_by_type: dict[str, int] = {}
-    for i in instances:
-        by_source[i.source or "manual"] = by_source.get(i.source or "manual", 0) + 1
-        inst_by_type[i.object_type_id] = inst_by_type.get(i.object_type_id, 0) + 1
+    for object_type_id, source, count in instance_rows:
+        instances_n += count
+        by_source[source or "manual"] = by_source.get(source or "manual", 0) + count
+        inst_by_type[object_type_id] = inst_by_type.get(object_type_id, 0) + count
     link_instances_n = (db.query(LinkInstance).filter(
         LinkInstance.ontology_id == ontology_id,
         LinkInstance.link_type_id.in_(link_type_ids),
@@ -240,35 +265,48 @@ def _ontology_overview_uncached(ontology_id: str, db: Session):
             mappings_stat["autoApply"] += 1
 
     # —— 运行：动作日志显式带发布版本血缘 ——
-    logs = (db.query(ActionExecutionLog).filter(
+    # 只取审批统计需要的三个标量列：整行 hydration 会连带解压
+    # parameters/target_snapshot/effects 等 JSON 大列。
+    log_rows = (db.query(
+        ActionExecutionLog.status,
+        ActionExecutionLog.decided_at,
+        ActionExecutionLog.executed_at,
+    ).filter(
         ActionExecutionLog.ontology_id == ontology_id,
         ActionExecutionLog.ontology_release_id == release.id,
         ActionExecutionLog.action_id.in_(action_ids),
         ActionExecutionLog.dry_run == False).all()) if action_ids else []  # noqa: E712
-    pending_n = sum(1 for l in logs if l.status in ("pending", "executing"))
-    decided = sorted([l for l in logs if l.status in ("approved", "rejected")],
-                     key=lambda l: (l.decided_at or l.executed_at), reverse=True)
-    approved_n = sum(1 for l in decided if l.status == "approved")
+    pending_n = sum(1 for status, _, _ in log_rows
+                    if status in ("pending", "executing"))
+    decided = sorted(
+        [(status, decided_at, executed_at)
+         for status, decided_at, executed_at in log_rows
+         if status in ("approved", "rejected")],
+        key=lambda row: (row[1] or row[2]), reverse=True)
+    approved_n = sum(1 for status, _, _ in decided if status == "approved")
     recent = decided[:20]
-    recent_rate = (sum(1 for l in recent if l.status == "approved") / len(recent)) if recent else None
-    runs_7d = [l for l in logs if l.executed_at
-               and release_window_start <= l.executed_at <= now
-               and l.status in ("success", "failed")]
-    for firing in firings_7d:
-        day = runtime_by_date.get(firing.created_at.date().isoformat())
-        if day and firing.status in ("fired", "error"):
-            day["firings"][firing.status] += 1
-    for log in runs_7d:
-        day = runtime_by_date.get(log.executed_at.date().isoformat())
+    recent_rate = (sum(1 for status, _, _ in recent if status == "approved")
+                   / len(recent)) if recent else None
+    runs_7d = [row for row in log_rows if row[2]
+               and release_window_start <= row[2] <= now
+               and row[0] in ("success", "failed")]
+    for firing_status, firing_created_at in firings_7d:
+        day = runtime_by_date.get(firing_created_at.date().isoformat())
+        if day and firing_status in ("fired", "error"):
+            day["firings"][firing_status] += 1
+    for run_status, _, run_executed_at in runs_7d:
+        day = runtime_by_date.get(run_executed_at.date().isoformat())
         if day:
-            day["actionRuns"][log.status] += 1
+            day["actionRuns"][run_status] += 1
 
     # —— 事实流：仅统计当前发布产生/发布后追加且仍属于该结构的事实 ——
     facts_query = _release_fact_query(db, ontology_id, release, snapshot)
-    facts_total = facts_query.count()
+    facts_total = 0
     by_kind: dict[str, int] = {}
-    for kind, in facts_query.with_entities(PropertyFact.kind).all():
-        by_kind[kind or "property"] = by_kind.get(kind or "property", 0) + 1
+    for kind, count in facts_query.with_entities(
+            PropertyFact.kind, func.count()).group_by(PropertyFact.kind).all():
+        facts_total += count
+        by_kind[kind or "property"] = by_kind.get(kind or "property", 0) + count
 
     # —— 健康检查（可操作的下一步建议）——
     # target 指向本体详情页 Tab key（GROUPS），前端据此一键跳转处理。
@@ -283,7 +321,7 @@ def _ontology_overview_uncached(ontology_id: str, db: Session):
     if no_pk:
         health.append({"level": "warn", "message": f"{len(no_pk)} 个对象实体未设主键：{', '.join(no_pk[:3])}{'…' if len(no_pk) > 3 else ''}", "target": "design",
                        "hint": "无主键会影响数据灌入去重与动作的实例定位"})
-    if object_types and not instances:
+    if object_types and instances_n == 0:
         health.append({"level": "info", "message": "模型已就绪但还没有实例数据", "target": "data-mapping",
                        "hint": "到「数据映射」把 curated 数据灌进来"})
     if mappings_stat["autoCreate"] > 0:
@@ -293,10 +331,10 @@ def _ontology_overview_uncached(ontology_id: str, db: Session):
             sentinel_flag(item, "muted", False) for item in snapshot_sentinels):
         health.append({"level": "warn", "message": "所有哨兵都处于影子（静默）状态", "target": "governance",
                        "hint": "确认规律无误后，在哨兵面板解除静默让治理真正生效"})
-    if not snapshot_sentinels and instances:
+    if not snapshot_sentinels and instances_n > 0:
         health.append({"level": "info", "message": "已有数据但还没有哨兵", "target": "design",
                        "hint": "在图谱编辑器建哨兵，让平台替你盯住状态变化"})
-    err_firings = sum(1 for f in firings_7d if f.status == "error")
+    err_firings = sum(1 for status, _ in firings_7d if status == "error")
     if err_firings:
         health.append({"level": "warn", "message": f"近 7 天有 {err_firings} 次哨兵评估出错", "target": "governance",
                        "hint": "查看运行历史的哨兵触发记录，多为条件表达式写错"})
@@ -323,7 +361,7 @@ def _ontology_overview_uncached(ontology_id: str, db: Session):
                               if sentinel_flag(item, "muted", False))},
         },
         "data": {
-            "instances": len(instances), "instancesBySource": by_source,
+            "instances": instances_n, "instancesBySource": by_source,
             "linkInstances": link_instances_n, "mappings": mappings_stat,
             "topTypes": sorted(
                 [{"id": str(item.get("id") or ""),
@@ -338,11 +376,11 @@ def _ontology_overview_uncached(ontology_id: str, db: Session):
                           "rejected": len(decided) - approved_n,
                           "recentApprovalRate": recent_rate},
             "firings7d": {"total": len(firings_7d),
-                          "fired": sum(1 for f in firings_7d if f.status == "fired"),
+                          "fired": sum(1 for status, _ in firings_7d if status == "fired"),
                           "error": err_firings},
             "actionRuns7d": {"total": len(runs_7d),
-                             "success": sum(1 for l in runs_7d if l.status == "success"),
-                             "failed": sum(1 for l in runs_7d if l.status == "failed")},
+                             "success": sum(1 for row in runs_7d if row[0] == "success"),
+                             "failed": sum(1 for row in runs_7d if row[0] == "failed")},
             "daily7d": runtime_days,
         },
         "facts": {"total": facts_total, "byKind": by_kind},

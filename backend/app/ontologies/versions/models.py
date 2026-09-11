@@ -19,7 +19,12 @@ class OntologyVersion(Base):
     时无法还原待发布结构。
     """
     __tablename__ = "ontology_versions"
-    __table_args__ = (UniqueConstraint("ontology_id", "version_number"),)
+    __table_args__ = (
+        UniqueConstraint("ontology_id", "version_number"),
+        # 版本树/版本列表按本体全量或分页读取并按时间排序；行内多个 JSON
+        # 快照列使堆元组很宽，按 (ontology_id, created_at) 走索引避免全表扫。
+        Index("ix_ontology_versions_ontology_created", "ontology_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     ontology_id: Mapped[str] = mapped_column(String, ForeignKey("ontology_projects.id", ondelete="CASCADE"), nullable=False)
