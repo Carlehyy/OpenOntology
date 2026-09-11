@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
+import { useListEntryInitial } from '@/hooks/useListEntryInitial'
 import {
   CheckCircle2,
   CircleAlert,
@@ -324,6 +325,7 @@ function EmptyGuide({ onAdd }: { onAdd: () => void }) {
 
 export default function PluginCommunityPage() {
   const reduce = useReducedMotion() ?? false
+  const rowEntryInitial = useListEntryInitial()
   const [servers, setServers] = useState<SuperMcpServer[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -542,7 +544,7 @@ export default function PluginCommunityPage() {
                   {filteredServers.map((server, index) => (
                     <motion.tr
                       key={server.id}
-                      initial={reduce ? false : { opacity: 0 }}
+                      initial={rowEntryInitial === false ? false : { opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ ...SPRING_LAYOUT, delay: rowDelay(index) }}
                       className="transition-colors hover:bg-muted/60"
