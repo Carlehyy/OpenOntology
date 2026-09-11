@@ -442,7 +442,7 @@ export default function PluginCommunityPage() {
           label={`删除 MCP ${serverTitle(server)}`}
           reduce={reduce}
           onClick={() => setDeleteTarget(server)}
-          className="hover:bg-[var(--color-danger-bg)] hover:text-destructive focus-visible:ring-destructive"
+          className="hover:bg-[var(--color-danger-bg)] hover:text-destructive focus-visible:ring-ring"
         >
           <Trash2 size={14} />
         </IconButton>
@@ -468,7 +468,7 @@ export default function PluginCommunityPage() {
             onChange={event => setSearch(event.target.value)}
             placeholder="搜索名称、标识、地址或工具..."
             aria-label="搜索 MCP"
-            className="w-full rounded-xl border border-border bg-card py-2 pl-8 pr-8 text-sm text-foreground outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-ring focus:ring-4 focus:ring-ring/10"
+            className="w-full rounded-xl border border-border bg-card py-2 pl-8 pr-8 text-sm text-foreground outline-none transition placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
           />
           {search && (
             <button type="button" onClick={() => setSearch('')} aria-label="清除 MCP 搜索" className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] transition-colors hover:text-foreground">

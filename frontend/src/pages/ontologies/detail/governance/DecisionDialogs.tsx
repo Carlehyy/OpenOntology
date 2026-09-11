@@ -100,10 +100,10 @@ export function RejectDialog({
                 aria-describedby={`governance-reject-reason-help${error ? ' governance-reject-error' : ''}`}
                 aria-invalid={Boolean(error)}
                 placeholder="例如：当前风险信息不足，请补充证据后重新提交"
-                className={`min-h-24 w-full resize-y rounded-lg border bg-card px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition focus:ring-2 disabled:cursor-wait disabled:bg-muted ${
+                className={`min-h-24 w-full resize-y rounded-lg border bg-card px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition focus-visible:ring-2 disabled:cursor-wait disabled:bg-muted ${
                   error
-                    ? 'border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] focus:border-[var(--color-danger)] focus:ring-[var(--color-danger)]'
-                    : 'border-border focus:border-brand focus:ring-ring'
+                    ? 'border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] focus:border-[var(--color-danger)] focus-visible:ring-ring'
+                    : 'border-border focus-visible:border-ring focus-visible:ring-ring'
                 }`}
               />
               <p id="governance-reject-reason-help" className="mt-1.5 text-xs leading-5 text-muted-foreground">

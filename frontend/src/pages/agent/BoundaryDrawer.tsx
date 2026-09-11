@@ -158,7 +158,7 @@ export function BoundaryDrawer({ oid, open, onClose }: {
             <Shield size={15} className="text-[var(--color-primary)]" />
             <h3 id="agent-boundary-title" className="text-sm font-semibold text-[var(--color-text-primary)]">智能体授权边界</h3>
           </div>
-          <button onClick={onClose} aria-label="关闭授权边界配置" className="rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]">
+          <button onClick={onClose} aria-label="关闭授权边界配置" className="rounded-md p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <X size={16} />
           </button>
         </div>

@@ -187,7 +187,7 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
           <p className="text-xs text-[var(--color-text-tertiary)] mt-1 max-w-lg mx-auto">
             任务按计划触发已发布的流水线，并把最终产物按入库方式写进数据资产湖
           </p>
-          <button type="button" onClick={onClose} aria-label="关闭弹窗" className="absolute right-5 top-5 rounded-lg p-1 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]">
+          <button type="button" onClick={onClose} aria-label="关闭弹窗" className="absolute right-5 top-5 rounded-lg p-1 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <X size={18} />
           </button>
         </div>
@@ -225,12 +225,12 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
               <Field label="任务名称" required>
                 <input type="text" aria-label="任务名称" value={form.name} onChange={e => update('name', e.target.value)}
                   placeholder="例如：订单数据每日入湖" autoFocus={!isEdit}
-                  className="w-full px-3 py-2 border border-border rounded-xl text-sm focus:outline-none focus:border-[var(--color-success)] focus:ring-2 focus:ring-[var(--color-success)] transition" />
+                  className="w-full px-3 py-2 border border-border rounded-xl text-sm focus-visible:outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring transition" />
               </Field>
               <Field label="任务描述" required>
                 <textarea aria-label="任务描述" value={form.description} onChange={e => update('description', e.target.value)}
                   placeholder="例如：每天同步订单数据，为经营分析提供最新资产" rows={2}
-                  className="w-full px-3 py-2 border border-border rounded-xl text-sm focus:outline-none focus:border-[var(--color-success)] focus:ring-2 focus:ring-[var(--color-success)] resize-none transition" />
+                  className="w-full px-3 py-2 border border-border rounded-xl text-sm focus-visible:outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring resize-none transition" />
               </Field>
             </StepShell>
           )}
@@ -281,7 +281,7 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
                     <span className="text-xs text-muted-foreground">预览成品数据集</span>
                     {curatedList.length > 1 ? (
                       <select value={activeCurated.id} onChange={e => setActiveCuratedId(e.target.value)}
-                        className="text-xs px-2 py-1 border border-border rounded-lg bg-card focus:outline-none focus:border-[var(--color-success)]">
+                        className="text-xs px-2 py-1 border border-border rounded-lg bg-card focus-visible:outline-none focus-visible:border-ring">
                         {curatedList.map(c => <option key={c.id} value={c.id}>{c.name}（{c.rowcount} 行）</option>)}
                       </select>
                     ) : (
@@ -351,14 +351,14 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
                   <Field label="软删除列（可选）" hint="产物中的逻辑删除标识列；命中的行会打上 __deleted__ 标记而非物理删除">
                     {contractColumns.length > 0 ? (
                       <select value={form.soft_delete_column ?? ''} onChange={e => update('soft_delete_column', e.target.value)}
-                        className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card focus:outline-none focus:border-[var(--color-success)]">
+                        className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card focus-visible:outline-none focus-visible:border-ring">
                         <option value="">— 不使用 —</option>
                         {contractColumns.map(c => <option key={c.name} value={c.name}>{c.field_name}（{c.name}）</option>)}
                       </select>
                     ) : (
                       <input type="text" value={form.soft_delete_column ?? ''} onChange={e => update('soft_delete_column', e.target.value)}
                         placeholder="例如：is_deleted"
-                        className="w-full px-3 py-2 border border-border rounded-lg text-sm font-mono focus:outline-none focus:border-[var(--color-success)]" />
+                        className="w-full px-3 py-2 border border-border rounded-lg text-sm font-mono focus-visible:outline-none focus-visible:border-ring" />
                     )}
                   </Field>
                 )}
@@ -366,14 +366,14 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
                 <Field label="增量游标列（可选）" hint="声明后每次运行只拉取游标之后的新数据（词法可比较列：ISO8601 时间戳/自增 ID）；平台在运行成功时自动推进水位">
                   {contractColumns.length > 0 ? (
                     <select data-testid="cursor-column-select" value={form.cursor_column ?? ''} onChange={e => update('cursor_column', e.target.value)}
-                      className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card focus:outline-none focus:border-[var(--color-success)]">
+                      className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card focus-visible:outline-none focus-visible:border-ring">
                       <option value="">— 每次全量 —</option>
                       {contractColumns.map(c => <option key={c.name} value={c.name}>{c.field_name}（{c.name}）</option>)}
                     </select>
                   ) : (
                     <input type="text" data-testid="cursor-column-input" value={form.cursor_column ?? ''} onChange={e => update('cursor_column', e.target.value)}
                       placeholder="例如：updated_at"
-                      className="w-full px-3 py-2 border border-border rounded-lg text-sm font-mono focus:outline-none focus:border-[var(--color-success)]" />
+                      className="w-full px-3 py-2 border border-border rounded-lg text-sm font-mono focus-visible:outline-none focus-visible:border-ring" />
                   )}
                 </Field>
                 {form.cursor_column && form.write_mode === 'overwrite' && (
@@ -413,7 +413,7 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
                 <Field label="Cron 表达式" required hint="5 段格式：分 时 日 月 周。如 0 2 * * * 表示每天凌晨 2 点">
                   <input type="text" value={form.cron_expression} onChange={e => update('cron_expression', e.target.value)}
                     placeholder="0 2 * * *"
-                    className="w-full px-3 py-2 border border-border rounded-xl text-sm font-mono focus:outline-none focus:border-[var(--color-success)] focus:ring-2 focus:ring-[var(--color-success)] transition" />
+                    className="w-full px-3 py-2 border border-border rounded-xl text-sm font-mono focus-visible:outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring transition" />
                 </Field>
               )}
 
@@ -421,7 +421,7 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
                 <Field label="间隔秒数" required hint="最小 10 秒">
                   <input type="number" min={10} value={form.interval_seconds}
                     onChange={e => update('interval_seconds', parseInt(e.target.value) || 0)}
-                    className="w-full px-3 py-2 border border-border rounded-xl text-sm focus:outline-none focus:border-[var(--color-success)] focus:ring-2 focus:ring-[var(--color-success)] transition" />
+                    className="w-full px-3 py-2 border border-border rounded-xl text-sm focus-visible:outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring transition" />
                 </Field>
               )}
 
@@ -481,12 +481,12 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
             {step > 0 && <button type="button" onClick={onClose} className="px-4 py-1.5 text-sm text-muted-foreground hover:bg-muted rounded-lg transition">取消</button>}
             {step < STEPS.length - 1 ? (
               <button type="button" onClick={handleNext}
-                className="inline-flex items-center gap-1 rounded-lg bg-[var(--color-success)] px-4 py-1.5 text-sm text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]">
+                className="inline-flex items-center gap-1 rounded-lg bg-[var(--color-success)] px-4 py-1.5 text-sm text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 下一步 <ChevronRight size={14} />
               </button>
             ) : (
               <button type="button" onClick={handleSubmit} disabled={submitting}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-success)] px-4 py-1.5 text-sm text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)] disabled:opacity-50">
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-success)] px-4 py-1.5 text-sm text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
                 {submitting && <Loader2 size={13} className="animate-spin" />}
                 {isEdit ? '保存修改' : '创建任务'}
               </button>

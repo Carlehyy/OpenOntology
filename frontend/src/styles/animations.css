@@ -198,13 +198,6 @@
   transform: scale(0.96);
 }
 
-/* 聚焦环 */
-.focus-ring:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--color-primary), 0 0 0 4px var(--color-primary-light);
-  transition: box-shadow 0.15s var(--ease-out-quart);
-}
-
 /* 卡片光晕效果 */
 .card-glow {
   position: relative;

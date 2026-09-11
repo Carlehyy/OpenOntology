@@ -429,7 +429,7 @@ export default function SyncTasksTab() {
             <button
               type="button"
               onClick={() => setShowGlobalHistory(true)}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-card px-4 text-xs font-medium text-[var(--color-success)] shadow-sm transition hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]"
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-card px-4 text-xs font-medium text-[var(--color-success)] shadow-sm transition hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <History size={14} />
               历史记录
@@ -437,7 +437,7 @@ export default function SyncTasksTab() {
             <button
               type="button"
               onClick={handleCreate}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[var(--color-success)] px-4 text-xs font-medium text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]"
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[var(--color-success)] px-4 text-xs font-medium text-[var(--color-text-inverse)] shadow-sm transition hover:bg-[var(--color-success)] active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <Plus size={14} />
               新建任务
@@ -492,7 +492,7 @@ export default function SyncTasksTab() {
                   placeholder="搜索任务名或流水线"
                   value={searchInput}
                   onChange={e => setSearchInput(e.target.value)}
-                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-xs text-foreground outline-none transition focus:border-brand focus:ring-2 focus:ring-ring"
+                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-xs text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
                 />
                 {searchInput && (
                   <button
@@ -509,7 +509,7 @@ export default function SyncTasksTab() {
               <select
                 value={filterPipelineId}
                 onChange={e => handlePipelineFilter(e.target.value)}
-                className="h-9 max-w-[240px] rounded-lg border border-border bg-card px-3 text-xs text-muted-foreground outline-none transition focus:border-brand focus:ring-2 focus:ring-ring"
+                className="h-9 max-w-[240px] rounded-lg border border-border bg-card px-3 text-xs text-muted-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label="按数据流水线筛选任务"
                 title="按数据流水线筛选任务"
               >
@@ -738,7 +738,7 @@ export default function SyncTasksTab() {
                   <select
                     value={pageSize}
                     onChange={e => { setPageSize(Number(e.target.value)); setPage(1) }}
-                    className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none focus:border-brand"
+                    className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none focus-visible:border-ring"
                     aria-label="任务列表每页显示条数"
                   >
                     {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
@@ -1046,7 +1046,7 @@ function Switch({ checked, onChange }: { checked: boolean; onChange: () => void 
     <button
       type="button" role="switch" aria-checked={checked} onClick={onChange}
       title={checked ? '点击停用' : '点击启用'}
-      className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)] focus-visible:ring-offset-1 ${
+      className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${
         checked ? 'bg-[var(--color-success)]' : 'bg-accent'
       }`}
     >

@@ -216,7 +216,7 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               className={cn(
                 'w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2 text-sm shadow-sm transition-colors',
                 'placeholder:text-[var(--color-text-tertiary)]',
-                'focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] focus:border-[var(--color-primary)]',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus:border-[var(--color-primary)]',
               )}
             />
           </div>

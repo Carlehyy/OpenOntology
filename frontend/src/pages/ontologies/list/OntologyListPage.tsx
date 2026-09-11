@@ -151,7 +151,7 @@ function OntologyFormModal({
             value={name}
             onChange={event => setName(event.target.value)}
             placeholder="例如：供应链知识本体"
-            className="selection:bg-brand-mist selection:text-brand-ink focus:border-brand focus:ring-ring"
+            className="selection:bg-brand-mist selection:text-brand-ink focus-visible:border-ring focus-visible:ring-ring"
           />
           <div>
             <label className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
@@ -186,7 +186,7 @@ function OntologyFormModal({
             maxLength={500}
             rows={3}
             placeholder="简要说明本体覆盖的业务范围和用途"
-            className="w-full resize-none rounded-md border border-[var(--color-border)] bg-card px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] selection:bg-brand-mist selection:text-brand-ink focus:border-brand focus:outline-none focus:ring-1 focus:ring-ring"
+            className="w-full resize-none rounded-md border border-[var(--color-border)] bg-card px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] selection:bg-brand-mist selection:text-brand-ink focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <p className="mt-1 text-right text-[11px] text-[var(--color-text-tertiary)]">{description.length}/500</p>
         </div>
@@ -602,7 +602,7 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
             onChange={event => setNameFilter(event.target.value)}
             placeholder="搜索本体名称或描述"
             aria-label="按本体名称或描述筛选"
-            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus:border-brand focus:outline-none focus:ring-2 focus:ring-ring"
+            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           {nameFilter && (
             <button
@@ -623,7 +623,7 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
           {/* 样式对齐旁边搜索输入框：白底/slate 描边/teal 聚焦（覆盖 vendored bg-background 画布灰） */}
           <SelectTrigger
             aria-label="按所属领域筛选"
-            className="h-9 w-44 rounded-lg border-border bg-card text-foreground focus:border-brand focus:ring-ring"
+            className="h-9 w-44 rounded-lg border-border bg-card text-foreground focus-visible:border-ring focus-visible:ring-ring"
           >
             <SelectValue />
           </SelectTrigger>
@@ -683,7 +683,7 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
             <button
               type="button"
               onClick={() => void refetch()}
-              className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)]"
+              className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               重新加载
             </button>

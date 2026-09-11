@@ -131,6 +131,23 @@ success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引�
 `--color-bg-overlay`；全局消息提示（sonner）统一顶部居中，层级
 `--z-toast: 1100`（高于 antd 弹层，低于悬浮助手）。
 
+### 4.4 焦点环（全站唯一规格）
+
+- **颜色唯一**：一切焦点环只用 `--ring` 令牌（Tailwind 类 `ring-ring`，
+  配套边框 `border-ring`）；禁止 focus 态使用语义色/色板类/裸 hex 环。
+- **宽度唯一**：`ring-2`（2px）一档。#059669/#3ecf8e 对页面底色非文本对比
+  约 3.7:1 / 9.4:1（≥3:1 达标），1px 在浅底下过细不可靠，4px 光晕过粗；
+  2px 同时满足 WCAG 2.4.13 焦点外观建议。
+- **触发唯一**：`focus-visible`（文本输入类控件点击聚焦等价键盘输入、行为
+  不变；按钮/选择器仅键盘导航出环，消除鼠标点击后的残留边框）。
+- **校验态**：错误/警告只改边框色（`border-destructive`/
+  `border-[var(--color-warning)]`），环色仍 `ring-ring`，不做双色环。
+- **非焦点状态环不属此规范**：选中节点（`ring-viz-*`）、状态圆点、表格单元格
+  高亮（`ring-inset` + 语义色）是状态标记，保持其语义色。
+- 存量清理记录（2026-09）：App.css 残留 outline、animations.css `.focus-ring`
+  双环已删除；mapping-overview/overview-dashboard/mapping-configuration/login
+  页域 CSS 的焦点 outline/光晕统一为 `var(--color-ring)`。
+
 ## 5. 图表规范（ECharts 为主要标准）
 
 ### 5.1 唯一主题来源 `frontend/src/lib/echartsTheme.ts`
@@ -206,6 +223,8 @@ ECharts 关系图能力不足时可选 G6（图可视化）/X6（图编辑），
 7. 在 TSX 中直接写 Tailwind 原生绿色族色板类（`teal-*`/`emerald-*`/`cyan-*`/
    `green-*`/`lime-*`）表达强调色或任意界面颜色——由 `check:color-tokens`
    的色板棘轮与 ESLint 同源约束强制，存量只减不增。
+8. 焦点环偏离 §4.4 唯一规格：focus 触发的环使用 `ring-2`/`ring-ring` 之外的
+   宽度或颜色（含色板类、语义 var、透明度修饰符如 `ring-ring/10`）。
 
 ## 9. 变更方式
 

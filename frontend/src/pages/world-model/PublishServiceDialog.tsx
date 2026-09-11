@@ -143,7 +143,7 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
             value={name}
             onChange={event => setName(event.target.value)}
             placeholder="例如：台区负荷短期推演服务"
-            className=" focus:border-ring focus:ring-ring"
+            className=" focus-visible:border-ring focus-visible:ring-ring"
           />
           <div>
             <label className={labelClass}>发布版本</label>
@@ -169,7 +169,7 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
             maxLength={500}
             rows={2}
             placeholder="说明该服务回答什么推演问题、适用边界"
-            className="w-full resize-none rounded-md border border-[var(--color-border)] bg-card px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+            className="w-full resize-none rounded-md border border-[var(--color-border)] bg-card px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
 
@@ -261,7 +261,7 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
                       min={1}
                       value={item.min_count}
                       onChange={event => setPreconditions(current => current.map((row, i) => i === index ? { ...row, min_count: Math.max(1, Number(event.target.value) || 1) } : row))}
-                      className="h-9 w-20 rounded-md border border-[var(--color-border)] bg-card px-2 text-sm focus:border-ring focus:outline-none"
+                      className="h-9 w-20 rounded-md border border-[var(--color-border)] bg-card px-2 text-sm focus-visible:border-ring focus-visible:outline-none"
                       aria-label={`前置条件 ${index + 1} 最小数量`}
                     />
                     <button

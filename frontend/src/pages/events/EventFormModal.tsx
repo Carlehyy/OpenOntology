@@ -190,7 +190,7 @@ export default function EventFormModal({
   }
 
   const labelClass = 'mb-1.5 block text-sm font-medium text-foreground'
-  const controlClass = 'h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-success)] focus:outline-none focus:ring-2 focus:ring-[var(--color-success)]'
+  const controlClass = 'h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
   const visibleExistingCount = existingAttachments.filter(attachment => !removedAttachmentIds.has(attachment.id)).length
 
   return (
@@ -277,7 +277,7 @@ export default function EventFormModal({
             value={description}
             onChange={event => setDescription(event.target.value)}
             rows={4}
-            className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-success)] focus:outline-none focus:ring-2 focus:ring-[var(--color-success)]"
+            className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             placeholder="事件的完整经过、背景、影响……"
           />
         </div>
@@ -299,7 +299,7 @@ export default function EventFormModal({
               </span>
             )}
           </div>
-          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] px-4 py-4 text-sm font-medium text-[var(--color-success)] transition-all hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] focus-within:ring-2 focus-within:ring-[var(--color-success)]">
+          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] px-4 py-4 text-sm font-medium text-[var(--color-success)] transition-all hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] focus-within:ring-2 focus-within:ring-ring">
             <Upload size={16} /> 选择多个附件
             <input
               type="file"

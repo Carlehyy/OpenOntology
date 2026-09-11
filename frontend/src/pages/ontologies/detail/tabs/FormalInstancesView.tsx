@@ -520,7 +520,7 @@ export default function FormalInstancesView({
                 applySearch()
               }}
             >
-              <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 focus-within:border-brand focus-within:ring-2 focus-within:ring-ring">
+              <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
                 <Search size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
                 <input
                   value={draftKeyword}
@@ -760,7 +760,7 @@ export default function FormalInstancesView({
                 onBlur={commitPageJump}
                 inputMode="numeric"
                 aria-label="跳转至指定页"
-                className="h-7 w-10 rounded-md border border-border bg-card text-center text-xs text-foreground outline-none focus:border-brand focus:ring-2 focus:ring-ring"
+                className="h-7 w-10 rounded-md border border-border bg-card text-center text-xs text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
               />
               / {pages}
             </span>

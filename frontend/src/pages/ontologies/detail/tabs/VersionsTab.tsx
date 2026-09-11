@@ -82,9 +82,9 @@ const STAGE_META: Record<VersionStage, { label: string; badge: 'success' | 'warn
 }
 
 const VERSION_ACTION_BUTTON = {
-  editor: 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet shadow-sm hover:border-viz-violet-soft hover:bg-viz-violet-soft focus-visible:ring-2 focus-visible:ring-viz-violet',
-  mapping: 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] shadow-sm hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] focus-visible:ring-2 focus-visible:ring-[var(--color-info)]',
-  trial: 'border-[var(--color-warning)] bg-[var(--color-warning)] text-[var(--color-text-inverse)] shadow-sm hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:ring-2 focus-visible:ring-[var(--color-warning)]',
+  editor: 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet shadow-sm hover:border-viz-violet-soft hover:bg-viz-violet-soft focus-visible:ring-2 focus-visible:ring-ring',
+  mapping: 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] shadow-sm hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] focus-visible:ring-2 focus-visible:ring-ring',
+  trial: 'border-[var(--color-warning)] bg-[var(--color-warning)] text-[var(--color-text-inverse)] shadow-sm hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:ring-2 focus-visible:ring-ring',
   release: 'border-brand bg-brand-deep text-[var(--color-text-inverse)] shadow-sm hover:border-brand hover:bg-brand-deep focus-visible:ring-2 focus-visible:ring-ring',
 } as const
 

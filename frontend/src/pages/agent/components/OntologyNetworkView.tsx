@@ -612,7 +612,7 @@ export function OntologyNetworkView({
                     <select
                       value={instanceModalFilterCol}
                       onChange={e => setInstanceModalFilterCol(e.target.value)}
-                      className="h-8 w-40 cursor-pointer appearance-none rounded-md border border-border bg-card pl-2.5 pr-6 text-xs text-muted-foreground outline-none focus:border-brand-line focus:ring-1 focus:ring-ring"
+                      className="h-8 w-40 cursor-pointer appearance-none rounded-md border border-border bg-card pl-2.5 pr-6 text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
                       style={{ backgroundImage: `url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center' }}
                     >
                       <option value="">全部列</option>
@@ -626,7 +626,7 @@ export function OntologyNetworkView({
                       onKeyDown={e => { if (e.key === 'Enter' && instanceModalFilterCol) applyFilter() }}
                       placeholder={instanceModalFilterCol ? '输入关键词筛选…' : '请先选择筛选列'}
                       disabled={!instanceModalFilterCol}
-                      className="h-8 flex-1 rounded-md border border-border bg-card px-3 text-xs text-muted-foreground outline-none placeholder:text-[var(--color-text-tertiary)] focus:border-brand-line focus:ring-1 focus:ring-ring disabled:bg-muted disabled:text-[var(--color-text-tertiary)]"
+                      className="h-8 flex-1 rounded-md border border-border bg-card px-3 text-xs text-muted-foreground outline-none placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring disabled:bg-muted disabled:text-[var(--color-text-tertiary)]"
                     />
                     <button
                       onClick={applyFilter}

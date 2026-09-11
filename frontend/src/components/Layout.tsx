@@ -127,7 +127,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             aria-expanded={!collapsed}
             aria-label={collapsed ? '展开平台导航' : '折叠平台导航'}
             title={collapsed ? '展开平台导航' : '折叠平台导航'}
-            className={`flex min-w-0 items-center rounded-lg transition-all ${SIDEBAR_EASE} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${collapsed ? 'gap-0' : 'gap-3'}`}
+            className={`flex min-w-0 items-center rounded-lg transition-all ${SIDEBAR_EASE} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${collapsed ? 'gap-0' : 'gap-3'}`}
           >
             <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ background: 'var(--color-nav-bg)' }}>
               <Network size={18} className="text-white" />
@@ -233,7 +233,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 type="button"
                 onClick={() => { setCollapsed(false); setMobileNavOpen(true) }}
                 aria-label="打开平台导航"
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] md:hidden"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
               >
                 <Menu size={18} />
               </button>

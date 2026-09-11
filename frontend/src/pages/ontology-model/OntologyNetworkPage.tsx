@@ -670,7 +670,7 @@ export default function OntologyNetworkPage() {
                 <input type="checkbox" checked={bridgeEnabled} onChange={event => setBridgeEnabled(event.target.checked)}
                   className="h-4 w-4 shrink-0 accent-viz-violet" aria-label="启用同名类型桥接" />
               </label>
-              <form onSubmit={submitSearch} className="flex items-center rounded-md border border-[var(--color-border)] bg-card focus-within:border-viz-violet focus-within:ring-2 focus-within:ring-viz-violet">
+              <form onSubmit={submitSearch} className="flex items-center rounded-md border border-[var(--color-border)] bg-card focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
                 <Search size={13} className="ml-2.5 shrink-0 text-[var(--color-text-tertiary)]" />
                 <input value={queryInput} onChange={event => setQueryInput(event.target.value)}
                   placeholder="搜索实例、主键或字段值" aria-label="搜索实例"
@@ -796,7 +796,7 @@ export default function OntologyNetworkPage() {
                       <span className="mb-1 block text-[10px] font-medium text-muted-foreground">拟议新值</span>
                       <input value={proposedValue} onChange={event => setProposedValue(event.target.value)} disabled={!detail}
                         placeholder="仅模拟，不写入真实数据"
-                        className="h-8 w-full rounded-md border border-[var(--color-border)] bg-card px-2 text-xs text-foreground outline-none focus:border-viz-violet disabled:bg-muted" />
+                        className="h-8 w-full rounded-md border border-[var(--color-border)] bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring disabled:bg-muted" />
                     </label>
                     <label className="block">
                       <span className="mb-1 block text-[10px] font-medium text-muted-foreground">传播深度</span>

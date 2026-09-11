@@ -181,14 +181,14 @@ export function DynamicSentinelDrawer({
             <section className="grid grid-cols-2 gap-3">
               <label className="col-span-1 text-xs text-muted-foreground">显示名称
                 <input value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })}
-                  className="mt-1 h-9 w-full rounded-md border border-border px-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-ring" />
+                  className="mt-1 h-9 w-full rounded-md border border-border px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
               <label className="col-span-1 text-xs text-muted-foreground">技术名称
                 <input value={draft.name} readOnly className="mt-1 h-9 w-full rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground" />
               </label>
               <label className="col-span-2 text-xs text-muted-foreground">说明
                 <textarea value={draft.description || ''} onChange={event => setDraft({ ...draft, description: event.target.value })}
-                  className="mt-1 min-h-20 w-full rounded-md border border-border px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-ring" />
+                  className="mt-1 min-h-20 w-full rounded-md border border-border px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
             </section>
 
@@ -256,7 +256,7 @@ export function DynamicSentinelDrawer({
                 <h3 className="mb-2 text-xs font-semibold text-foreground">事件模式定义 <span className="font-normal text-[var(--color-text-tertiary)]">（stages 需与监听对象镜像；服务端将强校验）</span></h3>
                 <textarea
                   aria-label="事件模式 JSON"
-                  className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus:border-brand"
+                  className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus-visible:border-ring"
                   placeholder={'{ "stages": [ { "alias": "a", "objectTypeId": "...", "filter": "a.status == \'submitted\'" }, { "alias": "b", "objectTypeId": "...", "within": 7200 } ], "absence": { "enabled": true } }'}
                   defaultValue={draft.pattern ? JSON.stringify(draft.pattern, null, 2) : ''}
                   onBlur={event => {
@@ -281,7 +281,7 @@ export function DynamicSentinelDrawer({
               <h3 className="mb-2 text-xs font-semibold text-foreground">最终触发条件</h3>
               <textarea value={draft.condition || ''} onChange={event => setDraft({ ...draft, condition: event.target.value || null, conditionRows: [] })}
                 placeholder="例如 a.status == 'pending' and a.amount > 1000" aria-label="动态哨兵触发条件"
-                className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus:border-brand" />
+                className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus-visible:border-ring" />
             </section>
 
             <section>

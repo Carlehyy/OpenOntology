@@ -779,7 +779,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                         <button
                           type="button"
                           onClick={() => setDeleteRow(row)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-2.5 py-1.5 text-xs font-medium text-[var(--color-danger)] transition hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)] active:scale-[0.98]"
+                          className="inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-2.5 py-1.5 text-xs font-medium text-[var(--color-danger)] transition hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98]"
                           title="完整删除数据集"
                         >
                           <Trash2 size={12} /> 删除

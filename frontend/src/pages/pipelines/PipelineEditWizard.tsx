@@ -381,7 +381,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                 <input
                   value={name}
                   onChange={e => setName(e.target.value)}
-                  className="w-full rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus:border-brand focus:ring-4 focus:ring-ring"
+                  className="w-full rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
                   placeholder="输入流水线名称"
                 />
               </div>
@@ -390,7 +390,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                 <textarea
                   value={description}
                   onChange={e => setDescription(e.target.value)}
-                  className="h-20 w-full resize-none rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus:border-brand focus:ring-4 focus:ring-ring"
+                  className="h-20 w-full resize-none rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
                   placeholder="输入流水线描述（可选）"
                 />
               </div>
@@ -603,7 +603,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                                 aria-describedby={missingFields?.has('field_key') ? `field-key-error-${i}` : undefined}
                                 onChange={e => updateColDef(i, { field_key: e.target.value })}
                                 title={declaredInLake ? '湖中已固化的主键列：改名后需以「全量覆盖」运行一次重建资产' : d.source_key !== d.field_key ? `入湖时 ${d.source_key} → ${d.field_key}` : undefined}
-                                className={`w-full px-2 py-1 border rounded text-xs font-mono ${disabled ? 'bg-muted text-[var(--color-text-tertiary)] cursor-not-allowed' : missingFields?.has('field_key') ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-danger)]' : d.source_key !== d.field_key ? 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)]' : ''}`}
+                                className={`w-full px-2 py-1 border rounded text-xs font-mono ${disabled ? 'bg-muted text-[var(--color-text-tertiary)] cursor-not-allowed' : missingFields?.has('field_key') ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring' : d.source_key !== d.field_key ? 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)]' : ''}`}
                               />
                               {declaredInLake && <Lock size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[var(--color-warning)] pointer-events-none" />}
                             </div>
@@ -618,7 +618,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                               aria-invalid={missingFields?.has('field_name') || undefined}
                               aria-describedby={missingFields?.has('field_name') ? `field-name-error-${i}` : undefined}
                               onChange={e => updateColDef(i, { field_name: e.target.value })}
-                              className={`w-full px-2 py-1 border rounded text-xs ${disabled ? 'bg-muted text-[var(--color-text-tertiary)] cursor-not-allowed' : missingFields?.has('field_name') ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-danger)]' : ''}`}
+                              className={`w-full px-2 py-1 border rounded text-xs ${disabled ? 'bg-muted text-[var(--color-text-tertiary)] cursor-not-allowed' : missingFields?.has('field_name') ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring' : ''}`}
                             />
                             {missingFields?.has('field_name') && <p id={`field-name-error-${i}`} className="mt-0.5 text-[10px] text-[var(--color-danger)]">字段名称为必填项</p>}
                           </td>
@@ -632,7 +632,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                                 aria-required="true"
                                 aria-invalid={missingFields?.has('field_type') || undefined}
                                 aria-describedby={missingFields?.has('field_type') ? `field-type-error-${i}` : undefined}
-                                className={`w-full px-2 py-1 border rounded text-xs ${disabled ? 'bg-muted text-[var(--color-text-tertiary)] cursor-not-allowed' : missingFields?.has('field_type') ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus:outline-none focus:ring-2 focus:ring-[var(--color-danger)]' : ''}`}
+                                className={`w-full px-2 py-1 border rounded text-xs ${disabled ? 'bg-muted text-[var(--color-text-tertiary)] cursor-not-allowed' : missingFields?.has('field_type') ? 'border-[var(--color-danger)] bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring' : ''}`}
                               >
                                 <SelectValue />
                               </SelectTrigger>

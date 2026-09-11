@@ -228,7 +228,7 @@ function ActionSample({
 
   return (
     <details className={`group/action rounded-lg border ${hasError ? 'border-red-200 bg-red-50/40' : 'border-slate-200 bg-slate-50/60'}`}>
-      <summary className="cursor-pointer rounded-lg px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1">
+      <summary className="cursor-pointer rounded-lg px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1">
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="font-medium text-slate-800">
             {redactTrialText(sample.actionName || sample.actionId || `动作 ${index + 1}`)}
@@ -306,7 +306,7 @@ function SentinelPlan({
       className={`rounded-xl border ${errors.length > 0 ? 'border-red-200 bg-red-50/30' : 'border-slate-200 bg-white'}`}
       open={index === 0 || errors.length > 0}
     >
-      <summary className="cursor-pointer rounded-xl px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1">
+      <summary className="cursor-pointer rounded-xl px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1">
         <span className="flex flex-wrap items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-2">
             <ShieldCheck size={15} className="shrink-0 text-teal-600" aria-hidden="true" />

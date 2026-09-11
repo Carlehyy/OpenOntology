@@ -290,7 +290,7 @@ export default function PipelineListPage() {
             value={search}
             onChange={e => { setSearch(e.target.value); setPage(1) }}
             placeholder="搜索名称 / ID..."
-            className="w-full rounded-xl border border-border py-2 pl-8 pr-3 text-sm outline-none transition focus:border-brand focus:ring-4 focus:ring-ring"
+            className="w-full rounded-xl border border-border py-2 pl-8 pr-3 text-sm outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
           />
           {search && (
             <button onClick={() => { setSearch(''); setPage(1) }} className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] hover:text-foreground">
@@ -834,7 +834,7 @@ function PipelineCreateModal({
             <input
               value={name}
               onChange={e => setName(e.target.value)}
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:border-[var(--color-success)] focus:ring-1 focus:ring-[var(--color-success)] focus:outline-none transition-colors"
+              className="w-full border rounded-lg px-3 py-2 text-sm focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none transition-colors"
               placeholder="例：供应链数据清洗"
               autoFocus
             />
@@ -844,7 +844,7 @@ function PipelineCreateModal({
             <textarea
               value={description}
               onChange={e => setDescription(e.target.value)}
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:border-[var(--color-success)] focus:ring-1 focus:ring-[var(--color-success)] focus:outline-none transition-colors"
+              className="w-full border rounded-lg px-3 py-2 text-sm focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none transition-colors"
               rows={3}
               placeholder="流水线用途说明"
             />

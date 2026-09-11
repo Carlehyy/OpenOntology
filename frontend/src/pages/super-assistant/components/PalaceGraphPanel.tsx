@@ -246,7 +246,7 @@ export default function PalaceGraphPanel({
             onClick={toggleFileFocus}
             aria-pressed={fileFocus}
             title={`「${selectedFile.filename}」贡献的节点${fileFocus ? '，其余已淡化' : ''}`}
-            className={`flex h-7 max-w-full items-center gap-1 rounded-full px-2.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${
+            className={`flex h-7 max-w-full items-center gap-1 rounded-full px-2.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
               fileFocus
                 ? 'bg-brand-soft text-brand-ink hover:bg-brand-mist'
                 : 'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)]'
@@ -311,7 +311,7 @@ export default function PalaceGraphPanel({
                 aria-label="放大图谱"
                 title="放大"
                 onClick={() => applyView((viewRef.current.zoom ?? 1) * 1.3, viewRef.current.center ?? ['50%', '50%'])}
-                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] shadow-sm transition hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] shadow-sm transition hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Maximize size={13} />
               </button>
@@ -321,7 +321,7 @@ export default function PalaceGraphPanel({
                 aria-label="缩小图谱"
                 title="缩小"
                 onClick={() => applyView((viewRef.current.zoom ?? 1) / 1.3, viewRef.current.center ?? ['50%', '50%'])}
-                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] shadow-sm transition hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] shadow-sm transition hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <Minus size={13} />
               </button>
@@ -331,7 +331,7 @@ export default function PalaceGraphPanel({
                 aria-label="重置图谱视图"
                 title="重置视图"
                 onClick={() => applyView(1, ['50%', '50%'])}
-                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] shadow-sm transition hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] shadow-sm transition hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <RotateCcw size={13} />
               </button>
@@ -363,7 +363,7 @@ export default function PalaceGraphPanel({
                   type="button"
                   onClick={() => setSelectedId(null)}
                   aria-label="关闭节点详情"
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <X size={12} />
                 </button>
@@ -378,7 +378,7 @@ export default function PalaceGraphPanel({
                           type="button"
                           data-testid="palace-node-source-file"
                           onClick={() => { if (!chip.id.startsWith('name-')) onSelectFile(chip.id) }}
-                          className="max-w-[220px] truncate rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                          className="max-w-[220px] truncate rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           title={chip.id.startsWith('name-') ? undefined : `定位文档 ${chip.name}`}
                         >
                           {chip.name}
@@ -418,7 +418,7 @@ export default function PalaceGraphPanel({
                     <button
                       type="button"
                       onClick={clearSearchHighlight}
-                      className="rounded-md px-1.5 py-0.5 text-[11px] text-[var(--color-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+                      className="rounded-md px-1.5 py-0.5 text-[11px] text-[var(--color-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       清除高亮
                     </button>

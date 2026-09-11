@@ -27,7 +27,7 @@ function CopyBtn({ text }: { text: string }) {
           window.setTimeout(() => setDone(false), 1500)
         }).catch(() => setDone(false))
       }}
-      className="inline-flex items-center gap-1 rounded-md text-xs text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]"
+      className="inline-flex items-center gap-1 rounded-md text-xs text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {done ? <Check size={13} /> : <Copy size={13} />}{done ? '已复制' : '复制'}
     </button>
@@ -111,7 +111,7 @@ function ProgressPanel({
                 if (event.key === 'Enter' && comment.trim() && !mutation.isPending) mutation.mutate()
               }}
               placeholder="例如：已复现，等待下个版本修复"
-              className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-success)] focus:outline-none focus:ring-2 focus:ring-[var(--color-success)]"
+              className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
             <button
               type="button"
@@ -229,7 +229,7 @@ export default function TicketDetailDrawer({
           <button
             type="button"
             onClick={onClose}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label="关闭工单详情"
           >
             <X size={20} />
@@ -253,7 +253,7 @@ export default function TicketDetailDrawer({
               <button
                 type="button"
                 onClick={() => void detailQuery.refetch()}
-                className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-success)]"
+                className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <RefreshCw size={14} /> 重新加载
               </button>

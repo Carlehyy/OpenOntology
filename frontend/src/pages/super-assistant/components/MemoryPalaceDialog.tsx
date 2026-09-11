@@ -468,7 +468,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 value={editor.draft}
                 spellCheck={false}
                 onChange={event => setEditor(prev => prev ? { ...prev, draft: event.target.value } : prev)}
-                className="min-h-[220px] flex-1 w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-2 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]"
+                className="min-h-[220px] flex-1 w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-2 font-mono text-xs leading-5 text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
               <div className="flex items-center gap-2">
                 <Button
@@ -801,7 +801,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                           type="button"
                           aria-pressed={previewMode === value}
                           onClick={() => setPreviewMode(value)}
-                          className={`h-5 rounded-md px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${
+                          className={`h-5 rounded-md px-1.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                             previewMode === value
                               ? 'bg-white text-[var(--color-text-primary)] shadow-sm'
                               : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'

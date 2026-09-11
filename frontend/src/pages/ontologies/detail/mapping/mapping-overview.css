@@ -65,7 +65,7 @@
   background: var(--dmo-surface);
 }
 .dmo-card button, .dmo-card input, .dmo-preview-dialog button, .dmo-preview-dialog select { font: inherit; }
-.dmo-card button:focus-visible, .dmo-card a:focus-visible, .dmo-card [role="button"]:focus-visible { outline: 2px solid var(--dmo-focus-ring); outline-offset: 2px; }
+.dmo-card button:focus-visible, .dmo-card a:focus-visible, .dmo-card [role="button"]:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
 .dmo-loading { min-height: 360px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--dmo-muted); font-size: 13px; }
 .dmo-loading--error { color: var(--dmo-danger-ink); }
 
@@ -308,7 +308,7 @@
 .dmo-preview-heading p { margin: 3px 0 0; color: var(--dmo-subtle); font-size: 11px; }
 .dmo-preview-close { width: 32px; height: 32px; flex: none; border: 0; border-radius: 8px; display: grid; place-items: center; color: var(--dmo-faint); background: transparent; cursor: pointer; transition: color .18s ease, background-color .18s ease; }
 .dmo-preview-close:hover { color: var(--dmo-text); background: var(--dmo-hover-bg); }
-.dmo-preview-close:focus-visible { outline: 2px solid var(--dmo-focus-ring); outline-offset: 1px; }
+.dmo-preview-close:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 1px; }
 .dmo-preview-body { min-height: 0; position: relative; flex: 1; padding: 14px 16px; display: flex; overflow: hidden; background: var(--dmo-workspace-bg); }
 .dmo-preview-table-scroll { min-width: 0; min-height: 0; width: 100%; overflow: auto; border: 1px solid var(--dmo-line); border-radius: 11px; background: var(--dmo-cell-bg); scrollbar-color: #c7d1d6 transparent; scrollbar-width: thin; }
 .dmo-preview-table { border-collapse: separate; border-spacing: 0; color: var(--dmo-text); font-size: 12px; }

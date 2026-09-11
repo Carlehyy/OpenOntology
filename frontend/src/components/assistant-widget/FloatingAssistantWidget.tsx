@@ -70,7 +70,7 @@ export default function FloatingAssistantWidget() {
         aria-expanded={open}
         title="AI 助手"
         data-testid="assistant-widget-fab"
-        className={`fixed right-5 ${WIDGET_FAB_BOTTOM[anchor]} ${WIDGET_Z[anchor]} flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-nav-bg)] text-white shadow-[0_10px_30px_rgba(13,148,136,0.35)] transition-all hover:scale-105 hover:shadow-[0_14px_36px_rgba(13,148,136,0.45)] active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 focus-visible:ring-offset-2`}
+        className={`fixed right-5 ${WIDGET_FAB_BOTTOM[anchor]} ${WIDGET_Z[anchor]} flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-nav-bg)] text-white shadow-[0_10px_30px_rgba(13,148,136,0.35)] transition-all hover:scale-105 hover:shadow-[0_14px_36px_rgba(13,148,136,0.45)] active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`}
       >
         <Sparkles size={22} />
         {(streaming || awaitingDecision) && !open && (

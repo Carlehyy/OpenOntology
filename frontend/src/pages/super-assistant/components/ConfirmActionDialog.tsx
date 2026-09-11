@@ -38,7 +38,7 @@ export default function ConfirmActionDialog({
           <button
             type="button"
             onClick={onCancel}
-            className="min-h-9 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
+            className="min-h-9 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             取消
           </button>
@@ -46,7 +46,7 @@ export default function ConfirmActionDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="min-h-9 rounded-lg bg-red-600 px-4 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+            className="min-h-9 rounded-lg bg-red-600 px-4 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {confirmLabel}
           </button>
