@@ -443,9 +443,9 @@ export default function OverviewPage() {
                   <Brain size={16} className="text-[#d97706]" />
                 </div>
               </div>
-              <div className="flex items-center justify-between mt-2.5">
-                <span className="text-[10.5px] text-[#5a5a72]">置信度 · {windowMeta.compare} +2.4%</span>
-                <div className="flex items-center gap-1.5"><SignalBars level={5} color="#16a34a" /><span className="text-[10.5px] text-[#16a34a]">Strong</span></div>
+              <div className="flex items-center justify-between gap-2 mt-2.5">
+                <span className="min-w-0 truncate text-xs text-[#5a5a72]">置信度 · {windowMeta.compare} +2.4%</span>
+                <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap"><SignalBars level={5} color="#16a34a" /><span className="text-xs text-[#16a34a]">Strong</span></div>
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 mt-2.5">
