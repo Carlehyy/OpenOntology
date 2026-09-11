@@ -60,6 +60,7 @@ _SUPER_ASSISTANT_REFLECT_FULL_DURABLE = "super-assistant-reflect-full"
 _SUPER_ASSISTANT_REFLECT_FOCUSED_DURABLE = "super-assistant-reflect-focused"
 _SUPER_ASSISTANT_PALACE_EXTRACT_DURABLE = "super-assistant-palace-extract"
 _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE = "super-assistant-palace-consolidate"
+_ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
 
 # 消息处理器：解析后的 payload → 协程；业务异常必须在 handler 内消化，
 # 逃到 ``_process_message`` 的异常一律 nak 重投
@@ -185,6 +186,7 @@ def _handler_registry():
         DATASET_IMPORT_SUBJECT,
         DATASET_MIGRATE_SUBJECT,
         MAPPING_APPLY_SUBJECT,
+        ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
         PIPELINE_EXECUTE_SUBJECT,
         PIPELINE_RUN_SUBJECT,
         SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
@@ -237,6 +239,11 @@ def _handler_registry():
             SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
             _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE,
             palace_tasks.run_palace_consolidate_message,
+        ),
+        (
+            ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
+            _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE,
+            palace_tasks.run_palace_ontology_document_message,
         ),
     )
 

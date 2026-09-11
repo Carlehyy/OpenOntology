@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 _NODE_LABEL = "PalaceEntity"
 _REL_TYPE = "RELATED"
 
+# 本体发布文档的图谱系统作用域：owner_id 位置使用该哨兵（users.id 均为
+# UUID，字符串哨兵不可能与真实用户碰撞），所有 Cypher 沿用同一 owner
+# 过滤口径。单一共享作用域意味着跨本体同名实体在此层自然合并——这正是
+# 「本体知识层」作为一份平台共享图谱的语义。
+ONTOLOGY_DOCUMENTS_SCOPE = "__ontology_documents__"
+
 _WS_RE = re.compile(r"\s+")
 
 

@@ -324,6 +324,7 @@ def test_handler_registry_covers_all_stream_subjects():
         "super-assistant-reflect-focused",
         "super-assistant-palace-extract",
         "super-assistant-palace-consolidate",
+        "ontology-documents-published",
     }
     assert nats_executor._CONSUMER_DURABLE == "pipeline-executor"
 
@@ -430,7 +431,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
 
     run_task = asyncio.ensure_future(executor.run())
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and len(subscriptions) < 13:
+    while time.monotonic() < deadline and len(subscriptions) < 14:
         await asyncio.sleep(0.02)
     executor.request_shutdown()
     await asyncio.wait_for(run_task, timeout=5)
@@ -449,6 +450,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
         ("assistant_evaluation.autopilot.cycle", "assistant-eval-autopilot"),
         ("super_assistant.palace.extract", "super-assistant-palace-extract"),
         ("super_assistant.palace.consolidate", "super-assistant-palace-consolidate"),
+        ("ontology.documents.published", "ontology-documents-published"),
     ]
     assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions)
     # ack_wait=30s 与 20s 续约间隔配套；max_deliver 兜底 poison 消息

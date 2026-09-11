@@ -709,8 +709,9 @@ def test_super_assistant_router_and_services_stay_bounded():
         # 记忆宫殿新增 /palace/* 5 个端点（3 条路径），router.py 748 → 778；
         # 第二批新增 batch/content/replace/preview/graph-search/consolidate
         # 6 个端点 → 811；目录一等公民（folders CRUD/笔记/移动）6 个端点、
-        # multica 外部集成子路由接线 → 860
-        "router.py": 890,
+        # multica 外部集成子路由接线 → 860；本体发布文档共享镜像新增
+        # ontology-documents list/preview/rebuild 3 个端点 → 885
+        "router.py": 910,
         # 死流回收（_reap_stale_streaming 读取兜底）与启动恢复
         # （recover_interrupted_streams）落地：320 → 360
         "conversation_service.py": 360,
@@ -761,9 +762,12 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 远程助手声明式注册新增 /remote-agents 的 list/create、
     # /remote-agents/{id} 的 put/delete、/remote-agents/{id}/test 的 post
     # 共 5 个操作（3 条路径）；multica 配置弹窗打开即拉取工作区列表，
-    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）
-    assert len(paths) == 49
-    assert sum(len(item) for item in paths.values()) == 70
+    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）；
+    # 本体发布文档共享镜像新增 /palace/ontology-documents 的 list、
+    # /palace/ontology-documents/{id} 的 preview/rebuild 共 3 个操作
+    # （3 条路径）
+    assert len(paths) == 52
+    assert sum(len(item) for item in paths.values()) == 73
     assert hashlib.sha256(payload).hexdigest() == (
-        "1df9a7a59e105004f771cbded5241b7d5f6a4dbea5468a427fc099cfa44d2dfc"
+        "30af381db8a129cbfa6fc8149ecd2bd2381d6e115c786124c105e042d66749f3"
     )

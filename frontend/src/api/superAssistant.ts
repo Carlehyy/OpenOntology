@@ -92,6 +92,32 @@ export interface PalaceFolder {
   updatedAt: string
 }
 
+/** 本体发布态业务文档的宫殿镜像（平台共享只读）：发布/回滚事件自动同步建图 */
+export interface PalaceOntologyDocument {
+  id: string
+  ontologyId: string
+  ontologyName: string
+  versionId: string
+  versionNumber: string
+  title: string
+  fingerprint: string
+  status: 'pending' | 'building' | 'built' | 'failed' | string
+  error: string | null
+  entityCount: number
+  relationCount: number
+  extractedChars: number
+  size: number
+  updatedAt: string
+}
+
+/** 本体文档内容预览（GET ontology-documents preview）：与文件预览同响应形状 */
+export interface PalaceOntologyDocumentPreview {
+  file: PalaceOntologyDocument
+  content: string
+  truncated: boolean
+  previewable: boolean
+}
+
 export interface PalaceGraphNode {
   id: string
   name: string
@@ -481,6 +507,14 @@ export const superAssistantApi = {
   palaceGraph: () => apiClientV2.get<PalaceGraph>('/super-assistant/palace/graph'),
   palaceGraphSearch: (q: string) =>
     apiClientV2.get<PalaceGraphSearchResult>('/super-assistant/palace/graph/search', { params: { q } }),
+  /** 本体发布文档镜像列表（平台共享只读，树中「本体文档」目录数据源之一） */
+  palaceOntologyDocuments: () =>
+    apiClientV2.get<PalaceOntologyDocument[]>('/super-assistant/palace/ontology-documents'),
+  palaceOntologyDocumentPreview: (docId: string, maxChars = 60000) =>
+    apiClientV2.get<PalaceOntologyDocumentPreview>(`/super-assistant/palace/ontology-documents/${docId}/preview`, { params: { max_chars: maxChars } }),
+  /** 手动重试失败的本体文档建图（正常路径由发布事件/每日对账驱动） */
+  rebuildPalaceOntologyDocument: (docId: string) =>
+    apiClientV2.post<{ dispatched: boolean }>(`/super-assistant/palace/ontology-documents/${docId}/rebuild`),
   streamChat,
   cancel: (id: string) => apiClientV2.post(`/super-assistant/conversations/${id}/cancel`),
   decideToolRun: (id: string, decision: 'approve' | 'deny') =>

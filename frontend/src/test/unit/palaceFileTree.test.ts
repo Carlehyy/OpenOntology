@@ -3,13 +3,17 @@ import { describe, it } from 'node:test'
 
 import {
   buildPalaceTree,
+  mergeOntologyDocRows,
   normalizePalacePath,
+  PALACE_ONTOLOGY_DOCS_DIR_ID,
   PALACE_TREE_ROOT,
   palaceDirId,
   palaceFileId,
+  palaceOntologyDocId,
   palaceTreeDirIds,
 } from '../../pages/super-assistant/components/palaceTreeModel.ts'
-import type { PalaceFile } from '../../api/superAssistant'
+import type { PalaceFile, PalaceOntologyDocument } from '../../api/superAssistant'
+import type { OntologyPublishedDocument } from '../../api/ontologies'
 
 let seq = 0
 
@@ -144,5 +148,129 @@ describe('路径纯函数', () => {
     assert.equal(joinPalacePath('a', 'b'), 'a/b')
     assert.equal(joinPalacePath('', 'b'), 'b')
     assert.equal(joinPalacePath(' a / ', ' b '), 'a/b')
+  })
+})
+
+// ----- 本体文档：权威清单 ∪ 镜像状态合并 + 只读虚拟目录 ---------------------
+
+function makePublished(partial: Partial<OntologyPublishedDocument> & { ontologyId: string }): OntologyPublishedDocument {
+  return {
+    ontologyId: partial.ontologyId,
+    ontologyName: partial.ontologyName ?? '本体A',
+    versionId: partial.versionId ?? 'v-id',
+    versionNumber: partial.versionNumber ?? 'v2',
+    title: partial.title ?? '本体A 业务文档',
+    fingerprint: partial.fingerprint ?? 'fp-a',
+    documentChars: partial.documentChars ?? 100,
+    publishedAt: partial.publishedAt ?? null,
+  }
+}
+
+function makeMirror(partial: Partial<PalaceOntologyDocument> & { id: string; ontologyId: string }): PalaceOntologyDocument {
+  return {
+    id: partial.id,
+    ontologyId: partial.ontologyId,
+    ontologyName: partial.ontologyName ?? '本体A',
+    versionId: partial.versionId ?? 'v-id',
+    versionNumber: partial.versionNumber ?? 'v2',
+    title: partial.title ?? '本体A 业务文档',
+    fingerprint: partial.fingerprint ?? 'fp-a',
+    status: partial.status ?? 'built',
+    error: partial.error ?? null,
+    entityCount: partial.entityCount ?? 3,
+    relationCount: partial.relationCount ?? 2,
+    extractedChars: partial.extractedChars ?? 100,
+    size: partial.size ?? 120,
+    updatedAt: partial.updatedAt ?? '2026-09-11T00:00:00Z',
+  }
+}
+
+describe('mergeOntologyDocRows', () => {
+  it('指纹一致：以镜像状态为准，计数透传', () => {
+    const rows = mergeOntologyDocRows(
+      [makePublished({ ontologyId: 'o1' })],
+      [makeMirror({ id: 'd1', ontologyId: 'o1', status: 'built', entityCount: 7 })],
+    )
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].id, 'd1')
+    assert.equal(rows[0].status, 'built')
+    assert.equal(rows[0].entityCount, 7)
+    assert.equal(rows[0].synced, true)
+  })
+
+  it('指纹漂移：非建图中标记待同步并清零计数；建图中保持抽取中', () => {
+    const rows = mergeOntologyDocRows(
+      [makePublished({ ontologyId: 'o1', fingerprint: 'fp-new' })],
+      [
+        makeMirror({ id: 'd1', ontologyId: 'o1', fingerprint: 'fp-old', status: 'built' }),
+        // o2 镜像没有权威清单条目 → 不展示
+        makeMirror({ id: 'd2', ontologyId: 'o2', fingerprint: 'fp-old', status: 'built' }),
+      ],
+    )
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].status, 'pending-sync')
+    assert.equal(rows[0].entityCount, 0)
+
+    const buildingRows = mergeOntologyDocRows(
+      [makePublished({ ontologyId: 'o1', fingerprint: 'fp-new' })],
+      [makeMirror({ id: 'd1', ontologyId: 'o1', fingerprint: 'fp-old', status: 'building' })],
+    )
+    assert.equal(buildingRows[0].status, 'building')
+  })
+
+  it('无镜像：占位行待同步、id 带 pending 前缀、不可预览', () => {
+    const rows = mergeOntologyDocRows(
+      [makePublished({ ontologyId: 'o9' })],
+      [],
+    )
+    assert.equal(rows[0].id, 'pending:o9')
+    assert.equal(rows[0].status, 'pending-sync')
+    assert.equal(rows[0].synced, false)
+  })
+
+  it('镜像有而权威清单没有：不展示（权威清单是唯一事实源）', () => {
+    const rows = mergeOntologyDocRows(
+      [],
+      [makeMirror({ id: 'd1', ontologyId: 'ghost' })],
+    )
+    assert.equal(rows.length, 0)
+  })
+})
+
+describe('buildPalaceTree（本体文档目录）', () => {
+  it('空清单时目录不出现；有行时固定根级首位且只读标记齐全', () => {
+    const empty = buildPalaceTree([], [], [])
+    assert.equal(empty.items[PALACE_ONTOLOGY_DOCS_DIR_ID], undefined)
+
+    const rows = mergeOntologyDocRows(
+      [makePublished({ ontologyId: 'o1', title: '供应文档' })],
+      [makeMirror({ id: 'd1', ontologyId: 'o1' })],
+    )
+    const model = buildPalaceTree(
+      [makeFile({ id: 'fa', filename: 'a.md' })],
+      [makeFolder({ id: 'fd-1', path: '资料' })],
+      rows,
+    )
+    const rootChildren = model.children[PALACE_TREE_ROOT]
+    assert.equal(rootChildren[0], PALACE_ONTOLOGY_DOCS_DIR_ID, '本体文档目录钉在根级首位')
+    assert.equal(model.items[PALACE_ONTOLOGY_DOCS_DIR_ID].ontologyDocsDir, true)
+    assert.equal(model.items[PALACE_ONTOLOGY_DOCS_DIR_ID].dirId, undefined, '虚拟目录无目录行，不可拖拽/重命名')
+    assert.deepEqual(model.children[PALACE_ONTOLOGY_DOCS_DIR_ID], [palaceOntologyDocId('d1')])
+    assert.equal(model.items[palaceOntologyDocId('d1')].kind, 'ontology-doc')
+    assert.equal(model.items[palaceOntologyDocId('d1')].name, '供应文档')
+    // 计数徽章的数据基础：直接子节点数
+    assert.equal(model.children[PALACE_ONTOLOGY_DOCS_DIR_ID].length, 1)
+    assert.equal(model.children[palaceDirId('资料')].length, 0)
+  })
+
+  it('本体文档行与用户目录同名不冲突（节点 id 命名空间隔离）', () => {
+    const rows = mergeOntologyDocRows(
+      [makePublished({ ontologyId: 'o1', title: 'T' })],
+      [makeMirror({ id: 'd1', ontologyId: 'o1' })],
+    )
+    const model = buildPalaceTree([], [makeFolder({ id: 'fd-x', path: '__ontology_docs__' })], rows)
+    assert.notEqual(PALACE_ONTOLOGY_DOCS_DIR_ID, palaceDirId('__ontology_docs__'))
+    assert.equal(model.items[palaceDirId('__ontology_docs__')].dirId, 'fd-x')
+    assert.equal(model.items[PALACE_ONTOLOGY_DOCS_DIR_ID].ontologyDocsDir, true)
   })
 })

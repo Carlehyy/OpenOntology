@@ -420,6 +420,11 @@ def _promote_draft_locked(
         from app.ontologies.projection_state import mark_ready
         mark_ready(db, ontology_id)
         db.commit()
+        # 发布成功（事务已提交）：发布态业务文档若随版本变化，广播自包含
+        # 事件供宫殿共享建图；无语义层时为 no-op，失败只记日志。
+        from app.ontologies.published_documents import notify_published_document
+
+        notify_published_document(project, release)
     except HTTPException:
         db.rollback()
         from app.ontologies.projection_state import mark_ready

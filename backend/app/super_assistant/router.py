@@ -374,6 +374,30 @@ def consolidate_palace_graph(db: Session = Depends(get_db),
     return palace_consolidate.run_consolidation(db, current_user.id)
 
 
+# ---------------------------------------------------------------------------
+# 本体发布态业务文档（平台共享只读镜像：「本体文档」目录）
+# ---------------------------------------------------------------------------
+
+@router.get("/palace/ontology-documents")
+def list_palace_ontology_documents(db: Session = Depends(get_db),
+                                   current_user: User = Depends(get_current_user)):
+    """各本体发布文档的镜像状态（与 /ontologies/published-documents 聚合端点
+    联合消费：聚合端点是权威清单，这里是摄取/建图状态）。"""
+    return palace_service.list_ontology_documents(db)
+
+@router.get("/palace/ontology-documents/{doc_id}/preview")
+def preview_palace_ontology_document(doc_id: str, max_chars: int = Query(60000, le=200000),
+                                     db: Session = Depends(get_db),
+                                     current_user: User = Depends(get_current_user)):
+    return palace_service.ontology_document_preview(db, doc_id, max_chars)
+
+@router.post("/palace/ontology-documents/{doc_id}/rebuild", status_code=202)
+def rebuild_palace_ontology_document(doc_id: str, db: Session = Depends(get_db),
+                                     current_user: User = Depends(get_current_user)):
+    """手动重试失败的本体文档建图（正常路径由发布事件/每日对账驱动）。"""
+    return palace_service.rebuild_ontology_document(db, doc_id)
+
+
 @router.post("/tool-runs/{tool_run_id}/decision")
 def decide_tool_run(
     tool_run_id: str,

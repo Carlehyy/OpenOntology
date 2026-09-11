@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     # 少数指针变更路径与详情缓存一致地由短 TTL 兜底。
     ontology_list_cache_enabled: bool = True
     ontology_list_cache_ttl_seconds: int = Field(default=60, ge=1, le=300)
+    # 本体发布态业务文档每日对账（04:00 重放全部发布文档事件，宫殿消费侧
+    # 按指纹幂等：正常时 no-op、漂移时自愈；关闭后仅失去兜底自愈能力）
+    ontology_published_documents_reconcile_enabled: bool = True
     # 数据资产湖读缓存（fail-open 加速层，可整体关闭；键落 db 1）。
     # 版本级数据键携带 version id 自然换键；总览用短 TTL + 写路径 bump 失效。
     dataset_cache_enabled: bool = True
@@ -191,6 +194,14 @@ class Settings(BaseSettings):
     super_assistant_palace_extract_concurrency: int = 1
     # 每天 03:00 的实体聚类合并定时任务开关（手动触发端点不受此开关影响）
     super_assistant_palace_consolidate_enabled: bool = True
+    # 记忆宫殿图谱视图缓存（fail-open 加速层，键落 db 1）：弹窗打开/轮询期间
+    # 的 GET /palace/graph 整体短 TTL 缓存；抽取完成、文件删除、聚类合并与
+    # 本体文档建图在写侧 bump 版本换键，executor 进程经共享 Redis 同样生效。
+    super_assistant_palace_graph_cache_enabled: bool = True
+    super_assistant_palace_graph_cache_ttl_seconds: int = Field(default=30, ge=2, le=300)
+    super_assistant_palace_graph_cache_max_bytes: int = Field(
+        default=2_000_000, ge=100_000, le=20_000_000
+    )
     steward_browser_cdp_url: str = "http://localhost:9222"
     steward_browser_timeout_seconds: int = 30
     steward_browser_max_captures: int = 300

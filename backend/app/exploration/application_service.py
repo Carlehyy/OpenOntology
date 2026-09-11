@@ -213,6 +213,7 @@ def apply_draft(
 
     project = None
     created_project = False
+    release = None
     if draft.applied_ontology_id:
         # Re-application stays pinned to the first materialized ontology.
         project = db.query(project_model).filter(
@@ -406,6 +407,13 @@ def apply_draft(
         draft.applied_ontology_id = project.id
         draft.applied_version_id = applied_version_id
         db.commit()
+        # 落地即业务文档出生点（新建本体的 v0 自带语义层）：提交后广播
+        # 自包含事件供宫殿共享建图。必须在 commit 之后——提交前广播会在
+        # 事务失败时留下永不自愈的幻影镜像（重试落地会创建新的本体 id）。
+        if created_project and release is not None:
+            from app.ontologies.published_documents import notify_published_document
+
+            notify_published_document(project, release)
         if created_project:
             _finish_projection(db, project.id)
         return ok_fn({

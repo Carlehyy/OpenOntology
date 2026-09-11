@@ -213,6 +213,23 @@ def import_ontology_structure(
     ontology_cache.invalidate_list()
     return {"data": result}
 
+@router.get("/published-documents")
+def list_published_documents(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """各本体最新发布态业务文档摘要（超级助手知识图谱「本体文档」目录数据源）。
+
+    只认 current_release_id 指针，语义层无 documentMd 的本体不出现；摘要不含
+    正文。读多写少（弹窗打开时拉取），整体短 TTL 缓存 + 发布/回滚/落地路径
+    bump 版本换键（fail-open）。
+    """
+    from app.ontologies import published_documents
+
+    return ontology_cache.list_cached_call(
+        ontology_cache.published_documents_cache_key(),
+        settings.ontology_list_cache_ttl_seconds,
+        lambda: {"data": {"items": published_documents.list_published_documents(db)}},
+    )
+
+
 @router.get("/{ontology_id}")
 def get_ontology(ontology_id: str, db: Session = Depends(get_db), _=Depends(get_current_user)):
     # 详情页高频入口：短 TTL 只读缓存，写操作 bump 版本即整体失效（fail-open）。

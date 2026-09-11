@@ -475,6 +475,11 @@ def _rollback_version_locked(
         from app.ontologies.projection_state import mark_ready
         mark_ready(db, ontology_id)
         db.commit()
+        # 回滚激活成功（事务已提交）：激活版语义层可能 resurrect 另一份
+        # 业务文档，广播自包含事件供宫殿共享建图；无语义层时为 no-op。
+        from app.ontologies.published_documents import notify_published_document
+
+        notify_published_document(project, activation)
     except HTTPException as exc:
         db.rollback()
         detail = exc.detail if isinstance(exc.detail, dict) else {}

@@ -36,11 +36,12 @@ from app.data_channel.steward.workspace import SessionWorkspace, WorkspaceError
 from app.model_configs.selector import llm_call_kwargs, select_llm_model_config, usage_tags
 from app.shared.config import settings
 from app.shared.database import SessionLocal
-from app.super_assistant import palace_graph, palace_workspace, provider, reflection_service
+from app.super_assistant import palace_cache, palace_graph, palace_workspace, provider, reflection_service
 from app.super_assistant.models import (
     SuperAssistantPalaceBuild,
     SuperAssistantPalaceFile,
     SuperAssistantPalaceFolder,
+    SuperAssistantPalaceOntologyDocument,
 )
 
 logger = logging.getLogger(__name__)
@@ -455,6 +456,7 @@ def run_build(db: Session, owner_id: str, file_id: str) -> SuperAssistantPalaceB
     file_row.entity_count = entity_count
     file_row.relation_count = relation_count
     db.commit()
+    palace_cache.invalidate_graph()
     return build
 
 
@@ -645,7 +647,12 @@ def list_files(db: Session, owner_id: str) -> list[dict]:
         .order_by(SuperAssistantPalaceFile.created_at.desc())
         .all()
     )
-    return [_file_dict(row) for row in rows]
+    # 列表载荷裁剪：error 行内上限 2000 字符（失败详情见预览/编辑路径），
+    # 500 文件 × 全文是树加载 payload 的主要放大器之一
+    return [
+        {**_file_dict(row), "error": (row.error or "")[:200] or None}
+        for row in rows
+    ]
 
 
 def _owned_file(db: Session, owner_id: str, file_id: str) -> SuperAssistantPalaceFile:
@@ -993,6 +1000,7 @@ def delete_palace_file(db: Session, owner_id: str, file_id: str) -> None:
         logger.warning("记忆宫殿图谱清理失败（file=%s）", file_id, exc_info=True)
     db.delete(row)
     db.commit()
+    palace_cache.invalidate_graph()
 
 
 def rebuild_file(db: Session, owner_id: str, file_id: str) -> dict:
@@ -1230,9 +1238,59 @@ def create_note(db: Session, current_user: User, body: PalaceNoteCreate) -> dict
     return _file_dict(row)
 
 
+def _ontology_docs_built(db: Session) -> int:
+    return (
+        db.query(SuperAssistantPalaceOntologyDocument.id)
+        .filter(SuperAssistantPalaceOntologyDocument.status == "built")
+        .count()
+    )
+
+
+def _aware_datetime(value: datetime) -> datetime:
+    """DB 侧 naive/aware 混存（SQLite 无时区、列未带 tz）：统一按 UTC 补齐
+    再比较，避免 TypeError（与 _active_running_build 同口径）。"""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _merge_search_results(base: dict, extra: dict) -> dict:
+    """合并两个作用域的检索结果：带 id 的实体按 merge_key 去重（无 id 的
+    行原样保留，兼容测试桩与旧调用方），关系按三元组去重。"""
+    entities: list[dict] = []
+    seen_ids: set[str] = set()
+    for item in [*(base.get("entities") or []), *(extra.get("entities") or [])]:
+        key = str(item.get("id") or "")
+        if key:
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+        entities.append(item)
+    relations: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    base_relations = base.get("relations") or []
+    extra_relations = extra.get("relations") or []
+    for item in [*base_relations, *extra_relations]:
+        key = (str(item.get("source") or ""), str(item.get("name") or ""), str(item.get("target") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        relations.append(item)
+    return {"entities": entities, "relations": relations}
+
+
+def _combined_graph_search(db: Session, owner_id: str, terms: list[str]) -> dict:
+    """用户作用域 + 本体文档共享作用域的联合图谱检索（本体层节点带来源）。"""
+    user = palace_graph.search(owner_id, terms)
+    shared = palace_graph.search(palace_graph.ONTOLOGY_DOCUMENTS_SCOPE, terms)
+    for entity in shared.get("entities") or []:
+        entity.setdefault("origin", "ontology")
+    return _merge_search_results(user, shared)
+
+
 def search_graph(db: Session, owner_id: str, query: str) -> dict:
-    """图谱检索：无已建图文件或无关键词时返回空集；Neo4j 不可用降级
-    available=False（同 graph_overview 语义，不 5xx）。"""
+    """图谱检索：无已建图内容或无关键词时返回空集；Neo4j 不可用降级
+    available=False（同 graph_overview 语义，不 5xx）。检索范围含本体文档
+    共享层（本体层实体带 origin=ontology 标记）。"""
+    empty = {"entities": [], "relations": []}
     built = (
         db.query(SuperAssistantPalaceFile)
         .filter(
@@ -1241,8 +1299,7 @@ def search_graph(db: Session, owner_id: str, query: str) -> dict:
         )
         .count()
     )
-    empty = {"entities": [], "relations": []}
-    if not built:
+    if not built and _ontology_docs_built(db) == 0:
         return {"available": True, **empty}
     from app.data_channel.steward.workspace import _context_terms
 
@@ -1250,7 +1307,7 @@ def search_graph(db: Session, owner_id: str, query: str) -> dict:
     if not terms:
         return {"available": True, **empty}
     try:
-        payload = palace_graph.search(owner_id, terms)
+        payload = _combined_graph_search(db, owner_id, terms)
     except palace_graph.PalaceGraphUnavailable:
         logger.warning("记忆宫殿图谱检索失败：Neo4j 不可用（owner=%s）", owner_id)
         return {"available": False, **empty}
@@ -1262,45 +1319,92 @@ def search_graph(db: Session, owner_id: str, query: str) -> dict:
 
 
 def graph_overview(db: Session, owner_id: str) -> dict:
-    """图谱可视化数据；Neo4j 不可用时返回 available=False 而不是 5xx。
+    """图谱可视化数据（用户作用域 ∪ 本体文档共享作用域）；Neo4j 不可用时
+    返回 available=False 而不是 5xx。
 
-    附带画布下统计条的消费字段：builtFiles/totalFiles（文档口径）与
-    updatedAt（最近一次成功建图完成时间，无则 None）。
+    附带画布下统计条的消费字段：builtFiles/totalFiles（文档口径，含本体
+    文档）与 updatedAt（最近一次成功建图完成时间，无则 None）。本端点是
+    弹窗打开/轮询期间最贵的一腿：整体 cache-aside（fail-open），写侧
+    （抽取完成/删除/聚类合并/本体文档建图）bump 版本换键，瞬态不可用
+    结果不缓存。
     """
-    built = (
-        db.query(SuperAssistantPalaceFile)
-        .filter(
-            SuperAssistantPalaceFile.owner_id == owner_id,
-            SuperAssistantPalaceFile.status == "built",
+    def _build() -> dict:
+        built = (
+            db.query(SuperAssistantPalaceFile)
+            .filter(
+                SuperAssistantPalaceFile.owner_id == owner_id,
+                SuperAssistantPalaceFile.status == "built",
+            )
+            .count()
         )
-        .count()
-    )
-    total_files = (
-        db.query(SuperAssistantPalaceFile.id)
-        .filter(SuperAssistantPalaceFile.owner_id == owner_id)
-        .count()
-    )
-    last_built_at = (
-        db.query(func.max(SuperAssistantPalaceBuild.finished_at))
-        .filter(
-            SuperAssistantPalaceBuild.owner_id == owner_id,
-            SuperAssistantPalaceBuild.status == "success",
+        total_docs = db.query(SuperAssistantPalaceOntologyDocument.id).count()
+        docs_built = _ontology_docs_built(db)
+        total_files = (
+            db.query(SuperAssistantPalaceFile.id)
+            .filter(SuperAssistantPalaceFile.owner_id == owner_id)
+            .count()
         )
-        .scalar()
+        last_built_at = (
+            db.query(func.max(SuperAssistantPalaceBuild.finished_at))
+            .filter(
+                SuperAssistantPalaceBuild.owner_id == owner_id,
+                SuperAssistantPalaceBuild.status == "success",
+            )
+            .scalar()
+        )
+        docs_updated = (
+            db.query(func.max(SuperAssistantPalaceOntologyDocument.updated_at))
+            .filter(SuperAssistantPalaceOntologyDocument.status == "built")
+            .scalar()
+        )
+        if docs_updated is not None and (
+            last_built_at is None
+            or _aware_datetime(docs_updated) > _aware_datetime(last_built_at)
+        ):
+            last_built_at = docs_updated
+        stats = {
+            "builtFiles": built + docs_built,
+            "totalFiles": total_files + total_docs,
+            "updatedAt": last_built_at.isoformat() if last_built_at else None,
+        }
+        empty: dict = {
+            "nodes": [], "edges": [], "totals": {"entities": 0, "relations": 0},
+            "truncated": False,
+        }
+        if stats["builtFiles"] == 0:
+            return {"available": True, **empty, **stats}
+        try:
+            payload = palace_graph.owner_graph(owner_id)
+        except palace_graph.PalaceGraphUnavailable:
+            logger.warning("记忆宫殿图谱读取失败：Neo4j 不可用（owner=%s）", owner_id)
+            return {"available": False, **empty, **stats}
+        try:
+            shared = palace_graph.owner_graph(palace_graph.ONTOLOGY_DOCUMENTS_SCOPE)
+        except palace_graph.PalaceGraphUnavailable:
+            # 共享层不可用时个人图谱仍可展示：共享部分按空集降级
+            logger.warning("本体文档共享图谱读取失败：Neo4j 不可用")
+            shared = {**empty}
+        for node in shared.get("nodes") or []:
+            node["origin"] = "ontology"
+        for edge in shared.get("edges") or []:
+            edge["origin"] = "ontology"
+        return {
+            "available": True,
+            "nodes": [*(payload.get("nodes") or []), *(shared.get("nodes") or [])],
+            "edges": [*(payload.get("edges") or []), *(shared.get("edges") or [])],
+            "totals": {
+                "entities": int(payload["totals"]["entities"]) + int(shared["totals"]["entities"]),
+                "relations": int(payload["totals"]["relations"]) + int(shared["totals"]["relations"]),
+            },
+            "truncated": bool(payload.get("truncated")) or bool(shared.get("truncated")),
+            **stats,
+        }
+
+    return palace_cache.graph_cached_call(
+        palace_cache.graph_cache_key(owner_id),
+        int(settings.super_assistant_palace_graph_cache_ttl_seconds),
+        _build,
     )
-    stats = {
-        "builtFiles": built,
-        "totalFiles": total_files,
-        "updatedAt": last_built_at.isoformat() if last_built_at else None,
-    }
-    if not built:
-        return {"available": True, "nodes": [], "edges": [], "totals": {"entities": 0, "relations": 0}, "truncated": False, **stats}
-    try:
-        payload = palace_graph.owner_graph(owner_id)
-    except palace_graph.PalaceGraphUnavailable:
-        logger.warning("记忆宫殿图谱读取失败：Neo4j 不可用（owner=%s）", owner_id)
-        return {"available": False, "nodes": [], "edges": [], "totals": {"entities": 0, "relations": 0}, "truncated": False, **stats}
-    return {"available": True, **payload, **stats}
 
 
 # ---------------------------------------------------------------------------
@@ -1314,9 +1418,10 @@ def _format_source_files(source_files: list[str]) -> str:
 
 
 def build_prompt_section(db: Session, owner_id: str, query: str = "") -> str:
-    """组装注入 system prompt 的图谱段；无已建图文件时返回 ""。
+    """组装注入 system prompt 的图谱段；无已建图内容时返回 ""。
 
-    先做一次轻量 DB 计数探测，避免每轮对话都触碰 Neo4j。
+    先做一次轻量 DB 计数探测，避免每轮对话都触碰 Neo4j。检索范围含
+    本体文档共享层（平台发布态业务知识，与个人文档并列注入）。
     """
     built = (
         db.query(SuperAssistantPalaceFile)
@@ -1326,19 +1431,19 @@ def build_prompt_section(db: Session, owner_id: str, query: str = "") -> str:
         )
         .count()
     )
-    if not built:
+    if not built and _ontology_docs_built(db) == 0:
         return ""
     from app.data_channel.steward.workspace import _context_terms
 
     terms = _context_terms(query)
     if not terms:
         return ""
-    result = palace_graph.search(owner_id, terms)
+    result = _combined_graph_search(db, owner_id, terms)
     entities = result.get("entities") or []
     relations = result.get("relations") or []
     if not entities and not relations:
         return ""
-    lines = ["# 记忆宫殿知识图谱（用户上传文档沉淀的长期知识，跨会话可用）"]
+    lines = ["# 记忆宫殿知识图谱（用户上传文档与本体发布文档沉淀的长期知识，跨会话可用）"]
     if entities:
         lines.append("## 相关实体")
         for entity in entities[:20]:
@@ -1358,11 +1463,15 @@ def build_prompt_section(db: Session, owner_id: str, query: str = "") -> str:
 def search_for_tool(owner_id: str, query: str) -> dict:
     from app.data_channel.steward.workspace import _context_terms
 
-    return palace_graph.search(owner_id, _context_terms(query))
+    terms = _context_terms(query)
+    shared = palace_graph.search(palace_graph.ONTOLOGY_DOCUMENTS_SCOPE, terms)
+    for entity in shared.get("entities") or []:
+        entity.setdefault("origin", "ontology")
+    return _merge_search_results(palace_graph.search(owner_id, terms), shared)
 
 
 def list_files_for_tool(db: Session, owner_id: str) -> list[dict]:
-    return [
+    rows = [
         {
             "id": row.id,
             "filename": row.filename,
@@ -1378,3 +1487,327 @@ def list_files_for_tool(db: Session, owner_id: str) -> list[dict]:
             .all()
         )
     ]
+    # 平台共享的本体发布文档与个人文件并列列出（来源标记区分）
+    rows.extend(
+        {
+            "id": doc.id,
+            "filename": doc.title,
+            "status": doc.status,
+            "entityCount": doc.entity_count,
+            "relationCount": doc.relation_count,
+            "createdAt": doc.created_at.isoformat() if doc.created_at else None,
+            "source": "ontology",
+        }
+        for doc in (
+            db.query(SuperAssistantPalaceOntologyDocument)
+            .order_by(SuperAssistantPalaceOntologyDocument.ontology_name.asc())
+            .all()
+        )
+    )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 本体发布态业务文档（平台共享只读镜像：事件摄取 + 系统作用域建图）
+# ---------------------------------------------------------------------------
+
+
+def _ontology_doc_filename(payload: dict) -> str:
+    """事件 → 工作区文件名：本体名/标题去掉路径分隔符等危险字符，固定 .md。"""
+    stem = str(payload.get("ontology_name") or payload.get("title") or "ontology-document").strip()
+    stem = re.sub(r'[\\/:*?"<>|\r\n]+', "-", stem).strip("- ")[:80] or "ontology-document"
+    return f"{stem}.md"
+
+
+def _ontology_doc_dict(row: SuperAssistantPalaceOntologyDocument) -> dict:
+    return {
+        "id": row.id,
+        "ontologyId": row.ontology_id,
+        "ontologyName": row.ontology_name,
+        "versionId": row.version_id,
+        "versionNumber": row.version_number,
+        "title": row.title,
+        "fingerprint": row.fingerprint,
+        "status": row.status,
+        "error": (row.error or "")[:200] or None,
+        "entityCount": row.entity_count,
+        "relationCount": row.relation_count,
+        "extractedChars": row.extracted_chars,
+        "size": row.size,
+        "updatedAt": row.updated_at,
+    }
+
+
+def list_ontology_documents(db: Session) -> list[dict]:
+    rows = (
+        db.query(SuperAssistantPalaceOntologyDocument)
+        .order_by(SuperAssistantPalaceOntologyDocument.ontology_name.asc())
+        .all()
+    )
+    return [_ontology_doc_dict(row) for row in rows]
+
+
+def _ontology_doc_in_flight(row: SuperAssistantPalaceOntologyDocument) -> bool:
+    """在途判定：pending/building 且 30 分钟内有心跳（updated_at）。超龄视为
+    进程中断（executor 崩溃/OOM），允许重新驱动——否则卡死的行永远无法
+    重试（消息重投被 no-op 吞掉、手动重建 409、对账同样 no-op）。"""
+    if row.status not in ("pending", "building"):
+        return False
+    updated = _aware_datetime(row.updated_at)
+    return updated >= datetime.now(timezone.utc) - _STALE_RUNNING
+
+
+def ingest_ontology_document(db: Session, payload: dict) -> dict:
+    """ontology.documents.published 消费入口：镜像 upsert + 共享建图。
+
+    幂等状态机（以 (ontology_id, fingerprint) 收敛）：
+    - 指纹一致且状态 pending/building/built → no-op（每日对账重放走这里）；
+    - 指纹一致但 failed → 复用已存工作区文件直接重试建图（对账自愈失败）；
+    - 指纹变化 → 替换工作区文件、剥离旧版本图谱贡献后重建（标题变更时
+      旧标题必须显式传入剥离，否则共享节点上残留旧来源名）。
+    """
+    ontology_id = str(payload.get("ontology_id") or "")
+    fingerprint = str(payload.get("fingerprint") or "")
+    document_md = str(payload.get("document_md") or "")
+    if not ontology_id or not fingerprint or not document_md.strip():
+        logger.warning("本体文档事件缺少必填字段，跳过（ontology=%s）", ontology_id or "?")
+        return {"changed": False, "reason": "invalid_payload"}
+
+    scope = palace_graph.ONTOLOGY_DOCUMENTS_SCOPE
+    dir_id = palace_workspace.user_dir_id(scope)
+    workspace = palace_workspace.user_workspace(scope)
+
+    # 决策 + 落库两轮重试：并发窗口下（抽取并发度 >1 时同一本体的两条事件
+    # 同时到达）第二个提交撞 ontology_id 唯一约束，回滚清掉刚落的工作区
+    # 文件后按胜者的行重走决策；默认并发 1 时串行不可达。
+    row: SuperAssistantPalaceOntologyDocument | None = None
+    previous_title: str | None = None
+    previous_built = False
+    for _attempt in range(2):
+        row = (
+            db.query(SuperAssistantPalaceOntologyDocument)
+            .filter(SuperAssistantPalaceOntologyDocument.ontology_id == ontology_id)
+            .first()
+        )
+        # 幂等 no-op：指纹一致且（已建图或在途）。在途超龄（进程中断）继续
+        # 走重建，不能让卡死的行永久 wedged。
+        if (
+            row is not None
+            and row.fingerprint == fingerprint
+            and (row.status == "built" or _ontology_doc_in_flight(row))
+        ):
+            return {"changed": False}
+        # 剥离判定按「曾完整建过图」（status==built 或行内计数>0），不能只看
+        # 状态：重建失败会把状态置 failed 而旧图谱贡献仍在，此时发布新版若
+        # 不剥离，新旧实体会在共享层并存（文件流生产实测过的同类坑）。
+        previous_title = row.title if row is not None else None
+        previous_built = row is not None and (
+            row.status == "built" or (row.entity_count or 0) > 0
+        )
+        saved_artifact: str | None = None
+        if row is None:
+            row = SuperAssistantPalaceOntologyDocument(ontology_id=ontology_id)
+            db.add(row)
+        if row.fingerprint != fingerprint:
+            if row.artifact_id:
+                try:
+                    workspace.delete_file(dir_id, row.artifact_id)
+                except WorkspaceError:
+                    logger.warning("本体文档旧工作区文件清理失败（ontology=%s）", ontology_id)
+            artifact = workspace.save_bytes(
+                dir_id,
+                _ontology_doc_filename(payload),
+                document_md.encode("utf-8"),
+                source="palace-ontology-doc",
+                mime_type="text/markdown",
+                extract=True,
+            )
+            saved_artifact = str(artifact.get("id"))
+            row.version_id = str(payload.get("version_id") or "")
+            row.version_number = str(payload.get("version_number") or "")
+            row.ontology_name = str(payload.get("ontology_name") or "")[:255]
+            row.title = str(payload.get("title") or "")[:255]
+            row.fingerprint = fingerprint
+            row.artifact_id = saved_artifact
+            row.size = int(artifact.get("size") or len(document_md.encode("utf-8")))
+            row.extracted_chars = int(artifact.get("extractedChars") or 0)
+            # entity/relation 计数保留到重建成功再覆盖：它们是「曾完整建过图」
+            # 的剥离依据（见上），清零会让重建漏剥离旧贡献
+        row.status = "pending"
+        row.error = None
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            if saved_artifact:
+                try:
+                    workspace.delete_file(dir_id, saved_artifact)
+                except WorkspaceError:
+                    logger.warning("本体文档并发回滚清理工作区文件失败（ontology=%s）", ontology_id)
+            continue
+        db.refresh(row)
+        break
+    else:
+        logger.warning("本体文档并发摄取冲突，交由对账重放（ontology=%s）", ontology_id)
+        return {"changed": False, "reason": "concurrent_ingest"}
+
+    if previous_built and previous_title:
+        try:
+            palace_graph.remove_file_graph(scope, row.id, previous_title)
+        except Exception:  # noqa: BLE001 — 剥离失败由新贡献整体替换与对账兜底
+            logger.warning("本体文档旧图谱贡献剥离失败（ontology=%s）", ontology_id, exc_info=True)
+    run_ontology_document_build(db, row.id)
+    return {"changed": True}
+
+
+def run_ontology_document_build(db: Session, doc_id: str) -> SuperAssistantPalaceOntologyDocument:
+    """共享本体文档的一次图谱抽取（系统作用域）；异常记行内，不向上抛。
+
+    与 run_build 同管线（分块 → LLM 抽取 → 别名归一 → MERGE），差异：
+    - 作用域为 ONTOLOGY_DOCUMENTS_SCOPE（跨本体同名实体在共享层自然合并）；
+    - 幂等锚点用行内 fingerprint（无独立 builds 表）；
+    - 在途判定用 updated_at（30 分钟内的 building 视为在途）。
+    """
+    scope = palace_graph.ONTOLOGY_DOCUMENTS_SCOPE
+    row = db.get(SuperAssistantPalaceOntologyDocument, doc_id)
+    if row is None:
+        raise ValueError("本体文档镜像不存在")
+    if row.status == "building":
+        updated = row.updated_at if row.updated_at.tzinfo else row.updated_at.replace(tzinfo=timezone.utc)
+        if updated >= datetime.now(timezone.utc) - _STALE_RUNNING:
+            return row
+    # 曾完整建过图（重试/手动重建）先剥离旧贡献，首建与失败重试跳过
+    was_built = row.entity_count > 0
+    title = row.title
+    row.status = "building"
+    row.error = None
+    db.commit()
+    try:
+        text = palace_workspace.user_workspace(scope).extracted_text(
+            palace_workspace.user_dir_id(scope), row.artifact_id, cap=200_000,
+        )
+        if not text.strip():
+            raise ValueError("本体文档没有可抽取的文本（内容为空）")
+        chunks = split_chunks(text)
+        if not chunks:
+            raise ValueError("本体文档没有可抽取的文本（内容为空）")
+        call_kwargs = _palace_call_kwargs(db)
+        entity_map: dict[str, dict] = {}
+        raw_relations: list[dict] = []
+        parsed_chunks = 0
+        last_chunk_error: str | None = None
+        for chunk in chunks:
+            try:
+                payload = extract_chunk(call_kwargs, chunk)
+            except Exception as exc:
+                last_chunk_error = str(exc)
+                logger.warning("本体文档抽取块失败（doc=%s），跳过该块", doc_id, exc_info=True)
+                continue
+            parsed_chunks += 1
+            for entity in _sanitize_chunk_entities(scope, payload):
+                known = entity_map.get(entity["key"])
+                if known is None:
+                    entity_map[entity["key"]] = entity
+                else:
+                    known["mentions"] += 1
+            raw_relations.extend(
+                item for item in (payload.get("relations") or []) if isinstance(item, dict)
+            )
+        if parsed_chunks == 0:
+            raise ValueError(f"全部文档片段抽取失败：{last_chunk_error or '模型输出无法解析'}")
+        merged_map: dict[str, dict] = {}
+        for entity in _merge_alias_entities(list(entity_map.values())):
+            entity["key"] = palace_graph.entity_key(scope, str(entity.get("name") or ""))
+            merged_map[entity["key"]] = entity
+        entity_map = merged_map
+        raw_relations = _redirect_relation_endpoints(scope, raw_relations, entity_map)
+        relations = _resolve_relations(scope, entity_map, raw_relations)
+
+        if was_built:
+            palace_graph.remove_file_graph(scope, row.id, title)
+        entity_count, relation_count = palace_graph.merge_extraction(
+            scope, row.id, title, list(entity_map.values()), relations,
+        )
+    except Exception as exc:
+        db.rollback()
+        row = db.get(SuperAssistantPalaceOntologyDocument, doc_id) or row
+        row.status = "failed"
+        row.error = str(exc)[:2000]
+        db.commit()
+        logger.warning("本体文档图谱抽取失败（doc=%s）: %s", doc_id, exc)
+        return row
+
+    row = db.get(SuperAssistantPalaceOntologyDocument, doc_id) or row
+    row.status = "built"
+    row.error = None
+    row.entity_count = entity_count
+    row.relation_count = relation_count
+    db.commit()
+    palace_cache.invalidate_graph()
+    return row
+
+
+def ontology_document_preview(db: Session, doc_id: str, max_chars: int) -> dict:
+    """本体文档内容预览（只读 Markdown，与文件预览同响应形状）。"""
+    row = db.get(SuperAssistantPalaceOntologyDocument, doc_id)
+    if row is None:
+        raise HTTPException(404, "本体文档不存在")
+    try:
+        content = palace_workspace.user_workspace(
+            palace_graph.ONTOLOGY_DOCUMENTS_SCOPE,
+        ).extracted_text(
+            palace_workspace.user_dir_id(palace_graph.ONTOLOGY_DOCUMENTS_SCOPE),
+            row.artifact_id, max_chars,
+        )
+    except WorkspaceError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {
+        "file": _ontology_doc_dict(row),
+        "content": content,
+        "truncated": len(content) >= max_chars,
+        "previewable": True,
+    }
+
+
+def rebuild_ontology_document(db: Session, doc_id: str) -> dict:
+    """手动重试本体文档建图（内容已镜像，无需事件重放）。
+
+    允许 failed/built；pending/building 仅在超龄（进程中断卡死）时放行。
+    以「观察态 CAS 更新」原子占位，关闭两个并发 POST 都通过检查、各自起
+    线程双重抽取的窗口。
+    """
+    row = db.get(SuperAssistantPalaceOntologyDocument, doc_id)
+    if row is None:
+        raise HTTPException(404, "本体文档不存在")
+    eligible = (
+        row.status in ("failed", "built")
+        or (row.status in ("pending", "building") and not _ontology_doc_in_flight(row))
+    )
+    if not eligible:
+        raise HTTPException(409, "该文档正在抽取队列中，请稍候")
+    observed_status = row.status
+    from sqlalchemy import update
+
+    claimed = db.execute(
+        update(SuperAssistantPalaceOntologyDocument)
+        .where(
+            SuperAssistantPalaceOntologyDocument.id == doc_id,
+            SuperAssistantPalaceOntologyDocument.status == observed_status,
+        )
+        .values(status="pending", error=None)
+    )
+    db.commit()
+    if claimed.rowcount != 1:
+        raise HTTPException(409, "该文档正在抽取队列中，请稍候")
+
+    def _inline() -> None:
+        build_db = SessionLocal()
+        try:
+            run_ontology_document_build(build_db, doc_id)
+        except Exception:
+            logger.exception("内联本体文档抽取失败（doc=%s）", doc_id)
+        finally:
+            build_db.close()
+
+    threading.Thread(target=_inline, daemon=True, name="sa-palace-ontodoc-build").start()
+    return {"dispatched": False}

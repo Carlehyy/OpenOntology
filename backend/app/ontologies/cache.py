@@ -25,6 +25,7 @@ _PENDING_VERSION_KEY = "ob:ont:pending:ver"
 _INSTANCE_COUNTS_VERSION_KEY = "ob:ont:instance-counts:ver"
 _VERSION_TREE_VERSION_KEY = "ob:ont:vtree:ver"
 _LIST_VERSION_KEY = "ob:ont:list:ver"
+_PUBLISHED_DOCS_VERSION_KEY = "ob:ont:pubdocs:ver"
 
 # 实例计数缓存 TTL：外部灌数/executor 进程无法事件失效，短 TTL 兜底；
 # 手动"刷新本体清单"可带 fresh 参数绕过缓存强制直查。
@@ -184,3 +185,18 @@ def invalidate_version_tree() -> None:
     redis_cache.cache_bump(_VERSION_TREE_VERSION_KEY)
 def invalidate_list() -> None:
     redis_cache.cache_bump(_LIST_VERSION_KEY)
+
+
+def _published_docs_version() -> str:
+    if not _list_enabled():
+        return "0"
+    return redis_cache.cache_version(_PUBLISHED_DOCS_VERSION_KEY)
+
+
+def published_documents_cache_key() -> str:
+    """各本体发布态业务文档摘要列表（knowledge 图谱弹窗「本体文档」数据源）。"""
+    return f"ob:ont:pubdocs:v{_published_docs_version()}"
+
+
+def invalidate_published_documents() -> None:
+    redis_cache.cache_bump(_PUBLISHED_DOCS_VERSION_KEY)

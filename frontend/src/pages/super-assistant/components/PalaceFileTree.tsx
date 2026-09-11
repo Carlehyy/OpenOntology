@@ -16,7 +16,7 @@ import {
 import type { ItemInstance } from '@headless-tree/core'
 import { useTree } from '@headless-tree/react'
 import {
-  AlertCircle, CircleDashed, FileJson, FileSpreadsheet, FileText, Folder, FolderOpen,
+  AlertCircle, BookMarked, CircleDashed, Clock, FileJson, FileSpreadsheet, FileText, Folder, FolderOpen,
   Image as ImageIcon, Loader2, type LucideIcon,
 } from 'lucide-react'
 
@@ -25,10 +25,13 @@ import { Tree, TreeItem, TreeItemLabel } from '@/components/ui/tree'
 import {
   buildPalaceTree,
   normalizePalacePath,
+  PALACE_ONTOLOGY_DOCS_DIR_ID,
   PALACE_TREE_ROOT,
   palaceDirId,
   palaceFileId,
+  palaceOntologyDocId,
   palaceTreeDirIds,
+  type PalaceOntologyDocRow,
   type PalaceTreeItemData,
 } from './palaceTreeModel'
 
@@ -43,10 +46,15 @@ export interface PalaceInlineAction {
 interface PalaceFileTreeProps {
   files: PalaceFile[]
   folders: PalaceFolder[]
+  /** 「本体文档」目录子项（权威清单 ∪ 镜像状态合并后的行） */
+  ontologyDocs: PalaceOntologyDocRow[]
   selectedFileId: string | null
+  /** 当前选中的本体文档行 id（pending:<ontologyId> 表示待同步占位） */
+  selectedOntologyDocId: string | null
   /** 当前选中目录路径（根为空串）：新建/上传的落点，行内高亮 */
   selectedDirPath: string
   onSelectFile: (file: PalaceFile) => void
+  onSelectOntologyDoc: (doc: PalaceOntologyDocRow) => void
   onSelectDir: (path: string) => void
   /** 拖拽落定：移动文件 / 移动整目录（目标路径空串表示根目录） */
   onMoveFile: (fileId: string, targetPath: string) => void
@@ -89,14 +97,17 @@ const fileIconFor = (file: PalaceFile | undefined): { Icon: LucideIcon; classNam
 }
 
 export default function PalaceFileTree({
-  files, folders, selectedFileId, selectedDirPath, onSelectFile, onSelectDir,
+  files, folders, ontologyDocs, selectedFileId, selectedOntologyDocId, selectedDirPath,
+  onSelectFile, onSelectOntologyDoc, onSelectDir,
   onMoveFile, onMoveFolder, inline, onInlineSubmit, onInlineCancel,
 }: PalaceFileTreeProps) {
-  const model = useMemo(() => buildPalaceTree(files, folders), [files, folders])
+  const model = useMemo(() => buildPalaceTree(files, folders, ontologyDocs), [files, folders, ontologyDocs])
   const modelRef = useRef(model)
   modelRef.current = model
   const onSelectFileRef = useRef(onSelectFile)
   onSelectFileRef.current = onSelectFile
+  const onSelectOntologyDocRef = useRef(onSelectOntologyDoc)
+  onSelectOntologyDocRef.current = onSelectOntologyDoc
   const onSelectDirRef = useRef(onSelectDir)
   onSelectDirRef.current = onSelectDir
   const onMoveFileRef = useRef(onMoveFile)
@@ -124,12 +135,17 @@ export default function PalaceFileTree({
     // draggedItemOverwritesSelection 保持默认 true：未选中直接拖拽时拖的就是
     // 被拖项（若为 false，空选中会让拖拽变成拖「零个条目」，onDrop 不生效）
     canReorder: false,
+    // 本体文档行与「本体文档」虚拟目录均不可拖拽（只读，随发布事件演化）
     canDrag: items => items.every(item => {
       const data = item.getItemData()
-      return data?.kind === 'file' || (data?.kind === 'dir' && !!data.dirId)
+      if (data?.kind === 'file') return true
+      if (data?.kind === 'dir' && !data.ontologyDocsDir) return !!data.dirId
+      return false
     }),
     canDrop: (items, target) => {
       if (!target.item.isFolder()) return false
+      // 「本体文档」目录只读：禁止任何拖入
+      if (target.item.getId() === PALACE_ONTOLOGY_DOCS_DIR_ID) return false
       const targetPath = target.item.getId() === PALACE_TREE_ROOT
         ? '' : target.item.getItemData()?.path ?? ''
       return items.every(item => {
@@ -158,6 +174,9 @@ export default function PalaceFileTree({
     onPrimaryAction: item => {
       const data = item.getItemData()
       if (data?.kind === 'file' && data.file) onSelectFileRef.current(data.file)
+      else if (data?.kind === 'ontology-doc' && data.ontologyDoc) {
+        onSelectOntologyDocRef.current(data.ontologyDoc)
+      }
     },
   })
   const treeRef = useRef(tree)
@@ -182,7 +201,9 @@ export default function PalaceFileTree({
   // 在 rebuildTree 时会被 headless-tree 丢掉展开态，不能只靠 fresh-dir 展开）
   useEffect(() => {
     const instance = treeRef.current
-    const id = selectedFileId ? palaceFileId(selectedFileId) : ''
+    const id = selectedFileId
+      ? palaceFileId(selectedFileId)
+      : selectedOntologyDocId ? palaceOntologyDocId(selectedOntologyDocId) : ''
     const current = instance.getSelectedItems().map(item => item.getId())
     const needsUpdate = id ? !current.includes(id) : current.length > 0
     if (needsUpdate) {
@@ -196,12 +217,14 @@ export default function PalaceFileTree({
     } catch {
       // 结构缓存尚未收敛（layout rebuild 前），跳过本次 reveal
     }
-  }, [tree, selectedFileId, files])
+  }, [tree, selectedFileId, selectedOntologyDocId, files])
 
   const handleSelect = (item: ItemInstance<PalaceTreeItemData>) => {
     const data = item.getItemData()
     if (data?.kind === 'file' && data.file) onSelectFileRef.current(data.file)
-    else if (data?.kind === 'dir' && data.path != null) onSelectDirRef.current(data.path)
+    else if (data?.kind === 'ontology-doc' && data.ontologyDoc) {
+      onSelectOntologyDocRef.current(data.ontologyDoc)
+    } else if (data?.kind === 'dir' && data.path != null) onSelectDirRef.current(data.path)
   }
 
   // 内联输入行落位：根级出现在树顶；目录级（新建/重命名）紧随该目录行之后。
@@ -255,11 +278,15 @@ export default function PalaceFileTree({
   for (const item of tree.getItems()) {
     const data = item.getItemData()
     const file = data?.kind === 'file' ? data.file : undefined
+    const ontologyDoc = data?.kind === 'ontology-doc' ? data.ontologyDoc : undefined
     const extracting = file?.status === 'pending' || file?.status === 'building'
+      || ontologyDoc?.status === 'pending' || ontologyDoc?.status === 'building'
     const dragTarget = item.isFolder() && item.isDragTarget()
     const dirPath = data?.kind === 'dir' && item.getId() !== PALACE_TREE_ROOT ? data.path : undefined
     const { Icon: FileIcon, className: iconClass } = fileIconFor(file)
     const selectedDir = dirPath != null && dirPath === selectedDirPath && !selectedFileId
+    // 目录直接子节点数（含子目录与文件；本体文档目录同理），右侧徽章展示
+    const childCount = data?.kind === 'dir' ? (model.children[item.getId()]?.length ?? 0) : 0
     rows.push(
       <div key={`row-${item.getId()}`}>
         <TreeItem
@@ -279,6 +306,31 @@ export default function PalaceFileTree({
                   <Folder size={FILE_ICON_SIZE} className="shrink-0 text-[var(--color-primary)]" />
                 )}
                 <span className="truncate text-[13px]" title={dirPath || undefined}>{data.name}</span>
+                <span
+                  aria-label={`${data.name} 下共 ${childCount} 项`}
+                  className="ml-auto shrink-0 rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] tabular-nums leading-4 text-[var(--color-text-tertiary)]"
+                >
+                  {childCount}
+                </span>
+              </>
+            ) : data?.kind === 'ontology-doc' && ontologyDoc ? (
+              <>
+                <BookMarked size={FILE_ICON_SIZE} className="shrink-0 text-brand-ink" />
+                <span
+                  className="truncate text-[13px]"
+                  title={`${ontologyDoc.ontologyName} · ${ontologyDoc.versionNumber}${ontologyDoc.error ? ` · ${ontologyDoc.error}` : ''}`}
+                >
+                  {ontologyDoc.title}
+                </span>
+                {ontologyDoc.status === 'pending-sync' && (
+                  <Clock size={11} className="ml-auto shrink-0 text-slate-300" aria-label="待同步" />
+                )}
+                {ontologyDoc.status === 'failed' && (
+                  <AlertCircle size={11} className="ml-auto shrink-0 text-red-500" aria-label="抽取失败" />
+                )}
+                {extracting && (
+                  <Loader2 size={11} className="ml-auto shrink-0 animate-spin text-amber-500" aria-label="抽取中" />
+                )}
               </>
             ) : (
               <>

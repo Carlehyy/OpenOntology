@@ -16,6 +16,18 @@ export interface OntologyImportResult {
   }
 }
 
+/** 本体当前发布态业务文档摘要（不含正文）：超级助手知识图谱「本体文档」目录的权威清单 */
+export interface OntologyPublishedDocument {
+  ontologyId: string
+  ontologyName: string
+  versionId: string
+  versionNumber: string
+  title: string
+  fingerprint: string
+  documentChars: number
+  publishedAt: string | null
+}
+
 function safeDownloadName(value: string) {
   const printable = [...value.trim()].filter(character => character.charCodeAt(0) >= 32).join('')
   const cleaned = printable.replace(/[\\/:*?"<>|]/g, '_')
@@ -31,6 +43,9 @@ export const ontologyApi = {
   update: (id: string, body: Partial<OntologyDetail>) => apiClient.put<OntologyDetail>(`/ontologies/${id}`, body),
   delete: (id: string) => apiClient.delete(`/ontologies/${id}`),
   importStructure: (body: unknown) => apiClient.post<OntologyImportResult>('/ontologies/import', body),
+  /** 各本体最新发布态业务文档摘要（发布/回滚后自动失效缓存，短 TTL fail-open） */
+  publishedDocuments: () =>
+    apiClient.get<{ items: OntologyPublishedDocument[] }>('/ontologies/published-documents'),
   // 本体助手卡片确认选中一次的全局计数；失败不应打断选中流程，调用方自行吞错。
   recordAssistantCardClick: (id: string) =>
     apiClient.post<{ id: string; assistant_card_clicks: number }>(`/ontologies/${id}/assistant-card-clicks`),

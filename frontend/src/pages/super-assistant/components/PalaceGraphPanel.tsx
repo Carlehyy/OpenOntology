@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/Input'
 import { parseServerTime } from '@/utils/datetime'
 import { filterPalaceGraph, palaceFileNodeIds, palaceOneHopNeighbors } from './palaceGraphFilter'
 import { palaceGraphOption } from './palaceGraphOption'
+import type { PalaceOntologyDocRow } from './palaceTreeModel'
 
 interface PalaceGraphPanelProps {
   graph: PalaceGraph | null
@@ -18,7 +19,9 @@ interface PalaceGraphPanelProps {
   hasFiles: boolean
   /** 文件库列表（节点→文档联动的 id→文件名解析） */
   files: PalaceFile[]
-  /** 当前选中文档：高亮其贡献节点（file_ids 溯源），可一键切回全图 */
+  /** 本体文档行（id 与图谱 file_ids 同命名空间：本体文档贡献节点的定位） */
+  ontologyDocs: PalaceOntologyDocRow[]
+  /** 当前选中文档（文件或本体文档行 id）：高亮其贡献节点，可一键切回全图 */
   selectedFileId: string | null
   /** 图谱侧反向定位：点节点/来源 chip 时通知父级选中对应文档 */
   onSelectFile: (fileId: string) => void
@@ -54,6 +57,7 @@ export default function PalaceGraphPanel({
   maximized = false,
   hasFiles,
   files,
+  ontologyDocs,
   selectedFileId,
   onSelectFile,
   onRefresh,
@@ -123,9 +127,12 @@ export default function PalaceGraphPanel({
     () => (graph && selectedId ? palaceOneHopNeighbors(graph, selectedId) : []),
     [graph, selectedId],
   )
-  const selectedFile = useMemo(
-    () => files.find(file => file.id === selectedFileId) ?? null,
-    [files, selectedFileId],
+  // 选中来源：文件或本体文档行（聚焦 chip 文案取其展示名）
+  const selectedSourceName = useMemo(
+    () => files.find(file => file.id === selectedFileId)?.filename
+      ?? ontologyDocs.find(doc => doc.id === selectedFileId)?.title
+      ?? null,
+    [files, ontologyDocs, selectedFileId],
   )
   const fileHighlight = useMemo(() => {
     if (!fileFocus || !selectedFileId || !baseGraph.available) return null
@@ -151,7 +158,13 @@ export default function PalaceGraphPanel({
     },
     [baseGraph, view, highlightIds, compactLabels],
   )
-  const fileById = useMemo(() => new Map(files.map(file => [file.id, file])), [files])
+  // 节点→文档定位解析表：文件与本体文档共用 file_ids 命名空间
+  const fileById = useMemo(() => {
+    const map = new Map<string, { id: string; name: string }>()
+    for (const file of files) map.set(file.id, { id: file.id, name: file.filename })
+    for (const doc of ontologyDocs) map.set(doc.id, { id: doc.id, name: doc.title })
+    return map
+  }, [files, ontologyDocs])
 
   const handleNodeClick = (nodeId: string) => {
     setSelectedId(nodeId)
@@ -205,7 +218,7 @@ export default function PalaceGraphPanel({
     const ids = selectedNode.file_ids ?? []
     const known = ids
       .filter(id => fileById.has(id))
-      .map(id => ({ id, name: fileById.get(id)?.filename as string }))
+      .map(id => ({ id, name: fileById.get(id)?.name as string }))
     if (known.length > 0) return known
     // 图谱尚未随文件库刷新（或文件已删）：退回文件名展示，不做点击定位
     return (selectedNode.source_files ?? []).map((name, index) => ({ id: `name-${index}`, name }))
@@ -238,14 +251,14 @@ export default function PalaceGraphPanel({
         </div>
       </div>
 
-      {selectedFile && graph?.available && graph.nodes.length > 0 && (
+      {selectedSourceName && graph?.available && graph.nodes.length > 0 && (
         <div className="pb-1.5">
           <button
             type="button"
             data-testid="palace-graph-file-focus"
             onClick={toggleFileFocus}
             aria-pressed={fileFocus}
-            title={`「${selectedFile.filename}」贡献的节点${fileFocus ? '，其余已淡化' : ''}`}
+            title={`「${selectedSourceName}」贡献的节点${fileFocus ? '，其余已淡化' : ''}`}
             className={`flex h-7 max-w-full items-center gap-1 rounded-full px-2.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] ${
               fileFocus
                 ? 'bg-brand-soft text-brand-ink hover:bg-brand-mist'
@@ -255,8 +268,8 @@ export default function PalaceGraphPanel({
             <Crosshair size={11} className="shrink-0" />
             <span className="min-w-0 truncate">
               {fileFocus
-                ? `聚焦「${selectedFile.filename}」贡献的节点，其余已淡化`
-                : `聚焦「${selectedFile.filename}」的贡献节点`}
+                ? `聚焦「${selectedSourceName}」贡献的节点，其余已淡化`
+                : `聚焦「${selectedSourceName}」的贡献节点`}
             </span>
           </button>
         </div>

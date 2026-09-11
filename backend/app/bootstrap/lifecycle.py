@@ -188,6 +188,18 @@ async def application_lifespan(
             except Exception as exc:
                 _main_logger.warning("记忆宫殿聚类合并定时器启动失败: %s", exc)
 
+        # 本体发布文档对账定时器（每天 04:00 重放全部发布态业务文档事件，
+        # 宫殿消费侧按指纹幂等：漂移自愈、正常时 no-op；失败不阻断启动）
+        if settings.environment != "test":
+            try:
+                from app.ontologies.published_documents import (
+                    start as start_published_documents_reconcile,
+                )
+
+                start_published_documents_reconcile()
+            except Exception as exc:
+                _main_logger.warning("本体发布文档对账定时器启动失败: %s", exc)
+
         from app.data_channel.file_assets.service import (
             file_asset_cleanup_loop,
         )
@@ -254,3 +266,11 @@ async def application_lifespan(
             palace_consolidate.shutdown()
         except Exception:  # noqa: BLE001
             _main_logger.exception("Palace consolidate scheduler cleanup failed")
+        try:
+            from app.ontologies import published_documents
+
+            published_documents.shutdown()
+        except Exception:  # noqa: BLE001
+            _main_logger.exception(
+                "Published documents reconcile scheduler cleanup failed"
+            )

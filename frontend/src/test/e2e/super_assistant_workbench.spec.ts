@@ -60,6 +60,21 @@ const palaceGraphFixture = {
   updatedAt: at(0, 6),
 }
 
+// 本体发布文档：宫殿镜像（已建图）+ 本体侧权威清单（多一个未同步的 v0 本体）
+const palaceOntologyDocsFixture = [
+  { id: 'pod-1', ontologyId: 'ont-1', ontologyName: '供应链本体', versionId: 'rel-2', versionNumber: 'v2',
+    title: '供应链业务文档', fingerprint: 'fp-1', status: 'built', error: null,
+    entityCount: 4, relationCount: 2, extractedChars: 520, size: 640, updatedAt: at(0, 6) },
+]
+const ontologyPublishedDocsFixture = {
+  items: [
+    { ontologyId: 'ont-1', ontologyName: '供应链本体', versionId: 'rel-2', versionNumber: 'v2',
+      title: '供应链业务文档', fingerprint: 'fp-1', documentChars: 520, publishedAt: at(0, 6) },
+    { ontologyId: 'ont-2', ontologyName: '合规本体', versionId: 'rel-9', versionNumber: 'v0',
+      title: '合规本体 业务文档', fingerprint: 'fp-9', documentChars: 100, publishedAt: at(0, 7) },
+  ],
+}
+
 const multicaCommandsFixture = [
   { command: 'list_agents', title: '查看智能体', description: '列出 multica 工作台的全部智能体及其运行时绑定状态。', usage: '/multica:list_agents', write: false },
   { command: 'list_tasks', title: '查看任务清单', description: '查看当前工作台的任务清单，可按状态或负责人过滤。', usage: '/multica:list_tasks [过滤条件]', write: false },
@@ -95,6 +110,8 @@ interface MockOptions {
   chatDelayMs?: number
   /** GET /super-assistant/multica/config 的返回（默认未配置态） */
   multicaConfig?: Record<string, unknown>
+  /** 知识图谱「本体文档」目录：true 时提供发布文档镜像 + 权威清单桩 */
+  withOntologyDocs?: boolean
 }
 
 async function mockApis(page: Page, options: MockOptions = {}) {
@@ -150,6 +167,9 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const palaceFolders: Array<Record<string, unknown>> = [
     { id: 'pfd-design', path: '设计图', createdAt: at(0, 7), updatedAt: at(0, 7) },
   ]
+  // 本体文档共享镜像 + 本体侧权威清单（默认空：树中「本体文档」目录不出现）
+  const palaceOntologyDocs = options.withOntologyDocs ? palaceOntologyDocsFixture : []
+  const ontologyPublishedDocs = options.withOntologyDocs ? ontologyPublishedDocsFixture : { items: [] }
   await page.route('**/api/**', route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
@@ -368,6 +388,24 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     }
     if (path === '/api/v2/super-assistant/palace/graph' && request.method() === 'GET') {
       return json(route, palaceGraphFixture)
+    }
+    // 本体文档共享镜像（宫殿侧状态）与本体侧权威清单（发布文档摘要）
+    if (path === '/api/v2/super-assistant/palace/ontology-documents' && request.method() === 'GET') {
+      return json(route, palaceOntologyDocs)
+    }
+    if (path === '/api/v1/ontologies/published-documents' && request.method() === 'GET') {
+      return json(route, ontologyPublishedDocs)
+    }
+    const ontoPreviewMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/ontology-documents\/([^/]+)\/preview$/)
+    if (ontoPreviewMatch && request.method() === 'GET') {
+      const row = palaceOntologyDocs.find(item => item.id === ontoPreviewMatch[1])
+      if (!row) return json(route, { detail: '本体文档不存在' }, 404)
+      return json(route, {
+        file: row,
+        content: '# 供应链业务文档\n\n张三 任职 ACME，ACME 位于上海。',
+        truncated: false,
+        previewable: true,
+      })
     }
     if (path === '/api/v2/super-assistant/palace/graph/search' && request.method() === 'GET') {
       palaceGraphSearches.push(new URL(request.url()).searchParams.get('q') || '')
@@ -1452,5 +1490,44 @@ test('知识图谱：拖拽文件至目录归位与画布下统计条', async ({
   await dragByDnd(page, source, filesPane.getByTestId('palace-file-tree'))
   await expect.poll(() => mocks.palaceMoves.length).toBe(2)
   expect(mocks.palaceMoves[1]).toBe('pf-1:设计图->')
+})
+
+test('知识图谱：本体文档目录——发布文档只读展示、目录计数徽章与待同步状态', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page, { withOntologyDocs: true })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: '知识图谱' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  const filesPane = dialog.getByTestId('super-assistant-palace-files')
+  const contentPane = dialog.locator('section[aria-label="文档内容"]')
+
+  // 「本体文档」固定根级首位；目录行右侧直接子节点计数徽章（含子目录与文件）
+  const ontoDirRow = filesPane.locator('[data-palace-dir="__ontology_docs__"]')
+  await expect(ontoDirRow).toBeVisible()
+  await expect(ontoDirRow).toContainText('本体文档')
+  await expect(ontoDirRow.getByLabel('本体文档 下共 2 项')).toHaveText('2')
+  // 用户目录同样有计数徽章
+  await expect(filesPane.locator('[data-palace-dir="设计图"]').getByLabel('设计图 下共 1 项')).toHaveText('1')
+
+  // 点击已建图文档：中栏只读预览（无编辑/替换/删除动作）；渲染/源码切换可用
+  await filesPane.getByText('供应链业务文档').click()
+  await expect(contentPane.getByText('供应链业务文档').first()).toBeVisible()
+  await expect(contentPane.getByText(/只读，随本体发布自动更新/)).toBeVisible()
+  await expect(contentPane.getByTestId('palace-ontology-doc-preview')).toContainText('张三 任职 ACME')
+  await expect(contentPane.getByTestId('palace-ontology-doc-preview').getByRole('button', { name: /编辑|替换|删除/ })).toHaveCount(0)
+  await expect(contentPane.getByTestId('palace-ontology-preview-mode')).toBeVisible()
+
+  // 权威清单有而镜像未达（发布事件在途）：占位行标记「待同步」
+  await filesPane.getByText('合规本体 业务文档').click()
+  await expect(contentPane.getByText(/尚未同步到知识图谱/)).toBeVisible()
+
+  // 最后点目录行（单击会折叠目录）：工具栏切换为只读说明，上传/新建被禁用
+  await ontoDirRow.click()
+  await expect(filesPane.getByTestId('palace-dir-toolbar')).toContainText('本体文档（只读')
+  await expect(filesPane.getByRole('button', { name: '上传', exact: true })).toBeDisabled()
+  await expect(filesPane.getByTestId('palace-new-folder')).toBeDisabled()
+  await expect(filesPane.getByTestId('palace-new-note')).toBeDisabled()
 })
 

@@ -22,6 +22,7 @@ from app.super_assistant.models import (
     SuperAssistantPalaceBuild,
     SuperAssistantPalaceFile,
     SuperAssistantPalaceFolder,
+    SuperAssistantPalaceOntologyDocument,
 )
 
 _TABLES = [
@@ -29,6 +30,7 @@ _TABLES = [
     SuperAssistantPalaceFile.__table__,
     SuperAssistantPalaceBuild.__table__,
     SuperAssistantPalaceFolder.__table__,
+    SuperAssistantPalaceOntologyDocument.__table__,
 ]
 
 _PREFIX = "/api/v2/super-assistant"

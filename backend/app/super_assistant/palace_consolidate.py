@@ -245,6 +245,11 @@ def run_consolidation(db: Session, owner_id: str) -> dict[str, Any]:
         )
         consumed.update(entity["merge_key"] for entity in absorbed)
         merged_groups.append([str(entity.get("name") or "") for entity in available])
+    if merged_entities:
+        # 图谱内容已变化：bump 图谱视图缓存版本（executor 与 Web 进程共享）
+        from app.super_assistant import palace_cache
+
+        palace_cache.invalidate_graph()
     return {
         "candidates": len(candidates),
         "merged_groups": merged_groups,

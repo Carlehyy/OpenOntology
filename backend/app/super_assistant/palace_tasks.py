@@ -68,6 +68,32 @@ async def run_palace_extract_message(payload: dict) -> None:
     await asyncio.to_thread(_run)
 
 
+async def run_palace_ontology_document_message(payload: dict) -> None:
+    """ontology.documents.published：本体发布态业务文档的共享镜像建图。
+
+    与抽取同一并发闸（本体文档建图也是分钟级 LLM 长任务）；摄取+建图整体
+    置于信号量内，同本体的事件自然串行。业务异常在 handler 内消化
+    （行内 status=failed 记 error），每日对账按指纹自愈重试。
+    """
+    ontology_id = str(payload.get("ontology_id") or "?")
+
+    from app.database import SessionLocal
+    from app.super_assistant import palace_service
+
+    def _run() -> None:
+        with _palace_semaphore():
+            db = SessionLocal()
+            try:
+                palace_service.ingest_ontology_document(db, payload)
+                logger.info("本体文档共享建图处理完成（ontology=%s）", ontology_id)
+            except Exception:
+                logger.exception("本体文档共享建图执行失败（ontology=%s）", ontology_id)
+            finally:
+                db.close()
+
+    await asyncio.to_thread(_run)
+
+
 async def run_palace_consolidate_message(payload: dict) -> None:
     """super_assistant.palace.consolidate：用户图谱的定期聚类合并。
 

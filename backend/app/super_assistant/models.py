@@ -359,6 +359,42 @@ class SuperAssistantPalaceFolder(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SuperAssistantPalaceOntologyDocument(Base):
+    """本体发布态业务文档的宫殿共享镜像（平台级，非用户资产）。
+
+    由 ontology.documents.published 事件驱动 upsert：fingerprint 与语义层
+    documentFingerprint 同源（sha256(documentMd)），一致且已建图时消费端
+    no-op；变化时整体替换工作区文件并以系统作用域重建图谱。内容本体存
+    palace 工作区共享目录（artifact_id 指向清单行），本表持有权威状态：
+    pending → building → built/failed。这些文档对用户只读，不占用用户配额，
+    也不可删除/编辑——以本体侧的发布/回滚为准随事件演化。
+    """
+
+    __tablename__ = "super_assistant_palace_ontology_documents"
+    __table_args__ = (
+        Index("ix_sa_palace_ontdocs_updated", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    # 幂等键：每个本体至多一行，事件按 (ontology_id, fingerprint) 状态机收敛
+    ontology_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    version_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    version_number: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    ontology_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    artifact_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    extracted_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # pending=待抽取 building=抽取中 built=已建图 failed=失败（可重建/等对账重试）
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entity_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    relation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class SuperAssistantWidgetConfig(Base):
     """悬浮 AI 助手（迷你超级助手）的页面可见范围配置（平台级单例）。
 
