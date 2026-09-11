@@ -35,6 +35,16 @@ const sseBody = (text: string) => [
   '',
 ].join('\n\n')
 
+/** 远程助手邀请函夹具：与后端 build_invite_prompt 同构的截断版 */
+const remoteInvitePromptFixture = [
+  '你是即将接入 OpenOntology 平台「超级助手」的外部 AI 助手。请阅读本函并自行完成接入。',
+  '【第一步：判断你的网络，二选一】',
+  '- 平台服务器能直接访问你的 HTTP 端点 → 选「方式 A：直连」；',
+  '- 你在局域网 / NAT 后，平台访问不到你，但你能访问公网 → 选「方式 B：回连」。',
+  '【本函邀请码】',
+  'rai_e2e_fixture_invite_token_1234',
+].join('\n')
+
 const conversationsFixture = [
   { id: 'c-today', title: '今日需求梳理', model_config_id: 'model-1', status: 'active', created_at: at(0, 9), updated_at: at(0, 9) },
   { id: 'c-yesterday', title: '昨日方案讨论', model_config_id: 'model-1', status: 'active', created_at: at(1, 20), updated_at: at(1, 20) },
@@ -107,6 +117,14 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const searchQueries: string[] = []
   const createdConvs: Array<Record<string, unknown>> = []
   const multicaPuts: Array<Record<string, unknown>> = []
+  const remoteAgentCreates: Array<Record<string, unknown>> = []
+  const remoteInviteCreates: string[] = []
+  // 远程助手目录夹具：直连（带端点）+ 回连（在线，仅邀请函路径接入的形态）
+  const remoteAgents: Array<Record<string, unknown>> = [
+    { id: 'ra-direct', key: 'remote.kb', label: '客服知识库助手', description: '擅长客服问答', endpoint: 'https://kb.example.com/turn', token_set: true, enabled: true, timeout_seconds: 120, mode: 'direct', last_seen_at: null, last_turn_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() },
+    { id: 'ra-pull', key: 'remote.lan-helper', label: '内网文档助手', description: '内网文档检索', endpoint: '', token_set: false, enabled: true, timeout_seconds: 60, mode: 'pull', last_seen_at: new Date().toISOString(), last_turn_at: null },
+  ]
+  const remoteInvites: Array<Record<string, unknown>> = []
   const multicaTests: Array<Record<string, unknown>> = []
   const multicaWorkspaceCalls: string[] = []
   let chatDone = false
@@ -439,6 +457,48 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       }
       return json(route, [])
     }
+    // 远程助手：列表/新增（邀请接入的助手在真实后端经公开兑换端点落库，
+    // mock 里直接由列表夹具承载；手动配置走 POST）
+    if (path === '/api/v2/super-assistant/remote-agents') {
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON() as Record<string, unknown>
+        remoteAgentCreates.push(body)
+        const created = {
+          id: `ra-${remoteAgents.length + 1}`, key: body.key || 'remote.auto',
+          label: body.label, description: body.description || '', endpoint: body.endpoint || '',
+          token_set: !!body.token, enabled: body.enabled !== false,
+          timeout_seconds: body.timeout_seconds || 120, mode: 'direct',
+          last_seen_at: null, last_turn_at: null,
+        }
+        remoteAgents.push(created)
+        return json(route, created)
+      }
+      return json(route, remoteAgents)
+    }
+    if (path === '/api/v2/super-assistant/remote-agents/ra-direct/test') {
+      return json(route, { ok: true, message: 'pong' })
+    }
+    if (path === '/api/v2/super-assistant/remote-agent-invites') {
+      if (request.method() === 'POST') {
+        remoteInvites.push({
+          id: `inv-${remoteInvites.length + 1}`, status: 'pending',
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+          redeemed_agent_key: null, redeemed_agent_label: null,
+        })
+        remoteInviteCreates.push('created')
+        return json(route, { ...remoteInvites[remoteInvites.length - 1], prompt_text: remoteInvitePromptFixture })
+      }
+      return json(route, remoteInvites)
+    }
+    if (path.startsWith('/api/v2/super-assistant/remote-agent-invites/') && path.endsWith('/prompt')) {
+      return route.fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', body: remoteInvitePromptFixture })
+    }
+    if (path.startsWith('/api/v2/super-assistant/remote-agent-invites/') && request.method() === 'DELETE') {
+      const target = remoteInvites.find(invite => path.endsWith(`/${invite.id}`))
+      if (target) (target as Record<string, unknown>).status = 'revoked'
+      return route.fulfill({ status: 204, body: '' })
+    }
     if (path === '/api/v2/super-assistant/skills') return json(route, [])
     if (path === '/api/v2/super-assistant/mcp-servers') return json(route, [])
     // multica 外部集成：配置读写与连接测试（PUT 后按提交值回显已启用态）
@@ -515,6 +575,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     searchQueries,
     multicaPuts,
     multicaTests,
+    remoteAgentCreates,
+    remoteInviteCreates,
     multicaWorkspaceCalls,
     palaceUploads,
     palaceDeletes,
@@ -1454,3 +1516,54 @@ test('知识图谱：拖拽文件至目录归位与画布下统计条', async ({
   expect(mocks.palaceMoves[1]).toBe('pf-1:设计图->')
 })
 
+
+test('远程助手：邀请函自助接入主路径，手动配置为高级路径，双模式展示', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: '外部集成' }).click()
+  const integrationsDialog = page.getByRole('dialog')
+  await expect(integrationsDialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
+  await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
+
+  // 目录：直连行展示端点，回连行展示模式徽标与在线状态
+  const list = integrationsDialog.getByTestId('remote-agent-list')
+  await expect(list.getByText('客服知识库助手')).toBeVisible()
+  await expect(list.getByText('https://kb.example.com/turn')).toBeVisible()
+  await expect(list.getByText('内网文档助手')).toBeVisible()
+  await expect(list.getByText('回连', { exact: true })).toBeVisible()
+  await expect(list.getByText('直连', { exact: true })).toBeVisible()
+  await expect(list.getByText('在线').first()).toBeVisible()
+  await expect(list.getByText('上次委派 3 小时前')).toBeVisible()
+
+  // 主路径：生成邀请 → 邀请函弹层常驻全文（复制失败也有手动复制/下载兜底）
+  await integrationsDialog.getByTestId('remote-agent-invite-create').click()
+  const promptBox = integrationsDialog.getByTestId('remote-agent-invite-prompt')
+  await expect(promptBox).toBeVisible()
+  await expect(promptBox).toHaveValue(/rai_e2e_fixture_invite_token_1234/)
+  await expect(promptBox).toHaveValue(/方式 B：回连/)
+  await integrationsDialog.getByTestId('remote-agent-invite-copy').click()
+  await expect(
+    page.getByText('已尝试写入剪贴板').or(page.getByText('自动复制不可用')),
+  ).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  // 邀请卡：待使用状态 + 撤销流转
+  const invites = integrationsDialog.getByTestId('remote-agent-invite-list')
+  await expect(invites.getByText('待使用')).toBeVisible()
+  await invites.getByRole('button', { name: '撤销' }).click()
+  await expect(invites.getByText('已撤销', { exact: true })).toBeVisible()
+
+  // 高级路径：手动配置（key 留空自动生成）仍可用
+  await integrationsDialog.getByRole('button', { name: '手动配置' }).click()
+  const form = integrationsDialog.getByTestId('remote-agent-form')
+  await expect(form).toBeVisible()
+  await form.getByTestId('remote-agent-label').fill('数据查询助手')
+  await form.getByTestId('remote-agent-endpoint').fill('https://data.example.com/turn')
+  await integrationsDialog.getByTestId('remote-agent-save-button').click()
+  await expect.poll(() => mocks.remoteAgentCreates.length).toBe(1)
+  expect(mocks.remoteAgentCreates[0].endpoint).toBe('https://data.example.com/turn')
+  expect(mocks.remoteAgentCreates[0].key).toBeUndefined()
+  await expect(list.getByText('数据查询助手')).toBeVisible()
+})

@@ -71,4 +71,5 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0099_super_assistant_remote_agents"]
+    # 0100 起远程助手迁移拆至 test_super_assistant_remote_agent_invites_migration
+    assert heads == ["0100_super_assistant_remote_agent_invites"]

@@ -761,9 +761,13 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 远程助手声明式注册新增 /remote-agents 的 list/create、
     # /remote-agents/{id} 的 put/delete、/remote-agents/{id}/test 的 post
     # 共 5 个操作（3 条路径）；multica 配置弹窗打开即拉取工作区列表，
-    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）
-    assert len(paths) == 49
-    assert sum(len(item) for item in paths.values()) == 70
+    # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）；
+    # 邀请自助接入新增 /remote-agent-invites 的 list/create、
+    # /remote-agent-invites/{id} 的 delete、/remote-agent-invites/{id}/prompt
+    # 的 get 共 4 个操作（3 条路径；公开兑换/回连端点在 /api/public 前缀，
+    # 不在本基线范围）
+    assert len(paths) == 52
+    assert sum(len(item) for item in paths.values()) == 74
     assert hashlib.sha256(payload).hexdigest() == (
-        "1df9a7a59e105004f771cbded5241b7d5f6a4dbea5468a427fc099cfa44d2dfc"
+        "dd3e1f8a00350a65bf06f2b7de8315bacdd120e1cefd90da3d0659bd2e599de8"
     )
