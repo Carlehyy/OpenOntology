@@ -288,6 +288,21 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 记忆宫殿文件夹同步：浏览器侧（令牌管理/脚本下发）同前缀同守卫；本机
+# 脚本侧 /palace/sync/* 以长效令牌鉴权（依赖内校验菜单权限），不挂
+# menu_guard——与 events ingest_router 同一挂载先例。
+from app.super_assistant import palace_sync as super_assistant_palace_sync
+app.include_router(
+    super_assistant_palace_sync.management_router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
+app.include_router(
+    super_assistant_palace_sync.sync_router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+)
 # 悬浮助手页面可见范围配置：GET 面向全体登录用户（不受 super_assistant 菜单权限约束），
 # PUT 仅管理员，鉴权在路由级声明，故此处不挂 menu_guard。
 from app.super_assistant import widget_config as super_assistant_widget_config

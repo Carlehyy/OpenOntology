@@ -776,9 +776,15 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 共 5 个操作（3 条路径）；multica 配置弹窗打开即拉取工作区列表，
     # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）；
     # 内置工具目录与用户级启停新增 /tools 的 GET、/tools/{tool_name} 的
-    # PATCH 共 2 个操作（2 条路径，tools.py 子路由）
-    assert len(paths) == 51
-    assert sum(len(item) for item in paths.values()) == 72
+    # PATCH 共 2 个操作（2 条路径，tools.py 子路由）；
+    # 文件夹同步（palace_sync.py 子路由）新增 /palace/sync/files 的
+    # list/upload、/palace/sync/files/{id} 的 delete、/palace/sync/files/{id}
+    # 的 replace、/palace/sync/folders 的 list/create、/palace/sync/folders
+    # /{id} 的 delete 共 7 个操作（5 条路径，X-Palace-Sync-Token 令牌鉴权），
+    # 以及 /palace/sync/script 的 GET 与 /palace/sync/token 的 POST 共 2 个
+    # 操作（2 条路径，浏览器侧 JWT 鉴权）
+    assert len(paths) == 58
+    assert sum(len(item) for item in paths.values()) == 81
     assert hashlib.sha256(payload).hexdigest() == (
-        "16854c3fb58c27a8a2beb7b1030e1eab7549ff40470ab4243a232be8a44fd273"
+        "1e7be5dff399c4c1a65d6ba220bb7d183240efb4989d60e7acbd106c1c71a9a8"
     )

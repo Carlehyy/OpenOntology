@@ -376,6 +376,25 @@ class SuperAssistantToolSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SuperAssistantPalaceSyncToken(Base):
+    """记忆宫殿「文件夹同步」脚本的长效访问令牌（每用户一条）。
+
+    脚本在用户本机以 X-Palace-Sync-Token 头调用 /palace/sync/* 子路由：
+    token_hash(sha256) 供请求路径 O(1) 查找；token_encrypted(Fernet) 仅供
+    脚本下发端点复嵌同一令牌（重复下载脚本不轮换）。重置 = 覆盖两列，
+    旧令牌立即失效。明文只在生成/重置响应与下发脚本中出现，不落库。
+    """
+
+    __tablename__ = "super_assistant_palace_sync_tokens"
+
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class SuperAssistantWidgetConfig(Base):
     """悬浮 AI 助手（迷你超级助手）的页面可见范围配置（平台级单例）。
 
