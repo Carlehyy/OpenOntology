@@ -27,6 +27,7 @@ from app.super_assistant.models import (
     SuperAssistantMessage,
     SuperAssistantSkill,
     SuperAssistantToolRun,
+    SuperAssistantToolSetting,
 )
 from app.super_assistant.permissions import ToolPermissionChecker
 from app.super_assistant.skill_store import read_text_file, skill_directory
@@ -79,6 +80,31 @@ _READ_ONLY_BUILTIN_TOOLS = frozenset({
 
 # 需要用户审批确认的内置工具：目前是 multica 下发任务（外部系统写操作）
 _CONFIRMATION_REQUIRED_BUILTIN_TOOLS = frozenset({"multica_create_task"})
+
+# 条件进入目录的联网工具声明：settings 未启用时也要在工具目录 API 中
+# 展示（标注不可用原因），故提为模块级常量供 _builtin_tools 与
+# builtin_tool_catalog 共用，避免两处 schema 漂移
+_WEB_FETCH_TOOL_SCHEMA: dict[str, Any] = {
+    "name": "web_fetch",
+    "description": "抓取一个公开网页并返回正文文本（自动截断）。",
+    "parameters": {
+        "type": "object",
+        "properties": {"url": {"type": "string", "description": "http/https URL"}},
+        "required": ["url"],
+        "additionalProperties": False,
+    },
+}
+
+_WEB_SEARCH_TOOL_SCHEMA: dict[str, Any] = {
+    "name": "web_search",
+    "description": "搜索互联网，返回标题/链接/摘要列表。",
+    "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "搜索词"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+}
 
 
 def sse(event: str, data: dict[str, Any]) -> str:
@@ -318,27 +344,9 @@ def _builtin_tools(agent_mode: bool = False) -> list[dict[str, Any]]:
             },
         ])
     if settings.super_assistant_web_fetch_enabled:
-        tools.append({
-            "name": "web_fetch",
-            "description": "抓取一个公开网页并返回正文文本（自动截断）。",
-            "parameters": {
-                "type": "object",
-                "properties": {"url": {"type": "string", "description": "http/https URL"}},
-                "required": ["url"],
-                "additionalProperties": False,
-            },
-        })
+        tools.append(_WEB_FETCH_TOOL_SCHEMA)
     if str(settings.super_assistant_web_search_backend or "").strip():
-        tools.append({
-            "name": "web_search",
-            "description": "搜索互联网，返回标题/链接/摘要列表。",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "搜索词"}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-        })
+        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
     return tools
 
 
@@ -363,6 +371,98 @@ def _tool_catalog(
                 "parameters": item.get("input_schema") or {"type": "object", "properties": {}},
             })
     return tools, registry
+
+
+class UnknownBuiltinToolError(Exception):
+    """工具名不在内置目录全集内（内置工具启停端点的 404 语义）。"""
+
+
+def _disabled_builtin_tools(db, owner_id: str) -> set[str]:
+    """用户级禁用名单：缺行或空名单=全部启用（与功能上线前行为一致）。"""
+    setting = db.get(SuperAssistantToolSetting, owner_id)
+    return set(setting.disabled_tools or []) if setting else set()
+
+
+def builtin_tool_catalog(db, owner_id: str) -> list[dict[str, Any]]:
+    """内置工具目录全景（GET /api/v2/super-assistant/tools 数据源）。
+
+    覆盖全部非 MCP 工具的跨模式并集，逐项标注三类信息：
+    - category：read_only（可并行只读）/ confirmation_required（执行前审批）/ standard；
+    - available + unavailable_reason：平台/配置条件可用性（settings 开关、
+      multica 配置、可委派目录、agent 模式），区分「用户禁用」与「条件不可用」；
+    - enabled：用户启停状态。
+    MCP 工具不在此列（继续由 server.enabled 管理，避免双控制点）。
+    """
+    disabled = _disabled_builtin_tools(db, owner_id)
+
+    def _entry(schema: dict[str, Any], *, available: bool = True,
+               reason: str | None = None) -> dict[str, Any]:
+        name = schema["name"]
+        if name in _CONFIRMATION_REQUIRED_BUILTIN_TOOLS:
+            category = "confirmation_required"
+        elif name in _READ_ONLY_BUILTIN_TOOLS:
+            category = "read_only"
+        else:
+            category = "standard"
+        return {
+            "name": name,
+            "description": schema.get("description") or "",
+            "parameters": schema.get("parameters") or {"type": "object", "properties": {}},
+            "category": category,
+            "available": available,
+            "unavailable_reason": reason,
+            "enabled": name not in disabled,
+        }
+
+    catalog: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for schema in _builtin_tools(True):
+        name = schema["name"]
+        if name in {"todo_write", "todo_read"}:
+            catalog.append(_entry(schema, available=False, reason="仅在自主执行模式下可用"))
+        else:
+            catalog.append(_entry(schema))
+        seen.add(name)
+    # settings 未启用时补全联网工具声明（展示为条件不可用，可预先禁用）
+    if "web_fetch" not in seen:
+        catalog.append(_entry(_WEB_FETCH_TOOL_SCHEMA, available=False, reason="平台未开启网页抓取"))
+    if "web_search" not in seen:
+        catalog.append(_entry(_WEB_SEARCH_TOOL_SCHEMA, available=False, reason="平台未配置搜索后端"))
+    multica_available = multica_service.active_config(db, owner_id) is not None
+    multica_reason = None if multica_available else "未配置或未启用 multica 集成"
+    catalog.extend(
+        _entry(schema, available=multica_available, reason=multica_reason)
+        for schema in multica_service.tool_schemas()
+    )
+    delegation_schemas = delegation.delegation_tools(db, owner_id)
+    if delegation_schemas:
+        catalog.extend(_entry(schema) for schema in delegation_schemas)
+    else:
+        catalog.append(_entry({
+            "name": delegation.DELEGATION_TOOL_NAME,
+            "description": "以用户分身身份把任务委派给平台内其他助手执行并返回结果。",
+            "parameters": {"type": "object", "properties": {}},
+        }, available=False, reason="当前没有可委派的助手"))
+    return catalog
+
+
+def set_builtin_tool_enabled(db, owner_id: str, tool_name: str, enabled: bool) -> dict[str, Any]:
+    """切换一个内置工具的启停并返回其目录项（条件性工具也允许预先禁用）。"""
+    catalog = builtin_tool_catalog(db, owner_id)
+    if not any(entry["name"] == tool_name for entry in catalog):
+        raise UnknownBuiltinToolError(tool_name)
+    disabled = _disabled_builtin_tools(db, owner_id)
+    if enabled:
+        disabled.discard(tool_name)
+    else:
+        disabled.add(tool_name)
+    setting = db.get(SuperAssistantToolSetting, owner_id)
+    if setting is None:
+        db.add(SuperAssistantToolSetting(owner_id=owner_id, disabled_tools=sorted(disabled)))
+    else:
+        setting.disabled_tools = sorted(disabled)
+    db.commit()
+    return next(entry for entry in builtin_tool_catalog(db, owner_id) if entry["name"] == tool_name)
 
 
 def _run_cancelled(db, message: SuperAssistantMessage) -> bool:
@@ -910,6 +1010,11 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         delegation_schemas = delegation.delegation_tools(db, owner_id)
         if delegation_schemas:
             tools.extend(delegation_schemas)
+        # 用户级内置工具启停：禁用名单内的工具不进入本轮目录（缺行=全启用）；
+        # MCP 工具名（mcp__ 前缀）不在名单内，继续由 server.enabled 管理
+        disabled_builtin_tools = _disabled_builtin_tools(db, owner_id)
+        if disabled_builtin_tools:
+            tools = [entry for entry in tools if entry.get("name") not in disabled_builtin_tools]
         # 自主 agent 模式的 todo 清单状态：仅存活于本次 stream_chat，不落库
         todo_state: dict[str, list[str]] | None = {"items": []} if agent_mode else None
         max_rounds = (
@@ -977,6 +1082,14 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         # 收敛到命令指定的工具，写操作仍走审批门）
         direct_reply: str | None = None
         forced_tool: str | None = None
+        if multica_slash is not None:
+            if multica_slash.state == "ok" and multica_slash.tool_name in disabled_builtin_tools:
+                # 强制命令指定的工具已被用户禁用：确定性引导而非执行
+                direct_reply = (
+                    f"工具 {multica_slash.tool_name} 已被禁用，"
+                    "可在助手配置面板的「工具」标签页重新启用。"
+                )
+                multica_slash = None
         if multica_slash is not None:
             if multica_slash.state != "ok":
                 direct_reply = multica_service.guidance_text(multica_slash)
@@ -1099,6 +1212,13 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 elif not permission_checker.is_allowed(item["name"]):
                     executed[item["id"]] = (
                         json.dumps({"error": "已被权限规则拒绝", "decision": "denied"}, ensure_ascii=False),
+                        "denied",
+                        None,
+                    )
+                elif item["name"] in disabled_builtin_tools:
+                    # 目录级过滤的兜底：模型幻觉调用已禁用工具时拒绝并回灌
+                    executed[item["id"]] = (
+                        json.dumps({"error": "工具已被用户禁用", "decision": "denied"}, ensure_ascii=False),
                         "denied",
                         None,
                     )

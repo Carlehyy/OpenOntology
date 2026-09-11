@@ -186,6 +186,19 @@ export interface McpTool {
 
 export type McpTransport = 'stdio' | 'sse' | 'streamable_http'
 
+/** 内置工具目录项（GET /super-assistant/tools）。
+ *  available 是平台/配置条件可用性（如 web_search 平台未配后端），
+ *  enabled 是用户启停状态，两者独立。 */
+export interface AssistantTool {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  category: 'read_only' | 'confirmation_required' | 'standard'
+  available: boolean
+  unavailable_reason: string | null
+  enabled: boolean
+}
+
 export interface SuperMcpServer {
   id: string
   name: string
@@ -523,6 +536,10 @@ export const superAssistantApi = {
   testMcpServer: (id: string) => apiClientV2.post<{ ok: boolean; message: string; tools: McpTool[] }>(
     `/super-assistant/mcp-servers/${id}/test`,
   ),
+
+  assistantTools: () => apiClientV2.get<AssistantTool[]>('/super-assistant/tools'),
+  updateAssistantTool: (name: string, enabled: boolean) =>
+    apiClientV2.patch<AssistantTool>(`/super-assistant/tools/${encodeURIComponent(name)}`, { enabled }),
 
   memories: (params: { zone?: string; include_superseded?: boolean } = {}) => {
     const search = new URLSearchParams()

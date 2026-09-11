@@ -6,6 +6,7 @@ import {
 
 import {
   superAssistantApi,
+  type AssistantTool,
   type McpTransport,
   type SkillFile,
   type SuperMcpServer,
@@ -472,6 +473,97 @@ function SettingSwitch({ label, ariaLabel, checked, busy, onToggle }: {
 }
 
 
+// 工具分类的稳定展示文案：read_only 同轮可并行、confirmation_required
+// 执行前需用户审批（与对话中的确认卡对应）
+const TOOL_CATEGORY_LABELS: Record<AssistantTool['category'], string> = {
+  read_only: '只读 · 可并行',
+  confirmation_required: '写操作 · 执行前审批',
+  standard: '常规',
+}
+
+function ToolParameters({ parameters }: { parameters: Record<string, unknown> }) {
+  const properties = (parameters?.properties || {}) as Record<string, { type?: string; description?: string }>
+  const required = new Set((parameters?.required as string[] | undefined) || [])
+  const entries = Object.entries(properties)
+  if (!entries.length) {
+    return <p className="mt-1.5 text-[10px] leading-4 text-[var(--color-text-tertiary)]">无参数</p>
+  }
+  return (
+    <dl className="mt-1.5 space-y-1">
+      {entries.map(([name, spec]) => (
+        <div key={name} className="flex gap-2 text-[10px] leading-4">
+          <dt className="shrink-0 font-mono text-[var(--color-text-secondary)]">
+            {name}{required.has(name) && <span className="text-red-500">*</span>}
+          </dt>
+          <dd className="min-w-0 text-[var(--color-text-tertiary)]">
+            {spec.type || 'any'}{spec.description ? ` — ${spec.description}` : ''}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+function ToolsTab({ tools, refreshTools }: {
+  tools: AssistantTool[]
+  refreshTools: () => Promise<void>
+}) {
+  const [updatingName, setUpdatingName] = useState<string | null>(null)
+
+  const toggleTool = async (tool: AssistantTool) => {
+    // busy/防重入按工具名粒度：单个开关保存中不连坐禁用其它卡片
+    if (updatingName === tool.name) return
+    setUpdatingName(tool.name)
+    try {
+      await superAssistantApi.updateAssistantTool(tool.name, !tool.enabled)
+      await refreshTools()
+    } catch (error) {
+      toast.error('工具设置更新失败', { description: errorText(error) })
+    } finally {
+      setUpdatingName(null)
+    }
+  }
+
+  const disabledCount = tools.filter(tool => !tool.enabled).length
+  return (
+    <div className="grid gap-3" data-testid="tools-tab">
+      <p className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+        内置工具 {tools.length} 个{disabledCount > 0 ? ` · 已禁用 ${disabledCount} 个` : ''}。禁用后工具不进入对话目录；MCP 工具请在 MCP 标签页按 Server 管理。
+      </p>
+      {tools.map(tool => (
+        <article key={tool.name} data-testid={`tool-card-${tool.name}`} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-4 transition-colors hover:border-brand-line">
+          <div className="flex items-start gap-2">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink"><Wrench size={16} /></div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-xs font-semibold text-[var(--color-text-primary)]">{tool.name}</p>
+              <p className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">{TOOL_CATEGORY_LABELS[tool.category]}</p>
+            </div>
+            <SettingSwitch
+              label="启用"
+              ariaLabel={`${tool.enabled ? '禁用' : '启用'}工具 ${tool.name}`}
+              checked={tool.enabled}
+              busy={updatingName === tool.name}
+              onToggle={() => void toggleTool(tool)}
+            />
+          </div>
+          <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-[var(--color-text-secondary)]">{tool.description || '暂无描述'}</p>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {!tool.available && tool.unavailable_reason && (
+              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] text-amber-800">{tool.unavailable_reason}</span>
+            )}
+            {!tool.enabled && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500">已禁用</span>}
+          </div>
+          <details className="mt-2">
+            <summary className="cursor-pointer text-[11px] text-brand-ink transition-colors hover:text-brand-deep">查看参数</summary>
+            <ToolParameters parameters={tool.parameters} />
+          </details>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+
 /** 配置面板宽度边界：默认 26rem，拖拽/键盘在 [288, min(600, 视口-720)] 内调整，
     为聊天卡头部（品牌区已让出）与标题保底最小可用宽度 */
 export const DEFAULT_CONFIG_PANEL_WIDTH = 416
@@ -479,7 +571,7 @@ const MIN_PANEL_WIDTH = 288
 const maxPanelWidth = () => Math.max(MIN_PANEL_WIDTH, Math.min(600, window.innerWidth - 720))
 const clampPanelWidth = (width: number) => Math.min(Math.max(width, MIN_PANEL_WIDTH), maxPanelWidth())
 
-export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, refreshSkills, refreshServers, conversationId }: {
+export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, refreshSkills, refreshServers, refreshTools, conversationId }: {
   open: boolean
   onClose: () => void
   /** 面板宽度（px）：受控于页面级状态（聊天列据此让位），拖拽/键盘经 onWidthResize 回写 */
@@ -489,11 +581,13 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   onDraggingChange: (dragging: boolean) => void
   skills: SuperSkill[]
   servers: SuperMcpServer[]
+  tools: AssistantTool[]
   refreshSkills: () => Promise<void>
   refreshServers: () => Promise<void>
+  refreshTools: () => Promise<void>
   conversationId: string | null
 }) {
-  const [tab, setTab] = useState<'skills' | 'mcp' | 'approval' | 'memory'>('skills')
+  const [tab, setTab] = useState<'skills' | 'mcp' | 'tools' | 'approval' | 'memory'>('skills')
   const [dragging, setDragging] = useState(false)
   const [creatingSkill, setCreatingSkill] = useState(false)
   const [editingSkill, setEditingSkill] = useState<SuperSkill | null>(null)
@@ -649,10 +743,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
               <X size={16} />
             </button>
           </header>
-          <div className="relative mx-4 mt-3 grid grid-cols-4 gap-1 rounded-lg border border-slate-200 bg-slate-50/70 p-0.5">
+          <div className="relative mx-4 mt-3 grid grid-cols-5 gap-1 rounded-lg border border-slate-200 bg-slate-50/70 p-0.5">
             <div
-              className="absolute bottom-0.5 top-0.5 w-[calc(25%_-_4px)] rounded-md bg-brand shadow-sm transition-all duration-300 ease-out"
-              style={{ left: `calc(${(['skills', 'mcp', 'approval', 'memory'] as const).indexOf(tab) * 25}% + 2px)` }}
+              className="absolute bottom-0.5 top-0.5 w-[calc(20%_-_4px)] rounded-md bg-brand shadow-sm transition-all duration-300 ease-out"
+              style={{ left: `calc(${(['skills', 'mcp', 'tools', 'approval', 'memory'] as const).indexOf(tab) * 20}% + 2px)` }}
             />
             <button type="button" onClick={() => setTab('skills')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'skills' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -661,6 +755,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             <button type="button" onClick={() => setTab('mcp')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'mcp' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
               MCP <span className={`ml-1 text-[10px] tabular-nums ${tab === 'mcp' ? 'text-white' : 'text-slate-400'}`}>{configurableServers.length}</span>
+            </button>
+            <button type="button" onClick={() => setTab('tools')}
+              className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'tools' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
+              工具 <span className={`ml-1 text-[10px] tabular-nums ${tab === 'tools' ? 'text-white' : 'text-slate-400'}`}>{tools.length}</span>
             </button>
             <button type="button" onClick={() => setTab('approval')}
               className={`relative z-10 flex min-h-9 items-center justify-center gap-1 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'approval' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -677,6 +775,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             <ApprovalTab conversationId={conversationId} />
           ) : tab === 'memory' ? (
             <MemoryTab />
+          ) : tab === 'tools' ? (
+            <ToolsTab tools={tools} refreshTools={refreshTools} />
           ) : tab === 'skills' ? (
             <>
               <div className="grid gap-3">

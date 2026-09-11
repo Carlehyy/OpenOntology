@@ -77,6 +77,25 @@ const multicaEnabledFixture = {
   last_test_status: 'success', last_test_message: '连接成功', last_tested_at: at(0, 8),
 }
 
+// 内置工具目录夹具：覆盖三个分类 + 一条条件不可用（web_search 平台未配后端）
+const assistantToolsFixture = [
+  {
+    name: 'memory_search', description: '按相关性搜索跨会话记忆，返回最匹配的若干条（含 id）。',
+    parameters: { type: 'object', properties: { query: { type: 'string', description: '检索词' } }, required: ['query'] },
+    category: 'read_only', available: true, unavailable_reason: null, enabled: true,
+  },
+  {
+    name: 'web_search', description: '搜索互联网，返回标题/链接/摘要列表。',
+    parameters: { type: 'object', properties: { query: { type: 'string', description: '搜索词' } }, required: ['query'] },
+    category: 'read_only', available: false, unavailable_reason: '平台未配置搜索后端', enabled: true,
+  },
+  {
+    name: 'multica_create_task', description: '在 multica 创建任务并指派给指定智能体。',
+    parameters: { type: 'object', properties: { title: { type: 'string', description: '任务标题' } }, required: ['title'] },
+    category: 'confirmation_required', available: true, unavailable_reason: null, enabled: true,
+  },
+]
+
 async function seedAuth(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
@@ -109,6 +128,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const multicaPuts: Array<Record<string, unknown>> = []
   const multicaTests: Array<Record<string, unknown>> = []
   const multicaWorkspaceCalls: string[] = []
+  const toolPatchCalls: Array<{ name: string; body: { enabled: boolean } }> = []
+  const toolsState = assistantToolsFixture.map(item => ({ ...item }))
   let chatDone = false
   const filesByConv: Record<string, Array<Record<string, unknown>>> = {
     'c-today': [{
@@ -441,6 +462,18 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     }
     if (path === '/api/v2/super-assistant/skills') return json(route, [])
     if (path === '/api/v2/super-assistant/mcp-servers') return json(route, [])
+    // 内置工具目录与启停（PATCH 后按提交值刷新目录，驱动开关/徽章回显）
+    if (path === '/api/v2/super-assistant/tools') return json(route, toolsState)
+    const toolMatch = path.match(/^\/api\/v2\/super-assistant\/tools\/([^/]+)$/)
+    if (toolMatch && request.method() === 'PATCH') {
+      const name = decodeURIComponent(toolMatch[1])
+      const body = request.postDataJSON() as { enabled: boolean }
+      toolPatchCalls.push({ name, body })
+      const target = toolsState.find(item => item.name === name)
+      if (!target) return route.fulfill({ status: 404, body: '{"detail":"未知内置工具"}' })
+      target.enabled = body.enabled
+      return json(route, target)
+    }
     // multica 外部集成：配置读写与连接测试（PUT 后按提交值回显已启用态）
     if (path === '/api/v2/super-assistant/multica/config') {
       if (request.method() === 'PUT') {
@@ -516,6 +549,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     multicaPuts,
     multicaTests,
     multicaWorkspaceCalls,
+    toolPatchCalls,
     palaceUploads,
     palaceDeletes,
     palacePreviews,
@@ -943,6 +977,38 @@ test('助手配置面板为白色背景', async ({ page }) => {
   const panel = page.locator('section[aria-label="助手配置"]')
   await expect(panel).toBeVisible()
   await expect.poll(() => panel.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(255, 255, 255)')
+})
+
+test('工具标签页：查看内置工具目录、可用性标注与启停切换', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
+  // 分段控件第 3 个标签：工具（含计数后缀，用正则消歧）
+  await page.getByRole('button', { name: /^工具/ }).click()
+  const toolsTab = page.getByTestId('tools-tab')
+  await expect(toolsTab).toBeVisible()
+  await expect(page.getByTestId('tool-card-memory_search')).toBeVisible()
+  await expect(page.getByTestId('tool-card-multica_create_task')).toContainText('写操作 · 执行前审批')
+  // 条件不可用如实标注，与用户启停是两个维度
+  await expect(page.getByTestId('tool-card-web_search')).toContainText('平台未配置搜索后端')
+
+  // 查看参数：展开后可见参数名与必填标记
+  await page.getByTestId('tool-card-memory_search').getByText('查看参数').click()
+  await expect(page.getByTestId('tool-card-memory_search').getByText('query')).toBeVisible()
+
+  // 启停切换：PATCH 落库后目录刷新，「已禁用」徽章出现
+  await page.getByRole('switch', { name: '禁用工具 memory_search' }).click()
+  await expect.poll(() => mocks.toolPatchCalls).toEqual([
+    { name: 'memory_search', body: { enabled: false } },
+  ])
+  await expect(page.getByTestId('tool-card-memory_search')).toContainText('已禁用')
+  // 再启用：徽章消失
+  await page.getByRole('switch', { name: '启用工具 memory_search' }).click()
+  await expect.poll(() => mocks.toolPatchCalls).toHaveLength(2)
+  await expect(page.getByTestId('tool-card-memory_search')).not.toContainText('已禁用')
 })
 
 test('重命名会话：点击其它处自动取消，Enter 仍可保存', async ({ page }) => {

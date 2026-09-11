@@ -36,12 +36,13 @@ from app.super_assistant.models import (
     SuperAssistantMulticaConfig,
     SuperAssistantSkill,
     SuperAssistantToolRun,
+    SuperAssistantToolSetting,
 )
 
 _TABLES = [
     User.__table__, RoleMenuPermission.__table__, ModelConfig.__table__,
     SuperAssistantConversation.__table__, SuperAssistantMessage.__table__,
-    SuperAssistantToolRun.__table__, SuperAssistantDelegation.__table__,
+    SuperAssistantToolRun.__table__, SuperAssistantToolSetting.__table__, SuperAssistantDelegation.__table__,
     SuperAssistantSkill.__table__, SuperAssistantMcpServer.__table__,
     SuperAssistantMemory.__table__, SuperAssistantMemoryProfile.__table__,
     SuperAssistantMulticaConfig.__table__,

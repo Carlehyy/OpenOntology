@@ -359,6 +359,23 @@ class SuperAssistantPalaceFolder(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SuperAssistantToolSetting(Base):
+    """每用户一行的内置工具启停设置：只存"禁用名单"。
+
+    disabled_tools 列出被用户禁用的内置工具名（条件性工具如 web_search
+    平台未启用时也可预先禁用，配置生效后即被过滤）。未配置（无行）或
+    名单为空表示全部启用，与功能上线前行为一致。stream_chat 组装工具
+    目录时按名单过滤；执行级对模型幻觉调用已禁用工具再防御性拒绝。
+    MCP 工具不在此名单（继续由 server.enabled 管理，避免双控制点）。
+    """
+
+    __tablename__ = "super_assistant_tool_settings"
+
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    disabled_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class SuperAssistantWidgetConfig(Base):
     """悬浮 AI 助手（迷你超级助手）的页面可见范围配置（平台级单例）。
 

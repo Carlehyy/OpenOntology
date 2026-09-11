@@ -272,6 +272,14 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 内置工具目录与用户级启停：同前缀同守卫的独立子路由
+from app.super_assistant import tools as super_assistant_tools
+app.include_router(
+    super_assistant_tools.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 远程助手（声明式注册目录：CRUD/连接测试）：同前缀同守卫的独立子路由
 from app.super_assistant import remote_agents as super_assistant_remote_agents
 app.include_router(
