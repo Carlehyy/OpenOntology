@@ -137,16 +137,6 @@ export default function CuratedTab() {
             const report = reports[ds.id]
             const isPending = ds.status === 'pending_review'
 
-            // 推断来源数据类型（从名称）
-            const routeHint = ds.name.includes('Route-B') || ds.name.includes('供应商订单') ? 'B'
-              : ds.name.includes('Route-C') || ds.name.includes('策略') || ds.name.includes('文档') ? 'C'
-              : 'A'
-            const routeStyle: Record<string, string> = {
-              A: 'bg-[var(--color-info-bg)] text-[var(--color-info)] border-[color-mix(in_srgb,var(--color-info)_35%,transparent)]',
-              B: 'bg-[var(--color-warning-bg)] text-[var(--color-warning)] border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)]',
-              C: 'bg-viz-violet-soft text-viz-violet border-viz-violet-soft',
-            }
-
             return (
               <div key={ds.id} className="border rounded-xl overflow-hidden bg-card">
                 {/* 标题行 */}
@@ -155,9 +145,6 @@ export default function CuratedTab() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-sm truncate">{ds.name}</span>
-                      <span className={`text-xs px-1.5 py-0.5 rounded border flex-shrink-0 ${routeStyle[routeHint]}`}>
-                        Route {routeHint}
-                      </span>
                       <span className="text-xs bg-muted text-muted-foreground px-1.5 py-0.5 rounded flex-shrink-0">
                         {statusLabel[ds.status] ?? ds.status}
                       </span>
