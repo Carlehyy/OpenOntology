@@ -502,7 +502,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       <Dialog open={newGroupOpen} onOpenChange={next => { if (!next) closeNewGroup() }}>
         <DialogContent className="w-[min(92vw,26rem)]">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>新增分类</DialogTitle>
               <DialogDescription>输入新的分类名称，添加后当前接口会立即选中该分类。</DialogDescription>
             </div>
@@ -525,7 +525,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       >
         <DialogContent className="w-[min(92vw,37.5rem)]">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>上游调试 cURL</DialogTitle>
             </div>
           </DialogHeader>

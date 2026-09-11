@@ -18,6 +18,7 @@ import { toast } from 'sonner'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -568,19 +569,19 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
         >
           {maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </button>
-        <DialogHeader>
+        <DialogHeader icon={<Brain size={18} />}>
           <DialogTitle className="flex items-center gap-2">
-            <Brain size={16} className="text-brand-ink" /> 知识图谱
+            知识图谱
             {building && (
               <span className="ml-2 flex items-center gap-1 text-xs font-normal text-amber-600">
                 <Loader2 size={12} className="animate-spin" /> 图谱构建中…
               </span>
             )}
           </DialogTitle>
+          <DialogDescription>
+            上传的文档沉淀为跨会话长期知识：自动抽取实体关系构建图谱，选中文件可阅读编辑，图谱与文档双向联动。
+          </DialogDescription>
         </DialogHeader>
-        <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-          上传的文档沉淀为跨会话长期知识：自动抽取实体关系构建图谱，选中文件可阅读编辑，图谱与文档双向联动。
-        </p>
 
         <div className={`grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto lg:overflow-hidden ${
             maximized

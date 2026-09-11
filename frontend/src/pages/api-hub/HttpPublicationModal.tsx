@@ -123,14 +123,9 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
       <DialogContent className="w-[min(92vw,48rem)]">
-        <DialogHeader>
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--color-bg-hover)] text-[var(--color-nav-bg)]">
-            <Share2 size={19} />
-          </div>
-          <div className="min-w-0 pt-0.5">
-            <DialogTitle>{`HTTP 发布 · ${current.name}`}</DialogTitle>
-            <DialogDescription>勾选调用方可传入的业务参数后，平台生成可直接复制的调用包；固定值和认证信息继续由平台保管。</DialogDescription>
-          </div>
+        <DialogHeader icon={<Share2 size={18} />}>
+          <DialogTitle>{`HTTP 发布 · ${current.name}`}</DialogTitle>
+          <DialogDescription>勾选调用方可传入的业务参数后，平台生成可直接复制的调用包；固定值和认证信息继续由平台保管。</DialogDescription>
         </DialogHeader>
         <div className="max-h-[66vh] space-y-5 overflow-y-auto pr-1">
         <section className={`flex items-center justify-between gap-5 rounded-xl border px-4 py-4 ${current.http_enabled ? 'border-brand-line bg-brand-soft' : 'border-brand-line bg-brand-soft'}`}>

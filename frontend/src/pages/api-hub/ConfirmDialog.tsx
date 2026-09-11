@@ -47,7 +47,7 @@ export function ConfirmDialog({
           >
             {danger || warning ? <AlertTriangle size={19} /> : <Info size={19} />}
           </div>
-          <div className="min-w-0 pt-0.5">
+          <div className="min-w-0">
             <DialogTitle>{title}</DialogTitle>
           </div>
         </DialogHeader>

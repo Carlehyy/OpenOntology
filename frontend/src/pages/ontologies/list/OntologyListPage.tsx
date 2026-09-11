@@ -128,18 +128,13 @@ function OntologyFormModal({
   return (
     <Dialog open={open} onOpenChange={next => { if (!next && !saving) onClose() }}>
       <DialogContent className="w-[min(92vw,32rem)]">
-        <DialogHeader>
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-ink">
-            {initial ? <Pencil size={18} /> : <Plus size={19} />}
-          </div>
-          <div className="min-w-0 pt-0.5">
-            <DialogTitle>{title}</DialogTitle>
-            <DialogDescription>
-              {initial
-                ? '更新本体的名称、领域与说明，不会影响已经维护的结构和版本。'
-                : '填写基本信息后即可使用，后续可在详情页维护结构与版本。'}
-            </DialogDescription>
-          </div>
+        <DialogHeader icon={initial ? <Pencil size={18} /> : <Plus size={18} />}>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>
+            {initial
+              ? '更新本体的名称、领域与说明，不会影响已经维护的结构和版本。'
+              : '填写基本信息后即可使用，后续可在详情页维护结构与版本。'}
+          </DialogDescription>
         </DialogHeader>
       <div className="space-y-5">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

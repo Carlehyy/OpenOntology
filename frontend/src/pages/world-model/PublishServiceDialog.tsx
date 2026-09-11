@@ -123,16 +123,11 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
   return (
     <Dialog open={open} onOpenChange={next => { if (!next && !submitting) onClose() }}>
       <DialogContent className="w-[min(92vw,40rem)]">
-        <DialogHeader>
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-ink">
-            <Rocket size={17} />
-          </div>
-          <div className="min-w-0 pt-0.5">
-            <DialogTitle>{service ? '重新发布推演服务' : '发布为推演服务'}</DialogTitle>
-            <DialogDescription>
-              发布即上线：选定冻结版本并完成本体语义注册后，服务会获得对外调用端点，重复发布将覆盖更新。
-            </DialogDescription>
-          </div>
+        <DialogHeader icon={<Rocket size={18} />}>
+          <DialogTitle>{service ? '重新发布推演服务' : '发布为推演服务'}</DialogTitle>
+          <DialogDescription>
+            发布即上线：选定冻结版本并完成本体语义注册后，服务会获得对外调用端点，重复发布将覆盖更新。
+          </DialogDescription>
         </DialogHeader>
       <div className="space-y-5">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 import {
@@ -388,19 +389,23 @@ export default function CreateTableModal({ onClose, onCreated }: {
   const progressFailed = importStatus === 'failed'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]">
-      <div className="flex max-h-[86vh] w-[min(96vw,1120px)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
-        role="dialog" aria-modal="true" aria-labelledby="create-table-title">
-        <header className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-soft text-brand-ink"><Table2 size={16} /></span>
-          <div className="min-w-0 flex-1">
-            <h3 id="create-table-title" className="text-sm font-semibold text-foreground">在线新建表格</h3>
-            <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">上传一个现有表格自动识别名称与字段，或直接定义一张空表；创建前可统一检查字段契约。</p>
-          </div>
-          <button type="button" onClick={onClose} disabled={submitting || parsing}
-            className="grid h-8 w-8 place-items-center rounded-lg text-[var(--color-text-tertiary)] transition hover:bg-muted hover:text-foreground disabled:opacity-40"
-            aria-label="关闭在线新建表格"><X size={16} /></button>
-        </header>
+    <Dialog
+      open
+      onOpenChange={next => { if (!next && !submitting && !parsing) onClose() }}
+    >
+      <DialogContent
+        className="flex max-h-[86vh] w-[min(96vw,1120px)] flex-col p-0"
+        dismissible={!(submitting || parsing)}
+      >
+        <DialogHeader
+          className="mb-0 shrink-0 border-b border-border px-5 pb-3 pt-4"
+          icon={<Table2 size={18} />}
+        >
+          <DialogTitle>在线新建表格</DialogTitle>
+          <DialogDescription>
+            上传一个现有表格自动识别名称与字段，或直接定义一张空表；创建前可统一检查字段契约。
+          </DialogDescription>
+        </DialogHeader>
 
         <main className="min-h-0 flex-1 overflow-auto">
           <section className="border-b border-border px-5 py-4">
@@ -508,7 +513,7 @@ export default function CreateTableModal({ onClose, onCreated }: {
           <button type="button" onClick={onClose} disabled={submitting} className="h-8 rounded-lg border border-border bg-card px-3 text-xs font-medium text-muted-foreground transition hover:bg-muted disabled:opacity-40">取消</button>
           <button type="button" onClick={() => void handleSubmit()} disabled={submitting || parsing || !hasSource || duplicateFieldKeys.size > 0} className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand-deep px-4 text-xs font-medium text-[var(--color-text-inverse)] transition hover:bg-brand-deep disabled:opacity-40">{submitting ? <Loader2 size={12} className="animate-spin" /> : file ? <Upload size={12} /> : <Table2 size={12} />}{file ? '导入并创建' : '创建空表'}</button>
         </footer>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

@@ -63,8 +63,33 @@ function DialogContent({
   )
 }
 
-function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('mb-4 flex items-start gap-3 pr-8', className)} {...props} />
+function DialogHeader({
+  className,
+  icon,
+  iconClassName,
+  children,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement> & {
+  /** 标准图标盒（h-10 w-10 rounded-xl，默认品牌底）；传入后 children 自动进入
+      文字列并对齐光学中心：标题行(leading-6=24px) + pt-2(8px) 与 40px 图标盒同心 */
+  icon?: React.ReactNode
+  iconClassName?: string
+}) {
+  return (
+    <div className={cn('mb-4 flex items-start gap-3 pr-14', className)} {...props}>
+      {icon && (
+        <div
+          className={cn(
+            'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-ink',
+            iconClassName,
+          )}
+        >
+          {icon}
+        </div>
+      )}
+      {icon ? <div className="min-w-0 pt-2">{children}</div> : children}
+    </div>
+  )
 }
 
 function DialogFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {

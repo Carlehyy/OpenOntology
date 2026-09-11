@@ -1,19 +1,21 @@
-// 本体模型域内确认弹窗：基于 vendored Radix Dialog（component-catalog.ts
-// 「弹窗 / 对话框」条目）组合，替换旧 ui/Modal 的 ConfirmModal 在本域的
-// 用法；不属于新的弹窗体系，禁止在域外复用前先沉淀进 components/ui。
+// 全站唯一确认弹窗（component-catalog「弹窗 / 对话框」+ DESIGN.md §4.5 头部模板）。
+// 收敛自 4 套并行实现：pages/ontologies|api-hub/ConfirmDialog、
+// components/ConfirmDialog（legacy 手写 overlay）、super-assistant ConfirmActionDialog。
+// 视觉：标准 Dialog 壳 + 语义图标盒头部 + 语义浅底描述 callout + outline/主色|危险按钮。
+import * as React from 'react'
 import { AlertTriangle, Info } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { Button } from '@/components/ui/Button'
+import { Button } from './Button'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog'
+} from './dialog'
 
-interface ConfirmDialogProps {
+export interface ConfirmDialogProps {
   open: boolean
   onClose: () => void
   onConfirm: () => void
   title: string
-  description?: string
+  description?: React.ReactNode
   confirmText?: string
   cancelText?: string
   variant?: 'danger' | 'warning' | 'default'
@@ -36,20 +38,15 @@ export function ConfirmDialog({
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
       <DialogContent className="w-[min(92vw,26rem)]">
-        <DialogHeader>
-          <div
-            className={cn(
-              'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl',
-              danger ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'
-                : warning ? 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'
-                  : 'bg-[var(--color-bg-hover)] text-[var(--color-nav-bg)]',
-            )}
-          >
-            {danger || warning ? <AlertTriangle size={19} /> : <Info size={19} />}
-          </div>
-          <div className="min-w-0">
-            <DialogTitle>{title}</DialogTitle>
-          </div>
+        <DialogHeader
+          icon={danger || warning ? <AlertTriangle size={18} /> : <Info size={18} />}
+          iconClassName={cn(
+            danger && 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
+            warning && 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
+            !danger && !warning && 'bg-[var(--color-bg-hover)] text-[var(--color-nav-bg)]',
+          )}
+        >
+          <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
         {description && (
           <DialogDescription

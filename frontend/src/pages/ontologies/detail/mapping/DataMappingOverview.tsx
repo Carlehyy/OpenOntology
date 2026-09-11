@@ -1020,7 +1020,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
       <Dialog open={reconcileTarget !== null} onOpenChange={next => { if (!next) setReconcileTarget(null) }}>
         <DialogContent className="w-[min(92vw,26rem)]">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>确认重新灌入数据</DialogTitle>
             </div>
           </DialogHeader>

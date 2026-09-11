@@ -698,7 +698,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         <Dialog open onOpenChange={next => { if (!next) setSource(null) }}>
           <DialogContent className="w-[min(92vw,26rem)]">
             <DialogHeader>
-              <div className="min-w-0 pt-0.5">
+              <div className="min-w-0">
                 <DialogTitle>{source.node_kind === 'release' && source.id !== currentReleaseId
                   ? `从 ${source.version_number} 创建恢复草稿`
                   : `从 ${source.version_number} 创建完整分支`}</DialogTitle>
@@ -738,7 +738,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         <Dialog open onOpenChange={next => { if (!next) setTrialDetail(null) }}>
           <DialogContent className="flex h-[min(88dvh,860px)] w-[min(92vw,64rem)] flex-col">
             <DialogHeader>
-              <div className="min-w-0 pt-0.5">
+              <div className="min-w-0">
                 <DialogTitle>隔离试跑结果</DialogTitle>
                 <DialogDescription>先审查试跑将产生的动作计划，再决定是否进入发布。</DialogDescription>
               </div>
@@ -791,7 +791,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
                   <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${blocked ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]' : 'bg-[var(--color-success-bg)] text-[var(--color-success)]'}`}>
                     {blocked ? <CircleAlert size={20} /> : <ShieldCheck size={20} />}
                   </div>
-                  <div className="min-w-0 pt-0.5">
+                  <div className="min-w-0">
                     <DialogTitle>{`发布前检查 · ${promotion.node.version_number}`}</DialogTitle>
                   </div>
                 </DialogHeader>

@@ -148,6 +148,41 @@ success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引�
   双环已删除；mapping-overview/overview-dashboard/mapping-configuration/login
   页域 CSS 的焦点 outline/光晕统一为 `var(--color-ring)`。
 
+### 4.5 弹窗头部（图标 + 标题 + 描述唯一模板）
+
+- **几何唯一**（`DialogHeader` 的 `icon` props 与 `Modal` 内建头部同规格）：
+  头部行 `flex items-start gap-3 pr-14`（pr-14 为右上角关闭符预留安全区）；
+  图标盒 `h-10 w-10 rounded-xl`、图形统一 lucide `size={18}`；
+  文字列 `min-w-0 pt-2`——标题行高 24px，(40−24)/2=8px 使标题行光学中心
+  与图标盒中心精确重合；标题 `text-base font-semibold leading-6`，
+  描述 `text-sm leading-6 mt-1`。
+- **色彩语义**：图标盒底色按弹窗语义选择并经 `iconClassName` 传入——
+  创建/发布类默认品牌底 `bg-brand-soft text-brand-ink`；危险/警告/信息
+  确认类用对应语义浅底深字（`bg-[var(--color-danger-bg)]` 等）。
+- **用法**：Radix `Dialog` 一律经 `DialogHeader`（icon 可选）组装头部，
+  禁止手写图标盒或把图标内联进 `DialogTitle`；`Modal` 继续走内建
+  `headerIcon`。无图标头部为合法形态（纯文字列，不加光学补偿）。
+- 超级助手工作台内的紧凑面板弹窗（AssistantConfiguration/Evolution）允许
+  经 className 覆盖为小字号密度变体，但几何与间距仍走本模板。
+- 手写 overlay 一律收敛回 `ui/dialog` / `ui/Modal` 标准壳（2026-09 已完成
+  CreateTableModal 迁移）。
+
+### 4.6 消息提示（瞬态 / 持久二分）
+
+- **瞬态操作反馈**（保存成功、删除完成、请求失败等看完即走）：统一全局
+  Sonner（`import { toast } from 'sonner'`，`App.tsx` 挂载 top-center），
+  按 success/error/warning/info 选用语义图标；**不开启全局 closeButton**
+  （居中位置下关闭符落在 toast 左缘、悬浮于弹窗之上，易被误读为弹窗的
+  一部分；toast 点击本体或 4s 自动消失即达关闭目的）。禁止页内自建
+  fixed 定位 toast、平行 toast 库与 `window.alert`。
+- **持久上下文信息**（表单校验、试跑前置检查等需停留阅读）：统一
+  `components/ui/Alert` 四档语义浅底（info/success/warning/danger）；
+  `role="alert"` 等可达性属性由调用方按语义传入。禁止语义色手写横幅
+  再扩散（存量由色板/颜色棘轮锁定只减不增）。
+- **确认动作**（删除、废弃等需明确意图）：统一 `components/ui/ConfirmDialog`
+  （danger/warning/default 三档语义图标与按钮）；禁止 `window.confirm`/
+  `window.prompt` 与域内自建确认框。
+
 ## 5. 图表规范（ECharts 为主要标准）
 
 ### 5.1 唯一主题来源 `frontend/src/lib/echartsTheme.ts`

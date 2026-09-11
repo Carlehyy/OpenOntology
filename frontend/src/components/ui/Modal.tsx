@@ -101,7 +101,7 @@ export function Modal({
                 {headerIcon}
               </div>
             )}
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0 pt-2">
               {title && (
                 <h3 id={titleId} className="text-base font-semibold tracking-[-0.01em] text-[var(--color-text-primary)]">
                   {title}

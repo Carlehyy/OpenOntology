@@ -76,7 +76,7 @@ export function ProxyKeysModal({ open, onClose, interfaces, onError }: Omit<Shar
       <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
         <DialogContent className="w-[min(92vw,48rem)]">
           <DialogHeader>
-            <div className="min-w-0 pt-0.5">
+            <div className="min-w-0">
               <DialogTitle>调用方管理</DialogTitle>
               <DialogDescription>查看、停用或撤销平台已经生成的调用凭证；日常分享无需在这里手动创建。</DialogDescription>
             </div>
@@ -126,7 +126,7 @@ export function SystemDataModal({ open, onClose, interfaces, reload, onError }: 
     <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
       <DialogContent className="w-[min(92vw,48rem)]">
         <DialogHeader>
-          <div className="min-w-0 pt-0.5">
+          <div className="min-w-0">
             <DialogTitle>系统数据</DialogTitle>
             <DialogDescription>备份或还原接口清单；调用历史、W3 凭据和代理密钥不会写入备份。</DialogDescription>
           </div>

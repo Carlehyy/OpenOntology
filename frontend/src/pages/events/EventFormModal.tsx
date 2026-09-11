@@ -199,14 +199,9 @@ export default function EventFormModal({
         className="flex max-h-[min(88dvh,900px)] w-[min(92vw,64rem)] flex-col"
         dismissible={!mutation.isPending}
       >
-        <DialogHeader>
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--color-success-bg)] text-[var(--color-success)]">
-            <FilePlus2 size={19} />
-          </div>
-          <div className="min-w-0 pt-0.5">
-            <DialogTitle>{isEdit ? '编辑事件' : '登记事件'}</DialogTitle>
-            {!isEdit && <DialogDescription>记录一条业务事件，供后续本体优化挖掘</DialogDescription>}
-          </div>
+        <DialogHeader icon={<FilePlus2 size={18} />}>
+          <DialogTitle>{isEdit ? '编辑事件' : '登记事件'}</DialogTitle>
+          {!isEdit && <DialogDescription>记录一条业务事件，供后续本体优化挖掘</DialogDescription>}
         </DialogHeader>
       <div className="max-h-[68vh] space-y-5 overflow-y-auto px-1 pb-1 pr-2">
         {error && (
