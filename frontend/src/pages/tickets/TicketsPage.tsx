@@ -14,6 +14,7 @@ import {
 import TicketFormModal from '@/components/tickets/TicketFormModal'
 import TicketDetailDrawer from './TicketDetailDrawer'
 import { CategoryBadge, StatusBadge } from './shared'
+import { KpiStatCard } from '@/components/KpiStatCard'
 
 // 与「事件登记」一致的基础面板：白底、细边框、轻阴影。
 const PANEL = 'rounded-xl border border-border bg-card shadow-sm/50'
@@ -152,7 +153,7 @@ export default function TicketsPage() {
                 <th className="w-[30%] px-4 py-3 text-left font-medium">工单</th>
                 <th className="w-[14%] px-3 py-3 text-center font-medium">提交人</th>
                 <th className="w-[11%] px-3 py-3 text-center font-medium">状态</th>
-                <th className="w-[22%] px-3 py-3 text-center font-medium">反馈内容</th>
+                <th className="w-[22%] px-3 py-3 text-left font-medium">反馈内容</th>
                 <th className="w-[10%] px-3 py-3 text-center font-medium">附件</th>
                 <th className="w-[13%] px-3 py-3 text-center font-medium">提交时间</th>
               </tr>
@@ -201,7 +202,7 @@ export default function TicketsPage() {
                   <td className="px-3 py-3 text-center align-middle">
                     <div className="flex justify-center"><StatusBadge status={row.status} /></div>
                   </td>
-                  <td className="max-w-0 px-3 py-3 text-center align-middle text-muted-foreground">
+                  <td className="max-w-0 px-3 py-3 text-left align-middle text-muted-foreground">
                     <div className="truncate" title={row.content}>{row.content || <span className="italic text-[var(--color-text-tertiary)]">无内容</span>}</div>
                   </td>
                   <td className="px-3 py-3 text-center align-middle">
@@ -300,14 +301,10 @@ function MetricCard({
   loading?: boolean
 }) {
   return (
-    <div className={`${PANEL} min-w-0 px-3 py-2.5`}>
-      <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-        {dot ?? icon}
-        {label}
-      </p>
-      <p className="mt-0.5 text-2xl font-semibold tabular-nums text-foreground">
-        {loading ? <Loader2 className="h-5 w-5 animate-spin text-[var(--color-text-tertiary)]" /> : value.toLocaleString()}
-      </p>
-    </div>
+    <KpiStatCard
+      label={label}
+      value={loading ? <Loader2 className="h-5 w-5 animate-spin text-[var(--color-text-tertiary)]" /> : value.toLocaleString()}
+      icon={dot ?? icon}
+    />
   )
 }

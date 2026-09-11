@@ -14,6 +14,7 @@ import TaskFormModal from './TaskFormModal'
 import HistoryDrawer from './HistoryDrawer'
 import GlobalHistoryModal from './GlobalHistoryModal'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { KpiStatCard } from '@/components/KpiStatCard'
 
 // ── 常量 ──────────────────────────────────────────────
 const QUICK_TABS = [
@@ -86,17 +87,11 @@ function toLocalDate(iso: string): Date {
 
 function TimeInline({ iso, withSeconds }: { iso: string | null | undefined; withSeconds?: boolean }) {
   if (!iso) return <span className="whitespace-nowrap text-xs text-[var(--color-text-tertiary)]">—</span>
-  try {
-    const d = toLocalDate(iso)
-    const p = (n: number) => String(n).padStart(2, '0')
-    const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
-    const time = withSeconds
-      ? `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-      : `${p(d.getHours())}:${p(d.getMinutes())}`
-    return <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">{date} {time}</span>
-  } catch {
-    return <span className="whitespace-nowrap text-xs text-muted-foreground">{iso}</span>
-  }
+  return (
+    <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
+      {formatDateTime(iso, { seconds: withSeconds, fallback: iso })}
+    </span>
+  )
 }
 
 function relativeDuration(seconds?: number): string {
@@ -448,11 +443,11 @@ export default function SyncTasksTab() {
       </div>
 
       <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
-        <KpiCard label="任务总数" value={stats?.total ?? 0} note="当前任务配置" icon={<Database size={13} />} tone="slate" />
-        <KpiCard label="已启用" value={stats?.enabled ?? 0} note="可被计划调度" icon={<CheckCircle2 size={13} />} tone="emerald" />
-        <KpiCard label="今日执行" value={stats?.today_runs ?? 0} note={`累计 ${stats?.total_runs ?? 0} 次`} icon={<Activity size={13} />} tone="teal" />
-        <KpiCard label="今日异常" value={stats?.today_errors ?? 0} note={`累计 ${stats?.total_errors ?? 0} 次`} icon={<AlertCircle size={13} />} tone="rose" pulse={(stats?.today_errors ?? 0) > 0} />
-        <KpiCard label="今日成功率" value={todaySuccessRate} note="基于今日执行结果" icon={<Waves size={13} />} tone="cyan" />
+        <KpiStatCard label="任务总数" value={stats?.total ?? 0} note="当前任务配置" icon={<Database size={13} />} />
+        <KpiStatCard label="已启用" value={stats?.enabled ?? 0} note="可被计划调度" icon={<CheckCircle2 size={13} />} tone="success" />
+        <KpiStatCard label="今日执行" value={stats?.today_runs ?? 0} note={`累计 ${stats?.total_runs ?? 0} 次`} icon={<Activity size={13} />} tone="brand" />
+        <KpiStatCard label="今日异常" value={stats?.today_errors ?? 0} note={`累计 ${stats?.total_errors ?? 0} 次`} icon={<AlertCircle size={13} />} tone="danger" toneActive={(stats?.today_errors ?? 0) > 0} pulse />
+        <KpiStatCard label="今日成功率" value={todaySuccessRate} note="基于今日执行结果" icon={<Waves size={13} />} tone="info" />
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 2xl:grid-cols-12">
@@ -578,7 +573,7 @@ export default function SyncTasksTab() {
                           <th scope="col" data-column="run-status" className="min-w-[105px] px-4 py-2.5 text-center font-medium">运行状态</th>
                           <th scope="col" data-column="enabled" className="min-w-[105px] px-4 py-2.5 text-center font-medium">启停</th>
                           <th scope="col" data-column="pipeline" className="min-w-[240px] px-4 py-2.5 text-center font-medium">关联流水线</th>
-                          <th scope="col" data-column="last-run" className="min-w-[185px] px-4 py-2.5 text-center font-medium">最近执行</th>
+                          <th scope="col" data-column="last-run" className="min-w-[205px] px-4 py-2.5 text-center font-medium">最近执行</th>
                           <th scope="col" data-column="lake-result" className="min-w-[210px] px-4 py-2.5 text-center font-medium">入湖结果</th>
                           <th scope="col" data-column="next-run" className="min-w-[190px] px-4 py-2.5 text-center font-medium">下次执行</th>
                           <th scope="col" data-column="schedule-type" className="min-w-[110px] px-4 py-2.5 text-center font-medium">调度方式</th>
@@ -879,40 +874,6 @@ export default function SyncTasksTab() {
 }
 
 // ── 子组件 ────────────────────────────────────────────
-
-function KpiCard({
-  label, value, note, icon, tone, pulse,
-}: {
-  label: string
-  value: number | string
-  note: string
-  icon: ReactNode
-  tone: 'slate' | 'rose' | 'emerald' | 'teal' | 'cyan'
-  pulse?: boolean
-}) {
-  const toneMap = {
-    slate:   { text: 'text-foreground',   iconBg: 'bg-muted text-muted-foreground' },
-    rose:    { text: 'text-viz-rose',    iconBg: 'bg-viz-rose-soft text-viz-rose' },
-    emerald: { text: 'text-[var(--color-success)]', iconBg: 'bg-[var(--color-success-bg)] text-[var(--color-success)]' },
-    teal:    { text: 'text-brand-ink',    iconBg: 'bg-brand-soft text-brand-ink' },
-    cyan:    { text: 'text-viz-cyan',    iconBg: 'bg-viz-cyan-soft text-viz-cyan' },
-  }[tone]
-  return (
-    <div className="rounded-xl border border-border bg-card px-4 py-3 shadow-sm/50">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-[11px] font-medium text-muted-foreground">{label}</span>
-        <span className={`relative grid h-6 w-6 shrink-0 place-items-center rounded-md ${toneMap.iconBg}`}>
-          {icon}
-          {pulse && (
-            <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 animate-ping rounded-full bg-current opacity-60" />
-          )}
-        </span>
-      </div>
-      <p className={`mt-0.5 text-xl font-semibold leading-none tracking-tight tabular-nums ${toneMap.text}`}>{value}</p>
-      <p className="mt-1 truncate text-[10px] text-[var(--color-text-tertiary)]" title={note}>{note}</p>
-    </div>
-  )
-}
 
 function LegendRow({ color, label, value }: { color: string; label: string; value: number }) {
   return (

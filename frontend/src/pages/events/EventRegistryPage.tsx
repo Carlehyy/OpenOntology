@@ -14,6 +14,7 @@ import EventDetailDrawer from './EventDetailDrawer'
 import IngestKeysDrawer from './IngestKeysDrawer'
 import { PALETTE, fmt, SeverityBadge } from './shared'
 import { Select as UiSelect, SelectContent as UiSelectContent, SelectItem as UiSelectItem, SelectTrigger as UiSelectTrigger, SelectValue as UiSelectValue } from '@/components/ui/select'
+import { KpiStatCard } from '@/components/KpiStatCard'
 
 // 与「数据资产湖」一致的基础面板：白底、细边框、轻阴影。
 const PANEL = 'rounded-xl border border-border bg-card shadow-sm/50'
@@ -363,7 +364,7 @@ export default function EventRegistryPage() {
                   <th className="w-[22%] px-4 py-3 text-left font-medium">事件</th>
                   <th className="w-[13%] px-3 py-3 text-center font-medium">来源</th>
                   <th className="w-[9%] px-3 py-3 text-center font-medium">级别</th>
-                  <th className="w-[19%] px-3 py-3 text-center font-medium">描述</th>
+                  <th className="w-[19%] px-3 py-3 text-left font-medium">描述</th>
                   <th className="w-[11%] px-3 py-3 text-center font-medium">附件</th>
                   <th className="w-[12%] px-3 py-3 text-center font-medium">发生时间</th>
                   <th className="w-[14%] px-2 py-3 text-center font-medium">操作</th>
@@ -416,7 +417,7 @@ export default function EventRegistryPage() {
                       <div className="flex justify-center"><SourceTag sourceType={r.sourceType} reporter={r.reporterName} sourceLabel={r.sourceLabel} /></div>
                     </td>
                     <td className="px-3 py-3 text-center align-middle"><SeverityBadge sev={r.severity} /></td>
-                    <td className="max-w-0 px-3 py-3 text-center align-middle text-muted-foreground">
+                    <td className="max-w-0 px-3 py-3 text-left align-middle text-muted-foreground">
                       <div className="truncate" title={r.description || undefined}>{r.description || <span className="italic text-[var(--color-text-tertiary)]">无描述</span>}</div>
                     </td>
                     <td className="px-3 py-3 text-center align-middle">
@@ -547,13 +548,7 @@ export default function EventRegistryPage() {
 
 // ─── 小型指标卡 ──────────────────────────────────────────
 function MetricCard({ label, value, sub }: { label: string; value: number; sub?: string }) {
-  return (
-    <div className={`${PANEL} min-w-0 px-3 py-2.5`}>
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="mt-0.5 text-2xl font-semibold tabular-nums text-foreground">{value.toLocaleString()}</p>
-      <p className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]" title={sub}>{sub}</p>
-    </div>
-  )
+  return <KpiStatCard label={label} value={value.toLocaleString()} note={sub} />
 }
 
 // ─── 下拉选择 ────────────────────────────────────────────

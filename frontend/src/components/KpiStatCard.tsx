@@ -18,7 +18,7 @@ const TONE_MAP: Record<KpiTone, ToneStyle> = {
 
 export interface KpiStatCardProps {
   label: string
-  value: number | string
+  value: number | string | ReactNode
   note?: string
   icon?: ReactNode
   /**
