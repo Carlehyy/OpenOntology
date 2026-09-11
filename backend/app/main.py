@@ -280,6 +280,23 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 远程助手邀请（属主侧：创建/列出/撤销一次性接入邀请，邀请函重发）：同前缀同守卫
+from app.super_assistant import remote_agent_invites as super_assistant_remote_agent_invites
+app.include_router(
+    super_assistant_remote_agent_invites.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
+# 远程助手公开面（先例：/api/public/manual-datasets）：远端 agent 凭一次性邀请
+# 令牌自助注册；回连模式凭 agent key 长轮询领任务/回传结果。无会话鉴权，
+# 门禁分别是邀请令牌与 agent key（sha256 哈希查表）。
+from app.super_assistant import remote_agent_public as super_assistant_remote_agent_public
+app.include_router(
+    super_assistant_remote_agent_public.router,
+    prefix="/api/public/super-assistant/remote-agents",
+    tags=["super-assistant-public"],
+)
 # 悬浮助手页面可见范围配置：GET 面向全体登录用户（不受 super_assistant 菜单权限约束），
 # PUT 仅管理员，鉴权在路由级声明，故此处不挂 menu_guard。
 from app.super_assistant import widget_config as super_assistant_widget_config

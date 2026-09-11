@@ -263,22 +263,31 @@ class RemoteAgentOut(BaseModel):
     token_set: bool
     enabled: bool
     timeout_seconds: int
+    # direct = 平台主动外呼远端端点；pull = 远端长轮询回连（NAT 友好）
+    mode: str = "direct"
+    last_seen_at: datetime | None = None
+    # 最近一次被委派执行回合的时间（直连模式的活动信号）
+    last_turn_at: datetime | None = None
 
 
 class RemoteAgentCreate(BaseModel):
-    # key 命名空间 remote.* 与平台内置助手隔离（校验见 remote_agent_service）
-    key: str = Field(min_length=1, max_length=50)
+    # key 命名空间 remote.* 与平台内置助手隔离（校验见 remote_agent_service）；
+    # 可缺省/留空：由服务层按名称自动生成
+    key: str | None = Field(default=None, max_length=50)
     label: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=2000)
-    endpoint: str = Field(min_length=1, max_length=1000)
+    # direct 模式必填回合端点（服务层校验）；pull 模式不需要
+    endpoint: str | None = Field(default=None, max_length=1000)
     # token 加密存储、永不回显
     token: str | None = Field(default=None, max_length=2000)
     enabled: bool = True
     timeout_seconds: int = 120
+    mode: str = "direct"
 
 
 class RemoteAgentUpdate(BaseModel):
-    # 全部可选：缺省/None 表示不修改；token 留空表示保留已存凭据
+    # 全部可选：缺省/None 表示不修改；token 留空表示保留已存凭据；
+    # mode 创建后不可改（传输身份），endpoint 仅 direct 行使用
     label: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=2000)
     endpoint: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -290,6 +299,75 @@ class RemoteAgentUpdate(BaseModel):
 class RemoteAgentTestOut(BaseModel):
     ok: bool
     message: str
+
+
+# ------------------------------------------------------- 邀请自助接入（v2）
+
+
+class RemoteAgentInviteOut(BaseModel):
+    """邀请状态行（不含令牌本体；待使用期间可经 token_encrypted 重发邀请函）。"""
+
+    id: str
+    status: str  # pending | used | expired | revoked
+    created_at: datetime
+    expires_at: datetime
+    redeemed_agent_key: str | None = None
+    redeemed_agent_label: str | None = None
+
+
+class RemoteAgentInviteCreatedOut(BaseModel):
+    """创建邀请的响应：邀请函全文由后端单源生成（含一次性令牌）。"""
+
+    id: str
+    status: str
+    expires_at: datetime
+    prompt_text: str
+
+
+class RemoteAgentRedeemIn(BaseModel):
+    """远端 agent 凭邀请令牌自助注册的请求体（公开端点，无会话鉴权）。"""
+
+    invite_token: str = Field(min_length=10, max_length=200)
+    mode: str = "direct"  # direct | pull
+    # RAP 协议版本（注册时声明；平台不认识的版本拒绝，见 remote_agent_service）
+    rap_version: int = Field(default=1, ge=1, le=99)
+    key: str | None = Field(default=None, max_length=50)
+    label: str = Field(min_length=1, max_length=100)
+    # 远端自述将拼入委派目录（LLM 上下文），比受信的手动路径更紧
+    description: str = Field(default="", max_length=1000)
+    endpoint: str | None = Field(default=None, max_length=1000)
+    token: str | None = Field(default=None, max_length=2000)
+    timeout_seconds: int = Field(default=120, ge=10, le=600)
+
+
+class RemoteAgentRedeemOut(BaseModel):
+    mode: str
+    key: str
+    label: str
+    # 平台确认采用的 RAP 协议版本（后续任务载荷同值携带）
+    rap_version: int = 1
+    # 回连模式一次性发放的 agent key（sha256 哈希落库，此后不再回显）
+    agent_key: str | None = None
+
+
+class RemoteAgentTaskNextOut(BaseModel):
+    """回连模式长轮询领取的任务体。"""
+
+    task_id: str
+    message: str
+    session_ref: str | None
+    timeout_seconds: int
+    # 本任务遵循的 RAP 协议版本（与注册时协商值一致）
+    rap_version: int = 1
+
+
+class RemoteAgentTaskResultIn(BaseModel):
+    """回连模式任务结果回传体（契约与直连回合响应一致；体积封顶防滥用）。"""
+
+    status: str  # answered | failed
+    content: str = Field(default="", max_length=20000)
+    session_ref: str | None = Field(default=None, max_length=255)
+    note: str = Field(default="", max_length=2000)
 
 
 class MulticaConfigUpdate(BaseModel):
