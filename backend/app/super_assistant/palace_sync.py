@@ -65,7 +65,15 @@ def current_sync_token(db: Session, owner_id: str) -> str:
     row = db.get(SuperAssistantPalaceSyncToken, owner_id)
     if row is None:
         return generate_sync_token(db, owner_id)
-    return decrypt_value(row.token_encrypted)
+    try:
+        return decrypt_value(row.token_encrypted)
+    except Exception as exc:
+        # ENCRYPTION_KEY 轮换后旧密文不可解（令牌鉴权走 hash 不受影响，
+        # 已下发脚本仍可用）；显式引导重置而非裸 500。
+        raise HTTPException(
+            409,
+            "加密密钥已变更，无法还原既有同步令牌；请先重置同步令牌再下载脚本",
+        ) from exc
 
 
 def get_palace_sync_user(
@@ -93,8 +101,15 @@ def get_palace_sync_user(
                 "menu_key": "super_assistant",
             },
         )
-    row.last_used_at = datetime.now(timezone.utc)
-    db.commit()
+    # last_used_at 节流写入：大批量同步是数百次连发请求，逐请求提交只添
+    # 写放大；60 秒内的重复调用不再触碰该列（检测信号精度足够）。
+    stamp = row.last_used_at
+    if stamp is not None and stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if stamp is None or (now - stamp).total_seconds() > 60:
+        row.last_used_at = now
+        db.commit()
     return user
 
 
@@ -217,7 +232,11 @@ def download_palace_sync_script(
     return Response(
         content=script,
         media_type="text/x-python",
-        headers={"Content-Disposition": 'attachment; filename="palace_sync.py"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="palace_sync.py"',
+            # 响应体内嵌令牌明文：禁止任何中间层/浏览器缓存
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -262,16 +281,23 @@ OpenOntology 知识图谱「文件夹同步」脚本（由平台自动生成）�
   python palace_sync.py --dry-run       # 只预览将上传/删除的清单，不做改动
   python palace_sync.py --yes           # 跳过删除确认（供定时任务使用）
 
-隐私说明：脚本只上传扩展名在白名单内的文档/图片；隐藏目录（如 .git）、
-node_modules、Office 临时锁文件、系统文件与超大文件默认跳过，跳过原因
-会在运行时逐条打印。同步令牌已内嵌，请勿把本脚本分享给他人。
+定时任务建议加锁避免重叠运行（如 flock）：重叠或"已入库但响应丢失"的
+重试会产生重复文件行（平台按路径不去重）。REMOTE_ROOT 必须位于 synced/
+子树内，这是"不影响手动上传文件"的范围保证。
+
+隐私说明：脚本只上传扩展名在白名单内的文档/图片；隐藏目录与隐藏文件
+（如 .git、.plan.md）、node_modules、Office 临时锁文件、系统文件与超大
+文件默认跳过，跳过原因会在运行时逐条打印。同步令牌已内嵌，请勿把本
+脚本分享给他人。
 """
 
 import argparse
 import hashlib
+import http.client
 import json
 import mimetypes
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -291,7 +317,9 @@ MAX_UPLOAD_BYTES = __MAX_UPLOAD_MB__ * 1024 * 1024
 IN_FLIGHT_THRESHOLD = max(1, __IN_FLIGHT_LIMIT__ - 4)  # 预留余量，避免贴着上限被 429
 POLL_SECONDS = int(os.environ.get("PALACE_SYNC_POLL_SECONDS", "10"))
 HOURLY_WAIT_SECONDS = int(os.environ.get("PALACE_SYNC_HOURLY_WAIT_SECONDS", "120"))
-MAX_RETRY_MINUTES = 30
+# 全轮共享的"等待配额释放"总预算（秒）：防止抽取队列停滞/小时限流把脚本
+# 无限挂起，也防止逐文件重置预算导致整体运行时间无界
+WAIT_BUDGET_SECONDS = 30 * 60
 HTTP_TIMEOUT = 300
 
 API_PREFIX = "/api/v2/super-assistant/palace/sync"
@@ -303,7 +331,7 @@ _IGNORED_DIRS_LOWER = {
 _IGNORED_FILE_NAMES = {"thumbs.db", "desktop.ini", ".ds_store"}
 _IGNORED_FILE_SUFFIXES = (".tmp", ".swp", ".crdownload", ".part", ".partial")
 
-_state = {"in_flight": 0}
+_state = {"in_flight": 0, "wait_budget": WAIT_BUDGET_SECONDS}
 
 
 def log(message):
@@ -357,10 +385,13 @@ def api(method, path, json_body=None, data=None, content_type=None):
                 payload = response.read()
                 if not payload:
                     return None
-                return json.loads(payload.decode("utf-8"))
+                try:
+                    return json.loads(payload.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    raise ApiError(response.status, "响应不是有效 JSON: %s" % payload[:120])
         except urllib.error.HTTPError as exc:
             raise ApiError(exc.code, _read_error_detail(exc))
-        except (urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
             last_error = exc
             wait = min(60, 5 * (2 ** attempt))
             log("[网络] 请求失败（%s），%d 秒后重试" % (exc, wait))
@@ -377,8 +408,26 @@ def normalize_rel(path):
     return "/".join(parts)
 
 
+_SAFE_NAME_RE = re.compile(r"[^\\w.()\\-\\u4e00-\\u9fff]+", re.UNICODE)
+
+
+def safe_name(name):
+    """与服务端 steward/workspace.safe_filename 同构的文件名归一。
+
+    服务端落库的是归一化后的名字；diff 键若用本地原始名，含空格等
+    字符的文件会每次运行都"删除+重传+重抽"（churn），必须两侧同口径。
+    """
+    raw = str(name).replace("\\\\", "/").rsplit("/", 1)[-1].strip()
+    cleaned = _SAFE_NAME_RE.sub("_", raw).strip("._ ")
+    if not cleaned:
+        cleaned = "file"
+    return cleaned[:180]
+
+
 def skip_reason(name, full):
     lower = name.lower()
+    if name.startswith("."):
+        return "隐藏文件"
     if lower in _IGNORED_FILE_NAMES:
         return "系统文件"
     if name.startswith("~$"):
@@ -405,6 +454,7 @@ def scan_folder(root):
     entries = []
     skipped = []
     local_dirs = set()
+    seen_rels = set()
     for dirpath, dirnames, filenames in os.walk(root):
         kept = []
         for name in dirnames:
@@ -417,17 +467,24 @@ def scan_folder(root):
         if rel_dir:
             local_dirs.add(rel_dir)
         for name in sorted(filenames):
-            rel = (rel_dir + "/" + normalize_rel(name)) if rel_dir else normalize_rel(name)
             full = os.path.join(dirpath, name)
+            display = (rel_dir + "/" + normalize_rel(name)) if rel_dir else normalize_rel(name)
             reason = skip_reason(name, full)
             if reason:
-                skipped.append((reason, rel))
+                skipped.append((reason, display))
                 continue
             try:
                 size = os.path.getsize(full)
             except OSError as exc:
-                skipped.append(("无法读取（%s）" % exc, rel))
+                skipped.append(("无法读取（%s）" % exc, display))
                 continue
+            # 目录段服务端原样保留；文件名段必须用归一化名，与服务端落库名一致
+            sync_name = safe_name(name)
+            rel = (rel_dir + "/" + sync_name) if rel_dir else sync_name
+            if rel in seen_rels:
+                skipped.append(("与其它文件归一化后重名（%s）" % sync_name, display))
+                continue
+            seen_rels.add(rel)
             entries.append({"rel": rel, "full": full, "size": size})
     return entries, skipped, local_dirs
 
@@ -472,9 +529,15 @@ def refresh_in_flight():
 
 def wait_for_capacity():
     while _state["in_flight"] >= IN_FLIGHT_THRESHOLD:
+        if _state["wait_budget"] <= 0:
+            die("等待平台抽取队列释放超时（%d 分钟）：请在「知识图谱」弹窗确认构建是否停滞，恢复后重新运行脚本即可续传" % (WAIT_BUDGET_SECONDS // 60))
+        _state["wait_budget"] -= POLL_SECONDS
         log("  [等待] 平台抽取队列在途 %d（阈值 %d），%d 秒后重查…" % (_state["in_flight"], IN_FLIGHT_THRESHOLD, POLL_SECONDS))
         time.sleep(POLL_SECONDS)
-        refresh_in_flight()
+        try:
+            refresh_in_flight()
+        except ApiError as exc:
+            log("  [等待] 状态刷新失败（%s），继续等待" % exc.message)
 
 
 def multipart_body(fields, file_path, file_name):
@@ -497,16 +560,20 @@ def multipart_body(fields, file_path, file_name):
 
 
 def _handle_rate_limit(exc, label):
-    """429 按语义退避；返回 True 表示可重试。"""
+    """429 按语义退避（共享等待预算防挂起）；返回 True 表示可重试。"""
     message = exc.message or ""
-    if "队列已满" in message:
-        log("  [等待] %s: %s" % (label, message))
-        time.sleep(POLL_SECONDS)
-        refresh_in_flight()
-        return True
-    if "频繁" in message:
-        log("  [等待] %s: %s（%d 秒后重试）" % (label, message, HOURLY_WAIT_SECONDS))
-        time.sleep(HOURLY_WAIT_SECONDS)
+    if "队列已满" in message or "频繁" in message:
+        wait = POLL_SECONDS if "队列已满" in message else HOURLY_WAIT_SECONDS
+        if _state["wait_budget"] <= 0:
+            die("等待平台配额释放超时（%d 分钟）：稍后重新运行脚本即可续传剩余文件" % (WAIT_BUDGET_SECONDS // 60))
+        _state["wait_budget"] -= wait
+        log("  [等待] %s: %s（%d 秒后重试）" % (label, message, wait))
+        time.sleep(wait)
+        if "队列已满" in message:
+            try:
+                refresh_in_flight()
+            except ApiError:
+                pass  # 刷新失败不阻断：下一轮 429 会再次触发等待
         return True
     if "上限" in message:
         die("平台配额已达上限: %s（请删除部分文件或联系管理员调整配额后重新运行）" % message)
@@ -526,7 +593,6 @@ def upload_one(entry, replace_file_id, remote_root):
         path = API_PREFIX + "/files"
     else:
         path = API_PREFIX + "/files/%s/replace" % urllib.parse.quote(replace_file_id, safe="")
-    started = time.time()
     while True:
         try:
             api("POST", path, data=body, content_type=content_type)
@@ -535,9 +601,6 @@ def upload_one(entry, replace_file_id, remote_root):
             return True
         except ApiError as exc:
             if exc.status == 429 and _handle_rate_limit(exc, label):
-                if time.time() - started > MAX_RETRY_MINUTES * 60:
-                    log("  [失败] %s: 等待配额超过 %d 分钟" % (label, MAX_RETRY_MINUTES))
-                    return False
                 continue
             log("  [失败] %s: %s" % (label, exc.message))
             return False
@@ -600,6 +663,8 @@ def main():
     remote_root = normalize_rel(args.root or CONFIG["REMOTE_ROOT"] or ("synced/" + os.path.basename(local_dir)))
     if not remote_root:
         die("REMOTE_ROOT 不能为空")
+    if remote_root != "synced" and not remote_root.startswith("synced/"):
+        die("REMOTE_ROOT 必须位于 synced/ 子树内（当前: %s）：这是「不影响手动上传文件」的范围保证" % remote_root)
 
     log("同步: %s  ->  平台 %s/" % (local_dir, remote_root))
     log("扫描本地文件…")
@@ -611,7 +676,11 @@ def main():
     if entries:
         log("计算文件指纹（%d 个文件）…" % len(entries))
         for entry in entries:
-            entry["sha256"] = sha256_of(entry["full"])
+            try:
+                entry["sha256"] = sha256_of(entry["full"])
+            except OSError as exc:
+                skipped.append(("读取失败（%s）" % exc, entry["rel"]))
+                continue
             local_map[entry["rel"]] = entry
 
     try:

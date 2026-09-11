@@ -246,6 +246,41 @@ def test_waits_when_in_flight_threshold_reached(env):
         assert db.query(SuperAssistantPalaceFile).count() == 2
 
 
+def test_filename_normalization_matches_server_and_stays_idempotent(env):
+    """对抗回归：脚本 diff 键必须用与服务端 safe_filename 同构的归一化名，
+    否则含空格/& 的文件每次运行都会"删除+重传+重抽"（churn）。"""
+    folder = env.root / "norm"
+    folder.mkdir()
+    (folder / "会议 notes.md").write_text("space in name", encoding="utf-8")
+    (folder / "Q&A.md").write_text("ampersand", encoding="utf-8")
+    (folder / "Q_A.md").write_text("collides after normalization", encoding="utf-8")
+    (folder / ".plan.md").write_text("editor config", encoding="utf-8")
+
+    first = env.run(env.write_script(), folder)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert ".plan.md（隐藏文件）" in first.stdout
+    assert "归一化后重名" in first.stdout
+    with env.session() as db:
+        names = {row.filename for row in db.query(SuperAssistantPalaceFile).all()}
+    # 服务端 safe_filename：空格/& → 下划线；归一后与既有文件撞名的跳过
+    assert names == {"Q_A.md", "会议_notes.md"}
+
+    # 归一化同口径后二跑幂等：不再出现"删除+重传"抖动
+    second = env.run(env.write_script(), folder)
+    assert "计划: 上传 0，更新 0，删除 0" in second.stdout
+
+
+def test_refuses_remote_root_outside_synced_subtree(env):
+    folder = env.root / "scoped"
+    folder.mkdir()
+    (folder / "a.md").write_text("a", encoding="utf-8")
+    result = env.run(env.write_script(), folder, "--root", "docs")
+    assert result.returncode == 1
+    assert "REMOTE_ROOT 必须位于 synced/ 子树内" in result.stdout
+    with env.session() as db:
+        assert db.query(SuperAssistantPalaceFile).count() == 0
+
+
 def test_aborts_with_clear_message_on_file_count_cap(env, monkeypatch):
     monkeypatch.setattr(settings, "super_assistant_palace_max_files_per_user", 1)
     folder = env.root / "capped"

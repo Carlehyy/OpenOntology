@@ -5,6 +5,8 @@ fixture 与断言风格沿用 test_memory_palace.py：sqlite 临时库 + 依赖�
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -200,6 +202,8 @@ def test_script_download_embeds_token_and_compiles(env):
     assert first.status_code == 200
     assert first.headers["content-type"].startswith("text/x-python")
     assert 'filename="palace_sync.py"' in first.headers["content-disposition"]
+    # 响应体内嵌令牌明文：禁止中间层/浏览器缓存
+    assert first.headers.get("cache-control") == "no-store"
     body = first.text
     assert "pal_sync_" in body
     assert settings.pipeline_file_public_api_base_url.rstrip("/") in body
@@ -229,3 +233,44 @@ def test_quota_defaults_raised_for_folder_sync():
     assert settings.super_assistant_palace_max_total_mb == 10240
     assert settings.super_assistant_palace_max_builds_per_hour == 300
     assert settings.super_assistant_palace_max_in_flight == 20
+
+
+def test_script_download_degrades_gracefully_on_key_rotation(env, monkeypatch):
+    env.client.get(f"{_PREFIX}/palace/sync/script")  # 先创建令牌
+
+    def _undecryptable(_value: str) -> str:
+        raise RuntimeError("FernetInvalidToken")
+
+    monkeypatch.setattr(palace_sync, "decrypt_value", _undecryptable)
+    response = env.client.get(f"{_PREFIX}/palace/sync/script")
+    assert response.status_code == 409
+    assert "重置同步令牌" in response.json()["detail"]
+
+
+def test_last_used_at_write_is_throttled(env):
+    token = env.mint("user-1")
+    client = env.make_client(_user("user-1", "owner"), token=token)
+    with env.session() as db:
+        row = db.get(SuperAssistantPalaceSyncToken, "user-1")
+        row.last_used_at = datetime.now(timezone.utc) - timedelta(seconds=120)
+        db.commit()
+
+    assert client.get(f"{_PREFIX}/palace/sync/files").status_code == 200
+    with env.session() as db:
+        first = db.get(SuperAssistantPalaceSyncToken, "user-1").last_used_at
+    assert first is not None
+
+    # 60 秒内的重复调用不再写库：大批量同步是数百次连发请求的写放大护栏
+    assert client.get(f"{_PREFIX}/palace/sync/files").status_code == 200
+    with env.session() as db:
+        assert db.get(SuperAssistantPalaceSyncToken, "user-1").last_used_at == first
+
+
+def test_rate_limit_message_contract_for_script_backoff():
+    # 同步脚本按 429 文案子串区分退避（"队列已满"→轮询在途、"过于频繁"→
+    # 长等待、"已达上限"→中止）。重构这些文案会静默弱化脚本退避，这里
+    # 钉住契约：改 palace_service 文案必须同步改脚本模板的匹配子串。
+    source = Path(palace_service.__file__).read_text(encoding="utf-8")
+    assert "队列已满" in source
+    assert "抽取任务过于频繁" in source
+    assert "已达上限" in source
