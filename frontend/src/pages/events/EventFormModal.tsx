@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Select as FormSelect, SelectContent as FormSelectContent, SelectItem as FormSelectItem, SelectTrigger as FormSelectTrigger, SelectValue as FormSelectValue } from '@/components/ui/select'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, FilePlus2, Loader2, Paperclip, RefreshCcw, Trash2, Undo2, Upload } from 'lucide-react'
+import { Alert } from '@/components/ui/Alert'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { toast } from 'sonner'
 import { ontologyApi } from '@/api/ontologies'
@@ -205,9 +206,9 @@ export default function EventFormModal({
         </DialogHeader>
       <div className="max-h-[68vh] space-y-5 overflow-y-auto px-1 pb-1 pr-2">
         {error && (
-          <div className="flex items-center gap-2 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-3 py-2 text-sm text-[var(--color-danger)]">
-            <AlertTriangle size={15} /> {error}
-          </div>
+          <Alert variant="danger" role="alert" className="items-center">
+            {error}
+          </Alert>
         )}
 
         <div>

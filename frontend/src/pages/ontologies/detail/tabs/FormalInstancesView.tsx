@@ -18,7 +18,7 @@ import {
   X,
 } from 'lucide-react'
 import { apiClientV2 } from '@/api/client'
-import { ConfirmDialog } from '../../ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/authStore'
 import type {

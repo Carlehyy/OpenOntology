@@ -12,7 +12,7 @@ import type { Pipeline, PipelineOverview } from '@/api/v2/pipelines'
 import { getPipelineEngine } from '@/api/v2/pipelines'
 import { stewardApi } from '@/api/steward'
 import type { StewardStatus } from '@/api/steward'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from 'sonner'
 import RunPreviewModal from './RunPreviewModal'
 import PipelineEditWizard from './PipelineEditWizard'
@@ -681,21 +681,21 @@ export default function PipelineListPage() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="归档流水线"
-        message={`确认归档流水线「${deleteTarget?.name}」？系统会停用该流水线，并保留发布版本、运行记录和资产湖产物用于审计。`}
-        confirmLabel={deleting ? '处理中...' : '确认归档'}
+        description={`确认归档流水线「${deleteTarget?.name}」？系统会停用该流水线，并保留发布版本、运行记录和资产湖产物用于审计。`}
+        confirmText={deleting ? '处理中...' : '确认归档'}
+        variant="danger"
         onConfirm={handleDelete}
-        onCancel={() => setDeleteTarget(null)}
+        onClose={() => setDeleteTarget(null)}
       />
 
       {/* 克隆确认：复制编排结构（n8n workflow / Python 脚本）与字段契约，副本未发布未启用 */}
       <ConfirmDialog
         open={!!cloneTarget}
         title="克隆流水线"
-        message={`确认克隆流水线「${cloneTarget?.name}」？系统将复制其${cloneTarget && isN8nPipeline(cloneTarget) ? ' n8n 工作流编排' : ' Python 脚本'}与字段契约，生成未发布、未启用的草稿副本，名称在原名称后追加「_复制」尾缀（重名自动递增）。`}
-        confirmLabel={cloning ? '克隆中...' : '确认克隆'}
-        tone="primary"
+        description={`确认克隆流水线「${cloneTarget?.name}」？系统将复制其${cloneTarget && isN8nPipeline(cloneTarget) ? ' n8n 工作流编排' : ' Python 脚本'}与字段契约，生成未发布、未启用的草稿副本，名称在原名称后追加「_复制」尾缀（重名自动递增）。`}
+        confirmText={cloning ? '克隆中...' : '确认克隆'}
         onConfirm={handleClone}
-        onCancel={() => setCloneTarget(null)}
+        onClose={() => setCloneTarget(null)}
       />
     </div>
   )

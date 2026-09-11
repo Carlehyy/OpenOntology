@@ -53,7 +53,7 @@ export function Alert({
       {...props}
     >
       <Icon size={15} className="mt-0.5 shrink-0" />
-      <span className="min-w-0 flex-1">{children}</span>
+      <div className="min-w-0 flex-1">{children}</div>
       {onDismiss && (
         <button
           type="button"

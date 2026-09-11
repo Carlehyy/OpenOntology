@@ -30,6 +30,7 @@ import {
   type SuggestionAcceptance,
 } from './suggestion-apply'
 import { computeHandleSides, type HandleSide } from './handle-sides'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import MappingSuggestionPanel from './MappingSuggestionPanel'
 import './mapping-configuration.css'
 
@@ -795,7 +796,14 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
     persistLayout(nextNodes)
   }
   const clearConnectionFocus = () => { setFocusedNodeId(null); setFocusedEdgeId(null); setHoveredEdgeId(null) }
-  const clearCanvas = () => { if (editable && nodes.length && window.confirm('清空画布会把现有映射标记为待删除，只有点击“保存配置”后才会同步数据库。')) { setNodes([]); setEdges([]); setDirty(true); setSelectedDatasetId(null); clearConnectionFocus() } }
+  const [clearCanvasOpen, setClearCanvasOpen] = useState(false)
+  const clearCanvas = () => {
+    if (!editable || !nodes.length) return
+    setClearCanvasOpen(true)
+  }
+  const doClearCanvas = () => {
+    setNodes([]); setEdges([]); setDirty(true); setSelectedDatasetId(null); clearConnectionFocus()
+  }
 
   const canvasDatasetIds = useMemo(
     () => nodes
@@ -859,33 +867,43 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
     })
   }
 
-  const confirmLeavingWorkspace = () => (
-    !dirty || window.confirm('当前还有未保存的映射更改，离开后这些前端草稿会丢失。确定离开吗？')
-  )
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false)
+  const leaveProceedRef = useRef<(() => void) | null>(null)
+  /** dirty 时先经确认弹窗；确认后继续 proceed（替代原 window.confirm 同步守卫） */
+  const confirmLeavingWorkspace = (proceed: () => void) => {
+    if (!dirty) {
+      proceed()
+      return
+    }
+    leaveProceedRef.current = proceed
+    setLeaveConfirmOpen(true)
+  }
   const mappingOverviewPath = versionId
     ? `/ontologies/${ontologyId}?tab=versions`
     : `/ontologies/${ontologyId}?tab=data-mapping`
   const fallbackBack = onOpenModelStructure ?? (() => navigate(mappingOverviewPath))
   const returnToPreviousPage = () => {
-    if (!confirmLeavingWorkspace()) return
-    if (onBack) {
-      onBack()
-      return
-    }
-    const historyIndex = window.history.state?.idx
-    if (typeof historyIndex === 'number' && historyIndex > 0) {
-      navigate(-1)
-      return
-    }
-    fallbackBack()
+    confirmLeavingWorkspace(() => {
+      if (onBack) {
+        onBack()
+        return
+      }
+      const historyIndex = window.history.state?.idx
+      if (typeof historyIndex === 'number' && historyIndex > 0) {
+        navigate(-1)
+        return
+      }
+      fallbackBack()
+    })
   }
   const leaveWorkspace = () => {
-    if (!confirmLeavingWorkspace()) return
-    if (onOpenModelStructure) {
-      onOpenModelStructure()
-      return
-    }
-    navigate(mappingOverviewPath)
+    confirmLeavingWorkspace(() => {
+      if (onOpenModelStructure) {
+        onOpenModelStructure()
+        return
+      }
+      navigate(mappingOverviewPath)
+    })
   }
   const closeTutorial = () => { localStorage.setItem(`mapping-tutorial:${ontologyId}`, 'seen'); setTutorialStep(null) }
   const tutorial = [
@@ -1054,6 +1072,30 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       )}
 
       {tutorialStep !== null && <div className="dmc-tutorial" role="dialog" aria-modal="true"><div className="dmc-tutorial-card"><header><div><span><BookOpen size={15} /></span><div><b>数据映射快速入门</b><small>第 {tutorialStep + 1} 步，共 {tutorial.length} 步</small></div></div><button onClick={closeTutorial}><X size={15} /></button></header><main>{(() => { const StepIcon = tutorial[tutorialStep].icon; return <><span><StepIcon size={27} /></span><h3>{tutorial[tutorialStep].title}</h3><p>{tutorial[tutorialStep].text}</p></> })()}</main><footer><div>{tutorial.map((_, index) => <button key={index} data-active={index === tutorialStep} onClick={() => setTutorialStep(index)} />)}</div><span>{tutorialStep > 0 && <button onClick={() => setTutorialStep(step => (step || 1) - 1)}>上一步</button>}<button className="dmc-tutorial-next" onClick={() => tutorialStep === tutorial.length - 1 ? closeTutorial() : setTutorialStep(step => (step || 0) + 1)}>{tutorialStep === tutorial.length - 1 ? '开始配置' : '下一步'}<ArrowRight size={13} /></button></span></footer></div></div>}
+
+      <ConfirmDialog
+        open={clearCanvasOpen}
+        onClose={() => setClearCanvasOpen(false)}
+        onConfirm={doClearCanvas}
+        title="清空画布"
+        description="清空画布会把现有映射标记为待删除，只有点击“保存配置”后才会同步数据库。"
+        confirmText="清空画布"
+        variant="warning"
+      />
+      <ConfirmDialog
+        open={leaveConfirmOpen}
+        onClose={() => { setLeaveConfirmOpen(false); leaveProceedRef.current = null }}
+        onConfirm={() => {
+          const proceed = leaveProceedRef.current
+          leaveProceedRef.current = null
+          setLeaveConfirmOpen(false)
+          proceed?.()
+        }}
+        title="离开映射工作台"
+        description="当前还有未保存的映射更改，离开后这些前端草稿会丢失。确定离开吗？"
+        confirmText="放弃修改并离开"
+        variant="warning"
+      />
     </div>
   )
 }

@@ -6,7 +6,7 @@ import {
   ChevronLeft, ChevronRight, Search,
 } from 'lucide-react'
 import datasetsApi, { type DatasetOverviewItem, type DatasetConsumer, type CreateTableResult } from '@/api/v2/datasets'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import DatasetEditorModal from './DatasetEditorModal'
 import CreateTableModal from './CreateTableModal'
 import manualSharingApi from '@/api/v2/manual-sharing'
@@ -472,10 +472,11 @@ export default function RawDatasetsView({
       <ConfirmDialog
         open={!!deleteTarget}
         title="删除人工数据集"
-        message={`确认删除「${deleteTarget?.name}」及其全部 ${deleteTarget?.version_count ?? 0} 个版本？此操作不可撤销。`}
-        confirmLabel={deleting ? '删除中...' : '确认删除'}
+        description={`确认删除「${deleteTarget?.name}」及其全部 ${deleteTarget?.version_count ?? 0} 个版本？此操作不可撤销。`}
+        confirmText={deleting ? '删除中...' : '确认删除'}
+        variant="danger"
         onConfirm={handleDelete}
-        onCancel={() => setDeleteTarget(null)}
+        onClose={() => setDeleteTarget(null)}
       />
 
       {/* 被引用时只展示依赖；必须先解除，不能绕过真实外键强删 */}

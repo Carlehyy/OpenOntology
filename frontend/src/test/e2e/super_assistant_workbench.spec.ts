@@ -1401,13 +1401,13 @@ test('知识图谱：目录一等公民——新建目录/笔记、重命名与�
   await expect.poll(() => mocks.palaceFolderRenames.length).toBe(1)
   expect(mocks.palaceFolderRenames[0]).toBe('项目资料->项目档案')
 
-  // 空目录删除：先删文件（清空目录），window.confirm 确认后 DELETE
+  // 空目录删除：先删文件（清空目录），标准确认弹窗确认后 DELETE
   await filesPane.locator('[data-palace-file="pf-note-1"]').click()
   await contentPane.getByRole('button', { name: /删除 会议纪要/ }).click()
   await expect.poll(() => mocks.palaceDeletes.length).toBe(1)
   await filesPane.locator('[data-palace-dir="项目档案"]').click()
-  page.once('dialog', dialogEvent => void dialogEvent.accept())
   await toolbar.getByTestId('palace-delete-folder').click()
+  await page.getByRole('dialog', { name: /删除目录/ }).getByRole('button', { name: '删除', exact: true }).click()
   await expect.poll(() => mocks.palaceFolderDeletes.length).toBe(1)
   expect(mocks.palaceFolderDeletes[0]).toBe('项目档案')
   await expect(filesPane.locator('[data-palace-dir="项目档案"]')).toHaveCount(0)

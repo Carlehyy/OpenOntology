@@ -44,7 +44,7 @@ import TrajectoryPreview from './TrajectoryPreview'
 import { extractTrajectorySummary } from './trajectorySummary'
 import { validateTestInputText } from './testInputValidation'
 import { toast } from 'sonner'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
@@ -842,29 +842,26 @@ export default function WorldModelDevelopPage() {
       <ConfirmDialog
         open={confirmInsertTs}
         title="插入时序推演示例？"
-        message="当前未保存的修改将被示例脚本覆盖丢弃，此操作无法撤销。建议先执行并保存当前内容。"
-        confirmLabel="插入示例"
-        tone="primary"
+        description="当前未保存的修改将被示例脚本覆盖丢弃，此操作无法撤销。建议先执行并保存当前内容。"
+        confirmText="插入示例"
         onConfirm={() => void insertTimeSeriesTemplate()}
-        onCancel={() => setConfirmInsertTs(false)}
+        onClose={() => setConfirmInsertTs(false)}
       />
       <ConfirmDialog
         open={confirmRevert}
         title="恢复到已保存内容？"
-        message="当前未保存的修改将被丢弃，此操作无法撤销。"
-        confirmLabel="恢复"
-        tone="primary"
+        description="当前未保存的修改将被丢弃，此操作无法撤销。"
+        confirmText="恢复"
         onConfirm={revertToSaved}
-        onCancel={() => setConfirmRevert(false)}
+        onClose={() => setConfirmRevert(false)}
       />
       <ConfirmDialog
         open={confirmRestoreVersionId !== null}
         title="恢复到该历史版本？"
-        message="当前编辑器中的未保存修改将被覆盖丢弃；若该版本记录了测试入参，入参编辑区也会一并回退。恢复后需重新执行并保存。"
-        confirmLabel="恢复"
-        tone="primary"
+        description="当前编辑器中的未保存修改将被覆盖丢弃；若该版本记录了测试入参，入参编辑区也会一并回退。恢复后需重新执行并保存。"
+        confirmText="恢复"
         onConfirm={() => { if (confirmRestoreVersionId) void restoreVersion(confirmRestoreVersionId) }}
-        onCancel={() => setConfirmRestoreVersionId(null)}
+        onClose={() => setConfirmRestoreVersionId(null)}
       />
       {project && (
         <PublishServiceDialog

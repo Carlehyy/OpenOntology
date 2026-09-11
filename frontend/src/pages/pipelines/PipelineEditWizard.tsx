@@ -8,6 +8,7 @@ import {
 import pipelinesApi, { CONTRACT_FIELD_TYPES } from '@/api/v2/pipelines'
 import type { Pipeline, DryRunResult, DryRunRowsPage, ColumnDefinition, ValidateDefinitionsResult } from '@/api/v2/pipelines'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 const splitPk = (s?: string): string[] =>
   (s ?? '').split(',').map(x => x.trim()).filter(Boolean)
@@ -86,6 +87,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
   const [saving, setSaving] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [actionError, setActionError] = useState('')
+  const [pendingConfirm, setPendingConfirm] = useState<null | { title: string; description: string; action: () => void }>(null)
 
   // ── 初始化字段契约：按原始列合并已有定义（旧数据缺 source_key 时回退 field_key）──
   const initColumnDefs = useCallback((columns: string[], existing?: ColumnDefinition[] | null, lockedPk?: Set<string>) => {
@@ -268,8 +270,12 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
   // 名称/描述到第 4 步保存才落库——中途关窗要提醒，避免静默丢改动
   const infoDirty = name !== (pipeline.name || '') || description !== (pipeline.description || '')
   const handleClose = () => {
-    if (infoDirty && !window.confirm('流水线名称/描述有未保存的修改，关闭后将丢失。确认关闭？')) return
-    onClose()
+    if (!infoDirty) { onClose(); return }
+    setPendingConfirm({
+      title: '关闭并放弃未保存修改',
+      description: '流水线名称/描述有未保存的修改，关闭后将丢失。确认关闭？',
+      action: () => { onClose() },
+    })
   }
 
   const updateColDef = (index: number, patch: Partial<ColumnDefinition>) => {
@@ -913,6 +919,15 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        onClose={() => setPendingConfirm(null)}
+        onConfirm={() => { const c = pendingConfirm; setPendingConfirm(null); c?.action() }}
+        title={pendingConfirm?.title ?? ''}
+        description={pendingConfirm?.description}
+        variant="warning"
+      />
     </div>,
     document.body,
   )

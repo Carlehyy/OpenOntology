@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/Button'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
-import { ConfirmDialog } from './ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { writeTextToClipboard } from '@/utils/clipboard'
 
 interface SharedProps {

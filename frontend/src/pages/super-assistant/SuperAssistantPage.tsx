@@ -29,7 +29,7 @@ import { hasMenuAccess } from '@/config/navigation'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
 import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './components/AssistantConfiguration'
-import ConfirmActionDialog from './components/ConfirmActionDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import {
@@ -912,15 +912,16 @@ export default function SuperAssistantPage() {
         onSelectConversation={handleSearchSelect}
       />
 
-      <ConfirmActionDialog
+      <ConfirmDialog
         open={deletingConversation !== null}
         title="删除会话"
-        message={deletingConversation
+        description={deletingConversation
           ? `确定删除会话「${deletingConversation.title}」？会话内消息与附件将一并删除。`
           : ''}
-        confirmLabel="删除"
+        confirmText="删除"
+        variant="danger"
         onConfirm={() => void deleteConversation()}
-        onCancel={() => setDeletingConversation(null)}
+        onClose={() => setDeletingConversation(null)}
       />
     </div>
   )

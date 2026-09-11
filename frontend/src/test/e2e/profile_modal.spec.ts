@@ -262,6 +262,9 @@ test('隐私变量支持创建、列表回显、下载脚本与重置token', asy
   await expect(toastItem(page, '已创建')).toBeVisible()
   // 列表回显
   await expect(panel.getByText('MY_LOCAL_COOKIE')).toBeVisible()
+  // 关闭一次性 token 展示弹窗（旧实现为 window.prompt 由 Playwright 自动关闭；现为显式 Modal，需主动关闭）
+  await page.getByRole('dialog', { name: '上报 token' }).getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: '上报 token' })).toHaveCount(0)
 
   // 下载脚本：用 Playwright download 事件断言真实文件内容（非中间信号）
   const downloadPromise = page.waitForEvent('download')
@@ -285,6 +288,8 @@ test('隐私变量支持创建、列表回显、下载脚本与重置token', asy
   })
   await panel.getByRole('button', { name: '重置上报 token' }).click()
   await expect(toastItem(page, '已重置')).toBeVisible()
+  // 关闭重置后的 token 展示弹窗
+  await page.getByRole('dialog', { name: '新上报 token（旧 token 已失效）' }).getByRole('button', { name: '关闭', exact: true }).click()
   expect(captured.resetCalled).toBe(true)
 })
 

@@ -7,7 +7,7 @@ import {
   Star, Search, Upload, Download, Settings2, FileClock,
 } from 'lucide-react'
 import type { ModelConfig } from '@/types/ontology'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from 'sonner'
 import ModelDetailDrawer from './components/ModelDetailDrawer'
 import ModelHeatStrip from './components/ModelHeatStrip'
@@ -720,9 +720,11 @@ export default function ModelsPage() {
       <ConfirmDialog
         open={!!deleteTarget}
         title={t('model.confirm_delete')}
-        message={t('model.confirm_delete_msg', { name: deleteTarget?.name })}
+        description={t('model.confirm_delete_msg', { name: deleteTarget?.name })}
+        confirmText="确认删除"
+        variant="danger"
         onConfirm={handleDelete}
-        onCancel={() => setDeleteTarget(null)}
+        onClose={() => setDeleteTarget(null)}
       />
     </div>
   )

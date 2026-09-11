@@ -4,6 +4,7 @@ import type { Readiness } from '@/api/exploration'
 import { ontologyVersionApi, type OntologyTrialRun } from '@/api/v2/ontology-versions'
 import TrialActionPlanReview, { redactTrialText } from '@/components/ontology/TrialActionPlanReview'
 import { Button } from '@/components/ui/Button'
+import { Alert } from '@/components/ui/Alert'
 import { Modal } from '@/components/ui/Modal'
 
 // 试跑门禁 422 的错误拆解，与 VersionsTab 同一口径（页面惯例：跨文件复制这两个小助手）。
@@ -117,18 +118,18 @@ export default function TrialPreflightDialog({ open, ontologyId, versionId, read
         <div className="space-y-4 text-sm">
           {trial.isError && (
             gateIssues.length > 0 ? (
-              <div role="alert" className="rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]">
+              <Alert variant="danger" role="alert" className="rounded-xl px-4 py-3">
                 <p className="font-semibold">暂时不能进入试跑态：仍有 {gateIssues.length} 项试跑门禁条件未满足。</p>
-                <div className="scrollbar-thin mt-1 max-h-24 space-y-1 overflow-y-auto pr-2 text-xs leading-5 text-[var(--color-danger)]">
+                <div className="scrollbar-thin mt-1 max-h-24 space-y-1 overflow-y-auto pr-2 text-xs leading-5">
                   {gateIssues.map((item, index) => (
                     <p key={`${item.kind || ''}-${item.field || ''}-${index}`}>• {item.message}</p>
                   ))}
                 </div>
-              </div>
+              </Alert>
             ) : (
-              <p role="alert" className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] p-3 text-[var(--color-danger)]">
+              <Alert variant="danger" role="alert" className="p-3">
                 {errorText(trial.error)}
-              </p>
+              </Alert>
             )
           )}
 
@@ -140,9 +141,9 @@ export default function TrialPreflightDialog({ open, ontologyId, versionId, read
               </div>
             )}
             {preflight.isError && (
-              <p role="alert" className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] p-3 text-xs text-[var(--color-danger)]">
+              <Alert variant="danger" role="alert" className="p-3 text-xs">
                 预检失败：{errorText(preflight.error)}
-              </p>
+              </Alert>
             )}
             {preflight.data && (
               <ul data-testid="trial-preflight-checks" className="space-y-1.5">

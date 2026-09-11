@@ -142,7 +142,6 @@ export default function App() {
         position="top-center"
         offset={{ top: '4rem' }}
         visibleToasts={3}
-        closeButton
         style={
           {
             zIndex: 'var(--z-toast)',

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import curatedApi, { type ReviewDiff, type ReviewRowEdit } from '@/api/v2/curated'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import datasetsApi, { FIELD_TYPE_LABELS, type DatasetSchemaColumn } from '@/api/v2/datasets'
 
 interface Props {
@@ -389,6 +390,7 @@ export default function CuratedDetailPanel({
   const [pendingEdits, setPendingEdits] = useState<ReviewRowEdit[]>([])
   const [savingEdits, setSavingEdits] = useState(false)
   const [editMessage, setEditMessage] = useState('')
+  const [pendingConfirm, setPendingConfirm] = useState<null | { title: string; description: string; action: () => void }>(null)
 
   const reviewPending = isPendingReview(status)
   const hasUnsavedEdits = pendingEdits.length > 0
@@ -403,7 +405,14 @@ export default function CuratedDetailPanel({
     && (diff?.current_row_pks?.length ?? -1) === (diff?.current?.rows.length ?? 0)
   )
   const requestClose = useCallback(() => {
-    if (hasUnsavedEdits && !window.confirm('还有未保存的审核修改，关闭后将丢失。确认关闭吗？')) return
+    if (hasUnsavedEdits) {
+      setPendingConfirm({
+        title: '关闭并放弃未保存修改',
+        description: '还有未保存的审核修改，关闭后将丢失。确认关闭吗？',
+        action: () => { onClose() },
+      })
+      return
+    }
     onClose()
   }, [hasUnsavedEdits, onClose])
 
@@ -585,8 +594,7 @@ export default function CuratedDetailPanel({
     } finally { setReviewAction(null) }
   }
 
-  const handleSwitchToLatestReview = async () => {
-    if (hasUnsavedEdits && !window.confirm('切换版本会丢弃当前未保存的修改，确认继续吗？')) return
+  const doSwitchToLatestReview = async () => {
     setSwitchingReview(true)
     setActionError('')
     try {
@@ -601,6 +609,18 @@ export default function CuratedDetailPanel({
     } finally {
       setSwitchingReview(false)
     }
+  }
+
+  const handleSwitchToLatestReview = () => {
+    if (hasUnsavedEdits) {
+      setPendingConfirm({
+        title: '切换版本并放弃修改',
+        description: '切换版本会丢弃当前未保存的修改，确认继续吗？',
+        action: () => { void doSwitchToLatestReview() },
+      })
+      return
+    }
+    void doSwitchToLatestReview()
   }
 
   const handleExport = async (format: 'csv' | 'xlsx') => {
@@ -1010,6 +1030,14 @@ export default function CuratedDetailPanel({
         </div>
       </div>
 
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        onClose={() => setPendingConfirm(null)}
+        onConfirm={() => { const c = pendingConfirm; setPendingConfirm(null); c?.action() }}
+        title={pendingConfirm?.title ?? ''}
+        description={pendingConfirm?.description}
+        variant="warning"
+      />
     </>
   )
 }

@@ -24,7 +24,7 @@ import {
 } from '@/lib/mcpClientConfig'
 import { ApprovalTab, EvolutionPendingBadge, MemoryTab } from './AssistantEvolution'
 import { errorText } from './assistantPanelUtils'
-import ConfirmActionDialog from './ConfirmActionDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 export { errorText }
 
@@ -225,13 +225,15 @@ function SkillEditor({ skill, onClose, onSaved }: { skill: SuperSkill; onClose: 
         </div>
       </div>
     </DialogShell>
-    <ConfirmActionDialog
+    <ConfirmDialog
       open={confirmingRemove}
       title="删除文件"
-      message={`确定删除 ${selectedPath}？`}
-      busy={removing}
+      description={`确定删除 ${selectedPath}？`}
+      confirmText="删除"
+      variant="danger"
+      loading={removing}
       onConfirm={() => void removeFile()}
-      onCancel={() => setConfirmingRemove(false)}
+      onClose={() => setConfirmingRemove(false)}
     />
     </>
   )
@@ -793,21 +795,25 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
       {creatingSkill && <SkillCreateDialog onClose={() => setCreatingSkill(false)} onSaved={refreshSkills} />}
       {editingSkill && <SkillEditor skill={editingSkill} onClose={() => setEditingSkill(null)} onSaved={refreshSkills} />}
       {editingMcp && <McpDialog server={editingMcp === 'new' ? undefined : editingMcp} onClose={() => setEditingMcp(null)} onSaved={refreshServers} />}
-      <ConfirmActionDialog
+      <ConfirmDialog
         open={removingSkill !== null}
         title="删除 Skill"
-        message={removingSkill ? `确定删除 Skill「${removingSkill.name}」及其整个文件夹？` : ''}
-        busy={removeBusy}
+        description={removingSkill ? `确定删除 Skill「${removingSkill.name}」及其整个文件夹？` : ''}
+        confirmText="删除"
+        variant="danger"
+        loading={removeBusy}
         onConfirm={() => { if (removingSkill) void removeSkill(removingSkill) }}
-        onCancel={() => setRemovingSkill(null)}
+        onClose={() => setRemovingSkill(null)}
       />
-      <ConfirmActionDialog
+      <ConfirmDialog
         open={removingServer !== null}
         title="删除 MCP Server"
-        message={removingServer ? `确定删除 MCP Server「${removingServer.name}」？` : ''}
-        busy={removeBusy}
+        description={removingServer ? `确定删除 MCP Server「${removingServer.name}」？` : ''}
+        confirmText="删除"
+        variant="danger"
+        loading={removeBusy}
         onConfirm={() => { if (removingServer) void removeServer(removingServer) }}
-        onCancel={() => setRemovingServer(null)}
+        onClose={() => setRemovingServer(null)}
       />
     </>
   )

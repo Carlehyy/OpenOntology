@@ -17,7 +17,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
-import ConfirmActionDialog from './ConfirmActionDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { errorText } from './assistantPanelUtils'
 import {
   ZONE_LABELS,
@@ -560,13 +560,15 @@ export function MemoryTab() {
         </DialogContent>
       </Dialog>
 
-      <ConfirmActionDialog
+      <ConfirmDialog
         open={removingMemory !== null}
         title="删除记忆"
-        message="确定删除这条记忆？"
-        busy={removeBusy}
+        description="确定删除这条记忆？"
+        confirmText="删除"
+        variant="danger"
+        loading={removeBusy}
         onConfirm={() => { if (removingMemory) void removeMemory(removingMemory) }}
-        onCancel={() => setRemovingMemory(null)}
+        onClose={() => setRemovingMemory(null)}
       />
     </div>
   )

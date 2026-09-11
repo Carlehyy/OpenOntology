@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
 import { LoadingState } from '@/components/ui/LoadingState'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { ConfirmDialog } from '../../ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import TrialActionPlanReview, {
   redactTrialText,
   sanitizeTrialValue,

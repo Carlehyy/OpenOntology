@@ -12,7 +12,7 @@ import { pipelineTasksApi, WRITE_MODE_META, type PipelineFilterOption, type Pipe
 import TaskFormModal from './TaskFormModal'
 import HistoryDrawer from './HistoryDrawer'
 import GlobalHistoryModal from './GlobalHistoryModal'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 // ── 常量 ──────────────────────────────────────────────
 const QUICK_TABS = [
@@ -867,9 +867,11 @@ export default function SyncTasksTab() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="删除调度任务"
-        message={`确定删除任务「${deleteTarget?.name}」？流水线本身与已入湖数据不受影响。`}
+        description={`确定删除任务「${deleteTarget?.name}」？流水线本身与已入湖数据不受影响。`}
+        confirmText="确认删除"
+        variant="danger"
         onConfirm={handleDelete}
-        onCancel={() => setDeleteTarget(null)}
+        onClose={() => setDeleteTarget(null)}
       />
     </div>
   )

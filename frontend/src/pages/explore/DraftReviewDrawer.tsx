@@ -6,6 +6,7 @@ import {
 import {
   explorationApi, type ApplyDraftResult, type BxDraft, type DraftValidation,
 } from '@/api/exploration'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 const CARDINALITY_LABEL: Record<string, string> = {
   'one-to-one': '1:1', 'one-to-many': '1:N', 'many-to-one': 'N:1', 'many-to-many': 'N:N',
@@ -40,6 +41,7 @@ export default function DraftReviewDrawer({ draft, onClose, onApplied, onDiscard
   const [error, setError] = useState('')
   const [result, setResult] = useState<ApplyDraftResult | null>(null)
   const [validation, setValidation] = useState<DraftValidation | null>(draft.report?.validation || null)
+  const [pendingConfirm, setPendingConfirm] = useState<null | { title: string; description: string; action: () => void }>(null)
   const discarded = draft.status === 'discarded'
 
   const toggle = (key: string, conflict?: boolean) => {
@@ -81,8 +83,7 @@ export default function DraftReviewDrawer({ draft, onClose, onApplied, onDiscard
     }
   }
 
-  const discard = async () => {
-    if (!window.confirm('废弃此草稿？废弃后不可再应用（可重新生成草稿）。')) return
+  const doDiscard = async () => {
     setError('')
     setBusy(true)
     try {
@@ -94,6 +95,14 @@ export default function DraftReviewDrawer({ draft, onClose, onApplied, onDiscard
     } finally {
       setBusy(false)
     }
+  }
+
+  const discard = () => {
+    setPendingConfirm({
+      title: '废弃草稿',
+      description: '废弃此草稿？废弃后不可再应用（可重新生成草稿）。',
+      action: () => { void doDiscard() },
+    })
   }
 
   const report = draft.report || { warnings: [], conflicts: [], scenarioCoverage: [], llmRefined: false }
@@ -499,6 +508,16 @@ export default function DraftReviewDrawer({ draft, onClose, onApplied, onDiscard
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingConfirm !== null}
+        onClose={() => setPendingConfirm(null)}
+        onConfirm={() => { const c = pendingConfirm; setPendingConfirm(null); c?.action() }}
+        title={pendingConfirm?.title ?? ''}
+        description={pendingConfirm?.description}
+        variant="danger"
+        confirmText="废弃"
+      />
     </div>
   )
 }

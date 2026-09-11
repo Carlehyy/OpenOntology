@@ -8,7 +8,7 @@ import datasetsApi, {
   type DatasetOverviewItem,
   type DatasetSchemaColumn,
 } from '@/api/v2/datasets'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 
 const PAGE_SIZES = [20, 50, 100, 200, 500, 1000] as const
@@ -579,9 +579,10 @@ export default function DatasetEditorModal({ dataset, onClose, onSaved }: {
       <ConfirmDialog
         open={confirmClose}
         title="放弃未保存的修改？"
-        message="当前页面有尚未保存的新增、修改或删除。关闭后这些改动将无法恢复。"
-        confirmLabel="放弃修改并关闭"
-        onCancel={() => setConfirmClose(false)}
+        description="当前页面有尚未保存的新增、修改或删除。关闭后这些改动将无法恢复。"
+        confirmText="放弃修改并关闭"
+        variant="danger"
+        onClose={() => setConfirmClose(false)}
         onConfirm={onClose}
       />
     </div>

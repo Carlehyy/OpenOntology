@@ -18,7 +18,7 @@ import {
 
 import { communityApi } from '@/api/community'
 import type { McpTool, SuperMcpServer } from '@/api/superAssistant'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import McpServerDialog from '@/components/mcp/McpServerDialog'
 import { AnimatedNumber } from '@/components/motion-ui/animated-number'
 import { Checkbox } from '@/components/motion-ui/checkbox'
@@ -599,7 +599,7 @@ export default function PluginCommunityPage() {
           onDone={load}
         />
       )}
-      <ConfirmDialog open={!!deleteTarget} title="删除 MCP Server" message={`确认删除 MCP Server「${deleteTarget ? serverTitle(deleteTarget) : ''}」？相关连接配置和工具清单将一并移除，此操作无法撤销。`} confirmLabel={deleting ? '删除中...' : '确认删除'} onConfirm={() => void removeServer()} onCancel={() => !deleting && setDeleteTarget(null)} />
+      <ConfirmDialog open={!!deleteTarget} title="删除 MCP Server" description={`确认删除 MCP Server「${deleteTarget ? serverTitle(deleteTarget) : ''}」？相关连接配置和工具清单将一并移除，此操作无法撤销。`} confirmText={deleting ? '删除中...' : '确认删除'} variant="danger" onConfirm={() => void removeServer()} onClose={() => !deleting && setDeleteTarget(null)} />
     </div>
   )
 }

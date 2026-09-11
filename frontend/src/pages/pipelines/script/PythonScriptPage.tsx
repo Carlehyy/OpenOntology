@@ -15,7 +15,7 @@ import {
 import pipelinesApi from '@/api/v2/pipelines'
 import type { Pipeline, ScriptExecutionResult, ScriptVersion } from '@/api/v2/pipelines'
 import { toast } from 'sonner'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
@@ -759,18 +759,19 @@ export default function PythonScriptPage() {
       <ConfirmDialog
         open={confirm !== null}
         title={confirm?.kind === 'restore' ? `恢复 v${confirm.version.version_no} 到编辑器` : '放弃修改'}
-        message={
+        description={
           confirm?.kind === 'restore'
             ? '当前编辑器中的内容将被该版本覆盖，未保存的修改会丢失；恢复后需重新执行校验才能保存。'
             : '将丢弃当前未保存的修改，回退到最近一次保存的脚本，草稿缓存一并清除。'
         }
-        confirmLabel={confirm?.kind === 'restore' ? '恢复' : '放弃修改'}
+        confirmText={confirm?.kind === 'restore' ? '恢复' : '放弃修改'}
+        variant="danger"
         onConfirm={() => {
           if (confirm?.kind === 'restore') handleRestoreVersion(confirm.version)
           if (confirm?.kind === 'revert') handleRevert()
           setConfirm(null)
         }}
-        onCancel={() => setConfirm(null)}
+        onClose={() => setConfirm(null)}
       />
     </div>
   )
