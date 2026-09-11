@@ -518,13 +518,13 @@ class SuperAssistantRemoteAgent(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
     mode: Mapped[str] = mapped_column(
-        String(10), nullable=False, default="direct", server_default=text("direct"),
+        String(10), nullable=False, default="direct", server_default="direct",
     )
     agent_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # RAP 协议版本（兑换时协商冻结；平台永远兼容 v1，见 remote_agent_service）
     rap_version: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=1, server_default=text("1"),
+        Integer, nullable=False, default=1, server_default="1",
     )
     # 最近一次被委派执行回合的时间（直连模式的活动信号；回连看 last_seen_at）
     last_turn_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
