@@ -784,11 +784,15 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # /{id} 的 delete 共 7 个操作（5 条路径，X-Palace-Sync-Token 令牌鉴权），
     # 以及 /palace/sync/script 的 GET 与 /palace/sync/token 的 POST 共 2 个
     # 操作（2 条路径，浏览器侧 JWT 鉴权）；
+    # 邀请自助接入新增 /remote-agent-invites 的 list/create、
+    # /remote-agent-invites/{id} 的 delete、/remote-agent-invites/{id}/prompt
+    # 的 get 共 4 个操作（3 条路径；公开兑换/回连端点在 /api/public 前缀，
+    # 不在本基线范围）；
     # 本体发布文档共享镜像新增 /palace/ontology-documents 的 list、
     # /palace/ontology-documents/{id} 的 preview/rebuild 共 3 个操作
     # （3 条路径）
-    assert len(paths) == 61
-    assert sum(len(item) for item in paths.values()) == 84
+    assert len(paths) == 64
+    assert sum(len(item) for item in paths.values()) == 88
     assert hashlib.sha256(payload).hexdigest() == (
-        "abaf4f3cad32d522960b25f49b325756f4d4603e0add14549ca5b276fd085c62"
+        "20fc0d5a5b641fb81baafb87fcbf93dec18fd76d920d01459a510f41b477a49a"
     )

@@ -333,6 +333,12 @@ export interface RemoteAgent {
   token_set: boolean
   enabled: boolean
   timeout_seconds: number
+  /** direct = 平台主动外呼端点；pull = 远端长轮询回连（NAT 友好） */
+  mode: 'direct' | 'pull'
+  /** 回连模式最近轮询时间（在线状态展示） */
+  last_seen_at: string | null
+  /** 最近一次被委派执行回合的时间（直连模式的活动信号） */
+  last_turn_at: string | null
 }
 
 export interface RemoteAgentPayload {
@@ -348,6 +354,24 @@ export interface RemoteAgentPayload {
 export interface RemoteAgentTestResult {
   ok: boolean
   message: string
+}
+
+/** 接入邀请状态（pending | used | expired | revoked），不含令牌本体 */
+export interface RemoteAgentInvite {
+  id: string
+  status: 'pending' | 'used' | 'expired' | 'revoked'
+  created_at: string
+  expires_at: string
+  redeemed_agent_key: string | null
+  redeemed_agent_label: string | null
+}
+
+/** 创建邀请的响应：邀请函全文（含一次性令牌）由后端单源生成 */
+export interface RemoteAgentInviteCreated {
+  id: string
+  status: string
+  expires_at: string
+  prompt_text: string
 }
 
 /** multica 外部集成配置（每用户一条）：commands 由后端下发，未配置/未启用时为空，
@@ -630,4 +654,13 @@ export const superAssistantApi = {
     apiClientV2.delete(`/super-assistant/remote-agents/${id}`),
   testRemoteAgent: (id: string) =>
     apiClientV2.post<RemoteAgentTestResult>(`/super-assistant/remote-agents/${id}/test`, {}),
+
+  listRemoteAgentInvites: () =>
+    apiClientV2.get<RemoteAgentInvite[]>('/super-assistant/remote-agent-invites'),
+  createRemoteAgentInvite: () =>
+    apiClientV2.post<RemoteAgentInviteCreated>('/super-assistant/remote-agent-invites', {}),
+  remoteAgentInvitePrompt: (id: string) =>
+    apiClientV2.get<string>(`/super-assistant/remote-agent-invites/${id}/prompt`),
+  revokeRemoteAgentInvite: (id: string) =>
+    apiClientV2.delete(`/super-assistant/remote-agent-invites/${id}`),
 }

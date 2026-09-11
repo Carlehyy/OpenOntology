@@ -489,18 +489,23 @@ class SuperAssistantDelegation(Base):
     last_turn_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 class SuperAssistantRemoteAgent(Base):
-    """用户自配的远程助手（声明式注册：填 key/名称/描述/端点即入委派目录）。
+    """用户自配的远程助手（邀请自助注册或手动声明式注册，均入委派目录）。
 
     远程助手走 OpenOntology 远程助手 HTTP 契约（见 remote_agent_service）：
     单端点回合制，session_ref 由远端签发、经委派表 conversation_ref 透传
     续用。token 加密存储永不回显；menu_keys 为空（不映射平台菜单，归属
     即权限）。key 命名空间 remote.* 与平台内置助手隔离。
+
+    双传输模式（mode）：direct = 平台主动 POST 远端回合端点（远端需平台
+    可达）；pull = 回连，远端凭 agent_key（sha256 哈希落库，一次性发放）
+    长轮询领任务、回传结果，平台不发起外呼——服务 NAT/防火墙后的远端。
     """
 
     __tablename__ = "super_assistant_remote_agents"
     __table_args__ = (
         UniqueConstraint("owner_id", "key", name="uq_sa_remote_agent_owner_key"),
         Index("ix_sa_remote_agents_owner_enabled", "owner_id", "enabled"),
+        Index("ix_sa_remote_agents_key_hash", "agent_key_hash", unique=True),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -508,9 +513,74 @@ class SuperAssistantRemoteAgent(Base):
     key: Mapped[str] = mapped_column(String(50), nullable=False)
     label: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    endpoint: Mapped[str] = mapped_column(String(1000), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
     token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120)
+    mode: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="direct", server_default=text("direct"),
+    )
+    agent_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # RAP 协议版本（兑换时协商冻结；平台永远兼容 v1，见 remote_agent_service）
+    rap_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1"),
+    )
+    # 最近一次被委派执行回合的时间（直连模式的活动信号；回连看 last_seen_at）
+    last_turn_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantRemoteAgentInvite(Base):
+    """远程助手接入邀请：平台生成一次性令牌，远端 agent 凭令牌自助注册。
+
+    令牌 sha256 哈希存储供公开兑换端点查表（未知/过期/撤销同响应防枚举，
+    同 manual-dataset 分享先例）；Fernet 加密备份用于「待使用」期间重新
+    展示邀请函。一次性消费（乐观并发）+ TTL + 属主可撤销；兑换成功的
+    落地行记 redeemed_agent_id（不做外键：助手删除后保留接入痕迹展示）。
+    """
+
+    __tablename__ = "super_assistant_remote_agent_invites"
+    __table_args__ = (
+        Index("ix_sa_remote_agent_invites_owner", "owner_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    redeemed_agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
+class SuperAssistantRemoteAgentTask(Base):
+    """回连模式任务队列：委派侧入队等待，远端长轮询认领并回传结果。
+
+    生命周期 pending → claimed → done（或 expired：超时未领/未回传）。
+    认领走条件 UPDATE 的乐观并发（rowcount 判定），多实例/多轮询并发安全。
+    """
+
+    __tablename__ = "super_assistant_remote_agent_tasks"
+    __table_args__ = (
+        Index("ix_sa_remote_agent_tasks_queue", "agent_id", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    agent_id: Mapped[str] = mapped_column(
+        String, ForeignKey("super_assistant_remote_agents.id", ondelete="CASCADE"), nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    session_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    result_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_session_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

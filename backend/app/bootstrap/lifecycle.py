@@ -199,6 +199,17 @@ async def application_lifespan(
                 start_published_documents_reconcile()
             except Exception as exc:
                 _main_logger.warning("本体发布文档对账定时器启动失败: %s", exc)
+        # 远程助手任务队列清理（每天 04:00 删除保留 7 天外的 done/expired/
+        # 孤儿任务行；APScheduler 进程内定时，单语句轻量维护不走 NATS）
+        if settings.environment != "test":
+            try:
+                from app.super_assistant.remote_agent_task_gc import (
+                    start as start_remote_agent_task_gc,
+                )
+
+                start_remote_agent_task_gc()
+            except Exception as exc:
+                _main_logger.warning("远程助手任务清理定时器启动失败: %s", exc)
 
         from app.data_channel.file_assets.service import (
             file_asset_cleanup_loop,
@@ -274,3 +285,8 @@ async def application_lifespan(
             _main_logger.exception(
                 "Published documents reconcile scheduler cleanup failed"
             )
+            from app.super_assistant import remote_agent_task_gc
+
+            remote_agent_task_gc.shutdown()
+        except Exception:  # noqa: BLE001
+            _main_logger.exception("Remote agent task GC cleanup failed")

@@ -297,6 +297,8 @@ class Settings(BaseSettings):
     # FileRef need public frontend and API addresses.
     pipeline_file_public_app_base_url: str = "http://localhost:5173"
     pipeline_file_public_api_base_url: str = "http://localhost:8000"
+    # 远程助手邀请函/回连契约里下发给远端 agent 的平台 API 公开地址
+    super_assistant_public_api_base_url: str = "http://localhost:8000"
     pipeline_file_upload_token_minutes: int = 15
     pipeline_file_max_upload_mb: int = 100
     pipeline_file_preview_retention_hours: int = 24
