@@ -40,6 +40,74 @@ def _failure_status(exc: Exception) -> str:
     return "timeout" if "timeout" in message or "timed out" in message else "error"
 
 
+# ---------------------------------------------------------------------------
+# 瞬态错误重试：仅覆盖建立连接/发起请求阶段的 429 / 5xx / 超时 / 连接错误；
+# 流式已开始产出 delta 后中途失败不重试（避免重复内容），由 except 收口上抛。
+# openai/anthropic 两个 SDK 均为函数内延迟 import，异常类只能惰性解析。
+# SDK 内建重试一律关闭（client 构造显式 max_retries=0），本模块 _with_retry
+# 是唯一重试层，避免「网关 × SDK」重试相乘放大上游压力。
+# ---------------------------------------------------------------------------
+
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = (1.0, 2.0)  # 3 次尝试之间只 sleep 两次
+_RETRY_AFTER_CAP_SECONDS = 10.0
+
+
+def _sleep(seconds: float) -> None:
+    """独立出来的 sleep seam，测试中替换以避免真实等待。"""
+    time.sleep(seconds)
+
+
+def _transient_error_types() -> tuple[type[BaseException], ...]:
+    """惰性收集两个 SDK 的瞬态异常类（限流/连接失败/服务端 5xx/超时）。"""
+    import importlib
+
+    types: list[type[BaseException]] = []
+    for module_name in ("openai", "anthropic"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        for name in ("RateLimitError", "APIConnectionError", "InternalServerError", "APITimeoutError"):
+            error_type = getattr(module, name, None)
+            if isinstance(error_type, type) and issubclass(error_type, BaseException):
+                types.append(error_type)
+    return tuple(types)
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """读取瞬态错误响应的 Retry-After 头（秒，上限 10s）；缺失或不可解析返回 None。"""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return min(max(seconds, 0.0), _RETRY_AFTER_CAP_SECONDS)
+
+
+def _with_retry(call):
+    """对瞬态 SDK 错误最多尝试 3 次，指数退避 1s/2s，Retry-After 头优先。
+
+    非瞬态错误（含 LLMError）立即原样抛出，不改变既有错误语义。
+    """
+    for attempt in range(_RETRY_MAX_ATTEMPTS):
+        try:
+            return call()
+        except Exception as exc:
+            if attempt + 1 >= _RETRY_MAX_ATTEMPTS or not isinstance(exc, _transient_error_types()):
+                raise
+            delay = _retry_after_seconds(exc)
+            if delay is None:
+                delay = _RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS) - 1)]
+            _sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def chat(call_kwargs: dict, messages: list[dict], tools: list[dict]) -> dict[str, Any]:
     provider = (call_kwargs.get("provider") or "openai").lower()
     model_name = call_kwargs.get("model", "unknown")
@@ -52,9 +120,9 @@ def chat(call_kwargs: dict, messages: list[dict], tools: list[dict]) -> dict[str
     span = perf_spans.begin_span("llm", name="chat.completions", target=f"{provider}/{model_name}")
     try:
         if provider == "anthropic":
-            result = _chat_anthropic(call_kwargs, messages, tools)
+            result = _with_retry(lambda: _chat_anthropic(call_kwargs, messages, tools))
         else:
-            result = _chat_openai(call_kwargs, messages, tools)
+            result = _with_retry(lambda: _chat_openai(call_kwargs, messages, tools))
         return _strip_think(result)
     except LLMError as e:
         status = _failure_status(e)
@@ -165,19 +233,20 @@ def _to_openai_messages(messages: list[dict]) -> list[dict]:
     return oai_msgs
 
 
+_STREAMABLE_PROVIDERS = ("openai", "compatible", "anthropic")
+
+
 def chat_stream(call_kwargs: dict, messages: list[dict], tools: list[dict]):
     """流式对话：逐段产出 {"delta": str}，最后产出 {"final": {content, tool_calls, usage}}。
 
-    能力判定（与测试/托管环境兼容的关键）：
-    - anthropic 或未配置自建 api_base 的 provider → 不试流式，产出
-      {"unsupported_stream": True}，由调用方回退到 chat()；
-    - openai 兼容 + api_base → 真流式：text_delta 增量 + tool_calls 分片组装
-      + usage（stream_options.include_usage，provider 不支持时自动降级重建）。
+    能力判定：openai / compatible / anthropic 均真流式（anthropic 走 messages
+    stream，usage 映射 inputTokens/outputTokens）；仅真正未知的 provider 产出
+    {"unsupported_stream": True}，由调用方回退 chat()。瞬态错误只在建连阶段
+    重试（指数退避 + Retry-After）；delta 已产出后中途失败直接上抛，不重复内容。
     流中 think 块实时过滤（<think>…</think> 不外发，含跨 delta 的半标签缓冲）。
     """
     provider = (call_kwargs.get("provider") or "openai").lower()
-    streamable = provider != "anthropic" and bool(call_kwargs.get("api_base"))
-    if not streamable:
+    if provider not in _STREAMABLE_PROVIDERS:
         yield {"unsupported_stream": True}
         return
 
@@ -191,89 +260,10 @@ def chat_stream(call_kwargs: dict, messages: list[dict], tools: list[dict]):
     span = perf_spans.begin_span(
         "llm", name="chat.completions.stream", target=f"{provider}/{model_name}")
     try:
-        import openai
-
-        client_kwargs: dict = {
-            "api_key": call_kwargs.get("api_key") or "sk-none",
-            "timeout": int(call_kwargs.get("timeout_seconds") or 120),
-        }
-        if call_kwargs.get("api_base"):
-            client_kwargs["base_url"] = call_kwargs["api_base"]
-        client = openai.OpenAI(**client_kwargs)
-
-        create_kwargs: dict = {
-            "model": call_kwargs["model"],
-            "messages": _to_openai_messages(messages),
-            "temperature": 0.2,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        max_output = call_kwargs.get("max_output_tokens")
-        if max_output:
-            create_kwargs["max_tokens"] = int(max_output)
-        if tools:
-            create_kwargs["tools"] = [
-                {"type": "function",
-                 "function": {"name": t["name"], "description": t["description"],
-                              "parameters": t["parameters"]}}
-                for t in tools
-            ]
-        try:
-            stream = client.chat.completions.create(**create_kwargs)
-        except Exception:  # noqa: BLE001 — 部分兼容端点不支持 stream_options
-            create_kwargs.pop("stream_options", None)
-            stream = client.chat.completions.create(**create_kwargs)
-
-        raw_parts: list[str] = []
-        tool_acc: dict[int, dict] = {}
-        usage = None
-        think_state: dict = {}
-        for chunk in stream:
-            if getattr(chunk, "usage", None):
-                usage = chunk.usage
-            if not getattr(chunk, "choices", None):
-                continue
-            choice = chunk.choices[0]
-            delta = getattr(choice, "delta", None)
-            if delta is None:
-                continue
-            piece = getattr(delta, "content", None)
-            if piece:
-                raw_parts.append(piece)
-                for safe in _filter_think_deltas(piece, think_state):
-                    if safe:
-                        yield {"delta": safe}
-            for tc in (getattr(delta, "tool_calls", None) or []):
-                index = getattr(tc, "index", 0) or 0
-                slot = tool_acc.setdefault(
-                    index, {"id": "", "name": "", "arguments": ""})
-                if getattr(tc, "id", None):
-                    slot["id"] = tc.id
-                fn = getattr(tc, "function", None)
-                if fn is not None:
-                    if getattr(fn, "name", None):
-                        slot["name"] += fn.name
-                    if getattr(fn, "arguments", None):
-                        slot["arguments"] += fn.arguments
-
-        tool_calls = []
-        for index in sorted(tool_acc):
-            slot = tool_acc[index]
-            if not slot["name"]:
-                continue
-            try:
-                args = json.loads(slot["arguments"] or "{}")
-            except json.JSONDecodeError:
-                args = {"_raw": slot["arguments"]}
-            tool_calls.append({"id": slot["id"] or f"call_{index}",
-                               "name": slot["name"], "arguments": args})
-        yield {"final": _strip_think({
-            "content": "".join(raw_parts) or None,
-            "tool_calls": tool_calls,
-            "usage": {"inputTokens": getattr(usage, "prompt_tokens", None),
-                      "outputTokens": getattr(usage, "completion_tokens", None)}
-            if usage else None,
-        })}
+        if provider == "anthropic":
+            yield from _stream_anthropic(call_kwargs, messages, tools)
+        else:
+            yield from _stream_openai(call_kwargs, messages, tools)
     except LLMError as e:
         status = _failure_status(e)
         error_msg = str(e)
@@ -292,6 +282,162 @@ def chat_stream(call_kwargs: dict, messages: list[dict], tools: list[dict]):
             perf_spans.end_span(span, status=status)
         except Exception:
             pass  # 统计记录失败不影响主流程
+
+
+def _stream_openai(call_kwargs: dict, messages: list[dict], tools: list[dict]):
+    """openai 兼容协议真流式：text_delta 增量 + tool_calls 分片组装 + usage。
+
+    usage 经 stream_options.include_usage 请求；端点不支持该字段（非瞬态拒绝）
+    时去掉字段重建流。只有建连（create 本身）走重试；迭代中途断线不重试，
+    避免重复产出 delta。
+    """
+    import openai
+
+    client = openai.OpenAI(**_openai_client_kwargs(call_kwargs))
+
+    create_kwargs: dict = {
+        "model": call_kwargs["model"],
+        "messages": _to_openai_messages(messages),
+        "temperature": 0.2,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    max_output = call_kwargs.get("max_output_tokens")
+    if max_output:
+        create_kwargs["max_tokens"] = int(max_output)
+    if tools:
+        create_kwargs["tools"] = [
+            {"type": "function",
+             "function": {"name": t["name"], "description": t["description"],
+                          "parameters": t["parameters"]}}
+            for t in tools
+        ]
+    try:
+        stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+    except Exception as exc:
+        if isinstance(exc, _transient_error_types()):
+            raise
+        create_kwargs.pop("stream_options", None)  # 部分兼容端点不支持 stream_options
+        stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+
+    raw_parts: list[str] = []
+    tool_acc: dict[int, dict] = {}
+    usage = None
+    think_state: dict = {}
+    for chunk in stream:
+        if getattr(chunk, "usage", None):
+            usage = chunk.usage
+        if not getattr(chunk, "choices", None):
+            continue
+        choice = chunk.choices[0]
+        delta = getattr(choice, "delta", None)
+        if delta is None:
+            continue
+        piece = getattr(delta, "content", None)
+        if piece:
+            raw_parts.append(piece)
+            for safe in _filter_think_deltas(piece, think_state):
+                if safe:
+                    yield {"delta": safe}
+        for tc in (getattr(delta, "tool_calls", None) or []):
+            index = getattr(tc, "index", 0) or 0
+            slot = tool_acc.setdefault(
+                index, {"id": "", "name": "", "arguments": ""})
+            if getattr(tc, "id", None):
+                slot["id"] = tc.id
+            fn = getattr(tc, "function", None)
+            if fn is not None:
+                if getattr(fn, "name", None):
+                    slot["name"] += fn.name
+                if getattr(fn, "arguments", None):
+                    slot["arguments"] += fn.arguments
+
+    tool_calls = []
+    for index in sorted(tool_acc):
+        slot = tool_acc[index]
+        if not slot["name"]:
+            continue
+        try:
+            args = json.loads(slot["arguments"] or "{}")
+        except json.JSONDecodeError:
+            args = {"_raw": slot["arguments"]}
+        tool_calls.append({"id": slot["id"] or f"call_{index}",
+                           "name": slot["name"], "arguments": args})
+    yield {"final": _strip_think({
+        "content": "".join(raw_parts) or None,
+        "tool_calls": tool_calls,
+        "usage": {"inputTokens": getattr(usage, "prompt_tokens", None),
+                  "outputTokens": getattr(usage, "completion_tokens", None)}
+        if usage else None,
+    })}
+
+
+def _stream_anthropic(call_kwargs: dict, messages: list[dict], tools: list[dict]):
+    """anthropic messages stream 真流式：产出序列与 openai 分支完全一致。
+
+    client.messages.stream 的 __enter__ 才发起 HTTP 请求（建连阶段），只有它走
+    重试；迭代中途断线不重试，避免重复产出 delta。tool_use 的 input_json_delta
+    分片按 index 归槽，收尾时与 openai 分支同规则解析（失败落 {"_raw": …}）。
+    """
+    import anthropic
+
+    client = anthropic.Anthropic(**_anthropic_client_kwargs(call_kwargs))
+    manager = client.messages.stream(
+        **_anthropic_create_kwargs(call_kwargs, messages, tools))
+    stream = _with_retry(manager.__enter__)
+    text_blocks: dict[int, list[str]] = {}
+    tool_acc: dict[int, dict] = {}
+    think_state: dict = {}
+    try:
+        for event in stream:
+            event_type = getattr(event, "type", "")
+            index = getattr(event, "index", None)
+            if event_type == "content_block_start":
+                block = event.content_block
+                block_type = getattr(block, "type", "")
+                if block_type == "text":
+                    text_blocks.setdefault(index, [])
+                elif block_type == "tool_use":
+                    tool_acc[index] = {
+                        "id": getattr(block, "id", "") or "",
+                        "name": getattr(block, "name", "") or "",
+                        "arguments": "",
+                    }
+            elif event_type == "content_block_delta":
+                delta = event.delta
+                delta_type = getattr(delta, "type", "")
+                if delta_type == "text_delta":
+                    piece = delta.text
+                    if piece:
+                        text_blocks.setdefault(index, []).append(piece)
+                        for safe in _filter_think_deltas(piece, think_state):
+                            if safe:
+                                yield {"delta": safe}
+                elif delta_type == "input_json_delta" and index in tool_acc:
+                    tool_acc[index]["arguments"] += delta.partial_json
+        final_message = stream.get_final_message()
+    finally:
+        manager.__exit__(None, None, None)
+
+    tool_calls = []
+    for index in sorted(tool_acc):
+        slot = tool_acc[index]
+        if not slot["name"]:
+            continue
+        try:
+            args = json.loads(slot["arguments"] or "{}")
+        except json.JSONDecodeError:
+            args = {"_raw": slot["arguments"]}
+        tool_calls.append({"id": slot["id"] or f"call_{index}",
+                           "name": slot["name"], "arguments": args})
+    usage = getattr(final_message, "usage", None)
+    yield {"final": _strip_think({
+        "content": "\n".join("".join(parts) for _index, parts in sorted(text_blocks.items())) or None,
+        "tool_calls": tool_calls,
+        "usage": {"inputTokens": getattr(usage, "input_tokens", None),
+                  "outputTokens": getattr(usage, "output_tokens", None)}
+        if usage else None,
+    })}
 
 
 # 流式 think 过滤器：与 strip_think_content 同语义 —— 只处理位于正文开头的
@@ -340,36 +486,35 @@ def _filter_think_deltas(piece: str, state: dict):
     return out
 
 
-def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
-    import openai
-
+def _openai_client_kwargs(kw: dict) -> dict:
     client_kwargs: dict = {
         "api_key": kw.get("api_key") or "sk-none",
         "timeout": int(kw.get("timeout_seconds") or 120),
+        "max_retries": 0,  # 关闭 SDK 内建重试，网关 _with_retry 为唯一重试层
     }
     if kw.get("api_base"):
         client_kwargs["base_url"] = kw["api_base"]
-    client = openai.OpenAI(**client_kwargs)
+    return client_kwargs
 
-    oai_msgs = []
-    for m in messages:
-        if m["role"] == "assistant" and m.get("tool_calls"):
-            oai_msgs.append({
-                "role": "assistant",
-                "content": m.get("content") or None,
-                "tool_calls": [{
-                    "id": tc["id"], "type": "function",
-                    "function": {"name": tc["name"],
-                                 "arguments": json.dumps(tc.get("arguments") or {}, ensure_ascii=False)},
-                } for tc in m["tool_calls"]],
-            })
-        elif m["role"] == "tool":
-            oai_msgs.append({"role": "tool", "tool_call_id": m["tool_call_id"],
-                             "content": m["content"]})
-        else:
-            oai_msgs.append({"role": m["role"], "content": m.get("content") or ""})
 
-    create_kwargs: dict = {"model": kw["model"], "messages": oai_msgs, "temperature": 0.2}
+def _anthropic_client_kwargs(kw: dict) -> dict:
+    client_kwargs: dict = {
+        "api_key": kw.get("api_key") or "",
+        "timeout": int(kw.get("timeout_seconds") or 120),
+        "max_retries": 0,  # 关闭 SDK 内建重试，网关 _with_retry 为唯一重试层
+    }
+    if kw.get("api_base"):
+        client_kwargs["base_url"] = kw["api_base"]
+    return client_kwargs
+
+
+def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
+    import openai
+
+    client = openai.OpenAI(**_openai_client_kwargs(kw))
+
+    create_kwargs: dict = {"model": kw["model"], "messages": _to_openai_messages(messages),
+                           "temperature": 0.2}
     max_output = kw.get("max_output_tokens")
     if max_output:  # 用户在模型配置中设置的最大输出上限
         create_kwargs["max_tokens"] = int(max_output)
@@ -395,17 +540,8 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
     }
 
 
-def _chat_anthropic(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
-    import anthropic
-
-    client_kwargs: dict = {
-        "api_key": kw.get("api_key") or "",
-        "timeout": int(kw.get("timeout_seconds") or 120),
-    }
-    if kw.get("api_base"):
-        client_kwargs["base_url"] = kw["api_base"]
-    client = anthropic.Anthropic(**client_kwargs)
-
+def _anthropic_create_kwargs(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
+    """中立消息格式 → Anthropic messages 协议（chat 与 chat_stream 共用）。"""
     system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
     aa_msgs: list[dict] = []
     for m in messages:
@@ -433,7 +569,14 @@ def _chat_anthropic(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
     if tools:  # 纯文本调用时省略 tools
         create_kwargs["tools"] = [{"name": t["name"], "description": t["description"],
                                    "input_schema": t["parameters"]} for t in tools]
-    resp = client.messages.create(**create_kwargs)
+    return create_kwargs
+
+
+def _chat_anthropic(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
+    import anthropic
+
+    client = anthropic.Anthropic(**_anthropic_client_kwargs(kw))
+    resp = client.messages.create(**_anthropic_create_kwargs(kw, messages, tools))
     text_parts, tool_calls = [], []
     for block in resp.content:
         if block.type == "text":
