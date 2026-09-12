@@ -34,7 +34,7 @@ def test_revision_graph_head_is_single_head(tmp_path, monkeypatch):
     # 单头门禁：新迁移必须线性追加（当前 head 见 alembic heads 输出）。
     # 0094 palace folders 目录一等公民表为当前 head（0093 为 multica 外部集成）。
     assert len(heads) == 1
-    assert heads == ["0105_palace_ontology_documents"]
+    assert heads == ["0107_mapping_suggestion_queue"]
 
 def _create_0067_shape_skills_table(db_path: Path) -> None:
     """手工建 0067 形态的 super_assistant_skills（不含治理列）。

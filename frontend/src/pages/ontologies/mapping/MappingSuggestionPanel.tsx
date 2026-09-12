@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  AlertCircle, Boxes, Check, History, Loader2, Sparkles, X,
+  AlertCircle, Bot, Boxes, Check, History, Loader2, Sparkles, X,
 } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import type {
   DatasetMappingSuggestion,
   MappingSuggestionResponse,
+  PersistentMappingSuggestion,
 } from '@/api/v2/mapping-suggestions'
 import type { MappingDataset, MappingObjectType } from '../detail/mapping/mapping-data'
 import type { SuggestionAcceptance } from './suggestion-apply'
+import { buildAgentSuggestionCards } from './persistent-suggestions'
 
 interface DatasetSelection {
   /** 面板内人工可改的配对对象（空串 = 未选择） */
@@ -24,6 +26,11 @@ interface MappingSuggestionPanelProps {
   datasetById: Map<string, MappingDataset>
   onClose: () => void
   onApply: (accepted: SuggestionAcceptance[]) => void
+  /** 持久队列中的 Agent 提案（待确认）；确认/驳回走服务端闭环端点 */
+  agentSuggestions?: PersistentMappingSuggestion[]
+  agentBusyId?: string | null
+  onConfirmAgent?: (suggestionId: string) => void
+  onDismissAgent?: (suggestionId: string) => void
 }
 
 function validFields(
@@ -53,8 +60,18 @@ function defaultChecked(
 
 export default function MappingSuggestionPanel({
   loading, response, objectTypes, datasetById, onClose, onApply,
+  agentSuggestions, agentBusyId, onConfirmAgent, onDismissAgent,
 }: MappingSuggestionPanelProps) {
   const [selections, setSelections] = useState<Record<string, DatasetSelection>>({})
+
+  const objectById = useMemo(
+    () => new Map(objectTypes.map(item => [item.id, item])),
+    [objectTypes],
+  )
+  const agentCards = useMemo(
+    () => buildAgentSuggestionCards(agentSuggestions || [], datasetById, objectById),
+    [agentSuggestions, datasetById, objectById],
+  )
 
   useEffect(() => {
     if (!response) return
@@ -124,6 +141,57 @@ export default function MappingSuggestionPanel({
         )}
 
         <main className="dmc-suggest-body">
+          {agentCards.length > 0 && (
+            <>
+              <div className="dmc-suggest-banner dmc-suggest-banner--good" data-testid="suggest-agent-banner">
+                <Bot size={14} />
+                <span>{agentCards.length} 条来自 Agent 的映射建议待确认：确认即写入草稿映射并回流知识库，驳回后出队。</span>
+              </div>
+              {agentCards.map(card => (
+                <section className="dmc-suggest-card" key={card.id} data-testid={`agent-suggest-card-${card.id}`}>
+                  <header>
+                    <b>{card.datasetLabel}</b>
+                    <small>
+                      映射到对象实体：{card.objectLabel}
+                      {card.primaryKeyColumn ? ` · 识别主键列：${card.primaryKeyColumn}` : ''}
+                    </small>
+                  </header>
+                  <ul className="dmc-suggest-fields">
+                    {card.fieldRows.map(row => (
+                      <li key={row.column}>
+                        <span className="dmc-suggest-field-name" title={row.columnLabel}>{row.columnLabel}</span>
+                        <span className="dmc-suggest-arrow">→</span>
+                        <span className="dmc-suggest-field-prop">{row.propertyLabel}</span>
+                        <i className="dmc-suggest-source" title="探索 Agent 提案"><Bot size={11} />来自 Agent</i>
+                      </li>
+                    ))}
+                  </ul>
+                  {card.note && (
+                    <p className="dmc-suggest-skipped" title={card.note}>提案理由：{card.note}</p>
+                  )}
+                  <div className="dmc-suggest-card-actions">
+                    <button
+                      className="dmc-suggest-confirm"
+                      disabled={agentBusyId === card.id}
+                      data-testid={`agent-confirm-${card.id}`}
+                      onClick={() => onConfirmAgent?.(card.id)}
+                    >
+                      {agentBusyId === card.id ? <Loader2 className="animate-spin" size={13} /> : <Check size={13} />}
+                      确认写入草稿
+                    </button>
+                    <button
+                      className="dmc-suggest-dismiss"
+                      disabled={agentBusyId === card.id}
+                      data-testid={`agent-dismiss-${card.id}`}
+                      onClick={() => onDismissAgent?.(card.id)}
+                    >
+                      <X size={13} />驳回
+                    </button>
+                  </div>
+                </section>
+              ))}
+            </>
+          )}
           {loading && (
             <div className="dmc-suggest-loading"><Loader2 className="animate-spin" size={18} />正在生成映射建议…</div>
           )}

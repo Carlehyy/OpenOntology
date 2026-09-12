@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, JSON, Float, ForeignKey, Integer, UniqueConstraint
+from sqlalchemy import String, DateTime, JSON, Float, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -69,3 +69,35 @@ class MappingKnowledgeEntry(Base):
     last_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+class OntologyMappingSuggestion(Base):
+    """映射建议的人工确认队列（持久层）。
+
+    探索 Agent（propose_mapping 工具）与 L0-L2 建议流水线共用同一确认纪律：
+    建议落库即 pending，确认只发生在映射视图的队列 UI；未确认建议永不进入
+    草稿快照 mappings、永不回流知识库（防飞轮污染）。
+    """
+    __tablename__ = "v2_mapping_suggestions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    ontology_id: Mapped[str] = mapped_column(String, ForeignKey("ontology_projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    # 建议锚定的草稿版本；版本语义（draft/editing）由建议服务在写入时守卫。
+    version_id: Mapped[str] = mapped_column(String, ForeignKey("ontology_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    dataset_id: Mapped[str] = mapped_column(String, ForeignKey("v2_datasets.id"), nullable=False)
+    # 目标对象实体：id + 语义名冗余（对齐 OntologyMapping 的 entity_class 口径，
+    # 对象改名后仍可追溯建议当时的锚点）。
+    object_type_id: Mapped[str] = mapped_column(String, nullable=False)
+    entity_class: Mapped[str] = mapped_column(String(200), nullable=False)
+    # {数据集列名: 本体属性名} —— 纯净业务映射，主键列单列不混入保留键。
+    field_mapping: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    primary_key_column: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # pending（待人工确认）| confirmed | dismissed；Agent 只能写入 pending。
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    # 确认后回填草稿快照中的 mapping 条目 id（幂等回报与审计锚点）。
+    confirmed_mapping_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 驳回原因（dismiss 时由人工填写，可空）。
+    status_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 建议来源（agent / pipeline ...），供确认队列区分呈现与审计。
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="agent")
+    note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

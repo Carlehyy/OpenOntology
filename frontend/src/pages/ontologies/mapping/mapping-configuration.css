@@ -512,6 +512,27 @@
 .dmc-suggest-foot .dmc-suggest-apply:disabled { opacity: .5; cursor: not-allowed; }
 .dmc-suggest-open { display: inline-flex; align-items: center; gap: 6px; }
 .dmc-suggest-open span { font-size: 12px; }
+/* 以下为 Agent 持久建议队列新增样式：颜色一律取 tokens.css 语义令牌（棘轮零新增） */
+.dmc-suggest-open em {
+  min-width: 16px; height: 16px; padding: 0 4px; margin-left: 2px;
+  border-radius: 999px; display: inline-flex; align-items: center; justify-content: center;
+  font-style: normal; font-size: 10px; font-weight: 700;
+  color: var(--color-accent-ink); background: var(--color-accent-soft);
+  border: 1px solid var(--color-accent-line);
+}
+.dmc-suggest-card-actions { display: flex; gap: 8px; margin-top: 9px; }
+.dmc-suggest-card-actions button {
+  display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px;
+  border-radius: 8px; font-size: 12px; cursor: pointer;
+  border: 1px solid var(--color-border); background: var(--card);
+  color: var(--color-text-primary);
+}
+.dmc-suggest-card-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.dmc-suggest-card-actions .dmc-suggest-confirm {
+  color: var(--color-accent-ink); background: var(--color-accent-soft);
+  border-color: var(--color-accent-line);
+}
+.dmc-suggest-card-actions .dmc-suggest-dismiss:hover { color: var(--destructive); }
 .dmc-header-actions > .dmc-suggest-open:not(.dmc-save) {
   width: auto;
   padding: 0 9px;
