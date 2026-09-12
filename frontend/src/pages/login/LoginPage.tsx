@@ -70,7 +70,7 @@ const features = [
 ]
 
 export default function LoginPage() {
-  const { register, handleSubmit } = useForm<LoginForm>()
+  const { register, handleSubmit, formState: { errors } } = useForm<LoginForm>()
   const setAuth = useAuthStore(state => state.setAuth)
   const navigate = useNavigate()
   const location = useLocation()
@@ -91,7 +91,16 @@ export default function LoginPage() {
       navigate(safeReturnTo(routeState?.returnTo ?? queryReturnTo), { replace: true })
     } catch (e: any) {
       localStorage.removeItem('token')
-      setError(e?.response?.data?.detail || '登录失败，请检查用户名和密码')
+      // axios 拦截器 reject 的是已解包的响应体（{detail}）或原始错误，不能按
+      // e.response.data.detail 取值；detail 也可能是对象（如 422 校验数组），
+      // 必须确认是字符串才能渲染，否则 React 渲染对象会崩溃
+      const detail = e?.detail
+      const message = e?.message
+      setError(
+        (typeof detail === 'string' && detail)
+        || (typeof message === 'string' && message)
+        || '登录失败，请检查用户名和密码',
+      )
     } finally {
       setLoading(false)
     }
@@ -144,17 +153,21 @@ export default function LoginPage() {
               <p>登录您的 OpenOntology 账号</p>
             </div>
 
-            <form onSubmit={handleSubmit(onSubmit)} className="ontology-login__form">
+            <form onSubmit={handleSubmit(onSubmit)} className="ontology-login__form" noValidate>
               <label htmlFor="login-username">用户名</label>
               <div className="ontology-login__input-wrap">
                 <UserRound size={20} aria-hidden="true" />
                 <input
                   id="login-username"
                   autoComplete="username"
-                  {...register('username', { required: true })}
+                  {...register('username', { required: '请输入用户名' })}
                   placeholder="请输入用户名"
+                  aria-invalid={errors.username ? 'true' : undefined}
                 />
               </div>
+              {errors.username && (
+                <p className="ontology-login__field-error" role="alert">{errors.username.message}</p>
+              )}
 
               <label htmlFor="login-password">密码</label>
               <div className="ontology-login__input-wrap">
@@ -162,9 +175,10 @@ export default function LoginPage() {
                 <input
                   id="login-password"
                   autoComplete="current-password"
-                  {...register('password', { required: true })}
+                  {...register('password', { required: '请输入密码' })}
                   type={showPassword ? 'text' : 'password'}
                   placeholder="请输入密码"
+                  aria-invalid={errors.password ? 'true' : undefined}
                 />
                 <button
                   type="button"
@@ -176,6 +190,9 @@ export default function LoginPage() {
                   {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
                 </button>
               </div>
+              {errors.password && (
+                <p className="ontology-login__field-error" role="alert">{errors.password.message}</p>
+              )}
 
               {error && <div className="ontology-login__error" role="alert">{error}</div>}
 

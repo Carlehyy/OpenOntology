@@ -327,6 +327,12 @@
   font-size: 13px;
 }
 
+.ontology-login__field-error {
+  margin: -20px 0 14px;
+  color: #b23a3a;
+  font-size: 12.5px;
+}
+
 .ontology-login__submit {
   display: grid;
   height: clamp(58px, 6.2vh, 63px);
@@ -598,6 +604,10 @@
   color: var(--color-danger);
   border-color: var(--color-danger-bg);
   background: var(--color-danger-bg);
+}
+
+.dark .ontology-login__field-error {
+  color: var(--color-danger);
 }
 
 @media (max-width: 540px) {

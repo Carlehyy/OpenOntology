@@ -39,10 +39,11 @@ function createApiClient(version: string): ApiClient {
       if (isUnauthenticated) {
         localStorage.removeItem('token')
         const currentRoute = window.location.hash.replace(/^#/, '') || '/'
-        const loginRoute = currentRoute.startsWith('/login')
-          ? '/#/login'
-          : `/#/login?returnTo=${encodeURIComponent(currentRoute)}`
-        window.location.href = loginRoute
+        if (!currentRoute.startsWith('/login')) {
+          // 登录页自身的 401（密码错误等）不做整页跳转：重写成裸 /#/login 会
+          // 丢掉 ?returnTo= 深链参数，留给页面内联报错即可
+          window.location.href = `/#/login?returnTo=${encodeURIComponent(currentRoute)}`
+        }
       }
       return Promise.reject(err.response?.data ?? err)
     }
