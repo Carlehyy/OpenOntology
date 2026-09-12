@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.exploration.context_builder import _CARD_PROGRESS_TOOL
 from app.exploration.orchestrator import run_exploration_turn
 from app.exploration.session_service import _ok, _require_session
 
@@ -61,7 +62,10 @@ def chat(
         steps = [
             event
             for event in events
-            if event["type"] == "step"
+            # heartbeat（llm_round 活性心跳）按类型天然不进此列表；
+            # attachment_card 是索引卡懒生成的进度 step，同样不是真实工具
+            # 步骤 —— 都不进非流式响应的 steps（保持与持久化 steps 同义）。
+            if event["type"] == "step" and event.get("tool") != _CARD_PROGRESS_TOOL
         ]
         return ok_fn({
             "sessionId": meta.get("sessionId") or session_id,

@@ -111,6 +111,9 @@ class ExplorationAttachment(Base):
     # 转换后的文本（注入对话上下文的内容源）+ 原始字符数（截断前）
     extracted_text: Mapped[str] = mapped_column(Text, default="")
     char_count: Mapped[int] = mapped_column(Integer, default=0)
+    # LLM 懒生成的「索引卡」摘要（≤600 字符）：注入上下文时代替原文全文；
+    # NULL=尚未生成。正文被更新（update_text/refresh_binary_metadata）时置空重生成。
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="ready")  # ready | failed
     error: Mapped[str] = mapped_column(String(500), nullable=True)
