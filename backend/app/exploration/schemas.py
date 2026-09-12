@@ -76,7 +76,7 @@ class DocumentListItem(CamelModel):
 
 
 class GenerateDraftRequest(CamelModel):
-    target_ontology_id: Optional[str] = None   # None = 应用时新建本体
+    target_ontology_id: Optional[str] = None   # 缺省取会话绑定本体；会话未绑定 = 应用时新建本体
     model_id: Optional[str] = None             # LLM 补缺用的模型；缺省用系统默认
     force: bool = False                        # 质量门未通过时显式越权（留痕于草稿报告）
 
@@ -155,3 +155,34 @@ class ApplyDraftRequest(CamelModel):
 
 class DraftValidationRequest(CamelModel):
     selected_keys: Optional[list[str]] = None
+
+
+# ---------------------------------------------------------------- 本体预览投影（只读）
+
+
+class OntologyPreviewItem(CamelModel):
+    key: str
+    name: str
+    display_name: str
+    # add=将新增 / exists=已存在将跳过 / conflict=同名冲突不进默认选择集
+    disposition: str
+
+
+class OntologyPreviewReadiness(CamelModel):
+    ready: bool
+    gates_passed: int
+    gates_total: int
+    blocking_count: int
+    advisory_count: int
+
+
+class OntologyPreviewOut(CamelModel):
+    """画布 → 本体预览投影：确定性转换 + 与绑定版本基线比对，不落库。"""
+    canvas_fingerprint: str
+    canvas_version: int = 0
+    bound: bool = False
+    ontology_id: Optional[str] = None
+    ontology_version_id: Optional[str] = None
+    readiness: OntologyPreviewReadiness
+    projected: dict[str, list[OntologyPreviewItem]] = Field(default_factory=dict)
+    semantic_issues: list[dict[str, Any]] = Field(default_factory=list)

@@ -1,4 +1,4 @@
-/* 探索会话的本体版本绑定纯逻辑：URL 参数解析与绑定会话选择。
+/* 探索会话的本体版本绑定纯逻辑：URL 参数解析、绑定会话选择与绑定失败横幅文案。
    与 ExplorationPage.tsx 解耦（无 React 依赖），便于 node:test 单测。 */
 import type { BxSession } from '@/api/exploration'
 
@@ -57,6 +57,26 @@ export type BoundSessionResolution =
   | { action: 'select'; sessionId: string }
   | { action: 'create' }
   | { action: 'none' }
+
+/**
+ * 绑定失败横幅文案：透出后端原因（HTTP detail/message），缺省给通用兜底。
+ * 供绑定会话解析失败（ensureSession/创建绑定会话失败）的 banner + 重试入口使用。
+ */
+export function bindingFailureBannerText(error: unknown): string {
+  const value = (error && typeof error === 'object' ? error : null) as
+    | { detail?: unknown; message?: unknown }
+    | null
+  const detail = value?.detail
+  const detailMessage = detail && typeof detail === 'object'
+    ? (detail as { message?: unknown }).message
+    : null
+  const reason =
+    (typeof detail === 'string' && detail.trim()) ||
+    (typeof detailMessage === 'string' && detailMessage.trim()) ||
+    (typeof value?.message === 'string' && value.message.trim()) ||
+    ''
+  return reason ? `绑定本体版本失败：${reason}` : '绑定本体版本失败，请检查绑定参数后重试'
+}
 
 /**
  * 绑定态会话解析：当前会话已是目标绑定 → 不动；

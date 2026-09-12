@@ -841,3 +841,36 @@ def test_retired_publish_endpoint_never_rebuilds_or_switches_projection(
     assert calls == []
     db.refresh(project)
     assert project.current_release_id == release_id
+
+
+def test_release_gate_blocks_dormant_action_but_exempts_approval(db, ontology):
+    """发布门保持严格：无启用副作用规则的动作阻断发布；
+    requiresApproval 动作按运行时审批挂起语义豁免同一条目。"""
+    oid = ontology["id"]
+    object_type = _object_type(oid, item_id="ot-dormant", with_contract=True)
+    action = ActionType(
+        id="act-dormant", ontology_id=oid,
+        name="dormant_action", display_name="休眠动作",
+        object_type_id=object_type.id, parameters=[],
+        rules=[{
+            "id": "rule-pending", "type": "validation",
+            "name": "待形式化: 金额约束", "enabled": False, "order": 0,
+            "config": {"type": "validation", "condition": "",
+                       "errorMessage": "金额必须大于 0"},
+        }],
+        requires_approval=False,
+    )
+    db.add_all([object_type, action])
+    db.commit()
+
+    codes = {item["code"] for item in version_router._release_errors(db, oid)}
+    assert "invalid_action_definition" in codes
+    assert any(
+        "没有启用的可执行副作用规则" in item["message"]
+        for item in version_router._release_errors(db, oid)
+    )
+
+    action.requires_approval = True
+    db.commit()
+    codes = {item["code"] for item in version_router._release_errors(db, oid)}
+    assert "invalid_action_definition" not in codes

@@ -435,9 +435,10 @@ def test_large_nested_canonical_state_is_losslessly_pageable():
 
 
 def test_system_prompt_includes_full_authoritative_snapshot_and_canvas_version():
+    from app.exploration.context_builder import _system_prompt
     session = ExplorationSession(
         id="s", title="state", canvas=_rich_canvas(), canvas_version=12)
-    prompt = OR._system_prompt(session, skills={})
+    prompt = _system_prompt(session, skills={})
     assert "canvasVersion=12" in prompt
     assert '"complete": true' in prompt
     assert '"type_hint": "金额"' in prompt
@@ -598,10 +599,11 @@ def test_stream_unsupported_falls_back_to_single_chat(db, monkeypatch):
 
 def test_system_prompt_encodes_autonomous_agent_contract():
     """E2 自主建模代理契约与回合预算：禁求确认、批量检查点、PLAN 工具、24 步。"""
+    from app.exploration.context_builder import _system_prompt
     assert OR._MAX_STEPS == 24
     session = ExplorationSession(
         id="prompt-contract", title="t", canvas=C.empty_canvas(), canvas_version=0)
-    prompt = OR._system_prompt(session)
+    prompt = _system_prompt(session)
     assert "自主建模代理" in prompt
     assert "不要提出「是否同意继续" in prompt
     assert "一次性批量" in prompt

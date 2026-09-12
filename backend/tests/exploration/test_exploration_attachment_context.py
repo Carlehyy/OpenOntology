@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 from app.exploration.attachment_context import build_attachment_context
 from app.exploration.canvas import empty_canvas
+from app.exploration.context_builder import _attachments_block
 from app.exploration.models import ExplorationAttachment, ExplorationSession
-from app.exploration.orchestrator import _attachments_block
 from app.exploration.toolkit import ExplorationToolRunner, _file_mutation_authorized
 
 
@@ -26,6 +26,7 @@ def test_long_attachment_retrieves_question_relevant_tail():
     block = build_attachment_context(
         [_row("risk-policy.txt", text)],
         query="附件里高风险订单阈值是多少？",
+        per_file_cap=6_000,
     )
 
     assert marker in block
@@ -54,12 +55,18 @@ def test_total_budget_prioritizes_the_relevant_file():
         [_row("first.txt", irrelevant), _row("second.txt", relevant)],
         query="唯一审批阈值",
         per_file_cap=6_000,
-        total_cap=6_000,
+        total_cap=8_000,
     )
 
+    # 索引卡分层：两份资料都有索引卡；原文窗口只给相关度最高的 second.txt。
+    assert "索引卡：" in block
     assert "second.txt" in block
     assert "99000 元" in block
-    assert "first.txt" not in block
+    sections = block.split("## 用户资料：")
+    first_section = next(s for s in sections if s.startswith("first.txt"))
+    second_section = next(s for s in sections if s.startswith("second.txt"))
+    assert "### 字符 " not in first_section
+    assert "### 字符 " in second_section
 
 
 def test_workspace_read_pages_binary_extracted_text_and_marks_authority(db, admin_user):

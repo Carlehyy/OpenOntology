@@ -108,9 +108,9 @@ def test_unbound_session_prompt_unchanged(client, auth_headers, session, db,
     assert SECTION not in system
     assert "绑定本体版本" not in system
     # 与不带漂移参数直接渲染的系统提示逐字一致（默认 64K 窗口走首个 profile）
+    from app.exploration.context_builder import _load_skills, _system_prompt
     row = db.query(ExplorationSession).filter_by(id=session["id"]).one()
-    assert system == orchestrator._system_prompt(
-        row, orchestrator._load_skills(), False)
+    assert system == _system_prompt(row, _load_skills(), False)
 
 
 def test_zero_drift_bound_version_reports_consistent(client, auth_headers, db,

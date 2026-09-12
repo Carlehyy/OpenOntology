@@ -16,7 +16,10 @@ import {
 import { apiClientV2 } from '@/api/client'
 import { saveCanvasLayout } from '@/palantir-graph/api/formalApi'
 import {
+  confirmMappingSuggestion,
+  dismissMappingSuggestion,
   fetchMappingSuggestions,
+  fetchPersistentMappingSuggestions,
   type MappingSuggestionResponse,
 } from '@/api/v2/mapping-suggestions'
 import {
@@ -29,6 +32,10 @@ import {
   buildSuggestionAdditions,
   type SuggestionAcceptance,
 } from './suggestion-apply'
+import {
+  agentConfirmNotice,
+  pendingAgentSuggestionCount,
+} from './persistent-suggestions'
 import { computeHandleSides, type HandleSide } from './handle-sides'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import MappingSuggestionPanel from './MappingSuggestionPanel'
@@ -225,6 +232,16 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
   const [suggestionResult, setSuggestionResult] = useState<MappingSuggestionResponse | null>(null)
   const initialized = useRef(false)
   const editable = data.workspaceEditable === true
+
+  // Agent 持久建议队列（探索 Agent 的 propose_mapping 提案）：确认/驳回在此闭环。
+  const agentSuggestionsQuery = useQuery({
+    queryKey: ['mapping-suggestions-persistent', ontologyId, versionId],
+    queryFn: () => fetchPersistentMappingSuggestions(ontologyId, versionId!),
+    enabled: Boolean(editable && versionId),
+  })
+  const [agentBusyId, setAgentBusyId] = useState<string | null>(null)
+  const [dismissTargetId, setDismissTargetId] = useState<string | null>(null)
+  const agentPendingCount = pendingAgentSuggestionCount(agentSuggestionsQuery.data)
 
   const toggleDatasetPreview = useCallback((datasetId: string) => {
     setSelectedDatasetId(current => current === datasetId ? null : datasetId)
@@ -813,7 +830,15 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
   )
 
   const openSuggestions = async () => {
-    if (!versionId || !editable || !canvasDatasetIds.length || suggestionLoading) return
+    if (!versionId || !editable || suggestionLoading) return
+    if (!canvasDatasetIds.length) {
+      // 画布上没有数据集时仍打开队列：可能有待确认的 Agent 持久建议
+      if (agentPendingCount > 0) {
+        setSuggestionResult(null)
+        setSuggestionOpen(true)
+      }
+      return
+    }
     setSuggestionOpen(true)
     setSuggestionLoading(true)
     setSuggestionResult(null)
@@ -825,6 +850,48 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       setNotice({ tone: 'bad', text: `生成映射建议失败：${errorMessage(error)}` })
     } finally {
       setSuggestionLoading(false)
+    }
+  }
+
+  // 确认 Agent 持久建议：服务端把建议写入草稿快照并回流知识库（与人工保存
+  // 画布映射同路径）；随后刷新队列与映射快照。画布无未保存更改时重建画布
+  // 以呈现新映射；有未保存更改时保持本地草稿，保存时按 baseRevision 冲突契约提示重载。
+  const confirmAgentSuggestion = async (suggestionId: string) => {
+    if (!versionId || agentBusyId) return
+    setAgentBusyId(suggestionId)
+    try {
+      const result = await confirmMappingSuggestion(ontologyId, versionId, suggestionId)
+      await queryClient.invalidateQueries({ queryKey: ['mapping-suggestions-persistent', ontologyId, versionId] })
+      await queryClient.invalidateQueries({ queryKey: ['mapping-snapshot', ontologyId, versionId] })
+      if (!dirty) initialized.current = false
+      setNotice({
+        tone: 'good',
+        text: agentConfirmNotice(result) + (dirty ? '当前画布有未保存更改，保存时若提示冲突请重新加载。' : ''),
+      })
+    } catch (error) {
+      setNotice({ tone: 'bad', text: `确认建议失败：${errorMessage(error)}` })
+    } finally {
+      setAgentBusyId(null)
+    }
+  }
+
+  const dismissAgentSuggestion = (suggestionId: string) => {
+    if (!versionId || agentBusyId) return
+    setDismissTargetId(suggestionId)
+  }
+  const confirmDismissAgentSuggestion = async () => {
+    const suggestionId = dismissTargetId
+    if (!versionId || agentBusyId || !suggestionId) return
+    setDismissTargetId(null)
+    setAgentBusyId(suggestionId)
+    try {
+      await dismissMappingSuggestion(ontologyId, versionId, suggestionId)
+      await queryClient.invalidateQueries({ queryKey: ['mapping-suggestions-persistent', ontologyId, versionId] })
+      setNotice({ tone: 'warn', text: '建议已驳回并移出确认队列。' })
+    } catch (error) {
+      setNotice({ tone: 'bad', text: `驳回建议失败：${errorMessage(error)}` })
+    } finally {
+      setAgentBusyId(null)
     }
   }
 
@@ -925,7 +992,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       <header className="dmc-header">
         <div className="dmc-brand">{!hideChromeNavigation && <button onClick={returnToPreviousPage} aria-label="返回上一页" title="返回上一页"><ArrowLeft size={16} /></button>}<span><Link2 size={18} /></span><div><b>数据映射</b><small>{editable ? '草稿可编辑 · 对象实体、实体关系与数据资产字段映射' : `${data.workspaceMode === 'trial' ? '试跑快照' : data.workspaceMode === 'archived' ? '归档快照' : '发布快照'} · 只读查看`}</small></div></div>
         <label className="dmc-global-search focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Search size={14} /><input placeholder="搜索画布节点、数据集或本体属性…" onChange={event => { setLeftSearch(event.target.value); setRightSearch(event.target.value) }} /></label>
-        <div className="dmc-header-actions">{!hideChromeNavigation && <button className="dmc-model-switch" onClick={leaveWorkspace} title="返回模型结构"><Boxes size={15} /><span>模型结构</span></button>}<button onClick={() => setTutorialStep(0)} title="新手教程"><BookOpen size={15} /></button><button onClick={autoLayout} title="自动布局"><LayoutGrid size={15} /></button>{editable && <button onClick={clearCanvas} title="清空画布"><Trash2 size={15} /></button>}{editable && <button className="dmc-suggest-open" data-testid="mapping-suggest-open" disabled={!canvasDatasetIds.length || suggestionLoading} onClick={openSuggestions} title={canvasDatasetIds.length ? '基于历史映射知识、名称规则与大模型概念化生成字段映射建议' : '先把左侧数据集加入画布，再生成智能建议'}>{suggestionLoading ? <Loader2 className="animate-spin" size={15} /> : <Sparkles size={15} />}<span>智能建议</span></button>}<span className="dmc-divider" />{editable ? <button className="dmc-save" disabled={!dirty || saving} onClick={saveAll}>{saving ? <Loader2 className="animate-spin" size={15} /> : <Save size={15} />}{saving ? '正在保存…' : dirty ? '保存配置' : '已保存'}</button> : <span className="dmc-readonly-badge"><Eye size={14} />只读快照</span>}</div>
+        <div className="dmc-header-actions">{!hideChromeNavigation && <button className="dmc-model-switch" onClick={leaveWorkspace} title="返回模型结构"><Boxes size={15} /><span>模型结构</span></button>}<button onClick={() => setTutorialStep(0)} title="新手教程"><BookOpen size={15} /></button><button onClick={autoLayout} title="自动布局"><LayoutGrid size={15} /></button>{editable && <button onClick={clearCanvas} title="清空画布"><Trash2 size={15} /></button>}{editable && <button className="dmc-suggest-open" data-testid="mapping-suggest-open" disabled={(!canvasDatasetIds.length && !agentPendingCount) || suggestionLoading} onClick={openSuggestions} title={canvasDatasetIds.length ? '基于历史映射知识、名称规则与大模型概念化生成字段映射建议' : agentPendingCount ? '查看待确认的 Agent 映射建议' : '先把左侧数据集加入画布，再生成智能建议'}>{suggestionLoading ? <Loader2 className="animate-spin" size={15} /> : <Sparkles size={15} />}<span>智能建议</span>{agentPendingCount > 0 && <em data-testid="suggest-agent-count">{agentPendingCount}</em>}</button>}<span className="dmc-divider" />{editable ? <button className="dmc-save" disabled={!dirty || saving} onClick={saveAll}>{saving ? <Loader2 className="animate-spin" size={15} /> : <Save size={15} />}{saving ? '正在保存…' : dirty ? '保存配置' : '已保存'}</button> : <span className="dmc-readonly-badge"><Eye size={14} />只读快照</span>}</div>
       </header>
 
       {notice && <div className={`dmc-notice dmc-notice--${notice.tone}`}>{notice.tone === 'good' ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}<span>{notice.text}</span><button onClick={() => setNotice(null)}><X size={13} /></button></div>}
@@ -1068,8 +1135,23 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
           datasetById={datasetById}
           onClose={() => setSuggestionOpen(false)}
           onApply={applySuggestions}
+          agentSuggestions={agentSuggestionsQuery.data?.suggestions}
+          agentBusyId={agentBusyId}
+          onConfirmAgent={confirmAgentSuggestion}
+          onDismissAgent={dismissAgentSuggestion}
         />
       )}
+
+      <ConfirmDialog
+        open={dismissTargetId !== null}
+        onClose={() => setDismissTargetId(null)}
+        onConfirm={() => void confirmDismissAgentSuggestion()}
+        variant="warning"
+        title="驳回该映射建议？"
+        description="驳回后该建议不再出现在确认队列。"
+        confirmText="确定驳回"
+        loading={agentBusyId !== null}
+      />
 
       {tutorialStep !== null && <div className="dmc-tutorial" role="dialog" aria-modal="true"><div className="dmc-tutorial-card"><header><div><span><BookOpen size={15} /></span><div><b>数据映射快速入门</b><small>第 {tutorialStep + 1} 步，共 {tutorial.length} 步</small></div></div><button onClick={closeTutorial}><X size={15} /></button></header><main>{(() => { const StepIcon = tutorial[tutorialStep].icon; return <><span><StepIcon size={27} /></span><h3>{tutorial[tutorialStep].title}</h3><p>{tutorial[tutorialStep].text}</p></> })()}</main><footer><div>{tutorial.map((_, index) => <button key={index} data-active={index === tutorialStep} onClick={() => setTutorialStep(index)} />)}</div><span>{tutorialStep > 0 && <button onClick={() => setTutorialStep(step => (step || 1) - 1)}>上一步</button>}<button className="dmc-tutorial-next" onClick={() => tutorialStep === tutorial.length - 1 ? closeTutorial() : setTutorialStep(step => (step || 0) + 1)}>{tutorialStep === tutorial.length - 1 ? '开始配置' : '下一步'}<ArrowRight size={13} /></button></span></footer></div></div>}
 

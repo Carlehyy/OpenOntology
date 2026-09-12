@@ -111,17 +111,20 @@ def create_draft(
             },
         )
 
+    # 目标本体：显式传参优先；缺省时会话已绑定本体则默认沉淀回该本体，
+    # 未绑定会话维持 None（应用时新建本体）。
+    target_ontology_id = body.target_ontology_id or session.ontology_id
     existing = None
-    if body.target_ontology_id:
+    if target_ontology_id:
         require_ontology_access_fn(
             db,
-            body.target_ontology_id,
+            target_ontology_id,
             current_user,
             write=True,
         )
         existing = converter_module.existing_name_sets(
             db,
-            body.target_ontology_id,
+            target_ontology_id,
         )
 
     config = select_llm_model_config_fn(db, model_id=body.model_id)
@@ -205,7 +208,7 @@ def create_draft(
     row = draft_model(
         session_id=document.session_id,
         document_id=document.id,
-        target_ontology_id=body.target_ontology_id,
+        target_ontology_id=target_ontology_id,
         draft=draft_data,
         report=report,
     )

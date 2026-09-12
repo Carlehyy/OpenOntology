@@ -40,7 +40,7 @@ from app.ontologies.versions.snapshot_contract import (
 )
 from app.services.auth_service import hash_password
 
-from tests.exploration.test_exploration import _make_draft
+from tests.exploration.test_exploration import _make_draft, _seed_canvas
 
 BASE = "/api/v2/exploration"
 
@@ -381,3 +381,94 @@ def test_merge_apply_stales_passed_trials(
     assert r.status_code == 200, r.text
     db.expire_all()
     assert db.query(OntologyTrialRun).filter_by(id=trial.id).one().status == "stale"
+
+
+def _dormant_canvas() -> dict:
+    """一个对象 + 一个无审批/无规则行为 → 转出动作无任何规则（休眠）。"""
+    cv = C.empty_canvas()
+    cv, _, errs = C.upsert_elements(cv, "object", [{
+        "name": "Ticket", "displayName": "工单", "keyAttribute": "ticket_no",
+        "attributes": [{"name": "ticket_no", "displayName": "工单号",
+                        "typeHint": "文本", "required": True}],
+    }])
+    assert not errs
+    cv, _, errs = C.upsert_elements(cv, "behavior", [{
+        "name": "close_ticket", "displayName": "关闭工单", "object": "Ticket",
+    }])
+    assert not errs
+    return cv
+
+
+def test_merge_apply_reports_strict_validation_warnings(
+        client, auth_headers, session, db, ontology):
+    """合并不静默：合并校验与草稿保存同一分层口径 —— 休眠动作等缺口以
+    warnings 随 apply 响应透出，不阻塞合并。"""
+    oid = ontology["id"]
+    _write_release_snapshot(db, oid, _order_snapshot())
+    _seed_canvas(db, session["id"], _dormant_canvas())
+    r = client.post(f"{BASE}/sessions/{session['id']}/documents",
+                    headers=auth_headers, json={})
+    assert r.status_code == 201, r.text
+    doc_id = r.json()["data"]["id"]
+    r = client.post(f"{BASE}/documents/{doc_id}/drafts",
+                    headers=auth_headers,
+                    json={"targetOntologyId": oid, "force": True})
+    assert r.status_code == 201, r.text
+    draft = r.json()["data"]
+
+    r = client.post(f"{BASE}/drafts/{draft['id']}/apply",
+                    headers=auth_headers, json={})
+    assert r.status_code == 200, r.text
+    result = r.json()["data"]
+    assert result["created"]["actions"] == 1
+
+    dormant = [
+        item for item in result["warnings"]
+        if item["code"] == "invalid_action_definition"
+    ]
+    assert len(dormant) == 1
+    assert dormant[0]["kind"] == "action"
+    assert dormant[0]["name"] == "关闭工单"
+    assert "没有启用的可执行副作用规则" in dormant[0]["message"]
+
+    # 合并不被告警阻塞：动作真实写入目标草稿版本快照
+    target = db.query(OntologyVersion).filter_by(id=result["versionId"]).one()
+    merged = complete_snapshot(target.snapshot_formal)
+    action = next(a for a in merged["actions"] if a["name"] == "close_ticket")
+    assert action["rules"] == []
+
+
+def test_merge_apply_blocks_non_dormant_validation_errors(db, admin_user,
+                                                          ontology):
+    """分层口径的另一半：非休眠类校验错误（如主键不在属性中）422 阻断合并，
+    候选快照不落版本、revision 不推进。"""
+    from app.exploration import converter as CV
+
+    draft_version = _insert_draft_version(
+        db, ontology["id"], admin_user.id, _order_snapshot())
+    revision_before = draft_version.revision
+    broken_draft = {
+        "objectTypes": [{
+            "key": "obj:broken", "name": "Broken", "displayName": "坏对象",
+            "description": "主键不在属性中的非法对象",
+            "primaryKey": "missing_pk",
+            "properties": [
+                {"id": "p-amount", "name": "amount", "displayName": "金额",
+                 "type": "number", "required": False},
+            ],
+        }],
+        "linkTypes": [], "actions": [], "functions": [], "sentinels": [],
+    }
+
+    with pytest.raises(Exception) as excinfo:
+        CV.apply_draft_to_snapshot(db, broken_draft, None, draft_version)
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["code"] == "invalid_merged_snapshot"
+    assert any(item["code"] == "invalid_primary_key"
+               for item in excinfo.value.detail["errors"])
+
+    db.rollback()
+    stored = db.query(OntologyVersion).filter_by(id=draft_version.id).one()
+    assert stored.revision == revision_before
+    assert all(item.get("name") != "Broken"
+               for item in complete_snapshot(stored.snapshot_formal)["objectTypes"])

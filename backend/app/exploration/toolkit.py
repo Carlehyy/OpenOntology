@@ -5,11 +5,16 @@ canvas 事件实时看到模型长出来。元素字段的详细约定写在工�
 schema 保持宽松（对象数组），由 canvas.py / questions.py 的 pydantic
 校验把关 —— 校验错误原样回填给 LLM，让它按提示修正后重试（对话期修复回路）。
 
-六个常驻工具：
+常驻工具：
   get_canvas_elements                  读取权威画布的完整 canonical 元素
   upsert_elements / remove_elements   七类模型元素的沉淀与修正
   raise_questions / resolve_questions 澄清账本（堵门问题必须定量销账）
   show_diagram                        确定性生成 ER/流程/时序/状态图，直接出现在对话里
+  generate_document / generate_draft  画布 → 需求文档 → 本体草稿（质量门准入）
+绑定会话追加工具：
+  apply_draft                         草稿沉淀到绑定本体版本（需当前用户消息明确授权）
+  get_mapping_overview / propose_mapping  绑定版本映射现状（只读）与映射提案
+                                      （写入人工确认队列，Agent 永不确认/应用映射）
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.exploration import canvas as C
+from app.exploration import application_service
 from app.exploration import diagram as D
 from app.exploration import document_service
 from app.exploration import draft_service
@@ -33,8 +39,70 @@ from app.exploration import workspace as W
 from app.exploration import officecli as O
 from app.exploration.document import document_source_state
 from app.exploration.models import (ExplorationAttachment, ExplorationDocument,
-                                    ExplorationSession)
+                                    ExplorationDraft, ExplorationSession)
 from app.exploration.skills import ExplorationSkill
+from app.ontologies.mappings import suggestion_service as _mapping_suggestions
+
+
+# ---- 工具参数方言归一化 -----------------------------------------------------
+# 实测（MiniMax-M3）：部分模型输出 XML 风格的工具参数方言 —— 嵌套数组被包成
+# {"item": [...]}、数组里混入 {"$text": "..."} 伪节点、值被包成 {"value": X}、
+# 布尔写成 "true"/"false" 字符串。canvas.py 保持严格校验（方言兼容不进画布层），
+# 在工具执行入口对白名单写工具的参数做确定性归一化；规范 JSON 经过归一化必须恒等。
+
+# 数组伪节点剔除标记（仅内部使用）
+_DROP = object()
+
+# 白名单：只有这些写工具的参数做方言归一化；manage_workspace_file 的 content
+# 等自由文本参数一律不动。apply_draft.selected_keys（数组）与
+# propose_mapping.field_mapping（结构化字典）同为方言病灶复发面，一并覆盖。
+_DIALECT_NORMALIZE_TOOLS = frozenset({
+    "upsert_elements", "remove_elements",
+    "raise_questions", "resolve_questions", "todo_write",
+    "apply_draft", "propose_mapping",
+})
+
+# 白名单工具参数中语义明确为布尔的字段（画布 schema 与 _delete 子项删除标记）；
+# 只有落在这些键上的 "true"/"false" 字符串才转布尔，其余位置一律不猜。
+_DIALECT_BOOL_FIELDS = frozenset({"required", "needs_approval", "_delete"})
+
+
+def _normalize_dialect_args(value, in_list: bool = False):
+    """递归归一化 LLM 工具参数的 XML 风格方言；纯函数、严格保守。
+
+    - 只有一个键 ``item`` 且值是数组的 dict → 解包为该数组（递归处理元素）；
+    - 只有一个键 ``$text`` 的 dict 是伪节点：在数组中出现则剔除（返回 _DROP），
+      在标量位置则取其文本值；
+    - 只有一个键 ``value`` 的 dict 是包装伪节点：取其值（如选项被包成
+      ``{"value": "..."}``，实测 MiniMax-M3 的系统性输出）；
+    - 布尔语义字段（_DIALECT_BOOL_FIELDS）上的 "true"/"false" 字符串 → 布尔；
+    - 其余输入原样返回（规范 JSON 恒等）。
+    """
+    if isinstance(value, dict):
+        keys = set(value)
+        if keys == {"item"} and isinstance(value["item"], list):
+            return _normalize_dialect_args(value["item"])
+        if keys == {"$text"}:
+            if in_list:
+                return _DROP
+            return _normalize_dialect_args(value["$text"])
+        if keys == {"value"}:
+            return _normalize_dialect_args(value["value"])
+        out = {}
+        for key, item in value.items():
+            normalized = _normalize_dialect_args(item)
+            if key in _DIALECT_BOOL_FIELDS and normalized in ("true", "false"):
+                normalized = normalized == "true"
+            out[key] = normalized
+        return out
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            normalized = _normalize_dialect_args(item, in_list=True)
+            if normalized is not _DROP:
+                out.append(normalized)
+        return out
+    return value
 
 
 _FILE_MUTATION_NEGATION_RE = re.compile(
@@ -172,6 +240,61 @@ def _file_mutation_authorized(message: str, row: ExplorationAttachment,
                 )
             if direct.search(clause) or ba_form.search(clause):
                 return True
+    return False
+
+
+# ---- apply_draft 口头授权守卫 ------------------------------------------------
+# 与 _file_mutation_authorized 同一思路：把授权约束到「当前用户消息」的子句级
+# 肯定表达，否定修饰优先。子句切分与否定词表直接复用上面的常量，不另造口径。
+
+_APPLY_AFFIRMATIVE_RE = re.compile(
+    r"(?:好的|好嘞|好吧|可以|确认|同意|批准|应用|落地|沉淀|"
+    r"就这么办|就这样|没问题|放行|"
+    r"\bok(?:ay)?\b|\byes\b|\byep\b|\bgo\s*ahead\b|\bapply\b)",
+    re.IGNORECASE,
+)
+# 紧邻肯定词之前的否定/保留修饰：「不可以」「未确认」「甭应用」「先不沉淀」。
+_APPLY_NEGATED_PREFIX_RE = re.compile(r"(?:不|没|未|勿|莫|甭)(?:是|太|能|要|用)?$")
+# 沉淀动作自身的指称词：否定子句点名它们时整句不放行（「好的，但先别沉淀」）；
+# 肯定子句也必须点名其中之一才构成授权（目标绑定，与否定检测同一子句）——
+# 「好的」「帮我确认一下这个枚举值」这类与沉淀无关的肯定回答不放行。
+_APPLY_ACTION_WORDS_RE = re.compile(
+    r"(?:沉淀|应用|落地|合并|草稿|\bapply\b)", re.IGNORECASE)
+
+
+def _apply_draft_authorized(message: str) -> bool:
+    """仅当当前用户消息含「点名沉淀动作且未被否定修饰」的肯定子句时放行沉淀。
+
+    与 _file_mutation_authorized 同一思路：子句级切分 + 否定优先 + 目标绑定。
+    肯定词被紧邻否定词（不/没/未/勿/莫/甭，可带 是/太/能/要/用 助词）修饰时
+    不构成授权；否定子句点名沉淀动作本身（沉淀/应用/落地/合并/草稿/apply）时
+    整句否决；肯定子句必须在同一子句内同时点名沉淀动作——单纯回答其他问题的
+    「好的」「可以」不构成对沉淀的授权。
+    """
+    value = unicodedata.normalize("NFKC", str(message or "")).lower()
+    clauses = [
+        part.strip()
+        for part in re.split(r"[，,。!！?？；;\n]+", value)
+        if part.strip()
+    ]
+    for clause in clauses:
+        negated = bool(_FILE_MUTATION_NEGATION_RE.search(clause))
+        if not negated:
+            negated = any(
+                _APPLY_NEGATED_PREFIX_RE.search(clause[:match.start()])
+                for match in _APPLY_AFFIRMATIVE_RE.finditer(clause)
+            )
+        if negated and _APPLY_ACTION_WORDS_RE.search(clause):
+            return False
+    for clause in clauses:
+        if _FILE_MUTATION_NEGATION_RE.search(clause):
+            continue
+        if not _APPLY_ACTION_WORDS_RE.search(clause):
+            continue  # 目标绑定：肯定子句必须点名沉淀动作本身
+        for match in _APPLY_AFFIRMATIVE_RE.finditer(clause):
+            if _APPLY_NEGATED_PREFIX_RE.search(clause[:match.start()]):
+                continue
+            return True
     return False
 
 _FIELD_DOC = """元素字段约定（name 用英文 snake_case/PascalCase 标识符，中文放 display_name）：
@@ -455,6 +578,98 @@ TOOL_DEFS = [
     },
 ]
 
+# 绑定会话专属工具 —— 仅当会话已绑定本体（ontology_id）时才挂载（见 orchestrator；
+# 绑定具体版本与否不影响挂载，apply 合并路径本身不要求 version）：
+# 未绑定会话的校验链必然拒绝（bindingRequired），常驻挂载只会白占小窗口模型的
+# 工具协议预算。
+APPLY_DRAFT_TOOL = {
+    "name": "apply_draft",
+    "description": (
+        "把 generate_draft 的草稿沉淀到会话绑定的本体版本（与「需求文档」审阅抽屉"
+        "同一落地，返回 created/skipped/warnings）。硬约束：先向用户说明影响"
+        "（新增/跳过/冲突/warnings）且用户当前消息明确同意沉淀本身（肯定答复"
+        "须点名沉淀/应用/落地/合并/草稿，如「确认沉淀」）后才可调用；被拒"
+        "（confirmationRequired）时先说明影响再征求同意，不要重试。"
+        "selected_keys 缺省全选。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "draft_id": {
+                "type": "string",
+                "description": "generate_draft 返回的 draftId",
+            },
+            "selected_keys": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "可选；只沉淀勾选的草稿元素 key，缺省全选",
+            },
+        },
+        "required": ["draft_id"],
+    },
+}
+
+# 数据映射工具 —— 仅当会话绑定本体版本（ontology_id + ontology_version_id）
+# 时才挂载（见 orchestrator）：两个工具都锚定绑定版本，未绑定会话的校验链
+# 必然拒绝（bindingRequired）。Agent 只能读现状、提建议；确认/应用映射只发生
+# 在「数据映射」视图的人工确认队列，工具集中不存在 confirm/apply mapping。
+GET_MAPPING_OVERVIEW_TOOL = {
+    "name": "get_mapping_overview",
+    "description": (
+        "读取会话绑定本体版本的映射现状（只读）：对象清单（名称+属性，用于对齐"
+        "数据集列与本体属性）、既有映射清单、待人工确认的建议数、未映射对象数，"
+        "以及涉及数据集的只读元信息（id/名称/列名清单）。提交映射建议前先调用"
+        "本工具对齐字段；清单截断时按 truncated/total 用更小 limit 重读。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "dataset_id": {
+                "type": "string",
+                "description": "可选；额外拉取该数据集的列清单（用户给出的数据集）",
+            },
+            "object_limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                             "description": "对象清单本页上限，缺省 20"},
+            "mapping_limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                              "description": "既有映射清单本页上限，缺省 20"},
+        },
+    },
+}
+
+PROPOSE_MAPPING_TOOL = {
+    "name": "propose_mapping",
+    "description": (
+        "把数据映射提案提交进人工确认队列（不直写映射，不确认、不应用）。"
+        "建议与映射视图的智能建议同一确认纪律：落库即待确认（pending），"
+        "需用户在「数据映射」视图确认后才生效。目标对象、数据集列、属性名"
+        "都必须真实存在且类型兼容，否则整体拒绝并说明；先 get_mapping_overview "
+        "对齐再提交。同一提案重复提交幂等复用。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "dataset_id": {"type": "string", "description": "数据资产湖数据集 id"},
+            "target_object": {
+                "type": "string",
+                "description": "目标对象实体的 id 或名称（get_mapping_overview 的 objects 清单）",
+            },
+            "field_mapping": {
+                "type": "object",
+                "description": "映射提案：{数据集列名: 本体属性名}，列与属性必须真实存在且类型兼容",
+            },
+            "primary_key_column": {
+                "type": "string",
+                "description": "可选；业务主键列名（必须是数据集已有列）",
+            },
+            "note": {"type": "string", "description": "可选；提案理由，随建议在队列中展示"},
+        },
+        "required": ["dataset_id", "target_object", "field_mapping"],
+    },
+}
+
+MAPPING_TOOLS = [GET_MAPPING_OVERVIEW_TOOL, PROPOSE_MAPPING_TOOL]
+
+
 # 技能激活工具 —— 仅当当前作用域有已启用技能时才挂载（见 orchestrator）
 USE_SKILL_TOOL = {
     "name": "use_skill",
@@ -581,6 +796,13 @@ class ExplorationToolRunner:
     def run(self, name: str, args: dict) -> dict:
         self.last_diagram = None
         args = _salvage_raw_tool_args(args)
+        if name in _DIALECT_NORMALIZE_TOOLS and isinstance(args, dict):
+            # 工具边界的方言归一化：canvas/questions 保持严格校验，LLM 的 XML
+            # 风格参数方言在这里确定性还原，避免整批元素被「必须是数组」拒收。
+            # 放在 _raw 抢救之后：网关回退的原始文本先解析回 dict，再走归一化。
+            normalized = _normalize_dialect_args(args)
+            if isinstance(normalized, dict):
+                args = normalized
         if name == "todo_write":
             return self._todo_write(args)
         if name == "todo_read":
@@ -589,6 +811,12 @@ class ExplorationToolRunner:
             return self._generate_document(args)
         if name == "generate_draft":
             return self._generate_draft(args)
+        if name == "apply_draft":
+            return self._apply_draft(args)
+        if name == "get_mapping_overview":
+            return self._get_mapping_overview(args)
+        if name == "propose_mapping":
+            return self._propose_mapping(args)
         if name == "get_canvas_elements":
             return self._get_canvas_elements(args)
         if name == "upsert_elements":
@@ -797,9 +1025,169 @@ class ExplorationToolRunner:
             "counts": counts,
             "conflicts": len(report.get("conflicts") or []),
             "warnings": len(report.get("warnings") or []),
-            "note": ("草稿已生成。请引导用户到「需求文档」视图的草稿审阅抽屉勾选并应用 —— "
-                     "应用必须由用户人工确认，你不能代替用户 apply"),
+            "note": ("草稿已生成。请用自然语言向用户说明草稿内容与影响"
+                     "（新增/冲突/warnings），用户明确同意后调用 apply_draft "
+                     "完成沉淀；也可引导用户到「需求文档」视图的草稿审阅抽屉"
+                     "勾选并应用（人工确认）"),
             **self._state(),
+        }
+
+    def _apply_draft(self, args: dict) -> dict:
+        """对话式沉淀：用户口头同意后把草稿应用到绑定本体版本。
+
+        与「需求文档」视图的审阅抽屉同一落地实现（application_service.apply_draft），
+        区别只在授权形态：HTTP 按钮是人工点击，本工具要求当前用户消息含明确
+        肯定子句（_apply_draft_authorized）。所有失败都以工具错误内容返回，
+        让 Agent 能向用户解释原因，不抛异常打断回合。
+        """
+        if self.user is None:
+            return {"error": "当前上下文缺少用户身份，无法应用草稿"}
+        draft_id = str(args.get("draft_id") or args.get("draftId") or "").strip()
+        if not draft_id:
+            return {"error": "apply_draft 需要 draft_id（generate_draft 返回的 draftId）"}
+        draft = (self.db.query(ExplorationDraft)
+                 .filter(ExplorationDraft.id == draft_id).first())
+        if draft is None:
+            return {"error": f"草稿「{draft_id[:24]}」不存在；请先 generate_draft 生成本体草稿"}
+        if draft.session_id != self.session.id:
+            return {"error": "该草稿不属于当前会话，不能在此应用"}
+        if draft.status == "applied":
+            return {"error": "该草稿已应用过；如需再次沉淀请在「需求文档」视图的草稿审阅抽屉操作"}
+        if draft.status != "draft":
+            return {"error": "该草稿已废弃，不可应用；如需落地请重新生成草稿"}
+        if not self.session.ontology_id:
+            return {"error": ("会话未绑定本体版本 —— 请引导用户从本体版本的「在线配置」"
+                              "入口进入并绑定后再沉淀"),
+                    "bindingRequired": True}
+        if not _apply_draft_authorized(self.user_message):
+            return {
+                "error": ("未获用户授权：apply_draft 会把草稿真实写入绑定的本体版本。"
+                          "请先用自然语言向用户说明本次沉淀的影响（新增/跳过/冲突/"
+                          "warnings），等用户在当前消息明确同意沉淀本身（如「确认沉淀」"
+                          "「同意应用草稿」）后再调用，不要重试。"),
+                "confirmationRequired": True,
+                "draftId": draft.id,
+            }
+        selected_keys = args.get("selected_keys")
+        if selected_keys is None:
+            selected_keys = args.get("selectedKeys")
+        if selected_keys is not None and (
+                not isinstance(selected_keys, list)
+                or not all(isinstance(key, str) for key in selected_keys)):
+            return {"error": "selected_keys 必须是字符串数组（草稿元素 key）"}
+        # 目标本体以 draft.target_ontology_id 为准；存量空目标草稿由会话绑定兜住
+        # （与 create_draft 的绑定默认同一口径），随 apply 的事务一并持久化。
+        previous_target = draft.target_ontology_id
+        if not draft.target_ontology_id and not draft.applied_ontology_id:
+            draft.target_ontology_id = self.session.ontology_id
+        try:
+            result = application_service.apply_draft(
+                draft.id, S.ApplyDraftRequest(selected_keys=selected_keys),
+                self.db, self.user)
+        except HTTPException as error:
+            # 应用被拒时还原兜底赋值，避免残留变更被回合末提交误持久化。
+            draft.target_ontology_id = previous_target
+            detail = error.detail
+            if isinstance(detail, dict):
+                message = detail.get("message") or str(detail)
+                code = str(detail.get("code") or error.status_code)
+            else:
+                message, code = str(detail), str(error.status_code)
+            return {"error": f"应用被拒（{error.status_code}）：{message}",
+                    "code": code, "draftId": draft.id}
+        data = (result or {}).get("data") or {}
+        created = data.get("created") or {}
+        skipped = data.get("skipped") or []
+        return {
+            "applied": True,
+            "draftId": draft.id,
+            "ontologyId": data.get("ontologyId"),
+            "ontologyName": data.get("ontologyName"),
+            "versionId": data.get("versionId"),
+            "versionNumber": data.get("versionNumber"),
+            "created": created,
+            "createdTotal": sum(v for v in created.values() if isinstance(v, int)),
+            "skippedCount": len(skipped),
+            "warnings": data.get("warnings") or [],
+            "note": ("草稿已沉淀到绑定本体版本（同名元素跳过、冲突项留在 skipped）。"
+                     "请把 created/skipped/warnings 如实转告用户；发布生效仍需试跑验证。"),
+        }
+
+    def _mapping_binding_error(self) -> dict | None:
+        """两个映射工具的共同前置：会话必须绑定到具体本体版本。"""
+        if not self.session.ontology_id or not self.session.ontology_version_id:
+            return {"error": ("会话未绑定本体版本 —— 请引导用户从本体版本的「业务探索」"
+                              "入口进入并绑定后再做数据映射"),
+                    "bindingRequired": True}
+        return None
+
+    def _get_mapping_overview(self, args: dict) -> dict:
+        """绑定版本映射现状（只读）。直接调建议服务层，不走 HTTP。"""
+        binding_error = self._mapping_binding_error()
+        if binding_error:
+            return binding_error
+        try:
+            return _mapping_suggestions.get_mapping_overview(
+                self.db, self.session.ontology_id, self.session.ontology_version_id,
+                dataset_id=(str(args.get("dataset_id")).strip()
+                           if args.get("dataset_id") else None),
+                object_limit=int(args.get("object_limit") or 20),
+                mapping_limit=int(args.get("mapping_limit") or 20),
+            )
+        except HTTPException as error:
+            detail = error.detail
+            message = (detail.get("message") if isinstance(detail, dict)
+                       else str(detail))
+            return {"error": message,
+                    "code": str((detail or {}).get("code") if isinstance(detail, dict)
+                                else error.status_code)}
+        except (TypeError, ValueError):
+            return {"error": "object_limit/mapping_limit 必须是整数"}
+
+    def _propose_mapping(self, args: dict) -> dict:
+        """映射提案 → 人工确认队列（pending）。
+
+        确认/应用不在工具能力内：建议落库后只能由用户在「数据映射」视图的
+        队列 UI 确认；本工具不提供任何 confirm/apply 路径，也不接受 force。
+        """
+        if args.get("force") is not None:
+            return {"error": "本工具不支持 force；映射确认只能由用户在数据映射视图进行"}
+        binding_error = self._mapping_binding_error()
+        if binding_error:
+            return binding_error
+        dataset_id = str(args.get("dataset_id") or "").strip()
+        if not dataset_id:
+            return {"error": "propose_mapping 需要 dataset_id（数据资产湖数据集 id）"}
+        target_object = str(args.get("target_object") or args.get("targetObject")
+                             or "").strip()
+        if not target_object:
+            return {"error": "propose_mapping 需要 target_object（目标对象 id 或名称）"}
+        field_mapping = args.get("field_mapping") or args.get("fieldMapping")
+        if not isinstance(field_mapping, dict):
+            return {"error": "field_mapping 必须是对象（{数据集列名: 本体属性名}）"}
+        try:
+            result = _mapping_suggestions.propose_agent_mapping(
+                self.db, self.session.ontology_id, self.session.ontology_version_id,
+                dataset_id=dataset_id,
+                object_ref=target_object,
+                field_mapping=field_mapping,
+                primary_key_column=(str(args.get("primary_key_column")).strip()
+                                    if args.get("primary_key_column") else None),
+                note=str(args.get("note") or ""),
+            )
+        except HTTPException as error:
+            detail = error.detail
+            message = (detail.get("message") if isinstance(detail, dict)
+                       else str(detail))
+            return {"error": f"映射建议被拒：{message}",
+                    "code": str((detail or {}).get("code") if isinstance(detail, dict)
+                                else error.status_code)}
+        return {
+            **result,
+            "status": "pending",
+            "note": ("建议已进入人工确认队列（pending）。映射需用户在「数据映射」"
+                     "视图的建议队列确认后才生效 —— 请如实转告用户，不要声称映射"
+                     "已生效；未确认前建议不会写入草稿映射，也不回流知识库。"),
         }
 
     def _use_skill(self, args: dict) -> dict:

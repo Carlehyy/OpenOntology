@@ -199,6 +199,7 @@ def update_text(db: Session, row: ExplorationAttachment, content: str,
         row.source = "user"
     row.extracted_text = content[:STORED_TEXT_CAP]
     row.char_count = len(content)
+    row.summary = None  # 正文已变，索引卡下回合懒生成重建
     row.status = "ready"
     row.error = None
     db.commit()
@@ -224,6 +225,7 @@ def refresh_binary_metadata(db: Session, row: ExplorationAttachment,
     row.version = (row.version or 0) + 1
     row.extracted_text = extracted[:STORED_TEXT_CAP]
     row.char_count = len(extracted)
+    row.summary = None  # 正文已变，索引卡下回合懒生成重建
     row.status = "ready" if conversion.ok else "failed"
     row.error = None if conversion.ok else conversion.error
     db.commit()

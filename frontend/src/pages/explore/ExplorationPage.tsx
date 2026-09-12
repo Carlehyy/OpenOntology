@@ -28,13 +28,14 @@ import { writeTextToClipboard } from '@/utils/clipboard'
 import Md from './Md'
 import CanvasPanel from './CanvasPanel'
 import ConsistencyPanel from './ConsistencyPanel'
-import { derivePlanFromSteps, foldStep, foldTextDelta } from './messageViews'
+import { derivePlanFromSteps, foldStep, foldTextDelta, isLivenessStep, runningStepLabel } from './messageViews'
 import DocumentsView from './DocumentsView'
 import DraftReviewDrawer from './DraftReviewDrawer'
 import FileWorkspaceDrawer from './FileWorkspaceDrawer'
+import OntologyPreviewPanel from './OntologyPreviewPanel'
 import { PipelinePositionHint } from './PipelinePositionHint'
 import TrialPreflightDialog from './TrialPreflightDialog'
-import { EXPLORE_VIEWS, parseExploreView, parsePendingNewSession, parseSessionBinding, resolveBoundSession, sessionBindingKey, shouldAutoSelectLatestSession, type ExploreView } from './sessionBinding'
+import { EXPLORE_VIEWS, parseExploreView, parsePendingNewSession, parseSessionBinding, resolveBoundSession, sessionBindingKey, shouldAutoSelectLatestSession, bindingFailureBannerText, type ExploreView } from './sessionBinding'
 import { SplitHandle, useSplitLayout } from '@/hooks/useSplitLayout'
 import { LazyGraphWorkspace, LazyMappingWorkspace } from '@/components/explore/ExploreWorkbenchViews'
 import type { ModelConfig } from '@/types/ontology'
@@ -57,6 +58,8 @@ interface ChatMsg {
   narrations?: string[]
   /** 本回合建模计划（todo_write 维护；历史消息从 steps 推导） */
   plan?: BxPlanItem[] | null
+  /** 后端活性心跳（llm_round）的最新标签；仅实时态，运行中指示优先用它 */
+  activity?: string | null
 }
 
 let _mid = 0
@@ -141,7 +144,7 @@ function NarrationTrace({ narrations }: { narrations: string[] }) {
   )
 }
 
-function StepTrace({ steps, running }: { steps: BxStep[]; running?: boolean }) {
+function StepTrace({ steps, running, activity }: { steps: BxStep[]; running?: boolean; activity?: string | null }) {
   if (steps.length === 0 && !running) return null
   return (
     <div className="mb-3 rounded-lg bg-[var(--color-bg-base)] border border-[var(--color-border)] px-3 py-2.5 space-y-2">
@@ -196,7 +199,7 @@ function StepTrace({ steps, running }: { steps: BxStep[]; running?: boolean }) {
             <Loader2 size={11} className="animate-spin text-brand-ink" />
           </div>
           <span className="text-xs text-[var(--color-text-tertiary)]">
-            {steps.length === 0 ? '正在理解业务，规划澄清问题…' : '正在把确认的信息沉淀进画布…'}
+            {runningStepLabel(steps.length, activity)}
           </span>
         </div>
       )}
@@ -308,6 +311,7 @@ export default function ExplorationPage() {
   // -- 对话 + 画布 --
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [canvas, setCanvas] = useState<BusinessCanvas | null>(null)
+  const [canvasVersion, setCanvasVersion] = useState(0)
   const [completeness, setCompleteness] = useState<Completeness | null>(null)
   const [readiness, setReadiness] = useState<Readiness | null>(null)
   const [input, setInput] = useState('')
@@ -321,7 +325,10 @@ export default function ExplorationPage() {
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const [reviewDraft, setReviewDraft] = useState<BxDraft | null>(null)
   const [genDocBusy, setGenDocBusy] = useState(false)
-  const [banner, setBanner] = useState('')
+  // 顶栏错误横幅；retryable=true 时带「重试」按钮（绑定解析失败兜底，重跑绑定逻辑）
+  const [banner, setBanner] = useState<{ text: string; retryable: boolean } | null>(null)
+  // 绑定解析失败后的重试节拍：+1 触发绑定解析 effect 重跑
+  const [bindingRetryNonce, setBindingRetryNonce] = useState(0)
   // -- 会话附件 --
   const [attachments, setAttachments] = useState<BxAttachment[]>([])
   const [uploads, setUploads] = useState<{ uid: string; name: string; ts: number }[]>([])
@@ -435,12 +442,13 @@ export default function ExplorationPage() {
     selectSession(id)
     setShowMessageHistory(false)
     setShowSessionHistory(false)
-    setBanner('')
+    setBanner(null)
     setAttachError('')
     setAttachments([])
     setUploads([])
     setMessages([])
     setCanvas(null)
+    setCanvasVersion(0)
     setCompleteness(null)
     setReadiness(null)
     try {
@@ -455,12 +463,13 @@ export default function ExplorationPage() {
         plan: m.role === 'assistant' ? derivePlanFromSteps(m.steps || []) : null,
       })))
       setCanvas(detail.canvas)
+      setCanvasVersion(detail.canvasVersion || 0)
       setCompleteness(detail.completeness)
       setReadiness(detail.readiness)
       setAttachments(sessionAttachments)
     } catch (error: unknown) {
       if (requestId !== sessionRequestRef.current || sidRef.current !== id) return
-      setBanner(errorMessage(error, '会话加载失败'))
+      setBanner({ text: errorMessage(error, '会话加载失败'), retryable: false })
     }
   }, [cancelActiveChat, selectSession])
 
@@ -488,6 +497,7 @@ export default function ExplorationPage() {
         selectSession('')
         setMessages([])
         setCanvas(null)
+        setCanvasVersion(0)
         setCompleteness(null)
         setReadiness(null)
         setAttachments([])
@@ -529,6 +539,13 @@ export default function ExplorationPage() {
     }
   }
 
+  // 绑定失败兜底：清掉解析记录并递增重试节拍，让绑定解析 effect 整体重跑
+  const retryBindingResolution = useCallback(() => {
+    bindingResolvedRef.current = ''
+    setBanner(null)
+    setBindingRetryNonce(nonce => nonce + 1)
+  }, [])
+
   // 绑定态会话解析：优先选中同绑定的既有会话，无匹配则经 ensureSession 创建绑定会话
   useEffect(() => {
     if (!binding || !sessionsLoaded) return
@@ -546,10 +563,11 @@ export default function ExplorationPage() {
         const id = await ensureSession()
         await loadSession(id)
       } catch (error: unknown) {
-        setBanner(errorMessage(error, '绑定会话创建失败，请重试'))
+        // 绑定失败退化为纯聊天前给出明确原因与重试入口（重跑整段绑定解析）
+        setBanner({ text: bindingFailureBannerText(error), retryable: true })
       }
     })()
-  }, [binding, sessionsLoaded, sessions, sid, loadSession])
+  }, [binding, sessionsLoaded, sessions, sid, loadSession, bindingRetryNonce])
 
   // 绑定徽章数据：本体名 + 版本号（queryKey 与本体详情页/版本 Tab 一致，共享缓存）
   const currentSession = sessions.find(s => s.id === sid)
@@ -674,7 +692,7 @@ export default function ExplorationPage() {
     if (!message || busy || sendInFlightRef.current) return
     sendInFlightRef.current = true
     setBusy(true)
-    setBanner('')
+    setBanner(null)
 
     try {
       const targetSid = await ensureSession()
@@ -712,6 +730,12 @@ export default function ExplorationPage() {
               { content: m.content, narrations: m.narrations ?? [], plan: null },
               e.delta).content }))
           } else if (e.type === 'step') {
+            if (isLivenessStep(e.tool)) {
+              // 部署窗口兼容：旧后端把 llm_round 心跳伪装成 step 类型发出；
+              // 新后端走独立 heartbeat 事件（下方分支）。只更新运行指示，不进 steps。
+              patchAssistant(m => ({ ...m, activity: e.summary || null }))
+              return
+            }
             const step: BxStep = {
               tool: e.tool, arguments: e.arguments, summary: e.summary,
               durationMs: e.durationMs, error: e.error, diagram: e.diagram,
@@ -733,10 +757,15 @@ export default function ExplorationPage() {
             if (step.tool === 'generate_document' || step.tool === 'generate_draft') {
               void queryClient.invalidateQueries({ queryKey: ['bx-documents', targetSid] })
             }
+          } else if (e.type === 'heartbeat') {
+            // llm_round 活性心跳：只更新运行指示，不进 steps（不污染历史回放
+            // 与 derivePlanFromSteps 的真实工具步骤语义）
+            patchAssistant(m => ({ ...m, activity: e.summary || null }))
           } else if (e.type === 'plan') {
             patchAssistant(m => ({ ...m, plan: e.items }))
           } else if (e.type === 'canvas') {
             setCanvas(e.canvas)
+            setCanvasVersion(e.version)
             setCompleteness(e.completeness)
             setReadiness(e.readiness)
           } else if (e.type === 'answer') {
@@ -760,7 +789,7 @@ export default function ExplorationPage() {
         }
       }
     } catch (error: unknown) {
-      setBanner(errorMessage(error, '会话创建失败，请重试'))
+      setBanner({ text: errorMessage(error, '会话创建失败，请重试'), retryable: false })
     } finally {
       sendInFlightRef.current = false
       setBusy(false)
@@ -770,11 +799,11 @@ export default function ExplorationPage() {
   const generateDocument = async () => {
     if (!sid || genDocBusy) return
     setGenDocBusy(true)
-    setBanner('')
+    setBanner(null)
     try {
       await explorationApi.generateDocument(sid, modelId || undefined)
     } catch (error: unknown) {
-      setBanner(errorMessage(error, '文档生成失败'))
+      setBanner({ text: errorMessage(error, '文档生成失败'), retryable: false })
     } finally {
       setGenDocBusy(false)
     }
@@ -843,8 +872,14 @@ export default function ExplorationPage() {
             />
           )}
           {view === 'model' && (
-            workbenchOntologyId ? (
-              <div className="flex h-full min-h-0 flex-col">
+            <div className="flex h-full min-h-0 flex-col">
+              {sid && (
+                <div className="shrink-0 border-b border-[var(--color-border)] bg-card px-3 py-2">
+                  <OntologyPreviewPanel sessionId={sid} canvasVersion={canvasVersion} />
+                </div>
+              )}
+              {workbenchOntologyId ? (
+              <div className="flex min-h-0 flex-1 flex-col">
                 {workbenchVersionId && (
                   <div className="shrink-0 border-b border-[var(--color-border)] bg-card px-3 py-2">
                     <div className="flex items-start gap-2">
@@ -897,9 +932,12 @@ export default function ExplorationPage() {
                   </Suspense>
                 </div>
               </div>
-            ) : (
-              <BindRequiredHint />
-            )
+              ) : (
+                <div className="min-h-0 flex-1">
+                  <BindRequiredHint />
+                </div>
+              )}
+            </div>
           )}
           {view === 'mapping' && (
             workbenchOntologyId ? (
@@ -952,9 +990,9 @@ export default function ExplorationPage() {
               </div>
               <div className="min-w-0">
                 <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                  {sessions.find(s => s.id === sid)?.title || '业务澄清'}
+                  {sessions.find(s => s.id === sid)?.title || '在线配置工作台'}
                 </h3>
-                <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">通过对话澄清业务，沉淀七大模型与需求文档，在线完善本体模型</p>
+                <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">在线配置工作台 · 业务澄清：对话沉淀七大模型与需求文档，在线完善本体模型</p>
               </div>
               {boundOntologyId && (
                 <span
@@ -1089,8 +1127,18 @@ export default function ExplorationPage() {
         </header>
 
         {banner && (
-          <div className="px-4 py-2 text-xs text-[var(--color-danger)] bg-[var(--color-danger-bg)] border-b border-[var(--color-border)]">
-            {banner}
+          <div className="flex items-center gap-2 px-4 py-2 text-xs text-[var(--color-danger)] bg-[var(--color-danger-bg)] border-b border-[var(--color-border)]">
+            <span className="min-w-0 flex-1">{banner.text}</span>
+            {banner.retryable && (
+              <button
+                type="button"
+                onClick={retryBindingResolution}
+                data-testid="binding-retry-button"
+                className="shrink-0 rounded-md border border-[var(--color-danger)] px-2 py-0.5 font-medium transition-colors hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                重试
+              </button>
+            )}
           </div>
         )}
 
@@ -1193,7 +1241,7 @@ export default function ExplorationPage() {
                     {m.role === 'assistant' && (m.narrations?.length || 0) > 0 && (
                       <NarrationTrace narrations={m.narrations!} />
                     )}
-                    {m.role === 'assistant' && <StepTrace steps={m.steps} running={m.streaming} />}
+                    {m.role === 'assistant' && <StepTrace steps={m.steps} running={m.streaming} activity={m.activity} />}
                     {m.content && (
                       <>
                         <div className={`inline-block text-left rounded-xl px-3.5 py-2.5 ${m.role === 'user'

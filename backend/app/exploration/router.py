@@ -281,6 +281,20 @@ def get_readiness(
     )
 
 
+@router.get("/sessions/{session_id}/ontology-preview")
+def get_ontology_preview(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """本体预览投影（只读）：当前画布确定性转换为五类集合，与绑定版本基线比对
+    得出 add/exists/conflict 去向；不写版本，版本落库仍走质量门+人工确认。"""
+    return _session_service.get_ontology_preview(
+        session_id, db, current_user,
+        require_session_fn=_require_session, ok_fn=_ok,
+    )
+
+
 @router.get("/sessions/{session_id}/diagrams/{kind}")
 def get_diagram(
     session_id: str,

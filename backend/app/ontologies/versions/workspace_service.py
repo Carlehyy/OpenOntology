@@ -875,7 +875,15 @@ def save_draft_workspace(
         raise HTTPException(422, detail={
             "code": "invalid_workspace", "message": str(exc),
         }) from exc
-    errors = validate_snapshot(candidate, require_object_type=False)
+    # 草稿保存期分层：「动作无启用的可执行副作用规则」（探索产物落地即休眠）
+    # 不阻断保存，降级为 warnings 随响应透出；试跑/发布仍走严格口径。
+    save_warnings: list[dict] = []
+    errors = validate_snapshot(
+        candidate,
+        require_object_type=False,
+        require_executable_action_rules=False,
+        warnings_out=save_warnings,
+    )
     errors.extend(_dynamic_sentinel_id_conflict_errors(
         db, ontology_id, candidate.get("sentinels"),
     ))
@@ -925,6 +933,7 @@ def save_draft_workspace(
     return {"data": {
         "revision": f"{draft.revision}:{draft.snapshot_hash}",
         "snapshotHash": draft.snapshot_hash,
+        "warnings": save_warnings,
     }}
 
 

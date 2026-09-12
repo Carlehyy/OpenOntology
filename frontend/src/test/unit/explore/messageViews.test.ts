@@ -6,6 +6,8 @@ import {
   emptyMessageView,
   foldStep,
   foldTextDelta,
+  isLivenessStep,
+  runningStepLabel,
 } from '../../../pages/explore/messageViews.ts'
 import type { BxStep } from '../../../api/exploration.ts'
 
@@ -32,6 +34,22 @@ describe('foldTextDelta / foldStep', () => {
     const view = foldStep(emptyMessageView())
     assert.deepEqual(view.narrations, [])
     assert.deepEqual(foldTextDelta(view, ''), view)
+  })
+})
+
+describe('isLivenessStep / runningStepLabel', () => {
+  it('llm_round 识别为活性心跳，真实工具名不受影响', () => {
+    assert.equal(isLivenessStep('llm_round'), true)
+    assert.equal(isLivenessStep('todo_write'), false)
+    assert.equal(isLivenessStep(''), false)
+  })
+
+  it('运行指示优先用活性心跳标签，缺省按已有步骤数回退', () => {
+    assert.equal(runningStepLabel(0, '正在思考与生成…'), '正在思考与生成…')
+    assert.equal(runningStepLabel(3, '正在思考与生成…'), '正在思考与生成…')
+    assert.equal(runningStepLabel(0, null), '正在理解业务，规划澄清问题…')
+    assert.equal(runningStepLabel(3, undefined), '正在把确认的信息沉淀进画布…')
+    assert.equal(runningStepLabel(0, ''), '正在理解业务，规划澄清问题…')
   })
 })
 

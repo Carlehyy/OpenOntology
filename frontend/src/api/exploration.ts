@@ -142,6 +142,11 @@ export type ExploreEvent =
   | { type: 'meta'; sessionId: string; model: string }
   | { type: 'text_delta'; delta: string }
   | ({ type: 'step' } & BxStep)
+  /** 活性心跳（tool=llm_round，每次 provider 调用前发出）：不是真实工具步骤，
+      只更新运行指示，不进 steps/历史回放。2026-09 加性契约变更：由复用
+      step 类型改为独立 heartbeat 类型（字段形状不变），旧后端在部署窗口内
+      仍可能以 step 类型发出 llm_round。 */
+  | { type: 'heartbeat'; tool: string; arguments?: Record<string, unknown>; summary?: string; durationMs?: number }
   | { type: 'plan'; items: BxPlanItem[] }
   | { type: 'canvas'; canvas: BusinessCanvas; version: number; completeness: Completeness; readiness: Readiness }
   | { type: 'answer'; content: string; usage?: unknown }
@@ -383,6 +388,36 @@ export interface BxWorkspacePreview {
   truncated: boolean
 }
 
+// ---------- 本体预览投影（只读） ----------
+
+/** add=将新增 / exists=已存在将跳过 / conflict=同名冲突不进默认选择集 */
+export type OntologyPreviewDisposition = 'add' | 'exists' | 'conflict'
+
+export interface OntologyPreviewItem {
+  key: string
+  name: string
+  displayName: string
+  disposition: OntologyPreviewDisposition
+}
+
+export interface OntologyPreview {
+  canvasFingerprint: string
+  canvasVersion: number
+  /** 是否绑定本体版本；绑定时与基线快照比对，未绑定全部按「将新增」。 */
+  bound: boolean
+  ontologyId?: string | null
+  ontologyVersionId?: string | null
+  readiness: Pick<Readiness, 'ready' | 'gatesPassed' | 'gatesTotal' | 'blockingCount' | 'advisoryCount'>
+  projected: {
+    objectTypes: OntologyPreviewItem[]
+    linkTypes: OntologyPreviewItem[]
+    actions: OntologyPreviewItem[]
+    functions: OntologyPreviewItem[]
+    sentinels: OntologyPreviewItem[]
+  }
+  semanticIssues: DraftSemanticIssue[]
+}
+
 // ---------- REST ----------
 
 export const explorationApi = {
@@ -401,6 +436,8 @@ export const explorationApi = {
       `/exploration/sessions/${sid}/canvas`),
   readiness: (sid: string) =>
     apiClientV2.get<Readiness>(`/exploration/sessions/${sid}/readiness`),
+  ontologyPreview: (sid: string) =>
+    apiClientV2.get<OntologyPreview>(`/exploration/sessions/${sid}/ontology-preview`),
 
   generateDocument: (sid: string, modelId?: string | null) =>
     apiClientV2.post<BxDocument>(`/exploration/sessions/${sid}/documents`,
