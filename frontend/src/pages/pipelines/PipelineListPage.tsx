@@ -772,10 +772,16 @@ function PipelineCreateModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]" onClick={onClose}>
-      <div className="w-[500px] max-w-full rounded-2xl border border-border bg-card p-6 shadow-[0_28px_90px_rgba(15,23,42,0.24)]" onClick={e => e.stopPropagation()}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pipeline-create-modal-title"
+        className="w-[500px] max-w-full rounded-2xl border border-border bg-card p-6 shadow-[0_28px_90px_rgba(15,23,42,0.24)]"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="flex justify-between items-center mb-4">
-          <h3 className="font-semibold">{isEdit ? '编辑数据流水线' : '新建数据流水线'}</h3>
-          <button onClick={onClose} className="text-[var(--color-text-tertiary)] hover:text-foreground">
+          <h3 id="pipeline-create-modal-title" className="font-semibold">{isEdit ? '编辑数据流水线' : '新建数据流水线'}</h3>
+          <button onClick={onClose} aria-label="关闭弹窗" className="text-[var(--color-text-tertiary)] hover:text-foreground">
             <X size={16} />
           </button>
         </div>

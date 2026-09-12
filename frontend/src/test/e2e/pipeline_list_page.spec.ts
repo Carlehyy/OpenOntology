@@ -250,6 +250,17 @@ test.describe('数据流水线列表页·运行概况与列内预览', () => {
     await expect(page).toHaveURL(/#\/data\/structured\?pipeline=/)
   })
 
+  test('新建流水线弹窗具备对话框语义（role=dialog 与可访问名称）', async ({ page }) => {
+    await mockLinkedListPage(page)
+    await page.goto('/#/data/pipelines')
+
+    await page.getByRole('button', { name: '新建流水线' }).first().click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toHaveAccessibleName('新建数据流水线')
+    await expect(dialog.getByRole('button', { name: '关闭弹窗' })).toBeVisible()
+  })
+
   test('关联任务列先列内预览任务，再选择性跳转数据任务池', async ({ page }) => {
     await mockLinkedListPage(page)
     await page.goto('/#/data/pipelines')
