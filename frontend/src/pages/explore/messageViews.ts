@@ -26,6 +26,20 @@ export function foldStep(view: StreamingMessageView): StreamingMessageView {
   return { ...view, narrations: [...view.narrations, view.content], content: '' }
 }
 
+/** llm_round 活性心跳（每次 provider 调用前发出）：不是真实工具步骤，
+    不进 steps/历史回放，只更新「正在…」运行指示。新后端以独立
+    {"type": "heartbeat"} 事件发出；本判定只用于部署窗口内旧后端
+    把心跳伪装成 step 类型的兼容路径。 */
+export function isLivenessStep(tool: string): boolean {
+  return tool === 'llm_round'
+}
+
+/** 运行中指示文案：优先用后端活性心跳的标签，否则按是否已有真实步骤给默认文案。 */
+export function runningStepLabel(stepCount: number, activity?: string | null): string {
+  if (activity) return activity
+  return stepCount === 0 ? '正在理解业务，规划澄清问题…' : '正在把确认的信息沉淀进画布…'
+}
+
 /** 从持久化 steps 重建该消息的建模计划：最后一次成功的 todo_write 生效。 */
 export function derivePlanFromSteps(steps: BxStep[]): BxPlanItem[] | null {
   for (let i = steps.length - 1; i >= 0; i--) {

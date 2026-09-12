@@ -24,6 +24,7 @@ export default defineConfig({
     '**/event_registry_detail.spec.ts',
     '**/event_registry_edit.spec.ts',
     '**/explore_async_isolation.spec.ts',
+    '**/explore_binding_retry.spec.ts',
     '**/explore_diagram_interaction.spec.ts',
     '**/explore_document_risk.spec.ts',
     '**/explore_model_consistency.spec.ts',

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 
 import {
   EXPLORE_VIEWS,
+  bindingFailureBannerText,
   parseExploreView,
   parsePendingNewSession,
   parseSessionBinding,
@@ -125,5 +126,28 @@ describe('parseExploreView', () => {
     const merged = params({ ontologyId: 'ont-1', versionId: 'ver-2', view: 'mapping' })
     assert.equal(parseExploreView(merged), 'mapping')
     assert.deepEqual(parseSessionBinding(merged), { ontologyId: 'ont-1', versionId: 'ver-2' })
+  })
+})
+
+describe('bindingFailureBannerText', () => {
+  it('HTTP detail 字符串透出为失败原因', () => {
+    assert.equal(
+      bindingFailureBannerText({ detail: '目标本体不存在' }),
+      '绑定本体版本失败：目标本体不存在',
+    )
+  })
+
+  it('detail 对象的 message 字段透出为失败原因', () => {
+    assert.equal(
+      bindingFailureBannerText({ detail: { code: 'version_missing', message: '绑定版本已发布' } }),
+      '绑定本体版本失败：绑定版本已发布',
+    )
+  })
+
+  it('无 detail 时回落到 Error.message；完全无法识别时给通用兜底', () => {
+    assert.equal(bindingFailureBannerText(new Error('network down')), '绑定本体版本失败：network down')
+    assert.equal(bindingFailureBannerText(null), '绑定本体版本失败，请检查绑定参数后重试')
+    assert.equal(bindingFailureBannerText({}), '绑定本体版本失败，请检查绑定参数后重试')
+    assert.equal(bindingFailureBannerText({ detail: '  ' }), '绑定本体版本失败，请检查绑定参数后重试')
   })
 })

@@ -76,7 +76,7 @@ export const PLATFORM_NAV_ITEMS: PlatformNavItem[] = [
   {
     key: 'ontology_model', to: '/ontology-model', icon: Boxes, label: '本体模型', description: '本体管理、业务澄清与本体网络', subItems: [
       { key: 'ontologies', to: '/ontologies', icon: Network, label: '本体管理', description: '本体、图谱与对象建模' },
-      { key: 'explore', to: '/explore', icon: Compass, label: '业务澄清', description: '对话澄清业务，沉淀七大模型与需求文档', hiddenFromNavigation: true },
+      { key: 'explore', to: '/explore', icon: Compass, label: '业务澄清', description: '在线配置工作台：对话澄清业务，沉淀七大模型与需求文档', hiddenFromNavigation: true },
       { key: 'ontology_model.network', to: '/ontology-model/network', icon: Share2, label: '本体网络', description: '跨本体关联与全局本体网络' },
     ],
   },
