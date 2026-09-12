@@ -10,8 +10,10 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from app.exploration import canvas as C
+from app.exploration import converter
 from app.exploration import readiness as R
 from app.exploration import schemas as S
+from app.exploration.document import canvas_fingerprint
 from app.exploration.diagram import (
     DIAGRAM_KINDS,
     DiagramError,
@@ -339,6 +341,64 @@ def get_readiness(
 ):
     session = require_session_fn(db, session_id, current_user)
     return ok_fn(readiness_module.evaluate(session.canvas))
+
+
+def get_ontology_preview(
+    session_id: str,
+    db: Session,
+    current_user,
+    *,
+    require_session_fn=_require_session,
+    canvas_module=C,
+    readiness_module=R,
+    converter_module=converter,
+    canvas_fingerprint_fn=canvas_fingerprint,
+    project_model=OntologyProject,
+    schemas_module=S,
+    ok_fn: Callable[[Any], dict] = _ok,
+):
+    """画布 → 本体预览投影（只读）：确定性转换 + 与绑定版本基线比对，不落库。
+
+    与草稿生成同一条确定性管线（converter.build_draft，无 LLM）；绑定会话以
+    resolve_merge_baseline_snapshot 解析的基线快照为「已有结构」口径
+    （绑定草稿版本优先，其次当前发布；都没有时回退 live 表名集合），
+    未绑定会话没有比对基线，全部元素按「将新增」处理（应用时新建本体）。
+    """
+    session = require_session_fn(db, session_id, current_user)
+    canvas = canvas_module._ensure_canvas(session.canvas)
+    readiness = readiness_module.evaluate(canvas)
+    ontology_id = session.ontology_id
+    baseline = None
+    existing = None
+    if ontology_id:
+        project = db.query(project_model).filter(
+            project_model.id == ontology_id).first()
+        baseline = converter_module.resolve_merge_baseline_snapshot(
+            db,
+            ontology_id,
+            bound_version_id=session.ontology_version_id,
+            current_release_id=getattr(project, "current_release_id", None),
+        )
+        existing = converter_module.existing_name_sets(
+            db, ontology_id, snapshot=baseline)
+    draft, report = converter_module.build_draft(canvas, existing=existing)
+    out = schemas_module.OntologyPreviewOut(
+        canvas_fingerprint=canvas_fingerprint_fn(canvas),
+        canvas_version=int(session.canvas_version or 0),
+        bound=bool(ontology_id),
+        ontology_id=ontology_id,
+        ontology_version_id=session.ontology_version_id,
+        readiness=schemas_module.OntologyPreviewReadiness(
+            ready=readiness["ready"],
+            gates_passed=readiness["gatesPassed"],
+            gates_total=readiness["gatesTotal"],
+            blocking_count=readiness["blockingCount"],
+            advisory_count=readiness["advisoryCount"],
+        ),
+        projected=converter_module.project_dispositions(draft, baseline),
+        semantic_issues=report.get("semanticIssues") or [],
+    )
+    return ok_fn(out.model_dump(by_alias=True))
 
 
 def get_diagram(

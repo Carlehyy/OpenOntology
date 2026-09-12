@@ -50,6 +50,7 @@ DELEGATES = {
     "delete_session": ("_session_service", "delete_session"),
     "get_canvas": ("_session_service", "get_canvas"),
     "get_readiness": ("_session_service", "get_readiness"),
+    "get_ontology_preview": ("_session_service", "get_ontology_preview"),
     "get_diagram": ("_session_service", "get_diagram"),
     "list_diagram_kinds": (
         "_session_service",
@@ -178,7 +179,8 @@ def test_all_exploration_handlers_are_named_service_adapters():
     assert ".commit(" not in source
     assert ".rollback(" not in source
     assert ".flush(" not in source
-    assert len(source.splitlines()) <= 620
+    # 尺寸绊线随 ontology-preview 只读路由上调；继续增长应先拆子路由而非再抬线
+    assert len(source.splitlines()) <= 640
 
 
 def test_service_modules_never_import_exploration_router():
@@ -363,8 +365,9 @@ def test_exploration_openapi_fingerprint_is_stable():
     ).encode()
 
     # MYW-68 业务澄清分支②入口：新增 GET /exploration/draft-ontologies（读契约）。
-    assert len(paths) == 22
-    assert operations == 27
+    # 工作台本体预览投影：新增 GET /exploration/sessions/{id}/ontology-preview（只读）。
+    assert len(paths) == 23
+    assert operations == 28
     assert hashlib.sha256(payload).hexdigest() == (
-        "d8ac046024f212602688fa6eb0b0565ecd9e00762a4bb3f9972257cf3e331abd"
+        "031ee8534714492bb2149c28fc5fc8f577d57482a2f1a960b2e479b6dd34483e"
     )

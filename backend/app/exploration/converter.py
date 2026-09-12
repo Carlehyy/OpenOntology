@@ -17,7 +17,9 @@
 草稿永不直写本体 —— apply_draft 只落用户勾选且无冲突的元素，且转出的
 函数/哨兵带三重闸门（enabled=false / muted / status=draft），落地即休眠待人工形式化。
 合并进已有本体走版本正门：apply_draft_to_snapshot 以同一保守合并语义改写
-目标草稿版本的结构快照，不触碰 fo_* live 表（发布时才物化）。
+目标草稿版本的结构快照，不触碰 fo_* live 表（发布时才物化）；合并校验与
+草稿保存同一分层口径 —— 休眠动作类缺口降级为 warnings 透出，其他校验错误
+422 阻断合并。
 落库元素写 source 血缘列（sessionId/documentId/draftId/draftKey/sourceRefs），
 元素级可回溯到探索会话与画布卡片。
 """
@@ -31,12 +33,14 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.ontologies.agent_runtime import llm_bridge
 from app.ontologies.formal_modeling.models import ActionType, LinkType, ObjectType, OntologyFunction
 from app.ontologies.sentinels.models import Sentinel
 from app.ontologies.versions.models import OntologyVersion
+from app.ontologies.versions.evolution_service import validate_snapshot
 from app.ontologies.versions.snapshot_contract import (
     complete_snapshot,
     snapshot_hash,
@@ -1045,6 +1049,143 @@ def validate_draft_selection(draft: dict, selected_keys: Optional[list[str]] = N
             "selectedCount": len(selected), "counts": counts}
 
 
+# ---------------------------------------------------------------- 预览投影（只读）
+
+
+def _text_of(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _prop_signature(props: Any) -> list[tuple[str, str, bool]]:
+    """属性集合的等价签名（与属性 id 无关，避免草稿/快照各自生成的随机 id 误判冲突）。"""
+    return sorted(
+        (norm_name(str(p.get("name") or "")), str(p.get("type") or ""), bool(p.get("required")))
+        for p in (props or []) if isinstance(p, dict)
+    )
+
+
+def _primary_key_name(item: dict) -> str:
+    """primaryKey 统一解析成属性名（草稿与快照都是属性 id，兼容历史 name 形式）。"""
+    props = [p for p in (item.get("properties") or []) if isinstance(p, dict)]
+    pk = item.get("primaryKey")
+    by_id = {str(p.get("id")): p for p in props if p.get("id")}
+    prop = by_id.get(str(pk))
+    if prop is None:
+        prop = next((p for p in props
+                     if norm_name(str(p.get("name") or "")) == norm_name(str(pk or ""))), None)
+    return norm_name(str((prop or {}).get("name") or ""))
+
+
+def _same_object_type(d: dict, b: dict, _obj_names: dict[str, str]) -> bool:
+    return (
+        _text_of(d.get("displayName")) == _text_of(b.get("displayName"))
+        and _text_of(d.get("description")) == _text_of(b.get("description"))
+        and _prop_signature(d.get("properties")) == _prop_signature(b.get("properties"))
+        and _primary_key_name(d) == _primary_key_name(b)
+    )
+
+
+def _same_link_type(d: dict, b: dict, obj_names: dict[str, str]) -> bool:
+    return (
+        _text_of(d.get("displayName")) == _text_of(b.get("displayName"))
+        and _text_of(d.get("description")) == _text_of(b.get("description"))
+        and _text_of(d.get("cardinality")) == _text_of(b.get("cardinality"))
+        and norm_name(str(d.get("sourceName") or ""))
+            == obj_names.get(str(b.get("sourceObjectTypeId") or ""), "")
+        and norm_name(str(d.get("targetName") or ""))
+            == obj_names.get(str(b.get("targetObjectTypeId") or ""), "")
+    )
+
+
+def _same_action(d: dict, b: dict, obj_names: dict[str, str]) -> bool:
+    return (
+        _text_of(d.get("displayName")) == _text_of(b.get("displayName"))
+        and _text_of(d.get("description")) == _text_of(b.get("description"))
+        and bool(d.get("requiresApproval")) == bool(b.get("requiresApproval"))
+        and norm_name(str(d.get("objectTypeName") or ""))
+            == obj_names.get(str(b.get("objectTypeId") or ""), "")
+        and _prop_signature(d.get("parameters")) == _prop_signature(b.get("parameters"))
+    )
+
+
+def _same_function(d: dict, b: dict, obj_names: dict[str, str]) -> bool:
+    return (
+        _text_of(d.get("displayName")) == _text_of(b.get("displayName"))
+        and _text_of(d.get("description")) == _text_of(b.get("description"))
+        and _text_of(d.get("functionType")) == _text_of(b.get("functionType"))
+        and _text_of(d.get("returnType")) == _text_of(b.get("returnType"))
+        and norm_name(str(d.get("targetObjectTypeName") or ""))
+            == obj_names.get(str(b.get("targetObjectTypeId") or ""), "")
+    )
+
+
+def _same_sentinel(d: dict, b: dict, obj_names: dict[str, str]) -> bool:
+    bindings = [x for x in (b.get("bindings") or []) if isinstance(x, dict)]
+    bound = (obj_names.get(str(bindings[0].get("objectTypeId") or ""), "")
+             if bindings else "")
+    return (
+        _text_of(d.get("displayName")) == _text_of(b.get("displayName"))
+        and _text_of(d.get("description")) == _text_of(b.get("description"))
+        and bool(d.get("onChange")) == bool(b.get("onChange"))
+        and bool(d.get("onSchedule")) == bool(b.get("onSchedule"))
+        and int(d.get("scanIntervalSeconds") or 300) == int(b.get("scanIntervalSeconds") or 300)
+        and norm_name(str(d.get("bindingObjectName") or "")) == bound
+    )
+
+
+_SAME_DEFINITION = {
+    "objectTypes": _same_object_type,
+    "linkTypes": _same_link_type,
+    "actions": _same_action,
+    "functions": _same_function,
+    "sentinels": _same_sentinel,
+}
+
+
+def project_dispositions(draft: dict, baseline: Optional[dict]) -> dict[str, list[dict]]:
+    """预览投影：为草稿五类集合逐项标注与基线结构的关系（纯函数，不写库）。
+
+    disposition 与 _mark_conflicts / validate_draft_selection 同一口径：
+      - add：基线无同名，应用时将新增（进入默认选择集）；
+      - exists：同名且关键定义一致，保守合并将跳过（幂等无变化）；
+      - conflict：同名但定义不同，不进默认选择集，需人工处理。
+    依赖 build_draft 已按同一基线名集合打好 conflict 标记；基线中没有可比对
+    定义的同名项（live 表兜底口径）只能确认会被跳过，按 exists 处理。
+    """
+    collections = tuple(_SAME_DEFINITION)
+    baseline_by_name: dict[str, dict[str, dict]] = {name: {} for name in collections}
+    obj_names: dict[str, str] = {}
+    if baseline is not None:
+        snap = complete_snapshot(baseline)
+        obj_names = {
+            str(item.get("id")): norm_name(str(item.get("name") or ""))
+            for item in snap["objectTypes"] if isinstance(item, dict) and item.get("id")
+        }
+        for coll in collections:
+            baseline_by_name[coll] = {
+                norm_name(str(item.get("name") or "")): item
+                for item in snap[coll] if isinstance(item, dict) and item.get("name")
+            }
+
+    def disposition(coll: str, item: dict) -> str:
+        if not item.get("conflict"):
+            return "add"
+        base_item = baseline_by_name[coll].get(norm_name(str(item.get("name") or "")))
+        if base_item is None:
+            return "exists"
+        return "exists" if _SAME_DEFINITION[coll](item, base_item, obj_names) else "conflict"
+
+    return {
+        coll: [
+            {"key": item.get("key"), "name": item.get("name"),
+             "displayName": item.get("displayName") or item.get("name"),
+             "disposition": disposition(coll, item)}
+            for item in draft.get(coll) or []
+        ]
+        for coll in collections
+    }
+
+
 # ---------------------------------------------------------------- 对外入口
 
 
@@ -1340,7 +1481,9 @@ def apply_draft_to_snapshot(
     函数 enabled=False；哨兵带三重闸门（muted + enabled=false + status=draft）。
     写回草稿版本：snapshot_formal 整体替换、revision + 1、snapshot_hash 重算、
     change_summary 用既有 _diff_formal 口径、既有非 running 试跑置 stale；
-    mappings/linkMappings 原样保留。本函数不 commit，事务由调用方持有。
+    mappings/linkMappings 原样保留。合并校验与草稿保存同一分层口径：
+    休眠动作类缺口进返回的 warnings，其他校验错误抛 422 阻断合并
+    （候选快照不落版本）。本函数不 commit，事务由调用方持有。
     """
     selected = _selected_draft_keys(draft_data, selected_keys)
 
@@ -1504,6 +1647,23 @@ def apply_draft_to_snapshot(
         existing["sentinels"].add(norm_name(item["name"]))
         created["sentinels"] += 1
 
+    # 合并校验与草稿保存（save_draft_workspace）同一分层口径：
+    # 「动作无启用的可执行副作用规则」（落地即休眠、待人工形式化）降级为
+    # warnings 透出，不阻断合并；其他校验错误 422 阻断 —— 候选快照不落版本，
+    # 事务由调用方持有，抛错后整体回滚。
+    merge_warnings: list[dict] = []
+    errors = validate_snapshot(
+        candidate,
+        require_object_type=False,
+        require_executable_action_rules=False,
+        warnings_out=merge_warnings,
+    )
+    if errors:
+        raise HTTPException(422, detail={
+            "code": "invalid_merged_snapshot",
+            "message": "合并后的草稿快照结构校验未通过，未执行合并",
+            "errors": errors[:20],
+        })
     draft_version.snapshot_formal = candidate
     draft_version.revision = (draft_version.revision or 0) + 1
     draft_version.snapshot_hash = snapshot_hash(candidate)
@@ -1513,4 +1673,5 @@ def apply_draft_to_snapshot(
     if stale_trials_fn is not None:
         stale_trials_fn(db, draft_version)
     return {"created": created, "skipped": skipped,
-            "versionId": str(draft_version.id)}
+            "versionId": str(draft_version.id),
+            "warnings": merge_warnings}
