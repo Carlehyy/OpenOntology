@@ -889,9 +889,9 @@ test('会话时间按本地时区显示：naive UTC 串按 UTC 解析', async ({
   })
   await page.goto('/#/super-assistant')
 
-  const expected = new Date(`${naive}Z`).toLocaleString('zh-CN', {
-    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  })
+  const d = new Date(`${naive}Z`)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const expected = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
   await expect(page.locator('[data-workbench-conversation="c-naive"]')).toContainText(expected)
 })
 
@@ -1610,7 +1610,7 @@ test('知识图谱：拖拽文件至目录归位与画布下统计条', async ({
   await expect(statsBar).toContainText('3 实体')
   await expect(statsBar).toContainText('2 关系')
   await expect(statsBar).toContainText('已建图文档 2/3')
-  await expect(statsBar).toContainText(/上次更新：\d{4}\//)
+  await expect(statsBar).toContainText(/上次更新：\d{4}-\d{2}-\d{2}/)
   // 标题行不再重复统计小字
   await expect(graphSection.getByText(/3 实体 \/ 2 关系/)).toHaveCount(0)
 

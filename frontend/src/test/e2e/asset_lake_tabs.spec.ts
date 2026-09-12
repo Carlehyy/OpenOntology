@@ -531,12 +531,11 @@ test('被拒绝的成品版本以审计语义展示且没有普通生产导出',
   await expect(page.getByRole('option', { name: '已处理' })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('cell', { name: '已拒绝' })).toBeVisible()
-  const expectedUpdatedAt = await page.evaluate(value => (
-    new Date(value).toLocaleString('zh-CN', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    })
-  ), rejectedUpdatedAt)
+  const expectedUpdatedAt = await page.evaluate(value => {
+    const d = new Date(value)
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  }, rejectedUpdatedAt)
   await expect(page.getByTitle(rejectedUpdatedAt, { exact: true })).toHaveText(expectedUpdatedAt)
   await expect(page.getByRole('button', { name: '查看' })).toBeVisible()
   const deleteButton = page.getByRole('button', { name: '删除' })

@@ -8,7 +8,7 @@ import { expect, test, type Page, type Route } from '@playwright/test'
  *      数据），徽标计数必须取自能力边界接口（与助手技能卡同一数据源），
  *      不再恒显示「0 实例」；点开徽标后实例行按 release 拉取真实数据。
  *   2. 卡片底部行可见性：属性区满配（>4 个属性时 3 行 + 更多行）时，
- *      「激活函数」行不得被卡片 overflow 裁切（bounding box 必须落在卡片内）。
+ *      「计算函数」行不得被卡片 overflow 裁切（bounding box 必须落在卡片内）。
  *   3. 缩放上限（MYW-73）：100% 是 viewBox 适配而非 1:1，大本体初始有效缩放
  *      远小于 1，旧 1.8 上限放大到底仍读不清卡片；滚轮/按钮必须能放大到
  *      400%（与本体网络画布 ZOOM_MAX 对齐）并在 400% 精确封顶、双击复位。
@@ -158,7 +158,7 @@ test('实例徽标显示能力接口的真实计数，弹层加载运行投影�
   await expect(page.getByText('数据一致原则')).toBeVisible()
 })
 
-test('属性区满配时底部「激活函数」行仍完整可见，不被卡片裁切', async ({ page }) => {
+test('属性区满配时底部「计算函数」行仍完整可见，不被卡片裁切', async ({ page }) => {
   await mockAgentTopology(page)
   await page.setViewportSize({ width: 1728, height: 1080 })
   await page.goto(`/#/agent?ontology_id=${ONTOLOGY_ID}`, { waitUntil: 'domcontentloaded' })
@@ -168,14 +168,14 @@ test('属性区满配时底部「激活函数」行仍完整可见，不被卡�
   await page.waitForTimeout(400)
 
   // 业务规则卡：5 个属性 → 3 行 + 「+2 更多实体属性」，最易触发底部裁切。
-  // 断言「激活函数」行的 bounding box 完整落在卡片边框内（含 1px 容差）。
+  // 断言「计算函数」行的 bounding box 完整落在卡片边框内（含 1px 容差）。
   const clip = await page.evaluate(() => {
     for (const card of document.querySelectorAll('[data-testid="ontology-network-node"]')) {
       if (!(card.textContent || '').includes('业务规则')) continue
       const cardRect = card.getBoundingClientRect()
       const rows = [...(card as HTMLElement).querySelectorAll(':scope > div:last-child > div')]
-      const fnRow = rows.find(row => (row.textContent || '').includes('激活函数'))
-      if (!fnRow) return { error: '激活函数行未渲染' }
+      const fnRow = rows.find(row => (row.textContent || '').includes('计算函数'))
+      if (!fnRow) return { error: '计算函数行未渲染' }
       const rowRect = fnRow.getBoundingClientRect()
       return {
         cardBottom: cardRect.bottom,
@@ -187,7 +187,7 @@ test('属性区满配时底部「激活函数」行仍完整可见，不被卡�
     return { error: '未找到业务规则卡片' }
   })
   expect(clip.error).toBeUndefined()
-  expect(clip.clipped, `激活函数行被裁切：行底 ${clip.rowBottom} > 卡底 ${clip.cardBottom}`).toBe(false)
+  expect(clip.clipped, `计算函数行被裁切：行底 ${clip.rowBottom} > 卡底 ${clip.cardBottom}`).toBe(false)
   expect(clip.overflowPx, `卡片内容溢出 ${clip.overflowPx}px`).toBe(0)
 })
 

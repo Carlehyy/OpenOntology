@@ -111,7 +111,7 @@ async function verifyReadonlyGraphInspection(page: Page, objectTypeId: string) {
   const objectButton = page.getByRole('button', { name: /查看对象实体，共 1 个/ })
   const linkButton = page.getByRole('button', { name: /查看实体关系，共 1 个/ })
   const actionButton = page.getByRole('button', { name: /查看执行动作，共 1 个/ })
-  const functionButton = page.getByRole('button', { name: /查看激活函数，共 1 个/ })
+  const functionButton = page.getByRole('button', { name: /查看计算函数，共 1 个/ })
   await expect(objectButton).toBeEnabled()
   await expect(linkButton).toBeEnabled()
   await expect(actionButton).toBeEnabled()
@@ -735,12 +735,12 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(page.locator(`.react-flow__node[data-id="property:${objectTypeId}:p-name"] > div`)).toHaveClass(/border-violet-500/)
   await expect(page.locator(`.react-flow__node[data-id="action:act-browser-order-${suffix}"] > div`)).toHaveClass(/border-violet-500/)
 
-  await page.getByLabel('查看激活函数使用关系').click()
+  await page.getByLabel('查看计算函数使用关系').click()
   await page.getByTestId(`function-dependency-option-fn-browser-order-${suffix}`).click()
   await expect(page.locator(`.react-flow__node[data-id="${objectTypeId}"] > div`)).toHaveClass(/border-violet-500/)
 
   // L2 节点同样只保存独立画布布局，并采用 3 秒尾随保存。
-  await page.getByLabel('查看激活函数使用关系').click()
+  await page.getByLabel('查看计算函数使用关系').click()
   await page.getByTestId('function-dependency-clear').click()
   const propertyNode = page.locator(`.react-flow__node[data-id="property:${objectTypeId}:p-name"]`)
   await expect(propertyNode).toBeVisible()

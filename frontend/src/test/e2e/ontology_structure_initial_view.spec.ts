@@ -354,9 +354,9 @@ test('结构工具栏使用友好层级名称、完整下拉文案并在输入�
   await expect(l1).toHaveAttribute('aria-pressed', 'true')
   await expect(l2).toHaveAttribute('aria-pressed', 'false')
 
-  const functionTrigger = page.getByLabel('查看激活函数使用关系')
+  const functionTrigger = page.getByLabel('查看计算函数使用关系')
   const sentinelTrigger = page.getByLabel('查看哨兵规则覆盖范围')
-  await expect(functionTrigger).toContainText('激活函数 · 查看使用关系')
+  await expect(functionTrigger).toContainText('计算函数 · 查看使用关系')
   await expect(sentinelTrigger).toContainText('哨兵规则 · 查看覆盖范围')
   await expect(functionTrigger).toHaveCSS('width', '224px')
   await expect(sentinelTrigger).toHaveCSS('width', '224px')
