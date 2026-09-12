@@ -131,10 +131,11 @@ function FlowNode({
 
 /** 洞察只使用接口返回的真实数据；任何接口失败时都明确提示，不补造指标。 */
 function AssetInsightStrip() {
+  const navigate = useNavigate()
   const [retryToken, setRetryToken] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [metrics, setMetrics] = useState<Array<{ label: string; value: string; note: string }> | null>(null)
+  const [metrics, setMetrics] = useState<Array<{ label: string; value: string; note: string; action?: { text: string; onClick: () => void } }> | null>(null)
 
   useEffect(() => {
     const refresh = () => {
@@ -162,7 +163,18 @@ function AssetInsightStrip() {
           ? `${Math.round((scored.reduce((sum, score) => sum + score, 0) / scored.length) * 100)}%`
           : '—'
         setMetrics([
-          { label: '数据集总数', value: String(curatedItems.length + rawItems.length), note: `成品 ${curatedItems.length} · 人工 ${manualItems.length}${legacySyncCount ? ` · 历史同步 ${legacySyncCount}` : ''}` },
+          {
+            label: '数据集总数', value: String(curatedItems.length + rawItems.length),
+            note: `成品 ${curatedItems.length} · 人工 ${manualItems.length}`,
+            // 连接同步数据集按导航设计（21dc9e08）不在资产湖列表展示，
+            // 其正式入口是「数据流水线 → 数据集」；计数必须可跳转，不能是死数字
+            ...(legacySyncCount ? {
+              action: {
+                text: `历史同步 ${legacySyncCount} →`,
+                onClick: () => navigate('/data/pipelines/datasets'),
+              },
+            } : {}),
+          },
           { label: '人工数据集', value: String(manualItems.length), note: '文件上传或在线维护' },
           { label: '已声明主键', value: String(manualItems.filter(item => Boolean(item.primary_key)).length), note: '具备主键契约的人工数据集' },
           { label: '平均质量分', value: avgQuality, note: scored.length ? `基于 ${scored.length} 个已评分成品` : '暂无已评分成品' },
@@ -206,7 +218,18 @@ function AssetInsightStrip() {
         <div key={metric.label} className="rounded-xl border border-border bg-card px-4 py-3 shadow-sm/50">
           <p className="text-[11px] font-medium text-muted-foreground">{metric.label}</p>
           <p className="mt-0.5 text-xl font-semibold tabular-nums text-foreground">{metric.value}</p>
-          <p className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]" title={metric.note}>{metric.note}</p>
+          <p className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]" title={metric.note}>
+            {metric.note}
+            {metric.action && (
+              <button
+                type="button"
+                onClick={metric.action.onClick}
+                className="ml-1 font-medium text-[var(--color-success)] underline decoration-[var(--color-success)] underline-offset-2 hover:opacity-80"
+              >
+                {metric.action.text}
+              </button>
+            )}
+          </p>
         </div>
       ))}
     </div>

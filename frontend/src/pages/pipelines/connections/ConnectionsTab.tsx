@@ -57,6 +57,16 @@ const KIND_CONFIG_FIELDS: Record<string, { key: string; label: string; placehold
   file: [],
 }
 
+// 拦截器 reject 的是已解包的响应体；HTTPException 的 detail 可能是字符串，
+// 也可能是结构化对象（如连接删除 409 的 {message, datasets}）
+function errorDetail(e: unknown, fallback: string): string {
+  const err = e as { detail?: string | { message?: string }; message?: string }
+  const payload = err?.detail
+  if (typeof payload === 'string' && payload) return payload
+  const message = typeof payload === 'object' && payload ? payload.message : ''
+  return message || err?.message || fallback
+}
+
 export default function ConnectionsTab() {
   const navigate = useNavigate()
   const [connections, setConnections] = useState<Connection[]>([])
@@ -67,6 +77,8 @@ export default function ConnectionsTab() {
   const [syncing, setSyncing] = useState<string | null>(null)
   const [syncResult, setSyncResult] = useState<{ id: string; ok: boolean; detail: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Connection | null>(null)
+  const [deleteError, setDeleteError] = useState('')
+  const [deleting, setDeleting] = useState(false)
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; detail?: string } | null>(null)
   const [testing, setTesting] = useState<string | null>(null)
 
@@ -95,6 +107,10 @@ export default function ConnectionsTab() {
 
   const handleSave = async () => {
     if (!formName.trim()) { setFormError('请填写连接名称'); return }
+    if (connections.some(c => c.name.trim() === formName.trim())) {
+      setFormError(`已存在同名连接「${formName.trim()}」，请更换连接名称`)
+      return
+    }
     if (formKind === 'rest') {
       if (!formConfig.url?.trim()) { setFormError('请填写 REST API URL'); return }
       try {
@@ -119,8 +135,7 @@ export default function ConnectionsTab() {
       resetForm()
       loadConnections()
     } catch (e: unknown) {
-      const err = e as { detail?: string; response?: { data?: { detail?: string } }; message?: string }
-      setFormError(err?.detail || err?.response?.data?.detail || err?.message || '保存失败')
+      setFormError(errorDetail(e, '保存失败'))
     } finally {
       setSaving(false)
     }
@@ -158,12 +173,7 @@ export default function ConnectionsTab() {
       })
       loadConnections()
     } catch (e: unknown) {
-      const err = e as { detail?: string; response?: { data?: { detail?: string } }; message?: string }
-      setSyncResult({
-        id,
-        ok: false,
-        detail: err?.detail || err?.response?.data?.detail || err?.message || '同步失败',
-      })
+      setSyncResult({ id, ok: false, detail: errorDetail(e, '同步失败') })
     } finally {
       setSyncing(null)
     }
@@ -171,9 +181,23 @@ export default function ConnectionsTab() {
 
   const handleDelete = async () => {
     if (!deleteTarget) return
-    await apiClientV2.delete(`/connections/${deleteTarget.id}`)
-    setDeleteTarget(null)
-    loadConnections()
+    setDeleting(true)
+    setDeleteError('')
+    try {
+      await apiClientV2.delete(`/connections/${deleteTarget.id}`)
+      setDeleteTarget(null)
+      loadConnections()
+    } catch (e: unknown) {
+      const err = e as { detail?: string | { message?: string; datasets?: { name?: string }[] } }
+      const payload = err?.detail
+      const names = (typeof payload === 'object' ? payload?.datasets : [])
+        ?.map(d => d?.name).filter(Boolean) ?? []
+      const message = errorDetail(e, '删除失败，请稍后重试')
+      setDeleteError(
+        names.length ? `${message}（${names.join('、')}）` : message)
+    } finally {
+      setDeleting(false)
+    }
   }
 
   if (loading) return <div className="text-[var(--color-text-tertiary)] text-sm p-4">加载中...</div>
@@ -339,7 +363,7 @@ export default function ConnectionsTab() {
                     同步
                   </button>
                   <button
-                    onClick={() => setDeleteTarget(c)}
+                    onClick={() => { setDeleteTarget(c); setDeleteError('') }}
                     className="text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)] text-xs px-1 transition-colors"
                   >
                     删除
@@ -351,8 +375,17 @@ export default function ConnectionsTab() {
                   </p>
                 )}
                 {syncResult?.id === c.id && (
-                  <p className={`text-xs mt-2 ml-11 ${syncResult.ok ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]'}`}>
-                    {syncResult.ok ? `✓ ${syncResult.detail}` : `✗ ${syncResult.detail}`}
+                  <p className={`text-xs mt-2 ml-11 flex items-center gap-2 ${syncResult.ok ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]'}`}>
+                    <span>{syncResult.ok ? `✓ ${syncResult.detail}` : `✗ ${syncResult.detail}`}</span>
+                    {syncResult.ok && (
+                      <button
+                        onClick={() => navigate('/data/pipelines/datasets')}
+                        className="underline underline-offset-2 hover:opacity-80"
+                        title="连接同步数据集在「数据流水线 → 数据集」中查看"
+                      >
+                        查看数据集
+                      </button>
+                    )}
                   </p>
                 )}
               </div>
@@ -364,11 +397,19 @@ export default function ConnectionsTab() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="删除连接"
-        description={`确认删除连接「${deleteTarget?.name}」？依赖该连接的同步任务将无法执行。`}
+        description={
+          <>
+            <p>确认删除连接「{deleteTarget?.name}」？依赖该连接的同步任务将无法执行。</p>
+            {deleteError && (
+              <p className="mt-2 font-medium" role="alert">{deleteError}</p>
+            )}
+          </>
+        }
         confirmText="确认删除"
         variant="danger"
+        loading={deleting}
         onConfirm={handleDelete}
-        onClose={() => setDeleteTarget(null)}
+        onClose={() => { setDeleteTarget(null); setDeleteError('') }}
       />
     </div>
   )
