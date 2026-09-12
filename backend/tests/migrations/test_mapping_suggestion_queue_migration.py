@@ -1,4 +1,4 @@
-"""0102 映射建议人工确认队列表迁移。"""
+"""0107 映射建议人工确认队列表迁移。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -30,8 +30,8 @@ def test_upgrade_downgrade_roundtrip(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _alembic_config(backend, db_path)
 
-    # head 即 0102;全新库经 0003 create_all 以当前模型建表(表随之创建),
-    # 0102 upgrade 为幂等空操作,downgrade 负责验证可逆。
+    # head 即 0107;全新库经 0003 create_all 以当前模型建表(表随之创建),
+    # 0107 upgrade 为幂等空操作,downgrade 负责验证可逆。
     command.upgrade(cfg, "head")
     assert _has_queue_table(db_path)
 

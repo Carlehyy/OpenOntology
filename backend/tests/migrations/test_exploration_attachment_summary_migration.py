@@ -1,4 +1,4 @@
-"""0101 探索附件索引卡摘要列迁移。"""
+"""0106 探索附件索引卡摘要列迁移。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,9 +29,9 @@ def test_upgrade_downgrade_roundtrip(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _alembic_config(backend, db_path)
 
-    # 钉在 0101 验证其往返(head 已推进到 0102,downgrade -1 口径随之变化)
-    command.upgrade(cfg, "0101_exploration_attachment_summary")
-    # 全新库经 0003 create_all 以当前模型建表（列随之创建），0101 幂等空操作。
+    # 钉在 0106 验证其往返(head 已推进到 0107,downgrade -1 口径随之变化)
+    command.upgrade(cfg, "0106_exploration_attachment_summary")
+    # 全新库经 0003 create_all 以当前模型建表（列随之创建），0106 幂等空操作。
     assert _has_summary_column(db_path)
 
     command.downgrade(cfg, "-1")
@@ -55,4 +55,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0102_mapping_suggestion_queue"]
+    assert heads == ["0107_mapping_suggestion_queue"]

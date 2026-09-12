@@ -5,8 +5,8 @@
 （NULL=尚未生成，首个回合懒生成；全新库经 0003 create_all 以当前模型建表，
 列已存在时 upgrade 为幂等空操作）。
 
-Revision ID: 0101_exploration_attachment_summary
-Revises: 0100_super_assistant_tool_settings
+Revision ID: 0106_exploration_attachment_summary
+Revises: 0105_palace_ontology_documents
 Create Date: 2026-09-11
 """
 
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from sqlalchemy import inspect
 
 
-revision = "0101_exploration_attachment_summary"
-down_revision = "0100_super_assistant_tool_settings"
+revision = "0106_exploration_attachment_summary"
+down_revision = "0105_palace_ontology_documents"
 branch_labels = None
 depends_on = None
 

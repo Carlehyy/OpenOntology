@@ -5,8 +5,8 @@ propose_mapping 工具提交的映射提案在此落库（status=pending），�
 映射视图的队列 UI；未确认建议不进草稿快照、不回流知识库。无数据回填需求
 （全新库经 0003 create_all 以当前模型建表，表已存在时 upgrade 为幂等空操作）。
 
-Revision ID: 0102_mapping_suggestion_queue
-Revises: 0101_exploration_attachment_summary
+Revision ID: 0107_mapping_suggestion_queue
+Revises: 0106_exploration_attachment_summary
 Create Date: 2026-09-12
 """
 
@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
 
-revision = "0102_mapping_suggestion_queue"
-down_revision = "0101_exploration_attachment_summary"
+revision = "0107_mapping_suggestion_queue"
+down_revision = "0106_exploration_attachment_summary"
 branch_labels = None
 depends_on = None
 
