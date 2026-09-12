@@ -204,9 +204,9 @@ export function DynamicSentinelDrawer({
                 {draft.bindings.map((binding, index) => (
                   <div key={index} className="grid grid-cols-[72px_1fr_1.3fr_28px] gap-2">
                     <input value={binding.alias} onChange={event => renameBinding(index, event.target.value)}
-                      aria-label={`绑定${index + 1}别名`} className="h-8 rounded-md border border-border px-2 text-xs" />
+                      aria-label={`绑定${index + 1}别名`} className="h-8 rounded-md border border-border px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
                     <select value={binding.objectTypeId} onChange={event => setDraft({ ...draft, bindings: draft.bindings.map((item, itemIndex) => itemIndex === index ? { ...item, objectTypeId: event.target.value } : item) })}
-                      aria-label={`绑定${index + 1}对象类型`} className="h-8 rounded-md border border-border px-2 text-xs">
+                      aria-label={`绑定${index + 1}对象类型`} className="h-8 rounded-md border border-border px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                       {objectTypes.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}
                     </select>
                     <input value={binding.filter || ''} placeholder="可选过滤，如 a.amount > 100"
@@ -219,7 +219,7 @@ export function DynamicSentinelDrawer({
               </div>
               <label className="mt-3 block text-xs text-muted-foreground">主对象别名
                 <select value={draft.primaryAlias} onChange={event => setDraft({ ...draft, primaryAlias: event.target.value })}
-                  className="mt-1 h-8 w-full rounded-md border border-border bg-card px-2 text-xs">
+                  className="mt-1 h-8 w-full rounded-md border border-border bg-card px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   {draft.bindings.map((item, index) => <option key={index} value={item.alias}>{item.alias} · {objectName(item.objectTypeId)}</option>)}
                 </select>
               </label>
@@ -235,15 +235,15 @@ export function DynamicSentinelDrawer({
                 {draft.links.map((link, index) => (
                   <div key={`${link.linkTypeId}-${index}`} className="grid grid-cols-[1fr_1.5fr_1fr_28px] gap-2">
                     <select value={link.from} onChange={event => setDraft({ ...draft, links: draft.links.map((item, itemIndex) => itemIndex === index ? { ...item, from: event.target.value } : item) })}
-                      aria-label={`关系${index + 1}起点`} className="h-8 rounded-md border border-border px-2 text-xs">
+                      aria-label={`关系${index + 1}起点`} className="h-8 rounded-md border border-border px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                       {draft.bindings.map((item, itemIndex) => <option key={itemIndex} value={item.alias}>{item.alias}</option>)}
                     </select>
                     <select value={link.linkTypeId} onChange={event => setDraft({ ...draft, links: draft.links.map((item, itemIndex) => itemIndex === index ? { ...item, linkTypeId: event.target.value } : item) })}
-                      aria-label={`关系${index + 1}类型`} className="h-8 rounded-md border border-border px-2 text-xs">
+                      aria-label={`关系${index + 1}类型`} className="h-8 rounded-md border border-border px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                       {linkTypes.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}
                     </select>
                     <select value={link.to} onChange={event => setDraft({ ...draft, links: draft.links.map((item, itemIndex) => itemIndex === index ? { ...item, to: event.target.value } : item) })}
-                      aria-label={`关系${index + 1}终点`} className="h-8 rounded-md border border-border px-2 text-xs">
+                      aria-label={`关系${index + 1}终点`} className="h-8 rounded-md border border-border px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                       {draft.bindings.map((item, itemIndex) => <option key={itemIndex} value={item.alias}>{item.alias}</option>)}
                     </select>
                     <button type="button" onClick={() => setDraft({ ...draft, links: draft.links.filter((_, itemIndex) => itemIndex !== index) })}
@@ -284,7 +284,7 @@ export function DynamicSentinelDrawer({
               <h3 className="mb-2 text-xs font-semibold text-foreground">最终触发条件</h3>
               <textarea value={draft.condition || ''} onChange={event => setDraft({ ...draft, condition: event.target.value || null, conditionRows: [] })}
                 placeholder="例如 a.status == 'pending' and a.amount > 1000" aria-label="动态哨兵触发条件"
-                className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none" />
+                className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </section>
 
             <section>
@@ -325,7 +325,7 @@ export function DynamicSentinelDrawer({
               </label>
               <label className="text-xs text-muted-foreground">扫描间隔（秒）
                 <input type="number" min={60} max={86400} value={draft.scanIntervalSeconds} onChange={event => setDraft({ ...draft, scanIntervalSeconds: Number(event.target.value) })}
-                  className="mt-1 h-8 w-full rounded-md border border-border bg-card px-2 text-xs" />
+                  className="mt-1 h-8 w-full rounded-md border border-border bg-card px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
             </section>
 

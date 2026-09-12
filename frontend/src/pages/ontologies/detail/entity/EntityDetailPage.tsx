@@ -387,9 +387,9 @@ export default function EntityDetailPage() {
         {propEditing && (
           <div className="flex items-center gap-2 border-t pt-3">
             <input value={newKey} onChange={e => setNewKey(e.target.value)} placeholder="属性名"
-              className="flex-1 border rounded-lg px-2 py-1.5 text-xs" onKeyDown={e => e.key === 'Enter' && addProp()} />
+              className="flex-1 border rounded-lg px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onKeyDown={e => e.key === 'Enter' && addProp()} />
             <input value={newVal} onChange={e => setNewVal(e.target.value)} placeholder="值"
-              className="flex-1 border rounded-lg px-2 py-1.5 text-xs" onKeyDown={e => e.key === 'Enter' && addProp()} />
+              className="flex-1 border rounded-lg px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onKeyDown={e => e.key === 'Enter' && addProp()} />
             <button onClick={addProp} disabled={!newKey.trim()}
               className="flex items-center gap-1 px-2.5 py-1.5 bg-[var(--color-bg-overlay)] text-[var(--color-text-inverse)] rounded-lg text-xs disabled:opacity-40">
               <Plus size={12} /> 添加

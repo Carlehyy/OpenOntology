@@ -189,20 +189,20 @@ export function BoundaryDrawer({ oid, open, onClose }: {
               <span>单次查询最大行数</span>
               <input type="number" min={1} max={500} value={maxRows}
                      onChange={e => setMaxRows(Math.max(1, Number(e.target.value) || 50))}
-                     className="w-full px-2 py-1.5 text-sm border border-[var(--color-border)] rounded-md bg-[var(--color-bg-base)]" />
+                     className="w-full px-2 py-1.5 text-sm border border-[var(--color-border)] rounded-md bg-[var(--color-bg-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </label>
             <label className="text-xs text-[var(--color-text-secondary)] space-y-1">
               <span>单回合最大推理步数</span>
               <input type="number" min={1} max={30} value={maxSteps}
                      onChange={e => setMaxSteps(Math.max(1, Number(e.target.value) || 8))}
-                     className="w-full px-2 py-1.5 text-sm border border-[var(--color-border)] rounded-md bg-[var(--color-bg-base)]" />
+                     className="w-full px-2 py-1.5 text-sm border border-[var(--color-border)] rounded-md bg-[var(--color-bg-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </label>
           </div>
 
           <label className="text-xs text-[var(--color-text-secondary)] space-y-1 block">
             <span>附加指令（追加到系统提示，如业务口径、回答风格）</span>
             <textarea rows={3} value={extra} onChange={e => setExtra(e.target.value)} data-testid="agent-boundary-extra"
-                      className="w-full px-2 py-1.5 text-sm border border-[var(--color-border)] rounded-md bg-[var(--color-bg-base)] resize-none" />
+                      className="w-full px-2 py-1.5 text-sm border border-[var(--color-border)] rounded-md bg-[var(--color-bg-base)] resize-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
 
           {error && <Badge variant="danger">{error}</Badge>}

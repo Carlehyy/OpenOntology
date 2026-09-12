@@ -734,7 +734,7 @@ export default function SyncTasksTab() {
                   <select
                     value={pageSize}
                     onChange={e => { setPageSize(Number(e.target.value)); setPage(1) }}
-                    className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none"
+                    className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     aria-label="任务列表每页显示条数"
                   >
                     {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}

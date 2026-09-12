@@ -195,7 +195,7 @@ function SkillEditor({ skill, onClose, onSaved }: { skill: SuperSkill; onClose: 
             <label className="text-[11px] text-[var(--color-text-secondary)]">新建相对路径</label>
             <div className="mt-1 flex gap-1.5">
               <input value={newPath} onChange={event => setNewPath(event.target.value)} onKeyDown={event => event.key === 'Enter' && startNewFile()}
-                placeholder="references/guide.md" className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs outline-none" />
+                placeholder="references/guide.md" className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
               <button onClick={startNewFile} aria-label="新建文件" className="flex h-10 w-10 items-center justify-center rounded-md border border-[var(--color-border)] bg-white hover:bg-brand-soft"><Plus size={14} /></button>
             </div>
           </div>

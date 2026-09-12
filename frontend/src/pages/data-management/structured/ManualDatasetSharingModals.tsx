@@ -110,7 +110,7 @@ export function ManualShareModal({ dataset, onClose }: { dataset: DatasetOvervie
                 </Select>
               </label>
               <label className="text-xs text-muted-foreground">备注
-                <input value={label} onChange={e => setLabel(e.target.value)} placeholder="如：供应商维护" className="mt-1.5 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm" />
+                <input value={label} onChange={e => setLabel(e.target.value)} placeholder="如：供应商维护" className="mt-1.5 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
             </div>
             <p className="text-[11px] leading-5 text-[var(--color-success)]">可编辑链接提交时会先做主键与字段类型校验，校验通过后只生成待审批任务，不会直接改动正式数据。</p>

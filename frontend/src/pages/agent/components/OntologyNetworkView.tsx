@@ -731,7 +731,7 @@ export function OntologyNetworkView({
                       <select
                         value={instanceModalPageSize}
                         onChange={e => { setInstanceModalPageSize(Number(e.target.value)); setInstanceModalPage(0) }}
-                        className="h-7 cursor-pointer rounded border border-border bg-card px-1.5 text-xs text-muted-foreground outline-none"
+                        className="h-7 cursor-pointer rounded border border-border bg-card px-1.5 text-xs text-muted-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         {[10, 20, 50, 100].map(n => (
                           <option key={n} value={n}>{n}</option>

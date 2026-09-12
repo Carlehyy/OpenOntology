@@ -526,7 +526,7 @@ export default function FormalInstancesView({
                   value={draftKeyword}
                   onChange={event => setDraftKeyword(event.target.value)}
                   placeholder={selection?.kind === 'link' ? '搜索关系端点或属性值' : '搜索外部 ID 或属性值'}
-                  className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)]"
+                  className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 />
               </label>
               <button

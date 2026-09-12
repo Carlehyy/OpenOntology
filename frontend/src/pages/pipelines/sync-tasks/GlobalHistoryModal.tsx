@@ -202,7 +202,7 @@ export default function GlobalHistoryModal({
             <label className="space-y-1 text-[11px] text-muted-foreground">
               <span className="block">关联流水线</span>
               <select aria-label="历史记录流水线筛选" value={pipelineId} onChange={event => { setPipelineId(event.target.value); setPage(1) }}
-                className="h-8 max-w-[180px] rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none">
+                className="h-8 max-w-[180px] rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <option value="">全部流水线</option>
                 {pipelineOptions.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
               </select>
@@ -210,7 +210,7 @@ export default function GlobalHistoryModal({
             <label className="space-y-1 text-[11px] text-muted-foreground">
               <span className="block">执行状态</span>
               <select aria-label="全部历史执行状态筛选" value={statusFilter} onChange={event => { setStatusFilter(event.target.value as StatusFilter); setPage(1) }}
-                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none">
+                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <option value="">全部状态</option>
                 <option value="pending">排队中</option>
                 <option value="running">执行中</option>
@@ -222,7 +222,7 @@ export default function GlobalHistoryModal({
             <label className="space-y-1 text-[11px] text-muted-foreground">
               <span className="block">触发方式</span>
               <select aria-label="全部历史触发方式筛选" value={triggerFilter} onChange={event => { setTriggerFilter(event.target.value as TriggerFilter); setPage(1) }}
-                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none">
+                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <option value="">全部方式</option>
                 <option value="manual">手动</option>
                 <option value="scheduled">定时</option>
@@ -231,12 +231,12 @@ export default function GlobalHistoryModal({
             <label className="space-y-1 text-[11px] text-muted-foreground">
               <span className="block">开始日期</span>
               <input aria-label="全部历史开始日期" type="date" value={dateFrom} max={dateTo || undefined} onChange={event => { setDateFrom(event.target.value); setPage(1) }}
-                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none" />
+                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </label>
             <label className="space-y-1 text-[11px] text-muted-foreground">
               <span className="block">结束日期</span>
               <input aria-label="全部历史结束日期" type="date" value={dateTo} min={dateFrom || undefined} onChange={event => { setDateTo(event.target.value); setPage(1) }}
-                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none" />
+                className="h-8 rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </label>
             {hasFilters && (
               <button type="button" onClick={resetFilters} className="inline-flex h-8 items-center gap-1 rounded-lg px-2.5 text-xs text-muted-foreground transition hover:bg-card hover:text-viz-rose">
@@ -304,7 +304,7 @@ export default function GlobalHistoryModal({
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             每页
             <select aria-label="全部历史每页条数" value={pageSize} onChange={event => { setPageSize(Number(event.target.value)); setPage(1) }}
-              className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none">
+              className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
               {PAGE_SIZE_OPTIONS.map(size => <option key={size} value={size}>{size}</option>)}
             </select>
             条

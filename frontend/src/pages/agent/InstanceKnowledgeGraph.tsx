@@ -677,7 +677,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
               onChange={event => setQueryInput(event.target.value)}
               placeholder="定位实例、主键或字段值"
               aria-label="搜索实例"
-              className="h-8 min-w-0 flex-1 bg-transparent px-2 text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)]"
+              className="h-8 min-w-0 flex-1 bg-transparent px-2 text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
             {queryInput && (
               <button type="button" onClick={() => setQueryInput('')} aria-label="清空搜索" className="flex h-8 w-8 items-center justify-center text-[var(--color-text-tertiary)] hover:text-foreground">
@@ -692,7 +692,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
             value={selectedNode?.kind === 'instance' ? selectedNode.id : ''}
             onChange={event => setSelectedNodeId(event.target.value)}
             aria-label="快速选择实例"
-            className="h-8 max-w-[170px] rounded-md border border-border bg-card px-2 text-xs text-muted-foreground outline-none"
+            className="h-8 max-w-[170px] rounded-md border border-border bg-card px-2 text-xs text-muted-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <option value="">快速选择实例</option>
             {instanceOptions.map(node => (
@@ -717,7 +717,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
           <div className="flex flex-wrap items-end gap-2 border-t border-border px-3 py-2" data-testid="path-controls">
             <label className="min-w-[150px] flex-1">
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">起点实例</span>
-              <select value={pathSource} onChange={event => setPathSource(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none">
+              <select value={pathSource} onChange={event => setPathSource(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <option value="">选择起点</option>
                 {instanceOptions.map(node => <option key={node.entityId} value={node.entityId}>{node.objectTypeLabel} · {node.label}</option>)}
               </select>
@@ -725,14 +725,14 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
             <ArrowRight size={14} className="mb-2 text-[var(--color-text-tertiary)]" />
             <label className="min-w-[150px] flex-1">
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">终点实例</span>
-              <select value={pathTarget} onChange={event => setPathTarget(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none">
+              <select value={pathTarget} onChange={event => setPathTarget(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <option value="">选择终点</option>
                 {instanceOptions.map(node => <option key={node.entityId} value={node.entityId}>{node.objectTypeLabel} · {node.label}</option>)}
               </select>
             </label>
             <label>
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">方向</span>
-              <select value={direction} onChange={event => setDirection(event.target.value as Direction)} className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none">
+              <select value={direction} onChange={event => setDirection(event.target.value as Direction)} className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <option value="both">双向关系</option>
                 <option value="outgoing">仅正向</option>
                 <option value="incoming">仅反向</option>
@@ -767,7 +767,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
             </label>
             <label>
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">传播深度</span>
-              <select value={impactDepth} onChange={event => setImpactDepth(Number(event.target.value))} className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none">
+              <select value={impactDepth} onChange={event => setImpactDepth(Number(event.target.value))} className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 {[1, 2, 3, 4].map(value => <option key={value} value={value}>{value} 跳</option>)}
               </select>
             </label>

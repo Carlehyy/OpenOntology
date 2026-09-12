@@ -924,7 +924,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
     <div className={`dmc-page ${editable ? '' : 'dmc-page--readonly'}`} data-testid="mapping-workspace" data-workspace-mode={data.workspaceMode || 'release'}>
       <header className="dmc-header">
         <div className="dmc-brand">{!hideChromeNavigation && <button onClick={returnToPreviousPage} aria-label="返回上一页" title="返回上一页"><ArrowLeft size={16} /></button>}<span><Link2 size={18} /></span><div><b>数据映射</b><small>{editable ? '草稿可编辑 · 对象实体、实体关系与数据资产字段映射' : `${data.workspaceMode === 'trial' ? '试跑快照' : data.workspaceMode === 'archived' ? '归档快照' : '发布快照'} · 只读查看`}</small></div></div>
-        <label className="dmc-global-search"><Search size={14} /><input placeholder="搜索画布节点、数据集或本体属性…" onChange={event => { setLeftSearch(event.target.value); setRightSearch(event.target.value) }} /></label>
+        <label className="dmc-global-search focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Search size={14} /><input placeholder="搜索画布节点、数据集或本体属性…" onChange={event => { setLeftSearch(event.target.value); setRightSearch(event.target.value) }} /></label>
         <div className="dmc-header-actions">{!hideChromeNavigation && <button className="dmc-model-switch" onClick={leaveWorkspace} title="返回模型结构"><Boxes size={15} /><span>模型结构</span></button>}<button onClick={() => setTutorialStep(0)} title="新手教程"><BookOpen size={15} /></button><button onClick={autoLayout} title="自动布局"><LayoutGrid size={15} /></button>{editable && <button onClick={clearCanvas} title="清空画布"><Trash2 size={15} /></button>}{editable && <button className="dmc-suggest-open" data-testid="mapping-suggest-open" disabled={!canvasDatasetIds.length || suggestionLoading} onClick={openSuggestions} title={canvasDatasetIds.length ? '基于历史映射知识、名称规则与大模型概念化生成字段映射建议' : '先把左侧数据集加入画布，再生成智能建议'}>{suggestionLoading ? <Loader2 className="animate-spin" size={15} /> : <Sparkles size={15} />}<span>智能建议</span></button>}<span className="dmc-divider" />{editable ? <button className="dmc-save" disabled={!dirty || saving} onClick={saveAll}>{saving ? <Loader2 className="animate-spin" size={15} /> : <Save size={15} />}{saving ? '正在保存…' : dirty ? '保存配置' : '已保存'}</button> : <span className="dmc-readonly-badge"><Eye size={14} />只读快照</span>}</div>
       </header>
 
@@ -934,7 +934,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       <div className="dmc-workbench">
         <aside className="dmc-sidebar dmc-sidebar--left">
           <div className="dmc-sidebar-title"><Database size={15} /><div><b>数据资产湖</b><small>已启用数据集</small></div><em>{data.datasets.length}</em></div>
-          <label className="dmc-side-search"><Search size={13} /><input value={leftSearch} onChange={event => setLeftSearch(event.target.value)} placeholder="搜索数据集或字段" /></label>
+          <label className="dmc-side-search focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Search size={13} /><input value={leftSearch} onChange={event => setLeftSearch(event.target.value)} placeholder="搜索数据集或字段" /></label>
           <div className="dmc-side-list" data-testid="mapping-assets-list">
             {filteredDatasets.map(dataset => {
               const expanded = expandedAssets.has(dataset.id)
@@ -1043,7 +1043,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
         <aside className="dmc-sidebar dmc-sidebar--right">
           <div className="dmc-sidebar-title"><Boxes size={15} /><div><b>本体清单</b><small>对象实体与实体关系</small></div><em>{data.objectTypes.length + data.linkTypes.length}</em></div>
           <div className="dmc-kind-tabs"><button data-active={rightKind === 'object'} onClick={() => setRightKind('object')}>对象实体 <span>{data.objectTypes.length}</span></button><button data-active={rightKind === 'relation'} onClick={() => setRightKind('relation')}>实体关系 <span>{data.linkTypes.length}</span></button></div>
-          <label className="dmc-side-search"><Search size={13} /><input value={rightSearch} onChange={event => setRightSearch(event.target.value)} placeholder="搜索本体元素或属性" /></label>
+          <label className="dmc-side-search focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Search size={13} /><input value={rightSearch} onChange={event => setRightSearch(event.target.value)} placeholder="搜索本体元素或属性" /></label>
           <div className="dmc-side-list" data-testid="mapping-ontology-list">
             {filteredTargets.map(target => {
               const nodeId = `${rightKind}:${target.id}`

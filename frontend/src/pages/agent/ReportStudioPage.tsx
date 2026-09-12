@@ -214,7 +214,7 @@ function ReportLibrary({ ontologies, initialOntologyId }: { ontologies: Ontology
             <div className="mt-5 text-[10px] font-semibold uppercase tracking-[0.2em] text-brand-ink">Report assets</div>
             <h1 className="mt-2 font-serif text-4xl tracking-[-0.03em] text-foreground">分析报告工作台</h1>
             <p className="mt-2 max-w-xl text-xs leading-6 text-muted-foreground">管理 AI 草稿、真实数据试运行、发布模板和历史报告输出。</p></div>
-          <div className="flex items-center gap-3"><select value={oid} onChange={event => setOid(event.target.value)} className={`${inputClass} min-w-52`}>
+          <div className="flex items-center gap-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><select value={oid} onChange={event => setOid(event.target.value)} className={`${inputClass} min-w-52`}>
             {ontologies.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
             <button onClick={() => navigate(`/agent/reports/new?ontologyId=${encodeURIComponent(oid)}`)} disabled={!oid} className={primaryButton}>AI 生成新模板</button></div>
         </header>
@@ -404,8 +404,8 @@ function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate
           {error && <div role="alert" className="mt-4 rounded-xl bg-viz-rose-soft px-3 py-2.5 text-xs leading-5 text-viz-rose">{error}</div>}
           {dirty && !readonly && <div className="mt-4 rounded-xl bg-[var(--color-info-bg)] px-3 py-2.5 text-xs leading-5 text-[var(--color-info)]">存在未保存修改。保存后需重新执行真实数据试运行，才可发布。</div>}
           {!readonly ? <div className="mt-5 space-y-4">
-            <label className="block"><span className="mb-1.5 block text-[11px] font-semibold text-foreground">报告名称</span><input value={template.name} onChange={event => { setTemplate(prev => ({ ...prev, name: event.target.value })); setDirty(true) }} className={inputClass} /></label>
-            <label className="block"><span className="mb-1.5 block text-[11px] font-semibold text-foreground">用途与说明</span><textarea value={template.description} onChange={event => { setTemplate(prev => ({ ...prev, description: event.target.value })); setDirty(true) }} rows={3} className={`${inputClass} resize-none`} /></label>
+            <label className="block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><span className="mb-1.5 block text-[11px] font-semibold text-foreground">报告名称</span><input value={template.name} onChange={event => { setTemplate(prev => ({ ...prev, name: event.target.value })); setDirty(true) }} className={inputClass} /></label>
+            <label className="block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><span className="mb-1.5 block text-[11px] font-semibold text-foreground">用途与说明</span><textarea value={template.description} onChange={event => { setTemplate(prev => ({ ...prev, description: event.target.value })); setDirty(true) }} rows={3} className={`${inputClass} resize-none`} /></label>
           </div> : <div className="mt-5 rounded-2xl bg-[var(--color-success-bg)] p-4 text-xs leading-6 text-[var(--color-success)]">已发布模板被冻结为正式版本。正式运行会复用通过真实数据验证的查询计划，保证自动输出口径稳定。</div>}
 
           <div className="mt-6 flex items-center justify-between"><div><h2 className="text-xs font-semibold text-foreground">报告章节</h2><p className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">编辑业务问题、图表与确定性查询计划</p></div>{!readonly && <button onClick={addSection} className={secondaryButton}>添加章节</button>}</div>

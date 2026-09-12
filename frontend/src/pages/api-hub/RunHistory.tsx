@@ -258,7 +258,7 @@ export default function RunHistory() {
                 <input
                   value={draftKeyword}
                   onChange={event => setDraftKeyword(event.target.value)}
-                  className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)]"
+                  className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   placeholder="搜索接口名称"
                   aria-label="搜索接口名称"
                 />
@@ -647,7 +647,7 @@ function DateField({
         type="date"
         value={value}
         onChange={event => onChange(event.target.value)}
-        className="w-[118px] bg-transparent text-[11px] text-muted-foreground outline-none"
+        className="w-[118px] bg-transparent text-[11px] text-muted-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
     </label>
   )

@@ -212,7 +212,7 @@ export default function ModelDetailDrawer({ model, isOpen, onClose }: ModelDetai
                     aria-label="开始时间"
                     value={draftFilters.start}
                     onChange={event => setDraftFilters(current => ({ ...current, start: event.target.value }))}
-                    className="w-full min-w-0 bg-transparent px-2 text-[11px] text-muted-foreground outline-none"
+                    className="w-full min-w-0 bg-transparent px-2 text-[11px] text-muted-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   />
                 </label>
                 <span className="flex h-full shrink-0 items-center border-x border-border px-2 text-[11px] text-[var(--color-text-tertiary)]">至</span>
@@ -223,7 +223,7 @@ export default function ModelDetailDrawer({ model, isOpen, onClose }: ModelDetai
                     aria-label="结束时间"
                     value={draftFilters.end}
                     onChange={event => setDraftFilters(current => ({ ...current, end: event.target.value }))}
-                    className="w-full min-w-0 bg-transparent px-2 text-[11px] text-muted-foreground outline-none"
+                    className="w-full min-w-0 bg-transparent px-2 text-[11px] text-muted-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   />
                 </label>
               </div>
