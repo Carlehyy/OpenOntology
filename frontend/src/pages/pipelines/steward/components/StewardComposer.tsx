@@ -139,7 +139,7 @@ export default function StewardComposer({
       <div
         ref={targetPickerRef}
         data-testid="steward-composer-shell"
-        className="relative overflow-visible rounded-xl border border-brand bg-card ring-1 ring-ring transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring"
+        className="relative overflow-visible rounded-xl border border-border bg-card transition-colors focus-within:ring-2 focus-within:ring-ring"
       >
         <div className="flex min-h-10 items-center gap-2 border-b border-border px-3.5 py-2">
           <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-muted-foreground">

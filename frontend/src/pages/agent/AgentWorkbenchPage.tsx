@@ -949,7 +949,7 @@ export default function AgentWorkbenchPage() {
           {/* pt/pb 取 2.5 使输入栏高度精确为 67px：顶部分割线距视口底部 72px
               （历史取值沿用，侧边栏底栏移除后保持输入栏高度不变）。 */}
           <div data-testid="agent-input-bar" className="border-t border-[var(--color-border)] bg-card px-4 pb-2.5 pt-2.5">
-            <div className="relative flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5 transition-all focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+            <div className="relative flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5 transition-all focus-within:ring-2 focus-within:ring-ring">
               <input
                 placeholder={oid ? (busy ? '可继续输入，回车进入追问队列…' : '问业务问题，或让它帮你预演一个操作…') : '请先选择一个本体'}
                 value={input}

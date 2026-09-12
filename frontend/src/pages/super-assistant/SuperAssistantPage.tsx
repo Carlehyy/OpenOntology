@@ -579,7 +579,7 @@ export default function SuperAssistantPage() {
       />
       <div
         data-testid="super-assistant-composer"
-        className={`relative overflow-visible rounded-xl border border-brand bg-white ring-1 ring-brand-mist transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring ${prominent
+        className={`relative overflow-visible rounded-xl border border-border bg-white transition-colors focus-within:ring-2 focus-within:ring-ring ${prominent
           ? 'shadow-[0_18px_50px_rgba(5,150,105,0.12)]'
           : 'shadow-[0_8px_28px_rgba(15,23,42,0.08)]'}`}
       >

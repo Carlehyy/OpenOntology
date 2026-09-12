@@ -670,7 +670,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
             ))}
           </div>
 
-          <form onSubmit={searchGraph} className="flex min-w-[220px] flex-1 items-center rounded-md border border-border bg-card focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+          <form onSubmit={searchGraph} className="flex min-w-[220px] flex-1 items-center rounded-md border border-border bg-card focus-within:ring-2 focus-within:ring-ring">
             <Search size={13} className="ml-2.5 shrink-0 text-[var(--color-text-tertiary)]" />
             <input
               value={queryInput}

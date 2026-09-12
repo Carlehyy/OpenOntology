@@ -520,7 +520,7 @@ export default function FormalInstancesView({
                 applySearch()
               }}
             >
-              <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+              <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 focus-within:ring-2 focus-within:ring-ring">
                 <Search size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
                 <input
                   value={draftKeyword}

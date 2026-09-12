@@ -202,7 +202,7 @@ export default function ModelDetailDrawer({ model, isOpen, onClose }: ModelDetai
               <div
                 role="group"
                 aria-label="调用时间范围"
-                className="flex h-9 min-w-0 flex-1 items-center rounded-lg border border-border bg-muted transition focus-within:border-ring focus-within:bg-card focus-within:ring-2 focus-within:ring-ring"
+                className="flex h-9 min-w-0 flex-1 items-center rounded-lg border border-border bg-muted transition focus-within:bg-card focus-within:ring-2 focus-within:ring-ring"
               >
                 <CalendarDays size={13} className="ml-3 shrink-0 text-[var(--color-text-tertiary)]" />
                 <label className="min-w-0 flex-1">

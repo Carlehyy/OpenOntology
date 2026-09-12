@@ -495,7 +495,7 @@ export default function SceneModelingPage() {
           {/* 输入栏对齐本体助手页（MYW-64 反馈）：外层 pt/pb 2.5 + 内层单行胶囊，
               发送/停止为胶囊内右侧的图标方钮。 */}
           <div className="border-t border-[var(--color-border)] bg-card px-4 pb-2.5 pt-2.5">
-            <div className="relative flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5 transition-all focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+            <div className="relative flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5 transition-all focus-within:ring-2 focus-within:ring-ring">
               <input
                 value={input}
                 onChange={event => setInput(event.target.value)}

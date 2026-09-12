@@ -253,7 +253,7 @@ export default function RunHistory() {
             }}
           >
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-              <label className="flex h-9 min-w-[240px] flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring lg:max-w-sm">
+              <label className="flex h-9 min-w-[240px] flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 transition focus-within:ring-2 focus-within:ring-ring lg:max-w-sm">
                 <Search size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
                 <input
                   value={draftKeyword}
@@ -639,7 +639,7 @@ function DateField({
   onChange: (value: string) => void
 }) {
   return (
-    <label className="relative flex h-9 items-center rounded-lg border border-border bg-card pl-3 pr-2 transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+    <label className="relative flex h-9 items-center rounded-lg border border-border bg-card pl-3 pr-2 transition focus-within:ring-2 focus-within:ring-ring">
       <CalendarDays size={13} className="mr-2 shrink-0 text-[var(--color-text-tertiary)]" />
       <span className="sr-only">{label}</span>
       <input

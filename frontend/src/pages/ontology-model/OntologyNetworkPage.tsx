@@ -670,7 +670,7 @@ export default function OntologyNetworkPage() {
                 <input type="checkbox" checked={bridgeEnabled} onChange={event => setBridgeEnabled(event.target.checked)}
                   className="h-4 w-4 shrink-0 accent-viz-violet" aria-label="启用同名类型桥接" />
               </label>
-              <form onSubmit={submitSearch} className="flex items-center rounded-md border border-[var(--color-border)] bg-card focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+              <form onSubmit={submitSearch} className="flex items-center rounded-md border border-[var(--color-border)] bg-card focus-within:ring-2 focus-within:ring-ring">
                 <Search size={13} className="ml-2.5 shrink-0 text-[var(--color-text-tertiary)]" />
                 <input value={queryInput} onChange={event => setQueryInput(event.target.value)}
                   placeholder="搜索实例、主键或字段值" aria-label="搜索实例"

@@ -155,7 +155,7 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
             <section className="rounded-xl border border-[var(--color-border)] bg-card p-4">
               <label className="text-xs font-semibold text-foreground" htmlFor="api-hub-proxy-slug">HTTP 公开路径</label>
               <p className="mt-1 text-[11px] leading-5 text-muted-foreground">保存后调用地址保持稳定；只能使用小写字母、数字、短横线和下划线。</p>
-              <div className="mt-3 flex overflow-hidden rounded-lg border border-border bg-card focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+              <div className="mt-3 flex overflow-hidden rounded-lg border border-border bg-card focus-within:ring-2 focus-within:ring-ring">
                 <span className="flex min-w-0 items-center truncate border-r border-border px-3 font-mono text-[11px] text-muted-foreground">{window.location.origin}{proxyPath}/</span>
                 <input id="api-hub-proxy-slug" value={configuration.slug} onChange={event => setConfiguration(value => value && ({ ...value, slug: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') }))} className="h-10 min-w-[180px] flex-1 bg-card px-3 font-mono text-xs outline-none" placeholder="interface-path" />
               </div>
