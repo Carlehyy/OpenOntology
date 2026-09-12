@@ -1167,7 +1167,7 @@ def test_attachment_upload_list_inject_delete(client, auth_headers, session, db,
                                               tmp_path, monkeypatch):
     """上传→列表→注入对话上下文→删除 全链路。"""
     from app.config import settings
-    from app.exploration.orchestrator import _attachments_block
+    from app.exploration.context_builder import _attachments_block
     monkeypatch.setattr(settings, "uploads_dir", str(tmp_path))
     sid = session["id"]
 
@@ -1746,11 +1746,11 @@ def test_small_context_budgets_every_provider_call_and_final_summary(
 
 
 def test_context_smaller_than_supported_minimum_is_rejected_explicitly():
-    from app.exploration import orchestrator as OR
+    from app.exploration import context_builder as CB
 
     kwargs = {"max_context_tokens": 4_096, "max_output_tokens": 1_024}
-    with pytest.raises(OR.ExplorationContextBudgetError, match="至少需要 8192"):
-        OR._configure_context_limits(kwargs)
+    with pytest.raises(CB.ExplorationContextBudgetError, match="至少需要 8192"):
+        CB._configure_context_limits(kwargs)
 
 
 # ---------------------------------------------------------------- 对话内出图与账本工具
