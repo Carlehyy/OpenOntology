@@ -131,3 +131,64 @@ def test_connection_async_sync_fails_closed_without_dispatchable_task(
         assert "未投递" in response.json()["detail"]
     finally:
         app.dependency_overrides.pop(connections_router.get_db, None)
+
+
+def test_connection_delete_blocked_by_dependent_datasets_returns_409(
+    client, db, auth_headers,
+):
+    # 有同步数据集引用（source_connection_id 外键无级联）时删除必须 409 +
+    # 依赖明细，不能 500（商业化审查 D-006）；解除依赖后删除恢复 204
+    from app.data_channel.datasets.models import Dataset
+
+    _route_db_to(db)
+    try:
+        body = _create(client, auth_headers)
+        dependent = Dataset(
+            id="ds-delete-blocked", name="同步数据集-验收", kind="structured",
+            source_connection_id=body["id"], source_resource="users",
+        )
+        db.add(dependent)
+        db.commit()
+
+        blocked = client.delete(
+            f"/api/v2/connections/{body['id']}", headers=auth_headers)
+        assert blocked.status_code == 409
+        detail = blocked.json()["detail"]
+        assert detail["total"] == 1
+        assert detail["datasets"][0]["name"] == "同步数据集-验收"
+        assert "同步数据集" in detail["message"]
+        # 连接未被误删
+        assert client.get(
+            f"/api/v2/connections/{body['id']}", headers=auth_headers,
+        ).status_code == 200
+
+        db.delete(dependent)
+        db.commit()
+        ok = client.delete(
+            f"/api/v2/connections/{body['id']}", headers=auth_headers)
+        assert ok.status_code == 204
+    finally:
+        app.dependency_overrides.pop(connections_router.get_db, None)
+
+
+def test_connection_create_rejects_duplicate_name_and_blank_name(
+    client, db, auth_headers,
+):
+    # 同名连接会让依赖连接名的数据集/任务无法区分（商业化审查 D-005）
+    _route_db_to(db)
+    try:
+        _create(client, auth_headers, name="唯一连接")
+        duplicate = client.post(
+            "/api/v2/connections", headers=auth_headers,
+            json={"name": "唯一连接", "kind": "postgres", "config": CONFIG},
+        )
+        assert duplicate.status_code == 409
+        assert "同名连接" in duplicate.json()["detail"]
+
+        blank = client.post(
+            "/api/v2/connections", headers=auth_headers,
+            json={"name": "   ", "kind": "postgres", "config": CONFIG},
+        )
+        assert blank.status_code == 400
+    finally:
+        app.dependency_overrides.pop(connections_router.get_db, None)

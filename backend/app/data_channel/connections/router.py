@@ -56,11 +56,17 @@ class ConnectionResponse(BaseModel):
 @router.post("", response_model=ConnectionResponse, status_code=201)
 def create_connection(body: ConnectionCreate, db: Session = Depends(get_db)):
     """创建连接。config 加密后存储。"""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "连接名称不能为空")
+    # 重名连接会让依赖连接名的数据集/任务无法区分（商业化审查 D-005）
+    if db.query(Connection).filter(Connection.name == name).first():
+        raise HTTPException(409, f"已存在同名连接「{name}」，请更换连接名称")
     from app.services import encryption_service
     encrypted_config = {"_encrypted": encryption_service.encrypt(json.dumps(body.config))}
 
     conn = Connection(
-        name=body.name,
+        name=name,
         kind=body.kind,
         config=encrypted_config,
         status="inactive",
@@ -131,6 +137,36 @@ def delete_connection(connection_id: str, db: Session = Depends(get_db)):
     conn = db.query(Connection).filter(Connection.id == connection_id).first()
     if not conn:
         raise HTTPException(status_code=404, detail="Connection not found")
+    # 同步产出的数据集以 source_connection_id 引用连接（外键无级联），直接删除
+    # 会触发数据库外键错误（生产 500，商业化审查 D-006）；对齐 delete_dataset /
+    # delete_pipeline 的先例：被依赖时明确 409 并列出依赖明细。
+    from sqlalchemy import func
+
+    from app.data_channel.datasets.models import Dataset
+    dependent_count = (
+        db.query(func.count(Dataset.id))
+        .filter(Dataset.source_connection_id == connection_id)
+        .scalar() or 0
+    )
+    if dependent_count:
+        preview = [
+            {"id": ds.id, "name": ds.name, "kind": ds.kind}
+            for ds in (
+                db.query(Dataset)
+                .filter(Dataset.source_connection_id == connection_id)
+                .order_by(Dataset.created_at.desc())
+                .limit(5)
+                .all()
+            )
+        ]
+        raise HTTPException(409, detail={
+            "message": (
+                f"连接被 {dependent_count} 个同步数据集引用，删除前请先在"
+                "「数据资产」中删除这些数据集"
+            ),
+            "datasets": preview,
+            "total": dependent_count,
+        })
     db.delete(conn)
     db.commit()
     # 数据源元数据/样例缓存随连接删除失效（best-effort，旧键靠 TTL 兜底）
