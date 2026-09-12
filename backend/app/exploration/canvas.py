@@ -258,6 +258,33 @@ _NESTED_MODELS: dict[str, dict[str, type[BaseModel]]] = {
     "process": {"steps": ProcessStep, "branches": ProcessBranch, "metrics": MetricSpec},
 }
 
+# 结构化子项字段拒收时回填给 LLM 的正确形状最小示例（自愈提示）：
+# 只改错误文案，让 agent 下一轮能按示例自我纠正。
+_NESTED_FIELD_EXAMPLES: dict[str, str] = {
+    "attributes": 'attributes: [{"name":"store_code","type_hint":"文本","required":true}]',
+    "relations": 'relations: [{"target":"目标对象名","cardinality":"many-to-one"}]',
+    "inputs": 'inputs: [{"name":"comment","type_hint":"文本","required":false}]',
+    "branches": 'branches: [{"from_step":1,"to_step":2,"condition":"条件描述"}]',
+    "steps": 'steps: [{"seq":1,"name":"步骤名"}]',
+    "metrics": 'metrics: [{"name":"metric_name","formula":"定量计算口径","source_objects":["对象名"]}]',
+    "enum": 'enum: ["值A","值B"]',
+}
+
+
+def _list_shape_hint(error: ValidationError) -> str:
+    """校验错误中含「数组字段收到非数组值」时，附带正确形状最小示例（自愈提示）。"""
+    fields: set[str] = set()
+    for item in error.errors():
+        if item.get("type") != "list_type":
+            continue
+        fields.update(
+            str(part) for part in item.get("loc") or ()
+            if str(part) in _NESTED_FIELD_EXAMPLES)
+    hints = [_NESTED_FIELD_EXAMPLES[field] for field in sorted(fields)]
+    if not hints:
+        return ""
+    return "；正确形状示例: " + "；".join(hints) + "（不要用 {\"item\": [...]} 包裹数组）"
+
 
 def _canonical_patch(model: type[BaseModel], raw: dict) -> dict:
     """把 camel/snake 双写的稀疏补丁统一成模型内部字段名。
@@ -397,7 +424,8 @@ def _merge_nested_list(existing: list[dict], patches: list[Any],
                 items[index] = child
         except ValidationError as error:
             identity = raw.get("id") or raw.get("name") or raw.get("target") or "?"
-            errors.append(f"{field} 子项「{identity}」不合法: {_validation_message(error)}")
+            errors.append(f"{field} 子项「{identity}」不合法: "
+                          f"{_validation_message(error)}{_list_shape_hint(error)}")
 
     return _ensure_child_ids(items, model), errors
 
@@ -516,7 +544,11 @@ def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict,
             for field, value in patch.items():
                 if field in _NESTED_MODELS.get(kind, {}):
                     if not isinstance(value, list):
-                        nested_errors.append(f"{field}: 必须是数组")
+                        example = _NESTED_FIELD_EXAMPLES.get(field, f"{field}: [...]")
+                        nested_errors.append(
+                            f"{field}: 必须是数组"
+                            f"（正确形状示例: {example}；数组元素是对象，不要用 "
+                            '{"item": [...]} 包裹整个数组）')
                         continue
                     merged, child_errors = _merge_nested_list(
                         current.get(field) or [], value,
@@ -537,7 +569,7 @@ def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict,
             except ValidationError as error:
                 errors.append(
                     f"元素「{current.get('name', raw_name or raw_id or '?')}」合并后不合法: "
-                    f"{_validation_message(error)}")
+                    f"{_validation_message(error)}{_list_shape_hint(error)}")
                 continue
             duplicate = next(
                 (
@@ -564,7 +596,8 @@ def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict,
             try:
                 data = _new_element(model, kind, raw)
             except ValidationError as error:
-                errors.append(f"元素「{raw_name or '?'}」不合法: {_validation_message(error)}")
+                errors.append(f"元素「{raw_name or '?'}」不合法: "
+                              f"{_validation_message(error)}{_list_shape_hint(error)}")
                 continue
             items.append(data)
         placeholder_errors = _reference_placeholder_errors(kind, data)
