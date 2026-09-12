@@ -1533,6 +1533,90 @@ def test_snapshot_gate_rejects_action_that_cannot_execute():
                for item in errors)
 
 
+def _dormant_action_snapshot(**action_overrides) -> dict:
+    action = {
+        "id": "action-no-effect", "name": "no_effect",
+        "displayName": "无效果动作", "objectTypeId": "type-order",
+        "parameters": [], "rules": [],
+    }
+    action.update(action_overrides)
+    return {
+        "objectTypes": [{
+            "id": "type-order", "name": "Order", "displayName": "订单",
+            "primaryKey": "order-id",
+            "properties": [{
+                "id": "order-id", "name": "id", "type": "string",
+                "required": True,
+            }],
+        }],
+        "linkTypes": [],
+        "actions": [action],
+        "functions": [], "instances": [], "linkInstances": [],
+        "mappings": [], "linkMappings": [], "sentinels": [],
+    }
+
+
+def test_snapshot_gate_layers_dormant_action_rules_for_draft_save():
+    """分层口径：草稿保存期把「无可执行副作用规则」降级为 warning；默认严格不变。"""
+    snapshot = _dormant_action_snapshot()
+
+    strict = validate_snapshot(snapshot)
+    assert any("没有启用的可执行副作用规则" in item["message"]
+               for item in strict)
+
+    warnings: list[dict] = []
+    errors = validate_snapshot(
+        snapshot,
+        require_object_type=False,
+        require_executable_action_rules=False,
+        warnings_out=warnings,
+    )
+    assert errors == []
+    assert [item["code"] for item in warnings] == ["invalid_action_definition"]
+    assert warnings[0]["kind"] == "action"
+    assert warnings[0]["id"] == "action-no-effect"
+    assert "没有启用的可执行副作用规则" in warnings[0]["message"]
+
+    # 宽松模式但未提供 warnings_out：降级信息不静默丢失，回退到 errors
+    fallback = validate_snapshot(snapshot, require_executable_action_rules=False)
+    assert any("没有启用的可执行副作用规则" in item["message"]
+               for item in fallback)
+
+    # 宽松只降级这一条：其他动作定义错误（如校验表达式引用不存在属性）仍拦截
+    broken = _dormant_action_snapshot(rules=[{
+        "id": "rule-bad", "type": "validation", "enabled": True, "order": 0,
+        "config": {"type": "validation",
+                   "condition": "object.missing_amount > 0"},
+    }])
+    warnings = []
+    errors = validate_snapshot(
+        broken,
+        require_object_type=False,
+        require_executable_action_rules=False,
+        warnings_out=warnings,
+    )
+    assert any("校验表达式无效" in item["message"] for item in errors)
+    assert any("没有启用的可执行副作用规则" in item["message"]
+               for item in warnings)
+
+
+def test_snapshot_gate_exempts_approval_only_action_in_both_modes():
+    """requiresApproval 对齐运行时 approval_proposal_only：挂起审批不记伪成功，
+    即使没有启用的可执行副作用规则也语义合法，严格/宽松两种模式都豁免。"""
+    snapshot = _dormant_action_snapshot(requiresApproval=True)
+
+    assert validate_snapshot(snapshot) == []
+    warnings: list[dict] = []
+    errors = validate_snapshot(
+        snapshot,
+        require_object_type=False,
+        require_executable_action_rules=False,
+        warnings_out=warnings,
+    )
+    assert errors == []
+    assert warnings == []
+
+
 def test_snapshot_gate_compiles_expression_functions_without_data_rows():
     snapshot = {
         "objectTypes": [{

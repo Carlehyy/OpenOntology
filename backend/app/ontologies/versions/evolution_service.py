@@ -342,7 +342,20 @@ def validate_expression_function_contract(
     return errors
 
 
-def validate_snapshot(snapshot: dict, *, require_object_type: bool = True) -> list[dict]:
+def validate_snapshot(
+    snapshot: dict,
+    *,
+    require_object_type: bool = True,
+    require_executable_action_rules: bool = True,
+    warnings_out: list[dict] | None = None,
+) -> list[dict]:
+    """快照结构校验；默认严格（试跑/发布口径）。
+
+    ``require_executable_action_rules=False`` 仅用于草稿保存期分层：
+    「动作无启用的可执行副作用规则」降级为 warning，写入 ``warnings_out``
+    （未提供 ``warnings_out`` 时回退到 errors，不允许静默丢失）；
+    ``requiresApproval`` 动作本就合法（运行时挂起审批），两种模式都豁免。
+    """
     source = snapshot if isinstance(snapshot, dict) else {}
     errors = validate_builtin_sentinel_contract(
         source.get("sentinels", []),
@@ -365,21 +378,32 @@ def validate_snapshot(snapshot: dict, *, require_object_type: bool = True) -> li
         validate_action_definition,
     )
     for action in models["actions"]:
-        for message in validate_action_definition(
-                action, models["objectTypes"], models["linkTypes"],
-                models["functions"]):
-            errors.append({
+        action_warnings: list[str] = []
+        messages = validate_action_definition(
+            action, models["objectTypes"], models["linkTypes"],
+            models["functions"],
+            require_executable_action_rules=require_executable_action_rules,
+            warnings_out=action_warnings)
+
+        def action_entry(message: str, _action=action) -> dict:
+            return {
                 "code": "invalid_action_definition",
                 "kind": "action",
-                "id": str(getattr(action, "id", "") or ""),
+                "id": str(getattr(_action, "id", "") or ""),
                 "name": str(
-                    getattr(action, "display_name", None)
-                    or getattr(action, "name", "")
-                    or getattr(action, "id", "")
+                    getattr(_action, "display_name", None)
+                    or getattr(_action, "name", "")
+                    or getattr(_action, "id", "")
                 ),
                 "field": "rules",
                 "message": message,
-            })
+            }
+        for message in messages:
+            errors.append(action_entry(message))
+        # 宽松模式未提供 warnings_out 时回退到 errors，降级信息不静默丢失。
+        sink = warnings_out if warnings_out is not None else errors
+        for message in action_warnings:
+            sink.append(action_entry(message))
     if require_object_type and not models["objectTypes"]:
         errors.append({
             "code": "object_type_required", "kind": "ontology",

@@ -528,3 +528,136 @@ def test_workspace_mappings_save_writes_exactly_one_audit_log(
         "added": 1, "modified": 0, "deleted": 0,
         "addedNames": ["mapping-order"], "modifiedNames": [], "deletedNames": [],
     }
+
+
+# ---------------------------------------------------------------- 动作规则保存期分层
+
+
+_DORMANT_ACTION = {
+    "id": "action-mark-paid", "name": "mark_paid", "displayName": "标记支付",
+    "objectTypeId": "ot-order", "parameters": [],
+    "rules": [{
+        "id": "rule-pending", "type": "validation", "name": "待形式化: 金额约束",
+        "enabled": False, "order": 0,
+        "config": {"type": "validation", "condition": "",
+                   "errorMessage": "金额必须大于 0"},
+    }],
+    "requiresApproval": False,
+}
+
+
+def _save_workspace_with_actions(
+        client, headers, ontology_id: str, version_id: str,
+        revision: str, actions: list):
+    body = _workspace_body(revision)
+    body["actions"] = actions
+    return client.put(
+        f"/api/v2/ontologies/{ontology_id}/versions/{version_id}/workspace",
+        headers=headers,
+        json=body,
+    )
+
+
+def test_workspace_save_keeps_dormant_action_as_warning(
+        client, auth_headers, ontology, db):
+    """休眠动作（副作用规则恒 disabled，落地即休眠待人工形式化）可随草稿保存，
+    「无可执行副作用规则」降级为 warnings 随响应透出，不再 422 连坐。"""
+    oid = ontology["id"]
+    root = _root(client, auth_headers, oid)
+    draft = _draft(client, auth_headers, oid, root["id"])
+
+    saved = _save_workspace_with_actions(
+        client, auth_headers, oid, draft["id"],
+        f"{draft['revision']}:{draft['snapshot_hash']}",
+        [dict(_DORMANT_ACTION)],
+    )
+    assert saved.status_code == 200, saved.text
+    warnings = saved.json()["data"]["warnings"]
+    assert [item["code"] for item in warnings] == ["invalid_action_definition"]
+    assert warnings[0]["kind"] == "action"
+    assert warnings[0]["id"] == "action-mark-paid"
+    assert "没有启用的可执行副作用规则" in warnings[0]["message"]
+
+    # 草稿内容真实落库（降级不是丢弃保存）
+    row = db.query(OntologyVersion).filter_by(id=draft["id"]).one()
+    actions = row.snapshot_formal["actions"]
+    assert [item["name"] for item in actions] == ["mark_paid"]
+    assert actions[0]["rules"][0]["enabled"] is False
+
+
+def test_workspace_save_approval_only_action_has_no_warning(
+        client, auth_headers, ontology, db):
+    """requiresApproval 对齐运行时审批挂起语义：两种模式都豁免，
+    探索转出的审批动作不再让草稿保存 422。"""
+    oid = ontology["id"]
+    root = _root(client, auth_headers, oid)
+    draft = _draft(client, auth_headers, oid, root["id"])
+
+    saved = _save_workspace_with_actions(
+        client, auth_headers, oid, draft["id"],
+        f"{draft['revision']}:{draft['snapshot_hash']}",
+        [{**_DORMANT_ACTION, "requiresApproval": True}],
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["data"]["warnings"] == []
+
+
+def test_workspace_save_still_rejects_other_action_definition_errors(
+        client, auth_headers, ontology, db):
+    """回归：保存期分层只降级「无可执行副作用规则」一条，其他校验错误仍 422。"""
+    oid = ontology["id"]
+    root = _root(client, auth_headers, oid)
+    draft = _draft(client, auth_headers, oid, root["id"])
+
+    broken = dict(_DORMANT_ACTION)
+    broken["rules"] = [{
+        "id": "rule-bad", "type": "validation", "name": "坏校验",
+        "enabled": True, "order": 0,
+        "config": {"type": "validation",
+                   "condition": "object.missing_amount > 0"},
+    }]
+    saved = _save_workspace_with_actions(
+        client, auth_headers, oid, draft["id"],
+        f"{draft['revision']}:{draft['snapshot_hash']}",
+        [broken],
+    )
+    assert saved.status_code == 422, saved.text
+    detail = saved.json()["detail"]
+    assert detail["code"] == "publish_validation_failed"
+    assert "invalid_action_definition" in {
+        item["code"] for item in detail["errors"]
+    }
+    assert any("校验表达式无效" in item["message"]
+               for item in detail["errors"])
+    # 422 时快照不被替换
+    row = db.query(OntologyVersion).filter_by(id=draft["id"]).one()
+    assert row.snapshot_formal["actions"] == []
+
+
+def test_trial_gate_still_blocks_dormant_action(
+        client, auth_headers, ontology, db):
+    """保存期放行不等于试跑放行：同一休眠动作在试跑门禁仍硬阻断。"""
+    oid = ontology["id"]
+    root = _root(client, auth_headers, oid)
+    draft = _draft(client, auth_headers, oid, root["id"])
+    saved = _save_workspace_with_actions(
+        client, auth_headers, oid, draft["id"],
+        f"{draft['revision']}:{draft['snapshot_hash']}",
+        [dict(_DORMANT_ACTION)],
+    )
+    assert saved.status_code == 200, saved.text
+
+    trial = client.post(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/trial-runs",
+        headers=auth_headers, json={},
+    )
+    assert trial.status_code == 422, trial.text
+    detail = trial.json()["detail"]
+    assert detail["code"] == "publish_validation_failed"
+    assert "invalid_action_definition" in {
+        item["code"] for item in detail["errors"]
+    }
+    assert any("没有启用的可执行副作用规则" in item["message"]
+               for item in detail["errors"])
+    assert db.query(OntologyTrialRun).filter_by(
+        version_id=draft["id"]).count() == 0

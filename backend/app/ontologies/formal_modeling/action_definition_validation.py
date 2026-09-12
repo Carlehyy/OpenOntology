@@ -61,7 +61,13 @@ def action_supports_snapshot_execution(action) -> bool:
 
 
 class _ActionDefinitionValidator:
-    """Ordered, side-effect-free validator for one Action definition."""
+    """Ordered, side-effect-free validator for one Action definition.
+
+    ``require_executable_action_rules=False`` 是草稿保存期的分层口径：
+    「无启用的可执行副作用规则」从 error 降级为 warning（由 ``warnings`` 收集、
+    经外层 ``warnings_out`` 透出）；其余校验（参数/结构/引用）不受影响，
+    试跑与发布保持默认严格。
+    """
 
     def __init__(
         self,
@@ -69,9 +75,21 @@ class _ActionDefinitionValidator:
         object_types: list,
         link_types: list,
         functions: list | None,
+        *,
+        require_executable_action_rules: bool = True,
     ) -> None:
         self.action = action
         self.errors: list[str] = []
+        self.warnings: list[str] = []
+        self.require_executable_action_rules = require_executable_action_rules
+        self.requires_approval = bool(
+            _definition_field(
+                action,
+                "requiresApproval",
+                "requires_approval",
+                default=False,
+            )
+        )
         self.action_name = str(
             _definition_field(
                 action,
@@ -278,9 +296,20 @@ class _ActionDefinitionValidator:
             rule for rule in ordered if rule.get("type") != "validation"
         ]
         if not effect_rules:
-            self.errors.append(
-                f"动作「{self.action_name}」没有启用的可执行副作用规则"
-            )
+            message = f"动作「{self.action_name}」没有启用的可执行副作用规则"
+            if self.requires_approval:
+                # 对齐运行时 approval_proposal_only 路径（action_engine）：
+                # requiresApproval 动作无副作用规则是语义合法 —— 执行挂起
+                # 审批提案，不记伪成功；两种模式都不报错。
+                # 注：该对齐对真实执行成立；dry_run 下 approval_proposal_only
+                # 为 False，运行时仍会拒绝 —— 试跑只做结构校验不执行动作，
+                # 静态豁免因此不会放行出"试跑期才炸"的动作。
+                pass
+            elif self.require_executable_action_rules:
+                self.errors.append(message)
+            else:
+                # 草稿保存期降级：不阻断保存，作为 warnings 透出待人工形式化。
+                self.warnings.append(message)
         first_webhook = next(
             (
                 index
@@ -860,11 +889,16 @@ def validate_action_definition(
     object_types: list,
     link_types: list,
     functions: list | None = None,
+    *,
+    require_executable_action_rules: bool = True,
+    warnings_out: list[str] | None = None,
 ) -> list[str]:
     """Validate one Action without database writes or outbound requests."""
-    return _ActionDefinitionValidator(
-        action,
-        object_types,
-        link_types,
-        functions,
-    ).validate()
+    validator = _ActionDefinitionValidator(
+        action, object_types, link_types, functions,
+        require_executable_action_rules=require_executable_action_rules,
+    )
+    errors = validator.validate()
+    if warnings_out is not None:
+        warnings_out.extend(validator.warnings)
+    return errors
