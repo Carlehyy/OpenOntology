@@ -22,7 +22,8 @@ import copy
 import json
 import re
 import uuid
-from typing import Any, Optional
+import xml.etree.ElementTree as ET
+from typing import Any, Optional, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -236,6 +237,158 @@ KIND_LABELS = {"object": "对象", "actor": "主体", "behavior": "行为",
 def norm_name(name: str) -> str:
     """名称归一化（匹配/去重键）：小写、去空白与连接符。"""
     return re.sub(r"[\s_\-]+", "", (name or "").strip().lower())
+
+
+# ---------------------------------------------------------------------------
+# LLM 序列化形态矫正
+#
+# 生产事故（2026-09 商业化审查 D-010）：MiniMax-M3 等模型对工具参数中的
+# 嵌套数组无法稳定输出 JSON 数组——attributes/relations 等列表字段常被序列化
+# 为 {"item": {...}} 包装对象、{"0":…,"1":…} 索引对象、单对象或 <item> XML 串。
+# 顶层 json.loads 成功、Pydantic 严格 list 校验必拒，而模型对自身序列化层的
+# 问题无法自纠，导致画布写入死循环（15+ 次重试全拒）。
+# 矫正只识别结构形态、不猜测内容语义；无法识别的非空形态保持原样交给
+# Pydantic 报错，让错误信息继续指给模型。
+# ---------------------------------------------------------------------------
+
+_ITEM_WRAP_KEYS = ("item", "items", "element", "elements", "entry", "value")
+
+
+def _coerce_llm_list(value: Any) -> Optional[list]:
+    """尽力把 LLM 常见的非数组序列化形态矫正为 list；无法识别返回 None。"""
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        if not value:
+            return None
+        if (len(value) == 1 and next(iter(value)) in _ITEM_WRAP_KEYS
+                and isinstance(next(iter(value.values())), (dict, list, str))):
+            return _coerce_llm_list(next(iter(value.values())))
+        if value and all(isinstance(key, str) and re.fullmatch(r"\d+", key)
+                         for key in value):
+            return [value[key] for key in sorted(value, key=int)]
+        return [value]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        parsed = _try_json_payload(text)
+        if parsed is not _UNRECOGNIZED:
+            return _coerce_llm_list(parsed)
+        xml_items = _try_xml_items(text)
+        if xml_items is not None:
+            return xml_items
+    return None
+
+
+_UNRECOGNIZED = object()
+
+
+def _try_json_payload(text: str) -> Any:
+    stripped = text.removeprefix("```json").removeprefix("```") \
+        .removesuffix("```").strip()
+    if not stripped.startswith(("[", "{")):
+        return _UNRECOGNIZED
+    try:
+        return json.loads(stripped)
+    except ValueError:
+        return _UNRECOGNIZED
+
+
+def _try_xml_items(text: str) -> Optional[list]:
+    """把 <item>…</item> 串（可带一层容器标签）解析为子项 dict 列表。"""
+    if not text.startswith("<"):
+        return None
+    try:
+        root = ET.fromstring(f"<root>{text}</root>")
+    except ET.ParseError:
+        return None
+    children = list(root)
+    if not children:
+        return []
+    tags = [child.tag for child in children]
+    if any(tag in _ITEM_WRAP_KEYS for tag in tags):
+        picked = [child for child in children if child.tag in _ITEM_WRAP_KEYS]
+    elif (len(children) == 1 and len(children[0]) > 0
+          and all(child.tag == tags[0] for child in children)):
+        picked = list(children[0])  # <attributes><item/></attributes> 类容器
+    else:
+        picked = children
+    return [_xml_node_to_dict(node) for node in picked]
+
+
+def _xml_node_to_dict(node: ET.Element) -> dict:
+    out: dict = {}
+    for child in node:
+        key = child.tag
+        if len(child) > 0:
+            item = _xml_node_to_dict(child)
+        else:
+            item = (child.text or "").strip()
+            if not item:
+                continue
+        if key in out:  # 同名兄弟标签（如多个 <enum>）收进列表
+            if not isinstance(out[key], list):
+                out[key] = [out[key]]
+            out[key].append(item)
+        else:
+            out[key] = item
+    return out
+
+
+def _annotation_allows_list(annotation: Any) -> bool:
+    for candidate in (annotation, *get_args(annotation)):
+        if get_origin(candidate) is list or candidate is list:
+            return True
+    return False
+
+
+def _coerce_element_list_fields(model: type[BaseModel], raw: dict,
+                                kind: Optional[str] = None) -> dict:
+    """按模型的 list 字段矫正元素内的坏形态；无法识别的非空形态原样保留。
+
+    子表字段（attributes/steps 等）内的子项还有自己的 list 字段
+    （enum/inputs/source_objects），按 _NESTED_MODELS 的子模型再矫正一层。
+    矫正出的空表不等于模型显式 ``[]`` 清空——非列表来源的空结果一律视为
+    「未提供」，防止把空包装对象误读成清空指令。
+    矫正发生在入参的浅拷贝上：orchestrator 把同一段 arguments dict 同时用于
+    工具执行、step 审计持久化与下一轮对话历史，原地改写会让审计记录失真。
+    """
+    for name, field in model.model_fields.items():
+        if not _annotation_allows_list(field.annotation):
+            continue
+        keys = [name]
+        if isinstance(field.alias, str) and field.alias != name:
+            keys.append(field.alias)
+        present = [key for key in keys if key in raw]
+        if not present:
+            continue
+        original = raw[present[0]]
+        coerced = original if isinstance(original, list) else _coerce_llm_list(original)
+        if coerced is None:
+            if original is None or original == "" or original == {}:
+                for key in present:
+                    raw.pop(key, None)
+            continue
+        if not coerced and not isinstance(original, list):
+            for key in present:
+                raw.pop(key, None)
+            continue
+        for key in present:
+            raw.pop(key, None)
+        raw[name] = coerced
+    if kind:
+        for field, child_model in _NESTED_MODELS.get(kind, {}).items():
+            value = raw.get(field)
+            if isinstance(value, list):
+                raw[field] = [
+                    _coerce_element_list_fields(child_model, dict(item))
+                    if isinstance(item, dict) else item
+                    for item in value
+                ]
+    return raw
 
 
 def empty_canvas() -> dict:
@@ -475,17 +628,30 @@ def _reference_placeholder_errors(kind: str, element: dict) -> list[str]:
     ]
 
 
-def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict, list[str], list[str]]:
+def upsert_elements(canvas: Any, kind: str, elements: Any) -> tuple[dict, list[str], list[str]]:
     """按 id（其次归一化 name）upsert；返回 (新画布, 生效元素 id 列表, 错误列表)。
 
     已有元素使用稀疏字段补丁。attributes / relations / inputs / branches /
     steps / metrics 使用子项 id（其次自然键）增量合并；只有显式 [] 才清空整表。
 
+    elements 与元素内的列表字段容忍 LLM 的坏序列化形态（见 _coerce_llm_list）；
     始终返回全新 dict —— SQLAlchemy JSON 列必须整体重新赋值才会写库。
     """
     model = KIND_MODELS.get(kind)
     if model is None:
         return _ensure_canvas(canvas), [], [f"未知模型类别: {kind}（可选: {', '.join(KIND_MODELS)}）"]
+
+    if elements is None:
+        elements = []
+    elif not isinstance(elements, list):
+        coerced = _coerce_llm_list(elements)
+        if coerced is None:
+            return _ensure_canvas(canvas), [], [
+                "elements 必须是元素对象的 JSON 数组；收到无法解析的"
+                f" {type(elements).__name__} 形态。attributes/relations/steps 等"
+                "子表字段同样必须是数组（不要用 {\"item\":…} 包装、索引对象或 XML 串）。"
+            ]
+        elements = coerced
 
     out = _ensure_canvas(canvas)
     key = KIND_KEYS[kind]
@@ -496,6 +662,8 @@ def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict,
         if not isinstance(raw, dict):
             errors.append(f"元素必须是对象，收到: {type(raw).__name__}")
             continue
+        # 浅拷贝后再矫正：调用方（orchestrator step 审计 / 对话历史）还持有原 dict
+        raw = _coerce_element_list_fields(model, dict(raw), kind)
 
         raw_id = str(raw.get("id") or "").strip()
         raw_name = str(raw.get("name") or "").strip()

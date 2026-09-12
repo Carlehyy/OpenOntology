@@ -13,6 +13,7 @@ schema 保持宽松（对象数组），由 canvas.py / questions.py 的 pydanti
 """
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 
@@ -46,6 +47,57 @@ _FILE_UPDATE_VERB = (
     r"(?:覆盖|改写|修改|编辑|更新|替换|保存|"
     r"\boverwrite\b|\bedit\b|\bupdate\b|\breplace\b|\bsave\b)"
 )
+
+
+def _extract_balanced_json(text: str, start: int) -> tuple[str, bool]:
+    """从 start（'{' 位置）扫描出配平的 JSON 对象片段；返回 (片段, 是否配平)。"""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1], True
+    return text[start:], False
+
+
+def _salvage_raw_tool_args(args: dict) -> dict:
+    """网关在工具参数整体不是合法 JSON 时回退 ``{"_raw": 原文}``；
+    此处剥离围栏后提取首个配平的 JSON 对象抢救（对照 super_assistant
+    反思链路 _parse_json_loose 的先例）。无法抢救时原样返回，让既有
+    错误路径继续兜底。生产背景见 canvas._coerce_llm_list 注释（D-010）。
+    """
+    if not isinstance(args, dict) or set(args) != {"_raw"}:
+        return args
+    text = str(args["_raw"] or "").strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```") \
+            .removesuffix("```").strip()
+    for match in re.finditer(r"\{", text):
+        fragment, balanced = _extract_balanced_json(text, match.start())
+        if not balanced:
+            continue
+        try:
+            parsed = json.loads(fragment)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return args
 
 
 def _file_mutation_authorized(message: str, row: ExplorationAttachment,
@@ -528,6 +580,7 @@ class ExplorationToolRunner:
 
     def run(self, name: str, args: dict) -> dict:
         self.last_diagram = None
+        args = _salvage_raw_tool_args(args)
         if name == "todo_write":
             return self._todo_write(args)
         if name == "todo_read":
@@ -892,7 +945,7 @@ class ExplorationToolRunner:
             return conflict
         kind = str(args.get("kind") or "")
         new_canvas, applied, errors = C.upsert_elements(
-            self.session.canvas, kind, args.get("elements") or [])
+            self.session.canvas, kind, args.get("elements"))
         if applied:
             commit_conflict = self._commit_canvas(new_canvas)
             if commit_conflict:
