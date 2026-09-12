@@ -648,7 +648,7 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
         ref={fileInputRef}
         type="file"
         accept=".json,application/json"
-        className="sr-only"
+        className="sr-only focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label="选择本体结构 JSON 文件"
         onChange={event => void handleImportFile(event.target.files?.[0])}
       />

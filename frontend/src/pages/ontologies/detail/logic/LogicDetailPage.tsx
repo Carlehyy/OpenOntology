@@ -245,24 +245,24 @@ export default function LogicDetailPage() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs text-muted-foreground mb-1">中文名 *</label>
-                <input {...register('name_cn', { required: true })} className="w-full border rounded-lg px-3 py-2 text-sm" />
+                <input {...register('name_cn', { required: true })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
               </div>
               <div>
                 <label className="block text-xs text-muted-foreground mb-1">英文名</label>
-                <input {...register('name_en')} className="w-full border rounded-lg px-3 py-2 text-sm" />
+                <input {...register('name_en')} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
               </div>
               <div>
                 <label className="block text-xs text-muted-foreground mb-1">置信度 (0-1)</label>
-                <input {...register('confidence', { valueAsNumber: true })} type="number" step="0.01" min="0" max="1" className="w-full border rounded-lg px-3 py-2 text-sm" />
+                <input {...register('confidence', { valueAsNumber: true })} type="number" step="0.01" min="0" max="1" className="w-full border border-border rounded-lg px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
               </div>
             </div>
             <div>
               <label className="block text-xs text-muted-foreground mb-1">公式</label>
-              <input {...register('formula')} className="w-full border rounded-lg px-3 py-2 text-sm font-mono" />
+              <input {...register('formula')} className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </div>
             <div>
               <label className="block text-xs text-muted-foreground mb-1">描述</label>
-              <textarea {...register('description')} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm resize-none" />
+              <textarea {...register('description')} rows={3} className="w-full border border-border rounded-lg px-3 py-2 text-sm resize-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </div>
           </form>
         ) : (

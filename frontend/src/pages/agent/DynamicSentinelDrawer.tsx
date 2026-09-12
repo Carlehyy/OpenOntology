@@ -187,7 +187,7 @@ export function DynamicSentinelDrawer({
                   className="mt-1 h-9 w-full rounded-md border border-border px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
               <label className="col-span-1 text-xs text-muted-foreground">技术名称
-                <input value={draft.name} readOnly className="mt-1 h-9 w-full rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground" />
+                <input value={draft.name} readOnly className="mt-1 h-9 w-full rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
               <label className="col-span-2 text-xs text-muted-foreground">说明
                 <textarea value={draft.description || ''} onChange={event => setDraft({ ...draft, description: event.target.value })}
@@ -259,7 +259,7 @@ export function DynamicSentinelDrawer({
                 <h3 className="mb-2 text-xs font-semibold text-foreground">事件模式定义 <span className="font-normal text-[var(--color-text-tertiary)]">（stages 需与监听对象镜像；服务端将强校验）</span></h3>
                 <textarea
                   aria-label="事件模式 JSON"
-                  className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground outline-none focus-visible:border-ring"
+                  className="min-h-24 w-full rounded-md border border-border bg-accent px-3 py-2 font-mono text-xs leading-5 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring"
                   placeholder={'{ "stages": [ { "alias": "a", "objectTypeId": "...", "filter": "a.status == \'submitted\'" }, { "alias": "b", "objectTypeId": "...", "within": 7200 } ], "absence": { "enabled": true } }'}
                   defaultValue={draft.pattern ? JSON.stringify(draft.pattern, null, 2) : ''}
                   onBlur={event => {

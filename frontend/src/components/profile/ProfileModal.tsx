@@ -401,7 +401,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
                   <span className="mb-1.5 flex items-center gap-1 text-xs font-medium text-[var(--color-text-secondary)]">
                     用户名<LockKeyhole size={11} className="text-[var(--color-text-tertiary)]" aria-hidden="true" />
                   </span>
-                  <input value={user?.username ?? ''} readOnly disabled aria-readonly className={`${inputClass} font-mono`} />
+                  <input value={user?.username ?? ''} readOnly disabled aria-readonly className={`${inputClass} font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`} />
                 </label>
                 <label className="block">
                   <span className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]">邮箱</span>

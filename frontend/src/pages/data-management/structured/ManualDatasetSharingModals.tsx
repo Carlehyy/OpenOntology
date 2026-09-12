@@ -121,7 +121,7 @@ export function ManualShareModal({ dataset, onClose }: { dataset: DatasetOvervie
 
           {link && <div className="rounded-xl border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-card p-3">
             <p className="mb-2 text-xs font-medium text-[var(--color-success)]">链接已生成，并会保存在下方的分享列表中</p>
-            <div className="flex gap-2"><input readOnly value={link} className="min-w-0 flex-1 rounded-lg border bg-muted px-3 py-2 font-mono text-xs" /><button onClick={copy} className="inline-flex items-center gap-1 rounded-lg border px-3 text-xs text-muted-foreground hover:bg-muted">{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? '已复制' : '复制'}</button></div>
+            <div className="flex gap-2"><input readOnly value={link} className="min-w-0 flex-1 rounded-lg border bg-muted px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" /><button onClick={copy} className="inline-flex items-center gap-1 rounded-lg border px-3 text-xs text-muted-foreground hover:bg-muted">{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? '已复制' : '复制'}</button></div>
           </div>}
           {error && <div className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-3 py-2 text-xs text-[var(--color-danger)]">{error}</div>}
 
@@ -134,7 +134,7 @@ export function ManualShareModal({ dataset, onClose }: { dataset: DatasetOvervie
                   {share.revoked_at ? <span className="text-[var(--color-text-tertiary)]">已停用</span> : <button onClick={async () => { await manualSharingApi.revoke(share.id); await load() }} title="停用链接" className="text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)]"><Trash2 size={13} /></button>}
                 </div>
                 {!share.revoked_at && (share.token ? <div className="mt-2 flex gap-2">
-                  <input readOnly value={shareUrl(share.token)} className="min-w-0 flex-1 rounded-lg border bg-muted px-3 py-2 font-mono text-[11px]" />
+                  <input readOnly value={shareUrl(share.token)} className="min-w-0 flex-1 rounded-lg border bg-muted px-3 py-2 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
                   <button onClick={() => void copyExisting(share)} className="inline-flex items-center gap-1 rounded-lg border px-3 text-xs text-muted-foreground hover:bg-muted">{copiedShareId === share.id ? <Check size={13} /> : <Copy size={13} />}{copiedShareId === share.id ? '已复制' : '复制'}</button>
                 </div> : <p className="mt-2 rounded-lg bg-[var(--color-warning-bg)] px-3 py-2 text-[11px] text-[var(--color-warning)]">此链接创建于令牌持久化功能上线前，无法恢复原地址；请停用后重新生成。</p>)}
               </div>)}

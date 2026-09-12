@@ -125,7 +125,7 @@ export default function DraftReviewDrawer({ draft, onClose, onApplied, onDiscard
   const checkbox = (key: string, conflict?: boolean) => (
     <input
       type="checkbox"
-      className="mt-1 accent-[var(--color-nav-bg)] shrink-0 disabled:opacity-40"
+      className="mt-1 accent-[var(--color-nav-bg)] shrink-0 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       checked={selected.has(key)}
       disabled={!!conflict || !!result}
       onChange={() => toggle(key, conflict)}

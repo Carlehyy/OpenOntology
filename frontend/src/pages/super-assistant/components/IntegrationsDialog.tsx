@@ -302,7 +302,7 @@ function InvitePromptModal({ promptText, onClose }: {
           value={promptText}
           data-testid="remote-agent-invite-prompt"
           onFocus={selectAll}
-          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-code-bg)] p-3 font-mono text-xs leading-5 text-[var(--color-code-fg)] outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-code-bg)] p-3 font-mono text-xs leading-5 text-[var(--color-code-fg)] outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring/10"
         />
         <p className="text-[11px] leading-4 text-[var(--color-text-tertiary)]">
           邀请码 24 小时内有效、一次性，仅发给要接入的助手。对方在内网 / NAT 后时会自动选择「回连」方式接入，无需暴露端口。

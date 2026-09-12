@@ -254,7 +254,7 @@ export default function PalaceFileTree({
           : ''}
         placeholder={inline?.kind === 'new-note' ? '笔记名（自动存为 .md）' : '目录名'}
         aria-label={inline?.kind === 'rename' ? '目录名称' : inline?.kind === 'new-folder' ? '新目录名称' : '新笔记文件名'}
-        className="h-6 w-full min-w-0 rounded-md border border-[var(--color-primary)] bg-white px-1.5 text-[13px] text-[var(--color-text-primary)] focus:outline-none"
+        className="h-6 w-full min-w-0 rounded-md border border-[var(--color-primary)] bg-white px-1.5 text-[13px] text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onKeyDown={event => {
           if (event.key === 'Enter') {
             event.preventDefault()
