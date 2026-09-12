@@ -391,6 +391,34 @@ def _coerce_element_list_fields(model: type[BaseModel], raw: dict,
     return raw
 
 
+def coerce_elements_payload(kind: str, elements: Any) -> tuple[list, Optional[str]]:
+    """工具编排侧的元素载荷形态矫正入口（方言兼容不进画布层）。
+
+    画布 upsert 保持严格校验（校验错误附正确形状示例自愈提示）；LLM 序列化
+    坏形态的确定性还原在 toolkit 工具入口编排：``_normalize_dialect_args``
+    处理 {"item":…}/{"$text"}/{"value":X}/布尔串之后，本入口兜住其余形态
+    ——elements 本身被包成 dict/XML 串/JSON 串，元素内数组字段为索引对象/
+    单对象/字符串（生产背景见 _coerce_llm_list 注释，商业化审查 D-010）。
+    返回 (矫正后的元素列表, 错误信息)；错误信息非空时直接回填给 LLM。
+    """
+    model = KIND_MODELS.get(kind)
+    if model is None or elements is None:
+        return (elements if isinstance(elements, list) else []), None
+    if not isinstance(elements, list):
+        coerced = _coerce_llm_list(elements)
+        if coerced is None:
+            return [], (
+                "elements 必须是元素对象的 JSON 数组；收到无法解析的"
+                f" {type(elements).__name__} 形态。attributes/relations/steps 等"
+                "子表字段同样必须是数组（不要用 {\"item\":…} 包装、索引对象或 XML 串）。")
+        elements = coerced
+    return [
+        _coerce_element_list_fields(model, dict(raw), kind)
+        if isinstance(raw, dict) else raw
+        for raw in elements
+    ], None
+
+
 def empty_canvas() -> dict:
     return {k: [] for k in KIND_KEYS.values()}
 
@@ -656,30 +684,21 @@ def _reference_placeholder_errors(kind: str, element: dict) -> list[str]:
     ]
 
 
-def upsert_elements(canvas: Any, kind: str, elements: Any) -> tuple[dict, list[str], list[str]]:
+def upsert_elements(canvas: Any, kind: str, elements: list[dict]) -> tuple[dict, list[str], list[str]]:
     """按 id（其次归一化 name）upsert；返回 (新画布, 生效元素 id 列表, 错误列表)。
 
     已有元素使用稀疏字段补丁。attributes / relations / inputs / branches /
     steps / metrics 使用子项 id（其次自然键）增量合并；只有显式 [] 才清空整表。
 
-    elements 与元素内的列表字段容忍 LLM 的坏序列化形态（见 _coerce_llm_list）；
+    本函数保持严格校验：LLM 序列化坏形态的确定性还原由工具编排侧负责
+    （toolkit._normalize_dialect_args + coerce_elements_payload），校验
+    错误附正确形状示例回填给 LLM 自愈。
+
     始终返回全新 dict —— SQLAlchemy JSON 列必须整体重新赋值才会写库。
     """
     model = KIND_MODELS.get(kind)
     if model is None:
         return _ensure_canvas(canvas), [], [f"未知模型类别: {kind}（可选: {', '.join(KIND_MODELS)}）"]
-
-    if elements is None:
-        elements = []
-    elif not isinstance(elements, list):
-        coerced = _coerce_llm_list(elements)
-        if coerced is None:
-            return _ensure_canvas(canvas), [], [
-                "elements 必须是元素对象的 JSON 数组；收到无法解析的"
-                f" {type(elements).__name__} 形态。attributes/relations/steps 等"
-                "子表字段同样必须是数组（不要用 {\"item\":…} 包装、索引对象或 XML 串）。"
-            ]
-        elements = coerced
 
     out = _ensure_canvas(canvas)
     key = KIND_KEYS[kind]
@@ -690,8 +709,6 @@ def upsert_elements(canvas: Any, kind: str, elements: Any) -> tuple[dict, list[s
         if not isinstance(raw, dict):
             errors.append(f"元素必须是对象，收到: {type(raw).__name__}")
             continue
-        # 浅拷贝后再矫正：调用方（orchestrator step 审计 / 对话历史）还持有原 dict
-        raw = _coerce_element_list_fields(model, dict(raw), kind)
 
         raw_id = str(raw.get("id") or "").strip()
         raw_name = str(raw.get("name") or "").strip()

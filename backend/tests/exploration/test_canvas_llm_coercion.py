@@ -8,6 +8,11 @@
   2. 矫正出的空表 ≠ 模型显式 [] 清空（防误清空既有子表）；
   3. 无法识别的非空形态保持响亮失败，错误信息指给模型；
   4. 网关 {"_raw": …} 回退形态在 toolkit 层抢救（围栏剥离 + 配平提取）。
+
+架构归属（与主干合入的方言归一化层调和后）：canvas.upsert_elements 保持
+严格校验；形态矫正经 coerce_elements_payload 在工具编排侧执行，本文件
+用 _upsert_via_tool 模拟 toolkit 编排链路（方言归一化 → 形态矫正 → 严格
+校验）中的后两步。
 """
 from __future__ import annotations
 
@@ -17,9 +22,17 @@ from app.exploration import canvas as C
 from app.exploration.models import ExplorationSession
 
 
+def _upsert_via_tool(cv, kind, payload):
+    """模拟 toolkit 编排：形态矫正（coerce_elements_payload）→ 严格 upsert。"""
+    elements, coerce_error = C.coerce_elements_payload(kind, payload)
+    if coerce_error:
+        return cv, [], [coerce_error]
+    return C.upsert_elements(cv, kind, elements)
+
+
 def _object_with_two_attrs() -> dict:
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         "displayName": "客户",
         "attributes": [
@@ -33,7 +46,7 @@ def _object_with_two_attrs() -> dict:
 
 def test_attributes_item_wrap_dict_is_coerced():
     cv = C.empty_canvas()
-    cv, applied, errors = C.upsert_elements(cv, "object", [{
+    cv, applied, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         "attributes": {"item": {"name": "code", "typeHint": "文本"}},
     }])
@@ -43,7 +56,7 @@ def test_attributes_item_wrap_dict_is_coerced():
 
 def test_attributes_items_wrap_list_is_coerced():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         "attributes": {"items": [
             {"name": "code", "typeHint": "文本"},
@@ -56,7 +69,7 @@ def test_attributes_items_wrap_list_is_coerced():
 
 def test_attributes_index_dict_is_coerced_in_numeric_order():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         "attributes": {
             "0": {"name": "code", "typeHint": "文本"},
@@ -71,7 +84,7 @@ def test_attributes_index_dict_is_coerced_in_numeric_order():
 
 def test_attributes_single_dict_is_wrapped_into_list():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer", "attributes": {"name": "code", "typeHint": "文本"},
     }])
     assert not errors
@@ -80,7 +93,7 @@ def test_attributes_single_dict_is_wrapped_into_list():
 
 def test_attributes_json_string_is_coerced():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         "attributes": '[{"name": "code", "typeHint": "文本"}, '
                       '{"name": "level", "typeHint": "枚举"}]',
@@ -91,7 +104,7 @@ def test_attributes_json_string_is_coerced():
 
 def test_attributes_xml_item_string_is_coerced():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         "attributes": (
             "<item><name>code</name><typeHint>文本</typeHint></item>"
@@ -108,7 +121,7 @@ def test_attributes_xml_item_string_is_coerced():
 
 def test_attributes_xml_container_string_is_coerced():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         "attributes": (
             "<attributes>"
@@ -124,16 +137,16 @@ def test_attributes_xml_container_string_is_coerced():
 def test_coerced_empty_wrap_does_not_clear_existing_children():
     cv = _object_with_two_attrs()
     # 空包装对象 / 空串 = 「未提供」，不得误读成显式 [] 清空
-    cv, _, errors = C.upsert_elements(cv, "object", [
+    cv, _, errors = _upsert_via_tool(cv, "object", [
         {"name": "Customer", "attributes": {}}])
     assert not errors
     assert len(cv["objects"][0]["attributes"]) == 2
-    cv, _, errors = C.upsert_elements(cv, "object", [
+    cv, _, errors = _upsert_via_tool(cv, "object", [
         {"name": "Customer", "attributes": ""}])
     assert not errors
     assert len(cv["objects"][0]["attributes"]) == 2
     # 模型显式 [] 仍然是清空整表（原语义不变）
-    cv, _, errors = C.upsert_elements(cv, "object", [
+    cv, _, errors = _upsert_via_tool(cv, "object", [
         {"name": "Customer", "attributes": []}])
     assert not errors
     assert cv["objects"][0]["attributes"] == []
@@ -141,7 +154,7 @@ def test_coerced_empty_wrap_does_not_clear_existing_children():
 
 def test_coerced_patch_merges_children_incrementally():
     cv = _object_with_two_attrs()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         # 坏形态矫正后按自然键增量合并：既有 2 项 + 新增 1 项
         "attributes": {"item": [{"name": "status", "typeHint": "是否"}]},
@@ -153,22 +166,22 @@ def test_coerced_patch_merges_children_incrementally():
 
 def test_unrecognizable_form_fails_loudly_with_guidance():
     cv = C.empty_canvas()
-    cv, applied, errors = C.upsert_elements(cv, "object", [{
+    cv, applied, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer", "attributes": 42}])
     assert not applied and len(errors) == 1
     assert "valid list" in errors[0] or "数组" in errors[0]
     # elements 本身无法解析 → 明确指引错误
-    cv, applied, errors = C.upsert_elements(cv, "object", 42)
+    cv, applied, errors = _upsert_via_tool(cv, "object", 42)
     assert not applied and len(errors) == 1
     assert "elements 必须是元素对象的 JSON 数组" in errors[0]
 
 
 def test_elements_itself_accepts_dict_and_xml_forms():
     cv = C.empty_canvas()
-    cv, applied, errors = C.upsert_elements(cv, "object",
+    cv, applied, errors = _upsert_via_tool(cv, "object",
                                             {"name": "Customer"})
     assert not errors and len(applied) == 1
-    cv, applied, errors = C.upsert_elements(cv, "object",
+    cv, applied, errors = _upsert_via_tool(cv, "object",
                                             "<item><name>VIP</name></item>")
     assert not errors and len(applied) == 1
     assert cv["objects"][-1]["name"] == "VIP"
@@ -176,7 +189,7 @@ def test_elements_itself_accepts_dict_and_xml_forms():
 
 def test_nested_child_list_fields_are_coerced_one_level_deeper():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "object", [{
+    cv, _, errors = _upsert_via_tool(cv, "object", [{
         "name": "Customer",
         # attribute 子项的 enum（list[str]）以索引对象形态到达
         "attributes": [{"name": "level", "typeHint": "枚举",
@@ -186,7 +199,7 @@ def test_nested_child_list_fields_are_coerced_one_level_deeper():
     assert cv["objects"][0]["attributes"][0]["enum"] == ["V1", "V2"]
 
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "process", [{
+    cv, _, errors = _upsert_via_tool(cv, "process", [{
         "name": "onboarding",
         "steps": [
             {"seq": 1, "name": "提交资料",
@@ -206,7 +219,7 @@ def test_nested_child_list_fields_are_coerced_one_level_deeper():
 
 def test_actor_responsibilities_index_dict_is_coerced():
     cv = C.empty_canvas()
-    cv, _, errors = C.upsert_elements(cv, "actor", [{
+    cv, _, errors = _upsert_via_tool(cv, "actor", [{
         "name": "Admin", "responsibilities": {"0": "审核", "1": "封禁"},
     }])
     assert not errors
@@ -254,7 +267,7 @@ def test_coercion_does_not_mutate_caller_arguments():
     element = {"name": "Customer", "attributes": {"item": [{"name": "code", "typeHint": "文本"}]}}
     elements = [element]
     cv = C.empty_canvas()
-    cv, applied, errors = C.upsert_elements(cv, "object", elements)
+    cv, applied, errors = _upsert_via_tool(cv, "object", elements)
     assert not errors and applied
     assert element == {"name": "Customer",
                        "attributes": {"item": [{"name": "code", "typeHint": "文本"}]}}

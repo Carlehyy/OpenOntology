@@ -1332,8 +1332,13 @@ class ExplorationToolRunner:
         if conflict:
             return conflict
         kind = str(args.get("kind") or "")
+        # 方言归一化（run 入口）之后、严格校验之前的第三层兜底：
+        # elements 载荷与索引 dict/单对象/XML 串等残余坏形态的确定性还原
+        elements, coerce_error = C.coerce_elements_payload(kind, args.get("elements"))
+        if coerce_error:
+            return {"error": coerce_error, **self._state()}
         new_canvas, applied, errors = C.upsert_elements(
-            self.session.canvas, kind, args.get("elements"))
+            self.session.canvas, kind, elements)
         if applied:
             commit_conflict = self._commit_canvas(new_canvas)
             if commit_conflict:
