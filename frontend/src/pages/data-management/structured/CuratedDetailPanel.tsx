@@ -270,7 +270,7 @@ function EditableReviewTable({
                           className={`h-8 w-full min-w-[150px] rounded-md border px-2.5 text-xs text-foreground outline-none transition ${
                             edit
                               ? 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] font-medium focus:border-[var(--color-warning)] focus-visible:ring-2 focus-visible:ring-ring'
-                              : 'border-transparent bg-transparent hover:border-border hover:bg-card focus-visible:border-ring focus:bg-card focus-visible:ring-2 focus-visible:ring-ring'
+                              : 'border-transparent bg-transparent hover:border-border hover:bg-card focus:bg-card focus-visible:ring-2 focus-visible:ring-ring'
                           } disabled:cursor-not-allowed disabled:bg-muted disabled:text-[var(--color-text-tertiary)]`}
                         />
                       )}

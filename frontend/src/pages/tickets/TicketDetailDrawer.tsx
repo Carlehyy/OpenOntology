@@ -111,7 +111,7 @@ function ProgressPanel({
                 if (event.key === 'Enter' && comment.trim() && !mutation.isPending) mutation.mutate()
               }}
               placeholder="例如：已复现，等待下个版本修复"
-              className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition placeholder:text-[var(--color-text-tertiary)] focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
             <button
               type="button"

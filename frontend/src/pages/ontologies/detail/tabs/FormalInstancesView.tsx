@@ -760,7 +760,7 @@ export default function FormalInstancesView({
                 onBlur={commitPageJump}
                 inputMode="numeric"
                 aria-label="跳转至指定页"
-                className="h-7 w-10 rounded-md border border-border bg-card text-center text-xs text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                className="h-7 w-10 rounded-md border border-border bg-card text-center text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
               / {pages}
             </span>

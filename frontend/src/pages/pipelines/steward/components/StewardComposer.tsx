@@ -202,7 +202,7 @@ export default function StewardComposer({
                     event.stopPropagation()
                   }}
                   placeholder="搜索流水线名称或描述"
-                  className="h-9 w-full rounded-xl border border-border bg-muted pl-8 pr-3 text-xs outline-none transition focus-visible:border-ring focus:bg-card"
+                  className="h-9 w-full rounded-xl border border-border bg-muted pl-8 pr-3 text-xs outline-none transition focus:bg-card"
                 />
               </div>
             </div>

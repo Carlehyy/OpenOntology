@@ -488,7 +488,7 @@ export default function SyncTasksTab() {
                   placeholder="搜索任务名或流水线"
                   value={searchInput}
                   onChange={e => setSearchInput(e.target.value)}
-                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-xs text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-xs text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                 />
                 {searchInput && (
                   <button
@@ -505,7 +505,7 @@ export default function SyncTasksTab() {
               <select
                 value={filterPipelineId}
                 onChange={e => handlePipelineFilter(e.target.value)}
-                className="h-9 max-w-[240px] rounded-lg border border-border bg-card px-3 text-xs text-muted-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                className="h-9 max-w-[240px] rounded-lg border border-border bg-card px-3 text-xs text-muted-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label="按数据流水线筛选任务"
                 title="按数据流水线筛选任务"
               >
@@ -734,7 +734,7 @@ export default function SyncTasksTab() {
                   <select
                     value={pageSize}
                     onChange={e => { setPageSize(Number(e.target.value)); setPage(1) }}
-                    className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none focus-visible:border-ring"
+                    className="h-8 rounded-lg border border-border bg-card px-2 text-xs outline-none"
                     aria-label="任务列表每页显示条数"
                   >
                     {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}

@@ -226,7 +226,7 @@ export default function RawDatasetsView({
             onChange={event => setSearch(event.target.value)}
             placeholder="搜索数据集名称"
             aria-label="按数据集名称搜索"
-            className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-xs text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-8 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-xs text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
           />
           {search && (
             <button type="button" onClick={() => setSearch('')} aria-label="清除数据集搜索"

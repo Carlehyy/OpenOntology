@@ -125,7 +125,7 @@ export default function TicketsPage() {
             value={search}
             onChange={event => setSearch(event.target.value)}
             placeholder="搜索工单标题、内容、编号、提交人..."
-            className="w-full rounded-lg border border-border bg-card py-2 pl-9 pr-3 text-sm text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring placeholder:text-[var(--color-text-tertiary)]"
+            className="w-full rounded-lg border border-border bg-card py-2 pl-9 pr-3 text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring placeholder:text-[var(--color-text-tertiary)]"
           />
         </div>
         <div className="ml-auto flex items-center gap-1">

@@ -830,7 +830,7 @@ export default function SuperAssistantPage() {
                 一律去粗焦点环只保留细边——细边即焦点指示，键盘操作同样可见 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
+              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
             >
               <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'} />
             </SelectTrigger>

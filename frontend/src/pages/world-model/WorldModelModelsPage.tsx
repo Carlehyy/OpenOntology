@@ -138,7 +138,7 @@ function ProjectFormModal({
             value={name}
             onChange={event => setName(event.target.value)}
             placeholder="例如：台区负荷短期推演"
-            className=" focus-visible:border-ring focus-visible:ring-ring"
+            className=" focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-ring"
           />
           <div>
             <label className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
@@ -171,7 +171,7 @@ function ProjectFormModal({
             maxLength={500}
             rows={3}
             placeholder="简要说明该模型推演的业务对象、时域与用途"
-            className="w-full resize-none rounded-md border border-[var(--color-border)] bg-card px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)]  focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="w-full resize-none rounded-md border border-[var(--color-border)] bg-card px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)]  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <p className="mt-1 text-right text-[11px] text-[var(--color-text-tertiary)]">{description.length}/500</p>
         </div>
@@ -372,7 +372,7 @@ export default function WorldModelModelsPage() {
             onChange={event => setNameFilter(event.target.value)}
             placeholder="搜索模型名称或描述"
             aria-label="按模型名称或描述筛选"
-            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-8 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           {nameFilter && (
             <button

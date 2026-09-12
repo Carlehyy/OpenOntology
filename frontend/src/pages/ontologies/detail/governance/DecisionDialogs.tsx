@@ -101,7 +101,7 @@ export function RejectDialog({
                 className={`min-h-24 w-full resize-y rounded-lg border bg-card px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition focus-visible:ring-2 disabled:cursor-wait disabled:bg-muted ${
                   error
                     ? 'border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] focus:border-[var(--color-danger)] focus-visible:ring-ring'
-                    : 'border-border focus-visible:border-ring focus-visible:ring-ring'
+                    : 'border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-ring'
                 }`}
               />
               <p id="governance-reject-reason-help" className="mt-1.5 text-xs leading-5 text-muted-foreground">

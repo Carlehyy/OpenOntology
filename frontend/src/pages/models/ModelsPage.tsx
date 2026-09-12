@@ -309,7 +309,7 @@ export default function ModelsPage() {
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="搜索提供商..."
-            className="w-full pl-8 pr-3 py-1.5 rounded-lg text-sm border border-border text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all"
+            className="w-full pl-8 pr-3 py-1.5 rounded-lg text-sm border border-border text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all"
           />
         </div>
 
@@ -617,12 +617,12 @@ export default function ModelsPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-1.5">名称 *</label>
-                  <input {...regEdit('name', { required: true })} className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                  <input {...regEdit('name', { required: true })} className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-1.5">配置分类 *</label>
                   <select {...regEdit('config_type', { required: true, onChange: e => setValue('provider', PROVIDERS[e.target.value]?.[0]?.value || 'custom') })}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                    className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                     {CONFIG_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                   </select>
                 </div>
@@ -631,25 +631,25 @@ export default function ModelsPage() {
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-1.5">Provider *</label>
                   <select {...regEdit('provider', { required: true })}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                    className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                     {(PROVIDERS[watchEdit('config_type') || 'llm'] || PROVIDERS.llm).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-1.5">API Key</label>
                   <input {...regEdit('api_key')} type="password" placeholder={editTarget.has_api_key ? '已保存，留空保留原密钥' : 'sk-...'}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                    className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                 </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">API Base</label>
                 <input {...regEdit('api_base')} placeholder="https://api.openai.com/v1"
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">模型名</label>
                 <input {...regEdit('models_str')} placeholder="gpt-4o"
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                 <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">每个提供商仅支持配置一个模型</p>
               </div>
               {(watchEdit('config_type') || 'llm') === 'llm' && (
@@ -657,13 +657,13 @@ export default function ModelsPage() {
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1.5">最大上下文（tokens）</label>
                     <input {...regEdit('max_context_tokens')} type="number" min={1} placeholder="如：128000"
-                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                     <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">模型可接受的最大输入上下文，留空则不限制</p>
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1.5">最大输出（tokens）</label>
                     <input {...regEdit('max_output_tokens')} type="number" min={1} placeholder="如：4096"
-                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                     <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">单次调用最大生成 tokens，留空用默认值</p>
                   </div>
                 </div>
@@ -673,19 +673,19 @@ export default function ModelsPage() {
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1.5">启用运行</label>
                     <select {...regEdit('ocr_enabled')}
-                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                       <option value="false">关闭</option><option value="true">开启</option>
                     </select>
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1.5">OCR语言</label>
                     <input {...regEdit('ocr_lang')} placeholder="ch"
-                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1.5">设备</label>
                     <select {...regEdit('ocr_device')}
-                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                      className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                       <option value="cpu">CPU</option><option value="gpu">GPU</option>
                     </select>
                   </div>
@@ -694,7 +694,7 @@ export default function ModelsPage() {
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">高级参数 JSON</label>
                 <textarea {...regEdit('options_json')} rows={3} placeholder='{"timeout": 30}'
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
               </div>
               <div className="flex justify-center gap-3 pt-2">
                 <button type="button" onClick={() => setEditTarget(null)}
@@ -752,12 +752,12 @@ function ModelFormModal({ title, onClose, onSubmit, register, handleSubmit, conf
             <div>
               <label className="block text-sm font-medium text-foreground mb-1.5">名称 *</label>
               <input {...register('name', { required: true })} placeholder="如：GPT-4o 生产环境"
-                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
             </div>
             <div>
               <label className="block text-sm font-medium text-foreground mb-1.5">配置分类 *</label>
               <select {...register('config_type', { required: true, onChange: (e: any) => setValue('provider', PROVIDERS[e.target.value]?.[0]?.value || 'custom') })}
-                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                 {CONFIG_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
             </div>
@@ -766,25 +766,25 @@ function ModelFormModal({ title, onClose, onSubmit, register, handleSubmit, conf
             <div>
               <label className="block text-sm font-medium text-foreground mb-1.5">Provider *</label>
               <select {...register('provider', { required: true })}
-                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                 {(PROVIDERS[configType] || PROVIDERS.llm).map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-sm font-medium text-foreground mb-1.5">API Key</label>
               <input {...register('api_key')} type="password" placeholder="sk-..."
-                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
             </div>
           </div>
           <div>
             <label className="block text-sm font-medium text-foreground mb-1.5">API Base</label>
             <input {...register('api_base')} placeholder="https://api.openai.com/v1"
-              className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
           </div>
           <div>
             <label className="block text-sm font-medium text-foreground mb-1.5">模型名</label>
             <input {...register('models_str')} placeholder="gpt-4o"
-              className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
             <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">每个提供商仅支持配置一个模型</p>
           </div>
           {configType === 'llm' && (
@@ -792,13 +792,13 @@ function ModelFormModal({ title, onClose, onSubmit, register, handleSubmit, conf
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">最大上下文（tokens）</label>
                 <input {...register('max_context_tokens')} type="number" min={1} placeholder="如：128000"
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                 <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">模型可接受的最大输入上下文，留空则不限制</p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">最大输出（tokens）</label>
                 <input {...register('max_output_tokens')} type="number" min={1} placeholder="如：4096"
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
                 <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">单次调用最大生成 tokens，留空用默认值</p>
               </div>
             </div>
@@ -808,19 +808,19 @@ function ModelFormModal({ title, onClose, onSubmit, register, handleSubmit, conf
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">启用运行</label>
                 <select {...register('ocr_enabled')}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                   <option value="false">关闭</option><option value="true">开启</option>
                 </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">OCR语言</label>
                 <input {...register('ocr_lang')} placeholder="ch"
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">设备</label>
                 <select {...register('ocr_device')}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all">
+                  className="w-full border border-border rounded-lg px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all">
                   <option value="cpu">CPU</option><option value="gpu">GPU</option>
                 </select>
               </div>
@@ -829,7 +829,7 @@ function ModelFormModal({ title, onClose, onSubmit, register, handleSubmit, conf
           <div>
             <label className="block text-sm font-medium text-foreground mb-1.5">高级参数 JSON</label>
             <textarea {...register('options_json')} rows={3} placeholder='{"timeout": 30}'
-              className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-ring transition-all" />
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-all" />
           </div>
           <div className="flex justify-center gap-3 pt-2">
             <button type="button" onClick={onClose}

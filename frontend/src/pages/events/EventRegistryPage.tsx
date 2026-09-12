@@ -333,7 +333,7 @@ export default function EventRegistryPage() {
           <div className="relative min-w-[220px] max-w-[340px] flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索事件标题、编号、上报人..."
-              className="w-full rounded-lg border border-border bg-card py-2 pl-9 pr-3 text-sm text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring placeholder:text-[var(--color-text-tertiary)]" />
+              className="w-full rounded-lg border border-border bg-card py-2 pl-9 pr-3 text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring placeholder:text-[var(--color-text-tertiary)]" />
           </div>
           <Select value={severity} onChange={setSeverity} ariaLabel="按严重程度筛选" options={[
             { v: '', l: '全部级别' }, { v: 'critical', l: '严重' }, { v: 'high', l: '高级' }, { v: 'medium', l: '中级' }, { v: 'low', l: '低级' }, { v: 'info', l: '信息' },

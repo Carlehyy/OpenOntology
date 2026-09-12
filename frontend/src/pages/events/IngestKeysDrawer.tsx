@@ -212,7 +212,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
                   value={search}
                   onChange={event => setSearch(event.target.value)}
                   placeholder="搜索名称、前缀或来源"
-                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-xs text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                  className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-xs text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                 />
               </label>
               <Select
@@ -232,7 +232,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
                 value={sourceSystem}
                 onChange={event => setSourceSystem(event.target.value)}
                 placeholder="来源系统，如 MES"
-                className="h-9 rounded-lg border border-border bg-card px-3 text-xs text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                className="h-9 rounded-lg border border-border bg-card px-3 text-xs text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
               />
               <button
                 type="button"

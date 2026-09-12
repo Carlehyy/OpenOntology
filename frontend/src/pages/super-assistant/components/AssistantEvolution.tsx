@@ -356,7 +356,7 @@ export function MemoryTab() {
           value={query}
           onChange={event => setQuery(event.target.value)}
           placeholder="搜索记忆内容或标签…"
-          className="min-h-9 min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-transparent px-3 text-xs outline-none focus-visible:border-ring"
+          className="min-h-9 min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-transparent px-3 text-xs outline-none"
         />
         {/* Radix Select 不允许空字符串 value，「全部分区」用哨兵值 __all__ 映射为空 */}
         <Select value={zone || '__all__'} onValueChange={value => setZone(value === '__all__' ? '' : value)}>
@@ -528,7 +528,7 @@ export function MemoryTab() {
               onChange={event => setDraft({ ...draft, content: event.target.value })}
               rows={4}
               placeholder="要记住的事实，例如：用户偏好简洁的中文回答"
-              className="mt-3 w-full rounded-lg border border-[var(--color-border)] bg-transparent p-3 text-xs leading-5 outline-none focus-visible:border-ring"
+              className="mt-3 w-full rounded-lg border border-[var(--color-border)] bg-transparent p-3 text-xs leading-5 outline-none"
             />
             <div className="mt-3 flex items-center gap-3">
               <Select value={draft.zone} onValueChange={value => setDraft({ ...draft, zone: value })}>

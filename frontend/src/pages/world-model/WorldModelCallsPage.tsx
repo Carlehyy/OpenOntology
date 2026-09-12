@@ -220,7 +220,7 @@ export default function WorldModelCallsPage() {
             onKeyDown={event => { if (event.key === 'Enter') applyFilters() }}
             placeholder="搜索服务名或调用方"
             aria-label="按服务名或调用方筛选"
-            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-9 w-full rounded-lg border border-border bg-card pl-8 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
         <input
@@ -228,7 +228,7 @@ export default function WorldModelCallsPage() {
           value={draftStart}
           onChange={event => setDraftStart(event.target.value)}
           aria-label="开始日期"
-          className="h-9 rounded-lg border border-border bg-card px-3 text-sm text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-9 rounded-lg border border-border bg-card px-3 text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
         <span className="text-xs text-muted-foreground">至</span>
         <input
@@ -236,7 +236,7 @@ export default function WorldModelCallsPage() {
           value={draftEnd}
           onChange={event => setDraftEnd(event.target.value)}
           aria-label="结束日期"
-          className="h-9 rounded-lg border border-border bg-card px-3 text-sm text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-9 rounded-lg border border-border bg-card px-3 text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
         <Select
           value={draftResult}

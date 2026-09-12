@@ -387,9 +387,9 @@ export default function FileWorkspaceDrawer({ sessionId, files, onFilesChange, o
                 <div className="flex min-h-0 flex-1 flex-col p-5">
                   <label className="mb-1.5 text-[11px] font-medium text-[var(--color-text-secondary)]">会话内相对路径</label>
                   <input value={newPath} onChange={event => setNewPath(event.target.value)}
-                    className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 text-xs outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                    className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring" />
                   <textarea value={draft} onChange={event => setDraft(event.target.value)} placeholder="输入文件内容…"
-                    className="scrollbar-thin min-h-0 flex-1 resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4 font-mono text-xs leading-5 outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                    className="scrollbar-thin min-h-0 flex-1 resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4 font-mono text-xs leading-5 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring" />
                   <div className="mt-3 flex justify-end">
                     <button onClick={() => void create()} disabled={!newPath.trim() || saving}
                       className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-[var(--color-text-inverse)] transition-colors hover:bg-brand-deep disabled:opacity-40">
@@ -474,7 +474,7 @@ export default function FileWorkspaceDrawer({ sessionId, files, onFilesChange, o
                   ) : viewMode === 'edit' && editor ? (
                     <textarea value={draft} onChange={event => setDraft(event.target.value)}
                       aria-label="文件内容编辑器"
-                      className="scrollbar-thin h-full min-h-[320px] w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4 font-mono text-xs leading-5 outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                      className="scrollbar-thin h-full min-h-[320px] w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4 font-mono text-xs leading-5 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring" />
                   ) : preview?.content && htmlPreview ? (
                     <iframe
                       data-testid="html-file-preview"

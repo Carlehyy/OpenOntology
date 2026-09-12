@@ -796,7 +796,7 @@ export default function OntologyNetworkPage() {
                       <span className="mb-1 block text-[10px] font-medium text-muted-foreground">拟议新值</span>
                       <input value={proposedValue} onChange={event => setProposedValue(event.target.value)} disabled={!detail}
                         placeholder="仅模拟，不写入真实数据"
-                        className="h-8 w-full rounded-md border border-[var(--color-border)] bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring disabled:bg-muted" />
+                        className="h-8 w-full rounded-md border border-[var(--color-border)] bg-card px-2 text-xs text-foreground outline-none disabled:bg-muted" />
                     </label>
                     <label className="block">
                       <span className="mb-1 block text-[10px] font-medium text-muted-foreground">传播深度</span>

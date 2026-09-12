@@ -388,7 +388,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                 <input
                   value={name}
                   onChange={e => setName(e.target.value)}
-                  className="w-full rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                  className="w-full rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                   placeholder="输入流水线名称"
                 />
               </div>
@@ -397,7 +397,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                 <textarea
                   value={description}
                   onChange={e => setDescription(e.target.value)}
-                  className="h-20 w-full resize-none rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                  className="h-20 w-full resize-none rounded-xl border border-border px-3.5 py-2.5 text-sm outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                   placeholder="输入流水线描述（可选）"
                 />
               </div>

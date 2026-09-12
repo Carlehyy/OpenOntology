@@ -597,7 +597,7 @@ export default function AgentWorkbenchPage() {
                   value={oid}
                   onChange={e => selectOntology(e.target.value)}
                   aria-label="选择本体"
-                  className="h-8 min-w-[180px] cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-3 pr-8 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                  className="h-8 min-w-[180px] cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-3 pr-8 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
                   style={{ backgroundImage: selectArrow, backgroundPosition: 'right 10px center' }}
                 >
                   {releasedOntologyList.length === 0 && <option value="">无已发布本体</option>}
@@ -727,7 +727,7 @@ export default function AgentWorkbenchPage() {
                   onChange={e => setModelId(e.target.value)}
                   aria-label="选择对话模型"
                   disabled={!oid}
-                  className="h-8 w-44 cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-2 pr-7 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="h-8 w-44 cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-2 pr-7 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:cursor-not-allowed"
                   style={{ backgroundImage: selectArrow, backgroundPosition: 'right 6px center', backgroundSize: '10px' }}
                 >
                   {llmModels.map((m: any) => <option key={m.id} value={m.id}>{m.name}</option>)}

@@ -358,7 +358,7 @@ export default function DecisionSimulationView({ oid, releaseId, conversationId,
             value={effectiveId || ''}
             onChange={event => setSelectedId(event.target.value || null)}
             disabled={!runs.length}
-            className="h-7 max-w-[300px] cursor-pointer rounded border border-border bg-muted px-2 text-[10px] text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            className="h-7 max-w-[300px] cursor-pointer rounded border border-border bg-muted px-2 text-[10px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
           >
             {!runs.length && <option value="">当前会话暂无推演</option>}
             {runs.map(item => <option key={item.id} value={item.id}>{item.title} · {dateTime(item.startedAt)}</option>)}

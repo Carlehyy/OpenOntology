@@ -219,7 +219,7 @@ export default function McpServerDialog({
                   rows={8}
                   aria-label="MCP 客户端 JSON"
                   placeholder={'{\n  "mcpServers": {\n    "api-hub": {\n      "command": "npx",\n      "args": ["-y", "mcp-remote", "https://example.com/mcp"]\n    }\n  }\n}'}
-                  className="w-full resize-none overflow-hidden rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
+                  className="w-full resize-none overflow-hidden rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
                 />
                 <button type="button" onClick={applyClientConfig} disabled={!clientConfig.trim()} className="min-h-10 rounded-lg border border-border bg-card px-3 text-xs font-medium text-brand-ink transition-colors hover:border-brand-mist hover:bg-brand-soft disabled:cursor-not-allowed disabled:opacity-45">
                   解析并填入下方表单
@@ -257,18 +257,18 @@ export default function McpServerDialog({
           <div className="grid gap-4 md:grid-cols-2">
             <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
               名称 <span className="text-destructive">*</span>
-              <input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="如：DMP 数据服务" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+              <input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="如：DMP 数据服务" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring" />
               <span className="mt-1.5 block text-[11px] font-normal leading-4 text-muted-foreground">列表与工具清单中展示的可读名称，需手动填写。</span>
             </label>
             <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
               标识 <span className="text-destructive">*</span>
-              <input value={identifier} disabled={!!server} onChange={event => setIdentifier(event.target.value)} placeholder="dmp-mcp-server" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 font-mono text-sm text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring disabled:bg-muted disabled:text-muted-foreground" />
+              <input value={identifier} disabled={!!server} onChange={event => setIdentifier(event.target.value)} placeholder="dmp-mcp-server" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 font-mono text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring disabled:bg-muted disabled:text-muted-foreground" />
               <span className="mt-1.5 block text-[11px] font-normal leading-4 text-muted-foreground">唯一标识，可从客户端 JSON 解析；保存后不可修改。</span>
             </label>
           </div>
           <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
             描述 <span className="text-destructive">*</span>
-            <textarea value={descriptionText} onChange={event => setDescriptionText(event.target.value)} rows={2} placeholder="该 MCP Server 的用途说明，如：提供 DMP 平台的数据检索能力" className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 text-sm leading-5 text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+            <textarea value={descriptionText} onChange={event => setDescriptionText(event.target.value)} rows={2} placeholder="该 MCP Server 的用途说明，如：提供 DMP 平台的数据检索能力" className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 text-sm leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
           <div className="grid gap-4 md:grid-cols-2">
             <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
@@ -290,16 +290,16 @@ export default function McpServerDialog({
             <>
               <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
                 command <span className="text-destructive">*</span>
-                <input value={command} onChange={event => setCommand(event.target.value)} placeholder="npx" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 font-mono text-sm text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                <input value={command} onChange={event => setCommand(event.target.value)} placeholder="npx" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 font-mono text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
                   args JSON
-                  <textarea value={args} onChange={event => setArgs(event.target.value)} rows={5} placeholder={'["-y", "@example/mcp-server"]'} className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                  <textarea value={args} onChange={event => setArgs(event.target.value)} rows={5} placeholder={'["-y", "@example/mcp-server"]'} className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring" />
                 </label>
                 <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
                   env JSON
-                  <textarea value={env} onChange={event => setEnv(event.target.value)} rows={5} placeholder={server ? `留空保持现有环境变量（${server.env_names.join(', ') || '无'}）` : '{\n  "API_KEY": "…"\n}'} className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                  <textarea value={env} onChange={event => setEnv(event.target.value)} rows={5} placeholder={server ? `留空保持现有环境变量（${server.env_names.join(', ') || '无'}）` : '{\n  "API_KEY": "…"\n}'} className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring" />
                 </label>
               </div>
               <p className="rounded-xl border border-[color:var(--color-warning)]/30 bg-[var(--color-warning-bg)] px-4 py-3 text-xs leading-5 text-[var(--color-warning)]">stdio 会在后端容器内启动进程，部署方必须显式启用并允许该 command。环境变量会加密存储且不会回显。</p>
@@ -308,12 +308,12 @@ export default function McpServerDialog({
             <>
               <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
                 MCP URL <span className="text-destructive">*</span>
-                <input type="url" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://mcp.example.com/mcp" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                <input type="url" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://mcp.example.com/mcp" className="mt-1.5 min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring" />
                 <span className="mt-1.5 block text-[11px] font-normal leading-4 text-muted-foreground">公网地址可直接连接；生产环境会拒绝环回、内网和链路本地地址。</span>
               </label>
               <label className="block text-xs font-medium text-[var(--color-text-secondary)]">
                 请求头 JSON
-                <textarea value={headers} onChange={event => setHeaders(event.target.value)} rows={4} placeholder={server ? `留空保持现有请求头（${server.header_names.join(', ') || '无'}）` : '{\n  "Authorization": "Bearer …"\n}'} className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring" />
+                <textarea value={headers} onChange={event => setHeaders(event.target.value)} rows={4} placeholder={server ? `留空保持现有请求头（${server.header_names.join(', ') || '无'}）` : '{\n  "Authorization": "Bearer …"\n}'} className="mt-1.5 w-full resize-y rounded-xl border border-border bg-card p-3 font-mono text-xs leading-5 text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring" />
               </label>
             </>
           )}

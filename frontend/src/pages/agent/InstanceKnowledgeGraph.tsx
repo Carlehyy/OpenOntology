@@ -692,7 +692,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
             value={selectedNode?.kind === 'instance' ? selectedNode.id : ''}
             onChange={event => setSelectedNodeId(event.target.value)}
             aria-label="快速选择实例"
-            className="h-8 max-w-[170px] rounded-md border border-border bg-card px-2 text-xs text-muted-foreground outline-none focus-visible:border-ring"
+            className="h-8 max-w-[170px] rounded-md border border-border bg-card px-2 text-xs text-muted-foreground outline-none"
           >
             <option value="">快速选择实例</option>
             {instanceOptions.map(node => (
@@ -717,7 +717,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
           <div className="flex flex-wrap items-end gap-2 border-t border-border px-3 py-2" data-testid="path-controls">
             <label className="min-w-[150px] flex-1">
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">起点实例</span>
-              <select value={pathSource} onChange={event => setPathSource(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring">
+              <select value={pathSource} onChange={event => setPathSource(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none">
                 <option value="">选择起点</option>
                 {instanceOptions.map(node => <option key={node.entityId} value={node.entityId}>{node.objectTypeLabel} · {node.label}</option>)}
               </select>
@@ -725,7 +725,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
             <ArrowRight size={14} className="mb-2 text-[var(--color-text-tertiary)]" />
             <label className="min-w-[150px] flex-1">
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">终点实例</span>
-              <select value={pathTarget} onChange={event => setPathTarget(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring">
+              <select value={pathTarget} onChange={event => setPathTarget(event.target.value)} className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none">
                 <option value="">选择终点</option>
                 {instanceOptions.map(node => <option key={node.entityId} value={node.entityId}>{node.objectTypeLabel} · {node.label}</option>)}
               </select>
@@ -763,7 +763,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
             </label>
             <label className="min-w-[150px] flex-1">
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">拟议新值</span>
-              <input value={proposedValue} onChange={event => setProposedValue(event.target.value)} disabled={!detail} placeholder="仅模拟，不写入真实数据" className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring disabled:bg-muted" />
+              <input value={proposedValue} onChange={event => setProposedValue(event.target.value)} disabled={!detail} placeholder="仅模拟，不写入真实数据" className="h-8 w-full rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none disabled:bg-muted" />
             </label>
             <label>
               <span className="mb-1 block text-[10px] font-medium text-muted-foreground">传播深度</span>
