@@ -578,6 +578,10 @@ async def process_external_call_message(payload: dict) -> None:
         if content:
             artifact = Artifact(owner_id=current.owner_id, run_id=current.id, call_id=current_call.id, kind="external.result", mime_type="text/markdown", size=len(content.encode("utf-8")), checksum=_checksum(content), storage_ref=f"inline://{current.id}/{current_call.id}", inline_content=content, status="complete", integrity_status="verified", business_status="success" if outcome == CallOutcome.COMPLETED.value else "failed", visibility="owner")
             db.add(artifact); db.flush()
+        if outcome == CallOutcome.COMPLETED.value:
+            structured = _persist_external_artifacts(db, current, current_call, (result or {}).get("artifacts") if isinstance(result, dict) else [])
+            if artifact is None and structured:
+                artifact = structured[0]
         current_call.status, current_call.outcome = CallStatus.CLOSED.value, outcome
         current_call.evidence_ref = f"artifact://{artifact.id}" if artifact else None
         current_call.remote_task_ref = (result or {}).get("remote_task_ref") if isinstance(result, dict) else None

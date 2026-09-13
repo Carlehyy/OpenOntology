@@ -216,6 +216,29 @@ def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, m
     assert artifact.inline_content == "远程研究完成"
 
 
+def test_kernel_external_structured_artifact_is_persisted_and_verified(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="返回结构化结果")
+    target = f"fake.artifact_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {"content": "", "tool_calls": [], "external_call": {"target_ref": target, "message": "生成 JSON"}})
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "artifact-dispatch"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+    class ArtifactConnector:
+        def descriptor(self):
+            return AgentDescriptor(agent_id="artifact-agent", key=target, revision=1, transport="rap.v1")
+        async def invoke(self, **kwargs):
+            return {"status": "answered", "artifacts": [{"kind": "report", "mime_type": "application/json", "content": {"ok": True}}]}
+        async def cancel(self, **kwargs):
+            return {"status": "unsupported"}
+        async def query_status(self, **kwargs):
+            return {"status": "unsupported"}
+    runtime.connector_registry.register(ArtifactConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all()
+    artifact = db.query(Artifact).filter_by(run_id=run.id, kind="report").one()
+    assert artifact.integrity_status == "verified"
+    assert artifact.inline_content == '{"ok": true}'
+
+
 def test_kernel_resolves_rap_pull_agent_as_idempotent_external_task(db, monkeypatch):
     run, owner, _ = _runtime_fixture(db, monkeypatch, goal="委派回连助手")
     agent = SuperAssistantRemoteAgent(
