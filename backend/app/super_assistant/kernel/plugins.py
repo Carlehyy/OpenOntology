@@ -34,6 +34,8 @@ class PluginManifest:
             raise ContractError("plugin manifest requires key, positive revision and entrypoint")
         if not set(self.capabilities) <= host_capabilities:
             raise ContractError("plugin requests capability outside host registry")
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ContractError("plugin capabilities must be unique")
         forbidden = {"event_store.write", "lease.fence", "database.raw"}
         if forbidden & set(self.permissions):
             raise ContractError("plugin cannot access kernel internals")
