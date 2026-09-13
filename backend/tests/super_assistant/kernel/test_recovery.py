@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from app.models.user import User
 from app.super_assistant.models import SuperAssistantConversation
-from app.super_assistant.kernel.models import ExecutionCall, ExecutionEvent, InboxItem
+from app.super_assistant.kernel.models import ExecutionAttempt, ExecutionCall, ExecutionEvent, ExecutionStep, ExecutionTurn, InboxItem
 from app.super_assistant.kernel.policies import ExecutionPolicy
 from app.super_assistant.kernel.recovery import expire_due_runs_once, expire_inbox_once, join_ready_parents_once, recover_stuck_runs_once
 from app.super_assistant.kernel.contracts import CancelReason
@@ -40,6 +40,27 @@ def test_stuck_run_is_fenced_and_woken(db):
     db.refresh(run)
     assert run.lease_owner == "kernel:recovery"
     assert run.lease_epoch == 1
+
+
+def test_stuck_run_fences_orphaned_call_and_attempt(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="stuck-call", idempotency_key="stuck-call")
+    run.status = "active"
+    run.updated_at = run.created_at - timedelta(minutes=10)
+    run.lease_expires_at = run.created_at - timedelta(minutes=10)
+    turn = ExecutionTurn(run_id=run.id, turn_no=0, status="open")
+    db.add(turn); db.flush()
+    step = ExecutionStep(turn_id=turn.id, step_no=0, status="open")
+    db.add(step); db.flush()
+    call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id, call_index=0, capability_key="model.chat", capability_revision=1, idempotency_key="stuck-call-1", status="running", outcome="accepted", lease_epoch=0)
+    db.add(call); db.flush()
+    attempt = ExecutionAttempt(call_id=call.id, attempt_no=1, provider_status="started")
+    db.add(attempt); db.commit()
+    assert recover_stuck_runs_once(db, policy=ExecutionPolicy(stuck_detector=timedelta(minutes=5))) == 1
+    db.refresh(call); db.refresh(attempt); db.refresh(step)
+    assert call.status == "reconciling" and call.outcome == "outcome_unknown" and call.manual_attention is True
+    assert attempt.provider_status == "unknown" and attempt.finished_at is not None
+    assert step.status == "closed"
 
 
 def test_parent_join_wakes_waiting_parent_after_child_completion(db):

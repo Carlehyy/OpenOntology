@@ -32,7 +32,7 @@ def _poll_external_calls_once() -> None:
     try:
         now = _now()
         calls = db.scalars(select(ExecutionCall).where(
-            ExecutionCall.status.in_((CallStatus.WAITING_EXTERNAL.value, CallStatus.RECONCILING.value)),
+            ExecutionCall.status.in_((CallStatus.WAITING_EXTERNAL.value, CallStatus.RECONCILING.value, CallStatus.CANCEL_REQUESTED.value)),
             (ExecutionCall.next_reconcile_at.is_(None)) | (ExecutionCall.next_reconcile_at <= now),
         ).order_by(ExecutionCall.next_reconcile_at, ExecutionCall.id).limit(50)).all()
         for call in calls:

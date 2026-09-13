@@ -44,6 +44,80 @@ def test_duplicate_activation_with_live_lease_is_a_noop(db, monkeypatch):
     assert db.get(ExecutionRun, run.id).status == "active"
 
 
+def test_cancel_during_model_call_closes_call_as_unknown_and_never_completes(db, monkeypatch):
+    from app.super_assistant.kernel.store import cancel_run
+    from app.super_assistant.kernel.contracts import CancelReason
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="cancel race")
+    cancelled = {"done": False}
+
+    def late_cancel(*_args, **_kwargs):
+        if not cancelled["done"]:
+            session = TestSession()
+            current = session.get(ExecutionRun, run.id)
+            cancel_run(session, run_id=run.id, owner_id=owner.id, reason=CancelReason.USER, idempotency_key="race-cancel", expected_version=current.version)
+            session.commit(); session.close()
+            cancelled["done"] = True
+        return {"content": "late result", "tool_calls": []}
+
+    monkeypatch.setattr(runtime.provider, "chat", late_cancel)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "cancel-race"}))
+    db.expire_all()
+    persisted = db.get(ExecutionRun, run.id)
+    assert persisted.status == "cancel_requested"
+    call = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, capability_key="model.chat").one()
+    attempt = db.query(runtime.ExecutionAttempt).filter_by(call_id=call.id).one()
+    assert call.status == "reconciling" and call.outcome == "outcome_unknown"
+    assert attempt.finished_at is not None
+    assert db.query(Artifact).filter_by(run_id=run.id).count() == 0
+
+
+def test_pause_during_model_call_fences_old_activation(db, monkeypatch):
+    from app.super_assistant.kernel.store import control_run
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="pause race")
+    paused = {"done": False}
+
+    def late_pause(*_args, **_kwargs):
+        if not paused["done"]:
+            session = TestSession()
+            current = session.get(ExecutionRun, run.id)
+            control_run(session, run_id=run.id, owner_id=owner.id, action="pause", idempotency_key="race-pause", expected_version=current.version)
+            session.commit(); session.close()
+            paused["done"] = True
+        return {"content": "late result", "tool_calls": []}
+
+    monkeypatch.setattr(runtime.provider, "chat", late_pause)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "pause-race"}))
+    db.expire_all()
+    persisted = db.get(ExecutionRun, run.id)
+    assert persisted.status == "paused" and persisted.lease_owner is None
+    call = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, capability_key="model.chat").one()
+    assert call.status == "reconciling" and call.outcome == "outcome_unknown"
+
+
+def test_stale_worker_failure_reconciles_only_its_fenced_call(db, monkeypatch):
+    from datetime import timedelta
+    from app.super_assistant.kernel.store import acquire_lease
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="stale worker")
+    run.status = "active"
+    token = acquire_lease(db, run_id=run.id, worker_id="worker-a", ttl=timedelta(minutes=5))
+    turn = runtime.ExecutionTurn(run_id=run.id, turn_no=0, status="open")
+    db.add(turn); db.flush()
+    step = runtime.ExecutionStep(turn_id=turn.id, step_no=0, status="open")
+    db.add(step); db.flush()
+    call = runtime.ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id, call_index=0, capability_key="model.chat", capability_revision=1, idempotency_key="stale-call", status="running", outcome="accepted", lease_epoch=token.epoch)
+    db.add(call); db.flush()
+    attempt = runtime.ExecutionAttempt(call_id=call.id, attempt_no=1, provider_status="started")
+    db.add(attempt)
+    run.lease_epoch += 1; run.lease_owner = "worker-b"
+    db.commit()
+    runtime._mark_run_failed(run.id, RuntimeError("stale"), expected_token=token)
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "active"
+    db.refresh(call); db.refresh(attempt); db.refresh(step)
+    assert call.status == "reconciling" and call.outcome == "outcome_unknown"
+    assert attempt.finished_at is not None and step.status == "closed"
+
+
 def test_kernel_activation_persists_attempt_artifact_and_completion(db, monkeypatch):
     owner = User(
         id=str(uuid.uuid4()), username=f"runtime-{uuid.uuid4().hex[:8]}",
@@ -263,6 +337,37 @@ def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, m
     assert external.outcome == "completed"
     artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
     assert artifact.inline_content == "远程研究完成"
+
+
+def test_external_result_after_cancel_preserves_remote_ref_for_cancellation(db, monkeypatch):
+    from app.super_assistant.kernel.store import cancel_run
+    from app.super_assistant.kernel.contracts import CancelReason
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="取消远程任务")
+    target = f"fake.cancel_race_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {"content": "已提交", "tool_calls": [], "external_call": {"target_ref": target, "message": "执行"}})
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "cancel-race-external"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+
+    class CancelRaceConnector:
+        def descriptor(self):
+            return AgentDescriptor(agent_id="cancel-race", key=target, revision=1, transport="rap.v1", session_policy=SessionPolicy.RESUMABLE, supports_cancel=True, supports_query_status=True)
+        async def invoke(self, **kwargs):
+            session = TestSession()
+            current = session.get(ExecutionRun, run.id)
+            cancel_run(session, run_id=run.id, owner_id=owner.id, reason=CancelReason.USER, idempotency_key="external-cancel-race", expected_version=current.version)
+            session.commit(); session.close()
+            return {"status": "running", "remote_task_ref": "remote-42"}
+        async def cancel(self, **kwargs):
+            return {"status": "cancelled", "remote_task_ref": kwargs["remote_task_ref"]}
+        async def query_status(self, **kwargs):
+            return {"status": "running", "remote_task_ref": kwargs["remote_task_ref"]}
+
+    runtime.connector_registry.register(CancelRaceConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all(); db.refresh(external)
+    assert db.get(ExecutionRun, run.id).status == "cancel_requested"
+    assert external.status == "waiting_external" and external.remote_task_ref == "remote-42"
+    assert db.query(runtime.ExecutionAttempt).filter_by(call_id=external.id).one().finished_at is not None
 
 
 def test_kernel_external_structured_artifact_is_persisted_and_verified(db, monkeypatch):

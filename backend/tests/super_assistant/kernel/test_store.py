@@ -4,7 +4,7 @@ import pytest
 
 from app.models.user import User
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
-from app.super_assistant.kernel.models import ExecutionEvent, ExecutionRun, ExecutionDispatchOutbox
+from app.super_assistant.kernel.models import ExecutionCall, ExecutionEvent, ExecutionRun, ExecutionDispatchOutbox
 from app.super_assistant.kernel.store import (
     IdempotencyConflict,
     acquire_lease,
@@ -125,3 +125,14 @@ def test_cancel_parent_propagates_to_non_terminal_descendants(db):
     assert child.cancel_reason == CancelReason.PARENT.value
     assert db.query(ExecutionEvent).filter_by(run_id=child.id, event_type="run.cancel_requested").count() == 1
     assert db.query(ExecutionDispatchOutbox).filter_by(run_id=child.id).count() >= 1
+
+
+def test_cancel_closes_unsent_offered_call_without_invalid_outcome_pair(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="offered", idempotency_key="offered-cancel")
+    db.add(ExecutionCall(run_id=run.id, call_index=0, capability_key="external", capability_revision=1, idempotency_key="offered-call", status="offered", outcome="not_sent"))
+    db.commit()
+    cancel_run(db, run_id=run.id, owner_id=owner.id, reason=CancelReason.USER, idempotency_key="offered-cancel-command", expected_version=1)
+    db.commit()
+    call = db.query(ExecutionCall).filter_by(run_id=run.id).one()
+    assert call.status == "closed" and call.outcome == "not_sent"

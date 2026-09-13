@@ -87,6 +87,49 @@ def _checksum(content: str) -> str:
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _control_outcome(status: str) -> tuple[str, str]:
+    """Return durable Call/Attempt values when control preempts a worker."""
+    if status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value, RunStatus.CANCELLED.value, RunStatus.EXPIRED.value}:
+        # A local cancel request is not evidence that a provider stopped. The
+        # reconciliation path may later promote it to cancelled_confirmed.
+        return CallOutcome.OUTCOME_UNKNOWN.value, "cancelled"
+    return CallOutcome.OUTCOME_UNKNOWN.value, "interrupted"
+
+
+def _close_controlled_model_call(db, run, call, attempt, *, reason: str, lease=None) -> None:
+    """Close a model Call after pause/cancel without claiming a late success."""
+    outcome, provider_status = _control_outcome(run.status)
+    # Unknown control interruption is not proof of cancellation. Keep the
+    # Call reconciling so cancel grace/manual attention can close it honestly.
+    call.status, call.outcome = CallStatus.RECONCILING.value, outcome
+    call.manual_attention = True
+    _append_manual_attention(db, run, call, "control_interrupted")
+    attempt.provider_status = provider_status
+    attempt.safe_to_retry = False
+    attempt.finished_at = attempt.finished_at or _now()
+    append_event(
+        db, run, event_type="call.outcome_changed",
+        payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": None, "provider_event_id": None},
+        actor={"kind": "worker"}, command_id=f"control:{call.id}:outcome", idempotency_key=f"control-outcome:{call.id}", lease=lease,
+    )
+    append_event(
+        db, run, event_type="attempt.result",
+        payload={"attempt_id": attempt.id, "provider_status": attempt.provider_status, "result_ref": None, "error_ref": attempt.error_ref, "safe_to_retry": False, "token_usage_ref": None, "cost_ref": None},
+        actor={"kind": "worker"}, command_id=f"control:{attempt.id}:result", idempotency_key=f"control-result:{attempt.id}", lease=lease,
+    )
+
+
+def _close_controlled_step(db, run, turn, step, *, reason: str, lease=None) -> None:
+    close_reason = "cancelled" if reason in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value, RunStatus.CANCELLED.value, RunStatus.EXPIRED.value} else "paused"
+    if step is not None and step.status != "closed":
+        step.status, step.close_reason, step.closed_at = "closed", close_reason, _now()
+        append_event(db, run, event_type="step.closed", payload={"step_id": step.id, "reason": close_reason}, actor={"kind": "worker"}, command_id=f"control:{step.id}:close", idempotency_key=f"control-step:{step.id}", lease=lease)
+    if turn is not None and turn.status == "open":
+        turn.status, turn.close_reason, turn.closed_at = "closed", close_reason, _now()
+        append_event(db, run, event_type="turn.closed", payload={"turn_id": turn.id, "reason": close_reason}, actor={"kind": "worker"}, command_id=f"control:{turn.id}:close", idempotency_key=f"control-turn:{turn.id}", lease=lease)
+    run.lease_owner, run.lease_expires_at = None, None
+
+
 def _run_id(payload: dict) -> str:
     value = payload.get("run_id") or str(payload.get("message_ref", "")).removeprefix("run://")
     if not value:
@@ -112,11 +155,16 @@ async def _invoke_model_with_retries(
             current_run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
             if current_run is None:
                 raise
-            assert_lease(current_run, token)
             current_call = db.get(ExecutionCall, call.id)
             current_attempt = db.get(ExecutionAttempt, current_attempt.id)
             if current_call is None or current_attempt is None:
                 raise RuntimeError("model Call or Attempt disappeared")
+            if current_run.status != RunStatus.ACTIVE.value:
+                current_attempt.error_ref = str(exc)[:1000]
+                _close_controlled_model_call(db, current_run, current_call, current_attempt, reason=current_run.status, lease=None)
+                db.commit()
+                return {"content": "", "tool_calls": [], "_control_interrupted": True}, current_attempt.id
+            assert_lease(current_run, token)
             retryable = index + 1 < policy.call_max_attempts
             current_attempt.provider_status = "failed"
             current_attempt.error_ref = str(exc)[:1000]
@@ -222,7 +270,7 @@ async def process_execution_message(payload: dict) -> None:
             if turn is None: raise RuntimeError("execution Turn disappeared")
             step = ExecutionStep(turn_id=turn.id, step_no=step_no, status="open")
             db.add(step); db.flush()
-            call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id, call_index=_next_call_index(db, run.id), capability_key="model.chat", capability_revision=1, input_snapshot_ref=f"run:{run.id}:context:{turn.turn_no}:{step_no}", side_effect_class="read_only", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"model:{run.id}:{turn.turn_no}:{step_no}", status="running", outcome="accepted")
+            call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id, call_index=_next_call_index(db, run.id), capability_key="model.chat", capability_revision=1, input_snapshot_ref=f"run:{run.id}:context:{turn.turn_no}:{step_no}", side_effect_class="read_only", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"model:{run.id}:{turn.turn_no}:{step_no}", status="running", outcome="accepted", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at)
             db.add(call); db.flush()
             attempt = ExecutionAttempt(call_id=call.id, attempt_no=1, provider_status="started")
             db.add(attempt); db.flush()
@@ -267,9 +315,17 @@ async def process_execution_message(payload: dict) -> None:
             current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update())
             if current is None:
                 db.rollback(); return
-            assert_lease(current, token)
             if current.status != RunStatus.ACTIVE.value:
+                late_call = db.get(ExecutionCall, call.id)
+                late_attempt = db.get(ExecutionAttempt, attempt_id)
+                late_turn = db.get(ExecutionTurn, turn.id)
+                late_step = db.get(ExecutionStep, step.id)
+                if late_call is not None and late_attempt is not None and late_call.status != CallStatus.CLOSED.value:
+                    _close_controlled_model_call(db, current, late_call, late_attempt, reason=current.status, lease=None)
+                _close_controlled_step(db, current, late_turn, late_step, reason=current.status, lease=None)
+                db.commit()
                 db.rollback(); return
+            assert_lease(current, token)
             run = current
             tool_calls = result.get("tool_calls") or []
             wait = _wait_request(result, tool_calls)
@@ -296,9 +352,18 @@ async def process_execution_message(payload: dict) -> None:
                     }
             content = strip_think_content(str(result.get("content") or ""))
             db.rollback()  # connector/tool adapters may have opened an implicit transaction
-            db.begin(); run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update()); assert run is not None; assert_lease(run, token)
+            db.begin(); run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update()); assert run is not None
             if run.status != RunStatus.ACTIVE.value:
+                late_call = db.get(ExecutionCall, call.id)
+                late_attempt = db.get(ExecutionAttempt, attempt_id)
+                late_turn = db.get(ExecutionTurn, turn.id)
+                late_step = db.get(ExecutionStep, step.id)
+                if late_call is not None and late_attempt is not None and late_call.status != CallStatus.CLOSED.value:
+                    _close_controlled_model_call(db, run, late_call, late_attempt, reason=run.status, lease=None)
+                _close_controlled_step(db, run, late_turn, late_step, reason=run.status, lease=None)
+                db.commit()
                 db.rollback(); return
+            assert_lease(run, token)
             call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt_id)
             artifact = _persist_assistant_artifact(db, run, call, attempt, content, token) if content else None
             _close_model_call(db, run, call, attempt, step, artifact, token)
@@ -627,9 +692,25 @@ async def process_external_call_message(payload: dict) -> None:
             return
         if current.status in {s.value for s in {RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLING, RunStatus.PAUSED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
             # Preserve the late provider result for reconciliation; never
-            # reopen a terminal Run.
-            current_call.status, current_call.outcome = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value
-            current_call.remote_observed_state_ref = "late_terminal_result"
+            # reopen a terminal Run. A remote handle is essential here: the
+            # cancellation grace scheduler can only issue connector.cancel
+            # when it has something durable to address.
+            result_map = result if isinstance(result, dict) else {}
+            remote_ref = result_map.get("remote_task_ref")
+            normalized = str(result_map.get("status") or "unknown").lower()
+            current_call.remote_task_ref = str(remote_ref) if remote_ref else current_call.remote_task_ref
+            current_call.remote_observed_state_ref = "late_provider_result"
+            current_call.next_reconcile_at = _now() if current_call.remote_task_ref else None
+            current_call.status = CallStatus.WAITING_EXTERNAL.value if current_call.remote_task_ref else CallStatus.RECONCILING.value
+            current_call.outcome = CallOutcome.REMOTE_RUNNING.value if current_call.remote_task_ref and normalized in {"running", "pending", "queued", "accepted", "in_progress", "processing"} else CallOutcome.OUTCOME_UNKNOWN.value
+            latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
+            if latest is not None and latest.finished_at is None:
+                latest.provider_status, latest.finished_at, latest.safe_to_retry = normalized, _now(), False
+                append_event(db, current, event_type="attempt.result", payload={"attempt_id": latest.id, "provider_status": normalized, "result_ref": None, "error_ref": "late_control_result", "safe_to_retry": False, "token_usage_ref": None, "cost_ref": None}, actor={"kind": "connector"}, command_id=f"external:{latest.id}:late", idempotency_key=f"external-attempt-late:{latest.id}", connector_id=descriptor.agent_id)
+            if not current_call.remote_task_ref:
+                current_call.manual_attention = True
+                _append_manual_attention(db, current, current_call, "late_control_result")
+            append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": result_map.get("provider_event_id")}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:late", idempotency_key=f"external-late:{current_call.id}", connector_id=descriptor.agent_id, provider_event_id=result_map.get("provider_event_id"))
             db.commit()
             return
         normalized = str(result.get("status") or "failed").lower() if isinstance(result, dict) else "failed"
@@ -894,7 +975,7 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 ensure_ascii=False,
             )
             capability_revision = _capability_revision_for_target(db, run.owner_id, target_ref)
-            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=capability_revision, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running")
+            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=capability_revision, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at)
             db.add(external_call); db.flush()
             append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": capability_revision, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": "external_async", "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
             append_event(db, run, event_type="call.outcome_changed", payload={"call_id": external_call.id, "status": "waiting_external", "outcome": "remote_running", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
@@ -935,6 +1016,32 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
     # A yielded Turn must not hold a worker lease across human/external wait.
     run.lease_owner, run.lease_expires_at = None, None
 
+
+def _fence_stale_activation(db, run, token) -> None:
+    """Reconcile Calls owned by a worker whose lease was fenced."""
+    stale_calls = db.scalars(select(ExecutionCall).where(
+        ExecutionCall.run_id == run.id,
+        ExecutionCall.lease_epoch == token.epoch,
+        ExecutionCall.status.in_((CallStatus.OFFERED.value, CallStatus.DISPATCHED.value, CallStatus.RUNNING.value)),
+    ).with_for_update()).all()
+    for call in stale_calls:
+        call.status, call.outcome, call.manual_attention = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value, True
+        call.remote_observed_state_ref = "worker_fenced"
+        attempt = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc()).with_for_update())
+        if attempt is not None and attempt.finished_at is None:
+            attempt.provider_status, attempt.finished_at, attempt.safe_to_retry = "unknown", _now(), False
+            append_event(db, run, event_type="attempt.result", payload={"attempt_id": attempt.id, "provider_status": "unknown", "result_ref": None, "error_ref": "worker_fenced", "safe_to_retry": False, "token_usage_ref": None, "cost_ref": None}, actor={"kind": "system"}, command_id=f"stale:{attempt.id}:result", idempotency_key=f"stale-attempt:{attempt.id}")
+        if call.step_id:
+            step = db.get(ExecutionStep, call.step_id)
+            if step is not None and step.status != "closed":
+                step.status, step.close_reason, step.closed_at = "closed", "interrupted", _now()
+            if step is not None:
+                turn = db.get(ExecutionTurn, step.turn_id)
+                if turn is not None and turn.status == "open":
+                    turn.status, turn.close_reason, turn.closed_at = "closed", "interrupted", _now()
+                    append_event(db, run, event_type="turn.closed", payload={"turn_id": turn.id, "reason": "interrupted"}, actor={"kind": "system"}, command_id=f"stale:{turn.id}:close", idempotency_key=f"stale-turn:{turn.id}")
+        append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "system"}, command_id=f"stale:{call.id}:outcome", idempotency_key=f"stale-call:{call.id}", connector_id=call.target_ref)
+
 def _mark_run_failed(run_id: str, exc: Exception, *, expected_token=None) -> None:
     db = SessionLocal()
     try:
@@ -947,8 +1054,11 @@ def _mark_run_failed(run_id: str, exc: Exception, *, expected_token=None) -> Non
                 assert_lease(run, expected_token)
             except Exception:
                 # A duplicate or stale activation must never overwrite the
-                # current worker's projection with FAILED.
-                db.rollback()
+                # current worker's projection with FAILED. Reconcile only
+                # Calls carrying this fenced epoch; a newer worker's Calls
+                # remain untouched.
+                _fence_stale_activation(db, run, expected_token)
+                db.commit()
                 return
         elif "lease is held by another worker" in str(exc) or "terminal Run cannot acquire lease" in str(exc):
             db.rollback()
@@ -1237,7 +1347,7 @@ async def _process_assistant_child(db, run: ExecutionRun, token, policy: Executi
         capability_key=f"assistant_hub:{binding.get('assistant_key')}", capability_revision=1,
         target_ref=str(binding.get("assistant_key") or ""), input_snapshot_ref=run.goal,
         side_effect_class="read_only", authorization_snapshot_ref=run.permission_snapshot_ref,
-        idempotency_key=f"assistant-child:{run.id}", status="running", outcome="accepted",
+        idempotency_key=f"assistant-child:{run.id}", status="running", outcome="accepted", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at,
     )
     db.add(call); db.flush()
     attempt = ExecutionAttempt(call_id=call.id, attempt_no=1, provider_status="started")
@@ -1261,12 +1371,20 @@ async def _process_assistant_child(db, run: ExecutionRun, token, policy: Executi
     current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
     if current is None:
         db.rollback(); return
-    assert_lease(current, token)
     if current.status != RunStatus.ACTIVE.value:
         # The Hub result arrived after pause/cancel. Preserve the control
         # decision and avoid projecting a successful child completion.
+        late_call = db.get(ExecutionCall, call.id)
+        late_attempt = db.get(ExecutionAttempt, attempt.id)
+        late_turn = db.get(ExecutionTurn, turn.id)
+        late_step = db.get(ExecutionStep, step.id)
+        if late_call is not None and late_attempt is not None and late_call.status != CallStatus.CLOSED.value:
+            _close_controlled_model_call(db, current, late_call, late_attempt, reason=current.status, lease=None)
+        _close_controlled_step(db, current, late_turn, late_step, reason=current.status, lease=None)
+        db.commit()
         db.rollback()
         return
+    assert_lease(current, token)
     call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt.id); turn = db.get(ExecutionTurn, turn.id); step = db.get(ExecutionStep, step.id)
     artifact = None
     if content:

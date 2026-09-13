@@ -24,6 +24,7 @@ from .contracts import (
 from .events import EventEnvelope, validate_payload
 from .models import (
     InboxItem,
+    ExecutionCall,
     ExecutionCommand,
     ExecutionDispatchOutbox,
     ExecutionEvent,
@@ -311,11 +312,20 @@ def cancel_run(
     before = run.status
     next_state = request_cancel(_state_from_run(run), reason)
     run.status, run.cancel_reason = next_state.status.value, next_state.cancel_reason.value if next_state.cancel_reason else None
+    # Fence any in-flight worker immediately. It may still submit facts with a
+    # row lock, but it cannot continue tool/model side effects under the old
+    # epoch; cancel grace and recovery own the remaining closure.
+    run.lease_epoch += 1
+    run.lease_owner, run.lease_expires_at = None, None
     # Cancellation is a two-phase protocol.  The worker gets a bounded grace
     # period to confirm remote cancellation; the scheduler closes the Run
     # after this deadline even if the connector is unavailable.
     run.cancel_deadline = _now() + CANCEL_GRACE
     run.version += 1
+    # Mark in-flight Calls before publishing the cancellation wake-up. The
+    # external reconciler can then issue connector.cancel when a remote handle
+    # exists; a delayed invoke message will be rejected by the runtime gate.
+    _mark_calls_cancel_requested(db, run, command_id=command.command_id, actor={"kind": "user"})
     append_event(
         db, run, event_type="run.cancel_requested",
         payload={"reason": reason.value, "cancel_reason": reason.value, "actor": "user"},
@@ -330,6 +340,24 @@ def cancel_run(
     _add_outbox(db, run, command_id=command.command_id, message_ref=f"command://{command.command_id}")
     command.result = {"status": run.status, "version": run.version}
     return run
+
+
+def _mark_calls_cancel_requested(db: Session, run: ExecutionRun, *, command_id: str, actor: dict[str, str]) -> None:
+    """Move in-flight Calls onto the cancellation/reconciliation path."""
+    active_calls = db.scalars(select(ExecutionCall).where(
+        ExecutionCall.run_id == run.id,
+        ExecutionCall.status.in_(("offered", "dispatched", "running", "waiting_external", "reconciling")),
+    ).with_for_update()).all()
+    for call in active_calls:
+        if call.status in {"offered", "dispatched"} and call.outcome == "not_sent":
+            call.status, call.outcome = "closed", "not_sent"
+        else:
+            call.status, call.outcome = "cancel_requested", "outcome_unknown"
+        append_event(
+            db, run, event_type="call.outcome_changed",
+            payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": call.evidence_ref, "connector_id": call.target_ref, "provider_event_id": call.provider_event_id},
+            actor=actor, command_id=f"cancel:{command_id}:{call.id}", idempotency_key=f"cancel-call:{command_id}:{call.id}", connector_id=call.target_ref,
+        )
 
 
 def _cascade_cancel_children(db: Session, parent: ExecutionRun, *, parent_command_id: str) -> None:
@@ -354,7 +382,10 @@ def _cascade_cancel_children(db: Session, parent: ExecutionRun, *, parent_comman
                 RunStatus.COMPLETED.value, RunStatus.FAILED.value,
             }:
                 continue
+            child.lease_epoch += 1
+            child.lease_owner, child.lease_expires_at = None, None
             child_key = f"parent-cancel:{parent_command_id}:{child.id}"
+            _mark_calls_cancel_requested(db, child, command_id=child_key, actor={"kind": "system"})
             child_command, replayed = record_command(
                 db, child, kind="cancel", idempotency_key=child_key,
                 payload={"reason": CancelReason.PARENT.value, "parent_command_id": parent_command_id},
@@ -405,12 +436,19 @@ def control_run(
         if run.status != RunStatus.ACTIVE.value:
             raise ContractError("only active Run can pause")
         run.status = RunStatus.PAUSED.value
+        # Pausing invalidates the current activation. Resume will mint a new
+        # epoch so a late provider result cannot pass fencing and continue a
+        # stale tool loop.
+        run.lease_epoch += 1
+        run.lease_owner, run.lease_expires_at = None, None
         event_type = "run.pause_requested"
         payload = {"reason": "user", "pause_reason": "user", "actor": "user"}
     elif action == "resume":
         if run.status != RunStatus.PAUSED.value:
             raise ContractError("only paused Run can resume")
         run.status = RunStatus.ACTIVE.value
+        run.lease_epoch += 1
+        run.lease_owner, run.lease_expires_at = None, None
         event_type = "run.recovery_requested"
         payload = {"reason": "user_resume", "lease_epoch": run.lease_epoch, "diagnostic_ref": None}
     else:
@@ -505,6 +543,8 @@ def renew_lease(db: Session, *, token: LeaseToken, ttl: timedelta = timedelta(se
     if ttl <= timedelta(0):
         raise ContractError("lease ttl must be positive")
     run = _lock_run(db, token.run_id)
+    if run.status not in {RunStatus.ACTIVE.value, RunStatus.QUEUED.value}:
+        raise ContractError("non-active Run cannot renew lease")
     assert_lease(run, token)
     expires_at = _now() + ttl
     run.lease_expires_at = expires_at

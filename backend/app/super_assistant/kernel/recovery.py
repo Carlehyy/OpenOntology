@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .contracts import RunStatus
-from .models import Approval, Artifact, ExecutionCall, ExecutionEvent, ExecutionRun, InboxItem
+from .models import Approval, Artifact, ExecutionAttempt, ExecutionCall, ExecutionEvent, ExecutionRun, ExecutionStep, ExecutionTurn, InboxItem
 from .policies import ChildResult, ChildStatus, ExecutionPolicy, JoinDecision, JoinPolicy, decide_child_join
 from .reconciler import decide_run_timeout, should_recover_run
 from .store import _add_outbox, _now, acquire_lease, append_event
@@ -180,6 +180,7 @@ def recover_stuck_runs_once(db: Session, *, policy: ExecutionPolicy | None = Non
         if not should_recover_run(status=RunStatus(run.status), updated_at=updated_at, now=now, policy=policy):
             continue
         token = acquire_lease(db, run_id=run.id, worker_id="kernel:recovery", ttl=policy.lease_ttl)
+        _fence_orphaned_calls(db, run, token)
         run.version += 1
         append_event(
             db, run, event_type="run.recovery_requested",
@@ -190,6 +191,33 @@ def recover_stuck_runs_once(db: Session, *, policy: ExecutionPolicy | None = Non
         changed += 1
     db.commit()
     return changed
+
+
+def _fence_orphaned_calls(db: Session, run: ExecutionRun, token) -> None:
+    """Close only calls left by a fenced worker, preserving remote waits."""
+    rows = db.scalars(select(ExecutionCall).where(
+        ExecutionCall.run_id == run.id,
+        ExecutionCall.status.in_(("offered", "dispatched", "running")),
+        ExecutionCall.lease_epoch != token.epoch,
+    ).with_for_update()).all()
+    for call in rows:
+        call.status = "reconciling"
+        call.outcome = "outcome_unknown"
+        call.manual_attention = True
+        call.remote_observed_state_ref = "worker_fenced"
+        attempt = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc()).with_for_update())
+        if attempt is not None and attempt.finished_at is None:
+            attempt.provider_status, attempt.finished_at, attempt.safe_to_retry = "unknown", _now(), False
+            append_event(db, run, event_type="attempt.result", payload={"attempt_id": attempt.id, "provider_status": "unknown", "result_ref": None, "error_ref": "worker_fenced", "safe_to_retry": False, "token_usage_ref": None, "cost_ref": None}, actor={"kind": "system"}, command_id=f"recovery:{attempt.id}:fenced", idempotency_key=f"recovery-attempt-fenced:{attempt.id}", lease=token)
+        if call.step_id:
+            step = db.get(ExecutionStep, call.step_id)
+            if step is not None and step.status != "closed":
+                step.status, step.close_reason, step.closed_at = "closed", "interrupted", _now()
+            if step is not None:
+                turn = db.get(ExecutionTurn, step.turn_id)
+                if turn is not None and turn.status == "open":
+                    turn.status, turn.close_reason, turn.closed_at = "closed", "interrupted", _now()
+        append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "system"}, command_id=f"recovery:{call.id}:fenced", idempotency_key=f"recovery-call-fenced:{call.id}", lease=token, connector_id=call.target_ref)
 
 
 def join_ready_parents_once(db: Session, *, limit: int = 100) -> int:
