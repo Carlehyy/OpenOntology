@@ -254,7 +254,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 - pending user Inbox 在模型结果成功落库的同一事务中才标记 consumed；模型失败或进程崩溃会保留 pending，等待下一次 activation。
 - MCP、Remote Agent 和 Multica 的 Call 固定 `capability_revision` 与 manifest hash。配置或凭据变更撤销当前 revision；旧 Call 不会重定向到新端点，而是进入 `outcome_unknown/manual_attention`。
 - mutation API 要求 body/header 幂等键一致；控制、重试、输入和审批使用 `If-Match`，SSE snapshot 使用 `data.run`，Artifact 下载声明 `application/octet-stream`。
-- 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；`backend/tests/super_assistant/kernel/` 当前为 `151 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
+- 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；此前记录的 Kernel 专项为 `151 passed`，本轮包含新增连接器/callback/插件回归的完整 `backend/tests/super_assistant/kernel/` 为 `159 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
 
 本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3555 passed, 6 skipped`；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单和 JetStream 策略漂移测试均已通过；核心定向集合为 `273 passed, 1 skipped`。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
 
