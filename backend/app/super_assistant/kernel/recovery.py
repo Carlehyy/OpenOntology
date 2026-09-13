@@ -268,3 +268,9 @@ def _merge_child_result(db: Session, parent: ExecutionRun, child: ExecutionRun) 
         actor={"kind": "system"}, command_id=f"child-artifact:{artifact.id}:complete",
         idempotency_key=f"child-artifact:{provenance}:complete",
     )
+    append_event(
+        db, parent, event_type="assistant.message",
+        payload={"attempt_id": artifact.id, "message_ref": f"artifact://{artifact.id}"},
+        actor={"kind": "system"}, command_id=f"child-artifact:{artifact.id}:message",
+        idempotency_key=f"child-artifact:{provenance}:message",
+    )

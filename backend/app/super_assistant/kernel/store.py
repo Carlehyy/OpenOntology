@@ -173,7 +173,8 @@ def create_run(
             raise ContractError("delegated binding requires editing draft and write permission")
         _validate_delegated_binding(db, owner_id=owner_id, binding=binding)
     elif mode not in {"direct_ui", "legacy"}:
-        raise ContractError("unknown binding_mode")
+        if mode != "assistant_child" or not binding.get("assistant_key"):
+            raise ContractError("unknown binding_mode")
     run = ExecutionRun(
         id=_new_id(), owner_id=owner_id, conversation_id=conversation_id,
         parent_run_id=parent_run_id, execution_version="kernel.v1", status="queued",

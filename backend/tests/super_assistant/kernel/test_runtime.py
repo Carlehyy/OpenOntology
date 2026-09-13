@@ -87,6 +87,42 @@ def test_kernel_runtime_runs_multiple_model_steps_and_persists_each_step(db, mon
     assert db.query(runtime.ExecutionAttempt).join(runtime.ExecutionCall).filter(runtime.ExecutionCall.run_id == run.id).count() == 2
 
 
+def test_kernel_hub_delegation_creates_bound_child_run(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派任务")
+    result = runtime._invoke_hub_delegation(db, run, {"assistant": "ontology_agent", "task": "分析本体"})
+    payload = __import__("json").loads(result)
+    assert payload["status"] == "queued"
+    child = db.get(ExecutionRun, payload["child_run_id"])
+    assert child is not None
+    assert child.parent_run_id == run.id
+    assert __import__("json").loads(child.binding_snapshot_ref)["binding_mode"] == "assistant_child"
+    assert payload["child_run_id"] in (db.get(ExecutionRun, run.id).required_child_ids or [])
+
+
+def test_kernel_hub_child_result_is_merged_into_parent(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派任务")
+    result = runtime._invoke_hub_delegation(db, run, {"assistant": "ontology_agent", "task": "分析本体"})
+    child_id = __import__("json").loads(result)["child_run_id"]
+    db.commit()
+    def fake_hub(*_args, **_kwargs):
+        if False:
+            yield None
+        return __import__("json").dumps({"status": "answered", "content": "子助手完成"}, ensure_ascii=False)
+    monkeypatch.setattr(runtime.delegation, "run_delegation_tool", fake_hub)
+    asyncio.run(runtime.process_execution_message({"run_id": child_id, "command_id": "child-run"}))
+    db.expire_all()
+    assert db.get(ExecutionRun, child_id).status == "completed"
+    parent = db.get(ExecutionRun, run.id)
+    parent.status = "waiting_external"
+    db.commit()
+    from app.super_assistant.kernel.recovery import join_ready_parents_once
+    join_ready_parents_once(db)
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "active"
+    merged = db.query(Artifact).filter_by(run_id=run.id, kind="child.result").one()
+    assert "子助手完成" in merged.inline_content
+
+
 def test_kernel_runtime_yields_for_input_then_resumes_in_a_new_turn(db, monkeypatch):
     run, owner, _ = _runtime_fixture(db, monkeypatch, goal="需要用户确认")
     monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {"content": "请补充信息", "tool_calls": [], "wait_for_input": {"question_id": "q-1", "question": "项目名称？"}})

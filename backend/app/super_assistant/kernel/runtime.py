@@ -36,7 +36,7 @@ from .models import (
     InboxItem,
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
-from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, renew_lease
+from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, create_run, renew_lease
 from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, ProcessPluginConnector, TrustLevel
 
 
@@ -123,8 +123,12 @@ async def process_execution_message(payload: dict) -> None:
         if conversation is None: raise RuntimeError("conversation missing for execution Run")
         messages = _rebuild_messages(db, run)
         delegation_tools = delegation.delegation_tools(db, run.owner_id)
-        tools = delegation_tools
+        tools = [*delegation_tools, *_kernel_connector_tool_schemas(db, run.owner_id)]
         db.commit()
+        binding = _binding_snapshot(run)
+        if binding.get("binding_mode") == "assistant_child":
+            await _process_assistant_child(db, run, token, policy, binding)
+            return
         turn = _open_turn(db, run, trigger_ref=str(payload.get("message_ref") or f"run:{run.id}"), lease=token)
         db.commit()
         from sqlalchemy import func
@@ -192,6 +196,12 @@ async def process_execution_message(payload: dict) -> None:
                     if tool_call.get("name") == "delegate_to_assistant" and not handled:
                         delegate_result = _invoke_hub_delegation(db, run, tool_call.get("arguments") or {})
                         messages.extend([{ "role": "assistant", "content": result.get("content"), "tool_calls": tool_calls }, { "role": "tool", "tool_call_id": tool_call.get("id"), "name": tool_call.get("name"), "content": delegate_result }])
+                        try:
+                            delegate_payload = json.loads(delegate_result)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            delegate_payload = {}
+                        if delegate_payload.get("status") == "queued" and delegate_payload.get("child_run_id"):
+                            wait = {"kind": "child_run", "reason": "delegation", "target_ref": str(delegate_payload["child_run_id"]), "input_ref": delegate_result}
                         handled = True; break
                 if not handled:
                     tool_call = tool_calls[0]
@@ -602,6 +612,59 @@ def _policy_for_run(run: ExecutionRun) -> ExecutionPolicy:
     return ExecutionPolicy(max_steps=max_steps)
 
 
+def _kernel_connector_tool_schemas(db, owner_id: str) -> list[dict]:
+    """Expose only persisted, owner-scoped connector capabilities to the model.
+
+    The model receives a small routing schema; authorization and immutable
+    revision checks still happen later at Call dispatch.  Unknown tool names
+    therefore cannot become an implicit capability merely because a provider
+    emitted them.
+    """
+    tools: list[dict] = []
+    seen: set[str] = set()
+    try:
+        from app.super_assistant.models import SuperAssistantMcpServer, SuperAssistantProcessPlugin, SuperAssistantRemoteAgent
+        from app.super_assistant.mcp_client import namespaced_tool_name
+        servers = db.scalars(select(SuperAssistantMcpServer).where(SuperAssistantMcpServer.owner_id == owner_id, SuperAssistantMcpServer.enabled.is_(True))).all()
+        for server in servers:
+            for item in server.tool_manifest or []:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                name = namespaced_tool_name(server.name, str(item["name"]))
+                if name in seen:
+                    continue
+                schema = item.get("input_schema") or {"type": "object", "properties": {}, "additionalProperties": True}
+                tools.append({"name": name, "description": f"MCP {server.name}: {item.get('description') or item['name']}", "parameters": schema})
+                seen.add(name)
+        agents = db.scalars(select(SuperAssistantRemoteAgent).where(SuperAssistantRemoteAgent.owner_id == owner_id, SuperAssistantRemoteAgent.enabled.is_(True))).all()
+        for agent in agents:
+            if agent.key in seen:
+                continue
+            tools.append({"name": agent.key, "description": f"外部助手：{agent.label}。通过异步任务执行并返回结果。", "parameters": {"type": "object", "properties": {"task": {"type": "string"}, "session_ref": {"type": ["string", "null"]}}, "required": ["task"], "additionalProperties": False}})
+            seen.add(agent.key)
+        plugins = db.scalars(select(SuperAssistantProcessPlugin).where(SuperAssistantProcessPlugin.owner_id == owner_id, SuperAssistantProcessPlugin.state == "enabled")).all()
+        for plugin in plugins:
+            name = plugin.id
+            if name in seen:
+                continue
+            tools.append({"name": name, "description": f"用户插件：{plugin.display_name or plugin.key}。", "parameters": {"type": "object", "properties": {"arguments": {"type": "object"}}, "additionalProperties": False}})
+            seen.add(name)
+    except Exception:
+        logger.exception("failed to build owner-scoped kernel connector schemas")
+    if any(name not in seen for name in ("multica_list_agents", "multica_list_tasks", "multica_create_task")):
+        try:
+            from app.super_assistant import multica_service
+            if multica_service.active_config(db, owner_id) is not None:
+                for name in ("multica_list_agents", "multica_list_tasks", "multica_create_task"):
+                    if name in seen:
+                        continue
+                    tools.append({"name": name, "description": f"Multica {name.removeprefix('multica_')}", "parameters": {"type": "object", "properties": {}, "additionalProperties": True}})
+                    seen.add(name)
+        except Exception:
+            logger.exception("failed to build Multica kernel schemas")
+    return tools
+
+
 def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
     messages = [{"role": "system", "content": "你是 OpenOntology 的超级助手。请直接完成用户目标，并在无法完成时说明原因。"}, {"role": "user", "content": run.goal}]
     message_events = db.scalars(select(ExecutionEvent).where(ExecutionEvent.run_id == run.id, ExecutionEvent.event_type == "assistant.message").order_by(ExecutionEvent.seq)).all()
@@ -676,7 +739,7 @@ def _close_model_call(db, run, call, attempt, step, artifact, token):
 
 
 def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
-    kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None; expiry_policy = None
+    kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None; external_call = None; question_expires_at = None; expiry_policy = None
     if kind == "approval_decision":
         from .models import Approval
         approval = Approval(owner_id=run.owner_id, run_id=run.id, call_id=call.id if call is not None else None, target_summary=str(wait.get("target_summary") or "需要用户审批"), parameter_summary=str(wait.get("parameter_summary") or "{}"), scope_summary=str(wait.get("scope_summary") or "run scope"), capability_revision=1, parameter_hash=_checksum(str(wait)), status="pending", expires_at=min(run.deadline or (_now() + timedelta(hours=24)), _now() + timedelta(hours=1)))
@@ -684,7 +747,6 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
         inbox = InboxItem(run_id=run.id, kind=kind, priority=10, status="pending", approval_id=approval.id, target_ref=target_ref or approval.id, payload={"approval_id": approval.id}, source="system", expires_at=approval.expires_at, expiry_policy="fail_run", idempotency_key=f"approval:{approval.id}"); db.add(inbox); db.flush()
         append_event(db, run, event_type="approval.requested", payload={"approval_id": approval.id, "run_id": run.id, "call_id": approval.call_id, "scope_snapshot_ref": run.permission_snapshot_ref or f"run://{run.id}/scope", "expires_at": approval.expires_at.isoformat()}, actor={"kind": "worker"}, command_id=f"approval:{approval.id}", idempotency_key=f"approval-request:{approval.id}", lease=token)
     elif kind in {"question_answer", "external_event"}:
-        external_call = None
         if kind == "external_event" and call is not None:
             # The model decision is closed above; the requested remote work is
             # a separate long-lived Call so reconciliation can advance it
@@ -705,16 +767,17 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 message_ref=f"call://{external_call.id}",
                 subject=f"sa.execution.call.{run.owner_id}",
             )
-        question_expires_at = None
         if kind == "question_answer":
             deadline = run.deadline
             if deadline is not None and deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
             question_expires_at = min(deadline, _now() + timedelta(minutes=30)) if deadline else _now() + timedelta(minutes=30)
             expiry_policy = "reask_once"
+    if kind != "child_run":
         inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", call_id=external_call.id if external_call is not None else None, question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", expires_at=question_expires_at, expiry_policy=expiry_policy, idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
-    before = run.status; run.status = {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
-    append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id if inbox else f"run:{run.id}:wait", "kind": kind, "target_ref": target_ref or (inbox.id if inbox else run.id), "expiry_policy": expiry_policy or "none"}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)
+    before = run.status; run.status = {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "child_run": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
+    if inbox is not None:
+        append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id, "kind": kind, "target_ref": target_ref or inbox.id, "expiry_policy": expiry_policy or "none"}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)
     reason = {
         "waiting_input": "waiting_input", "waiting_approval": "waiting_approval",
         "waiting_external": "waiting_external", "waiting_retry": "waiting_retry",
@@ -954,13 +1017,118 @@ def _append_manual_attention(db, run: ExecutionRun, call: ExecutionCall, observe
     )
 
 
+def _binding_snapshot(run: ExecutionRun) -> dict:
+    try:
+        value = json.loads(run.binding_snapshot_ref or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _child_ref_from_result(value: str) -> str:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value
+    return str(parsed.get("child_run_id") or value) if isinstance(parsed, dict) else value
+
+
 def _invoke_hub_delegation(db, run: ExecutionRun, arguments: dict) -> str:
-    generator = delegation.run_delegation_tool(
-        db, owner_id=run.owner_id, conversation_id=run.conversation_id,
-        arguments=arguments, should_cancel=lambda: False,
+    """Create a durable Kernel child Run for an Assistant Hub delegation."""
+    assistant_key = str(arguments.get("assistant") or arguments.get("assistant_key") or "").strip()
+    task = str(arguments.get("task") or "").strip()
+    if not assistant_key or not task:
+        return json.dumps({"status": "failed", "error": "assistant and task are required"}, ensure_ascii=False)
+    binding = {
+        "binding_mode": "assistant_child", "assistant_key": assistant_key,
+        "session": str(arguments.get("session") or "resume"),
+        "context": arguments.get("context") if isinstance(arguments.get("context"), dict) else {},
+    }
+    try:
+        child, replayed = create_run(
+            db, owner_id=run.owner_id, conversation_id=run.conversation_id,
+            goal=task, idempotency_key=f"delegate:{run.id}:{assistant_key}:{hashlib.sha256(task.encode()).hexdigest()[:16]}",
+            parent_run_id=run.id, join_policy="all", max_steps=8, binding=binding,
+        )
+        return json.dumps({"status": "queued", "child_run_id": child.id, "assistant": assistant_key, "replayed": replayed}, ensure_ascii=False)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("kernel child delegation creation failed for run=%s", run.id)
+        return json.dumps({"status": "failed", "error": str(exc)[:500]}, ensure_ascii=False)
+
+
+def _run_hub_child(owner_id: str, conversation_id: str, binding: dict, task: str) -> str:
+    """Execute one Hub turn in a worker-owned session for a child Run."""
+    child_db = SessionLocal()
+    try:
+        arguments = {
+            "assistant": binding.get("assistant_key"), "task": task,
+            "session": binding.get("session") or "resume", "context": binding.get("context") or {},
+        }
+        generator = delegation.run_delegation_tool(
+            child_db, owner_id=owner_id, conversation_id=conversation_id,
+            arguments=arguments, should_cancel=lambda: False,
+        )
+        while True:
+            try:
+                next(generator)
+            except StopIteration as stop:
+                return str(stop.value or "")
+    finally:
+        child_db.close()
+
+
+async def _process_assistant_child(db, run: ExecutionRun, token, policy: ExecutionPolicy, binding: dict) -> None:
+    """Run the Hub adapter as a first-class child Run and close its facts."""
+    turn = _open_turn(db, run, trigger_ref=f"run:{run.id}:assistant-child", lease=token)
+    step = ExecutionStep(turn_id=turn.id, step_no=0, status="open")
+    db.add(step); db.flush()
+    call = ExecutionCall(
+        run_id=run.id, turn_id=turn.id, step_id=step.id, call_index=0,
+        capability_key=f"assistant_hub:{binding.get('assistant_key')}", capability_revision=1,
+        target_ref=str(binding.get("assistant_key") or ""), input_snapshot_ref=run.goal,
+        side_effect_class="read_only", authorization_snapshot_ref=run.permission_snapshot_ref,
+        idempotency_key=f"assistant-child:{run.id}", status="running", outcome="accepted",
     )
-    while True:
-        try:
-            next(generator)
-        except StopIteration as stop:
-            return str(stop.value or "")
+    db.add(call); db.flush()
+    attempt = ExecutionAttempt(call_id=call.id, attempt_no=1, provider_status="started")
+    db.add(attempt); db.flush()
+    append_event(db, run, event_type="call.intent", payload={"call_id": call.id, "capability_key": call.capability_key, "capability_revision": 1, "input_snapshot_ref": run.goal, "side_effect_class": "read_only", "idempotency_key": call.idempotency_key}, actor={"kind": "worker"}, command_id=f"child:{call.id}:intent", idempotency_key=f"child:{call.id}:intent", lease=token)
+    db.commit()
+    stop = asyncio.Event()
+    heartbeat = asyncio.create_task(_lease_heartbeat(run.id, token, policy, stop))
+    try:
+        raw = await asyncio.to_thread(_run_hub_child, run.owner_id, run.conversation_id, binding, run.goal)
+    finally:
+        stop.set(); await heartbeat
+    try:
+        result = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        result = {"status": "failed", "error": "invalid Hub result"}
+    status = str(result.get("status") or "failed")
+    content = str(result.get("content") or result.get("error") or "")[:20000]
+    db.rollback()
+    db.begin()
+    current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
+    if current is None:
+        db.rollback(); return
+    assert_lease(current, token)
+    call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt.id); turn = db.get(ExecutionTurn, turn.id); step = db.get(ExecutionStep, step.id)
+    artifact = None
+    if content:
+        artifact = Artifact(owner_id=current.owner_id, run_id=current.id, call_id=call.id, kind="assistant.child.result", mime_type="text/markdown", size=len(content.encode()), checksum=_checksum(content), storage_ref=f"inline://{current.id}/{attempt.id}", inline_content=content, status="complete", integrity_status="verified", business_status="success" if status == "answered" else "failed", visibility="owner")
+        db.add(artifact); db.flush()
+    outcome = "completed" if status == "answered" else ("cancelled_confirmed" if status == "cancelled" else "failed")
+    call.status, call.outcome, call.evidence_ref = "closed", outcome, f"artifact://{artifact.id}" if artifact else None
+    attempt.provider_status, attempt.result_ref, attempt.finished_at = status, call.evidence_ref, _now()
+    step.status, step.close_reason, step.closed_at = "closed", "decision_complete", _now()
+    turn.status, turn.close_reason, turn.closed_at = "closed", "completed" if status == "answered" else outcome, _now()
+    append_event(db, current, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": call.evidence_ref, "connector_id": binding.get("assistant_key"), "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"child:{call.id}:outcome", idempotency_key=f"child:{call.id}:outcome", lease=token)
+    append_event(db, current, event_type="attempt.result", payload={"attempt_id": attempt.id, "provider_status": status, "result_ref": call.evidence_ref, "error_ref": None if status == "answered" else str(result.get("error") or "hub_failed")[:1000], "safe_to_retry": False, "token_usage_ref": None, "cost_ref": None}, actor={"kind": "worker"}, command_id=f"child:{attempt.id}:result", idempotency_key=f"child:{attempt.id}:result", lease=token)
+    if artifact is not None:
+        append_event(db, current, event_type="assistant.message", payload={"attempt_id": attempt.id, "message_ref": f"artifact://{artifact.id}"}, actor={"kind": "worker"}, command_id=f"child:{artifact.id}:message", idempotency_key=f"child:{artifact.id}:message", lease=token)
+    before = current.status
+    current.status, current.version, current.finished_at, current.wait_reason = ("completed" if status == "answered" else "failed"), current.version + 1, _now(), None
+    append_event(db, current, event_type="run.status_changed", payload={"from": before, "to": current.status, "reason": "assistant_child_result", "actor": "worker", "version": current.version}, actor={"kind": "worker"}, command_id=f"child:{current.id}:status", idempotency_key=f"child:{current.id}:status", lease=token)
+    current.lease_owner, current.lease_expires_at = None, None
+    db.commit()
