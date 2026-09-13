@@ -288,7 +288,14 @@ def join_ready_parents_once(db: Session, *, limit: int = 100) -> int:
             append_event(db, parent, event_type="run.status_changed", payload={"from": before, "to": parent.status, "reason": "child_join", "actor": "system", "version": parent.version}, actor={"kind": "system"}, command_id=f"join-status:{parent.id}:{parent.version}", idempotency_key=f"join-status:{parent.id}:{parent.version}")
             if parent.status == RunStatus.ACTIVE.value:
                 _add_outbox(db, parent, command_id=f"join-dispatch:{parent.id}:{parent.version}", message_ref=f"run://{parent.id}")
-        changed += 1
+        # Preserve the historical return contract for cancellation scans:
+        # cancellation is intentionally not counted as a parent change even
+        # though the durable child_joined facts above are retained.
+        if transitioned or parent.status not in {
+            RunStatus.CANCEL_REQUESTED.value,
+            RunStatus.CANCELLING.value,
+        }:
+            changed += 1
     db.commit()
     return changed
 
