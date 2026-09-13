@@ -208,19 +208,19 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14）
+## 11. 当前实现证据（2026-09-14，提交 `6f869ce6`）
 
-本节只记录已经执行过的证据，不把设计目标当成完成事实。当前分支最近的实现提交包括：Kernel Artifact 下载 `7c1bdf9c`、外部插件与异步委派 `6d42792b`、进程插件健康/清理 `9f317068`、外部回调/恢复/DLQ/子结果归并 `b5775974`、Assistant Hub Kernel 子 Run `fd7323d9`、结构化外部 Artifact `1737edab`，以及本轮竞态/边界修复 `c1b9fcab`、`bb1a8d43`、`3a744b65`、`dae778e2`、`5a71a7e0`、`10d6570f`、`e19c237f`、`0c254edd`。
+本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；本轮对抗式修复统一收敛在 `6f869ce6`，其父提交为 `f3bdc181`。该提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约和对应回归测试。
 
 | 里程碑 | 当前证据 | 状态 |
 |---|---|---|
 | M0 | 源码、迁移、路由、事件、前端和参考 Harness 已完成差距审计；本文件与开发基线已修正实现状态 | 已完成 |
 | M1 | `tests/super_assistant/kernel/` 专项回归；lease heartbeat、Inbox TTL、stuck recovery、父子结果 Artifact 均有测试 | 已完成代码闭环，需长时 staging 压测 |
-| M2 | `alembic heads` 单 head；执行 Outbox、DLQ 发布与 replay 测试；staging 数据库已执行 `alembic upgrade head` | 已完成代码闭环 |
+| M2 | `alembic heads` 唯一 head 为 `0113_remote_agent_result_artifacts`；迁移链为 `0111 → 0112_reconcile_outbox_payload → 0113_remote_agent_result_artifacts`；执行 Outbox、DLQ 发布与 replay 测试 | 已完成代码闭环；现存业务库升级仍需 staging 证据 |
 | M3 | 多步 activation、等待/恢复、统一外部 Call、Assistant Hub `assistant_child` 子 Run、fan-in 结果归并均有专项测试 | 已完成首版；Hub 内部 legacy 子会话行保留兼容 |
-| M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试 | 已完成首版；OS 沙箱、secret broker 需部署层证据 |
+| M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试；配置变更按 revision/hash 栅栏，旧 revision 进入人工处理 | 已完成首版；OS 沙箱、secret broker 需部署层证据 |
 | M5 | Context Pack、Memory/Palace source provenance、tombstone 排除、结构化 Artifact 和 checksum 校验有代码/测试 | 已完成首版 |
-| M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
+| M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、If-Match/Idempotency-Key、UTF-8 请求上限、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
 | M7 | 当前 `oo-rearch` Compose 的 `/api/health` 依赖探针通过（PostgreSQL、Redis、Neo4j、MinIO、Browser、NATS、n8n 均健康）；但该 staging backend 旧镜像内 `alembic current` 无法定位数据库 revision `0110_super_assistant_process_plugins`，不能证明当前分支迁移已部署。隔离临时 Compose 已使用当前镜像完成 PostgreSQL `upgrade head`、`downgrade 0110 -> 0109`、再次 `upgrade head`，但尚未覆盖现存业务数据库升级、完整 kernel live E2E 和外部副作用证据 | 依赖探针通过，临时迁移往返通过，当前提交完整 staging 验收待执行 |
 | M8 | 静态门禁、前端 color-token 和专项测试通过；完整发布/回滚演练尚未完成 | 未完成 |
 
@@ -245,3 +245,15 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 新增专项回归为 `33 passed`（router/reconciler/recovery/callback/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
 
 当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（数据库行被运维改写时可绕过运行时拒绝）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。它们必须在 staging 攻击验收与发布门禁中闭环。
+
+## 13. 最新对抗式代码审查证据（提交 `6f869ce6`）
+
+本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
+
+- callback 与 scheduler 只写 reconciliation Outbox；状态转换仍由 `sa-reconciler-v1` durable consumer 执行，重复 provider event 以 payload hash 拒绝冲突。
+- pending user Inbox 在模型结果成功落库的同一事务中才标记 consumed；模型失败或进程崩溃会保留 pending，等待下一次 activation。
+- MCP、Remote Agent 和 Multica 的 Call 固定 `capability_revision` 与 manifest hash。配置或凭据变更撤销当前 revision；旧 Call 不会重定向到新端点，而是进入 `outcome_unknown/manual_attention`。
+- mutation API 要求 body/header 幂等键一致；控制、重试、输入和审批使用 `If-Match`，SSE snapshot 使用 `data.run`，Artifact 下载声明 `application/octet-stream`。
+- 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；`backend/tests/super_assistant/kernel/` 当前为 `151 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
+
+本轮没有把局部专项结果扩大解释为商用验收。完整后端回归曾在约 22% 处被主动中断，期间暴露的四个架构基线问题（adapter 白名单、服务行数预算、OpenAPI hash 和测试时长记录）已修复并由对应门禁复验。真实 staging、浏览器 E2E、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
