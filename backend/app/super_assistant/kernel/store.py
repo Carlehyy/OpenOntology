@@ -89,6 +89,7 @@ def create_run(
     deadline: datetime | None = None,
     parent_run_id: str | None = None,
     join_policy: str = "all",
+    max_steps: int = 8,
     binding: dict | None = None,
 ) -> tuple[ExecutionRun, bool]:
     """创建 queued Run 并在同一事务写入 created 事件和 outbox。
@@ -100,6 +101,8 @@ def create_run(
         raise ContractError("goal cannot be empty")
     if join_policy not in {"all", "any"}:
         raise ContractError("join_policy must be all or any")
+    if type(max_steps) is not int or not 1 <= max_steps <= 128:
+        raise ContractError("max_steps must be between 1 and 128")
     conv = db.scalar(
         select(SuperAssistantConversation)
         .where(SuperAssistantConversation.id == conversation_id, SuperAssistantConversation.owner_id == owner_id)
@@ -112,6 +115,7 @@ def create_run(
         "deadline": deadline.isoformat() if deadline else None,
         "parent_run_id": parent_run_id,
         "join_policy": join_policy,
+        "max_steps": max_steps,
         "binding": binding or {},
     }
     payload_hash = _hash_payload(payload)
@@ -149,6 +153,7 @@ def create_run(
         binding_mode=mode, binding_snapshot_ref=json.dumps(binding, sort_keys=True),
         ontology_id=binding.get("ontology_id"), draft_version_id=binding.get("draft_version_id"),
         join_policy=join_policy,
+        budget_snapshot_ref=json.dumps({"max_steps": max_steps}, sort_keys=True),
     )
     db.add(run)
     db.flush()

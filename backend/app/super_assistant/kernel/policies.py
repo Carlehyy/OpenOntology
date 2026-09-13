@@ -40,6 +40,7 @@ class ExecutionPolicy:
     reconciliation_max_attempts: int = 12
     outbox_max_attempts: int = 10
     artifact_retention: timedelta = timedelta(days=30)
+    max_steps: int = 8
 
     def __post_init__(self) -> None:
         for name in (
@@ -50,10 +51,12 @@ class ExecutionPolicy:
             _positive(getattr(self, name), name)
         for name in (
             "active_run_concurrency", "call_max_attempts", "reconciliation_max_attempts",
-            "outbox_max_attempts",
+            "outbox_max_attempts", "max_steps",
         ):
             if getattr(self, name) < 1:
                 raise PolicyError(f"{name} must be at least 1")
+        if self.max_steps < 1 or self.max_steps > 128:
+            raise PolicyError("max_steps must be between 1 and 128")
         if self.reconciliation_backoff < 1:
             raise PolicyError("reconciliation_backoff must be at least 1")
         if self.heartbeat_interval >= self.lease_ttl:

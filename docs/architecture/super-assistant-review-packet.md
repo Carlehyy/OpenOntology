@@ -204,6 +204,6 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 ## 10. 二次审查后的当前门槛
 
-当前实现门槛应按以下事实读取：M1 的状态/事件/幂等/租约纯合同已闭环，但持久化 TTL、stuck 扫描和 parent fan-in 仍是部分闭环；M2 的执行表、迁移、Outbox 和 NATS 基础已闭环，但历史回填、DLQ 重放和真实基础设施验收未闭环；M3 目前只有单次 activation 与 Call 对账，完整多轮 loop、heartbeat、恢复和等待态执行未闭环；M4/M5 已有边界合同和策略测试，真实 RAP/MCP/Multica/process plugin、知识图谱来源传播和 Artifact 对象存储未闭环；M6 已有 kernel.v1 API/SSE 与最小任务卡，多 Run、输入/审批/Artifact/重试 UI 未闭环；M7/M8 的真实 staging 验收和最终发布证据尚未完成。
+当前实现门槛应按以下事实读取：M1 的状态/事件/幂等/租约、heartbeat、stuck 扫描和 parent fan-in 已有实现与专项测试，但跨进程 heartbeat 和复杂子结果归并仍需 staging 证据；M2 的执行表、迁移、Outbox、NATS 基础、历史显式回填/回滚和 DLQ 重放入口已实现，真实 PostgreSQL/NATS 验收仍未闭环；M3 已具备可持续多步 activation、等待输入/审批/外部结果、恢复和 Artifact 结果证据，但完整外部 Connector 驱动的 Call loop、重试策略和远端取消仍需补齐；M4 已有不可变 Capability/Connector、Remote Agent HTTP 适配和回调身份校验，MCP/Multica/process plugin 独立宿主与凭据撤销尚未闭环；M5 已接入 Memory/Palace ContextSource、来源字段、tombstone 持久化和索引排除，Artifact 对象存储仍未接入；M6 已有 kernel.v1 API/SSE、输入/审批/Artifact、深链和任务卡，完整多 Run 列表、失败重试 UI 仍需补齐；M7/M8 的真实 staging 验收和最终发布证据尚未完成。
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。

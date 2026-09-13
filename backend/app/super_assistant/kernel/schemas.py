@@ -25,6 +25,7 @@ class CreateRunRequest(KernelRequest):
     deadline: datetime | None = None
     parent_run_id: str | None = None
     join_policy: Literal["all", "any"] = "all"
+    max_steps: int = Field(default=8, ge=1, le=128)
     binding: BindingInput | None = None
 
 

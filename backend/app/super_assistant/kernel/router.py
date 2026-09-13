@@ -48,7 +48,7 @@ def create_kernel_run(
         run, _ = create_run(
             db, owner_id=user.id, conversation_id=conversation_id, goal=body.goal,
             idempotency_key=body.idempotency_key, deadline=body.deadline,
-            parent_run_id=body.parent_run_id, join_policy=body.join_policy,
+            parent_run_id=body.parent_run_id, join_policy=body.join_policy, max_steps=body.max_steps,
             binding=body.binding.model_dump(exclude_none=True) if body.binding else None,
         )
         db.commit()
