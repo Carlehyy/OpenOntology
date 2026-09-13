@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 import pytest
 
 from app.shared.config import settings
@@ -74,3 +76,21 @@ def test_validates_native_stdio_and_legacy_sse(monkeypatch):
     assert normalize_connection(
         transport="sse", url="http://127.0.0.1:3000/sse",
     ) == ("sse", "http://127.0.0.1:3000/sse", None, [])
+
+
+@pytest.mark.asyncio
+async def test_call_tool_rejects_oversized_serialized_result(monkeypatch):
+    class FakeSession:
+        async def call_tool(self, tool_name, arguments):
+            return {"content": "x" * (256 * 1024)}
+
+    @asynccontextmanager
+    async def fake_session(**kwargs):
+        yield FakeSession()
+
+    monkeypatch.setattr(mcp_client, "_client_session", fake_session)
+    with pytest.raises(McpClientError, match="256 KiB"):
+        await mcp_client.call_tool(
+            transport="stdio", url="", headers={}, tool_name="large", arguments={},
+            command="python", args=[], env={},
+        )

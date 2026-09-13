@@ -264,6 +264,8 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 旧 `/remote-agents` 兼容适配器也增加同一 256 KiB 响应体上限，避免旁路契约绕过 Kernel 的输入边界；兼容层完整回归 `21 passed`。
 
+MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE、streamable HTTP 和 stdio 共用出口；超限结果在进入 Kernel 事件或 Artifact 持久化前即被拒绝，MCP 客户端回归 `11 passed`。
+
 此外，Kernel 直连连接器在每次真实外呼前重新执行共享 SSRF/URL 校验，避免配置变更或 DNS 变化后继续使用已失效的网络边界；注入 transport 的测试路径不参与 DNS 解析。该校验不能消除 DNS 解析与 TCP 建连之间的全部 rebinding 窗口，最终仍需网络层 egress policy 和攻击性 staging 验证。
 
 生产 Compose 的 backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。

@@ -2028,6 +2028,7 @@
     "tests/super_assistant/test_delegation.py::test_unknown_assistant_key_rejected_without_row": 0.22922008286695927,
     "tests/super_assistant/test_delegation.py::test_write_permission_fingerprint_changes_when_scope_changes": 0.18391741591040045,
     "tests/super_assistant/test_mcp_client.py::test_anyio_exception_groups_are_unwrapped_for_users": 0.2656804579310119,
+    "tests/super_assistant/test_mcp_client.py::test_call_tool_rejects_oversized_serialized_result": 0.2,
     "tests/super_assistant/test_mcp_client.py::test_mcp_url_allows_public_targets_without_a_host_allowlist": 0.7886471259407699,
     "tests/super_assistant/test_mcp_client.py::test_mcp_url_blocks_nonpublic_targets_in_production[http://10.2.3.4/mcp]": 0.24875300005078316,
     "tests/super_assistant/test_mcp_client.py::test_mcp_url_blocks_nonpublic_targets_in_production[http://127.0.0.1:3000/mcp]": 0.4687865840969607,

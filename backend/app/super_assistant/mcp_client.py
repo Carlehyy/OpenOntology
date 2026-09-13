@@ -17,6 +17,9 @@ class McpClientError(ValueError):
     pass
 
 
+_MAX_TOOL_RESULT_BYTES = 256 * 1024
+
+
 def _error_message(exc: BaseException) -> str:
     """Unwrap AnyIO task groups so connection failures stay actionable."""
     if isinstance(exc, BaseExceptionGroup):
@@ -248,8 +251,12 @@ async def call_tool(*, transport: str, url: str, headers: dict[str, str], tool_n
         ) as session:
             result = await session.call_tool(tool_name, arguments=arguments)
             if hasattr(result, "model_dump_json"):
-                return result.model_dump_json(by_alias=True, exclude_none=True)
-            return json.dumps(result, ensure_ascii=False, default=str)
+                serialized = result.model_dump_json(by_alias=True, exclude_none=True)
+            else:
+                serialized = json.dumps(result, ensure_ascii=False, default=str)
+            if len(serialized.encode("utf-8")) > _MAX_TOOL_RESULT_BYTES:
+                raise McpClientError("MCP 工具响应超过 256 KiB 上限")
+            return serialized
     except McpClientError:
         status = "error"
         raise
