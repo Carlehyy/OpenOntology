@@ -35,6 +35,12 @@ class SchemaInferenceStep(PipelineStep):
                     continue
                 t = self._infer_type(str(val).strip())
                 votes[t] = votes.get(t, 0) + 1
+            # 列级类型拓宽（与前端 scriptUtils.inferColumnTypes 同口径）：
+            # 同列出现小数票后整数值不可能把列拉回整数，float 票吸收
+            # integer 票再参与多数裁决，避免 ["100.5", "200"] 平票时被
+            # priority 裁决为 integer。
+            if "float" in votes and "integer" in votes:
+                votes["float"] += votes.pop("integer")
             # 选择得票最多的类型; 平票时更具体的类型优先
             if votes:
                 priority = ["timestamp", "integer", "float", "boolean", "string", "null"]

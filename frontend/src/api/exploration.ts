@@ -5,6 +5,7 @@
  * 其余走 apiClientV2。画布元素后端以 snake_case 存储（display_name 等）。
  */
 import { apiClientV2 } from './client'
+import { createStreamWatchdog, StreamIdleTimeoutError } from './streamWatchdog'
 
 // ---------- 类型 ----------
 
@@ -502,59 +503,85 @@ function apiRoot(): string {
   return `${runtimeBase}/api/v2`
 }
 
+/**
+ * 流静默看门狗超时（D-014）：后端每个 LLM 轮都有 llm_round 心跳，正常
+ * 长任务不会长时间零字节；工具执行期间的静默窗口留足余量。测试可用
+ * window.__EXPLORE_STREAM_IDLE_TIMEOUT_MS__ 覆盖（同 __API_BASE_URL__ 先例）。
+ */
+const STREAM_IDLE_TIMEOUT_DEFAULT_MS = 180_000
+
+function streamIdleTimeoutMs(): number {
+  const override = typeof window !== 'undefined'
+    && (window as Window & { __EXPLORE_STREAM_IDLE_TIMEOUT_MS__?: number })
+      .__EXPLORE_STREAM_IDLE_TIMEOUT_MS__
+  return typeof override === 'number' && override > 0 ? override : STREAM_IDLE_TIMEOUT_DEFAULT_MS
+}
+
 export async function streamExplorationChat(
   sid: string,
   body: { message: string; modelId?: string | null; webSearch?: boolean },
   onEvent: (e: ExploreEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const token = localStorage.getItem('token') || ''
-  const resp = await fetch(`${apiRoot()}/exploration/sessions/${sid}/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({
-      message: body.message,
-      modelId: body.modelId || undefined,
-      webSearch: body.webSearch || undefined,
-      stream: true,
-    }),
-    signal,
-  })
-  if (!resp.ok || !resp.body) {
-    const text = await resp.text().catch(() => '')
-    throw new Error(`对话请求失败 (${resp.status}) ${text.slice(0, 200)}`)
-  }
-
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
+  const idleTimeoutMs = streamIdleTimeoutMs()
+  const watchdog = createStreamWatchdog(idleTimeoutMs, signal)
   let sawDone = false
-  const consumeChunk = (chunk: string) => {
-    for (const line of chunk.split('\n')) {
-      if (!line.startsWith('data:')) continue
-      try {
-        const event = JSON.parse(line.slice(5).trim()) as ExploreEvent
-        if (event.type === 'done') sawDone = true
-        onEvent(event)
-      } catch { /* 忽略无法解析的行 */ }
+  try {
+    const token = localStorage.getItem('token') || ''
+    const resp = await fetch(`${apiRoot()}/exploration/sessions/${sid}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        message: body.message,
+        modelId: body.modelId || undefined,
+        webSearch: body.webSearch || undefined,
+        stream: true,
+      }),
+      signal: watchdog.signal,
+    })
+    watchdog.activity()
+    if (!resp.ok || !resp.body) {
+      const text = await resp.text().catch(() => '')
+      throw new Error(`对话请求失败 (${resp.status}) ${text.slice(0, 200)}`)
     }
-  }
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) {
-      buffer += decoder.decode()
-      break
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const consumeChunk = (chunk: string) => {
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data:')) continue
+        try {
+          const event = JSON.parse(line.slice(5).trim()) as ExploreEvent
+          if (event.type === 'done') sawDone = true
+          onEvent(event)
+        } catch { /* 忽略无法解析的行 */ }
+      }
     }
-    buffer += decoder.decode(value, { stream: true })
-    let idx: number
-    while ((idx = buffer.indexOf('\n\n')) >= 0) {
-      const chunk = buffer.slice(0, idx)
-      buffer = buffer.slice(idx + 2)
-      consumeChunk(chunk)
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) {
+        buffer += decoder.decode()
+        break
+      }
+      watchdog.activity()
+      buffer += decoder.decode(value, { stream: true })
+      let idx: number
+      while ((idx = buffer.indexOf('\n\n')) >= 0) {
+        const chunk = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 2)
+        consumeChunk(chunk)
+      }
     }
-  }
-  if (buffer.trim()) consumeChunk(buffer)
-  if (!sawDone && !signal?.aborted) {
-    throw new Error('对话连接在完成前中断，请重试；未完成内容不会写入当前会话')
+    if (buffer.trim()) consumeChunk(buffer)
+    if (!sawDone && !signal?.aborted) {
+      throw new Error('对话连接在完成前中断，请重试；未完成内容不会写入当前会话')
+    }
+  } catch (error) {
+    // 看门狗触发的 abort 不能当作用户取消静默吞掉：它是需要呈现的错误
+    if (watchdog.timedOut()) throw new StreamIdleTimeoutError(idleTimeoutMs)
+    throw error
+  } finally {
+    watchdog.dispose()
   }
 }

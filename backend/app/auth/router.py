@@ -33,7 +33,7 @@ router = APIRouter()
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = authenticate_user(db, body.username, body.password)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_access_token(
         {"sub": user.id, "role": user.role, "ver": user.token_version})
     return {"data": {"access_token": token, "token_type": "bearer"}, "message": "ok"}

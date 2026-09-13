@@ -6,6 +6,8 @@ def test_login_success(client, admin_user):
 def test_login_wrong_password(client, admin_user):
     r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "wrong"})
     assert r.status_code == 401
+    # 中文产品文案契约（D-013）：detail 直接透传到登录表单，不允许英文裸奔
+    assert r.json()["detail"] == "用户名或密码错误"
 
 def test_profile_requires_auth(client):
     r = client.get("/api/v1/auth/profile")

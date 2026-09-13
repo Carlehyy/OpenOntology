@@ -1,0 +1,234 @@
+// 哨兵详情面板：本体结构页选中哨兵后在画布右下角浮出（与点击节点/属性/
+// 动作出现的 DetailPanel 同形态：无遮罩、不锁交互、340px 浮动卡片），
+// 回答“这条哨兵到底怎么判定、怎么执行”——绑定、触发、条件、动作的
+// 只读档案；底部「导出Skill」走后端确定性模板生成的标准 Skill zip
+// （鉴权 blob 下载，文案只在下载真实触发成功后才宣称“已下载”）。
+import { useState } from 'react'
+import { toast } from 'sonner'
+import { Download, Loader2, ShieldCheck, X } from 'lucide-react'
+import { sentinelApi } from '@/api/sentinelApi'
+import {
+  sentinelActionSummaries,
+  sentinelOriginLabel,
+  sentinelPatternSummary,
+  sentinelTriggerModeLabel,
+  sentinelTriggerSummary,
+} from './sentinelDetailModel'
+import type {
+  PublishedWorkspace,
+  StructureSentinel,
+} from './structureGraphModel'
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
+      {children}
+    </p>
+  )
+}
+
+function Field({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-start gap-2.5 py-1">
+      <dt className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">{label}</dt>
+      <dd className="min-w-0 break-words text-xs leading-5 text-foreground">{value || '—'}</dd>
+    </div>
+  )
+}
+
+export default function SentinelDetailPanel({
+  ontologyId,
+  ontologyName,
+  workspace,
+  sentinel,
+  onClose,
+}: {
+  ontologyId: string
+  ontologyName?: string
+  workspace: PublishedWorkspace
+  sentinel: StructureSentinel
+  onClose: () => void
+}) {
+  const [exporting, setExporting] = useState(false)
+  const label = sentinel.displayName || sentinel.name
+  const actions = sentinelActionSummaries(workspace, sentinel)
+
+  const objectLabel = (objectTypeId: string) => {
+    const item = workspace.objectTypes.find(
+      objectType => objectType.id === objectTypeId,
+    )
+    return item ? item.displayName || item.name : objectTypeId
+  }
+
+  const dynamicState = sentinel.origin === 'assistant_dynamic'
+    ? sentinel.validationReport?.passed === false
+      ? '版本不兼容'
+      : sentinel.trialCurrent === false
+        ? '待试跑'
+        : sentinel.enabled === false ? '已停用' : '已启用'
+    : sentinel.enabled === false ? '已停用' : '已启用'
+
+  const handleExport = async () => {
+    if (exporting) return
+    setExporting(true)
+    try {
+      await sentinelApi.exportSkill(
+        ontologyId, sentinel.id, `${ontologyName || '本体'}-${label}`,
+      )
+      toast.success('哨兵 Skill 已下载')
+    } catch {
+      // blob 错误响应取不到后端 detail，只给通用原因。
+      toast.error('哨兵 Skill 导出失败', { description: '下载未完成，请重试' })
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  return (
+    <aside
+      data-testid="sentinel-detail-panel"
+      aria-label={`哨兵 ${label} 执行逻辑`}
+      className="absolute bottom-3 right-3 top-[3.25rem] z-30 flex w-[340px] max-w-[calc(100%-24px)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl backdrop-blur-xl"
+    >
+      <div className="flex shrink-0 items-start gap-3 border-b border-border px-4 py-4">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink ring-1 ring-ring"><ShieldCheck size={17} /></span>
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-sm font-semibold text-foreground" title={label}>{label}</h3>
+          <p className="truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{sentinel.name} · {sentinelOriginLabel(sentinel)}</p>
+        </div>
+        <button type="button" onClick={onClose} aria-label="关闭详情" className="rounded-lg p-1.5 text-[var(--color-text-tertiary)] hover:bg-muted hover:text-foreground"><X size={15} /></button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-3" data-testid="sentinel-detail-body">
+        <dl>
+          <Field label="类型" value="哨兵规则" />
+          <Field label="状态" value={dynamicState} />
+          <Field label="说明" value={sentinel.description} />
+        </dl>
+
+        <div className="mt-4">
+          <SectionTitle>绑定范围 · 监测哪些数据</SectionTitle>
+          <div className="space-y-1.5" data-testid="sentinel-detail-bindings">
+            {(sentinel.bindings || []).map(binding => (
+              <div
+                key={`${binding.alias}:${binding.objectTypeId}`}
+                className="rounded-lg border border-border bg-muted px-2.5 py-2 text-xs"
+              >
+                <span className="font-mono text-[11px] text-muted-foreground">{binding.alias}</span>
+                <span className="mx-1.5 text-[var(--color-text-tertiary)]">→</span>
+                <span className="text-foreground">{objectLabel(binding.objectTypeId)}</span>
+                {binding.filter && (
+                  <p className="mt-1 break-all font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                    过滤 {binding.filter}
+                  </p>
+                )}
+              </div>
+            ))}
+            {!sentinel.bindings?.length && (
+              <p className="text-xs text-[var(--color-text-tertiary)]">无绑定</p>
+            )}
+            {(sentinel.links || []).map(link => (
+              <div
+                key={`${link.from}:${link.linkTypeId}:${link.to}`}
+                className="rounded-lg border border-border bg-card px-2.5 py-2 text-xs text-foreground"
+              >
+                <span className="font-mono text-[11px] text-muted-foreground">{link.from}</span>
+                <span className="mx-1.5 text-[var(--color-text-tertiary)]">—[{objectLabel(link.linkTypeId)}]→</span>
+                <span className="font-mono text-[11px] text-muted-foreground">{link.to}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <SectionTitle>触发时机 · 何时检查</SectionTitle>
+          <dl>
+            <Field label="触发方式" value={sentinelTriggerSummary(sentinel).join(' · ')} />
+            <Field label="触发语义" value={sentinelTriggerModeLabel(sentinel.triggerMode)} />
+            {sentinel.pattern && (
+              <Field
+                label="事件模式"
+                value={
+                  <span className="block break-all font-mono text-[11px] text-muted-foreground" data-testid="sentinel-detail-pattern">
+                    {sentinelPatternSummary(sentinel.pattern)}
+                  </span>
+                }
+              />
+            )}
+          </dl>
+        </div>
+
+        <div className="mt-4">
+          <SectionTitle>判定条件 · 怎样判定命中</SectionTitle>
+          <div className="space-y-2">
+            {sentinel.condition ? (
+              <pre className="overflow-x-auto rounded-lg border border-border bg-muted px-3 py-2 font-mono text-[11px] leading-5 text-foreground" data-testid="sentinel-detail-condition">
+                {sentinel.condition}
+              </pre>
+            ) : (
+              <p className="text-xs text-[var(--color-text-tertiary)]">无条件表达式（对所有绑定实例生效）</p>
+            )}
+            <dl>
+              <Field label="条件组合" value={sentinel.conditionLogic || 'and'} />
+              <Field
+                label="条件行"
+                value={`${sentinel.conditionRows?.length || 0} 条（UI 回显形态，运行期权威是上方表达式）`}
+              />
+              <Field label="主别名" value={sentinel.primaryAlias} />
+            </dl>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <SectionTitle>处置动作 · 命中后做什么</SectionTitle>
+          <div className="space-y-1.5" data-testid="sentinel-detail-actions">
+            {actions.length ? actions.map(action => (
+              <div
+                key={action.id}
+                className={`rounded-lg border px-2.5 py-2 text-xs ${
+                  action.available
+                    ? 'border-border bg-muted'
+                    : 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)]'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-foreground">{action.label}</span>
+                  <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">
+                    {action.available
+                      ? action.requiresApproval ? '需人工审批' : '无需审批'
+                      : '当前发布快照中不可用'}
+                  </span>
+                </div>
+                {action.parameterNames.length > 0 && (
+                  <p className="mt-1 break-all font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                    参数绑定：{action.parameterNames.join('、')}
+                  </p>
+                )}
+              </div>
+            )) : (
+              <p className="text-xs text-[var(--color-text-tertiary)]">无处置动作（命中仅记录触发日志）</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="shrink-0 border-t border-border px-4 py-3">
+        <button
+          type="button"
+          data-testid="sentinel-skill-export"
+          onClick={() => void handleExport()}
+          disabled={exporting}
+          aria-busy={exporting}
+          className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-brand text-xs font-semibold text-[var(--color-text-inverse)] transition-all hover:bg-brand-deep active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+        >
+          {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+          {exporting ? '正在导出…' : '导出 Skill'}
+        </button>
+        <p className="mt-1.5 text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+          下载 {ontologyName || '本体'}-{label}.zip：SKILL.md（执行指令）+ 哨兵结构化定义 + 业务文档，
+          可分享或导入支持标准 Skill 包的助手。
+        </p>
+      </div>
+    </aside>
+  )
+}

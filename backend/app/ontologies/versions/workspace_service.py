@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import math
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import desc
+from sqlalchemy import desc, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, defer
 
 from app.config import settings
@@ -802,6 +804,45 @@ def get_version_workspace(
         trial_links=trial_links)}
 
 
+# 行锁等待上限（D-015）：生产为单 uvicorn 同步线程池，无界的 FOR UPDATE
+# 等待会在上游事务楔死时把保存请求一起挂死（nginx 侧表现为 502/挂起）。
+# 有界等待把该场景转化为即刻 409，由前端按可重试错误呈现。
+_ROW_LOCK_WAIT_TIMEOUT = "5s"
+
+# PostgreSQL 锁等待超时 / 语句取消 / 死锁检测的 SQLSTATE
+_LOCK_WAIT_SQLSTATES = {"55P03", "57014", "40P01"}
+
+
+def _bound_row_lock_wait(db: Session) -> None:
+    """给当前事务的行锁等待设上限；SQLite（单测）与其他方言不支持则跳过。"""
+    try:
+        bind = db.get_bind()
+    except Exception:  # noqa: BLE001 — 未绑定引擎的假会话按无界旧语义处理
+        return
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    db.execute(text(f"SET LOCAL lock_timeout = '{_ROW_LOCK_WAIT_TIMEOUT}'"))
+
+
+@contextmanager
+def _bounded_row_locks(db: Session):
+    """写阶段锁纪律：进入前设 lock_timeout，锁等待超时转 409 而非无限挂起。"""
+    _bound_row_lock_wait(db)
+    try:
+        yield
+    except DBAPIError as exc:
+        if getattr(exc.orig, "pgcode", None) not in _LOCK_WAIT_SQLSTATES:
+            raise
+        db.rollback()
+        raise HTTPException(409, detail={
+            "code": "write_lock_timeout",
+            "message": (
+                "写入与并发操作冲突（数据库锁等待超时），"
+                "请稍后重试；如持续出现请检查是否有未完成的试跑或探索会话"
+            ),
+        }) from exc
+
+
 def save_canvas_layout(
     db: Session,
     ontology_id: str,
@@ -810,7 +851,7 @@ def save_canvas_layout(
     """保存共享画布布局；不推进模型 revision，也不改变 snapshot_hash。"""
     project = db.query(OntologyProject).filter(
         OntologyProject.id == ontology_id,
-    ).with_for_update().first()
+    ).first()
     if project is None:
         raise HTTPException(404, "Ontology not found")
 
@@ -819,26 +860,46 @@ def save_canvas_layout(
         version = db.query(OntologyVersion).filter(
             OntologyVersion.id == str(version_id),
             OntologyVersion.ontology_id == ontology_id,
-        ).with_for_update().first()
+        ).first()
     else:
         version = _current_release(db, project)
     if version is None:
         raise HTTPException(404, "Version not found")
 
-    snapshot = complete_snapshot(version.snapshot_formal)
-    valid_ids = _canvas_node_ids(snapshot)
-    updates = _validated_canvas_positions(body.get("positions"), valid_ids)
-    current = version.canvas_layout if isinstance(version.canvas_layout, dict) else {}
-    merged = {
-        str(node_id): value for node_id, value in current.items()
-        if str(node_id) in valid_ids and isinstance(value, dict)
-    }
-    merged.update(updates)
-    version.canvas_layout = merged
-    db.commit()
+    # 写阶段（短锁）：project → version 的加锁顺序与发布/删除路径一致；
+    # 快照节点集与现有布局必须在锁内取新鲜值，防止并发结构保存丢更新。
+    with _bounded_row_locks(db):
+        locked_project = db.query(OntologyProject).filter(
+            OntologyProject.id == ontology_id,
+        ).with_for_update().first()
+        if locked_project is None:
+            raise HTTPException(404, "Ontology not found")
+        if version_id:
+            locked = db.query(OntologyVersion).filter(
+                OntologyVersion.id == version.id,
+                OntologyVersion.ontology_id == ontology_id,
+            ).populate_existing().with_for_update().first()
+        else:
+            # project 行锁已挡住发布指针切换，锁内解析 current release
+            # 保持与旧实现相同的指针一致性语义。
+            locked = _current_release(db, locked_project)
+        if locked is None:
+            raise HTTPException(404, "Version not found")
+
+        snapshot = complete_snapshot(locked.snapshot_formal)
+        valid_ids = _canvas_node_ids(snapshot)
+        updates = _validated_canvas_positions(body.get("positions"), valid_ids)
+        current = locked.canvas_layout if isinstance(locked.canvas_layout, dict) else {}
+        merged = {
+            str(node_id): value for node_id, value in current.items()
+            if str(node_id) in valid_ids and isinstance(value, dict)
+        }
+        merged.update(updates)
+        locked.canvas_layout = merged
+        db.commit()
     ontology_cache.invalidate_version_tree()
     return {"data": {
-        "versionId": version.id,
+        "versionId": locked.id,
         "positions": merged,
     }}
 
@@ -856,7 +917,7 @@ def save_draft_workspace(
     draft = db.query(OntologyVersion).filter(
         OntologyVersion.id == version_id,
         OntologyVersion.ontology_id == ontology_id,
-    ).with_for_update().first()
+    ).first()
     if draft is None:
         raise HTTPException(404, "Version not found")
     if draft.node_kind != "draft":
@@ -890,49 +951,69 @@ def save_draft_workspace(
     _raise_publish_errors(errors, "草稿结构校验未通过")
     # 审计 diff 必须在替换快照前计算，否则 prev/curr 相同、差异永远为空。
     diff = _diff_formal(draft.snapshot_formal, candidate)
-    draft.snapshot_formal = candidate
     valid_layout_ids = _canvas_node_ids(candidate)
-    previous_layout = draft.canvas_layout if isinstance(draft.canvas_layout, dict) else {}
-    next_layout = {
-        str(node_id): value for node_id, value in previous_layout.items()
-        if str(node_id) in valid_layout_ids and isinstance(value, dict)
-    }
-    # Object coordinates are still edited by the full-screen graph workspace.
-    # Preserve the independent L2 property/action coordinates while refreshing
-    # those shared object positions from the submitted model workspace.
-    next_layout.update({
-        str(item["id"]): {
-            "x": float(item.get("positionX") or 0),
-            "y": float(item.get("positionY") or 0),
+
+    # 写阶段（短锁）：校验/审计等重活不持锁；锁内按 revision:snapshot_hash
+    # CAS 复核（D-015），等待有界，并发漂移即刻 409。布局保存不推进
+    # revision，CAS 挡不住它，因此 canvas_layout 必须在锁内取新鲜值合并。
+    with _bounded_row_locks(db):
+        locked = db.query(OntologyVersion).filter(
+            OntologyVersion.id == version_id,
+            OntologyVersion.ontology_id == ontology_id,
+        ).populate_existing().with_for_update().first()
+        if locked is None:
+            raise HTTPException(404, "Version not found")
+        if locked.node_kind != "draft":
+            raise HTTPException(409, detail={"code": "immutable_release", "message": "发布版本不可修改"})
+        _ensure_editable_draft(locked)
+        current_expected = f"{locked.revision}:{locked.snapshot_hash}"
+        if current_expected != expected:
+            raise HTTPException(409, detail={
+                "code": "conflict", "message": "该草稿已被其他会话修改，请重新加载",
+                "currentRevision": current_expected,
+            })
+        previous_layout = locked.canvas_layout if isinstance(locked.canvas_layout, dict) else {}
+        next_layout = {
+            str(node_id): value for node_id, value in previous_layout.items()
+            if str(node_id) in valid_layout_ids and isinstance(value, dict)
         }
-        for item in candidate["objectTypes"] if item.get("id")
-    })
-    draft.canvas_layout = next_layout
-    draft.revision = (draft.revision or 0) + 1
-    draft.snapshot_hash = snapshot_hash(candidate)
-    draft.lifecycle_status = "editing"
-    _stale_previous_trials(db, draft)
-    db.add(AuditLog(
-        id=str(uuid.uuid4()), ontology_id=ontology_id,
-        event_type="edit", event_subtype="workspace_saved",
-        user_id=current_user.id, user_name=current_user.username,
-        description=(
-            f"保存草稿 {draft.version_number} 结构工作区，"
-            f"revision 推进至 {draft.revision}"
-        ),
-        object_type="ontology_version", object_id=version_id,
-        before_state=None, after_state=None,
-        meta={
-            "revision": draft.revision,
-            "snapshotHash": draft.snapshot_hash,
-            "diff": diff,
-        },
-    ))
-    db.commit()
+        # Object coordinates are still edited by the full-screen graph workspace.
+        # Preserve the independent L2 property/action coordinates while refreshing
+        # those shared object positions from the submitted model workspace.
+        next_layout.update({
+            str(item["id"]): {
+                "x": float(item.get("positionX") or 0),
+                "y": float(item.get("positionY") or 0),
+            }
+            for item in candidate["objectTypes"] if item.get("id")
+        })
+        locked.snapshot_formal = candidate
+        locked.canvas_layout = next_layout
+        locked.revision = (locked.revision or 0) + 1
+        locked.snapshot_hash = snapshot_hash(candidate)
+        locked.lifecycle_status = "editing"
+        _stale_previous_trials(db, locked)
+        db.add(AuditLog(
+            id=str(uuid.uuid4()), ontology_id=ontology_id,
+            event_type="edit", event_subtype="workspace_saved",
+            user_id=current_user.id, user_name=current_user.username,
+            description=(
+                f"保存草稿 {locked.version_number} 结构工作区，"
+                f"revision 推进至 {locked.revision}"
+            ),
+            object_type="ontology_version", object_id=version_id,
+            before_state=None, after_state=None,
+            meta={
+                "revision": locked.revision,
+                "snapshotHash": locked.snapshot_hash,
+                "diff": diff,
+            },
+        ))
+        db.commit()
     ontology_cache.invalidate_version_tree()
     return {"data": {
-        "revision": f"{draft.revision}:{draft.snapshot_hash}",
-        "snapshotHash": draft.snapshot_hash,
+        "revision": f"{locked.revision}:{locked.snapshot_hash}",
+        "snapshotHash": locked.snapshot_hash,
         "warnings": save_warnings,
     }}
 
@@ -970,7 +1051,7 @@ def save_draft_mappings(
     draft = db.query(OntologyVersion).filter(
         OntologyVersion.id == version_id,
         OntologyVersion.ontology_id == ontology_id,
-    ).with_for_update().first()
+    ).first()
     if draft is None:
         raise HTTPException(404, "Version not found")
     if draft.node_kind != "draft":
@@ -1000,32 +1081,50 @@ def save_draft_mappings(
     )
     # 审计 diff 必须在替换快照前计算，否则 prev/curr 相同、差异永远为空。
     diff = _diff_formal(draft.snapshot_formal, snap)
-    draft.snapshot_formal = snap
-    draft.revision = (draft.revision or 0) + 1
-    draft.snapshot_hash = snapshot_hash(snap)
-    draft.lifecycle_status = "editing"
-    _stale_previous_trials(db, draft)
-    db.add(AuditLog(
-        id=str(uuid.uuid4()), ontology_id=ontology_id,
-        event_type="edit", event_subtype="workspace_mappings_saved",
-        user_id=current_user.id, user_name=current_user.username,
-        description=(
-            f"保存草稿 {draft.version_number} 数据映射与哨兵，"
-            f"revision 推进至 {draft.revision}"
-        ),
-        object_type="ontology_version", object_id=version_id,
-        before_state=None, after_state=None,
-        meta={
-            "revision": draft.revision,
-            "snapshotHash": draft.snapshot_hash,
-            "diff": diff,
-        },
-    ))
-    db.commit()
+
+    # 写阶段（短锁）：同 save_draft_workspace 的 CAS 复核与有界等待。
+    with _bounded_row_locks(db):
+        locked = db.query(OntologyVersion).filter(
+            OntologyVersion.id == version_id,
+            OntologyVersion.ontology_id == ontology_id,
+        ).populate_existing().with_for_update().first()
+        if locked is None:
+            raise HTTPException(404, "Version not found")
+        if locked.node_kind != "draft":
+            raise HTTPException(409, detail={"code": "immutable_release", "message": "发布版本不可修改"})
+        _ensure_editable_draft(locked)
+        current_expected = f"{locked.revision}:{locked.snapshot_hash}"
+        if current_expected != expected:
+            raise HTTPException(409, detail={
+                "code": "conflict", "message": "该草稿映射已被修改，请重新加载",
+                "currentRevision": current_expected,
+            })
+        locked.snapshot_formal = snap
+        locked.revision = (locked.revision or 0) + 1
+        locked.snapshot_hash = snapshot_hash(snap)
+        locked.lifecycle_status = "editing"
+        _stale_previous_trials(db, locked)
+        db.add(AuditLog(
+            id=str(uuid.uuid4()), ontology_id=ontology_id,
+            event_type="edit", event_subtype="workspace_mappings_saved",
+            user_id=current_user.id, user_name=current_user.username,
+            description=(
+                f"保存草稿 {locked.version_number} 数据映射与哨兵，"
+                f"revision 推进至 {locked.revision}"
+            ),
+            object_type="ontology_version", object_id=version_id,
+            before_state=None, after_state=None,
+            meta={
+                "revision": locked.revision,
+                "snapshotHash": locked.snapshot_hash,
+                "diff": diff,
+            },
+        ))
+        db.commit()
     ontology_cache.invalidate_version_tree()
     return {"data": {
-        "revision": f"{draft.revision}:{draft.snapshot_hash}",
-        "snapshotHash": draft.snapshot_hash,
+        "revision": f"{locked.revision}:{locked.snapshot_hash}",
+        "snapshotHash": locked.snapshot_hash,
     }}
 
 
