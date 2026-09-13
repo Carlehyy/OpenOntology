@@ -461,3 +461,55 @@ def test_duplicate_project_name_conflicts(db):
         mcp_dev_service.create_project(
             db, "owner-1", McpDevProjectCreate(name="my-tools"),
         )
+
+
+# ──────────────────────────── 对抗式审查回归 ────────────────────────────
+
+
+def test_publish_out_serializes_dev_project_id(db):
+    """McpServerOut 必须回传 dev_project_id：前端编辑按钮据此进入开发页。"""
+    from app.super_assistant.schemas import McpServerOut
+
+    project = _prepare_publishable(db)
+    out = mcp_dev_service.publish_project(db, "owner-1", project.id, McpDevPublishIn())
+    server = db.get(SuperAssistantMcpServer, out.server_id)
+    payload = McpServerOut.model_validate(server)
+    assert payload.dev_project_id == project.id
+    assert payload.transport == "developed"
+
+
+def test_export_interfaces_rejects_developed_server(db):
+    """转接口 API 必须拒绝自研行：放行只会生成运行时必然失败的桥接接口。"""
+    from app.community import mcp_export
+
+    server = _developed_server(db)
+    with pytest.raises(mcp_server_service.McpServerServiceError, match="自研 MCP 暂不支持转接口"):
+        mcp_export.export_server_tools(db, "owner-1", server.id, ["add_numbers"])
+
+
+def test_publish_rejects_version_with_empty_manifest(db):
+    """空清单版本的独立防线（不依赖 save 兜底）。"""
+    project = _prepare_publishable(db)
+    version = (
+        db.query(SuperAssistantMcpDevVersion)
+        .filter(SuperAssistantMcpDevVersion.project_id == project.id)
+        .order_by(SuperAssistantMcpDevVersion.version_no.desc())
+        .first()
+    )
+    version.tool_manifest = []
+    db.commit()
+    with pytest.raises(mcp_dev_service.McpDevValidationError, match="未解析出任何工具"):
+        mcp_dev_service.publish_project(db, "owner-1", project.id, McpDevPublishIn())
+
+
+def test_publish_falls_back_to_live_project_samples(db):
+    """样例死角：版本冻结早于成功试跑时，闸门回退项目当前样例并回写快照。"""
+    script = _passify(_SCRIPT)
+    project = _project(db)
+    _save(db, project, script)  # v1 冻结时项目还没有任何样例
+    for tool, args in (("add_numbers", {"a": 1, "b": 2}), ("read_env", {"name": "X"}), ("always_fail", {})):
+        _run_tool(db, project, tool, args, script=script)
+    out = mcp_dev_service.publish_project(db, "owner-1", project.id, McpDevPublishIn(version_no=1))
+    assert all(g["ok"] for g in out.gates)
+    detail = mcp_dev_service.get_version(db, "owner-1", project.id, 1)
+    assert set(detail.tool_samples) == {"add_numbers", "read_env", "always_fail"}

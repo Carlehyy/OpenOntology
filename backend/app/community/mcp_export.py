@@ -139,6 +139,12 @@ def export_server_tools(
         server_id,
         include_builtins=False,
     )
+    if server.transport == "developed":
+        # 自研 MCP 的桥接执行分支尚未落地：现在放行只会生成运行时必然
+        # 失败的 mcp-bridge:// 接口，必须在创建前拒绝而不是留死接口
+        raise mcp_server_service.McpServerValidationError(
+            "自研 MCP 暂不支持转接口：请经超级助手对话调用，或等待后续版本支持"
+        )
     manifest = {str(tool.get("name") or ""): tool for tool in server.tool_manifest}
     if not manifest:
         raise mcp_server_service.McpServerValidationError(

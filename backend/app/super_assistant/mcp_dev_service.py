@@ -16,6 +16,7 @@ import json
 import re
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -168,7 +169,11 @@ def create_project(db: Session, owner_id: str, body: McpDevProjectCreate) -> Mcp
         tool_samples={},
     )
     db.add(project)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise McpDevConflictError("同名开发项目已存在") from exc
     db.refresh(project)
     return _project_out(db, project, detail=True)  # type: ignore[return-value]
 
@@ -396,6 +401,8 @@ def get_version(
 
 def _validate_manifest_gates(manifest: list, samples: dict) -> None:
     """描述完备性与样例完备性：不满足时直接拒绝，不进入真实执行。"""
+    if not manifest:
+        raise McpDevValidationError("该版本未解析出任何工具，无法发布")
     missing_desc = [
         str(tool.get("name"))
         for tool in manifest
@@ -421,11 +428,22 @@ def _run_gates(
     db: Session,
     owner_id: str,
     version: SuperAssistantMcpDevVersion,
+    *,
+    project: SuperAssistantMcpDevProject | None = None,
 ) -> list[dict]:
-    """以冻结版本的样例参数逐工具真实执行，返回逐工具结果清单。"""
+    """逐工具按样例参数真实执行，返回逐工具结果清单。
+
+    样例来源：版本冻结快照优先；快照里缺的工具回退到项目当前样例
+    （试跑成功即记在项目上，晚于保存冻结也仍可用于校验），并把合并结果
+    回写版本快照——否则用户按提示重新试跑也无法修复"缺样例"的旧版本。
+    """
     manifest = version.tool_manifest or []
-    samples = version.tool_samples or {}
+    samples = {**(project.tool_samples or {}), **(version.tool_samples or {})} if project else dict(version.tool_samples or {})
     _validate_manifest_gates(manifest, samples)
+    version.tool_samples = {
+        str(tool.get("name")): samples[str(tool.get("name"))]
+        for tool in manifest
+    }
     personal = executor.load_personal_vars(db, owner_id)
     picked = {
         str(tool.get("name")): samples[str(tool.get("name"))]
@@ -488,7 +506,7 @@ def publish_project(
         project.description = body.description
 
     manifest = version.tool_manifest or []
-    gates = _run_gates(db, owner_id, version)
+    gates = _run_gates(db, owner_id, version, project=project)
     version.tool_gates = gates
 
     server = db.query(SuperAssistantMcpServer).filter(
@@ -532,7 +550,13 @@ def publish_project(
     project.status = STATUS_PUBLISHED
     project.published_version_id = version.id
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise McpDevConflictError(
+            f"已存在名为 {project.name} 的 MCP Server：请修改项目标识后重新发布"
+        ) from exc
     db.refresh(server)
     return McpDevPublishOut(
         server_id=server.id,
@@ -565,7 +589,7 @@ def verify_published_server(
         db.commit()
         return McpTestOut(ok=False, message=server.last_test_message, tools=[])
     try:
-        gates = _run_gates(db, owner_id, version)
+        gates = _run_gates(db, owner_id, version, project=project)
     except McpDevServiceError as exc:
         server.tool_manifest = []
         server.last_test_status = "error"
