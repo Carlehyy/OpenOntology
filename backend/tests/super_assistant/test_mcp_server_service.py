@@ -8,6 +8,7 @@ from app.auth.models import User
 from app.shared.database import Base
 from app.super_assistant import mcp_server_service
 from app.super_assistant.models import SuperAssistantMcpServer
+from app.super_assistant.kernel.models import CapabilityRevision
 from app.super_assistant.schemas import McpServerCreate, McpServerUpdate
 
 
@@ -19,7 +20,7 @@ async def test_mcp_server_lifecycle_preserves_owner_and_builtin_boundaries(
     engine = create_engine(f"sqlite:///{tmp_path / 'mcp-service.db'}")
     Base.metadata.create_all(
         bind=engine,
-        tables=[User.__table__, SuperAssistantMcpServer.__table__],
+        tables=[User.__table__, SuperAssistantMcpServer.__table__, CapabilityRevision.__table__],
     )
     Session = sessionmaker(bind=engine, expire_on_commit=False)
 
@@ -203,6 +204,21 @@ async def test_mcp_server_lifecycle_preserves_owner_and_builtin_boundaries(
         assert observed["args"] == ["-y", "@example/mcp-server"]
         assert observed["env"] == {"API_KEY": "secret"}
 
+        db.add(
+            CapabilityRevision(
+                key="mcp__owner_tools__search",
+                revision=1,
+                source="mcp",
+                manifest_hash="test",
+                trust_level="user_untrusted",
+                permissions=[],
+                input_schema={},
+                output_schema={},
+                side_effect_class="external_async",
+            )
+        )
+        db.commit()
+
         removed_id = custom.id
         mcp_server_service.remove_mcp_server(
             db,
@@ -211,5 +227,7 @@ async def test_mcp_server_lifecycle_preserves_owner_and_builtin_boundaries(
             include_builtins=False,
         )
         assert db.get(SuperAssistantMcpServer, removed_id) is None
+        capability = db.get(CapabilityRevision, ("mcp__owner_tools__search", 1))
+        assert capability is not None and capability.enabled is False
 
     engine.dispose()

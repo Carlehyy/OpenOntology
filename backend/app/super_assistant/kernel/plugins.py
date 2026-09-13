@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping
 
 from .connectors import TrustLevel
 from .contracts import ContractError
@@ -81,4 +80,3 @@ class PluginCatalog:
             return self._records[(key, revision)]
         except KeyError as exc:
             raise ContractError("unknown plugin revision") from exc
-

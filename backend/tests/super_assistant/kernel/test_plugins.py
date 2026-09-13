@@ -3,6 +3,7 @@ import pytest
 from app.super_assistant.kernel.connectors import TrustLevel
 from app.super_assistant.kernel.contracts import ContractError
 from app.super_assistant.kernel.plugins import PluginCatalog, PluginManifest, PluginState
+from app.super_assistant.kernel.plugin_host import PluginHostError, ProcessPluginHost
 
 
 def test_plugin_manifest_cannot_expand_capability_or_kernel_access():
@@ -35,3 +36,32 @@ def test_plugin_drain_must_precede_uninstall():
     draining = catalog.start_drain("user.mail", 1)
     assert draining.state is PluginState.DRAINING
     catalog.uninstall("user.mail", 1)
+
+
+@pytest.mark.asyncio
+async def test_process_plugin_host_uses_json_lines_and_rejects_capability_expansion():
+    import shlex
+    import sys
+
+    script = (
+        "import json,sys; "
+        "[print(json.dumps({'ok':True,'secret':__import__('os').environ.get('PLUGIN_SECRET')}), flush=True) "
+        "for line in sys.stdin if json.loads(line).get('op') == 'health']"
+    )
+    manifest = PluginManifest(
+        key="user.echo", revision=1,
+        entrypoint=f"{sys.executable} -c {shlex.quote(script)}",
+        trust_level=TrustLevel.VERIFIED,
+    )
+    host = ProcessPluginHost(manifest, secret_env={"PLUGIN_SECRET": "short-lived"})
+    result = await host.health()
+    assert result == {"ok": True, "secret": "short-lived"}
+    await host.stop()
+
+    bad_script = "import sys; print('{\\\"capabilities\\\":[]}'); sys.stdout.flush()"
+    bad = ProcessPluginHost(
+        PluginManifest(key="user.bad", revision=1, entrypoint=f"{sys.executable} -c {shlex.quote(bad_script)}", trust_level=TrustLevel.VERIFIED),
+    )
+    with pytest.raises(PluginHostError, match="expand capabilities"):
+        await bad.health()
+    await bad.stop()

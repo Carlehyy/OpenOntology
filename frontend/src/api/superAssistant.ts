@@ -416,7 +416,11 @@ const streamKernelRun = async (
     },
     signal: options.signal,
   })
-  if (!response.ok) throw new Error(`运行事件请求失败 (${response.status})`)
+  if (!response.ok) {
+    const error = new Error(`运行事件请求失败 (${response.status})`) as Error & { status?: number }
+    error.status = response.status
+    throw error
+  }
   if (!response.body) throw new Error('浏览器未提供流式响应体')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()

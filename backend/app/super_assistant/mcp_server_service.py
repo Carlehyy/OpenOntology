@@ -17,9 +17,11 @@ from app.super_assistant.mcp_client import (
     encrypt_env,
     encrypt_headers,
     normalize_connection,
+    namespaced_tool_name,
 )
 from app.super_assistant.models import SuperAssistantMcpServer
 from app.super_assistant.schemas import McpServerCreate, McpServerUpdate, McpTestOut
+from app.super_assistant.kernel.capability_service import revoke_capability_revisions
 
 
 class McpServerServiceError(Exception):
@@ -40,6 +42,14 @@ class McpServerConflictError(McpServerServiceError):
 
 class McpServerUnavailableError(McpServerServiceError):
     pass
+
+
+def _manifest_keys(server: SuperAssistantMcpServer) -> list[str]:
+    return [
+        namespaced_tool_name(server.name, str(tool.get("name") or ""))
+        for tool in (server.tool_manifest or [])
+        if isinstance(tool, dict) and tool.get("name")
+    ]
 
 
 def get_mcp_server(
@@ -146,6 +156,9 @@ def update_mcp_server(
             value is not None
             for value in (body.transport, body.url, body.command, body.args)
         )
+        manifest_changed = connection_changed or body.headers is not None or body.env is not None
+        if manifest_changed or body.enabled is False:
+            revoke_capability_revisions(db, _manifest_keys(item))
         if connection_changed:
             transport, url, command, args = normalize_connection(
                 transport=body.transport or item.transport,
@@ -199,6 +212,7 @@ def remove_mcp_server(
         server_id,
         include_builtins=include_builtins,
     )
+    revoke_capability_revisions(db, _manifest_keys(item))
     db.delete(item)
     db.commit()
 
@@ -230,12 +244,14 @@ async def test_mcp_server(
                 args=item.args,
                 env=decrypt_env(item.env_encrypted),
             )
+        revoke_capability_revisions(db, _manifest_keys(item))
         item.tool_manifest = tools
         item.last_test_status = "success"
         item.last_test_message = f"连接成功，发现 {len(tools)} 个工具"
         db.commit()
         return McpTestOut(ok=True, message=item.last_test_message, tools=tools)
     except Exception as exc:
+        revoke_capability_revisions(db, _manifest_keys(item))
         item.tool_manifest = []
         item.last_test_status = "error"
         item.last_test_message = str(exc)[:500]
@@ -286,6 +302,7 @@ def install_platform_minio_mcp(
             require_confirmation=True,
         )
         db.add(item)
+    revoke_capability_revisions(db, _manifest_keys(item))
     item.tool_manifest = minio_tool_manifest_fn()
     item.last_test_status = "success"
     item.last_test_message = (

@@ -47,6 +47,21 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
           if (terminalStatuses.has(latest.status)) return
         } catch (cause) {
           if (!alive || abort.signal.aborted) return
+          if (cause instanceof Error && (cause as Error & { status?: number }).status === 410) {
+            // The replay window moved past the persisted cursor.  Reload the
+            // authoritative snapshot and start a fresh stream from its tail.
+            lastEventRef.current = undefined
+            try {
+              const fresh = await superAssistantApi.kernelRun(runId)
+              if (!alive) return
+              setRun(fresh)
+              setError(null)
+              if (terminalStatuses.has(fresh.status)) return
+              continue
+            } catch {
+              // Fall through to the normal reconnect/backoff path.
+            }
+          }
           setError(cause instanceof Error ? cause.message : '运行状态加载失败')
           await new Promise(resolve => window.setTimeout(resolve, 1000))
         }
@@ -106,6 +121,23 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
     finally { setBusy(false) }
   }
 
+  const downloadArtifact = async (artifactId: string, kind: string, mimeType: string) => {
+    if (busy) return
+    setBusy(true); setError(null)
+    try {
+      const result = await superAssistantApi.kernelArtifact(runId, artifactId)
+      if (result.content === null) throw new Error('该 Artifact 尚未提供可下载的内联内容')
+      const blob = new Blob([result.content], { type: mimeType || 'application/octet-stream' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${kind || 'artifact'}-${artifactId}`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Artifact 下载失败') }
+    finally { setBusy(false) }
+  }
+
   const retryRun = async () => {
     if (!run || busy) return
     setBusy(true); setError(null)
@@ -161,6 +193,7 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
           {run.artifacts.map(artifact => (
             <div key={artifact.artifact_id} className="rounded bg-muted/40 p-2">
               <button type="button" onClick={() => void loadArtifact(artifact.artifact_id)} className="font-medium underline">查看 {artifact.kind}</button>
+              <button type="button" onClick={() => void downloadArtifact(artifact.artifact_id, artifact.kind, artifact.mime_type)} className="ml-2 underline">下载</button>
               <span className="ml-2 text-muted-foreground">{artifact.mime_type} · {artifact.size} B</span>
               {artifactContent[artifact.artifact_id] !== undefined && <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-[11px]">{artifactContent[artifact.artifact_id]}</pre>}
             </div>

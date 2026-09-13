@@ -38,3 +38,29 @@ def persist_capability_revision(
     db.flush()
     return row
 
+
+def revoke_capability_revisions(
+    db: Session,
+    keys: list[str] | tuple[str, ...] | set[str],
+    *,
+    revision: int | None = None,
+) -> int:
+    """Disable previously frozen capability snapshots.
+
+    Capability rows are immutable identity snapshots; revocation changes only
+    the live authorization bit.  Keeping the row (rather than deleting it)
+    lets historical Calls remain auditable and prevents a disabled MCP tool
+    from being recreated accidentally by a manifest refresh.
+    """
+    normalized = {str(key) for key in keys if str(key)}
+    if not normalized:
+        return 0
+    statement = select(CapabilityRevision).where(CapabilityRevision.key.in_(normalized))
+    if revision is not None:
+        statement = statement.where(CapabilityRevision.revision == revision)
+    rows = list(db.scalars(statement).all())
+    for row in rows:
+        row.enabled = False
+    if rows:
+        db.flush()
+    return len(rows)
