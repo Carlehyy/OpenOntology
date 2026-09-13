@@ -260,7 +260,9 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 对抗式审查新增的代码修复包括：NATS handler 在状态未持久化时 NAK 而非 ACK；RUNNING 状态的重复外部调用进入对账/人工介入路径且不二次触发 provider；父 Run 终态后仍对带远端句柄的 Call 执行取消；provider 引用和结果文本在落库前限长；人工介入 Call 不再被 scheduler 无限轮询；外部 Artifact 的对象存储引用必须落在 owner/run/artifact 命名空间；SSE callback 事件只保留稳定字段和受限 Artifact 引用。上述修复已经通过对应专项测试，但不替代真实 provider、对象存储和浏览器副作用验收。
 
-直连 Remote Agent 的响应读取也已改为流式并设置 256 KiB 硬上限，避免远端在 Kernel 处理前用超大 JSON 响应造成内存压力；超限响应进入失败/对账路径，新增连接器回归已通过（`10 passed`）。
+直连 Remote Agent 的响应读取也已改为流式并设置 256 KiB 硬上限，避免远端在 Kernel 处理前用超大 JSON 响应造成内存压力；超限响应进入失败/对账路径，新增连接器回归已通过（`11 passed`）。
+
+旧 `/remote-agents` 兼容适配器也增加同一 256 KiB 响应体上限，避免旁路契约绕过 Kernel 的输入边界；兼容层完整回归 `21 passed`。
 
 此外，Kernel 直连连接器在每次真实外呼前重新执行共享 SSRF/URL 校验，避免配置变更或 DNS 变化后继续使用已失效的网络边界；注入 transport 的测试路径不参与 DNS 解析。该校验不能消除 DNS 解析与 TCP 建连之间的全部 rebinding 窗口，最终仍需网络层 egress policy 和攻击性 staging 验证。
 

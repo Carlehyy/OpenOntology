@@ -216,6 +216,22 @@ def test_adapter_maps_failures(db, admin_user, monkeypatch):
     assert "无法解析" in failed.content
 
 
+def test_adapter_rejects_oversized_direct_response(db, admin_user, monkeypatch):
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    row = _add_agent(db, admin_user.id)
+    adapter = remote_agent_service.RemoteAgentAdapter(row)
+    ref = adapter.start(db, admin_user)
+    oversized = SimpleNamespace(
+        status_code=200,
+        content=b"x" * (256 * 1024 + 1),
+        json=lambda: {"status": "answered", "content": "should not parse"},
+    )
+    monkeypatch.setattr(remote_agent_service, "_request", lambda *a, **k: oversized)
+    result = list(adapter.run_turn(db, admin_user, ref, "q"))[-1]
+    assert result.status == STATUS_FAILED
+    assert "256 KiB" in result.content
+
+
 def test_adapter_rejects_private_endpoint_in_production(db, admin_user, monkeypatch):
     monkeypatch.setattr(settings, "environment", "production")
     row = _add_agent(db, admin_user.id, endpoint="http://127.0.0.1:9000/turn")

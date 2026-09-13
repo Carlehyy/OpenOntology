@@ -2322,6 +2322,7 @@
     "tests/super_assistant/test_remote_agent_invites.py::test_redeem_rejects_unknown_rap_version": 0.20152979204431176,
     "tests/super_assistant/test_remote_agent_invites.py::test_redeem_token_single_use_and_anti_enumeration": 0.2423792079789564,
     "tests/super_assistant/test_remote_agents.py::test_adapter_maps_failures": 0.2801632919581607,
+    "tests/super_assistant/test_remote_agents.py::test_adapter_rejects_oversized_direct_response": 0.3,
     "tests/super_assistant/test_remote_agents.py::test_adapter_rejects_private_endpoint_in_production": 0.2149968749145046,
     "tests/super_assistant/test_remote_agents.py::test_adapter_roundtrip_issues_and_resumes_remote_session": 0.2352058329852298,
     "tests/super_assistant/test_remote_agents.py::test_claim_next_task_is_exclusive": 0.21487008407711983,

@@ -84,6 +84,7 @@ _TASK_POLL_INTERVAL = 0.4
 _TASK_RESULT_GRACE_SECONDS = 5.0
 # 「测试」按钮的回合超时上限：离线回连助手快速失败而非挂满 timeout_seconds
 _TEST_TURN_TIMEOUT_SECONDS = 20
+_MAX_DIRECT_RESPONSE_BYTES = 256 * 1024
 
 
 def _utcnow() -> datetime:
@@ -184,6 +185,25 @@ class RemoteAgentAdapter:
             yield TurnResult(
                 status=STATUS_FAILED,
                 content=f"远程助手返回 HTTP {response.status_code}",
+                conversation_ref=conversation_ref,
+            )
+            return
+        # The legacy adapter predates the kernel connector and still sits on
+        # a public compatibility route. Reject an oversized body before JSON
+        # parsing and before any content can enter the conversation projection.
+        try:
+            raw_content = getattr(response, "content", None)
+            if raw_content is not None and len(raw_content) > _MAX_DIRECT_RESPONSE_BYTES:
+                yield TurnResult(
+                    status=STATUS_FAILED,
+                    content="远程助手响应超过 256 KiB 上限",
+                    conversation_ref=conversation_ref,
+                )
+                return
+        except (AttributeError, TypeError):
+            yield TurnResult(
+                status=STATUS_FAILED,
+                content="远程助手响应无法读取",
                 conversation_ref=conversation_ref,
             )
             return
