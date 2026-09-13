@@ -111,6 +111,20 @@ def create_run(
     )
     if conv is None:
         raise KeyError(conversation_id)
+    # ``assistant_child`` Runs are executed by the Assistant Hub in a worker
+    # session. Persist an internal marker inside the frozen context so the
+    # Hub can distinguish this durable path from the legacy direct-UI tool
+    # (whose historical "resume latest" behaviour remains supported). Copy
+    # nested data first: callers may reuse their argument dict for another
+    # invocation and must not observe our marker.
+    binding = dict(binding or {})
+    mode = binding.get("binding_mode", "direct_ui")
+    if mode == "assistant_child":
+        child_context = binding.get("context")
+        child_context = dict(child_context) if isinstance(child_context, dict) else {}
+        child_context.setdefault("_kernel_child", True)
+        binding["context"] = child_context
+
     payload = {
         "goal": goal,
         "deadline": deadline.isoformat() if deadline else None,
@@ -138,8 +152,6 @@ def create_run(
             RunStatus.COMPLETED.value, RunStatus.FAILED.value,
         }:
             raise ContractError("cannot bind child to terminal parent")
-    binding = binding or {}
-    mode = binding.get("binding_mode", "direct_ui")
     if mode == "delegated":
         required = {"ontology_id", "draft_version_id", "lifecycle", "write_permission_hash"}
         if required - binding.keys() or binding.get("lifecycle") != "editing" or not binding.get("write_permission_hash"):

@@ -16,8 +16,10 @@
   线程 + 1 子会话连接），超限立即返回"通道忙"；超时/取消返回即释放额度，
   不可协作取消的子回合线程可能仍在后台跑到终态（由工作线程收尾）。
 
-会话引用（conversation_ref）由委派表独占，绝不进入 LLM 可见上下文：
-resume 解析 = 按 (super_conversation_id, assistant_key) 查最近一条。
+会话引用（conversation_ref）由委派表独占，绝不进入 LLM 可见上下文。
+直接 UI 仍按 (super_conversation_id, assistant_key) 续用最近一条；Kernel
+child 必须由目标 adapter 证明 ref 与持久化 binding 快照一致，禁止跨本体/版本
+静默续聊。
 """
 from __future__ import annotations
 
@@ -160,6 +162,58 @@ def _latest_delegation(
     )
 
 
+def _bound_latest_delegation(
+    db, owner_id: str, conversation_id: str, assistant_key: str,
+    *, user, context: dict[str, Any],
+) -> tuple[SuperAssistantDelegation | None, bool]:
+    """Find a latest ref whose domain binding is proven by its adapter.
+
+    The second return value says that at least one prior ref exists.  It lets
+    callers distinguish a first child (safe to start) from an existing but
+    unverifiable session (must stop with ``needs_input``).
+    """
+    rows = (
+        db.query(SuperAssistantDelegation)
+        .filter(
+            SuperAssistantDelegation.owner_id == owner_id,
+            SuperAssistantDelegation.super_conversation_id == conversation_id,
+            SuperAssistantDelegation.assistant_key == assistant_key,
+        )
+        .order_by(
+            SuperAssistantDelegation.last_turn_at.desc(),
+            SuperAssistantDelegation.created_at.desc(),
+        )
+        .all()
+    )
+    prior_ref = False
+    for row in rows:
+        ref = str(row.conversation_ref or "").strip()
+        if not ref:
+            continue
+        prior_ref = True
+        matched = False
+        try:
+            if assistant_key == "exploration":
+                from app.assistant_hub.adapters.exploration import (
+                    ref_matches_delegated_binding,
+                )
+            elif assistant_key == "ontology_agent":
+                from app.assistant_hub.adapters.ontology_agent import (
+                    ref_matches_delegated_binding,
+                )
+            else:
+                ref_matches_delegated_binding = None
+            matched = bool(
+                ref_matches_delegated_binding
+                and ref_matches_delegated_binding(db, user, ref, context)
+            )
+        except (AssistantHubError, ValueError, TypeError):
+            matched = False
+        if matched:
+            return row, prior_ref
+    return None, prior_ref
+
+
 def _reclaim_stale_running(
     db, owner_id: str, conversation_id: str, assistant_key: str,
 ) -> int:
@@ -186,6 +240,48 @@ def _reclaim_stale_running(
     )
     db.commit()
     return int(result.rowcount or 0)
+
+
+def _running_delegation(
+    db, owner_id: str, conversation_id: str, assistant_key: str,
+) -> SuperAssistantDelegation | None:
+    return (
+        db.query(SuperAssistantDelegation)
+        .filter(
+            SuperAssistantDelegation.owner_id == owner_id,
+            SuperAssistantDelegation.super_conversation_id == conversation_id,
+            SuperAssistantDelegation.assistant_key == assistant_key,
+            SuperAssistantDelegation.status == "running",
+        )
+        .order_by(SuperAssistantDelegation.created_at.desc())
+        .first()
+    )
+
+
+def _wait_for_running_delegation_to_finish(
+    db, owner_id: str, conversation_id: str, assistant_key: str,
+) -> bool:
+    """Give a detached worker a short window to finalize before inserting.
+
+    Generator disconnect releases the bulkhead while the child thread may
+    still be finalizing its row.  Inserting immediately would violate the
+    partial unique ``running`` index (and concurrent live work must never be
+    reclaimed as stale).  Return ``True`` only when a live row remains after
+    the bounded wait so the caller can report busy without creating a second
+    row.
+    """
+    running = _running_delegation(db, owner_id, conversation_id, assistant_key)
+    if running is None:
+        return False
+    deadline = time.monotonic() + min(
+        max(0.2, settings.super_assistant_delegation_timeout_seconds), 5.0,
+    )
+    while time.monotonic() < deadline:
+        db.expire_all()
+        if _running_delegation(db, owner_id, conversation_id, assistant_key) is None:
+            return False
+        time.sleep(min(_POLL_INTERVAL_SECONDS, 0.05))
+    return _running_delegation(db, owner_id, conversation_id, assistant_key) is not None
 
 
 def _transition_if_running(
@@ -309,12 +405,47 @@ def run_delegation_tool(
 
     cancel_event = threading.Event()
     try:
-        resume_row = (
-            None
-            if session_policy == "new"
-            else _latest_delegation(db, owner_id, conversation_id, assistant_key)
-        )
         _reclaim_stale_running(db, owner_id, conversation_id, assistant_key)
+        if _wait_for_running_delegation_to_finish(
+            db, owner_id, conversation_id, assistant_key,
+        ):
+            return _result_json({
+                "status": "failed",
+                "assistant": assistant.spec().label,
+                "error": "该助手仍在处理上一条委派，请稍后再试",
+            })
+        # Built-in adapters own the domain proof.  Dynamic external assistants
+        # may add their own verifier later; until then retain their established
+        # resume contract rather than guessing a schema we do not own.
+        strict_kernel_binding = (
+            context.get("_kernel_child") is True
+            and assistant_key in {"exploration", "ontology_agent"}
+        )
+        prior_ref = False
+        if session_policy == "new":
+            resume_row = None
+        elif strict_kernel_binding and assistant_key in {"exploration", "ontology_agent"}:
+            resume_row, prior_ref = _bound_latest_delegation(
+                db, owner_id, conversation_id, assistant_key,
+                user=user, context=context,
+            )
+            if resume_row is None and prior_ref:
+                # A durable child must never silently inherit another domain's
+                # opaque ref.  The caller can explicitly select ``session=new``
+                # or provide a complete binding snapshot on the next attempt.
+                return _result_json({
+                    "status": "needs_input",
+                    "reason": "delegation_binding_mismatch",
+                    "assistant": assistant.spec().label,
+                    "question": (
+                        "无法证明已有子会话属于当前绑定的本体/版本；"
+                        "请确认目标本体与 editing draft，或明确使用 session=new。"
+                    ),
+                })
+        else:
+            resume_row = _latest_delegation(
+                db, owner_id, conversation_id, assistant_key,
+            )
         row = SuperAssistantDelegation(
             owner_id=owner_id,
             super_conversation_id=conversation_id,

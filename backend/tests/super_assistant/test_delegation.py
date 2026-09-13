@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -26,6 +27,7 @@ from app.model_configs.models import ModelConfig
 from app.shared.config import settings
 from app.shared.database import Base
 from app.super_assistant import delegation, runtime
+from app.exploration.session_service import write_permission_fingerprint
 from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantDelegation,
@@ -194,6 +196,52 @@ def test_second_delegation_resumes_same_conversation(tmp_path, monkeypatch):
             SuperAssistantDelegation.created_at).all()
         assert len(rows) == 2  # 追加式历史
         assert rows[0].conversation_ref == rows[1].conversation_ref
+
+
+def test_kernel_child_resume_rejects_ref_for_different_binding(tmp_path, monkeypatch):
+    """Kernel recovery must not inherit a prior ontology ref blindly."""
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "kernel-binding")
+    fake = _FakeAssistant()
+    _fake_registry(monkeypatch, fake)
+    _fast_polls(monkeypatch)
+
+    with TestingSession() as db:
+        db.add(SuperAssistantDelegation(
+            owner_id=ids["owner_id"],
+            super_conversation_id=ids["conversation_id"],
+            assistant_key="ontology_agent",
+            conversation_ref=build_ref(
+                "ontology_agent", {"ontology_id": "ontology-old"}),
+            status="answered",
+            summary="旧本体结果",
+        ))
+        db.commit()
+
+        _, output = _run_once(db, ids, arguments={
+            "assistant": "ontology_agent",
+            "task": "继续任务",
+            "context": {"_kernel_child": True, "ontology_id": "ontology-new"},
+        })
+        payload = json.loads(output)
+        assert payload["status"] == "needs_input"
+        assert payload["reason"] == "delegation_binding_mismatch"
+        assert fake.start_calls == 0
+        assert fake.run_refs == []
+        assert db.query(SuperAssistantDelegation).count() == 1
+
+
+def test_write_permission_fingerprint_changes_when_scope_changes():
+    user = SimpleNamespace(id="user-1", role="editor")
+    project = SimpleNamespace(
+        id="ontology-1", created_by="user-1", updated_at=None,
+    )
+    version = SimpleNamespace(
+        id="draft-1", revision=1, lifecycle_status="editing",
+    )
+    first = write_permission_fingerprint(user, project, version)
+    assert first == write_permission_fingerprint(user, project, version)
+    version.revision = 2
+    assert write_permission_fingerprint(user, project, version) != first
 
 
 def test_session_new_rotates_to_fresh_conversation(tmp_path, monkeypatch):

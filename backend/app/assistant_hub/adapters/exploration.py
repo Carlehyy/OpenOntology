@@ -30,8 +30,44 @@ from app.exploration.session_service import (
     create_session,
     validate_delegated_binding,
 )
+from app.exploration.models import ExplorationSession
 
 _KEY = "exploration"
+
+
+def ref_matches_delegated_binding(
+    db: Session, user, conversation_ref: str, context: dict[str, Any] | None,
+) -> bool:
+    """Prove that a persisted exploration ref belongs to the frozen binding.
+
+    This is deliberately a strict predicate for Kernel child recovery.  A
+    malformed ref, missing session, changed draft, lost write access, or
+    stale permission fingerprint is not treated as a resumable session.
+    """
+    try:
+        payload = parse_ref(_KEY, conversation_ref)
+    except AssistantHubError:
+        return False
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return False
+    session = db.query(ExplorationSession).filter(
+        ExplorationSession.id == session_id,
+    ).first()
+    if session is None or (
+        session.user_id
+        and session.user_id != getattr(user, "id", None)
+        and getattr(user, "role", "") != "admin"
+    ):
+        return False
+    try:
+        expected = validate_delegated_binding(db, user, context)
+    except ValueError:
+        return False
+    return (
+        str(session.ontology_id or "") == expected["ontology_id"]
+        and str(session.ontology_version_id or "") == expected["draft_version_id"]
+    )
 
 
 class ExplorationAdapter:

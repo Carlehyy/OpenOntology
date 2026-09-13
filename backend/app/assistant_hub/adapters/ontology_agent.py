@@ -36,6 +36,38 @@ from app.ontologies.versions.models import OntologyVersion
 _KEY = "ontology_agent"
 
 
+def ref_matches_delegated_binding(
+    db: Session, user, conversation_ref: str, context: dict[str, Any] | None,
+) -> bool:
+    """Prove a persisted ontology-agent ref is for the requested ontology.
+
+    Kernel child recovery cannot infer a target from the most recent row.  The
+    ontology id is therefore mandatory in the frozen context and must agree
+    with the opaque ref (and, when present, its owned conversation row).
+    """
+    try:
+        payload = parse_ref(_KEY, conversation_ref)
+    except AssistantHubError:
+        return False
+    expected_id = str((context or {}).get("ontology_id") or "").strip()
+    ref_id = str(payload.get("ontology_id") or "").strip()
+    if not expected_id or not ref_id or expected_id != ref_id:
+        return False
+    try:
+        require_ontology_access(db, expected_id, user, write=False)
+    except HTTPException:
+        return False
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return True
+    conv = db.query(AgentConversation).filter(
+        AgentConversation.id == conversation_id,
+        AgentConversation.ontology_id == expected_id,
+        AgentConversation.user_id == user.id,
+    ).first()
+    return conv is not None
+
+
 def validate_delegated_binding(db: Session, *, owner_id: str, binding: dict) -> None:
     """Prove delegated ontology/version ownership before a Kernel snapshot."""
     ontology_id = str(binding.get("ontology_id") or "").strip()

@@ -232,7 +232,9 @@ def test_kernel_hub_delegation_creates_bound_child_run(db, monkeypatch):
     child = db.get(ExecutionRun, payload["child_run_id"])
     assert child is not None
     assert child.parent_run_id == run.id
-    assert __import__("json").loads(child.binding_snapshot_ref)["binding_mode"] == "assistant_child"
+    snapshot = __import__("json").loads(child.binding_snapshot_ref)
+    assert snapshot["binding_mode"] == "assistant_child"
+    assert snapshot["context"]["_kernel_child"] is True
     assert payload["child_run_id"] in (db.get(ExecutionRun, run.id).required_child_ids or [])
 
 
