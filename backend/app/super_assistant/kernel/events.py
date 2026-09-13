@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from typing import Any
 
 from .contracts import ContractError
@@ -26,7 +27,7 @@ REQUIRED_PAYLOAD: dict[str, frozenset[str]] = {
     "run.expiry_requested": frozenset({"reason", "deadline", "unresolved_call_ids"}),
     "run.cancel_requested": frozenset({"reason", "cancel_reason", "actor"}),
     "run.cancel_timeout": frozenset({"reason", "cancel_deadline", "unresolved_call_ids", "run_terminal_status"}),
-    "run.pause_requested": frozenset({"reason", "actor"}),
+    "run.pause_requested": frozenset({"reason", "pause_reason", "actor"}),
     "run.recovery_requested": frozenset({"reason", "lease_epoch", "diagnostic_ref"}),
     "run.child_bound": frozenset({"parent_run_id", "child_run_id", "join_policy", "required"}),
     "run.child_joined": frozenset({"parent_run_id", "child_run_id", "join_policy", "required"}),
@@ -35,14 +36,14 @@ REQUIRED_PAYLOAD: dict[str, frozenset[str]] = {
     "step.started": frozenset({"step_id", "step_no"}),
     "step.closed": frozenset({"step_id", "reason"}),
     "context.snapshot": frozenset({"snapshot_id", "pack_hash", "source_refs"}),
-    "request.header": frozenset({"snapshot_id", "model", "capability_snapshot_ref"}),
+    "request.header": frozenset({"snapshot_id", "pack_hash", "model", "prompt_ref", "capability_snapshot_ref"}),
     "assistant.delta": frozenset({"attempt_id", "delta_seq", "content_ref"}),
     "assistant.message": frozenset({"attempt_id", "message_ref"}),
     "call.intent": frozenset({"call_id", "capability_key", "capability_revision", "input_snapshot_ref", "side_effect_class", "idempotency_key"}),
     "call.progress": frozenset({"call_id", "progress_seq", "connector_id", "provider_event_id"}),
     "call.outcome_changed": frozenset({"status", "outcome", "evidence_ref", "connector_id", "provider_event_id"}),
     "attempt.started": frozenset({"attempt_id", "provider_status", "request_ref", "started_at"}),
-    "attempt.result": frozenset({"attempt_id", "provider_status", "safe_to_retry"}),
+    "attempt.result": frozenset({"attempt_id", "provider_status", "result_ref", "error_ref", "safe_to_retry", "token_usage_ref", "cost_ref"}),
     "inbox.appended": frozenset({"inbox_id", "kind", "target_ref", "expiry_policy"}),
     "inbox.claimed": frozenset({"inbox_id", "claim_token", "claim_expires_at", "actor"}),
     "inbox.expired": frozenset({"inbox_id", "kind", "target_ref", "question_id", "question_expires_at", "expiry_policy", "accepted_at"}),
@@ -95,6 +96,7 @@ class EventEnvelope:
         missing = sorted(required - self.payload.keys())
         if missing:
             raise ContractError(f"missing payload fields for {self.event_type}: {', '.join(missing)}")
+        _validate_payload_size(self.payload)
 
 
 def validate_payload(event_type: str, payload: dict[str, Any]) -> None:
@@ -103,3 +105,9 @@ def validate_payload(event_type: str, payload: dict[str, Any]) -> None:
     missing = sorted(REQUIRED_PAYLOAD[event_type] - payload.keys())
     if missing:
         raise ContractError(f"missing payload fields for {event_type}: {', '.join(missing)}")
+    _validate_payload_size(payload)
+
+
+def _validate_payload_size(payload: dict[str, Any]) -> None:
+    if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 64 * 1024:
+        raise ContractError("event payload exceeds 64 KiB; store large content as an Artifact reference")

@@ -104,6 +104,8 @@ Inbox item 必须绑定 `run_id`，必要时绑定 `call_id`、`approval_id` 或
 
 所有时间使用 UTC；PostgreSQL 使用 uuid/timestamptz，SQLite 测试使用字符串化 UUID 适配同一逻辑约束；凭据只保存受控引用；大正文使用 MinIO 引用和 checksum；Neo4j 只保存可重建的图谱投影。Run/Call lease 使用 epoch、owner、expires_at 三元组，过期写入被 fencing 拒绝；Inbox claim TTL 固定 60 秒。kernel.v1 API 字段统一 snake_case，旧 API casing 保持原样。
 
+状态枚举、Call 双轴组合、事件类型、脱敏模式和 payload 大小由 Kernel command/event service 在所有写入口统一校验；数据库字段保留可查询事实和幂等约束，但不依赖数据库 CHECK 代替服务层状态机。恢复器和人工运维入口也必须复用同一校验器，直接 SQL 写入不属于受支持的执行路径。
+
 ## 5. 事件、事务和派发
 
 事件类型注册表 v1：

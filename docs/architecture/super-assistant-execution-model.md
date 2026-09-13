@@ -95,7 +95,7 @@ stateDiagram-v2
 - `paused` 期间到达的普通输入、外部结果和审批决定写入关联 Inbox，但不被消费；取消、过期等控制命令仍走高优先级通道。恢复动作只激活明确的 Run，并按 Inbox 幂等规则消费关联项。
 - `active` 必须至少有可消费 Inbox、已领取 Turn、可推进 Call 或计划中的重试之一。否则属于 stuck-run，检测器必须产生诊断事件并进入恢复或人工处理路径，不能保持 `active` 无期限等待。
 
-Run deadline 命中时，如果存在未决外部 Call，不能直接绕过协作取消进入 `expired`：先记录 `run.expiry_requested`，再走 `cancel_requested → cancelling`，取消收敛后按截止时间原因进入 `expired`。没有未决副作用 Call 时才允许直接进入 `expired`。`cancel_requested` 一旦被接受不再转为 `expired`，由第一次成功的终态转换决定取消和截止时间的竞态。
+Run deadline 命中时，如果存在未决外部 Call，不能直接绕过协作取消进入 `expired`：先记录 `run.expiry_requested`，再走 `cancel_requested → cancelling`，取消收敛后按截止时间原因进入 `expired`。没有未决副作用 Call 时也先记录 `run.expiry_requested`，再在同一事务内进入 `expired`。`cancel_reason=deadline` 的意图一旦在 Run 行锁下接受，只能收敛为 `expired`；`user|parent` 只能收敛为 `cancelled`。后到的冲突控制命令返回 409，不能改写首个意图。
 
 每个 `waiting_input` 问题必须有独立的 `question_expires_at` 和持久化 `expiry_policy`；有效截止时间取 `min(question_expires_at, run.deadline)`。问题 TTL 到期时先关闭该问题并产生 `inbox.expired`，按 `expiry_policy` 选择重新提问、仅失败该分支或终止整个 Run，不能由 Worker 默默二选一。回答是否有效以 `InboxItem.accepted_at` 与 `question_expires_at` 比较，而不是以 Worker 实际处理时间比较；同一 Run 行锁下按事件入库顺序裁决，过期后到达的回答不能复活问题。问题 TTL 不能延长 Run deadline。
 
@@ -117,7 +117,7 @@ Call 的本地调度状态和外部结果是两条轴，不能合并成第二套
 - `status`：`offered`、`dispatched`、`running`、`waiting_external`、`cancel_requested`、`reconciling`、`closed`；
 - `outcome`：`not_sent`、`accepted`、`remote_running`、`completed`、`failed`、`cancelled_confirmed`、`outcome_unknown`。
 
-两轴必须遵守以下不变量：`offered` 只能是 `not_sent`；`dispatched` 可为 `not_sent` 或 `outcome_unknown`；`running`/`waiting_external` 可为 `accepted`、`remote_running` 或 `outcome_unknown`；`cancel_requested`/`reconciling` 可为 `accepted`、`remote_running` 或 `outcome_unknown`；`closed` 只能为 `not_sent`、`completed`、`failed` 或 `cancelled_confirmed`。只有本地能够证明没有发送时，才允许 `status=closed, outcome=not_sent`；网络超时、连接断开或未知回包一律不能猜成 `not_sent`。`accepted` 和 `remote_running` 是外部观测，不代表完成；`remote_running` 不是本地可调度状态。取消请求只写入 `status=cancel_requested` 和取消事件，不写入 `outcome`。
+两轴必须遵守以下不变量：`offered` 只能是 `not_sent`；`dispatched` 可为 `not_sent` 或 `outcome_unknown`；`running`/`waiting_external` 可为 `accepted`、`remote_running` 或 `outcome_unknown`；`cancel_requested`/`reconciling` 可为 `accepted`、`remote_running` 或 `outcome_unknown`；`closed` 只能为 `not_sent`、`completed`、`failed` 或 `cancelled_confirmed`。只有本地能够证明没有发送时，才允许 `status=closed, outcome=not_sent`；网络超时、连接断开或未知回包一律不能猜成 `not_sent`。`accepted` 和 `remote_running` 是外部观测，不代表完成；`remote_running` 不是本地可调度状态。取消请求只写入 `status=cancel_requested` 和取消事件，不写入 `outcome`；若取消发生在发送前且有确定未发送证据，直接收敛为 `closed/not_sent`，否则必须保留前一 outcome 并进入 reconciliation。
 
 取消后的外部对账使用 `status=reconciling`，确认取消后才进入 `status=closed, outcome=cancelled_confirmed`；Run 已经本地终止时，对账不得重新打开 Run。Call 进入 `outcome_unknown` 后只能由 Kernel recovery/reconciliation service 通过状态查询或人工确认收敛，不能由普通重试覆盖。Connector 只提供远端查询、取消和结果映射，不自行改变 Run 状态。
 

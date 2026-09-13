@@ -95,3 +95,8 @@ def test_event_registry_rejects_reference_without_checksum():
     )
     with pytest.raises(ContractError, match="checksum"):
         event.validate()
+
+
+def test_event_registry_rejects_oversized_inline_payload():
+    with pytest.raises(ContractError, match="64 KiB"):
+        validate_payload("assistant.message", {"attempt_id": "a1", "message_ref": "x" * (64 * 1024)})

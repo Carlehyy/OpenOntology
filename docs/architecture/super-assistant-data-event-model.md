@@ -138,6 +138,8 @@ run.status_changed
 run.expiry_requested
 run.cancel_timeout
 run.recovery_requested
+run.child_bound
+run.child_joined
 turn.started
 turn.closed
 step.started
@@ -173,6 +175,8 @@ inbox.claimed
 inbox.expired
 approval.requested
 approval.decided
+approval.expired
+approval.revoked
 run.cancel_requested
 run.pause_requested
 ```
@@ -185,6 +189,7 @@ artifact.chunked
 artifact.completed
 projection.applied
 projection.failed
+source.tombstoned
 ```
 
 事件注册表 v1 的新增事件必须至少满足以下 payload 约束；它们与 `event_id`、`run_id`、`seq`、`schema_version` 和 `causation_id` 一起原子写入：
@@ -194,7 +199,7 @@ projection.failed
 | `run.expiry_requested` | `reason`, `deadline`, `unresolved_call_ids` | 同一 Run/截止原因只接受一次；不含正文 |
 | `run.cancel_timeout` | `reason`, `cancel_deadline`, `unresolved_call_ids`, `run_terminal_status` | 取消超时只登记一次；仅保存 Call ID 和状态引用 |
 | `run.recovery_requested` | `reason`, `lease_epoch`, `diagnostic_ref` | 诊断引用可脱敏，不能写入凭据 |
-| `inbox.expired` | `inbox_id`, `question_id`, `question_expires_at`, `expiry_policy` | 原问题过期后回答不得复活；按 Inbox 幂等键去重 |
+| `inbox.expired` | `inbox_id`, `kind`, `target_ref`, `question_id`, `question_expires_at`, `expiry_policy`, `accepted_at` | 原问题过期后回答不得复活；按 Inbox 幂等键去重 |
 
 Connector 的 `agent.*` 输入必须在持久化前映射到此注册表和能力/Artifact 事件集合；未知事件类型或不兼容 payload 拒绝自动解释。
 
