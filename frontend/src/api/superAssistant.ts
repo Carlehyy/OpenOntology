@@ -694,6 +694,10 @@ export const superAssistantApi = {
     apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
       `/super-assistant/runs/${encodeURIComponent(runId)}/resume`, body, { headers: { 'If-Match': String(version) } },
     ),
+  retryKernelRun: (runId: string, body: { idempotency_key: string; max_steps?: number }) =>
+    apiClientV2.post<KernelRunAccepted>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/retry`, body, { headers: { 'Idempotency-Key': body.idempotency_key } },
+    ),
   submitKernelInput: (runId: string, body: { kind: string; content?: string; content_ref?: string; question_id?: string; idempotency_key: string }) =>
     apiClientV2.post<{ inbox_id: string; status: string; run_id: string }>(`/super-assistant/runs/${encodeURIComponent(runId)}/inputs`, body),
   decideKernelApproval: (runId: string, approvalId: string, body: { decision: 'approved' | 'denied'; idempotency_key: string }, version: number) =>

@@ -877,6 +877,11 @@ export default function SuperAssistantPage() {
               <div className="mx-auto w-full max-w-4xl px-4 pt-3 sm:px-8">
                 <KernelRunTaskCard
                   runId={kernelRunId}
+                  onRetry={(newRunId) => {
+                    const next = new URLSearchParams(searchParams)
+                    next.set('run', newRunId)
+                    setSearchParams(next, { replace: true })
+                  }}
                   onClose={() => {
                     const next = new URLSearchParams(searchParams)
                     next.delete('run')

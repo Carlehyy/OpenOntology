@@ -13,7 +13,7 @@ const statusLabel: Record<string, string> = {
 }
 
 /** kernel.v1 长任务卡片：关闭页面不会取消 Run，重新挂载会从最后一个事件继续回放。 */
-export default function KernelRunTaskCard({ runId, onClose }: { runId: string; onClose?: () => void }) {
+export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: string; onClose?: () => void; onRetry?: (runId: string) => void }) {
   const [run, setRun] = useState<KernelRunView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -106,6 +106,16 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
     finally { setBusy(false) }
   }
 
+  const retryRun = async () => {
+    if (!run || busy) return
+    setBusy(true); setError(null)
+    try {
+      const result = await superAssistantApi.retryKernelRun(runId, { idempotency_key: `${runId}:retry:${crypto.randomUUID()}` })
+      onRetry?.(result.run_id)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '重试任务失败') }
+    finally { setBusy(false) }
+  }
+
   const decideApproval = async (approvalId: string, decision: 'approved' | 'denied') => {
     if (!run || busy) return
     setBusy(true); setError(null)
@@ -157,6 +167,7 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
           ))}
         </div>
       )}
+      {run && run.status === 'failed' && <button type="button" disabled={busy} onClick={() => void retryRun()} className="mt-2 mr-3 rounded border px-2 py-1 hover:bg-muted disabled:opacity-50"><Play size={12} className="mr-1 inline" />重试失败任务</button>}
       {run && terminalStatuses.has(run.status) && onClose && <button type="button" onClick={onClose} className="mt-2 text-muted-foreground underline">关闭任务卡</button>}
     </section>
   )

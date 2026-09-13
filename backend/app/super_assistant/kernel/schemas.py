@@ -38,6 +38,11 @@ class ControlRunRequest(KernelRequest):
     idempotency_key: str = Field(min_length=1, max_length=255)
 
 
+class RetryRunRequest(KernelRequest):
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    max_steps: int = Field(default=8, ge=1, le=128)
+
+
 class InputRequest(KernelRequest):
     kind: Literal["user_input", "question_answer", "external_event", "resume"] = "user_input"
     content: str | None = Field(default=None, max_length=262144)

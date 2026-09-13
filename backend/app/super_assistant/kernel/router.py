@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_current_user, get_db
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
 from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionDispatchOutbox, ExecutionEvent, ExecutionRun, InboxItem
-from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RunAccepted, RunView
+from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RetryRunRequest, RunAccepted, RunView
 from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
 from app.super_assistant.kernel.artifacts import verify_artifact
 from app.super_assistant.kernel.outbox import replay_dead_once
@@ -88,6 +88,54 @@ def get_kernel_run(run_id: str, db: Session = Depends(get_db), user=Depends(get_
         calls=[{"call_id": c.id, "status": c.status, "outcome": c.outcome, "capability_key": c.capability_key} for c in calls],
         artifacts=[{"artifact_id": a.id, "kind": a.kind, "mime_type": a.mime_type, "size": a.size, "checksum": a.checksum, "status": a.status, "business_status": a.business_status} for a in artifacts],
     )
+
+
+@router.post("/runs/{run_id}/retry", response_model=RunAccepted, status_code=status.HTTP_202_ACCEPTED)
+def retry_kernel_run(
+    run_id: str,
+    body: RetryRunRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+    idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """Retry a failed Run as a new immutable execution lineage.
+
+    A terminal Run is never reopened. The new Run reuses the original goal and
+    binding snapshot, while receiving a fresh idempotency key and execution
+    facts so the failed attempt remains auditable.
+    """
+    if idempotency_header is None or idempotency_header != body.idempotency_key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must match body.idempotency_key")
+    source = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id))
+    if source is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if source.status != "failed":
+        raise HTTPException(status_code=409, detail="only failed Run can retry")
+    try:
+        binding = json.loads(source.binding_snapshot_ref) if source.binding_snapshot_ref else {}
+        run, _ = create_run(
+            db,
+            owner_id=user.id,
+            conversation_id=source.conversation_id,
+            goal=source.goal,
+            idempotency_key=body.idempotency_key,
+            deadline=None,
+            max_steps=body.max_steps,
+            binding=binding,
+        )
+        db.commit()
+        return RunAccepted(
+            run_id=run.id,
+            execution_version="kernel.v1",
+            stream_url=f"/api/v2/super-assistant/runs/{run.id}/events",
+            request_id=_request_id(),
+        )
+    except IdempotencyConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="idempotency_conflict") from exc
+    except ContractError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/cancel", status_code=status.HTTP_202_ACCEPTED)

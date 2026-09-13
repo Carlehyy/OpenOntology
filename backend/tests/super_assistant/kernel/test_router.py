@@ -91,3 +91,40 @@ def test_kernel_control_and_input_wake_waiting_run(client, db, admin_user, auth_
     )
     assert replay.status_code == 202
     assert replay.json()["inbox_id"] == answer.json()["inbox_id"]
+
+
+def test_kernel_retry_creates_new_run_without_reopening_failed_run(client, db, admin_user, auth_headers):
+    conversation = SuperAssistantConversation(owner_id=admin_user.id, title="kernel retry")
+    db.add(conversation)
+    db.commit()
+    created = client.post(
+        f"/api/v2/super-assistant/conversations/{conversation.id}/runs",
+        json={"goal": "retryable task", "idempotency_key": "retry-source"},
+        headers={**auth_headers, "Idempotency-Key": "retry-source"},
+    )
+    source_id = created.json()["run_id"]
+    from app.super_assistant.kernel.models import ExecutionRun
+
+    source = db.get(ExecutionRun, source_id)
+    source.status = "failed"
+    db.commit()
+    retried = client.post(
+        f"/api/v2/super-assistant/runs/{source_id}/retry",
+        json={"idempotency_key": "retry-new", "max_steps": 3},
+        headers={**auth_headers, "Idempotency-Key": "retry-new"},
+    )
+    assert retried.status_code == 202, retried.text
+    new_id = retried.json()["run_id"]
+    assert new_id != source_id
+    new_run = db.get(ExecutionRun, new_id)
+    assert new_run.goal == source.goal
+    assert new_run.status == "queued"
+    assert db.get(ExecutionRun, source_id).status == "failed"
+
+    replay = client.post(
+        f"/api/v2/super-assistant/runs/{source_id}/retry",
+        json={"idempotency_key": "retry-new", "max_steps": 3},
+        headers={**auth_headers, "Idempotency-Key": "retry-new"},
+    )
+    assert replay.status_code == 202
+    assert replay.json()["run_id"] == new_id
