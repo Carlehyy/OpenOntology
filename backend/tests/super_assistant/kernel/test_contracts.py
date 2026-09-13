@@ -49,6 +49,12 @@ def test_conflicting_cancel_is_rejected():
         request_cancel(state, CancelReason.DEADLINE)
 
 
+def test_deadline_after_user_cancel_is_rejected():
+    state = request_cancel(RunState(RunStatus.ACTIVE), CancelReason.USER)
+    with pytest.raises(ContractError, match="conflicting"):
+        mark_deadline(state)
+
+
 def test_question_reask_only_once_then_fails_branch():
     state, action = expire_question(RunState(RunStatus.WAITING_INPUT), ExpiryPolicy.REASK_ONCE)
     assert action == ExpiryAction.REASK

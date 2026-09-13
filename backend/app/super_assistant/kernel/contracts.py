@@ -129,6 +129,12 @@ class RunState:
             None, CancelReason.USER, CancelReason.PARENT, CancelReason.DEADLINE,
         }:
             raise ContractError("terminal Run has invalid cancel_reason")
+        if self.status not in {
+            RunStatus.CANCEL_REQUESTED,
+            RunStatus.CANCELLING,
+            *TERMINAL_RUN_STATUSES,
+        } and self.cancel_reason is not None:
+            raise ContractError("open Run cannot retain a cancel_reason")
 
 
 def _ensure_open(state: RunState) -> None:
@@ -165,7 +171,7 @@ def mark_deadline(state: RunState) -> RunState:
     """Run deadline：无未决 Call 可直接过期，否则先登记 deadline cancel。"""
     _ensure_open(state)
     if state.cancel_reason is not None and state.cancel_reason != CancelReason.DEADLINE:
-        return state
+        raise ContractError("conflicting cancel reason")
     if state.unresolved_call_count:
         return request_cancel(state, CancelReason.DEADLINE)
     return replace(state, status=RunStatus.EXPIRED, cancel_reason=CancelReason.DEADLINE)
