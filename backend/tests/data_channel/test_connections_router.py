@@ -192,3 +192,39 @@ def test_connection_create_rejects_duplicate_name_and_blank_name(
         assert blank.status_code == 400
     finally:
         app.dependency_overrides.pop(connections_router.get_db, None)
+
+
+def test_rest_connection_create_validates_config_server_side(
+        client, db, auth_headers):
+    """D-003 遗留加固：直连 API 持久化坏 REST config 被服务端 400 拦截。"""
+    _route_db_to(db)
+    # 坏 headers（非法 JSON 字符串）→ 400，不落库
+    bad = client.post(
+        "/api/v2/connections",
+        headers=auth_headers,
+        json={"name": "坏请求头连接", "kind": "rest",
+              "config": {"url": "https://api.example.com/v1", "headers": "{not-json"}},
+    )
+    assert bad.status_code == 400, bad.text
+    assert "请求头" in bad.json()["detail"]
+    assert db.query(Connection).filter(
+        Connection.name == "坏请求头连接").count() == 0
+
+    # 非 http(s) URL → 400
+    bad_url = client.post(
+        "/api/v2/connections",
+        headers=auth_headers,
+        json={"name": "坏地址连接", "kind": "rest",
+              "config": {"url": "ftp://example.com/data"}},
+    )
+    assert bad_url.status_code == 400, bad_url.text
+
+    # 正常 rest config → 201（页面单 URL 形态也应通过归一化）
+    good = client.post(
+        "/api/v2/connections",
+        headers=auth_headers,
+        json={"name": "合法REST连接", "kind": "rest",
+              "config": {"url": "https://api.example.com/v1/users",
+                         "headers": "{\"X-Token\": \"abc\"}"}},
+    )
+    assert good.status_code == 201, good.text

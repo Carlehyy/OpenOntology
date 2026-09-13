@@ -62,6 +62,14 @@ def create_connection(body: ConnectionCreate, db: Session = Depends(get_db)):
     # 重名连接会让依赖连接名的数据集/任务无法区分（商业化审查 D-005）
     if db.query(Connection).filter(Connection.name == name).first():
         raise HTTPException(409, f"已存在同名连接「{name}」，请更换连接名称")
+    if body.kind == "rest":
+        # 防御纵深（商业化审查 D-003 遗留建议）：前端已有保存拦截，直连
+        # API 仍可持久化坏 config，复用连接器归一化在服务端再拦一道。
+        from app.data_channel.connections.rest_connector import RestConnector
+        try:
+            RestConnector._normalize_config(body.config)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     from app.services import encryption_service
     encrypted_config = {"_encrypted": encryption_service.encrypt(json.dumps(body.config))}
 
