@@ -215,6 +215,8 @@ async def process_execution_message(payload: dict) -> None:
             run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update())
             if run is None or run.status in terminal:
                 db.rollback(); return
+            if run.status != RunStatus.ACTIVE.value:
+                db.rollback(); return
             assert_lease(run, token)
             turn = db.get(ExecutionTurn, turn.id)
             if turn is None: raise RuntimeError("execution Turn disappeared")
@@ -258,6 +260,17 @@ async def process_execution_message(payload: dict) -> None:
                 db, run, call, step, attempt, token, policy,
                 call_kwargs, request_messages, tools,
             )
+            # Control commands may arrive while the provider is running.  A
+            # late result is evidence for the Call, but it must never create
+            # a new side effect or advance a paused/cancelled Run.
+            db.rollback(); db.begin()
+            current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update())
+            if current is None:
+                db.rollback(); return
+            assert_lease(current, token)
+            if current.status != RunStatus.ACTIVE.value:
+                db.rollback(); return
+            run = current
             tool_calls = result.get("tool_calls") or []
             wait = _wait_request(result, tool_calls)
             if tool_calls and wait is None:
@@ -284,6 +297,8 @@ async def process_execution_message(payload: dict) -> None:
             content = strip_think_content(str(result.get("content") or ""))
             db.rollback()  # connector/tool adapters may have opened an implicit transaction
             db.begin(); run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update()); assert run is not None; assert_lease(run, token)
+            if run.status != RunStatus.ACTIVE.value:
+                db.rollback(); return
             call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt_id)
             artifact = _persist_assistant_artifact(db, run, call, attempt, content, token) if content else None
             _close_model_call(db, run, call, attempt, step, artifact, token)
@@ -307,7 +322,7 @@ async def process_execution_message(payload: dict) -> None:
             step = db.scalar(select(ExecutionStep).where(ExecutionStep.turn_id == turn.id).order_by(ExecutionStep.step_no.desc()))
             _persist_waiting_state(db, run, turn, step, {"kind": "resume", "reason": "max_steps"}, token); db.commit()
     except Exception as exc:
-        db.rollback(); logger.exception("kernel Run %s execution failed", run_id); _mark_run_failed(run_id, exc)
+        db.rollback(); logger.exception("kernel Run %s execution failed", run_id); _mark_run_failed(run_id, exc, expected_token=token)
     finally:
         db.close()
 
@@ -338,6 +353,10 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             (SuperAssistantProcessPlugin.id == target) | (SuperAssistantProcessPlugin.key == target),
         ))
         if plugin is not None:
+            from app.shared.config import settings
+            if settings.environment == "production" and plugin.trust_level == TrustLevel.USER_UNTRUSTED.value:
+                logger.error("refusing user_untrusted process plugin in production: %s", plugin.id)
+                return None
             from app.super_assistant.kernel.plugin_host import ProcessPluginHost
             host = ProcessPluginHost(_manifest(plugin))
             descriptor = _descriptor(plugin)
@@ -561,6 +580,10 @@ async def process_external_call_message(payload: dict) -> None:
         if run is None or call is None or call.status != CallStatus.WAITING_EXTERNAL.value:
             db.rollback()
             return
+        if run.status in {s.value for s in {RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLING, RunStatus.PAUSED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
+            call.status, call.outcome = CallStatus.CANCEL_REQUESTED.value, CallOutcome.OUTCOME_UNKNOWN.value
+            db.commit()
+            return
         connector = _resolve_external_connector(db, run, call)
         if connector is None:
             call.status, call.outcome, call.manual_attention = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value, True
@@ -602,7 +625,7 @@ async def process_external_call_message(payload: dict) -> None:
         current_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == call.id).with_for_update())
         if current is None or current_call is None:
             return
-        if current.status in {s.value for s in {RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
+        if current.status in {s.value for s in {RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLING, RunStatus.PAUSED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
             # Preserve the late provider result for reconciliation; never
             # reopen a terminal Run.
             current_call.status, current_call.outcome = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value
@@ -912,11 +935,22 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
     # A yielded Turn must not hold a worker lease across human/external wait.
     run.lease_owner, run.lease_expires_at = None, None
 
-def _mark_run_failed(run_id: str, exc: Exception) -> None:
+def _mark_run_failed(run_id: str, exc: Exception, *, expected_token=None) -> None:
     db = SessionLocal()
     try:
         run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update())
         if run is None or run.status in {s.value for s in {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.EXPIRED}}:
+            db.rollback()
+            return
+        if expected_token is not None:
+            try:
+                assert_lease(run, expected_token)
+            except Exception:
+                # A duplicate or stale activation must never overwrite the
+                # current worker's projection with FAILED.
+                db.rollback()
+                return
+        elif "lease is held by another worker" in str(exc) or "terminal Run cannot acquire lease" in str(exc):
             db.rollback()
             return
         before = run.status
@@ -1228,6 +1262,11 @@ async def _process_assistant_child(db, run: ExecutionRun, token, policy: Executi
     if current is None:
         db.rollback(); return
     assert_lease(current, token)
+    if current.status != RunStatus.ACTIVE.value:
+        # The Hub result arrived after pause/cancel. Preserve the control
+        # decision and avoid projecting a successful child completion.
+        db.rollback()
+        return
     call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt.id); turn = db.get(ExecutionTurn, turn.id); step = db.get(ExecutionStep, step.id)
     artifact = None
     if content:

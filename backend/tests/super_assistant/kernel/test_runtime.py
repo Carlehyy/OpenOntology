@@ -32,6 +32,18 @@ def test_rebuild_messages_records_consumed_input_for_crash_recovery(db):
     assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.consumed").count() == 1
 
 
+def test_duplicate_activation_with_live_lease_is_a_noop(db, monkeypatch):
+    from datetime import timedelta
+    from app.super_assistant.kernel.store import acquire_lease
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="duplicate activation")
+    run.status = "active"
+    acquire_lease(db, run_id=run.id, worker_id="worker-a", ttl=timedelta(minutes=5))
+    db.commit()
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "duplicate"}))
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "active"
+
+
 def test_kernel_activation_persists_attempt_artifact_and_completion(db, monkeypatch):
     owner = User(
         id=str(uuid.uuid4()), username=f"runtime-{uuid.uuid4().hex[:8]}",

@@ -56,6 +56,31 @@ def test_parent_join_wakes_waiting_parent_after_child_completion(db):
     assert parent.status == "active"
 
 
+def test_parent_join_maps_queued_child_without_blocking_scheduler(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-queued")
+    db.flush()
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child-queued", parent_run_id=parent.id)
+    parent.status = "waiting_external"
+    db.commit()
+    assert join_ready_parents_once(db) == 0
+    db.refresh(parent)
+    assert parent.status == "waiting_external"
+
+
+def test_parent_cancel_is_not_overwritten_by_child_join(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-cancel-join")
+    db.flush()
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child-cancel-join", parent_run_id=parent.id)
+    parent.status = "cancel_requested"
+    child.status = "cancelled"
+    db.commit()
+    assert join_ready_parents_once(db) == 0
+    db.refresh(parent)
+    assert parent.status == "cancel_requested"
+
+
 def test_expiry_with_unresolved_call_sets_cancel_grace(db):
     owner, conversation = _owner_and_conversation(db)
     run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="cancel grace", idempotency_key="grace")

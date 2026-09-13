@@ -24,6 +24,20 @@ _TERMINAL = {RunStatus.COMPLETED.value, RunStatus.FAILED.value, RunStatus.CANCEL
 _UNRESOLVED = {"offered", "dispatched", "running", "waiting_external", "cancel_requested", "reconciling"}
 
 
+def _child_status(value: str) -> ChildStatus:
+    """Map a Run projection to the smaller fan-in status vocabulary.
+
+    ChildStatus intentionally models join semantics, while RunStatus also
+    contains execution-control and waiting states.  Unknown/non-terminal
+    values must remain conservative instead of aborting the scheduler tick.
+    """
+    if value == RunStatus.QUEUED.value:
+        return ChildStatus.PENDING
+    if value in _TERMINAL:
+        return ChildStatus(value)
+    return ChildStatus.RUNNING
+
+
 def _utc(value):
     return value if value is None or value.tzinfo else value.replace(tzinfo=timezone.utc)
 
@@ -184,11 +198,15 @@ def join_ready_parents_once(db: Session, *, limit: int = 100) -> int:
     parents = [r for r in rows if r.required_child_ids]
     changed = 0
     for parent in parents:
+        if parent.status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}:
+            # Cancellation is the parent's control decision; child fan-in
+            # must never overwrite it with FAILED.
+            continue
         children = db.scalars(select(ExecutionRun).where(ExecutionRun.parent_run_id == parent.id)).all()
         if not children:
             continue
         policy = JoinPolicy(parent.join_policy)
-        result = decide_child_join(tuple(ChildResult(c.id, ChildStatus(c.status), c.id in set(parent.required_child_ids or [])) for c in children), policy)
+        result = decide_child_join(tuple(ChildResult(c.id, _child_status(c.status), c.id in set(parent.required_child_ids or [])) for c in children), policy)
         if result.decision is JoinDecision.PENDING:
             continue
         before = parent.status
