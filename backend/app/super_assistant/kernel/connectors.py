@@ -48,6 +48,7 @@ class AgentDescriptor:
     session_policy: SessionPolicy = SessionPolicy.STATELESS
     supports_stream: bool = False
     supports_cancel: bool = False
+    supports_approval: bool = False
     supports_push: bool = False
     supports_query_status: bool = False
     supports_artifact: bool = False
@@ -149,7 +150,11 @@ class ConnectorRegistry:
         key = (descriptor.key, descriptor.revision)
         existing = self._connectors.get(key)
         if existing is not None and existing is not connector:
-            raise ContractError("connector revision is already registered")
+            # Rebuilding a connector after worker restart or credential
+            # rotation is safe when the immutable descriptor is identical.
+            # A descriptor change still remains an immutable-revision error.
+            if existing.descriptor() != descriptor:
+                raise ContractError("connector revision is already registered")
         self._connectors[key] = connector
 
     def resolve(self, key: str, revision: int) -> AgentConnector:
@@ -168,11 +173,9 @@ class ConnectorRegistry:
 class RemoteAgentHttpConnector:
     """RAP-compatible HTTP connector backed by the existing remote-agent API.
 
-    It deliberately exposes only the capabilities the legacy endpoint can
-    prove.  Cancellation and status polling remain unsupported until the
-    remote endpoint advertises those operations; callers therefore enter the
-    kernel's normal ``outcome_unknown``/reconciliation path instead of
-    guessing a result.
+    Direct mode calls the configured HTTP endpoint.  Pull mode enqueues a
+    durable RAP task through owner-scoped callbacks and reconciles the task
+    queue; the protocol has no cancellation callback after a task is claimed.
     """
 
     agent_id: str
@@ -181,6 +184,10 @@ class RemoteAgentHttpConnector:
     token: str = ""
     timeout_seconds: int = 120
     revision: int = 1
+    mode: str = "direct"
+    pull_enqueue: Callable[[str, str | None, int, str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
+    pull_query: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
+    pull_cancel: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
     transport: Any = field(default=None, compare=False, repr=False)
 
     def descriptor(self) -> AgentDescriptor:
@@ -191,9 +198,9 @@ class RemoteAgentHttpConnector:
             transport="rap.v1",
             session_policy=SessionPolicy.RESUMABLE,
             supports_stream=False,
-            supports_cancel=False,
+            supports_cancel=self.mode == "pull" and self.pull_cancel is not None,
             supports_push=False,
-            supports_query_status=False,
+            supports_query_status=self.mode == "pull" and self.pull_query is not None,
             supports_artifact=False,
         )
 
@@ -209,6 +216,18 @@ class RemoteAgentHttpConnector:
 
     async def invoke(self, *, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
         body = self._input(input_ref)
+        if self.mode == "pull":
+            if self.pull_enqueue is None:
+                raise ContractError("RAP pull connector is not configured")
+            timeout = max(1, int(self.timeout_seconds))
+            if isinstance(deadline, datetime):
+                timeout = max(1, min(timeout, int((deadline - datetime.now(timezone.utc)).total_seconds())))
+            queued = await asyncio.to_thread(
+                self.pull_enqueue, body["message"], body.get("session_ref"), timeout, call_id,
+            )
+            if not isinstance(queued, Mapping) or not queued.get("remote_task_ref"):
+                raise ContractError("RAP pull enqueue did not return a remote task reference")
+            return {"run_id": run_id, "call_id": call_id, **dict(queued)}
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         timeout = max(1.0, float(self.timeout_seconds))
         if isinstance(deadline, datetime):
@@ -225,7 +244,8 @@ class RemoteAgentHttpConnector:
             raise ContractError("remote connector response must be an object")
         status = str(value.get("status") or "failed").lower()
         if status not in {"answered", "failed", "cancelled"}:
-            status = "failed"
+            # Unknown provider state is not evidence of failure.
+            status = "unknown"
         return {
             "run_id": run_id,
             "call_id": call_id,
@@ -237,9 +257,13 @@ class RemoteAgentHttpConnector:
         }
 
     async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        if self.pull_cancel is not None:
+            return await asyncio.to_thread(self.pull_cancel, remote_task_ref)
         return {"status": "unsupported", "remote_task_ref": remote_task_ref}
 
     async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        if self.pull_query is not None:
+            return await asyncio.to_thread(self.pull_query, remote_task_ref)
         return {"status": "unsupported", "remote_task_ref": remote_task_ref}
 
 
@@ -430,7 +454,14 @@ class ProcessPluginConnector:
                 raise ContractError("process plugin result must be an object")
             return {"run_id": run_id, "call_id": call_id, **value}
         finally:
-            self.release()
+            try:
+                stop = getattr(self.host, "stop", None)
+                if stop is not None:
+                    await stop()
+            finally:
+                # Admission is a durable counter; release it even when host
+                # cleanup itself fails so drain cannot wedge permanently.
+                self.release()
 
     async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
         return {"status": "unsupported", "remote_task_ref": remote_task_ref}

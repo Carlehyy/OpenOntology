@@ -10,7 +10,7 @@ from datetime import timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.data_channel.pipeline_tasks.dispatch import dispatch_execution
+from app.data_channel.pipeline_tasks.dispatch import EXECUTION_DLQ_SUBJECT, dispatch_execution
 from .models import ExecutionDispatchOutbox, ExecutionRun
 from .store import _now
 
@@ -110,9 +110,26 @@ def _record_failure(db: Session, row_id: str, claim_token: str, error: str) -> N
     row.error_ref = error[:1000]
     row.claim_token = None
     row.claim_expires_at = None
-    if row.attempt_count >= MAX_ATTEMPTS:
+    exhausted = row.attempt_count >= MAX_ATTEMPTS
+    if exhausted:
         row.status = "dead"
     else:
         row.status = "pending"
         row.next_attempt_at = _now() + timedelta(seconds=min(300, 5 * (2 ** (row.attempt_count - 1))))
+    dlq_payload = {
+        "schema": "sa.execution.dlq.v1",
+        "run_id": row.run_id,
+        "outbox_id": row.id,
+        "command_id": row.command_id,
+        "message_ref": row.message_ref,
+        "subject": row.subject,
+        "attempt_count": row.attempt_count,
+        "error_ref": row.error_ref,
+        "replay_requires_operator": True,
+    }
     db.commit()
+    if exhausted:
+        try:
+            dispatch_execution(EXECUTION_DLQ_SUBJECT, dlq_payload, command_id=f"dlq:{row.command_id}:{row.attempt_count}")
+        except Exception:
+            pass

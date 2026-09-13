@@ -36,7 +36,7 @@ from .models import (
     InboxItem,
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
-from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease
+from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease, renew_lease
 from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, ProcessPluginConnector, TrustLevel
 
 
@@ -46,6 +46,41 @@ from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnecto
 connector_registry = ConnectorRegistry()
 
 logger = logging.getLogger(__name__)
+
+
+def _renew_run_lease_once(run_id: str, token, ttl: timedelta) -> bool:
+    """Renew a lease in an independent transaction while provider work runs.
+
+    Provider calls must not hold the Run row lock.  A separate short-lived
+    session lets the scheduler/recovery process observe the same lease epoch;
+    if another worker fenced this token, renewal simply returns ``False`` and
+    the owning activation will fail its next fenced write.
+    """
+    db = SessionLocal()
+    try:
+        renewed = renew_lease(db, token=token, ttl=ttl)
+        db.commit()
+        return renewed.epoch == token.epoch and renewed.owner == token.owner
+    except Exception:
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+
+async def _lease_heartbeat(run_id: str, token, policy: ExecutionPolicy, stop: asyncio.Event) -> None:
+    """Keep a long provider/model step fenced until it yields or completes."""
+    interval = max(0.5, policy.heartbeat_interval.total_seconds())
+    ttl = max(policy.lease_ttl, policy.heartbeat_interval * 3)
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return
+        except asyncio.TimeoutError:
+            ok = await asyncio.to_thread(_renew_run_lease_once, run_id, token, ttl)
+            if not ok:
+                logger.warning("lease heartbeat lost for run=%s owner=%s epoch=%s", run_id, token.owner, token.epoch)
+                return
 
 
 def _checksum(content: str) -> str:
@@ -138,7 +173,17 @@ async def process_execution_message(payload: dict) -> None:
             # message history compact while injecting the current selected
             # sources for each Step.
             request_messages = [*messages, {"role": "system", "content": pack.content}]
-            result = await asyncio.to_thread(provider.chat, call_kwargs, request_messages, tools)
+            # Provider/model work can outlive the ordinary lease TTL.  Renew
+            # the same fencing epoch in a separate DB session while awaiting
+            # it; this prevents a long step from being mistaken for a stuck
+            # Run and reclaimed by the recovery scanner.
+            heartbeat_stop = asyncio.Event()
+            heartbeat = asyncio.create_task(_lease_heartbeat(run.id, token, policy, heartbeat_stop))
+            try:
+                result = await asyncio.to_thread(provider.chat, call_kwargs, request_messages, tools)
+            finally:
+                heartbeat_stop.set()
+                await heartbeat
             tool_calls = result.get("tool_calls") or []
             wait = _wait_request(result, tool_calls)
             if tool_calls and wait is None:
@@ -242,7 +287,9 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
     # User-scoped targets must be resolved from the owner row first. Looking
     # in a process-global registry first could otherwise reuse another user's
     # connector with the same key after a worker restart.
-    if not (target.startswith("remote.") or target.startswith("mcp__") or target.startswith("plugin:")):
+    # These descriptors are owner-scoped and rebuilt from persisted rows;
+    # never reuse another owner's process-global connector instance.
+    if not (target.startswith("remote.") or target.startswith("mcp__") or target.startswith("plugin:") or target.startswith("multica_")):
         try:
             return connector_registry.resolve(target, int(call.capability_revision))
         except Exception:
@@ -296,7 +343,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
         ))
     except Exception:
         row = None
-    if row is None or (row.mode or "direct") != "direct":
+    if row is None:
         # Pull-mode agents require a durable task queue adapter; treating them
         # as direct would violate the connector transport contract.
         # MCP tools use the same immutable Call boundary. Resolve the
@@ -331,8 +378,37 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             logger.exception("failed to resolve MCP connector target=%s", target)
         return None
     try:
-        from app.super_assistant.remote_agent_service import kernel_connector
-        connector = kernel_connector(row)
+        from app.super_assistant import remote_agent_service
+
+        def pull_enqueue(message: str, session_ref: str | None, timeout_seconds: int, call_id: str) -> dict:
+            session = SessionLocal()
+            try:
+                return remote_agent_service.enqueue_kernel_task(
+                    session, row.id, call_id, message, session_ref, timeout_seconds,
+                )
+            finally:
+                session.close()
+
+        def pull_query(remote_task_ref: str) -> dict:
+            session = SessionLocal()
+            try:
+                return remote_agent_service.query_kernel_task(session, row.id, remote_task_ref)
+            finally:
+                session.close()
+
+        def pull_cancel(remote_task_ref: str) -> dict:
+            session = SessionLocal()
+            try:
+                return remote_agent_service.cancel_kernel_task(session, row.id, remote_task_ref)
+            finally:
+                session.close()
+
+        connector = remote_agent_service.kernel_connector(
+            row,
+            pull_enqueue=pull_enqueue if (row.mode or "direct") == "pull" else None,
+            pull_query=pull_query if (row.mode or "direct") == "pull" else None,
+            pull_cancel=pull_cancel if (row.mode or "direct") == "pull" else None,
+        )
         _persist_connector_capability(db, connector, source="remote_agent")
         connector_registry.register(connector)
         return connector
@@ -473,6 +549,19 @@ async def process_external_call_message(payload: dict) -> None:
             )
             db.commit()
             return
+        if normalized == "unknown":
+            current_call.status = CallStatus.RECONCILING.value
+            current_call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
+            current_call.remote_observed_state_ref = "provider_unknown"
+            current_call.reconcile_attempt_count += 1
+            current_call.next_reconcile_at = _now() + ExecutionPolicy().reconciliation_initial
+            latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
+            if latest is not None:
+                latest.provider_status = "unknown"
+            append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": (result or {}).get("provider_event_id") if isinstance(result, dict) else None}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:unknown-response", idempotency_key=f"external-unknown-response:{current_call.id}", connector_id=descriptor.agent_id)
+            _append_manual_attention(db, current, current_call, "provider_unknown")
+            db.commit()
+            return
         outcome = {"answered": CallOutcome.COMPLETED.value, "failed": CallOutcome.FAILED.value, "cancelled": CallOutcome.CANCELLED_CONFIRMED.value}.get(normalized, CallOutcome.FAILED.value)
         content = str((result or {}).get("content") or "") if isinstance(result, dict) else str(result)
         artifact = None
@@ -587,12 +676,12 @@ def _close_model_call(db, run, call, attempt, step, artifact, token):
 
 
 def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
-    kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None
+    kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None; expiry_policy = None
     if kind == "approval_decision":
         from .models import Approval
         approval = Approval(owner_id=run.owner_id, run_id=run.id, call_id=call.id if call is not None else None, target_summary=str(wait.get("target_summary") or "需要用户审批"), parameter_summary=str(wait.get("parameter_summary") or "{}"), scope_summary=str(wait.get("scope_summary") or "run scope"), capability_revision=1, parameter_hash=_checksum(str(wait)), status="pending", expires_at=min(run.deadline or (_now() + timedelta(hours=24)), _now() + timedelta(hours=1)))
         db.add(approval); db.flush()
-        inbox = InboxItem(run_id=run.id, kind=kind, priority=10, status="pending", approval_id=approval.id, target_ref=target_ref or approval.id, payload={"approval_id": approval.id}, source="system", idempotency_key=f"approval:{approval.id}"); db.add(inbox); db.flush()
+        inbox = InboxItem(run_id=run.id, kind=kind, priority=10, status="pending", approval_id=approval.id, target_ref=target_ref or approval.id, payload={"approval_id": approval.id}, source="system", expires_at=approval.expires_at, expiry_policy="fail_run", idempotency_key=f"approval:{approval.id}"); db.add(inbox); db.flush()
         append_event(db, run, event_type="approval.requested", payload={"approval_id": approval.id, "run_id": run.id, "call_id": approval.call_id, "scope_snapshot_ref": run.permission_snapshot_ref or f"run://{run.id}/scope", "expires_at": approval.expires_at.isoformat()}, actor={"kind": "worker"}, command_id=f"approval:{approval.id}", idempotency_key=f"approval-request:{approval.id}", lease=token)
     elif kind in {"question_answer", "external_event"}:
         external_call = None
@@ -616,9 +705,16 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 message_ref=f"call://{external_call.id}",
                 subject=f"sa.execution.call.{run.owner_id}",
             )
-        inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", call_id=external_call.id if external_call is not None else None, question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
+        question_expires_at = None
+        if kind == "question_answer":
+            deadline = run.deadline
+            if deadline is not None and deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            question_expires_at = min(deadline, _now() + timedelta(minutes=30)) if deadline else _now() + timedelta(minutes=30)
+            expiry_policy = "reask_once"
+        inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", call_id=external_call.id if external_call is not None else None, question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", expires_at=question_expires_at, expiry_policy=expiry_policy, idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
     before = run.status; run.status = {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
-    append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id if inbox else f"run:{run.id}:wait", "kind": kind, "target_ref": target_ref or (inbox.id if inbox else run.id), "expiry_policy": "none"}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)
+    append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id if inbox else f"run:{run.id}:wait", "kind": kind, "target_ref": target_ref or (inbox.id if inbox else run.id), "expiry_policy": expiry_policy or "none"}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)
     reason = {
         "waiting_input": "waiting_input", "waiting_approval": "waiting_approval",
         "waiting_external": "waiting_external", "waiting_retry": "waiting_retry",

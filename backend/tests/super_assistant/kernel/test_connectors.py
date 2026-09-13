@@ -85,6 +85,38 @@ async def test_remote_connector_does_not_claim_unsupported_cancel_or_status():
 
 
 @pytest.mark.asyncio
+async def test_remote_pull_connector_enqueues_and_reconciles_with_truthful_controls():
+    calls = []
+
+    def enqueue(message, session_ref, timeout_seconds, call_id):
+        calls.append(("enqueue", message, session_ref, timeout_seconds, call_id))
+        return {"status": "running", "remote_task_ref": "rap-pull:t1"}
+
+    def query(remote_ref):
+        calls.append(("query", remote_ref))
+        return {"status": "completed", "content": "完成", "provider_event_id": "evt-1"}
+
+    def cancel(remote_ref):
+        calls.append(("cancel", remote_ref))
+        return {"status": "cancelled", "provider_event_id": "evt-cancel"}
+
+    connector = RemoteAgentHttpConnector(
+        agent_id="remote-pull", key="remote.pull", endpoint="", mode="pull",
+        pull_enqueue=enqueue, pull_query=query, pull_cancel=cancel,
+    )
+    result = await connector.invoke(
+        run_id="r1", call_id="c1", input_ref='{"message":"研究项目","session_ref":"s1"}', deadline=None,
+    )
+    assert result["status"] == "running"
+    assert result["remote_task_ref"] == "rap-pull:t1"
+    assert connector.descriptor().supports_query_status is True
+    assert connector.descriptor().supports_cancel is True
+    assert (await connector.query_status(remote_task_ref="rap-pull:t1"))["status"] == "completed"
+    assert (await connector.cancel(remote_task_ref="rap-pull:t1"))["status"] == "cancelled"
+    assert calls[0][0] == "enqueue"
+
+
+@pytest.mark.asyncio
 async def test_multica_tool_connector_wraps_existing_service_without_expanding_capabilities():
     seen = {}
 
@@ -138,3 +170,11 @@ async def test_multica_create_connector_preserves_remote_ref_and_control_hooks()
     assert (await connector.query_status(remote_task_ref=result["remote_task_ref"]))["status"] == "completed"
     assert (await connector.cancel(remote_task_ref=result["remote_task_ref"]))["status"] == "cancelled"
     assert [item[0] for item in calls] == ["invoke", "query", "cancel"]
+
+@pytest.mark.asyncio
+async def test_remote_direct_unknown_provider_status_is_preserved_for_reconciliation():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "mystery", "content": ""})
+    connector = RemoteAgentHttpConnector(agent_id="remote-unknown", key="remote.unknown", endpoint="https://agent.example/run", transport=httpx.MockTransport(handler))
+    result = await connector.invoke(run_id="r1", call_id="c1", input_ref='{"message":"x"}', deadline=None)
+    assert result["status"] == "unknown"
