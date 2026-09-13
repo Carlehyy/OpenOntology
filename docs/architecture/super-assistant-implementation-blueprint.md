@@ -9,14 +9,14 @@ kernel.v1 的首发实现集中在 `backend/app/super_assistant/kernel/`：
 | 责任 | 代码入口 | 验证入口 |
 |---|---|---|
 | 状态机、事件注册表、幂等和租约 | `contracts.py`、`events.py`、`store.py` | `test_contracts.py`、`test_store.py` |
-| 执行事实与迁移 schema | `models.py`、`alembic/versions/2026_09_13_0108_super_assistant_kernel.py` | `test_models.py`、迁移回归 |
-| 策略、上下文、记忆和 Artifact | `policies.py`、`context.py`、`memory_policy.py`、`artifacts.py` | `test_policies.py`、`test_context_memory_artifacts.py` |
+| 执行事实与迁移 schema | `models.py`、`alembic/versions/2026_09_13_0108_super_assistant_kernel.py`、`2026_09_13_0109_super_assistant_context_sources.py` | `test_models.py`、迁移回归 |
+| 策略、上下文、记忆和 Artifact | `policies.py`、`context.py`、`context_sources.py`、`source_registry.py`、`memory_policy.py`、`artifacts.py` | `test_policies.py`、`test_context_memory_artifacts.py`、`test_context_sources.py` |
 | Capability、插件和外部回调 | `connectors.py`、`plugins.py`、`capability_service.py`、`callbacks.py` | `test_connectors.py`、`test_plugins.py`、`test_capability_callback.py` |
-| durable 派发和 worker 激活 | `outbox.py`、`runtime.py`、`scheduler.py`、`data_channel/pipeline_tasks/dispatch.py`、`nats_executor.py` | `test_runtime.py`、`test_dispatch_contract.py` |
+| durable 派发和 worker 激活 | `outbox.py`、`runtime.py`、`scheduler.py`、`data_channel/pipeline_tasks/dispatch.py`、`nats_executor.py` | `test_runtime.py`、`test_dispatch_contract.py`；runtime 按 max_steps 持久化多轮、等待和恢复 |
 | kernel.v1 HTTP/SSE | `router.py`、`schemas.py` | `test_router.py` |
 | 历史数据处置 | `migration_report.py`、`scripts/super_assistant_migration_report.py` | `test_migration_report.py` |
 
-历史数据迁移默认是“报告先行”：报告命令只读统计 Delegation、Memory、Palace、MCP、Skill 的可映射与只读行，禁止静默重绑；实际回填必须在 staging 依据报告逐类启用并保留原表。
+历史数据迁移默认是“报告先行”：报告命令只读统计 Delegation、Memory、Palace、MCP、Skill、Remote Agent 的可映射与只读行，禁止静默重绑；负责人确认后通过显式 `--apply --migration-id` 逐行回填，回滚只追加 tombstone/禁用生成能力而保留执行事实，并保留原表。
 
 ## 1. 推荐包结构
 
