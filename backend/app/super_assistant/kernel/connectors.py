@@ -5,9 +5,13 @@ Agent 和插件只通过这个窄接口进入 Kernel；CapabilityRevision 是不
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, runtime_checkable
+
+import httpx
 
 from .contracts import ContractError
 
@@ -126,3 +130,113 @@ class CapabilityRegistry:
     def snapshot(self) -> tuple[tuple[AgentDescriptor, TrustLevel], ...]:
         return tuple(self._entries.values())
 
+
+class ConnectorRegistry:
+    """Runtime connector directory keyed by the immutable AgentDescriptor.
+
+    The capability registry remains the source of truth for what a Run was
+    authorised to call.  This directory only resolves the already-selected
+    revision to a transport implementation; registering a connector never
+    mutates a descriptor or the capability snapshot.
+    """
+
+    def __init__(self) -> None:
+        self._connectors: dict[tuple[str, int], AgentConnector] = {}
+
+    def register(self, connector: AgentConnector) -> None:
+        descriptor = connector.descriptor()
+        key = (descriptor.key, descriptor.revision)
+        existing = self._connectors.get(key)
+        if existing is not None and existing is not connector:
+            raise ContractError("connector revision is already registered")
+        self._connectors[key] = connector
+
+    def resolve(self, key: str, revision: int) -> AgentConnector:
+        try:
+            return self._connectors[(key, revision)]
+        except KeyError as exc:
+            raise ContractError("unknown connector revision") from exc
+
+    async def invoke(self, *, key: str, revision: int, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
+        return await self.resolve(key, revision).invoke(
+            run_id=run_id, call_id=call_id, input_ref=input_ref, deadline=deadline,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteAgentHttpConnector:
+    """RAP-compatible HTTP connector backed by the existing remote-agent API.
+
+    It deliberately exposes only the capabilities the legacy endpoint can
+    prove.  Cancellation and status polling remain unsupported until the
+    remote endpoint advertises those operations; callers therefore enter the
+    kernel's normal ``outcome_unknown``/reconciliation path instead of
+    guessing a result.
+    """
+
+    agent_id: str
+    key: str
+    endpoint: str
+    token: str = ""
+    timeout_seconds: int = 120
+    revision: int = 1
+    transport: Any = field(default=None, compare=False, repr=False)
+
+    def descriptor(self) -> AgentDescriptor:
+        return AgentDescriptor(
+            agent_id=self.agent_id,
+            key=self.key,
+            revision=self.revision,
+            transport="rap.v1",
+            session_policy=SessionPolicy.RESUMABLE,
+            supports_stream=False,
+            supports_cancel=False,
+            supports_push=False,
+            supports_query_status=False,
+            supports_artifact=False,
+        )
+
+    @staticmethod
+    def _input(input_ref: str) -> dict[str, Any]:
+        try:
+            value = json.loads(input_ref)
+        except (TypeError, ValueError):
+            return {"message": str(input_ref), "session_ref": None}
+        if not isinstance(value, dict) or not isinstance(value.get("message"), str):
+            raise ContractError("remote connector input_ref must contain a message")
+        return {"message": value["message"], "session_ref": value.get("session_ref")}
+
+    async def invoke(self, *, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
+        body = self._input(input_ref)
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        timeout = max(1.0, float(self.timeout_seconds))
+        if isinstance(deadline, datetime):
+            remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+            timeout = max(1.0, min(timeout, remaining))
+        client_kwargs: dict[str, Any] = {"timeout": timeout}
+        if self.transport is not None:
+            client_kwargs["transport"] = self.transport
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            response = await client.post(self.endpoint, headers=headers, json=body)
+            response.raise_for_status()
+            value = response.json()
+        if not isinstance(value, dict):
+            raise ContractError("remote connector response must be an object")
+        status = str(value.get("status") or "failed").lower()
+        if status not in {"answered", "failed", "cancelled"}:
+            status = "failed"
+        return {
+            "run_id": run_id,
+            "call_id": call_id,
+            "status": status,
+            "content": str(value.get("content") or ""),
+            "session_ref": value.get("session_ref"),
+            "note": str(value.get("note") or "")[:2000],
+            "provider_status": status,
+        }
+
+    async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+
+    async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}
