@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
-from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionEvent, ExecutionRun
+from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionEvent, ExecutionRun, InboxItem
 from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RunAccepted, RunView
 from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
 
@@ -72,6 +72,8 @@ def get_kernel_run(run_id: str, db: Session = Depends(get_db), user=Depends(get_
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     calls = db.scalars(select(ExecutionCall).where(ExecutionCall.run_id == run.id).order_by(ExecutionCall.call_index)).all()
+    inbox = db.scalars(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.status.in_(("pending", "claimed"))).order_by(InboxItem.priority, InboxItem.id)).all()
+    artifacts = db.scalars(select(Artifact).where(Artifact.run_id == run.id, Artifact.owner_id == user.id).order_by(Artifact.id)).all()
     try:
         binding = json.loads(run.binding_snapshot_ref) if run.binding_snapshot_ref else {}
     except json.JSONDecodeError:
@@ -80,7 +82,9 @@ def get_kernel_run(run_id: str, db: Session = Depends(get_db), user=Depends(get_
         run_id=run.id, conversation_id=run.conversation_id, status=run.status,
         wait_reason=run.wait_reason, version=run.version, execution_version=run.execution_version,
         goal=run.goal, deadline=run.deadline, binding_snapshot=binding,
+        current_inbox=[{"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id, "expires_at": item.expires_at} for item in inbox],
         calls=[{"call_id": c.id, "status": c.status, "outcome": c.outcome, "capability_key": c.capability_key} for c in calls],
+        artifacts=[{"artifact_id": a.id, "kind": a.kind, "mime_type": a.mime_type, "size": a.size, "checksum": a.checksum, "status": a.status, "business_status": a.business_status} for a in artifacts],
     )
 
 

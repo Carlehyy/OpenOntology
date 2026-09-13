@@ -87,6 +87,8 @@
 
 旧路由的状态码和响应保持不变：Conversation GET=200、POST=201、PATCH=200、DELETE=204，`chat` 为 SSE 且同会话 streaming 返回 409，`cancel` 为 202 `{cancelled}`；tool decision 为 200，缺失 404、已处理 409；MCP/Skill/Memory/Palace/Multica/Remote Agent 的既有 CRUD 状态码、公开 remote task 的 401/404/409/429/204 和 Palace sync token 门禁均保持。kernel.v1 新路由只返回开发基线中的 202/200/404/409/410/422。
 
+迁移执行前先运行 `cd backend && uv run python scripts/super_assistant_migration_report.py`（可加 `--owner-id`）。该命令只读旧表并输出 `kernel.v1.legacy-disposition.v1` 报告；报告中的 `readonly_rows` 必须由负责人确认后才能启用对应回填，任何无法映射的 Delegation 都保持只读，禁止自动重绑。
+
 
 
 ### 2.2 现有表和历史数据处置

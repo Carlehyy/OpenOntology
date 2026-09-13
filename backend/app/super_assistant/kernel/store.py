@@ -345,6 +345,14 @@ def append_input(
     _ensure_owner(run, owner_id)
     if kind == "question_answer" and not question_id:
         raise ContractError("question_id is required for question_answer")
+    existing = db.scalar(select(InboxItem).where(
+        InboxItem.run_id == run.id, InboxItem.idempotency_key == idempotency_key,
+    ))
+    if existing is not None:
+        same = existing.kind == kind and existing.question_id == question_id and existing.payload == payload and existing.target_ref == target_ref
+        if not same:
+            raise IdempotencyConflict("inbox idempotency key reused with different payload")
+        return existing
     item = InboxItem(
         run_id=run.id, kind=kind, priority={"control": 0, "approval_decision": 10, "external_event": 20, "user_input": 30, "question_answer": 30, "resume": 0}.get(kind, 30),
         status="pending", question_id=question_id, target_ref=target_ref,

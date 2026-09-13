@@ -791,8 +791,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 本体发布文档共享镜像新增 /palace/ontology-documents 的 list、
     # /palace/ontology-documents/{id} 的 preview/rebuild 共 3 个操作
     # （3 条路径）
-    assert len(paths) == 64
-    assert sum(len(item) for item in paths.values()) == 88
+    # kernel.v1 长任务 API 新增 runs 查询/控制/输入/审批/SSE/Artifact 共
+    # 9 条路径、9 个操作；旧路由仍保持原有语义并行存在。
+    assert len(paths) == 73
+    assert sum(len(item) for item in paths.values()) == 97
     assert hashlib.sha256(payload).hexdigest() == (
-        "20fc0d5a5b641fb81baafb87fcbf93dec18fd76d920d01459a510f41b477a49a"
+        "1b3e07b344f9c5cc4d24102d25b26bcb3dfced7778af87617a3603b2cc99bf98"
     )

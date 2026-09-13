@@ -16,10 +16,12 @@ from sqlalchemy import select
 from app.model_configs.llm_gateway import strip_think_content
 from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
 from app.shared.database import SessionLocal
-from app.super_assistant import provider
+from app.super_assistant import delegation, provider
 from app.super_assistant.models import SuperAssistantConversation
 
-from .contracts import RunStatus
+from .contracts import CallOutcome, CallStatus, RunStatus
+from .context import ContextCandidate, ContextPackPlanner, ContextTier, SourceRef
+from .reconciler import ReconcileAction, RemoteObservation, decide_reconciliation, normalize_remote_state
 from .models import (
     Artifact,
     ContextSnapshot,
@@ -29,7 +31,7 @@ from .models import (
     ExecutionStep,
     ExecutionTurn,
 )
-from .policies import ErrorEnvelope
+from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
 from .store import _now, acquire_lease, append_event, assert_lease
 
 logger = logging.getLogger(__name__)
@@ -91,10 +93,16 @@ async def process_execution_message(payload: dict) -> None:
         attempt = ExecutionAttempt(call_id=call.id, attempt_no=1, provider_status="started")
         db.add(attempt)
         db.flush()
+        pack = ContextPackPlanner().plan([
+            ContextCandidate(
+                SourceRef("run_goal", run.id, str(run.version), f"run://{run.id}/goal", "kernel.v1", "kernel.v1"),
+                run.goal, ContextTier.REQUIRED, relevance=1.0, section="working",
+            ),
+        ])
         snapshot = ContextSnapshot(
             run_id=run.id, turn_id=turn.id, attempt_id=attempt.id,
-            pack_hash=_checksum(run.goal), source_refs=[],
-            budget={"system": 4000, "working": 8000, "knowledge": 12000, "episode": 4000, "recent": 4000},
+            pack_hash=pack.pack_hash, source_refs=list(pack.source_refs),
+            budget=pack.budget,
             policy_revision="kernel.v1", redaction_revision="kernel.v1",
         )
         db.add(snapshot)
@@ -102,7 +110,7 @@ async def process_execution_message(payload: dict) -> None:
         snapshot_id, pack_hash, goal_text = snapshot.id, snapshot.pack_hash, run.goal
         append_event(
             db, run, event_type="context.snapshot",
-            payload={"snapshot_id": snapshot_id, "pack_hash": pack_hash, "source_refs": []},
+            payload={"snapshot_id": snapshot_id, "pack_hash": pack_hash, "source_refs": list(pack.source_refs)},
             actor={"kind": "worker"}, command_id=f"step:{step.id}", idempotency_key=f"context:{snapshot.id}", lease=token,
         )
         attempt.transport_request_ref = f"context:{snapshot.id}"
@@ -128,11 +136,30 @@ async def process_execution_message(payload: dict) -> None:
             actor={"kind": "worker"}, command_id=f"step:{step.id}", idempotency_key=f"request:{attempt.id}", lease=token,
         )
         db.commit()
+        delegation_tools = delegation.delegation_tools(db, run.owner_id)
+        tools = delegation_tools
+        messages = [
+            {"role": "system", "content": "你是 OpenOntology 的超级助手。请直接完成用户目标，并在无法完成时说明原因。"},
+            {"role": "user", "content": pack.content},
+        ]
         result = provider.chat(
             call_kwargs,
-            [{"role": "system", "content": "你是 OpenOntology 的超级助手。请直接完成用户目标，并在无法完成时说明原因。"}, {"role": "user", "content": goal_text}],
-            [],
+            messages,
+            tools,
         )
+        tool_calls = result.get("tool_calls") or []
+        if tool_calls:
+            # M4 第一条 Connector：平台 Assistant Hub。每个委派仍由旧
+            # adapter 自己隔离子会话；Kernel 只保存调用事实和结果引用。
+            for tool_call in tool_calls[:1]:
+                if tool_call.get("name") != "delegate_to_assistant":
+                    continue
+                delegate_result = _invoke_hub_delegation(db, run, tool_call.get("arguments") or {})
+                messages.extend([
+                    {"role": "assistant", "content": result.get("content"), "tool_calls": tool_calls},
+                    {"role": "tool", "tool_call_id": tool_call.get("id"), "name": tool_call.get("name"), "content": delegate_result},
+                ])
+                result = provider.chat(call_kwargs, messages, tools)
         content = strip_think_content(str(result.get("content") or ""))
         if not content:
             raise provider.ProviderError("模型未返回有效内容")
@@ -215,5 +242,57 @@ def _mark_run_failed(run_id: str, exc: Exception) -> None:
 
 
 async def reconcile_execution_message(payload: dict) -> None:
-    """对账入口；具体 Connector 注册在 M4，当前只保留可重试的唤醒边界。"""
-    logger.info("kernel reconciliation wakeup received: %s", payload.get("call_id") or payload.get("run_id"))
+    """应用一次 Connector 对账观察，并以事实事件推进 Call。
+
+    终态 Run 不会被迟到回调重开；未知结果按指数退避，超过预算标记人工介入。
+    """
+    run_id, call_id = payload.get("run_id"), payload.get("call_id")
+    if not run_id or not call_id:
+        logger.warning("kernel reconciliation message missing run_id/call_id")
+        return
+    db = SessionLocal()
+    try:
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == str(run_id)).with_for_update())
+        call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == str(call_id), ExecutionCall.run_id == str(run_id)).with_for_update())
+        if run is None or call is None:
+            db.rollback(); return
+        latest_attempt = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc()))
+        try:
+            run_status, call_status, call_outcome = RunStatus(run.status), CallStatus(call.status), CallOutcome(call.outcome)
+        except ValueError:
+            db.rollback(); return
+        side_effect = SideEffectClass(call.side_effect_class) if call.side_effect_class in {x.value for x in SideEffectClass} else SideEffectClass.READ_ONLY
+        provider_event_id, connector_id = payload.get("provider_event_id"), payload.get("connector_id")
+        observation = RemoteObservation(normalize_remote_state(payload.get("remote_state") or payload.get("status")), provider_event_id=provider_event_id, evidence_ref=payload.get("evidence_ref"), raw_state=str(payload.get("remote_state") or payload.get("status") or ""))
+        decision = decide_reconciliation(observation=observation, run_status=run_status, call_status=call_status, call_outcome=call_outcome, side_effect=side_effect, safe_to_retry=bool(getattr(latest_attempt, "safe_to_retry", False)), reconcile_attempt_count=call.reconcile_attempt_count, policy=ExecutionPolicy(), now=_now())
+        if decision.action is ReconcileAction.IGNORE_LATE:
+            status, outcome = call_status, call_outcome
+            call.remote_observed_state_ref = observation.raw_state
+        else:
+            status, outcome = decision.call_status, decision.call_outcome
+            call.status, call.outcome = status.value, outcome.value
+            call.reconcile_attempt_count += 1
+            call.next_reconcile_at = decision.next_reconcile_at
+            call.remote_observed_state_ref = observation.raw_state
+            call.evidence_ref = observation.evidence_ref
+            call.provider_event_id = provider_event_id or call.provider_event_id
+            call.manual_attention = decision.action is ReconcileAction.MANUAL_ATTENTION
+        key = provider_event_id or str(call.reconcile_attempt_count)
+        append_event(db, run, event_type="call.outcome_changed", payload={"status": status.value, "outcome": outcome.value, "evidence_ref": observation.evidence_ref, "connector_id": connector_id, "provider_event_id": provider_event_id}, actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:{key}", idempotency_key=f"reconcile:{call.id}:{key}", connector_id=connector_id, provider_event_id=provider_event_id)
+        db.commit()
+    except Exception:
+        db.rollback(); logger.exception("kernel reconciliation failed for run=%s call=%s", run_id, call_id)
+    finally:
+        db.close()
+
+
+def _invoke_hub_delegation(db, run: ExecutionRun, arguments: dict) -> str:
+    generator = delegation.run_delegation_tool(
+        db, owner_id=run.owner_id, conversation_id=run.conversation_id,
+        arguments=arguments, should_cancel=lambda: False,
+    )
+    while True:
+        try:
+            next(generator)
+        except StopIteration as stop:
+            return str(stop.value or "")

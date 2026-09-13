@@ -1,6 +1,22 @@
 # 超级助手实现蓝图（开发基线 v1.0）
 
-状态：开发基线 v1.0 的实现拆分说明。本文把冻结的架构边界映射到现有 Python 包和后台运行机制，按顺序形成开发任务。
+状态：开发基线 v1.0 的实现与交付基线。本文把冻结的架构边界映射到现有 Python 包和后台运行机制，并给出可直接执行的开发顺序、验证入口和版本边界。
+
+## 0. 已落地的代码入口
+
+kernel.v1 的首发实现集中在 `backend/app/super_assistant/kernel/`：
+
+| 责任 | 代码入口 | 验证入口 |
+|---|---|---|
+| 状态机、事件注册表、幂等和租约 | `contracts.py`、`events.py`、`store.py` | `test_contracts.py`、`test_store.py` |
+| 执行事实与迁移 schema | `models.py`、`alembic/versions/2026_09_13_0108_super_assistant_kernel.py` | `test_models.py`、迁移回归 |
+| 策略、上下文、记忆和 Artifact | `policies.py`、`context.py`、`memory_policy.py`、`artifacts.py` | `test_policies.py`、`test_context_memory_artifacts.py` |
+| Capability、插件和外部回调 | `connectors.py`、`plugins.py`、`capability_service.py`、`callbacks.py` | `test_connectors.py`、`test_plugins.py`、`test_capability_callback.py` |
+| durable 派发和 worker 激活 | `outbox.py`、`runtime.py`、`scheduler.py`、`data_channel/pipeline_tasks/dispatch.py`、`nats_executor.py` | `test_runtime.py`、`test_dispatch_contract.py` |
+| kernel.v1 HTTP/SSE | `router.py`、`schemas.py` | `test_router.py` |
+| 历史数据处置 | `migration_report.py`、`scripts/super_assistant_migration_report.py` | `test_migration_report.py` |
+
+历史数据迁移默认是“报告先行”：报告命令只读统计 Delegation、Memory、Palace、MCP、Skill 的可映射与只读行，禁止静默重绑；实际回填必须在 staging 依据报告逐类启用并保留原表。
 
 ## 1. 推荐包结构
 

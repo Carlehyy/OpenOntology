@@ -33,6 +33,7 @@ import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './com
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
+import KernelRunTaskCard from './components/KernelRunTaskCard'
 import {
   ChatMessage, ConfirmationCard, ContextUsage,
   type PendingConfirmation,
@@ -69,6 +70,7 @@ export default function SuperAssistantPage() {
   // 页内选中的会话也回写参数，地址栏始终标识当前会话，复制到其它浏览器可直达
   const initialRequestedIdRef = useRef(searchParams.get('conversation'))
   const requestedConversationId = searchParams.get('conversation')
+  const kernelRunId = searchParams.get('run')
   const [conversations, setConversations] = useState<SuperConversation[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<SuperMessage[]>([])
@@ -224,7 +226,12 @@ export default function SuperAssistantPage() {
   useEffect(() => {
     if (loading || writtenParamRef.current === selectedId) return
     writtenParamRef.current = selectedId
-    setSearchParams(selectedId ? { conversation: selectedId } : {}, { replace: true })
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous)
+      if (selectedId) next.set('conversation', selectedId)
+      else next.delete('conversation')
+      return next
+    }, { replace: true })
   }, [selectedId, loading, setSearchParams])
   useEffect(() => {
     if (!requestedConversationId || requestedConversationId === lastAppliedParamRef.current) return
@@ -866,6 +873,18 @@ export default function SuperAssistantPage() {
           }}
         >
           <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            {kernelRunId && (
+              <div className="mx-auto w-full max-w-4xl px-4 pt-3 sm:px-8">
+                <KernelRunTaskCard
+                  runId={kernelRunId}
+                  onClose={() => {
+                    const next = new URLSearchParams(searchParams)
+                    next.delete('run')
+                    setSearchParams(next, { replace: true })
+                  }}
+                />
+              </div>
+            )}
             {loading ? (
               <div className="flex flex-1 items-center justify-center"><Loader2 size={22} className="animate-spin text-brand-ink" /></div>
             ) : !hasMessages ? (
