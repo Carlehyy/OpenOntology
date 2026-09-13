@@ -10,6 +10,16 @@ from app.shared.env_files import (
 )
 
 
+def normalized_environment(value: object) -> str:
+    """Return the canonical deployment environment name.
+
+    Environment values come from process configuration and may contain
+    harmless whitespace/casing differences. Security gates must not treat
+    ``Production`` as a non-production profile.
+    """
+    return str(value or "").strip().lower()
+
+
 class Settings(BaseSettings):
     environment: str = "development"
     # Local launch settings are deliberately separate from deployment ports.
@@ -544,7 +554,7 @@ def production_config_errors(current: Settings) -> list[str]:
 
 settings = Settings()
 
-if settings.environment != "test":
+if normalized_environment(settings.environment) != "test":
     _dependency_errors = required_dependency_config_errors(settings)
     if _dependency_errors:
         raise RuntimeError(
@@ -552,7 +562,7 @@ if settings.environment != "test":
             f"{', '.join(_dependency_errors)}"
         )
 
-if settings.environment == "production":
+if normalized_environment(settings.environment) == "production":
     _insecure = production_config_errors(settings)
     if _insecure:
         raise RuntimeError(

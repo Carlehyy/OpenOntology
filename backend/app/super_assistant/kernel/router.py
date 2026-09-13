@@ -291,12 +291,22 @@ def decide_kernel_approval(run_id: str, approval_id: str, body: ApprovalDecision
             raise VersionConflict("version_conflict")
         if approval.status != "pending":
             raise ContractError("approval is no longer pending")
+        expires_at = approval.expires_at
+        if expires_at is not None:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= _utcnow():
+                raise ContractError("approval has expired")
+        if run.status != "waiting_approval":
+            raise ContractError("run is not waiting for approval")
         approval.status, approval.decided_at, approval.decided_by = body.decision, _utcnow(), user.id
         append_event(db, run, event_type="approval.decided", payload={"approval_id": approval.id, "decision": body.decision, "actor": "user", "decided_at": approval.decided_at.isoformat(), "authorization_hash": approval.parameter_hash}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=body.idempotency_key)
         if run.status == "waiting_approval":
             before = run.status
             run.status, run.wait_reason, run.version = "active", None, run.version + 1
             append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "approval_decided", "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=body.idempotency_key)
+            from .store import _add_outbox
+            _add_outbox(db, run, command_id=command.command_id, message_ref=f"command://{command.command_id}")
         command.result = {"status": approval.status, "version": run.version}
         db.commit()
         return {"command_id": command.command_id, "status": approval.status, "version": run.version}

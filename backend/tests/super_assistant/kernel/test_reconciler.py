@@ -43,6 +43,27 @@ def test_reconcile_completion_and_late_result_are_terminally_safe():
     assert late.action is ReconcileAction.IGNORE_LATE
 
 
+def test_active_run_does_not_reopen_terminal_call_on_late_running_observation():
+    decision = decide_reconciliation(
+        observation=RemoteObservation(RemoteState.RUNNING), run_status=RunStatus.ACTIVE,
+        call_status=CallStatus.CLOSED, call_outcome=CallOutcome.COMPLETED,
+        side_effect=SideEffectClass.EXTERNAL_ASYNC, safe_to_retry=False,
+        reconcile_attempt_count=1, policy=ExecutionPolicy(), now=datetime.now(timezone.utc),
+    )
+    assert decision.action is ReconcileAction.IGNORE_LATE
+
+
+def test_cancel_requested_call_does_not_reopen_on_late_running_observation():
+    decision = decide_reconciliation(
+        observation=RemoteObservation(RemoteState.RUNNING), run_status=RunStatus.CANCEL_REQUESTED,
+        call_status=CallStatus.CANCEL_REQUESTED, call_outcome=CallOutcome.OUTCOME_UNKNOWN,
+        side_effect=SideEffectClass.EXTERNAL_ASYNC, safe_to_retry=False,
+        reconcile_attempt_count=1, policy=ExecutionPolicy(), now=datetime.now(timezone.utc),
+    )
+    assert decision.call_status is CallStatus.CANCEL_REQUESTED
+    assert decision.call_outcome is CallOutcome.OUTCOME_UNKNOWN
+
+
 def test_terminal_run_still_converges_unresolved_remote_cancellation():
     decision = decide_reconciliation(
         observation=RemoteObservation(RemoteState.CANCELLED), run_status=RunStatus.EXPIRED,

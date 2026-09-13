@@ -95,6 +95,8 @@ def test_kernel_control_and_input_wake_waiting_run(client, db, admin_user, auth_
     )
     assert replay.status_code == 202
     assert replay.json()["inbox_id"] == answer.json()["inbox_id"]
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+    assert db.query(ExecutionDispatchOutbox).filter_by(run_id=run_id).count() >= 2
 
 
 def test_kernel_retry_creates_new_run_without_reopening_failed_run(client, db, admin_user, auth_headers):

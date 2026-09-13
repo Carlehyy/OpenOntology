@@ -86,6 +86,12 @@ def expire_inbox_once(db: Session, *, limit: int = 100) -> int:
                     actor={"kind": "system"}, command_id=f"approval-expired:{approval.id}",
                     idempotency_key=f"approval-expired:{approval.id}",
                 )
+            elif approval is not None:
+                # A decision won the race with the TTL scanner. The linked
+                # Inbox is still expired for audit, but it must not fail the
+                # Run after an approval was already accepted or denied.
+                changed += 1
+                continue
         if run.status in _TERMINAL:
             changed += 1
             continue

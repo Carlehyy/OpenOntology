@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from app.models.user import User
 from app.super_assistant.models import SuperAssistantConversation
-from app.super_assistant.kernel.models import ExecutionAttempt, ExecutionCall, ExecutionEvent, ExecutionStep, ExecutionTurn, InboxItem
+from app.super_assistant.kernel.models import Approval, ExecutionAttempt, ExecutionCall, ExecutionEvent, ExecutionStep, ExecutionTurn, InboxItem
 from app.super_assistant.kernel.policies import ExecutionPolicy
 from app.super_assistant.kernel.recovery import expire_due_runs_once, expire_inbox_once, join_ready_parents_once, recover_stuck_runs_once
 from app.super_assistant.kernel.contracts import CancelReason
@@ -161,3 +161,16 @@ def test_expired_question_is_reasked_once_then_fails_run(db):
     db.refresh(run)
     assert run.status == "failed"
     assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.expired").count() == 2
+
+
+def test_expiring_already_decided_approval_does_not_fail_active_run(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="approval", idempotency_key="approval")
+    run.status = "active"
+    approval = Approval(owner_id=owner.id, run_id=run.id, target_summary="write", parameter_summary="{}", scope_summary="run", capability_revision=1, parameter_hash="hash", status="approved", expires_at=run.created_at - timedelta(seconds=1))
+    db.add(approval); db.flush()
+    db.add(InboxItem(run_id=run.id, kind="approval_decision", priority=10, status="pending", approval_id=approval.id, payload={"approval_id": approval.id}, source="system", expires_at=approval.expires_at, expiry_policy="fail_run", idempotency_key="approval-inbox"))
+    db.commit()
+    assert expire_inbox_once(db) == 1
+    db.refresh(run)
+    assert run.status == "active"

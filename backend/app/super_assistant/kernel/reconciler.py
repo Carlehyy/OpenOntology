@@ -91,13 +91,28 @@ def decide_reconciliation(
     callback is retained as evidence but cannot reopen that Run.
     """
     state = observation.state
+    # Call terminality is stronger than any later provider observation. A
+    # delayed or duplicated RUNNING callback must never reopen a closed Call.
+    if call_status is CallStatus.CLOSED:
+        return ReconcileDecision(ReconcileAction.IGNORE_LATE, call_status, call_outcome, reason="call already terminal")
+    if state is RemoteState.RUNNING and (
+        call_status is CallStatus.CANCEL_REQUESTED
+        or run_status in {RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLING}
+    ):
+        # Cancellation is monotonic. Keep the cancellation fact while the
+        # provider is still running so the scheduler can issue cancel/query;
+        # never turn a late running observation back into an ordinary wait.
+        return ReconcileDecision(
+            ReconcileAction.WAIT, CallStatus.CANCEL_REQUESTED,
+            CallOutcome.OUTCOME_UNKNOWN,
+            next_reconcile_at=reconcile_delay(now=now, attempt_count=reconcile_attempt_count, policy=policy),
+            reason="remote still running after cancellation requested",
+        )
     if run_status in {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.FAILED}:
         # A terminal Run is immutable, but an unresolved remote Call still
         # needs to converge.  Cancellation/timeout may have happened before
         # the provider accepted the work; retain the Call fact and keep
         # polling/cancelling it without reopening the Run.
-        if call_status in {CallStatus.CLOSED}:
-            return ReconcileDecision(ReconcileAction.IGNORE_LATE, call_status, call_outcome, reason="call already terminal")
         if state is RemoteState.COMPLETED:
             return ReconcileDecision(ReconcileAction.CLOSE, CallStatus.CLOSED, CallOutcome.COMPLETED, reason="remote completed after run terminal")
         if state is RemoteState.FAILED:

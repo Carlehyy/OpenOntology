@@ -441,7 +441,8 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
         ))
         if plugin is not None:
             from app.shared.config import settings
-            if settings.environment == "production" and plugin.trust_level == TrustLevel.USER_UNTRUSTED.value:
+            from app.shared.config import normalized_environment
+            if normalized_environment(settings.environment) == "production" and plugin.trust_level == TrustLevel.USER_UNTRUSTED.value:
                 logger.error("refusing user_untrusted process plugin in production: %s", plugin.id)
                 return None
             from app.super_assistant.kernel.plugin_host import ProcessPluginHost
@@ -1014,7 +1015,7 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 deadline = deadline.replace(tzinfo=timezone.utc)
             question_expires_at = min(deadline, _now() + timedelta(minutes=30)) if deadline else _now() + timedelta(minutes=30)
             expiry_policy = "reask_once"
-    if kind != "child_run":
+    if kind != "child_run" and inbox is None:
         inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", call_id=external_call.id if external_call is not None else None, question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", expires_at=question_expires_at, expiry_policy=expiry_policy, idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
     before = run.status; run.status = {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "child_run": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
     if inbox is not None:

@@ -15,7 +15,7 @@ from app.super_assistant.kernel.schemas import AgentCallbackRequest
 from app.super_assistant.kernel.capability_service import persist_capability_revision
 from app.super_assistant.kernel.connectors import AgentDescriptor, TrustLevel
 from app.super_assistant.kernel.contracts import ContractError
-from app.super_assistant.kernel.models import CapabilityRevision, ExecutionCall, ExecutionEvent
+from app.super_assistant.kernel.models import CapabilityRevision, ExecutionAttempt, ExecutionCall, ExecutionEvent
 from app.super_assistant.kernel.store import create_run
 
 
@@ -49,6 +49,24 @@ def test_callback_connector_is_fenced_by_call_target(db):
     db.add(call); db.commit()
     with pytest.raises(ContractError, match="does not match"):
         append_agent_callback(db, owner_id=owner.id, run_id=run.id, call_id=call.id, connector_id="connector-2", provider_event_id="event-target", event_type="call.progress", payload={"call_id": call.id, "progress_seq": 1, "connector_id": "connector-2", "provider_event_id": "event-target"})
+
+
+def test_callback_payload_cannot_reference_another_call_or_attempt(db):
+    owner = User(id=str(uuid.uuid4()), username=f"cap-{uuid.uuid4().hex[:8]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
+    db.add(owner); db.flush()
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="callback-scope")
+    db.add(conversation); db.flush()
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="goal", idempotency_key="callback-scope")
+    first = ExecutionCall(run_id=run.id, call_index=0, capability_key="external.agent", capability_revision=1, side_effect_class="external_async", idempotency_key="call-1", status="waiting_external", outcome="remote_running")
+    second = ExecutionCall(run_id=run.id, call_index=1, capability_key="external.agent", capability_revision=1, side_effect_class="external_async", idempotency_key="call-2", status="waiting_external", outcome="remote_running")
+    db.add_all([first, second]); db.flush()
+    attempt = ExecutionAttempt(call_id=second.id, attempt_no=1, provider_status="started")
+    db.add(attempt); db.commit()
+    with pytest.raises(ContractError, match="call does not match"):
+        append_agent_callback(db, owner_id=owner.id, run_id=run.id, call_id=first.id, connector_id="connector", provider_event_id="event-call", event_type="call.progress", payload={"call_id": second.id, "connector_id": "connector", "provider_event_id": "event-call"})
+    db.rollback()
+    with pytest.raises(ContractError, match="attempt does not belong"):
+        append_agent_callback(db, owner_id=owner.id, run_id=run.id, call_id=first.id, connector_id="connector", provider_event_id="event-attempt", event_type="attempt.result", payload={"attempt_id": attempt.id, "connector_id": "connector", "provider_event_id": "event-attempt"})
 
 
 def test_hmac_callback_ingress_is_authenticated(db, monkeypatch):

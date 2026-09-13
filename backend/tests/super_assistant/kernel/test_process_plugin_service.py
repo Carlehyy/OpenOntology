@@ -97,10 +97,11 @@ def test_enable_requires_healthy_handshake_and_keeps_plugin_disabled(db, admin_u
     assert cap is not None and cap.enabled is False
 
 
-def test_production_fails_closed_for_user_untrusted_plugin(db, admin_user, monkeypatch):
+@pytest.mark.parametrize("environment", ["production", "Production", " production "])
+def test_production_fails_closed_for_user_untrusted_plugin(db, admin_user, monkeypatch, environment):
     from app.super_assistant import process_plugin_service
     row = install_process_plugin(db, admin_user.id, _body(key="user.production"))
-    monkeypatch.setattr(process_plugin_service.settings, "environment", "production")
+    monkeypatch.setattr(process_plugin_service.settings, "environment", environment)
     with pytest.raises(ProcessPluginValidationError, match="隔离 runner"):
         enable_process_plugin(db, admin_user.id, row.id)
     db.refresh(row)

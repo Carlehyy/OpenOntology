@@ -16,7 +16,7 @@ from app.shared.encryption import decrypt
 from app.super_assistant.kernel.schemas import AgentCallbackRequest
 from app.super_assistant.models import SuperAssistantRemoteAgent
 from .contracts import ContractError
-from .models import ExecutionCall, ExecutionRun
+from .models import ExecutionAttempt, ExecutionCall, ExecutionRun
 from .store import append_event
 
 
@@ -53,6 +53,17 @@ def append_agent_callback(
         raise ContractError("callback payload identity does not match envelope")
     if event_type not in {"call.progress", "call.outcome_changed", "attempt.result"}:
         raise ContractError("unsupported external callback event")
+    payload_call_id = payload.get("call_id")
+    if payload_call_id is not None and str(payload_call_id) != call_id:
+        raise ContractError("callback payload call does not match envelope")
+    if event_type == "attempt.result":
+        attempt_id = payload.get("attempt_id")
+        attempt = db.scalar(select(ExecutionAttempt).where(
+            ExecutionAttempt.id == str(attempt_id or ""),
+            ExecutionAttempt.call_id == call_id,
+        ))
+        if attempt is None:
+            raise ContractError("callback attempt does not belong to call")
     append_event(
         db, run, event_type=event_type, payload=payload,
         actor={"kind": "connector"}, command_id=f"callback:{connector_id}:{provider_event_id}",
@@ -134,10 +145,15 @@ def receive_agent_callback(
     if body.event_type == "call.outcome_changed":
         from .runtime import reconcile_execution_message
         import asyncio
+        reported_state = payload.get("remote_state")
+        # Some providers use ``status=closed`` as a transport envelope and
+        # carry the semantic terminal state in ``outcome``.
+        if not reported_state or str(reported_state).strip().lower() in {"closed", "done"}:
+            reported_state = payload.get("outcome") or payload.get("status")
         accepted = asyncio.run(reconcile_execution_message({
             "run_id": run_id, "call_id": call_id, "connector_id": body.connector_id,
             "provider_event_id": body.provider_event_id,
-            "remote_state": payload.get("remote_state") or payload.get("status") or payload.get("outcome"),
+            "remote_state": reported_state,
             "status": payload.get("status"), "content": payload.get("content"),
             "evidence_ref": payload.get("evidence_ref"), "artifacts": payload.get("artifacts"),
         }))

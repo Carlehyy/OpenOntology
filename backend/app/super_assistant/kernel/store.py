@@ -502,6 +502,9 @@ def append_input(
         run.status, run.wait_reason, run.version = RunStatus.ACTIVE.value, None, run.version + 1
         reason = "input_received" if kind == "question_answer" else "resume_received"
         append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": reason, "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
+        # Waking a Run is a durable command. Without an outbox record the
+        # state would become ACTIVE while no NATS activation is published.
+        _add_outbox(db, run, command_id=command_id, message_ref=f"command://{command_id}")
     return item
 
 

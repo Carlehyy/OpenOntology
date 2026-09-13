@@ -28,6 +28,7 @@ from app.super_assistant.kernel.plugins import PluginManifest, PluginState
 from app.super_assistant.models import SuperAssistantProcessPlugin
 from app.super_assistant.schemas import ProcessPluginCreate
 from app.shared.config import settings
+from app.shared.config import normalized_environment
 
 
 class ProcessPluginServiceError(Exception):
@@ -194,7 +195,7 @@ def enable_process_plugin(db: Session, owner_id: str, plugin_id: str) -> SuperAs
     row = get_process_plugin(db, owner_id, plugin_id, lock=True)
     if row.state not in {PluginState.INSTALLED.value, PluginState.DISABLED.value}:
         raise ProcessPluginValidationError("当前插件状态不可启用")
-    if settings.environment == "production" and row.trust_level == TrustLevel.USER_UNTRUSTED.value:
+    if normalized_environment(settings.environment) == "production" and row.trust_level == TrustLevel.USER_UNTRUSTED.value:
         # Until the dedicated rootless plugin-runner is deployed, executing a
         # user entrypoint in the API worker would expose platform secrets and
         # shared volumes. Production therefore fails closed.

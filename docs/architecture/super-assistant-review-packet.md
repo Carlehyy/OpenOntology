@@ -240,5 +240,8 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 - Run 在取消宽限期后进入 `cancelled/expired` 时，原调度器会停止远程 Call 对账；现在带远端句柄的未决 Call 继续执行取消或状态查询，终态 Run 保持不可重开但 Call 可收敛到真实终态。
 - 回连 Agent 长轮询原先会持有请求级数据库连接；现在认证/心跳事务在等待前结束，任务认领使用短会话。
 - 远程 callback payload 增加 64 KiB 上限；超限内容必须以 Artifact 引用传递。
+- 发现并修复了四条可触发的闭环缺口：`ENVIRONMENT=Production`/带空格时进程插件生产禁用曾被绕过（现在统一规范化）；输入和审批把 Run 唤醒为 `active` 却未写 activation Outbox（现在与状态事实同事务写入）；活动 Run 的已终态 Call 曾可被迟到 `running` 观察重开（现在 Call 终态优先忽略）；取消中的 Call 也曾被迟到 `running` 观察改回普通等待（现在保持 `cancel_requested`）。审批决策同时增加 Run 等待态和过期校验，callback 对 `status=closed + outcome=completed` 的传输封套按语义结果处理，并拒绝 payload 跨 Call/Attempt 引用。
 
-专项 Kernel 回归为 `131 passed`；独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚以及前端 color-token 基线问题仍未完成，因此本轮审查不构成商用发布批准。
+新增专项回归为 `24 passed`（router/reconciler/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
+
+当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（数据库行被运维改写时可绕过运行时拒绝）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。它们必须在 staging 攻击验收与发布门禁中闭环。
