@@ -1,7 +1,7 @@
 """CapabilityRevision 的持久化快照服务。"""
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from .connectors import AgentDescriptor, TrustLevel
@@ -54,6 +54,12 @@ def revoke_capability_revisions(
     """
     normalized = {str(key) for key in keys if str(key)}
     if not normalized:
+        return 0
+    # A few legacy SQLite fixtures are intentionally created before the
+    # kernel migration.  Their MCP lifecycle must remain testable while the
+    # production schema is upgraded; there is simply no snapshot to revoke.
+    bind = db.get_bind()
+    if bind is None or not inspect(bind).has_table(CapabilityRevision.__tablename__):
         return 0
     statement = select(CapabilityRevision).where(CapabilityRevision.key.in_(normalized))
     if revision is not None:
