@@ -222,7 +222,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 | M5 | Context Pack、Memory/Palace source provenance、tombstone 排除、结构化 Artifact 和 checksum 校验有代码/测试 | 已完成首版 |
 | M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
 | M7 | 当前 `oo-rearch` Compose 的 `/api/health` 依赖探针通过（PostgreSQL、Redis、Neo4j、MinIO、Browser、NATS、n8n 均健康）；但该 staging backend 旧镜像内 `alembic current` 无法定位数据库 revision `0110_super_assistant_process_plugins`，不能证明当前分支迁移已部署。完整 kernel live E2E、隔离 staging 数据库升级和外部副作用证据仍需按当前提交重跑 | 依赖探针通过，当前提交 staging 验收未通过/待重建 |
-| M8 | 静态门禁和专项测试通过；前端 color-token 门禁仍有既有 `pages/login/login.css` 基线失败，完整发布/回滚演练尚未完成 | 未完成 |
+| M8 | 静态门禁、前端 color-token 和专项测试通过；完整发布/回滚演练尚未完成 | 未完成 |
 
 已执行的 staging 依赖探针命令为：
 
@@ -242,6 +242,6 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 - 远程 callback payload 增加 64 KiB 上限；超限内容必须以 Artifact 引用传递。
 - 发现并修复了四条可触发的闭环缺口：`ENVIRONMENT=Production`/带空格时进程插件生产禁用曾被绕过（现在统一规范化）；输入和审批把 Run 唤醒为 `active` 却未写 activation Outbox（现在与状态事实同事务写入）；活动 Run 的已终态 Call 曾可被迟到 `running` 观察重开（现在 Call 终态优先忽略）；取消中的 Call 也曾被迟到 `running` 观察改回普通等待（现在保持 `cancel_requested`）。审批决策同时增加 Run 等待态和过期校验，callback 对 `status=closed + outcome=completed` 的传输封套按语义结果处理，并拒绝 payload 跨 Call/Attempt 引用。
 
-新增专项回归为 `24 passed`（router/reconciler/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
+新增专项回归为 `33 passed`（router/reconciler/recovery/callback/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
 
 当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（数据库行被运维改写时可绕过运行时拒绝）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。它们必须在 staging 攻击验收与发布门禁中闭环。
