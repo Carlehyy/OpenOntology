@@ -19,6 +19,7 @@ docs/
 ## 架构设计
 
 - [超级助手顶层架构设计（提案）](./architecture/super-assistant-top-level.md)：目标、边界、分层和演进原则。
+- [超级助手执行模型（提案）](./architecture/super-assistant-execution-model.md)：Run、Turn、Step、Event、Inbox 和恢复语义。
 
 ## 运维
 
