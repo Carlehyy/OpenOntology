@@ -12,6 +12,7 @@
 6. [数据与事件模型](./super-assistant-data-event-model.md)：逻辑实体、事件封套、Outbox、幂等和兼容投影。
 7. [实现蓝图](./super-assistant-implementation-blueprint.md)：包边界、Protocol 和 Runtime 拆分顺序。
 8. [迁移与验收方案](./super-assistant-migration-validation-plan.md)：阶段、回滚、故障注入和真实环境门禁。
+9. [审查交接包](./super-assistant-review-packet.md)：原始需求、关键决策、相关资料路径和外部 Agent 审查 Prompt。
 
 ## 讨论规则
 

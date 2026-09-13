@@ -27,6 +27,7 @@ docs/
 - [超级助手数据与事件模型（提案）](./architecture/super-assistant-data-event-model.md)：逻辑实体、事件封套、Outbox、幂等和兼容投影。
 - [超级助手实现蓝图（提案）](./architecture/super-assistant-implementation-blueprint.md)：包边界、Protocol 和 Runtime 拆分顺序。
 - [超级助手迁移与验收方案（提案）](./architecture/super-assistant-migration-validation-plan.md)：阶段、回滚、故障注入和真实环境门禁。
+- [超级助手架构审查交接包](./architecture/super-assistant-review-packet.md)：原始需求、关键决策、相关资料路径和外部 Agent 审查 Prompt。
 
 ## 运维
 
