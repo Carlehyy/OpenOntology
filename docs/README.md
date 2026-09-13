@@ -20,6 +20,8 @@ docs/
 
 - [超级助手顶层架构设计（提案）](./architecture/super-assistant-top-level.md)：目标、边界、分层和演进原则。
 - [超级助手执行模型（提案）](./architecture/super-assistant-execution-model.md)：Run、Turn、Step、Event、Inbox 和恢复语义。
+- [超级助手能力与插件模型（提案）](./architecture/super-assistant-capability-plugin-model.md)：能力目录、插件生命周期、隔离和调用策略。
+- [超级助手 Agent 协作模型（提案）](./architecture/super-assistant-agent-connector-model.md)：内部助手、RAP、A2A、Agent Client Protocol 和 MCP 的边界。
 
 ## 运维
 

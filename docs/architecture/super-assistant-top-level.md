@@ -1,317 +1,154 @@
 # 超级助手顶层架构设计（提案）
 
-状态：讨论稿
+状态：讨论稿；描述目标架构，不代表当前已实现或已批准开发。
 
-本文只定义 OpenOntology 超级助手升级的目标、边界、核心概念、分层方式和演进原则，不定义具体数据库字段、HTTP 路径或实现任务。后续设计必须先与本文保持一致，再逐层细化。
+## 1. 目标与已确认边界
 
-## 1. 设计目标
+超级助手负责理解用户目标，按需组织私人知识与记忆，协调平台能力和外部 Agent，交付可检查的结果。升级的衡量标准是任务完成质量、可恢复性、交互连续性和扩展成本。
 
-超级助手不是一个把所有业务能力都塞进单个模型上下文的巨型 Agent，而是一个面向单用户、多会话和长尾任务的 Agent 编排运行时。它负责理解用户目标、选择合适的上下文、调用受控能力、协调内部和外部 Agent，并在任务完成后交付可验证的结果。
+已确认的产品边界：
 
-升级后的超级助手必须同时满足以下目标：
+- 单用户使用，可以同时开启多个会话；不为假设中的多租户 SaaS 引入新架构。
+- 支持长尾任务。浏览器断开不等于取消，系统重启后应能识别已完成工作、安全续行。
+- 用户可自建、安装、停用和卸载插件；不要求先建设插件市场。
+- 主要调用平台内部助手及外部 Agent；本次不新增“超级助手被外部系统调用”的服务。
+- 平台需要承接真实流式进度、取消、人工审批和结构化产物；不能把远端不支持的能力伪装成已支持。
+- 不确定的业务选择必须向用户询问，可以给推荐；等待某项输入不能锁住整个会话。
+- 本轮交付架构设计，后续另行确定开发安排。仅借鉴 Rust Harness 思想，继续使用项目既有技术体系。
 
-- 通过私人知识和长期记忆逐渐理解用户；
-- 只把当前任务需要的上下文放入模型请求；
-- 以统一方式使用内置工具、Skill、MCP、用户插件和 Agent；
-- 调用平台内部助手时严格处理本体、版本、权限等前置条件；
-- 调用外部 Agent 时支持进度、取消、审批、恢复和结构化产物；
-- 浏览器断开或进程重启后，长任务仍可以恢复；
-- 能够重建模型实际看到的上下文、工具目录和执行结果；
-- 保留现有平台能力，通过渐进迁移降低商用风险。
+## 2. 现状与目标的区别
 
-## 2. 设计边界
+| 方面 | 当前事实与源码入口 | 目标 |
+|---|---|---|
+| 主循环 | [runtime.py](../../backend/app/super_assistant/runtime.py) 组装提示、工具、审批与 SSE | 业务能力通过契约接入，运行与浏览器连接分离 |
+| 平台委派 | [Assistant Hub](../../backend/app/assistant_hub/contract.py) 提供统一回合契约 | 保留域适配边界，补齐结构化前置条件、等待和结果证据 |
+| 外部 Agent | [remote_agent_service.py](../../backend/app/super_assistant/remote_agent_service.py) 提供 RAP v1 direct/pull | 保留真实兼容能力，按需增加协议适配器 |
+| 记忆与资料 | [memory_service.py](../../backend/app/super_assistant/memory_service.py)、[palace_service.py](../../backend/app/super_assistant/palace_service.py) | 存储分工保留，统一按需检索、来源与生命周期 |
+| 恢复 | [conversation_service.py](../../backend/app/super_assistant/conversation_service.py) 识别遗留生成中断 | 在调用结果、授权和外部状态明确时继续；未知副作用先核实 |
 
-本次升级只针对超级助手作为出站任务编排器的能力。超级助手被外部系统调用、公开新的入站 Agent 协议，不属于第一阶段目标，但内部模型必须为未来增加入站 Connector 留出位置。
+源码是当前行为事实源，本文是设计提案，两者不能互相冒充。历史未合入的 Harness 实验仅作参考，未合入原因不能由分支状态推断；不直接合并或复用其迁移。
 
-`rust-deepseek-harness` 作为架构参考，吸收其事件溯源、Turn/Step、Inbox、能力注册、请求重建和可恢复循环的思想。它的本地 JSONL、单进程内存注册表和任意进程动态挂载不直接作为 OpenOntology 的生产实现。
-
-现有的会话、消息、工具运行、记忆宫殿、Knowledge Graph、MCP、Multica、Assistant Hub、RAP v1 和 NATS 任务体系都是可迁移资产。重构不以一次性替换这些能力为目标。
-
-## 3. 核心架构原则
-
-### 3.1 任务事实与展示传输分离
-
-Run 是任务事实，SSE 是事件传输。浏览器断开不能默认为任务取消；用户显式取消才会改变任务状态。
-
-### 3.2 事件先持久化，再广播
-
-任何模型请求、工具调用、Agent 进度、审批、Artifact 和状态变更，都先写入持久化事件，再广播给 SSE 或其他监听者。监听者失败不能改变任务事实。
-
-### 3.3 模型可见内容必须可重建
-
-发送给模型的消息、system prompt、工具 schema、Context Pack 和模型配置，必须具有可追溯快照。请求发送前必须能够校验请求与快照一致。
-
-### 3.4 能力通过注册表进入运行时
-
-内置工具、Skill、MCP、用户插件、平台助手和外部 Agent 都以 Capability 形式进入运行时。主循环不直接分派具体业务模块。
-
-### 3.5 前置条件由机器校验，交互由用户决定
-
-本体、版本、权限、工作区和凭据等前置条件必须结构化声明并由 Resolver 校验。信息不足时，超级助手给出候选和推荐并询问用户，不能凭自然语言猜测。
-
-### 3.6 记忆与知识有来源、有权限、有生命周期
-
-用户上传的知识、图谱事实、长期记忆和会话摘要都必须保留来源、权限、版本和删除语义。不同来源可以使用不同存储，但必须通过统一 Context Source 接口提供给运行时。
-
-### 3.7 兼容优先，逐步替换
-
-新运行时先通过兼容投影接入现有 HTTP、SSE、数据库和 Agent 契约。只有在事件重放、恢复、并发和真实外部调用验证通过后，才删除旧路径。
-
-## 4. 顶层分层
+## 3. 架构边界与依赖方向
 
 ```mermaid
-flowchart TD
-    UI[超级助手 UI / API / SSE] --> COMPAT[兼容投影层]
-    COMPAT --> KERNEL[Agent Orchestration Kernel]
-
-    KERNEL --> RUN[Run / Turn / Step]
-    KERNEL --> INBOX[Durable Inbox]
-    KERNEL --> POLICY[Policy / Approval / Budget]
-    KERNEL --> CONTEXT[Context Planner]
-    KERNEL --> CAP[Capability Registry]
-    KERNEL --> EVENTS[Event Store]
-
-    CONTEXT --> MEMORY[Memory Provider]
-    CONTEXT --> KG[Knowledge Graph Provider]
-    CONTEXT --> CONVERSATION[Conversation Provider]
-    CONTEXT --> ARTIFACT[Artifact Provider]
-    CONTEXT --> TASK[Task State Provider]
-
-    CAP --> BUILTIN[Built-in Tools]
-    CAP --> SKILL[Skills]
-    CAP --> MCP[MCP Connector]
-    CAP --> PLUGIN[User Plugin Connector]
-    CAP --> AGENT[Agent Connector]
-
-    AGENT --> HUB[Assistant Hub]
-    AGENT --> RAP[RAP v1 Adapter]
-    AGENT --> FUTURE[Future ACP/A2A Adapter]
-
-    EVENTS --> PG[(PostgreSQL)]
-    EVENTS --> OUTBOX[NATS Outbox]
-    OUTBOX --> WORKER[Durable Worker]
-    ARTIFACT --> OBJECTS[(MinIO)]
-    KG --> GRAPH[(Neo4j)]
+flowchart TB
+    USER[用户交互 / API / SSE] --> APP[会话与任务应用服务]
+    APP --> KERNEL[执行内核]
+    WORKER[后台执行器] --> KERNEL
+    KERNEL --> CONTEXT[上下文组织]
+    KERNEL --> CATALOG[能力目录与调用服务]
+    CATALOG --> POLICY[授权与审批]
+    CATALOG --> TOOLS[工具连接器]
+    CATALOG --> AGENTS[Agent 连接器]
+    AGENTS --> HUB[Assistant Hub / 平台业务域]
+    AGENTS --> REMOTE[外部 Agent]
+    TOOLS --> EXTERNAL[MCP / 用户插件 / 外部系统]
+    PLUGINS[插件管理] --> CATALOG
+    CONTEXT --> KNOWLEDGE[记忆 / 资料 / 图谱 / 技能 / 任务状态]
+    KERNEL --> STORE[执行记录与状态服务]
+    CATALOG --> ARTIFACT[产物服务]
+    STORE --> PG[(PostgreSQL 事件 / 状态 / Outbox)]
+    PG --> DELIVERY[NATS 派发与唤醒]
+    DELIVERY --> WORKER
+    STORE --> VIEW[会话投影与事件订阅]
+    VIEW --> USER
 ```
 
-### 4.1 兼容投影层
+这些是职责边界，不是八个微服务。首版在现有后端和 NATS executor 中实现，避免为分层增加部署单元。产物复用 MinIO，图谱复用 Neo4j；不引入第二套业务数据库或消息基础设施。
 
-兼容投影层保留现有前端和外部契约，让旧的 Conversation、Message、ToolRun、Delegation 和 Remote Task 查询继续可用。它不再承担新的编排逻辑。
+| 边界 | 负责 | 不负责 |
+|---|---|---|
+| 会话与任务应用服务 | 会话输入、目标选择、任务切换、查询和交互卡片 | 直接执行领域业务 |
+| 执行内核 | 激活、模型循环、等待、预算、取消和恢复决策 | MCP 握手、本体规则、记忆抽取 |
+| 能力目录与调用服务 | 能力发现、调用绑定、参数校验、Call 生命周期 | 凭插件声明自行授予权限 |
+| 插件管理 | 安装、版本、启停、运行宿主和资源释放 | 任意替换数据库、授权器或内核 |
+| 上下文组织 | 检索、预算分配、来源、压缩与请求视图 | 把所有事件或所有工具全文塞给模型 |
+| Agent 连接器 | 协议转换、前置条件、会话绑定、进度与结果映射 | 重建另一套平台业务编排器 |
+| 授权与审批 | 判断允许、拒绝或需确认，消费既有授权 | 每次重复询问已明确授权的同一动作 |
+| 产物服务 | 内容、版本、可读取引用和交付状态 | 用文件存在代替业务正确性验证 |
+| 执行记录与状态服务 | 原子状态转换、事件、Outbox、租约与投影 | 替代本体、记忆等领域自身的数据事实 |
 
-### 4.2 Agent Orchestration Kernel
+模块继续落在 `backend/app/super_assistant/` 能力域内。平台助手适配器留在 `backend/app/assistant_hub/`，其依赖方向仍为 Hub → 业务域，超级助手不得直连本体或业务探索编排器。前端先沿用现有路径，不通过设计文档擅自批准 features 迁移。
 
-Kernel 只负责：
+## 4. 核心概念
 
-- Run、Turn、Step 生命周期；
-- Inbox 的追加、领取和恢复；
-- 工具与 Agent 调用的调度；
-- 取消、超时、重试和预算；
-- 事件追加和请求重建校验；
-- Worker 租约和崩溃恢复。
+| 概念 | 唯一语义 |
+|---|---|
+| Conversation | 用户持续交流的容器，承载多个先后或并行的目标 |
+| Run | 一个有目标、约束与验收依据的执行任务，可跨多次激活 |
+| Turn | Run 被输入、外部结果或续行信号唤醒后的一次激活，可包含多个 Step；主动让出执行权时结束 |
+| Step | 一次模型请求及其产生的 Call 的登记/调度边界；不等于单个工具调用 |
+| Call | 一次逻辑能力调用，可能比发起它的 Step/Turn 存活更久 |
+| Attempt | 一次实际模型请求或能力发送尝试；重试保留原尝试，不覆盖历史 |
+| Inbox | 待消费的用户消息、结果、确认和控制命令 |
+| Artifact | 可独立读取、引用和验证的产物，完整性与业务有效性分别记录 |
 
-Kernel 不负责具体业务工具、Knowledge Graph 查询、MCP 连接或本体逻辑。
+详细执行语义以 [执行模型](./super-assistant-execution-model.md) 为准。只保留这套定义，插件和 Connector 文档不得另建同名不同义的状态机。
 
-### 4.3 Capability Registry
+## 5. 必须保持的不变量
 
-Capability Registry 统一管理能力的发现、schema、权限、信任级别、生命周期、健康状态和调用限制。能力可以是进程内实现、MCP 服务、用户安装的插件或 Agent Connector。
+### 5.1 可恢复不等于自动重做
 
-### 4.4 Context Planner
+能够确定未发送或确定可幂等重试时才自动重发。外部写操作可能已成功而回包丢失时，先查询或请求用户核实。事件日志不能提供跨外部系统的 exactly-once 保证。
 
-Context Planner 根据当前用户目标、Run 状态、权限和 token 预算，选择需要进入模型请求的上下文。常驻 system prompt 只保留稳定规则和当前任务契约，记忆、图谱、附件、Skill 和能力描述按需加载。
+### 5.2 执行事实与传输分离
 
-### 4.5 Agent Connector
+持久化后再发布事件，SSE 断开不取消 Run。NATS 提供派发和唤醒，PostgreSQL 提供任务事实；等待外部结果时释放执行资源。模型增量可以合并成小批写入，不要求逐 token 单独事务。
 
-Agent Connector 把平台内部助手、RAP v1 远程助手和未来 ACP/A2A 适配器统一为可调用能力。调用者不需要知道目标 Agent 的传输方式，只需要处理统一的进度、输入、审批、Artifact、完成和失败事件。
+### 5.3 模型请求有确定的视图
 
-### 4.6 Policy / Approval
+实际请求由被选中的消息、上下文版本、技能和能力定义构成。记录其精确视图，并在发送前核验；不把整份事件日志当作模型历史。压缩也是有来源的上下文变换。
 
-所有高风险动作通过统一策略层裁决，包括外部 Agent 调用、数据出境、插件安装、写操作、凭据使用和用户确认。插件或 Agent 自身不能绕过 Kernel 的策略。
+审计不要求披露隐藏推理或凭据。用户删除数据后，正文和相关快照按保留策略清除；可以保留不含正文的执行元数据，但不得声称仍能完整重建被删除内容。
 
-### 4.7 Event Store 与 Worker
+### 5.4 用户授权和当前权限共同生效
 
-PostgreSQL 保存任务事件和查询投影，NATS 负责后台派发和唤醒。SSE 只是事件订阅方式，不是任务状态的唯一载体。
+用户已授权的范围继续有效，不因接入新架构重复确认。调用前检查当前权限、资源范围和版本；旧审批不能授权变更后的目标或载荷。插件自称只读或受信任不等于平台认证。
 
-## 5. 核心执行概念
+### 5.5 等待的是具体工作，不是整个用户
 
-```text
-Run
- └── Turn
-      └── Step
-           ├── Model Request
-           ├── Capability Call
-           ├── Approval
-           ├── Agent Call
-           ├── Context Update
-           └── Artifact
-```
+缺少本体或版本时提出问题、保留任务状态。可继续无依赖工作，用户也能处理另一个目标。输入通过关联 ID 返回原等待项，不按“最近一个任务”猜测归属。
 
-### Run
+### 5.6 任务完成必须有结果依据
 
-Run 表示一个用户目标，可以脱离浏览器连接继续执行。建议支持以下状态：
+Run 的目标、验收要求和已有证据是显式工作状态。模型输出完成标记只是一项建议；根据任务检查交付物、工具结果和领域验证证据。预算耗尽或输出了一段最终文字不能自动等于成功。
 
-```text
-queued
-planning
-running
-waiting_input
-waiting_approval
-waiting_external
-waiting_retry
-cancel_requested
-cancelled
-paused
-succeeded
-failed
-interrupted
-expired
-```
+### 5.7 业务事实由业务域掌握
 
-`waiting_input` 和 `waiting_approval` 是可恢复状态，不是失败。用户补充信息或完成审批后，Run 从原位置继续。
+发布版、草稿、可写性、归属和版本变更由既有领域服务判定。用户的明确选择可以复用；“最近使用”只用于推荐，不自动代表当前意图。
 
-### Turn
+## 6. 扩展模型
 
-Turn 是一次模型决策周期。一个 Turn 可以包含多个只读工具调用、写操作、Agent 调用或等待事件。
+Plugin 是可安装的能力包，Capability 是包提供的能力，Connector 是调用适配器，Skill 是按需加载的行为说明。四者不能等同。
 
-### Step
+能力共享身份、版本、授权和来源元数据，工具与 Agent 保留不同调用语义；Skill 不需要硬套执行、取消、Artifact 等字段。可信平台代码可以进程内运行，用户提供的可执行代码由独立宿主承载，不能以动态 import 获得平台进程权限。
 
-Step 是最小的可审计和可重试执行单元。所有工具调用、Agent 调用、审批和外部回调都必须属于某个 Step。
+完整边界见 [能力与插件模型](./super-assistant-capability-plugin-model.md) 和 [Agent 协作模型](./super-assistant-agent-connector-model.md)。是否支持某项协议能力来自实际协商和验证，不能只用统一接口补造能力。
 
-所有状态转换都必须使用条件更新、版本号或租约，保证取消、超时、完成和回调并发时只有一个终态生效。
+## 7. 私人知识与记忆的分工
 
-## 6. 统一能力模型
+- 原始资料保存用户提供的内容，图谱保存来源明确的抽取和关系；图谱是可修订的推导，不自动比原文更可信。
+- 长期记忆记录可复用的偏好、事实及交互经验；模型推断先带不确定性和来源，不直接晋升为用户指令。
+- 当前 Run 保存目标、已确认选择、计划、未决问题与产物；它们不依赖模型摘要记住。
+- 统一 Context Source 用于发现和组织，底层存储和删除责任继续分开。
 
-每个 Capability 至少需要声明：
+不设置“某类来源永远优先”的总排序。偏好以用户最新明确表达为准，业务事实结合对应时间、版本和领域证据判断；冲突不能由模型静默覆盖。自动记忆、纠错、删除传播和跨会话共享还需在上下文专题细化，本稿不把审批默认值冻结为新产品规则。
 
-```text
-key
-version
-description
-input_schema
-output_schema
-permissions
-trust_level
-supports_stream
-supports_cancel
-supports_approval
-supports_artifact
-timeout
-max_calls
-session_scope
-```
+## 8. 演进与事实源切换
 
-用户插件还需要声明安装来源、依赖、健康检查、凭据范围和资源限制。安装过程应遵循：
+迁移按 Run 的执行版本隔离。旧运行路径产生的任务仍以旧业务记录为准，新增影子事件只用于验证，不能反向成为权威。新内核承接的 Run 以新执行事务和事件为准，旧页面查询由兼容投影提供。
 
-```text
-validate manifest
-→ freeze revision
-→ approve
-→ install
-→ healthcheck
-→ mount
-```
+每个迁移阶段只有一个写入责任方。执行状态、事件、Inbox/Call 变更和 Outbox 在同一 PostgreSQL 事务内提交；业务域中已经发生的操作仍由该域记录，跨域结果通过 Call 关联，不要求全平台事件溯源。
 
-卸载过程应先停止新调用，处理或取消在途调用，回收进程和凭据，再保留完整审计记录。
+兼容只维护已经存在的外部和持久化契约，不为新设计增加通用 fallback。需改变旧行为时单列迁移和契约验证，避免在目录整理中改变语义。
 
-## 7. 统一 Agent 调用模型
+## 9. 分层设计顺序与待决事项
 
-Agent Descriptor 需要同时提供人类可读的描述和机器可验证的约束：
+1. 顶层边界与 [执行模型](./super-assistant-execution-model.md)。
+2. [能力与插件模型](./super-assistant-capability-plugin-model.md)、[Agent 协作模型](./super-assistant-agent-connector-model.md)。
+3. 上下文、记忆和知识来源治理。
+4. 事件载荷、数据模型、协议适配、前端交互与迁移验证。
 
-```text
-key
-version
-description
-input_schema
-output_schema
-context_requirements
-supports_stream
-supports_cancel
-supports_approval
-supports_artifact
-auth_scope
-timeout
-session_policy
-```
+当前未冻结：具体数据库字段、端点、协议版本、并发和预算数值、插件隔离实现、上下文算法。首版按单部署和有界并发设计，不提前建设分布式工作流引擎。
 
-例如，本体助手可以声明 `ontology_id` 和 `release_id` 为必需上下文。Resolver 尝试从当前会话、最近使用记录和用户选择中解析；没有候选或存在歧义时，必须向用户询问，并附带候选和推荐理由。
-
-统一 Agent 事件包括：
-
-```text
-agent.started
-agent.progress
-agent.needs_input
-agent.approval_required
-agent.artifact_declared
-agent.artifact_completed
-agent.completed
-agent.failed
-agent.cancelled
-```
-
-RAP v1 先通过 Adapter 保持兼容。ACP/A2A 后续作为可选 Connector，不直接成为 Kernel 的硬依赖。
-
-## 8. 记忆、知识与上下文
-
-Memory 和 Knowledge Graph 继续使用各自合适的存储，但统一实现 Context Source 接口。每条上下文候选都必须携带：
-
-```text
-source_id
-source_type
-content
-authority
-confidence
-sensitivity
-citation
-version
-ttl
-token_cost
-permissions
-```
-
-事实权威顺序建议为：用户原始资料、来源明确的图谱事实、用户确认的长期记忆、反思候选、模型推断。来源冲突时必须显式暴露冲突，不得静默覆盖。
-
-用户上传知识自动进入索引，但抽取出的长期记忆和敏感事实需要按照风险策略进入候选或审批。删除文件、记忆或来源时，相关图谱事实和上下文引用必须能够失效。
-
-## 9. 长任务和恢复
-
-长任务与 SSE 请求解耦：
-
-- 浏览器断开时 Run 默认继续；
-- 用户显式取消才写入 `cancel_requested`；
-- Worker 使用租约执行 Run；
-- Worker 崩溃后可重新领取未完成 Run；
-- SSE 支持按事件序号重新订阅；
-- 重复回调和重复派发通过幂等键收敛；
-- 无法协作取消的外部 Agent 必须显示真实状态。
-
-这套机制先按单用户、多会话设计，同时保留未来多实例接管所需的租约和版本控制。
-
-## 10. 不属于本层的内容
-
-以下内容暂不在本文固化：
-
-- 具体数据库字段和 Alembic revision；
-- 新旧 API 的最终路径；
-- ACP/A2A 的具体版本选择；
-- 插件进程的最终沙箱实现；
-- Context Planner 的具体排序算法；
-- 默认并发、超时和 token 数值；
-- 前端任务工作台的页面布局。
-
-这些内容必须在顶层边界稳定后，分别形成执行模型、能力模型、上下文模型、Agent Connector、插件和迁移设计。
-
-## 11. 演进顺序
-
-建议按以下顺序细化和开发：
-
-1. 冻结 Run/Turn/Step/Event 顶层语义；
-2. 定义事件闭合、请求重建、终态不可逆和幂等不变量；
-3. 在现有 Runtime 中以 shadow 方式追加事件；
-4. 抽取 Capability Registry 和统一策略层；
-5. 将 Memory、Palace、会话和附件包装为 Context Provider；
-6. 引入可恢复 Worker 和事件订阅；
-7. 统一内部助手、RAP v1 和外部 Agent Connector；
-8. 增加 Artifact、审批、取消和前端任务时间线；
-9. 在真实重启、取消、并发和外部 Agent 验证通过后删除旧执行路径。
-
-后续任何局部设计都必须回答一个问题：它属于 Kernel、Capability、Context、Connector、Policy、Artifact、Persistence 还是 Compatibility Projection？如果无法回答，说明边界还没有设计清楚。
+业务澄清是否必须绑定草稿版本，还是允许先无绑定讨论，是唯一当前待用户确认的产品分支；详见 Agent 协作模型。涉及该项的文档保持待决，不把沉默当作选择。
