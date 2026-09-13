@@ -65,7 +65,7 @@ def _canonical_callback(value: AgentCallbackRequest, *, run_id: str, call_id: st
     payload_bytes = json.dumps(value.payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if hashlib.sha256(payload_bytes).hexdigest() != value.payload_hash:
         raise HTTPException(status_code=422, detail="callback payload hash mismatch")
-    return f"{value.request_id}.{call_id}.{value.provider_event_id}.{value.payload_hash}".encode("utf-8")
+    return f"{run_id}.{value.request_id}.{call_id}.{value.provider_event_id}.{value.payload_hash}".encode("utf-8")
 
 
 @callback_router.post("/runs/{run_id}/calls/{call_id}/callback", status_code=202)

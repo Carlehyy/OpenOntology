@@ -109,3 +109,19 @@ def test_external_provider_event_is_idempotent_but_hash_conflicts_are_rejected(d
     assert first.event_id == second.event_id
     with pytest.raises(IdempotencyConflict, match="payload hash"):
         append_event(db, run, event_type="call.outcome_changed", payload={**payload, "evidence_ref": "different"}, actor={"kind": "connector"}, command_id="cmd-2", idempotency_key="event-2", connector_id="c", provider_event_id="p")
+
+
+def test_cancel_parent_propagates_to_non_terminal_descendants(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-cancel")
+    db.commit()
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child-cancel", parent_run_id=parent.id)
+    child.status = "active"
+    db.commit()
+    cancel_run(db, run_id=parent.id, owner_id=owner.id, reason=CancelReason.USER, idempotency_key="cancel-parent", expected_version=1)
+    db.commit()
+    db.refresh(child)
+    assert child.status == "cancel_requested"
+    assert child.cancel_reason == CancelReason.PARENT.value
+    assert db.query(ExecutionEvent).filter_by(run_id=child.id, event_type="run.cancel_requested").count() == 1
+    assert db.query(ExecutionDispatchOutbox).filter_by(run_id=child.id).count() >= 1

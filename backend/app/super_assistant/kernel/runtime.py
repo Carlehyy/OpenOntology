@@ -94,6 +94,79 @@ def _run_id(payload: dict) -> str:
     return str(value)
 
 
+async def _invoke_model_with_retries(
+    db, run, call, step, attempt, token, policy, call_kwargs, request_messages, tools,
+):
+    """Invoke the model with durable bounded Attempts and retry evidence."""
+    current_attempt = attempt
+    for index in range(policy.call_max_attempts):
+        heartbeat_stop = asyncio.Event()
+        heartbeat = asyncio.create_task(_lease_heartbeat(run.id, token, policy, heartbeat_stop))
+        try:
+            result = await asyncio.to_thread(provider.chat, call_kwargs, request_messages, tools)
+        except Exception as exc:
+            heartbeat_stop.set()
+            await heartbeat
+            db.rollback()
+            db.begin()
+            current_run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
+            if current_run is None:
+                raise
+            assert_lease(current_run, token)
+            current_call = db.get(ExecutionCall, call.id)
+            current_attempt = db.get(ExecutionAttempt, current_attempt.id)
+            if current_call is None or current_attempt is None:
+                raise RuntimeError("model Call or Attempt disappeared")
+            retryable = index + 1 < policy.call_max_attempts
+            current_attempt.provider_status = "failed"
+            current_attempt.error_ref = str(exc)[:1000]
+            current_attempt.finished_at = _now()
+            current_attempt.safe_to_retry = retryable
+            append_event(
+                db, current_run, event_type="attempt.result",
+                payload={"attempt_id": current_attempt.id, "provider_status": "failed",
+                         "result_ref": None, "error_ref": current_attempt.error_ref,
+                         "safe_to_retry": retryable, "token_usage_ref": None, "cost_ref": None},
+                actor={"kind": "worker"}, command_id=f"attempt:{current_attempt.id}:failure",
+                idempotency_key=f"result:{current_attempt.id}", lease=token,
+            )
+            if not retryable:
+                current_call.status, current_call.outcome = CallStatus.CLOSED.value, CallOutcome.FAILED.value
+                append_event(
+                    db, current_run, event_type="call.outcome_changed",
+                    payload={"call_id": current_call.id, "status": current_call.status,
+                             "outcome": current_call.outcome, "evidence_ref": None,
+                             "connector_id": None, "provider_event_id": None},
+                    actor={"kind": "worker"}, command_id=f"call:{current_call.id}:failed",
+                    idempotency_key=f"outcome:{current_call.id}", lease=token,
+                )
+                db.commit()
+                raise
+            next_attempt = ExecutionAttempt(
+                call_id=current_call.id, attempt_no=current_attempt.attempt_no + 1,
+                provider_status="started", transport_request_ref=current_attempt.transport_request_ref,
+            )
+            db.add(next_attempt)
+            db.flush()
+            append_event(
+                db, current_run, event_type="attempt.started",
+                payload={"attempt_id": next_attempt.id, "provider_status": "started",
+                         "request_ref": next_attempt.transport_request_ref or f"call:{current_call.id}",
+                         "started_at": next_attempt.started_at.isoformat()},
+                actor={"kind": "worker"}, command_id=f"attempt:{next_attempt.id}:start",
+                idempotency_key=f"external-attempt-start:{next_attempt.id}", lease=token,
+            )
+            db.commit()
+            current_attempt = next_attempt
+            continue
+        finally:
+            if not heartbeat_stop.is_set():
+                heartbeat_stop.set()
+                await heartbeat
+        return result, current_attempt.id
+    raise RuntimeError("model retry loop exhausted")
+
+
 async def process_execution_message(payload: dict) -> None:
     """Run one durable activation and continue its model loop until it yields.
 
@@ -181,13 +254,10 @@ async def process_execution_message(payload: dict) -> None:
             # the same fencing epoch in a separate DB session while awaiting
             # it; this prevents a long step from being mistaken for a stuck
             # Run and reclaimed by the recovery scanner.
-            heartbeat_stop = asyncio.Event()
-            heartbeat = asyncio.create_task(_lease_heartbeat(run.id, token, policy, heartbeat_stop))
-            try:
-                result = await asyncio.to_thread(provider.chat, call_kwargs, request_messages, tools)
-            finally:
-                heartbeat_stop.set()
-                await heartbeat
+            result, attempt_id = await _invoke_model_with_retries(
+                db, run, call, step, attempt, token, policy,
+                call_kwargs, request_messages, tools,
+            )
             tool_calls = result.get("tool_calls") or []
             wait = _wait_request(result, tool_calls)
             if tool_calls and wait is None:
@@ -214,7 +284,7 @@ async def process_execution_message(payload: dict) -> None:
             content = strip_think_content(str(result.get("content") or ""))
             db.rollback()  # connector/tool adapters may have opened an implicit transaction
             db.begin(); run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update()); assert run is not None; assert_lease(run, token)
-            call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt.id)
+            call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt_id)
             artifact = _persist_assistant_artifact(db, run, call, attempt, content, token) if content else None
             _close_model_call(db, run, call, attempt, step, artifact, token)
             if wait is not None:
@@ -680,10 +750,32 @@ def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
         if artifact is not None and artifact.inline_content and artifact.id not in seen_artifacts:
             messages.append({"role": "assistant", "content": artifact.inline_content})
             seen_artifacts.add(artifact.id)
+    consumed_events = db.scalars(
+        select(ExecutionEvent)
+        .where(ExecutionEvent.run_id == run.id, ExecutionEvent.event_type == "inbox.consumed")
+        .order_by(ExecutionEvent.seq)
+    ).all()
+    consumed_ids: set[str] = set()
+    for event in consumed_events:
+        inbox_id = str((event.payload or {}).get("inbox_id") or "")
+        item = db.get(InboxItem, inbox_id) if inbox_id else None
+        if item is None or item.id in consumed_ids:
+            continue
+        payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
+        if content:
+            messages.append({"role": "user", "content": str(content)})
+        consumed_ids.add(item.id)
     pending = db.scalars(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.status == "pending", InboxItem.source == "user").order_by(InboxItem.accepted_at, InboxItem.id)).all()
     for item in pending:
         payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
-        if content: messages.append({"role": "user", "content": str(content)})
+        if content:
+            messages.append({"role": "user", "content": str(content)})
+        append_event(
+            db, run, event_type="inbox.consumed",
+            payload={"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id},
+            actor={"kind": "worker"}, command_id=f"inbox-consume:{item.id}",
+            idempotency_key=f"inbox-consumed:{item.id}",
+        )
         item.status, item.consumed_at = "consumed", _now()
     from .models import Approval
     approvals = db.scalars(select(Approval).where(Approval.run_id == run.id, Approval.status.in_(("approved", "denied"))).order_by(Approval.decided_at, Approval.id)).all()
@@ -735,6 +827,25 @@ def _persist_assistant_artifact(db, run, call, attempt, content: str, token):
     return artifact
 
 
+def _capability_revision_for_target(db, owner_id: str, target_ref: str | None) -> int:
+    """Resolve the immutable revision recorded on a new external Call."""
+    target = str(target_ref or "").strip()
+    if target == "multica_create_task":
+        return 2
+    try:
+        from app.super_assistant.models import SuperAssistantProcessPlugin
+        plugin = db.scalar(select(SuperAssistantProcessPlugin).where(
+            SuperAssistantProcessPlugin.owner_id == owner_id,
+            SuperAssistantProcessPlugin.state == "enabled",
+            (SuperAssistantProcessPlugin.id == target) | (SuperAssistantProcessPlugin.key == target),
+        ))
+        if plugin is not None:
+            return int(plugin.revision)
+    except Exception:
+        logger.exception("failed to resolve capability revision for target=%s", target)
+    return 1
+
+
 def _close_model_call(db, run, call, attempt, step, artifact, token):
     evidence_ref = f"artifact://{artifact.id}" if artifact is not None else None
     append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": "closed", "outcome": "completed", "evidence_ref": evidence_ref, "connector_id": None, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"attempt:{attempt.id}", idempotency_key=f"outcome:{call.id}", lease=token)
@@ -759,7 +870,7 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 {"message": str(wait.get("message") or run.goal), "session_ref": wait.get("session_ref")},
                 ensure_ascii=False,
             )
-            capability_revision = 2 if target_ref == "multica_create_task" else 1
+            capability_revision = _capability_revision_for_target(db, run.owner_id, target_ref)
             external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=capability_revision, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running")
             db.add(external_call); db.flush()
             append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": capability_revision, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": "external_async", "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)

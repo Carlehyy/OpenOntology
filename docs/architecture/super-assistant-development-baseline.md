@@ -117,7 +117,7 @@ turn.started, turn.closed, step.started, step.closed,
 context.snapshot, request.header, assistant.delta, assistant.message,
 call.intent, call.progress, call.outcome_changed,
 attempt.started, attempt.result,
-inbox.appended, inbox.claimed, inbox.expired,
+inbox.appended, inbox.claimed, inbox.expired, inbox.consumed,
 approval.requested, approval.decided, approval.expired, approval.revoked,
 artifact.declared, artifact.chunked, artifact.completed,
 projection.applied, projection.failed, source.tombstoned
@@ -176,7 +176,7 @@ Worker 持有短租约和 `lease_epoch` fencing，默认 lease TTL 30 秒、hear
 
 Reconciliation service 只处理 `reconciling` Call，使用 Call 级租约调用 Connector `query_status(handle)`。默认退避 5 秒起步、倍数 2、上限 5 分钟、最多 12 次；结果映射为 `remote_running`、`completed`、`failed` 或 `cancelled_confirmed`。Connector 无查询能力、达到上限、到达 Run deadline 或凭据失效时设置 `manual_attention=true`，创建关联 Inbox/通知；人工操作只能确认外部事实，不能无证据重发非幂等写。Run 查询显示“结果待确认”，提供 `confirm_completed`、`confirm_failed`、`confirm_remote_running` 三种受控处置，均要求 evidence_ref、追加事件且不得重开 Run。
 
-父子 Run 固定 `join_policy=all|any`，默认 `all`；父取消向活动子 Run 发送 best-effort cancel，子 Run 终态不自动完成父 Run，父 Run 必须显式归并所有必需子结果；可选子 Run 失败不使父 Run 失败，必需子 Run 失败使父 Run 失败。
+父子 Run 固定 `join_policy=all|any`，默认 `all`；父取消向所有非终态子 Run 级联发送幂等 cancel，子 Run 终态不自动完成父 Run，父 Run 必须显式归并所有必需子结果；可选子 Run 失败不使父 Run 失败，必需子 Run 失败使父 Run 失败。
 
 ## 7. HTTP、SSE 和交互合同
 
@@ -261,7 +261,7 @@ kernel.v1 外部 direct HTTPS 必须 TLS、token 使用 `secret_ref`；kernel.v1
 `POST /api/v2/super-assistant/runs/{run_id}/calls/{call_id}/callback`，必须携带
 `X-Callback-Timestamp` 和 `X-Callback-Signature`。请求体包含
 `connector_id`、`request_id`、`provider_event_id`、`payload_hash`、`event_type` 和
-`payload`；签名覆盖 `timestamp + request_id + call_id + provider_event_id + payload_hash`，
+`payload`；签名覆盖 `timestamp + run_id + request_id + call_id + provider_event_id + payload_hash`，
 允许时钟偏差 5 分钟。`provider_event_id` 去重并拒绝重放，结果回调由同一
 reconciler 原子推进 Call/Attempt/Artifact 状态。所有 kernel.v1 回调同时校验 owner、agent、
 Call 和 Run 绑定，跨绑定返回 404；回调自述不能提升权限。legacy RAP v1 的公开

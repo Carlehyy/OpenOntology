@@ -164,7 +164,7 @@ def _artifact_fixture(db, owner, *, content: bytes, storage_ref: str | None = No
         owner_id=owner.id, run_id=run.id, kind="file", mime_type=mime_type,
         size=len(content), checksum="sha256:" + hashlib.sha256(content).hexdigest(),
         storage_ref=storage_ref or "pending://artifact", inline_content=content.decode("utf-8") if inline else None,
-        status=status, business_status="success",
+        status=status, integrity_status="verified" if status == "complete" else "pending", business_status="success",
         retention_until=retention_until,
     )
     db.add(artifact)

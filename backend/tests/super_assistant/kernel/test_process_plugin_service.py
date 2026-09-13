@@ -72,9 +72,9 @@ def test_process_plugin_manifest_rejects_unknown_host_capability(db, admin_user)
 def test_runtime_resolves_enabled_plugin_without_manifest_hash_conflict(db, admin_user):
     from app.super_assistant.kernel import runtime
 
-    row = install_process_plugin(db, admin_user.id, _body(key="user.runtime"))
+    row = install_process_plugin(db, admin_user.id, _body(key="user.runtime", revision=3))
     enable_process_plugin(db, admin_user.id, row.id)
-    call = SimpleNamespace(target_ref=row.id, capability_revision=1, capability_key=capability_key(admin_user.id, row.key))
+    call = SimpleNamespace(target_ref=row.id, capability_revision=3, capability_key=capability_key(admin_user.id, row.key))
     run = SimpleNamespace(owner_id=admin_user.id)
     connector = runtime._resolve_external_connector(db, run, call)
     assert connector is not None

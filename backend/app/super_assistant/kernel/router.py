@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -9,6 +10,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from app.shared.database import SessionLocal
 
 from app.deps import get_current_user, get_db
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
@@ -329,21 +332,46 @@ def stream_kernel_events(
     if oldest is not None and cursor < oldest - 1:
         raise HTTPException(status_code=410, detail="event cursor is outside replay window")
 
-    def generate():
+    # The request dependency session must not remain pinned for the lifetime
+    # of an SSE subscription.  Each short poll uses a fresh session and the
+    # blocking SQL work is moved off the event loop.
+    db.rollback()
+
+    def read_batch():
+        session = SessionLocal()
+        try:
+            current_run = session.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id))
+            events = session.scalars(
+                select(ExecutionEvent)
+                .where(ExecutionEvent.run_id == run_id, ExecutionEvent.seq > cursor)
+                .order_by(ExecutionEvent.seq).limit(100)
+            ).all()
+            snapshot = None if current_run is None else {
+                "run_id": current_run.id, "status": current_run.status,
+                "version": current_run.version, "wait_reason": current_run.wait_reason,
+            }
+            return snapshot, events
+        finally:
+            session.close()
+
+    async def generate():
         nonlocal cursor
         last_ping = time.monotonic()
+        sent_snapshot = False
         while True:
-            db.refresh(run)
-            events = db.scalars(select(ExecutionEvent).where(ExecutionEvent.run_id == run_id, ExecutionEvent.seq > cursor).order_by(ExecutionEvent.seq).limit(100)).all()
+            snapshot, events = await asyncio.to_thread(read_batch)
+            if not sent_snapshot and snapshot is not None:
+                yield f"event: run.snapshot\ndata: {json.dumps(snapshot, ensure_ascii=False)}\nretry: 5000\n\n"
+                sent_snapshot = True
             for event in events:
                 cursor = event.seq
                 yield f"id: {run_id}:{event.seq}\nevent: {event.event_type}\ndata: {json.dumps(event.payload, ensure_ascii=False, default=str)}\nretry: 5000\n\n"
-            if run.status in {"cancelled", "expired", "completed", "failed"} and not events:
+            if snapshot is None or (snapshot["status"] in {"cancelled", "expired", "completed", "failed"} and not events):
                 break
             if time.monotonic() - last_ping >= 15:
                 yield ": ping\n\n"
                 last_ping = time.monotonic()
-            time.sleep(0.25)
+            await asyncio.sleep(0.25)
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -383,6 +411,8 @@ def _load_kernel_artifact(run_id: str, artifact_id: str, db: Session, user):
         raise HTTPException(status_code=404, detail="artifact not found")
     if artifact_is_expired(status=artifact.status, retention_until=artifact.retention_until):
         raise HTTPException(status_code=410, detail="artifact expired or deleted")
+    if artifact.status != "complete" or artifact.integrity_status != "verified":
+        raise HTTPException(status_code=409, detail="artifact_not_ready")
     return artifact
 
 

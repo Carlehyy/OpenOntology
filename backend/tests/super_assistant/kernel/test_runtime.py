@@ -13,6 +13,25 @@ from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy
 from app.models.user import User
 
 
+def test_rebuild_messages_records_consumed_input_for_crash_recovery(db):
+    owner = User(id=str(uuid.uuid4()), username=f"input-{uuid.uuid4().hex[:8]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
+    db.add(owner); db.flush()
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="input")
+    db.add(conversation); db.flush()
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="goal", idempotency_key="input-run")
+    db.commit()
+    run.status = "waiting_input"; db.commit()
+    from app.super_assistant.kernel.store import append_input
+    append_input(db, run_id=run.id, owner_id=owner.id, kind="question_answer", question_id="q1", payload={"content": "answer"}, idempotency_key="answer-1")
+    db.commit(); db.refresh(run)
+    first = runtime._rebuild_messages(db, run)
+    db.commit(); db.expire_all(); db.refresh(run)
+    second = runtime._rebuild_messages(db, run)
+    assert [item["content"] for item in first if item["role"] == "user"].count("answer") == 1
+    assert [item["content"] for item in second if item["role"] == "user"].count("answer") == 1
+    assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.consumed").count() == 1
+
+
 def test_kernel_activation_persists_attempt_artifact_and_completion(db, monkeypatch):
     owner = User(
         id=str(uuid.uuid4()), username=f"runtime-{uuid.uuid4().hex[:8]}",
@@ -144,6 +163,24 @@ def test_kernel_runtime_yields_for_input_then_resumes_in_a_new_turn(db, monkeypa
     turns = db.query(runtime.ExecutionTurn).filter_by(run_id=run.id).order_by(runtime.ExecutionTurn.turn_no).all()
     assert [turn.turn_no for turn in turns] == [0, 1]
     assert all(turn.status == "closed" for turn in turns)
+
+
+def test_kernel_model_transient_failures_create_retry_attempts(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="retry model")
+    calls = {"count": 0}
+    def flaky(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise RuntimeError("temporary gateway failure")
+        return {"content": "最终结果"}
+    monkeypatch.setattr(runtime.provider, "chat", flaky)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "model-retry"}))
+    db.expire_all()
+    persisted = db.get(ExecutionRun, run.id)
+    assert persisted.status == "completed"
+    attempts = db.query(runtime.ExecutionAttempt).join(runtime.ExecutionCall).filter(runtime.ExecutionCall.run_id == run.id).order_by(runtime.ExecutionAttempt.attempt_no).all()
+    assert len(attempts) == 3
+    assert [item.safe_to_retry for item in attempts] == [True, True, False]
 
 
 def test_kernel_runtime_honors_max_steps_and_yields_retry(db, monkeypatch):
@@ -333,7 +370,7 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
             return {"status": "running", "remote_task_ref": "poll-ref"}
 
         async def query_status(self, **kwargs):
-            return {"status": "completed", "content": "轮询完成", "provider_event_id": "poll-1"}
+            return {"status": "completed", "content": "轮询完成", "artifacts": [{"kind": "poll.report", "mime_type": "application/json", "content": {"ok": True}}], "provider_event_id": "poll-1"}
 
         async def cancel(self, **kwargs):
             return {"status": "unsupported"}
@@ -352,6 +389,7 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
     db.expire_all()
     assert db.get(ExecutionRun, run.id).status == "active"
     assert db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one().inline_content == "轮询完成"
+    assert db.query(Artifact).filter_by(run_id=run.id, kind="poll.report").one().inline_content == '{"ok": true}'
 
 
 def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):

@@ -326,9 +326,59 @@ def cancel_run(
         payload={"from": before, "to": run.status, "reason": reason.value, "actor": "user", "version": run.version},
         actor={"kind": "user"}, command_id=command.command_id, idempotency_key=idempotency_key,
     )
+    _cascade_cancel_children(db, run, parent_command_id=command.command_id)
     _add_outbox(db, run, command_id=command.command_id, message_ref=f"command://{command.command_id}")
     command.result = {"status": run.status, "version": run.version}
     return run
+
+
+def _cascade_cancel_children(db: Session, parent: ExecutionRun, *, parent_command_id: str) -> None:
+    """Propagate a parent cancellation through every non-terminal descendant."""
+    pending = [parent.id]
+    visited: set[str] = set()
+    while pending:
+        ancestor_id = pending.pop(0)
+        if ancestor_id in visited:
+            continue
+        visited.add(ancestor_id)
+        children = db.scalars(
+            select(ExecutionRun)
+            .where(ExecutionRun.parent_run_id == ancestor_id)
+            .order_by(ExecutionRun.id)
+            .with_for_update()
+        ).all()
+        for child in children:
+            pending.append(child.id)
+            if child.status in {
+                RunStatus.CANCELLED.value, RunStatus.EXPIRED.value,
+                RunStatus.COMPLETED.value, RunStatus.FAILED.value,
+            }:
+                continue
+            child_key = f"parent-cancel:{parent_command_id}:{child.id}"
+            child_command, replayed = record_command(
+                db, child, kind="cancel", idempotency_key=child_key,
+                payload={"reason": CancelReason.PARENT.value, "parent_command_id": parent_command_id},
+            )
+            if replayed:
+                continue
+            before = child.status
+            next_state = request_cancel(_state_from_run(child), CancelReason.PARENT)
+            child.status = next_state.status.value
+            child.cancel_reason = CancelReason.PARENT.value
+            child.cancel_deadline = _now() + CANCEL_GRACE
+            child.version += 1
+            append_event(
+                db, child, event_type="run.cancel_requested",
+                payload={"reason": CancelReason.PARENT.value, "cancel_reason": CancelReason.PARENT.value, "actor": "system"},
+                actor={"kind": "system"}, command_id=child_command.command_id, idempotency_key=child_key,
+            )
+            append_event(
+                db, child, event_type="run.status_changed",
+                payload={"from": before, "to": child.status, "reason": "parent_cancel", "actor": "system", "version": child.version},
+                actor={"kind": "system"}, command_id=child_command.command_id, idempotency_key=f"{child_key}:status",
+            )
+            _add_outbox(db, child, command_id=child_command.command_id, message_ref=f"command://{child_command.command_id}")
+            child_command.result = {"status": child.status, "version": child.version}
 
 
 def control_run(

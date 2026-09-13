@@ -65,7 +65,7 @@ def test_hmac_callback_ingress_is_authenticated(db, monkeypatch):
     payload_hash = hashlib.sha256(json.dumps(callback_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     body = AgentCallbackRequest(connector_id=remote.id, request_id="request-1", provider_event_id="provider-1", payload_hash=payload_hash, event_type="call.outcome_changed", payload=callback_payload)
     timestamp = int(time.time())
-    message = f"{timestamp}.request-1.{call.id}.provider-1.{payload_hash}".encode()
+    message = f"{timestamp}.{run.id}.request-1.{call.id}.provider-1.{payload_hash}".encode()
     signature = "sha256=" + hmac.new(b"callback-secret", message, hashlib.sha256).hexdigest()
     async def reconcile(_payload):
         return True

@@ -69,6 +69,7 @@ def _poll_external_calls_once() -> None:
                 "provider_event_id": observed.get("provider_event_id"),
                 "evidence_ref": observed.get("evidence_ref"),
                 "content": observed.get("content"),
+                "artifacts": observed.get("artifacts") or [],
             }
             asyncio.run(reconcile_execution_message(payload))
     except Exception:

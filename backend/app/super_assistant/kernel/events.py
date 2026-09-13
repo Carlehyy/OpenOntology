@@ -23,7 +23,7 @@ EVENT_TYPES = frozenset({
     "run.child_bound", "run.child_joined", "turn.started", "turn.closed", "step.started", "step.closed",
     "context.snapshot", "request.header", "assistant.delta", "assistant.message",
     "call.intent", "call.progress", "call.outcome_changed", "attempt.started", "attempt.result",
-    "inbox.appended", "inbox.claimed", "inbox.expired", "approval.requested", "approval.decided",
+    "inbox.appended", "inbox.claimed", "inbox.expired", "inbox.consumed", "approval.requested", "approval.decided",
     "approval.expired", "approval.revoked", "artifact.declared", "artifact.chunked", "artifact.completed",
     "projection.applied", "projection.failed", "source.tombstoned",
 })
@@ -56,6 +56,7 @@ REQUIRED_PAYLOAD: dict[str, frozenset[str]] = {
     "inbox.appended": frozenset({"inbox_id", "kind", "target_ref", "expiry_policy"}),
     "inbox.claimed": frozenset({"inbox_id", "claim_token", "claim_expires_at", "actor"}),
     "inbox.expired": frozenset({"inbox_id", "kind", "target_ref", "question_id", "question_expires_at", "expiry_policy", "accepted_at"}),
+    "inbox.consumed": frozenset({"inbox_id", "kind", "question_id"}),
     "approval.requested": frozenset({"approval_id", "run_id", "call_id", "scope_snapshot_ref", "expires_at"}),
     "approval.decided": frozenset({"approval_id", "decision", "actor", "decided_at", "authorization_hash"}),
     "approval.expired": frozenset({"approval_id", "reason", "actor", "occurred_at"}),
