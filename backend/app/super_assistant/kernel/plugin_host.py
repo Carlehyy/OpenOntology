@@ -38,9 +38,16 @@ class ProcessPluginHost:
         return command
 
     def _env(self) -> dict[str, str]:
-        # Backend credentials never flow into an untrusted child implicitly.
-        env = {key: value for key, value in os.environ.items() if key.startswith("PLUGIN_")}
-        env.update({str(key): str(value) for key, value in self._secret_env.items()})
+        # Start from a deliberately tiny environment.  In particular, do not
+        # inherit ``PLUGIN_*`` from the worker: those values may belong to a
+        # different plugin or to the host itself.  A deployment may still
+        # provide a normal executable PATH, but credentials are admitted only
+        # when the manifest explicitly names the corresponding secret ref.
+        env: dict[str, str] = {}
+        if os.environ.get("PATH"):
+            env["PATH"] = os.environ["PATH"]
+        allowed = set(self.manifest.secret_refs)
+        env.update({str(key): str(value) for key, value in self._secret_env.items() if str(key) in allowed})
         return env
 
     async def start(self) -> None:

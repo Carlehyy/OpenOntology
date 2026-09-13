@@ -263,6 +263,14 @@ app.include_router(
     tags=["super-assistant-kernel"],
     dependencies=assistant_guard,
 )
+# Remote Agent callbacks authenticate with the per-agent HMAC token and do not
+# require a browser session; all state changes still pass the kernel fence.
+from app.super_assistant.kernel import callbacks as super_assistant_kernel_callbacks
+app.include_router(
+    super_assistant_kernel_callbacks.callback_router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant-kernel"],
+)
 # 会话内容全局搜索：独立子路由（super_assistant/router.py 已贴近架构行数上限），
 # 与主路由同前缀同菜单守卫。
 from app.super_assistant import search as super_assistant_search

@@ -18,7 +18,7 @@ $OPENONTOLOGY_REVIEW_ROOT
 codex/super-assistant-commercial-20260913
 ```
 
-该分支从本地 `nano-ontoprompt` 创建，当前只包含架构设计文档，没有超级助手业务代码改动。原始 OpenOntology 工作树和参考 Harness 的位置如下：
+该分支从本地 `nano-ontoprompt` 创建，已包含 kernel.v1 的执行内核、Connector、Artifact、插件生命周期和前端任务投影实现；实现状态以本文件第 10 节和最终测试证据为准。原始 OpenOntology 工作树和参考 Harness 的位置如下：
 
 ```text
 OpenOntology 基线工作树：
@@ -72,7 +72,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 | 来源分工 | 原始私人资料、图谱推导、长期记忆、当前任务状态分别管理；图谱推导不自动高于原始来源 | `super-assistant-context-memory-model.md` |
 | 插件受控扩展 | 用户插件只能提供受控 Tool、Resource、Skill 或 Agent Connector；事件存储、状态机、权限、密钥、Outbox 和 Artifact 校验属于平台内核 | `super-assistant-capability-plugin-model.md`、`super-assistant-implementation-blueprint.md` |
 | 迁移按执行版本隔离 | 旧 Run 按旧路径收尾，新 Run 才进入新 Kernel；不对同一个 Run 双写两套权威状态 | `super-assistant-migration-validation-plan.md` |
-| 本轮先做设计 | 当前产出是架构设计和开发依据，代码重构在独立开发任务中执行；字段、端点、协议版本、预算和隔离实现已冻结在开发基线 v1.0 | 全部架构文档 |
+| 本轮先做设计再实现 | 设计合同已冻结，并已在本分支逐步落地；未完成项必须以源码、测试和 staging 证据标记，不得由文档推断完成 | 全部架构文档 |
 
 ## 4. 当前架构主张
 
@@ -204,6 +204,6 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 ## 10. 二次审查后的当前门槛
 
-当前实现门槛应按以下事实读取：M1 的状态/事件/幂等/租约、heartbeat、stuck 扫描和 parent fan-in 已有实现与专项测试，但跨进程 heartbeat 和复杂子结果归并仍需 staging 证据；M2 的执行表、迁移、Outbox、NATS 基础、历史显式回填/回滚和 DLQ 重放入口已实现，真实 PostgreSQL/NATS 验收仍未闭环；M3 已具备可持续多步 activation、等待输入/审批/外部结果、恢复、Artifact 结果证据，以及通过 `sa.execution.call.<owner>` durable consumer 进入 ConnectorRegistry 的直连外部 Call 派发；连接器按 owner 解析，并在首个调用前冻结 `CapabilityRevision`，不可用或异常进入 `outcome_unknown/reconciling`；Multica 已支持 opaque remote ref、周期查询、远端取消、终态 Artifact 和 Run 唤醒，仍不提供 provider 流式传输；M4 已有不可变 Capability/Connector、Remote Agent HTTP 适配、MCP 工具 Connector、首调快照和 MCP manifest 变更/禁用/卸载撤销、`plugin_host.py` 的独立 JSON-lines 进程边界、回调身份校验，以及持久化用户进程插件的安装/启停/卸载 drain；生产隔离仍需 staging/deployment 证据；M5 已接入 Memory/Palace ContextSource、来源字段、tombstone 持久化和索引排除，Artifact 对象存储仍未接入；M6 已有 kernel.v1 API/SSE、输入/审批/Artifact、深链、失败重试 API、多 Run 列表/任务卡、410 游标恢复、事件 reducer 和内联 Artifact 下载，非内联对象存储下载和真实浏览器验收仍需补齐；M7/M8 的真实 staging 验收和最终发布证据尚未完成。
+当前实现门槛应按以下事实读取：M1 的状态/事件/幂等/租约、跨进程 heartbeat、stuck 扫描、Inbox TTL 和 parent 子结果 Artifact 归并已有实现与专项测试；M2 的执行表、迁移、Outbox、NATS 基础、历史显式回填/回滚、结构化 DLQ 发布与重放入口已实现，真实 PostgreSQL/NATS 验收仍未闭环；M3 已具备多步 activation、等待输入/审批/外部结果、恢复、Artifact 结果证据，以及通过 `sa.execution.call.<owner>` durable consumer 进入 ConnectorRegistry 的直连外部 Call 派发，但 Assistant Hub 仍保留 legacy 同步委派路径，尚未完全转换为 Kernel 子 Run；连接器按 owner 解析，并在首个调用前冻结 `CapabilityRevision`，不可用或异常进入 `outcome_unknown/reconciling`；Multica 已支持 opaque remote ref、周期查询、远端取消、终态 Artifact 和 Run 唤醒，仍不提供 provider 流式传输；M4 已有不可变 Capability/Connector、Remote Agent HTTP 适配、MCP 工具 Connector、RAP pull、HMAC callback ingress、provider event 幂等、MCP manifest 变更/禁用/卸载撤销、`plugin_host.py` 的独立 JSON-lines 进程边界，以及持久化用户进程插件的安装/启停/卸载 drain；真实 OS 沙箱、secret broker 和插件 staging 证据仍未闭环；M5 已接入 Memory/Palace ContextSource、来源字段、tombstone 持久化和结构化外部 Artifact 归档；M6 已有 kernel.v1 API/SSE、输入/审批/Artifact、深链、失败重试 API、多 Run 列表/任务卡、410 游标恢复、事件 reducer 和 inline/object Artifact 下载，真实浏览器验收仍需补齐；M7/M8 的真实 staging、迁移升级/downgrade、发布和回滚证据尚未完成。
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。

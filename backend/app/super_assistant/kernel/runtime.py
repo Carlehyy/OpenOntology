@@ -36,7 +36,7 @@ from .models import (
     InboxItem,
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
-from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease, renew_lease
+from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, renew_lease
 from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, ProcessPluginConnector, TrustLevel
 
 
@@ -764,7 +764,7 @@ def _mark_run_failed(run_id: str, exc: Exception) -> None:
         db.close()
 
 
-async def reconcile_execution_message(payload: dict) -> None:
+async def reconcile_execution_message(payload: dict) -> bool:
     """应用一次 Connector 对账观察，并以事实事件推进 Call。
 
     终态 Run 不会被迟到回调重开；未知结果按指数退避，超过预算标记人工介入。
@@ -772,20 +772,39 @@ async def reconcile_execution_message(payload: dict) -> None:
     run_id, call_id = payload.get("run_id"), payload.get("call_id")
     if not run_id or not call_id:
         logger.warning("kernel reconciliation message missing run_id/call_id")
-        return
+        return False
     db = SessionLocal()
     try:
         run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == str(run_id)).with_for_update())
         call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == str(call_id), ExecutionCall.run_id == str(run_id)).with_for_update())
         if run is None or call is None:
-            db.rollback(); return
+            db.rollback(); return False
+        provider_event_id, connector_id = payload.get("provider_event_id"), payload.get("connector_id")
+        provider_payload_hash = _hash_payload({
+            "run_id": run.id, "call_id": call.id,
+            "remote_state": payload.get("remote_state") or payload.get("status"),
+            "content": payload.get("content"), "evidence_ref": payload.get("evidence_ref"),
+            "artifacts": payload.get("artifacts"),
+        })
+        if provider_event_id and connector_id:
+            prior = db.scalar(select(ExecutionEvent).where(
+                ExecutionEvent.connector_id == connector_id,
+                ExecutionEvent.provider_event_id == provider_event_id,
+            ))
+            if prior is not None:
+                # An identical provider observation is already applied.  A
+                # reused event id with different content is rejected before
+                # touching Call state or creating duplicate Artifacts.
+                if (prior.payload or {}).get("provider_payload_hash") != provider_payload_hash:
+                    raise ValueError("provider_event_id payload hash conflict")
+                db.rollback()
+                return True
         latest_attempt = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc()))
         try:
             run_status, call_status, call_outcome = RunStatus(run.status), CallStatus(call.status), CallOutcome(call.outcome)
         except ValueError:
-            db.rollback(); return
+            db.rollback(); return False
         side_effect = SideEffectClass(call.side_effect_class) if call.side_effect_class in {x.value for x in SideEffectClass} else SideEffectClass.READ_ONLY
-        provider_event_id, connector_id = payload.get("provider_event_id"), payload.get("connector_id")
         observation = RemoteObservation(normalize_remote_state(payload.get("remote_state") or payload.get("status")), provider_event_id=provider_event_id, evidence_ref=payload.get("evidence_ref"), raw_state=str(payload.get("remote_state") or payload.get("status") or ""))
         decision = decide_reconciliation(observation=observation, run_status=run_status, call_status=call_status, call_outcome=call_outcome, side_effect=side_effect, safe_to_retry=bool(getattr(latest_attempt, "safe_to_retry", False)), reconcile_attempt_count=call.reconcile_attempt_count, policy=ExecutionPolicy(), now=_now())
         artifact = None
@@ -821,6 +840,12 @@ async def reconcile_execution_message(payload: dict) -> None:
                     observation.state, provider_event_id=observation.provider_event_id,
                     evidence_ref=call.evidence_ref, raw_state=observation.raw_state,
                 )
+            structured_artifacts = []
+            if decision.action is ReconcileAction.CLOSE and decision.call_outcome is CallOutcome.COMPLETED:
+                structured_artifacts = _persist_external_artifacts(db, run, call, payload.get("artifacts") or [])
+                if artifact is None and structured_artifacts:
+                    artifact = structured_artifacts[0]
+                    call.evidence_ref = f"artifact://{artifact.id}"
             if decision.action is ReconcileAction.CLOSE and run.status == RunStatus.WAITING_EXTERNAL.value:
                 remaining = db.scalar(select(ExecutionCall.id).where(
                     ExecutionCall.run_id == run.id,
@@ -833,7 +858,7 @@ async def reconcile_execution_message(payload: dict) -> None:
                     append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "external_result", "actor": "reconciler", "version": run.version}, actor={"kind": "reconciler"}, command_id=f"reconcile-wake:{run.id}:{run.version}", idempotency_key=f"reconcile-wake:{run.id}:{run.version}")
                     _add_outbox(db, run, command_id=f"reconcile-dispatch:{run.id}:{run.version}", message_ref=f"run://{run.id}")
         key = provider_event_id or str(call.reconcile_attempt_count)
-        append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": status.value, "outcome": outcome.value, "evidence_ref": observation.evidence_ref, "connector_id": connector_id, "provider_event_id": provider_event_id}, actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:{key}", idempotency_key=f"reconcile:{call.id}:{key}", connector_id=connector_id, provider_event_id=provider_event_id)
+        append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": status.value, "outcome": outcome.value, "evidence_ref": observation.evidence_ref, "connector_id": connector_id, "provider_event_id": provider_event_id, "provider_payload_hash": provider_payload_hash}, actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:{key}", idempotency_key=f"reconcile:{call.id}:{key}", connector_id=connector_id, provider_event_id=provider_event_id)
         if artifact is not None:
             append_event(
                 db, run, event_type="assistant.message",
@@ -841,10 +866,71 @@ async def reconcile_execution_message(payload: dict) -> None:
                 actor={"kind": "connector"}, command_id=f"reconcile:{artifact.id}:message", idempotency_key=f"reconcile-artifact:{artifact.id}", connector_id=connector_id,
             )
         db.commit()
+        return True
     except Exception:
         db.rollback(); logger.exception("kernel reconciliation failed for run=%s call=%s", run_id, call_id)
+        return False
     finally:
         db.close()
+
+
+def _persist_external_artifacts(db, run: ExecutionRun, call: ExecutionCall, values: list) -> list[Artifact]:
+    """Persist provider-declared structured Artifacts with bounded inline data."""
+    if not isinstance(values, list):
+        raise ValueError("external artifacts must be a list")
+    if len(values) > 32:
+        raise ValueError("external artifact count exceeds limit")
+    created: list[Artifact] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ValueError("external artifact must be an object")
+        kind = str(value.get("kind") or "external.artifact")[:64]
+        mime_type = str(value.get("mime_type") or "application/json")[:255]
+        raw = value.get("content", value.get("data"))
+        inline = None
+        storage_ref = str(value.get("storage_ref") or "")
+        if raw is not None:
+            inline = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, sort_keys=True)
+            if len(inline.encode("utf-8")) > 1024 * 1024:
+                raise ValueError("external artifact exceeds inline size limit")
+            storage_ref = f"inline://{run.id}/{call.id}/{index}"
+        if not storage_ref:
+            raise ValueError("external artifact requires content or storage_ref")
+        computed_checksum = _checksum(inline) if inline is not None else ""
+        checksum = str(value.get("checksum") or computed_checksum)
+        if not checksum:
+            raise ValueError("external artifact requires checksum")
+        if inline is not None and checksum != computed_checksum:
+            raise ValueError("external artifact checksum mismatch")
+        inline_verified = inline is not None
+        artifact = Artifact(
+            owner_id=run.owner_id, run_id=run.id, call_id=call.id, kind=kind,
+            mime_type=mime_type, size=len(inline.encode("utf-8")) if inline is not None else int(value.get("size") or 0),
+            checksum=checksum, storage_ref=storage_ref, inline_content=inline,
+            status="complete" if inline_verified else "declared", integrity_status="verified" if inline_verified else "pending",
+            business_status="success", visibility=str(value.get("visibility") or "owner")[:16],
+            provenance_ref=f"connector:{call.id}:artifact:{index}",
+        )
+        db.add(artifact)
+        db.flush()
+        append_event(
+            db, run, event_type="artifact.declared",
+            payload={"artifact_id": artifact.id, "kind": artifact.kind, "mime_type": artifact.mime_type,
+                     "size": artifact.size, "checksum": artifact.checksum, "storage_ref": artifact.storage_ref,
+                     "visibility": artifact.visibility},
+            actor={"kind": "connector"}, command_id=f"artifact:{artifact.id}:declare",
+            idempotency_key=f"artifact:{call.id}:{index}:declare", connector_id=call.target_ref,
+        )
+        if inline_verified:
+            append_event(
+                db, run, event_type="artifact.completed",
+                payload={"artifact_id": artifact.id, "checksum": artifact.checksum,
+                         "integrity_status": artifact.integrity_status, "business_status": artifact.business_status},
+                actor={"kind": "connector"}, command_id=f"artifact:{artifact.id}:complete",
+                idempotency_key=f"artifact:{call.id}:{index}:complete", connector_id=call.target_ref,
+            )
+        created.append(artifact)
+    return created
 
 
 def _append_manual_attention(db, run: ExecutionRun, call: ExecutionCall, observed_state: str) -> None:

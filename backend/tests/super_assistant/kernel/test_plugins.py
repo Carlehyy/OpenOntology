@@ -54,23 +54,24 @@ def test_plugin_catalog_drain_stops_new_calls_and_waits_for_active_calls():
 
 
 @pytest.mark.asyncio
-async def test_process_plugin_host_uses_json_lines_and_rejects_capability_expansion():
+async def test_process_plugin_host_uses_json_lines_and_rejects_capability_expansion(monkeypatch):
     import shlex
     import sys
 
     script = (
         "import json,sys; "
-        "[print(json.dumps({'ok':True,'key':'user.echo','revision':1,'protocol':'plugin.v1','secret':__import__('os').environ.get('PLUGIN_SECRET')}), flush=True) "
+        "[print(json.dumps({'ok':True,'key':'user.echo','revision':1,'protocol':'plugin.v1','secret':__import__('os').environ.get('PLUGIN_SECRET'),'leak':__import__('os').environ.get('PLUGIN_LEAK')}), flush=True) "
         "for line in sys.stdin if json.loads(line).get('op') == 'health']"
     )
     manifest = PluginManifest(
         key="user.echo", revision=1,
         entrypoint=f"{sys.executable} -c {shlex.quote(script)}",
-        trust_level=TrustLevel.VERIFIED,
+        trust_level=TrustLevel.VERIFIED, secret_refs=("PLUGIN_SECRET",),
     )
-    host = ProcessPluginHost(manifest, secret_env={"PLUGIN_SECRET": "short-lived"})
+    monkeypatch.setenv("PLUGIN_LEAK", "must-not-cross-plugin-boundary")
+    host = ProcessPluginHost(manifest, secret_env={"PLUGIN_SECRET": "short-lived", "PLUGIN_LEAK": "wrong"})
     result = await host.health()
-    assert result == {"ok": True, "key": "user.echo", "revision": 1, "protocol": "plugin.v1", "secret": "short-lived"}
+    assert result == {"ok": True, "key": "user.echo", "revision": 1, "protocol": "plugin.v1", "secret": "short-lived", "leak": None}
     await host.stop()
 
     bad_script = "import sys; print('{\\\"capabilities\\\":[]}'); sys.stdout.flush()"

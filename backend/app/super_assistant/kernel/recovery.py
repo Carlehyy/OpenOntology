@@ -7,12 +7,14 @@ in the NATS executor.
 from __future__ import annotations
 
 from datetime import timedelta, timezone
+import hashlib
+import json
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .contracts import RunStatus
-from .models import ExecutionCall, ExecutionRun
+from .models import Approval, Artifact, ExecutionCall, ExecutionEvent, ExecutionRun, InboxItem
 from .policies import ChildResult, ChildStatus, ExecutionPolicy, JoinDecision, JoinPolicy, decide_child_join
 from .reconciler import decide_run_timeout, should_recover_run
 from .store import _add_outbox, _now, acquire_lease, append_event
@@ -24,6 +26,86 @@ _UNRESOLVED = {"offered", "dispatched", "running", "waiting_external", "cancel_r
 
 def _utc(value):
     return value if value is None or value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def expire_inbox_once(db: Session, *, limit: int = 100) -> int:
+    """Expire unanswered questions/approvals and apply their frozen policy.
+
+    A question may be re-asked once with a fresh inbox row.  The second expiry
+    and every approval expiry fail the owning Run; no expired item is consumed
+    by a later worker.  All transitions are append-only kernel facts.
+    """
+    now = _now()
+    rows = db.scalars(select(InboxItem).where(
+        InboxItem.status.in_(("pending", "claimed")),
+        InboxItem.expires_at.is_not(None),
+        InboxItem.expires_at <= now,
+    ).order_by(InboxItem.expires_at, InboxItem.id).limit(limit).with_for_update(skip_locked=True)).all()
+    changed = 0
+    for item in rows:
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == item.run_id).with_for_update())
+        if run is None or item.status not in {"pending", "claimed"}:
+            continue
+        item.status = "expired"
+        item.consumed_at = now
+        item.claim_token = None
+        item.claim_expires_at = None
+        append_event(
+            db, run, event_type="inbox.expired",
+            payload={
+                "inbox_id": item.id, "kind": item.kind,
+                "target_ref": item.target_ref or item.id,
+                "question_id": item.question_id,
+                "question_expires_at": item.expires_at.isoformat() if item.expires_at else now.isoformat(),
+                "expiry_policy": item.expiry_policy or "fail_run",
+                "accepted_at": item.accepted_at.isoformat() if item.accepted_at else now.isoformat(),
+            }, actor={"kind": "system"}, command_id=f"inbox-expired:{item.id}",
+            idempotency_key=f"inbox-expired:{item.id}",
+        )
+        if item.approval_id:
+            approval = db.scalar(select(Approval).where(Approval.id == item.approval_id).with_for_update())
+            if approval is not None and approval.status == "pending":
+                approval.status = "expired"
+                append_event(
+                    db, run, event_type="approval.expired",
+                    payload={"approval_id": approval.id, "reason": "ttl", "actor": "system", "occurred_at": now.isoformat()},
+                    actor={"kind": "system"}, command_id=f"approval-expired:{approval.id}",
+                    idempotency_key=f"approval-expired:{approval.id}",
+                )
+        if run.status in _TERMINAL:
+            changed += 1
+            continue
+        if item.kind == "question_answer" and item.expiry_policy == "reask_once" and not (item.payload or {}).get("_reasked"):
+            # Preserve the original question while marking the retry in the
+            # payload, so a second expiration deterministically fails the Run.
+            deadline = _utc(run.deadline)
+            retry = InboxItem(
+                run_id=run.id, kind=item.kind, priority=item.priority, status="pending",
+                question_id=item.question_id, target_ref=item.target_ref,
+                payload={**(item.payload or {}), "_reasked": True}, source="system",
+                expires_at=min(deadline, now + timedelta(minutes=30)) if deadline else now + timedelta(minutes=30),
+                expiry_policy="fail_run", accepted_at=now,
+                idempotency_key=f"{item.id}:reask",
+            )
+            db.add(retry); db.flush()
+            append_event(
+                db, run, event_type="inbox.appended",
+                payload={"inbox_id": retry.id, "kind": retry.kind, "target_ref": retry.target_ref or retry.id, "expiry_policy": retry.expiry_policy},
+                actor={"kind": "system"}, command_id=f"inbox-reask:{item.id}", idempotency_key=f"inbox-reask:{item.id}",
+            )
+        else:
+            before = run.status
+            run.status = RunStatus.FAILED.value
+            run.wait_reason = "input_expired"
+            run.version += 1
+            append_event(
+                db, run, event_type="run.status_changed",
+                payload={"from": before, "to": run.status, "reason": "inbox_expired", "actor": "system", "version": run.version},
+                actor={"kind": "system"}, command_id=f"inbox-fail:{item.id}", idempotency_key=f"inbox-fail:{item.id}",
+            )
+        changed += 1
+    db.commit()
+    return changed
 
 
 def expire_due_runs_once(db: Session, *, policy: ExecutionPolicy | None = None, limit: int = 100) -> int:
@@ -122,9 +204,67 @@ def join_ready_parents_once(db: Session, *, limit: int = 100) -> int:
         required_ids = set(parent.required_child_ids or [])
         for child_id in joined_ids:
             required = child_id in required_ids
+            child = next((candidate for candidate in children if candidate.id == child_id), None)
+            if child is not None:
+                _merge_child_result(db, parent, child)
             append_event(db, parent, event_type="run.child_joined", payload={"parent_run_id": parent.id, "child_run_id": child_id, "join_policy": parent.join_policy, "required": required}, actor={"kind": "system"}, command_id=f"join:{parent.id}:{parent.version}:{child_id}", idempotency_key=f"join:{parent.id}:{parent.version}:{child_id}")
         append_event(db, parent, event_type="run.status_changed", payload={"from": before, "to": parent.status, "reason": "child_join", "actor": "system", "version": parent.version}, actor={"kind": "system"}, command_id=f"join-status:{parent.id}:{parent.version}", idempotency_key=f"join-status:{parent.id}:{parent.version}")
         _add_outbox(db, parent, command_id=f"join-dispatch:{parent.id}:{parent.version}", message_ref=f"run://{parent.id}")
         changed += 1
     db.commit()
     return changed
+
+
+def _merge_child_result(db: Session, parent: ExecutionRun, child: ExecutionRun) -> None:
+    """Materialize a bounded child-result manifest in the parent context.
+
+    Parent activation must be able to reason over a completed child without
+    opening the child Run's private event stream.  The manifest references all
+    child Artifacts and embeds only small inline payloads; object-backed
+    content remains addressable through its artifact URI and ownership checks.
+    The provenance marker makes repeated recovery scans idempotent.
+    """
+    provenance = f"child-run:{child.id}:v{child.version}"
+    if db.scalar(select(Artifact).where(Artifact.run_id == parent.id, Artifact.provenance_ref == provenance)) is not None:
+        return
+    artifacts = db.scalars(select(Artifact).where(Artifact.run_id == child.id).order_by(Artifact.id)).all()
+    entries = []
+    for artifact in artifacts:
+        entry = {
+            "artifact_id": artifact.id,
+            "kind": artifact.kind,
+            "mime_type": artifact.mime_type,
+            "size": artifact.size,
+            "checksum": artifact.checksum,
+            "storage_ref": artifact.storage_ref,
+            "business_status": artifact.business_status,
+        }
+        if artifact.inline_content is not None and len(artifact.inline_content.encode("utf-8")) <= 64 * 1024:
+            entry["inline_content"] = artifact.inline_content
+        entries.append(entry)
+    content = json.dumps({"child_run_id": child.id, "status": child.status, "artifacts": entries}, ensure_ascii=False, sort_keys=True)
+    artifact = Artifact(
+        owner_id=parent.owner_id, run_id=parent.id, kind="child.result",
+        mime_type="application/json", size=len(content.encode("utf-8")),
+        checksum="sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        storage_ref=f"inline://{parent.id}/{provenance}", inline_content=content,
+        status="complete", integrity_status="verified", business_status="success" if child.status == RunStatus.COMPLETED.value else "failed",
+        visibility="owner", provenance_ref=provenance,
+    )
+    db.add(artifact)
+    db.flush()
+    append_event(
+        db, parent, event_type="artifact.declared",
+        payload={"artifact_id": artifact.id, "kind": artifact.kind, "mime_type": artifact.mime_type,
+                 "size": artifact.size, "checksum": artifact.checksum, "storage_ref": artifact.storage_ref,
+                 "visibility": artifact.visibility},
+        actor={"kind": "system"}, command_id=f"child-artifact:{artifact.id}:declare",
+        idempotency_key=f"child-artifact:{provenance}:declare",
+    )
+    append_event(
+        db, parent, event_type="artifact.completed",
+        payload={"artifact_id": artifact.id, "checksum": artifact.checksum,
+                 "integrity_status": artifact.integrity_status, "business_status": artifact.business_status},
+        actor={"kind": "system"}, command_id=f"child-artifact:{artifact.id}:complete",
+        idempotency_key=f"child-artifact:{provenance}:complete",
+    )

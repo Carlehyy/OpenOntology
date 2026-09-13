@@ -79,12 +79,13 @@ def _poll_external_calls_once() -> None:
 
 def _drain() -> None:
     from .outbox import publish_due_once, recover_expired_claims
-    from .recovery import expire_due_runs_once, join_ready_parents_once, recover_stuck_runs_once
+    from .recovery import expire_due_runs_once, expire_inbox_once, join_ready_parents_once, recover_stuck_runs_once
 
     db = SessionLocal()
     try:
         recover_expired_claims(db)
         expire_due_runs_once(db)
+        expire_inbox_once(db)
         recover_stuck_runs_once(db)
         join_ready_parents_once(db)
         publish_due_once(db, batch_size=20)

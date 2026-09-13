@@ -554,6 +554,24 @@ def test_claim_next_task_is_exclusive(db, admin_user):
     assert second is None  # 已认领不再派发
 
 
+def test_kernel_pull_task_is_idempotent_and_reports_claimed_as_unknown(db, admin_user):
+    row = _add_pull_agent(db, admin_user.id, key="remote.kernel-pull")
+    first = remote_agent_service.enqueue_kernel_task(
+        db, row.id, "call-1", "研究项目", "session-1", 60,
+    )
+    second = remote_agent_service.enqueue_kernel_task(
+        db, row.id, "call-1", "研究项目", "session-1", 60,
+    )
+    assert first["remote_task_ref"] == second["remote_task_ref"]
+    assert db.query(SuperAssistantRemoteAgentTask).count() == 1
+    claimed = remote_agent_service.claim_next_task(db, row.id)
+    assert claimed is not None
+    observed = remote_agent_service.query_kernel_task(db, row.id, first["remote_task_ref"])
+    assert observed["status"] == "running"
+    cancelled = remote_agent_service.cancel_kernel_task(db, row.id, first["remote_task_ref"])
+    assert cancelled["status"] == "unknown"
+
+
 def test_task_gc_prunes_only_past_retention(db, admin_user, monkeypatch):
     from datetime import timedelta
 

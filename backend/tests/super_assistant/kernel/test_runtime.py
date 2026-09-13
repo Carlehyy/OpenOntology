@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from tests.conftest import TestSession
 
-from app.super_assistant.models import SuperAssistantConversation, SuperAssistantMcpServer
+from app.super_assistant.models import SuperAssistantConversation, SuperAssistantMcpServer, SuperAssistantRemoteAgent, SuperAssistantRemoteAgentTask
 from app.super_assistant.kernel.models import Artifact, ExecutionEvent, ExecutionRun
 from app.super_assistant.kernel.store import create_run
 from app.super_assistant.kernel import runtime
@@ -178,6 +178,34 @@ def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, m
     assert external.outcome == "completed"
     artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
     assert artifact.inline_content == "远程研究完成"
+
+
+def test_kernel_resolves_rap_pull_agent_as_idempotent_external_task(db, monkeypatch):
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="委派回连助手")
+    agent = SuperAssistantRemoteAgent(
+        owner_id=owner.id, key=f"remote.pull_{uuid.uuid4().hex[:8]}", label="回连助手",
+        description="pull", endpoint=None, mode="pull", enabled=True,
+        timeout_seconds=60, agent_key_hash=f"hash-{uuid.uuid4().hex}",
+    )
+    db.add(agent); db.commit()
+    call = SimpleNamespace(target_ref=agent.id, capability_revision=1)
+    connector = runtime._resolve_external_connector(db, run, call)
+    assert connector is not None
+    assert connector.descriptor().supports_query_status is True
+    db.commit()  # the pull callback uses a separate worker session
+    result = asyncio.run(connector.invoke(
+        run_id=run.id, call_id="call-pull-1",
+        input_ref='{"message":"执行回连任务","session_ref":null}', deadline=None,
+    ))
+    assert result["status"] == "running"
+    assert result["remote_task_ref"].startswith("rap-pull:")
+    assert db.query(SuperAssistantRemoteAgentTask).count() == 1
+    duplicate = asyncio.run(connector.invoke(
+        run_id=run.id, call_id="call-pull-1",
+        input_ref='{"message":"执行回连任务","session_ref":null}', deadline=None,
+    ))
+    assert duplicate["remote_task_ref"] == result["remote_task_ref"]
+    assert db.query(SuperAssistantRemoteAgentTask).count() == 1
 
 
 def test_kernel_external_async_result_is_reconciled_after_remote_acceptance(db, monkeypatch):

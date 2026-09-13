@@ -28,7 +28,7 @@ def persist_capability_revision(
         "trust_level": trust_level.value, "permissions": permissions or [],
         "input_schema": {}, "output_schema": {}, "side_effect_class": side_effect_class,
         "supports_stream": descriptor.supports_stream, "supports_cancel": descriptor.supports_cancel,
-        "supports_approval": False, "supports_artifact": descriptor.supports_artifact,
+        "supports_approval": descriptor.supports_approval, "supports_artifact": descriptor.supports_artifact,
         "supports_query_status": descriptor.supports_query_status,
         "workspace_scope": list(workspace_scope or []),
         "network_scope": list(network_scope or []),

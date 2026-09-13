@@ -3,9 +3,9 @@ from datetime import timedelta
 
 from app.models.user import User
 from app.super_assistant.models import SuperAssistantConversation
-from app.super_assistant.kernel.models import ExecutionCall
+from app.super_assistant.kernel.models import ExecutionCall, ExecutionEvent, InboxItem
 from app.super_assistant.kernel.policies import ExecutionPolicy
-from app.super_assistant.kernel.recovery import expire_due_runs_once, join_ready_parents_once, recover_stuck_runs_once
+from app.super_assistant.kernel.recovery import expire_due_runs_once, expire_inbox_once, join_ready_parents_once, recover_stuck_runs_once
 from app.super_assistant.kernel.contracts import CancelReason
 from app.super_assistant.kernel.store import acquire_lease, cancel_run, create_run, renew_lease
 
@@ -90,3 +90,28 @@ def test_user_cancel_has_grace_deadline_and_scheduler_closes_it(db):
     assert expire_due_runs_once(db) == 1
     db.refresh(run)
     assert run.status == "cancelled"
+
+
+def test_expired_question_is_reasked_once_then_fails_run(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="question", idempotency_key="question")
+    run.status = "waiting_input"
+    run.wait_reason = "question"
+    db.add(InboxItem(
+        run_id=run.id, kind="question_answer", priority=30, status="pending",
+        question_id="q1", target_ref="q1", payload={"question": "需要什么？"}, source="system",
+        expires_at=run.created_at - timedelta(seconds=1), expiry_policy="reask_once",
+        idempotency_key="question-wait",
+    ))
+    db.commit()
+    assert expire_inbox_once(db) == 1
+    db.refresh(run)
+    assert run.status == "waiting_input"
+    retry = db.query(InboxItem).filter(InboxItem.run_id == run.id, InboxItem.status == "pending").one()
+    assert retry.expiry_policy == "fail_run"
+    retry.expires_at = run.created_at - timedelta(seconds=1)
+    db.commit()
+    assert expire_inbox_once(db) == 1
+    db.refresh(run)
+    assert run.status == "failed"
+    assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.expired").count() == 2

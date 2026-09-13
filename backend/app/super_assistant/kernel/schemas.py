@@ -96,3 +96,14 @@ class RunSummary(KernelRequest):
     deadline: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class AgentCallbackRequest(KernelRequest):
+    """Authenticated kernel.v1 callback envelope for remote connectors."""
+
+    connector_id: str = Field(min_length=1, max_length=255)
+    request_id: str = Field(min_length=1, max_length=255)
+    provider_event_id: str = Field(min_length=1, max_length=255)
+    payload_hash: str = Field(min_length=64, max_length=128)
+    event_type: Literal["call.progress", "call.outcome_changed", "attempt.result"]
+    payload: dict[str, Any] = Field(default_factory=dict)

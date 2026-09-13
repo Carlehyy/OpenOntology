@@ -795,9 +795,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # （3 条路径）
     # kernel.v1 长任务 API 新增 runs 查询/控制/输入/审批/SSE/Artifact/Retry 共
     # 10 条路径、10 个操作；dispatch dead-letter 显式重放新增 1 条运维路径；
-    # process-plugin 持久化生命周期新增 4 条路径、5 个操作；旧路由仍保持原有语义并行存在。
-    assert len(paths) == 79
-    assert sum(len(item) for item in paths.values()) == 105
+    # process-plugin 持久化生命周期新增 4 条路径、5 个操作；Artifact 二进制下载
+    # 与 HMAC callback ingress 各新增 1 条路径/1 个操作，旧路由语义保持并行。
+    assert len(paths) == 81
+    assert sum(len(item) for item in paths.values()) == 107
     assert hashlib.sha256(payload).hexdigest() == (
-        "b182094888dffbe214579be61289737fc6d2e3f58360d5f43974f7a98cd3ecff"
+        "720f1e8dfefa0e7dea7bded30fe2baa46081c4cedf1bf2252638674b2ecae496"
     )
