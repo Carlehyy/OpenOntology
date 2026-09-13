@@ -94,6 +94,9 @@ def _freeze_capability(db: Session, row: SuperAssistantProcessPlugin, *, enabled
     persist_capability_revision(
         db, descriptor, source="process_plugin", trust_level=TrustLevel(row.trust_level),
         manifest_hash=row.manifest_hash, permissions=list(row.permissions or []),
+        workspace_scope=list(row.workspace_scope or []),
+        network_scope=list(row.network_scope or []),
+        secret_refs=list(row.secret_refs or []),
     )
     set_capability_revision_enabled(db, descriptor.key, descriptor.revision, enabled=enabled)
 
@@ -119,6 +122,10 @@ def list_process_plugins(db: Session, owner_id: str, *, include_uninstalled: boo
 
 
 def install_process_plugin(db: Session, owner_id: str, body: ProcessPluginCreate) -> SuperAssistantProcessPlugin:
+    # This route is the user installation boundary.  ``verified`` is reserved
+    # for a future platform-signed/admin flow and must not be user-selectable.
+    if body.trust_level != TrustLevel.USER_UNTRUSTED.value:
+        raise ProcessPluginValidationError("用户安装的进程插件必须标记为 user_untrusted")
     try:
         manifest = PluginManifest(
             key=capability_key(owner_id, body.key), revision=body.revision,

@@ -18,6 +18,9 @@ def persist_capability_revision(
     manifest_hash: str,
     permissions: list[str] | None = None,
     side_effect_class: str = "external_async",
+    workspace_scope: list[str] | None = None,
+    network_scope: list[str] | None = None,
+    secret_refs: list[str] | None = None,
 ) -> CapabilityRevision:
     existing = db.scalar(select(CapabilityRevision).where(CapabilityRevision.key == descriptor.key, CapabilityRevision.revision == descriptor.revision))
     values = {
@@ -27,7 +30,9 @@ def persist_capability_revision(
         "supports_stream": descriptor.supports_stream, "supports_cancel": descriptor.supports_cancel,
         "supports_approval": False, "supports_artifact": descriptor.supports_artifact,
         "supports_query_status": descriptor.supports_query_status,
-        "workspace_scope": [], "network_scope": [], "secret_refs": [], "enabled": True,
+        "workspace_scope": list(workspace_scope or []),
+        "network_scope": list(network_scope or []),
+        "secret_refs": list(secret_refs or []), "enabled": True,
     }
     if existing is not None:
         # ``enabled`` is the live authorization bit.  It is intentionally
