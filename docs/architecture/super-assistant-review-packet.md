@@ -246,7 +246,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。它们必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `103b674c`）
+## 13. 最新对抗式代码审查证据（提交 `3ff3ecb2`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
