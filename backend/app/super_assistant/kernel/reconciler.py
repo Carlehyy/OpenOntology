@@ -90,9 +90,28 @@ def decide_reconciliation(
     A terminal Run is immutable from the user's perspective.  A late provider
     callback is retained as evidence but cannot reopen that Run.
     """
-    if run_status in {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.FAILED}:
-        return ReconcileDecision(ReconcileAction.IGNORE_LATE, call_status, call_outcome, reason="run already terminal")
     state = observation.state
+    if run_status in {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.FAILED}:
+        # A terminal Run is immutable, but an unresolved remote Call still
+        # needs to converge.  Cancellation/timeout may have happened before
+        # the provider accepted the work; retain the Call fact and keep
+        # polling/cancelling it without reopening the Run.
+        if call_status in {CallStatus.CLOSED}:
+            return ReconcileDecision(ReconcileAction.IGNORE_LATE, call_status, call_outcome, reason="call already terminal")
+        if state is RemoteState.COMPLETED:
+            return ReconcileDecision(ReconcileAction.CLOSE, CallStatus.CLOSED, CallOutcome.COMPLETED, reason="remote completed after run terminal")
+        if state is RemoteState.FAILED:
+            return ReconcileDecision(ReconcileAction.CLOSE, CallStatus.CLOSED, CallOutcome.FAILED, reason="remote failed after run terminal")
+        if state is RemoteState.CANCELLED:
+            return ReconcileDecision(ReconcileAction.CLOSE, CallStatus.CLOSED, CallOutcome.CANCELLED_CONFIRMED, reason="remote cancellation confirmed after run terminal")
+        if state is RemoteState.RUNNING:
+            return ReconcileDecision(
+                ReconcileAction.WAIT, CallStatus.WAITING_EXTERNAL,
+                CallOutcome.REMOTE_RUNNING,
+                next_reconcile_at=reconcile_delay(now=now, attempt_count=reconcile_attempt_count, policy=policy),
+                reason="remote still running after run terminal",
+            )
+        return ReconcileDecision(ReconcileAction.MANUAL_ATTENTION, CallStatus.RECONCILING, CallOutcome.OUTCOME_UNKNOWN, reason="remote outcome unknown after run terminal")
     if state is RemoteState.COMPLETED:
         return ReconcileDecision(ReconcileAction.CLOSE, CallStatus.CLOSED, CallOutcome.COMPLETED, reason="remote completed")
     if state is RemoteState.FAILED:

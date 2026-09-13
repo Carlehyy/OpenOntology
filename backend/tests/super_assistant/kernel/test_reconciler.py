@@ -43,6 +43,18 @@ def test_reconcile_completion_and_late_result_are_terminally_safe():
     assert late.action is ReconcileAction.IGNORE_LATE
 
 
+def test_terminal_run_still_converges_unresolved_remote_cancellation():
+    decision = decide_reconciliation(
+        observation=RemoteObservation(RemoteState.CANCELLED), run_status=RunStatus.EXPIRED,
+        call_status=CallStatus.CANCEL_REQUESTED, call_outcome=CallOutcome.OUTCOME_UNKNOWN,
+        side_effect=SideEffectClass.EXTERNAL_ASYNC, safe_to_retry=False,
+        reconcile_attempt_count=1, policy=ExecutionPolicy(), now=datetime.now(timezone.utc),
+    )
+    assert (decision.action, decision.call_status, decision.call_outcome) == (
+        ReconcileAction.CLOSE, CallStatus.CLOSED, CallOutcome.CANCELLED_CONFIRMED,
+    )
+
+
 def test_unknown_external_result_requires_manual_attention_after_budget():
     decision = decide_reconciliation(
         observation=RemoteObservation(RemoteState.UNKNOWN), run_status=RunStatus.WAITING_EXTERNAL,

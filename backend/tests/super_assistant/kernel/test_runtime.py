@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from datetime import timezone
 from types import SimpleNamespace
 
 from tests.conftest import TestSession
@@ -205,6 +206,17 @@ def test_kernel_hub_delegation_creates_bound_child_run(db, monkeypatch):
     assert payload["child_run_id"] in (db.get(ExecutionRun, run.id).required_child_ids or [])
 
 
+def test_kernel_exploration_delegation_requires_binding_before_child_creation(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="业务澄清")
+    result = runtime._invoke_hub_delegation(
+        db, run, {"assistant": "exploration", "task": "梳理订单流程", "context": {}},
+    )
+    payload = __import__("json").loads(result)
+    assert payload["status"] == "needs_input"
+    assert payload["reason"] == "delegation_binding_required"
+    assert db.query(ExecutionRun).filter(ExecutionRun.parent_run_id == run.id).count() == 0
+
+
 def test_kernel_hub_child_result_is_merged_into_parent(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派任务")
     result = runtime._invoke_hub_delegation(db, run, {"assistant": "ontology_agent", "task": "分析本体"})
@@ -392,7 +404,10 @@ def test_external_result_after_cancel_preserves_remote_ref_for_cancellation(db, 
     db.expire_all(); db.refresh(external)
     assert db.get(ExecutionRun, run.id).status == "cancel_requested"
     assert external.status == "waiting_external" and external.remote_task_ref == "remote-42"
-    assert external.next_reconcile_at is not None and external.next_reconcile_at <= runtime._now()
+    observed_reconcile_at = external.next_reconcile_at
+    if observed_reconcile_at is not None and observed_reconcile_at.tzinfo is None:
+        observed_reconcile_at = observed_reconcile_at.replace(tzinfo=timezone.utc)
+    assert observed_reconcile_at is not None and observed_reconcile_at <= runtime._now()
     assert db.query(runtime.ExecutionAttempt).filter_by(call_id=external.id).one().finished_at is not None
 
 

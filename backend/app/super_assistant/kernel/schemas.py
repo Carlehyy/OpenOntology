@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
 
@@ -107,3 +108,13 @@ class AgentCallbackRequest(KernelRequest):
     payload_hash: str = Field(min_length=64, max_length=128)
     event_type: Literal["call.progress", "call.outcome_changed", "attempt.result"]
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def bounded_payload(self):
+        # Callback payloads are authenticated but still remote input. Bound
+        # them before reconciliation so an authorized connector cannot use a
+        # signed event as an unbounded memory/transaction DoS vector.
+        size = len(json.dumps(self.payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        if size > 64 * 1024:
+            raise ValueError("callback payload exceeds 64 KiB; store large content as an Artifact reference")
+        return self

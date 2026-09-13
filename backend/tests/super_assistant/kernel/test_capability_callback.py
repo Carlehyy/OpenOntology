@@ -71,3 +71,13 @@ def test_hmac_callback_ingress_is_authenticated(db, monkeypatch):
         return True
     monkeypatch.setattr("app.super_assistant.kernel.runtime.reconcile_execution_message", reconcile)
     assert receive_agent_callback(run.id, call.id, body, db, str(timestamp), signature)["accepted"] is True
+
+
+def test_callback_payload_is_bounded_before_authentication_work():
+    payload = {"content": "x" * (64 * 1024)}
+    payload_hash = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with pytest.raises(ValueError, match="64 KiB"):
+        AgentCallbackRequest(
+            connector_id="remote-1", request_id="request-1", provider_event_id="event-1",
+            payload_hash=payload_hash, event_type="call.progress", payload=payload,
+        )

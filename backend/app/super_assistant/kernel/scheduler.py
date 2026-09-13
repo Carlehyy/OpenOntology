@@ -24,10 +24,6 @@ def _poll_external_calls_once() -> None:
     from .runtime import _resolve_external_connector, reconcile_execution_message
     from .store import _now
 
-    terminal = {
-        RunStatus.COMPLETED.value, RunStatus.FAILED.value,
-        RunStatus.CANCELLED.value, RunStatus.EXPIRED.value,
-    }
     db = SessionLocal()
     try:
         now = _now()
@@ -37,14 +33,22 @@ def _poll_external_calls_once() -> None:
         ).order_by(ExecutionCall.next_reconcile_at, ExecutionCall.id).limit(50)).all()
         for call in calls:
             run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == call.run_id))
-            if run is None or run.status in terminal or not call.remote_task_ref:
+            # A cancelled/expired Run can still own an unresolved remote Call.
+            # Keep polling those Calls after local termination so a provider
+            # cancellation can be confirmed and no remote side effect is
+            # abandoned merely because the parent Run reached its terminal
+            # projection.
+            if run is None or not call.remote_task_ref:
                 continue
             connector = _resolve_external_connector(db, run, call)
             if connector is None:
                 db.rollback()
                 continue
             descriptor = connector.descriptor()
-            cancelling = run.status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}
+            cancelling = (
+                call.status == CallStatus.CANCEL_REQUESTED.value
+                or run.status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}
+            )
             if cancelling and not descriptor.supports_cancel:
                 db.rollback()
                 continue

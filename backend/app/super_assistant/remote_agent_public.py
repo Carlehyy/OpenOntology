@@ -118,17 +118,26 @@ async def next_task(
     agent = await run_in_threadpool(_agent_from_bearer, db, authorization)
     if not _agent_limiter.allow(f"agent:{agent.id}"):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+    agent_id = agent.id
+    agent_timeout_seconds = agent.timeout_seconds
+    agent_rap_version = agent.rap_version or 1
     await run_in_threadpool(remote_agent_service.touch_agent, db, agent)
+    # The request-scoped dependency would otherwise keep its checked-out DB
+    # connection for the entire 30s long-poll window.  All subsequent claims
+    # use short-lived SessionLocal instances, so end the auth transaction
+    # before sleeping; rollback returns the connection without detaching the
+    # session object used by dependency overrides and tests.
+    db.rollback()
     deadline = time.monotonic() + min(wait, _MAX_WAIT_SECONDS)
     while True:
-        task = await run_in_threadpool(_try_claim, agent.id)
+        task = await run_in_threadpool(_try_claim, agent_id)
         if task is not None:
             return RemoteAgentTaskNextOut(
                 task_id=task.id,
                 message=task.message,
                 session_ref=task.session_ref,
-                timeout_seconds=agent.timeout_seconds,
-                rap_version=agent.rap_version or 1,
+                timeout_seconds=agent_timeout_seconds,
+                rap_version=agent_rap_version,
             )
         if time.monotonic() >= deadline:
             return Response(status_code=204)

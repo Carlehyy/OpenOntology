@@ -356,6 +356,13 @@ async def process_execution_message(payload: dict) -> None:
                             delegate_payload = {}
                         if delegate_payload.get("status") == "queued" and delegate_payload.get("child_run_id"):
                             wait = {"kind": "child_run", "reason": "delegation", "target_ref": str(delegate_payload["child_run_id"]), "input_ref": delegate_result}
+                        elif delegate_payload.get("status") == "needs_input":
+                            wait = {
+                                "kind": "question_answer",
+                                "reason": str(delegate_payload.get("reason") or "delegation_binding_required"),
+                                "question_id": str(delegate_payload.get("question_id") or uuid.uuid4().hex),
+                                "question": str(delegate_payload.get("question") or "请补充委派所需的业务绑定信息"),
+                            }
                         handled = True; break
                 if not handled:
                     tool_call = tool_calls[0]
@@ -1313,10 +1320,40 @@ def _invoke_hub_delegation(db, run: ExecutionRun, arguments: dict) -> str:
     task = str(arguments.get("task") or "").strip()
     if not assistant_key or not task:
         return json.dumps({"status": "failed", "error": "assistant and task are required"}, ensure_ascii=False)
+    raw_context = arguments.get("context") if isinstance(arguments.get("context"), dict) else {}
+    context = dict(raw_context)
+    if assistant_key == "exploration":
+        # Business exploration is the one Hub assistant whose delegated path
+        # has a mandatory editable ontology draft.  Validate before creating
+        # the child Run, otherwise a missing prerequisite would leave an
+        # unbound child session behind and only fail much later in the adapter.
+        from app.auth.models import User
+        from app.assistant_hub.adapters.exploration import validate_delegated_binding
+        user = db.get(User, run.owner_id)
+        try:
+            normalized = validate_delegated_binding(db, user, context) if user is not None else None
+        except ValueError as exc:
+            return json.dumps({
+                "status": "needs_input",
+                "reason": "delegation_binding_required",
+                "question_id": uuid.uuid4().hex,
+                "question": str(exc),
+                "assistant": assistant_key,
+            }, ensure_ascii=False)
+        if normalized is None:
+            return json.dumps({
+                "status": "needs_input",
+                "reason": "delegation_binding_required",
+                "question_id": uuid.uuid4().hex,
+                "question": "请先选择可写的本体及 editing draft 版本，再委派业务探索。",
+                "assistant": assistant_key,
+            }, ensure_ascii=False)
+        context.update(normalized)
+        context["delegated_kernel"] = True
     binding = {
         "binding_mode": "assistant_child", "assistant_key": assistant_key,
         "session": str(arguments.get("session") or "resume"),
-        "context": arguments.get("context") if isinstance(arguments.get("context"), dict) else {},
+        "context": context,
     }
     try:
         child, replayed = create_run(
