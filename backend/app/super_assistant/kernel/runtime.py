@@ -36,7 +36,7 @@ from .models import (
     InboxItem,
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
-from .store import _now, acquire_lease, append_event, assert_lease
+from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +358,17 @@ async def reconcile_execution_message(payload: dict) -> None:
             call.manual_attention = decision.action is ReconcileAction.MANUAL_ATTENTION
             if call.manual_attention:
                 _append_manual_attention(db, run, call, observation.raw_state)
+            if decision.action is ReconcileAction.CLOSE and run.status == RunStatus.WAITING_EXTERNAL.value:
+                remaining = db.scalar(select(ExecutionCall.id).where(
+                    ExecutionCall.run_id == run.id,
+                    ExecutionCall.id != call.id,
+                    ExecutionCall.status.in_((CallStatus.WAITING_EXTERNAL.value, CallStatus.RECONCILING.value)),
+                ))
+                if remaining is None:
+                    before = run.status
+                    run.status, run.wait_reason, run.version = RunStatus.ACTIVE.value, None, run.version + 1
+                    append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "external_result", "actor": "reconciler", "version": run.version}, actor={"kind": "reconciler"}, command_id=f"reconcile-wake:{run.id}:{run.version}", idempotency_key=f"reconcile-wake:{run.id}:{run.version}")
+                    _add_outbox(db, run, command_id=f"reconcile-dispatch:{run.id}:{run.version}", message_ref=f"run://{run.id}")
         key = provider_event_id or str(call.reconcile_attempt_count)
         append_event(db, run, event_type="call.outcome_changed", payload={"status": status.value, "outcome": outcome.value, "evidence_ref": observation.evidence_ref, "connector_id": connector_id, "provider_event_id": provider_event_id}, actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:{key}", idempotency_key=f"reconcile:{call.id}:{key}", connector_id=connector_id, provider_event_id=provider_event_id)
         db.commit()
