@@ -38,6 +38,21 @@ def test_plugin_drain_must_precede_uninstall():
     catalog.uninstall("user.mail", 1)
 
 
+def test_plugin_catalog_drain_stops_new_calls_and_waits_for_active_calls():
+    catalog = PluginCatalog()
+    catalog.install(
+        PluginManifest(key="user.calendar", revision=1, entrypoint="plugin:main", trust_level=TrustLevel.VERIFIED),
+        host_capabilities=frozenset(),
+    )
+    catalog.enable("user.calendar", 1)
+    assert catalog.acquire_call("user.calendar", 1).active_calls == 1
+    catalog.start_drain("user.calendar", 1)
+    with pytest.raises(ContractError, match="not enabled"):
+        catalog.acquire_call("user.calendar", 1)
+    assert catalog.release_call("user.calendar", 1).active_calls == 0
+    catalog.uninstall("user.calendar", 1)
+
+
 @pytest.mark.asyncio
 async def test_process_plugin_host_uses_json_lines_and_rejects_capability_expansion():
     import shlex

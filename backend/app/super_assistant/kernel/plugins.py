@@ -69,6 +69,31 @@ class PluginCatalog:
         self._records[(key, revision)] = record
         return record
 
+    def acquire_call(self, key: str, revision: int) -> PluginRecord:
+        """Atomically admit a call only while the revision is enabled."""
+        record = self._get(key, revision)
+        if record.state is not PluginState.ENABLED:
+            raise ContractError("plugin revision is not enabled")
+        record = PluginRecord(record.manifest, record.state, record.active_calls + 1)
+        self._records[(key, revision)] = record
+        return record
+
+    def release_call(self, key: str, revision: int) -> PluginRecord:
+        record = self._get(key, revision)
+        if record.active_calls <= 0:
+            raise ContractError("plugin has no active call")
+        record = PluginRecord(record.manifest, record.state, record.active_calls - 1)
+        self._records[(key, revision)] = record
+        return record
+
+    def enable(self, key: str, revision: int) -> PluginRecord:
+        record = self._get(key, revision)
+        if record.state not in {PluginState.INSTALLED, PluginState.DISABLED}:
+            raise ContractError("plugin revision cannot be enabled")
+        record = PluginRecord(record.manifest, PluginState.ENABLED, record.active_calls)
+        self._records[(key, revision)] = record
+        return record
+
     def uninstall(self, key: str, revision: int) -> None:
         record = self._get(key, revision)
         if record.active_calls:
