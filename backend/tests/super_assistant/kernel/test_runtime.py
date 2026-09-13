@@ -8,6 +8,7 @@ from app.super_assistant.models import SuperAssistantConversation, SuperAssistan
 from app.super_assistant.kernel.models import Artifact, ExecutionEvent, ExecutionRun
 from app.super_assistant.kernel.store import create_run
 from app.super_assistant.kernel import runtime
+from app.super_assistant.kernel import scheduler as kernel_scheduler
 from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy
 from app.models.user import User
 
@@ -222,6 +223,48 @@ def test_kernel_external_async_result_is_reconciled_after_remote_acceptance(db, 
     assert db.get(ExecutionRun, run.id).status == "active"
     artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
     assert artifact.inline_content == "长任务完成"
+
+
+def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="定时查询 multica")
+    target = f"fake.external_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "后台执行"},
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "scheduler-external"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+
+    class PollConnector:
+        def descriptor(self):
+            return AgentDescriptor(
+                agent_id="fake-poll", key=target, revision=1, transport="multica",
+                session_policy=SessionPolicy.RESUMABLE, supports_query_status=True,
+            )
+
+        async def invoke(self, **kwargs):
+            return {"status": "running", "remote_task_ref": "poll-ref"}
+
+        async def query_status(self, **kwargs):
+            return {"status": "completed", "content": "轮询完成", "provider_event_id": "poll-1"}
+
+        async def cancel(self, **kwargs):
+            return {"status": "unsupported"}
+
+    runtime.connector_registry.register(PollConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "waiting_external"
+    monkeypatch.setattr(kernel_scheduler, "SessionLocal", TestSession)
+    asyncio.run(asyncio.sleep(0))
+    # Make the due time deterministic for the scheduler's synchronous poll.
+    db.refresh(external)
+    external.next_reconcile_at = runtime._now()
+    db.commit()
+    kernel_scheduler._poll_external_calls_once()
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "active"
+    assert db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one().inline_content == "轮询完成"
 
 
 def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):

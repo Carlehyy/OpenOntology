@@ -34,7 +34,7 @@ def _poll_external_calls_once() -> None:
         calls = db.scalars(select(ExecutionCall).where(
             ExecutionCall.status.in_((CallStatus.WAITING_EXTERNAL.value, CallStatus.RECONCILING.value)),
             (ExecutionCall.next_reconcile_at.is_(None)) | (ExecutionCall.next_reconcile_at <= now),
-        ).order_by(ExecutionCall.next_reconcile_at, ExecutionCall.created_at).limit(50)).all()
+        ).order_by(ExecutionCall.next_reconcile_at, ExecutionCall.id).limit(50)).all()
         for call in calls:
             run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == call.run_id))
             if run is None or run.status in terminal or not call.remote_task_ref:
