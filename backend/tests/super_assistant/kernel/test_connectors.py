@@ -196,3 +196,19 @@ async def test_remote_direct_response_is_bounded_before_json_materialization():
     )
     with pytest.raises(ContractError, match="256 KiB"):
         await connector.invoke(run_id="r1", call_id="c1", input_ref='{"message":"x"}', deadline=None)
+
+
+@pytest.mark.asyncio
+async def test_remote_direct_revalidates_endpoint_before_network_request(monkeypatch):
+    from app.super_assistant.mcp_client import McpClientError
+
+    def reject(url):
+        raise McpClientError("private address")
+
+    monkeypatch.setattr("app.super_assistant.mcp_client.validate_mcp_url", reject)
+    connector = RemoteAgentHttpConnector(
+        agent_id="remote-runtime-ssrf", key="remote.runtime_ssrf",
+        endpoint="https://agent.example/run",
+    )
+    with pytest.raises(ContractError, match="endpoint rejected"):
+        await connector.invoke(run_id="r1", call_id="c1", input_ref='{"message":"x"}', deadline=None)

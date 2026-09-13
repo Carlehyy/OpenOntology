@@ -235,6 +235,17 @@ class RemoteAgentHttpConnector:
             if not isinstance(queued, Mapping) or not queued.get("remote_task_ref"):
                 raise ContractError("RAP pull enqueue did not return a remote task reference")
             return {"run_id": run_id, "call_id": call_id, **dict(queued)}
+        # Configuration-time validation is insufficient: an operator may have
+        # changed the persisted endpoint, and DNS may have changed since the
+        # capability revision was registered. Re-run the shared SSRF guard at
+        # the last point before a real network request. Injected transports
+        # are test seams and intentionally bypass DNS resolution.
+        if self.transport is None:
+            try:
+                from app.super_assistant.mcp_client import McpClientError, validate_mcp_url
+                validate_mcp_url(self.endpoint)
+            except McpClientError as exc:
+                raise ContractError(f"remote connector endpoint rejected: {exc}") from exc
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         timeout = max(1.0, float(self.timeout_seconds))
         if isinstance(deadline, datetime):
