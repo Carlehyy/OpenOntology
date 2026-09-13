@@ -38,6 +38,12 @@ stateDiagram-v2
     waiting_approval --> active
     waiting_external --> active
     waiting_retry --> active
+    waiting_input --> paused
+    waiting_approval --> paused
+    waiting_external --> paused
+    waiting_retry --> paused
+    waiting_external --> failed
+    waiting_retry --> failed
     waiting_input --> cancel_requested
     waiting_approval --> cancel_requested
     waiting_external --> cancel_requested
@@ -71,7 +77,7 @@ stateDiagram-v2
 - `cancelling`：本地编排正在收尾；
 - `completed`、`failed`、`cancelled`、`expired`：不可逆终态。
 
-等待状态不会锁住 Conversation。所有非终态都可以被取消、暂停或因明确截止时间进入 `expired`。如果 Run 中仍有其他独立工作可推进，外部 Call 等待不应把整个 Run 置为等待；只有没有可安全推进的工作时才进入 `waiting_*`。
+等待状态不会锁住 Conversation。所有非终态都可以被取消或因明确截止时间进入 `expired`；等待中的 Run 也可以被显式暂停，暂停后不会消费新的唤醒输入，直到用户恢复。若 Run 中仍有其他独立工作可推进，外部 Call 等待不应把整个 Run 置为等待；只有没有可安全推进的工作时才进入 `waiting_*`。
 
 Run 进入终态后不能重新打开。若外部迟到结果后来到达，只能作为关联 Call 和 Artifact 的新事实保存，不能恢复已取消的 Run。
 
