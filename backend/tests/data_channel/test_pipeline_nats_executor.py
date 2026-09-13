@@ -452,6 +452,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
             ("super_assistant.palace.consolidate", "super-assistant-palace-consolidate"),
             ("ontology.documents.published", "ontology-documents-published"),
             ("sa.execution.run.*", "sa-kernel-v1"),
+            ("sa.execution.call.*", "sa-call-v1"),
             ("sa.execution.reconcile", "sa-reconciler-v1"),
         ]
     assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:14])

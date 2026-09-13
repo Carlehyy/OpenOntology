@@ -8,6 +8,7 @@ from app.super_assistant.models import SuperAssistantConversation
 from app.super_assistant.kernel.models import Artifact, ExecutionEvent, ExecutionRun
 from app.super_assistant.kernel.store import create_run
 from app.super_assistant.kernel import runtime
+from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy
 from app.models.user import User
 
 
@@ -135,3 +136,44 @@ def test_kernel_runtime_materializes_external_wait_as_reconcilable_call(db, monk
     assert external.outcome == "remote_running"
     inbox = db.query(runtime.InboxItem).filter_by(run_id=run.id, kind="external_event").one()
     assert inbox.call_id == external.id
+
+
+def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派远程研究")
+    target = f"remote.test_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交远程任务", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "研究项目"},
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "external-dispatch"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+
+    class FakeConnector:
+        def descriptor(self):
+            return AgentDescriptor(
+                agent_id="fake-agent", key=target, revision=1, transport="rap.v1",
+                session_policy=SessionPolicy.RESUMABLE,
+            )
+
+        async def invoke(self, **kwargs):
+            assert kwargs["run_id"] == run.id
+            assert '"message": "研究项目"' in kwargs["input_ref"]
+            return {"status": "answered", "content": "远程研究完成"}
+
+        async def cancel(self, **kwargs):
+            return {"status": "unsupported"}
+
+        async def query_status(self, **kwargs):
+            return {"status": "unsupported"}
+
+    runtime.connector_registry.register(FakeConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+
+    db.expire_all()
+    persisted = db.get(ExecutionRun, run.id)
+    assert persisted.status == "active"
+    db.refresh(external)
+    assert external.status == "closed"
+    assert external.outcome == "completed"
+    artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
+    assert artifact.inline_content == "远程研究完成"

@@ -42,7 +42,12 @@ def publish_due_once(db: Session, *, batch_size: int = 20, publisher_id: str | N
         try:
             dispatch_execution(
                 row.subject,
-                {"run_id": row.run_id, "command_id": row.command_id, "message_ref": row.message_ref},
+                {
+                    "run_id": row.run_id,
+                    "command_id": row.command_id,
+                    "message_ref": row.message_ref,
+                    **({"call_id": row.message_ref.removeprefix("call://")} if row.message_ref.startswith("call://") else {}),
+                },
                 command_id=row.command_id,
             )
         except Exception as exc:  # durable row remains for a later scheduler tick

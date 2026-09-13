@@ -37,6 +37,13 @@ from .models import (
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
 from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease
+from .connectors import ConnectorRegistry
+
+
+# Implementations are registered by application bootstrap (and by tests).
+# Capability snapshots remain the authorization source; this registry only
+# resolves the already-selected transport implementation.
+connector_registry = ConnectorRegistry()
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +181,143 @@ async def process_execution_message(payload: dict) -> None:
         db.close()
 
 
+def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
+    """Resolve only an owner-scoped, enabled connector for a frozen Call.
+
+    The registry is an implementation directory, never an authorization
+    source. A database-backed remote agent is registered lazily so worker
+    processes can recover after restart without relying on process-local
+    bootstrap order.
+    """
+    target = str(call.target_ref or "").strip()
+    if not target:
+        return None
+    try:
+        return connector_registry.resolve(target, int(call.capability_revision))
+    except Exception:
+        pass
+    try:
+        from app.super_assistant.models import SuperAssistantRemoteAgent
+        row = db.scalar(select(SuperAssistantRemoteAgent).where(
+            SuperAssistantRemoteAgent.owner_id == run.owner_id,
+            SuperAssistantRemoteAgent.enabled.is_(True),
+            (SuperAssistantRemoteAgent.id == target) | (SuperAssistantRemoteAgent.key == target),
+        ))
+    except Exception:
+        return None
+    if row is None or (row.mode or "direct") != "direct":
+        # Pull-mode agents require a durable task queue adapter; treating them
+        # as direct would violate the connector transport contract.
+        return None
+    try:
+        from app.super_assistant.remote_agent_service import kernel_connector
+        connector = kernel_connector(row)
+        connector_registry.register(connector)
+        return connector
+    except Exception:
+        logger.exception("failed to register external connector target=%s", target)
+        return None
+
+
+async def process_external_call_message(payload: dict) -> None:
+    """Dispatch one durable external Call through ConnectorRegistry.
+
+    The outbox publisher invokes this handler through ``sa.execution.call.*``.
+    Provider execution happens outside the database transaction; the result is
+    then fenced by a fresh row lock and represented as Call/Attempt/Artifact
+    facts. Exceptions become ``outcome_unknown`` for reconciliation rather
+    than being reported as a fabricated provider failure.
+    """
+    run_id, call_id = payload.get("run_id"), payload.get("call_id")
+    if not run_id or not call_id:
+        logger.warning("external call message missing run_id/call_id")
+        return
+    db = SessionLocal()
+    try:
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == str(run_id)).with_for_update())
+        call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == str(call_id), ExecutionCall.run_id == str(run_id)).with_for_update())
+        if run is None or call is None or call.status != CallStatus.WAITING_EXTERNAL.value:
+            db.rollback()
+            return
+        connector = _resolve_external_connector(db, run, call)
+        if connector is None:
+            call.status, call.outcome, call.manual_attention = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value, True
+            call.remote_observed_state_ref = "connector_unavailable"
+            _append_manual_attention(db, run, call, "connector_unavailable")
+            append_event(db, run, event_type="call.outcome_changed", payload={"status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"call:{call.id}:unavailable", idempotency_key=f"call-unavailable:{call.id}", connector_id=call.target_ref)
+            db.commit()
+            return
+        descriptor = connector.descriptor()
+        attempt_no = (db.scalar(select(ExecutionAttempt.attempt_no).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc())) or 0) + 1
+        attempt = ExecutionAttempt(call_id=call.id, attempt_no=attempt_no, provider_status="started", transport_request_ref=call.input_snapshot_ref)
+        db.add(attempt)
+        call.status, call.outcome = CallStatus.RUNNING.value, CallOutcome.ACCEPTED.value
+        db.flush()
+        append_event(db, run, event_type="attempt.started", payload={"attempt_id": attempt.id, "provider_status": "started", "request_ref": call.input_snapshot_ref or f"call:{call.id}", "started_at": attempt.started_at.isoformat()}, actor={"kind": "connector"}, command_id=f"external:{attempt.id}:start", idempotency_key=f"external-attempt-start:{attempt.id}", connector_id=descriptor.agent_id)
+        append_event(db, run, event_type="call.outcome_changed", payload={"status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"external:{call.id}:running", idempotency_key=f"external-running:{call.id}", connector_id=descriptor.agent_id)
+        db.commit()
+        try:
+            result = await connector.invoke(run_id=run.id, call_id=call.id, input_ref=call.input_snapshot_ref or json.dumps({"message": run.goal, "session_ref": None}), deadline=run.deadline)
+        except Exception as exc:
+            db.rollback()
+            current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
+            current_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == call.id).with_for_update())
+            if current is None or current_call is None:
+                return
+            current_call.status, current_call.outcome = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value
+            current_call.reconcile_attempt_count += 1
+            current_call.next_reconcile_at = _now() + timedelta(seconds=min(300, 5 * (2 ** max(0, current_call.reconcile_attempt_count - 1))))
+            current_call.remote_observed_state_ref = "invoke_exception"
+            latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
+            if latest is not None:
+                latest.provider_status, latest.error_ref, latest.finished_at = "unknown", str(exc)[:1000], _now()
+            append_event(db, current, event_type="call.outcome_changed", payload={"status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:unknown:{current_call.reconcile_attempt_count}", idempotency_key=f"external-unknown:{current_call.id}:{current_call.reconcile_attempt_count}", connector_id=descriptor.agent_id)
+            _append_manual_attention(db, current, current_call, "invoke_exception")
+            db.commit()
+            return
+        db.rollback()
+        current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
+        current_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == call.id).with_for_update())
+        if current is None or current_call is None:
+            return
+        if current.status in {s.value for s in {RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
+            # Preserve the late provider result for reconciliation; never
+            # reopen a terminal Run.
+            current_call.status, current_call.outcome = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value
+            current_call.remote_observed_state_ref = "late_terminal_result"
+            db.commit()
+            return
+        normalized = str(result.get("status") or "failed").lower() if isinstance(result, dict) else "failed"
+        outcome = {"answered": CallOutcome.COMPLETED.value, "failed": CallOutcome.FAILED.value, "cancelled": CallOutcome.CANCELLED_CONFIRMED.value}.get(normalized, CallOutcome.FAILED.value)
+        content = str((result or {}).get("content") or "") if isinstance(result, dict) else str(result)
+        artifact = None
+        if content:
+            artifact = Artifact(owner_id=current.owner_id, run_id=current.id, call_id=current_call.id, kind="external.result", mime_type="text/markdown", size=len(content.encode("utf-8")), checksum=_checksum(content), storage_ref=f"inline://{current.id}/{current_call.id}", inline_content=content, status="complete", integrity_status="verified", business_status="success" if outcome == CallOutcome.COMPLETED.value else "failed", visibility="owner")
+            db.add(artifact); db.flush()
+        current_call.status, current_call.outcome = CallStatus.CLOSED.value, outcome
+        current_call.evidence_ref = f"artifact://{artifact.id}" if artifact else None
+        current_call.remote_task_ref = (result or {}).get("remote_task_ref") if isinstance(result, dict) else None
+        current_call.provider_event_id = (result or {}).get("provider_event_id") if isinstance(result, dict) else None
+        latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
+        if latest is not None:
+            latest.provider_status, latest.result_ref, latest.finished_at = normalized, current_call.evidence_ref, _now()
+        append_event(db, current, event_type="call.outcome_changed", payload={"status": current_call.status, "outcome": current_call.outcome, "evidence_ref": current_call.evidence_ref, "connector_id": descriptor.agent_id, "provider_event_id": current_call.provider_event_id}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:close", idempotency_key=f"external-close:{current_call.id}", connector_id=descriptor.agent_id, provider_event_id=current_call.provider_event_id)
+        if artifact is not None:
+            append_event(db, current, event_type="assistant.message", payload={"attempt_id": latest.id if latest else current_call.id, "message_ref": f"artifact://{artifact.id}"}, actor={"kind": "connector"}, command_id=f"external:{artifact.id}:message", idempotency_key=f"external-artifact:{artifact.id}", connector_id=descriptor.agent_id)
+        remaining = db.scalar(select(ExecutionCall.id).where(ExecutionCall.run_id == current.id, ExecutionCall.id != current_call.id, ExecutionCall.status.in_((CallStatus.WAITING_EXTERNAL.value, CallStatus.RECONCILING.value, CallStatus.RUNNING.value))))
+        if remaining is None and current.status == RunStatus.WAITING_EXTERNAL.value:
+            before = current.status
+            current.status, current.wait_reason, current.version = RunStatus.ACTIVE.value, None, current.version + 1
+            append_event(db, current, event_type="run.status_changed", payload={"from": before, "to": current.status, "reason": "external_result", "actor": "connector", "version": current.version}, actor={"kind": "connector"}, command_id=f"external-wake:{current.id}:{current.version}", idempotency_key=f"external-wake:{current.id}:{current.version}", connector_id=descriptor.agent_id)
+            _add_outbox(db, current, command_id=f"external-wake-dispatch:{current.id}:{current.version}", message_ref=f"run://{current.id}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("external call dispatch failed for run=%s call=%s", run_id, call_id)
+    finally:
+        db.close()
+
+
 def _policy_for_run(run: ExecutionRun) -> ExecutionPolicy:
     values = {}
     if run.budget_snapshot_ref:
@@ -231,7 +375,14 @@ def _wait_request(result: dict, tool_calls: list[dict]) -> dict | None:
     value = result.get("wait_for_external") or result.get("external_call")
     if value:
         detail = value if isinstance(value, dict) else {"target_ref": str(value)}
-        return {"kind": "external_event", "reason": detail.get("reason") or "external_call", "target_ref": detail.get("target_ref") or detail.get("target") or "external"}
+        return {
+            "kind": "external_event",
+            "reason": detail.get("reason") or "external_call",
+            "target_ref": detail.get("target_ref") or detail.get("target") or "external",
+            "message": detail.get("message") or detail.get("prompt"),
+            "session_ref": detail.get("session_ref"),
+            "input_ref": detail.get("input_ref"),
+        }
     return None
 
 
@@ -264,10 +415,21 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
             # The model decision is closed above; the requested remote work is
             # a separate long-lived Call so reconciliation can advance it
             # without reopening the model Call.
-            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=1, target_ref=target_ref, input_snapshot_ref=call.input_snapshot_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running")
+            input_ref = wait.get("input_ref") or json.dumps(
+                {"message": str(wait.get("message") or run.goal), "session_ref": wait.get("session_ref")},
+                ensure_ascii=False,
+            )
+            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=1, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running")
             db.add(external_call); db.flush()
             append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": 1, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": "external_async", "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
             append_event(db, run, event_type="call.outcome_changed", payload={"status": "waiting_external", "outcome": "remote_running", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
+            _add_outbox(
+                db,
+                run,
+                command_id=f"external-dispatch:{external_call.id}",
+                message_ref=f"call://{external_call.id}",
+                subject=f"sa.execution.call.{run.owner_id}",
+            )
         inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", call_id=external_call.id if external_call is not None else None, question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
     before = run.status; run.status = {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
     append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id if inbox else f"run:{run.id}:wait", "kind": kind, "target_ref": target_ref or (inbox.id if inbox else run.id), "expiry_policy": "none"}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)

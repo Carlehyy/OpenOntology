@@ -235,10 +235,17 @@ def append_event(
     return event
 
 
-def _add_outbox(db: Session, run: ExecutionRun, *, command_id: str, message_ref: str) -> ExecutionDispatchOutbox:
+def _add_outbox(
+    db: Session,
+    run: ExecutionRun,
+    *,
+    command_id: str,
+    message_ref: str,
+    subject: str | None = None,
+) -> ExecutionDispatchOutbox:
     row = ExecutionDispatchOutbox(
         id=_new_id(), command_id=command_id, run_id=run.id,
-        subject=f"{OUTBOX_SUBJECT_PREFIX}{run.owner_id}", message_ref=message_ref,
+        subject=subject or f"{OUTBOX_SUBJECT_PREFIX}{run.owner_id}", message_ref=message_ref,
         status="pending", next_attempt_at=_now(),
     )
     db.add(row)

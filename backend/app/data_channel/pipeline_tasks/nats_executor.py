@@ -62,6 +62,7 @@ _SUPER_ASSISTANT_PALACE_EXTRACT_DURABLE = "super-assistant-palace-extract"
 _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE = "super-assistant-palace-consolidate"
 _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
+_EXECUTION_CALL_DURABLE = "sa-call-v1"
 _EXECUTION_RECONCILER_DURABLE = "sa-reconciler-v1"
 
 # 消息处理器：解析后的 payload → 协程；业务异常必须在 handler 内消化，
@@ -256,6 +257,12 @@ async def _run_kernel_execution_message(payload: dict) -> None:
     await process_execution_message(payload)
 
 
+async def _run_kernel_call_message(payload: dict) -> None:
+    from app.super_assistant.kernel.runtime import process_external_call_message
+
+    await process_external_call_message(payload)
+
+
 async def _run_kernel_reconcile_message(payload: dict) -> None:
     from app.super_assistant.kernel.runtime import reconcile_execution_message
 
@@ -265,11 +272,13 @@ async def _run_kernel_reconcile_message(payload: dict) -> None:
 def _execution_handler_registry():
     """kernel.v1 使用独立 stream，但复用本 executor 进程和并发治理。"""
     from app.data_channel.pipeline_tasks.dispatch import (
+        EXECUTION_CALL_SUBJECT,
         EXECUTION_RECONCILE_SUBJECT,
         EXECUTION_RUN_SUBJECT,
     )
     return (
         (EXECUTION_RUN_SUBJECT, _EXECUTION_KERNEL_DURABLE, _run_kernel_execution_message),
+        (EXECUTION_CALL_SUBJECT, _EXECUTION_CALL_DURABLE, _run_kernel_call_message),
         (EXECUTION_RECONCILE_SUBJECT, _EXECUTION_RECONCILER_DURABLE, _run_kernel_reconcile_message),
     )
 

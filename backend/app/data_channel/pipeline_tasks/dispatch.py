@@ -35,6 +35,7 @@ ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT = "ontology.documents.published"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
 EXECUTION_STREAM = "SA_EXECUTION_V1"
 EXECUTION_RUN_SUBJECT = "sa.execution.run.*"
+EXECUTION_CALL_SUBJECT = "sa.execution.call.*"
 EXECUTION_RECONCILE_SUBJECT = "sa.execution.reconcile"
 EXECUTION_DLQ_SUBJECT = "sa.execution.dlq"
 # 流的全部订阅主题：扩容只能追加，旧 subject 与旧 durable 保持不变
@@ -98,7 +99,7 @@ async def ensure_execution_stream(js) -> None:
 
     config = StreamConfig(
         name=EXECUTION_STREAM,
-        subjects=[EXECUTION_RUN_SUBJECT, EXECUTION_RECONCILE_SUBJECT, EXECUTION_DLQ_SUBJECT],
+        subjects=[EXECUTION_RUN_SUBJECT, EXECUTION_CALL_SUBJECT, EXECUTION_RECONCILE_SUBJECT, EXECUTION_DLQ_SUBJECT],
         retention=RetentionPolicy.WORK_QUEUE,
         max_age=7 * 24 * 3600,
         duplicate_window=10 * 60,
