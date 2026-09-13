@@ -375,6 +375,28 @@ def touch_last_turn(db: Session, agent_id: str) -> None:
 # ------------------------------------------------------------ 动态目录接线
 
 
+def kernel_connector(row: SuperAssistantRemoteAgent):
+    """Build the kernel.v1 connector for an existing remote-agent row.
+
+    The legacy ``PlatformAssistant`` adapter remains untouched for old chat
+    routes; kernel callers can opt into the same endpoint through the common
+    ConnectorRegistry without duplicating credential or timeout semantics.
+    """
+    from app.super_assistant.kernel.connectors import RemoteAgentHttpConnector
+
+    try:
+        token = decrypt(row.token_encrypted or "") if row.token_encrypted else ""
+    except Exception:  # noqa: BLE001 - a bad secret is surfaced by the remote endpoint
+        token = ""
+    return RemoteAgentHttpConnector(
+        agent_id=row.id,
+        key=row.key,
+        endpoint=row.endpoint,
+        token=token,
+        timeout_seconds=max(10, int(row.timeout_seconds or 120)),
+    )
+
+
 def dynamic_assistants(db: Session, user) -> list[Any]:
     """assistant_hub 动态目录 provider：返回该用户已启用的远程助手适配器。
 
