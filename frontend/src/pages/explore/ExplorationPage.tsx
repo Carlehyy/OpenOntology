@@ -1313,7 +1313,11 @@ export default function ExplorationPage() {
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send() }
+                    // 输入法组合期/带修饰键的 Enter 不发送（平台标准语义，同超级助手）
+                    if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey
+                      || e.nativeEvent.isComposing) return
+                    e.preventDefault()
+                    void send()
                   }}
                   rows={1}
                   placeholder="描述业务、回答澄清问题…（Enter 发送，Shift+Enter 换行）"

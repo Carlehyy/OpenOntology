@@ -954,8 +954,16 @@ export default function AgentWorkbenchPage() {
                 placeholder={oid ? (busy ? '可继续输入，回车进入追问队列…' : '问业务问题，或让它帮你预演一个操作…') : '请先选择一个本体'}
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && send()}
+                onKeyDown={e => {
+                  // 平台标准提交语义（同超级助手）：输入法组合期/带修饰键的 Enter 不发送
+                  if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey
+                    || e.nativeEvent.isComposing) return
+                  e.preventDefault()
+                  if (input.trim() && oid) void send()
+                }}
                 disabled={!oid}
+                aria-label="本体助手消息"
+                data-testid="agent-composer"
                 className="min-w-0 flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50"
               />
               {busy ? (
@@ -970,6 +978,8 @@ export default function AgentWorkbenchPage() {
                 </button>
               ) : (
                 <button onClick={() => send()} disabled={!input.trim() || !oid}
+                  aria-label="发送消息"
+                  data-testid="agent-send-button"
                   className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-brand-deep text-[var(--color-text-inverse)] transition-all duration-200 hover:bg-brand disabled:cursor-not-allowed disabled:opacity-25">
                   <Send size={14} />
                 </button>
