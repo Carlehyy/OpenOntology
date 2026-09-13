@@ -34,6 +34,7 @@ from ..models import SuperAssistantConversation
 
 UTC = timezone.utc
 RUN_DEADLINE = timedelta(hours=24)
+CANCEL_GRACE = timedelta(seconds=30)
 OUTBOX_SUBJECT_PREFIX = "sa.execution.run."
 
 
@@ -127,8 +128,11 @@ def create_run(
         parent = _lock_run(db, parent_run_id)
         if parent.owner_id != owner_id or parent.conversation_id != conversation_id:
             raise ContractError("parent Run must share owner and conversation")
-        if parent.id == parent_run_id and parent.status in {RunStatus.CANCELLED.value, RunStatus.EXPIRED.value}:
-            raise ContractError("cannot bind child to cancelled or expired parent")
+        if parent.status in {
+            RunStatus.CANCELLED.value, RunStatus.EXPIRED.value,
+            RunStatus.COMPLETED.value, RunStatus.FAILED.value,
+        }:
+            raise ContractError("cannot bind child to terminal parent")
     binding = binding or {}
     mode = binding.get("binding_mode", "direct_ui")
     if mode == "delegated":
@@ -154,6 +158,22 @@ def create_run(
         payload={"execution_version": "kernel.v1", "conversation_id": conversation_id},
         actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key,
     )
+    if parent_run_id:
+        child_ids = list(parent.required_child_ids or [])
+        if run.id in child_ids:
+            raise IdempotencyConflict("child Run is already bound to parent")
+        child_ids.append(run.id)
+        parent.required_child_ids = child_ids
+        append_event(
+            db, parent, event_type="run.child_bound",
+            payload={"parent_run_id": parent.id, "child_run_id": run.id, "join_policy": parent.join_policy, "required": True},
+            actor={"kind": "user"}, command_id=command_id, idempotency_key=f"{idempotency_key}:parent-bind",
+        )
+        append_event(
+            db, run, event_type="run.child_bound",
+            payload={"parent_run_id": parent.id, "child_run_id": run.id, "join_policy": parent.join_policy, "required": True},
+            actor={"kind": "user"}, command_id=command_id, idempotency_key=f"{idempotency_key}:child-bind",
+        )
     _add_outbox(db, run, command_id=command_id, message_ref=f"run://{run.id}")
     return run, False
 
@@ -270,6 +290,10 @@ def cancel_run(
     before = run.status
     next_state = request_cancel(_state_from_run(run), reason)
     run.status, run.cancel_reason = next_state.status.value, next_state.cancel_reason.value if next_state.cancel_reason else None
+    # Cancellation is a two-phase protocol.  The worker gets a bounded grace
+    # period to confirm remote cancellation; the scheduler closes the Run
+    # after this deadline even if the connector is unavailable.
+    run.cancel_deadline = _now() + CANCEL_GRACE
     run.version += 1
     append_event(
         db, run, event_type="run.cancel_requested",
@@ -398,6 +422,22 @@ def assert_lease(run: ExecutionRun, token: LeaseToken) -> None:
         raise ContractError("stale lease fencing token")
     if not run.lease_expires_at or _as_utc(run.lease_expires_at) <= _now():
         raise ContractError("lease expired")
+
+
+def renew_lease(db: Session, *, token: LeaseToken, ttl: timedelta = timedelta(seconds=30)) -> LeaseToken:
+    """Renew a worker lease while retaining the same fencing epoch.
+
+    Renewal is deliberately fenced and transactional: a worker that lost its
+    lease cannot extend it after another worker has taken ownership.
+    """
+    if ttl <= timedelta(0):
+        raise ContractError("lease ttl must be positive")
+    run = _lock_run(db, token.run_id)
+    assert_lease(run, token)
+    expires_at = _now() + ttl
+    run.lease_expires_at = expires_at
+    db.flush()
+    return LeaseToken(run.id, token.owner, token.epoch, expires_at)
 
 
 def _as_utc(value: datetime | None) -> datetime | None:

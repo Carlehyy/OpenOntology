@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Loader2, Pause, Play, Square } from 'lucide-react'
+import { Loader2, Pause, Play, Send, Square } from 'lucide-react'
 
 import { superAssistantApi, type KernelRunEvent, type KernelRunStatus, type KernelRunView } from '@/api/superAssistant'
 
@@ -17,6 +17,7 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
   const [run, setRun] = useState<KernelRunView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [input, setInput] = useState('')
   const lastEventRef = useRef<string | undefined>(undefined)
 
   useEffect(() => {
@@ -68,6 +69,26 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
     finally { setBusy(false) }
   }
 
+  const sendInput = async () => {
+    if (!run || !input.trim() || busy) return
+    setBusy(true); setError(null)
+    try {
+      await superAssistantApi.submitKernelInput(runId, { kind: 'user_input', content: input.trim(), idempotency_key: `${runId}:input:${crypto.randomUUID()}` })
+      setInput('')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '输入提交失败') }
+    finally { setBusy(false) }
+  }
+
+  const decideApproval = async (approvalId: string, decision: 'approved' | 'denied') => {
+    if (!run || busy) return
+    setBusy(true); setError(null)
+    try {
+      const result = await superAssistantApi.decideKernelApproval(runId, approvalId, { decision, idempotency_key: `${runId}:approval:${approvalId}:${crypto.randomUUID()}` }, run.version)
+      setRun(current => current ? { ...current, version: result.version } : current)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '审批提交失败') }
+    finally { setBusy(false) }
+  }
+
   if (!run && !error) return <div className="rounded-lg border border-border p-3 text-xs text-muted-foreground"><Loader2 size={14} className="mr-1 inline animate-spin" />正在加载任务…</div>
   return (
     <section data-testid="kernel-run-task-card" className="rounded-lg border border-border bg-card p-3 text-xs shadow-sm">
@@ -78,6 +99,16 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
       </div>
       {run?.wait_reason && <p className="mt-1 text-muted-foreground">{run.wait_reason}</p>}
       {error && <p role="alert" className="mt-1 text-red-600">{error}</p>}
+      {run && run.current_inbox.length > 0 && (
+        <div className="mt-2 space-y-2 rounded bg-muted/40 p-2">
+          {run.current_inbox.map(item => item.kind === 'approval' && item.approval_id ? (
+            <div key={item.inbox_id} className="flex items-center gap-2"><span>需要审批</span><button type="button" disabled={busy} onClick={() => void decideApproval(item.approval_id!, 'approved')} className="rounded border px-2 py-1">批准</button><button type="button" disabled={busy} onClick={() => void decideApproval(item.approval_id!, 'denied')} className="rounded border px-2 py-1">拒绝</button></div>
+          ) : <span key={item.inbox_id}>等待输入</span>)}
+        </div>
+      )}
+      {run && run.status === 'waiting_input' && (
+        <div className="mt-2 flex gap-1.5"><input value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void sendInput() }} placeholder="输入补充信息…" className="min-w-0 flex-1 rounded border bg-background px-2 py-1" /><button type="button" disabled={busy || !input.trim()} onClick={() => void sendInput()} className="rounded border px-2 py-1 disabled:opacity-50"><Send size={12} className="inline" /></button></div>
+      )}
       {run && !terminalStatuses.has(run.status) && (
         <div className="mt-2 flex gap-1.5">
           {run.status === 'paused'

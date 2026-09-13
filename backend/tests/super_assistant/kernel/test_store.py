@@ -53,6 +53,19 @@ def test_create_run_rejects_same_key_with_different_payload(db):
         create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="two", idempotency_key="same")
 
 
+def test_child_run_binding_is_persisted_and_evented(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent")
+    db.commit()
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child", parent_run_id=parent.id)
+    db.commit()
+    db.refresh(parent)
+    assert child.parent_run_id == parent.id
+    assert child.id in parent.required_child_ids
+    assert db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_bound").count() == 1
+    assert db.query(ExecutionEvent).filter_by(run_id=child.id, event_type="run.child_bound").count() == 1
+
+
 def test_cancel_is_versioned_idempotent_and_conflicting_reason_rejected(db):
     owner, conversation = _owner_and_conversation(db)
     run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="one", idempotency_key="create")

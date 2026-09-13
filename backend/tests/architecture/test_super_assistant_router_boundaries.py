@@ -792,9 +792,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # /palace/ontology-documents/{id} 的 preview/rebuild 共 3 个操作
     # （3 条路径）
     # kernel.v1 长任务 API 新增 runs 查询/控制/输入/审批/SSE/Artifact 共
-    # 9 条路径、9 个操作；旧路由仍保持原有语义并行存在。
-    assert len(paths) == 73
-    assert sum(len(item) for item in paths.values()) == 97
+    # 9 条路径、9 个操作；dispatch dead-letter 显式重放新增 1 条运维路径；
+    # 旧路由仍保持原有语义并行存在。
+    assert len(paths) == 74
+    assert sum(len(item) for item in paths.values()) == 98
     assert hashlib.sha256(payload).hexdigest() == (
-        "1b3e07b344f9c5cc4d24102d25b26bcb3dfced7778af87617a3603b2cc99bf98"
+        "114fb8af014bfb3af37a5d9679d763b504f2ed2a949aa7374e24234ce8de523b"
     )

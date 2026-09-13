@@ -9,7 +9,8 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
 
@@ -30,6 +31,7 @@ from .models import (
     ExecutionRun,
     ExecutionStep,
     ExecutionTurn,
+    InboxItem,
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
 from .store import _now, acquire_lease, append_event, assert_lease
@@ -61,7 +63,14 @@ async def process_execution_message(payload: dict) -> None:
         if run.status not in {RunStatus.QUEUED.value, RunStatus.ACTIVE.value}:
             db.rollback()
             return
-        token = acquire_lease(db, run_id=run.id, worker_id=f"kernel:{uuid.uuid4().hex[:12]}")
+        # A model step may legitimately run longer than the default recovery
+        # lease. Keep the lease above the configured provider timeout; the
+        # fencing check still prevents late writers after recovery takeover.
+        step_policy = ExecutionPolicy()
+        token = acquire_lease(
+            db, run_id=run.id, worker_id=f"kernel:{uuid.uuid4().hex[:12]}",
+            ttl=step_policy.step_model_timeout + timedelta(seconds=30),
+        )
         before = run.status
         if before == RunStatus.QUEUED.value:
             run.status = RunStatus.ACTIVE.value
@@ -142,11 +151,9 @@ async def process_execution_message(payload: dict) -> None:
             {"role": "system", "content": "你是 OpenOntology 的超级助手。请直接完成用户目标，并在无法完成时说明原因。"},
             {"role": "user", "content": pack.content},
         ]
-        result = provider.chat(
-            call_kwargs,
-            messages,
-            tools,
-        )
+        # The provider client is synchronous today; run it off the NATS
+        # consumer's event loop so one slow model cannot starve other Runs.
+        result = await asyncio.to_thread(provider.chat, call_kwargs, messages, tools)
         tool_calls = result.get("tool_calls") or []
         if tool_calls:
             # M4 第一条 Connector：平台 Assistant Hub。每个委派仍由旧
@@ -159,7 +166,7 @@ async def process_execution_message(payload: dict) -> None:
                     {"role": "assistant", "content": result.get("content"), "tool_calls": tool_calls},
                     {"role": "tool", "tool_call_id": tool_call.get("id"), "name": tool_call.get("name"), "content": delegate_result},
                 ])
-                result = provider.chat(call_kwargs, messages, tools)
+                result = await asyncio.to_thread(provider.chat, call_kwargs, messages, tools)
         content = strip_think_content(str(result.get("content") or ""))
         if not content:
             raise provider.ProviderError("模型未返回有效内容")
@@ -284,6 +291,8 @@ async def reconcile_execution_message(payload: dict) -> None:
             call.evidence_ref = observation.evidence_ref
             call.provider_event_id = provider_event_id or call.provider_event_id
             call.manual_attention = decision.action is ReconcileAction.MANUAL_ATTENTION
+            if call.manual_attention:
+                _append_manual_attention(db, run, call, observation.raw_state)
         key = provider_event_id or str(call.reconcile_attempt_count)
         append_event(db, run, event_type="call.outcome_changed", payload={"status": status.value, "outcome": outcome.value, "evidence_ref": observation.evidence_ref, "connector_id": connector_id, "provider_event_id": provider_event_id}, actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:{key}", idempotency_key=f"reconcile:{call.id}:{key}", connector_id=connector_id, provider_event_id=provider_event_id)
         db.commit()
@@ -291,6 +300,27 @@ async def reconcile_execution_message(payload: dict) -> None:
         db.rollback(); logger.exception("kernel reconciliation failed for run=%s call=%s", run_id, call_id)
     finally:
         db.close()
+
+
+def _append_manual_attention(db, run: ExecutionRun, call: ExecutionCall, observed_state: str) -> None:
+    """Create one durable operator inbox item for an exhausted reconciliation."""
+    key = f"manual-attention:{call.id}"
+    existing = db.scalar(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.idempotency_key == key))
+    if existing is not None:
+        return
+    item = InboxItem(
+        run_id=run.id, kind="manual_attention", priority=0, status="pending",
+        call_id=call.id, target_ref=call.target_ref or call.id,
+        payload={"call_id": call.id, "observed_state": observed_state, "reason": "reconciliation_exhausted"},
+        source="system", idempotency_key=key, accepted_at=_now(),
+    )
+    db.add(item)
+    db.flush()
+    append_event(
+        db, run, event_type="inbox.appended",
+        payload={"inbox_id": item.id, "kind": item.kind, "target_ref": item.target_ref, "expiry_policy": "none"},
+        actor={"kind": "system"}, command_id=key, idempotency_key=key,
+    )
 
 
 def _invoke_hub_delegation(db, run: ExecutionRun, arguments: dict) -> str:

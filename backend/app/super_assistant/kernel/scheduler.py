@@ -11,10 +11,14 @@ _scheduler = None
 
 def _drain() -> None:
     from .outbox import publish_due_once, recover_expired_claims
+    from .recovery import expire_due_runs_once, join_ready_parents_once, recover_stuck_runs_once
 
     db = SessionLocal()
     try:
         recover_expired_claims(db)
+        expire_due_runs_once(db)
+        recover_stuck_runs_once(db)
+        join_ready_parents_once(db)
         publish_due_once(db, batch_size=20)
     except Exception:
         logger.exception("kernel execution outbox drain failed")

@@ -299,6 +299,7 @@ export interface KernelRunInboxItem {
   inbox_id: string
   kind: string
   question_id: string | null
+  approval_id?: string | null
   expires_at: string | null
 }
 

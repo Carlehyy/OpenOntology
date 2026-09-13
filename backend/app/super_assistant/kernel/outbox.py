@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.data_channel.pipeline_tasks.dispatch import dispatch_execution
-from .models import ExecutionDispatchOutbox
+from .models import ExecutionDispatchOutbox, ExecutionRun
 from .store import _now
 
 MAX_ATTEMPTS = 10
@@ -71,6 +71,30 @@ def recover_expired_claims(db: Session) -> int:
         row.claim_expires_at = None
     db.commit()
     return len(rows)
+
+
+def replay_dead_once(db: Session, *, outbox_id: str, owner_id: str) -> bool:
+    """Explicitly requeue one dead dispatch after an operator decision.
+
+    Replay is never implicit: the row remains dead until a caller with access
+    to the owning Run requests it, preserving an auditable boundary around
+    potentially duplicated external work.
+    """
+    row = db.get(ExecutionDispatchOutbox, outbox_id)
+    if row is None:
+        raise KeyError(outbox_id)
+    run = db.get(ExecutionRun, row.run_id)
+    if run is None or run.owner_id != owner_id:
+        raise KeyError(outbox_id)
+    if row.status != "dead":
+        return False
+    row.status = "pending"
+    row.next_attempt_at = _now()
+    row.claim_token = None
+    row.claim_expires_at = None
+    row.error_ref = None
+    db.commit()
+    return True
 
 
 def _record_failure(db: Session, row_id: str, claim_token: str, error: str) -> None:

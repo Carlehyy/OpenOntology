@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
-from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionEvent, ExecutionRun, InboxItem
+from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionDispatchOutbox, ExecutionEvent, ExecutionRun, InboxItem
 from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RunAccepted, RunView
 from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
+from app.super_assistant.kernel.artifacts import verify_artifact
+from app.super_assistant.kernel.outbox import replay_dead_once
 
 
 router = APIRouter()
@@ -82,7 +84,7 @@ def get_kernel_run(run_id: str, db: Session = Depends(get_db), user=Depends(get_
         run_id=run.id, conversation_id=run.conversation_id, status=run.status,
         wait_reason=run.wait_reason, version=run.version, execution_version=run.execution_version,
         goal=run.goal, deadline=run.deadline, binding_snapshot=binding,
-        current_inbox=[{"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id, "expires_at": item.expires_at} for item in inbox],
+        current_inbox=[{"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id, "approval_id": item.approval_id, "expires_at": item.expires_at} for item in inbox],
         calls=[{"call_id": c.id, "status": c.status, "outcome": c.outcome, "capability_key": c.capability_key} for c in calls],
         artifacts=[{"artifact_id": a.id, "kind": a.kind, "mime_type": a.mime_type, "size": a.size, "checksum": a.checksum, "status": a.status, "business_status": a.business_status} for a in artifacts],
     )
@@ -268,4 +270,25 @@ def get_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depends(get
     artifact = db.scalar(select(Artifact).where(Artifact.id == artifact_id, Artifact.run_id == run_id, Artifact.owner_id == user.id))
     if artifact is None:
         raise HTTPException(status_code=404, detail="artifact not found")
+    if artifact.inline_content is not None:
+        integrity = verify_artifact(
+            artifact.inline_content.encode("utf-8"),
+            expected_checksum=artifact.checksum,
+            expected_size=artifact.size,
+        )
+        if integrity.integrity_status != "verified":
+            raise HTTPException(status_code=409, detail="artifact_integrity_failed")
     return {"artifact_id": artifact.id, "mime_type": artifact.mime_type, "size": artifact.size, "checksum": artifact.checksum, "status": artifact.status, "business_status": artifact.business_status, "content": artifact.inline_content}
+
+
+@router.post("/runs/{run_id}/dispatch/{outbox_id}/replay", status_code=status.HTTP_202_ACCEPTED)
+def replay_kernel_dispatch(run_id: str, outbox_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    row = db.scalar(select(ExecutionDispatchOutbox).where(ExecutionDispatchOutbox.id == outbox_id, ExecutionDispatchOutbox.run_id == run_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="dispatch not found")
+    try:
+        replayed = replay_dead_once(db, outbox_id=outbox_id, owner_id=user.id)
+    except KeyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="dispatch not found") from exc
+    return {"outbox_id": outbox_id, "status": "pending" if replayed else row.status, "replayed": replayed}

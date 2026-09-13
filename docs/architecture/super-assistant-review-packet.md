@@ -200,10 +200,10 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 5. M5：委派恢复、唯一索引、子会话和远端引用是否已绑定到 Run/Call，是否存在跨 Run 串线；
 6. 初审建议项是否已形成可执行契约：`seq` 串行化、Inbox claim/consume、未知结果 reconciler、结构化 `source_ref`、Artifact 存储边界、插件能力不可动态扩展和兼容 facade 退役条件。
 
-二次审查记录已将每一条意见标记为已闭环或 post-v1 deferred，并在开发基线和迁移验收文档中给出章节、源码证据和测试用例。
+二次审查记录已将每一条意见标记为已闭环、部分闭环、未闭环或 post-v1 deferred，并在开发基线和迁移验收文档中给出章节、源码证据和测试用例。本文本身是审查记录，不得把设计合同误写成运行时已经实现。
 
 ## 10. 二次审查后的当前门槛
 
-二次审查确认 M1–M5 已闭环，阶段 0/4/5/6 的权威枚举、事件注册表、旧端点映射、RAP 字段、问题 TTL、reconciler、委派历史行、图谱配方、反思触发和 widget 断线行为均已纳入开发基线 v1.0 与对应验收用例。
+当前实现门槛应按以下事实读取：M1 的状态/事件/幂等/租约纯合同已闭环，但持久化 TTL、stuck 扫描和 parent fan-in 仍是部分闭环；M2 的执行表、迁移、Outbox 和 NATS 基础已闭环，但历史回填、DLQ 重放和真实基础设施验收未闭环；M3 目前只有单次 activation 与 Call 对账，完整多轮 loop、heartbeat、恢复和等待态执行未闭环；M4/M5 已有边界合同和策略测试，真实 RAP/MCP/Multica/process plugin、知识图谱来源传播和 Artifact 对象存储未闭环；M6 已有 kernel.v1 API/SSE 与最小任务卡，多 Run、输入/审批/Artifact/重试 UI 未闭环；M7/M8 的真实 staging 验收和最终发布证据尚未完成。
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
