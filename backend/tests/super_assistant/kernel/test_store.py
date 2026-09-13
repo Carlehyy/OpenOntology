@@ -103,7 +103,7 @@ def test_external_provider_event_is_idempotent_but_hash_conflicts_are_rejected(d
     owner, conversation = _owner_and_conversation(db)
     run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="one", idempotency_key="create")
     db.flush()
-    payload = {"status": "running", "outcome": "remote_running", "evidence_ref": "e", "connector_id": "c", "provider_event_id": "p"}
+    payload = {"call_id": "call-1", "status": "running", "outcome": "remote_running", "evidence_ref": "e", "connector_id": "c", "provider_event_id": "p"}
     first = append_event(db, run, event_type="call.outcome_changed", payload=payload, actor={"kind": "connector"}, command_id="cmd", idempotency_key="event-1", connector_id="c", provider_event_id="p")
     second = append_event(db, run, event_type="call.outcome_changed", payload=payload, actor={"kind": "connector"}, command_id="cmd", idempotency_key="event-1", connector_id="c", provider_event_id="p")
     assert first.event_id == second.event_id

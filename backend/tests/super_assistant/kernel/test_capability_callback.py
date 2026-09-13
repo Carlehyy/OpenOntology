@@ -26,7 +26,7 @@ def test_capability_revision_and_callback_are_immutable_and_scoped(db):
     db.commit()
     with pytest.raises(ContractError, match="immutable"):
         persist_capability_revision(db, descriptor, source="user", trust_level=TrustLevel.VERIFIED, manifest_hash="different")
-    append_agent_callback(db, owner_id=owner.id, run_id=run.id, call_id=call.id, connector_id="connector-1", provider_event_id="event-1", event_type="call.outcome_changed", payload={"status": "closed", "outcome": "completed", "evidence_ref": "artifact://a", "connector_id": "connector-1", "provider_event_id": "event-1"})
+    append_agent_callback(db, owner_id=owner.id, run_id=run.id, call_id=call.id, connector_id="connector-1", provider_event_id="event-1", event_type="call.outcome_changed", payload={"call_id": call.id, "status": "closed", "outcome": "completed", "evidence_ref": "artifact://a", "connector_id": "connector-1", "provider_event_id": "event-1"})
     db.commit()
     assert db.query(ExecutionEvent).filter_by(provider_event_id="event-1").count() == 1
     with pytest.raises(KeyError):

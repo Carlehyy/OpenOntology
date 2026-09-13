@@ -135,8 +135,9 @@ def test_event_registry_rejects_unsupported_schema_version(schema_version):
         ),
         (
             "call.outcome_changed",
-            {
-                "status": "closed",
+                {
+                    "call_id": "call-1",
+                    "status": "closed",
                 "outcome": "outcome_unknown",
                 "evidence_ref": "e1",
                 "connector_id": "connector",
