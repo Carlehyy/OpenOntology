@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +15,8 @@ from app.super_assistant.kernel.contracts import CancelReason, ContractError
 from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionDispatchOutbox, ExecutionEvent, ExecutionRun, InboxItem
 from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RetryRunRequest, RunAccepted, RunSummary, RunView
 from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
-from app.super_assistant.kernel.artifacts import verify_artifact
+from app.super_assistant.kernel.artifacts import artifact_is_expired, validate_object_storage_ref, verify_artifact
+from app.shared.storage import get_storage_service
 from app.super_assistant.kernel.outbox import replay_dead_once
 from app.super_assistant.models import SuperAssistantConversation
 
@@ -347,20 +348,72 @@ def stream_kernel_events(
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@router.get("/runs/{run_id}/artifacts/{artifact_id}")
-def get_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+def _artifact_bytes(artifact: Artifact, *, run_id: str) -> bytes:
+    if artifact.inline_content is not None:
+        data = artifact.inline_content.encode("utf-8")
+    else:
+        try:
+            validate_object_storage_ref(
+                artifact.storage_ref,
+                owner_id=artifact.owner_id,
+                run_id=run_id,
+                artifact_id=artifact.id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="artifact_storage_ref_invalid") from exc
+        try:
+            data = get_storage_service().get_object(artifact.storage_ref)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="artifact object not found") from exc
+        except Exception as exc:
+            # Do not turn a storage outage into a false 404.  The object store
+            # is an operational dependency and callers should retry later.
+            if getattr(exc, "code", None) in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
+                raise HTTPException(status_code=404, detail="artifact object not found") from exc
+            raise HTTPException(status_code=503, detail="artifact storage unavailable") from exc
+    integrity = verify_artifact(data, expected_checksum=artifact.checksum, expected_size=artifact.size)
+    if integrity.integrity_status != "verified":
+        raise HTTPException(status_code=409, detail="artifact_integrity_failed")
+    return data
+
+
+def _load_kernel_artifact(run_id: str, artifact_id: str, db: Session, user):
     artifact = db.scalar(select(Artifact).where(Artifact.id == artifact_id, Artifact.run_id == run_id, Artifact.owner_id == user.id))
     if artifact is None:
         raise HTTPException(status_code=404, detail="artifact not found")
-    if artifact.inline_content is not None:
-        integrity = verify_artifact(
-            artifact.inline_content.encode("utf-8"),
-            expected_checksum=artifact.checksum,
-            expected_size=artifact.size,
-        )
-        if integrity.integrity_status != "verified":
-            raise HTTPException(status_code=409, detail="artifact_integrity_failed")
-    return {"artifact_id": artifact.id, "mime_type": artifact.mime_type, "size": artifact.size, "checksum": artifact.checksum, "status": artifact.status, "business_status": artifact.business_status, "content": artifact.inline_content}
+    if artifact_is_expired(status=artifact.status, retention_until=artifact.retention_until):
+        raise HTTPException(status_code=410, detail="artifact expired or deleted")
+    return artifact
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}")
+def get_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    artifact = _load_kernel_artifact(run_id, artifact_id, db, user)
+    data = _artifact_bytes(artifact, run_id=run_id)
+    # Preserve the existing JSON shape.  Binary/object-backed assets remain
+    # represented by null content and use the explicit download endpoint.
+    content = artifact.inline_content
+    if content is None and (artifact.mime_type.startswith("text/") or artifact.mime_type == "application/json") and len(data) <= 1 * 1024 * 1024:
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            content = None
+    return {"artifact_id": artifact.id, "mime_type": artifact.mime_type, "size": artifact.size, "checksum": artifact.checksum, "status": artifact.status, "business_status": artifact.business_status, "content": content, "download_url": f"/api/v2/super-assistant/runs/{run_id}/artifacts/{artifact.id}/download"}
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}/download")
+def download_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    artifact = _load_kernel_artifact(run_id, artifact_id, db, user)
+    data = _artifact_bytes(artifact, run_id=run_id)
+    return Response(
+        content=data,
+        media_type=artifact.mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact.id}"',
+            "X-Artifact-Checksum": artifact.checksum,
+            "X-Artifact-Size": str(artifact.size),
+        },
+    )
 
 
 @router.post("/runs/{run_id}/dispatch/{outbox_id}/replay", status_code=status.HTTP_202_ACCEPTED)

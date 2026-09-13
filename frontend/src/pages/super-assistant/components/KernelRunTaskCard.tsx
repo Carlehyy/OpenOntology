@@ -13,6 +13,16 @@ const statusLabel: Record<string, string> = {
   completed: '已完成', failed: '失败',
 }
 
+async function verifyArtifactBlob(blob: Blob, expectedSize: number, expectedChecksum: string): Promise<Blob> {
+  if (blob.size !== expectedSize) throw new Error('Artifact 下载大小校验失败')
+  const subtle = globalThis.crypto?.subtle
+  if (!subtle) throw new Error('当前浏览器不支持 Artifact checksum 校验')
+  const digest = await subtle.digest('SHA-256', await blob.arrayBuffer())
+  const actual = `sha256:${Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')}`
+  if (actual !== expectedChecksum) throw new Error('Artifact 下载 checksum 校验失败')
+  return blob
+}
+
 /** kernel.v1 长任务卡片：关闭页面不会取消 Run，重新挂载会从最后一个事件继续回放。 */
 export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: string; onClose?: () => void; onRetry?: (runId: string) => void }) {
   const [run, setRun] = useState<KernelRunView | null>(null)
@@ -150,13 +160,12 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
     finally { setBusy(false) }
   }
 
-  const downloadArtifact = async (artifactId: string, kind: string, mimeType: string) => {
+  const downloadArtifact = async (artifactId: string, kind: string, mimeType: string, expectedSize: number, expectedChecksum: string) => {
     if (busy) return
     setBusy(true); setError(null)
     try {
-      const result = await superAssistantApi.kernelArtifact(runId, artifactId)
-      if (result.content === null) throw new Error('该 Artifact 尚未提供可下载的内联内容')
-      const blob = new Blob([result.content], { type: mimeType || 'application/octet-stream' })
+      const raw = await superAssistantApi.kernelArtifactDownload(runId, artifactId)
+      const blob = await verifyArtifactBlob(raw, expectedSize, expectedChecksum)
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
@@ -237,7 +246,7 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
           {run.artifacts.map(artifact => (
             <div key={artifact.artifact_id} className="rounded bg-muted/40 p-2">
               <button type="button" onClick={() => void loadArtifact(artifact.artifact_id)} className="font-medium underline">查看 {artifact.kind}</button>
-              <button type="button" onClick={() => void downloadArtifact(artifact.artifact_id, artifact.kind, artifact.mime_type)} className="ml-2 underline">下载</button>
+              <button type="button" onClick={() => void downloadArtifact(artifact.artifact_id, artifact.kind, artifact.mime_type, artifact.size, artifact.checksum)} className="ml-2 underline">下载</button>
               <span className="ml-2 text-muted-foreground">{artifact.mime_type} · {artifact.size} B</span>
               {artifactContent[artifact.artifact_id] !== undefined && <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-[11px]">{artifactContent[artifact.artifact_id]}</pre>}
             </div>

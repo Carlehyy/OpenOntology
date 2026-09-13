@@ -728,6 +728,8 @@ export const superAssistantApi = {
     apiClientV2.get<{ artifact_id: string; mime_type: string; size: number; checksum: string; status: string; business_status: string; content: string | null }>(
       `/super-assistant/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`,
     ),
+  kernelArtifactDownload: (runId: string, artifactId: string) =>
+    apiClientV2.getBlob(`/super-assistant/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/download`),
   cancel: (id: string) => apiClientV2.post(`/super-assistant/conversations/${id}/cancel`),
   decideToolRun: (id: string, decision: 'approve' | 'deny') =>
     apiClientV2.post(`/super-assistant/tool-runs/${id}/decision`, { decision }),

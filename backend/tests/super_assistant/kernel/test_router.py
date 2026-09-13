@@ -1,4 +1,8 @@
+import hashlib
+from datetime import datetime, timedelta, timezone
+
 from app.super_assistant.models import SuperAssistantConversation
+from app.super_assistant.kernel.models import Artifact, ExecutionRun
 
 
 def test_kernel_create_get_and_cancel_contract(client, db, admin_user, auth_headers):
@@ -147,3 +151,79 @@ def test_kernel_run_list_is_owner_scoped_and_keeps_independent_runs(client, db, 
     )
     assert listed.status_code == 200, listed.text
     assert {item["goal"] for item in listed.json()} == {"task 0", "task 1"}
+
+
+def _artifact_fixture(db, owner, *, content: bytes, storage_ref: str | None = None, mime_type: str = "application/octet-stream", status: str = "complete", retention_until=None):
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="artifact")
+    db.add(conversation)
+    db.flush()
+    run = ExecutionRun(owner_id=owner.id, conversation_id=conversation.id, goal="artifact", status="completed", idempotency_key="artifact-fixture", payload_hash="fixture")
+    db.add(run)
+    db.flush()
+    artifact = Artifact(
+        owner_id=owner.id, run_id=run.id, kind="file", mime_type=mime_type,
+        size=len(content), checksum="sha256:" + hashlib.sha256(content).hexdigest(),
+        storage_ref=storage_ref or "pending://artifact", status=status, business_status="success",
+        retention_until=retention_until,
+    )
+    db.add(artifact)
+    db.flush()
+    if storage_ref is None:
+        artifact.storage_ref = f"s3://assistant-workspace/{owner.id}/{run.id}/{artifact.id}"
+    db.commit()
+    return run, artifact
+
+
+def test_kernel_artifact_download_verifies_object_bytes_and_preserves_json_shape(client, db, admin_user, auth_headers, monkeypatch):
+    data = b"binary artifact\x00"
+    run, artifact = _artifact_fixture(db, admin_user, content=data)
+
+    class Store:
+        def get_object(self, uri):
+            assert uri == artifact.storage_ref
+            return data
+
+    monkeypatch.setattr("app.super_assistant.kernel.router.get_storage_service", lambda: Store())
+    fetched = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}", headers=auth_headers)
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["content"] is None
+    assert fetched.json()["download_url"].endswith("/download")
+    downloaded = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}/download", headers=auth_headers)
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.content == data
+    assert downloaded.headers["x-artifact-checksum"] == artifact.checksum
+
+
+def test_kernel_artifact_download_rejects_corrupt_or_unscoped_object(client, db, admin_user, auth_headers, monkeypatch):
+    data = b"correct"
+    run, artifact = _artifact_fixture(db, admin_user, content=data)
+
+    class Store:
+        def get_object(self, uri):
+            return b"corrupt"
+
+    monkeypatch.setattr("app.super_assistant.kernel.router.get_storage_service", lambda: Store())
+    corrupt = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}/download", headers=auth_headers)
+    assert corrupt.status_code == 409
+    artifact.storage_ref = "s3://assistant-workspace/other-owner/other-run/other-artifact"
+    db.commit()
+    unscoped = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}/download", headers=auth_headers)
+    assert unscoped.status_code == 409
+
+
+def test_kernel_artifact_download_expired_deleted_and_cross_owner_are_not_read(client, db, admin_user, editor_user, auth_headers, monkeypatch):
+    data = b"secret"
+    run, artifact = _artifact_fixture(db, admin_user, content=data, retention_until=datetime.now(timezone.utc) - timedelta(seconds=1))
+    monkeypatch.setattr("app.super_assistant.kernel.router.get_storage_service", lambda: (_ for _ in ()).throw(AssertionError("storage must not be touched")))
+    expired = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}/download", headers=auth_headers)
+    assert expired.status_code == 410
+    artifact.retention_until = None
+    artifact.status = "deleted"
+    db.commit()
+    deleted = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}/download", headers=auth_headers)
+    assert deleted.status_code == 410
+    # A different authenticated owner cannot even discover the row.
+    from app.auth.service import create_access_token
+    other_headers = {"Authorization": "Bearer " + create_access_token({"sub": editor_user.id})}
+    cross_owner = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}/download", headers=other_headers)
+    assert cross_owner.status_code in {401, 404}
