@@ -22,6 +22,7 @@ docs/
 - [超级助手执行模型（提案）](./architecture/super-assistant-execution-model.md)：Run、Turn、Step、Event、Inbox 和恢复语义。
 - [超级助手能力与插件模型（提案）](./architecture/super-assistant-capability-plugin-model.md)：能力目录、插件生命周期、隔离和调用策略。
 - [超级助手 Agent 协作模型（提案）](./architecture/super-assistant-agent-connector-model.md)：内部助手、RAP、A2A、Agent Client Protocol 和 MCP 的边界。
+- [超级助手上下文、记忆与知识模型（提案）](./architecture/super-assistant-context-memory-model.md)：Context Pack、私人知识、记忆、图谱、压缩和 Artifact。
 
 ## 运维
 
