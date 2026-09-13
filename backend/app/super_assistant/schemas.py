@@ -231,7 +231,10 @@ class McpTestOut(BaseModel):
 
 
 class ProcessPluginCreate(CamelModel):
-    key: str = Field(min_length=1, max_length=255, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$")
+    # The owner namespace is prepended to CapabilityRevision.key (a 255-byte
+    # column), so reserve room for that prefix while keeping the public key
+    # comfortably expressive.
+    key: str = Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$")
     revision: int = Field(ge=1, le=1_000_000)
     entrypoint: str = Field(min_length=1, max_length=2000)
     display_name: str = Field(default="", max_length=200)
