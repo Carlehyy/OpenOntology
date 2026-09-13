@@ -69,6 +69,7 @@ def test_cancel_during_model_call_closes_call_as_unknown_and_never_completes(db,
     assert call.status == "reconciling" and call.outcome == "outcome_unknown"
     assert attempt.finished_at is not None
     assert db.query(Artifact).filter_by(run_id=run.id).count() == 0
+    assert db.query(runtime.ExecutionEvent).filter_by(run_id=run.id, event_type="call.outcome_changed").count() == 2
 
 
 def test_pause_during_model_call_fences_old_activation(db, monkeypatch):

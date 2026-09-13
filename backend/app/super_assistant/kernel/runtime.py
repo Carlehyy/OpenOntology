@@ -320,7 +320,7 @@ async def process_execution_message(payload: dict) -> None:
                 late_attempt = db.get(ExecutionAttempt, attempt_id)
                 late_turn = db.get(ExecutionTurn, turn.id)
                 late_step = db.get(ExecutionStep, step.id)
-                if late_call is not None and late_attempt is not None and late_call.status != CallStatus.CLOSED.value:
+                if late_call is not None and late_attempt is not None and late_call.status not in {CallStatus.CLOSED.value, CallStatus.RECONCILING.value}:
                     _close_controlled_model_call(db, current, late_call, late_attempt, reason=current.status, lease=None)
                 _close_controlled_step(db, current, late_turn, late_step, reason=current.status, lease=None)
                 db.commit()
@@ -358,7 +358,7 @@ async def process_execution_message(payload: dict) -> None:
                 late_attempt = db.get(ExecutionAttempt, attempt_id)
                 late_turn = db.get(ExecutionTurn, turn.id)
                 late_step = db.get(ExecutionStep, step.id)
-                if late_call is not None and late_attempt is not None and late_call.status != CallStatus.CLOSED.value:
+                if late_call is not None and late_attempt is not None and late_call.status not in {CallStatus.CLOSED.value, CallStatus.RECONCILING.value}:
                     _close_controlled_model_call(db, run, late_call, late_attempt, reason=run.status, lease=None)
                 _close_controlled_step(db, run, late_turn, late_step, reason=run.status, lease=None)
                 db.commit()
@@ -1378,7 +1378,7 @@ async def _process_assistant_child(db, run: ExecutionRun, token, policy: Executi
         late_attempt = db.get(ExecutionAttempt, attempt.id)
         late_turn = db.get(ExecutionTurn, turn.id)
         late_step = db.get(ExecutionStep, step.id)
-        if late_call is not None and late_attempt is not None and late_call.status != CallStatus.CLOSED.value:
+        if late_call is not None and late_attempt is not None and late_call.status not in {CallStatus.CLOSED.value, CallStatus.RECONCILING.value}:
             _close_controlled_model_call(db, current, late_call, late_attempt, reason=current.status, lease=None)
         _close_controlled_step(db, current, late_turn, late_step, reason=current.status, lease=None)
         db.commit()
