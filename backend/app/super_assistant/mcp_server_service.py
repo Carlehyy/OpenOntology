@@ -9,6 +9,7 @@ from app.settings.object_storage.service import (
     get_workspace_minio_service,
     minio_tool_manifest,
 )
+from app.super_assistant import mcp_dev_service
 from app.super_assistant.mcp_client import (
     McpClientError,
     decrypt_env,
@@ -18,7 +19,7 @@ from app.super_assistant.mcp_client import (
     encrypt_headers,
     normalize_connection,
 )
-from app.super_assistant.models import SuperAssistantMcpServer
+from app.super_assistant.models import SuperAssistantMcpDevProject, SuperAssistantMcpServer
 from app.super_assistant.schemas import McpServerCreate, McpServerUpdate, McpTestOut
 
 
@@ -141,6 +142,13 @@ def update_mcp_server(
             raise McpClientError(
                 "平台内置 MCP 仅允许修改启用和执行确认设置"
             )
+        if item.dev_project_id and body.model_fields_set - {
+            "enabled",
+            "require_confirmation",
+        }:
+            raise McpClientError(
+                "自研 MCP 的连接与工具由开发页管理：这里仅允许修改启用和执行确认设置"
+            )
 
         connection_changed = any(
             value is not None
@@ -199,6 +207,14 @@ def remove_mcp_server(
         server_id,
         include_builtins=include_builtins,
     )
+    # 自研 MCP 与开发项目一一对应：删除任一侧都整体清理（版本随之删除）
+    if item.dev_project_id:
+        project = db.query(SuperAssistantMcpDevProject).filter(
+            SuperAssistantMcpDevProject.id == item.dev_project_id,
+            SuperAssistantMcpDevProject.owner_id == owner_id,
+        ).first()
+        if project is not None:
+            mcp_dev_service.delete_project_row(db, project)
     db.delete(item)
     db.commit()
 
@@ -218,6 +234,9 @@ async def test_mcp_server(
     )
     item.last_tested_at = datetime.now(timezone.utc)
     try:
+        if item.dev_project_id is not None:
+            # 自研 MCP：测试 = 重跑发布闸门（逐工具样例真实执行）
+            return mcp_dev_service.verify_published_server(db, owner_id, item)
         if item.builtin_key == "minio":
             get_workspace_minio_service().status()
             tools = minio_tool_manifest()

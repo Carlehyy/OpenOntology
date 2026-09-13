@@ -169,6 +169,11 @@ Python 脚本流水线（`definition.engine=python`）由 Jupyter Kernel Gateway
 **可选**的：不参与启动探测与 readiness；未配置或不可达时，脚本执行/保存/
 试运行返回明确错误，其余平台能力不受影响。
 
+插件社区「开发 MCP」（自研 MCP，`transport=developed`）同样经该网关执行：
+开发页解析/试跑/保存/发布校验沿用 `PYTHON_SCRIPT_TIMEOUT_SECONDS` 时限；
+agent 会话内调用自研 MCP 工具使用独立的 `MCP_DEV_TOOL_TIMEOUT_SECONDS`
+（默认 60 秒，5-1800 可调）——会话内工具调用对时延更敏感，故默认收紧。
+
 Compose 部署固定使用随栈启动的 `python_kernel_gateway` 服务。该服务以独立
 内核执行用户脚本，因此**不得**给它挂 `env_file` 或注入任何平台凭据环境变量
 （`DATABASE_URL`、`SECRET_KEY`、MinIO/n8n 凭据等对用户脚本可读），也不暴露

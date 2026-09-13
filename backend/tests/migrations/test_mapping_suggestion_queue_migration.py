@@ -30,12 +30,13 @@ def test_upgrade_downgrade_roundtrip(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _alembic_config(backend, db_path)
 
-    # head 即 0107;全新库经 0003 create_all 以当前模型建表(表随之创建),
-    # 0107 upgrade 为幂等空操作,downgrade 负责验证可逆。
+    # 全新库经 0003 create_all 以当前模型建表(表随之创建),0107 upgrade
+    # 为幂等空操作;显式降级到 0106 验证 0107 可逆(head 之上还有新迁移,
+    # 不能用相对 "-1")。
     command.upgrade(cfg, "head")
     assert _has_queue_table(db_path)
 
-    command.downgrade(cfg, "-1")
+    command.downgrade(cfg, "0106_exploration_attachment_summary")
     assert not _has_queue_table(db_path)
 
     command.upgrade(cfg, "head")

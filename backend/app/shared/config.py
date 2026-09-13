@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     python_kernel_gateway_url: str = ""
     python_kernel_gateway_auth_token: str = ""
     python_script_timeout_seconds: int = Field(default=120, ge=5, le=1800)
+    # 自研 MCP（插件社区「开发 MCP」）工具执行的时限。独立于脚本流水线
+    # 默认值：agent 会话内的工具调用对时延更敏感，默认收紧到 60 秒。
+    mcp_dev_tool_timeout_seconds: int = Field(default=60, ge=5, le=1800)
 
     # SQLite is retained only for the explicit test environment. Every normal
     # application startup validates PostgreSQL before importing the app.

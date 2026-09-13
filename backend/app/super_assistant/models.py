@@ -225,6 +225,7 @@ class SuperAssistantMcpServer(Base):
     __table_args__ = (
         UniqueConstraint("owner_id", "name", name="uq_sa_mcp_owner_name"),
         Index("ix_sa_mcp_owner_updated", "owner_id", "updated_at"),
+        Index("ix_sa_mcp_servers_dev_project_id", "dev_project_id"),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -247,8 +248,70 @@ class SuperAssistantMcpServer(Base):
     last_test_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     last_test_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 自研 MCP（插件社区「开发 MCP」发布产物）：指向开发项目行；
+    # transport='developed'、url='developed://<project_id>' 伪传输，
+    # 执行走进程内 mcp_dev_executor（对标 builtin minio 的进程内先例）
+    dev_project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantMcpDevProject(Base):
+    """自研 MCP 开发项目：以 Python 代码承载若干工具函数的最小开发单元。
+
+    script 是当前草稿；每次「保存」经服务端复核后冻结一个版本
+    （SuperAssistantMcpDevVersion）；「发布」把冻结版本固化为
+    SuperAssistantMcpServer 行（transport='developed'）。已发布的 MCP
+    始终执行 published_version_id 绑定的冻结脚本，草稿编辑不影响线上，
+    直到重新发布（与推演服务的版本纪律一致）。
+    """
+
+    __tablename__ = "super_assistant_mcp_dev_projects"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "name", name="uq_sa_mcp_dev_owner_name"),
+        Index("ix_sa_mcp_dev_owner_updated", "owner_id", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    description: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    script: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 每个工具最近一次成功试跑使用的入参（发布闸门的样例参数来源）
+    tool_samples: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    # 发布绑定的冻结版本 id（无 FK：versions.project_id 已反向引用本项目，
+    # 双向 FK 需 use_alter；修剪版本时由服务层保证不删除绑定版本）
+    published_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantMcpDevVersion(Base):
+    """保存时冻结的自研 MCP 脚本版本（含当时的工具清单与样例参数快照）。"""
+
+    __tablename__ = "super_assistant_mcp_dev_versions"
+    __table_args__ = (
+        UniqueConstraint("project_id", "version_no", name="uq_sa_mcp_dev_version_no"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("super_assistant_mcp_dev_projects.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    script: Mapped[str] = mapped_column(Text, nullable=False)
+    # 保存时从代码内省出的工具清单 [{name, description, input_schema}]
+    tool_manifest: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # 冻结时的样例参数快照（{tool_name: arguments}），发布闸门按此执行
+    tool_samples: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 最近一次发布校验/重验的逐工具结果 [{name, ok, error, duration_ms}]
+    tool_gates: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 
 class SuperAssistantMulticaConfig(Base):

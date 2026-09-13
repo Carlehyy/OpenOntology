@@ -208,6 +208,8 @@ class McpServerOut(ORMModel):
     display_name: str
     description: str
     builtin_key: str | None
+    # 自研 MCP 指向的开发项目（前端据此进入开发页；导入行为 None）
+    dev_project_id: str | None
     transport: str
     url: str
     header_names: list[str]
@@ -228,6 +230,113 @@ class McpTestOut(BaseModel):
     ok: bool
     message: str
     tools: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ──────────────────────────── 自研 MCP（开发 MCP） ────────────────────────────
+
+
+class McpDevProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+    display_name: str = Field(default="", max_length=200)
+    description: str = Field(default="", max_length=500)
+
+    @field_validator("display_name", "description", mode="before")
+    @classmethod
+    def strip_display_fields(cls, value: str) -> str:
+        return str(value).strip()
+
+
+class McpDevProjectUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=500)
+
+    @field_validator("display_name", "description", mode="before")
+    @classmethod
+    def strip_display_fields(cls, value: str | None) -> str | None:
+        return str(value).strip() if value is not None else None
+
+
+class McpDevProjectOut(ORMModel):
+    id: str
+    name: str
+    display_name: str
+    description: str
+    status: str
+    tool_count: int
+    version_count: int
+    published_version_no: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class McpDevProjectDetailOut(McpDevProjectOut):
+    script: str
+    tool_samples: dict[str, Any]
+
+
+class McpDevExecuteIn(BaseModel):
+    script: str = Field(min_length=1, max_length=200_000)
+    # 为空 = 仅解析工具清单（保存前复核 / 工具列表面板）
+    tool_name: str | None = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpDevExecuteOut(BaseModel):
+    ok: bool
+    # 解析运行：工具清单；调用运行：单工具执行结果
+    tools: list[dict[str, Any]] | None = None
+    payload: Any | None = None
+    stdout: str
+    error: str | None
+    traceback: str
+    duration_ms: int
+
+
+class McpDevSaveIn(BaseModel):
+    script: str = Field(min_length=1, max_length=200_000)
+
+
+class McpDevSaveOut(BaseModel):
+    ok: bool
+    version_no: int | None = None
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+    traceback: str = ""
+    duration_ms: int = 0
+
+
+class McpDevVersionOut(ORMModel):
+    id: str
+    version_no: int
+    tool_count: int
+    duration_ms: int
+    created_at: datetime
+
+
+class McpDevVersionDetailOut(McpDevVersionOut):
+    script: str
+    tool_manifest: list[dict[str, Any]]
+    tool_samples: dict[str, Any]
+    tool_gates: list[dict[str, Any]] | None = None
+
+
+class McpDevPublishIn(BaseModel):
+    version_no: int | None = Field(default=None, ge=1)
+    display_name: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=500)
+
+    @field_validator("display_name", "description", mode="before")
+    @classmethod
+    def strip_display_fields(cls, value: str | None) -> str | None:
+        return str(value).strip() if value is not None else None
+
+
+class McpDevPublishOut(BaseModel):
+    server_id: str
+    version_no: int
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    gates: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MulticaCommandOut(BaseModel):

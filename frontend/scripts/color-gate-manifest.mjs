@@ -50,7 +50,7 @@ export const LEGACY_COLOR_LIMITS = {
   'pages/explore/ElementDetailView.tsx':                             13,
   'pages/explore/ExplorationPage.tsx':                               3,
   'pages/explore/FileWorkspaceDrawer.tsx':                           1,
-  'pages/login/login.css':                                           101,
+  'pages/login/login.css':                                           100,
   'pages/models/ModelsPage.tsx':                                     29,
   'pages/models/hooks/useMockModels.ts':                             1,
   'pages/ontologies/detail/governance/ChainPanorama.tsx':            5,
