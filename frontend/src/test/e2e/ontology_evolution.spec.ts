@@ -735,11 +735,6 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(page.locator(`.react-flow__node[data-id="property:${objectTypeId}:p-name"] > div`)).toHaveClass(/border-violet-500/)
   await expect(page.locator(`.react-flow__node[data-id="action:act-browser-order-${suffix}"] > div`)).toHaveClass(/border-violet-500/)
 
-  // 选中哨兵后右侧会弹出执行逻辑面板（Radix 模态会锁住 body 交互），
-  // 关闭面板（等价清除哨兵选中）后再继续“计算函数”选择器的断言。
-  await page.keyboard.press('Escape')
-  await expect(page.getByTestId('sentinel-detail-sheet')).toHaveCount(0)
-
   await page.getByLabel('查看计算函数使用关系').click()
   await page.getByTestId(`function-dependency-option-fn-browser-order-${suffix}`).click()
   await expect(page.locator(`.react-flow__node[data-id="${objectTypeId}"] > div`)).toHaveClass(/border-violet-500/)

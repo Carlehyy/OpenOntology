@@ -49,10 +49,10 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     note: '需要中心 morph 动效过渡时才允许用 motion-ui CenterMorphModal（exception，新增须 PR 说明）。',
   },
   {
-    scenario: '侧滑详情面板（画布/表格行内上下文，边缘滑出的只读详情）',
+    scenario: '页面级边缘滑出抽屉（跨页面/跨页签的上下文详情）',
     component: 'Sheet（@/components/ui/sheet，Radix Dialog 封装）',
     status: 'vendored',
-    note: '自带焦点陷阱、Esc 与遮罩关闭；必须渲染 SheetTitle 保证可访问名称；首个消费方 InstanceDetailDrawer，内容层级用 --z-modal 令牌对齐 DESIGN.md §4.3。',
+    note: '模态侧滑（焦点陷阱、Esc 与遮罩关闭）；必须渲染 SheetTitle。存量消费方 InstanceDetailDrawer。画布内的浮动详情（如本体结构页 DetailPanel/SentinelDetailPanel）不选 Sheet，沿用页内 absolute 浮动卡片模式，避免遮罩锁住画布交互。',
   },
   {
     scenario: 'Tooltip 气泡提示',

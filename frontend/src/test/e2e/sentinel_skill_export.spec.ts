@@ -158,8 +158,11 @@ test('结构页导出的哨兵 Skill zip：文件名为本体名-哨兵名，内
   await expect(page.getByTestId('structure-node-object')).toBeVisible({ timeout: 20_000 })
   await page.getByLabel('查看哨兵规则覆盖范围').click()
   await page.getByTestId(`sentinel-dependency-option-${dynamicSentinel.id}`).click()
-  await expect(page.getByRole('dialog', { name: '真机技能哨兵' })).toBeVisible()
-  await expect(page.getByTestId('sentinel-detail-body')).toContainText('动态哨兵')
+  await expect(page.getByTestId('sentinel-detail-panel')).toBeVisible()
+  await expect(page.getByTestId('sentinel-detail-panel')).toHaveAttribute(
+    'aria-label', '哨兵 真机技能哨兵 执行逻辑',
+  )
+  await expect(page.getByTestId('sentinel-detail-panel')).toContainText('动态哨兵')
   await expect(page.getByTestId('sentinel-detail-condition')).toContainText("s.status == 'pending'")
 
   const downloadPromise = page.waitForEvent('download')

@@ -1,8 +1,9 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 // 本体结构页「哨兵规则」选中链路的 Skill 化回归：
-// 选中哨兵（公共/动态）→ 画布高亮保持 + 右侧弹出执行逻辑面板 →
-// 「导出Skill」触发真实下载事件（文件名=本体名-哨兵名.zip）→ toast 如实反馈。
+// 选中哨兵（公共/动态）→ 画布高亮保持 + 画布内浮出执行逻辑面板（与节点
+// DetailPanel 同形态，无遮罩不锁交互）→「导出Skill」触发真实下载事件
+// （文件名=本体名-哨兵名.zip）→ toast 如实反馈。
 // zip 内容级校验（SKILL.md 可解析、定义保真）由 stack 套件对真实后端验收。
 const ontologyId = 'ontology-structure-sentinel-skill'
 const ontologyName = '哨兵技能测试本体'
@@ -197,19 +198,18 @@ async function openStructureTab(page: Page) {
   await expect(page.getByTestId('structure-node-object')).toBeVisible()
 }
 
-test('选中公共哨兵：右侧执行逻辑面板 + 导出Skill 触发真实下载事件', async ({ page }) => {
+test('选中公共哨兵：画布内执行逻辑面板 + 导出Skill 触发真实下载事件', async ({ page }) => {
   await mockStructurePage(page)
   await openStructureTab(page)
 
   await page.getByLabel('查看哨兵规则覆盖范围').click()
   await page.getByTestId('sentinel-dependency-option-sentinel-skill-public').click()
 
-  // Radix 会给 Content 自动挂 aria-labelledby 指向 SheetTitle，
-  // 可达名称按 ARIA 优先级取标题文本（哨兵显示名）。
-  const sheet = page.getByRole('dialog', { name: '公共订单监控' })
-  await expect(sheet).toBeVisible()
+  const panel = page.getByTestId('sentinel-detail-panel')
+  await expect(panel).toBeVisible()
+  await expect(panel).toHaveAttribute('aria-label', '哨兵 公共订单监控 执行逻辑')
+  await expect(panel).toContainText('公共哨兵')
   const body = page.getByTestId('sentinel-detail-body')
-  await expect(body).toContainText('公共哨兵')
   await expect(body).toContainText('每 300 秒定时扫描')
   await expect(body).toContainText('order')
   await expect(page.getByTestId('sentinel-detail-condition')).toContainText('order.order_no != null')
@@ -224,31 +224,27 @@ test('选中公共哨兵：右侧执行逻辑面板 + 导出Skill 触发真实�
   await expect(page.getByText('哨兵 Skill 已下载')).toBeVisible()
 })
 
-test('切换动态哨兵：面板原地更新事件模式与不可用动作，Esc 关闭并清空选中', async ({ page }) => {
+test('切换动态哨兵：面板原地更新且不锁画布交互，关闭并清空选中', async ({ page }) => {
   await mockStructurePage(page)
   await openStructureTab(page)
 
   await page.getByLabel('查看哨兵规则覆盖范围').click()
   await page.getByTestId('sentinel-dependency-option-sentinel-skill-public').click()
-  await expect(page.getByRole('dialog', { name: '公共订单监控' })).toBeVisible()
+  await expect(page.getByTestId('sentinel-detail-panel')).toBeVisible()
 
-  // 面板是模态侧滑：先关闭再换选动态哨兵。
-  await page.keyboard.press('Escape')
-  await expect(page.getByTestId('sentinel-detail-sheet')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: '查看哨兵规则覆盖范围' })).toContainText('哨兵规则 · 查看覆盖范围')
-
+  // 面板无遮罩：不必先关闭，直接换选动态哨兵，内容原地更新。
   await page.getByLabel('查看哨兵规则覆盖范围').click()
   await page.getByTestId('sentinel-dependency-option-sentinel-skill-dynamic').click()
-  await expect(page.getByRole('dialog', { name: '动态订单事件模式' })).toBeVisible()
+  await expect(page.getByTestId('sentinel-detail-panel')).toBeVisible()
 
   const body = page.getByTestId('sentinel-detail-body')
-  await expect(body).toContainText('动态哨兵')
+  await expect(page.getByTestId('sentinel-detail-panel')).toContainText('动态哨兵')
   await expect(body).toContainText('事件模式')
   await expect(page.getByTestId('sentinel-detail-pattern')).toContainText('order · 窗口 3600 秒 · 含缺失分支 · count(order_no) ≥ 5 / 600 秒')
   await expect(page.getByTestId('sentinel-detail-actions')).toContainText('当前发布快照中不可用')
 
-  await page.keyboard.press('Escape')
-  await expect(page.getByTestId('sentinel-detail-sheet')).toHaveCount(0)
+  await page.getByLabel('关闭详情').click()
+  await expect(page.getByTestId('sentinel-detail-panel')).toHaveCount(0)
   // 关闭面板等价于清除哨兵选中：触发器回到占位文案，画布高亮一并消失。
   await expect(page.getByRole('button', { name: '查看哨兵规则覆盖范围' })).toContainText('哨兵规则 · 查看覆盖范围')
 })

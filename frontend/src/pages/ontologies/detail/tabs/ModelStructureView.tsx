@@ -16,7 +16,7 @@ import { agentApi, type DynamicSentinel } from '@/api/agent'
 import { apiClientV2 } from '@/api/client'
 import { saveCanvasLayout } from '@/palantir-graph/api/formalApi'
 import BusinessModelDialog from './BusinessModelDialog'
-import SentinelDetailSheet from './SentinelDetailSheet'
+import SentinelDetailPanel from './SentinelDetailPanel'
 import StructureDocDialog from './StructureDocDialog'
 import { StructureGraphEdge, StructureGraphNode } from './StructureGraphElements'
 import {
@@ -766,6 +766,8 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     }), [dependencyHighlight.edges, hasDependency, hasHighlight, level, routedEdges, searchFocus])
 
   const selectNode = useCallback((node: StructureNode) => {
+    // 画布内浮动详情面板同一时间只保留一个：点节点即让位哨兵面板。
+    setSentinelId('')
     if (node.data.kind === 'property') setDetail({ kind: 'property', id: node.data.entityId, parentObjectId: node.data.parentObjectId })
     else if (node.data.kind === 'action') setDetail({ kind: 'action', id: node.data.entityId, parentObjectId: node.data.parentObjectId })
     else setDetail({ kind: 'object', id: node.data.entityId })
@@ -867,7 +869,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
           nodes={visibleNodes} edges={visibleEdges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES}
           onNodesChange={onNodesChange} onNodeDragStart={startNodeDrag} onNodeDrag={dragNodeGroup} onNodeDragStop={stopNodeDrag}
           onNodeClick={(_event, node) => selectNode(node)}
-          onEdgeClick={(_event, edge) => { if (edge.data?.kind === 'relation' && edge.data.entityId) setDetail({ kind: 'relation', id: edge.data.entityId }) }}
+          onEdgeClick={(_event, edge) => { if (edge.data?.kind === 'relation' && edge.data.entityId) { setSentinelId(''); setDetail({ kind: 'relation', id: edge.data.entityId }) } }}
           onPaneClick={() => { setDetail(null); setSearchOpen(false) }}
           nodesDraggable nodesConnectable={false} elementsSelectable minZoom={0.2} maxZoom={2.4}
           fitView fitViewOptions={{ padding: 0.2, minZoom: 0.35, maxZoom: 0.9 }}
@@ -935,7 +937,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
         <DetailPanel workspace={workspace} selection={detail} onClose={() => setDetail(null)} />
 
         {selectedSentinel && (
-          <SentinelDetailSheet
+          <SentinelDetailPanel
             ontologyId={ontologyId}
             ontologyName={ontologyName}
             workspace={workspace}
