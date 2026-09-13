@@ -1833,6 +1833,8 @@
     "tests/super_assistant/kernel/test_context_memory_artifacts.py::test_artifact_checksum_and_business_completion_are_separate": 0.1956907920539379,
     "tests/super_assistant/kernel/test_context_memory_artifacts.py::test_context_planner_excludes_tombstones_and_applies_relevance_order": 0.18418362498050556,
     "tests/super_assistant/kernel/test_context_memory_artifacts.py::test_memory_risk_gate_only_auto_accepts_explicit_low_risk": 0.22757037507835776,
+    "tests/super_assistant/kernel/test_context_sources.py::test_collector_builds_provenance_and_filters_deleted_sources": 0.2696376250241883,
+    "tests/super_assistant/kernel/test_context_sources.py::test_collector_tolerates_graph_outage_and_keeps_pinned_memory": 0.22218337398953736,
     "tests/super_assistant/kernel/test_contracts.py::test_call_status_outcome_axes_are_validated": 0.2535792930284515,
     "tests/super_assistant/kernel/test_contracts.py::test_conflicting_cancel_is_rejected": 0.2271926249959506,
     "tests/super_assistant/kernel/test_contracts.py::test_deadline_after_user_cancel_is_rejected": 0.28080320806475356,
