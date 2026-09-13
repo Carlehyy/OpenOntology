@@ -50,7 +50,10 @@ class ProcessPluginHost:
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *self._command(), stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                # Structured responses are the only plugin diagnostic channel.
+                # A never-read stderr pipe can otherwise block a noisy child.
+                stderr=asyncio.subprocess.DEVNULL,
                 cwd=cwd, env=self._env(),
             )
         except (OSError, ValueError) as exc:
@@ -62,30 +65,51 @@ class ProcessPluginHost:
             process = self._process
             if process is None or process.stdin is None or process.stdout is None:
                 raise PluginHostError("plugin process is unavailable")
-            process.stdin.write((json.dumps(dict(payload), ensure_ascii=False) + "\n").encode())
-            await process.stdin.drain()
             try:
+                process.stdin.write((json.dumps(dict(payload), ensure_ascii=False) + "\n").encode())
+                await process.stdin.drain()
                 line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
             except asyncio.TimeoutError as exc:
+                # A timed-out child is no longer trusted to consume the next
+                # request.  Kill it before returning so no process or secret
+                # environment survives a failed call.
+                await self.stop()
                 raise PluginHostError("plugin process request timed out") from exc
+            except (BrokenPipeError, ConnectionError, OSError) as exc:
+                await self.stop()
+                raise PluginHostError("plugin process is unavailable") from exc
             if not line:
+                await self.stop()
                 raise PluginHostError("plugin process exited without a response")
             if len(line) > 1024 * 1024:
+                await self.stop()
                 raise PluginHostError("plugin response frame is too large")
             try:
                 value = json.loads(line.decode())
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                await self.stop()
                 raise PluginHostError("plugin response is not valid JSON") from exc
             if not isinstance(value, dict) or any(key in value for key in ("capabilities", "permissions")):
+                await self.stop()
                 raise PluginHostError("plugin response must not expand capabilities")
             return value
 
     async def health(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        value = await self._request({"op": "health", "key": self.manifest.key, "revision": self.manifest.revision}, timeout=timeout)
-        if value.get("key") not in {None, self.manifest.key} or value.get("revision") not in {None, self.manifest.revision}:
+        value = await self._request(
+            {"op": "health", "key": self.manifest.key, "revision": self.manifest.revision},
+            timeout=timeout,
+        )
+        # Identity and protocol are mandatory handshake facts.  Accepting a
+        # missing value would let a stale or unrelated process pass health.
+        if value.get("key") != self.manifest.key or value.get("revision") != self.manifest.revision:
+            await self.stop()
             raise PluginHostError("plugin health identity mismatch")
-        if value.get("protocol") not in {None, "plugin.v1"}:
+        if value.get("protocol") != "plugin.v1":
+            await self.stop()
             raise PluginHostError("unsupported plugin protocol")
+        if value.get("ok") is not True:
+            await self.stop()
+            raise PluginHostError("plugin health check failed")
         return value
 
     async def invoke(self, request: Mapping[str, Any], *, timeout: float = 120.0) -> dict[str, Any]:
@@ -95,9 +119,21 @@ class ProcessPluginHost:
         process, self._process = self._process, None
         if process is None or process.returncode is not None:
             return
-        process.terminate()
         try:
-            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+            process.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=max(0.0, grace_seconds))
         except asyncio.TimeoutError:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
             await process.wait()
+
+    async def __aenter__(self) -> "ProcessPluginHost":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.stop()

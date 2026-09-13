@@ -7,6 +7,7 @@ explicit enable operation.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from app.super_assistant.kernel.capability_service import (
 )
 from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy, TrustLevel
 from app.super_assistant.kernel.contracts import ContractError
+from app.super_assistant.kernel.plugin_host import PluginHostError, ProcessPluginHost
 from app.super_assistant.kernel.plugins import PluginManifest, PluginState
 from app.super_assistant.models import SuperAssistantProcessPlugin
 from app.super_assistant.schemas import ProcessPluginCreate
@@ -160,13 +162,51 @@ def install_process_plugin(db: Session, owner_id: str, body: ProcessPluginCreate
         raise
 
 
+async def _probe_plugin(row: SuperAssistantProcessPlugin) -> dict:
+    """Run the mandatory pre-enable handshake and always tear down the host."""
+    host = ProcessPluginHost(_manifest(row))
+    try:
+        return await host.health(timeout=5.0)
+    finally:
+        # A health probe is a short-lived process.  It must not leave a child
+        # (or its secret environment) running while the revision is disabled.
+        await host.stop()
+
+
+def _healthcheck_before_enable(row: SuperAssistantProcessPlugin) -> dict:
+    # The route is intentionally synchronous and runs in FastAPI's worker
+    # thread.  Refuse to create an un-awaited coroutine when called from an
+    # event loop by an internal caller.
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        raise ProcessPluginValidationError("插件健康检查必须在同步 worker 中执行")
+    try:
+        return asyncio.run(_probe_plugin(row))
+    except (PluginHostError, OSError, ValueError) as exc:
+        raise ProcessPluginValidationError(f"插件健康检查失败: {str(exc)[:400]}") from exc
+
+
 def enable_process_plugin(db: Session, owner_id: str, plugin_id: str) -> SuperAssistantProcessPlugin:
     row = get_process_plugin(db, owner_id, plugin_id, lock=True)
     if row.state not in {PluginState.INSTALLED.value, PluginState.DISABLED.value}:
         raise ProcessPluginValidationError("当前插件状态不可启用")
+    try:
+        health = _healthcheck_before_enable(row)
+    except ProcessPluginValidationError as exc:
+        row.last_health_status = "failed"
+        row.last_health_message = str(exc)[:500]
+        # Capability remains disabled and the persisted lifecycle state is
+        # explicit, so a failed probe cannot accidentally become callable.
+        _freeze_capability(db, row, enabled=False)
+        db.commit()
+        raise
     _freeze_capability(db, row, enabled=True)
     row.state = PluginState.ENABLED.value
-    row.last_health_status = None
+    row.last_health_status = "healthy"
+    row.last_health_message = None
     db.commit(); db.refresh(row)
     return row
 

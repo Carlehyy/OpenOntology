@@ -60,7 +60,7 @@ async def test_process_plugin_host_uses_json_lines_and_rejects_capability_expans
 
     script = (
         "import json,sys; "
-        "[print(json.dumps({'ok':True,'secret':__import__('os').environ.get('PLUGIN_SECRET')}), flush=True) "
+        "[print(json.dumps({'ok':True,'key':'user.echo','revision':1,'protocol':'plugin.v1','secret':__import__('os').environ.get('PLUGIN_SECRET')}), flush=True) "
         "for line in sys.stdin if json.loads(line).get('op') == 'health']"
     )
     manifest = PluginManifest(
@@ -70,7 +70,7 @@ async def test_process_plugin_host_uses_json_lines_and_rejects_capability_expans
     )
     host = ProcessPluginHost(manifest, secret_env={"PLUGIN_SECRET": "short-lived"})
     result = await host.health()
-    assert result == {"ok": True, "secret": "short-lived"}
+    assert result == {"ok": True, "key": "user.echo", "revision": 1, "protocol": "plugin.v1", "secret": "short-lived"}
     await host.stop()
 
     bad_script = "import sys; print('{\\\"capabilities\\\":[]}'); sys.stdout.flush()"
@@ -80,3 +80,38 @@ async def test_process_plugin_host_uses_json_lines_and_rejects_capability_expans
     with pytest.raises(PluginHostError, match="expand capabilities"):
         await bad.health()
     await bad.stop()
+
+
+@pytest.mark.asyncio
+async def test_process_plugin_health_requires_identity_protocol_and_ok():
+    import shlex
+    import sys
+
+    script = (
+        "import json,sys; "
+        "[print(json.dumps({'ok':True}), flush=True) for line in sys.stdin]"
+    )
+    host = ProcessPluginHost(PluginManifest(
+        key="user.missing", revision=7,
+        entrypoint=f"{sys.executable} -c {shlex.quote(script)}",
+        trust_level=TrustLevel.VERIFIED,
+    ))
+    with pytest.raises(PluginHostError, match="identity mismatch"):
+        await host.health(timeout=1)
+    assert host._process is None
+
+
+@pytest.mark.asyncio
+async def test_process_plugin_timeout_terminates_child():
+    import shlex
+    import sys
+
+    script = "import time,sys; [time.sleep(10) for _ in sys.stdin]"
+    host = ProcessPluginHost(PluginManifest(
+        key="user.timeout", revision=1,
+        entrypoint=f"{sys.executable} -c {shlex.quote(script)}",
+        trust_level=TrustLevel.VERIFIED,
+    ))
+    with pytest.raises(PluginHostError, match="timed out"):
+        await host.invoke({"x": 1}, timeout=0.05)
+    assert host._process is None

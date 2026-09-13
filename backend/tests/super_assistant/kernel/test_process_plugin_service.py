@@ -1,4 +1,6 @@
 import pytest
+import shlex
+import sys
 from types import SimpleNamespace
 
 from app.super_assistant.kernel.models import CapabilityRevision
@@ -15,12 +17,18 @@ from app.super_assistant.schemas import ProcessPluginCreate
 
 
 def _body(**overrides):
+    script = (
+        "import json,sys; "
+        "[print(json.dumps({'ok':True,'key':json.loads(line).get('key',''),"
+        "'revision':json.loads(line).get('revision',1),'protocol':'plugin.v1'}), flush=True) "
+        "for line in sys.stdin]"
+    )
     values = {
         "key": "user.echo",
         "revision": 1,
-        "entrypoint": "python plugin.py",
+        "entrypoint": f"{sys.executable} -c {shlex.quote(script)}",
         "trust_level": "user_untrusted",
-        "workspace_scope": ["/tmp/plugin"],
+        "workspace_scope": ["/tmp"],
     }
     values.update(overrides)
     return ProcessPluginCreate(**values)
@@ -71,3 +79,19 @@ def test_runtime_resolves_enabled_plugin_without_manifest_hash_conflict(db, admi
     connector = runtime._resolve_external_connector(db, run, call)
     assert connector is not None
     assert connector.descriptor().key == capability_key(admin_user.id, row.key)
+
+
+def test_enable_requires_healthy_handshake_and_keeps_plugin_disabled(db, admin_user):
+    script = "import sys; [print('{\\\"ok\\\":true}', flush=True) for line in sys.stdin]"
+    row = install_process_plugin(
+        db,
+        admin_user.id,
+        _body(key="user.unhealthy", entrypoint=f"{sys.executable} -c {shlex.quote(script)}"),
+    )
+    with pytest.raises(ProcessPluginValidationError, match="健康检查失败"):
+        enable_process_plugin(db, admin_user.id, row.id)
+    db.refresh(row)
+    cap = db.get(CapabilityRevision, (capability_key(admin_user.id, "user.unhealthy"), 1))
+    assert row.state == "installed"
+    assert row.last_health_status == "failed"
+    assert cap is not None and cap.enabled is False
