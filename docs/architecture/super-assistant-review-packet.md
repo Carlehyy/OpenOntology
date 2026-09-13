@@ -221,7 +221,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 | M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试 | 已完成首版；OS 沙箱、secret broker 需部署层证据 |
 | M5 | Context Pack、Memory/Palace source provenance、tombstone 排除、结构化 Artifact 和 checksum 校验有代码/测试 | 已完成首版 |
 | M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
-| M7 | 当前 `oo-rearch` Compose 的 `/api/health` 依赖探针通过（PostgreSQL、Redis、Neo4j、MinIO、Browser、NATS、n8n 均健康）；但该 staging backend 旧镜像内 `alembic current` 无法定位数据库 revision `0110_super_assistant_process_plugins`，不能证明当前分支迁移已部署。完整 kernel live E2E、隔离 staging 数据库升级和外部副作用证据仍需按当前提交重跑 | 依赖探针通过，当前提交 staging 验收未通过/待重建 |
+| M7 | 当前 `oo-rearch` Compose 的 `/api/health` 依赖探针通过（PostgreSQL、Redis、Neo4j、MinIO、Browser、NATS、n8n 均健康）；但该 staging backend 旧镜像内 `alembic current` 无法定位数据库 revision `0110_super_assistant_process_plugins`，不能证明当前分支迁移已部署。隔离临时 Compose 已使用当前镜像完成 PostgreSQL `upgrade head`、`downgrade 0110 -> 0109`、再次 `upgrade head`，但尚未覆盖现存业务数据库升级、完整 kernel live E2E 和外部副作用证据 | 依赖探针通过，临时迁移往返通过，当前提交完整 staging 验收待执行 |
 | M8 | 静态门禁、前端 color-token 和专项测试通过；完整发布/回滚演练尚未完成 | 未完成 |
 
 已执行的 staging 依赖探针命令为：
