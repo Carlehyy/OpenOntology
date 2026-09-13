@@ -146,7 +146,11 @@ class ExecutionAttempt(Base):
 
 class ExecutionEvent(Base):
     __tablename__ = "super_assistant_execution_events"
-    __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_sa_execution_event_seq"), Index("ix_sa_execution_events_run_seq", "run_id", "seq"))
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_sa_execution_event_seq"),
+        UniqueConstraint("connector_id", "provider_event_id", name="uq_sa_execution_event_provider"),
+        Index("ix_sa_execution_events_run_seq", "run_id", "seq"),
+    )
 
     event_id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     run_id: Mapped[str] = mapped_column(String, ForeignKey("super_assistant_execution_runs.id", ondelete="CASCADE"), nullable=False)
@@ -159,6 +163,9 @@ class ExecutionEvent(Base):
     correlation_id: Mapped[str] = mapped_column(String(255), nullable=False)
     command_id: Mapped[str] = mapped_column(String(255), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    connector_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     payload_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     redaction: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

@@ -171,11 +171,23 @@ def append_event(
     correlation_id: str | None = None,
     redaction: dict | None = None,
     lease: LeaseToken | None = None,
+    connector_id: str | None = None,
+    provider_event_id: str | None = None,
 ) -> ExecutionEvent:
     """追加一个事件；调用方必须已锁定 Run。seq 回滚不消耗可见序号。"""
     if lease is not None:
         assert_lease(run, lease)
     validate_payload(event_type, payload)
+    payload_hash = _hash_payload(payload)
+    if connector_id and provider_event_id:
+        prior = db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.connector_id == connector_id,
+            ExecutionEvent.provider_event_id == provider_event_id,
+        ))
+        if prior is not None:
+            if prior.payload_hash != payload_hash:
+                raise IdempotencyConflict("provider_event_id payload hash conflict")
+            return prior
     seq = run.next_event_seq
     envelope = EventEnvelope(
         event_id=_new_id(), run_id=run.id, seq=seq, event_type=event_type,
@@ -190,7 +202,8 @@ def append_event(
         schema_version=1, occurred_at=envelope.occurred_at, actor=actor,
         causation_id=envelope.causation_id, correlation_id=envelope.correlation_id,
         command_id=command_id, idempotency_key=idempotency_key, payload=payload,
-        redaction=envelope.redaction,
+        redaction=envelope.redaction, connector_id=connector_id,
+        provider_event_id=provider_event_id, payload_hash=payload_hash,
     )
     db.add(event)
     run.next_event_seq += 1
