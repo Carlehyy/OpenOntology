@@ -135,7 +135,7 @@ fi
 # Keep the production container hardening from being removed during a
 # Compose edit.  These settings are defense in depth and do not replace the
 # dedicated rootless runner required for user process plugins.
-for hardened_service in backend pipeline_executor; do
+for hardened_service in python_kernel_gateway backend pipeline_executor; do
   hardened_block="$(awk -v service="$hardened_service" '
     $0 == "  " service ":" { in_service = 1 }
     in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
