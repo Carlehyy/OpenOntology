@@ -125,7 +125,7 @@ disable new calls
 
 - **内置工具和 Skill**：优先使用进程内实现，避免序列化和不必要的依赖。
 - **MCP**：承担工具、资源和提示集成；如果双方协商支持 MCP Tasks，可使用任务句柄、查询和合作式取消，但仍通过本地 Call/Run 记录。
-- **用户进程插件**：参考 Harness 的 `initialize / tools-list / tools-call / progress / shutdown` 生命周期；工具仍经过 schema、权限、超时、取消、审计和有序结果处理。
+- **用户进程插件**：参考 Harness 的 `initialize / tools/list / tools/call / progress / shutdown` 生命周期；工具仍经过 schema、权限、超时、取消、审计和有序结果处理。
 - **远程工具**：通过 HTTPS/MCP Connector 接入，不把远程声明视为可信身份。
 - **Agent**：走 Agent Connector，不把长任务 Agent 简化成一次 Tool Call。
 

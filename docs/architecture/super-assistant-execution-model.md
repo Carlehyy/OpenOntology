@@ -93,7 +93,7 @@ Turn 是一次激活区间，开始时领取 Inbox 输入或继续信号，结�
 
 ### Step
 
-Step 是一次模型决策及其派生 Call 的归并边界。模型请求、可见上下文和能力目录属于 Step 的请求视图。Step 可以在 Call 已经转为 `waiting_external` 后闭合，之后的回调通过 Inbox 激活新的 Turn；不把一个悬挂网络连接当作永久开放的 Step。
+Step 是一次模型决策及其派生 Call 的归并边界。模型请求、可见上下文和能力目录属于 Step 的请求视图。Step 在其 Call 进入 `waiting_external` 前结束并记录等待原因；之后的外部回调通过 Inbox 激活新的 Turn 和新的 Step。Call 与 Run 可以跨请求存活，数据库不保留一个悬挂网络连接。
 
 ### Call
 
