@@ -38,6 +38,7 @@ from app.ontologies.sentinels import (
     operational_workflow as _operational_workflow,
 )
 from app.ontologies.sentinels import query_service as _query_service
+from app.ontologies.sentinels import skill_export as _skill_export
 from app.ontologies.sentinels.dynamic_service import (
     ORIGIN_BUILTIN,
     _sentinel_write_fence,
@@ -259,6 +260,21 @@ def get_sentinel(
         sentinel_id,
         db,
         dict_fn=_dict,
+    )
+
+
+@router.get("/{sentinel_id}/export-skill")
+def export_sentinel_skill(
+    ontology_id: str,
+    sentinel_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Deterministically render one sentinel as a standard Skill zip archive."""
+    return _skill_export.export_sentinel_skill(
+        ontology_id,
+        sentinel_id,
+        db,
     )
 
 

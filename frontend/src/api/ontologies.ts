@@ -28,7 +28,7 @@ export interface OntologyPublishedDocument {
   publishedAt: string | null
 }
 
-function safeDownloadName(value: string) {
+export function safeDownloadName(value: string) {
   const printable = [...value.trim()].filter(character => character.charCodeAt(0) >= 32).join('')
   const cleaned = printable.replace(/[\\/:*?"<>|]/g, '_')
   return cleaned || 'ontology'

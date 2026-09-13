@@ -56,6 +56,7 @@ export default defineConfig({
     '**/ontology_overview_responsive.spec.ts',
     '**/ontology_structure_doc_dialog.spec.ts',
     '**/ontology_structure_initial_view.spec.ts',
+    '**/ontology_structure_sentinel_skill.spec.ts',
     '**/ontology_runtime_state_conflict.spec.ts',
     '**/ontology_safe_recovery.spec.ts',
     '**/ontology_semantic_gate.spec.ts',

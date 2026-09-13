@@ -49,6 +49,12 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     note: '需要中心 morph 动效过渡时才允许用 motion-ui CenterMorphModal（exception，新增须 PR 说明）。',
   },
   {
+    scenario: '侧滑详情面板（画布/表格行内上下文，边缘滑出的只读详情）',
+    component: 'Sheet（@/components/ui/sheet，Radix Dialog 封装）',
+    status: 'vendored',
+    note: '自带焦点陷阱、Esc 与遮罩关闭；必须渲染 SheetTitle 保证可访问名称；首个消费方 InstanceDetailDrawer，内容层级用 --z-modal 令牌对齐 DESIGN.md §4.3。',
+  },
+  {
     scenario: 'Tooltip 气泡提示',
     component: 'reUI Tooltip',
     status: 'available',

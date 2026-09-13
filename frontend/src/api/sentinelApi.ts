@@ -1,4 +1,5 @@
 import { apiClient } from './client'
+import { safeDownloadName } from './ontologies'
 
 export interface SentinelBinding {
   alias: string
@@ -185,6 +186,22 @@ export const sentinelApi = {
     apiClient.get<SentinelNotification[]>(`${base(ontologyId)}/notifications`),
   cdcStatus: (ontologyId: string) =>
     apiClient.get<SentinelCdcStatus>(`${base(ontologyId)}/cdc-status`),
+  // 导出标准 Skill zip（must use authenticated request — plain links omit Bearer token）
+  exportSkill: async (ontologyId: string, sentinelId: string, downloadName: string) => {
+    const blob = (await apiClient.get(
+      `${base(ontologyId)}/${sentinelId}/export-skill`,
+      { responseType: 'blob' },
+    )) as unknown as Blob
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${safeDownloadName(downloadName)}.zip`
+    a.style.display = 'none'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  },
 }
 
 export interface SentinelNotification {
