@@ -61,8 +61,6 @@ def _memory_candidates(db: Session, owner_id: str, query_text: str) -> list[Cont
             continue
         seen.add(row.id)
         rows.append(row)
-    if rows:
-        memory_service.mark_referenced(db, [row.id for row in rows])
     result: list[ContextCandidate] = []
     for row in rows:
         result.append(ContextCandidate(
@@ -160,6 +158,16 @@ def _palace_candidates(db: Session, owner_id: str, query_text: str) -> list[Cont
             cost=1.0, section="knowledge",
         ))
     return result
+
+
+def mark_selected_context_sources(db: Session, source_refs: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> None:
+    """Increment reference counters only for sources admitted to the final pack."""
+    memory_ids = [
+        str(ref.get("id")) for ref in source_refs
+        if ref.get("kind") == "memory" and ref.get("id")
+    ]
+    if memory_ids:
+        memory_service.mark_referenced(db, memory_ids)
 
 
 def collect_context_candidates(db: Session, owner_id: str, query_text: str) -> list[ContextCandidate]:
