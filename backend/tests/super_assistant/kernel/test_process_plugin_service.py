@@ -12,7 +12,11 @@ from app.super_assistant.process_plugin_service import (
     enable_process_plugin,
     install_process_plugin,
     uninstall_process_plugin,
+    admit_plugin_call,
+    reclaim_expired_plugin_calls,
 )
+from datetime import datetime, timedelta, timezone
+from app.super_assistant.models import SuperAssistantProcessPluginInvocation
 from app.super_assistant.schemas import ProcessPluginCreate
 
 
@@ -62,6 +66,26 @@ def test_uninstall_enters_drain_when_calls_are_active(db, admin_user):
         uninstall_process_plugin(db, admin_user.id, row.id)
     db.refresh(row)
     assert row.state == "draining"
+
+
+def test_process_plugin_invocation_lease_reclaims_after_worker_loss(db, admin_user):
+    row = install_process_plugin(db, admin_user.id, _body(key="user.lease"))
+    enable_process_plugin(db, admin_user.id, row.id)
+    lease_id = admit_plugin_call(db, admin_user.id, row.id, call_id="call-lost", lease_seconds=1)
+    db.commit()
+    assert row.active_calls == 1
+    reclaimed = reclaim_expired_plugin_calls(
+        db, owner_id=admin_user.id, plugin_id=row.id,
+        now=datetime.now(timezone.utc) + timedelta(seconds=2),
+    )
+    db.commit()
+    assert reclaimed == 1
+    db.refresh(row)
+    invocation = db.get(SuperAssistantProcessPluginInvocation, lease_id)
+    assert row.active_calls == 0 and invocation.state == "expired"
+    uninstall_process_plugin(db, admin_user.id, row.id)
+    db.refresh(row)
+    assert row.state == "uninstalled"
 
 
 def test_process_plugin_manifest_rejects_unknown_host_capability(db, admin_user):

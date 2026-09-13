@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -25,7 +25,10 @@ from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy
 from app.super_assistant.kernel.contracts import ContractError
 from app.super_assistant.kernel.plugin_host import PluginHostError, ProcessPluginHost
 from app.super_assistant.kernel.plugins import PluginManifest, PluginState
-from app.super_assistant.models import SuperAssistantProcessPlugin
+from app.super_assistant.models import (
+    SuperAssistantProcessPlugin,
+    SuperAssistantProcessPluginInvocation,
+)
 from app.super_assistant.schemas import ProcessPluginCreate
 from app.shared.config import settings
 from app.shared.config import normalized_environment
@@ -49,6 +52,12 @@ class ProcessPluginValidationError(ProcessPluginServiceError):
 
 class ProcessPluginBusyError(ProcessPluginServiceError):
     pass
+
+
+# The process host timeout is currently capped at 120 seconds.  The longer
+# lease allows a worker to be restarted without prematurely reclaiming a live
+# invocation while still giving drain a bounded recovery path.
+PLUGIN_INVOCATION_LEASE_SECONDS = 10 * 60
 
 
 # These are the host-facing capabilities that a process may request.  The
@@ -233,6 +242,8 @@ def uninstall_process_plugin(db: Session, owner_id: str, plugin_id: str) -> None
     row = get_process_plugin(db, owner_id, plugin_id, lock=True)
     if row.state == PluginState.UNINSTALLED.value:
         return
+    reclaim_expired_plugin_calls(db, owner_id=owner_id, plugin_id=plugin_id)
+    db.refresh(row)
     revoke_capability_revisions(db, [capability_key(row.owner_id, row.key)], revision=row.revision)
     if row.active_calls:
         row.state = PluginState.DRAINING.value
@@ -244,22 +255,108 @@ def uninstall_process_plugin(db: Session, owner_id: str, plugin_id: str) -> None
     db.commit()
 
 
-def admit_plugin_call(db: Session, owner_id: str, plugin_id: str) -> SuperAssistantProcessPlugin:
-    """Atomically admit only enabled revisions; host releases this count."""
+def reclaim_expired_plugin_calls(
+    db: Session,
+    *,
+    owner_id: str | None = None,
+    plugin_id: str | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Reclaim leases whose owner process disappeared.
+
+    This is deliberately idempotent and safe to call from admission, drain,
+    and a periodic maintenance job.  The invocation row is the authority;
+    ``active_calls`` is repaired from the number of rows transitioned here.
+    """
+    current = now or datetime.now(timezone.utc)
+    statement = select(SuperAssistantProcessPluginInvocation).where(
+        SuperAssistantProcessPluginInvocation.state == "active",
+        SuperAssistantProcessPluginInvocation.lease_expires_at <= current,
+    )
+    if owner_id is not None:
+        statement = statement.where(SuperAssistantProcessPluginInvocation.owner_id == owner_id)
+    if plugin_id is not None:
+        statement = statement.where(SuperAssistantProcessPluginInvocation.plugin_id == plugin_id)
+    rows = list(db.scalars(statement.with_for_update()).all())
+    if not rows:
+        return 0
+    grouped: dict[str, int] = {}
+    for invocation in rows:
+        invocation.state = "expired"
+        invocation.released_at = current
+        grouped[invocation.plugin_id] = grouped.get(invocation.plugin_id, 0) + 1
+    for row_id, count in grouped.items():
+        plugin = db.scalar(select(SuperAssistantProcessPlugin).where(
+            SuperAssistantProcessPlugin.id == row_id,
+        ).with_for_update())
+        if plugin is not None:
+            plugin.active_calls = max(0, plugin.active_calls - count)
+    db.flush()
+    return len(rows)
+
+
+def admit_plugin_call(
+    db: Session,
+    owner_id: str,
+    plugin_id: str,
+    *,
+    call_id: str,
+    lease_seconds: int = PLUGIN_INVOCATION_LEASE_SECONDS,
+) -> str:
+    """Atomically admit one Call and return its crash-recoverable lease id."""
+    reclaim_expired_plugin_calls(db, owner_id=owner_id, plugin_id=plugin_id)
     row = get_process_plugin(db, owner_id, plugin_id, lock=True)
     if row.state != PluginState.ENABLED.value:
         raise ProcessPluginValidationError("插件 revision 未启用")
+    if not call_id.strip():
+        raise ProcessPluginValidationError("插件调用缺少 call_id")
+    existing = db.scalar(select(SuperAssistantProcessPluginInvocation).where(
+        SuperAssistantProcessPluginInvocation.call_id == call_id,
+    ).with_for_update())
+    if existing is not None:
+        if existing.plugin_id != plugin_id or existing.owner_id != owner_id:
+            raise ProcessPluginValidationError("插件调用已绑定其他插件")
+        if existing.state == "active":
+            return existing.id
+        raise ProcessPluginValidationError("插件调用 lease 已结束")
+    invocation = SuperAssistantProcessPluginInvocation(
+        plugin_id=plugin_id,
+        owner_id=owner_id,
+        call_id=call_id,
+        state="active",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, int(lease_seconds))),
+    )
+    db.add(invocation)
     row.active_calls += 1
     db.flush()
-    return row
+    return invocation.id
 
 
-def release_plugin_call(db: Session, owner_id: str, plugin_id: str) -> SuperAssistantProcessPlugin:
+def release_plugin_call(
+    db: Session,
+    owner_id: str,
+    plugin_id: str,
+    *,
+    invocation_id: str,
+    call_id: str | None = None,
+) -> SuperAssistantProcessPlugin:
+    """Release one invocation lease; repeated/late releases are idempotent."""
+    reclaim_expired_plugin_calls(db, owner_id=owner_id, plugin_id=plugin_id)
+    invocation = db.scalar(select(SuperAssistantProcessPluginInvocation).where(
+        SuperAssistantProcessPluginInvocation.id == invocation_id,
+        SuperAssistantProcessPluginInvocation.plugin_id == plugin_id,
+        SuperAssistantProcessPluginInvocation.owner_id == owner_id,
+    ).with_for_update())
     row = get_process_plugin(db, owner_id, plugin_id, lock=True)
-    if row.active_calls <= 0:
-        raise ProcessPluginValidationError("插件没有在途调用")
-    row.active_calls -= 1
-    if row.state == PluginState.DRAINING.value and row.active_calls == 0:
-        row.state = PluginState.DISABLED.value
+    if invocation is None:
+        raise ProcessPluginValidationError("插件调用 lease 不存在")
+    if call_id is not None and invocation.call_id != call_id:
+        raise ProcessPluginValidationError("插件调用 lease 与 call_id 不匹配")
+    if invocation.state == "active":
+        invocation.state = "released"
+        invocation.released_at = datetime.now(timezone.utc)
+        row.active_calls = max(0, row.active_calls - 1)
+        if row.state == PluginState.DRAINING.value and row.active_calls == 0:
+            row.state = PluginState.DISABLED.value
     db.flush()
     return row

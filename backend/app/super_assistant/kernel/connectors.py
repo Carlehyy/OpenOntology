@@ -281,6 +281,7 @@ class McpToolConnector:
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
     revision: int = 1
+    manifest_hash: str | None = None
 
     @property
     def namespaced_key(self) -> str:

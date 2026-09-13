@@ -204,21 +204,6 @@ async def test_mcp_server_lifecycle_preserves_owner_and_builtin_boundaries(
         assert observed["args"] == ["-y", "@example/mcp-server"]
         assert observed["env"] == {"API_KEY": "secret"}
 
-        db.add(
-            CapabilityRevision(
-                key="mcp__owner_tools__search",
-                revision=1,
-                source="mcp",
-                manifest_hash="test",
-                trust_level="user_untrusted",
-                permissions=[],
-                input_schema={},
-                output_schema={},
-                side_effect_class="external_async",
-            )
-        )
-        db.commit()
-
         removed_id = custom.id
         mcp_server_service.remove_mcp_server(
             db,
@@ -230,4 +215,32 @@ async def test_mcp_server_lifecycle_preserves_owner_and_builtin_boundaries(
         capability = db.get(CapabilityRevision, ("mcp__owner_tools__search", 1))
         assert capability is not None and capability.enabled is False
 
+    engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manifest_revisions_freeze_and_failed_probe_keeps_last_good(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'mcp-revisions.db'}")
+    Base.metadata.create_all(bind=engine, tables=[User.__table__, SuperAssistantMcpServer.__table__, CapabilityRevision.__table__])
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    with Session() as db:
+        owner = User(id="owner-rev", username="owner-rev", email="owner-rev@example.com", password_hash="unused", role="editor")
+        db.add(owner); db.commit()
+        server = mcp_server_service.create_mcp_server(db, owner.id, McpServerCreate(name="rev_tools", transport="stdio", command="node"))
+        mode = {"value": 1}
+        async def discover(**_):
+            if mode["value"] == 3:
+                raise RuntimeError("offline")
+            return [{"name": "search" if mode["value"] == 1 else "lookup"}]
+        monkeypatch.setattr(mcp_server_service, "discover_tools", discover)
+        first = await mcp_server_service.test_mcp_server(db, owner.id, server.id, include_builtins=False)
+        assert first.ok and server.manifest_revision == 1
+        mode["value"] = 2
+        second = await mcp_server_service.test_mcp_server(db, owner.id, server.id, include_builtins=False)
+        assert second.ok and server.manifest_revision == 2
+        mode["value"] = 3
+        failed = await mcp_server_service.test_mcp_server(db, owner.id, server.id, include_builtins=False)
+        assert not failed.ok and server.manifest_revision == 2 and server.tool_manifest[0]["name"] == "lookup"
+        caps = db.query(CapabilityRevision).filter(CapabilityRevision.key == "mcp__rev_tools__lookup").all()
+        assert len(caps) == 1 and caps[0].revision == 2 and caps[0].enabled
     engine.dispose()

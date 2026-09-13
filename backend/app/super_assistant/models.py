@@ -244,6 +244,9 @@ class SuperAssistantMcpServer(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     require_confirmation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     tool_manifest: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Capability revisions are frozen snapshots of the tested tool manifest.
+    manifest_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    manifest_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_test_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     last_test_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -288,6 +291,32 @@ class SuperAssistantProcessPlugin(Base):
     uninstalled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantProcessPluginInvocation(Base):
+    """Durable lease for one process-plugin invocation.
+
+    ``active_calls`` on the plugin row is a projection for UI/drain checks;
+    this row is the recovery source of truth so a worker crash cannot leave an
+    invocation permanently active.
+    """
+
+    __tablename__ = "super_assistant_process_plugin_invocations"
+    __table_args__ = (
+        UniqueConstraint("call_id", name="uq_sa_process_plugin_invocation_call"),
+        Index("ix_sa_process_plugin_invocations_plugin_state", "plugin_id", "state", "lease_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    plugin_id: Mapped[str] = mapped_column(
+        String, ForeignKey("super_assistant_process_plugins.id", ondelete="CASCADE"), nullable=False,
+    )
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    call_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 
 class SuperAssistantMulticaConfig(Base):
