@@ -83,9 +83,10 @@ async def ensure_pipeline_stream(js) -> None:
         # 多进程同时首次派发时只有一个能建流成功；“名字已占用”即已存在
         if "already in use" not in str(exc):
             raise
-        # 生产上可能存在只含旧 subject 的流：合并 subjects 后原地更新，
-        # 其余配置（retention/max_age/duplicate_window）一并收敛到当前声明
+        # 旧流仅允许追加 subject；持久性策略不一致时停止派发，
+        # 避免在业务流上静默改变保留或去重语义。
         info = await js.stream_info(PIPELINE_STREAM)
+        _assert_stream_policy(info.config, config, PIPELINE_STREAM)
         existing = [str(subject) for subject in (info.config.subjects or [])]
         merged = sorted(set(existing) | set(PIPELINE_STREAM_SUBJECTS))
         if merged != sorted(existing):
@@ -110,11 +111,38 @@ async def ensure_execution_stream(js) -> None:
         if "already in use" not in str(exc):
             raise
         info = await js.stream_info(EXECUTION_STREAM)
+        _assert_stream_policy(info.config, config, EXECUTION_STREAM)
         existing = [str(subject) for subject in (info.config.subjects or [])]
         merged = sorted(set(existing) | set(config.subjects))
         if merged != sorted(existing):
             config.subjects = merged
             await js.update_stream(config)
+
+
+def _assert_stream_policy(existing, expected, stream_name: str) -> None:
+    """Fail fast when an existing stream silently violates delivery policy.
+
+    Subject evolution is safe, but changing retention or deduplication policy
+    under the same stream name changes durability semantics.  Real JetStream
+    configs expose these fields; lightweight test doubles may only expose
+    subjects, so absent attributes remain compatible with the test contract.
+    """
+    checks = {
+        "retention": expected.retention,
+        "max_age": expected.max_age,
+        "duplicate_window": expected.duplicate_window,
+    }
+    for field, wanted in checks.items():
+        actual = getattr(existing, field, None)
+        if actual is None:
+            continue
+        actual_value = getattr(actual, "value", actual)
+        wanted_value = getattr(wanted, "value", wanted)
+        if actual_value != wanted_value:
+            raise RuntimeError(
+                f"JetStream stream {stream_name} policy mismatch: "
+                f"{field}={actual_value!r}, expected {wanted_value!r}"
+            )
 
 
 async def _dispatch(

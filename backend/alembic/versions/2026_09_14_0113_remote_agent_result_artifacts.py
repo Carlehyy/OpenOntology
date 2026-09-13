@@ -24,7 +24,13 @@ def upgrade() -> None:
             "super_assistant_remote_agent_tasks",
             sa.Column("result_artifacts", sa.JSON(), nullable=False, server_default=sa.text("'[]'")),
         )
-        op.alter_column("super_assistant_remote_agent_tasks", "result_artifacts", server_default=None)
+        # SQLite cannot ALTER COLUMN to remove a default.  The default is only
+        # needed to backfill pre-existing rows during this expand migration;
+        # leaving it in place is harmless on SQLite and keeps the migration
+        # reversible in the lightweight migration test database.  PostgreSQL
+        # can drop it after the backfill so future inserts use the ORM default.
+        if bind.dialect.name != "sqlite":
+            op.alter_column("super_assistant_remote_agent_tasks", "result_artifacts", server_default=None)
 
 
 def downgrade() -> None:

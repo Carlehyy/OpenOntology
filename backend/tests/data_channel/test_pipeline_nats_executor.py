@@ -121,6 +121,46 @@ async def test_thread_exception_escape_is_naked(executor, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_kernel_reconcile_not_applied_is_naked_for_redelivery(executor, monkeypatch):
+    """A transient reconcile failure must not be acknowledged and lost."""
+    async def not_applied(_payload):
+        return False
+
+    monkeypatch.setattr(
+        "app.super_assistant.kernel.runtime.reconcile_execution_message",
+        not_applied,
+    )
+    msg = _FakeMsg(json.dumps({"run_id": "run-1", "call_id": "call-1"}).encode())
+
+    await executor._process_message(
+        msg, nats_executor._run_kernel_reconcile_message, "sa.execution.reconcile"
+    )
+
+    assert msg.naked == 1
+    assert msg.acked == 0
+
+
+@pytest.mark.asyncio
+async def test_kernel_call_not_applied_is_naked_for_redelivery(executor, monkeypatch):
+    """A transient initial-call failure must remain deliverable."""
+    async def not_applied(_payload):
+        return False
+
+    monkeypatch.setattr(
+        "app.super_assistant.kernel.runtime.process_external_call_message",
+        not_applied,
+    )
+    msg = _FakeMsg(json.dumps({"run_id": "run-1", "call_id": "call-1"}).encode())
+
+    await executor._process_message(
+        msg, nats_executor._run_kernel_call_message, "sa.execution.call.owner"
+    )
+
+    assert msg.naked == 1
+    assert msg.acked == 0
+
+
+@pytest.mark.asyncio
 async def test_in_progress_renews_while_executing(executor, monkeypatch):
     monkeypatch.setattr(nats_executor, "_IN_PROGRESS_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr(

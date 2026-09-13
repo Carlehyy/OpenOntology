@@ -621,6 +621,102 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
     assert queued.payload["remote_state"] == "completed"
 
 
+def test_scheduler_continues_cancel_after_run_reaches_terminal_state(db, monkeypatch):
+    """Cancel grace must not abandon a still-running remote side effect."""
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="终止后仍需取消远端任务")
+    target = f"fake.cancel_terminal_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "执行"},
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "terminal-cancel"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+    cancelled: list[str] = []
+
+    class TerminalCancelConnector:
+        def descriptor(self):
+            return AgentDescriptor(
+                agent_id="terminal-cancel-agent", key=target, revision=1,
+                transport="rap.v1", session_policy=SessionPolicy.RESUMABLE,
+                supports_cancel=True, supports_query_status=True,
+            )
+
+        async def invoke(self, **kwargs):
+            return {"status": "running", "remote_task_ref": "terminal-ref"}
+
+        async def cancel(self, **kwargs):
+            cancelled.append(kwargs["remote_task_ref"])
+            return {"status": "cancelled", "remote_task_ref": kwargs["remote_task_ref"]}
+
+        async def query_status(self, **kwargs):
+            return {"status": "running", "remote_task_ref": kwargs["remote_task_ref"]}
+
+    runtime.connector_registry.register(TerminalCancelConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all(); db.refresh(external)
+    persisted_run = db.get(ExecutionRun, run.id)
+    persisted_run.status = "cancelled"
+    external.next_reconcile_at = runtime._now()
+    db.commit()
+    monkeypatch.setattr(kernel_scheduler, "SessionLocal", TestSession)
+    kernel_scheduler._poll_external_calls_once()
+    assert cancelled == ["terminal-ref"]
+
+
+def test_external_acceptance_without_bounded_remote_ref_requires_manual_attention(db, monkeypatch):
+    """An opaque provider id that cannot be persisted must not strand a Call."""
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="远端引用过长")
+    target = f"fake.long_ref_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "执行"},
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "long-ref"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+
+    class LongRefConnector:
+        def descriptor(self):
+            return AgentDescriptor(agent_id="long-ref-agent", key=target, revision=1, transport="rap.v1")
+
+        async def invoke(self, **kwargs):
+            return {"status": "running", "remote_task_ref": "r" * 2001}
+
+        async def cancel(self, **kwargs):
+            return {"status": "unsupported"}
+
+        async def query_status(self, **kwargs):
+            return {"status": "unknown"}
+
+    runtime.connector_registry.register(LongRefConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all(); db.refresh(external)
+    assert external.status == "reconciling"
+    assert external.outcome == "outcome_unknown"
+    assert external.manual_attention is True
+    assert external.remote_task_ref is None
+
+
+def test_duplicate_external_delivery_recovers_interrupted_running_call(db, monkeypatch):
+    """A call left RUNNING by a crashed worker must enter reconciliation."""
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="恢复中断的远端调用")
+    target = f"fake.interrupted_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "执行"},
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "interrupted-call"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+    external.status = "running"
+    external.outcome = "accepted"
+    db.commit()
+
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all(); db.refresh(external)
+    assert external.status == "reconciling"
+    assert external.outcome == "outcome_unknown"
+    assert external.manual_attention is True
+
+
 def test_kernel_scheduler_claims_due_call_once_across_workers(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="并发对账")
     call = runtime.ExecutionCall(

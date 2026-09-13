@@ -22,6 +22,55 @@ from .store import append_event
 
 callback_router = APIRouter()
 
+_CALLBACK_FIELDS: dict[str, frozenset[str]] = {
+    # Provider callbacks are untrusted input and are replayed verbatim by SSE.
+    # Keep only the stable contract fields and bounded, user-visible progress
+    # metadata; opaque provider envelopes must never enter the event log.
+    "call.progress": frozenset({
+        "call_id", "progress_seq", "connector_id", "provider_event_id",
+        "message", "status", "progress", "phase", "eta", "content_ref",
+    }),
+    "call.outcome_changed": frozenset({
+        "call_id", "status", "outcome", "evidence_ref", "connector_id",
+        "provider_event_id", "remote_state", "content", "artifacts",
+    }),
+    "attempt.result": frozenset({
+        "attempt_id", "provider_status", "result_ref", "error_ref",
+        "safe_to_retry", "token_usage_ref", "cost_ref",
+    }),
+}
+_ARTIFACT_REF_FIELDS = frozenset({
+    "artifact_id", "kind", "mime_type", "size", "checksum", "storage_ref",
+    "status", "business_status",
+})
+
+
+def _sanitize_callback_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip provider-only fields before durable storage and SSE replay."""
+    allowed = _CALLBACK_FIELDS[event_type]
+    clean: dict[str, Any] = {}
+    for key in allowed:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if key == "artifacts":
+            if not isinstance(value, list):
+                continue
+            refs: list[dict[str, Any]] = []
+            for item in value[:64]:
+                if isinstance(item, dict):
+                    refs.append({k: item[k][:1000] if isinstance(item[k], str) else item[k]
+                                 for k in _ARTIFACT_REF_FIELDS if k in item and
+                                 (item[k] is None or isinstance(item[k], (str, int, float, bool)))})
+            clean[key] = refs
+        elif isinstance(value, str):
+            # Keep event rows and SSE frames bounded even when a provider sends
+            # a verbose progress message or opaque reference.
+            clean[key] = value[:20_000]
+        elif value is None or isinstance(value, (int, float, bool)):
+            clean[key] = value
+    return clean
+
 
 def append_agent_callback(
     db: Session,
@@ -64,6 +113,7 @@ def append_agent_callback(
         ))
         if attempt is None:
             raise ContractError("callback attempt does not belong to call")
+    payload = _sanitize_callback_payload(event_type, payload)
     append_event(
         db, run, event_type=event_type, payload=payload,
         actor={"kind": "connector"}, command_id=f"callback:{connector_id}:{provider_event_id}",
@@ -117,6 +167,7 @@ def receive_agent_callback(
     if payload.get("connector_id", body.connector_id) != body.connector_id or payload.get("provider_event_id", body.provider_event_id) != body.provider_event_id:
         raise HTTPException(status_code=422, detail="callback payload identity mismatch")
     payload.update({"connector_id": body.connector_id, "provider_event_id": body.provider_event_id})
+    safe_payload = _sanitize_callback_payload(body.event_type, payload)
     try:
         run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update())
         call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == call_id, ExecutionCall.run_id == run_id).with_for_update())
@@ -136,18 +187,20 @@ def receive_agent_callback(
         else:
             from .store import enqueue_reconcile_observation
 
-            reported_state = payload.get("remote_state")
+            reported_state = safe_payload.get("remote_state")
             if not reported_state or str(reported_state).strip().lower() in {"closed", "done"}:
-                reported_state = payload.get("outcome") or payload.get("status")
+                reported_state = safe_payload.get("outcome") or safe_payload.get("status")
             enqueue_reconcile_observation(
                 db, run=run, call=call,
                 observation={
                     "connector_id": body.connector_id,
                     "provider_event_id": body.provider_event_id,
                     "remote_state": reported_state,
-                    "status": payload.get("status"),
-                    "content": payload.get("content"),
-                    "evidence_ref": payload.get("evidence_ref"),
+                    "status": safe_payload.get("status"),
+                    "content": safe_payload.get("content"),
+                    "evidence_ref": safe_payload.get("evidence_ref"),
+                    # Business artifact content is consumed by the bounded
+                    # Artifact persister, never copied into the SSE event.
                     "artifacts": payload.get("artifacts") or [],
                 },
             )

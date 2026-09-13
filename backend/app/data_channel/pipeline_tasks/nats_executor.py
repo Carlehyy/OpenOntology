@@ -260,13 +260,28 @@ async def _run_kernel_execution_message(payload: dict) -> None:
 async def _run_kernel_call_message(payload: dict) -> None:
     from app.super_assistant.kernel.runtime import process_external_call_message
 
-    await process_external_call_message(payload)
+    # A call message is the only durable trigger for the initial provider
+    # invocation.  The runtime returns False when it could not persist a
+    # state transition (for example a transient DB failure); acknowledging
+    # that message would strand a waiting Call with no remote task reference.
+    applied = await process_external_call_message(payload)
+    if applied is False:
+        raise RuntimeError("kernel external call was not applied")
 
 
 async def _run_kernel_reconcile_message(payload: dict) -> None:
     from app.super_assistant.kernel.runtime import reconcile_execution_message
 
-    await reconcile_execution_message(payload)
+    # ``reconcile_execution_message`` deliberately keeps a narrow direct-call
+    # contract and returns ``False`` when the observation could not be
+    # durably applied (for example a transient database failure).  Do not ack
+    # such a message: an ack here would permanently lose the provider
+    # observation and leave the Call waiting forever.  Missing/stale
+    # run/call references are treated as successful no-ops by the runtime and
+    # therefore still ack normally.
+    applied = await reconcile_execution_message(payload)
+    if applied is False:
+        raise RuntimeError("kernel reconciliation observation was not applied")
 
 
 def _execution_handler_registry():

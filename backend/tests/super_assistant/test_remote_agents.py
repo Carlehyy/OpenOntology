@@ -570,6 +570,13 @@ def test_kernel_pull_task_is_idempotent_and_reports_claimed_as_unknown(db, admin
     assert observed["status"] == "running"
     cancelled = remote_agent_service.cancel_kernel_task(db, row.id, first["remote_task_ref"])
     assert cancelled["status"] == "unknown"
+    claimed.status = "done"
+    claimed.result_status = "answered"
+    claimed.result_artifacts = [{"kind": "report", "content": {"ok": True}}]
+    db.commit()
+    observed = remote_agent_service.query_kernel_task(db, row.id, first["remote_task_ref"])
+    assert observed["status"] == "completed"
+    assert observed["artifacts"][0]["kind"] == "report"
 
 
 def test_task_gc_prunes_only_past_retention(db, admin_user, monkeypatch):

@@ -38,6 +38,7 @@ from .models import (
     InboxItem,
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
+from .artifacts import validate_object_storage_ref
 from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, create_run, renew_lease
 from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, ProcessPluginConnector, TrustLevel
 
@@ -114,6 +115,24 @@ async def _watch_child_cancel(run_id: str, cancel_event: threading.Event, stop: 
 
 def _checksum(content: str) -> str:
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _bounded_ref(value: object, *, limit: int = 1000) -> str | None:
+    """Accept provider references only when they fit the durable column.
+
+    A remote response is untrusted input.  Silently truncating an opaque task
+    id would point reconciliation at a different task, so oversized values
+    are treated as unavailable and routed to the unknown/manual path instead
+    of causing a DB error after the provider side effect has already happened.
+    """
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text.encode("utf-8")) <= limit else None
+
+
+def _bounded_provider_event_id(value: object) -> str | None:
+    return _bounded_ref(value, limit=255)
 
 
 def _control_outcome(status: str) -> tuple[str, str]:
@@ -733,7 +752,7 @@ def _persist_connector_capability(db, connector, *, source: str) -> None:
         raise ValueError("connector capability is disabled")
 
 
-async def process_external_call_message(payload: dict) -> None:
+async def process_external_call_message(payload: dict) -> bool:
     """Dispatch one durable external Call through ConnectorRegistry.
 
     The outbox publisher invokes this handler through ``sa.execution.call.*``.
@@ -745,18 +764,40 @@ async def process_external_call_message(payload: dict) -> None:
     run_id, call_id = payload.get("run_id"), payload.get("call_id")
     if not run_id or not call_id:
         logger.warning("external call message missing run_id/call_id")
-        return
+        # A malformed envelope cannot be repaired by redelivery.  Ack it as a
+        # no-op; persistence/processing errors in the body return False and
+        # are nak'ed by the NATS handler for retry.
+        return True
     db = SessionLocal()
     try:
         run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == str(run_id)).with_for_update())
         call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == str(call_id), ExecutionCall.run_id == str(run_id)).with_for_update())
-        if run is None or call is None or call.status != CallStatus.WAITING_EXTERNAL.value:
+        if run is None or call is None:
             db.rollback()
-            return
+            # Stale duplicate deliveries are safe no-ops.
+            return True
+        if call.status == CallStatus.RUNNING.value:
+            # The initial invocation committed RUNNING before leaving the DB
+            # transaction.  If the worker crashed (or failed to persist the
+            # provider response) before the follow-up commit, redelivery must
+            # recover the Call into the reconciliation/manual path instead of
+            # treating RUNNING as a harmless duplicate forever.  We never
+            # invoke the provider a second time from this branch.
+            call.status = CallStatus.RECONCILING.value
+            call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
+            call.manual_attention = True
+            call.next_reconcile_at = _now() if call.remote_task_ref else None
+            _append_manual_attention(db, run, call, "initial_call_interrupted")
+            db.commit()
+            return True
+        if call.status != CallStatus.WAITING_EXTERNAL.value:
+            # A terminal/already reconciled Call is an idempotent no-op.
+            db.rollback()
+            return True
         if run.status in {s.value for s in {RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLING, RunStatus.PAUSED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
             call.status, call.outcome = CallStatus.CANCEL_REQUESTED.value, CallOutcome.OUTCOME_UNKNOWN.value
             db.commit()
-            return
+            return True
         connector = _resolve_external_connector(db, run, call)
         if connector is None:
             call.status, call.outcome, call.manual_attention = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value, True
@@ -764,7 +805,7 @@ async def process_external_call_message(payload: dict) -> None:
             _append_manual_attention(db, run, call, "connector_unavailable")
             append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"call:{call.id}:unavailable", idempotency_key=f"call-unavailable:{call.id}", connector_id=call.target_ref)
             db.commit()
-            return
+            return True
         descriptor = connector.descriptor()
         attempt_no = (db.scalar(select(ExecutionAttempt.attempt_no).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc())) or 0) + 1
         attempt = ExecutionAttempt(call_id=call.id, attempt_no=attempt_no, provider_status="started", transport_request_ref=call.input_snapshot_ref)
@@ -781,7 +822,7 @@ async def process_external_call_message(payload: dict) -> None:
             current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
             current_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == call.id).with_for_update())
             if current is None or current_call is None:
-                return
+                return True
             current_call.status, current_call.outcome = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value
             current_call.reconcile_attempt_count += 1
             current_call.next_reconcile_at = _now() + timedelta(seconds=min(300, 5 * (2 ** max(0, current_call.reconcile_attempt_count - 1))))
@@ -792,19 +833,19 @@ async def process_external_call_message(payload: dict) -> None:
             append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:unknown:{current_call.reconcile_attempt_count}", idempotency_key=f"external-unknown:{current_call.id}:{current_call.reconcile_attempt_count}", connector_id=descriptor.agent_id)
             _append_manual_attention(db, current, current_call, "invoke_exception")
             db.commit()
-            return
+            return True
         db.rollback()
         current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
         current_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == call.id).with_for_update())
         if current is None or current_call is None:
-            return
+            return True
         if current.status in {s.value for s in {RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLING, RunStatus.PAUSED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
             # Preserve the late provider result for reconciliation; never
             # reopen a terminal Run. A remote handle is essential here: the
             # cancellation grace scheduler can only issue connector.cancel
             # when it has something durable to address.
             result_map = result if isinstance(result, dict) else {}
-            remote_ref = result_map.get("remote_task_ref")
+            remote_ref = _bounded_ref(result_map.get("remote_task_ref"))
             normalized = str(result_map.get("status") or "unknown").lower()
             current_call.remote_task_ref = str(remote_ref) if remote_ref else current_call.remote_task_ref
             current_call.remote_observed_state_ref = "late_provider_result"
@@ -818,29 +859,40 @@ async def process_external_call_message(payload: dict) -> None:
             if not current_call.remote_task_ref:
                 current_call.manual_attention = True
                 _append_manual_attention(db, current, current_call, "late_control_result")
-            append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": result_map.get("provider_event_id")}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:late", idempotency_key=f"external-late:{current_call.id}", connector_id=descriptor.agent_id, provider_event_id=result_map.get("provider_event_id"))
+            late_event_id = _bounded_provider_event_id(result_map.get("provider_event_id"))
+            append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": late_event_id}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:late", idempotency_key=f"external-late:{current_call.id}", connector_id=descriptor.agent_id, provider_event_id=late_event_id)
             db.commit()
-            return
+            return True
         normalized = str(result.get("status") or "failed").lower() if isinstance(result, dict) else "failed"
         if normalized in {"running", "pending", "queued", "accepted", "in_progress", "processing"}:
             # Provider accepted the work but has not produced a result. Keep
             # the Call open and persist its opaque identity; the kernel
             # scheduler/reconciler can later call query_status with this ref.
-            current_call.status = CallStatus.WAITING_EXTERNAL.value
-            current_call.outcome = CallOutcome.REMOTE_RUNNING.value
-            current_call.remote_task_ref = (result or {}).get("remote_task_ref") if isinstance(result, dict) else None
+            current_call.remote_task_ref = _bounded_ref((result or {}).get("remote_task_ref")) if isinstance(result, dict) else None
+            if current_call.remote_task_ref:
+                current_call.status = CallStatus.WAITING_EXTERNAL.value
+                current_call.outcome = CallOutcome.REMOTE_RUNNING.value
+            else:
+                # An accepted asynchronous task without a durable provider
+                # reference cannot be polled or cancelled safely. Preserve
+                # the unknown outcome and expose manual attention instead of
+                # leaving a permanently waiting Call.
+                current_call.status = CallStatus.RECONCILING.value
+                current_call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
+                current_call.manual_attention = True
+                _append_manual_attention(db, current, current_call, "missing_remote_task_ref")
             current_call.remote_observed_state_ref = normalized
-            current_call.next_reconcile_at = _now() + ExecutionPolicy().reconciliation_initial
+            current_call.next_reconcile_at = _now() + ExecutionPolicy().reconciliation_initial if current_call.remote_task_ref else None
             latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
             if latest is not None:
                 latest.provider_status = normalized
             append_event(
                 db, current, event_type="call.outcome_changed",
-                payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": (result or {}).get("provider_event_id") if isinstance(result, dict) else None},
+                payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": _bounded_provider_event_id((result or {}).get("provider_event_id")) if isinstance(result, dict) else None},
                 actor={"kind": "connector"}, command_id=f"external:{current_call.id}:accepted", idempotency_key=f"external-accepted:{current_call.id}", connector_id=descriptor.agent_id,
             )
             db.commit()
-            return
+            return True
         if normalized == "unknown":
             current_call.status = CallStatus.RECONCILING.value
             current_call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
@@ -850,12 +902,13 @@ async def process_external_call_message(payload: dict) -> None:
             latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
             if latest is not None:
                 latest.provider_status = "unknown"
-            append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": (result or {}).get("provider_event_id") if isinstance(result, dict) else None}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:unknown-response", idempotency_key=f"external-unknown-response:{current_call.id}", connector_id=descriptor.agent_id)
+            unknown_event_id = _bounded_provider_event_id((result or {}).get("provider_event_id")) if isinstance(result, dict) else None
+            append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": unknown_event_id}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:unknown-response", idempotency_key=f"external-unknown-response:{current_call.id}", connector_id=descriptor.agent_id)
             _append_manual_attention(db, current, current_call, "provider_unknown")
             db.commit()
-            return
+            return True
         outcome = {"answered": CallOutcome.COMPLETED.value, "failed": CallOutcome.FAILED.value, "cancelled": CallOutcome.CANCELLED_CONFIRMED.value}.get(normalized, CallOutcome.FAILED.value)
-        content = str((result or {}).get("content") or "") if isinstance(result, dict) else str(result)
+        content = str((result or {}).get("content") or "")[:20000] if isinstance(result, dict) else str(result)[:20000]
         artifact = None
         if content:
             artifact = Artifact(owner_id=current.owner_id, run_id=current.id, call_id=current_call.id, kind="external.result", mime_type="text/markdown", size=len(content.encode("utf-8")), checksum=_checksum(content), storage_ref=f"inline://{current.id}/{current_call.id}", inline_content=content, status="complete", integrity_status="verified", business_status="success" if outcome == CallOutcome.COMPLETED.value else "failed", visibility="owner")
@@ -866,8 +919,8 @@ async def process_external_call_message(payload: dict) -> None:
                 artifact = structured[0]
         current_call.status, current_call.outcome = CallStatus.CLOSED.value, outcome
         current_call.evidence_ref = f"artifact://{artifact.id}" if artifact else None
-        current_call.remote_task_ref = (result or {}).get("remote_task_ref") if isinstance(result, dict) else None
-        current_call.provider_event_id = (result or {}).get("provider_event_id") if isinstance(result, dict) else None
+        current_call.remote_task_ref = _bounded_ref((result or {}).get("remote_task_ref")) if isinstance(result, dict) else None
+        current_call.provider_event_id = _bounded_provider_event_id((result or {}).get("provider_event_id")) if isinstance(result, dict) else None
         latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
         if latest is not None:
             latest.provider_status, latest.result_ref, latest.finished_at = normalized, current_call.evidence_ref, _now()
@@ -881,9 +934,11 @@ async def process_external_call_message(payload: dict) -> None:
             append_event(db, current, event_type="run.status_changed", payload={"from": before, "to": current.status, "reason": "external_result", "actor": "connector", "version": current.version}, actor={"kind": "connector"}, command_id=f"external-wake:{current.id}:{current.version}", idempotency_key=f"external-wake:{current.id}:{current.version}", connector_id=descriptor.agent_id)
             _add_outbox(db, current, command_id=f"external-wake-dispatch:{current.id}:{current.version}", message_ref=f"run://{current.id}")
         db.commit()
+        return True
     except Exception:
         db.rollback()
         logger.exception("external call dispatch failed for run=%s call=%s", run_id, call_id)
+        return False
     finally:
         db.close()
 
@@ -1503,18 +1558,24 @@ async def reconcile_execution_message(payload: dict) -> bool:
     run_id, call_id = payload.get("run_id"), payload.get("call_id")
     if not run_id or not call_id:
         logger.warning("kernel reconciliation message missing run_id/call_id")
-        return False
+        # A malformed/stale envelope cannot be repaired by redelivery.  Treat
+        # it as a consumed no-op so the JetStream consumer does not spin on a
+        # poison message; persistence/processing failures below return False
+        # and are explicitly nak'ed by the NATS handler.
+        return True
     db = SessionLocal()
     try:
         run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == str(run_id)).with_for_update())
         call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == str(call_id), ExecutionCall.run_id == str(run_id)).with_for_update())
         if run is None or call is None:
-            db.rollback(); return False
-        provider_event_id, connector_id = payload.get("provider_event_id"), payload.get("connector_id")
+            db.rollback(); return True
+        provider_event_id = _bounded_provider_event_id(payload.get("provider_event_id"))
+        connector_id = _bounded_provider_event_id(payload.get("connector_id"))
+        evidence_ref = _bounded_ref(payload.get("evidence_ref"))
         provider_payload_hash = _hash_payload({
             "run_id": run.id, "call_id": call.id,
             "remote_state": payload.get("remote_state") or payload.get("status"),
-            "content": payload.get("content"), "evidence_ref": payload.get("evidence_ref"),
+            "content": str(payload.get("content") or "")[:20000], "evidence_ref": evidence_ref,
             "artifacts": payload.get("artifacts"),
         })
         if provider_event_id and connector_id:
@@ -1536,7 +1597,7 @@ async def reconcile_execution_message(payload: dict) -> bool:
         except ValueError:
             db.rollback(); return False
         side_effect = SideEffectClass(call.side_effect_class) if call.side_effect_class in {x.value for x in SideEffectClass} else SideEffectClass.READ_ONLY
-        observation = RemoteObservation(normalize_remote_state(payload.get("remote_state") or payload.get("status")), provider_event_id=provider_event_id, evidence_ref=payload.get("evidence_ref"), raw_state=str(payload.get("remote_state") or payload.get("status") or ""))
+        observation = RemoteObservation(normalize_remote_state(payload.get("remote_state") or payload.get("status")), provider_event_id=provider_event_id, evidence_ref=evidence_ref, raw_state=str(payload.get("remote_state") or payload.get("status") or "")[:1000])
         decision = decide_reconciliation(observation=observation, run_status=run_status, call_status=call_status, call_outcome=call_outcome, side_effect=side_effect, safe_to_retry=bool(getattr(latest_attempt, "safe_to_retry", False)), reconcile_attempt_count=call.reconcile_attempt_count, policy=ExecutionPolicy(), now=_now())
         artifact = None
         if decision.action is ReconcileAction.IGNORE_LATE:
@@ -1553,7 +1614,7 @@ async def reconcile_execution_message(payload: dict) -> bool:
             call.manual_attention = decision.action is ReconcileAction.MANUAL_ATTENTION
             if call.manual_attention:
                 _append_manual_attention(db, run, call, observation.raw_state)
-            observed_content = payload.get("content")
+            observed_content = str(payload.get("content") or "")[:20000]
             if decision.action is ReconcileAction.CLOSE and decision.call_outcome is CallOutcome.COMPLETED and observed_content:
                 text = str(observed_content)[:20000]
                 artifact = Artifact(
@@ -1573,7 +1634,24 @@ async def reconcile_execution_message(payload: dict) -> bool:
                 )
             structured_artifacts = []
             if decision.action is ReconcileAction.CLOSE and decision.call_outcome is CallOutcome.COMPLETED:
-                structured_artifacts = _persist_external_artifacts(db, run, call, payload.get("artifacts") or [])
+                try:
+                    structured_artifacts = _persist_external_artifacts(db, run, call, payload.get("artifacts") or [])
+                except ValueError as exc:
+                    # A provider artifact is untrusted input. Rejecting the
+                    # whole durable observation would cause infinite NATS
+                    # redelivery, so close this attempt as auditable manual
+                    # attention and let an operator repair/retry the artifact.
+                    db.rollback()
+                    current = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
+                    current_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == call.id).with_for_update())
+                    if current is None or current_call is None:
+                        return True
+                    current_call.status = CallStatus.RECONCILING.value
+                    current_call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
+                    current_call.manual_attention = True
+                    _append_manual_attention(db, current, current_call, f"invalid_external_artifact:{str(exc)[:200]}")
+                    db.commit()
+                    return True
                 if artifact is None and structured_artifacts:
                     artifact = structured_artifacts[0]
                     call.evidence_ref = f"artifact://{artifact.id}"
@@ -1653,6 +1731,10 @@ def _persist_external_artifacts(db, run: ExecutionRun, call: ExecutionCall, valu
         )
         db.add(artifact)
         db.flush()
+        if inline is None:
+            validate_object_storage_ref(
+                storage_ref, owner_id=run.owner_id, run_id=run.id, artifact_id=artifact.id,
+            )
         append_event(
             db, run, event_type="artifact.declared",
             payload={"artifact_id": artifact.id, "kind": artifact.kind, "mime_type": artifact.mime_type,

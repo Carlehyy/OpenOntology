@@ -170,6 +170,10 @@ def _poll_external_calls_once() -> None:
         now = _now()
         calls = db.scalars(select(ExecutionCall).where(
             ExecutionCall.status.in_((CallStatus.WAITING_EXTERNAL.value, CallStatus.RECONCILING.value, CallStatus.CANCEL_REQUESTED.value)),
+            # Manual attention is an explicit operator handoff. Do not turn a
+            # provider-unknown outcome into an unbounded polling loop; an
+            # operator retry/reconciliation command can clear the flag.
+            ExecutionCall.manual_attention.is_(False),
             (ExecutionCall.next_reconcile_at.is_(None)) | (ExecutionCall.next_reconcile_at <= now),
         ).order_by(ExecutionCall.next_reconcile_at, ExecutionCall.id).limit(50)).all()
         worker_id = f"kernel-reconciler:{uuid.uuid4().hex}"
@@ -215,7 +219,16 @@ def _poll_external_calls_once() -> None:
             descriptor = connector.descriptor()
             cancelling = (
                 call.status == CallStatus.CANCEL_REQUESTED.value
-                or run.status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}
+                # Once cancel grace elapses the Run becomes terminal, but an
+                # unresolved remote Call still represents a live external
+                # side effect. Keep issuing connector.cancel for cancelled or
+                # deadline-expired Runs until the provider confirms it.
+                or run.status in {
+                    RunStatus.CANCEL_REQUESTED.value,
+                    RunStatus.CANCELLING.value,
+                    RunStatus.CANCELLED.value,
+                    RunStatus.EXPIRED.value,
+                }
             )
             if cancelling and not descriptor.supports_cancel:
                 db.rollback()

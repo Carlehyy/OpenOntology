@@ -333,6 +333,9 @@ def query_kernel_task(db: Session, agent_id: str, remote_task_ref: str) -> dict[
         return {
             "status": status, "content": row.result_content or "", "session_ref": row.result_session_ref,
             "note": row.result_note or "", "provider_event_id": event_id,
+            # Kernel reconciliation consumes the canonical RAP result here;
+            # omit no structured Artifacts from pull-mode agents.
+            "artifacts": row.result_artifacts or [],
             "remote_task_ref": remote_task_ref,
         }
     # Expiry means the remote side effect is not confirmed.  Reconciliation

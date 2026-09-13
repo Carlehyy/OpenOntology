@@ -703,25 +703,28 @@ export const superAssistantApi = {
   ),
   cancelKernelRun: (runId: string, body: { reason: 'user' | 'parent' | 'deadline'; idempotency_key: string }, version: number) =>
     apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
-      `/super-assistant/runs/${encodeURIComponent(runId)}/cancel`, body, { headers: { 'If-Match': String(version) } },
+      `/super-assistant/runs/${encodeURIComponent(runId)}/cancel`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
     ),
   pauseKernelRun: (runId: string, body: { idempotency_key: string }, version: number) =>
     apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
-      `/super-assistant/runs/${encodeURIComponent(runId)}/pause`, body, { headers: { 'If-Match': String(version) } },
+      `/super-assistant/runs/${encodeURIComponent(runId)}/pause`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
     ),
   resumeKernelRun: (runId: string, body: { idempotency_key: string }, version: number) =>
     apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
-      `/super-assistant/runs/${encodeURIComponent(runId)}/resume`, body, { headers: { 'If-Match': String(version) } },
+      `/super-assistant/runs/${encodeURIComponent(runId)}/resume`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
     ),
-  retryKernelRun: (runId: string, body: { idempotency_key: string; max_steps?: number }) =>
+  retryKernelRun: (runId: string, body: { idempotency_key: string; max_steps?: number }, version: number) =>
     apiClientV2.post<KernelRunAccepted>(
-      `/super-assistant/runs/${encodeURIComponent(runId)}/retry`, body, { headers: { 'Idempotency-Key': body.idempotency_key } },
+      `/super-assistant/runs/${encodeURIComponent(runId)}/retry`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
     ),
-  submitKernelInput: (runId: string, body: { kind: string; content?: string; content_ref?: string; question_id?: string; idempotency_key: string }) =>
-    apiClientV2.post<{ inbox_id: string; status: string; run_id: string }>(`/super-assistant/runs/${encodeURIComponent(runId)}/inputs`, body),
+  submitKernelInput: (runId: string, body: { kind: string; content?: string; content_ref?: string; question_id?: string; idempotency_key: string }, version: number) =>
+    apiClientV2.post<{ inbox_id: string; status: string; run_id: string }>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/inputs`, body,
+      { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
+    ),
   decideKernelApproval: (runId: string, approvalId: string, body: { decision: 'approved' | 'denied'; idempotency_key: string }, version: number) =>
     apiClientV2.post<{ command_id: string; status: string; version: number }>(
-      `/super-assistant/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}/decision`, body, { headers: { 'If-Match': String(version) } },
+      `/super-assistant/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}/decision`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
     ),
   streamKernelRun,
   kernelArtifact: (runId: string, artifactId: string) =>

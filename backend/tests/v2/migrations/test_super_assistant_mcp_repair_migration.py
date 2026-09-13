@@ -36,7 +36,7 @@ def test_upgrade_repairs_missing_super_assistant_mcp_table(tmp_path, monkeypatch
         "builtin_key", "transport", "url",
         "headers_encrypted", "header_names", "command", "args",
         "env_encrypted", "env_names", "enabled", "require_confirmation",
-        "tool_manifest", "last_test_status", "last_test_message",
+        "tool_manifest", "manifest_revision", "manifest_hash", "last_test_status", "last_test_message",
         "last_tested_at", "created_at", "updated_at",
     } == {column["name"] for column in inspector.get_columns("super_assistant_mcp_servers")}
     assert {

@@ -47,7 +47,11 @@ class ContextCandidate:
 
     @property
     def token_estimate(self) -> int:
-        return max(1, len(self.content.encode("utf-8")) // 4)
+        # The provider tokenizer is not available at planning time. UTF-8
+        # bytes are a conservative upper bound across BPE/tokenizer variants;
+        # ``bytes // 4`` under-counts CJK text and can let the ContextPack
+        # exceed its declared hard cap before the final request gate runs.
+        return max(1, len(self.content.encode("utf-8")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +96,7 @@ class ContextPackPlanner:
                     # when their body is oversized. Keep the source ref and
                     # both ends of the content instead of silently dropping
                     # the goal or a mandatory binding.
-                    byte_budget = max(1, available * 4)
+                    byte_budget = max(1, available)
                     raw = candidate.content.encode("utf-8")
                     marker = "\n…[context truncated]…\n".encode("utf-8")
                     if len(raw) > byte_budget:

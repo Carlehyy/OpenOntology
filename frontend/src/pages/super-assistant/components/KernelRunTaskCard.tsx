@@ -129,7 +129,7 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
         content: input.trim(),
         ...(question?.question_id ? { question_id: question.question_id } : {}),
         idempotency_key: `${runId}:input:${crypto.randomUUID()}`,
-      })
+      }, run.version)
       setInput('')
     } catch (cause) { setError(cause instanceof Error ? cause.message : '输入提交失败') }
     finally { setBusy(false) }
@@ -139,7 +139,7 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
     if (!run || busy) return
     setBusy(true); setError(null)
     try {
-      await superAssistantApi.submitKernelInput(runId, { kind: 'resume', content: '继续执行', idempotency_key: `${runId}:resume:${crypto.randomUUID()}` })
+      await superAssistantApi.submitKernelInput(runId, { kind: 'resume', content: '继续执行', idempotency_key: `${runId}:resume:${crypto.randomUUID()}` }, run.version)
       setRun(current => {
         if (!current) return current
         const next = { ...current, status: 'active' as KernelRunStatus }
@@ -184,7 +184,7 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
     if (!run || busy) return
     setBusy(true); setError(null)
     try {
-      const result = await superAssistantApi.retryKernelRun(runId, { idempotency_key: `${runId}:retry:${crypto.randomUUID()}` })
+      const result = await superAssistantApi.retryKernelRun(runId, { idempotency_key: `${runId}:retry:${crypto.randomUUID()}` }, run.version)
       onRetry?.(result.run_id)
     } catch (cause) { setError(cause instanceof Error ? cause.message : '重试任务失败') }
     finally { setBusy(false) }
