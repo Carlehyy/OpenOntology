@@ -5,11 +5,12 @@ Agent 和插件只通过这个窄接口进入 Kernel；CapabilityRevision 是不
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 import httpx
 
@@ -297,6 +298,53 @@ class McpToolConnector:
             args=list(self.args),
             env=dict(self.env),
         )
+        return {
+            "run_id": run_id,
+            "call_id": call_id,
+            "status": "answered",
+            "content": str(content),
+            "provider_status": "completed",
+        }
+
+    async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+
+    async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+
+
+@dataclass(frozen=True, slots=True)
+class MulticaToolConnector:
+    """Adapter for the existing Multica service under the kernel Call API."""
+
+    tool_name: str
+    executor: Callable[[dict[str, Any]], str] = field(compare=False, repr=False)
+    revision: int = 1
+
+    def descriptor(self) -> AgentDescriptor:
+        return AgentDescriptor(
+            agent_id=f"multica:{self.tool_name}",
+            key=self.tool_name,
+            revision=self.revision,
+            transport="multica",
+            capabilities=("workspace",),
+            session_policy=SessionPolicy.STATELESS,
+            supports_stream=False,
+            supports_cancel=False,
+            supports_push=False,
+            supports_query_status=False,
+            supports_artifact=False,
+        )
+
+    async def invoke(self, *, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
+        try:
+            value = json.loads(input_ref or "{}")
+        except (TypeError, ValueError):
+            value = {}
+        arguments = value.get("arguments") if isinstance(value, dict) else {}
+        if not isinstance(arguments, dict):
+            raise ContractError("Multica connector arguments must be an object")
+        content = await asyncio.to_thread(self.executor, arguments)
         return {
             "run_id": run_id,
             "call_id": call_id,

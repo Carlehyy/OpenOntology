@@ -34,6 +34,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import KernelRunTaskCard from './components/KernelRunTaskCard'
+import KernelRunList from './components/KernelRunList'
 import {
   ChatMessage, ConfirmationCard, ContextUsage,
   type PendingConfirmation,
@@ -890,6 +891,7 @@ export default function SuperAssistantPage() {
                 />
               </div>
             )}
+            {!kernelRunId && selectedId && <KernelRunList conversationId={selectedId} />}
             {loading ? (
               <div className="flex flex-1 items-center justify-center"><Loader2 size={22} className="animate-spin text-brand-ink" /></div>
             ) : !hasMessages ? (

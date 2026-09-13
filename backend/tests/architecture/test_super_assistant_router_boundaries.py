@@ -795,7 +795,7 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 10 条路径、10 个操作；dispatch dead-letter 显式重放新增 1 条运维路径；
     # 旧路由仍保持原有语义并行存在。
     assert len(paths) == 75
-    assert sum(len(item) for item in paths.values()) == 99
+    assert sum(len(item) for item in paths.values()) == 100
     assert hashlib.sha256(payload).hexdigest() == (
-        "b71ca674adc420eda2000abcef4129a9d497fe644393bd19335ee0aeeb6c4258"
+        "bac7b276bc14f152cd0b0f03a2132529a7918e1d62414b0d8ac68bcf3027cbe5"
     )

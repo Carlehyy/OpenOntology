@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 from app.deps import get_current_user, get_db
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
 from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionDispatchOutbox, ExecutionEvent, ExecutionRun, InboxItem
-from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RetryRunRequest, RunAccepted, RunView
+from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RetryRunRequest, RunAccepted, RunSummary, RunView
 from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
 from app.super_assistant.kernel.artifacts import verify_artifact
 from app.super_assistant.kernel.outbox import replay_dead_once
+from app.super_assistant.models import SuperAssistantConversation
 
 
 router = APIRouter()
@@ -136,6 +137,39 @@ def retry_kernel_run(
     except ContractError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/conversations/{conversation_id}/runs", response_model=list[RunSummary])
+def list_kernel_runs(
+    conversation_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """List independent long-running Runs for one conversation."""
+    conversation = db.scalar(select(SuperAssistantConversation).where(
+        SuperAssistantConversation.id == conversation_id,
+        SuperAssistantConversation.owner_id == user.id,
+    ))
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    rows = db.scalars(
+        select(ExecutionRun)
+        .where(ExecutionRun.conversation_id == conversation_id, ExecutionRun.owner_id == user.id)
+        .order_by(ExecutionRun.created_at.desc())
+        .limit(limit)
+    ).all()
+    return [RunSummary(
+        run_id=row.id,
+        conversation_id=row.conversation_id,
+        status=row.status,
+        wait_reason=row.wait_reason,
+        version=row.version,
+        goal=row.goal,
+        deadline=row.deadline,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    ) for row in rows]
 
 
 @router.post("/runs/{run_id}/cancel", status_code=status.HTTP_202_ACCEPTED)

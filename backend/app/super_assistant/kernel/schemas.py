@@ -84,3 +84,15 @@ class RunView(KernelRequest):
     calls: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     binding_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunSummary(KernelRequest):
+    run_id: str
+    conversation_id: str
+    status: str
+    wait_reason: str | None
+    version: int
+    goal: str
+    deadline: datetime | None
+    created_at: datetime
+    updated_at: datetime

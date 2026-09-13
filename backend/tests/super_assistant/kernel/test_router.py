@@ -128,3 +128,22 @@ def test_kernel_retry_creates_new_run_without_reopening_failed_run(client, db, a
     )
     assert replay.status_code == 202
     assert replay.json()["run_id"] == new_id
+
+
+def test_kernel_run_list_is_owner_scoped_and_keeps_independent_runs(client, db, admin_user, auth_headers):
+    conversation = SuperAssistantConversation(owner_id=admin_user.id, title="kernel run list")
+    db.add(conversation)
+    db.commit()
+    for index in range(2):
+        response = client.post(
+            f"/api/v2/super-assistant/conversations/{conversation.id}/runs",
+            json={"goal": f"task {index}", "idempotency_key": f"list-{index}"},
+            headers={**auth_headers, "Idempotency-Key": f"list-{index}"},
+        )
+        assert response.status_code == 202
+    listed = client.get(
+        f"/api/v2/super-assistant/conversations/{conversation.id}/runs?limit=10",
+        headers=auth_headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert {item["goal"] for item in listed.json()} == {"task 0", "task 1"}

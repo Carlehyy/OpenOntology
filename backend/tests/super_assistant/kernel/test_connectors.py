@@ -11,6 +11,7 @@ from app.super_assistant.kernel.connectors import (
     TrustLevel,
     ConnectorRegistry,
     RemoteAgentHttpConnector,
+    MulticaToolConnector,
 )
 from app.super_assistant.kernel.contracts import ContractError
 
@@ -81,3 +82,22 @@ async def test_remote_connector_does_not_claim_unsupported_cancel_or_status():
     )
     assert (await connector.cancel(remote_task_ref="x"))["status"] == "unsupported"
     assert (await connector.query_status(remote_task_ref="x"))["status"] == "unsupported"
+
+
+@pytest.mark.asyncio
+async def test_multica_tool_connector_wraps_existing_service_without_expanding_capabilities():
+    seen = {}
+
+    def execute(arguments):
+        seen.update(arguments)
+        return "created"
+
+    connector = MulticaToolConnector(tool_name="multica_create_task", executor=execute)
+    result = await connector.invoke(
+        run_id="r1", call_id="c1",
+        input_ref='{"arguments":{"title":"写报告"}}', deadline=None,
+    )
+    assert result["status"] == "answered"
+    assert result["content"] == "created"
+    assert seen == {"title": "写报告"}
+    assert connector.descriptor().supports_query_status is False

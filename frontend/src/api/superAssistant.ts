@@ -318,6 +318,18 @@ export interface KernelRunView {
   artifacts: KernelRunArtifactSummary[]
 }
 
+export interface KernelRunSummary {
+  run_id: string
+  conversation_id: string
+  status: KernelRunStatus
+  wait_reason: string | null
+  version: number
+  goal: string
+  deadline: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type KernelRunEvent = {
   event: string
   data: Record<string, any>
@@ -682,6 +694,9 @@ export const superAssistantApi = {
     { headers: { 'Idempotency-Key': body.idempotency_key } },
   ),
   kernelRun: (runId: string) => apiClientV2.get<KernelRunView>(`/super-assistant/runs/${encodeURIComponent(runId)}`),
+  kernelRuns: (conversationId: string, limit = 50) => apiClientV2.get<KernelRunSummary[]>(
+    `/super-assistant/conversations/${encodeURIComponent(conversationId)}/runs`, { params: { limit } },
+  ),
   cancelKernelRun: (runId: string, body: { reason: 'user' | 'parent' | 'deadline'; idempotency_key: string }, version: number) =>
     apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
       `/super-assistant/runs/${encodeURIComponent(runId)}/cancel`, body, { headers: { 'If-Match': String(version) } },

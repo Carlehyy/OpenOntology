@@ -37,7 +37,7 @@ from .models import (
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
 from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease
-from .connectors import ConnectorRegistry, McpToolConnector
+from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, TrustLevel
 
 
 # Implementations are registered by application bootstrap (and by tests).
@@ -198,10 +198,31 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
     target = str(call.target_ref or "").strip()
     if not target:
         return None
-    try:
-        return connector_registry.resolve(target, int(call.capability_revision))
-    except Exception:
-        pass
+    # User-scoped targets must be resolved from the owner row first. Looking
+    # in a process-global registry first could otherwise reuse another user's
+    # connector with the same key after a worker restart.
+    if not (target.startswith("remote.") or target.startswith("mcp__")):
+        try:
+            return connector_registry.resolve(target, int(call.capability_revision))
+        except Exception:
+            pass
+    if target in {"multica_list_agents", "multica_list_tasks", "multica_create_task"}:
+        try:
+            from app.super_assistant import multica_service
+            if multica_service.active_config(db, run.owner_id) is not None:
+                def execute(arguments: dict) -> str:
+                    session = SessionLocal()
+                    try:
+                        return multica_service.execute_tool(session, run.owner_id, target, arguments)
+                    finally:
+                        session.close()
+
+                connector = MulticaToolConnector(tool_name=target, executor=execute)
+                _persist_connector_capability(db, connector, source="multica")
+                connector_registry.register(connector)
+                return connector
+        except Exception:
+            logger.exception("failed to resolve Multica connector target=%s", target)
     try:
         from app.super_assistant.models import SuperAssistantRemoteAgent
         row = db.scalar(select(SuperAssistantRemoteAgent).where(
@@ -239,6 +260,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                             args=tuple(str(value) for value in (server.args or [])),
                             env=decrypt_env(server.env_encrypted),
                         )
+                        _persist_connector_capability(db, connector, source="mcp")
                         connector_registry.register(connector)
                         return connector
         except Exception:
@@ -247,11 +269,36 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
     try:
         from app.super_assistant.remote_agent_service import kernel_connector
         connector = kernel_connector(row)
+        _persist_connector_capability(db, connector, source="remote_agent")
         connector_registry.register(connector)
         return connector
     except Exception:
         logger.exception("failed to register external connector target=%s", target)
         return None
+
+
+def _persist_connector_capability(db, connector, *, source: str) -> None:
+    """Freeze/authorize a connector descriptor before its first Call."""
+    from .capability_service import persist_capability_revision
+
+    descriptor = connector.descriptor()
+    manifest = json.dumps({
+        "agent_id": descriptor.agent_id,
+        "key": descriptor.key,
+        "revision": descriptor.revision,
+        "transport": descriptor.transport,
+        "capabilities": descriptor.capabilities,
+    }, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+    row = persist_capability_revision(
+        db,
+        descriptor,
+        source=source,
+        trust_level=TrustLevel.USER_UNTRUSTED,
+        manifest_hash=digest,
+    )
+    if not row.enabled:
+        raise ValueError("connector capability is disabled")
 
 
 async def process_external_call_message(payload: dict) -> None:

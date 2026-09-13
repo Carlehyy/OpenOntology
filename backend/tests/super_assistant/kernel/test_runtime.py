@@ -140,7 +140,7 @@ def test_kernel_runtime_materializes_external_wait_as_reconcilable_call(db, monk
 
 def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派远程研究")
-    target = f"remote.test_{uuid.uuid4().hex[:8]}"
+    target = f"fake.external_{uuid.uuid4().hex[:8]}"
     monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
         "content": "已提交远程任务", "tool_calls": [],
         "external_call": {"target_ref": target, "message": "研究项目"},
