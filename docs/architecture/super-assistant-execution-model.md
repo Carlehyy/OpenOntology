@@ -26,6 +26,8 @@
 stateDiagram-v2
     [*] --> queued
     queued --> active
+    queued --> cancel_requested
+    queued --> expired
     active --> waiting_input
     active --> waiting_approval
     active --> waiting_external
@@ -35,7 +37,9 @@ stateDiagram-v2
     active --> completed
     active --> failed
     waiting_input --> active
+    waiting_input --> failed
     waiting_approval --> active
+    waiting_approval --> failed
     waiting_external --> active
     waiting_retry --> active
     waiting_input --> paused
@@ -78,6 +82,14 @@ stateDiagram-v2
 - `completed`、`failed`、`cancelled`、`expired`：不可逆终态。
 
 等待状态不会锁住 Conversation。所有非终态都可以被取消或因明确截止时间进入 `expired`；等待中的 Run 也可以被显式暂停，暂停后不会消费新的唤醒输入，直到用户恢复。若 Run 中仍有其他独立工作可推进，外部 Call 等待不应把整个 Run 置为等待；只有没有可安全推进的工作时才进入 `waiting_*`。
+
+以下触发器和边界是状态机的一部分，不能留给 Worker 自行解释：
+
+- `queued` 收到取消或达到 Run 截止时间时，分别进入 `cancel_requested` 或 `expired`；排队中的 Run 也必须可取消。
+- `waiting_input` 或 `waiting_approval` 的问题、审批策略、权限或绑定版本失效时，进入 `failed` 或按明确截止时间进入 `expired`，并保留失败原因。
+- `cancelling` 必须有 `cancel_deadline`。本地收尾完成后进入 `cancelled`；达到截止时间仍未收到远端确认时，Run 可以进入本地 `cancelled`，但未收敛的 Call 必须保留 `outcome_unknown` 或 `remote_running`，并产生 `run.cancel_timeout` 供对账；本地收尾本身失败时进入 `failed`。
+- `paused` 期间到达的普通输入、外部结果和审批决定写入关联 Inbox，但不被消费；取消、过期等控制命令仍走高优先级通道。恢复动作只激活明确的 Run，并按 Inbox 幂等规则消费关联项。
+- `active` 必须至少有可消费 Inbox、已领取 Turn、可推进 Call 或计划中的重试之一。否则属于 stuck-run，检测器必须产生诊断事件并进入恢复或人工处理路径，不能保持 `active` 无期限等待。
 
 Run 进入终态后不能重新打开。若外部迟到结果后来到达，只能作为关联 Call 和 Artifact 的新事实保存，不能恢复已取消的 Run。
 
@@ -248,3 +260,4 @@ claim
 - 请求消息和 Call 结果按模型顺序重建；
 - shadow/canary/cutover 写入责任不会漂移；
 - 旧 Conversation、Message、ToolRun 投影与事件结果一致。
+- `queued` 的取消和截止时间、等待状态失效、`cancelling` 超时收敛、暂停期间 Inbox 保留和 stuck-run 检测；

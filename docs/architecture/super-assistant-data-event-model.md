@@ -67,6 +67,8 @@ remote_task_ref
 outcome
 ```
 
+`target_ref` 必须能关联父 Run、目标 Agent/能力 revision 和不透明的远端会话引用；委派恢复不得只按 Conversation 和 Agent 取“最近一条”。同一目标 Agent 可以被同一 Conversation 的多个 Run 同时调用，唯一性和运行中约束必须至少收敛到 Run/Call 作用域；现有按“会话 + 助手”限制一条 running 的索引需要在迁移方案中替换，历史行不能被静默重绑。
+
 Attempt 保存：
 
 ```text
@@ -80,6 +82,8 @@ error_ref
 ```
 
 `outcome` 至少区分 `not_sent`、`accepted`、`completed`、`failed`、`cancel_requested`、`cancelled_confirmed`、`outcome_unknown`。超时不等于失败，网络错误不等于未发送。
+
+契约冻结时必须明确两条轴：`status` 表示 Call 当前是否可继续调度（例如 `offered`、`dispatched`、`running`、`waiting_external`、`cancel_requested`）；`outcome` 表示外部动作已知的结果或未知结果（例如 `not_sent`、`accepted`、`completed`、`failed`、`cancelled_confirmed`、`outcome_unknown`）。两者不能各自扩展出第二套状态机；同名值的转换规则、终态条件和 UI 展示值必须由一份权威枚举表冻结。
 
 ## 5. Event Envelope
 
@@ -103,6 +107,8 @@ error_ref
 ```
 
 `seq` 只在 Run 内单调递增；`event_id` 全局唯一；`schema_version` 不随代码版本隐式改变。Payload 未知版本必须拒绝自动解释或进入显式兼容处理。
+
+`seq` 的分配必须在同一 Run 的串行化边界内完成（Run 行锁、等价的 advisory lock 或其他可证明的原子机制），不能使用 Worker 进程内计数器。并行 Worker、重试和事务回滚都必须保证无间隙、无重复、不可回写；具体锁策略在字段/事务契约中冻结。
 
 ## 6. Payload 分类
 
@@ -163,6 +169,8 @@ projection.failed
 
 现有面向用户通知的 Inbox/Outbox 记录不能直接充当执行派发 Outbox：两者的消费语义、保留时间和重试责任不同。新执行模型使用独立的 dispatch outbox 逻辑（是否落独立表和 JetStream stream 在实现阶段确认），但必须和 Run 状态、事件在同一 PostgreSQL 事务中提交。现有 reflection、Palace 和 pipeline subject 保持不变。
 
+实现时应优先复用仓库 Sentinel CDC Outbox 已验证的同事务插入、唯一 `dedupe_key`、claim token CAS 和退避模式；这是一种实现先例，不改变执行 Outbox 与用户通知 Inbox/Outbox 的职责分离。
+
 改变执行事实的命令必须在一个数据库事务内完成：
 
 ```text
@@ -175,6 +183,8 @@ idempotency check
 ```
 
 Dispatch Outbox 行携带 `command_id`、`run_id`、目标 subject、尝试次数和下一次投递时间；消息正文只放 ID 和版本引用，不放 prompt、凭据或大 Artifact。发布成功不能删除事实事件；可以标记 Outbox 已发送。发布失败由发布器重试，消费端按 `event_id` 或业务幂等键去重。
+
+Inbox 的 `claimed` 不等于 `consumed`：领取必须有租约、过期时间和 fencing；只有关联结果事件或控制命令的事务提交后才标记消费。Worker 在 claim 后崩溃时，其他 Worker 可以在租约到期后重领，不能因先删除队列项而形成 at-most-once 丢失窗口。
 
 跨 PostgreSQL、外部 Agent、MCP、Neo4j 和 MinIO 不做分布式事务。先记录本地意图，再执行外部动作；外部动作的结果通过 Call/Artifact 事件回填。
 
@@ -206,6 +216,7 @@ new events → projection worker → legacy read models
 - 旧租约不能覆盖新版本；
 - Outbox 重复投递不重复执行不可幂等写入；
 - Call 和 Attempt 的未知结果可查询、可对账；
+- `outcome_unknown` 有明确的 reconciler、查询节奏、升级人工条件和用户可见状态；
 - 投影崩溃后从 cursor 继续，不跳过事件；
 - 删除后的来源不再进入新的 Context Pack；
 - 事件 schema 升级可拒绝不兼容 payload；

@@ -131,6 +131,8 @@ disable new calls
 
 协议能力必须通过握手或适配器实现确认。统一 Capability 接口不能补造远端不支持的流式、取消或 Artifact。
 
+能力只能在安装、启用或明确挂载时按不可变 revision 注册；`tools/call`、Agent 结果或插件运行时响应只能返回数据、进度和 Artifact 引用，不能偷偷扩展当前能力目录。新增能力必须重新走 manifest、schema、权限和审批检查。
+
 ## 7. 调用策略
 
 调用前顺序固定为：

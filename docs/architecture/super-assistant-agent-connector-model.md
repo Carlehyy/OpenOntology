@@ -129,6 +129,19 @@ agent.outcome_unknown
 
 子会话引用继续是不透明值，由适配器持有和校验；它不进入模型上下文，也不替代父 Run 的事件和权限记录。
 
+### 6.1 现有行为拆除清单
+
+已确认的绑定决策需要穿透到现有适配器和领域服务，不能只在 Connector 外层增加一次校验。进入开发前必须逐条处置：
+
+1. `assistant_hub/adapters/ontology_agent.py` 中缺少 `ontology_id` 时按最近使用本体回退的路径必须删除或改为候选推荐，不能静默选择。
+2. `assistant_hub/adapters/exploration.py` 的 `start()` 不能再无条件创建无绑定会话；`context_requirements` 必须声明 `ontology_id` 和编辑草稿版本。
+3. 业务探索领域服务必须在创建和恢复时强制检查目标本体、草稿版本的 `draft + editing` 生命周期、归属和写权限；列表端点的过滤不能替代写路径校验。
+4. 领域 `apply` 在绑定版本不再是 `draft + editing` 时不得静默分叉新草稿并重锚会话，必须返回版本失效并由 Run 重新询问或终止。
+5. 绑定版本删除、晋级或被替代时，不能只通过拉取漂移摘要提示；领域服务应发出带版本引用的生命周期事件（例如 `promoted`、`superseded`、`deleted`），由 Inbox 唤醒关联 Run。
+6. 本体助手的 HTTP 直聊入口也必须执行按本体的访问校验，不能因为绕过 Assistant Hub 就只依赖菜单级权限；Hub 路径和直聊路径的权限语义需要在契约中对齐。
+
+以上清单是迁移任务的拆除和改造范围。业务事实仍由本体/探索领域服务裁决，Connector 不能单独伪造“可编辑版本”。
+
 ## 7. RAP v1
 
 RAP v1 通过 Adapter 继续兼容现有直连和 pull 模式：
@@ -140,6 +153,18 @@ RAP v1 通过 Adapter 继续兼容现有直连和 pull 模式：
 - 回连结果使用任务 ID、Call ID 和幂等键去重。
 
 不把 RAP v1 的最终文本包装成虚假的阶段进度，也不把网络超时解释成远端任务失败。
+
+RAP v1 的单端点回合模型不能凭最终文本可靠判断远端是否需要澄清或审批，因此能力必须按协议实际提供的字段声明：
+
+| RAP 能力 | v1 默认值 | 允许声明为支持的条件 |
+|---|---:|---|
+| 同一 `session_ref` 继续输入 | `false` | 远端明确支持追加回合且 Adapter 能验证会话归属 |
+| `agent.needs_input` | `false` | RAP minor 扩展提供结构化 `input_request`；纯文本问题不能自动升级为该事件 |
+| `agent.approval_required` | `false` | 远端提供结构化审批请求和决定回送通道 |
+| 取消 | `false` | 远端提供取消请求和可验证状态查询 |
+| 幂等重试 | `false` | 请求携带可选 `call_id`、`idempotency_key`，远端承诺按其去重 |
+
+如果远端只支持 `{message, session_ref}`，用户回答只能作为新的、明确关联的回合输入；Adapter 不得把普通最终文本伪装成 `needs_input`，也不得在没有远端幂等字段时自动重发可能产生副作用的请求。RAP minor 演进需沿用现有版本化规则，并在契约冻结时确定字段、去重范围和回送错误语义。
 
 ## 8. A2A、Agent Client Protocol 与 MCP
 
@@ -185,3 +210,4 @@ RAP v1 通过 Adapter 继续兼容现有直连和 pull 模式：
 - 远端只支持部分能力时目录如实展示；
 - 外部结果不能恢复已经终态的 Run；
 - 外部 Agent 无法读取未授权的上下文和凭据。
+- RAP v1 无结构化输入/审批能力时不会伪造 `needs_input` 或 `approval_required`；具备 minor 扩展时，用户回答和审批决定能回送同一远端会话并按幂等键去重。

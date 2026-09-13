@@ -56,6 +56,8 @@ super_assistant/
 
 `assistant_hub` 仍是平台助手目录与业务适配的 canonical package。`connectors/agents/assistant_hub.py` 只依赖 Hub 契约，不直接导入 ontology 或 exploration 域。
 
+`compatibility/` 仅是迁移期 facade 和旧读模型投影，必须按项目兼容层退役顺序登记调用方、边界检查和删除条件；它不是允许新功能长期落入的业务层。现有进程内只读 `subagent` 工具在首轮可继续作为内置能力，待其输入、结果、取消和 Artifact 语义与 Agent Connector 完成等价测试后，再决定是否迁移为 Connector，不另建第二套 Kernel。
+
 ## 2. 最小 Protocol
 
 初期用 Python `Protocol` 和不可变 dataclass 表达边界，避免先创建复杂继承树。
