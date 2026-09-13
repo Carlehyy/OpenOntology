@@ -1,8 +1,12 @@
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
+import pytest
+from sqlalchemy.orm import sessionmaker
 
 from app.super_assistant.models import SuperAssistantConversation
 from app.super_assistant.kernel.models import Artifact, ExecutionRun
+from app.super_assistant.kernel.schemas import InputRequest
 
 
 def test_kernel_create_get_and_cancel_contract(client, db, admin_user, auth_headers):
@@ -33,7 +37,7 @@ def test_kernel_create_get_and_cancel_contract(client, db, admin_user, auth_head
     cancelled = client.post(
         f"/api/v2/super-assistant/runs/{run_id}/cancel",
         json={"idempotency_key": "api-cancel-1"},
-        headers={**auth_headers, "If-Match": '"1"'},
+        headers={**auth_headers, "If-Match": '"1"', "Idempotency-Key": "api-cancel-1"},
     )
     assert cancelled.status_code == 202, cancelled.text
     assert cancelled.json()["status"] == "cancel_requested"
@@ -49,6 +53,41 @@ def test_kernel_create_requires_matching_idempotency_header(client, db, admin_us
         headers={**auth_headers, "Idempotency-Key": "other-key"},
     )
     assert response.status_code == 422
+
+
+def test_kernel_input_content_limit_is_utf8_bytes():
+    # 100k CJK code points fit the old character-count check but exceed 256 KiB.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        InputRequest(content="中" * 100_000, idempotency_key="utf8-cap")
+
+
+def test_kernel_input_requires_headers_and_rejects_terminal_run(client, db, admin_user, auth_headers):
+    conversation = SuperAssistantConversation(owner_id=admin_user.id, title="kernel input contract")
+    db.add(conversation)
+    db.commit()
+    created = client.post(
+        f"/api/v2/super-assistant/conversations/{conversation.id}/runs",
+        json={"goal": "terminal input", "idempotency_key": "terminal-create"},
+        headers={**auth_headers, "Idempotency-Key": "terminal-create"},
+    )
+    run_id = created.json()["run_id"]
+    run = db.get(ExecutionRun, run_id)
+    run.status = "completed"
+    db.commit()
+    missing = client.post(
+        f"/api/v2/super-assistant/runs/{run_id}/inputs",
+        json={"content": "x", "idempotency_key": "input-missing"},
+        headers=auth_headers,
+    )
+    assert missing.status_code == 428
+    rejected = client.post(
+        f"/api/v2/super-assistant/runs/{run_id}/inputs",
+        json={"content": "x", "idempotency_key": "input-terminal"},
+        headers={**auth_headers, "If-Match": '"1"', "Idempotency-Key": "input-terminal"},
+    )
+    assert rejected.status_code == 409
 
 
 def test_kernel_control_and_input_wake_waiting_run(client, db, admin_user, auth_headers):
@@ -69,13 +108,13 @@ def test_kernel_control_and_input_wake_waiting_run(client, db, admin_user, auth_
     paused = client.post(
         f"/api/v2/super-assistant/runs/{run_id}/pause",
         json={"idempotency_key": "pause-1"},
-        headers={**auth_headers, "If-Match": '"1"'},
+        headers={**auth_headers, "If-Match": '"1"', "Idempotency-Key": "pause-1"},
     )
     assert paused.status_code == 202
     resumed = client.post(
         f"/api/v2/super-assistant/runs/{run_id}/resume",
         json={"idempotency_key": "resume-1"},
-        headers={**auth_headers, "If-Match": '"2"'},
+        headers={**auth_headers, "If-Match": '"2"', "Idempotency-Key": "resume-1"},
     )
     assert resumed.status_code == 202
     run = db.get(ExecutionRun, run_id)
@@ -85,13 +124,13 @@ def test_kernel_control_and_input_wake_waiting_run(client, db, admin_user, auth_
     answer = client.post(
         f"/api/v2/super-assistant/runs/{run_id}/inputs",
         json={"kind": "question_answer", "question_id": "q1", "content": "detail", "idempotency_key": "input-1"},
-        headers=auth_headers,
+        headers={**auth_headers, "If-Match": '"3"', "Idempotency-Key": "input-1"},
     )
     assert answer.status_code == 202, answer.text
     replay = client.post(
         f"/api/v2/super-assistant/runs/{run_id}/inputs",
         json={"kind": "question_answer", "question_id": "q1", "content": "detail", "idempotency_key": "input-1"},
-        headers=auth_headers,
+        headers={**auth_headers, "If-Match": '"4"', "Idempotency-Key": "input-1"},
     )
     assert replay.status_code == 202
     assert replay.json()["inbox_id"] == answer.json()["inbox_id"]
@@ -117,7 +156,7 @@ def test_kernel_retry_creates_new_run_without_reopening_failed_run(client, db, a
     retried = client.post(
         f"/api/v2/super-assistant/runs/{source_id}/retry",
         json={"idempotency_key": "retry-new", "max_steps": 3},
-        headers={**auth_headers, "Idempotency-Key": "retry-new"},
+        headers={**auth_headers, "Idempotency-Key": "retry-new", "If-Match": '"1"'},
     )
     assert retried.status_code == 202, retried.text
     new_id = retried.json()["run_id"]
@@ -130,10 +169,52 @@ def test_kernel_retry_creates_new_run_without_reopening_failed_run(client, db, a
     replay = client.post(
         f"/api/v2/super-assistant/runs/{source_id}/retry",
         json={"idempotency_key": "retry-new", "max_steps": 3},
-        headers={**auth_headers, "Idempotency-Key": "retry-new"},
+        headers={**auth_headers, "Idempotency-Key": "retry-new", "If-Match": '"1"'},
     )
     assert replay.status_code == 202
     assert replay.json()["run_id"] == new_id
+
+
+def test_kernel_sse_snapshot_shape_and_cursor_validation(client, db, admin_user, auth_headers, monkeypatch):
+    conversation = SuperAssistantConversation(owner_id=admin_user.id, title="kernel sse")
+    db.add(conversation)
+    db.commit()
+    created = client.post(
+        f"/api/v2/super-assistant/conversations/{conversation.id}/runs",
+        json={"goal": "sse snapshot", "idempotency_key": "sse-create"},
+        headers={**auth_headers, "Idempotency-Key": "sse-create"},
+    )
+    run_id = created.json()["run_id"]
+    run = db.get(ExecutionRun, run_id)
+    run.status = "completed"
+    db.commit()
+    # The production stream intentionally uses a fresh SessionLocal. Point it
+    # at this test database so the polling generator sees the fixture rows.
+    local_session = sessionmaker(bind=db.get_bind())
+    monkeypatch.setattr("app.super_assistant.kernel.router.SessionLocal", local_session)
+    response = client.get(f"/api/v2/super-assistant/runs/{run_id}/events", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    snapshot_line = next(line for line in response.text.splitlines() if line.startswith("data: "))
+    snapshot = json.loads(snapshot_line.removeprefix("data: "))
+    assert snapshot["run"]["run_id"] == run_id
+    assert snapshot["run"]["conversation_id"] == conversation.id
+    assert {"status", "version", "goal", "current_inbox", "calls", "artifacts", "binding_snapshot"} <= set(snapshot["run"])
+    negative = client.get(
+        f"/api/v2/super-assistant/runs/{run_id}/events",
+        headers={**auth_headers, "Last-Event-ID": f"{run_id}:-1"},
+    )
+    assert negative.status_code == 400
+
+
+def test_kernel_openapi_declares_sse_and_artifact_media_types(client):
+    from app.main import app
+
+    schema = app.openapi()
+    sse = schema["paths"]["/api/v2/super-assistant/runs/{run_id}/events"]["get"]["responses"]["200"]["content"]
+    download = schema["paths"]["/api/v2/super-assistant/runs/{run_id}/artifacts/{artifact_id}/download"]["get"]["responses"]["200"]["content"]
+    assert "text/event-stream" in sse
+    assert "application/octet-stream" in download
 
 
 def test_kernel_run_list_is_owner_scoped_and_keeps_independent_runs(client, db, admin_user, auth_headers):

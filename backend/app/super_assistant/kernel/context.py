@@ -80,11 +80,37 @@ class ContextPackPlanner:
             for candidate in group:
                 section_limit = self.budget.get(candidate.section, 0)
                 section_used = used_by_section.get(candidate.section, 0)
-                if section_limit <= 0 or section_used + candidate.token_estimate > section_limit or used + candidate.token_estimate > self.hard_cap:
+                available = min(
+                    max(0, section_limit - section_used),
+                    max(0, self.hard_cap - used),
+                )
+                if available <= 0:
                     continue
-                selected.append(candidate)
-                used += candidate.token_estimate
-                used_by_section[candidate.section] = section_used + candidate.token_estimate
+                fitted = candidate
+                if candidate.token_estimate > available:
+                    # Required facts must remain addressable in the pack even
+                    # when their body is oversized. Keep the source ref and
+                    # both ends of the content instead of silently dropping
+                    # the goal or a mandatory binding.
+                    byte_budget = max(1, available * 4)
+                    raw = candidate.content.encode("utf-8")
+                    marker = "\n…[context truncated]…\n".encode("utf-8")
+                    if len(raw) > byte_budget:
+                        if byte_budget <= len(marker):
+                            content = marker[:byte_budget].decode("utf-8", "ignore")
+                        else:
+                            remain = byte_budget - len(marker)
+                            head = raw[: remain // 2].decode("utf-8", "ignore")
+                            tail = raw[-(remain - remain // 2):].decode("utf-8", "ignore")
+                            content = f"{head}\n…[context truncated]…\n{tail}"
+                        fitted = ContextCandidate(
+                            candidate.source, content, candidate.tier,
+                            candidate.relevance, candidate.authority,
+                            candidate.freshness, candidate.cost, candidate.section,
+                        )
+                selected.append(fitted)
+                used += fitted.token_estimate
+                used_by_section[candidate.section] = section_used + fitted.token_estimate
         content = "\n\n".join(candidate.content for candidate in selected)
         refs = tuple(candidate.source.as_dict() for candidate in selected)
         digest = hashlib.sha256(json.dumps({"content": content, "refs": refs}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()

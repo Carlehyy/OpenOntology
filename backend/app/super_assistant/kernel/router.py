@@ -35,6 +35,11 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _require_matching_idempotency(body_key: str, header_key: str | None) -> None:
+    if header_key is None or header_key != body_key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must match body.idempotency_key")
+
+
 @router.post(
     "/conversations/{conversation_id}/runs",
     response_model=RunAccepted,
@@ -47,8 +52,7 @@ def create_kernel_run(
     user=Depends(get_current_user),
     idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    if idempotency_header is None or idempotency_header != body.idempotency_key:
-        raise HTTPException(status_code=422, detail="Idempotency-Key must match body.idempotency_key")
+    _require_matching_idempotency(body.idempotency_key, idempotency_header)
     try:
         run, _ = create_run(
             db, owner_id=user.id, conversation_id=conversation_id, goal=body.goal,
@@ -102,6 +106,7 @@ def retry_kernel_run(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
     idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
 ):
     """Retry a failed Run as a new immutable execution lineage.
 
@@ -109,13 +114,15 @@ def retry_kernel_run(
     binding snapshot, while receiving a fresh idempotency key and execution
     facts so the failed attempt remains auditable.
     """
-    if idempotency_header is None or idempotency_header != body.idempotency_key:
-        raise HTTPException(status_code=422, detail="Idempotency-Key must match body.idempotency_key")
-    source = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id))
+    expected_version = _parse_if_match(if_match)
+    _require_matching_idempotency(body.idempotency_key, idempotency_header)
+    source = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id).with_for_update())
     if source is None:
         raise HTTPException(status_code=404, detail="run not found")
     if source.status != "failed":
         raise HTTPException(status_code=409, detail="only failed Run can retry")
+    if source.version != expected_version:
+        raise HTTPException(status_code=409, detail="version_conflict")
     try:
         binding = json.loads(source.binding_snapshot_ref) if source.binding_snapshot_ref else {}
         run, _ = create_run(
@@ -183,13 +190,10 @@ def cancel_kernel_run(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
     if_match: str | None = Header(default=None, alias="If-Match"),
+    idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    if if_match is None:
-        raise HTTPException(status_code=428, detail="If-Match is required")
-    try:
-        expected_version = int(if_match.strip('"'))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="If-Match must be a Run version") from exc
+    expected_version = _parse_if_match(if_match)
+    _require_matching_idempotency(body.idempotency_key, idempotency_header)
     try:
         run = cancel_run(
             db, run_id=run_id, owner_id=user.id, reason=CancelReason(body.reason),
@@ -226,13 +230,17 @@ def _parse_if_match(if_match: str | None) -> int:
 
 
 @router.post("/runs/{run_id}/pause", status_code=status.HTTP_202_ACCEPTED)
-def pause_kernel_run(run_id: str, body: ControlRunRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match")):
-    return _control_kernel_run(run_id, body, "pause", _parse_if_match(if_match), db, user)
+def pause_kernel_run(run_id: str, body: ControlRunRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match"), idempotency_header: str | None = Header(default=None, alias="Idempotency-Key")):
+    expected_version = _parse_if_match(if_match)
+    _require_matching_idempotency(body.idempotency_key, idempotency_header)
+    return _control_kernel_run(run_id, body, "pause", expected_version, db, user)
 
 
 @router.post("/runs/{run_id}/resume", status_code=status.HTTP_202_ACCEPTED)
-def resume_kernel_run(run_id: str, body: ControlRunRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match")):
-    return _control_kernel_run(run_id, body, "resume", _parse_if_match(if_match), db, user)
+def resume_kernel_run(run_id: str, body: ControlRunRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match"), idempotency_header: str | None = Header(default=None, alias="Idempotency-Key")):
+    expected_version = _parse_if_match(if_match)
+    _require_matching_idempotency(body.idempotency_key, idempotency_header)
+    return _control_kernel_run(run_id, body, "resume", expected_version, db, user)
 
 
 def _control_kernel_run(run_id: str, body: ControlRunRequest, action: str, expected_version: int, db: Session, user):
@@ -256,27 +264,38 @@ def _control_kernel_run(run_id: str, body: ControlRunRequest, action: str, expec
 
 
 @router.post("/runs/{run_id}/inputs", status_code=status.HTTP_202_ACCEPTED)
-def submit_kernel_input(run_id: str, body: InputRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+def submit_kernel_input(run_id: str, body: InputRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match"), idempotency_header: str | None = Header(default=None, alias="Idempotency-Key")):
+    expected_version = _parse_if_match(if_match)
+    _require_matching_idempotency(body.idempotency_key, idempotency_header)
+    run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id).with_for_update())
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
     try:
         item = append_input(
             db, run_id=run_id, owner_id=user.id, kind=body.kind,
             payload={"content": body.content} if body.content is not None else {"content_ref": body.content_ref},
             idempotency_key=body.idempotency_key, question_id=body.question_id,
             target_ref=body.content_ref,
+            expected_version=expected_version,
         )
         db.commit()
         return {"inbox_id": item.id, "status": item.status, "run_id": run_id}
     except KeyError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail="run not found") from exc
+    except VersionConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="version_conflict") from exc
     except ContractError as exc:
         db.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        code = 409 if "terminal Run" in str(exc) or "not waiting" in str(exc) else 422
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/approvals/{approval_id}/decision", status_code=status.HTTP_202_ACCEPTED)
-def decide_kernel_approval(run_id: str, approval_id: str, body: ApprovalDecisionRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match")):
+def decide_kernel_approval(run_id: str, approval_id: str, body: ApprovalDecisionRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match"), idempotency_header: str | None = Header(default=None, alias="Idempotency-Key")):
     expected_version = _parse_if_match(if_match)
+    _require_matching_idempotency(body.idempotency_key, idempotency_header)
     run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id).with_for_update())
     approval = db.scalar(select(Approval).where(Approval.id == approval_id, Approval.run_id == run_id, Approval.owner_id == user.id).with_for_update())
     if run is None or approval is None:
@@ -318,7 +337,7 @@ def decide_kernel_approval(run_id: str, approval_id: str, body: ApprovalDecision
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/runs/{run_id}/events")
+@router.get("/runs/{run_id}/events", response_class=StreamingResponse, responses={200: {"content": {"text/event-stream": {}}}})
 def stream_kernel_events(
     run_id: str,
     after_seq: int = Query(default=-1, ge=-1),
@@ -338,6 +357,8 @@ def stream_kernel_events(
             cursor = int(parts[1])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Last-Event-ID must be run_id:seq") from exc
+        if cursor < 0:
+            raise HTTPException(status_code=400, detail="Last-Event-ID seq must be non-negative")
     oldest = db.scalar(select(ExecutionEvent.seq).where(ExecutionEvent.run_id == run_id).order_by(ExecutionEvent.seq).limit(1))
     if oldest is not None and cursor < oldest - 1:
         raise HTTPException(status_code=410, detail="event cursor is outside replay window")
@@ -356,10 +377,26 @@ def stream_kernel_events(
                 .where(ExecutionEvent.run_id == run_id, ExecutionEvent.seq > cursor)
                 .order_by(ExecutionEvent.seq).limit(100)
             ).all()
-            snapshot = None if current_run is None else {
-                "run_id": current_run.id, "status": current_run.status,
-                "version": current_run.version, "wait_reason": current_run.wait_reason,
-            }
+            if current_run is None:
+                snapshot = None
+            else:
+                calls = session.scalars(select(ExecutionCall).where(ExecutionCall.run_id == current_run.id).order_by(ExecutionCall.call_index)).all()
+                inbox = session.scalars(select(InboxItem).where(InboxItem.run_id == current_run.id, InboxItem.status.in_(("pending", "claimed"))).order_by(InboxItem.priority, InboxItem.id)).all()
+                artifacts = session.scalars(select(Artifact).where(Artifact.run_id == current_run.id, Artifact.owner_id == user.id).order_by(Artifact.id)).all()
+                try:
+                    binding = json.loads(current_run.binding_snapshot_ref) if current_run.binding_snapshot_ref else {}
+                except json.JSONDecodeError:
+                    binding = {}
+                snapshot = {"run": {
+                    "run_id": current_run.id, "conversation_id": current_run.conversation_id,
+                    "status": current_run.status, "wait_reason": current_run.wait_reason,
+                    "version": current_run.version, "execution_version": current_run.execution_version,
+                    "goal": current_run.goal, "deadline": current_run.deadline,
+                    "binding_snapshot": binding,
+                    "current_inbox": [{"inbox_id": i.id, "kind": i.kind, "question_id": i.question_id, "approval_id": i.approval_id, "expires_at": i.expires_at} for i in inbox],
+                    "calls": [{"call_id": c.id, "status": c.status, "outcome": c.outcome, "capability_key": c.capability_key} for c in calls],
+                    "artifacts": [{"artifact_id": a.id, "kind": a.kind, "mime_type": a.mime_type, "size": a.size, "checksum": a.checksum, "status": a.status, "business_status": a.business_status} for a in artifacts],
+                }}
             return snapshot, events
         finally:
             session.close()
@@ -371,12 +408,13 @@ def stream_kernel_events(
         while True:
             snapshot, events = await asyncio.to_thread(read_batch)
             if not sent_snapshot and snapshot is not None:
-                yield f"event: run.snapshot\ndata: {json.dumps(snapshot, ensure_ascii=False)}\nretry: 5000\n\n"
+                yield f"event: run.snapshot\ndata: {json.dumps(snapshot, ensure_ascii=False, default=str)}\nretry: 5000\n\n"
                 sent_snapshot = True
             for event in events:
                 cursor = event.seq
                 yield f"id: {run_id}:{event.seq}\nevent: {event.event_type}\ndata: {json.dumps(event.payload, ensure_ascii=False, default=str)}\nretry: 5000\n\n"
-            if snapshot is None or (snapshot["status"] in {"cancelled", "expired", "completed", "failed"} and not events):
+            snapshot_run = snapshot.get("run") if snapshot else None
+            if snapshot_run is None or (snapshot_run["status"] in {"cancelled", "expired", "completed", "failed"} and not events):
                 break
             if time.monotonic() - last_ping >= 15:
                 yield ": ping\n\n"
@@ -441,7 +479,7 @@ def get_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depends(get
     return {"artifact_id": artifact.id, "mime_type": artifact.mime_type, "size": artifact.size, "checksum": artifact.checksum, "status": artifact.status, "business_status": artifact.business_status, "content": content, "download_url": f"/api/v2/super-assistant/runs/{run_id}/artifacts/{artifact.id}/download"}
 
 
-@router.get("/runs/{run_id}/artifacts/{artifact_id}/download")
+@router.get("/runs/{run_id}/artifacts/{artifact_id}/download", response_class=Response, responses={200: {"content": {"application/octet-stream": {}}}})
 def download_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     artifact = _load_kernel_artifact(run_id, artifact_id, db, user)
     data = _artifact_bytes(artifact, run_id=run_id)
@@ -457,10 +495,23 @@ def download_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depend
 
 
 @router.post("/runs/{run_id}/dispatch/{outbox_id}/replay", status_code=status.HTTP_202_ACCEPTED)
-def replay_kernel_dispatch(run_id: str, outbox_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+def replay_kernel_dispatch(
+    run_id: str,
+    outbox_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    expected_version = _parse_if_match(if_match)
+    if not idempotency_header:
+        raise HTTPException(status_code=422, detail="Idempotency-Key is required")
+    run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id).with_for_update())
     row = db.scalar(select(ExecutionDispatchOutbox).where(ExecutionDispatchOutbox.id == outbox_id, ExecutionDispatchOutbox.run_id == run_id))
-    if row is None:
+    if run is None or row is None:
         raise HTTPException(status_code=404, detail="dispatch not found")
+    if run.version != expected_version:
+        raise HTTPException(status_code=409, detail="version_conflict")
     try:
         replayed = replay_dead_once(db, outbox_id=outbox_id, owner_id=user.id)
     except KeyError as exc:

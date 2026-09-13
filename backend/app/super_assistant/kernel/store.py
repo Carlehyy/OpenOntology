@@ -19,6 +19,7 @@ from .contracts import (
     CancelReason,
     ContractError,
     RunStatus,
+    TERMINAL_RUN_STATUSES,
     request_cancel,
 )
 from .events import EventEnvelope, validate_payload
@@ -264,14 +265,58 @@ def _add_outbox(
     command_id: str,
     message_ref: str,
     subject: str | None = None,
+    payload: dict | None = None,
 ) -> ExecutionDispatchOutbox:
     row = ExecutionDispatchOutbox(
         id=_new_id(), command_id=command_id, run_id=run.id,
         subject=subject or f"{OUTBOX_SUBJECT_PREFIX}{run.owner_id}", message_ref=message_ref,
+        payload=dict(payload or {}),
         status="pending", next_attempt_at=_now(),
     )
     db.add(row)
     return row
+
+
+def enqueue_reconcile_observation(
+    db: Session,
+    *,
+    run: ExecutionRun,
+    call: ExecutionCall,
+    observation: dict,
+    claim_owner: str | None = None,
+) -> ExecutionDispatchOutbox:
+    """Persist one external observation for the NATS reconciler consumer.
+
+    Callback and scheduler ingress are producers only.  They never mutate the
+    Call state directly; the durable ``sa.execution.reconcile`` consumer is
+    the single fenced state transition path.  A provider event id (or a
+    deterministic payload hash when a provider omits one) is the command
+    identity, so retries are idempotent and conflicting observations are
+    rejected before another outbox row can be created.
+    """
+    if run.id != call.run_id:
+        raise ContractError("reconcile observation call does not belong to run")
+    if claim_owner is not None and call.lease_owner != claim_owner:
+        raise VersionConflict("reconcile claim is no longer held")
+    payload = dict(observation)
+    payload["run_id"] = run.id
+    payload["call_id"] = call.id
+    provider_event_id = str(payload.get("provider_event_id") or "").strip()
+    identity = provider_event_id or _hash_payload(payload)
+    command_id = f"reconcile:{call.id}:{identity}"
+    message_ref = f"reconcile://{call.id}/{identity}"
+    existing = db.scalar(select(ExecutionDispatchOutbox).where(
+        ExecutionDispatchOutbox.command_id == command_id,
+    ).with_for_update())
+    if existing is not None:
+        if _hash_payload(existing.payload or {}) != _hash_payload(payload):
+            raise IdempotencyConflict("reconcile observation payload conflict")
+        return existing
+    from app.data_channel.pipeline_tasks.dispatch import EXECUTION_RECONCILE_SUBJECT
+    return _add_outbox(
+        db, run, command_id=command_id, message_ref=message_ref,
+        subject=EXECUTION_RECONCILE_SUBJECT, payload=payload,
+    )
 
 
 def record_command(
@@ -486,6 +531,7 @@ def append_input(
     target_ref: str | None = None,
     expires_at: datetime | None = None,
     expiry_policy: str | None = None,
+    expected_version: int | None = None,
 ) -> InboxItem:
     run = _lock_run(db, run_id)
     _ensure_owner(run, owner_id)
@@ -499,6 +545,15 @@ def append_input(
         if not same:
             raise IdempotencyConflict("inbox idempotency key reused with different payload")
         return existing
+    if expected_version is not None and run.version != expected_version:
+        raise VersionConflict("version_conflict")
+    if run.status in {status.value for status in TERMINAL_RUN_STATUSES}:
+        raise ContractError("terminal Run cannot accept input")
+    if kind == "question_answer" and run.status not in {
+        RunStatus.WAITING_INPUT.value,
+        RunStatus.WAITING_RETRY.value,
+    }:
+        raise ContractError("run is not waiting for input")
     item = InboxItem(
         run_id=run.id, kind=kind, priority={"control": 0, "approval_decision": 10, "external_event": 20, "user_input": 30, "question_answer": 30, "resume": 0}.get(kind, 30),
         status="pending", question_id=question_id, target_ref=target_ref,
@@ -509,10 +564,10 @@ def append_input(
     db.flush()
     command_id = _new_id()
     append_event(db, run, event_type="inbox.appended", payload={"inbox_id": item.id, "kind": kind, "target_ref": target_ref or item.id, "expiry_policy": expiry_policy or "none"}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
-    if kind in {"question_answer", "resume"} and run.status in {RunStatus.WAITING_INPUT.value, RunStatus.WAITING_RETRY.value}:
+    if kind in {"user_input", "question_answer", "resume"} and run.status in {RunStatus.WAITING_INPUT.value, RunStatus.WAITING_RETRY.value}:
         before = run.status
         run.status, run.wait_reason, run.version = RunStatus.ACTIVE.value, None, run.version + 1
-        reason = "input_received" if kind == "question_answer" else "resume_received"
+        reason = "resume_received" if kind == "resume" else "input_received"
         append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": reason, "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
         # Waking a Run is a durable command. Without an outbox record the
         # state would become ACTIVE while no NATS activation is published.

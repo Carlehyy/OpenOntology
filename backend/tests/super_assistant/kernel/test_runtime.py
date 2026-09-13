@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from tests.conftest import TestSession
 
 from app.super_assistant.models import SuperAssistantConversation, SuperAssistantMcpServer, SuperAssistantRemoteAgent, SuperAssistantRemoteAgentTask
-from app.super_assistant.kernel.models import Artifact, ExecutionEvent, ExecutionRun
+from app.super_assistant.kernel.models import Artifact, CapabilityRevision, ExecutionEvent, ExecutionRun
 from app.super_assistant.kernel.store import create_run
 from app.super_assistant.kernel import runtime
 from app.super_assistant.kernel import scheduler as kernel_scheduler
@@ -31,6 +31,24 @@ def test_rebuild_messages_records_consumed_input_for_crash_recovery(db):
     assert [item["content"] for item in first if item["role"] == "user"].count("answer") == 1
     assert [item["content"] for item in second if item["role"] == "user"].count("answer") == 1
     assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.consumed").count() == 1
+
+
+def test_user_input_wakes_waiting_run_without_leaving_stranded_pending_item(db):
+    owner = User(id=str(uuid.uuid4()), username=f"wake-{uuid.uuid4().hex[:8]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
+    db.add(owner); db.flush()
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="input wake")
+    db.add(conversation); db.flush()
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="goal", idempotency_key="wake-run")
+    db.commit()
+    run.status = "waiting_input"; db.commit()
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+    from app.super_assistant.kernel.store import append_input
+    item = append_input(db, run_id=run.id, owner_id=owner.id, kind="user_input", payload={"content": "follow up"}, idempotency_key="wake-input")
+    db.commit(); db.refresh(run)
+    assert item.status == "pending"
+    assert run.status == "active"
+    wake = db.query(ExecutionDispatchOutbox).filter_by(run_id=run.id, message_ref="command://" + db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.appended").order_by(ExecutionEvent.seq.desc()).first().command_id).one()
+    assert wake.subject.startswith("sa.execution.run.")
 
 
 def test_request_budget_keeps_required_history_and_records_compaction():
@@ -593,9 +611,14 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
     db.commit()
     kernel_scheduler._poll_external_calls_once()
     db.expire_all()
-    assert db.get(ExecutionRun, run.id).status == "active"
-    assert db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one().inline_content == "轮询完成"
-    assert db.query(Artifact).filter_by(run_id=run.id, kind="poll.report").one().inline_content == '{"ok": true}'
+    # Polling is producer-only. The durable NATS reconciler consumer is the
+    # sole state transition path, so the observation must be queued first.
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+    queued = db.query(ExecutionDispatchOutbox).filter_by(
+        run_id=run.id, subject="sa.execution.reconcile",
+    ).one()
+    assert queued.payload["call_id"] == external.id
+    assert queued.payload["remote_state"] == "completed"
 
 
 def test_kernel_scheduler_claims_due_call_once_across_workers(db, monkeypatch):
@@ -647,3 +670,26 @@ def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):
     assert db.get(ExecutionRun, run.id).status == "active"
     artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
     assert artifact.inline_content == "MCP 结果"
+
+
+def test_waiting_call_cannot_retarget_after_remote_agent_revision_change(db, monkeypatch):
+    from app.super_assistant.remote_agent_service import create_agent_row, update_agent
+    from app.super_assistant.schemas import RemoteAgentCreate, RemoteAgentUpdate
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="冻结远端配置")
+    agent, _ = create_agent_row(db, owner.id, RemoteAgentCreate(
+        key=f"remote.freeze_{uuid.uuid4().hex[:8]}", label="freeze", endpoint="https://1.1.1.1/run", token="secret",
+    ))
+    old_call = SimpleNamespace(target_ref=agent.id, capability_revision=1)
+    connector = runtime._resolve_external_connector(db, run, old_call)
+    assert connector is not None and connector.endpoint == "https://1.1.1.1/run"
+    db.commit()
+
+    update_agent(db, owner.id, agent.id, RemoteAgentUpdate(endpoint="https://8.8.8.8/run"))
+    db.expire_all(); db.refresh(agent)
+    assert db.query(CapabilityRevision).filter_by(key=agent.key, revision=1).one().enabled is False
+    assert runtime._resolve_external_connector(db, run, old_call) is None
+    new_revision = runtime._capability_revision_for_target(db, owner.id, agent.key)
+    assert new_revision == 2
+    new_connector = runtime._resolve_external_connector(db, run, SimpleNamespace(target_ref=agent.id, capability_revision=new_revision))
+    assert new_connector is not None and new_connector.endpoint == "https://8.8.8.8/run"

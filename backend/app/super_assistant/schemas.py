@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -417,10 +418,18 @@ class RemoteAgentTaskNextOut(BaseModel):
 class RemoteAgentTaskResultIn(BaseModel):
     """回连模式任务结果回传体（契约与直连回合响应一致；体积封顶防滥用）。"""
 
-    status: str  # answered | failed
+    status: Literal["answered", "failed"]
     content: str = Field(default="", max_length=20000)
     session_ref: str | None = Field(default=None, max_length=255)
     note: str = Field(default="", max_length=2000)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
+
+    @model_validator(mode="after")
+    def bounded_artifacts(self):
+        size = len(json.dumps(self.artifacts, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        if size > 64 * 1024:
+            raise ValueError("artifacts payload exceeds 64 KiB; use an external artifact reference")
+        return self
 
 
 class MulticaConfigUpdate(BaseModel):

@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from app.shared.encryption import decrypt, encrypt
@@ -187,6 +188,24 @@ def save_config(db: Session, owner_id: str, body: MulticaConfigUpdate) -> SuperA
     if config is None:
         config = SuperAssistantMulticaConfig(owner_id=owner_id, base_url="", workspace_id="")
         db.add(config)
+    previous = (config.base_url, config.workspace_id, config.token_encrypted, config.enabled)
+    changed = (
+        previous[0] != base_url
+        or previous[1] != body.workspace_id.strip()
+        or (body.token is not None and bool(body.token.strip()) and previous[2] != encrypt(body.token))
+        or (previous[3] and not body.enabled)
+    )
+    if changed and config.owner_id:
+        from app.super_assistant.kernel.capability_service import revoke_capability_revisions
+        from app.super_assistant.kernel.models import CapabilityRevision
+        bind = db.get_bind()
+        if bind is not None and inspect(bind).has_table(CapabilityRevision.__tablename__):
+            for key in ("multica_list_agents", "multica_list_tasks", "multica_create_task"):
+                current = db.scalar(select(CapabilityRevision.revision).where(
+                    CapabilityRevision.key == key, CapabilityRevision.enabled.is_(True),
+                ).order_by(CapabilityRevision.revision.desc()))
+                if current is not None:
+                    revoke_capability_revisions(db, [key], revision=int(current))
     config.base_url = base_url
     config.workspace_id = body.workspace_id.strip()
     # 显示名由前端从测试连接的工作区列表带回；缺省保留已存名称

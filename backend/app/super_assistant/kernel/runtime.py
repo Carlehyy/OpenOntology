@@ -286,7 +286,12 @@ async def process_execution_message(payload: dict) -> None:
             append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "activation", "actor": "worker", "version": run.version}, actor={"kind": "worker"}, command_id=str(payload.get("command_id") or uuid.uuid4()), idempotency_key=f"activate:{run.id}", lease=token)
         conversation = db.scalar(select(SuperAssistantConversation).where(SuperAssistantConversation.id == run.conversation_id))
         if conversation is None: raise RuntimeError("conversation missing for execution Run")
-        message_candidates = _collect_message_candidates(db, run)
+        # Read pending user inputs into this activation, but do not consume
+        # them yet.  Consumption is part of the same transaction as the first
+        # successful model result; a provider failure must leave the Inbox
+        # item pending for a later activation.
+        pending_input_ids: list[str] = []
+        message_candidates = _collect_message_candidates(db, run, consume=False, pending_ids=pending_input_ids)
         delegation_tools = delegation.delegation_tools(db, run.owner_id)
         tools = [*delegation_tools, *_kernel_connector_tool_schemas(db, run.owner_id)]
         db.commit()
@@ -432,6 +437,8 @@ async def process_execution_message(payload: dict) -> None:
             call = db.get(ExecutionCall, call.id); attempt = db.get(ExecutionAttempt, attempt_id)
             artifact = _persist_assistant_artifact(db, run, call, attempt, content, token) if content else None
             _close_model_call(db, run, call, attempt, step, artifact, token)
+            _consume_pending_inputs(db, run, pending_input_ids, token)
+            pending_input_ids.clear()
             if wait is not None:
                 _persist_waiting_state(db, run, turn, step, wait, token, call=call); db.commit(); yielded = True; break
             if not tool_calls:
@@ -536,7 +543,11 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
     if target in {"multica_list_agents", "multica_list_tasks", "multica_create_task"}:
         try:
             from app.super_assistant import multica_service
-            if multica_service.active_config(db, run.owner_id) is not None:
+            config = multica_service.active_config(db, run.owner_id)
+            if config is not None:
+                digest = _external_config_hash({"kind": "multica", "base_url": config.base_url, "workspace_id": config.workspace_id, "token": config.token_encrypted})
+                if _capability_revision_for_target(db, run.owner_id, target) != int(call.capability_revision):
+                    return None
                 def execute(arguments: dict) -> str:
                     session = SessionLocal()
                     try:
@@ -566,7 +577,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                     # Revision 2 records the newly proven async query/cancel
                     # contract; old revision-1 Calls remain immutable and
                     # continue to use their historical synchronous snapshot.
-                    revision=2 if target == "multica_create_task" else 1,
+                    revision=int(call.capability_revision), manifest_hash=digest,
                 )
                 _persist_connector_capability(db, connector, source="multica")
                 connector_registry.register(connector)
@@ -596,9 +607,15 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                 SuperAssistantMcpServer.enabled.is_(True),
             )).all()
             for server in servers:
+                if int(getattr(server, "manifest_revision", 1) or 1) != int(call.capability_revision):
+                    continue
                 for item in (server.tool_manifest or []):
                     tool_name = str(item.get("name") or "") if isinstance(item, dict) else ""
                     if tool_name and namespaced_tool_name(server.name, tool_name) == target:
+                        digest = getattr(server, "manifest_hash", None) or _external_config_hash({"kind": "mcp", "transport": server.transport, "url": server.url, "command": server.command, "args": server.args or [], "headers": server.headers_encrypted, "env": server.env_encrypted, "tools": server.tool_manifest or []})
+                        capability = _capability_snapshot(db, target, int(call.capability_revision))
+                        if capability is not None and (not capability.enabled or capability.manifest_hash != digest):
+                            return None
                         connector = McpToolConnector(
                             server_id=server.id,
                             server_name=server.name,
@@ -609,14 +626,19 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                             command=server.command,
                             args=tuple(str(value) for value in (server.args or [])),
                             env=decrypt_env(server.env_encrypted),
-                            revision=int(getattr(server, "manifest_revision", 1) or 1),
-                            manifest_hash=getattr(server, "manifest_hash", None),
+                            revision=int(call.capability_revision), manifest_hash=digest,
                         )
                         _persist_connector_capability(db, connector, source="mcp")
                         connector_registry.register(connector)
                         return connector
         except Exception:
             logger.exception("failed to resolve MCP connector target=%s", target)
+        return None
+    digest = _external_config_hash({"kind": "remote_agent", "key": row.key, "endpoint": row.endpoint, "token": row.token_encrypted, "mode": row.mode, "timeout_seconds": row.timeout_seconds, "rap_version": row.rap_version})
+    if _capability_revision_for_target(db, run.owner_id, row.key) != int(call.capability_revision):
+        return None
+    capability = _capability_snapshot(db, row.key, int(call.capability_revision))
+    if capability is not None and (not capability.enabled or capability.manifest_hash != digest):
         return None
     try:
         from app.super_assistant import remote_agent_service
@@ -649,6 +671,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             pull_enqueue=pull_enqueue if (row.mode or "direct") == "pull" else None,
             pull_query=pull_query if (row.mode or "direct") == "pull" else None,
             pull_cancel=pull_cancel if (row.mode or "direct") == "pull" else None,
+            revision=int(call.capability_revision), manifest_hash=digest,
         )
         _persist_connector_capability(db, connector, source="remote_agent")
         connector_registry.register(connector)
@@ -691,6 +714,10 @@ def _persist_connector_capability(db, connector, *, source: str) -> None:
                     "secret_refs": list(persisted.secret_refs or []),
                 }
     elif source == "mcp":
+        persisted_hash = getattr(connector, "manifest_hash", None)
+        if persisted_hash:
+            digest = persisted_hash
+    else:
         persisted_hash = getattr(connector, "manifest_hash", None)
         if persisted_hash:
             digest = persisted_hash
@@ -1101,7 +1128,9 @@ def _bound_request_candidates(
     return bounded, trace
 
 
-def _collect_message_candidates(db, run: ExecutionRun) -> list[_MessageCandidate]:
+def _collect_message_candidates(
+    db, run: ExecutionRun, *, consume: bool = True, pending_ids: list[str] | None = None,
+) -> list[_MessageCandidate]:
     candidates = [
         _MessageCandidate(
             "system",
@@ -1146,18 +1175,43 @@ def _collect_message_candidates(db, run: ExecutionRun) -> list[_MessageCandidate
         payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
         if content:
             candidates.append(_MessageCandidate("user", str(content), "user_input"))
-        append_event(
-            db, run, event_type="inbox.consumed",
-            payload={"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id},
-            actor={"kind": "worker"}, command_id=f"inbox-consume:{item.id}",
-            idempotency_key=f"inbox-consumed:{item.id}",
-        )
-        item.status, item.consumed_at = "consumed", _now()
+        if consume:
+            append_event(
+                db, run, event_type="inbox.consumed",
+                payload={"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id},
+                actor={"kind": "worker"}, command_id=f"inbox-consume:{item.id}",
+                idempotency_key=f"inbox-consumed:{item.id}",
+            )
+            item.status, item.consumed_at = "consumed", _now()
+        elif pending_ids is not None:
+            pending_ids.append(item.id)
     from .models import Approval
     approvals = db.scalars(select(Approval).where(Approval.run_id == run.id, Approval.status.in_(("approved", "denied"))).order_by(Approval.decided_at, Approval.id)).all()
     for approval in approvals:
         candidates.append(_MessageCandidate("system", f"用户审批结果：{approval.status}（审批 {approval.id}）", "approval"))
     return candidates
+
+
+def _consume_pending_inputs(db, run, inbox_ids: list[str], token) -> None:
+    """Consume inputs only after a model result is durably recorded.
+
+    The list is captured before provider work starts.  Locking each row here
+    prevents a concurrent replay from turning a pending item into an
+    at-most-once message while preserving the existing event-sourced history.
+    """
+    for inbox_id in inbox_ids:
+        item = db.scalar(select(InboxItem).where(
+            InboxItem.id == inbox_id, InboxItem.run_id == run.id,
+        ).with_for_update())
+        if item is None or item.status != "pending":
+            continue
+        append_event(
+            db, run, event_type="inbox.consumed",
+            payload={"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id},
+            actor={"kind": "worker"}, command_id=f"inbox-consume:{item.id}",
+            idempotency_key=f"inbox-consumed:{item.id}", lease=token,
+        )
+        item.status, item.consumed_at = "consumed", _now()
 
 
 def _rebuild_messages(
@@ -1221,8 +1275,30 @@ def _persist_assistant_artifact(db, run, call, attempt, content: str, token):
 def _capability_revision_for_target(db, owner_id: str, target_ref: str | None) -> int:
     """Resolve the immutable revision recorded on a new external Call."""
     target = str(target_ref or "").strip()
-    if target == "multica_create_task":
-        return 2
+    def revision_for_hash(key: str, manifest_hash: str, default: int) -> int:
+        from .models import CapabilityRevision
+        from sqlalchemy import inspect
+        bind = db.get_bind()
+        if bind is None or not inspect(bind).has_table(CapabilityRevision.__tablename__):
+            return default
+        rows = db.scalars(select(CapabilityRevision).where(
+            CapabilityRevision.key == key,
+        ).order_by(CapabilityRevision.revision.desc())).all()
+        for row in rows:
+            if row.enabled and row.manifest_hash == manifest_hash:
+                return int(row.revision)
+        return (int(rows[0].revision) + 1) if rows else default
+
+    if target.startswith("multica_"):
+        from app.super_assistant import multica_service
+        config = multica_service.active_config(db, owner_id)
+        if config is not None:
+            digest = _external_config_hash({
+                "kind": "multica", "base_url": config.base_url,
+                "workspace_id": config.workspace_id, "token": config.token_encrypted,
+            })
+            return revision_for_hash(target, digest, 2 if target == "multica_create_task" else 1)
+        return 2 if target == "multica_create_task" else 1
     try:
         from app.super_assistant.models import SuperAssistantProcessPlugin
         plugin = db.scalar(select(SuperAssistantProcessPlugin).where(
@@ -1243,10 +1319,44 @@ def _capability_revision_for_target(db, owner_id: str, target_ref: str | None) -
                 and namespaced_tool_name(server.name, str(tool.get("name") or "")) == target
                 for tool in (server.tool_manifest or [])
             ):
-                return int(getattr(server, "manifest_revision", 1) or 1)
+                digest = getattr(server, "manifest_hash", None) or _external_config_hash({
+                    "kind": "mcp", "transport": server.transport, "url": server.url,
+                    "command": server.command, "args": server.args or [],
+                    "headers": server.headers_encrypted, "env": server.env_encrypted,
+                    "tools": server.tool_manifest or [],
+                })
+                return revision_for_hash(target, digest, int(getattr(server, "manifest_revision", 1) or 1))
+        from app.super_assistant.models import SuperAssistantRemoteAgent
+        remote = db.scalar(select(SuperAssistantRemoteAgent).where(
+            SuperAssistantRemoteAgent.owner_id == owner_id,
+            SuperAssistantRemoteAgent.enabled.is_(True),
+            (SuperAssistantRemoteAgent.id == target) | (SuperAssistantRemoteAgent.key == target),
+        ))
+        if remote is not None:
+            digest = _external_config_hash({
+                "kind": "remote_agent", "key": remote.key, "endpoint": remote.endpoint,
+                "token": remote.token_encrypted, "mode": remote.mode,
+                "timeout_seconds": remote.timeout_seconds, "rap_version": remote.rap_version,
+            })
+            return revision_for_hash(remote.key, digest, 1)
     except Exception:
         logger.exception("failed to resolve capability revision for target=%s", target)
     return 1
+
+
+def _external_config_hash(value: dict) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def _capability_snapshot(db, key: str, revision: int):
+    from sqlalchemy import inspect
+    from .models import CapabilityRevision
+    bind = db.get_bind()
+    if bind is None or not inspect(bind).has_table(CapabilityRevision.__tablename__):
+        return None
+    return db.scalar(select(CapabilityRevision).where(
+        CapabilityRevision.key == str(key), CapabilityRevision.revision == int(revision),
+    ))
 
 
 def _close_model_call(db, run, call, attempt, step, artifact, token):
@@ -1502,6 +1612,7 @@ def _persist_external_artifacts(db, run: ExecutionRun, call: ExecutionCall, valu
     if len(values) > 32:
         raise ValueError("external artifact count exceeds limit")
     created: list[Artifact] = []
+    total_inline_bytes = 0
     for index, value in enumerate(values):
         if not isinstance(value, dict):
             raise ValueError("external artifact must be an object")
@@ -1512,11 +1623,19 @@ def _persist_external_artifacts(db, run: ExecutionRun, call: ExecutionCall, valu
         storage_ref = str(value.get("storage_ref") or "")
         if raw is not None:
             inline = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, sort_keys=True)
-            if len(inline.encode("utf-8")) > 1024 * 1024:
+            inline_size = len(inline.encode("utf-8"))
+            if inline_size > 1024 * 1024:
                 raise ValueError("external artifact exceeds inline size limit")
+            total_inline_bytes += inline_size
+            if total_inline_bytes > 8 * 1024 * 1024:
+                raise ValueError("external artifact aggregate exceeds inline size limit")
             storage_ref = f"inline://{run.id}/{call.id}/{index}"
         if not storage_ref:
             raise ValueError("external artifact requires content or storage_ref")
+        if len(storage_ref) > 2048:
+            raise ValueError("external artifact storage_ref is too long")
+        if inline is None and int(value.get("size") or 0) < 0:
+            raise ValueError("external artifact size cannot be negative")
         computed_checksum = _checksum(inline) if inline is not None else ""
         checksum = str(value.get("checksum") or computed_checksum)
         if not checksum:

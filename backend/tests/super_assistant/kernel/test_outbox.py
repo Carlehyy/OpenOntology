@@ -42,6 +42,35 @@ def test_publish_claims_each_row_immediately_before_dispatch(db, monkeypatch):
     assert len(seen) == 2 and len(set(seen)) == 2
 
 
+def test_publish_preserves_reconcile_payload_and_legacy_call_id(db, monkeypatch):
+    owner = User(id=str(uuid.uuid4()), username=f"payload-{uuid.uuid4().hex[:6]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
+    db.add(owner); db.flush()
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="payload")
+    db.add(conversation); db.flush()
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="x", idempotency_key=f"payload-{uuid.uuid4().hex}")
+    initial = db.query(ExecutionDispatchOutbox).filter_by(run_id=run.id).one()
+    initial.status = "published"
+    db.add(ExecutionDispatchOutbox(
+        id=str(uuid.uuid4()), command_id="reconcile:test", run_id=run.id,
+        subject="sa.execution.reconcile", message_ref="reconcile://call-1/event-1",
+        payload={"call_id": "call-1", "remote_state": "completed"},
+        status="pending", next_attempt_at=_now(),
+    ))
+    db.add(ExecutionDispatchOutbox(
+        id=str(uuid.uuid4()), command_id="call:test", run_id=run.id,
+        subject="sa.execution.call.owner", message_ref="call://legacy-call",
+        payload={}, status="pending", next_attempt_at=_now(),
+    ))
+    db.commit()
+    seen = []
+    monkeypatch.setattr(outbox, "dispatch_execution", lambda subject, payload, *, command_id: seen.append((subject, payload, command_id)))
+    assert outbox.publish_due_once(db, batch_size=2, publisher_id="publisher") == 2
+    reconcile = next(payload for subject, payload, _ in seen if subject == "sa.execution.reconcile")
+    legacy = next(payload for subject, payload, _ in seen if subject == "sa.execution.call.owner")
+    assert reconcile["remote_state"] == "completed" and reconcile["call_id"] == "call-1"
+    assert legacy["call_id"] == "legacy-call"
+
+
 def test_expired_claim_recovery_is_locked_and_requeues(db):
     owner = User(id=str(uuid.uuid4()), username=f"recover-outbox-{uuid.uuid4().hex[:6]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
     db.add(owner); db.flush()

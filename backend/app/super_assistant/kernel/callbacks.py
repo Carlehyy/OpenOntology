@@ -125,38 +125,37 @@ def receive_agent_callback(
         if call.target_ref not in {remote.id, remote.key}:
             raise ContractError("callback connector does not match call target")
         if body.event_type != "call.outcome_changed":
-            # Outcome callbacks are appended by the reconciler atomically
-            # with their state change. Progress/attempt facts have no state
-            # transition and can be recorded directly.
+            # Progress/attempt facts have no state transition and can be
+            # recorded directly. Outcome observations are deliberately routed
+            # through the durable reconciler outbox below.
             append_agent_callback(
                 db, owner_id=remote.owner_id, run_id=run_id, call_id=call_id,
                 connector_id=body.connector_id, provider_event_id=body.provider_event_id,
                 event_type=body.event_type, payload=payload,
             )
-            db.commit()
         else:
-            db.rollback()
+            from .store import enqueue_reconcile_observation
+
+            reported_state = payload.get("remote_state")
+            if not reported_state or str(reported_state).strip().lower() in {"closed", "done"}:
+                reported_state = payload.get("outcome") or payload.get("status")
+            enqueue_reconcile_observation(
+                db, run=run, call=call,
+                observation={
+                    "connector_id": body.connector_id,
+                    "provider_event_id": body.provider_event_id,
+                    "remote_state": reported_state,
+                    "status": payload.get("status"),
+                    "content": payload.get("content"),
+                    "evidence_ref": payload.get("evidence_ref"),
+                    "artifacts": payload.get("artifacts") or [],
+                },
+            )
+        db.commit()
     except KeyError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail="callback scope not found") from exc
     except ContractError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if body.event_type == "call.outcome_changed":
-        from .runtime import reconcile_execution_message
-        import asyncio
-        reported_state = payload.get("remote_state")
-        # Some providers use ``status=closed`` as a transport envelope and
-        # carry the semantic terminal state in ``outcome``.
-        if not reported_state or str(reported_state).strip().lower() in {"closed", "done"}:
-            reported_state = payload.get("outcome") or payload.get("status")
-        accepted = asyncio.run(reconcile_execution_message({
-            "run_id": run_id, "call_id": call_id, "connector_id": body.connector_id,
-            "provider_event_id": body.provider_event_id,
-            "remote_state": reported_state,
-            "status": payload.get("status"), "content": payload.get("content"),
-            "evidence_ref": payload.get("evidence_ref"), "artifacts": payload.get("artifacts"),
-        }))
-        if not accepted:
-            raise HTTPException(status_code=503, detail="callback reconciliation not persisted; retry with the same event id")
     return {"accepted": True, "provider_event_id": body.provider_event_id}

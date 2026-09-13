@@ -184,6 +184,10 @@ class RemoteAgentHttpConnector:
     token: str = ""
     timeout_seconds: int = 120
     revision: int = 1
+    # Hash of the persisted endpoint/credential snapshot used by this
+    # connector.  CapabilityRevision stores it so a later config update can
+    # never silently retarget an old waiting Call.
+    manifest_hash: str | None = None
     mode: str = "direct"
     pull_enqueue: Callable[[str, str | None, int, str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
     pull_query: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
@@ -201,7 +205,10 @@ class RemoteAgentHttpConnector:
             supports_cancel=self.mode == "pull" and self.pull_cancel is not None,
             supports_push=False,
             supports_query_status=self.mode == "pull" and self.pull_query is not None,
-            supports_artifact=False,
+            # RAP v1 accepts bounded structured artifacts in its terminal
+            # response; progress/cancellation remain explicit callback or
+            # pull capabilities rather than being overclaimed here.
+            supports_artifact=True,
         )
 
     @staticmethod
@@ -253,6 +260,7 @@ class RemoteAgentHttpConnector:
             "content": str(value.get("content") or ""),
             "session_ref": value.get("session_ref"),
             "note": str(value.get("note") or "")[:2000],
+            "artifacts": value.get("artifacts") or [],
             "provider_status": status,
         }
 
@@ -347,6 +355,7 @@ class MulticaToolConnector:
     query_executor: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
     cancel_executor: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
     revision: int = 1
+    manifest_hash: str | None = None
 
     def descriptor(self) -> AgentDescriptor:
         return AgentDescriptor(

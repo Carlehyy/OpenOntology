@@ -35,3 +35,14 @@ def test_artifact_checksum_and_business_completion_are_separate():
     assert complete_business_artifact(integrity, success=True).business_status == "success"
     failed = verify_artifact(data, expected_checksum="sha256:bad", expected_size=5)
     assert failed.business_status == "integrity_failed"
+
+
+def test_context_planner_retains_oversized_required_source_with_provenance():
+    source = _source("long-goal")
+    pack = ContextPackPlanner().plan([
+        ContextCandidate(source, "GOAL-START " + ("x" * 50000) + " GOAL-END", ContextTier.REQUIRED, section="working"),
+    ])
+    assert pack.source_refs[0]["id"] == "long-goal"
+    assert "GOAL-START" in pack.content and "GOAL-END" in pack.content
+    assert "context truncated" in pack.content
+    assert sum(len(part.encode("utf-8")) // 4 for part in pack.content.split("\n\n")) <= pack.budget["working"]

@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class KernelRequest(BaseModel):
@@ -50,6 +50,13 @@ class InputRequest(KernelRequest):
     content_ref: str | None = None
     question_id: str | None = None
     idempotency_key: str = Field(min_length=1, max_length=255)
+
+    @field_validator("content")
+    @classmethod
+    def content_utf8_cap(cls, value: str | None) -> str | None:
+        if value is not None and len(value.encode("utf-8")) > 256 * 1024:
+            raise ValueError("content exceeds 256 KiB UTF-8 limit")
+        return value
 
     @model_validator(mode="after")
     def one_content(self):

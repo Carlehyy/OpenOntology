@@ -14,6 +14,40 @@ _scheduler = None
 _RECONCILE_CLAIM_TTL = timedelta(seconds=45)
 
 
+def _enqueue_reconcile_observation(
+    run_id: str,
+    call_id: str,
+    observation: dict,
+    claim_owner: str,
+) -> bool:
+    """Persist a poll result; the NATS reconciler owns state transitions."""
+    from .models import ExecutionCall, ExecutionRun
+    from .store import enqueue_reconcile_observation
+
+    db = SessionLocal()
+    try:
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update())
+        call = db.scalar(select(ExecutionCall).where(
+            ExecutionCall.id == call_id, ExecutionCall.run_id == run_id,
+        ).with_for_update())
+        if run is None or call is None:
+            db.rollback()
+            return False
+        try:
+            enqueue_reconcile_observation(
+                db, run=run, call=call, observation=observation,
+                claim_owner=claim_owner,
+            )
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            logger.exception("failed to enqueue reconciliation observation for run=%s call=%s", run_id, call_id)
+            return False
+    finally:
+        db.close()
+
+
 def _claim_external_call(call_id: str, worker_id: str):
     """Atomically claim one due Call before invoking a remote connector.
 
@@ -82,6 +116,42 @@ def _release_external_call(call_id: str, worker_id: str) -> None:
         db.close()
 
 
+def _mark_external_call_manual(call_id: str, worker_id: str, reason: str) -> None:
+    """Fence a waiting Call whose immutable capability revision was revoked."""
+    from .models import ExecutionCall, ExecutionRun
+    from .store import _now, append_event
+    from .runtime import _append_manual_attention
+    from .contracts import CallOutcome, CallStatus
+
+    db = SessionLocal()
+    try:
+        call = db.scalar(select(ExecutionCall).where(
+            ExecutionCall.id == call_id, ExecutionCall.lease_owner == worker_id,
+        ).with_for_update())
+        if call is None:
+            return
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == call.run_id).with_for_update())
+        if run is None:
+            db.rollback(); return
+        call.status = CallStatus.RECONCILING.value
+        call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
+        call.manual_attention = True
+        call.remote_observed_state_ref = reason
+        call.next_reconcile_at = None
+        _append_manual_attention(db, run, call, reason)
+        append_event(
+            db, run, event_type="call.outcome_changed",
+            payload={"call_id": call.id, "status": call.status, "outcome": call.outcome,
+                     "evidence_ref": None, "connector_id": call.target_ref,
+                     "provider_event_id": None},
+            actor={"kind": "scheduler"}, command_id=f"call:{call.id}:manual:{reason}",
+            idempotency_key=f"call-manual:{call.id}:{reason}", connector_id=call.target_ref,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
 def _poll_external_calls_once() -> None:
     """Poll provider-backed Calls whose reconciliation deadline has arrived.
 
@@ -92,7 +162,7 @@ def _poll_external_calls_once() -> None:
     """
     from .contracts import CallStatus, RunStatus
     from .models import ExecutionCall, ExecutionRun
-    from .runtime import _resolve_external_connector, reconcile_execution_message
+    from .runtime import _resolve_external_connector
     from .store import _now
 
     db = SessionLocal()
@@ -121,7 +191,26 @@ def _poll_external_calls_once() -> None:
             connector = _resolve_external_connector(db, run, call)
             if connector is None:
                 db.rollback()
-                _release_external_call(claimed_call_id, worker_id)
+                # A revoked/mismatched immutable revision is terminal for
+                # this Call. Other resolution failures (for example a
+                # temporarily unavailable connector) remain retryable.
+                stale = False
+                try:
+                    from .runtime import _capability_revision_for_target
+                    from .models import CapabilityRevision
+                    stale = _capability_revision_for_target(db, run.owner_id, call.target_ref) != int(call.capability_revision)
+                    if not stale and call.target_ref:
+                        snapshot = db.scalar(select(CapabilityRevision).where(
+                            CapabilityRevision.key == str(call.target_ref),
+                            CapabilityRevision.revision == int(call.capability_revision),
+                        ))
+                        stale = snapshot is not None and not snapshot.enabled
+                except Exception:
+                    stale = False
+                if stale:
+                    _mark_external_call_manual(claimed_call_id, worker_id, "capability_revision_unavailable")
+                else:
+                    _release_external_call(claimed_call_id, worker_id)
                 continue
             descriptor = connector.descriptor()
             cancelling = (
@@ -157,7 +246,9 @@ def _poll_external_calls_once() -> None:
                 "content": observed.get("content"),
                 "artifacts": observed.get("artifacts") or [],
             }
-            asyncio.run(reconcile_execution_message(payload))
+            _enqueue_reconcile_observation(
+                claimed_run_id, claimed_call_id, payload, worker_id,
+            )
             _release_external_call(claimed_call_id, worker_id)
     except Exception:
         logger.exception("kernel external reconciliation poll failed")

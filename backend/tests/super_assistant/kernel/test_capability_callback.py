@@ -85,10 +85,13 @@ def test_hmac_callback_ingress_is_authenticated(db, monkeypatch):
     timestamp = int(time.time())
     message = f"{timestamp}.{run.id}.request-1.{call.id}.provider-1.{payload_hash}".encode()
     signature = "sha256=" + hmac.new(b"callback-secret", message, hashlib.sha256).hexdigest()
-    async def reconcile(_payload):
-        return True
-    monkeypatch.setattr("app.super_assistant.kernel.runtime.reconcile_execution_message", reconcile)
     assert receive_agent_callback(run.id, call.id, body, db, str(timestamp), signature)["accepted"] is True
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+    queued = db.query(ExecutionDispatchOutbox).filter_by(
+        run_id=run.id, subject="sa.execution.reconcile",
+    ).one()
+    assert queued.payload["call_id"] == call.id
+    assert queued.payload["remote_state"] == "completed"
 
 
 def test_callback_payload_is_bounded_before_authentication_work():

@@ -192,7 +192,10 @@ def update_mcp_server(
         )
         manifest_changed = connection_changed or body.headers is not None or body.env is not None
         if manifest_changed or body.enabled is False:
-            revoke_capability_revisions(db, _manifest_keys(item))
+            revoke_capability_revisions(
+                db, _manifest_keys(item),
+                revision=int(item.manifest_revision or 1),
+            )
         if manifest_changed:
             # The persisted connection fields are mutable, while a Capability
             # revision is immutable. Do not leave the old tool manifest exposed
@@ -254,7 +257,9 @@ def remove_mcp_server(
         server_id,
         include_builtins=include_builtins,
     )
-    revoke_capability_revisions(db, _manifest_keys(item))
+    revoke_capability_revisions(
+        db, _manifest_keys(item), revision=int(item.manifest_revision or 1),
+    )
     db.delete(item)
     db.commit()
 

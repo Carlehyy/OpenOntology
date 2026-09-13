@@ -50,16 +50,22 @@ def publish_due_once(db: Session, *, batch_size: int = 20, publisher_id: str | N
         row.claim_expires_at = now + CLAIM_TTL
         row_id = row.id
         subject, command_id, message_ref, run_id = row.subject, row.command_id, row.message_ref, row.run_id
+        payload = dict(row.payload or {})
         db.commit()
         try:
+            # Rows written before the payload column was introduced carry an
+            # empty JSON object. Preserve their call dispatch contract while
+            # allowing newer reconcile rows to carry an immutable body.
+            if message_ref.startswith("call://") and "call_id" not in payload:
+                payload["call_id"] = message_ref.removeprefix("call://")
+            payload.update({
+                "run_id": run_id,
+                "command_id": command_id,
+                "message_ref": message_ref,
+            })
             dispatch_execution(
                 subject,
-                {
-                    "run_id": run_id,
-                    "command_id": command_id,
-                    "message_ref": message_ref,
-                    **({"call_id": message_ref.removeprefix("call://")} if message_ref.startswith("call://") else {}),
-                },
+                payload,
                 command_id=command_id,
             )
         except Exception as exc:  # durable row remains for a later scheduler tick

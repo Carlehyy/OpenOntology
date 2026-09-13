@@ -101,6 +101,7 @@ _ADAPTER_IMPORT_WHITELIST: dict[str, set[str]] = {
         "app.exploration.orchestrator",
         "app.exploration.schemas",
         "app.exploration.session_service",
+        "app.exploration.models",
     },
     "assistant_hub/registry.py": {
         "app.assistant_hub.adapters",

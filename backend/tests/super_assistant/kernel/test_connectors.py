@@ -57,7 +57,7 @@ async def test_remote_agent_http_connector_is_dispatchable_and_preserves_contrac
         assert request.method == "POST"
         assert request.headers["authorization"] == "Bearer secret"
         assert json.loads(request.content) == {"message": "研究项目", "session_ref": "s1"}
-        return httpx.Response(200, json={"status": "answered", "content": "完成", "session_ref": "s2"})
+        return httpx.Response(200, json={"status": "answered", "content": "完成", "session_ref": "s2", "artifacts": [{"kind": "report", "content": {"ok": True}}]})
 
     connector = RemoteAgentHttpConnector(
         agent_id="remote-1", key="remote.research", endpoint="https://agent.example/run",
@@ -72,6 +72,8 @@ async def test_remote_agent_http_connector_is_dispatchable_and_preserves_contrac
     assert result["status"] == "answered"
     assert result["session_ref"] == "s2"
     assert result["run_id"] == "r1"
+    assert result["artifacts"][0]["kind"] == "report"
+    assert connector.descriptor().supports_artifact is True
     assert registry.resolve("remote.research", 1) is connector
 
 

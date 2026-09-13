@@ -252,6 +252,7 @@ class RemoteAgentAdapter:
                     conversation_ref=final_ref,
                     created_new_conversation=remote_session is None and bool(new_session),
                     note=str(row.result_note or ""),
+                    usage={"artifacts": row.result_artifacts or []} if row.result_artifacts else None,
                 )
                 return
             if row.status == "expired":
@@ -411,6 +412,7 @@ def submit_task_result(
     row.result_content = body.content[:20000]
     row.result_session_ref = (body.session_ref or None) if len(body.session_ref or "") <= 255 else None
     row.result_note = body.note[:2000]
+    row.result_artifacts = list(body.artifacts or [])
     row.completed_at = _utcnow()
     db.commit()
     db.refresh(row)
@@ -459,6 +461,8 @@ def kernel_connector(
     pull_enqueue=None,
     pull_query=None,
     pull_cancel=None,
+    revision: int = 1,
+    manifest_hash: str | None = None,
 ):
     """Build the kernel.v1 connector for an existing remote-agent row.
 
@@ -479,6 +483,8 @@ def kernel_connector(
         token=token,
         timeout_seconds=max(10, int(row.timeout_seconds or 120)),
         mode=row.mode or "direct",
+        revision=revision,
+        manifest_hash=manifest_hash,
         pull_enqueue=pull_enqueue,
         pull_query=pull_query,
         pull_cancel=pull_cancel,
@@ -645,6 +651,15 @@ def update_agent(
     db: Session, owner_id: str, agent_id: str, body: RemoteAgentUpdate,
 ) -> RemoteAgentOut:
     row = _require_row(db, owner_id, agent_id)
+    config_changed = any(value is not None for value in (body.endpoint, body.token, body.timeout_seconds)) or body.enabled is False
+    if config_changed:
+        from app.super_assistant.kernel.capability_service import revoke_capability_revisions
+        from app.super_assistant.kernel.models import CapabilityRevision
+        current = db.scalar(select(CapabilityRevision.revision).where(
+            CapabilityRevision.key == row.key, CapabilityRevision.enabled.is_(True),
+        ).order_by(CapabilityRevision.revision.desc()))
+        if current is not None:
+            revoke_capability_revisions(db, [row.key], revision=int(current))
     if body.label is not None:
         label = body.label.strip()
         if not label:
@@ -668,6 +683,13 @@ def update_agent(
 
 def delete_agent(db: Session, owner_id: str, agent_id: str) -> None:
     row = _require_row(db, owner_id, agent_id)
+    from app.super_assistant.kernel.capability_service import revoke_capability_revisions
+    from app.super_assistant.kernel.models import CapabilityRevision
+    current = db.scalar(select(CapabilityRevision.revision).where(
+        CapabilityRevision.key == row.key, CapabilityRevision.enabled.is_(True),
+    ).order_by(CapabilityRevision.revision.desc()))
+    if current is not None:
+        revoke_capability_revisions(db, [row.key], revision=int(current))
     db.delete(row)
     db.commit()
 

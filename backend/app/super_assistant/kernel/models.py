@@ -325,6 +325,10 @@ class ExecutionDispatchOutbox(Base):
     run_id: Mapped[str] = mapped_column(String, ForeignKey("super_assistant_execution_runs.id", ondelete="CASCADE"), nullable=False)
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     message_ref: Mapped[str] = mapped_column(String(1000), nullable=False)
+    # Optional immutable command body.  Run wakeups only need ``message_ref``;
+    # reconciliation observations also carry provider state/content and must
+    # survive a process crash before the NATS publisher claims the row.
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)

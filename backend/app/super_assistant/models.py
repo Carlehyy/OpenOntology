@@ -648,6 +648,10 @@ class SuperAssistantRemoteAgentTask(Base):
     result_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_session_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     result_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Bounded structured artifacts returned by a pull-mode RAP task.  The
+    # kernel validates checksums/content when the result is reconciled; this
+    # column only preserves the transport payload across polling.
+    result_artifacts: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
