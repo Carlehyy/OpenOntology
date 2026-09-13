@@ -210,7 +210,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 ## 11. 当前实现证据（2026-09-14）
 
-本节只记录已经执行过的证据，不把设计目标当成完成事实。当前分支最近的实现提交包括：Kernel Artifact 下载 `7c1bdf9c`、外部插件与异步委派 `6d42792b`、进程插件健康/清理 `9f317068`、外部回调/恢复/DLQ/子结果归并 `b5775974`、Assistant Hub Kernel 子 Run `fd7323d9`、结构化外部 Artifact `1737edab`。
+本节只记录已经执行过的证据，不把设计目标当成完成事实。当前分支最近的实现提交包括：Kernel Artifact 下载 `7c1bdf9c`、外部插件与异步委派 `6d42792b`、进程插件健康/清理 `9f317068`、外部回调/恢复/DLQ/子结果归并 `b5775974`、Assistant Hub Kernel 子 Run `fd7323d9`、结构化外部 Artifact `1737edab`，以及本轮竞态/边界修复 `c1b9fcab`、`bb1a8d43`、`3a744b65`、`dae778e2`、`5a71a7e0`、`10d6570f`、`e19c237f`、`0c254edd`。
 
 | 里程碑 | 当前证据 | 状态 |
 |---|---|---|
@@ -221,7 +221,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 | M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试 | 已完成首版；OS 沙箱、secret broker 需部署层证据 |
 | M5 | Context Pack、Memory/Palace source provenance、tombstone 排除、结构化 Artifact 和 checksum 校验有代码/测试 | 已完成首版 |
 | M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
-| M7 | PostgreSQL、Neo4j、NATS JetStream、MinIO staging 探针全部通过；staging 数据库已升级至 `0110_super_assistant_process_plugins` | 依赖探针通过，完整 E2E 待执行 |
+| M7 | PostgreSQL、Neo4j、NATS JetStream、MinIO staging 探针已通过；本地当前仅复核了 Compose `/api/health`，完整 kernel live E2E、隔离 staging 数据库升级和外部副作用证据仍需按当前提交重跑 | 依赖探针部分通过，完整 staging 验收待执行 |
 | M8 | 静态门禁和专项测试通过；前端 color-token 门禁仍有既有 `pages/login/login.css` 基线失败，完整发布/回滚演练尚未完成 | 未完成 |
 
 已执行的 staging 依赖探针命令为：
@@ -231,3 +231,14 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 ```
 
 在隔离 Compose 网络中，PostgreSQL `SELECT 1`、NATS `SA_EXECUTION_V1` subjects、MinIO `assistant-workspace` bucket、Neo4j `RETURN 1` 均通过；并使用当前分支源码短时启动 `nats_executor`，确认 durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 已注册，随后已停止该临时进程。该证据不等价于完整业务 E2E 或生产发布批准。
+
+## 12. 对抗式代码审查（2026-09-14）
+
+本轮按恶意输入、并发竞态、迟到结果、进程泄漏和资源耗尽路径复核 Kernel、Assistant Hub、远程 Agent 与进程插件边界，确认并修复以下问题：
+
+- 业务探索委派原先可在缺少本体/编辑草稿绑定时先创建 `assistant_child`；现在由探索域服务在创建子 Run 前校验 `ontology_id + draft_version_id + editing + write_permission_hash`，缺失条件转为 `waiting_input`，不留下无绑定子会话。
+- Run 在取消宽限期后进入 `cancelled/expired` 时，原调度器会停止远程 Call 对账；现在带远端句柄的未决 Call 继续执行取消或状态查询，终态 Run 保持不可重开但 Call 可收敛到真实终态。
+- 回连 Agent 长轮询原先会持有请求级数据库连接；现在认证/心跳事务在等待前结束，任务认领使用短会话。
+- 远程 callback payload 增加 64 KiB 上限；超限内容必须以 Artifact 引用传递。
+
+专项 Kernel 回归为 `131 passed`；独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚以及前端 color-token 基线问题仍未完成，因此本轮审查不构成商用发布批准。
