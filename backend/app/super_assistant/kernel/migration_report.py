@@ -110,7 +110,16 @@ def _source_ref(kind: str, source_id: str) -> dict[str, str]:
         # persisted row; retain a synthetic namespace without claiming a table.
         "assistant": "assistant_hub.capability",
     }
-    return {"table": tables.get(kind, f"legacy:{kind}"), "id": str(source_id)}
+    table = tables.get(kind, f"legacy:{kind}")
+    return {
+        "table": table,
+        "kind": kind,
+        "id": str(source_id),
+        "revision": "legacy",
+        "locator": f"{table}://{source_id}",
+        "recipe_revision": "legacy.v1",
+        "extraction_id": f"legacy:{kind}:{source_id}",
+    }
 
 
 def _legacy_capability_key(kind: str, source_id: str) -> str:
@@ -397,7 +406,7 @@ def rollback_legacy_backfill(
         except (TypeError, ValueError):
             metadata = {}
         source = metadata.get("legacy_source")
-        if not isinstance(source, dict) or not source.get("table") or not source.get("id"):
+        if not isinstance(source, dict) or not source.get("kind") or not source.get("id") or not source.get("locator"):
             continue
         marker = f"legacy-rollback:{migration_id}:{run.id}"
         already = db.scalar(select(ExecutionEvent).where(

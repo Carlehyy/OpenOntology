@@ -392,10 +392,11 @@ def append_input(
     db.flush()
     command_id = _new_id()
     append_event(db, run, event_type="inbox.appended", payload={"inbox_id": item.id, "kind": kind, "target_ref": target_ref or item.id, "expiry_policy": expiry_policy or "none"}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
-    if kind == "question_answer" and run.status == RunStatus.WAITING_INPUT.value:
+    if kind in {"question_answer", "resume"} and run.status in {RunStatus.WAITING_INPUT.value, RunStatus.WAITING_RETRY.value}:
         before = run.status
         run.status, run.wait_reason, run.version = RunStatus.ACTIVE.value, None, run.version + 1
-        append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "input_received", "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
+        reason = "input_received" if kind == "question_answer" else "resume_received"
+        append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": reason, "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
     return item
 
 
