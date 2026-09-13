@@ -49,6 +49,14 @@ export function inferColumnTypes(
       if (type === 'null') continue
       votes.set(type, (votes.get(type) ?? 0) + 1)
     }
+    // 列级类型拓宽：同一列只要出现小数票，整数值就不可能把列拉回整数
+    // （JS 中 200.0 === 200 会投整数票，与 100.5 的浮点票平票时曾让
+    // PRIORITY 错误裁决为整数——与后端字符串口径「int("100.5") 失败→
+    // float」对齐，float 票吸收 integer 票后再参与平票裁决）。
+    if (votes.has('float') && votes.has('integer')) {
+      votes.set('float', (votes.get('float') ?? 0) + (votes.get('integer') ?? 0))
+      votes.delete('integer')
+    }
     let best: InferredType = 'string'
     let bestScore: [number, number] = [0, 0]
     for (const [type, count] of votes) {

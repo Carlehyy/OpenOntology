@@ -44,11 +44,25 @@ describe('inferColumnTypes', () => {
     ]
     const types = inferColumnTypes(rows, ['id', 'amount', 'flag', 'ts', 'mixed'])
     assert.equal(types.id, 'string')
-    assert.equal(types.amount, 'integer')
+    // 列级拓宽（D-008）：列内出现 20.5 浮点票后，'10' 的整数票被吸收，
+    // 列类型为小数——旧断言 integer 正是生产把含小数列标成整数的缺陷行为
+    assert.equal(types.amount, 'float')
     assert.equal(types.flag, 'boolean')
     assert.equal(types.ts, 'timestamp')
     // string 与 integer 平票时 integer（更具体）优先——与后端优先级一致
     assert.equal(types.mixed, 'integer')
+  })
+
+  it('JSON 数值列含小数时不得标为整数（D-008 生产缺陷回归）', () => {
+    // JS 中 200.0 === 200 投整数票，与 100.5 平票曾让 PRIORITY 裁决为整数
+    const numericRows = [
+      { amount: 100.5, all_int: 200, str_float: '100.5' },
+      { amount: 200.0, all_int: 300, str_float: '200' },
+    ]
+    const types = inferColumnTypes(numericRows, ['amount', 'all_int', 'str_float'])
+    assert.equal(types.amount, 'float')
+    assert.equal(types.all_int, 'integer')
+    assert.equal(types.str_float, 'float')
   })
 
   it('全空列回退 string', () => {
