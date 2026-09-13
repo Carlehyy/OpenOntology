@@ -10,6 +10,7 @@ import json
 import logging
 import uuid
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
@@ -257,7 +258,7 @@ async def process_execution_message(payload: dict) -> None:
             append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "activation", "actor": "worker", "version": run.version}, actor={"kind": "worker"}, command_id=str(payload.get("command_id") or uuid.uuid4()), idempotency_key=f"activate:{run.id}", lease=token)
         conversation = db.scalar(select(SuperAssistantConversation).where(SuperAssistantConversation.id == run.conversation_id))
         if conversation is None: raise RuntimeError("conversation missing for execution Run")
-        messages = _rebuild_messages(db, run)
+        message_candidates = _collect_message_candidates(db, run)
         delegation_tools = delegation.delegation_tools(db, run.owner_id)
         tools = [*delegation_tools, *_kernel_connector_tool_schemas(db, run.owner_id)]
         db.commit()
@@ -309,12 +310,15 @@ async def process_execution_message(payload: dict) -> None:
             if not call_kwargs: raise provider.ProviderError("没有可用的文本模型，请先配置模型")
             db.rollback(); db.begin()
             run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update()); assert run is not None; assert_lease(run, token)
-            append_event(db, run, event_type="request.header", payload={"snapshot_id": snapshot.id, "pack_hash": snapshot.pack_hash, "model": str(call_kwargs.get("model") or "unknown"), "prompt_ref": "inline://kernel-system-prompt", "capability_snapshot_ref": "capability://kernel.v1"}, actor={"kind": "worker"}, command_id=f"step:{step.id}", idempotency_key=f"request:{attempt.id}", lease=token)
+            request_candidates, request_budget = _bound_request_candidates(
+                message_candidates, context_content=pack.content,
+            )
+            request_messages = [candidate.as_message() for candidate in request_candidates]
+            append_event(db, run, event_type="request.header", payload={"snapshot_id": snapshot.id, "pack_hash": snapshot.pack_hash, "model": str(call_kwargs.get("model") or "unknown"), "prompt_ref": "inline://kernel-system-prompt", "capability_snapshot_ref": "capability://kernel.v1", "context_budget": request_budget}, actor={"kind": "worker"}, command_id=f"step:{step.id}", idempotency_key=f"request:{attempt.id}", lease=token)
             db.commit()
             # ContextPack is the model-facing request view. Keep the durable
             # message history compact while injecting the current selected
             # sources for each Step.
-            request_messages = [*messages, {"role": "system", "content": pack.content}]
             # Provider/model work can outlive the ordinary lease TTL.  Renew
             # the same fencing epoch in a separate DB session while awaiting
             # it; this prevents a long step from being mistaken for a stuck
@@ -346,9 +350,13 @@ async def process_execution_message(payload: dict) -> None:
             wait = _wait_request(result, tool_calls)
             if tool_calls and wait is None:
                 handled = False
-                for tool_call in tool_calls:
+                for tool_index, tool_call in enumerate(tool_calls):
                     if tool_call.get("name") == "delegate_to_assistant" and not handled:
-                        delegate_result = _invoke_hub_delegation(db, run, tool_call.get("arguments") or {})
+                        invocation_ref = str(tool_call.get("id") or f"step:{step.id}:tool:{tool_index}")
+                        delegate_result = _invoke_hub_delegation(
+                            db, run, tool_call.get("arguments") or {},
+                            invocation_ref=invocation_ref,
+                        )
                         messages.extend([{ "role": "assistant", "content": result.get("content"), "tool_calls": tool_calls }, { "role": "tool", "tool_call_id": tool_call.get("id"), "name": tool_call.get("name"), "content": delegate_result }])
                         try:
                             delegate_payload = json.loads(delegate_result)
@@ -866,8 +874,189 @@ def _kernel_connector_tool_schemas(db, owner_id: str) -> list[dict]:
     return tools
 
 
-def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
-    messages = [{"role": "system", "content": "你是 OpenOntology 的超级助手。请直接完成用户目标，并在无法完成时说明原因。"}, {"role": "user", "content": run.goal}]
+REQUEST_TOKEN_HARD_CAP = 32_000
+_MESSAGE_OVERHEAD_TOKENS = 8
+_MIN_REQUIRED_CONTENT_TOKENS = 32
+_TRUNCATION_MARKER = "\n…[context truncated]…\n"
+
+
+@dataclass(frozen=True, slots=True)
+class _MessageCandidate:
+    """A model message plus the retention policy used by the context gate."""
+
+    role: str
+    content: str
+    kind: str
+
+    def as_message(self) -> dict[str, str]:
+        return {"role": self.role, "content": self.content}
+
+
+def _message_token_estimate(candidate: _MessageCandidate) -> int:
+    """Return a conservative request size estimate.
+
+    UTF-8 bytes are an upper bound for token count for a byte-pair tokenizer;
+    the fixed envelope allowance covers role/message framing.  The bound is
+    deliberately conservative so the request gate cannot exceed its cap even
+    when the provider tokenizer is unavailable in the worker.
+    """
+
+    return _MESSAGE_OVERHEAD_TOKENS + len(candidate.content.encode("utf-8"))
+
+
+def _truncate_context(text: str, content_budget: int) -> str:
+    """Keep both ends of an oversized value and leave an explicit marker."""
+
+    encoded = str(text).encode("utf-8")
+    if len(encoded) <= content_budget:
+        return str(text)
+    marker = _TRUNCATION_MARKER.encode("utf-8")
+    if content_budget <= len(marker):
+        return marker[:content_budget].decode("utf-8", "ignore")
+    remaining = content_budget - len(marker)
+    head_budget = remaining // 2
+    tail_budget = remaining - head_budget
+    head = encoded[:head_budget].decode("utf-8", "ignore")
+    tail = encoded[-tail_budget:].decode("utf-8", "ignore") if tail_budget else ""
+    return f"{head}{_TRUNCATION_MARKER}{tail}"
+
+
+def _fit_candidate(candidate: _MessageCandidate, allowance: int) -> _MessageCandidate:
+    """Fit one candidate to an allowance while retaining its role and kind."""
+
+    content_budget = max(0, allowance - _MESSAGE_OVERHEAD_TOKENS)
+    return _MessageCandidate(
+        candidate.role,
+        _truncate_context(candidate.content, content_budget),
+        candidate.kind,
+    )
+
+
+def _bound_request_candidates(
+    candidates: list[_MessageCandidate], *, context_content: str | None = None,
+) -> tuple[list[_MessageCandidate], dict[str, object]]:
+    """Apply one deterministic hard gate to history plus selected context.
+
+    The goal, latest user input, and every tool/child result are mandatory.
+    Mandatory values are head/tail truncated when necessary; optional older
+    model messages are dropped oldest-first.  The context pack is optional and
+    is admitted before optional history, then truncated if it is the only way
+    to fit.  The returned trace is persisted in ``request.header``.
+    """
+
+    all_candidates = list(candidates)
+    if context_content is not None:
+        all_candidates.append(_MessageCandidate("system", str(context_content), "context"))
+    if not all_candidates:
+        return [], {
+            "hard_cap": REQUEST_TOKEN_HARD_CAP,
+            "original_estimated_tokens": 0,
+            "estimated_tokens": 0,
+            "compacted": False,
+            "strategy": "required_goal_latest_user_tool_child; drop_oldest_optional; head_tail_truncate",
+            "dropped_message_count": 0,
+            "truncated_message_count": 0,
+            "dropped_kinds": [],
+            "truncated_kinds": [],
+        }
+
+    original_tokens = sum(_message_token_estimate(candidate) for candidate in all_candidates)
+    required_indices: set[int] = {
+        index for index, candidate in enumerate(all_candidates)
+        if candidate.kind in {"system", "goal", "tool_result", "child_result"}
+    }
+    user_indices = [
+        index for index, candidate in enumerate(all_candidates)
+        if candidate.kind == "user_input"
+    ]
+    if user_indices:
+        required_indices.add(user_indices[-1])
+    # A malformed/legacy history should still retain a usable system message.
+    if not any(all_candidates[index].kind == "system" for index in required_indices):
+        required_indices.add(0)
+
+    # Allocate mandatory values in semantic priority order, reserving a small
+    # floor for every later required value so one huge child result cannot starve
+    # the latest user input or another required result.
+    priority = {"system": 0, "goal": 1, "user_input": 2, "tool_result": 3, "child_result": 3}
+    required_order = sorted(
+        required_indices,
+        key=lambda index: (priority.get(all_candidates[index].kind, 4), index),
+    )
+    selected: dict[int, _MessageCandidate] = {}
+    remaining = REQUEST_TOKEN_HARD_CAP
+    for position, index in enumerate(required_order):
+        candidate = all_candidates[index]
+        later = required_order[position + 1:]
+        reserve = sum(
+            min(
+                _message_token_estimate(all_candidates[item]),
+                _MESSAGE_OVERHEAD_TOKENS + _MIN_REQUIRED_CONTENT_TOKENS,
+            )
+            for item in later
+        )
+        allowance = min(
+            _message_token_estimate(candidate),
+            max(_MESSAGE_OVERHEAD_TOKENS, remaining - reserve),
+        )
+        fitted = _fit_candidate(candidate, allowance)
+        selected[index] = fitted
+        used = _message_token_estimate(fitted)
+        remaining = max(0, remaining - used)
+
+    # Context and newest optional history are more useful than old model turns.
+    # We still emit them in original sequence order after admission.
+    optional_indices = [index for index in range(len(all_candidates)) if index not in required_indices]
+    optional_order = sorted(
+        optional_indices,
+        key=lambda index: (0 if all_candidates[index].kind == "context" else 1, -index),
+    )
+    for index in optional_order:
+        candidate = all_candidates[index]
+        full = _message_token_estimate(candidate)
+        if full <= remaining:
+            selected[index] = candidate
+            remaining -= full
+            continue
+        if candidate.kind == "context" and remaining > _MESSAGE_OVERHEAD_TOKENS:
+            fitted = _fit_candidate(candidate, remaining)
+            selected[index] = fitted
+            remaining = max(0, remaining - _message_token_estimate(fitted))
+
+    bounded = [selected[index] for index in sorted(selected)]
+    dropped = [index for index in range(len(all_candidates)) if index not in selected]
+    truncated = [
+        index for index in selected
+        if selected[index].content != all_candidates[index].content
+    ]
+
+    def _kinds(indices: list[int]) -> list[str]:
+        return sorted({all_candidates[index].kind for index in indices})
+
+    final_tokens = sum(_message_token_estimate(candidate) for candidate in bounded)
+    trace: dict[str, object] = {
+        "hard_cap": REQUEST_TOKEN_HARD_CAP,
+        "original_estimated_tokens": original_tokens,
+        "estimated_tokens": final_tokens,
+        "compacted": bool(dropped or truncated),
+        "strategy": "required_goal_latest_user_tool_child; drop_oldest_optional; head_tail_truncate",
+        "dropped_message_count": len(dropped),
+        "truncated_message_count": len(truncated),
+        "dropped_kinds": _kinds(dropped),
+        "truncated_kinds": _kinds(truncated),
+    }
+    return bounded, trace
+
+
+def _collect_message_candidates(db, run: ExecutionRun) -> list[_MessageCandidate]:
+    candidates = [
+        _MessageCandidate(
+            "system",
+            "你是 OpenOntology 的超级助手。请直接完成用户目标，并在无法完成时说明原因。",
+            "system",
+        ),
+        _MessageCandidate("user", run.goal, "goal"),
+    ]
     message_events = db.scalars(select(ExecutionEvent).where(ExecutionEvent.run_id == run.id, ExecutionEvent.event_type == "assistant.message").order_by(ExecutionEvent.seq)).all()
     seen_artifacts: set[str] = set()
     for event in message_events:
@@ -875,7 +1064,14 @@ def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
         artifact_id = ref.removeprefix("artifact://")
         artifact = db.get(Artifact, artifact_id) if artifact_id else None
         if artifact is not None and artifact.inline_content and artifact.id not in seen_artifacts:
-            messages.append({"role": "assistant", "content": artifact.inline_content})
+            kind = (
+                "child_result"
+                if artifact.kind in {"child.result", "assistant.child.result"}
+                else "tool_result"
+                if artifact.kind.endswith(".result") or artifact.kind in {"external.result", "tool.result"}
+                else "assistant"
+            )
+            candidates.append(_MessageCandidate("assistant", artifact.inline_content, kind))
             seen_artifacts.add(artifact.id)
     consumed_events = db.scalars(
         select(ExecutionEvent)
@@ -890,13 +1086,13 @@ def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
             continue
         payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
         if content:
-            messages.append({"role": "user", "content": str(content)})
+            candidates.append(_MessageCandidate("user", str(content), "user_input"))
         consumed_ids.add(item.id)
     pending = db.scalars(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.status == "pending", InboxItem.source == "user").order_by(InboxItem.accepted_at, InboxItem.id)).all()
     for item in pending:
         payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
         if content:
-            messages.append({"role": "user", "content": str(content)})
+            candidates.append(_MessageCandidate("user", str(content), "user_input"))
         append_event(
             db, run, event_type="inbox.consumed",
             payload={"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id},
@@ -907,8 +1103,15 @@ def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
     from .models import Approval
     approvals = db.scalars(select(Approval).where(Approval.run_id == run.id, Approval.status.in_(("approved", "denied"))).order_by(Approval.decided_at, Approval.id)).all()
     for approval in approvals:
-        messages.append({"role": "system", "content": f"用户审批结果：{approval.status}（审批 {approval.id}）"})
-    return messages
+        candidates.append(_MessageCandidate("system", f"用户审批结果：{approval.status}（审批 {approval.id}）", "approval"))
+    return candidates
+
+
+def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
+    """Rebuild bounded history; request construction applies the final cap."""
+
+    candidates, _ = _bound_request_candidates(_collect_message_candidates(db, run))
+    return [candidate.as_message() for candidate in candidates]
 
 
 def _open_turn(db, run, *, trigger_ref: str, lease) -> ExecutionTurn:
@@ -1315,7 +1518,13 @@ def _child_ref_from_result(value: str) -> str:
     return str(parsed.get("child_run_id") or value) if isinstance(parsed, dict) else value
 
 
-def _invoke_hub_delegation(db, run: ExecutionRun, arguments: dict) -> str:
+def _invoke_hub_delegation(
+    db,
+    run: ExecutionRun,
+    arguments: dict,
+    *,
+    invocation_ref: str | None = None,
+) -> str:
     """Create a durable Kernel child Run for an Assistant Hub delegation."""
     assistant_key = str(arguments.get("assistant") or arguments.get("assistant_key") or "").strip()
     task = str(arguments.get("task") or "").strip()
@@ -1357,9 +1566,13 @@ def _invoke_hub_delegation(db, run: ExecutionRun, arguments: dict) -> str:
         "context": context,
     }
     try:
+        # Idempotency belongs to one model tool invocation.  Task text is not
+        # an idempotency key: two deliberate delegations may have identical
+        # wording but must still create two child Runs.
+        invocation_ref = str(invocation_ref or uuid.uuid4().hex)
         child, replayed = create_run(
             db, owner_id=run.owner_id, conversation_id=run.conversation_id,
-            goal=task, idempotency_key=f"delegate:{run.id}:{assistant_key}:{hashlib.sha256(task.encode()).hexdigest()[:16]}",
+            goal=task, idempotency_key=f"delegate:{run.id}:{invocation_ref}",
             parent_run_id=run.id, join_policy="all", max_steps=8, binding=binding,
         )
         return json.dumps({"status": "queued", "child_run_id": child.id, "assistant": assistant_key, "replayed": replayed}, ensure_ascii=False)

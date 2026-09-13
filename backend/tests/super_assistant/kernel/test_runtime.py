@@ -206,6 +206,22 @@ def test_kernel_hub_delegation_creates_bound_child_run(db, monkeypatch):
     assert payload["child_run_id"] in (db.get(ExecutionRun, run.id).required_child_ids or [])
 
 
+def test_kernel_hub_delegation_idempotency_is_per_tool_invocation(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="重复委派")
+    first = __import__("json").loads(runtime._invoke_hub_delegation(
+        db, run, {"assistant": "ontology_agent", "task": "发送相同通知"}, invocation_ref="step-1:tool-0",
+    ))
+    second = __import__("json").loads(runtime._invoke_hub_delegation(
+        db, run, {"assistant": "ontology_agent", "task": "发送相同通知"}, invocation_ref="step-2:tool-0",
+    ))
+    replay = __import__("json").loads(runtime._invoke_hub_delegation(
+        db, run, {"assistant": "ontology_agent", "task": "发送相同通知"}, invocation_ref="step-1:tool-0",
+    ))
+    assert first["child_run_id"] != second["child_run_id"]
+    assert replay["child_run_id"] == first["child_run_id"]
+    assert replay["replayed"] is True
+
+
 def test_kernel_exploration_delegation_requires_binding_before_child_creation(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="业务澄清")
     result = runtime._invoke_hub_delegation(
@@ -548,6 +564,25 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
     assert db.get(ExecutionRun, run.id).status == "active"
     assert db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one().inline_content == "轮询完成"
     assert db.query(Artifact).filter_by(run_id=run.id, kind="poll.report").one().inline_content == '{"ok": true}'
+
+
+def test_kernel_scheduler_claims_due_call_once_across_workers(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="并发对账")
+    call = runtime.ExecutionCall(
+        run_id=run.id, call_index=0, capability_key="external.agent", capability_revision=1,
+        target_ref="remote-agent", input_snapshot_ref="input", side_effect_class="external_async",
+        idempotency_key="poll-claim", status="waiting_external", outcome="remote_running",
+        remote_task_ref="remote-task", next_reconcile_at=runtime._now(),
+    )
+    db.add(call); db.commit()
+    monkeypatch.setattr(kernel_scheduler, "SessionLocal", TestSession)
+    first = kernel_scheduler._claim_external_call(call.id, "kernel-reconciler:a")
+    second = kernel_scheduler._claim_external_call(call.id, "kernel-reconciler:b")
+    assert first is not None and first[1] == call.id
+    assert second is None
+    kernel_scheduler._release_external_call(call.id, "kernel-reconciler:a")
+    assert kernel_scheduler._claim_external_call(call.id, "kernel-reconciler:b") is not None
+    kernel_scheduler._release_external_call(call.id, "kernel-reconciler:b")
 
 
 def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):
