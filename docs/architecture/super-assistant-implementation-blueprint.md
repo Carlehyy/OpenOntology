@@ -1,6 +1,6 @@
-# 超级助手实现蓝图（提案）
+# 超级助手实现蓝图（开发基线 v1.0）
 
-状态：讨论稿。本文把已确定的架构边界映射到现有 Python 包和后台运行机制，作为后续开发拆分依据，不是立即执行的重构清单。
+状态：开发基线 v1.0 的实现拆分说明。本文把冻结的架构边界映射到现有 Python 包和后台运行机制，按顺序形成开发任务。
 
 ## 1. 推荐包结构
 
@@ -35,7 +35,7 @@ super_assistant/
 │   ├── agents/base.py      AgentConnector Protocol
 │   ├── agents/assistant_hub.py
 │   ├── agents/rap_v1.py
-│   ├── agents/a2a.py        后续适配器
+│   ├── agents/a2a.py        post-v1 A2A 适配器（deferred）
 │   ├── tools/builtin.py
 │   ├── tools/mcp.py
 │   └── tools/remote.py
@@ -56,7 +56,7 @@ super_assistant/
 
 `assistant_hub` 仍是平台助手目录与业务适配的 canonical package。`connectors/agents/assistant_hub.py` 只依赖 Hub 契约，不直接导入 ontology 或 exploration 域。
 
-`compatibility/` 仅是迁移期 facade 和旧读模型投影，必须按项目兼容层退役顺序登记调用方、边界检查和删除条件；它不是允许新功能长期落入的业务层。现有进程内只读 `subagent` 工具在首轮可继续作为内置能力，待其输入、结果、取消和 Artifact 语义与 Agent Connector 完成等价测试后，再决定是否迁移为 Connector，不另建第二套 Kernel。
+`compatibility/` 仅是迁移期 facade 和旧读模型投影，必须按项目兼容层退役顺序登记调用方、边界检查和删除条件；它不是允许新功能长期落入的业务层。现有进程内只读 `subagent` 工具在 kernel.v1 首发继续作为内置能力；它通过同一 Call/Attempt/Artifact 语义接入，不另建第二套 Kernel。后续若迁移为 Connector，必须先通过等价契约测试。
 
 ## 2. 最小 Protocol
 
@@ -84,12 +84,12 @@ class AgentConnector(Protocol):
 class ExecutionKernel(Protocol):
     def activate(self, command: RunCommand) -> ActivationResult: ...
     def resume(self, run_id: str, reason: WakeReason) -> ActivationResult: ...
-    def cancel(self, run_id: str, reason: str) -> CancelRequestResult: ...
+    def cancel(self, run_id: str, reason: str, *, command_id: str, actor: Actor, expected_version: int) -> CancelRequestResult: ...
 ```
 
-这些是边界语义，不是最终公开 API。调用结果必须携带事件关联、Call/Attempt 身份和是否可以安全重试的事实。
+这些是 kernel.v1 的边界语义。调用结果必须携带事件关联、Call/Attempt 身份和是否可以安全重试的事实；公开 HTTP 合同见开发基线 v1.0。
 
-`poll()` 只表示 Connector 能否拉取进度或增量事件；`query_status()` 是 reconciliation service 用于确认远端最终状态的只读查询，两者不能互相代替。Connector 不支持状态查询时必须声明 `supports_poll=false`，未知结果达到取消或重试边界后直接转人工处理，不能由 Kernel 无限轮询。
+`poll()` 只表示 Connector 能否拉取进度或增量事件；`query_status()` 是 reconciliation service 用于确认远端最终状态的只读查询，两者不能互相代替。Connector 不支持状态查询时必须声明 `supports_query_status=false`，未知结果达到取消或重试边界后直接转人工处理，不能由 Kernel 无限轮询。
 
 ## 3. Runtime 拆分顺序
 

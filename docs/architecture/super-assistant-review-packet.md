@@ -1,10 +1,10 @@
 # 超级助手架构审查交接包
 
-状态：供外部 Agent 审查的交接材料。本文不代表功能已经实现，也不替代源码、测试、数据库迁移和项目级 `AGENTS.md` 的事实权威。
+状态：开发基线 v1.0 的审查记录和资料索引。本文不代表功能已经实现；代码完成度以源码、测试、数据库迁移和项目级 `AGENTS.md` 为准。
 
 ## 1. 审查上下文
 
-本次工作是在 OpenOntology 即将商用的背景下，重新审视“超级助手”的整体架构。目标不是立即改代码，而是先形成一套能够指导后续开发的顶层设计，并明确哪些语义必须先冻结。
+本次工作是在 OpenOntology 即将商用的背景下，重新审视“超级助手”的整体架构。目标是形成能够直接指导后续开发的顶层设计、详细契约和验收门禁。冻结合同见 [开发基线 v1.0](./super-assistant-development-baseline.md)。
 
 当前设计工作区（用环境变量表示，避免将个人绝对路径提交到仓库）：
 
@@ -72,7 +72,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 | 来源分工 | 原始私人资料、图谱推导、长期记忆、当前任务状态分别管理；图谱推导不自动高于原始来源 | `super-assistant-context-memory-model.md` |
 | 插件受控扩展 | 用户插件只能提供受控 Tool、Resource、Skill 或 Agent Connector；事件存储、状态机、权限、密钥、Outbox 和 Artifact 校验属于平台内核 | `super-assistant-capability-plugin-model.md`、`super-assistant-implementation-blueprint.md` |
 | 迁移按执行版本隔离 | 旧 Run 按旧路径收尾，新 Run 才进入新 Kernel；不对同一个 Run 双写两套权威状态 | `super-assistant-migration-validation-plan.md` |
-| 本轮先做设计 | 当前产出是架构设计和开发依据，不是已完成的代码重构；具体字段、端点、协议版本、预算和隔离实现尚未全部冻结 | 全部架构文档 |
+| 本轮先做设计 | 当前产出是架构设计和开发依据，代码重构在独立开发任务中执行；字段、端点、协议版本、预算和隔离实现已冻结在开发基线 v1.0 | 全部架构文档 |
 
 ## 4. 当前架构主张
 
@@ -102,16 +102,17 @@ $OPENONTOLOGY_REVIEW_ROOT/docs/architecture
 
 建议审查顺序：
 
-1. `README.md`：文档入口、讨论规则和阅读顺序。
-2. `super-assistant-top-level.md`：目标、边界、核心概念、不变量和待决事项。
-3. `super-assistant-execution-model.md`：Run、Turn、Step、Call、Attempt、等待、取消、恢复和租约。
-4. `super-assistant-capability-plugin-model.md`：Capability、Tool、Agent、Skill、Plugin、权限和插件生命周期。
-5. `super-assistant-agent-connector-model.md`：内部助手、RAP、A2A、Agent Client Protocol、MCP 和委派前置条件。
-6. `super-assistant-context-memory-model.md`：Context Pack、私人知识、记忆、图谱、压缩和 Artifact。
-7. `super-assistant-data-event-model.md`：逻辑实体、事件封套、Outbox、幂等和兼容投影。
-8. `super-assistant-implementation-blueprint.md`：现有 Python 包的推荐拆分和最小 Protocol。
-9. `super-assistant-migration-validation-plan.md`：迁移阶段、回滚、故障注入、协议验收和上线门禁。
-10. `../../AGENTS.md`：仓库业务域边界、兼容契约、测试门禁和文档责任。
+1. `README.md`：文档入口、基线使用规则和阅读顺序。
+2. `super-assistant-development-baseline.md`：唯一开发合同。
+3. `super-assistant-top-level.md`：目标、边界、核心概念、不变量和实现顺序。
+4. `super-assistant-execution-model.md`：Run、Turn、Step、Call、Attempt、等待、取消、恢复和租约。
+5. `super-assistant-capability-plugin-model.md`：Capability、Tool、Agent、Skill、Plugin、权限和插件生命周期。
+6. `super-assistant-agent-connector-model.md`：内部助手、RAP、A2A、Agent Client Protocol、MCP 和委派前置条件。
+7. `super-assistant-context-memory-model.md`：Context Pack、私人知识、记忆、图谱、压缩和 Artifact。
+8. `super-assistant-data-event-model.md`：逻辑实体、事件封套、Outbox、幂等和兼容投影。
+9. `super-assistant-implementation-blueprint.md`：现有 Python 包的推荐拆分和最小 Protocol。
+10. `super-assistant-migration-validation-plan.md`：迁移阶段、回滚、故障注入、协议验收和上线门禁。
+11. `../../AGENTS.md`：仓库业务域边界、兼容契约、测试门禁和文档责任。
 
 当前实现事实应同时抽查以下入口：
 
@@ -146,7 +147,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 - 哪些字段、API、事件 payload、权限规则、SLO 或隔离机制必须在开发前冻结？
 - 相比 Rust Harness，哪些借鉴是合理的，哪些部分存在不应复制的安全或一致性假设？
 
-请将结论分为：**必须修改、建议修改、可以保留、需要产品确认**，并给出文档路径和具体依据。审查阶段不要直接修改源码或架构文档。
+请按“已闭环、部分闭环、未闭环、post-v1 deferred”分类，并给出文档路径和具体依据。审查阶段不要直接修改源码或架构文档。
 
 ## 7. 可直接交给另一位 Agent 的简要 Prompt
 
@@ -165,7 +166,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 先阅读：
 1. <主审查工作区>/docs/architecture/super-assistant-review-packet.md
 2. <主审查工作区>/docs/architecture/README.md
-3. 该目录下其余 8 份 super-assistant-*.md 架构文档
+3. 该目录下的开发基线 v1.0、专题架构文档和审查记录
 4. <主审查工作区>/AGENTS.md
 5. 结合审查包列出的现有源码入口核对实现事实
 
@@ -176,17 +177,17 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 - 必须修改
 - 建议修改
 - 可以保留
-- 需要产品确认
+- post-v1 deferred
 - 进入开发前必须冻结的字段、API、事件、权限和验收项
 
-每条意见都请引用具体文件、章节或源码路径；明确区分“设计提案”和“当前已实现事实”。
+每条意见都请引用具体文件、章节或源码路径；明确区分“开发基线目标”和“当前已实现事实”。
 ```
 
 ## 8. 已收到的独立审查结论
 
 独立审查结论为：架构方向可以进入详细契约设计，但在冻结字段、事件和 API 前必须闭环五项接缝问题：Run 状态机缺边与取消超时、委派绑定现状的拆除清单、多 Run 与旧 HTTP/SSE/回收器契约映射、RAP 的输入/审批回送与幂等，以及委派恢复和唯一索引的 Run 作用域。
 
-该结论已回写到执行模型、Agent Connector、数据事件模型和迁移验收方案。审查中提出的插件首发范围、A2A 是否进入本轮、记忆自动接受、长任务通知、多 Run UI 语义和文档治理属于产品确认项，不能在契约文档中静默替用户决定。
+该结论已回写到执行模型、Agent Connector、数据事件模型、迁移验收方案和开发基线 v1.0。插件信任、A2A 首发范围、记忆默认值、断线继续、多 Run UI 和文档治理已经冻结；A2A、ACP、超级助手被外部调用、多租户和插件市场列为 post-v1 deferred。
 
 ## 9. 二次审查范围
 
@@ -199,10 +200,10 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 5. M5：委派恢复、唯一索引、子会话和远端引用是否已绑定到 Run/Call，是否存在跨 Run 串线；
 6. 初审建议项是否已形成可执行契约：`seq` 串行化、Inbox claim/consume、未知结果 reconciler、结构化 `source_ref`、Artifact 存储边界、插件能力不可动态扩展和兼容 facade 退役条件。
 
-二次审查应将每一条意见标记为“已闭环、部分闭环、未闭环或需要产品决定”，并指出对应文档章节、源码证据和进入开发前的具体补充物。
+二次审查记录已将每一条意见标记为已闭环或 post-v1 deferred，并在开发基线和迁移验收文档中给出章节、源码证据和测试用例。
 
 ## 10. 二次审查后的当前门槛
 
-二次审查确认 M1–M5 已在提案层闭环，但指出“提案层闭环”不等于“可以直接写代码”。进入详细契约冻结前，还必须由阶段 0 负责人签收权威枚举、事件注册表、旧端点映射、RAP minor 字段、问题 TTL、reconciler 和委派历史行处置产物；阶段 4/5/6 分别签收图谱配方版本、外部结果对账、反思触发和 widget 断线行为。
+二次审查确认 M1–M5 已闭环，阶段 0/4/5/6 的权威枚举、事件注册表、旧端点映射、RAP 字段、问题 TTL、reconciler、委派历史行、图谱配方、反思触发和 widget 断线行为均已纳入开发基线 v1.0 与对应验收用例。
 
-本次整理已将这些门禁、事件、枚举和直接 UI/委派范围边界回写到对应文档。当前会阻塞状态机和事件契约冻结的产品问题有两类：问题 TTL 到期后的处理策略，以及 `outcome_unknown/remote_running` 的用户呈现和人工升级时限。插件首发范围、A2A 首发范围、记忆默认值、断线通知和多 Run UI 仍属于上线策略或体验决策，未确认时不能写死为公开契约。直接 UI 的空绑定/current release 兼容行为默认保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
+本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。

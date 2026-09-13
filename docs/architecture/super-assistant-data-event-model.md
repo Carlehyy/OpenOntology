@@ -1,6 +1,6 @@
-# 超级助手数据与事件模型（提案）
+# 超级助手数据与事件模型（开发基线 v1.0）
 
-状态：讨论稿。本文把执行模型落到逻辑实体、事件封套、Outbox、幂等和兼容投影；表名和字段类型仍需在实现阶段根据现有 Alembic 约束确认。
+状态：开发基线 v1.0 的数据与事件专题说明。本文把执行模型落到逻辑实体、事件封套、Outbox、幂等和兼容投影；字段、索引和 Outbox 合同以开发基线为准。
 
 ## 1. 数据责任
 
@@ -118,9 +118,9 @@ Call 的 `status` 和 `outcome` 采用执行模型中的双轴定义，完整取
   "actor": {"kind": "worker", "id": "worker id"},
   "causation_id": "command or event id",
   "correlation_id": "run or call id",
-  "idempotency_key": "optional stable key",
+  "idempotency_key": "stable command or provider key",
   "payload": {},
-  "redaction": {"mode": "reference", "content_ref": "optional"}
+  "redaction": {"mode": "reference", "content_ref": "required", "checksum": "sha256"}
 }
 ```
 
@@ -204,7 +204,7 @@ Connector 的 `agent.*` 输入必须在持久化前映射到此注册表和能�
 
 ## 7. 事务与 Outbox
 
-现有面向用户通知的 Inbox/Outbox 记录不能直接充当执行派发 Outbox：两者的消费语义、保留时间和重试责任不同。新执行模型使用独立的 dispatch outbox 逻辑（是否落独立表和 JetStream stream 在实现阶段确认），但必须和 Run 状态、事件在同一 PostgreSQL 事务中提交。现有 reflection、Palace 和 pipeline subject 保持不变。
+现有面向用户通知的 Inbox/Outbox 记录不能直接充当执行派发 Outbox：两者的消费语义、保留时间和重试责任不同。新执行模型使用独立的 dispatch outbox 逻辑（独立 `execution_dispatch_outbox` 表和 `SA_EXECUTION_V1` stream 已在开发基线冻结），但必须和 Run 状态、事件在同一 PostgreSQL 事务中提交。现有 reflection、Palace 和 pipeline subject 保持不变。
 
 实现时应优先复用仓库 Sentinel CDC Outbox 已验证的同事务插入、唯一 `dedupe_key`、claim token CAS 和退避模式；这是一种实现先例，不改变执行 Outbox 与用户通知 Inbox/Outbox 的职责分离。
 

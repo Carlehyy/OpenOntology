@@ -1,8 +1,8 @@
-# 超级助手执行模型（提案）
+# 超级助手执行模型（开发基线 v1.0）
 
-状态：讨论稿
+状态：开发基线 v1.0 的执行专题说明
 
-本文细化[顶层架构](./super-assistant-top-level.md)中的执行内核，定义 Run、Turn、Step、Call、Attempt、Event、Inbox、租约和恢复语义。具体数据库字段、HTTP 路径和 Worker 实现另行设计。
+本文细化[开发基线](./super-assistant-development-baseline.md)中的执行内核，定义 Run、Turn、Step、Call、Attempt、Event、Inbox、租约和恢复语义。数据库字段、HTTP 路径和 Worker 参数以开发基线为准。
 
 ## 1. 核心对象
 
@@ -90,8 +90,8 @@ stateDiagram-v2
 以下触发器和边界是状态机的一部分，不能留给 Worker 自行解释：
 
 - `queued` 收到取消或达到 Run 截止时间时，分别进入 `cancel_requested` 或 `expired`；排队中的 Run 也必须可取消。
-- `waiting_input` 或 `waiting_approval` 的问题、审批策略、权限或绑定版本失效时，进入 `failed` 或按明确截止时间进入 `expired`，并保留失败原因。
-- `cancelling` 必须有 `cancel_deadline`。本地收尾完成后进入 `cancelled`；达到截止时间仍未收到远端确认时，Run 可以进入本地 `cancelled`，但未收敛的 Call 必须保留 `outcome_unknown` 或 `remote_running`，并产生 `run.cancel_timeout` 供对账；本地收尾本身失败时进入 `failed`。
+- `waiting_input` 或 `waiting_approval` 的问题、审批策略、权限或绑定版本失效时，按开发基线的 `expiry_policy` 进入 reask、分支失败或 Run 失败；Run deadline 始终进入 `expired`，并保留失败原因。
+- `cancelling` 必须有 `cancel_deadline`。`cancel_reason=user|parent` 的本地收尾进入 `cancelled`，`cancel_reason=deadline` 进入 `expired`；未收到远端确认时，未收敛的 Call 必须保留 `outcome_unknown` 或 `remote_running`，并产生 `run.cancel_timeout` 供对账；本地收尾本身失败时进入 `failed`。
 - `paused` 期间到达的普通输入、外部结果和审批决定写入关联 Inbox，但不被消费；取消、过期等控制命令仍走高优先级通道。恢复动作只激活明确的 Run，并按 Inbox 幂等规则消费关联项。
 - `active` 必须至少有可消费 Inbox、已领取 Turn、可推进 Call 或计划中的重试之一。否则属于 stuck-run，检测器必须产生诊断事件并进入恢复或人工处理路径，不能保持 `active` 无期限等待。
 
@@ -243,7 +243,7 @@ next_step  进度、审批、Artifact 可用、控制和恢复信号
 
 ### 7.1 未知结果对账
 
-对账属于 Kernel recovery/reconciliation service，而不是每个 Connector 自己维护的隐式循环。Call 进入 `reconciling` 时保存 `next_reconcile_at`、退避次数、远端状态快照和 `manual_attention` 标记；服务只调用 Connector 的 `query_status`，用 Call 级租约和 fencing 写入结果。初始间隔、退避上限、最大次数和 Run deadline 由部署配置提供（测试可使用 5 秒起步、5 分钟上限的示例值），达到上限或截止时间后进入人工处理，并通过关联 Inbox/通知向用户展示“结果未知”，不得伪造失败或再次发送写操作。
+对账属于 Kernel recovery/reconciliation service，而不是每个 Connector 自己维护的隐式循环。Call 进入 `reconciling` 时保存 `next_reconcile_at`、退避次数、远端状态快照和 `manual_attention` 标记；服务只调用 Connector 的 `query_status`，用 Call 级租约和 fencing 写入结果。kernel.v1 固定使用首次 5 秒、倍数 2、上限 5 分钟、最多 12 次；部署可在版本化配置中调整但不能超过安全上限，达到上限或截止时间后进入人工处理，并通过关联 Inbox/通知向用户展示“结果未知”，不得伪造失败或再次发送写操作。
 
 状态查询确认远端仍在执行时记录 `outcome=remote_running`；确认取消时记录 `outcome=cancelled_confirmed`；确认完成或失败时记录相应结果。迟到结果只更新 Call/Artifact 事实，不改变已经终态的 Run。
 

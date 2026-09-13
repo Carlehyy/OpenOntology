@@ -1,10 +1,10 @@
-# 超级助手迁移与验收方案（提案）
+# 超级助手迁移与验收方案（开发基线 v1.0）
 
-状态：讨论稿。本文定义从当前实现迁移到新执行内核的阶段、门禁、回滚和真实环境验证，暂不确定具体版本号和上线日期。
+状态：开发基线 v1.0 的迁移与验收说明。本文定义从当前实现迁移到 `kernel.v1` 的阶段、门禁、回滚和真实环境验证。
 
 ## 1. 迁移总原则
 
-本文与其他架构稿当前都是“讨论稿”。进入开发前必须冻结一份设计基线，标明评审人、日期、适用执行版本和待决事项；冻结后变更必须同时更新受影响的不变量与验收用例。
+所有架构稿以 [开发基线 v1.0](./super-assistant-development-baseline.md) 为合同入口；变更必须同时更新受影响的不变量、迁移/回滚方案与验收用例。
 
 - 每个 Run 创建时固定执行版本和唯一写入方；
 - 旧 Run 按旧路径收尾，新 Run 才能进入新 Kernel；
@@ -77,13 +77,27 @@
 
 | 旧入口 | 旧语义 | 新 Kernel / `execution_version` 处理 |
 |---|---|---|
-| `POST /conversations/{id}/chat` | 以 Conversation 级“唯一 streaming 消息”闸门返回 409 | 旧版本保持原语义；新版本必须创建带幂等键的 Run，是否保留 409 由产品确认，不能让投影行误触发旧闸门 |
+| `POST /conversations/{id}/chat` | 以 Conversation 级“唯一 streaming 消息”闸门返回 409 | 旧版本保持原语义；新版本必须创建带幂等键的 Run，旧版本保持 409；`kernel.v1` 入口返回 202 创建独立 Run，不能让投影行误触发旧闸门 |
 | `POST /conversations/{id}/cancel` | 取消该会话唯一 streaming 消息 | 旧版本只取消旧 Message；新版本必须按 Run/Call/Approval 关联取消，不能按“最近任务”猜测 |
 | `POST /tool-runs/{id}/decision` | 以 `tool_run_id` 提交决定 | 新版本必须能解析到 `Approval`、Run、Call 和参数/权限快照；映射失败不得消费其他 Run 的审批 |
 | 旧 SSE 事件流 | 固定事件集合，缺少 Run 内序号和重连游标 | 旧版本保持兼容；新版本使用版本化事件集合、`event_id`、Run 内 `seq` 和 `after_seq`，不得在同一流中无声明混用两套语义 |
 | 600 秒死流回收与启动恢复 | 将遗留 streaming 行收为 error | 必须按执行版本识别旧投影；长任务新投影不得被旧回收器误判，需有 version-aware 迁移验收 |
 
-该表不是最终公开 API；它是进入详细契约设计前必须由负责人补齐的映射表，包含状态码、响应结构、幂等字段和前端迁移策略。
+该表是 legacy 与 kernel.v1 的迁移合同；新增端点、状态码、响应结构、幂等字段和前端策略以开发基线 v1.0 为准。
+
+旧路由的状态码和响应保持不变：Conversation GET=200、POST=201、PATCH=200、DELETE=204，`chat` 为 SSE 且同会话 streaming 返回 409，`cancel` 为 202 `{cancelled}`；tool decision 为 200，缺失 404、已处理 409；MCP/Skill/Memory/Palace/Multica/Remote Agent 的既有 CRUD 状态码、公开 remote task 的 401/404/409/429/204 和 Palace sync token 门禁均保持。kernel.v1 新路由只返回开发基线中的 202/200/404/409/410/422。
+
+
+
+### 2.2 现有表和历史数据处置
+
+不得重命名或删除既有 Alembic 表。新增 `execution_runs/turns/steps/calls/attempts/events/inbox_items/approvals/context_snapshots/artifacts/capability_revisions/execution_dispatch_outbox/projection_cursors` 表，或在等价表中增加同名逻辑字段；所有新表使用 UUID、UTC timestamptz、owner 外键和开发基线中的唯一索引。现有 0032–0107 revision 链保持单 head、可升级和可回滚。
+
+- `super_assistant_messages`、`tool_runs`、`super_assistant_delegations` 保持旧列和索引；新 Run 通过 projection 关联 `run_id/execution_version`，不写 `streaming`；delegation 历史逐行回填 legacy Run/Call 后，才替换 Conversation 级 running 唯一索引，无法映射行只读。
+- `super_assistant_memories` 的旧 `source` 字符串和 `memory_profiles.auto_accept_enabled` 保留；旧行标记 `legacy`、risk `unknown`，继续可召回但不回溯伪造 `source_ref`。新写入必须 `source_ref+risk`，旧 profile 的 True 只影响 explicit low-risk。
+- `palace_files/builds` 的 `content_hash` 映射为 legacy `source_version`；新图谱抽取增加 `recipe_revision/extraction_id/locator`，Neo4j provenance 缺失的历史事实不自动升级为 current。
+- `mcp_servers`、`skills` 的 manifest/版本字段通过 immutable `CapabilityRevision` 投影，不把旧配置直接当作受信任能力；既有 Multica、Remote Agent、Palace sync 和公开 remote task API 保持路径和状态码。
+- `execution_dispatch_outbox` 使用 `SA_EXECUTION_V1`、`sa.execution.dlq`；行字段含 `command_id/run_id/subject/payload_ref/attempt_count/claim_token/next_attempt_at/error_ref`。DLQ 只允许带原 command_id 的人工重放，重放仍受幂等检查和权限检查约束。
 
 ## 3. 回滚原则
 
@@ -176,38 +190,18 @@ real staging checks for external side effects
 
 另外必须提供：RAP direct 重试无重复证明、needs_input/审批回送测试、旧端点按执行版本映射测试、投影 streaming 行与死流回收器的版本隔离测试、委派唯一索引替换和历史行处置报告、stuck-run 检测与 `outcome_unknown` 对账收敛报告。
 
-阶段 0 的退出审查必须逐项签收上述契约和新增测试；未闭环的建议项不能因为“建议级”而从门禁中消失。
+阶段 0 的退出审查必须逐项签收 `SA-CONTRACT-STATE/EVENT/SEQ/IDEMPOTENCY/LEASE/INBOX/API/SSE/LEGACY/CONNECTOR/CALLBACK/PLUGIN/RECONCILE/BINDING/CONTEXT/MEMORY/ARTIFACT/STORAGE/NATS/E2E` 用例和证据；任何用例失败都阻止进入下一阶段。
 
 ## 6. 上线硬门禁
 
-在没有部署级隔离前，生产只允许审核过的第一方或已验证的受控插件；用户任意可执行进程不能仅凭 manifest 上线。还必须给出任务最长时长、并发、恢复时间、SSE 首次进度、Artifact 可用时间和外部 Agent 超时的目标值。目标值由单用户压力和故障演练测量后冻结。
+生产只允许 `platform`、`verified` 插件；`user_untrusted` 只能在独立 uid/container、network deny、workspace read-only 和 secret allowlist 均具备时启用。kernel.v1 固定运行默认值为：Run deadline 24h、active Run 并发 4、Step 模型超时 120s、Call 最多 3 次、lease TTL 30s/heartbeat 10s、stuck detector 5m、cancel grace 30s、reconciliation 5s→5m/12 次、outbox 最多 10 次、事件与 SSE replay 24h、Artifact 默认保留 30d（用户删除立即失效）。
 
-事件、请求快照、Artifact、外部返回和插件日志的保留、脱敏、删除和导出策略必须在上线前冻结。NATS poison message、死信、backpressure、最大重试和积压告警必须有演练结果。
+NATS poison message、DLQ、backpressure、最大重试和积压告警必须在 staging 演练；新增 `SA_EXECUTION_V1` 只追加 stream/subject，不改现有 `PIPELINE_TASKS` 和旧 durable。kernel.v1 长任务禁止无 NATS 时 inline fallback；Palace legacy fallback 只在 legacy 路径退役前保留并单独验收。
 
 ## 7. 可观测指标
 
-初始不硬编码商业 SLO，但必须测量：
+初始目标值固定为：Run 创建到首次可见进度 ≤2s（正常依赖可用时）、Worker 恢复 ≤60s、Artifact 校验完成 ≤30s（1GB 以内）、SSE replay 24h。持续记录 Run 首进度、成功/失败/未知比例、恢复耗时、租约接管、重复回调/Outbox、Context Pack 裁剪、取消确认和 Artifact 完整性失败；超过目标只产生告警，不改变状态机语义。
 
-- Run 创建到首次可见进度的延迟；
-- 模型请求、工具和 Agent 的成功/失败/未知结果比例；
-- Run 恢复耗时和租约接管次数；
-- 重复回调、重复 Outbox 和投影失败数量；
-- Context Pack token、来源覆盖和被裁剪原因；
-- 外部 Agent 取消确认率；
-- Artifact 完整性失败和用户重试次数。
+## 8. post-v1 deferred
 
-这些指标用于确定单用户部署的默认并发、预算、超时和后续扩容需求，不在架构阶段凭空设定数值。
-
-## 8. 外部审查后的待产品确认项
-
-以下问题影响发布口径或用户体验，不能仅由实现人员替产品做决定。未确认前不得写入不可逆的公开契约：
-
-1. 首发生产是否只允许审核过的第一方/受控插件，用户自建可执行插件何时开放；
-2. A2A 是否纳入本轮首个外部 Agent 适配器，还是先以 RAP v1 minor 演进覆盖首发范围；
-3. 记忆自动接受是否按敏感类别收紧，以及各类别的默认值；
-4. 长任务在浏览器断开后的完成触达方式，以及是否提供“断开即停”偏好；
-5. 多 Run 并行后，同一 Conversation 是否仍由 UI 限制同时只能有一个生成中的回复；
-6. 问题 TTL 到期是重新提问、仅失败当前分支还是终止整个 Run；
-7. `outcome_unknown`/`remote_running` 的用户呈现、对账通知和升级人工的时限；
-8. 直接 UI 创建业务澄清会话是否继续允许空绑定和 current release（本次默认保持既有契约，只收紧 `binding_mode=delegated`）；
-9. 架构文档是否作为长期冻结基线维护，还是契约冻结后归档，以解决与项目文档治理条款的边界问题。
+以下能力明确延期，不阻塞 kernel.v1：A2A 和 ACP 适配器、超级助手被外部系统调用、多租户隔离、插件市场、跨用户共享记忆、分布式工作流引擎、“断开即停”用户偏好，以及把内置 subagent 迁移为独立外部 Connector。任何延期能力都不得在本轮实现中引入第二套执行事实或状态机。

@@ -1,6 +1,6 @@
-# 超级助手上下文、记忆与知识模型（提案）
+# 超级助手上下文、记忆与知识模型（开发基线 v1.0）
 
-状态：讨论稿
+状态：开发基线 v1.0 的上下文、记忆与知识专题说明
 
 本文细化顶层架构中的 Context Planner、Memory、Knowledge Graph 和 Artifact 边界，目标是让超级助手“更懂用户”而不把所有历史数据塞入每次模型请求。
 
@@ -24,18 +24,19 @@
 ```text
 source_id
 source_type
-owner_scope
+source_version
+locator
 content_ref
 summary
-authority
-confidence
-sensitivity
-citation
-source_version
-valid_from / valid_to
-ttl
-token_cost
 permissions
+validity
+sensitivity
+freshness
+authority
+confidence（candidate-only）
+citation（candidate-only）
+retrieval_cost
+token_cost
 ```
 
 `content_ref` 可以指向数据库正文、对象存储文件、图谱事实或历史事件。候选本身应尽量短，模型需要原文时再通过受控能力展开。
@@ -55,7 +56,7 @@ permission and sensitivity filter
         ↓
 deduplicate and detect conflicts
         ↓
-rank by relevance, authority, freshness and cost
+rank by relevance, same-domain authority, freshness and cost
         ↓
 assemble bounded Context Pack
         ↓
@@ -141,7 +142,7 @@ validity
 - `derived`：从文件、任务或对话中推导出的候选；
 - `reflection`：反思流程提出的偏好、经验或技能候选。
 
-建议的写入流程：
+冻结的写入流程：
 
 ```text
 memory candidate
@@ -154,7 +155,7 @@ memory candidate
 → update index
 ```
 
-低风险、可撤销的偏好可以按用户设置自动接受；敏感身份、权限、财务、健康和第三方信息默认进入确认。具体默认值需要结合平台设置设计，不能由模型自行决定。
+用户明确要求记住的 low-risk explicit 偏好可按用户设置自动接受；derived/reflection 即使 low-risk 也必须确认；敏感身份、权限、财务、健康、第三方和指令类信息永不自动接受。
 
 `derived` 和 `reflection` 记忆的来源必须使用结构化 `source_ref`（例如消息、Run、文件及其版本或 Artifact），不能只写自由字符串。来源删除、撤销或不可访问时，记忆索引和 Context Pack 必须按该引用传播失效；没有可验证来源的候选只能保留为待确认候选，不能晋升为当前事实。
 
@@ -247,4 +248,4 @@ Artifact 的“传输完整”与“业务正确”分开记录。校验和通�
 - 请求快照能重建来源、版本、权限和模型可见内容；
 - 重启或重复 Context 查询不会生成重复记忆或重复图谱事实。
 
-具体检索算法、向量索引、默认 token 预算和审批默认值在本层之后单独设计。
+检索实现和索引类型可以替换，但排序、来源、删除传播和预算必须遵循开发基线 v1.0：Context Pack hard cap 32k，system/working/knowledge/episode/recent 分配为 4k/8k/12k/4k/4k。

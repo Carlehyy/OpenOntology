@@ -1,6 +1,6 @@
-# 超级助手 Agent 协作模型（提案）
+# 超级助手 Agent 协作模型（开发基线 v1.0）
 
-状态：讨论稿
+状态：开发基线 v1.0 的 Agent 协作专题说明
 
 本文细化 Agent Connector，解决平台内部助手和外部 Agent 如何被超级助手安全、可恢复地调用。它不把某个外部协议冻结成 Kernel 的唯一实现。
 
@@ -34,7 +34,7 @@ supports_stream
 supports_cancel
 supports_approval
 supports_artifact
-supports_poll
+supports_query_status
 supports_push
 session_policy
 auth_scope
@@ -45,7 +45,7 @@ trust_level
 
 `human_description` 供模型路由和用户选择；其余字段供程序校验。外部 Agent 的自描述必须经过平台验证，不能仅凭描述授予本体访问或写操作。
 
-`supports_poll` 在本模型中表示 Connector 能够实现 `query_status()` 的只读远端状态查询；`supports_push` 表示能够接收远端主动事件。两者都不能由适配器自报而缺少真实握手或可执行验收。
+`supports_query_status` 在本模型中表示 Connector 能够实现 `query_status()` 的只读远端状态查询；`supports_push` 表示能够接收远端主动事件。两者都不能由适配器自报而缺少真实握手或可执行验收。
 
 ## 3. Context Requirements 与澄清
 
@@ -134,7 +134,7 @@ Connector 收到的 `agent.*` 是协议/适配器输入，不是第二套持久�
 
 1. `assistant_hub/adapters/ontology_agent.py` 中缺少 `ontology_id` 时按最近使用本体回退的路径必须删除或改为候选推荐，不能静默选择；`AssistantSpec.prerequisites` 文案和断言该回退的旧测试也必须同步改为“缺失→needs_input/不建子会话”。
 2. `assistant_hub/adapters/exploration.py` 的 `start()` 不能再无条件创建无绑定会话；`context_requirements` 必须声明 `ontology_id` 和编辑草稿版本。
-3. 业务探索的**委派创建和委派恢复路径**必须显式使用 `binding_mode=delegated`（或等价的独立入口），强制检查目标本体、草稿版本的 `draft + editing` 生命周期、归属和写权限；列表端点的过滤不能替代写路径校验。直接 UI 创建探索会话的空绑定和 `ontology_id`→current release 既有契约不在本次委派收紧范围内，是否另行收紧必须单独做产品变更。
+3. 业务探索的**委派创建和委派恢复路径**（即 `binding_mode=delegated`）必须显式使用绑定入口，强制检查目标本体、草稿版本的 `draft + editing` 生命周期、归属和写权限；列表端点的过滤不能替代写路径校验。direct UI 入口保留空绑定和 `ontology_id`→current release 的既有契约；本次只收紧 `binding_mode=delegated`。
 4. 委派会话的领域 `apply` 在绑定版本不再是 `draft + editing` 时不得静默分叉新草稿并重锚会话，必须返回版本失效并由 Run 重新询问或终止。直接 UI 会话继续遵循其既有绑定语义，但不能被伪装成委派绑定。
 5. 绑定版本删除、晋级或被替代时，不能只通过拉取漂移摘要提示；领域服务应发出带版本引用的生命周期事件（例如 `promoted`、`superseded`、`deleted`），由 Inbox 唤醒关联 Run。
 6. 本体助手的 HTTP 直聊入口也必须执行按本体的访问校验，不能因为绕过 Assistant Hub 就只依赖菜单级权限；Hub 路径和直聊路径的权限语义需要在契约中对齐。
@@ -163,18 +163,18 @@ RAP v1 的单端点回合模型不能凭最终文本可靠判断远端是否需�
 | 取消 | `false` | 远端提供取消请求和可验证状态查询 |
 | 幂等重试 | `false` | 请求携带可选 `call_id`、`idempotency_key`，远端承诺按其去重 |
 
-如果远端只支持 `{message, session_ref}`，用户回答只能作为新的、明确关联的回合输入；Adapter 不得把普通最终文本伪装成 `needs_input`，也不得在没有远端幂等字段时自动重发可能产生副作用的请求。RAP minor 演进需沿用现有版本化规则，并在契约冻结时确定字段、去重范围和回送错误语义。
+如果远端只支持 `{message, session_ref}`，用户回答只能作为新的、明确关联的回合输入；Adapter 不得把普通最终文本伪装成 `needs_input`，也不得在没有远端幂等字段时自动重发可能产生副作用的请求。RAP minor 演进沿用现有版本化规则；kernel.v1 使用 `call_id`、`idempotency_key`、`input_request`、`approval_request`、`decision`、`result_status` 的 additive 字段和固定去重范围。
 
 ## 8. A2A、Agent Client Protocol 与 MCP
 
 名称必须写全，避免把不同协议混为“ACP/A2A”：
 
-- **A2A（Agent2Agent）**：适合独立远端 Agent 的消息、Task、上下文、Artifact、轮询和可选流式/推送。取消、消息幂等和授权范围仍需本地策略补足。第一阶段适合作为未来外部 Agent Adapter。
+- **A2A（Agent2Agent）**：适合独立远端 Agent 的消息、Task、上下文、Artifact、轮询和可选流式/推送。取消、消息幂等和授权范围仍需本地策略补足。列为 post-v1 deferred，不进入 kernel.v1 首发适配器。
 - **Agent Client Protocol**：更适合代码编辑器或客户端与编码 Agent 的会话、流式更新、工具状态、diff、终端和权限请求。本轮不把它作为通用 Agent 编排协议；只有接入明确的编码 Agent 产品时再增加适配器。
 - **MCP**：继续承担工具、资源和提示集成。双方明确协商支持时可以使用 MCP Tasks 的任务句柄、状态查询、输入和合作式取消，但 MCP Task 不自动获得 Agent 的业务语义。
 - **Agent Communication Protocol**：这是另一个历史上使用 ACP 缩写的协议，文档中不使用含糊的“ACP”指代它；如未来需要互操作，单独命名 Adapter。
 
-参考官方资料：[A2A 核心概念](https://a2a-protocol.org/latest/topics/key-concepts/)、[A2A 任务生命周期](https://a2a-protocol.org/latest/topics/life-of-a-task/)、[A2A 流式与异步](https://a2a-protocol.org/latest/topics/streaming-and-async/)、[Agent Client Protocol](https://agentclientprotocol.com/get-started/introduction)、[MCP](https://modelcontextprotocol.io/docs/getting-started/intro)、[MCP Tasks](https://modelcontextprotocol.io/extensions/tasks/overview)。具体版本在适配器实现阶段锁定，并通过互操作测试验证。
+参考官方资料：[A2A 核心概念](https://a2a-protocol.org/latest/topics/key-concepts/)、[A2A 任务生命周期](https://a2a-protocol.org/latest/topics/life-of-a-task/)、[A2A 流式与异步](https://a2a-protocol.org/latest/topics/streaming-and-async/)、[Agent Client Protocol](https://agentclientprotocol.com/get-started/introduction)、[MCP](https://modelcontextprotocol.io/docs/getting-started/intro)、[MCP Tasks](https://modelcontextprotocol.io/extensions/tasks/overview)。首发 RAP 固定 v1，MCP 使用仓库已支持的 transport；A2A、ACP 和超级助手被外部调用属于 post-v1 deferred。
 
 ## 9. 取消、审批与数据边界
 
@@ -202,7 +202,7 @@ RAP v1 的单端点回合模型不能凭最终文本可靠判断远端是否需�
 - 缺失条件的澄清问题绑定到正确 Run；
 - 当前权限和版本变更重新检查；
 - RAP direct/pull 的会话续用和幂等；
-- A2A 或其他外部适配器的 Task/Artifact 映射；
+- RAP/MCP 的 Task/Artifact 映射；A2A 仅保留 deferred contract；
 - 真实流式进度和断线重连；
 - 取消请求、确认取消和未知结果的区分；
 - 审批回调过期、重复和乱序；
