@@ -92,6 +92,6 @@ def test_enable_requires_healthy_handshake_and_keeps_plugin_disabled(db, admin_u
         enable_process_plugin(db, admin_user.id, row.id)
     db.refresh(row)
     cap = db.get(CapabilityRevision, (capability_key(admin_user.id, "user.unhealthy"), 1))
-    assert row.state == "installed"
+    assert row.state == "disabled"
     assert row.last_health_status == "failed"
     assert cap is not None and cap.enabled is False

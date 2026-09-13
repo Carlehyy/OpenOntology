@@ -198,6 +198,7 @@ def enable_process_plugin(db: Session, owner_id: str, plugin_id: str) -> SuperAs
     except ProcessPluginValidationError as exc:
         row.last_health_status = "failed"
         row.last_health_message = str(exc)[:500]
+        row.state = PluginState.DISABLED.value
         # Capability remains disabled and the persisted lifecycle state is
         # explicit, so a failed probe cannot accidentally become callable.
         _freeze_capability(db, row, enabled=False)
