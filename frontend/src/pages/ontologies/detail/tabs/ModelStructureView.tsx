@@ -16,6 +16,7 @@ import { agentApi, type DynamicSentinel } from '@/api/agent'
 import { apiClientV2 } from '@/api/client'
 import { saveCanvasLayout } from '@/palantir-graph/api/formalApi'
 import BusinessModelDialog from './BusinessModelDialog'
+import SentinelDetailSheet from './SentinelDetailSheet'
 import StructureDocDialog from './StructureDocDialog'
 import { StructureGraphEdge, StructureGraphNode } from './StructureGraphElements'
 import {
@@ -70,6 +71,7 @@ function dynamicStructureSentinel(item: DynamicSentinel): StructureSentinel {
     bindings: item.bindings,
     links: item.links,
     condition: item.condition ?? undefined,
+    pattern: item.pattern ?? undefined,
     conditionRows: item.conditionRows,
     conditionLogic: item.conditionLogic,
     primaryAlias: item.primaryAlias,
@@ -677,6 +679,13 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     return searchIndex.filter(item => `${item.label} ${item.technicalName} ${item.context || ''}`.toLocaleLowerCase().includes(query)).slice(0, 8)
   }, [searchIndex, searchText])
 
+  const selectedSentinel = useMemo(
+    () => sentinelId
+      ? workspace.sentinels.find(item => item.id === sentinelId) ?? null
+      : null,
+    [sentinelId, workspace.sentinels],
+  )
+
   const functionOptions = useMemo<DependencyOption[]>(() => workspace.functions.map(item => ({
     id: item.id,
     label: item.displayName || item.name,
@@ -783,7 +792,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     setSearchText('')
     setSearchFocus(null)
     if (kind === 'function') { setFunctionId(id); setSentinelId('') }
-    else { setSentinelId(id); setFunctionId('') }
+    else { setSentinelId(id); setFunctionId(''); setDetail(null) }
     window.setTimeout(() => void fitView({ padding: 0.2, maxZoom: 0.88, duration: 280 }), 30)
   }, [fitView])
 
@@ -924,6 +933,16 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
         </div>
 
         <DetailPanel workspace={workspace} selection={detail} onClose={() => setDetail(null)} />
+
+        {selectedSentinel && (
+          <SentinelDetailSheet
+            ontologyId={ontologyId}
+            ontologyName={ontologyName}
+            workspace={workspace}
+            sentinel={selectedSentinel}
+            onClose={() => setSentinelId('')}
+          />
+        )}
       </div>
 
       <StructureDocDialog

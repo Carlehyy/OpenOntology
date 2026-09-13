@@ -61,6 +61,20 @@ export interface StructureFunction {
   targetActionId?: string
 }
 
+export interface StructureSentinelPattern {
+  stages: Array<{ alias: string; objectTypeId: string; filter?: string | null; within?: number | null }>
+  within?: number
+  absence?: { enabled: boolean }
+  aggregate?: {
+    property: string
+    function: 'count' | 'avg' | 'sum' | 'min' | 'max'
+    window: number
+    threshold: number
+    comparison?: 'gte' | 'gt' | 'lte' | 'lt'
+  }
+  condition?: string | null
+}
+
 export interface StructureSentinel {
   id: string
   name: string
@@ -69,6 +83,7 @@ export interface StructureSentinel {
   bindings?: Array<{ alias: string; objectTypeId: string; filter?: string | null }>
   links?: Array<{ from: string; linkTypeId: string; to: string }>
   condition?: string
+  pattern?: StructureSentinelPattern | null
   conditionRows?: Array<Record<string, unknown>>
   conditionLogic?: string
   primaryAlias?: string

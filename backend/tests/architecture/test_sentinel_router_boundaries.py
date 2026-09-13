@@ -14,6 +14,7 @@ from app.ontologies.sentinels import operational_workflow
 from app.ontologies.sentinels import project_guard
 from app.ontologies.sentinels import query_service
 from app.ontologies.sentinels import router as sentinel_router
+from app.ontologies.sentinels import skill_export
 from app.routers import sentinel as legacy_router
 
 
@@ -56,6 +57,7 @@ ROUTE_PARAMETERS = {
         "_",
     ),
     "get_sentinel": ("ontology_id", "sentinel_id", "db", "_"),
+    "export_sentinel_skill": ("ontology_id", "sentinel_id", "db", "_"),
     "update_sentinel": (
         "ontology_id",
         "sentinel_id",
@@ -79,6 +81,7 @@ DELEGATES = {
         "update_operational_state",
     ),
     "get_sentinel": ("_query_service", "get_sentinel"),
+    "export_sentinel_skill": ("_skill_export", "export_sentinel_skill"),
     "update_sentinel": ("_definition_workflow", "update_sentinel"),
     "delete_sentinel": ("_definition_workflow", "delete_sentinel"),
     "toggle_sentinel": ("_operational_workflow", "toggle_sentinel"),
@@ -101,6 +104,7 @@ HELPER_KEYWORDS = {
         "released_dict_fn",
     },
     "get_sentinel": {"dict_fn"},
+    "export_sentinel_skill": set(),
     "update_sentinel": {
         "sentinel_write_fence_fn",
         "project_fn",
@@ -266,6 +270,7 @@ def test_sentinel_application_modules_do_not_depend_on_http_router():
         operational_workflow,
         project_guard,
         query_service,
+        skill_export,
     ):
         imports = _imports(Path(module.__file__))
         assert "app.ontologies.sentinels.router" not in imports
@@ -280,6 +285,7 @@ def test_sentinel_router_and_application_modules_stay_bounded():
         "query_service.py": 350,
         "definition_workflow.py": 180,
         "operational_workflow.py": 280,
+        "skill_export.py": 560,
     }
     for filename, maximum in limits.items():
         line_count = len(
@@ -305,8 +311,8 @@ def test_sentinel_openapi_contract_matches_pre_extraction_baseline():
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode()
-    assert len(paths) == 8
-    assert sum(len(item) for item in paths.values()) == 11
+    assert len(paths) == 9
+    assert sum(len(item) for item in paths.values()) == 12
     assert hashlib.sha256(payload).hexdigest() == (
-        "19a9ec1e4cdcf6f720dca2c0b558e4f5040e4042553834e4296f2653edce62d7"
+        "2204b421275a1055140cb2ca08518fec8f2bd4edf8152d3cca37ff798e00c336"
     )

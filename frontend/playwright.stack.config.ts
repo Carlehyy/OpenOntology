@@ -23,6 +23,7 @@ export default defineConfig({
     '**/ontology_evolution.spec.ts',
     '**/ontology_list.spec.ts',
     '**/pipeline_ontology_supply_chain.spec.ts',
+    '**/sentinel_skill_export.spec.ts',
     '**/settings.spec.ts',
     '**/super_assistant_markdown.spec.ts',
     '**/super_assistant_resilience.spec.ts',
