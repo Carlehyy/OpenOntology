@@ -8,6 +8,7 @@ DEPLOY_SCRIPT="$REPO_ROOT/deploy/deploy-prod.sh"
 DEPLOY_WORKFLOW="$REPO_ROOT/.github/workflows/deploy-nano-ontoprompt.yml"
 ARCHIVE_SCRIPT="$SCRIPT_DIR/create-deployment-archive.sh"
 NGINX_CONFIG="$REPO_ROOT/frontend/nginx/default.conf"
+PROD_COMPOSE="$REPO_ROOT/docker-compose.prod.yml"
 
 assert_accepted() {
   local value="$1"
@@ -130,6 +131,24 @@ if [ "$post_migration_stop_count" -ne 3 ] \
   printf 'post-migration startup/readiness failures must stop the new runtime\n' >&2
   exit 1
 fi
+
+# Keep the production container hardening from being removed during a
+# Compose edit.  These settings are defense in depth and do not replace the
+# dedicated rootless runner required for user process plugins.
+for hardened_service in backend pipeline_executor; do
+  hardened_block="$(awk -v service="$hardened_service" '
+    $0 == "  " service ":" { in_service = 1 }
+    in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+    in_service { print }
+  ' "$PROD_COMPOSE")"
+  if ! grep -Fq 'no-new-privileges:true' <<<"$hardened_block" \
+      || ! grep -Fq '      - ALL' <<<"$hardened_block" \
+      || ! grep -Fq '/tmp:size=256m,nosuid,nodev' <<<"$hardened_block"; then
+    printf '%s must retain no-new-privileges, cap_drop ALL, and a hardened /tmp tmpfs\n' \
+      "$hardened_service" >&2
+    exit 1
+  fi
+done
 
 test_dir="$(mktemp -d /tmp/openontology-deploy-guards.XXXXXX)"
 archive_source="$(mktemp -d /tmp/openontology-archive-source.XXXXXX)"
