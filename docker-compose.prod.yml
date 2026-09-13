@@ -164,6 +164,14 @@ services:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # Container hardening is defense in depth; user plugins still require the
+    # dedicated rootless runner described in the commercial release gate.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev
     healthcheck:
       # Liveness must stay dependency-free.  Deep readiness is checked once by
       # deploy-prod.sh via /api/health; probing every dependency every 15s can
@@ -233,6 +241,12 @@ services:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
     command: python -m app.data_channel.pipeline_tasks.nats_executor
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev
     healthcheck:
       # executor 没有进程内 ping 接口；主循环每 5 秒刷新心跳文件 mtime。
       test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/nats_executor.heartbeat')<30 else 1)"]
