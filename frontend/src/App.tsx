@@ -32,6 +32,7 @@ import ExplorationPage from '@/pages/explore/ExplorationPage'
 import SuperAssistantPage from '@/pages/super-assistant/SuperAssistantPage'
 import SkillCommunityPage from '@/pages/community/SkillCommunityPage'
 import PluginCommunityPage from '@/pages/community/PluginCommunityPage'
+import McpDevPage from '@/pages/community/McpDevPage'
 import OntologyNetworkPage from '@/pages/ontology-model/OntologyNetworkPage'
 import OntologyGraphPage from '@/pages/ontologies/graph/OntologyGraphPage'
 import WorldModelModelsPage from '@/pages/world-model/WorldModelModelsPage'
@@ -215,6 +216,7 @@ export default function App() {
           <Route path="/community" element={<Navigate to="/community/skills" replace />} />
           <Route path="/community/skills" element={<ProtectedRoute><SkillCommunityPage /></ProtectedRoute>} />
           <Route path="/community/plugins" element={<ProtectedRoute><PluginCommunityPage /></ProtectedRoute>} />
+          <Route path="/community/plugins/develop/:projectId" element={<ProtectedRoute><McpDevPage /></ProtectedRoute>} />
           <Route path="/agent/reports" element={<ProtectedRoute><ReportStudioPage /></ProtectedRoute>} />
           <Route path="/agent/reports/:templateId" element={<ProtectedRoute><ReportStudioPage /></ProtectedRoute>} />
           <Route path="/agent" element={<ProtectedRoute><AgentWorkbenchPage /></ProtectedRoute>} />

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useReducedMotion } from 'motion/react'
 import {
   CheckCircle2,
@@ -6,6 +7,7 @@ import {
   Clock3,
   Code2,
   FileUp,
+  Hammer,
   Loader2,
   Pencil,
   PlugZap,
@@ -16,7 +18,7 @@ import {
   X,
 } from 'lucide-react'
 
-import { communityApi } from '@/api/community'
+import { communityApi, mcpDevApi } from '@/api/community'
 import type { McpTool, SuperMcpServer } from '@/api/superAssistant'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import McpServerDialog from '@/components/mcp/McpServerDialog'
@@ -57,14 +59,18 @@ const serverTitle = (server: SuperMcpServer) =>
   server.display_name || server.name
 
 const transportLabel = (server: SuperMcpServer) => {
+  if (server.transport === 'developed') return '自研'
   if (server.transport === 'streamable_http') return 'Streamable HTTP'
   return server.transport.toUpperCase()
 }
 
 const endpointText = (server: SuperMcpServer) => {
+  if (server.transport === 'developed') return '平台进程内执行'
   if (server.transport === 'stdio') return [server.command, ...server.args].filter(Boolean).join(' ')
   return server.url
 }
+
+const developed = (server: SuperMcpServer) => server.transport === 'developed'
 
 const exportable = (server: SuperMcpServer) => server.tool_manifest.length > 0
 
@@ -148,6 +154,8 @@ function ToolManifestDialog({ server, onClose }: { server: SuperMcpServer; onClo
         <p className="mt-1.5">协议：MCP JSON-RPC 2.0，方法 <code className="rounded bg-card px-1 font-mono text-[11px] text-brand-ink ring-1 ring-border">tools/call</code>，参数为 <code className="rounded bg-card px-1 font-mono text-[11px] text-brand-ink ring-1 ring-border">{'{ name, arguments }'}</code>。</p>
         {server.transport === 'stdio' ? (
           <p className="mt-1.5">地址：本地进程 <span className="break-all font-mono text-[11px] text-[var(--color-text-tertiary)]">{endpointText(server) || '未配置 command'}</span>（stdio 由平台进程托管，不提供直连地址）。</p>
+        ) : developed(server) ? (
+          <p className="mt-1.5">执行：平台进程内执行（Python 内核，无直连地址）；在超级助手会话中按 <code className="rounded bg-card px-1 font-mono text-[11px] text-brand-ink ring-1 ring-border">mcp__{server.name}__工具名</code> 调用。</p>
         ) : (
           <p className="mt-1.5">地址：<span className="break-all font-mono text-[11px] text-[var(--color-text-tertiary)]">{server.url}</span>（{transportLabel(server)}，需携带已配置的请求头）。</p>
         )}
@@ -275,6 +283,111 @@ function ExportToolsDialog({ server, onClose, onDone }: { server: SuperMcpServer
   )
 }
 
+/** 新建开发项目弹窗：标识 + 名称 + 描述，创建后直接进入开发页 */
+function McpDevCreateDialog({ onClose }: { onClose: () => void }) {
+  const navigate = useNavigate()
+  const [name, setName] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [description, setDescription] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const nameValid = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name.trim())
+
+  const submit = async () => {
+    if (busy || !nameValid) return
+    setBusy(true)
+    setError('')
+    try {
+      const project = await mcpDevApi.createProject({
+        name: name.trim(),
+        display_name: displayName.trim(),
+        description: description.trim(),
+      })
+      toast.success('开发项目已创建', { description: '正在进入开发页，用 @mcp_tool 声明你的工具函数。' })
+      onClose()
+      navigate(`/community/plugins/develop/${project.id}`)
+    } catch (createError) {
+      setError(errorText(createError, '创建失败，请稍后重试。'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open
+      onClose={() => { if (!busy) onClose() }}
+      title="开发 MCP"
+      description="用 Python 编写若干工具函数（封装你的接口），发布后作为 MCP 进入本清单，供超级助手调用。"
+      contentClassName="p-5"
+      footer={(
+        <div className="flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="min-h-10 min-w-24 rounded-xl border border-border bg-card px-4 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => void submit()}
+            disabled={busy || !nameValid}
+            className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-xl bg-brand px-4 text-xs font-medium text-[var(--color-text-inverse)] transition-colors hover:bg-brand-deep disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {busy && <Loader2 size={13} className="animate-spin" />} 创建并开发
+          </button>
+        </div>
+      )}
+    >
+      <div className="space-y-4 text-xs">
+        <label className="block">
+          <span className="mb-1 block font-medium text-foreground">标识（发布后即 MCP 标识，不可改）</span>
+          <input
+            value={name}
+            onChange={event => setName(event.target.value)}
+            disabled={busy}
+            maxLength={100}
+            placeholder="例如 my_weather_tools"
+            aria-label="开发项目标识"
+            className="w-full rounded-lg border border-border bg-card px-3 py-2 font-mono text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          {!nameValid && name.trim() !== '' && (
+            <span className="mt-1 block text-[11px] text-destructive">仅限字母/数字/下划线/连字符，且以字母或数字开头</span>
+          )}
+        </label>
+        <label className="block">
+          <span className="mb-1 block font-medium text-foreground">显示名称</span>
+          <input
+            value={displayName}
+            onChange={event => setDisplayName(event.target.value)}
+            disabled={busy}
+            maxLength={200}
+            placeholder="例如 天气工具集"
+            aria-label="开发项目显示名称"
+            className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block font-medium text-foreground">描述</span>
+          <textarea
+            value={description}
+            onChange={event => setDescription(event.target.value)}
+            disabled={busy}
+            maxLength={500}
+            rows={2}
+            aria-label="开发项目描述"
+            className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        </label>
+        {error && <p role="alert" className="rounded-xl border border-destructive/30 bg-[var(--color-danger-bg)] px-4 py-3 text-xs leading-5 text-destructive">{error}</p>}
+      </div>
+    </Modal>
+  )
+}
+
 /** 零数据空态：三步引导替代一句话提示，对齐世界模型页的 beUI 空态模式 */
 function EmptyGuide({ onAdd }: { onAdd: () => void }) {
   const steps = [
@@ -313,6 +426,7 @@ function EmptyGuide({ onAdd }: { onAdd: () => void }) {
 
 export default function PluginCommunityPage() {
   const reduce = useReducedMotion() ?? false
+  const navigate = useNavigate()
     const [servers, setServers] = useState<SuperMcpServer[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -323,6 +437,7 @@ export default function PluginCommunityPage() {
   const [deleting, setDeleting] = useState(false)
   const [manifestTarget, setManifestTarget] = useState<SuperMcpServer | null>(null)
   const [exportTarget, setExportTarget] = useState<SuperMcpServer | null>(null)
+  const [devCreateOpen, setDevCreateOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -394,7 +509,7 @@ export default function PluginCommunityPage() {
   // 悬停色仅按语义区分（转接口品牌色、删除危险色），结构零混搭
   const renderActions = (server: SuperMcpServer) => (
     <div className="flex items-center justify-center gap-1">
-      <Tooltip content="测试连接并刷新工具清单">
+      <Tooltip content={developed(server) ? '重跑发布校验（逐工具按样例参数真实执行）' : '测试连接并刷新工具清单'}>
         <IconButton
           label={`测试 MCP ${serverTitle(server)}`}
           reduce={reduce}
@@ -407,25 +522,39 @@ export default function PluginCommunityPage() {
         </IconButton>
       </Tooltip>
       <Tooltip
-        content={exportable(server)
-          ? '将勾选工具生成为接口代理的 HTTP 接口'
-          : '尚未发现工具，请先执行连接测试'}
+        content={developed(server)
+          ? '自研 MCP 暂不支持转接口（规划中）'
+          : exportable(server)
+            ? '将勾选工具生成为接口代理的 HTTP 接口'
+            : '尚未发现工具，请先执行连接测试'}
       >
         <IconButton
           label={`转接口 ${serverTitle(server)}`}
           reduce={reduce}
-          onClick={() => setExportTarget(server)}
-          disabled={!exportable(server)}
+          onClick={() => { if (!developed(server)) setExportTarget(server) }}
+          disabled={!exportable(server) || developed(server)}
           className="hover:bg-brand-soft hover:text-brand-ink"
         >
           <FileUp size={14} />
         </IconButton>
       </Tooltip>
-      <Tooltip content="编辑名称、描述与连接配置">
-        <IconButton label={`编辑 MCP ${serverTitle(server)}`} reduce={reduce} onClick={() => setEditing(server)}>
-          <Pencil size={14} />
-        </IconButton>
-      </Tooltip>
+      {developed(server) ? (
+        <Tooltip content="进入开发页编辑工具脚本（发布绑定版不受影响）">
+          <IconButton
+            label={`开发 ${serverTitle(server)}`}
+            reduce={reduce}
+            onClick={() => navigate(`/community/plugins/develop/${server.dev_project_id ?? ''}`)}
+          >
+            <Hammer size={14} />
+          </IconButton>
+        </Tooltip>
+      ) : (
+        <Tooltip content="编辑名称、描述与连接配置">
+          <IconButton label={`编辑 MCP ${serverTitle(server)}`} reduce={reduce} onClick={() => setEditing(server)}>
+            <Pencil size={14} />
+          </IconButton>
+        </Tooltip>
+      )}
       <Tooltip content="删除该 MCP Server 及其工具清单">
         <IconButton
           label={`删除 MCP ${serverTitle(server)}`}
@@ -485,6 +614,14 @@ export default function PluginCommunityPage() {
           </button>
         )}
         <p className="ml-auto shrink-0 text-xs tabular-nums text-[var(--color-text-tertiary)]">显示 {filteredServers.length} / {servers.length} 项</p>
+        <button
+          type="button"
+          onClick={() => setDevCreateOpen(true)}
+          title="用 Python 编写工具函数并封装为本平台 MCP"
+          className="inline-flex h-[38px] shrink-0 items-center gap-1.5 rounded-xl border border-brand-line bg-brand-soft px-3.5 text-sm font-medium text-brand-ink transition-all duration-200 hover:-translate-y-px hover:bg-brand-mist active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        >
+          <Hammer size={15} /> 开发 MCP
+        </button>
         <button
           type="button"
           onClick={() => setEditing('new')}
@@ -571,6 +708,7 @@ export default function PluginCommunityPage() {
       )}
 
       {editing && <McpServerDialog server={editing === 'new' ? undefined : editing} client={communityApi} onClose={() => setEditing(null)} onSaved={load} />}
+      {devCreateOpen && <McpDevCreateDialog onClose={() => setDevCreateOpen(false)} />}
       {manifestTarget && <ToolManifestDialog server={servers.find(item => item.id === manifestTarget.id) || manifestTarget} onClose={() => setManifestTarget(null)} />}
       {exportTarget && (
         <ExportToolsDialog
@@ -579,7 +717,7 @@ export default function PluginCommunityPage() {
           onDone={load}
         />
       )}
-      <ConfirmDialog open={!!deleteTarget} title="删除 MCP Server" description={`确认删除 MCP Server「${deleteTarget ? serverTitle(deleteTarget) : ''}」？相关连接配置和工具清单将一并移除，此操作无法撤销。`} confirmText={deleting ? '删除中...' : '确认删除'} variant="danger" onConfirm={() => void removeServer()} onClose={() => !deleting && setDeleteTarget(null)} />
+      <ConfirmDialog open={!!deleteTarget} title="删除 MCP Server" description={`确认删除 MCP Server「${deleteTarget ? serverTitle(deleteTarget) : ''}」？${deleteTarget && developed(deleteTarget) ? '其开发项目、全部历史版本与样例参数将一并删除，' : '相关连接配置和工具清单将一并移除，'}此操作无法撤销。`} confirmText={deleting ? '删除中...' : '确认删除'} variant="danger" onConfirm={() => void removeServer()} onClose={() => !deleting && setDeleteTarget(null)} />
     </div>
   )
 }

@@ -210,7 +210,7 @@ export interface McpTool {
   input_schema: Record<string, unknown>
 }
 
-export type McpTransport = 'stdio' | 'sse' | 'streamable_http'
+export type McpTransport = 'stdio' | 'sse' | 'streamable_http' | 'developed'
 
 /** 内置工具目录项（GET /super-assistant/tools）。
  *  available 是平台/配置条件可用性（如 web_search 平台未配后端），
@@ -231,6 +231,7 @@ export interface SuperMcpServer {
   display_name: string
   description: string
   builtin_key: string | null
+  dev_project_id: string | null
   transport: McpTransport
   url: string
   header_names: string[]

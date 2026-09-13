@@ -320,7 +320,7 @@
 .ontology-login__error {
   margin: -17px 0 20px;
   padding: 10px 12px;
-  color: #b23a3a;
+  color: var(--color-danger-hover);
   border: 1px solid #f4d2d2;
   border-radius: 8px;
   background: #fff6f6;
@@ -329,7 +329,7 @@
 
 .ontology-login__field-error {
   margin: -20px 0 14px;
-  color: #b23a3a;
+  color: var(--color-danger-hover);
   font-size: 12.5px;
 }
 

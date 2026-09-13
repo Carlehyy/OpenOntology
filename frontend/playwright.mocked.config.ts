@@ -19,6 +19,7 @@ export default defineConfig({
     '**/assistant_widget.spec.ts',
     '**/asset_lake_tabs.spec.ts',
     '**/community.spec.ts',
+    '**/community_mcp_dev.spec.ts',
     '**/connections_page.spec.ts',
     '**/component_gallery.spec.ts',
     '**/data_mapping_preview.spec.ts',

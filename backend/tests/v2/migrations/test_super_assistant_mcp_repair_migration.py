@@ -33,7 +33,7 @@ def test_upgrade_repairs_missing_super_assistant_mcp_table(tmp_path, monkeypatch
     assert "super_assistant_mcp_servers" in inspector.get_table_names()
     assert {
         "id", "owner_id", "name", "display_name", "description",
-        "builtin_key", "transport", "url",
+        "builtin_key", "transport", "url", "dev_project_id",
         "headers_encrypted", "header_names", "command", "args",
         "env_encrypted", "env_names", "enabled", "require_confirmation",
         "tool_manifest", "last_test_status", "last_test_message",
@@ -41,6 +41,7 @@ def test_upgrade_repairs_missing_super_assistant_mcp_table(tmp_path, monkeypatch
     } == {column["name"] for column in inspector.get_columns("super_assistant_mcp_servers")}
     assert {
         "ix_super_assistant_mcp_servers_owner_id", "ix_sa_mcp_owner_updated",
+        "ix_sa_mcp_servers_dev_project_id",
     } == {index["name"] for index in inspector.get_indexes("super_assistant_mcp_servers")}
     assert any(
         constraint["name"] == "uq_sa_mcp_owner_name"

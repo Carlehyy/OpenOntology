@@ -19,7 +19,7 @@ from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
 from app.settings.object_storage.service import execute_minio_tool
 from app.shared.config import settings
 from app.shared.database import SessionLocal
-from app.super_assistant import delegation, files_workspace, memory_service, multica_service, palace_service, provider, reflection_service, web_tools
+from app.super_assistant import delegation, files_workspace, mcp_dev_service, memory_service, multica_service, palace_service, provider, reflection_service, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -1337,6 +1337,12 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                             output = execute_minio_tool(
                                 db, original_name, item["arguments"],
                                 actor_type="super_assistant", actor_id=owner_id,
+                            )
+                        elif server.transport == "developed":
+                            # 自研 MCP：进程内执行发布绑定的冻结脚本
+                            #（对标内置 MinIO 的进程内先例，不走外部传输）
+                            output = mcp_dev_service.call_published_tool(
+                                db, server, original_name, item["arguments"],
                             )
                         else:
                             output = asyncio.run(call_tool(

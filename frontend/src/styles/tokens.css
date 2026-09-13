@@ -93,6 +93,15 @@
   --color-code-bg: #0d1420;
   --color-code-fg: #dbe4f0;
 
+  /* ── 代码语法高亮（CodeMirror GitHub light 观感；明暗同值，成对维护） ── */
+  --color-syntax-keyword: #cf222e;
+  --color-syntax-string: #0a3069;
+  --color-syntax-comment: #6e7781;
+  --color-syntax-number: #0550ae;
+  --color-syntax-function: #8250df;
+  --color-syntax-class: #953800;
+  --color-syntax-property: #116329;
+
   /* ── 类型编码色（viz，分类数据可视化：图例、类型徽章、结构图节点）──
      与 §5 图表序列同源取值；明暗同值，成对维护以便未来分档。 */
   --color-viz-violet: #8b5cf6;
@@ -234,6 +243,15 @@
   /* ── 代码块面（深色档） ── */
   --color-code-bg: #0a0f18;
   --color-code-fg: #c9d4e3;
+
+  /* ── 代码语法高亮（深色档同值，成对维护） ── */
+  --color-syntax-keyword: #cf222e;
+  --color-syntax-string: #0a3069;
+  --color-syntax-comment: #6e7781;
+  --color-syntax-number: #0550ae;
+  --color-syntax-function: #8250df;
+  --color-syntax-class: #953800;
+  --color-syntax-property: #116329;
 
   /* ── 类型编码色（viz，深色档同值） ── */
   --color-viz-violet: #8b5cf6;

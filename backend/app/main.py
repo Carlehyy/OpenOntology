@@ -336,6 +336,14 @@ app.include_router(
     tags=["community"],
     dependencies=community_plugins_guard,
 )
+# 开放社区 · 自研 MCP（开发 MCP）：项目/版本/发布端点，同一菜单边界。
+from app.community import mcp_dev_router as community_mcp_dev_router
+app.include_router(
+    community_mcp_dev_router.router,
+    prefix="/api/v2/community",
+    tags=["community"],
+    dependencies=community_plugins_guard,
+)
 app.include_router(sentinel_router.router, prefix="/api/v1/ontologies/{ontology_id}/sentinels", tags=["sentinel"], dependencies=ontology_guard)
 # 助手评估（系统设置子项，仅 admin）— 基于 OpenJudge 的助手会话质量旁路评估
 from app.assistant_evaluation import router as assistant_evaluation_router
