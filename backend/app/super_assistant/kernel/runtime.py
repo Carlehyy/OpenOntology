@@ -226,11 +226,18 @@ def _mark_run_failed(run_id: str, exc: Exception) -> None:
             db.rollback()
             return
         before = run.status
-        run.status, run.version, run.finished_at = "failed", run.version + 1, _now()
-        error = ErrorEnvelope("execution_failed", str(exc), retryable=False, safe_to_retry=False)
+        # Cancellation/deadline intent wins over a late worker exception.  A
+        # worker must never turn a user cancellation into a misleading failure.
+        if before in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}:
+            terminal = RunStatus.EXPIRED.value if run.cancel_reason == "deadline" else RunStatus.CANCELLED.value
+            run.status, run.version, run.finished_at = terminal, run.version + 1, _now()
+            error = ErrorEnvelope("cancelled_during_execution", str(exc), retryable=False, safe_to_retry=False)
+        else:
+            run.status, run.version, run.finished_at = "failed", run.version + 1, _now()
+            error = ErrorEnvelope("execution_failed", str(exc), retryable=False, safe_to_retry=False)
         append_event(
             db, run, event_type="run.status_changed",
-            payload={"from": before, "to": "failed", "reason": error.error_code, "actor": "worker", "version": run.version},
+            payload={"from": before, "to": run.status, "reason": error.error_code, "actor": "worker", "version": run.version},
             actor={"kind": "worker"}, command_id=f"run:{run.id}:failure", idempotency_key=f"failure:{run.id}",
         )
         db.commit()
