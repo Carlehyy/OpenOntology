@@ -268,9 +268,9 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 此外，Kernel 直连连接器在每次真实外呼前重新执行共享 SSRF/URL 校验，避免配置变更或 DNS 变化后继续使用已失效的网络边界；注入 transport 的测试路径不参与 DNS 解析。该校验不能消除 DNS 解析与 TCP 建连之间的全部 rebinding 窗口，最终仍需网络层 egress policy 和攻击性 staging 验证。
 
-生产 Compose 的 `python_kernel_gateway`、backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。
+生产 Compose 的 browser、`python_kernel_gateway`、backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。
 
-`scripts/ci/test-deploy-guards.sh` 已增加对上述三项配置的服务级守卫，部署守卫自测通过，后续 Compose 修改若移除任一选项会在 CI 阶段失败。
+`scripts/ci/test-deploy-guards.sh` 已增加对上述四个服务和三项配置的服务级守卫，部署守卫自测通过，后续 Compose 修改若移除任一选项会在 CI 阶段失败。
 
 本轮对用户进程插件做了额外的反向检查：`plugin_host.py` 目前只是受限 JSON-lines 子进程，`network_scope`、`workspace_scope`、`secret_refs` 没有被 OS/网络策略执行；生产 Compose 已增加通用的 capability drop、no-new-privileges 和 hardened `/tmp`，但仍没有 rootless 用户、只读根文件系统或独立插件 namespace。运行时不会把 secret 值直接传给插件，因此当前插件能力是 fail-closed 的，不能作为“已支持凭据注入的商用插件”宣称。该事实与 `process_plugin_service.py`、`kernel/runtime.py`、`kernel/plugin_host.py` 和生产 Compose 配置一致，必须以独立 runner、secret broker 和攻击性 staging 验收完成后才可解除 M7/M8 阻断。
 

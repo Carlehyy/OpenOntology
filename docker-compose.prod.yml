@@ -76,6 +76,14 @@ services:
         BROWSER_BASE_IMAGE: ${BROWSER_IMAGE:-chromedp/headless-shell:latest}
     command: ["--no-sandbox", "--disable-dev-shm-usage"]
     shm_size: 2gb
+    # Chromium runs without its own sandbox in this image; keep the container
+    # itself least-privileged as a compensating control.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=512m,nosuid,nodev
     healthcheck:
       # The browser image intentionally has no curl/wget. Bash's TCP socket
       # support verifies the real CDP endpoint without adding another package.
