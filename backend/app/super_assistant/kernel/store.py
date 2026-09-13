@@ -353,6 +353,7 @@ def _mark_calls_cancel_requested(db: Session, run: ExecutionRun, *, command_id: 
             call.status, call.outcome = "closed", "not_sent"
         else:
             call.status, call.outcome = "cancel_requested", "outcome_unknown"
+        call.next_reconcile_at = _now() if call.remote_task_ref else None
         append_event(
             db, run, event_type="call.outcome_changed",
             payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": call.evidence_ref, "connector_id": call.target_ref, "provider_event_id": call.provider_event_id},

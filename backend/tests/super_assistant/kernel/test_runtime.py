@@ -270,6 +270,30 @@ def test_kernel_model_transient_failures_create_retry_attempts(db, monkeypatch):
     assert [item.safe_to_retry for item in attempts] == [True, True, False]
 
 
+def test_model_retry_rechecks_cancel_before_next_provider_call(db, monkeypatch):
+    from app.super_assistant.kernel.contracts import CancelReason
+    from app.super_assistant.kernel.store import cancel_run
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="retry cancel")
+    calls = {"count": 0}
+
+    def flaky_then_cancel(*_args, **_kwargs):
+        calls["count"] += 1
+        session = TestSession()
+        current = session.get(ExecutionRun, run.id)
+        if calls["count"] == 1:
+            cancel_run(session, run_id=run.id, owner_id=owner.id, reason=CancelReason.USER, idempotency_key="retry-cancel", expected_version=current.version)
+            session.commit(); session.close()
+            raise RuntimeError("temporary gateway failure")
+        session.close()
+        return {"content": "错误的第二次调用"}
+
+    monkeypatch.setattr(runtime.provider, "chat", flaky_then_cancel)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "retry-cancel"}))
+    db.expire_all()
+    assert calls["count"] == 1
+    assert db.get(ExecutionRun, run.id).status == "cancel_requested"
+
+
 def test_kernel_runtime_honors_max_steps_and_yields_retry(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, max_steps=1)
     monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {"content": "继续", "tool_calls": [{"id": "tool-1", "name": "delegate_to_assistant", "arguments": {}}]})
@@ -368,6 +392,7 @@ def test_external_result_after_cancel_preserves_remote_ref_for_cancellation(db, 
     db.expire_all(); db.refresh(external)
     assert db.get(ExecutionRun, run.id).status == "cancel_requested"
     assert external.status == "waiting_external" and external.remote_task_ref == "remote-42"
+    assert external.next_reconcile_at is not None and external.next_reconcile_at <= runtime._now()
     assert db.query(runtime.ExecutionAttempt).filter_by(call_id=external.id).one().finished_at is not None
 
 

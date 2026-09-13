@@ -146,6 +146,21 @@ async def _invoke_model_with_retries(
         heartbeat_stop = asyncio.Event()
         heartbeat = asyncio.create_task(_lease_heartbeat(run.id, token, policy, heartbeat_stop))
         try:
+            # Re-admit every retry after its durable Attempt commit. A cancel
+            # can arrive in that gap and must prevent the next provider call.
+            db.rollback(); db.begin()
+            admission_run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run.id).with_for_update())
+            if admission_run is None:
+                raise RuntimeError("execution Run disappeared")
+            if admission_run.status != RunStatus.ACTIVE.value:
+                current_call = db.get(ExecutionCall, call.id)
+                current_attempt = db.get(ExecutionAttempt, current_attempt.id)
+                if current_call is not None and current_attempt is not None and current_call.status not in {CallStatus.CLOSED.value, CallStatus.RECONCILING.value}:
+                    _close_controlled_model_call(db, admission_run, current_call, current_attempt, reason=admission_run.status, lease=None)
+                db.commit()
+                return {"content": "", "tool_calls": [], "_control_interrupted": True}, current_attempt.id if current_attempt is not None else attempt.id
+            assert_lease(admission_run, token)
+            db.commit()
             result = await asyncio.to_thread(provider.chat, call_kwargs, request_messages, tools)
         except Exception as exc:
             heartbeat_stop.set()
