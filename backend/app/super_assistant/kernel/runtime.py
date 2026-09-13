@@ -10,6 +10,7 @@ import json
 import logging
 import uuid
 import asyncio
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
@@ -81,6 +82,33 @@ async def _lease_heartbeat(run_id: str, token, policy: ExecutionPolicy, stop: as
             ok = await asyncio.to_thread(_renew_run_lease_once, run_id, token, ttl)
             if not ok:
                 logger.warning("lease heartbeat lost for run=%s owner=%s epoch=%s", run_id, token.owner, token.epoch)
+                return
+
+
+def _child_cancelled(run_id: str) -> bool:
+    """Read a child Run's control state without sharing the worker Session."""
+    db = SessionLocal()
+    try:
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id))
+        return run is None or run.status in {
+            RunStatus.CANCEL_REQUESTED.value,
+            RunStatus.CANCELLING.value,
+            RunStatus.CANCELLED.value,
+            RunStatus.EXPIRED.value,
+        }
+    finally:
+        db.close()
+
+
+async def _watch_child_cancel(run_id: str, cancel_event: threading.Event, stop: asyncio.Event) -> None:
+    """Bridge durable parent/child cancellation into the Hub adapter contract."""
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.5)
+            return
+        except asyncio.TimeoutError:
+            if await asyncio.to_thread(_child_cancelled, run_id):
+                cancel_event.set()
                 return
 
 
@@ -463,17 +491,26 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             from app.super_assistant.kernel.plugin_host import ProcessPluginHost
             host = ProcessPluginHost(_manifest(plugin))
             descriptor = _descriptor(plugin)
+            lease_ref: dict[str, str] = {}
             def admit() -> None:
                 session = SessionLocal()
                 try:
-                    admit_plugin_call(session, run.owner_id, plugin.id)
+                    lease_ref["id"] = admit_plugin_call(
+                        session, run.owner_id, plugin.id, call_id=call.id,
+                    )
                     session.commit()
                 finally:
                     session.close()
             def release() -> None:
+                invocation_id = lease_ref.get("id")
+                if not invocation_id:
+                    return
                 session = SessionLocal()
                 try:
-                    release_plugin_call(session, run.owner_id, plugin.id)
+                    release_plugin_call(
+                        session, run.owner_id, plugin.id,
+                        invocation_id=invocation_id, call_id=call.id,
+                    )
                     session.commit()
                 finally:
                     session.close()
@@ -572,6 +609,8 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                             command=server.command,
                             args=tuple(str(value) for value in (server.args or [])),
                             env=decrypt_env(server.env_encrypted),
+                            revision=int(getattr(server, "manifest_revision", 1) or 1),
+                            manifest_hash=getattr(server, "manifest_hash", None),
                         )
                         _persist_connector_capability(db, connector, source="mcp")
                         connector_registry.register(connector)
@@ -651,6 +690,10 @@ def _persist_connector_capability(db, connector, *, source: str) -> None:
                     "network_scope": list(persisted.network_scope or []),
                     "secret_refs": list(persisted.secret_refs or []),
                 }
+    elif source == "mcp":
+        persisted_hash = getattr(connector, "manifest_hash", None)
+        if persisted_hash:
+            digest = persisted_hash
     row = persist_capability_revision(
         db,
         descriptor,
@@ -1189,6 +1232,18 @@ def _capability_revision_for_target(db, owner_id: str, target_ref: str | None) -
         ))
         if plugin is not None:
             return int(plugin.revision)
+        from app.super_assistant.models import SuperAssistantMcpServer
+        from app.super_assistant.mcp_client import namespaced_tool_name
+        for server in db.scalars(select(SuperAssistantMcpServer).where(
+            SuperAssistantMcpServer.owner_id == owner_id,
+            SuperAssistantMcpServer.enabled.is_(True),
+        )).all():
+            if any(
+                isinstance(tool, dict)
+                and namespaced_tool_name(server.name, str(tool.get("name") or "")) == target
+                for tool in (server.tool_manifest or [])
+            ):
+                return int(getattr(server, "manifest_revision", 1) or 1)
     except Exception:
         logger.exception("failed to resolve capability revision for target=%s", target)
     return 1
@@ -1600,7 +1655,7 @@ def _invoke_hub_delegation(
         return json.dumps({"status": "failed", "error": str(exc)[:500]}, ensure_ascii=False)
 
 
-def _run_hub_child(owner_id: str, conversation_id: str, binding: dict, task: str) -> str:
+def _run_hub_child(owner_id: str, conversation_id: str, binding: dict, task: str, cancel_event: threading.Event | None = None) -> str:
     """Execute one Hub turn in a worker-owned session for a child Run."""
     child_db = SessionLocal()
     try:
@@ -1610,7 +1665,7 @@ def _run_hub_child(owner_id: str, conversation_id: str, binding: dict, task: str
         }
         generator = delegation.run_delegation_tool(
             child_db, owner_id=owner_id, conversation_id=conversation_id,
-            arguments=arguments, should_cancel=lambda: False,
+            arguments=arguments, should_cancel=lambda: bool(cancel_event and cancel_event.is_set()),
         )
         while True:
             try:
@@ -1639,11 +1694,14 @@ async def _process_assistant_child(db, run: ExecutionRun, token, policy: Executi
     append_event(db, run, event_type="call.intent", payload={"call_id": call.id, "capability_key": call.capability_key, "capability_revision": 1, "input_snapshot_ref": run.goal, "side_effect_class": "read_only", "idempotency_key": call.idempotency_key}, actor={"kind": "worker"}, command_id=f"child:{call.id}:intent", idempotency_key=f"child:{call.id}:intent", lease=token)
     db.commit()
     stop = asyncio.Event()
+    cancel_event = threading.Event()
+    cancel_watch_stop = asyncio.Event()
     heartbeat = asyncio.create_task(_lease_heartbeat(run.id, token, policy, stop))
+    cancel_watch = asyncio.create_task(_watch_child_cancel(run.id, cancel_event, cancel_watch_stop))
     try:
-        raw = await asyncio.to_thread(_run_hub_child, run.owner_id, run.conversation_id, binding, run.goal)
+        raw = await asyncio.to_thread(_run_hub_child, run.owner_id, run.conversation_id, binding, run.goal, cancel_event)
     finally:
-        stop.set(); await heartbeat
+        stop.set(); cancel_watch_stop.set(); await heartbeat; await cancel_watch
     try:
         result = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
