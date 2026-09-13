@@ -89,7 +89,9 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # mocked e2e 全量在 CI runner 上 17.6m+（309 spec 且持续增长），
+    # 20m 悬崖已被多次贴近并翻越；对齐 deploy 工作流 verify-frontend 的 25m
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
