@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
-from app.super_assistant.kernel.models import ExecutionCall, ExecutionCommand, ExecutionRun
-from app.super_assistant.kernel.schemas import CancelRunRequest, CreateRunRequest, RunAccepted, RunView
-from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, cancel_run, create_run
+from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionEvent, ExecutionRun
+from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RunAccepted, RunView
+from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
 
 
 router = APIRouter()
@@ -19,6 +22,10 @@ router = APIRouter()
 
 def _request_id() -> str:
     return str(uuid.uuid4())
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @router.post(
@@ -115,3 +122,146 @@ def cancel_kernel_run(
     except ContractError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _parse_if_match(if_match: str | None) -> int:
+    if if_match is None:
+        raise HTTPException(status_code=428, detail="If-Match is required")
+    try:
+        return int(if_match.strip('"'))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="If-Match must be a Run version") from exc
+
+
+@router.post("/runs/{run_id}/pause", status_code=status.HTTP_202_ACCEPTED)
+def pause_kernel_run(run_id: str, body: ControlRunRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match")):
+    return _control_kernel_run(run_id, body, "pause", _parse_if_match(if_match), db, user)
+
+
+@router.post("/runs/{run_id}/resume", status_code=status.HTTP_202_ACCEPTED)
+def resume_kernel_run(run_id: str, body: ControlRunRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match")):
+    return _control_kernel_run(run_id, body, "resume", _parse_if_match(if_match), db, user)
+
+
+def _control_kernel_run(run_id: str, body: ControlRunRequest, action: str, expected_version: int, db: Session, user):
+    try:
+        run = control_run(db, run_id=run_id, owner_id=user.id, action=action, idempotency_key=body.idempotency_key, expected_version=expected_version)
+        command = db.scalar(select(ExecutionCommand).where(ExecutionCommand.run_id == run.id, ExecutionCommand.idempotency_key == body.idempotency_key))
+        db.commit()
+        return {"command_id": command.command_id if command else body.idempotency_key, "status": run.status, "version": run.version}
+    except KeyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="run not found") from exc
+    except VersionConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="version_conflict") from exc
+    except IdempotencyConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="idempotency_conflict") from exc
+    except ContractError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/inputs", status_code=status.HTTP_202_ACCEPTED)
+def submit_kernel_input(run_id: str, body: InputRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    try:
+        item = append_input(
+            db, run_id=run_id, owner_id=user.id, kind=body.kind,
+            payload={"content": body.content} if body.content is not None else {"content_ref": body.content_ref},
+            idempotency_key=body.idempotency_key, question_id=body.question_id,
+            target_ref=body.content_ref,
+        )
+        db.commit()
+        return {"inbox_id": item.id, "status": item.status, "run_id": run_id}
+    except KeyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="run not found") from exc
+    except ContractError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/approvals/{approval_id}/decision", status_code=status.HTTP_202_ACCEPTED)
+def decide_kernel_approval(run_id: str, approval_id: str, body: ApprovalDecisionRequest, db: Session = Depends(get_db), user=Depends(get_current_user), if_match: str | None = Header(default=None, alias="If-Match")):
+    expected_version = _parse_if_match(if_match)
+    run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id).with_for_update())
+    approval = db.scalar(select(Approval).where(Approval.id == approval_id, Approval.run_id == run_id, Approval.owner_id == user.id).with_for_update())
+    if run is None or approval is None:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="run or approval not found")
+    try:
+        command, replayed = record_command(db, run, kind="approval_decision", idempotency_key=body.idempotency_key, payload={"approval_id": approval_id, "decision": body.decision, "expected_version": expected_version})
+        if replayed:
+            db.commit()
+            return {"command_id": command.command_id, "status": approval.status, "version": run.version}
+        if run.version != expected_version:
+            raise VersionConflict("version_conflict")
+        if approval.status != "pending":
+            raise ContractError("approval is no longer pending")
+        approval.status, approval.decided_at, approval.decided_by = body.decision, _utcnow(), user.id
+        append_event(db, run, event_type="approval.decided", payload={"approval_id": approval.id, "decision": body.decision, "actor": "user", "decided_at": approval.decided_at.isoformat(), "authorization_hash": approval.parameter_hash}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=body.idempotency_key)
+        if run.status == "waiting_approval":
+            before = run.status
+            run.status, run.wait_reason, run.version = "active", None, run.version + 1
+            append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "approval_decided", "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=body.idempotency_key)
+        command.result = {"status": approval.status, "version": run.version}
+        db.commit()
+        return {"command_id": command.command_id, "status": approval.status, "version": run.version}
+    except VersionConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="version_conflict") from exc
+    except (ContractError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/events")
+def stream_kernel_events(
+    run_id: str,
+    after_seq: int = Query(default=-1, ge=-1),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id, ExecutionRun.owner_id == user.id))
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    cursor = after_seq
+    if last_event_id:
+        parts = last_event_id.split(":")
+        if len(parts) != 2 or parts[0] != run_id:
+            raise HTTPException(status_code=400, detail="Last-Event-ID must be run_id:seq")
+        try:
+            cursor = int(parts[1])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Last-Event-ID must be run_id:seq") from exc
+    oldest = db.scalar(select(ExecutionEvent.seq).where(ExecutionEvent.run_id == run_id).order_by(ExecutionEvent.seq).limit(1))
+    if oldest is not None and cursor < oldest - 1:
+        raise HTTPException(status_code=410, detail="event cursor is outside replay window")
+
+    def generate():
+        nonlocal cursor
+        last_ping = time.monotonic()
+        while True:
+            db.refresh(run)
+            events = db.scalars(select(ExecutionEvent).where(ExecutionEvent.run_id == run_id, ExecutionEvent.seq > cursor).order_by(ExecutionEvent.seq).limit(100)).all()
+            for event in events:
+                cursor = event.seq
+                yield f"id: {run_id}:{event.seq}\nevent: {event.event_type}\ndata: {json.dumps(event.payload, ensure_ascii=False, default=str)}\nretry: 5000\n\n"
+            if run.status in {"cancelled", "expired", "completed", "failed"} and not events:
+                break
+            if time.monotonic() - last_ping >= 15:
+                yield ": ping\n\n"
+                last_ping = time.monotonic()
+            time.sleep(0.25)
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}")
+def get_kernel_artifact(run_id: str, artifact_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    artifact = db.scalar(select(Artifact).where(Artifact.id == artifact_id, Artifact.run_id == run_id, Artifact.owner_id == user.id))
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    return {"artifact_id": artifact.id, "mime_type": artifact.mime_type, "size": artifact.size, "checksum": artifact.checksum, "status": artifact.status, "business_status": artifact.business_status, "content": artifact.inline_content}

@@ -16,6 +16,7 @@ class BindingInput(KernelRequest):
     draft_version_id: str | None = None
     lifecycle: str | None = None
     write_permission: bool | None = None
+    write_permission_hash: str | None = None
 
 
 class CreateRunRequest(KernelRequest):
@@ -30,6 +31,31 @@ class CreateRunRequest(KernelRequest):
 class CancelRunRequest(KernelRequest):
     idempotency_key: str = Field(min_length=1, max_length=255)
     reason: Literal["user", "parent", "deadline"] = "user"
+
+
+class ControlRunRequest(KernelRequest):
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class InputRequest(KernelRequest):
+    kind: Literal["user_input", "question_answer", "external_event", "resume"] = "user_input"
+    content: str | None = Field(default=None, max_length=262144)
+    content_ref: str | None = None
+    question_id: str | None = None
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def one_content(self):
+        if (self.content is None) == (self.content_ref is None):
+            raise ValueError("exactly one of content or content_ref is required")
+        if self.kind == "question_answer" and not self.question_id:
+            raise ValueError("question_id is required for question_answer")
+        return self
+
+
+class ApprovalDecisionRequest(KernelRequest):
+    decision: Literal["approved", "denied"]
+    idempotency_key: str = Field(min_length=1, max_length=255)
 
 
 class RunAccepted(KernelRequest):

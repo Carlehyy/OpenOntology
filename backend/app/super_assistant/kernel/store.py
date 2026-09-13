@@ -23,6 +23,7 @@ from .contracts import (
 )
 from .events import EventEnvelope, validate_payload
 from .models import (
+    InboxItem,
     ExecutionCommand,
     ExecutionDispatchOutbox,
     ExecutionEvent,
@@ -131,8 +132,8 @@ def create_run(
     binding = binding or {}
     mode = binding.get("binding_mode", "direct_ui")
     if mode == "delegated":
-        required = {"ontology_id", "draft_version_id", "lifecycle", "write_permission"}
-        if required - binding.keys() or binding.get("lifecycle") != "editing" or binding.get("write_permission") is not True:
+        required = {"ontology_id", "draft_version_id", "lifecycle", "write_permission_hash"}
+        if required - binding.keys() or binding.get("lifecycle") != "editing" or not binding.get("write_permission_hash"):
             raise ContractError("delegated binding requires editing draft and write permission")
     elif mode not in {"direct_ui", "legacy"}:
         raise ContractError("unknown binding_mode")
@@ -270,6 +271,82 @@ def cancel_run(
     _add_outbox(db, run, command_id=command.command_id, message_ref=f"command://{command.command_id}")
     command.result = {"status": run.status, "version": run.version}
     return run
+
+
+def control_run(
+    db: Session,
+    *,
+    run_id: str,
+    owner_id: str,
+    action: str,
+    idempotency_key: str,
+    expected_version: int,
+) -> ExecutionRun:
+    run = _lock_run(db, run_id)
+    _ensure_owner(run, owner_id)
+    command, replayed = record_command(
+        db, run, kind=action, idempotency_key=idempotency_key,
+        payload={"action": action, "expected_version": expected_version},
+    )
+    if replayed:
+        return run
+    if run.version != expected_version:
+        raise VersionConflict("version_conflict")
+    before = run.status
+    if action == "pause":
+        if run.status != RunStatus.ACTIVE.value:
+            raise ContractError("only active Run can pause")
+        run.status = RunStatus.PAUSED.value
+        event_type = "run.pause_requested"
+        payload = {"reason": "user", "pause_reason": "user", "actor": "user"}
+    elif action == "resume":
+        if run.status != RunStatus.PAUSED.value:
+            raise ContractError("only paused Run can resume")
+        run.status = RunStatus.ACTIVE.value
+        event_type = "run.recovery_requested"
+        payload = {"reason": "user_resume", "lease_epoch": run.lease_epoch, "diagnostic_ref": None}
+    else:
+        raise ContractError("unknown control action")
+    run.version += 1
+    append_event(db, run, event_type=event_type, payload=payload, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=idempotency_key)
+    append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": action, "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=idempotency_key)
+    _add_outbox(db, run, command_id=command.command_id, message_ref=f"command://{command.command_id}")
+    command.result = {"status": run.status, "version": run.version}
+    return run
+
+
+def append_input(
+    db: Session,
+    *,
+    run_id: str,
+    owner_id: str,
+    kind: str,
+    payload: dict,
+    idempotency_key: str,
+    question_id: str | None = None,
+    target_ref: str | None = None,
+    expires_at: datetime | None = None,
+    expiry_policy: str | None = None,
+) -> InboxItem:
+    run = _lock_run(db, run_id)
+    _ensure_owner(run, owner_id)
+    if kind == "question_answer" and not question_id:
+        raise ContractError("question_id is required for question_answer")
+    item = InboxItem(
+        run_id=run.id, kind=kind, priority={"control": 0, "approval_decision": 10, "external_event": 20, "user_input": 30, "question_answer": 30, "resume": 0}.get(kind, 30),
+        status="pending", question_id=question_id, target_ref=target_ref,
+        payload=payload, payload_ref=target_ref, source="user", expires_at=expires_at,
+        expiry_policy=expiry_policy, accepted_at=_now(), idempotency_key=idempotency_key,
+    )
+    db.add(item)
+    db.flush()
+    command_id = _new_id()
+    append_event(db, run, event_type="inbox.appended", payload={"inbox_id": item.id, "kind": kind, "target_ref": target_ref or item.id, "expiry_policy": expiry_policy or "none"}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
+    if kind == "question_answer" and run.status == RunStatus.WAITING_INPUT.value:
+        before = run.status
+        run.status, run.wait_reason, run.version = RunStatus.ACTIVE.value, None, run.version + 1
+        append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "input_received", "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
+    return item
 
 
 def _state_from_run(run: ExecutionRun):
