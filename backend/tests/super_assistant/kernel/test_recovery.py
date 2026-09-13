@@ -77,6 +77,36 @@ def test_parent_join_wakes_waiting_parent_after_child_completion(db):
     assert parent.status == "active"
 
 
+def test_parent_join_merges_ready_child_while_active_and_is_idempotent(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-active-join")
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child-active-join", parent_run_id=parent.id)
+    parent.status = "active"
+    child.status = "completed"
+    db.commit()
+    assert join_ready_parents_once(db) == 1
+    db.refresh(parent)
+    assert parent.status == "active"
+    assert db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_joined").count() == 1
+    assert join_ready_parents_once(db) == 0
+    assert db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_joined").count() == 1
+
+
+def test_parent_join_page_progresses_after_ready_parent_is_merged(db):
+    owner, conversation = _owner_and_conversation(db)
+    parents = []
+    for index in range(2):
+        parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal=f"parent-{index}", idempotency_key=f"parent-page-{index}")
+        child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal=f"child-{index}", idempotency_key=f"child-page-{index}", parent_run_id=parent.id)
+        parent.status = "active"
+        child.status = "completed"
+        parents.append((parent, child))
+    db.commit()
+    assert join_ready_parents_once(db, limit=1) == 1
+    assert join_ready_parents_once(db, limit=1) == 1
+    assert all(db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_joined").count() == 1 for parent, _ in parents)
+
+
 def test_parent_join_maps_queued_child_without_blocking_scheduler(db):
     owner, conversation = _owner_and_conversation(db)
     parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-queued")

@@ -228,14 +228,19 @@ def _fence_orphaned_calls(db: Session, run: ExecutionRun, token) -> None:
 
 def join_ready_parents_once(db: Session, *, limit: int = 100) -> int:
     """Apply child fan-in decisions to parents without executing child work."""
-    rows = db.scalars(select(ExecutionRun).where(ExecutionRun.status.not_in(_TERMINAL)).limit(limit).with_for_update(skip_locked=True)).all()
+    # Stable keyset ordering prevents an unordered LIMIT from repeatedly
+    # selecting the same hot parent and starving later conversations.  The
+    # bounded page is still small enough for the scheduler transaction.
+    rows = db.scalars(
+        select(ExecutionRun)
+        .where(ExecutionRun.status.not_in(_TERMINAL), ExecutionRun.required_child_ids.is_not(None))
+        .order_by(ExecutionRun.updated_at, ExecutionRun.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    ).all()
     parents = [r for r in rows if r.required_child_ids]
     changed = 0
     for parent in parents:
-        if parent.status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}:
-            # Cancellation is the parent's control decision; child fan-in
-            # must never overwrite it with FAILED.
-            continue
         children = db.scalars(select(ExecutionRun).where(ExecutionRun.parent_run_id == parent.id)).all()
         if not children:
             continue
@@ -243,25 +248,46 @@ def join_ready_parents_once(db: Session, *, limit: int = 100) -> int:
         result = decide_child_join(tuple(ChildResult(c.id, _child_status(c.status), c.id in set(parent.required_child_ids or [])) for c in children), policy)
         if result.decision is JoinDecision.PENDING:
             continue
-        before = parent.status
-        if result.decision is JoinDecision.FAILED:
-            parent.status = RunStatus.FAILED.value
-            parent.version += 1
-        elif parent.status in {RunStatus.WAITING_EXTERNAL.value, RunStatus.WAITING_RETRY.value}:
-            parent.status = RunStatus.ACTIVE.value
-            parent.version += 1
-        else:
-            continue
-        joined_ids = list(dict.fromkeys(result.failed_child_ids + result.successful_child_ids))
+        # READY is an edge-triggered fact.  Recover it from the durable event
+        # log so a crash/retry cannot emit duplicate child_joined events or
+        # duplicate child-result manifests.
+        joined_ids = {
+            str((event.payload or {}).get("child_run_id"))
+            for event in db.scalars(select(ExecutionEvent).where(
+                ExecutionEvent.run_id == parent.id,
+                ExecutionEvent.event_type == "run.child_joined",
+            )).all()
+            if (event.payload or {}).get("child_run_id")
+        }
         required_ids = set(parent.required_child_ids or [])
-        for child_id in joined_ids:
+        ready_ids = list(dict.fromkeys(result.failed_child_ids + result.successful_child_ids))
+        new_joined = [child_id for child_id in ready_ids if child_id not in joined_ids]
+        for child_id in new_joined:
             required = child_id in required_ids
             child = next((candidate for candidate in children if candidate.id == child_id), None)
             if child is not None:
                 _merge_child_result(db, parent, child)
-            append_event(db, parent, event_type="run.child_joined", payload={"parent_run_id": parent.id, "child_run_id": child_id, "join_policy": parent.join_policy, "required": required}, actor={"kind": "system"}, command_id=f"join:{parent.id}:{parent.version}:{child_id}", idempotency_key=f"join:{parent.id}:{parent.version}:{child_id}")
-        append_event(db, parent, event_type="run.status_changed", payload={"from": before, "to": parent.status, "reason": "child_join", "actor": "system", "version": parent.version}, actor={"kind": "system"}, command_id=f"join-status:{parent.id}:{parent.version}", idempotency_key=f"join-status:{parent.id}:{parent.version}")
-        _add_outbox(db, parent, command_id=f"join-dispatch:{parent.id}:{parent.version}", message_ref=f"run://{parent.id}")
+            append_event(db, parent, event_type="run.child_joined", payload={"parent_run_id": parent.id, "child_run_id": child_id, "join_policy": parent.join_policy, "required": required}, actor={"kind": "system"}, command_id=f"join:{parent.id}:{child_id}", idempotency_key=f"join:{parent.id}:{child_id}")
+        before = parent.status
+        transitioned = False
+        if parent.status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}:
+            # Cancellation is the parent's control decision; fan-in facts are
+            # still retained, but they must not overwrite the control state.
+            pass
+        elif result.decision is JoinDecision.FAILED and parent.status != RunStatus.FAILED.value:
+            parent.status = RunStatus.FAILED.value
+            parent.version += 1
+            transitioned = True
+        elif result.decision is JoinDecision.READY and parent.status in {RunStatus.WAITING_EXTERNAL.value, RunStatus.WAITING_RETRY.value}:
+            parent.status = RunStatus.ACTIVE.value
+            parent.version += 1
+            transitioned = True
+        if not new_joined and not transitioned:
+            continue
+        if transitioned:
+            append_event(db, parent, event_type="run.status_changed", payload={"from": before, "to": parent.status, "reason": "child_join", "actor": "system", "version": parent.version}, actor={"kind": "system"}, command_id=f"join-status:{parent.id}:{parent.version}", idempotency_key=f"join-status:{parent.id}:{parent.version}")
+            if parent.status == RunStatus.ACTIVE.value:
+                _add_outbox(db, parent, command_id=f"join-dispatch:{parent.id}:{parent.version}", message_ref=f"run://{parent.id}")
         changed += 1
     db.commit()
     return changed
