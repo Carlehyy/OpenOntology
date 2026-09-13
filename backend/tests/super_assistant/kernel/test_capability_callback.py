@@ -121,3 +121,24 @@ def test_callback_payload_drops_provider_private_fields_before_event_replay(db):
     event = db.query(ExecutionEvent).filter_by(provider_event_id="event-redact").one()
     assert event.payload["message"] == "working"
     assert "provider_secret" not in event.payload
+
+
+def test_callback_long_identifiers_use_bounded_event_keys(db):
+    owner = User(id=str(uuid.uuid4()), username=f"cap-{uuid.uuid4().hex[:8]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
+    db.add(owner); db.flush()
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="callback-long-ids")
+    db.add(conversation); db.flush()
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="goal", idempotency_key="callback-long")
+    call = ExecutionCall(run_id=run.id, call_index=0, capability_key="external.agent", capability_revision=1, side_effect_class="external_async", idempotency_key="call-long", status="waiting_external", outcome="remote_running")
+    db.add(call); db.flush()
+    connector_id = "c" * 255
+    provider_event_id = "e" * 255
+    append_agent_callback(
+        db, owner_id=owner.id, run_id=run.id, call_id=call.id,
+        connector_id=connector_id, provider_event_id=provider_event_id,
+        event_type="call.progress",
+        payload={"call_id": call.id, "connector_id": connector_id, "provider_event_id": provider_event_id, "progress_seq": 1},
+    )
+    event = db.query(ExecutionEvent).filter_by(provider_event_id=provider_event_id).one()
+    assert len(event.command_id) <= 255
+    assert len(event.idempotency_key) <= 255

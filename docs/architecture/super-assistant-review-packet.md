@@ -263,3 +263,5 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 本轮对用户进程插件做了额外的反向检查：`plugin_host.py` 目前只是受限 JSON-lines 子进程，`network_scope`、`workspace_scope`、`secret_refs` 没有被 OS/网络策略执行；`docker-compose.prod.yml` 的 backend 与 executor 也没有 rootless 用户、只读根文件系统、capability drop、no-new-privileges 或独立插件 namespace。运行时不会把 secret 值直接传给插件，因此当前插件能力是 fail-closed 的，不能作为“已支持凭据注入的商用插件”宣称。该事实与 `process_plugin_service.py`、`kernel/runtime.py`、`kernel/plugin_host.py` 和生产 Compose 配置一致，必须以独立 runner、secret broker 和攻击性 staging 验收完成后才可解除 M7/M8 阻断。
 
 同时增加了信任字段篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。专项插件回归为 `16 passed`，新增篡改测试已通过。该修复属于 fail-closed 防护，不能替代签名信任根。
+
+本轮还收紧了 callback 事件键的长度边界：`connector_id` 与 `provider_event_id` 即使各自达到协议上限，拼接后的 `command_id`/`idempotency_key` 也会在 255 字符数据库列内以确定性 SHA-256 短键落库；对应长标识回归已通过（callback 专项 `7 passed`）。

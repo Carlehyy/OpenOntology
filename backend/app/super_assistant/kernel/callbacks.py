@@ -45,6 +45,21 @@ _ARTIFACT_REF_FIELDS = frozenset({
 })
 
 
+def _callback_event_key(prefix: str, connector_id: str, provider_event_id: str) -> str:
+    """Return a deterministic DB-safe key for an authenticated provider event.
+
+    Both input identifiers are individually bounded at 255 characters, while
+    the event command/idempotency columns are also 255 characters.  Keep the
+    readable form for normal identifiers and hash only the oversized
+    composition so a valid callback cannot fail at persistence time.
+    """
+    value = f"{prefix}:{connector_id}:{provider_event_id}"
+    if len(value) <= 255:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"{prefix}:sha256:{digest}"
+
+
 def _sanitize_callback_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Strip provider-only fields before durable storage and SSE replay."""
     allowed = _CALLBACK_FIELDS[event_type]
@@ -114,10 +129,11 @@ def append_agent_callback(
         if attempt is None:
             raise ContractError("callback attempt does not belong to call")
     payload = _sanitize_callback_payload(event_type, payload)
+    event_key = _callback_event_key("callback", connector_id, provider_event_id)
     append_event(
         db, run, event_type=event_type, payload=payload,
-        actor={"kind": "connector"}, command_id=f"callback:{connector_id}:{provider_event_id}",
-        idempotency_key=f"provider:{connector_id}:{provider_event_id}",
+        actor={"kind": "connector"}, command_id=event_key,
+        idempotency_key=_callback_event_key("provider", connector_id, provider_event_id),
         connector_id=connector_id, provider_event_id=provider_event_id,
     )
 
