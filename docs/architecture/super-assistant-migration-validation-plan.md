@@ -28,6 +28,10 @@
 - 给旧 HTTP/SSE 端点建立按 `execution_version` 的语义映射，尤其是单生成 409、会话级 cancel、tool decision、SSE 事件集和 600 秒死流回收；
 - 定义 `agent.needs_input`、审批决定的远端回送能力，以及 RAP minor 的幂等字段和不支持能力的诚实声明；
 - 将委派恢复和运行中唯一约束从 Conversation/Agent 作用域收敛到 Run/Call 作用域，并给出历史行迁移策略。
+- 冻结 Call `status/outcome` 双轴、Turn/Step close reason、事件注册表 v1、`seq` 串行化、问题 TTL/Run deadline 和 reconciliation metadata；
+- 明确 `run.expiry_requested`、`run.cancel_timeout`、`run.recovery_requested`、`inbox.expired` 的 payload、redaction、幂等和回放规则；
+- 将 `source_ref` 删除传播、插件运行时能力扩展拒绝、旧 facade 退役条件和委派绑定测试列入阶段产物；
+- 明确 `binding_mode=delegated` 只约束超级助手委派；直接 UI 的空会话和 current release 兼容语义不在本次隐式收紧范围内。
 
 ### 阶段 1：事件 shadow
 
@@ -49,25 +53,25 @@
 
 依次接入内置工具、Skill、MCP、文件/Palace、Multica、Assistant Hub 和 RAP v1。每种能力先只读，再写入，再外部异步。
 
-退出条件：manifest、权限、审批、超时、取消、未知结果和 revision 固定测试通过。
+退出条件：manifest、权限、审批、超时、取消、未知结果和 revision 固定测试通过；本体助手最近使用回退的旧测试改为澄清/不建子会话，委派探索路径覆盖 `binding_mode=delegated` 的本体、draft+editing 版本和写权限校验，直接 UI 兼容路径保持独立。
 
 ### 阶段 4：Context 迁移
 
 将 Memory、Palace、会话、附件和任务状态包装为 ContextSource。先以 shadow Context Pack 记录选择和预算，再让新 Kernel 使用它。
 
-退出条件：来源引用、删除传播、冲突、压缩、出站脱敏和请求重建通过。
+退出条件：来源引用、删除传播、冲突、压缩、出站脱敏和请求重建通过；图谱抽取的 `source_version + recipe_revision + extraction_id` bump 规则、内容定位和 Neo4j provenance 引用可验证；反思由新 Run/Turn 终态事件触发，旧 reflection subject 的幂等与投影保持一致。
 
 ### 阶段 5：长任务与 Agent
 
 接入 NATS wakeup、Worker 租约、RAP direct/pull 和外部 Agent 事件。浏览器断开后 Run 继续，SSE 通过序号重连。
 
-退出条件：外部任务接受、进度、审批、取消、未知结果、迟到回调和结构化 Artifact 的真实 staging 验收通过。
+退出条件：外部任务接受、进度、审批、取消、未知结果、迟到回调和结构化 Artifact 的真实 staging 验收通过；Connector 的 `query_status`、Call reconciliation、无查询能力的人工升级和 Run 终态不重开均有证据。
 
 ### 阶段 6：前端与旧路径退役
 
 增加任务状态、事件时间线、等待输入、审批、取消、Artifact 和失败重试；旧页面通过兼容投影继续工作。
 
-退出条件：新旧页面关键路径、刷新、深链、权限、下载和真实结果验证通过，才删除旧分派逻辑。
+退出条件：新旧页面关键路径、刷新、深链、权限、下载和真实结果验证通过，才删除旧分派逻辑；主页面和悬浮 widget 在 SSE 断开、widget 关闭、Run 继续执行和完成回看时的可见性行为有 E2E 证据。
 
 ### 2.1 旧端点与执行版本映射（必须冻结）
 
@@ -146,6 +150,7 @@
 - 本体助手和业务澄清的前置条件询问；
 - 业务澄清没有目标本体或编辑中草稿版本时不会创建子会话；
 - admin/editor/viewer 菜单权限不越界。
+- `run.cancel_timeout` 的超时、迟到远端确认和 Call 对账端到端一致；版本生命周期事件能唤醒绑定 Run；结构化 `source_ref` 删除传播和插件运行时自扩拒绝均有测试。
 
 ## 5. 质量门禁
 
@@ -171,6 +176,8 @@ real staging checks for external side effects
 
 另外必须提供：RAP direct 重试无重复证明、needs_input/审批回送测试、旧端点按执行版本映射测试、投影 streaming 行与死流回收器的版本隔离测试、委派唯一索引替换和历史行处置报告、stuck-run 检测与 `outcome_unknown` 对账收敛报告。
 
+阶段 0 的退出审查必须逐项签收上述契约和新增测试；未闭环的建议项不能因为“建议级”而从门禁中消失。
+
 ## 6. 上线硬门禁
 
 在没有部署级隔离前，生产只允许审核过的第一方或已验证的受控插件；用户任意可执行进程不能仅凭 manifest 上线。还必须给出任务最长时长、并发、恢复时间、SSE 首次进度、Artifact 可用时间和外部 Agent 超时的目标值。目标值由单用户压力和故障演练测量后冻结。
@@ -193,11 +200,14 @@ real staging checks for external side effects
 
 ## 8. 外部审查后的待产品确认项
 
-以下问题影响发布口径或用户体验，不能仅由实现人员替产品做决定：
+以下问题影响发布口径或用户体验，不能仅由实现人员替产品做决定。未确认前不得写入不可逆的公开契约：
 
 1. 首发生产是否只允许审核过的第一方/受控插件，用户自建可执行插件何时开放；
 2. A2A 是否纳入本轮首个外部 Agent 适配器，还是先以 RAP v1 minor 演进覆盖首发范围；
 3. 记忆自动接受是否按敏感类别收紧，以及各类别的默认值；
 4. 长任务在浏览器断开后的完成触达方式，以及是否提供“断开即停”偏好；
 5. 多 Run 并行后，同一 Conversation 是否仍由 UI 限制同时只能有一个生成中的回复；
-6. 架构文档是否作为长期冻结基线维护，还是契约冻结后归档，以解决与项目文档治理条款的边界问题。
+6. 问题 TTL 到期是重新提问、仅失败当前分支还是终止整个 Run；
+7. `outcome_unknown`/`remote_running` 的用户呈现、对账通知和升级人工的时限；
+8. 直接 UI 创建业务澄清会话是否继续允许空绑定和 current release（本次默认保持既有契约，只收紧 `binding_mode=delegated`）；
+9. 架构文档是否作为长期冻结基线维护，还是契约冻结后归档，以解决与项目文档治理条款的边界问题。

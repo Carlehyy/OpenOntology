@@ -27,6 +27,8 @@ PostgreSQL 是执行状态、事件、Inbox、审批和索引元数据的权威�
 
 这些是逻辑边界，不要求每个实体立即独立建表。第一阶段可以把事件与最小 Run 状态放入少量表，但不能丢失上述身份关系。
 
+`InboxItem` 至少保存 `kind`、`run_id`、`call_id/approval_id/question_id`、`expires_at`、`expiry_policy`、`accepted_at`、claim lease 和幂等键。`accepted_at` 是回答是否赶上问题 TTL 的事实时间；Worker 的处理时间不能覆盖它。
+
 ## 3. Run 最小字段语义
 
 ```text
@@ -65,9 +67,27 @@ authorization_snapshot_ref
 status
 remote_task_ref
 outcome
+next_reconcile_at
+reconcile_attempt_count
+remote_observed_state_ref
+manual_attention
 ```
 
 `target_ref` 必须能关联父 Run、目标 Agent/能力 revision 和不透明的远端会话引用；委派恢复不得只按 Conversation 和 Agent 取“最近一条”。同一目标 Agent 可以被同一 Conversation 的多个 Run 同时调用，唯一性和运行中约束必须至少收敛到 Run/Call 作用域；现有按“会话 + 助手”限制一条 running 的索引需要在迁移方案中替换，历史行不能被静默重绑。
+
+上述 reconciliation 字段是 Call 的调度元数据，不是新增的 Call 状态；`manual_attention` 只表示是否需要人工介入。`remote_observed_state_ref` 指向脱敏的远端状态快照，不能把第三方原始响应直接放进事件或模型上下文。
+
+Call 的权威不变量如下：
+
+| `status` | 允许的 `outcome` |
+|---|---|
+| `offered` | `not_sent` |
+| `dispatched` | `not_sent`、`outcome_unknown` |
+| `running`、`waiting_external` | `accepted`、`remote_running`、`outcome_unknown` |
+| `cancel_requested`、`reconciling` | `accepted`、`remote_running`、`outcome_unknown` |
+| `closed` | `not_sent`、`completed`、`failed`、`cancelled_confirmed` |
+
+`cancel_requested` 只属于 status 和事件，不能写进 outcome；`remote_running` 是外部观测，不是本地可调度状态。Run 进入终态不强迫未决 Call 伪造关闭，Call 可以独立进入 `reconciling`。
 
 Attempt 保存：
 
@@ -81,9 +101,7 @@ result_ref
 error_ref
 ```
 
-`outcome` 至少区分 `not_sent`、`accepted`、`completed`、`failed`、`cancel_requested`、`cancelled_confirmed`、`outcome_unknown`。超时不等于失败，网络错误不等于未发送。
-
-契约冻结时必须明确两条轴：`status` 表示 Call 当前是否可继续调度（例如 `offered`、`dispatched`、`running`、`waiting_external`、`cancel_requested`）；`outcome` 表示外部动作已知的结果或未知结果（例如 `not_sent`、`accepted`、`completed`、`failed`、`cancelled_confirmed`、`outcome_unknown`）。两者不能各自扩展出第二套状态机；同名值的转换规则、终态条件和 UI 展示值必须由一份权威枚举表冻结。
+Call 的 `status` 和 `outcome` 采用执行模型中的双轴定义，完整取值和不变量以[执行模型](./super-assistant-execution-model.md)为唯一权威；本数据模型只保存这两条轴及其原始外部观测，不再定义第三套词汇。超时不等于失败，网络错误不等于未发送。
 
 ## 5. Event Envelope
 
@@ -94,7 +112,7 @@ error_ref
   "event_id": "stable id",
   "run_id": "run id",
   "seq": 42,
-  "event_type": "agent.progress",
+  "event_type": "call.progress",
   "schema_version": 1,
   "occurred_at": "timestamp",
   "actor": {"kind": "worker", "id": "worker id"},
@@ -117,6 +135,9 @@ error_ref
 ```text
 run.created
 run.status_changed
+run.expiry_requested
+run.cancel_timeout
+run.recovery_requested
 turn.started
 turn.closed
 step.started
@@ -149,6 +170,7 @@ call.outcome_changed
 ```text
 inbox.appended
 inbox.claimed
+inbox.expired
 approval.requested
 approval.decided
 run.cancel_requested
@@ -164,6 +186,21 @@ artifact.completed
 projection.applied
 projection.failed
 ```
+
+事件注册表 v1 的新增事件必须至少满足以下 payload 约束；它们与 `event_id`、`run_id`、`seq`、`schema_version` 和 `causation_id` 一起原子写入：
+
+| 事件 | 必需 payload | 幂等/脱敏要求 |
+|---|---|---|
+| `run.expiry_requested` | `reason`, `deadline`, `unresolved_call_ids` | 同一 Run/截止原因只接受一次；不含正文 |
+| `run.cancel_timeout` | `reason`, `cancel_deadline`, `unresolved_call_ids`, `run_terminal_status` | 取消超时只登记一次；仅保存 Call ID 和状态引用 |
+| `run.recovery_requested` | `reason`, `lease_epoch`, `diagnostic_ref` | 诊断引用可脱敏，不能写入凭据 |
+| `inbox.expired` | `inbox_id`, `question_id`, `question_expires_at`, `expiry_policy` | 原问题过期后回答不得复活；按 Inbox 幂等键去重 |
+
+Connector 的 `agent.*` 输入必须在持久化前映射到此注册表和能力/Artifact 事件集合；未知事件类型或不兼容 payload 拒绝自动解释。
+
+`turn.closed` 和 `step.closed` 的 payload 必须使用执行模型中冻结的 close-reason 枚举；`call.outcome_changed` 必须同时携带 canonical `status`、`outcome` 和证据引用。`turn.closed.reason=yielded` 只表示已经登记下一次激活，不得把 Run 误标成完成。
+
+其中 `turn.closed.reason` 的注册取值为 `waiting_input`、`waiting_approval`、`waiting_external`、`waiting_retry`、`paused`、`completed`、`cancel_requested`、`cancelled`、`expired`、`failed`、`stuck_recovery`、`interrupted`、`yielded`；`step.closed.reason` 的注册取值为 `decision_complete`、`waiting_input`、`waiting_approval`、`waiting_external`、`waiting_retry`、`paused`、`cancelled`、`failed`、`interrupted`。新增取值必须提升 `schema_version` 并更新 UI 映射。
 
 ## 7. 事务与 Outbox
 

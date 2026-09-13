@@ -33,7 +33,7 @@ stateDiagram-v2
     active --> waiting_external
     active --> waiting_retry
     active --> paused
-    active --> cancel_requested
+    active --> cancel_requested: user cancel or deadline with unresolved Call
     active --> completed
     active --> failed
     waiting_input --> active
@@ -48,20 +48,22 @@ stateDiagram-v2
     waiting_retry --> paused
     waiting_external --> failed
     waiting_retry --> failed
-    waiting_input --> cancel_requested
-    waiting_approval --> cancel_requested
-    waiting_external --> cancel_requested
-    waiting_retry --> cancel_requested
+    waiting_input --> cancel_requested: user cancel or deadline with unresolved Call
+    waiting_approval --> cancel_requested: user cancel or deadline with unresolved Call
+    waiting_external --> cancel_requested: user cancel or deadline with unresolved Call
+    waiting_retry --> cancel_requested: user cancel or deadline with unresolved Call
     paused --> active
-    paused --> cancel_requested
+    paused --> cancel_requested: user cancel or deadline with unresolved Call
+    paused --> expired: deadline without unresolved Call
     cancel_requested --> cancelling
     cancelling --> cancelled
+    cancelling --> expired: deadline cancellation
     cancelling --> failed
-    active --> expired
-    waiting_input --> expired
-    waiting_approval --> expired
-    waiting_external --> expired
-    waiting_retry --> expired
+    active --> expired: deadline without unresolved Call
+    waiting_input --> expired: question/Run deadline without unresolved Call
+    waiting_approval --> expired: approval/Run deadline without unresolved Call
+    waiting_external --> expired: deadline without unresolved Call
+    waiting_retry --> expired: deadline without unresolved Call
     expired --> [*]
     cancelled --> [*]
     completed --> [*]
@@ -83,6 +85,8 @@ stateDiagram-v2
 
 等待状态不会锁住 Conversation。所有非终态都可以被取消或因明确截止时间进入 `expired`；等待中的 Run 也可以被显式暂停，暂停后不会消费新的唤醒输入，直到用户恢复。若 Run 中仍有其他独立工作可推进，外部 Call 等待不应把整个 Run 置为等待；只有没有可安全推进的工作时才进入 `waiting_*`。
 
+状态图中的 `active/waiting_*/paused → expired` 是带条件的快捷路径：只有没有未决外部副作用 Call 时才可直接过期；一旦存在未决 Call，必须先经过 `run.expiry_requested → cancel_requested → cancelling`，再按截止时间原因收敛到 `expired`。`cancelling → cancelled` 仅用于用户取消，`cancelling → expired` 仅用于 Run deadline。
+
 以下触发器和边界是状态机的一部分，不能留给 Worker 自行解释：
 
 - `queued` 收到取消或达到 Run 截止时间时，分别进入 `cancel_requested` 或 `expired`；排队中的 Run 也必须可取消。
@@ -90,6 +94,10 @@ stateDiagram-v2
 - `cancelling` 必须有 `cancel_deadline`。本地收尾完成后进入 `cancelled`；达到截止时间仍未收到远端确认时，Run 可以进入本地 `cancelled`，但未收敛的 Call 必须保留 `outcome_unknown` 或 `remote_running`，并产生 `run.cancel_timeout` 供对账；本地收尾本身失败时进入 `failed`。
 - `paused` 期间到达的普通输入、外部结果和审批决定写入关联 Inbox，但不被消费；取消、过期等控制命令仍走高优先级通道。恢复动作只激活明确的 Run，并按 Inbox 幂等规则消费关联项。
 - `active` 必须至少有可消费 Inbox、已领取 Turn、可推进 Call 或计划中的重试之一。否则属于 stuck-run，检测器必须产生诊断事件并进入恢复或人工处理路径，不能保持 `active` 无期限等待。
+
+Run deadline 命中时，如果存在未决外部 Call，不能直接绕过协作取消进入 `expired`：先记录 `run.expiry_requested`，再走 `cancel_requested → cancelling`，取消收敛后按截止时间原因进入 `expired`。没有未决副作用 Call 时才允许直接进入 `expired`。`cancel_requested` 一旦被接受不再转为 `expired`，由第一次成功的终态转换决定取消和截止时间的竞态。
+
+每个 `waiting_input` 问题必须有独立的 `question_expires_at` 和持久化 `expiry_policy`；有效截止时间取 `min(question_expires_at, run.deadline)`。问题 TTL 到期时先关闭该问题并产生 `inbox.expired`，按 `expiry_policy` 选择重新提问、仅失败该分支或终止整个 Run，不能由 Worker 默默二选一。回答是否有效以 `InboxItem.accepted_at` 与 `question_expires_at` 比较，而不是以 Worker 实际处理时间比较；同一 Run 行锁下按事件入库顺序裁决，过期后到达的回答不能复活问题。问题 TTL 不能延长 Run deadline。
 
 Run 进入终态后不能重新打开。若外部迟到结果后来到达，只能作为关联 Call 和 Artifact 的新事实保存，不能恢复已取消的 Run。
 
@@ -104,7 +112,14 @@ Run 进入终态后不能重新打开。若外部迟到结果后来到达，只�
 
 事件先结束对应 Call 的状态，再决定 Run 是否回到 `active`。不能因为收到一个无关回调就唤醒或改变 Run。
 
-Call 的最小状态集合为 `offered`、`dispatched`、`running`、`waiting_external`、`completed`、`failed`、`cancel_requested`、`cancelled_confirmed`、`outcome_unknown`。Call 进入 `outcome_unknown` 后只能通过状态查询、对账或人工确认收敛，不能由普通重试覆盖。
+Call 的本地调度状态和外部结果是两条轴，不能合并成第二套状态机：
+
+- `status`：`offered`、`dispatched`、`running`、`waiting_external`、`cancel_requested`、`reconciling`、`closed`；
+- `outcome`：`not_sent`、`accepted`、`remote_running`、`completed`、`failed`、`cancelled_confirmed`、`outcome_unknown`。
+
+两轴必须遵守以下不变量：`offered` 只能是 `not_sent`；`dispatched` 可为 `not_sent` 或 `outcome_unknown`；`running`/`waiting_external` 可为 `accepted`、`remote_running` 或 `outcome_unknown`；`cancel_requested`/`reconciling` 可为 `accepted`、`remote_running` 或 `outcome_unknown`；`closed` 只能为 `not_sent`、`completed`、`failed` 或 `cancelled_confirmed`。只有本地能够证明没有发送时，才允许 `status=closed, outcome=not_sent`；网络超时、连接断开或未知回包一律不能猜成 `not_sent`。`accepted` 和 `remote_running` 是外部观测，不代表完成；`remote_running` 不是本地可调度状态。取消请求只写入 `status=cancel_requested` 和取消事件，不写入 `outcome`。
+
+取消后的外部对账使用 `status=reconciling`，确认取消后才进入 `status=closed, outcome=cancelled_confirmed`；Run 已经本地终止时，对账不得重新打开 Run。Call 进入 `outcome_unknown` 后只能由 Kernel recovery/reconciliation service 通过状态查询或人工确认收敛，不能由普通重试覆盖。Connector 只提供远端查询、取消和结果映射，不自行改变 Run 状态。
 
 ## 3. Turn、Step、Call、Attempt
 
@@ -120,11 +135,30 @@ Run
 
 ### Turn
 
-Turn 是一次激活区间，开始时领取 Inbox 输入或继续信号，结束时必须记录原因：继续、等待、完成、暂停、取消或失败。Turn 不会在数据库事务中跨越小时级外部等待。
+Turn 是一次激活区间，开始时领取 Inbox 输入或继续信号，结束时必须记录关闭原因。Turn 不会在数据库事务中跨越小时级外部等待。
+
+Turn 的状态是 `open | closed`，`turn.closed.reason` 固定为：
+
+```text
+waiting_input | waiting_approval | waiting_external | waiting_retry |
+paused | completed | cancel_requested | cancelled | expired | failed |
+stuck_recovery | interrupted | yielded
+```
+
+若模型结果可以立即继续，当前 Step 直接登记下一个 Step；不产生“已关闭但继续”的 Turn。若必须让出调度，使用 `yielded` 作为内部调度原因，并在同一事务登记下一次激活。
 
 ### Step
 
 Step 是一次模型决策及其派生 Call 的归并边界。模型请求、可见上下文和能力目录属于 Step 的请求视图。Step 在其 Call 进入 `waiting_external` 前结束并记录等待原因；之后的外部回调通过 Inbox 激活新的 Turn 和新的 Step。Call 与 Run 可以跨请求存活，数据库不保留一个悬挂网络连接。
+
+Step 的状态是 `open | closed`，`step.closed.reason` 固定为：
+
+```text
+decision_complete | waiting_input | waiting_approval | waiting_external |
+waiting_retry | paused | cancelled | failed | interrupted
+```
+
+`decision_complete` 只表示本次模型请求、Call 登记和本地归并已提交，不表示 Run 完成。
 
 ### Call
 
@@ -205,7 +239,13 @@ next_step  进度、审批、Artifact 可用、控制和恢复信号
 3. 本地收尾：释放租约、停止等待和关闭本地执行；
 4. `cancelled`：只有本地 Run 进入终态，不代表每个外部系统都已经停止。
 
-外部协议只提供“取消请求已发送”或“远端确认取消”时，Call 保留真实的远端状态。没有确认时使用 `outcome_unknown` 或 `remote_running`，而不是伪造 `cancelled`。迟到的成功写入必须保留，不能被本地取消覆盖。
+外部协议只提供“取消请求已发送”或“远端确认取消”时，Call 保留真实的远端状态。没有确认时使用 `outcome_unknown` 或 `remote_running`，而不是伪造 `cancelled`。迟到的成功写入必须保留，不能被本地取消覆盖。因用户取消而收敛的 Run 进入本地 `cancelled`，因 Run deadline 而收敛的 Run 进入 `expired`；未决 Call 独立进入 `reconciling`，不得通过改变 Run 终态来掩盖远端状态。
+
+### 7.1 未知结果对账
+
+对账属于 Kernel recovery/reconciliation service，而不是每个 Connector 自己维护的隐式循环。Call 进入 `reconciling` 时保存 `next_reconcile_at`、退避次数、远端状态快照和 `manual_attention` 标记；服务只调用 Connector 的 `query_status`，用 Call 级租约和 fencing 写入结果。初始间隔、退避上限、最大次数和 Run deadline 由部署配置提供（测试可使用 5 秒起步、5 分钟上限的示例值），达到上限或截止时间后进入人工处理，并通过关联 Inbox/通知向用户展示“结果未知”，不得伪造失败或再次发送写操作。
+
+状态查询确认远端仍在执行时记录 `outcome=remote_running`；确认取消时记录 `outcome=cancelled_confirmed`；确认完成或失败时记录相应结果。迟到结果只更新 Call/Artifact 事实，不改变已经终态的 Run。
 
 ## 8. 崩溃恢复和幂等
 
@@ -261,3 +301,4 @@ claim
 - shadow/canary/cutover 写入责任不会漂移；
 - 旧 Conversation、Message、ToolRun 投影与事件结果一致。
 - `queued` 的取消和截止时间、等待状态失效、`cancelling` 超时收敛、暂停期间 Inbox 保留和 stuck-run 检测；
+- Call status/outcome 双轴、Turn/Step close reason、问题 TTL 与 Run deadline、reconciler 归属和取消超时事件的重放幂等；

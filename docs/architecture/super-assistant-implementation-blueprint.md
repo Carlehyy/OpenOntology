@@ -78,6 +78,7 @@ class AgentConnector(Protocol):
     def descriptor(self) -> AgentDescriptor: ...
     def start(self, request: AgentRequest) -> AgentHandle: ...
     def poll(self, handle: AgentHandle) -> list[AgentEvent]: ...
+    def query_status(self, handle: AgentHandle) -> RemoteStatus: ...
     def cancel(self, handle: AgentHandle) -> CancelOutcome: ...
 
 class ExecutionKernel(Protocol):
@@ -87,6 +88,8 @@ class ExecutionKernel(Protocol):
 ```
 
 这些是边界语义，不是最终公开 API。调用结果必须携带事件关联、Call/Attempt 身份和是否可以安全重试的事实。
+
+`poll()` 只表示 Connector 能否拉取进度或增量事件；`query_status()` 是 reconciliation service 用于确认远端最终状态的只读查询，两者不能互相代替。Connector 不支持状态查询时必须声明 `supports_poll=false`，未知结果达到取消或重试边界后直接转人工处理，不能由 Kernel 无限轮询。
 
 ## 3. Runtime 拆分顺序
 

@@ -45,6 +45,8 @@ trust_level
 
 `human_description` 供模型路由和用户选择；其余字段供程序校验。外部 Agent 的自描述必须经过平台验证，不能仅凭描述授予本体访问或写操作。
 
+`supports_poll` 在本模型中表示 Connector 能够实现 `query_status()` 的只读远端状态查询；`supports_push` 表示能够接收远端主动事件。两者都不能由适配器自报而缺少真实握手或可执行验收。
+
 ## 3. Context Requirements 与澄清
 
 每个条件声明：
@@ -95,23 +97,20 @@ list descriptors
 
 ## 5. 事件映射
 
-内部统一事件：
+Connector 收到的 `agent.*` 是协议/适配器输入，不是第二套持久化事件注册表。持久化只使用执行模型和数据事件模型定义的 canonical 事件；同一事实只能写一次，适配器映射如下：
 
-```text
-agent.started
-agent.progress
-agent.needs_input
-agent.approval_required
-agent.artifact_declared
-agent.artifact_chunk
-agent.artifact_completed
-agent.accepted
-agent.completed
-agent.failed
-agent.cancel_requested
-agent.cancelled_confirmed
-agent.outcome_unknown
-```
+| Connector 输入 | 持久化 canonical 事件 | 主要状态变化 |
+|---|---|---|
+| `agent.started` | `attempt.started` + `call.outcome_changed` | 远端已报告开始，Call 进入 `running, outcome=remote_running` |
+| `agent.accepted` | `call.outcome_changed` | `status=waiting_external, outcome=accepted`，等待远端继续 |
+| `agent.progress` | `call.progress` + `call.outcome_changed` | 更新远端观测，Call 保持 `waiting_external` 和 `accepted/remote_running` outcome |
+| `agent.needs_input` | `inbox.appended` + `call.outcome_changed` + `run.status_changed` | Call 进入 `waiting_external, outcome=remote_running`，以 `question_id` 关联问题，Run 进入 `waiting_input` |
+| `agent.approval_required` | `approval.requested` + `call.outcome_changed` + `run.status_changed` | Call 进入 `waiting_external, outcome=remote_running`，以 `approval_id` 关联审批，Run 进入 `waiting_approval` |
+| `agent.artifact_declared/chunk/completed` | `artifact.declared/chunked/completed` | Artifact 按校验和和引用落库 |
+| `agent.completed/failed` | `attempt.result` + `call.outcome_changed` | `status=closed`，写入对应 outcome |
+| `agent.cancel_requested` | `call.outcome_changed` | `status=cancel_requested`，保留此前 outcome，不写入 `cancel_requested` outcome |
+| `agent.cancelled_confirmed` | `attempt.result` + `call.outcome_changed` | `status=closed, outcome=cancelled_confirmed` |
+| `agent.outcome_unknown` | `call.outcome_changed` | `status=reconciling, outcome=outcome_unknown` |
 
 进度事件主要用于展示和诊断，不自动进入下一次模型上下文。需要模型决策时，由 Context Planner 选择摘要、最终结果或 Artifact 引用。
 
@@ -133,14 +132,14 @@ agent.outcome_unknown
 
 已确认的绑定决策需要穿透到现有适配器和领域服务，不能只在 Connector 外层增加一次校验。进入开发前必须逐条处置：
 
-1. `assistant_hub/adapters/ontology_agent.py` 中缺少 `ontology_id` 时按最近使用本体回退的路径必须删除或改为候选推荐，不能静默选择。
+1. `assistant_hub/adapters/ontology_agent.py` 中缺少 `ontology_id` 时按最近使用本体回退的路径必须删除或改为候选推荐，不能静默选择；`AssistantSpec.prerequisites` 文案和断言该回退的旧测试也必须同步改为“缺失→needs_input/不建子会话”。
 2. `assistant_hub/adapters/exploration.py` 的 `start()` 不能再无条件创建无绑定会话；`context_requirements` 必须声明 `ontology_id` 和编辑草稿版本。
-3. 业务探索领域服务必须在创建和恢复时强制检查目标本体、草稿版本的 `draft + editing` 生命周期、归属和写权限；列表端点的过滤不能替代写路径校验。
-4. 领域 `apply` 在绑定版本不再是 `draft + editing` 时不得静默分叉新草稿并重锚会话，必须返回版本失效并由 Run 重新询问或终止。
+3. 业务探索的**委派创建和委派恢复路径**必须显式使用 `binding_mode=delegated`（或等价的独立入口），强制检查目标本体、草稿版本的 `draft + editing` 生命周期、归属和写权限；列表端点的过滤不能替代写路径校验。直接 UI 创建探索会话的空绑定和 `ontology_id`→current release 既有契约不在本次委派收紧范围内，是否另行收紧必须单独做产品变更。
+4. 委派会话的领域 `apply` 在绑定版本不再是 `draft + editing` 时不得静默分叉新草稿并重锚会话，必须返回版本失效并由 Run 重新询问或终止。直接 UI 会话继续遵循其既有绑定语义，但不能被伪装成委派绑定。
 5. 绑定版本删除、晋级或被替代时，不能只通过拉取漂移摘要提示；领域服务应发出带版本引用的生命周期事件（例如 `promoted`、`superseded`、`deleted`），由 Inbox 唤醒关联 Run。
 6. 本体助手的 HTTP 直聊入口也必须执行按本体的访问校验，不能因为绕过 Assistant Hub 就只依赖菜单级权限；Hub 路径和直聊路径的权限语义需要在契约中对齐。
 
-以上清单是迁移任务的拆除和改造范围。业务事实仍由本体/探索领域服务裁决，Connector 不能单独伪造“可编辑版本”。
+以上清单是迁移任务中**超级助手委派路径**的拆除和改造范围。业务事实仍由本体/探索领域服务裁决，Connector 不能单独伪造“可编辑版本”。委派调用必须把 `ontology_id`、`draft_version_id` 和 `binding_mode=delegated` 一并写入 Call/子会话绑定快照；直接 UI 流程的兼容行为不得被这条规则隐式改变。
 
 ## 7. RAP v1
 
@@ -150,7 +149,7 @@ RAP v1 通过 Adapter 继续兼容现有直连和 pull 模式：
 - direct 和 pull 都映射成相同的 AgentCall；
 - 旧远端只有最终文本时，由 Adapter 产生最小的 started/accepted/completed 事件；
 - 不能支持真实流式、取消或 Artifact 时，Descriptor 必须如实声明；
-- 回连结果使用任务 ID、Call ID 和幂等键去重。
+- pull 模式在存在远端任务 ID 时按任务 ID、Call ID 和幂等键去重；direct v1 没有平台幂等字段时不能声称可安全重试，必须等待明确结果或进入 `outcome_unknown`。
 
 不把 RAP v1 的最终文本包装成虚假的阶段进度，也不把网络超时解释成远端任务失败。
 
