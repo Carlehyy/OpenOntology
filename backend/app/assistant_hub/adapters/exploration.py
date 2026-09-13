@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any, Iterator, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.assistant_hub.contract import (
@@ -26,53 +25,13 @@ from app.assistant_hub.contract import (
 from app.auth.permissions import user_has_menu_access
 from app.exploration.orchestrator import run_exploration_turn
 from app.exploration.schemas import SessionCreate
-from app.exploration.session_service import _require_session, create_session
-from app.ontologies.access import require_ontology_access
-from app.ontologies.projects.models import OntologyProject
-from app.ontologies.versions.models import OntologyVersion
+from app.exploration.session_service import (
+    _require_session,
+    create_session,
+    validate_delegated_binding,
+)
 
 _KEY = "exploration"
-
-
-def validate_delegated_binding(db: Session, user, context: dict[str, Any] | None) -> dict[str, str]:
-    """Validate and normalize the mandatory binding for delegated exploration.
-
-    Direct UI sessions intentionally keep their historical unbound/current-release
-    behavior.  Kernel delegation is a separate contract: it must prove the target
-    ontology and an editable draft before a child Run or exploration session is
-    created, so a missing prerequisite becomes an input request instead of an
-    unbound side effect.
-    """
-    values = context if isinstance(context, dict) else {}
-    ontology_id = str(values.get("ontology_id") or "").strip()
-    version_id = str(values.get("draft_version_id") or values.get("ontology_version_id") or "").strip()
-    lifecycle = str(values.get("lifecycle") or "").strip()
-    permission_hash = str(values.get("write_permission_hash") or "").strip()
-    if not ontology_id or not version_id or lifecycle != "editing" or not permission_hash:
-        raise ValueError(
-            "业务探索委派需要绑定 ontology_id、draft_version_id、editing 和 write_permission_hash"
-        )
-    project = db.scalar(select(OntologyProject).where(OntologyProject.id == ontology_id))
-    if project is None:
-        raise ValueError("委派绑定的本体不存在")
-    try:
-        require_ontology_access(db, ontology_id, user, write=True)
-    except HTTPException as exc:
-        raise ValueError("委派绑定的本体不可写") from exc
-    version = db.scalar(select(OntologyVersion).where(OntologyVersion.id == version_id))
-    if (
-        version is None
-        or str(version.ontology_id) != ontology_id
-        or version.node_kind != "draft"
-        or version.lifecycle_status != "editing"
-    ):
-        raise ValueError("委派绑定必须指向该本体的 editing draft 版本")
-    return {
-        "ontology_id": ontology_id,
-        "draft_version_id": version_id,
-        "lifecycle": "editing",
-        "write_permission_hash": permission_hash,
-    }
 
 
 class ExplorationAdapter:

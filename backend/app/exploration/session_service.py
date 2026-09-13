@@ -36,6 +36,42 @@ def _ok(data):
     return {"data": data}
 
 
+def validate_delegated_binding(
+    db: Session, user, context: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Validate the mandatory ontology draft binding for delegated sessions."""
+    values = context if isinstance(context, dict) else {}
+    ontology_id = str(values.get("ontology_id") or "").strip()
+    version_id = str(values.get("draft_version_id") or values.get("ontology_version_id") or "").strip()
+    lifecycle = str(values.get("lifecycle") or "").strip()
+    permission_hash = str(values.get("write_permission_hash") or "").strip()
+    if not ontology_id or not version_id or lifecycle != "editing" or not permission_hash:
+        raise ValueError(
+            "业务探索委派需要绑定 ontology_id、draft_version_id、editing 和 write_permission_hash"
+        )
+    project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
+    if project is None:
+        raise ValueError("委派绑定的本体不存在")
+    try:
+        require_ontology_access(db, ontology_id, user, write=True)
+    except HTTPException as exc:
+        raise ValueError("委派绑定的本体不可写") from exc
+    version = db.query(OntologyVersion).filter(OntologyVersion.id == version_id).first()
+    if (
+        version is None
+        or str(version.ontology_id) != ontology_id
+        or version.node_kind != "draft"
+        or version.lifecycle_status != "editing"
+    ):
+        raise ValueError("委派绑定必须指向该本体的 editing draft 版本")
+    return {
+        "ontology_id": ontology_id,
+        "draft_version_id": version_id,
+        "lifecycle": "editing",
+        "write_permission_hash": permission_hash,
+    }
+
+
 def _require_session(
     db: Session,
     session_id: str,
