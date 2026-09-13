@@ -81,7 +81,12 @@ class ProcessPluginHost:
             return value
 
     async def health(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        return await self._request({"op": "health", "key": self.manifest.key, "revision": self.manifest.revision}, timeout=timeout)
+        value = await self._request({"op": "health", "key": self.manifest.key, "revision": self.manifest.revision}, timeout=timeout)
+        if value.get("key") not in {None, self.manifest.key} or value.get("revision") not in {None, self.manifest.revision}:
+            raise PluginHostError("plugin health identity mismatch")
+        if value.get("protocol") not in {None, "plugin.v1"}:
+            raise PluginHostError("unsupported plugin protocol")
+        return value
 
     async def invoke(self, request: Mapping[str, Any], *, timeout: float = 120.0) -> dict[str, Any]:
         return await self._request({"op": "invoke", "request": dict(request)}, timeout=timeout)
