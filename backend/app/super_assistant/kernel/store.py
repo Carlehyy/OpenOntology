@@ -30,6 +30,8 @@ from .models import (
     ExecutionRun,
 )
 from ..models import SuperAssistantConversation
+from app.ontologies.projects.models import OntologyProject
+from app.ontologies.versions.models import OntologyVersion
 
 
 UTC = timezone.utc
@@ -49,6 +51,32 @@ def _hash_payload(payload: object) -> str:
 
 def _new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _validate_delegated_binding(db: Session, *, owner_id: str, binding: dict) -> None:
+    """Validate the domain objects captured by a delegated run snapshot.
+
+    ``DomainBindingResolver`` validates the shape of a binding, but a kernel run
+    must also prove that the referenced objects exist and are still writable at
+    creation time.  We deliberately require the project owner here: the kernel
+    only receives the durable owner id (rather than a request User/role), so
+    accepting an unverified permission hash would turn it into an authorization
+    bypass.  Direct UI and legacy runs retain their existing compatibility path.
+    """
+    ontology_id = str(binding.get("ontology_id") or "").strip()
+    version_id = str(binding.get("draft_version_id") or "").strip()
+    if not ontology_id or not version_id:
+        raise ContractError("delegated binding requires ontology and draft version")
+    project = db.scalar(select(OntologyProject).where(OntologyProject.id == ontology_id))
+    if project is None:
+        raise ContractError("delegated binding references an unknown ontology")
+    if str(project.created_by) != str(owner_id):
+        raise ContractError("delegated binding owner has no write permission")
+    version = db.scalar(select(OntologyVersion).where(OntologyVersion.id == version_id))
+    if version is None or str(version.ontology_id) != ontology_id:
+        raise ContractError("delegated binding draft version does not belong to ontology")
+    if version.node_kind != "draft" or version.lifecycle_status != "editing":
+        raise ContractError("delegated binding requires an editing draft version")
 
 
 class IdempotencyConflict(ContractError):
@@ -143,6 +171,7 @@ def create_run(
         required = {"ontology_id", "draft_version_id", "lifecycle", "write_permission_hash"}
         if required - binding.keys() or binding.get("lifecycle") != "editing" or not binding.get("write_permission_hash"):
             raise ContractError("delegated binding requires editing draft and write permission")
+        _validate_delegated_binding(db, owner_id=owner_id, binding=binding)
     elif mode not in {"direct_ui", "legacy"}:
         raise ContractError("unknown binding_mode")
     run = ExecutionRun(
