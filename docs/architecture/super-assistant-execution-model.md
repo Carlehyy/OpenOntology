@@ -75,6 +75,19 @@ stateDiagram-v2
 
 Run 进入终态后不能重新打开。若外部迟到结果后来到达，只能作为关联 Call 和 Artifact 的新事实保存，不能恢复已取消的 Run。
 
+等待状态收到事件后的处理不是固定地“恢复运行”：
+
+| 等待原因 | 可恢复事件 | 不可恢复事件 |
+|---|---|---|
+| `waiting_input` | 关联问题的有效回答 | 问题已过期则 `expired` |
+| `waiting_approval` | 关联审批通过或拒绝 | 审批策略失效则 Call 失败并重新规划或终止 |
+| `waiting_external` | 远端进度、结果或可查询状态 | 远端确认失败且没有替代路径则 Run 失败 |
+| `waiting_retry` | 预算内的新 Attempt | 重试预算耗尽则 Run 失败 |
+
+事件先结束对应 Call 的状态，再决定 Run 是否回到 `active`。不能因为收到一个无关回调就唤醒或改变 Run。
+
+Call 的最小状态集合为 `offered`、`dispatched`、`running`、`waiting_external`、`completed`、`failed`、`cancel_requested`、`cancelled_confirmed`、`outcome_unknown`。Call 进入 `outcome_unknown` 后只能通过状态查询、对账或人工确认收敛，不能由普通重试覆盖。
+
 ## 3. Turn、Step、Call、Attempt
 
 ```text
