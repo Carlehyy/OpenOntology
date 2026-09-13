@@ -513,3 +513,12 @@ def test_publish_falls_back_to_live_project_samples(db):
     assert all(g["ok"] for g in out.gates)
     detail = mcp_dev_service.get_version(db, "owner-1", project.id, 1)
     assert set(detail.tool_samples) == {"add_numbers", "read_env", "always_fail"}
+
+
+def test_execute_stdout_hides_internal_markers(db):
+    """试跑 stdout 不得泄露 __OB_RESULT_*__ 内部标记（与脚本流水线同口径）。"""
+    project = _project(db)
+    out = _run_tool(db, project, "add_numbers", {"a": 1, "b": 1})
+    assert out.ok
+    assert "__OB_RESULT_BEGIN__" not in out.stdout
+    assert "__OB_RESULT_END__" not in out.stdout

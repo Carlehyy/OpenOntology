@@ -30,6 +30,7 @@ from app.data_channel.pipelines.python_engine.client import (
     execute_code,
     extract_payload,
     tail_stdout,
+    visible_stdout,
 )
 
 # 与 mcp_client.namespaced_tool_name 的公开名长度预算对齐：工具名本身保持
@@ -300,10 +301,12 @@ def _run_code(code: str, *, timeout: int | None = None) -> McpDevExecution:
             payload = extract_payload(execution.stdout)
         except PythonEngineError as exc:
             error = str(exc)
+    # 解析后剥离平台结果传输块再截断回传：stdout 面板不应暴露内部
+    # 输出协议标记（与 python_engine.execute_script 同一口径）
     return McpDevExecution(
         ok=error is None,
         payload=payload,
-        stdout=tail_stdout(execution.stdout),
+        stdout=tail_stdout(visible_stdout(execution.stdout)),
         error=error,
         traceback=execution.traceback,
         duration_ms=execution.duration_ms,
