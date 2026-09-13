@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Loader2, Pause, Play, Send, Square } from 'lucide-react'
 
 import { superAssistantApi, type KernelRunEvent, type KernelRunStatus, type KernelRunView } from '@/api/superAssistant'
+import { projectionFromSnapshot, reduceKernelRunEvent, type KernelRunProjection } from './kernelRunReducer'
 
 const terminalStatuses = new Set<KernelRunStatus>(['cancelled', 'expired', 'completed', 'failed'])
 
@@ -20,29 +21,40 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
   const [input, setInput] = useState('')
   const [artifactContent, setArtifactContent] = useState<Record<string, string>>({})
   const lastEventRef = useRef<string | undefined>(undefined)
+  const projectionRef = useRef<KernelRunProjection>({ run: null, lastSeq: null })
+
+  const refreshAuthoritativeSnapshot = async (message?: string) => {
+    const fresh = await superAssistantApi.kernelRun(runId)
+    projectionRef.current = projectionFromSnapshot(fresh, lastEventRef.current)
+    setRun(fresh)
+    if (message) setError(message)
+    return fresh
+  }
 
   useEffect(() => {
     const abort = new AbortController()
     lastEventRef.current = undefined
+    projectionRef.current = { run: null, lastSeq: null }
     let alive = true
     const applyEvent = (event: KernelRunEvent) => {
+      const previous = projectionRef.current
+      const next = reduceKernelRunEvent(projectionRef.current, event)
+      projectionRef.current = next
       if (event.id) lastEventRef.current = event.id
-      const data = event.data
-      if (event.event === 'run.snapshot' && data.run) setRun(data.run as KernelRunView)
-      if (event.event === 'run.status_changed' && typeof data.to === 'string') {
-        setRun(current => current ? { ...current, status: data.to as KernelRunStatus, version: Number(data.version ?? current.version), wait_reason: data.reason ?? current.wait_reason } : current)
-      }
+      if (next.run !== previous.run) setRun(next.run)
     }
     void (async () => {
       while (alive && !abort.signal.aborted) {
         try {
           const snapshot = await superAssistantApi.kernelRun(runId)
           if (!alive) return
+          projectionRef.current = projectionFromSnapshot(snapshot, lastEventRef.current)
           setRun(snapshot); setError(null)
           if (terminalStatuses.has(snapshot.status)) return
           await superAssistantApi.streamKernelRun(runId, applyEvent, { lastEventId: lastEventRef.current, signal: abort.signal })
           const latest = await superAssistantApi.kernelRun(runId)
           if (!alive) return
+          projectionRef.current = projectionFromSnapshot(latest, lastEventRef.current)
           setRun(latest)
           if (terminalStatuses.has(latest.status)) return
         } catch (cause) {
@@ -54,6 +66,7 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
             try {
               const fresh = await superAssistantApi.kernelRun(runId)
               if (!alive) return
+              projectionRef.current = projectionFromSnapshot(fresh)
               setRun(fresh)
               setError(null)
               if (terminalStatuses.has(fresh.status)) return
@@ -80,8 +93,19 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
         : action === 'pause'
           ? await superAssistantApi.pauseKernelRun(runId, { idempotency_key: key }, run.version)
           : await superAssistantApi.resumeKernelRun(runId, { idempotency_key: key }, run.version)
-      setRun(current => current ? { ...current, status: result.status, version: result.version } : current)
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '操作失败') }
+      setRun(current => {
+        if (!current) return current
+        const next = { ...current, status: result.status, version: result.version }
+        projectionRef.current = { ...projectionRef.current, run: next }
+        return next
+      })
+    } catch (cause) {
+      const detail = typeof cause === 'object' && cause !== null && 'detail' in cause ? String((cause as { detail?: unknown }).detail) : ''
+      if (detail === 'version_conflict') {
+        try { await refreshAuthoritativeSnapshot('任务状态已更新，请基于最新状态重试操作') }
+        catch { setError('任务状态已更新，刷新失败，请稍后重试') }
+      } else setError(cause instanceof Error ? cause.message : detail || '操作失败')
+    }
     finally { setBusy(false) }
   }
 
@@ -106,7 +130,12 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
     setBusy(true); setError(null)
     try {
       await superAssistantApi.submitKernelInput(runId, { kind: 'resume', content: '继续执行', idempotency_key: `${runId}:resume:${crypto.randomUUID()}` })
-      setRun(current => current ? { ...current, status: 'active' } : current)
+      setRun(current => {
+        if (!current) return current
+        const next = { ...current, status: 'active' as KernelRunStatus }
+        projectionRef.current = { ...projectionRef.current, run: next }
+        return next
+      })
     } catch (cause) { setError(cause instanceof Error ? cause.message : '恢复执行失败') }
     finally { setBusy(false) }
   }
@@ -131,9 +160,13 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
-      anchor.download = `${kind || 'artifact'}-${artifactId}`
+      const extension = mimeType === 'text/markdown' ? '.md' : mimeType === 'text/plain' ? '.txt' : mimeType === 'application/json' ? '.json' : ''
+      anchor.download = `${kind || 'artifact'}-${artifactId}${extension}`
+      anchor.style.display = 'none'
+      document.body.appendChild(anchor)
       anchor.click()
-      URL.revokeObjectURL(url)
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 0)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Artifact 下载失败') }
     finally { setBusy(false) }
   }
@@ -153,8 +186,19 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
     setBusy(true); setError(null)
     try {
       const result = await superAssistantApi.decideKernelApproval(runId, approvalId, { decision, idempotency_key: `${runId}:approval:${approvalId}:${crypto.randomUUID()}` }, run.version)
-      setRun(current => current ? { ...current, version: result.version } : current)
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '审批提交失败') }
+      setRun(current => {
+        if (!current) return current
+        const next = { ...current, version: result.version }
+        projectionRef.current = { ...projectionRef.current, run: next }
+        return next
+      })
+    } catch (cause) {
+      const detail = typeof cause === 'object' && cause !== null && 'detail' in cause ? String((cause as { detail?: unknown }).detail) : ''
+      if (detail === 'version_conflict') {
+        try { await refreshAuthoritativeSnapshot('审批状态已更新，请基于最新状态重试') }
+        catch { setError('审批状态已更新，刷新失败，请稍后重试') }
+      } else setError(cause instanceof Error ? cause.message : detail || '审批提交失败')
+    }
     finally { setBusy(false) }
   }
 
