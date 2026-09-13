@@ -357,7 +357,14 @@ async def process_execution_message(payload: dict) -> None:
                             db, run, tool_call.get("arguments") or {},
                             invocation_ref=invocation_ref,
                         )
-                        messages.extend([{ "role": "assistant", "content": result.get("content"), "tool_calls": tool_calls }, { "role": "tool", "tool_call_id": tool_call.get("id"), "name": tool_call.get("name"), "content": delegate_result }])
+                        assistant_content = str(result.get("content") or "")
+                        if assistant_content:
+                            message_candidates.append(
+                                _MessageCandidate("assistant", assistant_content, "assistant")
+                            )
+                        message_candidates.append(
+                            _MessageCandidate("tool", delegate_result, "tool_result")
+                        )
                         try:
                             delegate_payload = json.loads(delegate_result)
                         except (TypeError, ValueError, json.JSONDecodeError):
@@ -876,7 +883,7 @@ def _kernel_connector_tool_schemas(db, owner_id: str) -> list[dict]:
 
 REQUEST_TOKEN_HARD_CAP = 32_000
 _MESSAGE_OVERHEAD_TOKENS = 8
-_MIN_REQUIRED_CONTENT_TOKENS = 32
+_MIN_REQUIRED_CONTENT_TOKENS = 96
 _TRUNCATION_MARKER = "\n…[context truncated]…\n"
 
 
@@ -983,18 +990,21 @@ def _bound_request_candidates(
         required_indices,
         key=lambda index: (priority.get(all_candidates[index].kind, 4), index),
     )
+    required_minimums = [
+        min(
+            _message_token_estimate(all_candidates[index]),
+            _MESSAGE_OVERHEAD_TOKENS + _MIN_REQUIRED_CONTENT_TOKENS,
+        )
+        for index in required_order
+    ]
+    suffix_reserve = [0] * (len(required_order) + 1)
+    for position in range(len(required_order) - 1, -1, -1):
+        suffix_reserve[position] = suffix_reserve[position + 1] + required_minimums[position]
     selected: dict[int, _MessageCandidate] = {}
     remaining = REQUEST_TOKEN_HARD_CAP
     for position, index in enumerate(required_order):
         candidate = all_candidates[index]
-        later = required_order[position + 1:]
-        reserve = sum(
-            min(
-                _message_token_estimate(all_candidates[item]),
-                _MESSAGE_OVERHEAD_TOKENS + _MIN_REQUIRED_CONTENT_TOKENS,
-            )
-            for item in later
-        )
+        reserve = suffix_reserve[position + 1]
         allowance = min(
             _message_token_estimate(candidate),
             max(_MESSAGE_OVERHEAD_TOKENS, remaining - reserve),
@@ -1107,11 +1117,19 @@ def _collect_message_candidates(db, run: ExecutionRun) -> list[_MessageCandidate
     return candidates
 
 
-def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
-    """Rebuild bounded history; request construction applies the final cap."""
+def _rebuild_messages(
+    db, run: ExecutionRun, *, with_trace: bool = False,
+) -> list[dict] | tuple[list[dict], dict[str, object]]:
+    """Rebuild bounded history; request construction applies the final cap.
 
-    candidates, _ = _bound_request_candidates(_collect_message_candidates(db, run))
-    return [candidate.as_message() for candidate in candidates]
+    ``with_trace`` is used by request construction/tests that need to expose
+    why history was compacted.  The default keeps the original list-returning
+    helper contract for callers that only need model messages.
+    """
+
+    candidates, trace = _bound_request_candidates(_collect_message_candidates(db, run))
+    messages = [candidate.as_message() for candidate in candidates]
+    return (messages, trace) if with_trace else messages
 
 
 def _open_turn(db, run, *, trigger_ref: str, lease) -> ExecutionTurn:

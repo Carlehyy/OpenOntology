@@ -33,6 +33,36 @@ def test_rebuild_messages_records_consumed_input_for_crash_recovery(db):
     assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.consumed").count() == 1
 
 
+def test_request_budget_keeps_required_history_and_records_compaction():
+    long_goal = "GOAL-START " + ("g" * 48_000) + " GOAL-END"
+    long_child = "CHILD-START " + ("c" * 48_000) + " CHILD-END"
+    candidates = [
+        runtime._MessageCandidate("system", "system", "system"),
+        runtime._MessageCandidate("user", long_goal, "goal"),
+        runtime._MessageCandidate("assistant", "old model turn", "assistant"),
+        runtime._MessageCandidate("assistant", long_child, "child_result"),
+        runtime._MessageCandidate("user", "old user turn", "user_input"),
+        runtime._MessageCandidate("user", "LATEST-USER", "user_input"),
+    ]
+
+    bounded, trace = runtime._bound_request_candidates(
+        candidates, context_content="CTX-START " + ("k" * 48_000) + " CTX-END",
+    )
+    estimate = sum(runtime._message_token_estimate(item) for item in bounded)
+    contents = [item.content for item in bounded]
+
+    assert estimate <= runtime.REQUEST_TOKEN_HARD_CAP
+    assert any("GOAL-START" in content for content in contents)
+    assert any("GOAL-END" in content for content in contents)
+    assert "LATEST-USER" in contents
+    assert any("CHILD-START" in content and "CHILD-END" in content for content in contents)
+    assert trace["compacted"] is True
+    assert trace["hard_cap"] == runtime.REQUEST_TOKEN_HARD_CAP
+    assert trace["estimated_tokens"] == estimate
+    assert trace["truncated_message_count"] >= 1
+    assert "assistant" in trace["dropped_kinds"]
+
+
 def test_duplicate_activation_with_live_lease_is_a_noop(db, monkeypatch):
     from datetime import timedelta
     from app.super_assistant.kernel.store import acquire_lease
