@@ -178,17 +178,26 @@ def _record_call(model_config_id: str, model_name: str, provider: str,
 # content 开头可能残留 </mm:think> 等标签。仅清开头残留；正文中部出现视为
 # 普通文本（教程/JSON 字面量不误伤）；大小写敏感（无大写变体生产证据）
 _THINK_CLOSE_VARIANT_RE = re.compile(r"\s*</[A-Za-z0-9_.-]+:think>")
+# 精确 <think>…</think> 成对块（含正文中段——推理模型偶发在正文后重入思考）
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.S)
 
 
 def strip_think_content(content: str) -> str:
     """统一 think 清洗语义（本网关与超级助手 provider 共用同一实现）。
 
-    - 精确 ``</think>``：任意位置出现取其后文本（历史语义，覆盖
-      DeepSeek-R1/MiniMax 的完整思考块 ``<think>…</think>正文``）；
+    - 精确 ``<think>…</think>`` 成对块：整体剔除，不限位置（D-011 残余：
+      正文中段重入思考同样外泄内部推理）；未闭合的 ``<think>`` 维持历史
+      语义原样保留——流式 delta 层已抑制直播外发，最终内容的处置权留给
+      消费方（provider 测试锁定的契约）；
+    - 无开标签但出现精确 ``</think>``（provider 已剥思考、残留闭合标签）：
+      取其后文本（历史语义，覆盖 DeepSeek-R1/MiniMax 的
+      ``思考</think>正文`` 形态）；
     - 命名空间变体（``</mm:think>`` 等）：仅当位于 content 开头时剥离
       残留闭合标签（生产实测形态），正文中部不截断；
     - 其余原样返回。
     """
+    if "<think>" in content:
+        content = _THINK_BLOCK_RE.sub("", content).strip()
     if "</think>" in content:
         return content.split("</think>", 1)[1].strip()
     match = _THINK_CLOSE_VARIANT_RE.match(content)
@@ -352,6 +361,10 @@ def _stream_openai(call_kwargs: dict, messages: list[dict], tools: list[dict]):
                 if getattr(fn, "arguments", None):
                     slot["arguments"] += fn.arguments
 
+    for safe in _filter_think_deltas("", think_state, flush=True):
+        if safe:
+            yield {"delta": safe}
+
     tool_calls = []
     for index in sorted(tool_acc):
         slot = tool_acc[index]
@@ -419,6 +432,10 @@ def _stream_anthropic(call_kwargs: dict, messages: list[dict], tools: list[dict]
     finally:
         manager.__exit__(None, None, None)
 
+    for safe in _filter_think_deltas("", think_state, flush=True):
+        if safe:
+            yield {"delta": safe}
+
     tool_calls = []
     for index in sorted(tool_acc):
         slot = tool_acc[index]
@@ -440,24 +457,36 @@ def _stream_anthropic(call_kwargs: dict, messages: list[dict], tools: list[dict]
     })}
 
 
-# 流式 think 过滤器：与 strip_think_content 同语义 —— 只处理位于正文开头的
-# <think>…</think> 完整思考块；正文中的 "<" 一旦确认不是块开头即原样放行。
+# 流式 think 过滤器：与 strip_think_content 同语义 —— 开头思考块实时剔除；
+# 正文开始后同样守卫中段重入的 <think>（D-011 残余），"<" 一旦确认不是
+# 块开头即原样放行。
 _THINK_OPEN_TAG = "<think>"
 _THINK_CLOSE_TAG = "</think>"
 
 
-def _filter_think_deltas(piece: str, state: dict):
-    """增量过滤开头 think 块：产出可安全外发的文本片段。
+def _filter_think_deltas(piece: str, state: dict, *, flush: bool = False):
+    """增量过滤 think 块：产出可安全外发的文本片段。
+
+    flush=True 用于流收尾：滞留的疑似半标签尾巴按所在模式定夺——
+    pass/detect 态的滞留是普通文本，冲刷外发；think 态是未闭合的
+    泄漏思考尾部，丢弃（与 strip_think_content 的未闭合语义一致）。
 
     state 为 {"mode": "detect"|"think"|"pass", "buf": str}，由调用方跨 delta 保持。
     - detect：正文尚未开始，开头可能构成 <think> 的字符全部滞留直到可判定；
     - think：处于思考块内，等待 </think>（末尾疑似半个闭标签的字符滞留）；
-    - pass：已确认非 think 开头，后续一切原样放行。
-    开头块之外的 <think> 视为普通文本（与历史语义一致：剥离只针对开头思考块）。
+    - pass：正文已开始，原样放行；但正文中段再次出现精确 <think>（推理
+      模型偶发重入思考）时切入 think 抑制，与 strip_think_content 同口径。
     """
     mode = state.get("mode", "detect")
     buf = state.get("buf", "") + piece
     out: list[str] = []
+
+    if flush and buf and mode != "think":
+        out.append(buf)
+        buf = ""
+        state["mode"] = mode
+        state["buf"] = ""
+        return out
 
     while buf:
         if mode == "detect":
@@ -478,8 +507,26 @@ def _filter_think_deltas(piece: str, state: dict):
             buf = buf[idx + len(_THINK_CLOSE_TAG):]
             mode = "pass"
             continue
-        out.append(buf)
-        buf = ""
+        # pass：放行正文，同时守卫中段重入的开标签。滞留必须最小化——只
+        # 滞留「从某个 < 起、后缀仍是 <think> 前缀」的尾巴；其余内容立即
+        # 外发（粗粒度滞留会延迟已收内容，破坏流中断重试护栏的语义）。
+        idx = buf.find(_THINK_OPEN_TAG)
+        if idx < 0:
+            hold_from = len(buf)
+            probe = buf.find("<")
+            while 0 <= probe < hold_from:
+                if _THINK_OPEN_TAG.startswith(buf[probe:]):
+                    hold_from = probe
+                    break
+                probe = buf.find("<", probe + 1)
+            if hold_from > 0:
+                out.append(buf[:hold_from])
+            buf = buf[hold_from:]
+            break
+        out.append(buf[:idx])
+        buf = buf[idx + len(_THINK_OPEN_TAG):]
+        mode = "think"
+        continue
 
     state["mode"] = mode
     state["buf"] = buf

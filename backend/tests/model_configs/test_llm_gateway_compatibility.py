@@ -48,9 +48,14 @@ def test_strip_think_unified_semantics():
     from app.model_configs.llm_gateway import strip_think_content
 
     cases = {
-        # 精确 </think>：完整思考块，任意位置取其后（历史语义）
+        # 精确 <think>…</think> 成对块：整体剔除（D-011 残余——中段重入思考
+        # 不再外泄，且不再连带丢弃块前正文）
         "<think>推理中</think>正文": "正文",
-        "序言<think>x</think>答": "答",
+        "序言<think>x</think>答": "序言答",
+        "答A<think>重入思考</think>答B": "答A答B",
+        # 未闭合 <think>：维持历史语义原样保留（直播 delta 层已抑制外发，
+        # 最终内容处置权留给消费方——provider 契约测试锁定）
+        "答案<think>泄漏": "答案<think>泄漏",
         # 命名空间变体：仅 content 开头的残留闭合标签（GLM/mm 系生产形态）
         "</mm:think>正文": "正文",
         "  </mm:think>  正文  ": "正文",

@@ -48,7 +48,9 @@ def test_chat_stream_assembles_deltas_tool_calls_and_usage(monkeypatch):
         _STREAM_KWARGS, [{"role": "user", "content": "hi"}], []))
 
     deltas = [e["delta"] for e in events if "delta" in e]
-    assert deltas == ["你", "好"]
+    # 中段标签守卫会把 ≤ 半标签长度的短尾滞留到下一帧/收尾 flush，
+    # 分帧不再逐字对应，按拼接内容断言
+    assert "".join(deltas) == "你好"
     final = next(e["final"] for e in events if "final" in e)
     assert final["content"] == "你好"
     assert final["tool_calls"] == [{
@@ -188,7 +190,9 @@ def test_chat_stream_anthropic_assembles_deltas_tool_calls_and_usage(monkeypatch
         [{"name": "upsert_elements", "description": "d", "parameters": {}}]))
 
     deltas = [e["delta"] for e in events if "delta" in e]
-    assert deltas == ["你", "好"]
+    # 中段标签守卫会把 ≤ 半标签长度的短尾滞留到下一帧/收尾 flush，
+    # 分帧不再逐字对应，按拼接内容断言
+    assert "".join(deltas) == "你好"
     final = next(e["final"] for e in events if "final" in e)
     assert final["content"] == "你好"
     assert final["tool_calls"] == [{
@@ -226,18 +230,37 @@ def test_chat_stream_anthropic_filters_think_block_across_deltas(monkeypatch):
 
 def test_filter_think_deltas_holds_partial_tags():
     """纯过滤器：开头 think 块跨 delta 拆分时不泄漏思考内容；正文开头非标签则原样放行。"""
-    # 场景 1：正文以 <think> 开头（跨 delta 拆成 "<th"/"ink>"），只放行闭标签后的正文
+    # 场景 1：正文以 <think> 开头（跨 delta 拆成 "<th"/"ink>"），只放行闭标签后的正文；
+    # 末尾 ≤ 半标签长度的滞留由收尾 flush 冲刷（生产两分支均已接线）
     state: dict = {}
     out: list[str] = []
     for piece in ["<th", "ink>内部推理</th", "ink>正文开", "始"]:
         out.extend(gw._filter_think_deltas(piece, state))
+    out.extend(gw._filter_think_deltas("", state, flush=True))
     assert "".join(out) == "正文开始"
+
+    # 场景 1b（D-011 残余）：正文中段重入 <think> 同样抑制，块后正文恢复放行
+    state1b: dict = {}
+    out1b: list[str] = []
+    for piece in ["答案开始。", "<think>再想", "想</think>", "答案结束"]:
+        out1b.extend(gw._filter_think_deltas(piece, state1b))
+    out1b.extend(gw._filter_think_deltas("", state1b, flush=True))
+    assert "".join(out1b) == "答案开始。答案结束"
+
+    # 场景 1c：中段 <think> 未闭合即流结束 → 其后视为泄漏思考尾部，丢弃
+    state1c: dict = {}
+    out1c: list[str] = []
+    for piece in ["答", "案<think>泄", "漏尾巴"]:
+        out1c.extend(gw._filter_think_deltas(piece, state1c))
+    out1c.extend(gw._filter_think_deltas("", state1c, flush=True))
+    assert "".join(out1c) == "答案"
 
     # 场景 2：正文开头是普通文本（含"<"字符但非标签）→ 全部放行
     state2: dict = {}
     out2: list[str] = []
     for piece in ["结论 a<b ", "继续"]:
         out2.extend(gw._filter_think_deltas(piece, state2))
+    out2.extend(gw._filter_think_deltas("", state2, flush=True))
     assert "".join(out2) == "结论 a<b 继续"
 
     # 场景 3：无 think 的普通文本原样通过
