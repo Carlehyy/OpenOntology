@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 
 from .models import ContextSourceTombstone, ExecutionRun
 
@@ -19,19 +20,38 @@ def source_ref_dict(*, kind: str, source_id: str, revision: str, locator: str,
     }
 
 
+def _missing_table(exc: OperationalError) -> bool:
+    return "no such table" in str(exc).lower() or "does not exist" in str(exc).lower()
+
+
 def tombstoned_source_ids(db: Session, owner_id: str, kind: str) -> set[str]:
-    return set(db.scalars(select(ContextSourceTombstone.source_id).where(
-        ContextSourceTombstone.owner_id == owner_id,
-        ContextSourceTombstone.kind == kind,
-    )).all())
+    try:
+        return set(db.scalars(select(ContextSourceTombstone.source_id).where(
+            ContextSourceTombstone.owner_id == owner_id,
+            ContextSourceTombstone.kind == kind,
+        )).all())
+    except OperationalError as exc:
+        # Legacy-only test databases and pre-0109 rolling deployments do not
+        # have the optional marker table yet; preserve the old read path until
+        # the migration has run. Production migration failures still surface.
+        if not _missing_table(exc):
+            raise
+        db.rollback()
+        return set()
 
 
 def is_source_tombstoned(db: Session, *, owner_id: str, kind: str, source_id: str) -> bool:
-    return db.scalar(select(ContextSourceTombstone.id).where(
-        ContextSourceTombstone.owner_id == owner_id,
-        ContextSourceTombstone.kind == kind,
-        ContextSourceTombstone.source_id == source_id,
-    )) is not None
+    try:
+        return db.scalar(select(ContextSourceTombstone.id).where(
+            ContextSourceTombstone.owner_id == owner_id,
+            ContextSourceTombstone.kind == kind,
+            ContextSourceTombstone.source_id == source_id,
+        )) is not None
+    except OperationalError as exc:
+        if not _missing_table(exc):
+            raise
+        db.rollback()
+        return False
 
 
 def tombstone_source(
@@ -47,11 +67,17 @@ def tombstone_source(
     the same transaction. The unique source key means retries cannot emit a
     second lifecycle marker.
     """
-    existing = db.scalar(select(ContextSourceTombstone).where(
-        ContextSourceTombstone.owner_id == owner_id,
-        ContextSourceTombstone.kind == kind,
-        ContextSourceTombstone.source_id == source_id,
-    ))
+    try:
+        existing = db.scalar(select(ContextSourceTombstone).where(
+            ContextSourceTombstone.owner_id == owner_id,
+            ContextSourceTombstone.kind == kind,
+            ContextSourceTombstone.source_id == source_id,
+        ))
+    except OperationalError as exc:
+        if not _missing_table(exc):
+            raise
+        db.rollback()
+        return None  # type: ignore[return-value]
     if existing is not None:
         return existing
     row = ContextSourceTombstone(

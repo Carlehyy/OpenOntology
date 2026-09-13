@@ -99,3 +99,27 @@ def test_tombstone_is_idempotent_and_excludes_existing_source(db):
     assert first.id == second.id
     assert second.revision == "r1"
     assert collect_context_candidates(db, owner.id, "") == []
+
+
+def test_tombstone_can_emit_a_kernel_source_event(db):
+    from app.super_assistant.models import SuperAssistantConversation
+    from app.super_assistant.kernel.models import ExecutionEvent
+    from app.super_assistant.kernel.store import create_run
+
+    owner = _owner(db)
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="context")
+    db.add(conversation)
+    db.flush()
+    run, _ = create_run(
+        db, owner_id=owner.id, conversation_id=conversation.id,
+        goal="retire source", idempotency_key=f"run-{uuid.uuid4().hex}",
+    )
+    tombstone_source(
+        db, owner_id=owner.id, kind="memory", source_id="mem-1", revision="r1",
+        locator="memory://mem-1", recipe_revision="memory.v1", extraction_id="extract-1",
+        reason="user_deleted", run=run,
+    )
+    db.commit()
+    event = db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="source.tombstoned").one()
+    assert event.payload["source_ref"]["id"] == "mem-1"
+    assert event.payload["reason"] == "user_deleted"
