@@ -251,6 +251,45 @@ class SuperAssistantMcpServer(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SuperAssistantProcessPlugin(Base):
+    """Persisted user process-plugin manifest and lifecycle state.
+
+    The executable is never treated as an implicit capability.  A plugin must
+    be explicitly enabled before its immutable ``CapabilityRevision`` is
+    enabled; disabling or draining revokes that live authorization bit while
+    retaining this row for audit and safe restart recovery.
+    """
+
+    __tablename__ = "super_assistant_process_plugins"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "key", "revision", name="uq_sa_process_plugin_owner_revision"),
+        Index("ix_sa_process_plugins_owner_state", "owner_id", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    description: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    entrypoint: Mapped[str] = mapped_column(String(2000), nullable=False)
+    trust_level: Mapped[str] = mapped_column(String(24), nullable=False, default="user_untrusted")
+    capabilities: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    permissions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    network_scope: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    workspace_scope: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    secret_refs: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    manifest_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default="installed")
+    active_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_health_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    last_health_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    drain_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    uninstalled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class SuperAssistantMulticaConfig(Base):
     """每用户一条的 multica 外部集成配置。
 

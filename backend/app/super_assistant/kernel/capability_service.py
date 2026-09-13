@@ -30,7 +30,10 @@ def persist_capability_revision(
         "workspace_scope": [], "network_scope": [], "secret_refs": [], "enabled": True,
     }
     if existing is not None:
-        if any(getattr(existing, key) != value for key, value in values.items()):
+        # ``enabled`` is the live authorization bit.  It is intentionally
+        # mutable during plugin/MCP disable, drain and re-enable; the
+        # manifest and transport fields above remain immutable.
+        if any(getattr(existing, key) != value for key, value in values.items() if key != "enabled"):
             raise ContractError("capability revision is immutable")
         return existing
     row = CapabilityRevision(key=descriptor.key, revision=descriptor.revision, **values)
@@ -70,3 +73,24 @@ def revoke_capability_revisions(
     if rows:
         db.flush()
     return len(rows)
+
+
+def set_capability_revision_enabled(
+    db: Session,
+    key: str,
+    revision: int,
+    *,
+    enabled: bool,
+) -> bool:
+    """Toggle only the live authorization bit of an immutable snapshot."""
+    bind = db.get_bind()
+    if bind is None or not inspect(bind).has_table(CapabilityRevision.__tablename__):
+        return False
+    row = db.scalar(select(CapabilityRevision).where(
+        CapabilityRevision.key == str(key), CapabilityRevision.revision == int(revision),
+    ))
+    if row is None:
+        return False
+    row.enabled = bool(enabled)
+    db.flush()
+    return True

@@ -21,6 +21,7 @@ from app.super_assistant import (
     conversation_service as _conversation_service,
 )
 from app.super_assistant import mcp_server_service
+from app.super_assistant import process_plugin_service
 from app.super_assistant import memory_service
 from app.super_assistant import palace_consolidate
 from app.super_assistant import palace_service
@@ -51,6 +52,8 @@ from app.super_assistant.schemas import (
     McpServerOut,
     McpServerUpdate,
     McpTestOut,
+    ProcessPluginCreate,
+    ProcessPluginOut,
     MemoryCreate,
     MemoryDistillReport,
     MemoryDistillRequest,
@@ -120,6 +123,16 @@ def _mcp_http_error(
         mcp_server_service.McpServerUnavailableError,
     ):
         status_code = 503
+    else:
+        status_code = 400
+    return HTTPException(status_code=status_code, detail=str(exc))
+
+
+def _process_plugin_http_error(exc: process_plugin_service.ProcessPluginServiceError) -> HTTPException:
+    if isinstance(exc, process_plugin_service.ProcessPluginNotFoundError):
+        status_code = 404
+    elif isinstance(exc, (process_plugin_service.ProcessPluginConflictError, process_plugin_service.ProcessPluginBusyError)):
+        status_code = 409
     else:
         status_code = 400
     return HTTPException(status_code=status_code, detail=str(exc))
@@ -677,6 +690,64 @@ def install_platform_minio_mcp(
         )
     except mcp_server_service.McpServerServiceError as exc:
         raise _mcp_http_error(exc) from exc
+
+
+@router.get("/process-plugins", response_model=list[ProcessPluginOut])
+def list_process_plugins(
+    include_uninstalled: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return process_plugin_service.list_process_plugins(db, current_user.id, include_uninstalled=include_uninstalled)
+
+
+@router.post("/process-plugins", response_model=ProcessPluginOut, status_code=201)
+def install_process_plugin(
+    body: ProcessPluginCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return process_plugin_service.install_process_plugin(db, current_user.id, body)
+    except process_plugin_service.ProcessPluginServiceError as exc:
+        raise _process_plugin_http_error(exc) from exc
+
+
+@router.post("/process-plugins/{plugin_id}/enable", response_model=ProcessPluginOut)
+def enable_process_plugin(
+    plugin_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return process_plugin_service.enable_process_plugin(db, current_user.id, plugin_id)
+    except process_plugin_service.ProcessPluginServiceError as exc:
+        raise _process_plugin_http_error(exc) from exc
+
+
+@router.post("/process-plugins/{plugin_id}/disable", response_model=ProcessPluginOut)
+def disable_process_plugin(
+    plugin_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return process_plugin_service.disable_process_plugin(db, current_user.id, plugin_id)
+    except process_plugin_service.ProcessPluginServiceError as exc:
+        raise _process_plugin_http_error(exc) from exc
+
+
+@router.delete("/process-plugins/{plugin_id}", status_code=204)
+def uninstall_process_plugin(
+    plugin_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        process_plugin_service.uninstall_process_plugin(db, current_user.id, plugin_id)
+    except process_plugin_service.ProcessPluginServiceError as exc:
+        raise _process_plugin_http_error(exc) from exc
+    return Response(status_code=204)
 
 
 @router.get("/memories", response_model=list[MemoryOut])
