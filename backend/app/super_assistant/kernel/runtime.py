@@ -511,6 +511,13 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
         if plugin is not None:
             from app.shared.config import settings
             from app.shared.config import normalized_environment
+            # The current install path only supports user_untrusted plugins.
+            # Do not trust a mutable DB string to elevate a process plugin to
+            # a future verified/platform tier; that tier needs a signed trust
+            # root and a dedicated runner before it can be executable.
+            if plugin.trust_level != TrustLevel.USER_UNTRUSTED.value:
+                logger.error("refusing process plugin with unsupported trust level: %s", plugin.id)
+                return None
             if normalized_environment(settings.environment) == "production" and plugin.trust_level == TrustLevel.USER_UNTRUSTED.value:
                 logger.error("refusing user_untrusted process plugin in production: %s", plugin.id)
                 return None

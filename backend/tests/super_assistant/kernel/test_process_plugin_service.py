@@ -130,3 +130,17 @@ def test_production_fails_closed_for_user_untrusted_plugin(db, admin_user, monke
         enable_process_plugin(db, admin_user.id, row.id)
     db.refresh(row)
     assert row.state == "installed"
+
+
+def test_tampered_trust_level_cannot_elevate_process_plugin(db, admin_user):
+    """A mutable DB trust string must never create an executable elevation."""
+    from app.super_assistant.kernel import runtime
+
+    row = install_process_plugin(db, admin_user.id, _body(key="user.tampered"))
+    row.trust_level = "verified"
+    db.commit()
+    with pytest.raises(ProcessPluginValidationError, match="未经平台签名"):
+        enable_process_plugin(db, admin_user.id, row.id)
+    call = SimpleNamespace(target_ref=row.id, capability_revision=row.revision, capability_key=capability_key(admin_user.id, row.key))
+    run = SimpleNamespace(owner_id=admin_user.id)
+    assert runtime._resolve_external_connector(db, run, call) is None
