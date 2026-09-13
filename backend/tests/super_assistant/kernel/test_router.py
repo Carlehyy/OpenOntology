@@ -153,7 +153,7 @@ def test_kernel_run_list_is_owner_scoped_and_keeps_independent_runs(client, db, 
     assert {item["goal"] for item in listed.json()} == {"task 0", "task 1"}
 
 
-def _artifact_fixture(db, owner, *, content: bytes, storage_ref: str | None = None, mime_type: str = "application/octet-stream", status: str = "complete", retention_until=None):
+def _artifact_fixture(db, owner, *, content: bytes, storage_ref: str | None = None, inline: bool = False, mime_type: str = "application/octet-stream", status: str = "complete", retention_until=None):
     conversation = SuperAssistantConversation(owner_id=owner.id, title="artifact")
     db.add(conversation)
     db.flush()
@@ -163,7 +163,8 @@ def _artifact_fixture(db, owner, *, content: bytes, storage_ref: str | None = No
     artifact = Artifact(
         owner_id=owner.id, run_id=run.id, kind="file", mime_type=mime_type,
         size=len(content), checksum="sha256:" + hashlib.sha256(content).hexdigest(),
-        storage_ref=storage_ref or "pending://artifact", status=status, business_status="success",
+        storage_ref=storage_ref or "pending://artifact", inline_content=content.decode("utf-8") if inline else None,
+        status=status, business_status="success",
         retention_until=retention_until,
     )
     db.add(artifact)
@@ -172,6 +173,15 @@ def _artifact_fixture(db, owner, *, content: bytes, storage_ref: str | None = No
         artifact.storage_ref = f"s3://assistant-workspace/{owner.id}/{run.id}/{artifact.id}"
     db.commit()
     return run, artifact
+
+
+def test_kernel_inline_artifact_download_remains_compatible(client, db, admin_user, auth_headers):
+    data = "内联文本".encode("utf-8")
+    run, artifact = _artifact_fixture(db, admin_user, content=data, inline=True, mime_type="text/plain", storage_ref="inline://artifact")
+    response = client.get(f"/api/v2/super-assistant/runs/{run.id}/artifacts/{artifact.id}/download", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.content == data
+    assert response.headers["content-type"].startswith("text/plain")
 
 
 def test_kernel_artifact_download_verifies_object_bytes_and_preserves_json_shape(client, db, admin_user, auth_headers, monkeypatch):

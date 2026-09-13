@@ -194,7 +194,7 @@ def enable_process_plugin(db: Session, owner_id: str, plugin_id: str) -> SuperAs
     if row.state not in {PluginState.INSTALLED.value, PluginState.DISABLED.value}:
         raise ProcessPluginValidationError("当前插件状态不可启用")
     try:
-        health = _healthcheck_before_enable(row)
+        _healthcheck_before_enable(row)
     except ProcessPluginValidationError as exc:
         row.last_health_status = "failed"
         row.last_health_message = str(exc)[:500]
