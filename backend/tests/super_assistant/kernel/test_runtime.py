@@ -121,3 +121,17 @@ def test_kernel_runtime_honors_max_steps_and_yields_retry(db, monkeypatch):
     assert turn.close_reason == "waiting_retry"
     step = db.query(runtime.ExecutionStep).filter_by(turn_id=turn.id).one()
     assert step.close_reason == "waiting_retry"
+
+
+def test_kernel_runtime_materializes_external_wait_as_reconcilable_call(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="调用外部智能体")
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {"content": "已发起", "tool_calls": [], "external_call": {"target_ref": "agent:research", "reason": "等待外部结果"}})
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "external-wait"}))
+    db.expire_all()
+    persisted = db.get(ExecutionRun, run.id)
+    assert persisted.status == "waiting_external"
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+    assert external.status == "waiting_external"
+    assert external.outcome == "remote_running"
+    inbox = db.query(runtime.InboxItem).filter_by(run_id=run.id, kind="external_event").one()
+    assert inbox.call_id == external.id

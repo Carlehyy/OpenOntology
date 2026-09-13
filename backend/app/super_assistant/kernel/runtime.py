@@ -186,9 +186,15 @@ def _policy_for_run(run: ExecutionRun) -> ExecutionPolicy:
 
 def _rebuild_messages(db, run: ExecutionRun) -> list[dict]:
     messages = [{"role": "system", "content": "你是 OpenOntology 的超级助手。请直接完成用户目标，并在无法完成时说明原因。"}, {"role": "user", "content": run.goal}]
-    artifacts = db.scalars(select(Artifact).where(Artifact.run_id == run.id, Artifact.kind == "assistant.message").order_by(Artifact.id)).all()
-    for artifact in artifacts:
-        if artifact.inline_content: messages.append({"role": "assistant", "content": artifact.inline_content})
+    message_events = db.scalars(select(ExecutionEvent).where(ExecutionEvent.run_id == run.id, ExecutionEvent.event_type == "assistant.message").order_by(ExecutionEvent.seq)).all()
+    seen_artifacts: set[str] = set()
+    for event in message_events:
+        ref = str((event.payload or {}).get("message_ref") or "")
+        artifact_id = ref.removeprefix("artifact://")
+        artifact = db.get(Artifact, artifact_id) if artifact_id else None
+        if artifact is not None and artifact.inline_content and artifact.id not in seen_artifacts:
+            messages.append({"role": "assistant", "content": artifact.inline_content})
+            seen_artifacts.add(artifact.id)
     pending = db.scalars(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.status == "pending", InboxItem.source == "user").order_by(InboxItem.accepted_at, InboxItem.id)).all()
     for item in pending:
         payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
@@ -253,7 +259,16 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
         inbox = InboxItem(run_id=run.id, kind=kind, priority=10, status="pending", approval_id=approval.id, target_ref=target_ref or approval.id, payload={"approval_id": approval.id}, source="system", idempotency_key=f"approval:{approval.id}"); db.add(inbox); db.flush()
         append_event(db, run, event_type="approval.requested", payload={"approval_id": approval.id, "run_id": run.id, "call_id": approval.call_id, "scope_snapshot_ref": run.permission_snapshot_ref or f"run://{run.id}/scope", "expires_at": approval.expires_at.isoformat()}, actor={"kind": "worker"}, command_id=f"approval:{approval.id}", idempotency_key=f"approval-request:{approval.id}", lease=token)
     elif kind in {"question_answer", "external_event"}:
-        inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
+        external_call = None
+        if kind == "external_event" and call is not None:
+            # The model decision is closed above; the requested remote work is
+            # a separate long-lived Call so reconciliation can advance it
+            # without reopening the model Call.
+            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=1, target_ref=target_ref, input_snapshot_ref=call.input_snapshot_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running")
+            db.add(external_call); db.flush()
+            append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": 1, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": "external_async", "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
+            append_event(db, run, event_type="call.outcome_changed", payload={"status": "waiting_external", "outcome": "remote_running", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
+        inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", call_id=external_call.id if external_call is not None else None, question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
     before = run.status; run.status = {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
     append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id if inbox else f"run:{run.id}:wait", "kind": kind, "target_ref": target_ref or (inbox.id if inbox else run.id), "expiry_policy": "none"}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)
     reason = {
