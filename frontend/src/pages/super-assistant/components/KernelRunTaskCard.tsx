@@ -18,6 +18,7 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [input, setInput] = useState('')
+  const [artifactContent, setArtifactContent] = useState<Record<string, string>>({})
   const lastEventRef = useRef<string | undefined>(undefined)
 
   useEffect(() => {
@@ -73,9 +74,35 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
     if (!run || !input.trim() || busy) return
     setBusy(true); setError(null)
     try {
-      await superAssistantApi.submitKernelInput(runId, { kind: 'user_input', content: input.trim(), idempotency_key: `${runId}:input:${crypto.randomUUID()}` })
+      const question = run.current_inbox.find(item => item.kind === 'question_answer')
+      await superAssistantApi.submitKernelInput(runId, {
+        kind: question ? 'question_answer' : 'user_input',
+        content: input.trim(),
+        ...(question?.question_id ? { question_id: question.question_id } : {}),
+        idempotency_key: `${runId}:input:${crypto.randomUUID()}`,
+      })
       setInput('')
     } catch (cause) { setError(cause instanceof Error ? cause.message : '输入提交失败') }
+    finally { setBusy(false) }
+  }
+
+  const resumeRetry = async () => {
+    if (!run || busy) return
+    setBusy(true); setError(null)
+    try {
+      await superAssistantApi.submitKernelInput(runId, { kind: 'resume', content: '继续执行', idempotency_key: `${runId}:resume:${crypto.randomUUID()}` })
+      setRun(current => current ? { ...current, status: 'active' } : current)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '恢复执行失败') }
+    finally { setBusy(false) }
+  }
+
+  const loadArtifact = async (artifactId: string) => {
+    if (busy || artifactContent[artifactId] !== undefined) return
+    setBusy(true); setError(null)
+    try {
+      const result = await superAssistantApi.kernelArtifact(runId, artifactId)
+      setArtifactContent(current => ({ ...current, [artifactId]: result.content || '（Artifact 没有内联文本，请使用原始下载入口）' }))
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Artifact 加载失败') }
     finally { setBusy(false) }
   }
 
@@ -101,7 +128,7 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
       {error && <p role="alert" className="mt-1 text-red-600">{error}</p>}
       {run && run.current_inbox.length > 0 && (
         <div className="mt-2 space-y-2 rounded bg-muted/40 p-2">
-          {run.current_inbox.map(item => item.kind === 'approval' && item.approval_id ? (
+          {run.current_inbox.map(item => item.kind === 'approval_decision' && item.approval_id ? (
             <div key={item.inbox_id} className="flex items-center gap-2"><span>需要审批</span><button type="button" disabled={busy} onClick={() => void decideApproval(item.approval_id!, 'approved')} className="rounded border px-2 py-1">批准</button><button type="button" disabled={busy} onClick={() => void decideApproval(item.approval_id!, 'denied')} className="rounded border px-2 py-1">拒绝</button></div>
           ) : <span key={item.inbox_id}>等待输入</span>)}
         </div>
@@ -111,10 +138,23 @@ export default function KernelRunTaskCard({ runId, onClose }: { runId: string; o
       )}
       {run && !terminalStatuses.has(run.status) && (
         <div className="mt-2 flex gap-1.5">
-          {run.status === 'paused'
+          {run.status === 'waiting_retry'
+            ? <button type="button" disabled={busy} onClick={() => void resumeRetry()} className="rounded border px-2 py-1 hover:bg-muted disabled:opacity-50"><Play size={12} className="mr-1 inline" />重试</button>
+            : run.status === 'paused'
             ? <button type="button" disabled={busy} onClick={() => void sendControl('resume')} className="rounded border px-2 py-1 hover:bg-muted disabled:opacity-50"><Play size={12} className="mr-1 inline" />继续</button>
             : <button type="button" disabled={busy} onClick={() => void sendControl('pause')} className="rounded border px-2 py-1 hover:bg-muted disabled:opacity-50"><Pause size={12} className="mr-1 inline" />暂停</button>}
           <button type="button" disabled={busy} onClick={() => void sendControl('cancel')} className="rounded border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50 disabled:opacity-50"><Square size={11} className="mr-1 inline" />取消</button>
+        </div>
+      )}
+      {run && run.artifacts.length > 0 && (
+        <div className="mt-2 space-y-1.5 border-t border-border pt-2">
+          {run.artifacts.map(artifact => (
+            <div key={artifact.artifact_id} className="rounded bg-muted/40 p-2">
+              <button type="button" onClick={() => void loadArtifact(artifact.artifact_id)} className="font-medium underline">查看 {artifact.kind}</button>
+              <span className="ml-2 text-muted-foreground">{artifact.mime_type} · {artifact.size} B</span>
+              {artifactContent[artifact.artifact_id] !== undefined && <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-[11px]">{artifactContent[artifact.artifact_id]}</pre>}
+            </div>
+          ))}
         </div>
       )}
       {run && terminalStatuses.has(run.status) && onClose && <button type="button" onClick={onClose} className="mt-2 text-muted-foreground underline">关闭任务卡</button>}
