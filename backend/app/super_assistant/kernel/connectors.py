@@ -244,9 +244,22 @@ class RemoteAgentHttpConnector:
         if self.transport is not None:
             client_kwargs["transport"] = self.transport
         async with httpx.AsyncClient(**client_kwargs) as client:
-            response = await client.post(self.endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            value = response.json()
+            # Read the untrusted remote response incrementally.  Parsing via
+            # ``client.post(...).json()`` first materializes an arbitrarily
+            # large body before the kernel's later 20k content cap can help.
+            chunks: list[bytes] = []
+            size = 0
+            async with client.stream("POST", self.endpoint, headers=headers, json=body) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > 256 * 1024:
+                        raise ContractError("remote connector response exceeds 256 KiB")
+                    chunks.append(chunk)
+            try:
+                value = json.loads(b"".join(chunks))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ContractError("remote connector response is not valid JSON") from exc
         if not isinstance(value, dict):
             raise ContractError("remote connector response must be an object")
         status = str(value.get("status") or "failed").lower()

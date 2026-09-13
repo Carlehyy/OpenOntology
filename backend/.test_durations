@@ -1841,6 +1841,7 @@
     "tests/super_assistant/kernel/test_connectors.py::test_multica_tool_connector_wraps_existing_service_without_expanding_capabilities": 0.22600991697981954,
     "tests/super_assistant/kernel/test_connectors.py::test_remote_agent_http_connector_is_dispatchable_and_preserves_contract": 0.2846537498990074,
     "tests/super_assistant/kernel/test_connectors.py::test_remote_connector_does_not_claim_unsupported_cancel_or_status": 0.23634504084475338,
+    "tests/super_assistant/kernel/test_connectors.py::test_remote_direct_response_is_bounded_before_json_materialization": 0.2,
     "tests/super_assistant/kernel/test_connectors.py::test_remote_direct_unknown_provider_status_is_preserved_for_reconciliation": 0.21366608410608023,
     "tests/super_assistant/kernel/test_connectors.py::test_remote_pull_connector_enqueues_and_reconciles_with_truthful_controls": 0.20716091711074114,
     "tests/super_assistant/kernel/test_context_memory_artifacts.py::test_artifact_checksum_and_business_completion_are_separate": 0.18944575102068484,

@@ -180,3 +180,19 @@ async def test_remote_direct_unknown_provider_status_is_preserved_for_reconcilia
     connector = RemoteAgentHttpConnector(agent_id="remote-unknown", key="remote.unknown", endpoint="https://agent.example/run", transport=httpx.MockTransport(handler))
     result = await connector.invoke(run_id="r1", call_id="c1", input_ref='{"message":"x"}', deadline=None)
     assert result["status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_remote_direct_response_is_bounded_before_json_materialization():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b'{"status":"answered","content":"' + b"x" * (256 * 1024) + b'"}',
+        )
+
+    connector = RemoteAgentHttpConnector(
+        agent_id="remote-large", key="remote.large",
+        endpoint="https://agent.example/run", transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ContractError, match="256 KiB"):
+        await connector.invoke(run_id="r1", call_id="c1", input_ref='{"message":"x"}', deadline=None)
