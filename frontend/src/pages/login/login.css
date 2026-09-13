@@ -197,7 +197,7 @@
   border: 1px solid rgba(205, 214, 221, 0.92);
   border-radius: 21px;
   background: rgba(255, 255, 255, 0.975);
-  box-shadow: 0 20px 50px rgba(34, 61, 73, 0.08), inset 0 1px 0 #fff;
+  box-shadow: 0 20px 50px rgba(34, 61, 73, 0.08), inset 0 1px 0 var(--color-text-inverse);
   backdrop-filter: blur(12px);
 }
 
