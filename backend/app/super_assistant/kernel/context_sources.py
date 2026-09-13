@@ -18,6 +18,7 @@ from app.super_assistant import memory_service, palace_graph
 from app.super_assistant.models import SuperAssistantMemory, SuperAssistantPalaceBuild, SuperAssistantPalaceFile
 
 from .context import ContextCandidate, ContextTier, SourceRef
+from .source_registry import tombstoned_source_ids
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def _memory_candidates(db: Session, owner_id: str, query_text: str) -> list[Cont
     # pinned 仍是用户明确要求常驻的上下文来源。
     relevant = memory_service.relevant_memories(db, owner_id, query_text) if query_text else []
     relevant_ids = {row.id for row in relevant}
+    tombstones = tombstoned_source_ids(db, owner_id, "memory")
     pinned = db.scalars(
         select(SuperAssistantMemory)
         .where(
@@ -55,7 +57,7 @@ def _memory_candidates(db: Session, owner_id: str, query_text: str) -> list[Cont
     for row in [*pinned, *relevant]:
         # owner/status 条件已在查询中，但保留显式检查防止调用方传入被刷新
         # 的对象或未来检索实现绕过条件。
-        if row.id in seen or row.owner_id != owner_id or row.superseded:
+        if row.id in seen or row.id in tombstones or row.owner_id != owner_id or row.superseded:
             continue
         seen.add(row.id)
         rows.append(row)
@@ -86,7 +88,8 @@ def _active_palace_files(db: Session, owner_id: str) -> dict[str, SuperAssistant
             SuperAssistantPalaceFile.status == "built",
         )
     ).all()
-    return {row.id: row for row in rows}
+    tombstones = tombstoned_source_ids(db, owner_id, "palace_file")
+    return {row.id: row for row in rows if row.id not in tombstones}
 
 
 def _latest_builds(db: Session, file_ids: set[str]) -> dict[str, SuperAssistantPalaceBuild]:

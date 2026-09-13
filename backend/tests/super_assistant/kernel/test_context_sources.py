@@ -5,6 +5,7 @@ from app.models.user import User
 from app.super_assistant import palace_graph
 from app.super_assistant.models import SuperAssistantMemory, SuperAssistantPalaceBuild, SuperAssistantPalaceFile
 from app.super_assistant.kernel.context_sources import collect_context_candidates
+from app.super_assistant.kernel.source_registry import tombstone_source
 
 
 def _owner(db):
@@ -77,3 +78,24 @@ def test_collector_tolerates_graph_outage_and_keeps_pinned_memory(db, monkeypatc
     monkeypatch.setattr(palace_graph, "search", lambda *_args: (_ for _ in ()).throw(RuntimeError("neo4j down")))
     candidates = collect_context_candidates(db, owner.id, "任意查询")
     assert [candidate.source.id for candidate in candidates] == [memory.id]
+
+
+def test_tombstone_is_idempotent_and_excludes_existing_source(db):
+    owner = _owner(db)
+    memory = SuperAssistantMemory(owner_id=owner.id, content="待删除事实", pinned=True, source="explicit")
+    db.add(memory)
+    db.flush()
+    first = tombstone_source(
+        db, owner_id=owner.id, kind="memory", source_id=memory.id, revision="r1",
+        locator=f"memory://{memory.id}", recipe_revision="memory.v1",
+        extraction_id="extract-1", reason="user_deleted",
+    )
+    second = tombstone_source(
+        db, owner_id=owner.id, kind="memory", source_id=memory.id, revision="r2",
+        locator=f"memory://{memory.id}", recipe_revision="memory.v1",
+        extraction_id="extract-2", reason="retry",
+    )
+    db.commit()
+    assert first.id == second.id
+    assert second.revision == "r1"
+    assert collect_context_candidates(db, owner.id, "") == []

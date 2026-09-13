@@ -998,6 +998,16 @@ def delete_palace_file(db: Session, owner_id: str, file_id: str) -> None:
         palace_graph.remove_file_graph(owner_id, file_id, row.filename)
     except Exception:
         logger.warning("记忆宫殿图谱清理失败（file=%s）", file_id, exc_info=True)
+    # Record the source retirement in the kernel before deleting the legacy row;
+    # stale Neo4j projections are therefore excluded from future Context Packs.
+    from app.super_assistant.kernel.source_registry import tombstone_source
+    revision = row.sha256 or row.updated_at.isoformat()
+    tombstone_source(
+        db, owner_id=owner_id, kind="palace_file", source_id=row.id,
+        revision=revision, locator=f"palace://{row.id}",
+        recipe_revision="palace.graph.v1", extraction_id=f"palace:{row.id}:{revision}",
+        reason="user_deleted",
+    )
     db.delete(row)
     db.commit()
     palace_cache.invalidate_graph()

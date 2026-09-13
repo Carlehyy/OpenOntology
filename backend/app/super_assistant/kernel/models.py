@@ -254,6 +254,32 @@ class Artifact(Base):
     provenance_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
 
+class ContextSourceTombstone(Base):
+    """Durable deletion marker for long-lived context sources.
+
+    A source is matched by ``(owner_id, kind, source_id)``; ``revision`` is
+    retained for audit and allows a future replacement revision to be indexed
+    deliberately rather than resurrecting deleted content by accident.
+    """
+
+    __tablename__ = "super_assistant_context_source_tombstones"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "kind", "source_id", name="uq_sa_context_tombstone_source"),
+        Index("ix_sa_context_tombstones_owner_kind", "owner_id", "kind"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    revision: Mapped[str] = mapped_column(String(255), nullable=False)
+    locator: Mapped[str] = mapped_column(String(1000), nullable=False)
+    recipe_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    extraction_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    tombstone_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
 class CapabilityRevision(Base):
     __tablename__ = "super_assistant_capability_revisions"
     __table_args__ = (UniqueConstraint("key", "revision", name="uq_sa_capability_revision"),)
