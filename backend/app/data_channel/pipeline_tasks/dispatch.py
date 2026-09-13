@@ -33,6 +33,10 @@ SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT = "super_assistant.palace.extract"
 SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT = "super_assistant.palace.consolidate"
 ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT = "ontology.documents.published"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
+EXECUTION_STREAM = "SA_EXECUTION_V1"
+EXECUTION_RUN_SUBJECT = "sa.execution.run.*"
+EXECUTION_RECONCILE_SUBJECT = "sa.execution.reconcile"
+EXECUTION_DLQ_SUBJECT = "sa.execution.dlq"
 # 流的全部订阅主题：扩容只能追加，旧 subject 与旧 durable 保持不变
 PIPELINE_STREAM_SUBJECTS = (
     PIPELINE_EXECUTE_SUBJECT,
@@ -88,11 +92,36 @@ async def ensure_pipeline_stream(js) -> None:
             await js.update_stream(config)
 
 
+async def ensure_execution_stream(js) -> None:
+    """声明 kernel.v1 专用流；不修改既有 PIPELINE_TASKS 配置。"""
+    from nats.js.api import RetentionPolicy, StreamConfig
+
+    config = StreamConfig(
+        name=EXECUTION_STREAM,
+        subjects=[EXECUTION_RUN_SUBJECT, EXECUTION_RECONCILE_SUBJECT, EXECUTION_DLQ_SUBJECT],
+        retention=RetentionPolicy.WORK_QUEUE,
+        max_age=7 * 24 * 3600,
+        duplicate_window=10 * 60,
+    )
+    try:
+        await js.add_stream(config)
+    except Exception as exc:
+        if "already in use" not in str(exc):
+            raise
+        info = await js.stream_info(EXECUTION_STREAM)
+        existing = [str(subject) for subject in (info.config.subjects or [])]
+        merged = sorted(set(existing) | set(config.subjects))
+        if merged != sorted(existing):
+            config.subjects = merged
+            await js.update_stream(config)
+
+
 async def _dispatch(
     subject: str,
     payload: dict,
     nats_url: str,
     msg_id: str,
+    stream_name: str = PIPELINE_STREAM,
 ) -> None:
     global _stream_ensured
     import nats
@@ -100,9 +129,11 @@ async def _dispatch(
     nc = await nats.connect(nats_url, connect_timeout=3)
     try:
         js = nc.jetstream()
-        if not _stream_ensured:
+        if not _stream_ensured and stream_name == PIPELINE_STREAM:
             await ensure_pipeline_stream(js)
             _stream_ensured = True
+        elif stream_name == EXECUTION_STREAM:
+            await ensure_execution_stream(js)
         body = json.dumps(
             {**payload, "dispatched_at": datetime.utcnow().isoformat()},
             # ensure_ascii=False：消息体按 UTF-8 字节编码（CJK 3 字节而非
@@ -162,6 +193,28 @@ def dispatch_task(subject: str, payload: dict) -> None:
     """
     params = ":".join(f"{key}={payload[key]}" for key in sorted(payload))
     _dispatch_sync(subject, payload, f"{subject}:{params}:{time.time_ns()}")
+
+
+def dispatch_execution(subject: str, payload: dict, *, command_id: str) -> None:
+    """派发 kernel.v1 唤醒消息；正文只放执行 ID/版本引用。"""
+    if not subject.startswith("sa.execution."):
+        raise ValueError("execution subject must use sa.execution prefix")
+    _dispatch_sync_to_stream(
+        subject, payload, command_id, EXECUTION_STREAM,
+    )
+
+
+def _dispatch_sync_to_stream(subject: str, payload: dict, msg_id: str, stream_name: str) -> None:
+    from app.config import settings
+
+    nats_url = (settings.nats_url or "").strip()
+    if not nats_url:
+        raise RuntimeError("后台任务派发失败：未配置 NATS_URL（JetStream 消息通道）")
+    future = asyncio.run_coroutine_threadsafe(
+        _dispatch(subject, payload, nats_url, msg_id, stream_name=stream_name),
+        _get_dispatch_loop(),
+    )
+    future.result(timeout=15)
 
 
 def dispatch_pipeline_task(task_id: str, trigger_type: str,

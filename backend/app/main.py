@@ -255,6 +255,14 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# kernel.v1 执行 API 与 legacy Super Assistant 路由并行挂载，旧协议保持不变。
+from app.super_assistant.kernel import router as super_assistant_kernel_router
+app.include_router(
+    super_assistant_kernel_router.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant-kernel"],
+    dependencies=assistant_guard,
+)
 # 会话内容全局搜索：独立子路由（super_assistant/router.py 已贴近架构行数上限），
 # 与主路由同前缀同菜单守卫。
 from app.super_assistant import search as super_assistant_search

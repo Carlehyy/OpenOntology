@@ -6,7 +6,16 @@ from datetime import datetime
 import json
 from typing import Any
 
-from .contracts import ContractError
+from .contracts import (
+    CallOutcome,
+    CallStatus,
+    CancelReason,
+    ContractError,
+    RunStatus,
+    StepCloseReason,
+    TurnCloseReason,
+    validate_call,
+)
 
 EVENT_TYPES = frozenset({
     "run.created", "run.status_changed", "run.expiry_requested", "run.cancel_requested",
@@ -79,10 +88,7 @@ class EventEnvelope:
     def validate(self) -> None:
         if self.seq < 0:
             raise ContractError("event seq must be non-negative")
-        if self.schema_version < 1:
-            raise ContractError("schema_version must be positive")
-        if self.event_type not in EVENT_TYPES:
-            raise ContractError(f"unknown event type: {self.event_type}")
+        validate_payload(self.event_type, self.payload, schema_version=self.schema_version)
         if self.actor.get("kind") not in ACTOR_KINDS:
             raise ContractError("unknown actor kind")
         mode = self.redaction.get("mode")
@@ -92,20 +98,43 @@ class EventEnvelope:
             raise ContractError("reference redaction requires content_ref")
         if mode == "reference" and not self.redaction.get("checksum"):
             raise ContractError("reference redaction requires checksum")
-        required = REQUIRED_PAYLOAD.get(self.event_type, frozenset())
-        missing = sorted(required - self.payload.keys())
-        if missing:
-            raise ContractError(f"missing payload fields for {self.event_type}: {', '.join(missing)}")
-        _validate_payload_size(self.payload)
 
 
-def validate_payload(event_type: str, payload: dict[str, Any]) -> None:
+def validate_payload(event_type: str, payload: dict[str, Any], *, schema_version: int = 1) -> None:
+    if type(schema_version) is not int or schema_version != 1:
+        raise ContractError(f"unsupported schema_version: {schema_version!r}")
     if event_type not in EVENT_TYPES:
         raise ContractError(f"unknown event type: {event_type}")
     missing = sorted(REQUIRED_PAYLOAD[event_type] - payload.keys())
     if missing:
         raise ContractError(f"missing payload fields for {event_type}: {', '.join(missing)}")
+    _validate_payload_values(event_type, payload)
     _validate_payload_size(payload)
+
+
+def _validate_payload_values(event_type: str, payload: dict[str, Any]) -> None:
+    try:
+        if event_type == "run.status_changed":
+            RunStatus(payload["from"])
+            RunStatus(payload["to"])
+        elif event_type == "run.cancel_requested":
+            CancelReason(payload["cancel_reason"])
+        elif event_type == "run.cancel_timeout":
+            terminal_status = RunStatus(payload["run_terminal_status"])
+            if terminal_status not in {RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.FAILED}:
+                raise ContractError("cancel timeout must close the Run as cancelled, expired or failed")
+        elif event_type == "call.outcome_changed":
+            validate_call(CallStatus(payload["status"]), CallOutcome(payload["outcome"]))
+        elif event_type == "turn.closed":
+            TurnCloseReason(payload["reason"])
+        elif event_type == "step.closed":
+            StepCloseReason(payload["reason"])
+        elif event_type == "approval.decided" and payload["decision"] not in ("approved", "denied"):
+            raise ContractError("approval decision must be approved or denied")
+    except ContractError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"invalid payload values for {event_type}: {exc}") from exc
 
 
 def _validate_payload_size(payload: dict[str, Any]) -> None:

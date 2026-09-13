@@ -46,8 +46,12 @@ class ExecutionRun(Base):
     budget_snapshot_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    next_event_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lease_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     binding_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="direct_ui")
     binding_snapshot_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     ontology_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -293,3 +297,19 @@ class ExecutionDispatchOutbox(Base):
     claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ExecutionCommand(Base):
+    """命令幂等账本；同一 scope/key 的不同 payload 永远拒绝。"""
+
+    __tablename__ = "super_assistant_execution_commands"
+    __table_args__ = (UniqueConstraint("scope", "idempotency_key", name="uq_sa_execution_command_idempotency"),)
+
+    command_id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("super_assistant_execution_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)

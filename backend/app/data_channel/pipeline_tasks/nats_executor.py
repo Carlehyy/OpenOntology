@@ -61,6 +61,8 @@ _SUPER_ASSISTANT_REFLECT_FOCUSED_DURABLE = "super-assistant-reflect-focused"
 _SUPER_ASSISTANT_PALACE_EXTRACT_DURABLE = "super-assistant-palace-extract"
 _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE = "super-assistant-palace-consolidate"
 _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
+_EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
+_EXECUTION_RECONCILER_DURABLE = "sa-reconciler-v1"
 
 # 消息处理器：解析后的 payload → 协程；业务异常必须在 handler 内消化，
 # 逃到 ``_process_message`` 的异常一律 nak 重投
@@ -248,6 +250,30 @@ def _handler_registry():
     )
 
 
+async def _run_kernel_execution_message(payload: dict) -> None:
+    from app.super_assistant.kernel.runtime import process_execution_message
+
+    await process_execution_message(payload)
+
+
+async def _run_kernel_reconcile_message(payload: dict) -> None:
+    from app.super_assistant.kernel.runtime import reconcile_execution_message
+
+    await reconcile_execution_message(payload)
+
+
+def _execution_handler_registry():
+    """kernel.v1 使用独立 stream，但复用本 executor 进程和并发治理。"""
+    from app.data_channel.pipeline_tasks.dispatch import (
+        EXECUTION_RECONCILE_SUBJECT,
+        EXECUTION_RUN_SUBJECT,
+    )
+    return (
+        (EXECUTION_RUN_SUBJECT, _EXECUTION_KERNEL_DURABLE, _run_kernel_execution_message),
+        (EXECUTION_RECONCILE_SUBJECT, _EXECUTION_RECONCILER_DURABLE, _run_kernel_reconcile_message),
+    )
+
+
 class PipelineExecutor:
     """流水线执行消费者：拉取消息、限并发执行、按结果 ack/nak。"""
 
@@ -380,6 +406,8 @@ class PipelineExecutor:
         from app.data_channel.pipeline_tasks.dispatch import (
             PIPELINE_STREAM,
             ensure_pipeline_stream,
+            EXECUTION_STREAM,
+            ensure_execution_stream,
         )
 
         nc = await nats.connect(settings.nats_url.strip(), connect_timeout=3)
@@ -387,6 +415,7 @@ class PipelineExecutor:
         try:
             js = nc.jetstream()
             await ensure_pipeline_stream(js)
+            await ensure_execution_stream(js)
             loops = []
             for subject, durable, handler in _handler_registry():
                 subscription = await js.pull_subscribe(
@@ -399,6 +428,21 @@ class PipelineExecutor:
                     "流水线 executor 已订阅 %s（durable=%s）",
                     subject,
                     durable,
+                )
+                loops.append(
+                    asyncio.ensure_future(
+                        self._fetch_loop(subscription, handler, subject)
+                    )
+                )
+            for subject, durable, handler in _execution_handler_registry():
+                subscription = await js.pull_subscribe(
+                    subject,
+                    durable=durable,
+                    stream=EXECUTION_STREAM,
+                    config=ConsumerConfig(ack_wait=30, max_deliver=5),
+                )
+                logger.info(
+                    "kernel executor 已订阅 %s（durable=%s）", subject, durable,
                 )
                 loops.append(
                     asyncio.ensure_future(

@@ -106,3 +106,77 @@ def test_event_registry_rejects_reference_without_checksum():
 def test_event_registry_rejects_oversized_inline_payload():
     with pytest.raises(ContractError, match="64 KiB"):
         validate_payload("assistant.message", {"attempt_id": "a1", "message_ref": "x" * (64 * 1024)})
+
+
+@pytest.mark.parametrize("schema_version", [0, 2, 999, True, 1.0, "1"])
+def test_event_registry_rejects_unsupported_schema_version(schema_version):
+    with pytest.raises(ContractError, match="schema_version"):
+        validate_payload(
+            "run.created",
+            {"execution_version": "kernel.v1", "conversation_id": "c1"},
+            schema_version=schema_version,
+        )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            "run.status_changed",
+            {"from": "unknown", "to": "active", "reason": "test", "actor": "system", "version": 1},
+        ),
+        (
+            "run.cancel_requested",
+            {"reason": "test", "cancel_reason": "operator", "actor": "user"},
+        ),
+        (
+            "run.cancel_timeout",
+            {"reason": "test", "cancel_deadline": "t", "unresolved_call_ids": [], "run_terminal_status": "active"},
+        ),
+        (
+            "call.outcome_changed",
+            {
+                "status": "closed",
+                "outcome": "outcome_unknown",
+                "evidence_ref": "e1",
+                "connector_id": "connector",
+                "provider_event_id": "event",
+            },
+        ),
+        ("turn.closed", {"turn_id": "t1", "reason": "unknown"}),
+        ("step.closed", {"step_id": "s1", "reason": "completed"}),
+        (
+            "approval.decided",
+            {"approval_id": "a1", "decision": "expired", "actor": "user", "decided_at": "t", "authorization_hash": "h"},
+        ),
+    ],
+)
+def test_event_registry_rejects_invalid_frozen_values(event_type, payload):
+    with pytest.raises(ContractError, match="invalid|must"):
+        validate_payload(event_type, payload)
+
+
+def test_event_envelope_uses_schema_and_value_validation():
+    event = EventEnvelope(
+        event_id="e1",
+        run_id="r1",
+        seq=0,
+        event_type="call.outcome_changed",
+        schema_version=2,
+        occurred_at=datetime.now(timezone.utc),
+        actor={"kind": "worker"},
+        causation_id="c1",
+        correlation_id="r1",
+        command_id="cmd1",
+        idempotency_key="idem1",
+        payload={
+            "status": "closed",
+            "outcome": "outcome_unknown",
+            "evidence_ref": "e1",
+            "connector_id": "connector",
+            "provider_event_id": "event",
+        },
+        redaction={"mode": "none"},
+    )
+    with pytest.raises(ContractError, match="schema_version"):
+        event.validate()

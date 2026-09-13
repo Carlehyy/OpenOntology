@@ -30,6 +30,7 @@ _TABLES = (
     "super_assistant_capability_revisions",
     "super_assistant_execution_projection_cursors",
     "super_assistant_execution_dispatch_outbox",
+    "super_assistant_execution_commands",
 )
 
 

@@ -18,6 +18,7 @@ def test_kernel_models_are_registered_with_canonical_metadata():
         "super_assistant_capability_revisions",
         "super_assistant_execution_projection_cursors",
         "super_assistant_execution_dispatch_outbox",
+        "super_assistant_execution_commands",
     }
     assert expected <= set(Base.metadata.tables)
 
