@@ -19,45 +19,60 @@ CLAIM_TTL = timedelta(seconds=60)
 
 
 def publish_due_once(db: Session, *, batch_size: int = 20, publisher_id: str | None = None) -> int:
-    """发布一批到期 Outbox；返回本次完成 published 的数量。"""
+    """Claim immediately before each bounded publish, never a waiting batch.
+
+    Broker dispatch has a 15-second deadline, below CLAIM_TTL. Claiming all
+    twenty rows up front allowed later rows to expire while earlier broker
+    calls were still running. A unique token also fences stale acknowledgments
+    when the same publisher identity is reused after a crash.
+    """
     publisher_id = publisher_id or f"outbox:{uuid.uuid4().hex[:12]}"
-    now = _now()
-    rows = db.scalars(
-        select(ExecutionDispatchOutbox)
-        .where(
-            ExecutionDispatchOutbox.status == "pending",
-            ExecutionDispatchOutbox.next_attempt_at <= now,
-        )
-        .order_by(ExecutionDispatchOutbox.next_attempt_at)
-        .limit(batch_size)
-        .with_for_update(skip_locked=True)
-    ).all()
-    for row in rows:
-        row.status = "claimed"
-        row.claim_token = publisher_id
-        row.claim_expires_at = now + CLAIM_TTL
-    db.commit()
     published = 0
-    for row in rows:
+    for _ in range(batch_size):
+        now = _now()
+        row = db.scalar(
+            select(ExecutionDispatchOutbox)
+            .where(
+                ExecutionDispatchOutbox.status == "pending",
+                ExecutionDispatchOutbox.next_attempt_at <= now,
+            )
+            .order_by(ExecutionDispatchOutbox.next_attempt_at, ExecutionDispatchOutbox.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            db.rollback()
+            break
+        token = f"{publisher_id}:{uuid.uuid4().hex}"
+        row.status = "claimed"
+        row.claim_token = token
+        row.claim_expires_at = now + CLAIM_TTL
+        row_id = row.id
+        subject, command_id, message_ref, run_id = row.subject, row.command_id, row.message_ref, row.run_id
+        db.commit()
         try:
             dispatch_execution(
-                row.subject,
+                subject,
                 {
-                    "run_id": row.run_id,
-                    "command_id": row.command_id,
-                    "message_ref": row.message_ref,
-                    **({"call_id": row.message_ref.removeprefix("call://")} if row.message_ref.startswith("call://") else {}),
+                    "run_id": run_id,
+                    "command_id": command_id,
+                    "message_ref": message_ref,
+                    **({"call_id": message_ref.removeprefix("call://")} if message_ref.startswith("call://") else {}),
                 },
-                command_id=row.command_id,
+                command_id=command_id,
             )
         except Exception as exc:  # durable row remains for a later scheduler tick
-            _record_failure(db, row.id, publisher_id, str(exc))
+            _record_failure(db, row_id, token, str(exc))
         else:
-            current = db.get(ExecutionDispatchOutbox, row.id)
-            if current is None or current.claim_token != publisher_id:
+            current = _lock_claim(db, row_id, token)
+            if current is None:
+                db.rollback()
                 continue
             current.status = "published"
             current.published_at = _now()
+            current.claim_token = None
+            current.claim_expires_at = None
             db.commit()
             published += 1
     return published
@@ -69,7 +84,7 @@ def recover_expired_claims(db: Session) -> int:
     rows = db.scalars(select(ExecutionDispatchOutbox).where(
         ExecutionDispatchOutbox.status == "claimed",
         ExecutionDispatchOutbox.claim_expires_at < now,
-    )).all()
+    ).with_for_update(skip_locked=True).execution_options(populate_existing=True)).all()
     for row in rows:
         row.status = "pending"
         row.claim_token = None
@@ -102,9 +117,20 @@ def replay_dead_once(db: Session, *, outbox_id: str, owner_id: str) -> bool:
     return True
 
 
+def _lock_claim(db: Session, row_id: str, claim_token: str, *, require_claimed: bool = True):
+    statement = select(ExecutionDispatchOutbox).where(
+        ExecutionDispatchOutbox.id == row_id,
+        ExecutionDispatchOutbox.claim_token == claim_token,
+    )
+    if require_claimed:
+        statement = statement.where(ExecutionDispatchOutbox.status == "claimed")
+    return db.scalar(statement.with_for_update().execution_options(populate_existing=True))
+
+
 def _record_failure(db: Session, row_id: str, claim_token: str, error: str) -> None:
-    row = db.get(ExecutionDispatchOutbox, row_id)
-    if row is None or row.claim_token != claim_token:
+    row = _lock_claim(db, row_id, claim_token, require_claimed=False)
+    if row is None:
+        db.rollback()
         return
     row.attempt_count += 1
     row.error_ref = error[:1000]

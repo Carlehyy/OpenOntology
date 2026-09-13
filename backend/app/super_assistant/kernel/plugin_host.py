@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import shlex
+import signal
 from typing import Any, Mapping
 
 from .contracts import ContractError
@@ -62,6 +63,11 @@ class ProcessPluginHost:
                 # A never-read stderr pipe can otherwise block a noisy child.
                 stderr=asyncio.subprocess.DEVNULL,
                 cwd=cwd, env=self._env(),
+                # Bound the line protocol before any bytes are accumulated.
+                # The previous readline() path could retain an unbounded
+                # no-newline frame until the worker ran out of memory.
+                limit=1024 * 1024 + 1,
+                start_new_session=(os.name == "posix"),
             )
         except (OSError, ValueError) as exc:
             raise PluginHostError(f"plugin process start failed: {exc}") from exc
@@ -75,15 +81,17 @@ class ProcessPluginHost:
             try:
                 process.stdin.write((json.dumps(dict(payload), ensure_ascii=False) + "\n").encode())
                 await process.stdin.drain()
-                line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
+                line = await asyncio.wait_for(process.stdout.readuntil(b"\n"), timeout=timeout)
             except asyncio.TimeoutError as exc:
                 # A timed-out child is no longer trusted to consume the next
                 # request.  Kill it before returning so no process or secret
                 # environment survives a failed call.
                 await self.stop()
                 raise PluginHostError("plugin process request timed out") from exc
-            except (BrokenPipeError, ConnectionError, OSError) as exc:
+            except (asyncio.LimitOverrunError, asyncio.IncompleteReadError, BrokenPipeError, ConnectionError, OSError) as exc:
                 await self.stop()
+                if isinstance(exc, asyncio.LimitOverrunError):
+                    raise PluginHostError("plugin response frame is too large") from exc
                 raise PluginHostError("plugin process is unavailable") from exc
             if not line:
                 await self.stop()
@@ -127,14 +135,20 @@ class ProcessPluginHost:
         if process is None or process.returncode is not None:
             return
         try:
-            process.terminate()
+            if os.name == "posix" and getattr(process, "pid", None):
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
         except ProcessLookupError:
             return
         try:
             await asyncio.wait_for(process.wait(), timeout=max(0.0, grace_seconds))
         except asyncio.TimeoutError:
             try:
-                process.kill()
+                if os.name == "posix" and getattr(process, "pid", None):
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
             except ProcessLookupError:
                 return
             await process.wait()

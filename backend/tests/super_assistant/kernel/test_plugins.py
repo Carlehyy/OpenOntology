@@ -116,3 +116,19 @@ async def test_process_plugin_timeout_terminates_child():
     with pytest.raises(PluginHostError, match="timed out"):
         await host.invoke({"x": 1}, timeout=0.05)
     assert host._process is None
+
+
+@pytest.mark.asyncio
+async def test_process_plugin_rejects_unframed_oversized_response_before_memory_growth():
+    import shlex
+    import sys
+
+    script = "import sys; sys.stdout.write('x' * (1024 * 1024 + 1024)); sys.stdout.flush()"
+    host = ProcessPluginHost(PluginManifest(
+        key="user.frame", revision=1,
+        entrypoint=f"{sys.executable} -c {shlex.quote(script)}",
+        trust_level=TrustLevel.VERIFIED,
+    ))
+    with pytest.raises(PluginHostError, match="frame is too large"):
+        await host.invoke({"x": 1}, timeout=1)
+    assert host._process is None

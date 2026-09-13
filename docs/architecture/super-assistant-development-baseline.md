@@ -223,9 +223,9 @@ Multica 的 `list_agents/list_tasks` 作为 read_only Capability；`create_task`
 
 ## 10. 插件信任和资源策略
 
-插件信任级别固定为 `platform | verified | user_untrusted`。用户安装入口强制写入 `user_untrusted`；`platform/verified` 仅保留给未来平台签名或管理员受控流程，不能由用户请求体自选。用户插件可以安装但默认 disabled；在生产环境尚未部署独立 rootless plugin-runner 前，`user_untrusted` 启用请求必须 fail-closed，已启用的历史记录也不得被执行。隔离 runner 上线后，必须使用独立 uid/container；network 默认 deny、workspace 默认 read-only、secret 使用 allowlist；默认资源上限 CPU 1 core、内存 512 MB、wall time 10 分钟。manifest SHA-256 revision immutable，namespace 冲突安装失败。
+插件信任级别固定为 `platform | verified | user_untrusted`。用户安装入口强制写入 `user_untrusted`；`platform/verified` 仅保留给未来平台签名或管理员受控流程，不能由用户请求体自选。用户插件可以安装但默认 disabled；在生产环境尚未部署独立 rootless plugin-runner 前，`user_untrusted` 启用请求必须 fail-closed，已启用的历史记录也不得被执行。当前本地宿主只用于 development/test，并以独立进程组、最小环境和 1 MiB JSON frame 上限收口；它不构成生产隔离。隔离 runner 上线后，必须使用独立 uid/container；network 默认 deny、workspace 默认 read-only、secret 使用 allowlist；默认资源上限 CPU 1 core、内存 512 MB、wall time 10 分钟。manifest SHA-256 revision immutable，namespace 冲突安装失败。
 
-安装和启用分离。安装流程为 inspect → manifest/schema 校验 → 依赖解析 → 用户启用 → immutable revision；首次调用前由独立宿主完成 healthcheck 和身份/协议校验，失败保持 disabled。用户进程插件通过宿主获得输入引用、凭据引用、取消令牌、deadline、网络/工作区 scope 和 Artifact 回传接口，不能访问 Event Store、租约、授权器或任意数据库；宿主从最小环境启动进程，只有 `manifest.secret_refs` 明确列出的凭据才允许注入，禁止继承其他插件或 Worker 的 `PLUGIN_*` 环境变量；生产环境仍需由部署层提供 uid/container、资源和网络隔离。
+安装和启用分离。安装流程为 inspect → manifest/schema 校验 → 依赖解析 → 用户启用 → immutable revision；首次调用前由独立宿主完成 healthcheck 和身份/协议校验，失败保持 disabled。用户进程插件通过宿主获得输入引用、凭据引用、取消令牌、deadline、网络/工作区 scope 和 Artifact 回传接口，不能访问 Event Store、租约、授权器或任意数据库；宿主从最小环境启动进程，只有 `manifest.secret_refs` 明确列出的凭据才允许注入，禁止继承其他插件或 Worker 的 `PLUGIN_*` 环境变量；生产环境仍需由部署层提供 uid/container、资源和网络隔离。Outbox 每次只在即将调用 NATS 前 claim 一行，使用唯一 token 和 60 秒 claim lease，避免批量预占导致过期重发。
 
 现有 Skill 仅作为文本/行为说明按需加载，不因扩展名变成可执行插件；Skill 与 user_untrusted process plugin 不互转。插件安装、启用、卸载和在途 drain 都产生审计事件。卸载先阻止新 Call、撤销凭据、取消/对账在途 Call、停止进程；外部结果未确认时保持 `outcome_unknown`。插件返回的数据不能注册新 Capability、扩大权限或改变 Run 策略。MCP stdio 继续使用现有 enable/allowed-command 门控，不因插件 manifest 放宽；MCP 既有 `require_confirmation=true` 保持兼容；read_only 且仅 owner scope 的能力可在用户明确关闭确认后免确认，所有 `idempotent_write`、`non_idempotent_write` 和 `external_async` 必须审批。
 
