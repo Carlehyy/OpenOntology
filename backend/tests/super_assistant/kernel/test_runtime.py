@@ -179,6 +179,51 @@ def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, m
     assert artifact.inline_content == "远程研究完成"
 
 
+def test_kernel_external_async_result_is_reconciled_after_remote_acceptance(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派 multica 长任务")
+    target = f"fake.external_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "执行长任务"},
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "async-external"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+
+    class AsyncConnector:
+        def descriptor(self):
+            return AgentDescriptor(
+                agent_id="fake-async", key=target, revision=1, transport="multica",
+                session_policy=SessionPolicy.RESUMABLE, supports_cancel=True,
+                supports_query_status=True,
+            )
+
+        async def invoke(self, **kwargs):
+            return {"status": "running", "remote_task_ref": '{"issue_ref":"MYW-1"}', "provider_status": "queued"}
+
+        async def query_status(self, **kwargs):
+            return {"status": "completed", "content": "长任务完成", "remote_task_ref": kwargs["remote_task_ref"], "provider_event_id": "evt-1"}
+
+        async def cancel(self, **kwargs):
+            return {"status": "cancelled", "remote_task_ref": kwargs["remote_task_ref"]}
+
+    runtime.connector_registry.register(AsyncConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "waiting_external"
+    db.refresh(external)
+    assert external.status == "waiting_external"
+    assert external.remote_task_ref == '{"issue_ref":"MYW-1"}'
+
+    asyncio.run(runtime.reconcile_execution_message({
+        "run_id": run.id, "call_id": external.id, "connector_id": "fake-async",
+        "remote_state": "completed", "provider_event_id": "evt-1", "content": "长任务完成",
+    }))
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "active"
+    artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
+    assert artifact.inline_content == "长任务完成"
+
+
 def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):
     run, owner, _ = _runtime_fixture(db, monkeypatch, goal="查询 MCP")
     from app.super_assistant.mcp_client import namespaced_tool_name

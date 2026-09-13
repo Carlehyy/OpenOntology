@@ -101,3 +101,40 @@ async def test_multica_tool_connector_wraps_existing_service_without_expanding_c
     assert result["content"] == "created"
     assert seen == {"title": "写报告"}
     assert connector.descriptor().supports_query_status is False
+
+
+@pytest.mark.asyncio
+async def test_multica_create_connector_preserves_remote_ref_and_control_hooks():
+    calls = []
+
+    def execute(arguments):
+        calls.append(("invoke", arguments))
+        return json.dumps({
+            "created": True,
+            "issue": {"identifier": "MYW-9", "status": "open"},
+            "remote_task_ref": '{"issue_ref":"MYW-9","task_id":null}',
+            "note": "任务已创建",
+        }, ensure_ascii=False)
+
+    def query(remote_ref):
+        calls.append(("query", remote_ref))
+        return {"status": "completed", "content": "已完成", "remote_task_ref": remote_ref}
+
+    def cancel(remote_ref):
+        calls.append(("cancel", remote_ref))
+        return {"status": "cancelled", "remote_task_ref": remote_ref}
+
+    connector = MulticaToolConnector(
+        tool_name="multica_create_task", executor=execute,
+        query_executor=query, cancel_executor=cancel,
+    )
+    result = await connector.invoke(
+        run_id="r1", call_id="c1", input_ref='{"arguments":{"title":"写报告"}}', deadline=None,
+    )
+    assert result["status"] == "running"
+    assert result["remote_task_ref"] == '{"issue_ref":"MYW-9","task_id":null}'
+    assert connector.descriptor().supports_query_status is True
+    assert connector.descriptor().supports_cancel is True
+    assert (await connector.query_status(remote_task_ref=result["remote_task_ref"]))["status"] == "completed"
+    assert (await connector.cancel(remote_task_ref=result["remote_task_ref"]))["status"] == "cancelled"
+    assert [item[0] for item in calls] == ["invoke", "query", "cancel"]

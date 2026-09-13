@@ -111,6 +111,31 @@ def test_create_issue_assignee_contract_is_type_plus_id(monkeypatch):
     assert calls[2]["json"] == {"title": "修复登录", "allow_duplicate": True}
 
 
+def test_external_task_observation_and_cancel_use_issue_task_routes(monkeypatch):
+    calls: list = []
+    responses = iter([
+        _FakeResponse(payload={"identifier": "MYW-9", "status": "in_progress"}),
+        _FakeResponse(payload={"id": "task-1", "status": "running"}),
+        _FakeResponse(payload={"status": "cancelled"}),
+    ])
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        return next(responses)
+
+    monkeypatch.setattr(multica_client, "_request", fake_request)
+    issue = multica_client.get_issue("http://127.0.0.1:8080", "t", "ws", "MYW-9")
+    task = multica_client.get_active_task("http://127.0.0.1:8080", "t", "ws", "MYW-9")
+    result = multica_client.cancel_task("http://127.0.0.1:8080", "t", "ws", "MYW-9", "task-1")
+    assert issue["identifier"] == "MYW-9"
+    assert task["id"] == "task-1"
+    assert result["status"] == "cancelled"
+    assert calls[0]["url"].endswith("/api/issues/MYW-9")
+    assert calls[1]["url"].endswith("/api/issues/MYW-9/active-task")
+    assert calls[2]["method"] == "POST"
+    assert calls[2]["url"].endswith("/api/issues/MYW-9/tasks/task-1/cancel")
+
+
 def test_match_agent_exact_then_unique_substring():
     agents = [
         {"id": "agent-1", "name": "全栈工程师（KiMi）"},
