@@ -1828,6 +1828,7 @@
     "tests/shared/test_time_utils.py::test_parse_temporal_text_rejects_non_iso[]": 0.16414949903264642,
     "tests/shared/test_time_utils.py::test_parse_temporal_text_rejects_non_iso[not-a-time]": 0.26157920801779255,
     "tests/super_assistant/kernel/test_capability_callback.py::test_callback_connector_is_fenced_by_call_target": 0.24616529094055295,
+    "tests/super_assistant/kernel/test_capability_callback.py::test_callback_long_identifiers_use_bounded_event_keys": 0.26,
     "tests/super_assistant/kernel/test_capability_callback.py::test_callback_payload_cannot_reference_another_call_or_attempt": 0.259832915966399,
     "tests/super_assistant/kernel/test_capability_callback.py::test_callback_payload_drops_provider_private_fields_before_event_replay": 0.28961512399837375,
     "tests/super_assistant/kernel/test_capability_callback.py::test_callback_payload_is_bounded_before_authentication_work": 0.31922066595871,
