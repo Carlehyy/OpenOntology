@@ -207,3 +207,27 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 当前实现门槛应按以下事实读取：M1 的状态/事件/幂等/租约、跨进程 heartbeat、stuck 扫描、Inbox TTL 和 parent 子结果 Artifact 归并已有实现与专项测试；M2 的执行表、迁移、Outbox、NATS 基础、历史显式回填/回滚、结构化 DLQ 发布与重放入口已实现，真实 PostgreSQL/NATS 验收仍未闭环；M3 已具备多步 activation、等待输入/审批/外部结果、恢复、Artifact 结果证据，以及通过 `sa.execution.call.<owner>` durable consumer 进入 ConnectorRegistry 的直连外部 Call 派发；Assistant Hub 委派现在先创建 Kernel `assistant_child` 子 Run，子 Run 完成后通过父子 fan-in 归并结果，适配器内部仍保留 legacy delegation 行以兼容既有子会话语义；连接器按 owner 解析，并在首个调用前冻结 `CapabilityRevision`，不可用或异常进入 `outcome_unknown/reconciling`；Multica 已支持 opaque remote ref、周期查询、远端取消、终态 Artifact 和 Run 唤醒，仍不提供 provider 流式传输；M4 已有不可变 Capability/Connector、Remote Agent HTTP 适配、MCP 工具 Connector、RAP pull、HMAC callback ingress、provider event 幂等、MCP manifest 变更/禁用/卸载撤销、`plugin_host.py` 的独立 JSON-lines 进程边界，以及持久化用户进程插件的安装/启停/卸载 drain；真实 OS 沙箱、secret broker 和插件 staging 证据仍未闭环；M5 已接入 Memory/Palace ContextSource、来源字段、tombstone 持久化和结构化外部 Artifact 归档；M6 已有 kernel.v1 API/SSE、输入/审批/Artifact、深链、失败重试 API、多 Run 列表/任务卡、410 游标恢复、事件 reducer 和 inline/object Artifact 下载，真实浏览器验收仍需补齐；M7/M8 的真实 staging、迁移升级/downgrade、发布和回滚证据尚未完成。
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
+
+## 11. 当前实现证据（2026-09-14）
+
+本节只记录已经执行过的证据，不把设计目标当成完成事实。当前分支最近的实现提交包括：Kernel Artifact 下载 `7c1bdf9c`、外部插件与异步委派 `6d42792b`、进程插件健康/清理 `9f317068`、外部回调/恢复/DLQ/子结果归并 `b5775974`、Assistant Hub Kernel 子 Run `fd7323d9`、结构化外部 Artifact `1737edab`。
+
+| 里程碑 | 当前证据 | 状态 |
+|---|---|---|
+| M0 | 源码、迁移、路由、事件、前端和参考 Harness 已完成差距审计；本文件与开发基线已修正实现状态 | 已完成 |
+| M1 | `tests/super_assistant/kernel/` 专项回归；lease heartbeat、Inbox TTL、stuck recovery、父子结果 Artifact 均有测试 | 已完成代码闭环，需长时 staging 压测 |
+| M2 | `alembic heads` 单 head；执行 Outbox、DLQ 发布与 replay 测试；staging 数据库已执行 `alembic upgrade head` | 已完成代码闭环 |
+| M3 | 多步 activation、等待/恢复、统一外部 Call、Assistant Hub `assistant_child` 子 Run、fan-in 结果归并均有专项测试 | 已完成首版；Hub 内部 legacy 子会话行保留兼容 |
+| M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试 | 已完成首版；OS 沙箱、secret broker 需部署层证据 |
+| M5 | Context Pack、Memory/Palace source provenance、tombstone 排除、结构化 Artifact 和 checksum 校验有代码/测试 | 已完成首版 |
+| M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
+| M7 | PostgreSQL、Neo4j、NATS JetStream、MinIO staging 探针全部通过；staging 数据库已升级至 `0110_super_assistant_process_plugins` | 依赖探针通过，完整 E2E 待执行 |
+| M8 | 静态门禁和专项测试通过；前端 color-token 门禁仍有既有 `pages/login/login.css` 基线失败，完整发布/回滚演练尚未完成 | 未完成 |
+
+已执行的 staging 依赖探针命令为：
+
+```bash
+uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/super-assistant-kernel-live-e2e-staging.json
+```
+
+在隔离 Compose 网络中，PostgreSQL `SELECT 1`、NATS `SA_EXECUTION_V1` subjects、MinIO `assistant-workspace` bucket、Neo4j `RETURN 1` 均通过；并使用当前分支源码短时启动 `nats_executor`，确认 durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 已注册，随后已停止该临时进程。该证据不等价于完整业务 E2E 或生产发布批准。

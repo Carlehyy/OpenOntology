@@ -10,6 +10,7 @@ import uuid
 from typing import Any, Iterator, Optional
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.assistant_hub.contract import (
@@ -29,8 +30,28 @@ from app.ontologies.access import require_ontology_access
 from app.ontologies.agent_runtime.chat_cancel import chat_cancel_registry
 from app.ontologies.agent_runtime.models import AgentConversation
 from app.ontologies.agent_runtime.orchestrator import run_agent_turn
+from app.ontologies.projects.models import OntologyProject
+from app.ontologies.versions.models import OntologyVersion
 
 _KEY = "ontology_agent"
+
+
+def validate_delegated_binding(db: Session, *, owner_id: str, binding: dict) -> None:
+    """Prove delegated ontology/version ownership before a Kernel snapshot."""
+    ontology_id = str(binding.get("ontology_id") or "").strip()
+    version_id = str(binding.get("draft_version_id") or "").strip()
+    if not ontology_id or not version_id:
+        raise ValueError("delegated binding requires ontology and draft version")
+    project = db.scalar(select(OntologyProject).where(OntologyProject.id == ontology_id))
+    if project is None:
+        raise ValueError("delegated binding references an unknown ontology")
+    if str(project.created_by) != str(owner_id):
+        raise ValueError("delegated binding owner has no write permission")
+    version = db.scalar(select(OntologyVersion).where(OntologyVersion.id == version_id))
+    if version is None or str(version.ontology_id) != ontology_id:
+        raise ValueError("delegated binding draft version does not belong to ontology")
+    if version.node_kind != "draft" or version.lifecycle_status != "editing":
+        raise ValueError("delegated binding requires an editing draft version")
 
 
 class OntologyAgentAdapter:

@@ -90,6 +90,10 @@ _ADAPTER_IMPORT_WHITELIST: dict[str, set[str]] = {
         "app.ontologies.agent_runtime.chat_cancel",
         "app.ontologies.agent_runtime.models",
         "app.ontologies.agent_runtime.orchestrator",
+        # Kernel delegated binding validation is exposed through this adapter;
+        # the kernel store remains independent from ontology business modules.
+        "app.ontologies.projects.models",
+        "app.ontologies.versions.models",
     },
     "assistant_hub/adapters/exploration.py": {
         "app.assistant_hub.contract",
