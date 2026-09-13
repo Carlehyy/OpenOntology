@@ -208,9 +208,9 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，提交 `461847a1`）
+## 11. 当前实现证据（2026-09-14，基线提交 `103b674c`）
 
-本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；本轮对抗式修复统一收敛在 `461847a1`，其父提交为 `6f869ce6`。该提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
+本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，本轮在其上增加进程插件信任字段篡改防护，最新提交为 `103b674c`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
 | 里程碑 | 当前证据 | 状态 |
 |---|---|---|
@@ -246,7 +246,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（数据库行被运维改写时可绕过运行时拒绝）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。它们必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `461847a1`）
+## 13. 最新对抗式代码审查证据（提交 `103b674c`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
@@ -262,4 +262,4 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 本轮对用户进程插件做了额外的反向检查：`plugin_host.py` 目前只是受限 JSON-lines 子进程，`network_scope`、`workspace_scope`、`secret_refs` 没有被 OS/网络策略执行；`docker-compose.prod.yml` 的 backend 与 executor 也没有 rootless 用户、只读根文件系统、capability drop、no-new-privileges 或独立插件 namespace。运行时不会把 secret 值直接传给插件，因此当前插件能力是 fail-closed 的，不能作为“已支持凭据注入的商用插件”宣称。该事实与 `process_plugin_service.py`、`kernel/runtime.py`、`kernel/plugin_host.py` 和生产 Compose 配置一致，必须以独立 runner、secret broker 和攻击性 staging 验收完成后才可解除 M7/M8 阻断。
 
-同时增加了信任字段篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。专项插件回归为 `16 passed`，新增篡改测试已通过。
+同时增加了信任字段篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。专项插件回归为 `16 passed`，新增篡改测试已通过。该修复属于 fail-closed 防护，不能替代签名信任根。
