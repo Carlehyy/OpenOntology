@@ -31,6 +31,7 @@ export default defineConfig({
     '**/explore_model_consistency.spec.ts',
     '**/explore_pending_new_session.spec.ts',
     '**/explore_process_panel.spec.ts',
+    '**/explore_stream_idle_recovery.spec.ts',
     '**/file_asset_links.spec.ts',
     '**/governance_async_refresh.spec.ts',
     '**/governance_reject_modal.spec.ts',
