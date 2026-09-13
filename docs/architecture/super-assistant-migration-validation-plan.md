@@ -200,6 +200,13 @@ real staging checks for external side effects
 
 NATS poison message、DLQ、backpressure、最大重试和积压告警必须在 staging 演练；新增 `SA_EXECUTION_V1` 只追加 stream/subject，不改现有 `PIPELINE_TASKS` 和旧 durable。kernel.v1 长任务禁止无 NATS 时 inline fallback；Palace legacy fallback 只在 legacy 路径退役前保留并单独验收。
 
+staging 的第一步使用 `cd backend && uv run python scripts/super_assistant_kernel_live_e2e.py`。
+该脚本只读检查 PostgreSQL、`SA_EXECUTION_V1` 的 Run/Call/Reconcile subjects、MinIO
+Artifact bucket 和 Neo4j 连通性，并在 `.artifacts/super-assistant-kernel-live-e2e.json`
+生成机器可读证据；缺失依赖时返回非零。`--allow-missing` 只用于开发环境收集缺失项，
+不能作为发布验收结果。依赖探针通过后，才执行本计划中的真实长任务、Connector、回调、
+撤销、重启和 DLQ 场景。
+
 ## 7. 可观测指标
 
 初始目标值固定为：Run 创建到首次可见进度 ≤2s（正常依赖可用时）、Worker 恢复 ≤60s、Artifact 校验完成 ≤30s（1GB 以内）、SSE replay 24h。持续记录 Run 首进度、成功/失败/未知比例、恢复耗时、租约接管、重复回调/Outbox、Context Pack 裁剪、取消确认和 Artifact 完整性失败；超过目标只产生告警，不改变状态机语义。
