@@ -319,6 +319,8 @@ class MulticaToolConnector:
 
     tool_name: str
     executor: Callable[[dict[str, Any]], str] = field(compare=False, repr=False)
+    query_executor: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
+    cancel_executor: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
     revision: int = 1
 
     def descriptor(self) -> AgentDescriptor:
@@ -330,9 +332,9 @@ class MulticaToolConnector:
             capabilities=("workspace",),
             session_policy=SessionPolicy.STATELESS,
             supports_stream=False,
-            supports_cancel=False,
+            supports_cancel=self.cancel_executor is not None,
             supports_push=False,
-            supports_query_status=False,
+            supports_query_status=self.query_executor is not None,
             supports_artifact=False,
         )
 
@@ -345,6 +347,38 @@ class MulticaToolConnector:
         if not isinstance(arguments, dict):
             raise ContractError("Multica connector arguments must be an object")
         content = await asyncio.to_thread(self.executor, arguments)
+        # ``multica_create_task`` is provider-asynchronous: preserve the
+        # issue/task identity while keeping list/read tools synchronous.
+        parsed: dict[str, Any] = {}
+        if isinstance(content, str):
+            try:
+                value = json.loads(content)
+                if isinstance(value, dict):
+                    parsed = value
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        if self.tool_name == "multica_create_task" and parsed.get("created"):
+            remote_ref = parsed.get("remote_task_ref")
+            if remote_ref:
+                issue = parsed.get("issue") if isinstance(parsed.get("issue"), dict) else {}
+                provider_status = str(issue.get("status") or "running")
+                normalized = provider_status.lower().replace("-", "_")
+                if normalized in {"completed", "complete", "done", "closed", "resolved", "success", "succeeded", "finished"}:
+                    status = "answered"
+                elif normalized in {"failed", "failure", "error", "errored", "blocked"}:
+                    status = "failed"
+                elif normalized in {"cancelled", "canceled", "aborted", "stopped"}:
+                    status = "cancelled"
+                else:
+                    status = "running"
+                return {
+                    "run_id": run_id,
+                    "call_id": call_id,
+                    "status": status,
+                    "content": str(parsed.get("note") or content),
+                    "remote_task_ref": str(remote_ref),
+                    "provider_status": provider_status,
+                }
         return {
             "run_id": run_id,
             "call_id": call_id,
@@ -352,6 +386,51 @@ class MulticaToolConnector:
             "content": str(content),
             "provider_status": "completed",
         }
+
+    async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        if self.cancel_executor is None:
+            return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+        return await asyncio.to_thread(self.cancel_executor, remote_task_ref)
+
+    async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        if self.query_executor is None:
+            return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+        return await asyncio.to_thread(self.query_executor, remote_task_ref)
+
+
+@dataclass
+class ProcessPluginConnector:
+    """Kernel adapter for one persisted process-plugin revision.
+
+    Admission/release callbacks are supplied by the owner-scoped service so
+    unloading a plugin cannot race a new Call.  The host response is treated
+    as data only; it cannot alter the selected capability revision.
+    """
+
+    plugin_id: str
+    descriptor_value: AgentDescriptor
+    host: Any
+    admit: Callable[[], None] = field(compare=False, repr=False)
+    release: Callable[[], None] = field(compare=False, repr=False)
+
+    def descriptor(self) -> AgentDescriptor:
+        return self.descriptor_value
+
+    async def invoke(self, *, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
+        self.admit()
+        try:
+            timeout = 120.0
+            if isinstance(deadline, datetime):
+                timeout = max(1.0, min(timeout, (deadline - datetime.now(timezone.utc)).total_seconds()))
+            result = await self.host.health(timeout=min(5.0, timeout))
+            if result.get("ok") is False:
+                raise ContractError("process plugin health check failed")
+            value = await self.host.invoke({"run_id": run_id, "call_id": call_id, "input_ref": input_ref}, timeout=timeout)
+            if not isinstance(value, dict):
+                raise ContractError("process plugin result must be an object")
+            return {"run_id": run_id, "call_id": call_id, **value}
+        finally:
+            self.release()
 
     async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
         return {"status": "unsupported", "remote_task_ref": remote_task_ref}

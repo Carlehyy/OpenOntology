@@ -50,7 +50,7 @@ REQUIRED_PAYLOAD: dict[str, frozenset[str]] = {
     "assistant.message": frozenset({"attempt_id", "message_ref"}),
     "call.intent": frozenset({"call_id", "capability_key", "capability_revision", "input_snapshot_ref", "side_effect_class", "idempotency_key"}),
     "call.progress": frozenset({"call_id", "progress_seq", "connector_id", "provider_event_id"}),
-    "call.outcome_changed": frozenset({"status", "outcome", "evidence_ref", "connector_id", "provider_event_id"}),
+    "call.outcome_changed": frozenset({"call_id", "status", "outcome", "evidence_ref", "connector_id", "provider_event_id"}),
     "attempt.started": frozenset({"attempt_id", "provider_status", "request_ref", "started_at"}),
     "attempt.result": frozenset({"attempt_id", "provider_status", "result_ref", "error_ref", "safe_to_retry", "token_usage_ref", "cost_ref"}),
     "inbox.appended": frozenset({"inbox_id", "kind", "target_ref", "expiry_policy"}),

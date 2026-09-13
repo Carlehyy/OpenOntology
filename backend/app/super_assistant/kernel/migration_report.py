@@ -314,7 +314,7 @@ def _append_legacy_run(
     }, actor={"kind": "system"}, command_id=command_id, idempotency_key=f"{key}:call-intent")
     provider_event_id = f"legacy:{row.id}:outcome"
     append_event(db, run, event_type="call.outcome_changed", payload={
-        "status": call.status, "outcome": call.outcome, "evidence_ref": call.evidence_ref,
+        "call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": call.evidence_ref,
         "connector_id": "legacy", "provider_event_id": provider_event_id,
     }, actor={"kind": "system"}, command_id=command_id, idempotency_key=f"{key}:call-outcome", connector_id="legacy", provider_event_id=provider_event_id)
     return run, True

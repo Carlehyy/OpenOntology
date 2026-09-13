@@ -37,7 +37,7 @@ from .models import (
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
 from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease
-from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, TrustLevel
+from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, ProcessPluginConnector, TrustLevel
 
 
 # Implementations are registered by application bootstrap (and by tests).
@@ -198,10 +198,51 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
     target = str(call.target_ref or "").strip()
     if not target:
         return None
+    # Persisted process plugins are owner-scoped and must pass both live
+    # CapabilityRevision authorization and the plugin's DB call admission
+    # counter before a child process is contacted.
+    try:
+        from app.super_assistant.models import SuperAssistantProcessPlugin
+        from app.super_assistant.process_plugin_service import (
+            _descriptor, _manifest, admit_plugin_call, release_plugin_call,
+        )
+        plugin = db.scalar(select(SuperAssistantProcessPlugin).where(
+            SuperAssistantProcessPlugin.owner_id == run.owner_id,
+            SuperAssistantProcessPlugin.state == "enabled",
+            SuperAssistantProcessPlugin.revision == int(call.capability_revision),
+            (SuperAssistantProcessPlugin.id == target) | (SuperAssistantProcessPlugin.key == target),
+        ))
+        if plugin is not None:
+            from app.super_assistant.kernel.plugin_host import ProcessPluginHost
+            host = ProcessPluginHost(_manifest(plugin))
+            descriptor = _descriptor(plugin)
+            def admit() -> None:
+                session = SessionLocal()
+                try:
+                    admit_plugin_call(session, run.owner_id, plugin.id)
+                    session.commit()
+                finally:
+                    session.close()
+            def release() -> None:
+                session = SessionLocal()
+                try:
+                    release_plugin_call(session, run.owner_id, plugin.id)
+                    session.commit()
+                finally:
+                    session.close()
+            connector = ProcessPluginConnector(
+                plugin_id=plugin.id, descriptor_value=descriptor, host=host,
+                admit=admit, release=release,
+            )
+            _persist_connector_capability(db, connector, source="process_plugin")
+            connector_registry.register(connector)
+            return connector
+    except Exception:
+        logger.exception("failed to resolve process plugin target=%s", target)
     # User-scoped targets must be resolved from the owner row first. Looking
     # in a process-global registry first could otherwise reuse another user's
     # connector with the same key after a worker restart.
-    if not (target.startswith("remote.") or target.startswith("mcp__")):
+    if not (target.startswith("remote.") or target.startswith("mcp__") or target.startswith("plugin:")):
         try:
             return connector_registry.resolve(target, int(call.capability_revision))
         except Exception:
@@ -217,7 +258,30 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                     finally:
                         session.close()
 
-                connector = MulticaToolConnector(tool_name=target, executor=execute)
+                def query(remote_task_ref: str) -> dict:
+                    session = SessionLocal()
+                    try:
+                        return multica_service.query_external_task(session, run.owner_id, remote_task_ref)
+                    finally:
+                        session.close()
+
+                def cancel(remote_task_ref: str) -> dict:
+                    session = SessionLocal()
+                    try:
+                        return multica_service.cancel_external_task(session, run.owner_id, remote_task_ref)
+                    finally:
+                        session.close()
+
+                connector = MulticaToolConnector(
+                    tool_name=target,
+                    executor=execute,
+                    query_executor=query if target == "multica_create_task" else None,
+                    cancel_executor=cancel if target == "multica_create_task" else None,
+                    # Revision 2 records the newly proven async query/cancel
+                    # contract; old revision-1 Calls remain immutable and
+                    # continue to use their historical synchronous snapshot.
+                    revision=2 if target == "multica_create_task" else 1,
+                )
                 _persist_connector_capability(db, connector, source="multica")
                 connector_registry.register(connector)
                 return connector
@@ -290,12 +354,32 @@ def _persist_connector_capability(db, connector, *, source: str) -> None:
         "capabilities": descriptor.capabilities,
     }, sort_keys=True, ensure_ascii=False)
     digest = hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+    # Process-plugin manifests are frozen at installation time.  Their hash
+    # includes executable and policy fields that are intentionally absent from
+    # the generic descriptor; use the persisted value so a restart resolves
+    # the same immutable CapabilityRevision instead of tripping immutability.
+    capability_scope: dict[str, list[str]] = {}
+    if source == "process_plugin":
+        plugin_id = getattr(connector, "plugin_id", None)
+        if plugin_id:
+            from app.super_assistant.models import SuperAssistantProcessPlugin
+            persisted = db.scalar(select(SuperAssistantProcessPlugin).where(
+                SuperAssistantProcessPlugin.id == str(plugin_id),
+            ))
+            if persisted is not None:
+                digest = persisted.manifest_hash
+                capability_scope = {
+                    "workspace_scope": list(persisted.workspace_scope or []),
+                    "network_scope": list(persisted.network_scope or []),
+                    "secret_refs": list(persisted.secret_refs or []),
+                }
     row = persist_capability_revision(
         db,
         descriptor,
         source=source,
         trust_level=TrustLevel.USER_UNTRUSTED,
         manifest_hash=digest,
+        **capability_scope,
     )
     if not row.enabled:
         raise ValueError("connector capability is disabled")
@@ -326,7 +410,7 @@ async def process_external_call_message(payload: dict) -> None:
             call.status, call.outcome, call.manual_attention = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value, True
             call.remote_observed_state_ref = "connector_unavailable"
             _append_manual_attention(db, run, call, "connector_unavailable")
-            append_event(db, run, event_type="call.outcome_changed", payload={"status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"call:{call.id}:unavailable", idempotency_key=f"call-unavailable:{call.id}", connector_id=call.target_ref)
+            append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"call:{call.id}:unavailable", idempotency_key=f"call-unavailable:{call.id}", connector_id=call.target_ref)
             db.commit()
             return
         descriptor = connector.descriptor()
@@ -336,7 +420,7 @@ async def process_external_call_message(payload: dict) -> None:
         call.status, call.outcome = CallStatus.RUNNING.value, CallOutcome.ACCEPTED.value
         db.flush()
         append_event(db, run, event_type="attempt.started", payload={"attempt_id": attempt.id, "provider_status": "started", "request_ref": call.input_snapshot_ref or f"call:{call.id}", "started_at": attempt.started_at.isoformat()}, actor={"kind": "connector"}, command_id=f"external:{attempt.id}:start", idempotency_key=f"external-attempt-start:{attempt.id}", connector_id=descriptor.agent_id)
-        append_event(db, run, event_type="call.outcome_changed", payload={"status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"external:{call.id}:running", idempotency_key=f"external-running:{call.id}", connector_id=descriptor.agent_id)
+        append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"external:{call.id}:running", idempotency_key=f"external-running:{call.id}", connector_id=descriptor.agent_id)
         db.commit()
         try:
             result = await connector.invoke(run_id=run.id, call_id=call.id, input_ref=call.input_snapshot_ref or json.dumps({"message": run.goal, "session_ref": None}), deadline=run.deadline)
@@ -353,7 +437,7 @@ async def process_external_call_message(payload: dict) -> None:
             latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
             if latest is not None:
                 latest.provider_status, latest.error_ref, latest.finished_at = "unknown", str(exc)[:1000], _now()
-            append_event(db, current, event_type="call.outcome_changed", payload={"status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:unknown:{current_call.reconcile_attempt_count}", idempotency_key=f"external-unknown:{current_call.id}:{current_call.reconcile_attempt_count}", connector_id=descriptor.agent_id)
+            append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:unknown:{current_call.reconcile_attempt_count}", idempotency_key=f"external-unknown:{current_call.id}:{current_call.reconcile_attempt_count}", connector_id=descriptor.agent_id)
             _append_manual_attention(db, current, current_call, "invoke_exception")
             db.commit()
             return
@@ -370,6 +454,25 @@ async def process_external_call_message(payload: dict) -> None:
             db.commit()
             return
         normalized = str(result.get("status") or "failed").lower() if isinstance(result, dict) else "failed"
+        if normalized in {"running", "pending", "queued", "accepted", "in_progress", "processing"}:
+            # Provider accepted the work but has not produced a result. Keep
+            # the Call open and persist its opaque identity; the kernel
+            # scheduler/reconciler can later call query_status with this ref.
+            current_call.status = CallStatus.WAITING_EXTERNAL.value
+            current_call.outcome = CallOutcome.REMOTE_RUNNING.value
+            current_call.remote_task_ref = (result or {}).get("remote_task_ref") if isinstance(result, dict) else None
+            current_call.remote_observed_state_ref = normalized
+            current_call.next_reconcile_at = _now() + ExecutionPolicy().reconciliation_initial
+            latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
+            if latest is not None:
+                latest.provider_status = normalized
+            append_event(
+                db, current, event_type="call.outcome_changed",
+                payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": (result or {}).get("provider_event_id") if isinstance(result, dict) else None},
+                actor={"kind": "connector"}, command_id=f"external:{current_call.id}:accepted", idempotency_key=f"external-accepted:{current_call.id}", connector_id=descriptor.agent_id,
+            )
+            db.commit()
+            return
         outcome = {"answered": CallOutcome.COMPLETED.value, "failed": CallOutcome.FAILED.value, "cancelled": CallOutcome.CANCELLED_CONFIRMED.value}.get(normalized, CallOutcome.FAILED.value)
         content = str((result or {}).get("content") or "") if isinstance(result, dict) else str(result)
         artifact = None
@@ -383,7 +486,7 @@ async def process_external_call_message(payload: dict) -> None:
         latest = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == current_call.id).order_by(ExecutionAttempt.attempt_no.desc()))
         if latest is not None:
             latest.provider_status, latest.result_ref, latest.finished_at = normalized, current_call.evidence_ref, _now()
-        append_event(db, current, event_type="call.outcome_changed", payload={"status": current_call.status, "outcome": current_call.outcome, "evidence_ref": current_call.evidence_ref, "connector_id": descriptor.agent_id, "provider_event_id": current_call.provider_event_id}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:close", idempotency_key=f"external-close:{current_call.id}", connector_id=descriptor.agent_id, provider_event_id=current_call.provider_event_id)
+        append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": current_call.evidence_ref, "connector_id": descriptor.agent_id, "provider_event_id": current_call.provider_event_id}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:close", idempotency_key=f"external-close:{current_call.id}", connector_id=descriptor.agent_id, provider_event_id=current_call.provider_event_id)
         if artifact is not None:
             append_event(db, current, event_type="assistant.message", payload={"attempt_id": latest.id if latest else current_call.id, "message_ref": f"artifact://{artifact.id}"}, actor={"kind": "connector"}, command_id=f"external:{artifact.id}:message", idempotency_key=f"external-artifact:{artifact.id}", connector_id=descriptor.agent_id)
         remaining = db.scalar(select(ExecutionCall.id).where(ExecutionCall.run_id == current.id, ExecutionCall.id != current_call.id, ExecutionCall.status.in_((CallStatus.WAITING_EXTERNAL.value, CallStatus.RECONCILING.value, CallStatus.RUNNING.value))))
@@ -478,7 +581,7 @@ def _persist_assistant_artifact(db, run, call, attempt, content: str, token):
 
 def _close_model_call(db, run, call, attempt, step, artifact, token):
     evidence_ref = f"artifact://{artifact.id}" if artifact is not None else None
-    append_event(db, run, event_type="call.outcome_changed", payload={"status": "closed", "outcome": "completed", "evidence_ref": evidence_ref, "connector_id": None, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"attempt:{attempt.id}", idempotency_key=f"outcome:{call.id}", lease=token)
+    append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": "closed", "outcome": "completed", "evidence_ref": evidence_ref, "connector_id": None, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"attempt:{attempt.id}", idempotency_key=f"outcome:{call.id}", lease=token)
     append_event(db, run, event_type="attempt.result", payload={"attempt_id": attempt.id, "provider_status": "completed", "result_ref": evidence_ref, "error_ref": None, "safe_to_retry": False, "token_usage_ref": None, "cost_ref": None}, actor={"kind": "worker"}, command_id=f"attempt:{attempt.id}", idempotency_key=f"result:{attempt.id}", lease=token)
     call.status, call.outcome = "closed", "completed"; attempt.provider_status, attempt.result_ref, attempt.finished_at = "completed", evidence_ref, _now()
 
@@ -501,10 +604,11 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 {"message": str(wait.get("message") or run.goal), "session_ref": wait.get("session_ref")},
                 ensure_ascii=False,
             )
-            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=1, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running")
+            capability_revision = 2 if target_ref == "multica_create_task" else 1
+            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=capability_revision, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running")
             db.add(external_call); db.flush()
-            append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": 1, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": "external_async", "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
-            append_event(db, run, event_type="call.outcome_changed", payload={"status": "waiting_external", "outcome": "remote_running", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
+            append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": capability_revision, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": "external_async", "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
+            append_event(db, run, event_type="call.outcome_changed", payload={"call_id": external_call.id, "status": "waiting_external", "outcome": "remote_running", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
             _add_outbox(
                 db,
                 run,
@@ -588,6 +692,7 @@ async def reconcile_execution_message(payload: dict) -> None:
         provider_event_id, connector_id = payload.get("provider_event_id"), payload.get("connector_id")
         observation = RemoteObservation(normalize_remote_state(payload.get("remote_state") or payload.get("status")), provider_event_id=provider_event_id, evidence_ref=payload.get("evidence_ref"), raw_state=str(payload.get("remote_state") or payload.get("status") or ""))
         decision = decide_reconciliation(observation=observation, run_status=run_status, call_status=call_status, call_outcome=call_outcome, side_effect=side_effect, safe_to_retry=bool(getattr(latest_attempt, "safe_to_retry", False)), reconcile_attempt_count=call.reconcile_attempt_count, policy=ExecutionPolicy(), now=_now())
+        artifact = None
         if decision.action is ReconcileAction.IGNORE_LATE:
             status, outcome = call_status, call_outcome
             call.remote_observed_state_ref = observation.raw_state
@@ -602,6 +707,24 @@ async def reconcile_execution_message(payload: dict) -> None:
             call.manual_attention = decision.action is ReconcileAction.MANUAL_ATTENTION
             if call.manual_attention:
                 _append_manual_attention(db, run, call, observation.raw_state)
+            observed_content = payload.get("content")
+            if decision.action is ReconcileAction.CLOSE and decision.call_outcome is CallOutcome.COMPLETED and observed_content:
+                text = str(observed_content)[:20000]
+                artifact = Artifact(
+                    owner_id=run.owner_id, run_id=run.id, call_id=call.id,
+                    kind="external.result", mime_type="text/markdown",
+                    size=len(text.encode("utf-8")), checksum=_checksum(text),
+                    storage_ref=f"inline://{run.id}/{call.id}/reconcile",
+                    inline_content=text, status="complete", integrity_status="verified",
+                    business_status="success", visibility="owner",
+                )
+                db.add(artifact)
+                db.flush()
+                call.evidence_ref = f"artifact://{artifact.id}"
+                observation = RemoteObservation(
+                    observation.state, provider_event_id=observation.provider_event_id,
+                    evidence_ref=call.evidence_ref, raw_state=observation.raw_state,
+                )
             if decision.action is ReconcileAction.CLOSE and run.status == RunStatus.WAITING_EXTERNAL.value:
                 remaining = db.scalar(select(ExecutionCall.id).where(
                     ExecutionCall.run_id == run.id,
@@ -614,7 +737,13 @@ async def reconcile_execution_message(payload: dict) -> None:
                     append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "external_result", "actor": "reconciler", "version": run.version}, actor={"kind": "reconciler"}, command_id=f"reconcile-wake:{run.id}:{run.version}", idempotency_key=f"reconcile-wake:{run.id}:{run.version}")
                     _add_outbox(db, run, command_id=f"reconcile-dispatch:{run.id}:{run.version}", message_ref=f"run://{run.id}")
         key = provider_event_id or str(call.reconcile_attempt_count)
-        append_event(db, run, event_type="call.outcome_changed", payload={"status": status.value, "outcome": outcome.value, "evidence_ref": observation.evidence_ref, "connector_id": connector_id, "provider_event_id": provider_event_id}, actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:{key}", idempotency_key=f"reconcile:{call.id}:{key}", connector_id=connector_id, provider_event_id=provider_event_id)
+        append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": status.value, "outcome": outcome.value, "evidence_ref": observation.evidence_ref, "connector_id": connector_id, "provider_event_id": provider_event_id}, actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:{key}", idempotency_key=f"reconcile:{call.id}:{key}", connector_id=connector_id, provider_event_id=provider_event_id)
+        if artifact is not None:
+            append_event(
+                db, run, event_type="assistant.message",
+                payload={"attempt_id": latest_attempt.id if latest_attempt else call.id, "message_ref": f"artifact://{artifact.id}"},
+                actor={"kind": "connector"}, command_id=f"reconcile:{artifact.id}:message", idempotency_key=f"reconcile-artifact:{artifact.id}", connector_id=connector_id,
+            )
         db.commit()
     except Exception:
         db.rollback(); logger.exception("kernel reconciliation failed for run=%s call=%s", run_id, call_id)

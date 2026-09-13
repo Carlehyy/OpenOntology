@@ -211,7 +211,7 @@ SSE `id` 使用 `run_id:seq`；每个事件有 `event`, `data`, `retry`，heartb
 
 远端 `agent.*` 仅是线缆/适配器输入，持久化事件使用 canonical 事件：accepted → `call.outcome_changed`，progress → `call.progress`，needs_input → `inbox.appended + run.status_changed`，approval_required → `approval.requested`，completed/failed → `attempt.result + call.outcome_changed`，cancel_requested → status `cancel_requested`，结果未知 → status `reconciling`、outcome `outcome_unknown`。同一 Call 的 provider event id 去重，事件顺序由 Call 状态不变量校验。
 
-Multica 的 `list_agents/list_tasks` 作为 read_only Capability；`create_task` 作为 `external_async`，必须绑定 workspace scope、保存外部 task/issue id、使用 Call 幂等键并支持 `query_status`；不支持查询时立即进入 `outcome_unknown`，不得当作普通同步 Tool。kernel.v1 通过 `MulticaToolConnector` 复用既有服务的 workspace/凭据校验，所有调用仍经 Call/Attempt/Artifact/Outbox；Connector 尚不宣称远端取消、流式或查询能力，直到 Multica API 提供可验证的异步任务契约。
+Multica 的 `list_agents/list_tasks` 作为 read_only Capability；`create_task` 作为 `external_async`，必须绑定 workspace scope、保存外部 task/issue id、使用 Call 幂等键并支持 `query_status`/`cancel`。Connector 返回 opaque remote ref 后保持 `waiting_external`，kernel scheduler 周期查询；终态结果写入 `external.result` Artifact 并唤醒 Run，查询不到活动任务时保留 issue 状态，无法确认时进入 `outcome_unknown`。kernel.v1 通过 `MulticaToolConnector` 复用既有服务的 workspace/凭据校验，所有调用仍经 Call/Attempt/Artifact/Outbox；当前仍不承诺 provider 流式传输，实时进度通过状态事件和周期对账提供。
 
 业务探索委派流程固定：解析 descriptor → 发现缺失前置条件 → 以结构化问题询问 → 用户选定本体 → 校验用户拥有可写的 `draft + editing` 版本 → 在同一事务创建带 `binding_mode=delegated` 的子 Run/Call → 后续恢复只读绑定快照。版本失效、权限变化或版本漂移只能重新询问或终止，不能静默改绑。直接探索 UI 的空会话/current release 路径单独保留，不得被委派约束误伤。
 
@@ -223,9 +223,9 @@ Multica 的 `list_agents/list_tasks` 作为 read_only Capability；`create_task`
 
 ## 10. 插件信任和资源策略
 
-插件信任级别固定为 `platform | verified | user_untrusted`。生产默认只启用 `platform` 和 `verified`；`user_untrusted` 可以安装但默认 disabled，必须经过用户审批和部署环境能力检查后才能启用。可执行插件宿主使用独立 uid/container；network 默认 deny、workspace 默认 read-only、secret 使用 allowlist；默认资源上限 CPU 1 core、内存 512 MB、wall time 10 分钟。manifest SHA-256 revision immutable，namespace 冲突安装失败。
+插件信任级别固定为 `platform | verified | user_untrusted`。用户安装入口强制写入 `user_untrusted`；`platform/verified` 仅保留给未来平台签名或管理员受控流程，不能由用户请求体自选。用户插件可以安装但默认 disabled，必须经过用户显式启用和部署环境能力检查后才能调用。可执行插件宿主使用独立 uid/container；network 默认 deny、workspace 默认 read-only、secret 使用 allowlist；默认资源上限 CPU 1 core、内存 512 MB、wall time 10 分钟。manifest SHA-256 revision immutable，namespace 冲突安装失败。
 
-安装和启用分离。安装流程为 inspect → manifest/schema 校验 → 依赖解析 → 审批 → immutable revision → healthcheck；失败回滚到未安装。用户进程插件通过宿主获得输入引用、凭据引用、取消令牌、deadline、网络/工作区 scope 和 Artifact 回传接口，不能访问 Event Store、租约、授权器或任意数据库。
+安装和启用分离。安装流程为 inspect → manifest/schema 校验 → 依赖解析 → 用户启用 → immutable revision；首次调用前由独立宿主完成 healthcheck 和身份/协议校验，失败保持 disabled。用户进程插件通过宿主获得输入引用、凭据引用、取消令牌、deadline、网络/工作区 scope 和 Artifact 回传接口，不能访问 Event Store、租约、授权器或任意数据库；生产环境仍需由部署层提供 uid/container、资源和网络隔离。
 
 现有 Skill 仅作为文本/行为说明按需加载，不因扩展名变成可执行插件；Skill 与 user_untrusted process plugin 不互转。插件安装、启用、卸载和在途 drain 都产生审计事件。卸载先阻止新 Call、撤销凭据、取消/对账在途 Call、停止进程；外部结果未确认时保持 `outcome_unknown`。插件返回的数据不能注册新 Capability、扩大权限或改变 Run 策略。MCP stdio 继续使用现有 enable/allowed-command 门控，不因插件 manifest 放宽；MCP 既有 `require_confirmation=true` 保持兼容；read_only 且仅 owner scope 的能力可在用户明确关闭确认后免确认，所有 `idempotent_write`、`non_idempotent_write` 和 `external_async` 必须审批。
 

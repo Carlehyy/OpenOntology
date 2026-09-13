@@ -55,4 +55,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0109_super_assistant_context_sources"]
+    assert heads == ["0110_super_assistant_process_plugins"]

@@ -724,7 +724,9 @@ def test_super_assistant_router_and_services_stay_bounded():
         # 6 个端点 → 811；目录一等公民（folders CRUD/笔记/移动）6 个端点、
         # multica 外部集成子路由接线 → 860；本体发布文档共享镜像新增
         # ontology-documents list/preview/rebuild 3 个端点 → 885
-        "router.py": 910,
+        # process-plugin 持久化生命周期新增 list/install/enable/disable/uninstall
+        # 五个端点；保持边界只允许随能力域增长的小幅预算。
+        "router.py": 980,
         # 死流回收（_reap_stale_streaming 读取兜底）与启动恢复
         # （recover_interrupted_streams）落地：320 → 360
         "conversation_service.py": 360,
@@ -793,9 +795,9 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # （3 条路径）
     # kernel.v1 长任务 API 新增 runs 查询/控制/输入/审批/SSE/Artifact/Retry 共
     # 10 条路径、10 个操作；dispatch dead-letter 显式重放新增 1 条运维路径；
-    # 旧路由仍保持原有语义并行存在。
-    assert len(paths) == 75
-    assert sum(len(item) for item in paths.values()) == 100
+    # process-plugin 持久化生命周期新增 4 条路径、5 个操作；旧路由仍保持原有语义并行存在。
+    assert len(paths) == 79
+    assert sum(len(item) for item in paths.values()) == 105
     assert hashlib.sha256(payload).hexdigest() == (
-        "bac7b276bc14f152cd0b0f03a2132529a7918e1d62414b0d8ac68bcf3027cbe5"
+        "b182094888dffbe214579be61289737fc6d2e3f58360d5f43974f7a98cd3ecff"
     )
