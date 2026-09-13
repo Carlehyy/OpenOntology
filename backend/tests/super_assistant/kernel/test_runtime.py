@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from tests.conftest import TestSession
 
-from app.super_assistant.models import SuperAssistantConversation
+from app.super_assistant.models import SuperAssistantConversation, SuperAssistantMcpServer
 from app.super_assistant.kernel.models import Artifact, ExecutionEvent, ExecutionRun
 from app.super_assistant.kernel.store import create_run
 from app.super_assistant.kernel import runtime
@@ -177,3 +177,35 @@ def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, m
     assert external.outcome == "completed"
     artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
     assert artifact.inline_content == "远程研究完成"
+
+
+def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="查询 MCP")
+    from app.super_assistant.mcp_client import namespaced_tool_name
+
+    server = SuperAssistantMcpServer(
+        owner_id=owner.id, name="research", display_name="Research MCP",
+        transport="streamable_http", url="https://mcp.example/tools",
+        tool_manifest=[{"name": "search", "description": "search"}], enabled=True,
+    )
+    db.add(server)
+    db.commit()
+    target = namespaced_tool_name(server.name, "search")
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "调用 MCP", "tool_calls": [{"id": "mcp-1", "name": target, "arguments": {"q": "OpenOntology"}}],
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "mcp-wait"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+
+    async def fake_call_tool(**kwargs):
+        assert kwargs["tool_name"] == "search"
+        assert kwargs["arguments"] == {"q": "OpenOntology"}
+        return "MCP 结果"
+
+    monkeypatch.setattr("app.super_assistant.mcp_client.call_tool", fake_call_tool)
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+
+    db.expire_all()
+    assert db.get(ExecutionRun, run.id).status == "active"
+    artifact = db.query(Artifact).filter_by(run_id=run.id, kind="external.result").one()
+    assert artifact.inline_content == "MCP 结果"

@@ -37,7 +37,7 @@ from .models import (
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
 from .store import _add_outbox, _now, acquire_lease, append_event, assert_lease
-from .connectors import ConnectorRegistry
+from .connectors import ConnectorRegistry, McpToolConnector
 
 
 # Implementations are registered by application bootstrap (and by tests).
@@ -149,7 +149,13 @@ async def process_execution_message(payload: dict) -> None:
                         messages.extend([{ "role": "assistant", "content": result.get("content"), "tool_calls": tool_calls }, { "role": "tool", "tool_call_id": tool_call.get("id"), "name": tool_call.get("name"), "content": delegate_result }])
                         handled = True; break
                 if not handled:
-                    wait = {"kind": "external_event", "reason": "connector_call", "target_ref": str(tool_calls[0].get("name") or "external")}
+                    tool_call = tool_calls[0]
+                    wait = {
+                        "kind": "external_event",
+                        "reason": "connector_call",
+                        "target_ref": str(tool_call.get("name") or "external"),
+                        "input_ref": json.dumps({"message": str(run.goal), "arguments": tool_call.get("arguments") or {}}, ensure_ascii=False),
+                    }
             content = strip_think_content(str(result.get("content") or ""))
             db.rollback()  # connector/tool adapters may have opened an implicit transaction
             db.begin(); run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update()); assert run is not None; assert_lease(run, token)
@@ -204,10 +210,39 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             (SuperAssistantRemoteAgent.id == target) | (SuperAssistantRemoteAgent.key == target),
         ))
     except Exception:
-        return None
+        row = None
     if row is None or (row.mode or "direct") != "direct":
         # Pull-mode agents require a durable task queue adapter; treating them
         # as direct would violate the connector transport contract.
+        # MCP tools use the same immutable Call boundary. Resolve the
+        # namespaced tool from the owner-scoped manifest and decrypt secrets
+        # only inside this worker invocation.
+        try:
+            from app.super_assistant.models import SuperAssistantMcpServer
+            from app.super_assistant.mcp_client import decrypt_env, decrypt_headers, namespaced_tool_name
+            servers = db.scalars(select(SuperAssistantMcpServer).where(
+                SuperAssistantMcpServer.owner_id == run.owner_id,
+                SuperAssistantMcpServer.enabled.is_(True),
+            )).all()
+            for server in servers:
+                for item in (server.tool_manifest or []):
+                    tool_name = str(item.get("name") or "") if isinstance(item, dict) else ""
+                    if tool_name and namespaced_tool_name(server.name, tool_name) == target:
+                        connector = McpToolConnector(
+                            server_id=server.id,
+                            server_name=server.name,
+                            tool_name=tool_name,
+                            transport=server.transport,
+                            url=server.url,
+                            headers=decrypt_headers(server.headers_encrypted),
+                            command=server.command,
+                            args=tuple(str(value) for value in (server.args or [])),
+                            env=decrypt_env(server.env_encrypted),
+                        )
+                        connector_registry.register(connector)
+                        return connector
+        except Exception:
+            logger.exception("failed to resolve MCP connector target=%s", target)
         return None
     try:
         from app.super_assistant.remote_agent_service import kernel_connector

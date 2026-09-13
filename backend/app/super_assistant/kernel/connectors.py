@@ -240,3 +240,73 @@ class RemoteAgentHttpConnector:
 
     async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
         return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+
+
+@dataclass(frozen=True, slots=True)
+class McpToolConnector:
+    """A single namespaced MCP tool exposed through the kernel boundary."""
+
+    server_id: str
+    server_name: str
+    tool_name: str
+    transport: str
+    url: str
+    headers: Mapping[str, str] = field(default_factory=dict)
+    command: str | None = None
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+    revision: int = 1
+
+    @property
+    def namespaced_key(self) -> str:
+        from app.super_assistant.mcp_client import namespaced_tool_name
+
+        return namespaced_tool_name(self.server_name, self.tool_name)
+
+    def descriptor(self) -> AgentDescriptor:
+        return AgentDescriptor(
+            agent_id=f"mcp:{self.server_id}:{self.tool_name}",
+            key=self.namespaced_key,
+            revision=self.revision,
+            transport="mcp",
+            session_policy=SessionPolicy.STATELESS,
+            supports_stream=False,
+            supports_cancel=False,
+            supports_push=False,
+            supports_query_status=False,
+            supports_artifact=False,
+        )
+
+    async def invoke(self, *, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
+        try:
+            value = json.loads(input_ref or "{}")
+        except (TypeError, ValueError):
+            value = {}
+        arguments = value.get("arguments") if isinstance(value, dict) else {}
+        if not isinstance(arguments, dict):
+            raise ContractError("MCP connector arguments must be an object")
+        from app.super_assistant.mcp_client import call_tool
+
+        content = await call_tool(
+            transport=self.transport,
+            url=self.url,
+            headers=dict(self.headers),
+            tool_name=self.tool_name,
+            arguments=arguments,
+            command=self.command,
+            args=list(self.args),
+            env=dict(self.env),
+        )
+        return {
+            "run_id": run_id,
+            "call_id": call_id,
+            "status": "answered",
+            "content": str(content),
+            "provider_status": "completed",
+        }
+
+    async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+
+    async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}
