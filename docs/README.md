@@ -6,7 +6,8 @@
 ```text
 docs/
 ├── development/      本地环境搭建与测试门禁
-└── operations/       配置、部署、回滚、备份与排障
+├── operations/       配置、部署、回滚、备份与排障
+└── architecture/     处于讨论阶段的架构设计提案
 ```
 
 ## 开发
@@ -14,6 +15,10 @@ docs/
 - [开发目录](./development/README.md)
 - [本地开发](./development/setup.md)：启动完整本地栈与源码开发；
 - [测试指南](./development/testing.md)：测试分层和强制门禁。
+
+## 架构设计
+
+- [超级助手顶层架构设计（提案）](./architecture/super-assistant-top-level.md)：目标、边界、分层和演进原则。
 
 ## 运维
 
