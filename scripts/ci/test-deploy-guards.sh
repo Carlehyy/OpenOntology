@@ -150,6 +150,17 @@ for hardened_service in browser python_kernel_gateway backend pipeline_executor;
   fi
 done
 
+browser_block="$(awk -v service=browser '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+if ! grep -Fq 'user: "10001:10001"' <<<"$browser_block" \
+    || ! grep -Fq 'USER 10001:10001' docker/browser/Dockerfile; then
+  printf 'browser must run as the fixed non-root UID 10001\n' >&2
+  exit 1
+fi
+
 test_dir="$(mktemp -d /tmp/openontology-deploy-guards.XXXXXX)"
 archive_source="$(mktemp -d /tmp/openontology-archive-source.XXXXXX)"
 archive_output="$(mktemp /tmp/openontology-archive.XXXXXX.tar.gz)"

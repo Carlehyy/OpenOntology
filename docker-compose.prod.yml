@@ -75,6 +75,7 @@ services:
       args:
         BROWSER_BASE_IMAGE: ${BROWSER_IMAGE:-chromedp/headless-shell:latest}
     command: ["--no-sandbox", "--disable-dev-shm-usage"]
+    user: "10001:10001"
     shm_size: 2gb
     # Chromium runs without its own sandbox in this image; keep the container
     # itself least-privileged as a compensating control.

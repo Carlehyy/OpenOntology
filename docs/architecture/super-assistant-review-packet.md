@@ -244,7 +244,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 新增专项回归为 `33 passed`（router/reconciler/recovery/callback/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
 
-当前仍有四项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口；browser 镜像运行时仍为 root，且 Chromium 使用 `--no-sandbox`，尚未完成非 root 入口与浏览器隔离的 staging 验证。它们必须在 staging 攻击验收与发布门禁中闭环。
+当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。它们必须在 staging 攻击验收与发布门禁中闭环。
 
 ## 13. 最新对抗式代码审查证据（提交 `05d24994`）
 
@@ -276,7 +276,7 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 生产 Compose 的 browser、`python_kernel_gateway`、backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。
 
-对 browser 镜像的运行态检查显示，`docker/browser/Dockerfile` 明确设置 `USER root`，生产 Compose 未覆盖运行用户，并通过 `--no-sandbox` 启动 Chromium。由于当前镜像入口和字体安装方式尚未证明可在非 root 下稳定运行，本轮没有直接修改；在完成非 root 镜像构建、CDP 健康检查和浏览器攻击面 staging 验证前，该项保持为发布阻断风险。
+对 browser 镜像的运行态检查显示，基础镜像缺少可用的 Chromium SUID sandbox，去掉 `--no-sandbox` 会退出；本轮已据探针结果把镜像和 Compose 固定到 UID/GID 10001，保留 `--no-sandbox`，并验证 CDP 健康检查和新页面创建均成功。该项降低了容器被攻破后的权限，但仍需换用带内部 sandbox 的固定 digest 镜像并完成浏览器攻击面 staging，才能解除纵深防御风险。
 
 `scripts/ci/test-deploy-guards.sh` 已增加对上述四个服务和三项配置的服务级守卫，部署守卫自测通过，后续 Compose 修改若移除任一选项会在 CI 阶段失败。
 
