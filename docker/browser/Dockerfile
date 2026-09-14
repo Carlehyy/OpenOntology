@@ -13,7 +13,8 @@ RUN apt-get update \
 # layer until a sandbox-enabled browser image is adopted and staged.
 RUN groupadd --gid 10001 browser \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/browser --shell /usr/sbin/nologin browser \
-    && chown -R 10001:10001 /home/browser
+    && mkdir -p /tmp/browser-cache \
+    && chown -R 10001:10001 /home/browser /tmp/browser-cache
 ENV HOME=/home/browser \
-    XDG_CACHE_HOME=/tmp
+    XDG_CACHE_HOME=/tmp/browser-cache
 USER 10001:10001
