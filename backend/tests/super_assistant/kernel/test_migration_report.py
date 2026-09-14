@@ -72,3 +72,33 @@ def test_backfill_capability_revisions_and_rollback_are_scoped(db):
     assert db.query(ExecutionEvent).filter_by(event_type="source.tombstoned").count() == 1
     assert all(cap.enabled is False for cap in db.query(CapabilityRevision).all())
     assert db.get(SuperAssistantMcpServer, mcp.id) is not None
+
+
+def test_backfill_replay_after_rollback_keeps_revision_and_run_idempotency(db):
+    owner, _conv, delegation, _mcp = _legacy_fixture(db)
+    first = backfill_legacy_data(db, owner_id=owner.id, migration_id="mig-a", apply=True)
+    assert len(first["created_runs"]) == 1
+    call = db.query(ExecutionCall).one()
+    intent = db.query(ExecutionEvent).filter_by(event_type="call.intent").one()
+    assert intent.payload["capability_revision"] == call.capability_revision
+
+    rollback_legacy_backfill(db, migration_id="mig-a", owner_id=owner.id, apply=True)
+    replay = backfill_legacy_data(db, owner_id=owner.id, migration_id="mig-a", apply=True)
+    assert replay["created_runs"] == []
+    assert replay["created_capabilities"] == []
+    assert db.query(ExecutionRun).count() == 1
+    assert db.query(CapabilityRevision).count() == 2
+    assert db.query(ExecutionCall).filter_by(run_id=first["created_runs"][0], capability_revision=call.capability_revision).count() == 1
+    assert db.query(ExecutionRun).filter_by(owner_id=owner.id, idempotency_key=f"legacy-delegation:{delegation.id}").count() == 1
+
+
+def test_new_migration_snapshot_allocates_new_capability_revision_without_duplicate_run(db):
+    owner, _conv, _delegation, mcp = _legacy_fixture(db)
+    first = backfill_legacy_data(db, owner_id=owner.id, migration_id="mig-a", apply=True)
+    second = backfill_legacy_data(db, owner_id=owner.id, migration_id="mig-b", apply=True)
+    assert len(first["created_capabilities"]) == 2
+    assert len(second["created_capabilities"]) == 1
+    assert second["created_runs"] == []
+    revisions = db.query(CapabilityRevision).filter_by(key=f"legacy.mcp.{mcp.id}").order_by(CapabilityRevision.revision).all()
+    assert [cap.revision for cap in revisions] == [1, 2]
+    assert {cap.input_schema["legacy_migration_id"] for cap in revisions} == {"mig-a", "mig-b"}

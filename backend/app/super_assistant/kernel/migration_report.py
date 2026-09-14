@@ -170,14 +170,26 @@ def _ensure_legacy_capability(
         "secret_refs": [],
         "enabled": True,
     }
-    existing = db.get(CapabilityRevision, {"key": key, "revision": 1})
-    if existing is not None:
-        # Capability revisions are immutable.  If a legacy row changed after a
-        # previous rehearsal, leave it untouched and report it for review.
-        if any(getattr(existing, field) != value for field, value in values.items()):
-            raise ValueError(f"legacy capability revision is immutable: {key}@1")
-        return existing, False
-    row = CapabilityRevision(key=key, revision=1, **values)
+    # A capability key identifies the legacy source, while each migration id
+    # represents an immutable snapshot of that source.  Reusing revision 1 for
+    # a later snapshot would either raise on legitimate source changes or make
+    # rollback of one batch disable another batch's capability.
+    revisions = db.scalars(
+        select(CapabilityRevision)
+        .where(CapabilityRevision.key == key)
+        .order_by(CapabilityRevision.revision.desc())
+        .with_for_update()
+    ).all()
+    for existing in revisions:
+        existing_metadata = existing.input_schema if isinstance(existing.input_schema, dict) else {}
+        if (existing_metadata.get("legacy_migration_id") == migration_id
+                and existing_metadata.get("owner_id") == owner_id):
+            immutable_values = {field: value for field, value in values.items() if field != "enabled"}
+            if any(getattr(existing, field) != value for field, value in immutable_values.items()):
+                raise ValueError(f"legacy capability revision is immutable: {key}@{existing.revision}")
+            return existing, False
+    next_revision = (revisions[0].revision + 1) if revisions else 1
+    row = CapabilityRevision(key=key, revision=next_revision, **values)
     db.add(row)
     db.flush()
     return row, True
@@ -254,6 +266,7 @@ def _append_legacy_run(
     existing = db.scalar(select(ExecutionRun).where(
         ExecutionRun.execution_version == "legacy",
         ExecutionRun.idempotency_key == key,
+        ExecutionRun.owner_id == row.owner_id,
     ).with_for_update())
     if existing is not None:
         snapshot = json.loads(existing.binding_snapshot_ref or "{}")
@@ -308,7 +321,7 @@ def _append_legacy_run(
     )
     db.add(call); db.flush()
     append_event(db, run, event_type="call.intent", payload={
-        "call_id": call.id, "capability_key": capability.key, "capability_revision": 1,
+        "call_id": call.id, "capability_key": capability.key, "capability_revision": capability.revision,
         "input_snapshot_ref": call.input_snapshot_ref, "side_effect_class": call.side_effect_class,
         "idempotency_key": call.idempotency_key,
     }, actor={"kind": "system"}, command_id=command_id, idempotency_key=f"{key}:call-intent")
@@ -338,6 +351,14 @@ def backfill_legacy_data(
         for row in db.scalars(select(SuperAssistantDelegation).where(*_owner_filter(SuperAssistantDelegation, owner_id)).order_by(SuperAssistantDelegation.id)).all():
             if row not in _legacy_mappable_delegations(db, owner_id):
                 readonly.append({"source": "delegation", "id": row.id, "reason": "missing_owner_or_conversation_or_assistant_key"})
+                continue
+            existing_run = db.scalar(select(ExecutionRun).where(
+                ExecutionRun.execution_version == "legacy",
+                ExecutionRun.idempotency_key == f"legacy-delegation:{row.id}",
+                ExecutionRun.owner_id == row.owner_id,
+            ))
+            if existing_run is not None:
+                skipped.append({"source": "delegation", "id": row.id, "reason": "already_backfilled"})
                 continue
             cap, cap_created = _ensure_legacy_capability(
                 db, kind="assistant", source_id=row.assistant_key, owner_id=row.owner_id,
