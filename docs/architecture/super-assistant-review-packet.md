@@ -208,7 +208,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `eaec417b`）
+## 11. 当前实现证据（2026-09-14，基线提交 `497cfa88`）
 
 本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界。本轮进一步收紧探索委派绑定：服务端生成并校验写权限指纹，Kernel 子 Run 强制保留可信来源标记，委派恢复每轮复核实时草稿和写权限。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
