@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
 
-from app.shared.database import SessionLocal
-from app.super_assistant.kernel.migration_report import (
-    backfill_legacy_data,
-    build_legacy_migration_report,
-    rollback_legacy_backfill,
-)
-
+# This is an operator-facing script documented as being invoked from
+# ``backend``. Bootstrap the repository root before importing ``app`` so that
+# the documented command works without requiring callers to set PYTHONPATH.
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -27,6 +28,16 @@ def main() -> None:
         parser.error("--rollback requires --migration-id")
     if args.apply and not args.migration_id:
         parser.error("--apply requires --migration-id so the mutation is auditable")
+    # Import the application only after argparse has handled ``--help`` and
+    # argument errors.  Operators can inspect this entry point without a live
+    # database, while real report/mutation modes still use normal app config.
+    from app.shared.database import SessionLocal
+    from app.super_assistant.kernel.migration_report import (
+        backfill_legacy_data,
+        build_legacy_migration_report,
+        rollback_legacy_backfill,
+    )
+
     db = SessionLocal()
     try:
         if args.rollback:
