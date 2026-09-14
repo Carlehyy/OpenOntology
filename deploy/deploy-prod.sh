@@ -1097,14 +1097,15 @@ if [ -z "$(env_value ENCRYPTION_KEY)" ]; then
 fi
 strict_image_digests_value="$(env_value STRICT_IMAGE_DIGESTS)"
 case "$strict_image_digests_value" in
-  ""|0|false|FALSE|no|NO)
-    strict_image_digests_enabled=0
-    ;;
   1|true|TRUE|yes|YES)
     strict_image_digests_enabled=1
     ;;
+  ""|0|false|FALSE|no|NO)
+    log "production deployment requires STRICT_IMAGE_DIGESTS=true"
+    exit 1
+    ;;
   *)
-    log "STRICT_IMAGE_DIGESTS must be true or false"
+    log "STRICT_IMAGE_DIGESTS must be true in production"
     exit 1
     ;;
 esac
@@ -1117,7 +1118,8 @@ check_image_digest() {
       log "$key must be pinned to an immutable @sha256 digest"
       exit 1
     fi
-    log "warning: $key is not digest-pinned; set STRICT_IMAGE_DIGESTS=1 after populating immutable image references"
+    log "$key must be pinned to an immutable @sha256 digest"
+    exit 1
   fi
 }
 # The browser consumes attacker-controlled page content and is therefore a

@@ -497,15 +497,25 @@ if (
 fi
 
 set_test_env_value STRICT_IMAGE_DIGESTS false
-(
+if (
   cd "$test_dir"
   STRICT_IMAGE_DIGESTS=1 \
     APP_DIR="$test_dir" \
     SKIP_GIT=1 \
     DEPLOY_VALIDATE_ONLY=1 \
     DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
-    bash "$DEPLOY_SCRIPT" >/dev/null
-)
+    bash "$DEPLOY_SCRIPT" >strict-disabled.log 2>&1
+); then
+  printf 'production deployment must reject STRICT_IMAGE_DIGESTS=false even when the shell exports true\n' >&2
+  exit 1
+fi
+grep -q 'production deployment requires STRICT_IMAGE_DIGESTS=true' "$test_dir/strict-disabled.log"
+set_test_env_value STRICT_IMAGE_DIGESTS true
+for image_key in \
+  POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
+  PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE; do
+  set_test_env_value "$image_key" "$digest"
+done
 
 set_test_env_value BROWSER_IMAGE chromedp/headless-shell:stable
 if (

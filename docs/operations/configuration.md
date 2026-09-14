@@ -270,11 +270,9 @@ Actions 日志。普通 push 不具有创建新加密 authority 的权限，后�
 [部署手册](./deployment.md#首次登录与管理员密码恢复)。
 
 镜像变量来自服务器最终合并后的 `.env`。其中
-`STRICT_IMAGE_DIGESTS=true` 会要求全部镜像使用 `@sha256`，合法值为
-`true/false`、`yes/no` 或 `1/0`。部署入口不接受宿主 shell 中的同名变量覆盖
-`.env`；如需改变策略，必须先修改持久配置并重新执行完整校验。
-无论该总开关取值如何，生产部署始终要求 `BROWSER_IMAGE` 使用不可变
-`@sha256` digest；浏览器承载外部网页内容，不能使用浮动 tag。
+生产部署强制 `STRICT_IMAGE_DIGESTS=true`，所有镜像必须使用不可变
+`@sha256` digest；`false`、`no`、`0` 或缺失值都会被拒绝。部署入口不接受宿主
+shell 中的同名变量覆盖 `.env`。浏览器承载外部网页内容，不能使用浮动 tag。
 browser Dockerfile 中的字体包也固定到 Debian 版本号；更新版本必须重新构建、
 执行 CDP 健康检查并复核浏览器安全探针。
 

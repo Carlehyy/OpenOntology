@@ -300,7 +300,7 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 对 browser 镜像的运行态检查显示，基础镜像缺少可用的 Chromium SUID sandbox，去掉 `--no-sandbox` 会退出；本轮已据探针结果把镜像和 Compose 固定到 UID/GID 10001，保留 `--no-sandbox`，并验证 CDP 健康检查和新页面创建均成功。该项降低了容器被攻破后的权限，但仍需换用带内部 sandbox 的固定 digest 镜像并完成浏览器攻击面 staging，才能解除纵深防御风险。
 
-browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署守卫会拒绝恢复 `latest`；容器以 UID/GID 10001 运行，启用只读根文件系统，缓存收口到专用 `/tmp/browser-cache` 子目录；显式传入 `BROWSER_IMAGE` 仍属于运维变更，必须重新执行镜像构建、CDP 健康检查和安全回归。
+browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署守卫会拒绝恢复 `latest`；容器以 UID/GID 10001 运行，启用只读根文件系统，缓存收口到专用 `/tmp/browser-cache` 子目录；生产部署现已强制所有镜像启用 `STRICT_IMAGE_DIGESTS=true`，显式传入 `BROWSER_IMAGE` 仍属于运维变更，必须重新执行镜像构建、CDP 健康检查和安全回归。
 
 `scripts/ci/test-deploy-guards.sh` 已增加对上述四个服务和三项配置的服务级守卫，部署守卫自测通过，后续 Compose 修改若移除任一选项会在 CI 阶段失败。
 
