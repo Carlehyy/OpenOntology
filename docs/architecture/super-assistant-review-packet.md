@@ -208,7 +208,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `6397fee7`）
+## 11. 当前实现证据（2026-09-14，基线提交 `daff9e1e`）
 
 本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界。本轮进一步收紧探索委派绑定：服务端生成并校验写权限指纹，Kernel 子 Run 强制保留可信来源标记，委派恢复每轮复核实时草稿和写权限。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
@@ -216,9 +216,9 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 |---|---|---|
 | M0 | 源码、迁移、路由、事件、前端和参考 Harness 已完成差距审计；本文件与开发基线已修正实现状态 | 已完成 |
 | M1 | `tests/super_assistant/kernel/` 专项回归；lease heartbeat、Inbox TTL、stuck recovery、父子结果 Artifact 均有测试 | 已完成代码闭环，需长时 staging 压测 |
-| M2 | `alembic heads` 唯一 head 为 `0113_remote_agent_result_artifacts`；迁移链为 `0111 → 0112_reconcile_outbox_payload → 0113_remote_agent_result_artifacts`；执行 Outbox、DLQ 发布与 replay 测试；隔离 PostgreSQL 已验证历史数据 `apply → replay → rollback → replay` 幂等与批次隔离 | 已完成代码闭环；现存业务库升级仍需 staging 证据 |
+| M2 | `alembic heads` 唯一 head 为 `0115_plugin_runner_event_replay`；迁移链包含 `0111 → 0112 → 0113 → 0114_plugin_runner_journal → 0115_plugin_runner_event_replay`；执行 Outbox、DLQ 发布与 replay 测试；隔离 PostgreSQL 已验证历史数据 `apply → replay → rollback → replay` 幂等与批次隔离 | 已完成代码闭环；现存业务库升级仍需 staging 证据 |
 | M3 | 多步 activation、等待/恢复、统一外部 Call、Assistant Hub `assistant_child` 子 Run、fan-in 结果归并均有专项测试 | 已完成首版；Hub 内部 legacy 子会话行保留兼容 |
-| M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试；配置变更按 revision/hash 栅栏，旧 revision 进入人工处理 | 已完成首版；OS 沙箱、secret broker 需部署层证据 |
+| M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试；配置变更按 revision/hash 栅栏，插件 runner 调用/回执信封与 PostgreSQL journal 已落地，旧 revision 进入人工处理 | 已完成首版；真实 OCI/rootless launcher、OS/网络/secret broker 和生产接线需部署层证据 |
 | M5 | Context Pack、Memory/Palace source provenance、tombstone 排除、结构化 Artifact 和 checksum 校验有代码/测试 | 已完成首版 |
 | M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、If-Match/Idempotency-Key、UTF-8 请求上限、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
 | M7 | 当前 `oo-rearch` Compose 的 `/api/health` 依赖探针通过（PostgreSQL、Redis、Neo4j、MinIO、Browser、NATS、n8n 均健康）；但该 staging backend 旧镜像内 `alembic current` 无法定位数据库 revision `0110_super_assistant_process_plugins`，不能证明当前分支迁移已部署。将当前分支源码挂载到该旧数据库启动时，schema guard 明确拒绝缺少 `super_assistant_mcp_servers.manifest_revision/manifest_hash`，证明现存业务库必须先执行迁移；本轮未直接改动该共享数据库。最新隔离临时 Compose 已使用当前分支执行 PostgreSQL `upgrade head`（到 `0113`）、`downgrade 0113 -> 0110`、再次 `upgrade head`，并通过 PostgreSQL/NATS JetStream/MinIO/Neo4j 依赖探针；NATS executor 短时启动并成功注册 `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1`。该证据仍未覆盖现存业务数据库升级、完整 kernel live E2E、浏览器/外部副作用和发布回滚 | 当前分支临时迁移往返和依赖探针通过，现存业务库升级和完整 staging 验收待执行 |
@@ -268,13 +268,13 @@ rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version
 
 本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3597 passed, 6 skipped`；时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单、JetStream 策略漂移和进程插件 manifest 篡改测试均已通过；核心定向集合和真实隔离栈证据仍不替代完整 staging。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
 
-最新隔离 E2E 栈证据（2026-09-14）为：PostgreSQL 当前分支从空库升级到 `0113_remote_agent_result_artifacts`，再降级到 `0110_super_assistant_process_plugins` 并重新升级到 `0113`；依赖探针返回 PostgreSQL、NATS JetStream、MinIO bucket、Neo4j 全部 `ok=true`；短时 nats executor 成功注册三个 kernel durable consumer。临时容器、卷和网络已在验证后销毁；这仍不等价于现存业务库升级或完整外部副作用验收。
+最新隔离 E2E 栈证据（2026-09-14）为：PostgreSQL 当前分支从空库升级到 `0115_plugin_runner_event_replay`，再降级到 `0113_remote_agent_result_artifacts` 并重新升级到 `0115`；依赖探针返回 PostgreSQL、NATS JetStream、MinIO bucket、Neo4j 全部 `ok=true`；短时 nats executor 成功注册三个 kernel durable consumer。临时容器、卷和网络已在验证后销毁；这仍不等价于现存业务库升级或完整外部副作用验收。
 
 迁移报告运维入口已补齐脚本自举：在 `backend` 目录直接执行 `uv run python scripts/super_assistant_migration_report.py`（无需手工设置 `PYTHONPATH`）可输出 `kernel.v1.legacy-disposition.v1` 只读报告；`--help` 在无数据库配置时也可用。入口已补齐 ORM registry 初始化，避免独立 CLI 进程在 PostgreSQL flush 时缺少 `users` mapper。隔离 PostgreSQL 已实际验证带历史数据的 `apply → replay → rollback → replay`：首轮创建 1 个 legacy Run 和 2 个 CapabilityRevision，重复 apply 与回滚后重放均不重复创建，回滚只影响指定 migration id。
 
 本次最新收口后的定向回归为 `77 passed`，探索适配器完整回归为 `14 passed`，委派边界架构测试为 `4 passed`，时长覆盖守卫为 `1 passed`；新增验证覆盖伪造权限指纹、服务端重算指纹、Kernel 子 Run 来源标记不可被上下文覆盖，以及草稿生命周期变化后恢复委派会话会明确失败。该专项证据只证明代码级绑定不变量，不改变 M7/M8 的 staging 和发布阻断状态。
 
-用户进程插件的 runner 合同专项回归为 `17 passed`（覆盖调用信封与进度/审批/取消/结构化 Artifact 回执），插件生命周期/服务回归为 `28 passed`，生产配置回归为 `84 passed`；验证覆盖 runner 信封字段/大小/摘要/回复主题校验，以及 `disabled | nats | direct_dev` 的 fail-closed 解析。当前 `nats` 只冻结了独立 runner 的消息契约，尚未提供 rootless 执行服务，因此不能据此解除插件商用阻断。
+用户进程插件的 runner 合同专项回归为 `17 passed`（覆盖调用信封与进度/审批/取消/结构化 Artifact 回执），插件生命周期/服务回归为 `28 passed`，runner journal/attestation 回归为 `5 passed`，生产配置回归为 `84 passed`；验证覆盖 runner 信封字段/大小/摘要/回复主题校验，以及 `disabled | nats | direct_dev` 的 fail-closed 解析。当前已提供独立 runner 的 NATS/journal 首片，但真实 OCI/rootless launcher、Scope Broker 和生产接线尚未完成，因此不能据此解除插件商用阻断。
 
 对抗式审查新增的代码修复包括：NATS handler 在状态未持久化时 NAK 而非 ACK；RUNNING 状态的重复外部调用进入对账/人工介入路径且不二次触发 provider；父 Run 终态后仍对带远端句柄的 Call 执行取消；provider 引用和结果文本在落库前限长；人工介入 Call 不再被 scheduler 无限轮询；外部 Artifact 的对象存储引用必须落在 owner/run/artifact 命名空间；SSE callback 事件只保留稳定字段和受限 Artifact 引用。上述修复已经通过对应专项测试，但不替代真实 provider、对象存储和浏览器副作用验收。
 
