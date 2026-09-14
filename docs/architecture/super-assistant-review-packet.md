@@ -244,7 +244,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 新增专项回归为 `33 passed`（router/reconciler/recovery/callback/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
 
-当前仍有多项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 以及浏览器导航的配置期 DNS 校验与实际建连之间仍存在 DNS rebinding TOCTOU 窗口。浏览器的 `context.route("**/*", _route_guard)` 会逐请求重检 URL，因此重定向已受应用层 URL 检查；但它不能证明最终连接使用的 IP，也不能替代网络层 egress/private-CIDR 策略。当前镜像仍需 `--no-sandbox`；生产部署已经强制 `BROWSER_IMAGE` 使用 digest，但其他基础镜像的全局 `STRICT_IMAGE_DIGESTS` 仍允许关闭，且 browser APT 包未锁版本。生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。生产环境配置现已在 Settings 入口统一规范化 `prod`、大小写和外围空白，并对空值/未知值 fail-closed；私网浏览器目标默认关闭且生产 Compose 显式固定为 `false`。剩余问题必须在 staging 攻击验收与发布门禁中闭环。
+当前仍有多项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 以及浏览器导航的配置期 DNS 校验与实际建连之间仍存在 DNS rebinding TOCTOU 窗口。浏览器的 `context.route("**/*", _route_guard)` 会逐请求重检 URL，因此重定向已受应用层 URL 检查；但它不能证明最终连接使用的 IP，也不能替代网络层 egress/private-CIDR 策略。当前镜像仍需 `--no-sandbox`；生产部署已经强制 `BROWSER_IMAGE` 使用 digest，但其他基础镜像的全局 `STRICT_IMAGE_DIGESTS` 仍允许关闭。browser Dockerfile 的字体包已锁定 Debian 版本，生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。生产环境配置现已在 Settings 入口统一规范化 `prod`、大小写和外围空白，并对空值/未知值 fail-closed；私网浏览器目标默认关闭且生产 Compose 显式固定为 `false`。剩余问题必须在 staging 攻击验收与发布门禁中闭环。
 
 ## 13. 最新对抗式代码审查证据（提交 `d269b367`）
 
@@ -296,7 +296,7 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 本轮对用户进程插件做了额外的反向检查：`plugin_host.py` 目前只是受限 JSON-lines 子进程，`network_scope`、`workspace_scope`、`secret_refs` 没有被 OS/网络策略执行；生产 Compose 已增加通用的 capability drop、no-new-privileges、固定非 root browser、只读 browser 根文件系统和 hardened `/tmp`，但插件仍没有独立 runner/namespace。运行时不会把 secret 值直接传给插件，因此当前插件能力是 fail-closed 的，不能作为“已支持凭据注入的商用插件”宣称。该事实与 `process_plugin_service.py`、`kernel/runtime.py`、`kernel/plugin_host.py` 和生产 Compose 配置一致，必须以独立 runner、secret broker 和攻击性 staging 验收完成后才可解除 M7/M8 阻断。
 
-本次新增的对抗式复查确认了四个 P1 风险中的两项已完成代码级收口：浏览器私网目标默认拒绝并由生产 Compose 固定关闭，`ENVIRONMENT=prod`、大小写、外围空白和未知值在 Settings 入口统一处理。浏览器已有逐请求 route URL 检查，但 DNS 解析与实际建连之间仍有 TOCTOU 窗口，且尚无网络层 egress/private-CIDR 隔离；生产部署现已无论全局开关取值都拒绝浮动 `BROWSER_IMAGE`，但 APT 包未锁定版本，其他基础镜像仍可在全局 digest 门禁关闭时漂移，当前镜像还需 `--no-sandbox`。后续需要通过网络层隔离、不可关闭的全量发布镜像完整性门禁和 staging 攻击测试收口。
+本次新增的对抗式复查确认了四个 P1 风险中的三项已完成代码级收口：浏览器私网目标默认拒绝并由生产 Compose 固定关闭，`ENVIRONMENT=prod`、大小写、外围空白和未知值在 Settings 入口统一处理，browser Dockerfile 的字体包固定到版本号。浏览器已有逐请求 route URL 检查，但 DNS 解析与实际建连之间仍有 TOCTOU 窗口，且尚无网络层 egress/private-CIDR 隔离；生产部署现已无论全局开关取值都拒绝浮动 `BROWSER_IMAGE`，但其他基础镜像仍可在全局 digest 门禁关闭时漂移，当前镜像还需 `--no-sandbox`。后续需要通过网络层隔离、不可关闭的全量发布镜像完整性门禁和 staging 攻击测试收口。
 
 同时增加了进程插件完整 manifest 篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；运行前会重算并校验 `key/revision/entrypoint/capabilities/permissions/network_scope/workspace_scope/secret_refs`，不一致即撤销 CapabilityRevision 并进入 connector unavailable/manual attention 路径。生产环境门禁同时覆盖规范化后的 `production` 与 `prod` 别名。新增 entrypoint、capabilities 和环境别名回归均已通过。未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。该修复属于 fail-closed 防护，不能替代签名信任根。
 

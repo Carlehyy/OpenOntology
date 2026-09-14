@@ -3,7 +3,9 @@ FROM ${BROWSER_BASE_IMAGE}
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk \
+    && apt-get install -y --no-install-recommends \
+        fontconfig=2.15.0-2.3 \
+        fonts-noto-cjk=1:20240730+repack1-1 \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -f
 

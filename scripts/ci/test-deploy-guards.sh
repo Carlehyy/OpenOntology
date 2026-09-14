@@ -179,6 +179,11 @@ if ! grep -Fq 'XDG_CACHE_HOME=/tmp/browser-cache' docker/browser/Dockerfile; the
   printf 'browser must keep its cache in a dedicated tmpfs subdirectory\n' >&2
   exit 1
 fi
+if ! grep -Fq 'fontconfig=2.15.0-2.3' docker/browser/Dockerfile \
+    || ! grep -Fq 'fonts-noto-cjk=1:20240730+repack1-1' docker/browser/Dockerfile; then
+  printf 'browser APT packages must be pinned to immutable versions\n' >&2
+  exit 1
+fi
 if ! grep -Fq 'BROWSER_IMAGE:-chromedp/headless-shell@sha256:' "$PROD_COMPOSE" \
     || grep -Fq 'BROWSER_IMAGE:-chromedp/headless-shell:latest' "$PROD_COMPOSE"; then
   printf 'browser base image default must be pinned by digest\n' >&2

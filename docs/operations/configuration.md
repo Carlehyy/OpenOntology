@@ -275,6 +275,8 @@ Actions 日志。普通 push 不具有创建新加密 authority 的权限，后�
 `.env`；如需改变策略，必须先修改持久配置并重新执行完整校验。
 无论该总开关取值如何，生产部署始终要求 `BROWSER_IMAGE` 使用不可变
 `@sha256` digest；浏览器承载外部网页内容，不能使用浮动 tag。
+browser Dockerfile 中的字体包也固定到 Debian 版本号；更新版本必须重新构建、
+执行 CDP 健康检查并复核浏览器安全探针。
 
 ## 运行监控（API 性能监控）
 
