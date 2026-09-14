@@ -65,11 +65,17 @@ def _resolved_addresses(hostname: str, port: int) -> set[ipaddress.IPv4Address |
     return addresses
 
 
-def validate_mcp_url(url: str) -> str:
+def validate_mcp_url(url: str, *, require_https: bool = False) -> str:
     value = (url or "").strip()
     parsed = urlsplit(value)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.hostname:
         raise McpClientError("MCP URL 必须是 HTTP/HTTPS 绝对地址")
+    environment = settings.environment.strip().lower()
+    if require_https and settings.super_assistant_external_https_required \
+            and environment not in {"development", "dev", "test", "local"} \
+            and scheme != "https":
+        raise McpClientError("生产环境外部集成必须使用 HTTPS")
     if parsed.username or parsed.password:
         raise McpClientError("MCP URL 不能内嵌账号或密码")
     try:
@@ -78,7 +84,7 @@ def validate_mcp_url(url: str) -> str:
         raise McpClientError("MCP URL 端口无效") from exc
     hostname = parsed.hostname.lower().rstrip(".")
     addresses = _resolved_addresses(hostname, port)
-    if settings.environment.strip().lower() not in {"development", "dev", "test", "local"}:
+    if environment not in {"development", "dev", "test", "local"}:
         blocked = sorted(str(address) for address in addresses if not address.is_global)
         if blocked:
             raise McpClientError(
@@ -137,13 +143,13 @@ def normalize_connection(*, transport: str, url: str = "", command: str | None =
             remote_url = next((item for item in arguments[remote_index + 1:] if item.startswith(("http://", "https://"))), "")
             if not remote_url:
                 raise McpClientError("mcp-remote 配置缺少远程 MCP URL")
-            return "streamable_http", validate_mcp_url(remote_url), None, []
+            return "streamable_http", validate_mcp_url(remote_url, require_https=True), None, []
         if not executable or "\x00" in executable:
             raise McpClientError("stdio MCP 必须配置 command")
         return "stdio", "", executable, arguments
     if normalized not in {"sse", "streamable_http"}:
         raise McpClientError("传输方式必须是 stdio、sse 或 streamable_http")
-    return normalized, validate_mcp_url(url), None, []
+    return normalized, validate_mcp_url(url, require_https=True), None, []
 
 
 def _validate_stdio_runtime(command: str) -> None:
@@ -212,7 +218,7 @@ async def _client_session(*, transport: str, url: str, headers: dict[str, str],
                 await session.initialize()
                 yield session
         return
-    valid_url = validate_mcp_url(url)
+    valid_url = validate_mcp_url(url, require_https=True)
     if transport == "sse":
         async with sse_client(
             valid_url, headers=headers, timeout=20, sse_read_timeout=120,

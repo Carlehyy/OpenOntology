@@ -243,7 +243,7 @@ class RemoteAgentHttpConnector:
         if self.transport is None:
             try:
                 from app.super_assistant.mcp_client import McpClientError, validate_mcp_url
-                validate_mcp_url(self.endpoint)
+                validate_mcp_url(self.endpoint, require_https=True)
             except McpClientError as exc:
                 raise ContractError(f"remote connector endpoint rejected: {exc}") from exc
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}

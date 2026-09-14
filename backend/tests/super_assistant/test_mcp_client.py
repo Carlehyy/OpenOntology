@@ -54,10 +54,18 @@ def test_mcp_url_allows_public_targets_without_a_host_allowlist(monkeypatch):
     monkeypatch.setattr(mcp_client.socket, "getaddrinfo", lambda host, port, **_kwargs: [
         (None, None, None, None, ("93.184.216.34", port)),
     ])
-    assert validate_mcp_url("http://38.76.215.169:8765/mcp") == "http://38.76.215.169:8765/mcp"
+    assert validate_mcp_url("https://38.76.215.169:8765/mcp") == "https://38.76.215.169:8765/mcp"
     assert validate_mcp_url("https://tools.example.com/mcp") == "https://tools.example.com/mcp"
     with pytest.raises(McpClientError, match="不能内嵌"):
         validate_mcp_url("https://user:secret@tools.example.com/mcp")
+
+
+def test_external_integrations_require_https_in_production(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "super_assistant_external_https_required", True)
+    with pytest.raises(McpClientError, match="必须使用 HTTPS"):
+        validate_mcp_url("http://93.184.216.34/mcp", require_https=True)
+    assert validate_mcp_url("https://93.184.216.34/mcp", require_https=True).startswith("https://")
 
 
 @pytest.mark.parametrize("url", [
@@ -95,10 +103,10 @@ def test_normalizes_mcp_remote_wrapper_to_direct_streamable_http(monkeypatch):
     assert normalize_connection(
         transport="stdio",
         command="npx",
-        args=["-y", "mcp-remote", "http://38.76.215.169:8765/mcp"],
+        args=["-y", "mcp-remote", "https://38.76.215.169:8765/mcp"],
     ) == (
         "streamable_http",
-        "http://38.76.215.169:8765/mcp",
+        "https://38.76.215.169:8765/mcp",
         None,
         [],
     )

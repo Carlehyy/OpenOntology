@@ -202,7 +202,7 @@ async def test_remote_direct_response_is_bounded_before_json_materialization():
 async def test_remote_direct_revalidates_endpoint_before_network_request(monkeypatch):
     from app.super_assistant.mcp_client import McpClientError
 
-    def reject(url):
+    def reject(url, **kwargs):
         raise McpClientError("private address")
 
     monkeypatch.setattr("app.super_assistant.mcp_client.validate_mcp_url", reject)

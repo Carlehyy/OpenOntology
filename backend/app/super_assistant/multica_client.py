@@ -30,7 +30,7 @@ def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
 def normalize_base_url(base_url: str) -> str:
     value = (base_url or "").strip().rstrip("/")
     try:
-        return validate_mcp_url(value)
+        return validate_mcp_url(value, require_https=True)
     except McpClientError as exc:
         raise MulticaClientError(f"multica 服务地址无效：{exc}") from exc
 

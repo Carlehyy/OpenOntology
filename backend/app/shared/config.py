@@ -177,6 +177,9 @@ class Settings(BaseSettings):
     # granting server-side code execution to assistant configurators.
     super_assistant_mcp_stdio_enabled: bool = False
     super_assistant_mcp_stdio_allowed_commands: str = ""
+    # Credential-bearing external integrations must use TLS in production.
+    # Development/test keep HTTP compatibility for local fixtures.
+    super_assistant_external_https_required: bool = True
     # Anthropic prompt caching：给 system 与 tools 末位元素加 ephemeral 缓存断点，
     # 降低重复前缀的计费与时延；DeepSeek 等 anthropic 兼容端点不支持时应关闭。
     super_assistant_prompt_cache_enabled: bool = True

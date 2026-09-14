@@ -162,7 +162,7 @@ class RemoteAgentAdapter:
         self, conversation_ref: str, message: str, remote_session: str | None,
     ) -> Iterator[TurnResult]:
         try:
-            validate_mcp_url(self._endpoint)
+            validate_mcp_url(self._endpoint, require_https=True)
         except McpClientError as exc:
             raise AssistantHubError(f"远程助手端点被拒绝：{exc}") from exc
 
@@ -600,7 +600,7 @@ def _generate_key(db: Session, owner_id: str, label: str) -> str:
 def _validate_endpoint(endpoint: str) -> str:
     value = (endpoint or "").strip()
     try:
-        validate_mcp_url(value)
+        validate_mcp_url(value, require_https=True)
     except McpClientError as exc:
         raise RemoteAgentServiceError(str(exc)) from exc
     return value

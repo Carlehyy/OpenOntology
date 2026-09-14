@@ -178,6 +178,11 @@ backend 镜像依赖（requests/httpx/pandas/pymysql 等），脚本可直接发
 
 ## 插件社区 stdio MCP（可选，默认关闭）
 
+生产环境的 MCP、Remote Agent 和 Multica 外部端点默认要求 HTTPS，由
+`SUPER_ASSISTANT_EXTERNAL_HTTPS_REQUIRED`（默认 `true`）控制；development/test
+环境仍允许本地 HTTP fixture。切换既有生产集成前，应先迁移端点并执行外部回调、
+凭据和证书验收。
+
 stdio 形态的 MCP 会在后端容器内以子进程运行 `command`，等同开放容器内命令
 执行，因此按部署开关管理：`SUPER_ASSISTANT_MCP_STDIO_ENABLED`（默认
 `false`）与 `SUPER_ASSISTANT_MCP_STDIO_ALLOWED_COMMANDS`（逗号分隔的命令

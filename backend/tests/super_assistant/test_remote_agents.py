@@ -148,7 +148,7 @@ def test_update_keeps_token_when_blank(db, admin_user):
 
 
 def test_adapter_roundtrip_issues_and_resumes_remote_session(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     row = _add_agent(db, admin_user.id)
     adapter = remote_agent_service.RemoteAgentAdapter(row)
     ref = adapter.start(db, admin_user)
@@ -189,7 +189,7 @@ def test_adapter_roundtrip_issues_and_resumes_remote_session(db, admin_user, mon
 
 
 def test_adapter_maps_failures(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     row = _add_agent(db, admin_user.id)
     adapter = remote_agent_service.RemoteAgentAdapter(row)
     ref = adapter.start(db, admin_user)
@@ -217,7 +217,7 @@ def test_adapter_maps_failures(db, admin_user, monkeypatch):
 
 
 def test_adapter_rejects_oversized_direct_response(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     row = _add_agent(db, admin_user.id)
     adapter = remote_agent_service.RemoteAgentAdapter(row)
     ref = adapter.start(db, admin_user)
@@ -273,7 +273,7 @@ def test_delegation_executes_dynamic_agent_end_to_end(tmp_path, monkeypatch):
     TestingSession, ids = _seed(tmp_path, monkeypatch, "remote-e2e")
     with TestingSession() as db:
         _add_agent(db, ids["owner_id"])
-        monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+        monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
         monkeypatch.setattr(
             remote_agent_service, "_request",
             lambda *a, **k: _fake_response(payload={
@@ -511,7 +511,7 @@ def test_corrupt_token_ciphertext_degrades_instead_of_poisoning(db, admin_user):
 
 
 def test_direct_mode_caps_oversized_session_ref(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     row = _add_agent(db, admin_user.id, key="remote.long-ref", endpoint="http://127.0.0.1:9103/turn")
     monkeypatch.setattr(
         remote_agent_service, "_request",

@@ -244,7 +244,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 新增专项回归为 `33 passed`（router/reconciler/recovery/callback/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
 
-当前仍有四项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口；生产集成端点仍允许公网 `http://`，尚未完成 HTTPS 强制策略、迁移开关和兼容性验收。它们必须在 staging 攻击验收与发布门禁中闭环。
+当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。生产集成 HTTPS 已默认强制，仍需完成既有端点迁移、证书和回调兼容性验收。它们必须在 staging 攻击验收与发布门禁中闭环。
 
 ## 13. 最新对抗式代码审查证据（提交 `d9c68247`）
 
@@ -281,6 +281,8 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 独立 DNS 审查还发现 MCP legacy SSE 路径会使用 SDK 默认的 `follow_redirects=True`，存在跨主机重定向和请求头泄露风险；现在注入 `follow_redirects=False` 的客户端工厂，SSE 与 streamable HTTP 的重定向策略保持一致。DNS 解析与 TCP 建连之间的 rebinding TOCTOU 仍需网络层 egress policy 或固定 IP transport 解决。
 
 同一审查确认 HTTPX 默认会读取进程环境代理；所有超级助手外部 HTTP 出口现在显式设置 `trust_env=False`，避免 `HTTP(S)_PROXY/NO_PROXY` 在校验后改变解析或路由。若生产必须使用代理，应由受控 egress proxy 负责 DNS/IP 策略并通过明确的应用配置接入。
+
+生产外部集成端点现由 `SUPER_ASSISTANT_EXTERNAL_HTTPS_REQUIRED=true` 默认强制 HTTPS；本地 development/test 保留 HTTP fixture 兼容。既有生产端点迁移、证书轮换和 callback 回连验收仍属于 M7 staging 门禁。
 
 生产 Compose 的 browser、`python_kernel_gateway`、backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。
 
