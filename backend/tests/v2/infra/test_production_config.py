@@ -69,7 +69,11 @@ def test_browser_private_network_access_is_disabled_without_configuration(monkey
     assert Settings(_env_file=None).steward_browser_allow_private_networks is False
 
 
-@pytest.mark.parametrize("environment", ["", " ", "prodction", "staging"])
+@pytest.mark.parametrize(
+    "environment",
+    ["", " ", "prodction", "staging"],
+    ids=["empty", "spaces", "typo", "staging"],
+)
 def test_unknown_environment_fails_closed_at_settings_ingress(environment):
     with pytest.raises(ValidationError, match="ENVIRONMENT"):
         Settings(_env_file=None, environment=environment)
