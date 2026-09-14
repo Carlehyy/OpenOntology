@@ -13,6 +13,10 @@ npm run test:e2e:stack
 npm run test:e2e:external
 ```
 
+默认不复用已有 Vite 服务。多个 worktree 并行执行时，请为每个执行指定独立
+端口，例如 `PLAYWRIGHT_PORT=5200 npm run test:e2e:mocked`；确认服务属于当前
+worktree 后才使用 `PLAYWRIGHT_REUSE_SERVER=1`。
+
 不要用文件名 grep 或默认 skip 代替分类。新增 spec 后先更新唯一一个 suite
 allowlist，再运行 classification。证据统一写到仓库根目录
 `.artifacts/playwright/`。

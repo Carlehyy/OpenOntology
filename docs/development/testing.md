@@ -44,6 +44,11 @@ npm run test:e2e:mocked
 - `test:e2e:external`：需要显式开关及真实 LLM/外部服务的 spec；
 - `test:e2e:classification`：保证全部 spec 恰好属于一组。
 
+Playwright 默认不会复用已有 Vite 服务，避免多个 worktree 共用 5173 时把旧
+bundle 当成当前源码。并行运行时请为每个 worktree 指定独立端口，例如
+`PLAYWRIGHT_PORT=5200 npm run test:e2e:mocked`；只有确认服务确实属于当前
+worktree 时，才显式设置 `PLAYWRIGHT_REUSE_SERVER=1`。
+
 各组收录数量以 `frontend/playwright.*.config.ts` 的 testMatch 为准，文档不
 维护会随迭代腐烂的计数。
 

@@ -32,7 +32,10 @@ export default defineConfig({
   webServer: {
     command: `npm run dev -- --port ${port}`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    // A shared 5173 server may belong to another worktree and serve a stale
+    // bundle. Reuse is an explicit opt-in for local debugging; CI and normal
+    // test runs must start the bundle from this checkout.
+    reuseExistingServer: process.env.PLAYWRIGHT_REUSE_SERVER === '1',
     timeout: 60000,
   },
 })
