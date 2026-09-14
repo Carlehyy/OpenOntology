@@ -150,6 +150,20 @@ for hardened_service in browser python_kernel_gateway backend pipeline_executor;
   fi
 done
 
+for private_network_service in backend pipeline_executor; do
+  private_network_block="$(awk -v service="$private_network_service" '
+    $0 == "  " service ":" { in_service = 1 }
+    in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+    in_service { print }
+  ' "$PROD_COMPOSE")"
+  if ! grep -Fq 'STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS: "false"' \
+      <<<"$private_network_block"; then
+    printf '%s must explicitly deny browser private-network targets\n' \
+      "$private_network_service" >&2
+    exit 1
+  fi
+done
+
 browser_block="$(awk -v service=browser '
   $0 == "  " service ":" { in_service = 1 }
   in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
