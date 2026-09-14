@@ -231,6 +231,13 @@ class PluginRunnerJournal:
         if event.event_seq <= row.event_seq:
             # Replayed event is harmless; a sequence gap is rejected below.
             if event.event_seq == row.event_seq:
+                # Sequence equality alone is insufficient: a compromised or
+                # buggy runner must not be able to replace the durable
+                # evidence for an already committed event.  Compare the
+                # complete bounded wire event before treating it as a replay.
+                prior = row.last_event or {}
+                if prior and dict(prior) != event.to_payload():
+                    raise ContractError("plugin runner replay payload conflicts with journal")
                 return
             raise ContractError("plugin runner event sequence moved backwards")
         if event.event_seq != row.event_seq + 1:

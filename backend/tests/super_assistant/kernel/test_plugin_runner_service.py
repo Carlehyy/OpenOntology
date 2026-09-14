@@ -83,6 +83,32 @@ def test_attestation_requires_immutable_rootless_probe(tmp_path):
         verifier.verify(envelope)
 
 
+def test_journal_replay_with_same_sequence_but_different_payload_is_rejected(db):
+    envelope = _envelope()
+    journal = PluginRunnerJournal(db)
+    row = journal.accept(envelope)
+    db.commit()
+    event = PluginRunnerEventEnvelope(
+        request_id=envelope.request_id, owner_id=envelope.owner_id,
+        run_id=envelope.run_id, call_id=envelope.call_id,
+        plugin_id=envelope.plugin_id, revision=envelope.revision,
+        manifest_hash=envelope.manifest_hash,
+        capability_revision=envelope.capability_revision, event_seq=0,
+        kind="progress", status="running", payload={"message": "first"},
+    )
+    journal.record_event(row, event)
+    conflicting = PluginRunnerEventEnvelope(
+        request_id=envelope.request_id, owner_id=envelope.owner_id,
+        run_id=envelope.run_id, call_id=envelope.call_id,
+        plugin_id=envelope.plugin_id, revision=envelope.revision,
+        manifest_hash=envelope.manifest_hash,
+        capability_revision=envelope.capability_revision, event_seq=0,
+        kind="progress", status="running", payload={"message": "tampered"},
+    )
+    with pytest.raises(ContractError, match="replay payload"):
+        journal.record_event(row, conflicting)
+
+
 def test_attestation_requires_scope_enforcement_and_secret_broker(tmp_path):
     path = tmp_path / "attestation.json"
     path.write_text(json.dumps({
