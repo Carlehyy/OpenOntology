@@ -102,7 +102,7 @@ class RemoteAgentServiceError(ValueError):
 
 def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     """httpx 调用收口（测试 monkeypatch 此函数）。"""
-    kwargs.setdefault("trust_env", False)
+    kwargs["trust_env"] = False
     return httpx.request(method, url, **kwargs)
 
 
