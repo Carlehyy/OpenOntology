@@ -520,7 +520,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             if plugin.trust_level != TrustLevel.USER_UNTRUSTED.value:
                 logger.error("refusing process plugin with unsupported trust level: %s", plugin.id)
                 return None
-            if normalized_environment(settings.environment) == "production" and plugin.trust_level == TrustLevel.USER_UNTRUSTED.value:
+            if normalized_environment(settings.environment) in {"production", "prod"} and plugin.trust_level == TrustLevel.USER_UNTRUSTED.value:
                 logger.error("refusing user_untrusted process plugin in production: %s", plugin.id)
                 return None
             # The database row is mutable storage, not an integrity source.

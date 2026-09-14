@@ -60,6 +60,11 @@ class ProcessPluginBusyError(ProcessPluginServiceError):
 PLUGIN_INVOCATION_LEASE_SECONDS = 10 * 60
 
 
+def _is_production_environment(value: object) -> bool:
+    """Treat supported production aliases as production for plugin safety."""
+    return normalized_environment(value) in {"production", "prod"}
+
+
 # These are the host-facing capabilities that a process may request.  The
 # plugin cannot turn them into shell/database access; the process host still
 # enforces a separate OS/deployment sandbox.
@@ -228,7 +233,7 @@ def enable_process_plugin(db: Session, owner_id: str, plugin_id: str) -> SuperAs
         raise ProcessPluginValidationError("当前插件状态不可启用")
     if row.trust_level != TrustLevel.USER_UNTRUSTED.value:
         raise ProcessPluginValidationError("插件信任级别未经平台签名，拒绝启用")
-    if normalized_environment(settings.environment) == "production" and row.trust_level == TrustLevel.USER_UNTRUSTED.value:
+    if _is_production_environment(settings.environment) and row.trust_level == TrustLevel.USER_UNTRUSTED.value:
         # Until the dedicated rootless plugin-runner is deployed, executing a
         # user entrypoint in the API worker would expose platform secrets and
         # shared volumes. Production therefore fails closed.
