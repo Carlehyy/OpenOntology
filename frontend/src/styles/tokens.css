@@ -56,6 +56,7 @@
   --color-accent-mist: #d1fae5;
   --color-accent-line: #a7f3d0;
   --color-accent-ink: #047857;
+  --color-context-usage-bg: rgba(240, 253, 250, 0.8);
 
   /* ── 背景 ── */
   --color-bg-base: var(--background);
@@ -205,6 +206,7 @@
   --color-accent-mist: #064e3b;
   --color-accent-line: #065f46;
   --color-accent-ink: #6ee7b7;
+  --color-context-usage-bg: rgba(2, 44, 34, 0.8);
 
   /* ── 背景 ── */
   --color-bg-elevated: #161c26;
