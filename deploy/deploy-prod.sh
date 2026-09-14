@@ -1120,6 +1120,15 @@ check_image_digest() {
     log "warning: $key is not digest-pinned; set STRICT_IMAGE_DIGESTS=1 after populating immutable image references"
   fi
 }
+# The browser consumes attacker-controlled page content and is therefore a
+# security boundary even when the operator intentionally keeps the broader
+# image policy in warning mode during migration. Never allow its tag to drift.
+browser_image_value="$(env_value BROWSER_IMAGE)"
+if [[ ! "$browser_image_value" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+  log "BROWSER_IMAGE must be pinned to an immutable @sha256 digest"
+  exit 1
+fi
+unset browser_image_value
 for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE; do

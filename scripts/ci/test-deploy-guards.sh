@@ -488,6 +488,22 @@ set_test_env_value STRICT_IMAGE_DIGESTS false
     bash "$DEPLOY_SCRIPT" >/dev/null
 )
 
+set_test_env_value BROWSER_IMAGE chromedp/headless-shell:stable
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/browser-image-failure.log" 2>&1; then
+  printf 'production deployment must reject a floating browser image even when the global image gate is disabled\n' >&2
+  exit 1
+fi
+grep -q 'BROWSER_IMAGE must be pinned' "$test_dir/browser-image-failure.log"
+set_test_env_value BROWSER_IMAGE "$digest"
+
 fake_bin="$test_dir/fake-bin"
 fake_docker_log="$test_dir/fake-docker.log"
 mkdir -p "$fake_bin"

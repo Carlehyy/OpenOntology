@@ -273,6 +273,8 @@ Actions 日志。普通 push 不具有创建新加密 authority 的权限，后�
 `STRICT_IMAGE_DIGESTS=true` 会要求全部镜像使用 `@sha256`，合法值为
 `true/false`、`yes/no` 或 `1/0`。部署入口不接受宿主 shell 中的同名变量覆盖
 `.env`；如需改变策略，必须先修改持久配置并重新执行完整校验。
+无论该总开关取值如何，生产部署始终要求 `BROWSER_IMAGE` 使用不可变
+`@sha256` digest；浏览器承载外部网页内容，不能使用浮动 tag。
 
 ## 运行监控（API 性能监控）
 
