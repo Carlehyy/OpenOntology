@@ -9,6 +9,7 @@ gate.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
@@ -43,6 +44,38 @@ _ENVELOPE_FIELDS = frozenset(
         "reply_subject",
     }
 )
+_EVENT_FIELDS = frozenset(
+    {
+        "request_id",
+        "owner_id",
+        "run_id",
+        "call_id",
+        "plugin_id",
+        "revision",
+        "manifest_hash",
+        "capability_revision",
+        "event_seq",
+        "kind",
+        "status",
+        "payload",
+        "artifacts",
+    }
+)
+_ARTIFACT_FIELDS = frozenset({"artifact_ref", "name", "mime_type", "size", "checksum"})
+_EVENT_KINDS = frozenset({
+    "progress", "approval_requested", "artifact", "completed", "failed", "cancelled", "unknown",
+})
+_EVENT_STATUS = {
+    "progress": "running",
+    "approval_requested": "waiting_approval",
+    "artifact": "running",
+    "completed": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "unknown": "unknown",
+}
+_MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
+_MAX_ARTIFACTS = 32
 
 
 def _required_text(name: str, value: Any, *, max_length: int = _MAX_REF_LENGTH) -> str:
@@ -138,4 +171,105 @@ class PluginInvocationEnvelope:
             secret_lease_refs=tuple(str(item) for item in leases),
             deadline=str(payload["deadline"]),
             reply_subject=str(payload["reply_subject"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PluginRunnerEventEnvelope:
+    """Bound, ordered runner-to-kernel event for progress and final results.
+
+    Every event repeats the invocation identity.  The reconcile adapter must
+    reject an event whose owner/run/call/plugin/revision or manifest hash does
+    not match the frozen Call before acknowledging it.  ``artifacts`` contain
+    only opaque references and integrity metadata; bytes and secret values
+    never travel through this subject.
+    """
+
+    request_id: str
+    owner_id: str
+    run_id: str
+    call_id: str
+    plugin_id: str
+    revision: int
+    manifest_hash: str
+    capability_revision: int
+    event_seq: int
+    kind: str
+    status: str
+    payload: Mapping[str, Any]
+    artifacts: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("request_id", "owner_id", "run_id", "call_id", "plugin_id"):
+            _required_text(name, getattr(self, name))
+        if int(self.revision) < 1 or int(self.capability_revision) < 1:
+            raise ContractError("plugin runner event revisions must be positive")
+        if not _SHA256.fullmatch(str(self.manifest_hash)):
+            raise ContractError("plugin runner event manifest_hash must be a lowercase sha256")
+        if int(self.event_seq) < 0:
+            raise ContractError("plugin runner event_seq must be non-negative")
+        kind = _required_text("event kind", self.kind, max_length=32)
+        if kind not in _EVENT_KINDS or self.status != _EVENT_STATUS[kind]:
+            raise ContractError("plugin runner event kind/status is invalid")
+        if not isinstance(self.payload, Mapping):
+            raise ContractError("plugin runner event payload must be an object")
+        try:
+            payload_size = len(json.dumps(self.payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ContractError("plugin runner event payload is not JSON serializable") from exc
+        if payload_size > _MAX_EVENT_PAYLOAD_BYTES:
+            raise ContractError("plugin runner event payload exceeds 256 KiB")
+        if not isinstance(self.artifacts, tuple) or len(self.artifacts) > _MAX_ARTIFACTS:
+            raise ContractError("plugin runner event artifacts exceed limit")
+        for artifact in self.artifacts:
+            if not isinstance(artifact, Mapping) or set(artifact) != _ARTIFACT_FIELDS:
+                raise ContractError("plugin runner artifact fields do not match the contract")
+            _required_text("artifact_ref", artifact["artifact_ref"])
+            _required_text("artifact name", artifact["name"], max_length=255)
+            _required_text("artifact mime_type", artifact["mime_type"], max_length=127)
+            try:
+                size = int(artifact["size"])
+            except (TypeError, ValueError) as exc:
+                raise ContractError("plugin runner artifact size must be an integer") from exc
+            if size < 0 or size > 1024 * 1024 * 1024:
+                raise ContractError("plugin runner artifact size is out of bounds")
+            if not _SHA256.fullmatch(str(artifact["checksum"])):
+                raise ContractError("plugin runner artifact checksum must be a lowercase sha256")
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["protocol"] = PLUGIN_RUNNER_PROTOCOL
+        payload["artifacts"] = [dict(item) for item in self.artifacts]
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "PluginRunnerEventEnvelope":
+        if not isinstance(payload, Mapping) or payload.get("protocol") != PLUGIN_RUNNER_PROTOCOL:
+            raise ContractError("unsupported plugin runner event protocol")
+        keys = set(payload) - {"protocol"}
+        if keys != _EVENT_FIELDS:
+            raise ContractError("plugin runner event fields do not match the contract")
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, (list, tuple)):
+            raise ContractError("plugin runner event artifacts must be a list")
+        try:
+            revision = int(payload["revision"])
+            capability_revision = int(payload["capability_revision"])
+            event_seq = int(payload["event_seq"])
+        except (TypeError, ValueError) as exc:
+            raise ContractError("plugin runner event numeric fields are invalid") from exc
+        return cls(
+            request_id=str(payload["request_id"]),
+            owner_id=str(payload["owner_id"]),
+            run_id=str(payload["run_id"]),
+            call_id=str(payload["call_id"]),
+            plugin_id=str(payload["plugin_id"]),
+            revision=revision,
+            manifest_hash=str(payload["manifest_hash"]),
+            capability_revision=capability_revision,
+            event_seq=event_seq,
+            kind=str(payload["kind"]),
+            status=str(payload["status"]),
+            payload=payload["payload"],
+            artifacts=tuple(artifacts),
         )

@@ -7,6 +7,7 @@ from app.super_assistant.kernel.plugin_host import PluginHostError, ProcessPlugi
 from app.super_assistant.kernel.plugin_runner import (
     PLUGIN_RUNNER_PROTOCOL,
     PluginInvocationEnvelope,
+    PluginRunnerEventEnvelope,
 )
 
 
@@ -60,9 +61,47 @@ def test_plugin_runner_envelope_rejects_unknown_or_missing_fields():
     payload["unexpected"] = "must-not-cross-contract"
     with pytest.raises(ContractError, match="fields"):
         PluginInvocationEnvelope.from_payload(payload)
+    del payload["unexpected"]
     del payload["reply_subject"]
     with pytest.raises(ContractError, match="fields"):
         PluginInvocationEnvelope.from_payload(payload)
+
+
+def test_plugin_runner_event_round_trips_structured_artifact_and_identity():
+    event = PluginRunnerEventEnvelope(
+        request_id="req-1", owner_id="owner-1", run_id="run-1", call_id="call-1",
+        plugin_id="plugin-1", revision=2, manifest_hash="a" * 64,
+        capability_revision=2, event_seq=4, kind="completed", status="completed",
+        payload={"summary": "done"}, artifacts=({
+            "artifact_ref": "artifact://owner-1/run-1/call-1/out",
+            "name": "result.json", "mime_type": "application/json", "size": 12,
+            "checksum": "b" * 64,
+        },),
+    )
+    payload = event.to_payload()
+    restored = PluginRunnerEventEnvelope.from_payload(payload)
+    assert restored == event
+    assert payload["artifacts"][0]["artifact_ref"].startswith("artifact://")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kind": "completed", "status": "running"},
+        {"kind": "progress", "status": "running", "event_seq": -1},
+        {"kind": "artifact", "status": "running", "artifacts": ({"artifact_ref": "x"},)},
+    ],
+)
+def test_plugin_runner_event_rejects_invalid_status_sequence_or_artifact(overrides):
+    values = {
+        "request_id": "req-1", "owner_id": "owner-1", "run_id": "run-1", "call_id": "call-1",
+        "plugin_id": "plugin-1", "revision": 1, "manifest_hash": "a" * 64,
+        "capability_revision": 1, "event_seq": 0, "kind": "progress", "status": "running",
+        "payload": {}, "artifacts": (),
+    }
+    values.update(overrides)
+    with pytest.raises(ContractError):
+        PluginRunnerEventEnvelope(**values)
 
 
 def test_plugin_manifest_cannot_expand_capability_or_kernel_access():
