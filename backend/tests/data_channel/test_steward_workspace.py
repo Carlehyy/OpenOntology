@@ -258,6 +258,37 @@ def test_url_policy_blocks_loopback_and_metadata(monkeypatch):
         validate_target_url("https://intranet.example/path")
 
 
+@pytest.mark.asyncio
+async def test_route_guard_rechecks_each_request_target(monkeypatch):
+    class FakeRequest:
+        def __init__(self, url):
+            self.url = url
+
+    class FakeRoute:
+        def __init__(self, url):
+            self.request = FakeRequest(url)
+            self.aborted = None
+            self.continued = False
+
+        async def abort(self, reason):
+            self.aborted = reason
+
+        async def continue_(self):
+            self.continued = True
+
+    monkeypatch.setattr(
+        "app.data_channel.steward.browser_runtime.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("10.20.30.40", 80))],
+    )
+    monkeypatch.setattr(settings, "steward_browser_allow_private_networks", False)
+    route = FakeRoute("http://intranet.example/private")
+
+    await browser_manager._route_guard(route)
+
+    assert route.aborted == "blockedbyclient"
+    assert route.continued is False
+
+
 def test_internal_cdp_hostname_resolves_to_ip_for_chromium_host_validation(monkeypatch):
     monkeypatch.setattr(
         "app.data_channel.steward.browser_runtime.socket.getaddrinfo",

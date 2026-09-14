@@ -703,6 +703,7 @@
     "tests/data_channel/test_steward_workspace.py::test_network_capture_redacts_auth_and_detects_page_offset_and_cursor": 0.2141367921140045,
     "tests/data_channel/test_steward_workspace.py::test_queued_user_input_gets_priority_over_agent_operation": 0.43861533398739994,
     "tests/data_channel/test_steward_workspace.py::test_register_proxy_interface_uses_capture_without_leaking_auth": 0.17333174997474998,
+    "tests/data_channel/test_steward_workspace.py::test_route_guard_rechecks_each_request_target": 0.2314030840061605,
     "tests/data_channel/test_steward_workspace.py::test_save_page_data_resource_stays_inside_conversation_workspace": 0.2170031249988824,
     "tests/data_channel/test_steward_workspace.py::test_static_media_responses_are_downloadable_file_captures[application/octet-stream-https://cdn.example/report.pdf]": 0.19511466601397842,
     "tests/data_channel/test_steward_workspace.py::test_static_media_responses_are_downloadable_file_captures[image/png-https://cdn.example/assets/hash]": 0.1914642909541726,
