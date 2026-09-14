@@ -25,6 +25,30 @@ async def test_sse_client_factory_disables_redirects():
         await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_sse_discovery_never_follows_redirect_to_private_host(monkeypatch):
+    import httpx
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"location": "http://127.0.0.1/private"})
+
+    class MockClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockClient)
+    with pytest.raises(McpClientError, match="302"):
+        await mcp_client.discover_tools(
+            transport="sse", url="https://93.184.216.34/sse",
+            headers={"X-API-Key": "test-only-key"},
+        )
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://93.184.216.34/sse"
+
+
 def test_mcp_url_allows_public_targets_without_a_host_allowlist(monkeypatch):
     monkeypatch.setattr(settings, "environment", "production")
     monkeypatch.setattr(mcp_client.socket, "getaddrinfo", lambda host, port, **_kwargs: [
