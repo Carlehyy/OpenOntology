@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+import pytest
 from datetime import timezone
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from app.super_assistant.kernel.store import create_run
 from app.super_assistant.kernel import runtime
 from app.super_assistant.kernel import scheduler as kernel_scheduler
 from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy
+from app.super_assistant.kernel.artifacts import MAX_ARTIFACT_BYTES
 from app.models.user import User
 
 
@@ -498,6 +500,26 @@ def test_kernel_external_structured_artifact_is_persisted_and_verified(db, monke
     artifact = db.query(Artifact).filter_by(run_id=run.id, kind="report").one()
     assert artifact.integrity_status == "verified"
     assert artifact.inline_content == '{"ok": true}'
+
+
+def test_external_declared_artifact_rejects_oversized_metadata_before_db_write():
+    run = SimpleNamespace(owner_id="owner-1", id="run-1")
+    call = SimpleNamespace(id="call-1", target_ref="remote-1")
+    with pytest.raises(ValueError, match="size exceeds"):
+        runtime._persist_external_artifacts(
+            object(), run, call,
+            [{"storage_ref": "s3://bucket/owner-1/run-1/artifact", "size": MAX_ARTIFACT_BYTES + 1, "checksum": "sha256:x"}],
+        )
+
+
+def test_external_declared_artifact_rejects_storage_ref_over_database_limit():
+    run = SimpleNamespace(owner_id="owner-1", id="run-1")
+    call = SimpleNamespace(id="call-1", target_ref="remote-1")
+    with pytest.raises(ValueError, match="storage_ref is too long"):
+        runtime._persist_external_artifacts(
+            object(), run, call,
+            [{"storage_ref": "s3://bucket/" + "x" * 990, "size": 1, "checksum": "sha256:x"}],
+        )
 
 
 def test_kernel_resolves_rap_pull_agent_as_idempotent_external_task(db, monkeypatch):

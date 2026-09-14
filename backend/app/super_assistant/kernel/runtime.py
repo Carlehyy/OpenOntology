@@ -38,7 +38,7 @@ from .models import (
     InboxItem,
 )
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
-from .artifacts import validate_object_storage_ref
+from .artifacts import MAX_ARTIFACT_BYTES, validate_object_storage_ref
 from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, create_run, renew_lease
 from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, ProcessPluginConnector, TrustLevel
 
@@ -1739,10 +1739,14 @@ def _persist_external_artifacts(db, run: ExecutionRun, call: ExecutionCall, valu
             storage_ref = f"inline://{run.id}/{call.id}/{index}"
         if not storage_ref:
             raise ValueError("external artifact requires content or storage_ref")
-        if len(storage_ref) > 2048:
+        declared_size = int(value.get("size") or 0)
+        if inline is None and not 0 <= declared_size <= MAX_ARTIFACT_BYTES:
+            raise ValueError("external artifact size exceeds configured maximum")
+        # Artifact.storage_ref is a 1000-byte database column. Reject before
+        # flush so an untrusted provider cannot turn a valid callback into a
+        # late database truncation/500 or a poison-message retry.
+        if len(storage_ref) > 1000:
             raise ValueError("external artifact storage_ref is too long")
-        if inline is None and int(value.get("size") or 0) < 0:
-            raise ValueError("external artifact size cannot be negative")
         computed_checksum = _checksum(inline) if inline is not None else ""
         checksum = str(value.get("checksum") or computed_checksum)
         if not checksum:
@@ -1752,7 +1756,7 @@ def _persist_external_artifacts(db, run: ExecutionRun, call: ExecutionCall, valu
         inline_verified = inline is not None
         artifact = Artifact(
             owner_id=run.owner_id, run_id=run.id, call_id=call.id, kind=kind,
-            mime_type=mime_type, size=len(inline.encode("utf-8")) if inline is not None else int(value.get("size") or 0),
+            mime_type=mime_type, size=len(inline.encode("utf-8")) if inline is not None else declared_size,
             checksum=checksum, storage_ref=storage_ref, inline_content=inline,
             status="complete" if inline_verified else "declared", integrity_status="verified" if inline_verified else "pending",
             business_status="success", visibility=str(value.get("visibility") or "owner")[:16],
