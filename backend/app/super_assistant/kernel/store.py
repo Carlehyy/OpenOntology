@@ -242,6 +242,13 @@ def append_event(
             ExecutionEvent.provider_event_id == provider_event_id,
         ))
         if prior is not None:
+            if prior.run_id != run.id:
+                # Provider event ids are scoped to a connector, not to an
+                # arbitrary Run. Returning a row from another Run would make
+                # this append silently disappear from the current event log
+                # and could let a cross-owner/reused callback be treated as a
+                # successful duplicate.
+                raise IdempotencyConflict("provider_event_id is already bound to another Run")
             if prior.payload_hash != payload_hash:
                 raise IdempotencyConflict("provider_event_id payload hash conflict")
             return prior

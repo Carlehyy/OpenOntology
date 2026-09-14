@@ -173,6 +173,16 @@ def test_external_provider_event_is_idempotent_but_hash_conflicts_are_rejected(d
         append_event(db, run, event_type="call.outcome_changed", payload={**payload, "evidence_ref": "different"}, actor={"kind": "connector"}, command_id="cmd-2", idempotency_key="event-2", connector_id="c", provider_event_id="p")
 
 
+def test_external_provider_event_cannot_be_reused_by_another_run(db):
+    owner, conversation = _owner_and_conversation(db)
+    first, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="first", idempotency_key="first")
+    second, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="second", idempotency_key="second")
+    payload = {"call_id": "call-1", "status": "running", "outcome": "remote_running", "evidence_ref": "e", "connector_id": "c", "provider_event_id": "provider-reused"}
+    append_event(db, first, event_type="call.outcome_changed", payload=payload, actor={"kind": "connector"}, command_id="first-event", idempotency_key="first-event", connector_id="c", provider_event_id="provider-reused")
+    with pytest.raises(IdempotencyConflict, match="another Run"):
+        append_event(db, second, event_type="call.outcome_changed", payload=payload, actor={"kind": "connector"}, command_id="second-event", idempotency_key="second-event", connector_id="c", provider_event_id="provider-reused")
+
+
 def test_cancel_parent_propagates_to_non_terminal_descendants(db):
     owner, conversation = _owner_and_conversation(db)
     parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-cancel")
