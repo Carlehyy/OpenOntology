@@ -156,6 +156,7 @@ browser_block="$(awk -v service=browser '
   in_service { print }
 ' "$PROD_COMPOSE")"
 if ! grep -Fq 'user: "10001:10001"' <<<"$browser_block" \
+    || ! grep -Fq 'read_only: true' <<<"$browser_block" \
     || ! grep -Fq 'USER 10001:10001' docker/browser/Dockerfile; then
   printf 'browser must run as the fixed non-root UID 10001\n' >&2
   exit 1
