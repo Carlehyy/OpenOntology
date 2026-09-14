@@ -315,9 +315,9 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 同时增加了进程插件完整 manifest 篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；运行前会重算并校验 `key/revision/entrypoint/capabilities/permissions/network_scope/workspace_scope/secret_refs`，不一致即撤销 CapabilityRevision 并进入 connector unavailable/manual attention 路径。生产环境门禁同时覆盖规范化后的 `production` 与 `prod` 别名。新增 entrypoint、capabilities 和环境别名回归均已通过。未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。该修复属于 fail-closed 防护，不能替代签名信任根。
 
-## 14. 当前增量验证（2026-09-14，提交 `df4fa4a8`）
+## 14. 当前增量验证（2026-09-14，提交 `4224023d`）
 
-在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归；同时拒绝同一 Connector 的 `provider_event_id` 跨 Run 重用，避免重复回执被错误归属到旧 Run。当前验证结果为：Kernel 专项 `194 passed`；Runner service、插件目录和 Connector 专项合计 `38 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；隔离端口 `PLAYWRIGHT_PORT=5199 npm run test:e2e:mocked` 为 `306 passed`；Markdown 链接检查为 `75 files, 153 links, 0 errors`。此前启动的后端全量回归在约 41% 处因耗时主动中断，未观察到失败，不能视为全量通过。
+在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归；同时拒绝同一 Connector 的 `provider_event_id` 跨 Run 重用，并拒绝同一 `event_seq` 携带不同 payload 的伪重放，避免重复或篡改回执污染原始证据。当前验证结果为：Kernel 专项 `194 passed`；Runner service、插件目录和 Connector 专项合计 `39 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；隔离端口 `PLAYWRIGHT_PORT=5199 npm run test:e2e:mocked` 为 `306 passed`；后端全量 `3619 passed, 6 skipped`；Markdown 链接检查为 `75 files, 153 links, 0 errors`。
 
 该增量修复只收紧了代码级崩溃恢复语义，未改变当前 M7/M8 的发布结论：真实 OCI/rootless launcher、Scope Broker、审批回执映射、现存业务库升级、完整 staging 外部副作用和发布回滚仍需部署证据。
 
@@ -336,13 +336,13 @@ manifest 字段 hash 不能替代插件包本身的完整性证明。runner 必�
 | 里程碑 | 当前结论 | 可复核证据 | 发布前剩余条件 |
 |---|---|---|---|
 | M0 现状审计 | 已完成 | 本文件第 1–4 节及源码/迁移/兼容入口映射 | 无 |
-| M1 Kernel 可靠性 | 代码与专项回归已完成 | Kernel `194 passed`；状态机、幂等、租约、恢复和事件回放测试 | 全量回归与 staging 竞态证据 |
+| M1 Kernel 可靠性 | 代码与回归已完成 | Kernel `194 passed`；后端全量 `3619 passed, 6 skipped`；状态机、幂等、租约、恢复和事件回放测试 | staging 竞态证据 |
 | M2 数据库、Outbox、NATS | 隔离环境已验证 | 空库升级、回滚、重放；JetStream stream/consumer 探针 | 现存业务库升级与回滚演练 |
 | M3 Runtime | 代码与专项回归已完成 | Kernel runtime/reconciler/recovery 专项；NATS durable consumer | 长任务真实外部结果、崩溃接管 staging |
 | M4 Capability/Agent/插件 | 首版已完成，生产能力未放行 | Connector、runner journal、回执绑定专项 | OCI/rootless runner、Scope Broker、签名信任根、审批回执通道 |
 | M5 Context/Memory/Artifact | 代码与专项回归已完成 | Context Pack、Artifact 完整性、来源引用和记忆策略测试 | 真实对象存储下载及 source tombstone staging |
 | M6 HTTP/SSE/前端 | 本地门禁已通过 | unit `481 passed`、mocked E2E `306 passed`、lint/build/边界门禁 | 真实浏览器副作用、外部 Agent 流式/断线验收 |
-| M7 商用验收 | 尚未完成 | 已完成隔离依赖探针和专项回归 | 后端全量 pytest、真实 staging、攻击验证、现存库迁移 |
+| M7 商用验收 | 尚未完成 | 后端全量 `3619 passed, 6 skipped`；已完成隔离依赖探针和专项回归 | 真实 staging、攻击验证、现存库迁移 |
 | M8 文档与发布 | 文档已同步，发布未批准 | 本文件、迁移报告入口、回滚说明 | 完成 M7 后生成带证据的发布批准记录 |
 
 本矩阵是发布门禁，不把专项测试或隔离依赖探针扩大解释为商用完成。任何一项“发布前剩余条件”没有对应的命令输出、运行记录或 staging artifact 时，Goal 必须保持 active，不能标记为 complete。
