@@ -26,6 +26,8 @@ def _runner_envelope(**overrides):
         "secret_lease_refs": ("lease:one",),
         "deadline": "2030-01-01T00:00:00+00:00",
         "reply_subject": "sa.plugin.reply.req-1",
+        "network_scope": ("https://api.example.com",),
+        "workspace_scope": ("/tmp/plugin",),
     }
     values.update(overrides)
     return PluginInvocationEnvelope(**values)
@@ -49,6 +51,8 @@ def test_plugin_runner_envelope_round_trips_and_uses_request_id_for_deduplicatio
         {"reply_subject": "sa.plugin.reply.*"},
         {"revision": 0},
         {"input_ref": "x" * (1024 * 1024 + 1)},
+        {"network_scope": ("*",)},
+        {"workspace_scope": ("/tmp/plugin/../escape",)},
     ],
 )
 def test_plugin_runner_envelope_rejects_unsafe_identity_or_bounds(overrides):

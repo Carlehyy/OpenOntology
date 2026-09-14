@@ -521,6 +521,10 @@ class PluginRunnerConnector:
     capability_revision: int
     manifest_hash: str
     workspace_snapshot_ref: str
+    # Frozen owner policy forwarded to the isolated runner.  These values are
+    # authorization inputs, not advisory metadata.
+    network_scope: tuple[str, ...] = ()
+    workspace_scope: tuple[str, ...] = ()
     secret_lease_refs: tuple[str, ...] = ()
 
     def descriptor(self) -> AgentDescriptor:
@@ -543,6 +547,7 @@ class PluginRunnerConnector:
             call_id=call_id, plugin_id=self.plugin_id, revision=self.revision,
             manifest_hash=self.manifest_hash, capability_revision=self.capability_revision,
             input_ref=input_ref, workspace_snapshot_ref=self.workspace_snapshot_ref,
+            network_scope=tuple(self.network_scope), workspace_scope=tuple(self.workspace_scope),
             secret_lease_refs=tuple(self.secret_lease_refs),
             deadline=deadline.isoformat() if isinstance(deadline, datetime) else str(deadline),
             reply_subject=f"{PLUGIN_RUNNER_REPLY_PREFIX}{request_id}",

@@ -119,6 +119,17 @@ class FileRootlessSandboxAttestation:
         runtime = str(record.get("runtime") or "").strip()
         if not runtime or len(runtime) > 128:
             raise RootlessSandboxUnavailable("rootless sandbox runtime is missing")
+        # The attestation is also the deployment's proof that the launcher
+        # applies the immutable policy snapshots from the invocation.  A
+        # rootless container by itself is not enough: network/workspace scope
+        # must be allowlisted and credential values must come only from the
+        # owner/run/call-bound Scope Broker. Missing any proof fails closed.
+        if record.get("network_scope_enforced") is not True:
+            raise RootlessSandboxUnavailable("rootless sandbox network scope is not enforced")
+        if record.get("workspace_scope_enforced") is not True:
+            raise RootlessSandboxUnavailable("rootless sandbox workspace scope is not enforced")
+        if record.get("secret_broker") != "scope-broker.v1":
+            raise RootlessSandboxUnavailable("rootless sandbox secret broker is unavailable")
 
 
 def _error(value: object) -> str:

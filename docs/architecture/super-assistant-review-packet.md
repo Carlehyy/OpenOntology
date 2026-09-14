@@ -208,7 +208,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `f37988d7`）
+## 11. 当前实现证据（2026-09-14，基线提交 `da7dd4d4`）
 
 本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界。本轮进一步收紧探索委派绑定：服务端生成并校验写权限指纹，Kernel 子 Run 强制保留可信来源标记，委派恢复每轮复核实时草稿和写权限。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
@@ -315,7 +315,7 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 ## 14. 用户进程插件 runner 的冻结实施契约
 
-本轮没有提交伪隔离 runner。现有 `plugin_host.py` 只能作为 development/test 宿主；生产继续拒绝 `user_untrusted`。商用 runner 必须作为独立服务接收内部 NATS durable envelope，不改变外部 Run/Call/SSE 契约。请求至少绑定 `request_id、owner_id、run_id、call_id、plugin_id、revision、manifest_hash、capability_revision、input_ref、workspace_snapshot_ref、secret_lease_refs、deadline、reply_subject`；所有结果、进度和 Artifact 引用必须回显同一组绑定字段，`request_id` 作为 NATS `Msg-Id`，重复投递只读取结果 journal，不重新执行插件。
+本轮没有提交伪隔离 runner。现有 `plugin_host.py` 只能作为 development/test 宿主；生产继续拒绝 `user_untrusted`。商用 runner 必须作为独立服务接收内部 NATS durable envelope，不改变外部 Run/Call/SSE 契约。请求至少绑定 `request_id、owner_id、run_id、call_id、plugin_id、revision、manifest_hash、capability_revision、input_ref、workspace_snapshot_ref、network_scope、workspace_scope、secret_lease_refs、deadline、reply_subject`；所有结果、进度和 Artifact 引用必须回显同一组绑定字段，`request_id` 作为 NATS `Msg-Id`，重复投递只读取结果 journal，不重新执行插件。
 
 runner 每次调用启动短命 rootless sandbox：固定非 root UID、read-only rootfs、独立 PID/IPC/UTS/network namespace、`no-new-privileges`、seccomp/AppArmor、cgroup CPU/内存/PID/文件限制；cgroup v2 必须由宿主明确 delegated subtree 管理，不能依赖容器内临时 `cap_add` 自建控制器。工作区只允许 canonical allowlist 的 read-only bind mount，调用 scratch 单独可写；禁止挂载 Docker socket、平台 uploads/API Hub 数据和宿主凭据。网络默认 deny，非空 `network_scope` 在受控 egress proxy 与 DNS/IP 策略部署前必须拒绝。凭据只通过按 owner/run/call/manifest hash 绑定的一次性短 TTL secret lease 按需获取，值不得进入环境继承、日志、事件或模型上下文。Artifact 只能通过 broker 写入 owner/run/call 前缀并返回 checksum、size、mime 和 opaque object ref。runner journal 必须在 spawn 前后持久化状态，`spawned` 记录一旦存在，NATS 重投只能查询 journal 或对账，禁止再次执行同一 `call_id`。
 

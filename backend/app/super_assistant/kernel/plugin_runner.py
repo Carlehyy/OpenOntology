@@ -40,6 +40,8 @@ _ENVELOPE_FIELDS = frozenset(
         "input_ref",
         "workspace_snapshot_ref",
         "secret_lease_refs",
+        "network_scope",
+        "workspace_scope",
         "deadline",
         "reply_subject",
     }
@@ -106,8 +108,13 @@ class PluginInvocationEnvelope:
     input_ref: str
     workspace_snapshot_ref: str
     secret_lease_refs: tuple[str, ...]
-    deadline: str
-    reply_subject: str
+    # These are immutable policy snapshots.  The runner must apply them when
+    # constructing the sandbox; opaque references alone are insufficient to
+    # prove that a process cannot escape its declared network/workspace.
+    network_scope: tuple[str, ...] = ()
+    workspace_scope: tuple[str, ...] = ()
+    deadline: str = ""
+    reply_subject: str = ""
 
     def __post_init__(self) -> None:
         for name in ("request_id", "owner_id", "run_id", "call_id", "plugin_id"):
@@ -126,6 +133,18 @@ class PluginInvocationEnvelope:
             raise ContractError("plugin runner secret lease refs exceed limit")
         for value in self.secret_lease_refs:
             _required_text("secret_lease_ref", value)
+        for name, scopes in (("network_scope", self.network_scope), ("workspace_scope", self.workspace_scope)):
+            if not isinstance(scopes, tuple) or len(scopes) > 64:
+                raise ContractError(f"plugin runner {name} must be a bounded tuple")
+            for scope in scopes:
+                text = _required_text(name, scope, max_length=500)
+                # A wildcard would turn an owner-declared scope into ambient
+                # access.  The concrete runner may interpret URI/CIDR/path
+                # forms, but it must receive explicit entries only.
+                if "*" in text or "?" in text:
+                    raise ContractError(f"plugin runner {name} cannot contain wildcards")
+                if name == "workspace_scope" and any(part == ".." for part in text.replace("\\", "/").split("/")):
+                    raise ContractError("plugin runner workspace_scope cannot traverse parent directories")
         _required_text("deadline", self.deadline, max_length=80)
         subject = _required_text("reply_subject", self.reply_subject, max_length=255)
         if not subject.startswith(PLUGIN_RUNNER_REPLY_PREFIX) or any(char in subject for char in "*>"):
@@ -143,6 +162,8 @@ class PluginInvocationEnvelope:
         payload = asdict(self)
         payload["protocol"] = PLUGIN_RUNNER_PROTOCOL
         payload["secret_lease_refs"] = list(self.secret_lease_refs)
+        payload["network_scope"] = list(self.network_scope)
+        payload["workspace_scope"] = list(self.workspace_scope)
         return payload
 
     @classmethod
@@ -153,8 +174,12 @@ class PluginInvocationEnvelope:
         if keys != _ENVELOPE_FIELDS:
             raise ContractError("plugin runner envelope fields do not match the contract")
         leases = payload.get("secret_lease_refs")
+        network_scope = payload.get("network_scope")
+        workspace_scope = payload.get("workspace_scope")
         if not isinstance(leases, (list, tuple)):
             raise ContractError("plugin runner secret_lease_refs must be a list")
+        if not isinstance(network_scope, (list, tuple)) or not isinstance(workspace_scope, (list, tuple)):
+            raise ContractError("plugin runner scopes must be lists")
         try:
             revision = int(payload["revision"])
             capability_revision = int(payload["capability_revision"])
@@ -172,6 +197,8 @@ class PluginInvocationEnvelope:
             input_ref=payload["input_ref"],
             workspace_snapshot_ref=payload["workspace_snapshot_ref"],
             secret_lease_refs=tuple(str(item) for item in leases),
+            network_scope=tuple(str(item) for item in network_scope),
+            workspace_scope=tuple(str(item) for item in workspace_scope),
             deadline=str(payload["deadline"]),
             reply_subject=str(payload["reply_subject"]),
         )

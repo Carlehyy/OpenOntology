@@ -73,7 +73,9 @@ def test_attestation_requires_immutable_rootless_probe(tmp_path):
     envelope = _envelope()
     with pytest.raises(RootlessSandboxUnavailable):
         verifier.verify(envelope)
-    path.write_text(json.dumps({"protocol": "plugin-runner.sandbox.v1", "verified": True, "mode": "rootless", "runtime": "podman", "image_digest": "sha256:" + "b" * 64}), encoding="utf-8")
+    path.write_text(json.dumps({"protocol": "plugin-runner.sandbox.v1", "verified": True, "mode": "rootless", "runtime": "podman", "image_digest": "sha256:" + "b" * 64,
+        "network_scope_enforced": True, "workspace_scope_enforced": True,
+        "secret_broker": "scope-broker.v1"}), encoding="utf-8")
     path.chmod(0o600)
     verifier.verify(envelope)
     path.chmod(0o666)
@@ -81,10 +83,24 @@ def test_attestation_requires_immutable_rootless_probe(tmp_path):
         verifier.verify(envelope)
 
 
+def test_attestation_requires_scope_enforcement_and_secret_broker(tmp_path):
+    path = tmp_path / "attestation.json"
+    path.write_text(json.dumps({
+        "protocol": "plugin-runner.sandbox.v1", "verified": True,
+        "mode": "rootless", "runtime": "podman",
+        "image_digest": "sha256:" + "b" * 64,
+    }), encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(RootlessSandboxUnavailable, match="network scope"):
+        FileRootlessSandboxAttestation(path).verify(_envelope())
+
+
 @pytest.mark.asyncio
 async def test_service_requires_contract_events_from_launcher(db, tmp_path):
     path = tmp_path / "attestation.json"
-    path.write_text(json.dumps({"protocol": "plugin-runner.sandbox.v1", "verified": True, "mode": "rootless", "runtime": "podman", "image_digest": "sha256:" + "b" * 64}), encoding="utf-8")
+    path.write_text(json.dumps({"protocol": "plugin-runner.sandbox.v1", "verified": True, "mode": "rootless", "runtime": "podman", "image_digest": "sha256:" + "b" * 64,
+        "network_scope_enforced": True, "workspace_scope_enforced": True,
+        "secret_broker": "scope-broker.v1"}), encoding="utf-8")
     path.chmod(0o600)
 
     async def launcher(envelope):
@@ -112,6 +128,8 @@ async def test_terminal_event_is_replayed_when_reply_publish_fails(db, tmp_path)
         "protocol": "plugin-runner.sandbox.v1", "verified": True,
         "mode": "rootless", "runtime": "podman",
         "image_digest": "sha256:" + "b" * 64,
+        "network_scope_enforced": True, "workspace_scope_enforced": True,
+        "secret_broker": "scope-broker.v1",
     }), encoding="utf-8")
     path.chmod(0o600)
 

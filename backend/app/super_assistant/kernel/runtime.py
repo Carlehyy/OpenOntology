@@ -563,6 +563,8 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                     revision=int(plugin.revision), capability_revision=int(call.capability_revision),
                     manifest_hash=actual_hash,
                     workspace_snapshot_ref=f"workspace://{run.owner_id}/run/{run.id}",
+                    network_scope=tuple(plugin.network_scope or ()),
+                    workspace_scope=tuple(plugin.workspace_scope or ()),
                 )
                 # Installation already froze and this branch validated the
                 # capability snapshot.  Switching the host to NATS cannot
