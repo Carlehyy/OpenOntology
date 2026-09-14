@@ -221,7 +221,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 | M4 | RAP direct/pull、MCP、Multica、Process Plugin、HMAC callback、provider event 去重和 secret allowlist 有代码/测试；配置变更按 revision/hash 栅栏，旧 revision 进入人工处理 | 已完成首版；OS 沙箱、secret broker 需部署层证据 |
 | M5 | Context Pack、Memory/Palace source provenance、tombstone 排除、结构化 Artifact 和 checksum 校验有代码/测试 | 已完成首版 |
 | M6 | Kernel API/SSE、输入/审批、Artifact inline/object 下载、If-Match/Idempotency-Key、UTF-8 请求上限、前端任务卡和 reducer 已有单测/build | 已完成代码闭环，需真实浏览器验收 |
-| M7 | 当前 `oo-rearch` Compose 的 `/api/health` 依赖探针通过（PostgreSQL、Redis、Neo4j、MinIO、Browser、NATS、n8n 均健康）；但该 staging backend 旧镜像内 `alembic current` 无法定位数据库 revision `0110_super_assistant_process_plugins`，不能证明当前分支迁移已部署。将当前分支源码挂载到该旧数据库启动时，schema guard 明确拒绝缺少 `super_assistant_mcp_servers.manifest_revision/manifest_hash`，证明现存业务库必须先执行迁移；本轮未直接改动该共享数据库。隔离临时 Compose 已使用当前镜像完成 PostgreSQL `upgrade head`、`downgrade 0110 -> 0109`、再次 `upgrade head`，但尚未覆盖现存业务数据库升级、完整 kernel live E2E 和外部副作用证据 | 依赖探针通过，临时迁移往返通过，现存业务库升级和当前提交完整 staging 验收待执行 |
+| M7 | 当前 `oo-rearch` Compose 的 `/api/health` 依赖探针通过（PostgreSQL、Redis、Neo4j、MinIO、Browser、NATS、n8n 均健康）；但该 staging backend 旧镜像内 `alembic current` 无法定位数据库 revision `0110_super_assistant_process_plugins`，不能证明当前分支迁移已部署。将当前分支源码挂载到该旧数据库启动时，schema guard 明确拒绝缺少 `super_assistant_mcp_servers.manifest_revision/manifest_hash`，证明现存业务库必须先执行迁移；本轮未直接改动该共享数据库。最新隔离临时 Compose 已使用当前分支执行 PostgreSQL `upgrade head`（到 `0113`）、`downgrade 0113 -> 0110`、再次 `upgrade head`，并通过 PostgreSQL/NATS JetStream/MinIO/Neo4j 依赖探针；NATS executor 短时启动并成功注册 `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1`。该证据仍未覆盖现存业务数据库升级、完整 kernel live E2E、浏览器/外部副作用和发布回滚 | 当前分支临时迁移往返和依赖探针通过，现存业务库升级和完整 staging 验收待执行 |
 | M8 | 静态门禁、前端 color-token 和专项测试通过；完整发布/回滚演练尚未完成 | 未完成 |
 
 已执行的 staging 依赖探针命令为：
@@ -267,6 +267,8 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version`、`PUT /json/new` 页面创建、Chromium/socat 子进程 UID/GID 和错误日志检查；这些结果证明容器权限加固可运行，但不替代完整真实浏览器外部副作用验收。
 
 本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3597 passed, 6 skipped`；时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单、JetStream 策略漂移和进程插件 manifest 篡改测试均已通过；核心定向集合和真实隔离栈证据仍不替代完整 staging。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
+
+最新隔离 E2E 栈证据（2026-09-14）为：PostgreSQL 当前分支从空库升级到 `0113_remote_agent_result_artifacts`，再降级到 `0110_super_assistant_process_plugins` 并重新升级到 `0113`；依赖探针返回 PostgreSQL、NATS JetStream、MinIO bucket、Neo4j 全部 `ok=true`；短时 nats executor 成功注册三个 kernel durable consumer。临时容器、卷和网络已在验证后销毁；这仍不等价于现存业务库升级或完整外部副作用验收。
 
 本次最新收口后的定向回归为 `77 passed`，探索适配器完整回归为 `14 passed`，委派边界架构测试为 `4 passed`，时长覆盖守卫为 `1 passed`；新增验证覆盖伪造权限指纹、服务端重算指纹、Kernel 子 Run 来源标记不可被上下文覆盖，以及草稿生命周期变化后恢复委派会话会明确失败。该专项证据只证明代码级绑定不变量，不改变 M7/M8 的 staging 和发布阻断状态。
 
