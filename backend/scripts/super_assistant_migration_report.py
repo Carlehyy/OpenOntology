@@ -31,6 +31,12 @@ def main() -> None:
     # Import the application only after argparse has handled ``--help`` and
     # argument errors.  Operators can inspect this entry point without a live
     # database, while real report/mutation modes still use normal app config.
+    # Import the aggregate model registry before opening a Session.  The
+    # migration backfill creates rows with FKs to users; without this import a
+    # standalone CLI process has not registered the users mapper and a
+    # PostgreSQL flush fails with NoReferencedTableError (unit tests usually
+    # import app.models indirectly through their fixture bootstrap).
+    import app.models  # noqa: F401
     from app.shared.database import SessionLocal
     from app.super_assistant.kernel.migration_report import (
         backfill_legacy_data,
