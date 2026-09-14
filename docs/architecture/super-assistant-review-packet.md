@@ -248,7 +248,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有多项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 以及浏览器导航的配置期 DNS 校验与实际建连之间仍存在 DNS rebinding TOCTOU 窗口。浏览器的 `context.route("**/*", _route_guard)` 会逐请求重检 URL，因此重定向已受应用层 URL 检查；但它不能证明最终连接使用的 IP，也不能替代网络层 egress/private-CIDR 策略。当前镜像仍需 `--no-sandbox`；生产部署已经强制 `BROWSER_IMAGE` 使用 digest，但其他基础镜像的全局 `STRICT_IMAGE_DIGESTS` 仍允许关闭。browser Dockerfile 的字体包已锁定 Debian 版本，生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。生产环境配置现已在 Settings 入口统一规范化 `prod`、大小写和外围空白，并对空值/未知值 fail-closed；私网浏览器目标默认关闭且生产 Compose 显式固定为 `false`。剩余问题必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `d5bf6fb9`）
+## 13. 最新对抗式代码审查证据（提交 `669f9a70`，代码收口 `d5bf6fb9`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
