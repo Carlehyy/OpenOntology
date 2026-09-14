@@ -13,6 +13,9 @@ from app.super_assistant.kernel.store import (
     create_run,
 )
 from app.super_assistant.models import SuperAssistantConversation
+from app.exploration.session_service import write_permission_fingerprint
+from app.ontologies.projects.models import OntologyProject
+from app.ontologies.versions.models import OntologyVersion
 
 
 def _owner_and_conversation(db):
@@ -64,6 +67,65 @@ def test_child_run_binding_is_persisted_and_evented(db):
     assert child.id in parent.required_child_ids
     assert db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_bound").count() == 1
     assert db.query(ExecutionEvent).filter_by(run_id=child.id, event_type="run.child_bound").count() == 1
+
+
+@pytest.mark.parametrize("supplied_marker", [False, 0, None], ids=["false", "zero", "null"])
+def test_child_run_origin_marker_cannot_be_overridden_by_context(db, supplied_marker):
+    owner, conversation = _owner_and_conversation(db)
+    child, _ = create_run(
+        db, owner_id=owner.id, conversation_id=conversation.id,
+        goal="child", idempotency_key="trusted-origin",
+        binding={
+            "binding_mode": "assistant_child", "assistant_key": "ontology_agent",
+            "context": {"ontology_id": "ont-1", "_kernel_child": supplied_marker},
+        },
+    )
+    assert __import__("json").loads(child.binding_snapshot_ref)["context"]["_kernel_child"] is True
+
+
+def test_delegated_binding_rejects_fabricated_permission_hash(db):
+    owner, conversation = _owner_and_conversation(db)
+    project = OntologyProject(
+        id="delegated-ontology", name="Delegated", domain="test", created_by=owner.id,
+    )
+    version = OntologyVersion(
+        id="delegated-draft", ontology_id=project.id, version_number="v0",
+        node_kind="draft", lifecycle_status="editing", created_by=owner.id,
+    )
+    db.add_all([project, version]); db.flush()
+    with pytest.raises(ContractError, match="write_permission_hash"):
+        create_run(
+            db, owner_id=owner.id, conversation_id=conversation.id,
+            goal="delegated", idempotency_key="delegated-fake-hash",
+            binding={
+                "binding_mode": "delegated", "ontology_id": project.id,
+                "draft_version_id": version.id, "lifecycle": "editing",
+                "write_permission_hash": "sha256:caller-controlled",
+            },
+        )
+
+
+def test_delegated_binding_persists_server_verified_permission_hash(db):
+    owner, conversation = _owner_and_conversation(db)
+    project = OntologyProject(
+        id="delegated-ontology-valid", name="Delegated", domain="test", created_by=owner.id,
+    )
+    version = OntologyVersion(
+        id="delegated-draft-valid", ontology_id=project.id, version_number="v0",
+        node_kind="draft", lifecycle_status="editing", created_by=owner.id,
+    )
+    db.add_all([project, version]); db.flush()
+    permission_hash = write_permission_fingerprint(owner, project, version)
+    run, _ = create_run(
+        db, owner_id=owner.id, conversation_id=conversation.id,
+        goal="delegated", idempotency_key="delegated-valid-hash",
+        binding={
+            "binding_mode": "delegated", "ontology_id": project.id,
+            "draft_version_id": version.id, "lifecycle": "editing",
+            "write_permission_hash": permission_hash,
+        },
+    )
+    assert '"write_permission_hash": "' + permission_hash + '"' in run.binding_snapshot_ref
 
 
 def test_cancel_is_versioned_idempotent_and_conflicting_reason_rejected(db):

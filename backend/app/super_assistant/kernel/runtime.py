@@ -1845,10 +1845,10 @@ def _invoke_hub_delegation(
         # the child Run, otherwise a missing prerequisite would leave an
         # unbound child session behind and only fail much later in the adapter.
         from app.auth.models import User
-        from app.assistant_hub.adapters.exploration import validate_delegated_binding
+        from app.assistant_hub.adapters.exploration import prepare_delegated_binding
         user = db.get(User, run.owner_id)
         try:
-            normalized = validate_delegated_binding(db, user, context) if user is not None else None
+            normalized = prepare_delegated_binding(db, user, context) if user is not None else None
         except ValueError as exc:
             return json.dumps({
                 "status": "needs_input",

@@ -100,7 +100,7 @@ Inbox item 必须绑定 `run_id`，必要时绑定 `call_id`、`approval_id` 或
 | `CapabilityRevision` | `key, revision, source, manifest_hash, trust_level, permissions, input_schema, output_schema, side_effect_class, supports_stream, supports_cancel, supports_approval, supports_artifact, supports_query_status, workspace_scope, network_scope, secret_refs, enabled` |
 | `ProjectionCursor` | `projection_name, run_id/partition, last_seq, status, error_ref, updated_at`；每个投影分区唯一 |
 
-`binding_mode=delegated` 的 BindingSnapshot 必须含 ontology_id、draft_version_id、lifecycle=editing、owner_id 和 write permission hash；`direct_ui` 可为空或绑定 current release，`legacy` 只用于历史投影。
+`binding_mode=delegated` 的 BindingSnapshot 必须含 ontology_id、draft_version_id、lifecycle=editing、owner_id 和 write permission hash；业务探索委派创建时由服务端根据明确选择的本体和 editing draft 计算 write permission hash，调用方提供的 hash 只能用于一致性校验，不能自行伪造。恢复每一轮都重新校验本体归属、写权限和草稿生命周期，失效时转为重新询问/终止，不能静默切换到最新版本。`direct_ui` 可为空或绑定 current release，`legacy` 只用于历史投影。
 
 所有时间使用 UTC；PostgreSQL 使用 uuid/timestamptz，SQLite 测试使用字符串化 UUID 适配同一逻辑约束；凭据只保存受控引用；大正文使用 MinIO 引用和 checksum；Neo4j 只保存可重建的图谱投影。Run/Call lease 使用 epoch、owner、expires_at 三元组，过期写入被 fencing 拒绝；Inbox claim TTL 固定 60 秒。kernel.v1 API 字段统一 snake_case，旧 API casing 保持原样。
 

@@ -208,9 +208,9 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `6a9e4349`）
+## 11. 当前实现证据（2026-09-14，基线提交 `待本轮提交更新`）
 
-本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界，当前证据基线为 `6a9e4349`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
+本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界。本轮进一步收紧探索委派绑定：服务端生成并校验写权限指纹，Kernel 子 Run 强制保留可信来源标记，委派恢复每轮复核实时草稿和写权限。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
 | 里程碑 | 当前证据 | 状态 |
 |---|---|---|
@@ -237,6 +237,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 本轮按恶意输入、并发竞态、迟到结果、进程泄漏和资源耗尽路径复核 Kernel、Assistant Hub、远程 Agent 与进程插件边界，确认并修复以下问题：
 
 - 业务探索委派原先可在缺少本体/编辑草稿绑定时先创建 `assistant_child`；现在由探索域服务在创建子 Run 前校验 `ontology_id + draft_version_id + editing + write_permission_hash`，缺失条件转为 `waiting_input`，不留下无绑定子会话。
+- 业务探索委派的写权限指纹现在由服务端从明确的本体/草稿选择计算；伪造或过期指纹会被拒绝，委派恢复的每一轮会重新检查实时权限和草稿生命周期，失效时不会静默 fork 到最新版本。
 - 本轮复查发现本体助手首次 Kernel 委派曾可缺少 `ontology_id` 并依赖“最近本体”回退；现在 Kernel 委派入口缺少显式本体绑定时直接返回 `needs_input`，不创建子 Run。直接 UI 的历史回退语义保持不变。
 - Run 在取消宽限期后进入 `cancelled/expired` 时，原调度器会停止远程 Call 对账；现在带远端句柄的未决 Call 继续执行取消或状态查询，终态 Run 保持不可重开但 Call 可收敛到真实终态。
 - 回连 Agent 长轮询原先会持有请求级数据库连接；现在认证/心跳事务在等待前结束，任务认领使用短会话。

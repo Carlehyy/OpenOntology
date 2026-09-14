@@ -69,18 +69,24 @@ def write_permission_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def validate_delegated_binding(
+def prepare_delegated_binding(
     db: Session, user, context: dict[str, Any] | None,
 ) -> dict[str, str]:
-    """Validate the mandatory ontology draft binding for delegated sessions."""
+    """Resolve explicit target ids into a server-owned delegation snapshot.
+
+    A user/model selects the ontology and draft; only the server derives the
+    lifecycle and permission fingerprint.  A supplied fingerprint still has
+    to match, so preparing a new request cannot silently refresh a stale
+    snapshot from an earlier delegation.
+    """
     values = context if isinstance(context, dict) else {}
     ontology_id = str(values.get("ontology_id") or "").strip()
     version_id = str(values.get("draft_version_id") or values.get("ontology_version_id") or "").strip()
     lifecycle = str(values.get("lifecycle") or "").strip()
     permission_hash = str(values.get("write_permission_hash") or "").strip()
-    if not ontology_id or not version_id or lifecycle != "editing" or not permission_hash:
+    if not ontology_id or not version_id or lifecycle not in {"", "editing"}:
         raise ValueError(
-            "业务探索委派需要绑定 ontology_id、draft_version_id、editing 和 write_permission_hash"
+            "业务探索委派需要选择 ontology_id 和 editing draft_version_id"
         )
     project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
     if project is None:
@@ -98,14 +104,26 @@ def validate_delegated_binding(
     ):
         raise ValueError("委派绑定必须指向该本体的 editing draft 版本")
     expected_hash = write_permission_fingerprint(user, project, version)
-    if permission_hash != expected_hash:
+    if permission_hash and permission_hash != expected_hash:
         raise ValueError("委派绑定的 write_permission_hash 已失效，请重新选择本体和草稿版本")
     return {
         "ontology_id": ontology_id,
         "draft_version_id": version_id,
         "lifecycle": "editing",
-        "write_permission_hash": permission_hash,
+        "write_permission_hash": expected_hash,
     }
+
+
+def validate_delegated_binding(
+    db: Session, user, context: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Revalidate every field of an already frozen delegation snapshot."""
+    values = context if isinstance(context, dict) else {}
+    if values.get("lifecycle") != "editing" or not values.get("write_permission_hash"):
+        raise ValueError(
+            "业务探索委派需要绑定 ontology_id、draft_version_id、editing 和 write_permission_hash"
+        )
+    return prepare_delegated_binding(db, user, values)
 
 
 def _require_session(

@@ -28,6 +28,7 @@ from app.exploration.schemas import SessionCreate
 from app.exploration.session_service import (
     _require_session,
     create_session,
+    prepare_delegated_binding,
     validate_delegated_binding,
 )
 from app.exploration.models import ExplorationSession
@@ -123,7 +124,10 @@ class ExplorationAdapter:
         session_id = str(payload.get("id") or "")
         if not session_id:
             raise AssistantHubError("创建探索会话失败")
-        return build_ref(_KEY, {"session_id": session_id})
+        return build_ref(_KEY, {
+            "session_id": session_id,
+            "delegated_kernel": delegated,
+        })
 
     def run_turn(
         self, db: Session, user, conversation_ref: str, message: str, *,
@@ -135,6 +139,23 @@ class ExplorationAdapter:
         if not session_id:
             raise AssistantHubError("会话引用已损坏；请用 session=new 重新开始")
         self._require_owned_session(db, session_id, user)
+        if payload.get("delegated_kernel") is True:
+            session = db.query(ExplorationSession).filter(
+                ExplorationSession.id == session_id,
+            ).first()
+            try:
+                # Recheck the live draft and write scope on every delegated
+                # turn.  A frozen child must stop with an explicit binding
+                # error when its draft is released or access is revoked; it
+                # must never silently fork onto the current release.
+                prepare_delegated_binding(db, user, {
+                    "ontology_id": getattr(session, "ontology_id", None),
+                    "draft_version_id": getattr(session, "ontology_version_id", None),
+                })
+            except ValueError as exc:
+                raise AssistantHubError(
+                    f"委派绑定已失效，请重新选择本体和 editing draft：{exc}"
+                ) from exc
 
         answer_content = ""
         error_message: Optional[str] = None

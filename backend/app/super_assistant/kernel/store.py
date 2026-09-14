@@ -123,7 +123,10 @@ def create_run(
     if mode == "assistant_child":
         child_context = binding.get("context")
         child_context = dict(child_context) if isinstance(child_context, dict) else {}
-        child_context.setdefault("_kernel_child", True)
+        # This is a trusted execution-origin marker, not model/user context.
+        # Always overwrite a supplied value so false/null cannot restore the
+        # legacy "resume latest" path and bypass the frozen domain binding.
+        child_context["_kernel_child"] = True
         binding["context"] = child_context
 
     payload = {
@@ -157,14 +160,20 @@ def create_run(
         required = {"ontology_id", "draft_version_id", "lifecycle", "write_permission_hash"}
         if required - binding.keys() or binding.get("lifecycle") != "editing" or not binding.get("write_permission_hash"):
             raise ContractError("delegated binding requires editing draft and write permission")
-        # Domain ownership/lifecycle is owned by Assistant Hub's ontology
-        # adapter; the kernel store only freezes the validated snapshot and
-        # stays independent from ontology business packages.
-        from app.assistant_hub.adapters.ontology_agent import validate_delegated_binding
+        # Domain ownership/lifecycle and the permission fingerprint are owned
+        # by the exploration service.  Do not accept an opaque caller-supplied
+        # hash: a stale or fabricated hash would turn a public delegated Run
+        # into an authorization snapshot that cannot be revalidated later.
+        from app.auth.models import User
+        from app.assistant_hub.adapters.exploration import validate_delegated_binding
+        user = db.get(User, owner_id)
+        if user is None:
+            raise ContractError("delegated binding owner does not exist")
         try:
-            validate_delegated_binding(db, owner_id=owner_id, binding=binding)
+            normalized = validate_delegated_binding(db, user, binding)
         except ValueError as exc:
             raise ContractError(str(exc)) from exc
+        binding.update(normalized)
     elif mode not in {"direct_ui", "legacy"}:
         if mode != "assistant_child" or not binding.get("assistant_key"):
             raise ContractError("unknown binding_mode")
