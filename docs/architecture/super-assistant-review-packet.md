@@ -330,3 +330,19 @@ runner 每次调用启动短命 rootless sandbox：固定非 root UID、read-onl
 manifest 字段 hash 不能替代插件包本身的完整性证明。runner 必须只接受不可变 bundle/artifact digest，并在启动前校验包内容；workspace 中可变的 executable 或依赖文件不能作为生产插件来源。runner staging 必须攻击验证 `/proc`、共享卷、symlink/`..`、内部 CIDR、非 allowlist 外联、fork/memory/CPU/file exhaustion、`setsid`/daemon 逃逸、凭据泄露、安装后替换 bundle、重复 NATS 投递、进程崩溃、取消和 worker 重启恢复；只有这些证据与发布/回滚演练完成后，才能解除生产 `user_untrusted` 的 fail-closed 门禁。
 
 本轮还收紧了 callback 事件键的长度边界：`connector_id` 与 `provider_event_id` 即使各自达到协议上限，拼接后的 `command_id`/`idempotency_key` 也会在 255 字符数据库列内以确定性 SHA-256 短键落库；对应长标识回归已通过（callback 专项 `7 passed`）。
+
+## 16. M0–M8 收口矩阵（2026-09-14）
+
+| 里程碑 | 当前结论 | 可复核证据 | 发布前剩余条件 |
+|---|---|---|---|
+| M0 现状审计 | 已完成 | 本文件第 1–4 节及源码/迁移/兼容入口映射 | 无 |
+| M1 Kernel 可靠性 | 代码与专项回归已完成 | Kernel `194 passed`；状态机、幂等、租约、恢复和事件回放测试 | 全量回归与 staging 竞态证据 |
+| M2 数据库、Outbox、NATS | 隔离环境已验证 | 空库升级、回滚、重放；JetStream stream/consumer 探针 | 现存业务库升级与回滚演练 |
+| M3 Runtime | 代码与专项回归已完成 | Kernel runtime/reconciler/recovery 专项；NATS durable consumer | 长任务真实外部结果、崩溃接管 staging |
+| M4 Capability/Agent/插件 | 首版已完成，生产能力未放行 | Connector、runner journal、回执绑定专项 | OCI/rootless runner、Scope Broker、签名信任根、审批回执通道 |
+| M5 Context/Memory/Artifact | 代码与专项回归已完成 | Context Pack、Artifact 完整性、来源引用和记忆策略测试 | 真实对象存储下载及 source tombstone staging |
+| M6 HTTP/SSE/前端 | 本地门禁已通过 | unit `481 passed`、mocked E2E `306 passed`、lint/build/边界门禁 | 真实浏览器副作用、外部 Agent 流式/断线验收 |
+| M7 商用验收 | 尚未完成 | 已完成隔离依赖探针和专项回归 | 后端全量 pytest、真实 staging、攻击验证、现存库迁移 |
+| M8 文档与发布 | 文档已同步，发布未批准 | 本文件、迁移报告入口、回滚说明 | 完成 M7 后生成带证据的发布批准记录 |
+
+本矩阵是发布门禁，不把专项测试或隔离依赖探针扩大解释为商用完成。任何一项“发布前剩余条件”没有对应的命令输出、运行记录或 staging artifact 时，Goal 必须保持 active，不能标记为 complete。
