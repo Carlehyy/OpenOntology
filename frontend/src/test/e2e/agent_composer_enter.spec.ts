@@ -6,13 +6,6 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // 「Enter 不发送」。修复对齐超级助手平台语义：组合期/修饰键不发送。
 
 const now = '2026-07-19T08:00:00+00:00'
-const conversation = {
-  id: 'conv-1',
-  title: '会话一',
-  ontologyReleaseId: 'release-1',
-  createdAt: now,
-  updatedAt: now,
-}
 
 async function mockPlatform(page: Page, chatBodies: string[]) {
   await page.addInitScript(() => {
