@@ -40,7 +40,7 @@ from .models import (
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
 from .artifacts import MAX_ARTIFACT_BYTES, validate_object_storage_ref
 from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, create_run, renew_lease
-from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, ProcessPluginConnector, TrustLevel
+from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, PluginRunnerConnector, ProcessPluginConnector, TrustLevel
 
 
 # Implementations are registered by application bootstrap (and by tests).
@@ -548,6 +548,27 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             # separate rootless runner contract; never silently fall back to
             # the in-process host when that service is absent or misconfigured.
             runner_mode = str(getattr(settings, "super_assistant_process_plugin_runner_mode", "disabled") or "").strip().lower()
+            if runner_mode == "nats":
+                # The external runner is the only production path.  Secret
+                # names are not leases: until Scope Broker can exchange them
+                # for one-time owner/run/call-bound leases, refuse plugins
+                # that request credentials instead of passing metadata through
+                # as if it were authorization.
+                if plugin.secret_refs:
+                    logger.error("refusing runner plugin with unresolved secret refs: %s", plugin.id)
+                    return None
+                connector = PluginRunnerConnector(
+                    owner_id=run.owner_id, plugin_id=plugin.id,
+                    descriptor_value=_descriptor(plugin),
+                    revision=int(plugin.revision), capability_revision=int(call.capability_revision),
+                    manifest_hash=actual_hash,
+                    workspace_snapshot_ref=f"workspace://{run.owner_id}/run/{run.id}",
+                )
+                # Installation already froze and this branch validated the
+                # capability snapshot.  Switching the host to NATS cannot
+                # rewrite its source, permissions or transport features.
+                connector_registry.register(connector)
+                return connector
             if runner_mode != "direct_dev":
                 logger.error(
                     "refusing process plugin without dedicated runner (mode=%s): %s",

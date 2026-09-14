@@ -64,6 +64,7 @@ _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
 _EXECUTION_CALL_DURABLE = "sa-call-v1"
 _EXECUTION_RECONCILER_DURABLE = "sa-reconciler-v1"
+_PLUGIN_RUNNER_REPLY_DURABLE = "sa-plugin-reply-v1"
 
 # 消息处理器：解析后的 payload → 协程；业务异常必须在 handler 内消化，
 # 逃到 ``_process_message`` 的异常一律 nak 重投
@@ -284,6 +285,94 @@ async def _run_kernel_reconcile_message(payload: dict) -> None:
         raise RuntimeError("kernel reconciliation observation was not applied")
 
 
+async def _run_plugin_runner_reply_message(payload: dict) -> None:
+    """Validate one runner event and enqueue it for the Kernel reconciler.
+
+    The reply consumer never mutates a Call directly.  It only persists an
+    owner/run/call-bound observation in the existing outbox, preserving the
+    single state-transition authority and provider-event idempotency rules.
+    """
+    from app.super_assistant.kernel.plugin_runner import PluginRunnerEventEnvelope
+    from app.super_assistant.kernel.store import enqueue_reconcile_observation
+    from app.super_assistant.kernel.models import ExecutionCall, ExecutionRun
+    from app.super_assistant.models import SuperAssistantProcessPlugin
+    from app.shared.database import SessionLocal
+    from sqlalchemy import select
+
+    try:
+        event = PluginRunnerEventEnvelope.from_payload(payload)
+    except Exception as exc:
+        logger.error("invalid plugin runner reply envelope: %s", str(exc)[:300])
+        return
+
+    db = SessionLocal()
+    try:
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == event.run_id).with_for_update())
+        call = db.scalar(select(ExecutionCall).where(
+            ExecutionCall.id == event.call_id, ExecutionCall.run_id == event.run_id,
+        ).with_for_update())
+        plugin = db.scalar(select(SuperAssistantProcessPlugin).where(
+            SuperAssistantProcessPlugin.owner_id == event.owner_id,
+            (SuperAssistantProcessPlugin.id == event.plugin_id)
+            | (SuperAssistantProcessPlugin.key == event.plugin_id),
+        ))
+        if run is None or call is None or run.owner_id != event.owner_id or plugin is None:
+            db.rollback()
+            return
+        if call.capability_revision != event.capability_revision or plugin.revision != event.revision:
+            db.rollback()
+            logger.error("plugin runner reply revision mismatch for call=%s", event.call_id)
+            return
+        if event.manifest_hash != plugin.manifest_hash or event.request_id != f"plugin-call:{call.id}":
+            db.rollback()
+            logger.error("plugin runner reply invocation identity mismatch for call=%s", event.call_id)
+            return
+        if call.target_ref not in {plugin.id, plugin.key}:
+            db.rollback()
+            logger.error("plugin runner reply target mismatch for call=%s", event.call_id)
+            return
+        state = {
+            "progress": "running", "artifact": "running",
+            "completed": "completed", "failed": "failed",
+            "cancelled": "cancelled", "unknown": "unknown",
+            # Approval is intentionally left unresolved until the adapter has
+            # a durable Approval/Inbox mapping; never claim completion.
+            "approval_requested": "unknown",
+        }[event.kind]
+        content = ""
+        for key in ("content", "message", "summary"):
+            value = event.payload.get(key)
+            if isinstance(value, str):
+                content = value[:20000]
+                break
+        artifacts = [
+            {
+                "kind": "external.artifact", "name": item["name"],
+                "mime_type": item["mime_type"], "size": item["size"],
+                "checksum": item["checksum"], "storage_ref": item["artifact_ref"],
+            }
+            for item in event.artifacts
+        ]
+        enqueue_reconcile_observation(
+            db, run=run, call=call,
+            observation={
+                "remote_state": state, "status": state,
+                "provider_event_id": f"{event.request_id}:{event.event_seq}",
+                "connector_id": f"plugin-runner:{event.plugin_id}",
+                "content": content, "artifacts": artifacts,
+                "evidence_ref": artifacts[0]["storage_ref"] if artifacts else None,
+                "event_kind": event.kind, "event_payload": dict(event.payload),
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("plugin runner reply could not be persisted for call=%s", event.call_id)
+        raise
+    finally:
+        db.close()
+
+
 def _execution_handler_registry():
     """kernel.v1 使用独立 stream，但复用本 executor 进程和并发治理。"""
     from app.data_channel.pipeline_tasks.dispatch import (
@@ -433,6 +522,8 @@ class PipelineExecutor:
             EXECUTION_STREAM,
             ensure_execution_stream,
         )
+        from app.super_assistant.kernel.plugin_runner import PLUGIN_RUNNER_REPLY_PREFIX, PLUGIN_RUNNER_STREAM
+        from app.super_assistant.kernel.plugin_runner_service import ensure_plugin_runner_stream
 
         nc = await nats.connect(settings.nats_url.strip(), connect_timeout=3)
         heartbeat = asyncio.ensure_future(self._heartbeat_loop())
@@ -440,6 +531,7 @@ class PipelineExecutor:
             js = nc.jetstream()
             await ensure_pipeline_stream(js)
             await ensure_execution_stream(js)
+            await ensure_plugin_runner_stream(js)
             loops = []
             for subject, durable, handler in _handler_registry():
                 subscription = await js.pull_subscribe(
@@ -473,6 +565,16 @@ class PipelineExecutor:
                         self._fetch_loop(subscription, handler, subject)
                     )
                 )
+            reply_subscription = await js.pull_subscribe(
+                f"{PLUGIN_RUNNER_REPLY_PREFIX}*",
+                durable=_PLUGIN_RUNNER_REPLY_DURABLE,
+                stream=PLUGIN_RUNNER_STREAM,
+                config=ConsumerConfig(ack_wait=30, max_deliver=5),
+            )
+            loops.append(asyncio.ensure_future(self._fetch_loop(
+                reply_subscription, _run_plugin_runner_reply_message,
+                "plugin-runner-reply",
+            )))
             logger.info(
                 "流水线 executor 已启动（并发上限 %d，%d 个 subject）",
                 self._concurrency,

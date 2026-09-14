@@ -1,6 +1,6 @@
 import pytest
 
-from app.super_assistant.kernel.connectors import TrustLevel
+from app.super_assistant.kernel.connectors import AgentDescriptor, PluginRunnerConnector, TrustLevel
 from app.super_assistant.kernel.contracts import ContractError
 from app.super_assistant.kernel.plugins import PluginCatalog, PluginManifest, PluginState
 from app.super_assistant.kernel.plugin_host import PluginHostError, ProcessPluginHost
@@ -102,6 +102,37 @@ def test_plugin_runner_event_rejects_invalid_status_sequence_or_artifact(overrid
     values.update(overrides)
     with pytest.raises(ContractError):
         PluginRunnerEventEnvelope(**values)
+
+
+@pytest.mark.asyncio
+async def test_plugin_runner_connector_publishes_only_immutable_invocation(monkeypatch):
+    import app.data_channel.pipeline_tasks.dispatch as dispatch
+
+    published = {}
+
+    def publish(subject, payload, msg_id, stream_name):
+        published.update(subject=subject, payload=payload, msg_id=msg_id, stream_name=stream_name)
+
+    monkeypatch.setattr(dispatch, "_dispatch_sync_to_stream", publish)
+    connector = PluginRunnerConnector(
+        owner_id="owner-1", plugin_id="plugin-1",
+        descriptor_value=AgentDescriptor(
+            agent_id="plugin:plugin-1", key="plugin:owner-1:mail", revision=3,
+            transport="process_plugin",
+        ),
+        revision=3, capability_revision=3, manifest_hash="a" * 64,
+        workspace_snapshot_ref="workspace://owner-1/run/run-1",
+    )
+    result = await connector.invoke(
+        run_id="run-1", call_id="call-1", input_ref="artifact://input", deadline=None,
+    )
+    assert result["status"] == "accepted"
+    assert result["remote_task_ref"] == "plugin-call:call-1"
+    assert published["subject"] == "sa.plugin.invoke"
+    assert published["stream_name"] == "SA_PLUGIN_RUNNER_V1"
+    assert published["msg_id"] == "plugin-call:call-1"
+    assert published["payload"]["reply_subject"] == "sa.plugin.reply.plugin-call:call-1"
+    assert connector.descriptor().supports_approval is False
 
 
 def test_plugin_manifest_cannot_expand_capability_or_kernel_access():

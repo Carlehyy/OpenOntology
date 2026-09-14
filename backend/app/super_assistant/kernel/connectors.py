@@ -502,3 +502,65 @@ class ProcessPluginConnector:
 
     async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
         return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+
+
+@dataclass(frozen=True)
+class PluginRunnerConnector:
+    """NATS adapter for a user plugin executed by the external runner.
+
+    The API/executor process only publishes an immutable invocation envelope;
+    it never starts plugin code.  Completion and progress arrive through the
+    runner reply stream and are reconciled by the durable adapter, so the
+    initial call returns an opaque request reference immediately.
+    """
+
+    owner_id: str
+    plugin_id: str
+    descriptor_value: AgentDescriptor
+    revision: int
+    capability_revision: int
+    manifest_hash: str
+    workspace_snapshot_ref: str
+    secret_lease_refs: tuple[str, ...] = ()
+
+    def descriptor(self) -> AgentDescriptor:
+        # Changing the execution host must not expand the immutable
+        # capability snapshot frozen when the plugin was installed.
+        return self.descriptor_value
+
+    async def invoke(self, *, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
+        from .plugin_runner import (
+            PLUGIN_RUNNER_REPLY_PREFIX,
+            PLUGIN_RUNNER_STREAM,
+            PLUGIN_RUNNER_SUBJECT,
+            PluginInvocationEnvelope,
+        )
+        from app.data_channel.pipeline_tasks.dispatch import _dispatch_sync_to_stream
+
+        request_id = f"plugin-call:{call_id}"
+        envelope = PluginInvocationEnvelope(
+            request_id=request_id, owner_id=self.owner_id, run_id=run_id,
+            call_id=call_id, plugin_id=self.plugin_id, revision=self.revision,
+            manifest_hash=self.manifest_hash, capability_revision=self.capability_revision,
+            input_ref=input_ref, workspace_snapshot_ref=self.workspace_snapshot_ref,
+            secret_lease_refs=tuple(self.secret_lease_refs),
+            deadline=deadline.isoformat() if isinstance(deadline, datetime) else str(deadline),
+            reply_subject=f"{PLUGIN_RUNNER_REPLY_PREFIX}{request_id}",
+        )
+        await asyncio.to_thread(
+            _dispatch_sync_to_stream, PLUGIN_RUNNER_SUBJECT, envelope.to_payload(),
+            envelope.msg_id, PLUGIN_RUNNER_STREAM,
+        )
+        return {
+            "run_id": run_id, "call_id": call_id, "status": "accepted",
+            "remote_task_ref": request_id, "provider_event_id": f"{request_id}:accepted",
+        }
+
+    async def cancel(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        # Cancellation control messages require a runner-side process handle;
+        # until that contract is deployed, report unsupported rather than
+        # claiming that a user process stopped.
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}
+
+    async def query_status(self, *, remote_task_ref: str) -> Mapping[str, Any]:
+        return {"status": "unsupported", "remote_task_ref": remote_task_ref}

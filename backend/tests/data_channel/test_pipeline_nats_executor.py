@@ -369,6 +369,51 @@ def test_handler_registry_covers_all_stream_subjects():
     assert nats_executor._CONSUMER_DURABLE == "pipeline-executor"
 
 
+@pytest.mark.asyncio
+async def test_plugin_runner_reply_ack_path_consumes_malformed_envelope(caplog):
+    """Poison replies are logged and consumed instead of redelivered forever."""
+    await nats_executor._run_plugin_runner_reply_message({"protocol": "invalid"})
+    assert "invalid plugin runner reply envelope" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manifest_matches", [True, False])
+async def test_plugin_runner_reply_binds_manifest_before_enqueuing(monkeypatch, manifest_matches):
+    from types import SimpleNamespace
+    from app.super_assistant.kernel.plugin_runner import PluginRunnerEventEnvelope
+
+    rows = iter([
+        SimpleNamespace(id="run-1", owner_id="owner-1"),
+        SimpleNamespace(id="call-1", capability_revision=2, target_ref="plugin-1"),
+        SimpleNamespace(id="plugin-1", key="mail", revision=2, manifest_hash="a" * 64),
+    ])
+    committed = []
+    observations = []
+    db = SimpleNamespace(
+        scalar=lambda _query: next(rows),
+        commit=lambda: committed.append(True),
+        rollback=lambda: None,
+        close=lambda: None,
+    )
+    monkeypatch.setattr("app.shared.database.SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        "app.super_assistant.kernel.store.enqueue_reconcile_observation",
+        lambda _db, **kwargs: observations.append(kwargs),
+    )
+    event = PluginRunnerEventEnvelope(
+        request_id="plugin-call:call-1", owner_id="owner-1", run_id="run-1", call_id="call-1",
+        plugin_id="plugin-1", revision=2, manifest_hash=("a" if manifest_matches else "b") * 64,
+        capability_revision=2, event_seq=3, kind="completed", status="completed",
+        payload={"summary": "done"},
+    )
+    await nats_executor._run_plugin_runner_reply_message(event.to_payload())
+    assert bool(observations) is manifest_matches
+    assert bool(committed) is manifest_matches
+    if observations:
+        assert observations[0]["observation"]["provider_event_id"] == "plugin-call:call-1:3"
+        assert observations[0]["observation"]["remote_state"] == "completed"
+
+
 class _FakeSubscription:
     def __init__(self, batches, on_fetch=None):
         self._batches = list(batches)
@@ -494,9 +539,11 @@ async def test_run_subscribes_each_subject_with_own_durable(
             ("sa.execution.run.*", "sa-kernel-v1"),
             ("sa.execution.call.*", "sa-call-v1"),
             ("sa.execution.reconcile", "sa-reconciler-v1"),
+            ("sa.plugin.reply.*", "sa-plugin-reply-v1"),
         ]
     assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:14])
-    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[14:])
+    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[14:17])
+    assert subscriptions[17][2] == "SA_PLUGIN_RUNNER_V1"
     # ack_wait=30s 与 20s 续约间隔配套；max_deliver 兜底 poison 消息
     assert all(
         config.ack_wait == 30 and config.max_deliver == 5
