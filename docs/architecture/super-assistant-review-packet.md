@@ -248,7 +248,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有多项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；本轮已增加 `plugin-runner.v1` 有界调用信封，并把运行时默认改为 `disabled`，仅 development/test 允许 `direct_dev`，但 `nats` 独立 runner 尚未部署，不能把契约当成隔离执行完成；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 以及浏览器导航的配置期 DNS 校验与实际建连之间仍存在 DNS rebinding TOCTOU 窗口。浏览器的 `context.route("**/*", _route_guard)` 会逐请求重检 URL，因此重定向已受应用层 URL 检查；但它不能证明最终连接使用的 IP，也不能替代网络层 egress/private-CIDR 策略。当前镜像仍需 `--no-sandbox`；生产部署已经强制 `BROWSER_IMAGE` 使用 digest，但其他基础镜像的全局 `STRICT_IMAGE_DIGESTS` 仍允许关闭。browser Dockerfile 的字体包已锁定 Debian 版本，生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。生产环境配置现已在 Settings 入口统一规范化 `prod`、大小写和外围空白，并对空值/未知值 fail-closed；私网浏览器目标默认关闭且生产 Compose 显式固定为 `false`。剩余问题必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `62661863`，绑定收口 `47a6a4d9`）
+## 13. 此前对抗式代码审查证据（提交 `62661863`，绑定收口 `47a6a4d9`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
@@ -315,7 +315,13 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 同时增加了进程插件完整 manifest 篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；运行前会重算并校验 `key/revision/entrypoint/capabilities/permissions/network_scope/workspace_scope/secret_refs`，不一致即撤销 CapabilityRevision 并进入 connector unavailable/manual attention 路径。生产环境门禁同时覆盖规范化后的 `production` 与 `prod` 别名。新增 entrypoint、capabilities 和环境别名回归均已通过。未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。该修复属于 fail-closed 防护，不能替代签名信任根。
 
-## 14. 用户进程插件 runner 的冻结实施契约
+## 14. 当前增量验证（2026-09-14，提交 `d1dd1749`）
+
+在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归。当前验证结果为：Kernel 专项 `193 passed`；Runner service、插件目录和 Connector 专项合计 `38 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；Markdown 链接检查为 `75 files, 153 links, 0 errors`。此前启动的后端全量回归在约 41% 处因耗时主动中断，未观察到失败，不能视为全量通过。
+
+该增量修复只收紧了代码级崩溃恢复语义，未改变当前 M7/M8 的发布结论：真实 OCI/rootless launcher、Scope Broker、审批回执映射、现存业务库升级、完整 staging 外部副作用和发布回滚仍需部署证据。
+
+## 15. 用户进程插件 runner 的冻结实施契约
 
 本轮没有提交伪隔离 runner。现有 `plugin_host.py` 只能作为 development/test 宿主；生产继续拒绝 `user_untrusted`。商用 runner 必须作为独立服务接收内部 NATS durable envelope，不改变外部 Run/Call/SSE 契约。请求至少绑定 `request_id、owner_id、run_id、call_id、plugin_id、revision、manifest_hash、capability_revision、input_ref、workspace_snapshot_ref、network_scope、workspace_scope、secret_lease_refs、deadline、reply_subject`；所有结果、进度和 Artifact 引用必须回显同一组绑定字段，`request_id` 作为 NATS `Msg-Id`，重复投递只读取结果 journal，不重新执行插件。
 
