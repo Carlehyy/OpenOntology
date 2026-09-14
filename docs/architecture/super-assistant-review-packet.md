@@ -317,7 +317,7 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 ## 14. 当前增量验证（2026-09-14，提交 `4224023d`）
 
-在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归；同时拒绝同一 Connector 的 `provider_event_id` 跨 Run 重用，并拒绝同一 `event_seq` 携带不同 payload 的伪重放，避免重复或篡改回执污染原始证据。当前验证结果为：Kernel 专项 `194 passed`；Runner service、插件目录和 Connector 专项合计 `39 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；隔离端口 `PLAYWRIGHT_PORT=5199 npm run test:e2e:mocked` 为 `306 passed`；后端全量 `3619 passed, 6 skipped`；Markdown 链接检查为 `75 files, 153 links, 0 errors`。
+在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归；同时拒绝同一 Connector 的 `provider_event_id` 跨 Run 重用，并拒绝同一 `event_seq` 携带不同 payload 的伪重放，避免重复或篡改回执污染原始证据。当前验证结果为：Kernel 专项 `194 passed`；Runner service、插件目录和 Connector 专项合计 `39 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；隔离端口 `PLAYWRIGHT_PORT=5200 env -u PLAYWRIGHT_REUSE_SERVER npm run test:e2e:mocked` 为 `306 passed`（约 4 分钟）；后端全量 `3619 passed, 6 skipped`；架构门禁 `199 passed`；Markdown 链接检查为 `76 files, 153 links, 0 errors`。
 
 该增量修复只收紧了代码级崩溃恢复语义，未改变当前 M7/M8 的发布结论：真实 OCI/rootless launcher、Scope Broker、审批回执映射、现存业务库升级、完整 staging 外部副作用和发布回滚仍需部署证据。
 
