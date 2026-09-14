@@ -208,9 +208,9 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `0f2899fc`）
+## 11. 当前实现证据（2026-09-14，基线提交 `92150fc5`）
 
-本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、回调/远程响应/MCP 结果边界、运行时 SSRF 复核，以及生产容器加固，当前证据基线为 `0f2899fc`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
+本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、回调/远程响应/MCP 结果边界、运行时 SSRF 复核，以及生产容器加固，当前证据基线为 `92150fc5`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
 | 里程碑 | 当前证据 | 状态 |
 |---|---|---|
@@ -246,7 +246,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。它们必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `0f2899fc`）
+## 13. 最新对抗式代码审查证据（提交 `92150fc5`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
@@ -270,7 +270,7 @@ rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version
 
 旧 `/remote-agents` 兼容适配器也增加同一 256 KiB 响应体上限，避免旁路契约绕过 Kernel 的输入边界；兼容层完整回归 `21 passed`。
 
-MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE、streamable HTTP 和 stdio 共用出口；超限结果在进入 Kernel 事件或 Artifact 持久化前即被拒绝，MCP 客户端回归 `11 passed`。
+MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE、streamable HTTP 和 stdio 共用出口；超限结果在进入 Kernel 事件或 Artifact 持久化前即被拒绝，MCP 客户端回归 `12 passed`。
 
 此外，Kernel 直连连接器在每次真实外呼前重新执行共享 SSRF/URL 校验，避免配置变更或 DNS 变化后继续使用已失效的网络边界；注入 transport 的测试路径不参与 DNS 解析。该校验不能消除 DNS 解析与 TCP 建连之间的全部 rebinding 窗口，最终仍需网络层 egress policy 和攻击性 staging 验证。
 
