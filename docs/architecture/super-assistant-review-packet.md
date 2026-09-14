@@ -304,6 +304,6 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 runner 每次调用启动短命 rootless sandbox：固定非 root UID、read-only rootfs、独立 PID/IPC/UTS/network namespace、`no-new-privileges`、seccomp/AppArmor、cgroup CPU/内存/PID/文件限制；工作区只允许 canonical allowlist 的 read-only bind mount，调用 scratch 单独可写；禁止挂载 Docker socket、平台 uploads/API Hub 数据和宿主凭据。网络默认 deny，非空 `network_scope` 在受控 egress proxy 与 DNS/IP 策略部署前必须拒绝。凭据只通过按 owner/run/call/manifest hash 绑定的一次性短 TTL secret lease 按需获取，值不得进入环境继承、日志、事件或模型上下文。Artifact 只能通过 broker 写入 owner/run/call 前缀并返回 checksum、size、mime 和 opaque object ref。
 
-runner staging 必须攻击验证 `/proc`、共享卷、symlink/`..`、内部 CIDR、非 allowlist 外联、fork/memory/CPU/file exhaustion、`setsid`/daemon 逃逸、凭据泄露、重复 NATS 投递、进程崩溃、取消和 worker 重启恢复；只有这些证据与发布/回滚演练完成后，才能解除生产 `user_untrusted` 的 fail-closed 门禁。
+manifest 字段 hash 不能替代插件包本身的完整性证明。runner 必须只接受不可变 bundle/artifact digest，并在启动前校验包内容；workspace 中可变的 executable 或依赖文件不能作为生产插件来源。runner staging 必须攻击验证 `/proc`、共享卷、symlink/`..`、内部 CIDR、非 allowlist 外联、fork/memory/CPU/file exhaustion、`setsid`/daemon 逃逸、凭据泄露、安装后替换 bundle、重复 NATS 投递、进程崩溃、取消和 worker 重启恢复；只有这些证据与发布/回滚演练完成后，才能解除生产 `user_untrusted` 的 fail-closed 门禁。
 
 本轮还收紧了 callback 事件键的长度边界：`connector_id` 与 `provider_event_id` 即使各自达到协议上限，拼接后的 `command_id`/`idempotency_key` 也会在 255 字符数据库列内以确定性 SHA-256 短键落库；对应长标识回归已通过（callback 专项 `7 passed`）。
