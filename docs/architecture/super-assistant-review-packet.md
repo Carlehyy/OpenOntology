@@ -315,9 +315,9 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 同时增加了进程插件完整 manifest 篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；运行前会重算并校验 `key/revision/entrypoint/capabilities/permissions/network_scope/workspace_scope/secret_refs`，不一致即撤销 CapabilityRevision 并进入 connector unavailable/manual attention 路径。生产环境门禁同时覆盖规范化后的 `production` 与 `prod` 别名。新增 entrypoint、capabilities 和环境别名回归均已通过。未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。该修复属于 fail-closed 防护，不能替代签名信任根。
 
-## 14. 当前增量验证（2026-09-14，提交 `7ffb9566`）
+## 14. 当前增量验证（2026-09-14，提交 `df4fa4a8`）
 
-在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归；同时拒绝同一 Connector 的 `provider_event_id` 跨 Run 重用，避免重复回执被错误归属到旧 Run。当前验证结果为：Kernel 专项 `194 passed`；Runner service、插件目录和 Connector 专项合计 `38 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；Markdown 链接检查为 `75 files, 153 links, 0 errors`。此前启动的后端全量回归在约 41% 处因耗时主动中断，未观察到失败，不能视为全量通过。
+在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归；同时拒绝同一 Connector 的 `provider_event_id` 跨 Run 重用，避免重复回执被错误归属到旧 Run。当前验证结果为：Kernel 专项 `194 passed`；Runner service、插件目录和 Connector 专项合计 `38 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；隔离端口 `PLAYWRIGHT_PORT=5199 npm run test:e2e:mocked` 为 `306 passed`；Markdown 链接检查为 `75 files, 153 links, 0 errors`。此前启动的后端全量回归在约 41% 处因耗时主动中断，未观察到失败，不能视为全量通过。
 
 该增量修复只收紧了代码级崩溃恢复语义，未改变当前 M7/M8 的发布结论：真实 OCI/rootless launcher、Scope Broker、审批回执映射、现存业务库升级、完整 staging 外部副作用和发布回滚仍需部署证据。
 
