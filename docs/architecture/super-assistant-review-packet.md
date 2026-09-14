@@ -208,9 +208,9 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `b2dbae86`）
+## 11. 当前实现证据（2026-09-14，基线提交 `0ace5f83`）
 
-本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、回调/远程响应/MCP 结果边界、运行时 SSRF 复核，以及生产容器加固，当前证据基线为 `b2dbae86`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
+本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、回调/远程响应/MCP 结果边界、运行时 SSRF 复核，以及生产容器加固，当前证据基线为 `0ace5f83`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
 | 里程碑 | 当前证据 | 状态 |
 |---|---|---|
@@ -246,7 +246,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。生产集成 HTTPS 已默认强制，仍需完成既有端点迁移、证书和回调兼容性验收。它们必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `b2dbae86`）
+## 13. 最新对抗式代码审查证据（提交 `0ace5f83`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
@@ -256,7 +256,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 - mutation API 要求 body/header 幂等键一致；控制、重试、输入和审批使用 `If-Match`，SSE snapshot 使用 `data.run`，Artifact 下载声明 `application/octet-stream`。
 - 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；此前记录的 Kernel 专项为 `151 passed`，本轮包含新增连接器/callback/插件回归的完整 `backend/tests/super_assistant/kernel/` 为 `159 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
 
-本轮另执行了完整超级助手业务域回归 `uv run pytest -q tests/super_assistant --disable-warnings`，结果为 `605 passed`，覆盖 Kernel、远程助手、MCP、记忆宫殿、同步、路由和兼容接口；该证据仍不替代真实 staging 的外部依赖、浏览器副作用与发布回滚验收。
+本轮另执行了完整超级助手业务域回归 `uv run pytest -q tests/super_assistant --disable-warnings`，结果为 `607 passed`，覆盖 Kernel、远程助手、MCP、记忆宫殿、同步、路由和兼容接口；该证据仍不替代真实 staging 的外部依赖、浏览器副作用与发布回滚验收。
 
 前端超级助手专属浏览器验收（自主模式、MCP 降级、工作台、多会话、知识图谱、Artifact/集成入口）执行 36 个用例，结果 `36 passed`（Chromium，3 workers）；其中修正了旧占位文案断言和目录刷新后的 busy 竞态等待。
 
