@@ -208,9 +208,9 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `7ca6cae0`）
+## 11. 当前实现证据（2026-09-14，基线提交 `6551c3c3`）
 
-本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、回调/远程响应/MCP 结果边界、运行时 SSRF 复核，以及生产容器加固，当前证据基线为 `7ca6cae0`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
+本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、回调/远程响应/MCP 结果边界、运行时 SSRF 复核，以及生产容器加固，当前证据基线为 `6551c3c3`。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
 | 里程碑 | 当前证据 | 状态 |
 |---|---|---|
@@ -246,7 +246,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有四项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口；生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。它们必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `7ca6cae0`）
+## 13. 最新对抗式代码审查证据（提交 `6551c3c3`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
@@ -290,7 +290,7 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 对 browser 镜像的运行态检查显示，基础镜像缺少可用的 Chromium SUID sandbox，去掉 `--no-sandbox` 会退出；本轮已据探针结果把镜像和 Compose 固定到 UID/GID 10001，保留 `--no-sandbox`，并验证 CDP 健康检查和新页面创建均成功。该项降低了容器被攻破后的权限，但仍需换用带内部 sandbox 的固定 digest 镜像并完成浏览器攻击面 staging，才能解除纵深防御风险。
 
-browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署守卫会拒绝恢复 `latest`；显式传入 `BROWSER_IMAGE` 仍属于运维变更，必须重新执行镜像构建、CDP 健康检查和安全回归。
+browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署守卫会拒绝恢复 `latest`；容器以 UID/GID 10001 运行，缓存收口到专用 `/tmp/browser-cache` 子目录；显式传入 `BROWSER_IMAGE` 仍属于运维变更，必须重新执行镜像构建、CDP 健康检查和安全回归。
 
 `scripts/ci/test-deploy-guards.sh` 已增加对上述四个服务和三项配置的服务级守卫，部署守卫自测通过，后续 Compose 修改若移除任一选项会在 CI 阶段失败。
 
