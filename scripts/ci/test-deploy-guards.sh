@@ -160,6 +160,11 @@ if ! grep -Fq 'user: "10001:10001"' <<<"$browser_block" \
   printf 'browser must run as the fixed non-root UID 10001\n' >&2
   exit 1
 fi
+if ! grep -Fq 'BROWSER_IMAGE:-chromedp/headless-shell@sha256:' "$PROD_COMPOSE" \
+    || grep -Fq 'BROWSER_IMAGE:-chromedp/headless-shell:latest' "$PROD_COMPOSE"; then
+  printf 'browser base image default must be pinned by digest\n' >&2
+  exit 1
+fi
 
 test_dir="$(mktemp -d /tmp/openontology-deploy-guards.XXXXXX)"
 archive_source="$(mktemp -d /tmp/openontology-archive-source.XXXXXX)"
