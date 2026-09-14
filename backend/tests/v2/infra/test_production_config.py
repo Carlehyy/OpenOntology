@@ -514,7 +514,30 @@ def _run_deploy_validation(
     health_url: str | None = None,
     bootstrap: bool = True,
     extra_env: dict[str, str] | None = None,
+    pin_images: bool = True,
 ):
+    # The production gate rejects floating image tags.  Keep the repository's
+    # human-facing .env.example readable while giving validation-only tests
+    # deterministic synthetic immutable authorities.
+    image_keys = (
+        "POSTGRES_IMAGE", "REDIS_IMAGE", "NEO4J_IMAGE", "MINIO_IMAGE",
+        "BROWSER_IMAGE", "PYTHON_BASE_IMAGE", "NODE_BASE_IMAGE", "NGINX_BASE_IMAGE",
+    )
+    for candidate in ((app_dir / ".env.example", app_dir / ".env") if pin_images else ()):
+        if not candidate.exists() or candidate.is_symlink():
+            continue
+        lines = candidate.read_text(encoding="utf-8").splitlines()
+        replacements = {
+            key: f"test/{key.lower()}@sha256:{'a' * 64}" for key in image_keys
+        }
+        candidate.write_text(
+            "\n".join(
+                f"{line.split('=', 1)[0]}={replacements[line.split('=', 1)[0]]}"
+                if "=" in line and line.split("=", 1)[0] in replacements else line
+                for line in lines
+            ) + "\n",
+            encoding="utf-8",
+        )
     manifest = app_dir / "deploy" / "production.dependencies.env"
     if not manifest.exists():
         manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -679,7 +702,7 @@ def test_deploy_refuses_env_symlink_without_replacing_authority(
         original = target.read_bytes()
     (tmp_path / ".env").symlink_to(target)
 
-    result = _run_deploy_validation(tmp_path)
+    result = _run_deploy_validation(tmp_path, pin_images=False)
 
     assert result.returncode != 0
     assert (tmp_path / ".env").is_symlink()
@@ -1274,7 +1297,7 @@ def test_deploy_rejects_case_variant_authority_without_touching_env(
     env_path.write_text(contents, encoding="utf-8")
     original = env_path.read_bytes()
 
-    result = _run_deploy_validation(tmp_path)
+    result = _run_deploy_validation(tmp_path, pin_images=False)
 
     output = result.stdout + result.stderr
     assert result.returncode != 0
@@ -1291,7 +1314,7 @@ def test_deploy_rejects_duplicate_case_variant_authority(tmp_path):
     env_path.write_text(contents, encoding="utf-8")
     original = env_path.read_bytes()
 
-    result = _run_deploy_validation(tmp_path)
+    result = _run_deploy_validation(tmp_path, pin_images=False)
 
     assert result.returncode != 0
     assert env_path.read_bytes() == original
