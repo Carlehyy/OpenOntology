@@ -73,9 +73,31 @@ def capability_key(owner_id: str, key: str) -> str:
     return f"plugin:{owner_id}:{key}"
 
 
-def _manifest_hash(body: ProcessPluginCreate) -> str:
-    value = body.model_dump(mode="json", by_alias=False)
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+_MANIFEST_FIELDS = (
+    "key", "revision", "entrypoint", "display_name", "description",
+    "trust_level", "capabilities", "permissions", "network_scope",
+    "workspace_scope", "secret_refs",
+)
+
+
+def _manifest_payload(value: ProcessPluginCreate | SuperAssistantProcessPlugin) -> dict:
+    """Return the complete, canonicalized executable plugin manifest.
+
+    The digest is an integrity fence, not merely an installation identifier.
+    It therefore covers every persisted field that can affect execution or
+    authorization.  Keeping the same field set for Pydantic input and ORM
+    rows also lets runtime detect direct database edits after a restart.
+    """
+    if isinstance(value, ProcessPluginCreate):
+        raw = value.model_dump(mode="json", by_alias=False)
+    else:
+        raw = {field: getattr(value, field) for field in _MANIFEST_FIELDS}
+    return {field: raw.get(field) for field in _MANIFEST_FIELDS}
+
+
+def _manifest_hash(value: ProcessPluginCreate | SuperAssistantProcessPlugin) -> str:
+    payload = _manifest_payload(value)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def _manifest(row: SuperAssistantProcessPlugin) -> PluginManifest:

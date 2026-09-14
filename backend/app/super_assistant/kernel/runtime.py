@@ -500,7 +500,8 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
     try:
         from app.super_assistant.models import SuperAssistantProcessPlugin
         from app.super_assistant.process_plugin_service import (
-            _descriptor, _manifest, admit_plugin_call, release_plugin_call,
+            _descriptor, _manifest, admit_plugin_call, capability_key,
+            release_plugin_call,
         )
         plugin = db.scalar(select(SuperAssistantProcessPlugin).where(
             SuperAssistantProcessPlugin.owner_id == run.owner_id,
@@ -511,6 +512,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
         if plugin is not None:
             from app.shared.config import settings
             from app.shared.config import normalized_environment
+            from app.super_assistant.process_plugin_service import _manifest_hash
             # The current install path only supports user_untrusted plugins.
             # Do not trust a mutable DB string to elevate a process plugin to
             # a future verified/platform tier; that tier needs a signed trust
@@ -520,6 +522,26 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                 return None
             if normalized_environment(settings.environment) == "production" and plugin.trust_level == TrustLevel.USER_UNTRUSTED.value:
                 logger.error("refusing user_untrusted process plugin in production: %s", plugin.id)
+                return None
+            # The database row is mutable storage, not an integrity source.
+            # Recompute the complete manifest before constructing a host so a
+            # direct edit to entrypoint, capabilities or any policy scope
+            # cannot execute under an old digest after worker restart.
+            actual_hash = _manifest_hash(plugin)
+            if actual_hash != plugin.manifest_hash:
+                from .capability_service import revoke_capability_revisions
+                revoke_capability_revisions(
+                    db, [capability_key(run.owner_id, plugin.key)],
+                    revision=int(plugin.revision),
+                )
+                db.flush()
+                logger.error("refusing process plugin with manifest integrity mismatch: %s", plugin.id)
+                return None
+            capability = _capability_snapshot(
+                db, capability_key(run.owner_id, plugin.key), int(plugin.revision),
+            )
+            if capability is None or not capability.enabled or capability.manifest_hash != actual_hash:
+                logger.error("refusing process plugin without matching capability snapshot: %s", plugin.id)
                 return None
             from app.super_assistant.kernel.plugin_host import ProcessPluginHost
             host = ProcessPluginHost(_manifest(plugin))

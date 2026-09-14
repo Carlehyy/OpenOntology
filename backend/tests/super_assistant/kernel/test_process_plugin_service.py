@@ -144,3 +144,30 @@ def test_tampered_trust_level_cannot_elevate_process_plugin(db, admin_user):
     call = SimpleNamespace(target_ref=row.id, capability_revision=row.revision, capability_key=capability_key(admin_user.id, row.key))
     run = SimpleNamespace(owner_id=admin_user.id)
     assert runtime._resolve_external_connector(db, run, call) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("entrypoint", "/tmp/attacker-plugin"), ("capabilities", ["context.read", "network.request"])],
+)
+def test_runtime_rejects_tampered_manifest_and_revokes_capability(db, admin_user, field, value):
+    """Changing executable or policy fields cannot reuse an old manifest hash."""
+    from app.super_assistant.kernel import runtime
+
+    row = install_process_plugin(db, admin_user.id, _body(key=f"user.tampered.{field}", revision=4))
+    enable_process_plugin(db, admin_user.id, row.id)
+    old_hash = row.manifest_hash
+    setattr(row, field, value)
+    # Simulate a direct database edit that deliberately preserves the old
+    # digest. The resolver must catch it before creating a child process.
+    row.manifest_hash = old_hash
+    db.commit()
+
+    call = SimpleNamespace(
+        target_ref=row.id, capability_revision=row.revision,
+        capability_key=capability_key(admin_user.id, row.key),
+    )
+    run = SimpleNamespace(owner_id=admin_user.id)
+    assert runtime._resolve_external_connector(db, run, call) is None
+    cap = db.get(CapabilityRevision, (capability_key(admin_user.id, row.key), row.revision))
+    assert cap is not None and cap.enabled is False

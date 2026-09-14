@@ -244,7 +244,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 新增专项回归为 `33 passed`（router/reconciler/recovery/callback/process-plugin），前端静态门禁和 unit/build 通过；`test:e2e:mocked` 当前为 `253 passed, 53 failed`，失败集中在既有导航/场景/登录等跨域规格，不能作为超级助手商用验收通过证据。独立 rootless plugin-runner/secret broker、真实 staging 外部副作用、迁移升级与回滚仍未完成，因此本轮审查不构成商用发布批准。
 
-当前仍有三项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（当前已对普通数据库字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口。生产集成 HTTPS 已默认强制，仍需完成既有端点迁移、证书和回调兼容性验收。它们必须在 staging 攻击验收与发布门禁中闭环。
+当前仍有四项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 的配置期 DNS 校验与请求期解析之间仍存在 DNS rebinding 窗口；生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。它们必须在 staging 攻击验收与发布门禁中闭环。
 
 ## 13. 最新对抗式代码审查证据（提交 `95443e87`）
 
@@ -254,9 +254,9 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 - pending user Inbox 在模型结果成功落库的同一事务中才标记 consumed；模型失败或进程崩溃会保留 pending，等待下一次 activation。
 - MCP、Remote Agent 和 Multica 的 Call 固定 `capability_revision` 与 manifest hash。配置或凭据变更撤销当前 revision；旧 Call 不会重定向到新端点，而是进入 `outcome_unknown/manual_attention`。
 - mutation API 要求 body/header 幂等键一致；控制、重试、输入和审批使用 `If-Match`，SSE snapshot 使用 `data.run`，Artifact 下载声明 `application/octet-stream`。
-- 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；此前记录的 Kernel 专项为 `151 passed`，本轮包含新增连接器/callback/插件回归的完整 `backend/tests/super_assistant/kernel/` 为 `159 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
+- 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；此前记录的 Kernel 专项为 `151 passed`，本轮包含新增连接器/callback/插件回归的完整 `backend/tests/super_assistant/kernel/` 为 `161 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
 
-本轮另执行了完整超级助手业务域回归 `uv run pytest -q tests/super_assistant --disable-warnings`，结果为 `607 passed`，覆盖 Kernel、远程助手、MCP、记忆宫殿、同步、路由和兼容接口；该证据仍不替代真实 staging 的外部依赖、浏览器副作用与发布回滚验收。
+本轮另执行了完整超级助手业务域回归 `uv run pytest -q tests/super_assistant --disable-warnings`，结果为 `609 passed`，覆盖 Kernel、远程助手、MCP、记忆宫殿、同步、路由和兼容接口；该证据仍不替代真实 staging 的外部依赖、浏览器副作用与发布回滚验收。
 
 前端完整静态门禁已复核：`npm run test:unit` 为 `481 passed`（155 suites），feature-boundaries、component-convergence、color-tokens、lint 和 `npm run build` 均通过；构建仅报告既有 Vite/Tailwind 警告，不影响退出码。
 
@@ -264,7 +264,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version`、`PUT /json/new` 页面创建、Chromium/socat 子进程 UID/GID 和错误日志检查；这些结果证明容器权限加固可运行，但不替代完整真实浏览器外部副作用验收。
 
-本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3564 passed, 6 skipped`；时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单和 JetStream 策略漂移测试均已通过；核心定向集合为 `273 passed, 1 skipped`。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
+本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3567 passed, 6 skipped`；时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单、JetStream 策略漂移和进程插件 manifest 篡改测试均已通过；核心定向集合和真实隔离栈证据仍不替代完整 staging。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
 
 对抗式审查新增的代码修复包括：NATS handler 在状态未持久化时 NAK 而非 ACK；RUNNING 状态的重复外部调用进入对账/人工介入路径且不二次触发 provider；父 Run 终态后仍对带远端句柄的 Call 执行取消；provider 引用和结果文本在落库前限长；人工介入 Call 不再被 scheduler 无限轮询；外部 Artifact 的对象存储引用必须落在 owner/run/artifact 命名空间；SSE callback 事件只保留稳定字段和受限 Artifact 引用。上述修复已经通过对应专项测试，但不替代真实 provider、对象存储和浏览器副作用验收。
 
@@ -296,6 +296,6 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 本轮对用户进程插件做了额外的反向检查：`plugin_host.py` 目前只是受限 JSON-lines 子进程，`network_scope`、`workspace_scope`、`secret_refs` 没有被 OS/网络策略执行；生产 Compose 已增加通用的 capability drop、no-new-privileges 和 hardened `/tmp`，但仍没有 rootless 用户、只读根文件系统或独立插件 namespace。运行时不会把 secret 值直接传给插件，因此当前插件能力是 fail-closed 的，不能作为“已支持凭据注入的商用插件”宣称。该事实与 `process_plugin_service.py`、`kernel/runtime.py`、`kernel/plugin_host.py` 和生产 Compose 配置一致，必须以独立 runner、secret broker 和攻击性 staging 验收完成后才可解除 M7/M8 阻断。
 
-同时增加了信任字段篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。专项插件回归为 `16 passed`，新增篡改测试已通过。该修复属于 fail-closed 防护，不能替代签名信任根。
+同时增加了进程插件完整 manifest 篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；运行前会重算并校验 `key/revision/entrypoint/capabilities/permissions/network_scope/workspace_scope/secret_refs`，不一致即撤销 CapabilityRevision 并进入 connector unavailable/manual attention 路径。新增 entrypoint 与 capabilities 篡改回归均已通过。未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。该修复属于 fail-closed 防护，不能替代签名信任根。
 
 本轮还收紧了 callback 事件键的长度边界：`connector_id` 与 `provider_event_id` 即使各自达到协议上限，拼接后的 `command_id`/`idempotency_key` 也会在 255 字符数据库列内以确定性 SHA-256 短键落库；对应长标识回归已通过（callback 专项 `7 passed`）。
