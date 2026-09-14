@@ -38,6 +38,7 @@ def test_fetch_me_sends_bearer_and_normalizes_base_url(monkeypatch):
     assert me["name"] == "admin"
     assert calls[0]["url"] == "http://127.0.0.1:8080/api/me"
     assert calls[0]["headers"]["Authorization"] == "Bearer mul-token"
+    assert calls[0]["follow_redirects"] is False
     assert "X-Workspace-ID" not in calls[0]["headers"]
 
 

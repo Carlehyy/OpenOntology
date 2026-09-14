@@ -43,14 +43,35 @@ def test_web_fetch_extracts_text_and_skips_script_and_style(monkeypatch):
     assert "color" not in text
 
 
-def test_web_fetch_sends_user_agent_and_follows_redirects(monkeypatch):
+def test_web_fetch_sends_user_agent_without_implicit_redirects(monkeypatch):
     calls: list = []
     _patch_request(monkeypatch, _FakeResponse(200, text="<p>ok</p>"), calls)
     web_tools.web_fetch("http://203.0.113.10/page")
     assert calls[0]["method"] == "GET"
     assert calls[0]["headers"]["User-Agent"] == "OpenOntology-SuperAssistant/1.0"
-    assert calls[0]["follow_redirects"] is True
+    assert calls[0]["follow_redirects"] is False
     assert calls[0]["timeout"] == 20.0
+
+
+def test_web_fetch_validates_every_redirect_hop(monkeypatch):
+    calls: list = []
+    responses = iter([
+        _FakeResponse(302),
+        _FakeResponse(200, text="<p>ok</p>"),
+    ])
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        response = next(responses)
+        if response.status_code == 302:
+            response.headers = {"location": "http://127.0.0.1/secret"}
+        return response
+
+    monkeypatch.setattr(web_tools, "_request", fake_request)
+    monkeypatch.setattr(settings, "environment", "production")
+    with pytest.raises(McpClientError, match="非公网地址"):
+        web_tools.web_fetch("http://93.184.216.34/start")
+    assert len(calls) == 1
 
 
 def test_web_fetch_raises_with_status_code_on_http_error(monkeypatch):

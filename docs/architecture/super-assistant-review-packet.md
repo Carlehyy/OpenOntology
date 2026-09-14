@@ -272,6 +272,8 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 此外，Kernel 直连连接器在每次真实外呼前重新执行共享 SSRF/URL 校验，避免配置变更或 DNS 变化后继续使用已失效的网络边界；注入 transport 的测试路径不参与 DNS 解析。该校验不能消除 DNS 解析与 TCP 建连之间的全部 rebinding 窗口，最终仍需网络层 egress policy 和攻击性 staging 验证。
 
+本轮额外发现并修复了 web_fetch 与 Multica 客户端的重定向边界：此前 HTTP 客户端会自动跟随未经逐跳 SSRF 校验的 Location，可能把请求转向内网地址，Multica 还可能将 Bearer 凭据带到重定向主机。现在 web_fetch 关闭隐式跟随并对每一跳重新校验，限制最多 3 次；Multica 对重定向直接 fail-closed。对应 web 与 Multica 回归已通过。
+
 生产 Compose 的 browser、`python_kernel_gateway`、backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。
 
 对 browser 镜像的运行态检查显示，`docker/browser/Dockerfile` 明确设置 `USER root`，生产 Compose 未覆盖运行用户，并通过 `--no-sandbox` 启动 Chromium。由于当前镜像入口和字体安装方式尚未证明可在非 root 下稳定运行，本轮没有直接修改；在完成非 root 镜像构建、CDP 健康检查和浏览器攻击面 staging 验证前，该项保持为发布阻断风险。

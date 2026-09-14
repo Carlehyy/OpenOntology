@@ -79,7 +79,10 @@ def _call(
         params=cleaned_params,
         json=payload,
         timeout=_TIMEOUT_SECONDS,
-        follow_redirects=True,
+        # A redirect changes the host to which the bearer token would be sent.
+        # Fail closed and let the caller surface the HTTP status instead of
+        # allowing an unvalidated redirect target.
+        follow_redirects=False,
     )
     if not 200 <= response.status_code < 300:
         raise MulticaClientError(
