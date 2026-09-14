@@ -208,7 +208,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `待本轮提交更新`）
+## 11. 当前实现证据（2026-09-14，基线提交 `d5bf6fb9`）
 
 本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界。本轮进一步收紧探索委派绑定：服务端生成并校验写权限指纹，Kernel 子 Run 强制保留可信来源标记，委派恢复每轮复核实时草稿和写权限。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
@@ -248,7 +248,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有多项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 以及浏览器导航的配置期 DNS 校验与实际建连之间仍存在 DNS rebinding TOCTOU 窗口。浏览器的 `context.route("**/*", _route_guard)` 会逐请求重检 URL，因此重定向已受应用层 URL 检查；但它不能证明最终连接使用的 IP，也不能替代网络层 egress/private-CIDR 策略。当前镜像仍需 `--no-sandbox`；生产部署已经强制 `BROWSER_IMAGE` 使用 digest，但其他基础镜像的全局 `STRICT_IMAGE_DIGESTS` 仍允许关闭。browser Dockerfile 的字体包已锁定 Debian 版本，生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。生产环境配置现已在 Settings 入口统一规范化 `prod`、大小写和外围空白，并对空值/未知值 fail-closed；私网浏览器目标默认关闭且生产 Compose 显式固定为 `false`。剩余问题必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `6a9e4349`）
+## 13. 最新对抗式代码审查证据（提交 `d5bf6fb9`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
@@ -267,6 +267,8 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version`、`PUT /json/new` 页面创建、Chromium/socat 子进程 UID/GID 和错误日志检查；这些结果证明容器权限加固可运行，但不替代完整真实浏览器外部副作用验收。
 
 本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3567 passed, 6 skipped`；时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单、JetStream 策略漂移和进程插件 manifest 篡改测试均已通过；核心定向集合和真实隔离栈证据仍不替代完整 staging。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
+
+本次最新收口后的定向回归为 `76 passed`，委派边界架构测试为 `4 passed`，时长覆盖守卫为 `1 passed`；新增验证覆盖伪造权限指纹、服务端重算指纹以及 Kernel 子 Run 来源标记不可被上下文覆盖。该专项证据只证明代码级绑定不变量，不改变 M7/M8 的 staging 和发布阻断状态。
 
 对抗式审查新增的代码修复包括：NATS handler 在状态未持久化时 NAK 而非 ACK；RUNNING 状态的重复外部调用进入对账/人工介入路径且不二次触发 provider；父 Run 终态后仍对带远端句柄的 Call 执行取消；provider 引用和结果文本在落库前限长；人工介入 Call 不再被 scheduler 无限轮询；外部 Artifact 的对象存储引用必须落在 owner/run/artifact 命名空间；SSE callback 事件只保留稳定字段和受限 Artifact 引用。上述修复已经通过对应专项测试，但不替代真实 provider、对象存储和浏览器副作用验收。
 
