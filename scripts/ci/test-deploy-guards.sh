@@ -517,6 +517,22 @@ for image_key in \
   set_test_env_value "$image_key" "$digest"
 done
 
+set_test_env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE direct_dev
+if (
+  cd "$test_dir"
+  APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >runner-mode-failure.log 2>&1
+); then
+  printf 'production deployment must reject direct_dev plugin runner mode\n' >&2
+  exit 1
+fi
+grep -q 'rejects SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE=direct_dev' \
+  "$test_dir/runner-mode-failure.log"
+set_test_env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE disabled
+
 set_test_env_value BROWSER_IMAGE chromedp/headless-shell:stable
 if (
   cd "$test_dir"

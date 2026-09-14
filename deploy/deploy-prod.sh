@@ -1110,6 +1110,20 @@ case "$strict_image_digests_value" in
     exit 1
     ;;
 esac
+process_plugin_runner_mode="$(env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE)"
+case "$process_plugin_runner_mode" in
+  direct_dev)
+    log "production deployment rejects SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE=direct_dev"
+    exit 1
+    ;;
+  ""|disabled|nats)
+    ;;
+  *)
+    log "SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE must be disabled or nats in production"
+    exit 1
+    ;;
+esac
+unset process_plugin_runner_mode
 check_image_digest() {
   local key="$1"
   local value
