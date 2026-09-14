@@ -578,6 +578,33 @@ def test_chat_turn_with_fake_llm(client, auth_headers, modeled_ontology, db,
     assert any(c["id"] == conv_id for c in r.json()["data"])
 
 
+def test_chat_turn_empty_llm_response_falls_back_to_notice(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """content 与 tool_calls 双空（网关降级重试后仍无产出）→ 编排器兜底文本，
+    不抛错、不产生 step。生产 GLM MaaS tool_calls 缺失缺陷的残余路径。"""
+    oid = modeled_ontology["id"]
+
+    from app.models.model_config import ModelConfig
+    db.add(ModelConfig(id=str(uuid.uuid4()), name="fake", provider="openai",
+                       config_type="llm", models=["fake-model"],
+                       created_by=admin_user.id))
+    db.commit()
+
+    def fake_chat(call_kwargs, messages, tools):
+        return {"content": None, "tool_calls": [], "usage": None}
+
+    from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(f"{_fo(oid)}/agent/chat", headers=auth_headers,
+                    json={"message": "有哪些实例？", "stream": False})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["error"] is None
+    assert data["content"] == "（模型未给出回答）"
+    assert data["steps"] == []
+
+
 def test_conversation_export_is_not_limited_to_history_replay_window(
     client, auth_headers, modeled_ontology, db, admin_user,
 ):

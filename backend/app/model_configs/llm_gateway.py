@@ -555,6 +555,22 @@ def _anthropic_client_kwargs(kw: dict) -> dict:
     return client_kwargs
 
 
+def _merged_usage(*usages) -> dict[str, Any] | None:
+    """合并同一次网关调用内多次实际请求的 usage（降级重试同样消耗 token）。"""
+    total: dict[str, Any] | None = None
+    for usage in usages:
+        if not usage:
+            continue
+        if total is None:
+            total = {"inputTokens": 0, "outputTokens": 0}
+        for source, key in (("prompt_tokens", "inputTokens"),
+                            ("completion_tokens", "outputTokens")):
+            value = getattr(usage, source, None)
+            if isinstance(value, int):
+                total[key] += value
+    return total
+
+
 def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
     import openai
 
@@ -570,6 +586,19 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
                                    "function": {"name": t["name"], "description": t["description"],
                                                 "parameters": t["parameters"]}} for t in tools]
     resp = client.chat.completions.create(**create_kwargs)
+    usages = [getattr(resp, "usage", None)]
+    # 非流式 tool calling 序列化缺陷降级：个别网关型端点在模型决定调工具时
+    # 返回 finish_reason="tool_calls" 却丢失 message.tool_calls 字段（生产
+    # 实测 GLM MaaS 非流式路径，content 与 tool_calls 双空），编排器只能落
+    # 到"（模型未给出回答）"兜底。该签名精确指向端点侧缺陷，检测到时去掉
+    # tools 重试一次让模型直接作答——与 _stream_openai 去掉 stream_options
+    # 重建流同款降参重试先例；健康端点不会出现该签名，行为不变。
+    if (create_kwargs.get("tools")
+            and getattr(resp.choices[0], "finish_reason", None) == "tool_calls"
+            and not getattr(resp.choices[0].message, "tool_calls", None)):
+        create_kwargs.pop("tools")
+        resp = client.chat.completions.create(**create_kwargs)
+        usages.append(getattr(resp, "usage", None))
     msg = resp.choices[0].message
     tool_calls = []
     for tc in (msg.tool_calls or []):
@@ -578,12 +607,10 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
         except json.JSONDecodeError:
             args = {"_raw": tc.function.arguments}
         tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
-    usage = getattr(resp, "usage", None)
     return {
         "content": msg.content,
         "tool_calls": tool_calls,
-        "usage": {"inputTokens": getattr(usage, "prompt_tokens", None),
-                  "outputTokens": getattr(usage, "completion_tokens", None)} if usage else None,
+        "usage": _merged_usage(*usages),
     }
 
 
