@@ -25,6 +25,9 @@
   已记录停机前运行的 backend/frontend 版本。
 - [ ] 迁移窗口已安排：先停止 API/worker 写入者，再执行 migration，最后启动
   与 schema 兼容的版本。
+- [ ] 本体审批链路已验证：`pending` 与审批请求在同一事务产生 durable
+  outbox，管理员 Inbox 可见，approved/rejected/failed 均按同一 correlation
+  key 关闭；外部通知不得绕过治理 API 写入决策。
 
 ## 发布后
 
