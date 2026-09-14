@@ -270,6 +270,8 @@ rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version
 
 最新隔离 E2E 栈证据（2026-09-14）为：PostgreSQL 当前分支从空库升级到 `0113_remote_agent_result_artifacts`，再降级到 `0110_super_assistant_process_plugins` 并重新升级到 `0113`；依赖探针返回 PostgreSQL、NATS JetStream、MinIO bucket、Neo4j 全部 `ok=true`；短时 nats executor 成功注册三个 kernel durable consumer。临时容器、卷和网络已在验证后销毁；这仍不等价于现存业务库升级或完整外部副作用验收。
 
+迁移报告运维入口已补齐脚本自举：在 `backend` 目录直接执行 `uv run python scripts/super_assistant_migration_report.py`（无需手工设置 `PYTHONPATH`）可输出 `kernel.v1.legacy-disposition.v1` 只读报告；`--help` 在无数据库配置时也可用。该入口修复已用隔离 PostgreSQL 实际执行并确认 `mutated=false`，不改变现存数据。
+
 本次最新收口后的定向回归为 `77 passed`，探索适配器完整回归为 `14 passed`，委派边界架构测试为 `4 passed`，时长覆盖守卫为 `1 passed`；新增验证覆盖伪造权限指纹、服务端重算指纹、Kernel 子 Run 来源标记不可被上下文覆盖，以及草稿生命周期变化后恢复委派会话会明确失败。该专项证据只证明代码级绑定不变量，不改变 M7/M8 的 staging 和发布阻断状态。
 
 用户进程插件的最新专项回归为 `28 passed`，生产配置回归为 `84 passed`；新增验证覆盖 runner 信封字段/大小/摘要/回复主题校验，以及 `disabled | nats | direct_dev` 的 fail-closed 解析。当前 `nats` 只冻结了独立 runner 的消息契约，尚未提供 rootless 执行服务，因此不能据此解除插件商用阻断。
