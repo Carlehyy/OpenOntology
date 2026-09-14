@@ -168,7 +168,9 @@ fi
 
 test_dir="$(mktemp -d /tmp/openontology-deploy-guards.XXXXXX)"
 archive_source="$(mktemp -d /tmp/openontology-archive-source.XXXXXX)"
-archive_output="$(mktemp /tmp/openontology-archive.XXXXXX.tar.gz)"
+# Keep the XXXXXX suffix at the end: BSD mktemp otherwise treats a trailing
+# extension as literal text and a second guard run can collide with the first.
+archive_output="$(mktemp /tmp/openontology-archive.XXXXXX)"
 trap 'rm -rf -- "$test_dir" "$archive_source"; rm -f -- "$archive_output"' EXIT
 
 archive_fixture_paths=(
