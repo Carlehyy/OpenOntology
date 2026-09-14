@@ -20,6 +20,21 @@ class McpClientError(ValueError):
 _MAX_TOOL_RESULT_BYTES = 256 * 1024
 
 
+def _sse_http_client_factory(*, headers: dict[str, str] | None = None,
+                             timeout=None, auth=None):
+    """Build the SSE client with redirects disabled.
+
+    The MCP SDK's default factory enables redirects.  SSE endpoints can carry
+    API-key headers and may emit a cross-host 30x before the first event, so
+    using that default would bypass the URL/SSRF validation performed here.
+    """
+    import httpx
+
+    return httpx.AsyncClient(
+        headers=headers, timeout=timeout, auth=auth, follow_redirects=False,
+    )
+
+
 def _error_message(exc: BaseException) -> str:
     """Unwrap AnyIO task groups so connection failures stay actionable."""
     if isinstance(exc, BaseExceptionGroup):
@@ -200,6 +215,7 @@ async def _client_session(*, transport: str, url: str, headers: dict[str, str],
     if transport == "sse":
         async with sse_client(
             valid_url, headers=headers, timeout=20, sse_read_timeout=120,
+            httpx_client_factory=_sse_http_client_factory,
         ) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()

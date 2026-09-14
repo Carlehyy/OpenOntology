@@ -278,6 +278,8 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 同一入口的响应体也改为流式读取，先检查 `Content-Length`，并在实际字节累计超过 256 KiB 时立即中止；这避免 chunked 或错误声明长度的远端响应在 HTML 解析前造成内存压力。
 
+独立 DNS 审查还发现 MCP legacy SSE 路径会使用 SDK 默认的 `follow_redirects=True`，存在跨主机重定向和请求头泄露风险；现在注入 `follow_redirects=False` 的客户端工厂，SSE 与 streamable HTTP 的重定向策略保持一致。DNS 解析与 TCP 建连之间的 rebinding TOCTOU 仍需网络层 egress policy 或固定 IP transport 解决。
+
 生产 Compose 的 browser、`python_kernel_gateway`、backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。
 
 对 browser 镜像的运行态检查显示，基础镜像缺少可用的 Chromium SUID sandbox，去掉 `--no-sandbox` 会退出；本轮已据探针结果把镜像和 Compose 固定到 UID/GID 10001，保留 `--no-sandbox`，并验证 CDP 健康检查和新页面创建均成功。该项降低了容器被攻破后的权限，但仍需换用带内部 sandbox 的固定 digest 镜像并完成浏览器攻击面 staging，才能解除纵深防御风险。

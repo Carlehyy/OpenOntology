@@ -6,11 +6,22 @@ from app.shared.config import settings
 from app.super_assistant import mcp_client
 from app.super_assistant.mcp_client import (
     McpClientError,
+    _sse_http_client_factory,
     _error_message,
     namespaced_tool_name,
     normalize_connection,
     validate_mcp_url,
 )
+
+
+@pytest.mark.asyncio
+async def test_sse_client_factory_disables_redirects():
+    client = _sse_http_client_factory(headers={"X-API-Key": "secret"})
+    try:
+        assert client.follow_redirects is False
+        assert client.headers["X-API-Key"] == "secret"
+    finally:
+        await client.aclose()
 
 
 def test_mcp_url_allows_public_targets_without_a_host_allowlist(monkeypatch):
