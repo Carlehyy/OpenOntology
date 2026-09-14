@@ -262,7 +262,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version`、`PUT /json/new` 页面创建、Chromium/socat 子进程 UID/GID 和错误日志检查；这些结果证明容器权限加固可运行，但不替代完整真实浏览器外部副作用验收。
 
-本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3564 passed, 6 skipped`；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单和 JetStream 策略漂移测试均已通过；核心定向集合为 `273 passed, 1 skipped`。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
+本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3564 passed, 6 skipped`；时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单和 JetStream 策略漂移测试均已通过；核心定向集合为 `273 passed, 1 skipped`。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
 
 对抗式审查新增的代码修复包括：NATS handler 在状态未持久化时 NAK 而非 ACK；RUNNING 状态的重复外部调用进入对账/人工介入路径且不二次触发 provider；父 Run 终态后仍对带远端句柄的 Call 执行取消；provider 引用和结果文本在落库前限长；人工介入 Call 不再被 scheduler 无限轮询；外部 Artifact 的对象存储引用必须落在 owner/run/artifact 命名空间；SSE callback 事件只保留稳定字段和受限 Artifact 引用。上述修复已经通过对应专项测试，但不替代真实 provider、对象存储和浏览器副作用验收。
 
@@ -270,7 +270,7 @@ rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version
 
 旧 `/remote-agents` 兼容适配器也增加同一 256 KiB 响应体上限，避免旁路契约绕过 Kernel 的输入边界；兼容层完整回归 `21 passed`。
 
-MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE、streamable HTTP 和 stdio 共用出口；超限结果在进入 Kernel 事件或 Artifact 持久化前即被拒绝，MCP 客户端回归 `12 passed`。
+MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE、streamable HTTP 和 stdio 共用出口；超限结果在进入 Kernel 事件或 Artifact 持久化前即被拒绝，MCP 客户端回归 `13 passed`。
 
 此外，Kernel 直连连接器在每次真实外呼前重新执行共享 SSRF/URL 校验，避免配置变更或 DNS 变化后继续使用已失效的网络边界；注入 transport 的测试路径不参与 DNS 解析。该校验不能消除 DNS 解析与 TCP 建连之间的全部 rebinding 窗口，最终仍需网络层 egress policy 和攻击性 staging 验证。
 
