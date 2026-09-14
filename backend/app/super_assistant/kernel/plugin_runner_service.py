@@ -280,6 +280,30 @@ def _replay_last_event(row: SuperAssistantPluginRunnerJournal, envelope: PluginI
     return event
 
 
+async def _record_unknown(
+    journal: PluginRunnerJournal,
+    row: SuperAssistantPluginRunnerJournal,
+    envelope: PluginInvocationEnvelope,
+    *,
+    reason: str,
+    error: object,
+    publish: Callable[[PluginRunnerEventEnvelope], Awaitable[None]] | None,
+) -> None:
+    """Persist the unknown event before closing the journal state.
+
+    The event is the durable evidence consumed by Kernel reconciliation.  It
+    must be committed before the terminal journal transition; otherwise a
+    crash between two commits can leave a terminal row with no replayable
+    evidence.  A redelivery then either emits a second event or silently loses
+    the provider outcome.
+    """
+    event = _event_for(envelope, row, kind="unknown", payload={"reason": reason})
+    journal.record_event(row, event)
+    journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": reason}, error=error)
+    if publish:
+        await publish(event)
+
+
 class PluginRunnerService:
     """One invocation processor; transport lifecycle is provided below."""
 
@@ -325,31 +349,35 @@ class PluginRunnerService:
                     journal.transition(row, JOURNAL_FINISHED, outcome={"kind": replay.kind, "status": replay.status})
                     if publish:
                         await publish(replay)
+                elif replay is not None and replay.kind == "unknown":
+                    # The event was committed but the state transition was
+                    # interrupted. Complete the transition and replay the
+                    # exact event; never append a second unknown event.
+                    journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": (replay.payload or {}).get("reason", "runner_unknown")}, error=(replay.payload or {}).get("reason"))
+                    if publish:
+                        await publish(replay)
                 else:
                     # A process may have disappeared with the service.  It is
                     # unsafe to guess whether side effects happened.
-                    row = journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": "runner_restarted_after_spawn"}, error="runner restarted after spawn")
-                    event = _event_for(envelope, row, kind="unknown", payload={"reason": "runner_restarted_after_spawn"})
-                    journal.record_event(row, event)
-                    if publish:
-                        await publish(event)
+                    await _record_unknown(
+                        journal, row, envelope, reason="runner_restarted_after_spawn",
+                        error="runner restarted after spawn", publish=publish,
+                    )
                 return True
             try:
                 self.attestation.verify(envelope)
             except RootlessSandboxUnavailable as exc:
-                row = journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": "sandbox_unavailable"}, error=exc)
-                event = _event_for(envelope, row, kind="unknown", payload={"reason": "sandbox_unavailable"})
-                journal.record_event(row, event)
-                if publish:
-                    await publish(event)
+                await _record_unknown(
+                    journal, row, envelope, reason="sandbox_unavailable",
+                    error=exc, publish=publish,
+                )
                 return True
             row = journal.transition(row, JOURNAL_VALIDATED)
             if self.launcher is None:
-                row = journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": "sandbox_launcher_unconfigured"}, error="sandbox launcher is not configured")
-                event = _event_for(envelope, row, kind="unknown", payload={"reason": "sandbox_launcher_unconfigured"})
-                journal.record_event(row, event)
-                if publish:
-                    await publish(event)
+                await _record_unknown(
+                    journal, row, envelope, reason="sandbox_launcher_unconfigured",
+                    error="sandbox launcher is not configured", publish=publish,
+                )
                 return True
             row = journal.transition(row, JOURNAL_SPAWNED)
             try:
@@ -357,18 +385,16 @@ class PluginRunnerService:
             except asyncio.CancelledError:
                 # Cancellation leaves outcome uncertain after spawn; persist
                 # unknown before letting worker shutdown propagate.
-                row = journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": "runner_cancelled"}, error="runner task cancelled")
-                event = _event_for(envelope, row, kind="unknown", payload={"reason": "runner_cancelled"})
-                journal.record_event(row, event)
-                if publish:
-                    await publish(event)
+                await _record_unknown(
+                    journal, row, envelope, reason="runner_cancelled",
+                    error="runner task cancelled", publish=publish,
+                )
                 raise
             except Exception as exc:  # noqa: BLE001 - side effect outcome is unknown
-                row = journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": "launcher_error"}, error=exc)
-                event = _event_for(envelope, row, kind="unknown", payload={"reason": "launcher_error"})
-                journal.record_event(row, event)
-                if publish:
-                    await publish(event)
+                await _record_unknown(
+                    journal, row, envelope, reason="launcher_error",
+                    error=exc, publish=publish,
+                )
                 return True
             events = result if isinstance(result, list) else [result]
             for index, event in enumerate(events):
@@ -389,11 +415,10 @@ class PluginRunnerService:
                     await publish(event)
             final = events[-1] if events else None
             if final is None or final.kind not in {"completed", "failed", "cancelled"}:
-                row = journal.transition(row, JOURNAL_UNKNOWN, outcome={"reason": "launcher_missing_terminal_event"}, error="launcher missing terminal event")
-                event = _event_for(envelope, row, kind="unknown", payload={"reason": "launcher_missing_terminal_event"})
-                journal.record_event(row, event)
-                if publish:
-                    await publish(event)
+                await _record_unknown(
+                    journal, row, envelope, reason="launcher_missing_terminal_event",
+                    error="launcher missing terminal event", publish=publish,
+                )
             else:
                 journal.transition(row, JOURNAL_FINISHED, outcome={"kind": final.kind, "status": final.status})
             return True

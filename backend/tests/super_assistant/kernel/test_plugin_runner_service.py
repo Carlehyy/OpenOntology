@@ -164,3 +164,38 @@ async def test_terminal_event_is_replayed_when_reply_publish_fails(db, tmp_path)
 
     assert await service.handle(_envelope().to_payload(), flaky_publish)
     assert delivered and delivered[0].kind == "completed"
+
+
+@pytest.mark.asyncio
+async def test_unknown_event_replay_completes_interrupted_journal_transition(db):
+    """A crash after event commit must not append a second unknown event."""
+    envelope = _envelope()
+    journal = PluginRunnerJournal(db)
+    row = journal.accept(envelope)
+    db.commit()
+    journal.transition(row, "validated")
+    journal.transition(row, "spawned")
+    event = PluginRunnerEventEnvelope(
+        request_id=envelope.request_id, owner_id=envelope.owner_id,
+        run_id=envelope.run_id, call_id=envelope.call_id,
+        plugin_id=envelope.plugin_id, revision=envelope.revision,
+        manifest_hash=envelope.manifest_hash,
+        capability_revision=envelope.capability_revision, event_seq=0,
+        kind="unknown", status="unknown", payload={"reason": "launcher_error"},
+        artifacts=(),
+    )
+    # Simulate the process dying after record_event committed but before the
+    # JOURNAL_UNKNOWN transition committed.
+    journal.record_event(row, event)
+    assert row.state == "spawned"
+
+    service = PluginRunnerService(lambda: db)
+    published = []
+
+    async def publish(value):
+        published.append(value)
+
+    assert await service.handle(envelope.to_payload(), publish)
+    assert db.scalar(select(SuperAssistantPluginRunnerJournal)).state == JOURNAL_UNKNOWN
+    assert published == [event]
+    assert db.scalar(select(SuperAssistantPluginRunnerJournal)).event_seq == 0
