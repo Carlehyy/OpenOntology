@@ -378,7 +378,20 @@ async def test_plugin_runner_reply_ack_path_consumes_malformed_envelope(caplog):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manifest_matches", [True, False])
-async def test_plugin_runner_reply_binds_manifest_before_enqueuing(monkeypatch, manifest_matches):
+@pytest.mark.parametrize(
+    ("event_kind", "event_status", "expected_state"),
+    [
+        ("completed", "completed", "completed"),
+        # The current runner descriptor has no decision return channel.  An
+        # approval request therefore remains an unknown observation instead
+        # of creating an Approval that could never be delivered back to the
+        # remote invocation.
+        ("approval_requested", "waiting_approval", "unknown"),
+    ],
+)
+async def test_plugin_runner_reply_binds_manifest_before_enqueuing(
+    monkeypatch, manifest_matches, event_kind, event_status, expected_state,
+):
     from types import SimpleNamespace
     from app.super_assistant.kernel.plugin_runner import PluginRunnerEventEnvelope
 
@@ -403,15 +416,18 @@ async def test_plugin_runner_reply_binds_manifest_before_enqueuing(monkeypatch, 
     event = PluginRunnerEventEnvelope(
         request_id="plugin-call:call-1", owner_id="owner-1", run_id="run-1", call_id="call-1",
         plugin_id="plugin-1", revision=2, manifest_hash=("a" if manifest_matches else "b") * 64,
-        capability_revision=2, event_seq=3, kind="completed", status="completed",
-        payload={"summary": "done"},
+        capability_revision=2, event_seq=3, kind=event_kind, status=event_status,
+        payload={"summary": "done"} if event_kind == "completed" else {
+            "target_ref": "plugin-1", "target_summary": "send mail",
+            "parameter_summary": "{}", "scope_summary": "mail",
+        },
     )
     await nats_executor._run_plugin_runner_reply_message(event.to_payload())
     assert bool(observations) is manifest_matches
     assert bool(committed) is manifest_matches
     if observations:
         assert observations[0]["observation"]["provider_event_id"] == "plugin-call:call-1:3"
-        assert observations[0]["observation"]["remote_state"] == "completed"
+        assert observations[0]["observation"]["remote_state"] == expected_state
 
 
 class _FakeSubscription:
