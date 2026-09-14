@@ -208,7 +208,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `daff9e1e`）
+## 11. 当前实现证据（2026-09-14，基线提交 `541294e7`）
 
 本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界。本轮进一步收紧探索委派绑定：服务端生成并校验写权限指纹，Kernel 子 Run 强制保留可信来源标记，委派恢复每轮复核实时草稿和写权限。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
@@ -256,7 +256,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 - pending user Inbox 在模型结果成功落库的同一事务中才标记 consumed；模型失败或进程崩溃会保留 pending，等待下一次 activation。
 - MCP、Remote Agent 和 Multica 的 Call 固定 `capability_revision` 与 manifest hash。配置或凭据变更撤销当前 revision；旧 Call 不会重定向到新端点，而是进入 `outcome_unknown/manual_attention`。
 - mutation API 要求 body/header 幂等键一致；控制、重试、输入和审批使用 `If-Match`，SSE snapshot 使用 `data.run`，Artifact 下载声明 `application/octet-stream`。
-- 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；本轮包含迁移幂等和 runner 回执回归的完整 `backend/tests/super_assistant/kernel/` 为 `180 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
+- 新增的结构化 Artifact、UTF-8 请求大小、Outbox payload 和迁移链均有专项测试；本轮包含迁移幂等和 runner 回执回归的完整 `backend/tests/super_assistant/kernel/` 为 `189 passed`，架构/OpenAPI/时长门禁为 `12 passed`。
 
 本轮另执行了完整超级助手业务域回归 `uv run pytest -q tests/super_assistant --disable-warnings`，结果为 `609 passed`，覆盖 Kernel、远程助手、MCP、记忆宫殿、同步、路由和兼容接口；该证据仍不替代真实 staging 的外部依赖、浏览器副作用与发布回滚验收。
 
