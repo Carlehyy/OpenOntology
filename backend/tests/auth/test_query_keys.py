@@ -13,7 +13,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app.auth.crypto import encrypt_value, hash_query_key
-from app.auth.models import UserPrivacyVar, UserQueryKey
+from app.auth.models import UserEnvVar, UserPrivacyVar, UserQueryKey
 
 
 def _login_headers(client, username: str, password: str) -> dict:
@@ -240,6 +240,47 @@ def test_public_deactivated_user_rejected(client, admin_user, db):
     db.commit()
     r = client.get("/api/public/env-vars", headers={"Authorization": f"Bearer {key['key']}"})
     assert r.status_code == 401
+
+
+def test_password_change_revokes_query_keys(client, admin_user):
+    """改密是账号失守后的止损动作：token_version 吊销 JWT 的同时，
+    全部查询密钥（含永久档）一并吊销，公开端点立即 401。"""
+    headers = _login_headers(client, "admin", "admin123")
+    key = _create_key(client, headers, category="env", validity="permanent")
+
+    r = client.put(
+        "/api/v1/auth/password",
+        json={"current_password": "admin123", "new_password": "admin456"},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    # 旧 JWT 因 token_version 失效，公开端点因密钥已吊销而 401。
+    r = client.get("/api/public/env-vars", headers={"Authorization": f"Bearer {key['key']}"})
+    assert r.status_code == 401
+
+    new_headers = _login_headers(client, "admin", "admin456")
+    listed = client.get("/api/v1/auth/query-keys", headers=new_headers).json()["data"]
+    assert len(listed) == 1
+    assert listed[0]["revoked_at"] is not None
+
+
+def test_public_decrypt_failure_degrades_to_null(client, admin_user, db):
+    """坏行（Fernet 密钥轮换/数据损坏）不打断整批返回：单条 value=null。"""
+    headers = _login_headers(client, "admin", "admin123")
+    _put_env_vars(client, headers, [
+        {"key": "GOOD", "value": "good-value"},
+        {"key": "BAD", "value": "bad-value"},
+    ])
+    row = db.query(UserEnvVar).filter(UserEnvVar.key == "BAD").one()
+    row.value_encrypted = "not-a-valid-fernet-token"
+    db.commit()
+
+    key = _create_key(client, headers, category="env")
+    r = client.get("/api/public/env-vars", headers={"Authorization": f"Bearer {key['key']}"})
+    assert r.status_code == 200, r.text
+    items = {item["key"]: item["value"] for item in r.json()["items"]}
+    assert items["GOOD"] == "good-value"
+    assert items["BAD"] is None
 
 
 def test_public_scoped_per_user(client, admin_user, editor_user):

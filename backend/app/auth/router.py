@@ -19,6 +19,7 @@ from app.auth.schemas import (
 from app.auth.service import authenticate_user, create_access_token, hash_password, verify_password
 from app.auth.models import User, UserEnvVar, UserPrivacyKeypair, UserPrivacyVar, UserQueryKey
 from app.auth.permissions import get_role_menu_keys
+from app.auth.public_query import query_key_is_usable
 from app.auth.crypto import (
     decrypt_private_key,
     decrypt_value,
@@ -56,8 +57,17 @@ def change_password(body: PasswordChangeRequest, db: Session = Depends(get_db), 
     if not verify_password(body.current_password, current_user.password_hash):
         raise HTTPException(status_code=400, detail="Current password incorrect")
     current_user.password_hash = hash_password(body.new_password)
-    # 改密即吊销全部已签发 token（token_version 会话吊销）
+    # 改密即吊销全部已签发 token（token_version 会话吊销）；同时视为账号
+    # 失守后的止损动作，同步吊销全部查询密钥（与上报 token「重置即失效」
+    # 同一心智）——外部流水线需用新密钥重新配置。
     current_user.token_version = (current_user.token_version or 0) + 1
+    db.query(UserQueryKey).filter(
+        UserQueryKey.user_id == current_user.id,
+        UserQueryKey.revoked_at.is_(None),
+    ).update(
+        {"revoked_at": datetime.now(timezone.utc)},
+        synchronize_session=False,
+    )
     db.commit()
     return {"message": "Password updated"}
 
@@ -555,21 +565,6 @@ def report_privacy_vars(
 QUERY_KEY_MAX_PER_CATEGORY = 20
 
 
-def _as_aware_utc(value: datetime | None) -> datetime | None:
-    """SQLite 读回的 naive datetime 统一补 UTC，与 sharing_router 同一口径。"""
-    if value is None or value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=timezone.utc)
-
-
-def _query_key_usable(row: UserQueryKey, now: datetime) -> bool:
-    """未吊销且未过期即算有效（过期但未吊销的行保留供回看，不占配额）。"""
-    return (
-        row.revoked_at is None
-        and (row.expires_at is None or _as_aware_utc(row.expires_at) > now)
-    )
-
-
 def _query_key_out(row: UserQueryKey) -> dict:
     return {
         "id": row.id,
@@ -608,7 +603,7 @@ def create_query_key(
         UserQueryKey.category == body.category,
         UserQueryKey.revoked_at.is_(None),
     ).all()
-    if sum(1 for r in rows if _query_key_usable(r, now)) >= QUERY_KEY_MAX_PER_CATEGORY:
+    if sum(1 for r in rows if query_key_is_usable(r, now)) >= QUERY_KEY_MAX_PER_CATEGORY:
         raise HTTPException(
             status_code=400,
             detail=f"Active query keys limit reached "
