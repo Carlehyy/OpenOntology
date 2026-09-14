@@ -302,6 +302,8 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署守卫会拒绝恢复 `latest`；容器以 UID/GID 10001 运行，启用只读根文件系统，缓存收口到专用 `/tmp/browser-cache` 子目录；生产部署现已强制所有镜像启用 `STRICT_IMAGE_DIGESTS=true`，显式传入 `BROWSER_IMAGE` 仍属于运维变更，必须重新执行镜像构建、CDP 健康检查和安全回归。
 
+部署脚本同时清除宿主环境中的 `SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE`，防止 shell 变量覆盖已验证的生产配置；插件 runner 模式只能来自服务器 `.env`。
+
 `scripts/ci/test-deploy-guards.sh` 已增加对上述四个服务和三项配置的服务级守卫，部署守卫自测通过，后续 Compose 修改若移除任一选项会在 CI 阶段失败。
 
 本轮对用户进程插件做了额外的反向检查：`plugin_host.py` 目前只是受限 JSON-lines 子进程，`network_scope`、`workspace_scope`、`secret_refs` 没有被 OS/网络策略执行；生产 Compose 已增加通用的 capability drop、no-new-privileges、固定非 root browser、只读 browser 根文件系统和 hardened `/tmp`，但插件仍没有独立 runner/namespace。运行时不会把 secret 值直接传给插件，因此当前插件能力是 fail-closed 的，不能作为“已支持凭据注入的商用插件”宣称。该事实与 `process_plugin_service.py`、`kernel/runtime.py`、`kernel/plugin_host.py` 和生产 Compose 配置一致，必须以独立 runner、secret broker 和攻击性 staging 验收完成后才可解除 M7/M8 阻断。
