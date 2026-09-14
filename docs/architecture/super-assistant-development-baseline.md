@@ -18,7 +18,7 @@
 | 外部 Agent | 首发实现 Assistant Hub、现有 RAP v1 direct/pull、MCP；A2A 只保留 Connector 边界，不作为首发硬依赖 |
 | 插件 | 用户可以安装、启用、停用和卸载自建插件；可执行插件必须由独立进程宿主运行，并遵守显式网络、工作区和凭据 scope；未经健康检查的 revision 不可启用 |
 | 信任 | manifest 是声明，平台策略和审批是授权事实；插件不能覆盖平台能力、扩大运行时能力目录或自行决定审批 |
-| 委派绑定 | `binding_mode` 固定为 `none | delegated | direct_ui | legacy`；超级助手委派业务探索时强制 `binding_mode=delegated`，绑定 `ontology_id + draft_version_id + editing`、用户归属和写权限；缺失时提问，不创建无绑定子会话。直接 UI 的空会话和 current release 语义保留 |
+| 委派绑定 | `binding_mode` 固定为 `none | delegated | direct_ui | legacy`；超级助手委派本体助手时必须绑定 `ontology_id`，委派业务探索时还强制绑定 `draft_version_id + editing`、用户归属和写权限；缺失时提问，不创建无绑定子会话。直接 UI 的空会话和 current release 语义保留 |
 | 记忆 | 原始资料是事实源；图谱是可追溯推导；用户明确要求记住的 low-risk `explicit` 记忆可自动接纳；`derived`/`reflection` 即使 low-risk 也保持 pending，需确认后成为 current fact；敏感信息和指令类记忆永不自动接纳 |
 | 问题过期 | `ContextRequirement.expiry_policy` 只允许 `reask_once`、`fail_branch`、`fail_run`。可选信息默认 `reask_once`，必需绑定默认 `fail_branch`；只有明确的 Run 安全前置条件才使用 `fail_run`。问题 TTL 与 Run deadline 取更早者，过期回答不能复活 Run。`reask_once` 到期先关闭原 Inbox 并最多创建一个新问题；再次到期转 `fail_branch`；`fail_branch` 只结束当前分支并保留其他可推进 Step；`fail_run` 直接按 `failed` 关闭 Run；Run deadline 始终优先，统一进入 `expired`。 |
 | 未知结果 | 用户看到“结果待确认”；Kernel reconciliation service 负责查询。默认首次 5 秒、指数退避倍数 2、上限 5 分钟、最多 12 次或到 Run deadline；无 `query_status` 能力或达到上限则 `manual_attention=true`，不得伪造失败或重发写操作 |

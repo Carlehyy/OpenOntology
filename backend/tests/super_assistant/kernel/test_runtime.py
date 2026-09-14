@@ -246,7 +246,7 @@ def test_kernel_runtime_runs_multiple_model_steps_and_persists_each_step(db, mon
 
 def test_kernel_hub_delegation_creates_bound_child_run(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派任务")
-    result = runtime._invoke_hub_delegation(db, run, {"assistant": "ontology_agent", "task": "分析本体"})
+    result = runtime._invoke_hub_delegation(db, run, {"assistant": "ontology_agent", "task": "分析本体", "context": {"ontology_id": "ont-1"}})
     payload = __import__("json").loads(result)
     assert payload["status"] == "queued"
     child = db.get(ExecutionRun, payload["child_run_id"])
@@ -261,13 +261,13 @@ def test_kernel_hub_delegation_creates_bound_child_run(db, monkeypatch):
 def test_kernel_hub_delegation_idempotency_is_per_tool_invocation(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="重复委派")
     first = __import__("json").loads(runtime._invoke_hub_delegation(
-        db, run, {"assistant": "ontology_agent", "task": "发送相同通知"}, invocation_ref="step-1:tool-0",
+        db, run, {"assistant": "ontology_agent", "task": "发送相同通知", "context": {"ontology_id": "ont-1"}}, invocation_ref="step-1:tool-0",
     ))
     second = __import__("json").loads(runtime._invoke_hub_delegation(
-        db, run, {"assistant": "ontology_agent", "task": "发送相同通知"}, invocation_ref="step-2:tool-0",
+        db, run, {"assistant": "ontology_agent", "task": "发送相同通知", "context": {"ontology_id": "ont-1"}}, invocation_ref="step-2:tool-0",
     ))
     replay = __import__("json").loads(runtime._invoke_hub_delegation(
-        db, run, {"assistant": "ontology_agent", "task": "发送相同通知"}, invocation_ref="step-1:tool-0",
+        db, run, {"assistant": "ontology_agent", "task": "发送相同通知", "context": {"ontology_id": "ont-1"}}, invocation_ref="step-1:tool-0",
     ))
     assert first["child_run_id"] != second["child_run_id"]
     assert replay["child_run_id"] == first["child_run_id"]
@@ -285,9 +285,20 @@ def test_kernel_exploration_delegation_requires_binding_before_child_creation(db
     assert db.query(ExecutionRun).filter(ExecutionRun.parent_run_id == run.id).count() == 0
 
 
+def test_kernel_ontology_delegation_requires_binding_before_child_creation(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="本体委派")
+    result = runtime._invoke_hub_delegation(
+        db, run, {"assistant": "ontology_agent", "task": "分析本体", "context": {}},
+    )
+    payload = __import__("json").loads(result)
+    assert payload["status"] == "needs_input"
+    assert payload["reason"] == "delegation_binding_required"
+    assert db.query(ExecutionRun).filter(ExecutionRun.parent_run_id == run.id).count() == 0
+
+
 def test_kernel_hub_child_result_is_merged_into_parent(db, monkeypatch):
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="委派任务")
-    result = runtime._invoke_hub_delegation(db, run, {"assistant": "ontology_agent", "task": "分析本体"})
+    result = runtime._invoke_hub_delegation(db, run, {"assistant": "ontology_agent", "task": "分析本体", "context": {"ontology_id": "ont-1"}})
     child_id = __import__("json").loads(result)["child_run_id"]
     db.commit()
     def fake_hub(*_args, **_kwargs):

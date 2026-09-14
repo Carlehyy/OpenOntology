@@ -1867,6 +1867,22 @@ def _invoke_hub_delegation(
             }, ensure_ascii=False)
         context.update(normalized)
         context["delegated_kernel"] = True
+    elif assistant_key == "ontology_agent":
+        # Kernel delegation must freeze the target ontology at dispatch time.
+        # The direct UI adapter may retain its historical "use the most recent
+        # ontology" convenience, but a durable child Run cannot depend on a
+        # mutable recent-session lookup.  The adapter rechecks ownership and
+        # access before starting the child turn.
+        ontology_id = str(context.get("ontology_id") or "").strip()
+        if not ontology_id:
+            return json.dumps({
+                "status": "needs_input",
+                "reason": "delegation_binding_required",
+                "question_id": uuid.uuid4().hex,
+                "question": "请先选择要委派的目标本体，再调用本体助手。",
+                "assistant": assistant_key,
+            }, ensure_ascii=False)
+        context["ontology_id"] = ontology_id
     binding = {
         "binding_mode": "assistant_child", "assistant_key": assistant_key,
         "session": str(arguments.get("session") or "resume"),

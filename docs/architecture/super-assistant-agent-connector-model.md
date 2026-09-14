@@ -132,7 +132,7 @@ Connector 收到的 `agent.*` 是协议/适配器输入，不是第二套持久�
 
 已确认的绑定决策需要穿透到现有适配器和领域服务，不能只在 Connector 外层增加一次校验。进入开发前必须逐条处置：
 
-1. `assistant_hub/adapters/ontology_agent.py` 中缺少 `ontology_id` 时按最近使用本体回退的路径必须删除或改为候选推荐，不能静默选择；`AssistantSpec.prerequisites` 文案和断言该回退的旧测试也必须同步改为“缺失→needs_input/不建子会话”。
+1. `assistant_hub/adapters/ontology_agent.py` 的直接 UI 入口继续保留“最近使用本体”兼容语义；Kernel 委派入口缺少 `ontology_id` 时必须先返回 `needs_input`，不能创建依赖最近会话解析的子 Run。`AssistantSpec.prerequisites` 和委派测试必须明确区分这两条路径。
 2. `assistant_hub/adapters/exploration.py` 的 `start()` 不能再无条件创建无绑定会话；`context_requirements` 必须声明 `ontology_id` 和编辑草稿版本。
 3. 业务探索的**委派创建和委派恢复路径**（即 `binding_mode=delegated`）必须显式使用绑定入口，强制检查目标本体、草稿版本的 `draft + editing` 生命周期、归属和写权限；列表端点的过滤不能替代写路径校验。direct UI 入口保留空绑定和 `ontology_id`→current release 的既有契约；本次只收紧 `binding_mode=delegated`。
 4. 委派会话的领域 `apply` 在绑定版本不再是 `draft + editing` 时不得静默分叉新草稿并重锚会话，必须返回版本失效并由 Run 重新询问或终止。直接 UI 会话继续遵循其既有绑定语义，但不能被伪装成委派绑定。

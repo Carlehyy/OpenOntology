@@ -63,7 +63,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 | 决策 | 当前约束 | 文档依据 |
 |---|---|---|
-| 委派必须绑定业务上下文 | 业务澄清委派在创建前必须绑定目标本体和编辑中的草稿版本；缺失任一条件时进入 `waiting_input`，不创建无绑定子会话 | `super-assistant-top-level.md`、`super-assistant-agent-connector-model.md` |
+| 委派必须绑定业务上下文 | 本体助手委派创建前必须绑定 `ontology_id`；业务澄清委派还必须绑定编辑中的草稿版本；缺失条件时进入 `waiting_input`，不创建无绑定子会话。直接 UI 的历史兼容回退独立保留 | `super-assistant-top-level.md`、`super-assistant-agent-connector-model.md` |
 | 多运行并行 | 一个 Conversation 可包含多个 Run；一个 Run 等待输入、审批或外部结果时，不锁住整个会话 | `super-assistant-execution-model.md` |
 | 事实与传输分离 | PostgreSQL 保存执行事实和事件；NATS 负责派发与唤醒；SSE 断开不等于取消 | `super-assistant-top-level.md`、`super-assistant-data-event-model.md` |
 | 不伪造远端能力 | 远端不支持真实流式、取消或 Artifact 时，Connector 必须如实声明，不得通过统一接口伪造 | `super-assistant-agent-connector-model.md`、`super-assistant-capability-plugin-model.md` |
@@ -237,6 +237,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 本轮按恶意输入、并发竞态、迟到结果、进程泄漏和资源耗尽路径复核 Kernel、Assistant Hub、远程 Agent 与进程插件边界，确认并修复以下问题：
 
 - 业务探索委派原先可在缺少本体/编辑草稿绑定时先创建 `assistant_child`；现在由探索域服务在创建子 Run 前校验 `ontology_id + draft_version_id + editing + write_permission_hash`，缺失条件转为 `waiting_input`，不留下无绑定子会话。
+- 本轮复查发现本体助手首次 Kernel 委派曾可缺少 `ontology_id` 并依赖“最近本体”回退；现在 Kernel 委派入口缺少显式本体绑定时直接返回 `needs_input`，不创建子 Run。直接 UI 的历史回退语义保持不变。
 - Run 在取消宽限期后进入 `cancelled/expired` 时，原调度器会停止远程 Call 对账；现在带远端句柄的未决 Call 继续执行取消或状态查询，终态 Run 保持不可重开但 Call 可收敛到真实终态。
 - 回连 Agent 长轮询原先会持有请求级数据库连接；现在认证/心跳事务在等待前结束，任务认领使用短会话。
 - 远程 callback payload 增加 64 KiB 上限；超限内容必须以 Artifact 引用传递。
