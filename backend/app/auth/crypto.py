@@ -58,6 +58,23 @@ def generate_report_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+# ---- 变量查询密钥（公开查询端点凭据） ----
+
+def generate_query_key(category: str) -> str:
+    """生成查询密钥明文：类别前缀 + 高熵随机段（token_urlsafe(32)=256 位熵）。
+
+    前缀让密钥肉眼可辨类别（obk_env_* / obk_priv_*），便于用户在 n8n 等
+    外部系统中配置时自查用错类别。校验走 sha256 查表（hash_query_key），
+    不落明文、不做全表解密比对。
+    """
+    prefix = "obk_env_" if category == "env" else "obk_priv_"
+    return prefix + secrets.token_urlsafe(32)
+
+
+def hash_query_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
 # ---- RSA 非对称层（隐私变量上报） ----
 
 # RSA-OAEP 的明文上限取决于密钥尺寸与哈希。2048 位密钥 + SHA-256 时

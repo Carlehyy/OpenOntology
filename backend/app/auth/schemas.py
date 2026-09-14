@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -91,3 +92,23 @@ class PrivacyReport(BaseModel):
 class ReportTokenOut(BaseModel):
     """上报 token 明文只此一次返回（创建/重置时）。前端展示后由用户复制。"""
     report_token: str
+
+
+# ---- 变量查询密钥（PAT 式：跟用户、分类别 env/privacy、多把并存） ----
+
+# 有效期六档（天）；None 表示永久。与个人资料弹窗的选项一一对应。
+QUERY_KEY_VALIDITY_DAYS: dict[str, int | None] = {
+    "1d": 1,
+    "7d": 7,
+    "30d": 30,
+    "90d": 90,
+    "365d": 365,
+    "permanent": None,
+}
+
+
+class QueryKeyCreate(BaseModel):
+    category: Literal["env", "privacy"]
+    # 备注名（如"n8n 流水线"），仅用于列表识别，不做唯一性约束。
+    name: str = Field(default="", max_length=64)
+    validity: Literal["1d", "7d", "30d", "90d", "365d", "permanent"] = "365d"

@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Response
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Response
 from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user
 from app.config import settings
@@ -10,19 +10,23 @@ from app.auth.schemas import (
     PrivacyReport,
     PrivacyVarCreate,
     ProfileUpdate,
+    QUERY_KEY_VALIDITY_DAYS,
+    QueryKeyCreate,
     TokenResponse,
     UserEnvVarsReplace,
     UserOut,
 )
 from app.auth.service import authenticate_user, create_access_token, hash_password, verify_password
-from app.auth.models import User, UserEnvVar, UserPrivacyKeypair, UserPrivacyVar
+from app.auth.models import User, UserEnvVar, UserPrivacyKeypair, UserPrivacyVar, UserQueryKey
 from app.auth.permissions import get_role_menu_keys
 from app.auth.crypto import (
     decrypt_private_key,
     decrypt_value,
     encrypt_value,
+    generate_query_key,
     generate_report_token,
     generate_rsa_keypair,
+    hash_query_key,
     hybrid_decrypt,
     rsa_decrypt,
 )
@@ -540,3 +544,110 @@ def report_privacy_vars(
         .all()
     )
     return {"data": [_privacy_var_out(row) for row in rows], "message": "ok"}
+
+
+# --------------------------------------------------------------------------
+# 变量查询密钥（PAT 式）：跟用户不跟变量、按类别（env/privacy）隔离、多把并存。
+# 明文仅创建时返回一次；落库只存 sha256 key_hash 与可见前缀。公开查询端点
+# （Authorization: Bearer <key>）见 app/auth/public_query.py。
+# --------------------------------------------------------------------------
+
+QUERY_KEY_MAX_PER_CATEGORY = 20
+
+
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    """SQLite 读回的 naive datetime 统一补 UTC，与 sharing_router 同一口径。"""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
+def _query_key_usable(row: UserQueryKey, now: datetime) -> bool:
+    """未吊销且未过期即算有效（过期但未吊销的行保留供回看，不占配额）。"""
+    return (
+        row.revoked_at is None
+        and (row.expires_at is None or _as_aware_utc(row.expires_at) > now)
+    )
+
+
+def _query_key_out(row: UserQueryKey) -> dict:
+    return {
+        "id": row.id,
+        "category": row.category,
+        "name": row.name,
+        "key_prefix": row.key_prefix,
+        "expires_at": row.expires_at,
+        "revoked_at": row.revoked_at,
+        "last_used_at": row.last_used_at,
+        "created_at": row.created_at,
+    }
+
+
+@router.get("/query-keys")
+def list_query_keys(
+    category: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    q = db.query(UserQueryKey).filter(UserQueryKey.user_id == current_user.id)
+    if category in ("env", "privacy"):
+        q = q.filter(UserQueryKey.category == category)
+    rows = q.order_by(UserQueryKey.created_at.desc()).all()
+    return {"data": [_query_key_out(r) for r in rows], "message": "ok"}
+
+
+@router.post("/query-keys", status_code=201)
+def create_query_key(
+    body: QueryKeyCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc)
+    rows = db.query(UserQueryKey).filter(
+        UserQueryKey.user_id == current_user.id,
+        UserQueryKey.category == body.category,
+        UserQueryKey.revoked_at.is_(None),
+    ).all()
+    if sum(1 for r in rows if _query_key_usable(r, now)) >= QUERY_KEY_MAX_PER_CATEGORY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Active query keys limit reached "
+                   f"({QUERY_KEY_MAX_PER_CATEGORY} per category)",
+        )
+
+    plain = generate_query_key(body.category)
+    days = QUERY_KEY_VALIDITY_DAYS[body.validity]
+    expires_at = (now + timedelta(days=days)) if days is not None else None
+    row = UserQueryKey(
+        user_id=current_user.id,
+        category=body.category,
+        name=body.name,
+        key_prefix=plain[:16],
+        key_hash=hash_query_key(plain),
+        expires_at=expires_at,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    data = _query_key_out(row)
+    # 明文仅此一次返回，前端展示后由用户复制保存。
+    data["key"] = plain
+    return {"data": data, "message": "ok"}
+
+
+@router.delete("/query-keys/{key_id}")
+def revoke_query_key(
+    key_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    row = db.query(UserQueryKey).filter(
+        UserQueryKey.user_id == current_user.id,
+        UserQueryKey.id == key_id,
+    ).first()
+    if not row or row.revoked_at is not None:
+        raise HTTPException(status_code=404, detail="Query key not found")
+    row.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"message": "revoked"}
