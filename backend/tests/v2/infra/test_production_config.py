@@ -13,6 +13,7 @@ import pytest
 import yaml
 from cryptography.fernet import Fernet
 import jwt
+from pydantic import ValidationError
 
 from app.shared.config import Settings, production_config_errors
 from app.settings.workflows.n8n_client import enforce_n8n_url_policy
@@ -46,6 +47,7 @@ def _production_settings(**updates):
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
+        "steward_browser_allow_private_networks": False,
     }
     values.update(updates)
     return Settings(**values)
@@ -53,6 +55,24 @@ def _production_settings(**updates):
 
 def test_existing_production_can_keep_secret_key_derived_encryption():
     assert production_config_errors(_production_settings()) == []
+
+
+def test_production_rejects_private_browser_network_access():
+    errors = production_config_errors(
+        _production_settings(steward_browser_allow_private_networks=True)
+    )
+    assert "STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS must be false" in errors
+
+
+def test_browser_private_network_access_is_disabled_without_configuration(monkeypatch):
+    monkeypatch.delenv("STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS", raising=False)
+    assert Settings(_env_file=None).steward_browser_allow_private_networks is False
+
+
+@pytest.mark.parametrize("environment", ["", " ", "prodction", "staging"])
+def test_unknown_environment_fails_closed_at_settings_ingress(environment):
+    with pytest.raises(ValidationError, match="ENVIRONMENT"):
+        Settings(_env_file=None, environment=environment)
 
 
 @pytest.mark.parametrize(
@@ -149,6 +169,10 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert backend["environment"]["STEWARD_BROWSER_CDP_URL"] == (
         "http://browser:9222"
     )
+    for service in ("backend", "pipeline_executor"):
+        assert compose["services"][service]["environment"][
+            "STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS"
+        ] == "false"
     assert backend["environment"]["N8N_TIMEOUT_SECONDS"] == (
         "${N8N_TIMEOUT_SECONDS:-30}"
     )

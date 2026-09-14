@@ -80,6 +80,7 @@ def _required_settings(**updates) -> Settings:
         "minio_access_key": "ontology-minio",
         "minio_secret_key": "strong-minio-password",
         "steward_browser_cdp_url": "http://browser:9222",
+        "steward_browser_allow_private_networks": False,
         "n8n_api_url": "https://n8n.example.com/api/v1",
         "n8n_api_key": "strong-n8n-api-key",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",

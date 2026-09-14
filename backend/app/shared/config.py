@@ -1,7 +1,7 @@
 import ipaddress
 from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.shared.env_files import (
@@ -17,11 +17,27 @@ def normalized_environment(value: object) -> str:
     harmless whitespace/casing differences. Security gates must not treat
     ``Production`` as a non-production profile.
     """
-    return str(value or "").strip().lower()
+    name = str(value or "").strip().lower()
+    return "production" if name == "prod" else name
 
 
 class Settings(BaseSettings):
     environment: str = "development"
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def canonical_environment(cls, value: object) -> str:
+        # Normalize once at configuration ingress so legacy consumers using
+        # an exact production comparison cannot bypass their safety gates.
+        name = normalized_environment(value)
+        if name in {"dev", "local"}:
+            return "development"
+        if name not in {"development", "test", "production"}:
+            raise ValueError(
+                "ENVIRONMENT must be one of development, test, or production"
+            )
+        return name
+
     # Local launch settings are deliberately separate from deployment ports.
     # Docker and production continue to own their Uvicorn command line.
     local_backend_host: str = "127.0.0.1"
@@ -237,7 +253,7 @@ class Settings(BaseSettings):
     steward_browser_max_sessions_per_user: int = 3
     steward_browser_idle_timeout_seconds: int = 900
     steward_browser_reaper_interval_seconds: int = 30
-    steward_browser_allow_private_networks: bool = True
+    steward_browser_allow_private_networks: bool = False
     # URL used inside generated n8n workflows to reach this backend.
     steward_internal_proxy_base_url: str = "http://backend:8000/api-hub/internal/interfaces"
     # Header Auth credential already configured in n8n.  The data steward only
@@ -508,6 +524,11 @@ def production_config_errors(current: Settings) -> list[str]:
     # Empty means same-origin only and is safe. Wildcard remains forbidden.
     if "*" in origins:
         _insecure.append("CORS_ALLOWED_ORIGINS")
+    # Browser navigation is an SSRF-capable surface. Production must opt out
+    # of RFC1918/private targets. Local development may explicitly opt in for
+    # fixtures and on-device integrations.
+    if current.steward_browser_allow_private_networks:
+        _insecure.append("STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS must be false")
     _insecure.extend(required_dependency_config_errors(current))
     for key, value in (
         ("PIPELINE_FILE_PUBLIC_APP_BASE_URL",
