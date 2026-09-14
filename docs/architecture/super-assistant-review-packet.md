@@ -208,7 +208,7 @@ $RUST_DEEPSEEK_HARNESS_ROOT
 
 本次整理已将这些门禁、事件、枚举、API、默认配置和直接 UI/委派范围边界回写到开发基线 v1.0。问题 TTL、`outcome_unknown/remote_running` 的用户呈现和人工升级已分别冻结为 `reask_once/fail_branch/fail_run` 与结果待确认+对账上限。直接 UI 的空绑定/current release 兼容行为保持不变，本轮只收紧超级助手委派的 `binding_mode=delegated`。
 
-## 11. 当前实现证据（2026-09-14，基线提交 `da7dd4d4`）
+## 11. 当前实现证据（2026-09-14，基线提交 `eaec417b`）
 
 本节只记录已经执行过的证据，不把设计目标当成完成事实。此前的功能提交已汇入当前分支；主要对抗式修复收敛在 `461847a1`，其后又增加进程插件信任字段篡改防护、完整 manifest 指纹校验、生产环境别名 fail-closed、回调/远程响应/MCP 结果边界、运行时 SSRF 复核、生产容器加固，以及外部 Artifact 声明大小和存储引用长度边界。本轮进一步收紧探索委派绑定：服务端生成并校验写权限指纹，Kernel 子 Run 强制保留可信来源标记，委派恢复每轮复核实时草稿和写权限。相关提交包含 reconciliation Outbox payload、RAP 结构化 Artifact 持久化、输入消费事务、能力 revision 栅栏、HTTP/SSE 契约、NATS 重投与外部结果边界修复和对应回归测试。
 
@@ -266,7 +266,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version`、`PUT /json/new` 页面创建、Chromium/socat 子进程 UID/GID 和错误日志检查；这些结果证明容器权限加固可运行，但不替代完整真实浏览器外部副作用验收。
 
-本轮没有把局部专项结果扩大解释为商用验收。此前修复后的完整后端回归基线为 `3597 passed, 6 skipped`；本轮新增回执适配测试已在专项集合中通过，时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单、JetStream 策略漂移和进程插件 manifest 篡改测试均已通过；核心定向集合和真实隔离栈证据仍不替代完整 staging。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
+本轮没有把局部专项结果扩大解释为商用验收。此前修复后的完整后端回归基线为 `3597 passed, 6 skipped`；随后全量回归暴露了部署测试夹具仍使用浮动镜像标签的问题，已将验证夹具改为显式合成 immutable digest，并使部署配置专项达到 `110 passed`。本轮新增回执适配测试已在专项集合中通过，时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单、JetStream 策略漂移和进程插件 manifest 篡改测试均已通过；核心定向集合和真实隔离栈证据仍不替代完整 staging。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
 
 最新隔离 E2E 栈证据（2026-09-14）为：PostgreSQL 当前分支从空库升级到 `0115_plugin_runner_event_replay`，再降级到 `0113_remote_agent_result_artifacts` 并重新升级到 `0115`；依赖探针返回 PostgreSQL、NATS JetStream、MinIO bucket、Neo4j 全部 `ok=true`；短时 nats executor 成功注册三个 kernel durable consumer。临时容器、卷和网络已在验证后销毁；这仍不等价于现存业务库升级或完整外部副作用验收。
 
@@ -274,7 +274,7 @@ rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version
 
 本次最新收口后的定向回归为 `77 passed`，探索适配器完整回归为 `14 passed`，委派边界架构测试为 `4 passed`，时长覆盖守卫为 `1 passed`；新增验证覆盖伪造权限指纹、服务端重算指纹、Kernel 子 Run 来源标记不可被上下文覆盖，以及草稿生命周期变化后恢复委派会话会明确失败。该专项证据只证明代码级绑定不变量，不改变 M7/M8 的 staging 和发布阻断状态。
 
-用户进程插件的 runner 合同专项回归为 `18 passed`（覆盖调用信封与进度/审批/取消/结构化 Artifact 回执），插件生命周期/服务回归为 `28 passed`，runner journal/attestation 回归为 `5 passed`，生产配置回归为 `84 passed`；NATS executor/回执适配专项为 `24 passed, 1 skipped`。验证覆盖 runner 信封字段/大小/摘要/回复主题校验、回执 owner/run/call/revision/manifest 绑定，以及 `disabled | nats | direct_dev` 的 fail-closed 解析。真实 JetStream 探针已确认 `SA_PLUGIN_RUNNER_V1` 同时覆盖 `sa.plugin.invoke` 与 `sa.plugin.reply.*`，durable `sa-plugin-runner-v1` 可注册。当前已提供独立 runner 的 NATS/journal 首片和回执进入 Kernel reconciliation outbox 的适配，但真实 OCI/rootless launcher、Scope Broker、审批回执映射和生产接线尚未完成，因此不能据此解除插件商用阻断。
+用户进程插件的 runner 合同与 attestation 专项回归为 `26 passed`（覆盖调用信封、范围边界、runner 回执和 rootless/scope broker 证明），插件生命周期/服务回归为 `28 passed`，生产配置回归为 `84 passed`；NATS executor/回执适配专项为 `26 passed, 1 skipped`。验证覆盖 runner 信封字段/大小/摘要/回复主题、network/workspace scope 校验、回执 owner/run/call/revision/manifest 绑定，以及 `disabled | nats | direct_dev` 的 fail-closed 解析。真实 JetStream 探针已确认 `SA_PLUGIN_RUNNER_V1` 同时覆盖 `sa.plugin.invoke` 与 `sa.plugin.reply.*`，durable `sa-plugin-runner-v1` 可注册。当前已提供独立 runner 的 NATS/journal 首片和回执进入 Kernel reconciliation outbox 的适配，但真实 OCI/rootless launcher、Scope Broker、审批回执映射和生产接线尚未完成，因此不能据此解除插件商用阻断。
 
 对抗式审查新增的代码修复包括：NATS handler 在状态未持久化时 NAK 而非 ACK；RUNNING 状态的重复外部调用进入对账/人工介入路径且不二次触发 provider；父 Run 终态后仍对带远端句柄的 Call 执行取消；provider 引用和结果文本在落库前限长；人工介入 Call 不再被 scheduler 无限轮询；外部 Artifact 的对象存储引用必须落在 owner/run/artifact 命名空间；SSE callback 事件只保留稳定字段和受限 Artifact 引用。上述修复已经通过对应专项测试，但不替代真实 provider、对象存储和浏览器副作用验收。
 
