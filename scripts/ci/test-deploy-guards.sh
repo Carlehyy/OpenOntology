@@ -531,6 +531,23 @@ if (
 fi
 grep -q 'rejects SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE=direct_dev' \
   "$test_dir/runner-mode-failure.log"
+cat >>"$test_dir/.env" <<'EOF'
+super_assistant_process_plugin_runner_mode=disabled
+EOF
+if (
+  cd "$test_dir"
+  APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >runner-mode-ambiguous.log 2>&1
+); then
+  printf 'production deployment must reject case-variant plugin runner keys\n' >&2
+  exit 1
+fi
+grep -q 'is duplicated or has a case-variant key' "$test_dir/runner-mode-ambiguous.log"
+sed -i.bak '/^super_assistant_process_plugin_runner_mode=/d' "$test_dir/.env"
+find "$test_dir" -maxdepth 1 -name '.env.bak' -delete
 set_test_env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE disabled
 
 set_test_env_value BROWSER_IMAGE chromedp/headless-shell:stable

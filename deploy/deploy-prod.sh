@@ -1110,6 +1110,11 @@ case "$strict_image_digests_value" in
     exit 1
     ;;
 esac
+process_plugin_runner_assignment_state="$(runtime_env_assignment_state SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE)"
+if [ "$process_plugin_runner_assignment_state" = "ambiguous" ]; then
+  log "SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE is duplicated or has a case-variant key in .env"
+  exit 1
+fi
 process_plugin_runner_mode="$(env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE)"
 case "$process_plugin_runner_mode" in
   direct_dev)
@@ -1123,7 +1128,7 @@ case "$process_plugin_runner_mode" in
     exit 1
     ;;
 esac
-unset process_plugin_runner_mode
+unset process_plugin_runner_assignment_state process_plugin_runner_mode
 check_image_digest() {
   local key="$1"
   local value
