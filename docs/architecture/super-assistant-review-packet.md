@@ -298,4 +298,12 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 同时增加了进程插件完整 manifest 篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；运行前会重算并校验 `key/revision/entrypoint/capabilities/permissions/network_scope/workspace_scope/secret_refs`，不一致即撤销 CapabilityRevision 并进入 connector unavailable/manual attention 路径。新增 entrypoint 与 capabilities 篡改回归均已通过。未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。该修复属于 fail-closed 防护，不能替代签名信任根。
 
+## 14. 用户进程插件 runner 的冻结实施契约
+
+本轮没有提交伪隔离 runner。现有 `plugin_host.py` 只能作为 development/test 宿主；生产继续拒绝 `user_untrusted`。商用 runner 必须作为独立服务接收内部 NATS durable envelope，不改变外部 Run/Call/SSE 契约。请求至少绑定 `request_id、owner_id、run_id、call_id、plugin_id、revision、manifest_hash、capability_revision、input_ref、workspace_snapshot_ref、secret_lease_refs、deadline、reply_subject`；所有结果、进度和 Artifact 引用必须回显同一组绑定字段，`request_id` 作为 NATS `Msg-Id`，重复投递只读取结果 journal，不重新执行插件。
+
+runner 每次调用启动短命 rootless sandbox：固定非 root UID、read-only rootfs、独立 PID/IPC/UTS/network namespace、`no-new-privileges`、seccomp/AppArmor、cgroup CPU/内存/PID/文件限制；工作区只允许 canonical allowlist 的 read-only bind mount，调用 scratch 单独可写；禁止挂载 Docker socket、平台 uploads/API Hub 数据和宿主凭据。网络默认 deny，非空 `network_scope` 在受控 egress proxy 与 DNS/IP 策略部署前必须拒绝。凭据只通过按 owner/run/call/manifest hash 绑定的一次性短 TTL secret lease 按需获取，值不得进入环境继承、日志、事件或模型上下文。Artifact 只能通过 broker 写入 owner/run/call 前缀并返回 checksum、size、mime 和 opaque object ref。
+
+runner staging 必须攻击验证 `/proc`、共享卷、symlink/`..`、内部 CIDR、非 allowlist 外联、fork/memory/CPU/file exhaustion、`setsid`/daemon 逃逸、凭据泄露、重复 NATS 投递、进程崩溃、取消和 worker 重启恢复；只有这些证据与发布/回滚演练完成后，才能解除生产 `user_untrusted` 的 fail-closed 门禁。
+
 本轮还收紧了 callback 事件键的长度边界：`connector_id` 与 `provider_event_id` 即使各自达到协议上限，拼接后的 `command_id`/`idempotency_key` 也会在 255 字符数据库列内以确定性 SHA-256 短键落库；对应长标识回归已通过（callback 专项 `7 passed`）。
