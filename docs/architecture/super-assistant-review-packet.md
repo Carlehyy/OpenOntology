@@ -315,11 +315,13 @@ browser 基础镜像默认值现已固定为已验证的 SHA-256 digest，部署
 
 同时增加了进程插件完整 manifest 篡改防护：当前 executable process plugin 只接受 `user_untrusted`，数据库中把 `trust_level` 改写为 `verified/platform` 会在启用和运行时双重拒绝；运行前会重算并校验 `key/revision/entrypoint/capabilities/permissions/network_scope/workspace_scope/secret_refs`，不一致即撤销 CapabilityRevision 并进入 connector unavailable/manual attention 路径。生产环境门禁同时覆盖规范化后的 `production` 与 `prod` 别名。新增 entrypoint、capabilities 和环境别名回归均已通过。未来签名信任根和独立 runner 上线前，不允许通过普通数据库字段获得执行权限。该修复属于 fail-closed 防护，不能替代签名信任根。
 
-## 14. 当前增量验证（2026-09-15，提交 `6a6f31f7`）
+## 14. 当前增量验证（2026-09-15，提交 `6072e62e`）
 
 在上述历史审查基础上，本轮修复了 Plugin Runner `unknown` 终态的 journal/事件提交窗口，并新增“事件已提交、状态提交被中断后重投只重放原事件”的回归；同时拒绝同一 Connector 的 `provider_event_id` 跨 Run 重用，并拒绝同一 `event_seq` 携带不同 payload 的伪重放，避免重复或篡改回执污染原始证据。随后修复真实栈验收暴露的超级助手上下文状态色、输入框焦点边框和消息历史浮层间距，并以当前分支后端和隔离依赖重跑专项。当前验证结果为：Kernel 专项 `194 passed`；Runner service、插件目录和 Connector 专项合计 `39 passed`；前端 unit `481 passed`；生产/部署配置专项 `110 passed`；隔离端口 `PLAYWRIGHT_PORT=5200 env -u PLAYWRIGHT_REUSE_SERVER npm run test:e2e:mocked` 为 `306 passed`（约 4 分钟）；真实隔离栈 `super_assistant_markdown.spec.ts` 为 `5 passed`；后端全量 `3619 passed, 6 skipped`；架构门禁 `199 passed`；Markdown 链接检查为 `76 files, 153 links, 0 errors`。
 
-该增量修复只收紧了代码级崩溃恢复语义，未改变当前 M7/M8 的发布结论：真实 OCI/rootless launcher、Scope Broker、审批回执映射、现存业务库升级、完整 staging 外部副作用和发布回滚仍需部署证据。
+本次增量还将本体动作审批接入 Inbox durable outbox：`pending` 与业务动作同事务写入请求事件，approved/rejected/failed 按同一 correlation key 关闭；收件箱只负责管理员通知和站内导航，决策仍只能通过治理 API。新增 Inbox/审批回归分别为 `5 passed` 与 `7 passed`，架构和 Inbox 组合回归为 `14 passed`。Markdown 链接检查更新为 `77 files, 155 links, 0 errors`。
+
+该增量修复只收紧了代码级崩溃恢复语义和站内审批通知，未改变当前 M7/M8 的发布结论：真实 OCI/rootless launcher、Scope Broker、外部审批决定回传、现存业务库升级、完整 staging 外部副作用和发布回滚仍需部署证据。
 
 ## 15. 用户进程插件 runner 的冻结实施契约
 
@@ -339,7 +341,7 @@ manifest 字段 hash 不能替代插件包本身的完整性证明。runner 必�
 | M1 Kernel 可靠性 | 代码与回归已完成 | Kernel `194 passed`；后端全量 `3619 passed, 6 skipped`；状态机、幂等、租约、恢复和事件回放测试 | staging 竞态证据 |
 | M2 数据库、Outbox、NATS | 隔离环境已验证 | 空库升级、回滚、重放；JetStream stream/consumer 探针 | 现存业务库升级与回滚演练 |
 | M3 Runtime | 代码与专项回归已完成 | Kernel runtime/reconciler/recovery 专项；NATS durable consumer | 长任务真实外部结果、崩溃接管 staging |
-| M4 Capability/Agent/插件 | 首版已完成，生产能力未放行 | Connector、runner journal、回执绑定专项 | OCI/rootless runner、Scope Broker、签名信任根、审批回执通道 |
+| M4 Capability/Agent/插件 | 首版已完成，生产能力未放行 | Connector、runner journal、回执绑定、ontology approval Inbox outbox 专项 | OCI/rootless runner、Scope Broker、签名信任根、外部审批决定回传通道 |
 | M5 Context/Memory/Artifact | 代码与专项回归已完成 | Context Pack、Artifact 完整性、来源引用和记忆策略测试 | 真实对象存储下载及 source tombstone staging |
 | M6 HTTP/SSE/前端 | 本地门禁已通过 | unit `481 passed`、mocked E2E `306 passed`、lint/build/边界门禁 | 真实浏览器副作用、外部 Agent 流式/断线验收 |
 | M7 商用验收 | 尚未完成 | 后端全量 `3619 passed, 6 skipped`；已完成隔离依赖探针和专项回归 | 真实 staging、攻击验证、现存库迁移 |
