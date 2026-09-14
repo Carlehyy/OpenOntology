@@ -276,6 +276,8 @@ MCP `call_tool` 的序列化结果现在也限制为 256 KiB，覆盖 HTTP、SSE
 
 本轮额外发现并修复了 web_fetch 与 Multica 客户端的重定向边界：此前 HTTP 客户端会自动跟随未经逐跳 SSRF 校验的 Location，可能把请求转向内网地址，Multica 还可能将 Bearer 凭据带到重定向主机。现在 web_fetch 关闭隐式跟随并对每一跳重新校验，限制最多 3 次；Multica 对重定向直接 fail-closed。对应 web 与 Multica 回归已通过。
 
+同一入口的响应体也改为流式读取，先检查 `Content-Length`，并在实际字节累计超过 256 KiB 时立即中止；这避免 chunked 或错误声明长度的远端响应在 HTML 解析前造成内存压力。
+
 生产 Compose 的 browser、`python_kernel_gateway`、backend 与 `pipeline_executor` 已增加 `no-new-privileges`、`cap_drop: ALL` 和独立 `/tmp` tmpfs，降低容器内提权与临时目录持久化风险；这属于通用容器纵深防御，不能替代用户插件所需的 rootless runner、独立 namespace、网络/工作区隔离和资源配额。
 
 对 browser 镜像的运行态检查显示，基础镜像缺少可用的 Chromium SUID sandbox，去掉 `--no-sandbox` 会退出；本轮已据探针结果把镜像和 Compose 固定到 UID/GID 10001，保留 `--no-sandbox`，并验证 CDP 健康检查和新页面创建均成功。该项降低了容器被攻破后的权限，但仍需换用带内部 sandbox 的固定 digest 镜像并完成浏览器攻击面 staging，才能解除纵深防御风险。
