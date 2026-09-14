@@ -18,6 +18,7 @@ import {
 
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
+import QueryKeyManager from '@/components/profile/QueryKeyManager'
 import { authApi, type PrivacyVar, type UserEnvVar } from '@/api/auth'
 import { useAuthStore } from '@/stores/authStore'
 import { writeTextToClipboard } from '@/utils/clipboard'
@@ -31,11 +32,13 @@ import { toast } from 'sonner'
  * - 「账号信息」：用户名（唯一标识，只读）、邮箱自助修改（成功后同步
  *   auth-store）、修改密码（走既有 PUT /auth/password，需验证当前密码）；
  * - 「环境变量」：用户私有环境变量，key/value 均为字符串，全量保存，
- *   服务端加密落库；本期仅做个人配置的保存与维护，不注入任何执行链路。
+ *   服务端加密落库；本期仅做个人配置的保存与维护，不注入执行链路。
+ *   分区尾部挂查询密钥管理（QueryKeyManager，供外部流水线只读调用）。
  * - 「隐私变量」：由本地脚本 RSA 公钥加密上报、平台私钥解密后 Fernet
  *   落库的变量。用户创建变量（首次创建生成上报 token，仅此一次可见）、
  *   下载 Python 上报脚本模板、重置上报 token、查看已上报变量的明文值
- *   （数据所有者取回自己的值，不脱敏，可复制）。
+ *   （数据所有者取回自己的值，不脱敏，可复制）。分区尾部同样挂
+ *   查询密钥管理（与「环境变量」各自独立成套，密钥按类别隔离）。
  */
 
 const ENV_VAR_KEY_PATTERN = /^[A-Za-z0-9_.-]+$/
@@ -517,6 +520,8 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
                 </div>
               </div>
             </section>
+
+            <QueryKeyManager category="env" />
           </div>
         )}
 
@@ -650,6 +655,8 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
                 </div>
               </div>
             </section>
+
+            <QueryKeyManager category="privacy" />
           </div>
         )}
       </div>

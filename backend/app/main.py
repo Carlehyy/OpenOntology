@@ -46,6 +46,8 @@ from app.data_channel.datasets.sharing_router import (
     management_router as manual_sharing_router,
     public_router as public_manual_sharing_router,
 )
+# 用户变量公开只读查询（n8n 等外部流水线持 per-user 查询密钥调用）。
+from app.auth.public_query import public_router as auth_public_query_router
 from app.ontologies.access import legacy_ontology_write_guard
 
 _seed_db = seed_database
@@ -181,6 +183,7 @@ app.include_router(connections_v2.router, prefix="/api/v2/connections", tags=["v
 app.include_router(datasets_v2.router, prefix="/api/v2/datasets", tags=["v2-datasets"], dependencies=asset_lake_guard)
 app.include_router(manual_sharing_router, prefix="/api/v2/manual-dataset-sharing", tags=["manual-dataset-sharing"], dependencies=asset_lake_guard)
 app.include_router(public_manual_sharing_router, prefix="/api/public/manual-datasets", tags=["public-manual-datasets"])
+app.include_router(auth_public_query_router, prefix="/api/public", tags=["public-var-query"])
 app.include_router(pipelines_v2.router, prefix="/api/v2/pipelines", tags=["v2-pipelines"], dependencies=pipeline_guard)
 app.include_router(
     pipeline_file_assets.upload_router,

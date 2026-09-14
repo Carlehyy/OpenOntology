@@ -84,4 +84,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0108_super_assistant_mcp_dev"]
+    assert heads == ["0109_user_query_keys"]

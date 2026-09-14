@@ -78,6 +78,33 @@ class UserPrivacyKeypair(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class UserQueryKey(Base):
+    """用户变量查询密钥（PAT 式：跟用户不跟变量、按类别隔离、多把并存）。
+
+    一把某类别（env/privacy）有效密钥即可读取该用户该类别下全部变量，
+    供 n8n 等外部流水线经公开只读端点（app.auth.public_query）无人值守
+    调用。明文仅在创建时返回一次；落库只存 sha256 key_hash（查表校验）
+    与可见前缀 key_prefix（列表识别用，不足以还原密钥）。expires_at 为
+    NULL 表示永久。吊销为软删除（revoked_at），保留行供用户回看。
+    """
+
+    __tablename__ = "user_query_keys"
+    __table_args__ = (
+        UniqueConstraint("key_hash", name="uq_user_query_keys_key_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class UserPrivacyVar(Base):
     """用户隐私变量。
 
