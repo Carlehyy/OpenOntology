@@ -54,6 +54,7 @@ _EVENT_FIELDS = frozenset(
         "revision",
         "manifest_hash",
         "capability_revision",
+        "reply_subject",
         "event_seq",
         "kind",
         "status",
@@ -129,6 +130,8 @@ class PluginInvocationEnvelope:
         subject = _required_text("reply_subject", self.reply_subject, max_length=255)
         if not subject.startswith(PLUGIN_RUNNER_REPLY_PREFIX) or any(char in subject for char in "*>"):
             raise ContractError("plugin runner reply_subject is outside the reply namespace")
+        if subject != f"{PLUGIN_RUNNER_REPLY_PREFIX}{self.request_id}":
+            raise ContractError("plugin runner reply_subject must be bound to request_id")
 
     @property
     def msg_id(self) -> str:
@@ -198,6 +201,11 @@ class PluginRunnerEventEnvelope:
     status: str
     payload: Mapping[str, Any]
     artifacts: tuple[Mapping[str, Any], ...] = ()
+    # The reply route is repeated in every event so an intermediate transport
+    # cannot redirect a valid result to another invocation.  Empty is accepted
+    # only for in-process constructors and is canonicalized to the request
+    # bound subject below; wire payloads always include the resulting field.
+    reply_subject: str = ""
 
     def __post_init__(self) -> None:
         for name in ("request_id", "owner_id", "run_id", "call_id", "plugin_id"):
@@ -208,6 +216,10 @@ class PluginRunnerEventEnvelope:
             raise ContractError("plugin runner event manifest_hash must be a lowercase sha256")
         if int(self.event_seq) < 0:
             raise ContractError("plugin runner event_seq must be non-negative")
+        subject = self.reply_subject or f"{PLUGIN_RUNNER_REPLY_PREFIX}{self.request_id}"
+        if subject != f"{PLUGIN_RUNNER_REPLY_PREFIX}{self.request_id}" or any(char in subject for char in "*>"):
+            raise ContractError("plugin runner event reply_subject must be bound to request_id")
+        object.__setattr__(self, "reply_subject", subject)
         kind = _required_text("event kind", self.kind, max_length=32)
         if kind not in _EVENT_KINDS or self.status != _EVENT_STATUS[kind]:
             raise ContractError("plugin runner event kind/status is invalid")
@@ -255,6 +267,7 @@ class PluginRunnerEventEnvelope:
         try:
             revision = int(payload["revision"])
             capability_revision = int(payload["capability_revision"])
+            reply_subject = str(payload["reply_subject"])
             event_seq = int(payload["event_seq"])
         except (TypeError, ValueError) as exc:
             raise ContractError("plugin runner event numeric fields are invalid") from exc
@@ -267,6 +280,7 @@ class PluginRunnerEventEnvelope:
             revision=revision,
             manifest_hash=str(payload["manifest_hash"]),
             capability_revision=capability_revision,
+            reply_subject=reply_subject,
             event_seq=event_seq,
             kind=str(payload["kind"]),
             status=str(payload["status"]),

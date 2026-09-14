@@ -319,6 +319,43 @@ class SuperAssistantProcessPluginInvocation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 
+class SuperAssistantPluginRunnerJournal(Base):
+    """Crash-recovery journal for the external plugin-runner service.
+
+    ``request_id`` is the idempotency anchor carried by
+    :class:`PluginInvocationEnvelope`.  The runner commits every state before
+    performing the next irreversible action; a redelivered NATS message can
+    therefore never spawn a second process.  Only bounded identity and outcome
+    metadata are retained here; input/secret bytes stay behind their opaque
+    references.
+    """
+
+    __tablename__ = "super_assistant_plugin_runner_journal"
+    __table_args__ = (
+        Index("ix_sa_plugin_runner_journal_owner_state", "owner_id", "state", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    call_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    plugin_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="accepted")
+    event_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    outcome: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # Complete contract event needed to replay a publish that failed after the
+    # journal commit.  It contains only opaque artifact references and bounded
+    # payload, never plugin input or secret values.
+    last_event: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class SuperAssistantMulticaConfig(Base):
     """每用户一条的 multica 外部集成配置。
 
