@@ -193,6 +193,23 @@ class Settings(BaseSettings):
     # granting server-side code execution to assistant configurators.
     super_assistant_mcp_stdio_enabled: bool = False
     super_assistant_mcp_stdio_allowed_commands: str = ""
+    # User process plugins are executable code.  ``disabled`` is the safe
+    # default until the dedicated rootless runner is deployed.  ``nats`` is
+    # reserved for the external runner contract; it must not silently fall
+    # back to spawning a child in the API/executor process.  ``direct_dev`` is
+    # an explicit development/test-only escape hatch for protocol fixtures.
+    super_assistant_process_plugin_runner_mode: str = "disabled"
+
+    @field_validator("super_assistant_process_plugin_runner_mode", mode="before")
+    @classmethod
+    def canonical_process_plugin_runner_mode(cls, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        if mode not in {"disabled", "nats", "direct_dev"}:
+            raise ValueError(
+                "SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE must be one of disabled, nats, or direct_dev"
+            )
+        return mode
+
     # Credential-bearing external integrations must use TLS in production.
     # Development/test keep HTTP compatibility for local fixtures.
     super_assistant_external_https_required: bool = True

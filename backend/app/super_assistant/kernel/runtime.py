@@ -543,6 +543,21 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             if capability is None or not capability.enabled or capability.manifest_hash != actual_hash:
                 logger.error("refusing process plugin without matching capability snapshot: %s", plugin.id)
                 return None
+            # A raw subprocess in the API/executor process is only a protocol
+            # fixture.  Production-capable execution must go through the
+            # separate rootless runner contract; never silently fall back to
+            # the in-process host when that service is absent or misconfigured.
+            runner_mode = str(getattr(settings, "super_assistant_process_plugin_runner_mode", "disabled") or "").strip().lower()
+            if runner_mode != "direct_dev":
+                logger.error(
+                    "refusing process plugin without dedicated runner (mode=%s): %s",
+                    runner_mode or "disabled",
+                    plugin.id,
+                )
+                return None
+            if normalized_environment(settings.environment) not in {"development", "test"}:
+                logger.error("refusing direct process plugin host outside development/test: %s", plugin.id)
+                return None
             from app.super_assistant.kernel.plugin_host import ProcessPluginHost
             host = ProcessPluginHost(_manifest(plugin))
             descriptor = _descriptor(plugin)

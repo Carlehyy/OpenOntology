@@ -4,6 +4,65 @@ from app.super_assistant.kernel.connectors import TrustLevel
 from app.super_assistant.kernel.contracts import ContractError
 from app.super_assistant.kernel.plugins import PluginCatalog, PluginManifest, PluginState
 from app.super_assistant.kernel.plugin_host import PluginHostError, ProcessPluginHost
+from app.super_assistant.kernel.plugin_runner import (
+    PLUGIN_RUNNER_PROTOCOL,
+    PluginInvocationEnvelope,
+)
+
+
+def _runner_envelope(**overrides):
+    values = {
+        "request_id": "req-1",
+        "owner_id": "owner-1",
+        "run_id": "run-1",
+        "call_id": "call-1",
+        "plugin_id": "plugin-1",
+        "revision": 2,
+        "manifest_hash": "a" * 64,
+        "capability_revision": 2,
+        "input_ref": '{"message":"hello"}',
+        "workspace_snapshot_ref": "workspace:owner-1/run-1",
+        "secret_lease_refs": ("lease:one",),
+        "deadline": "2030-01-01T00:00:00+00:00",
+        "reply_subject": "sa.plugin.reply.req-1",
+    }
+    values.update(overrides)
+    return PluginInvocationEnvelope(**values)
+
+
+def test_plugin_runner_envelope_round_trips_and_uses_request_id_for_deduplication():
+    envelope = _runner_envelope()
+    payload = envelope.to_payload()
+    assert payload["protocol"] == PLUGIN_RUNNER_PROTOCOL
+    assert payload["secret_lease_refs"] == ["lease:one"]
+    assert "short-lived-secret" not in str(payload)
+    restored = PluginInvocationEnvelope.from_payload(payload)
+    assert restored == envelope
+    assert restored.msg_id == "req-1"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"manifest_hash": "not-a-digest"},
+        {"reply_subject": "sa.plugin.reply.*"},
+        {"revision": 0},
+        {"input_ref": "x" * (1024 * 1024 + 1)},
+    ],
+)
+def test_plugin_runner_envelope_rejects_unsafe_identity_or_bounds(overrides):
+    with pytest.raises(ContractError):
+        _runner_envelope(**overrides)
+
+
+def test_plugin_runner_envelope_rejects_unknown_or_missing_fields():
+    payload = _runner_envelope().to_payload()
+    payload["unexpected"] = "must-not-cross-contract"
+    with pytest.raises(ContractError, match="fields"):
+        PluginInvocationEnvelope.from_payload(payload)
+    del payload["reply_subject"]
+    with pytest.raises(ContractError, match="fields"):
+        PluginInvocationEnvelope.from_payload(payload)
 
 
 def test_plugin_manifest_cannot_expand_capability_or_kernel_access():

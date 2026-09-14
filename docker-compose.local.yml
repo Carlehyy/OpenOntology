@@ -121,6 +121,9 @@ services:
       # 流水线任务派发通道，仅 compose 内网可达；宿主机源码运行时使用
       # config/generated/local/.env 中的 NATS_URL（经 4222 宿主端口映射）。
       NATS_URL: nats://nats:4222
+      # 本地默认也不在 backend 内直接执行用户插件；协议 fixture 可在
+      # 源码测试中显式选择 direct_dev。
+      SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
     depends_on:
       db:
         condition: service_healthy
@@ -156,6 +159,7 @@ services:
       PYTHON_KERNEL_GATEWAY_URL: http://python_kernel_gateway:8088
       PYTHON_KERNEL_GATEWAY_AUTH_TOKEN: ${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}
       NATS_URL: nats://nats:4222
+      SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
     depends_on:
       db:
         condition: service_healthy
