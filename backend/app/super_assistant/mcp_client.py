@@ -32,6 +32,7 @@ def _sse_http_client_factory(*, headers: dict[str, str] | None = None,
 
     return httpx.AsyncClient(
         headers=headers, timeout=timeout, auth=auth, follow_redirects=False,
+        trust_env=False,
     )
 
 
@@ -222,7 +223,9 @@ async def _client_session(*, transport: str, url: str, headers: dict[str, str],
                 yield session
         return
     timeout = httpx.Timeout(connect=20, read=120, write=60, pool=20)
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as http_client:
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=False, trust_env=False,
+    ) as http_client:
         async with streamable_http_client(
             valid_url,
             http_client=http_client,

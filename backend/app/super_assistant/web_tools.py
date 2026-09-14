@@ -31,11 +31,13 @@ class WebToolError(RuntimeError):
 
 def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     """集中的 httpx 调用点（测试 monkeypatch 此函数）。"""
+    kwargs.setdefault("trust_env", False)
     return httpx.request(method, url, **kwargs)
 
 
 def _stream_request(method: str, url: str, **kwargs: Any):
     """Streaming seam for web_fetch; callers must use it as a context manager."""
+    kwargs.setdefault("trust_env", False)
     return httpx.stream(method, url, **kwargs)
 
 

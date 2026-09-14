@@ -251,7 +251,7 @@ class RemoteAgentHttpConnector:
         if isinstance(deadline, datetime):
             remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
             timeout = max(1.0, min(timeout, remaining))
-        client_kwargs: dict[str, Any] = {"timeout": timeout}
+        client_kwargs: dict[str, Any] = {"timeout": timeout, "trust_env": False}
         if self.transport is not None:
             client_kwargs["transport"] = self.transport
         async with httpx.AsyncClient(**client_kwargs) as client:

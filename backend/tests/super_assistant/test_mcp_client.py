@@ -19,6 +19,7 @@ async def test_sse_client_factory_disables_redirects():
     client = _sse_http_client_factory(headers={"X-API-Key": "secret"})
     try:
         assert client.follow_redirects is False
+        assert client.trust_env is False
         assert client.headers["X-API-Key"] == "secret"
     finally:
         await client.aclose()

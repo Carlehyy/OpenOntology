@@ -23,6 +23,7 @@ class MulticaClientError(RuntimeError):
 
 def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     """集中的 httpx 调用点（测试 monkeypatch 此函数）。"""
+    kwargs.setdefault("trust_env", False)
     return httpx.request(method, url, **kwargs)
 
 
