@@ -248,7 +248,7 @@ uv run python scripts/super_assistant_kernel_live_e2e.py --output .artifacts/sup
 
 当前仍有多项对商用安全和可运维性有直接影响的未闭环问题：用户进程插件的 `network_scope`、`workspace_scope`、`secret_refs` 仍是元数据，尚未由独立 rootless runner、网络/secret broker 和工作区挂载真正执行；插件信任等级缺少可验证的签名信任根（运行时现在会重算完整 manifest 并对 entrypoint/权限字段篡改 fail-closed，但不能替代签名验证）；MCP/外部 HTTP 以及浏览器导航的配置期 DNS 校验与实际建连之间仍存在 DNS rebinding TOCTOU 窗口。浏览器的 `context.route("**/*", _route_guard)` 会逐请求重检 URL，因此重定向已受应用层 URL 检查；但它不能证明最终连接使用的 IP，也不能替代网络层 egress/private-CIDR 策略。当前镜像仍需 `--no-sandbox`；生产部署已经强制 `BROWSER_IMAGE` 使用 digest，但其他基础镜像的全局 `STRICT_IMAGE_DIGESTS` 仍允许关闭。browser Dockerfile 的字体包已锁定 Debian 版本，生产集成 HTTPS 仍需完成既有端点迁移、证书和回调兼容性验收。生产环境配置现已在 Settings 入口统一规范化 `prod`、大小写和外围空白，并对空值/未知值 fail-closed；私网浏览器目标默认关闭且生产 Compose 显式固定为 `false`。剩余问题必须在 staging 攻击验收与发布门禁中闭环。
 
-## 13. 最新对抗式代码审查证据（提交 `669f9a70`，代码收口 `d5bf6fb9`）
+## 13. 最新对抗式代码审查证据（提交 `47a6a4d9`，代码收口 `d5bf6fb9`）
 
 本轮重点检查了“写入成功但派发丢失”“重复或迟到外部结果”“配置漂移误调用”“输入丢失”“HTTP 并发覆盖”和“SSE 客户端按错误形状解析”等故障路径，并补充了以下不变量：
 
@@ -268,7 +268,7 @@ rootless browser 探针已覆盖 Compose 精确 healthcheck、CDP `/json/version
 
 本轮没有把局部专项结果扩大解释为商用验收。修复后的完整后端回归已实际执行：`3567 passed, 6 skipped`；时长表重录后的覆盖守卫单独复核通过；此前暴露的迁移 head、能力版本表和 manifest 列问题均已修复并复验。新增的 NATS 失败重投、远端调用崩溃恢复、终态取消、超长引用收口、ContextPack 上限、RAP Artifact、callback 白名单、JetStream 策略漂移和进程插件 manifest 篡改测试均已通过；核心定向集合和真实隔离栈证据仍不替代完整 staging。真实隔离栈探针已通过 PostgreSQL、NATS `SA_EXECUTION_V1`、MinIO bucket、Neo4j；NATS durable consumers `sa-kernel-v1`、`sa-call-v1`、`sa-reconciler-v1` 注册并清空积压，真实 MinIO round-trip 和 NATS executor E2E 各 `1 passed`。当前分支启动的 API `/api/health` 返回 503 的唯一不可用项是隔离栈未提供 n8n，因此浏览器 E2E、真实外部 Agent、rootless 插件隔离、DNS rebinding 攻击验证和发布回滚演练仍是 M7/M8 的阻断项。
 
-本次最新收口后的定向回归为 `76 passed`，委派边界架构测试为 `4 passed`，时长覆盖守卫为 `1 passed`；新增验证覆盖伪造权限指纹、服务端重算指纹以及 Kernel 子 Run 来源标记不可被上下文覆盖。该专项证据只证明代码级绑定不变量，不改变 M7/M8 的 staging 和发布阻断状态。
+本次最新收口后的定向回归为 `77 passed`，探索适配器完整回归为 `14 passed`，委派边界架构测试为 `4 passed`，时长覆盖守卫为 `1 passed`；新增验证覆盖伪造权限指纹、服务端重算指纹、Kernel 子 Run 来源标记不可被上下文覆盖，以及草稿生命周期变化后恢复委派会话会明确失败。该专项证据只证明代码级绑定不变量，不改变 M7/M8 的 staging 和发布阻断状态。
 
 对抗式审查新增的代码修复包括：NATS handler 在状态未持久化时 NAK 而非 ACK；RUNNING 状态的重复外部调用进入对账/人工介入路径且不二次触发 provider；父 Run 终态后仍对带远端句柄的 Call 执行取消；provider 引用和结果文本在落库前限长；人工介入 Call 不再被 scheduler 无限轮询；外部 Artifact 的对象存储引用必须落在 owner/run/artifact 命名空间；SSE callback 事件只保留稳定字段和受限 Artifact 引用。上述修复已经通过对应专项测试，但不替代真实 provider、对象存储和浏览器副作用验收。
 
