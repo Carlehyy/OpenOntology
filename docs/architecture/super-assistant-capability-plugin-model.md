@@ -117,7 +117,7 @@ disable new calls
 - 资源预算；
 - 结果和 Artifact 回传接口。
 
-可信平台实现可以进程内运行。用户提供的可执行代码默认由独立进程宿主运行，使用允许的工作区和网络范围；本项目的进程插件协议依赖独立宿主；生产启用 user_untrusted 前必须具备独立 uid/container，否则保持 disabled。
+可信平台实现可以进程内运行。用户提供的可执行代码默认由独立进程宿主运行，使用允许的工作区和网络范围；本项目的进程插件协议依赖独立宿主；生产启用 user_untrusted 前必须具备独立 uid/container，否则保持 disabled。宿主模式必须显式配置：`disabled` 拒绝执行，`direct_dev` 仅供 development/test 协议测试，`nats` 通过独立 runner 契约执行；`nats` 不可用时必须 fail-closed，禁止回退到 API/executor 进程内直接 spawn。
 
 模型不能直接把任意 shell 命令变成持久插件。安装、启用、动态挂载和使用高风险能力都经过用户确认或既有策略。
 
