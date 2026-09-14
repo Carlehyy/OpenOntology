@@ -629,6 +629,20 @@ def _prepare_action_execution_request(
         )
         db.add(log)
         try:
+            # Keep the governance notification in the same transaction as the
+            # pending action. Projection failure must leave a retryable inbox
+            # outbox row rather than losing the approval request.
+            db.flush()
+            from app.inbox.service import enqueue_ontology_approval_request
+            enqueue_ontology_approval_request(
+                db,
+                log_id=log.id,
+                ontology_id=ontology_id,
+                action_name=log.action_name or action.name,
+                ontology_version=log.ontology_version,
+                ontology_release_id=log.ontology_release_id,
+                occurred_at=log.executed_at,
+            )
             db.commit(); db.refresh(log)
         except IntegrityError:
             db.rollback()

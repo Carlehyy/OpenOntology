@@ -378,6 +378,17 @@ def decide_pending_action_locked(
         # can create one new, auditable attempt rather than replaying rejection.
         state_id = log.sentinel_match_state_id
         log.idempotency_key = None
+        from app.inbox.service import enqueue_ontology_approval_decision
+        enqueue_ontology_approval_decision(
+            db,
+            log_id=log.id,
+            ontology_id=ontology_id,
+            decision="rejected",
+            action_name=log.action_name or "待审批动作",
+            ontology_version=log.ontology_version,
+            ontology_release_id=log.ontology_release_id,
+            occurred_at=log.decided_at,
+        )
         db.commit()
         db.refresh(log)
         if state_id:
@@ -488,6 +499,17 @@ def decide_pending_action_locked(
             or "审批已通过，但动作技术执行失败"
         )
         log.idempotency_key = None
+    from app.inbox.service import enqueue_ontology_approval_decision
+    enqueue_ontology_approval_decision(
+        db,
+        log_id=log.id,
+        ontology_id=ontology_id,
+        decision="approved" if execution_succeeded else "failed",
+        action_name=log.action_name or "待审批动作",
+        ontology_version=log.ontology_version,
+        ontology_release_id=log.ontology_release_id,
+        occurred_at=log.decided_at,
+    )
     db.commit()
     db.refresh(log)
     sentinel_resume = None
