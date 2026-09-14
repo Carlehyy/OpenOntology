@@ -343,6 +343,6 @@ manifest 字段 hash 不能替代插件包本身的完整性证明。runner 必�
 | M5 Context/Memory/Artifact | 代码与专项回归已完成 | Context Pack、Artifact 完整性、来源引用和记忆策略测试 | 真实对象存储下载及 source tombstone staging |
 | M6 HTTP/SSE/前端 | 本地门禁已通过 | unit `481 passed`、mocked E2E `306 passed`、lint/build/边界门禁 | 真实浏览器副作用、外部 Agent 流式/断线验收 |
 | M7 商用验收 | 尚未完成 | 后端全量 `3619 passed, 6 skipped`；已完成隔离依赖探针和专项回归 | 真实 staging、攻击验证、现存库迁移 |
-| M8 文档与发布 | 文档已同步，发布未批准 | 本文件、迁移报告入口、回滚说明 | 完成 M7 后生成带证据的发布批准记录 |
+| M8 文档与发布 | 文档已同步，发布未批准 | 本文件、`docs/operations/release-checklist.md`、迁移报告入口、回滚说明 | 完成 M7 后生成带证据的发布批准记录 |
 
 本矩阵是发布门禁，不把专项测试或隔离依赖探针扩大解释为商用完成。任何一项“发布前剩余条件”没有对应的命令输出、运行记录或 staging artifact 时，Goal 必须保持 active，不能标记为 complete。
