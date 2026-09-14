@@ -30,6 +30,29 @@ export interface PrivacyVarCreated extends PrivacyVar {
   report_token?: string
 }
 
+/** 变量查询密钥（PAT 式）：跟用户不跟变量、按类别隔离（env/privacy）、
+ * 多把并存。密钥用于公开只读查询端点（Authorization: Bearer <key>），
+ * 供 n8n 等外部流水线无人值守调用。 */
+export type QueryKeyCategory = 'env' | 'privacy'
+export type QueryKeyValidity = '1d' | '7d' | '30d' | '90d' | '365d' | 'permanent'
+
+export interface QueryKeyItem {
+  id: string
+  category: QueryKeyCategory
+  name: string
+  key_prefix: string
+  expires_at: string | null
+  revoked_at: string | null
+  last_used_at: string | null
+  created_at: string
+}
+
+/** 创建响应附带密钥明文：仅此一次返回，平台只落 sha256 哈希，关闭弹窗后
+ * 无法再查看，前端须立即引导用户复制保存。 */
+export interface QueryKeyCreated extends QueryKeyItem {
+  key: string
+}
+
 export const authApi = {
   login: (username: string, password: string) =>
     apiClient.post<{ access_token: string; token_type: string }>('/auth/login', { username, password }),
@@ -57,4 +80,12 @@ export const authApi = {
   // 副作用验收标准：E2E 必须断言下载文件内容，不能只断言"提示出现"。
   downloadReporterScript: () =>
     apiClient.get('/auth/privacy-vars/script', { responseType: 'blob' }) as Promise<Blob>,
+  // 变量查询密钥（PAT 式）：列表（按类别过滤）/ 生成（明文仅此一次）/ 吊销。
+  // 密钥配套的公开只读查询端点为 /api/public/env-vars 与
+  // /api/public/privacy-vars（Authorization: Bearer <key>），供 n8n 调用。
+  listQueryKeys: (category: QueryKeyCategory) =>
+    apiClient.get<QueryKeyItem[]>('/auth/query-keys', { params: { category } }),
+  createQueryKey: (category: QueryKeyCategory, name: string, validity: QueryKeyValidity) =>
+    apiClient.post<QueryKeyCreated>('/auth/query-keys', { category, name, validity }),
+  revokeQueryKey: (id: string) => apiClient.delete(`/auth/query-keys/${encodeURIComponent(id)}`),
 }

@@ -360,3 +360,125 @@ test('隐私变量支持查看明文值并复制到剪贴板', async ({ page }) 
   await panel.getByRole('button', { name: '收起 MY_REPORTED_COOKIE 的值' }).click()
   await expect(valueBox).not.toBeVisible()
 })
+
+// ---- 查询密钥（PAT 式）：生成（一次性展示 + 真实剪贴板断言）/ 列表 / 吊销 ----
+
+// 复制依赖剪贴板读写权限：按 AGENTS.md §5 副作用验收，断言真实剪贴板内容
+// （非中间提示），手动 Cmd+C 兜底由自动全选的输入框提供。
+test.use({ contextOptions: { permissions: ['clipboard-read', 'clipboard-write'] } })
+test('环境变量查询密钥支持生成、一次性展示复制与吊销', async ({ page }) => {
+  await mockPlatformShell(page)
+
+  const created = {
+    id: 'qk-1',
+    category: 'env',
+    name: 'n8n 流水线',
+    key_prefix: 'obk_env_abcd123',
+    expires_at: null,
+    revoked_at: null,
+    last_used_at: null,
+    created_at: now,
+  }
+  const captured: { createBody?: Record<string, unknown>; revokeCalled?: boolean } = {}
+  let stored: Array<Record<string, unknown>> = []
+
+  await page.route('**/api/v1/auth/query-keys', async route => {
+    const method = route.request().method()
+    if (method === 'GET') return json(route, stored)
+    if (method === 'POST') {
+      captured.createBody = route.request().postDataJSON() as Record<string, unknown>
+      stored = [{ ...created }]
+      return json(route, { ...created, key: 'obk_env_plaintext-once' })
+    }
+    return route.continue()
+  })
+  await page.route('**/api/v1/auth/query-keys/*', async route => {
+    if (route.request().method() === 'DELETE') {
+      captured.revokeCalled = true
+      stored = stored.map(k => ({ ...k, revoked_at: now }))
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'revoked' }),
+      })
+    }
+    return route.continue()
+  })
+
+  await page.goto('/#/inbox', { waitUntil: 'domcontentloaded' })
+  await openProfileDialog(page)
+  const panel = await openEnvVarsTab(page)
+
+  // 生成：名称 + 有效期（Radix Select，选项渲染在 body 级 portal）
+  await panel.getByLabel('新环境变量查询密钥名称').fill('n8n 流水线')
+  await panel.getByLabel('新环境变量查询密钥有效期').click()
+  await page.getByRole('option', { name: '永久' }).click()
+  await panel.getByRole('button', { name: '生成密钥' }).click()
+
+  // 一次性明文展示弹窗：断言真实明文与调用方式说明（端点 + Bearer 头）
+  const reveal = page.getByRole('dialog', { name: '查询密钥（仅此一次展示）' })
+  await expect(reveal).toBeVisible()
+  await expect(reveal.getByLabel('查询密钥')).toHaveValue('obk_env_plaintext-once')
+  await expect(reveal.getByText('/api/public/env-vars')).toBeVisible()
+
+  // 复制：断言真实剪贴板内容（AGENTS.md §5：不依据中间提示宣称已复制）
+  await reveal.getByRole('button', { name: '复制密钥' }).click()
+  await expect(toastItem(page, '已尝试复制到剪贴板')).toBeVisible()
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('obk_env_plaintext-once')
+
+  await reveal.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(reveal).toHaveCount(0)
+
+  // 列表回显：前缀可见（明文不再出现）+ 有效徽标；创建请求体带六档有效期枚举
+  await expect(panel.getByText('obk_env_abcd123…')).toBeVisible()
+  await expect(panel.getByText('有效', { exact: true })).toBeVisible()
+  expect(captured.createBody).toEqual({ category: 'env', name: 'n8n 流水线', validity: 'permanent' })
+
+  // 吊销：统一 ConfirmDialog（DESIGN.md §4.6，禁止 window.confirm）
+  await panel.getByRole('button', { name: '吊销查询密钥 n8n 流水线' }).click()
+  const confirm = page.getByRole('dialog', { name: '吊销查询密钥' })
+  await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: '吊销', exact: true }).click()
+  await expect(toastItem(page, '已吊销')).toBeVisible()
+  await expect(panel.getByText('已吊销')).toBeVisible()
+  // 已吊销的密钥不再提供吊销按钮
+  await expect(panel.getByRole('button', { name: '吊销查询密钥 n8n 流水线' })).toHaveCount(0)
+  expect(captured.revokeCalled).toBe(true)
+})
+
+test('隐私变量分区独立生成查询密钥（类别隔离）', async ({ page }) => {
+  await mockPlatformShell(page)
+
+  const captured: { createBody?: Record<string, unknown> } = {}
+  await page.route('**/api/v1/auth/query-keys', async route => {
+    const method = route.request().method()
+    if (method === 'GET') return json(route, [])
+    if (method === 'POST') {
+      captured.createBody = route.request().postDataJSON() as Record<string, unknown>
+      return json(route, {
+        id: 'qk-priv',
+        category: 'privacy',
+        name: '',
+        key_prefix: 'obk_priv_prefix0',
+        expires_at: now,
+        revoked_at: null,
+        last_used_at: null,
+        created_at: now,
+        key: 'obk_priv_plaintext-once',
+      })
+    }
+    return route.continue()
+  })
+
+  await page.goto('/#/inbox', { waitUntil: 'domcontentloaded' })
+  const dialog = await openProfileDialog(page)
+  await dialog.getByRole('tab', { name: '隐私变量' }).click()
+  const panel = dialog.getByRole('tabpanel', { name: '隐私变量' })
+  await expect(panel).toBeVisible()
+
+  // 隐私分区展示自己的公开端点说明，生成请求带 category=privacy
+  await expect(panel.getByText('/api/public/privacy-vars')).toBeVisible()
+  await panel.getByRole('button', { name: '生成密钥' }).click()
+  await expect(page.getByRole('dialog', { name: '查询密钥（仅此一次展示）' })).toBeVisible()
+  expect(captured.createBody).toEqual({ category: 'privacy', name: '', validity: '365d' })
+})
