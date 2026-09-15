@@ -439,6 +439,34 @@ def build_tool_observation(
     return bounded if isinstance(bounded, dict) else observation
 
 
+def compact_search_result_for_context(result: Any, *, limit: int = 5) -> Any:
+    """Deduplicate search hits before they enter the next model turn.
+
+    The append-only audit keeps the original provider payload; this projection
+    is deliberately small and evidence-oriented for reasoning context.
+    """
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+        return result
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for item in result["results"]:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("url") or item.get("title") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "title": str(item.get("title") or "")[:180],
+            "url": str(item.get("url") or "")[:500],
+            "snippet": str(item.get("snippet") or "")[:520],
+        })
+        if len(rows) >= limit:
+            break
+    return {**result, "results": rows, "resultCount": len(result["results"]),
+            "contextProjection": True}
+
+
 def _legacy_step_observation(step: dict) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if step.get("preview") is not None:
@@ -539,10 +567,15 @@ def select_tools(
 ) -> list[dict]:
     """Use full capability on normal windows; scope schemas only on small ones."""
     available = {str(tool.get("name")): tool for tool in tools}
-    if context_limit >= 32_768:
+    # Source tracing is intentionally staged even on large windows: exposing
+    # every browser, file, pipeline and API-Hub schema causes needless tool
+    # choice noise before any evidence has been collected.
+    if context_limit >= 32_768 and intent_code != "source":
         return list(tools)
 
-    selected = set(_INTENT_TOOLS.get(intent_code, _PIPELINE_TOOLS))
+    selected = set() if intent_code == "source" else set(
+        _INTENT_TOOLS.get(intent_code, _PIPELINE_TOOLS)
+    )
     text = (question or "").lower()
     if any(token in text for token in ("文件", "附件", "word", "excel", "pdf", "ppt", "csv")):
         selected |= _FILE_TOOLS
@@ -550,6 +583,19 @@ def select_tools(
         selected |= _BROWSER_TOOLS
     if any(token in text for token in ("接口代理", "interface", "revision", "api hub")):
         selected |= _API_HUB_TOOLS
+    if intent_code == "source":
+        source_signal = any(token in text for token in (
+            "http://", "https://", "接口", "网页", "页面", "xhr", "fetch",
+            "网络", "请求", "来源", "api", "url",
+        ))
+        if source_signal:
+            selected |= _BROWSER_TOOLS | _API_HUB_TOOLS | {"probe_url"}
+        if any(token in text for token in ("流水线", "workflow", "n8n")):
+            selected |= _PIPELINE_TOOLS
+        if any(token in text for token in ("文件", "附件", "源码", "配置")):
+            selected |= _FILE_TOOLS
+        if not selected:
+            selected |= {"probe_url", "browser_open", "browser_state", "get_workflow"}
     recent_names = [str(name) for name in recent_tool_names]
     selected |= set(recent_names)
     if "web_search" in available:
