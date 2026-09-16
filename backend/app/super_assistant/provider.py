@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
 from typing import Any
 
-from app.model_configs.llm_gateway import strip_think_content
+from app.model_configs.llm_gateway import merged_usage, strip_think_content
 from app.shared.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderError(RuntimeError):
@@ -168,6 +171,31 @@ def _chat_openai(kw: dict[str, Any], messages: list[dict[str, Any]],
             },
         } for tool in tools]
     response = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+    usages = [getattr(response, "usage", None)]
+    if not response.choices:
+        raise ProviderError("模型未返回任何候选结果")
+    # 非流式 tool calling 序列化缺陷降级：与 llm_gateway._chat_openai 同款
+    # （生产实测 GLM MaaS 非流式路径在模型决定调工具时返回
+    # finish_reason="tool_calls" 却丢失 message.tool_calls 字段）。带 tools
+    # 走本函数的有两路——子代理 run_subagent 直接调用，以及 chat_stream
+    # 流式失败后的非流式回退 _chat_fallback；缺该降级时子代理会静默返回
+    # 空结论。检测到该签名时去掉 tools 重试一次让模型直接作答，消息历史
+    # 原样保留（含 tool 角色消息，端点按上下文作答）。
+    if (create_kwargs.get("tools")
+            and getattr(response.choices[0], "finish_reason", None) == "tool_calls"
+            and not getattr(response.choices[0].message, "tool_calls", None)):
+        logger.warning(
+            "LLM 端点返回 finish_reason=tool_calls 但缺失 tool_calls 字段，"
+            "去除 tools 降级重试（%s @ %s）", kw.get("model"), kw.get("api_base"))
+        create_kwargs.pop("tools")
+        response = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+        usages.append(getattr(response, "usage", None))
+        if (not response.choices
+                or (not getattr(response.choices[0].message, "content", None)
+                    and not getattr(response.choices[0].message, "tool_calls", None))):
+            logger.warning(
+                "LLM 端点降级重试后仍无正文与工具调用（%s @ %s），"
+                "该端点非流式路径可能整体异常", kw.get("model"), kw.get("api_base"))
     if not response.choices:
         raise ProviderError("模型未返回任何候选结果")
     message = response.choices[0].message
@@ -178,14 +206,10 @@ def _chat_openai(kw: dict[str, Any], messages: list[dict[str, Any]],
         except json.JSONDecodeError:
             arguments = {"_raw": call.function.arguments or ""}
         tool_calls.append({"id": call.id, "name": call.function.name, "arguments": arguments})
-    usage = getattr(response, "usage", None)
     return {
         "content": message.content,
         "tool_calls": tool_calls,
-        "usage": {
-            "inputTokens": getattr(usage, "prompt_tokens", None),
-            "outputTokens": getattr(usage, "completion_tokens", None),
-        } if usage else {},
+        "usage": merged_usage(*usages) or {},
     }
 
 

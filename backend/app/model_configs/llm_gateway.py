@@ -14,9 +14,12 @@ Moonshot 等国内主流服务都兼容 OpenAI tools 协议，走 openai 分支�
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
@@ -555,8 +558,12 @@ def _anthropic_client_kwargs(kw: dict) -> dict:
     return client_kwargs
 
 
-def _merged_usage(*usages) -> dict[str, Any] | None:
-    """合并同一次网关调用内多次实际请求的 usage（降级重试同样消耗 token）。"""
+def merged_usage(*usages) -> dict[str, Any] | None:
+    """合并同一次网关调用内多次实际请求的 usage（降级重试同样消耗 token）。
+
+    公开给 super_assistant.provider 复用（其非流式降级重试同样需要合并）；
+    非整型字段（GLM MaaS 实测 prompt_tokens 返回 null）跳过不计数。
+    """
     total: dict[str, Any] | None = None
     for usage in usages:
         if not usage:
@@ -596,9 +603,18 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
     if (create_kwargs.get("tools")
             and getattr(resp.choices[0], "finish_reason", None) == "tool_calls"
             and not getattr(resp.choices[0].message, "tool_calls", None)):
+        logger.warning(
+            "LLM 端点返回 finish_reason=tool_calls 但缺失 tool_calls 字段，"
+            "去除 tools 降级重试（%s @ %s）", kw.get("model"), kw.get("api_base"))
         create_kwargs.pop("tools")
         resp = client.chat.completions.create(**create_kwargs)
         usages.append(getattr(resp, "usage", None))
+        if (resp.choices
+                and not getattr(resp.choices[0].message, "content", None)
+                and not getattr(resp.choices[0].message, "tool_calls", None)):
+            logger.warning(
+                "LLM 端点降级重试后仍无正文与工具调用（%s @ %s），"
+                "该端点非流式路径可能整体异常", kw.get("model"), kw.get("api_base"))
     msg = resp.choices[0].message
     tool_calls = []
     for tc in (msg.tool_calls or []):
@@ -610,7 +626,7 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
     return {
         "content": msg.content,
         "tool_calls": tool_calls,
-        "usage": _merged_usage(*usages),
+        "usage": merged_usage(*usages),
     }
 
 
