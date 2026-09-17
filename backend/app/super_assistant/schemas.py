@@ -40,6 +40,7 @@ class ConversationOut(ORMModel):
     id: str
     title: str
     model_config_id: str | None
+    browser_source_id: str | None
     status: str
     created_at: datetime
     updated_at: datetime

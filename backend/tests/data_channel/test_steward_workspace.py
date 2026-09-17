@@ -382,6 +382,7 @@ async def test_save_page_data_resource_stays_inside_conversation_workspace(
 
     session = SimpleNamespace(
         page=Page(), operation_lock=asyncio.Lock(), touch=lambda: None,
+        workspace=workspace,
     )
     manager = BrowserManager.__new__(BrowserManager)
     manager._sessions = {cid: session}
@@ -720,3 +721,95 @@ async def test_live_attach_waits_for_inflight_browser_operation():
     session.operation_lock.release()
     await attach
     assert manager._live_clients == {"conversation": 1}
+
+
+@pytest.mark.asyncio
+async def test_capture_response_appends_to_injected_session_workspace(
+    steward_workspace, tmp_path,
+):
+    from app.data_channel.steward.browser_runtime import BrowserSession
+
+    cid = str(uuid.uuid4())
+    custom = workspace.SessionWorkspace(tmp_path / "super")
+
+    class _Request:
+        method = "GET"
+        resource_type = "xhr"
+        post_data = None
+        headers = {"accept": "application/json"}
+
+        async def all_headers(self):
+            return dict(self.headers)
+
+    class _Response:
+        url = "https://example.com/api/orders"
+        status = 200
+        request = _Request()
+        headers = {"content-type": "application/json"}
+
+        async def all_headers(self):
+            return dict(self.headers)
+
+        async def body(self):
+            return b'{"ok": true}'
+
+    session = BrowserSession(cid, None, None, workspace=custom)
+    await session._capture_response(_Response())
+
+    rows = custom.load_captures(cid)
+    assert [row["url"] for row in rows] == ["https://example.com/api/orders"]
+    # 默认 steward 根下不得出现同一会话的捕获（注入工作区生效）
+    assert workspace.load_captures(cid) == []
+
+
+@pytest.mark.asyncio
+async def test_save_state_writes_to_injected_session_workspace(
+    steward_workspace, tmp_path,
+):
+    from app.data_channel.steward.browser_runtime import BrowserSession
+
+    cid = str(uuid.uuid4())
+    custom = workspace.SessionWorkspace(tmp_path / "super")
+    saved_to = []
+
+    class _Context:
+        async def storage_state(self, path):
+            saved_to.append(path)
+
+    session = BrowserSession(cid, _Context(), None, workspace=custom)
+    await session.save_state()
+
+    assert saved_to == [str(custom.storage_state_path(cid))]
+
+
+def test_list_captures_defaults_to_steward_root_and_accepts_override(
+    steward_workspace, tmp_path,
+):
+    cid = str(uuid.uuid4())
+    custom = workspace.SessionWorkspace(tmp_path / "super")
+    workspace.append_capture(cid, {"id": "cap-steward", "method": "GET", "url": "https://s.example/x"})
+    custom.append_capture(cid, {"id": "cap-super", "method": "GET", "url": "https://sa.example/y"})
+
+    manager = BrowserManager.__new__(BrowserManager)
+    assert [row["id"] for row in manager.list_captures(cid)] == ["cap-steward"]
+    assert [
+        row["id"] for row in manager.list_captures(cid, session_workspace=custom)
+    ] == ["cap-super"]
+
+
+def test_close_by_source_closes_only_matching_sessions():
+    manager = BrowserManager.__new__(BrowserManager)
+    manager._sessions = {
+        "keep": SimpleNamespace(source_key="managed"),
+        "drop-1": SimpleNamespace(source_key="companion:src-1"),
+        "drop-2": SimpleNamespace(source_key="companion:src-1"),
+    }
+    closed = []
+    manager.close = lambda cid: (closed.append(cid), manager._sessions.pop(cid))
+
+    manager.close_by_source("companion:src-1")
+
+    assert sorted(closed) == ["drop-1", "drop-2"]
+    assert set(manager._sessions) == {"keep"}
+    manager.close_by_source("companion:src-1")  # 幂等：无匹配会话时不动作
+    assert closed == ["drop-1", "drop-2"]

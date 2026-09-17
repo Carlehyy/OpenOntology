@@ -1,4 +1,12 @@
 import { apiClientV2 } from '@/api/client'
+import {
+  browserLiveWsUrl,
+  type BrowserCapture,
+  type BrowserCollaborationApi,
+  type BrowserCollaborationState,
+  type BrowserLiveFrame,
+  type BrowserSource,
+} from '@/api/browserCollaboration'
 
 export interface SuperConversation {
   id: string
@@ -7,6 +15,9 @@ export interface SuperConversation {
   status: string
   created_at: string
   updated_at: string
+  /** 会话绑定的浏览器来源（后端 ConversationOut 已透出；未绑定为 null，
+   *  面板回退默认的 managed） */
+  browser_source_id?: string | null
 }
 
 export interface SuperMessage {
@@ -664,4 +675,80 @@ export const superAssistantApi = {
     apiClientV2.get<string>(`/super-assistant/remote-agent-invites/${id}/prompt`),
   revokeRemoteAgentInvite: (id: string) =>
     apiClientV2.delete(`/super-assistant/remote-agent-invites/${id}`),
+}
+
+// ---------- 浏览器协作（与数据管家共用面板，运行时复用 steward BrowserManager） ----------
+// 端点族见 backend/app/super_assistant/browser.py：响应沿用 steward {"data": ...}
+// 包络，由 apiClientV2 响应拦截器统一解包；实时画面 WS 由 steward 处理器以
+// /api/v2/super-assistant 前缀二次挂载（ticket 鉴权，处理器与会话模型无关）。
+export const superAssistantBrowserApi: BrowserCollaborationApi = {
+  listSources: () => apiClientV2.get<BrowserSource[]>('/super-assistant/browser/sources'),
+  // 超助无读取单会话绑定来源的 GET 端点：从会话列表取（ConversationOut
+  // 已透出 browser_source_id；未绑定时为 null，面板回退默认的 managed）。
+  conversationBrowserSourceId: async cid =>
+    (await superAssistantApi.conversations()).find(item => item.id === cid)?.browser_source_id ?? null,
+  createSource: body =>
+    apiClientV2.post<BrowserSource>('/super-assistant/browser/sources', body),
+  testSource: id =>
+    apiClientV2.post<{ reachable: boolean; sourceType: string; label: string }>(
+      `/super-assistant/browser/sources/${id}/test`),
+  deleteSource: id => apiClientV2.delete(`/super-assistant/browser/sources/${id}`),
+  bindSource: (cid, sourceId) =>
+    apiClientV2.put<{ conversationId: string; browserSourceId: string }>(
+      `/super-assistant/conversations/${cid}/browser/source`, { sourceId }),
+  start: (cid, url) =>
+    apiClientV2.post<{ url: string; title: string }>(
+      `/super-assistant/conversations/${cid}/browser/start`, { url }),
+  navigate: (cid, url) =>
+    apiClientV2.post<{ url: string; title: string }>(
+      `/super-assistant/conversations/${cid}/browser/navigate`, { url }),
+  session: cid =>
+    apiClientV2.get<{
+      active: boolean; url: string; live: boolean; collaboration: BrowserCollaborationState
+    }>(`/super-assistant/conversations/${cid}/browser/session`),
+  ticket: cid =>
+    apiClientV2.post<{ ticket: string; expiresIn: number }>(
+      `/super-assistant/conversations/${cid}/browser/ticket`),
+  liveHttpAttach: cid =>
+    apiClientV2.post<{
+      leaseId: string; expiresIn: number; frameIntervalMs: number
+      collaboration: BrowserCollaborationState
+    }>(`/super-assistant/conversations/${cid}/browser/live-http`),
+  liveHttpFrame: (cid, leaseId) =>
+    apiClientV2.post<BrowserLiveFrame>(
+      `/super-assistant/conversations/${cid}/browser/live-http/frame`, { leaseId }),
+  liveHttpInput: (cid, leaseId, message) =>
+    apiClientV2.post<{ accepted: boolean; collaboration: BrowserCollaborationState }>(
+      `/super-assistant/conversations/${cid}/browser/live-http/input`, { leaseId, message }),
+  liveHttpControl: (cid, leaseId, action) =>
+    apiClientV2.post<{ collaboration: BrowserCollaborationState }>(
+      `/super-assistant/conversations/${cid}/browser/live-http/control`, { leaseId, action }),
+  liveHttpRelease: (cid, leaseId) =>
+    apiClientV2.post<{ released: boolean }>(
+      `/super-assistant/conversations/${cid}/browser/live-http/release`, { leaseId }),
+  captures: cid =>
+    apiClientV2.get<BrowserCapture[]>(`/super-assistant/conversations/${cid}/browser/captures`, {
+      params: { keyword: '', limit: 100 },
+    }),
+  downloadCapture: (cid, captureId) =>
+    apiClientV2.post(`/super-assistant/conversations/${cid}/browser/captures/${captureId}/download`),
+  // companion 脚本下载照 steward.ts 的 token + fetch 范式（Blob 直下，无包络）
+  downloadCompanionScript: async () => {
+    const token = localStorage.getItem('token') || ''
+    const resp = await fetch(`${runtimeApiBase()}/super-assistant/browser/companion/script`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!resp.ok) throw new Error(`助手下载失败 (${resp.status})`)
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = 'openontology-browser-companion.mjs'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  },
+  liveWsUrl: (cid, ticket) =>
+    browserLiveWsUrl(`/api/v2/super-assistant/conversations/${cid}/browser/live?ticket=${encodeURIComponent(ticket)}`),
 }

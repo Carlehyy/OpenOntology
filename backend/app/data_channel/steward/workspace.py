@@ -468,17 +468,17 @@ def _steward_root() -> Path:
     return base.expanduser().resolve()
 
 
-def _steward_workspace() -> SessionWorkspace:
+def steward_session_workspace() -> SessionWorkspace:
     # 根目录每次现读 settings：测试经 monkeypatch 切换，禁止缓存单例
     return SessionWorkspace(_steward_root())
 
 
 def session_root(conversation_id: str, *, create: bool = True) -> Path:
-    return _steward_workspace().session_root(conversation_id, create=create)
+    return steward_session_workspace().session_root(conversation_id, create=create)
 
 
 def _within(conversation_id: str, relative: str, *, create_parent: bool = False) -> Path:
-    return _steward_workspace()._within(conversation_id, relative, create_parent=create_parent)
+    return steward_session_workspace()._within(conversation_id, relative, create_parent=create_parent)
 
 
 def save_bytes(
@@ -491,7 +491,7 @@ def save_bytes(
     source_url: str | None = None,
     extract: bool = True,
 ) -> dict:
-    return _steward_workspace().save_bytes(
+    return steward_session_workspace().save_bytes(
         conversation_id, filename, content,
         source=source, mime_type=mime_type, source_url=source_url, extract=extract,
     )
@@ -507,22 +507,22 @@ def save_stream(
     source_url: str | None = None,
     extract: bool = True,
 ) -> dict:
-    return _steward_workspace().save_stream(
+    return steward_session_workspace().save_stream(
         conversation_id, filename, stream,
         source=source, mime_type=mime_type, source_url=source_url, extract=extract,
     )
 
 
 def list_files(conversation_id: str) -> list[dict]:
-    return _steward_workspace().list_files(conversation_id)
+    return steward_session_workspace().list_files(conversation_id)
 
 
 def require_file(conversation_id: str, artifact_id: str) -> tuple[dict, Path]:
-    return _steward_workspace().require_file(conversation_id, artifact_id)
+    return steward_session_workspace().require_file(conversation_id, artifact_id)
 
 
 def delete_file(conversation_id: str, artifact_id: str) -> None:
-    _steward_workspace().delete_file(conversation_id, artifact_id)
+    steward_session_workspace().delete_file(conversation_id, artifact_id)
 
 
 def extracted_text(
@@ -532,7 +532,7 @@ def extracted_text(
     *,
     offset: int = 0,
 ) -> str:
-    return _steward_workspace().extracted_text(conversation_id, artifact_id, cap, offset=offset)
+    return steward_session_workspace().extracted_text(conversation_id, artifact_id, cap, offset=offset)
 
 
 def context_block(
@@ -541,32 +541,32 @@ def context_block(
     *,
     query: str | None = None,
 ) -> str:
-    return _steward_workspace().context_block(conversation_id, total_cap, query=query)
+    return steward_session_workspace().context_block(conversation_id, total_cap, query=query)
 
 
 def archive_path(conversation_id: str) -> Path:
-    return _steward_workspace().archive_path(conversation_id)
+    return steward_session_workspace().archive_path(conversation_id)
 
 
 def remove_session(conversation_id: str) -> None:
-    _steward_workspace().remove_session(conversation_id)
+    steward_session_workspace().remove_session(conversation_id)
 
 
 def captures_path(conversation_id: str) -> Path:
-    return _steward_workspace().captures_path(conversation_id)
+    return steward_session_workspace().captures_path(conversation_id)
 
 
 def append_capture(conversation_id: str, capture: dict) -> None:
-    _steward_workspace().append_capture(conversation_id, capture)
+    steward_session_workspace().append_capture(conversation_id, capture)
 
 
 def load_captures(conversation_id: str, limit: int = 300) -> list[dict]:
-    return _steward_workspace().load_captures(conversation_id, limit)
+    return steward_session_workspace().load_captures(conversation_id, limit)
 
 
 def require_capture(conversation_id: str, capture_id: str) -> dict:
-    return _steward_workspace().require_capture(conversation_id, capture_id)
+    return steward_session_workspace().require_capture(conversation_id, capture_id)
 
 
 def storage_state_path(conversation_id: str) -> Path:
-    return _steward_workspace().storage_state_path(conversation_id)
+    return steward_session_workspace().storage_state_path(conversation_id)

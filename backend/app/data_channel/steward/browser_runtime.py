@@ -316,6 +316,7 @@ class BrowserSession:
     conversation_id: str
     context: Any
     page: Any
+    workspace: workspace.SessionWorkspace
     user_id: str | None = None
     source_key: str = "managed"
     captures: list[dict] = field(default_factory=list)
@@ -351,7 +352,7 @@ class BrowserSession:
             if not path:
                 return
             content = Path(path).read_bytes()
-            workspace.save_bytes(
+            self.workspace.save_bytes(
                 self.conversation_id, download.suggested_filename or "download.bin", content,
                 source="download", source_url=download.url, extract=True,
             )
@@ -407,11 +408,11 @@ class BrowserSession:
         }
         self.captures.append(capture)
         self.captures = self.captures[-max(20, int(settings.steward_browser_max_captures)):]
-        workspace.append_capture(self.conversation_id, capture)
+        self.workspace.append_capture(self.conversation_id, capture)
 
     async def save_state(self) -> None:
         try:
-            await self.context.storage_state(path=str(workspace.storage_state_path(self.conversation_id)))
+            await self.context.storage_state(path=str(self.workspace.storage_state_path(self.conversation_id)))
             self.last_state_saved = time.time()
         except Exception:
             logger.debug("browser storage state save failed", exc_info=True)
@@ -859,9 +860,11 @@ class BrowserManager:
             await route.abort("blockedbyclient")
 
     async def _start(self, conversation_id: str, url: str, *, user_id: str | None = None,
-                     actor: str = "agent", browser_target: BrowserTarget | None = None) -> dict:
+                     actor: str = "agent", browser_target: BrowserTarget | None = None,
+                     session_workspace: workspace.SessionWorkspace | None = None) -> dict:
         navigation_target = _safe_url(url)
         selected_target = browser_target or managed_browser_target()
+        session_workspace = session_workspace or workspace.steward_session_workspace()
         user_id = str(user_id) if user_id is not None else None
         self._ensure_reaper()
         await self._wait_actor_allowed(conversation_id, actor)
@@ -878,7 +881,7 @@ class BrowserManager:
                 if session is None:
                     reclaimed = await self._ensure_capacity(user_id)
                     browser = await self._ensure_browser(selected_target)
-                    state = workspace.storage_state_path(conversation_id)
+                    state = session_workspace.storage_state_path(conversation_id)
                     restored = state.exists()
                     kwargs = {
                         "accept_downloads": True,
@@ -892,6 +895,7 @@ class BrowserManager:
                     page = await context.new_page()
                     session = BrowserSession(
                         conversation_id, context, page,
+                        workspace=session_workspace,
                         user_id=user_id, source_key=selected_target.key,
                     )
                     session.bind_page(page)
@@ -935,10 +939,11 @@ class BrowserManager:
         return result
 
     def start(self, conversation_id: str, url: str, *, user_id: str | None = None,
-              actor: str = "agent", browser_target: BrowserTarget | None = None) -> dict:
+              actor: str = "agent", browser_target: BrowserTarget | None = None,
+              session_workspace: workspace.SessionWorkspace | None = None) -> dict:
         return self.call(self._start(
             conversation_id, url, user_id=user_id, actor=actor,
-            browser_target=browser_target))
+            browser_target=browser_target, session_workspace=session_workspace))
 
     async def _require(self, conversation_id: str) -> BrowserSession:
         session = self._sessions.get(conversation_id)
@@ -1039,7 +1044,7 @@ class BrowserManager:
 
     async def _finish_click(self, conversation_id: str, session: BrowserSession,
                             locator: Any, *, actor: str) -> dict:
-        before = {row["id"] for row in workspace.list_files(conversation_id)}
+        before = {row["id"] for row in session.workspace.list_files(conversation_id)}
         await locator.scroll_into_view_if_needed(timeout=3000)
         await locator.click(timeout=5000)
         await session.page.wait_for_timeout(500)
@@ -1055,7 +1060,7 @@ class BrowserManager:
         state = await self._state(
             conversation_id, actor=actor, check_control=False)
         state["downloadedFiles"] = [
-            row for row in workspace.list_files(conversation_id) if row["id"] not in before
+            row for row in session.workspace.list_files(conversation_id) if row["id"] not in before
         ]
         return state
 
@@ -1155,7 +1160,7 @@ class BrowserManager:
                 mime = headers.get("content-type") or "application/octet-stream"
                 source_url = target
             saved_name = _download_filename(resource_url, headers, mime, preferred)
-            row = workspace.save_bytes(
+            row = session.workspace.save_bytes(
                 conversation_id, saved_name, content, source="download",
                 mime_type=mime, source_url=source_url, extract=True,
             )
@@ -1248,8 +1253,10 @@ class BrowserManager:
                          client_id: str | None = None) -> dict:
         return await self.acall(self._screenshot(conversation_id, client_id))
 
-    def list_captures(self, conversation_id: str, keyword: str | None = None, limit: int = 50) -> list[dict]:
-        rows = workspace.load_captures(conversation_id, max(limit * 4, 100))
+    def list_captures(self, conversation_id: str, keyword: str | None = None, limit: int = 50,
+                      *, session_workspace: workspace.SessionWorkspace | None = None) -> list[dict]:
+        source = session_workspace or workspace.steward_session_workspace()
+        rows = source.load_captures(conversation_id, max(limit * 4, 100))
         if keyword:
             needle = keyword.lower()
             rows = [r for r in rows if needle in str(r.get("url", "")).lower() or needle in str(r.get("responseBody", "")).lower()]
@@ -1258,7 +1265,7 @@ class BrowserManager:
     async def _download(self, conversation_id: str, capture_id: str, *, actor: str = "agent") -> dict:
         await self._wait_actor_allowed(conversation_id, actor)
         session = await self._require(conversation_id)
-        capture = workspace.require_capture(conversation_id, capture_id)
+        capture = session.workspace.require_capture(conversation_id, capture_id)
         if capture.get("method") != "GET":
             raise BrowserRuntimeError("自动下载只重放 GET 请求，其他方法请先在页面中触发下载")
         headers = {
@@ -1274,7 +1281,7 @@ class BrowserManager:
             response_headers = response.headers
             filename = _download_filename(
                 capture["url"], response_headers, response_headers.get("content-type"))
-            row = workspace.save_bytes(
+            row = session.workspace.save_bytes(
                 conversation_id, filename, content, source="download",
                 mime_type=response_headers.get("content-type"), source_url=capture["url"], extract=True,
             )
@@ -1302,6 +1309,15 @@ class BrowserManager:
 
     def close(self, conversation_id: str) -> None:
         self.call(self._close(conversation_id), timeout=20)
+
+    def close_by_source(self, source_key: str) -> None:
+        for cid, session in list(self._sessions.items()):
+            if session.source_key != source_key:
+                continue
+            try:
+                self.close(cid)
+            except Exception:
+                logger.warning("关闭来源 %s 的浏览器会话失败: %s", source_key, cid, exc_info=True)
 
     async def _close_all(self) -> None:
         if self._reaper_task and not self._reaper_task.done():

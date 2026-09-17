@@ -314,6 +314,22 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 实时浏览器协作（来源管理 + 会话级浏览器操作）：同前缀同守卫的独立子路由
+from app.super_assistant import browser as super_assistant_browser
+app.include_router(
+    super_assistant_browser.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
+# 浏览器实时画面 WebSocket 复用 steward 的 ticket 鉴权处理器（理由同上方
+# steward WS 挂载处注释）：live 处理器与会话模型完全无关，二次挂载仅新增
+# 超助前缀；companion/connect 顺带双前缀可用，脚本仍回连 steward 路径。
+app.include_router(
+    steward_browser_ws.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant-browser"],
+)
 # 远程助手公开面（先例：/api/public/manual-datasets）：远端 agent 凭一次性邀请
 # 令牌自助注册；回连模式凭 agent key 长轮询领任务/回传结果。无会话鉴权，
 # 门禁分别是邀请令牌与 agent key（sha256 哈希查表）。

@@ -75,6 +75,7 @@ export default defineConfig({
     '**/steward_conversation_export.spec.ts',
     '**/sync_tasks_ui.spec.ts',
     '**/super_assistant_agent_mode.spec.ts',
+    '**/super_assistant_browser_collaboration.spec.ts',
     '**/super_assistant_evolution.spec.ts',
     '**/super_assistant_workbench.spec.ts',
     '**/theme_toggle.spec.ts',

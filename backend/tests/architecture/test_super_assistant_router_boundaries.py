@@ -790,9 +790,17 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 不在本基线范围）；
     # 本体发布文档共享镜像新增 /palace/ontology-documents 的 list、
     # /palace/ontology-documents/{id} 的 preview/rebuild 共 3 个操作
-    # （3 条路径）
-    assert len(paths) == 64
-    assert sum(len(item) for item in paths.values()) == 88
+    # （3 条路径）；
+    # 实时浏览器协作（browser.py 子路由）新增 /browser/sources 的
+    # list/create、/browser/sources/{id} 的 patch/delete、
+    # /browser/sources/{id}/rotate-token 与 /test 的 post、
+    # /browser/companion/script 的 get 共 7 个操作（5 条路径），以及
+    # /conversations/{id}/browser/* 会话级 source/start/navigate/session/
+    # captures/captures/{cid}/download/ticket/live-http(+frame/input/
+    # control/release) 共 12 个操作（12 条路径）；live/companion WS 经
+    # steward 处理器二次挂载，不进 OpenAPI
+    assert len(paths) == 81
+    assert sum(len(item) for item in paths.values()) == 107
     assert hashlib.sha256(payload).hexdigest() == (
-        "20fc0d5a5b641fb81baafb87fcbf93dec18fd76d920d01459a510f41b477a49a"
+        "97ab5b10224b2c007d933de11144a2778b6a38689fb75cfb61ecb153da6c6921"
     )

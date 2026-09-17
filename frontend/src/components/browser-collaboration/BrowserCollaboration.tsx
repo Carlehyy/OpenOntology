@@ -5,9 +5,9 @@ import {
   Settings, Trash2, User, Wifi, WifiOff, X,
 } from 'lucide-react'
 import {
-  downloadBrowserCompanion, stewardApi,
-  type BrowserCapture, type BrowserCollaborationState, type BrowserSource,
-} from '@/api/steward'
+  type BrowserCapture, type BrowserCollaborationApi, type BrowserCollaborationState,
+  type BrowserSource,
+} from '@/api/browserCollaboration'
 import { writeTextToClipboard } from '@/utils/clipboard'
 
 const PIP_VIEWPORT_MARGIN = 12
@@ -29,14 +29,18 @@ const OBSERVING_COLLABORATION: BrowserCollaborationState = {
   controller: 'agent', mode: 'observe', agentCanAct: true, expiresIn: 0,
 }
 
-export default function BrowserModal({ conversationId, mode, onMinimize, onRestore, onClose, errorText }: {
+export default function BrowserModal({ conversationId, mode, onMinimize, onRestore, onClose, errorText, api, labels }: {
   conversationId: string
   mode: Exclude<BrowserDisplayMode, 'closed'>
   onMinimize: () => void
   onRestore: () => void
   onClose: () => void
   errorText: (error: unknown, fallback: string) => string
+  api: BrowserCollaborationApi
+  labels?: { assistantName?: string; shortName?: string }
 }) {
+  const assistantName = labels?.assistantName || '数据管家'
+  const shortName = labels?.shortName || '管家'
   const [url, setUrl] = useState('https://')
   const [currentUrl, setCurrentUrl] = useState('')
   const [frame, setFrame] = useState('')
@@ -322,15 +326,15 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
 
   const loadSources = useCallback(async () => {
     try {
-      const [rows, conversation] = await Promise.all([
-        stewardApi.browserSources(), stewardApi.conversation(conversationId),
+      const [rows, boundSourceId] = await Promise.all([
+        api.listSources(), api.conversationBrowserSourceId(conversationId),
       ])
       setSources(rows)
-      setSelectedSource(conversation.browserSourceId || 'managed')
+      setSelectedSource(boundSourceId || 'managed')
     } catch (err: unknown) {
       setError(errorText(err, '浏览器来源加载失败'))
     }
-  }, [conversationId])
+  }, [api, conversationId])
 
   useEffect(() => { void loadSources() }, [loadSources])
 
@@ -383,21 +387,21 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     ws?.close()
     const leaseId = httpLeaseRef.current
     httpLeaseRef.current = null
-    if (leaseId) void stewardApi.browserLiveHttpRelease(conversationId, leaseId).catch(() => undefined)
+    if (leaseId) void api.liveHttpRelease(conversationId, leaseId).catch(() => undefined)
     setConnected(false)
     setLiveTransport('')
     setCollaboration(OBSERVING_COLLABORATION)
     setControlBusy(false)
-  }, [conversationId])
+  }, [api, conversationId])
 
   const startHttpFallback = useCallback(async (runId: number) => {
     const wait = (ms: number) => new Promise<void>(resolve => window.setTimeout(resolve, ms))
     while (liveRunRef.current === runId) {
       let attached: { leaseId: string; expiresIn: number; frameIntervalMs: number; collaboration: BrowserCollaborationState }
       try {
-        attached = await stewardApi.browserLiveHttpAttach(conversationId)
+        attached = await api.liveHttpAttach(conversationId)
         if (liveRunRef.current !== runId) {
-          void stewardApi.browserLiveHttpRelease(conversationId, attached.leaseId).catch(() => undefined)
+          void api.liveHttpRelease(conversationId, attached.leaseId).catch(() => undefined)
           return
         }
         httpLeaseRef.current = attached.leaseId
@@ -419,7 +423,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
       let failures = 0
       while (liveRunRef.current === runId && httpLeaseRef.current === leaseId) {
         try {
-          const nextFrame = await stewardApi.browserLiveHttpFrame(conversationId, leaseId)
+          const nextFrame = await api.liveHttpFrame(conversationId, leaseId)
           if (liveRunRef.current !== runId || httpLeaseRef.current !== leaseId) break
           failures = 0
           setConnected(true)
@@ -441,10 +445,10 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
       }
 
       if (httpLeaseRef.current === leaseId) httpLeaseRef.current = null
-      if (leaseId) void stewardApi.browserLiveHttpRelease(conversationId, leaseId).catch(() => undefined)
+      if (leaseId) void api.liveHttpRelease(conversationId, leaseId).catch(() => undefined)
       if (liveRunRef.current === runId) await wait(1000)
     }
-  }, [conversationId])
+  }, [api, conversationId])
 
   const connectLive = useCallback(async () => {
     stopLive()
@@ -452,17 +456,15 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     setAttaching(true)
     let ticket: string
     try {
-      ticket = (await stewardApi.browserTicket(conversationId)).ticket
+      ticket = (await api.ticket(conversationId)).ticket
     } catch {
       if (liveRunRef.current === runId) void startHttpFallback(runId)
       return
     }
     if (liveRunRef.current !== runId) return
-    const runtimeBase = ((window as Window & { __API_BASE_URL__?: string }).__API_BASE_URL__ || window.location.origin).replace(/\/$/, '')
-    const wsBase = runtimeBase.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')
     let ws: WebSocket
     try {
-      ws = new WebSocket(`${wsBase}/api/v2/steward/conversations/${conversationId}/browser/live?ticket=${encodeURIComponent(ticket)}`)
+      ws = new WebSocket(api.liveWsUrl(conversationId, ticket))
     } catch {
       void startHttpFallback(runId)
       return
@@ -515,7 +517,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
         }
       } catch { /* 忽略损坏帧 */ }
     }
-  }, [conversationId, startHttpFallback, stopLive])
+  }, [api, conversationId, startHttpFallback, stopLive])
 
   useEffect(() => {
     let cancelled = false
@@ -523,7 +525,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
       let waitingForFrame = false
       setAttaching(true)
       try {
-        const session = await stewardApi.browserSession(conversationId)
+        const session = await api.session(conversationId)
         if (cancelled || !session.active) return
         setCollaboration(session.collaboration || OBSERVING_COLLABORATION)
         if (session.url) { setCurrentUrl(session.url); setUrl(session.url) }
@@ -547,8 +549,8 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     setBusy(true); setError('')
     try {
       const state = currentUrl
-        ? await stewardApi.browserNavigate(conversationId, url.trim())
-        : await stewardApi.browserStart(conversationId, url.trim())
+        ? await api.navigate(conversationId, url.trim())
+        : await api.start(conversationId, url.trim())
       setCurrentUrl(state.url); setUrl(state.url)
       if (!connected) await connectLive()
     } catch (err: unknown) {
@@ -559,7 +561,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
   const bindSource = async (sourceId: string) => {
     setSourceBusy(true); setError('')
     try {
-      await stewardApi.bindBrowserSource(conversationId, sourceId)
+      await api.bindSource(conversationId, sourceId)
       stopLive()
       setFrame(''); setCurrentUrl('')
       setSelectedSource(sourceId)
@@ -576,7 +578,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
         if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('请求头必须是 JSON 对象')
         headers = parsed as Record<string, string>
       }
-      const created = await stewardApi.createBrowserSource({
+      const created = await api.createSource({
         name: sourceName.trim() || (sourceType === 'companion' ? '我的电脑' : '远程浏览器'),
         sourceType, endpointUrl: sourceType === 'remote_cdp' ? endpointUrl.trim() : undefined, headers,
       })
@@ -590,7 +592,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
   const testSource = async (sourceId: string) => {
     setSourceBusy(true); setError('')
     try {
-      const result = await stewardApi.testBrowserSource(sourceId)
+      const result = await api.testSource(sourceId)
       setError(result.reachable ? `✓ ${result.label}连接正常` : `${result.label}不可达`)
       await loadSources()
     } catch (err: unknown) { setError(errorText(err, '连接测试失败')) }
@@ -601,7 +603,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     setSourceBusy(true); setError('')
     try {
       if (selectedSource === sourceId) await bindSource('managed')
-      await stewardApi.deleteBrowserSource(sourceId)
+      await api.deleteSource(sourceId)
       await loadSources()
     } catch (err: unknown) { setError(errorText(err, '删除浏览器来源失败')) }
     finally { setSourceBusy(false) }
@@ -627,7 +629,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
       .catch(() => undefined)
       .then(async () => {
         if (httpLeaseRef.current !== leaseId) return
-        const result = await stewardApi.browserLiveHttpInput(conversationId, leaseId, message)
+        const result = await api.liveHttpInput(conversationId, leaseId, message)
         setCollaboration(result.collaboration)
       })
       .catch((err: unknown) => setError(errorText(err, '浏览器操作发送失败')))
@@ -656,7 +658,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
       } else {
         const leaseId = httpLeaseRef.current
         if (!leaseId) throw new Error('实时浏览器尚未连接')
-        const result = await stewardApi.browserLiveHttpControl(
+        const result = await api.liveHttpControl(
           conversationId, leaseId, action)
         setCollaboration(result.collaboration)
       }
@@ -694,10 +696,10 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
 
   const loadCaptures = useCallback(async () => {
     try {
-      const rows = await stewardApi.browserCaptures(conversationId)
+      const rows = await api.captures(conversationId)
       setCaptures(rows.filter(row => row.isApi || row.isFile).reverse())
     } catch { /* 浏览器未启动时为空 */ }
-  }, [conversationId])
+  }, [api, conversationId])
 
   useEffect(() => {
     if (!showNetwork) return
@@ -734,7 +736,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
             <span className={`h-2 w-2 shrink-0 rounded-full ${connected ? 'bg-[var(--color-success-bg)]' : 'bg-accent'}`} />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[11px] font-medium text-foreground">实时浏览器</span>
-              <span className="block truncate text-[9px] text-[var(--color-text-tertiary)]">旁观中 · 数据管家可继续操作</span>
+              <span className="block truncate text-[9px] text-[var(--color-text-tertiary)]">{`旁观中 · ${assistantName}可继续操作`}</span>
             </span>
             {connected && liveTransport === 'http' && (
               <span title="WebSocket 不可用，已自动切换到 HTTPS" className="shrink-0 rounded bg-[var(--color-warning-bg)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--color-warning)]">HTTP</span>
@@ -848,10 +850,10 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
           >
             {userHoldingControl || userTemporarilyActive ? <User size={12} /> : <Bot size={12} />}
             {userHoldingControl
-              ? '你正在操作 · 管家等待'
+              ? `你正在操作 · ${shortName}等待`
               : userTemporarilyActive
-                ? '协同操作中 · 管家稍候'
-                : '数据管家可操作 · 你可随时参与'}
+                ? `协同操作中 · ${shortName}稍候`
+                : `${assistantName}可操作 · 你可随时参与`}
           </div>
           {connected && liveTransport === 'http' && (
             <span title="当前网络禁止 WebSocket，画面与操作已自动切换到 HTTPS"
@@ -883,7 +885,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
               : 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] text-[var(--color-warning)] hover:bg-[var(--color-warning-bg)]'}`}
           >
             {controlBusy ? <Loader2 size={12} className="animate-spin" /> : userHoldingControl ? <Bot size={12} /> : <User size={12} />}
-            {userHoldingControl ? '继续交给数据管家' : '暂停管家，我来处理'}
+            {userHoldingControl ? `继续交给${assistantName}` : `暂停${shortName}，我来处理`}
           </button>
           <button
             ref={modalPipButtonRef}
@@ -967,7 +969,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
                 <div className="mt-3 rounded-xl border border-brand-line bg-brand-soft p-3">
                   <p className="text-[11px] font-medium text-brand-ink">配对令牌只显示这一次</p>
                   <ol className="mt-1 list-decimal space-y-1 pl-4 text-[10px] leading-5 text-brand-ink"><li>安装 Node.js 22+，下载助手脚本</li><li>在脚本目录运行下面命令，Chrome/Edge 会使用独立资料目录启动</li></ol>
-                  <div className="mt-2 flex gap-2"><button onClick={() => void downloadBrowserCompanion()} className="rounded-lg bg-card px-2.5 py-1.5 text-[10px] font-medium text-brand-ink shadow-sm">下载助手</button>
+                  <div className="mt-2 flex gap-2"><button onClick={() => void api.downloadCompanionScript()} className="rounded-lg bg-card px-2.5 py-1.5 text-[10px] font-medium text-brand-ink shadow-sm">下载助手</button>
                     <button onClick={() => void writeTextToClipboard(companionCommand).catch(() => undefined)} className="flex items-center gap-1 rounded-lg bg-card px-2.5 py-1.5 text-[10px] font-medium text-brand-ink shadow-sm"><Copy size={10} />复制命令</button></div>
                   <code className="mt-2 block max-h-16 overflow-auto break-all rounded-lg bg-card p-2 text-[9px] leading-4 text-brand-ink">{companionCommand}</code>
                 </div>
@@ -1018,7 +1020,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
                       {item.isFile && <span className="rounded bg-[var(--color-warning-bg)] px-1.5 py-0.5 text-[var(--color-warning)]">文件</span>}
                     </div>
                     <p className="mt-1.5 break-all font-mono text-[10px] leading-4 text-muted-foreground">{item.url}</p>
-                    {item.isFile && <button onClick={async () => { await stewardApi.downloadCapture(conversationId, item.id); await loadCaptures() }}
+                    {item.isFile && <button onClick={async () => { await api.downloadCapture(conversationId, item.id); await loadCaptures() }}
                       className="mt-2 flex items-center gap-1 text-[11px] font-medium text-brand-ink"><Download size={11} />保存到会话</button>}
                   </div>
                 ))}
@@ -1028,7 +1030,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
         </div>
         </div>
         <div className="flex items-center justify-between gap-4 border-t bg-card px-4 py-2 text-[11px] text-muted-foreground">
-          <span>协同浏览器支持你旁观并随时参与；普通点击结束后管家会自动继续。登录等长操作可先暂停管家，完成后直接交还，无需关闭窗口。</span>
+          <span>{`协同浏览器支持你旁观并随时参与；普通点击结束后${shortName}会自动继续。登录等长操作可先暂停${shortName}，完成后直接交还，无需关闭窗口。`}</span>
           <span className="shrink-0 text-[var(--color-text-tertiary)]">密码只由你在隔离浏览器中输入</span>
         </div>
       </div>

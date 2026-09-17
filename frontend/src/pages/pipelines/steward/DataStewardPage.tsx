@@ -18,10 +18,12 @@ import {
   Sparkles,
 } from 'lucide-react'
 import {
-  downloadStewardConversation, downloadStewardFile, stewardApi, streamStewardChat,
+  downloadBrowserCompanion, downloadStewardConversation, downloadStewardFile,
+  stewardApi, streamStewardChat,
   type StewardArtifact, type StewardConversationDTO, type StewardPipeline,
   type StewardStatus, type StewardStep,
 } from '@/api/steward'
+import { browserLiveWsUrl, type BrowserCollaborationApi } from '@/api/browserCollaboration'
 import { modelApi } from '@/api/ontologies'
 import pipelinesApi from '@/api/v2/pipelines'
 import type { Pipeline } from '@/api/v2/pipelines'
@@ -30,7 +32,7 @@ import { toast } from 'sonner'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import SessionHistoryPopover from '@/components/SessionHistoryPopover'
 import PipelineEditWizard from '../PipelineEditWizard'
-import BrowserModal, { type BrowserDisplayMode } from './components/BrowserCollaboration'
+import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-collaboration/BrowserCollaboration'
 import ConversationTimeline from './components/ConversationTimeline'
 import ManagedPipelinesPanel from './components/ManagedPipelinesPanel'
 import StewardComposer from './components/StewardComposer'
@@ -45,6 +47,32 @@ import {
 
 let msgSeq = 0
 const nextId = () => `m${Date.now()}_${msgSeq++}`
+
+// 浏览器协作面板的管家域适配对象：薄封装既有 stewardApi 函数（/steward 前缀），
+// 文案 labels 不传（组件默认值即管家文案）。
+const stewardBrowserApi: BrowserCollaborationApi = {
+  listSources: () => stewardApi.browserSources(),
+  conversationBrowserSourceId: async cid =>
+    (await stewardApi.conversation(cid)).browserSourceId || null,
+  createSource: body => stewardApi.createBrowserSource(body),
+  testSource: id => stewardApi.testBrowserSource(id),
+  deleteSource: id => stewardApi.deleteBrowserSource(id),
+  bindSource: (cid, sourceId) => stewardApi.bindBrowserSource(cid, sourceId),
+  start: (cid, url) => stewardApi.browserStart(cid, url),
+  navigate: (cid, url) => stewardApi.browserNavigate(cid, url),
+  session: cid => stewardApi.browserSession(cid),
+  ticket: cid => stewardApi.browserTicket(cid),
+  liveHttpAttach: cid => stewardApi.browserLiveHttpAttach(cid),
+  liveHttpFrame: (cid, leaseId) => stewardApi.browserLiveHttpFrame(cid, leaseId),
+  liveHttpInput: (cid, leaseId, message) => stewardApi.browserLiveHttpInput(cid, leaseId, message),
+  liveHttpControl: (cid, leaseId, action) => stewardApi.browserLiveHttpControl(cid, leaseId, action),
+  liveHttpRelease: (cid, leaseId) => stewardApi.browserLiveHttpRelease(cid, leaseId),
+  captures: cid => stewardApi.browserCaptures(cid),
+  downloadCapture: (cid, captureId) => stewardApi.downloadCapture(cid, captureId),
+  downloadCompanionScript: () => downloadBrowserCompanion(),
+  liveWsUrl: (cid, ticket) =>
+    browserLiveWsUrl(`/api/v2/steward/conversations/${cid}/browser/live?ticket=${encodeURIComponent(ticket)}`),
+}
 // ---------- 主页面 ----------
 
 export default function DataStewardPage() {
@@ -570,6 +598,7 @@ export default function DataStewardPage() {
           onRestore={() => setBrowserDisplay('modal')}
           onClose={() => setBrowserDisplay('closed')}
           errorText={errorText}
+          api={stewardBrowserApi}
         />
       )}
     </div>

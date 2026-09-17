@@ -6,6 +6,16 @@
  */
 import { apiClientV2 } from './client'
 
+// 浏览器协作共享类型已迁至 ./browserCollaboration（面板泛化供超级助手复用）；
+// 此处 re-export 保持既有 import 路径（@/api/steward）不破。
+import type {
+  BrowserCapture, BrowserCollaborationState, BrowserLiveFrame, BrowserSource,
+} from './browserCollaboration'
+export type {
+  BrowserCapture, BrowserCollaborationState, BrowserLiveFrame, BrowserSource,
+  BrowserSourceType,
+} from './browserCollaboration'
+
 // ---------- 类型 ----------
 
 /** 治理记录自身状态：在管 / 已归档。发布状态见 pipelineStatus（影子流水线） */
@@ -101,19 +111,6 @@ export interface StewardConversationExport {
   }
 }
 
-export type BrowserSourceType = 'managed' | 'remote_cdp' | 'companion'
-
-export interface BrowserSource {
-  id: string
-  name: string
-  sourceType: BrowserSourceType
-  enabled: boolean
-  online: boolean | null
-  hasSecret: boolean
-  lastSeenAt?: string | null
-  pairingToken?: string | null
-}
-
 export interface StewardArtifact {
   id: string
   filename: string
@@ -134,34 +131,6 @@ export interface StewardFilePreview {
   content: string
   truncated: boolean
   previewable: boolean
-}
-
-export interface BrowserCapture {
-  id: string
-  method: string
-  url: string
-  resourceType: string
-  status: number
-  contentType: string
-  responseShape?: unknown
-  responsePreview?: string
-  pagination?: { mode: string; requestParams: Record<string, string>; responseFields: Record<string, unknown> } | null
-  isApi: boolean
-  isFile: boolean
-  capturedAt: number
-}
-
-export interface BrowserCollaborationState {
-  controller: 'agent' | 'user'
-  mode: 'observe' | 'transient' | 'held'
-  agentCanAct: boolean
-  expiresIn: number
-}
-
-export interface BrowserLiveFrame {
-  data: string
-  url: string
-  collaboration: BrowserCollaborationState
 }
 
 export type StewardEvent =
