@@ -561,8 +561,10 @@ def _anthropic_client_kwargs(kw: dict) -> dict:
 def merged_usage(*usages) -> dict[str, Any] | None:
     """合并同一次网关调用内多次实际请求的 usage（降级重试同样消耗 token）。
 
-    公开给 super_assistant.provider 复用（其非流式降级重试同样需要合并）；
-    非整型字段（GLM MaaS 实测 prompt_tokens 返回 null）跳过不计数。
+    公开给 super_assistant.provider 复用（其非流式降级重试同样需要合并）。
+    兼容两种形态：SDK usage 对象（prompt_tokens/completion_tokens 属性）与
+    已映射的 {"inputTokens", "outputTokens"} dict（流式 final 的形态）；
+    非整型字段（GLM MaaS 实测非流式 prompt_tokens 返回 null）跳过不计数。
     """
     total: dict[str, Any] | None = None
     for usage in usages:
@@ -570,12 +572,31 @@ def merged_usage(*usages) -> dict[str, Any] | None:
             continue
         if total is None:
             total = {"inputTokens": 0, "outputTokens": 0}
+        if isinstance(usage, dict):
+            for key in ("inputTokens", "outputTokens"):
+                value = usage.get(key)
+                if isinstance(value, int):
+                    total[key] += value
+            continue
         for source, key in (("prompt_tokens", "inputTokens"),
                             ("completion_tokens", "outputTokens")):
             value = getattr(usage, source, None)
             if isinstance(value, int):
                 total[key] += value
     return total
+
+
+def _stream_retry_final(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
+    """非流式降级重试的流式路径：消费 _stream_openai 事件流并返回 final。
+
+    delta 事件被有意丢弃——调用方是 chat() 的非流式语义，不需要增量；
+    聚合、think 过滤、usage 采集与 stream_options 降参重建全部复用
+    _stream_openai，不另立聚合实现。
+    """
+    for event in _stream_openai(kw, messages, tools):
+        if "final" in event:
+            return event["final"]
+    raise LLMError("流式重试未产出最终结果")
 
 
 def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
@@ -594,27 +615,47 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
                                                 "parameters": t["parameters"]}} for t in tools]
     resp = client.chat.completions.create(**create_kwargs)
     usages = [getattr(resp, "usage", None)]
-    # 非流式 tool calling 序列化缺陷降级：个别网关型端点在模型决定调工具时
-    # 返回 finish_reason="tool_calls" 却丢失 message.tool_calls 字段（生产
-    # 实测 GLM MaaS 非流式路径，content 与 tool_calls 双空），编排器只能落
-    # 到"（模型未给出回答）"兜底。该签名精确指向端点侧缺陷，检测到时去掉
-    # tools 重试一次让模型直接作答——与 _stream_openai 去掉 stream_options
-    # 重建流同款降参重试先例；健康端点不会出现该签名，行为不变。
+    # 非流式 tool calling 序列化缺陷降级（两级瀑布）：个别网关型端点在模型
+    # 决定调工具时返回 finish_reason="tool_calls" 却丢失 message.tool_calls
+    # 字段（生产实测 GLM MaaS 非流式路径，content 与 tool_calls 双空），但
+    # 其流式路径序列化完好。第一级改用流式重试以保留工具调用能力；流式
+    # 非瞬态失败时第二级去除 tools 重试让模型直接作答（保住可用性）；
+    # 瞬态错误原样上抛，由 chat() 外层 _with_retry 收口。健康端点不会
+    # 出现该签名，行为不变。
     if (create_kwargs.get("tools")
             and getattr(resp.choices[0], "finish_reason", None) == "tool_calls"
             and not getattr(resp.choices[0].message, "tool_calls", None)):
         logger.warning(
             "LLM 端点返回 finish_reason=tool_calls 但缺失 tool_calls 字段，"
-            "去除 tools 降级重试（%s @ %s）", kw.get("model"), kw.get("api_base"))
-        create_kwargs.pop("tools")
-        resp = client.chat.completions.create(**create_kwargs)
-        usages.append(getattr(resp, "usage", None))
-        if (resp.choices
-                and not getattr(resp.choices[0].message, "content", None)
-                and not getattr(resp.choices[0].message, "tool_calls", None)):
+            "改用流式重试以保留工具调用（%s @ %s）", kw.get("model"), kw.get("api_base"))
+        try:
+            final = _stream_retry_final(kw, messages, tools)
+        except Exception as exc:
+            if isinstance(exc, _transient_error_types()):
+                raise
             logger.warning(
-                "LLM 端点降级重试后仍无正文与工具调用（%s @ %s），"
-                "该端点非流式路径可能整体异常", kw.get("model"), kw.get("api_base"))
+                "LLM 端点流式重试失败（%s @ %s: %s），回退去除 tools 重试",
+                kw.get("model"), kw.get("api_base"), type(exc).__name__)
+            create_kwargs.pop("tools")
+            resp = client.chat.completions.create(**create_kwargs)
+            usages.append(getattr(resp, "usage", None))
+            if (resp.choices
+                    and not getattr(resp.choices[0].message, "content", None)
+                    and not getattr(resp.choices[0].message, "tool_calls", None)):
+                logger.warning(
+                    "LLM 端点降级重试后仍无正文与工具调用（%s @ %s），"
+                    "该端点非流式路径可能整体异常", kw.get("model"), kw.get("api_base"))
+        else:
+            usages.append(final.get("usage"))
+            if not final.get("content") and not final.get("tool_calls"):
+                logger.warning(
+                    "LLM 端点流式重试后仍无正文与工具调用（%s @ %s），"
+                    "该端点 tool calling 可能整体异常", kw.get("model"), kw.get("api_base"))
+            return {
+                "content": final.get("content"),
+                "tool_calls": final.get("tool_calls") or [],
+                "usage": merged_usage(*usages),
+            }
     msg = resp.choices[0].message
     tool_calls = []
     for tc in (msg.tool_calls or []):
