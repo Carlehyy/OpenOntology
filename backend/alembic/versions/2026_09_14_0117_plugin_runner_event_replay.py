@@ -1,15 +1,15 @@
 """persist last plugin-runner event for publish replay
 
-Revision ID: 0115_plugin_runner_event_replay
-Revises: 0114_plugin_runner_journal
+Revision ID: 0117_plugin_runner_event_replay
+Revises: 0116_plugin_runner_journal
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
 
-revision = "0115_plugin_runner_event_replay"
-down_revision = "0114_plugin_runner_journal"
+revision = "0117_plugin_runner_event_replay"
+down_revision = "0116_plugin_runner_journal"
 branch_labels = None
 depends_on = None
 

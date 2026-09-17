@@ -83,9 +83,17 @@ def test_hmac_callback_ingress_is_authenticated(db, monkeypatch):
     payload_hash = hashlib.sha256(json.dumps(callback_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     body = AgentCallbackRequest(connector_id=remote.id, request_id="request-1", provider_event_id="provider-1", payload_hash=payload_hash, event_type="call.outcome_changed", payload=callback_payload)
     timestamp = int(time.time())
-    message = f"{timestamp}.{run.id}.request-1.{call.id}.provider-1.{payload_hash}".encode()
+    message = f"{timestamp}.{run.id}.{remote.id}.request-1.{call.id}.provider-1.call.outcome_changed.{payload_hash}".encode()
     signature = "sha256=" + hmac.new(b"callback-secret", message, hashlib.sha256).hexdigest()
     assert receive_agent_callback(run.id, call.id, body, db, str(timestamp), signature)["accepted"] is True
+    # 时间窗内换 event_type 重放同一签名（progress 冒充 outcome）必须被
+    # 签名材料中的 event_type 挡下。
+    from fastapi import HTTPException
+
+    swapped = AgentCallbackRequest(connector_id=remote.id, request_id="request-1", provider_event_id="provider-1", payload_hash=payload_hash, event_type="call.progress", payload=callback_payload)
+    with pytest.raises(HTTPException) as exc_info:
+        receive_agent_callback(run.id, call.id, swapped, db, str(timestamp), signature)
+    assert exc_info.value.status_code == 401
     from app.super_assistant.kernel.models import ExecutionDispatchOutbox
     queued = db.query(ExecutionDispatchOutbox).filter_by(
         run_id=run.id, subject="sa.execution.reconcile",

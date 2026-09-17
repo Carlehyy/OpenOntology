@@ -17,7 +17,7 @@ from app.deps import get_current_user, get_db
 from app.super_assistant.kernel.contracts import CancelReason, ContractError
 from app.super_assistant.kernel.models import Approval, Artifact, ExecutionCall, ExecutionCommand, ExecutionDispatchOutbox, ExecutionEvent, ExecutionRun, InboxItem
 from app.super_assistant.kernel.schemas import ApprovalDecisionRequest, CancelRunRequest, ControlRunRequest, CreateRunRequest, InputRequest, RetryRunRequest, RunAccepted, RunSummary, RunView
-from app.super_assistant.kernel.store import IdempotencyConflict, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
+from app.super_assistant.kernel.store import IdempotencyConflict, QuestionStateError, VersionConflict, append_event, append_input, cancel_run, control_run, create_run, record_command
 from app.super_assistant.kernel.artifacts import artifact_is_expired, validate_object_storage_ref, verify_artifact
 from app.shared.storage import get_storage_service
 from app.super_assistant.kernel.outbox import replay_dead_once
@@ -283,6 +283,9 @@ def submit_kernel_input(run_id: str, body: InputRequest, db: Session = Depends(g
     except KeyError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail="run not found") from exc
+    except QuestionStateError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404 if exc.not_found else 409, detail=str(exc)) from exc
     except VersionConflict as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="version_conflict") from exc
@@ -320,6 +323,33 @@ def decide_kernel_approval(run_id: str, approval_id: str, body: ApprovalDecision
             raise ContractError("run is not waiting for approval")
         approval.status, approval.decided_at, approval.decided_by = body.decision, _utcnow(), user.id
         append_event(db, run, event_type="approval.decided", payload={"approval_id": approval.id, "decision": body.decision, "actor": "user", "decided_at": approval.decided_at.isoformat(), "authorization_hash": approval.parameter_hash}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=body.idempotency_key)
+        gated_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == approval.call_id, ExecutionCall.run_id == run.id)) if approval.call_id else None
+        if gated_call is not None and gated_call.status in {"offered", "waiting_external"} and not gated_call.remote_task_ref:
+            from .store import _add_outbox
+
+            if body.decision == "approved":
+                # 批准后只解锁派发：Run 回到 waiting_external，等外部结果的
+                # 自然唤醒。不立即唤醒模型——否则模型可能在结果未回时重发
+                # 同一 tool_call 触发重复审批。command_id 幂等保证重复决定
+                # 不会重复派发。
+                _add_outbox(db, run, command_id=f"external-dispatch:{gated_call.id}", message_ref=f"call://{gated_call.id}", subject=f"sa.execution.call.{run.owner_id}")
+                run.status, run.wait_reason, run.version = "waiting_external", "external_call", run.version + 1
+                append_event(db, run, event_type="run.status_changed", payload={"from": "waiting_approval", "to": run.status, "reason": "approval_decided", "actor": "user", "version": run.version}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=f"run-approval:{approval.id}")
+            else:
+                # 拒绝：provider 从未被接触（无 dispatch Outbox、无 Attempt、
+                # 无 remote_task_ref），closed/not_sent 是可证明的诚实终态。
+                gated_call.status, gated_call.outcome = "closed", "not_sent"
+                append_event(db, run, event_type="call.outcome_changed", payload={"call_id": gated_call.id, "status": "closed", "outcome": "not_sent", "evidence_ref": None, "connector_id": gated_call.target_ref, "provider_event_id": None}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=f"call-denied:{gated_call.id}")
+                stale_wait = db.scalar(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.kind == "external_event", InboxItem.call_id == gated_call.id, InboxItem.status == "pending"))
+                if stale_wait is not None:
+                    stale_wait.status, stale_wait.consumed_at = "consumed", _utcnow()
+                    append_event(db, run, event_type="inbox.consumed", payload={"inbox_id": stale_wait.id, "kind": stale_wait.kind, "question_id": None}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=f"inbox-denied:{stale_wait.id}")
+        # 决定一经落库即消费审批收件箱行：否则它会挂到 TTL 才转 expired，
+        # Run 视图的 current_inbox 一直显示一条已不存在的待决审批。
+        approval_inbox = db.scalar(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.kind == "approval_decision", InboxItem.approval_id == approval.id, InboxItem.status == "pending"))
+        if approval_inbox is not None:
+            approval_inbox.status, approval_inbox.consumed_at = "consumed", _utcnow()
+            append_event(db, run, event_type="inbox.consumed", payload={"inbox_id": approval_inbox.id, "kind": approval_inbox.kind, "question_id": None}, actor={"kind": "user"}, command_id=command.command_id, idempotency_key=f"inbox-approval:{approval_inbox.id}")
         if run.status == "waiting_approval":
             before = run.status
             run.status, run.wait_reason, run.version = "active", None, run.version + 1
@@ -351,8 +381,11 @@ def stream_kernel_events(
     cursor = after_seq
     if last_event_id:
         parts = last_event_id.split(":")
-        if len(parts) != 2 or parts[0] != run_id:
+        if len(parts) != 2:
             raise HTTPException(status_code=400, detail="Last-Event-ID must be run_id:seq")
+        if parts[0] != run_id:
+            # A cursor minted for another Run must not leak its existence.
+            raise HTTPException(status_code=404, detail="run not found")
         try:
             cursor = int(parts[1])
         except ValueError as exc:

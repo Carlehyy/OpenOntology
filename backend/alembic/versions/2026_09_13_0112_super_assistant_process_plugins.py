@@ -1,15 +1,15 @@
 """persisted process plugin manifests and lifecycle state
 
-Revision ID: 0110_super_assistant_process_plugins
-Revises: 0109_super_assistant_context_sources
+Revision ID: 0112_super_assistant_process_plugins
+Revises: 0111_super_assistant_context_sources
 """
 from alembic import op
 from sqlalchemy import inspect as sa_inspect
 
 from app.super_assistant import models as super_assistant_models
 
-revision = "0110_super_assistant_process_plugins"
-down_revision = "0109_super_assistant_context_sources"
+revision = "0112_super_assistant_process_plugins"
+down_revision = "0111_super_assistant_context_sources"
 branch_labels = None
 depends_on = None
 

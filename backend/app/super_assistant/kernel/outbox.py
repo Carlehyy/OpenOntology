@@ -92,9 +92,16 @@ def recover_expired_claims(db: Session) -> int:
         ExecutionDispatchOutbox.claim_expires_at < now,
     ).with_for_update(skip_locked=True).execution_options(populate_existing=True)).all()
     for row in rows:
-        row.status = "pending"
         row.claim_token = None
         row.claim_expires_at = None
+        # 崩溃恢复也必须计一次尝试：否则"claim 后被杀"的死循环永远到不了
+        # dead/DLQ，观察者只看到行在 pending/claimed 之间无限震荡。
+        row.attempt_count += 1
+        if row.attempt_count >= MAX_ATTEMPTS:
+            row.status = "dead"
+        else:
+            row.status = "pending"
+            row.next_attempt_at = _now() + timedelta(seconds=min(300, 5 * (2 ** max(row.attempt_count - 1, 0))))
     db.commit()
     return len(rows)
 

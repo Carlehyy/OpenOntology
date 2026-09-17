@@ -61,6 +61,14 @@ class VersionConflict(ContractError):
     """写入方持有过期的 Run version 或 lease。"""
 
 
+class QuestionStateError(ContractError):
+    """回答关联的问题不存在、已过期或已被消费（映射为 404/409）。"""
+
+    def __init__(self, message: str, *, not_found: bool = False) -> None:
+        super().__init__(message)
+        self.not_found = not_found
+
+
 @dataclass(frozen=True, slots=True)
 class LeaseToken:
     run_id: str
@@ -327,6 +335,15 @@ def enqueue_reconcile_observation(
     if existing is not None:
         if _hash_payload(existing.payload or {}) != _hash_payload(payload):
             raise IdempotencyConflict("reconcile observation payload conflict")
+        if existing.status == "published":
+            # 观察型消息没有消费回执：一旦消费端丢失投递（nak 耗尽/流重建），
+            # 已发布行会以同 command_id 永远挡住该 provider_event_id 的重发，
+            # Call 随即无限等待。命中已发布行即重置回 pending 让 publisher
+            # 重投；重复消费由消费端 provider_event_id 幂等去重兜底。
+            existing.status = "pending"
+            existing.claim_token = None
+            existing.claim_expires_at = None
+            db.flush()
         return existing
     from app.data_channel.pipeline_tasks.dispatch import EXECUTION_RECONCILE_SUBJECT
     return _add_outbox(
@@ -425,7 +442,9 @@ def _mark_calls_cancel_requested(db: Session, run: ExecutionRun, *, command_id: 
         if call.status in {"offered", "dispatched"} and call.outcome == "not_sent":
             call.status, call.outcome = "closed", "not_sent"
         else:
-            call.status, call.outcome = "cancel_requested", "outcome_unknown"
+            # 取消意图只写 status（baseline §3.2）：outcome 保留已观测事实，
+            # 由 reconciliation 决定远端是否真正停止。
+            call.status = "cancel_requested"
         call.next_reconcile_at = _now() if call.remote_task_ref else None
         append_event(
             db, run, event_type="call.outcome_changed",
@@ -535,6 +554,51 @@ def control_run(
     return run
 
 
+def _resolve_content_ref(db: Session, *, owner_id: str, run_id: str, content_ref: str) -> str:
+    """把 ``artifact://`` 引用解析为有界正文；未知引用不落库。
+
+    用户经 ``content_ref`` 提交的内容必须以其真实正文进入模型视图，不能把
+    一行 URI 当作消息内容。只支持本 owner 的 Artifact；visibility 为
+    run/call 的 Artifact 不能跨 Run 引用。
+    """
+    from .artifacts import MAX_ARTIFACT_BYTES, verify_artifact
+    from .models import Artifact
+
+    ref = str(content_ref or "").strip()
+    if not ref.startswith("artifact://"):
+        raise ContractError("unsupported content_ref scheme")
+    artifact_id = ref.removeprefix("artifact://")
+    artifact = db.scalar(select(Artifact).where(Artifact.id == artifact_id))
+    if artifact is None or artifact.owner_id != owner_id:
+        raise QuestionStateError("content_ref does not resolve to an artifact", not_found=True)
+    if artifact.visibility in {"run", "call"} and artifact.run_id != run_id:
+        raise QuestionStateError("content_ref artifact is scoped to another run", not_found=True)
+    if artifact.status != "complete" or artifact.integrity_status != "verified":
+        raise ContractError("content_ref artifact is not ready")
+    from .artifacts import artifact_is_expired
+    if artifact_is_expired(status=artifact.status, retention_until=getattr(artifact, "retention_until", None)):
+        raise ContractError("content_ref artifact retention expired")
+    if artifact.inline_content is not None:
+        data = artifact.inline_content.encode("utf-8")
+    else:
+        if int(artifact.size or 0) > 256 * 1024 or int(artifact.size or 0) > MAX_ARTIFACT_BYTES:
+            raise ContractError("content_ref artifact exceeds input size limit")
+        from app.shared.storage import get_storage_service
+        try:
+            data = get_storage_service().get_object(artifact.storage_ref)
+        except Exception as exc:
+            raise ContractError("content_ref artifact is not readable") from exc
+    if len(data) > 256 * 1024:
+        raise ContractError("content_ref artifact exceeds input size limit")
+    integrity = verify_artifact(data, expected_checksum=artifact.checksum, expected_size=artifact.size)
+    if integrity.integrity_status != "verified":
+        raise ContractError("content_ref artifact failed integrity check")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractError("content_ref artifact is not UTF-8 text") from exc
+
+
 def append_input(
     db: Session,
     *,
@@ -557,7 +621,15 @@ def append_input(
         InboxItem.run_id == run.id, InboxItem.idempotency_key == idempotency_key,
     ))
     if existing is not None:
-        same = existing.kind == kind and existing.question_id == question_id and existing.payload == payload and existing.target_ref == target_ref
+        same = existing.kind == kind and existing.question_id == question_id and existing.target_ref == target_ref
+        if same:
+            if payload.get("content_ref") and not payload.get("content"):
+                # 首次请求的 content_ref 已在落库前解析为正文；重放只携带
+                # ref。必须按 ref 判等——拿 {content_ref} 与已解析的
+                # {content_ref, content} 逐字节比较会误报幂等冲突。
+                same = (existing.payload or {}).get("content_ref") == payload.get("content_ref")
+            else:
+                same = (existing.payload or {}) == payload
         if not same:
             raise IdempotencyConflict("inbox idempotency key reused with different payload")
         return existing
@@ -565,11 +637,35 @@ def append_input(
         raise VersionConflict("version_conflict")
     if run.status in {status.value for status in TERMINAL_RUN_STATUSES}:
         raise ContractError("terminal Run cannot accept input")
-    if kind == "question_answer" and run.status not in {
-        RunStatus.WAITING_INPUT.value,
-        RunStatus.WAITING_RETRY.value,
-    }:
-        raise ContractError("run is not waiting for input")
+    # ``content_ref`` 必须在这里解析成正文：下游模型视图只消费 content。
+    if payload.get("content") is None and payload.get("content_ref"):
+        resolved = _resolve_content_ref(db, owner_id=run.owner_id, run_id=run.id, content_ref=str(payload["content_ref"]))
+        payload = {**payload, "content": resolved}
+    if kind in {"user_input", "question_answer"} and payload.get("content") is None:
+        # 空回答会在下方把问题行永久置为 consumed：答案静默丢失且 TTL 不再
+        # 补救，必须在落库前拒绝（HTTP 层已有 one-of 校验，此处覆盖内部调用方）。
+        raise ContractError("input requires content or a resolvable content_ref")
+    question_row: InboxItem | None = None
+    if kind == "question_answer":
+        if run.status not in {
+            RunStatus.WAITING_INPUT.value,
+            RunStatus.WAITING_RETRY.value,
+            RunStatus.PAUSED.value,
+        }:
+            raise ContractError("run is not waiting for input")
+        question_row = db.scalar(select(InboxItem).where(
+            InboxItem.run_id == run.id,
+            InboxItem.kind == "question_answer",
+            InboxItem.question_id == question_id,
+            InboxItem.source == "system",
+        ).order_by(InboxItem.accepted_at.desc(), InboxItem.id.desc()).with_for_update())
+        if question_row is None:
+            raise QuestionStateError("question not found for this run", not_found=True)
+        question_expires = _as_utc(question_row.expires_at)
+        if question_row.status == "expired" or (question_expires is not None and question_expires <= _now()):
+            raise QuestionStateError("question has expired")
+        if question_row.status != "pending":
+            raise QuestionStateError("question is no longer answerable")
     item = InboxItem(
         run_id=run.id, kind=kind, priority={"control": 0, "approval_decision": 10, "external_event": 20, "user_input": 30, "question_answer": 30, "resume": 0}.get(kind, 30),
         status="pending", question_id=question_id, target_ref=target_ref,
@@ -579,7 +675,18 @@ def append_input(
     db.add(item)
     db.flush()
     command_id = _new_id()
-    append_event(db, run, event_type="inbox.appended", payload={"inbox_id": item.id, "kind": kind, "target_ref": target_ref or item.id, "expiry_policy": expiry_policy or "none"}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
+    append_event(db, run, event_type="inbox.appended", payload={"inbox_id": item.id, "kind": kind, "target_ref": target_ref or item.id, "expiry_policy": expiry_policy or "none", "question_id": question_id}, actor={"kind": "user"}, command_id=command_id, idempotency_key=idempotency_key)
+    if question_row is not None:
+        # 回答被接受即关闭问题行：否则 TTL 扫描器会在 30 分钟后把已回答的
+        # 问题重新提问或按 fail 策略误伤 Run。
+        question_row.status = "consumed"
+        question_row.consumed_at = _now()
+        append_event(
+            db, run, event_type="inbox.consumed",
+            payload={"inbox_id": question_row.id, "kind": question_row.kind, "question_id": question_row.question_id},
+            actor={"kind": "user"}, command_id=command_id,
+            idempotency_key=f"inbox-consumed:{question_row.id}",
+        )
     if kind in {"user_input", "question_answer", "resume"} and run.status in {RunStatus.WAITING_INPUT.value, RunStatus.WAITING_RETRY.value}:
         before = run.status
         run.status, run.wait_reason, run.version = RunStatus.ACTIVE.value, None, run.version + 1
@@ -588,6 +695,10 @@ def append_input(
         # Waking a Run is a durable command. Without an outbox record the
         # state would become ACTIVE while no NATS activation is published.
         _add_outbox(db, run, command_id=command_id, message_ref=f"command://{command_id}")
+    elif run.status == RunStatus.ACTIVE.value and kind == "user_input":
+        # 激活中途到达的输入不能改变当前 Step，但必须保证后续激活能捡到它：
+        # 登记一条续行 Outbox，让当前 worker 收尾后立刻再激活一次。
+        _add_outbox(db, run, command_id=f"{command_id}:wake", message_ref=f"run://{run.id}")
     return item
 
 

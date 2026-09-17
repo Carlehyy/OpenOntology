@@ -27,7 +27,7 @@ def test_upgrade_and_downgrade_context_source_tombstones(tmp_path, monkeypatch):
     indexes = {index["name"] for index in inspector.get_indexes("super_assistant_context_source_tombstones")}
     assert "ix_sa_context_tombstones_owner_kind" in indexes
     engine.dispose()
-    command.downgrade(cfg, "0108_super_assistant_kernel")
+    command.downgrade(cfg, "0110_super_assistant_kernel")
     engine = create_engine(f"sqlite:///{db_path}")
     assert "super_assistant_context_source_tombstones" not in inspect(engine).get_table_names()
     engine.dispose()

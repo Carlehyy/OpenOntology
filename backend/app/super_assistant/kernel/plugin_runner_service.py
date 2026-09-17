@@ -495,7 +495,7 @@ class PluginRunnerConsumer:
             subscription = await js.pull_subscribe(
                 PLUGIN_RUNNER_SUBJECT, durable=PLUGIN_RUNNER_DURABLE,
                 stream=PLUGIN_RUNNER_STREAM,
-                config=ConsumerConfig(ack_wait=30, max_deliver=5),
+                config=ConsumerConfig(ack_wait=60),
             )
             while not self._shutdown.is_set():
                 try:

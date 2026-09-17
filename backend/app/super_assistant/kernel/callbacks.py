@@ -142,7 +142,10 @@ def _canonical_callback(value: AgentCallbackRequest, *, run_id: str, call_id: st
     payload_bytes = json.dumps(value.payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if hashlib.sha256(payload_bytes).hexdigest() != value.payload_hash:
         raise HTTPException(status_code=422, detail="callback payload hash mismatch")
-    return f"{run_id}.{value.request_id}.{call_id}.{value.provider_event_id}.{value.payload_hash}".encode("utf-8")
+    # event_type 与 connector_id 必须进签名材料：否则 300s 时间窗内截获的
+    # call.progress 可原样重放为 call.outcome_changed（payload 本身允许携带
+    # status 字段），经 reconciler 把未完成 Call 错误关闭。
+    return f"{run_id}.{value.connector_id}.{value.request_id}.{call_id}.{value.provider_event_id}.{value.event_type}.{value.payload_hash}".encode("utf-8")
 
 
 @callback_router.post("/runs/{run_id}/calls/{call_id}/callback", status_code=202)

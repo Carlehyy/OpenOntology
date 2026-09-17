@@ -1,14 +1,14 @@
 """preserve structured RAP artifacts for pull tasks
 
-Revision ID: 0113_remote_agent_result_artifacts
-Revises: 0112_reconcile_outbox_payload
+Revision ID: 0115_remote_agent_result_artifacts
+Revises: 0114_reconcile_outbox_payload
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
-revision = "0113_remote_agent_result_artifacts"
-down_revision = "0112_reconcile_outbox_payload"
+revision = "0115_remote_agent_result_artifacts"
+down_revision = "0114_reconcile_outbox_payload"
 branch_labels = None
 depends_on = None
 

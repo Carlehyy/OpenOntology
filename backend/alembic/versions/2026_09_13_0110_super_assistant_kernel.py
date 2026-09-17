@@ -1,6 +1,6 @@
 """super assistant kernel.v1 execution facts
 
-Revision ID: 0108_super_assistant_kernel
+Revision ID: 0110_super_assistant_kernel
 Revises: 0107_mapping_suggestion_queue
 """
 
@@ -10,8 +10,8 @@ from sqlalchemy import inspect as sa_inspect
 from app.super_assistant.kernel import models as kernel_models
 
 
-revision = "0108_super_assistant_kernel"
-down_revision = "0107_mapping_suggestion_queue"
+revision = "0110_super_assistant_kernel"
+down_revision = "0109_user_query_keys"
 branch_labels = None
 depends_on = None
 

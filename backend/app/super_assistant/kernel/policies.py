@@ -165,6 +165,18 @@ class SideEffectClass(StrEnum):
     EXTERNAL_ASYNC = "external_async"
 
 
+def requires_approval(side_effect_class: str | None, *, require_confirmation: bool = False) -> bool:
+    """Baseline §10: MCP require_confirmation 保持既有口径，其余凡非
+    read_only 的副作用类别（idempotent_write/non_idempotent_write/
+    external_async）必须在派发前取得用户审批；未知分类 fail-closed。"""
+    if require_confirmation:
+        return True
+    value = str(side_effect_class or "")
+    if value not in {member.value for member in SideEffectClass}:
+        return True
+    return value != SideEffectClass.READ_ONLY.value
+
+
 class RetryDecision(StrEnum):
     RETRY = "retry"
     DO_NOT_RETRY = "do_not_retry"

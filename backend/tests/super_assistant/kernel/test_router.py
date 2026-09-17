@@ -121,6 +121,14 @@ def test_kernel_control_and_input_wake_waiting_run(client, db, admin_user, auth_
     run.status = "waiting_input"
     run.wait_reason = "question"
     db.commit()
+    from app.super_assistant.kernel.models import InboxItem as KernelInboxItem
+
+    db.add(KernelInboxItem(
+        run_id=run_id, kind="question_answer", priority=30, status="pending",
+        question_id="q1", target_ref="q1", payload={"question": "需要什么细节？"},
+        source="system", accepted_at=run.created_at, idempotency_key="question-q1",
+    ))
+    db.commit()
     answer = client.post(
         f"/api/v2/super-assistant/runs/{run_id}/inputs",
         json={"kind": "question_answer", "question_id": "q1", "content": "detail", "idempotency_key": "input-1"},

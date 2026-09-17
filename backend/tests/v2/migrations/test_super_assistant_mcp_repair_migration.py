@@ -38,9 +38,14 @@ def test_upgrade_repairs_missing_super_assistant_mcp_table(tmp_path, monkeypatch
         "env_encrypted", "env_names", "enabled", "require_confirmation",
         "tool_manifest", "manifest_revision", "manifest_hash", "last_test_status", "last_test_message",
         "last_tested_at", "created_at", "updated_at",
+        # 基线 main 的 0108_super_assistant_mcp_dev 给该表补的 dev 项目
+        # 外键列：合并后随迁移链必然存在（本分支代码不消费它）。
+        "dev_project_id",
     } == {column["name"] for column in inspector.get_columns("super_assistant_mcp_servers")}
     assert {
         "ix_super_assistant_mcp_servers_owner_id", "ix_sa_mcp_owner_updated",
+        # 基线 0108 dev 外键列自带的索引（合并后必然存在）。
+        "ix_sa_mcp_servers_dev_project_id",
     } == {index["name"] for index in inspector.get_indexes("super_assistant_mcp_servers")}
     assert any(
         constraint["name"] == "uq_sa_mcp_owner_name"

@@ -24,15 +24,25 @@ def test_rebuild_messages_records_consumed_input_for_crash_recovery(db):
     run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="goal", idempotency_key="input-run")
     db.commit()
     run.status = "waiting_input"; db.commit()
+    from app.super_assistant.kernel.models import InboxItem as KernelInboxItem
+    db.add(KernelInboxItem(
+        run_id=run.id, kind="question_answer", priority=30, status="pending",
+        question_id="q1", target_ref="q1", payload={"question": "需要什么？"},
+        source="system", accepted_at=run.created_at, idempotency_key="question-q1",
+    ))
+    db.commit()
     from app.super_assistant.kernel.store import append_input
-    append_input(db, run_id=run.id, owner_id=owner.id, kind="question_answer", question_id="q1", payload={"content": "answer"}, idempotency_key="answer-1")
+    item = append_input(db, run_id=run.id, owner_id=owner.id, kind="question_answer", question_id="q1", payload={"content": "answer"}, idempotency_key="answer-1")
     db.commit(); db.refresh(run)
     first = runtime._rebuild_messages(db, run)
     db.commit(); db.expire_all(); db.refresh(run)
     second = runtime._rebuild_messages(db, run)
     assert [item["content"] for item in first if item["role"] == "user"].count("answer") == 1
     assert [item["content"] for item in second if item["role"] == "user"].count("answer") == 1
-    assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.consumed").count() == 1
+    consumed = db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.consumed").all()
+    # 回答行的消费必须恰好一次（两次 rebuild 不重复消费）；问题行的关闭
+    # 会额外产生一条 consumed 事件，属新契约的预期行为。
+    assert len([e for e in consumed if (e.payload or {}).get("inbox_id") == item.id]) == 1
 
 
 def test_user_input_wakes_waiting_run_without_leaving_stranded_pending_item(db):
@@ -400,18 +410,110 @@ def test_kernel_runtime_honors_max_steps_and_yields_retry(db, monkeypatch):
     assert step.close_reason == "waiting_retry"
 
 
-def test_kernel_runtime_materializes_external_wait_as_reconcilable_call(db, monkeypatch):
+def test_kernel_external_call_requests_approval_and_defers_dispatch(db, monkeypatch):
+    from app.super_assistant.kernel.models import Approval as KernelApproval, ExecutionDispatchOutbox
+
     run, _, _ = _runtime_fixture(db, monkeypatch, goal="调用外部智能体")
     monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {"content": "已发起", "tool_calls": [], "external_call": {"target_ref": "agent:research", "reason": "等待外部结果"}})
     asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "external-wait"}))
     db.expire_all()
     persisted = db.get(ExecutionRun, run.id)
-    assert persisted.status == "waiting_external"
+    # Baseline §10：非 read_only 副作用先过审批——Run 停在 waiting_approval，
+    # Call 已物化为可对账的 waiting_external，但派发 Outbox 必须不存在。
+    assert persisted.status == "waiting_approval"
     external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
-    assert external.status == "waiting_external"
-    assert external.outcome == "remote_running"
-    inbox = db.query(runtime.InboxItem).filter_by(run_id=run.id, kind="external_event").one()
-    assert inbox.call_id == external.id
+    # provider 从未被接触：Call 只能落在 offered/not_sent，不能伪造
+    # remote_running 外部观测（baseline §2/§3.2）。
+    assert external.status == "offered"
+    assert external.outcome == "not_sent"
+    approval = db.query(KernelApproval).filter_by(run_id=run.id, call_id=external.id, status="pending").one()
+    assert approval.capability_revision == external.capability_revision
+    assert approval.parameter_hash
+    assert db.query(ExecutionDispatchOutbox).filter_by(run_id=run.id, command_id=f"external-dispatch:{external.id}").count() == 0
+
+
+def _gated_external_fixture(db, monkeypatch, *, goal):
+    from app.super_assistant.kernel.models import Approval as KernelApproval
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal=goal)
+    target = f"fake.gated_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交待审", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "执行写入"},
+    })
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": f"gated-{target}"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, target_ref=target).one()
+    approval = db.query(KernelApproval).filter_by(call_id=external.id).one()
+    db.refresh(run)
+    assert run.status == "waiting_approval"
+    return run, owner, external, approval
+
+
+def test_kernel_approval_denied_closes_gated_call_and_replans(db, monkeypatch):
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+    from app.super_assistant.kernel.router import decide_kernel_approval
+    from app.super_assistant.kernel.schemas import ApprovalDecisionRequest
+
+    run, owner, external, approval = _gated_external_fixture(db, monkeypatch, goal="需要审批的写入")
+    decide_kernel_approval(
+        run.id, approval.id, ApprovalDecisionRequest(decision="denied", idempotency_key=f"deny-{approval.id}"),
+        db=db, user=owner, if_match=f'"{run.version}"', idempotency_header=f"deny-{approval.id}",
+    )
+    db.expire_all()
+    external = db.get(runtime.ExecutionCall, external.id)
+    # provider 从未被接触：closed/not_sent 是可证明的诚实终态。
+    assert (external.status, external.outcome) == ("closed", "not_sent")
+    assert db.get(ExecutionRun, run.id).status == "active"
+    assert db.query(ExecutionDispatchOutbox).filter_by(run_id=run.id, command_id=f"external-dispatch:{external.id}").count() == 0
+
+
+def test_kernel_approval_approved_defers_then_dispatches_gated_call(db, monkeypatch):
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+    from app.super_assistant.kernel.router import decide_kernel_approval
+    from app.super_assistant.kernel.schemas import ApprovalDecisionRequest
+
+    run, owner, external, approval = _gated_external_fixture(db, monkeypatch, goal="批准后执行")
+    version = run.version
+    decide_kernel_approval(
+        run.id, approval.id, ApprovalDecisionRequest(decision="approved", idempotency_key=f"ok-{approval.id}"),
+        db=db, user=owner, if_match=f'"{version}"', idempotency_header=f"ok-{approval.id}",
+    )
+    db.expire_all()
+    # 批准只解锁派发：Run 回 waiting_external 等结果自然唤醒；Call 保持
+    # offered/not_sent，由 dispatch 消费端翻到 running/accepted。
+    assert db.get(ExecutionRun, run.id).status == "waiting_external"
+    external = db.get(runtime.ExecutionCall, external.id)
+    assert external.status == "offered"
+    assert external.outcome == "not_sent"
+    assert db.query(ExecutionDispatchOutbox).filter_by(run_id=run.id, command_id=f"external-dispatch:{external.id}").count() == 1
+    # 同键同版本的幂等重放不得产生第二条派发指令（异版本重放按迟到
+    # 决定契约返回 409 并保留原决定）。
+    decide_kernel_approval(
+        run.id, approval.id, ApprovalDecisionRequest(decision="approved", idempotency_key=f"ok-{approval.id}"),
+        db=db, user=owner, if_match=f'"{version}"', idempotency_header=f"ok-{approval.id}",
+    )
+    assert db.query(ExecutionDispatchOutbox).filter_by(run_id=run.id, command_id=f"external-dispatch:{external.id}").count() == 1
+
+
+def test_expiring_gated_approval_closes_undispatched_call(db, monkeypatch):
+    from datetime import timedelta
+
+    from app.super_assistant.kernel.models import Approval as KernelApproval
+    from app.super_assistant.kernel.recovery import expire_inbox_once
+
+    run, _, external, approval = _gated_external_fixture(db, monkeypatch, goal="审批过期")
+    inbox_row = db.query(runtime.InboxItem).filter_by(approval_id=approval.id).one()
+    past = run.created_at - timedelta(seconds=1)
+    approval.expires_at = past
+    inbox_row.expires_at = past
+    db.commit()
+    assert expire_inbox_once(db) == 1
+    db.expire_all()
+    external = db.get(runtime.ExecutionCall, external.id)
+    # 审批 TTL 到期：未派发的 Call 收敛为 closed/not_sent，Run 按 fail_run 失败。
+    assert (external.status, external.outcome) == ("closed", "not_sent")
+    assert db.get(KernelApproval, approval.id).status == "expired"
+    assert db.get(ExecutionRun, run.id).status == "failed"
 
 
 def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, monkeypatch):
@@ -421,6 +523,8 @@ def test_kernel_external_call_is_dispatched_through_registry_and_wakes_run(db, m
         "content": "已提交远程任务", "tool_calls": [],
         "external_call": {"target_ref": target, "message": "研究项目"},
     })
+    # 本测试聚焦派发链路；审批门行为由专项测试覆盖，按已批准放行。
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
     asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "external-dispatch"}))
     external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
 
@@ -568,6 +672,8 @@ def test_kernel_external_async_result_is_reconciled_after_remote_acceptance(db, 
         "content": "已提交", "tool_calls": [],
         "external_call": {"target_ref": target, "message": "执行长任务"},
     })
+    # 本测试聚焦对账链路；审批门行为由专项测试覆盖，按已批准放行。
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
     asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "async-external"}))
     external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
 
@@ -613,6 +719,8 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
         "content": "已提交", "tool_calls": [],
         "external_call": {"target_ref": target, "message": "后台执行"},
     })
+    # 本测试聚焦 scheduler 轮询；审批门行为由专项测试覆盖，按已批准放行。
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
     asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "scheduler-external"}))
     external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
 
@@ -784,6 +892,8 @@ def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):
     monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
         "content": "调用 MCP", "tool_calls": [{"id": "mcp-1", "name": target, "arguments": {"q": "OpenOntology"}}],
     })
+    # 本测试聚焦 MCP 连接器；审批门行为由专项测试覆盖，按已批准放行。
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
     asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "mcp-wait"}))
     external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
 

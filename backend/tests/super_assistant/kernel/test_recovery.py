@@ -168,7 +168,7 @@ def test_user_cancel_has_grace_deadline_and_scheduler_closes_it(db):
     assert run.status == "cancelled"
 
 
-def test_expired_question_is_reasked_once_then_fails_run(db):
+def test_expired_question_is_reasked_once_then_fails_branch(db):
     owner, conversation = _owner_and_conversation(db)
     run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="question", idempotency_key="question")
     run.status = "waiting_input"
@@ -184,12 +184,15 @@ def test_expired_question_is_reasked_once_then_fails_run(db):
     db.refresh(run)
     assert run.status == "waiting_input"
     retry = db.query(InboxItem).filter(InboxItem.run_id == run.id, InboxItem.status == "pending").one()
-    assert retry.expiry_policy == "fail_run"
+    assert retry.expiry_policy == "fail_branch"
     retry.expires_at = run.created_at - timedelta(seconds=1)
     db.commit()
     assert expire_inbox_once(db) == 1
     db.refresh(run)
-    assert run.status == "failed"
+    # fail_branch 只关闭等待分支：Run 回到 active 由模型在缺少该回答的
+    # 情况下重新规划，而不是整体失败。
+    assert run.status == "active"
+    assert run.wait_reason is None
     assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.expired").count() == 2
 
 

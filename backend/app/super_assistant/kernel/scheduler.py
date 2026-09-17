@@ -144,7 +144,7 @@ def _mark_external_call_manual(call_id: str, worker_id: str, reason: str) -> Non
             payload={"call_id": call.id, "status": call.status, "outcome": call.outcome,
                      "evidence_ref": None, "connector_id": call.target_ref,
                      "provider_event_id": None},
-            actor={"kind": "scheduler"}, command_id=f"call:{call.id}:manual:{reason}",
+            actor={"kind": "system"}, command_id=f"call:{call.id}:manual:{reason}",
             idempotency_key=f"call-manual:{call.id}:{reason}", connector_id=call.target_ref,
         )
         db.commit()

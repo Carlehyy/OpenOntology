@@ -37,7 +37,7 @@ from .models import (
     ExecutionTurn,
     InboxItem,
 )
-from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass
+from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass, requires_approval
 from .artifacts import MAX_ARTIFACT_BYTES, validate_object_storage_ref
 from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, create_run, renew_lease
 from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, PluginRunnerConnector, ProcessPluginConnector, TrustLevel
@@ -854,15 +854,19 @@ async def process_external_call_message(payload: dict) -> bool:
             call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
             call.manual_attention = True
             call.next_reconcile_at = _now() if call.remote_task_ref else None
+            append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "system"}, command_id=f"call:{call.id}:redelivered", idempotency_key=f"call-redelivered:{call.id}", connector_id=call.target_ref)
             _append_manual_attention(db, run, call, "initial_call_interrupted")
             db.commit()
             return True
-        if call.status != CallStatus.WAITING_EXTERNAL.value:
+        if call.status not in {CallStatus.WAITING_EXTERNAL.value, CallStatus.OFFERED.value}:
             # A terminal/already reconciled Call is an idempotent no-op.
             db.rollback()
             return True
         if run.status in {s.value for s in {RunStatus.CANCEL_REQUESTED, RunStatus.CANCELLING, RunStatus.PAUSED, RunStatus.CANCELLED, RunStatus.EXPIRED, RunStatus.COMPLETED, RunStatus.FAILED}}:
-            call.status, call.outcome = CallStatus.CANCEL_REQUESTED.value, CallOutcome.OUTCOME_UNKNOWN.value
+            # 取消意图只写 status，不改写 outcome：已观测到的 accepted/
+            # remote_running 是事实，是否真正停止由对账/远端确认决定。
+            call.status = CallStatus.CANCEL_REQUESTED.value
+            append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "system"}, command_id=f"call:{call.id}:cancel-preempted", idempotency_key=f"call-cancel-preempted:{call.id}", connector_id=call.target_ref)
             db.commit()
             return True
         connector = _resolve_external_connector(db, run, call)
@@ -873,8 +877,22 @@ async def process_external_call_message(payload: dict) -> bool:
             append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "connector"}, command_id=f"call:{call.id}:unavailable", idempotency_key=f"call-unavailable:{call.id}", connector_id=call.target_ref)
             db.commit()
             return True
+        if call.remote_task_ref:
+            # 首次 invoke 已拿到远端句柄：本条投递是 Outbox/NATS 的重复投递，
+            # 绝不能对 provider 发起第二次 invoke（可能产生重复外部副作用）。
+            # 后续推进由 reconciler/调度器经 query_status 完成。
+            db.rollback()
+            return True
         descriptor = connector.descriptor()
         attempt_no = (db.scalar(select(ExecutionAttempt.attempt_no).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc())) or 0) + 1
+        if attempt_no > ExecutionPolicy().call_max_attempts:
+            # Call 的 Attempt 预算耗尽：转入人工，不继续向 provider 发送。
+            call.status, call.outcome, call.manual_attention = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value, True
+            call.remote_observed_state_ref = "attempt_budget_exhausted"
+            _append_manual_attention(db, run, call, "attempt_budget_exhausted")
+            append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "system"}, command_id=f"call:{call.id}:attempt-budget", idempotency_key=f"call-attempt-budget:{call.id}", connector_id=call.target_ref)
+            db.commit()
+            return True
         attempt = ExecutionAttempt(call_id=call.id, attempt_no=attempt_no, provider_status="started", transport_request_ref=call.input_snapshot_ref)
         db.add(attempt)
         call.status, call.outcome = CallStatus.RUNNING.value, CallOutcome.ACCEPTED.value
@@ -930,7 +948,7 @@ async def process_external_call_message(payload: dict) -> bool:
             append_event(db, current, event_type="call.outcome_changed", payload={"call_id": current_call.id, "status": current_call.status, "outcome": current_call.outcome, "evidence_ref": None, "connector_id": descriptor.agent_id, "provider_event_id": late_event_id}, actor={"kind": "connector"}, command_id=f"external:{current_call.id}:late", idempotency_key=f"external-late:{current_call.id}", connector_id=descriptor.agent_id, provider_event_id=late_event_id)
             db.commit()
             return True
-        normalized = str(result.get("status") or "failed").lower() if isinstance(result, dict) else "failed"
+        normalized = str(result.get("status") or "unknown").lower() if isinstance(result, dict) else "unknown"
         if normalized in {"running", "pending", "queued", "accepted", "in_progress", "processing"}:
             # Provider accepted the work but has not produced a result. Keep
             # the Call open and persist its opaque identity; the kernel
@@ -960,7 +978,9 @@ async def process_external_call_message(payload: dict) -> bool:
             )
             db.commit()
             return True
-        if normalized == "unknown":
+        if normalized not in {"answered", "failed", "cancelled"}:
+            # 未识别或缺失的 provider 终态不是失败证据：按未知结果进入对账，
+            # 不得把 "unknown"/provider 私有状态猜成 failed。
             current_call.status = CallStatus.RECONCILING.value
             current_call.outcome = CallOutcome.OUTCOME_UNKNOWN.value
             current_call.remote_observed_state_ref = "provider_unknown"
@@ -974,7 +994,7 @@ async def process_external_call_message(payload: dict) -> bool:
             _append_manual_attention(db, current, current_call, "provider_unknown")
             db.commit()
             return True
-        outcome = {"answered": CallOutcome.COMPLETED.value, "failed": CallOutcome.FAILED.value, "cancelled": CallOutcome.CANCELLED_CONFIRMED.value}.get(normalized, CallOutcome.FAILED.value)
+        outcome = {"answered": CallOutcome.COMPLETED.value, "failed": CallOutcome.FAILED.value, "cancelled": CallOutcome.CANCELLED_CONFIRMED.value}[normalized]
         content = str((result or {}).get("content") or "")[:20000] if isinstance(result, dict) else str(result)[:20000]
         artifact = None
         if content:
@@ -1162,7 +1182,9 @@ def _bound_request_candidates(
     original_tokens = sum(_message_token_estimate(candidate) for candidate in all_candidates)
     required_indices: set[int] = {
         index for index, candidate in enumerate(all_candidates)
-        if candidate.kind in {"system", "goal", "tool_result", "child_result"}
+        # approval = 用户的明确决定：压缩不得丢弃，否则模型会重新申请
+        # 已批准/已拒绝的动作（baseline §9 MUST-KEEP）。
+        if candidate.kind in {"system", "goal", "tool_result", "child_result", "approval"}
     }
     user_indices = [
         index for index, candidate in enumerate(all_candidates)
@@ -1277,6 +1299,15 @@ def _collect_message_candidates(
             )
             candidates.append(_MessageCandidate("assistant", artifact.inline_content, kind))
             seen_artifacts.add(artifact.id)
+    def _question_text(question_id: str | None) -> str:
+        if not question_id:
+            return ""
+        row = db.scalar(select(InboxItem).where(
+            InboxItem.run_id == run.id, InboxItem.kind == "question_answer",
+            InboxItem.source == "system", InboxItem.question_id == question_id,
+        ).order_by(InboxItem.accepted_at.desc(), InboxItem.id.desc()))
+        return str((row.payload or {}).get("question") or "") if row is not None else ""
+
     consumed_events = db.scalars(
         select(ExecutionEvent)
         .where(ExecutionEvent.run_id == run.id, ExecutionEvent.event_type == "inbox.consumed")
@@ -1290,12 +1321,22 @@ def _collect_message_candidates(
             continue
         payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
         if content:
+            # 回答必须与其问题成对出现：唤醒后模型只见答案不见问题会误解
+            # 上下文。问题原文以 system 候选注入，紧跟用户回答。
+            if item.kind == "question_answer" and item.question_id:
+                question = _question_text(item.question_id)
+                if question:
+                    candidates.append(_MessageCandidate("system", f"系统提问：{question[:500]}", "system"))
             candidates.append(_MessageCandidate("user", str(content), "user_input"))
         consumed_ids.add(item.id)
     pending = db.scalars(select(InboxItem).where(InboxItem.run_id == run.id, InboxItem.status == "pending", InboxItem.source == "user").order_by(InboxItem.accepted_at, InboxItem.id)).all()
     for item in pending:
         payload = item.payload or {}; content = payload.get("content") or payload.get("content_ref")
         if content:
+            if item.kind == "question_answer" and item.question_id:
+                question = _question_text(item.question_id)
+                if question:
+                    candidates.append(_MessageCandidate("system", f"系统提问：{question[:500]}", "system"))
             candidates.append(_MessageCandidate("user", str(content), "user_input"))
         if consume:
             append_event(
@@ -1311,6 +1352,36 @@ def _collect_message_candidates(
     approvals = db.scalars(select(Approval).where(Approval.run_id == run.id, Approval.status.in_(("approved", "denied"))).order_by(Approval.decided_at, Approval.id)).all()
     for approval in approvals:
         candidates.append(_MessageCandidate("system", f"用户审批结果：{approval.status}（审批 {approval.id}）", "approval"))
+    # 已过期且未获回答的问题必须进入模型视图：模型不得假设答案，应按
+    # 失败分支继续推进或如实说明缺口。已接受回答（存在 user 侧回答行）的
+    # 问题不得再注入"未获回答"；同一 question_id 的原始行+reask 行只注入一次。
+    answered_question_ids = set(db.scalars(select(InboxItem.question_id).where(
+        InboxItem.run_id == run.id,
+        InboxItem.kind == "question_answer",
+        InboxItem.source == "user",
+        InboxItem.question_id.isnot(None),
+    )).all())
+    injected_expired: set[str] = set()
+    expired_questions = db.scalars(
+        select(InboxItem).where(
+            InboxItem.run_id == run.id,
+            InboxItem.kind == "question_answer",
+            InboxItem.status == "expired",
+            InboxItem.source == "system",
+        ).order_by(InboxItem.accepted_at, InboxItem.id)
+    ).all()
+    for item in expired_questions:
+        if item.question_id and (item.question_id in answered_question_ids or item.question_id in injected_expired):
+            continue
+        if item.question_id:
+            injected_expired.add(item.question_id)
+        question = str((item.payload or {}).get("question") or "").strip()
+        if question:
+            candidates.append(_MessageCandidate(
+                "system",
+                f"问题已过期且未获回答：{question[:500]}（按 {item.expiry_policy or 'fail_run'} 策略继续，不要假设答案）",
+                "system",
+            ))
     return candidates
 
 
@@ -1489,7 +1560,7 @@ def _close_model_call(db, run, call, attempt, step, artifact, token):
 
 
 def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
-    kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None; external_call = None; question_expires_at = None; expiry_policy = None
+    kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None; external_call = None; question_expires_at = None; expiry_policy = None; gated = False
     if kind == "approval_decision":
         from .models import Approval
         approval = Approval(owner_id=run.owner_id, run_id=run.id, call_id=call.id if call is not None else None, target_summary=str(wait.get("target_summary") or "需要用户审批"), parameter_summary=str(wait.get("parameter_summary") or "{}"), scope_summary=str(wait.get("scope_summary") or "run scope"), capability_revision=1, parameter_hash=_checksum(str(wait)), status="pending", expires_at=min(run.deadline or (_now() + timedelta(hours=24)), _now() + timedelta(hours=1)))
@@ -1506,28 +1577,61 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 ensure_ascii=False,
             )
             capability_revision = _capability_revision_for_target(db, run.owner_id, target_ref)
-            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=capability_revision, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class="external_async", authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="waiting_external", outcome="remote_running", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at)
+            snapshot = _capability_snapshot(db, str(target_ref or "agent"), int(capability_revision)) if target_ref else None
+            side_effect_class = getattr(snapshot, "side_effect_class", None) or SideEffectClass.EXTERNAL_ASYNC.value
+            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=capability_revision, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class=side_effect_class, authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="offered", outcome="not_sent", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at)
             db.add(external_call); db.flush()
-            append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": capability_revision, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": "external_async", "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
-            append_event(db, run, event_type="call.outcome_changed", payload={"call_id": external_call.id, "status": "waiting_external", "outcome": "remote_running", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
-            _add_outbox(
-                db,
-                run,
-                command_id=f"external-dispatch:{external_call.id}",
-                message_ref=f"call://{external_call.id}",
-                subject=f"sa.execution.call.{run.owner_id}",
-            )
+            append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": capability_revision, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": side_effect_class, "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
+            append_event(db, run, event_type="call.outcome_changed", payload={"call_id": external_call.id, "status": "offered", "outcome": "not_sent", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
+            gated = requires_approval(side_effect_class)
+            if gated:
+                # 审批门：需审批的 Call 只落地 intent，不写派发 Outbox——provider
+                # 在用户决定前绝不能被接触。批准后由决策端点补写
+                # external-dispatch；拒绝/过期则收敛为 closed/not_sent。
+                from .models import Approval
+                from .policies import approval_expires_at
+                deadline = run.deadline
+                if deadline is not None and deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                approval = Approval(
+                    owner_id=run.owner_id, run_id=run.id, call_id=external_call.id,
+                    target_summary=str(target_ref or "external"),
+                    parameter_summary=str(input_ref or "")[:2000],
+                    scope_summary=str(run.permission_snapshot_ref or f"run://{run.id}/scope"),
+                    capability_revision=int(capability_revision),
+                    parameter_hash=_checksum(str(input_ref or "")),
+                    status="pending",
+                    expires_at=approval_expires_at(now=_now(), requested_ttl=timedelta(hours=1), run_deadline=deadline or _now() + timedelta(hours=24)),
+                )
+                db.add(approval); db.flush()
+                approval_inbox = InboxItem(run_id=run.id, kind="approval_decision", priority=10, status="pending", approval_id=approval.id, call_id=external_call.id, target_ref=external_call.id, payload={"approval_id": approval.id, "call_id": external_call.id}, source="system", expires_at=approval.expires_at, expiry_policy="fail_run", idempotency_key=f"approval:{approval.id}")
+                db.add(approval_inbox); db.flush()
+                append_event(db, run, event_type="approval.requested", payload={"approval_id": approval.id, "run_id": run.id, "call_id": external_call.id, "scope_snapshot_ref": run.permission_snapshot_ref or f"run://{run.id}/scope", "expires_at": approval.expires_at.isoformat()}, actor={"kind": "worker"}, command_id=f"approval:{approval.id}", idempotency_key=f"approval-request:{approval.id}", lease=token)
+            else:
+                _add_outbox(
+                    db,
+                    run,
+                    command_id=f"external-dispatch:{external_call.id}",
+                    message_ref=f"call://{external_call.id}",
+                    subject=f"sa.execution.call.{run.owner_id}",
+                )
         if kind == "question_answer":
             deadline = run.deadline
             if deadline is not None and deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
             question_expires_at = min(deadline, _now() + timedelta(minutes=30)) if deadline else _now() + timedelta(minutes=30)
-            expiry_policy = "reask_once"
+            # 可选信息默认 reask_once（二次到期由恢复扫描降级为 fail_branch）；
+            # 必需绑定（如业务探索委派的本体+草稿绑定）默认 fail_branch：
+            # 到期只结束当前等待分支并保留其他可推进工作。只有明确的 Run 安全
+            # 前置条件（审批等）使用 fail_run。
+            expiry_policy = "fail_branch" if wait.get("reason") == "delegation_binding_required" else "reask_once"
     if kind != "child_run" and inbox is None:
         inbox = InboxItem(run_id=run.id, kind=kind, priority=20 if kind == "external_event" else 30, status="pending", call_id=external_call.id if external_call is not None else None, question_id=wait.get("question_id"), target_ref=target_ref, payload={"question": wait.get("question")} if kind == "question_answer" else {"target_ref": target_ref}, source="system", expires_at=question_expires_at, expiry_policy=expiry_policy, idempotency_key=f"wait:{run.id}:{run.version}:{kind}"); db.add(inbox); db.flush()
-    before = run.status; run.status = {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "child_run": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
+    before = run.status; run.status = "waiting_approval" if gated else {"question_answer": "waiting_input", "approval_decision": "waiting_approval", "external_event": "waiting_external", "child_run": "waiting_external", "resume": "waiting_retry"}.get(kind, "waiting_retry"); run.version += 1
+    if gated:
+        run.wait_reason = "approval"
     if inbox is not None:
-        append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id, "kind": kind, "target_ref": target_ref or inbox.id, "expiry_policy": expiry_policy or "none"}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)
+        append_event(db, run, event_type="inbox.appended", payload={"inbox_id": inbox.id, "kind": kind, "target_ref": target_ref or inbox.id, "expiry_policy": expiry_policy or "none", "question_id": inbox.question_id}, actor={"kind": "worker"}, command_id=f"wait:{run.id}:{run.version}", idempotency_key=f"wait-event:{run.id}:{run.version}", lease=token)
     reason = {
         "waiting_input": "waiting_input", "waiting_approval": "waiting_approval",
         "waiting_external": "waiting_external", "waiting_retry": "waiting_retry",
@@ -1797,7 +1901,11 @@ def _persist_external_artifacts(db, run: ExecutionRun, call: ExecutionCall, valu
             mime_type=mime_type, size=len(inline.encode("utf-8")) if inline is not None else declared_size,
             checksum=checksum, storage_ref=storage_ref, inline_content=inline,
             status="complete" if inline_verified else "declared", integrity_status="verified" if inline_verified else "pending",
-            business_status="success", visibility=str(value.get("visibility") or "owner")[:16],
+            business_status="success", visibility=(
+                str(value.get("visibility") or "owner")
+                if str(value.get("visibility") or "owner") in {"owner", "run", "call"}
+                else "owner"
+            ),
             provenance_ref=f"connector:{call.id}:artifact:{index}",
         )
         db.add(artifact)

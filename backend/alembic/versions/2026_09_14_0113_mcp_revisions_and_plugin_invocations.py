@@ -1,7 +1,7 @@
 """freeze MCP manifests and persist process-plugin invocation leases
 
-Revision ID: 0111_mcp_revisions_and_plugin_invocations
-Revises: 0110_super_assistant_process_plugins
+Revision ID: 0113_mcp_revisions_and_plugin_invocations
+Revises: 0112_super_assistant_process_plugins
 """
 from alembic import op
 import sqlalchemy as sa
@@ -9,8 +9,8 @@ from sqlalchemy import inspect as sa_inspect
 
 from app.super_assistant import models as super_assistant_models
 
-revision = "0111_mcp_revisions_and_plugin_invocations"
-down_revision = "0110_super_assistant_process_plugins"
+revision = "0113_mcp_revisions_and_plugin_invocations"
+down_revision = "0112_super_assistant_process_plugins"
 branch_labels = None
 depends_on = None
 

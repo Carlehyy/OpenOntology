@@ -45,20 +45,29 @@ def _utc(value):
 def expire_inbox_once(db: Session, *, limit: int = 100) -> int:
     """Expire unanswered questions/approvals and apply their frozen policy.
 
-    A question may be re-asked once with a fresh inbox row.  The second expiry
-    and every approval expiry fail the owning Run; no expired item is consumed
-    by a later worker.  All transitions are append-only kernel facts.
+    A question may be re-asked once with a fresh inbox row; the second expiry
+    downgrades to ``fail_branch`` per the frozen baseline. ``fail_branch``
+    closes only the waiting branch and returns the Run to ``active`` for
+    replanning; ``fail_run`` closes the whole Run.  Lock order is always
+    Run → InboxItem (worker paths lock the Run first); the scanner must not
+    invert it, or PostgreSQL can deadlock the two paths.
     """
     now = _now()
-    rows = db.scalars(select(InboxItem).where(
+    candidate_ids = list(db.scalars(select(InboxItem.id).where(
         InboxItem.status.in_(("pending", "claimed")),
         InboxItem.expires_at.is_not(None),
         InboxItem.expires_at <= now,
-    ).order_by(InboxItem.expires_at, InboxItem.id).limit(limit).with_for_update(skip_locked=True)).all()
+    ).order_by(InboxItem.expires_at, InboxItem.id).limit(limit)).all())
     changed = 0
-    for item in rows:
-        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == item.run_id).with_for_update())
-        if run is None or item.status not in {"pending", "claimed"}:
+    for item_id in candidate_ids:
+        probe = db.scalar(select(InboxItem.run_id).where(InboxItem.id == item_id))
+        if probe is None:
+            continue
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == probe).with_for_update(skip_locked=True))
+        if run is None:
+            continue  # Run 行锁被在飞 worker 持有，下一 tick 再处理
+        item = db.scalar(select(InboxItem).where(InboxItem.id == item_id).with_for_update())
+        if item is None or item.status not in {"pending", "claimed"}:
             continue
         item.status = "expired"
         item.consumed_at = now
@@ -86,6 +95,23 @@ def expire_inbox_once(db: Session, *, limit: int = 100) -> int:
                     actor={"kind": "system"}, command_id=f"approval-expired:{approval.id}",
                     idempotency_key=f"approval-expired:{approval.id}",
                 )
+                # 审批到期时收尾被门住的 Call：它从未派发（无 dispatch
+                # Outbox、无 Attempt），closed/not_sent 是诚实终态，避免
+                # scheduler/reconciler 之后误推进一个用户从未批准的动作。
+                if approval.call_id:
+                    from .models import ExecutionCall
+                    gated = db.scalar(select(ExecutionCall).where(
+                        ExecutionCall.id == approval.call_id,
+                        ExecutionCall.run_id == approval.run_id,
+                    ).with_for_update())
+                    if gated is not None and gated.status in {"offered", "waiting_external"} and not gated.remote_task_ref:
+                        gated.status, gated.outcome = "closed", "not_sent"
+                        append_event(
+                            db, run, event_type="call.outcome_changed",
+                            payload={"call_id": gated.id, "status": "closed", "outcome": "not_sent", "evidence_ref": None, "connector_id": gated.target_ref, "provider_event_id": None},
+                            actor={"kind": "system"}, command_id=f"call-approval-expired:{gated.id}",
+                            idempotency_key=f"call-approval-expired:{gated.id}",
+                        )
             elif approval is not None:
                 # A decision won the race with the TTL scanner. The linked
                 # Inbox is still expired for audit, but it must not fail the
@@ -95,24 +121,42 @@ def expire_inbox_once(db: Session, *, limit: int = 100) -> int:
         if run.status in _TERMINAL:
             changed += 1
             continue
-        if item.kind == "question_answer" and item.expiry_policy == "reask_once" and not (item.payload or {}).get("_reasked"):
+        policy = item.expiry_policy or "fail_run"
+        if item.kind == "question_answer" and policy == "reask_once" and not (item.payload or {}).get("_reasked"):
             # Preserve the original question while marking the retry in the
-            # payload, so a second expiration deterministically fails the Run.
+            # payload.  Per the frozen baseline the second expiry downgrades
+            # to ``fail_branch`` (close the branch, keep the Run alive)
+            # instead of failing the whole Run.
             deadline = _utc(run.deadline)
             retry = InboxItem(
                 run_id=run.id, kind=item.kind, priority=item.priority, status="pending",
                 question_id=item.question_id, target_ref=item.target_ref,
                 payload={**(item.payload or {}), "_reasked": True}, source="system",
                 expires_at=min(deadline, now + timedelta(minutes=30)) if deadline else now + timedelta(minutes=30),
-                expiry_policy="fail_run", accepted_at=now,
+                expiry_policy="fail_branch", accepted_at=now,
                 idempotency_key=f"{item.id}:reask",
             )
             db.add(retry); db.flush()
             append_event(
                 db, run, event_type="inbox.appended",
-                payload={"inbox_id": retry.id, "kind": retry.kind, "target_ref": retry.target_ref or retry.id, "expiry_policy": retry.expiry_policy},
+                payload={"inbox_id": retry.id, "kind": retry.kind, "target_ref": retry.target_ref or retry.id, "expiry_policy": retry.expiry_policy, "question_id": retry.question_id},
                 actor={"kind": "system"}, command_id=f"inbox-reask:{item.id}", idempotency_key=f"inbox-reask:{item.id}",
             )
+        elif policy == "fail_branch":
+            if run.status == RunStatus.WAITING_INPUT.value:
+                # 分支失败：问题已关闭，Run 回到 active 由模型在没有该回答的
+                # 情况下重新规划；其他可推进工作（其余等待/外部 Call）不受影响。
+                before = run.status
+                run.status = RunStatus.ACTIVE.value
+                run.wait_reason = None
+                run.version += 1
+                append_event(
+                    db, run, event_type="run.status_changed",
+                    payload={"from": before, "to": run.status, "reason": "question_expired_branch_failed", "actor": "system", "version": run.version},
+                    actor={"kind": "system"}, command_id=f"inbox-branch-fail:{item.id}", idempotency_key=f"inbox-branch-fail:{item.id}",
+                )
+                _add_outbox(db, run, command_id=f"branch-fail-dispatch:{run.id}:{run.version}", message_ref=f"run://{run.id}")
+            # Run 不在等待该问题（如已暂停）时只关闭问题，不翻动 Run 状态。
         else:
             before = run.status
             run.status = RunStatus.FAILED.value
@@ -155,6 +199,14 @@ def expire_due_runs_once(db: Session, *, policy: ExecutionPolicy | None = None, 
                 payload={"reason": "deadline", "deadline": run.deadline.isoformat() if run.deadline else now.isoformat(), "unresolved_call_ids": [str(call_id) for call_id in unresolved_ids]},
                 actor={"kind": "system"}, command_id=f"expiry:{run.id}:{run.version}", idempotency_key=f"expiry:{run.id}:{run.version}",
             )
+        elif decision.action == "expired":
+            # 无未决 Call 的直接过期同样必须先留下 run.expiry_requested
+            # 事实再进入 expired（execution-model §2），不能只写终态。
+            append_event(
+                db, run, event_type="run.expiry_requested",
+                payload={"reason": "deadline", "deadline": run.deadline.isoformat() if run.deadline else now.isoformat(), "unresolved_call_ids": []},
+                actor={"kind": "system"}, command_id=f"expiry:{run.id}:{run.version}", idempotency_key=f"expiry:{run.id}:{run.version}",
+            )
         elif decision.action == "cancel_timeout":
             append_event(
                 db, run, event_type="run.cancel_timeout",
@@ -182,6 +234,19 @@ def recover_stuck_runs_once(db: Session, *, policy: ExecutionPolicy | None = Non
     for run in rows:
         if _utc(run.lease_expires_at) and _utc(run.lease_expires_at) > now:
             continue
+        if run.status not in {RunStatus.ACTIVE.value, RunStatus.QUEUED.value}:
+            # 合法等待不是卡死：暂停交给 resume、取消交给 cancel 超时路径；
+            # WAITING_* 只有在"存在待消费的用户输入却没人唤醒"（唤醒丢失）
+            # 时才需要恢复。否则审批/问题 TTL 与外部 Call 上的正常等待会被
+            # 每 5 分钟误判一轮：version 递增打爆客户端 If-Match，事件日志
+            # 无界增长。
+            if run.status in {RunStatus.PAUSED.value, RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}:
+                continue
+            has_pending_user_input = db.scalar(select(InboxItem.id).where(
+                InboxItem.run_id == run.id, InboxItem.status == "pending", InboxItem.source == "user",
+            ).limit(1))
+            if not has_pending_user_input:
+                continue
         updated_at = run.updated_at if run.updated_at.tzinfo else run.updated_at.replace(tzinfo=timezone.utc)
         if not should_recover_run(status=RunStatus(run.status), updated_at=updated_at, now=now, policy=policy):
             continue

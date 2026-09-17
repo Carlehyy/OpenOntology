@@ -1,15 +1,15 @@
 """persist external plugin-runner invocation journal
 
-Revision ID: 0114_plugin_runner_journal
-Revises: 0113_remote_agent_result_artifacts
+Revision ID: 0116_plugin_runner_journal
+Revises: 0115_remote_agent_result_artifacts
 """
 from alembic import op
 
 from app.super_assistant import models as super_assistant_models
 
 
-revision = "0114_plugin_runner_journal"
-down_revision = "0113_remote_agent_result_artifacts"
+revision = "0116_plugin_runner_journal"
+down_revision = "0115_remote_agent_result_artifacts"
 branch_labels = None
 depends_on = None
 

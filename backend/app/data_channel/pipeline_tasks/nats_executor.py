@@ -416,8 +416,10 @@ class PipelineExecutor:
         try:
             payload = json.loads(msg.data.decode())
         except Exception:
-            logger.error("%s 消息无法解析，nak 丢弃: %r", description, msg.data)
-            await msg.nak()
+            # 不可解析的消息无法通过重投修复：nak 只会空烧投递次数，
+            # 必须显式 ack 丢弃（数据库侧的事件幂等仍是最终防线）。
+            logger.error("%s 消息无法解析，ack 丢弃: %r", description, msg.data)
+            await msg.ack()
             return
 
         execute = asyncio.ensure_future(handler(payload))
@@ -439,9 +441,10 @@ class PipelineExecutor:
             execute.result()
         except Exception:
             # handler 内部消化所有业务异常；能逃到这里的是解析/线程级意外，
-            # 交给 nak 重投
+            # 交给 nak 重投。带延迟防止瞬时故障瞬间烧完投递——丢一条
+            # kernel 派发消息意味着 Run 挂死到 deadline 兜底。
             logger.exception("%s 执行异常逃逸", description)
-            await msg.nak()
+            await msg.nak(delay=5)
             return
         await msg.ack()
 
@@ -456,7 +459,7 @@ class PipelineExecutor:
         except Exception:
             logger.exception("%s 消息处理异常", description)
             try:
-                await msg.nak()
+                await msg.nak(delay=5)
             except Exception:
                 logger.exception("%s 消息 nak 失败", description)
         finally:
@@ -538,7 +541,7 @@ class PipelineExecutor:
                     subject,
                     durable=durable,
                     stream=PIPELINE_STREAM,
-                    config=ConsumerConfig(ack_wait=30, max_deliver=5),
+                    config=ConsumerConfig(ack_wait=60),
                 )
                 logger.info(
                     "流水线 executor 已订阅 %s（durable=%s）",
@@ -555,7 +558,7 @@ class PipelineExecutor:
                     subject,
                     durable=durable,
                     stream=EXECUTION_STREAM,
-                    config=ConsumerConfig(ack_wait=30, max_deliver=5),
+                    config=ConsumerConfig(ack_wait=60),
                 )
                 logger.info(
                     "kernel executor 已订阅 %s（durable=%s）", subject, durable,
@@ -569,7 +572,7 @@ class PipelineExecutor:
                 f"{PLUGIN_RUNNER_REPLY_PREFIX}*",
                 durable=_PLUGIN_RUNNER_REPLY_DURABLE,
                 stream=PLUGIN_RUNNER_STREAM,
-                config=ConsumerConfig(ack_wait=30, max_deliver=5),
+                config=ConsumerConfig(ack_wait=60),
             )
             loops.append(asyncio.ensure_future(self._fetch_loop(
                 reply_subscription, _run_plugin_runner_reply_message,
