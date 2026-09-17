@@ -18,6 +18,11 @@
   拒绝根目录、非绝对路径、未规范化路径和 shell/控制字符。
 - `create-deployment-archive.sh`：只打包生产构建/运行输入和受控维护入口，
   排除测试、文档、fixture、前端测试源码与过程报告。
+- `classify-deploy-changes.sh`：按改动路径家族输出部署工作流开关（后端回归、
+  前端测试、前端构建、镜像构建、是否上线）。未知路径与分类器自身变更强制
+  全量；`--self-test` 跑 `test-classify-deploy-changes.sh`。
+- `test-classify-deploy-changes.sh`：分类器夹具，含历史 push 回放与 fail-closed
+  用例。由 `test-deploy-guards.sh` 一并执行。
 - `test-deploy-guards.sh`：校验部署目录正反例，并通过
   `DEPLOY_VALIDATE_ONLY=1` 验证镜像摘要严格模式从最终 `.env` 读取、显式
   进程环境优先，同时验证当前配置来源契约和生产包白名单。
