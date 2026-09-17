@@ -7,12 +7,6 @@ import {
 
 import type { SuperConversation } from '@/api/superAssistant'
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
   SidebarGroup,
   SidebarGroupContent,
   SidebarMenu,
@@ -40,17 +34,9 @@ interface WorkbenchSidebarProps {
   onDelete: (id: string) => void
   onSetArchived: (id: string, archived: boolean) => void
   onOpenSearch: () => void
+  onOpenScheduled: () => void
   /** 外部集成保存后回调（页面刷新 multica 配置以同步命令提示可用性） */
   onIntegrationsSaved?: () => void | Promise<void>
-}
-
-type PlaceholderFeature = 'tasks'
-
-const PLACEHOLDER_COPY: Record<PlaceholderFeature, { title: string; body: string }> = {
-  tasks: {
-    title: '定时任务',
-    body: '定时任务功能即将上线：让超级助手按你设定的计划自动执行任务，当前版本请手动发起对话。',
-  },
 }
 
 interface ConversationRowProps {
@@ -123,12 +109,12 @@ export default function WorkbenchSidebar({
   onDelete,
   onSetArchived,
   onOpenSearch,
+  onOpenScheduled,
   onIntegrationsSaved,
 }: WorkbenchSidebarProps) {
   const user = useAuthStore(state => state.user)
   const logout = useAuthStore(state => state.logout)
   const navigate = useNavigate()
-  const [placeholder, setPlaceholder] = useState<PlaceholderFeature | null>(null)
   const [palaceOpen, setPalaceOpen] = useState(false)
   const [integrationsOpen, setIntegrationsOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
@@ -222,7 +208,7 @@ export default function WorkbenchSidebar({
             {isMac ? '⌘K' : 'Ctrl K'}
           </kbd>
         </button>
-        <button type="button" onClick={() => setPlaceholder('tasks')} className={actionItemClass}>
+        <button type="button" onClick={onOpenScheduled} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
         <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
@@ -364,17 +350,6 @@ export default function WorkbenchSidebar({
       <aside className={`${mobileOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 flex w-64 shrink-0 flex-col border-r border-[var(--color-border)] bg-card transition-transform duration-300 md:static md:z-auto md:border-r-0 md:translate-x-0 md:bg-transparent`}>
         {content}
       </aside>
-
-      <Dialog open={placeholder !== null} onOpenChange={open => { if (!open) setPlaceholder(null) }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{placeholder ? PLACEHOLDER_COPY[placeholder].title : ''}</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
-            {placeholder ? PLACEHOLDER_COPY[placeholder].body : ''}
-          </p>
-        </DialogContent>
-      </Dialog>
 
       <MemoryPalaceDialog open={palaceOpen} onOpenChange={setPalaceOpen} />
       {integrationsOpen && (

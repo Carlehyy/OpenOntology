@@ -517,6 +517,55 @@ export interface RemoteAgentInviteCreated {
   prompt_text: string
 }
 
+export type ScheduledKind = 'once' | 'daily' | 'weekly'
+export type ScheduledRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'skipped'
+
+export interface ScheduledTask {
+  id: string
+  title: string
+  instruction: string
+  schedule_kind: ScheduledKind
+  timezone: string
+  run_at: string | null
+  hour: number | null
+  minute: number | null
+  weekday: number | null
+  enabled: boolean
+  next_run_at: string | null
+  last_dispatched_at: string | null
+  last_run_id: string | null
+  last_run_status: ScheduledRunStatus | null
+  last_run_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ScheduledTaskPayload {
+  title?: string
+  instruction: string
+  schedule_kind: ScheduledKind
+  run_at?: string | null
+  hour?: number | null
+  minute?: number | null
+  weekday?: number | null
+  enabled?: boolean
+}
+
+export type ScheduledTaskUpdatePayload = Partial<ScheduledTaskPayload>
+
+export interface ScheduledRun {
+  id: string
+  task_id: string
+  conversation_id: string | null
+  scheduled_for: string
+  status: ScheduledRunStatus
+  error: string | null
+  result_summary: string | null
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+}
+
 /** multica 外部集成配置（每用户一条）：commands 由后端下发，未配置/未启用时为空，
  *  输入框据此决定是否展示 /multica: 命令提示 */
 export interface MulticaCommand {
@@ -855,6 +904,21 @@ export const superAssistantApi = {
     apiClientV2.get<string>(`/super-assistant/remote-agent-invites/${id}/prompt`),
   revokeRemoteAgentInvite: (id: string) =>
     apiClientV2.delete(`/super-assistant/remote-agent-invites/${id}`),
+
+  listScheduledTasks: () =>
+    apiClientV2.get<ScheduledTask[]>('/super-assistant/scheduled-tasks'),
+  createScheduledTask: (body: ScheduledTaskPayload) =>
+    apiClientV2.post<ScheduledTask>('/super-assistant/scheduled-tasks', body),
+  getScheduledTask: (id: string) =>
+    apiClientV2.get<ScheduledTask>(`/super-assistant/scheduled-tasks/${id}`),
+  updateScheduledTask: (id: string, body: ScheduledTaskUpdatePayload) =>
+    apiClientV2.patch<ScheduledTask>(`/super-assistant/scheduled-tasks/${id}`, body),
+  deleteScheduledTask: (id: string) =>
+    apiClientV2.delete(`/super-assistant/scheduled-tasks/${id}`),
+  listScheduledRuns: (taskId: string) =>
+    apiClientV2.get<ScheduledRun[]>(`/super-assistant/scheduled-tasks/${taskId}/runs`),
+  getScheduledRun: (taskId: string, runId: string) =>
+    apiClientV2.get<ScheduledRun>(`/super-assistant/scheduled-tasks/${taskId}/runs/${runId}`),
 }
 
 // ---------- 浏览器协作（与数据管家共用面板，运行时复用 steward BrowserManager） ----------

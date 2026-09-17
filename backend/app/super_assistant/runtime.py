@@ -1011,7 +1011,8 @@ def _run_multica_direct_tool(
 
 
 def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: str,
-                requested_model_id: str | None, agent_mode: bool = False) -> Iterator[str]:
+                requested_model_id: str | None, agent_mode: bool = False,
+                unattended: bool = False) -> Iterator[str]:
     db = SessionLocal()
     assistant_message: SuperAssistantMessage | None = None
     client_disconnected = False
@@ -1317,6 +1318,21 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             for item in serial_items:
                 tool_run = item["run"]
                 server_tuple = item["server"]
+                deny_unattended_write = unattended and (
+                    tool_run.requires_confirmation
+                    or (
+                        server_tuple is None
+                        and tool_run.tool_name not in _READ_ONLY_BUILTIN_TOOLS
+                    )
+                )
+                if deny_unattended_write:
+                    # 无人值守不执行写工具：含需确认的 MCP/multica，以及浏览器/委派等内置写操作
+                    output = json.dumps(
+                        {"error": "无人值守执行未自动批准需要确认的操作", "decision": "denied"},
+                        ensure_ascii=False,
+                    )
+                    executed[item["id"]] = (output, "denied", None)
+                    continue
                 if tool_run.requires_confirmation:
                     # MCP 工具按 server 名展示来源；multica 等需确认的内置
                     # 工具无 server 归属，统一以 multica 作为来源标签

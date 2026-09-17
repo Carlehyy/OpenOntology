@@ -330,6 +330,14 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 定时任务（计划 CRUD + 执行记录）：同前缀同守卫的独立子路由
+from app.super_assistant import scheduled as super_assistant_scheduled
+app.include_router(
+    super_assistant_scheduled.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 实时浏览器协作（来源管理 + 会话级浏览器操作）：同前缀同守卫的独立子路由
 from app.super_assistant import browser as super_assistant_browser
 app.include_router(

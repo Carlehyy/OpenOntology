@@ -31,6 +31,7 @@ SUPER_ASSISTANT_REFLECT_FULL_SUBJECT = "super_assistant.reflect.full"
 SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT = "super_assistant.reflect.focused"
 SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT = "super_assistant.palace.extract"
 SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT = "super_assistant.palace.consolidate"
+SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT = "super_assistant.scheduled.run"
 ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT = "ontology.documents.published"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
 EXECUTION_STREAM = "SA_EXECUTION_V1"
@@ -59,6 +60,8 @@ PIPELINE_STREAM_SUBJECTS = (
     SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
     # 只能追加：本体发布态业务文档就绪（本体域派发、宫殿消费）
     ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
+    # 只能追加：超级助手用户定时任务（无人值守执行）
+    SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
 )
 
 # 进程内缓存：每个进程只在首次派发时确保一次 Stream
@@ -291,6 +294,15 @@ def dispatch_super_assistant_palace_extract(owner_id: str, file_id: str) -> None
         "owner_id": owner_id,
         "file_id": file_id,
     })
+
+
+def dispatch_super_assistant_scheduled_run(run_id: str) -> None:
+    """超级助手定时任务执行派发入口。
+
+    payload 约定：run_id 必填。消费侧按执行记录状态机幂等（终态直接跳过，
+    running 视为重复投递）。
+    """
+    dispatch_task(SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT, {"run_id": run_id})
 
 
 def dispatch_super_assistant_palace_consolidate(owner_id: str) -> None:

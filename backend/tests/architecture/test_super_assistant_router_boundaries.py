@@ -728,8 +728,8 @@ def test_super_assistant_router_and_services_stay_bounded():
         # 五个端点；保持边界只允许随能力域增长的小幅预算。
         "router.py": 980,
         # 死流回收（_reap_stale_streaming 读取兜底）与启动恢复
-        # （recover_interrupted_streams）落地：320 → 360
-        "conversation_service.py": 360,
+        # （recover_interrupted_streams 跳过进行中的定时任务会话）落地：360 → 380
+        "conversation_service.py": 380,
         "skill_service.py": 380,
         # MCP lifecycle/revision fencing and probe diagnostics now live in
         # this domain service; keep the guard above the current bounded size.
@@ -809,8 +809,12 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 10 条路径、10 个操作；dispatch dead-letter 显式重放新增 1 条运维路径；
     # process-plugin 持久化生命周期新增 4 条路径、5 个操作；Artifact 二进制下载
     # 与 HMAC callback ingress 各新增 1 条路径/1 个操作，旧路由语义保持并行。
-    assert len(paths) == 98
-    assert sum(len(item) for item in paths.values()) == 126
+    # 用户定时任务（scheduled.py 子路由）新增 /scheduled-tasks 的 list/create、
+    # /scheduled-tasks/{task_id} 的 get/patch/delete、
+    # /scheduled-tasks/{task_id}/runs 与 /runs/{run_id} 的 get
+    # 共 7 个操作（4 条路径）。
+    assert len(paths) == 102
+    assert sum(len(item) for item in paths.values()) == 133
     assert hashlib.sha256(payload).hexdigest() == (
-        "d57219e54ce8cbe88c2599b85ef57ec1162194fea0554793c1942bede8587931"
+        "537fe5bba0d25d6922e87a65d3166692d47ad97eee490b7e57a5041bf83945f0"
     )

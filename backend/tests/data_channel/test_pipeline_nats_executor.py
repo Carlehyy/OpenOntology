@@ -367,6 +367,7 @@ def test_handler_registry_covers_all_stream_subjects():
         "super-assistant-palace-extract",
         "super-assistant-palace-consolidate",
         "ontology-documents-published",
+        "super-assistant-scheduled-run",
     }
     assert nats_executor._CONSUMER_DURABLE == "pipeline-executor"
 

@@ -161,6 +161,22 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     { id: 'ra-pull', key: 'remote.lan-helper', label: '内网文档助手', description: '内网文档检索', endpoint: '', token_set: false, enabled: true, timeout_seconds: 60, mode: 'pull', last_seen_at: new Date().toISOString(), last_turn_at: null },
   ]
   const remoteInvites: Array<Record<string, unknown>> = []
+  const scheduledTasks: Array<Record<string, unknown>> = [
+    {
+      id: 'st-daily', title: '每日站会纪要', instruction: '根据昨天的会话整理站会纪要。',
+      schedule_kind: 'daily', timezone: 'Asia/Shanghai', run_at: null, hour: 9, minute: 0, weekday: null,
+      enabled: true, next_run_at: at(0, 9), last_dispatched_at: at(1, 9),
+      last_run_id: 'sr-1', last_run_status: 'completed', last_run_at: at(1, 9),
+      created_at: at(5, 9), updated_at: at(1, 9),
+    },
+  ]
+  const scheduledRuns: Array<Record<string, unknown>> = [
+    {
+      id: 'sr-1', task_id: 'st-daily', conversation_id: 'c-today', scheduled_for: at(1, 9),
+      status: 'completed', error: null, result_summary: '昨日三项待办均已推进。',
+      started_at: at(1, 9), finished_at: at(1, 9), created_at: at(1, 9),
+    },
+  ]
   const multicaTests: Array<Record<string, unknown>> = []
   const multicaWorkspaceCalls: string[] = []
   const toolPatchCalls: Array<{ name: string; body: { enabled: boolean } }> = []
@@ -625,6 +641,59 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         }] : [],
       })
     }
+    if (path === '/api/v2/super-assistant/scheduled-tasks') {
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON() as Record<string, unknown>
+        const created = {
+          id: `st-${Date.now()}`,
+          title: body.title || String(body.instruction || '定时任务').slice(0, 40),
+          instruction: body.instruction,
+          schedule_kind: body.schedule_kind,
+          timezone: 'Asia/Shanghai',
+          run_at: body.run_at || null,
+          hour: body.hour ?? null,
+          minute: body.minute ?? null,
+          weekday: body.weekday ?? null,
+          enabled: body.enabled !== false,
+          next_run_at: body.run_at || at(0, 10),
+          last_dispatched_at: null,
+          last_run_id: null,
+          last_run_status: null,
+          last_run_at: null,
+          created_at: at(0, 10),
+          updated_at: at(0, 10),
+        }
+        scheduledTasks.unshift(created)
+        return json(route, created, 201)
+      }
+      return json(route, scheduledTasks)
+    }
+    const scheduledRunMatch = path.match(/^\/api\/v2\/super-assistant\/scheduled-tasks\/([^/]+)\/runs(?:\/([^/]+))?$/)
+    if (scheduledRunMatch) {
+      const taskId = scheduledRunMatch[1]
+      const runId = scheduledRunMatch[2]
+      const taskRuns = scheduledRuns.filter(item => item.task_id === taskId)
+      if (runId) {
+        const row = taskRuns.find(item => item.id === runId)
+        return row ? json(route, row) : json(route, { detail: '执行记录不存在' }, 404)
+      }
+      return json(route, taskRuns)
+    }
+    const scheduledTaskMatch = path.match(/^\/api\/v2\/super-assistant\/scheduled-tasks\/([^/]+)$/)
+    if (scheduledTaskMatch) {
+      const row = scheduledTasks.find(item => item.id === scheduledTaskMatch[1])
+      if (!row) return json(route, { detail: '定时任务不存在' }, 404)
+      if (request.method() === 'DELETE') {
+        const index = scheduledTasks.findIndex(item => item.id === row.id)
+        if (index >= 0) scheduledTasks.splice(index, 1)
+        return route.fulfill({ status: 204 })
+      }
+      if (request.method() === 'PATCH') {
+        Object.assign(row, request.postDataJSON())
+        return json(route, row)
+      }
+      return json(route, row)
+    }
     if (path === '/api/v2/inbox/summary') {
       return json(route, { openAlertCount: 0, actionableCount: 0, unreadCount: 0, resolvedCount: 0 })
     }
@@ -789,19 +858,32 @@ test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级�
   await expect(page.getByRole('button', { name: '新建任务' })).toBeVisible()
 })
 
-test('定时任务为如实占位的即将上线弹窗，全局搜索打开真实检索面板', async ({ page }) => {
+test('定时任务弹窗：查看已有计划、创建、点进某次执行', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  // 全局搜索已是真实功能：打开 ReUI Command 检索面板
   await page.getByRole('button', { name: '全局搜索' }).click()
   await expect(page.getByPlaceholder('搜索会话标题与消息内容…')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog')).toHaveCount(0)
 
   await page.getByRole('button', { name: '定时任务' }).click()
-  await expect(page.getByText(/即将上线/).first()).toBeVisible()
+  const dialog = page.getByTestId('scheduled-tasks-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible()
+  await expect(dialog.getByText('每日站会纪要')).toBeVisible()
+
+  await dialog.getByRole('button', { name: /每日站会纪要/ }).click()
+  await expect(dialog.getByText('执行记录')).toBeVisible()
+  await dialog.getByRole('button', { name: /\d{4}-\d{2}-\d{2}.*已完成/ }).click()
+  await expect(dialog.getByText('昨日三项待办均已推进。')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '在会话中继续' })).toBeVisible()
+
+  await page.getByRole('button', { name: '创建定时任务' }).click()
+  await dialog.getByPlaceholder('到点后助手会按这段指令在后台执行').fill('明早汇总待办')
+  await page.getByRole('button', { name: '创建', exact: true }).click()
+  await expect(dialog.getByText('明早汇总待办')).toBeVisible()
 })
 
 test('multica 命令提示：未配置/未启用时输入 / 也不提供任何命令', async ({ page }) => {

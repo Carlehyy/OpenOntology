@@ -15,7 +15,8 @@
 - ``super_assistant.reflect.micro/full/focused``：超级助手三种自我进化
   反思任务（micro 每轮后 / full 手动 / focused 定向技能）；
 - ``super_assistant.palace.extract/consolidate``：记忆宫殿图谱抽取与
-  定期聚类合并。
+  定期聚类合并；
+- ``super_assistant.scheduled.run``：超级助手用户定时任务的无人值守执行。
 
 每个 subject 使用独立 durable pull consumer，共享进程级并发信号量。
 启动方式::
@@ -60,6 +61,7 @@ _SUPER_ASSISTANT_REFLECT_FULL_DURABLE = "super-assistant-reflect-full"
 _SUPER_ASSISTANT_REFLECT_FOCUSED_DURABLE = "super-assistant-reflect-focused"
 _SUPER_ASSISTANT_PALACE_EXTRACT_DURABLE = "super-assistant-palace-extract"
 _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE = "super-assistant-palace-consolidate"
+_SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE = "super-assistant-scheduled-run"
 _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
 _EXECUTION_CALL_DURABLE = "sa-call-v1"
@@ -195,12 +197,13 @@ def _handler_registry():
         PIPELINE_RUN_SUBJECT,
         SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
         SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT,
+        SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
         SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT,
         SUPER_ASSISTANT_REFLECT_FULL_SUBJECT,
         SUPER_ASSISTANT_REFLECT_MICRO_SUBJECT,
     )
     from app.assistant_evaluation import autopilot_tasks
-    from app.super_assistant import palace_tasks, reflection_tasks
+    from app.super_assistant import palace_tasks, reflection_tasks, scheduled_tasks
 
     return (
         (PIPELINE_EXECUTE_SUBJECT, _CONSUMER_DURABLE, _execute_pipeline_task_message),
@@ -248,6 +251,11 @@ def _handler_registry():
             ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
             _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE,
             palace_tasks.run_palace_ontology_document_message,
+        ),
+        (
+            SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
+            _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE,
+            scheduled_tasks.run_scheduled_task_message,
         ),
     )
 

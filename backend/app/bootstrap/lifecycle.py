@@ -223,6 +223,17 @@ async def application_lifespan(
             except Exception as exc:
                 _main_logger.warning("远程助手任务清理定时器启动失败: %s", exc)
 
+        # 超级助手用户定时任务扫描器（每 30 秒到期派发；旁路能力，失败不阻断启动）
+        if settings.environment != "test":
+            try:
+                from app.super_assistant.scheduled_scheduler import (
+                    start as start_scheduled_scheduler,
+                )
+
+                start_scheduled_scheduler()
+            except Exception as exc:
+                _main_logger.warning("超级助手定时任务扫描器启动失败: %s", exc)
+
         from app.data_channel.file_assets.service import (
             file_asset_cleanup_loop,
         )
@@ -296,6 +307,12 @@ async def application_lifespan(
             palace_consolidate.shutdown()
         except Exception:  # noqa: BLE001
             _main_logger.exception("Palace consolidate scheduler cleanup failed")
+        try:
+            from app.super_assistant import scheduled_scheduler
+
+            scheduled_scheduler.shutdown()
+        except Exception:  # noqa: BLE001
+            _main_logger.exception("Super assistant scheduled-task scheduler cleanup failed")
         try:
             from app.ontologies import published_documents
 

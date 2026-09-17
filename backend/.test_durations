@@ -3762,5 +3762,18 @@
     "tests/world_model/test_world_model_cache.py::test_services_overview_endpoint_hits_cache_on_second_call": 1.2090918750036508,
     "tests/world_model/test_world_model_multi_publish.py::test_delete_blocked_while_any_service_online_then_cleans_all": 1.2155844569206238,
     "tests/world_model/test_world_model_multi_publish.py::test_multi_ontology_publish_and_republish_semantics": 1.2156444159336388,
-    "tests/world_model/test_world_model_multi_publish.py::test_project_status_toggle_applies_to_all_services": 1.2530925830360502
+    "tests/world_model/test_world_model_multi_publish.py::test_project_status_toggle_applies_to_all_services": 1.2530925830360502,
+    "tests/super_assistant/test_scheduled_tasks.py::test_compute_next_run_at_once_daily_weekly": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_crud_and_owner_isolation": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_daily_title_falls_back_to_instruction": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_dispatch_due_creates_run_and_disables_once": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_dispatch_skips_when_previous_run_in_flight": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_execute_run_creates_conversation_and_records_summary": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_dispatch_subject_and_handler_registration": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_inbox_href_is_hash_router_path": 0.05,
+    "tests/super_assistant/test_scheduled_tasks.py::test_parse_user_run_at_naive_is_shanghai": 0.05,
+    "tests/super_assistant/test_scheduled_tasks.py::test_create_rejects_past_once": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_overdue_daily_is_skipped_not_fired": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_queued_unpublished_run_is_redispatched": 0.12,
+    "tests/super_assistant/test_scheduled_tasks.py::test_execute_run_claims_once": 0.12
 }
