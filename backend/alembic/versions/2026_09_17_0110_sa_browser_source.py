@@ -47,11 +47,27 @@ def downgrade() -> None:
             column["name"] for column in inspector.get_columns("super_assistant_conversations")
         }
         if "browser_source_id" in columns:
-            op.drop_index(
-                "ix_super_assistant_conversations_browser_source_id",
-                table_name="super_assistant_conversations")
+            # FK 实际名随建表路径不同（本迁移显式命名 vs 0003 create_all 由数据库
+            # 自动命名）：按 inspector 查到的真实名删除；SQLite 经 batch 重建随列消失
+            fk_name = next(
+                (
+                    fk["name"]
+                    for fk in sa_inspect(bind).get_foreign_keys(
+                        "super_assistant_conversations")
+                    if fk.get("referred_table") == "v2_steward_browser_sources"
+                    and fk.get("constrained_columns") == ["browser_source_id"]
+                ),
+                None,
+            )
+            indexes = {
+                index["name"]
+                for index in sa_inspect(bind).get_indexes("super_assistant_conversations")
+            }
+            if "ix_super_assistant_conversations_browser_source_id" in indexes:
+                op.drop_index(
+                    "ix_super_assistant_conversations_browser_source_id",
+                    table_name="super_assistant_conversations")
             with op.batch_alter_table("super_assistant_conversations") as batch:
-                if bind.dialect.name != "sqlite":
-                    batch.drop_constraint(
-                        "fk_sa_conversation_browser_source", type_="foreignkey")
+                if fk_name and bind.dialect.name != "sqlite":
+                    batch.drop_constraint(fk_name, type_="foreignkey")
                 batch.drop_column("browser_source_id")

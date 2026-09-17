@@ -28,7 +28,8 @@ class SuperAssistantConversation(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="新会话")
     model_config_id: Mapped[str | None] = mapped_column(String, ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True)
     browser_source_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("v2_steward_browser_sources.id", ondelete="SET NULL"),
+        String, ForeignKey("v2_steward_browser_sources.id", ondelete="SET NULL",
+                           name="fk_sa_conversation_browser_source"),
         nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     # 上下文压缩：summary 覆盖最旧的 summary_message_count 条 complete 消息
