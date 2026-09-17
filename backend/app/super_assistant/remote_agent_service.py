@@ -39,11 +39,13 @@ import hashlib
 import re
 import secrets
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Optional
 
 import httpx
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -82,6 +84,7 @@ _TASK_POLL_INTERVAL = 0.4
 _TASK_RESULT_GRACE_SECONDS = 5.0
 # 「测试」按钮的回合超时上限：离线回连助手快速失败而非挂满 timeout_seconds
 _TEST_TURN_TIMEOUT_SECONDS = 20
+_MAX_DIRECT_RESPONSE_BYTES = 256 * 1024
 
 
 def _utcnow() -> datetime:
@@ -99,6 +102,7 @@ class RemoteAgentServiceError(ValueError):
 
 def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     """httpx 调用收口（测试 monkeypatch 此函数）。"""
+    kwargs["trust_env"] = False
     return httpx.request(method, url, **kwargs)
 
 
@@ -158,7 +162,7 @@ class RemoteAgentAdapter:
         self, conversation_ref: str, message: str, remote_session: str | None,
     ) -> Iterator[TurnResult]:
         try:
-            validate_mcp_url(self._endpoint)
+            validate_mcp_url(self._endpoint, require_https=True)
         except McpClientError as exc:
             raise AssistantHubError(f"远程助手端点被拒绝：{exc}") from exc
 
@@ -182,6 +186,25 @@ class RemoteAgentAdapter:
             yield TurnResult(
                 status=STATUS_FAILED,
                 content=f"远程助手返回 HTTP {response.status_code}",
+                conversation_ref=conversation_ref,
+            )
+            return
+        # The legacy adapter predates the kernel connector and still sits on
+        # a public compatibility route. Reject an oversized body before JSON
+        # parsing and before any content can enter the conversation projection.
+        try:
+            raw_content = getattr(response, "content", None)
+            if raw_content is not None and len(raw_content) > _MAX_DIRECT_RESPONSE_BYTES:
+                yield TurnResult(
+                    status=STATUS_FAILED,
+                    content="远程助手响应超过 256 KiB 上限",
+                    conversation_ref=conversation_ref,
+                )
+                return
+        except (AttributeError, TypeError):
+            yield TurnResult(
+                status=STATUS_FAILED,
+                content="远程助手响应无法读取",
                 conversation_ref=conversation_ref,
             )
             return
@@ -250,6 +273,7 @@ class RemoteAgentAdapter:
                     conversation_ref=final_ref,
                     created_new_conversation=remote_session is None and bool(new_session),
                     note=str(row.result_note or ""),
+                    usage={"artifacts": row.result_artifacts or []} if row.result_artifacts else None,
                 )
                 return
             if row.status == "expired":
@@ -279,6 +303,85 @@ def enqueue_task(
     db.commit()
     db.refresh(row)
     return row
+
+
+def enqueue_kernel_task(
+    db: Session, agent_id: str, call_id: str, message: str,
+    session_ref: str | None, timeout_seconds: int,
+) -> dict[str, Any]:
+    """Create an idempotent RAP pull task for one kernel Call.
+
+    The task id is deterministic for the Call, so a redelivered NATS message
+    cannot enqueue a second remote side effect.  Legacy chat continues to use
+    :func:`enqueue_task` and its historical UUID lifecycle.
+    """
+    task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"openontology:kernel-pull:{call_id}"))
+    existing = db.get(SuperAssistantRemoteAgentTask, task_id)
+    if existing is not None:
+        if existing.agent_id != agent_id or existing.message != message or existing.session_ref != session_ref:
+            raise RemoteAgentServiceError("kernel pull task idempotency conflict")
+        return {"status": "running", "remote_task_ref": f"rap-pull:{task_id}", "provider_status": existing.status}
+    row = SuperAssistantRemoteAgentTask(
+        id=task_id, agent_id=agent_id, status="pending", message=message,
+        session_ref=session_ref,
+        expires_at=_utcnow() + timedelta(seconds=max(1, int(timeout_seconds))),
+    )
+    db.add(row)
+    db.commit()
+    return {"status": "running", "remote_task_ref": f"rap-pull:{task_id}", "provider_status": "pending"}
+
+
+def _kernel_task_id(remote_task_ref: str) -> str:
+    prefix, _, task_id = str(remote_task_ref or "").partition(":")
+    if prefix != "rap-pull" or not task_id:
+        raise RemoteAgentServiceError("invalid RAP pull task reference")
+    return task_id
+
+
+def query_kernel_task(db: Session, agent_id: str, remote_task_ref: str) -> dict[str, Any]:
+    task_id = _kernel_task_id(remote_task_ref)
+    row = db.scalar(select(SuperAssistantRemoteAgentTask).where(
+        SuperAssistantRemoteAgentTask.id == task_id,
+        SuperAssistantRemoteAgentTask.agent_id == agent_id,
+    ))
+    if row is None:
+        return {"status": "unknown", "remote_task_ref": remote_task_ref}
+    if row.status in {"pending", "claimed"}:
+        return {"status": "running", "provider_status": row.status, "remote_task_ref": remote_task_ref}
+    if row.status == "done":
+        status = "completed" if row.result_status == "answered" else "failed"
+        event_id = f"rap-pull:{row.id}:done:{row.completed_at.isoformat() if row.completed_at else 'unknown'}"
+        return {
+            "status": status, "content": row.result_content or "", "session_ref": row.result_session_ref,
+            "note": row.result_note or "", "provider_event_id": event_id,
+            # Kernel reconciliation consumes the canonical RAP result here;
+            # omit no structured Artifacts from pull-mode agents.
+            "artifacts": row.result_artifacts or [],
+            "remote_task_ref": remote_task_ref,
+        }
+    # Expiry means the remote side effect is not confirmed.  Reconciliation
+    # must keep this as unknown instead of inventing a provider failure.
+    return {"status": "unknown", "provider_status": row.status, "remote_task_ref": remote_task_ref}
+
+
+def cancel_kernel_task(db: Session, agent_id: str, remote_task_ref: str) -> dict[str, Any]:
+    task_id = _kernel_task_id(remote_task_ref)
+    row = db.scalar(select(SuperAssistantRemoteAgentTask).where(
+        SuperAssistantRemoteAgentTask.id == task_id,
+        SuperAssistantRemoteAgentTask.agent_id == agent_id,
+    ).with_for_update())
+    if row is None:
+        return {"status": "unknown", "remote_task_ref": remote_task_ref}
+    if row.status == "pending":
+        row.status = "expired"
+        db.commit()
+        return {"status": "cancelled", "provider_event_id": f"rap-pull:{row.id}:cancelled", "remote_task_ref": remote_task_ref}
+    if row.status == "done":
+        return query_kernel_task(db, agent_id, remote_task_ref)
+    # A claimed task is already owned by the remote process.  The pull v1
+    # protocol has no cancel callback, so report uncertainty honestly.
+    db.commit()
+    return {"status": "unknown", "provider_status": "claimed", "remote_task_ref": remote_task_ref}
 
 
 def claim_next_task(db: Session, agent_id: str) -> Optional[SuperAssistantRemoteAgentTask]:
@@ -333,6 +436,7 @@ def submit_task_result(
     row.result_content = body.content[:20000]
     row.result_session_ref = (body.session_ref or None) if len(body.session_ref or "") <= 255 else None
     row.result_note = body.note[:2000]
+    row.result_artifacts = list(body.artifacts or [])
     row.completed_at = _utcnow()
     db.commit()
     db.refresh(row)
@@ -373,6 +477,42 @@ def touch_last_turn(db: Session, agent_id: str) -> None:
 
 
 # ------------------------------------------------------------ 动态目录接线
+
+
+def kernel_connector(
+    row: SuperAssistantRemoteAgent,
+    *,
+    pull_enqueue=None,
+    pull_query=None,
+    pull_cancel=None,
+    revision: int = 1,
+    manifest_hash: str | None = None,
+):
+    """Build the kernel.v1 connector for an existing remote-agent row.
+
+    The legacy ``PlatformAssistant`` adapter remains untouched for old chat
+    routes; kernel callers can opt into the same endpoint through the common
+    ConnectorRegistry without duplicating credential or timeout semantics.
+    """
+    from app.super_assistant.kernel.connectors import RemoteAgentHttpConnector
+
+    try:
+        token = decrypt(row.token_encrypted or "") if row.token_encrypted else ""
+    except Exception:  # noqa: BLE001 - a bad secret is surfaced by the remote endpoint
+        token = ""
+    return RemoteAgentHttpConnector(
+        agent_id=row.id,
+        key=row.key,
+        endpoint=row.endpoint or "",
+        token=token,
+        timeout_seconds=max(10, int(row.timeout_seconds or 120)),
+        mode=row.mode or "direct",
+        revision=revision,
+        manifest_hash=manifest_hash,
+        pull_enqueue=pull_enqueue,
+        pull_query=pull_query,
+        pull_cancel=pull_cancel,
+    )
 
 
 def dynamic_assistants(db: Session, user) -> list[Any]:
@@ -460,7 +600,7 @@ def _generate_key(db: Session, owner_id: str, label: str) -> str:
 def _validate_endpoint(endpoint: str) -> str:
     value = (endpoint or "").strip()
     try:
-        validate_mcp_url(value)
+        validate_mcp_url(value, require_https=True)
     except McpClientError as exc:
         raise RemoteAgentServiceError(str(exc)) from exc
     return value
@@ -535,6 +675,15 @@ def update_agent(
     db: Session, owner_id: str, agent_id: str, body: RemoteAgentUpdate,
 ) -> RemoteAgentOut:
     row = _require_row(db, owner_id, agent_id)
+    config_changed = any(value is not None for value in (body.endpoint, body.token, body.timeout_seconds)) or body.enabled is False
+    if config_changed:
+        from app.super_assistant.kernel.capability_service import revoke_capability_revisions
+        from app.super_assistant.kernel.models import CapabilityRevision
+        current = db.scalar(select(CapabilityRevision.revision).where(
+            CapabilityRevision.key == row.key, CapabilityRevision.enabled.is_(True),
+        ).order_by(CapabilityRevision.revision.desc()))
+        if current is not None:
+            revoke_capability_revisions(db, [row.key], revision=int(current))
     if body.label is not None:
         label = body.label.strip()
         if not label:
@@ -558,6 +707,13 @@ def update_agent(
 
 def delete_agent(db: Session, owner_id: str, agent_id: str) -> None:
     row = _require_row(db, owner_id, agent_id)
+    from app.super_assistant.kernel.capability_service import revoke_capability_revisions
+    from app.super_assistant.kernel.models import CapabilityRevision
+    current = db.scalar(select(CapabilityRevision.revision).where(
+        CapabilityRevision.key == row.key, CapabilityRevision.enabled.is_(True),
+    ).order_by(CapabilityRevision.revision.desc()))
+    if current is not None:
+        revoke_capability_revisions(db, [row.key], revision=int(current))
     db.delete(row)
     db.commit()
 

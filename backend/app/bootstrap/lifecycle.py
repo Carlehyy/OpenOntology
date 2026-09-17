@@ -31,6 +31,7 @@ async def application_lifespan(
     file_cleanup_task = None
     perf_monitor_started = False
     runtime_resources_started = False
+    kernel_scheduler_started = False
     try:
         seed_database()
 
@@ -130,6 +131,17 @@ async def application_lifespan(
                     "Data scheduler failed to initialize"
                 ) from exc
             _main_logger.warning("SyncScheduler 启动失败: %s", exc)
+
+        # kernel.v1 execution outbox：仅负责 durable 发布/过期 claim 恢复，
+        # 执行仍由同一 nats_executor 的独立 SA_EXECUTION_V1 consumer 完成。
+        if settings.environment != "test":
+            try:
+                from app.super_assistant.kernel.scheduler import start as start_kernel_scheduler
+
+                start_kernel_scheduler()
+                kernel_scheduler_started = True
+            except Exception as exc:
+                _main_logger.warning("kernel execution outbox scheduler 启动失败: %s", exc)
 
         # 助手评估任务恢复：queued 重排、running 标记中断（旁路能力，失败不阻断启动）
         if settings.environment != "test":
@@ -259,6 +271,13 @@ async def application_lifespan(
                 data_scheduler.shutdown()
             except Exception:  # noqa: BLE001
                 _main_logger.exception("Data scheduler cleanup failed")
+        if kernel_scheduler_started:
+            try:
+                from app.super_assistant.kernel.scheduler import stop as stop_kernel_scheduler
+
+                stop_kernel_scheduler()
+            except Exception:  # noqa: BLE001
+                _main_logger.exception("kernel execution scheduler cleanup failed")
         if sentinel_attempted:
             try:
                 from app.services.sentinel import (

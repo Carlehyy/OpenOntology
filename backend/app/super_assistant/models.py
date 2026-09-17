@@ -249,6 +249,9 @@ class SuperAssistantMcpServer(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     require_confirmation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     tool_manifest: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Capability revisions are frozen snapshots of the tested tool manifest.
+    manifest_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    manifest_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_test_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     last_test_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -292,6 +295,47 @@ class SuperAssistantMcpDevProject(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+
+
+class SuperAssistantProcessPlugin(Base):
+    """Persisted user process-plugin manifest and lifecycle state.
+
+    The executable is never treated as an implicit capability.  A plugin must
+    be explicitly enabled before its immutable ``CapabilityRevision`` is
+    enabled; disabling or draining revokes that live authorization bit while
+    retaining this row for audit and safe restart recovery.
+    """
+
+    __tablename__ = "super_assistant_process_plugins"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "key", "revision", name="uq_sa_process_plugin_owner_revision"),
+        Index("ix_sa_process_plugins_owner_state", "owner_id", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    description: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    entrypoint: Mapped[str] = mapped_column(String(2000), nullable=False)
+    trust_level: Mapped[str] = mapped_column(String(24), nullable=False, default="user_untrusted")
+    capabilities: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    permissions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    network_scope: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    workspace_scope: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    secret_refs: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    manifest_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default="installed")
+    active_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_health_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    last_health_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    drain_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    uninstalled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class SuperAssistantMcpDevVersion(Base):
     """保存时冻结的自研 MCP 脚本版本（含当时的工具清单与样例参数快照）。"""
 
@@ -316,6 +360,71 @@ class SuperAssistantMcpDevVersion(Base):
     tool_gates: Mapped[list | None] = mapped_column(JSON, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
+
+
+class SuperAssistantProcessPluginInvocation(Base):
+    """Durable lease for one process-plugin invocation.
+
+    ``active_calls`` on the plugin row is a projection for UI/drain checks;
+    this row is the recovery source of truth so a worker crash cannot leave an
+    invocation permanently active.
+    """
+
+    __tablename__ = "super_assistant_process_plugin_invocations"
+    __table_args__ = (
+        UniqueConstraint("call_id", name="uq_sa_process_plugin_invocation_call"),
+        Index("ix_sa_process_plugin_invocations_plugin_state", "plugin_id", "state", "lease_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    plugin_id: Mapped[str] = mapped_column(
+        String, ForeignKey("super_assistant_process_plugins.id", ondelete="CASCADE"), nullable=False,
+    )
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    call_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
+class SuperAssistantPluginRunnerJournal(Base):
+    """Crash-recovery journal for the external plugin-runner service.
+
+    ``request_id`` is the idempotency anchor carried by
+    :class:`PluginInvocationEnvelope`.  The runner commits every state before
+    performing the next irreversible action; a redelivered NATS message can
+    therefore never spawn a second process.  Only bounded identity and outcome
+    metadata are retained here; input/secret bytes stay behind their opaque
+    references.
+    """
+
+    __tablename__ = "super_assistant_plugin_runner_journal"
+    __table_args__ = (
+        Index("ix_sa_plugin_runner_journal_owner_state", "owner_id", "state", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    call_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    plugin_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="accepted")
+    event_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    outcome: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # Complete contract event needed to replay a publish that failed after the
+    # journal commit.  It contains only opaque artifact references and bounded
+    # payload, never plugin input or secret values.
+    last_event: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
 class SuperAssistantMulticaConfig(Base):
@@ -647,6 +756,10 @@ class SuperAssistantRemoteAgentTask(Base):
     result_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_session_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     result_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Bounded structured artifacts returned by a pull-mode RAP task.  The
+    # kernel validates checksums/content when the result is reconciled; this
+    # column only preserves the transport payload across polling.
+    result_artifacts: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

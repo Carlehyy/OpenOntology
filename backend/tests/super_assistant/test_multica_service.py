@@ -328,3 +328,28 @@ def test_execute_create_task_reports_unknown_assignee(session, monkeypatch):
         multica_service.execute_tool(session, "user-1", "multica_create_task", {
             "title": "修复登录", "assignee": "不存在",
         })
+
+
+def test_external_task_query_and_cancel_preserve_provider_identity(session, monkeypatch):
+    _enabled_config(session)
+    ref = json.dumps({"issue_ref": "MYW-99", "task_id": None})
+    monkeypatch.setattr(
+        multica_client,
+        "get_issue",
+        lambda *args: {"id": "issue-99", "identifier": "MYW-99", "status": "in_progress"},
+    )
+    monkeypatch.setattr(
+        multica_client,
+        "get_active_task",
+        lambda *args: {"id": "task-99", "status": "running"},
+    )
+    monkeypatch.setattr(
+        multica_client,
+        "cancel_task",
+        lambda *args: {"status": "cancelled", "id": "task-99"},
+    )
+    observed = multica_service.query_external_task(session, "user-1", ref)
+    assert observed["status"] == "running"
+    assert json.loads(observed["remote_task_ref"]) == {"issue_ref": "MYW-99", "task_id": "task-99"}
+    cancelled = multica_service.cancel_external_task(session, "user-1", observed["remote_task_ref"])
+    assert cancelled["status"] == "cancelled"

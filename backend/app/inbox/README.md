@@ -4,6 +4,12 @@
 
 当前首个生产者是数据任务池：同一任务连续失败聚合为一条未恢复告警，下一次成功自动关闭该故障周期，之后再次失败会创建新的故障周期。
 
+本体动作审批也是 v1 生产者：动作进入 `pending` 时，在同一业务事务写入
+`ontology_approval` outbox，投影为管理员收件箱任务；审批完成（approved、
+rejected 或技术执行 failed）后写入同一 correlation key 的 close 事件。收件箱
+只负责通知和导航，最终决策仍必须经过本体治理 API 的权限、发布版本和
+`If-Match` 校验；不会通过收件箱或外部通知直接修改动作事实。
+
 ## 输入事件
 
 生产者在自己的事务内先写 durable outbox，再由投影器调用 `publish_event(db, InboxEventIn)`。事件字段统一使用 camelCase JSON；Python 模型也接受 snake_case。

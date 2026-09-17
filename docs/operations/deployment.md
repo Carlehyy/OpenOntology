@@ -207,6 +207,15 @@ backend 和 frontend，且不得在旧 API 仍可访问数据库时
 
 ## 部署前检查
 
+超级助手用户进程插件的生产验收需要独立 Linux staging，不能用 macOS Docker
+或单元测试代替 namespace/cgroup 证据。环境至少应提供 cgroup v2 delegated
+subtree、非 root user namespace、seccomp/AppArmor、受控 egress/DNS 策略，
+以及与生产隔离的 PostgreSQL、NATS JetStream、MinIO、Neo4j、n8n 和 Chromium
+CDP。插件包须以不可变 digest 交付；secret/artifact broker 使用仅限 staging
+的短期授权，证据写入 CI artifact 或 `.artifacts/`，不得写入 Git。缺少任一
+隔离、broker 或恢复条件时，保持生产 `user_untrusted` 插件 disabled，并记录
+未执行的攻击、崩溃、重复投递、取消、升级和回滚验收，不得按商用通过处理。
+
 - `PROD_*` Repository secrets/variables 齐全，物化出的生产依赖清单通过只读
   配置校验；
 - 服务器 `.env` 是可恢复的普通 `0600` 文件，而不是软链接；

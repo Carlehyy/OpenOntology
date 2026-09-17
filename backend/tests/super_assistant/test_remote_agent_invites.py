@@ -69,7 +69,7 @@ def test_create_invite_generates_once_token_and_prompt(db, admin_user):
 
 
 def test_list_invites_reports_status_and_redeemed_agent(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     _, token = _create_invite(db, admin_user.id)
     remote_agent_invite_service.redeem(db, _redeem_body(token, mode="direct",
                                                        endpoint="http://127.0.0.1:9101/turn"))
@@ -133,7 +133,7 @@ def test_redeem_direct_requires_valid_endpoint(db, admin_user):
 
 
 def test_redeem_auto_key_avoids_collision(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     keys = []
     for _ in range(2):
         _, token = _create_invite(db, admin_user.id)
@@ -176,7 +176,7 @@ def test_redeem_token_single_use_and_anti_enumeration(db, admin_user):
 
 
 def test_invite_prompt_redispatch_only_while_pending(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     created, token = _create_invite(db, admin_user.id)
 
     prompt = remote_agent_invite_service.invite_prompt(db, admin_user.id, created.id)
@@ -279,7 +279,7 @@ from app.super_assistant import remote_agent_invite_service
 
 def test_owner_invite_endpoints_over_http(client, auth_headers, admin_user, db, monkeypatch):
     from app.super_assistant import remote_agent_service
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
 
     created = client.post("/api/v2/super-assistant/remote-agent-invites", headers=auth_headers, json={})
     assert created.status_code == 200

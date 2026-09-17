@@ -1,0 +1,426 @@
+"""Durable recovery scans for kernel.v1.
+
+The scheduler is intentionally a producer: it only records fenced state
+transitions and enqueues an outbox wake-up.  Actual model/connector work stays
+in the NATS executor.
+"""
+from __future__ import annotations
+
+from datetime import timedelta, timezone
+import hashlib
+import json
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .contracts import RunStatus
+from .models import Approval, Artifact, ExecutionAttempt, ExecutionCall, ExecutionEvent, ExecutionRun, ExecutionStep, ExecutionTurn, InboxItem
+from .policies import ChildResult, ChildStatus, ExecutionPolicy, JoinDecision, JoinPolicy, decide_child_join
+from .reconciler import decide_run_timeout, should_recover_run
+from .store import _add_outbox, _now, acquire_lease, append_event
+
+
+_TERMINAL = {RunStatus.COMPLETED.value, RunStatus.FAILED.value, RunStatus.CANCELLED.value, RunStatus.EXPIRED.value}
+_UNRESOLVED = {"offered", "dispatched", "running", "waiting_external", "cancel_requested", "reconciling"}
+
+
+def _child_status(value: str) -> ChildStatus:
+    """Map a Run projection to the smaller fan-in status vocabulary.
+
+    ChildStatus intentionally models join semantics, while RunStatus also
+    contains execution-control and waiting states.  Unknown/non-terminal
+    values must remain conservative instead of aborting the scheduler tick.
+    """
+    if value == RunStatus.QUEUED.value:
+        return ChildStatus.PENDING
+    if value in _TERMINAL:
+        return ChildStatus(value)
+    return ChildStatus.RUNNING
+
+
+def _utc(value):
+    return value if value is None or value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def expire_inbox_once(db: Session, *, limit: int = 100) -> int:
+    """Expire unanswered questions/approvals and apply their frozen policy.
+
+    A question may be re-asked once with a fresh inbox row; the second expiry
+    downgrades to ``fail_branch`` per the frozen baseline. ``fail_branch``
+    closes only the waiting branch and returns the Run to ``active`` for
+    replanning; ``fail_run`` closes the whole Run.  Lock order is always
+    Run → InboxItem (worker paths lock the Run first); the scanner must not
+    invert it, or PostgreSQL can deadlock the two paths.
+    """
+    now = _now()
+    candidate_ids = list(db.scalars(select(InboxItem.id).where(
+        InboxItem.status.in_(("pending", "claimed")),
+        InboxItem.expires_at.is_not(None),
+        InboxItem.expires_at <= now,
+    ).order_by(InboxItem.expires_at, InboxItem.id).limit(limit)).all())
+    changed = 0
+    for item_id in candidate_ids:
+        probe = db.scalar(select(InboxItem.run_id).where(InboxItem.id == item_id))
+        if probe is None:
+            continue
+        run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == probe).with_for_update(skip_locked=True))
+        if run is None:
+            continue  # Run 行锁被在飞 worker 持有，下一 tick 再处理
+        item = db.scalar(select(InboxItem).where(InboxItem.id == item_id).with_for_update())
+        if item is None or item.status not in {"pending", "claimed"}:
+            continue
+        item.status = "expired"
+        item.consumed_at = now
+        item.claim_token = None
+        item.claim_expires_at = None
+        append_event(
+            db, run, event_type="inbox.expired",
+            payload={
+                "inbox_id": item.id, "kind": item.kind,
+                "target_ref": item.target_ref or item.id,
+                "question_id": item.question_id,
+                "question_expires_at": item.expires_at.isoformat() if item.expires_at else now.isoformat(),
+                "expiry_policy": item.expiry_policy or "fail_run",
+                "accepted_at": item.accepted_at.isoformat() if item.accepted_at else now.isoformat(),
+            }, actor={"kind": "system"}, command_id=f"inbox-expired:{item.id}",
+            idempotency_key=f"inbox-expired:{item.id}",
+        )
+        if item.approval_id:
+            approval = db.scalar(select(Approval).where(Approval.id == item.approval_id).with_for_update())
+            if approval is not None and approval.status == "pending":
+                approval.status = "expired"
+                append_event(
+                    db, run, event_type="approval.expired",
+                    payload={"approval_id": approval.id, "reason": "ttl", "actor": "system", "occurred_at": now.isoformat()},
+                    actor={"kind": "system"}, command_id=f"approval-expired:{approval.id}",
+                    idempotency_key=f"approval-expired:{approval.id}",
+                )
+                # 审批到期时收尾被门住的 Call：它从未派发（无 dispatch
+                # Outbox、无 Attempt），closed/not_sent 是诚实终态，避免
+                # scheduler/reconciler 之后误推进一个用户从未批准的动作。
+                if approval.call_id:
+                    from .models import ExecutionCall
+                    gated = db.scalar(select(ExecutionCall).where(
+                        ExecutionCall.id == approval.call_id,
+                        ExecutionCall.run_id == approval.run_id,
+                    ).with_for_update())
+                    if gated is not None and gated.status in {"offered", "waiting_external"} and not gated.remote_task_ref:
+                        gated.status, gated.outcome = "closed", "not_sent"
+                        append_event(
+                            db, run, event_type="call.outcome_changed",
+                            payload={"call_id": gated.id, "status": "closed", "outcome": "not_sent", "evidence_ref": None, "connector_id": gated.target_ref, "provider_event_id": None},
+                            actor={"kind": "system"}, command_id=f"call-approval-expired:{gated.id}",
+                            idempotency_key=f"call-approval-expired:{gated.id}",
+                        )
+            elif approval is not None:
+                # A decision won the race with the TTL scanner. The linked
+                # Inbox is still expired for audit, but it must not fail the
+                # Run after an approval was already accepted or denied.
+                changed += 1
+                continue
+        if run.status in _TERMINAL:
+            changed += 1
+            continue
+        policy = item.expiry_policy or "fail_run"
+        if item.kind == "question_answer" and policy == "reask_once" and not (item.payload or {}).get("_reasked"):
+            # Preserve the original question while marking the retry in the
+            # payload.  Per the frozen baseline the second expiry downgrades
+            # to ``fail_branch`` (close the branch, keep the Run alive)
+            # instead of failing the whole Run.
+            deadline = _utc(run.deadline)
+            retry = InboxItem(
+                run_id=run.id, kind=item.kind, priority=item.priority, status="pending",
+                question_id=item.question_id, target_ref=item.target_ref,
+                payload={**(item.payload or {}), "_reasked": True}, source="system",
+                expires_at=min(deadline, now + timedelta(minutes=30)) if deadline else now + timedelta(minutes=30),
+                expiry_policy="fail_branch", accepted_at=now,
+                idempotency_key=f"{item.id}:reask",
+            )
+            db.add(retry); db.flush()
+            append_event(
+                db, run, event_type="inbox.appended",
+                payload={"inbox_id": retry.id, "kind": retry.kind, "target_ref": retry.target_ref or retry.id, "expiry_policy": retry.expiry_policy, "question_id": retry.question_id},
+                actor={"kind": "system"}, command_id=f"inbox-reask:{item.id}", idempotency_key=f"inbox-reask:{item.id}",
+            )
+        elif policy == "fail_branch":
+            if run.status == RunStatus.WAITING_INPUT.value:
+                # 分支失败：问题已关闭，Run 回到 active 由模型在没有该回答的
+                # 情况下重新规划；其他可推进工作（其余等待/外部 Call）不受影响。
+                before = run.status
+                run.status = RunStatus.ACTIVE.value
+                run.wait_reason = None
+                run.version += 1
+                append_event(
+                    db, run, event_type="run.status_changed",
+                    payload={"from": before, "to": run.status, "reason": "question_expired_branch_failed", "actor": "system", "version": run.version},
+                    actor={"kind": "system"}, command_id=f"inbox-branch-fail:{item.id}", idempotency_key=f"inbox-branch-fail:{item.id}",
+                )
+                _add_outbox(db, run, command_id=f"branch-fail-dispatch:{run.id}:{run.version}", message_ref=f"run://{run.id}")
+            # Run 不在等待该问题（如已暂停）时只关闭问题，不翻动 Run 状态。
+        else:
+            before = run.status
+            run.status = RunStatus.FAILED.value
+            run.wait_reason = "input_expired"
+            run.version += 1
+            append_event(
+                db, run, event_type="run.status_changed",
+                payload={"from": before, "to": run.status, "reason": "inbox_expired", "actor": "system", "version": run.version},
+                actor={"kind": "system"}, command_id=f"inbox-fail:{item.id}", idempotency_key=f"inbox-fail:{item.id}",
+            )
+        changed += 1
+    db.commit()
+    return changed
+
+
+def expire_due_runs_once(db: Session, *, policy: ExecutionPolicy | None = None, limit: int = 100) -> int:
+    """Request deadline cancellation, then close runs after cancel grace."""
+    policy = policy or ExecutionPolicy()
+    now = _now()
+    rows = db.scalars(select(ExecutionRun).where(ExecutionRun.status.not_in(_TERMINAL)).order_by(ExecutionRun.updated_at).limit(limit).with_for_update(skip_locked=True)).all()
+    changed = 0
+    for run in rows:
+        unresolved_ids = list(db.scalars(select(ExecutionCall.id).where(ExecutionCall.run_id == run.id, ExecutionCall.status.in_(_UNRESOLVED))).all())
+        unresolved_count = len(unresolved_ids)
+        decision = decide_run_timeout(
+            status=RunStatus(run.status), unresolved_call_count=unresolved_count,
+            deadline=_utc(run.deadline), cancel_deadline=_utc(run.cancel_deadline),
+            cancel_reason=run.cancel_reason, now=now,
+        )
+        if decision.action == "noop":
+            continue
+        before = run.status
+        run.status = decision.status.value
+        run.cancel_reason = decision.cancel_reason
+        run.version += 1
+        if decision.action == "expiry_requested":
+            run.cancel_deadline = now + policy.cancel_grace
+            append_event(
+                db, run, event_type="run.expiry_requested",
+                payload={"reason": "deadline", "deadline": run.deadline.isoformat() if run.deadline else now.isoformat(), "unresolved_call_ids": [str(call_id) for call_id in unresolved_ids]},
+                actor={"kind": "system"}, command_id=f"expiry:{run.id}:{run.version}", idempotency_key=f"expiry:{run.id}:{run.version}",
+            )
+        elif decision.action == "expired":
+            # 无未决 Call 的直接过期同样必须先留下 run.expiry_requested
+            # 事实再进入 expired（execution-model §2），不能只写终态。
+            append_event(
+                db, run, event_type="run.expiry_requested",
+                payload={"reason": "deadline", "deadline": run.deadline.isoformat() if run.deadline else now.isoformat(), "unresolved_call_ids": []},
+                actor={"kind": "system"}, command_id=f"expiry:{run.id}:{run.version}", idempotency_key=f"expiry:{run.id}:{run.version}",
+            )
+        elif decision.action == "cancel_timeout":
+            append_event(
+                db, run, event_type="run.cancel_timeout",
+                payload={"reason": run.cancel_reason or "deadline", "cancel_deadline": run.cancel_deadline.isoformat() if run.cancel_deadline else now.isoformat(), "unresolved_call_ids": [str(call_id) for call_id in unresolved_ids], "run_terminal_status": run.status},
+                actor={"kind": "system"}, command_id=f"cancel-timeout:{run.id}:{run.version}", idempotency_key=f"cancel-timeout:{run.id}:{run.version}",
+            )
+        append_event(
+            db, run, event_type="run.status_changed",
+            payload={"from": before, "to": run.status, "reason": decision.action, "actor": "system", "version": run.version},
+            actor={"kind": "system"}, command_id=f"timeout-status:{run.id}:{run.version}", idempotency_key=f"timeout-status:{run.id}:{run.version}",
+        )
+        if decision.action == "expiry_requested":
+            _add_outbox(db, run, command_id=f"expiry-dispatch:{run.id}:{run.version}", message_ref=f"run://{run.id}")
+        changed += 1
+    db.commit()
+    return changed
+
+
+def recover_stuck_runs_once(db: Session, *, policy: ExecutionPolicy | None = None, limit: int = 100) -> int:
+    """Fence and wake runs whose worker lease and progress both went stale."""
+    policy = policy or ExecutionPolicy()
+    now = _now()
+    rows = db.scalars(select(ExecutionRun).where(ExecutionRun.status.not_in(_TERMINAL)).order_by(ExecutionRun.updated_at).limit(limit).with_for_update(skip_locked=True)).all()
+    changed = 0
+    for run in rows:
+        if _utc(run.lease_expires_at) and _utc(run.lease_expires_at) > now:
+            continue
+        if run.status not in {RunStatus.ACTIVE.value, RunStatus.QUEUED.value}:
+            # 合法等待不是卡死：暂停交给 resume、取消交给 cancel 超时路径；
+            # WAITING_* 只有在"存在待消费的用户输入却没人唤醒"（唤醒丢失）
+            # 时才需要恢复。否则审批/问题 TTL 与外部 Call 上的正常等待会被
+            # 每 5 分钟误判一轮：version 递增打爆客户端 If-Match，事件日志
+            # 无界增长。
+            if run.status in {RunStatus.PAUSED.value, RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}:
+                continue
+            has_pending_user_input = db.scalar(select(InboxItem.id).where(
+                InboxItem.run_id == run.id, InboxItem.status == "pending", InboxItem.source == "user",
+            ).limit(1))
+            if not has_pending_user_input:
+                continue
+        updated_at = run.updated_at if run.updated_at.tzinfo else run.updated_at.replace(tzinfo=timezone.utc)
+        if not should_recover_run(status=RunStatus(run.status), updated_at=updated_at, now=now, policy=policy):
+            continue
+        token = acquire_lease(db, run_id=run.id, worker_id="kernel:recovery", ttl=policy.lease_ttl)
+        _fence_orphaned_calls(db, run, token)
+        run.version += 1
+        append_event(
+            db, run, event_type="run.recovery_requested",
+            payload={"reason": "stuck_detector", "lease_epoch": token.epoch, "diagnostic_ref": f"run://{run.id}/recovery"},
+            actor={"kind": "system"}, command_id=f"recovery:{run.id}:{token.epoch}", idempotency_key=f"recovery:{run.id}:{token.epoch}", lease=token,
+        )
+        _add_outbox(db, run, command_id=f"recovery-dispatch:{run.id}:{token.epoch}", message_ref=f"run://{run.id}")
+        changed += 1
+    db.commit()
+    return changed
+
+
+def _fence_orphaned_calls(db: Session, run: ExecutionRun, token) -> None:
+    """Close only calls left by a fenced worker, preserving remote waits."""
+    rows = db.scalars(select(ExecutionCall).where(
+        ExecutionCall.run_id == run.id,
+        ExecutionCall.status.in_(("offered", "dispatched", "running")),
+        ExecutionCall.lease_epoch != token.epoch,
+    ).with_for_update()).all()
+    for call in rows:
+        call.status = "reconciling"
+        call.outcome = "outcome_unknown"
+        call.manual_attention = True
+        call.remote_observed_state_ref = "worker_fenced"
+        attempt = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc()).with_for_update())
+        if attempt is not None and attempt.finished_at is None:
+            attempt.provider_status, attempt.finished_at, attempt.safe_to_retry = "unknown", _now(), False
+            append_event(db, run, event_type="attempt.result", payload={"attempt_id": attempt.id, "provider_status": "unknown", "result_ref": None, "error_ref": "worker_fenced", "safe_to_retry": False, "token_usage_ref": None, "cost_ref": None}, actor={"kind": "system"}, command_id=f"recovery:{attempt.id}:fenced", idempotency_key=f"recovery-attempt-fenced:{attempt.id}", lease=token)
+        if call.step_id:
+            step = db.get(ExecutionStep, call.step_id)
+            if step is not None and step.status != "closed":
+                step.status, step.close_reason, step.closed_at = "closed", "interrupted", _now()
+            if step is not None:
+                turn = db.get(ExecutionTurn, step.turn_id)
+                if turn is not None and turn.status == "open":
+                    turn.status, turn.close_reason, turn.closed_at = "closed", "interrupted", _now()
+        append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "system"}, command_id=f"recovery:{call.id}:fenced", idempotency_key=f"recovery-call-fenced:{call.id}", lease=token, connector_id=call.target_ref)
+
+
+def join_ready_parents_once(db: Session, *, limit: int = 100) -> int:
+    """Apply child fan-in decisions to parents without executing child work."""
+    # Stable keyset ordering prevents an unordered LIMIT from repeatedly
+    # selecting the same hot parent and starving later conversations.  The
+    # bounded page is still small enough for the scheduler transaction.
+    rows = db.scalars(
+        select(ExecutionRun)
+        .where(ExecutionRun.status.not_in(_TERMINAL), ExecutionRun.required_child_ids.is_not(None))
+        .order_by(ExecutionRun.updated_at, ExecutionRun.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    ).all()
+    parents = [r for r in rows if r.required_child_ids]
+    changed = 0
+    for parent in parents:
+        children = db.scalars(select(ExecutionRun).where(ExecutionRun.parent_run_id == parent.id)).all()
+        if not children:
+            continue
+        policy = JoinPolicy(parent.join_policy)
+        result = decide_child_join(tuple(ChildResult(c.id, _child_status(c.status), c.id in set(parent.required_child_ids or [])) for c in children), policy)
+        if result.decision is JoinDecision.PENDING:
+            continue
+        # READY is an edge-triggered fact.  Recover it from the durable event
+        # log so a crash/retry cannot emit duplicate child_joined events or
+        # duplicate child-result manifests.
+        joined_ids = {
+            str((event.payload or {}).get("child_run_id"))
+            for event in db.scalars(select(ExecutionEvent).where(
+                ExecutionEvent.run_id == parent.id,
+                ExecutionEvent.event_type == "run.child_joined",
+            )).all()
+            if (event.payload or {}).get("child_run_id")
+        }
+        required_ids = set(parent.required_child_ids or [])
+        ready_ids = list(dict.fromkeys(result.failed_child_ids + result.successful_child_ids))
+        new_joined = [child_id for child_id in ready_ids if child_id not in joined_ids]
+        for child_id in new_joined:
+            required = child_id in required_ids
+            child = next((candidate for candidate in children if candidate.id == child_id), None)
+            if child is not None:
+                _merge_child_result(db, parent, child)
+            append_event(db, parent, event_type="run.child_joined", payload={"parent_run_id": parent.id, "child_run_id": child_id, "join_policy": parent.join_policy, "required": required}, actor={"kind": "system"}, command_id=f"join:{parent.id}:{child_id}", idempotency_key=f"join:{parent.id}:{child_id}")
+        before = parent.status
+        transitioned = False
+        if parent.status in {RunStatus.CANCEL_REQUESTED.value, RunStatus.CANCELLING.value}:
+            # Cancellation is the parent's control decision; fan-in facts are
+            # still retained, but they must not overwrite the control state.
+            pass
+        elif result.decision is JoinDecision.FAILED and parent.status != RunStatus.FAILED.value:
+            parent.status = RunStatus.FAILED.value
+            parent.version += 1
+            transitioned = True
+        elif result.decision is JoinDecision.READY and parent.status in {RunStatus.WAITING_EXTERNAL.value, RunStatus.WAITING_RETRY.value}:
+            parent.status = RunStatus.ACTIVE.value
+            parent.version += 1
+            transitioned = True
+        if not new_joined and not transitioned:
+            continue
+        if transitioned:
+            append_event(db, parent, event_type="run.status_changed", payload={"from": before, "to": parent.status, "reason": "child_join", "actor": "system", "version": parent.version}, actor={"kind": "system"}, command_id=f"join-status:{parent.id}:{parent.version}", idempotency_key=f"join-status:{parent.id}:{parent.version}")
+            if parent.status == RunStatus.ACTIVE.value:
+                _add_outbox(db, parent, command_id=f"join-dispatch:{parent.id}:{parent.version}", message_ref=f"run://{parent.id}")
+        # Preserve the historical return contract for cancellation scans:
+        # cancellation is intentionally not counted as a parent change even
+        # though the durable child_joined facts above are retained.
+        if transitioned or parent.status not in {
+            RunStatus.CANCEL_REQUESTED.value,
+            RunStatus.CANCELLING.value,
+        }:
+            changed += 1
+    db.commit()
+    return changed
+
+
+def _merge_child_result(db: Session, parent: ExecutionRun, child: ExecutionRun) -> None:
+    """Materialize a bounded child-result manifest in the parent context.
+
+    Parent activation must be able to reason over a completed child without
+    opening the child Run's private event stream.  The manifest references all
+    child Artifacts and embeds only small inline payloads; object-backed
+    content remains addressable through its artifact URI and ownership checks.
+    The provenance marker makes repeated recovery scans idempotent.
+    """
+    provenance = f"child-run:{child.id}:v{child.version}"
+    if db.scalar(select(Artifact).where(Artifact.run_id == parent.id, Artifact.provenance_ref == provenance)) is not None:
+        return
+    artifacts = db.scalars(select(Artifact).where(Artifact.run_id == child.id).order_by(Artifact.id)).all()
+    entries = []
+    for artifact in artifacts:
+        entry = {
+            "artifact_id": artifact.id,
+            "kind": artifact.kind,
+            "mime_type": artifact.mime_type,
+            "size": artifact.size,
+            "checksum": artifact.checksum,
+            "storage_ref": artifact.storage_ref,
+            "business_status": artifact.business_status,
+        }
+        if artifact.inline_content is not None and len(artifact.inline_content.encode("utf-8")) <= 64 * 1024:
+            entry["inline_content"] = artifact.inline_content
+        entries.append(entry)
+    content = json.dumps({"child_run_id": child.id, "status": child.status, "artifacts": entries}, ensure_ascii=False, sort_keys=True)
+    artifact = Artifact(
+        owner_id=parent.owner_id, run_id=parent.id, kind="child.result",
+        mime_type="application/json", size=len(content.encode("utf-8")),
+        checksum="sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        storage_ref=f"inline://{parent.id}/{provenance}", inline_content=content,
+        status="complete", integrity_status="verified", business_status="success" if child.status == RunStatus.COMPLETED.value else "failed",
+        visibility="owner", provenance_ref=provenance,
+    )
+    db.add(artifact)
+    db.flush()
+    append_event(
+        db, parent, event_type="artifact.declared",
+        payload={"artifact_id": artifact.id, "kind": artifact.kind, "mime_type": artifact.mime_type,
+                 "size": artifact.size, "checksum": artifact.checksum, "storage_ref": artifact.storage_ref,
+                 "visibility": artifact.visibility},
+        actor={"kind": "system"}, command_id=f"child-artifact:{artifact.id}:declare",
+        idempotency_key=f"child-artifact:{provenance}:declare",
+    )
+    append_event(
+        db, parent, event_type="artifact.completed",
+        payload={"artifact_id": artifact.id, "checksum": artifact.checksum,
+                 "integrity_status": artifact.integrity_status, "business_status": artifact.business_status},
+        actor={"kind": "system"}, command_id=f"child-artifact:{artifact.id}:complete",
+        idempotency_key=f"child-artifact:{provenance}:complete",
+    )
+    append_event(
+        db, parent, event_type="assistant.message",
+        payload={"attempt_id": artifact.id, "message_ref": f"artifact://{artifact.id}"},
+        actor={"kind": "system"}, command_id=f"child-artifact:{artifact.id}:message",
+        idempotency_key=f"child-artifact:{provenance}:message",
+    )

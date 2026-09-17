@@ -7,6 +7,7 @@ multica 官方 CLI/API 约定一致：PAT Bearer + 工作区级 X-Workspace-ID�
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -22,13 +23,14 @@ class MulticaClientError(RuntimeError):
 
 def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     """集中的 httpx 调用点（测试 monkeypatch 此函数）。"""
+    kwargs["trust_env"] = False
     return httpx.request(method, url, **kwargs)
 
 
 def normalize_base_url(base_url: str) -> str:
     value = (base_url or "").strip().rstrip("/")
     try:
-        return validate_mcp_url(value)
+        return validate_mcp_url(value, require_https=True)
     except McpClientError as exc:
         raise MulticaClientError(f"multica 服务地址无效：{exc}") from exc
 
@@ -63,6 +65,7 @@ def _call(
     workspace_id: str | None = None,
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
+    allow_empty: bool = False,
 ) -> Any:
     url = f"{normalize_base_url(base_url)}{path}"
     cleaned_params = {
@@ -77,7 +80,10 @@ def _call(
         params=cleaned_params,
         json=payload,
         timeout=_TIMEOUT_SECONDS,
-        follow_redirects=True,
+        # A redirect changes the host to which the bearer token would be sent.
+        # Fail closed and let the caller surface the HTTP status instead of
+        # allowing an unvalidated redirect target.
+        follow_redirects=False,
     )
     if not 200 <= response.status_code < 300:
         raise MulticaClientError(
@@ -86,6 +92,8 @@ def _call(
     try:
         return response.json()
     except ValueError as exc:
+        if allow_empty and not (response.text or "").strip():
+            return {}
         raise MulticaClientError(f"multica 响应不是有效 JSON（{path}）") from exc
 
 
@@ -196,4 +204,73 @@ def create_issue(
     if allow_duplicate:
         payload["allow_duplicate"] = True
     data = _call("POST", base_url, token, "/api/issues", workspace_id=workspace_id, payload=payload)
+    return data if isinstance(data, dict) else {}
+
+
+def _issue_path(issue_ref: str) -> str:
+    """Return an encoded issue identifier path segment.
+
+    Multica accepts both its human identifier (for example ``MYW-9``) and the
+    UUID returned by the API.  Encoding the complete segment prevents a remote
+    task reference from changing the request path.
+    """
+    value = str(issue_ref or "").strip()
+    if not value or len(value) > 255:
+        raise MulticaClientError("multica issue 标识不能为空且长度不能超过 255")
+    return f"/api/issues/{quote(value, safe='')}"
+
+
+def get_issue(
+    base_url: str,
+    token: str,
+    workspace_id: str | None,
+    issue_ref: str,
+) -> dict[str, Any]:
+    """Fetch one issue by identifier/UUID for durable external reconciliation."""
+    data = _call("GET", base_url, token, _issue_path(issue_ref), workspace_id=workspace_id)
+    return data if isinstance(data, dict) else {}
+
+
+def get_active_task(
+    base_url: str,
+    token: str,
+    workspace_id: str | None,
+    issue_ref: str,
+) -> dict[str, Any]:
+    """Return the active execution task associated with an issue.
+
+    The endpoint returns either a task object or ``{task_id: ...}`` depending
+    on the Multica server revision; callers normalize both forms.
+    """
+    data = _call(
+        "GET", base_url, token, f"{_issue_path(issue_ref)}/active-task",
+        workspace_id=workspace_id,
+    )
+    if isinstance(data, dict) and isinstance(data.get("task"), dict):
+        return dict(data["task"])
+    return data if isinstance(data, dict) else {}
+
+
+def cancel_task(
+    base_url: str,
+    token: str,
+    workspace_id: str | None,
+    issue_ref: str,
+    task_id: str,
+) -> dict[str, Any]:
+    """Request cancellation of a Multica execution task.
+
+    Cancellation is an explicit provider operation.  A successful HTTP
+    response with no body is still a valid acknowledgement and is represented
+    as an empty object for the connector to normalize.
+    """
+    task = str(task_id or "").strip()
+    if not task or len(task) > 255:
+        raise MulticaClientError("multica task 标识不能为空且长度不能超过 255")
+    data = _call(
+        "POST", base_url, token,
+        f"{_issue_path(issue_ref)}/tasks/{quote(task, safe='')}/cancel",
+        workspace_id=workspace_id,
+        allow_empty=True,
+    )
     return data if isinstance(data, dict) else {}

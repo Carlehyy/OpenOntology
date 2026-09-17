@@ -232,6 +232,75 @@ def enqueue_pipeline_task_result(
     return event_id
 
 
+def enqueue_ontology_approval_request(
+    db: Session,
+    *,
+    log_id: str,
+    ontology_id: str,
+    action_name: str,
+    ontology_version: str | None,
+    ontology_release_id: str | None,
+    occurred_at: datetime | None = None,
+) -> str:
+    """Durably notify governance users about a pending ontology action.
+
+    The outbox contains only bounded, safe display metadata.  Action
+    parameters and execution details remain in the authoritative ontology
+    tables and are fetched after the user follows the internal link.
+    """
+    event_id = f"ontology-approval:{log_id}:requested"
+    if db.query(InboxOutboxEvent.id).filter(InboxOutboxEvent.id == event_id).first():
+        return event_id
+    db.add(InboxOutboxEvent(
+        id=event_id,
+        event_type="ontology_approval",
+        payload={
+            "phase": "requested",
+            "logId": log_id,
+            "ontologyId": ontology_id,
+            "actionName": (action_name or "待审批动作")[:200],
+            "ontologyVersion": (ontology_version or "")[:20],
+            "ontologyReleaseId": (ontology_release_id or "")[:200],
+            "occurredAt": _iso(occurred_at or _now()),
+        },
+    ))
+    return event_id
+
+
+def enqueue_ontology_approval_decision(
+    db: Session,
+    *,
+    log_id: str,
+    ontology_id: str,
+    decision: str,
+    action_name: str,
+    ontology_version: str | None,
+    ontology_release_id: str | None,
+    occurred_at: datetime | None = None,
+) -> str:
+    """Durably close the corresponding approval inbox item."""
+    if decision not in {"approved", "rejected", "failed"}:
+        raise ValueError("unsupported ontology approval decision")
+    event_id = f"ontology-approval:{log_id}:{decision}"
+    if db.query(InboxOutboxEvent.id).filter(InboxOutboxEvent.id == event_id).first():
+        return event_id
+    db.add(InboxOutboxEvent(
+        id=event_id,
+        event_type="ontology_approval",
+        payload={
+            "phase": "decision",
+            "decision": decision,
+            "logId": log_id,
+            "ontologyId": ontology_id,
+            "actionName": (action_name or "待审批动作")[:200],
+            "ontologyVersion": (ontology_version or "")[:20],
+            "ontologyReleaseId": (ontology_release_id or "")[:200],
+            "occurredAt": _iso(occurred_at or _now()),
+        },
+    ))
+    return event_id
+
+
 def _pipeline_task_recipient_ids(db: Session, task, pipeline) -> list[str]:
     candidates = [getattr(task, "created_by", None), getattr(pipeline, "created_by", None)]
     for candidate in candidates:
@@ -317,6 +386,95 @@ def _dispatch_pipeline_task_result(db: Session, row: InboxOutboxEvent) -> None:
     publish_event(db, event)
 
 
+def _approval_recipient_ids(db: Session) -> list[str]:
+    # The formal governance decision endpoint is admin-only. Keep the inbox
+    # audience aligned with that authorization boundary.
+    return [
+        user.id
+        for user in db.query(User).filter(
+            User.role == "admin",
+            User.is_active.is_(True),
+        ).all()
+    ]
+
+
+def _dispatch_ontology_approval(db: Session, row: InboxOutboxEvent) -> None:
+    payload = row.payload or {}
+    log_id = str(payload.get("logId") or "")
+    ontology_id = str(payload.get("ontologyId") or "")
+    if not log_id or not ontology_id:
+        raise ValueError("ontology approval outbox payload missing identity")
+    correlation_key = f"ontology-approval:{log_id}"
+    source = {
+        "system": "ontology",
+        "type": "action_approval",
+        "id": log_id,
+        "occurrenceId": row.id,
+        "correlationKey": correlation_key,
+    }
+    occurred = payload.get("occurredAt") or row.created_at or _now()
+    if payload.get("phase") == "decision":
+        # Preserve ordering if a terminal event is picked up before the
+        # request projection (for example after a partial worker crash).
+        item = db.query(InboxItem).filter(
+            InboxItem.source_system == "ontology",
+            InboxItem.source_type == "action_approval",
+            InboxItem.correlation_key == correlation_key,
+            InboxItem.business_state == "open",
+        ).first()
+        if item is None and _approval_recipient_ids(db):
+            raise RuntimeError("approval request projection has not completed")
+        event = InboxEventIn.model_validate({
+            "schemaVersion": "v1",
+            "eventId": row.id,
+            "occurredAt": occurred,
+            "operation": "close",
+            "source": source,
+            "resolution": {
+                "state": "resolved" if payload.get("decision") == "approved" else "cancelled",
+                "reason": f"approval_{payload.get('decision')}",
+            },
+        })
+    else:
+        recipients = _approval_recipient_ids(db)
+        if not recipients:
+            # No governance recipient is a valid installation state; ack the
+            # event without creating an orphan notification.
+            return
+        href = (
+            f"/ontologies/{ontology_id}?tab=governance&approval_id={log_id}"
+        )
+        action_name = str(payload.get("actionName") or "待审批动作")[:200]
+        version = str(payload.get("ontologyVersion") or "")[:20]
+        event = InboxEventIn.model_validate({
+            "schemaVersion": "v1",
+            "eventId": row.id,
+            "occurredAt": occurred,
+            "operation": "upsert",
+            "source": source,
+            "item": {
+                "kind": "task",
+                "priority": "high",
+                "title": f"待审批：{action_name}",
+                "summary": f"本体动作等待治理审批（版本 {version or '未标注'}）",
+                "safeContext": {
+                    "ontologyId": ontology_id,
+                    "approvalLogId": log_id,
+                    "ontologyVersion": version,
+                },
+            },
+            "resource": {
+                "type": "ontology_action_approval",
+                "id": log_id,
+                "label": action_name,
+                "href": href,
+            },
+            "audience": {"type": "users", "userIds": recipients},
+            "actions": [{"key": "open", "label": "查看并审批", "href": href}],
+        })
+    publish_event(db, event)
+
+
 def drain_outbox(db: Session, *, event_id: str | None = None, limit: int = 50) -> dict[str, int]:
     query = db.query(InboxOutboxEvent).filter(InboxOutboxEvent.status == "pending")
     if event_id:
@@ -337,6 +495,8 @@ def drain_outbox(db: Session, *, event_id: str | None = None, limit: int = 50) -
             db.flush()
             if row.event_type == "pipeline_task_result":
                 _dispatch_pipeline_task_result(db, row)
+            elif row.event_type == "ontology_approval":
+                _dispatch_ontology_approval(db, row)
             else:
                 raise ValueError(f"unknown inbox outbox event type: {row.event_type}")
             row.status = "completed"

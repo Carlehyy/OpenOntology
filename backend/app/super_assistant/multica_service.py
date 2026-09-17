@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from app.shared.encryption import decrypt, encrypt
@@ -83,6 +84,12 @@ _UUID_PATTERN = re.compile(
 )
 _MAX_LIST_LIMIT = 50
 _DEFAULT_LIST_LIMIT = 10
+
+# Multica's issue and task statuses are intentionally normalized here rather
+# than leaking provider-specific values into kernel.v1.
+_MULTICA_SUCCESS_STATES = frozenset({"completed", "complete", "done", "closed", "resolved", "success", "succeeded", "finished"})
+_MULTICA_FAILURE_STATES = frozenset({"failed", "failure", "error", "errored", "blocked"})
+_MULTICA_CANCELLED_STATES = frozenset({"cancelled", "canceled", "aborted", "stopped"})
 
 
 @dataclass(frozen=True)
@@ -181,6 +188,24 @@ def save_config(db: Session, owner_id: str, body: MulticaConfigUpdate) -> SuperA
     if config is None:
         config = SuperAssistantMulticaConfig(owner_id=owner_id, base_url="", workspace_id="")
         db.add(config)
+    previous = (config.base_url, config.workspace_id, config.token_encrypted, config.enabled)
+    changed = (
+        previous[0] != base_url
+        or previous[1] != body.workspace_id.strip()
+        or (body.token is not None and bool(body.token.strip()) and previous[2] != encrypt(body.token))
+        or (previous[3] and not body.enabled)
+    )
+    if changed and config.owner_id:
+        from app.super_assistant.kernel.capability_service import revoke_capability_revisions
+        from app.super_assistant.kernel.models import CapabilityRevision
+        bind = db.get_bind()
+        if bind is not None and inspect(bind).has_table(CapabilityRevision.__tablename__):
+            for key in ("multica_list_agents", "multica_list_tasks", "multica_create_task"):
+                current = db.scalar(select(CapabilityRevision.revision).where(
+                    CapabilityRevision.key == key, CapabilityRevision.enabled.is_(True),
+                ).order_by(CapabilityRevision.revision.desc()))
+                if current is not None:
+                    revoke_capability_revisions(db, [key], revision=int(current))
     config.base_url = base_url
     config.workspace_id = body.workspace_id.strip()
     # 显示名由前端从测试连接的工作区列表带回；缺省保留已存名称
@@ -393,6 +418,105 @@ def _trim_issue(issue: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _external_ref(issue: dict[str, Any], task: dict[str, Any] | None = None) -> str | None:
+    """Encode the provider identity needed for later query/cancel calls."""
+    issue_ref = issue.get("identifier") or issue.get("key") or issue.get("id")
+    if not issue_ref:
+        return None
+    task = task or {}
+    task_ref = task.get("id") or task.get("task_id")
+    return json.dumps(
+        {"issue_ref": str(issue_ref), "task_id": str(task_ref) if task_ref else None},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _parse_external_ref(remote_task_ref: str) -> tuple[str, str | None]:
+    try:
+        value = json.loads(remote_task_ref or "")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise MulticaServiceError("multica remote_task_ref 无法解析") from exc
+    if not isinstance(value, dict) or not value.get("issue_ref"):
+        raise MulticaServiceError("multica remote_task_ref 缺少 issue_ref")
+    task_id = value.get("task_id")
+    return str(value["issue_ref"]), str(task_id) if task_id else None
+
+
+def _provider_state(value: Any) -> str:
+    state = str(value or "").strip().lower().replace("-", "_")
+    if state in _MULTICA_SUCCESS_STATES:
+        return "completed"
+    if state in _MULTICA_FAILURE_STATES:
+        return "failed"
+    if state in _MULTICA_CANCELLED_STATES:
+        return "cancelled"
+    return "running"
+
+
+def query_external_task(db: Session, owner_id: str, remote_task_ref: str) -> dict[str, Any]:
+    """Observe a previously created Multica issue/task without guessing.
+
+    The issue remains the durable identity.  If Multica exposes an active task
+    id, it is folded into the returned reference so a subsequent cancellation
+    can target that exact execution.
+    """
+    issue_ref, task_id = _parse_external_ref(remote_task_ref)
+    config = active_config(db, owner_id)
+    if config is None:
+        raise MulticaServiceError("multica 未配置或未启用")
+    token = decrypt_token(config)
+    issue = multica_client.get_issue(config.base_url, token, config.workspace_id, issue_ref)
+    task: dict[str, Any] = {}
+    if task_id is None:
+        try:
+            task = multica_client.get_active_task(config.base_url, token, config.workspace_id, issue_ref)
+        except multica_client.MulticaClientError as exc:
+            # An issue may have no active task after completion.  Preserve the
+            # issue status as the authoritative observation in that case.
+            if "404" not in str(exc):
+                raise
+    task_id = task_id or task.get("id") or task.get("task_id")
+    task_state = task.get("status") if task else None
+    state = _provider_state(task_state or issue.get("status"))
+    content = task.get("result") or task.get("content") or issue.get("result") or issue.get("description") or ""
+    return {
+        "status": state,
+        "content": str(content or "")[:20000],
+        "remote_task_ref": _external_ref(issue, {"task_id": task_id}),
+        "provider_status": str(task_state or issue.get("status") or "unknown"),
+        "provider_event_id": str(task.get("id") or issue.get("id") or issue_ref),
+    }
+
+
+def cancel_external_task(db: Session, owner_id: str, remote_task_ref: str) -> dict[str, Any]:
+    """Request cancellation for the exact Multica task represented by a ref."""
+    issue_ref, task_id = _parse_external_ref(remote_task_ref)
+    config = active_config(db, owner_id)
+    if config is None:
+        raise MulticaServiceError("multica 未配置或未启用")
+    token = decrypt_token(config)
+    issue = multica_client.get_issue(config.base_url, token, config.workspace_id, issue_ref)
+    if task_id is None:
+        task = multica_client.get_active_task(config.base_url, token, config.workspace_id, issue_ref)
+        task_id = task.get("id") or task.get("task_id")
+    if not task_id:
+        state = _provider_state(issue.get("status"))
+        if state == "cancelled":
+            return {"status": "cancelled", "remote_task_ref": _external_ref(issue)}
+        raise MulticaServiceError("multica 未返回可取消的活动 task")
+    response = multica_client.cancel_task(
+        config.base_url, token, config.workspace_id, issue_ref, str(task_id),
+    )
+    provider_state = response.get("status") if isinstance(response, dict) else None
+    return {
+        "status": "cancelled" if _provider_state(provider_state) == "cancelled" else "running",
+        "remote_task_ref": _external_ref(issue, {"task_id": task_id}),
+        "provider_status": str(provider_state or "cancel_requested"),
+        "provider_event_id": str(response.get("id") or task_id) if isinstance(response, dict) else str(task_id),
+    }
+
+
 def execute_tool(db: Session, owner_id: str, name: str, arguments: dict[str, Any]) -> str:
     """multica 工具统一执行入口；失败抛错（runtime 记为工具错误并回灌模型）。"""
     if name not in _MULTICA_TOOL_NAMES:
@@ -454,10 +578,14 @@ def execute_tool(db: Session, owner_id: str, name: str, arguments: dict[str, Any
         assignee_id=assignee_id,
         allow_duplicate=bool(arguments.get("allow_duplicate")),
     )
+    issue_ref = _external_ref(issue)
     return json.dumps(
         {
             "created": True,
             "issue": _trim_issue(issue),
+            # Kernel callers retain this opaque identity and reconcile through
+            # query_external_task; legacy callers can ignore the additive key.
+            "remote_task_ref": issue_ref,
             "assignee": resolved_name or assignee,
             "note": "任务已创建" + (
                 f"并指派给 {resolved_name or assignee}，被指派的智能体会自动开始执行"

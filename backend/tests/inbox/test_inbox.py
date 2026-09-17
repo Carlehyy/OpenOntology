@@ -8,7 +8,12 @@ from app.data_channel.pipeline_tasks.engine import _claim_task, _release_claim
 from app.data_channel.pipeline_tasks.models import PipelineTask
 from app.inbox.models import InboxDelivery, InboxEventReceipt, InboxItem, InboxOutboxEvent
 from app.inbox.schemas import InboxEventIn
-from app.inbox.service import publish_event
+from app.inbox.service import (
+    enqueue_ontology_approval_decision,
+    enqueue_ontology_approval_request,
+    drain_outbox,
+    publish_event,
+)
 from app.models.v2.pipeline import Pipeline
 
 
@@ -112,6 +117,53 @@ def test_pipeline_failure_without_an_active_recipient_does_not_poison_outbox(db)
     event = db.query(InboxOutboxEvent).one()
     assert event.status == "completed"
     assert event.attempts == 1
+
+
+def test_ontology_approval_outbox_projects_and_closes_idempotently(
+    db, admin_user,
+):
+    log_id = "approval-log-1"
+    enqueue_ontology_approval_request(
+        db,
+        log_id=log_id,
+        ontology_id="ontology-1",
+        action_name="发送通知",
+        ontology_version="v1",
+        ontology_release_id="release-1",
+    )
+    db.commit()
+    assert drain_outbox(db) == {"processed": 1, "failed": 0}
+    item = db.query(InboxItem).one()
+    delivery = db.query(InboxDelivery).one()
+    assert delivery.recipient_user_id == admin_user.id
+    assert item.business_state == "open"
+    assert item.safe_context["approvalLogId"] == log_id
+    assert item.resource["href"].startswith("/ontologies/ontology-1?")
+
+    # Re-enqueueing the same request is a no-op; a terminal decision closes
+    # the existing item through the same correlation key.
+    enqueue_ontology_approval_request(
+        db,
+        log_id=log_id,
+        ontology_id="ontology-1",
+        action_name="发送通知",
+        ontology_version="v1",
+        ontology_release_id="release-1",
+    )
+    enqueue_ontology_approval_decision(
+        db,
+        log_id=log_id,
+        ontology_id="ontology-1",
+        decision="approved",
+        action_name="发送通知",
+        ontology_version="v1",
+        ontology_release_id="release-1",
+    )
+    db.commit()
+    assert drain_outbox(db) == {"processed": 1, "failed": 0}
+    db.refresh(item)
+    assert item.business_state == "resolved"
+    assert item.open_key is None
 
 
 def test_inbox_api_is_user_scoped_and_open_alert_cannot_be_archived(

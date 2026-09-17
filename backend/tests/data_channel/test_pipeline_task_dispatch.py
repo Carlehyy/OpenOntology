@@ -33,10 +33,12 @@ class _FakeJS:
         *,
         add_stream_error: Exception | None = None,
         existing_subjects: list[str] | None = None,
+        existing_policy: dict | None = None,
     ):
         self._calls = calls
         self._add_stream_error = add_stream_error
         self._existing_subjects = existing_subjects
+        self._existing_policy = existing_policy or {}
 
     async def add_stream(self, config):
         self._calls.setdefault("add_stream", []).append(config)
@@ -47,9 +49,9 @@ class _FakeJS:
         from types import SimpleNamespace
 
         self._calls.setdefault("stream_info", []).append(name)
-        return SimpleNamespace(
-            config=SimpleNamespace(subjects=list(self._existing_subjects or [])),
-        )
+        return SimpleNamespace(config=SimpleNamespace(
+            subjects=list(self._existing_subjects or []), **self._existing_policy
+        ))
 
     async def update_stream(self, config):
         self._calls.setdefault("update_stream", []).append(config)
@@ -305,6 +307,26 @@ async def test_ensure_stream_propagates_real_errors():
     js = _FakeJS(calls, add_stream_error=Exception("permission denied"))
 
     with pytest.raises(Exception, match="permission denied"):
+        await ensure_pipeline_stream(js)
+
+
+@pytest.mark.asyncio
+async def test_ensure_stream_rejects_policy_drift():
+    """A same-named stream with weaker durability must fail closed."""
+    from nats.js.api import RetentionPolicy
+
+    calls: dict = {"add_stream": []}
+    js = _FakeJS(
+        calls,
+        add_stream_error=Exception("stream name already in use"),
+        existing_subjects=list(PIPELINE_STREAM_SUBJECTS),
+        existing_policy={
+            "retention": RetentionPolicy.LIMITS,
+            "max_age": 7 * 24 * 3600,
+            "duplicate_window": 10 * 60,
+        },
+    )
+    with pytest.raises(RuntimeError, match="policy mismatch"):
         await ensure_pipeline_stream(js)
 
 

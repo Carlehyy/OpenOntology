@@ -52,14 +52,16 @@ def test_settings_central_env_overrides_legacy_but_not_process_env(
     assert "redis_url" in configured.model_fields_set
 
 
+@pytest.mark.parametrize("environment", ["production", "Production", " production ", "prod", " PROD "])
 def test_clean_checkout_production_uses_process_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    environment: str,
 ):
     missing_legacy = tmp_path / "missing-legacy.env"
     missing_central = tmp_path / "missing-central.env"
     process_values = {
-        "ENVIRONMENT": "production",
+        "ENVIRONMENT": environment,
         "DATABASE_URL": (
             "postgresql://ontology:strong-password@postgres.example.test:5432/"
             "ontology"
@@ -77,6 +79,7 @@ def test_clean_checkout_production_uses_process_environment(
         "MINIO_ACCESS_KEY": "ontology-minio",
         "MINIO_SECRET_KEY": "a-secure-minio-password",
         "STEWARD_BROWSER_CDP_URL": "https://browser.example.test:9222",
+        "STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS": "false",
         "N8N_API_URL": "https://n8n.example.test",
         "N8N_API_KEY": "a-secure-n8n-api-key",
         "PYTHON_KERNEL_GATEWAY_AUTH_TOKEN": "a-secure-kernel-gateway-token",

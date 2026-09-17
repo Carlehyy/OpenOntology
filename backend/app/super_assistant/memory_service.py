@@ -342,6 +342,16 @@ def delete_memory(
     )
     if memory is None:
         return None
+    # Keep a durable source tombstone before removing the legacy row. Kernel
+    # context collectors then reject stale projections even if an index lags.
+    from app.super_assistant.kernel.source_registry import tombstone_source
+    revision = (memory.updated_at or memory.created_at).isoformat()
+    tombstone_source(
+        db, owner_id=owner_id, kind="memory", source_id=memory.id,
+        revision=revision, locator=f"memory://{memory.id}",
+        recipe_revision="memory.v1", extraction_id=f"memory:{memory.id}:{revision}",
+        reason="user_deleted",
+    )
     db.delete(memory)
     db.commit()
     return True

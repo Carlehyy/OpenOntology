@@ -73,9 +73,19 @@ services:
     build:
       context: ./docker/browser
       args:
-        BROWSER_BASE_IMAGE: ${BROWSER_IMAGE:-chromedp/headless-shell:latest}
+        BROWSER_BASE_IMAGE: ${BROWSER_IMAGE:-chromedp/headless-shell@sha256:2d349b544a1ea6b5b5fd7c0fe99215ff662339c57407ee2e8c0a11af93516b04}
     command: ["--no-sandbox", "--disable-dev-shm-usage"]
+    user: "10001:10001"
+    read_only: true
     shm_size: 2gb
+    # Chromium runs without its own sandbox in this image; keep the container
+    # itself least-privileged as a compensating control.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=512m,nosuid,nodev
     healthcheck:
       # The browser image intentionally has no curl/wget. Bash's TCP socket
       # support verifies the real CDP endpoint without adding another package.
@@ -95,6 +105,15 @@ services:
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     command: jupyter kernelgateway --KernelGatewayApp.ip=0.0.0.0 --KernelGatewayApp.port=8088 --KernelGatewayApp.auth_token=${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}
+    # This service executes user-authored scripts. Keep it least-privileged
+    # even though the application still needs a dedicated sandbox for
+    # untrusted process plugins.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev
     restart: unless-stopped
 
   backend:
@@ -120,6 +139,9 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://:ontopromptredis123@redis:6379/0}
       # 流水线任务派发通道，仅 compose 内网可达，不进入生产依赖清单。
       NATS_URL: nats://nats:4222
+      # 用户进程插件在独立 rootless runner 上线前保持关闭；禁止回退到
+      # backend/pipeline_executor 内直接 spawn 用户 entrypoint。
+      SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
       N8N_TIMEOUT_SECONDS: ${N8N_TIMEOUT_SECONDS:-30}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -127,6 +149,7 @@ services:
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
       STEWARD_BROWSER_CDP_URL: http://browser:9222
+      STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS: "false"
       STEWARD_BROWSER_HTTP_LEASE_SECONDS: ${STEWARD_BROWSER_HTTP_LEASE_SECONDS:-30}
       STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS: ${STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS:-500}
       STEWARD_BROWSER_MAX_SESSIONS: ${STEWARD_BROWSER_MAX_SESSIONS:-8}
@@ -164,6 +187,14 @@ services:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # Container hardening is defense in depth; user plugins still require the
+    # dedicated rootless runner described in the commercial release gate.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev
     healthcheck:
       # Liveness must stay dependency-free.  Deep readiness is checked once by
       # deploy-prod.sh via /api/health; probing every dependency every 15s can
@@ -199,6 +230,8 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://:ontopromptredis123@redis:6379/0}
       # 流水线任务派发通道，仅 compose 内网可达，不进入生产依赖清单。
       NATS_URL: nats://nats:4222
+      # 与 backend 保持一致：runner 未部署时 fail-closed。
+      SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
       N8N_TIMEOUT_SECONDS: ${N8N_TIMEOUT_SECONDS:-30}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -206,6 +239,7 @@ services:
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
       STEWARD_BROWSER_CDP_URL: http://browser:9222
+      STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS: "false"
       STEWARD_BROWSER_HTTP_LEASE_SECONDS: ${STEWARD_BROWSER_HTTP_LEASE_SECONDS:-30}
       STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS: ${STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS:-500}
       STEWARD_BROWSER_MAX_SESSIONS: ${STEWARD_BROWSER_MAX_SESSIONS:-8}
@@ -233,6 +267,12 @@ services:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
     command: python -m app.data_channel.pipeline_tasks.nats_executor
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev
     healthcheck:
       # executor 没有进程内 ping 接口；主循环每 5 秒刷新心跳文件 mtime。
       test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/nats_executor.heartbeat')<30 else 1)"]

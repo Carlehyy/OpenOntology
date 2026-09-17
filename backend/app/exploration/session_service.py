@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -34,6 +36,94 @@ from app.ontologies.versions.models import OntologyVersion
 
 def _ok(data):
     return {"data": data}
+
+
+def write_permission_fingerprint(
+    user,
+    project: OntologyProject,
+    version: OntologyVersion,
+) -> str:
+    """Return the deterministic write-scope fingerprint for a draft binding.
+
+    The snapshot must be tied to the principal and the exact editable draft,
+    rather than accepting an opaque caller supplied value.  Role/owner and
+    project/version revisions are included so a resumed long task cannot keep
+    using a permission snapshot after either access or the draft changed.
+    """
+    def _time(value):
+        return value.isoformat() if value is not None else None
+
+    material = {
+        "owner_id": str(getattr(user, "id", "") or ""),
+        "role": str(getattr(user, "role", "") or ""),
+        "ontology_id": str(project.id),
+        "ontology_owner_id": str(project.created_by),
+        "ontology_updated_at": _time(getattr(project, "updated_at", None)),
+        "draft_version_id": str(version.id),
+        "draft_revision": int(getattr(version, "revision", 0) or 0),
+        "draft_lifecycle": str(getattr(version, "lifecycle_status", "") or ""),
+    }
+    encoded = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def prepare_delegated_binding(
+    db: Session, user, context: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Resolve explicit target ids into a server-owned delegation snapshot.
+
+    A user/model selects the ontology and draft; only the server derives the
+    lifecycle and permission fingerprint.  A supplied fingerprint still has
+    to match, so preparing a new request cannot silently refresh a stale
+    snapshot from an earlier delegation.
+    """
+    values = context if isinstance(context, dict) else {}
+    ontology_id = str(values.get("ontology_id") or "").strip()
+    version_id = str(values.get("draft_version_id") or values.get("ontology_version_id") or "").strip()
+    lifecycle = str(values.get("lifecycle") or "").strip()
+    permission_hash = str(values.get("write_permission_hash") or "").strip()
+    if not ontology_id or not version_id or lifecycle not in {"", "editing"}:
+        raise ValueError(
+            "业务探索委派需要选择 ontology_id 和 editing draft_version_id"
+        )
+    project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
+    if project is None:
+        raise ValueError("委派绑定的本体不存在")
+    try:
+        require_ontology_access(db, ontology_id, user, write=True)
+    except HTTPException as exc:
+        raise ValueError("委派绑定的本体不可写") from exc
+    version = db.query(OntologyVersion).filter(OntologyVersion.id == version_id).first()
+    if (
+        version is None
+        or str(version.ontology_id) != ontology_id
+        or version.node_kind != "draft"
+        or version.lifecycle_status != "editing"
+    ):
+        raise ValueError("委派绑定必须指向该本体的 editing draft 版本")
+    expected_hash = write_permission_fingerprint(user, project, version)
+    if permission_hash and permission_hash != expected_hash:
+        raise ValueError("委派绑定的 write_permission_hash 已失效，请重新选择本体和草稿版本")
+    return {
+        "ontology_id": ontology_id,
+        "draft_version_id": version_id,
+        "lifecycle": "editing",
+        "write_permission_hash": expected_hash,
+    }
+
+
+def validate_delegated_binding(
+    db: Session, user, context: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Revalidate every field of an already frozen delegation snapshot."""
+    values = context if isinstance(context, dict) else {}
+    if values.get("lifecycle") != "editing" or not values.get("write_permission_hash"):
+        raise ValueError(
+            "业务探索委派需要绑定 ontology_id、draft_version_id、editing 和 write_permission_hash"
+        )
+    return prepare_delegated_binding(db, user, values)
 
 
 def _require_session(

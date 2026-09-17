@@ -724,12 +724,16 @@ def test_super_assistant_router_and_services_stay_bounded():
         # 6 个端点 → 811；目录一等公民（folders CRUD/笔记/移动）6 个端点、
         # multica 外部集成子路由接线 → 860；本体发布文档共享镜像新增
         # ontology-documents list/preview/rebuild 3 个端点 → 885
-        "router.py": 910,
+        # process-plugin 持久化生命周期新增 list/install/enable/disable/uninstall
+        # 五个端点；保持边界只允许随能力域增长的小幅预算。
+        "router.py": 980,
         # 死流回收（_reap_stale_streaming 读取兜底）与启动恢复
         # （recover_interrupted_streams）落地：320 → 360
         "conversation_service.py": 360,
         "skill_service.py": 380,
-        "mcp_server_service.py": 340,
+        # MCP lifecycle/revision fencing and probe diagnostics now live in
+        # this domain service; keep the guard above the current bounded size.
+        "mcp_server_service.py": 390,
     }
     for filename, maximum in limits.items():
         line_count = len(
@@ -798,9 +802,13 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # /conversations/{id}/browser/* 会话级 source/start/navigate/session/
     # captures/captures/{cid}/download/ticket/live-http(+frame/input/
     # control/release) 共 12 个操作（12 条路径）；live/companion WS 经
-    # steward 处理器二次挂载，不进 OpenAPI
-    assert len(paths) == 81
-    assert sum(len(item) for item in paths.values()) == 107
+    # steward 处理器二次挂载，不进 OpenAPI；
+    # kernel.v1 长任务 API 新增 runs 查询/控制/输入/审批/SSE/Artifact/Retry 共
+    # 10 条路径、10 个操作；dispatch dead-letter 显式重放新增 1 条运维路径；
+    # process-plugin 持久化生命周期新增 4 条路径、5 个操作；Artifact 二进制下载
+    # 与 HMAC callback ingress 各新增 1 条路径/1 个操作，旧路由语义保持并行。
+    assert len(paths) == 98
+    assert sum(len(item) for item in paths.values()) == 126
     assert hashlib.sha256(payload).hexdigest() == (
-        "97ab5b10224b2c007d933de11144a2778b6a38689fb75cfb61ecb153da6c6921"
+        "d57219e54ce8cbe88c2599b85ef57ec1162194fea0554793c1942bede8587931"
     )

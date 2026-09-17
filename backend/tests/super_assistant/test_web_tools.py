@@ -9,10 +9,22 @@ from app.super_assistant.web_tools import WebToolError
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int = 200, text: str = "", payload: dict | None = None):
+    def __init__(self, status_code: int = 200, text: str = "", payload: dict | None = None,
+                 headers: dict[str, str] | None = None):
         self.status_code = status_code
         self.text = text
         self._payload = payload or {}
+        self.headers = headers or {}
+        self.encoding = "utf-8"
+
+    def iter_bytes(self):
+        yield self.text.encode(self.encoding)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
     def json(self):
         return self._payload
@@ -27,6 +39,15 @@ def _patch_request(monkeypatch, response: _FakeResponse, calls: list | None = No
     monkeypatch.setattr(web_tools, "_request", fake_request)
 
 
+def _patch_stream_request(monkeypatch, response: _FakeResponse, calls: list | None = None):
+    def fake_stream_request(method, url, **kwargs):
+        if calls is not None:
+            calls.append({"method": method, "url": url, **kwargs})
+        return response
+
+    monkeypatch.setattr(web_tools, "_stream_request", fake_stream_request)
+
+
 def test_web_fetch_extracts_text_and_skips_script_and_style(monkeypatch):
     html = (
         "<html><head><style>body{color:red}</style>"
@@ -34,7 +55,7 @@ def test_web_fetch_extracts_text_and_skips_script_and_style(monkeypatch):
         "<body><h1>页面 标题</h1><p>第一\n\n 段</p>"
         "<script>alert('x')</script></body></html>"
     )
-    _patch_request(monkeypatch, _FakeResponse(200, text=html))
+    _patch_stream_request(monkeypatch, _FakeResponse(200, text=html))
     text = web_tools.web_fetch("http://203.0.113.10/page")
     assert "页面 标题" in text
     assert "第一 段" in text
@@ -43,24 +64,42 @@ def test_web_fetch_extracts_text_and_skips_script_and_style(monkeypatch):
     assert "color" not in text
 
 
-def test_web_fetch_sends_user_agent_and_follows_redirects(monkeypatch):
+def test_web_fetch_sends_user_agent_without_implicit_redirects(monkeypatch):
     calls: list = []
-    _patch_request(monkeypatch, _FakeResponse(200, text="<p>ok</p>"), calls)
+    _patch_stream_request(monkeypatch, _FakeResponse(200, text="<p>ok</p>"), calls)
     web_tools.web_fetch("http://203.0.113.10/page")
     assert calls[0]["method"] == "GET"
     assert calls[0]["headers"]["User-Agent"] == "OpenOntology-SuperAssistant/1.0"
-    assert calls[0]["follow_redirects"] is True
+    assert calls[0]["follow_redirects"] is False
     assert calls[0]["timeout"] == 20.0
 
 
+def test_web_fetch_validates_every_redirect_hop(monkeypatch):
+    calls: list = []
+    responses = iter([
+        _FakeResponse(302, headers={"location": "http://127.0.0.1/secret"}),
+        _FakeResponse(200, text="<p>ok</p>"),
+    ])
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        return next(responses)
+
+    monkeypatch.setattr(web_tools, "_stream_request", fake_request)
+    monkeypatch.setattr(settings, "environment", "production")
+    with pytest.raises(McpClientError, match="非公网地址"):
+        web_tools.web_fetch("http://93.184.216.34/start")
+    assert len(calls) == 1
+
+
 def test_web_fetch_raises_with_status_code_on_http_error(monkeypatch):
-    _patch_request(monkeypatch, _FakeResponse(404, text="not found"))
+    _patch_stream_request(monkeypatch, _FakeResponse(404, text="not found"))
     with pytest.raises(WebToolError, match="404"):
         web_tools.web_fetch("http://203.0.113.10/missing")
 
 
 def test_web_fetch_truncates_to_max_chars(monkeypatch):
-    _patch_request(monkeypatch, _FakeResponse(200, text="<p>" + "长" * 100 + "</p>"))
+    _patch_stream_request(monkeypatch, _FakeResponse(200, text="<p>" + "长" * 100 + "</p>"))
     assert len(web_tools.web_fetch("http://203.0.113.10/page", max_chars=10)) == 10
     monkeypatch.setattr(settings, "super_assistant_web_fetch_max_chars", 5)
     assert len(web_tools.web_fetch("http://203.0.113.10/page")) == 5
@@ -75,10 +114,20 @@ def test_web_fetch_requires_enablement(monkeypatch):
 def test_web_fetch_rejects_private_targets_in_production(monkeypatch):
     monkeypatch.setattr(settings, "environment", "production")
     calls: list = []
-    _patch_request(monkeypatch, _FakeResponse(200, text="<p>ok</p>"), calls)
+    _patch_stream_request(monkeypatch, _FakeResponse(200, text="<p>ok</p>"), calls)
     with pytest.raises(McpClientError, match="非公网地址"):
         web_tools.web_fetch("http://127.0.0.1/secret")
     assert calls == []  # SSRF 拒绝发生在发请求之前
+
+
+def test_web_fetch_rejects_oversized_streaming_response(monkeypatch):
+    class OversizedResponse(_FakeResponse):
+        def iter_bytes(self):
+            yield b"x" * (256 * 1024 + 1)
+
+    _patch_stream_request(monkeypatch, OversizedResponse())
+    with pytest.raises(WebToolError, match="256 KiB"):
+        web_tools.web_fetch("http://93.184.216.34/large")
 
 
 def test_web_search_requires_configured_backend():

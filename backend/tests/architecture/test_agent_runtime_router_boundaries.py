@@ -196,6 +196,8 @@ def test_router_patch_seams_are_resolved_at_request_time(monkeypatch):
     profile = object()
 
     monkeypatch.setattr(agent_router, "_require_ontology", lambda *_: marker)
+    # chat/cancel/run 状态/提案执行端点走按本体访问裁决的模块级缝隙。
+    monkeypatch.setattr(agent_router, "require_ontology_access", lambda *args, **kwargs: marker)
     monkeypatch.setattr(agent_router, "get_or_create_profile", marker)
     monkeypatch.setattr(agent_router, "_profile_out", lambda row: row)
 

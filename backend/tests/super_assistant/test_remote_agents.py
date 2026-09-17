@@ -148,7 +148,7 @@ def test_update_keeps_token_when_blank(db, admin_user):
 
 
 def test_adapter_roundtrip_issues_and_resumes_remote_session(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     row = _add_agent(db, admin_user.id)
     adapter = remote_agent_service.RemoteAgentAdapter(row)
     ref = adapter.start(db, admin_user)
@@ -189,7 +189,7 @@ def test_adapter_roundtrip_issues_and_resumes_remote_session(db, admin_user, mon
 
 
 def test_adapter_maps_failures(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     row = _add_agent(db, admin_user.id)
     adapter = remote_agent_service.RemoteAgentAdapter(row)
     ref = adapter.start(db, admin_user)
@@ -214,6 +214,22 @@ def test_adapter_maps_failures(db, admin_user, monkeypatch):
     failed = list(adapter.run_turn(db, admin_user, ref, "q"))[-1]
     assert failed.status == contract.STATUS_FAILED
     assert "无法解析" in failed.content
+
+
+def test_adapter_rejects_oversized_direct_response(db, admin_user, monkeypatch):
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
+    row = _add_agent(db, admin_user.id)
+    adapter = remote_agent_service.RemoteAgentAdapter(row)
+    ref = adapter.start(db, admin_user)
+    oversized = SimpleNamespace(
+        status_code=200,
+        content=b"x" * (256 * 1024 + 1),
+        json=lambda: {"status": "answered", "content": "should not parse"},
+    )
+    monkeypatch.setattr(remote_agent_service, "_request", lambda *a, **k: oversized)
+    result = list(adapter.run_turn(db, admin_user, ref, "q"))[-1]
+    assert result.status == STATUS_FAILED
+    assert "256 KiB" in result.content
 
 
 def test_adapter_rejects_private_endpoint_in_production(db, admin_user, monkeypatch):
@@ -257,7 +273,7 @@ def test_delegation_executes_dynamic_agent_end_to_end(tmp_path, monkeypatch):
     TestingSession, ids = _seed(tmp_path, monkeypatch, "remote-e2e")
     with TestingSession() as db:
         _add_agent(db, ids["owner_id"])
-        monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+        monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
         monkeypatch.setattr(
             remote_agent_service, "_request",
             lambda *a, **k: _fake_response(payload={
@@ -495,7 +511,7 @@ def test_corrupt_token_ciphertext_degrades_instead_of_poisoning(db, admin_user):
 
 
 def test_direct_mode_caps_oversized_session_ref(db, admin_user, monkeypatch):
-    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url: url)
+    monkeypatch.setattr(remote_agent_service, "validate_mcp_url", lambda url, **kwargs: url)
     row = _add_agent(db, admin_user.id, key="remote.long-ref", endpoint="http://127.0.0.1:9103/turn")
     monkeypatch.setattr(
         remote_agent_service, "_request",
@@ -552,6 +568,31 @@ def test_claim_next_task_is_exclusive(db, admin_user):
     second = remote_agent_service.claim_next_task(db, row.id)
     assert first is not None and first.message == "only-one"
     assert second is None  # 已认领不再派发
+
+
+def test_kernel_pull_task_is_idempotent_and_reports_claimed_as_unknown(db, admin_user):
+    row = _add_pull_agent(db, admin_user.id, key="remote.kernel-pull")
+    first = remote_agent_service.enqueue_kernel_task(
+        db, row.id, "call-1", "研究项目", "session-1", 60,
+    )
+    second = remote_agent_service.enqueue_kernel_task(
+        db, row.id, "call-1", "研究项目", "session-1", 60,
+    )
+    assert first["remote_task_ref"] == second["remote_task_ref"]
+    assert db.query(SuperAssistantRemoteAgentTask).count() == 1
+    claimed = remote_agent_service.claim_next_task(db, row.id)
+    assert claimed is not None
+    observed = remote_agent_service.query_kernel_task(db, row.id, first["remote_task_ref"])
+    assert observed["status"] == "running"
+    cancelled = remote_agent_service.cancel_kernel_task(db, row.id, first["remote_task_ref"])
+    assert cancelled["status"] == "unknown"
+    claimed.status = "done"
+    claimed.result_status = "answered"
+    claimed.result_artifacts = [{"kind": "report", "content": {"ok": True}}]
+    db.commit()
+    observed = remote_agent_service.query_kernel_task(db, row.id, first["remote_task_ref"])
+    assert observed["status"] == "completed"
+    assert observed["artifacts"][0]["kind"] == "report"
 
 
 def test_task_gc_prunes_only_past_retention(db, admin_user, monkeypatch):

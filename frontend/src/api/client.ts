@@ -15,6 +15,7 @@ const getBaseURL = (version: string): string => {
 
 type ApiClient = {
   get: <T = any>(url: string, config?: AxiosRequestConfig) => Promise<T>
+  getBlob: (url: string, config?: AxiosRequestConfig) => Promise<Blob>
   post: <T = any>(url: string, data?: unknown, config?: AxiosRequestConfig) => Promise<T>
   put: <T = any>(url: string, data?: unknown, config?: AxiosRequestConfig) => Promise<T>
   patch: <T = any>(url: string, data?: unknown, config?: AxiosRequestConfig) => Promise<T>
@@ -50,6 +51,7 @@ function createApiClient(version: string): ApiClient {
   )
   return {
     get: (url, config) => client.get(url, config) as Promise<any>,
+    getBlob: (url, config) => client.get(url, { ...config, responseType: 'blob' }) as Promise<Blob>,
     post: (url, data, config) => client.post(url, data, config) as Promise<any>,
     put: (url, data, config) => client.put(url, data, config) as Promise<any>,
     patch: (url, data, config) => client.patch(url, data, config) as Promise<any>,

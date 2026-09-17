@@ -75,6 +75,7 @@ compose_environment() {
     -u N8N_API_KEY \
     -u N8N_TIMEOUT_SECONDS \
     -u PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \
+    -u SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE \
     -u STEWARD_BROWSER_CDP_URL \
     -u CORS_ALLOWED_ORIGINS \
     -u UPLOADS_DIR \
@@ -82,6 +83,7 @@ compose_environment() {
     -u PIPELINE_FILE_PUBLIC_APP_BASE_URL \
     -u PIPELINE_FILE_PUBLIC_API_BASE_URL \
     -u SUPER_ASSISTANT_PUBLIC_API_BASE_URL \
+    -u STEWARD_INTERNAL_PROXY_BASE_URL \
     -u STEWARD_BROWSER_HTTP_LEASE_SECONDS \
     -u STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS \
     -u STEWARD_BROWSER_MAX_SESSIONS \
@@ -1097,17 +1099,37 @@ if [ -z "$(env_value ENCRYPTION_KEY)" ]; then
 fi
 strict_image_digests_value="$(env_value STRICT_IMAGE_DIGESTS)"
 case "$strict_image_digests_value" in
-  ""|0|false|FALSE|no|NO)
-    strict_image_digests_enabled=0
-    ;;
   1|true|TRUE|yes|YES)
     strict_image_digests_enabled=1
     ;;
+  ""|0|false|FALSE|no|NO)
+    log "production deployment requires STRICT_IMAGE_DIGESTS=true"
+    exit 1
+    ;;
   *)
-    log "STRICT_IMAGE_DIGESTS must be true or false"
+    log "STRICT_IMAGE_DIGESTS must be true in production"
     exit 1
     ;;
 esac
+process_plugin_runner_assignment_state="$(runtime_env_assignment_state SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE)"
+if [ "$process_plugin_runner_assignment_state" = "ambiguous" ]; then
+  log "SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE is duplicated or has a case-variant key in .env"
+  exit 1
+fi
+process_plugin_runner_mode="$(env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE)"
+case "$process_plugin_runner_mode" in
+  direct_dev)
+    log "production deployment rejects SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE=direct_dev"
+    exit 1
+    ;;
+  ""|disabled|nats)
+    ;;
+  *)
+    log "SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE must be disabled or nats in production"
+    exit 1
+    ;;
+esac
+unset process_plugin_runner_assignment_state process_plugin_runner_mode
 check_image_digest() {
   local key="$1"
   local value
@@ -1117,9 +1139,19 @@ check_image_digest() {
       log "$key must be pinned to an immutable @sha256 digest"
       exit 1
     fi
-    log "warning: $key is not digest-pinned; set STRICT_IMAGE_DIGESTS=1 after populating immutable image references"
+    log "$key must be pinned to an immutable @sha256 digest"
+    exit 1
   fi
 }
+# The browser consumes attacker-controlled page content and is therefore a
+# security boundary even when the operator intentionally keeps the broader
+# image policy in warning mode during migration. Never allow its tag to drift.
+browser_image_value="$(env_value BROWSER_IMAGE)"
+if [[ ! "$browser_image_value" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+  log "BROWSER_IMAGE must be pinned to an immutable @sha256 digest"
+  exit 1
+fi
+unset browser_image_value
 for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE; do

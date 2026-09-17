@@ -17,6 +17,25 @@ class McpClientError(ValueError):
     pass
 
 
+_MAX_TOOL_RESULT_BYTES = 256 * 1024
+
+
+def _sse_http_client_factory(*, headers: dict[str, str] | None = None,
+                             timeout=None, auth=None):
+    """Build the SSE client with redirects disabled.
+
+    The MCP SDK's default factory enables redirects.  SSE endpoints can carry
+    API-key headers and may emit a cross-host 30x before the first event, so
+    using that default would bypass the URL/SSRF validation performed here.
+    """
+    import httpx
+
+    return httpx.AsyncClient(
+        headers=headers, timeout=timeout, auth=auth, follow_redirects=False,
+        trust_env=False,
+    )
+
+
 def _error_message(exc: BaseException) -> str:
     """Unwrap AnyIO task groups so connection failures stay actionable."""
     if isinstance(exc, BaseExceptionGroup):
@@ -46,11 +65,17 @@ def _resolved_addresses(hostname: str, port: int) -> set[ipaddress.IPv4Address |
     return addresses
 
 
-def validate_mcp_url(url: str) -> str:
+def validate_mcp_url(url: str, *, require_https: bool = False) -> str:
     value = (url or "").strip()
     parsed = urlsplit(value)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.hostname:
         raise McpClientError("MCP URL 必须是 HTTP/HTTPS 绝对地址")
+    environment = settings.environment.strip().lower()
+    if require_https and settings.super_assistant_external_https_required \
+            and environment not in {"development", "dev", "test", "local"} \
+            and scheme != "https":
+        raise McpClientError("生产环境外部集成必须使用 HTTPS")
     if parsed.username or parsed.password:
         raise McpClientError("MCP URL 不能内嵌账号或密码")
     try:
@@ -59,7 +84,7 @@ def validate_mcp_url(url: str) -> str:
         raise McpClientError("MCP URL 端口无效") from exc
     hostname = parsed.hostname.lower().rstrip(".")
     addresses = _resolved_addresses(hostname, port)
-    if settings.environment.strip().lower() not in {"development", "dev", "test", "local"}:
+    if environment not in {"development", "dev", "test", "local"}:
         blocked = sorted(str(address) for address in addresses if not address.is_global)
         if blocked:
             raise McpClientError(
@@ -118,13 +143,13 @@ def normalize_connection(*, transport: str, url: str = "", command: str | None =
             remote_url = next((item for item in arguments[remote_index + 1:] if item.startswith(("http://", "https://"))), "")
             if not remote_url:
                 raise McpClientError("mcp-remote 配置缺少远程 MCP URL")
-            return "streamable_http", validate_mcp_url(remote_url), None, []
+            return "streamable_http", validate_mcp_url(remote_url, require_https=True), None, []
         if not executable or "\x00" in executable:
             raise McpClientError("stdio MCP 必须配置 command")
         return "stdio", "", executable, arguments
     if normalized not in {"sse", "streamable_http"}:
         raise McpClientError("传输方式必须是 stdio、sse 或 streamable_http")
-    return normalized, validate_mcp_url(url), None, []
+    return normalized, validate_mcp_url(url, require_https=True), None, []
 
 
 def _validate_stdio_runtime(command: str) -> None:
@@ -193,17 +218,20 @@ async def _client_session(*, transport: str, url: str, headers: dict[str, str],
                 await session.initialize()
                 yield session
         return
-    valid_url = validate_mcp_url(url)
+    valid_url = validate_mcp_url(url, require_https=True)
     if transport == "sse":
         async with sse_client(
             valid_url, headers=headers, timeout=20, sse_read_timeout=120,
+            httpx_client_factory=_sse_http_client_factory,
         ) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 yield session
         return
     timeout = httpx.Timeout(connect=20, read=120, write=60, pool=20)
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as http_client:
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=False, trust_env=False,
+    ) as http_client:
         async with streamable_http_client(
             valid_url,
             http_client=http_client,
@@ -248,8 +276,12 @@ async def call_tool(*, transport: str, url: str, headers: dict[str, str], tool_n
         ) as session:
             result = await session.call_tool(tool_name, arguments=arguments)
             if hasattr(result, "model_dump_json"):
-                return result.model_dump_json(by_alias=True, exclude_none=True)
-            return json.dumps(result, ensure_ascii=False, default=str)
+                serialized = result.model_dump_json(by_alias=True, exclude_none=True)
+            else:
+                serialized = json.dumps(result, ensure_ascii=False, default=str)
+            if len(serialized.encode("utf-8")) > _MAX_TOOL_RESULT_BYTES:
+                raise McpClientError("MCP 工具响应超过 256 KiB 上限")
+            return serialized
     except McpClientError:
         status = "error"
         raise

@@ -35,6 +35,8 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-collaboration/BrowserCollaboration'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
+import KernelRunTaskCard from './components/KernelRunTaskCard'
+import KernelRunList from './components/KernelRunList'
 import {
   ChatMessage, ConfirmationCard, ContextUsage,
   type PendingConfirmation,
@@ -71,6 +73,7 @@ export default function SuperAssistantPage() {
   // 页内选中的会话也回写参数，地址栏始终标识当前会话，复制到其它浏览器可直达
   const initialRequestedIdRef = useRef(searchParams.get('conversation'))
   const requestedConversationId = searchParams.get('conversation')
+  const kernelRunId = searchParams.get('run')
   const [conversations, setConversations] = useState<SuperConversation[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<SuperMessage[]>([])
@@ -228,7 +231,12 @@ export default function SuperAssistantPage() {
   useEffect(() => {
     if (loading || writtenParamRef.current === selectedId) return
     writtenParamRef.current = selectedId
-    setSearchParams(selectedId ? { conversation: selectedId } : {}, { replace: true })
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous)
+      if (selectedId) next.set('conversation', selectedId)
+      else next.delete('conversation')
+      return next
+    }, { replace: true })
   }, [selectedId, loading, setSearchParams])
   useEffect(() => {
     if (!requestedConversationId || requestedConversationId === lastAppliedParamRef.current) return
@@ -591,7 +599,7 @@ export default function SuperAssistantPage() {
       />
       <div
         data-testid="super-assistant-composer"
-        className={`relative overflow-visible rounded-xl border border-border bg-white transition-colors focus-within:ring-2 focus-within:ring-ring ${prominent
+        className={`relative overflow-visible rounded-xl border border-border bg-white transition-colors focus-within:border-brand focus-within:ring-2 focus-within:ring-ring ${prominent
           ? 'shadow-[0_18px_50px_rgba(5,150,105,0.12)]'
           : 'shadow-[0_8px_28px_rgba(15,23,42,0.08)]'}`}
       >
@@ -707,7 +715,7 @@ export default function SuperAssistantPage() {
               <PopoverContent
                 side="top"
                 align="end"
-                sideOffset={12}
+                sideOffset={92}
                 data-testid="super-assistant-message-history"
                 className="w-72 overflow-hidden rounded-lg border-slate-200 p-0"
               >
@@ -887,6 +895,24 @@ export default function SuperAssistantPage() {
           }}
         >
           <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            {kernelRunId && (
+              <div className="mx-auto w-full max-w-4xl px-4 pt-3 sm:px-8">
+                <KernelRunTaskCard
+                  runId={kernelRunId}
+                  onRetry={(newRunId) => {
+                    const next = new URLSearchParams(searchParams)
+                    next.set('run', newRunId)
+                    setSearchParams(next, { replace: true })
+                  }}
+                  onClose={() => {
+                    const next = new URLSearchParams(searchParams)
+                    next.delete('run')
+                    setSearchParams(next, { replace: true })
+                  }}
+                />
+              </div>
+            )}
+            {!kernelRunId && selectedId && <KernelRunList conversationId={selectedId} />}
             {loading ? (
               <div className="flex flex-1 items-center justify-center"><Loader2 size={22} className="animate-spin text-brand-ink" /></div>
             ) : !hasMessages ? (

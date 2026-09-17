@@ -182,7 +182,7 @@ test('消息输入框默认获得焦点并展示绿色边框', async ({ page }) 
   await page.goto('/#/super-assistant')
 
   await expect(page.getByRole('textbox', { name: '向超级助手发送消息' })).toBeFocused()
-  await expect(page.getByTestId('super-assistant-composer')).toHaveCSS('border-color', 'rgb(20, 184, 166)')
+  await expect(page.getByTestId('super-assistant-composer')).toHaveCSS('border-color', 'rgb(5, 150, 105)')
 })
 
 test('消息跳转浮层与输入区保留间距', async ({ page }) => {

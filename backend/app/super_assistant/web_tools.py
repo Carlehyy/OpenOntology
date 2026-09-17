@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -17,6 +18,8 @@ from app.shared.config import settings
 from app.super_assistant.mcp_client import validate_mcp_url
 
 _TIMEOUT_SECONDS = 20.0
+_MAX_REDIRECTS = 3
+_MAX_FETCH_BYTES = 256 * 1024
 _USER_AGENT = "OpenOntology-SuperAssistant/1.0"
 _TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 _BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
@@ -28,7 +31,14 @@ class WebToolError(RuntimeError):
 
 def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     """集中的 httpx 调用点（测试 monkeypatch 此函数）。"""
+    kwargs["trust_env"] = False
     return httpx.request(method, url, **kwargs)
+
+
+def _stream_request(method: str, url: str, **kwargs: Any):
+    """Streaming seam for web_fetch; callers must use it as a context manager."""
+    kwargs["trust_env"] = False
+    return httpx.stream(method, url, **kwargs)
 
 
 class _TextExtractor(HTMLParser):
@@ -66,16 +76,49 @@ def web_fetch(url: str, max_chars: int | None = None) -> str:
     if not settings.super_assistant_web_fetch_enabled:
         raise WebToolError("web_fetch 未启用：请开启 SUPER_ASSISTANT_WEB_FETCH_ENABLED")
     safe_url = validate_mcp_url(url)
-    response = _request(
-        "GET",
-        safe_url,
-        headers={"User-Agent": _USER_AGENT},
-        timeout=_TIMEOUT_SECONDS,
-        follow_redirects=True,
-    )
-    if response.status_code < 200 or response.status_code >= 300:
-        raise WebToolError(f"web_fetch 请求失败：HTTP {response.status_code}")
-    text = _extract_text(response.text)
+    # Do not let the HTTP client follow redirects implicitly.  Each hop is a
+    # fresh network target and must pass the SSRF guard before it is requested;
+    # otherwise a public URL could redirect into localhost/private metadata
+    # services.  The fetch carries no credentials, but the same boundary is
+    # required for consistent egress policy.
+    for redirect_count in range(_MAX_REDIRECTS + 1):
+        with _stream_request(
+            "GET",
+            safe_url,
+            headers={"User-Agent": _USER_AGENT},
+            timeout=_TIMEOUT_SECONDS,
+            follow_redirects=False,
+        ) as response:
+            if 300 <= response.status_code < 400:
+                location = getattr(response, "headers", {}).get("location")
+                if not location:
+                    raise WebToolError("web_fetch 重定向缺少 Location")
+                if redirect_count >= _MAX_REDIRECTS:
+                    raise WebToolError("web_fetch 重定向次数超过上限")
+                safe_url = validate_mcp_url(urljoin(safe_url, str(location)))
+                continue
+            if response.status_code < 200 or response.status_code >= 300:
+                raise WebToolError(f"web_fetch 请求失败：HTTP {response.status_code}")
+            declared_length = getattr(response, "headers", {}).get("content-length")
+            try:
+                if declared_length is not None and int(declared_length) > _MAX_FETCH_BYTES:
+                    raise WebToolError("web_fetch 响应超过 256 KiB 上限")
+            except ValueError:
+                pass
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > _MAX_FETCH_BYTES:
+                    raise WebToolError("web_fetch 响应超过 256 KiB 上限")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            encoding = getattr(response, "encoding", None) or "utf-8"
+            try:
+                text = _extract_text(raw.decode(encoding, errors="replace"))
+            except LookupError:
+                text = _extract_text(raw.decode("utf-8", errors="replace"))
+            break
     limit = int(max_chars or settings.super_assistant_web_fetch_max_chars)
     if len(text) > limit:
         text = text[:limit]

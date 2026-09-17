@@ -149,6 +149,17 @@ CDP 配置只填写服务根地址（例如 `http://browser:9222`）；平台会
 `/json/version`。带该 discovery 路径、查询参数、fragment 或 URL 用户信息的
 地址会在配置阶段被拒绝，避免配置校验通过后实际探测到重复路径。
 
+浏览器页面目标默认拒绝私网地址，`STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS`
+默认 `false`。生产配置校验拒绝该值为 `true`，生产 Compose 的 backend 与
+pipeline_executor 固定为 `false`；升级前依赖私网页面的部署必须改用受控
+集成入口。隔离的本地 development/test 环境可显式启用。该限制针对页面目标，
+不限制 backend 通过 `STEWARD_BROWSER_CDP_URL` 连接 Compose 内的 browser。
+它仍不能替代浏览器网络出口策略：自动重定向、子资源和再次 DNS 解析需要在
+隔离网络/受控代理上做攻击验收。
+
+配置加载时会去除 `ENVIRONMENT` 两侧空白并转为小写，`prod` 统一为
+`production`，以确保启动、权限、发布和浏览器入口使用相同的生产环境判定。
+
 明确例外只有：API Hub 自有 SQLite；`ENVIRONMENT=test` 的隔离 SQLite 与 n8n
 配置注入；历史 `local://` 对象的只读读取/迁移。新平台数据不写入这些兼容路径。
 
@@ -182,6 +193,11 @@ backend 镜像依赖（requests/httpx/pandas/pymysql 等），脚本可直接发
 请求取数；新增第三方库须加入 backend 依赖并重建镜像。
 
 ## 插件社区 stdio MCP（可选，默认关闭）
+
+生产环境的 MCP、Remote Agent 和 Multica 外部端点默认要求 HTTPS，由
+`SUPER_ASSISTANT_EXTERNAL_HTTPS_REQUIRED`（默认 `true`）控制；development/test
+环境仍允许本地 HTTP fixture。切换既有生产集成前，应先迁移端点并执行外部回调、
+凭据和证书验收。
 
 stdio 形态的 MCP 会在后端容器内以子进程运行 `command`，等同开放容器内命令
 执行，因此按部署开关管理：`SUPER_ASSISTANT_MCP_STDIO_ENABLED`（默认
@@ -259,9 +275,11 @@ Actions 日志。普通 push 不具有创建新加密 authority 的权限，后�
 [部署手册](./deployment.md#首次登录与管理员密码恢复)。
 
 镜像变量来自服务器最终合并后的 `.env`。其中
-`STRICT_IMAGE_DIGESTS=true` 会要求全部镜像使用 `@sha256`，合法值为
-`true/false`、`yes/no` 或 `1/0`。部署入口不接受宿主 shell 中的同名变量覆盖
-`.env`；如需改变策略，必须先修改持久配置并重新执行完整校验。
+生产部署强制 `STRICT_IMAGE_DIGESTS=true`，所有镜像必须使用不可变
+`@sha256` digest；`false`、`no`、`0` 或缺失值都会被拒绝。部署入口不接受宿主
+shell 中的同名变量覆盖 `.env`。浏览器承载外部网页内容，不能使用浮动 tag。
+browser Dockerfile 中的字体包也固定到 Debian 版本号；更新版本必须重新构建、
+执行 CDP 健康检查并复核浏览器安全探针。
 
 ## 运行监控（API 性能监控）
 

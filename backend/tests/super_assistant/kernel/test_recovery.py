@@ -1,0 +1,209 @@
+import uuid
+from datetime import timedelta
+
+from app.models.user import User
+from app.super_assistant.models import SuperAssistantConversation
+from app.super_assistant.kernel.models import Approval, ExecutionAttempt, ExecutionCall, ExecutionEvent, ExecutionStep, ExecutionTurn, InboxItem
+from app.super_assistant.kernel.policies import ExecutionPolicy
+from app.super_assistant.kernel.recovery import expire_due_runs_once, expire_inbox_once, join_ready_parents_once, recover_stuck_runs_once
+from app.super_assistant.kernel.contracts import CancelReason
+from app.super_assistant.kernel.store import acquire_lease, cancel_run, create_run, renew_lease
+
+
+def _owner_and_conversation(db):
+    owner = User(id=str(uuid.uuid4()), username=f"recover-{uuid.uuid4().hex[:8]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
+    db.add(owner)
+    db.flush()
+    conversation = SuperAssistantConversation(owner_id=owner.id, title="recovery")
+    db.add(conversation)
+    db.flush()
+    return owner, conversation
+
+
+def test_expiry_requests_cancel_then_closes_after_grace(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="deadline", idempotency_key="deadline", deadline=None)
+    run.deadline = run.created_at - timedelta(seconds=1)
+    db.commit()
+    assert expire_due_runs_once(db, policy=ExecutionPolicy(cancel_grace=timedelta(seconds=2))) == 1
+    db.refresh(run)
+    assert run.status == "expired"  # no unresolved call: no grace required
+
+
+def test_stuck_run_is_fenced_and_woken(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="stuck", idempotency_key="stuck")
+    run.updated_at = run.created_at - timedelta(minutes=10)
+    run.lease_expires_at = run.created_at - timedelta(minutes=10)
+    db.commit()
+    assert recover_stuck_runs_once(db, policy=ExecutionPolicy(stuck_detector=timedelta(minutes=5))) == 1
+    db.refresh(run)
+    assert run.lease_owner == "kernel:recovery"
+    assert run.lease_epoch == 1
+
+
+def test_stuck_run_fences_orphaned_call_and_attempt(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="stuck-call", idempotency_key="stuck-call")
+    run.status = "active"
+    run.updated_at = run.created_at - timedelta(minutes=10)
+    run.lease_expires_at = run.created_at - timedelta(minutes=10)
+    turn = ExecutionTurn(run_id=run.id, turn_no=0, status="open")
+    db.add(turn); db.flush()
+    step = ExecutionStep(turn_id=turn.id, step_no=0, status="open")
+    db.add(step); db.flush()
+    call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id, call_index=0, capability_key="model.chat", capability_revision=1, idempotency_key="stuck-call-1", status="running", outcome="accepted", lease_epoch=0)
+    db.add(call); db.flush()
+    attempt = ExecutionAttempt(call_id=call.id, attempt_no=1, provider_status="started")
+    db.add(attempt); db.commit()
+    assert recover_stuck_runs_once(db, policy=ExecutionPolicy(stuck_detector=timedelta(minutes=5))) == 1
+    db.refresh(call); db.refresh(attempt); db.refresh(step)
+    assert call.status == "reconciling" and call.outcome == "outcome_unknown" and call.manual_attention is True
+    assert attempt.provider_status == "unknown" and attempt.finished_at is not None
+    assert step.status == "closed"
+
+
+def test_parent_join_wakes_waiting_parent_after_child_completion(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent")
+    db.flush()
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child", parent_run_id=parent.id)
+    db.flush()
+    parent.status = "waiting_external"
+    child.status = "completed"
+    db.commit()
+    assert join_ready_parents_once(db) == 1
+    db.refresh(parent)
+    assert parent.status == "active"
+
+
+def test_parent_join_merges_ready_child_while_active_and_is_idempotent(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-active-join")
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child-active-join", parent_run_id=parent.id)
+    parent.status = "active"
+    child.status = "completed"
+    db.commit()
+    assert join_ready_parents_once(db) == 1
+    db.refresh(parent)
+    assert parent.status == "active"
+    assert db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_joined").count() == 1
+    assert join_ready_parents_once(db) == 0
+    assert db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_joined").count() == 1
+
+
+def test_parent_join_page_progresses_after_ready_parent_is_merged(db):
+    owner, conversation = _owner_and_conversation(db)
+    parents = []
+    for index in range(2):
+        parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal=f"parent-{index}", idempotency_key=f"parent-page-{index}")
+        child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal=f"child-{index}", idempotency_key=f"child-page-{index}", parent_run_id=parent.id)
+        parent.status = "active"
+        child.status = "completed"
+        parents.append((parent, child))
+    db.commit()
+    assert join_ready_parents_once(db, limit=1) == 1
+    assert join_ready_parents_once(db, limit=1) == 1
+    assert all(db.query(ExecutionEvent).filter_by(run_id=parent.id, event_type="run.child_joined").count() == 1 for parent, _ in parents)
+
+
+def test_parent_join_maps_queued_child_without_blocking_scheduler(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-queued")
+    db.flush()
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child-queued", parent_run_id=parent.id)
+    parent.status = "waiting_external"
+    db.commit()
+    assert join_ready_parents_once(db) == 0
+    db.refresh(parent)
+    assert parent.status == "waiting_external"
+
+
+def test_parent_cancel_is_not_overwritten_by_child_join(db):
+    owner, conversation = _owner_and_conversation(db)
+    parent, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="parent", idempotency_key="parent-cancel-join")
+    db.flush()
+    child, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="child", idempotency_key="child-cancel-join", parent_run_id=parent.id)
+    parent.status = "cancel_requested"
+    child.status = "cancelled"
+    db.commit()
+    assert join_ready_parents_once(db) == 0
+    db.refresh(parent)
+    assert parent.status == "cancel_requested"
+
+
+def test_expiry_with_unresolved_call_sets_cancel_grace(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="cancel grace", idempotency_key="grace")
+    db.flush()
+    db.add(ExecutionCall(run_id=run.id, call_index=0, capability_key="remote", capability_revision=1, idempotency_key="call-1", status="running", outcome="accepted"))
+    run.deadline = run.created_at - timedelta(seconds=1)
+    db.commit()
+    assert expire_due_runs_once(db, policy=ExecutionPolicy(cancel_grace=timedelta(seconds=30))) == 1
+    db.refresh(run)
+    assert run.status == "cancel_requested"
+    assert run.cancel_reason == "deadline"
+    assert run.cancel_deadline is not None
+
+
+def test_heartbeat_renews_same_fencing_epoch(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="heartbeat", idempotency_key="heartbeat")
+    db.commit()
+    token = acquire_lease(db, run_id=run.id, worker_id="worker-a")
+    renewed = renew_lease(db, token=token, ttl=timedelta(seconds=45))
+    assert renewed.epoch == token.epoch
+    assert renewed.expires_at > token.expires_at
+
+
+def test_user_cancel_has_grace_deadline_and_scheduler_closes_it(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="cancel", idempotency_key="cancel")
+    db.commit()
+    cancel_run(db, run_id=run.id, owner_id=owner.id, reason=CancelReason.USER, idempotency_key="cancel-cmd", expected_version=1)
+    run.cancel_deadline = run.created_at - timedelta(seconds=1)
+    db.commit()
+    assert expire_due_runs_once(db) == 1
+    db.refresh(run)
+    assert run.status == "cancelled"
+
+
+def test_expired_question_is_reasked_once_then_fails_branch(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="question", idempotency_key="question")
+    run.status = "waiting_input"
+    run.wait_reason = "question"
+    db.add(InboxItem(
+        run_id=run.id, kind="question_answer", priority=30, status="pending",
+        question_id="q1", target_ref="q1", payload={"question": "需要什么？"}, source="system",
+        expires_at=run.created_at - timedelta(seconds=1), expiry_policy="reask_once",
+        idempotency_key="question-wait",
+    ))
+    db.commit()
+    assert expire_inbox_once(db) == 1
+    db.refresh(run)
+    assert run.status == "waiting_input"
+    retry = db.query(InboxItem).filter(InboxItem.run_id == run.id, InboxItem.status == "pending").one()
+    assert retry.expiry_policy == "fail_branch"
+    retry.expires_at = run.created_at - timedelta(seconds=1)
+    db.commit()
+    assert expire_inbox_once(db) == 1
+    db.refresh(run)
+    # fail_branch 只关闭等待分支：Run 回到 active 由模型在缺少该回答的
+    # 情况下重新规划，而不是整体失败。
+    assert run.status == "active"
+    assert run.wait_reason is None
+    assert db.query(ExecutionEvent).filter_by(run_id=run.id, event_type="inbox.expired").count() == 2
+
+
+def test_expiring_already_decided_approval_does_not_fail_active_run(db):
+    owner, conversation = _owner_and_conversation(db)
+    run, _ = create_run(db, owner_id=owner.id, conversation_id=conversation.id, goal="approval", idempotency_key="approval")
+    run.status = "active"
+    approval = Approval(owner_id=owner.id, run_id=run.id, target_summary="write", parameter_summary="{}", scope_summary="run", capability_revision=1, parameter_hash="hash", status="approved", expires_at=run.created_at - timedelta(seconds=1))
+    db.add(approval); db.flush()
+    db.add(InboxItem(run_id=run.id, kind="approval_decision", priority=10, status="pending", approval_id=approval.id, payload={"approval_id": approval.id}, source="system", expires_at=approval.expires_at, expiry_policy="fail_run", idempotency_key="approval-inbox"))
+    db.commit()
+    assert expire_inbox_once(db) == 1
+    db.refresh(run)
+    assert run.status == "active"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,9 +20,16 @@ from app.super_assistant.mcp_client import (
     encrypt_env,
     encrypt_headers,
     normalize_connection,
+    namespaced_tool_name,
 )
 from app.super_assistant.models import SuperAssistantMcpDevProject, SuperAssistantMcpServer
 from app.super_assistant.schemas import McpServerCreate, McpServerUpdate, McpTestOut
+from app.super_assistant.kernel.capability_service import (
+    persist_capability_revision,
+    revoke_capability_revisions,
+    set_capability_revision_enabled,
+)
+from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy, TrustLevel
 
 
 class McpServerServiceError(Exception):
@@ -41,6 +50,41 @@ class McpServerConflictError(McpServerServiceError):
 
 class McpServerUnavailableError(McpServerServiceError):
     pass
+
+
+def _manifest_keys(server: SuperAssistantMcpServer) -> list[str]:
+    return [
+        namespaced_tool_name(server.name, str(tool.get("name") or ""))
+        for tool in (server.tool_manifest or [])
+        if isinstance(tool, dict) and tool.get("name")
+    ]
+
+
+def _manifest_hash(server: SuperAssistantMcpServer, tools: list[dict]) -> str:
+    value = {
+        "transport": server.transport, "url": server.url, "command": server.command,
+        "args": server.args or [], "headers": server.headers_encrypted,
+        "env": server.env_encrypted, "tools": tools,
+    }
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def _freeze_manifest(db: Session, server: SuperAssistantMcpServer, tools: list[dict], revision: int, *, enabled: bool = True) -> None:
+    digest = _manifest_hash(server, tools)
+    for tool in tools:
+        name = str(tool.get("name") or "") if isinstance(tool, dict) else ""
+        if not name:
+            continue
+        key = namespaced_tool_name(server.name, name)
+        descriptor = AgentDescriptor(
+            agent_id=f"mcp:{server.id}:{name}", key=key, revision=revision,
+            transport="mcp", session_policy=SessionPolicy.STATELESS,
+        )
+        persist_capability_revision(
+            db, descriptor, source="mcp", trust_level=TrustLevel.USER_UNTRUSTED,
+            manifest_hash=digest,
+        )
+        set_capability_revision_enabled(db, key, revision, enabled=enabled)
 
 
 def get_mcp_server(
@@ -154,6 +198,20 @@ def update_mcp_server(
             value is not None
             for value in (body.transport, body.url, body.command, body.args)
         )
+        manifest_changed = connection_changed or body.headers is not None or body.env is not None
+        if manifest_changed or body.enabled is False:
+            revoke_capability_revisions(
+                db, _manifest_keys(item),
+                revision=int(item.manifest_revision or 1),
+            )
+        if manifest_changed:
+            # The persisted connection fields are mutable, while a Capability
+            # revision is immutable. Do not leave the old tool manifest exposed
+            # against the new endpoint/credentials; a successful probe will
+            # publish the next revision atomically.
+            item.tool_manifest = []
+            item.last_test_status = None
+            item.last_test_message = None
         if connection_changed:
             transport, url, command, args = normalize_connection(
                 transport=body.transport or item.transport,
@@ -165,17 +223,14 @@ def update_mcp_server(
             item.url = url
             item.command = command
             item.args = args
-            item.tool_manifest = []
             item.last_test_status = None
             item.last_test_message = None
         if body.headers is not None:
             item.headers_encrypted, item.header_names = encrypt_headers(body.headers)
-            item.tool_manifest = []
             item.last_test_status = None
             item.last_test_message = None
         if body.env is not None:
             item.env_encrypted, item.env_names = encrypt_env(body.env)
-            item.tool_manifest = []
             item.last_test_status = None
             item.last_test_message = None
         if body.display_name is not None:
@@ -184,6 +239,9 @@ def update_mcp_server(
             item.description = body.description
         if body.enabled is not None:
             item.enabled = body.enabled
+            if body.enabled and not manifest_changed:
+                for key in _manifest_keys(item):
+                    set_capability_revision_enabled(db, key, int(item.manifest_revision or 1), enabled=True)
         if body.require_confirmation is not None:
             item.require_confirmation = body.require_confirmation
         db.commit()
@@ -207,7 +265,11 @@ def remove_mcp_server(
         server_id,
         include_builtins=include_builtins,
     )
-    # 自研 MCP 与开发项目一一对应：删除任一侧都整体清理（版本随之删除）
+    # 删除 server 前先撤销其 CapabilityRevision 的在线授权位（保留快照行供审计），
+    # 并级联清理一一对应的自研 MCP 开发项目（版本随之删除）。
+    revoke_capability_revisions(
+        db, _manifest_keys(item), revision=int(item.manifest_revision or 1),
+    )
     if item.dev_project_id:
         project = db.query(SuperAssistantMcpDevProject).filter(
             SuperAssistantMcpDevProject.id == item.dev_project_id,
@@ -249,13 +311,21 @@ async def test_mcp_server(
                 args=item.args,
                 env=decrypt_env(item.env_encrypted),
             )
+        digest = _manifest_hash(item, tools)
+        revision = int(item.manifest_revision or 1)
+        if item.manifest_hash and item.manifest_hash != digest:
+            revision += 1
+        _freeze_manifest(db, item, tools, revision, enabled=True)
+        item.manifest_revision = revision
+        item.manifest_hash = digest
         item.tool_manifest = tools
         item.last_test_status = "success"
         item.last_test_message = f"连接成功，发现 {len(tools)} 个工具"
         db.commit()
         return McpTestOut(ok=True, message=item.last_test_message, tools=tools)
     except Exception as exc:
-        item.tool_manifest = []
+        # Preserve the last known-good manifest and its enabled revision when
+        # a probe fails; callers can retry after fixing connectivity/credentials.
         item.last_test_status = "error"
         item.last_test_message = str(exc)[:500]
         db.commit()
@@ -305,7 +375,15 @@ def install_platform_minio_mcp(
             require_confirmation=True,
         )
         db.add(item)
-    item.tool_manifest = minio_tool_manifest_fn()
+    tools = minio_tool_manifest_fn()
+    digest = _manifest_hash(item, tools)
+    revision = int(item.manifest_revision or 1)
+    if item.manifest_hash and item.manifest_hash != digest:
+        revision += 1
+    _freeze_manifest(db, item, tools, revision, enabled=True)
+    item.manifest_revision = revision
+    item.manifest_hash = digest
+    item.tool_manifest = tools
     item.last_test_status = "success"
     item.last_test_message = (
         f"平台内置连接成功，发现 {len(item.tool_manifest)} 个工具"

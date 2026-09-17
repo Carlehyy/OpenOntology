@@ -24,6 +24,7 @@ from app.settings.object_storage.service import (
 from app.shared.database import Base
 from app.super_assistant import router as super_assistant_router
 from app.super_assistant.models import SuperAssistantMcpServer
+from app.super_assistant.kernel.models import CapabilityRevision
 
 
 WORKSPACE_BUCKET = "assistant-workspace"
@@ -229,7 +230,7 @@ def test_super_assistant_installs_builtin_without_db_config(tmp_path, monkeypatc
     )
     Base.metadata.create_all(bind=engine, tables=[
         User.__table__, MinioOperationAudit.__table__,
-        SuperAssistantMcpServer.__table__,
+        SuperAssistantMcpServer.__table__, CapabilityRevision.__table__,
     ])
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     admin = User(

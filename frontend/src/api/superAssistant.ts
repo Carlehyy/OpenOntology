@@ -269,6 +269,85 @@ export interface StreamEvent {
   data: Record<string, any>
 }
 
+/** kernel.v1 长任务运行时状态。旧 Conversation 流仍使用上面的 StreamEvent。 */
+export type KernelRunStatus =
+  | 'queued' | 'active' | 'waiting_input' | 'waiting_approval' | 'waiting_external'
+  | 'waiting_retry' | 'paused' | 'cancel_requested' | 'cancelling' | 'cancelled'
+  | 'expired' | 'completed' | 'failed' | string
+
+export interface KernelRunBinding {
+  binding_mode: 'direct_ui' | 'delegated' | 'legacy'
+  ontology_id?: string
+  draft_version_id?: string
+  lifecycle?: string
+  write_permission_hash?: string
+}
+
+export interface KernelRunAccepted {
+  run_id: string
+  execution_version: string
+  stream_url: string
+  request_id: string
+}
+
+export interface KernelRunCallSummary {
+  call_id: string
+  status: string
+  outcome: string | null
+  capability_key: string
+}
+
+export interface KernelRunArtifactSummary {
+  artifact_id: string
+  kind: string
+  mime_type: string
+  size: number
+  checksum: string
+  status: string
+  business_status: string
+}
+
+export interface KernelRunInboxItem {
+  inbox_id: string
+  kind: string
+  question_id: string | null
+  approval_id?: string | null
+  expires_at: string | null
+}
+
+export interface KernelRunView {
+  run_id: string
+  conversation_id: string
+  status: KernelRunStatus
+  wait_reason: string | null
+  version: number
+  execution_version: string
+  goal: string
+  deadline: string | null
+  binding_snapshot: Record<string, unknown>
+  current_inbox: KernelRunInboxItem[]
+  calls: KernelRunCallSummary[]
+  artifacts: KernelRunArtifactSummary[]
+}
+
+export interface KernelRunSummary {
+  run_id: string
+  conversation_id: string
+  status: KernelRunStatus
+  wait_reason: string | null
+  version: number
+  goal: string
+  deadline: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type KernelRunEvent = {
+  event: string
+  data: Record<string, any>
+  id?: string
+}
+
 const pathPart = (path: string) => path.split('/').map(encodeURIComponent).join('/')
 
 const runtimeApiBase = () => {
@@ -318,6 +397,58 @@ const streamChat = async (
     } catch {
       onEvent({ event: 'error', data: { message: '无法解析服务端流式事件' } })
     }
+  }
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n')
+    let split = buffer.indexOf('\n\n')
+    while (split >= 0) {
+      dispatch(buffer.slice(0, split))
+      buffer = buffer.slice(split + 2)
+      split = buffer.indexOf('\n\n')
+    }
+    if (done) break
+  }
+  if (buffer.trim()) dispatch(buffer)
+}
+
+/** 消费 kernel.v1 SSE。用 fetch 而非 EventSource，以便复用现有 Bearer 鉴权并支持取消。 */
+const streamKernelRun = async (
+  runId: string,
+  onEvent: (event: KernelRunEvent) => void,
+  options: { afterSeq?: number; lastEventId?: string; signal?: AbortSignal } = {},
+) => {
+  const token = localStorage.getItem('token')
+  const params = options.afterSeq === undefined ? '' : `?after_seq=${encodeURIComponent(options.afterSeq)}`
+  const response = await fetch(`${runtimeApiBase()}/super-assistant/runs/${encodeURIComponent(runId)}/events${params}`, {
+    headers: {
+      Accept: 'text/event-stream',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.lastEventId ? { 'Last-Event-ID': options.lastEventId } : {}),
+    },
+    signal: options.signal,
+  })
+  if (!response.ok) {
+    const error = new Error(`运行事件请求失败 (${response.status})`) as Error & { status?: number }
+    error.status = response.status
+    throw error
+  }
+  if (!response.body) throw new Error('浏览器未提供流式响应体')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const dispatch = (block: string) => {
+    let event = 'message'
+    let id: string | undefined
+    const dataLines: string[] = []
+    for (const line of block.split('\n')) {
+      if (line.startsWith('id:')) id = line.slice(3).trim()
+      else if (line.startsWith('event:')) event = line.slice(6).trim()
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+    }
+    if (!dataLines.length) return // heartbeat comment
+    try { onEvent({ event, id, data: JSON.parse(dataLines.join('\n')) }) }
+    catch { onEvent({ event: 'error', id, data: { message: '无法解析运行事件' } }) }
   }
   while (true) {
     const { value, done } = await reader.read()
@@ -565,6 +696,55 @@ export const superAssistantApi = {
   rebuildPalaceOntologyDocument: (docId: string) =>
     apiClientV2.post<{ dispatched: boolean }>(`/super-assistant/palace/ontology-documents/${docId}/rebuild`),
   streamChat,
+  /** kernel.v1 长任务 API；与旧 Conversation 流并行，调用方需自行保存 run_id/version。 */
+  createKernelRun: (conversationId: string, body: {
+    goal: string
+    idempotency_key: string
+    deadline?: string
+    parent_run_id?: string
+    join_policy?: 'all' | 'any'
+    binding?: KernelRunBinding
+  }) => apiClientV2.post<KernelRunAccepted>(
+    `/super-assistant/conversations/${encodeURIComponent(conversationId)}/runs`,
+    body,
+    { headers: { 'Idempotency-Key': body.idempotency_key } },
+  ),
+  kernelRun: (runId: string) => apiClientV2.get<KernelRunView>(`/super-assistant/runs/${encodeURIComponent(runId)}`),
+  kernelRuns: (conversationId: string, limit = 50) => apiClientV2.get<KernelRunSummary[]>(
+    `/super-assistant/conversations/${encodeURIComponent(conversationId)}/runs`, { params: { limit } },
+  ),
+  cancelKernelRun: (runId: string, body: { reason: 'user' | 'parent' | 'deadline'; idempotency_key: string }, version: number) =>
+    apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/cancel`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
+    ),
+  pauseKernelRun: (runId: string, body: { idempotency_key: string }, version: number) =>
+    apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/pause`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
+    ),
+  resumeKernelRun: (runId: string, body: { idempotency_key: string }, version: number) =>
+    apiClientV2.post<{ command_id: string; status: KernelRunStatus; version: number }>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/resume`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
+    ),
+  retryKernelRun: (runId: string, body: { idempotency_key: string; max_steps?: number }, version: number) =>
+    apiClientV2.post<KernelRunAccepted>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/retry`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
+    ),
+  submitKernelInput: (runId: string, body: { kind: string; content?: string; content_ref?: string; question_id?: string; idempotency_key: string }, version: number) =>
+    apiClientV2.post<{ inbox_id: string; status: string; run_id: string }>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/inputs`, body,
+      { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
+    ),
+  decideKernelApproval: (runId: string, approvalId: string, body: { decision: 'approved' | 'denied'; idempotency_key: string }, version: number) =>
+    apiClientV2.post<{ command_id: string; status: string; version: number }>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}/decision`, body, { headers: { 'If-Match': String(version), 'Idempotency-Key': body.idempotency_key } },
+    ),
+  streamKernelRun,
+  kernelArtifact: (runId: string, artifactId: string) =>
+    apiClientV2.get<{ artifact_id: string; mime_type: string; size: number; checksum: string; status: string; business_status: string; content: string | null }>(
+      `/super-assistant/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`,
+    ),
+  kernelArtifactDownload: (runId: string, artifactId: string) =>
+    apiClientV2.getBlob(`/super-assistant/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/download`),
   cancel: (id: string) => apiClientV2.post(`/super-assistant/conversations/${id}/cancel`),
   decideToolRun: (id: string, decision: 'approve' | 'deny') =>
     apiClientV2.post(`/super-assistant/tool-runs/${id}/decision`, { decision }),

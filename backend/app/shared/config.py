@@ -1,7 +1,7 @@
 import ipaddress
 from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.shared.env_files import (
@@ -10,8 +10,34 @@ from app.shared.env_files import (
 )
 
 
+def normalized_environment(value: object) -> str:
+    """Return the canonical deployment environment name.
+
+    Environment values come from process configuration and may contain
+    harmless whitespace/casing differences. Security gates must not treat
+    ``Production`` as a non-production profile.
+    """
+    name = str(value or "").strip().lower()
+    return "production" if name == "prod" else name
+
+
 class Settings(BaseSettings):
     environment: str = "development"
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def canonical_environment(cls, value: object) -> str:
+        # Normalize once at configuration ingress so legacy consumers using
+        # an exact production comparison cannot bypass their safety gates.
+        name = normalized_environment(value)
+        if name in {"dev", "local"}:
+            return "development"
+        if name not in {"development", "test", "production"}:
+            raise ValueError(
+                "ENVIRONMENT must be one of development, test, or production"
+            )
+        return name
+
     # Local launch settings are deliberately separate from deployment ports.
     # Docker and production continue to own their Uvicorn command line.
     local_backend_host: str = "127.0.0.1"
@@ -170,6 +196,26 @@ class Settings(BaseSettings):
     # granting server-side code execution to assistant configurators.
     super_assistant_mcp_stdio_enabled: bool = False
     super_assistant_mcp_stdio_allowed_commands: str = ""
+    # User process plugins are executable code.  ``disabled`` is the safe
+    # default until the dedicated rootless runner is deployed.  ``nats`` is
+    # reserved for the external runner contract; it must not silently fall
+    # back to spawning a child in the API/executor process.  ``direct_dev`` is
+    # an explicit development/test-only escape hatch for protocol fixtures.
+    super_assistant_process_plugin_runner_mode: str = "disabled"
+
+    @field_validator("super_assistant_process_plugin_runner_mode", mode="before")
+    @classmethod
+    def canonical_process_plugin_runner_mode(cls, value: object) -> str:
+        mode = str(value or "").strip().lower()
+        if mode not in {"disabled", "nats", "direct_dev"}:
+            raise ValueError(
+                "SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE must be one of disabled, nats, or direct_dev"
+            )
+        return mode
+
+    # Credential-bearing external integrations must use TLS in production.
+    # Development/test keep HTTP compatibility for local fixtures.
+    super_assistant_external_https_required: bool = True
     # Anthropic prompt caching：给 system 与 tools 末位元素加 ephemeral 缓存断点，
     # 降低重复前缀的计费与时延；DeepSeek 等 anthropic 兼容端点不支持时应关闭。
     super_assistant_prompt_cache_enabled: bool = True
@@ -227,7 +273,7 @@ class Settings(BaseSettings):
     steward_browser_max_sessions_per_user: int = 3
     steward_browser_idle_timeout_seconds: int = 900
     steward_browser_reaper_interval_seconds: int = 30
-    steward_browser_allow_private_networks: bool = True
+    steward_browser_allow_private_networks: bool = False
     # URL used inside generated n8n workflows to reach this backend.
     steward_internal_proxy_base_url: str = "http://backend:8000/api-hub/internal/interfaces"
     # Header Auth credential already configured in n8n.  The data steward only
@@ -498,6 +544,11 @@ def production_config_errors(current: Settings) -> list[str]:
     # Empty means same-origin only and is safe. Wildcard remains forbidden.
     if "*" in origins:
         _insecure.append("CORS_ALLOWED_ORIGINS")
+    # Browser navigation is an SSRF-capable surface. Production must opt out
+    # of RFC1918/private targets. Local development may explicitly opt in for
+    # fixtures and on-device integrations.
+    if current.steward_browser_allow_private_networks:
+        _insecure.append("STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS must be false")
     _insecure.extend(required_dependency_config_errors(current))
     for key, value in (
         ("PIPELINE_FILE_PUBLIC_APP_BASE_URL",
@@ -547,7 +598,7 @@ def production_config_errors(current: Settings) -> list[str]:
 
 settings = Settings()
 
-if settings.environment != "test":
+if normalized_environment(settings.environment) != "test":
     _dependency_errors = required_dependency_config_errors(settings)
     if _dependency_errors:
         raise RuntimeError(
@@ -555,7 +606,7 @@ if settings.environment != "test":
             f"{', '.join(_dependency_errors)}"
         )
 
-if settings.environment == "production":
+if normalized_environment(settings.environment) == "production":
     _insecure = production_config_errors(settings)
     if _insecure:
         raise RuntimeError(

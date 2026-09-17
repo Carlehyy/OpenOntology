@@ -6,7 +6,8 @@
 ```text
 docs/
 ├── development/      本地环境搭建与测试门禁
-└── operations/       配置、部署、回滚、备份与排障
+├── operations/       配置、部署、回滚、备份与排障
+└── architecture/     处于讨论阶段的架构设计提案
 ```
 
 ## 开发
@@ -14,6 +15,19 @@ docs/
 - [开发目录](./development/README.md)
 - [本地开发](./development/setup.md)：启动完整本地栈与源码开发；
 - [测试指南](./development/testing.md)：测试分层和强制门禁。
+
+## 架构设计
+
+- [超级助手架构设计目录（提案）](./architecture/README.md)：按顶层到细节的完整阅读顺序和讨论规则。
+- [超级助手顶层架构设计（提案）](./architecture/super-assistant-top-level.md)：目标、边界、分层和演进原则。
+- [超级助手执行模型（提案）](./architecture/super-assistant-execution-model.md)：Run、Turn、Step、Event、Inbox 和恢复语义。
+- [超级助手能力与插件模型（提案）](./architecture/super-assistant-capability-plugin-model.md)：能力目录、插件生命周期、隔离和调用策略。
+- [超级助手 Agent 协作模型（提案）](./architecture/super-assistant-agent-connector-model.md)：内部助手、RAP、A2A、Agent Client Protocol 和 MCP 的边界。
+- [超级助手上下文、记忆与知识模型（提案）](./architecture/super-assistant-context-memory-model.md)：Context Pack、私人知识、记忆、图谱、压缩和 Artifact。
+- [超级助手数据与事件模型（提案）](./architecture/super-assistant-data-event-model.md)：逻辑实体、事件封套、Outbox、幂等和兼容投影。
+- [超级助手实现蓝图（提案）](./architecture/super-assistant-implementation-blueprint.md)：包边界、Protocol 和 Runtime 拆分顺序。
+- [超级助手迁移与验收方案（提案）](./architecture/super-assistant-migration-validation-plan.md)：阶段、回滚、故障注入和真实环境门禁。
+- [超级助手架构审查交接包](./architecture/super-assistant-review-packet.md)：原始需求、关键决策、相关资料路径和外部 Agent 审查 Prompt。
 
 ## 运维
 

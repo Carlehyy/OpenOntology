@@ -497,7 +497,7 @@ def get_report_html(ontology_id: str, run_id: str,
 @router.post("/{ontology_id}/agent/chat")
 def chat(ontology_id: str, body: S.ChatRequest,
          db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    _require_ontology(db, ontology_id)
+    require_ontology_access(db, ontology_id, current_user, write=False)
     if not (body.message or "").strip():
         raise HTTPException(422, "message 不能为空")
     if not body.stream:
@@ -518,7 +518,7 @@ def cancel_chat(ontology_id: str, body: S.ChatCancelRequest,
                 db: Session = Depends(get_db),
                 current_user=Depends(get_current_user)):
     """取消本进程内正在流式执行的回合（协作式：步间/模型调用间生效）。"""
-    _require_ontology(db, ontology_id)
+    require_ontology_access(db, ontology_id, current_user, write=False)
     from app.ontologies.agent_runtime.chat_cancel import chat_cancel_registry
 
     if not (body.run_id or "").strip():
@@ -543,7 +543,7 @@ def get_chat_run(ontology_id: str, run_id: str,
     SSE 推送与执行解耦后，前端在离开页面后凭 run_id 轮询此端点恢复
     「正在处理」的展示（MYW-71）。
     """
-    _require_ontology(db, ontology_id)
+    require_ontology_access(db, ontology_id, current_user, write=False)
     return _ok(chat_runs.run_status_payload(run_id, ontology_id))
 
 
@@ -604,7 +604,8 @@ def execute_proposal(ontology_id: str, body: S.ExecuteProposalRequest,
     仍然只放行授权边界内的动作；执行走动作引擎全套治理（校验 / HITL 审批 /
     事实追加），actor 记为确认执行的用户 —— agent 只提案，人签字。
     """
-    _require_ontology(db, ontology_id)
+    # 提案执行是真实写路径：与 dynamic-sentinels 写路由同口径，必须按本体做写权限裁决。
+    require_ontology_access(db, ontology_id, current_user, write=True)
     try:
         release, action = _proposal_service.authorize(
             db, ontology_id, body,

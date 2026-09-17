@@ -25,9 +25,50 @@ from app.assistant_hub.contract import (
 from app.auth.permissions import user_has_menu_access
 from app.exploration.orchestrator import run_exploration_turn
 from app.exploration.schemas import SessionCreate
-from app.exploration.session_service import _require_session, create_session
+from app.exploration.session_service import (
+    _require_session,
+    create_session,
+    prepare_delegated_binding,
+    validate_delegated_binding,
+)
+from app.exploration.models import ExplorationSession
 
 _KEY = "exploration"
+
+
+def ref_matches_delegated_binding(
+    db: Session, user, conversation_ref: str, context: dict[str, Any] | None,
+) -> bool:
+    """Prove that a persisted exploration ref belongs to the frozen binding.
+
+    This is deliberately a strict predicate for Kernel child recovery.  A
+    malformed ref, missing session, changed draft, lost write access, or
+    stale permission fingerprint is not treated as a resumable session.
+    """
+    try:
+        payload = parse_ref(_KEY, conversation_ref)
+    except AssistantHubError:
+        return False
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return False
+    session = db.query(ExplorationSession).filter(
+        ExplorationSession.id == session_id,
+    ).first()
+    if session is None or (
+        session.user_id
+        and session.user_id != getattr(user, "id", None)
+        and getattr(user, "role", "") != "admin"
+    ):
+        return False
+    try:
+        expected = validate_delegated_binding(db, user, context)
+    except ValueError:
+        return False
+    return (
+        str(session.ontology_id or "") == expected["ontology_id"]
+        and str(session.ontology_version_id or "") == expected["draft_version_id"]
+    )
 
 
 class ExplorationAdapter:
@@ -65,10 +106,17 @@ class ExplorationAdapter:
         self, db: Session, user, *, context: dict[str, Any] | None = None,
     ) -> str:
         self._check_menu(db, user)
-        title_hint = str((context or {}).get("title_hint") or "").strip()[:40]
+        values = context if isinstance(context, dict) else {}
+        delegated = bool(values.get("delegated_kernel"))
+        delegated_binding = validate_delegated_binding(db, user, values) if delegated else None
+        title_hint = str(values.get("title_hint") or "").strip()[:40]
         title = f"[委派] {title_hint}" if title_hint else "[委派] 超级助手探索"
         payload = create_session(
-            SessionCreate(title=title),
+            SessionCreate(
+                title=title,
+                ontology_id=delegated_binding["ontology_id"] if delegated_binding else None,
+                ontology_version_id=delegated_binding["draft_version_id"] if delegated_binding else None,
+            ),
             db,
             user,
             ok_fn=lambda data: data,
@@ -76,7 +124,10 @@ class ExplorationAdapter:
         session_id = str(payload.get("id") or "")
         if not session_id:
             raise AssistantHubError("创建探索会话失败")
-        return build_ref(_KEY, {"session_id": session_id})
+        return build_ref(_KEY, {
+            "session_id": session_id,
+            "delegated_kernel": delegated,
+        })
 
     def run_turn(
         self, db: Session, user, conversation_ref: str, message: str, *,
@@ -88,6 +139,23 @@ class ExplorationAdapter:
         if not session_id:
             raise AssistantHubError("会话引用已损坏；请用 session=new 重新开始")
         self._require_owned_session(db, session_id, user)
+        if payload.get("delegated_kernel") is True:
+            session = db.query(ExplorationSession).filter(
+                ExplorationSession.id == session_id,
+            ).first()
+            try:
+                # Recheck the live draft and write scope on every delegated
+                # turn.  A frozen child must stop with an explicit binding
+                # error when its draft is released or access is revoked; it
+                # must never silently fork onto the current release.
+                prepare_delegated_binding(db, user, {
+                    "ontology_id": getattr(session, "ontology_id", None),
+                    "draft_version_id": getattr(session, "ontology_version_id", None),
+                })
+            except ValueError as exc:
+                raise AssistantHubError(
+                    f"委派绑定已失效，请重新选择本体和 editing draft：{exc}"
+                ) from exc
 
         answer_content = ""
         error_message: Optional[str] = None

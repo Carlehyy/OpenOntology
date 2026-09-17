@@ -80,6 +80,7 @@ def _required_settings(**updates) -> Settings:
         "minio_access_key": "ontology-minio",
         "minio_secret_key": "strong-minio-password",
         "steward_browser_cdp_url": "http://browser:9222",
+        "steward_browser_allow_private_networks": False,
         "n8n_api_url": "https://n8n.example.com/api/v1",
         "n8n_api_key": "strong-n8n-api-key",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
@@ -279,6 +280,20 @@ def test_materializer_validates_typed_values(
 
 def test_deploy_merges_required_runtime_manifest(tmp_path):
     shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
+    image_keys = (
+        "POSTGRES_IMAGE", "REDIS_IMAGE", "NEO4J_IMAGE", "MINIO_IMAGE",
+        "BROWSER_IMAGE", "PYTHON_BASE_IMAGE", "NODE_BASE_IMAGE", "NGINX_BASE_IMAGE",
+    )
+    example = (tmp_path / ".env.example").read_text(encoding="utf-8").splitlines()
+    replacements = {key: f"test/{key.lower()}@sha256:{'a' * 64}" for key in image_keys}
+    (tmp_path / ".env.example").write_text(
+        "\n".join(
+            f"{line.split('=', 1)[0]}={replacements[line.split('=', 1)[0]]}"
+            if "=" in line and line.split("=", 1)[0] in replacements else line
+            for line in example
+        ) + "\n",
+        encoding="utf-8",
+    )
     manifest_path = tmp_path / "deploy" / "production.dependencies.env"
     materialized = _run_materializer(manifest_path)
     assert materialized.returncode == 0, materialized.stdout + materialized.stderr

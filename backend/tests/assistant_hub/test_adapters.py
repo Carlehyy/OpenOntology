@@ -239,6 +239,43 @@ def test_exploration_start_creates_titled_session(db, admin_user):
     assert session.user_id == admin_user.id
 
 
+def test_delegated_exploration_rechecks_live_draft_before_resume(db, admin_user, monkeypatch):
+    from app.ontologies.projects.models import OntologyProject
+    from app.ontologies.versions.models import OntologyVersion
+
+    project = OntologyProject(
+        id="delegated-live-ontology", name="委派本体", domain="test",
+        created_by=admin_user.id,
+    )
+    version = OntologyVersion(
+        id="delegated-live-draft", ontology_id=project.id, version_number="v0",
+        node_kind="draft", lifecycle_status="editing", created_by=admin_user.id,
+    )
+    db.add_all([project, version])
+    db.commit()
+    from app.exploration.session_service import write_permission_fingerprint
+
+    ref = ExplorationAdapter().start(
+        db, admin_user,
+        context={
+            "delegated_kernel": True,
+            "ontology_id": project.id,
+            "draft_version_id": version.id,
+            "lifecycle": "editing",
+            "write_permission_hash": write_permission_fingerprint(admin_user, project, version),
+        },
+    )
+    version.lifecycle_status = "released"
+    db.commit()
+
+    def _must_not_run(*args, **kwargs):  # pragma: no cover - 触发即失败
+        raise AssertionError("草稿失效后不得继续执行委派会话")
+
+    monkeypatch.setattr(exploration_adapter, "run_exploration_turn", _must_not_run)
+    with pytest.raises(contract.AssistantHubError, match="委派绑定已失效"):
+        list(ExplorationAdapter().run_turn(db, admin_user, ref, "继续"))
+
+
 def test_exploration_run_turn_normalizes_answer(db, admin_user, monkeypatch):
     ref = ExplorationAdapter().start(db, admin_user, context={"title_hint": "t"})
     captured = {}

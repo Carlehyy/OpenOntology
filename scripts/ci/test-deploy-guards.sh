@@ -8,6 +8,7 @@ DEPLOY_SCRIPT="$REPO_ROOT/deploy/deploy-prod.sh"
 DEPLOY_WORKFLOW="$REPO_ROOT/.github/workflows/deploy-nano-ontoprompt.yml"
 ARCHIVE_SCRIPT="$SCRIPT_DIR/create-deployment-archive.sh"
 NGINX_CONFIG="$REPO_ROOT/frontend/nginx/default.conf"
+PROD_COMPOSE="$REPO_ROOT/docker-compose.prod.yml"
 
 assert_accepted() {
   local value="$1"
@@ -131,9 +132,69 @@ if [ "$post_migration_stop_count" -ne 3 ] \
   exit 1
 fi
 
+# Keep the production container hardening from being removed during a
+# Compose edit.  These settings are defense in depth and do not replace the
+# dedicated rootless runner required for user process plugins.
+for hardened_service in browser python_kernel_gateway backend pipeline_executor; do
+  hardened_block="$(awk -v service="$hardened_service" '
+    $0 == "  " service ":" { in_service = 1 }
+    in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+    in_service { print }
+  ' "$PROD_COMPOSE")"
+  if ! grep -Fq 'no-new-privileges:true' <<<"$hardened_block" \
+      || ! grep -Fq '      - ALL' <<<"$hardened_block" \
+      || ! grep -Eq '/tmp:size=[0-9]+m,nosuid,nodev' <<<"$hardened_block"; then
+    printf '%s must retain no-new-privileges, cap_drop ALL, and a hardened /tmp tmpfs\n' \
+      "$hardened_service" >&2
+    exit 1
+  fi
+done
+
+for private_network_service in backend pipeline_executor; do
+  private_network_block="$(awk -v service="$private_network_service" '
+    $0 == "  " service ":" { in_service = 1 }
+    in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+    in_service { print }
+  ' "$PROD_COMPOSE")"
+  if ! grep -Fq 'STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS: "false"' \
+      <<<"$private_network_block"; then
+    printf '%s must explicitly deny browser private-network targets\n' \
+      "$private_network_service" >&2
+    exit 1
+  fi
+done
+
+browser_block="$(awk -v service=browser '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+if ! grep -Fq 'user: "10001:10001"' <<<"$browser_block" \
+    || ! grep -Fq 'read_only: true' <<<"$browser_block" \
+    || ! grep -Fq 'USER 10001:10001' docker/browser/Dockerfile; then
+  printf 'browser must run as the fixed non-root UID 10001\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'XDG_CACHE_HOME=/tmp/browser-cache' docker/browser/Dockerfile; then
+  printf 'browser must keep its cache in a dedicated tmpfs subdirectory\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'fontconfig=2.15.0-2.3' docker/browser/Dockerfile \
+    || ! grep -Fq 'fonts-noto-cjk=1:20240730+repack1-1' docker/browser/Dockerfile; then
+  printf 'browser APT packages must be pinned to immutable versions\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'BROWSER_IMAGE:-chromedp/headless-shell@sha256:' "$PROD_COMPOSE" \
+    || grep -Fq 'BROWSER_IMAGE:-chromedp/headless-shell:latest' "$PROD_COMPOSE"; then
+  printf 'browser base image default must be pinned by digest\n' >&2
+  exit 1
+fi
+
 test_dir="$(mktemp -d /tmp/openontology-deploy-guards.XXXXXX)"
 archive_source="$(mktemp -d /tmp/openontology-archive-source.XXXXXX)"
-archive_output="$(mktemp /tmp/openontology-archive.XXXXXX.tar.gz)"
+# Keep the XXXXXX suffix at the end: BSD mktemp otherwise treats a trailing
+# extension as literal text and a second guard run can collide with the first.
+archive_output="$(mktemp /tmp/openontology-archive.XXXXXX)"
 trap 'rm -rf -- "$test_dir" "$archive_source"; rm -f -- "$archive_output"' EXIT
 
 archive_fixture_paths=(
@@ -436,15 +497,74 @@ if (
 fi
 
 set_test_env_value STRICT_IMAGE_DIGESTS false
-(
+if (
   cd "$test_dir"
   STRICT_IMAGE_DIGESTS=1 \
     APP_DIR="$test_dir" \
     SKIP_GIT=1 \
     DEPLOY_VALIDATE_ONLY=1 \
     DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
-    bash "$DEPLOY_SCRIPT" >/dev/null
-)
+    bash "$DEPLOY_SCRIPT" >strict-disabled.log 2>&1
+); then
+  printf 'production deployment must reject STRICT_IMAGE_DIGESTS=false even when the shell exports true\n' >&2
+  exit 1
+fi
+grep -q 'production deployment requires STRICT_IMAGE_DIGESTS=true' "$test_dir/strict-disabled.log"
+set_test_env_value STRICT_IMAGE_DIGESTS true
+for image_key in \
+  POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
+  PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE; do
+  set_test_env_value "$image_key" "$digest"
+done
+
+set_test_env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE direct_dev
+if (
+  cd "$test_dir"
+  APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >runner-mode-failure.log 2>&1
+); then
+  printf 'production deployment must reject direct_dev plugin runner mode\n' >&2
+  exit 1
+fi
+grep -q 'rejects SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE=direct_dev' \
+  "$test_dir/runner-mode-failure.log"
+cat >>"$test_dir/.env" <<'EOF'
+super_assistant_process_plugin_runner_mode=disabled
+EOF
+if (
+  cd "$test_dir"
+  APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >runner-mode-ambiguous.log 2>&1
+); then
+  printf 'production deployment must reject case-variant plugin runner keys\n' >&2
+  exit 1
+fi
+grep -q 'is duplicated or has a case-variant key' "$test_dir/runner-mode-ambiguous.log"
+sed -i.bak '/^super_assistant_process_plugin_runner_mode=/d' "$test_dir/.env"
+find "$test_dir" -maxdepth 1 -name '.env.bak' -delete
+set_test_env_value SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE disabled
+
+set_test_env_value BROWSER_IMAGE chromedp/headless-shell:stable
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/browser-image-failure.log" 2>&1; then
+  printf 'production deployment must reject a floating browser image even when the global image gate is disabled\n' >&2
+  exit 1
+fi
+grep -q 'BROWSER_IMAGE must be pinned' "$test_dir/browser-image-failure.log"
+set_test_env_value BROWSER_IMAGE "$digest"
 
 fake_bin="$test_dir/fake-bin"
 fake_docker_log="$test_dir/fake-docker.log"
@@ -461,13 +581,14 @@ for key in \
   N8N_TIMEOUT_SECONDS STEWARD_BROWSER_CDP_URL CORS_ALLOWED_ORIGINS \
   UPLOADS_DIR PIPELINE_FILE_GATEWAY_BASE_URL \
   PIPELINE_FILE_PUBLIC_APP_BASE_URL PIPELINE_FILE_PUBLIC_API_BASE_URL \
+  STEWARD_INTERNAL_PROXY_BASE_URL \
   STEWARD_BROWSER_HTTP_LEASE_SECONDS \
   STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS STEWARD_BROWSER_MAX_SESSIONS \
   STEWARD_BROWSER_MAX_SESSIONS_PER_USER \
   STEWARD_BROWSER_IDLE_TIMEOUT_SECONDS \
   STEWARD_BROWSER_REAPER_INTERVAL_SECONDS POSTGRES_IMAGE REDIS_IMAGE \
   NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE PYTHON_BASE_IMAGE NODE_BASE_IMAGE \
-  NGINX_BASE_IMAGE STRICT_IMAGE_DIGESTS COMPOSE_DISABLE_ENV_FILE \
+  NGINX_BASE_IMAGE STRICT_IMAGE_DIGESTS SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE COMPOSE_DISABLE_ENV_FILE \
   COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR COMPOSE_PROFILES \
   COMPOSE_PROJECT_NAME; do
   if [ "${!key+x}" = "x" ]; then
@@ -524,6 +645,7 @@ if (
     PIPELINE_FILE_GATEWAY_BASE_URL=https://shell-override.invalid/gateway \
     PIPELINE_FILE_PUBLIC_APP_BASE_URL=https://shell-override.invalid \
     PIPELINE_FILE_PUBLIC_API_BASE_URL=https://shell-override.invalid \
+    STEWARD_INTERNAL_PROXY_BASE_URL=https://shell-override.invalid/internal-proxy \
     STEWARD_BROWSER_HTTP_LEASE_SECONDS=1 \
     STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS=1 \
     STEWARD_BROWSER_MAX_SESSIONS=1 \
@@ -539,6 +661,7 @@ if (
     NODE_BASE_IMAGE=example.invalid/unvalidated:latest \
     NGINX_BASE_IMAGE=example.invalid/unvalidated:latest \
     STRICT_IMAGE_DIGESTS=true \
+    SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE=direct_dev \
     COMPOSE_DISABLE_ENV_FILE=1 \
     COMPOSE_ENV_FILES=/tmp/unvalidated-compose.env \
     COMPOSE_FILE=/tmp/unvalidated-compose.yml \

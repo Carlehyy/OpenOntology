@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -270,6 +271,64 @@ class McpDevProjectOut(ORMModel):
     updated_at: datetime
 
 
+
+class ProcessPluginCreate(CamelModel):
+    # The owner namespace is prepended to CapabilityRevision.key (a 255-byte
+    # column), so reserve room for that prefix while keeping the public key
+    # comfortably expressive.
+    key: str = Field(min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$")
+    revision: int = Field(ge=1, le=1_000_000)
+    entrypoint: str = Field(min_length=1, max_length=2000)
+    display_name: str = Field(default="", max_length=200)
+    description: str = Field(default="", max_length=1000)
+    trust_level: Literal["verified", "user_untrusted"] = "user_untrusted"
+    capabilities: list[str] = Field(default_factory=list, max_length=64)
+    permissions: list[str] = Field(default_factory=list, max_length=64)
+    network_scope: list[str] = Field(default_factory=list, max_length=64)
+    workspace_scope: list[str] = Field(default_factory=list, max_length=16)
+    secret_refs: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("entrypoint", "display_name", "description", mode="before")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return str(value).strip()
+
+    @field_validator("capabilities", "permissions", "network_scope", "workspace_scope", "secret_refs")
+    @classmethod
+    def validate_items(cls, value: list[str]) -> list[str]:
+        if any(not str(item).strip() or len(str(item)) > 500 for item in value):
+            raise ValueError("插件 manifest 列表项无效")
+        return [str(item).strip() for item in value]
+
+
+class ProcessPluginOut(ORMModel):
+    id: str
+    key: str
+    display_name: str
+    description: str
+    revision: int
+    entrypoint: str
+    trust_level: str
+    capabilities: list[str]
+    permissions: list[str]
+    network_scope: list[str]
+    workspace_scope: list[str]
+    secret_refs: list[str]
+    manifest_hash: str
+    state: str
+    active_calls: int
+    last_health_status: str | None
+    last_health_message: str | None
+    drain_started_at: datetime | None
+    uninstalled_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+    created_at: datetime
+    updated_at: datetime
+
+
 class McpDevProjectDetailOut(McpDevProjectOut):
     script: str
     tool_samples: dict[str, Any]
@@ -338,8 +397,6 @@ class McpDevPublishOut(BaseModel):
     version_no: int
     tools: list[dict[str, Any]] = Field(default_factory=list)
     gates: list[dict[str, Any]] = Field(default_factory=list)
-
-
 class MulticaCommandOut(BaseModel):
     command: str
     title: str
@@ -474,10 +531,18 @@ class RemoteAgentTaskNextOut(BaseModel):
 class RemoteAgentTaskResultIn(BaseModel):
     """回连模式任务结果回传体（契约与直连回合响应一致；体积封顶防滥用）。"""
 
-    status: str  # answered | failed
+    status: Literal["answered", "failed"]
     content: str = Field(default="", max_length=20000)
     session_ref: str | None = Field(default=None, max_length=255)
     note: str = Field(default="", max_length=2000)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
+
+    @model_validator(mode="after")
+    def bounded_artifacts(self):
+        size = len(json.dumps(self.artifacts, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        if size > 64 * 1024:
+            raise ValueError("artifacts payload exceeds 64 KiB; use an external artifact reference")
+        return self
 
 
 class MulticaConfigUpdate(BaseModel):
