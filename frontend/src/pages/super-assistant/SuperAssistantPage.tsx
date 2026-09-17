@@ -3,13 +3,14 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  Check, Cpu, List, Loader2, Menu, Paperclip, Pencil,
+  Check, Cpu, List, Loader2, Menu, Monitor, Paperclip, Pencil,
   Send, Settings2, Square, X,
 } from 'lucide-react'
 
 import { modelApi } from '@/api/ontologies'
 import {
   superAssistantApi,
+  superAssistantBrowserApi,
   type AssistantTool,
   type MulticaConfig,
   type SuperConversation,
@@ -32,6 +33,7 @@ import { useThemeStore } from '@/stores/themeStore'
 import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './components/AssistantConfiguration'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
+import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-collaboration/BrowserCollaboration'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import {
   ChatMessage, ConfirmationCard, ContextUsage,
@@ -104,6 +106,8 @@ export default function SuperAssistantPage() {
   const [conversationFiles, setConversationFiles] = useState<SuperConversationFile[]>([])
   const [uploading, setUploading] = useState(false)
   const [deletingConversation, setDeletingConversation] = useState<SuperConversation | null>(null)
+  // 实时浏览器面板三态：closed / 大窗口 modal / 画中画 pip（与数据管家同一面板组件）
+  const [browserDisplay, setBrowserDisplay] = useState<BrowserDisplayMode>('closed')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const senderRef = useRef<ElementRef<typeof Sender>>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -264,6 +268,14 @@ export default function SuperAssistantPage() {
       setConversations(current => [item, ...current]); setSelectedId(item.id); setMessages([])
       return item
     } catch (error) { toast.error('新建会话失败', { description: errorText(error) }); return null }
+  }
+
+  // 实时浏览器：未落地的新会话视图（selectedId 为 null）先复用现有建会话流程
+  // 懒建会话，再开大窗口；建会话失败已由 createConversation 提示，这里保持安静
+  const openBrowser = async () => {
+    if (selectedId) { setBrowserDisplay('modal'); return }
+    const created = await createConversation()
+    if (created) setBrowserDisplay('modal')
   }
 
   // 「新建任务」去重：当前已在未落地的全新视图、或选中的会话还是空会话（无消息且未在生成）
@@ -849,6 +861,15 @@ export default function SuperAssistantPage() {
           </Select>
           <button
             type="button"
+            onClick={() => void openBrowser()}
+            aria-label={browserDisplay === 'pip' ? '恢复实时浏览器大窗口' : '打开实时浏览器'}
+            title={browserDisplay === 'pip' ? '恢复实时浏览器大窗口' : '打开实时浏览器'}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand bg-brand-soft text-brand-ink transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Monitor size={15} />
+          </button>
+          <button
+            type="button"
             onClick={() => setConfigOpen(value => !value)}
             aria-label={configOpen ? '关闭助手配置' : '打开助手配置'}
             aria-expanded={configOpen}
@@ -913,6 +934,20 @@ export default function SuperAssistantPage() {
         conversationId={selectedId}
       />
       </section>
+
+      {browserDisplay !== 'closed' && selectedId && (
+        <BrowserModal
+          key={selectedId}
+          conversationId={selectedId}
+          mode={browserDisplay}
+          onMinimize={() => setBrowserDisplay('pip')}
+          onRestore={() => setBrowserDisplay('modal')}
+          onClose={() => setBrowserDisplay('closed')}
+          errorText={errorText}
+          labels={{ assistantName: '超级助手', shortName: '超级助手' }}
+          api={superAssistantBrowserApi}
+        />
+      )}
 
       <GlobalSearchPalette
         open={searchOpen}
