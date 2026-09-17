@@ -81,6 +81,7 @@ def start_browser(
     *,
     require_conversation_fn=_require_conversation,
     browser_error_fn=_browser_error,
+    session_workspace=None,
 ):
     conversation = require_conversation_fn(
         db, conversation_id, current_user
@@ -101,6 +102,7 @@ def start_browser(
             user_id=owner_id,
             actor="user",
             browser_target=target,
+            session_workspace=session_workspace,
         ))
     except Exception as exc:  # noqa: BLE001
         raise browser_error_fn(exc)
@@ -208,11 +210,13 @@ def browser_captures(
     current_user,
     *,
     require_conversation_fn=_require_conversation,
+    session_workspace=None,
 ):
     require_conversation_fn(db, conversation_id, current_user)
     return _ok(
         browser_manager.list_captures(
-            conversation_id, keyword, limit
+            conversation_id, keyword, limit,
+            session_workspace=session_workspace,
         )
     )
 

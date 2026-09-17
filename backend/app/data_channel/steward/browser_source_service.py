@@ -188,6 +188,8 @@ def delete_browser_source(
                 exc_info=True,
             )
         conversation.browser_source_id = None
+    # 超助等其它域复用同一运行时的会话也按来源一并释放；库侧由 FK SET NULL 兜底
+    browser_manager.close_by_source(f"{source.source_type}:{source.id}")
     db.delete(source)
     db.commit()
 
