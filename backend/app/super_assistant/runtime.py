@@ -19,7 +19,7 @@ from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
 from app.settings.object_storage.service import execute_minio_tool
 from app.shared.config import settings
 from app.shared.database import SessionLocal
-from app.super_assistant import delegation, files_workspace, mcp_dev_service, memory_service, multica_service, palace_service, provider, reflection_service, web_tools
+from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, palace_service, provider, reflection_service, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -54,6 +54,13 @@ _AGENT_MODE_SECTION = """自主执行模式：
 5. 确认目标已完成时，在最终答复开头输出 [GOAL_COMPLETE]；确认无法完成时输出 [GOAL_FAILED] 并说明原因。这两个标记不会展示给用户。
 """
 
+# 浏览器协作规则：browser_* 工具与实时浏览器面板共享当前会话的同一浏览器
+_BROWSER_SECTION = """浏览器协作（用 browser_* 工具驱动当前会话的独立浏览器，用户可在实时浏览器面板实时观看）：
+1. 用户仅打开大窗口或画中画旁观时，你必须继续操作；只有用户正在输入或明确接管时才等待，当前步骤完成后如仍处于接管状态，如实说明并请用户交还。
+2. 绝不向用户索要密码，也不用 browser_type 填密码框；需要登录时请用户在实时浏览器画面中手动输入。
+3. 查页面数据来源用 browser_network_requests 核对 XHR/fetch 响应样例与分页字段，不要只凭 URL 名称猜接口；浏览器下载与页面资源保存都落在当前会话工作区（与会话附件同一边界），随后可用 list_session_files / read_session_file 读取。
+"""
+
 # 只读内置工具：同一轮内可并行执行（无副作用、无需确认）
 _READ_ONLY_BUILTIN_TOOLS = frozenset({
     "use_skill",
@@ -78,6 +85,10 @@ _READ_ONLY_BUILTIN_TOOLS = frozenset({
     # todo 清单是本轮 stream_chat 的内存态，读写均无外部副作用
     "todo_write",
     "todo_read",
+    # 浏览器只读观测：与页面写操作（open/navigate/click/type/保存）不交错
+    "browser_state",
+    "browser_page_resources",
+    "browser_network_requests",
 })
 
 # 需要用户审批确认的内置工具：目前是 multica 下发任务（外部系统写操作）
@@ -177,6 +188,7 @@ def _system_prompt(
         )
     if delegation_enabled:
         prompt = f"{prompt}\n{delegation.SYSTEM_PROMPT_RULE}\n"
+    prompt = f"{prompt}\n{_BROWSER_SECTION}\n"
     if memory_section:
         prompt = f"{prompt}\n{memory_section}\n"
     if file_section:
@@ -350,6 +362,7 @@ def _builtin_tools(agent_mode: bool = False) -> list[dict[str, Any]]:
         tools.append(dict(_WEB_FETCH_TOOL_SCHEMA))
     if str(settings.super_assistant_web_search_backend or "").strip():
         tools.append(dict(_WEB_SEARCH_TOOL_SCHEMA))
+    tools.extend(browser_tools.BROWSER_TOOL_SCHEMAS)
     return tools
 
 
@@ -785,6 +798,11 @@ def _execute_builtin_tool(
         return run_subagent(db, owner_id, call_kwargs, task, disabled_tools=disabled_tools)
     if name in {"multica_list_agents", "multica_list_tasks", "multica_create_task"}:
         return multica_service.execute_tool(db, owner_id, name, arguments)
+    if name in browser_tools.BROWSER_TOOL_NAMES:
+        return browser_tools.execute_browser_tool(
+            db, owner_id=owner_id, conversation_id=conversation_id,
+            name=name, arguments=arguments,
+        )
     return json.dumps({"error": f"未知工具 {name}"}, ensure_ascii=False)
 
 

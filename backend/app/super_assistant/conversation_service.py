@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 
@@ -8,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.auth.models import User
+from app.data_channel.steward.browser_runtime import browser_manager
 from app.model_configs.models import ModelConfig
 from app.shared.database import SessionLocal
 from app.super_assistant import files_workspace
@@ -31,6 +33,8 @@ ConversationLookup = Callable[
     SuperAssistantConversation,
 ]
 ChatStream = Callable[..., Iterator[str]]
+
+logger = logging.getLogger(__name__)
 
 # 超过该时长的 streaming 行视为死流（与 chat 的 409 闸门同口径）；
 # 真实生成中断（进程重启/被杀）来不及走流内 GeneratorExit/异常兜底。
@@ -173,6 +177,11 @@ def delete_conversation(
         current_user.id,
         conversation_id,
     )
+    try:
+        # 先释放浏览器会话再删库（与 steward 同序）；运行时故障不阻断删除
+        browser_manager.close(conversation_id)
+    except Exception:
+        logger.warning("会话浏览器关闭失败: %s", conversation_id, exc_info=True)
     db.query(SuperAssistantReflectionCandidate).filter(
         SuperAssistantReflectionCandidate.conversation_id == item.id,
     ).delete(synchronize_session=False)
