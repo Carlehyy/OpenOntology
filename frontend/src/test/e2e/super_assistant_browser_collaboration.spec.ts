@@ -33,6 +33,8 @@ async function mockSuperAssistantCollaboration(
   let collaboration: Collaboration = { ...observing }
   const controlActions: string[] = []
   const createCalls: string[] = []
+  const navigated: string[] = []
+  let liveUrl = 'https://example.com/data'
   let inputCount = 0
   const conversations: Array<Record<string, unknown>> = options.withConversation === false
     ? []
@@ -157,7 +159,7 @@ async function mockSuperAssistantCollaboration(
     }
     if (path.endsWith('/browser/session')) {
       return ok(route, {
-        active: true, url: 'https://example.com/data', live: false, collaboration,
+        active: true, url: liveUrl, live: false, collaboration,
       })
     }
     if (path.endsWith('/browser/ticket')) {
@@ -173,9 +175,13 @@ async function mockSuperAssistantCollaboration(
       })
     }
     if (path.endsWith('/browser/live-http/frame')) {
-      return ok(route, { data: tinyFrame, url: 'https://example.com/data', collaboration })
+      return ok(route, { data: tinyFrame, url: liveUrl, collaboration })
     }
     if (path.endsWith('/browser/live-http/input')) {
+      const body = route.request().postDataJSON() as { message?: { type?: string; action?: string } }
+      if (body.message?.type === 'mouse' && body.message.action === 'move') {
+        return ok(route, { accepted: true, collaboration })
+      }
       inputCount += 1
       collaboration = {
         controller: 'user', mode: 'transient', agentCanAct: false, expiresIn: 3,
@@ -191,6 +197,12 @@ async function mockSuperAssistantCollaboration(
       return ok(route, { collaboration })
     }
     if (path.endsWith('/browser/live-http/release')) return ok(route, { released: true })
+    if (path.endsWith('/browser/start') || path.endsWith('/browser/navigate')) {
+      const body = route.request().postDataJSON() as { url: string }
+      navigated.push(body.url)
+      liveUrl = body.url
+      return ok(route, { url: body.url, title: 'ok' })
+    }
     if (path.endsWith('/browser/captures')) return ok(route, [])
     return ok(route, [])
   })
@@ -199,8 +211,28 @@ async function mockSuperAssistantCollaboration(
     controlActions: () => [...controlActions],
     createCalls: () => [...createCalls],
     inputCount: () => inputCount,
+    navigated: () => [...navigated],
   }
 }
+
+test('实时画面推流时地址栏仍可手改并跳转', async ({ page }) => {
+  const state = await mockSuperAssistantCollaboration(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/super-assistant', { waitUntil: 'domcontentloaded' })
+
+  await page.getByRole('button', { name: '打开实时浏览器' }).click()
+  const address = page.getByTestId('browser-address-bar')
+  await expect(address).toHaveValue('https://example.com/data')
+  await address.fill('https://example.org/new-path')
+  await expect(address).toHaveValue('https://example.org/new-path')
+  await page.waitForTimeout(800)
+  await expect(address).toHaveValue('https://example.org/new-path')
+  await address.press('Enter')
+  await expect.poll(state.navigated).toEqual(['https://example.org/new-path'])
+  await expect(address).toHaveValue('https://example.org/new-path')
+  await page.waitForTimeout(800)
+  await expect(address).toHaveValue('https://example.org/new-path')
+})
 
 test('实时浏览器支持协同操作，画中画只旁观且不占控制权', async ({ page }, testInfo) => {
   const state = await mockSuperAssistantCollaboration(page)

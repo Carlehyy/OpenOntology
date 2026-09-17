@@ -84,16 +84,26 @@ async def browser_live(websocket: WebSocket, conversation_id: str, ticket: str =
             await websocket.send_json(payload)
 
     async def send_frames() -> None:
-        interval = max(100, int(settings.steward_browser_frame_interval_ms)) / 1000
+        min_interval = max(33, int(settings.steward_browser_frame_interval_ms)) / 1000
+        last_version = -1
+        sent_at = 0.0
         while not stopped.is_set():
             try:
-                frame = await browser_manager.screenshot(
-                    conversation_id, client_id=client_id)
+                frame, version = await browser_manager.next_live_frame(
+                    conversation_id, client_id=client_id,
+                    after_version=last_version, timeout=1.0)
+                if version == last_version:
+                    continue
+                last_version = version
+                now = asyncio.get_running_loop().time()
+                wait = min_interval - (now - sent_at)
+                if wait > 0:
+                    await asyncio.sleep(wait)
                 await send_json({"type": "frame", **frame})
+                sent_at = asyncio.get_running_loop().time()
             except Exception as exc:  # noqa: BLE001
                 await send_json({"type": "error", "message": str(exc)})
                 await asyncio.sleep(1)
-            await asyncio.sleep(interval)
 
     async def receive_input() -> None:
         while not stopped.is_set():

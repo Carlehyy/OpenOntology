@@ -256,7 +256,7 @@ class Settings(BaseSettings):
     steward_browser_cdp_url: str = "http://localhost:9222"
     steward_browser_timeout_seconds: int = 30
     steward_browser_max_captures: int = 300
-    steward_browser_frame_interval_ms: int = 250
+    steward_browser_frame_interval_ms: int = 50
     # WebSocket-blocked clients fall back to authenticated HTTP frame polling.
     # A short renewable lease preserves manual-takeover semantics without
     # leaving the Agent paused forever when a tab or network disappears.

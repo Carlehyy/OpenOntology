@@ -324,6 +324,13 @@ class BrowserSession:
     last_state_saved: float = 0.0
     last_active: float = field(default_factory=time.time)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    cdp_session: Any = field(default=None, repr=False)
+    screencast_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    screencast_active: bool = False
+    screencast_failed: bool = False
+    latest_frame: dict[str, Any] | None = field(default=None, repr=False)
+    frame_version: int = 0
+    frame_condition: asyncio.Condition = field(default_factory=asyncio.Condition, repr=False)
 
     def touch(self) -> None:
         self.last_active = time.time()
@@ -569,6 +576,15 @@ class BrowserManager:
                     leases.pop(lease_id, None)
             if not leases:
                 registry.pop(cid, None)
+                session = self._sessions.get(cid)
+                loop = getattr(self, "_loop", None)
+                if (
+                    session is not None
+                    and self._live_clients.get(cid, 0) <= 0
+                    and loop is not None
+                    and loop.is_running()
+                ):
+                    self._submit(self._stop_screencast(session))
 
     @staticmethod
     def _is_busy(session: BrowserSession) -> bool:
@@ -664,6 +680,7 @@ class BrowserManager:
         async with session.operation_lock:
             self._live_clients[conversation_id] = self._live_clients.get(conversation_id, 0) + 1
             session.touch()
+        await self._ensure_screencast(session)
 
     async def attach_live(self, conversation_id: str) -> None:
         await self.acall(
@@ -702,6 +719,8 @@ class BrowserManager:
             session.touch()
         if client_id:
             self._release_user_control(conversation_id, client_id)
+        if not self._is_live(conversation_id) and session:
+            await self._stop_screencast(session)
 
     async def detach_live(self, conversation_id: str,
                           client_id: str | None = None) -> None:
@@ -717,6 +736,7 @@ class BrowserManager:
             expires_at = time.monotonic() + self._http_lease_ttl()
             self._live_leases.setdefault(conversation_id, {})[lease_id] = expires_at
             session.touch()
+        await self._ensure_screencast(session)
         return {
             "leaseId": lease_id,
             "expiresIn": self._http_lease_ttl(),
@@ -742,7 +762,9 @@ class BrowserManager:
 
     async def _http_live_screenshot(self, conversation_id: str, lease_id: str) -> dict:
         await self._renew_http_live(conversation_id, lease_id)
-        return await self._screenshot(conversation_id)
+        frame, _version = await self._next_live_frame(
+            conversation_id, client_id=lease_id, after_version=-1, timeout=0)
+        return frame
 
     def http_live_screenshot(self, conversation_id: str, lease_id: str) -> dict:
         return self.call(
@@ -794,6 +816,8 @@ class BrowserManager:
         session = self._sessions.get(conversation_id)
         if session:
             session.touch()
+            if not self._is_live(conversation_id):
+                await self._stop_screencast(session)
 
     def release_http_live(self, conversation_id: str, lease_id: str) -> None:
         self.call(self._release_http_live(conversation_id, lease_id), timeout=10)
@@ -902,6 +926,8 @@ class BrowserManager:
 
                     def on_page(new_page: Any) -> None:
                         session.bind_page(new_page)
+                        if self._is_live(session.conversation_id):
+                            asyncio.create_task(self._restart_screencast(session))
 
                     context.on("page", on_page)
                     self._sessions[conversation_id] = session
@@ -913,7 +939,7 @@ class BrowserManager:
             try:
                 response = await session.page.goto(
                     navigation_target,
-                    wait_until="domcontentloaded",
+                    wait_until="commit" if actor == "user" else "domcontentloaded",
                     timeout=int(settings.steward_browser_timeout_seconds) * 1000,
                 )
                 _validate_navigation_response(response, navigation_target)
@@ -929,8 +955,8 @@ class BrowserManager:
                         "restoredSession": restored, "reclaimedSessionCount": len(reclaimed)}
             await session.save_state_if_due()
             session.touch()
-            result = await self._state(
-                conversation_id, actor=actor, check_control=False)
+            result = await self._navigation_result(
+                conversation_id, actor=actor, session=session)
         result.update({
             "restoredSession": restored,
             "reclaimedSessionCount": len(reclaimed),
@@ -980,6 +1006,27 @@ class BrowserManager:
     def state(self, conversation_id: str, *, actor: str = "agent") -> dict:
         return self.call(self._state(conversation_id, actor=actor))
 
+    async def _cheap_page_view(self, session: BrowserSession) -> dict:
+        title = ""
+        try:
+            title = await session.page.title()
+        except Exception:
+            pass
+        return {
+            "url": session.page.url,
+            "title": title,
+            "text": "",
+            "elements": [],
+        }
+
+    async def _navigation_result(
+        self, conversation_id: str, *, actor: str, session: BrowserSession,
+    ) -> dict:
+        if actor == "user":
+            return await self._cheap_page_view(session)
+        return await self._state(
+            conversation_id, actor=actor, check_control=False)
+
     async def _page_resources(
         self, conversation_id: str, keyword: str | None = None, limit: int = 50,
         *, actor: str = "agent",
@@ -1022,7 +1069,7 @@ class BrowserManager:
             try:
                 response = await session.page.goto(
                     target,
-                    wait_until="domcontentloaded",
+                    wait_until="commit" if actor == "user" else "domcontentloaded",
                     timeout=int(settings.steward_browser_timeout_seconds) * 1000,
                 )
                 _validate_navigation_response(response, target)
@@ -1034,10 +1081,10 @@ class BrowserManager:
                 session.touch()
                 return {"url": session.page.url, "title": "文件下载已触发",
                         "downloadStarted": True, "targetUrl": target}
-            await session.save_state()
+            await session.save_state_if_due()
             session.touch()
-            return await self._state(
-                conversation_id, actor=actor, check_control=False)
+            return await self._navigation_result(
+                conversation_id, actor=actor, session=session)
 
     def navigate(self, conversation_id: str, url: str, *, actor: str = "agent") -> dict:
         return self.call(self._navigate(conversation_id, url, actor=actor))
@@ -1202,18 +1249,23 @@ class BrowserManager:
     async def _input(self, conversation_id: str, message: dict,
                      *, client_id: str = "live-user") -> dict[str, Any]:
         session = await self._require(conversation_id)
-        self._claim_user_control(
-            conversation_id, client_id, mode="transient")
+        kind = message.get("type")
+        action = message.get("action")
+        hover_move = kind == "mouse" and action == "move"
+        if not hover_move:
+            self._claim_user_control(
+                conversation_id, client_id, mode="transient")
+        page = session.page
+        if hover_move:
+            session.touch()
+            await page.mouse.move(float(message.get("x", 0)), float(message.get("y", 0)))
+            session.touch()
+            return self._control_status(conversation_id)
         async with session.operation_lock:
             session.touch()
-            page = session.page
-            kind = message.get("type")
             if kind == "mouse":
                 x, y = float(message.get("x", 0)), float(message.get("y", 0))
-                action = message.get("action")
-                if action == "move":
-                    await page.mouse.move(x, y)
-                elif action == "down":
+                if action == "down":
                     await page.mouse.move(x, y); await page.mouse.down(button=message.get("button", "left"))
                 elif action == "up":
                     await page.mouse.move(x, y); await page.mouse.up(button=message.get("button", "left"))
@@ -1235,19 +1287,185 @@ class BrowserManager:
         return await self.acall(
             self._input(conversation_id, message, client_id=client_id))
 
-    async def _screenshot(self, conversation_id: str,
-                          client_id: str | None = None) -> dict:
+    async def _publish_live_frame(self, session: BrowserSession, data_b64: str) -> None:
+        url = ""
+        try:
+            if session.page and not session.page.is_closed():
+                url = session.page.url
+        except Exception:
+            pass
+        if not hasattr(session, "frame_condition"):
+            session.frame_condition = asyncio.Condition()
+            session.frame_version = 0
+        async with session.frame_condition:
+            session.latest_frame = {
+                "data": data_b64,
+                "url": url,
+                "collaboration": self._control_status(session.conversation_id),
+            }
+            session.frame_version += 1
+            session.frame_condition.notify_all()
+
+    async def _on_screencast_frame(
+        self, session: BrowserSession, cdp: Any, params: dict[str, Any],
+    ) -> None:
+        stale = (
+            cdp is not getattr(session, "cdp_session", None)
+            or not getattr(session, "screencast_active", False)
+        )
+        data = params.get("data")
+        if not stale and data:
+            await self._publish_live_frame(session, str(data))
+        session_id = params.get("sessionId")
+        if session_id is None:
+            return
+        delay = max(0, int(settings.steward_browser_frame_interval_ms)) / 1000
+        if delay and not stale:
+            await asyncio.sleep(delay)
+        try:
+            await cdp.send("Page.screencastFrameAck", {"sessionId": session_id})
+        except Exception:
+            logger.debug("screencast frame ack failed", exc_info=True)
+
+    async def _detach_cdp(self, cdp: Any) -> None:
+        if cdp is None:
+            return
+        try:
+            await cdp.send("Page.stopScreencast")
+        except Exception:
+            pass
+        try:
+            await cdp.detach()
+        except Exception:
+            pass
+
+    async def _stop_screencast(self, session: BrowserSession) -> None:
+        lock = getattr(session, "screencast_lock", None)
+        if lock is None:
+            session.screencast_lock = asyncio.Lock()
+            lock = session.screencast_lock
+        async with lock:
+            cdp = getattr(session, "cdp_session", None)
+            session.screencast_active = False
+            session.cdp_session = None
+            await self._detach_cdp(cdp)
+
+    async def _restart_screencast(self, session: BrowserSession) -> None:
+        session.screencast_failed = False
+        await self._stop_screencast(session)
+        if self._is_live(session.conversation_id):
+            await self._ensure_screencast(session)
+
+    async def _ensure_screencast(self, session: BrowserSession) -> None:
+        if getattr(session, "screencast_failed", False):
+            return
+        if getattr(session, "screencast_active", False) and getattr(session, "cdp_session", None) is not None:
+            return
+        page = getattr(session, "page", None)
+        if page is None or page.is_closed():
+            return
+        if not hasattr(session, "screencast_lock"):
+            session.screencast_lock = asyncio.Lock()
+        if not hasattr(session, "frame_condition"):
+            session.frame_condition = asyncio.Condition()
+            session.frame_version = 0
+            session.latest_frame = None
+            session.cdp_session = None
+        async with session.screencast_lock:
+            if getattr(session, "screencast_failed", False):
+                return
+            if getattr(session, "screencast_active", False) and getattr(session, "cdp_session", None) is not None:
+                return
+            if page.is_closed():
+                return
+            cdp = None
+            session.screencast_active = True
+            try:
+                cdp = await page.context.new_cdp_session(page)
+                session.cdp_session = cdp
+
+                def handler(params: dict[str, Any]) -> None:
+                    asyncio.create_task(self._on_screencast_frame(session, cdp, params))
+
+                cdp.on("Page.screencastFrame", handler)
+                await cdp.send("Page.enable")
+                await cdp.send("Page.startScreencast", {
+                    "format": "jpeg",
+                    "quality": 55,
+                    "maxWidth": 1365,
+                    "maxHeight": 768,
+                    "everyNthFrame": 1,
+                })
+            except Exception:
+                session.screencast_failed = True
+                session.screencast_active = False
+                session.cdp_session = None
+                await self._detach_cdp(cdp)
+                logger.warning(
+                    "CDP screencast unavailable, live view falls back to screenshots",
+                    exc_info=True,
+                )
+
+    async def _capture_jpeg(self, session: BrowserSession) -> str:
+        image = await session.page.screenshot(
+            type="jpeg", quality=55, animations="allow")
+        return base64.b64encode(image).decode("ascii")
+
+    def _screenshot_fallback_delay_s(self) -> float:
+        return max(0.25, int(settings.steward_browser_frame_interval_ms) / 1000)
+
+    async def _live_frame_payload(self, session: BrowserSession, conversation_id: str) -> tuple[dict, int]:
+        page_url = session.page.url if session.page and not session.page.is_closed() else ""
+        frame = dict(session.latest_frame or {})
+        frame["url"] = page_url
+        frame["collaboration"] = self._control_status(conversation_id)
+        return frame, session.frame_version
+
+    async def _next_live_frame(
+        self, conversation_id: str, *, client_id: str | None = None,
+        after_version: int = -1, timeout: float = 1.0,
+    ) -> tuple[dict, int]:
         session = await self._require(conversation_id)
         if client_id:
             self._renew_user_control(conversation_id, client_id)
         session.touch()
-        await session.save_state_if_due()
-        image = await session.page.screenshot(type="jpeg", quality=68, animations="disabled")
-        return {
-            "data": base64.b64encode(image).decode("ascii"),
-            "url": session.page.url,
-            "collaboration": self._control_status(conversation_id),
-        }
+        await self._ensure_screencast(session)
+        if not getattr(session, "screencast_active", False):
+            if after_version >= 0:
+                await asyncio.sleep(self._screenshot_fallback_delay_s())
+            await self._publish_live_frame(session, await self._capture_jpeg(session))
+            return await self._live_frame_payload(session, conversation_id)
+        if not hasattr(session, "frame_condition"):
+            session.frame_condition = asyncio.Condition()
+        if session.frame_version == after_version and timeout > 0:
+            async with session.frame_condition:
+                if session.frame_version == after_version:
+                    try:
+                        await asyncio.wait_for(
+                            session.frame_condition.wait_for(
+                                lambda: session.frame_version != after_version),
+                            timeout=timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+        if session.latest_frame is None:
+            await self._publish_live_frame(session, await self._capture_jpeg(session))
+        return await self._live_frame_payload(session, conversation_id)
+
+    async def next_live_frame(
+        self, conversation_id: str, *, client_id: str | None = None,
+        after_version: int = -1, timeout: float = 1.0,
+    ) -> tuple[dict, int]:
+        return await self.acall(self._next_live_frame(
+            conversation_id, client_id=client_id,
+            after_version=after_version, timeout=timeout,
+        ))
+
+    async def _screenshot(self, conversation_id: str,
+                          client_id: str | None = None) -> dict:
+        frame, _version = await self._next_live_frame(
+            conversation_id, client_id=client_id, after_version=-1, timeout=0)
+        return frame
 
     async def screenshot(self, conversation_id: str,
                          client_id: str | None = None) -> dict:
@@ -1299,6 +1517,7 @@ class BrowserManager:
                 if self._sessions.get(conversation_id) is not session:
                     return
                 self._sessions.pop(conversation_id, None)
+                await self._stop_screencast(session)
                 await session.save_state()
                 if session.capture_tasks:
                     await asyncio.gather(*session.capture_tasks, return_exceptions=True)

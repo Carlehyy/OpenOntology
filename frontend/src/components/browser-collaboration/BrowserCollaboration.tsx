@@ -29,6 +29,17 @@ const OBSERVING_COLLABORATION: BrowserCollaborationState = {
   controller: 'agent', mode: 'observe', agentCanAct: true, expiresIn: 0,
 }
 
+function jpegBlobUrl(b64: string): string {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
+}
+
+function collaborationKey(state: BrowserCollaborationState): string {
+  return `${state.controller}:${state.mode}:${state.agentCanAct}:${state.expiresIn}`
+}
+
 export default function BrowserModal({ conversationId, mode, onMinimize, onRestore, onClose, errorText, api, labels }: {
   conversationId: string
   mode: Exclude<BrowserDisplayMode, 'closed'>
@@ -42,8 +53,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
   const assistantName = labels?.assistantName || '数据管家'
   const shortName = labels?.shortName || '管家'
   const [url, setUrl] = useState('https://')
-  const [currentUrl, setCurrentUrl] = useState('')
-  const [frame, setFrame] = useState('')
+  const [hasFrame, setHasFrame] = useState(false)
   const [connected, setConnected] = useState(false)
   const [liveTransport, setLiveTransport] = useState<'websocket' | 'http' | ''>('')
   const [collaboration, setCollaboration] = useState<BrowserCollaborationState>(OBSERVING_COLLABORATION)
@@ -72,6 +82,20 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
   const liveRunRef = useRef(0)
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve())
   const imageRef = useRef<HTMLImageElement>(null)
+  const pipImageRef = useRef<HTMLImageElement>(null)
+  const lastFrameUrlRef = useRef('')
+  const urlFocusedRef = useRef(false)
+  const urlDirtyRef = useRef(false)
+  const currentUrlRef = useRef('')
+  const awaitingNavFromRef = useRef<string | null>(null)
+  const awaitingNavUntilRef = useRef(0)
+  const collabKeyRef = useRef(collaborationKey(OBSERVING_COLLABORATION))
+  const pendingWheelRef = useRef({ deltaX: 0, deltaY: 0 })
+  const wheelRafRef = useRef(0)
+  const pendingMoveRef = useRef<{ x: number; y: number } | null>(null)
+  const moveRafRef = useRef(0)
+  const paintJpegRef = useRef<(b64: string) => void>(() => undefined)
+  const applyLiveMetaRef = useRef<(remoteUrl?: string, collab?: BrowserCollaborationState) => void>(() => undefined)
   const sourceButtonRef = useRef<HTMLButtonElement>(null)
   const sourceDrawerRef = useRef<HTMLDivElement>(null)
   const sourceDrawerCloseRef = useRef<HTMLButtonElement>(null)
@@ -108,6 +132,53 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
   const pipResizing = pipResizeDirection !== null
   const userHoldingControl = collaboration.controller === 'user' && collaboration.mode === 'held'
   const userTemporarilyActive = collaboration.controller === 'user' && collaboration.mode === 'transient'
+
+  const paintJpeg = (b64: string) => {
+    const next = jpegBlobUrl(b64)
+    const prev = lastFrameUrlRef.current
+    lastFrameUrlRef.current = next
+    if (imageRef.current) imageRef.current.src = next
+    if (pipImageRef.current) pipImageRef.current.src = next
+    if (prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+    setHasFrame(true)
+  }
+
+  const applyLiveMeta = (remoteUrl?: string, collab?: BrowserCollaborationState) => {
+    if (collab) {
+      const key = collaborationKey(collab)
+      if (collabKeyRef.current !== key) {
+        collabKeyRef.current = key
+        setCollaboration(collab)
+      }
+    }
+    if (!remoteUrl) return
+    if (awaitingNavFromRef.current !== null && Date.now() < awaitingNavUntilRef.current) {
+      if (remoteUrl === awaitingNavFromRef.current) return
+      awaitingNavFromRef.current = null
+      awaitingNavUntilRef.current = 0
+    } else if (Date.now() >= awaitingNavUntilRef.current) {
+      awaitingNavFromRef.current = null
+    }
+    if (currentUrlRef.current !== remoteUrl) {
+      currentUrlRef.current = remoteUrl
+    }
+    if (!urlFocusedRef.current && !urlDirtyRef.current) setUrl(remoteUrl)
+  }
+
+  const bindFrameImage = (element: HTMLImageElement | null, pip: boolean) => {
+    if (pip) pipImageRef.current = element
+    else imageRef.current = element
+    if (element && lastFrameUrlRef.current) element.src = lastFrameUrlRef.current
+  }
+
+  paintJpegRef.current = paintJpeg
+  applyLiveMetaRef.current = applyLiveMeta
+
+  useEffect(() => () => {
+    if (lastFrameUrlRef.current.startsWith('blob:')) URL.revokeObjectURL(lastFrameUrlRef.current)
+    if (wheelRafRef.current) window.cancelAnimationFrame(wheelRafRef.current)
+    if (moveRafRef.current) window.cancelAnimationFrame(moveRafRef.current)
+  }, [])
 
   const maxPipWidthAtPosition = useCallback((left: number, _top: number) => Math.max(0, Math.min(
     PIP_MAX_WIDTH,
@@ -390,6 +461,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     if (leaseId) void api.liveHttpRelease(conversationId, leaseId).catch(() => undefined)
     setConnected(false)
     setLiveTransport('')
+    collabKeyRef.current = collaborationKey(OBSERVING_COLLABORATION)
     setCollaboration(OBSERVING_COLLABORATION)
     setControlBusy(false)
   }, [api, conversationId])
@@ -429,9 +501,8 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
           setConnected(true)
           setAttaching(false)
           setError('')
-          setFrame(`data:image/jpeg;base64,${nextFrame.data}`)
-          setCollaboration(nextFrame.collaboration)
-          if (nextFrame.url) { setCurrentUrl(nextFrame.url); setUrl(nextFrame.url) }
+          paintJpegRef.current(nextFrame.data)
+          applyLiveMetaRef.current(nextFrame.url, nextFrame.collaboration)
         } catch (err: unknown) {
           if (liveRunRef.current !== runId) break
           failures += 1
@@ -499,10 +570,10 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
           receivedFrame = true
           window.clearTimeout(timeoutId)
           setAttaching(false)
-          setFrame(`data:image/jpeg;base64,${msg.data}`)
-          if (msg.collaboration) setCollaboration(msg.collaboration)
-          if (msg.url) { setCurrentUrl(msg.url); setUrl(msg.url) }
+          paintJpegRef.current(msg.data)
+          applyLiveMetaRef.current(msg.url, msg.collaboration)
         } else if (msg.type === 'collaboration' && msg.collaboration) {
+          collabKeyRef.current = collaborationKey(msg.collaboration)
           setCollaboration(msg.collaboration)
           const pendingControl = controlAckRef.current
           controlAckRef.current = null
@@ -528,7 +599,10 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
         const session = await api.session(conversationId)
         if (cancelled || !session.active) return
         setCollaboration(session.collaboration || OBSERVING_COLLABORATION)
-        if (session.url) { setCurrentUrl(session.url); setUrl(session.url) }
+        if (session.url) {
+          currentUrlRef.current = session.url
+          if (!urlFocusedRef.current && !urlDirtyRef.current) setUrl(session.url)
+        }
         waitingForFrame = true
         await connectLive()
       } catch (err: unknown) {
@@ -547,11 +621,21 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
   const open = async () => {
     if (!url.trim()) return
     setBusy(true); setError('')
+    const previousUrl = currentUrlRef.current
     try {
-      const state = currentUrl
+      const state = currentUrlRef.current
         ? await api.navigate(conversationId, url.trim())
         : await api.start(conversationId, url.trim())
-      setCurrentUrl(state.url); setUrl(state.url)
+      urlDirtyRef.current = false
+      if (state.url !== previousUrl) {
+        awaitingNavFromRef.current = previousUrl
+        awaitingNavUntilRef.current = Date.now() + 2000
+      } else {
+        awaitingNavFromRef.current = null
+        awaitingNavUntilRef.current = 0
+      }
+      currentUrlRef.current = state.url
+      setUrl(state.url)
       if (!connected) await connectLive()
     } catch (err: unknown) {
       setError(errorText(err, '网址打开失败'))
@@ -563,7 +647,14 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     try {
       await api.bindSource(conversationId, sourceId)
       stopLive()
-      setFrame(''); setCurrentUrl('')
+      if (lastFrameUrlRef.current.startsWith('blob:')) URL.revokeObjectURL(lastFrameUrlRef.current)
+      lastFrameUrlRef.current = ''
+      setHasFrame(false)
+      currentUrlRef.current = ''
+      urlDirtyRef.current = false
+      awaitingNavFromRef.current = null
+      awaitingNavUntilRef.current = 0
+      setUrl('https://')
       setSelectedSource(sourceId)
     } catch (err: unknown) { setError(errorText(err, '浏览器来源切换失败')) }
     finally { setSourceBusy(false) }
@@ -613,11 +704,20 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     ? `node openontology-browser-companion.mjs --server ${window.location.origin} --source ${pairing.sourceId} --token ${pairing.token}`
     : ''
 
+  const discardAddressDraft = () => {
+    urlDirtyRef.current = false
+    if (currentUrlRef.current) setUrl(currentUrlRef.current)
+  }
+
   const send = (message: Record<string, unknown>) => {
-    if (!userHoldingControl) {
-      setCollaboration({
-        controller: 'user', mode: 'transient', agentCanAct: false, expiresIn: 3,
-      })
+    const hoverMove = message.type === 'mouse' && message.action === 'move'
+    if (hoverMove && wsRef.current?.readyState !== WebSocket.OPEN) return
+    if (!userHoldingControl && !hoverMove) {
+      const next = {
+        controller: 'user' as const, mode: 'transient' as const, agentCanAct: false, expiresIn: 3,
+      }
+      collabKeyRef.current = collaborationKey(next)
+      setCollaboration(next)
     }
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(message))
@@ -630,9 +730,32 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
       .then(async () => {
         if (httpLeaseRef.current !== leaseId) return
         const result = await api.liveHttpInput(conversationId, leaseId, message)
-        setCollaboration(result.collaboration)
+        applyLiveMetaRef.current(undefined, result.collaboration)
       })
       .catch((err: unknown) => setError(errorText(err, '浏览器操作发送失败')))
+  }
+
+  const sendWheel = (deltaX: number, deltaY: number) => {
+    pendingWheelRef.current.deltaX += deltaX
+    pendingWheelRef.current.deltaY += deltaY
+    if (wheelRafRef.current) return
+    wheelRafRef.current = window.requestAnimationFrame(() => {
+      wheelRafRef.current = 0
+      const next = pendingWheelRef.current
+      pendingWheelRef.current = { deltaX: 0, deltaY: 0 }
+      if (next.deltaX || next.deltaY) send({ type: 'wheel', deltaX: next.deltaX, deltaY: next.deltaY })
+    })
+  }
+
+  const sendMove = (x: number, y: number) => {
+    pendingMoveRef.current = { x, y }
+    if (moveRafRef.current) return
+    moveRafRef.current = window.requestAnimationFrame(() => {
+      moveRafRef.current = 0
+      const next = pendingMoveRef.current
+      pendingMoveRef.current = null
+      if (next) send({ type: 'mouse', action: 'move', ...next })
+    })
   }
 
   const changeUserControl = async (action: 'hold' | 'release'): Promise<boolean> => {
@@ -642,6 +765,7 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
     const optimistic: BrowserCollaborationState = action === 'hold'
       ? { controller: 'user', mode: 'held', agentCanAct: false, expiresIn: 30 }
       : OBSERVING_COLLABORATION
+    collabKeyRef.current = collaborationKey(optimistic)
     setCollaboration(optimistic)
     try {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -654,16 +778,19 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
           controlAckRef.current = { resolve, reject, timeoutId }
           socket.send(JSON.stringify({ type: 'control', action }))
         })
+        collabKeyRef.current = collaborationKey(result)
         setCollaboration(result)
       } else {
         const leaseId = httpLeaseRef.current
         if (!leaseId) throw new Error('实时浏览器尚未连接')
         const result = await api.liveHttpControl(
           conversationId, leaseId, action)
+        collabKeyRef.current = collaborationKey(result.collaboration)
         setCollaboration(result.collaboration)
       }
       return true
     } catch (err: unknown) {
+      collabKeyRef.current = collaborationKey(OBSERVING_COLLABORATION)
       setCollaboration(OBSERVING_COLLABORATION)
       setError(errorText(err, '协作控制权切换失败'))
       return false
@@ -763,9 +890,9 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
           </button>
         </div>
         <div className="relative min-h-0 flex-1 bg-[#15171b]" aria-live="polite">
-          {frame ? (
+          {hasFrame ? (
             <img
-              src={frame}
+              ref={element => bindFrameImage(element, true)}
               draggable={false}
               alt="会话浏览器画中画预览"
               className="pointer-events-none h-full w-full select-none object-contain"
@@ -859,8 +986,28 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
             <span title="当前网络禁止 WebSocket，画面与操作已自动切换到 HTTPS"
               className="rounded bg-[var(--color-warning-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-warning)]">HTTP 兼容模式</span>
           )}
-          <input value={url} onChange={e => setUrl(e.target.value)} onKeyDown={e => e.key === 'Enter' && void open()}
-            className="h-8 min-w-0 flex-1 rounded-lg border bg-card px-3 font-mono text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+          <input
+            data-testid="browser-address-bar"
+            value={url}
+            onFocus={() => { urlFocusedRef.current = true }}
+            onBlur={() => {
+              urlFocusedRef.current = false
+              if (!urlDirtyRef.current && currentUrlRef.current) setUrl(currentUrlRef.current)
+            }}
+            onChange={e => {
+              urlDirtyRef.current = true
+              setUrl(e.target.value)
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                discardAddressDraft()
+                return
+              }
+              if (e.key === 'Enter') void open()
+            }}
+            className="h-8 min-w-0 flex-1 rounded-lg border bg-card px-3 font-mono text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
           <button onClick={() => void open()} disabled={busy}
             className="flex h-8 items-center gap-1.5 rounded-lg bg-brand px-3 text-xs text-[var(--color-text-inverse)] disabled:opacity-50">
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />} 打开
@@ -979,13 +1126,18 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
           </div>
         <div className="flex h-full min-h-0 bg-[#15171b]">
           <div className="flex min-w-0 flex-1 items-center justify-center overflow-auto p-2">
-            {frame ? (
-              <img ref={imageRef} data-testid="steward-live-browser-frame" src={frame} draggable={false} tabIndex={0} alt="会话浏览器协作画面"
+            {hasFrame ? (
+              <img ref={element => bindFrameImage(element, false)} data-testid="steward-live-browser-frame" draggable={false} tabIndex={0} alt="会话浏览器协作画面"
                 className="max-h-full max-w-full select-none outline-none ring-ring focus-visible:ring-2"
-                onMouseDown={e => { e.currentTarget.focus(); send({ type: 'mouse', action: 'down', ...point(e), button: e.button === 2 ? 'right' : 'left' }) }}
+                onMouseDown={e => {
+                  discardAddressDraft()
+                  e.currentTarget.focus()
+                  send({ type: 'mouse', action: 'down', ...point(e), button: e.button === 2 ? 'right' : 'left' })
+                }}
                 onMouseUp={e => send({ type: 'mouse', action: 'up', ...point(e), button: e.button === 2 ? 'right' : 'left' })}
+                onMouseMove={e => sendMove(point(e).x, point(e).y)}
                 onDoubleClick={e => send({ type: 'mouse', action: 'click', ...point(e), clickCount: 2 })}
-                onWheel={e => { e.preventDefault(); send({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY }) }}
+                onWheel={e => { e.preventDefault(); sendWheel(e.deltaX, e.deltaY) }}
                 onContextMenu={e => e.preventDefault()}
                 onKeyDown={e => {
                   e.preventDefault()
