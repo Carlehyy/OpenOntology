@@ -133,6 +133,17 @@ export default function BrowserModal({ conversationId, mode, onMinimize, onResto
   const userHoldingControl = collaboration.controller === 'user' && collaboration.mode === 'held'
   const userTemporarilyActive = collaboration.controller === 'user' && collaboration.mode === 'transient'
 
+  useEffect(() => {
+    if (collaboration.controller !== 'user' || collaboration.mode !== 'transient') return
+    const ms = Math.max(1000, (Number(collaboration.expiresIn) || 3) * 1000)
+    const timer = window.setTimeout(() => {
+      if (!collabKeyRef.current.startsWith('user:transient:')) return
+      collabKeyRef.current = collaborationKey(OBSERVING_COLLABORATION)
+      setCollaboration(OBSERVING_COLLABORATION)
+    }, ms)
+    return () => window.clearTimeout(timer)
+  }, [collaboration])
+
   const paintJpeg = (b64: string) => {
     const next = jpegBlobUrl(b64)
     const prev = lastFrameUrlRef.current
