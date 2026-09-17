@@ -330,8 +330,8 @@ function InvitePromptModal({ promptText, onClose }: {
   )
 }
 
-/** 远程助手面板：主路径 = 邀请函自助接入（远端 agent 凭一次性邀请码注册，
- *  直连/回连双模式自选）；手动配置为高级路径（直连声明式注册）。
+/** 远程助手面板：每用户可同时接入多条（与 Multica 单行配置不同）。
+ *  主路径 = 邀请函自助接入（可按需多次邀请）；手动配置为高级路径。
  *  列表与邀请状态 5s 轮询：对方接入后无需手动刷新即出现。 */
 function RemoteAgentsPanel({ onError, onChanged }: {
   onError: (message: string) => void
@@ -351,7 +351,10 @@ function RemoteAgentsPanel({ onError, onChanged }: {
   const reload = (silent = false) => {
     superAssistantApi.listRemoteAgents()
       .then(data => { setAgents(data); setLoaded(true) })
-      .catch(err => { if (!silent) onError(errorText(err, '远程助手加载失败')) })
+      .catch(err => {
+        setLoaded(true)
+        if (!silent) onError(errorText(err, '远程助手加载失败'))
+      })
     superAssistantApi.listRemoteAgentInvites()
       .then(setInvites)
       .catch(err => { if (!silent) onError(errorText(err, '邀请加载失败')) })
@@ -476,9 +479,16 @@ function RemoteAgentsPanel({ onError, onChanged }: {
           <div className="flex items-start gap-2">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><Bot size={16} /></div>
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold text-[var(--color-text-primary)]">远程助手</p>
+              <div className="flex items-center gap-1.5">
+                <p className="text-xs font-semibold text-[var(--color-text-primary)]">远程助手</p>
+                {loaded && agents.length > 0 && (
+                  <span data-testid="remote-agent-count" className="rounded bg-brand-soft px-1.5 py-0.5 text-[9px] text-brand-ink">
+                    已接入 {agents.length} 个
+                  </span>
+                )}
+              </div>
               <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-                把其他 AI 助手接进来，超级助手就能把合适的任务委派给它们。生成一封邀请函发给对方即可自动接入；
+                可同时接入多个远程助手，按需再邀请或手动配置。生成邀请函发给对方即可自动接入；
                 对方在内网时也能用「回连」方式接入，无需暴露端口。
               </p>
             </div>
@@ -495,9 +505,12 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                 onClick={() => void createInvite()}
                 data-testid="remote-agent-invite-create"
                 disabled={creatingInvite}
+                aria-busy={!loaded}
+                aria-label={loaded ? undefined : '正在加载远程助手'}
                 className="inline-flex min-h-9 items-center gap-1 rounded-lg bg-brand px-3 text-xs font-medium text-white transition-colors hover:bg-brand-deep disabled:opacity-50"
               >
-                {creatingInvite ? <Loader2 size={13} className="animate-spin" /> : <MailPlus size={13} />} 邀请 AI 助手接入
+                {creatingInvite || !loaded ? <Loader2 size={13} className="animate-spin" /> : <MailPlus size={13} />}
+                {loaded ? (agents.length > 0 ? '再邀请一个' : '邀请 AI 助手接入') : null}
               </button>
             </div>
           </div>
@@ -548,7 +561,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
           <div className="mt-3 space-y-2" data-testid="remote-agent-list">
             {loaded && agents.length === 0 && (
               <p className="rounded-lg bg-[var(--color-bg-base)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
-                还没有接入远程助手。点「邀请 AI 助手接入」生成邀请函，发给对方即可；接入成功后会自动出现在这里。
+                还没有接入远程助手。点「邀请 AI 助手接入」生成邀请函发给对方；接入成功后会出现在这里，之后还能继续添加。
               </p>
             )}
             {agents.map(agent => {
@@ -600,7 +613,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
               <p className="text-[11px] text-[var(--color-text-tertiary)]">
                 {form.id && form.mode === 'pull'
                   ? '回连助手经邀请函接入，无需端点与凭据；这里只调整名称、描述与超时。'
-                  : '手动配置适合已经有现成 HTTP 服务的助手（直连）。普通 AI 助手推荐用上方「邀请 AI 助手接入」。'}
+                  : '手动配置适合已经有现成 HTTP 服务的助手（直连）。普通 AI 助手推荐用上方邀请按钮，可按需多次邀请。'}
               </p>
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block text-xs text-[var(--color-text-secondary)]">key（留空自动生成）
