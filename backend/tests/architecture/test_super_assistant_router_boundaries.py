@@ -733,7 +733,9 @@ def test_super_assistant_router_and_services_stay_bounded():
         "skill_service.py": 380,
         # MCP lifecycle/revision fencing and probe diagnostics now live in
         # this domain service; keep the guard above the current bounded size.
-        "mcp_server_service.py": 390,
+        # 商用线合并：删除 server 时撤销 CapabilityRevision 授权位 +
+        # 级联清理自研 MCP 开发项目（两条清理路径叠加）→ 390 → 400
+        "mcp_server_service.py": 400,
     }
     for filename, maximum in limits.items():
         line_count = len(
