@@ -5,7 +5,7 @@
  * 最近更新的一支，读取其画布（对象/主体/行为/事件/规则/流程/场景）。
  * 左侧目录按模型类别归纳，点击具体模型后在右侧查看详情；没有业务模型
  * 时呈现空态。视觉与「业务文档」弹窗同口径：beUI CenterMorphModal 弹窗壳 +
- * 白底 teal 目录导航 + 细滚动条。
+ * 中性画布目录导航（与超级助手工作台导航画布同值）+ 细滚动条。
  */
 import { useEffect, useMemo, useState, type ElementType } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -207,8 +207,8 @@ export default function BusinessModelDialog({ open, ontologyId, onClose }: {
         className="odg-scope flex h-[78vh] min-h-[520px] !max-w-[min(94vw,1040px)] !rounded-[14px] shadow-[0_24px_80px_rgba(15,23,42,0.22)]"
       >
         {/* 目录：按七类模型归纳 */}
-        <aside className="flex w-64 shrink-0 flex-col border-r border-brand-line bg-brand-soft">
-          <div className="flex h-16 shrink-0 flex-col justify-center border-b border-brand-line px-4">
+        <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-[var(--odg-nav-canvas)]">
+          <div className="flex h-16 shrink-0 flex-col justify-center border-b border-border px-4">
             <div className="text-sm font-semibold text-[var(--color-text-primary)]">业务模型</div>
             <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
               {totalModels > 0 ? `七类模型目录 · 共 ${totalModels} 个` : '七类模型目录'}
@@ -234,7 +234,7 @@ export default function BusinessModelDialog({ open, ontologyId, onClose }: {
                         onClick={() => setSelected({ key: section.key, id: el.id })}
                         className={`block w-full truncate rounded-md py-2 pl-7 pr-2.5 text-left text-[13px] transition-colors ${
                           active
-                            ? 'odg-toc-active bg-brand-soft font-medium text-brand-ink'
+                            ? 'odg-toc-active bg-card font-medium text-[var(--color-text-primary)]'
                             : 'text-[var(--color-text-secondary)] hover:bg-card'
                         }`}
                         title={displayName(el)}
@@ -256,7 +256,7 @@ export default function BusinessModelDialog({ open, ontologyId, onClose }: {
 
         {/* 正文：选中模型详情 / 加载 / 空态（右上角为弹窗内置关闭按钮，留出让位） */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-16 shrink-0 items-center justify-between gap-3 border-b border-brand-line py-0 pl-5 pr-14">
+          <div className="flex h-16 shrink-0 items-center justify-between gap-3 border-b border-border py-0 pl-5 pr-14">
             <span className="truncate text-xs font-medium text-[var(--color-text-primary)]">
               {boundSession ? `来源：业务澄清会话「${boundSession.title || '未命名会话'}」` : '业务模型'}
             </span>

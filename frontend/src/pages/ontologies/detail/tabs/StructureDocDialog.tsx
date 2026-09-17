@@ -88,9 +88,9 @@ function CenterHint({ icon, title, hint, testid, retry }: {
  * 本体结构的「业务文档」弹窗：查询并展示当前本体版本语义层冻结的需求文档
  * （快照口径，与建模页 DocumentsDrawer 同源同风格）。
  * 弹窗壳走 beUI CenterMorphModal（morph 展开、焦点圈定、Esc/遮罩关闭、
- * 滚动锁），内置关闭按钮经 closeButtonLabel 中文化；目录导航为白底 + teal
- * 色族（与工具栏按钮同口径）；顶栏展示本体名称与发布版本徽章，下载入口
- * 收进顶栏。
+ * 滚动锁），内置关闭按钮经 closeButtonLabel 中文化；目录导航为中性画布
+ * 浅底（与超级助手工作台导航画布同值）；顶栏展示本体名称与发布版本徽章，
+ * 下载入口收进顶栏。
  */
 export default function StructureDocDialog({ open, ontologyId, ontologyName, versionId, versionLabel, onClose }: {
   open: boolean
@@ -163,9 +163,9 @@ export default function StructureDocDialog({ open, ontologyId, ontologyName, ver
         closeButtonLabel="关闭业务文档"
         className="odg-scope flex h-[78vh] min-h-[520px] !max-w-[min(94vw,1040px)] !rounded-[14px] shadow-[0_24px_80px_rgba(15,23,42,0.22)]"
       >
-        {/* 文档目录：白 + teal 导航，细滚动条，点击跳转到正文具体位置 */}
-        <aside className="flex w-60 shrink-0 flex-col border-r border-brand-line bg-brand-soft">
-          <div className="flex h-16 shrink-0 flex-col justify-center border-b border-brand-line px-4">
+        {/* 文档目录：中性画布浅底导航，细滚动条，点击跳转到正文具体位置 */}
+        <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-[var(--odg-nav-canvas)]">
+          <div className="flex h-16 shrink-0 flex-col justify-center border-b border-border px-4">
             <div className="text-sm font-semibold text-[var(--color-text-primary)]">业务文档</div>
             <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">需求文档目录 · 共 {toc.length} 节</div>
           </div>
@@ -186,7 +186,7 @@ export default function StructureDocDialog({ open, ontologyId, ontologyName, ver
                 onClick={() => jumpTo(section.id)}
                 style={{ paddingLeft: 10 + (Math.min(section.level, 4) - 1) * 12 }}
                 className={`block w-full truncate rounded-md py-2 pr-2.5 text-left text-[13px] transition-colors ${activeId === section.id
-                  ? 'odg-toc-active bg-brand-soft font-medium text-brand-ink'
+                  ? 'odg-toc-active bg-card font-medium text-[var(--color-text-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-card'}`}
               >
                 {section.title}
@@ -197,7 +197,7 @@ export default function StructureDocDialog({ open, ontologyId, ontologyName, ver
 
         {/* 正文 + 顶部操作（下载入口随标题区展示；右上角为弹窗内置关闭按钮，留出让位） */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-16 shrink-0 items-center justify-between gap-3 border-b border-brand-line py-0 pl-5 pr-14">
+          <div className="flex h-16 shrink-0 items-center justify-between gap-3 border-b border-border py-0 pl-5 pr-14">
             <div className="flex min-w-0 items-center gap-2">
               <span
                 data-testid="structure-doc-ontology-name"
@@ -208,7 +208,7 @@ export default function StructureDocDialog({ open, ontologyId, ontologyName, ver
               </span>
               {versionLabel && (
                 <span
-                  className="shrink-0 rounded border border-brand-line bg-brand-soft px-1.5 py-px text-[10px] font-medium text-brand-ink"
+                  className="shrink-0 rounded border border-border bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground"
                   title="需求文档在生成该版本时冻结为快照，随版本可追溯"
                 >
                   发布版本 {versionLabel}
@@ -221,7 +221,7 @@ export default function StructureDocDialog({ open, ontologyId, ontologyName, ver
                   type="button"
                   data-testid="structure-doc-download"
                   onClick={download}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-brand-line bg-brand-soft px-2.5 py-1.5 text-xs font-medium text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted"
                 >
                   <Download size={12} /> 下载 .md
                 </button>

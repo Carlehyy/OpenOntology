@@ -1,6 +1,6 @@
 /* 本体结构页两个文档类弹窗（业务文档 / 业务模型）的共享视觉口径：
    弹窗壳由 beUI CenterMorphModal 提供（morph 展开入场、焦点圈定、Esc/遮罩关闭）；
-   目录导航为白底 + teal 色族（与结构页工具栏「业务文档/业务模型」按钮同一色族）、
+   目录导航为中性画布浅底（与超级助手工作台导航画布同值）+ 品牌主色点缀、
    细滚动条、正文文字清晰度。 */
 
 /* beUI 语义令牌在本弹窗作用域钉为浅色（DESIGN.md §5.4 固定浅色作用域）：
@@ -14,12 +14,15 @@
   --accent: #f1f3f5;
   --border: #e2e4e9;
   --ring: #059669;
+  /* 目录导航面板底：取超级助手工作台页面画布（tokens.css --background 浅色值），
+     固定浅色不随 html.dark 翻转。 */
+  --odg-nav-canvas: #f8fbfa;
 }
 
-/* 细滚动条：Firefox 走 scrollbar-width，WebKit 走 4px 自绘轨道（teal-200） */
-.odg-scroll { scrollbar-width: thin; scrollbar-color: #99f6e4 transparent; }
+/* 细滚动条：Firefox 走 scrollbar-width，WebKit 走 4px 自绘轨道（中性边框灰） */
+.odg-scroll { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 .odg-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
-.odg-scroll::-webkit-scrollbar-thumb { background: #99f6e4; border-radius: 999px; }
+.odg-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
 .odg-scroll::-webkit-scrollbar-track { background: transparent; }
 .odg-scroll::-webkit-scrollbar-corner { background: transparent; }
 
@@ -27,8 +30,8 @@
 .odg-body-text { color: var(--odg-ink, #1f2937); font-size: 14px; line-height: 1.85; }
 .odg-body-text strong { color: var(--odg-ink-strong, #111827); }
 
-/* 目录激活项左指示条：teal-600 (#0d9488) 实色竖条，与 teal-100 激活底色
-   拉开层级，长目录下当前小节/模型一眼可辨（两个弹窗共用）。 */
+/* 目录激活项左指示条：品牌主色实色竖条（odg-scope 内 var(--ring) 钉为品牌主值），
+   与白底激活项拉开层级，长目录下当前小节/模型一眼可辨（两个弹窗共用）。 */
 .odg-toc-active { position: relative; }
 .odg-toc-active::before {
   content: '';
@@ -38,5 +41,5 @@
   bottom: 6px;
   width: 3px;
   border-radius: 999px;
-  background: #0d9488;
+  background: var(--ring);
 }

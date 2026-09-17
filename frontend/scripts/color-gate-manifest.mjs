@@ -64,7 +64,7 @@ export const LEGACY_COLOR_LIMITS = {
   'pages/ontologies/detail/tabs/StructureDocDialog.tsx':             1,
   'pages/ontologies/detail/tabs/StructureGraphElements.tsx':         10,
   'pages/ontologies/detail/tabs/instanceStatsFormat.ts':             6,
-  'pages/ontologies/detail/tabs/ontology-dialogs.css':               13,
+  'pages/ontologies/detail/tabs/ontology-dialogs.css':               10,
   'pages/ontologies/detail/tabs/overview-dashboard.css':             156,
   'pages/ontologies/detail/tabs/structureGraphModel.ts':             1,
   'pages/ontologies/mapping/MappingConfigurationPage.tsx':           13,
