@@ -141,6 +141,10 @@ interface MockOptions {
   multicaConfig?: Record<string, unknown>
   /** 知识图谱「本体文档」目录：true 时提供发布文档镜像 + 权威清单桩 */
   withOntologyDocs?: boolean
+  /** 覆盖远程助手目录；传入空数组即空目录 */
+  remoteAgents?: Array<Record<string, unknown>>
+  /** GET /remote-agents 延迟，用于断言加载完成前不展示空态 CTA */
+  remoteAgentsDelayMs?: number
 }
 
 async function mockApis(page: Page, options: MockOptions = {}) {
@@ -156,10 +160,12 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const remoteAgentCreates: Array<Record<string, unknown>> = []
   const remoteInviteCreates: string[] = []
   // 远程助手目录夹具：直连（带端点）+ 回连（在线，仅邀请函路径接入的形态）
-  const remoteAgents: Array<Record<string, unknown>> = [
-    { id: 'ra-direct', key: 'remote.kb', label: '客服知识库助手', description: '擅长客服问答', endpoint: 'https://kb.example.com/turn', token_set: true, enabled: true, timeout_seconds: 120, mode: 'direct', last_seen_at: null, last_turn_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() },
-    { id: 'ra-pull', key: 'remote.lan-helper', label: '内网文档助手', description: '内网文档检索', endpoint: '', token_set: false, enabled: true, timeout_seconds: 60, mode: 'pull', last_seen_at: new Date().toISOString(), last_turn_at: null },
-  ]
+  const remoteAgents: Array<Record<string, unknown>> = options.remoteAgents
+    ? [...options.remoteAgents]
+    : [
+      { id: 'ra-direct', key: 'remote.kb', label: '客服知识库助手', description: '擅长客服问答', endpoint: 'https://kb.example.com/turn', token_set: true, enabled: true, timeout_seconds: 120, mode: 'direct', last_seen_at: null, last_turn_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() },
+      { id: 'ra-pull', key: 'remote.lan-helper', label: '内网文档助手', description: '内网文档检索', endpoint: '', token_set: false, enabled: true, timeout_seconds: 60, mode: 'pull', last_seen_at: new Date().toISOString(), last_turn_at: null },
+    ]
   const remoteInvites: Array<Record<string, unknown>> = []
   const multicaTests: Array<Record<string, unknown>> = []
   const multicaWorkspaceCalls: string[] = []
@@ -531,6 +537,9 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         }
         remoteAgents.push(created)
         return json(route, created)
+      }
+      if (options.remoteAgentsDelayMs) {
+        return new Promise(resolve => setTimeout(() => resolve(json(route, remoteAgents)), options.remoteAgentsDelayMs))
       }
       return json(route, remoteAgents)
     }
@@ -1682,8 +1691,11 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   await expect(integrationsDialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
   await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
 
-  // 目录：直连行展示端点，回连行展示模式徽标与在线状态
+  // 目录：直连行展示端点，回连行展示模式徽标与在线状态；已有助手时仍可再邀请
   const list = integrationsDialog.getByTestId('remote-agent-list')
+  await expect(integrationsDialog.getByText('可同时接入多个远程助手')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('remote-agent-count')).toHaveText('已接入 2 个')
+  await expect(integrationsDialog.getByRole('button', { name: '再邀请一个' })).toBeVisible()
   await expect(list.getByText('客服知识库助手')).toBeVisible()
   await expect(list.getByText('https://kb.example.com/turn')).toBeVisible()
   await expect(list.getByText('内网文档助手')).toBeVisible()
@@ -1692,7 +1704,7 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   await expect(list.getByText('在线').first()).toBeVisible()
   await expect(list.getByText('上次委派 3 小时前')).toBeVisible()
 
-  // 主路径：生成邀请 → 邀请函弹层常驻全文（复制失败也有手动复制/下载兜底）
+  // 主路径：已有助手时再邀请 → 邀请函弹层常驻全文（复制失败也有手动复制/下载兜底）
   await integrationsDialog.getByTestId('remote-agent-invite-create').click()
   const promptBox = integrationsDialog.getByTestId('remote-agent-invite-prompt')
   await expect(promptBox).toBeVisible()
@@ -1720,5 +1732,29 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   await expect.poll(() => mocks.remoteAgentCreates.length).toBe(1)
   expect(mocks.remoteAgentCreates[0].endpoint).toBe('https://data.example.com/turn')
   expect(mocks.remoteAgentCreates[0].key).toBeUndefined()
+  await expect(list.getByText('客服知识库助手')).toBeVisible()
+  await expect(list.getByText('内网文档助手')).toBeVisible()
   await expect(list.getByText('数据查询助手')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('remote-agent-count')).toHaveText('已接入 3 个')
+})
+
+test('远程助手：空目录展示首次邀请文案，加载完成前不闪成单槽 CTA', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page, {
+    remoteAgents: [],
+    remoteAgentsDelayMs: 1200,
+  })
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: '外部集成' }).click()
+  const integrationsDialog = page.getByRole('dialog')
+  await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
+
+  await expect(integrationsDialog.getByRole('button', { name: '邀请 AI 助手接入' })).toHaveCount(0)
+  await expect(integrationsDialog.getByRole('button', { name: '再邀请一个' })).toHaveCount(0)
+  await expect(integrationsDialog.getByRole('button', { name: '正在加载远程助手' })).toBeVisible()
+
+  await expect(integrationsDialog.getByRole('button', { name: '邀请 AI 助手接入' })).toBeVisible()
+  await expect(integrationsDialog.getByText('还没有接入远程助手')).toBeVisible()
+  await expect(integrationsDialog.getByText('之后还能继续添加')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('remote-agent-count')).toHaveCount(0)
 })
