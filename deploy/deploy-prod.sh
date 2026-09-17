@@ -564,6 +564,53 @@ fi
 if [ -z "$(awk -F= '$1 == "API_HUB_SYSTEM_MCP_TOKEN" {print substr($0, index($0,"=")+1)}' .env | tail -n1)" ]; then
   set_env_value API_HUB_SYSTEM_MCP_TOKEN "$(random_hex 32)"
 fi
+# 镜像 digest 钉扎迁移：存量服务器 .env 来自 tag 形态且 STRICT=0 的旧
+# .env.example，本次校验既会因 STRICT=0 也会因浮动镜像被拒。仅当 .env
+# 呈现完整的 legacy 指纹——全部镜像键缺失或恰好等于旧浮动默认值，且
+# STRICT 处于 0/缺失——才判定为 legacy 文件整体迁移：回填与 .env.example
+# 一致的不可变 @sha256 引用并打开 STRICT。任何偏离（运维换用自己的钉扎
+# 镜像、单独修改过某个镜像、或已显式开启 STRICT）都不迁移，严格模式的
+# "浮动镜像必须拒绝"语义保持不变。
+legacy_env_fingerprint=1
+while read -r legacy_key legacy_value; do
+  [ -n "$legacy_key" ] || continue
+  legacy_current="$(env_value "$legacy_key")"
+  if [ -n "$legacy_current" ] && [ "$legacy_current" != "$legacy_value" ]; then
+    legacy_env_fingerprint=0
+  fi
+done <<'LEGACY_IMAGES'
+POSTGRES_IMAGE postgres:16-alpine
+REDIS_IMAGE redis:7-alpine
+NEO4J_IMAGE neo4j:5-community
+MINIO_IMAGE minio/minio:latest
+BROWSER_IMAGE chromedp/headless-shell:latest
+PYTHON_BASE_IMAGE python:3.12-slim
+NODE_BASE_IMAGE node:22-alpine
+NGINX_BASE_IMAGE nginx:1.27-alpine
+LEGACY_IMAGES
+case "$(env_value STRICT_IMAGE_DIGESTS)" in
+  1|true|TRUE|yes|YES)
+    legacy_env_fingerprint=0
+    ;;
+esac
+if [ "$legacy_env_fingerprint" = "1" ]; then
+  pin_image_default() {
+    local key="$1" pinned="$2"
+    if [[ ! "$(env_value "$key")" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+      set_env_value "$key" "$pinned"
+    fi
+  }
+  pin_image_default POSTGRES_IMAGE "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"
+  pin_image_default REDIS_IMAGE "redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99"
+  pin_image_default NEO4J_IMAGE "neo4j:5-community@sha256:362542416de6c09a971484d1893878016cc3b5cdec166e54b1c824a220ecd6b9"
+  pin_image_default MINIO_IMAGE "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+  pin_image_default BROWSER_IMAGE "chromedp/headless-shell@sha256:2d349b544a1ea6b5b5fd7c0fe99215ff662339c57407ee2e8c0a11af93516b04"
+  pin_image_default PYTHON_BASE_IMAGE "python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36"
+  pin_image_default NODE_BASE_IMAGE "node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
+  pin_image_default NGINX_BASE_IMAGE "nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10"
+  set_env_value STRICT_IMAGE_DIGESTS 1
+  log "migrated legacy .env to immutable image digests and enabled STRICT_IMAGE_DIGESTS"
+fi
 write_runtime_secret_split() {
   local secret_key="$1"
   local encryption_key="$2"
