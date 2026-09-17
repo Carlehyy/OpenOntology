@@ -19,12 +19,17 @@ permissions:
   statuses: write
 jobs:
   changes:
-    # 仅当改动全部落在文档类路径（docs/ 与根目录 *.md）时跳过代码验证与部署；
-    # 这些文件不进入部署归档，跳过不丢失任何运行时风险识别。手动触发始终全量。
+    # 按改动家族分流，不确定则全量。未知路径、空 diff、手工触发，以及改到
+    # 本工作流或分类器本身时，全部验证与部署开关都打开。文档/测试元数据/
+    # 纯测试源码不进入部署归档，跳过部署不会放过运行时风险。
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      run_backend: ${{ steps.filter.outputs.run_backend }}
+      run_frontend_tests: ${{ steps.filter.outputs.run_frontend_tests }}
+      run_frontend_build: ${{ steps.filter.outputs.run_frontend_build }}
+      run_docker: ${{ steps.filter.outputs.run_docker }}
+      run_deploy: ${{ steps.filter.outputs.run_deploy }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,22 +39,21 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "code=true" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" != "push" ]; then
+            bash scripts/ci/classify-deploy-changes.sh --full
             exit 0
           fi
           before="${{ github.event.before }}"
           if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            bash scripts/ci/classify-deploy-changes.sh --full
             exit 0
           fi
-          changed="$(git diff --name-only "$before" "${{ github.sha }}")"
-          if [ -n "$changed" ] && ! grep -vEq '^(docs/|[^/]+\.md$)' <<<"$changed"; then
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
+          git diff --name-only --no-renames "$before" "${{ github.sha }}" \
+            | bash scripts/ci/classify-deploy-changes.sh --stdin
 
   verify-backend:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.run_backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -191,7 +195,9 @@ jobs:
 
   verify-frontend:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: >-
+      needs.changes.outputs.run_frontend_tests == 'true'
+      || needs.changes.outputs.run_frontend_build == 'true'
     runs-on: ubuntu-latest
     # 15 分钟余量过薄：同一提交在快慢不同的 runner 上实测 11m39s ~ >15m，
     # 慢机器会随机撞顶导致部署被跳过（MYW-73 首次部署即如此）。提到 25 分钟。
@@ -210,38 +216,46 @@ jobs:
         working-directory: frontend
 
       - name: Frontend unit tests
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run test:unit
         working-directory: frontend
 
       - name: Frontend E2E classification gate
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run test:e2e:classification
         working-directory: frontend
 
       - name: Frontend feature-boundary gate
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run check:feature-boundaries
         working-directory: frontend
 
       # 像素尺寸断言规范：禁止对 boundingBox 宽高做精确相等断言
       # （CI Linux 浮点舍入差会误报，先例 6596ffa7）。
       - name: Frontend E2E assertion-convention gate
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run check:e2e-assertions
         working-directory: frontend
 
       - name: Frontend component-convergence gate
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run check:component-convergence
         working-directory: frontend
 
       - name: Frontend lint
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run lint
         working-directory: frontend
 
       - name: Frontend production build
+        if: needs.changes.outputs.run_frontend_build == 'true'
         run: npm run build
         working-directory: frontend
 
       # 部署镜像直接使用本 job 构建的 dist，保证上线产物与通过门禁的产物一致，
       # 服务器端不再重复执行 vite build。
       - name: Upload frontend dist for deployment
+        if: needs.changes.outputs.run_frontend_build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist-${{ github.run_id }}
@@ -250,15 +264,17 @@ jobs:
           retention-days: 1
 
       - name: Install Playwright Chromium
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npx playwright install --with-deps chromium
         working-directory: frontend
 
       - name: Frontend offline E2E suite
+        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run test:e2e:mocked
         working-directory: frontend
 
       - name: Upload frontend test evidence
-        if: ${{ always() }}
+        if: ${{ always() && needs.changes.outputs.run_frontend_tests == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: frontend-playwright-${{ github.run_id }}
@@ -350,7 +366,7 @@ jobs:
     # 前端镜像改为预构建形态（COPY dist），需要 verify-frontend 产出的 dist；
     # 该依赖仍早于关键路径上的 verify-backend，不延长整体墙钟。
     needs: [changes, verify-frontend]
-    if: always() && needs.changes.outputs.code == 'true' && needs.verify-frontend.result == 'success'
+    if: always() && needs.changes.outputs.run_docker == 'true' && needs.verify-frontend.result == 'success'
     steps:
       - uses: actions/checkout@v4
 
@@ -365,14 +381,18 @@ jobs:
 
   deploy:
     needs: [changes, verify-backend, verify-frontend, verify-gates, verify-docker-build]
-    # 文档类改动不进入部署归档，跳过部署不会放过任何运行时变更；其余改动必须
-    # 四个验证 job 全部成功才允许部署。
+    # 只有分类器打开 run_deploy 才上线。被要求跑的验证 job 必须 success；
+    # 未被要求的 job 保持 skipped，不能用 skipped 冒充已验证。
     if: >-
       always() && needs.verify-gates.result == 'success'
-      && needs.changes.outputs.code == 'true'
-      && needs.verify-backend.result == 'success'
-      && needs.verify-frontend.result == 'success'
-      && needs.verify-docker-build.result == 'success'
+      && needs.changes.outputs.run_deploy == 'true'
+      && (needs.changes.outputs.run_backend != 'true'
+          || needs.verify-backend.result == 'success')
+      && ((needs.changes.outputs.run_frontend_tests != 'true'
+           && needs.changes.outputs.run_frontend_build != 'true')
+          || needs.verify-frontend.result == 'success')
+      && (needs.changes.outputs.run_docker != 'true'
+          || needs.verify-docker-build.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -551,7 +571,7 @@ jobs:
     # continue-on-error），且未列入 report 的结果聚合。分支推送不触发部署
     # 工作流（on.push 仅 nano-ontoprompt），PR 合并才随正常流程生效。
     needs: [changes, verify-backend]
-    if: ${{ always() && needs.changes.outputs.code == 'true' && needs.verify-backend.result != 'skipped' }}
+    if: ${{ always() && needs.changes.outputs.run_backend == 'true' && needs.verify-backend.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
@@ -623,7 +643,12 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const code = '${{ needs.changes.outputs.code }}'
+            const changesResult = '${{ needs.changes.result }}'
+            const runBackend = '${{ needs.changes.outputs.run_backend }}'
+            const runFrontendTests = '${{ needs.changes.outputs.run_frontend_tests }}'
+            const runFrontendBuild = '${{ needs.changes.outputs.run_frontend_build }}'
+            const runDocker = '${{ needs.changes.outputs.run_docker }}'
+            const runDeploy = '${{ needs.changes.outputs.run_deploy }}'
             const results = {
               'verify-backend': '${{ needs.verify-backend.result }}',
               'verify-frontend': '${{ needs.verify-frontend.result }}',
@@ -631,12 +656,15 @@ jobs:
               'verify-docker-build': '${{ needs.verify-docker-build.result }}',
               deploy: '${{ needs.deploy.result }}',
             }
-            // 文档类改动（code=false）下代码验证与部署被有意跳过，只要文档与
-            // 卫生门禁通过即为成功；代码改动则要求全部 job 成功。
-            const succeeded = results['verify-gates'] === 'success'
-              && (code === 'false'
-                ? results.deploy === 'skipped'
-                : Object.values(results).every((r) => r === 'success'))
+            const frontendNeeded = runFrontendTests === 'true' || runFrontendBuild === 'true'
+            const succeeded = changesResult === 'success'
+              && results['verify-gates'] === 'success'
+              && (runBackend !== 'true' || results['verify-backend'] === 'success')
+              && (!frontendNeeded || results['verify-frontend'] === 'success')
+              && (runDocker !== 'true' || results['verify-docker-build'] === 'success')
+              && (runDeploy === 'true'
+                ? results.deploy === 'success'
+                : results.deploy === 'skipped')
             const summary = Object.entries(results).map(([k, v]) => `${k}=${v}`).join(', ')
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,

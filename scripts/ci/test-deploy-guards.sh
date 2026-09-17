@@ -23,6 +23,8 @@ assert_rejected() {
   fi
 }
 
+bash "$SCRIPT_DIR/test-classify-deploy-changes.sh"
+
 assert_accepted /opt/openontology
 assert_accepted /srv/apps/openontology_1
 
@@ -44,6 +46,34 @@ if grep -q 'StrictHostKeyChecking=no' "$DEPLOY_WORKFLOW"; then
 fi
 if ! grep -Fq 'cancel-in-progress: false' "$DEPLOY_WORKFLOW"; then
   printf 'deployment workflow must queue rather than cancel an in-flight migration\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'bash scripts/ci/classify-deploy-changes.sh --stdin' "$DEPLOY_WORKFLOW" \
+  || ! grep -Fq 'bash scripts/ci/classify-deploy-changes.sh --full' "$DEPLOY_WORKFLOW"; then
+  printf 'deployment workflow must classify push paths with the tested script\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'git diff --name-only --no-renames' "$DEPLOY_WORKFLOW"; then
+  printf 'change classification must list rename source and destination paths\n' >&2
+  exit 1
+fi
+if grep -Eq 'needs\.changes\.outputs\.code' "$DEPLOY_WORKFLOW"; then
+  printf 'deployment workflow must not use the old code=true skip switch\n' >&2
+  exit 1
+fi
+if ! grep -Fq "needs.changes.outputs.run_deploy == 'true'" "$DEPLOY_WORKFLOW" \
+  || ! grep -Fq "needs.changes.outputs.run_backend != 'true'" "$DEPLOY_WORKFLOW" \
+  || ! grep -Fq "needs.verify-backend.result == 'success'" "$DEPLOY_WORKFLOW"; then
+  printf 'deploy job must require run_deploy and demanded backend verification\n' >&2
+  exit 1
+fi
+if grep -Eq "run_backend != 'true'[[:space:]]*\|\|[[:space:]]*needs\.verify-backend\.result == 'skipped'" \
+  "$DEPLOY_WORKFLOW"; then
+  printf 'deploy job must not treat a skipped backend job as verification\n' >&2
+  exit 1
+fi
+if ! grep -Fq "needs.changes.result" "$DEPLOY_WORKFLOW"; then
+  printf 'report job must fail when change classification does not succeed\n' >&2
   exit 1
 fi
 fresh_database_migration_block="$(

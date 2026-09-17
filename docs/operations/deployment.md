@@ -12,9 +12,14 @@
 
 ## 当前流程
 
-改动先经 `changes` 作业分类：仅含 `docs/` 与根目录 Markdown 的推送不进入
-部署归档，因此跳过代码验证与部署（文档/卫生门禁照常运行）；其余推送执行
-完整流程，手动触发（workflow_dispatch）始终全量：
+改动先经 `changes` 作业按家族分类（`scripts/ci/classify-deploy-changes.sh`）。
+这是粗粒度、不确定则全量的分流，不是按文件增量跑单测。手工触发、空
+diff、未知路径、rename 源路径，以及改到分类器或本工作流时始终全量。文档
+与配置中心只跑卫生门禁；纯测试源码跑对应测试但不上线；时长表跑后端回归
+但不上线。Compose、`deploy-prod.sh` 和物化脚本与 `.env.example` 一样会跑
+后端生产配置回归并部署。只改后端产品代码时仍构建前端 `dist` 并部署，但
+跳过离线 Playwright；只改前端产品代码时跳过后端六分片。文档/卫生门禁始终
+运行：
 
 1. 使用 Python 3.12 和各自 `uv.lock` 并行执行后端（pytest-xdist 多进程 +
    pytest-split 按已记录时长均衡分片，分片数以该 workflow 的 matrix 定义
@@ -45,7 +50,8 @@
 12. 无论成功失败，清理 runner 上的上传压缩包与物化清单。
 
 PR 到 `nano-ontoprompt` 时，独立的 `.github/workflows/ci.yml` 会并行执行
-文档/仓库卫生、后端、配置中心和前端门禁，但不会执行部署。
+文档/仓库卫生、后端、配置中心和前端门禁，但不会执行部署；PR 工作流目前
+仍是全量验证，不受上述家族分流影响。
 
 生产编排可能按需叠加观测层：`deploy/deploy-prod.sh` 检测到 `ARMS_LICENSE_KEY`
 时自动合并 `agentloop/compose.agentloop.yml`（阿里云 AgentLoop 探针后端），
