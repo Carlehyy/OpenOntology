@@ -37,6 +37,23 @@ from app.super_assistant.skill_tools import builtin_skill_tool_schemas, execute_
 
 logger = logging.getLogger(__name__)
 
+# 模型常先口头预告「我先看看…」却不带 tool_calls，循环会当成最终答复收工。
+_TOOL_PREAMBLE_MARKERS = (
+    "我先看看", "我看看", "我来看看", "先看下", "先看看",
+    "确认一下", "当前浏览器", "当前页面", "我先看一下",
+)
+_TOOL_PREAMBLE_NUDGE = "请立即调用工具完成你刚才说要做的事，不要只口头描述。"
+_TOOL_PREAMBLE_MAX_CHARS = 160
+
+
+def looks_like_tool_preamble(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped or len(stripped) > _TOOL_PREAMBLE_MAX_CHARS:
+        return False
+    if re.search(r"(?m)^#{1,3}[ \t]+\S", stripped):
+        return False
+    return any(marker in stripped for marker in _TOOL_PREAMBLE_MARKERS)
+
 _API_HUB_TOOL_PREFIX = "mcp__platform_api_hub__"
 _API_HUB_PREVIEW_REDACT_KEYS = frozenset({
     "value", "secret", "headers", "bodyContent", "queryParams", "variables",
@@ -1206,6 +1223,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             yield sse("text_delta", {"delta": direct_reply})
             all_text.append(direct_reply)
 
+        preamble_nudges = 0
         for round_index in range(max_rounds):
             if direct_reply is not None:
                 break  # 确定性引导已产出全文；break 同时跳过 for-else 的收尾合成
@@ -1244,6 +1262,15 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 break
             calls = result.get("tool_calls") or []
             if not calls:
+                if (
+                    round_tools
+                    and preamble_nudges < 1
+                    and looks_like_tool_preamble(round_text)
+                ):
+                    preamble_nudges += 1
+                    messages.append({"role": "assistant", "content": round_text or ""})
+                    messages.append({"role": "user", "content": _TOOL_PREAMBLE_NUDGE})
+                    continue
                 break
 
             messages.append({"role": "assistant", "content": round_text or None, "tool_calls": calls})

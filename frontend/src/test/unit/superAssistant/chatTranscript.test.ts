@@ -8,6 +8,7 @@ import {
   patchToolStep,
   processSummary,
   shiftQueue,
+  splitProcessAndAnswer,
   toolStatusLabel,
 } from '../../../pages/super-assistant/components/chatTranscript.ts'
 
@@ -19,7 +20,6 @@ describe('chatTranscript', () => {
 
   it('summarizes tool process without inventing counts', () => {
     assert.equal(processSummary([]), '已思考')
-    assert.equal(processSummary([], 3), '已思考 · 3 轮')
     assert.equal(processSummary([{ toolName: 'web_search', status: 'success' }]), '1 个工具')
     assert.equal(processSummary([
       { toolName: 'web_search', status: 'success' },
@@ -37,6 +37,32 @@ describe('chatTranscript', () => {
     assert.equal(patched[0].preview, 'a-ok')
     assert.equal(patched[1].status, 'running')
     assert.equal(toolStatusLabel('awaiting_confirmation'), '待确认')
+  })
+
+  it('folds pre-heading agent chatter and keeps the report as the answer', () => {
+    const source = [
+      '好的，我来打开 B 站首页并抓取网络请求。页面已经打开。信息已经足够了。',
+      '',
+      '# B 站首页推荐视频的接口来源',
+      '',
+      '打开首页后定位到推荐位接口。',
+    ].join('\n')
+    const split = splitProcessAndAnswer(source)
+    assert.match(split.process, /我来打开 B 站首页/)
+    assert.match(split.answer, /^# B 站首页推荐视频的接口来源/)
+    assert.equal(split.answer.includes('我来打开'), false)
+  })
+
+  it('does not split when the reply already starts with a heading', () => {
+    const source = '# 结论\n\n正文'
+    assert.deepEqual(splitProcessAndAnswer(source), { process: '', answer: source })
+  })
+
+  it('ignores headings inside fenced code', () => {
+    const source = '过程说明。\n\n```md\n# 不是结论\n```\n\n# 真正结论\n\n正文'
+    const split = splitProcessAndAnswer(source)
+    assert.equal(split.process, '过程说明。\n\n```md\n# 不是结论\n```')
+    assert.equal(split.answer, '# 真正结论\n\n正文')
   })
 
   it('queues and drains follow-up prompts in FIFO order', () => {

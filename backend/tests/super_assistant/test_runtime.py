@@ -400,3 +400,109 @@ def test_runtime_executes_builtin_api_hub_mcp_without_http_client(tmp_path, monk
         preview = (saved.steps or [])[0]["preview"]
         assert "should-not-preview" not in preview
         assert "***" in preview
+
+
+def test_looks_like_tool_preamble_detects_spoken_intent():
+    assert runtime.looks_like_tool_preamble("我先看看当前浏览器状态，确认一下到底发生了什么。")
+    assert runtime.looks_like_tool_preamble("我先看看浏览器当前状态。")
+    assert not runtime.looks_like_tool_preamble("好的。")
+    assert not runtime.looks_like_tool_preamble("# 结论\n\n页面没有滚动。")
+    assert not runtime.looks_like_tool_preamble("我先看看" + "啊" * 200)
+
+
+def test_runtime_continues_when_model_announces_a_tool_but_does_not_call_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "super_assistant_skill_root", str(tmp_path / "skills"))
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'preamble-runtime.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(runtime, "SessionLocal", TestingSession)
+
+    folder = skill_directory("user-preamble", "skill-preamble")
+    create_skill_folder(folder, render_skill_markdown(
+        name="qa-skill", description="Use this skill for QA work",
+        content="Read references when necessary.",
+    ))
+    with TestingSession() as db:
+        db.add(User(
+            id="user-preamble", username="owner", email="preamble@example.com",
+            password_hash="unused", role="editor",
+        ))
+        db.add(ModelConfig(
+            id="model-preamble", name="Fake", config_type="llm", provider="openai",
+            models=["fake-model"], options={}, enabled=True, is_default=True,
+            created_by="user-preamble",
+        ))
+        db.add(SuperAssistantConversation(
+            id="conversation-preamble", owner_id="user-preamble", title="Preamble",
+            model_config_id="model-preamble",
+        ))
+        db.add_all([
+            SuperAssistantMessage(
+                id="user-message-preamble", conversation_id="conversation-preamble",
+                role="user", content="看一下浏览器", status="complete",
+            ),
+            SuperAssistantMessage(
+                id="assistant-message-preamble", conversation_id="conversation-preamble",
+                role="assistant", content="", status="streaming",
+            ),
+            SuperAssistantSkill(
+                id="skill-preamble", owner_id="user-preamble", name="qa-skill",
+                display_name="qa-skill", description="Use this skill for QA work",
+                triggers=[], folder_path=str(folder), manifest=build_manifest(folder),
+                enabled=True,
+            ),
+        ])
+        db.commit()
+
+    seen_prompts: list[list[dict]] = []
+
+    def _fake(_call_kwargs, messages, _tools, on_delta=None):
+        seen_prompts.append(messages)
+        result = next(responses)
+        content = result.get("content")
+        if content and on_delta:
+            on_delta(content)
+        return result
+
+    responses = iter([
+        {
+            "content": "我先看看当前浏览器状态，确认一下到底发生了什么。",
+            "tool_calls": [],
+            "usage": {"inputTokens": 10, "outputTokens": 12},
+        },
+        {
+            "content": None,
+            "tool_calls": [{"id": "call-1", "name": "use_skill", "arguments": {"name": "qa-skill"}}],
+            "usage": {"inputTokens": 12, "outputTokens": 4},
+        },
+        {
+            "content": "页面还停在首页，没有往下翻。",
+            "tool_calls": [],
+            "usage": {"inputTokens": 20, "outputTokens": 8},
+        },
+    ])
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake)
+
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-preamble",
+        owner_id="user-preamble",
+        assistant_message_id="assistant-message-preamble",
+        requested_model_id="model-preamble",
+        agent_mode=True,
+    ))
+    assert "event: tool_start" in events
+    assert "页面还停在首页" in events
+    assert any(
+        item.get("content") == runtime._TOOL_PREAMBLE_NUDGE
+        for prompt in seen_prompts
+        for item in prompt
+    )
+    with TestingSession() as db:
+        saved = db.get(SuperAssistantMessage, "assistant-message-preamble")
+        assert saved.status == "complete"
+        assert "我先看看当前浏览器状态" in saved.content
+        assert "页面还停在首页" in saved.content
+        assert db.query(SuperAssistantToolRun).one().status == "success"

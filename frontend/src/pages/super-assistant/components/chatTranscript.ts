@@ -49,11 +49,47 @@ export function normalizeAssistantMarkdown(value: string) {
   return normalized
 }
 
-export function processSummary(steps: ToolStep[], thinkingRound?: number | null) {
+export function processSummary(steps: ToolStep[]) {
   if (steps.length === 1) return '1 个工具'
   if (steps.length > 1) return `${steps.length} 个工具`
-  if (thinkingRound && thinkingRound > 1) return `已思考 · ${thinkingRound} 轮`
   return '已思考'
+}
+
+/**
+ * 多轮 Agent 会把边做边说的过程写进同一段 content，真正的答复通常从第一个标题开始。
+ * 围栏内的 # 不算标题，以免把代码/引用切碎。切不出两端则原样返回。
+ */
+export function splitProcessAndAnswer(content: string) {
+  const lines = content.replace(/\r\n?/g, '\n').split('\n')
+  let inFence = false
+  let fenceMarker = ''
+  let fenceLength = 0
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const opening = /^(\s*)(`{3,}|~{3,})/.exec(lines[index])
+    if (opening) {
+      const marker = opening[2][0]
+      const length = opening[2].length
+      if (!inFence) {
+        inFence = true
+        fenceMarker = marker
+        fenceLength = length
+      } else if (marker === fenceMarker && length >= fenceLength) {
+        inFence = false
+        fenceMarker = ''
+        fenceLength = 0
+      }
+      continue
+    }
+    if (inFence || !/^#{1,3}[ \t]+\S/.test(lines[index])) continue
+    if (index === 0) return { process: '', answer: content }
+    const process = lines.slice(0, index).join('\n').trim()
+    const answer = lines.slice(index).join('\n').trim()
+    if (!process || !answer) return { process: '', answer: content }
+    return { process, answer }
+  }
+
+  return { process: '', answer: content }
 }
 
 export function toolStatusLabel(status: string) {

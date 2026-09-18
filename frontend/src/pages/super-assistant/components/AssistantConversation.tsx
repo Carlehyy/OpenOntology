@@ -13,18 +13,18 @@ import ZoomableImage from '@/components/ZoomableImage'
 import type { ModelConfig } from '@/types/ontology'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import {
-  normalizeAssistantMarkdown, processSummary, toolStatusLabel,
+  normalizeAssistantMarkdown, processSummary, splitProcessAndAnswer, toolStatusLabel,
 } from './chatTranscript'
 
 function isMermaidEl(child: unknown) {
   return isValidElement(child) && String((child.props as { className?: string })?.className || '').includes('language-mermaid')
 }
 
-function TurnProcess({ steps, thinkingRound, status, hasContent }: {
+function TurnProcess({ steps, status, hasContent, processText }: {
   steps: ToolStep[]
-  thinkingRound?: number | null
   status: SuperMessage['status']
   hasContent: boolean
+  processText?: string
 }) {
   const streaming = status === 'streaming'
   const hasSteps = steps.length > 0
@@ -40,14 +40,12 @@ function TurnProcess({ steps, thinkingRound, status, hasContent }: {
     return (
       <p className="flex items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
         <Loader2 size={12} className="animate-spin" />
-        {thinkingRound ? `正在思考（第 ${thinkingRound} 轮推理）` : '正在思考…'}
+        正在思考…
       </p>
     )
   }
 
-  const summary = streaming
-    ? (thinkingRound ? `进行中 · 第 ${thinkingRound} 轮` : '进行中')
-    : processSummary(steps, thinkingRound)
+  const summary = streaming ? '进行中' : processSummary(steps)
 
   return (
     <div data-testid="super-assistant-turn-process" className="min-w-0">
@@ -83,6 +81,11 @@ function TurnProcess({ steps, thinkingRound, status, hasContent }: {
             </li>
           ))}
         </ul>
+      )}
+      {open && processText && (
+        <p className="mt-2 text-xs leading-5 text-[var(--color-text-tertiary)] whitespace-pre-wrap">
+          {processText}
+        </p>
       )}
       {!open && hasContent && <div className="mt-2 border-t border-[var(--color-border)]" />}
     </div>
@@ -190,6 +193,15 @@ function AssistantMarkdown({ content }: { content: string }) {
 
 
 export function ChatMessage({ message }: { message: SuperMessage }) {
+  const settled = message.status !== 'streaming'
+  const display = useMemo(() => {
+    const normalized = normalizeAssistantMarkdown(message.content || '')
+    if (message.role !== 'assistant' || !settled || !message.steps?.length) {
+      return { process: '', answer: normalized }
+    }
+    return splitProcessAndAnswer(normalized)
+  }, [message.content, message.role, message.steps, settled])
+
   if (message.role !== 'assistant') {
     return (
       <div id={`super-assistant-msg-${message.id}`} className="flex justify-end scroll-mt-6">
@@ -204,12 +216,12 @@ export function ChatMessage({ message }: { message: SuperMessage }) {
     <article className="min-w-0 max-w-3xl space-y-3">
       <TurnProcess
         steps={message.steps}
-        thinkingRound={message.thinking_round}
         status={message.status}
-        hasContent={Boolean(message.content)}
+        hasContent={Boolean(display.answer)}
+        processText={display.process}
       />
-      {message.content
-        ? <AssistantMarkdown content={message.content} />
+      {display.answer
+        ? <AssistantMarkdown content={display.answer} />
         : message.status === 'streaming'
           ? null
           : <p className="text-sm text-[var(--color-text-tertiary)]">（无文本）</p>}
