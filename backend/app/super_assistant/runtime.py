@@ -1356,7 +1356,8 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     )
                 )
                 if deny_unattended_write:
-                    # 无人值守不执行写工具：含需确认的 MCP/multica，以及浏览器/委派等内置写操作
+                    # 无人值守：平台内置写工具一律拒绝；MCP 仍以 server.require_confirmation
+                    # 为准（关闭确认 = 对该服务的持续授权，含后台执行）。
                     output = json.dumps(
                         {"error": "无人值守执行未自动批准需要确认的操作", "decision": "denied"},
                         ensure_ascii=False,
