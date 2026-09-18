@@ -19,6 +19,7 @@ import {
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import QueryKeyManager from '@/components/profile/QueryKeyManager'
+import RemoteAccessSection from '@/components/profile/RemoteAccessSection'
 import { authApi, type PrivacyVar, type UserEnvVar } from '@/api/auth'
 import { useAuthStore } from '@/stores/authStore'
 import { writeTextToClipboard } from '@/utils/clipboard'
@@ -37,7 +38,9 @@ import { toast } from 'sonner'
  * - 「隐私变量」：由本地脚本 RSA 公钥加密上报、平台私钥解密后 Fernet
  *   落库的变量。用户创建变量（首次创建生成上报 token，仅此一次可见）、
  *   下载 Python 上报脚本模板、重置上报 token、查看已上报变量的明文值
- *   （数据所有者取回自己的值，不脱敏，可复制）。分区尾部同样挂
+ *   （数据所有者取回自己的值，不脱敏，可复制）。「远程访问」版块
+ *   （RemoteAccessSection）提供手机扫码进入超级助手的二维码，仅含访问
+ *   地址、不含凭据，扫码后走既有登录链路。分区尾部同样挂
  *   查询密钥管理（与「环境变量」各自独立成套，密钥按类别隔离）。
  */
 
@@ -655,6 +658,8 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
                 </div>
               </div>
             </section>
+
+            <RemoteAccessSection />
 
             <QueryKeyManager category="privacy" />
           </div>
