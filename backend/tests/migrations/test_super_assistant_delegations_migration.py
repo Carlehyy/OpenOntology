@@ -97,4 +97,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
     # 0098 委派映射表在本迁移之后线性追加，head 随之演进
-    assert heads == ["0118_plugin_runner_event_replay"]
+    assert heads == ["0119_sa_scheduled_tasks"]

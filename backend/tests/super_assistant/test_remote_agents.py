@@ -127,6 +127,20 @@ def test_create_validates_key_namespace_and_endpoint(db, admin_user):
     assert exc.value.status_code == 409
 
 
+def test_create_two_agents_for_same_owner(db, admin_user):
+    from app.super_assistant.schemas import RemoteAgentCreate
+
+    first = remote_agent_service.create_agent(db, admin_user.id, RemoteAgentCreate(
+        key="remote.one", label="甲", endpoint="http://127.0.0.1:9101/turn",
+    ))
+    second = remote_agent_service.create_agent(db, admin_user.id, RemoteAgentCreate(
+        key="remote.two", label="乙", endpoint="http://127.0.0.1:9102/turn",
+    ))
+    listed = remote_agent_service.list_agents(db, admin_user.id)
+    assert first.id != second.id
+    assert {row.key for row in listed} == {"remote.one", "remote.two"}
+
+
 def test_update_keeps_token_when_blank(db, admin_user):
     from app.super_assistant.schemas import RemoteAgentCreate, RemoteAgentUpdate
 
@@ -258,6 +272,19 @@ def test_registry_merges_dynamic_agents_by_owner(db, admin_user, editor_user):
     assert registry.get_assistant("remote.helper", db=db, user=admin_user) is not None
     assert registry.get_assistant("remote.helper") is None
     assert registry.get_assistant("remote.helper", db=db, user=editor_user) is None
+
+
+def test_registry_includes_all_enabled_remote_agents(db, admin_user):
+    _add_agent(db, admin_user.id, key="remote.alpha")
+    _add_agent(db, admin_user.id, key="remote.beta", endpoint="http://127.0.0.1:9104/turn")
+
+    permitted = registry.permitted_assistants(db, admin_user)
+    keys = [assistant.spec().key for assistant in permitted]
+    assert "remote.alpha" in keys and "remote.beta" in keys
+    schema = registry.delegation_tool_schema(permitted)
+    assert schema is not None
+    enum_keys = schema["parameters"]["properties"]["assistant"]["enum"]
+    assert "remote.alpha" in enum_keys and "remote.beta" in enum_keys
 
 
 def test_provider_registration_is_idempotent():

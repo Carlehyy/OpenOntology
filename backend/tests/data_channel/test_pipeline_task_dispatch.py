@@ -141,6 +141,7 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
         "super_assistant.palace.extract",
         "super_assistant.palace.consolidate",
         "ontology.documents.published",
+        "super_assistant.scheduled.run",
     ]
     assert config.subjects == list(PIPELINE_STREAM_SUBJECTS)
     assert config.retention == RetentionPolicy.WORK_QUEUE

@@ -93,6 +93,12 @@ async def browser_live(websocket: WebSocket, conversation_id: str, ticket: str =
                     conversation_id, client_id=client_id,
                     after_version=last_version, timeout=1.0)
                 if version == last_version:
+                    # Idle pages do not produce JPEG frames; still push
+                    # collaboration so transient/held expiry is visible.
+                    await send_json({
+                        "type": "collaboration",
+                        "collaboration": frame.get("collaboration"),
+                    })
                     continue
                 last_version = version
                 now = asyncio.get_running_loop().time()

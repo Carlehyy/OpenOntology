@@ -764,3 +764,60 @@ class SuperAssistantRemoteAgentTask(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SuperAssistantScheduledTask(Base):
+    """用户设定的后台指令计划：到点由 nats_executor 无人值守执行。
+
+    schedule_kind: once | daily | weekly。时刻按 Asia/Shanghai 解释，
+    next_run_at 存 UTC naive。一次性任务触发后 enabled=False。
+    """
+
+    __tablename__ = "super_assistant_scheduled_tasks"
+    __table_args__ = (
+        Index("ix_sa_scheduled_tasks_due", "enabled", "next_run_at"),
+        Index("ix_sa_scheduled_tasks_owner_updated", "owner_id", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    schedule_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Shanghai")
+    run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    weekday: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantScheduledRun(Base):
+    """一次计划触发的执行记录。会话在触发时新建，删除计划不删会话。"""
+
+    __tablename__ = "super_assistant_scheduled_runs"
+    __table_args__ = (
+        UniqueConstraint("task_id", "scheduled_for", name="uq_sa_scheduled_run_slot"),
+        Index("ix_sa_scheduled_runs_task_scheduled", "task_id", "scheduled_for"),
+        Index("ix_sa_scheduled_runs_owner_created", "owner_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    task_id: Mapped[str] = mapped_column(
+        String, ForeignKey("super_assistant_scheduled_tasks.id", ondelete="CASCADE"), nullable=False,
+    )
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("super_assistant_conversations.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)

@@ -34,6 +34,7 @@ import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './com
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-collaboration/BrowserCollaboration'
+import ScheduledTasksDialog from './components/ScheduledTasksDialog'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import KernelRunTaskCard from './components/KernelRunTaskCard'
 import KernelRunList from './components/KernelRunList'
@@ -74,6 +75,12 @@ export default function SuperAssistantPage() {
   const initialRequestedIdRef = useRef(searchParams.get('conversation'))
   const requestedConversationId = searchParams.get('conversation')
   const kernelRunId = searchParams.get('run')
+  const scheduleId = searchParams.get('schedule')
+  const scheduleRunId = searchParams.get('scheduleRun')
+  const [scheduledOpen, setScheduledOpen] = useState(Boolean(scheduleId))
+  useEffect(() => {
+    if (scheduleId) setScheduledOpen(true)
+  }, [scheduleId])
   const [conversations, setConversations] = useState<SuperConversation[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<SuperMessage[]>([])
@@ -762,7 +769,33 @@ export default function SuperAssistantPage() {
         }}
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
+        onOpenScheduled={() => setScheduledOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
+      />
+      <ScheduledTasksDialog
+        open={scheduledOpen}
+        initialTaskId={scheduleId}
+        initialRunId={scheduleRunId}
+        onClose={() => {
+          setScheduledOpen(false)
+          setSearchParams(previous => {
+            const next = new URLSearchParams(previous)
+            next.delete('schedule')
+            next.delete('scheduleRun')
+            return next
+          }, { replace: true })
+        }}
+        onOpenConversation={id => {
+          setSelectedId(id)
+          setScheduledOpen(false)
+          setSearchParams(previous => {
+            const next = new URLSearchParams(previous)
+            next.set('conversation', id)
+            next.delete('schedule')
+            next.delete('scheduleRun')
+            return next
+          }, { replace: true })
+        }}
       />
       {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
           面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}

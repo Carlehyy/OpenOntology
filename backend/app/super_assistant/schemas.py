@@ -739,3 +739,74 @@ class AssistantToolOut(BaseModel):
 
 class AssistantToolEnabledUpdate(BaseModel):
     enabled: bool
+
+
+ScheduleKind = Literal["once", "daily", "weekly"]
+ScheduledRunStatus = Literal["queued", "running", "completed", "failed", "skipped"]
+
+
+class ScheduledTaskCreate(BaseModel):
+    title: str = Field(default="", max_length=200)
+    instruction: str = Field(min_length=1, max_length=100_000)
+    schedule_kind: ScheduleKind
+    run_at: datetime | None = None
+    hour: int | None = Field(default=None, ge=0, le=23)
+    minute: int | None = Field(default=None, ge=0, le=59)
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    enabled: bool = True
+
+    @field_validator("title", "instruction", mode="before")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return str(value).strip()
+
+
+class ScheduledTaskUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    instruction: str | None = Field(default=None, min_length=1, max_length=100_000)
+    schedule_kind: ScheduleKind | None = None
+    run_at: datetime | None = None
+    hour: int | None = Field(default=None, ge=0, le=23)
+    minute: int | None = Field(default=None, ge=0, le=59)
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    enabled: bool | None = None
+
+    @field_validator("title", "instruction", mode="before")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip()
+
+
+class ScheduledTaskOut(ORMModel):
+    id: str
+    title: str
+    instruction: str
+    schedule_kind: str
+    timezone: str
+    run_at: datetime | None
+    hour: int | None
+    minute: int | None
+    weekday: int | None
+    enabled: bool
+    next_run_at: datetime | None
+    last_dispatched_at: datetime | None
+    last_run_id: str | None = None
+    last_run_status: str | None = None
+    last_run_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScheduledRunOut(ORMModel):
+    id: str
+    task_id: str
+    conversation_id: str | None
+    scheduled_for: datetime
+    status: str
+    error: str | None
+    result_summary: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime

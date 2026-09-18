@@ -24,6 +24,8 @@ from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantMcpServer,
     SuperAssistantMessage,
+    SuperAssistantScheduledRun,
+    SuperAssistantScheduledTask,
     SuperAssistantSkill,
     SuperAssistantToolRun,
 )
@@ -305,6 +307,8 @@ def test_recover_interrupted_streams_marks_stale_rows(tmp_path, monkeypatch):
             User.__table__,
             SuperAssistantConversation.__table__,
             SuperAssistantMessage.__table__,
+            SuperAssistantScheduledTask.__table__,
+            SuperAssistantScheduledRun.__table__,
         ],
     )
     Session = sessionmaker(bind=engine, expire_on_commit=False)

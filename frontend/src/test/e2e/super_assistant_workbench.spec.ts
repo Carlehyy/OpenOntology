@@ -141,6 +141,10 @@ interface MockOptions {
   multicaConfig?: Record<string, unknown>
   /** 知识图谱「本体文档」目录：true 时提供发布文档镜像 + 权威清单桩 */
   withOntologyDocs?: boolean
+  /** 覆盖远程助手目录；传入空数组即空目录 */
+  remoteAgents?: Array<Record<string, unknown>>
+  /** GET /remote-agents 延迟，用于断言加载完成前不展示空态 CTA */
+  remoteAgentsDelayMs?: number
 }
 
 async function mockApis(page: Page, options: MockOptions = {}) {
@@ -156,11 +160,29 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const remoteAgentCreates: Array<Record<string, unknown>> = []
   const remoteInviteCreates: string[] = []
   // 远程助手目录夹具：直连（带端点）+ 回连（在线，仅邀请函路径接入的形态）
-  const remoteAgents: Array<Record<string, unknown>> = [
-    { id: 'ra-direct', key: 'remote.kb', label: '客服知识库助手', description: '擅长客服问答', endpoint: 'https://kb.example.com/turn', token_set: true, enabled: true, timeout_seconds: 120, mode: 'direct', last_seen_at: null, last_turn_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() },
-    { id: 'ra-pull', key: 'remote.lan-helper', label: '内网文档助手', description: '内网文档检索', endpoint: '', token_set: false, enabled: true, timeout_seconds: 60, mode: 'pull', last_seen_at: new Date().toISOString(), last_turn_at: null },
-  ]
+  const remoteAgents: Array<Record<string, unknown>> = options.remoteAgents
+    ? [...options.remoteAgents]
+    : [
+      { id: 'ra-direct', key: 'remote.kb', label: '客服知识库助手', description: '擅长客服问答', endpoint: 'https://kb.example.com/turn', token_set: true, enabled: true, timeout_seconds: 120, mode: 'direct', last_seen_at: null, last_turn_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() },
+      { id: 'ra-pull', key: 'remote.lan-helper', label: '内网文档助手', description: '内网文档检索', endpoint: '', token_set: false, enabled: true, timeout_seconds: 60, mode: 'pull', last_seen_at: new Date().toISOString(), last_turn_at: null },
+    ]
   const remoteInvites: Array<Record<string, unknown>> = []
+  const scheduledTasks: Array<Record<string, unknown>> = [
+    {
+      id: 'st-daily', title: '每日站会纪要', instruction: '根据昨天的会话整理站会纪要。',
+      schedule_kind: 'daily', timezone: 'Asia/Shanghai', run_at: null, hour: 9, minute: 0, weekday: null,
+      enabled: true, next_run_at: at(0, 9), last_dispatched_at: at(1, 9),
+      last_run_id: 'sr-1', last_run_status: 'completed', last_run_at: at(1, 9),
+      created_at: at(5, 9), updated_at: at(1, 9),
+    },
+  ]
+  const scheduledRuns: Array<Record<string, unknown>> = [
+    {
+      id: 'sr-1', task_id: 'st-daily', conversation_id: 'c-today', scheduled_for: at(1, 9),
+      status: 'completed', error: null, result_summary: '昨日三项待办均已推进。',
+      started_at: at(1, 9), finished_at: at(1, 9), created_at: at(1, 9),
+    },
+  ]
   const multicaTests: Array<Record<string, unknown>> = []
   const multicaWorkspaceCalls: string[] = []
   const toolPatchCalls: Array<{ name: string; body: { enabled: boolean } }> = []
@@ -532,6 +554,9 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         remoteAgents.push(created)
         return json(route, created)
       }
+      if (options.remoteAgentsDelayMs) {
+        return new Promise(resolve => setTimeout(() => resolve(json(route, remoteAgents)), options.remoteAgentsDelayMs))
+      }
       return json(route, remoteAgents)
     }
     if (path === '/api/v2/super-assistant/remote-agents/ra-direct/test') {
@@ -624,6 +649,59 @@ async function mockApis(page: Page, options: MockOptions = {}) {
           }],
         }] : [],
       })
+    }
+    if (path === '/api/v2/super-assistant/scheduled-tasks') {
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON() as Record<string, unknown>
+        const created = {
+          id: `st-${Date.now()}`,
+          title: body.title || String(body.instruction || '定时任务').slice(0, 40),
+          instruction: body.instruction,
+          schedule_kind: body.schedule_kind,
+          timezone: 'Asia/Shanghai',
+          run_at: body.run_at || null,
+          hour: body.hour ?? null,
+          minute: body.minute ?? null,
+          weekday: body.weekday ?? null,
+          enabled: body.enabled !== false,
+          next_run_at: body.run_at || at(0, 10),
+          last_dispatched_at: null,
+          last_run_id: null,
+          last_run_status: null,
+          last_run_at: null,
+          created_at: at(0, 10),
+          updated_at: at(0, 10),
+        }
+        scheduledTasks.unshift(created)
+        return json(route, created, 201)
+      }
+      return json(route, scheduledTasks)
+    }
+    const scheduledRunMatch = path.match(/^\/api\/v2\/super-assistant\/scheduled-tasks\/([^/]+)\/runs(?:\/([^/]+))?$/)
+    if (scheduledRunMatch) {
+      const taskId = scheduledRunMatch[1]
+      const runId = scheduledRunMatch[2]
+      const taskRuns = scheduledRuns.filter(item => item.task_id === taskId)
+      if (runId) {
+        const row = taskRuns.find(item => item.id === runId)
+        return row ? json(route, row) : json(route, { detail: '执行记录不存在' }, 404)
+      }
+      return json(route, taskRuns)
+    }
+    const scheduledTaskMatch = path.match(/^\/api\/v2\/super-assistant\/scheduled-tasks\/([^/]+)$/)
+    if (scheduledTaskMatch) {
+      const row = scheduledTasks.find(item => item.id === scheduledTaskMatch[1])
+      if (!row) return json(route, { detail: '定时任务不存在' }, 404)
+      if (request.method() === 'DELETE') {
+        const index = scheduledTasks.findIndex(item => item.id === row.id)
+        if (index >= 0) scheduledTasks.splice(index, 1)
+        return route.fulfill({ status: 204 })
+      }
+      if (request.method() === 'PATCH') {
+        Object.assign(row, request.postDataJSON())
+        return json(route, row)
+      }
+      return json(route, row)
     }
     if (path === '/api/v2/inbox/summary') {
       return json(route, { openAlertCount: 0, actionableCount: 0, unreadCount: 0, resolvedCount: 0 })
@@ -789,19 +867,32 @@ test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级�
   await expect(page.getByRole('button', { name: '新建任务' })).toBeVisible()
 })
 
-test('定时任务为如实占位的即将上线弹窗，全局搜索打开真实检索面板', async ({ page }) => {
+test('定时任务弹窗：查看已有计划、创建、点进某次执行', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  // 全局搜索已是真实功能：打开 ReUI Command 检索面板
   await page.getByRole('button', { name: '全局搜索' }).click()
   await expect(page.getByPlaceholder('搜索会话标题与消息内容…')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog')).toHaveCount(0)
 
   await page.getByRole('button', { name: '定时任务' }).click()
-  await expect(page.getByText(/即将上线/).first()).toBeVisible()
+  const dialog = page.getByTestId('scheduled-tasks-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible()
+  await expect(dialog.getByText('每日站会纪要')).toBeVisible()
+
+  await dialog.getByRole('button', { name: /每日站会纪要/ }).click()
+  await expect(dialog.getByText('执行记录')).toBeVisible()
+  await dialog.getByRole('button', { name: /\d{4}-\d{2}-\d{2}.*已完成/ }).click()
+  await expect(dialog.getByText('昨日三项待办均已推进。')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '在会话中继续' })).toBeVisible()
+
+  await page.getByRole('button', { name: '创建定时任务' }).click()
+  await dialog.getByPlaceholder('到点后助手会按这段指令在后台执行').fill('明早汇总待办')
+  await page.getByRole('button', { name: '创建', exact: true }).click()
+  await expect(dialog.getByText('明早汇总待办')).toBeVisible()
 })
 
 test('multica 命令提示：未配置/未启用时输入 / 也不提供任何命令', async ({ page }) => {
@@ -1682,8 +1773,11 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   await expect(integrationsDialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
   await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
 
-  // 目录：直连行展示端点，回连行展示模式徽标与在线状态
+  // 目录：直连行展示端点，回连行展示模式徽标与在线状态；已有助手时仍可再邀请
   const list = integrationsDialog.getByTestId('remote-agent-list')
+  await expect(integrationsDialog.getByText('可同时接入多个远程助手')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('remote-agent-count')).toHaveText('已接入 2 个')
+  await expect(integrationsDialog.getByRole('button', { name: '再邀请一个' })).toBeVisible()
   await expect(list.getByText('客服知识库助手')).toBeVisible()
   await expect(list.getByText('https://kb.example.com/turn')).toBeVisible()
   await expect(list.getByText('内网文档助手')).toBeVisible()
@@ -1692,7 +1786,7 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   await expect(list.getByText('在线').first()).toBeVisible()
   await expect(list.getByText('上次委派 3 小时前')).toBeVisible()
 
-  // 主路径：生成邀请 → 邀请函弹层常驻全文（复制失败也有手动复制/下载兜底）
+  // 主路径：已有助手时再邀请 → 邀请函弹层常驻全文（复制失败也有手动复制/下载兜底）
   await integrationsDialog.getByTestId('remote-agent-invite-create').click()
   const promptBox = integrationsDialog.getByTestId('remote-agent-invite-prompt')
   await expect(promptBox).toBeVisible()
@@ -1720,5 +1814,29 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   await expect.poll(() => mocks.remoteAgentCreates.length).toBe(1)
   expect(mocks.remoteAgentCreates[0].endpoint).toBe('https://data.example.com/turn')
   expect(mocks.remoteAgentCreates[0].key).toBeUndefined()
+  await expect(list.getByText('客服知识库助手')).toBeVisible()
+  await expect(list.getByText('内网文档助手')).toBeVisible()
   await expect(list.getByText('数据查询助手')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('remote-agent-count')).toHaveText('已接入 3 个')
+})
+
+test('远程助手：空目录展示首次邀请文案，加载完成前不闪成单槽 CTA', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page, {
+    remoteAgents: [],
+    remoteAgentsDelayMs: 1200,
+  })
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: '外部集成' }).click()
+  const integrationsDialog = page.getByRole('dialog')
+  await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
+
+  await expect(integrationsDialog.getByRole('button', { name: '邀请 AI 助手接入' })).toHaveCount(0)
+  await expect(integrationsDialog.getByRole('button', { name: '再邀请一个' })).toHaveCount(0)
+  await expect(integrationsDialog.getByRole('button', { name: '正在加载远程助手' })).toBeVisible()
+
+  await expect(integrationsDialog.getByRole('button', { name: '邀请 AI 助手接入' })).toBeVisible()
+  await expect(integrationsDialog.getByText('还没有接入远程助手')).toBeVisible()
+  await expect(integrationsDialog.getByText('之后还能继续添加')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('remote-agent-count')).toHaveCount(0)
 })

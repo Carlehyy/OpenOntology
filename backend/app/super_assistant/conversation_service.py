@@ -69,16 +69,33 @@ def recover_interrupted_streams() -> dict[str, int]:
     """启动恢复：进程重启后遗留 streaming 的回复统一标记中断（重启语义）。"""
     db = SessionLocal()
     try:
+        from datetime import timedelta
+
+        from app.super_assistant.models import SuperAssistantScheduledRun
+
+        live_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30)
+        protected = {
+            row[0]
+            for row in db.query(SuperAssistantScheduledRun.conversation_id).filter(
+                SuperAssistantScheduledRun.status == "running",
+                SuperAssistantScheduledRun.started_at >= live_cutoff,
+                SuperAssistantScheduledRun.conversation_id.isnot(None),
+            )
+        }
         stale_rows = db.query(SuperAssistantMessage).filter(
             SuperAssistantMessage.role == "assistant",
             SuperAssistantMessage.status == "streaming",
         ).all()
+        interrupted = 0
         for row in stale_rows:
+            if row.conversation_id in protected:
+                continue
             row.status = "error"
             row.content = row.content or _INTERRUPTED_STREAM_NOTE
-        if stale_rows:
+            interrupted += 1
+        if interrupted:
             db.commit()
-        return {"interrupted": len(stale_rows)}
+        return {"interrupted": interrupted}
     finally:
         db.close()
 
