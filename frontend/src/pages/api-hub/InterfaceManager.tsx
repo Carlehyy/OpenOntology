@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Braces, Check, ChevronRight, CirclePlus, Copy, Download, FileCode2, FileUp, Folder, Play,
-  Plus, Search, Send, Sparkles, Trash2, X, Database, GripVertical, KeyRound, Share2, ShieldCheck,
+  Plus, Search, Send, Trash2, X, Database, GripVertical, KeyRound, Share2, ShieldCheck,
   LoaderCircle,
 } from 'lucide-react'
 import { apiError, apiHub, emptyHubInterface, validateHttpUrl, type HubInterface, type KV, type RunResult } from '@/api/apiHub'
-import { superAssistantApi, type SuperMcpServer } from '@/api/superAssistant'
 import { authApi, type PrivacyVar, type UserEnvVar } from '@/api/auth'
 import { Button } from '@/components/ui/Button'
 import {
@@ -65,8 +64,6 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   const [newGroupError, setNewGroupError] = useState('')
   const [privacyVars, setPrivacyVars] = useState<PrivacyVar[]>([])
   const [envVars, setEnvVars] = useState<UserEnvVar[]>([])
-  const [hubMcp, setHubMcp] = useState<SuperMcpServer | null>(null)
-  const [hubMcpBusy, setHubMcpBusy] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const [sizes, setSizes] = useState<[number, number]>([28, 72])
   const [listSearch, setListSearch] = useState('')
@@ -182,35 +179,6 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     setExtraGroups(current => current.includes(name) ? current : [...current, name])
     patchDraft('group_name', name)
     closeNewGroup()
-  }
-
-  const refreshHubMcp = useCallback(async () => {
-    try {
-      const items = await superAssistantApi.mcpServers()
-      setHubMcp(Array.isArray(items) ? items.find(item => item.builtin_key === 'api_hub') ?? null : null)
-    } catch {
-      setHubMcp(null)
-    }
-  }, [])
-
-  useEffect(() => {
-    void refreshHubMcp()
-  }, [refreshHubMcp])
-
-  const exposeToAssistant = async () => {
-    if (hubMcpBusy) return
-    setHubMcpBusy(true)
-    try {
-      if (hubMcp && !hubMcp.enabled) {
-        await superAssistantApi.updateMcpServer(hubMcp.id, { enabled: true })
-      }
-      await superAssistantApi.installPlatformApiHubMcp()
-      await refreshHubMcp()
-    } catch (error) {
-      onError(apiError(error) || '无法同步到超级助手')
-    } finally {
-      setHubMcpBusy(false)
-    }
   }
 
   useEffect(() => {
@@ -394,16 +362,13 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   return (
     <div ref={containerRef} className="scrollbar-none grid h-full min-h-0 overflow-x-auto overflow-y-hidden p-1" style={{ gridTemplateColumns: `minmax(250px, ${sizes[0]}fr) 4px minmax(680px, ${sizes[1]}fr)` }}>
       <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-card shadow-sm">
-        <div className="flex shrink-0 flex-col gap-2 border-b border-[var(--color-border)] px-3 py-3">
-          <div className="flex w-full items-center justify-between gap-2">
-            <div>
-              <h2 className="text-sm font-semibold">接口清单</h2>
-              <p className="text-xs text-[var(--color-text-tertiary)]">{interfaces.length} 个接口</p>
-            </div>
-            <Button size="sm" onClick={create}><CirclePlus size={13} />新建接口</Button>
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3 py-3">
+          <div className="shrink-0">
+            <h2 className="text-sm font-semibold">接口清单</h2>
+            <p className="text-xs text-[var(--color-text-tertiary)]">{interfaces.length} 个接口</p>
           </div>
           {interfaces.length > 0 && (
-            <label className="relative block">
+            <label className="relative min-w-0 flex-1">
               <span className="sr-only">搜索接口</span>
               <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
               <input
@@ -414,6 +379,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
               />
             </label>
           )}
+          <Button size="sm" className="shrink-0" onClick={create}><CirclePlus size={13} />新建接口</Button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {!interfaces.length ? <EmptyList onCreate={create} /> : !visibleInterfaces.length ? (
@@ -474,20 +440,9 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           ))}
         </div>
         <div className="grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--color-border)] bg-card px-3 py-[1.125rem]">
-          <Button variant="outline" size="sm" onClick={() => setProxyKeys(true)}><KeyRound size={13} />HTTP 调用方</Button>
+          <Button variant="outline" size="sm" title="管理对外已发布 HTTP 接口的调用凭证" onClick={() => setProxyKeys(true)}><KeyRound size={13} />调用密钥</Button>
           <Button variant="outline" size="sm" onClick={() => setSystemData(true)}><Database size={13} />系统数据</Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="col-span-2"
-            data-testid="api-hub-expose-mcp"
-            loading={hubMcpBusy}
-            onClick={() => void exposeToAssistant()}
-            title={hubMcp?.enabled ? '超级助手已可管理这些接口' : '把接口管理能力同步到超级助手'}
-          >
-            {!hubMcpBusy && <Sparkles size={13} />}
-            {hubMcp?.enabled ? '已同步到超级助手' : hubMcp ? '重新同步到超级助手' : '同步到超级助手'}
-          </Button>
+          <p className="col-span-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">调用密钥：给第三方调用已发布接口用的鉴权凭证</p>
         </div>
       </aside>
 
@@ -513,10 +468,10 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             {draft.id && <Button variant="ghost" size="icon-sm" title="复制为新接口" onClick={() => { setSelectedId(null); setBaseline(emptyHubInterface()); setDraft({ ...structuredClone(draft), id: null, name: `${draft.name} 副本`, mcp_enabled: false, open_enabled: false, http_enabled: false, proxy_slug: '', proxy_query_keys: [], proxy_header_keys: [], proxy_body_enabled: false, proxy_body_keys: [] }); setResult(null); setResultFingerprint(''); setSelectedFiles([]) }}><Copy size={14} /></Button>}
             {draft.id && <Button variant="ghost" size="icon-sm" title="删除接口" className="text-[var(--color-danger)]" onClick={() => setDeleteOpen(true)}><Trash2 size={14} /></Button>}
-            {draft.id && <Button variant="outline" size="sm" onClick={() => setPublicationTarget(structuredClone(baseline))}><Share2 size={14} />HTTP 发布</Button>}
-            {draft.id && draft.http_enabled && <Button variant="outline" size="sm" loading={publicationCopying} onClick={copyPublishedExample} aria-label={'复制“' + draft.name + '”的 HTTP 调用示例'}>{!publicationCopying && (publicationCopied ? <Check size={14} /> : <Copy size={14} />)}{publicationCopied ? '已复制' : '复制 HTTP 示例'}<span className="sr-only" aria-live="polite">{publicationCopied ? 'HTTP 调用示例复制成功' : ''}</span></Button>}
+            {draft.id && <Button size="sm" onClick={() => setPublicationTarget(structuredClone(baseline))}><Share2 size={14} />HTTP 发布</Button>}
+            {draft.id && draft.http_enabled && <Button size="sm" loading={publicationCopying} onClick={copyPublishedExample} aria-label={'复制“' + draft.name + '”的 HTTP 调用示例'}>{!publicationCopying && (publicationCopied ? <Check size={14} /> : <Copy size={14} />)}{publicationCopied ? '已复制' : '复制 HTTP 示例'}<span className="sr-only" aria-live="polite">{publicationCopied ? 'HTTP 调用示例复制成功' : ''}</span></Button>}
             {/* 桥接接口由平台进程内分发，外部 cURL 无法触达，不提供调试示例 */}
-            {!draft.url.trim().startsWith('mcp-bridge://') && <Button variant="outline" size="sm" onClick={() => void showCallExample()}><FileCode2 size={14} />上游调试 cURL</Button>}
+            {!draft.url.trim().startsWith('mcp-bridge://') && <Button size="sm" onClick={() => void showCallExample()}><FileCode2 size={14} />上游调试 cURL</Button>}
           </div>
         </div>
 

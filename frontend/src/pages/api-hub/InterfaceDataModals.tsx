@@ -78,8 +78,8 @@ export function ProxyKeysModal({ open, onClose, interfaces, onError }: Omit<Shar
         <DialogContent className="w-[min(92vw,48rem)]">
           <DialogHeader>
             <div className="min-w-0">
-              <DialogTitle>调用方管理</DialogTitle>
-              <DialogDescription>查看、停用或撤销平台已经生成的调用凭证；日常分享无需在这里手动创建。</DialogDescription>
+              <DialogTitle>调用密钥</DialogTitle>
+              <DialogDescription>管理对外已发布 HTTP 接口的调用凭证；第三方凭密钥调用已发布接口，可在此查看、停用或撤销。</DialogDescription>
             </div>
           </DialogHeader>
           {revealed ? <SecretView secret={revealed} info={info} onDone={() => setRevealed('')} />

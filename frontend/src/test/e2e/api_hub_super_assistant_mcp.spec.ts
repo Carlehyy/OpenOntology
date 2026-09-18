@@ -65,7 +65,9 @@ const installedMcp = {
   updated_at: '2026-09-18T08:00:00+00:00',
 }
 
-test('接口管理页可以把接口代理 MCP 提供给超级助手', async ({ page }) => {
+// Interfaces 页已移除「同步到超级助手」按钮（api-hub-expose-mcp）；
+// 本用例改为：确认接口清单仍可用且按钮已消失，并经页面 fetch 走 installPlatformApiHubMcp API 路径验证安装。
+test('接口代理 MCP 仍可通过平台 API 安装到超级助手', async ({ page }) => {
   await loginAsAdmin(page)
   let installed = false
   const installs: string[] = []
@@ -96,11 +98,27 @@ test('接口管理页可以把接口代理 MCP 提供给超级助手', async ({ 
 
   await page.goto('/#/api-hub/interfaces')
   await expect(page.getByText('订单详情').first()).toBeVisible()
-  const expose = page.getByTestId('api-hub-expose-mcp')
-  await expect(expose).toHaveText(/提供给超级助手/)
-  await expose.click()
-  await expect(expose).toHaveText('已提供给超级助手')
+  await expect(page.getByTestId('api-hub-expose-mcp')).toHaveCount(0)
+
+  const first = await page.evaluate(async () => {
+    const response = await fetch('/api/v2/super-assistant/mcp-servers/platform-api-hub', { method: 'POST' })
+    return { ok: response.ok, body: await response.json() }
+  })
+  expect(first.ok).toBeTruthy()
+  expect(first.body?.data?.builtin_key ?? first.body?.builtin_key).toBe('api_hub')
   expect(installs).toEqual(['/api/v2/super-assistant/mcp-servers/platform-api-hub'])
-  await expose.click()
+
+  const listed = await page.evaluate(async () => {
+    const response = await fetch('/api/v2/super-assistant/mcp-servers')
+    return { ok: response.ok, body: await response.json() }
+  })
+  expect(listed.ok).toBeTruthy()
+  expect(listed.body?.data?.[0]?.builtin_key ?? listed.body?.[0]?.builtin_key).toBe('api_hub')
+
+  const second = await page.evaluate(async () => {
+    const response = await fetch('/api/v2/super-assistant/mcp-servers/platform-api-hub', { method: 'POST' })
+    return { ok: response.ok }
+  })
+  expect(second.ok).toBeTruthy()
   expect(installs).toHaveLength(2)
 })
