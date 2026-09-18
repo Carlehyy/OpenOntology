@@ -446,28 +446,30 @@ test('环境变量查询密钥支持生成、一次性展示复制与吊销', as
   expect(captured.revokeCalled).toBe(true)
 })
 
-// ---- 远程访问：二维码 + 访问地址 + 回环地址兜底提示 ----
+// ---- 远程访问 tab（竖排 tab 第四项，位于「隐私变量」之下）：二维码 + 访问地址 + 回环兜底提示 ----
 
-test('隐私变量分区展示远程访问二维码与访问地址（回环地址给出兜底提示）', async ({ page }) => {
+test('远程访问 tab 展示二维码与访问地址（回环地址给出兜底提示）', async ({ page }) => {
   await mockPlatformShell(page)
   await page.goto('/#/inbox', { waitUntil: 'domcontentloaded' })
   const dialog = await openProfileDialog(page)
 
-  await dialog.getByRole('tab', { name: '隐私变量' }).click()
-  const panel = dialog.getByRole('tabpanel', { name: '隐私变量' })
-  await expect(panel).toBeVisible()
+  // tab 顺序契约：账号信息 → 环境变量 → 隐私变量 → 远程访问
+  const tablist = dialog.getByRole('tablist', { name: '个人资料分区' })
+  await expect(tablist.getByRole('tab')).toHaveText(['账号信息', '环境变量', '隐私变量', '远程访问'])
 
-  const section = panel.locator('section[aria-label="远程访问"]')
-  await expect(section).toBeVisible()
+  await dialog.getByRole('tab', { name: '远程访问' }).click()
+  const panel = dialog.getByRole('tabpanel', { name: '远程访问' })
+  await expect(panel).toBeVisible()
+  await expect(dialog.getByRole('tab', { name: '远程访问' })).toHaveAttribute('aria-selected', 'true')
 
   // 二维码内容 = 当前 origin + 超级助手深链，与版面上展示的访问地址同源
   // （扫码即所得；antd QRCode 编码对同一 value 是确定性的）
   const expectedUrl = `${new URL(page.url()).origin}/#/super-assistant`
-  await expect(section.getByLabel('移动端访问地址')).toHaveValue(expectedUrl)
-  await expect(section.getByTestId('remote-access-qr').locator('svg')).toBeVisible()
+  await expect(panel.getByLabel('移动端访问地址')).toHaveValue(expectedUrl)
+  await expect(panel.getByTestId('remote-access-qr').locator('svg')).toBeVisible()
 
   // mocked 环境本身就是 localhost：回环兜底提示必须如实出现
-  await expect(section.getByText(/本机回环地址/)).toBeVisible()
+  await expect(panel.getByText(/本机回环地址/)).toBeVisible()
 })
 
 test('隐私变量分区独立生成查询密钥（类别隔离）', async ({ page }) => {

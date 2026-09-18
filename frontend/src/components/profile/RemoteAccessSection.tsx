@@ -1,10 +1,10 @@
 import { QRCode } from 'antd'
-import { QrCode, TriangleAlert } from 'lucide-react'
+import { TriangleAlert } from 'lucide-react'
 
 import { buildMobileAccessUrl, isLoopbackOrigin } from '@/components/profile/remoteAccess'
 
 /**
- * 远程访问版块（个人资料弹窗 → 隐私变量 tab，隐私变量分区下方）：
+ * 远程访问 tab（个人资料弹窗左侧竖排 tab 第四项，位于「隐私变量」之下）：
  * 展示当前访问地址的二维码，手机扫码后在浏览器打开超级助手（需登录）。
  * 二维码只含 URL、不含任何凭据；扫码免登（一次性票据）为后续独立迭代。
  * QRCode 自带白底衬边（antd 内置样式），黑码白底保证扫码可靠性。
@@ -14,11 +14,8 @@ export default function RemoteAccessSection() {
   const loopback = isLoopbackOrigin(window.location.origin)
 
   return (
-    <section aria-label="远程访问" className="mt-5 border-t border-[var(--color-border)] pt-4">
-      <h4 className="flex items-center gap-1.5 text-sm font-medium text-[var(--color-text-primary)]">
-        <QrCode size={14} />远程访问
-      </h4>
-      <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
+    <section aria-label="远程访问">
+      <p className="text-xs text-[var(--color-text-tertiary)]">
         用手机相机或微信扫码，在手机浏览器打开超级助手；扫码后需登录你的账号。二维码只包含访问地址，不含任何凭据。
       </p>
       <div className="mt-3 flex flex-wrap items-start gap-4">

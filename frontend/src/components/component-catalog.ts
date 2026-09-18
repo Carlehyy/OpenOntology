@@ -112,7 +112,7 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     scenario: '二维码展示（扫码访问 / 设备配对）',
     component: "antd QRCode（import { QRCode } from 'antd'）",
     status: 'vendored',
-    note: 'antd 6 内置（@rc-component/qrcode 随 antd 入库），组件自带白底衬边；固定黑码白底，扫码可靠性优先于主题色。首个消费方：个人资料弹窗「远程访问」版块（RemoteAccessSection）。',
+    note: 'antd 6 内置（@rc-component/qrcode 随 antd 入库），组件自带白底衬边；固定黑码白底，扫码可靠性优先于主题色。首个消费方：个人资料弹窗「远程访问」tab（RemoteAccessSection）。',
   },
 ]
 
