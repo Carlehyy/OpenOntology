@@ -6,25 +6,13 @@ const json = (route: Route, data: unknown, status = 200) => route.fulfill({
   body: JSON.stringify({ data }),
 })
 
-const raw = (route: Route, data: unknown, status = 200) => route.fulfill({
-  status,
-  contentType: 'application/json',
-  body: JSON.stringify(data),
-})
-
 async function authenticate(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
       state: {
         token: 'e2e-token',
-        user: {
-          id: 'admin',
-          username: 'admin',
-          email: 'admin@example.com',
-          role: 'admin',
-          is_active: true,
-        },
+        user: { id: 'admin', username: 'admin', email: 'admin@example.com', role: 'admin', is_active: true },
       },
       version: 0,
     }))
@@ -79,22 +67,33 @@ const installedMcp = {
 
 test('接口管理页可以把接口代理 MCP 提供给超级助手', async ({ page }) => {
   await authenticate(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
   let installed = false
   const installs: string[] = []
 
-  await page.route(/\/api\//, async route => {
+  // Same glob the rest of the mocked suite uses (`assistant_widget.spec.ts`).
+  // One handler so api-hub cannot miss the more-specific glob.
+  await page.route('**/api/**', async route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
+    if (request.method() === 'GET' && path === '/api/api-hub/interfaces') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([exampleInterface]),
+      })
+      return
+    }
     if (path.startsWith('/api/api-hub/')) {
-      if (request.method() === 'GET' && path === '/api/api-hub/interfaces') {
-        await raw(route, [exampleInterface])
-        return
-      }
-      await raw(route, {})
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
       return
     }
     if (path === '/api/v2/inbox/summary') {
       await json(route, { openAlertCount: 0, actionableCount: 0, unreadCount: 0, resolvedCount: 0 })
+      return
+    }
+    if (path === '/api/v2/super-assistant/widget-config') {
+      await json(route, { hidden_menu_keys: [] })
       return
     }
     if (request.method() === 'GET' && path === '/api/v2/super-assistant/mcp-servers') {
@@ -107,15 +106,12 @@ test('接口管理页可以把接口代理 MCP 提供给超级助手', async ({ 
       await json(route, installedMcp)
       return
     }
-    if (path.startsWith('/api/v1/') || path.startsWith('/api/v2/')) {
-      await json(route, [])
-      return
-    }
-    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
+    await json(route, [])
   })
 
   await page.goto('/#/api-hub/interfaces')
-  await expect(page.getByRole('heading', { name: '接口清单' })).toBeVisible()
+  await expect(page).toHaveURL(/\/#\/api-hub\/interfaces/)
+  await expect(page.getByRole('heading', { name: '接口清单' })).toBeVisible({ timeout: 15_000 })
   await expect(page.getByText('订单详情').first()).toBeVisible()
   const expose = page.getByTestId('api-hub-expose-mcp')
   await expect(expose).toHaveText(/提供给超级助手/)
