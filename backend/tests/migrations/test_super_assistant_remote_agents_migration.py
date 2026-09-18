@@ -71,4 +71,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0118_plugin_runner_event_replay"]
+    assert heads == ["0119_sa_scheduled_tasks"]
