@@ -786,6 +786,9 @@ export const superAssistantApi = {
   testMcpServer: (id: string) => apiClientV2.post<{ ok: boolean; message: string; tools: McpTool[] }>(
     `/super-assistant/mcp-servers/${id}/test`,
   ),
+  installPlatformApiHubMcp: () => apiClientV2.post<SuperMcpServer>(
+    '/super-assistant/mcp-servers/platform-api-hub',
+  ),
 
   assistantTools: () => apiClientV2.get<AssistantTool[]>('/super-assistant/tools'),
   updateAssistantTool: (name: string, enabled: boolean) =>

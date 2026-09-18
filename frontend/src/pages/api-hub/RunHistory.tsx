@@ -1023,6 +1023,7 @@ function sourceLabel(source?: string | null) {
     mcp_individual: '独立 MCP',
     mcp_open: '统一 MCP',
     mcp_system: '系统 MCP',
+    super_assistant: '超级助手',
   }
   return labels[source || ''] || source || '平台界面'
 }

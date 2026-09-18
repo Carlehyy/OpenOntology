@@ -8,7 +8,7 @@ from typing import List
 
 from fastapi import HTTPException
 
-from . import config, db
+from . import config, db, publication
 from .interface_contracts import DeleteGroupBody, InterfaceIn, KV
 from .personal_ref import interface_has_personal_refs
 
@@ -372,3 +372,198 @@ def delete_group(body: DeleteGroupBody, *, user=None):
             )
         count = cursor.rowcount
     return {"ok": True, "count": count}
+
+
+def rename_group(*, old_name: str, new_name: str, user=None):
+    """Rename a group by rewriting group_name on owned interfaces."""
+    old = (old_name or "").strip()
+    new = (new_name or "").strip()
+    if old == _RESERVED_GROUP:
+        old = ""
+    if new == _RESERVED_GROUP:
+        new = ""
+    if not old:
+        raise HTTPException(status_code=400, detail="原分类名不能为空")
+    _check_group_name(old)
+    _check_group_name(new)
+    if old == new:
+        return {"ok": True, "count": 0}
+    now = datetime.now(timezone.utc).isoformat()
+    with db.get_conn() as conn:
+        if user is None or _is_admin(user):
+            cursor = conn.execute(
+                "UPDATE interfaces SET group_name = ?, updated_at = ? "
+                "WHERE group_name = ?",
+                (new, now, old),
+            )
+        else:
+            cursor = conn.execute(
+                "UPDATE interfaces SET group_name = ?, updated_at = ? "
+                "WHERE group_name = ? AND created_by = ?",
+                (new, now, old, user.id),
+            )
+        count = cursor.rowcount
+    return {"ok": True, "count": count, "group_name": new or _RESERVED_GROUP}
+
+
+def move_interface(
+    iid: int,
+    *,
+    group_name: str = "",
+    target_index: int = 0,
+    user=None,
+):
+    """Move an interface into a group slot and resequence sort_order."""
+    _check_group_name(group_name)
+    now = datetime.now(timezone.utc).isoformat()
+    admin = user is None or _is_admin(user)
+    with db.get_conn() as conn:
+        current = _row_to_dict(_get_or_404(conn, iid, user=user))
+        source_group = current["group_name"]
+        conn.execute(
+            "UPDATE interfaces SET group_name = ?, updated_at = ? WHERE id = ?",
+            (group_name, now, iid),
+        )
+        if admin:
+            rows = conn.execute(
+                "SELECT id FROM interfaces WHERE group_name = ? "
+                "ORDER BY sort_order, id",
+                (group_name,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id FROM interfaces WHERE group_name = ? "
+                "AND created_by = ? ORDER BY sort_order, id",
+                (group_name, user.id),
+            ).fetchall()
+        ids = [row["id"] for row in rows]
+        if iid in ids:
+            ids.remove(iid)
+        idx = max(0, min(int(target_index), len(ids)))
+        ids.insert(idx, iid)
+        for index, row_id in enumerate(ids):
+            conn.execute(
+                "UPDATE interfaces SET sort_order = ? WHERE id = ?",
+                (index, row_id),
+            )
+        if source_group != group_name:
+            if admin:
+                source_rows = conn.execute(
+                    "SELECT id FROM interfaces WHERE group_name = ? "
+                    "ORDER BY sort_order, id",
+                    (source_group,),
+                ).fetchall()
+            else:
+                source_rows = conn.execute(
+                    "SELECT id FROM interfaces WHERE group_name = ? "
+                    "AND created_by = ? ORDER BY sort_order, id",
+                    (source_group, user.id),
+                ).fetchall()
+            for index, row in enumerate(source_rows):
+                conn.execute(
+                    "UPDATE interfaces SET sort_order = ? WHERE id = ?",
+                    (index, row["id"]),
+                )
+    return {"ok": True}
+
+
+def _unique_proxy_slug(conn, interface: dict) -> str:
+    current = (interface.get("proxy_slug") or "").strip().lower()
+    candidate = current if _PROXY_SLUG_RE.fullmatch(current) else publication.slug_suggestion(interface)
+    base = candidate[:64]
+    suffix = 1
+    iid = int(interface["id"])
+    while conn.execute(
+        "SELECT 1 FROM interfaces WHERE proxy_slug = ? AND http_enabled = 1 AND id <> ?",
+        (candidate, iid),
+    ).fetchone():
+        marker = f"-{iid}" if suffix == 1 else f"-{iid}-{suffix}"
+        candidate = base[: 64 - len(marker)] + marker
+        suffix += 1
+    return candidate
+
+
+def apply_http_publication(
+    iid: int,
+    *,
+    enabled: bool,
+    slug: str = "",
+    query_keys: list | None = None,
+    header_keys: list | None = None,
+    body_enabled: bool = False,
+    body_keys: list | None = None,
+    user=None,
+) -> dict:
+    """Update only HTTP publication columns. Does not bump config_revision."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db.get_conn() as conn:
+        row = _get_or_404(conn, iid, user=user)
+        draft = InterfaceIn(
+            **{
+                **_row_to_dict(row),
+                "http_enabled": enabled,
+                "proxy_slug": slug,
+                "proxy_query_keys": list(query_keys or []),
+                "proxy_header_keys": list(header_keys or []),
+                "proxy_body_enabled": body_enabled,
+                "proxy_body_keys": list(body_keys or []),
+            }
+        )
+        slug, query_keys, header_keys, body_keys = _validate_proxy_publish(conn, draft, iid)
+        conn.execute(
+            "UPDATE interfaces SET http_enabled=?, proxy_slug=?, proxy_query_keys=?, "
+            "proxy_header_keys=?, proxy_body_enabled=?, proxy_body_keys=?, updated_at=? WHERE id=?",
+            (
+                1 if enabled else 0,
+                slug,
+                json.dumps(query_keys, ensure_ascii=False),
+                json.dumps(header_keys, ensure_ascii=False),
+                1 if body_enabled else 0,
+                json.dumps(body_keys, ensure_ascii=False),
+                now,
+                iid,
+            ),
+        )
+        row = conn.execute("SELECT * FROM interfaces WHERE id = ?", (iid,)).fetchone()
+    return _row_to_dict(row)
+
+
+def auto_http_publication(iid: int, *, user=None) -> dict:
+    """Infer a safe forwarding contract and publish without bumping revision."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db.get_conn() as conn:
+        row = _get_or_404(conn, iid, user=user)
+        interface = _row_to_dict(row)
+        body_keys = publication.infer_body_keys(interface)
+        draft = InterfaceIn(
+            **{
+                **interface,
+                "http_enabled": True,
+                "proxy_slug": _unique_proxy_slug(conn, interface),
+                "proxy_query_keys": publication.infer_query_keys(interface),
+                "proxy_header_keys": publication.infer_header_keys(
+                    interface, config.PROXY_KEY_HEADER
+                ),
+                "proxy_body_enabled": bool(body_keys),
+                "proxy_body_keys": body_keys,
+            }
+        )
+        slug, query_keys, header_keys, body_keys = _validate_proxy_publish(
+            conn, draft, iid
+        )
+        conn.execute(
+            "UPDATE interfaces SET http_enabled=1, proxy_slug=?, proxy_query_keys=?, "
+            "proxy_header_keys=?, proxy_body_enabled=?, proxy_body_keys=?, updated_at=? "
+            "WHERE id=?",
+            (
+                slug,
+                json.dumps(query_keys, ensure_ascii=False),
+                json.dumps(header_keys, ensure_ascii=False),
+                1 if body_keys else 0,
+                json.dumps(body_keys, ensure_ascii=False),
+                now,
+                iid,
+            ),
+        )
+        row = conn.execute("SELECT * FROM interfaces WHERE id = ?", (iid,)).fetchone()
+    return _row_to_dict(row)

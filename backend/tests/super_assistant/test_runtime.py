@@ -300,3 +300,103 @@ def test_runtime_executes_builtin_minio_mcp_without_network_or_credentials(tmp_p
         assert run.server_id == "server-minio"
         assert run.status == "success"
         assert "s3://openontology/note.txt" in run.result
+
+
+def test_runtime_executes_builtin_api_hub_mcp_without_http_client(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'api-hub-runtime.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(runtime, "SessionLocal", TestingSession)
+    with TestingSession() as db:
+        db.add(User(
+            id="user-hub", username="hub-owner", email="hub@example.com",
+            password_hash="unused", role="admin",
+        ))
+        db.add(ModelConfig(
+            id="model-hub", name="Fake", config_type="llm", provider="openai",
+            models=["fake-model"], options={}, enabled=True, is_default=True,
+            created_by="user-hub",
+        ))
+        db.add(SuperAssistantConversation(
+            id="conversation-hub", owner_id="user-hub", title="API Hub",
+            model_config_id="model-hub",
+        ))
+        db.add_all([
+            SuperAssistantMessage(
+                id="user-message-hub", conversation_id="conversation-hub",
+                role="user", content="列出接口", status="complete",
+            ),
+            SuperAssistantMessage(
+                id="assistant-message-hub", conversation_id="conversation-hub",
+                role="assistant", content="", status="streaming",
+            ),
+            SuperAssistantMcpServer(
+                id="server-hub", owner_id="user-hub", name="platform_api_hub",
+                builtin_key="api_hub", transport="streamable_http",
+                url="builtin://api-hub",
+                header_names=[], args=[], env_names=[], enabled=True,
+                require_confirmation=False,
+                tool_manifest=[{
+                    "name": "list_env_vars",
+                    "description": "列出环境变量",
+                    "input_schema": {"type": "object", "properties": {}},
+                }],
+            ),
+        ])
+        db.commit()
+
+    calls = []
+
+    def fake_execute(db, *, user, name, arguments, conversation_id=None):
+        calls.append((user.id, name, arguments, conversation_id))
+        return json.dumps({
+            "notice": "该结果含个人变量明文。不要写入记忆。",
+            "count": 1,
+            "variables": [{"key": "REGION", "value": "should-not-preview", "placeholder": "{{env:REGION}}"}],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr("app.api_hub.assistant_mcp.execute_tool", fake_execute)
+    monkeypatch.setattr(
+        runtime,
+        "call_tool",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError(f"unexpected HTTP MCP call {kwargs}")),
+    )
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{
+                "id": "call-hub",
+                "name": "mcp__platform_api_hub__list_env_vars",
+                "arguments": {},
+            }],
+            "usage": {"inputTokens": 12, "outputTokens": 2},
+        },
+        {
+            "content": "已列出环境变量。",
+            "tool_calls": [],
+            "usage": {"inputTokens": 18, "outputTokens": 6},
+        },
+    ])
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-hub",
+        owner_id="user-hub",
+        assistant_message_id="assistant-message-hub",
+        requested_model_id="model-hub",
+    ))
+    assert "已列出环境变量" in events
+    assert "should-not-preview" not in events
+    assert calls == [("user-hub", "list_env_vars", {}, "conversation-hub")]
+    with TestingSession() as db:
+        run = db.query(SuperAssistantToolRun).one()
+        assert run.server_id == "server-hub"
+        assert run.status == "success"
+        assert "should-not-preview" in run.result
+        saved = db.get(SuperAssistantMessage, "assistant-message-hub")
+        preview = (saved.steps or [])[0]["preview"]
+        assert "should-not-preview" not in preview
+        assert "***" in preview

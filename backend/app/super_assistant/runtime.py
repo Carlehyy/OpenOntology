@@ -37,6 +37,36 @@ from app.super_assistant.skill_tools import builtin_skill_tool_schemas, execute_
 
 logger = logging.getLogger(__name__)
 
+_API_HUB_TOOL_PREFIX = "mcp__platform_api_hub__"
+_API_HUB_PREVIEW_REDACT_KEYS = frozenset({
+    "value", "secret", "headers", "bodyContent", "queryParams", "variables",
+})
+
+
+def _redact_api_hub_preview(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, child in value.items():
+            if key in _API_HUB_PREVIEW_REDACT_KEYS:
+                redacted[key] = "***"
+            else:
+                redacted[key] = _redact_api_hub_preview(child)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_api_hub_preview(item) for item in value]
+    return value
+
+
+def _tool_result_preview(tool_name: str, output: str) -> str:
+    text = str(output or "")
+    if not str(tool_name).startswith(_API_HUB_TOOL_PREFIX):
+        return text[:800]
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text[:800]
+    return json.dumps(_redact_api_hub_preview(payload), ensure_ascii=False)[:800]
+
 
 _DEFAULT_CONTEXT_TOKENS = 64_000
 
@@ -1356,6 +1386,20 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                                 db, original_name, item["arguments"],
                                 actor_type="super_assistant", actor_id=owner_id,
                             )
+                        elif server.builtin_key == "api_hub":
+                            from app.api_hub.assistant_mcp import execute_tool as execute_api_hub_tool
+                            from app.auth.models import User as AuthUser
+
+                            actor = db.get(AuthUser, owner_id)
+                            if actor is None:
+                                raise RuntimeError("用户不存在")
+                            output = execute_api_hub_tool(
+                                db,
+                                user=actor,
+                                name=original_name,
+                                arguments=item["arguments"],
+                                conversation_id=conversation_id,
+                            )
                         elif server.transport == "developed":
                             # 自研 MCP：进程内执行发布绑定的冻结脚本
                             #（对标内置 MinIO 的进程内先例，不走外部传输）
@@ -1418,17 +1462,18 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 tool_run.duration_ms = durations.get(item["id"])
                 tool_run.completed_at = datetime.now(timezone.utc)
                 db.commit()
+                preview = _tool_result_preview(item["name"], output)
                 steps.append({
                     "toolName": item["name"],
                     "status": tool_run.status,
                     "arguments": item["arguments"],
-                    "preview": output[:800],
+                    "preview": preview,
                 })
                 messages.append({"role": "tool", "tool_call_id": item["id"], "name": item["name"], "content": output})
                 yield sse("tool_result", {
                     "toolRunId": tool_run.id,
                     "status": tool_run.status,
-                    "preview": output[:800],
+                    "preview": preview,
                 })
         else:
             # Final synthesis without tools prevents an infinite tool loop.

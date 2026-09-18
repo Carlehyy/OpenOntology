@@ -11,7 +11,7 @@ from starlette.datastructures import FormData, UploadFile
 
 from app.auth.models import User
 from app.deps import get_current_user
-from .. import config, db, executor, publication
+from .. import config, db, executor
 from ..interface_contracts import (
     _ALLOWED_BODY_TYPES,
     _ALLOWED_METHODS,
@@ -35,9 +35,12 @@ from ..interface_service import (
     _normalize_publish_keys,
     _row_to_dict,
     _validate_proxy_publish,
+    apply_http_publication,
+    auto_http_publication as persist_auto_http_publication,
     create_interface,
     delete_group,
     delete_interface,
+    move_interface as persist_move_interface,
     update_interface,
 )
 
@@ -269,60 +272,12 @@ class MoveBody(BaseModel):
 @router.put("/{iid}/move")
 def move_interface(iid: int, body: MoveBody, current_user: User = Depends(get_current_user)):
     """移动接口到指定分组的指定位置。后端重排该组所有接口的 sort_order。"""
-    _check_group_name(body.group_name)
-    now = datetime.now(timezone.utc).isoformat()
-    # Non-admin users can only move their own interfaces and only reorder
-    # their own rows within a group; admin reorders the whole group as before.
-    admin = _is_admin(current_user)
-    with db.get_conn() as conn:
-        current = _row_to_dict(_get_or_404(conn, iid, user=current_user))
-        source_group = current["group_name"]
-        # 更新分组
-        conn.execute(
-            "UPDATE interfaces SET group_name = ?, updated_at = ? WHERE id = ?",
-            (body.group_name, now, iid),
-        )
-        # 取出目标分组所有接口，按当前 sort_order, id 排序
-        if admin:
-            rows = conn.execute(
-                "SELECT id FROM interfaces WHERE group_name = ? "
-                "ORDER BY sort_order, id",
-                (body.group_name,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id FROM interfaces WHERE group_name = ? "
-                "AND created_by = ? ORDER BY sort_order, id",
-                (body.group_name, current_user.id),
-            ).fetchall()
-        ids = [r["id"] for r in rows]
-        # 把当前接口从原位置移除，插入到 target_index
-        if iid in ids:
-            ids.remove(iid)
-        idx = max(0, min(body.target_index, len(ids)))
-        ids.insert(idx, iid)
-        # 重新编号 sort_order
-        for i, rid in enumerate(ids):
-            conn.execute("UPDATE interfaces SET sort_order = ? WHERE id = ?", (i, rid))
-        if source_group != body.group_name:
-            if admin:
-                source_rows = conn.execute(
-                    "SELECT id FROM interfaces WHERE group_name = ? "
-                    "ORDER BY sort_order, id",
-                    (source_group,),
-                ).fetchall()
-            else:
-                source_rows = conn.execute(
-                    "SELECT id FROM interfaces WHERE group_name = ? "
-                    "AND created_by = ? ORDER BY sort_order, id",
-                    (source_group, current_user.id),
-                ).fetchall()
-            for i, row in enumerate(source_rows):
-                conn.execute(
-                    "UPDATE interfaces SET sort_order = ? WHERE id = ?",
-                    (i, row["id"]),
-                )
-    return {"ok": True}
+    return persist_move_interface(
+        iid,
+        group_name=body.group_name,
+        target_index=body.target_index,
+        user=current_user,
+    )
 
 
 @router.post("/groups/delete")
@@ -333,94 +288,22 @@ def remove_group(body: DeleteGroupBody, current_user: User = Depends(get_current
 @router.put("/{iid}/http-publication")
 def set_http_publication(iid: int, body: HttpPublishIn, current_user: User = Depends(get_current_user)):
     """独立更新普通 HTTP 发布配置，不覆盖编辑器里其它接口字段。"""
-    now = datetime.now(timezone.utc).isoformat()
-    with db.get_conn() as conn:
-        row = _get_or_404(conn, iid, user=current_user)
-        draft = InterfaceIn(
-            **{
-                **_row_to_dict(row),
-                "http_enabled": body.enabled,
-                "proxy_slug": body.slug,
-                "proxy_query_keys": body.query_keys,
-                "proxy_header_keys": body.header_keys,
-                "proxy_body_enabled": body.body_enabled,
-                "proxy_body_keys": body.body_keys,
-            }
-        )
-        slug, query_keys, header_keys, body_keys = _validate_proxy_publish(conn, draft, iid)
-        conn.execute(
-            "UPDATE interfaces SET http_enabled=?, proxy_slug=?, proxy_query_keys=?, "
-            "proxy_header_keys=?, proxy_body_enabled=?, proxy_body_keys=?, updated_at=? WHERE id=?",
-            (
-                1 if body.enabled else 0,
-                slug,
-                json.dumps(query_keys, ensure_ascii=False),
-                json.dumps(header_keys, ensure_ascii=False),
-                1 if body.body_enabled else 0,
-                json.dumps(body_keys, ensure_ascii=False),
-                now,
-                iid,
-            ),
-        )
-        row = conn.execute("SELECT * FROM interfaces WHERE id = ?", (iid,)).fetchone()
-    return _row_to_dict(row)
-
-
-def _auto_slug(conn, interface: dict) -> str:
-    current = (interface.get("proxy_slug") or "").strip().lower()
-    candidate = current if _PROXY_SLUG_RE.fullmatch(current) else publication.slug_suggestion(interface)
-    base = candidate[:64]
-    suffix = 1
-    while conn.execute(
-        "SELECT 1 FROM interfaces WHERE proxy_slug = ? AND http_enabled = 1 AND id <> ?",
-        (candidate, interface["id"]),
-    ).fetchone():
-        marker = f"-{interface['id']}" if suffix == 1 else f"-{interface['id']}-{suffix}"
-        candidate = base[: 64 - len(marker)] + marker
-        suffix += 1
-    return candidate
+    return apply_http_publication(
+        iid,
+        enabled=body.enabled,
+        slug=body.slug,
+        query_keys=body.query_keys,
+        header_keys=body.header_keys,
+        body_enabled=body.body_enabled,
+        body_keys=body.body_keys,
+        user=current_user,
+    )
 
 
 @router.post("/{iid}/http-publication/auto")
 def auto_http_publication(iid: int, current_user: User = Depends(get_current_user)):
     """Infer a safe forwarding contract and publish without exposing protocol details."""
-    now = datetime.now(timezone.utc).isoformat()
-    with db.get_conn() as conn:
-        row = _get_or_404(conn, iid, user=current_user)
-        interface = _row_to_dict(row)
-        body_keys = publication.infer_body_keys(interface)
-        draft = InterfaceIn(
-            **{
-                **interface,
-                "http_enabled": True,
-                "proxy_slug": _auto_slug(conn, interface),
-                "proxy_query_keys": publication.infer_query_keys(interface),
-                "proxy_header_keys": publication.infer_header_keys(
-                    interface, config.PROXY_KEY_HEADER
-                ),
-                "proxy_body_enabled": bool(body_keys),
-                "proxy_body_keys": body_keys,
-            }
-        )
-        slug, query_keys, header_keys, body_keys = _validate_proxy_publish(
-            conn, draft, iid
-        )
-        conn.execute(
-            "UPDATE interfaces SET http_enabled=1, proxy_slug=?, proxy_query_keys=?, "
-            "proxy_header_keys=?, proxy_body_enabled=?, proxy_body_keys=?, updated_at=? "
-            "WHERE id=?",
-            (
-                slug,
-                json.dumps(query_keys, ensure_ascii=False),
-                json.dumps(header_keys, ensure_ascii=False),
-                1 if body_keys else 0,
-                json.dumps(body_keys, ensure_ascii=False),
-                now,
-                iid,
-            ),
-        )
-        row = conn.execute("SELECT * FROM interfaces WHERE id = ?", (iid,)).fetchone()
-    return _row_to_dict(row)
+    return persist_auto_http_publication(iid, user=current_user)
 
 
 @router.post("/{iid}/run")

@@ -692,6 +692,23 @@ def install_platform_minio_mcp(
         raise _mcp_http_error(exc) from exc
 
 
+@router.post(
+    "/mcp-servers/platform-api-hub",
+    response_model=McpServerOut,
+)
+def install_platform_api_hub_mcp(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return mcp_server_service.install_platform_api_hub_mcp(
+            db,
+            current_user.id,
+        )
+    except mcp_server_service.McpServerServiceError as exc:
+        raise _mcp_http_error(exc) from exc
+
+
 @router.get("/process-plugins", response_model=list[ProcessPluginOut])
 def list_process_plugins(
     include_uninstalled: bool = False,

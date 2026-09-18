@@ -156,6 +156,7 @@ ROUTE_PARAMETERS = {
         "current_user",
     ),
     "install_platform_minio_mcp": ("db", "current_user"),
+    "install_platform_api_hub_mcp": ("db", "current_user"),
     "list_assistant_tools": ("db", "current_user"),
     "update_assistant_tool_enabled": (
         "tool_name",
@@ -372,6 +373,10 @@ DELEGATES = {
     "install_platform_minio_mcp": (
         "mcp_server_service",
         "install_platform_minio_mcp",
+    ),
+    "install_platform_api_hub_mcp": (
+        "mcp_server_service",
+        "install_platform_api_hub_mcp",
     ),
     "list_assistant_tools": ("runtime", "builtin_tool_catalog"),
     "update_assistant_tool_enabled": (
@@ -700,6 +705,27 @@ def test_router_patch_seams_are_resolved_at_request_time(
         },
     }
 
+    api_hub_call = {}
+
+    def fake_install_api_hub(*args, **kwargs):
+        api_hub_call["args"] = args
+        api_hub_call["kwargs"] = kwargs
+        return expected_mcp
+
+    monkeypatch.setattr(
+        mcp_server_service,
+        "install_platform_api_hub_mcp",
+        fake_install_api_hub,
+    )
+    assert assistant_router.install_platform_api_hub_mcp(
+        database,
+        actor,
+    ) is expected_mcp
+    assert api_hub_call == {
+        "args": (database, "owner-1"),
+        "kwargs": {},
+    }
+
 
 def test_super_assistant_services_do_not_import_http_router():
     for module in (
@@ -735,7 +761,8 @@ def test_super_assistant_router_and_services_stay_bounded():
         # this domain service; keep the guard above the current bounded size.
         # 商用线合并：删除 server 时撤销 CapabilityRevision 授权位 +
         # 级联清理自研 MCP 开发项目（两条清理路径叠加）→ 390 → 400
-        "mcp_server_service.py": 400,
+        # 平台内置 API Hub MCP 与 MinIO 共用 _install_builtin_mcp
+        "mcp_server_service.py": 480,
     }
     for filename, maximum in limits.items():
         line_count = len(
@@ -809,8 +836,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 10 条路径、10 个操作；dispatch dead-letter 显式重放新增 1 条运维路径；
     # process-plugin 持久化生命周期新增 4 条路径、5 个操作；Artifact 二进制下载
     # 与 HMAC callback ingress 各新增 1 条路径/1 个操作，旧路由语义保持并行。
-    assert len(paths) == 98
-    assert sum(len(item) for item in paths.values()) == 126
+    # 平台内置接口代理 MCP 安装新增 /mcp-servers/platform-api-hub 的 POST
+    # 共 1 个操作（1 条路径）。
+    assert len(paths) == 99
+    assert sum(len(item) for item in paths.values()) == 127
     assert hashlib.sha256(payload).hexdigest() == (
-        "d57219e54ce8cbe88c2599b85ef57ec1162194fea0554793c1942bede8587931"
+        "31c75433d41b558fe09de79f36220350fe8ada7befe7722f00847e9453b0dc1a"
     )
