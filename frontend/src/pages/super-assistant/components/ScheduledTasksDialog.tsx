@@ -247,7 +247,7 @@ export default function ScheduledTasksDialog({
       <DialogShell
         size="wide"
         title="定时任务"
-        description="到点后助手在后台执行指令。回来看结果，不必盯着对话框。"
+        description="到点后助手在后台执行。需确认的操作不会替你点头；你已关闭确认的外部工具会按指令直接执行。"
         onClose={onClose}
         icon={<Clock size={18} />}
         contentClassName="h-[min(82dvh,44rem)]"
@@ -438,6 +438,9 @@ function CreateForm({
             className="mt-1.5 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </label>
+        <p className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+          浏览器、委派等平台写操作不会在后台自动执行。外部工具是否直接调用，以该工具的「需要确认」为准。
+        </p>
       </div>
       <footer className="flex shrink-0 justify-end border-t border-[var(--color-border)] px-5 py-3.5">
         <button

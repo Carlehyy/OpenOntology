@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Braces, Check, ChevronRight, CirclePlus, Copy, Download, FileCode2, FileUp, Folder, Play,
-  Plus, Send, Trash2, X, Database, GripVertical, KeyRound, Share2, ShieldCheck,
+  Plus, Send, Sparkles, Trash2, X, Database, GripVertical, KeyRound, Share2, ShieldCheck,
   LoaderCircle,
 } from 'lucide-react'
 import { apiError, apiHub, emptyHubInterface, validateHttpUrl, type HubInterface, type KV, type RunResult } from '@/api/apiHub'
+import { superAssistantApi, type SuperMcpServer } from '@/api/superAssistant'
 import { authApi, type PrivacyVar, type UserEnvVar } from '@/api/auth'
 import { Button } from '@/components/ui/Button'
 import {
@@ -64,6 +65,8 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   const [newGroupError, setNewGroupError] = useState('')
   const [privacyVars, setPrivacyVars] = useState<PrivacyVar[]>([])
   const [envVars, setEnvVars] = useState<UserEnvVar[]>([])
+  const [hubMcp, setHubMcp] = useState<SuperMcpServer | null>(null)
+  const [hubMcpBusy, setHubMcpBusy] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const [sizes, setSizes] = useState<[number, number]>([28, 72])
 
@@ -174,6 +177,35 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     setExtraGroups(current => current.includes(name) ? current : [...current, name])
     patchDraft('group_name', name)
     closeNewGroup()
+  }
+
+  const refreshHubMcp = useCallback(async () => {
+    try {
+      const items = await superAssistantApi.mcpServers()
+      setHubMcp(Array.isArray(items) ? items.find(item => item.builtin_key === 'api_hub') ?? null : null)
+    } catch {
+      setHubMcp(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshHubMcp()
+  }, [refreshHubMcp])
+
+  const exposeToAssistant = async () => {
+    if (hubMcpBusy) return
+    setHubMcpBusy(true)
+    try {
+      if (hubMcp && !hubMcp.enabled) {
+        await superAssistantApi.updateMcpServer(hubMcp.id, { enabled: true })
+      }
+      await superAssistantApi.installPlatformApiHubMcp()
+      await refreshHubMcp()
+    } catch (error) {
+      onError(apiError(error) || '无法提供给超级助手')
+    } finally {
+      setHubMcpBusy(false)
+    }
   }
 
   useEffect(() => {
@@ -424,6 +456,18 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
         <div className="grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--color-border)] bg-card px-3 py-[1.125rem]">
           <Button variant="outline" size="sm" onClick={() => setProxyKeys(true)}><KeyRound size={13} />HTTP 调用方</Button>
           <Button variant="outline" size="sm" onClick={() => setSystemData(true)}><Database size={13} />系统数据</Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="col-span-2"
+            data-testid="api-hub-expose-mcp"
+            loading={hubMcpBusy}
+            onClick={() => void exposeToAssistant()}
+            title={hubMcp?.enabled ? '超级助手已可管理这些接口' : '把接口管理能力提供给超级助手'}
+          >
+            {!hubMcpBusy && <Sparkles size={13} />}
+            {hubMcp?.enabled ? '已提供给超级助手' : hubMcp ? '重新提供给超级助手' : '提供给超级助手'}
+          </Button>
         </div>
       </aside>
 

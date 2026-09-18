@@ -7,6 +7,8 @@ import json
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.auth.models import User
+from app.auth.permissions import user_has_menu_access
 from app.settings.object_storage.service import (
     get_workspace_minio_service,
     minio_tool_manifest,
@@ -302,6 +304,15 @@ async def test_mcp_server(
         if item.builtin_key == "minio":
             get_workspace_minio_service().status()
             tools = minio_tool_manifest()
+        elif item.builtin_key == "api_hub":
+            from app.api_hub.assistant_mcp import MENU_KEY, tool_manifest as api_hub_tool_manifest
+
+            actor = db.get(User, owner_id)
+            if actor is None or not user_has_menu_access(db, actor, MENU_KEY):
+                raise McpServerUnavailableError(
+                    "当前用户没有「接口代理 → 接口管理」权限",
+                )
+            tools = api_hub_tool_manifest()
         else:
             tools = await discover_tools(
                 transport=item.transport,
@@ -332,6 +343,70 @@ async def test_mcp_server(
         return McpTestOut(ok=False, message=str(exc), tools=[])
 
 
+def _install_builtin_mcp(
+    db: Session,
+    owner_id: str,
+    *,
+    builtin_key: str,
+    name: str,
+    url: str,
+    tools: list[dict],
+    display_name: str = "",
+    description: str = "",
+) -> SuperAssistantMcpServer:
+    item = db.query(SuperAssistantMcpServer).filter(
+        SuperAssistantMcpServer.owner_id == owner_id,
+        SuperAssistantMcpServer.builtin_key == builtin_key,
+    ).first()
+    if not item:
+        name_taken = db.query(SuperAssistantMcpServer).filter(
+            SuperAssistantMcpServer.owner_id == owner_id,
+            SuperAssistantMcpServer.name == name,
+        ).first()
+        if name_taken:
+            raise McpServerConflictError(
+                f"已有同名 {name} MCP，请先重命名或删除",
+            )
+        item = SuperAssistantMcpServer(
+            owner_id=owner_id,
+            name=name,
+            display_name=display_name,
+            description=description,
+            builtin_key=builtin_key,
+            transport="streamable_http",
+            url=url,
+            headers_encrypted=None,
+            header_names=[],
+            command=None,
+            args=[],
+            env_encrypted=None,
+            env_names=[],
+            enabled=True,
+            require_confirmation=True,
+        )
+        db.add(item)
+    digest = _manifest_hash(item, tools)
+    revision = int(item.manifest_revision or 1)
+    if item.manifest_hash and item.manifest_hash != digest:
+        revision += 1
+    _freeze_manifest(db, item, tools, revision, enabled=True)
+    item.manifest_revision = revision
+    item.manifest_hash = digest
+    item.tool_manifest = tools
+    if display_name:
+        item.display_name = display_name
+    if description:
+        item.description = description
+    item.last_test_status = "success"
+    item.last_test_message = (
+        f"平台内置连接成功，发现 {len(item.tool_manifest)} 个工具"
+    )
+    item.last_tested_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
 def install_platform_minio_mcp(
     db: Session,
     owner_id: str,
@@ -345,50 +420,44 @@ def install_platform_minio_mcp(
         raise McpServerUnavailableError(
             f"平台 MinIO 当前不可用：{exc}",
         ) from exc
-
-    item = db.query(SuperAssistantMcpServer).filter(
-        SuperAssistantMcpServer.owner_id == owner_id,
-        SuperAssistantMcpServer.builtin_key == "minio",
-    ).first()
-    if not item:
-        name_taken = db.query(SuperAssistantMcpServer).filter(
-            SuperAssistantMcpServer.owner_id == owner_id,
-            SuperAssistantMcpServer.name == "platform_minio",
-        ).first()
-        if name_taken:
-            raise McpServerConflictError(
-                "已有同名 platform_minio MCP，请先重命名或删除",
-            )
-        item = SuperAssistantMcpServer(
-            owner_id=owner_id,
-            name="platform_minio",
-            builtin_key="minio",
-            transport="streamable_http",
-            url="builtin://minio",
-            headers_encrypted=None,
-            header_names=[],
-            command=None,
-            args=[],
-            env_encrypted=None,
-            env_names=[],
-            enabled=True,
-            require_confirmation=True,
-        )
-        db.add(item)
-    tools = minio_tool_manifest_fn()
-    digest = _manifest_hash(item, tools)
-    revision = int(item.manifest_revision or 1)
-    if item.manifest_hash and item.manifest_hash != digest:
-        revision += 1
-    _freeze_manifest(db, item, tools, revision, enabled=True)
-    item.manifest_revision = revision
-    item.manifest_hash = digest
-    item.tool_manifest = tools
-    item.last_test_status = "success"
-    item.last_test_message = (
-        f"平台内置连接成功，发现 {len(item.tool_manifest)} 个工具"
+    return _install_builtin_mcp(
+        db,
+        owner_id,
+        builtin_key="minio",
+        name="platform_minio",
+        url="builtin://minio",
+        tools=minio_tool_manifest_fn(),
     )
-    item.last_tested_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(item)
-    return item
+
+
+def install_platform_api_hub_mcp(
+    db: Session,
+    owner_id: str,
+    *,
+    tool_manifest_fn=None,
+) -> SuperAssistantMcpServer:
+    from app.api_hub.assistant_mcp import (
+        BUILTIN_URL,
+        MENU_KEY,
+        SERVER_NAME,
+        tool_manifest as api_hub_tool_manifest,
+    )
+
+    actor = db.get(User, owner_id)
+    if actor is None:
+        raise McpServerValidationError("用户不存在")
+    if not user_has_menu_access(db, actor, MENU_KEY):
+        raise McpServerValidationError(
+            "当前用户没有「接口代理 → 接口管理」权限",
+        )
+    manifest = tool_manifest_fn or api_hub_tool_manifest
+    return _install_builtin_mcp(
+        db,
+        owner_id,
+        builtin_key="api_hub",
+        name=SERVER_NAME,
+        url=BUILTIN_URL,
+        tools=manifest(),
+        display_name="接口代理",
+        description="管理当前用户在接口代理中的接口、分类、HTTP 发布与调用方密钥，并调用指定接口。",
+    )

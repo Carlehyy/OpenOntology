@@ -890,6 +890,7 @@ test('定时任务弹窗：查看已有计划、创建、点进某次执行', as
   await expect(dialog.getByRole('button', { name: '在会话中继续' })).toBeVisible()
 
   await page.getByRole('button', { name: '创建定时任务' }).click()
+  await expect(dialog.getByText(/外部工具是否直接调用/)).toBeVisible()
   await dialog.getByPlaceholder('到点后助手会按这段指令在后台执行').fill('明早汇总待办')
   await page.getByRole('button', { name: '创建', exact: true }).click()
   await expect(dialog.getByText('明早汇总待办')).toBeVisible()

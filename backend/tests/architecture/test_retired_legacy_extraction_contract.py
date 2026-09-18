@@ -40,6 +40,7 @@ PRESERVED_MCP_OPERATIONS = {
     ("get", "/api/v2/community/mcp-servers"),
     ("get", "/api/v2/super-assistant/mcp-servers"),
     ("post", "/api/v2/super-assistant/mcp-servers/platform-minio"),
+    ("post", "/api/v2/super-assistant/mcp-servers/platform-api-hub"),
 }
 
 RETIRED_MINIO_OPERATION_PREFIXES = (
