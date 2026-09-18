@@ -443,11 +443,14 @@ export default function GovernanceTab({
       setRemainingRefreshCycles(BACKGROUND_REFRESH_MAX_CYCLES)
       void refreshAll()
     } catch (e: unknown) {
-      const text = formatDecideFailureMessage(e)
-      toast.error(text)
-      setMsg({ ok: false, text })
-      if (decision === 'rejected') setRejectError(text)
-      else setApproveError(text)
+      // toast / 页头用完整可行动句；弹窗内 DecisionDialogs 会再包一层
+      // 「拒绝/批准提交失败：…请核对待办状态后重试」，故 error state 只传服务端原因。
+      const toastText = formatDecideFailureMessage(e)
+      const dialogReason = extractApiErrorMessage(e, '未知原因')
+      toast.error(toastText)
+      setMsg({ ok: false, text: toastText })
+      if (decision === 'rejected') setRejectError(dialogReason)
+      else setApproveError(dialogReason)
     } finally {
       setBusy(null)
     }
