@@ -1065,6 +1065,22 @@ test('流式生成跨会话隔离：A 生成中切到 B，B 输入区不受影�
   await expect(page.getByText('你好，我是超级助手')).toBeVisible()
 })
 
+test('生成中可继续输入并将下一条排队', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page, { chatDelayMs: 1500 })
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  await page.getByRole('textbox', { name: '向超级助手发送消息' }).fill('你好')
+  await page.getByRole('button', { name: '发送消息' }).click()
+  await expect(page.getByRole('button', { name: '停止生成' })).toBeVisible()
+
+  await page.getByRole('textbox', { name: '向超级助手发送消息' }).fill('继续补充')
+  await page.getByRole('button', { name: '发送消息' }).click()
+  await expect(page.getByTestId('super-assistant-queued-prompt')).toContainText('继续补充')
+  await expect(page.getByRole('button', { name: '停止生成' })).toBeVisible()
+  await expect.poll(() => mocks.chatCalls.length).toBe(2)
+})
+
 test('会话模型选择器为 ReUI Select，选择后 PATCH 持久化', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)

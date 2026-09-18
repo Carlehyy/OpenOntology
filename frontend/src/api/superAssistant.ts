@@ -38,6 +38,8 @@ export interface ToolStep {
   status: string
   arguments?: Record<string, unknown>
   preview?: string
+  /** 流式期间用于对齐 tool_result；message_end 回放可能没有此字段 */
+  toolRunId?: string
 }
 
 /** 会话附件（服务端会话目录 manifest 行）：仅所属会话可见 */

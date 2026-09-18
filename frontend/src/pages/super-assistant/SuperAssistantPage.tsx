@@ -42,6 +42,9 @@ import {
   ChatMessage, ConfirmationCard, ContextUsage,
   type PendingConfirmation,
 } from './components/AssistantConversation'
+import {
+  appendToolStart, enqueueMessage, patchToolStep, shiftQueue,
+} from './components/chatTranscript'
 import type { ModelConfig } from '@/types/ontology'
 
 const ATTACH_ACCEPT = '.csv,.xlsx,.xls,.json,.xml,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt'
@@ -96,6 +99,7 @@ export default function SuperAssistantPage() {
   const [pendingByConv, setPendingByConv] = useState<Record<string, PendingConfirmation>>({})
   // 审批请求进行中的动作：仅被点击的按钮转圈，两个按钮在请求期间都禁用防重复提交
   const [pendingDecision, setPendingDecision] = useState<'approve' | 'deny' | null>(null)
+  const [queuedByConv, setQueuedByConv] = useState<Record<string, string[]>>({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showMessageHistory, setShowMessageHistory] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -119,11 +123,14 @@ export default function SuperAssistantPage() {
   // 实时浏览器面板三态：closed / 大窗口 modal / 画中画 pip（与数据管家同一面板组件）
   const [browserDisplay, setBrowserDisplay] = useState<BrowserDisplayMode>('closed')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
   const senderRef = useRef<ElementRef<typeof Sender>>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const queuedByConvRef = useRef<Record<string, string[]>>({})
   // 流式回调闭包固定于发起时刻，需经 ref 读取「当前选中的会话」做渲染守卫
   const selectedIdRef = useRef<string | null>(null)
   selectedIdRef.current = selectedId
+  queuedByConvRef.current = queuedByConv
   const streamsRef = useRef(new Map<string, StreamBuffer>())
   // 输入草稿按会话缓存：多会话来回切换时未发送的内容不丢失；
   // '__new__' 是「尚未落地的新会话」视图（selectedId 为 null）的草稿槽
@@ -268,18 +275,24 @@ export default function SuperAssistantPage() {
     setInput(draftsRef.current.get(selectedId ?? NEW_DRAFT_KEY) ?? '')
   }, [selectedId])
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, pendingByConv])
-
   const selectedConversation = conversations.find(item => item.id === selectedId) || null
   const selectedModelId = selectedConversation?.model_config_id || models.find(model => model.is_default)?.id || models[0]?.id || ''
   const selectedModel = models.find(model => model.id === selectedModelId)
   const myMessages = useMemo(() => messages.filter(message => message.role === 'user'), [messages])
   const runningHere = selectedId !== null && streamingIds.has(selectedId)
   const pendingHere = selectedId ? pendingByConv[selectedId] ?? null : null
+  const queuedHere = selectedId ? queuedByConv[selectedId] || [] : []
+
+  useEffect(() => { stickToBottomRef.current = true }, [selectedId])
+  useEffect(() => {
+    if (!stickToBottomRef.current) return
+    messagesEndRef.current?.scrollIntoView({ behavior: runningHere ? 'auto' : 'smooth', block: 'end' })
+  }, [messages, pendingByConv, runningHere])
 
   const createConversation = async () => {
     try {
       const item = await superAssistantApi.createConversation({ model_config_id: selectedModelId || null })
+      selectedIdRef.current = item.id
       setConversations(current => [item, ...current]); setSelectedId(item.id); setMessages([])
       return item
     } catch (error) { toast.error('新建会话失败', { description: errorText(error) }); return null }
@@ -427,13 +440,22 @@ export default function SuperAssistantPage() {
     }
   }
 
-  const send = async (value?: string) => {
-    const message = (value ?? input).trim()
-    if (!message || runningHere) return
-    let conversation = selectedConversation
-    if (!conversation) conversation = await createConversation()
-    if (!conversation) return
-    const conversationId = conversation.id
+  const queueMessage = (conversationId: string, message: string) => {
+    const next = enqueueMessage(queuedByConvRef.current[conversationId] || [], message)
+    const updated = { ...queuedByConvRef.current, [conversationId]: next }
+    queuedByConvRef.current = updated
+    setQueuedByConv(updated)
+  }
+
+  const removeQueued = (index: number) => {
+    if (!selectedId) return
+    const rest = (queuedByConvRef.current[selectedId] || []).filter((_, current) => current !== index)
+    const updated = { ...queuedByConvRef.current, [selectedId]: rest }
+    queuedByConvRef.current = updated
+    setQueuedByConv(updated)
+  }
+
+  const dispatchMessage = async (message: string, conversationId: string, modelConfigId: string | null) => {
     const now = new Date().toISOString()
     const tempUserId = `user-${Date.now()}`
     const tempAssistantId = `assistant-${Date.now()}`
@@ -443,12 +465,6 @@ export default function SuperAssistantPage() {
       delete next[conversationId]
       return next
     })
-    setInput('')
-    // 草稿同步清空：inputRef 立即置空，随后会话切换的草稿 effect 读到的即为空值，
-    // 刚发送的文本不会被存回任何草稿槽
-    inputRef.current = ''
-    draftsRef.current.set(conversationId, '')
-    draftsRef.current.set(NEW_DRAFT_KEY, '')
     setStopping(false)
     clearPending()
     setStreamingIds(current => new Set(current).add(conversationId))
@@ -461,7 +477,6 @@ export default function SuperAssistantPage() {
       thinkingRound: null,
     }
     streamsRef.current.set(conversationId, buffer)
-    // 缓冲始终更新；仅当仍处于该会话时才渲染增量（跨会话隔离）
     const applyBuffer = () => {
       if (selectedIdRef.current !== conversationId) return
       setMessages(current => current.map(item => item.id === buffer.messageId
@@ -475,21 +490,26 @@ export default function SuperAssistantPage() {
           }
         : item))
     }
-    setMessages(current => [...current,
-      { id: tempUserId, conversation_id: conversationId, role: 'user', content: message, status: 'complete', steps: [], token_usage: {}, created_at: now },
-      { id: tempAssistantId, conversation_id: conversationId, role: 'assistant', content: '', status: 'streaming', steps: [], token_usage: {}, created_at: now },
-    ])
+    if (selectedIdRef.current === conversationId) {
+      setMessages(current => [...current,
+        { id: tempUserId, conversation_id: conversationId, role: 'user', content: message, status: 'complete', steps: [], token_usage: {}, created_at: now },
+        { id: tempAssistantId, conversation_id: conversationId, role: 'assistant', content: '', status: 'streaming', steps: [], token_usage: {}, created_at: now },
+      ])
+    }
     try {
-      await superAssistantApi.streamChat(conversationId, { message, model_config_id: selectedModelId || null, agent_mode: true }, ({ event, data }) => {
+      await superAssistantApi.streamChat(conversationId, { message, model_config_id: modelConfigId, agent_mode: true }, ({ event, data }) => {
         if (event === 'thinking') {
-          // 推理模型的首 token 前与多轮工具调用间只发 thinking：显示轮次避免长时间空白转圈
           buffer.thinkingRound = Number(data.round) || null
           applyBuffer()
         } else if (event === 'text_delta') {
           buffer.content += String(data.delta || '')
           applyBuffer()
         } else if (event === 'tool_start') {
-          buffer.steps = [...buffer.steps, { toolName: data.toolName, status: 'running', arguments: data.arguments }]
+          buffer.steps = appendToolStart(buffer.steps, {
+            toolName: data.toolName,
+            arguments: data.arguments,
+            toolRunId: data.toolRunId,
+          })
           applyBuffer()
         } else if (event === 'tool_confirmation_required') {
           setPendingByConv(current => ({
@@ -501,7 +521,7 @@ export default function SuperAssistantPage() {
               arguments: data.arguments || {},
             },
           }))
-          buffer.steps = buffer.steps.map((step, index) => index === buffer.steps.length - 1 ? { ...step, status: 'awaiting_confirmation' } : step)
+          buffer.steps = patchToolStep(buffer.steps, { toolRunId: data.toolRunId, status: 'awaiting_confirmation' })
           applyBuffer()
         } else if (event === 'tool_result') {
           setPendingByConv(current => {
@@ -510,7 +530,7 @@ export default function SuperAssistantPage() {
             delete next[conversationId]
             return next
           })
-          buffer.steps = buffer.steps.map((step, index) => index === buffer.steps.length - 1 ? { ...step, status: data.status, preview: data.preview } : step)
+          buffer.steps = patchToolStep(buffer.steps, { toolRunId: data.toolRunId, status: data.status, preview: data.preview })
           applyBuffer()
         } else if (event === 'message_end') {
           buffer.content = data.message?.content || buffer.content
@@ -542,16 +562,45 @@ export default function SuperAssistantPage() {
       })
       setStopping(false)
       clearPending()
-      try {
-        if (selectedIdRef.current === conversationId) {
-          const [messageRows] = await Promise.all([superAssistantApi.messages(conversationId), refreshConversations()])
-          setMessages(messageRows)
-        } else {
-          await refreshConversations()
-        }
-      } catch { /* optimistic state remains usable */ }
-      if (selectedIdRef.current === conversationId) window.setTimeout(() => senderRef.current?.focus(), 0)
     }
+    const queued = shiftQueue(queuedByConvRef.current[conversationId] || [])
+    const updatedQueue = { ...queuedByConvRef.current, [conversationId]: queued.rest }
+    queuedByConvRef.current = updatedQueue
+    setQueuedByConv(updatedQueue)
+    if (queued.next) {
+      void dispatchMessage(queued.next, conversationId, modelConfigId)
+      return
+    }
+    try {
+      if (selectedIdRef.current === conversationId) {
+        const [messageRows] = await Promise.all([superAssistantApi.messages(conversationId), refreshConversations()])
+        setMessages(messageRows)
+      } else {
+        await refreshConversations()
+      }
+    } catch { /* optimistic state remains usable */ }
+    if (selectedIdRef.current === conversationId) window.setTimeout(() => senderRef.current?.focus(), 0)
+  }
+
+  const send = async (value?: string) => {
+    const message = (value ?? input).trim()
+    if (!message || models.length === 0) return
+    if (runningHere && selectedId) {
+      queueMessage(selectedId, message)
+      setInput('')
+      inputRef.current = ''
+      draftsRef.current.set(selectedId, '')
+      return
+    }
+    let conversation = selectedConversation
+    if (!conversation) conversation = await createConversation()
+    if (!conversation) return
+    const conversationId = conversation.id
+    setInput('')
+    inputRef.current = ''
+    draftsRef.current.set(conversationId, '')
+    draftsRef.current.set(NEW_DRAFT_KEY, '')
+    await dispatchMessage(message, conversationId, conversation.model_config_id || selectedModelId || null)
   }
 
   const stop = async () => {
@@ -578,7 +627,9 @@ export default function SuperAssistantPage() {
     finally { setPendingDecision(null) }
   }
 
-  const canSend = input.trim().length > 0 && !runningHere && models.length > 0
+  const hasDraft = input.trim().length > 0 && models.length > 0
+  const canSend = hasDraft
+  const showStop = runningHere && !hasDraft
   // SenderProps 未显式声明原生透传属性，但库内部会转发到内部 textarea
   const senderNativeProps = { autoFocus: true, 'aria-label': '向超级助手发送消息' }
   const placeholder = loading
@@ -606,25 +657,23 @@ export default function SuperAssistantPage() {
       />
       <div
         data-testid="super-assistant-composer"
-        className={`relative overflow-visible rounded-xl border border-border bg-white transition-colors focus-within:border-brand focus-within:ring-2 focus-within:ring-ring ${prominent
-          ? 'shadow-[0_18px_50px_rgba(5,150,105,0.12)]'
-          : 'shadow-[0_8px_28px_rgba(15,23,42,0.08)]'}`}
+        className={`relative overflow-visible rounded-xl border border-border bg-card transition-colors focus-within:border-brand focus-within:ring-2 focus-within:ring-ring ${prominent ? 'shadow-sm' : ''}`}
       >
         {conversationFiles.length > 0 && (
-          <div data-testid="super-assistant-attachments" className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 px-2.5 py-2">
+          <div data-testid="super-assistant-attachments" className="flex flex-wrap items-center gap-1.5 border-b border-border px-2.5 py-2">
             {conversationFiles.map(file => (
               <span
                 key={file.id}
                 title={`${file.filename} · ${formatFileSize(file.size)} · 仅本会话可见`}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600"
+                className="inline-flex items-center gap-1 rounded-lg border border-border bg-[var(--color-bg-base)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)]"
               >
-                <Paperclip size={11} className="shrink-0 text-slate-400" />
+                <Paperclip size={11} className="shrink-0 text-[var(--color-text-tertiary)]" />
                 <span className="max-w-40 truncate">{file.filename}</span>
                 <button
                   type="button"
                   onClick={() => void removeAttachment(file.id)}
                   aria-label={`移除附件 ${file.filename}`}
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none"
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none"
                 >
                   <X size={11} />
                 </button>
@@ -637,8 +686,8 @@ export default function SuperAssistantPage() {
         {(() => {
           const slashHints = multicaConfig?.enabled ? matchSlashCommands(input, multicaConfig.commands) : []
           return slashHints.length > 0 && (
-            <div data-testid="multica-command-hints" className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 px-2.5 py-2">
-              <span className="text-[10px] text-slate-400">命令</span>
+            <div data-testid="multica-command-hints" className="flex flex-wrap items-center gap-1.5 border-b border-border px-2.5 py-2">
+              <span className="text-[10px] text-[var(--color-text-tertiary)]">命令</span>
               {slashHints.map(hint => (
                 <button
                   key={hint.command}
@@ -657,6 +706,24 @@ export default function SuperAssistantPage() {
             </div>
           )
         })()}
+        {queuedHere.length > 0 && (
+          <div data-testid="super-assistant-queued-prompt" className="space-y-1 border-b border-border px-2.5 py-2">
+            {queuedHere.map((item, index) => (
+              <div key={`${item}-${index}`} className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">排队</span>
+                <span className="min-w-0 flex-1 truncate">{item}</span>
+                <button
+                  type="button"
+                  aria-label="移除排队消息"
+                  onClick={() => removeQueued(index)}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="px-3 pb-1 pt-2.5">
           <Sender
             ref={senderRef}
@@ -672,10 +739,10 @@ export default function SuperAssistantPage() {
               return false
             }}
             onCancel={() => void stop()}
-            loading={runningHere}
+            loading={false}
             // 空态主输入框用品牌占位符；原生 placeholder 在聚焦输入后自动消失，不会混入用户文本
             placeholder={prominent && !loading && !modelLoadFailed && models.length > 0 ? '咨询任何问题，创造任何事物' : placeholder}
-            disabled={runningHere || models.length === 0}
+            disabled={models.length === 0}
             autoSize={{ minRows: 1, maxRows: 6 }}
             suffix={false}
             className="w-full"
@@ -689,18 +756,18 @@ export default function SuperAssistantPage() {
             disabled={uploading}
             title="上传会话附件（仅本会话可见）"
             aria-label="上传会话附件"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-50 hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
           </button>
           <div className="flex shrink-0 items-center gap-2">
-            {runningHere ? (
+            {showStop ? (
               <button type="button" onClick={() => void stop()} disabled={stopping} aria-label="停止生成" title="停止生成"
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--color-text-primary)] text-white transition-opacity hover:opacity-90 active:scale-[0.98] disabled:opacity-50">
                 {stopping ? <Loader2 size={14} className="animate-spin" /> : <Square size={13} fill="currentColor" />}
               </button>
             ) : (
-              <button type="button" onClick={() => void send()} disabled={!canSend} aria-label="发送消息" title="发送消息"
+              <button type="button" onClick={() => void send()} disabled={!canSend} aria-label="发送消息" title={runningHere ? '排队下一条' : '发送消息'}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand text-white transition-all hover:bg-brand-deep active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1">
                 <Send size={14} />
               </button>
@@ -714,7 +781,7 @@ export default function SuperAssistantPage() {
                   aria-label="查看我发送的消息"
                   className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${showMessageHistory
                     ? 'border-brand bg-brand-soft text-brand-ink'
-                    : 'border-slate-200 text-slate-400 hover:bg-slate-50 hover:text-slate-600'}`}
+                    : 'border-border text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)]'}`}
                 >
                   <List size={15} />
                 </button>
@@ -724,11 +791,11 @@ export default function SuperAssistantPage() {
                 align="end"
                 sideOffset={92}
                 data-testid="super-assistant-message-history"
-                className="w-72 overflow-hidden rounded-lg border-slate-200 p-0"
+                className="w-72 overflow-hidden rounded-lg border-border p-0"
               >
-                <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
-                  <span className="text-[11px] font-medium text-slate-600">我发送的消息</span>
-                  <span className="text-[10px] text-slate-400">点击跳转 · 共 {myMessages.length} 条</span>
+                <div className="flex items-center justify-between border-b border-border px-3 py-2">
+                  <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">我发送的消息</span>
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">点击跳转 · 共 {myMessages.length} 条</span>
                 </div>
                 <div className="scrollbar-none max-h-64 overflow-y-auto py-1">
                   {[...myMessages].reverse().map((message, index) => (
@@ -737,10 +804,10 @@ export default function SuperAssistantPage() {
                       key={message.id}
                       onClick={() => jumpToMessage(message.id)}
                       title={message.content}
-                      className="flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
+                      className="flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:bg-[var(--color-bg-hover)] focus-visible:outline-none"
                     >
-                      <span className="mt-0.5 shrink-0 font-mono text-[10px] text-slate-400">#{myMessages.length - index}</span>
-                      <span className="min-w-0 flex-1 truncate text-xs text-slate-600">{message.content}</span>
+                      <span className="mt-0.5 shrink-0 font-mono text-[10px] text-[var(--color-text-tertiary)]">#{myMessages.length - index}</span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{message.content}</span>
                     </button>
                   ))}
                 </div>
@@ -958,8 +1025,14 @@ export default function SuperAssistantPage() {
                 </div>
               </div>
             ) : (
-              <div className="h-full overflow-y-auto">
-                <div className="mx-auto w-full max-w-4xl space-y-7 px-4 pb-28 pt-6 sm:px-8">
+              <div
+                className="h-full overflow-y-auto"
+                onScroll={event => {
+                  const node = event.currentTarget
+                  stickToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96
+                }}
+              >
+                <div className="mx-auto w-full max-w-4xl space-y-8 px-4 pb-10 pt-8 sm:px-8">
                   {messages.map(message => <ChatMessage key={message.id} message={message} />)}
                   {pendingHere && <ConfirmationCard pending={pendingHere} busyDecision={pendingDecision} onDecision={decision => void decide(decision)} />}
                   <div ref={messagesEndRef} />
@@ -969,7 +1042,7 @@ export default function SuperAssistantPage() {
           </main>
 
           {hasMessages && (
-            <footer className="shrink-0 px-4 pb-8 pt-2 sm:px-8 sm:pb-10">
+            <footer className="shrink-0 px-4 pb-6 pt-2 sm:px-8">
               <div className="mx-auto max-w-4xl">
                 {renderComposer()}
               </div>

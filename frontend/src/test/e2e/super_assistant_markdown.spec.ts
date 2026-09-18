@@ -99,7 +99,7 @@ async function mockSuperAssistant(page: Page) {
         role: 'assistant',
         content: wrappedMarkdown,
         status: 'complete',
-        steps: [],
+        steps: [{ toolName: 'web_search', status: 'success', preview: '{"hits":1}' }],
         token_usage: { inputTokens: 974, contextTokens: 974, contextLimit: 100_000 },
         created_at: now,
       },
@@ -121,8 +121,9 @@ test('渲染 Markdown 主体并在顶栏展示上下文用量', async ({ page })
   await expect(page.getByRole('columnheader', { name: '名称' })).toBeVisible()
   const codeBlock = page.locator('pre').filter({ hasText: 'def hello()' })
   await expect(codeBlock).toBeVisible()
-  await expect(codeBlock).toHaveCSS('background-color', 'rgb(248, 250, 252)')
-  await expect(codeBlock).toHaveCSS('color', 'rgb(51, 65, 85)')
+  await expect(codeBlock).toHaveCSS('background-color', 'rgb(13, 20, 32)')
+  await expect(codeBlock).toHaveCSS('color', 'rgb(219, 228, 240)')
+  await expect(page.getByTestId('super-assistant-turn-process')).toContainText('1 个工具')
   await expect(page.getByRole('link', { name: 'OpenOntology' })).toHaveAttribute('target', '_blank')
   await expect(page.getByText('围栏外的补充说明。')).toBeVisible()
   await expect(page.getByText('### 三级标题', { exact: true })).toHaveCount(0)
