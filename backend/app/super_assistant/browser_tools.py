@@ -1,6 +1,6 @@
 """超级助手的浏览器协作内置工具：与数据管家共用 BrowserManager 运行时。
 
-10 个 browser_* 工具的 schema 与 steward toolkit 同名同构（描述去掉管家语境），
+browser_* 工具的 schema 与 steward toolkit 同名同构（描述去掉管家语境），
 执行经 execute_browser_tool 统一分派：归属校验复用会话 404 语义，浏览器产物
 （登录态/捕获/下载）落超助会话工作区。
 """
@@ -81,6 +81,21 @@ BROWSER_TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "browser_scroll",
+        "description": "滚动当前会话浏览器的页面。往底部翻用 position=bottom，往下翻一屏用 page_down，回到顶部用 top。不要假装用 JS 或键盘滚动。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "position": {
+                    "type": "string",
+                    "enum": ["top", "bottom", "page_down", "page_up"],
+                    "description": "bottom=滚到页底，page_down=向下滚一屏，top=回顶部，page_up=向上一屏",
+                },
+            },
+            "required": ["position"],
+        },
+    },
+    {
         "name": "browser_type",
         "description": "向普通输入框填写非敏感文本；密码框会被系统拒绝，账号密码必须由用户在实时画面中手动输入。",
         "parameters": {
@@ -140,6 +155,9 @@ def _dispatch(
         return browser_manager.click_text(cid, str(arguments.get("text") or ""), actor="agent")
     if name == "browser_click_element":
         return browser_manager.click_element(cid, int(arguments.get("element_index") or 0), actor="agent")
+    if name == "browser_scroll":
+        return browser_manager.scroll(
+            cid, str(arguments.get("position") or "page_down"), actor="agent")
     if name == "browser_page_resources":
         rows = browser_manager.page_resources(
             cid, arguments.get("keyword"), int(arguments.get("limit") or 50), actor="agent")

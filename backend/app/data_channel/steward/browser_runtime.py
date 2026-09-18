@@ -1144,6 +1144,39 @@ class BrowserManager:
         return self.call(self._click_element(
             conversation_id, element_index, actor=actor))
 
+    async def _scroll(self, conversation_id: str, position: str = "page_down",
+                      *, actor: str = "agent") -> dict:
+        await self._wait_actor_allowed(conversation_id, actor)
+        session = await self._require(conversation_id)
+        target = (position or "page_down").strip()
+        if target not in {"top", "bottom", "page_down", "page_up"}:
+            raise BrowserRuntimeError(
+                "position 只能是 top、bottom、page_down 或 page_up")
+        async with self._browser_operation(session, conversation_id, actor):
+            session.touch()
+            page = session.page
+            before = await page.evaluate(
+                "() => ({y: window.scrollY, height: document.body.scrollHeight, inner: window.innerHeight})")
+            if target == "bottom":
+                await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+            elif target == "top":
+                await page.evaluate("() => window.scrollTo(0, 0)")
+            elif target == "page_down":
+                await page.mouse.wheel(0, 900)
+            else:
+                await page.mouse.wheel(0, -900)
+            await page.wait_for_timeout(600)
+            after = await page.evaluate(
+                "() => ({y: window.scrollY, height: document.body.scrollHeight, inner: window.innerHeight})")
+            state = await self._state(
+                conversation_id, actor=actor, check_control=False)
+            state["scroll"] = {"position": target, "before": before, "after": after}
+            return state
+
+    def scroll(self, conversation_id: str, position: str = "page_down",
+               *, actor: str = "agent") -> dict:
+        return self.call(self._scroll(conversation_id, position, actor=actor))
+
     async def _save_page_resource(
         self, conversation_id: str, element_index: int, filename: str | None = None,
         *, actor: str = "agent",

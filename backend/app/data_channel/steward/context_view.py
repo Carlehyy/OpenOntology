@@ -78,8 +78,9 @@ _FILE_TOOLS = {
 }
 _BROWSER_TOOLS = {
     "browser_open", "browser_state", "browser_navigate", "browser_click_text",
-    "browser_click_element", "browser_page_resources", "browser_save_resource",
-    "browser_type", "browser_network_requests", "download_captured_file",
+    "browser_click_element", "browser_scroll", "browser_page_resources",
+    "browser_save_resource", "browser_type", "browser_network_requests",
+    "download_captured_file",
 }
 _API_HUB_TOOLS = {
     "register_proxy_interface", "list_proxy_interfaces", "get_proxy_interface",

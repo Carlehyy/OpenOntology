@@ -37,13 +37,20 @@ from app.super_assistant.skill_tools import builtin_skill_tool_schemas, execute_
 
 logger = logging.getLogger(__name__)
 
-# 模型常先口头预告「我先看看…」却不带 tool_calls，循环会当成最终答复收工。
+# 模型常先口头预告/道歉「我先看看…让我重新来一次」却不带 tool_calls，循环会当成最终答复收工。
 _TOOL_PREAMBLE_MARKERS = (
-    "我先看看", "我看看", "我来看看", "先看下", "先看看",
-    "确认一下", "当前浏览器", "当前页面", "我先看一下",
+    "我先看看", "我看看", "我来看看", "先看下", "先看看", "我先看一下",
+    "确认一下", "当前浏览器", "当前页面",
+    "让我重新", "重新来一次", "重新来过", "我现在重新",
+    "没有真正控制", "并没有真的", "没在你的浏览器",
+    "先打开浏览器", "再滚到", "确保这次真的",
 )
-_TOOL_PREAMBLE_NUDGE = "请立即调用工具完成你刚才说要做的事，不要只口头描述。"
-_TOOL_PREAMBLE_MAX_CHARS = 160
+_TOOL_PREAMBLE_NUDGE = (
+    "请立即调用工具完成你刚才说要做的事，不要只口头描述或道歉。"
+    "滚动页面必须调用 browser_scroll；用户看到的是实时浏览器面板，不是本机 Chrome。"
+)
+_TOOL_PREAMBLE_MAX_CHARS = 400
+_TOOL_PREAMBLE_MAX_NUDGES = 2
 
 
 def looks_like_tool_preamble(text: str) -> bool:
@@ -102,10 +109,13 @@ _AGENT_MODE_SECTION = """自主执行模式：
 """
 
 # 浏览器协作规则：browser_* 工具与实时浏览器面板共享当前会话的同一浏览器
-_BROWSER_SECTION = """浏览器协作（用 browser_* 工具驱动当前会话的独立浏览器，用户可在实时浏览器面板实时观看）：
-1. 用户仅打开大窗口或画中画旁观时，你必须继续操作；只有用户正在输入或明确接管时才等待，当前步骤完成后如仍处于接管状态，如实说明并请用户交还。
-2. 绝不向用户索要密码，也不用 browser_type 填密码框；需要登录时请用户在实时浏览器画面中手动输入。
-3. 查页面数据来源用 browser_network_requests 核对 XHR/fetch 响应样例与分页字段，不要只凭 URL 名称猜接口；浏览器下载与页面资源保存都落在当前会话工作区（与会话附件同一边界），随后可用 list_session_files / read_session_file 读取。
+_BROWSER_SECTION = """浏览器协作（用 browser_* 工具驱动当前会话的独立浏览器，用户可在右上角「实时浏览器」面板观看同一画面）：
+1. 打开、跳转、点击、输入、滚动都必须调用对应 browser_* 工具；禁止只在文字里说「让我打开/滚动/看看」然后结束本轮。滚动或翻到页面底部用 browser_scroll，不要假装用 JS 或键盘。
+2. 工具返回 error 或 timeout 后，不得声称已经滚动、点击或打开成功；先 browser_state 核对 URL 与滚动位置，再换真正的工具重试。
+3. 用户说「没见到页面翻动」时，指的就是实时浏览器面板。若面板未打开，提醒用户点右上角显示器按钮观看，同时你仍须继续用工具操作。
+4. 用户仅打开大窗口或画中画旁观时，你必须继续操作；只有用户正在输入或明确接管时才等待，当前步骤完成后如仍处于接管状态，如实说明并请用户交还。
+5. 绝不向用户索要密码，也不用 browser_type 填密码框；需要登录时请用户在实时浏览器画面中手动输入。
+6. 查页面数据来源用 browser_network_requests 核对 XHR/fetch 响应样例与分页字段，不要只凭 URL 名称猜接口；浏览器下载与页面资源保存都落在当前会话工作区（与会话附件同一边界），随后可用 list_session_files / read_session_file 读取。
 """
 
 # 只读内置工具：同一轮内可并行执行（无副作用、无需确认）
@@ -1264,7 +1274,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             if not calls:
                 if (
                     round_tools
-                    and preamble_nudges < 1
+                    and preamble_nudges < _TOOL_PREAMBLE_MAX_NUDGES
                     and looks_like_tool_preamble(round_text)
                 ):
                     preamble_nudges += 1

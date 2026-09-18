@@ -21,8 +21,9 @@ const GROUP_DEFS: Array<{ key: string; label: string; names: string[] }> = [
   { key: 'web', label: '联网', names: ['web_fetch', 'web_search'] },
   { key: 'browser', label: '浏览器', names: [
     'browser_open', 'browser_state', 'browser_navigate', 'browser_click_text',
-    'browser_click_element', 'browser_page_resources', 'browser_save_resource',
-    'browser_type', 'browser_network_requests', 'download_captured_file',
+    'browser_click_element', 'browser_scroll', 'browser_page_resources',
+    'browser_save_resource', 'browser_type', 'browser_network_requests',
+    'download_captured_file',
   ] },
   { key: 'multica', label: 'Multica', names: ['multica_list_agents', 'multica_list_tasks', 'multica_create_task'] },
   { key: 'delegation', label: '委派', names: ['delegate_to_assistant'] },

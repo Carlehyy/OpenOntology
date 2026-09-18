@@ -521,4 +521,33 @@ def test_system_prompt_includes_browser_collaboration_rules():
     prompt = runtime._system_prompt([])
     assert "浏览器协作" in prompt
     assert "browser_network_requests" in prompt
+    assert "browser_scroll" in prompt
     assert "索要密码" in prompt
+
+
+def test_execute_browser_scroll_dispatches_position(tmp_path, monkeypatch):
+    TestingSession = _session_factory(tmp_path, "browser-scroll.db", _ENDPOINT_TABLES)
+    with TestingSession() as db:
+        db.add(_user("user-1"))
+        db.add(SuperAssistantConversation(
+            id="11111111-1111-1111-1111-111111111111", owner_id="user-1", title="浏览器",
+        ))
+        db.commit()
+    captured = {}
+
+    def fake_scroll(cid, position, **kwargs):
+        captured.update({"cid": cid, "position": position, **kwargs})
+        return {"url": "https://example.com", "scroll": {"position": position}}
+
+    monkeypatch.setattr(browser_manager, "scroll", fake_scroll)
+    with TestingSession() as db:
+        result = json.loads(browser_tools.execute_browser_tool(
+            db, owner_id="user-1", conversation_id="11111111-1111-1111-1111-111111111111",
+            name="browser_scroll", arguments={"position": "bottom"},
+        ))
+    assert result["scroll"]["position"] == "bottom"
+    assert captured == {
+        "cid": "11111111-1111-1111-1111-111111111111",
+        "position": "bottom",
+        "actor": "agent",
+    }

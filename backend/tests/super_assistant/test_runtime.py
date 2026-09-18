@@ -405,9 +405,15 @@ def test_runtime_executes_builtin_api_hub_mcp_without_http_client(tmp_path, monk
 def test_looks_like_tool_preamble_detects_spoken_intent():
     assert runtime.looks_like_tool_preamble("我先看看当前浏览器状态，确认一下到底发生了什么。")
     assert runtime.looks_like_tool_preamble("我先看看浏览器当前状态。")
+    assert runtime.looks_like_tool_preamble(
+        "我刚才的操作其实没有真正控制你的浏览器——只调了工具，但你的浏览器并没有真的打开 B 站往下翻。让我重新来一次，确保这次真的打开浏览器并滚到底部。"
+    )
+    assert runtime.looks_like_tool_preamble(
+        "抱歉，之前的滚动操作确实没在你的浏览器里生效。我现在重新来过：先打开浏览器，再滚到底部。"
+    )
     assert not runtime.looks_like_tool_preamble("好的。")
     assert not runtime.looks_like_tool_preamble("# 结论\n\n页面没有滚动。")
-    assert not runtime.looks_like_tool_preamble("我先看看" + "啊" * 200)
+    assert not runtime.looks_like_tool_preamble("我先看看" + "啊" * 400)
 
 
 def test_runtime_continues_when_model_announces_a_tool_but_does_not_call_it(tmp_path, monkeypatch):

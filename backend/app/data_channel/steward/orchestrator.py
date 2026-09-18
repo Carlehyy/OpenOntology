@@ -223,6 +223,10 @@ def _summarize(name: str, result: dict) -> str:
         downloaded = result.get("downloadedFiles") or []
         return (f"已点击并下载 {len(downloaded)} 个文件" if downloaded
                 else f"已点击，当前页面 {result.get('title') or ''}")
+    if name == "browser_scroll":
+        scroll = result.get("scroll") or {}
+        after = (scroll.get("after") or {})
+        return f"已滚动到 {scroll.get('position') or ''} · y={after.get('y', '')}"
     if name == "browser_page_resources":
         return f"发现 {result.get('count', 0)} 个可保存页面资源"
     if name == "browser_save_resource":

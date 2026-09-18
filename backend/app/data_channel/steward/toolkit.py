@@ -322,6 +322,21 @@ TOOL_DEFS: list[dict] = [
         },
     },
     {
+        "name": "browser_scroll",
+        "description": "滚动当前会话浏览器的页面。往底部翻用 position=bottom，往下翻一屏用 page_down，回到顶部用 top。不要假装用 JS 或键盘滚动。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "position": {
+                    "type": "string",
+                    "enum": ["top", "bottom", "page_down", "page_up"],
+                    "description": "bottom=滚到页底，page_down=向下滚一屏，top=回顶部，page_up=向上一屏",
+                },
+            },
+            "required": ["position"],
+        },
+    },
+    {
         "name": "browser_click_element",
         "description": "按 browser_state 返回的元素 index 进行真实浏览器点击，适合无文字的图标、图片和下载控件；若触发原生下载，文件会自动保存到当前会话。",
         "parameters": {
@@ -1040,6 +1055,10 @@ class ToolRunner:
     def tool_browser_click_element(self, element_index: int) -> dict:
         return browser_manager.click_element(
             self._conversation(), element_index, actor="agent")
+
+    def tool_browser_scroll(self, position: str) -> dict:
+        return browser_manager.scroll(
+            self._conversation(), position, actor="agent")
 
     def tool_browser_page_resources(self, keyword: str | None = None,
                                     limit: int | None = None) -> dict:
