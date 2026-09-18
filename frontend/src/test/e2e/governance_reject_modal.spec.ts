@@ -207,9 +207,9 @@ test('HITL 拒绝弹窗取消不提交，确认时携带原因并展示成功反
     releaseId: RELEASE_ID,
   })
   await expect(dialog).toHaveCount(0)
-  await expect(page.getByRole('status').filter({
-    hasText: '已拒绝，决策已写入事实流。',
-  })).toBeVisible()
+  await expect(
+    page.locator('[data-sonner-toast]').filter({ hasText: '已拒绝。可在事实流查看记录。' }).first(),
+  ).toBeVisible()
 })
 
 test('HITL 拒绝 API 失败时保留弹窗和输入，并恢复可重试状态', async ({ page }) => {
@@ -243,7 +243,7 @@ test('HITL 拒绝 API 失败时保留弹窗和输入，并恢复可重试状态'
   await confirm.click()
   await expect.poll(() => mock.decisionBodies).toHaveLength(2)
   await expect(dialog).toHaveCount(0)
-  await expect(page.getByRole('status').filter({
-    hasText: '已拒绝，决策已写入事实流。',
-  })).toBeVisible()
+  await expect(
+    page.locator('[data-sonner-toast]').filter({ hasText: '已拒绝。可在事实流查看记录。' }).first(),
+  ).toBeVisible()
 })

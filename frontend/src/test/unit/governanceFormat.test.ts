@@ -3,10 +3,15 @@ import { describe, it } from 'node:test'
 
 import {
   buildGovernanceKpis,
+  buildPromoteCtaReason,
+  extractApiErrorMessage,
   firingStatusMeta,
+  formatDecideFailureMessage,
+  formatDecideSuccessMessage,
   formatDecisionValue,
   formatFactSource,
   formatScanInterval,
+  NON_ADMIN_DECIDE_HINT,
   readableTargetSummary,
 } from '../../pages/ontologies/detail/tabs/governanceFormat.ts'
 
@@ -173,5 +178,94 @@ describe('buildGovernanceKpis', () => {
     assert.equal(kpis.decisionsRejected, 1)
     assert.equal(kpis.decisionsTotal, 5)
     assert.equal(kpis.approvalRate, 0.8)
+  })
+})
+
+
+describe('extractApiErrorMessage', () => {
+  it('优先取 detail 字符串', () => {
+    assert.equal(extractApiErrorMessage({ detail: '版本已过期' }, 'fallback'), '版本已过期')
+  })
+
+  it('支持 detail.message 与顶层 message', () => {
+    assert.equal(extractApiErrorMessage({ detail: { message: '无权限' } }, 'x'), '无权限')
+    assert.equal(extractApiErrorMessage({ message: '网络中断' }, 'x'), '网络中断')
+  })
+
+  it('支持 FastAPI detail 数组', () => {
+    assert.equal(extractApiErrorMessage({ detail: [{ msg: 'field required' }] }, 'x'), 'field required')
+  })
+
+  it('空值走 fallback', () => {
+    assert.equal(extractApiErrorMessage(null, 'fallback'), 'fallback')
+    assert.equal(extractApiErrorMessage({}, 'fallback'), 'fallback')
+  })
+})
+
+describe('formatDecideFailureMessage', () => {
+  it('嵌入服务端原因且禁止空泛重试', () => {
+    const text = formatDecideFailureMessage({ detail: '目标已不在待审批' })
+    assert.match(text, /裁决提交失败：目标已不在待审批/)
+    assert.match(text, /请刷新待办后重试/)
+    assert.equal(text.includes('决策失败，请重试'), false)
+  })
+
+  it('无原因时仍给出可行动兜底', () => {
+    const text = formatDecideFailureMessage({})
+    assert.match(text, /裁决提交失败：未知原因/)
+    assert.equal(text.includes('决策失败，请重试'), false)
+  })
+})
+
+describe('formatDecideSuccessMessage', () => {
+  it('批准/拒绝指向事实流', () => {
+    assert.equal(formatDecideSuccessMessage('approved'), '已批准并执行。可在事实流查看记录。')
+    assert.equal(formatDecideSuccessMessage('rejected'), '已拒绝。可在事实流查看记录。')
+  })
+})
+
+describe('buildPromoteCtaReason', () => {
+  it('达标时提示重新发布后生效', () => {
+    assert.equal(
+      buildPromoteCtaReason({
+        recommendation: 'promote',
+        recentCount: 12,
+        recentApprovalRate: 0.96,
+        promoteMinDecisions: 10,
+        promoteRate: 0.95,
+      }),
+      '批准率已达标。请在草稿中提高自治等级并重新发布后生效。',
+    )
+  })
+
+  it('未达标时暴露次数与批准率条件', () => {
+    const text = buildPromoteCtaReason({
+      recommendation: 'observe',
+      recentCount: 3,
+      recentApprovalRate: 0.5,
+      promoteMinDecisions: 10,
+      promoteRate: 0.95,
+    })
+    assert.match(text, /晋升条件:近 10 次批准率 ≥ 95%/)
+    assert.match(text, /当前 3 次 \/ 50%/)
+  })
+
+  it('批准率为 null 时显示 —', () => {
+    const text = buildPromoteCtaReason({
+      recommendation: null,
+      recentCount: 0,
+      recentApprovalRate: null,
+      promoteMinDecisions: 10,
+      promoteRate: 0.95,
+    })
+    assert.match(text, /当前 0 次 \/ —/)
+  })
+})
+
+describe('NON_ADMIN_DECIDE_HINT', () => {
+  it('说明只读与管理员要求', () => {
+    assert.match(NON_ADMIN_DECIDE_HINT, /无审批权限/)
+    assert.match(NON_ADMIN_DECIDE_HINT, /管理员/)
+    assert.match(NON_ADMIN_DECIDE_HINT, /前因后果/)
   })
 })

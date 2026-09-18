@@ -31,6 +31,7 @@ import {
   type ChainNode,
   type ChainNodeKind,
 } from './chainModel'
+import { TruncatedText } from './TruncatedText'
 
 const COLUMN_X = 264
 const NODE_W = 204
@@ -95,17 +96,13 @@ function ChainNodeCard({ data }: NodeProps<Node<ChainFlowData>>) {
           <Icon size={14} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[14px] font-semibold leading-[18px] text-foreground" title={chainNode.title}>
-            {chainNode.title}
-          </span>
+          <TruncatedText className="text-[14px] font-semibold leading-[18px] text-foreground" text={chainNode.title} />
           {chainNode.sub && (
-            <span className="mt-1 block truncate text-[11.5px] leading-4 text-muted-foreground" title={chainNode.sub}>
-              {chainNode.sub}
-            </span>
+            <TruncatedText className="mt-1 text-xs leading-4 text-muted-foreground" text={chainNode.sub} />
           )}
         </span>
         {chainNode.badge && (
-          <span className={`shrink-0 rounded border px-1 py-px text-[10.5px] font-medium ${BADGE_CLS[chainNode.badge.tone]}`}>
+          <span className={`shrink-0 rounded border px-1 py-px text-xs font-medium ${BADGE_CLS[chainNode.badge.tone]}`}>
             {chainNode.badge.text}
           </span>
         )}
@@ -121,7 +118,7 @@ function ChainColumnHeader({ data }: NodeProps<Node<{ label: string; count: numb
       <span className="text-[15px] font-semibold tracking-wide text-muted-foreground">
         {data.label}
       </span>
-      <span className="rounded-full bg-muted px-1.5 py-px text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+      <span className="rounded-full bg-muted px-1.5 py-px text-xs tabular-nums text-muted-foreground">
         {data.count}
       </span>
     </div>
@@ -278,10 +275,10 @@ export default function ChainPanorama({
     <div data-testid="governance-chain-panorama" className="rounded-xl border bg-card p-4">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <Waypoints size={15} className="text-brand-ink" />
-        <p className="text-[13px] font-semibold text-foreground">本体执行链 · 数据如何变成动作与事实</p>
-        <span className="text-[11px] text-[var(--color-text-tertiary)]">点击节点高亮整条上下游,点击空白复位;待审批节点即当前瓶颈,点开看前因后果</span>
+        <p className="text-[13px] font-semibold text-foreground">执行链 · 从数据到动作</p>
+        <span className="text-xs text-muted-foreground">点击节点高亮上下游；待审批节点可查看前因后果</span>
         {isRefreshing && (
-          <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-brand-ink">
+          <span className="ml-auto inline-flex items-center gap-1 text-xs text-brand-ink">
             <Loader2 size={10} className="animate-spin" /> 同步中
           </span>
         )}
@@ -297,7 +294,7 @@ export default function ChainPanorama({
             className="flex h-full flex-col items-center justify-center gap-3 bg-muted"
           >
             <Loader2 size={18} className="animate-spin text-brand-ink" />
-            <span className="text-xs text-[var(--color-text-tertiary)]">正在构建链路全景…</span>
+            <span className="text-xs text-muted-foreground">正在构建链路全景…</span>
             <div className="flex w-52 flex-col gap-2" aria-hidden="true">
               {[0, 1, 2].map(row => (
                 <div key={row} className="flex justify-center gap-3">
@@ -333,9 +330,9 @@ export default function ChainPanorama({
         )}
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        <span className="text-[11px] font-medium text-[var(--color-text-tertiary)]">链路导读</span>
+        <span className="text-xs font-medium text-muted-foreground">链路导读</span>
         {guides.length === 0 ? (
-          <span className="text-[11px] text-[var(--color-text-tertiary)]">当前没有停滞在审批环节的链路,全链路畅通。</span>
+          <span className="text-xs text-muted-foreground">暂无卡在审批的环节，链路畅通。</span>
         ) : (
           guides.map(guide => (
             <button
@@ -345,8 +342,8 @@ export default function ChainPanorama({
               className="group inline-flex max-w-full items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] px-2.5 py-1 text-left transition hover:border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] hover:bg-[var(--color-warning-bg)]"
             >
               <HandMetal size={11} className="shrink-0 text-[var(--color-warning)]" />
-              <span className="truncate text-[11px] font-medium text-[var(--color-warning)]">{guide.title}</span>
-              <span className="hidden truncate text-[10px] text-[var(--color-warning)] sm:inline">{guide.sub}</span>
+              <TruncatedText className="text-xs font-medium text-[var(--color-warning)]" text={guide.title} tip={`${guide.title} · ${guide.sub}`} />
+              <TruncatedText className="hidden text-xs text-[var(--color-warning)] sm:block" text={guide.sub} />
             </button>
           ))
         )}

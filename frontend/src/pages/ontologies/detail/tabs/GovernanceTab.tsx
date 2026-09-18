@@ -5,7 +5,14 @@ import { apiClientV2 } from '@/api/client'
 import { sentinelApi, type Sentinel, type SentinelFiring } from '@/api/sentinelApi'
 import pipelinesApi from '@/api/v2/pipelines'
 import { useAuthStore } from '@/stores/authStore'
-import { buildGovernanceKpis, readableTargetSummary } from './governanceFormat'
+import { toast } from 'sonner'
+import {
+  buildGovernanceKpis,
+  extractApiErrorMessage,
+  formatDecideFailureMessage,
+  formatDecideSuccessMessage,
+  readableTargetSummary,
+} from './governanceFormat'
 import {
   CheckCircle2, LayoutGrid, ScrollText,
   Loader2, RefreshCw,
@@ -111,21 +118,14 @@ function SectionHead({ icon: Icon, iconCls, title, sub, badge, extra }: {
       <Icon size={16} className={iconCls} />
       <p className="whitespace-nowrap text-[15px] font-semibold text-foreground">{title}</p>
       {badge}
-      <span className="text-xs text-[var(--color-text-tertiary)]">{sub}</span>
+      <span className="text-xs text-muted-foreground">{sub}</span>
       {extra && <div className="ml-auto">{extra}</div>}
     </div>
   )
 }
 
 function errorMessage(error: unknown, fallback = '治理数据加载失败'): string {
-  if (!error || typeof error !== 'object') return fallback
-  const candidate = error as { detail?: unknown; message?: unknown }
-  if (typeof candidate.detail === 'string') return candidate.detail
-  if (candidate.detail && typeof candidate.detail === 'object' && 'message' in candidate.detail) {
-    const message = (candidate.detail as { message?: unknown }).message
-    if (typeof message === 'string') return message
-  }
-  return typeof candidate.message === 'string' ? candidate.message : fallback
+  return extractApiErrorMessage(error, fallback) || fallback
 }
 
 export default function GovernanceTab({
@@ -433,7 +433,7 @@ export default function GovernanceTab({
     try {
       await apiClientV2.post(`/formal/ontologies/${ontologyId}/action-logs/${log.id}/decide`,
         { decision, reason, releaseId: currentReleaseId })
-      setMsg({ ok: true, text: decision === 'approved' ? '已批准并提交执行，决策已写入事实流。' : '已拒绝，决策已写入事实流。' })
+      toast.success(formatDecideSuccessMessage(decision))
       if (decision === 'approved') {
         setApproveTarget(null)
       }
@@ -442,8 +442,10 @@ export default function GovernanceTab({
       }
       setRemainingRefreshCycles(BACKGROUND_REFRESH_MAX_CYCLES)
       void refreshAll()
-    } catch (e: any) {
-      const text = errorMessage(e, '决策失败，请重试')
+    } catch (e: unknown) {
+      const text = formatDecideFailureMessage(e)
+      toast.error(text)
+      setMsg({ ok: false, text })
       if (decision === 'rejected') setRejectError(text)
       else setApproveError(text)
     } finally {
@@ -489,7 +491,8 @@ export default function GovernanceTab({
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-brand-line bg-brand-soft px-3 py-2 text-xs text-brand-ink">
         <span className="inline-flex items-center gap-2">
           <CheckCircle2 size={13} />
-          数据范围已锁定到最新发布版 <span className="font-mono font-semibold">{currentReleaseVersion}</span>
+          正在查看发布版 <span className="font-mono font-semibold">{currentReleaseVersion}</span>
+          <span className="font-normal opacity-80">（草稿变更不会出现在此）</span>
         </span>
         <span className="hidden h-3 w-px bg-brand-mist sm:block" aria-hidden="true" />
         <span
@@ -504,9 +507,9 @@ export default function GovernanceTab({
             : <CheckCircle2 size={12} />}
           {backgroundRefreshActive
             ? isPageVisible
-              ? '自动同步中 · 正在获取最新的审批与哨兵结果'
+              ? '正在同步待审批与哨兵状态'
               : '自动同步已暂停 · 页面隐藏中'
-            : isRefreshing ? '正在刷新治理结果' : '自动同步已结束 · 可手动刷新'}
+            : isRefreshing ? '正在刷新治理结果' : '同步完成 · 可手动刷新'}
         </span>
         {backgroundRefreshActive && isPageVisible && (
           <span className="text-brand-ink">每 12 秒刷新，最多 2 分钟</span>
@@ -559,11 +562,11 @@ export default function GovernanceTab({
       />
 
       {/* ② 治理工作台:待审批 / 自治等级 / 哨兵以动作为行一表汇总 */}
-      <div ref={boardRef} className="rounded-xl border bg-card p-5">
+      <div ref={boardRef} className="rounded-xl border bg-card p-4">
         <SectionHead icon={LayoutGrid} iconCls="text-brand-ink" title="治理工作台"
           badge={pending.length > 0 && (
-            <span className="rounded-full bg-[var(--color-warning-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-warning)]">
-              {pending.length} 项待裁决
+            <span className="rounded-full bg-[var(--color-warning-bg)] px-2 py-0.5 text-xs font-medium text-[var(--color-warning)]">
+              {pending.length} 项待审批
             </span>
           )}
           sub="待审批 · 自治等级 · 哨兵以动作为中心一表汇总 · 点击待审批条目看前因后果"
@@ -579,9 +582,9 @@ export default function GovernanceTab({
       </div>
 
       {/* ③ 事实流:全宽审计底(原样不动) */}
-      <div className="rounded-xl border bg-card p-5">
+      <div className="rounded-xl border bg-card p-4">
         <SectionHead icon={ScrollText} iconCls="text-viz-indigo" title="事实流"
-          sub="追加不修改 · 每个变化都有出处与因果 · 最近 50 条" />
+          sub="只追加、不改写历史 · 最近 50 条" />
         <FactStream facts={facts} kindFilter={kindFilter} onKindFilterChange={setKindFilter} />
       </div>
 

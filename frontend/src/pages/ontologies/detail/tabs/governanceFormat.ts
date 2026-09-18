@@ -152,3 +152,55 @@ export function buildGovernanceKpis(input: {
     approvalRate: decisionsTotal > 0 ? decisionsApproved / decisionsTotal : null,
   }
 }
+
+/** 从 apiClient 拒绝值（多为 response.data）或 Error 中提取可读原因。 */
+export function extractApiErrorMessage(error: unknown, fallback = ''): string {
+  if (!error || typeof error !== 'object') {
+    return typeof error === 'string' && error.trim() ? error.trim() : fallback
+  }
+  const candidate = error as { detail?: unknown; message?: unknown }
+  if (typeof candidate.detail === 'string' && candidate.detail.trim()) return candidate.detail.trim()
+  if (Array.isArray(candidate.detail)) {
+    const first = candidate.detail[0] as { msg?: unknown; message?: unknown } | undefined
+    if (typeof first?.msg === 'string' && first.msg.trim()) return first.msg.trim()
+    if (typeof first?.message === 'string' && first.message.trim()) return first.message.trim()
+  }
+  if (candidate.detail && typeof candidate.detail === 'object' && 'message' in candidate.detail) {
+    const message = (candidate.detail as { message?: unknown }).message
+    if (typeof message === 'string' && message.trim()) return message.trim()
+  }
+  if (typeof candidate.message === 'string' && candidate.message.trim()) return candidate.message.trim()
+  return fallback
+}
+
+/** 裁决失败：必须带可行动原因，禁止仅「决策失败，请重试」。 */
+export function formatDecideFailureMessage(error: unknown): string {
+  const reason = extractApiErrorMessage(error, '')
+  if (reason) return `裁决提交失败：${reason}。请刷新待办后重试`
+  return '裁决提交失败：未知原因。请刷新待办后重试'
+}
+
+export function formatDecideSuccessMessage(decision: 'approved' | 'rejected'): string {
+  return decision === 'approved'
+    ? '已批准并执行。可在事实流查看记录。'
+    : '已拒绝。可在事实流查看记录。'
+}
+
+const pctLabel = (rate: number | null) => (rate === null ? '—' : `${Math.round(rate * 100)}%`)
+
+/** 工作台「去草稿提升自治等级」禁用/启用原因（title + 可见 hint + aria-describedby）。 */
+export function buildPromoteCtaReason(input: {
+  recommendation: 'promote' | 'demote' | 'observe' | null
+  recentCount: number
+  recentApprovalRate: number | null
+  promoteMinDecisions: number
+  promoteRate: number
+}): string {
+  if (input.recommendation === 'promote') {
+    return '批准率已达标。请在草稿中提高自治等级并重新发布后生效。'
+  }
+  return `晋升条件:近 ${input.promoteMinDecisions} 次批准率 ≥ ${Math.round(input.promoteRate * 100)}%（当前 ${input.recentCount} 次 / ${pctLabel(input.recentApprovalRate)}）`
+}
+
+export const NON_ADMIN_DECIDE_HINT =
+  '你的账号无审批权限（需要管理员）。仍可查看前因后果。'

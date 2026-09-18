@@ -59,7 +59,7 @@ function Act({ icon: Icon, tone, step, title, children }: {
         <Icon size={14} />
       </span>
       <p className="flex items-baseline gap-2 pt-1">
-        <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-tertiary)]">{step}</span>
+        <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{step}</span>
         <span className="text-sm font-semibold text-foreground">{title}</span>
       </p>
       <div className="mt-2 space-y-2 text-xs leading-5 text-muted-foreground">{children}</div>
@@ -146,12 +146,12 @@ export default function PendingStoryChapters({
           <div className="gov-evidence gov-evidence-sky rounded-lg px-3 py-2.5">
             <p className="text-[13px] font-semibold text-foreground">
               {readableTargetSummary(log)}
-              {typeInstancesQuery.isLoading && <Loader2 size={11} className="ml-1 inline animate-spin text-[var(--color-text-tertiary)]" />}
+              {typeInstancesQuery.isLoading && <Loader2 size={11} className="ml-1 inline animate-spin text-muted-foreground" />}
             </p>
             {objectValues && (
               <div className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1">
                 {Object.entries(objectValues).slice(0, 4).map(([key, value]) => (
-                  <span key={key} className="gov-evidence-meta font-mono text-[11px]" title={`${key}=${String(fmtVal(value))}`}>
+                  <span key={key} className="gov-evidence-meta font-mono text-xs" title={`${key}=${String(fmtVal(value))}`}>
                     {key}={fmtVal(value)}
                   </span>
                 ))}
@@ -161,14 +161,14 @@ export default function PendingStoryChapters({
         )}
         {targetFactsQuery.data && targetFactsQuery.data.length > 0 && (
           <div className="space-y-1">
-            <p className="text-[11px] font-medium text-[var(--color-text-tertiary)]">最近变化</p>
+            <p className="text-xs font-medium text-muted-foreground">最近变化</p>
             {targetFactsQuery.data.slice(0, 3).map(fact => (
-              <p key={fact.id} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <p key={fact.id} className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span className="h-1 w-1 shrink-0 rounded-full bg-[var(--color-info-bg)]" />
                 <span className="font-mono">{fact.propertyName}</span>
-                <ArrowRight size={9} className="text-[var(--color-text-tertiary)]" />
+                <ArrowRight size={9} className="text-muted-foreground" />
                 <span className="font-medium text-foreground">{fact.present === false ? '(已删除)' : fmtVal(fact.value)}</span>
-                <span className="text-[var(--color-text-tertiary)]">{fmtTime(fact.recordedAt)}</span>
+                <span className="text-muted-foreground">{fmtTime(fact.recordedAt)}</span>
               </p>
             ))}
           </div>
@@ -179,7 +179,7 @@ export default function PendingStoryChapters({
         {sentinel ? (
           <>
             <p className="text-[13px] leading-6 text-foreground">
-              <span className={`mr-1.5 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] ${
+              <span className={`mr-1.5 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs ${
                 sentinel.muted
                   ? 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] text-[var(--color-warning)]'
                   : 'border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] text-[var(--color-success)]'
@@ -191,7 +191,7 @@ export default function PendingStoryChapters({
               <span className="ml-1.5 text-muted-foreground">{buildBindingSentence(sentinel, objectTypeName)}</span>
             </p>
             <div className="gov-evidence gov-evidence-rose rounded-lg px-3 py-2">
-              <p className="text-[11px] text-[var(--color-text-tertiary)]">命中条件</p>
+              <p className="text-xs text-muted-foreground">命中条件</p>
               <p className="mt-0.5 font-mono text-[12px] font-medium text-viz-rose">
                 {conditionSentence}
               </p>
@@ -222,7 +222,7 @@ export default function PendingStoryChapters({
               <span className="text-[13px] leading-5 text-foreground">
                 {item.sentence}
                 {item.detail && (
-                  <span className="gov-quote mt-1 block break-all rounded-md px-2.5 py-1.5 font-mono text-[11px] leading-4">
+                  <span className="gov-quote mt-1 block break-all rounded-md px-2.5 py-1.5 font-mono text-xs leading-4">
                     {item.detail}
                   </span>
                 )}
@@ -230,7 +230,7 @@ export default function PendingStoryChapters({
             </li>
           ))}
         </ul>
-        <p className="text-[11px] text-[var(--color-text-tertiary)]">批准后立即执行;执行结果与本次决策都会写入事实流,可全程追溯。拒绝则只记录决策,不改动任何数据。</p>
+        <p className="text-xs text-muted-foreground">批准后立即执行;执行结果与本次决策都会写入事实流,可全程追溯。拒绝则只记录决策,不改动任何数据。</p>
       </Act>
     </div>
   )

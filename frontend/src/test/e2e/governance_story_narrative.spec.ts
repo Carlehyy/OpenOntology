@@ -284,9 +284,9 @@ test('链路全景呈现七段链路,待审批打开「起因 → 判定 → 后
 
   await expect.poll(() => mock.decisionBodies).toHaveLength(1)
   expect(mock.decisionBodies[0]).toEqual({ decision: 'approved', releaseId: RELEASE_ID })
-  await expect(page.getByRole('status').filter({
-    hasText: '已批准并提交执行，决策已写入事实流。',
-  })).toBeVisible()
+  await expect(
+    page.locator('[data-sonner-toast]').filter({ hasText: '已批准并执行。可在事实流查看记录。' }).first(),
+  ).toBeVisible()
 })
 
 test('治理工作台以动作为行汇总等级路径、批准率与执行履历点阵', async ({ page }) => {

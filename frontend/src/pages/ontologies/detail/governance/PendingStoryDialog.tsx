@@ -3,11 +3,13 @@
    以三幕故事板完整呈现「起因 → 判定 → 后果」,底部直接裁决;
    内容按实际高度自然展示(无卡片内滚条),批准/拒绝仍走既有确认弹窗与决策协议。 */
 import { HandMetal } from 'lucide-react'
+import { Alert } from '@/components/ui/Alert'
 import { Button } from '@/components/ui/Button'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
+import { NON_ADMIN_DECIDE_HINT } from '../tabs/governanceFormat'
 import type {
   FiringLike, PendingLog, SentinelLike, WorkspaceActionLike,
 } from './storyModel'
@@ -49,7 +51,7 @@ export default function PendingStoryDialog({
             {target ? `待审批详情：${target.actionName || target.actionId}` : '待审批详情'}
           </DialogTitle>
           <DialogDescription>
-            三幕故事看懂这条动作的来龙去脉,看明白再裁决;批准/拒绝都会写入事实流留痕。
+            分三步看清起因、判定与后果后再裁决；结果会写入事实流。
           </DialogDescription>
         </DialogHeader>
         {target && (
@@ -63,6 +65,11 @@ export default function PendingStoryDialog({
             active={Boolean(target)}
           />
         )}
+        {target && !canDecide && (
+          <Alert variant="info" role="status" className="mt-1">
+            {NON_ADMIN_DECIDE_HINT}
+          </Alert>
+        )}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
             关闭
@@ -74,7 +81,7 @@ export default function PendingStoryDialog({
                 variant="danger"
                 onClick={() => onReject(target)}
                 disabled={busy || !canDecide}
-                title={canDecide ? undefined : '仅管理员可执行审批'}
+                title={canDecide ? undefined : NON_ADMIN_DECIDE_HINT}
               >
                 拒绝
               </Button>
@@ -84,7 +91,7 @@ export default function PendingStoryDialog({
                 onClick={() => onApprove(target)}
                 loading={busy}
                 disabled={!canDecide}
-                title={canDecide ? undefined : '仅管理员可执行审批'}
+                title={canDecide ? undefined : NON_ADMIN_DECIDE_HINT}
                 className="shadow-sm"
               >
                 批准并执行

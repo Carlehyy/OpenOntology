@@ -11,7 +11,8 @@ import type {
   OperationsRow, PendingLog, TimelineDot,
 } from './storyModel'
 import { buildLevelSteps, type AutonomyLevelKey } from './storyModel'
-import { readableTargetSummary } from '../tabs/governanceFormat'
+import { buildPromoteCtaReason, readableTargetSummary } from '../tabs/governanceFormat'
+import { TruncatedText } from './TruncatedText'
 
 const LEVEL_META: Record<AutonomyLevelKey, { label: string; icon: any; cls: string; desc: string }> = {
   L0: { label: 'L0 影子', icon: Eye, cls: 'bg-muted text-muted-foreground border-border', desc: '哨兵全部静默,只观察不动手' },
@@ -51,8 +52,8 @@ function LevelStepper({ level }: { level: AutonomyLevelKey }) {
             )}
             <span
               title={meta.desc}
-              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
-                step.current ? `${meta.cls} gov-level-current` : step.reached ? 'border-brand-line bg-brand-soft text-brand-ink' : 'border-border bg-card text-[var(--color-text-tertiary)]'
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+                step.current ? `${meta.cls} gov-level-current` : step.reached ? 'border-brand-line bg-brand-soft text-brand-ink' : 'border-border bg-card text-muted-foreground'
               }`}
             >
               <meta.icon size={10} /> {step.key}
@@ -66,7 +67,7 @@ function LevelStepper({ level }: { level: AutonomyLevelKey }) {
 
 function TimelineDots({ timeline }: { timeline: TimelineDot[] }) {
   if (!timeline.length) {
-    return <span className="text-[11px] text-[var(--color-text-tertiary)]">还没有执行履历</span>
+    return <span className="text-xs text-muted-foreground">还没有执行履历</span>
   }
   return (
     <div className="flex items-center gap-1.5" data-testid="autonomy-timeline">
@@ -88,15 +89,66 @@ function TimelineDots({ timeline }: { timeline: TimelineDot[] }) {
           />
         )
       })}
-      <span className="ml-1 text-[10px] text-[var(--color-text-tertiary)]">新 → 旧</span>
+      <span className="ml-1 text-xs text-muted-foreground">新 → 旧</span>
     </div>
+  )
+}
+
+
+function PromoteCta({
+  actionId,
+  recommendation,
+  recentCount,
+  recentApprovalRate,
+  promoteMinDecisions,
+  promoteRate,
+  onGoVersions,
+}: {
+  actionId: string
+  recommendation: 'promote' | 'demote' | 'observe' | null
+  recentCount: number
+  recentApprovalRate: number | null
+  promoteMinDecisions: number
+  promoteRate: number
+  onGoVersions: () => void
+}) {
+  const promoteEnabled = recommendation === 'promote'
+  const promoteReason = buildPromoteCtaReason({
+    recommendation,
+    recentCount,
+    recentApprovalRate,
+    promoteMinDecisions,
+    promoteRate,
+  })
+  const hintId = `promote-hint-${actionId}`
+  return (
+    <span className="inline-flex flex-col gap-0.5">
+      {/* aria-disabled 保留悬停/聚焦，避免 HTML disabled 吞掉 title */}
+      <button
+        type="button"
+        onClick={() => { if (!promoteEnabled) return; onGoVersions() }}
+        aria-disabled={!promoteEnabled}
+        aria-describedby={hintId}
+        title={promoteReason}
+        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs ${
+          promoteEnabled
+            ? 'border-[var(--color-success)] bg-[var(--color-success)] text-[var(--color-text-inverse)] hover:bg-[var(--color-success)]'
+            : 'cursor-not-allowed border-border text-muted-foreground opacity-70'
+        }`}
+      >
+        <ArrowUpCircle size={12} /> 去草稿提升自治等级
+      </button>
+      <p id={hintId} className={`text-xs ${promoteEnabled ? 'text-[var(--color-success)]' : 'text-muted-foreground'}`}>
+        {promoteReason}
+      </p>
+    </span>
   )
 }
 
 const GRID_COLS = 'xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1.4fr)_minmax(0,1.1fr)_minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1.15fr)]'
 
 function CellLabel({ children }: { children: React.ReactNode }) {
-  return <p className="mb-1 text-[10px] font-medium text-[var(--color-text-tertiary)] xl:hidden">{children}</p>
+  return <p className="mb-1 text-xs font-medium text-muted-foreground xl:hidden">{children}</p>
 }
 
 export default function OperationsBoard({
@@ -113,7 +165,7 @@ export default function OperationsBoard({
   if (rows.length === 0) {
     return (
       <div className="py-3 text-center">
-        <p className="text-xs text-[var(--color-text-tertiary)]">还没有动作。请在版本草稿中创建动作并绑定哨兵，发布后再在这里管理放权与裁决。</p>
+        <p className="text-xs text-muted-foreground">还没有动作。请在版本草稿中创建动作并绑定哨兵，发布后再在这里管理放权与裁决。</p>
         <button onClick={onGoVersions}
           className="mt-2 inline-flex items-center gap-1 text-xs text-[var(--color-warning)] hover:underline">
           去版本草稿创建动作
@@ -125,7 +177,7 @@ export default function OperationsBoard({
   return (
     <div data-testid="governance-operations-board">
       {/* 表头(宽屏可见;窄屏每行折叠为卡片,字段带小标签) */}
-      <div className={`hidden gap-3 border-b border-border pb-2 text-[11px] font-medium text-[var(--color-text-tertiary)] xl:grid ${GRID_COLS}`}>
+      <div className={`hidden gap-3 border-b border-border pb-2 text-xs font-medium text-muted-foreground xl:grid ${GRID_COLS}`}>
         <span>动作</span>
         <span>自治等级</span>
         <span>绑定哨兵</span>
@@ -153,7 +205,7 @@ export default function OperationsBoard({
                   <Rocket size={13} className="shrink-0 text-[var(--color-warning)]" />
                   {stat.actionName}
                 </p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground">
                   累计 批准 {stat.decisions.approved} · 拒绝 {stat.decisions.rejected} · 自动执行 {stat.autoRuns.total}
                   {stat.autoRuns.failed > 0 && <span className="text-[var(--color-danger)]">(失败 {stat.autoRuns.failed})</span>}
                 </p>
@@ -165,40 +217,29 @@ export default function OperationsBoard({
                 <div className="flex flex-wrap items-center gap-2">
                   <LevelStepper level={stat.level} />
                   {stat.level === 'L1' && (
-                    <span
-                      className="inline-flex"
-                      title={stat.recommendation === 'promote' ? '批准率达标,请在版本草稿中变更后重新发布'
-                        : `晋升条件:近 ${stat.thresholds.promoteMinDecisions} 次批准率 ≥ ${Math.round(stat.thresholds.promoteRate * 100)}%(当前 ${stat.decisions.recentCount} 次 / ${pct(rate)})`}
-                    >
-                      <button onClick={onGoVersions}
-                        disabled={stat.recommendation !== 'promote'}
-                        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] disabled:pointer-events-none ${
-                          stat.recommendation === 'promote'
-                            ? 'border-[var(--color-success)] bg-[var(--color-success)] text-[var(--color-text-inverse)] hover:bg-[var(--color-success)]'
-                            : 'cursor-not-allowed border-border text-[var(--color-text-tertiary)]'
-                        }`}>
-                        <ArrowUpCircle size={12} /> 去草稿晋升
-                      </button>
-                    </span>
+                    <PromoteCta
+                      actionId={stat.actionId}
+                      recommendation={stat.recommendation}
+                      recentCount={stat.decisions.recentCount}
+                      recentApprovalRate={rate}
+                      promoteMinDecisions={stat.thresholds.promoteMinDecisions}
+                      promoteRate={stat.thresholds.promoteRate}
+                      onGoVersions={onGoVersions}
+                    />
                   )}
                   {stat.level === 'L2' && (
-                    <button onClick={onGoVersions}
-                      className="inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] px-2 py-1 text-[11px] text-[var(--color-info)] hover:bg-[var(--color-info-bg)]">
-                      <ArrowDownCircle size={12} /> 去草稿调整
+                    <button type="button" onClick={onGoVersions}
+                      title="去草稿降低/调整自治等级"
+                      className="inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] px-2 py-1 text-xs text-[var(--color-info)] hover:bg-[var(--color-info-bg)]">
+                      <ArrowDownCircle size={12} /> 去草稿降低/调整自治等级
                     </button>
                   )}
-                  {stat.level === 'L0' && <span className="text-[11px] text-[var(--color-text-tertiary)]">影子观察中</span>}
+                  {stat.level === 'L0' && <span className="text-xs text-muted-foreground">影子观察中</span>}
                 </div>
-                {stat.recommendationReason ? (
-                  <p className={`text-[11px] ${
-                    stat.recommendation === 'promote' ? 'text-[var(--color-success)]'
-                    : stat.recommendation === 'demote' ? 'text-[var(--color-danger)]' : 'text-muted-foreground'
+                {stat.recommendationReason && stat.level !== 'L1' ? (
+                  <p className={`text-xs ${
+                    stat.recommendation === 'demote' ? 'text-[var(--color-danger)]' : 'text-muted-foreground'
                   }`}>{stat.recommendationReason}</p>
-                ) : stat.level === 'L1' ? (
-                  <p className="text-[11px] text-[var(--color-text-tertiary)]">
-                    晋升条件:近 {stat.thresholds.promoteMinDecisions} 次批准率 ≥ {Math.round(stat.thresholds.promoteRate * 100)}%
-                    (当前 {stat.decisions.recentCount} 次 · {pct(rate)})
-                  </p>
                 ) : null}
               </div>
 
@@ -206,11 +247,11 @@ export default function OperationsBoard({
               <div className="space-y-1">
                 <CellLabel>绑定哨兵</CellLabel>
                 {row.sentinelViews.length === 0 ? (
-                  <span className="text-[11px] text-[var(--color-text-tertiary)]">未绑定哨兵</span>
+                  <span className="text-xs text-muted-foreground">未绑定哨兵</span>
                 ) : row.sentinelViews.map(sn => {
                   const meta = SENTINEL_STATUS_META[sn.status]
                   return (
-                    <p key={sn.id} className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <p key={sn.id} className="flex flex-wrap items-center gap-1.5 text-xs">
                       <span className={`relative h-1.5 w-1.5 rounded-full ${meta.dot} ${sn.status === 'online' ? 'gov-pulse' : ''}`} />
                       <span className="font-medium text-foreground">{sn.name}</span>
                       <span className={meta.cls}>{meta.text}</span>
@@ -224,7 +265,7 @@ export default function OperationsBoard({
               <div className="space-y-1">
                 <CellLabel>待审批</CellLabel>
                 {row.pendings.length === 0 ? (
-                  <span className="text-[11px] text-[var(--color-text-tertiary)]">—</span>
+                  <span className="text-xs text-muted-foreground">—</span>
                 ) : row.pendings.map(log => (
                   <button
                     key={log.id}
@@ -234,11 +275,12 @@ export default function OperationsBoard({
                     className="group flex w-full items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-card px-2 py-1 text-left transition hover:border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] hover:bg-[var(--color-warning-bg)]"
                   >
                     <HandMetal size={11} className="shrink-0 text-[var(--color-warning)]" />
-                    <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
-                      {log.objectInstanceId ? readableTargetSummary(log, `${log.objectInstanceId.slice(0, 10)}…`) : (log.actionName || log.actionId)}
-                    </span>
-                    <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">{fmtTime(log.executedAt)}</span>
-                    <span className="shrink-0 text-[10px] text-brand-ink opacity-0 transition group-hover:opacity-100">前因后果 →</span>
+                    <TruncatedText
+                      className="min-w-0 flex-1 text-xs font-medium text-foreground"
+                      text={log.objectInstanceId ? readableTargetSummary(log, `${log.objectInstanceId.slice(0, 10)}…`) : (log.actionName || log.actionId)}
+                    />
+                    <span className="shrink-0 text-xs text-muted-foreground">{fmtTime(log.executedAt)}</span>
+                    <span className="shrink-0 text-xs text-brand-ink opacity-0 transition group-hover:opacity-100">查看详情</span>
                   </button>
                 ))}
               </div>
@@ -258,9 +300,9 @@ export default function OperationsBoard({
                       title={`晋升线 ${Math.round(stat.thresholds.promoteRate * 100)}%`}
                     />
                   </div>
-                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{pct(rate)}</span>
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">{pct(rate)}</span>
                 </div>
-                <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">({stat.decisions.recentCount}/{stat.thresholds.promoteMinDecisions} 次)</p>
+                <p className="mt-1 text-xs text-muted-foreground">({stat.decisions.recentCount}/{stat.thresholds.promoteMinDecisions} 次)</p>
               </div>
 
               {/* 近期执行履历 */}

@@ -98,8 +98,7 @@ test('治理页有限刷新后台结果，页面隐藏时暂停并保留最近�
   })
 
   const status = page.getByTestId('governance-background-refresh-status')
-  await expect(status).toContainText('自动同步中')
-  await expect(status).toContainText('正在获取最新的审批与哨兵结果')
+  await expect(status).toContainText('正在同步待审批与哨兵状态')
   await expect(page.getByText('每 12 秒刷新，最多 2 分钟')).toBeVisible()
   await expect(page.getByTestId('governance-last-refreshed')).not.toContainText('尚未完成')
 
@@ -114,7 +113,7 @@ test('治理页有限刷新后台结果，页面隐藏时暂停并保留最近�
   expect(requests.pendingRequestCount()).toBe(requestsBeforeHiddenWait)
 
   await setDocumentVisibility(page, 'visible')
-  await expect(status).toContainText('正在获取最新的审批与哨兵结果')
+  await expect(status).toContainText('正在同步待审批与哨兵状态')
   const initialRequests = requests.pendingRequestCount()
   await page.clock.fastForward(REFRESH_INTERVAL_MS - 100)
   expect(requests.pendingRequestCount()).toBe(initialRequests)
@@ -129,12 +128,12 @@ test('治理页有限刷新后台结果，页面隐藏时暂停并保留最近�
     await expect(status).toHaveAttribute('aria-busy', 'false')
   }
 
-  await expect(status).toContainText('自动同步已结束')
+  await expect(status).toContainText('同步完成 · 可手动刷新')
   const requestsAfterWindow = requests.pendingRequestCount()
   await page.clock.fastForward(60_000)
   expect(requests.pendingRequestCount()).toBe(requestsAfterWindow)
 
   await page.getByRole('button', { name: '立即刷新治理结果' }).click()
   await expect.poll(requests.pendingRequestCount).toBeGreaterThan(requestsAfterWindow)
-  await expect(status).toContainText('自动同步中')
+  await expect(status).toContainText('正在同步待审批与哨兵状态')
 })

@@ -2,6 +2,7 @@
    渲染逻辑与原治理页一致,仅排版融入叙事时间线风格。 */
 import { formatDateTime } from '@/utils/datetime'
 import { formatDecisionValue, formatFactSource } from '../tabs/governanceFormat'
+import { TruncatedText } from './TruncatedText'
 
 export interface FactRow {
   id: string
@@ -49,18 +50,18 @@ export default function FactStream({
     <>
       <div className="mb-3 flex flex-wrap gap-1">
         <button onClick={() => onKindFilterChange('')}
-          className={`rounded-full border px-2 py-0.5 text-[10px] ${!kindFilter ? 'border-viz-indigo-soft bg-viz-indigo-soft text-viz-indigo' : 'border-border text-[var(--color-text-tertiary)] hover:text-muted-foreground'}`}>
+          className={`rounded-full border px-2 py-0.5 text-xs ${!kindFilter ? 'border-viz-indigo-soft bg-viz-indigo-soft text-viz-indigo' : 'border-border text-muted-foreground hover:text-muted-foreground'}`}>
           全部
         </button>
         {Object.entries(KIND_META).map(([k, m]) => (
           <button key={k} onClick={() => onKindFilterChange(k)} title={m.title}
-            className={`rounded-full border px-2 py-0.5 text-[10px] ${kindFilter === k ? m.cls : 'border-border text-[var(--color-text-tertiary)] hover:text-muted-foreground'}`}>
+            className={`rounded-full border px-2 py-0.5 text-xs ${kindFilter === k ? m.cls : 'border-border text-muted-foreground hover:text-muted-foreground'}`}>
             {m.label}
           </button>
         ))}
       </div>
       {facts.length === 0 ? (
-        <p className="py-3 text-center text-xs text-[var(--color-text-tertiary)]">暂无{kindFilter ? `「${KIND_META[kindFilter]?.label}」类` : ''}事实。</p>
+        <p className="py-3 text-center text-xs text-muted-foreground">暂无{kindFilter ? `「${KIND_META[kindFilter]?.label}」类` : ''}事实。</p>
       ) : (
         <div className="max-h-96 space-y-0.5 overflow-y-auto">
           {facts.map(f => {
@@ -70,13 +71,13 @@ export default function FactStream({
               : typeof f.value === 'object' ? JSON.stringify(f.value) : String(f.value)
             return (
               <div key={f.id} className="flex items-center gap-2 border-b border-border py-1 text-xs last:border-0">
-                <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${KIND_META[f.kind]?.cls ?? KIND_META.property.cls}`}
+                <span className={`shrink-0 rounded border px-1.5 py-0.5 text-xs ${KIND_META[f.kind]?.cls ?? KIND_META.property.cls}`}
                   title={KIND_META[f.kind]?.title}>
                   {KIND_META[f.kind]?.label ?? f.kind}
                 </span>
-                <span className="max-w-[180px] truncate text-muted-foreground" title={f.subjectLabel}>{f.subjectLabel}</span>
-                <span className="max-w-[110px] truncate font-mono text-[var(--color-text-tertiary)]">{f.propertyName}</span>
-                <span className="text-[var(--color-text-tertiary)]">=</span>
+                <TruncatedText className="max-w-[180px] text-muted-foreground" text={f.subjectLabel} />
+                <TruncatedText className="max-w-[110px] font-mono text-muted-foreground" text={f.propertyName} />
+                <span className="text-muted-foreground">=</span>
                 {decision ? (
                   <span className="flex-1 truncate" title={rawValue}>
                     <span className={decision.decision === 'approved' ? 'font-medium text-[var(--color-success)]' : 'font-medium text-[var(--color-danger)]'}>
@@ -85,23 +86,22 @@ export default function FactStream({
                     {decision.reason && <span className="text-muted-foreground">:{decision.reason}</span>}
                   </span>
                 ) : (
-                  <span
-                    className="flex-1 truncate font-mono text-foreground"
-                    title={f.present === false ? '属性已删除' : String(fmtVal(f.value))}
-                  >
-                    {f.present === false ? '(已删除)' : fmtVal(f.value)}
-                  </span>
+                  <TruncatedText
+                    className="flex-1 font-mono text-foreground"
+                    text={f.present === false ? '(已删除)' : String(fmtVal(f.value))}
+                    tip={f.present === false ? '属性已删除' : (rawValue || String(fmtVal(f.value)))}
+                  />
                 )}
                 {f.causedBy && (
-                  <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]"
+                  <span className="shrink-0 text-xs text-muted-foreground"
                     title={`该变化由一次已批准的动作执行引起(指针 ${f.causedBy})`}>因果</span>
                 )}
                 {f.supersedesId && (
-                  <span className="shrink-0 rounded bg-viz-violet-soft px-1 text-[10px] text-viz-violet"
+                  <span className="shrink-0 rounded bg-viz-violet-soft px-1 text-xs text-viz-violet"
                     title="该事实覆盖了同属性的旧值">覆盖</span>
                 )}
-                <span className="max-w-[110px] shrink-0 truncate text-[var(--color-text-tertiary)]" title={f.source}>{formatFactSource(f.source)}</span>
-                <span className="shrink-0 text-[var(--color-text-tertiary)]">{fmtTime(f.recordedAt)}</span>
+                <TruncatedText className="max-w-[110px] shrink-0 text-muted-foreground" text={formatFactSource(f.source)} tip={f.source} />
+                <span className="shrink-0 text-muted-foreground">{fmtTime(f.recordedAt)}</span>
               </div>
             )
           })}

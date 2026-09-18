@@ -16,6 +16,7 @@ import {
   buildMiniBarOption, buildMiniLineOption,
   type KpiSparkSeries,
 } from './charts'
+import { TruncatedText } from './TruncatedText'
 
 /** 与总览页 daily7d 同构的按日运行桶。 */
 interface RuntimeDay {
@@ -42,13 +43,13 @@ function StatCell({ icon: Icon, iconCls, label, value, detail, spark, onClick }:
       className="group relative rounded-xl border bg-card px-4 py-3 text-left transition hover:border-brand-line hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       <span className="flex items-center justify-between gap-2">
-        <span className="text-xs text-[var(--color-text-tertiary)]">{label}</span>
+        <span className="text-xs text-muted-foreground">{label}</span>
         <Icon size={13} className={`${iconCls} opacity-70 transition group-hover:opacity-100`} />
       </span>
       <span className="mt-0.5 block text-xl font-semibold tabular-nums text-foreground">{value}</span>
-      <span className="mt-0.5 block truncate text-[11px] text-[var(--color-text-tertiary)]" title={detail}>{detail}</span>
+      <TruncatedText className="mt-0.5 text-xs text-muted-foreground" text={detail} />
       <span className="mt-1.5 block" title={spark.hint}>
-        <span className="mb-0.5 block text-[9px] text-[var(--color-text-tertiary)]">近 7 日</span>
+        <span className="mb-0.5 block text-xs text-muted-foreground">近 7 日</span>
         <ReactECharts option={sparkOption} style={{ width: '100%', height: 30 }} opts={{ renderer: 'canvas' }} />
       </span>
     </button>
@@ -63,15 +64,15 @@ function DailyRuntimeTrend({ days, isRefreshing }: { days: RuntimeDay[]; isRefre
   return (
     <div data-testid="governance-daily-spark" className="relative flex h-full flex-col">
       {isRefreshing && (
-        <span className="absolute -top-1 right-0 z-10 inline-flex items-center gap-1 text-[10px] text-brand-ink">
+        <span className="absolute -top-1 right-0 z-10 inline-flex items-center gap-1 text-xs text-brand-ink">
           <Loader2 size={10} className="animate-spin" /> 同步中
         </span>
       )}
-      <p className="text-[11px] text-[var(--color-text-tertiary)]">近 7 日运行趋势</p>
+      <p className="text-xs text-muted-foreground">近 7 日运行趋势</p>
       <div className="relative mt-1 flex-1">
         <RuntimeTrendChart days={days} rangeLabel="近 7 日" />
         {totalEvents === 0 && (
-          <span className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 text-center text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 text-center text-xs text-muted-foreground">
             近 7 日暂无哨兵命中或动作执行记录
           </span>
         )}
@@ -103,7 +104,7 @@ export function KpiOverviewGrid({
       <div data-testid="governance-kpi-strip" className="grid grid-cols-2 content-start gap-4">
         <StatCell icon={HandMetal} iconCls="text-[var(--color-info)]" label="待审批"
           value={String(kpis.pendingCount)}
-          detail={kpis.pendingCount > 0 ? '需要人工裁决 · 点击直达' : '全部已处理'}
+          detail={kpis.pendingCount > 0 ? '有待审批 · 点击处理' : '全部已处理'}
           spark={{
             kind: 'bar', values: sparks.decisions, color: CHART_BLUE,
             hint: '近 7 日每日人工决策处理量(批准+拒绝)',
