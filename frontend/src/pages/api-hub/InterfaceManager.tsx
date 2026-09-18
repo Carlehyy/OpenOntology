@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Braces, Check, ChevronRight, CirclePlus, Copy, Download, FileCode2, FileUp, Folder, Play,
-  Plus, Send, Sparkles, Trash2, X, Database, GripVertical, KeyRound, Share2, ShieldCheck,
+  Plus, Search, Send, Sparkles, Trash2, X, Database, GripVertical, KeyRound, Share2, ShieldCheck,
   LoaderCircle,
 } from 'lucide-react'
 import { apiError, apiHub, emptyHubInterface, validateHttpUrl, type HubInterface, type KV, type RunResult } from '@/api/apiHub'
@@ -17,6 +17,12 @@ import { writeTextToClipboard } from '@/utils/clipboard'
 import { ProxyKeysModal, SystemDataModal } from './InterfaceDataModals'
 import { HttpPublicationModal } from './HttpPublicationModal'
 import { buildProxyCallExample } from './proxyCallExample'
+import {
+  detectBusinessFailure,
+  filterInterfaces,
+  httpStatusChipClass,
+  methodTone,
+} from './interfaceUxHelpers'
 
 interface Props {
   interfaces: HubInterface[]
@@ -25,12 +31,6 @@ interface Props {
 }
 
 const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
-const methodTone: Record<string, string> = {
-  GET: 'text-[var(--color-info)] bg-[var(--color-info-bg)]', POST: 'text-brand-ink bg-brand-soft',
-  PUT: 'text-[var(--color-warning)] bg-[var(--color-warning-bg)]', PATCH: 'text-brand-ink bg-brand-soft',
-  DELETE: 'text-[var(--color-danger)] bg-[var(--color-danger-bg)]', HEAD: 'text-muted-foreground bg-muted',
-  OPTIONS: 'text-[var(--color-info)] bg-[var(--color-info-bg)]',
-}
 
 type PendingNavigation =
   | { type: 'select'; item: HubInterface }
@@ -69,6 +69,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   const [hubMcpBusy, setHubMcpBusy] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const [sizes, setSizes] = useState<[number, number]>([28, 72])
+  const [listSearch, setListSearch] = useState('')
 
   const startResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
@@ -95,14 +96,18 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     window.addEventListener('pointerup', onUp)
   }, [sizes])
 
+  const visibleInterfaces = useMemo(
+    () => filterInterfaces(interfaces, listSearch),
+    [interfaces, listSearch],
+  )
   const grouped = useMemo(() => {
     const groups = new Map<string, HubInterface[]>()
-    interfaces.forEach(item => {
+    visibleInterfaces.forEach(item => {
       const key = item.group_name || ''
       groups.set(key, [...(groups.get(key) || []), item])
     })
     return [...groups.entries()].sort(([a], [b]) => a === '' ? 1 : b === '' ? -1 : a.localeCompare(b, 'zh-CN'))
-  }, [interfaces])
+  }, [visibleInterfaces])
   const groupNames = useMemo(() => {
     const names = new Set(extraGroups)
     interfaces.forEach(item => {
@@ -171,7 +176,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   }
   const addNewGroup = () => {
     const name = newGroupName.trim()
-    if (!name) { setNewGroupError('分类名称不能为空'); return }
+    if (!name) { setNewGroupError('分组名称不能为空'); return }
     if (name === '__new__') { setNewGroupError('该名称为保留字，请换一个'); return }
     if (name === '默认分组') { setNewGroupError('「默认分组」为保留名称，请使用其他名称'); return }
     setExtraGroups(current => current.includes(name) ? current : [...current, name])
@@ -202,7 +207,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       await superAssistantApi.installPlatformApiHubMcp()
       await refreshHubMcp()
     } catch (error) {
-      onError(apiError(error) || '无法提供给超级助手')
+      onError(apiError(error) || '无法同步到超级助手')
     } finally {
       setHubMcpBusy(false)
     }
@@ -389,11 +394,35 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   return (
     <div ref={containerRef} className="scrollbar-none grid h-full min-h-0 overflow-x-auto overflow-y-hidden p-1" style={{ gridTemplateColumns: `minmax(250px, ${sizes[0]}fr) 4px minmax(680px, ${sizes[1]}fr)` }}>
       <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-card shadow-sm">
-        <div className="flex min-h-16 shrink-0 items-center border-b border-[var(--color-border)] px-3">
-          <div className="flex w-full items-center justify-between"><div><h2 className="text-sm font-semibold">接口清单</h2><p className="text-[10px] text-[var(--color-text-tertiary)]">{interfaces.length} 个已纳管接口</p></div><Button size="sm" onClick={create}><CirclePlus size={13} />新建接口</Button></div>
+        <div className="flex shrink-0 flex-col gap-2 border-b border-[var(--color-border)] px-3 py-3">
+          <div className="flex w-full items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold">接口清单</h2>
+              <p className="text-xs text-[var(--color-text-tertiary)]">{interfaces.length} 个接口</p>
+            </div>
+            <Button size="sm" onClick={create}><CirclePlus size={13} />新建接口</Button>
+          </div>
+          {interfaces.length > 0 && (
+            <label className="relative block">
+              <span className="sr-only">搜索接口</span>
+              <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
+              <input
+                value={listSearch}
+                onChange={event => setListSearch(event.target.value)}
+                placeholder="搜索名称 / URL / 分组"
+                className="h-8 w-full rounded-md border border-border bg-card pl-8 pr-3 text-xs outline-none placeholder:text-[var(--color-text-tertiary)] focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </label>
+          )}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          {!interfaces.length ? <EmptyList onCreate={create} /> : grouped.map(([group, items]) => (
+          {!interfaces.length ? <EmptyList onCreate={create} /> : !visibleInterfaces.length ? (
+            <div className="flex flex-col items-center px-5 py-14 text-center">
+              <Search size={24} className="mb-3 text-[var(--color-text-tertiary)]" />
+              <p className="text-xs text-[var(--color-text-secondary)]">没有匹配「{listSearch.trim()}」的接口</p>
+              <button type="button" onClick={() => setListSearch('')} className="mt-2 text-xs font-medium text-[var(--color-nav-bg)]">清除搜索</button>
+            </div>
+          ) : grouped.map(([group, items]) => (
             <div key={group || '__default'} className="mb-3">
               <div
                 onDragOver={event => {
@@ -427,25 +456,16 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
                       const rect = event.currentTarget.getBoundingClientRect()
                       void moveInterface(group, event.clientY < rect.top + rect.height / 2 ? index : index + 1)
                     }}
-                    className={`group relative flex min-h-10 w-full items-center rounded-md pr-1 transition-all ${draggingId === item.id ? 'opacity-45' : ''} ${selectedId === item.id ? 'bg-[var(--color-nav-light)]' : 'hover:bg-[var(--color-bg-hover)]'}`}
+                    className={`group relative flex min-h-10 w-full items-center rounded-md pr-1 transition-all ${draggingId === item.id ? 'opacity-45' : ''} ${selectedId === item.id ? 'bg-brand-soft' : 'hover:bg-[var(--color-bg-hover)]'}`}
                   >
                     {dropTarget?.group === group && dropTarget.index === index && <span className="pointer-events-none absolute inset-x-1 top-0 h-0.5 rounded-full bg-brand" />}
                     {dropTarget?.group === group && dropTarget.index === index + 1 && <span className="pointer-events-none absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-brand" />}
                     <span className="flex h-8 w-5 shrink-0 cursor-grab items-center justify-center text-[var(--color-text-tertiary)] active:cursor-grabbing" title="拖拽调整顺序或移动分组"><GripVertical size={12} /></span>
                     <button type="button" onClick={() => select(item)} className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
-                      <span className={`w-12 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-bold ${methodTone[item.method] || methodTone.HEAD}`}>{item.method}</span>
-                      <span className={`min-w-0 flex-1 truncate text-xs ${selectedId === item.id ? 'font-semibold text-[var(--color-nav-bg)]' : 'text-[var(--color-text-primary)]'}`}>{item.name}</span>
+                      <span className={`w-12 shrink-0 rounded px-1.5 py-0.5 text-center text-xs font-bold ${methodTone[item.method] || methodTone.HEAD}`}>{item.method}</span>
+                      <span title={item.name} className={`min-w-0 flex-1 truncate text-xs ${selectedId === item.id ? 'font-semibold text-brand-ink' : 'text-[var(--color-text-primary)]'}`}>{item.name}</span>
                       {item.http_enabled && <PublicationBadge title="已发布 HTTP 接口" />}
                       <ChevronRight size={12} className="shrink-0 text-[var(--color-text-tertiary)] opacity-0 group-hover:opacity-100" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPublicationTarget(item)}
-                      aria-label={`${item.name}：${item.http_enabled ? '查看 HTTP 发布配置' : '发布 HTTP 接口'}`}
-                      title={item.http_enabled ? '查看 HTTP 调用方式' : '发布为带鉴权的 HTTP 接口'}
-                      className={`flex h-7 shrink-0 items-center gap-1 rounded px-2 text-[9px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${item.http_enabled ? 'bg-brand-mist text-brand-ink hover:bg-brand-mist' : 'border border-dashed border-border bg-card text-muted-foreground hover:border-brand-line hover:text-brand-ink'}`}
-                    >
-                      <Share2 size={11} />{item.http_enabled ? 'HTTP 设置' : 'HTTP 发布'}
                     </button>
                   </div>
                 ))}
@@ -463,10 +483,10 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
             data-testid="api-hub-expose-mcp"
             loading={hubMcpBusy}
             onClick={() => void exposeToAssistant()}
-            title={hubMcp?.enabled ? '超级助手已可管理这些接口' : '把接口管理能力提供给超级助手'}
+            title={hubMcp?.enabled ? '超级助手已可管理这些接口' : '把接口管理能力同步到超级助手'}
           >
             {!hubMcpBusy && <Sparkles size={13} />}
-            {hubMcp?.enabled ? '已提供给超级助手' : hubMcp ? '重新提供给超级助手' : '提供给超级助手'}
+            {hubMcp?.enabled ? '已同步到超级助手' : hubMcp ? '重新同步到超级助手' : '同步到超级助手'}
           </Button>
         </div>
       </aside>
@@ -476,19 +496,19 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-card shadow-sm">
         <div className="flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
           <div className="flex min-w-[430px] flex-[1_1_430px] items-center gap-2">
-            <input value={draft.name} onChange={event => patchDraft('name', event.target.value)} className="h-8 min-w-[180px] max-w-md flex-1 rounded-md border border-[var(--color-border)] bg-card px-3 text-sm font-semibold outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] hover:border-[var(--color-border-hover)] focus-visible:ring-2 focus-visible:ring-ring" placeholder="接口名称" />
+            <input value={draft.name} onChange={event => patchDraft('name', event.target.value)} aria-label="接口名称" className="h-8 min-w-[180px] max-w-md flex-1 rounded-md border border-[var(--color-border)] bg-card px-3 text-sm font-semibold outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] hover:border-[var(--color-border-hover)] focus-visible:ring-2 focus-visible:ring-ring" placeholder="接口名称" />
             <Select value={draft.group_name || '__default__'} onValueChange={changeGroup}>
-              <SelectTrigger className="h-8 w-40 shrink-0 rounded-md bg-card text-xs" title="选择或新增分类" aria-label="选择或新增分类">
+              <SelectTrigger className="h-8 w-40 shrink-0 rounded-md bg-card text-xs" title="选择或新增分组" aria-label="选择或新增分组">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__default__">默认分组</SelectItem>
                 {groupNames.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}
-                <SelectItem value="__new__">＋ 新增分类…</SelectItem>
+                <SelectItem value="__new__">＋ 新增分组…</SelectItem>
               </SelectContent>
             </Select>
             <Button size="sm" loading={saving} onClick={save}>{!saving && <Check size={14} />}{draft.id ? '保存配置' : '保存接口'}</Button>
-            {isDirty && <span className="shrink-0 rounded bg-[var(--color-warning-bg)] px-2 py-1 text-[10px] font-medium text-[var(--color-warning)]">未保存</span>}
+            {isDirty && <span className="shrink-0 rounded bg-[var(--color-warning-bg)] px-2 py-1 text-xs font-medium text-[var(--color-warning)]">未保存</span>}
           </div>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             {draft.id && <Button variant="ghost" size="icon-sm" title="复制为新接口" onClick={() => { setSelectedId(null); setBaseline(emptyHubInterface()); setDraft({ ...structuredClone(draft), id: null, name: `${draft.name} 副本`, mcp_enabled: false, open_enabled: false, http_enabled: false, proxy_slug: '', proxy_query_keys: [], proxy_header_keys: [], proxy_body_enabled: false, proxy_body_keys: [] }); setResult(null); setResultFingerprint(''); setSelectedFiles([]) }}><Copy size={14} /></Button>}
@@ -511,18 +531,25 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
               </SelectContent>
             </Select>
             <input value={draft.url} aria-invalid={Boolean(urlError)} aria-describedby={urlError ? 'api-hub-url-error' : undefined} onChange={event => patchDraft('url', event.target.value)} className="h-10 min-w-0 flex-1 bg-transparent px-3 font-mono text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="https://example.com/api/resource" />
-            <button onClick={run} disabled={running} className={`relative m-1 flex min-w-[84px] items-center justify-center gap-1.5 overflow-hidden rounded bg-brand px-4 text-xs font-semibold text-[var(--color-text-inverse)] shadow-sm transition-all duration-200 hover:-translate-y-px hover:bg-brand-deep active:translate-y-0 active:scale-[0.98] disabled:cursor-wait disabled:opacity-90 ${running ? 'ring-4 ring-brand-mist' : ''}`}>
+            <button type="button" onClick={run} disabled={running} className={`relative m-1 flex min-w-[84px] items-center justify-center gap-1.5 overflow-hidden rounded bg-brand px-4 text-xs font-semibold text-[var(--color-text-inverse)] shadow-sm transition-all duration-200 hover:-translate-y-px hover:bg-brand-deep active:translate-y-0 active:scale-[0.98] disabled:cursor-wait disabled:opacity-90 ${running ? 'ring-4 ring-brand-mist' : ''}`}>
               {running ? <><LoaderCircle size={14} className="animate-spin" />调用中…</> : <><Play size={13} />调用</>}
               {running && <span className="absolute inset-0 animate-pulse bg-card/10" />}
             </button>
           </div>
-          {urlError && <p id="api-hub-url-error" role="alert" className="mt-2 text-[11px] text-[var(--color-danger)]">{urlError}</p>}
+          {urlError && <p id="api-hub-url-error" role="alert" className="mt-2 text-xs text-[var(--color-danger)]">{urlError}</p>}
         </div>
 
         <div className="flex shrink-0 items-center border-b border-[var(--color-border)] px-4">
-          <div className="flex gap-5">
+          <div role="tablist" aria-label="接口编辑分区" className="flex gap-5">
             {(['params', 'headers', 'body', 'description', 'privacy'] as const).map(key => (
-              <button key={key} onClick={() => setEditorTab(key)} className={`relative py-2.5 text-xs font-medium ${editorTab === key ? 'text-[var(--color-nav-bg)]' : 'text-[var(--color-text-secondary)]'}`}>
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={editorTab === key}
+                onClick={() => setEditorTab(key)}
+                className={`relative py-2.5 text-xs font-medium ${editorTab === key ? 'text-[var(--color-nav-bg)]' : 'text-[var(--color-text-secondary)]'}`}
+              >
                 {{ params: '查询参数', headers: '请求头', body: '请求体', description: '用途说明', privacy: '个人变量' }[key]}
                 {editorTab === key && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[var(--color-nav-bg)]" />}
               </button>
@@ -547,13 +574,13 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
         <DialogContent className="w-[min(92vw,26rem)]">
           <DialogHeader>
             <div className="min-w-0">
-              <DialogTitle>新增分类</DialogTitle>
-              <DialogDescription>输入新的分类名称，添加后当前接口会立即选中该分类。</DialogDescription>
+              <DialogTitle>新增分组</DialogTitle>
+              <DialogDescription>输入新的分组名称，添加后当前接口会立即选中该分组。</DialogDescription>
             </div>
           </DialogHeader>
           <div className="space-y-3">
-          <div className="rounded-lg border border-brand-line bg-brand-soft px-3 py-2.5 text-xs leading-5 text-muted-foreground">分类会先保留在本次编辑会话中，保存当前接口后正式生效。</div>
-          <label htmlFor="api-hub-new-group" className="block text-xs font-semibold text-foreground">分类名称</label>
+          <div className="rounded-lg border border-brand-line bg-brand-soft px-3 py-2.5 text-xs leading-5 text-muted-foreground">分组会先保留在本次编辑会话中，保存当前接口后正式生效。</div>
+          <label htmlFor="api-hub-new-group" className="block text-xs font-semibold text-foreground">分组名称</label>
           <input id="api-hub-new-group" autoFocus autoComplete="off" value={newGroupName} onChange={event => { setNewGroupName(event.target.value); if (newGroupError) setNewGroupError('') }} onKeyDown={event => { if (event.key === 'Enter') addNewGroup() }} className={`h-10 w-full rounded-lg border bg-card px-3 text-sm outline-none transition-colors focus-visible:ring-2 ${newGroupError ? 'border-[color-mix(in_srgb,var(--color-danger)_40%,transparent)] focus-visible:border-destructive focus-visible:ring-ring' : 'border-[var(--color-border)] focus-visible:ring-ring'}`} placeholder="例如：用户中心 / 订单服务" />
           {newGroupError && <div role="alert" className="rounded-md bg-[var(--color-danger-bg)] px-3 py-2 text-xs text-[var(--color-danger)]">{newGroupError}</div>}
           </div>
@@ -571,18 +598,18 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           <DialogHeader>
             <div className="min-w-0">
               <DialogTitle>上游调试 cURL</DialogTitle>
+              <DialogDescription>
+                此命令直连真实上游地址，仅用于管理员调试；对外系统请使用“HTTP 发布”生成的调用包。CMD / PowerShell / bash 通用。
+              </DialogDescription>
             </div>
           </DialogHeader>
         <div className="space-y-3.5">
-          <div className="rounded-r-lg border-l-[3px] border-brand bg-brand-soft/80 px-3.5 py-2.5 text-xs leading-5 text-muted-foreground">
-            此命令直连真实上游地址，仅用于管理员调试；对外系统请使用“HTTP 发布”生成的调用包。CMD / PowerShell / bash 通用。
-          </div>
-          <pre aria-label="cURL 命令" className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-[10px] border border-border bg-muted px-4 py-3.5 font-mono text-[12.5px] leading-[1.7] text-foreground">{callExample}</pre>
+          <pre aria-label="cURL 命令" className="max-h-80 overflow-x-auto overflow-y-auto whitespace-pre rounded-[10px] border border-border bg-muted px-4 py-3.5 font-mono text-xs leading-[1.7] text-foreground">{callExample}</pre>
           <span className="sr-only" role="status" aria-live="polite">
             {callExampleCopyState === 'copied' ? 'cURL 命令已复制' : callExampleCopyState === 'failed' ? '复制失败，请重试' : ''}
           </span>
         </div>
-          <DialogFooter className="justify-center">
+          <DialogFooter className="justify-end">
             <Button variant="outline" className="min-w-24" onClick={() => setCallExampleDraft(null)}>关闭</Button>
             <Button
               className={`min-w-24 shadow-sm ${callExampleCopyState === 'failed' ? 'bg-[var(--color-danger)] hover:bg-[var(--color-danger-hover)]' : ''}`}
@@ -602,11 +629,18 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
 }
 
 function EmptyList({ onCreate }: { onCreate: () => void }) {
-  return <div className="flex flex-col items-center px-5 py-14 text-center"><Braces size={28} className="mb-3 text-[var(--color-text-tertiary)]" /><p className="text-xs text-[var(--color-text-secondary)]">还没有接口</p><button onClick={onCreate} className="mt-2 text-xs font-medium text-[var(--color-nav-bg)]">新建一个接口</button></div>
+  return (
+    <div className="flex flex-col items-center px-5 py-14 text-center">
+      <Braces size={28} className="mb-3 text-[var(--color-text-tertiary)]" />
+      <p className="text-sm font-medium text-[var(--color-text-secondary)]">还没有接口</p>
+      <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">新建后可调试调用，并发布为带鉴权的 HTTP 接口</p>
+      <Button size="sm" className="mt-4" onClick={onCreate}><CirclePlus size={13} />新建第一个接口</Button>
+    </div>
+  )
 }
 
 function PublicationBadge({ title }: { title: string }) {
-  return <span title={title} className="shrink-0 rounded bg-[var(--color-info-bg)] px-1.5 py-0.5 text-[9px] font-bold tracking-wide text-[var(--color-info)]">HTTP</span>
+  return <span title={title} className="shrink-0 rounded bg-[var(--color-info-bg)] px-1.5 py-0.5 text-xs font-bold tracking-wide text-[var(--color-info)]">HTTP</span>
 }
 
 function PersonalVarPanel({ privacyVars, envVars }: { privacyVars: PrivacyVar[]; envVars: UserEnvVar[] }) {
@@ -634,7 +668,7 @@ function PersonalVarPanel({ privacyVars, envVars }: { privacyVars: PrivacyVar[];
     emptyText: string,
   ) => (
     <section className="space-y-1.5">
-      <div className="text-[11px] font-semibold text-[var(--color-text-secondary)]">{title}</div>
+      <div className="text-xs font-semibold text-[var(--color-text-secondary)]">{title}</div>
       {items.length ? (
         items.map(item => {
           const ref = `{{${prefix}:${item.key}}}`
@@ -649,7 +683,7 @@ function PersonalVarPanel({ privacyVars, envVars }: { privacyVars: PrivacyVar[];
                 className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-[11px] font-medium text-[var(--color-nav-bg)] transition-colors hover:bg-[var(--color-nav-light)]"
               >
                 {copiedRef === ref ? <Check size={13} /> : <Copy size={13} />}
-                {copiedRef === ref ? '已尝试复制' : '复制使用格式'}
+                {copiedRef === ref ? '已复制' : '复制使用格式'}
               </button>
             </div>
           )
@@ -681,7 +715,7 @@ function PersonalVarPanel({ privacyVars, envVars }: { privacyVars: PrivacyVar[];
 function KVEditor({ value, onChange, keyPlaceholder, valuePlaceholder }: { value: KV[]; onChange: (value: KV[]) => void; keyPlaceholder: string; valuePlaceholder: string }) {
   const rows = value.length ? value : [{ key: '', value: '' }]
   const update = (index: number, key: keyof KV, text: string) => onChange(rows.map((row, i) => i === index ? { ...row, [key]: text } : row))
-  return <div className="space-y-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{rows.map((row, index) => <div key={index} className="flex items-center gap-2"><input value={row.key} onChange={event => update(index, 'key', event.target.value)} className="h-8 w-2/5 rounded-md border border-border bg-card px-2.5 font-mono text-xs outline-none" placeholder={keyPlaceholder} /><input value={row.value} onChange={event => update(index, 'value', event.target.value)} className="h-8 min-w-0 flex-1 rounded-md border border-border bg-card px-2.5 font-mono text-xs outline-none" placeholder={valuePlaceholder} /><button onClick={() => onChange(rows.filter((_, i) => i !== index))} className="text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)]"><X size={14} /></button></div>)}<button onClick={() => onChange([...rows, { key: '', value: '' }])} className="flex items-center gap-1 text-xs text-[var(--color-nav-bg)]"><Plus size={13} />添加一行</button></div>
+  return <div className="space-y-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{rows.map((row, index) => <div key={index} className="flex items-center gap-2"><input value={row.key} onChange={event => update(index, 'key', event.target.value)} className="h-8 w-2/5 rounded-md border border-border bg-card px-2.5 font-mono text-xs outline-none" placeholder={keyPlaceholder} /><input value={row.value} onChange={event => update(index, 'value', event.target.value)} className="h-8 min-w-0 flex-1 rounded-md border border-border bg-card px-2.5 font-mono text-xs outline-none" placeholder={valuePlaceholder} /><button type="button" aria-label="删除此行" onClick={() => onChange(rows.filter((_, i) => i !== index))} className="text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)]"><X size={14} /></button></div>)}<button type="button" onClick={() => onChange([...rows, { key: '', value: '' }])} className="flex items-center gap-1 text-xs text-[var(--color-nav-bg)]"><Plus size={13} />添加一行</button></div>
 }
 
 function BodyEditor({
@@ -727,7 +761,7 @@ function BodyEditor({
           <label className="block">
             <span className="mb-1.5 block text-[11px] font-semibold text-foreground">文本字段</span>
             <textarea value={draft.body_content} onChange={event => patchDraft('body_content', event.target.value)} className="h-32 w-full resize-none rounded-md border border-border bg-card p-3 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder={'description=说明\ncategory=document'} />
-            <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">每行一个 key=value，调用时与文件一起组成 multipart/form-data。</span>
+            <span className="mt-1 block text-xs leading-4 text-[var(--color-text-tertiary)]">每行一个 key=value，调用时与文件一起组成 multipart/form-data。</span>
           </label>
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-3">
@@ -749,13 +783,13 @@ function BodyEditor({
                       <button type="button" onClick={() => removeFileField(index)} aria-label={`删除文件字段 ${field.key || index + 1}`} className="text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)]"><X size={14} /></button>
                     </div>
                     <div className="mt-2 flex min-h-6 flex-wrap items-center gap-2">
-                      <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted-foreground"><input type="checkbox" checked={field.multiple} onChange={event => { updateFileField(index, { multiple: event.target.checked }); if (!event.target.checked) setSelectedFiles(current => current.map((items, itemIndex) => itemIndex === index ? items.slice(0, 1) : items)) }} className="accent-[var(--color-nav-bg)]" />允许多文件</label>
-                      {files.length ? files.map(file => <span key={`${file.name}-${file.lastModified}`} title={file.name} className="max-w-[210px] truncate rounded bg-brand-soft px-2 py-1 text-[10px] text-brand-ink">{file.name} · {formatFileSize(file.size)}</span>) : <span className="text-[10px] text-[var(--color-text-tertiary)]">本次调用尚未选择文件</span>}
-                      {files.length > 0 && <button type="button" onClick={() => chooseFiles(index, null)} className="ml-auto text-[10px] font-medium text-muted-foreground hover:text-[var(--color-danger)]">清空</button>}
+                      <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"><input type="checkbox" checked={field.multiple} onChange={event => { updateFileField(index, { multiple: event.target.checked }); if (!event.target.checked) setSelectedFiles(current => current.map((items, itemIndex) => itemIndex === index ? items.slice(0, 1) : items)) }} className="accent-[var(--color-nav-bg)]" />允许多文件</label>
+                      {files.length ? files.map(file => <span key={`${file.name}-${file.lastModified}`} title={file.name} className="max-w-[210px] truncate rounded bg-brand-soft px-2 py-1 text-xs text-brand-ink">{file.name} · {formatFileSize(file.size)}</span>) : <span className="text-xs text-[var(--color-text-tertiary)]">本次调用尚未选择文件</span>}
+                      {files.length > 0 && <button type="button" onClick={() => chooseFiles(index, null)} className="ml-auto text-xs font-medium text-muted-foreground hover:text-[var(--color-danger)]">清空</button>}
                     </div>
                   </div>
                 )
-              }) : <button type="button" onClick={() => { patchDraft('file_fields', [{ key: 'file', accept: '', multiple: false }]); setSelectedFiles([[]]) }} className="flex h-32 w-full flex-col items-center justify-center rounded-lg border border-dashed border-border bg-muted text-muted-foreground transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink"><FileUp size={20} /><span className="mt-2 text-xs font-medium">添加文件上传字段</span><span className="mt-1 text-[10px]">文件只用于本次调用，不会保存到接口配置</span></button>}
+              }) : <button type="button" onClick={() => { patchDraft('file_fields', [{ key: 'file', accept: '', multiple: false }]); setSelectedFiles([[]]) }} className="flex h-32 w-full flex-col items-center justify-center rounded-lg border border-dashed border-border bg-muted text-muted-foreground transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink"><FileUp size={20} /><span className="mt-2 text-xs font-medium">添加文件上传字段</span><span className="mt-1 text-xs">文件只用于本次调用，不会保存到接口配置</span></button>}
             </div>
           </div>
         </div>
@@ -768,6 +802,13 @@ function BodyEditor({
 
 function ResponsePanel({ result, stale, loading }: { result: RunResult | null; stale: boolean; loading: boolean }) {
   const response = useMemo(() => formatResponseBody(result?.response_body ?? ''), [result?.response_body])
+  const businessFailure = useMemo(
+    () => detectBusinessFailure(result?.response_body ?? ''),
+    [result?.response_body],
+  )
+  const httpSuccess = typeof result?.status_code === 'number'
+    && result.status_code >= 200
+    && result.status_code < 300
   const copyText = response.text || result?.error || ''
   const [copyFeedback, setCopyFeedback] = useState<{ text: string; status: 'copied' | 'failed' } | null>(null)
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -804,14 +845,17 @@ function ResponsePanel({ result, stale, loading }: { result: RunResult | null; s
       <div className="flex h-10 shrink-0 items-center gap-3 border-b border-[var(--color-border)] px-4">
         <span className="text-xs font-semibold text-[var(--color-text-primary)]">响应</span>
         {loading ? (
-          <span className="flex items-center gap-1.5 text-[11px] font-medium text-brand-ink"><LoaderCircle size={12} className="animate-spin" />请求处理中</span>
+          <span className="flex items-center gap-1.5 text-xs font-medium text-brand-ink"><LoaderCircle size={12} className="animate-spin" />请求处理中</span>
         ) : result && (
           <>
-            <span className={`rounded px-2 py-0.5 text-[11px] font-semibold ${stale ? 'bg-muted text-muted-foreground' : result.status_code && result.status_code < 400 ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'}`}>{result.status_code ?? 'ERR'}</span>
-            <span className="text-[11px] text-[var(--color-text-tertiary)]">{result.elapsed_ms ?? '—'} ms</span>
-            {response.isJson && <span className="rounded bg-brand-soft px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand-ink">JSON</span>}
-            {stale && <span className="text-[11px] font-medium text-[var(--color-warning)]">请求已修改，此结果已过期</span>}
-            {result.relogin && <span className="text-[11px] text-[var(--color-warning)]">已自动重登</span>}
+            <span className={`rounded px-2 py-0.5 text-xs font-semibold ${httpStatusChipClass(result.status_code, stale)}`}>{result.status_code ?? 'ERR'}</span>
+            {!stale && httpSuccess && businessFailure.failed && (
+              <span className="rounded px-2 py-0.5 text-xs font-semibold bg-[var(--color-warning-bg)] text-[var(--color-warning)]" title={businessFailure.summary || '业务层返回失败'}>业务失败</span>
+            )}
+            <span className="text-xs text-[var(--color-text-tertiary)]">{result.elapsed_ms ?? '—'} ms</span>
+            {response.isJson && <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold text-muted-foreground">JSON</span>}
+            {stale && <span className="text-xs font-medium text-[var(--color-warning)]">请求已修改，此结果已过期</span>}
+            {result.relogin && <span className="text-xs text-[var(--color-warning)]">已自动重登</span>}
           </>
         )}
         {result && !loading && (
@@ -838,6 +882,11 @@ function ResponsePanel({ result, stale, loading }: { result: RunResult | null; s
       ) : (
         <div className={`min-h-0 flex-1 animate-fade-in overflow-auto bg-muted ${stale ? 'opacity-60' : ''}`}>
           {result.error && <div className="m-4 mb-3 rounded-md bg-[var(--color-danger-bg)] px-3 py-2 text-xs text-[var(--color-danger)]">{result.error}</div>}
+          {!stale && httpSuccess && businessFailure.failed && businessFailure.summary && (
+            <div className="m-4 mb-0 rounded-md border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] px-3 py-2 text-xs leading-5 text-[var(--color-warning)]">
+              {businessFailure.summary}
+            </div>
+          )}
           {response.isJson ? <JsonResponse value={response.text} /> : <pre className="whitespace-pre-wrap break-words p-4 font-mono text-xs leading-6 text-[var(--color-text-primary)]">{response.text || '(空响应体)'}</pre>}
         </div>
       )}
@@ -850,7 +899,7 @@ function JsonResponse({ value }: { value: string }) {
     <div className="min-w-max py-3 font-mono text-xs leading-6">
       {value.split('\n').map((line, index) => (
         <div key={index} className="grid grid-cols-[3rem_minmax(0,1fr)] hover:bg-brand-soft">
-          <span className="select-none border-r border-border pr-3 text-right text-[10px] text-[var(--color-text-tertiary)]">{index + 1}</span>
+          <span className="select-none border-r border-border pr-3 text-right text-xs text-[var(--color-text-tertiary)]">{index + 1}</span>
           <code className="whitespace-pre px-4">{highlightJsonLine(line)}</code>
         </div>
       ))}

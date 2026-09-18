@@ -6,10 +6,16 @@ import {
   apiError, apiHub, type ForwardingPackage, type HubInterface,
 } from '@/api/apiHub'
 import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { writeTextToClipboard } from '@/utils/clipboard'
+import {
+  publicationBannerIconTone,
+  publicationBannerTone,
+  publicationStatusChipTone,
+} from './interfaceUxHelpers'
 
 interface Props {
   open: boolean
@@ -35,6 +41,7 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
   const [copied, setCopied] = useState('')
   const [proxyPath, setProxyPath] = useState('/proxy')
   const [configuration, setConfiguration] = useState<PublicationDraft | null>(null)
+  const [confirmDisableOpen, setConfirmDisableOpen] = useState(false)
 
   useEffect(() => {
     if (!open || !item) return
@@ -42,6 +49,7 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
     setCallPackage(null)
     setTab('curl')
     setCopied('')
+    setConfirmDisableOpen(false)
     setConfiguration(publicationDraft(item))
     apiHub.proxyInfo().then(info => setProxyPath(info.path)).catch(error => onError(apiError(error)))
   }, [item, onError, open])
@@ -120,17 +128,22 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
 
   const code = callPackage ? forwardingCode(callPackage, tab) : ''
 
+  const queryCandidates = candidates.query
+  const headerCandidates = candidates.headers
+  const bodyHasContent = candidates.body.length > 0 || candidates.rawBody
+  const activeParamColumns = [queryCandidates.length > 0, headerCandidates.length > 0, bodyHasContent].filter(Boolean).length
   return (
+    <>
     <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
-      <DialogContent className="w-[min(92vw,48rem)]">
-        <DialogHeader icon={<Share2 size={18} />}>
+      <DialogContent className="flex max-h-[85vh] w-[min(92vw,48rem)] flex-col overflow-hidden p-5">
+        <DialogHeader icon={<Share2 size={18} />} className="mb-3 shrink-0">
           <DialogTitle>{`HTTP 发布 · ${current.name}`}</DialogTitle>
           <DialogDescription>勾选调用方可传入的业务参数后，平台生成可直接复制的调用包；固定值和认证信息继续由平台保管。</DialogDescription>
         </DialogHeader>
-        <div className="max-h-[66vh] space-y-5 overflow-y-auto pr-1">
-        <section className={`flex items-center justify-between gap-5 rounded-xl border px-4 py-4 ${current.http_enabled ? 'border-brand-line bg-brand-soft' : 'border-brand-line bg-brand-soft'}`}>
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1 pb-4">
+        <section className={`flex items-center justify-between gap-5 rounded-xl border px-4 py-4 ${publicationBannerTone(current.http_enabled)}`}>
           <div className="flex min-w-0 items-start gap-3">
-            <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${current.http_enabled ? 'bg-brand-mist text-brand-ink' : 'bg-brand-mist text-brand-ink'}`}>
+            <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${publicationBannerIconTone(current.http_enabled)}`}>
               {current.http_enabled ? <CheckCircle2 size={18} /> : <SlidersHorizontal size={18} />}
             </div>
             <div className="min-w-0">
@@ -138,7 +151,7 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
               <p className="mt-1 text-xs leading-5 text-muted-foreground">已选择 {editableCount} 项调用方可修改的数据；未选择的参数会继续使用接口中保存的固定值。</p>
             </div>
           </div>
-          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold ${current.http_enabled ? 'bg-brand-mist text-brand-ink' : 'bg-card text-brand-ink'}`}>{current.http_enabled ? '已转发' : '待发布'}</span>
+          <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${publicationStatusChipTone(current.http_enabled)}`}>{current.http_enabled ? '已转发' : '待发布'}</span>
         </section>
 
         {!callPackage && (
@@ -148,15 +161,15 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
                 <AlertTriangle size={18} className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
                 <div>
                   <div className="text-xs font-semibold text-[var(--color-warning)]">此接口含个人变量占位符，不能发布</div>
-                  <p className="mt-1 text-[10px] leading-4 text-[var(--color-warning)]">URL / 请求头 / 请求体中存在 {'{{privacy:}}'} 或 {'{{env:}}'} 占位符；公开代理链路没有用户身份、不会解析占位符，发布后调用必然失败。请先在接口编辑器中移除占位符，再发布。</p>
+                  <p className="mt-1 text-xs leading-4 text-[var(--color-warning)]">URL / 请求头 / 请求体中存在 {'{{privacy:}}'} 或 {'{{env:}}'} 占位符；公开代理链路没有用户身份、不会解析占位符，发布后调用必然失败。请先在接口编辑器中移除占位符，再发布。</p>
                 </div>
               </section>
             )}
             <section className="rounded-xl border border-[var(--color-border)] bg-card p-4">
               <label className="text-xs font-semibold text-foreground" htmlFor="api-hub-proxy-slug">HTTP 公开路径</label>
-              <p className="mt-1 text-[11px] leading-5 text-muted-foreground">保存后调用地址保持稳定；只能使用小写字母、数字、短横线和下划线。</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">保存后调用地址保持稳定；只能使用小写字母、数字、短横线和下划线。</p>
               <div className="mt-3 flex overflow-hidden rounded-lg border border-border bg-card focus-within:ring-2 focus-within:ring-ring">
-                <span className="flex min-w-0 items-center truncate border-r border-border px-3 font-mono text-[11px] text-muted-foreground">{window.location.origin}{proxyPath}/</span>
+                <span className="flex min-w-0 items-center truncate border-r border-border px-3 font-mono text-xs text-muted-foreground">{window.location.origin}{proxyPath}/</span>
                 <input id="api-hub-proxy-slug" value={configuration.slug} onChange={event => setConfiguration(value => value && ({ ...value, slug: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '') }))} className="h-10 min-w-[180px] flex-1 bg-card px-3 font-mono text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="interface-path" />
               </div>
             </section>
@@ -164,22 +177,35 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
             <section className="rounded-xl border border-[var(--color-border)] bg-card p-4">
               <div className="flex items-start gap-3">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink"><SlidersHorizontal size={17} /></div>
-                <div><div className="text-xs font-semibold text-foreground">允许调用方传入的参数</div><p className="mt-1 text-[11px] leading-5 text-muted-foreground">选中的值可在每次转发时覆盖。认证字段会默认排除，固定参数不会暴露给调用方。</p></div>
+                <div><div className="text-xs font-semibold text-foreground">允许调用方传入的参数</div><p className="mt-1 text-xs leading-5 text-muted-foreground">选中的值可在每次转发时覆盖。认证字段会默认排除，固定参数不会暴露给调用方。</p></div>
               </div>
-              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-                <ParameterGroup title="Query 参数" items={candidates.query} selected={configuration.queryKeys} emptyText="接口未配置 Query 参数" onToggle={key => setConfiguration(value => value && ({ ...value, queryKeys: toggleValue(value.queryKeys, key) }))} />
-                <ParameterGroup title="业务请求头" items={candidates.headers} selected={configuration.headerKeys} emptyText="没有可安全开放的请求头" onToggle={key => setConfiguration(value => value && ({ ...value, headerKeys: toggleValue(value.headerKeys, key, true) }))} />
-                <ParameterGroup title="请求 Body" items={candidates.body} selected={configuration.bodyKeys} emptyText={candidates.rawBody ? 'Raw Body 只能整段开放' : '没有可开放的 Body 字段'} onToggle={key => setConfiguration(value => {
-                  if (!value) return value
-                  const bodyKeys = toggleValue(value.bodyKeys, key)
-                  return { ...value, bodyKeys, bodyEnabled: bodyKeys.length > 0 }
-                })} rawBody={candidates.rawBody} rawEnabled={configuration.bodyEnabled} onToggleRaw={() => setConfiguration(value => value && ({ ...value, bodyEnabled: !value.bodyEnabled, bodyKeys: [] }))} />
+              <div className={`mt-4 grid grid-cols-1 gap-3 ${activeParamColumns <= 1 ? '' : activeParamColumns === 2 ? 'md:grid-cols-2' : 'md:grid-cols-3'}`}>
+                {(queryCandidates.length > 0 || activeParamColumns === 0) && (
+                  <ParameterGroup title="Query 参数" items={queryCandidates} selected={configuration.queryKeys} emptyText="接口未配置 Query 参数" onToggle={key => setConfiguration(value => value && ({ ...value, queryKeys: toggleValue(value.queryKeys, key) }))} />
+                )}
+                {(headerCandidates.length > 0 || activeParamColumns === 0) && (
+                  <ParameterGroup title="业务请求头" items={headerCandidates} selected={configuration.headerKeys} emptyText="没有可安全开放的请求头" onToggle={key => setConfiguration(value => value && ({ ...value, headerKeys: toggleValue(value.headerKeys, key, true) }))} />
+                )}
+                <ParameterGroup
+                  title="请求 Body"
+                  items={candidates.body}
+                  selected={configuration.bodyKeys}
+                  emptyText={candidates.rawBody ? 'Raw Body 只能整段开放' : '没有可开放的 Body 字段'}
+                  onToggle={key => setConfiguration(value => {
+                    if (!value) return value
+                    const bodyKeys = toggleValue(value.bodyKeys, key)
+                    return { ...value, bodyKeys, bodyEnabled: bodyKeys.length > 0 }
+                  })}
+                  rawBody={candidates.rawBody}
+                  rawEnabled={configuration.bodyEnabled}
+                  onToggleRaw={() => setConfiguration(value => value && ({ ...value, bodyEnabled: !value.bodyEnabled, bodyKeys: [] }))}
+                />
               </div>
             </section>
 
             <section className="flex items-start gap-3 rounded-xl border border-brand-line bg-brand-soft px-4 py-3">
               <ShieldCheck size={18} className="mt-0.5 shrink-0 text-brand-ink" />
-              <div><div className="text-xs font-semibold text-brand-ink">转发时不注入登录态</div><p className="mt-1 text-[10px] leading-4 text-brand-ink">如目标需要登录态认证，请改为在接口详情中配置认证 Header 或查询参数并保存。</p></div>
+              <div><div className="text-xs font-semibold text-brand-ink">转发时不注入登录态</div><p className="mt-1 text-xs leading-4 text-brand-ink">如目标需要登录态认证，请改为在接口详情中配置认证 Header 或查询参数并保存。</p></div>
             </section>
           </>
         )}
@@ -187,10 +213,10 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
         {current.http_enabled && !callPackage && (
           <section className="rounded-xl border border-[var(--color-border)] bg-card p-4">
             <div className="flex items-center justify-between gap-4">
-              <div><div className="text-xs font-semibold text-foreground">当前调用地址</div><div className="mt-1 text-[11px] text-muted-foreground">调用方无需知道真实接口。</div></div>
+              <div><div className="text-xs font-semibold text-foreground">当前调用地址</div><div className="mt-1 text-xs text-muted-foreground">调用方无需知道真实接口。</div></div>
               <button type="button" onClick={() => void copy(publicUrl, 'url')} className="rounded-md px-2 py-1 text-xs font-medium text-brand-ink hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{copied === 'url' ? '已复制' : '复制地址'}</button>
             </div>
-            <code className="mt-3 block break-all rounded-lg bg-[var(--color-code-bg)] px-3 py-2.5 text-[11px] text-[var(--color-code-fg)]">{publicUrl}</code>
+            <code className="mt-3 block break-all rounded-lg bg-[var(--color-code-bg)] px-3 py-2.5 text-xs text-[var(--color-code-fg)]">{publicUrl}</code>
           </section>
         )}
 
@@ -205,18 +231,18 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
                 <div className="flex items-center gap-2"><Code2 size={15} className="text-brand-ink" /><span className="text-xs font-semibold text-foreground">可直接使用的调用代码</span></div>
                 <div className="flex rounded-lg bg-muted p-1">
                   {(['curl', 'python', 'javascript'] as const).map(value => (
-                    <button key={value} type="button" onClick={() => { setTab(value); setCopied('') }} className={`rounded-md px-3 py-1 text-[10px] font-semibold transition-colors ${tab === value ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>{value === 'curl' ? 'cURL' : value === 'python' ? 'Python' : 'JavaScript'}</button>
+                    <button key={value} type="button" onClick={() => { setTab(value); setCopied('') }} className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${tab === value ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>{value === 'curl' ? 'cURL' : value === 'python' ? 'Python' : 'JavaScript'}</button>
                   ))}
                 </div>
               </div>
-              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--color-code-bg)] p-4 font-mono text-[11px] leading-5 text-[var(--color-code-fg)]">{code}</pre>
-              <div className="mt-3 flex items-center justify-between gap-4 text-[10px] text-muted-foreground"><span>完整凭证只在这次生成结果中展示；之后可以单独撤销。</span><button type="button" onClick={() => void copy(code, 'inline-code')} className="shrink-0 rounded px-2 py-1 font-semibold text-brand-ink hover:bg-brand-soft">{copied === 'inline-code' ? '已复制' : '复制代码'}</button></div>
+              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--color-code-bg)] p-4 font-mono text-xs leading-5 text-[var(--color-code-fg)]">{code}</pre>
+              <div className="mt-3 flex items-center justify-between gap-4 text-xs text-muted-foreground"><span>完整凭证只在这次生成结果中展示；之后可以单独撤销。</span><button type="button" onClick={() => void copy(code, 'inline-code')} className="shrink-0 rounded px-2 py-1 font-semibold text-brand-ink hover:bg-brand-soft">{copied === 'inline-code' ? '已复制' : '复制代码'}</button></div>
             </div>
 
             {editableLabels(callPackage).length > 0 && (
               <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-muted px-4 py-3">
-                <span className="mr-1 text-[10px] font-semibold text-muted-foreground">调用方可修改</span>
-                {editableLabels(callPackage).map(label => <span key={label} className="rounded-full border border-border bg-card px-2 py-1 font-mono text-[10px] text-foreground">{label}</span>)}
+                <span className="mr-1 text-xs font-semibold text-muted-foreground">调用方可修改</span>
+                {editableLabels(callPackage).map(label => <span key={label} className="rounded-full border border-border bg-card px-2 py-1 font-mono text-xs text-foreground">{label}</span>)}
               </div>
             )}
           </section>
@@ -224,13 +250,22 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
 
         </div>
         {callPackage ? (
-          <DialogFooter>
+          <DialogFooter className="mt-0 shrink-0 border-t border-border pt-4">
             <Button variant="outline" onClick={onClose}>完成</Button>
             <Button onClick={() => void copy(code, 'code')}><Copy size={14} />{copied === 'code' ? '已复制' : '复制当前代码'}</Button>
           </DialogFooter>
         ) : (
-          <DialogFooter>
-            {current.http_enabled && <Button variant="ghost" onClick={() => void disable()} disabled={busy} className="mr-auto text-muted-foreground">停止 HTTP 发布</Button>}
+          <DialogFooter className="mt-0 shrink-0 border-t border-border pt-4">
+            {current.http_enabled && (
+              <Button
+                variant="outline"
+                onClick={() => setConfirmDisableOpen(true)}
+                disabled={busy}
+                className="mr-auto border-[color-mix(in_srgb,var(--color-danger)_30%,transparent)] text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]"
+              >
+                停止 HTTP 发布
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setConfiguration(suggestedPublicationDraft(current))} disabled={busy}><RefreshCw size={14} />恢复推荐选择</Button>
             <Button variant="outline" onClick={() => void savePublication(false)} loading={busy}>保存 HTTP 配置</Button>
             <Button onClick={() => void savePublication(true)} loading={busy}>{!busy && <Share2 size={14} />}{current.http_enabled ? '保存并生成调用包' : '发布并生成调用包'}</Button>
@@ -238,6 +273,20 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
         )}
       </DialogContent>
     </Dialog>
+    <ConfirmDialog
+      open={confirmDisableOpen}
+      onClose={() => setConfirmDisableOpen(false)}
+      onConfirm={() => {
+        setConfirmDisableOpen(false)
+        void disable()
+      }}
+      loading={busy}
+      variant="warning"
+      title="停止 HTTP 发布？"
+      description="停止后，已分发的 HTTP 调用地址将立即不可用，调用方会收到失败响应。可随时重新发布。"
+      confirmText="停止发布"
+    />
+    </>
   )
 }
 
@@ -250,6 +299,7 @@ function ParameterGroup({
   rawBody = false,
   rawEnabled = false,
   onToggleRaw,
+  className = '',
 }: {
   title: string
   items: string[]
@@ -259,14 +309,15 @@ function ParameterGroup({
   rawBody?: boolean
   rawEnabled?: boolean
   onToggleRaw?: () => void
+  className?: string
 }) {
   return (
-    <div className="rounded-lg border border-border bg-muted p-3">
-      <div className="mb-2 flex items-center justify-between gap-2"><span className="text-[11px] font-semibold text-foreground">{title}</span><span className="text-[9px] text-[var(--color-text-tertiary)]">{rawBody ? (rawEnabled ? '已开放' : '固定') : `${selected.length}/${items.length}`}</span></div>
-      {items.length > 0 ? <div className="space-y-1.5">{items.map(key => {
+    <div className={`rounded-lg border border-border bg-muted p-3 ${className}`}>
+      <div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-semibold text-foreground">{title}</span><span className="text-xs text-[var(--color-text-tertiary)]">{rawBody ? (rawEnabled ? '已开放' : '固定') : `${selected.length}/${items.length}`}</span></div>
+      {items.length > 0 ? <div className="max-h-56 space-y-1.5 overflow-y-auto pr-0.5">{items.map(key => {
         const active = selected.some(value => value.toLowerCase() === key.toLowerCase())
-        return <button key={key} type="button" role="checkbox" aria-checked={active} onClick={() => onToggle(key)} className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left font-mono text-[10px] transition-colors ${active ? 'border-brand-line bg-card text-brand-ink shadow-sm' : 'border-transparent text-muted-foreground hover:border-border hover:bg-card'}`}><span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${active ? 'border-brand bg-brand text-[var(--color-text-inverse)]' : 'border-border bg-card'}`}>{active && <Check size={10} strokeWidth={3} />}</span><span className="min-w-0 truncate" title={bodyKeyLabel(key)}>{title === '请求 Body' ? bodyKeyLabel(key) : key}</span></button>
-      })}</div> : rawBody ? <button type="button" role="checkbox" aria-checked={rawEnabled} onClick={onToggleRaw} className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left text-[10px] leading-4 transition-colors ${rawEnabled ? 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] text-[var(--color-warning)]' : 'border-border bg-card text-muted-foreground'}`}><span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${rawEnabled ? 'border-[var(--color-warning)] bg-[var(--color-warning)] text-[var(--color-text-inverse)]' : 'border-border'}`}>{rawEnabled && <Check size={10} strokeWidth={3} />}</span><span>允许调用方完整替换 Raw Body</span></button> : <div className="rounded-md border border-dashed border-border bg-card px-2.5 py-4 text-center text-[10px] text-[var(--color-text-tertiary)]">{emptyText}</div>}
+        return <button key={key} type="button" role="checkbox" aria-checked={active} onClick={() => onToggle(key)} className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left font-mono text-xs transition-colors ${active ? 'border-brand-line bg-card text-brand-ink shadow-sm' : 'border-transparent text-muted-foreground hover:border-border hover:bg-card'}`}><span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${active ? 'border-brand bg-brand text-[var(--color-text-inverse)]' : 'border-border bg-card'}`}>{active && <Check size={10} strokeWidth={3} />}</span><span className="min-w-0 truncate" title={bodyKeyLabel(key)}>{title === '请求 Body' ? bodyKeyLabel(key) : key}</span></button>
+      })}</div> : rawBody ? <button type="button" role="checkbox" aria-checked={rawEnabled} onClick={onToggleRaw} className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left text-xs leading-4 transition-colors ${rawEnabled ? 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] text-[var(--color-warning)]' : 'border-border bg-card text-muted-foreground'}`}><span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${rawEnabled ? 'border-[var(--color-warning)] bg-[var(--color-warning)] text-[var(--color-text-inverse)]' : 'border-border'}`}>{rawEnabled && <Check size={10} strokeWidth={3} />}</span><span>允许调用方完整替换 Raw Body</span></button> : <div className="rounded-md border border-dashed border-border bg-card px-2.5 py-4 text-center text-xs text-[var(--color-text-tertiary)]">{emptyText}</div>}
     </div>
   )
 }

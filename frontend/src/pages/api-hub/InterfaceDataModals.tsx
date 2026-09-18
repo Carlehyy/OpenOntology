@@ -109,7 +109,7 @@ export function SystemDataModal({ open, onClose, interfaces, reload, onError }: 
       const response = await apiHub.exportBackup({ name, mode, ids, include_sensitive: includeSensitive })
       const url = URL.createObjectURL(response.data)
       const link = document.createElement('a')
-      link.href = url; link.download = `${name || 'Backup'}.json`; link.click()
+      link.href = url; link.download = `${name || '接口备份'}.json`; link.click()
       URL.revokeObjectURL(url)
       setMessage(`已导出 ${mode === 'full' ? interfaces.length : ids.length} 个接口`)
     } catch (error) { onError(apiError(error)) }
@@ -144,7 +144,7 @@ export function SystemDataModal({ open, onClose, interfaces, reload, onError }: 
         </section>
         <section className="space-y-4 rounded-lg border border-[var(--color-border)] p-4">
           <div><h4 className="text-sm font-semibold">数据还原</h4><p className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">以名称、方法和 URL 去重；导入后的 MCP 与 HTTP 发布状态统一保持关闭，需管理员重新确认。</p></div>
-          <label className="flex min-h-64 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-[var(--color-border-hover)] bg-card text-center hover:border-[var(--color-nav-bg)]"><Upload size={28} className="mb-3 text-[var(--color-text-tertiary)]" /><span className="text-xs font-medium">选择 API-Hub 备份文件</span><span className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">支持 .json</span><input type="file" accept=".json,application/json" className="hidden" onChange={event => { void importData(event.target.files?.[0]); event.currentTarget.value = '' }} /></label>
+          <label className="flex min-h-64 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-[var(--color-border-hover)] bg-card text-center hover:border-[var(--color-nav-bg)]"><Upload size={28} className="mb-3 text-[var(--color-text-tertiary)]" /><span className="text-xs font-medium">选择接口代理备份文件</span><span className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">支持 .json</span><input type="file" accept=".json,application/json" className="hidden" onChange={event => { void importData(event.target.files?.[0]); event.currentTarget.value = '' }} /></label>
         </section>
       </div>
         <DialogFooter>
@@ -156,7 +156,7 @@ export function SystemDataModal({ open, onClose, interfaces, reload, onError }: 
 }
 
 function ModeButton({ active, onClick, title, subtitle }: { active: boolean; onClick: () => void; title: string; subtitle: string }) { return <button onClick={onClick} className={`rounded-md border p-3 text-left ${active ? 'border-[var(--color-nav-bg)] bg-[var(--color-nav-light)]' : 'border-[var(--color-border)]'}`}><div className={`text-xs font-medium ${active ? 'text-[var(--color-nav-bg)]' : ''}`}>{title}</div><div className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">{subtitle}</div></button> }
-function defaultBackupName() { const now = new Date(); const pad = (value: number) => String(value).padStart(2, '0'); return `Backup-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}` }
+function defaultBackupName() { const now = new Date(); const pad = (value: number) => String(value).padStart(2, '0'); return `接口备份-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}` }
 function statusLabel(status: ProxyKey['status']) { return { active: '有效', disabled: '已停用', scheduled: '待生效', expired: '已过期' }[status] }
 function formatTime(value: string) { return formatDateTime(new Date(value), { seconds: true }) }
 function keyPayload(key: ProxyKey): ProxyKeyPayload { return { name: key.name, enabled: key.enabled, valid_from: key.valid_from, expires_at: key.expires_at, scope_all: key.scope_all, interface_ids: key.interface_ids } }
