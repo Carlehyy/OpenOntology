@@ -12,7 +12,6 @@ export default defineConfig({
   ...baseConfig,
   testMatch: [
     '**/agent_chat_resume.spec.ts',
-    '**/api_hub_super_assistant_mcp.spec.ts',
     '**/agent_composer_enter.spec.ts',
     '**/agent_header.spec.ts',
     '**/agent_ontology_carousel.spec.ts',

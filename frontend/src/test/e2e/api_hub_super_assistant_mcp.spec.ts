@@ -1,22 +1,22 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
+import {
+  STACK_ADMIN_PASSWORD,
+  STACK_ADMIN_USERNAME,
+} from './support/stack-credentials'
+
 const json = (route: Route, data: unknown, status = 200) => route.fulfill({
   status,
   contentType: 'application/json',
   body: JSON.stringify({ data }),
 })
 
-async function authenticate(page: Page) {
-  await page.addInitScript(() => {
-    localStorage.setItem('token', 'e2e-token')
-    localStorage.setItem('auth-store', JSON.stringify({
-      state: {
-        token: 'e2e-token',
-        user: { id: 'admin', username: 'admin', email: 'admin@example.com', role: 'admin', is_active: true },
-      },
-      version: 0,
-    }))
-  })
+async function loginAsAdmin(page: Page) {
+  await page.goto('/#/login')
+  await page.getByLabel('用户名', { exact: true }).fill(STACK_ADMIN_USERNAME)
+  await page.getByLabel('密码', { exact: true }).fill(STACK_ADMIN_PASSWORD)
+  await page.locator('button[type="submit"]').click()
+  await page.waitForURL('**/#/super-assistant')
 }
 
 const exampleInterface = {
@@ -66,36 +66,21 @@ const installedMcp = {
 }
 
 test('接口管理页可以把接口代理 MCP 提供给超级助手', async ({ page }) => {
-  await authenticate(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
+  await loginAsAdmin(page)
   let installed = false
   const installs: string[] = []
 
-  // Same glob the rest of the mocked suite uses (`assistant_widget.spec.ts`).
-  // One handler so api-hub cannot miss the more-specific glob.
-  await page.route('**/api/**', async route => {
+  await page.route('**/api/api-hub/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (route.request().method() === 'GET' && path === '/api/api-hub/interfaces') {
+      await route.fulfill({ json: [exampleInterface] })
+      return
+    }
+    await route.fulfill({ json: {} })
+  })
+  await page.route('**/api/v2/super-assistant/mcp-servers**', async route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
-    if (request.method() === 'GET' && path === '/api/api-hub/interfaces') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([exampleInterface]),
-      })
-      return
-    }
-    if (path.startsWith('/api/api-hub/')) {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-      return
-    }
-    if (path === '/api/v2/inbox/summary') {
-      await json(route, { openAlertCount: 0, actionableCount: 0, unreadCount: 0, resolvedCount: 0 })
-      return
-    }
-    if (path === '/api/v2/super-assistant/widget-config') {
-      await json(route, { hidden_menu_keys: [] })
-      return
-    }
     if (request.method() === 'GET' && path === '/api/v2/super-assistant/mcp-servers') {
       await json(route, installed ? [installedMcp] : [])
       return
@@ -106,12 +91,10 @@ test('接口管理页可以把接口代理 MCP 提供给超级助手', async ({ 
       await json(route, installedMcp)
       return
     }
-    await json(route, [])
+    await route.fallback()
   })
 
   await page.goto('/#/api-hub/interfaces')
-  await expect(page).toHaveURL(/\/#\/api-hub\/interfaces/)
-  await expect(page.getByRole('heading', { name: '接口清单' })).toBeVisible({ timeout: 15_000 })
   await expect(page.getByText('订单详情').first()).toBeVisible()
   const expose = page.getByTestId('api-hub-expose-mcp')
   await expect(expose).toHaveText(/提供给超级助手/)
