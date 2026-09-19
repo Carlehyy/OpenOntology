@@ -5,6 +5,7 @@ import {
 import {
   apiError, apiHub, type ForwardingPackage, type HubInterface,
 } from '@/api/apiHub'
+import { formatDateTime } from '@/utils/datetime'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
@@ -149,6 +150,9 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
             <div className="min-w-0">
               <div className="text-sm font-semibold text-foreground">{current.http_enabled ? 'HTTP 接口已经可以使用' : '请确认 HTTP 参数'}</div>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">已选择 {editableCount} 项调用方可修改的数据；未选择的参数会继续使用接口中保存的固定值。</p>
+              <p className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">
+                发布以最近一次保存的配置为准：配置版本 rev {current.config_revision ?? '—'} · 最后保存 {formatDateTime(current.updated_at, { seconds: true })}
+              </p>
             </div>
           </div>
           <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${publicationStatusChipTone(current.http_enabled)}`}>{current.http_enabled ? '已转发' : '待发布'}</span>
