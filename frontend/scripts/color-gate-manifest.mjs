@@ -37,7 +37,6 @@ export const LEGACY_COLOR_LIMITS = {
   'pages/agent/components/AgentWorkbenchPresentation.tsx':           4,
   'pages/agent/components/OntologyCardCarousel.tsx':                 7,
   'pages/agent/components/OntologyNetworkView.tsx':                  34,
-  'pages/api-hub/RunHistory.tsx':                                    1,
   'pages/community/SkillCommunityPage.tsx':                          2,
   'pages/data-management/structured/CuratedDetailPanel.tsx':         1,
   'pages/data-management/structured/DatasetEditorModal.tsx':         1,

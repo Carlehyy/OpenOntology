@@ -18,10 +18,10 @@ import {
   Search,
   ShieldCheck,
   TimerReset,
-  X,
 } from 'lucide-react'
 import { apiError, apiHub, type RunDetail, type RunOverview, type RunSummary } from '@/api/apiHub'
 import { Button } from '@/components/ui/Button'
+import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
 import { writeTextToClipboard } from '@/utils/clipboard'
 
 const PAGE_SIZE = 20
@@ -64,11 +64,10 @@ export default function RunHistory() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
   const [detailTab, setDetailTab] = useState<DetailTab>('request')
-  const [copied, setCopied] = useState('')
+  const [copied, setCopied] = useState<{ key: string; ok: boolean } | null>(null)
   const [refreshMode, setRefreshMode] = useState<RefreshMode>('manual')
   const [refreshing, setRefreshing] = useState(false)
   const detailRequestRef = useRef<number | null>(null)
-  const detailTriggerRef = useRef<HTMLElement | null>(null)
   const refreshRequestRef = useRef(false)
 
   const loadHistory = useCallback(async (silent = false) => {
@@ -168,15 +167,12 @@ export default function RunHistory() {
   }
 
   const openDetail = async (item: RunSummary) => {
-    detailTriggerRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null
     setSelected(item)
     setDetail(null)
     setDetailError('')
     setDetailLoading(true)
     setDetailTab('request')
-    setCopied('')
+    setCopied(null)
     detailRequestRef.current = item.id
     try {
       const next = await apiHub.getRun(item.interface_id, item.id)
@@ -193,17 +189,18 @@ export default function RunHistory() {
     setSelected(null)
     setDetail(null)
     setDetailError('')
-    setCopied('')
-    window.setTimeout(() => detailTriggerRef.current?.focus(), 0)
+    setCopied(null)
   }
 
   const copyText = async (key: string, value: string) => {
     try {
       await writeTextToClipboard(value)
-      setCopied(key)
-      window.setTimeout(() => setCopied(current => current === key ? '' : current), 1600)
+      setCopied({ key, ok: true })
+      window.setTimeout(() => setCopied(current => (current?.key === key ? null : current)), 1600)
     } catch {
-      setCopied('')
+      // 剪贴板写入可能被浏览器拒绝（无权限/页面未聚焦）：如实提示，内容仍可手动全选复制
+      setCopied({ key, ok: false })
+      window.setTimeout(() => setCopied(current => (current?.key === key ? null : current)), 3200)
     }
   }
 
@@ -818,37 +815,11 @@ function RunDetailDrawer({
   loading: boolean
   error: string
   activeTab: DetailTab
-  copied: string
+  copied: { key: string; ok: boolean } | null
   onTabChange: (tab: DetailTab) => void
   onCopy: (key: string, value: string) => void
   onClose: () => void
 }) {
-  const dialogRef = useRef<HTMLElement>(null)
-  const closeButtonRef = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-      if (event.key !== 'Tab' || !dialogRef.current) return
-      const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      )]
-      if (!focusable.length) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    window.addEventListener('keydown', close)
-    closeButtonRef.current?.focus()
-    return () => window.removeEventListener('keydown', close)
-  }, [onClose])
-
   const current = detail ?? summary
   const ok = Boolean(current.ok)
   const requestValue = detail ? stringifyValue(detail.request_snapshot, '暂无请求快照') : ''
@@ -863,25 +834,24 @@ function RunDetailDrawer({
     { key: 'response', label: '响应体' },
     { key: 'headers', label: '响应头' },
   ]
+  const runIdCopied = copied?.key === 'run-id'
+  const tabCopied = copied?.key === activeTab
 
+  // 抽屉复用 Sheet（Radix Dialog）：焦点圈定、Esc/遮罩关闭与焦点还原由组件保证
   return (
-    <div className="fixed inset-0 z-[var(--z-modal)]">
-      <button type="button" className="absolute inset-0 bg-[var(--color-code-bg)]/25 backdrop-blur-[1px]" onClick={onClose} aria-label="关闭调用详情" />
-      <aside
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="run-detail-title"
-        className="absolute inset-y-0 right-0 flex w-full max-w-3xl animate-slide-in-right flex-col border-l border-border bg-card shadow-[-24px_0_64px_rgba(15,23,42,0.14)]"
+    <Sheet open onOpenChange={next => { if (!next) onClose() }}>
+      <SheetContent
+        aria-describedby={undefined}
+        className="z-[var(--z-modal)] w-full max-w-3xl border-l border-border bg-card text-foreground"
       >
         <header className="shrink-0 border-b border-border px-6 pb-4 pt-5">
-          <div className="flex items-start gap-4">
+          <div className="flex items-start gap-4 pr-10">
             <span className={`mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-xl ${ok ? 'bg-brand-soft text-brand-ink' : 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'}`}>
               {ok ? <CheckCircle2 size={19} /> : <AlertCircle size={19} />}
             </span>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <h2 id="run-detail-title" className="truncate text-base font-semibold tracking-[-0.01em] text-foreground">{current.name}</h2>
+                <SheetTitle className="truncate text-base font-semibold tracking-[-0.01em] text-foreground">{current.name}</SheetTitle>
                 <span className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${ok ? 'bg-brand-soft text-brand-ink' : 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'}`}>
                   {ok ? '调用成功' : '调用失败'}
                 </span>
@@ -894,21 +864,15 @@ function RunDetailDrawer({
                   onClick={() => onCopy('run-id', `RUN-${String(current.id).padStart(6, '0')}`)}
                   className="inline-flex items-center gap-1 font-mono transition hover:text-brand-ink"
                 >
-                  {copied === 'run-id' ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
+                  {runIdCopied && copied?.ok
+                    ? <CheckCircle2 size={11} />
+                    : <ClipboardCopy size={11} className={runIdCopied ? 'text-[var(--color-danger)]' : ''} />}
                   RUN-{String(current.id).padStart(6, '0')}
                 </button>
+                {runIdCopied && !copied?.ok && <span className="text-[var(--color-danger)]">复制失败，请手动记录</span>}
               </div>
               {requestUrl && <p className="mt-2 truncate font-mono text-[10px] text-muted-foreground" title={requestUrl}>{requestUrl}</p>}
             </div>
-            <button
-              ref={closeButtonRef}
-              type="button"
-              onClick={onClose}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              aria-label="关闭详情"
-            >
-              <X size={16} />
-            </button>
           </div>
         </header>
 
@@ -934,13 +898,17 @@ function RunDetailDrawer({
 
         <div className="flex min-h-0 flex-1 flex-col px-6 pb-6 pt-4">
           <div className="flex shrink-0 items-center justify-between border-b border-border">
-            <div className="flex items-center gap-5">
+            <div className="flex items-center gap-5" role="tablist" aria-label="调用详情内容">
               {tabs.map(tab => (
                 <button
                   key={tab.key}
                   type="button"
+                  role="tab"
+                  id={`run-detail-tab-${tab.key}`}
+                  aria-selected={activeTab === tab.key}
+                  aria-controls="run-detail-panel"
                   onClick={() => onTabChange(tab.key)}
-                  className={`relative pb-3 text-xs font-medium transition ${
+                  className={`relative pb-3 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     activeTab === tab.key ? 'text-brand-ink' : 'text-muted-foreground hover:text-foreground'
                   }`}
                 >
@@ -953,15 +921,25 @@ function RunDetailDrawer({
               <button
                 type="button"
                 onClick={() => onCopy(activeTab, activeValue)}
-                className="mb-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                className={`mb-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] transition hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  tabCopied && !copied?.ok ? 'text-[var(--color-danger)]' : 'text-muted-foreground hover:text-foreground'
+                }`}
               >
-                {copied === activeTab ? <CheckCircle2 size={12} className="text-brand-ink" /> : <Copy size={12} />}
-                {copied === activeTab ? '已复制' : '复制'}
+                {tabCopied
+                  ? copied?.ok
+                    ? <><CheckCircle2 size={12} className="text-brand-ink" />已复制</>
+                    : <><Copy size={12} />复制失败，请手动选择</>
+                  : <><Copy size={12} />复制</>}
               </button>
             )}
           </div>
 
-          <div className="min-h-0 flex-1 pt-4">
+          <div
+            className="min-h-0 flex-1 pt-4"
+            role="tabpanel"
+            id="run-detail-panel"
+            aria-labelledby={`run-detail-tab-${activeTab}`}
+          >
             {loading ? (
               <div className="h-full min-h-[280px] animate-pulse rounded-xl bg-muted" />
             ) : error ? (
@@ -977,8 +955,8 @@ function RunDetailDrawer({
             )}
           </div>
         </div>
-      </aside>
-    </div>
+      </SheetContent>
+    </Sheet>
   )
 }
 
