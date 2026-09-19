@@ -82,9 +82,10 @@ export interface FilterableInterface {
   name: string
   url: string
   group_name?: string | null
+  method?: string
 }
 
-/** Filter interfaces by name / URL / group_name (case-insensitive substring). */
+/** Filter interfaces by name / URL / group_name / method (case-insensitive substring). */
 export function filterInterfaces<T extends FilterableInterface>(items: T[], search: string): T[] {
   const query = search.trim().toLowerCase()
   if (!query) return items
@@ -93,6 +94,7 @@ export function filterInterfaces<T extends FilterableInterface>(items: T[], sear
     return item.name.toLowerCase().includes(query)
       || item.url.toLowerCase().includes(query)
       || group.includes(query)
+      || (item.method || '').toLowerCase().includes(query)
   })
 }
 
@@ -133,4 +135,102 @@ export const methodTone: Record<string, string> = {
   DELETE: 'text-[var(--color-danger)] bg-[var(--color-danger-bg)]',
   HEAD: 'text-muted-foreground bg-muted',
   OPTIONS: 'text-[var(--color-info)] bg-[var(--color-info-bg)]',
+}
+
+/** 写方法判定：试调会向真实上游发送可能新增/修改/删除数据的请求。 */
+export function isMutatingMethod(method: string): boolean {
+  return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method.trim().toUpperCase())
+}
+
+/** 试调按钮文案：写方法显式表达副作用，只读方法保持「调用」。 */
+export function invokeActionLabel(method: string): string {
+  const normalized = method.trim().toUpperCase()
+  if (normalized === 'POST') return '发送 POST'
+  if (normalized === 'PUT' || normalized === 'PATCH') return '更新资源'
+  if (normalized === 'DELETE') return '执行 DELETE'
+  return '调用'
+}
+
+/**
+ * 调用密钥时间窗校验。入参为 datetime-local 的本地时间字符串（可为空）。
+ * 与后端 proxy_keys.py 的 400 校验同口径，提前到提交前就地提示；
+ * 编辑已有密钥时后端允许过期时间落在过去（allow_expired），isCreate 区分。
+ */
+export function validateProxyKeySchedule(
+  validFrom: string,
+  expiresAt: string,
+  options?: { isCreate?: boolean },
+): string {
+  if (validFrom && expiresAt) {
+    const from = new Date(validFrom)
+    const expires = new Date(expiresAt)
+    if (!Number.isNaN(from.getTime()) && !Number.isNaN(expires.getTime()) && expires.getTime() <= from.getTime()) {
+      return '过期时间需要晚于生效时间'
+    }
+  }
+  if (options?.isCreate && expiresAt) {
+    const expires = new Date(expiresAt)
+    if (!Number.isNaN(expires.getTime()) && expires.getTime() <= Date.now()) {
+      return '过期时间需要晚于当前时间'
+    }
+  }
+  return ''
+}
+
+/** 与后端 backup.py 的 BACKUP_VERSION 对齐；后端对更高版本同样返回 400。 */
+export const SUPPORTED_BACKUP_VERSION = 7
+
+export type BackupInspection =
+  | {
+    ok: true
+    name: string
+    version: number
+    exportedAt: string
+    interfaceCount: number
+    groupCount: number
+    includesSensitive: boolean
+  }
+  | { ok: false; error: string }
+
+/** 导入前本地校验并摘要备份文件，不触碰网络。 */
+export function summarizeBackup(payload: unknown): BackupInspection {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, error: '备份文件结构无效' }
+  }
+  const data = payload as Record<string, unknown>
+  if (data.app !== 'API-Hub') return { ok: false, error: '这不是接口代理的备份文件' }
+  const version = typeof data.version === 'number' ? data.version : NaN
+  if (!Number.isFinite(version)) return { ok: false, error: '备份文件缺少版本号' }
+  if (version > SUPPORTED_BACKUP_VERSION) {
+    return { ok: false, error: `备份文件版本过新（v${version}），当前支持 v${SUPPORTED_BACKUP_VERSION} 及以下` }
+  }
+  if (!Array.isArray(data.interfaces)) return { ok: false, error: '备份文件缺少接口数据' }
+  const groups = new Set<string>()
+  data.interfaces.forEach(item => {
+    if (item && typeof item === 'object') {
+      const group = (item as { group_name?: unknown }).group_name
+      if (typeof group === 'string' && group.trim()) groups.add(group.trim())
+    }
+  })
+  return {
+    ok: true,
+    name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : '未命名备份',
+    version,
+    exportedAt: typeof data.exported_at === 'string' ? data.exported_at : '',
+    interfaceCount: data.interfaces.length,
+    groupCount: groups.size,
+    includesSensitive: Boolean(data.includes_sensitive_values),
+  }
+}
+
+/** 响应头按名称排序，便于扫描定位。 */
+export function sortedHeaderEntries(headers: Record<string, string>): Array<[string, string]> {
+  return Object.entries(headers).sort(([a], [b]) => a.toLowerCase().localeCompare(b.toLowerCase()))
+}
+
+const sensitiveHeaderName = /(authorization|cookie|token|secret|credential|session|api[-_]?key|api-hub-key)/i
+
+/** 响应头值可能携带会话/凭证，默认掩码展示。 */
+export function isSensitiveHeader(name: string): boolean {
+  return sensitiveHeaderName.test(name)
 }
