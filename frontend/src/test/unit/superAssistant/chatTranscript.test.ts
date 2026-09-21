@@ -4,13 +4,29 @@ import { describe, it } from 'node:test'
 import {
   appendToolStart,
   enqueueMessage,
+  mergeServerMessages,
   normalizeAssistantMarkdown,
   patchToolStep,
   processSummary,
+  sameConversationList,
+  sameMessageList,
   shiftQueue,
   splitProcessAndAnswer,
   toolStatusLabel,
 } from '../../../pages/super-assistant/components/chatTranscript.ts'
+import type { SuperMessage } from '../../../api/superAssistant.ts'
+
+const makeMessage = (overrides: Partial<SuperMessage>): SuperMessage => ({
+  id: 'm-1',
+  conversation_id: 'c-1',
+  role: 'assistant',
+  content: '',
+  status: 'complete',
+  steps: [],
+  token_usage: {},
+  created_at: '2026-09-22T00:00:00Z',
+  ...overrides,
+})
 
 describe('chatTranscript', () => {
   it('strips a wrapping markdown fence that dominates the reply', () => {
@@ -74,5 +90,71 @@ describe('chatTranscript', () => {
     const empty = shiftQueue([])
     assert.equal(empty.next, null)
     assert.deepEqual(empty.rest, [])
+  })
+
+  it('adopts server messages verbatim when the page is not streaming', () => {
+    const server = [
+      makeMessage({ id: 'u-1', role: 'user', content: '你好' }),
+      makeMessage({ id: 'a-1', content: '你好！', status: 'complete' }),
+    ]
+    const merged = mergeServerMessages(server, undefined)
+    assert.ok(merged)
+    assert.equal(merged.boundMessageId, null)
+    assert.deepEqual(merged.messages, server)
+  })
+
+  it('overlays the local stream buffer onto the persisted streaming placeholder', () => {
+    const server = [
+      makeMessage({ id: 'u-1', role: 'user', content: '你好' }),
+      makeMessage({ id: 'a-real', status: 'streaming' }),
+    ]
+    const overlay = {
+      messageId: 'assistant-temp',
+      content: '已生成的部分',
+      steps: [{ toolName: 'web_search', status: 'running' }],
+      status: 'streaming' as const,
+      tokenUsage: {},
+      thinkingRound: null,
+    }
+    const merged = mergeServerMessages(server, overlay)
+    assert.ok(merged)
+    assert.equal(merged.boundMessageId, 'a-real')
+    assert.equal(merged.messages[1].id, 'a-real')
+    assert.equal(merged.messages[1].content, '已生成的部分')
+    assert.equal(merged.messages[1].steps.length, 1)
+    assert.equal(merged.messages[0].content, '你好')
+  })
+
+  it('keeps the local optimistic view when the placeholder is not persisted yet', () => {
+    const server = [makeMessage({ id: 'u-1', role: 'user', content: '你好' })]
+    const overlay = {
+      messageId: 'assistant-temp',
+      content: '',
+      steps: [],
+      status: 'streaming' as const,
+      tokenUsage: {},
+      thinkingRound: null,
+    }
+    assert.equal(mergeServerMessages(server, overlay), null)
+  })
+
+  it('treats equivalent message lists as unchanged to skip re-render', () => {
+    const left = [
+      makeMessage({ id: 'u-1', role: 'user', content: '你好' }),
+      makeMessage({ id: 'a-1', content: '回复', steps: [{ toolName: 't', status: 'success' }] }),
+    ]
+    const right = left.map(item => ({ ...item }))
+    assert.equal(sameMessageList(left, right), true)
+    assert.equal(sameMessageList(left, []), false)
+    assert.equal(sameMessageList(left, [right[0], { ...right[1], content: '变了' }]), false)
+    assert.equal(sameMessageList(left, [right[0], { ...right[1], status: 'streaming' }]), false)
+  })
+
+  it('detects conversation list changes for cross-client sync', () => {
+    const base = { id: 'c-1', title: '新会话', status: 'active', updated_at: '2026-09-22T00:00:00Z' }
+    assert.equal(sameConversationList([base], [{ ...base }]), true)
+    assert.equal(sameConversationList([base], [{ ...base, title: '你好，同步自测' }]), false)
+    assert.equal(sameConversationList([base], [{ ...base, updated_at: '2026-09-22T00:01:00Z' }]), false)
+    assert.equal(sameConversationList([], [base]), false)
   })
 })

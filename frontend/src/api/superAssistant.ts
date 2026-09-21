@@ -379,7 +379,10 @@ const streamChat = async (
       const payload = await response.json()
       message = payload.detail || payload.message || message
     } catch { /* keep HTTP status */ }
-    throw new Error(message)
+    // 携带状态码供调用方区分 409 单飞护栏等业务错误
+    const error = new Error(message) as Error & { status?: number }
+    error.status = response.status
+    throw error
   }
   if (!response.body) throw new Error('浏览器未提供流式响应体')
 

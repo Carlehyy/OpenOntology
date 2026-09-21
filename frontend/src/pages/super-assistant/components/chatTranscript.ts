@@ -1,4 +1,4 @@
-import type { ToolStep } from '@/api/superAssistant'
+import type { SuperMessage, ToolStep } from '@/api/superAssistant'
 
 /**
  * 部分模型会把整段答复包进 ```markdown 围栏。
@@ -151,4 +151,76 @@ export function shiftQueue(queue: string[]) {
   if (queue.length === 0) return { next: null as string | null, rest: queue }
   const [next, ...rest] = queue
   return { next, rest }
+}
+
+/** 本页流式生成中的增量缓冲（SuperAssistantPage.streamsRef 的最小视图） */
+export interface StreamOverlay {
+  messageId: string
+  content: string
+  steps: ToolStep[]
+  status: SuperMessage['status']
+  tokenUsage: Record<string, number>
+  thinkingRound: number | null
+}
+
+/**
+ * 多端同步的服务端消息合并。服务端列表是持久化事实源：
+ * 本页未在生成（无 overlay）时直接采用，其它端的新消息/生成占位由此到达本端；
+ * 本页正在生成时把 overlay 叠加到已落库的 streaming 占位上（并回绑真实消息 id），
+ * 增量渲染始终以本地缓冲为准。占位尚未落库（发送后的竞态窗口）返回 null，
+ * 调用方保留本地乐观视图等下一周期。
+ */
+export function mergeServerMessages(
+  server: SuperMessage[],
+  overlay: StreamOverlay | undefined,
+): { messages: SuperMessage[]; boundMessageId: string | null } | null {
+  if (!overlay) return { messages: server, boundMessageId: null }
+  const placeholder = [...server].reverse().find(
+    item => item.role === 'assistant' && item.status === 'streaming',
+  )
+  if (!placeholder) return null
+  return {
+    messages: server.map(item => item.id === placeholder.id
+      ? {
+          ...item,
+          content: overlay.content,
+          steps: overlay.steps,
+          status: overlay.status,
+          token_usage: overlay.tokenUsage,
+          thinking_round: overlay.thinkingRound,
+        }
+      : item),
+    boundMessageId: placeholder.id,
+  }
+}
+
+/** 轮询降噪：逐项等价时复用旧引用，避免整棵消息树每周期重渲染 */
+export function sameMessageList(current: SuperMessage[], next: SuperMessage[]) {
+  if (current.length !== next.length) return false
+  return current.every((item, index) => {
+    const other = next[index]
+    return item.id === other.id
+      && item.role === other.role
+      && item.status === other.status
+      && item.content === other.content
+      && item.created_at === other.created_at
+      && item.thinking_round === other.thinking_round
+      && JSON.stringify(item.steps) === JSON.stringify(other.steps)
+      && JSON.stringify(item.token_usage) === JSON.stringify(other.token_usage)
+  })
+}
+
+/** 会话列表轮询降噪：对端新建会话/改标题/归档时才有真实变化 */
+export function sameConversationList(
+  current: Array<{ id: string; title: string; status: string; updated_at: string }>,
+  next: Array<{ id: string; title: string; status: string; updated_at: string }>,
+) {
+  if (current.length !== next.length) return false
+  return current.every((item, index) => {
+    const other = next[index]
+    return item.id === other.id
+      && item.title === other.title
+      && item.status === other.status
+      && item.updated_at === other.updated_at
+  })
 }

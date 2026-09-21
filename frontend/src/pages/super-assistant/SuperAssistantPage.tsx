@@ -43,11 +43,16 @@ import {
   type PendingConfirmation,
 } from './components/AssistantConversation'
 import {
-  appendToolStart, enqueueMessage, patchToolStep, shiftQueue,
+  appendToolStart, enqueueMessage, mergeServerMessages, patchToolStep,
+  sameConversationList, sameMessageList, shiftQueue,
 } from './components/chatTranscript'
 import type { ModelConfig } from '@/types/ontology'
 
 const ATTACH_ACCEPT = '.csv,.xlsx,.xls,.json,.xml,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt'
+
+/** 多端完成级同步的轮询周期：同一会话在其它浏览器/设备打开时，
+ *  生成占位与新消息最晚在该周期内对齐到本端 */
+const SYNC_POLL_INTERVAL_MS = 2000
 
 /** 模型下拉底部「管理模型」项的哨兵值：不落库、不切换会话模型，仅触发跳转 */
 const MANAGE_MODELS_VALUE = '__manage_models__'
@@ -132,6 +137,8 @@ export default function SuperAssistantPage() {
   selectedIdRef.current = selectedId
   queuedByConvRef.current = queuedByConv
   const streamsRef = useRef(new Map<string, StreamBuffer>())
+  // 轮询在飞守卫：上一次同步未返回时不并发发起下一次
+  const syncingRef = useRef(false)
   // 输入草稿按会话缓存：多会话来回切换时未发送的内容不丢失；
   // '__new__' 是「尚未落地的新会话」视图（selectedId 为 null）的草稿槽
   const NEW_DRAFT_KEY = '__new__'
@@ -209,21 +216,10 @@ export default function SuperAssistantPage() {
       // 无占位消息说明服务端尚未落库本次流式（新建会话首条）——保留本地临时视图，
       // 流结束后 send 的 finally 会重新拉取对齐。
       const buffer = streamsRef.current.get(selectedId)
-      if (!buffer) { setMessages(data); return }
-      const placeholder = [...data].reverse().find(
-        item => item.role === 'assistant' && item.status === 'streaming',
-      )
-      if (!placeholder) return
-      buffer.messageId = placeholder.id
-      setMessages(data.map(item => item.id === buffer.messageId
-        ? {
-            ...item,
-            content: buffer.content,
-            steps: buffer.steps,
-            status: buffer.status,
-            token_usage: buffer.tokenUsage,
-          }
-        : item))
+      const merged = mergeServerMessages(data, buffer)
+      if (!merged) return
+      if (merged.boundMessageId && buffer) buffer.messageId = merged.boundMessageId
+      setMessages(merged.messages)
     })
       .catch(error => toast.error('会话消息加载失败', { description: errorText(error) }))
     superAssistantApi.conversationFiles(selectedId)
@@ -231,6 +227,47 @@ export default function SuperAssistantPage() {
       .catch(() => { if (alive) setConversationFiles([]) })
     return () => { alive = false }
   }, [selectedId])
+
+  // 多端完成级同步：周期轮询会话列表与选中会话的消息。对端新建会话、改标题、
+  // 发送的消息、生成中的 streaming 占位与完成后的全文都经此对齐到本端；
+  // 本页隐藏时暂停，回到前台立即补一次。会话列表同步还承担深链解析职责：
+  // 本页打开期间对端新建的会话，经列表刷新后 ?conversation= 参数才能命中。
+  // 本页自身正在生成时轮询同样有效：乐观临时行被替换为服务端落库行，
+  // 增量渲染始终以本地 streamsRef 缓冲为准（mergeServerMessages 叠加保护）。
+  // 轮询失败静默，下个周期自动恢复；内容无变化时复用旧引用，不触发重渲染。
+  const syncTick = useCallback(async () => {
+    if (syncingRef.current) return
+    syncingRef.current = true
+    try {
+      const conversationId = selectedIdRef.current
+      const [serverConversations, serverMessages] = await Promise.all([
+        superAssistantApi.conversations(),
+        conversationId ? superAssistantApi.messages(conversationId) : Promise.resolve(null),
+      ])
+      setConversations(current => sameConversationList(current, serverConversations) ? current : serverConversations)
+      if (!serverMessages || selectedIdRef.current !== conversationId) return
+      const buffer = streamsRef.current.get(conversationId as string)
+      const merged = mergeServerMessages(serverMessages, buffer)
+      if (!merged) return
+      if (merged.boundMessageId && buffer) buffer.messageId = merged.boundMessageId
+      setMessages(current => sameMessageList(current, merged.messages) ? current : merged.messages)
+    } catch { /* 静默：网络抖动由下个周期自愈 */ } finally {
+      syncingRef.current = false
+    }
+  }, [])
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void syncTick()
+    }, SYNC_POLL_INTERVAL_MS)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void syncTick()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
+  }, [syncTick])
 
   // 已进入页面后，悬浮窗再次跳转携带新的 ?conversation= 时跟随切换。
   // 用 lastAppliedParamRef 记录已消费的参数值：只在参数“变化”时跟随，
@@ -549,10 +586,17 @@ export default function SuperAssistantPage() {
         }
       })
     } catch (error) {
-      buffer.content = errorText(error, '生成失败')
-      buffer.status = 'error'
-      applyBuffer()
-      toast.error('生成失败', { description: errorText(error) })
+      if ((error as { status?: number }).status === 409) {
+        // 409 单飞护栏：另一端正在生成，本条消息未落库——撤掉乐观行，
+        // 对端的回复经轮询到达本端后再发送
+        setMessages(current => current.filter(item => item.id !== tempUserId && item.id !== tempAssistantId))
+        toast.error('另一端正在生成回复', { description: '当前会话仍有一条回复正在生成，请稍候再发送' })
+      } else {
+        buffer.content = errorText(error, '生成失败')
+        buffer.status = 'error'
+        applyBuffer()
+        toast.error('生成失败', { description: errorText(error) })
+      }
     } finally {
       streamsRef.current.delete(conversationId)
       setStreamingIds(current => {
