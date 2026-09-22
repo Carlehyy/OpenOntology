@@ -1,26 +1,21 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { domainApi } from '@/api/ontologies'
-
-
-function domainErrorMessage(error: any, fallback: string) {
-  const detail = error?.detail
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail) && typeof detail[0]?.msg === 'string') return detail[0].msg
-  if (detail && typeof detail.message === 'string') return detail.message
-  if (typeof error?.message === 'string') return error.message
-  return fallback
-}
-
-// create/update 的 409 detail 契约固定为「领域「xx」已存在」（settings/domains/router.py）；
-// 识别后落到名称字段行内错误，不弹 toast
-function isDuplicateNameError(error: any) {
-  return typeof error?.detail === 'string' && error.detail.includes('已存在')
-}
+import { useDebouncedValue } from '@/utils/useDebouncedValue'
+import {
+  domainErrorMessage,
+  domainNameValidationError,
+  isDuplicateNameError,
+  shortenDeleteDetail,
+  successNotice,
+} from '../domainUxHelpers'
 
 export function useDomainSettings(activeTab: string) {
-  const [domainSearch, setDomainSearch] = useState('')
+  // 搜索词双轨：输入框绑即时值，查询用 300ms 防抖值，避免每敲一键发一次请求；
+  // keepPreviousData 让键入换词期间保留上一屏列表，不闪回加载占位（UX 评审 P1-3）
+  const [domainSearchInput, setDomainSearchInput] = useState('')
+  const domainSearch = useDebouncedValue(domainSearchInput, 300)
   const [showDomainModal, setShowDomainModal] = useState(false)
   const [editingDomain, setEditingDomain] = useState<any | null>(null)
   const [domainName, setDomainName] = useState('')
@@ -37,14 +32,20 @@ export function useDomainSettings(activeTab: string) {
     queryKey: ['domains', domainSearch],
     queryFn: () => domainApi.list(domainSearch || undefined) as any,
     enabled: activeTab === 'domains',
+    placeholderData: keepPreviousData,
   })
+
+  function notifySuccess(action: 'create' | 'update' | 'delete', name?: string) {
+    const { title, description } = successNotice(action, name)
+    toast.success(title, { description })
+  }
 
   const createDomainMut = useMutation({
     mutationFn: (body: { name: string; description: string }) => domainApi.create(body),
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
       qc.invalidateQueries({ queryKey: ['domains'] })
       setShowDomainModal(false)
-      toast.success('领域设置', { description: '创建成功' })
+      notifySuccess('create', variables.name)
     },
     onError: (e: any) => {
       if (isDuplicateNameError(e)) {
@@ -58,12 +59,12 @@ export function useDomainSettings(activeTab: string) {
   const updateDomainMut = useMutation({
     mutationFn: ({ id, ...body }: { id: string; name?: string; description?: string }) =>
       domainApi.update(id, body),
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
       qc.invalidateQueries({ queryKey: ['domains'] })
       qc.invalidateQueries({ queryKey: ['ontologies'] })
       setShowDomainModal(false)
       setEditingDomain(null)
-      toast.success('领域设置', { description: '更新成功' })
+      notifySuccess('update', variables.name)
     },
     onError: (e: any) => {
       if (isDuplicateNameError(e)) {
@@ -79,14 +80,10 @@ export function useDomainSettings(activeTab: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['domains'] })
       setDeleteDomainTarget(null)
-      toast.success('领域设置', { description: '删除成功' })
+      notifySuccess('delete', deleteDomainTarget?.name)
     },
     onError: (e: any) => {
-      const detail = domainErrorMessage(e, '删除失败')
-      // 后端 409 detail 内嵌完整领域名，超长名称会把 toast 撑成多行；
-      // 被删对象就是本次点击的领域，toast 中改称「该领域」，保留引用次数与处理办法
-      const prefix = deleteDomainTarget?.name ? `领域「${deleteDomainTarget.name}」` : ''
-      const message = prefix && detail.startsWith(prefix) ? `该领域${detail.slice(prefix.length)}` : detail
+      const message = shortenDeleteDetail(domainErrorMessage(e, '删除失败'), deleteDomainTarget?.name)
       toast.error('操作失败', { description: message })
     },
   })
@@ -113,8 +110,9 @@ export function useDomainSettings(activeTab: string) {
   }
 
   function handleSaveDomain() {
-    if (!domainName.trim()) {
-      failNameValidation('请输入领域名称')
+    const validationError = domainNameValidationError(domainName)
+    if (validationError) {
+      failNameValidation(validationError)
       return
     }
     setNameError('')
@@ -134,7 +132,8 @@ export function useDomainSettings(activeTab: string) {
     domainList,
     domainsLoading,
     domainSearch,
-    setDomainSearch,
+    domainSearchInput,
+    setDomainSearchInput,
     showDomainModal,
     setShowDomainModal,
     editingDomain,

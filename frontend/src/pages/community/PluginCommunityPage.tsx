@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useReducedMotion } from 'motion/react'
 import {
@@ -43,36 +43,22 @@ import { Tooltip } from '@/components/motion-ui/tooltip'
 import { Modal } from '@/components/ui/Modal'
 import { toast } from 'sonner'
 
-
-type StatusKey = 'success' | 'error' | 'untested'
-
-const statusKeyOf = (server: SuperMcpServer): StatusKey => {
-  if (server.last_test_status === 'success') return 'success'
-  if (server.last_test_status === 'error') return 'error'
-  return 'untested'
-}
+import {
+  counterText,
+  developed,
+  endpointText,
+  exportable,
+  filterMcpServers,
+  mcpStats,
+  serverTitle,
+  statusKeyOf,
+  testToast,
+  transportLabel,
+  type StatusKey,
+} from './pluginCommunityModel'
 
 const errorText = (error: any, fallback = '操作失败') =>
   error?.detail || error?.message || fallback
-
-const serverTitle = (server: SuperMcpServer) =>
-  server.display_name || server.name
-
-const transportLabel = (server: SuperMcpServer) => {
-  if (server.transport === 'developed') return '自研'
-  if (server.transport === 'streamable_http') return 'Streamable HTTP'
-  return server.transport.toUpperCase()
-}
-
-const endpointText = (server: SuperMcpServer) => {
-  if (server.transport === 'developed') return '平台进程内执行'
-  if (server.transport === 'stdio') return [server.command, ...server.args].filter(Boolean).join(' ')
-  return server.url
-}
-
-const developed = (server: SuperMcpServer) => server.transport === 'developed'
-
-const exportable = (server: SuperMcpServer) => server.tool_manifest.length > 0
 
 const exportHint = (server: SuperMcpServer) =>
   server.transport === 'streamable_http'
@@ -109,32 +95,56 @@ const jsonRpcExample = (tool: McpTool) => JSON.stringify({
 
 function TestStatus({ server }: { server: SuperMcpServer }) {
   if (server.last_test_status === 'success') {
-    return <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--color-success)]/25 bg-[var(--color-success-bg)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-success)]"><CheckCircle2 size={12} /> 已通过</span>
+    return <span className="inline-flex items-center gap-1.5 rounded-full border border-transparent bg-[var(--color-success-bg)] px-2.5 py-1 text-[11px] font-medium text-foreground"><CheckCircle2 size={12} className="text-[var(--color-success)]" /> 已通过</span>
   }
   if (server.last_test_status === 'error') {
-    return <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/25 bg-[var(--color-danger-bg)] px-2.5 py-1 text-[11px] font-medium text-destructive"><CircleAlert size={12} /> 异常</span>
+    return <span className="inline-flex items-center gap-1.5 rounded-full border border-transparent bg-[var(--color-danger-bg)] px-2.5 py-1 text-[11px] font-medium text-foreground"><CircleAlert size={12} className="text-destructive" /> 连接异常</span>
   }
   return <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-1 text-[11px] font-medium text-muted-foreground"><Clock3 size={12} /> 未测试</span>
 }
 
-function StatCard({ icon, label, value, tone }: {
+function StatCard({ icon, label, value, tone, loading }: {
   icon: React.ReactNode
   label: string
   value: number
   tone?: 'default' | 'success'
+  loading?: boolean
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 shadow-sm/50">
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 shadow-sm">
       <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tone === 'success' ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-brand-soft text-brand-ink'}`}>
         {icon}
       </span>
       <div className="min-w-0">
         <p className="text-[11px] text-muted-foreground">{label}</p>
         <p className="text-base font-semibold tabular-nums text-foreground">
-          <AnimatedNumber value={value} duration={0.9} />
+          {loading ? '—' : <AnimatedNumber value={value} duration={0.9} />}
         </p>
       </div>
     </div>
+  )
+}
+
+/** 行内启用开关：本页切换「对超级助手启用」（PATCH enabled），与超级助手配置共用同一契约 */
+function EnableSwitch({ server, busy, onToggle }: {
+  server: SuperMcpServer
+  busy: boolean
+  onToggle: (next: boolean) => void
+}) {
+  const on = server.enabled
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={`对超级助手启用 ${serverTitle(server)}`}
+      title={on ? '已启用：超级助手可调用其工具' : '已停用：启用后超级助手才可调用'}
+      disabled={busy}
+      onClick={() => onToggle(!on)}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:cursor-not-allowed disabled:opacity-45 ${on ? 'border-transparent bg-brand' : 'border-transparent bg-muted-foreground'}`}
+    >
+      <span className={`absolute left-0.5 h-4 w-4 rounded-full bg-card shadow transition-transform ${on ? 'translate-x-4' : 'translate-x-0'}`} />
+    </button>
   )
 }
 
@@ -162,7 +172,7 @@ function ToolManifestDialog({ server, onClose }: { server: SuperMcpServer; onClo
       </div>
       {tools.length === 0 ? (
         <div className="mt-3 rounded-2xl border border-dashed border-border p-10 text-center">
-          <Code2 size={26} className="mx-auto text-muted-foreground/60" />
+          <Code2 size={26} className="mx-auto text-muted-foreground" />
           <p className="mt-3 text-sm font-medium text-muted-foreground">暂无可用工具</p>
           <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">请先关闭窗口并执行连接测试。</p>
         </div>
@@ -246,7 +256,7 @@ function ExportToolsDialog({ server, onClose, onDone }: { server: SuperMcpServer
           <p className="mt-1 text-xs leading-5 text-muted-foreground">勾选要生成 HTTP 接口的工具；生成后可在「接口代理 · 接口管理」的「MCP 插件」分组中查看。</p>
         </header>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-5">
-          <p className="rounded-lg border border-[color:var(--color-warning)]/30 bg-[var(--color-warning-bg)] px-3 py-2 text-[11px] leading-5 text-[var(--color-warning)]">{exportHint(server)}</p>
+          <p className="rounded-lg border border-transparent bg-[var(--color-warning-bg)] px-3 py-2 text-[11px] leading-5 text-[var(--color-warning)]">{exportHint(server)}</p>
           {tools.map((tool, _index) => (
             <div
               key={tool.name}
@@ -264,7 +274,7 @@ function ExportToolsDialog({ server, onClose, onDone }: { server: SuperMcpServer
               </span>
             </div>
           ))}
-          {error && <p role="alert" className="rounded-xl border border-destructive/30 bg-[var(--color-danger-bg)] px-4 py-3 text-xs leading-5 text-destructive">{error}</p>}
+          {error && <p role="alert" className="rounded-xl border border-transparent bg-[var(--color-danger-bg)] px-4 py-3 text-xs leading-5 text-destructive">{error}</p>}
         </div>
         <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-muted px-5 py-4">
           <div className="flex gap-3 text-xs text-muted-foreground">
@@ -382,7 +392,7 @@ function McpDevCreateDialog({ onClose }: { onClose: () => void }) {
             className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           />
         </label>
-        {error && <p role="alert" className="rounded-xl border border-destructive/30 bg-[var(--color-danger-bg)] px-4 py-3 text-xs leading-5 text-destructive">{error}</p>}
+        {error && <p role="alert" className="rounded-xl border border-transparent bg-[var(--color-danger-bg)] px-4 py-3 text-xs leading-5 text-destructive">{error}</p>}
       </div>
     </Modal>
   )
@@ -404,7 +414,7 @@ function EmptyGuide({ onAdd }: { onAdd: () => void }) {
       <ol className="grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-3" aria-label="插件社区使用流程指引">
         {steps.map((step, index) => (
           <li key={step.title} className="relative flex flex-col items-center gap-2 rounded-xl border border-border bg-muted px-4 pb-4 pt-5 text-center">
-            <span className="absolute left-3 top-3 flex h-5 w-5 items-center justify-center rounded-full bg-brand/10 text-[11px] font-semibold text-brand-ink">
+            <span className="absolute left-3 top-3 flex h-5 w-5 items-center justify-center rounded-full bg-brand-soft text-[11px] font-semibold text-brand-ink">
               {index + 1}
             </span>
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-soft text-brand-ink">{step.icon}</span>
@@ -429,62 +439,79 @@ export default function PluginCommunityPage() {
   const navigate = useNavigate()
     const [servers, setServers] = useState<SuperMcpServer[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusKey[]>([])
   const [editing, setEditing] = useState<SuperMcpServer | 'new' | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
+  const [togglingIds, setTogglingIds] = useState<ReadonlySet<string>>(() => new Set())
   const [deleteTarget, setDeleteTarget] = useState<SuperMcpServer | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [manifestTarget, setManifestTarget] = useState<SuperMcpServer | null>(null)
   const [exportTarget, setExportTarget] = useState<SuperMcpServer | null>(null)
   const [devCreateOpen, setDevCreateOpen] = useState(false)
+  // 请求序号：只接受最新一次 GET 的结果，防止测试/保存触发的在途旧快照
+  // 覆盖刚被行内开关 PATCH 更新过的状态
+  const loadSeq = useRef(0)
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     try {
       const items = await communityApi.mcpServers()
+      if (seq !== loadSeq.current) return
       setServers(Array.isArray(items) ? items.filter(item => !item.builtin_key) : [])
+      setLoadError(null)
     } catch (error) {
-      setServers([])
+      if (seq !== loadSeq.current) return
+      // 加载失败不把已有数据清掉：有数据时仅 toast 提示刷新失败，无数据时由错误态接管列表区
+      setLoadError(errorText(error, '请检查服务连接后重试。'))
       toast.error('MCP 清单加载失败', { description: errorText(error, '请检查服务连接后重试。') })
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [toast])
 
   useEffect(() => { void load() }, [load])
 
-  const filteredServers = useMemo(() => {
-    const keyword = search.trim().toLowerCase()
-    return servers.filter(server => {
-      const matchesKeyword = !keyword || [
-        server.name,
-        server.display_name,
-        server.description,
-        endpointText(server),
-        transportLabel(server),
-        ...server.tool_manifest.flatMap(tool => [tool.name, tool.description]),
-      ].some(value => String(value || '').toLowerCase().includes(keyword))
-      // 多选状态筛选：未勾选视为不过滤（全部）
-      const matchesStatus = statusFilter.length === 0 || statusFilter.includes(statusKeyOf(server))
-      return matchesKeyword && matchesStatus
-    })
-  }, [search, servers, statusFilter])
+  const filteredServers = useMemo(
+    () => filterMcpServers(servers, search, statusFilter),
+    [search, servers, statusFilter],
+  )
 
-  const stats = useMemo(() => ({
-    total: servers.length,
-    healthy: servers.filter(server => server.last_test_status === 'success').length,
-    tools: servers.reduce((sum, server) => sum + server.tool_manifest.length, 0),
-  }), [servers])
+  const stats = useMemo(() => mcpStats(servers), [servers])
+
+  const toggleEnabled = async (server: SuperMcpServer, next: boolean) => {
+    if (togglingIds.has(server.id)) return
+    setTogglingIds(current => new Set(current).add(server.id))
+    try {
+      const updated = await communityApi.updateMcpServer(server.id, { enabled: next })
+      setServers(current => current.map(item => (item.id === updated.id ? updated : item)))
+    } catch (error) {
+      toast.error('启用状态更新失败', { description: errorText(error, '请稍后重试。') })
+    } finally {
+      setTogglingIds(current => {
+        const nextSet = new Set(current)
+        nextSet.delete(server.id)
+        return nextSet
+      })
+    }
+  }
 
   const testServer = async (server: SuperMcpServer) => {
     setTestingId(server.id)
     try {
       const result = await communityApi.testMcpServer(server.id)
       await load()
-      const notifyTest = result.ok ? toast.success : toast.error
-      notifyTest(result.ok ? 'MCP 连接成功' : 'MCP 连接失败', { description: result.message })
+      const info = testToast(server, result)
+      const notifyTest = info.ok ? toast.success : toast.error
+      notifyTest(info.title, {
+        description: info.description,
+        ...(info.suggestEnable
+          ? { action: { label: '就地启用', onClick: () => void toggleEnabled(server, true) } }
+          : {}),
+      })
     } catch (error) {
-      toast.error('MCP 测试失败', { description: errorText(error, '请稍后重试。') })
+      toast.error(`「${serverTitle(server)}」测试失败`, { description: errorText(error, '请稍后重试。') })
     } finally {
       setTestingId(null)
     }
@@ -505,8 +532,8 @@ export default function PluginCommunityPage() {
     }
   }
 
-  // 操作列四个操作完全同构：beUI IconButton + Tooltip（default h-8 w-8、14px 图标），
-  // 悬停色仅按语义区分（转接口品牌色、删除危险色），结构零混搭
+  // 操作列：beUI IconButton + Tooltip（default h-8 w-8、14px 图标）。
+  // 仅「转接口」是平台自造概念、图标读不出含义，用图标+文字按钮，其余保持纯图标钮。
   const renderActions = (server: SuperMcpServer) => (
     <div className="flex items-center justify-center gap-1">
       <Tooltip content={developed(server) ? '重跑发布校验（逐工具按样例参数真实执行）' : '测试连接并刷新工具清单'}>
@@ -528,15 +555,16 @@ export default function PluginCommunityPage() {
             ? '将勾选工具生成为接口代理的 HTTP 接口'
             : '尚未发现工具，请先执行连接测试'}
       >
-        <IconButton
-          label={`转接口 ${serverTitle(server)}`}
-          reduce={reduce}
+        {/* 四个操作中仅「转接口」是平台自造概念、图标不可读出含义，补文字标签；其余保持图标钮 */}
+        <button
+          type="button"
+          aria-label={`转接口 ${serverTitle(server)}`}
           onClick={() => { if (!developed(server)) setExportTarget(server) }}
           disabled={!exportable(server) || developed(server)}
-          className="hover:bg-brand-soft hover:text-brand-ink"
+          className="inline-flex h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
         >
-          <FileUp size={14} />
-        </IconButton>
+          <FileUp size={14} /> 转接口
+        </button>
       </Tooltip>
       {developed(server) ? (
         <Tooltip content="进入开发页编辑工具脚本（发布绑定版不受影响）">
@@ -570,12 +598,17 @@ export default function PluginCommunityPage() {
 
   return (
     <div className="flex min-h-full flex-col gap-4 md:h-full md:min-h-0">
-      <h1 className="sr-only">插件社区</h1>
+      <header className="shrink-0">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h1 className="text-xl font-semibold text-foreground">插件社区</h1>
+          <p className="text-sm text-muted-foreground">接入第三方 MCP Server，测试通过并启用后可供超级助手调用，也可导出为接口代理的 HTTP 接口。</p>
+        </div>
+      </header>
 
       <section data-testid="mcp-server-stats" aria-label="MCP 统计" className="grid shrink-0 grid-cols-1 gap-3 sm:grid-cols-3">
-        <StatCard icon={<PlugZap size={16} />} label="MCP Server" value={stats.total} />
-        <StatCard icon={<CheckCircle2 size={16} />} label="测试通过" value={stats.healthy} tone="success" />
-        <StatCard icon={<Code2 size={16} />} label="已发现工具" value={stats.tools} />
+        <StatCard icon={<PlugZap size={16} />} label="MCP Server" value={stats.total} loading={loading} />
+        <StatCard icon={<CheckCircle2 size={16} />} label="已通过" value={stats.healthy} tone="success" loading={loading} />
+        <StatCard icon={<Code2 size={16} />} label="已发现工具" value={stats.tools} loading={loading} />
       </section>
 
       <section aria-label="MCP 筛选与操作" className="flex shrink-0 flex-wrap items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3 xl:flex-nowrap">
@@ -597,11 +630,11 @@ export default function PluginCommunityPage() {
           <MultiSelect value={statusFilter} onValueChange={values => setStatusFilter(values as StatusKey[])}>
             <MultiSelectTrigger className="min-h-[38px] w-56 rounded-xl bg-background">
               <MultiSelectValue placeholder="全部状态" />
-              <MultiSelectInput aria-label="筛选 MCP 状态" placeholder="筛选状态…" />
+              <MultiSelectInput aria-label="筛选 MCP 状态" />
             </MultiSelectTrigger>
             <MultiSelectContent>
               <MultiSelectList ariaLabel="MCP 状态">
-                <MultiSelectItem value="success">测试通过</MultiSelectItem>
+                <MultiSelectItem value="success">已通过</MultiSelectItem>
                 <MultiSelectItem value="error">连接异常</MultiSelectItem>
                 <MultiSelectItem value="untested">未测试</MultiSelectItem>
               </MultiSelectList>
@@ -613,12 +646,12 @@ export default function PluginCommunityPage() {
             清除筛选
           </button>
         )}
-        <p className="ml-auto shrink-0 text-xs tabular-nums text-[var(--color-text-tertiary)]">显示 {filteredServers.length} / {servers.length} 项</p>
+        <p className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{counterText(filteredServers.length, servers.length, loading)}</p>
         <button
           type="button"
           onClick={() => setDevCreateOpen(true)}
           title="用 Python 编写工具函数并封装为本平台 MCP"
-          className="inline-flex h-[38px] shrink-0 items-center gap-1.5 rounded-xl border border-brand-line bg-brand-soft px-3.5 text-sm font-medium text-brand-ink transition-all duration-200 hover:-translate-y-px hover:bg-brand-mist active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          className="inline-flex h-[38px] shrink-0 items-center gap-1.5 rounded-xl border border-border bg-card px-3.5 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
           <Hammer size={15} /> 开发 MCP
         </button>
@@ -635,6 +668,19 @@ export default function PluginCommunityPage() {
         <div className="flex min-h-64 flex-1 items-center justify-center rounded-2xl border border-border bg-card">
           <div className="text-center"><Loader2 size={24} className="mx-auto animate-spin text-brand-ink motion-reduce:animate-none" /><p className="mt-3 text-sm text-muted-foreground">正在加载 MCP 清单...</p></div>
         </div>
+      ) : loadError && servers.length === 0 ? (
+        <div role="alert" className="flex min-h-64 flex-1 flex-col items-center justify-center gap-2 rounded-2xl border border-border bg-card px-6 text-center">
+          <CircleAlert size={28} className="text-destructive" />
+          <p className="mt-1 text-sm font-medium text-foreground">MCP 清单加载失败</p>
+          <p className="max-w-md text-xs leading-5 text-muted-foreground">{loadError}</p>
+          <button
+            type="button"
+            onClick={() => { setLoading(true); setLoadError(null); void load() }}
+            className="mt-2 inline-flex h-[38px] items-center rounded-xl bg-brand px-5 text-sm font-medium text-[var(--color-text-inverse)] transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            重试
+          </button>
+        </div>
       ) : filteredServers.length === 0 ? (
         servers.length ? (
           <div className="flex min-h-64 flex-1 flex-col items-center justify-center rounded-2xl border border-border bg-card px-6 text-center">
@@ -643,42 +689,64 @@ export default function PluginCommunityPage() {
             </div>
             <p className="mt-3 text-sm font-medium text-muted-foreground">没有匹配的 MCP Server</p>
             <p className="mt-1 text-xs text-muted-foreground">请调整搜索词或状态筛选后重试。</p>
+            <button
+              type="button"
+              onClick={() => { setSearch(''); setStatusFilter([]) }}
+              className="mt-4 inline-flex h-[38px] items-center rounded-xl border border-border bg-card px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              清除筛选
+            </button>
           </div>
         ) : (
           <EmptyGuide onAdd={() => setEditing('new')} />
         )
       ) : (
         <>
-          <section aria-label="MCP Server 清单" className="hidden min-h-64 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm/50 md:flex">
+          <section aria-label="MCP Server 清单" className="hidden min-h-64 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm md:flex">
             <div className="min-h-0 flex-1 overflow-auto">
               <table className="w-full min-w-[960px] table-fixed text-sm">
-                <thead className="sticky top-0 z-10 border-b border-border bg-muted/95 backdrop-blur">
+                <thead className="sticky top-0 z-10 border-b border-border bg-muted">
                   <tr>
-                    <th className="w-[30%] px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">MCP Server</th>
-                    <th className="w-[14%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">传输方式</th>
-                    <th className="w-[13%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">工具</th>
-                    <th className="w-[14%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">连接状态</th>
-                    <th className="w-[29%] px-2 py-2.5 text-center text-xs font-medium text-muted-foreground">操作</th>
+                    <th scope="col" className="w-[26%] px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">MCP Server</th>
+                    <th scope="col" className="w-[10%] px-2 py-2.5 text-center text-xs font-medium text-muted-foreground">启用</th>
+                    <th scope="col" className="w-[12%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">传输方式</th>
+                    <th scope="col" className="w-[12%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">工具</th>
+                    <th scope="col" className="w-[13%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">连接状态</th>
+                    <th scope="col" className="w-[27%] px-2 py-2.5 text-center text-xs font-medium text-muted-foreground">操作</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
                   {filteredServers.map((server, _index) => (
                     <tr
                       key={server.id}
-                      className="transition-colors hover:bg-muted/60"
+                      className="transition-colors hover:bg-muted"
                     >
                       <td className="px-4 py-3 align-middle">
                         <div className="min-w-0">
                           <p className="truncate font-medium text-foreground" title={serverTitle(server)}>{serverTitle(server)}</p>
-                          <p className="mt-0.5 truncate text-[11px] leading-4 text-[var(--color-text-tertiary)]" title={`${server.name} · ${endpointText(server)}`}>
+                          <p className="mt-0.5 truncate text-[11px] leading-4 text-muted-foreground" title={`${server.name} · ${endpointText(server)}`}>
                             <span className="font-mono">{server.name}</span> · <span className="font-mono">{endpointText(server) || '尚未配置地址'}</span>
                           </p>
                           {server.description && <p className="mt-1 line-clamp-1 text-xs leading-4 text-muted-foreground" title={server.description}>{server.description}</p>}
                         </div>
                       </td>
+                      <td className="px-2 py-3 text-center align-middle">
+                        <EnableSwitch
+                          server={server}
+                          busy={togglingIds.has(server.id)}
+                          onToggle={next => void toggleEnabled(server, next)}
+                        />
+                      </td>
                       <td className="px-4 py-3 text-center align-middle"><span className="inline-flex rounded-lg border border-border bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">{transportLabel(server)}</span></td>
                       <td className="px-4 py-3 text-center align-middle"><button type="button" onClick={() => setManifestTarget(server)} aria-label={`查看 ${serverTitle(server)} 的工具清单`} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Code2 size={13} /> 共 {server.tool_manifest.length} 个</button></td>
-                      <td className="px-4 py-3 text-center align-middle"><TestStatus server={server} /></td>
+                      <td className="px-4 py-3 text-center align-middle">
+                        <div className="flex flex-col items-center gap-1">
+                          <TestStatus server={server} />
+                          {statusKeyOf(server) === 'error' && server.last_test_message && (
+                            <p className="line-clamp-2 text-xs leading-4 text-muted-foreground" title={server.last_test_message}>{server.last_test_message}</p>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-2 py-2 align-middle">{renderActions(server)}</td>
                     </tr>
                   ))}
@@ -691,14 +759,21 @@ export default function PluginCommunityPage() {
             {filteredServers.map((server, _index) => (
               <article
                 key={server.id}
-                className="rounded-2xl border border-border bg-card p-4 shadow-sm/50"
+                className="rounded-2xl border border-border bg-card p-4 shadow-sm"
               >
                 <div className="flex items-start gap-3">
-                  <div className="min-w-0 flex-1"><h2 className="truncate text-sm font-semibold text-foreground">{serverTitle(server)}</h2><p className="mt-1 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{server.name} · {endpointText(server)}</p></div>
-                  <TestStatus server={server} />
+                  <div className="min-w-0 flex-1"><h2 className="truncate text-sm font-semibold text-foreground">{serverTitle(server)}</h2><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{server.name} · {endpointText(server) || '尚未配置地址'}</p></div>
+                  <div className="flex shrink-0 flex-col items-end gap-1.5">
+                    <TestStatus server={server} />
+                    <EnableSwitch
+                      server={server}
+                      busy={togglingIds.has(server.id)}
+                      onToggle={next => void toggleEnabled(server, next)}
+                    />
+                  </div>
                 </div>
                 {server.description && <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{server.description}</p>}
-                <div className="mt-3 flex flex-wrap gap-1.5"><span className="rounded-lg bg-muted px-2 py-1 text-[10px] text-muted-foreground">{transportLabel(server)}</span><button type="button" onClick={() => setManifestTarget(server)} className="inline-flex min-h-8 items-center gap-1 rounded-lg bg-brand-soft px-2 text-[10px] font-medium text-brand-ink"><Code2 size={11} /> 共 {server.tool_manifest.length} 个工具</button></div>
+                <div className="mt-3 flex flex-wrap gap-1.5"><span className="rounded-lg bg-muted px-2 py-1 text-xs text-muted-foreground">{transportLabel(server)}</span><button type="button" onClick={() => setManifestTarget(server)} className="inline-flex min-h-8 items-center gap-1 rounded-lg bg-brand-soft px-2 text-xs font-medium text-brand-ink"><Code2 size={11} /> 共 {server.tool_manifest.length} 个工具</button></div>
                 {server.last_test_message && <p className="mt-3 line-clamp-2 text-xs leading-5 text-muted-foreground">{server.last_test_message}</p>}
                 <div className="mt-3 border-t border-border pt-2">{renderActions(server)}</div>
               </article>

@@ -19,7 +19,8 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
     domainList,
     domainsLoading,
     domainSearch,
-    setDomainSearch,
+    domainSearchInput,
+    setDomainSearchInput,
     showDomainModal,
     setShowDomainModal,
     editingDomain,
@@ -70,7 +71,7 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
           </Button>
         </header>
 
-        {/* 工具条：搜索 */}
+        {/* 工具条：搜索。输入框绑即时值，列表查询走 hook 内的 300ms 防抖词 */}
         <div className="flex items-center gap-3 px-5 pt-4">
           <div className="relative w-56 max-w-full">
             <Search
@@ -78,16 +79,16 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]"
             />
             <Input
-              value={domainSearch}
-              onChange={e => setDomainSearch(e.target.value)}
+              value={domainSearchInput}
+              onChange={e => setDomainSearchInput(e.target.value)}
               placeholder="按名称搜索"
               className="h-8 pl-8 pr-7 text-xs"
               aria-label="按名称搜索领域"
             />
-            {domainSearch && (
+            {domainSearchInput && (
               <button
                 type="button"
-                onClick={() => setDomainSearch('')}
+                onClick={() => setDomainSearchInput('')}
                 aria-label="清除搜索"
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
               >
@@ -114,10 +115,12 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               }
             />
           ) : (
-            <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
-              {/* table-fixed + colgroup 固定列宽配额：任何长度的名称/描述都只能
-                  在本列内截断，操作列永远不会被内容挤出容器 */}
-              <table className="w-full table-fixed text-sm">
+            <div className="overflow-x-auto rounded-lg border border-[var(--color-border)]">
+              {/* overflow-x-auto：窄视口下固定列宽超出容器时在容器内横滑，操作列
+                  始终可以滑到，页面本身不出现横向滚动条；table-fixed + colgroup 固定
+                  列宽配额，任何长度的名称/描述都只能在本列内截断，操作列不会被内容
+                  挤出容器；min-w 兜底极窄容器下时间/操作列不被按比例压扁 */}
+              <table className="w-full min-w-[600px] table-fixed text-sm">
                 <colgroup>
                   <col className="w-[30%]" />
                   <col />
@@ -213,11 +216,16 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               setDomainName(e.target.value)
               if (nameError) setNameError('')
             }}
+            onKeyDown={e => {
+              // Enter 直接保存（isComposing 排除输入法选词回车）；保存中不重复提交
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing && !saving) handleSaveDomain()
+            }}
             maxLength={100}
             placeholder="输入领域名称"
             autoFocus
             required
             error={nameError}
+            aria-invalid={nameError ? true : undefined}
           />
           <div>
             <label htmlFor={descriptionId} className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">描述</label>
