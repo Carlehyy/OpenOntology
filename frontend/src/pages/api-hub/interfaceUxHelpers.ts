@@ -137,6 +137,23 @@ export const methodTone: Record<string, string> = {
   OPTIONS: 'text-[var(--color-info)] bg-[var(--color-info-bg)]',
 }
 
+/**
+ * 接口名称前端就地校验：去空白后非空且 ≤200 个字符（UTF-16 码元）。
+ * 后端 validate_name 按码点计长，前端按码元恒 ≥ 码点数——只会在 emoji 等
+ * 增补平面字符上提前拦截，不会放过后端会拒绝的名称；超长文案与后端逐字一致。
+ */
+export function validateInterfaceName(name: string): string {
+  const trimmed = name.trim()
+  if (!trimmed) return '请填写接口名称'
+  if (trimmed.length > 200) return '接口名称不能超过 200 个字符'
+  return ''
+}
+
+/** 复制接口时追加「 副本」并按码点截回 200 上限，避免复制出必然保存失败的草稿。 */
+export function duplicateInterfaceName(name: string): string {
+  return [...`${name} 副本`].slice(0, 200).join('')
+}
+
 /** 写方法判定：试调会向真实上游发送可能新增/修改/删除数据的请求。 */
 export function isMutatingMethod(method: string): boolean {
   return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method.trim().toUpperCase())

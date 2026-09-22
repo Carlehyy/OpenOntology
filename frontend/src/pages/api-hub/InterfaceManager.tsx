@@ -20,6 +20,7 @@ import { HttpPublicationModal } from './HttpPublicationModal'
 import { buildProxyCallExample } from './proxyCallExample'
 import {
   detectBusinessFailure,
+  duplicateInterfaceName,
   filterInterfaces,
   httpStatusChipClass,
   invokeActionLabel,
@@ -27,6 +28,7 @@ import {
   isSensitiveHeader,
   methodTone,
   sortedHeaderEntries,
+  validateInterfaceName,
 } from './interfaceUxHelpers'
 
 interface Props {
@@ -92,6 +94,19 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   const confirmedRiskRef = useRef<Set<string>>(new Set())
   const [sizes, setSizes] = useState<[number, number]>([28, 72])
   const [listSearch, setListSearch] = useState('')
+  // 保存/调用校验失败后置位：空名称、空 URL 这类错误只在提交后才内联显示；
+  // 非空但非法的 URL 维持原有即时显示行为（urlError 原逻辑）。
+  const [validationArmed, setValidationArmed] = useState(false)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+  const urlInputRef = useRef<HTMLInputElement>(null)
+  // 焦点须在 DOM 提交后落下：ConfirmDialog 关闭与校验失败同帧发生时（如发布前
+  // 「保存并继续」），同步 focus() 会被弹窗的焦点陷阱在卸载前回抢，最终丢焦到 body。
+  const [focusTarget, setFocusTarget] = useState<'name' | 'url' | null>(null)
+  useEffect(() => {
+    if (!focusTarget) return
+    ;(focusTarget === 'name' ? nameInputRef : urlInputRef).current?.focus()
+    setFocusTarget(null)
+  }, [focusTarget])
 
   const startResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
@@ -158,7 +173,8 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN'))
   }, [draft.group_name, extraGroups, interfaces])
   const isDirty = draftFingerprint(draft) !== draftFingerprint(baseline)
-  const urlError = draft.url.trim() ? validateHttpUrl(draft.url) : ''
+  const nameError = validationArmed ? validateInterfaceName(draft.name) : ''
+  const urlError = draft.url.trim() ? validateHttpUrl(draft.url) : (validationArmed ? '请填写请求 URL' : '')
   const resultStale = Boolean(
     result && resultFingerprint !== requestFingerprint(draft, selectedFiles)
   )
@@ -175,6 +191,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     setRunContext(null)
     setResultFingerprint('')
     setSelectedFiles([])
+    setValidationArmed(false)
   }
   const createNow = () => {
     setSelectedId(null)
@@ -184,6 +201,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     setRunContext(null)
     setResultFingerprint('')
     setSelectedFiles([])
+    setValidationArmed(false)
   }
   const select = (item: HubInterface) => {
     if (item.id === selectedId) return
@@ -250,10 +268,18 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     return () => { cancelled = true }
   }, [])
 
+  // 保存/调用前的就地校验：错误内联留在字段上并在提交后聚焦首个出错项，
+  // 不再经 onError 弹 4 秒 toast——表单校验属持久上下文信息（DESIGN.md 消息二分）。
+  const validateDraftForSubmit = () => {
+    const nameMessage = validateInterfaceName(draft.name)
+    if (!nameMessage && !validateHttpUrl(draft.url)) return true
+    setValidationArmed(true)
+    setFocusTarget(nameMessage ? 'name' : 'url')
+    return false
+  }
+
   const save = async (): Promise<HubInterface | null> => {
-    if (!draft.name.trim()) { onError('请填写接口名称'); return null }
-    const validationError = validateHttpUrl(draft.url)
-    if (validationError) { onError(validationError); return null }
+    if (!validateDraftForSubmit()) return null
     setSaving(true)
     try {
       let saved: HubInterface
@@ -269,6 +295,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       setSelectedId(saved.id)
       setDraft(structuredClone(saved))
       setBaseline(structuredClone(saved))
+      setValidationArmed(false)
       // 写入已成功：成功反馈与「列表刷新失败」分开表达；已发布接口的线上调用
       // 会立即使用新配置（公开代理实时读当前配置），必须如实告知。
       toast.success('接口已保存', saved.http_enabled
@@ -335,14 +362,13 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       setResult(await apiHub.runDraftRaw(payload, selectedFiles))
       setResultFingerprint(fingerprint)
       setRunContext({ method: payload.method, url: payload.url })
+      setValidationArmed(false)
     } catch (error) { onError(apiError(error)) }
     finally { setRunning(false) }
   }
 
   const run = async () => {
-    if (!draft.name.trim()) { onError('请填写接口名称'); return }
-    const validationError = validateHttpUrl(draft.url)
-    if (validationError) { onError(validationError); return }
+    if (!validateDraftForSubmit()) return
     const payload = { ...draft, method: draft.method.toUpperCase() }
     const fingerprint = requestFingerprint(payload, selectedFiles)
     // 写方法直接向真实上游发送请求：同一配置每次会话首次调用前确认一次，
@@ -371,6 +397,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       setSelectedId(next?.id ?? null)
       setDraft(next ? structuredClone(next) : emptyHubInterface())
       setBaseline(next ? structuredClone(next) : emptyHubInterface())
+      setValidationArmed(false)
       setResult(null)
       setRunContext(null)
       setSelectedFiles([])
@@ -382,7 +409,8 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   const duplicateDraft = () => {
     setSelectedId(null)
     setBaseline(emptyHubInterface())
-    setDraft({ ...structuredClone(draft), id: null, name: `${draft.name} 副本`, mcp_enabled: false, open_enabled: false, http_enabled: false, proxy_slug: '', proxy_query_keys: [], proxy_header_keys: [], proxy_body_enabled: false, proxy_body_keys: [] })
+    setValidationArmed(false)
+    setDraft({ ...structuredClone(draft), id: null, name: duplicateInterfaceName(draft.name), mcp_enabled: false, open_enabled: false, http_enabled: false, proxy_slug: '', proxy_query_keys: [], proxy_header_keys: [], proxy_body_enabled: false, proxy_body_keys: [] })
     setResult(null)
     setRunContext(null)
     setResultFingerprint('')
@@ -390,8 +418,12 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   }
 
   const showCallExample = async () => {
-    const validationError = validateHttpUrl(draft.url)
-    if (validationError) { onError(validationError); return }
+    // cURL 只消费 URL：仅拦 URL（含空值，错误内联并聚焦），不施加保存级的名称校验
+    if (validateHttpUrl(draft.url)) {
+      setValidationArmed(true)
+      setFocusTarget('url')
+      return
+    }
     buildCallExample(draft)
     setCallExampleDraft(structuredClone(draft))
     setCallExampleCopyState('idle')
@@ -575,6 +607,13 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           )}
           <Button size="sm" className="shrink-0" onClick={create}><CirclePlus size={13} />新建接口</Button>
         </div>
+        {/* 未入库草稿（新建/复制）不在清单中：独立成行就地说明，避免「点没点上」的
+            疑惑。不放标题块内——shrink-0 会把整行撑宽，窄视口下裁掉「新建接口」按钮。 */}
+        {!draft.id && interfaces.length > 0 && (
+          <div className="shrink-0 px-3 pt-2">
+            <p className="text-xs text-[var(--color-warning)]">未保存，保存后才会出现在清单</p>
+          </div>
+        )}
         {listRefreshFailed && (
           <div className="shrink-0 px-3 pt-2">
             <Alert variant="warning" role="alert" className="text-xs">
@@ -684,20 +723,32 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
 
       <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-card shadow-sm">
         <div className="flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
-          <div className="flex min-w-[320px] flex-[1_1_320px] items-center gap-2">
-            <input value={draft.name} onChange={event => patchDraft('name', event.target.value)} aria-label="接口名称" className="h-8 min-w-[180px] max-w-md flex-1 rounded-md border border-[var(--color-border)] bg-card px-3 text-sm font-semibold outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] hover:border-[var(--color-border-hover)] focus-visible:ring-2 focus-visible:ring-ring" placeholder="接口名称" />
-            <Select value={draft.group_name || '__default__'} onValueChange={changeGroup}>
-              <SelectTrigger className="h-8 w-40 shrink-0 rounded-md bg-card text-xs" title="选择或新增分组" aria-label="选择或新增分组">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__default__">默认分组</SelectItem>
-                {groupNames.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}
-                <SelectItem value="__new__">＋ 新增分组…</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button size="sm" loading={saving} onClick={save}>{!saving && <Check size={14} />}{draft.id ? '保存配置' : '保存接口'}</Button>
-            {isDirty && <span className="shrink-0 rounded bg-[var(--color-warning-bg)] px-2 py-1 text-xs font-medium text-[var(--color-warning)]">未保存</span>}
+          <div className="flex min-w-[320px] flex-[1_1_320px] flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <input
+                ref={nameInputRef}
+                value={draft.name}
+                onChange={event => patchDraft('name', event.target.value)}
+                aria-label="接口名称"
+                aria-invalid={Boolean(nameError)}
+                aria-describedby={nameError ? 'api-hub-name-error' : undefined}
+                className={`h-8 min-w-[180px] max-w-md flex-1 rounded-md border bg-card px-3 text-sm font-semibold outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] focus-visible:ring-2 focus-visible:ring-ring ${nameError ? 'border-[color-mix(in_srgb,var(--color-danger)_40%,transparent)]' : 'border-[var(--color-border)] hover:border-[var(--color-border-hover)]'}`}
+                placeholder="接口名称"
+              />
+              <Select value={draft.group_name || '__default__'} onValueChange={changeGroup}>
+                <SelectTrigger className="h-8 w-40 shrink-0 rounded-md bg-card text-xs" title="选择或新增分组" aria-label="选择或新增分组">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">默认分组</SelectItem>
+                  {groupNames.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}
+                  <SelectItem value="__new__">＋ 新增分组…</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button size="sm" loading={saving} onClick={save}>{!saving && <Check size={14} />}{draft.id ? '保存配置' : '保存接口'}</Button>
+              {isDirty && <span className="shrink-0 rounded bg-[var(--color-warning-bg)] px-2 py-1 text-xs font-medium text-[var(--color-warning)]">未保存</span>}
+            </div>
+            {nameError && <p id="api-hub-name-error" role="alert" className="text-xs text-[var(--color-danger)]">{nameError}</p>}
           </div>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             {draft.id && (
@@ -721,7 +772,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
                 {methods.map(method => <SelectItem key={method} value={method}>{method}</SelectItem>)}
               </SelectContent>
             </Select>
-            <input value={draft.url} aria-invalid={Boolean(urlError)} aria-describedby={urlError ? 'api-hub-url-error' : undefined} onChange={event => patchDraft('url', event.target.value)} className="h-10 min-w-0 flex-1 bg-transparent px-3 font-mono text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="https://example.com/api/resource" />
+            <input ref={urlInputRef} value={draft.url} aria-invalid={Boolean(urlError)} aria-describedby={urlError ? 'api-hub-url-error' : undefined} onChange={event => patchDraft('url', event.target.value)} className="h-10 min-w-0 flex-1 bg-transparent px-3 font-mono text-xs outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="https://example.com/api/resource" />
             <button type="button" onClick={() => void run()} disabled={running} className={`relative m-1 flex min-w-[84px] items-center justify-center gap-1.5 overflow-hidden rounded px-4 text-xs font-semibold text-[var(--color-text-inverse)] shadow-sm transition-all duration-200 hover:-translate-y-px active:translate-y-0 active:scale-[0.98] disabled:cursor-wait disabled:opacity-90 ${draft.method.toUpperCase() === 'DELETE' ? 'bg-[var(--color-danger)] hover:bg-[var(--color-danger-hover)]' : 'bg-brand hover:bg-brand-deep'} ${running ? 'ring-4 ring-brand-mist' : ''}`}>
               {running ? <><LoaderCircle size={14} className="animate-spin" />调用中…</> : <>{invokeIcon(draft.method)}{invokeActionLabel(draft.method)}</>}
               {running && <span className="absolute inset-0 animate-pulse bg-card/10" />}

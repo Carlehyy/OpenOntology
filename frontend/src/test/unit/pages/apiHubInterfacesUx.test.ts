@@ -14,6 +14,8 @@ import {
   publicationStatusChipTone,
   sortedHeaderEntries,
   summarizeBackup,
+  duplicateInterfaceName,
+  validateInterfaceName,
   validateProxyKeySchedule,
 } from '../../../pages/api-hub/interfaceUxHelpers.ts'
 
@@ -146,6 +148,36 @@ describe('isMutatingMethod / invokeActionLabel', () => {
     assert.equal(invokeActionLabel('PATCH'), '更新资源')
     assert.equal(invokeActionLabel('DELETE'), '执行 DELETE')
     assert.equal(invokeActionLabel('delete'), '执行 DELETE')
+  })
+})
+
+describe('validateInterfaceName', () => {
+  it('flags empty and whitespace-only names', () => {
+    assert.equal(validateInterfaceName(''), '请填写接口名称')
+    assert.equal(validateInterfaceName('   '), '请填写接口名称')
+  })
+
+  it('accepts normal names and the 200-character boundary', () => {
+    assert.equal(validateInterfaceName('订单详情'), '')
+    assert.equal(validateInterfaceName('名'.repeat(200)), '')
+    assert.equal(validateInterfaceName(`  ${'名'.repeat(200)}  `), '')
+  })
+
+  it('rejects names longer than 200 characters after trimming, mirroring the backend copy', () => {
+    assert.equal(validateInterfaceName('名'.repeat(201)), '接口名称不能超过 200 个字符')
+    assert.equal(validateInterfaceName(`  ${'名'.repeat(201)}  `), '接口名称不能超过 200 个字符')
+  })
+})
+
+describe('duplicateInterfaceName', () => {
+  it('appends the 副本 suffix for normal names', () => {
+    assert.equal(duplicateInterfaceName('订单详情'), '订单详情 副本')
+  })
+
+  it('truncates back to 200 characters (by code point) so the copy stays saveable', () => {
+    assert.equal(duplicateInterfaceName('名'.repeat(199)).length, 200)
+    assert.equal([...duplicateInterfaceName('名'.repeat(300))].length, 200)
+    assert.equal([...duplicateInterfaceName(`😀${'名'.repeat(199)}`)].length, 200)
   })
 })
 
