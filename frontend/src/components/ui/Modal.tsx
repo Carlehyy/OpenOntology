@@ -163,6 +163,7 @@ export function ConfirmModal({
     <Modal
       open={open}
       onClose={onClose}
+      disableClose={loading}
       title={title}
       size="sm"
       headerIcon={danger
