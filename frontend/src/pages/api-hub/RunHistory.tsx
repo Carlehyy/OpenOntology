@@ -301,18 +301,16 @@ export default function RunHistory() {
         )}
 
         <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[1280px] border-collapse text-center text-xs">
+          <table className="w-full min-w-[1080px] border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-muted text-muted-foreground backdrop-blur">
               <tr>
-                <th className="w-32 border-b border-border px-5 py-3 text-center font-medium">结果</th>
-                <th className="min-w-52 border-b border-border px-4 py-3 text-center font-medium">接口</th>
-                <th className="w-36 border-b border-border px-4 py-3 text-center font-medium">来源</th>
-                <th className="min-w-56 border-b border-border px-4 py-3 text-center font-medium">诊断</th>
-                <th className="w-28 border-b border-border px-4 py-3 text-center font-medium">请求</th>
-                <th className="w-44 border-b border-border px-3 py-3 text-center font-medium">调用时间</th>
-                <th className="w-44 border-b border-border px-4 py-3 text-right font-medium">耗时</th>
-                <th className="w-32 border-b border-border px-4 py-3 text-center font-medium">认证恢复</th>
-                <th className="w-20 border-b border-border px-4 py-3 text-center font-medium">详情</th>
+                <th scope="col" className="w-32 border-b border-border px-5 py-3 text-center font-medium">结果</th>
+                <th scope="col" className="min-w-52 border-b border-border px-4 py-3 text-left font-medium">接口</th>
+                <th scope="col" className="w-36 border-b border-border px-4 py-3 text-center font-medium">来源</th>
+                <th scope="col" className="min-w-56 border-b border-border px-4 py-3 text-left font-medium">诊断</th>
+                <th scope="col" className="w-44 border-b border-border px-3 py-3 text-right font-medium">调用时间</th>
+                <th scope="col" className="w-40 border-b border-border px-4 py-3 text-right font-medium">耗时</th>
+                <th scope="col" className="w-20 border-b border-border px-4 py-3 text-center font-medium">详情</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -666,9 +664,6 @@ function HistoryRow({
 }) {
   const ok = Boolean(item.ok)
   const slow = item.elapsed_ms != null && item.elapsed_ms >= slowThreshold
-  const latencyWidth = item.elapsed_ms == null
-    ? 0
-    : Math.max(5, Math.min(100, item.elapsed_ms * 100 / Math.max(slowThreshold * 2, 1000)))
 
   return (
     <tr
@@ -686,16 +681,29 @@ function HistoryRow({
       }`}
     >
       <td className="px-5 py-2.5 text-center">
-        <div className={`inline-flex items-center justify-center gap-2 font-medium ${ok ? 'text-brand-ink' : 'text-[var(--color-danger)]'}`}>
-          <span className={`h-2 w-2 rounded-full ${ok ? 'bg-brand' : 'bg-[var(--color-danger)]'}`} />
-          <span>{ok ? '成功' : '失败'}</span>
-          <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${ok ? 'bg-brand-soft' : 'bg-[var(--color-danger-bg)]'}`}>
-            {item.status_code ?? 'ERR'}
-          </span>
+        <div className="flex flex-col items-center gap-1">
+          <div className={`inline-flex items-center justify-center gap-2 font-medium ${ok ? 'text-brand-ink' : 'text-[var(--color-danger)]'}`}>
+            <span className={`h-2 w-2 rounded-full ${ok ? 'bg-brand' : 'bg-[var(--color-danger)]'}`} />
+            <span>{ok ? '成功' : '失败'}</span>
+            <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${ok ? 'bg-brand-soft' : 'bg-[var(--color-danger-bg)]'}`}>
+              {item.status_code ?? 'ERR'}
+            </span>
+          </div>
+          {Boolean(item.relogin) && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[var(--color-warning)]">
+              <ShieldCheck size={12} />
+              自动重登
+            </span>
+          )}
         </div>
       </td>
-      <td className="max-w-52 px-4 py-2.5 text-center">
-        <p className="truncate font-medium text-foreground" title={item.name}>{item.name}</p>
+      <td className="max-w-72 px-4 py-2.5 text-left">
+        <div className="flex min-w-0 items-center gap-2">
+          <p className="min-w-0 truncate font-medium text-foreground" title={item.name}>{item.name}</p>
+          <span className="inline-flex shrink-0 rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
+            {item.method}
+          </span>
+        </div>
       </td>
       <td className="px-4 py-2.5 text-center">
         <div className="flex min-w-0 flex-col items-center justify-center gap-1">
@@ -707,41 +715,18 @@ function HistoryRow({
           )}
         </div>
       </td>
-      <td className="max-w-56 px-4 py-2.5 text-center">
-        <p className={`mx-auto truncate text-[10px] ${item.error ? 'text-[var(--color-danger)]' : 'font-mono text-[var(--color-text-tertiary)]'}`} title={item.error || undefined}>
-          {item.error || '-'}
+      <td className="max-w-56 px-4 py-2.5 text-left">
+        <p className={`line-clamp-2 break-words text-xs leading-4 ${item.error ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-tertiary)]'}`} title={item.error || undefined}>
+          {item.error || '—'}
         </p>
       </td>
-      <td className="px-4 py-2.5 text-center">
-        <span className="inline-flex rounded-md border border-border bg-muted px-2 py-1 font-mono text-[10px] font-semibold text-muted-foreground">
-          {item.method}
-        </span>
-      </td>
-      <td className="whitespace-nowrap px-3 py-2.5 text-center tabular-nums">
+      <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">
         <span className="text-muted-foreground">{formatDateTime(item.created_at, { seconds: true })}</span>
       </td>
       <td className="px-4 py-2.5 text-right">
-        <div className="flex items-center justify-end gap-2">
-          <span className={`w-14 tabular-nums ${slow ? 'font-medium text-[var(--color-warning)]' : 'text-muted-foreground'}`}>
-            {formatElapsed(item.elapsed_ms)}
-          </span>
-          {item.elapsed_ms != null && (
-            <span className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
-              <span
-                className={`block h-full rounded-full ${slow ? 'bg-[var(--color-warning)]' : 'bg-brand'}`}
-                style={{ width: `${latencyWidth}%` }}
-              />
-            </span>
-          )}
-        </div>
-      </td>
-      <td className="px-4 py-2.5 text-center">
-        {item.relogin ? (
-          <span className="inline-flex items-center justify-center gap-1.5 text-[11px] font-medium text-[var(--color-warning)]">
-            <ShieldCheck size={13} />
-            自动重登
-          </span>
-        ) : <span className="text-[11px] text-[var(--color-text-tertiary)]">未触发</span>}
+        <span className={`tabular-nums ${slow ? 'font-medium text-[var(--color-warning)]' : 'text-muted-foreground'}`}>
+          {formatElapsed(item.elapsed_ms)}
+        </span>
       </td>
       <td className="px-4 py-2.5 text-center">
         <span className={`inline-flex items-center justify-center gap-1 text-[11px] font-medium transition group-hover:translate-x-0.5 group-hover:text-brand-ink ${
@@ -771,13 +756,11 @@ function HistorySkeleton() {
   return (
     <tr className="animate-pulse">
       <td className="px-5 py-4"><div className="mx-auto h-5 w-20 rounded bg-muted" /></td>
-      <td className="px-4 py-4"><div className="mx-auto h-3 w-40 rounded bg-muted" /></td>
+      <td className="px-4 py-4"><div className="h-3 w-40 rounded bg-muted" /></td>
       <td className="px-4 py-4"><div className="mx-auto h-5 w-14 rounded bg-muted" /><div className="mx-auto mt-2 h-2.5 w-20 rounded bg-muted" /></td>
-      <td className="px-4 py-4"><div className="mx-auto h-3 w-32 rounded bg-muted" /></td>
-      <td className="px-4 py-4"><div className="mx-auto h-5 w-12 rounded bg-muted" /></td>
-      <td className="px-4 py-4"><div className="mx-auto h-3 w-24 rounded bg-muted" /><div className="mx-auto mt-2 h-2.5 w-16 rounded bg-muted" /></td>
-      <td className="px-4 py-4"><div className="mx-auto h-3 w-24 rounded bg-muted" /></td>
-      <td className="px-4 py-4"><div className="mx-auto h-3 w-16 rounded bg-muted" /></td>
+      <td className="px-4 py-4"><div className="h-3 w-32 rounded bg-muted" /></td>
+      <td className="px-3 py-4"><div className="ml-auto h-3 w-24 rounded bg-muted" /></td>
+      <td className="px-4 py-4"><div className="ml-auto h-3 w-16 rounded bg-muted" /></td>
       <td className="px-4 py-4"><div className="mx-auto h-4 w-10 rounded bg-muted" /></td>
     </tr>
   )

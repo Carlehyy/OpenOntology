@@ -57,7 +57,7 @@ const RUNS: RunFixture[] = [
     error: '该接口需要登录态，自动登录失败：未配置账号',
     created_at: '2026-09-17T09:10:00.000Z',
   }),
-  makeRun({ id: 87, name: '报表导出', method: 'POST', elapsed_ms: 950 }),
+  makeRun({ id: 87, name: '报表导出', method: 'POST', elapsed_ms: 950, relogin: 1 }),
 ]
 
 const OVERVIEW = {
@@ -191,7 +191,7 @@ test('H03 调用时间单行展示，日期只出现一次', async ({ page }) =>
   await mockHistoryApp(page)
   await gotoHistory(page)
 
-  const timeCell = page.locator('tbody tr').first().locator('td').nth(5)
+  const timeCell = page.locator('tbody tr').first().locator('td').nth(4)
   const text = (await timeCell.textContent()) ?? ''
   expect(text.trim()).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
 })
@@ -225,4 +225,52 @@ test('慢调用结果筛选与列表计数一致', async ({ page }) => {
   await page.getByRole('button', { name: /慢调用/ }).click()
   await expect(page.getByText('显示 1–2 / 2 条')).toBeVisible()
   await expect(page.locator('tbody tr')).toHaveCount(2)
+})
+
+test('H02 减列后 1440 视口无横向滚动，操作列可见', async ({ page }) => {
+  await mockHistoryApp(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await gotoHistory(page)
+
+  const headers = page.locator('thead th')
+  await expect(headers).toHaveCount(7)
+  await expect(page.getByRole('columnheader', { name: '请求' })).toHaveCount(0)
+  await expect(page.getByRole('columnheader', { name: '认证恢复' })).toHaveCount(0)
+
+  const fitsViewport = await page.evaluate(() => {
+    const table = document.querySelector('main table')
+    const scroller = table?.parentElement
+    if (!scroller) return false
+    return scroller.scrollWidth <= scroller.clientWidth
+  })
+  expect(fitsViewport).toBe(true)
+
+  // 「详情」入口列（最后一列）在视口内完整可见
+  const lastHeaderBox = await page.locator('thead th').last().boundingBox()
+  expect(lastHeaderBox && lastHeaderBox.x + lastHeaderBox.width <= 1440).toBe(true)
+})
+
+test('H14/H15 方法并入接口列，自动重登仅触发时出现', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  const orderRow = page.getByRole('row', { name: /订单详情查询/ })
+  await expect(orderRow.getByText('GET', { exact: true })).toBeVisible()
+
+  // 未触发重登的行不渲染「未触发」，触发行显示「自动重登」徽章
+  await expect(orderRow.getByText('未触发')).toHaveCount(0)
+  await expect(page.getByRole('row', { name: /报表导出/ }).getByText('自动重登')).toBeVisible()
+  await expect(page.getByText('自动重登')).toHaveCount(1)
+})
+
+test('H16/H18 失败原因在诊断列完整可达，耗时列不再渲染进度条', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  await expect(page.getByRole('row', { name: /库存同步/ }).getByText(/自动登录失败/)).toBeVisible()
+  await expect(page.getByRole('row', { name: /订单详情查询/ }).locator('td').nth(5)).toContainText('620 ms')
+
+  const barCount = await page.evaluate(() =>
+    document.querySelectorAll('tbody span[class*="h-1.5"]').length)
+  expect(barCount).toBe(0)
 })
