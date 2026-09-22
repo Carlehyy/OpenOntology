@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { eventsApi } from '../../api/events'
-import type { EventItem, EventStats } from '../../api/events'
-import { Search, Plus, RefreshCcw, Activity, Code2, AlertOctagon, ChevronLeft, ChevronRight, Filter, PlusCircle, ArrowUpRight, Archive, ArchiveRestore, Paperclip, Pencil, Trash2, Download, Loader2 } from 'lucide-react'
+import type { EventItem, EventListResp, EventStats } from '../../api/events'
+import { Search, Plus, RefreshCcw, Activity, Code2, AlertOctagon, ChevronLeft, ChevronRight, CloudOff, Filter, PlusCircle, ArrowUpRight, Archive, ArchiveRestore, Paperclip, Pencil, Trash2, Download, Loader2 } from 'lucide-react'
 import { ConfirmModal } from '@/components/ui/Modal'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/authStore'
@@ -28,7 +28,12 @@ const STATUS_TABS = [
 // ─── 数据 hooks ──────────────────────────────────────────
 function useStats() { return useQuery({ queryKey: ['events', 'stats'], queryFn: () => eventsApi.stats() }) }
 function useList(params: { page: number; pageSize: number; q?: string; sourceType?: string; severity?: string; status?: string }) {
-  return useQuery({ queryKey: ['events', 'list', params], queryFn: () => eventsApi.list(params) })
+  return useQuery({
+    queryKey: ['events', 'list', params],
+    queryFn: () => eventsApi.list(params),
+    // 筛选/搜索换 query key 时保留上一屏数据，避免整表闪「加载中...」（UX 评审 B4）
+    placeholderData: previous => previous,
+  })
 }
 
 export default function EventRegistryPage() {
@@ -46,6 +51,7 @@ export default function EventRegistryPage() {
   const [detailEventId, setDetailEventId] = useState<string | null>(null)
   const [attachmentEventId, setAttachmentEventId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<EventItem | null>(null)
+  const [archiveTarget, setArchiveTarget] = useState<EventItem | null>(null)
   const statusTabsRef = useRef<HTMLDivElement>(null)
   const [statusIndicator, setStatusIndicator] = useState({ left: 0, width: 0 })
 
@@ -105,6 +111,7 @@ export default function EventRegistryPage() {
       eventsApi.changeStatus(id, nextStatus),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['events'] })
+      setArchiveTarget(null)
       toast.success(variables.status === 'archived' ? '事件已归档' : '事件已恢复')
     },
     onError: (cause: any) => toast.error('事件状态更新失败', { description: cause?.detail || cause?.message || '请稍后重试' }),
@@ -112,7 +119,10 @@ export default function EventRegistryPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => eventsApi.remove(id),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      // 先从当前缓存拿掉该行，避免等重拉回来期间行仍可见（UX 评审 B4 顺手项）
+      queryClient.setQueriesData<EventListResp>({ queryKey: ['events', 'list'] }, old =>
+        old ? { ...old, items: old.items.filter(item => item.id !== id), total: Math.max(0, old.total - 1) } : old)
       queryClient.invalidateQueries({ queryKey: ['events'] })
       setDeleteTarget(null)
       toast.success('事件已删除')
@@ -231,7 +241,7 @@ export default function EventRegistryPage() {
               <div
                 aria-hidden="true"
                 data-status-indicator
-                className="pointer-events-none absolute top-1 h-[calc(100%-8px)] rounded-md bg-[var(--color-success)] shadow-sm transition-all duration-300 ease-out"
+                className="pointer-events-none absolute top-1 h-[calc(100%-8px)] rounded-md bg-primary shadow-sm transition-all duration-300 ease-out"
                 style={{ left: `${statusIndicator.left}px`, width: `${statusIndicator.width}px` }}
               />
               {STATUS_TABS.map(tab => {
@@ -243,7 +253,7 @@ export default function EventRegistryPage() {
                     data-status-value={tab.value}
                     onClick={() => setStatus(tab.value)}
                     aria-pressed={status === tab.value}
-                    className={`relative z-10 inline-flex items-center gap-1 rounded-md px-4 py-2 font-medium transition-colors duration-200 ${status === tab.value ? 'text-[var(--color-text-inverse)]' : 'text-muted-foreground hover:text-[var(--color-success)]'}`}
+                    className={`relative z-10 inline-flex items-center gap-1 rounded-md px-4 py-2 font-medium transition-colors duration-200 ${status === tab.value ? 'text-[var(--color-text-inverse)]' : 'text-muted-foreground hover:text-primary'}`}
                   >
                     <StatusIcon className="h-3.5 w-3.5" />{tab.label}
                   </button>
@@ -252,13 +262,15 @@ export default function EventRegistryPage() {
           </div>
 
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-            <button type="button" onClick={() => setKeysOpen(true)}
-              className="inline-flex h-9 w-32 items-center justify-center gap-1 rounded-lg border border-border bg-card px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
-              <Code2 className="h-4 w-4" />接入管理
-              <span className="rounded bg-[var(--color-success-bg)] px-1 py-0.5 text-[9px] font-semibold leading-none text-[var(--color-success)]">API</span>
-            </button>
+            {isAdmin && (
+              <button type="button" onClick={() => setKeysOpen(true)}
+                className="inline-flex h-9 w-32 items-center justify-center gap-1 rounded-lg border border-border bg-card px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                <Code2 className="h-4 w-4" />接入管理
+                <span className="rounded bg-[var(--color-success-bg)] px-1 py-0.5 text-[9px] font-semibold leading-none text-[var(--color-success)]">API</span>
+              </button>
+            )}
             <button type="button" onClick={() => { setEditing(null); setFormOpen(true) }}
-              className="inline-flex h-9 w-32 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-success)] px-3 text-sm font-medium text-[var(--color-text-inverse)] shadow-sm transition-colors hover:bg-[var(--color-success)] active:bg-[var(--color-success)]">
+              className="inline-flex h-9 w-32 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-[var(--color-primary-hover)] active:bg-[var(--color-primary-active)]">
               <Plus className="h-4 w-4" />登记事件
             </button>
           </div>
@@ -270,8 +282,8 @@ export default function EventRegistryPage() {
         <div className="grid grid-cols-2 gap-2 lg:col-span-4">
           <MetricCard label="事件总数" value={stats?.total ?? 0} sub={`活跃 ${stats?.active ?? 0} · 归档 ${stats?.archived ?? 0}`} />
           <MetricCard label="平台录入" value={stats?.platform ?? 0} sub="人工登记" />
-          <MetricCard label="API 接入" value={stats?.api ?? 0} sub={`${apiCoverage}% 覆盖率`} />
-          <MetricCard label="今日新增" value={stats?.today ?? 0} sub="实时更新" />
+          <MetricCard label="API 接入" value={stats?.api ?? 0} sub={(stats?.api ?? 0) > 0 ? `${apiCoverage}% 覆盖率` : '尚无 API 上报'} />
+          <MetricCard label="今日新增" value={stats?.today ?? 0} sub="按登记时间统计" />
         </div>
 
         {/* 级别分布环：大屏下收紧卡片，为趋势图让出更多横向空间。 */}
@@ -342,7 +354,11 @@ export default function EventRegistryPage() {
             { v: '', l: '全部来源' }, { v: 'platform', l: '平台录入' }, { v: 'api', l: 'API 上报' }, { v: 'system', l: '系统生成' },
           ]} />
           <div className="ml-auto flex items-center gap-1">
-            <span className="mr-1 text-sm text-[var(--color-text-tertiary)]">共 <span className="font-semibold tabular-nums text-foreground">{listQ.data?.total ?? 0}</span> 条</span>
+            {listQ.isError ? (
+              <span className="mr-1 text-sm text-[var(--color-text-tertiary)]">—</span>
+            ) : (
+              <span className="mr-1 text-sm text-[var(--color-text-tertiary)]">共 <span className="font-semibold tabular-nums text-foreground">{listQ.data?.total ?? 0}</span> 条</span>
+            )}
             <button type="button" onClick={handleExport} disabled={exporting}
               className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
               title="按当前筛选条件导出 CSV" aria-label="导出事件 CSV">
@@ -366,13 +382,30 @@ export default function EventRegistryPage() {
                   <th className="w-[9%] px-3 py-3 text-center font-medium">级别</th>
                   <th className="w-[19%] px-3 py-3 text-left font-medium">描述</th>
                   <th className="w-[11%] px-3 py-3 text-center font-medium">附件</th>
-                  <th className="w-[12%] px-3 py-3 text-center font-medium">发生时间</th>
+                  <th className="w-[12%] px-3 py-3 text-center font-medium" title="列表按登记时间从新到旧排序">发生时间</th>
                   <th className="w-[14%] px-2 py-3 text-center font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
                 {listQ.isLoading ? (
                   <tr><td colSpan={7} className="py-16 text-center text-sm text-[var(--color-text-tertiary)]">加载中...</td></tr>
+                ) : listQ.isError ? (
+                  // 失败必须与真空列表区分（UX 评审 A3）：服务故障不能被误读成「没有事件」。
+                  <tr><td colSpan={7} className="py-16">
+                    <div role="alert" className="mx-auto flex max-w-sm flex-col items-center text-center">
+                      <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--color-danger-bg)] text-[var(--color-danger)]">
+                        <CloudOff size={22} />
+                      </span>
+                      <p className="text-sm font-medium text-foreground">事件列表加载失败</p>
+                      <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">请检查网络连接后重试</p>
+                      <button
+                        onClick={() => { void listQ.refetch(); void statsQ.refetch() }}
+                        className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-card px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <RefreshCcw size={14} /> 重新加载
+                      </button>
+                    </div>
+                  </td></tr>
                 ) : listQ.data?.items?.length === 0 ? (
                   <tr><td colSpan={7} className="text-center py-16">
                     <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
@@ -381,7 +414,7 @@ export default function EventRegistryPage() {
                     <p className="text-sm text-[var(--color-text-tertiary)]">暂无匹配事件</p>
                     <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">尝试调整筛选条件，或登记新事件</p>
                     <button onClick={() => { setEditing(null); setFormOpen(true) }}
-                      className="mt-3 inline-flex items-center gap-1 rounded-lg bg-[var(--color-success-bg)] px-3 py-1.5 text-sm font-medium text-[var(--color-success)] transition-colors hover:bg-[var(--color-success-bg)]">
+                      className="mt-3 inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-[var(--color-primary-hover)]">
                       <PlusCircle className="h-3.5 w-3.5" />立即登记
                     </button>
                   </td></tr>
@@ -395,7 +428,7 @@ export default function EventRegistryPage() {
                         setDetailEventId(r.id)
                       }
                     }}
-                    className={`group cursor-pointer border-t border-border transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none ${(r.severity === 'critical' || r.severity === 'high') ? 'bg-[var(--color-danger-bg)]' : ''}`}
+                    className={`group cursor-pointer border-t border-border transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none ${r.severity === 'critical' ? 'bg-[var(--color-danger-bg)]' : ''}`}
                     style={{ animation: `rowIn 0.35s ease-out ${i * 30}ms both` }}>
                     <td className="px-4 py-3 text-left align-middle">
                       <div className="flex items-stretch justify-start gap-2">
@@ -446,7 +479,11 @@ export default function EventRegistryPage() {
                         <ActionButton
                           label={r.status === 'archived' ? '恢复事件' : '归档事件'}
                           ariaLabel={`${r.status === 'archived' ? '恢复' : '归档'}事件 ${r.title}`}
-                          onClick={() => statusMutation.mutate({ id: r.id, status: r.status === 'archived' ? 'active' : 'archived' })}
+                          // 归档会让行从当前页签消失且与删除图标相邻，误触代价高：先确认（UX 评审 B2）；恢复低风险保持即时。
+                          onClick={() => {
+                            if (r.status === 'archived') statusMutation.mutate({ id: r.id, status: 'active' })
+                            else setArchiveTarget(r)
+                          }}
                           disabled={statusMutation.isPending}
                           tone="amber"
                         >
@@ -472,8 +509,13 @@ export default function EventRegistryPage() {
 
           {/* 分页 */}
           <div className="flex shrink-0 items-center justify-between border-t border-border bg-card px-4 py-2">
-            <div className="text-sm tabular-nums text-[var(--color-text-tertiary)]">
-              显示 {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, listQ.data?.total ?? 0)} / {listQ.data?.total ?? 0}
+            <div data-testid="events-pagination-info" className="text-sm tabular-nums text-[var(--color-text-tertiary)]">
+              {listQ.isError
+                ? '—'
+                : (listQ.data?.total ?? 0) === 0
+                  // 空结果不显示「1–0 / 0」数学伪影（UX 评审 A3）
+                  ? '共 0 条'
+                  : <>显示 {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, listQ.data?.total ?? 0)} / {listQ.data?.total ?? 0}</>}
             </div>
             <div className="flex items-center gap-1">
               <button disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}
@@ -485,7 +527,7 @@ export default function EventRegistryPage() {
                 if (totalPages > 5) { if (page > 3) p = Math.min(totalPages - 4, page - 2) + i }
                 return (
                   <button key={p} onClick={() => setPage(p)}
-                    className={`flex h-8 w-8 items-center justify-center rounded-lg text-sm font-medium transition-colors ${p === page ? 'bg-[var(--color-success)] text-[var(--color-text-inverse)] shadow-sm' : 'border border-border bg-card text-muted-foreground hover:bg-muted'}`}>
+                    className={`flex h-8 w-8 items-center justify-center rounded-lg text-sm font-medium transition-colors ${p === page ? 'bg-primary text-primary-foreground shadow-sm hover:bg-[var(--color-primary-hover)]' : 'border border-border bg-card text-muted-foreground hover:bg-muted'}`}>
                     {p}
                   </button>
                 )
@@ -500,7 +542,7 @@ export default function EventRegistryPage() {
 
       {/* 移动端 FAB */}
       <button onClick={() => { setEditing(null); setFormOpen(true) }}
-          className="fixed bottom-6 right-6 z-20 flex h-11 w-11 items-center justify-center rounded-full bg-[var(--color-success)] text-[var(--color-text-inverse)] shadow-lg transition-colors hover:bg-[var(--color-success)] md:hidden">
+          className="fixed bottom-6 right-6 z-20 flex h-11 w-11 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-colors hover:bg-[var(--color-primary-hover)] md:hidden">
           <PlusCircle className="w-5 h-5" />
       </button>
 
@@ -521,6 +563,15 @@ export default function EventRegistryPage() {
         onClose={() => setAttachmentEventId(null)}
       />
       <IngestKeysDrawer open={keysOpen} onClose={() => setKeysOpen(false)} />
+      <ConfirmModal
+        open={Boolean(archiveTarget)}
+        onClose={() => setArchiveTarget(null)}
+        onConfirm={() => { if (archiveTarget) statusMutation.mutate({ id: archiveTarget.id, status: 'archived' }) }}
+        title="归档事件"
+        description={archiveTarget ? `确认归档事件“${archiveTarget.title}”？归档后可在「归档」页签中查看或恢复。` : undefined}
+        confirmText="确认归档"
+        loading={statusMutation.isPending}
+      />
       <ConfirmModal
         open={Boolean(deleteTarget)}
         onClose={() => setDeleteTarget(null)}

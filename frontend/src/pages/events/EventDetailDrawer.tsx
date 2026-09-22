@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -52,7 +52,7 @@ function CopyBtn({ text }: { text: string }) {
           window.setTimeout(() => setDone(false), 1500)
         }).catch(() => setDone(false))
       }}
-      className="inline-flex items-center gap-1 rounded-md text-xs text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {done ? <Check size={13} /> : <Copy size={13} />}{done ? '已复制' : '复制'}
     </button>
@@ -131,6 +131,16 @@ export default function EventDetailDrawer({
     ? ontologyList?.items?.find(o => o.id === event.ontologyId)?.name
     : null
   const hasPayload = Boolean(event?.payload && Object.keys(event.payload).length > 0)
+
+  // 手写抽屉补齐弹层惯例：Esc 可关闭（与 ui/Modal 的先例一致）。
+  useEffect(() => {
+    if (!open) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, onClose])
 
   if (!open) return null
 

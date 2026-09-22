@@ -34,12 +34,6 @@ function filePresentation(filename: string) {
   return { Icon: File, label: extension ? `${extension.toUpperCase()} 文件` : '文件' }
 }
 
-function formatTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '时间未知'
-  return formatDateTime(date)
-}
-
 function errorDetail(cause: any): string {
   return cause?.detail || cause?.message || '请稍后重试'
 }
@@ -185,7 +179,7 @@ export default function EventAttachmentsModal({
                         {attachment.filename}
                       </p>
                       <p className="mt-1 truncate text-xs tabular-nums text-[var(--color-text-tertiary)]">
-                        {label} · {formatBytes(attachment.fileSize)} · {formatTime(attachment.createdAt)}
+                        {label} · {formatBytes(attachment.fileSize)} · {formatDateTime(attachment.createdAt, { fallback: '时间未知' })}
                       </p>
                     </div>
                     <button

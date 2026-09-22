@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { toast } from 'sonner'
 import { ontologyApi } from '@/api/ontologies'
 import { eventsApi, formatBytes, type Attachment, type EventCreateBody, type EventItem } from '@/api/events'
+import { parseServerTime } from '@/utils/datetime'
 
 const SEVERITY_OPTIONS = [
   { value: 'info', label: '信息' },
@@ -35,8 +36,9 @@ function errorDetail(cause: any): string {
 
 function isoToLocalInput(iso: string | null): string {
   if (!iso) return ''
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return ''
+  // 后端时间为 naive UTC 序列化，须按 UTC 解析后再转本地钟点，否则回填慢 8 小时（UX 评审 A1）。
+  const date = parseServerTime(iso)
+  if (!date) return ''
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
@@ -64,6 +66,8 @@ export default function EventFormModal({
   const [createdEventId, setCreatedEventId] = useState<string | null>(null)
   const [uploadedFileKeys, setUploadedFileKeys] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
+  // 提交后才发现缺必填时置 true：为空字段渲染红框与 aria-invalid，随字段补齐逐个消除。
+  const [showFieldErrors, setShowFieldErrors] = useState(false)
 
   const { data: ontologyList } = useQuery({
     queryKey: ['events-ontology-options'],
@@ -76,13 +80,14 @@ export default function EventFormModal({
     enabled: open && Boolean(editing?.id),
   })
   const ontologyOptions = [
-    { value: '', label: '（不关联本体）' },
+    { value: '__none__', label: '（不关联本体）' },
     ...(ontologyList?.items || []).map(ontology => ({ value: ontology.id, label: ontology.name })),
   ]
 
   useEffect(() => {
     if (!open) return
     setError('')
+    setShowFieldErrors(false)
     setFiles([])
     setExistingAttachments(editing?.attachments || [])
     setRemovedAttachmentIds(new Set())
@@ -116,7 +121,6 @@ export default function EventFormModal({
       const missing: string[] = []
       if (!title.trim()) missing.push('事件标题')
       if (!eventType.trim()) missing.push('事件类型')
-      if (!severity.trim()) missing.push('严重程度')
       if (!description.trim()) missing.push('详细描述')
       if (missing.length) throw new Error(`请完善必填项：${missing.join('、')}`)
       const oversized = files.find(file => file.size > MAX_ATTACHMENT_BYTES)
@@ -175,7 +179,11 @@ export default function EventFormModal({
       toast.success(isEdit ? '事件已保存' : '事件登记成功', { description: isEdit ? undefined : `事件编号 ${event.eventNo}，可在详情中复制` })
       onClose()
     },
-    onError: (cause: any) => setError(cause?.message || cause?.detail || '保存失败'),
+    onError: (cause: any) => {
+      const message = cause?.message || cause?.detail || '保存失败'
+      if (String(message).startsWith('请完善必填项')) setShowFieldErrors(true)
+      setError(message)
+    },
   })
 
   const addFiles = (incoming: File[]) => {
@@ -192,6 +200,15 @@ export default function EventFormModal({
 
   const labelClass = 'mb-1.5 block text-sm font-medium text-foreground'
   const controlClass = 'h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+  // 校验态只改边框色（平台焦点环规范），沿用 InterfaceManager 的 color-mix 惯例。
+  const invalidBorder = 'border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)]'
+  const titleInvalid = showFieldErrors && !title.trim()
+  const eventTypeInvalid = showFieldErrors && !eventType.trim()
+  const descriptionInvalid = showFieldErrors && !description.trim()
+  // 必填项任一变动即收起顶部聚合告警，红框按字段值实时重算。
+  const clearMissingError = () => {
+    if (error.startsWith('请完善必填项')) setError('')
+  }
   const visibleExistingCount = existingAttachments.filter(attachment => !removedAttachmentIds.has(attachment.id)).length
 
   return (
@@ -202,7 +219,7 @@ export default function EventFormModal({
       >
         <DialogHeader icon={<FilePlus2 size={18} />}>
           <DialogTitle>{isEdit ? '编辑事件' : '登记事件'}</DialogTitle>
-          {!isEdit && <DialogDescription>记录一条业务事件，供后续本体优化挖掘</DialogDescription>}
+          {!isEdit && <DialogDescription>登记业务事件，沉淀为可追溯的业务事实</DialogDescription>}
         </DialogHeader>
       <div className="max-h-[68vh] space-y-5 overflow-y-auto px-1 pb-1 pr-2">
         {error && (
@@ -213,7 +230,17 @@ export default function EventFormModal({
 
         <div>
           <label htmlFor="event-title" className={labelClass}>事件标题 <span className="text-[var(--color-danger)]">*</span></label>
-          <input id="event-title" required aria-required="true" value={title} onChange={event => setTitle(event.target.value)} placeholder="简要描述发生了什么" className={controlClass} />
+          <input
+            id="event-title"
+            required
+            aria-required="true"
+            aria-invalid={titleInvalid || undefined}
+            maxLength={500}
+            value={title}
+            onChange={event => { setTitle(event.target.value); clearMissingError() }}
+            placeholder="简要描述发生了什么"
+            className={`${controlClass} ${titleInvalid ? invalidBorder : ''}`}
+          />
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -223,15 +250,19 @@ export default function EventFormModal({
               id="event-type"
               required
               aria-required="true"
+              aria-invalid={eventTypeInvalid || undefined}
               list="event-type-options"
               value={eventType}
-              onChange={event => setEventType(event.target.value)}
+              onChange={event => { setEventType(event.target.value); clearMissingError() }}
               placeholder="选择或输入类型"
-              className={controlClass}
+              className={`${controlClass} ${eventTypeInvalid ? invalidBorder : ''}`}
             />
             <datalist id="event-type-options">
               {EVENT_TYPE_SUGGESTIONS.map(type => <option key={type} value={type} />)}
             </datalist>
+            <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
+              常用：设备异常、业务变更、客户反馈、安全事件…，可自由输入
+            </p>
           </div>
           <div>
             <label htmlFor="event-severity" className={labelClass}>严重程度 <span className="text-[var(--color-danger)]">*</span></label>
@@ -252,8 +283,9 @@ export default function EventFormModal({
             <input id="event-occurred-at" type="datetime-local" value={occurredAt} onChange={event => setOccurredAt(event.target.value)} className={controlClass} />
           </div>
           <div>
-            <label htmlFor="event-ontology" className={labelClass}>关联本体（后续挖掘目标）</label>
-            <FormSelect value={ontologyId} onValueChange={setOntologyId}>
+            <label htmlFor="event-ontology" className={labelClass}>关联本体</label>
+            {/* Radix 不接受空字符串选项值：'' 哨兵映射为 __none__，保证「不关联本体」可见可回选 */}
+            <FormSelect value={ontologyId || '__none__'} onValueChange={value => setOntologyId(value === '__none__' ? '' : value)}>
               <FormSelectTrigger id="event-ontology" className={controlClass}>
                 <FormSelectValue />
               </FormSelectTrigger>
@@ -270,10 +302,11 @@ export default function EventFormModal({
             id="event-description"
             required
             aria-required="true"
+            aria-invalid={descriptionInvalid || undefined}
             value={description}
-            onChange={event => setDescription(event.target.value)}
+            onChange={event => { setDescription(event.target.value); clearMissingError() }}
             rows={4}
-            className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className={`w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${descriptionInvalid ? invalidBorder : ''}`}
             placeholder="事件的完整经过、背景、影响……"
           />
         </div>

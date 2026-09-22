@@ -10,20 +10,13 @@ import { Input } from '@/components/ui/Input'
 import { LoadingState } from '@/components/ui/LoadingState'
 import { ConfirmModal } from '@/components/ui/Modal'
 import { eventsApi, type IngestKey, type IngestKeyListResp } from '@/api/events'
+import { formatDateTime } from '@/utils/datetime'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 const KEY_PAGE_SIZE = 5
 
-function fmt(iso: string | null): string {
-  if (!iso) return '从未'
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return '时间未知'
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
-function CopyBtn({ text, small }: { text: string; small?: boolean }) {
+function CopyBtn({ text, small, label }: { text: string; small?: boolean; label?: string }) {
   const [done, setDone] = useState(false)
   return (
     <button
@@ -34,9 +27,9 @@ function CopyBtn({ text, small }: { text: string; small?: boolean }) {
           window.setTimeout(() => setDone(false), 1500)
         }).catch(() => setDone(false))
       }}
-      className={`inline-flex items-center gap-1 rounded-md text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${small ? 'text-xs' : 'text-sm'}`}
+      className={`inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[var(--color-success)] transition-colors hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${small ? 'text-xs' : 'text-sm'}`}
     >
-      {done ? <Check size={13} /> : <Copy size={13} />}{done ? '已复制' : '复制'}
+      {done ? <Check size={13} /> : <Copy size={13} />}{done ? '已复制' : (label ?? '复制')}
     </button>
   )
 }
@@ -78,6 +71,19 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
   }, [page, totalPages])
+
+  // 手写抽屉补齐弹层惯例：Esc 可关闭；嵌套确认弹窗或下拉浮层打开时让它们先消费 Esc。
+  useEffect(() => {
+    if (!open) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (revokeTarget) return
+      if (document.querySelector('[data-radix-popper-content-wrapper]')) return
+      onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, onClose, revokeTarget])
 
   const createMutation = useMutation({
     mutationFn: () => eventsApi.createKey(name.trim(), scope.trim() || undefined),
@@ -150,10 +156,10 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
             </h3>
             <div className="mb-2 flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
               <code className="flex-1 break-all text-xs text-foreground">POST {endpoint}</code>
-              <CopyBtn text={endpoint} small />
+              <CopyBtn text={endpoint} small label="复制 URL" />
             </div>
             <div className="relative rounded-lg border border-border bg-muted p-3">
-              <div className="absolute right-2 top-2"><CopyBtn text={curl.replace(/\\\n\s*/g, ' ')} small /></div>
+              <div className="absolute right-2 top-2"><CopyBtn text={curl.replace(/\\\n\s*/g, ' ')} small label="复制 curl" /></div>
               <pre className="overflow-x-auto whitespace-pre font-mono text-xs text-muted-foreground">{curl}</pre>
             </div>
             <p className="mt-2 text-xs leading-relaxed text-[var(--color-text-tertiary)]">
@@ -183,7 +189,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
               </div>
             )}
             <div className="flex items-end gap-2">
-              <Input label="密钥名（= 第三方来源标识）" value={name} onChange={event => setName(event.target.value)}
+              <Input label="密钥名" value={name} onChange={event => setName(event.target.value)}
                 placeholder="如：MES产线网关" className="flex-1" />
               <Input label="限定来源系统（可选）" value={scope} onChange={event => setScope(event.target.value)}
                 placeholder="如：MES" className="flex-1" />
@@ -216,8 +222,8 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
                 />
               </label>
               <Select
-                value={status || '__all__'}
-                onValueChange={value => setStatus((value === '__all__' ? '' : value) as typeof status)}
+                value={status === 'all' ? '__all__' : status}
+                onValueChange={value => setStatus((value === '__all__' ? 'all' : value) as typeof status)}
               >
                 <SelectTrigger aria-label="密钥状态" className="h-9 w-fit min-w-32 rounded-lg bg-card px-2.5 text-xs">
                   <SelectValue placeholder="全部状态" />
@@ -250,7 +256,9 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
               <LoadingState />
             ) : keyQuery.isError ? (
               <div className="rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-4 py-10 text-center text-sm text-[var(--color-danger)]">
-                密钥列表加载失败，请确认当前账号具备管理员权限
+                {(keyQuery.error as { status?: number })?.status === 403
+                  ? '密钥列表加载失败：需要管理员权限'
+                  : '密钥列表加载失败，请稍后重试'}
               </div>
             ) : keys.length ? (
               <div className="space-y-2">
@@ -275,7 +283,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
                             </span>
                           </div>
                           <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
-                            创建 {fmt(key.createdAt)} · 最近使用 {fmt(key.lastUsedAt)}
+                            创建 {formatDateTime(key.createdAt, { fallback: '时间未知' })} · 最近使用 {formatDateTime(key.lastUsedAt, { fallback: '从未' })}
                           </div>
                         </div>
                         {!revoked && (

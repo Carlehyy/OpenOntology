@@ -1,16 +1,16 @@
 // 事件登记域共享的展示元件与格式化助手：列表页与详情抽屉共用，保持唯一事实源。
 
+import { formatDateTime } from '@/utils/datetime'
+
 export const PALETTE = {
   blue: '#3B82F6', teal: '#5EEAD4', gold: '#FCD34D', orange: '#FDBA74',
   red: '#FB7185',
 }
 
+// 后端所有时间列均为 naive UTC 序列化（无 Z 后缀），必须经 parseServerTime
+// 补 UTC 语义后再展示，直接 new Date 会按本地时区解析、上海慢 8 小时（UX 评审 A1）。
 export function fmt(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return formatDateTime(iso)
 }
 
 // ─── 级别标签 ────────────────────────────────────────────

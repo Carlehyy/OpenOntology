@@ -175,12 +175,21 @@ test('事件登记列表与编辑附件流程符合交互要求', async ({ page 
 
   await page.getByRole('button', { name: '登记事件', exact: true }).click()
   const createDialog = page.getByRole('dialog', { name: '登记事件' })
+  // 关联本体空值经哨兵渲染为可见的「（不关联本体）」选项（UX 评审 4.4）
+  await expect(createDialog.getByText('（不关联本体）')).toBeVisible()
+  await expect(createDialog.getByLabel('事件标题', { exact: false })).toHaveAttribute('maxlength', '500')
   // MYW-42 优化点4：必填校验一次报齐全部缺失项，无需多次提交试错。
   await createDialog.getByRole('button', { name: '登记', exact: true }).click()
   await expect(
     createDialog.getByText('请完善必填项：事件标题、事件类型、详细描述'),
   ).toBeVisible()
+  // UX 评审 B3：提交后发现缺项的空字段标红并携带 aria-invalid
+  await expect(createDialog.getByLabel('事件标题', { exact: false })).toHaveAttribute('aria-invalid', 'true')
+  await expect(createDialog.getByLabel('事件类型', { exact: false })).toHaveAttribute('aria-invalid', 'true')
+  await expect(createDialog.getByLabel('详细描述', { exact: false })).toHaveAttribute('aria-invalid', 'true')
+  // 任一必填项输入后聚合告警即收起
   await createDialog.getByLabel('事件标题', { exact: false }).fill('新事件')
+  await expect(createDialog.getByText('请完善必填项')).toBeHidden()
   await createDialog.getByLabel('事件类型', { exact: false }).fill('业务异常')
   await createDialog
     .getByLabel('详细描述', { exact: false })
