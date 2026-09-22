@@ -11,6 +11,7 @@ import {
   formatNumber,
   normalizeInstanceTypeStats,
   serializeFilters,
+  type InstanceStatsField,
   type InstanceTypeStats,
 } from '../../pages/ontologies/detail/tabs/instanceStatsFormat.ts'
 
@@ -149,5 +150,41 @@ describe('buildCategoryBarOption', () => {
       values: [{ value: true, count: 2 }], otherCount: 0,
     }) as any
     assert.deepEqual(option.yAxis.data, ['是'])
+  })
+
+  it('单字段分布统一品牌单色,不再逐条轮转色板', () => {
+    const field: InstanceStatsField = {
+      name: 'city', label: '所在城市', kind: 'category', coverage: 1,
+      values: [{ value: '杭州', count: 2 }, { value: '上海', count: 1 }],
+      otherCount: 0,
+    }
+    const withoutActive = buildCategoryBarOption(field) as any
+    const styles = withoutActive.series[0].data.map((item: any) => item.itemStyle)
+    assert.ok(styles.every((style: any) => style.color === '#059669'))
+    assert.ok(styles.every((style: any) => style.opacity === 1))
+  })
+
+  it('激活过滤时命中条加重、其余降透明,其他条保持灰显', () => {
+    const option = buildCategoryBarOption({
+      name: 'city', label: '所在城市', kind: 'category', coverage: 1,
+      values: [{ value: '杭州', count: 2 }, { value: '上海', count: 1 }],
+      otherCount: 3,
+    }, ['杭州']) as any
+    const [hangzhou, shanghai, other] = option.series[0].data.map((item: any) => item.itemStyle)
+    assert.equal(hangzhou.color, '#059669')
+    assert.equal(hangzhou.opacity, 1)
+    assert.equal(shanghai.color, '#059669')
+    assert.equal(shanghai.opacity, 0.45)
+    assert.equal(other.color, '#CBD5E1')
+    assert.equal(other.opacity, 0.7)
+  })
+
+  it('激活值为空数组时与未激活同观感(全部满透明度)', () => {
+    const option = buildCategoryBarOption({
+      name: 'city', label: '所在城市', kind: 'category', coverage: 1,
+      values: [{ value: '杭州', count: 2 }],
+      otherCount: 0,
+    }, []) as any
+    assert.equal(option.series[0].data[0].itemStyle.opacity, 1)
   })
 })

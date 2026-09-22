@@ -273,7 +273,11 @@ test('字段值分布条点击施加精确属性过滤并生成 chip', async ({ 
   // 值分布按计数降序：delayed(5) 第一根、ok(3) 第二根
   await clickHorizontalBar(page, fieldCard, 0)
 
-  await expect(page.getByTestId('active-filters')).toContainText('status = delayed')
+  // 激活取值在卡片上给出已过滤提示与取消路径
+  await expect(fieldCard).toContainText('已过滤：delayed')
+  // chip 用列的中文展示名，英文字段名收进 title
+  await expect(page.getByTestId('active-filters')).toContainText('状态 = delayed')
+  await expect(page.getByTestId('active-filters').locator('span[title="status = delayed"]')).toHaveCount(1)
   await expect.poll(() => mock.objectRequests.some(
     url => url.searchParams.get('filters') === '{"status":["delayed"]}',
   )).toBe(true)
@@ -281,4 +285,31 @@ test('字段值分布条点击施加精确属性过滤并生成 chip', async ({ 
   // 再次点击同一条形 = 取消该过滤值
   await clickHorizontalBar(page, fieldCard, 0)
   await expect(page.getByTestId('active-filters')).toHaveCount(0)
+})
+
+test('图表过滤联动后实例浏览器标题锚定在吸顶头下方', async ({ page }) => {
+  await mockInstanceOverview(page)
+  await page.goto(`/#/ontologies/${ONTOLOGY_ID}?tab=data`, { waitUntil: 'domcontentloaded' })
+
+  const fieldCard = page.getByTestId('profile-field-status')
+  await expect(fieldCard.locator('svg').last()).toBeVisible()
+  // 点击前 helper 会把图表滚到视口中央(画像区在页面底部),联动滚动不平凡
+  await clickHorizontalBar(page, fieldCard, 0)
+  await expect(page.getByTestId('active-filters')).toBeVisible()
+
+  // 等平滑滚动落地:标题行包围盒连续两帧不动
+  const header = page.getByTestId('instance-data-header')
+  let anchor = await header.boundingBox()
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await page.waitForTimeout(120)
+    const next = await header.boundingBox()
+    const settled = anchor && next && Math.abs(next.y - anchor.y) < 1
+    anchor = next
+    if (settled) break
+  }
+  // 契约:锚定后浏览器标题(含搜索框)完整露出在吸顶头下沿之下,不被遮挡
+  const sticky = await page.getByTestId('ontology-detail-header').boundingBox()
+  expect(anchor).not.toBeNull()
+  expect(sticky).not.toBeNull()
+  expect(anchor!.y).toBeGreaterThanOrEqual(sticky!.y + sticky!.height - 2)
 })

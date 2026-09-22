@@ -34,7 +34,7 @@ import type {
   SchemaProperty,
   Selection,
 } from './instanceBrowserTypes'
-import { formatInstanceDateTime, instanceSourceLabel } from './instanceValueDisplay'
+import { columnDisplayLabel, formatInstanceDateTime, instanceSourceLabel } from './instanceValueDisplay'
 import {
   formatFilterValue,
   serializeFilters,
@@ -129,7 +129,7 @@ export default function FormalInstancesView({
   const [showAdoptConfirm, setShowAdoptConfirm] = useState(false)
   const [drawerRow, setDrawerRow] = useState<ObjectRow | null>(null)
   const tableScrollRef = useRef<HTMLDivElement>(null)
-  const browserRef = useRef<HTMLDivElement>(null)
+  const browserHeaderRef = useRef<HTMLElement>(null)
   const [scrollHint, setScrollHint] = useState({ left: false, right: false })
 
   const catalogQuery = useQuery<InstanceCatalog>({
@@ -294,10 +294,14 @@ export default function FormalInstancesView({
     setFilters({})
     setSourceFilter(null)
     setDrawerRow(null)
+    // 搜索词是自动填的,必须让标题和搜索框进入视口,用户才知道为什么只剩一条。
+    scrollToBrowser()
   }
 
+  // 锚定到实例浏览器的标题行(而非表格):scroll-mt 预留吸顶头高度,
+  // 保证跳转/联动后“当前类型 + 搜索框 + 过滤条”可见,不被吸顶头压住。
   const scrollToBrowser = useCallback(() => {
-    browserRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    browserHeaderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [])
 
   // 图表联动：点击字段值分布条 = 精确属性过滤（toggle）；点击来源 = 来源过滤。
@@ -424,7 +428,6 @@ export default function FormalInstancesView({
             md 起用 2×2 共享网格行：左右头部同行（分割线恒对齐，过滤 chips 撑高时也不错位），
             目录与表格同行（目录撑满行高、竖向分割线贯通到底）。移动端正文顺序即堆叠顺序。 */}
         <div
-          ref={browserRef}
           className="grid shrink-0 grid-cols-1 rounded-xl border border-border md:grid-cols-[minmax(230px,280px)_minmax(0,1fr)] md:grid-rows-[auto_minmax(0,1fr)]"
         >
       <div className="flex items-center rounded-t-xl border-b border-border bg-muted px-4 py-3.5 md:col-start-1 md:row-start-1 md:rounded-tr-none md:border-r">
@@ -486,7 +489,13 @@ export default function FormalInstancesView({
           )}
       </nav>
 
-      <header data-testid="instance-data-header" className="border-b border-border bg-card px-5 py-3.5 md:col-start-2 md:row-start-1 md:rounded-tr-xl">
+      <header
+        ref={browserHeaderRef}
+        data-testid="instance-data-header"
+        // 吸顶头(面包屑+页签,约 80px)下沿之外再留 16px:scrollIntoView 锚定
+        // 本行时标题/搜索框完整落在吸顶头下方。
+        className="scroll-mt-24 border-b border-border bg-card px-5 py-3.5 md:col-start-2 md:row-start-1 md:rounded-tr-xl"
+      >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
@@ -525,9 +534,24 @@ export default function FormalInstancesView({
                 <input
                   value={draftKeyword}
                   onChange={event => setDraftKeyword(event.target.value)}
+                  aria-label="搜索实例"
                   placeholder={selection?.kind === 'link' ? '搜索关系端点或属性值' : '搜索外部 ID 或属性值'}
                   className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 />
+                {/* 清除收进输入框内:外层按钮条件渲染会让“查询”横向位移,
+                    连续操作时第二次点击落点会漂移到“清除”上。
+                    aria-label 显式命名,避免被 label 子树内的按钮污染输入框可访问名。 */}
+                {draftKeyword && (
+                  <button
+                    type="button"
+                    onClick={clearSearch}
+                    aria-label="清除搜索"
+                    title="清除搜索条件"
+                    className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[var(--color-text-tertiary)] transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
               </label>
               <button
                 type="submit"
@@ -535,15 +559,6 @@ export default function FormalInstancesView({
               >
                 <Search size={12} /> 查询
               </button>
-              {keyword && (
-                <button
-                  type="button"
-                  onClick={clearSearch}
-                  className="h-8 shrink-0 rounded-lg px-2.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  清除
-                </button>
-              )}
             </form>
           </div>
           {hasActiveFilters && (
@@ -559,7 +574,8 @@ export default function FormalInstancesView({
                 values.map(value => (
                   <FilterChip
                     key={`${name}=${String(value)}`}
-                    label={`${name} = ${formatFilterValue(value)}`}
+                    label={`${columnDisplayLabel(name, columns)} = ${formatFilterValue(value)}`}
+                    title={`${name} = ${formatFilterValue(value)}`}
                     onRemove={() => toggleFilterValue(name, value)}
                   />
                 )))
@@ -802,9 +818,12 @@ export default function FormalInstancesView({
   )
 }
 
-function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+function FilterChip({ label, title, onRemove }: { label: string; title?: string; onRemove: () => void }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-brand-line bg-brand-soft px-2 py-0.5 text-[11px] text-brand-ink">
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-brand-line bg-brand-soft px-2 py-0.5 text-[11px] text-brand-ink"
+      title={title}
+    >
       {label}
       <button
         type="button"
@@ -967,7 +986,7 @@ function DatasetAssociationPopover({ datasets }: { datasets: AssociatedDataset[]
         }`}
       >
         <Database size={12} />
-        关联{datasets.length}个数据集
+        关联 {datasets.length} 个数据集
       </button>
 
       {open && (

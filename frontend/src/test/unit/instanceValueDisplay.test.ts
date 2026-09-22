@@ -2,11 +2,46 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  columnDisplayLabel,
+  formatInstanceDateTime,
+  instanceFactBodyText,
   instanceFactKindLabel,
+  instanceFactSourceLabel,
   instanceSourceLabel,
   resolveInstanceValueDisplay,
 } from '../../pages/ontologies/detail/tabs/instanceValueDisplay.ts'
 
+// UTC 回归锁必须在非 UTC 时区下才有效:本地时区=UTC 时"按本地解析"与
+// "按 UTC 解析"观测不可区分,CI 托管 runner 默认恰是 UTC。钉住上海时区。
+process.env.TZ = 'Asia/Shanghai'
+
+describe('formatInstanceDateTime', () => {
+  it('[canary] TZ 已固定为上海,否则下方精确断言会静默失去保护', () => {
+    assert.equal(new Date('2026-09-13T15:06:56Z').getHours(), 23)
+  })
+
+  it('无时区 ISO 串按 UTC 解析,上海时区渲染出 +8h 钟点', () => {
+    // 回归锁:后端序列化的 naive 串语义是 UTC,直接本地解析会慢 8 小时,
+    // 与事实历史(recordedAt 带 Z)出现两个钟点。
+    assert.equal(formatInstanceDateTime('2026-09-13T15:06:56'), '2026-09-13 23:06:56')
+    assert.equal(formatInstanceDateTime('2026-09-13T15:06:56Z'), '2026-09-13 23:06:56')
+  })
+
+  it('空格分隔的无时区串同样按 UTC 补齐', () => {
+    assert.equal(formatInstanceDateTime('2026-09-13 15:06:56'), '2026-09-13 23:06:56')
+  })
+
+  it('显式时区偏移按原样解析(与对应 UTC 时刻渲染一致)', () => {
+    assert.equal(
+      formatInstanceDateTime('2026-09-13T23:06:56+08:00'),
+      '2026-09-13 23:06:56',
+    )
+  })
+
+  it('非法输入原样返回', () => {
+    assert.equal(formatInstanceDateTime('not-a-date'), 'not-a-date')
+  })
+})
 
 describe('resolveInstanceValueDisplay', () => {
   it('renders empty values as empty kind', () => {
@@ -101,5 +136,52 @@ describe('instanceFactKindLabel', () => {
 
   it('falls back to raw kind for unknown values', () => {
     assert.equal(instanceFactKindLabel('audit'), 'audit')
+  })
+})
+
+describe('instanceFactSourceLabel', () => {
+  it('协议式来源与治理区共用翻译表,不裸露 URI', () => {
+    assert.equal(instanceFactSourceLabel('ontology-release://7fac5392-3660-45c0-b0e9-d3c020cfe7fa'), '发布快照')
+    assert.equal(instanceFactSourceLabel('action://mark_risk_review'), '动作 · mark_risk_review')
+    assert.equal(instanceFactSourceLabel('fn:risk_score'), '函数 · risk_score')
+    assert.equal(instanceFactSourceLabel('user://admin'), 'admin · 人工')
+  })
+
+  it('已知实例来源沿用本页口径,未知来源保留原文', () => {
+    assert.equal(instanceFactSourceLabel('pipeline'), '管道灌入')
+    assert.equal(instanceFactSourceLabel('custom-etl'), 'custom-etl')
+    assert.equal(instanceFactSourceLabel(''), '来源未知')
+    assert.equal(instanceFactSourceLabel(null), '来源未知')
+  })
+})
+
+describe('columnDisplayLabel', () => {
+  const columns = [
+    { name: 'city', label: '所在城市' },
+    { name: 'cust_name', label: '客户名称' },
+  ]
+
+  it('事实属性行与过滤 chip 共用列的中文展示名', () => {
+    assert.equal(columnDisplayLabel('city', columns), '所在城市')
+    assert.equal(columnDisplayLabel('cust_name', columns), '客户名称')
+  })
+
+  it('目录外的历史字段保留英文字段名', () => {
+    assert.equal(columnDisplayLabel('legacy_field', columns), 'legacy_field')
+    assert.equal(columnDisplayLabel('city', []), 'city')
+  })
+})
+
+describe('instanceFactBodyText', () => {
+  it('存在性事实渲染为人话文案,不再裸露 exists → true', () => {
+    assert.equal(instanceFactBodyText({ kind: 'object', present: true }), '实例创建')
+    assert.equal(instanceFactBodyText({ kind: 'object', present: false }), '实例已删除')
+    assert.equal(instanceFactBodyText({ kind: 'object' }), '实例创建')
+  })
+
+  it('非存在性事实返回 null,按属性行渲染', () => {
+    assert.equal(instanceFactBodyText({ kind: 'property', present: true }), null)
+    assert.equal(instanceFactBodyText({ kind: '', present: true }), null)
+    assert.equal(instanceFactBodyText({ kind: undefined, present: true }), null)
   })
 })

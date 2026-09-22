@@ -210,10 +210,17 @@ export function buildTrendOption(stats: InstanceTypeStats): EChartsOption {
   }
 }
 
-/** 字段值分布横向条形图：top 值可点击（payload 带 filterValue），"其他"条灰显不可点。 */
-export function buildCategoryBarOption(field: InstanceStatsField): EChartsOption {
+/** 字段值分布横向条形图：top 值可点击（payload 带 filterValue），“其他”条灰显不可点。
+ *  单字段分布是单序列数据，统一品牌单色；被过滤选中的取值加重、其余降透明，
+ *  颜色不承载第二维语义（逐条轮转色板会让用户误读出类别含义）。 */
+export function buildCategoryBarOption(
+  field: InstanceStatsField,
+  activeValues?: FilterValue[],
+): EChartsOption {
   const values = field.values ?? []
   const otherCount = field.otherCount ?? 0
+  const active = activeValues ?? []
+  const hasActive = active.length > 0
   const rows = [
     ...values.map(item => ({
       name: formatFilterValue(item.value),
@@ -240,13 +247,13 @@ export function buildCategoryBarOption(field: InstanceStatsField): EChartsOption
       barMaxWidth: 12,
       itemStyle: { borderRadius: [0, 5, 5, 0] },
       label: { show: true, position: 'right', color: CHART_TEXT, fontSize: 10 },
-      data: rows.map((row, index) => ({
+      data: rows.map(row => ({
         value: row.value,
         name: row.name,
         filterValue: row.filterValue,
         itemStyle: {
-          color: row.other ? '#CBD5E1' : CHART_SERIES_PALETTE[index % CHART_SERIES_PALETTE.length],
-          opacity: row.other ? 0.7 : 1,
+          color: row.other ? '#CBD5E1' : CHART_TEAL,
+          opacity: row.other ? 0.7 : hasActive && !active.includes(row.filterValue) ? 0.45 : 1,
         },
       })),
     }],

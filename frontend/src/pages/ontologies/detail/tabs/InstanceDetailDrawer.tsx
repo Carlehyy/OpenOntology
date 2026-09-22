@@ -12,7 +12,13 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import type { DataColumn, InstanceFact, ObjectRow, ObjectTypeNode } from './instanceBrowserTypes'
-import { formatInstanceDateTime, instanceFactKindLabel, instanceSourceLabel } from './instanceValueDisplay'
+import {
+  columnDisplayLabel,
+  formatInstanceDateTime,
+  instanceFactBodyText,
+  instanceFactKindLabel,
+  instanceFactSourceLabel,
+} from './instanceValueDisplay'
 import { FullValue, SourceChip } from './InstanceValueText'
 
 const FACTS_PAGE_SIZE = 20
@@ -132,10 +138,10 @@ export default function InstanceDetailDrawer({
           </section>
 
           <section aria-label="事实历史" className="mt-5">
-            <h3 className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
-              事实历史
-              <span className="ml-1.5 font-normal normal-case tracking-normal text-[var(--color-text-tertiary)]">属性级变更,时间倒序</span>
-            </h3>
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <h3 className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">事实历史</h3>
+              <p className="text-[10px] text-[var(--color-text-tertiary)]">属性级变更 · 时间倒序</p>
+            </div>
             {factsQuery.isLoading ? (
               <p className="flex items-center gap-2 py-4 text-xs text-[var(--color-text-tertiary)]">
                 <Loader2 size={13} className="animate-spin text-brand-ink" /> 正在加载事实历史…
@@ -167,11 +173,29 @@ export default function InstanceDetailDrawer({
                         </time>
                       </div>
                       <p className="mt-1.5 break-all text-xs leading-5 text-foreground">
-                        <span className="font-mono text-[11px] text-muted-foreground">{fact.propertyName}</span>
-                        {' → '}
-                        {fact.present === false ? '—（已删除）' : factValueText(fact.value)}
+                        {instanceFactBodyText(fact) ?? (
+                          <>
+                            <span
+                              className="font-mono text-[11px] text-muted-foreground"
+                              title={fact.propertyName}
+                            >
+                              {columnDisplayLabel(fact.propertyName, columns)}
+                            </span>
+                            {' → '}
+                            {fact.present === false ? '—（已删除）' : factValueText(fact.value)}
+                          </>
+                        )}
                       </p>
-                      <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">来源:{instanceSourceLabel(fact.source)}</p>
+                      <p
+                        className="mt-1 text-[10px] text-[var(--color-text-tertiary)]"
+                        title={
+                          fact.source && instanceFactSourceLabel(fact.source) !== fact.source.trim()
+                            ? fact.source
+                            : undefined
+                        }
+                      >
+                        来源:{instanceFactSourceLabel(fact.source)}
+                      </p>
                     </li>
                   ))}
                 </ul>

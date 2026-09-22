@@ -49,13 +49,21 @@ export function formatDecisionValue(value: unknown): DecisionValue | null {
   return null
 }
 
-/** 事实来源可读化：把协议式 source 翻译成中文表达，原始值由调用方留在 title。 */
-export function formatFactSource(source: string | null | undefined): string {
-  if (!source) return '—'
+/** 协议式事实来源（user://、action://、ontology-release://、fn:）的可读化。
+ *  命中返回译文，非协议来源返回 null，由调用方走各自域的来源口径。 */
+export function formatProtocolFactSource(source: string): string | null {
   if (source.startsWith('user://')) return `${source.slice('user://'.length)} · 人工`
   if (source.startsWith('action://')) return `动作 · ${source.slice('action://'.length)}`
   if (source.startsWith('ontology-release://')) return '发布快照'
   if (source.startsWith('fn:')) return `函数 · ${source.slice('fn:'.length)}`
+  return null
+}
+
+/** 事实来源可读化：把协议式 source 翻译成中文表达，原始值由调用方留在 title。 */
+export function formatFactSource(source: string | null | undefined): string {
+  if (!source) return '—'
+  const protocol = formatProtocolFactSource(source)
+  if (protocol !== null) return protocol
   if (source === 'pipeline') return '数据管道'
   return source
 }

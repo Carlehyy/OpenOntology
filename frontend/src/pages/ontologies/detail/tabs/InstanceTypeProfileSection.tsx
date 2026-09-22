@@ -88,6 +88,11 @@ export default function InstanceTypeProfileSection({
             共 <span className="font-semibold tabular-nums text-foreground">{formatNumber(stats.total)}</span> 条
           </span>
         )}
+        {stats && (
+          <span className="text-[11px] text-[var(--color-text-tertiary)]" title="分布与趋势始终统计该类型的全部实例">
+            分布是该类型全量，不随上方表格过滤变化
+          </span>
+        )}
         {stats?.truncated && (
           <span className="rounded bg-[var(--color-warning-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-warning)]"
             title="数据量较大，分布统计基于前 20000 条采样">
@@ -152,7 +157,7 @@ export default function InstanceTypeProfileSection({
               bodyClassName="min-h-24"
             >
               <ReactECharts
-                option={buildCategoryBarOption(field)}
+                option={buildCategoryBarOption(field, activeFilters[field.name])}
                 style={{
                   height: `${Math.max(96, ((field.values?.length ?? 0) + (field.otherCount ? 1 : 0)) * 30 + 16)}px`,
                   width: '100%',

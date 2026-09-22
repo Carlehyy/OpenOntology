@@ -207,6 +207,16 @@ async function mockInstanceInteractions(page: Page) {
     if (url.pathname.endsWith('/instances/row-order-1/facts')) {
       return ok([
         {
+          id: 'fact-0',
+          instanceId: 'row-order-1',
+          propertyName: 'exists',
+          value: true,
+          present: true,
+          kind: 'object',
+          source: 'ontology-release://7fac5392-3660-45c0-b0e9-d3c020cfe7fa',
+          recordedAt: '2026-07-30T14:33:25Z',
+        },
+        {
           id: 'fact-1',
           instanceId: 'row-order-1',
           propertyName: 'note',
@@ -278,6 +288,12 @@ test('点击对象行打开实例详情抽屉并加载事实历史', async ({ pa
   await expect(facts.getByText('加急')).toBeVisible()
   await expect(facts.getByText('派生', { exact: true })).toBeVisible()
   await expect(facts.getByText('risk_score', { exact: true })).toBeVisible()
+  // 事实属性行用列的中文展示名;目录外字段(如 risk_score)保留原名
+  await expect(facts.getByText('备注', { exact: true })).toBeVisible()
+  await expect(facts.getByText('来源:管道灌入')).toBeVisible()
+  // 存在性事实说人话,发布回放来源不裸露协议 URI
+  await expect(facts.getByText('实例创建', { exact: true })).toBeVisible()
+  await expect(facts.getByText('来源:发布快照')).toBeVisible()
 
   await page.keyboard.press('Escape')
   await expect(page.getByTestId('instance-detail-drawer')).toHaveCount(0)
@@ -307,6 +323,27 @@ test('搜索无结果时空态提供一键清除', async ({ page }) => {
   await expect(page.getByText('没有匹配的实例数据')).toBeVisible()
   await page.getByRole('button', { name: '清除查询条件' }).click()
   await expect(page.locator('tbody').getByText('O-1001')).toBeVisible()
+})
+
+test('搜索清除收进输入框内，查询按钮位置不再漂移', async ({ page }) => {
+  await mockInstanceInteractions(page)
+  await page.goto('/#/ontologies/ontology-trade?tab=data', { waitUntil: 'domcontentloaded' })
+
+  const input = page.getByPlaceholder('搜索外部 ID 或属性值')
+  // exact 必须开:默认子串匹配会误中「清除查询条件」「全部清除」
+  const clear = page.getByRole('button', { name: '清除搜索', exact: true })
+
+  await expect(clear).toHaveCount(0)
+  await input.fill('O-10')
+  await expect(clear).toBeVisible()
+
+  await page.getByRole('button', { name: '查询' }).click()
+  await expect(page.locator('tbody').getByText('O-1001')).toBeVisible()
+
+  await clear.click()
+  await expect(input).toHaveValue('')
+  await expect(clear).toHaveCount(0)
+  await expect(page.locator('tbody').getByText('O-1002')).toBeVisible()
 })
 
 test('未发布本体展示旅程引导而非报错死胡同', async ({ page }) => {

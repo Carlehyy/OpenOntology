@@ -161,7 +161,7 @@ test('实例数据中的关联数据集可跳转到资产湖并定位成品数�
   await expect.poll(() => imageArray.evaluate(element => element.getBoundingClientRect().height))
     .toBeLessThanOrEqual(21)
 
-  await page.getByRole('button', { name: '关联1个数据集' }).click()
+  await page.getByRole('button', { name: '关联 1 个数据集' }).click()
   await page.getByRole('link', { name: '在数据资产湖中查看电商本体_商品' }).click()
 
   await expect(page).toHaveURL(/#\/data\/structured\?tab=curated&dataset=dataset-products/)
