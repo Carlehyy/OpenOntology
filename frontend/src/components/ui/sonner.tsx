@@ -39,6 +39,9 @@ const Toaster = ({ ...props }: ToasterProps) => {
         classNames: {
           toast:
             'group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg',
+          // 成功态给语义浅底：默认 bg-background 与页面底色同值，提示会被当成没发生。
+          // toast 键的 bg-background 在编译产物中靠后、同特异性会级联胜出，需 ! 提权
+          success: 'group-[.toaster]:!bg-[var(--color-success-bg)]',
           description: 'group-[.toast]:text-muted-foreground',
           actionButton:
             'group-[.toast]:bg-primary group-[.toast]:text-primary-foreground',
