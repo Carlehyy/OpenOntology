@@ -96,6 +96,37 @@ def test_event_list_binds_snake_case_filters_and_page_size(
     assert [item["eventNo"] for item in page_data["items"]] == ["EVT-B-API"]
 
 
+def test_event_list_keyword_search_covers_reporter_name(client, auth_headers, db):
+    """UX 评审 B7：搜索框承诺「上报人」，列表关键字必须能命中 reporter_name。"""
+    def event_with_reporter(no: str, reporter: str | None) -> RegisteredEvent:
+        return RegisteredEvent(
+            event_no=no, title=no, severity="info",
+            recorded_at=datetime(2026, 7, 18, 1, 0),
+            source_type=event_models.SOURCE_PLATFORM,
+            status=event_models.STATUS_ACTIVE,
+            reporter_name=reporter,
+        )
+
+    db.add_all([
+        event_with_reporter("EVT-R-ZHANG", "张三"),
+        event_with_reporter("EVT-R-LISI", "lisi"),
+        event_with_reporter("EVT-R-NONE", None),
+    ])
+    db.commit()
+
+    by_reporter_cn = client.get(
+        "/api/v2/events", params={"q": "张三"}, headers=auth_headers,
+    )
+    assert by_reporter_cn.status_code == 200
+    assert [item["eventNo"] for item in by_reporter_cn.json()["data"]["items"]] == ["EVT-R-ZHANG"]
+
+    by_reporter_partial = client.get(
+        "/api/v2/events", params={"q": "lisi"}, headers=auth_headers,
+    )
+    assert by_reporter_partial.status_code == 200
+    assert [item["eventNo"] for item in by_reporter_partial.json()["data"]["items"]] == ["EVT-R-LISI"]
+
+
 def test_stats_severity_distribution_and_trend_cover_all_statuses(
     client, auth_headers, db, monkeypatch,
 ):

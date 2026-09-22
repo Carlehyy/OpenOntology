@@ -93,7 +93,7 @@ _archive_name = attachment_service.archive_name
 
 @router.get("")
 def list_events(
-    q: Optional[str] = Query(None, description="标题/描述/编号模糊搜索"),
+    q: Optional[str] = Query(None, description="标题/描述/编号/上报人模糊搜索"),
     source_type: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
     severity: Optional[str] = Query(None),
@@ -160,7 +160,7 @@ def _csv_safe(value) -> str:
 
 @router.get("/export")
 def export_events(
-    q: Optional[str] = Query(None, description="标题/描述/编号模糊搜索"),
+    q: Optional[str] = Query(None, description="标题/描述/编号/上报人模糊搜索"),
     source_type: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
     severity: Optional[str] = Query(None),

@@ -93,6 +93,7 @@ def filtered_event_query(
             RegisteredEvent.title.ilike(like)
             | RegisteredEvent.description.ilike(like)
             | RegisteredEvent.event_no.ilike(like)
+            | RegisteredEvent.reporter_name.ilike(like)
         )
     return query
 
