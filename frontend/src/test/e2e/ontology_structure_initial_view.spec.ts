@@ -2,7 +2,7 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 
 const ontologyId = 'ontology-structure-initial-view'
 
-async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: boolean; holdLayoutResponse?: boolean } = {}) {
+async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: boolean; holdLayoutResponse?: boolean; canvasLayout?: Record<string, { x: number; y: number }> } = {}) {
   const includeUxFixtures = options.includeUxFixtures === true
   const holdLayoutResponse = options.holdLayoutResponse === true
   await page.addInitScript(() => {
@@ -102,10 +102,22 @@ async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: 
           id: 'function-validate-order',
           name: 'validate_order',
           displayName: '校验订单',
-          functionType: 'validation',
-          language: 'python',
+          functionType: 'object',
+          language: 'expression',
+          returnType: 'boolean',
+          body: 'order.order_no != null',
           enabled: true,
           targetObjectTypeId: 'object-order',
+        }, {
+          id: 'function-derive-customer-level',
+          name: 'derive_customer_level',
+          displayName: '派生客户等级',
+          functionType: 'query',
+          language: 'expression',
+          returnType: 'string',
+          body: '',
+          enabled: false,
+          targetObjectTypeId: 'object-customer',
         }] : [],
         sentinels: includeUxFixtures ? [{
           id: 'sentinel-public-order',
@@ -126,7 +138,7 @@ async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: 
           enabled: true,
           origin: 'release_builtin',
         }] : [],
-        canvasLayout: {},
+        canvasLayout: options.canvasLayout || {},
       })
     }
     if (path === `/api/v2/formal/ontologies/${ontologyId}/agent/dynamic-sentinels`) {
@@ -403,6 +415,59 @@ test('结构工具栏使用友好层级名称、完整下拉文案并在输入�
   await expect(dynamicBadge).toHaveText(/✦\s*动态哨兵/)
   expect(await publicBadge.evaluate(element => element.previousElementSibling?.textContent)).toBe('公共订单监控')
   expect(await dynamicBadge.evaluate(element => element.previousElementSibling?.textContent)).toBe('动态订单监控')
+
+  await page.getByLabel('关闭哨兵规则选择').click()
+  await functionTrigger.click()
+  const functionDialog = page.getByRole('dialog', { name: '选择计算函数' })
+  await expect(functionDialog).toBeVisible()
+  const functionOptions = functionDialog.getByRole('option')
+  await expect(functionOptions).toHaveCount(2)
+  // 副标题把契约字段翻译成用户语言，不再裸露 `object · expression` 枚举。
+  await expect(functionOptions.nth(0)).toContainText('校验订单')
+  await expect(functionOptions.nth(0)).toContainText('校验表达式')
+  await expect(functionOptions.nth(0)).not.toContainText('未启用')
+  await expect(functionOptions.nth(1)).toContainText('派生客户等级')
+  await expect(functionOptions.nth(1)).toContainText('派生表达式 · 未启用')
+})
+
+test('点击被右缘面板遮挡的节点时视口只平移让位而不改缩放', async ({ page }) => {
+  await mockOntologyStructure(page, {
+    includeUxFixtures: true,
+    // 两个对象横向拉开足够宽：初始适配后「客户」落在画布右缘，即详情面板将覆盖的区域。
+    canvasLayout: { 'l1:object-order': { x: 0, y: 0 }, 'l1:object-customer': { x: 2400, y: 0 } },
+  })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/ontologies/' + ontologyId, { waitUntil: 'domcontentloaded' })
+  await page.getByRole('button', { name: '本体结构', exact: true }).click()
+  const customer = page.getByTestId('structure-node-object').filter({ hasText: '客户' })
+  await expect(customer).toBeVisible()
+  // 等待初始适配稳定
+  await page.waitForTimeout(750)
+
+  const canvasBox = await page.locator('.react-flow').boundingBox()
+  const before = await customer.boundingBox()
+  expect(canvasBox).toBeTruthy()
+  expect(before).toBeTruthy()
+  // 前置条件：客户节点确实落在右缘遮挡区（面板 340px + 边距）
+  expect(before!.x + before!.width).toBeGreaterThan(canvasBox!.x + canvasBox!.width - 380)
+  const transformBefore = await page.evaluate(() =>
+    document.querySelector<HTMLElement>('.react-flow__viewport')?.style.transform || '')
+
+  await customer.click()
+  await expect(page.getByTestId('structure-detail-panel')).toBeVisible()
+  // 让位平移动画（280ms）落定
+  await page.waitForTimeout(450)
+
+  const panelBox = await page.getByTestId('structure-detail-panel').boundingBox()
+  const after = await customer.boundingBox()
+  expect(panelBox).toBeTruthy()
+  expect(after).toBeTruthy()
+  // 节点完整让到面板左侧，不再被遮挡
+  expect(after!.x + after!.width).toBeLessThan(panelBox!.x)
+  // 只平移：scale 分量保持不变
+  const transformAfter = await page.evaluate(() =>
+    document.querySelector<HTMLElement>('.react-flow__viewport')?.style.transform || '')
+  expect(transformAfter.replace(/translate\([^)]*\)/, '')).toBe(transformBefore.replace(/translate\([^)]*\)/, ''))
 })
 
 test('拖拽节点后自动保存提示按 3→2→1 倒计时并复位', async ({ page }) => {

@@ -8,6 +8,7 @@ import { toast } from 'sonner'
 import { Download, Loader2, ShieldCheck, X } from 'lucide-react'
 import { sentinelApi } from '@/api/sentinelApi'
 import {
+  conditionRowsLabel,
   sentinelActionSummaries,
   sentinelOriginLabel,
   sentinelPatternSummary,
@@ -52,6 +53,7 @@ export default function SentinelDetailPanel({
   const [exporting, setExporting] = useState(false)
   const label = sentinel.displayName || sentinel.name
   const actions = sentinelActionSummaries(workspace, sentinel)
+  const conditionRowsText = conditionRowsLabel(sentinel)
 
   const objectLabel = (objectTypeId: string) => {
     const item = workspace.objectTypes.find(
@@ -170,10 +172,9 @@ export default function SentinelDetailPanel({
             )}
             <dl>
               <Field label="条件组合" value={sentinel.conditionLogic || 'and'} />
-              <Field
-                label="条件行"
-                value={`${sentinel.conditionRows?.length || 0} 条（UI 回显形态，运行期权威是上方表达式）`}
-              />
+              {conditionRowsText !== null && (
+                <Field label="条件行" value={conditionRowsText} />
+              )}
               <Field label="主别名" value={sentinel.primaryAlias} />
             </dl>
           </div>

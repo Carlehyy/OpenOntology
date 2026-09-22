@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Background, BackgroundVariant, MiniMap, ReactFlow, ReactFlowProvider,
+  Background, BackgroundVariant, Controls, MiniMap, ReactFlow, ReactFlowProvider,
   applyNodeChanges, useReactFlow, type NodeChange, type OnNodeDrag,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
@@ -20,7 +20,8 @@ import SentinelDetailPanel from './SentinelDetailPanel'
 import StructureDocDialog from './StructureDocDialog'
 import { StructureGraphEdge, StructureGraphNode } from './StructureGraphElements'
 import {
-  actionNodeId, buildStructureGraph, functionUsage, propertyNodeId,
+  actionNodeId, buildStructureGraph, computePanelYieldViewport, functionDependencyMeta,
+  functionUsage, propertyNodeId,
   relationEdgeId, routeStructureEdges, sentinelUsage,
   type HighlightSet, type PublishedWorkspace, type StructureEdge,
   type StructureNode, type StructureSentinel,
@@ -435,7 +436,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   ontologyName?: string
   workspace: PublishedWorkspace
 }) {
-  const { fitView } = useReactFlow<StructureNode, StructureEdge>()
+  const { fitView, getNodes, getViewport, setViewport } = useReactFlow<StructureNode, StructureEdge>()
   const [level, setLevel] = useState<Level>(1)
   const builtGraph = useMemo(() => buildStructureGraph(workspace, level), [level, workspace])
   const [allNodes, setAllNodes] = useState<StructureNode[]>(builtGraph.nodes)
@@ -463,6 +464,11 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   const savedResetTimer = useRef<number | null>(null)
   const saveInFlight = useRef(false)
   const lastFittedGraph = useRef(builtGraph)
+  const canvasRef = useRef<HTMLDivElement>(null)
+  // 哨兵让位平移在定时器/Promise 里迟到执行：sentinelIdRef 识别"清除/换人"，
+  // selectionToken 识别"重复选择同一哨兵"——两者共同让过期让位作废。
+  const sentinelIdRef = useRef('')
+  const selectionToken = useRef(0)
   const toolbarScrollRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const searchResultsRef = useRef<HTMLDivElement>(null)
@@ -518,6 +524,10 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     const timer = window.setTimeout(() => void fitView({ padding: 0.2, minZoom: level === 2 ? 0.34 : 0.35, maxZoom: 0.9 }), 80)
     return () => window.clearTimeout(timer)
   }, [builtGraph, fitView, level])
+
+  useEffect(() => {
+    sentinelIdRef.current = sentinelId
+  }, [sentinelId])
 
   useEffect(() => {
     setDetail(null)
@@ -592,6 +602,24 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
       void flushLayout()
     }
   }, [flushLayout])
+
+  // Esc 关闭画布内浮动面板（节点/关系/哨兵）；焦点在输入框或存在弹层/候选框时，
+  // 先让位给它们自身的 Esc 语义（如搜索框收起候选、选择器关闭）。函数高亮是
+  // 持续性筛选（无面板），不随 Esc/空白退出——由画布摘要条的 × 统一清除
+  // （onPaneClick 同口径）。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || (detail === null && sentinelId === '')) return
+      const target = event.target
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"], [role="dialog"], [role="listbox"]')) return
+      // 弹层/候选框打开但焦点落在 body 时，Esc 同样先归它们，不穿透关掉背后的面板。
+      if (document.querySelector('[role="dialog"], [role="listbox"]')) return
+      setDetail(null)
+      setSentinelId('')
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [detail, sentinelId])
 
   // 窄屏下工具栏可横向滚动但滚动条被隐藏，用右缘渐变提示「后面还有控件」。
   const updateToolbarScrollHint = useCallback(() => {
@@ -691,7 +719,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     label: item.displayName || item.name,
     technicalName: item.name,
     description: item.description,
-    meta: `${item.functionType || 'function'} · ${item.language || 'unknown'}`,
+    meta: functionDependencyMeta(item),
   })), [workspace.functions])
 
   const sentinelOptions = useMemo<DependencyOption[]>(() => workspace.sentinels
@@ -765,13 +793,36 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
       return { ...edge, data: { ...edge.data!, emphasis, dimmed: hasHighlight && !emphasis && !contextualRelation } }
     }), [dependencyHighlight.edges, hasDependency, hasHighlight, level, routedEdges, searchFocus])
 
+  // 详情/哨兵面板是盖在画布右缘的浮层：面板打开时若选中元素落在遮挡区内，
+  // 只平移视口把它让到面板左侧的剩余可视区，保持当前缩放不变——避免再次
+  // fitView 改写用户手上的缩放。几何计算在 structureGraphModel 中纯函数化。
+  const yieldNodesToPanel = useCallback((targets: StructureNode[]) => {
+    const rect = canvasRef.current?.getBoundingClientRect()
+    if (!rect || !targets.length) return
+    const next = computePanelYieldViewport({
+      canvasWidth: rect.width,
+      canvasHeight: rect.height,
+      viewX: getViewport().x,
+      zoom: getViewport().zoom,
+      boxes: targets.map(node => ({
+        x: node.position.x,
+        y: node.position.y,
+        width: node.measured?.width ?? 0,
+        height: node.measured?.height ?? 0,
+      })),
+    })
+    if (!next) return
+    void setViewport(next, { duration: 280 })
+  }, [getViewport, setViewport])
+
   const selectNode = useCallback((node: StructureNode) => {
     // 画布内浮动详情面板同一时间只保留一个：点节点即让位哨兵面板。
     setSentinelId('')
     if (node.data.kind === 'property') setDetail({ kind: 'property', id: node.data.entityId, parentObjectId: node.data.parentObjectId })
     else if (node.data.kind === 'action') setDetail({ kind: 'action', id: node.data.entityId, parentObjectId: node.data.parentObjectId })
     else setDetail({ kind: 'object', id: node.data.entityId })
-  }, [])
+    yieldNodesToPanel([node])
+  }, [yieldNodesToPanel])
 
   const changeLevel = useCallback((nextLevel: Level) => {
     setLevel(nextLevel)
@@ -785,6 +836,9 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
 
   const chooseDependency = useCallback((kind: 'function' | 'sentinel', id: string) => {
     setOpenDependency(null)
+    // 递增令牌：任何一次新的选择都会让上一次排队中的高亮适配/让位平移作废，
+    // 连选同一哨兵也能被区分（sentinelIdRef 只能识别"清除/换人"场景）。
+    const token = ++selectionToken.current
     if (!id) {
       if (kind === 'function') setFunctionId('')
       else setSentinelId('')
@@ -795,8 +849,23 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     setSearchFocus(null)
     if (kind === 'function') { setFunctionId(id); setSentinelId('') }
     else { setSentinelId(id); setFunctionId(''); setDetail(null) }
-    window.setTimeout(() => void fitView({ padding: 0.2, maxZoom: 0.88, duration: 280 }), 30)
-  }, [fitView])
+    // 高亮适配的缩放下限与 L1/L2 切换保持一致（0.34）：不传时会跌回实例下限
+    // 0.2，程序自己把视图打到不可读的小字；30ms 等待 L2 节点完成测量。
+    const alive = () => selectionToken.current === token && (kind !== 'sentinel' || sentinelIdRef.current === id)
+    window.setTimeout(() => {
+      if (!alive()) return
+      const fitted = fitView({ padding: 0.2, minZoom: 0.34, maxZoom: 0.88, duration: 280 })
+      if (kind !== 'sentinel') return
+      // 哨兵面板盖在右缘：等高亮适配真正落定（fitView 的 Promise）后再让位，
+      // 并用实时节点几何（此时已是 L2 坐标），避免闭包里过期的 L1 坐标。
+      const targetIds = new Set(workspace.sentinels
+        .find(item => item.id === id)?.bindings?.map(binding => binding.objectTypeId) || [])
+      void fitted.then(() => {
+        if (!alive()) return
+        yieldNodesToPanel(getNodes().filter(node => targetIds.has(node.id)))
+      }, () => {})
+    }, 30)
+  }, [fitView, getNodes, workspace.sentinels, yieldNodesToPanel])
 
   const saveLabel = saveStatusLabel(saveState, saveCountdown)
 
@@ -864,18 +933,28 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-hidden">
+      <div ref={canvasRef} className="relative min-h-0 flex-1 overflow-hidden">
         <ReactFlow<StructureNode, StructureEdge>
           nodes={visibleNodes} edges={visibleEdges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES}
           onNodesChange={onNodesChange} onNodeDragStart={startNodeDrag} onNodeDrag={dragNodeGroup} onNodeDragStop={stopNodeDrag}
           onNodeClick={(_event, node) => selectNode(node)}
-          onEdgeClick={(_event, edge) => { if (edge.data?.kind === 'relation' && edge.data.entityId) { setSentinelId(''); setDetail({ kind: 'relation', id: edge.data.entityId }) } }}
-          onPaneClick={() => { setDetail(null); setSearchOpen(false) }}
+          onEdgeClick={(_event, edge) => {
+            if (edge.data?.kind === 'relation' && edge.data.entityId) {
+              setSentinelId('')
+              setDetail({ kind: 'relation', id: edge.data.entityId })
+              yieldNodesToPanel(allNodes.filter(node => node.id === edge.source || node.id === edge.target))
+            }
+          }}
+          onPaneClick={() => { setDetail(null); setSentinelId(''); setSearchOpen(false) }}
           nodesDraggable nodesConnectable={false} elementsSelectable minZoom={0.2} maxZoom={2.4}
           fitView fitViewOptions={{ padding: 0.2, minZoom: 0.35, maxZoom: 0.9 }}
           proOptions={{ hideAttribution: true }}
         >
           <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#cbd5e1" />
+          {/* 缩放控件放在左上：右缘被详情/哨兵面板占用，左下是小地图。fit 按钮
+              只读 Controls 自身的 fitViewOptions（不继承 ReactFlow 同名 prop），
+              必须显式传，否则缩放回落会跌到实例下限 0.2。 */}
+          <Controls showInteractive={false} position="top-left" fitViewOptions={{ padding: 0.2, minZoom: 0.35, maxZoom: 0.9 }} />
           <MiniMap pannable zoomable position="bottom-left" style={{ width: 150, height: 96 }} className="!m-3 !rounded-xl !border !border-border !bg-card !shadow-sm" nodeColor={node => node.data?.kind === 'object' ? '#047857' : node.data?.kind === 'property' ? '#8b5cf6' : '#f59e0b'} maskColor="rgba(241,245,249,0.72)" />
         </ReactFlow>
 

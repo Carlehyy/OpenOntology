@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  conditionRowsLabel,
   sentinelActionSummaries,
   sentinelOriginLabel,
   sentinelPatternSummary,
@@ -122,5 +123,25 @@ describe('sentinelActionSummaries', () => {
         requiresApproval: false, available: false, parameterNames: [],
       },
     ])
+  })
+})
+
+describe('conditionRowsLabel：条件行回显文案', () => {
+  it('有条件行时显示条数', () => {
+    assert.equal(
+      conditionRowsLabel(sentinel({ condition: 'a.x > 0', conditionRows: [{}, {}] })),
+      '2 条',
+    )
+  })
+
+  it('0 条且有表达式时说明以表达式为准，不再出现开发者术语', () => {
+    const text = conditionRowsLabel(sentinel({ condition: 'a.x > 0', conditionRows: [] }))
+    assert.equal(text, '未使用条件行，以上方表达式为准')
+    assert.ok(!text!.includes('UI 回显形态'))
+  })
+
+  it('无条件行且无表达式时隐藏该行（返回 null）', () => {
+    assert.equal(conditionRowsLabel(sentinel({ condition: undefined, conditionRows: [] })), null)
+    assert.equal(conditionRowsLabel(sentinel({ condition: undefined })), null)
   })
 })

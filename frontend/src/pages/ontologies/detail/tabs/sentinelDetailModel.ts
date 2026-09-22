@@ -83,3 +83,13 @@ export function sentinelActionSummaries(
     }
   })
 }
+
+/**
+ * 条件行回显文案：有条件行时显示条数；0 条且有表达式时说明以表达式为准；
+ * 既无条件行又无表达式时返回 null（该行隐藏，不渲染空占位）。
+ */
+export function conditionRowsLabel(sentinel: Pick<StructureSentinel, 'condition' | 'conditionRows'>): string | null {
+  const count = sentinel.conditionRows?.length || 0
+  if (count > 0) return `${count} 条`
+  return sentinel.condition ? '未使用条件行，以上方表达式为准' : null
+}

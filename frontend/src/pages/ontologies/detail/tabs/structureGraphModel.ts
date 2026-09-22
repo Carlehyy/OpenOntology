@@ -59,6 +59,19 @@ export interface StructureFunction {
   enabled: boolean
   targetObjectTypeId?: string
   targetActionId?: string
+  /** 快照契约字段：结构页据此区分「校验/派生表达式」并标注未启用（老快照可能缺省）。 */
+  returnType?: string
+  body?: string
+}
+
+/** 计算函数选择器副标题：把契约字段翻译成用户语言，不再裸露 `object · expression` 枚举。 */
+export function functionDependencyMeta(item: StructureFunction): string {
+  const isValidation = item.language === 'expression' && item.returnType === 'boolean'
+  // body 缺省（老快照）视为「未知」而非「停用」，不标未启用；只有明确为空体才标。
+  const disabled = item.enabled === false || (item.body !== undefined && !item.body.trim())
+  return [isValidation ? '校验表达式' : '派生表达式', disabled ? '未启用' : null]
+    .filter(Boolean)
+    .join(' · ')
 }
 
 export interface StructureSentinelPattern {
@@ -763,5 +776,51 @@ export function sentinelUsage(workspace: PublishedWorkspace, sentinelId: string)
   return {
     nodes, edges, contextNodes, primaryNodes,
     summary: `${sentinel.displayName || sentinel.name}：覆盖 ${aliasMap.size} 个对象、${edges.size - propertyNodes.size} 个关系/动作连接、${propertyNodes.size} 个条件属性、${(sentinel.actionIds || []).length} 个动作`,
+  }
+}
+
+// 详情/哨兵面板是盖在画布右缘的 340px 浮层（含 right-3 与间隙共约 364px）。
+export const STRUCTURE_PANEL_RESERVED_WIDTH = 364
+
+export interface PanelYieldBox {
+  /** 流坐标系下的节点包围盒（measured 尚未就绪时宽高按 0 处理）。 */
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface PanelYieldViewport {
+  x: number
+  y: number
+  zoom: number
+}
+
+/**
+ * 面板让位计算：选中元素被右缘浮层面板遮挡时，返回保持当前缩放、把元素
+ * 平移到面板左侧剩余可视区中心的视口；未被遮挡时返回 null（不打扰用户）。
+ * 窄画布下面板预留宽度被钳制为画布宽的一半，剩余区域不小于半幅。
+ */
+export function computePanelYieldViewport(input: {
+  canvasWidth: number
+  canvasHeight: number
+  /** 当前视口平移量（viewport.x）。 */
+  viewX: number
+  zoom: number
+  boxes: PanelYieldBox[]
+  panelReservedWidth?: number
+}): PanelYieldViewport | null {
+  const { canvasWidth, canvasHeight, viewX, zoom, boxes } = input
+  if (!boxes.length || !(canvasWidth > 0) || !(canvasHeight > 0) || !(zoom > 0)) return null
+  const reserved = input.panelReservedWidth ?? STRUCTURE_PANEL_RESERVED_WIDTH
+  const panelLeft = canvasWidth - Math.min(reserved, canvasWidth / 2)
+  if (!boxes.some(box => viewX + (box.x + box.width) * zoom > panelLeft)) return null
+  const centers = boxes.map(box => ({ x: box.x + box.width / 2, y: box.y + box.height / 2 }))
+  const centerX = (Math.min(...centers.map(center => center.x)) + Math.max(...centers.map(center => center.x))) / 2
+  const centerY = (Math.min(...centers.map(center => center.y)) + Math.max(...centers.map(center => center.y))) / 2
+  return {
+    x: panelLeft / 2 - centerX * zoom,
+    y: canvasHeight / 2 - centerY * zoom,
+    zoom,
   }
 }

@@ -213,6 +213,9 @@ test('选中公共哨兵：画布内执行逻辑面板 + 导出Skill 触发真�
   await expect(body).toContainText('每 300 秒定时扫描')
   await expect(body).toContainText('order')
   await expect(page.getByTestId('sentinel-detail-condition')).toContainText('order.order_no != null')
+  // 无条件行时不再显示开发者术语，改为指向表达式的一句话说明
+  await expect(body).toContainText('未使用条件行，以上方表达式为准')
+  await expect(body).not.toContainText('UI 回显形态')
   await expect(page.getByTestId('sentinel-detail-actions')).toContainText('创建订单')
   await expect(page.getByTestId('sentinel-detail-actions')).toContainText('无需审批')
 
@@ -247,4 +250,32 @@ test('切换动态哨兵：面板原地更新且不锁画布交互，关闭并�
   await expect(page.getByTestId('sentinel-detail-panel')).toHaveCount(0)
   // 关闭面板等价于清除哨兵选中：触发器回到占位文案，画布高亮一并消失。
   await expect(page.getByRole('button', { name: '查看哨兵规则覆盖范围' })).toContainText('哨兵规则 · 查看覆盖范围')
+})
+
+test('Esc 与点击画布空白同时关闭哨兵面板与节点详情面板', async ({ page }) => {
+  await mockStructurePage(page)
+  await openStructureTab(page)
+
+  // 哨兵面板：Esc 关闭并清除选中
+  await page.getByLabel('查看哨兵规则覆盖范围').click()
+  await page.getByTestId('sentinel-dependency-option-sentinel-skill-public').click()
+  await expect(page.getByTestId('sentinel-detail-panel')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('sentinel-detail-panel')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '查看哨兵规则覆盖范围' })).toContainText('哨兵规则 · 查看覆盖范围')
+
+  // 哨兵面板：点击画布空白同样关闭
+  await page.getByLabel('查看哨兵规则覆盖范围').click()
+  await page.getByTestId('sentinel-dependency-option-sentinel-skill-public').click()
+  await expect(page.getByTestId('sentinel-detail-panel')).toBeVisible()
+  const canvasBox = await page.locator('.react-flow').boundingBox()
+  expect(canvasBox).toBeTruthy()
+  await page.mouse.click(canvasBox!.x + canvasBox!.width * 0.3, canvasBox!.y + canvasBox!.height * 0.2)
+  await expect(page.getByTestId('sentinel-detail-panel')).toHaveCount(0)
+
+  // 节点详情面板：Esc 关闭
+  await page.getByTestId('structure-node-object').click()
+  await expect(page.getByTestId('structure-detail-panel')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('structure-detail-panel')).toHaveCount(0)
 })
