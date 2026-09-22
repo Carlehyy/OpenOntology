@@ -9,6 +9,7 @@ import {
   ClipboardCopy,
   Clock3,
   Copy,
+  Download,
   Gauge,
   Globe2,
   KeyRound,
@@ -20,6 +21,7 @@ import {
   TimerReset,
 } from 'lucide-react'
 import { apiError, apiHub, type RunDetail, type RunOverview, type RunSummary } from '@/api/apiHub'
+import { Alert } from '@/components/ui/Alert'
 import { Button } from '@/components/ui/Button'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
 import { writeTextToClipboard } from '@/utils/clipboard'
@@ -43,6 +45,34 @@ const EMPTY_FILTERS: AppliedFilters = {
   start: '',
   end: '',
   result: 'all',
+}
+
+/** H11：与总览「近 7 日」口径对齐的快捷范围放首位。 */
+const QUICK_RANGES = [
+  { key: '7d', label: '近 7 天', days: 7 },
+  { key: 'today', label: '今天', days: null },
+  { key: '30d', label: '近 30 天', days: 30 },
+] as const
+
+const pad2 = (value: number) => String(value).padStart(2, '0')
+
+const toLocalDateString = (date: Date) =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+
+function quickRangeDates(range: (typeof QUICK_RANGES)[number]) {
+  const today = new Date()
+  const end = toLocalDateString(today)
+  if (range.days == null) return { start: end, end }
+  const start = new Date(today)
+  start.setDate(start.getDate() - (range.days - 1))
+  return { start: toLocalDateString(start), end }
+}
+
+/** H26：静态密钥类请求头原样入库（个人变量占位符除外），展示层默认打码防投屏/截图泄露。 */
+const SENSITIVE_HEADER_RE = /(authorization|cookie|token|secret|passwd|password|api[-_]?key|private[-_]?key)/i
+
+function maskHeaderValue(key: string, value: string) {
+  return SENSITIVE_HEADER_RE.test(key) ? '••••••（敏感头已脱敏展示）' : value
 }
 
 export default function RunHistory() {
@@ -69,6 +99,8 @@ export default function RunHistory() {
   const [refreshing, setRefreshing] = useState(false)
   const detailRequestRef = useRef<number | null>(null)
   const refreshRequestRef = useRef(false)
+  // H13：复制被拒时全选详情面板内容，作为手动 Cmd/Ctrl+C 的兜底
+  const detailPanelRef = useRef<HTMLDivElement | null>(null)
 
   const loadHistory = useCallback(async (silent = false) => {
     if (!silent) setHistoryLoading(true)
@@ -152,6 +184,34 @@ export default function RunHistory() {
     }))
   }
 
+  // H09：关键词/日期与结果筛选统一为即时生效——输入防抖 300ms 自动提交，
+  // 「查询」按钮保留为立即提交入口（先取消挂起的防抖，避免二次请求）。
+  const draftsDirty = draftKeyword.trim() !== filters.keyword
+    || draftStart !== filters.start
+    || draftEnd !== filters.end
+  const debounceRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!draftsDirty) return undefined
+    debounceRef.current = window.setTimeout(() => applyFilters(), 300)
+    return () => {
+      if (debounceRef.current) window.clearTimeout(debounceRef.current)
+    }
+  }, [draftsDirty, draftKeyword, draftStart, draftEnd])
+
+  const submitFilters = () => {
+    if (debounceRef.current) window.clearTimeout(debounceRef.current)
+    applyFilters()
+  }
+
+  // H11：快捷时间范围直接落到已生效筛选（绕过草稿态，点击即查）。
+  const applyQuickRange = (start: string, end: string) => {
+    setDraftStart(start)
+    setDraftEnd(end)
+    setFormError('')
+    setPage(1)
+    setFilters(current => ({ ...current, start, end }))
+  }
+
   const setResultFilter = (result: ResultFilter) => {
     setPage(1)
     setFilters(current => ({ ...current, result }))
@@ -198,10 +258,33 @@ export default function RunHistory() {
       setCopied({ key, ok: true })
       window.setTimeout(() => setCopied(current => (current?.key === key ? null : current)), 1600)
     } catch {
-      // 剪贴板写入可能被浏览器拒绝（无权限/页面未聚焦）：如实提示，内容仍可手动全选复制
+      // 剪贴板写入可能被浏览器拒绝（无权限/页面未聚焦）：如实提示，
+      // 并直接全选详情面板内容，用户 Cmd/Ctrl+C 即可完成手动复制
       setCopied({ key, ok: false })
+      const panel = detailPanelRef.current
+      if (panel) {
+        panel.focus({ preventScroll: true })
+        const selection = window.getSelection()
+        selection?.removeAllRanges()
+        selection?.selectAllChildren(panel)
+      }
       window.setTimeout(() => setCopied(current => (current?.key === key ? null : current)), 3200)
     }
+  }
+
+  // H24：导出当前已加载的完整记录（列表摘要 + 详情快照/响应），作为复制路径外的留证兜底
+  const exportRun = () => {
+    if (!selected || !detail) return
+    const payload = { ...selected, ...detail, exported_at: new Date().toISOString() }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `run-${detail.id}.json`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
   }
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -249,7 +332,7 @@ export default function RunHistory() {
             className="flex flex-wrap items-center gap-2 py-3"
             onSubmit={event => {
               event.preventDefault()
-              applyFilters()
+              submitFilters()
             }}
           >
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
@@ -259,13 +342,34 @@ export default function RunHistory() {
                   value={draftKeyword}
                   onChange={event => setDraftKeyword(event.target.value)}
                   className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  placeholder="搜索接口名称"
+                  placeholder="搜索接口名称，输入即查"
                   aria-label="搜索接口名称"
                 />
               </label>
               <DateField label="开始日期" value={draftStart} onChange={setDraftStart} />
               <span className="px-0.5 text-xs text-[var(--color-text-tertiary)]">—</span>
               <DateField label="结束日期" value={draftEnd} onChange={setDraftEnd} />
+              <div className="flex items-center gap-1" role="group" aria-label="快捷时间范围">
+                {QUICK_RANGES.map(range => {
+                  const { start, end } = quickRangeDates(range)
+                  const active = Boolean(filters.start || filters.end) && filters.start === start && filters.end === end
+                  return (
+                    <button
+                      key={range.key}
+                      type="button"
+                      onClick={() => applyQuickRange(start, end)}
+                      aria-pressed={active}
+                      className={`inline-flex h-9 items-center rounded-lg border px-2.5 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                        active
+                          ? 'border-brand-line bg-brand-soft text-brand-ink'
+                          : 'border-border bg-card text-muted-foreground hover:border-brand-line hover:text-brand-ink'
+                      }`}
+                    >
+                      {range.label}
+                    </button>
+                  )
+                })}
+              </div>
               <Button type="submit" size="sm" className="h-9 rounded-lg px-4">
                 <Search size={13} />
                 查询
@@ -288,15 +392,20 @@ export default function RunHistory() {
                 onChange={setResultFilter}
               />
             </div>
-            {formError && <span className="basis-full text-[11px] text-[var(--color-danger)]">{formError}</span>}
+            {formError && <span role="alert" aria-live="polite" className="basis-full text-[11px] text-[var(--color-danger)]">{formError}</span>}
           </form>
         </header>
 
         {historyError && (
-          <div className="mx-5 mt-3 flex shrink-0 items-center gap-2 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_30%,transparent)] bg-[var(--color-danger-bg)] px-3 py-2 text-xs text-[var(--color-danger)]">
-            <AlertCircle size={14} className="shrink-0" />
-            <span className="flex-1">调用记录加载失败：{historyError}</span>
-            <button type="button" onClick={() => void loadHistory()} className="font-medium hover:underline">重试</button>
+          <div className="mx-5 mt-3 shrink-0">
+            <Alert variant="danger" role="alert" className="text-xs">
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="flex-1">调用记录加载失败：{historyError}</span>
+                <button type="button" onClick={() => void loadHistory()} className="font-medium underline underline-offset-2">
+                  重试
+                </button>
+              </span>
+            </Alert>
           </div>
         )}
 
@@ -369,8 +478,10 @@ export default function RunHistory() {
           error={detailError}
           activeTab={detailTab}
           copied={copied}
+          panelRef={detailPanelRef}
           onTabChange={setDetailTab}
           onCopy={copyText}
+          onExport={exportRun}
           onClose={closeDetail}
         />
       )}
@@ -405,13 +516,22 @@ function OverviewMetrics({
 
   if (error || !overview) {
     return (
-      <div className="flex min-h-[118px] items-center gap-3 px-5 py-5 text-sm text-[var(--color-danger)]">
-        <AlertCircle size={17} />
-        <div className="flex-1">
-          <p className="font-medium">运行总览暂不可用</p>
-          <p className="mt-1 text-xs text-[var(--color-danger)]">{error || '请稍后重试'}</p>
-        </div>
-        <button type="button" onClick={onRetry} className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_30%,transparent)] bg-card px-3 py-1.5 text-xs hover:bg-[var(--color-danger-bg)]">重试</button>
+      <div className="px-5 py-5">
+        <Alert variant="danger" role="alert" className="text-xs">
+          <span className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <span>
+              <span className="block font-medium">运行总览暂不可用</span>
+              <span className="mt-1 block">{error || '请稍后重试'}</span>
+            </span>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="shrink-0 rounded-md border border-current px-2.5 py-1 font-medium transition hover:opacity-80"
+            >
+              重试
+            </button>
+          </span>
+        </Alert>
       </div>
     )
   }
@@ -544,22 +664,28 @@ function TrafficTrend({
       ) : error || !overview ? (
         <div className="mt-2 flex h-[62px] items-center justify-center rounded-lg bg-muted text-[11px] text-[var(--color-text-tertiary)]">趋势数据不可用</div>
       ) : (
-        <div className="mt-2 flex h-[62px] items-end gap-2">
+        <div
+          className="mt-2 flex h-[62px] items-end gap-2"
+          role="img"
+          aria-label={`近 7 日调用趋势，共 ${overview.seven_day_traffic} 次，失败 ${overview.seven_day_failed} 次`}
+        >
           {daily.map(item => {
-            const barHeight = item.count ? Math.max(7, item.count * 34 / max) : 3
-            const failedRatio = item.count ? item.failed / item.count : 0
+            const barHeight = Math.max(7, item.count * 34 / max)
+            const failedRatio = item.failed / item.count
             return (
               <div key={item.date} className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1">
                 <span className="text-[9px] tabular-nums text-[var(--color-text-tertiary)]">{item.count}</span>
-                <div
-                  className={`flex w-full max-w-12 flex-col overflow-hidden rounded-t-sm ${item.count ? 'bg-brand' : 'bg-[var(--color-bg-active)]'}`}
-                  style={{ height: `${barHeight}px` }}
-                  title={`${item.date}：${item.count} 次调用，${item.failed} 次失败`}
-                >
-                  {item.failed > 0 && (
-                    <span className="w-full bg-[var(--color-danger)]" style={{ height: `${Math.max(2, failedRatio * barHeight)}px` }} />
-                  )}
-                </div>
+                {item.count > 0 && (
+                  <div
+                    className="flex w-full max-w-12 flex-col overflow-hidden rounded-t-sm bg-brand"
+                    style={{ height: `${barHeight}px` }}
+                    title={`${item.date}：${item.count} 次调用，${item.failed} 次失败`}
+                  >
+                    {item.failed > 0 && (
+                      <span className="w-full bg-[var(--color-danger)]" style={{ height: `${Math.max(2, failedRatio * barHeight)}px` }} />
+                    )}
+                  </div>
+                )}
                 <span className="text-[9px] tabular-nums text-[var(--color-text-tertiary)]">{item.date.slice(5)}</span>
               </div>
             )
@@ -645,7 +771,7 @@ function DateField({
         type="date"
         value={value}
         onChange={event => onChange(event.target.value)}
-        className="w-[118px] bg-transparent text-[11px] text-muted-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="w-[118px] bg-transparent text-xs text-foreground outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
     </label>
   )
@@ -709,7 +835,7 @@ function HistoryRow({
         <div className="flex min-w-0 flex-col items-center justify-center gap-1">
           <SourceBadge source={item.source} />
           {item.proxy_key_name && (
-            <span className="max-w-28 truncate text-[10px] text-muted-foreground" title={item.proxy_key_name}>
+            <span className="max-w-28 truncate text-xs text-muted-foreground" title={item.proxy_key_name}>
               {item.proxy_key_name}
             </span>
           )}
@@ -749,7 +875,7 @@ function SourceBadge({ source }: { source: string }) {
       : source.startsWith('mcp_')
         ? 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'
         : 'bg-muted text-muted-foreground'
-  return <span className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[9px] font-semibold ${tone}`}>{label}</span>
+  return <span className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-semibold ${tone}`}>{label}</span>
 }
 
 function HistorySkeleton() {
@@ -790,8 +916,10 @@ function RunDetailDrawer({
   error,
   activeTab,
   copied,
+  panelRef,
   onTabChange,
   onCopy,
+  onExport,
   onClose,
 }: {
   summary: RunSummary
@@ -800,8 +928,10 @@ function RunDetailDrawer({
   error: string
   activeTab: DetailTab
   copied: { key: string; ok: boolean } | null
+  panelRef: React.RefObject<HTMLDivElement | null>
   onTabChange: (tab: DetailTab) => void
   onCopy: (key: string, value: string) => void
+  onExport: () => void
   onClose: () => void
 }) {
   // 详情接口只回 runs 表字段（无 name/method，见 apiHub.getRun 的后端实现），
@@ -837,7 +967,7 @@ function RunDetailDrawer({
             </span>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <SheetTitle className="truncate text-base font-semibold tracking-[-0.01em] text-foreground">{current.name}</SheetTitle>
+                <SheetTitle className="truncate text-base font-semibold text-foreground">{current.name}</SheetTitle>
                 <span className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${ok ? 'bg-brand-soft text-brand-ink' : 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'}`}>
                   {ok ? '调用成功' : '调用失败'}
                 </span>
@@ -847,13 +977,13 @@ function RunDetailDrawer({
                 <span>·</span>
                 <button
                   type="button"
-                  onClick={() => onCopy('run-id', `RUN-${String(current.id).padStart(6, '0')}`)}
+                  onClick={() => onCopy('run-id', String(current.id))}
                   className="inline-flex items-center gap-1 font-mono transition hover:text-brand-ink"
                 >
                   {runIdCopied && copied?.ok
                     ? <CheckCircle2 size={11} />
                     : <ClipboardCopy size={11} className={runIdCopied ? 'text-[var(--color-danger)]' : ''} />}
-                  RUN-{String(current.id).padStart(6, '0')}
+                  #{current.id}
                 </button>
                 {runIdCopied && !copied?.ok && <span className="text-[var(--color-danger)]">复制失败，请手动记录</span>}
               </div>
@@ -873,12 +1003,11 @@ function RunDetailDrawer({
         </div>
 
         {current.error && (
-          <div className="mx-6 mt-4 flex shrink-0 items-start gap-2 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_30%,transparent)] bg-[var(--color-danger-bg)] px-3 py-2.5 text-xs leading-5 text-[var(--color-danger)]">
-            <AlertCircle size={14} className="mt-0.5 shrink-0" />
-            <div>
+          <div className="mx-6 mt-4 shrink-0">
+            <Alert variant="danger" role="alert" className="text-xs">
               <p className="font-medium">失败原因</p>
-              <p className="mt-0.5 break-words text-[var(--color-danger)]">{current.error}</p>
-            </div>
+              <p className="mt-0.5 break-words">{current.error}</p>
+            </Alert>
           </div>
         )}
 
@@ -904,24 +1033,38 @@ function RunDetailDrawer({
               ))}
             </div>
             {!loading && !error && (
-              <button
-                type="button"
-                onClick={() => onCopy(activeTab, activeValue)}
-                className={`mb-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] transition hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                  tabCopied && !copied?.ok ? 'text-[var(--color-danger)]' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {tabCopied
-                  ? copied?.ok
-                    ? <><CheckCircle2 size={12} className="text-brand-ink" />已复制</>
-                    : <><Copy size={12} />复制失败，请手动选择</>
-                  : <><Copy size={12} />复制</>}
-              </button>
+              <div className="mb-2 flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => onCopy(activeTab, activeValue)}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] transition hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                    tabCopied && !copied?.ok ? 'text-[var(--color-danger)]' : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {tabCopied
+                    ? copied?.ok
+                      ? <><CheckCircle2 size={12} className="text-brand-ink" />已复制</>
+                      : <>复制失败，已全选可 Cmd+C</>
+                    : <><Copy size={12} />复制</>}
+                </button>
+                {detail && (
+                  <button
+                    type="button"
+                    onClick={onExport}
+                    className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Download size={12} />
+                    导出本条记录
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
           <div
-            className="min-h-0 flex-1 pt-4"
+            ref={panelRef}
+            tabIndex={-1}
+            className="min-h-0 flex-1 overflow-auto pt-4 focus-visible:outline-none"
             role="tabpanel"
             id="run-detail-panel"
             aria-labelledby={`run-detail-tab-${activeTab}`}
@@ -929,21 +1072,146 @@ function RunDetailDrawer({
             {loading ? (
               <div className="h-full min-h-[280px] animate-pulse rounded-xl bg-muted" />
             ) : error ? (
-              <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_30%,transparent)] bg-[var(--color-danger-bg)] px-6 text-center">
-                <AlertCircle size={24} className="text-[var(--color-danger)]" />
-                <p className="mt-3 text-sm font-medium text-[var(--color-danger)]">调用详情加载失败</p>
-                <p className="mt-1 text-xs text-[var(--color-danger)]">{error}</p>
+              <div className="flex h-full min-h-[280px] items-center justify-center px-6">
+                <Alert variant="danger" role="alert" className="max-w-md text-xs">
+                  <span className="block font-medium">调用详情加载失败</span>
+                  <span className="mt-1 block break-words">{error}</span>
+                </Alert>
               </div>
+            ) : activeTab === 'request' ? (
+              <RequestSnapshotView snapshot={detail?.request_snapshot ?? null} />
+            ) : activeTab === 'response' ? (
+              <ResponseBodyView body={detail?.response_body ?? ''} />
             ) : (
-              <pre className="h-full min-h-[280px] overflow-auto whitespace-pre-wrap break-all rounded-xl border border-border bg-muted p-4 font-mono text-[11px] leading-5 text-foreground shadow-inner">
-                {activeValue}
-              </pre>
+              <ResponseHeadersView headers={detail?.response_headers ?? null} />
             )}
           </div>
         </div>
       </SheetContent>
     </Sheet>
   )
+}
+
+function EmptyValue({ text }: { text: string }) {
+  return (
+    <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-xs text-[var(--color-text-tertiary)]">
+      {text}
+    </p>
+  )
+}
+
+/** H12：查询参数 / 请求头 / 响应头的键值表，替代裸 JSON dump。 */
+function KVList({ rows }: { rows: Array<{ key: string; value: string }> }) {
+  return (
+    <dl className="divide-y divide-border overflow-hidden rounded-xl border border-border">
+      {rows.map(row => (
+        <div key={row.key} className="flex items-start gap-3 px-3 py-2">
+          <dt className="w-44 shrink-0 truncate font-mono text-xs font-semibold text-muted-foreground" title={row.key}>
+            {row.key}
+          </dt>
+          <dd className="min-w-0 flex-1 break-all font-mono text-xs text-foreground">{row.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+/** H12：长文本默认折叠（超长响应体 / 50+ 元素的顶层 JSON 数组），展开后不折行、容器横向滚动。 */
+const CODE_COLLAPSE_CHARS = 20000
+
+function CodeBlock({ value, summary }: { value: string; summary?: string }) {
+  const [expanded, setExpanded] = useState(false)
+  if (!expanded && (value.length > CODE_COLLAPSE_CHARS || summary)) {
+    return (
+      <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border px-3 py-5 text-center">
+        <p className="text-xs text-muted-foreground">{summary ?? `内容较长（${formatNumber(value.length)} 字符），已折叠`}</p>
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          展开全部
+        </button>
+      </div>
+    )
+  }
+  return (
+    <pre className="overflow-auto whitespace-pre rounded-xl border border-border bg-muted p-4 font-mono text-xs leading-5 text-foreground shadow-inner">
+      {value}
+    </pre>
+  )
+}
+
+function kvPairsOf(value: unknown): Array<{ key: string; value: string }> {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is { key: string; value: string } =>
+      typeof item === 'object' && item !== null
+      && typeof (item as { key?: unknown }).key === 'string'
+      && typeof (item as { value?: unknown }).value === 'string')
+    .map(item => ({ key: item.key, value: item.value }))
+}
+
+function RequestSnapshotView({ snapshot }: { snapshot: Record<string, unknown> | null }) {
+  if (!snapshot) return <EmptyValue text="暂无请求快照" />
+  const method = typeof snapshot.method === 'string' ? snapshot.method : ''
+  const url = typeof snapshot.url === 'string' ? snapshot.url : ''
+  const queryParams = kvPairsOf(snapshot.query_params).map(row => ({ key: row.key, value: row.value || '（空）' }))
+  const headers = kvPairsOf(snapshot.headers).map(row => ({ key: row.key, value: maskHeaderValue(row.key, row.value || '（空）') }))
+  const bodyType = typeof snapshot.body_type === 'string' ? snapshot.body_type : 'none'
+  const bodyContent = snapshot.body_content
+  const bodyText = bodyType === 'none' || bodyContent == null || bodyContent === ''
+    ? ''
+    : typeof bodyContent === 'string'
+      ? bodyContent
+      : stringifyValue(bodyContent, '')
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <p className="mb-1.5 text-xs font-medium text-muted-foreground">请求地址</p>
+        <div className="flex min-w-0 items-center gap-2 rounded-xl border border-border px-3 py-2">
+          {method && (
+            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
+              {method}
+            </span>
+          )}
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground" title={url}>{url || '—'}</span>
+        </div>
+      </div>
+      <div>
+        <p className="mb-1.5 text-xs font-medium text-muted-foreground">查询参数</p>
+        {queryParams.length ? <KVList rows={queryParams} /> : <EmptyValue text="无查询参数" />}
+      </div>
+      <div>
+        <p className="mb-1.5 text-xs font-medium text-muted-foreground">请求头</p>
+        {headers.length ? <KVList rows={headers} /> : <EmptyValue text="无请求头" />}
+      </div>
+      <div>
+        <p className="mb-1.5 text-xs font-medium text-muted-foreground">请求体</p>
+        {bodyText ? <CodeBlock value={bodyText} /> : <EmptyValue text="无请求体" />}
+      </div>
+    </div>
+  )
+}
+
+function ResponseBodyView({ body }: { body: string }) {
+  if (!body) return <EmptyValue text="空响应体" />
+  let summary: string | undefined
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (Array.isArray(parsed) && parsed.length > 50) {
+      summary = `JSON 数组共 ${formatNumber(parsed.length)} 个元素，已折叠`
+    }
+  } catch {
+    // 非 JSON 响应按原文展示
+  }
+  return <CodeBlock value={prettyResponse(body)} summary={summary} />
+}
+
+function ResponseHeadersView({ headers }: { headers: Record<string, string> | null }) {
+  if (!headers) return <EmptyValue text="暂无响应头" />
+  const rows = Object.entries(headers).map(([key, value]) => ({ key, value: maskHeaderValue(key, value) }))
+  return rows.length ? <KVList rows={rows} /> : <EmptyValue text="暂无响应头" />
 }
 
 function DetailMetric({

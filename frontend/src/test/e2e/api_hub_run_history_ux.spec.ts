@@ -83,7 +83,10 @@ const OVERVIEW = {
   ],
 }
 
-/** 与后端 get_run 一致：只回 runs 表字段，故意缺 name/method（H01 回归守卫）。 */
+/**
+ * 与后端 get_run 一致：只回 runs 表字段，故意缺 name/method（H01 回归守卫）。
+ * run 90 的响应体是 60 元素 JSON 数组、请求头带 Authorization（H12/H26 用例载体）。
+ */
 function detailFor(run: RunFixture) {
   return {
     id: run.id,
@@ -95,15 +98,20 @@ function detailFor(run: RunFixture) {
       method: run.method,
       url: 'https://vendor.example/v1/orders',
       query_params: [],
-      headers: [{ key: 'Accept', value: 'application/json' }],
+      headers: [
+        { key: 'Accept', value: 'application/json' },
+        { key: 'Authorization', value: 'Bearer s3cret-token' },
+      ],
       body_type: 'none',
       body_content: null,
       source: run.source,
       proxy_key_name: run.proxy_key_name,
       source_ip: run.source_ip,
     },
-    response_headers: { 'content-type': 'application/json' },
-    response_body: '{"ok":true}',
+    response_headers: { 'content-type': 'application/json', 'x-request-id': 'req-1' },
+    response_body: run.id === 90
+      ? JSON.stringify(Array.from({ length: 60 }, (_, index) => 100000 + index))
+      : '{"ok":true}',
     error: run.error,
     relogin: Boolean(run.relogin),
     created_at: run.created_at,
@@ -114,8 +122,15 @@ function detailFor(run: RunFixture) {
   }
 }
 
-async function mockHistoryApp(page: Page) {
-  await page.addInitScript(() => {
+interface HistoryMockOptions {
+  /** 每次 GET /runs/overview 求值，支持「先失败后成功」场景。 */
+  overview?: () => { status?: number; body: unknown }
+  /** 模拟剪贴板完全不可用（Clipboard API 拒绝 + execCommand 失败）。 */
+  failClipboard?: boolean
+}
+
+async function mockHistoryApp(page: Page, options: HistoryMockOptions = {}) {
+  await page.addInitScript(({ failClipboard }) => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
       state: {
@@ -124,7 +139,13 @@ async function mockHistoryApp(page: Page) {
       },
       version: 0,
     }))
-  })
+    if (failClipboard) {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText: async () => { throw new Error('clipboard denied') } },
+      })
+      Document.prototype.execCommand = () => false
+    }
+  }, { failClipboard: options.failClipboard ?? false })
   await page.route('**/api/v2/inbox/summary', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -147,6 +168,10 @@ async function mockHistoryApp(page: Page) {
     })
 
     if (request.method() === 'GET' && path === '/api/api-hub/runs/overview') {
+      if (options.overview) {
+        const result = options.overview()
+        return json(result.body, result.status ?? 200)
+      }
       return json(OVERVIEW)
     }
     if (request.method() === 'GET' && path === '/api/api-hub/runs') {
@@ -273,4 +298,127 @@ test('H16/H18 失败原因在诊断列完整可达，耗时列不再渲染进度
   const barCount = await page.evaluate(() =>
     document.querySelectorAll('tbody span[class*="h-1.5"]').length)
   expect(barCount).toBe(0)
+})
+
+test('H09 关键词输入 300ms 防抖自动查询，无需点查询', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  await page.getByPlaceholder('搜索接口名称').fill('天')
+  // 不点「查询」，防抖后应自动过滤出「天气查询」
+  await expect(page.getByText('显示 1–1 / 1 条')).toBeVisible({ timeout: 4000 })
+  await expect(page.getByRole('row', { name: /天气查询/ })).toBeVisible()
+})
+
+test('H11 快捷范围「近 7 天」即点即查并高亮', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  const range = page.getByRole('button', { name: '近 7 天' })
+  await range.click()
+  await expect(range).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByLabel('开始日期')).not.toHaveValue('')
+  await expect(page.getByLabel('结束日期')).not.toHaveValue('')
+})
+
+test('日期先后校验即时拦截且不发非法区间请求', async ({ page }) => {
+  let invalidRangedRequests = 0
+  await mockHistoryApp(page)
+  await page.route('**/api/api-hub/runs*', route => {
+    const params = new URL(route.request().url()).searchParams
+    const start = params.get('start') ?? ''
+    const end = params.get('end') ?? ''
+    // 只统计「开始晚于结束」的非法区间；单边日期合法触发查询不计入。
+    // fallback() 回落到 mockHistoryApp 注册的 mock 处理器，请求不触真实网络。
+    if (start && end && start > end) invalidRangedRequests += 1
+    return route.fallback()
+  })
+  await gotoHistory(page)
+
+  await page.getByLabel('开始日期').fill('2026-09-22')
+  await page.getByLabel('结束日期').fill('2026-09-01')
+  await expect(page.getByText('开始日期不能晚于结束日期')).toBeVisible({ timeout: 4000 })
+  await expect(page.getByText('显示 1–4 / 4 条')).toBeVisible()
+  expect(invalidRangedRequests).toBe(0)
+})
+
+test('H12/H26 请求快照结构化渲染且敏感头打码，长数组默认折叠可展开', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  await page.getByRole('row', { name: /订单详情查询/ }).click()
+  const dialog = page.getByRole('dialog')
+
+  // 请求快照：地址行 + KV 表；Authorization 展示打码，明文不出现在 DOM
+  await expect(dialog.getByText('请求地址')).toBeVisible()
+  await expect(dialog.locator('#run-detail-panel').getByText('https://vendor.example/v1/orders')).toBeVisible()
+  await expect(dialog.getByText('Authorization')).toBeVisible()
+  await expect(dialog).not.toContainText('Bearer s3cret-token')
+
+  // 响应体：60 元素数组默认折叠为一行摘要，展开后可见内容
+  await dialog.getByRole('tab', { name: '响应体' }).click()
+  await expect(dialog.getByText('JSON 数组共 60 个元素，已折叠')).toBeVisible()
+  await dialog.getByRole('button', { name: '展开全部' }).click()
+  await expect(dialog.locator('pre')).toContainText('100000')
+
+  // 响应头以 KV 表呈现
+  await dialog.getByRole('tab', { name: '响应头' }).click()
+  await expect(dialog.getByText('x-request-id')).toBeVisible()
+})
+
+test('H13 剪贴板不可用时复制失败并自动全选面板内容', async ({ page }) => {
+  await mockHistoryApp(page, { failClipboard: true })
+  await gotoHistory(page)
+
+  await page.getByRole('row', { name: /订单详情查询/ }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: /复制/ }).first().click()
+
+  await expect(dialog.getByText('复制失败，已全选可 Cmd+C')).toBeVisible()
+  const selectedLength = await page.evaluate(() => window.getSelection()?.toString().length ?? 0)
+  expect(selectedLength).toBeGreaterThan(0)
+})
+
+test('H24 导出本条记录触发下载且文件名可追溯', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  await page.getByRole('row', { name: /订单详情查询/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('button', { name: '导出本条记录' })).toBeVisible()
+
+  const downloadPromise = page.waitForEvent('download')
+  await dialog.getByRole('button', { name: '导出本条记录' }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('run-90.json')
+})
+
+test('H25 抽屉展示原生 id 而非造出的 RUN 前缀编号', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  await page.getByRole('row', { name: /订单详情查询/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText('#90')).toBeVisible()
+  await expect(dialog.getByText(/RUN-\d{6}/)).toHaveCount(0)
+})
+
+test('H06 总览加载失败走标准 Alert 并可重试恢复', async ({ page }) => {
+  let overviewCalls = 0
+  await mockHistoryApp(page, {
+    overview: () => {
+      overviewCalls += 1
+      return overviewCalls === 1
+        ? { status: 500, body: { detail: '总览服务不可用' } }
+        : { body: OVERVIEW }
+    },
+  })
+  await gotoHistory(page)
+
+  const alert = page.getByRole('alert').filter({ hasText: '运行总览暂不可用' })
+  await expect(alert).toBeVisible()
+  await expect(alert).toContainText('总览服务不可用')
+
+  await alert.getByRole('button', { name: '重试' }).click()
+  await expect(page.getByText('今日 2 次')).toBeVisible()
 })
