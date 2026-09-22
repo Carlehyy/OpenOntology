@@ -92,6 +92,41 @@ export function splitProcessAndAnswer(content: string) {
   return { process: '', answer: content }
 }
 
+/** 常用内置工具的中文友好名：仅覆盖平台自带工具（与后端注册名一一对应），
+ *  MCP/外部工具一律直出原名；原名等宽保留在旁边，用户引用与审计对得上 */
+export const BUILTIN_TOOL_FRIENDLY_NAMES: Record<string, string> = {
+  web_fetch: '抓取网页',
+  web_search: '搜索互联网',
+  think: '记录思考',
+  subagent: '委派子代理',
+  todo_write: '写入步骤清单',
+  todo_read: '读取步骤清单',
+  memory_search: '检索长期记忆',
+  memory_save: '保存记忆',
+  memory_delete: '删除记忆',
+  memory_distill: '扫描近重复记忆',
+  palace_zones: '列出记忆分区',
+  palace_read_zone: '读取记忆分区',
+  palace_recall: '回忆记忆宫殿',
+  palace_graph_search: '检索知识图谱',
+  palace_graph_files: '列出文档库',
+  use_skill: '读取 Skill 指令',
+  read_skill_file: '读取 Skill 文件',
+  propose_skill: '提炼 Skill 候选',
+  list_session_files: '列出会话附件',
+  read_session_file: '读取会话附件',
+  browser_open: '打开浏览器',
+  browser_navigate: '打开网页',
+  browser_click_element: '点击元素',
+  browser_click_text: '点击文本',
+  browser_type: '输入文字',
+  browser_scroll: '滚动页面',
+  browser_state: '读取页面状态',
+  browser_network_requests: '查看网络请求',
+  browser_page_resources: '查看页面资源',
+  browser_save_resource: '保存资源',
+}
+
 export function toolStatusLabel(status: string) {
   if (status === 'running') return '进行中'
   if (status === 'awaiting_confirmation') return '待确认'
@@ -99,6 +134,62 @@ export function toolStatusLabel(status: string) {
   if (status === 'cancelled' || status === 'denied' || status === 'expired') return '已取消'
   if (status === 'error' || status === 'failed') return '失败'
   return status
+}
+
+export interface ToolStepGroup {
+  toolName: string
+  steps: ToolStep[]
+  /** 组内第一步在原 steps 中的下标，作 React key 用 */
+  startIndex: number
+}
+
+/** 连续同名工具折叠为一组（同名不连续不合并，保留时间线语义）：
+ *  Agent 轮询类工具常连续出现多条，逐条平铺会把有信息量的步骤挤出视口 */
+export function groupConsecutiveSteps(steps: ToolStep[]): ToolStepGroup[] {
+  const groups: ToolStepGroup[] = []
+  steps.forEach((step, index) => {
+    const last = groups[groups.length - 1]
+    if (last && last.toolName === step.toolName) last.steps.push(step)
+    else groups.push({ toolName: step.toolName, steps: [step], startIndex: index })
+  })
+  return groups
+}
+
+/** 组内聚合状态：待确认 > 进行中 > 失败 > 已取消 > 完成 */
+export function toolGroupStatus(steps: ToolStep[]) {
+  const statuses = steps.map(step => step.status)
+  if (statuses.includes('awaiting_confirmation')) return 'awaiting_confirmation'
+  if (statuses.includes('running')) return 'running'
+  if (statuses.some(status => status === 'error' || status === 'failed')) return 'error'
+  if (statuses.some(status => status === 'cancelled' || status === 'denied' || status === 'expired')) return 'cancelled'
+  return 'success'
+}
+
+/**
+ * 全局搜索摘要的展示层净化：去掉 markdown 语法符号（围栏、标题符、强调星号、行内码），
+ * 再截取关键词前后各约 radius 字的窗口；关键词未命中时截前 fallbackLimit 字。
+ * 只做语法剥离，不渲染 markdown——命中哪句话必须一眼可读。
+ * 单下划线强调不处理：会破坏 snake_case 工具名。
+ */
+export function plainSnippet(text: string, keyword: string, radius = 30, fallbackLimit = 64) {
+  const plain = text
+    .replace(/```[\w-]*\n?/g, '')
+    .replace(/~~~[\w-]*\n?/g, '')
+    .replace(/`([^`\n]*)`/g, '$1')
+    .replace(/^\s{0,3}#{1,6}[ \t]+/gm, '')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const key = keyword.trim().toLowerCase()
+  const index = key ? plain.toLowerCase().indexOf(key) : -1
+  if (index < 0) {
+    return plain.length > fallbackLimit ? `${plain.slice(0, fallbackLimit)}…` : plain
+  }
+  const start = Math.max(0, index - radius)
+  const end = Math.min(plain.length, index + key.length + radius)
+  return `${start > 0 ? '…' : ''}${plain.slice(start, end)}${end < plain.length ? '…' : ''}`
 }
 
 export function appendToolStart(steps: ToolStep[], payload: {

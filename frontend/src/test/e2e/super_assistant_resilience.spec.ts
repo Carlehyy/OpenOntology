@@ -63,7 +63,7 @@ test('MCP 列表失败时仍加载文本模型并允许输入', async ({ page })
 
   const composer = page.getByRole('textbox', { name: '向超级助手发送消息' })
   await expect(composer).toBeEnabled()
-  await expect(composer).toHaveAttribute('placeholder', '咨询任何问题，创造任何事物')
+  await expect(composer).toHaveAttribute('placeholder', '输入消息；Shift + Enter 换行')
   await expect(page.getByText('超级助手部分功能加载失败')).toBeVisible()
   await expect(page.getByText(/MCP：Internal Server Error/)).toBeVisible()
 })

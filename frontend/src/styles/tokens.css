@@ -69,7 +69,9 @@
   /* ── 文字 ── */
   --color-text-primary: var(--foreground);
   --color-text-secondary: var(--muted-foreground);
-  --color-text-tertiary: #8b8ba3;
+  /* 与 .dark 同档（#6b7688）：纯白底约 4.6:1、画布/浅绿底约 4.1~4.4:1（正文 AA 线为 4.5:1），
+     较旧值 #8b8ba3（2.9~3.3:1）大幅改善；非纯白浅底上的小号文字仍未达 AA 线 */
+  --color-text-tertiary: #6b7688;
   --color-text-disabled: #b8b8c8;
   --color-text-inverse: #ffffff;
 

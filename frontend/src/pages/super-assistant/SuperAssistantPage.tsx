@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ElementRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ElementRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  Check, Cpu, List, Loader2, Menu, Monitor, Paperclip, Pencil,
+  ArrowDown, Check, Cpu, List, Loader2, Menu, Monitor, MoreHorizontal, Paperclip, Pencil,
   Send, Settings2, Square, X,
 } from 'lucide-react'
 
@@ -67,6 +67,19 @@ interface StreamBuffer {
   thinkingRound: number | null
 }
 
+/** super_assistant 是「对话首选」偏好标记而非后台用途；仅带它的配置仍面向用户可选 */
+const SUPER_ASSISTANT_PREFERENCE_TAG = 'super_assistant'
+
+/** 会话模型下拉只保留面向用户的对话模型：带后台用途 usage_tags
+ *  （记忆宫殿抽取 super_assistant_palace、VLM 提取等）的启用配置排除在外；
+ *  默认模型豁免——被排除后一个不剩时调用处回退全集 */
+function isConversationSelectableModel(model: ModelConfig) {
+  if (model.is_default) return true
+  const raw = model.options?.usage_tags
+  const tags = Array.isArray(raw) ? raw.map(tag => String(tag)) : []
+  return tags.every(tag => tag === SUPER_ASSISTANT_PREFERENCE_TAG)
+}
+
 function formatFileSize(size: number): string {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
@@ -108,6 +121,8 @@ export default function SuperAssistantPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showMessageHistory, setShowMessageHistory] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  // 窄屏顶栏溢出菜单：实时浏览器/助手配置收进「⋯」，避免与标题、模型选择器挤出视口
+  const [headerOverflowOpen, setHeaderOverflowOpen] = useState(false)
   // 全局搜索选中消息命中后：先切会话，待消息加载完成再滚动定位
   const [pendingJumpId, setPendingJumpId] = useState<string | null>(null)
   // 助手配置面板默认收起，由用户点击右上角按钮展开/收起；
@@ -129,6 +144,14 @@ export default function SuperAssistantPage() {
   const [browserDisplay, setBrowserDisplay] = useState<BrowserDisplayMode>('closed')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
+  // 消息滚动容器：切换会话后的瞬时贴底与「回到最新」都直接操作它
+  const scrollHostRef = useRef<HTMLDivElement | null>(null)
+  // 会话切换后待执行的首帧贴底（值为目标会话 id；消息就位后消费）
+  const pendingBottomJumpRef = useRef<string | null>(null)
+  // 贴底稳定窗口：内容异步撑高（图片/Mermaid 渲染完）时保持跟随，用户上滚或超时即停
+  const settleStopRef = useRef<() => void>(() => {})
+  // 离底超过阈值时展示「回到最新」悬浮按钮
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const senderRef = useRef<ElementRef<typeof Sender>>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const queuedByConvRef = useRef<Record<string, string[]>>({})
@@ -184,7 +207,12 @@ export default function SuperAssistantPage() {
         failures.push(`会话：${errorText(conversationResult.reason, '加载失败')}`)
       }
       if (modelResult.status === 'fulfilled') {
-        setModels(modelResult.value.filter(model => model.config_type === 'llm' && model.enabled !== false))
+        // 流水线专用配置不进会话下拉；全部被排除时回退全集，
+        // 避免 tagging 不全的部署直接变成「无可用模型」
+        const llmModels = modelResult.value.filter(model => model.config_type === 'llm' && model.enabled !== false)
+        setModels(llmModels.some(isConversationSelectableModel)
+          ? llmModels.filter(isConversationSelectableModel)
+          : llmModels)
         setModelLoadFailed(false)
       } else {
         setModelLoadFailed(true)
@@ -315,16 +343,88 @@ export default function SuperAssistantPage() {
   const selectedConversation = conversations.find(item => item.id === selectedId) || null
   const selectedModelId = selectedConversation?.model_config_id || models.find(model => model.is_default)?.id || models[0]?.id || ''
   const selectedModel = models.find(model => model.id === selectedModelId)
+  // 展示层回落：存量会话可能保存着已被 usage_tags 过滤的后台配置（如记忆宫殿抽取），
+  // 显式 SelectValue children 在「值非空但无匹配项」时会渲染空白——此时按未选择处理，
+  // 让触发器回落占位符；发送仍使用会话已保存的 model_config_id，不因展示而切换
+  const selectedModelIdForDisplay = models.some(model => model.id === selectedModelId) ? selectedModelId : ''
   const myMessages = useMemo(() => messages.filter(message => message.role === 'user'), [messages])
   const runningHere = selectedId !== null && streamingIds.has(selectedId)
   const pendingHere = selectedId ? pendingByConv[selectedId] ?? null : null
   const queuedHere = selectedId ? queuedByConv[selectedId] || [] : []
 
-  useEffect(() => { stickToBottomRef.current = true }, [selectedId])
+  // 贴底稳定窗口时长：覆盖切回会话后图片/Mermaid 等异步内容撑高
+  const SETTLE_FOLLOW_MS = 3000
+
+  /** 内容异步撑高时保持贴底：观察滚动容器内容高度，stick 期间自动补滚，
+   *  用户上滚（stick 失效）或窗口到期即停止；下次切换会话时重启 */
+  const beginSettleFollow = useCallback(() => {
+    settleStopRef.current()
+    const host = scrollHostRef.current
+    const content = host?.firstElementChild
+    if (!host || !(content instanceof HTMLElement) || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      if (stickToBottomRef.current) {
+        host.scrollTop = host.scrollHeight
+        return
+      }
+      observer.disconnect()
+    })
+    settleStopRef.current = () => observer.disconnect()
+    observer.observe(content)
+    window.setTimeout(() => observer.disconnect(), SETTLE_FOLLOW_MS)
+  }, [])
+
+  useEffect(() => () => settleStopRef.current(), [])
+
+  useEffect(() => {
+    stickToBottomRef.current = true
+    // 登记切换后的首次贴底：等目标会话消息就位再瞬时到底（见下方 messages effect）
+    pendingBottomJumpRef.current = selectedId
+    // 短会话（无溢出）切换后不产生 scroll 事件，按钮残留态须在此重置
+    setShowJumpToLatest(false)
+  }, [selectedId])
+  // 绘制前执行：切回长会话时不闪现旧滚动位置（顶部）一帧
+  useLayoutEffect(() => {
+    // 会话切换后的首帧贴底：瞬时到底（不走 smooth，长历史平滑滚动耗时且易被
+    // 中途 onScroll 判定离底而取消），下一帧再补一次覆盖同帧布局竞争；
+    // 之后交给稳定窗口观察器兜底图片/Mermaid 晚到的撑高
+    const jumpTarget = pendingBottomJumpRef.current
+    if (jumpTarget !== null && messages.length > 0) {
+      pendingBottomJumpRef.current = null
+      if (jumpTarget === selectedIdRef.current) {
+        const jump = () => {
+          const host = scrollHostRef.current
+          if (host) host.scrollTop = host.scrollHeight
+        }
+        jump()
+        requestAnimationFrame(jump)
+        beginSettleFollow()
+      }
+    }
+  }, [messages, beginSettleFollow])
   useEffect(() => {
     if (!stickToBottomRef.current) return
     messagesEndRef.current?.scrollIntoView({ behavior: runningHere ? 'auto' : 'smooth', block: 'end' })
   }, [messages, pendingByConv, runningHere])
+
+  /** 「回到最新」：恢复贴底并平滑滚到最新消息。
+   *  平滑滚动的中间 scroll 事件不代表用户上滚——飞行期间不更新贴底判定，
+   *  到达（或超时兜底）后才恢复 onScroll 的正常判定 */
+  const jumpFlightRef = useRef(false)
+  const jumpToLatest = () => {
+    const host = scrollHostRef.current
+    if (!host) return
+    stickToBottomRef.current = true
+    setShowJumpToLatest(false)
+    jumpFlightRef.current = true
+    host.scrollTo({ top: host.scrollHeight, behavior: 'smooth' })
+    window.setTimeout(() => {
+      jumpFlightRef.current = false
+      const atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 96
+      stickToBottomRef.current = atBottom
+      setShowJumpToLatest(!atBottom)
+    }, 700)
+  }
 
   const createConversation = async () => {
     try {
@@ -343,7 +443,7 @@ export default function SuperAssistantPage() {
     if (created) setBrowserDisplay('modal')
   }
 
-  // 「新建任务」去重：当前已在未落地的全新视图、或选中的会话还是空会话（无消息且未在生成）
+  // 「新建会话」去重：当前已在未落地的全新视图、或选中的会话还是空会话（无消息且未在生成）
   // 时不再创建新会话，避免空会话堆积；仅把焦点放回输入框。
   const handleNewConversation = async () => {
     if (!selectedId || (selectedConversation && messages.length === 0 && !streamingIds.has(selectedConversation.id))) {
@@ -654,6 +754,23 @@ export default function SuperAssistantPage() {
     catch (error) { setStopping(false); toast.error('停止失败', { description: errorText(error) }) }
   }
 
+  /** 失败重试：以同一句提示词重发。仅提供给「尚未成功执行任何工具」的失败轮——
+   *  已经跑过工具的失败可能包含写操作，盲目重跑会把副作用再做一次，
+   *  由用户看到原因后自行决定是否重新发送 */
+  const retryFailedMessage = (assistantMessage: SuperMessage) => {
+    const index = messages.findIndex(item => item.id === assistantMessage.id)
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (messages[cursor].role === 'user') {
+        void send(messages[cursor].content)
+        return
+      }
+    }
+  }
+
+  /** 失败消息是否可安全重试：该轮没有已成功执行的工具步骤 */
+  const canRetryFailedMessage = (message: SuperMessage) => message.status === 'error'
+    && !(message.steps ?? []).some(step => step.status === 'success' || step.status === 'complete')
+
   const decide = async (decision: 'approve' | 'deny') => {
     const pending = pendingHere
     if (!pending || !selectedId) return
@@ -731,7 +848,7 @@ export default function SuperAssistantPage() {
           const slashHints = multicaConfig?.enabled ? matchSlashCommands(input, multicaConfig.commands) : []
           return slashHints.length > 0 && (
             <div data-testid="multica-command-hints" className="flex flex-wrap items-center gap-1.5 border-b border-border px-2.5 py-2">
-              <span className="text-[10px] text-[var(--color-text-tertiary)]">命令</span>
+              <span className="text-xs text-[var(--color-text-tertiary)]">命令</span>
               {slashHints.map(hint => (
                 <button
                   key={hint.command}
@@ -754,7 +871,7 @@ export default function SuperAssistantPage() {
           <div data-testid="super-assistant-queued-prompt" className="space-y-1 border-b border-border px-2.5 py-2">
             {queuedHere.map((item, index) => (
               <div key={`${item}-${index}`} className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-                <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">排队</span>
+                <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">排队</span>
                 <span className="min-w-0 flex-1 truncate">{item}</span>
                 <button
                   type="button"
@@ -784,8 +901,11 @@ export default function SuperAssistantPage() {
             }}
             onCancel={() => void stop()}
             loading={false}
-            // 空态主输入框用品牌占位符；原生 placeholder 在聚焦输入后自动消失，不会混入用户文本
-            placeholder={prominent && !loading && !modelLoadFailed && models.length > 0 ? '咨询任何问题，创造任何事物' : placeholder}
+            // 空态主输入框占位符：只指向当下真实存在的入口——斜杠命令仅在
+            // 外部集成已启用时提示（未配置时写了也用不了）；空会话没有「本会话附件」可指
+            placeholder={prominent && !loading && !modelLoadFailed && models.length > 0
+              ? (multicaConfig?.enabled ? '输入消息；Shift + Enter 换行 · 输入 / 调用已接入的命令' : '输入消息；Shift + Enter 换行')
+              : placeholder}
             disabled={models.length === 0}
             autoSize={{ minRows: 1, maxRows: 6 }}
             suffix={false}
@@ -839,7 +959,7 @@ export default function SuperAssistantPage() {
               >
                 <div className="flex items-center justify-between border-b border-border px-3 py-2">
                   <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">我发送的消息</span>
-                  <span className="text-[10px] text-[var(--color-text-tertiary)]">点击跳转 · 共 {myMessages.length} 条</span>
+                  <span className="text-xs text-[var(--color-text-tertiary)]">点击跳转 · 共 {myMessages.length} 条</span>
                 </div>
                 <div className="scrollbar-none max-h-64 overflow-y-auto py-1">
                   {[...myMessages].reverse().map((message, index) => (
@@ -974,14 +1094,15 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {/* 面板展开时头部宽度吃紧：上下文胶囊仅在 ≥2xl 视口展示（2xl 以上面板展开仍放得下） */}
+          {/* 面板展开时头部宽度吃紧：上下文胶囊仅在 ≥2xl 视口展示（2xl 以上面板展开仍放得下）；
+              窄屏（<md）胶囊整体让位，横向空间优先留给标题与模型选择器 */}
           {!loading && selectedConversation && (
-            <div className={configOpen ? 'hidden shrink-0 2xl:block' : 'shrink-0'}>
+            <div className={configOpen ? 'hidden shrink-0 2xl:block' : 'hidden shrink-0 md:block'}>
               <ContextUsage messages={messages} model={selectedModel} />
             </div>
           )}
           <Select
-            value={selectedModelId}
+            value={selectedModelIdForDisplay}
             onValueChange={value => {
               // 「管理模型」仅作跳转入口：不切换会话模型，直接进入模型配置页
               if (value === MANAGE_MODELS_VALUE) { navigate('/models'); return }
@@ -994,14 +1115,22 @@ export default function SuperAssistantPage() {
                 一律去粗焦点环只保留细边——细边即焦点指示，键盘操作同样可见 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-40 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
+              className="h-9 w-36 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
             >
-              <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'} />
+              {/* 触发器只显示配置名；底座模型放在选项第二行，不再拼接撑满一行 */}
+              <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'}>
+                {selectedModel ? selectedModel.name : undefined}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {models.map(model => (
                 <SelectItem key={model.id} value={model.id} className="text-xs">
-                  {model.models?.[0] && model.name !== model.models[0] ? `${model.name} · ${model.models[0]}` : model.name}
+                  <span className="flex min-w-0 flex-col items-start gap-0.5 py-0.5">
+                    <span className="max-w-56 truncate">{model.name}</span>
+                    {model.models?.[0] && model.name !== model.models[0] && (
+                      <span className="max-w-56 truncate text-[11px] text-[var(--color-text-tertiary)]">底座：{model.models[0]}</span>
+                    )}
+                  </span>
                 </SelectItem>
               ))}
               {hasMenuAccess(user, 'models') && (
@@ -1016,7 +1145,7 @@ export default function SuperAssistantPage() {
             onClick={() => void openBrowser()}
             aria-label={browserDisplay === 'pip' ? '恢复实时浏览器大窗口' : '打开实时浏览器'}
             title={browserDisplay === 'pip' ? '恢复实时浏览器大窗口' : '打开实时浏览器'}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand bg-brand-soft text-brand-ink transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand bg-brand-soft text-brand-ink transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
           >
             <Monitor size={15} />
           </button>
@@ -1026,10 +1155,41 @@ export default function SuperAssistantPage() {
             aria-label={configOpen ? '关闭助手配置' : '打开助手配置'}
             aria-expanded={configOpen}
             title="助手配置"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand bg-brand-soft text-brand-ink transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand bg-brand-soft text-brand-ink transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
           >
             <Settings2 size={15} />
           </button>
+          {/* 窄屏溢出菜单：实时浏览器/助手配置收进「⋯」，标题与模型选择器优先占位 */}
+          <Popover open={headerOverflowOpen} onOpenChange={setHeaderOverflowOpen}>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                aria-label="更多操作"
+                aria-expanded={headerOverflowOpen}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand bg-brand-soft text-brand-ink transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
+              >
+                <MoreHorizontal size={16} />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="end" side="bottom" sideOffset={8} className="w-44 p-1">
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); void openBrowser() }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Monitor size={15} className="shrink-0 text-brand-ink" />
+                {browserDisplay === 'pip' ? '恢复实时浏览器' : '打开实时浏览器'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); setConfigOpen(value => !value) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Settings2 size={15} className="shrink-0 text-brand-ink" />
+                {configOpen ? '关闭助手配置' : '打开助手配置'}
+              </button>
+            </PopoverContent>
+          </Popover>
         </header>
 
         <ConfigProvider
@@ -1062,26 +1222,49 @@ export default function SuperAssistantPage() {
             ) : !hasMessages ? (
               <div className="flex flex-1 items-center justify-center px-4 sm:px-8">
                 <div className="relative w-full max-w-3xl -translate-y-14 sm:-translate-y-20">
-                  <p className="absolute inset-x-0 bottom-full mb-8 text-center text-3xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-4xl">
-                    SuperAgent 工作空间 2.0
-                  </p>
+                  {/* 产品语言：主标题用产品名，副句只说当前真实可做的事 */}
+                  <div className="absolute inset-x-0 bottom-full mb-8 space-y-3 text-center">
+                    <h1 className="text-3xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-4xl">超级助手</h1>
+                    <p className="text-sm text-[var(--color-text-secondary)]">查资料、写文档、操作平台工具，或委派专业助手完成特定领域的任务</p>
+                  </div>
                   {renderComposer(true)}
                 </div>
               </div>
             ) : (
               <div
+                ref={node => { scrollHostRef.current = node }}
                 className="h-full overflow-y-auto"
                 onScroll={event => {
+                  if (jumpFlightRef.current) return
                   const node = event.currentTarget
-                  stickToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96
+                  const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 96
+                  stickToBottomRef.current = atBottom
+                  setShowJumpToLatest(!atBottom)
                 }}
               >
                 <div className="mx-auto w-full max-w-4xl space-y-8 px-4 pb-10 pt-8 sm:px-8">
-                  {messages.map(message => <ChatMessage key={message.id} message={message} />)}
+                  {messages.map(message => (
+                    <ChatMessage
+                      key={message.id}
+                      message={message}
+                      onRetry={canRetryFailedMessage(message) ? () => retryFailedMessage(message) : undefined}
+                    />
+                  ))}
                   {pendingHere && <ConfirmationCard pending={pendingHere} busyDecision={pendingDecision} onDecision={decision => void decide(decision)} />}
                   <div ref={messagesEndRef} />
                 </div>
               </div>
+            )}
+            {/* 离底较远时的兜底入口：一键回到最新消息（与贴底判定同一 96px 阈值） */}
+            {hasMessages && showJumpToLatest && (
+              <button
+                type="button"
+                onClick={jumpToLatest}
+                aria-label="回到最新消息"
+                className="absolute bottom-4 left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-card px-3.5 text-xs font-medium text-[var(--color-text-secondary)] shadow-md transition-colors hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ArrowDown size={13} className="shrink-0" /> 回到最新
+              </button>
             )}
           </main>
 

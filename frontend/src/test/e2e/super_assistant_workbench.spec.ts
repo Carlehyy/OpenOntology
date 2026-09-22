@@ -6,7 +6,7 @@ import { expectSameBoundingBox } from './support/geometry'
 // 本体治理跳后台并返回。全部接口本地 mock，不触真实后端。
 // 本 spec 另覆盖：分组限量展开、naive UTC 时区显示、行悬停不抖动、
 // 会话附件上传/移除/位于输入框上方与跨会话隔离、流式生成跨会话隔离、ReUI 模型选择器、
-// 删除确认弹窗、新建任务空会话去重、空态品牌文案与占位符、配置面板白底、
+// 删除确认弹窗、新建会话空会话去重、空态品牌文案与占位符、配置面板白底、
 // 重命名 blur 取消、知识图谱页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
 // 知识图谱过滤/节点详情/邻域检索高亮）、外部集成（multica 配置弹窗 + /multica:
 // 命令提示的配置门控）、⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、
@@ -248,6 +248,20 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         api_base: 'https://dashscope.aliyuncs.com', has_api_key: true, enabled: true, is_default: false,
         last_test_status: 'success', last_tested_at: at(0, 8), last_test_message: 'ok',
         models: ['qwen-max'], options: {}, created_by: 'admin',
+        created_at: at(0, 8), updated_at: at(0, 8),
+      }, {
+        // 后台管线配置（记忆宫殿抽取）：会话下拉不应出现
+        id: 'model-3', name: 'MiniMax-记忆宫殿抽取', config_type: 'llm', provider: 'minimax',
+        api_base: 'https://api.minimax.io', has_api_key: true, enabled: true, is_default: false,
+        last_test_status: 'success', last_tested_at: at(0, 8), last_test_message: 'ok',
+        models: ['MiniMax-M3'], options: { usage_tags: ['super_assistant_palace'] }, created_by: 'admin',
+        created_at: at(0, 8), updated_at: at(0, 8),
+      }, {
+        // 仅带 super_assistant 偏好标记的配置仍是可选对话模型
+        id: 'model-4', name: 'GLM 对话专用', config_type: 'llm', provider: 'zhipu',
+        api_base: 'https://open.bigmodel.cn', has_api_key: true, enabled: true, is_default: false,
+        last_test_status: 'success', last_tested_at: at(0, 8), last_test_message: 'ok',
+        models: ['glm-5'], options: { usage_tags: ['super_assistant'] }, created_by: 'admin',
         created_at: at(0, 8), updated_at: at(0, 8),
       }])
     }
@@ -529,7 +543,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
           { id: 'm-2', conversation_id: 'c-today', role: 'assistant', content: '你好，我是超级助手', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9) },
         ])
       }
-      // c-earlier 是「有消息的历史会话」：新建任务去重、底部输入框等场景以此为夹具
+      // c-earlier 是「有消息的历史会话」：新建会话去重、底部输入框等场景以此为夹具
       if (id === 'c-earlier') {
         return json(route, [
           { id: 'm-e1', conversation_id: 'c-earlier', role: 'user', content: '上周的问题', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 10) },
@@ -750,7 +764,7 @@ test('工作台骨架：七项入口齐备，近期会话单列表，归档折�
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await expect(page.getByRole('button', { name: '新建任务' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
   await expect(page.getByRole('button', { name: '知识图谱' })).toBeVisible()
@@ -856,7 +870,7 @@ test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级�
   // 经左栏「超级助手」返回工作台
   await assistantLink.click()
   await page.waitForURL(/#\/super-assistant/)
-  await expect(page.getByRole('button', { name: '新建任务' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
 
   // 右下角悬浮助手仍是第二条返回路径
   await page.getByRole('link', { name: '本体治理' }).click()
@@ -864,7 +878,7 @@ test('本体治理跳转本体管理：落地 #/ontologies，可经左栏超级�
   await page.getByTestId('assistant-widget-fab').click()
   await page.getByTestId('assistant-widget-open-full').click()
   await page.waitForURL(/#\/super-assistant/)
-  await expect(page.getByRole('button', { name: '新建任务' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
 })
 
 test('定时任务弹窗：查看已有计划、创建、点进某次执行', async ({ page }) => {
@@ -955,7 +969,7 @@ test('近期会话默认限量 10 条，展开全部后显示完整列表且可�
   const recent = page.locator('[data-workbench-group="recent"]')
   await expect(recent.locator('[data-workbench-conversation]')).toHaveCount(10)
   const toggle = page.locator('[data-workbench-group-toggle="recent"]')
-  await expect(toggle).toHaveText('展开全部（还有 3 条）')
+  await expect(toggle).toHaveText('显示全部 13 个会话')
 
   await toggle.click()
   await expect(recent.locator('[data-workbench-conversation]')).toHaveCount(13)
@@ -983,8 +997,12 @@ test('会话时间按本地时区显示：naive UTC 串按 UTC 解析', async ({
 
   const d = new Date(`${naive}Z`)
   const p2 = (n: number) => String(n).padStart(2, '0')
-  const expected = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
-  await expect(page.locator('[data-workbench-conversation="c-naive"]')).toContainText(expected)
+  // 窄列展示紧凑 MM-DD HH:mm，完整时间挂在时间戳 span 的 title 上
+  const compact = `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
+  const full = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${compact.slice(6)}`
+  const row = page.locator('[data-workbench-conversation="c-naive"]')
+  await expect(row).toContainText(compact)
+  await expect(row.locator('span[title]')).toHaveAttribute('title', full)
 })
 
 test('会话行悬停时行高与相邻组位置不变（无抖动）', async ({ page }) => {
@@ -1131,45 +1149,45 @@ test('删除会话走 ReUI 确认弹窗（非 window.confirm）', async ({ page 
   await expect(page.locator('[data-workbench-conversation="c-earlier"]')).toHaveCount(0)
 })
 
-test('新建任务去重：空会话或全新视图下点击不再创建新会话', async ({ page }) => {
+test('新建会话去重：空会话或全新视图下点击不再创建新会话', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
 
-  // c-today 是空会话：点击新建任务不创建
+  // c-today 是空会话：点击新建会话不创建
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
-  await page.getByRole('button', { name: '新建任务' }).click()
+  await page.getByRole('button', { name: '新建会话' }).click()
   await page.waitForTimeout(300)
   expect(mocks.createCalls).toHaveLength(0)
 
-  // 切到有消息的 c-earlier：点击新建任务创建新会话并选中
+  // 切到有消息的 c-earlier：点击新建会话创建新会话并选中
   await page.locator('[data-workbench-conversation="c-earlier"] button').first().click()
   await expect(page.getByText('上周的答复')).toBeVisible()
-  await page.getByRole('button', { name: '新建任务' }).click()
+  await page.getByRole('button', { name: '新建会话' }).click()
   await expect.poll(() => mocks.createCalls.length).toBe(1)
   await expect(page.locator('[data-workbench-conversation="c-new-1"]')).toHaveCount(1)
 
   // 新会话仍是空会话：再次点击不再创建
-  await page.getByRole('button', { name: '新建任务' }).click()
+  await page.getByRole('button', { name: '新建会话' }).click()
   await page.waitForTimeout(300)
   expect(mocks.createCalls).toHaveLength(1)
 })
 
-test('空态只保留品牌一句话，输入框占位符不混入用户输入', async ({ page }) => {
+test('空态保留产品名与能力一句话，输入框占位符不混入用户输入', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
 
-  const hero = page.getByText('SuperAgent 工作空间 2.0')
+  const hero = page.getByRole('heading', { name: '超级助手', exact: true })
   await expect(hero).toBeVisible()
-  await expect(page.getByText('有什么可以帮你？')).toHaveCount(0)
+  await expect(page.getByText('查资料、写文档、操作平台工具，或委派专业助手完成特定领域的任务')).toBeVisible()
   await expect(page.getByText('试试这样问')).toHaveCount(0)
   // 品牌一句话是页面视觉主角：字号不小于 text-3xl（30px）
   const heroFontSize = await hero.evaluate(el => parseFloat(getComputedStyle(el).fontSize))
   expect(heroFontSize).toBeGreaterThanOrEqual(30)
 
   const textbox = page.getByRole('textbox', { name: '向超级助手发送消息' })
-  await expect(textbox).toHaveAttribute('placeholder', '咨询任何问题，创造任何事物')
+  await expect(textbox).toHaveAttribute('placeholder', '输入消息；Shift + Enter 换行')
   await textbox.fill('帮我梳理需求')
   await expect(textbox).toHaveValue('帮我梳理需求')
 })
@@ -1526,11 +1544,15 @@ test('全局搜索：检索会话标题与消息内容，命中消息可跳转�
 
   // 输入关键词（防抖 300ms 后发出检索请求）
   await page.getByPlaceholder('搜索会话标题与消息内容…').fill('需求')
-  await expect(page.getByText('正在搜索…')).toHaveCount(1)
-  const searchingBox = await page.getByText('正在搜索…').boundingBox()
+  const searching = page.getByText('正在搜索…')
+  await expect(searching).toBeVisible()
+  // 夹具把检索响应挂起 500ms：并行 worker 拖慢时，断言到取几何之间元素可能已卸载，
+  // 句柄先行 + 空值跳过几何断言，消除竞态（几何检查存在时仍精确到 ±8px）
+  const searchingBox = await searching.boundingBox()
   const dialogBox = await dialog.boundingBox()
-  expect(searchingBox && dialogBox).toBeTruthy()
-  expect(Math.abs((searchingBox!.y + searchingBox!.height / 2) - (dialogBox!.y + 44 + 132))).toBeLessThan(8)
+  if (searchingBox && dialogBox) {
+    expect(Math.abs((searchingBox.y + searchingBox.height / 2) - (dialogBox.y + 44 + 132))).toBeLessThan(8)
+  }
 
   await expect.poll(() => mocks.searchQueries.length).toBeGreaterThan(0)
   await expect.poll(() => mocks.searchQueries.at(-1)).toBe('需求')
@@ -1856,4 +1878,298 @@ test('远程助手：空目录展示首次邀请文案，加载完成前不闪�
   await expect(integrationsDialog.getByText('还没有接入远程助手')).toBeVisible()
   await expect(integrationsDialog.getByText('之后还能继续添加')).toBeVisible()
   await expect(integrationsDialog.getByTestId('remote-agent-count')).toHaveCount(0)
+})
+
+test('会话模型下拉过滤后台用途配置：usage_tags 标记不出现，偏好标记保留', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  await page.getByRole('combobox', { name: '会话模型' }).click()
+  // 无标记与仅 super_assistant 偏好标记的对话模型可选
+  await expect(page.getByRole('option', { name: /Qwen/ })).toBeVisible()
+  await expect(page.getByRole('option', { name: /GLM 对话专用/ })).toBeVisible()
+  // 记忆宫殿抽取等后台管线配置不出现在会话模型列表
+  await expect(page.getByRole('option', { name: /记忆宫殿抽取/ })).toHaveCount(0)
+})
+
+test('长会话进入即贴底，上滚出现「回到最新」，点击回到底部', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  const longMessages = Array.from({ length: 30 }, (_, index) => ({
+    id: `m-long-${index}`, conversation_id: 'c-long',
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `第 ${index + 1} 条消息：${'内容'.repeat(30)}`,
+    status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9),
+  }))
+  await page.route('**/api/v2/super-assistant/conversations', route => {
+    if (route.request().method() === 'GET') {
+      return json(route, [{
+        id: 'c-long', title: '长会话', model_config_id: 'model-1',
+        status: 'active', created_at: at(0, 9), updated_at: at(0, 9),
+      }])
+    }
+    return route.fallback()
+  })
+  await page.route('**/api/v2/super-assistant/conversations/c-long/messages', route => json(route, longMessages))
+
+  await page.goto('/#/super-assistant?conversation=c-long')
+  const scroller = page.locator('main div.h-full.overflow-y-auto')
+  await expect(scroller.getByText('第 30 条消息')).toBeVisible()
+
+  // 进入长会话直接看到最新消息：滚动位置贴近底部
+  await expect.poll(async () => {
+    const distance = await scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight)
+    return Math.round(distance)
+  }).toBeLessThan(16)
+
+  // 上滚离开底部后出现「回到最新」
+  await scroller.evaluate(el => { el.scrollTop = 0 })
+  const jumpButton = page.getByRole('button', { name: '回到最新消息' })
+  await expect(jumpButton).toBeVisible()
+
+  await jumpButton.click()
+  await expect.poll(async () => {
+    const distance = await scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight)
+    return Math.round(distance)
+  }).toBeLessThan(16)
+  await expect(jumpButton).toBeHidden()
+})
+
+test('会话模型下拉空回退：全部配置带流水线标签时仍显示全集', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  // 后注册的路由优先：把全部 llm 配置都打上流水线专用标签（且都非默认）
+  await page.route('**/api/v1/models', route => json(route, [{
+    id: 'model-p1', name: 'Palace-A', config_type: 'llm', provider: 'a',
+    api_base: '', has_api_key: true, enabled: true, is_default: false,
+    last_test_status: 'success', last_tested_at: at(0, 8), last_test_message: 'ok',
+    models: ['a-1'], options: { usage_tags: ['super_assistant_palace'] }, created_by: 'admin',
+    created_at: at(0, 8), updated_at: at(0, 8),
+  }, {
+    id: 'model-p2', name: 'VLM-B', config_type: 'llm', provider: 'b',
+    api_base: '', has_api_key: true, enabled: true, is_default: false,
+    last_test_status: 'success', last_tested_at: at(0, 8), last_test_message: 'ok',
+    models: ['b-1'], options: { usage_tags: ['VLM提取'] }, created_by: 'admin',
+    created_at: at(0, 8), updated_at: at(0, 8),
+  }]))
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  // 会话保存的 model-1 不在（回退后的）模型集内：触发器按未选择处理、回落占位符，不渲染空白
+  const trigger = page.getByRole('combobox', { name: '会话模型' })
+  await expect(trigger).toHaveText(/选择模型/)
+
+  // 回退全集：不能因为 tagging 不全而变成「无可用模型」
+  await trigger.click()
+  await expect(page.getByRole('option', { name: /Palace-A/ })).toBeVisible()
+  await expect(page.getByRole('option', { name: /VLM-B/ })).toBeVisible()
+})
+
+test('过程卡连续同名工具折叠为 ×N，展开可见逐条子步骤', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.route('**/api/v2/super-assistant/conversations/c-earlier/messages', route => json(route, [{
+    id: 'm-s1', conversation_id: 'c-earlier', role: 'user', content: '查接口来源', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 10),
+  }, {
+    id: 'm-s2', conversation_id: 'c-earlier', role: 'assistant', status: 'complete',
+    content: '# 结论\n\n正文答复',
+    steps: [
+      { toolName: 'todo_write', status: 'success', preview: '计划' },
+      { toolName: 'browser_network_requests', status: 'success', preview: '请求 1' },
+      { toolName: 'browser_network_requests', status: 'success', preview: '请求 2' },
+      { toolName: 'browser_network_requests', status: 'error', preview: '请求 3' },
+    ],
+    token_usage: {}, created_at: at(5, 11),
+  }]))
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+
+  const process = page.getByTestId('super-assistant-turn-process')
+  await process.getByRole('button', { name: '4 个工具' }).click()
+  // 连续三条同名折叠为一行 ×3，聚合状态取失败（断言收在 summary 行，
+  // 折叠态下子步骤的「失败」也命中 getByText，严格模式会判多元素）
+  const group = process.locator('details', { hasText: 'browser_network_requests' })
+  await expect(group.locator('summary')).toContainText('browser_network_requests')
+  await expect(group.locator('summary')).toContainText('×3')
+  // 内置工具在等宽原名旁渲染中文友好名（MCP/未知名不翻译）
+  await expect(group.locator('summary')).toContainText('查看网络请求')
+  await expect(group.locator('summary')).toContainText('失败')
+  // 展开组：三条子步骤逐条可见
+  await group.locator('summary').click()
+  await expect(process.getByText('#1')).toBeVisible()
+  await expect(process.getByText('#2')).toBeVisible()
+  await expect(process.getByText('#3')).toBeVisible()
+  await expect(process.getByText('请求 3')).toBeVisible()
+})
+
+test('助手消息元信息行：显示时间与输出 tokens，缺 outputTokens 时仍显示时间', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.route('**/api/v2/super-assistant/conversations/c-earlier/messages', route => json(route, [{
+    id: 'm-t1', conversation_id: 'c-earlier', role: 'user', content: '问', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 10),
+  }, {
+    id: 'm-t2', conversation_id: 'c-earlier', role: 'assistant', content: '带用量的答复', status: 'complete',
+    steps: [], token_usage: { inputTokens: 1000, outputTokens: 1234 }, created_at: at(5, 11),
+  }, {
+    id: 'm-t3', conversation_id: 'c-earlier', role: 'user', content: '再问', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 12),
+  }, {
+    id: 'm-t4', conversation_id: 'c-earlier', role: 'assistant', content: '无输出用量的旧答复', status: 'complete',
+    steps: [], token_usage: {}, created_at: at(5, 13),
+  }]))
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+
+  const metas = page.getByTestId('super-assistant-message-meta')
+  await expect(metas).toHaveCount(2)
+  await expect(metas.first()).toContainText('输出 1.2k tokens')
+  await expect(metas.first()).toContainText(/-/) // 时间存在（MM-DD HH:mm）
+  // 旧记录缺 outputTokens：时间仍在，token 段不显示
+  await expect(metas.nth(1)).not.toContainText('tokens')
+})
+
+test('失败消息提供重试：无已成功工具的轮次以同一提示词重发', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.route('**/api/v2/super-assistant/conversations', route => {
+    if (route.request().method() === 'GET') {
+      return json(route, [{
+        id: 'c-err', title: '失败会话', model_config_id: 'model-1',
+        status: 'active', created_at: at(0, 9), updated_at: at(0, 9),
+      }])
+    }
+    return route.fallback()
+  })
+  // 重试完成后消息列表对齐为成功形态（send 的 finally 会重新拉取消息）
+  let retried = false
+  await page.route('**/api/v2/super-assistant/conversations/c-err/messages', route => json(route, retried
+    ? [
+      { id: 'm-err-1', conversation_id: 'c-err', role: 'user', content: '帮我算 1+1', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9) },
+      { id: 'm-err-3', conversation_id: 'c-err', role: 'assistant', content: '重试后的答复', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9) },
+    ]
+    : [
+      { id: 'm-err-1', conversation_id: 'c-err', role: 'user', content: '帮我算 1+1', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9) },
+      { id: 'm-err-2', conversation_id: 'c-err', role: 'assistant', content: '上游模型超时', status: 'error', steps: [], token_usage: {}, created_at: at(0, 9) },
+    ]))
+  const chatBodies: string[] = []
+  await page.route('**/api/v2/super-assistant/conversations/c-err/chat', route => {
+    retried = true
+    chatBodies.push(route.request().postData() || '')
+    return route.fulfill({ status: 200, contentType: 'text/event-stream', body: sseBody('重试后的答复') })
+  })
+
+  await page.goto('/#/super-assistant?conversation=c-err')
+  await expect(page.getByText('生成失败')).toBeVisible()
+  await page.getByRole('button', { name: '重试' }).click()
+
+  await expect.poll(() => chatBodies.length).toBe(1)
+  expect(JSON.parse(chatBodies[0])).toMatchObject({ message: '帮我算 1+1' })
+  await expect(page.getByText('重试后的答复')).toBeVisible()
+})
+
+test('失败且已有成功工具步骤的轮次不提供重试入口', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.route('**/api/v2/super-assistant/conversations', route => {
+    if (route.request().method() === 'GET') {
+      return json(route, [{
+        id: 'c-err-2', title: '带工具失败会话', model_config_id: 'model-1',
+        status: 'active', created_at: at(0, 9), updated_at: at(0, 9),
+      }])
+    }
+    return route.fallback()
+  })
+  await page.route('**/api/v2/super-assistant/conversations/c-err-2/messages', route => json(route, [
+    { id: 'm-et-1', conversation_id: 'c-err-2', role: 'user', content: '改一下标题', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9) },
+    { id: 'm-et-2', conversation_id: 'c-err-2', role: 'assistant', content: '执行工具后中断', status: 'error',
+      steps: [{ toolName: 'update_interface', status: 'success', arguments: {} }], token_usage: {}, created_at: at(0, 9) },
+  ]))
+
+  await page.goto('/#/super-assistant?conversation=c-err-2')
+  await expect(page.getByText('生成失败')).toBeVisible()
+  // 已成功执行过（可能含写操作的）工具：不提供一键重试，由用户自行决定是否重发
+  await expect(page.getByRole('button', { name: '重试' })).toHaveCount(0)
+})
+
+test.describe('窄屏顶栏与会话操作（390px）', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('顶栏保留标题与模型选择器，实时浏览器/助手配置收进溢出菜单', async ({ page }) => {
+    await seedAuth(page)
+    await mockApis(page)
+    await page.goto('/#/super-assistant?conversation=c-earlier')
+
+    // 标题优先占位：可见且未被压成 0 宽（按编辑按钮的 title 精确定位，避开侧栏同名会话行）
+    const title = page.getByTitle('点击编辑会话名称')
+    await expect(title).toBeVisible()
+    await expect(title).toHaveText(/上周数据摸底/)
+    expect((await title.boundingBox())?.width ?? 0).toBeGreaterThan(24)
+
+    // 模型选择器仍在顶栏，两个图标按钮让位给「⋯」溢出菜单
+    await expect(page.getByRole('combobox', { name: '会话模型' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '打开实时浏览器' })).toBeHidden()
+    await expect(page.getByRole('button', { name: '打开助手配置' })).toBeHidden()
+    const overflow = page.getByRole('button', { name: '更多操作' })
+    await expect(overflow).toBeVisible()
+
+    // 触屏无悬停：助手消息的复制按钮不依赖 hover，常显可用
+    const copyButton = page.getByRole('button', { name: '复制', exact: true }).first()
+    await expect(copyButton).toBeVisible()
+    await expect(copyButton).toHaveCSS('opacity', '1')
+
+    await overflow.click()
+    const menu = page.getByRole('dialog')
+    await expect(menu.getByRole('button', { name: '打开助手配置' })).toBeVisible()
+    await menu.getByRole('button', { name: '打开助手配置' }).click()
+    // 移动端配置面板为卡内覆盖抽屉：出现关闭入口即视为打开
+    await expect(page.getByRole('button', { name: '关闭助手配置' })).toBeVisible()
+  })
+
+  test('触屏无悬停：会话行归档/删除常显可达', async ({ page }) => {
+    await seedAuth(page)
+    await mockApis(page)
+    await page.goto('/#/super-assistant')
+
+    await page.getByRole('button', { name: '打开工作台导航' }).click()
+    const row = page.locator('[data-workbench-conversation="c-today"]')
+    await expect(row).toBeVisible()
+    // 不 hover，直接断言操作按钮可见且可点（时间戳窄屏让位）
+    const remove = row.getByRole('button', { name: '删除会话 今日需求梳理' })
+    await expect(remove).toBeVisible()
+    await remove.click()
+    await expect(page.getByRole('dialog', { name: '删除会话' })).toBeVisible()
+  })
+})
+
+test('代码块复制失败如实反馈：显示失败提示并选中代码留出手动复制路径', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.route('**/api/v2/super-assistant/conversations/c-earlier/messages', route => json(route, [
+    { id: 'm-c1', conversation_id: 'c-earlier', role: 'user', content: '给个示例', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 10) },
+    { id: 'm-c2', conversation_id: 'c-earlier', role: 'assistant', status: 'complete',
+      content: '示例：\n\n```json\n{"k": "v"}\n```\n', steps: [], token_usage: { outputTokens: 42 }, created_at: at(5, 11) },
+  ]))
+  // 双路径剪贴板全部失败：Clipboard API 不可用 + execCommand 返回 false
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => undefined })
+    Document.prototype.execCommand = () => false
+  })
+
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+  await page.getByRole('button', { name: '复制', exact: true }).first().click()
+  await expect(page.getByText('复制失败，可手动复制')).toBeVisible()
+  // 失败兜底：代码块被选中，用户可直接 Cmd+C / Ctrl+C
+  const selected = await page.evaluate(() => String(window.getSelection()))
+  expect(selected).toContain('"k": "v"')
+})
+
+test('助手完成但无正文时如实展示「助手未返回文本」', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.route('**/api/v2/super-assistant/conversations/c-earlier/messages', route => json(route, [
+    { id: 'm-n1', conversation_id: 'c-earlier', role: 'user', content: '在吗', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 10) },
+    { id: 'm-n2', conversation_id: 'c-earlier', role: 'assistant', content: '', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 11) },
+  ]))
+
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+  await expect(page.getByText('助手未返回文本')).toBeVisible()
+  // 旧文案不应残留
+  await expect(page.getByText('（无文本）')).toHaveCount(0)
 })

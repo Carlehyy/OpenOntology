@@ -3,15 +3,19 @@ import { describe, it } from 'node:test'
 
 import {
   appendToolStart,
+  BUILTIN_TOOL_FRIENDLY_NAMES,
   enqueueMessage,
+  groupConsecutiveSteps,
   mergeServerMessages,
   normalizeAssistantMarkdown,
   patchToolStep,
+  plainSnippet,
   processSummary,
   sameConversationList,
   sameMessageList,
   shiftQueue,
   splitProcessAndAnswer,
+  toolGroupStatus,
   toolStatusLabel,
 } from '../../../pages/super-assistant/components/chatTranscript.ts'
 import type { SuperMessage } from '../../../api/superAssistant.ts'
@@ -156,5 +160,77 @@ describe('chatTranscript', () => {
     assert.equal(sameConversationList([base], [{ ...base, title: '你好，同步自测' }]), false)
     assert.equal(sameConversationList([base], [{ ...base, updated_at: '2026-09-22T00:01:00Z' }]), false)
     assert.equal(sameConversationList([], [base]), false)
+  })
+
+  it('folds only consecutive same-name tool steps into groups', () => {
+    const steps = [
+      { toolName: 'todo_write', status: 'success' },
+      { toolName: 'browser_network_requests', status: 'success' },
+      { toolName: 'browser_network_requests', status: 'success' },
+      { toolName: 'browser_network_requests', status: 'success' },
+      { toolName: 'todo_write', status: 'success' },
+    ]
+    const groups = groupConsecutiveSteps(steps)
+    assert.deepEqual(groups.map(group => [group.toolName, group.steps.length]), [
+      ['todo_write', 1],
+      ['browser_network_requests', 3],
+      ['todo_write', 1],
+    ])
+    assert.equal(groups[0].startIndex, 0)
+    assert.equal(groups[1].startIndex, 1)
+    assert.equal(groups[2].startIndex, 4)
+  })
+
+  it('aggregates group status with awaiting/running outranking errors', () => {
+    assert.equal(toolGroupStatus([{ toolName: 't', status: 'success' }]), 'success')
+    assert.equal(toolGroupStatus([
+      { toolName: 't', status: 'success' },
+      { toolName: 't', status: 'error' },
+    ]), 'error')
+    assert.equal(toolGroupStatus([
+      { toolName: 't', status: 'success' },
+      { toolName: 't', status: 'running' },
+    ]), 'running')
+    assert.equal(toolGroupStatus([
+      { toolName: 't', status: 'cancelled' },
+      { toolName: 't', status: 'awaiting_confirmation' },
+    ]), 'awaiting_confirmation')
+    assert.equal(toolGroupStatus([
+      { toolName: 't', status: 'success' },
+      { toolName: 't', status: 'cancelled' },
+    ]), 'cancelled')
+  })
+
+  it('strips markdown syntax in search snippets and windows around the keyword', () => {
+    const raw = '好的，我来抓取请求。```json\n{"code":0}\n```\n# 滚动到底部后的接口确认\n浏览器已经实际**滚动到底部**并触发了 `x/web-show/res/locs` 接口。'
+    const snippet = plainSnippet(raw, '滚动到底部')
+    assert.equal(snippet.includes('```'), false)
+    assert.equal(snippet.includes('# 滚动'), false)
+    assert.equal(snippet.includes('**'), false)
+    assert.equal(snippet.includes('`x/web-show'), false)
+    assert.ok(snippet.includes('滚动到底部'))
+    // 命中词两侧超出窗口半径时带省略号，窗口内保留关键词本体
+    const windowed = plainSnippet(`${'前'.repeat(60)}命中词${'后'.repeat(60)}`, '命中词')
+    assert.ok(windowed.startsWith('…'))
+    assert.ok(windowed.endsWith('…'))
+    assert.ok(windowed.includes('命中词'))
+    // 关键词未命中：退化为截断展示，语法符号仍被剥离
+    const fallback = plainSnippet(raw, '不存在的关键词')
+    assert.equal(fallback.includes('**'), false)
+    assert.ok(fallback.endsWith('…'))
+    assert.ok(fallback.length <= 65)
+    // 不把 snake_case 的下划线当强调剥掉
+    assert.equal(plainSnippet('调用了 browser_network_requests 接口', '接口').includes('browser_network_requests'), true)
+  })
+})
+
+describe('BUILTIN_TOOL_FRIENDLY_NAMES', () => {
+  it('仅覆盖内置工具：已知名命中、MCP/未知名不命中', () => {
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.browser_navigate, '打开网页')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.web_fetch, '抓取网页')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.todo_write, '写入步骤清单')
+    // MCP 工具与未知名一律不翻译（直出原名）
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_api_hub__create_interface'], undefined)
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.unknown_tool, undefined)
   })
 })

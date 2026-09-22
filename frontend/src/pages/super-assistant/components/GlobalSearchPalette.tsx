@@ -13,20 +13,24 @@ import {
 } from '@/components/ui/command'
 import { formatSessionTime } from '@/utils/datetime'
 
+import { plainSnippet } from './chatTranscript'
+
 interface GlobalSearchPaletteProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSelectConversation: (conversationId: string, messageId?: string) => void
 }
 
-/** 关键词在文本中的首个命中位置高亮（大小写不敏感，纯前端展示层处理） */
+/** 关键词在文本中的首个命中位置高亮（大小写不敏感，纯前端展示层处理）。
+ *  品牌浅底不加透明度修饰符：brand-* 指向 CSS 变量，Tailwind 3.4 解析不了
+ *  var() 上的 /NN 修饰，声明会被丢弃并回落到 <mark> 的 UA 纯黄 */
 function Highlight({ text, keyword }: { text: string; keyword: string }) {
   const index = keyword ? text.toLowerCase().indexOf(keyword.toLowerCase()) : -1
   if (index < 0) return <>{text}</>
   return (
     <>
       {text.slice(0, index)}
-      <mark className="rounded-sm bg-brand-mist/70 px-0 text-inherit">{text.slice(index, index + keyword.length)}</mark>
+      <mark className="rounded-sm bg-brand-soft px-0.5 font-medium text-brand-ink">{text.slice(index, index + keyword.length)}</mark>
       {text.slice(index + keyword.length)}
     </>
   )
@@ -153,7 +157,8 @@ export default function GlobalSearchPalette({ open, onOpenChange, onSelectConver
                 <MessageSquareText size={15} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm">
-                    <Highlight text={hit.snippet} keyword={keyword} />
+                    {/* 摘要展示层净化：剥离围栏/标题符/强调星号后按命中词截窗，命中哪句话一眼可读 */}
+                    <Highlight text={plainSnippet(hit.snippet, keyword)} keyword={keyword} />
                   </span>
                   <span className="mt-0.5 block truncate text-[10px] text-[var(--color-text-tertiary)]">
                     {item.title || '未命名会话'} · {hit.role === 'user' ? '我' : '助手'} · {formatSessionTime(hit.createdAt)}

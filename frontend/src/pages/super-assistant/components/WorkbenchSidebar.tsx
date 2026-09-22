@@ -48,6 +48,13 @@ interface ConversationRowProps {
   onSetArchived: (id: string, archived: boolean) => void
 }
 
+/** 侧栏窄列的紧凑时间：MM-DD HH:mm；完整时间（YYYY-MM-DD HH:mm）挂在 title 上 */
+const formatCompactSessionTime = (value: string) => {
+  const full = formatSessionTime(value)
+  const match = /^\d{4}-(\d{2}-\d{2} \d{2}:\d{2})$/.exec(full)
+  return match ? match[1] : full
+}
+
 function ConversationRow({ item, current, archived, onSelect, onDelete, onSetArchived }: ConversationRowProps) {
   const title = item.title.trim() || '未命名会话'
   return (
@@ -71,11 +78,15 @@ function ConversationRow({ item, current, archived, onSelect, onDelete, onSetArc
         </span>
       </button>
       {/* 时间戳与 hover 动作按钮都锁定 h-6：两者高度一致，
-          悬停切换时行高不变，列表不抖动 */}
-      <span className="flex h-6 shrink-0 items-center text-[10px] tabular-nums text-[var(--color-text-tertiary)] group-hover:hidden">
-        {formatSessionTime(item.updated_at)}
+          悬停切换时行高不变，列表不抖动。
+          触屏没有悬停：窄屏（<md）隐藏时间戳、常显归档/删除，保证操作可达 */}
+      <span
+        title={formatSessionTime(item.updated_at)}
+        className="flex h-6 shrink-0 items-center text-xs tabular-nums text-[var(--color-text-tertiary)] group-hover:hidden max-md:hidden"
+      >
+        {formatCompactSessionTime(item.updated_at)}
       </span>
-      <span className="hidden h-6 shrink-0 items-center gap-0.5 group-hover:flex">
+      <span className="hidden h-6 shrink-0 items-center gap-0.5 group-hover:flex max-md:flex">
         <button
           type="button"
           onClick={() => onSetArchived(item.id, !archived)}
@@ -155,9 +166,9 @@ export default function WorkbenchSidebar({
         data-workbench-group-toggle={key}
         aria-expanded={expanded}
         onClick={() => toggleGroupExpanded(key)}
-        className="mt-0.5 flex w-full items-center justify-center rounded-lg px-2 py-1 text-[10px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="mt-0.5 flex w-full items-center justify-center rounded-lg px-2 py-1 text-xs text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        {expanded ? '收起' : `展开全部（还有 ${hiddenCount} 条）`}
+        {expanded ? '收起' : `显示全部 ${total} 个会话`}
       </button>
     )
   }
@@ -188,7 +199,7 @@ export default function WorkbenchSidebar({
         </button>
       </div>
 
-      {/* 新建任务 */}
+      {/* 新建会话：动作与产物同名（侧栏分组叫「近期会话」），与「定时任务」功能项不再抢词 */}
       <div className="shrink-0 px-2 pt-3">
         <button
           type="button"
@@ -196,7 +207,7 @@ export default function WorkbenchSidebar({
           className="flex h-10 w-full items-center justify-center gap-2 rounded-xl text-sm font-medium text-white shadow-sm transition-all hover:opacity-95 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           style={{ background: 'var(--color-nav-bg)' }}
         >
-          <Plus size={16} /> 新建任务
+          <Plus size={16} /> 新建会话
         </button>
       </div>
 
@@ -240,7 +251,7 @@ export default function WorkbenchSidebar({
         <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto pb-2">
           {activeCount === 0 && groups.archived.length === 0 && (
             <p className="px-3 py-6 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-              还没有会话，点击上方「新建任务」开始。
+              还没有会话，点击上方「新建会话」开始。
             </p>
           )}
           {groups.recent.length > 0 && (

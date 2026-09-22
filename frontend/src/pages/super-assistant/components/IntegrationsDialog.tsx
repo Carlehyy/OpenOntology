@@ -302,7 +302,7 @@ function InvitePromptModal({ promptText, onClose }: {
           value={promptText}
           data-testid="remote-agent-invite-prompt"
           onFocus={selectAll}
-          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-code-bg)] p-3 font-mono text-xs leading-5 text-[var(--color-code-fg)] outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring/10"
+          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-code-bg)] p-3 font-mono text-xs leading-5 text-[var(--color-code-fg)] outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
         />
         <p className="text-[11px] leading-4 text-[var(--color-text-tertiary)]">
           邀请码 24 小时内有效、一次性，仅发给要接入的助手。对方在内网 / NAT 后时会自动选择「回连」方式接入，无需暴露端口。
@@ -623,7 +623,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                     disabled={!!form.id}
                     onChange={event => setForm({ ...form, key: event.target.value })}
                     placeholder="remote.my-agent"
-                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10 disabled:opacity-60"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
                   />
                   <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
                     以 remote. 开头（小写字母/数字/-/_），创建后不可改；留空按名称自动生成。
@@ -635,7 +635,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                     value={form.label}
                     onChange={event => setForm({ ...form, label: event.target.value })}
                     placeholder="例如：客服知识库助手"
-                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
                   />
                 </label>
               </div>
@@ -645,7 +645,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                   value={form.description}
                   onChange={event => setForm({ ...form, description: event.target.value })}
                   placeholder="它擅长什么、适合什么任务（子助手看不到对话历史，描述要自包含）"
-                  className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                  className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
                 />
               </label>
               {form.mode === 'direct' && (
@@ -656,7 +656,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                       value={form.endpoint}
                       onChange={event => setForm({ ...form, endpoint: event.target.value })}
                       placeholder="https://agent.example.com/turn"
-                      className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                      className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
                     />
                     <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
                       平台将向该地址 POST 任务并等待答复；生产环境按 SSRF 策略拒绝内网地址。
@@ -684,7 +684,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                         value={form.token}
                         onChange={event => setForm({ ...form, token: event.target.value })}
                         placeholder={form.id && agents.find(a => a.id === form.id)?.token_set ? '已保存（留空保留）' : '可留空'}
-                        className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                        className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
                       />
                       <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">加密存储、永不回显。</span>
                     </label>
@@ -694,7 +694,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                           type="number" min={10} max={600}
                           value={form.timeoutSeconds}
                           onChange={event => setForm({ ...form, timeoutSeconds: Number(event.target.value) || 120 })}
-                          className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                          className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
                         />
                       </label>
                       <label className="flex items-end pb-1 text-xs text-[var(--color-text-secondary)]">
@@ -712,7 +712,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                       type="number" min={10} max={600}
                       value={form.timeoutSeconds}
                       onChange={event => setForm({ ...form, timeoutSeconds: Number(event.target.value) || 120 })}
-                      className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                      className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
                     />
                   </label>
                   <label className="flex items-end pb-1 text-xs text-[var(--color-text-secondary)]">
@@ -917,7 +917,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
                 value={baseUrl}
                 onChange={event => setBaseUrl(event.target.value)}
                 placeholder="http://127.0.0.1:8080"
-                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
               />
               <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
                 自托管实例的 API 地址（默认端口 8080）；生产环境按 SSRF 策略拒绝内网地址。
@@ -930,7 +930,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
                 value={token}
                 onChange={event => setToken(event.target.value)}
                 placeholder={config?.token_set ? '已保存（留空保留）' : 'mul_…（在 Multica 网页 Settings → API Token 创建）'}
-                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus:ring-2 focus:ring-ring/10"
+                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
               />
               <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
                 加密存储、永不回显；只用 PAT，不保存登录验证码。

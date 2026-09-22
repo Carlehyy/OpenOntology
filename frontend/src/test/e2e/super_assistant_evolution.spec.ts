@@ -144,7 +144,7 @@ test('超级助手：待审批与记忆面板全链路', async ({ page }) => {
   await expect(rejectButton.locator('.animate-spin')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '接受', exact: true }).locator('.animate-spin')).toBeVisible()
 
-  await expect(page.getByText('没有待审批的候选')).toBeVisible()
+  await expect(page.getByText('暂无需要你批准的记忆或技能')).toBeVisible()
   expect(decisions).toEqual([{ decision: 'accept' }])
 
   // 记忆：列表、搜索过滤、auto-accept 开关、409 冲突提示

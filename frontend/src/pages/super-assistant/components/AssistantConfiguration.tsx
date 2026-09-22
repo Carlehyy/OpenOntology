@@ -426,12 +426,24 @@ function McpDialog({ server, onClose, onSaved }: {
             <textarea value={env} onChange={event => setEnv(event.target.value)} rows={4} placeholder={server ? `留空保持现有环境变量（${server.env_names.join(', ') || '无'}）` : '{\n  "API_KEY": "…"\n}'}
               className="mt-1.5 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3 font-mono text-xs leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring" />
           </label>
-          <p className="rounded-lg bg-amber-50 p-3 text-[11px] leading-5 text-amber-800">stdio 会在后端容器内启动进程，部署方必须显式启用并允许该 command。env 会加密存储且不回显。</p>
+          {/* 首句用户语言；部署细节收进「了解详情」，安全事实不删。
+              容器用 div：details 是流内容，p/span 的内容模型装不下 */}
+          <div className="rounded-lg bg-amber-50 p-3 text-[11px] leading-5 text-amber-800">stdio 会在服务器上启动一个本地进程并运行你填写的命令，请只添加完全可信的来源。
+            <details className="mt-1">
+              <summary className="cursor-pointer underline decoration-[var(--color-warning)] underline-offset-2">了解详情</summary>
+              <span className="mt-1 block">该模式在后端容器内以子进程运行，部署方必须显式启用并允许该 command；env 会加密存储且不会回显。</span>
+            </details>
+          </div>
         </> : <>
           <label className="block text-xs text-[var(--color-text-secondary)]">MCP URL <span className="text-red-500">*</span>
             <input type="url" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://mcp.example.com/mcp"
               className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-            <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">公网地址可直接连接；生产环境会拒绝环回、内网和链路本地地址。</span>
+            <div className="mt-1 text-[10px] leading-4 text-[var(--color-text-tertiary)]">生产环境只接受公网能访问的地址（安全策略限制）。
+              <details className="mt-0.5">
+                <summary className="cursor-pointer underline decoration-[var(--color-border)] underline-offset-2">了解详情</summary>
+                <span className="mt-0.5 block">公网地址可直接连接；生产环境会拒绝环回、内网和链路本地地址。</span>
+              </details>
+            </div>
           </label>
           <label className="block text-xs text-[var(--color-text-secondary)]">请求头 JSON
             <textarea value={headers} onChange={event => setHeaders(event.target.value)} rows={4} placeholder={server ? `留空保持现有请求头（${server.header_names.join(', ') || '无'}）` : '{\n  "Authorization": "Bearer …"\n}'}
@@ -469,7 +481,7 @@ function SettingSwitch({ label, ariaLabel, checked, busy, onToggle }: {
 }) {
   return (
     <div className="inline-flex items-center gap-1.5">
-      <span className="text-[10px] text-[var(--color-text-secondary)]">{label}</span>
+      <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>
       <button type="button" role="switch" aria-label={ariaLabel} aria-checked={checked} aria-busy={busy} disabled={busy} onClick={onToggle}
         className="relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60">
         <span aria-hidden="true" className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors motion-reduce:transition-none ${busy ? 'animate-pulse motion-reduce:animate-none' : ''} ${checked ? 'bg-brand' : 'bg-slate-300'}`}>
@@ -762,7 +774,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
           <header className="flex shrink-0 items-start justify-between border-b border-[var(--color-border)] px-4 py-3.5">
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">助手配置</h2>
-              <p className="mt-1 text-[10px] leading-4 text-[var(--color-text-tertiary)]">管理当前助手可用的 Skill 与 MCP Server</p>
+              <p className="mt-1 text-xs leading-4 text-[var(--color-text-tertiary)]">管理当前助手可用的 Skill 与 MCP Server</p>
             </div>
             <button type="button" onClick={onClose} aria-label="关闭助手配置"
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
@@ -776,15 +788,15 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             />
             <button type="button" onClick={() => setTab('skills')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'skills' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
-              Skill <span className={`ml-1 text-[10px] tabular-nums ${tab === 'skills' ? 'text-white' : 'text-slate-400'}`}>{skills.length}</span>
+              Skill <span className={`ml-1 text-xs tabular-nums ${tab === 'skills' ? 'text-white' : 'text-slate-400'}`}>{skills.length}</span>
             </button>
             <button type="button" onClick={() => setTab('mcp')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'mcp' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
-              MCP <span className={`ml-1 text-[10px] tabular-nums ${tab === 'mcp' ? 'text-white' : 'text-slate-400'}`}>{configurableServers.length}</span>
+              MCP <span className={`ml-1 text-xs tabular-nums ${tab === 'mcp' ? 'text-white' : 'text-slate-400'}`}>{configurableServers.length}</span>
             </button>
             <button type="button" onClick={() => setTab('tools')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'tools' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
-              工具 <span className={`ml-1 text-[10px] tabular-nums ${tab === 'tools' ? 'text-white' : 'text-slate-400'}`}>{tools.length}</span>
+              工具 <span className={`ml-1 text-xs tabular-nums ${tab === 'tools' ? 'text-white' : 'text-slate-400'}`}>{tools.length}</span>
             </button>
             <button type="button" onClick={() => setTab('approval')}
               className={`relative z-10 flex min-h-9 items-center justify-center gap-1 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'approval' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>

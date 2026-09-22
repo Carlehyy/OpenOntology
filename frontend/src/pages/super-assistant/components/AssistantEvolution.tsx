@@ -125,17 +125,17 @@ export function ApprovalTab({ conversationId }: { conversationId: string | null 
         onClick={runFullReflection}
         disabled={!conversationId || reflecting}
         className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-brand-line bg-brand-soft text-xs font-medium text-brand-ink transition-colors hover:bg-brand-mist disabled:cursor-not-allowed disabled:opacity-50"
-        title={conversationId ? '对当前会话执行一次完整反思' : '请先选择一个会话'}
+        title={conversationId ? '检查当前会话，整理出可保存的记忆与技能' : '请先选择一个会话'}
       >
         {reflecting ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
-        立即反思当前会话
+        检查这次对话，整理可保存的记忆
       </button>
       {loading && candidates.length === 0 && (
         <div className="p-10 text-center text-xs text-[var(--color-text-tertiary)]"><Loader2 size={18} className="mx-auto animate-spin" /></div>
       )}
       {!loading && candidates.length === 0 && (
         <div className="rounded-xl border border-dashed border-[var(--color-border)] p-10 text-center text-xs text-[var(--color-text-tertiary)]">
-          <Check size={22} className="mx-auto mb-2" />没有待审批的候选
+          <Check size={22} className="mx-auto mb-2" />暂无需要你批准的记忆或技能
         </div>
       )}
       {candidates.map(candidate => {
@@ -157,7 +157,7 @@ export function ApprovalTab({ conversationId }: { conversationId: string | null 
               <>
                 <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-[var(--color-text-primary)]">{String(payload.content || '')}</p>
                 {Array.isArray(payload.supersedes) && payload.supersedes.length > 0 && (
-                  <p className="mt-1 text-[10px] text-amber-600">接受后将取代 {payload.supersedes.length} 条旧记忆</p>
+                  <p className="mt-1 text-xs text-[var(--color-warning)]">接受后将取代 {payload.supersedes.length} 条旧记忆</p>
                 )}
                 {actions(candidate)}
               </>
