@@ -403,30 +403,47 @@ def test_run_history_filters_failures_and_slow_calls(hub_client):
 
 def test_run_history_keyword_matches_name_or_numeric_run_id(hub_client):
     """H25：纯数字关键词同时按 runs.id 精确匹配，接口名模糊匹配语义不变。"""
-    item = hub_client.post("/interfaces", json=_interface()).json()
+    first = hub_client.post("/interfaces", json=_interface()).json()
+    second = hub_client.post(
+        "/interfaces", json=_interface(name="2026 年度报表")
+    ).json()
     created_at = datetime.now(timezone.utc).isoformat()
     with db.get_conn() as conn:
-        conn.execute(
+        conn.executemany(
             "INSERT INTO runs(interface_id, ok, status_code, elapsed_ms, "
             "request_snapshot, response_headers, response_body, error, relogin, "
             "created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (item["id"], 1, 200, 120, "{}", "{}", "{}", None, 0, created_at),
+            [
+                (first["id"], 1, 200, 120, "{}", "{}", "{}", None, 0, created_at),
+                (second["id"], 1, 200, 90, "{}", "{}", "{}", None, 0, created_at),
+            ],
         )
-        run_id = conn.execute("SELECT id FROM runs").fetchone()["id"]
+        run_ids = [row["id"] for row in conn.execute("SELECT id FROM runs").fetchall()]
 
-    by_id = hub_client.get("/runs", params={"keyword": str(run_id)}).json()
+    # 纯数字命中 runs.id（两个接口名都不含与 id 撞车的数字）
+    by_id = hub_client.get("/runs", params={"keyword": str(run_ids[0])}).json()
     assert by_id["total"] == 1
-    assert by_id["items"][0]["id"] == run_id
+    assert by_id["items"][0]["id"] == run_ids[0]
 
+    # 纯数字同样能按接口名命中（id 仅为 1/2，与 2026 不可能撞车）
+    by_digit_name = hub_client.get("/runs", params={"keyword": "2026"}).json()
+    assert by_digit_name["total"] == 1
+    assert by_digit_name["items"][0]["interface_id"] == second["id"]
+
+    # 中文名模糊匹配语义不变；数字未命中返回空
     by_name = hub_client.get("/runs", params={"keyword": "健康"}).json()
     assert by_name["total"] == 1
-    assert by_name["items"][0]["id"] == run_id
-
+    assert by_name["items"][0]["id"] == run_ids[0]
     numeric_miss = hub_client.get("/runs", params={"keyword": "999999"}).json()
     assert numeric_miss["total"] == 0
 
-    name_still_wins = hub_client.get("/runs", params={"keyword": "1"}).json()
-    assert {row["id"] for row in name_still_wins["items"]} == {run_id}
+    # 上标数字（isdigit 为 True 但非十进制）不得进入 id 分支抛 ValueError→500
+    superscript = hub_client.get("/runs", params={"keyword": "2\u00b2"}).json()
+    assert superscript["total"] == 0
+
+    # 超长数字串不触发 SQLite 整数绑定溢出，退回名称匹配
+    huge = hub_client.get("/runs", params={"keyword": "9" * 40}).json()
+    assert huge["total"] == 0
 
 
 def test_non_2xx_response_is_failure_in_history(

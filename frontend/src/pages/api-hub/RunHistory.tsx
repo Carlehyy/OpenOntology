@@ -68,8 +68,8 @@ function quickRangeDates(range: (typeof QUICK_RANGES)[number]) {
   return { start: toLocalDateString(start), end }
 }
 
-/** H26：静态密钥类请求头原样入库（个人变量占位符除外），展示层默认打码防投屏/截图泄露。 */
-const SENSITIVE_HEADER_RE = /(authorization|cookie|token|secret|passwd|password|api[-_]?key|private[-_]?key)/i
+/** H26：静态密钥类请求头/查询参数原样入库（个人变量占位符除外），展示层默认打码防投屏/截图泄露。 */
+const SENSITIVE_HEADER_RE = /(authorization|x-auth|cookie|token|secret|passwd|password|pwd|api[-_]?key|private[-_]?key|signature|session|jwt)/i
 
 function maskHeaderValue(key: string, value: string) {
   return SENSITIVE_HEADER_RE.test(key) ? '••••••（敏感头已脱敏展示）' : value
@@ -99,10 +99,14 @@ export default function RunHistory() {
   const [refreshing, setRefreshing] = useState(false)
   const detailRequestRef = useRef<number | null>(null)
   const refreshRequestRef = useRef(false)
+  const historyRequestSeqRef = useRef(0)
   // H13：复制被拒时全选详情面板内容，作为手动 Cmd/Ctrl+C 的兜底
   const detailPanelRef = useRef<HTMLDivElement | null>(null)
 
   const loadHistory = useCallback(async (silent = false) => {
+    // 时序守卫：自动刷新轮询与筛选切换并发时，仅渲染最新一次请求的结果，
+    // 防止慢响应在途返回后把新筛选的列表回写覆盖成旧数据。
+    const requestSeq = ++historyRequestSeqRef.current
     if (!silent) setHistoryLoading(true)
     setHistoryError('')
     try {
@@ -114,12 +118,14 @@ export default function RunHistory() {
         end: filters.end ? new Date(`${filters.end}T23:59:59.999`).toISOString() : '',
         result: filters.result,
       })
+      if (historyRequestSeqRef.current !== requestSeq) return
       setItems(history.items)
       setTotal(history.total)
     } catch (error) {
+      if (historyRequestSeqRef.current !== requestSeq) return
       setHistoryError(apiError(error))
     } finally {
-      if (!silent) setHistoryLoading(false)
+      if (!silent && historyRequestSeqRef.current === requestSeq) setHistoryLoading(false)
     }
   }, [filters, page])
 
@@ -284,7 +290,8 @@ export default function RunHistory() {
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()
-    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+    // 留出下载取 blob 引用的窗口再回收，避免个别浏览器早 revoke 截断下载
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -451,7 +458,7 @@ export default function RunHistory() {
               type="button"
               disabled={page <= 1 || historyLoading}
               onClick={() => setPage(value => value - 1)}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:cursor-not-allowed disabled:opacity-35"
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35"
               aria-label="上一页"
             >
               <ChevronLeft size={14} />
@@ -461,7 +468,7 @@ export default function RunHistory() {
               type="button"
               disabled={page >= pages || historyLoading}
               onClick={() => setPage(value => value + 1)}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:cursor-not-allowed disabled:opacity-35"
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35"
               aria-label="下一页"
             >
               <ChevronRight size={14} />
@@ -903,7 +910,7 @@ function EmptyHistory({ filtered, onReset }: { filtered: boolean; onReset: () =>
         {filtered ? '调整接口名称、时间范围或结果筛选后再试。' : '接口首次被调用后，这里会保留请求、响应和耗时证据。'}
       </p>
       {filtered && (
-        <button type="button" onClick={onReset} className="mt-3 text-xs font-medium text-brand-ink hover:underline">清除全部筛选</button>
+        <button type="button" onClick={onReset} className="mt-3 rounded text-xs font-medium text-brand-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">清除全部筛选</button>
       )}
     </div>
   )
@@ -1156,7 +1163,7 @@ function RequestSnapshotView({ snapshot }: { snapshot: Record<string, unknown> |
   if (!snapshot) return <EmptyValue text="暂无请求快照" />
   const method = typeof snapshot.method === 'string' ? snapshot.method : ''
   const url = typeof snapshot.url === 'string' ? snapshot.url : ''
-  const queryParams = kvPairsOf(snapshot.query_params).map(row => ({ key: row.key, value: row.value || '（空）' }))
+  const queryParams = kvPairsOf(snapshot.query_params).map(row => ({ key: row.key, value: maskHeaderValue(row.key, row.value || '（空）') }))
   const headers = kvPairsOf(snapshot.headers).map(row => ({ key: row.key, value: maskHeaderValue(row.key, row.value || '（空）') }))
   const bodyType = typeof snapshot.body_type === 'string' ? snapshot.body_type : 'none'
   const bodyContent = snapshot.body_content

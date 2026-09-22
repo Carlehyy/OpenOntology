@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { expect, test, type Page } from '@playwright/test'
 
 /**
@@ -180,7 +181,11 @@ async function mockHistoryApp(page: Page, options: HistoryMockOptions = {}) {
       const keyword = (params.get('keyword') ?? '').trim()
       const result = params.get('result') ?? 'all'
       let items = RUNS
-      if (keyword) items = items.filter(run => run.name.includes(keyword))
+      if (keyword) {
+        // 与后端 list_all_runs 的数字语义对齐：纯十进制关键词附加 runs.id 精确匹配
+        const asRunId = /^\d+$/.test(keyword) ? Number(keyword) : null
+        items = items.filter(run => run.name.includes(keyword) || (asRunId !== null && run.id === asRunId))
+      }
       if (result === 'failed') items = items.filter(run => !run.ok)
       else if (result === 'slow') items = items.filter(run => (run.elapsed_ms ?? 0) >= 500)
       else if (result === 'success') items = items.filter(run => Boolean(run.ok))
@@ -266,6 +271,9 @@ test('H02 减列后 1440 视口无横向滚动，操作列可见', async ({ page
     const table = document.querySelector('main table')
     const scroller = table?.parentElement
     if (!scroller) return false
+    // 确认拿到的是真正的横向滚动容器，而非任意恰好不溢出的父层（防空过）
+    const style = getComputedStyle(scroller)
+    if (!/(auto|scroll)/.test(`${style.overflowX} ${style.overflow}`)) return false
     return scroller.scrollWidth <= scroller.clientWidth
   })
   expect(fitsViewport).toBe(true)
@@ -310,8 +318,13 @@ test('H09 关键词输入 300ms 防抖自动查询，无需点查询', async ({ 
   await expect(page.getByRole('row', { name: /天气查询/ })).toBeVisible()
 })
 
-test('H11 快捷范围「近 7 天」即点即查并高亮', async ({ page }) => {
+test('H11 快捷范围「近 7 天」即点即查且区间换算正确', async ({ page }) => {
   await mockHistoryApp(page)
+  const captured: string[] = []
+  await page.route('**/api/api-hub/runs*', route => {
+    captured.push(route.request().url())
+    return route.fallback()
+  })
   await gotoHistory(page)
 
   const range = page.getByRole('button', { name: '近 7 天' })
@@ -319,6 +332,22 @@ test('H11 快捷范围「近 7 天」即点即查并高亮', async ({ page }) =>
   await expect(range).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByLabel('开始日期')).not.toHaveValue('')
   await expect(page.getByLabel('结束日期')).not.toHaveValue('')
+
+  // 断言真实发出的请求参数：start 为近 7 天本地零点的 UTC ISO，end 为当日末尾
+  await expect
+    .poll(() => captured.some(url => new URLSearchParams(url.split('?')[1] ?? '').get('start')))
+    .toBeTruthy()
+  const withRange = captured.find(url => new URLSearchParams(url.split('?')[1] ?? '').get('start'))
+  const params = new URLSearchParams((withRange ?? '').split('?')[1] ?? '')
+  const toLocalDate = (date: Date) => {
+    const pad = (value: number) => String(value).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  }
+  const today = new Date()
+  const start7 = new Date(today)
+  start7.setDate(start7.getDate() - 6)
+  expect(params.get('start')).toBe(new Date(`${toLocalDate(start7)}T00:00:00`).toISOString())
+  expect(params.get('end')).toBe(new Date(`${toLocalDate(today)}T23:59:59.999`).toISOString())
 })
 
 test('日期先后校验即时拦截且不发非法区间请求', async ({ page }) => {
@@ -379,7 +408,7 @@ test('H13 剪贴板不可用时复制失败并自动全选面板内容', async (
   expect(selectedLength).toBeGreaterThan(0)
 })
 
-test('H24 导出本条记录触发下载且文件名可追溯', async ({ page }) => {
+test('H24 导出本条记录触发下载且文件名与内容可追溯', async ({ page }) => {
   await mockHistoryApp(page)
   await gotoHistory(page)
 
@@ -391,6 +420,15 @@ test('H24 导出本条记录触发下载且文件名可追溯', async ({ page })
   await dialog.getByRole('button', { name: '导出本条记录' }).click()
   const download = await downloadPromise
   expect(download.suggestedFilename()).toBe('run-90.json')
+
+  // AGENTS §5：下载类交互必须校验最终文件内容，不能只看触发信号
+  const downloadPath = await download.path()
+  const payload = JSON.parse(readFileSync(downloadPath ?? '', 'utf8'))
+  expect(payload.id).toBe(90)
+  expect(payload.name).toBe('订单详情查询')
+  expect(payload.method).toBe('GET')
+  expect(payload.response_body).toContain('100000')
+  expect(typeof payload.exported_at).toBe('string')
 })
 
 test('H25 抽屉展示原生 id 而非造出的 RUN 前缀编号', async ({ page }) => {
@@ -404,14 +442,10 @@ test('H25 抽屉展示原生 id 而非造出的 RUN 前缀编号', async ({ page
 })
 
 test('H06 总览加载失败走标准 Alert 并可重试恢复', async ({ page }) => {
-  let overviewCalls = 0
+  // 初始恒定 500（StrictMode 双挂载也稳定失败），重试前再注入成功路由，
+  // 消除「先失败后成功」计数器在双发下的时序不确定性
   await mockHistoryApp(page, {
-    overview: () => {
-      overviewCalls += 1
-      return overviewCalls === 1
-        ? { status: 500, body: { detail: '总览服务不可用' } }
-        : { body: OVERVIEW }
-    },
+    overview: () => ({ status: 500, body: { detail: '总览服务不可用' } }),
   })
   await gotoHistory(page)
 
@@ -419,6 +453,21 @@ test('H06 总览加载失败走标准 Alert 并可重试恢复', async ({ page }
   await expect(alert).toBeVisible()
   await expect(alert).toContainText('总览服务不可用')
 
+  // 尾部 *：Playwright glob 按含查询串的完整 URL 匹配，须吞掉 ?timezone_offset_minutes=
+  await page.route('**/api/api-hub/runs/overview*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(OVERVIEW),
+  }))
   await alert.getByRole('button', { name: '重试' }).click()
   await expect(page.getByText('今日 2 次')).toBeVisible()
+})
+
+test('H25 数字关键词可按记录 id 搜回（前端链路）', async ({ page }) => {
+  await mockHistoryApp(page)
+  await gotoHistory(page)
+
+  await page.getByPlaceholder('搜索接口名称').fill('88')
+  await expect(page.getByText('显示 1–1 / 1 条')).toBeVisible({ timeout: 4000 })
+  await expect(page.getByRole('row', { name: /库存同步/ })).toBeVisible()
 })

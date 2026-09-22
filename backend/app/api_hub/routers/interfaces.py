@@ -517,7 +517,9 @@ def list_all_runs(
     if kw:
         # H25：详情抽屉展示/复制的编号是原生数字 id——纯数字关键词在按接口名
         # 模糊匹配之外同时按 runs.id 精确匹配，复制给同事的编号可直接搜回。
-        if kw.isdigit():
+        # isdecimal 排除上标等 isdigit()-only 字符（int() 会抛 ValueError 变 500）；
+        # 长度上限排除超长数字串（超出 SQLite 64 位整数绑定范围），超长时退回名称匹配。
+        if kw.isdecimal() and len(kw) <= 18:
             where.append("(i.name LIKE ? OR r.id = ?)")
             params.extend([f"%{kw}%", int(kw)])
         else:
