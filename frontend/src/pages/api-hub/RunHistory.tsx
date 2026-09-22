@@ -1,4 +1,4 @@
-import { formatDate, formatDateTime } from '@/utils/datetime'
+import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertCircle,
@@ -219,8 +219,11 @@ export default function RunHistory() {
               <span className="h-1.5 w-1.5 rounded-full bg-brand" />
               接口代理 · 可观测性
             </div>
-            <h1 className="text-lg font-semibold tracking-[-0.02em] text-foreground">调用历史</h1>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">短期调试记录，不作为合规审计；每接口最多保留 {overview?.retention_limit_per_interface ?? 20} 条。</p>
+            <h1 className="text-lg font-semibold text-foreground">调用历史</h1>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              短期调试记录，不作为合规审计；每接口最多保留 {overview?.retention_limit_per_interface ?? 20} 条
+              {overview && `，当前保留记录涉及 ${overview.executed_interfaces} / ${overview.total_interfaces} 个接口`}。
+            </p>
           </div>
           <RefreshSelector
             value={refreshMode}
@@ -306,7 +309,7 @@ export default function RunHistory() {
                 <th className="w-36 border-b border-border px-4 py-3 text-center font-medium">来源</th>
                 <th className="min-w-56 border-b border-border px-4 py-3 text-center font-medium">诊断</th>
                 <th className="w-28 border-b border-border px-4 py-3 text-center font-medium">请求</th>
-                <th className="w-40 border-b border-border px-4 py-3 text-center font-medium">调用时间</th>
+                <th className="w-44 border-b border-border px-3 py-3 text-center font-medium">调用时间</th>
                 <th className="w-44 border-b border-border px-4 py-3 text-right font-medium">耗时</th>
                 <th className="w-32 border-b border-border px-4 py-3 text-center font-medium">认证恢复</th>
                 <th className="w-20 border-b border-border px-4 py-3 text-center font-medium">详情</th>
@@ -334,7 +337,7 @@ export default function RunHistory() {
 
         <footer className="flex h-12 shrink-0 items-center justify-between border-t border-border bg-muted px-5">
           <span className="text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
-            {total ? `显示 ${rangeStart}–${rangeEnd} / ${total} 条` : '暂无记录'}
+            {total ? `显示 ${rangeStart}–${rangeEnd} / ${total} 条` : '共 0 条'}
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -420,7 +423,7 @@ function OverviewMetrics({
     {
       label: '近 7 日调用',
       value: formatNumber(overview.seven_day_traffic),
-      note: `覆盖 ${overview.executed_interfaces} / ${overview.total_interfaces} 个接口`,
+      note: `今日 ${formatNumber(overview.today_traffic)} 次`,
       tone: 'default',
     },
     {
@@ -663,7 +666,6 @@ function HistoryRow({
 }) {
   const ok = Boolean(item.ok)
   const slow = item.elapsed_ms != null && item.elapsed_ms >= slowThreshold
-  const time = formatTimeParts(item.created_at)
   const latencyWidth = item.elapsed_ms == null
     ? 0
     : Math.max(5, Math.min(100, item.elapsed_ms * 100 / Math.max(slowThreshold * 2, 1000)))
@@ -715,9 +717,8 @@ function HistoryRow({
           {item.method}
         </span>
       </td>
-      <td className="px-4 py-2.5 text-center tabular-nums">
-        <p className="text-muted-foreground">{time.date}</p>
-        <p className="mt-0.5 text-[10px] text-[var(--color-text-tertiary)]">{time.time}</p>
+      <td className="whitespace-nowrap px-3 py-2.5 text-center tabular-nums">
+        <span className="text-muted-foreground">{formatDateTime(item.created_at, { seconds: true })}</span>
       </td>
       <td className="px-4 py-2.5 text-right">
         <div className="flex items-center justify-end gap-2">
@@ -820,7 +821,9 @@ function RunDetailDrawer({
   onCopy: (key: string, value: string) => void
   onClose: () => void
 }) {
-  const current = detail ?? summary
+  // 详情接口只回 runs 表字段（无 name/method，见 apiHub.getRun 的后端实现），
+  // 必须以列表行为底合并，否则详情一到标题与方法就被 undefined 冲掉（H01）。
+  const current = { ...summary, ...(detail ?? {}) }
   const ok = Boolean(current.ok)
   const requestValue = detail ? stringifyValue(detail.request_snapshot, '暂无请求快照') : ''
   const responseValue = detail ? prettyResponse(detail.response_body) : ''
@@ -1021,16 +1024,6 @@ function prettyResponse(text: string) {
     return JSON.stringify(JSON.parse(text), null, 2)
   } catch {
     return text
-  }
-}
-
-function formatTimeParts(iso?: string | null) {
-  if (!iso) return { date: '—', time: '' }
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return { date: iso, time: '' }
-  return {
-    date: formatDate(date),
-    time: formatDateTime(date, { seconds: true }),
   }
 }
 

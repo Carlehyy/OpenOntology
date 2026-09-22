@@ -17,6 +17,7 @@ export default defineConfig({
     '**/agent_ontology_carousel.spec.ts',
     '**/agent_topology_instances.spec.ts',
     '**/api_hub_interfaces_ux.spec.ts',
+    '**/api_hub_run_history_ux.spec.ts',
     '**/assistant_eval.spec.ts',
     '**/assistant_widget.spec.ts',
     '**/asset_lake_tabs.spec.ts',
