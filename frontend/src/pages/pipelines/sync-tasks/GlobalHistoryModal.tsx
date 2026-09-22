@@ -1,5 +1,5 @@
 import { formatDateTime } from '@/utils/datetime'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CheckCircle2, ChevronLeft, ChevronRight, Clock, FilterX, History,
   Loader2, Search, X, XCircle,
@@ -9,6 +9,7 @@ import {
   type PipelineFilterOption,
   type PipelineTaskGlobalRun,
 } from '@/api/v2/pipeline-tasks'
+import { Alert } from '@/components/ui/Alert'
 
 type StatusFilter = '' | 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 type TriggerFilter = '' | 'manual' | 'scheduled'
@@ -57,7 +58,7 @@ function StatusBadge({ status }: { status: string }) {
 
 function LakeImpact({ run }: { run: PipelineTaskGlobalRun }) {
   const impact = run.lake_impact
-  if (!impact) return <span className="text-[var(--color-text-tertiary)]">—</span>
+  if (!impact) return <span className="text-[var(--color-text-tertiary)]" title="该次执行没有记录行级入湖变化">未记录</span>
   if (impact.added === 0 && impact.updated === 0 && impact.deleted === 0) {
     return <span className="text-[var(--color-text-tertiary)]">无变更</span>
   }
@@ -91,6 +92,8 @@ export default function GlobalHistoryModal({
   const [triggerFilter, setTriggerFilter] = useState<TriggerFilter>('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  // 遮罩关闭守卫：按下与抬起都发生在遮罩上才关闭，防止「内容内按下、遮罩上抬起」的拖选误关
+  const backdropPointerDown = useRef(false)
 
   useEffect(() => {
     const nextSearch = searchInput.trim()
@@ -165,7 +168,14 @@ export default function GlobalHistoryModal({
   const hasFilters = Boolean(searchInput || search || pipelineId || statusFilter || triggerFilter || dateFrom || dateTo)
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-sm"
+      onPointerDown={event => { backdropPointerDown.current = event.target === event.currentTarget }}
+      onClick={event => {
+        if (event.target === event.currentTarget && backdropPointerDown.current) onClose()
+        backdropPointerDown.current = false
+      }}
+    >
       <div
         data-testid="all-history-modal"
         role="dialog"
@@ -247,9 +257,13 @@ export default function GlobalHistoryModal({
         </div>
 
         {loadError && (
-          <div className="mx-6 mt-3 flex shrink-0 items-center gap-2 rounded-lg border border-viz-rose-soft bg-viz-rose-soft px-3 py-2 text-xs text-viz-rose">
-            <XCircle size={13} /><span className="flex-1">{loadError}</span>
-            <button type="button" onClick={() => setReloadKey(value => value + 1)} className="font-medium hover:underline">重试</button>
+          <div className="mx-6 mt-3 shrink-0">
+            <Alert variant="danger" role="alert" className="text-xs">
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="min-w-0 flex-1">{loadError}</span>
+                <button type="button" onClick={() => setReloadKey(value => value + 1)} className="shrink-0 font-medium hover:underline">重试</button>
+              </span>
+            </Alert>
           </div>
         )}
 
@@ -260,16 +274,16 @@ export default function GlobalHistoryModal({
             <div className="flex min-h-48 items-center justify-center text-sm text-[var(--color-text-tertiary)]">{hasFilters ? '当前筛选条件下暂无执行记录' : '暂无执行记录'}</div>
           ) : (
             <div className="overflow-hidden rounded-xl border border-border">
-              <table className="w-full min-w-[980px] table-fixed text-center text-xs">
+              <table className="w-full min-w-[920px] table-fixed text-center text-xs">
                 <thead className="sticky top-0 z-10 bg-muted text-muted-foreground">
                   <tr className="border-b border-border">
                     <th className="w-[160px] px-3 py-2.5 font-medium">执行时间</th>
                     <th className="w-[190px] px-3 py-2.5 font-medium">任务 / 流水线</th>
                     <th className="w-[84px] px-3 py-2.5 font-medium">状态</th>
                     <th className="w-[72px] px-3 py-2.5 font-medium">触发</th>
-                    <th className="w-[82px] px-3 py-2.5 font-medium">耗时</th>
-                    <th className="w-[80px] px-3 py-2.5 font-medium">输出行数</th>
-                    <th className="w-[190px] px-3 py-2.5 font-medium">原始入湖影响（相对上一原始快照）</th>
+                    <th className="w-[86px] px-3 py-2.5 text-right font-medium">耗时</th>
+                    <th className="w-[80px] px-3 py-2.5 text-right font-medium">输出行数</th>
+                    <th className="w-[110px] px-3 py-2.5 font-medium" title="相对上一原始快照的行级新增 / 更新 / 删除">入湖变化</th>
                     <th className="px-3 py-2.5 font-medium">错误信息</th>
                   </tr>
                 </thead>
@@ -283,8 +297,8 @@ export default function GlobalHistoryModal({
                       </td>
                       <td className="px-3 py-3"><StatusBadge status={run.status} /></td>
                       <td className="px-3 py-3 text-muted-foreground">{TRIGGER_LABEL[run.trigger_type] || run.trigger_type}</td>
-                      <td className="px-3 py-3 text-muted-foreground tabular-nums">{formatDuration(run.started_at, run.finished_at)}</td>
-                      <td className="px-3 py-3 text-muted-foreground tabular-nums">{run.rows_out ?? 0}</td>
+                      <td className="px-3 py-3 text-right text-muted-foreground tabular-nums">{formatDuration(run.started_at, run.finished_at)}</td>
+                      <td className="px-3 py-3 text-right text-muted-foreground tabular-nums">{run.rows_out ?? 0}</td>
                       <td className="px-3 py-3"><LakeImpact run={run} /></td>
                       <td className="px-3 py-3 text-left">
                         {run.error_message ? (

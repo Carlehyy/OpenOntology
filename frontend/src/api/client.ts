@@ -44,6 +44,12 @@ function createApiClient(version: string): ApiClient {
           // 登录页自身的 401（密码错误等）不做整页跳转：重写成裸 /#/login 会
           // 丢掉 ?returnTo= 深链参数，留给页面内联报错即可
           window.location.href = `/#/login?returnTo=${encodeURIComponent(currentRoute)}`
+          // 标记「已跳转登录」：业务页的 catch 据此静默，不再弹
+          // 「请检查服务连接」这类误导排障方向的错误 toast
+          const rejection = err.response?.data
+          if (rejection && typeof rejection === 'object') {
+            ;(rejection as { authRedirected?: boolean }).authRedirected = true
+          }
         }
       }
       return Promise.reject(err.response?.data ?? err)

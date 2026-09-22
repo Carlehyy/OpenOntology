@@ -10,6 +10,8 @@ import pipelinesApi, { CONTRACT_FIELD_TYPES } from '@/api/v2/pipelines'
 import type { Pipeline, DryRunResult, DryRunRowsPage, ColumnDefinition, ValidateDefinitionsResult } from '@/api/v2/pipelines'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { displayCellValue, isWebhookEchoColumns } from './previewDisplay'
+import { WebhookEchoNotice } from './WebhookEchoNotice'
 
 const splitPk = (s?: string): string[] =>
   (s ?? '').split(',').map(x => x.trim()).filter(Boolean)
@@ -320,7 +322,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
   ]
 
   return createPortal(
-    <div className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center bg-accent p-4 backdrop-blur-[2px] sm:p-6">
+    <div className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center bg-[var(--color-bg-overlay)] p-4 backdrop-blur-[2px] sm:p-6">
       <div
         role="dialog"
         aria-modal="true"
@@ -445,7 +447,9 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
               {dryRunPhase === 'done' && !isPublished && (
                 <div className="flex items-center justify-between text-xs text-[var(--color-text-tertiary)] mb-1">
                   <span>
-                    共 {totalRows.toLocaleString()} 行，默认展示前 {Math.min(cachedSample.length, 100)} 行
+                    {totalRows > Math.min(cachedSample.length, 100)
+                      ? `共 ${totalRows.toLocaleString()} 行，默认展示前 ${Math.min(cachedSample.length, 100)} 行`
+                      : `共 ${totalRows.toLocaleString()} 行`}
                   </span>
                   <div className="flex items-center gap-3">
                     {totalRows > cachedSample.length && dryRunResult && !expanded && (
@@ -477,6 +481,10 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                 </div>
               )}
 
+              {dryRunPhase === 'done' && !isPublished && isN8n && isWebhookEchoColumns(cachedColumns) && (
+                <WebhookEchoNotice />
+              )}
+
               {dryRunPhase === 'done' && isPublished && (
                 <div className="flex items-center gap-2 text-xs text-[var(--color-text-tertiary)] mb-1">
                   <Info size={12} />
@@ -501,7 +509,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                   rows={isPublished ? (typeof lastRun === 'object' ? lastRun.sample : []) : cachedSample.slice(0, 100)}
                   emptyText={
                     isPublished
-                      ? (lastRun === 'loading' ? '加载最近一次执行结果…' : '暂无成功的执行记录，可在列表页「执行」查看输出')
+                      ? (lastRun === 'loading' ? '加载最近一次执行结果…' : '暂无成功的执行记录，可在列表页「试运行」查看输出')
                       : '暂无数据'
                   }
                 />
@@ -780,7 +788,7 @@ export default function PipelineEditWizard({ pipeline, onClose, onSaved }: Props
                   dryRunId={dryRunResult.dry_run_id}
                   outputCount={dryRunResult.outputs.length}
                   title="执行预览数据"
-                  description="第二步试执行的完整输出，分页读取，不会重新执行流水线"
+                  description="第二步试运行的完整输出，分页读取，不会重新执行流水线"
                 />
               )}
 
@@ -972,11 +980,11 @@ function SampleTable({ columns, rows, emptyText }: {
                 <tr key={i} className="hover:bg-muted">
                   <td className="px-3 py-1.5 text-[var(--color-text-tertiary)]">{i + 1}</td>
                   {columns.map(col => (
-                    <td key={col} className="px-3 py-1.5 text-foreground whitespace-nowrap overflow-hidden text-ellipsis" title={String(row[col] ?? '')}>
+                    <td key={col} className="px-3 py-1.5 text-foreground whitespace-nowrap overflow-hidden text-ellipsis" title={displayCellValue(row[col])}>
                       {row[col] === null || row[col] === undefined ? (
                         <span className="text-[var(--color-text-tertiary)] italic">null</span>
                       ) : (
-                        String(row[col])
+                        displayCellValue(row[col])
                       )}
                     </td>
                   ))}
@@ -1085,11 +1093,11 @@ function DryRunPagedTable({ pipelineId, dryRunId, outputCount, onCollapse, title
                     {(page - 1) * pageSize + ri + 1}
                   </td>
                   {columns.map(c => (
-                    <td key={c} className="px-3 py-1.5 text-foreground whitespace-nowrap max-w-[220px] overflow-hidden text-ellipsis" title={String(row[c] ?? '')}>
+                    <td key={c} className="px-3 py-1.5 text-foreground whitespace-nowrap max-w-[220px] overflow-hidden text-ellipsis" title={displayCellValue(row[c])}>
                       {row[c] === null || row[c] === undefined ? (
                         <span className="text-[var(--color-text-tertiary)] italic">null</span>
                       ) : (
-                        String(row[c])
+                        displayCellValue(row[c])
                       )}
                     </td>
                   ))}

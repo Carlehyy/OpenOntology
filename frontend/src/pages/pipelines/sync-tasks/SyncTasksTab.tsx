@@ -4,16 +4,18 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactECharts from 'echarts-for-react'
 import {
   Plus, History, RefreshCw, Trash2, Edit2,
-  Database, Clock, CheckCircle2, XCircle, Loader2, AlertCircle,
-  Repeat, Timer, GitBranch, X, Search, ChevronLeft, ShieldCheck,
+  Database, CheckCircle2, Loader2, AlertCircle,
+  Repeat, GitBranch, X, Search, ChevronLeft, ShieldCheck,
   RotateCw, Activity, Waves, ExternalLink, Workflow, ListChecks,
   Boxes, Network, ArrowRight, DatabaseBackup,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { pipelineTasksApi, WRITE_MODE_META, type PipelineFilterOption, type PipelineTask, type PipelineTaskRecentRun, type PipelineTaskStats, type WriteMode, type LakeImpact } from '@/api/v2/pipeline-tasks'
 import TaskFormModal from './TaskFormModal'
 import HistoryDrawer from './HistoryDrawer'
 import GlobalHistoryModal from './GlobalHistoryModal'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Alert } from '@/components/ui/Alert'
 import { KpiStatCard } from '@/components/KpiStatCard'
 
 // ── 常量 ──────────────────────────────────────────────
@@ -25,12 +27,6 @@ const QUICK_TABS = [
 ] as const
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50]
-
-const SCHEDULE_LABEL: Record<string, { label: string; color: string; Icon: typeof Clock }> = {
-  MANUAL:  { label: '手动', color: 'text-muted-foreground',  Icon: Clock },
-  CRON:    { label: 'Cron', color: 'text-viz-violet', Icon: Timer },
-  INTERVAL:{ label: '间隔', color: 'text-[var(--color-info)]',   Icon: Repeat },
-}
 
 const WRITE_MODE_TONE: Record<WriteMode, string> = {
   overwrite: 'border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] text-[var(--color-success)]',
@@ -115,7 +111,9 @@ export default function SyncTasksTab() {
   const [historyTask, setHistoryTask] = useState<PipelineTask | null>(null)
   const [historyRunId, setHistoryRunId] = useState<string | null>(null)
   const [triggeringIds, setTriggeringIds] = useState<Set<string>>(new Set())
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set())
   const [deleteTarget, setDeleteTarget] = useState<PipelineTask | null>(null)
+  const [backfillTarget, setBackfillTarget] = useState<PipelineTask | null>(null)
   const [actionError, setActionError] = useState('')
   const [presetPipelineId, setPresetPipelineId] = useState<string | null>(null)
   const [filterPipelineId, setFilterPipelineId] = useState(() => searchParams.get('pipeline_id') || '')
@@ -289,13 +287,38 @@ export default function SyncTasksTab() {
 
   const handleDelete = async () => {
     if (!deleteTarget) return
-    try { await pipelineTasksApi.delete(deleteTarget.id); setDeleteTarget(null); load() }
-    catch { setDeleteTarget(null) }
+    const target = deleteTarget
+    try {
+      await pipelineTasksApi.delete(target.id)
+      toast.success(`任务「${target.name}」已删除`, { description: '流水线本身与已入湖数据不受影响' })
+      setDeleteTarget(null)
+      load()
+    } catch (err: any) {
+      setDeleteTarget(null)
+      setActionError(`删除任务「${target.name}」失败：${err?.detail || err?.message || '请稍后重试'}`)
+    }
+  }
+
+  /** 触发/回填共用的禁用谓词：返回不可触发的原因，可触发则 null */
+  const triggerBlockedReason = (t: PipelineTask): string | null => {
+    if (t.status === 'running') return '任务正在执行'
+    if (t.pipeline_status === 'deleted') return '关联流水线已删除'
+    if (t.pipeline_status && t.pipeline_status !== 'published') return '关联流水线未发布'
+    if (t.pipeline_enabled === false) return '关联流水线已停用'
+    return null
   }
 
   const handleToggle = async (task: PipelineTask) => {
-    try { await pipelineTasksApi.toggle(task.id, !task.enabled); load() }
-    catch { setActionError('切换启用状态失败') }
+    if (togglingIds.has(task.id)) return
+    setTogglingIds(prev => new Set(prev).add(task.id))
+    try {
+      await pipelineTasksApi.toggle(task.id, !task.enabled)
+      load()
+    } catch (err: any) {
+      setActionError(`切换「${task.name}」启用状态失败：${err?.detail || err?.message || '当前状态未变更，请稍后重试'}`)
+    } finally {
+      setTogglingIds(prev => { const n = new Set(prev); n.delete(task.id); return n })
+    }
   }
 
   const handleTrigger = async (task: PipelineTask) => {
@@ -447,7 +470,7 @@ export default function SyncTasksTab() {
         <KpiStatCard label="已启用" value={stats?.enabled ?? 0} note="可被计划调度" icon={<CheckCircle2 size={13} />} tone="success" />
         <KpiStatCard label="今日执行" value={stats?.today_runs ?? 0} note={`累计 ${stats?.total_runs ?? 0} 次`} icon={<Activity size={13} />} tone="brand" />
         <KpiStatCard label="今日异常" value={stats?.today_errors ?? 0} note={`累计 ${stats?.total_errors ?? 0} 次`} icon={<AlertCircle size={13} />} tone="danger" toneActive={(stats?.today_errors ?? 0) > 0} pulse />
-        <KpiStatCard label="今日成功率" value={todaySuccessRate} note="基于今日执行结果" icon={<Waves size={13} />} tone="info" />
+        <KpiStatCard label="今日成功率" value={todaySuccessRate} note={(stats?.today_runs ?? 0) > 0 ? '基于今日执行结果' : '今日尚无执行'} icon={<Waves size={13} />} tone="info" />
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 2xl:grid-cols-12">
@@ -528,7 +551,7 @@ export default function SyncTasksTab() {
               <div className="ml-auto flex items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)] tabular-nums">
                   <span className={`h-1.5 w-1.5 rounded-full ${refreshing ? 'bg-[var(--color-warning-bg)]' : 'bg-[var(--color-success)]'}`} />
-                  {refreshing ? '刷新中' : '10 秒自动刷新'}
+                  {refreshing ? '刷新中' : `${hasActiveTasks ? 10 : 30} 秒自动刷新`}
                 </span>
                 <button
                   type="button"
@@ -543,12 +566,10 @@ export default function SyncTasksTab() {
             </div>
 
             {actionError && (
-              <div className="mx-5 mt-3 flex shrink-0 items-center gap-2 rounded-lg border border-viz-rose-soft bg-viz-rose-soft px-3 py-2 text-xs text-viz-rose">
-                <XCircle size={13} className="shrink-0" />
-                <span className="flex-1">{actionError}</span>
-                <button type="button" onClick={() => setActionError('')} className="text-viz-rose hover:text-viz-rose" aria-label="关闭错误提示">
-                  <X size={12} />
-                </button>
+              <div className="mx-5 mt-3 shrink-0">
+                <Alert variant="danger" role="alert" onDismiss={() => setActionError('')} dismissLabel="关闭错误提示" className="text-xs">
+                  {actionError}
+                </Alert>
               </div>
             )}
 
@@ -566,143 +587,133 @@ export default function SyncTasksTab() {
                 </div>
               ) : (
                 <div data-testid="task-table-scroll" className="w-full overflow-x-auto overscroll-x-contain scrollbar-thin">
-                    <table className="w-max min-w-[1840px] table-auto text-center text-sm">
+                    <table className="w-full table-fixed text-left text-sm">
                       <thead className="bg-card">
                         <tr className="border-b border-border text-xs text-muted-foreground">
-                          <th scope="col" data-column="task-name" className="sticky left-0 z-20 min-w-[200px] border-r border-border bg-card px-4 py-2.5 text-center font-medium shadow-[10px_0_14px_-14px_rgba(15,23,42,0.35)]">任务名称</th>
-                          <th scope="col" data-column="run-status" className="min-w-[105px] px-4 py-2.5 text-center font-medium">运行状态</th>
-                          <th scope="col" data-column="enabled" className="min-w-[105px] px-4 py-2.5 text-center font-medium">启停</th>
-                          <th scope="col" data-column="pipeline" className="min-w-[240px] px-4 py-2.5 text-center font-medium">关联流水线</th>
-                          <th scope="col" data-column="last-run" className="min-w-[205px] px-4 py-2.5 text-center font-medium">最近执行</th>
-                          <th scope="col" data-column="lake-result" className="min-w-[210px] px-4 py-2.5 text-center font-medium">入湖结果</th>
-                          <th scope="col" data-column="next-run" className="min-w-[190px] px-4 py-2.5 text-center font-medium">下次执行</th>
-                          <th scope="col" data-column="schedule-type" className="min-w-[110px] px-4 py-2.5 text-center font-medium">调度方式</th>
-                          <th scope="col" data-column="write-mode" className="min-w-[210px] px-4 py-2.5 text-center font-medium">入库策略</th>
-                          <th scope="col" data-column="schedule-rule" className="min-w-[160px] px-4 py-2.5 text-center font-medium">调度规则</th>
-                          <th scope="col" data-column="description" className="min-w-[240px] px-4 py-2.5 text-center font-medium">任务描述</th>
-                          <th scope="col" data-column="actions" className="sticky right-0 z-20 min-w-[150px] border-l border-border bg-card px-4 py-2.5 text-center font-medium shadow-[-10px_0_14px_-14px_rgba(15,23,42,0.35)]">操作</th>
+                          <th scope="col" data-column="task-name" className="sticky left-0 z-20 w-[144px] border-r border-border bg-card px-4 py-2.5 text-left font-medium shadow-[10px_0_14px_-14px_rgba(15,23,42,0.35)]">任务名称</th>
+                          <th scope="col" data-column="run-status" className="w-[80px] px-2.5 py-2.5 text-left font-medium">运行状态</th>
+                          <th scope="col" data-column="enabled" className="w-[90px] px-2.5 py-2.5 text-left font-medium">启停</th>
+                          <th scope="col" data-column="pipeline" className="w-[118px] px-2.5 py-2.5 text-left font-medium">关联流水线</th>
+                          <th scope="col" data-column="last-run" className="w-[122px] px-2.5 py-2.5 text-left font-medium">最近执行</th>
+                          <th scope="col" data-column="lake-result" className="w-[110px] px-2.5 py-2.5 text-right font-medium">入湖结果</th>
+                          <th scope="col" data-column="schedule" className="w-[126px] px-2.5 py-2.5 text-left font-medium">调度</th>
+                          <th scope="col" data-column="write-mode" className="w-[98px] px-2.5 py-2.5 text-left font-medium">入库策略</th>
+                          <th scope="col" data-column="actions" className="sticky right-0 z-20 w-[170px] border-l border-border bg-card px-2 py-2.5 text-center font-medium shadow-[-10px_0_14px_-14px_rgba(15,23,42,0.35)]">操作</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y border-border">
                         {tasks.map(t => {
                           const isTriggering = triggeringIds.has(t.id)
                           const wm = WRITE_MODE_META[t.write_mode as WriteMode]
+                          const blockedReason = triggerBlockedReason(t)
                           const pipelineGone = t.pipeline_status === 'deleted'
                           const pipelineUnpub = !pipelineGone && t.pipeline_status && t.pipeline_status !== 'published'
                           const pipelineDisabled = !pipelineGone && t.pipeline_enabled === false
-                          const sch = SCHEDULE_LABEL[t.schedule_type] || SCHEDULE_LABEL.MANUAL
-                          const SchIcon = sch.Icon
                           const scheduleRule = t.schedule_type === 'CRON'
-                            ? (t.cron_expression || '未配置 Cron')
+                            ? `Cron ${t.cron_expression || '未配置'}`
                             : t.schedule_type === 'INTERVAL'
-                              ? `每 ${relativeDuration(t.interval_seconds) || `${t.interval_seconds || 0} 秒`}`
-                              : '仅支持手动触发'
+                              ? `间隔 · 每 ${relativeDuration(t.interval_seconds) || `${t.interval_seconds || 0} 秒`}`
+                              : '不自动调度，按需运行'
                           return (
                             <tr key={t.id} className="group whitespace-nowrap transition-colors hover:bg-muted">
-                              <td data-column="task-name" className="sticky left-0 z-[1] min-w-[200px] border-r border-border bg-card px-4 py-3 text-center align-middle shadow-[10px_0_14px_-14px_rgba(15,23,42,0.35)] group-hover:bg-muted">
-                                <span className="mx-auto block max-w-[176px] truncate text-sm font-medium text-foreground" title={t.name}>{t.name}</span>
+                              <td data-column="task-name" className="sticky left-0 z-[1] border-r border-border bg-card px-4 py-3 align-middle shadow-[10px_0_14px_-14px_rgba(15,23,42,0.35)] group-hover:bg-muted">
+                                <span className="block max-w-full whitespace-normal text-sm font-medium leading-snug line-clamp-2 text-foreground" title={t.name}>{t.name}</span>
                               </td>
-                              <td data-column="run-status" className="px-4 py-3 text-center align-middle"><RunStateBadge task={t} /></td>
-                              <td data-column="enabled" className="px-4 py-3 text-center align-middle">
-                                <div className="flex items-center justify-center gap-2">
-                                  <Switch checked={t.enabled} onChange={() => handleToggle(t)} />
-                                  <span className={`text-[11px] font-medium ${t.enabled ? 'text-[var(--color-success)]' : 'text-[var(--color-text-tertiary)]'}`}>
-                                    {t.enabled ? '已启用' : '已停用'}
-                                  </span>
+                              <td data-column="run-status" className="px-2.5 py-3 align-middle"><RunStateBadge task={t} /></td>
+                              <td data-column="enabled" className="px-2.5 py-3 align-middle">
+                                <Switch checked={t.enabled} pending={togglingIds.has(t.id)} onChange={() => handleToggle(t)} />
+                              </td>
+                              <td data-column="pipeline" className="px-2.5 py-3 align-middle">
+                                <div className="whitespace-normal">
+                                  <button
+                                    type="button"
+                                    onClick={() => !pipelineGone && navigate(`/data/pipelines?search=${encodeURIComponent(t.pipeline_name || t.pipeline_id)}`)}
+                                    className={`inline-flex max-w-full items-center gap-1 text-xs ${pipelineGone ? 'cursor-default text-[var(--color-text-tertiary)]' : 'text-brand-ink hover:underline underline-offset-2'}`}
+                                    title={pipelineGone ? '流水线已删除' : '前往数据流水线管理页'}
+                                  >
+                                    <GitBranch size={11} className="shrink-0" />
+                                    <span className="max-w-full truncate" title={t.pipeline_name || t.pipeline_id}>{t.pipeline_name || t.pipeline_id}</span>
+                                    {t.pipeline_version ? <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">v{t.pipeline_version}</span> : null}
+                                    {!pipelineGone && <ExternalLink size={9} className="shrink-0 opacity-60" />}
+                                  </button>
+                                  {(pipelineGone || pipelineUnpub || pipelineDisabled) && (
+                                    <span className="mt-0.5 flex items-center gap-1 text-[10px] text-viz-rose">
+                                      <AlertCircle size={10} />
+                                      {pipelineGone ? '已删除' : pipelineUnpub ? '未发布' : '流水线已停用'}
+                                    </span>
+                                  )}
                                 </div>
                               </td>
-                              <td data-column="pipeline" className="px-4 py-3 text-center align-middle">
-                                <button
-                                  type="button"
-                                  onClick={() => !pipelineGone && navigate(`/data/pipelines?search=${encodeURIComponent(t.pipeline_name || t.pipeline_id)}`)}
-                                  className={`inline-flex items-center gap-1 text-xs ${pipelineGone ? 'cursor-default text-[var(--color-text-tertiary)]' : 'text-brand-ink hover:underline underline-offset-2'}`}
-                                  title={pipelineGone ? '流水线已删除' : '前往数据流水线管理页'}
-                                >
-                                  <GitBranch size={11} className="shrink-0" />
-                                  <span>{t.pipeline_name || t.pipeline_id}</span>
-                                  {t.pipeline_version ? <span className="text-[10px] text-[var(--color-text-tertiary)]">v{t.pipeline_version}</span> : null}
-                                  {!pipelineGone && <ExternalLink size={9} className="shrink-0 opacity-60" />}
-                                </button>
-                                {(pipelineGone || pipelineUnpub || pipelineDisabled) && (
-                                  <span className="ml-2 inline-flex items-center gap-1 text-[10px] text-viz-rose">
-                                    <AlertCircle size={10} />
-                                    {pipelineGone ? '已删除' : pipelineUnpub ? '未发布' : '流水线已停用'}
-                                  </span>
-                                )}
+                              <td data-column="last-run" className="px-2.5 py-3 align-middle">
+                                {t.last_run_at ? <TimeInline iso={t.last_run_at} /> : <span className="text-xs text-[var(--color-text-tertiary)]">尚未执行</span>}
                               </td>
-                              <td data-column="last-run" className="px-4 py-3 text-center align-middle">
-                                {t.last_run_at ? <TimeInline iso={t.last_run_at} withSeconds /> : <span className="text-xs text-[var(--color-text-tertiary)]">尚未执行</span>}
-                              </td>
-                              <td data-column="lake-result" className="px-4 py-3 text-center align-middle">
+                              <td data-column="lake-result" className="px-2.5 py-3 text-right align-middle">
                                 {t.status === 'failed' && t.last_error ? (
                                   <span
                                     data-testid={`lake-result-error-${t.id}`}
-                                    className="mx-auto block max-w-[186px] cursor-help truncate text-xs text-viz-rose"
+                                    className="ml-auto block max-w-full cursor-help truncate text-xs text-viz-rose"
                                     title={t.last_error}
                                     aria-label={`入湖失败：${t.last_error}`}
                                   >
                                     {t.last_error}
                                   </span>
                                 ) : (
-                                  <div className="inline-flex items-center justify-center gap-2">
+                                  <div className="ml-auto flex w-fit max-w-full flex-col items-end gap-0.5">
                                     <span className="text-xs tabular-nums text-muted-foreground">产出 {t.last_rows ?? 0} 行</span>
-                                    <ExecResultCell impact={t.last_impact} status={t.status} />
+                                    {(t.last_impact || t.status === 'failed') && <ExecResultCell impact={t.last_impact} status={t.status} />}
                                   </div>
                                 )}
                               </td>
-                              <td data-column="next-run" className="px-4 py-3 text-center align-middle">
+                              <td data-column="schedule" className="px-2.5 py-3 align-middle">
                                 {t.schedule_type === 'MANUAL' ? (
-                                  <span className="text-xs text-[var(--color-text-tertiary)]">不自动调度</span>
-                                ) : !t.enabled ? (
-                                  <span className="text-xs text-[var(--color-text-tertiary)]">任务已停用</span>
-                                ) : t.next_run_at ? (
-                                  <div className="inline-flex items-center gap-2">
-                                    <TimeInline iso={t.next_run_at} />
-                                    <span className="text-[10px] text-brand-ink">{formatFuture(t.next_run_at)}</span>
+                                  <div>
+                                    <div className="text-xs text-foreground">手动触发</div>
+                                    <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">{t.enabled ? '不自动调度' : '任务已停用'}</div>
                                   </div>
                                 ) : (
-                                  <span className="text-xs text-[var(--color-text-tertiary)]">待调度器计算</span>
+                                  <div>
+                                    <div>
+                                      {!t.enabled ? (
+                                        <span className="text-xs text-[var(--color-text-tertiary)]">任务已停用</span>
+                                      ) : t.next_run_at ? (
+                                        <TimeInline iso={t.next_run_at} />
+                                      ) : (
+                                        <span className="text-xs text-[var(--color-text-tertiary)]">待调度器计算</span>
+                                      )}
+                                    </div>
+                                    <div className={`mt-0.5 max-w-full truncate text-[11px] text-[var(--color-text-tertiary)] ${t.schedule_type === 'CRON' ? 'font-mono' : ''}`} title={scheduleRule}>
+                                      {t.next_run_at && t.enabled && formatFuture(t.next_run_at)
+                                        ? `${formatFuture(t.next_run_at)} · ${scheduleRule}`
+                                        : scheduleRule}
+                                    </div>
+                                  </div>
                                 )}
                               </td>
-                              <td data-column="schedule-type" className="px-4 py-3 text-center align-middle">
-                                <div className="inline-flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
-                                  <SchIcon size={11} className={sch.color} />
-                                  <span>{sch.label}</span>
-                                </div>
-                              </td>
-                              <td data-column="write-mode" className="px-4 py-3 text-center align-middle">
-                                <div className="inline-flex items-center justify-center gap-2">
-                                  <span data-write-mode={t.write_mode} className={`inline-flex rounded-md border px-2 py-1 text-[11px] font-medium ${WRITE_MODE_TONE[t.write_mode]}`} title={wm?.desc}>
+                              <td data-column="write-mode" className="px-2.5 py-3 align-middle">
+                                <div className="flex flex-wrap items-center gap-1">
+                                  <span data-write-mode={t.write_mode} className={`inline-flex items-center gap-0.5 rounded-md border px-2 py-1 text-[11px] font-medium ${WRITE_MODE_TONE[t.write_mode]}`} title={`${wm?.desc ?? ''}；空输出保护：${t.skip_empty ? '开启（流水线输出为空时跳过写入）' : '关闭'}`}>
                                     {wm?.label || t.write_mode}
+                                    {t.skip_empty && <ShieldCheck size={10} className="shrink-0" aria-hidden="true" />}
                                   </span>
                                   {t.cursor_column && (
                                     <span data-testid="incremental-badge" className="inline-flex items-center gap-1 rounded-md border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] px-1.5 py-0.5 text-[10px] text-[var(--color-info)]" title={`增量游标列：${t.cursor_column}；当前水位：${t.last_cursor_value || '（未建立，下次全量）'}`}>
                                       <Waves size={10} />增量
                                     </span>
                                   )}
-                                  <span className={`inline-flex items-center gap-1 text-[10px] ${t.skip_empty ? 'text-brand-ink' : 'text-[var(--color-text-tertiary)]'}`}>
-                                    <ShieldCheck size={10} />空输出保护：{t.skip_empty ? '开启' : '关闭'}
-                                  </span>
                                 </div>
                               </td>
-                              <td data-column="schedule-rule" className={`px-4 py-3 text-center align-middle text-xs ${t.schedule_type === 'CRON' ? 'font-mono text-muted-foreground' : 'text-muted-foreground'}`}>
-                                {scheduleRule}
-                              </td>
-                              <td data-column="description" className="px-4 py-3 text-center align-middle text-xs text-muted-foreground">
-                                <span className="mx-auto block max-w-[216px] truncate" title={t.description || undefined}>{t.description || '—'}</span>
-                              </td>
-                              <td data-column="actions" className="sticky right-0 z-[1] border-l border-border bg-card px-4 py-2 text-center align-middle shadow-[-10px_0_14px_-14px_rgba(15,23,42,0.35)] group-hover:bg-muted">
+                              <td data-column="actions" className="sticky right-0 z-[1] border-l border-border bg-card px-2 py-2 text-center align-middle shadow-[-10px_0_14px_-14px_rgba(15,23,42,0.35)] group-hover:bg-muted">
                                 <div className="flex items-center justify-center gap-0.5">
-                                  <IconBtn2 title={pipelineDisabled ? '关联流水线已停用' : '立即执行'}
-                                    disabled={t.status === 'running' || isTriggering || pipelineGone || !!pipelineUnpub || pipelineDisabled}
+                                  <IconBtn2 title={blockedReason ? `立即执行不可用：${blockedReason}` : `立即执行（入库方式：${wm?.label || t.write_mode}）`}
+                                    disabled={!!blockedReason || isTriggering}
                                     onClick={() => handleTrigger(t)} accent="teal">
                                     <RotateCw size={14} className={isTriggering ? 'animate-spin' : ''} />
                                   </IconBtn2>
                                   {t.cursor_column && (
-                                    <IconBtn2 title="全量回填：忽略当前水位全量拉取一次，成功后水位推进到最新"
+                                    <IconBtn2 title={blockedReason ? `全量回填不可用：${blockedReason}` : '全量回填：忽略当前水位全量拉取一次，成功后水位推进到最新'}
                                       testId="full-refresh-btn"
-                                      disabled={t.status === 'running' || isTriggering || pipelineGone || !!pipelineUnpub || pipelineDisabled}
-                                      onClick={() => handleFullRefresh(t)} accent="sky">
+                                      disabled={!!blockedReason || isTriggering}
+                                      onClick={() => setBackfillTarget(t)} accent="sky">
                                       <DatabaseBackup size={14} />
                                     </IconBtn2>
                                   )}
@@ -869,6 +880,28 @@ export default function SyncTasksTab() {
         onConfirm={handleDelete}
         onClose={() => setDeleteTarget(null)}
       />
+      <ConfirmDialog
+        open={!!backfillTarget}
+        title="全量回填"
+        description={`将忽略任务「${backfillTarget?.name}」当前的增量水位，完整拉取一次流水线产物；执行成功后水位推进到最新。`}
+        confirmText="开始全量回填"
+        variant="warning"
+        onConfirm={() => {
+          const snapshot = backfillTarget
+          setBackfillTarget(null)
+          if (!snapshot) return
+          // 确认弹窗打开期间轮询可能已改变任务状态：按 id 从最新列表重解析并复用行内禁用谓词
+          const latest = tasks.find(t => t.id === snapshot.id)
+          const blocked = !latest || triggerBlockedReason(latest) || triggeringIds.has(snapshot.id)
+          if (blocked || !latest) {
+            setActionError(`任务「${snapshot.name}」当前不可全量回填（正在执行、流水线不可用或已被删除），请刷新后重试`)
+            load()
+            return
+          }
+          handleFullRefresh(latest)
+        }}
+        onClose={() => setBackfillTarget(null)}
+      />
     </div>
   )
 }
@@ -903,7 +936,7 @@ function IconBtn2({ children, onClick, title, disabled, danger, accent = 'slate'
       disabled={disabled}
       title={title}
       data-testid={testId}
-      className={`grid h-8 w-8 place-items-center rounded-lg text-[var(--color-text-tertiary)] transition ${hover} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35`}
+      className={`grid h-7 w-7 place-items-center rounded-lg text-[var(--color-text-tertiary)] transition ${hover} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35`}
     >
       {children}
     </button>
@@ -998,19 +1031,27 @@ function RecentRunFeed({ runs }: { runs: PipelineTaskRecentRun[] }) {
   )
 }
 
-// ── 启用开关 ──────────────────────────────────────────
-function Switch({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+// ── 启用开关：胶囊与状态文字同属一个按钮，点击热区覆盖整块 ──
+function Switch({ checked, pending = false, onChange }: { checked: boolean; pending?: boolean; onChange: () => void }) {
   return (
     <button
       type="button" role="switch" aria-checked={checked} onClick={onChange}
-      title={checked ? '点击停用' : '点击启用'}
-      className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${
-        checked ? 'bg-[var(--color-success)]' : 'bg-accent'
-      }`}
+      disabled={pending}
+      title={pending ? '正在切换启用状态…' : checked ? '点击停用' : '点击启用'}
+      className={`inline-flex items-center gap-2 rounded-md py-1 pr-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait ${pending ? 'opacity-75' : ''}`}
     >
-      <span className={`inline-block h-3 w-3 transform rounded-full bg-card shadow transition-transform ${
-        checked ? 'translate-x-3.5' : 'translate-x-0.5'
-      }`} />
+      <span className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+        checked ? 'bg-[var(--color-success)]' : 'bg-accent'
+      }`}>
+        {pending
+          ? <Loader2 size={10} className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 animate-spin ${checked ? 'text-[var(--color-text-inverse)]' : 'text-[var(--color-text-tertiary)]'}`} />
+          : <span className={`inline-block h-3 w-3 transform rounded-full bg-card shadow transition-transform ${
+              checked ? 'translate-x-3.5' : 'translate-x-0.5'
+            }`} />}
+      </span>
+      <span className={`text-[11px] font-medium leading-none ${checked ? 'text-[var(--color-success)]' : 'text-[var(--color-text-tertiary)]'}`}>
+        {pending ? '切换中' : checked ? '已启用' : '已停用'}
+      </span>
     </button>
   )
 }
@@ -1043,7 +1084,7 @@ function formatFuture(iso: string): string {
 // ── 执行结果：最近一次执行对资产湖的影响 ──────────────
 function ExecResultCell({ impact, status }: { impact?: LakeImpact | null; status: string }) {
   if (status === 'failed') return <span className="rounded-md bg-viz-rose-soft px-2 py-1 text-[10px] text-viz-rose">执行失败</span>
-  if (!impact) return <span className="text-[11px] text-[var(--color-text-tertiary)]">—</span>
+  if (!impact) return null
   const added = impact.added ?? 0, updated = impact.updated ?? 0, deleted = impact.deleted ?? 0
   if (!added && !updated && !deleted) return <span className="text-[11px] text-[var(--color-text-tertiary)]">无变化</span>
   return (

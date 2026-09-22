@@ -19,6 +19,7 @@ const STATUS_META: Record<string, { icon: React.ReactNode; color: string; label:
   running: { icon: <Loader2 size={13} className="animate-spin" />, color: 'text-[var(--color-info)] bg-[var(--color-info-bg)]', label: '执行中' },
   success: { icon: <CheckCircle2 size={13} />, color: 'text-[var(--color-success)] bg-[var(--color-success-bg)]', label: '成功' },
   failed:  { icon: <XCircle size={13} />, color: 'text-viz-rose bg-viz-rose-soft', label: '失败' },
+  cancelled: { icon: <XCircle size={13} />, color: 'text-[var(--color-warning)] bg-[var(--color-warning-bg)]', label: '已取消' },
 }
 
 const statusMeta = (status: string) => STATUS_META[status] ?? {

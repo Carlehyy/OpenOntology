@@ -27,8 +27,8 @@ export default function PipelineOverviewBar({ overview }: { overview: PipelineOv
       className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 ${hasTrend ? 'xl:grid-cols-5' : 'xl:grid-cols-4'}`}
     >
       <KpiStatCard label="流水线总数" value={overview.total} note="不含已归档" icon={<GitBranch size={13} />} />
-      <KpiStatCard label="已发布" value={overview.published} note="契约封版可挂接任务" icon={<CheckCircle2 size={13} />} tone="success" />
-      <KpiStatCard label="已启用" value={overview.enabled} note="可被任务池调度" icon={<Activity size={13} />} tone="brand" />
+      <KpiStatCard label="已发布" value={overview.published} note="字段契约已锁定，可挂接任务" icon={<CheckCircle2 size={13} />} tone="success" />
+      <KpiStatCard label="已启用" value={overview.enabled} note="任务池会按计划执行" icon={<Activity size={13} />} tone="brand" />
       <KpiStatCard
         label="最近执行失败"
         value={overview.latest_failed}

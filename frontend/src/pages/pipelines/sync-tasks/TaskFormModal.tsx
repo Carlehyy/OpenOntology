@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { toast } from 'sonner'
 import {
   X, Loader2, AlertCircle, CheckCircle2, GitBranch, ArrowRight,
   Database, KeyRound, ChevronLeft, ChevronRight, Table2, Check, Sparkles,
@@ -138,6 +139,7 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
         await pipelineTasksApi.update(initialTask.id, form)
       } else {
         await pipelineTasksApi.create(form)
+        toast.success(`任务「${form.name}」已创建`)
       }
       onSaved()
     } catch (err: any) {

@@ -1,31 +1,29 @@
 import { useEffect, useState } from 'react'
 import {
-  X, Loader2, CheckCircle2, XCircle, Table2, ArrowRight,
-  FlaskConical, RefreshCw,
+  Loader2, CheckCircle2, XCircle, Table2, ArrowRight,
+  FlaskConical, RefreshCw, AlertTriangle,
 } from 'lucide-react'
-import pipelinesApi from '@/api/v2/pipelines'
+import pipelinesApi, { getPipelineEngine } from '@/api/v2/pipelines'
 import type { Pipeline, DryRunResult } from '@/api/v2/pipelines'
 import { pipelineFileRefsIn } from '@/api/fileAssets'
 import FileRefActions from '@/components/pipelines/FileRefActions'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { displayCellValue, isWebhookEchoColumns } from './previewDisplay'
+import { WebhookEchoNotice } from './WebhookEchoNotice'
 import { toast } from 'sonner'
 
-function displayValue(value: unknown): string {
-  if (value == null) return ''
-  if (typeof value === 'object') {
-    try { return JSON.stringify(value) } catch { return String(value) }
-  }
-  return String(value)
-}
-
 /**
- * 列表页「试执行」弹窗：只负责真实执行与输出预览。
- * 试执行结果不提供入湖入口，正式入湖统一由数据任务池负责。
+ * 列表页「试运行」弹窗：只负责真实执行与输出预览。
+ * 试运行结果不提供入湖入口，正式入湖统一由数据任务池负责。
+ * 已发布流水线的试运行会真实触发生产工作流（n8n 没有只看不跑的模式），
+ * 因此打开后先说明后果、确认再执行；未发布流水线维持自动执行。
  */
 export default function RunPreviewModal({ pipeline, onClose }: {
   pipeline: Pipeline
   onClose: () => void
 }) {
-  const [phase, setPhase] = useState<'running' | 'preview' | 'error'>('running')
+  const isPublished = pipeline.status === 'published'
+  const [phase, setPhase] = useState<'confirm' | 'running' | 'preview' | 'error'>(isPublished ? 'confirm' : 'running')
   const [result, setResult] = useState<DryRunResult | null>(null)
   const [error, setError] = useState('')
 
@@ -41,40 +39,63 @@ export default function RunPreviewModal({ pipeline, onClose }: {
       const message = err?.detail || err?.message || '请稍后重试。'
       setError(message)
       setPhase('error')
-      toast.error('流水线试执行失败', { description: message })
+      toast.error('流水线试运行失败', { description: message })
     }
   }
 
-  useEffect(() => { void runPreview() }, [])
+  useEffect(() => { if (!isPublished) void runPreview() }, [])
+
+  // 未编排的 n8n 骨架：输出列恰好是 webhook 回显，提示「还不是业务数据」
+  const showsWebhookEcho = phase === 'preview'
+    && result
+    && getPipelineEngine(pipeline) === 'n8n'
+    && !isPublished
+    && result.outputs.some(output => isWebhookEchoColumns(output.columns))
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px] sm:p-6" onClick={onClose}>
-      <div
-        className="flex max-h-[88vh] w-[820px] max-w-full flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_28px_90px_rgba(15,23,42,0.24)]"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between border-b border-border px-6 py-4">
+    <Dialog open onOpenChange={open => { if (!open) onClose() }}>
+      <DialogContent className="flex max-h-[88vh] w-[min(92vw,820px)] max-w-full flex-col overflow-hidden p-0">
+        <div className="flex shrink-0 items-start justify-between border-b border-border px-6 py-4 pr-14">
           <div className="min-w-0">
-            <h3 className="flex items-center gap-2.5 text-base font-semibold tracking-tight text-foreground">
+            <DialogTitle className="flex items-center gap-2.5 text-base font-semibold tracking-tight text-foreground">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-brand-deep text-[var(--color-text-inverse)]">
                 <FlaskConical size={15} />
               </span>
-              <span className="truncate">试执行「{pipeline.name}」</span>
-            </h3>
-            <p className="ml-10 mt-0.5 text-xs text-muted-foreground">
+              <span className="truncate">试运行「{pipeline.name}」</span>
+            </DialogTitle>
+            <DialogDescription className="ml-10 mt-0.5 text-xs text-muted-foreground">
               执行流水线并查看本次输出；数据入湖统一由数据任务池负责
-            </p>
+            </DialogDescription>
           </div>
-          <button
-            onClick={onClose}
-            aria-label="关闭"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[var(--color-text-tertiary)] transition hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <X size={18} />
-          </button>
         </div>
 
-        <div className="scrollbar-thin flex-1 overflow-y-auto px-6 py-5">
+        <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          {phase === 'confirm' && (
+            <div className="flex flex-col items-center py-12 text-center">
+              <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--color-warning-bg)] text-[var(--color-warning)]">
+                <AlertTriangle size={21} />
+              </span>
+              <p className="mt-3 text-sm font-medium text-foreground">试运行将触发已发布的工作流</p>
+              <p className="mt-1 max-w-lg text-xs leading-5 text-muted-foreground">
+                「{pipeline.name}」当前已发布，试运行会真实触发其生产编排（与任务池正式执行同一工作流）。执行结果仅用于本次预览，不会写入资产湖。
+              </p>
+              <div className="mt-5 flex items-center gap-3">
+                <button
+                  onClick={onClose}
+                  className="rounded-xl border border-border px-3.5 py-2 text-sm font-medium text-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => void runPreview()}
+                  className="rounded-xl bg-brand-deep px-4 py-2 text-sm font-medium text-[var(--color-text-inverse)] transition hover:bg-brand-deep active:translate-y-px"
+                >
+                  确认试运行
+                </button>
+              </div>
+            </div>
+          )}
+
           {phase === 'running' && (
             <div className="space-y-3 py-16 text-center text-sm text-muted-foreground">
               <Loader2 size={28} className="mx-auto animate-spin text-brand-ink" />
@@ -87,7 +108,7 @@ export default function RunPreviewModal({ pipeline, onClose }: {
               <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--color-danger-bg)] text-[var(--color-danger)]">
                 <XCircle size={21} />
               </span>
-              <p className="mt-3 text-sm font-medium text-foreground">本次试执行未完成</p>
+              <p className="mt-3 text-sm font-medium text-foreground">本次试运行未完成</p>
               <p className="mt-1 max-w-lg break-all text-xs leading-5 text-muted-foreground">{error}</p>
               <button
                 onClick={() => void runPreview()}
@@ -100,6 +121,8 @@ export default function RunPreviewModal({ pipeline, onClose }: {
 
           {phase === 'preview' && result && (
             <div className="space-y-4">
+              {showsWebhookEcho && <WebhookEchoNotice />}
+
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-success)]">
                   <CheckCircle2 size={12} /> 执行完成
@@ -153,9 +176,9 @@ export default function RunPreviewModal({ pipeline, onClose }: {
                                   ) : (
                                     <span
                                       className="block max-w-[180px] truncate whitespace-nowrap"
-                                      title={displayValue(row[column])}
+                                      title={displayCellValue(row[column])}
                                     >
-                                      {displayValue(row[column])}
+                                      {displayCellValue(row[column])}
                                     </span>
                                   )}
                                 </td>
@@ -181,9 +204,9 @@ export default function RunPreviewModal({ pipeline, onClose }: {
         </div>
 
         {phase === 'preview' && result && (
-          <div className="flex items-center gap-3 border-t border-border bg-card px-6 py-4">
+          <div className="flex shrink-0 items-center gap-3 border-t border-border bg-card px-6 py-4">
             <p className="flex-1 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-              试执行只验证流水线输出，不会创建或更新资产湖数据。正式入湖请在数据任务池配置并执行任务。
+              试运行只验证流水线输出，不会创建或更新资产湖数据。正式入湖请在数据任务池配置并执行任务。
             </p>
             <button
               onClick={() => void runPreview()}
@@ -199,7 +222,7 @@ export default function RunPreviewModal({ pipeline, onClose }: {
             </button>
           </div>
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

@@ -146,7 +146,7 @@ test('试执行附件会刷新、复制并可吊销长期匿名链接', async ({
   })
 
   await page.goto('/#/data/pipelines')
-  await page.getByTitle('试执行流水线并查看输出').click()
+  await page.getByTitle('试运行流水线并查看输出').click()
   await expect(page.getByText('执行完成', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: '复制 report.pdf 的登录下载地址' }).click()

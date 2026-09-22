@@ -19,7 +19,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 const TASK_STATUS_LABEL: Record<string, { label: string; dot: string }> = {
   running: { label: '运行中', dot: 'bg-[var(--color-info)]' },
   success: { label: '上次成功', dot: 'bg-[var(--color-success)]' },
-  failed:  { label: '上次失败', dot: 'bg-[var(--color-danger-bg)]' },
+  failed:  { label: '上次失败', dot: 'bg-[var(--color-danger)]' },
   idle:    { label: '空闲', dot: 'bg-accent' },
 }
 
@@ -143,7 +143,7 @@ export function TaskPreviewPopover({ pipeline }: { pipeline: Pipeline }) {
                 )
               })}
               {taskCount > tasks.length && (
-                <li className="text-[10px] text-[var(--color-text-tertiary)]">等 {taskCount} 个任务</li>
+                <li className="text-[10px] text-[var(--color-text-tertiary)]">还有 {taskCount - tasks.length} 个</li>
               )}
             </ul>
           )}
