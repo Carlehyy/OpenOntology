@@ -3,6 +3,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 import {
+  Dialog, DialogContent, DialogDescription, DialogTitle,
+} from '@/components/ui/dialog'
+import {
   Check, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Copy, Link2, Loader2,
   Search, ShieldCheck, Trash2, X, XCircle,
 } from 'lucide-react'
@@ -74,15 +77,17 @@ export function ManualShareModal({ dataset, onClose }: { dataset: DatasetOvervie
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-bg-overlay)] p-4">
-      <div className="flex max-h-[86vh] w-[min(94vw,680px)] flex-col overflow-hidden rounded-2xl bg-card shadow-2xl">
-        <div className="flex items-center gap-3 border-b px-5 py-4">
+    <Dialog open onOpenChange={next => { if (!next) onClose() }}>
+      <DialogContent className="flex max-h-[86vh] w-[min(94vw,680px)] flex-col overflow-hidden p-0">
+        <div className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-4 pr-14">
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--color-success-bg)] text-[var(--color-success)]"><Link2 size={17} /></span>
-          <div className="min-w-0 flex-1"><h3 className="font-semibold text-foreground">分享人工数据集</h3><p className="truncate text-xs text-[var(--color-text-tertiary)]">{dataset.name} · 链接持有者无需注册</p></div>
-          <button onClick={onClose} className="text-[var(--color-text-tertiary)] hover:text-foreground"><X size={17} /></button>
+          <div className="min-w-0 flex-1">
+            <DialogTitle className="font-semibold text-foreground">分享人工数据集</DialogTitle>
+            <DialogDescription className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]" title={dataset.name}>{dataset.name} · 链接持有者无需注册</DialogDescription>
+          </div>
         </div>
 
-        <div className="overflow-y-auto p-5 space-y-5">
+        <div className="min-h-0 flex-1 overflow-y-auto p-5 space-y-5">
           <div className="rounded-xl border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] p-4 space-y-3">
             <div className="grid gap-3 sm:grid-cols-3">
               <label className="text-xs text-muted-foreground">权限
@@ -141,8 +146,8 @@ export function ManualShareModal({ dataset, onClose }: { dataset: DatasetOvervie
             </div>}
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -213,7 +218,21 @@ export function ManualApprovalModal({ onClose, onChanged }: { onClose: () => voi
   const rangeStart = total ? (page - 1) * pageSize + 1 : 0
   const rangeEnd = Math.min(page * pageSize, total)
 
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]">
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      // isComposing：输入法组词期按 Esc 只取消候选词；defaultPrevented 让位给上层 Radix 弹层
+      if (event.isComposing || event.defaultPrevented) return
+      // Radix Select 展开时 Esc 先收起下拉，不关闭弹窗本体
+      const target = event.target as HTMLElement | null
+      if (target?.closest('[role="listbox"], [data-radix-popper-content-wrapper]')) return
+      onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-bg-overlay)] p-4 backdrop-blur-[2px]">
     <div className="flex h-[min(88vh,820px)] w-[min(96vw,1040px)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_24px_80px_rgba(15,23,42,0.22)]" role="dialog" aria-modal="true" aria-labelledby="manual-approval-title">
       <div className="flex items-center gap-3 border-b border-border px-5 py-4">
         <span className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--color-success-bg)] text-[var(--color-success)]"><ShieldCheck size={17} /></span>

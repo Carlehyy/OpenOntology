@@ -70,7 +70,7 @@ function FlowNode({
         {icon}
       </span>
       <span className="whitespace-nowrap leading-none" title={label}>{label}</span>
-      {active && <span className="ml-0.5 shrink-0 rounded bg-[var(--color-success)] px-[clamp(0.25rem,0.4vw,0.375rem)] py-0.5 text-[clamp(8px,0.65vw,9px)] font-medium leading-none text-[var(--color-text-inverse)]">当前</span>}
+      {active && <span className="ml-0.5 shrink-0 whitespace-nowrap rounded bg-[var(--color-success)] px-1.5 py-0.5 text-[11px] font-medium leading-none text-[var(--color-text-inverse)]">当前</span>}
     </button>
   )
 }

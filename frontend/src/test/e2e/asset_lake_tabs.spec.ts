@@ -763,3 +763,124 @@ test('成品数据集迁移：二次确认提交异步任务，迁移任务弹�
   await tasksDialog.getByRole('button', { name: '前往人工数据集' }).click()
   await expect(page).toHaveURL(/tab=raw/)
 })
+
+test('首个待审核版本：上一版本视图隐藏分页条且审核动作保留', async ({ page }) => {
+  await mockAssetLake(page, {
+    curated: [{
+      id: 'ds-pending-first', name: '首版订单表', status: 'pending_review',
+      row_count: 3, quality_score: 0.95, primary_key: 'order_id',
+      producer_pipeline_id: null, output_key: null,
+      has_review_evidence: false, updated_at: '2026-09-01T00:00:00Z',
+    }],
+  })
+  await page.route(/\/api\/v2\/curated\/ds-pending-first\/review-diff/, async route => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          pk: ['order_id'],
+          current: {
+            version_no: 1, dataset_version_id: 'v-first-1', total: 3,
+            rows: [
+              { order_id: 'SO-001', amount: 1280 },
+              { order_id: 'SO-002', amount: 760 },
+              { order_id: 'SO-003', amount: 520 },
+            ],
+            offset: 0, limit: 50, has_more: false,
+          },
+          previous: {
+            version_no: null, dataset_version_id: null, total: 0,
+            rows: [], offset: 0, limit: 50, has_more: false,
+          },
+          delta: {
+            keyed_by: ['order_id'], total_before: 0, total_after: 3,
+            added_count: 3, updated_count: 0, deleted_count: 0, unchanged_count: 0,
+            added_sample: [], updated_sample: [], deleted_sample: [], sample_truncated: false,
+          },
+          review: {
+            id: 'review-first', dataset_version_id: 'v-first-1', status: 'pending',
+            stale: false, latest_dataset_version_id: 'v-first-1', latest_version_no: 1,
+          },
+        },
+        message: 'ok',
+      }),
+    })
+  })
+  await page.goto('/#/data/structured?tab=curated', { waitUntil: 'domcontentloaded' })
+
+  await page.getByRole('row').filter({ hasText: '首版订单表' }).getByRole('button', { name: '查看' }).click()
+  const dialog = page.getByRole('dialog', { name: '首版订单表' })
+  await expect(dialog).toBeVisible()
+
+  await dialog.getByRole('button', { name: /上一已批准版本全量/ }).click()
+  await expect(dialog.getByText('这是首个待审核版本，没有上一已批准版本可对照。')).toBeVisible()
+  // 0 行视图不渲染分页条，避免「第 1 / 1 页 · 0 / 0 行」噪音与空态说明自相矛盾
+  await expect(dialog.getByLabel('待审核数据每页显示条数')).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: '上一页' })).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: '下一页' })).toHaveCount(0)
+  // 审核决策入口不受影响
+  await expect(dialog.getByRole('button', { name: '拒绝本次数据' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '通过审核' })).toBeVisible()
+
+  // 切回有数据的视图，分页条恢复
+  await dialog.getByRole('button', { name: /本次接受后全量/ }).click()
+  await expect(dialog.getByLabel('待审核数据每页显示条数')).toBeVisible()
+})
+
+test('迁移任务弹窗支持 Esc 关闭', async ({ page }) => {
+  await mockAssetLake(page, {
+    curated: [{
+      id: 'ds-mig-source', name: '订单明细', status: 'approved',
+      producer_pipeline_id: null, output_key: null,
+      row_count: 1000, quality_score: 0.98, primary_key: 'order_id',
+      has_review_evidence: false, created_at: '2026-08-26T09:00:00Z', updated_at: '2026-08-26T09:00:00Z',
+    }],
+  })
+  await page.route(/\/api\/v2\/datasets\/migrations/, async route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: [] }),
+  }))
+  await page.goto('/#/data/structured?tab=curated', { waitUntil: 'domcontentloaded' })
+
+  await page.getByRole('button', { name: '迁移任务' }).click()
+  const tasksDialog = page.getByRole('dialog', { name: '迁移任务' })
+  await expect(tasksDialog).toBeVisible()
+  await expect(tasksDialog.getByText('暂无迁移任务')).toBeVisible()
+
+  await page.keyboard.press('Escape')
+  await expect(tasksDialog).toHaveCount(0)
+})
+
+test('窄视口下操作列贴右固定：横向滚动后删除按钮不被裁切', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await mockAssetLake(page, {
+    curated: [{
+      id: 'ds-narrow', name: '超长名称数据集-用于验证操作列在窄视口下的固定行为', status: 'approved',
+      producer_pipeline_id: null, output_key: null,
+      row_count: 42, quality_score: 0.9, primary_key: 'order_id',
+      has_review_evidence: false, created_at: '2026-08-26T09:00:00Z', updated_at: '2026-08-26T09:00:00Z',
+    }],
+  })
+  await page.goto('/#/data/structured?tab=curated', { waitUntil: 'domcontentloaded' })
+
+  const row = page.getByRole('row').filter({ hasText: '超长名称数据集' })
+  const deleteButton = row.getByRole('button', { name: '删除' })
+  await expect(deleteButton).toBeVisible()
+
+  const inViewport = async () => {
+    const box = await deleteButton.boundingBox()
+    return box !== null && box.x >= 0 && box.x + box.width <= 1280
+  }
+  await expect(inViewport()).resolves.toBe(true)
+
+  // 表格容器横向滚动到底，操作列仍须完整落在视口内
+  await page.getByRole('table').evaluate(table => {
+    const container = table.closest('.overflow-auto')
+    if (container) container.scrollLeft = container.scrollWidth
+  })
+  await page.waitForTimeout(200)
+  await expect(inViewport()).resolves.toBe(true)
+  await expect(deleteButton).toBeVisible()
+})

@@ -34,7 +34,7 @@ interface Row {
 
 const STATUS_ICON = (status: string) => {
   if (status === 'approved') return <CheckCircle size={13} className="text-[var(--color-success)]" />
-  if (status === 'rejected') return <AlertTriangle size={13} className="text-viz-rose" />
+  if (status === 'rejected') return <AlertTriangle size={13} className="text-[var(--color-danger)]" />
   return <Clock size={13} className="text-[var(--color-warning)]" />
 }
 
@@ -51,7 +51,7 @@ const STATUS_STYLE: Record<string, string> = {
   pending:        'bg-[var(--color-warning-bg)] text-[var(--color-warning)] border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)]',
   in_review:      'bg-[var(--color-warning-bg)] text-[var(--color-warning)] border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)]',
   approved:       'bg-[var(--color-success-bg)] text-[var(--color-success)] border-[color-mix(in_srgb,var(--color-success)_35%,transparent)]',
-  rejected:       'bg-viz-rose-soft text-viz-rose border-viz-rose-soft',
+  rejected:       'bg-[var(--color-danger-bg)] text-[var(--color-danger)] border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)]',
 }
 
 type LakeTab = 'curated' | 'raw'
@@ -123,8 +123,8 @@ function FlowNode({
         {icon}
       </span>
       <span className="whitespace-nowrap leading-none" title={label}>{label}</span>
-      {active && <span className="ml-0.5 shrink-0 rounded bg-[var(--color-success)] px-[clamp(0.25rem,0.4vw,0.375rem)] py-0.5 text-[clamp(8px,0.65vw,9px)] font-medium leading-none text-[var(--color-text-inverse)]">当前</span>}
-      {unavailable && <span className="ml-0.5 shrink-0 rounded bg-[var(--color-bg-active)] px-1 py-0.5 text-[9px] font-medium leading-none text-muted-foreground">即将开放</span>}
+      {active && <span className="ml-0.5 shrink-0 whitespace-nowrap rounded bg-[var(--color-success)] px-1.5 py-0.5 text-[11px] font-medium leading-none text-[var(--color-text-inverse)]">当前</span>}
+      {unavailable && <span className="ml-0.5 shrink-0 whitespace-nowrap rounded bg-[var(--color-bg-active)] px-1 py-0.5 text-[11px] font-medium leading-none text-muted-foreground">即将开放</span>}
     </button>
   )
 }
@@ -193,7 +193,7 @@ function AssetInsightStrip() {
   if (loading) {
     return (
       <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5" aria-label="总览加载中">
-        {Array.from({ length: 5 }).map((_, index) => <div key={index} className="h-[74px] animate-pulse rounded-xl border border-border bg-muted" />)}
+        {Array.from({ length: 5 }).map((_, index) => <div key={index} className="h-[92px] animate-pulse rounded-xl border border-border bg-muted" />)}
       </div>
     )
   }
@@ -220,16 +220,16 @@ function AssetInsightStrip() {
           <p className="mt-0.5 text-xl font-semibold tabular-nums text-foreground">{metric.value}</p>
           <p className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]" title={metric.note}>
             {metric.note}
-            {metric.action && (
-              <button
-                type="button"
-                onClick={metric.action.onClick}
-                className="ml-1 font-medium text-[var(--color-success)] underline decoration-[var(--color-success)] underline-offset-2 hover:opacity-80"
-              >
-                {metric.action.text}
-              </button>
-            )}
           </p>
+          {metric.action && (
+            <button
+              type="button"
+              onClick={metric.action.onClick}
+              className="mt-1 text-xs font-medium text-[var(--color-success)] underline decoration-[var(--color-success)] underline-offset-2 hover:opacity-80"
+            >
+              {metric.action.text}
+            </button>
+          )}
         </div>
       ))}
     </div>
@@ -634,7 +634,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
         {(pipelineFilter || taskFilter || statusFilter) && (
           <button
             onClick={clearFilters}
-            className="flex items-center gap-1 text-xs text-[var(--color-danger)] hover:text-[var(--color-danger)] px-2 py-1 rounded hover:bg-[var(--color-danger-bg)] transition-colors"
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-muted transition-colors"
           >
             <X size={11} /> 清除筛选
           </button>
@@ -703,29 +703,31 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
       ) : filtered.length === 0 ? (
         <div className="m-5 border rounded-xl p-8 text-center text-[var(--color-text-tertiary)] text-sm">没有匹配的数据集</div>
       ) : (
-        <table className="w-full min-w-[1040px] text-sm">
-            <thead className="bg-card border-b">
+        // border-separate：sticky 列在 collapsed 边框模型下横滚时边框不随单元格移动（同目录先例 DatasetEditorModal）
+        <table className="w-full min-w-[1040px] border-separate border-spacing-0 text-sm">
+            <thead className="bg-card">
               <tr>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">数据集</th>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">来源流水线</th>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">领域</th>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">行数</th>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">质量分</th>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">审核状态</th>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">最近更新时间</th>
-                <th className="px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">操作</th>
+                <th className="border-b border-border px-4 py-2.5 text-left font-medium text-muted-foreground text-xs">数据集</th>
+                <th className="border-b border-border px-4 py-2.5 text-left font-medium text-muted-foreground text-xs">来源流水线</th>
+                <th className="whitespace-nowrap border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">领域</th>
+                <th className="whitespace-nowrap border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">行数</th>
+                <th className="whitespace-nowrap border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">质量分</th>
+                <th className="whitespace-nowrap border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">审核状态</th>
+                <th className="border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">最近更新时间</th>
+                <th className="sticky right-0 z-10 border-b border-l border-border bg-card px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">操作</th>
               </tr>
             </thead>
-            <tbody className="divide-y">
+            {/* 分离边框模型下行（tr）边框不渲染，行间分隔改挂在单元格上（等价 divide-y） */}
+            <tbody className="[&>tr:not(:last-child)>td]:border-b [&>tr:not(:last-child)>td]:border-border">
               {filtered.map((row, idx) => (
                 <tr
                   key={`${row.pipelineId}-${row.curatedId}-${idx}`}
-                  className={`transition-colors hover:bg-muted ${row.curatedId ? '' : 'opacity-60'}`}
+                  className={`group transition-colors hover:bg-muted ${row.curatedId ? '' : 'opacity-60'}`}
                 >
-                  <td className="max-w-[240px] px-4 py-3 text-center font-medium text-foreground">
+                  <td className="max-w-[240px] px-4 py-3 text-left font-medium text-foreground">
                     <span className="block truncate" title={row.curatedName}>{row.curatedName}</span>
                   </td>
-                  <td className="max-w-[180px] px-4 py-3 text-center text-xs">
+                  <td className="max-w-[180px] px-4 py-3 text-left text-xs">
                     {row.pipelineId ? (
                       <button
                         type="button"
@@ -738,29 +740,29 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                       </button>
                     ) : <span className="text-[var(--color-text-tertiary)]">—</span>}
                   </td>
-                  <td className="px-4 py-3 text-center text-xs text-muted-foreground">{row.domain}</td>
-                  <td className="px-4 py-3 text-center text-xs text-muted-foreground">
+                  <td className="whitespace-nowrap px-4 py-3 text-center text-xs text-muted-foreground">{row.domain}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-center text-xs text-muted-foreground">
                     {row.rowCount != null ? (
                       <button
                         type="button"
                         onClick={() => setPanelRow(row)}
-                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 font-medium text-foreground underline decoration-dotted decoration-[var(--color-text-tertiary)] underline-offset-2 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-1 font-medium text-foreground underline decoration-dotted decoration-[var(--color-text-tertiary)] underline-offset-2 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         title="点击查看分页数据"
                       >
                         {row.rowCount.toLocaleString()} 行 <Eye size={11} />
                       </button>
                     ) : '—'}
                   </td>
-                  <td className="px-4 py-3 text-center text-xs">
+                  <td className="whitespace-nowrap px-4 py-3 text-center text-xs">
                     {row.quality != null ? (
                       <span className={row.quality >= 0.9 ? 'text-[var(--color-success)]' : row.quality >= 0.7 ? 'text-[var(--color-warning)]' : 'text-[var(--color-danger)]'}>
                         {(row.quality * 100).toFixed(0)}%
                       </span>
                     ) : <span className="text-[var(--color-text-tertiary)]">—</span>}
                   </td>
-                  <td className="px-4 py-3 text-center">
+                  <td className="whitespace-nowrap px-4 py-3 text-center">
                     {row.curatedStatus ? (
-                      <span className={`inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded border ${STATUS_STYLE[row.curatedStatus] || 'bg-muted text-muted-foreground border-border'}`}>
+                      <span className={`inline-flex items-center gap-1 whitespace-nowrap text-xs px-1.5 py-0.5 rounded border ${STATUS_STYLE[row.curatedStatus] || 'bg-muted text-muted-foreground border-border'}`}>
                         {STATUS_ICON(row.curatedStatus)}
                         {STATUS_LABEL[row.curatedStatus] || row.curatedStatus}
                       </span>
@@ -771,7 +773,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                   <td className="whitespace-nowrap px-4 py-3 text-center text-xs tabular-nums text-muted-foreground" title={row.updatedAt || ''}>
                     {formatUpdatedAt(row.updatedAt)}
                   </td>
-                  <td className="px-4 py-3 text-center">
+                  <td className="sticky right-0 z-10 border-l border-border bg-card px-4 py-3 text-center transition-colors group-hover:bg-muted">
                     <div className="flex items-center justify-center gap-2">
                       {row.curatedId && (
                         <button

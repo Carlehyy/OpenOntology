@@ -32,12 +32,12 @@ const STATUS_STYLE: Record<string, string> = {
   pending:        'bg-[var(--color-warning-bg)] text-[var(--color-warning)] border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)]',
   in_review:      'bg-[var(--color-warning-bg)] text-[var(--color-warning)] border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)]',
   approved:       'bg-[var(--color-success-bg)] text-[var(--color-success)] border-[color-mix(in_srgb,var(--color-success)_35%,transparent)]',
-  rejected:       'bg-viz-rose-soft text-viz-rose border-viz-rose-soft',
+  rejected:       'bg-[var(--color-danger-bg)] text-[var(--color-danger)] border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)]',
 }
 
 const STATUS_ICON = (status: string) => {
   if (status === 'approved') return <CheckCircle size={13} className="text-[var(--color-success)]" />
-  if (status === 'rejected') return <AlertTriangle size={13} className="text-viz-rose" />
+  if (status === 'rejected') return <AlertTriangle size={13} className="text-[var(--color-danger)]" />
   return <Clock size={13} className="text-[var(--color-warning)]" />
 }
 
@@ -444,7 +444,12 @@ export default function CuratedDetailPanel({
   }, [datasetId])
 
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') requestClose() }
+    // isComposing：输入法组词期按 Esc 只取消候选词；
+    // defaultPrevented：内嵌 Radix 弹层（确认框/下拉）已消费的 Esc 不再冒泡处理，
+    // 否则确认框关闭的同一按键会立刻重开确认（requestClose 重设 pendingConfirm）。
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.isComposing && !e.defaultPrevented) requestClose()
+    }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [requestClose])
@@ -552,6 +557,8 @@ export default function CuratedDetailPanel({
       }
       setStatus('approved')
       setView('current')
+      // 在 previous 视图深页码上批准后切回 current，重置偏移避免渲染越界的空分页
+      setPageOffset(0)
       setDiff(previous => previous?.review
         ? { ...previous, review: { ...previous.review, status: 'approved' } }
         : previous)
@@ -585,6 +592,7 @@ export default function CuratedDetailPanel({
       await curatedApi.rejectReview(reviewId)
       setStatus('rejected')
       setView('current')
+      setPageOffset(0)
       setDiff(previous => previous?.review
         ? { ...previous, review: { ...previous.review, status: 'rejected' } }
         : previous)
@@ -668,7 +676,7 @@ export default function CuratedDetailPanel({
 
   return (
     <>
-      <div className="fixed inset-0 z-40 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]" onClick={requestClose}>
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-[var(--color-bg-overlay)] p-4 backdrop-blur-[2px]" onClick={requestClose}>
         <div
           className="z-50 flex h-[78vh] max-h-[760px] min-h-[520px] w-[min(96vw,1440px)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
           onClick={e => e.stopPropagation()}
@@ -742,10 +750,10 @@ export default function CuratedDetailPanel({
               </span>
             </div>
           ) : status === 'rejected' ? (
-            <div className="flex shrink-0 items-center gap-2 border-b border-viz-rose-soft bg-viz-rose-soft px-5 py-3 text-xs text-viz-rose">
+            <div className="flex shrink-0 items-center gap-2 border-b border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-5 py-3 text-xs text-[var(--color-danger)]">
               <AlertTriangle size={14} className="shrink-0" />
               <span className="font-medium">当前版本已拒绝</span>
-              <span className="text-viz-rose">以下仅展示被拒绝的审核快照，供审计追溯；不会进入本体或正式数据消费。</span>
+              <span className="text-[var(--color-danger)]">以下仅展示被拒绝的审核快照，供审计追溯；不会进入本体或正式数据消费。</span>
             </div>
           ) : (
             <div className="flex shrink-0 items-center gap-2 border-b border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] px-5 py-3 text-xs text-[var(--color-success)]">
@@ -836,7 +844,7 @@ export default function CuratedDetailPanel({
                 </button>
               )) : (
                 <span className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground">
-                  <Table2 size={13} className={status === 'rejected' ? 'text-viz-rose' : 'text-brand-ink'} />
+                  <Table2 size={13} className={status === 'rejected' ? 'text-[var(--color-danger)]' : 'text-brand-ink'} />
                   {status === 'rejected' ? '已拒绝版本快照' : '已批准全量数据'}
                 </span>
               )}
@@ -921,33 +929,37 @@ export default function CuratedDetailPanel({
                   </span>
                 ) : (
                   <>
-                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      每页
-                      <PageSizeSelect
-                        value={pageSize}
-                        onChange={changePageSize}
-                        sizes={REVIEW_PAGE_SIZES}
-                        ariaLabel="待审核数据每页显示条数"
-                        disabled={hasUnsavedEdits}
-                        title={hasUnsavedEdits ? '请先保存或还原当前修改' : undefined}
-                      />
-                      条
-                    </label>
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <button type="button" onClick={() => switchPage(pageOffset - pageSize)} disabled={pageOffset <= 0 || loading || hasUnsavedEdits}
-                        aria-label="上一页"
-                        className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
-                        <ChevronLeft size={13} />
-                      </button>
-                      <span className="min-w-52 text-center tabular-nums">
-                        第 {currentPage} / {totalPages} 页 · {pagedTotal ? `${pageStart.toLocaleString()}–${pageEnd.toLocaleString()}` : 0} / {pagedTotal.toLocaleString()} 行
-                      </span>
-                      <button type="button" onClick={() => switchPage(pageOffset + pageSize)} disabled={!pagedView?.has_more || loading || hasUnsavedEdits}
-                        aria-label="下一页"
-                        className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
-                        <ChevronRight size={13} />
-                      </button>
-                    </div>
+                    {pagedTotal > 0 && (
+                      <>
+                        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                          每页
+                          <PageSizeSelect
+                            value={pageSize}
+                            onChange={changePageSize}
+                            sizes={REVIEW_PAGE_SIZES}
+                            ariaLabel="待审核数据每页显示条数"
+                            disabled={hasUnsavedEdits}
+                            title={hasUnsavedEdits ? '请先保存或还原当前修改' : undefined}
+                          />
+                          条
+                        </label>
+                        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <button type="button" onClick={() => switchPage(pageOffset - pageSize)} disabled={pageOffset <= 0 || loading || hasUnsavedEdits}
+                            aria-label="上一页"
+                            className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
+                            <ChevronLeft size={13} />
+                          </button>
+                          <span className="min-w-52 text-center tabular-nums">
+                            第 {currentPage} / {totalPages} 页 · {pagedTotal ? `${pageStart.toLocaleString()}–${pageEnd.toLocaleString()}` : 0} / {pagedTotal.toLocaleString()} 行
+                          </span>
+                          <button type="button" onClick={() => switchPage(pageOffset + pageSize)} disabled={!pagedView?.has_more || loading || hasUnsavedEdits}
+                            aria-label="下一页"
+                            className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
+                            <ChevronRight size={13} />
+                          </button>
+                        </div>
+                      </>
+                    )}
                     {view === 'current' && canEditCurrentRows && (
                       <div className="flex items-center gap-2">
                         <span className={`text-xs ${hasUnsavedEdits ? 'font-medium text-[var(--color-warning)]' : 'text-[var(--color-text-tertiary)]'}`} role="status">
@@ -979,7 +991,7 @@ export default function CuratedDetailPanel({
                 </button>
                 <button type="button" onClick={handleReject} disabled={Boolean(reviewAction) || reviewIsStale || loading || savingEdits || hasUnsavedEdits}
                   title={reviewIsStale ? '审核版本已过期，请先切换到最新版本' : hasUnsavedEdits ? '请先保存或还原当前修改' : '拒绝当前审核版本'}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-viz-rose-soft bg-card px-3.5 text-xs font-medium text-viz-rose transition hover:border-viz-rose-soft hover:bg-viz-rose-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45">
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-3.5 text-xs font-medium text-[var(--color-danger)] transition hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45">
                   {reviewAction === 'reject' ? <Loader2 size={13} className="animate-spin" /> : <AlertTriangle size={13} />}
                   拒绝本次数据
                 </button>
@@ -993,31 +1005,35 @@ export default function CuratedDetailPanel({
             </div>
           ) : (
             <div className="flex shrink-0 flex-wrap items-center gap-3 border-t border-border bg-muted px-5 py-3">
-              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                每页
-                <PageSizeSelect
-                  value={pageSize}
-                  onChange={changePageSize}
-                  sizes={REVIEW_PAGE_SIZES}
-                  ariaLabel={status === 'rejected' ? '已拒绝快照每页显示条数' : '已批准数据每页显示条数'}
-                />
-                条
-              </label>
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <button type="button" onClick={() => switchPage(pageOffset - pageSize)} disabled={pageOffset <= 0 || loading}
-                  aria-label="上一页"
-                  className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
-                  <ChevronLeft size={13} />
-                </button>
-                <span className="min-w-52 text-center tabular-nums">
-                  第 {currentPage} / {totalPages} 页 · {pagedTotal ? `${pageStart.toLocaleString()}–${pageEnd.toLocaleString()}` : 0} / {pagedTotal.toLocaleString()} 行
-                </span>
-                <button type="button" onClick={() => switchPage(pageOffset + pageSize)} disabled={!diff?.current?.has_more || loading}
-                  aria-label="下一页"
-                  className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
-                  <ChevronRight size={13} />
-                </button>
-              </div>
+              {pagedTotal > 0 && (
+                <>
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    每页
+                    <PageSizeSelect
+                      value={pageSize}
+                      onChange={changePageSize}
+                      sizes={REVIEW_PAGE_SIZES}
+                      ariaLabel={status === 'rejected' ? '已拒绝快照每页显示条数' : '已批准数据每页显示条数'}
+                    />
+                    条
+                  </label>
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                    <button type="button" onClick={() => switchPage(pageOffset - pageSize)} disabled={pageOffset <= 0 || loading}
+                      aria-label="上一页"
+                      className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
+                      <ChevronLeft size={13} />
+                    </button>
+                    <span className="min-w-52 text-center tabular-nums">
+                      第 {currentPage} / {totalPages} 页 · {pagedTotal ? `${pageStart.toLocaleString()}–${pageEnd.toLocaleString()}` : 0} / {pagedTotal.toLocaleString()} 行
+                    </span>
+                    <button type="button" onClick={() => switchPage(pageOffset + pageSize)} disabled={!diff?.current?.has_more || loading}
+                      aria-label="下一页"
+                      className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-card transition hover:border-brand-line hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98] disabled:opacity-35">
+                      <ChevronRight size={13} />
+                    </button>
+                  </div>
+                </>
+              )}
               <span className="inline-flex items-center gap-1 text-xs text-[var(--color-text-tertiary)]">
                 <LockKeyhole size={11} /> 只读模式，不会修改数据
               </span>

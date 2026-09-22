@@ -100,8 +100,17 @@ export default function MigrationTasksModal({
     return () => window.clearInterval(timer)
   }, [load])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      // isComposing：输入法组词期按 Esc 只取消候选词；defaultPrevented 让位给上层 Radix 弹层
+      if (event.key === 'Escape' && !event.isComposing && !event.defaultPrevented) onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-bg-overlay)] p-4 backdrop-blur-[2px]">
       <div
         className="flex max-h-[82vh] w-[min(96vw,880px)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
         role="dialog"

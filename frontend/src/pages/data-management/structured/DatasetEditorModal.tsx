@@ -173,7 +173,8 @@ export default function DatasetEditorModal({ dataset, onClose, onSaved }: {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !confirmClose) requestClose()
+      // isComposing：输入法组词期按 Esc 只取消候选词；defaultPrevented 让位给上层 Radix 弹层
+      if (event.key === 'Escape' && !event.isComposing && !event.defaultPrevented && !confirmClose) requestClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -359,7 +360,7 @@ export default function DatasetEditorModal({ dataset, onClose, onSaved }: {
   const totalPages = Math.max(1, Math.ceil(totalRows / pageSize))
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-bg-overlay)] p-4 backdrop-blur-[2px]">
       <div
         className="flex h-[78vh] max-h-[760px] min-h-[520px] w-[min(96vw,1440px)] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
         role="dialog"
