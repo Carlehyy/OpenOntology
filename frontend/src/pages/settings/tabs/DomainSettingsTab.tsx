@@ -44,7 +44,12 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
   } = settings
 
   const nameInputRef = useRef<HTMLInputElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const descriptionId = useId()
+  // 名称框组词态自管：Safari/WebKit 的 compositionend 先于同一次上屏 Enter 的
+  // keydown 派发，nativeEvent.isComposing 届时已是 false，仅靠它会让选词回车
+  // 误触发保存；ref 延迟一拍复位兜住该顺序（Chromium/Firefox 由 isComposing 覆盖）
+  const nameComposingRef = useRef(false)
 
   // 行内错误出现时（空名称 / 重名）把焦点拉回名称框，让反馈落在视线所在处；
   // nonce 兜住「连续两次相同错误」时 state 同值跳过 effect 的场景
@@ -79,6 +84,7 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]"
             />
             <Input
+              ref={searchInputRef}
               value={domainSearchInput}
               onChange={e => setDomainSearchInput(e.target.value)}
               placeholder="按名称搜索"
@@ -88,7 +94,11 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
             {domainSearchInput && (
               <button
                 type="button"
-                onClick={() => setDomainSearchInput('')}
+                onClick={() => {
+                  // 清空后按钮随即卸载，把焦点还给输入框，避免键盘用户焦点落回 body
+                  setDomainSearchInput('')
+                  searchInputRef.current?.focus()
+                }}
                 aria-label="清除搜索"
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
               >
@@ -217,8 +227,16 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               if (nameError) setNameError('')
             }}
             onKeyDown={e => {
-              // Enter 直接保存（isComposing 排除输入法选词回车）；保存中不重复提交
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing && !saving) handleSaveDomain()
+              // Enter 直接保存；双保险排除输入法组词回车：isComposing 覆盖
+              // Chromium/Firefox，nameComposingRef 兜 WebKit 的上屏回车顺序
+              if (e.key === 'Enter' && !nameComposingRef.current && !e.nativeEvent.isComposing && !saving) {
+                handleSaveDomain()
+              }
+            }}
+            onCompositionStart={() => { nameComposingRef.current = true }}
+            onCompositionEnd={() => {
+              // 延迟一拍复位：Safari 上屏 Enter 的 keydown 紧跟 compositionend 派发
+              setTimeout(() => { nameComposingRef.current = false }, 0)
             }}
             maxLength={100}
             placeholder="输入领域名称"

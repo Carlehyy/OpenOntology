@@ -47,10 +47,17 @@ interface DomainsGetRespond {
   payload?: object
 }
 
+/** 命中创建请求时的定制响应；缺省保持 409 重名契约，供既有用例复用 */
+interface DomainsPostRespond {
+  status?: number
+  json?: object
+}
+
 async function mockDomains(
   page: Page,
   payload = domainsPayload(),
   onDomainsGet?: (search: string | null) => DomainsGetRespond,
+  onDomainsPost?: () => DomainsPostRespond,
 ) {
   await page.addInitScript(() => {
     const user = {
@@ -82,7 +89,8 @@ async function mockDomains(
       return route.fulfill({ json: payload })
     }
     if (path === '/api/v1/domains' && route.request().method() === 'POST') {
-      return route.fulfill({ status: 409, json: { detail: '领域「制造」已存在' } })
+      const respond = onDomainsPost?.() ?? { status: 409, json: { detail: '领域「制造」已存在' } }
+      return route.fulfill({ status: respond.status ?? 200, json: respond.json })
     }
     if (path === '/api/v2/inbox/summary') {
       return route.fulfill({
@@ -174,13 +182,68 @@ test.describe('系统设置 · 领域设置（admin）', () => {
     await expect(page.locator('[data-sonner-toast]')).toHaveCount(0)
   })
 
+  test('名称框回车提交有效名称：弹窗关闭 + 成功 toast 标题写动作、说明带领域名', async ({ page }) => {
+    await mockDomains(page, domainsPayload(), undefined, () => ({
+      json: {
+        data: {
+          id: 'd-new',
+          name: '制造二部',
+          description: '',
+          created_by: 'u-1',
+          created_at: '2026-09-22T00:00:00',
+          updated_at: '2026-09-22T00:00:00',
+        },
+      },
+    }))
+    await page.goto('/#/settings/domains')
+
+    await page.getByRole('button', { name: '新增领域' }).click()
+    const modal = page.locator('[role="dialog"]')
+    const nameInput = modal.getByLabel('名称')
+    await nameInput.fill('制造二部')
+    await nameInput.press('Enter')
+
+    await expect(modal).toHaveCount(0)
+    await expect(page.getByText('已创建领域')).toBeVisible()
+    await expect(page.getByText('领域「制造二部」')).toBeVisible()
+  })
+
+  test('输入法组词中的回车不触发保存（含 WebKit 上屏回车顺序）', async ({ page }) => {
+    await mockDomains(page)
+    await page.goto('/#/settings/domains')
+
+    await page.getByRole('button', { name: '新增领域' }).click()
+    const modal = page.locator('[role="dialog"]')
+    const nameInput = modal.getByLabel('名称')
+    await nameInput.focus()
+
+    // Chromium/Firefox 顺序：组词中 keydown 的 isComposing=true
+    // （CompositionEvent 必须冒泡，否则到不了 React 的根委托监听）
+    await nameInput.evaluate((el: HTMLInputElement) => {
+      el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, isComposing: true }))
+    })
+    // WebKit 顺序：compositionend 先于同一次上屏 Enter 的 keydown 派发，
+    // 此时 isComposing 已是 false——守卫必须由组词态 ref 兜住
+    await nameInput.evaluate((el: HTMLInputElement) => {
+      el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, isComposing: false }))
+    })
+    await page.waitForTimeout(150)
+
+    // 两种顺序都没有触发保存：无行内错误、无 toast、弹窗保持打开
+    await expect(modal.getByText('请输入领域名称')).toHaveCount(0)
+    await expect(page.locator('[data-sonner-toast]')).toHaveCount(0)
+    await expect(modal.getByText('新增领域')).toBeVisible()
+  })
+
   test('搜索防抖：连击键只发一次查询，换词在途期间保留上一屏列表', async ({ page }) => {
     const searches: string[] = []
     const itOnly = { data: [domainsPayload().data[2]] }
     await mockDomains(page, domainsPayload(), search => {
       searches.push(search ?? '')
       // 带关键词的查询延迟响应，制造稳定的在途窗口供断言
-      return search ? { delayMs: 400, payload: itOnly } : {}
+      return search ? { delayMs: 1000, payload: itOnly } : {}
     })
     await page.goto('/#/settings/domains')
 
@@ -188,12 +251,11 @@ test.describe('系统设置 · 领域设置（admin）', () => {
 
     // 两次击键总时长 < 300ms 防抖窗：中间值不应触发查询
     await page.getByRole('textbox', { name: '按名称搜索领域' }).pressSequentially('IT', { delay: 60 })
-    await page.waitForTimeout(500)
+    // 轮询等防抖后的请求真正落地再钉住完整序列（固定 sleep 在慢机上余量不足）；
+    // 若中间值「I」曾触发请求，其防抖到期必然早于「IT」的，poll 会先看到而失败
+    await expect.poll(() => searches).toEqual(['', 'IT'])
 
-    // 首屏 1 次无关键词 + 防抖后 1 次「IT」，中间值「I」没有发请求
-    expect(searches).toEqual(['', 'IT'])
-
-    // 查询在途（延迟 400ms）：keepPreviousData 保留上一屏行，不闪回加载占位
+    // 查询在途（延迟 1000ms）：keepPreviousData 保留上一屏行，不闪回加载占位
     await expect(page.locator('tbody tr').filter({ hasText: '制造' })).toBeVisible()
     await expect(page.getByText('正在加载领域')).toHaveCount(0)
 

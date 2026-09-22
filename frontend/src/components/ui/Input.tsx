@@ -10,6 +10,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
   ({ className, type, error, label, id, ...props }, ref) => {
     const generatedId = React.useId()
     const inputId = id || (label ? generatedId : undefined)
+    const errorId = React.useId()
 
     return (
       <div className="w-full">
@@ -34,9 +35,10 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
           )}
           ref={ref}
           {...props}
+          aria-describedby={error ? errorId : undefined}
         />
         {error && (
-          <p className="mt-1 text-xs text-[var(--color-danger)]">{error}</p>
+          <p id={errorId} aria-live="polite" className="mt-1 text-xs text-[var(--color-danger)]">{error}</p>
         )}
       </div>
     )
