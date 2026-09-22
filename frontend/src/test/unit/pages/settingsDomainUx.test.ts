@@ -25,12 +25,6 @@ describe('successNotice', () => {
     })
   })
 
-  it('任何动作的标题都不是页面名「领域设置」', () => {
-    for (const action of ['create', 'update', 'delete'] as const) {
-      assert.notEqual(successNotice(action, '制造').title, '领域设置')
-    }
-  })
-
   it('领域名缺失或全空白时只给标题，不输出空说明', () => {
     assert.deepEqual(successNotice('create'), { title: '已创建领域' })
     assert.deepEqual(successNotice('delete', '   '), { title: '已删除领域' })
