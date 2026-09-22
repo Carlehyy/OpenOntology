@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useReducedMotion } from 'motion/react'
 import {
@@ -98,7 +98,7 @@ function TestStatus({ server }: { server: SuperMcpServer }) {
     return <span className="inline-flex items-center gap-1.5 rounded-full border border-transparent bg-[var(--color-success-bg)] px-2.5 py-1 text-[11px] font-medium text-foreground"><CheckCircle2 size={12} className="text-[var(--color-success)]" /> 已通过</span>
   }
   if (server.last_test_status === 'error') {
-    return <span className="inline-flex items-center gap-1.5 rounded-full border border-transparent bg-[var(--color-danger-bg)] px-2.5 py-1 text-[11px] font-medium text-destructive"><CircleAlert size={12} /> 连接异常</span>
+    return <span className="inline-flex items-center gap-1.5 rounded-full border border-transparent bg-[var(--color-danger-bg)] px-2.5 py-1 text-[11px] font-medium text-foreground"><CircleAlert size={12} className="text-destructive" /> 连接异常</span>
   }
   return <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted px-2.5 py-1 text-[11px] font-medium text-muted-foreground"><Clock3 size={12} /> 未测试</span>
 }
@@ -141,7 +141,7 @@ function EnableSwitch({ server, busy, onToggle }: {
       title={on ? '已启用：超级助手可调用其工具' : '已停用：启用后超级助手才可调用'}
       disabled={busy}
       onClick={() => onToggle(!on)}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:cursor-not-allowed disabled:opacity-45 ${on ? 'border-transparent bg-brand' : 'border-border bg-muted'}`}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:cursor-not-allowed disabled:opacity-45 ${on ? 'border-transparent bg-brand' : 'border-transparent bg-muted-foreground'}`}
     >
       <span className={`absolute left-0.5 h-4 w-4 rounded-full bg-card shadow transition-transform ${on ? 'translate-x-4' : 'translate-x-0'}`} />
     </button>
@@ -444,24 +444,30 @@ export default function PluginCommunityPage() {
   const [statusFilter, setStatusFilter] = useState<StatusKey[]>([])
   const [editing, setEditing] = useState<SuperMcpServer | 'new' | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
-  const [togglingId, setTogglingId] = useState<string | null>(null)
+  const [togglingIds, setTogglingIds] = useState<ReadonlySet<string>>(() => new Set())
   const [deleteTarget, setDeleteTarget] = useState<SuperMcpServer | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [manifestTarget, setManifestTarget] = useState<SuperMcpServer | null>(null)
   const [exportTarget, setExportTarget] = useState<SuperMcpServer | null>(null)
   const [devCreateOpen, setDevCreateOpen] = useState(false)
+  // 请求序号：只接受最新一次 GET 的结果，防止测试/保存触发的在途旧快照
+  // 覆盖刚被行内开关 PATCH 更新过的状态
+  const loadSeq = useRef(0)
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     try {
       const items = await communityApi.mcpServers()
+      if (seq !== loadSeq.current) return
       setServers(Array.isArray(items) ? items.filter(item => !item.builtin_key) : [])
       setLoadError(null)
     } catch (error) {
+      if (seq !== loadSeq.current) return
       // 加载失败不把已有数据清掉：有数据时仅 toast 提示刷新失败，无数据时由错误态接管列表区
       setLoadError(errorText(error, '请检查服务连接后重试。'))
       toast.error('MCP 清单加载失败', { description: errorText(error, '请检查服务连接后重试。') })
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [toast])
 
@@ -475,15 +481,19 @@ export default function PluginCommunityPage() {
   const stats = useMemo(() => mcpStats(servers), [servers])
 
   const toggleEnabled = async (server: SuperMcpServer, next: boolean) => {
-    if (togglingId) return
-    setTogglingId(server.id)
+    if (togglingIds.has(server.id)) return
+    setTogglingIds(current => new Set(current).add(server.id))
     try {
       const updated = await communityApi.updateMcpServer(server.id, { enabled: next })
       setServers(current => current.map(item => (item.id === updated.id ? updated : item)))
     } catch (error) {
       toast.error('启用状态更新失败', { description: errorText(error, '请稍后重试。') })
     } finally {
-      setTogglingId(null)
+      setTogglingIds(current => {
+        const nextSet = new Set(current)
+        nextSet.delete(server.id)
+        return nextSet
+      })
     }
   }
 
@@ -666,7 +676,7 @@ export default function PluginCommunityPage() {
           <button
             type="button"
             onClick={() => { setLoading(true); setLoadError(null); void load() }}
-            className="mt-2 inline-flex h-9 items-center rounded-xl bg-brand px-5 text-sm font-medium text-[var(--color-text-inverse)] transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            className="mt-2 inline-flex h-[38px] items-center rounded-xl bg-brand px-5 text-sm font-medium text-[var(--color-text-inverse)] transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
             重试
           </button>
@@ -682,7 +692,7 @@ export default function PluginCommunityPage() {
             <button
               type="button"
               onClick={() => { setSearch(''); setStatusFilter([]) }}
-              className="mt-4 inline-flex h-9 items-center rounded-xl border border-border bg-card px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-4 inline-flex h-[38px] items-center rounded-xl border border-border bg-card px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               清除筛选
             </button>
@@ -697,12 +707,12 @@ export default function PluginCommunityPage() {
               <table className="w-full min-w-[960px] table-fixed text-sm">
                 <thead className="sticky top-0 z-10 border-b border-border bg-muted">
                   <tr>
-                    <th className="w-[26%] px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">MCP Server</th>
-                    <th className="w-[10%] px-2 py-2.5 text-center text-xs font-medium text-muted-foreground">启用</th>
-                    <th className="w-[12%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">传输方式</th>
-                    <th className="w-[12%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">工具</th>
-                    <th className="w-[13%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">连接状态</th>
-                    <th className="w-[27%] px-2 py-2.5 text-center text-xs font-medium text-muted-foreground">操作</th>
+                    <th scope="col" className="w-[26%] px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">MCP Server</th>
+                    <th scope="col" className="w-[10%] px-2 py-2.5 text-center text-xs font-medium text-muted-foreground">启用</th>
+                    <th scope="col" className="w-[12%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">传输方式</th>
+                    <th scope="col" className="w-[12%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">工具</th>
+                    <th scope="col" className="w-[13%] px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">连接状态</th>
+                    <th scope="col" className="w-[27%] px-2 py-2.5 text-center text-xs font-medium text-muted-foreground">操作</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -723,7 +733,7 @@ export default function PluginCommunityPage() {
                       <td className="px-2 py-3 text-center align-middle">
                         <EnableSwitch
                           server={server}
-                          busy={togglingId === server.id}
+                          busy={togglingIds.has(server.id)}
                           onToggle={next => void toggleEnabled(server, next)}
                         />
                       </td>
@@ -752,12 +762,12 @@ export default function PluginCommunityPage() {
                 className="rounded-2xl border border-border bg-card p-4 shadow-sm"
               >
                 <div className="flex items-start gap-3">
-                  <div className="min-w-0 flex-1"><h2 className="truncate text-sm font-semibold text-foreground">{serverTitle(server)}</h2><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{server.name} · {endpointText(server)}</p></div>
+                  <div className="min-w-0 flex-1"><h2 className="truncate text-sm font-semibold text-foreground">{serverTitle(server)}</h2><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{server.name} · {endpointText(server) || '尚未配置地址'}</p></div>
                   <div className="flex shrink-0 flex-col items-end gap-1.5">
                     <TestStatus server={server} />
                     <EnableSwitch
                       server={server}
-                      busy={togglingId === server.id}
+                      busy={togglingIds.has(server.id)}
                       onToggle={next => void toggleEnabled(server, next)}
                     />
                   </div>

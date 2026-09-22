@@ -22,7 +22,7 @@ async function authenticate(page: Page) {
   })
 }
 
-  test('开放社区导航、技能占位页与 MCP 完整生命周期可用', async ({ page }) => {
+test('开放社区导航、技能占位页与 MCP 完整生命周期可用', async ({ page }) => {
   await authenticate(page)
   let createBody: Record<string, unknown> | null = null
   let patchBody: Record<string, unknown> | null = null
@@ -127,6 +127,10 @@ async function authenticate(page: Page) {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/#/community/skills')
   await expect(page.getByRole('heading', { name: '技能社区即将上线' })).toBeVisible()
+
+  // /community 父级入口落到插件页，不再落到"即将上线"占位页
+  await page.goto('/#/community')
+  await expect(page).toHaveURL(/#\/community\/plugins$/)
 
   const apiHub = page.getByRole('button', { name: '接口代理', exact: true })
   const community = page.getByRole('button', { name: '开放社区', exact: true })
