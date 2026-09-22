@@ -515,8 +515,14 @@ def list_all_runs(
         params.append(current_user.id)
     kw = keyword.strip()
     if kw:
-        where.append("i.name LIKE ?")
-        params.append(f"%{kw}%")
+        # H25：详情抽屉展示/复制的编号是原生数字 id——纯数字关键词在按接口名
+        # 模糊匹配之外同时按 runs.id 精确匹配，复制给同事的编号可直接搜回。
+        if kw.isdigit():
+            where.append("(i.name LIKE ? OR r.id = ?)")
+            params.extend([f"%{kw}%", int(kw)])
+        else:
+            where.append("i.name LIKE ?")
+            params.append(f"%{kw}%")
     s = start.strip()
     if s:
         where.append("datetime(r.created_at) >= datetime(?)")

@@ -401,6 +401,34 @@ def test_run_history_filters_failures_and_slow_calls(hub_client):
     assert sum(item["failed"] for item in overview["daily"]) == 1
 
 
+def test_run_history_keyword_matches_name_or_numeric_run_id(hub_client):
+    """H25：纯数字关键词同时按 runs.id 精确匹配，接口名模糊匹配语义不变。"""
+    item = hub_client.post("/interfaces", json=_interface()).json()
+    created_at = datetime.now(timezone.utc).isoformat()
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO runs(interface_id, ok, status_code, elapsed_ms, "
+            "request_snapshot, response_headers, response_body, error, relogin, "
+            "created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (item["id"], 1, 200, 120, "{}", "{}", "{}", None, 0, created_at),
+        )
+        run_id = conn.execute("SELECT id FROM runs").fetchone()["id"]
+
+    by_id = hub_client.get("/runs", params={"keyword": str(run_id)}).json()
+    assert by_id["total"] == 1
+    assert by_id["items"][0]["id"] == run_id
+
+    by_name = hub_client.get("/runs", params={"keyword": "健康"}).json()
+    assert by_name["total"] == 1
+    assert by_name["items"][0]["id"] == run_id
+
+    numeric_miss = hub_client.get("/runs", params={"keyword": "999999"}).json()
+    assert numeric_miss["total"] == 0
+
+    name_still_wins = hub_client.get("/runs", params={"keyword": "1"}).json()
+    assert {row["id"] for row in name_still_wins["items"]} == {run_id}
+
+
 def test_non_2xx_response_is_failure_in_history(
     hub_client, monkeypatch
 ):
