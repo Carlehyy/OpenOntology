@@ -72,6 +72,7 @@ export default defineConfig({
     '**/scenes.spec.ts',
     '**/sentinel_firing_delta.spec.ts',
     '**/sentinel_panel_loading.spec.ts',
+    '**/settings_domains.spec.ts',
     '**/settings_monitoring.spec.ts',
     '**/steward_browser_collaboration.spec.ts',
     '**/steward_conversation_export.spec.ts',

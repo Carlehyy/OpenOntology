@@ -1,14 +1,12 @@
-import { formatDate, formatDateTime } from '@/utils/datetime'
-import { useEffect } from 'react'
+import { formatDateTime } from '@/utils/datetime'
+import { useEffect, useId, useRef } from 'react'
 import { Pencil, Plus, Search, Trash2, X } from 'lucide-react'
 
-import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { LoadingState, EmptyState } from '@/components/ui/LoadingState'
 import { Modal, ConfirmModal } from '@/components/ui/Modal'
-import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import type { DomainSettingsViewModel } from '../hooks/useDomainSettings'
 
@@ -21,7 +19,8 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
     domainList,
     domainsLoading,
     domainSearch,
-    setDomainSearch,
+    domainSearchInput,
+    setDomainSearchInput,
     showDomainModal,
     setShowDomainModal,
     editingDomain,
@@ -30,8 +29,9 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
     setDomainName,
     domainDescription,
     setDomainDescription,
-    domainMsg,
-    setDomainMsg,
+    nameError,
+    setNameError,
+    nameErrorNonce,
     deleteDomainTarget,
     setDeleteDomainTarget,
     createDomainMut,
@@ -43,15 +43,14 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
     handleDeleteDomain,
   } = settings
 
+  const nameInputRef = useRef<HTMLInputElement>(null)
+  const descriptionId = useId()
 
-  // 把 hook 内的 domainMsg（成功/失败文案）转成 toast，并清空原值避免残留。
+  // 行内错误出现时（空名称 / 重名）把焦点拉回名称框，让反馈落在视线所在处；
+  // nonce 兜住「连续两次相同错误」时 state 同值跳过 effect 的场景
   useEffect(() => {
-    if (!domainMsg) return
-    const ok = domainMsg.includes('成功')
-    const notifyDomain = ok ? toast.success : toast.error
-    notifyDomain(ok ? '领域设置' : '操作失败', { description: domainMsg })
-    setDomainMsg('')
-  }, [domainMsg, setDomainMsg])
+    if (nameError) nameInputRef.current?.focus()
+  }, [nameError, nameErrorNonce])
 
   const saving = createDomainMut.isPending || updateDomainMut.isPending
   const list = (domainList as any[])
@@ -72,7 +71,7 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
           </Button>
         </header>
 
-        {/* 工具条：搜索 */}
+        {/* 工具条：搜索。输入框绑即时值，列表查询走 hook 内的 300ms 防抖词 */}
         <div className="flex items-center gap-3 px-5 pt-4">
           <div className="relative w-56 max-w-full">
             <Search
@@ -80,16 +79,16 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]"
             />
             <Input
-              value={domainSearch}
-              onChange={e => setDomainSearch(e.target.value)}
+              value={domainSearchInput}
+              onChange={e => setDomainSearchInput(e.target.value)}
               placeholder="按名称搜索"
               className="h-8 pl-8 pr-7 text-xs"
               aria-label="按名称搜索领域"
             />
-            {domainSearch && (
+            {domainSearchInput && (
               <button
                 type="button"
-                onClick={() => setDomainSearch('')}
+                onClick={() => setDomainSearchInput('')}
                 aria-label="清除搜索"
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
               >
@@ -116,14 +115,24 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
               }
             />
           ) : (
-            <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
-              <table className="w-full text-sm">
+            <div className="overflow-x-auto rounded-lg border border-[var(--color-border)]">
+              {/* overflow-x-auto：窄视口下固定列宽超出容器时在容器内横滑，操作列
+                  始终可以滑到，页面本身不出现横向滚动条；table-fixed + colgroup 固定
+                  列宽配额，任何长度的名称/描述都只能在本列内截断，操作列不会被内容
+                  挤出容器；min-w 兜底极窄容器下时间/操作列不被按比例压扁 */}
+              <table className="w-full min-w-[600px] table-fixed text-sm">
+                <colgroup>
+                  <col className="w-[30%]" />
+                  <col />
+                  <col className="w-[160px]" />
+                  <col className="w-24" />
+                </colgroup>
                 <thead className="border-b border-[var(--color-border)] bg-[var(--color-muted)]">
                   <tr>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--color-text-secondary)]">名称</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--color-text-secondary)]">描述</th>
                     <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--color-text-secondary)]">更新时间</th>
-                    <th className="w-20 px-4 py-2.5 text-right text-xs font-medium text-[var(--color-text-secondary)]">操作</th>
+                    <th className="px-4 py-2.5 text-right text-xs font-medium text-[var(--color-text-secondary)]">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -133,17 +142,17 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
                       className="border-b border-[var(--color-border)] transition-colors last:border-0 hover:bg-[var(--color-bg-hover)]"
                     >
                       <td className="px-4 py-3 font-medium text-[var(--color-text-primary)]">
-                        <span className="truncate">{d.name}</span>
+                        <span className="block truncate" title={d.name}>{d.name}</span>
                       </td>
-                      <td className="max-w-xs px-4 py-3 text-[var(--color-text-secondary)]">
+                      <td className="px-4 py-3 text-[var(--color-text-secondary)]">
                         {d.description ? (
                           <span className="block truncate" title={d.description}>{d.description}</span>
                         ) : (
-                          <Badge variant="outline">无描述</Badge>
+                          <span className="text-[var(--color-text-tertiary)]">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-[var(--color-text-tertiary)]" title={d.updated_at ? formatDateTime(d.updated_at) : ''}>
-                        {d.updated_at ? formatDate(new Date(d.updated_at)) : '—'}
+                      <td className="whitespace-nowrap px-4 py-3 text-[var(--color-text-tertiary)]">
+                        {d.updated_at ? formatDateTime(d.updated_at) : '—'}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-end gap-1">
@@ -179,6 +188,7 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
       <Modal
         open={showDomainModal}
         onClose={() => { setShowDomainModal(false); setEditingDomain(null) }}
+        disableClose={saving}
         title={editingDomain ? '编辑领域' : '新增领域'}
         description={editingDomain ? '修改领域名称或描述。' : '创建一个新的业务领域分类。'}
         size="md"
@@ -199,17 +209,28 @@ export default function DomainSettingsTab({ settings }: DomainSettingsTabProps) 
       >
         <div className="space-y-4">
           <Input
+            ref={nameInputRef}
             label="名称"
             value={domainName}
-            onChange={e => setDomainName(e.target.value)}
+            onChange={e => {
+              setDomainName(e.target.value)
+              if (nameError) setNameError('')
+            }}
+            onKeyDown={e => {
+              // Enter 直接保存（isComposing 排除输入法选词回车）；保存中不重复提交
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing && !saving) handleSaveDomain()
+            }}
             maxLength={100}
             placeholder="输入领域名称"
             autoFocus
             required
+            error={nameError}
+            aria-invalid={nameError ? true : undefined}
           />
           <div>
-            <div className="mb-1.5 text-sm font-medium text-[var(--color-text-primary)]">描述</div>
+            <label htmlFor={descriptionId} className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">描述</label>
             <textarea
+              id={descriptionId}
               value={domainDescription}
               onChange={e => setDomainDescription(e.target.value)}
               placeholder="输入领域描述（可选）"
