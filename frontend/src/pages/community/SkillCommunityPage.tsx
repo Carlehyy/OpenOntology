@@ -14,10 +14,10 @@ export default function SkillCommunityPage() {
           <Sparkles size={12} /> 技能社区
         </div>
         <h1 id="skill-community-title" className="mt-4 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
-          此功能正在修缮中，稍等片刻~
+          技能社区即将上线
         </h1>
         <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-muted-foreground">
-          我们正在打磨技能的发现、安装与管理体验，完成后会在这里与你见面。
+          技能的发现、安装与管理能力正在开发中。
         </p>
       </section>
     </div>

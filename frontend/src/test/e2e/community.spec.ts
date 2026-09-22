@@ -22,9 +22,10 @@ async function authenticate(page: Page) {
   })
 }
 
-test('开放社区导航、技能占位页与 MCP 完整生命周期可用', async ({ page }) => {
+  test('开放社区导航、技能占位页与 MCP 完整生命周期可用', async ({ page }) => {
   await authenticate(page)
   let createBody: Record<string, unknown> | null = null
+  let patchBody: Record<string, unknown> | null = null
   let exportBody: Record<string, unknown> | null = null
   let stdioExportBody: Record<string, unknown> | null = null
   let server = {
@@ -101,6 +102,7 @@ test('开放社区导航、技能占位页与 MCP 完整生命周期可用', asy
     }
     if (path === '/api/v2/community/mcp-servers/mcp-1' && request.method() === 'PATCH') {
       const body = request.postDataJSON() as Record<string, unknown>
+      patchBody = body
       server = { ...server, ...body }
       return json(route, server)
     }
@@ -124,7 +126,7 @@ test('开放社区导航、技能占位页与 MCP 完整生命周期可用', asy
 
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/#/community/skills')
-  await expect(page.getByRole('heading', { name: '此功能正在修缮中，稍等片刻~' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '技能社区即将上线' })).toBeVisible()
 
   const apiHub = page.getByRole('button', { name: '接口代理', exact: true })
   const community = page.getByRole('button', { name: '开放社区', exact: true })
@@ -165,11 +167,11 @@ test('开放社区导航、技能占位页与 MCP 完整生命周期可用', asy
   expect(serverListBox!.height).toBeGreaterThan(500)
   expect(viewportHeight - serverListBox!.y - serverListBox!.height).toBeGreaterThanOrEqual(20)
   expect(viewportHeight - serverListBox!.y - serverListBox!.height).toBeLessThanOrEqual(28)
-  // beUI 统计卡组：三张卡（MCP/测试通过/已发现工具）在筛选区上方渲染
+  // beUI 统计卡组：三张卡（MCP/已通过/已发现工具）在筛选区上方渲染
   const statsRegion = page.getByTestId('mcp-server-stats')
   await expect(statsRegion).toBeVisible()
   await expect(statsRegion.getByText('MCP Server', { exact: true })).toBeVisible()
-  await expect(statsRegion.getByText('测试通过', { exact: true })).toBeVisible()
+  await expect(statsRegion.getByText('已通过', { exact: true })).toBeVisible()
   await expect(statsRegion.getByText('已发现工具', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: '测试 MCP 天气工具集' }).click()
@@ -177,7 +179,13 @@ test('开放社区导航、技能占位页与 MCP 完整生命周期可用', asy
   const weatherRow = page.getByRole('row', { name: /天气工具集/ })
   await expect(weatherRow.getByText('已通过', { exact: true })).toBeVisible()
   await expect(weatherRow.getByText('共 1 个', { exact: true })).toBeVisible()
-  await expect(page.getByRole('switch')).toHaveCount(0)
+  // 行内启用开关：本页切换「对超级助手启用」，测试成功但未启用时 toast 提供就地启用
+  const enableSwitch = page.getByRole('switch', { name: '对超级助手启用 天气工具集' })
+  await expect(enableSwitch).toBeVisible()
+  await expect(enableSwitch).toHaveAttribute('aria-checked', 'false')
+  await page.getByRole('button', { name: '就地启用' }).click()
+  await expect.poll(() => patchBody).toMatchObject({ enabled: true })
+  await expect(enableSwitch).toHaveAttribute('aria-checked', 'true')
 
   await page.getByRole('button', { name: '查看 天气工具集 的工具清单' }).click()
   await expect(page.getByText('调用方式', { exact: true })).toBeVisible()
@@ -305,23 +313,23 @@ test('MCP 状态筛选支持多选并集与 chip 移除恢复', async ({ page })
   await expect(page.getByRole('row', { name: /异常服务/ })).toBeVisible()
   await expect(page.getByRole('row', { name: /未测试服务/ })).toBeVisible()
 
-  // 勾选「测试通过 + 未测试」：异常行隐藏，其余保留；chip 成对展示
+  // 勾选「已通过 + 未测试」：异常行隐藏，其余保留；chip 成对展示
   const filterInput = page.getByRole('combobox', { name: '筛选 MCP 状态' })
   await filterInput.click()
-  await page.getByRole('option', { name: '测试通过', exact: true }).click()
+  await page.getByRole('option', { name: '已通过', exact: true }).click()
   await page.getByRole('option', { name: '未测试', exact: true }).click()
   await expect(page.getByRole('row', { name: /异常服务/ })).toBeHidden()
   await expect(page.getByRole('row', { name: /已通过服务/ })).toBeVisible()
   await expect(page.getByRole('row', { name: /未测试服务/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: '移除 测试通过' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '移除 已通过' })).toBeVisible()
 
-  // chip 移除「未测试」：仅剩测试通过
+  // chip 移除「未测试」：仅剩已通过
   await page.getByRole('button', { name: '移除 未测试' }).click()
   await expect(page.getByRole('row', { name: /未测试服务/ })).toBeHidden()
   await expect(page.getByRole('row', { name: /已通过服务/ })).toBeVisible()
 
   // 移除最后一个 chip：回到全部
-  await page.getByRole('button', { name: '移除 测试通过' }).click()
+  await page.getByRole('button', { name: '移除 已通过' }).click()
   await expect(page.getByRole('row', { name: /异常服务/ })).toBeVisible()
   await expect(page.getByRole('row', { name: /未测试服务/ })).toBeVisible()
 })

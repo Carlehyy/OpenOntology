@@ -213,7 +213,7 @@ export default function App() {
           <Route path="/models" element={<ProtectedRoute><ModelsPage /></ProtectedRoute>} />
           <Route path="/api-hub" element={<Navigate to="/api-hub/interfaces" replace />} />
           <Route path="/api-hub/:tab" element={<ProtectedRoute><ApiHubPage /></ProtectedRoute>} />
-          <Route path="/community" element={<Navigate to="/community/skills" replace />} />
+          <Route path="/community" element={<Navigate to="/community/plugins" replace />} />
           <Route path="/community/skills" element={<ProtectedRoute><SkillCommunityPage /></ProtectedRoute>} />
           <Route path="/community/plugins" element={<ProtectedRoute><PluginCommunityPage /></ProtectedRoute>} />
           <Route path="/community/plugins/develop/:projectId" element={<ProtectedRoute><McpDevPage /></ProtectedRoute>} />
