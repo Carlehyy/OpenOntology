@@ -11,6 +11,7 @@ import {
   type PipelineTask, type PipelineTaskRun, type WriteMode, type RunAudit,
   type RunAuditOutput, type LakeImpactDetail,
 } from '@/api/v2/pipeline-tasks'
+import { Alert } from '@/components/ui/Alert'
 
 const TRIGGER_LABEL: Record<string, string> = { manual: '手动', scheduled: '定时' }
 
@@ -95,6 +96,15 @@ export default function HistoryDrawer({
     setExpanded(new Set())
     void load()
   }, [load])
+
+  // Esc 关闭：window 级监听，不依赖焦点是否落在抽屉内（先例：GlobalHistoryModal）
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
 
   useEffect(() => {
     setLinkedRun(null)
@@ -221,9 +231,13 @@ export default function HistoryDrawer({
         </div>
 
         {loadError && (
-          <div className="mx-5 mt-3 flex shrink-0 items-center gap-2 rounded-lg border border-viz-rose-soft bg-viz-rose-soft px-3 py-2 text-xs text-viz-rose">
-            <XCircle size={13} /><span className="flex-1">{loadError}</span>
-            <button type="button" onClick={() => void load()} className="font-medium hover:underline">重试</button>
+          <div className="mx-5 mt-3 shrink-0">
+            <Alert variant="danger" role="alert" className="text-xs">
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="min-w-0 flex-1">{loadError}</span>
+                <button type="button" onClick={() => void load()} className="shrink-0 font-medium hover:underline">重试</button>
+              </span>
+            </Alert>
           </div>
         )}
 

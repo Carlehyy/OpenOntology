@@ -2,7 +2,13 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 
 type MockTask = Record<string, unknown>
 
-async function mockTaskPool(page: Page, tasks: MockTask[] = [], recentRuns: MockTask[] = []) {
+/** failDeleteFor：注入删除失败的任务 id（DELETE 返回 500），用于删除失败路径断言 */
+async function mockTaskPool(
+  page: Page,
+  tasks: MockTask[] = [],
+  recentRuns: MockTask[] = [],
+  opts: { failDeleteFor?: string[] } = {},
+) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
@@ -10,6 +16,9 @@ async function mockTaskPool(page: Page, tasks: MockTask[] = [], recentRuns: Mock
       version: 0,
     }))
   })
+
+  // 删除是有状态的：DELETE 成功后从列表中移除，模拟真实后端行为
+  const remainingTasks = [...tasks]
 
   const historyItems = Array.from({ length: 24 }, (_, index) => {
     const startedAt = `2026-07-${String(18 - Math.floor(index / 3)).padStart(2, '0')}T02:00:00Z`
@@ -46,8 +55,21 @@ async function mockTaskPool(page: Page, tasks: MockTask[] = [], recentRuns: Mock
       body: JSON.stringify({ data, message: 'ok' }),
     })
 
-    if (url.pathname === '/api/v2/pipeline-tasks') {
-      return ok({ total: tasks.length, items: tasks, page: 1, page_size: 10 })
+    if (url.pathname === '/api/v2/pipeline-tasks' && route.request().method() === 'GET') {
+      return ok({ total: remainingTasks.length, items: remainingTasks, page: 1, page_size: 10 })
+    }
+    if (/^\/api\/v2\/pipeline-tasks\/[^/]+$/.test(url.pathname) && route.request().method() === 'DELETE') {
+      const taskId = url.pathname.split('/').at(-1) || ''
+      if (opts.failDeleteFor?.includes(taskId)) {
+        return route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: '目标数据集正在被其他任务写入，请稍后重试' }),
+        })
+      }
+      const index = remainingTasks.findIndex(task => task.id === taskId)
+      if (index >= 0) remainingTasks.splice(index, 1)
+      return ok({ deleted: true })
     }
     if (url.pathname === '/api/v2/pipeline-tasks/histories') {
       const status = url.searchParams.get('status')
@@ -317,7 +339,7 @@ test('全局历史记录弹窗限制尺寸、支持滚动分页与组合筛选',
   await expect(modal.getByText('第 1 / 3 页')).toBeVisible()
   await expect(modal.getByTestId('global-history-record-run-01')).toBeVisible()
   await expect(modal.getByRole('columnheader', {
-    name: '原始入湖影响（相对上一原始快照）',
+    name: '入湖变化',
   })).toBeVisible()
 
   const secondPageRequest = page.waitForRequest(request => {
@@ -380,11 +402,16 @@ test('全局历史记录弹窗限制尺寸、支持滚动分页与组合筛选',
   await dateRequest
   await page.screenshot({ path: testInfo.outputPath('global-history-modal.png'), fullPage: true })
 
+  // 只读弹窗：点遮罩空白处与右上角按钮均可关闭（向导弹窗不适用此行为，另见空状态用例）
+  await page.mouse.click(10, 400)
+  await expect(modal).toBeHidden()
+  await historyButton.click()
+  await expect(modal).toBeVisible()
   await modal.getByRole('button', { name: '关闭历史记录弹窗' }).click()
   await expect(modal).toBeHidden()
 })
 
-test('任务表格按优先级拆列、入库策略使用独立颜色并允许横向滚动', async ({ page }, testInfo) => {
+test('任务表格九列收窄、入库策略独立配色：宽屏无横滚，窄屏冻结列可用', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1728, height: 1000 })
   const longLakeError = 'aw-datasets/datasets/e39030ee-2746-49d5-a9f5-b50a70f88903/objects/9f0bfc4a-c9aa-4039-84d2-f143a0aa736 写入失败：目标数据集不可用'
   const baseTask = {
@@ -443,33 +470,40 @@ test('任务表格按优先级拆列、入库策略使用独立颜色并允许�
   const headers = await page.getByRole('columnheader').allTextContents()
   expect(headers).toEqual([
     '任务名称', '运行状态', '启停', '关联流水线', '最近执行', '入湖结果',
-    '下次执行', '调度方式', '入库策略', '调度规则', '任务描述', '操作',
+    '调度', '入库策略', '操作',
   ])
   const tableScroll = page.getByTestId('task-table-scroll')
-  expect(await tableScroll.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true)
+  // 1728 宽下表格已收窄：核心列无需横向滚动即可读全
+  expect(await tableScroll.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   const headerAlignments = await page.getByRole('columnheader').evaluateAll(elements =>
     elements.map(element => getComputedStyle(element).textAlign),
   )
-  expect(headerAlignments).toEqual(Array(headers.length).fill('center'))
+  expect(headerAlignments).toEqual(['left', 'left', 'left', 'left', 'left', 'right', 'left', 'left', 'center'])
   const cellAlignments = await row.locator('td').evaluateAll(elements =>
     elements.map(element => getComputedStyle(element).textAlign),
   )
-  expect(cellAlignments).toEqual(Array(headers.length).fill('center'))
+  expect(cellAlignments).toEqual(['left', 'left', 'left', 'left', 'left', 'right', 'left', 'left', 'center'])
   const fixedName = row.locator('[data-column="task-name"]')
   const fixedActions = row.locator('[data-column="actions"]')
   await expect(fixedName).toHaveCSS('position', 'sticky')
   await expect(fixedActions).toHaveCSS('position', 'sticky')
-  const fixedNameX = (await fixedName.boundingBox())?.x ?? 0
-  const fixedActionsX = (await fixedActions.boundingBox())?.x ?? 0
   await expect(page.locator('[data-write-mode="overwrite"]')).toHaveClass(/bg-\[var\(--color-success-bg\)\]/)
   await expect(page.locator('[data-write-mode="append"]')).toHaveClass(/bg-\[var\(--color-info-bg\)\]/)
   const lakeError = page.getByTestId('lake-result-error-task-orders-failed')
   await expect(lakeError).toHaveAttribute('title', longLakeError)
   await expect(lakeError).toHaveCSS('text-overflow', 'ellipsis')
   expect(await lakeError.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true)
-  expect((await lakeError.boundingBox())?.width ?? 0).toBeLessThanOrEqual(186)
+  expect((await lakeError.boundingBox())?.width ?? 0).toBeLessThanOrEqual(162)
   expect(await row.evaluate(element => getComputedStyle(element).whiteSpace)).toBe('nowrap')
   await page.screenshot({ path: testInfo.outputPath('task-table-status.png'), fullPage: true })
+  // 验收线：1440 宽（主流笔记本逻辑分辨率）下无横向滚动即可读全核心列
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect.poll(() => tableScroll.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+  // 窄视口下仍可横向滚动，冻结列保持可见
+  await page.setViewportSize({ width: 1024, height: 800 })
+  await expect.poll(() => tableScroll.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true)
+  const fixedNameX = (await fixedName.boundingBox())?.x ?? 0
+  const fixedActionsX = (await fixedActions.boundingBox())?.x ?? 0
   await tableScroll.evaluate(element => { element.scrollLeft = element.scrollWidth })
   expect(Math.abs(((await fixedName.boundingBox())?.x ?? 0) - fixedNameX)).toBeLessThanOrEqual(1)
   expect(Math.abs(((await fixedActions.boundingBox())?.x ?? 0) - fixedActionsX)).toBeLessThanOrEqual(1)
@@ -542,6 +576,10 @@ test('编辑任务沿用五步向导，执行记录支持筛选分页且保留�
   await secondPageRequest
   await expect(page.getByText('第 2 / 3 页')).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('task-history-filters.png'), fullPage: true })
+
+  // Esc 关闭抽屉（window 级监听，不依赖焦点在抽屉内）
+  await page.keyboard.press('Escape')
+  await expect(historyDrawer).toBeHidden()
 })
 
 test('增量游标任务：徽标、全量回填触发参数与表单游标列选择', async ({ page }, testInfo) => {
@@ -580,13 +618,20 @@ test('增量游标任务：徽标、全量回填触发参数与表单游标列�
   const backfillButton = page.getByTestId('full-refresh-btn')
   await expect(backfillButton).toBeVisible()
 
-  // 点击全量回填：trigger 必须携带 full_refresh=true
+  // 验收线：1440 宽下含 5 个操作按钮（含全量回填）的行也不产生横向滚动
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect.poll(() => page.getByTestId('task-table-scroll').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+
+  // 点击全量回填：先弹确认弹窗，确认后 trigger 才携带 full_refresh=true
   const triggerRequest = page.waitForRequest(request => {
     const url = new URL(request.url())
     return url.pathname.endsWith('/task-incr/trigger')
       && url.searchParams.get('full_refresh') === 'true'
   })
   await backfillButton.click()
+  await expect(page.getByRole('heading', { name: '全量回填' })).toBeVisible()
+  await expect(page.getByText(/忽略任务「订单增量入湖」当前的增量水位/)).toBeVisible()
+  await page.getByRole('button', { name: '开始全量回填' }).click()
   await triggerRequest
 
   // 表单：游标列下拉来自流水线发布契约列；overwrite + 游标组合给出警示
@@ -606,4 +651,50 @@ test('增量游标任务：徽标、全量回填触发参数与表单游标列�
   await cursorSelect.selectOption('order_id')
   await expect(modal.getByText('滚动窗口语义', { exact: false })).toBeVisible() // 默认 overwrite 组合警示
   await page.screenshot({ path: testInfo.outputPath('incremental-cursor-form.png'), fullPage: true })
+})
+
+test('删除任务双路径：成功出 toast 并移除行，失败出错误横幅且行保留', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const baseTask = {
+    pipeline_id: 'pipeline-orders',
+    pipeline_name: '订单标准化流水线',
+    pipeline_status: 'published',
+    pipeline_enabled: true,
+    pipeline_version: 3,
+    write_mode: 'overwrite',
+    primary_key: 'order_id',
+    soft_delete_column: '',
+    skip_empty: true,
+    schedule_type: 'MANUAL',
+    cron_expression: '',
+    interval_seconds: 0,
+    enabled: true,
+    status: 'idle',
+    last_run_at: null,
+    next_run_at: null,
+    last_rows: 0,
+    last_error: '',
+    created_at: '2026-07-18T02:00:00Z',
+    updated_at: '2026-07-18T02:00:00Z',
+  }
+  await mockTaskPool(page, [
+    { ...baseTask, id: 'task-orders', name: '订单每日入湖', description: '每天同步订单数据并写入资产湖' },
+    { ...baseTask, id: 'task-refunds', name: '退货数据入湖', description: '每天同步退货数据并写入资产湖' },
+  ], [], { failDeleteFor: ['task-refunds'] })
+  await page.goto('/#/data/pipelines/sync-tasks', { waitUntil: 'domcontentloaded' })
+
+  // 成功路径：确认删除 → sonner toast（真实出现断言）+ 行消失（mock 有状态删除）
+  const ordersRow = page.getByRole('row').filter({ hasText: '订单每日入湖' })
+  await ordersRow.getByTitle('删除').click()
+  await page.getByRole('button', { name: '确认删除' }).click()
+  await expect(page.locator('[data-sonner-toast]')).toContainText('任务「订单每日入湖」已删除')
+  await expect(page.getByRole('row').filter({ hasText: '订单每日入湖' })).toHaveCount(0)
+
+  // 失败路径：确认删除 → 页内错误横幅（Alert）含任务名，行保留不误删
+  const refundsRow = page.getByRole('row').filter({ hasText: '退货数据入湖' })
+  await refundsRow.getByTitle('删除').click()
+  await page.getByRole('button', { name: '确认删除' }).click()
+  await expect(page.getByRole('alert')).toContainText('删除任务「退货数据入湖」失败')
+  await expect(refundsRow).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('task-delete-failure-alert.png'), fullPage: true })
 })
