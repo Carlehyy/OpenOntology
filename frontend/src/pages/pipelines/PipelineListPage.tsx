@@ -14,6 +14,7 @@ import { getPipelineEngine } from '@/api/v2/pipelines'
 import { stewardApi } from '@/api/steward'
 import type { StewardStatus } from '@/api/steward'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { toast } from 'sonner'
 import RunPreviewModal from './RunPreviewModal'
 import PipelineEditWizard from './PipelineEditWizard'
@@ -39,6 +40,7 @@ const RUN_STATUS_META: Record<string, { icon: React.ReactNode; label: string; co
   failed:  { icon: <XCircle size={12} />,      label: '失败', color: 'text-[var(--color-danger)]' },
   running: { icon: <Loader2 size={12} className="animate-spin" />, label: '运行中', color: 'text-[var(--color-info)]' },
   pending: { icon: <Clock size={12} />,        label: '排队中', color: 'text-muted-foreground' },
+  cancelled: { icon: <XCircle size={12} />,    label: '已取消', color: 'text-[var(--color-warning)]' },
 }
 
 function isN8nPipeline(pl: Pipeline): boolean {
@@ -144,10 +146,15 @@ export default function PipelineListPage() {
         setOverview(res.overview ?? null)
         if (page > 1 && res.items.length === 0 && res.total > 0) setPage(page - 1)
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         setPipelines([])
         setTotal(0)
-        toast.error('流水线列表加载失败', { description: '请检查服务连接后重试。' })
+        // 401 已由共享客户端跳转登录（错误带 authRedirected 标记），
+        // 不再弹「请检查服务连接」误导排障方向
+        const err = e as { authRedirected?: boolean }
+        if (!err?.authRedirected) {
+          toast.error('流水线列表加载失败', { description: '请检查服务连接后重试。' })
+        }
       })
       .finally(() => setLoading(false))
   }, [filterEnabled, filterSource, filterStatus, page, pageSize, search])
@@ -418,7 +425,7 @@ export default function PipelineListPage() {
                 <th className="text-center px-4 py-2.5 font-medium text-muted-foreground text-xs" style={{ width: '14%' }}>最近执行结果</th>
                 <th className="text-center px-4 py-2.5 font-medium text-muted-foreground text-xs" style={{ width: '11%' }}>产物</th>
                 <th className="text-center px-4 py-2.5 font-medium text-muted-foreground text-xs" style={{ width: '11%' }}>关联任务</th>
-                <th className="text-center px-2 py-2.5 font-medium text-muted-foreground text-xs rounded-tr-xl" style={{ width: '13%' }}>操作</th>
+                <th className="sticky right-0 z-20 border-l border-border bg-card text-center px-2 py-2.5 font-medium text-muted-foreground text-xs rounded-tr-xl" style={{ width: '13%' }}>操作</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -438,7 +445,7 @@ export default function PipelineListPage() {
                 return (
                   <tr
                     key={pl.id}
-                    className={`align-middle transition-colors hover:bg-muted ${enabled ? '' : 'bg-muted'}`}
+                    className={`group/row align-middle transition-colors hover:bg-muted ${enabled ? '' : 'bg-muted'}`}
                   >
                     <td className="px-4 py-3 align-middle">
                       <p className="font-medium text-foreground truncate" title={pl.name}>{pl.name}</p>
@@ -481,7 +488,16 @@ export default function PipelineListPage() {
                           busy={togglingId === pl.id}
                           lockReason={enableLockReason}
                           onToggle={() => handleToggleEnabled(pl)}
-                          onLocked={() => enableLockReason && toast.warning('当前无法切换启用状态', { description: enableLockReason })}
+                          onLocked={() => enableLockReason && toast.warning('当前无法切换启用状态', {
+                            description: enableLockReason,
+                            // 被任务绑定的锁定：给出一步直达，把「为什么不让我点」变成可解
+                            ...(taskCount > 0 ? {
+                              action: {
+                                label: '前往数据任务池',
+                                onClick: () => navigate(`/data/pipelines/sync-tasks?pipeline_id=${encodeURIComponent(pl.id)}`),
+                              },
+                            } : {}),
+                          })}
                         />
                         <span className={`text-xs whitespace-nowrap ${enabled ? 'text-brand-ink' : 'text-[var(--color-text-tertiary)]'}`}>
                           {enabled ? '已启用' : '未启用'}
@@ -502,7 +518,7 @@ export default function PipelineListPage() {
                           <span className="text-xs text-[var(--color-text-tertiary)] group-hover/hist:text-brand-ink">{formatTime(pl.last_run_at)}</span>
                           {runFailed && (
                             <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-full mt-1.5 z-30 hidden group-hover/err:block w-80 text-left">
-                              <div className="bg-accent text-[var(--color-text-inverse)] text-xs rounded-lg px-3 py-2.5 shadow-xl whitespace-normal break-all leading-relaxed">
+                              <div className="bg-[var(--color-code-bg)] text-[var(--color-text-inverse)] text-xs rounded-lg px-3 py-2.5 shadow-xl whitespace-normal break-all leading-relaxed">
                                 {pl.last_run_error}
                               </div>
                             </div>
@@ -526,7 +542,11 @@ export default function PipelineListPage() {
                         <span className="text-xs text-[var(--color-text-tertiary)]">-</span>
                       )}
                     </td>
-                    <td className="px-2 py-3 text-center align-middle whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                    {/* 操作列吸右：窄视口横向滚动时编辑/试运行/归档始终可达 */}
+                    <td
+                      className={`sticky right-0 z-10 border-l border-border px-2 py-3 text-center align-middle whitespace-nowrap ${enabled ? 'bg-card group-hover/row:bg-muted' : 'bg-muted'}`}
+                      onClick={e => e.stopPropagation()}
+                    >
                       <div className="flex gap-0.5 justify-center">
                         {(n8n || python) && (
                           <button
@@ -565,8 +585,8 @@ export default function PipelineListPage() {
                           type="button"
                           onClick={() => setPreviewTarget(pl)}
                           className="flex w-[34px] flex-col items-center gap-0.5 rounded py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          title="试执行流水线并查看输出"
-                          aria-label="试运行：试执行流水线并查看输出"
+                          title="试运行流水线并查看输出"
+                          aria-label="试运行：试运行流水线并查看输出"
                         >
                           <Play size={14} />
                           <span className="text-[10px] leading-3">试运行</span>
@@ -636,7 +656,7 @@ export default function PipelineListPage() {
         </div>
       )}
 
-      {/* 试执行：仅运行并查看输出，入湖统一由数据任务池负责 */}
+      {/* 试运行：仅运行并查看输出，入湖统一由数据任务池负责 */}
       {previewTarget && (
         <RunPreviewModal
           pipeline={previewTarget}
@@ -723,10 +743,6 @@ function PipelineCreateModal({
   const [saving, setSaving] = useState(false)
 
   const handleSubmit = async () => {
-    if (!name.trim()) {
-      toast.warning('请填写流水线名称')
-      return
-    }
     if (!isEdit && mode === 'n8n' && !n8nReady) {
       toast.warning('n8n 当前不可用', { description: '请联系管理员检查部署环境的 N8N_* 启动配置并重启平台。' })
       return
@@ -771,21 +787,14 @@ function PipelineCreateModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-accent p-4 backdrop-blur-[2px]" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="pipeline-create-modal-title"
-        className="w-[500px] max-w-full rounded-2xl border border-border bg-card p-6 shadow-[0_28px_90px_rgba(15,23,42,0.24)]"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex justify-between items-center mb-4">
-          <h3 id="pipeline-create-modal-title" className="font-semibold">{isEdit ? '编辑数据流水线' : '新建数据流水线'}</h3>
-          <button onClick={onClose} aria-label="关闭弹窗" className="text-[var(--color-text-tertiary)] hover:text-foreground">
-            <X size={16} />
-          </button>
+    <Dialog open onOpenChange={open => { if (!open) onClose() }}>
+      <DialogContent className="w-[500px] max-w-full p-0">
+        <div className="px-6 pb-0 pr-14 pt-5">
+          <DialogTitle className="text-base font-semibold text-foreground">
+            {isEdit ? '编辑数据流水线' : '新建数据流水线'}
+          </DialogTitle>
         </div>
-        <div className="space-y-3">
+        <div className="mt-4 space-y-3 px-6">
           {!isEdit && (
             <div>
               <label className="block text-xs text-muted-foreground mb-1.5">创建方式 *</label>
@@ -855,7 +864,7 @@ function PipelineCreateModal({
             />
           </div>
         </div>
-        <div className="flex items-center justify-between mt-4">
+        <div className="mt-4 flex items-center justify-between px-6 pb-5">
           <p className="text-xs text-[var(--color-text-tertiary)] max-w-[60%] leading-relaxed">
             {isEdit
               ? '名称和描述始终可修改；发布后仅编排与字段契约封版。'
@@ -869,15 +878,15 @@ function PipelineCreateModal({
             </button>
             <button
               onClick={handleSubmit}
-              disabled={saving}
-              className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-nav-bg)] text-[var(--color-text-inverse)] rounded-lg text-sm disabled:opacity-50 hover:opacity-90 transition-opacity"
+              disabled={saving || !name.trim()}
+              className="flex items-center gap-1.5 px-4 py-2 bg-brand-deep text-[var(--color-text-inverse)] rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-brand-deep active:translate-y-px transition"
             >
               {saving && <Loader2 size={13} className="animate-spin" />}
               {saving ? (isEdit ? '保存中...' : '创建中...') : (isEdit ? '保存' : '创建')}
             </button>
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

@@ -258,7 +258,7 @@ test.describe('数据流水线列表页·运行概况与列内预览', () => {
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
     await expect(dialog).toHaveAccessibleName('新建数据流水线')
-    await expect(dialog.getByRole('button', { name: '关闭弹窗' })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: '关闭', exact: true })).toBeVisible()
   })
 
   test('关联任务列先列内预览任务，再选择性跳转数据任务池', async ({ page }) => {
@@ -272,5 +272,44 @@ test.describe('数据流水线列表页·运行概况与列内预览', () => {
 
     await page.getByRole('button', { name: '前往数据任务池' }).click()
     await expect(page).toHaveURL(/#\/data\/pipelines\/sync-tasks\?pipeline_id=py-pipe-2/)
+  })
+
+  test('已发布流水线试运行先说明会触发生产工作流，确认后才真正执行', async ({ page }) => {
+    let dryRunCalls = 0
+    await mockLinkedListPage(page)
+    await page.route('**/api/v2/pipelines/py-pipe-2/dry-run?**', route => {
+      dryRunCalls += 1
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          dry_run_id: 'dry-1',
+          engine: 'python',
+          rows_in: 1,
+          rows_out: 1,
+          outputs: [{
+            dataset_name: '样本输出',
+            dataset_exists: false,
+            rows_out: 1,
+            columns: ['id', 'name'],
+            sample: [{ id: 1, name: '样本行' }],
+            gate_error: null,
+            pk: '',
+            pk_source: '',
+            warnings: [],
+            drift: null,
+          }],
+        }),
+      })
+    })
+    await page.goto('/#/data/pipelines')
+
+    await page.getByTitle('试运行流水线并查看输出').click()
+    await expect(page.getByText('试运行将触发已发布的工作流')).toBeVisible()
+    expect(dryRunCalls).toBe(0)
+
+    await page.getByRole('button', { name: '确认试运行' }).click()
+    await expect(page.getByText('执行完成', { exact: true })).toBeVisible()
+    expect(dryRunCalls).toBe(1)
   })
 })
