@@ -630,7 +630,8 @@ export default function PluginCommunityPage() {
           <MultiSelect value={statusFilter} onValueChange={values => setStatusFilter(values as StatusKey[])}>
             <MultiSelectTrigger className="min-h-[38px] w-56 rounded-xl bg-background">
               <MultiSelectValue placeholder="全部状态" />
-              <MultiSelectInput aria-label="筛选 MCP 状态" />
+              {/* 组件默认占位是「搜索…」，与值区「全部状态」重复渲染，这里显式置空 */}
+              <MultiSelectInput aria-label="筛选 MCP 状态" placeholder="" />
             </MultiSelectTrigger>
             <MultiSelectContent>
               <MultiSelectList ariaLabel="MCP 状态">

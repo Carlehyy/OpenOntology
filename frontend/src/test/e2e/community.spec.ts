@@ -312,13 +312,14 @@ test('MCP 状态筛选支持多选并集与 chip 移除恢复', async ({ page })
   await page.route('**/api/v2/inbox/summary', route => json(route, { unread_count: 0 }))
   await page.goto('/#/community/plugins')
 
-  // 未勾选 = 不过滤：三行齐全
+  // 未勾选 = 不过滤：三行齐全；收起态只显示「全部状态」，内嵌输入占位保持为空
   await expect(page.getByRole('row', { name: /已通过服务/ })).toBeVisible()
   await expect(page.getByRole('row', { name: /异常服务/ })).toBeVisible()
   await expect(page.getByRole('row', { name: /未测试服务/ })).toBeVisible()
+  const filterInput = page.getByRole('combobox', { name: '筛选 MCP 状态' })
+  await expect(filterInput).toHaveAttribute('placeholder', '')
 
   // 勾选「已通过 + 未测试」：异常行隐藏，其余保留；chip 成对展示
-  const filterInput = page.getByRole('combobox', { name: '筛选 MCP 状态' })
   await filterInput.click()
   await page.getByRole('option', { name: '已通过', exact: true }).click()
   await page.getByRole('option', { name: '未测试', exact: true }).click()
