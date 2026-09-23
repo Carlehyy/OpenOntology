@@ -52,7 +52,12 @@ function createApiClient(version: string): ApiClient {
           }
         }
       }
-      return Promise.reject(err.response?.data ?? err)
+      const payload = err.response?.data ?? err
+      // 携带 HTTP 状态码，业务层据此区分「权限不足」与「服务故障」（如密钥列表 403）
+      if (status != null && payload && typeof payload === 'object' && payload.status === undefined) {
+        ;(payload as { status?: number }).status = status
+      }
+      return Promise.reject(payload)
     }
   )
   return {

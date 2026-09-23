@@ -96,6 +96,41 @@ def test_event_list_binds_snake_case_filters_and_page_size(
     assert [item["eventNo"] for item in page_data["items"]] == ["EVT-B-API"]
 
 
+def test_event_list_keyword_search_covers_reporter_name(client, auth_headers, db):
+    """UX 评审 B7：搜索框承诺「上报人」，列表关键字必须能命中 reporter_name。
+
+    构造约束：title/event_no 与关键字不得存在大小写不敏感交集，否则旧的三列
+    过滤器也能命中，用例会退化成误报通过（对抗式审查发现）。
+    """
+    def event_with_reporter(no: str, reporter: str | None) -> RegisteredEvent:
+        return RegisteredEvent(
+            event_no=no, title=no, severity="info",
+            recorded_at=datetime(2026, 7, 18, 1, 0),
+            source_type=event_models.SOURCE_PLATFORM,
+            status=event_models.STATUS_ACTIVE,
+            reporter_name=reporter,
+        )
+
+    db.add_all([
+        event_with_reporter("EVT-R-ONE", "张三"),
+        event_with_reporter("EVT-R-TWO", "MES系统管理员"),
+        event_with_reporter("EVT-R-THR", None),
+    ])
+    db.commit()
+
+    def event_nos(q: str) -> list[str]:
+        response = client.get("/api/v2/events", params={"q": q}, headers=auth_headers)
+        assert response.status_code == 200
+        return [item["eventNo"] for item in response.json()["data"]["items"]]
+
+    # 中文上报人：旧三列过滤器返回空，只有补上 reporter_name 才能命中
+    assert event_nos("张三") == ["EVT-R-ONE"]
+    # 英文片段 + 大小写折叠（mes 命中 MES）：同样只能经 reporter_name 命中
+    assert event_nos("mes") == ["EVT-R-TWO"]
+    # 上报人为空的行不因 reporter_name 为 NULL 被误命中或炸查询
+    assert "EVT-R-THR" not in event_nos("张三") + event_nos("mes")
+
+
 def test_stats_severity_distribution_and_trend_cover_all_statuses(
     client, auth_headers, db, monkeypatch,
 ):
