@@ -778,7 +778,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                       {row.curatedId && (
                         <button
                           onClick={() => setPanelRow(row)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           title="查看详情"
                         >
                           <Eye size={12} /> 查看
@@ -789,7 +789,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                           type="button"
                           onClick={() => { setMigrationNotice(''); setMigrateRow(row) }}
                           disabled={migrating}
-                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
+                          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
                           title="异步拷贝为人工数据集（结构与当前数据一致）"
                         >
                           <ArrowRightLeft size={12} /> 迁移
@@ -799,7 +799,7 @@ function CuratedView({ focusDatasetId }: { focusDatasetId?: string | null }) {
                         <button
                           type="button"
                           onClick={() => setDeleteRow(row)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-2.5 py-1.5 text-xs font-medium text-[var(--color-danger)] transition hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98]"
+                          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-2.5 py-1.5 text-xs font-medium text-[var(--color-danger)] transition hover:bg-[var(--color-danger-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98]"
                           title="完整删除数据集"
                         >
                           <Trash2 size={12} /> 删除
