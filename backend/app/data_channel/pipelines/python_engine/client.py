@@ -134,6 +134,22 @@ def visible_stdout(text: str) -> str:
     return text[:block_start] + text[block_end:]
 
 
+def _params_prelude(params: dict) -> str:
+    """构造 OB_RUN_PARAMS 注入前导。
+
+    JSON 的 true/false/null 不是合法 Python 字面量：参数必须编码为字符串字面量
+    后在运行时解析，不能把 json.dumps 结果直接拼进代码（回归：full_refresh
+    布尔值曾拼出 ``{"full_refresh": false}`` 触发 NameError，导致全部
+    python 引擎任务运行必败，而 dry-run 因不传参数未暴露）。
+    """
+    return (
+        "# ── OpenOntology 平台运行参数（自动注入） ──\n"
+        "OB_RUN_PARAMS = __import__('json').loads("
+        + json.dumps(json.dumps(params, ensure_ascii=False))
+        + ")\n"
+    )
+
+
 def execute_script(script: str, *, timeout: int | None = None, cancel_event=None,
                    params: dict | None = None) -> ScriptExecution:
     """在 Jupyter Kernel Gateway 上执行脚本并提取 result 行数据。
@@ -142,17 +158,10 @@ def execute_script(script: str, *, timeout: int | None = None, cancel_event=None
     脚本自身异常不抛出，以 ScriptExecution.error + traceback 承载。
     cancel_event（threading.Event）置位时在下一个轮询周期内取消执行，
     内核随 finally 销毁，远端不会留下空跑的执行。
-    params：平台运行参数（如增量游标），以 JSON 前导代码注入为
-    ``OB_RUN_PARAMS`` 变量（纯数据编码，不参与代码拼接）。
+    params：平台运行参数（如增量游标），经 _params_prelude 以合法 Python
+    代码注入为 ``OB_RUN_PARAMS`` 变量（见其 docstring 的回归说明）。
     """
-    prelude = ""
-    if params is not None:
-        prelude = (
-            "# ── OpenOntology 平台运行参数（自动注入） ──\n"
-            "OB_RUN_PARAMS = "
-            + json.dumps(params, ensure_ascii=False)
-            + "\n"
-        )
+    prelude = _params_prelude(params) if params is not None else ""
     execution = execute_code(
         prelude + script + _RESULT_EPILOGUE, timeout=timeout,
         cancel_event=cancel_event, full_stdout=True)

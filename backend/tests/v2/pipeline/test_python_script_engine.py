@@ -161,6 +161,24 @@ def test_clean_traceback_strips_ansi():
     assert cleaned == "Boom"
 
 
+def test_params_prelude_is_valid_python_with_json_literals():
+    # 回归：json.dumps 结果直接拼代码时，JSON 的 false/true/null 不是合法
+    # Python 字面量，任务运行注入 full_refresh 布尔即抛 NameError('false')，
+    # 而既有测试全部 mock 掉 execute_script，从未真实执行组装出的代码。
+    code = python_client._params_prelude({
+        "cursor_column": "updated_at",
+        "cursor_since": "",
+        "full_refresh": False,
+    })
+    namespace: dict = {}
+    exec(code, namespace)  # 修复前此行抛 NameError: name 'false' is not defined
+    assert namespace["OB_RUN_PARAMS"] == {
+        "cursor_column": "updated_at",
+        "cursor_since": "",
+        "full_refresh": False,
+    }
+
+
 def test_execute_script_requires_gateway_config():
     # 测试环境默认未配置 PYTHON_KERNEL_GATEWAY_URL
     assert not python_client.settings.python_kernel_gateway_url
