@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -35,9 +36,11 @@ from app.ontologies.export.schemas import (
 )
 from app.ontologies.formal_modeling import schemas as formal_schemas
 from app.ontologies.formal_modeling.validation import validate_model
+from app.ontologies.versions.release_service import resolve_current_release
 from app.ontologies.versions.snapshot_contract import (
     snapshot_hash,
 )
+from app.ontologies.versions.workspace_service import _canvas_node_ids
 from app.settings.domains.service import (
     LOCAL_IMPORT_DESCRIPTION,
     ensure_domain,
@@ -96,6 +99,108 @@ def _portable_function(item: OntologyFunction) -> PortableFunction:
     })
 
 
+# 画布坐标系以像素计；超出该幅度的坐标必然来自损坏或恶意数据，
+# 落库后会让前端 fitView 视口计算失效（整图被缩到不可见）。
+_CANVAS_POSITION_MAX = 10_000_000.0
+
+
+def _finite_position(value: Any) -> dict[str, float] | None:
+    """坐标必须是有限数字对；呈现层状态不合法时丢弃而非拒绝导入。"""
+    if not isinstance(value, dict):
+        return None
+    x, y = value.get("x"), value.get("y")
+    # bool 是 int 子类，会被 float() 静默转成 0/1——与 save_canvas_layout
+    # 的既有语义一致，明确拒绝。
+    if isinstance(x, bool) or isinstance(y, bool):
+        return None
+    try:
+        x_value, y_value = float(x), float(y)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(x_value) and math.isfinite(y_value)):
+        return None
+    if abs(x_value) > _CANVAS_POSITION_MAX or abs(y_value) > _CANVAS_POSITION_MAX:
+        return None
+    return {"x": x_value, "y": y_value}
+
+
+def _exportable_canvas_layout(db: Session, project: OntologyProject) -> dict[str, dict[str, float]] | None:
+    """导出当前发布版本的画布布局。
+
+    数据映射画布的 key（object:/relation:/dataset: 前缀）依赖 mappings，
+    而结构导出包有意不含 mappings，这些位置在新本体中没有落点，不导出。
+    """
+    release = resolve_current_release(db, project)
+    layout = getattr(release, "canvas_layout", None)
+    if not isinstance(layout, dict):
+        return None
+    portable: dict[str, dict[str, float]] = {}
+    for raw_id, raw_position in layout.items():
+        node_id = str(raw_id)
+        if node_id.startswith(("object:", "relation:", "dataset:")):
+            continue
+        position = _finite_position(raw_position)
+        if position is not None:
+            # 亚像素精度对画布无意义；取整同时稳定反复导出导入的坐标，
+            # 并显著缩小大本体的导出文件体积（布局条目可达数万条）。
+            portable[node_id] = {"x": float(round(position["x"])), "y": float(round(position["y"]))}
+    return portable or None
+
+
+def _remap_canvas_layout(
+    raw: Any,
+    *,
+    object_ids: dict[str, str],
+    action_ids: dict[str, str],
+) -> dict[str, dict[str, float]]:
+    """把包内布局 key 引用的旧结构 ID 改写为导入后的新 ID。
+
+    布局 key 形态：``<objId>``（全屏编辑器）、``l1:<objId>``、``l2:<objId>``、
+    ``[l2:]property:<objId>:<propKey>``、``[l2:]action:<actionId>``。属性
+    内部 ID 不参与导入重映射，原样保留。引用未知 ID 或坐标非法的条目
+    静默剔除，不阻塞结构导入。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    remapped: dict[str, dict[str, float]] = {}
+
+    def emit(node_id: str, position: Any) -> None:
+        value = _finite_position(position)
+        if value is not None:
+            remapped[node_id] = value
+
+    for raw_id, raw_position in raw.items():
+        parts = str(raw_id).split(":")
+        if len(parts) == 1:
+            new_id = object_ids.get(parts[0])
+            if new_id:
+                emit(new_id, raw_position)
+            continue
+        prefix = parts[0]
+        if prefix == "property" and len(parts) == 3:
+            new_object = object_ids.get(parts[1])
+            if new_object:
+                emit(f"property:{new_object}:{parts[2]}", raw_position)
+        elif prefix == "action" and len(parts) == 2:
+            new_action = action_ids.get(parts[1])
+            if new_action:
+                emit(f"action:{new_action}", raw_position)
+        elif prefix in ("l1", "l2") and len(parts) == 2:
+            new_object = object_ids.get(parts[1])
+            if new_object:
+                emit(f"{prefix}:{new_object}", raw_position)
+        elif prefix == "l2" and len(parts) == 4 and parts[1] == "property":
+            new_object = object_ids.get(parts[2])
+            if new_object:
+                emit(f"l2:property:{new_object}:{parts[3]}", raw_position)
+        elif prefix == "l2" and len(parts) == 3 and parts[1] == "action":
+            new_action = action_ids.get(parts[2])
+            if new_action:
+                emit(f"l2:action:{new_action}", raw_position)
+        # 其余形态（object:/relation:/dataset: 等映射画布 key）丢弃
+    return remapped
+
+
 def build_export_package(db: Session, project: OntologyProject) -> OntologyStructurePackage:
     """Build a stable structure-only package from the current formal model."""
 
@@ -119,6 +224,7 @@ def build_export_package(db: Session, project: OntologyProject) -> OntologyStruc
             actions=[_portable_action(item) for item in items(ActionType)],
             functions=[_portable_function(item) for item in items(OntologyFunction)],
         ),
+        canvas_layout=_exportable_canvas_layout(db, project),
     )
 
 
@@ -480,6 +586,17 @@ def import_structure_package(
         db.flush()
 
         formal_snapshot = _snapshot_formal(db, ontology_id)
+        # 布局 key 引用的旧 ID 改写为新 ID 后，再按新快照的合法节点集合
+        # 过滤一遍，保证写入的 canvas_layout 与导入结构自洽（悬挂条目剔除）。
+        canvas_layout = {
+            node_id: position
+            for node_id, position in _remap_canvas_layout(
+                package.canvas_layout,
+                object_ids=object_ids,
+                action_ids=action_ids,
+            ).items()
+            if node_id in _canvas_node_ids(formal_snapshot)
+        }
         counts = {
             "objectTypes": len(structure.object_types),
             "linkTypes": len(structure.link_types),
@@ -519,6 +636,7 @@ def import_structure_package(
             snapshot_actions=[],
             snapshot_formal=formal_snapshot,
             snapshot_hash=snapshot_hash(formal_snapshot),
+            canvas_layout=canvas_layout or None,
             published_at=published_at,
             change_summary={
                 "added": 0,

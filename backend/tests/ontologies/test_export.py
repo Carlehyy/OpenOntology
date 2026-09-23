@@ -1,5 +1,7 @@
 import copy
 
+from app.models.ontology_version import OntologyVersion
+
 
 def _formal_url(ontology_id: str) -> str:
     return f"/api/v2/formal/ontologies/{ontology_id}"
@@ -395,3 +397,167 @@ def test_importing_same_package_twice_uses_distinct_names_and_ids(
     assert first_ontology["id"] != second_ontology["id"]
     assert first_ontology["name"].endswith("（导入）")
     assert second_ontology["name"].endswith("（导入 2）")
+
+
+# ============ 画布布局随包迁移 ============
+
+
+def _seed_release_layout(client, auth_headers, db, ontology_id: str) -> tuple[dict, dict]:
+    """把一组画布布局写到当前发布版本行上，模拟用户此前排版已保存。
+
+    ``PUT /full`` 播种只推进 draft 快照，当前发布版仍是空基线，布局
+    写入接口（layout API）会以"节点不属于该版本"拒绝；而用户真实路径
+    是在已发布结构上排版，等价于发布版本行上已存在合法布局。布局写入
+    校验本身由 test_ontology_evolution.py 覆盖，这里直接落行。
+    返回（保存的布局，fixture 名 → 实际 ID 映射）。
+    """
+    full = client.get(
+        f"{_formal_url(ontology_id)}/full", headers=auth_headers,
+    ).json()["data"]
+    objects = {item["name"]: item["id"] for item in full["objectTypes"]}
+    action = full["actions"][0]
+    order_id = objects["Order"]
+    positions = {
+        f"l1:{order_id}": {"x": 10.0, "y": 20.0},
+        f"l2:{order_id}": {"x": 30.0, "y": 40.0},
+        # 小数坐标：导出按亚像素无意义取整（50.7 → 51.0）
+        objects["Supplier"]: {"x": 50.7, "y": 60.4},
+        f"l2:property:{order_id}:p-order-no": {"x": 70.0, "y": 80.0},
+        f"l2:action:{action['id']}": {"x": 90.0, "y": 100.0},
+    }
+    release = db.query(OntologyVersion).filter_by(
+        id=client.get(
+            f"/api/v1/ontologies/{ontology_id}", headers=auth_headers,
+        ).json()["data"]["current_release_id"],
+    ).one()
+    release.canvas_layout = positions
+    db.commit()
+    return positions, {"ot-order": order_id, "ot-supplier": objects["Supplier"], "act-review": action["id"]}
+
+
+def _workspace(client, auth_headers, ontology_id: str) -> dict:
+    response = client.get(
+        f"/api/v2/ontologies/{ontology_id}/current-release/workspace",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
+def test_export_includes_current_release_canvas_layout(
+    client, auth_headers, ontology, db,
+):
+    ontology_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, ontology_id)
+    positions, _ = _seed_release_layout(client, auth_headers, db, ontology_id)
+
+    package, _ = _export(client, auth_headers, ontology_id)
+
+    # 小数坐标被取整为整数像素，其余原样携带
+    expected = {**positions, **{
+        key: {"x": float(round(value["x"])), "y": float(round(value["y"]))}
+        for key, value in positions.items()
+    }}
+    assert package["canvasLayout"] == expected
+
+
+def test_export_omits_layout_when_none_saved(client, auth_headers, ontology):
+    ontology_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, ontology_id)
+
+    package, _ = _export(client, auth_headers, ontology_id)
+
+    assert package["canvasLayout"] is None
+
+
+def test_import_round_trip_carries_canvas_layout_with_remapped_ids(
+    client, auth_headers, ontology, db,
+):
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    _, source_ids = _seed_release_layout(client, auth_headers, db, source_id)
+    package, _ = _export(client, auth_headers, source_id)
+
+    response = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    imported_id = response.json()["data"]["ontology"]["id"]
+
+    workspace = _workspace(client, auth_headers, imported_id)
+    objects = {item["name"]: item["id"] for item in workspace["objectTypes"]}
+    action_id = workspace["actions"][0]["id"]
+    assert objects["Order"] != source_ids["ot-order"]
+
+    assert workspace["canvasLayout"] == {
+        "l1:{}".format(objects["Order"]): {"x": 10.0, "y": 20.0},
+        "l2:{}".format(objects["Order"]): {"x": 30.0, "y": 40.0},
+        objects["Supplier"]: {"x": 51.0, "y": 60.0},
+        "l2:property:{}:p-order-no".format(objects["Order"]): {"x": 70.0, "y": 80.0},
+        "l2:action:{}".format(action_id): {"x": 90.0, "y": 100.0},
+    }
+
+
+def test_import_without_canvas_layout_field_falls_back_to_auto_layout(
+    client, auth_headers, ontology,
+):
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    package, _ = _export(client, auth_headers, source_id)
+    package.pop("canvasLayout")
+
+    response = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    imported_id = response.json()["data"]["ontology"]["id"]
+
+    workspace = _workspace(client, auth_headers, imported_id)
+    assert workspace["canvasLayout"] == {}
+
+
+def test_import_prunes_stale_or_foreign_layout_entries(
+    client, auth_headers, ontology,
+):
+    from app.ontologies.export.service import _finite_position
+    # bool 是 int 子类：DB 直读路径（导出端）须显式拒绝而非转成 0/1；
+    # 导入路径上 Pydantic 已把它宽松转换为 1.0，属既定呈现层宽松语义。
+    assert _finite_position({"x": True, "y": 1.0}) is None
+    assert _finite_position({"x": 1e8, "y": 1.0}) is None
+    assert _finite_position({"x": 1e7, "y": -1e7}) == {"x": 1e7, "y": -1e7}
+
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    package, _ = _export(client, auth_headers, source_id)
+    package_objects = {
+        item["name"]: item["id"]
+        for item in package["structure"]["objectTypes"]
+    }
+    order_id = package_objects["Order"]
+    supplier_id = package_objects["Supplier"]
+    package["canvasLayout"] = {
+        f"l1:{order_id}": {"x": 1.0, "y": 2.0},
+        # 未知结构 ID：重映射无着落
+        "l1:ghost-object": {"x": 3.0, "y": 4.0},
+        # 数据映射画布 key：依赖 mappings，包内不迁移
+        f"object:{order_id}": {"x": 5.0, "y": 6.0},
+        "dataset:ds-legacy": {"x": 7.0, "y": 8.0},
+        # 引用不存在属性的组合 key：重映射后与新快照不自洽
+        f"l2:property:{order_id}:p-missing": {"x": 9.0, "y": 10.0},
+        # 坐标非法：呈现层数据不合法
+        supplier_id: {"x": "NaN", "y": 1.0},
+        # 超出画布坐标幅度的有限值：落库会让前端视口计算失效
+        f"l2:{supplier_id}": {"x": 1e8, "y": 1.0},
+    }
+
+    response = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    imported_id = response.json()["data"]["ontology"]["id"]
+
+    workspace = _workspace(client, auth_headers, imported_id)
+    objects = {item["name"]: item["id"] for item in workspace["objectTypes"]}
+    assert workspace["canvasLayout"] == {
+        "l1:{}".format(objects["Order"]): {"x": 1.0, "y": 2.0},
+    }

@@ -561,7 +561,7 @@ test('详情页头部操作区：映射入口跳转、悬停即时提示、导�
   // 版本徽章与三个图标按钮等高（h-10 = 40px），不再是偏小的 h-9
   const versionBadge = page.getByTestId('current-release-version')
   const graphButton = page.getByRole('button', { name: '查看当前发布图谱', exact: true })
-  const exportButton = page.getByRole('button', { name: '导出本体结构 JSON', exact: true })
+  const exportButton = page.getByRole('button', { name: '导出本体结构', exact: true })
   await expect(versionBadge).toHaveCSS('height', '40px')
   await expect(graphButton).toHaveCSS('height', '40px')
   await expect(exportButton).toHaveCSS('height', '40px')
@@ -577,7 +577,7 @@ test('详情页头部操作区：映射入口跳转、悬停即时提示、导�
 
   // 悬停即时提示浮层（替代原生 title）：hover 后 opacity 从 0 → 1
   const exportTip = exportButton.locator('..').getByRole('tooltip')
-  await expect(exportTip).toHaveText('导出本体结构 JSON')
+  await expect(exportTip).toHaveText('导出本体结构')
   await expect(exportTip).toHaveCSS('opacity', '1')
   // 浮层出现在按钮正下方且不改变任何布局（不把内容区往下顶）
   const buttonBox = await exportButton.boundingBox()

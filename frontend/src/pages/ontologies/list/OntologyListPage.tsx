@@ -551,8 +551,8 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
       toast.error('无法导入本体', { description: '请选择 JSON 格式的本体结构文件。' })
       return
     }
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error('文件超过大小限制', { description: '本体结构文件不能超过 5 MB。' })
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error('文件超过大小限制', { description: '本体结构文件不能超过 20 MB。' })
       return
     }
     try {

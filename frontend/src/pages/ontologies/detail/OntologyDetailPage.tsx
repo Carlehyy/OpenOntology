@@ -283,13 +283,13 @@ export default function OntologyDetailPage() {
               <History size={18} />
             </button>
           </TippedAction>
-          <TippedAction tip={isExporting ? '正在导出本体结构 JSON' : '导出本体结构 JSON'}>
+          <TippedAction tip={isExporting ? '正在导出本体结构' : '导出本体结构'}>
             <button
               type="button"
               onClick={() => void handleExport()}
               disabled={isExporting}
               className={HEADER_ICON_BUTTON_CLASS + ' disabled:cursor-wait disabled:opacity-70'}
-              aria-label={isExporting ? '正在导出本体结构 JSON' : '导出本体结构 JSON'}
+              aria-label={isExporting ? '正在导出本体结构' : '导出本体结构'}
               aria-busy={isExporting}
             >
               {isExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}

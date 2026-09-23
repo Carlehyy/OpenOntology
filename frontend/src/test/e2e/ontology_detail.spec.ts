@@ -78,7 +78,7 @@ test.describe('Ontology Detail Page', () => {
       await expect(page.getByRole('button', { name: '查看当前发布图谱', exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: '打开数据映射工作台', exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: '查看历史版本', exact: true })).toBeVisible()
-      await expect(page.getByRole('button', { name: '导出本体结构 JSON', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: '导出本体结构', exact: true })).toBeVisible()
     } finally {
       await removeOntology(request, token, ontologyId)
     }

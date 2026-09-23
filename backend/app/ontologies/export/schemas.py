@@ -109,3 +109,7 @@ class OntologyStructurePackage(formal_schemas.CamelModel):
     exported_at: datetime
     ontology: PortableOntologyMetadata
     structure: PortableOntologyStructure
+    # 画布布局是呈现层状态：key 为节点 ID（l1:/l2: 前缀或全屏编辑器的
+    # 无前缀实体 ID），不含结构语义，缺失时导入端回退自动布局。旧格式
+    # 包（无此字段）保持可导入，因此 format_version 仍为 1。
+    canvas_layout: Optional[dict[str, dict[str, float]]] = Field(default=None)
