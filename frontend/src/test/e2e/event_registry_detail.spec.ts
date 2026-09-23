@@ -9,8 +9,10 @@ const activeEvent = {
   severity: 'high',
   tags: ['产线', '停机'],
   payload: { line: 'A3', code: 'E502' },
-  occurredAt: '2026-08-08T01:12:00Z',
-  recordedAt: '2026-08-08T01:12:30Z',
+  // 后端真实序列化是 naive UTC（无 Z 后缀），fixture 保持同形态，
+  // 保证时区断言能区分「按 UTC 解析」与「按本地解析」两类实现。
+  occurredAt: '2026-08-08T01:12:00',
+  recordedAt: '2026-08-08T01:12:30',
   sourceType: 'api',
   sourceLabel: '第三方·MES产线网关',
   sourceSystem: 'MES',
@@ -24,8 +26,8 @@ const activeEvent = {
   subjectRef: null,
   supersedesId: null,
   status: 'active',
-  createdAt: '2026-08-08T01:12:30Z',
-  updatedAt: '2026-08-08T01:12:30Z',
+  createdAt: '2026-08-08T01:12:30',
+  updatedAt: '2026-08-08T01:12:30',
   attachmentCount: 1,
 }
 
@@ -48,8 +50,8 @@ const ingestKey = {
   enabled: true,
   allowedSourceSystem: 'MES',
   createdBy: 'admin',
-  createdAt: '2026-08-01T00:00:00Z',
-  lastUsedAt: '2026-08-08T01:12:30Z',
+  createdAt: '2026-08-01T00:00:00',
+  lastUsedAt: '2026-08-08T01:12:30',
   revokedAt: null,
 }
 
@@ -119,17 +121,17 @@ async function mockEventRegistry(page: Page, options: { role?: string; slowCreat
         ...activeEvent,
         attachments: [{
           id: 'att-1', eventId: 'event-1', filename: '停机照片.jpg', fileSize: 204800,
-          mimeType: 'image/jpeg', sha256: 'sha', uploadedBy: 'MES产线网关', createdAt: '2026-08-08T01:13:00Z',
+          mimeType: 'image/jpeg', sha256: 'sha', uploadedBy: 'MES产线网关', createdAt: '2026-08-08T01:13:00',
         }],
         auditTrail: [
           {
             id: 'audit-1', seq: 1, action: 'ingested', actorType: 'service', actorId: 'key-1',
-            actorName: 'MES产线网关', changes: null, note: null, ip: '10.1.2.3', createdAt: '2026-08-08T01:12:30Z',
+            actorName: 'MES产线网关', changes: null, note: null, ip: '10.1.2.3', createdAt: '2026-08-08T01:12:30',
           },
           {
             id: 'audit-2', seq: 2, action: 'updated', actorType: 'user', actorId: 'u1',
             actorName: 'admin', changes: { severity: { from: 'medium', to: 'high' } },
-            note: '升级严重度', ip: null, createdAt: '2026-08-08T02:00:00Z',
+            note: '升级严重度', ip: null, createdAt: '2026-08-08T02:00:00',
           },
         ],
       })
@@ -140,7 +142,7 @@ async function mockEventRegistry(page: Page, options: { role?: string; slowCreat
     }
     if (url.pathname === '/api/v2/events/ingest-keys/key-1' && request.method() === 'DELETE') {
       calls.revokedKeyIds.push('key-1')
-      return ok({ ...ingestKey, enabled: false, revokedAt: '2026-08-08T03:00:00Z' })
+      return ok({ ...ingestKey, enabled: false, revokedAt: '2026-08-08T03:00:00' })
     }
     if (url.pathname === '/api/v1/ontologies') {
       return ok({ items: [{ id: 'ont-1', name: '供应链本体' }], total: 1, page: 1, page_size: 100 })
@@ -153,9 +155,12 @@ async function mockEventRegistry(page: Page, options: { role?: string; slowCreat
   return { calls, releaseCreate }
 }
 
-// Node 与浏览器共享本机时区：按本地时区计算期望串，使时区断言不依赖运行环境。
+// Node 与浏览器共享本机时区；期望值按「服务端 naive UTC」语义解析（无时区后缀补 Z，
+// 与 utils/datetime 的 parseServerTime 同规则），使断言在任意时区下都成立：
+// 若组件回退成裸 new Date(naive)（按本地解析），非 UTC 时区的开发机上断言即失败。
 function localDateTime(iso: string): string {
-  const date = new Date(iso)
+  const normalized = /(Z|[+-]\d\d:?\d\d)$/.test(iso) ? iso : `${iso}Z`
+  const date = new Date(normalized)
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
@@ -175,7 +180,7 @@ test('点击行打开详情抽屉：编号、描述、payload、附件与审计�
   await expect(drawer.getByText('停机照片.jpg')).toBeVisible()
   await expect(drawer.getByText('WO-2026-0007')).toBeVisible()
   // UX 评审 A1：登记时间为 naive UTC 序列化，必须按 UTC 解析后展示本地钟点
-  await expect(drawer.getByText(localDateTime('2026-08-08T01:12:30Z')).first()).toBeVisible()
+  await expect(drawer.getByText(localDateTime('2026-08-08T01:12:30')).first()).toBeVisible()
   // 审计轨迹：最新在上，字段变更展示中文标签与前后值
   await expect(drawer.getByText('编辑', { exact: true }).first()).toBeVisible()
   await expect(drawer.getByText('第三方上传')).toBeVisible()

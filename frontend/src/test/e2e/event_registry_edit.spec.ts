@@ -9,8 +9,8 @@ const eventItem = {
   severity: 'critical',
   tags: [],
   payload: {},
-  occurredAt: '2026-07-28T07:03:00Z',
-  recordedAt: '2026-07-28T07:03:00Z',
+  occurredAt: '2026-07-28T07:03:00',
+  recordedAt: '2026-07-28T07:03:00',
   sourceType: 'platform',
   sourceLabel: '平台录入',
   sourceSystem: null,
@@ -24,8 +24,8 @@ const eventItem = {
   subjectRef: null,
   supersedesId: null,
   status: 'active',
-  createdAt: '2026-07-28T07:03:00Z',
-  updatedAt: '2026-07-28T07:03:00Z',
+  createdAt: '2026-07-28T07:03:00',
+  updatedAt: '2026-07-28T07:03:00',
   attachmentCount: 1,
 }
 
@@ -80,7 +80,7 @@ async function mockEventRegistry(page: Page) {
           mimeType: 'application/pdf',
           sha256: 'test-sha',
           uploadedBy: 'admin',
-          createdAt: '2026-07-28T07:04:00Z',
+          createdAt: '2026-07-28T07:04:00',
         }],
         auditTrail: [],
       })
@@ -112,7 +112,7 @@ async function mockEventRegistry(page: Page) {
         mimeType: 'text/plain',
         sha256: 'new-sha',
         uploadedBy: 'admin',
-        createdAt: '2026-07-28T08:00:00Z',
+        createdAt: '2026-07-28T08:00:00',
       }, 201)
     }
     if (url.pathname === '/api/v1/ontologies') {

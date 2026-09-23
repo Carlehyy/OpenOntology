@@ -86,6 +86,11 @@ export default function EventRegistryPage() {
   }, [status])
 
   const totalPages = Math.max(1, Math.ceil((listQ.data?.total ?? 0) / PAGE_SIZE))
+  // 删除/归档掉末页最后一行后 total 缩小，页码随之越界：钳回最后一页，
+  // 否则会出现「显示 17–16 / 16」伪影并落进误导性空态（与 IngestKeysDrawer 同款先例）。
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages)
+  }, [page, totalPages])
   const refresh = () => { statsQ.refetch(); listQ.refetch() }
 
   const [exporting, setExporting] = useState(false)
@@ -120,9 +125,12 @@ export default function EventRegistryPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => eventsApi.remove(id),
     onSuccess: (_, id) => {
-      // 先从当前缓存拿掉该行，避免等重拉回来期间行仍可见（UX 评审 B4 顺手项）
-      queryClient.setQueriesData<EventListResp>({ queryKey: ['events', 'list'] }, old =>
-        old ? { ...old, items: old.items.filter(item => item.id !== id), total: Math.max(0, old.total - 1) } : old)
+      // 先从当前缓存拿掉该行，避免等重拉回来期间行仍可见（UX 评审 B4 顺手项）。
+      // 仅当行确实存在于该缓存时才扣 total，避免误伤其他筛选组合的缓存计数。
+      queryClient.setQueriesData<EventListResp>({ queryKey: ['events', 'list'] }, old => {
+        if (!old || !old.items.some(item => item.id === id)) return old
+        return { ...old, items: old.items.filter(item => item.id !== id), total: Math.max(0, old.total - 1) }
+      })
       queryClient.invalidateQueries({ queryKey: ['events'] })
       setDeleteTarget(null)
       toast.success('事件已删除')
@@ -253,7 +261,7 @@ export default function EventRegistryPage() {
                     data-status-value={tab.value}
                     onClick={() => setStatus(tab.value)}
                     aria-pressed={status === tab.value}
-                    className={`relative z-10 inline-flex items-center gap-1 rounded-md px-4 py-2 font-medium transition-colors duration-200 ${status === tab.value ? 'text-[var(--color-text-inverse)]' : 'text-muted-foreground hover:text-primary'}`}
+                    className={`relative z-10 inline-flex items-center gap-1 rounded-md px-4 py-2 font-medium transition-colors duration-200 ${status === tab.value ? 'text-primary-foreground' : 'text-muted-foreground hover:text-primary'}`}
                   >
                     <StatusIcon className="h-3.5 w-3.5" />{tab.label}
                   </button>
@@ -354,7 +362,7 @@ export default function EventRegistryPage() {
             { v: '', l: '全部来源' }, { v: 'platform', l: '平台录入' }, { v: 'api', l: 'API 上报' }, { v: 'system', l: '系统生成' },
           ]} />
           <div className="ml-auto flex items-center gap-1">
-            {listQ.isError ? (
+            {listQ.isError && !listQ.data ? (
               <span className="mr-1 text-sm text-[var(--color-text-tertiary)]">—</span>
             ) : (
               <span className="mr-1 text-sm text-[var(--color-text-tertiary)]">共 <span className="font-semibold tabular-nums text-foreground">{listQ.data?.total ?? 0}</span> 条</span>
@@ -389,8 +397,9 @@ export default function EventRegistryPage() {
               <tbody>
                 {listQ.isLoading ? (
                   <tr><td colSpan={7} className="py-16 text-center text-sm text-[var(--color-text-tertiary)]">加载中...</td></tr>
-                ) : listQ.isError ? (
-                  // 失败必须与真空列表区分（UX 评审 A3）：服务故障不能被误读成「没有事件」。
+                ) : listQ.isError && !listQ.data ? (
+                  // 冷启动失败必须与真空列表区分（UX 评审 A3）：服务故障不能被误读成「没有事件」。
+                  // 暖失败（重拉失败但仍有上一屏数据）不遮蔽表格，保留 stale 行。
                   <tr><td colSpan={7} className="py-16">
                     <div role="alert" className="mx-auto flex max-w-sm flex-col items-center text-center">
                       <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--color-danger-bg)] text-[var(--color-danger)]">
@@ -510,7 +519,7 @@ export default function EventRegistryPage() {
           {/* 分页 */}
           <div className="flex shrink-0 items-center justify-between border-t border-border bg-card px-4 py-2">
             <div data-testid="events-pagination-info" className="text-sm tabular-nums text-[var(--color-text-tertiary)]">
-              {listQ.isError
+              {listQ.isError && !listQ.data
                 ? '—'
                 : (listQ.data?.total ?? 0) === 0
                   // 空结果不显示「1–0 / 0」数学伪影（UX 评审 A3）
@@ -565,7 +574,7 @@ export default function EventRegistryPage() {
       <IngestKeysDrawer open={keysOpen} onClose={() => setKeysOpen(false)} />
       <ConfirmModal
         open={Boolean(archiveTarget)}
-        onClose={() => setArchiveTarget(null)}
+        onClose={() => { if (!statusMutation.isPending) setArchiveTarget(null) }}
         onConfirm={() => { if (archiveTarget) statusMutation.mutate({ id: archiveTarget.id, status: 'archived' }) }}
         title="归档事件"
         description={archiveTarget ? `确认归档事件“${archiveTarget.title}”？归档后可在「归档」页签中查看或恢复。` : undefined}
@@ -574,7 +583,7 @@ export default function EventRegistryPage() {
       />
       <ConfirmModal
         open={Boolean(deleteTarget)}
-        onClose={() => setDeleteTarget(null)}
+        onClose={() => { if (!deleteMutation.isPending) setDeleteTarget(null) }}
         onConfirm={() => { if (deleteTarget) deleteMutation.mutate(deleteTarget.id) }}
         title="删除事件"
         description={deleteTarget ? `确认永久删除事件“${deleteTarget.title}”？附件和审计记录也会一并删除，此操作无法恢复。` : undefined}

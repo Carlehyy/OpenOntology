@@ -8,6 +8,7 @@ import { toast } from 'sonner'
 import { ontologyApi } from '@/api/ontologies'
 import { eventsApi, formatBytes, type Attachment, type EventCreateBody, type EventItem } from '@/api/events'
 import { parseServerTime } from '@/utils/datetime'
+import { cn } from '@/lib/utils'
 
 const SEVERITY_OPTIONS = [
   { value: 'info', label: '信息' },
@@ -200,7 +201,8 @@ export default function EventFormModal({
 
   const labelClass = 'mb-1.5 block text-sm font-medium text-foreground'
   const controlClass = 'h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
-  // 校验态只改边框色（平台焦点环规范），沿用 InterfaceManager 的 color-mix 惯例。
+  // 校验态只改边框色（平台焦点环规范）。须经 cn()（tailwind-merge）消解与 border-border 的
+  // 冲突——直接拼接两类时 Tailwind 产物内 border-border 排序靠后，红框永不生效。
   const invalidBorder = 'border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)]'
   const titleInvalid = showFieldErrors && !title.trim()
   const eventTypeInvalid = showFieldErrors && !eventType.trim()
@@ -239,7 +241,7 @@ export default function EventFormModal({
             value={title}
             onChange={event => { setTitle(event.target.value); clearMissingError() }}
             placeholder="简要描述发生了什么"
-            className={`${controlClass} ${titleInvalid ? invalidBorder : ''}`}
+            className={cn(controlClass, titleInvalid && invalidBorder)}
           />
         </div>
 
@@ -255,7 +257,7 @@ export default function EventFormModal({
               value={eventType}
               onChange={event => { setEventType(event.target.value); clearMissingError() }}
               placeholder="选择或输入类型"
-              className={`${controlClass} ${eventTypeInvalid ? invalidBorder : ''}`}
+              className={cn(controlClass, eventTypeInvalid && invalidBorder)}
             />
             <datalist id="event-type-options">
               {EVENT_TYPE_SUGGESTIONS.map(type => <option key={type} value={type} />)}
@@ -306,7 +308,10 @@ export default function EventFormModal({
             value={description}
             onChange={event => { setDescription(event.target.value); clearMissingError() }}
             rows={4}
-            className={`w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${descriptionInvalid ? invalidBorder : ''}`}
+            className={cn(
+              'w-full resize-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm leading-6 text-foreground shadow-sm transition-all placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              descriptionInvalid && invalidBorder,
+            )}
             placeholder="事件的完整经过、背景、影响……"
           />
         </div>
@@ -433,9 +438,9 @@ export default function EventFormModal({
           type="button"
           onClick={() => mutation.mutate()}
           disabled={mutation.isPending}
-          className="inline-flex h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-[var(--color-success)] px-6 text-sm font-medium text-[var(--color-text-inverse)] shadow-sm transition-all hover:bg-[var(--color-success)] active:scale-[0.98] disabled:opacity-50"
+          className="inline-flex h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-primary px-6 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:bg-[var(--color-primary-hover)] active:bg-[var(--color-primary-active)] active:scale-[0.98] disabled:opacity-50"
         >
-          {mutation.isPending && <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-white" />}
+          {mutation.isPending && <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-primary-foreground" />}
           {isEdit ? '保存' : '登记'}
         </button>
       </DialogFooter>

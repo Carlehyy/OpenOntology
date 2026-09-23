@@ -73,12 +73,14 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
   }, [page, totalPages])
 
   // 手写抽屉补齐弹层惯例：Esc 可关闭；嵌套确认弹窗或下拉浮层打开时让它们先消费 Esc。
+  // 浮层只认 [data-state="open"]：SelectContent 的退场动画期间 wrapper 仍挂在 DOM，
+  // 若不筛状态，动画窗口内连按两次 Esc 会被"正在退场的浮层"吞掉。
   useEffect(() => {
     if (!open) return undefined
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       if (revokeTarget) return
-      if (document.querySelector('[data-radix-popper-content-wrapper]')) return
+      if (document.querySelector('[data-radix-popper-content-wrapper] [data-state="open"]')) return
       onClose()
     }
     window.addEventListener('keydown', onKeyDown)
@@ -352,7 +354,7 @@ export default function IngestKeysDrawer({ open, onClose }: { open: boolean; onC
       </aside>
       <ConfirmModal
         open={Boolean(revokeTarget)}
-        onClose={() => setRevokeTarget(null)}
+        onClose={() => { if (!revokeMutation.isPending) setRevokeTarget(null) }}
         onConfirm={() => { if (revokeTarget) revokeMutation.mutate(revokeTarget.id) }}
         title="吊销密钥"
         description={revokeTarget ? `确认吊销密钥“${revokeTarget.name}”？吊销后使用该密钥的第三方系统将立即无法上报事件，此操作不可恢复。` : undefined}
