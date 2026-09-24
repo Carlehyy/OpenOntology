@@ -8,8 +8,11 @@ import {
   mapToolStepStatus,
   pickInitialConversationId,
   reduceStreamEvent,
+  clampWidgetPosition,
+  parseWidgetPosition,
   widgetAnchor,
   widgetNavLeafKey,
+  widgetPanelPlacement,
   widgetVisibleOnPath,
 } from '../../components/assistant-widget/logic.ts'
 
@@ -241,12 +244,12 @@ const navFixture = [
   { key: 'overview', to: '/overview' },
   { key: 'super_assistant', to: '/super-assistant' },
   { key: 'scenes', to: '/scenes' },
-  { key: 'agent', to: '/agent' },
   {
     key: 'ontology_model', to: '/ontology-model', subItems: [
       { key: 'explore', to: '/explore' },
       { key: 'ontologies', to: '/ontologies' },
       { key: 'ontology_model.network', to: '/ontology-model/network' },
+      { key: 'agent', to: '/agent' },
     ],
   },
   {
@@ -257,9 +260,10 @@ const navFixture = [
     ],
   },
   { key: 'events', to: '/events' },
-  { key: 'models', to: '/models' },
   {
     key: 'system_settings', to: '/settings', subItems: [
+      { key: 'tickets', to: '/tickets' },
+      { key: 'models', to: '/models' },
       { key: 'settings.domains', to: '/settings/domains' },
       { key: 'settings.assistant-widget', to: '/settings/assistant-widget' },
     ],
@@ -330,5 +334,46 @@ describe('widgetVisibleOnPath', () => {
     const hidden = new Set(['events', 'models'])
     assert.equal(widgetVisibleOnPath('/inbox', navFixture, hidden), true)
     assert.equal(widgetVisibleOnPath('/no-access', navFixture, hidden), true)
+  })
+
+  it('hides tickets and models by their leaf keys after they sit under settings', () => {
+    const hidden = new Set(['tickets', 'models'])
+    assert.equal(widgetVisibleOnPath('/tickets', navFixture, hidden), false)
+    assert.equal(widgetVisibleOnPath('/models', navFixture, hidden), false)
+    assert.equal(widgetVisibleOnPath('/settings/domains', navFixture, hidden), true)
+  })
+})
+
+describe('widget position', () => {
+  const viewport = { width: 1280, height: 800 }
+  const fab = { left: 1212, top: 732, width: 48, height: 48 }
+
+  it('rejects missing or corrupt stored positions', () => {
+    assert.equal(parseWidgetPosition(null), null)
+    assert.equal(parseWidgetPosition(''), null)
+    assert.equal(parseWidgetPosition('{'), null)
+    assert.equal(parseWidgetPosition('{"left":"12","top":3}'), null)
+    assert.equal(parseWidgetPosition('{"left":NaN,"top":1}'), null)
+    assert.deepEqual(parseWidgetPosition('{"left":12,"top":40}'), { left: 12, top: 40 })
+  })
+
+  it('clamps the fab inside the viewport', () => {
+    assert.deepEqual(clampWidgetPosition({ left: -20, top: 900 }, viewport), { left: 0, top: 752 })
+    assert.deepEqual(clampWidgetPosition({ left: 10.5, top: 20 }, viewport), { left: 10.5, top: 20 })
+    assert.deepEqual(clampWidgetPosition({ left: 10, top: 20 }, { width: 20, height: 20 }, 48), { left: 0, top: 0 })
+  })
+
+  it('opens the panel above and to the left when the fab sits at the bottom-right', () => {
+    assert.deepEqual(
+      widgetPanelPlacement(fab, viewport, { width: 384, height: 600 }),
+      { vertical: 'above', align: 'right' },
+    )
+  })
+
+  it('flips the panel below and to the right when the fab sits at the top-left', () => {
+    assert.deepEqual(
+      widgetPanelPlacement({ left: 8, top: 8, width: 48, height: 48 }, viewport, { width: 384, height: 600 }),
+      { vertical: 'below', align: 'left' },
+    )
   })
 })

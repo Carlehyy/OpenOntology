@@ -164,7 +164,7 @@ test('顶栏工单弹窗：位于收件箱左侧，展示处理中工单并可�
   // 底部「查看全部工单」进入工单页
   await popover.getByRole('button', { name: '查看全部工单' }).click()
   await expect(page).toHaveURL(/#\/tickets$/)
-  await expect(page.getByRole('tab', { name: '工单反馈' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: '系统设置 · 工单反馈' })).toBeVisible()
   await expect(page.getByRole('row', { name: /登录页偶尔白屏/ })).toBeVisible()
   await expect(page.getByText('展示全部用户的工单')).toBeVisible()
 })

@@ -134,17 +134,19 @@ test('开放社区导航、技能占位页与 MCP 完整生命周期可用', asy
 
   const apiHub = page.getByRole('button', { name: '接口代理', exact: true })
   const community = page.getByRole('button', { name: '开放社区', exact: true })
-  const models = page.getByRole('link', { name: '模型配置' })
-  const [apiHubBox, communityBox, modelsBox] = await Promise.all([
+  const settings = page.getByRole('button', { name: '系统设置', exact: true })
+  const [apiHubBox, communityBox, settingsBox] = await Promise.all([
     apiHub.boundingBox(),
     community.boundingBox(),
-    models.boundingBox(),
+    settings.boundingBox(),
   ])
   expect(apiHubBox).not.toBeNull()
   expect(communityBox).not.toBeNull()
-  expect(modelsBox).not.toBeNull()
+  expect(settingsBox).not.toBeNull()
   expect(apiHubBox!.y).toBeLessThan(communityBox!.y)
-  expect(communityBox!.y).toBeLessThan(modelsBox!.y)
+  expect(communityBox!.y).toBeLessThan(settingsBox!.y)
+  // 模型配置已收进系统设置，未展开时不是一级链接
+  await expect(page.getByRole('link', { name: '模型配置' })).toHaveCount(0)
 
   await expect(community).toHaveAttribute('aria-expanded', 'true')
   await community.click()

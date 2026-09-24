@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { ConfigProvider, Popover, theme as antdTheme } from 'antd'
 import antdZhCN from 'antd/locale/zh_CN'
 import { Bubble, Conversations, Sender, ThoughtChain, XProvider } from '@ant-design/x'
 import xZhCN from '@ant-design/x/locale/zh_CN'
 import XMarkdown from '@ant-design/x-markdown'
 import {
-  Bot, CircleAlert, History, Loader2, Maximize2, Plus, ShieldAlert, ShieldCheck, X,
+  Bot, CircleAlert, History, Loader2, Maximize2, Plus, RotateCcw, ShieldAlert, ShieldCheck, X,
 } from 'lucide-react'
 
 import type { SuperMessage } from '@/api/superAssistant'
 import { toast } from 'sonner'
-import { WIDGET_PANEL_BOTTOM, WIDGET_Z, buildChainSteps, widgetAnchor } from '@/components/assistant-widget/logic'
+import { buildChainSteps } from '@/components/assistant-widget/logic'
 import { useAssistantWidgetStore } from '@/stores/assistantWidgetStore'
 import { useThemeStore } from '@/stores/themeStore'
 
@@ -121,12 +121,15 @@ const headerButtonClass = 'flex h-8 w-8 shrink-0 items-center justify-center rou
  * 悬浮 AI 助手面板（懒加载 chunk，承载全部 antd / Ant Design X 依赖）。
  * 通过 ConfigProvider 把平台 dark mode 与品牌色同步给 antd 体系。
  */
-export default function AssistantWidgetPanel() {
+export default function AssistantWidgetPanel({
+  placementClass,
+  onResetPosition,
+}: {
+  placementClass: string
+  onResetPosition: (() => void) | null
+}) {
   const dark = useThemeStore(state => state.theme === 'dark')
   const navigate = useNavigate()
-  const anchor = widgetAnchor(useLocation().pathname)
-  const panelBottomClass = WIDGET_PANEL_BOTTOM[anchor]
-  const panelZClass = WIDGET_Z[anchor]
 
   const loadingList = useAssistantWidgetStore(state => state.loadingList)
   const loadingMessages = useAssistantWidgetStore(state => state.loadingMessages)
@@ -205,7 +208,7 @@ export default function AssistantWidgetPanel() {
           colorPrimary: '#059669',
           colorLink: '#059669',
           borderRadius: 8,
-          // 面板层级按 widgetAnchor 分级（常规 z-40 / 全屏图谱页 z-[10000]）；
+          // 外层悬浮球容器按 widgetAnchor 分级（常规 z-40 / 全屏图谱页 z-[10000]）；
           // 面板内的 antd 浮层（历史会话 Popover 等）统一抬到面板之上
           zIndexPopupBase: 10010,
         },
@@ -216,7 +219,7 @@ export default function AssistantWidgetPanel() {
           data-testid="assistant-widget-panel"
           aria-label="AI 助手悬浮窗"
           onKeyDown={event => { if (event.key === 'Escape') setOpen(false) }}
-          className={`fixed ${panelBottomClass} right-5 ${panelZClass} flex h-[min(600px,calc(100dvh-7rem))] w-[min(384px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] shadow-[0_24px_64px_rgba(15,23,42,0.22)]`}
+          className={`absolute ${placementClass} flex h-[min(600px,calc(100dvh-7rem))] w-[min(384px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] shadow-[0_24px_64px_rgba(15,23,42,0.22)]`}
         >
           <header className="flex h-12 shrink-0 items-center gap-1 border-b border-[var(--color-border)] px-3">
             <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[var(--color-nav-bg)] text-white">
@@ -275,6 +278,18 @@ export default function AssistantWidgetPanel() {
             >
               <Maximize2 size={15} />
             </button>
+            {onResetPosition && (
+              <button
+                type="button"
+                onClick={onResetPosition}
+                aria-label="恢复默认位置"
+                title="恢复默认位置"
+                data-testid="assistant-widget-reset-position"
+                className={headerButtonClass}
+              >
+                <RotateCcw size={15} />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setOpen(false)}

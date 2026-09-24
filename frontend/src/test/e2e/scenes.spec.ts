@@ -119,7 +119,7 @@ async function mockScenesApi(page: Page, options: { listItems?: SceneSummary[] }
   await page.route(/\/api\/v2\/scenes\/scn-1(\?.*)?$/, route => json(route, { ...sceneA, version_count: 2 }))
 }
 
-test('admin 左侧导航暂时隐藏「三维场景」，深链仍可达且「本体助手」保持可见', async ({ page }) => {
+test('admin 左侧导航暂时隐藏「三维场景」，深链仍可达，本体助手收在本体模型下', async ({ page }) => {
   await seedAuth(page)
   await mockPlatformShell(page)
   await mockScenesApi(page)
@@ -127,7 +127,9 @@ test('admin 左侧导航暂时隐藏「三维场景」，深链仍可达且「�
   const nav = page.locator('nav')
   // hiddenFromNavigation 只隐藏导航渲染：深链 /#/scenes 仍按 menu 权限放行（下方新建按钮可见）
   await expect(nav.getByText('三维场景', { exact: true })).toHaveCount(0)
-  await expect(nav.getByText('本体助手', { exact: true })).toBeVisible()
+  // 本体助手已挂到本体模型下；当前页未展开该组，所以侧栏里还看不到这一项
+  await expect(nav.getByRole('button', { name: '本体模型' })).toBeVisible()
+  await expect(nav.getByText('本体助手', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '新建场景' })).toBeVisible()
 })
 

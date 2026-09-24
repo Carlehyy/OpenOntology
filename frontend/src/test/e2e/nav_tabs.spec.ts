@@ -105,16 +105,16 @@ test('顶栏多标签页：打开、切换、域内路径恢复、关闭与刷�
   await page.goto('/#/agent')
 
   const tabList = page.getByRole('tablist', { name: '页面标签' })
-  const agentTab = tabList.getByRole('tab', { name: '本体助手' })
+  const agentTab = tabList.getByRole('tab', { name: '本体模型 · 本体助手' })
   const ontologiesTab = tabList.getByRole('tab', { name: '本体模型 · 本体管理' })
 
-  // 访问本体助手，出现第一个标签且为激活态
+  // 访问本体助手，出现第一个标签且为激活态。它已是本体模型的子项，分组默认展开。
   await expect(agentTab).toBeVisible()
   await expect(agentTab).toHaveAttribute('aria-selected', 'true')
   await expect(ontologiesTab).toHaveCount(0)
 
-  // 侧边栏展开本体模型分组：子项首项为本体管理，展开即自动进入并生成标签
-  await page.getByRole('navigation').getByRole('button', { name: '本体模型' }).click()
+  // 分组已因当前页展开，点可见子项「本体管理」进入并生成标签（再点分组按钮只会收起）
+  await page.getByRole('navigation').getByRole('link', { name: '本体管理' }).click()
   await expect(page).toHaveURL(/\/#\/ontologies$/)
   await expect(agentTab).toHaveAttribute('aria-selected', 'false')
   await expect(ontologiesTab).toHaveAttribute('aria-selected', 'true')
@@ -138,16 +138,16 @@ test('顶栏多标签页：打开、切换、域内路径恢复、关闭与刷�
   // 菜单域内跳转复用同一标签并记住路径（含 query）
   await page.getByLabel('选择本体').selectOption('ontology-1')
   await expect(page).toHaveURL(/\/#\/agent\?ontology_id=ontology-1$/)
-  await expect(tabList.getByRole('tab', { name: '本体助手' })).toHaveCount(1)
+  await expect(tabList.getByRole('tab', { name: '本体模型 · 本体助手' })).toHaveCount(1)
   await ontologiesTab.click()
   await expect(page).toHaveURL(/\/#\/ontologies$/)
   await agentTab.click()
   await expect(page).toHaveURL(/\/#\/agent\?ontology_id=ontology-1$/)
 
   // 关闭激活标签，回退到最近使用的标签
-  await agentTab.getByRole('button', { name: '关闭 本体助手' }).click()
+  await agentTab.getByRole('button', { name: '关闭 本体模型 · 本体助手' }).click()
   await expect(page).toHaveURL(/\/#\/ontologies$/)
-  await expect(tabList.getByRole('tab', { name: '本体助手' })).toHaveCount(0)
+  await expect(tabList.getByRole('tab', { name: '本体模型 · 本体助手' })).toHaveCount(0)
   await expect(ontologiesTab).toHaveAttribute('aria-selected', 'true')
 
   // 关闭最后一个标签，回到默认落地页（AI 原生工作台为裸布局，无顶栏标签栏）
@@ -157,7 +157,7 @@ test('顶栏多标签页：打开、切换、域内路径恢复、关闭与刷�
 
   // 从工作台回到后台页面，标签随同路径导航重新记录
   await page.goto('/#/agent')
-  await expect(tabList.getByRole('tab', { name: '本体助手' })).toHaveAttribute('aria-selected', 'true')
+  await expect(tabList.getByRole('tab', { name: '本体模型 · 本体助手' })).toHaveAttribute('aria-selected', 'true')
 })
 
 test('顶栏多标签页：按最近访问从左往右排序，最多保留 10 个', async ({ page }) => {
@@ -169,7 +169,7 @@ test('顶栏多标签页：按最近访问从左往右排序，最多保留 10 �
 
   // 依次访问 11 个不同页面
   const visited = [
-    { path: '/agent', title: '本体助手' },
+    { path: '/agent', title: '本体模型 · 本体助手' },
     { path: '/explore', title: '本体模型 · 业务澄清' },
     { path: '/ontologies', title: '本体模型 · 本体管理' },
     { path: '/world-model/models', title: '世界模型 · 推演模型' },
@@ -179,20 +179,20 @@ test('顶栏多标签页：按最近访问从左往右排序，最多保留 10 �
     { path: '/data/structured', title: '数据集成 · 数据资产湖' },
     { path: '/events', title: '事件登记' },
     { path: '/api-hub/history', title: '接口代理 · 调用历史' },
-    { path: '/models', title: '模型配置' },
+    { path: '/models', title: '系统设置 · 模型配置' },
   ]
   for (const item of visited) {
     await page.goto(`/#${item.path}`)
     await expect(tabList.getByRole('tab', { name: item.title })).toHaveAttribute('aria-selected', 'true')
   }
 
-  // 最多 10 个：最早访问的“本体助手”被淘汰，最左为当前页面，依次为最近访问
+  // 最多 10 个：最早访问的“本体模型 · 本体助手”被淘汰，最左为当前页面，依次为最近访问
   await expect(tabs).toHaveCount(10)
   const expectedOrder = visited.slice(1).reverse().map(item => item.title)
   for (const [index, title] of expectedOrder.entries()) {
     await expect(tabs.nth(index)).toHaveAttribute('title', title)
   }
-  await expect(tabList.getByRole('tab', { name: '本体助手' })).toHaveCount(0)
+  await expect(tabList.getByRole('tab', { name: '本体模型 · 本体助手' })).toHaveCount(0)
 
   // 刷新后顺序与淘汰结果从 localStorage 恢复
   await page.reload()
@@ -205,7 +205,7 @@ test('顶栏多标签页：按最近访问从左往右排序，最多保留 10 �
   await page.goto('/#/events')
   await expect(tabs).toHaveCount(10)
   await expect(tabs.nth(0)).toHaveAttribute('title', '事件登记')
-  await expect(tabs.nth(1)).toHaveAttribute('title', '模型配置')
+  await expect(tabs.nth(1)).toHaveAttribute('title', '系统设置 · 模型配置')
   await expect(tabList.getByRole('tab', { name: '事件登记' })).toHaveCount(1)
 })
 test('标签可见标题使用平台导航的一级/二级菜单标签，不使用页面级描述', async ({ page }) => {
@@ -215,8 +215,8 @@ test('标签可见标题使用平台导航的一级/二级菜单标签，不使�
 
   const tabList = page.getByRole('tablist', { name: '页面标签' })
 
-  // 列表页：一级 · 二级菜单标签（展开分组自动落到首项本体管理）
-  await page.getByRole('navigation').getByRole('button', { name: '本体模型' }).click()
+  // 列表页：一级 · 二级菜单标签。/agent 已展开本体模型，点「本体管理」进入该子项。
+  await page.getByRole('navigation').getByRole('link', { name: '本体管理' }).click()
   await expect(page).toHaveURL(/\/#\/ontologies$/)
   const ontologiesTab = tabList.getByRole('tab', { name: '本体模型 · 本体管理' })
   await expect(ontologiesTab).toBeVisible()
@@ -323,16 +323,14 @@ test('左侧导航折叠态：一级导航全部可点击，分组直达第一�
     ['数据集成', /\/#\/data\/pipelines$/],
     ['接口代理', /\/#\/api-hub\/interfaces$/],
     ['开放社区', /\/#\/community\/skills$/],
-    ['系统设置', /\/#\/settings\/domains$/],
+    ['系统设置', /\/#\/tickets$/],
   ]
   for (const [name, url] of groups) {
     await nav.getByRole('button', { name, exact: true }).click()
     await expect(page).toHaveURL(url)
   }
 
-  // 叶子项在折叠态本就可达，一并回归（三维场景已 hiddenFromNavigation，改用本体助手叶子）
-  await nav.getByRole('link', { name: '本体助手' }).click()
-  await expect(page).toHaveURL(/\/#\/agent$/)
+  // 叶子项在折叠态本就可达。本体助手已收进本体模型，折叠态不再暴露为一级链接。
   await nav.getByRole('link', { name: '事件登记' }).click()
   await expect(page).toHaveURL(/\/#\/events$/)
 })

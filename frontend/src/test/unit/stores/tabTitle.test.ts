@@ -17,6 +17,8 @@ describe('menuKeyForPath', () => {
     assert.equal(menuKeyForPath('/data/structured'), 'data.structured')
     assert.equal(menuKeyForPath('/data/pipelines/steward'), 'data.pipelines')
     assert.equal(menuKeyForPath('/agent/reports'), 'agent')
+    assert.equal(menuKeyForPath('/tickets'), 'tickets')
+    assert.equal(menuKeyForPath('/tickets/extra'), 'tickets')
     assert.equal(menuKeyForPath('/scenes'), 'scenes')
     assert.equal(menuKeyForPath('/scenes/scn-1'), 'scenes')
     assert.equal(menuKeyForPath('/scenes/scn-1?tab=models'), 'scenes')

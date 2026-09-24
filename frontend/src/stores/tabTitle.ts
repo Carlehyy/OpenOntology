@@ -37,5 +37,6 @@ export function menuKeyForPath(pathname: string): string | null {
   if (pathname.startsWith('/explore')) return 'explore'
   if (pathname.startsWith('/events')) return 'events'
   if (pathname.startsWith('/models')) return 'models'
+  if (pathname === '/tickets' || pathname.startsWith('/tickets/')) return 'tickets'
   return null
 }

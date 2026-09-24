@@ -361,7 +361,7 @@ test('本体助手未选本体时悬浮窗盖过拓扑卡片轮播（层级回�
 test('管理员配置的隐藏目录不再渲染悬浮入口', async ({ page }) => {
   await seedAuth(page)
   await mockPlatformShell(page)
-  // 平台级配置：事件登记（一级）、模型配置（一级）、领域设置（二级）隐藏悬浮助手
+  // 平台级配置：事件登记、模型配置、领域设置隐藏悬浮助手（后两者现为系统设置子项，键不变）
   await mockSuperAssistant(page, { hiddenMenuKeys: ['events', 'models', 'settings.domains'] })
   await page.setViewportSize({ width: 1280, height: 900 })
 
@@ -404,6 +404,10 @@ test('系统设置-超级助手页可勾选目录并保存显示范围', async (
   // 目录树与左侧导航一致：一级目录及其二级菜单都渲染出来
   await expect(tree.getByRole('checkbox', { name: /事件登记/ })).toBeChecked()
   await expect(tree.getByRole('checkbox', { name: '数据流水线' })).toBeChecked()
+  const settingsCard = tree.locator('article', { has: page.getByRole('checkbox', { name: '系统设置', exact: true }) })
+  await expect(settingsCard.locator('span.text-xs')).toHaveText([
+    '工单反馈', '模型配置', '领域设置', '助手评估', '超级助手', '运行监控',
+  ])
 
   // 取消勾选 事件登记（叶子目录），保存后 PUT 携带隐藏名单
   await tree.getByRole('checkbox', { name: /事件登记/ }).click()
@@ -425,4 +429,46 @@ test('系统设置-超级助手页可勾选目录并保存显示范围', async (
   await page.getByRole('button', { name: '保存配置' }).click()
   const body2 = (await putRequest2).postDataJSON() as { hidden_menu_keys: string[] }
   expect(body2.hidden_menu_keys).toEqual(['events', 'data.pipelines', 'data.sync_tasks', 'data.structured'])
+})
+
+test('拖动悬浮球把位置记在浏览器里，刷新后仍在，并可恢复默认右下角', async ({ page }) => {
+  await seedAuth(page)
+  await mockPlatformShell(page)
+  await mockSuperAssistant(page)
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto('/#/overview')
+
+  const fab = page.getByTestId('assistant-widget-fab')
+  await expect(fab).toBeVisible()
+  const before = await fab.boundingBox()
+  if (!before) throw new Error('fab box missing')
+  const startX = before.x + before.width / 2
+  const startY = before.y + before.height / 2
+  await page.mouse.move(startX, startY)
+  await page.mouse.down()
+  await page.mouse.move(startX - 280, startY - 220, { steps: 12 })
+  await page.mouse.up()
+
+  // 拖动不是点击：面板不应因此打开
+  await expect(page.getByTestId('assistant-widget-panel')).toHaveCount(0)
+  const moved = await fab.boundingBox()
+  if (!moved) throw new Error('fab box missing after drag')
+  expect(moved.x).toBeLessThan(before.x - 200)
+  expect(moved.y).toBeLessThan(before.y - 160)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('ob:assistant-widget-position:v1'))).toBeTruthy()
+
+  await page.reload()
+  await expect(fab).toBeVisible()
+  const restored = await fab.boundingBox()
+  if (!restored) throw new Error('fab box missing after reload')
+  expect(Math.abs(restored.x - moved.x)).toBeLessThan(2)
+  expect(Math.abs(restored.y - moved.y)).toBeLessThan(2)
+
+  await fab.click()
+  await page.getByTestId('assistant-widget-reset-position').click()
+  const reset = await fab.boundingBox()
+  if (!reset) throw new Error('fab box missing after reset')
+  expect(Math.abs(reset.x - before.x)).toBeLessThan(2)
+  expect(Math.abs(reset.y - before.y)).toBeLessThan(2)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('ob:assistant-widget-position:v1'))).toBeNull()
 })

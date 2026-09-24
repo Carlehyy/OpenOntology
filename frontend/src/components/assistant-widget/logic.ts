@@ -153,7 +153,12 @@ export function widgetAnchor(pathname: string): WidgetAnchor {
   return 'default'
 }
 
-/** 悬浮球 bottom 偏移（右偏移恒为 right-5）。Tailwind 扫描需要字面量类名。 */
+/**
+ * 没有浏览器本地位置时，悬浮球贴右缘，只按页面改 bottom。
+ * 用户拖动后的坐标见 WIDGET_POSITION_STORAGE_KEY，会盖过这里的 bottom/right，
+ * 但不盖过 WIDGET_Z（图谱页仍要压过全屏层）。
+ * Tailwind 扫描需要字面量类名。
+ */
 export const WIDGET_FAB_BOTTOM: Record<WidgetAnchor, string> = {
   default: 'bottom-5',
   overlay: 'bottom-20',
@@ -163,22 +168,77 @@ export const WIDGET_FAB_BOTTOM: Record<WidgetAnchor, string> = {
   aboveComposer: 'bottom-[4.75rem]',
 }
 
-/** 面板 bottom 偏移 = 悬浮球 bottom + 球高(3rem) + 间距(0.5rem) */
-export const WIDGET_PANEL_BOTTOM: Record<WidgetAnchor, string> = {
-  default: 'bottom-[4.75rem]',
-  overlay: 'bottom-[8.5rem]',
-  lifted: 'bottom-[8.5rem]',
-  liftedMobileOnly: 'bottom-[8.5rem] md:bottom-[4.75rem]',
-  aboveComposer: 'bottom-[8.25rem]',
-}
-
-/** 悬浮球/面板层级（见 widgetAnchor 注释） */
+/** 悬浮球/面板层级（见 widgetAnchor 注释）。面板是球的绝对定位子节点，跟着球走，不再单独写 bottom。 */
 export const WIDGET_Z: Record<WidgetAnchor, string> = {
   default: 'z-40',
   overlay: 'z-[10000]',
   lifted: 'z-40',
   liftedMobileOnly: 'z-40',
   aboveComposer: 'z-40',
+}
+
+/** 悬浮球位置只存在本机，不入库。换浏览器或清站点数据后回到默认锚点。 */
+export const WIDGET_POSITION_STORAGE_KEY = 'ob:assistant-widget-position:v1'
+export const WIDGET_FAB_SIZE = 48
+export const WIDGET_DRAG_THRESHOLD_PX = 4
+
+export interface WidgetViewportPoint {
+  left: number
+  top: number
+}
+
+export interface WidgetFabRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+export function parseWidgetPosition(raw: string | null): WidgetViewportPoint | null {
+  if (!raw) return null
+  try {
+    const value = JSON.parse(raw) as { left?: unknown; top?: unknown }
+    if (typeof value?.left !== 'number' || typeof value?.top !== 'number') return null
+    if (!Number.isFinite(value.left) || !Number.isFinite(value.top)) return null
+    return { left: value.left, top: value.top }
+  } catch {
+    return null
+  }
+}
+
+/** 把球的左上角限制在视口内，避免拖出屏幕或换一台更小的窗口后找不到。 */
+export function clampWidgetPosition(
+  point: WidgetViewportPoint,
+  viewport: { width: number; height: number },
+  fabSize = WIDGET_FAB_SIZE,
+): WidgetViewportPoint {
+  const maxLeft = Math.max(0, viewport.width - fabSize)
+  const maxTop = Math.max(0, viewport.height - fabSize)
+  return {
+    left: Math.min(maxLeft, Math.max(0, point.left)),
+    top: Math.min(maxTop, Math.max(0, point.top)),
+  }
+}
+
+/**
+ * 面板贴着球展开，并翻到视口里面。
+ * align=right：面板右缘对齐球的右缘（默认右下角的历史行为）。
+ * align=left：球靠近左缘时改为向右展开。
+ */
+export function widgetPanelPlacement(
+  fab: WidgetFabRect,
+  viewport: { width: number; height: number },
+  panel: { width: number; height: number },
+  gap = 8,
+): { vertical: 'above' | 'below'; align: 'left' | 'right' } {
+  const spaceAbove = fab.top
+  const spaceBelow = viewport.height - (fab.top + fab.height)
+  const need = panel.height + gap
+  const vertical: 'above' | 'below' = spaceAbove >= need || spaceAbove >= spaceBelow ? 'above' : 'below'
+  const fitsAlignRight = fab.left + fab.width >= panel.width
+  const fitsAlignLeft = fab.left + panel.width <= viewport.width
+  const align: 'left' | 'right' = fitsAlignRight || !fitsAlignLeft ? 'right' : 'left'
+  return { vertical, align }
 }
 
 /**

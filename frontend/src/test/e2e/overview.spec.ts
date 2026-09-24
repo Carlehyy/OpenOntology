@@ -98,7 +98,10 @@ test.describe('平台概览迁移契约', () => {
     const navigation = page.getByRole('navigation')
     await expect(navigation.getByRole('link', { name: '平台概览' })).toHaveCount(0)
     await expect(navigation.getByText('本体管理', { exact: true })).toHaveCount(0)
-    await expect(navigation.getByText('系统设置', { exact: true })).toHaveCount(0)
+    // 工单对所有登录用户开放，所以只分配了概览的账号也能看到系统设置；管理员专属子项仍不出现
+    await expect(navigation.getByRole('button', { name: '系统设置' })).toBeVisible()
+    await expect(navigation.getByText('领域设置', { exact: true })).toHaveCount(0)
+    await expect(navigation.getByText('模型配置', { exact: true })).toHaveCount(0)
 
     await page.reload()
     await expect(page).toHaveURL(/\/#\/overview$/)
@@ -136,19 +139,22 @@ test.describe('平台概览迁移契约', () => {
     await expect(page).toHaveURL(/\/#\/data\/pipelines\/steward$/)
   })
 
-  test('未分配菜单的 custom 用户进入无可访问页面状态', async ({ page }) => {
+  test('未分配菜单的 custom 用户仍可进入工单反馈，其它页面保持不可访问', async ({ page }) => {
     await mockOverview(page, { role: 'custom', menuPermissions: [] })
 
     await page.goto('/#/')
-    await expect(page).toHaveURL(/\/#\/no-access$/)
-    await expect(page.getByRole('heading', { name: '暂未分配可访问页面' })).toBeVisible()
-    await expect(page.getByRole('navigation').getByRole('link')).toHaveCount(0)
+    await expect(page).toHaveURL(/\/#\/tickets$/)
+    await expect(page.getByRole('button', { name: '提交工单' })).toBeVisible()
+    const navigation = page.getByRole('navigation')
+    await expect(navigation.getByRole('link', { name: '工单反馈' })).toBeVisible()
+    await expect(navigation.getByText('领域设置', { exact: true })).toHaveCount(0)
+    await expect(navigation.getByText('模型配置', { exact: true })).toHaveCount(0)
 
     await page.goto('/#/overview')
     await expect(page.getByRole('heading', { name: '当前页面无法访问' })).toBeVisible()
     await page.getByRole('button', { name: '返回上一级' }).click()
-    await expect(page).toHaveURL(/\/#\/no-access$/)
-    await expect(page.getByRole('heading', { name: '暂未分配可访问页面' })).toBeVisible()
+    await expect(page).toHaveURL(/\/#\/tickets$/)
+    await expect(page.getByRole('button', { name: '提交工单' })).toBeVisible()
   })
 
   test('旧 /rag 深链继续重定向到本体助手', async ({ page }) => {

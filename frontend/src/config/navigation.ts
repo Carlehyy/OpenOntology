@@ -25,6 +25,7 @@ import {
   Share2,
   Sparkles,
   Table2,
+  Ticket,
   Waypoints,
 } from 'lucide-react'
 import type { User } from '@/types/auth'
@@ -72,12 +73,12 @@ export const PLATFORM_NAV_ITEMS: PlatformNavItem[] = [
   { key: 'overview', to: '/overview', icon: LayoutDashboard, label: '平台概览', description: '平台运行与数据总览', hiddenFromNavigation: true },
   { key: 'super_assistant', to: '/super-assistant', icon: BrainCircuit, label: '超级助手', description: '通用智能协作入口' },
   { key: 'scenes', to: '/scenes', icon: Axis3d, label: '三维场景', description: '白模三维场景管理与建模', hiddenFromNavigation: true },
-  { key: 'agent', to: '/agent', icon: Bot, label: '本体助手', description: '本体智能体与分析报告' },
   {
-    key: 'ontology_model', to: '/ontology-model', icon: Boxes, label: '本体模型', description: '本体管理、业务澄清与本体网络', subItems: [
+    key: 'ontology_model', to: '/ontology-model', icon: Boxes, label: '本体模型', description: '本体管理、本体网络与本体助手', subItems: [
       { key: 'ontologies', to: '/ontologies', icon: Network, label: '本体管理', description: '本体、图谱与对象建模' },
       { key: 'explore', to: '/explore', icon: Compass, label: '业务澄清', description: '在线配置工作台：对话澄清业务，沉淀七大模型与需求文档', hiddenFromNavigation: true },
       { key: 'ontology_model.network', to: '/ontology-model/network', icon: Share2, label: '本体网络', description: '跨本体关联与全局本体网络' },
+      { key: 'agent', to: '/agent', icon: Bot, label: '本体助手', description: '本体智能体与分析报告' },
     ],
   },
   {
@@ -107,13 +108,16 @@ export const PLATFORM_NAV_ITEMS: PlatformNavItem[] = [
       { key: 'community.plugins', to: '/community/plugins', icon: PlugZap, label: '插件社区', description: '管理 MCP Server 清单' },
     ],
   },
-  { key: 'models', to: '/models', icon: Cpu, label: '模型配置', description: '模型提供商与运行配置' },
   {
     key: 'system_settings', to: '/settings', icon: Settings, label: '系统设置', adminOnly: true, subItems: [
+      // 工单不进 role_menu_permissions：任意登录用户都可提交。挂在本组下，
+      // 但 hasMenuAccess 对 tickets 单独放行，避免被 adminOnly 父组挡住。
+      { key: 'tickets', to: '/tickets', icon: Ticket, label: '工单反馈', description: '提交与查看平台使用反馈' },
+      { key: 'models', to: '/models', icon: Cpu, label: '模型配置', description: '模型提供商与运行配置' },
       { key: 'settings.domains', to: '/settings/domains', icon: Globe, label: '领域设置', adminOnly: true },
-      { key: 'settings.monitoring', to: '/settings/monitoring', icon: Activity, label: '运行监控', description: '接口性能与平台运行健康度', adminOnly: true },
       { key: 'settings.assistant-eval', to: '/settings/assistant-eval', icon: FlaskConical, label: '助手评估', description: '基于 OpenJudge 的助手会话质量评估与报告', adminOnly: true },
       { key: 'settings.assistant-widget', to: '/settings/assistant-widget', icon: Sparkles, label: '超级助手', description: '配置悬浮 AI 助手在哪些目录页面显示', adminOnly: true },
+      { key: 'settings.monitoring', to: '/settings/monitoring', icon: Activity, label: '运行监控', description: '接口性能与平台运行健康度', adminOnly: true },
     ],
   },
 ]
@@ -138,6 +142,8 @@ export function grantedMenuKeys(user: User | null): Set<string> {
 export function hasMenuAccess(user: User | null, key: string): boolean {
   if (!user) return false
   if (user.role === 'admin') return true
+  // 工单反馈对所有登录角色开放，且不写入菜单授权表。
+  if (key === 'tickets') return true
   if (key === 'system_settings' || key.startsWith('settings.')) return false
   return grantedMenuKeys(user).has(key)
 }
@@ -146,8 +152,13 @@ export function visibleNavigation(user: User | null): PlatformNavItem[] {
   if (!user) return []
   return PLATFORM_NAV_ITEMS.flatMap(item => {
     if (item.hiddenFromNavigation) return []
-    if (item.adminOnly && user.role !== 'admin') return []
     const subItems = item.subItems?.filter(child => !child.hiddenFromNavigation && hasMenuAccess(user, child.key))
+    // 父组 adminOnly 只挡住管理员专属子项。非管理员若还能用组内的工单或模型配置，
+    // 仍显示「系统设置」，里面只留他们有权看到的子项。
+    if (item.adminOnly && user.role !== 'admin') {
+      if (!subItems?.length) return []
+      return [{ ...item, subItems }]
+    }
     if (item.subItems && !subItems?.length && !hasMenuAccess(user, item.key)) return []
     if (!item.subItems && !hasMenuAccess(user, item.key)) return []
     return [{ ...item, subItems }]
@@ -180,7 +191,6 @@ function menuChainLabelForPath(pathname: string, key: string): string | null {
 /** 无菜单映射但值得拥有顶栏标签的页面（key 取路径本身）。 */
 const FALLBACK_TAB_PATHS: Record<string, string> = {
   '/inbox': '收件箱',
-  '/tickets': '工单反馈',
 }
 
 export interface NavTabInfo {
@@ -210,9 +220,11 @@ export function navTabForPath(pathname: string): NavTabInfo | null {
 export function firstAccessiblePath(user: User | null): string {
   if (!user) return '/no-access'
   const first = PLATFORM_NAV_ITEMS.find(item => {
-    if (item.adminOnly && user.role !== 'admin') return false
-    return hasMenuAccess(user, item.key)
-      || (item.subItems?.some(child => hasMenuAccess(user, child.key)) ?? false)
+    const childHit = item.subItems?.some(child => hasMenuAccess(user, child.key)) ?? false
+    // 与 visibleNavigation 一致：adminOnly 父组不再把非管理员整组跳过，
+    // 否则只剩工单/模型配置权限的用户会落到 /no-access。
+    if (item.adminOnly && user.role !== 'admin') return childHit
+    return hasMenuAccess(user, item.key) || childHit
   })
   if (!first) return '/no-access'
   const firstSubItem = first.subItems?.find(child => hasMenuAccess(user, child.key))
