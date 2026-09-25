@@ -1173,14 +1173,15 @@ test('新建会话去重：空会话或全新视图下点击不再创建新会�
   expect(mocks.createCalls).toHaveLength(1)
 })
 
-test('空态保留产品名与能力一句话，输入框占位符不混入用户输入', async ({ page }) => {
+test('空态只保留品牌一句话，输入框占位符不混入用户输入', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
 
-  const hero = page.getByRole('heading', { name: '超级助手', exact: true })
+  const hero = page.getByText('SuperAgent 工作空间 2.0', { exact: true })
   await expect(hero).toBeVisible()
-  await expect(page.getByText('查资料、写文档、操作平台工具，或委派专业助手完成特定领域的任务')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '超级助手', exact: true })).toHaveCount(0)
+  await expect(page.getByText('查资料、写文档、操作平台工具，或委派专业助手完成特定领域的任务')).toHaveCount(0)
   await expect(page.getByText('试试这样问')).toHaveCount(0)
   // 品牌一句话是页面视觉主角：字号不小于 text-3xl（30px）
   const heroFontSize = await hero.evaluate(el => parseFloat(getComputedStyle(el).fontSize))

@@ -1222,11 +1222,9 @@ export default function SuperAssistantPage() {
             ) : !hasMessages ? (
               <div className="flex flex-1 items-center justify-center px-4 sm:px-8">
                 <div className="relative w-full max-w-3xl -translate-y-14 sm:-translate-y-20">
-                  {/* 产品语言：主标题用产品名，副句只说当前真实可做的事 */}
-                  <div className="absolute inset-x-0 bottom-full mb-8 space-y-3 text-center">
-                    <h1 className="text-3xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-4xl">超级助手</h1>
-                    <p className="text-sm text-[var(--color-text-secondary)]">查资料、写文档、操作平台工具，或委派专业助手完成特定领域的任务</p>
-                  </div>
+                  <p className="absolute inset-x-0 bottom-full mb-8 text-center text-3xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-4xl">
+                    SuperAgent 工作空间 2.0
+                  </p>
                   {renderComposer(true)}
                 </div>
               </div>
