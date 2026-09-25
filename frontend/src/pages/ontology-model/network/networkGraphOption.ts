@@ -37,8 +37,11 @@ import type {
 import {
   degreeMap,
   maxDegreeOf,
+  networkViewBox,
   nodeSize,
   ontologyColorMap,
+  type NetworkViewBox,
+  type ViewInsets,
 } from './networkModel.ts'
 
 /** 分析态高亮集合（与旧 cytoscape 版画布的 props 契约一致）。 */
@@ -152,7 +155,37 @@ export interface BuildNetworkGraphOptionInput {
   /** 初始缩放，默认 1（坐标已按画布尺寸归一化，1 即恰好铺满）。 */
   zoom?: number
   /** 视图盒留白：必须与 fitLayoutToViewport 使用的 NETWORK_VIEW_INSETS 一致。 */
-  viewInsets?: { top: number; right: number; bottom: number; left: number }
+  viewInsets?: ViewInsets
+  /**
+   * 画布像素尺寸。传入后会在数据末尾放两个不绘制的角点，把 ECharts 量到的
+   * 外接框锁成视图盒，避免圆形符号被不等比缩放拉成椭圆。
+   */
+  viewSize?: { width: number; height: number }
+}
+
+/** 不绘制的视图盒角点。id 前缀稳定，点击和 tooltip 都要跳过。 */
+export const NETWORK_VIEW_PIN_ID_PREFIX = 'view-pin:'
+
+export function isNetworkViewPin(id: string | undefined | null): boolean {
+  return typeof id === 'string' && id.startsWith(NETWORK_VIEW_PIN_ID_PREFIX)
+}
+
+function viewPinData(box: NetworkViewBox) {
+  const corners = [
+    { x: box.x, y: box.y },
+    { x: box.x + box.w, y: box.y + box.h },
+  ]
+  return corners.map((point, index) => ({
+    id: `${NETWORK_VIEW_PIN_ID_PREFIX}${index}`,
+    name: `${NETWORK_VIEW_PIN_ID_PREFIX}${index}`,
+    x: point.x,
+    y: point.y,
+    symbol: 'none' as const,
+    symbolSize: 0,
+    label: { show: false },
+    tooltip: { show: false },
+    itemStyle: { opacity: 0 },
+  }))
 }
 
 
@@ -164,7 +197,7 @@ const CAPSULE_LABEL_BASE = {
 
 /** 构建完整的 graph series option；同一输入永远得到同一输出（可快照回归）。 */
 export function buildNetworkGraphOption(input: BuildNetworkGraphOptionInput): EChartsOption {
-  const { nodes, edges, sections, highlight, positions, center, zoom, viewInsets } = input
+  const { nodes, edges, sections, highlight, positions, center, zoom, viewInsets, viewSize } = input
   const analysisActive = hasActiveAnalysis(highlight)
   const insets = viewInsets ?? { top: 10, right: 10, bottom: 10, left: 10 }
 
@@ -320,6 +353,7 @@ export function buildNetworkGraphOption(input: BuildNetworkGraphOptionInput): EC
       ...(base.tooltip ?? {}),
       formatter: (params: { dataType?: string; data?: Record<string, unknown> }) => {
         const data = params.data || {}
+        if (isNetworkViewPin(typeof data.id === 'string' ? data.id : null)) return ''
         if (params.dataType === 'edge') {
           return `${data.edgeLabel || ''}`
         }
@@ -337,7 +371,10 @@ export function buildNetworkGraphOption(input: BuildNetworkGraphOptionInput): EC
         roam: true,
         draggable: true,
         categories,
-        data: nodeData,
+        data: [
+          ...nodeData,
+          ...(viewSize ? viewPinData(networkViewBox(viewSize.width, viewSize.height, insets)) : []),
+        ],
         links: linkData,
         // 悬停联动：原生 adjacency——一跳邻接强亮、其余进入 blur 淡出，
         // 零 option 重建 + 自带过渡动画；分析态下关闭让位给烘培压暗。
@@ -361,8 +398,8 @@ export function buildNetworkGraphOption(input: BuildNetworkGraphOptionInput): EC
         edgeSymbol: ['none', 'arrow'],
         edgeSymbolSize: 6.5,
         labelLayout: { hideOverlap: true },
-        // 视图盒留白与 fitLayoutToViewport 的归一化盒严格一致：
-        // 数据 bbox == 视图盒 ⇒ ECharts 的等比适配倍数 = 1，zoom=1 即 1:1 像素。
+        // 留白必须与 networkViewBox 一致。数据末尾的角点把外接框锁成这个盒子，
+        // ECharts 的 sx、sy 才都是 1，圆形符号保持 symbolSize 的像素直径。
         top: insets.top,
         bottom: insets.bottom,
         left: insets.left,

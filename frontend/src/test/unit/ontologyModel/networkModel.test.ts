@@ -9,6 +9,7 @@ import {
   maxDegreeOf,
   mergeOverlay,
   NETWORK_VIEW_INSETS,
+  networkViewBox,
   relaxForClearance,
   nodeSize,
   ontologyColorMap,
@@ -165,6 +166,25 @@ describe('fitLayoutToViewport（视口归一化）', () => {
     // 同一输入永远得到同一结果（可快照回归）
     const again = fitLayoutToViewport(layout, width, height)
     assert.deepEqual([...fitted.positions], [...again.positions])
+  })
+
+  it('同一行的孤立类型放到视图盒中线，而不是贴在上沿', () => {
+    const nodes = [
+      makeNode({ id: 'type:a', entityId: 'a', kind: 'object_type', label: '甲', objectTypeId: 'a' }),
+      makeNode({ id: 'type:b', entityId: 'b', kind: 'object_type', label: '乙', objectTypeId: 'b' }),
+      makeNode({ id: 'type:c', entityId: 'c', kind: 'object_type', label: '丙', objectTypeId: 'c' }),
+    ]
+    const width = 1200
+    const height = 800
+    const box = networkViewBox(width, height)
+    const fitted = fitLayoutToViewport(clusterLayout(nodes, []), width, height)
+    const points = [...fitted.positions.values()]
+    assert.equal(points.length, 3)
+    for (const point of points) {
+      assert.ok(Math.abs(point.y - (box.y + box.h / 2)) < 1e-6, `y=${point.y} 应在中线`)
+    }
+    const xs = points.map(point => point.x).sort((a, b) => a - b)
+    assert.ok(xs[2] - xs[0] > box.w * 0.5, '横向仍拉开，不能收成一个点')
   })
 })
 

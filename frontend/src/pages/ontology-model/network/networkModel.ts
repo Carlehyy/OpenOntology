@@ -428,16 +428,44 @@ export interface ViewInsets {
 /** 本页视图盒默认留白：下方加大避开左下角图例浮层，左右收窄利用横向空间。 */
 export const NETWORK_VIEW_INSETS: ViewInsets = { top: 40, right: 28, bottom: 172, left: 28 }
 
+export interface NetworkViewBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 /**
- * 把抽象布局归一化到视口：**非等比**拉伸，使节点坐标外接框恰好填满视图盒。
+ * ECharts graph 的视图盒：left/top/right/bottom 从画布像素里扣掉之后的矩形。
+ * 不要再加最小边长。ECharts 用的就是这个矩形；外接框若比它大或宽高比不同，
+ * 符号会被拉成椭圆（见 fitLayoutToViewport 的注释）。
+ */
+export function networkViewBox(
+  width: number,
+  height: number,
+  insets: ViewInsets = NETWORK_VIEW_INSETS,
+): NetworkViewBox {
+  return {
+    x: insets.left,
+    y: insets.top,
+    w: Math.max(1, width - insets.left - insets.right),
+    h: Math.max(1, height - insets.top - insets.bottom),
+  }
+}
+
+/**
+ * 把抽象布局映射到视口像素。
  *
- * 为什么是非等比：ECharts 6 对 layout:'none' 的 graph series 会在创建视图
- * 坐标系时把数据 bbox 等比适配进视图盒（createViewCoordSys），等效缩放 =
- * 适配倍数 × series.zoom。若我方归一化后的 bbox 宽高比与视图盒不一致，
- * 适配倍数 ≠ 1，节点符号/字号会被同步放大或缩小，字号不可控。让数据
- * bbox 与视图盒**完全重合**（宽高比一致且尺寸一致）后，适配倍数恰为 1，
- * series.zoom=1 即 1 数据单位 = 1 物理像素，符号与字号保持设定值。
- * 非等比拉伸只移动坐标（连线随之伸缩），不改变圆形符号本身。
+ * 两轴都有真实跨度时，非等比拉开，让节点中心贴满视图盒。某一轴跨度为 0
+ * （一条链、或不超过一行的孤立类型）时不能拉开，改放到该轴中线，避免整行
+ * 贴在视图盒边上。
+ *
+ * 这还不能保证圆形。ECharts 6 对 layout:'none' 的 graph 用
+ * sx = 视图宽 / 数据宽、sy = 视图高 / 数据高 铺满视图盒（两轴独立，
+ * preserveAspect 默认关），符号缩放只除以 sx。数据外接框一旦不等于视图盒，
+ * 圆就变成椭圆，换一批本体会改变外接框宽高比，所以有时圆有时椭圆。
+ * 松弛也会把点从边上推进去。锁住 sx = sy = 1 的是 option 里两个不绘制的
+ * 视图盒角点，不在这里改符号尺寸。
  */
 export function fitLayoutToViewport(
   layout: ClusterLayout,
@@ -445,23 +473,22 @@ export function fitLayoutToViewport(
   height: number,
   insets: ViewInsets = NETWORK_VIEW_INSETS,
 ): FittedLayout {
-  const box = {
-    x: insets.left,
-    y: insets.top,
-    w: Math.max(80, width - insets.left - insets.right),
-    h: Math.max(80, height - insets.top - insets.bottom),
-  }
+  const box = networkViewBox(width, height, insets)
   const spanX = Math.max(1e-6, layout.bbox.width)
   const spanY = Math.max(1e-6, layout.bbox.height)
+  const degenerateX = layout.bbox.width <= 1
+  const degenerateY = layout.bbox.height <= 1
+  const midX = box.x + box.w / 2
+  const midY = box.y + box.h / 2
   const positions = new Map<string, Point>()
   for (const [id, point] of layout.positions) {
     positions.set(id, {
-      x: box.x + ((point.x - layout.bbox.minX) / spanX) * box.w,
-      y: box.y + ((point.y - layout.bbox.minY) / spanY) * box.h,
+      x: degenerateX ? midX : box.x + ((point.x - layout.bbox.minX) / spanX) * box.w,
+      y: degenerateY ? midY : box.y + ((point.y - layout.bbox.minY) / spanY) * box.h,
     })
   }
-  // bbox 与视图盒重合时，视图盒中心对应的数据坐标即盒中心。
-  return { positions, center: [box.x + box.w / 2, box.y + box.h / 2] }
+  // 视图盒中心。角点把数据外接框锁成视图盒之后，这个中心就是 ECharts 的 center。
+  return { positions, center: [midX, midY] }
 }
 
 // ── 确定性碰撞消解（净空松弛，MYW-58 二期）──

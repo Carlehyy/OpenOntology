@@ -5,11 +5,19 @@ import {
   baseEdgeStyle,
   buildNetworkGraphOption,
   hasActiveAnalysis,
+  isNetworkViewPin,
   soften,
   withAlpha,
   type BuildNetworkGraphOptionInput,
   type NetworkCanvasHighlight,
 } from '../../../pages/ontology-model/network/networkGraphOption.ts'
+import {
+  clusterLayout,
+  fitLayoutToViewport,
+  NETWORK_VIEW_INSETS,
+  networkViewBox,
+  relaxForClearance,
+} from '../../../pages/ontology-model/network/networkModel.ts'
 import { CHART_AXIS, CHART_BLUE, CHART_ORANGE, CHART_TOOLTIP_BG, CHART_VIOLET } from '../../../lib/echartsTheme.ts'
 import type { NetworkGraphNode, NetworkOntologySection } from '../../../api/ontologyNetwork'
 
@@ -238,4 +246,73 @@ describe('buildNetworkGraphOption', () => {
     assert.equal(series.data.length, 0)
     assert.equal(series.links.length, 0)
   })
+
+  it('同一行类型不加角点会被拉高，加上角点后两轴缩放都是 1', () => {
+    const rowNodes = [
+      makeNode({ id: 'type:a', entityId: 'a', kind: 'object_type', label: '甲', objectTypeId: 'a' }),
+      makeNode({ id: 'type:b', entityId: 'b', kind: 'object_type', label: '乙', objectTypeId: 'b' }),
+      makeNode({ id: 'type:c', entityId: 'c', kind: 'object_type', label: '丙', objectTypeId: 'c' }),
+    ]
+    const width = 1200
+    const height = 800
+    const box = networkViewBox(width, height, NETWORK_VIEW_INSETS)
+    const fitted = fitLayoutToViewport(clusterLayout(rowNodes, []), width, height)
+    const relaxed = relaxForClearance(fitted.positions, rowNodes, [], {
+      bounds: { x: box.x, y: box.y, w: box.w, h: box.h },
+    })
+    const bare = echartsAxisScales([...relaxed.values()], box)
+    assert.ok(bare.sy / bare.sx > 2, `没有角点时应被拉高，实际 sx=${bare.sx} sy=${bare.sy}`)
+
+    const series = seriesOf(build({
+      nodes: rowNodes,
+      edges: [],
+      sections: [makeSection('o1', '本体一')],
+      positions: relaxed,
+      viewSize: { width, height },
+      viewInsets: NETWORK_VIEW_INSETS,
+    }))
+    const pins = series.data.filter(datum => isNetworkViewPin(String(datum.id)))
+    assert.equal(pins.length, 2)
+    for (const pin of pins) assert.equal(pin.symbol, 'none')
+    const locked = echartsAxisScales(
+      series.data
+        .filter(datum => Number.isFinite(Number(datum.x)) && Number.isFinite(Number(datum.y)))
+        .map(datum => ({ x: Number(datum.x), y: Number(datum.y) })),
+      box,
+    )
+    assert.ok(Math.abs(locked.sx - 1) < 1e-9, `sx=${locked.sx}`)
+    assert.ok(Math.abs(locked.sy - 1) < 1e-9, `sy=${locked.sy}`)
+    for (const datum of series.data) {
+      if (isNetworkViewPin(String(datum.id))) continue
+      assert.equal(typeof datum.symbolSize, 'number')
+      const size = datum.symbolSize as number
+      assert.ok(size >= 30 && size <= 50)
+    }
+  })
 })
+
+/** 复刻 ECharts createViewCoordSys：跨度为 0 的轴补成 2，两轴各自铺满视图盒。 */
+function echartsAxisScales(
+  points: { x: number; y: number }[],
+  view: { w: number; h: number },
+): { sx: number; sy: number } {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const point of points) {
+    minX = Math.min(minX, point.x)
+    minY = Math.min(minY, point.y)
+    maxX = Math.max(maxX, point.x)
+    maxY = Math.max(maxY, point.y)
+  }
+  if (maxX - minX === 0) {
+    maxX += 1
+    minX -= 1
+  }
+  if (maxY - minY === 0) {
+    maxY += 1
+    minY -= 1
+  }
+  return { sx: view.w / (maxX - minX), sy: view.h / (maxY - minY) }
+}

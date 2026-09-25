@@ -148,7 +148,10 @@ const instanceDetail = {
   externalId: null,
 }
 
-async function mockNetworkApi(page: Page) {
+async function mockNetworkApi(
+  page: Page,
+  fixtures?: { overview?: typeof overview; graph?: typeof graphResponse },
+) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
@@ -157,6 +160,8 @@ async function mockNetworkApi(page: Page) {
     }))
   })
 
+  const overviewPayload = fixtures?.overview ?? overview
+  const graphPayload = fixtures?.graph ?? graphResponse
   const graphQueries: string[] = []
   const overviewQueries: string[] = []
   await page.route(/^https?:\/\/[^/]+\/api\/v[12]\//, async (route: Route) => {
@@ -170,11 +175,11 @@ async function mockNetworkApi(page: Page) {
 
     if (url.pathname === '/api/v2/ontology-network/overview') {
       overviewQueries.push(url.searchParams.toString())
-      return ok(overview)
+      return ok(overviewPayload)
     }
     if (url.pathname === '/api/v2/ontology-network/graph') {
       graphQueries.push(url.searchParams.toString())
-      return ok(graphResponse)
+      return ok(graphPayload)
     }
     if (/^\/api\/v2\/ontology-network\/[^/]+\/instances\/[^/]+$/.test(url.pathname)) {
       return ok(instanceDetail)
@@ -359,4 +364,59 @@ test('切回浏览器标签页不触发全局图谱重建（无新请求、无�
   expect(graphQueries.length).toBe(graphBefore)
   expect(overviewQueries.length).toBe(overviewBefore)
   await expect(card.getByText('正在构建全局图谱')).toHaveCount(0)
+})
+
+const chainOverview = [
+  {
+    id: 'o-chain', name: '链路', domain: '链路', published: true,
+    releaseId: 'rel-chain', version: 'v1', typeCount: 3, linkTypeCount: 2, instanceCount: 0,
+  },
+]
+
+const chainGraph = {
+  level: 1,
+  query: null,
+  limitPerType: 10,
+  ontologies: chainOverview.map(item => ({ ...item, error: undefined })),
+  errors: [] as [],
+  nodes: [
+    { id: 'type:a', entityId: 'a', kind: 'object_type' as const, label: '甲', technicalName: 'a',
+      objectTypeId: 'a', ontologyId: 'o-chain', ontologyName: '链路', count: 0 },
+    { id: 'type:b', entityId: 'b', kind: 'object_type' as const, label: '乙', technicalName: 'b',
+      objectTypeId: 'b', ontologyId: 'o-chain', ontologyName: '链路', count: 0 },
+    { id: 'type:c', entityId: 'c', kind: 'object_type' as const, label: '丙', technicalName: 'c',
+      objectTypeId: 'c', ontologyId: 'o-chain', ontologyName: '链路', count: 0 },
+  ],
+  edges: [],
+  bridges: { enabled: true, groups: [] as [] },
+  meta: {
+    nodeBudget: 800, edgeBudget: 2000, truncated: false, droppedEdges: 0,
+    nodeCount: 3, edgeCount: 0, selectedOntologies: 1, totalInstances: 0,
+  },
+}
+
+test('同一行的对象类型色块是正圆，而不是被拉高的椭圆', async ({ page }) => {
+  await mockNetworkApi(page, { overview: chainOverview, graph: chainGraph })
+  await page.goto('/#/ontology-model/network', { waitUntil: 'domcontentloaded' })
+
+  const host = page.getByTestId('network-chart-host')
+  await expect(host.locator('svg text', { hasText: '甲' })).toBeVisible()
+  await expect(host.locator('svg text', { hasText: '丙' })).toBeVisible()
+
+  const readSymbols = () => page.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-testid="network-chart-host"] svg path, [data-testid="network-chart-host"] svg circle, [data-testid="network-chart-host"] svg ellipse')]
+      .map(el => {
+        const rect = el.getBoundingClientRect()
+        return {
+          tag: el.tagName,
+          width: Math.round(rect.width * 10) / 10,
+          height: Math.round(rect.height * 10) / 10,
+        }
+      })
+      .filter(rect => rect.width > 1 || rect.height > 1)
+    const round = rows.filter(rect => rect.width >= 12 && rect.height >= 12 && rect.width <= 70 && rect.height <= 70
+      && Math.abs(rect.width - rect.height) <= 2).length
+    return { round, rows: rows.slice(0, 12) }
+  })
+  await expect.poll(async () => (await readSymbols()).round, { timeout: 5000 }).toBeGreaterThanOrEqual(3)
 })

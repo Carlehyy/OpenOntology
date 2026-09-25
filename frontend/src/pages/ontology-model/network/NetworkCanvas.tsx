@@ -17,15 +17,16 @@
  * 渲染器自适应：节点数超过阈值切 canvas（大图性能），小图保持 svg 以支持
  * mocked E2E 的 DOM 级文本断言。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
 import type { ECharts } from 'echarts'
 import type {
   NetworkGraphData,
 } from '@/api/ontologyNetwork'
-import { clusterLayout, fitLayoutToViewport, relaxForClearance, NETWORK_VIEW_INSETS } from './networkModel.ts'
+import { clusterLayout, fitLayoutToViewport, networkViewBox, relaxForClearance, NETWORK_VIEW_INSETS } from './networkModel.ts'
 import {
   buildNetworkGraphOption,
+  isNetworkViewPin,
   type NetworkCanvasHighlight,
 } from './networkGraphOption.ts'
 
@@ -73,9 +74,9 @@ export default function NetworkCanvas(
 ) {
   const chartRef = useRef<ReactECharts | null>(null)
   const instanceRef = useRef<ECharts | null>(null)
-  /** 画布实测尺寸：layout 归一化的目标视口（首帧用常见尺寸兜底，ready 后校正）。 */
-  const [viewport, setViewport] = useState({ width: 960, height: 620 })
-  const [readyTick, setReadyTick] = useState(0)
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  /** 画布实测尺寸。未量到之前不挂图表，避免用假尺寸把圆拉成椭圆。 */
+  const [viewport, setViewport] = useState<{ width: number; height: number } | null>(null)
   /** 用户 roam 后的当前视图：高亮/选中重建 option 时回填，避免视图跳变。 */
   const userViewRef = useRef<{ zoom: number; center?: [number, number] } | null>(null)
   /** 数据身份追踪：仅当 nodes/edges 引用变化时重置视图（高亮变化不重置）。 */
@@ -93,20 +94,20 @@ export default function NetworkCanvas(
 
   // ---- 确定性分区布局 + 视口归一化 + 碰撞消解（1 数据单位 = 1 物理像素） ----
   const layout = useMemo(() => clusterLayout(nodes, edges), [nodes, edges])
+  const measured = viewport ?? { width: 960, height: 620 }
+  const viewBox = useMemo(
+    () => networkViewBox(measured.width, measured.height),
+    [measured.height, measured.width],
+  )
   const fitted = useMemo(
-    () => fitLayoutToViewport(layout, viewport.width, viewport.height),
-    [layout, viewport])
+    () => fitLayoutToViewport(layout, measured.width, measured.height),
+    [layout, measured.height, measured.width])
   // 碰撞消解在归一化后的像素坐标上进行：净空是真实像素，消解后节点锁回视图盒。
   const arranged = useMemo(
     () => relaxForClearance(fitted.positions, nodes, edges, {
-      bounds: {
-        x: NETWORK_VIEW_INSETS.left,
-        y: NETWORK_VIEW_INSETS.top,
-        w: Math.max(80, viewport.width - NETWORK_VIEW_INSETS.left - NETWORK_VIEW_INSETS.right),
-        h: Math.max(80, viewport.height - NETWORK_VIEW_INSETS.top - NETWORK_VIEW_INSETS.bottom),
-      },
+      bounds: { x: viewBox.x, y: viewBox.y, w: viewBox.w, h: viewBox.h },
     }),
-    [fitted, nodes, edges, viewport])
+    [fitted, nodes, edges, viewBox])
   const arrangedNowRef = useRef({ positions: arranged, center: fitted.center })
   arrangedNowRef.current = { positions: arranged, center: fitted.center }
 
@@ -120,39 +121,54 @@ export default function NetworkCanvas(
       center: userViewRef.current?.center ?? fitted.center,
       zoom: userViewRef.current?.zoom ?? 1,
       viewInsets: NETWORK_VIEW_INSETS,
+      viewSize: measured,
     }),
-    [nodes, edges, sections, highlight, arranged, fitted])
+    [nodes, edges, sections, highlight, arranged, fitted, measured])
 
   // 卸载清理：通知页面控制器失效。
   useEffect(() => () => {
     callbacksRef.current.onReady?.(null)
   }, [])
 
-  // 画布尺寸测量：ready 后与窗口 resize 时校正归一化视口。
-  // getWidth 在实例被 dispose 的瞬间可能抛错（_zr 置空），静默跳过本次测量。
-  useEffect(() => {
-    if (!readyTick) return
+  const publishViewport = (width: number, height: number) => {
+    if (width <= 0 || height <= 0) return
+    setViewport(previous => previous && previous.width === width && previous.height === height
+      ? previous
+      : { width, height })
+  }
+
+  // 先量宿主再挂图表。分栏拖动不会触发 window.resize，画布像素若跟不上，
+  // 整张 SVG 会被 CSS 拉开，圆又变成椭圆。这里跟宿主尺寸，并让图表实例跟上。
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    let lastWidth = -1
+    let lastHeight = -1
     const measure = () => {
+      const width = Math.round(host.clientWidth)
+      const height = Math.round(host.clientHeight)
+      if (width === lastWidth && height === lastHeight) return
+      lastWidth = width
+      lastHeight = height
       const instance = instanceRef.current
-      if (!instance) return
-      let width = 0
-      let height = 0
-      try {
-        width = instance.getWidth()
-        height = instance.getHeight()
-      } catch {
-        return
+      if (instance) {
+        try {
+          instance.resize({ width, height })
+        } catch {
+          // 实例刚销毁时 _zr 为空。
+        }
       }
-      if (width > 0 && height > 0) {
-        setViewport(previous => previous.width === width && previous.height === height
-          ? previous
-          : { width, height })
-      }
+      publishViewport(width, height)
     }
     measure()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(host)
     window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [readyTick])
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [])
 
   const applyView = (instance: ECharts, view: { zoom: number; center?: [number, number] }) => {
     userViewRef.current = view
@@ -193,14 +209,13 @@ export default function NetworkCanvas(
       },
     }
     callbacksRef.current.onReady?.(controller)
-    setReadyTick(tick => tick + 1)
   }
 
   const handleEvents = useMemo(() => ({
     click: (params: { dataType?: string; data?: { id?: string }; name?: string }) => {
       if (params.dataType !== 'node') return
       const id = params.data?.id || params.name
-      if (id) callbacksRef.current.onSelect?.(id)
+      if (id && !isNetworkViewPin(id)) callbacksRef.current.onSelect?.(id)
     },
   }), [])
 
@@ -212,6 +227,7 @@ export default function NetworkCanvas(
 
   return (
     <div
+      ref={hostRef}
       className="relative h-full min-h-0 w-full overflow-hidden"
       style={{
         backgroundColor: 'var(--color-bg-base)',
@@ -220,16 +236,18 @@ export default function NetworkCanvas(
       }}
     >
       <div className="absolute inset-0" data-testid="network-chart-host" aria-label="本体网络全局画布">
-        <ReactECharts
-          ref={chartRef}
-          option={option}
-          notMerge={false}
-          lazyUpdate
-          opts={chartOpts}
-          style={{ width: '100%', height: '100%' }}
-          onEvents={handleEvents}
-          onChartReady={handleReady}
-        />
+        {viewport && (
+          <ReactECharts
+            ref={chartRef}
+            option={option}
+            notMerge={false}
+            lazyUpdate
+            opts={chartOpts}
+            style={{ width: '100%', height: '100%' }}
+            onEvents={handleEvents}
+            onChartReady={handleReady}
+          />
+        )}
       </div>
     </div>
   )
