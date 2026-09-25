@@ -201,7 +201,11 @@ jobs:
     runs-on: ubuntu-latest
     # 15 分钟余量过薄：同一提交在快慢不同的 runner 上实测 11m39s ~ >15m，
     # 慢机器会随机撞顶导致部署被跳过（MYW-73 首次部署即如此）。提到 25 分钟。
-    timeout-minutes: 25
+    # 2026-09-25 套件增至 386 例后 25 分钟再度失守：快 runner 套件 14m26s
+    # （run 36118066551），慢 runner 22m39s 未完、连续两次撞顶取消
+    # （run 36153713911 首次与 rerun --failed 均如此，E2E 全绿但部署未推进）。
+    # 对齐 verify-backend 的 40 分钟：覆盖实测最坏分布，仍能掐断真卡死。
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
