@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Background, BackgroundVariant, Controls, MiniMap, ReactFlow, ReactFlowProvider,
   applyNodeChanges, useReactFlow, type NodeChange, type OnNodeDrag,
@@ -15,18 +15,19 @@ import {
 import { agentApi, type DynamicSentinel } from '@/api/agent'
 import { apiClientV2 } from '@/api/client'
 import { saveCanvasLayout } from '@/palantir-graph/api/formalApi'
+import { useAuthStore } from '@/stores/authStore'
 import BusinessModelDialog from './BusinessModelDialog'
 import SentinelDetailPanel from './SentinelDetailPanel'
 import StructureDocDialog from './StructureDocDialog'
 import { StructureGraphEdge, StructureGraphNode } from './StructureGraphElements'
 import {
   actionNodeId, buildStructureGraph, computePanelYieldViewport, functionDependencyMeta,
-  functionUsage, propertyNodeId,
-  relationEdgeId, routeStructureEdges, sentinelUsage,
+  functionUsage, L2_ANCHOR_SCALE, propertyNodeId,
+  relationEdgeId, routeStructureEdges, sentinelUsage, sharedObjectAnchors,
   type HighlightSet, type PublishedWorkspace, type StructureEdge,
   type StructureNode, type StructureSentinel,
 } from './structureGraphModel'
-import { saveStatusLabel, type StructureSaveState } from './saveStatus'
+import { classifySaveError, saveStatusLabel, type SaveErrorClassification, type StructureSaveState } from './saveStatus'
 
 type Level = 1 | 2
 type SearchKind = 'object' | 'relation' | 'property' | 'action'
@@ -48,14 +49,6 @@ const EMPTY_HIGHLIGHT: HighlightSet = {
 
 const kindLabel: Record<SearchKind, string> = {
   object: '对象实体', relation: '实体关系', property: '实体属性', action: '执行动作',
-}
-
-function errorMessage(error: unknown) {
-  const value = error as { detail?: unknown; message?: string; response?: { data?: { detail?: unknown } } }
-  const detail = value.response?.data?.detail ?? value.detail
-  if (typeof detail === 'string') return detail
-  if (detail && typeof detail === 'object' && 'message' in detail && typeof detail.message === 'string') return detail.message
-  return value.message || '布局保存失败'
 }
 
 function objectName(workspace: PublishedWorkspace, id: string) {
@@ -437,8 +430,20 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   workspace: PublishedWorkspace
 }) {
   const { fitView, getNodes, getViewport, setViewport } = useReactFlow<StructureNode, StructureEdge>()
+  const queryClient = useQueryClient()
   const [level, setLevel] = useState<Level>(1)
-  const builtGraph = useMemo(() => buildStructureGraph(workspace, level), [level, workspace])
+  // 会话内布局 overlay：保存成功的坐标立即并入画布输入，版本刷新（react-query
+  // 重新拉取）前切换层级不丢位置。overlay 绑定保存时的 versionId，版本一切换
+  // 即自然失效（无需 effect 清空，避免先用旧 overlay 渲一帧再重建）。
+  const [layoutOverlay, setLayoutOverlay] = useState<{
+    versionId: string
+    positions: Record<string, { x: number; y: number }>
+  }>({ versionId: workspace.versionId, positions: {} })
+  const effectiveWorkspace = useMemo(() => {
+    if (layoutOverlay.versionId !== workspace.versionId || Object.keys(layoutOverlay.positions).length === 0) return workspace
+    return { ...workspace, canvasLayout: { ...workspace.canvasLayout, ...layoutOverlay.positions } }
+  }, [workspace, layoutOverlay])
+  const builtGraph = useMemo(() => buildStructureGraph(effectiveWorkspace, level), [level, effectiveWorkspace])
   const [allNodes, setAllNodes] = useState<StructureNode[]>(builtGraph.nodes)
   const [detail, setDetail] = useState<DetailSelection>(null)
   const [searchText, setSearchText] = useState('')
@@ -450,7 +455,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   const [saveState, setSaveState] = useState<StructureSaveState>('idle')
   const [saveCountdown, setSaveCountdown] = useState(3)
   const [saveCountdownNonce, setSaveCountdownNonce] = useState(0)
-  const [saveError, setSaveError] = useState('')
+  const [saveError, setSaveError] = useState<SaveErrorClassification | null>(null)
   const [structureDocOpen, setStructureDocOpen] = useState(false)
   const [businessModelOpen, setBusinessModelOpen] = useState(false)
   const [toolbarMoreRight, setToolbarMoreRight] = useState(false)
@@ -463,7 +468,9 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   const saveTimer = useRef<number | null>(null)
   const savedResetTimer = useRef<number | null>(null)
   const saveInFlight = useRef(false)
-  const lastFittedGraph = useRef(builtGraph)
+  // 视口适配只跟随「版本 × 层级」：overlay 合并（保存成功）或哨兵数据到达会
+  // 重建 builtGraph，但显示坐标不变/与节点数据无关，不应重置节点或重适配视口。
+  const lastFitKey = useRef<string | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   // 哨兵让位平移在定时器/Promise 里迟到执行：sentinelIdRef 识别"清除/换人"，
   // selectionToken 识别"重复选择同一哨兵"——两者共同让过期让位作废。
@@ -474,6 +481,8 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   const searchResultsRef = useRef<HTMLDivElement>(null)
   const [searchPosition, setSearchPosition] = useState({ left: 0, top: 0, width: 320 })
   const searchResultsVisible = searchOpen && Boolean(searchText.trim())
+  // viewer/custom 只读（后端 owner 规则兜底：403 时保存错误透出原因）；admin/editor 可拖。
+  const canDragNodes = useAuthStore(state => state.user?.role === 'admin' || state.user?.role === 'editor')
 
   const updateSearchPosition = useCallback(() => {
     const input = searchInputRef.current
@@ -510,20 +519,23 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   }, [searchResultsVisible])
 
   useEffect(() => {
+    const fitKey = `${workspace.versionId}:${level}`
+    if (lastFitKey.current === fitKey) return
+    const firstFit = lastFitKey.current === null
+    lastFitKey.current = fitKey
     setAllNodes(builtGraph.nodes)
     // React Flow owns the initial fit so that it can center the viewport as soon
     // as node dimensions are measured, before those nodes become visible. Later
     // graph changes (L1 <-> L2) must snap to the fitted view without animation:
-    // the two levels pack their layouts independently from the same origin with
-    // different extents, so an animated fit makes the graph slide in from a
-    // corner instead of appearing centered.
-    if (lastFittedGraph.current === builtGraph) return
-    lastFittedGraph.current = builtGraph
+    // L2 锚点是共享 L1 锚点绕质心的放大展开，两级占据不同的范围与原点，
+    // an animated fit makes the graph slide in from a corner instead of
+    // appearing centered.
+    if (firstFit) return
     // 初始适配的缩放下限比旧值（0.24/0.32）更高：避免整图缩得太小导致节点文字难以辨认；
     // 视口装不下时用户可手动缩小或平移。
     const timer = window.setTimeout(() => void fitView({ padding: 0.2, minZoom: level === 2 ? 0.34 : 0.35, maxZoom: 0.9 }), 80)
     return () => window.clearTimeout(timer)
-  }, [builtGraph, fitView, level])
+  }, [builtGraph, fitView, level, workspace.versionId])
 
   useEffect(() => {
     sentinelIdRef.current = sentinelId
@@ -544,38 +556,50 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     pendingPositions.current = {}
     saveInFlight.current = true
     setSaveState('saving')
-    setSaveError('')
+    setSaveError(null)
+    // 瞬时错误（网络/409/5xx）自动重试；永久性错误（4xx）重试注定失败，
+    // 保持错误态等用户点击重试。
+    let autoRetry = true
     try {
       await saveCanvasLayout(ontologyId, batch, workspace.versionId)
+      setLayoutOverlay(previous => ({
+        versionId: workspace.versionId,
+        positions: { ...(previous.versionId === workspace.versionId ? previous.positions : {}), ...batch },
+      }))
       setSaveState('saved')
       // 成功提示短暂停留后回到空闲文案，避免「布局已保存」永久驻留造成状态残留。
       if (savedResetTimer.current !== null) window.clearTimeout(savedResetTimer.current)
       savedResetTimer.current = window.setTimeout(() => setSaveState('idle'), 2000)
     } catch (error) {
+      const classified = classifySaveError(error)
+      autoRetry = !classified.permanent
       pendingPositions.current = { ...batch, ...pendingPositions.current }
       setSaveState('error')
-      setSaveError(errorMessage(error))
+      setSaveError(classified)
+      if (classified.status === 404) {
+        // 版本号已过期：刷新工作区拿最新发布版，用户点击重试即落到新版本。
+        void queryClient.invalidateQueries({ queryKey: ['current-release-workspace', ontologyId] })
+      }
     } finally {
       saveInFlight.current = false
-      if (Object.keys(pendingPositions.current).length > 0) {
+      if (autoRetry && Object.keys(pendingPositions.current).length > 0) {
         saveTimer.current = window.setTimeout(() => void flushLayout(), 3000)
       }
     }
-  }, [ontologyId, workspace.versionId])
+  }, [ontologyId, queryClient, workspace.versionId])
 
+  // positions 的键已带命名空间前缀（l1:/l2:），由调用方按层级与节点类型组装。
   const schedulePositionSave = useCallback((positions: Record<string, { x: number; y: number }>) => {
-    Object.entries(positions).forEach(([nodeId, position]) => {
-      pendingPositions.current[`l${level}:${nodeId}`] = position
-    })
+    Object.assign(pendingPositions.current, positions)
     setSaveState('pending')
-    setSaveError('')
+    setSaveError(null)
     // 每次拖拽都重新开始 3 秒倒计时；nonce 用于让倒计时 effect 重新起表。
     setSaveCountdown(3)
     setSaveCountdownNonce(value => value + 1)
     if (savedResetTimer.current !== null) window.clearTimeout(savedResetTimer.current)
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current)
     saveTimer.current = window.setTimeout(() => void flushLayout(), 3000)
-  }, [flushLayout, level])
+  }, [flushLayout])
 
   // pending 期间每秒递减展示剩余秒数（3→2→1），随后由 flushLayout 切换为「正在保存布局」。
   useEffect(() => {
@@ -586,9 +610,20 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     return () => window.clearInterval(timer)
   }, [saveState, saveCountdownNonce])
 
+  // 单点拖（非整组）：L1 对象写 l1:；L2 属性/动作写 l2:。L2 对象一律走
+  // 整组拖拽路径（startNodeDrag 已建组），这里防御性地把对象锚点原样钉回 l1:。
   const scheduleLayoutSave = useCallback((node: StructureNode) => {
-    schedulePositionSave({ [node.id]: node.position })
-  }, [schedulePositionSave])
+    if (level === 2 && node.data.kind !== 'object') {
+      schedulePositionSave({ [`l2:${node.id}`]: node.position })
+      return
+    }
+    if (level === 2) {
+      const anchor = sharedObjectAnchors(workspace, effectiveWorkspace.canvasLayout).get(node.id)
+      schedulePositionSave({ [`l1:${node.id}`]: anchor || node.position })
+      return
+    }
+    schedulePositionSave({ [`l1:${node.id}`]: node.position })
+  }, [effectiveWorkspace.canvasLayout, level, schedulePositionSave, workspace])
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -674,23 +709,37 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
 
   const stopNodeDrag = useCallback<OnNodeDrag<StructureNode>>((_event, node) => {
     const drag = groupDrag.current
+    groupDrag.current = null
     if (!drag || drag.objectId !== node.id) {
       scheduleLayoutSave(node)
-      groupDrag.current = null
       return
     }
     const dx = node.position.x - drag.parentStart.x
     const dy = node.position.y - drag.parentStart.y
-    const positions: Record<string, { x: number; y: number }> = { [node.id]: { ...node.position } }
+    // L2 整组拖：对象本身改写共享锚点——显示位移 ÷ L2 放大倍数折回 L1 坐标系；
+    // 旧锚点优先取未落盘的待保存值，保证 3 秒防抖窗口内连续拖拽的位移能叠加。
+    const baseAnchor = pendingPositions.current[`l1:${node.id}`]
+      ?? sharedObjectAnchors(workspace, effectiveWorkspace.canvasLayout).get(node.id)
+      ?? drag.parentStart
+    const childPositions: Record<string, { x: number; y: number }> = {}
     Object.entries(drag.childStarts).forEach(([id, start]) => {
-      positions[id] = { x: start.x + dx, y: start.y + dy }
+      childPositions[id] = { x: start.x + dx, y: start.y + dy }
     })
-    setAllNodes(nodes => nodes.map(candidate => positions[candidate.id]
-      ? { ...candidate, position: positions[candidate.id] }
-      : candidate))
+    setAllNodes(nodes => nodes.map(candidate => {
+      if (candidate.id === node.id) return { ...candidate, position: { ...node.position } }
+      const child = childPositions[candidate.id]
+      return child ? { ...candidate, position: child } : candidate
+    }))
+    const positions: Record<string, { x: number; y: number }> = {
+      // 子节点照旧按显示坐标写 l2: 键。
+      ...Object.fromEntries(Object.entries(childPositions).map(([id, position]) => [`l2:${id}`, position])),
+      [`l1:${node.id}`]: {
+        x: baseAnchor.x + dx / L2_ANCHOR_SCALE,
+        y: baseAnchor.y + dy / L2_ANCHOR_SCALE,
+      },
+    }
     schedulePositionSave(positions)
-    groupDrag.current = null
-  }, [scheduleLayoutSave, schedulePositionSave])
+  }, [effectiveWorkspace.canvasLayout, scheduleLayoutSave, schedulePositionSave, workspace])
 
   const searchIndex = useMemo<SearchResult[]>(() => {
     const objectResults = workspace.objectTypes.map(item => ({ id: item.id, kind: 'object' as const, label: item.displayName || item.name, technicalName: item.name }))
@@ -946,7 +995,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
             }
           }}
           onPaneClick={() => { setDetail(null); setSentinelId(''); setSearchOpen(false) }}
-          nodesDraggable nodesConnectable={false} elementsSelectable minZoom={0.2} maxZoom={2.4}
+          nodesDraggable={canDragNodes} nodesConnectable={false} elementsSelectable minZoom={0.2} maxZoom={2.4}
           fitView fitViewOptions={{ padding: 0.2, minZoom: 0.35, maxZoom: 0.9 }}
           proOptions={{ hideAttribution: true }}
         >
@@ -965,10 +1014,13 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
             <button
               type="button"
               onClick={() => void flushLayout()}
-              title={saveError || '布局保存失败'}
+              title={saveError ? `${saveError.message}${saveError.code ? ` · ${saveError.code}` : ''}` : '布局保存失败'}
               className="pointer-events-auto inline-flex items-center gap-1 rounded px-1 py-0.5 font-medium text-[var(--color-danger)] underline decoration-[var(--color-danger)] underline-offset-2 transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
             >
-              <AlertCircle size={11} />保存失败 · 点击重试
+              <AlertCircle size={11} />
+              <span className="max-w-[220px] truncate">
+                保存失败：{saveError?.status === 404 ? '发布版本已更新，已刷新' : saveError?.reason || '未知原因'} · 点击重试
+              </span>
             </button>
           ) : (
             <span
