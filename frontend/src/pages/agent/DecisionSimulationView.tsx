@@ -324,7 +324,7 @@ export default function DecisionSimulationView({ oid, releaseId, conversationId,
       releaseId, conversationId: conversationId || undefined, limit: 30,
     }),
     enabled: !!oid && !!releaseId,
-    refetchInterval: running ? 1500 : false,
+    refetchInterval: query => (running || query.state.data?.[0]?.status === 'running' ? 1500 : false),
   })
 
   useEffect(() => {

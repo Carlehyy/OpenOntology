@@ -337,10 +337,8 @@ export function ProvenanceBar({ steps, cited }: { steps: AgentStep[]; cited: num
   )
 }
 
-export function AgentCallChainView({ messages, conversationId, ontologyName, running }: {
+export function AgentCallChainView({ messages, running }: {
   messages: ChatMsg[]
-  conversationId: string | null
-  ontologyName: string
   running: boolean
 }) {
   const turns = useMemo(() => {
@@ -391,10 +389,6 @@ export function AgentCallChainView({ messages, conversationId, ontologyName, run
               <p className="mt-0.5 font-mono text-sm font-semibold text-foreground">{value}</p>
             </div>
           ))}
-        </div>
-        <div className="mt-2 flex items-center justify-between px-1 text-[10px] text-[var(--color-text-tertiary)]">
-          <span>{ontologyName} · 当前会话完整执行记录</span>
-          <span className="font-mono">{conversationId ? `会话 ${conversationId.slice(0, 8)}` : '会话建立中'}</span>
         </div>
 
         <div className="relative mt-4 space-y-3 before:absolute before:bottom-4 before:left-[18px] before:top-4 before:w-px before:bg-[var(--color-bg-active)]">
