@@ -13,6 +13,7 @@ export default defineConfig({
   testMatch: [
     '**/agent_chat_resume.spec.ts',
     '**/agent_composer_enter.spec.ts',
+    '**/agent_decision_bridge.spec.ts',
     '**/agent_header.spec.ts',
     '**/agent_ontology_carousel.spec.ts',
     '**/agent_topology_instances.spec.ts',

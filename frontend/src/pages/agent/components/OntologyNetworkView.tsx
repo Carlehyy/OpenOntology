@@ -261,7 +261,7 @@ export function OntologyNetworkView({
   if (objectTypes.length === 0) {
     // 未选择本体时页面层已切换为卡片轮播，这里只剩「已选但无结构」的空态。
     return (
-      <div className="flex h-full flex-col items-center justify-center bg-gradient-to-br from-muted via-[var(--color-info-bg)] to-[var(--color-success-bg)] px-6 text-center dark:from-[#121820] dark:via-[#121820] dark:to-[#121820]">
+      <div className="workspace-topology-surface flex h-full flex-col items-center justify-center px-6 text-center">
         <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-card text-[var(--color-info)] shadow-sm">
           <Network size={24} />
         </div>

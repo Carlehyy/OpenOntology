@@ -185,6 +185,9 @@ export default function AgentWorkbenchPage() {
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  // 推演桥接占位：仅「推演意图回合」为真，供决策推演面板显示「正在启动」；
+  // 普通聊天回合不得置位，否则面板会对任意提问谎报推演中。
+  const [decisionPending, setDecisionPending] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const runIdRef = useRef<string | null>(null)
   const stoppedRef = useRef(false)
@@ -368,6 +371,7 @@ export default function AgentWorkbenchPage() {
     abortRef.current = new AbortController()
     if (/(决策推演|推演.{0,24}(方案|策略|未来|决策)|(?:方案|策略).{0,24}(比较|推演))/.test(question)) {
       setWorkspaceView('decision')
+      setDecisionPending(true)
     }
 
     setMessages(prev => [...prev, {
@@ -400,6 +404,8 @@ export default function AgentWorkbenchPage() {
           const kind = (typedStep.result as any)?.kind
           if (kind === 'decision_simulation') {
             setDecisionRunId(String((typedStep.result as any)?.runId || '') || null)
+            // 真实推演 run 接管面板展示，桥接占位即刻结束
+            setDecisionPending(false)
             setWorkspaceView('decision')
           } else if (kind === 'path' || kind === 'impact') {
             setWorkspaceView('data')
@@ -425,6 +431,7 @@ export default function AgentWorkbenchPage() {
       }
     } finally {
       // 回合终态（答复 / 停止 / 异常）补写本地时钟，调用链据此展示每轮结束时间与总耗时（MYW-66）
+      setDecisionPending(false)
       patch(m => (m.createdAt ? {} : { createdAt: new Date().toISOString() }))
       abortRef.current = null
       runIdRef.current = null
@@ -647,14 +654,12 @@ export default function AgentWorkbenchPage() {
                   releaseId={releaseId}
                   conversationId={conversationId}
                   activeRunId={decisionRunId}
-                  running={busy}
+                  running={decisionPending}
                 />
               </Suspense>
             ) : workspaceView === 'trace' ? (
               <AgentCallChainView
                 messages={messages}
-                conversationId={conversationId}
-                ontologyName={selectedOntology?.name || '当前本体'}
                 running={busy}
               />
             ) : workspaceView === 'data' ? (
