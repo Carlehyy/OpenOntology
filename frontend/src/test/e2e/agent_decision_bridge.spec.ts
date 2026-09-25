@@ -4,12 +4,68 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // busy，任意普通问答回合期间决策推演面板都会谎报「决策推演正在启动」。
 // 修复后桥接占位仅随推演意图回合（命中推演关键词正则）出现，回合终态即复位；
 // 普通回合与回合中的打字排队一律不触发。
+// 补充场景：会话已有历史推演时，新推演回合显示桥接而不是陈旧的已完成结果；
+// 卡死（超 30 分钟未更新）的 running 记录不再显示「推演中」，而是中断提示。
 
 const now = '2026-09-25T08:00:00+00:00'
 // 聊天 SSE 延迟返回，撑开 busy 窗口以观测「回合进行中」的面板状态
 const CHAT_DELAY_MS = 1200
 
-async function mockPlatform(page: Page) {
+const runSummary = (id: string, status: 'running' | 'succeeded', startedAt: string) => ({
+  id,
+  ontologyId: 'ontology-1',
+  ontologyReleaseId: 'release-1',
+  conversationId: 'conv-0',
+  title: status === 'running' ? '未完成的推演' : '历史推演记录',
+  question: '此前的推演问题',
+  status,
+  modelName: 'mock-llm',
+  recommendedOption: null,
+  robustScore: null,
+  perspectiveCount: 0,
+  diagnostics: {},
+  errorMessage: null,
+  startedAt,
+  completedAt: status === 'running' ? null : '2026-09-24T07:02:00+00:00',
+})
+
+const succeededRunDetail = (id: string) => ({
+  id,
+  ontologyId: 'ontology-1',
+  ontologyReleaseId: 'release-1',
+  conversationId: 'conv-0',
+  createdBy: 'admin',
+  modelConfigId: null,
+  modelName: 'mock-llm',
+  title: '历史推演记录',
+  question: '此前的推演问题',
+  status: 'succeeded',
+  specification: {},
+  snapshot: { checksum: 'abc123checksum', coverage: {} },
+  perspectives: [],
+  evaluation: {},
+  recommendation: { disclaimer: '结果用于辅助决策。' },
+  diagnostics: { phase: 'complete' },
+  errorMessage: null,
+  startedAt: '2026-09-24T07:00:00+00:00',
+  completedAt: '2026-09-24T07:02:00+00:00',
+})
+
+const stuckRunDetail = (id: string, startedAt: string) => ({
+  ...succeededRunDetail(id),
+  title: '未完成的推演',
+  status: 'running',
+  diagnostics: { phase: 'perspectives', perspectiveCompleted: 1, perspectiveTotal: 4 },
+  startedAt,
+  completedAt: null,
+})
+
+async function mockPlatform(page: Page, options: {
+  decisionList?: unknown[]
+  decisionDetails?: Record<string, unknown>
+} = {}) {
+  const decisionList = options.decisionList ?? []
+  const decisionDetails = options.decisionDetails ?? {}
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
@@ -101,8 +157,12 @@ async function mockPlatform(page: Page) {
         ].join('\n'),
       })
     }
+    const detailMatch = path.match(/^\/api\/v2\/formal\/ontologies\/ontology-1\/agent\/decision-simulations\/(.+)$/)
+    if (detailMatch && decisionDetails[detailMatch[1]]) {
+      return json(route, decisionDetails[detailMatch[1]])
+    }
     if (path === '/api/v2/formal/ontologies/ontology-1/agent/decision-simulations') {
-      return json(route, [])
+      return json(route, decisionList)
     }
     return route.fallback()
   })
@@ -145,5 +205,48 @@ test.describe('决策推演桥接占位', () => {
     await expect(page.getByText('LIVE_AGENT_ANSWER').nth(1)).toBeVisible()
     await expect(page.getByTestId('decision-simulation-running')).toHaveCount(0)
     await expect(page.getByTestId('decision-simulation-empty')).toBeVisible()
+  })
+
+  test('会话已有历史推演时：新推演回合显示桥接占位而不是陈旧的已完成结果', async ({ page }) => {
+    await mockPlatform(page, {
+      decisionList: [runSummary('run-old', 'succeeded', '2026-09-24T07:00:00+00:00')],
+      decisionDetails: { 'run-old': succeededRunDetail('run-old') },
+    })
+    await page.goto('/#/agent?ontology_id=ontology-1')
+    await expect(page.getByTestId('agent-input-bar')).toBeVisible()
+
+    // 决策推演视图默认展示最近一次已完成推演的结果
+    await page.getByTestId('workspace-view-decision').click()
+    await expect(page.getByTestId('decision-simulation-result')).toBeVisible()
+
+    // 推演意图回合：新 run 可见之前显示桥接占位，而不是继续展示陈旧结果
+    const composer = page.getByTestId('agent-composer')
+    await composer.fill('帮我推演一下订单策略')
+    await composer.press('Enter')
+    await expect(page.getByTestId('decision-simulation-running')).toBeVisible()
+    await expect(page.getByText('决策推演正在启动')).toBeVisible()
+    await expect(page.getByTestId('decision-simulation-result')).toHaveCount(0)
+
+    // 回合终态（本轮未产出真实推演 run）：恢复展示历史结果，不残留桥接
+    await expect(page.getByText('LIVE_AGENT_ANSWER')).toBeVisible()
+    await expect(page.getByTestId('decision-simulation-running')).toHaveCount(0)
+    await expect(page.getByTestId('decision-simulation-result')).toBeVisible()
+  })
+
+  test('卡死的 running 推演记录（超 30 分钟未更新）显示中断提示而不是「推演中」', async ({ page }) => {
+    const staleStartedAt = new Date(Date.now() - 40 * 60 * 1000).toISOString()
+    await mockPlatform(page, {
+      decisionList: [runSummary('run-stuck', 'running', staleStartedAt)],
+      decisionDetails: { 'run-stuck': stuckRunDetail('run-stuck', staleStartedAt) },
+    })
+    await page.goto('/#/agent?ontology_id=ontology-1')
+    await expect(page.getByTestId('agent-input-bar')).toBeVisible()
+
+    await page.getByTestId('workspace-view-decision').click()
+    // 卡死记录：显示中断提示，绝不显示「决策推演正在启动」/进行中动画
+    await expect(page.getByTestId('decision-simulation-stale')).toBeVisible()
+    await expect(page.getByText('推演可能已中断')).toBeVisible()
+    await expect(page.getByTestId('decision-simulation-running')).toHaveCount(0)
+    await expect(page.getByText('决策推演正在启动')).toHaveCount(0)
   })
 })

@@ -50,6 +50,16 @@ const dateTime = (value?: string | null) => {
   return Number.isNaN(parsed.getTime()) ? value : formatDateTime(parsed, { seconds: true })
 }
 
+const RUN_STALE_MS = 30 * 60 * 1000
+
+// 卡死 run 断路器：后端暂无 running 超时收割（进程在推演中途死亡会让记录永久
+// 停在 running），超过阈值后前端停止轮询、不再按「进行中」渲染，避免无限
+// 轮询打满接口，也避免对一条死掉的推演永久谎报进度。
+function isLiveRun(item?: { status?: string; startedAt?: string | null } | null): boolean {
+  if (item?.status !== 'running' || !item.startedAt) return false
+  return Date.now() - new Date(item.startedAt).getTime() < RUN_STALE_MS
+}
+
 function Metric({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
     <div className="min-w-0 border-l border-border pl-3 first:border-l-0 first:pl-0">
@@ -204,7 +214,17 @@ function ResultView({ run }: { run: DecisionSimulationRun }) {
     }).slice(0, 6)
   }, [run.perspectives])
 
-  if (run.status === 'running') return <RunningState run={run} />
+  if (run.status === 'running') {
+    if (isLiveRun(run)) return <RunningState run={run} />
+    return (
+      <div className="flex h-full items-center justify-center bg-muted p-8" data-testid="decision-simulation-stale">
+        <div role="alert" className="max-w-lg rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-card p-5">
+          <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-warning)]"><AlertTriangle size={16} />推演可能已中断</div>
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">该推演记录超过 30 分钟未更新，通常是服务在推演过程中重启所致。记录已保留，可重新发起一次推演。</p>
+        </div>
+      </div>
+    )
+  }
   if (run.status === 'failed') {
     return (
       <div className="flex h-full items-center justify-center bg-muted p-8">
@@ -324,7 +344,7 @@ export default function DecisionSimulationView({ oid, releaseId, conversationId,
       releaseId, conversationId: conversationId || undefined, limit: 30,
     }),
     enabled: !!oid && !!releaseId,
-    refetchInterval: query => (running || query.state.data?.[0]?.status === 'running' ? 1500 : false),
+    refetchInterval: query => (running || isLiveRun(query.state.data?.[0]) ? 1500 : false),
   })
 
   useEffect(() => {
@@ -343,7 +363,7 @@ export default function DecisionSimulationView({ oid, releaseId, conversationId,
     queryKey: ['decision-simulation', oid, effectiveId],
     queryFn: () => agentApi.decisionSimulation(oid, effectiveId!),
     enabled: !!oid && !!effectiveId,
-    refetchInterval: query => query.state.data?.status === 'running' || running ? 1500 : false,
+    refetchInterval: query => (isLiveRun(query.state.data) || running ? 1500 : false),
   })
 
   if (!oid) return <EmptyState running={false} />
@@ -376,7 +396,12 @@ export default function DecisionSimulationView({ oid, releaseId, conversationId,
       <div className="min-h-0 flex-1">
         {(listLoading || runLoading) && effectiveId ? (
           <div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground"><Loader2 size={14} className="animate-spin motion-reduce:animate-none" />正在读取推演记录…</div>
-        ) : run ? <ResultView run={run} /> : runs[0]?.status === 'running' ? <RunningState run={runs[0]} /> : <EmptyState running={running} />}
+        ) : isLiveRun(run) ? <RunningState run={run} />
+          : isLiveRun(runs[0]) ? <RunningState run={runs[0]} />
+            // 推演意图回合尚无可见的新 run：显示桥接占位，而不是陈旧历史结果
+            : running ? <EmptyState running />
+              : run ? <ResultView run={run} />
+                : <EmptyState running={false} />}
       </div>
     </div>
   )
