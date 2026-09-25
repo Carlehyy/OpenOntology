@@ -11,19 +11,20 @@ async function readFlowPosition(locator: Locator): Promise<{ x: number; y: numbe
   return { x: Number(match[1]), y: Number(match[2]) }
 }
 
-async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: boolean; holdLayoutResponse?: boolean; canvasLayout?: Record<string, { x: number; y: number }> } = {}) {
+async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: boolean; holdLayoutResponse?: boolean; canvasLayout?: Record<string, { x: number; y: number }>; role?: 'admin' | 'editor' | 'viewer' } = {}) {
   const includeUxFixtures = options.includeUxFixtures === true
   const holdLayoutResponse = options.holdLayoutResponse === true
-  await page.addInitScript(() => {
+  const role = options.role ?? 'admin'
+  await page.addInitScript((userRole) => {
     localStorage.setItem('token', 'structure-view-token')
     localStorage.setItem('auth-store', JSON.stringify({
       state: {
         token: 'structure-view-token',
-        user: { id: 'structure-view-user', username: 'structure-view-user', role: 'admin' },
+        user: { id: 'structure-view-user', username: 'structure-view-user', role: userRole },
       },
       version: 0,
     }))
-  })
+  }, role)
 
   const ok = (route: Route, data: unknown) => route.fulfill({
     status: 200,
@@ -31,7 +32,8 @@ async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: 
     body: JSON.stringify({ data, message: 'ok' }),
   })
   const layoutCalls: Array<{ positions: Record<string, { x: number; y: number }> }> = []
-  let layoutFailure: { status: number; detail: unknown } | null = null
+  // times=null 表示持续失败；times=N 表示只失败前 N 次（验证瞬时故障自动重试自愈）。
+  let layoutFailure: { status: number; detail: unknown; times: number | null } | null = null
   let workspaceFetches = 0
   // holdLayoutResponse：把 PUT /layout 的响应挂起，直到测试显式放行，
   // 让「正在保存布局」瞬态在慢 CI 上也能被确定性地断言到（顺序安全：
@@ -220,10 +222,15 @@ async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: 
       const body = JSON.parse(route.request().postData() || '{}')
       layoutCalls.push({ positions: body.positions ?? {} })
       if (layoutFailure) {
+        const failure = layoutFailure
+        if (failure.times !== null) {
+          failure.times -= 1
+          if (failure.times <= 0) layoutFailure = null
+        }
         return route.fulfill({
-          status: layoutFailure.status,
+          status: failure.status,
           contentType: 'application/json',
-          body: JSON.stringify({ detail: layoutFailure.detail }),
+          body: JSON.stringify({ detail: failure.detail }),
         })
       }
       if (holdLayoutResponse) {
@@ -235,14 +242,17 @@ async function mockOntologyStructure(page: Page, options: { includeUxFixtures?: 
         // 让「正在保存布局」状态停留足够长，便于断言捕获
         await new Promise(resolve => setTimeout(resolve, 400))
       }
-      return ok(route, { versionId: 'release-1', positions: {} })
+      // 与后端契约一致：响应携带合并后的全量 canvas_layout
+      // （前端 overlay 以响应为准全量重写，不做本地增量合并）。
+      return ok(route, { versionId: 'release-1', positions: { ...(options.canvasLayout || {}), ...body.positions } })
     }
     return ok(route, [])
   })
 
   return {
     layoutCalls,
-    failLayout: (detail: unknown, status = 500) => { layoutFailure = { status, detail } },
+    failLayout: (detail: unknown, status = 500) => { layoutFailure = { status, detail, times: null } },
+    failLayoutOnce: (detail: unknown, status = 500) => { layoutFailure = { status, detail, times: 1 } },
     recoverLayout: () => { layoutFailure = null },
     getWorkspaceFetches: () => workspaceFetches,
     releaseLayout: () => {
@@ -678,7 +688,7 @@ test('布局保存 404 触发工作区重新请求并提示版本已更新，手
 test('L2 整组拖拽对象：PUT 写共享锚点 l1: 键且不写 l2: 对象键', async ({ page }) => {
   const { layoutCalls } = await mockOntologyStructure(page, {
     includeUxFixtures: true,
-    // 间距 1200：L2 放大 1.6 倍 + 属性簇展开后整图仍能在 minZoom 0.34 下完整入画，
+    // 间距 1200：L2 放大 1.6 倍 + 属性簇展开后整图仍能在 minZoom 0.35 下完整入画，
     // 两个对象节点都在可视区内可直接拖拽。
     canvasLayout: { 'l1:object-order': { x: 0, y: 0 }, 'l1:object-customer': { x: 1200, y: 0 } },
   })
@@ -706,12 +716,74 @@ test('L2 整组拖拽对象：PUT 写共享锚点 l1: 键且不写 l2: 对象键
 
   expect(layoutCalls.length).toBe(1)
   const positions = layoutCalls[0].positions
-  // 对象本身改写共享锚点：l1: = 旧锚点(0,0) + 显示位移 / 1.6；不写 l2: 对象键
+  // 对象本身改写共享锚点：l1: = 旧锚点(0,0) + 显示位移 / l2WritebackDivisor(2)；
+  // 放大绕质心，除数需扣掉质心跟随项：1.6 - 0.6/2 = 1.3。不写 l2: 对象键。
   const after = await readFlowPosition(order)
   expect(positions['l2:object-order']).toBeUndefined()
-  expect(positions['l1:object-order'].x).toBeCloseTo((after.x - before.x) / 1.6, 1)
-  expect(positions['l1:object-order'].y).toBeCloseTo((after.y - before.y) / 1.6, 1)
+  expect(positions['l1:object-order'].x).toBeCloseTo((after.x - before.x) / 1.3, 1)
+  expect(positions['l1:object-order'].y).toBeCloseTo((after.y - before.y) / 1.3, 1)
   // 子节点照旧按显示坐标写 l2: 键
   expect(positions['l2:property:object-order:order_no']).toBeTruthy()
   expect(positions['l2:action:action-create-order']).toBeTruthy()
+})
+
+test('布局保存遭遇瞬时故障时 3 秒后自动重试并自愈（无需点击）', async ({ page }) => {
+  const { layoutCalls, failLayoutOnce } = await mockOntologyStructure(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/ontologies/' + ontologyId, { waitUntil: 'domcontentloaded' })
+  await page.getByRole('button', { name: '本体结构', exact: true }).click()
+  const node = page.getByTestId('structure-node-object')
+  await expect(node).toBeVisible()
+  await page.waitForTimeout(750)
+
+  // mock 只失败前 1 次：第一次保存失败，自动重试时接口已恢复
+  failLayoutOnce('模拟瞬时故障', 500)
+  const box = await node.boundingBox()
+  expect(box).toBeTruthy()
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box!.x + box!.width / 2 + 60, box!.y + box!.height / 2 + 40, { steps: 8 })
+  await page.mouse.up()
+
+  // 第一次保存失败：出现红色重试入口（500 属瞬时错误，会自动重试）
+  const retry = page.getByRole('button', { name: '保存失败：模拟瞬时故障 · 点击重试' })
+  await expect(retry).toBeVisible({ timeout: 8000 })
+
+  // 不点击：3 秒后自动重试成功，状态自愈为已保存
+  const status = page.getByTestId('structure-save-status')
+  await expect(status).toContainText('布局已保存', { timeout: 9000 })
+  // 恰好两次提交：第一次失败 + 自动重试成功
+  expect(layoutCalls.length).toBe(2)
+  // 成功提示短暂停留后回到空闲文案
+  await expect(status).toContainText('拖动后自动保存布局', { timeout: 6000 })
+})
+
+test('viewer 只读：节点不可拖拽、不发起保存，状态条如实提示只读', async ({ page }) => {
+  const { layoutCalls } = await mockOntologyStructure(page, { role: 'viewer' })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/ontologies/' + ontologyId, { waitUntil: 'domcontentloaded' })
+  await page.getByRole('button', { name: '本体结构', exact: true }).click()
+  const node = page.getByTestId('structure-node-object')
+  await expect(node).toBeVisible()
+  await page.waitForTimeout(750)
+
+  // 空闲态如实提示只读，而不是「拖动后自动保存布局」
+  const status = page.getByTestId('structure-save-status')
+  await expect(status).toContainText('只读模式，不可调整布局')
+
+  const before = await readFlowPosition(node)
+  const box = await node.boundingBox()
+  expect(box).toBeTruthy()
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box!.x + box!.width / 2 + 60, box!.y + box!.height / 2 + 40, { steps: 8 })
+  await page.mouse.up()
+
+  // 等待超过 3 秒防抖窗口：只读角色不触发任何保存，节点流坐标不变
+  await page.waitForTimeout(3800)
+  expect(layoutCalls.length).toBe(0)
+  const after = await readFlowPosition(node)
+  expect(after.x).toBeCloseTo(before.x, 1)
+  expect(after.y).toBeCloseTo(before.y, 1)
+  await expect(status).toContainText('只读模式，不可调整布局')
 })

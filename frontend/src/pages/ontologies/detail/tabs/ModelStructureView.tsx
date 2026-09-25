@@ -22,7 +22,7 @@ import StructureDocDialog from './StructureDocDialog'
 import { StructureGraphEdge, StructureGraphNode } from './StructureGraphElements'
 import {
   actionNodeId, buildStructureGraph, computePanelYieldViewport, functionDependencyMeta,
-  functionUsage, L2_ANCHOR_SCALE, propertyNodeId,
+  functionUsage, l2WritebackDivisor, propertyNodeId,
   relationEdgeId, routeStructureEdges, sentinelUsage, sharedObjectAnchors,
   type HighlightSet, type PublishedWorkspace, type StructureEdge,
   type StructureNode, type StructureSentinel,
@@ -465,6 +465,13 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     childStarts: Record<string, { x: number; y: number }>
   } | null>(null)
   const pendingPositions = useRef<Record<string, { x: number; y: number }>>({})
+  // 在途批次：flushLayout 捕获 batch 到响应返回期间 pending 已清空、overlay 未并入，
+  // 此窗口内再拖同一对象时旧锚点要能从在途批次里查到，否则第一批位移永久丢失。
+  const inFlightPositions = useRef<Record<string, { x: number; y: number }>>({})
+  // 保存成功后待 re-sync 的键集合：把本次 batch 涉及的节点吸附到重建后的派生位置，
+  // 让碰撞位移/除数舍入在保存落地后立即诚实呈现（拖拽进行中不吸附）。
+  const pendingResyncKeys = useRef<Set<string> | null>(null)
+  const draggingRef = useRef(false)
   const saveTimer = useRef<number | null>(null)
   const savedResetTimer = useRef<number | null>(null)
   const saveInFlight = useRef(false)
@@ -532,8 +539,9 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     // appearing centered.
     if (firstFit) return
     // 初始适配的缩放下限比旧值（0.24/0.32）更高：避免整图缩得太小导致节点文字难以辨认；
-    // 视口装不下时用户可手动缩小或平移。
-    const timer = window.setTimeout(() => void fitView({ padding: 0.2, minZoom: level === 2 ? 0.34 : 0.35, maxZoom: 0.9 }), 80)
+    // 视口装不下时用户可手动缩小或平移（交互缩放下限仍为 minZoom prop 的 0.2；
+    // 这里与 ReactFlow fitViewOptions prop、Controls 适配按钮的下限 0.35 一致）。
+    const timer = window.setTimeout(() => void fitView({ padding: 0.2, minZoom: 0.35, maxZoom: 0.9 }), 80)
     return () => window.clearTimeout(timer)
   }, [builtGraph, fitView, level, workspace.versionId])
 
@@ -548,24 +556,45 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     setFunctionId('')
     setSentinelId('')
     setOpenDependency(null)
+    // 版本切换后旧版本的待保存键不再带往新版本（过期键对新版本必 422）。
+    pendingPositions.current = {}
+    pendingResyncKeys.current = null
   }, [workspace.versionId])
+
+  // 保存落地后的定向 re-sync：overlay 并入触发 builtGraph 重建时，把刚保存的
+  // 节点吸附到派生位置（防抖窗口内切层、跨层保存落地、碰撞位移立即诚实呈现）。
+  // 拖拽进行中不吸附——当前拖拽位置是更新的用户意图，其保存落地时会自带 re-sync。
+  useEffect(() => {
+    const keys = pendingResyncKeys.current
+    if (!keys) return
+    pendingResyncKeys.current = null
+    if (draggingRef.current) return
+    const nodeIds = new Set([...keys].map(key => key.slice(3)))
+    const positions = new Map(builtGraph.nodes.map(node => [node.id, node.position]))
+    setAllNodes(nodes => nodes.map(node => {
+      if (!nodeIds.has(node.id)) return node
+      const position = positions.get(node.id)
+      return position ? { ...node, position } : node
+    }))
+  }, [builtGraph])
 
   const flushLayout = useCallback(async () => {
     if (saveInFlight.current || Object.keys(pendingPositions.current).length === 0) return
     const batch = pendingPositions.current
     pendingPositions.current = {}
     saveInFlight.current = true
+    inFlightPositions.current = batch
     setSaveState('saving')
     setSaveError(null)
     // 瞬时错误（网络/409/5xx）自动重试；永久性错误（4xx）重试注定失败，
     // 保持错误态等用户点击重试。
     let autoRetry = true
     try {
-      await saveCanvasLayout(ontologyId, batch, workspace.versionId)
-      setLayoutOverlay(previous => ({
-        versionId: workspace.versionId,
-        positions: { ...(previous.versionId === workspace.versionId ? previous.positions : {}), ...batch },
-      }))
+      const saved = await saveCanvasLayout(ontologyId, batch, workspace.versionId)
+      // 响应即后端合并后的全量画布布局：overlay 始终等于最后一次保存时的
+      // 服务端真实状态，不做本地增量合并。
+      setLayoutOverlay({ versionId: workspace.versionId, positions: saved.positions })
+      pendingResyncKeys.current = new Set(Object.keys(batch))
       setSaveState('saved')
       // 成功提示短暂停留后回到空闲文案，避免「布局已保存」永久驻留造成状态残留。
       if (savedResetTimer.current !== null) window.clearTimeout(savedResetTimer.current)
@@ -573,7 +602,12 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     } catch (error) {
       const classified = classifySaveError(error)
       autoRetry = !classified.permanent
-      pendingPositions.current = { ...batch, ...pendingPositions.current }
+      if (classified.status === 422) {
+        // 毒丸 batch：键集永远不可能通过校验，回排会污染后续每一次保存——丢弃本批
+        // （错误文案已点名问题节点，用户重新拖拽即可生成干净批次）。
+      } else {
+        pendingPositions.current = { ...batch, ...pendingPositions.current }
+      }
       setSaveState('error')
       setSaveError(classified)
       if (classified.status === 404) {
@@ -582,6 +616,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
       }
     } finally {
       saveInFlight.current = false
+      inFlightPositions.current = {}
       if (autoRetry && Object.keys(pendingPositions.current).length > 0) {
         saveTimer.current = window.setTimeout(() => void flushLayout(), 3000)
       }
@@ -611,7 +646,8 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   }, [saveState, saveCountdownNonce])
 
   // 单点拖（非整组）：L1 对象写 l1:；L2 属性/动作写 l2:。L2 对象一律走
-  // 整组拖拽路径（startNodeDrag 已建组），这里防御性地把对象锚点原样钉回 l1:。
+  // 整组拖拽路径（startNodeDrag 已建组）；拿不到锚点时跳过该键保存，
+  // 不把 L2 显示坐标错写进 l1: 键。
   const scheduleLayoutSave = useCallback((node: StructureNode) => {
     if (level === 2 && node.data.kind !== 'object') {
       schedulePositionSave({ [`l2:${node.id}`]: node.position })
@@ -619,7 +655,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     }
     if (level === 2) {
       const anchor = sharedObjectAnchors(workspace, effectiveWorkspace.canvasLayout).get(node.id)
-      schedulePositionSave({ [`l1:${node.id}`]: anchor || node.position })
+      if (anchor) schedulePositionSave({ [`l1:${node.id}`]: anchor })
       return
     }
     schedulePositionSave({ [`l1:${node.id}`]: node.position })
@@ -679,6 +715,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   }, [])
 
   const startNodeDrag = useCallback<OnNodeDrag<StructureNode>>((_event, node) => {
+    draggingRef.current = true
     if (level !== 2 || node.data.kind !== 'object') {
       groupDrag.current = null
       return
@@ -710,17 +747,19 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
   const stopNodeDrag = useCallback<OnNodeDrag<StructureNode>>((_event, node) => {
     const drag = groupDrag.current
     groupDrag.current = null
+    draggingRef.current = false
     if (!drag || drag.objectId !== node.id) {
       scheduleLayoutSave(node)
       return
     }
     const dx = node.position.x - drag.parentStart.x
     const dy = node.position.y - drag.parentStart.y
-    // L2 整组拖：对象本身改写共享锚点——显示位移 ÷ L2 放大倍数折回 L1 坐标系；
-    // 旧锚点优先取未落盘的待保存值，保证 3 秒防抖窗口内连续拖拽的位移能叠加。
+    // L2 整组拖：对象本身改写共享锚点——显示位移 ÷ l2WritebackDivisor 折回锚点坐标系
+    // （放大绕质心，除数需扣掉质心跟随项，重建后被拖节点才能精确落点）。
+    // 旧锚点优先取未落盘/在途的待保存值，保证防抖窗口与在途窗口内连续拖拽的位移能叠加。
     const baseAnchor = pendingPositions.current[`l1:${node.id}`]
+      ?? inFlightPositions.current[`l1:${node.id}`]
       ?? sharedObjectAnchors(workspace, effectiveWorkspace.canvasLayout).get(node.id)
-      ?? drag.parentStart
     const childPositions: Record<string, { x: number; y: number }> = {}
     Object.entries(drag.childStarts).forEach(([id, start]) => {
       childPositions[id] = { x: start.x + dx, y: start.y + dy }
@@ -733,10 +772,14 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     const positions: Record<string, { x: number; y: number }> = {
       // 子节点照旧按显示坐标写 l2: 键。
       ...Object.fromEntries(Object.entries(childPositions).map(([id, position]) => [`l2:${id}`, position])),
-      [`l1:${node.id}`]: {
-        x: baseAnchor.x + dx / L2_ANCHOR_SCALE,
-        y: baseAnchor.y + dy / L2_ANCHOR_SCALE,
-      },
+    }
+    // 拿不到锚点时跳过该键保存，不把 L2 显示坐标错写进 l1: 键。
+    if (baseAnchor) {
+      const divisor = l2WritebackDivisor(workspace.objectTypes.length)
+      positions[`l1:${node.id}`] = {
+        x: baseAnchor.x + dx / divisor,
+        y: baseAnchor.y + dy / divisor,
+      }
     }
     schedulePositionSave(positions)
   }, [effectiveWorkspace.canvasLayout, scheduleLayoutSave, schedulePositionSave, workspace])
@@ -898,12 +941,12 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     setSearchFocus(null)
     if (kind === 'function') { setFunctionId(id); setSentinelId('') }
     else { setSentinelId(id); setFunctionId(''); setDetail(null) }
-    // 高亮适配的缩放下限与 L1/L2 切换保持一致（0.34）：不传时会跌回实例下限
+    // 高亮适配的缩放下限与 L1/L2 切换保持一致（0.35）：不传时会跌回实例下限
     // 0.2，程序自己把视图打到不可读的小字；30ms 等待 L2 节点完成测量。
     const alive = () => selectionToken.current === token && (kind !== 'sentinel' || sentinelIdRef.current === id)
     window.setTimeout(() => {
       if (!alive()) return
-      const fitted = fitView({ padding: 0.2, minZoom: 0.34, maxZoom: 0.88, duration: 280 })
+      const fitted = fitView({ padding: 0.2, minZoom: 0.35, maxZoom: 0.88, duration: 280 })
       if (kind !== 'sentinel') return
       // 哨兵面板盖在右缘：等高亮适配真正落定（fitView 的 Promise）后再让位，
       // 并用实时节点几何（此时已是 L2 坐标），避免闭包里过期的 L1 坐标。
@@ -916,7 +959,10 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     }, 30)
   }, [fitView, getNodes, workspace.sentinels, yieldNodesToPanel])
 
-  const saveLabel = saveStatusLabel(saveState, saveCountdown)
+  // 只读角色（viewer/custom）空闲时如实提示不可调整，而不是「拖动后自动保存布局」。
+  const saveLabel = !canDragNodes && saveState === 'idle'
+    ? '只读模式，不可调整布局'
+    : saveStatusLabel(saveState, saveCountdown)
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-muted" data-testid="ontology-structure-graph">
@@ -1019,7 +1065,7 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
             >
               <AlertCircle size={11} />
               <span className="max-w-[220px] truncate">
-                保存失败：{saveError?.status === 404 ? '发布版本已更新，已刷新' : saveError?.reason || '未知原因'} · 点击重试
+                保存失败：{saveError?.status === 404 && saveError.reason.includes('Version') ? '发布版本已更新，已刷新' : saveError?.reason || '未知原因'} · 点击重试
               </span>
             </button>
           ) : (

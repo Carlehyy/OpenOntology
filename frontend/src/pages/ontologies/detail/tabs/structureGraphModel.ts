@@ -176,7 +176,7 @@ export const propertyNodeId = (objectId: string, property: StructureProperty) =>
 export const actionNodeId = (actionId: string) => `action:${actionId}`
 export const relationEdgeId = (linkId: string) => `link:${linkId}`
 
-const NODE_SIZE: Record<StructureKind, { width: number; height: number }> = {
+export const NODE_SIZE: Record<StructureKind, { width: number; height: number }> = {
   object: { width: 224, height: 80 },
   property: { width: 188, height: 60 },
   action: { width: 196, height: 64 },
@@ -487,6 +487,18 @@ function forceObjectLayout(workspace: PublishedWorkspace) {
 /** L2 对象锚点相对共享锚点（L1 拓扑）的放大倍数，以全部锚点的质心为中心。 */
 export const L2_ANCHOR_SCALE = 1.6
 
+/**
+ * L2 拖拽对象折回共享锚点（l1: 键）的位移除数。L2 显示 = 共享锚点绕质心
+ * 放大 s 倍：锚点平移 δ 会带动质心移动 δ/n（n=对象数），被拖节点的显示
+ * 位移为 s·δ - (s-1)·δ/n。令显示位移等于实际拖拽量 Δ，得 δ = Δ/d，
+ * d = s - (s-1)/n。零碰撞时被拖节点重建后精确落点；其余节点只剩
+ * -(s-1)δ/n 的整体平移（质心跟随的固有代价）。
+ */
+export function l2WritebackDivisor(objectCount: number): number {
+  const n = Math.max(1, objectCount)
+  return L2_ANCHOR_SCALE - (L2_ANCHOR_SCALE - 1) / n
+}
+
 /** L1 生成布局的对象节点左上角坐标（力导向中心点按对象卡片尺寸换算）。 */
 function generatedL1ObjectPositions(workspace: PublishedWorkspace): Map<string, Point> {
   const centers = forceObjectLayout(workspace)
@@ -512,15 +524,21 @@ export function sharedObjectAnchors(
   canvasLayout: Record<string, Point> | undefined,
 ): Map<string, Point> {
   const layout = canvasLayout || {}
-  const generated = generatedL1ObjectPositions(workspace)
   const anchors = new Map<string, Point>()
+  const missing: string[] = []
   workspace.objectTypes.forEach(objectType => {
     const saved = layout[`l1:${objectType.id}`]
-    anchors.set(objectType.id,
-      saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)
-        ? { x: saved.x, y: saved.y }
-        : generated.get(objectType.id) || { x: 72, y: 72 })
+    if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+      anchors.set(objectType.id, { x: saved.x, y: saved.y })
+    } else {
+      missing.push(objectType.id)
+    }
   })
+  // 全部命中已保存坐标时跳过 L1 生成布局（力导向 240 轮 O(n²)），有缺失才生成。
+  if (missing.length > 0) {
+    const generated = generatedL1ObjectPositions(workspace)
+    missing.forEach(id => anchors.set(id, generated.get(id) || { x: 72, y: 72 }))
+  }
   return anchors
 }
 

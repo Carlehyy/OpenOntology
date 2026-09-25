@@ -6,19 +6,14 @@ import {
   computePanelYieldViewport,
   functionDependencyMeta,
   L2_ANCHOR_SCALE,
+  l2WritebackDivisor,
+  NODE_SIZE,
   sharedObjectAnchors,
   STRUCTURE_PANEL_RESERVED_WIDTH,
   type PublishedWorkspace,
   type StructureFunction,
   type StructureObject,
 } from '../../../pages/ontologies/detail/tabs/structureGraphModel.ts'
-
-// 与 structureGraphModel.ts 的 NODE_SIZE 保持一致（画布节点像素尺寸）。
-const TEST_NODE_SIZE = {
-  object: { width: 224, height: 80 },
-  property: { width: 188, height: 60 },
-  action: { width: 196, height: 64 },
-} as const
 
 function makeObject(id: string, propertyCount = 0): StructureObject {
   return {
@@ -132,6 +127,19 @@ describe('buildStructureGraph：L1/L2 共享拓扑布局', () => {
     assert.deepEqual(dirty.get('a'), l1.get('a'))
   })
 
+  it('sharedObjectAnchors 惰性生成：全命中直接返回已存坐标，部分缺失仅缺失项回落生成布局', () => {
+    const workspace = makeWorkspace([makeObject('a', 1), makeObject('b', 1)])
+    const saved = { 'l1:a': { x: 10, y: 20 }, 'l1:b': { x: 300, y: 400 } }
+    const full = sharedObjectAnchors(workspace, saved)
+    assert.deepEqual(full.get('a'), { x: 10, y: 20 })
+    assert.deepEqual(full.get('b'), { x: 300, y: 400 })
+    // 部分缺失：命中项用已存坐标，缺失项与 buildStructureGraph 的 L1 生成位置一致
+    const partial = sharedObjectAnchors(workspace, { 'l1:b': { x: 300, y: 400 } })
+    const l1 = nodePositions(buildStructureGraph(workspace, 1))
+    assert.deepEqual(partial.get('a'), l1.get('a'))
+    assert.deepEqual(partial.get('b'), { x: 300, y: 400 })
+  })
+
   it('密集全互连 workspace 下 L2 任意两对象的簇包围盒不重叠', () => {
     const ids = Array.from({ length: 8 }, (_, index) => `obj-${index}`)
     const links: Array<[string, string]> = []
@@ -147,8 +155,8 @@ describe('buildStructureGraph：L1/L2 共享拓扑布局', () => {
       const rects = cluster.map(node => ({
         left: node.position.x,
         top: node.position.y,
-        right: node.position.x + TEST_NODE_SIZE[node.data.kind].width,
-        bottom: node.position.y + TEST_NODE_SIZE[node.data.kind].height,
+        right: node.position.x + NODE_SIZE[node.data.kind].width,
+        bottom: node.position.y + NODE_SIZE[node.data.kind].height,
       }))
       return {
         left: Math.min(...rects.map(rect => rect.left)),
@@ -185,6 +193,45 @@ describe('buildStructureGraph：L1/L2 共享拓扑布局', () => {
       firstL1.nodes.map(node => [node.id, node.position]),
       secondL1.nodes.map(node => [node.id, node.position]),
     )
+  })
+})
+
+describe('l2WritebackDivisor：L2 拖拽位移折回共享锚点', () => {
+  it('锚点按 Δ/d 回写后重建，被拖节点精确落点，另一节点只剩质心跟随平移', () => {
+    // 稀疏零碰撞场景：两对象无属性、间距 3000，放大 1.6 倍后间距 4800 ≫ 卡片宽 224
+    const workspace = makeWorkspace([makeObject('a'), makeObject('b')], [], {
+      'l1:a': { x: 0, y: 0 },
+      'l1:b': { x: 3000, y: 0 },
+    })
+    const l2Before = nodePositions(buildStructureGraph(workspace, 2))
+    const delta = { x: 130, y: -65 }
+    const divisor = l2WritebackDivisor(2)
+    assert.ok(Math.abs(divisor - 1.3) < 1e-9, `divisor: ${divisor} != 1.3`)
+    // 模拟 stopNodeDrag 的回写：newAnchor = oldAnchor + Δ/d
+    const anchorA = sharedObjectAnchors(workspace, workspace.canvasLayout).get('a')!
+    const moved = makeWorkspace([makeObject('a'), makeObject('b')], [], {
+      'l1:a': { x: anchorA.x + delta.x / divisor, y: anchorA.y + delta.y / divisor },
+      'l1:b': { x: 3000, y: 0 },
+    })
+    const l2After = nodePositions(buildStructureGraph(moved, 2))
+    // 被拖节点显示位移 = Δ（零碰撞时精确落点，误差 <1e-6）
+    const draggedDx = l2After.get('a')!.x - l2Before.get('a')!.x
+    const draggedDy = l2After.get('a')!.y - l2Before.get('a')!.y
+    assert.ok(Math.abs(draggedDx - delta.x) < 1e-6, `dragged dx: ${draggedDx} != ${delta.x}`)
+    assert.ok(Math.abs(draggedDy - delta.y) < 1e-6, `dragged dy: ${draggedDy} != ${delta.y}`)
+    // 另一节点只剩质心跟随平移 -(s-1)·δ/n，δ = Δ/d（质心跟随的固有代价）
+    const followX = -(L2_ANCHOR_SCALE - 1) * (delta.x / divisor) / 2
+    const followY = -(L2_ANCHOR_SCALE - 1) * (delta.y / divisor) / 2
+    const otherDx = l2After.get('b')!.x - l2Before.get('b')!.x
+    const otherDy = l2After.get('b')!.y - l2Before.get('b')!.y
+    assert.ok(Math.abs(otherDx - followX) < 1e-6, `other dx: ${otherDx} != ${followX}`)
+    assert.ok(Math.abs(otherDy - followY) < 1e-6, `other dy: ${otherDy} != ${followY}`)
+  })
+
+  it('objectCount 兜底：n=1 时 d=1（缩放绕唯一锚点即恒等，显示位移=锚点位移），0/负数按 n=1 处理', () => {
+    assert.equal(l2WritebackDivisor(1), 1)
+    assert.equal(l2WritebackDivisor(0), 1)
+    assert.equal(l2WritebackDivisor(-3), 1)
   })
 })
 
