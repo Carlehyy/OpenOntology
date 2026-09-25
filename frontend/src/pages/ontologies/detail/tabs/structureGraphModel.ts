@@ -176,7 +176,7 @@ export const propertyNodeId = (objectId: string, property: StructureProperty) =>
 export const actionNodeId = (actionId: string) => `action:${actionId}`
 export const relationEdgeId = (linkId: string) => `link:${linkId}`
 
-const NODE_SIZE: Record<StructureKind, { width: number; height: number }> = {
+export const NODE_SIZE: Record<StructureKind, { width: number; height: number }> = {
   object: { width: 224, height: 80 },
   property: { width: 188, height: 60 },
   action: { width: 196, height: 64 },
@@ -296,23 +296,66 @@ function objectComponents(objectIds: string[], links: StructureLink[]) {
 }
 
 /**
- * Deterministic force-directed layout for the object backbone.
+ * 确定性碰撞消除：把包围盒（extent 为半宽/半高）重叠的点对沿较浅的方向
+ * 各推开一半，最多 32 轮。力导向迭代优化的是整体系统，密集环图可能留下
+ * 少量接近重叠的位置；此 pass 保证预留范围互不接触。L1 生成布局收尾与
+ * L2 锚点放大共用此函数。
+ */
+function resolveClusterCollisions(
+  points: Map<string, Point>,
+  ids: string[],
+  reserveExtent: Map<string, Point>,
+) {
+  for (let pass = 0; pass < 32 && ids.length > 1; pass += 1) {
+    let moved = false
+    for (let leftIndex = 0; leftIndex < ids.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < ids.length; rightIndex += 1) {
+        const leftId = ids[leftIndex]
+        const rightId = ids[rightIndex]
+        const left = points.get(leftId)!
+        const right = points.get(rightId)!
+        let dx = right.x - left.x
+        let dy = right.y - left.y
+        if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) {
+          const angle = ((stableHash(`${leftId}:${rightId}:collision`) % 360) / 180) * Math.PI
+          dx = Math.cos(angle)
+          dy = Math.sin(angle)
+        }
+        const leftExtent = reserveExtent.get(leftId) || { x: 152, y: 112 }
+        const rightExtent = reserveExtent.get(rightId) || { x: 152, y: 112 }
+        const overlapX = leftExtent.x + rightExtent.x + 72 - Math.abs(dx)
+        const overlapY = leftExtent.y + rightExtent.y + 72 - Math.abs(dy)
+        if (overlapX <= 0 || overlapY <= 0) continue
+        if (overlapX < overlapY) {
+          const shift = overlapX / 2 + 0.5
+          const sign = dx >= 0 ? 1 : -1
+          points.set(leftId, { x: left.x - sign * shift, y: left.y })
+          points.set(rightId, { x: right.x + sign * shift, y: right.y })
+        } else {
+          const shift = overlapY / 2 + 0.5
+          const sign = dy >= 0 ? 1 : -1
+          points.set(leftId, { x: left.x, y: left.y - sign * shift })
+          points.set(rightId, { x: right.x, y: right.y + sign * shift })
+        }
+        moved = true
+      }
+    }
+    if (!moved) break
+  }
+}
+
+/**
+ * L1 对象骨干的确定性力导向布局（生成布局，不含任何已保存坐标）。
  *
  * Relations act as springs, every object pair repels and rectangular collision
- * bounds reserve room for the L2 property/action cluster. Disconnected components are
+ * bounds reserve room around each object card. Disconnected components are
  * packed afterwards, so they remain nearby without pretending to be linked.
  */
-function forceObjectLayout(
-  workspace: PublishedWorkspace,
-  level: StructureLevel,
-  clusterGeometries: Map<string, ClusterGeometry>,
-) {
+function forceObjectLayout(workspace: PublishedWorkspace) {
   const objectIds = workspace.objectTypes.map(item => item.id)
   const reserveExtent = new Map(objectIds.map(id => [
     id,
-    level === 2
-      ? clusterGeometries.get(id)?.extent || { x: 152, y: 112 }
-      : { x: NODE_SIZE.object.width / 2 + 40, y: NODE_SIZE.object.height / 2 + 40 },
+    { x: NODE_SIZE.object.width / 2 + 40, y: NODE_SIZE.object.height / 2 + 40 },
   ]))
   const components = objectComponents(objectIds, workspace.linkTypes)
   const componentLayouts: Array<{ points: Map<string, Point>; minX: number; minY: number; width: number; height: number }> = []
@@ -321,7 +364,7 @@ function forceObjectLayout(
     const points = new Map<string, Point>()
     const velocity = new Map<string, Point>()
     const count = component.length
-    const initialRadius = count <= 1 ? 0 : Math.max(150, Math.sqrt(count) * (level === 1 ? 112 : 148))
+    const initialRadius = count <= 1 ? 0 : Math.max(150, Math.sqrt(count) * 112)
     component.forEach((id, index) => {
       const jitter = ((stableHash(id) % 37) - 18) * 0.8
       const angle = -Math.PI / 2 + (index / Math.max(1, count)) * Math.PI * 2
@@ -333,7 +376,7 @@ function forceObjectLayout(
     const springs = workspace.linkTypes
       .filter(link => componentSet.has(link.sourceObjectTypeId) && componentSet.has(link.targetObjectTypeId) && link.sourceObjectTypeId !== link.targetObjectTypeId)
       .map(link => [link.sourceObjectTypeId, link.targetObjectTypeId] as const)
-    const baseDistance = level === 1 ? 318 : 420
+    const baseDistance = 318
     const iterations = count > 180 ? 70 : count > 100 ? 100 : count > 50 ? 150 : 240
 
     for (let iteration = 0; iteration < iterations && count > 1; iteration += 1) {
@@ -355,16 +398,7 @@ function forceObjectLayout(
           }
           const ux = dx / distance
           const uy = dy / distance
-          const leftExtent = reserveExtent.get(leftId) || { x: 152, y: 112 }
-          const rightExtent = reserveExtent.get(rightId) || { x: 152, y: 112 }
-          const collisionDistance = level === 1
-            ? 270
-            : Math.min(
-              1320,
-              (leftExtent.x + rightExtent.x) * Math.abs(ux)
-                + (leftExtent.y + rightExtent.y) * Math.abs(uy)
-                + 72,
-            )
+          const collisionDistance = 270
           const repulsion = (baseDistance * baseDistance * 1.15) / Math.max(900, distance * distance)
             + (distance < collisionDistance ? (collisionDistance - distance) * 0.11 : 0)
           const leftForce = forces.get(leftId)!
@@ -381,14 +415,7 @@ function forceObjectLayout(
         const dx = target.x - source.x
         const dy = target.y - source.y
         const distance = Math.hypot(dx, dy) || 1
-        const sourceExtent = reserveExtent.get(sourceId) || { x: 152, y: 112 }
-        const targetExtent = reserveExtent.get(targetId) || { x: 152, y: 112 }
-        const desired = level === 1
-          ? baseDistance
-          : Math.min(1320, Math.max(
-            baseDistance,
-            Math.hypot(sourceExtent.x + targetExtent.x, sourceExtent.y + targetExtent.y) * 0.82 + 72,
-          ))
+        const desired = baseDistance
         const spring = (distance - desired) * 0.025
         const sx = (dx / distance) * spring
         const sy = (dy / distance) * spring
@@ -416,45 +443,7 @@ function forceObjectLayout(
       })
     }
 
-    // Finish with a deterministic collision pass. Force simulations optimize
-    // the whole system and may leave a few near-overlaps in dense cyclic
-    // graphs; this pass guarantees that the reserved L2 clusters do not touch.
-    for (let pass = 0; pass < 32 && count > 1; pass += 1) {
-      let moved = false
-      for (let leftIndex = 0; leftIndex < count; leftIndex += 1) {
-        for (let rightIndex = leftIndex + 1; rightIndex < count; rightIndex += 1) {
-          const leftId = component[leftIndex]
-          const rightId = component[rightIndex]
-          const left = points.get(leftId)!
-          const right = points.get(rightId)!
-          let dx = right.x - left.x
-          let dy = right.y - left.y
-          if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) {
-            const angle = ((stableHash(`${leftId}:${rightId}:collision`) % 360) / 180) * Math.PI
-            dx = Math.cos(angle)
-            dy = Math.sin(angle)
-          }
-          const leftExtent = reserveExtent.get(leftId) || { x: 152, y: 112 }
-          const rightExtent = reserveExtent.get(rightId) || { x: 152, y: 112 }
-          const overlapX = leftExtent.x + rightExtent.x + 72 - Math.abs(dx)
-          const overlapY = leftExtent.y + rightExtent.y + 72 - Math.abs(dy)
-          if (overlapX <= 0 || overlapY <= 0) continue
-          if (overlapX < overlapY) {
-            const shift = overlapX / 2 + 0.5
-            const sign = dx >= 0 ? 1 : -1
-            points.set(leftId, { x: left.x - sign * shift, y: left.y })
-            points.set(rightId, { x: right.x + sign * shift, y: right.y })
-          } else {
-            const shift = overlapY / 2 + 0.5
-            const sign = dy >= 0 ? 1 : -1
-            points.set(leftId, { x: left.x, y: left.y - sign * shift })
-            points.set(rightId, { x: right.x, y: right.y + sign * shift })
-          }
-          moved = true
-        }
-      }
-      if (!moved) break
-    }
+    resolveClusterCollisions(points, component, reserveExtent)
 
     let minX = Number.POSITIVE_INFINITY
     let minY = Number.POSITIVE_INFINITY
@@ -493,6 +482,94 @@ function forceObjectLayout(
     rowHeight = Math.max(rowHeight, boxHeight)
   })
   return packed
+}
+
+/** L2 对象锚点相对共享锚点（L1 拓扑）的放大倍数，以全部锚点的质心为中心。 */
+export const L2_ANCHOR_SCALE = 1.6
+
+/**
+ * L2 拖拽对象折回共享锚点（l1: 键）的位移除数。L2 显示 = 共享锚点绕质心
+ * 放大 s 倍：锚点平移 δ 会带动质心移动 δ/n（n=对象数），被拖节点的显示
+ * 位移为 s·δ - (s-1)·δ/n。令显示位移等于实际拖拽量 Δ，得 δ = Δ/d，
+ * d = s - (s-1)/n。零碰撞时被拖节点重建后精确落点；其余节点只剩
+ * -(s-1)δ/n 的整体平移（质心跟随的固有代价）。
+ */
+export function l2WritebackDivisor(objectCount: number): number {
+  const n = Math.max(1, objectCount)
+  return L2_ANCHOR_SCALE - (L2_ANCHOR_SCALE - 1) / n
+}
+
+/** L1 生成布局的对象节点左上角坐标（力导向中心点按对象卡片尺寸换算）。 */
+function generatedL1ObjectPositions(workspace: PublishedWorkspace): Map<string, Point> {
+  const centers = forceObjectLayout(workspace)
+  const positions = new Map<string, Point>()
+  workspace.objectTypes.forEach(objectType => {
+    const center = centers.get(objectType.id) || { x: 184, y: 112 }
+    positions.set(objectType.id, {
+      x: center.x - NODE_SIZE.object.width / 2,
+      y: center.y - NODE_SIZE.object.height / 2,
+    })
+  })
+  return positions
+}
+
+/**
+ * 对象节点在本画布内唯一的共享锚点（左上角坐标）：优先 canvasLayout 的
+ * `l1:<objectId>` 键，缺省回落到 L1 生成布局。L1 视图直接使用；L2 视图在
+ * 此基础上放大展开（见 expandL2Anchors）。L2 拖拽对象时组件也按此锚点
+ * 把显示位移折算回 `l1:` 键写回。
+ */
+export function sharedObjectAnchors(
+  workspace: PublishedWorkspace,
+  canvasLayout: Record<string, Point> | undefined,
+): Map<string, Point> {
+  const layout = canvasLayout || {}
+  const anchors = new Map<string, Point>()
+  const missing: string[] = []
+  workspace.objectTypes.forEach(objectType => {
+    const saved = layout[`l1:${objectType.id}`]
+    if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+      anchors.set(objectType.id, { x: saved.x, y: saved.y })
+    } else {
+      missing.push(objectType.id)
+    }
+  })
+  // 全部命中已保存坐标时跳过 L1 生成布局（力导向 240 轮 O(n²)），有缺失才生成。
+  if (missing.length > 0) {
+    const generated = generatedL1ObjectPositions(workspace)
+    missing.forEach(id => anchors.set(id, generated.get(id) || { x: 72, y: 72 }))
+  }
+  return anchors
+}
+
+/**
+ * L2 对象锚点：以共享锚点的质心为中心放大 L2_ANCHOR_SCALE 倍保持 L1 相对
+ * 拓扑，再按各对象属性/动作簇的包围盒跑确定性碰撞消除，保证簇互不重叠。
+ */
+function expandL2Anchors(
+  anchors: Map<string, Point>,
+  clusterGeometries: Map<string, ClusterGeometry>,
+): Map<string, Point> {
+  let centroidX = 0
+  let centroidY = 0
+  anchors.forEach(anchor => {
+    centroidX += anchor.x
+    centroidY += anchor.y
+  })
+  const count = anchors.size || 1
+  centroidX /= count
+  centroidY /= count
+  const expanded = new Map<string, Point>()
+  anchors.forEach((anchor, id) => expanded.set(id, {
+    x: centroidX + (anchor.x - centroidX) * L2_ANCHOR_SCALE,
+    y: centroidY + (anchor.y - centroidY) * L2_ANCHOR_SCALE,
+  }))
+  const reserveExtent = new Map([...expanded.keys()].map(id => [
+    id,
+    clusterGeometries.get(id)?.extent || { x: 152, y: 112 },
+  ]))
+  resolveClusterCollisions(expanded, [...expanded.keys()].sort(), reserveExtent)
+  return expanded
 }
 
 type HandleSide = 'top' | 'right' | 'bottom' | 'left'
@@ -618,15 +695,20 @@ export function buildStructureGraph(
       workspace.actions.filter(action => action.objectTypeId === objectType.id).map(action => actionNodeId(action.id)),
     ))
   })
-  const objectCenters = forceObjectLayout(workspace, level, clusterGeometries)
+  // 对象位置只有一套共享锚点（l1: 键或 L1 生成布局）：L1 直接使用，L2 在
+  // 共享锚点上放大展开。历史上写入的 l2:<objectId> 对象键不再生效。
+  const savedLayout = options.ignoreSaved ? undefined : workspace.canvasLayout
+  const anchors = sharedObjectAnchors(workspace, savedLayout)
+  const objectPositions = level === 2 ? expandL2Anchors(anchors, clusterGeometries) : anchors
   const generated = new Map<string, Point>()
   workspace.objectTypes.forEach(objectType => {
-    const center = objectCenters.get(objectType.id) || { x: 184, y: 112 }
-    generated.set(objectType.id, {
-      x: center.x - NODE_SIZE.object.width / 2,
-      y: center.y - NODE_SIZE.object.height / 2,
-    })
+    const topLeft = objectPositions.get(objectType.id) || { x: 72, y: 72 }
+    generated.set(objectType.id, topLeft)
     if (level !== 2) return
+    const center = {
+      x: topLeft.x + NODE_SIZE.object.width / 2,
+      y: topLeft.y + NODE_SIZE.object.height / 2,
+    }
     clusterGeometries.get(objectType.id)?.childOffsets.forEach((offset, id) => {
       const node = nodeById.get(id)
       if (!node) return
@@ -639,7 +721,10 @@ export function buildStructureGraph(
   })
   const layout = workspace.canvasLayout || {}
   const positioned = nodes.map(node => {
-    const saved = options.ignoreSaved ? undefined : layout[`l${level}:${node.id}`]
+    // L2 对象锚点完全由共享锚点派生，不读 l2: 对象键；l2:property:/l2:action: 覆盖保留。
+    const saved = options.ignoreSaved || (level === 2 && node.data.kind === 'object')
+      ? undefined
+      : layout[`l${level}:${node.id}`]
     return {
       ...node,
       position: saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)
