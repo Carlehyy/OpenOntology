@@ -292,6 +292,16 @@
   color: #aeb9c8;
 }
 
+/* 密码显隐由页面内的可见性按钮负责：抑制 Edge 原生的密码显示眼睛与输入清除
+   按钮，避免与页面按钮并排出现「两个眼睛」。其余浏览器不识别这两个伪元素，
+   规则被忽略，无副作用。 */
+.ontology-login__input-wrap input::-ms-reveal,
+.ontology-login__input-wrap input::-ms-clear {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .ontology-login__visibility {
   display: grid;
   width: 47px;
