@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -19,6 +20,8 @@ from app.data_channel.curated.approved_version_reader import (
 )
 from app.data_channel.datasets.models import Dataset
 from app.data_channel.datasets.service import DatasetReadError, rows_to_csv_bytes
+
+logger = logging.getLogger(__name__)
 
 
 def require_current_approved_for_read(
@@ -140,6 +143,7 @@ def preview_curated(
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("成品数据预览读取失败 dataset=%s", dataset_id)
         raise HTTPException(502, f"成品数据读取失败：{exc}") from exc
 
 
@@ -311,6 +315,7 @@ def _export_curated_from_lake(
             },
         ) from exc
     except Exception as exc:
+        logger.exception("成品数据导出失败 dataset=%s", dataset_id)
         raise HTTPException(502, f"成品数据导出失败：{exc}") from exc
 
     def rest_batches():
@@ -376,6 +381,7 @@ def _export_curated_from_lake(
         spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024)
         workbook.save(spool)
     except Exception as exc:
+        logger.exception("成品数据导出（xlsx 流式写出）失败 dataset=%s", dataset_id)
         raise HTTPException(502, f"成品数据导出失败：{exc}") from exc
     spool.seek(0)
     return StreamingResponse(

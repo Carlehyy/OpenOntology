@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
@@ -15,12 +17,15 @@ from app.data_channel.curated.models import CuratedReview, CuratedRowEdit
 from app.data_channel.datasets.models import Dataset, DatasetVersion, MediaItem
 from app.ontologies.mappings.consumers import dataset_mapping_bindings
 
+logger = logging.getLogger(__name__)
+
 
 def delete_curated(
     db: Session,
     dataset_id: str,
     *,
     force: bool,
+    admin_id: str | None = None,
 ) -> None:
     """Delete one unreferenced curated dataset and all owned evidence/data."""
     dataset = (
@@ -126,5 +131,12 @@ def delete_curated(
         .delete(synchronize_session=False)
     )
     db.delete(dataset)
+    # 删除是行将消失的最危险操作：提交前留下唯一的服务端痕迹（连带删除的
+    # 审核数/版本数与操作管理员），事后只能靠这条日志追溯。
+    logger.warning(
+        "删除成品数据集 %s：连带删除 %d 条审核与 %d 个版本并 DROP 物理湖表，"
+        "操作管理员=%s",
+        dataset_id, len(review_ids), len(version_ids), admin_id or "unknown",
+    )
     db.commit()
     drain_storage_deletion_outbox(db)

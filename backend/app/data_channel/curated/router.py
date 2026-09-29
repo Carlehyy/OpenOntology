@@ -64,11 +64,6 @@ def get_db():
         db.close()
 
 
-_require_current_approved_for_read = (
-    read_service.require_current_approved_for_read
-)
-
-
 @router.get("")
 def list_curated(
     db: Session = Depends(get_db),
@@ -93,7 +88,7 @@ def list_curated(
 
 @router.delete("/{dataset_id}", status_code=204)
 def delete_curated(dataset_id: str, force: bool = False,
-                   db: Session = Depends(get_db), _admin=Depends(require_admin)):
+                   db: Session = Depends(get_db), admin=Depends(require_admin)):
     """完整删除 Curated Dataset 及其审核、版本数据（仅管理员）。
 
     安全约束：
@@ -105,6 +100,7 @@ def delete_curated(dataset_id: str, force: bool = False,
         db,
         dataset_id,
         force=force,
+        admin_id=str(admin.id),
     )
 
 
@@ -183,6 +179,7 @@ def get_quality_report(dataset_id: str, db: Session = Depends(get_db)):
             )
             sample_data = load_rows_with_edits(db, dataset_id, limit=200)
         except Exception as e:
+            logger.exception("质量评估读取数据失败 dataset=%s", dataset_id)
             raise HTTPException(502, f"质量评估读取数据失败：{e}")
     else:
         legacy = db.query(CuratedDataset).filter(CuratedDataset.id == dataset_id).first()
@@ -202,7 +199,7 @@ def submit_review(
     action: str,  # "approve" | "reject"
     notes: str = "",
     db: Session = Depends(get_db),
-    _admin=Depends(require_admin),  # PRD Security Logic: only admin can approve curated rows
+    admin=Depends(require_admin),  # PRD Security Logic: only admin can approve curated rows
 ):
     """提交审核结果（approve/reject）"""
     if action not in ("approve", "reject"):
@@ -213,8 +210,11 @@ def submit_review(
     # 空审核会造成按钮显示“已批准”但人工修改永远没有被批准。
     from app.data_channel.curated.review_service import ReviewService
     svc = ReviewService(db)
-    review = svc.start_review(dataset_id)
-    review = svc.approve(review.id, notes) if action == "approve" else svc.reject(review.id, notes)
+    review = svc.start_review(dataset_id, reviewer_id=str(admin.id))
+    if action == "approve":
+        review = svc.approve(review.id, notes, reviewer_id=str(admin.id))
+    else:
+        review = svc.reject(review.id, notes, reviewer_id=str(admin.id))
 
     dispatch = _dispatch_approved_review(db, review.id) if action == "approve" else None
     return {"review_id": review.id, "status": review.status,
@@ -249,6 +249,7 @@ def get_review(review_id: str, db: Session = Depends(get_db)):
         "curated_dataset_id": review.curated_dataset_id,
         "dataset_version_id": review.dataset_version_id,
         "status": review.status,
+        "reviewer_id": review.reviewer_id,
         "notes": review.notes,
         "decided_at": review.decided_at,
     }
@@ -265,11 +266,11 @@ def add_edit(review_id: str, body: BatchEditRequest, db: Session = Depends(get_d
 
 @router.post("/reviews/{review_id}/approve")
 def approve_review(review_id: str, notes: str = "", db: Session = Depends(get_db),
-                   _admin=Depends(require_admin)):
+                   admin=Depends(require_admin)):
     """审核通过"""
     from app.data_channel.curated.review_service import ReviewService
     svc = ReviewService(db)
-    review = svc.approve(review_id, notes)
+    review = svc.approve(review_id, notes, reviewer_id=str(admin.id))
     return {
         "review_id": review.id,
         "status": review.status,
@@ -279,9 +280,9 @@ def approve_review(review_id: str, notes: str = "", db: Session = Depends(get_db
 
 @router.post("/reviews/{review_id}/reject")
 def reject_review(review_id: str, notes: str = "", db: Session = Depends(get_db),
-                  _admin=Depends(require_admin)):
+                  admin=Depends(require_admin)):
     """审核拒绝"""
     from app.data_channel.curated.review_service import ReviewService
     svc = ReviewService(db)
-    review = svc.reject(review_id, notes)
+    review = svc.reject(review_id, notes, reviewer_id=str(admin.id))
     return {"review_id": review.id, "status": review.status}
