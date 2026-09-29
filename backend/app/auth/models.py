@@ -19,7 +19,12 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 隐私变量上报 token（用户级，Fernet 密文）。为空表示该用户尚未启用
     # 隐私变量上报；创建首个隐私变量或显式重置时生成。nullable 以兼容存量用户。
+    # 密文列仅供下载上报脚本时解出明文内嵌；鉴权不走它（见下一列）。
     report_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # 上报 token 的 sha256 哈希（与 user_query_keys.key_hash 同一模式）：上报
+    # 端点按此列 O(1) 查表鉴权，不做全表解密比对——单行密文损坏不影响他人
+    # 上报，也无法被匿名请求放大成解密运算。与密文列同步写入，永不单独更新。
+    report_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

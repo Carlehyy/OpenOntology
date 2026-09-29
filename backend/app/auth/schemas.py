@@ -16,16 +16,20 @@ class UserOut(BaseModel):
     model_config = {"from_attributes": True}
 
 class LoginRequest(BaseModel):
+    # 登录密码只设上限（防无界哈希输入），不设最小长度：存量弱密码账号
+    # 必须仍能登录，改密端点才强制新密码 ≥6。
     username: str
-    password: str
+    password: str = Field(max_length=128)
 
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
 class PasswordChangeRequest(BaseModel):
+    # 新密码与前端提示（"至少 6 个字符"）对齐；上限 128 防无界 bcrypt 输入
+    # （passlib 对超长输入会直接抛错变 500）。当前密码不加最小长度。
     current_password: str
-    new_password: str
+    new_password: str = Field(min_length=6, max_length=128)
 
 
 class ProfileUpdate(BaseModel):

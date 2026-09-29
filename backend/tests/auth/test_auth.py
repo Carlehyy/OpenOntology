@@ -31,6 +31,31 @@ def test_change_password_wrong_current(client, auth_headers):
     assert r.status_code == 400
 
 
+def test_change_password_enforces_new_password_length(client, auth_headers):
+    """新密码最小 6、最大 128（与前端"至少 6 个字符"提示对齐；直接调接口
+    绕过前端校验时由 schema 兜底）。"""
+    r = client.put("/api/v1/auth/password",
+                   json={"current_password": "admin123", "new_password": "12345"},
+                   headers=auth_headers)
+    assert r.status_code == 422
+    r = client.put("/api/v1/auth/password",
+                   json={"current_password": "admin123", "new_password": "x" * 129},
+                   headers=auth_headers)
+    assert r.status_code == 422
+    # 边界内（128）通过 schema 层
+    r = client.put("/api/v1/auth/password",
+                   json={"current_password": "admin123", "new_password": "x" * 128},
+                   headers=auth_headers)
+    assert r.status_code == 200
+
+
+def test_login_password_has_max_length(client, admin_user):
+    """登录密码只设上限（防无界哈希输入），不设最小长度（存量弱密码可登录）。"""
+    r = client.post("/api/v1/auth/login",
+                    json={"username": "admin", "password": "x" * 129})
+    assert r.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # Token 生命周期语义锁定（零行为变更）：以下测试显式锁定当前 JWT 语义，
 # 防止后续改动在无感知的情况下漂移。

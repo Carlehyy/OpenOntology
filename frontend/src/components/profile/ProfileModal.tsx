@@ -21,9 +21,10 @@ import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import QueryKeyManager from '@/components/profile/QueryKeyManager'
 import RemoteAccessSection from '@/components/profile/RemoteAccessSection'
-import { authApi, type PrivacyVar, type UserEnvVar } from '@/api/auth'
+import { authApi, type PrivacyVar, type QueryKeyCategory, type UserEnvVar } from '@/api/auth'
 import { useAuthStore } from '@/stores/authStore'
 import { writeTextToClipboard } from '@/utils/clipboard'
+import { formatDateTime } from '@/utils/datetime'
 import { toast } from 'sonner'
 /**
  * 个人资料弹窗（用户头像下拉 → 个人资料，MYW-56）。
@@ -71,14 +72,9 @@ const inputClass =
   'w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-primary)] disabled:cursor-not-allowed disabled:bg-[var(--color-muted)] disabled:text-[var(--color-text-secondary)]'
 
 function formatTime(iso: string | null): string {
-  if (!iso) return '尚未上报'
-  try {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return '尚未上报'
-    return d.toLocaleString()
-  } catch {
-    return '尚未上报'
-  }
+  // 全站日期展示唯一入口（utils/datetime）：库里的时间无 Z 后缀、语义是
+  // UTC，直接 new Date 会被按本地时区解析（上海慢 8 小时）。
+  return formatDateTime(iso, { seconds: true, fallback: '尚未上报' })
 }
 
 function saveBlob(blob: Blob, filename: string) {
@@ -111,8 +107,19 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
 
   // 隐私变量状态
   const [privacyVars, setPrivacyVars] = useState<PrivacyVar[]>([])
-  // 上报 token 一次性展示弹窗（替代 window.prompt：自动全选 + 复制按钮 + 手动 Cmd+C 兜底）
-  const [tokenReveal, setTokenReveal] = useState<null | { title: string; token: string }>(null)
+  // 一次性明文展示弹窗（上报 token / 查询密钥共用，替代 window.prompt：
+  // 自动全选 + 复制按钮 + 手动 Cmd+C 兜底）。状态刻意放在 ProfileModal
+  // 组件层：切换 tab（QueryKeyManager 卸载）或关闭再开弹窗（Modal 子树
+  // 卸载）都不丢明文，直到用户亲自关掉这张弹窗——否则"仅此一次展示"的
+  // 密钥会因看一眼别的分区而永久丢失，只能吊销重发。
+  const [secretReveal, setSecretReveal] = useState<null | {
+    title: string
+    description: string
+    secret: string
+    secretLabel: string
+    copyText: string
+    publicPath?: string
+  }>(null)
   const [privacyLoading, setPrivacyLoading] = useState(false)
   const [privacyNewKey, setPrivacyNewKey] = useState('')
   const [privacyBusy, setPrivacyBusy] = useState(false)
@@ -125,6 +132,40 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
 
   const busy = savingProfile || savingPassword || savingEnvVars || privacyBusy
+
+  // ---- 一次性明文展示（上报 token / 查询密钥共用一张弹窗） ----
+
+  const revealReportToken = (title: string, token: string) => {
+    setSecretReveal({
+      title,
+      description: '仅此一次展示，关闭后无法再次查看，请立即复制保存。',
+      secret: token,
+      secretLabel: '上报 token',
+      copyText: '复制 token',
+    })
+  }
+
+  const revealQueryKey = (category: QueryKeyCategory, key: string) => {
+    setSecretReveal({
+      title: '查询密钥（仅此一次展示）',
+      description: '关闭后无法再次查看，请立即复制并保存到外部流水线（如 n8n 凭据）中。',
+      secret: key,
+      secretLabel: '查询密钥',
+      copyText: '复制密钥',
+      publicPath: category === 'env' ? '/api/public/env-vars' : '/api/public/privacy-vars',
+    })
+  }
+
+  const copySecret = async (secret: string) => {
+    try {
+      await writeTextToClipboard(secret)
+      // 副作用类交互（AGENTS.md §5）：writeTextToClipboard 在非聚焦/HTTP 场景
+      // 可能静默失败，不依据中间返回值宣称已复制，提示如实。
+      toast.success('已尝试复制到剪贴板，请粘贴验证；也可在输入框手动全选复制')
+    } catch (error) {
+      toast.error(errorMessage(error, '自动复制失败，请在输入框手动全选后按 Cmd+C / Ctrl+C 复制'))
+    }
+  }
 
   // 仅在弹窗打开时初始化/加载。刻意不把 user 放进依赖：保存邮箱会更新
   // auth-store 里的 user，若依赖它，正在编辑的表单会被这次重置打断。
@@ -259,7 +300,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       // 首次创建返回 report_token：仅此一次可见，如实提示并给出复制兜底。
       if (created.report_token) {
         toast.success('已创建。上报 token 仅此一次展示，请立即复制保存')
-        setTokenReveal({ title: '上报 token', token: created.report_token })
+        revealReportToken('上报 token', created.report_token)
       } else {
         toast.success('已创建')
       }
@@ -288,7 +329,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
     try {
       const result = await authApi.resetReportToken()
       toast.success('已重置。新 token 仅此一次展示，请立即复制保存')
-      setTokenReveal({ title: '新上报 token（旧 token 已失效）', token: result.report_token })
+      revealReportToken('新上报 token（旧 token 已失效）', result.report_token)
     } catch (error) {
       toast.error(errorMessage(error, '重置上报 token 失败'))
     } finally {
@@ -526,7 +567,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
               </div>
             </section>
 
-            <QueryKeyManager category="env" />
+            <QueryKeyManager category="env" onCreated={key => revealQueryKey('env', key)} />
           </div>
         )}
 
@@ -661,7 +702,7 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
               </div>
             </section>
 
-            <QueryKeyManager category="privacy" />
+            <QueryKeyManager category="privacy" onCreated={key => revealQueryKey('privacy', key)} />
           </div>
         )}
 
@@ -676,37 +717,37 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
           </div>
         )}
       </div>
-      {tokenReveal && (
+      {secretReveal && (
         <Modal
           open
-          onClose={() => setTokenReveal(null)}
-          title={tokenReveal.title}
-          description="仅此一次展示，关闭后无法再次查看，请立即复制保存。"
+          onClose={() => setSecretReveal(null)}
+          title={secretReveal.title}
+          description={secretReveal.description}
           size="sm"
           headerIcon={<KeyRound size={18} className="text-[var(--color-nav-bg)]" />}
           footer={(
             <>
-              <Button variant="outline" onClick={() => setTokenReveal(null)}>关闭</Button>
-              <Button
-                onClick={() => {
-                  writeTextToClipboard(tokenReveal.token)
-                    .then(() => toast.success('已复制到剪贴板'))
-                    .catch(() => toast.error('自动复制失败，请手动全选后按 Cmd+C / Ctrl+C 复制'))
-                }}
-              >
-                <Copy size={14} /> 复制 token
+              <Button variant="outline" onClick={() => setSecretReveal(null)}>关闭</Button>
+              <Button onClick={() => void copySecret(secretReveal.secret)}>
+                <Copy size={14} /> {secretReveal.copyText}
               </Button>
             </>
           )}
         >
           <input
             readOnly
-            value={tokenReveal.token}
+            value={secretReveal.secret}
             autoFocus
             onFocus={event => event.currentTarget.select()}
-            aria-label="上报 token"
+            aria-label={secretReveal.secretLabel}
             className="h-9 w-full rounded-md border border-border bg-[var(--color-bg-elevated)] px-3 font-mono text-sm text-foreground"
           />
+          {secretReveal.publicPath && (
+            <p className="mt-2 text-xs text-[var(--color-text-tertiary)]">
+              调用方式：GET <code className="font-mono">{secretReveal.publicPath}</code>，请求头
+              {' '}<code className="font-mono">Authorization: Bearer 密钥</code>
+            </p>
+          )}
         </Modal>
       )}
     </Modal>
