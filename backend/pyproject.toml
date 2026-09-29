@@ -35,7 +35,6 @@ dependencies = [
   "python-dotenv==1.0.1",
   "json-repair==0.61.1",
   "neo4j==5.26.0",
-  "duckdb==1.2.0",
   "minio==7.2.12",
   "pymongo==4.10.1",
   "pymysql==1.1.1",

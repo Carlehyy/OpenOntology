@@ -820,9 +820,9 @@ export default function WorldModelDevelopPage() {
             <section>
               <h3 className="text-sm font-semibold text-foreground">可用的时序/科学计算库</h3>
               <p className="mt-1">
-                脚本在平台 Python 内核中执行，可直接使用 numpy、pandas、duckdb 与
+                脚本在平台 Python 内核中执行，可直接使用 numpy、pandas 与
                 statsmodels（ARIMA/SARIMAX、指数平滑、ACF/PACF 等）。
-                点击页头「时序示例」可一键插入官方 ARIMA/SARIMA 建模与预测脚本。
+                点击页头「时序示例」可一键插入官方 ARIMA/SARIMAX 建模与预测脚本。
               </p>
             </section>
             <section>

@@ -1,4 +1,4 @@
-"""Dataset CRUD + 版本管理服务 (含 DuckDB 预览)"""
+"""Dataset CRUD + 版本管理服务 (纯 Python 预览)"""
 from __future__ import annotations
 import hashlib
 import json
