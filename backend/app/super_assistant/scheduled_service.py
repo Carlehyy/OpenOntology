@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -34,7 +35,12 @@ from app.super_assistant.schemas import ScheduledTaskCreate, ScheduledTaskUpdate
 logger = logging.getLogger(__name__)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-STALE_RUNNING = timedelta(minutes=30)
+# 2 小时而非 30 分钟：默认 50 轮 agent 执行的墙钟可超 30 分钟，30 分钟会把
+# 还在正常执行的长任务收割成失败；日/周计划的下一槽约一天后，2 小时仍能在
+# 下次触发前清掉真正卡死的运行。conversation_service.recover_interrupted_streams
+# 的重启保护窗口复用本常量——两处必须同进退，只改一处会让时钟错开。
+STALE_RUNNING = timedelta(hours=2)
+REAP_ERROR = "执行超时未完成"
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=20)
 OVERDUE_GRACE = timedelta(hours=2)
 ONCE_PAST_GRACE = timedelta(minutes=2)
@@ -291,16 +297,34 @@ def _fail_run_row(db: Session, run: SuperAssistantScheduledRun, now: datetime, e
 
 def _reap_stale_runs(db: Session, now: datetime) -> None:
     cutoff = now - STALE_RUNNING
+    # 排队超时看创建时间；运行超时看开跑时间（started_at 为空的理论行退回
+    # created_at），与 recover_interrupted_streams 的重启保护看同一列——
+    # 排队很久但真正开跑不久的运行不该被收割。
     stale = (
         db.query(SuperAssistantScheduledRun)
         .filter(
-            SuperAssistantScheduledRun.status.in_(IN_FLIGHT),
-            SuperAssistantScheduledRun.created_at < cutoff,
+            or_(
+                and_(
+                    SuperAssistantScheduledRun.status == "queued",
+                    SuperAssistantScheduledRun.created_at < cutoff,
+                ),
+                and_(
+                    SuperAssistantScheduledRun.status == "running",
+                    func.coalesce(
+                        SuperAssistantScheduledRun.started_at,
+                        SuperAssistantScheduledRun.created_at,
+                    ) < cutoff,
+                ),
+            ),
         )
         .all()
     )
     for run in stale:
-        _fail_run_row(db, run, now, "执行超时未完成")
+        logger.warning(
+            "收割超时运行 run=%s task=%s status=%s started_at=%s created_at=%s",
+            run.id, run.task_id, run.status, run.started_at, run.created_at,
+        )
+        _fail_run_row(db, run, now, REAP_ERROR)
 
 
 def _redispatch_queued(db: Session, now: datetime, dispatch_fn) -> int:
@@ -351,10 +375,11 @@ def _advance_schedule(task: SuperAssistantScheduledTask, now: datetime) -> None:
         task.enabled = False
 
 
-def _notify(db: Session, *, run: SuperAssistantScheduledRun, task: SuperAssistantScheduledTask, kind: str, title: str, summary: str) -> None:
+def _notify(db: Session, *, run: SuperAssistantScheduledRun, task: SuperAssistantScheduledTask,
+            kind: str, title: str, summary: str, event_suffix: str = "") -> None:
     href = INBOX_HREF.format(task_id=task.id, run_id=run.id)
     publish_event(db, InboxEventIn(
-        eventId=f"super-assistant-scheduled:{run.id}:{kind}",
+        eventId=f"super-assistant-scheduled:{run.id}:{kind}{event_suffix}",
         occurredAt=datetime.now(timezone.utc),
         operation="append",
         source=InboxSource(
@@ -427,6 +452,8 @@ def _dispatch_one(db: Session, task: SuperAssistantScheduledTask, now: datetime,
         status, error = "skipped", "错过触发窗口，已跳过补跑"
     else:
         status, error = "queued", None
+    if status == "skipped":
+        logger.info("定时任务跳过派发 task=%s slot=%s 原因=%s", task.id, slot, error)
     run = SuperAssistantScheduledRun(
         task_id=task.id,
         owner_id=task.owner_id,
@@ -553,15 +580,21 @@ def execute_run(run_id: str) -> None:
 
     db = SessionLocal()
     try:
-        run = (
-            db.query(SuperAssistantScheduledRun)
-            .filter(
-                SuperAssistantScheduledRun.id == run_id,
-                SuperAssistantScheduledRun.status == "running",
-            )
-            .first()
-        )
+        run = db.get(SuperAssistantScheduledRun, run_id)
         if run is None:
+            logger.warning("定时任务写回落空：运行记录已不存在 run=%s", run_id)
+            return
+        # 本进程刚跑完：仍是 running 照旧写终态；若执行期间被收割成
+        # 「执行超时未完成」，用真实终态覆盖并按真实结果补发一条更正通知
+        # （收割时的假失败通知不撤回，只追加；eventId 加 -corrected 后缀，
+        # 否则与收割通知同 eventId 不同 payload 会触发收件箱 ValueError）。
+        # skipped 与其他失败另有归属，不覆盖。
+        reaped = run.status == "failed" and run.error == REAP_ERROR
+        if run.status != "running" and not reaped:
+            logger.warning(
+                "定时任务写回跳过：状态已被他处变更 run=%s status=%s error=%s",
+                run_id, run.status, run.error,
+            )
             return
         task = db.get(SuperAssistantScheduledTask, task_id) if task_id else None
         assistant = db.get(SuperAssistantMessage, assistant_id)
@@ -581,6 +614,10 @@ def execute_run(run_id: str) -> None:
             run.status = "completed"
             run.error = None
             run.result_summary = (assistant.content or "")[:RESULT_SUMMARY_CHARS]
+        if reaped:
+            logger.info(
+                "定时任务收割误报已按真实终态覆盖 run=%s 终态=%s", run_id, run.status,
+            )
         db.commit()
         if task is not None:
             kind = "notice" if run.status == "completed" else "alert"
@@ -590,7 +627,10 @@ def execute_run(run_id: str) -> None:
                 else f"定时任务失败：{task_title}"
             )
             summary = run.result_summary or run.error or ""
-            _notify(db, run=run, task=task, kind=kind, title=title, summary=summary)
+            _notify(
+                db, run=run, task=task, kind=kind, title=title, summary=summary,
+                event_suffix="-corrected" if reaped else "",
+            )
             db.commit()
     finally:
         db.close()

@@ -89,6 +89,7 @@ export default function ScheduledTasksDialog({
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRunId ?? null)
   const [runDetail, setRunDetail] = useState<ScheduledRun | null>(null)
   const [deleting, setDeleting] = useState<ScheduledTask | null>(null)
+  const [deletePending, setDeletePending] = useState(false)
 
   const [title, setTitle] = useState('')
   const [instruction, setInstruction] = useState('')
@@ -219,7 +220,8 @@ export default function ScheduledTasksDialog({
   }
 
   const confirmDelete = async () => {
-    if (!deleting) return
+    if (!deleting || deletePending) return
+    setDeletePending(true)
     try {
       await superAssistantApi.deleteScheduledTask(deleting.id)
       setTasks(current => current.filter(item => item.id !== deleting.id))
@@ -232,6 +234,8 @@ export default function ScheduledTasksDialog({
       toast.success('定时任务已删除')
     } catch (err) {
       toast.error(errorText(err, '删除失败'))
+    } finally {
+      setDeletePending(false)
     }
   }
 
@@ -340,6 +344,7 @@ export default function ScheduledTasksDialog({
         open={deleting !== null}
         onClose={() => setDeleting(null)}
         onConfirm={() => void confirmDelete()}
+        loading={deletePending}
         title="删除定时任务？"
         description="计划会停止，已经生成的会话还在近期会话里。"
         confirmText="删除"

@@ -69,11 +69,13 @@ def recover_interrupted_streams() -> dict[str, int]:
     """启动恢复：进程重启后遗留 streaming 的回复统一标记中断（重启语义）。"""
     db = SessionLocal()
     try:
-        from datetime import timedelta
-
         from app.super_assistant.models import SuperAssistantScheduledRun
+        from app.super_assistant.scheduled_service import STALE_RUNNING
 
-        live_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30)
+        # 定时任务执行器在另一进程，会话正文跑完仍会被写回 complete；这里只保护
+        # 「仍在 running 且开跑未超时」的会话。窗口必须与收割器同阈值：只改一处，
+        # 重启时另一处仍按旧时钟处理同一条会话。函数内导入避免模块级循环依赖。
+        live_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - STALE_RUNNING
         protected = {
             row[0]
             for row in db.query(SuperAssistantScheduledRun.conversation_id).filter(

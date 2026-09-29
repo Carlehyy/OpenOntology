@@ -18,6 +18,8 @@ from app.super_assistant.models import (
 )
 from app.super_assistant.scheduled_service import (
     INBOX_HREF,
+    REAP_ERROR,
+    STALE_RUNNING,
     ScheduledTaskError,
     ScheduledTaskNotFoundError,
     as_utc_naive,
@@ -391,3 +393,271 @@ def test_execute_run_claims_once(tmp_path, monkeypatch):
     with Session() as db:
         conversations = db.query(SuperAssistantConversation).all()
         assert len(conversations) == 1
+
+
+def test_reap_spares_running_run_with_recent_started_at(tmp_path, monkeypatch):
+    """排队很久（created_at 超阈值）但真正开跑不久的 running 不被收割。"""
+    Session = _session(tmp_path)
+    monkeypatch.setattr(
+        "app.data_channel.pipeline_tasks.dispatch.dispatch_super_assistant_scheduled_run",
+        lambda run_id: None,
+    )
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *a, **k: None)
+    now = datetime.now(timezone.utc)
+    with Session() as db:
+        _user(db)
+        task = SuperAssistantScheduledTask(
+            owner_id="owner-1", title="每日", instruction="日报",
+            schedule_kind="daily", timezone="Asia/Shanghai", enabled=False,
+        )
+        db.add(task)
+        db.flush()
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=as_utc_naive(now - STALE_RUNNING - timedelta(minutes=10)),
+            status="running",
+            created_at=as_utc_naive(now - STALE_RUNNING - timedelta(minutes=10)),
+            started_at=as_utc_naive(now - timedelta(minutes=5)),
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+    assert dispatch_due_tasks() == 0
+    with Session() as db:
+        run = db.get(SuperAssistantScheduledRun, run_id)
+        assert run.status == "running"
+
+
+def test_reap_fails_running_run_with_stale_started_at(tmp_path, monkeypatch):
+    """开跑超过 STALE_RUNNING 的 running 会被收割为超时失败。"""
+    Session = _session(tmp_path)
+    monkeypatch.setattr(
+        "app.data_channel.pipeline_tasks.dispatch.dispatch_super_assistant_scheduled_run",
+        lambda run_id: None,
+    )
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *a, **k: None)
+    now = datetime.now(timezone.utc)
+    with Session() as db:
+        _user(db)
+        task = SuperAssistantScheduledTask(
+            owner_id="owner-1", title="每日", instruction="日报",
+            schedule_kind="daily", timezone="Asia/Shanghai", enabled=False,
+        )
+        db.add(task)
+        db.flush()
+        stale = as_utc_naive(now - STALE_RUNNING - timedelta(minutes=1))
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=stale, status="running",
+            created_at=stale, started_at=stale,
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+    assert dispatch_due_tasks() == 0
+    with Session() as db:
+        run = db.get(SuperAssistantScheduledRun, run_id)
+        assert run.status == "failed"
+        assert run.error == REAP_ERROR
+
+
+def test_execute_run_overwrites_reaped_run_with_real_result(tmp_path, monkeypatch):
+    """执行期间被收割成「执行超时未完成」的运行，跑完后按真实终态覆盖并更正通知。"""
+    Session = _session(tmp_path)
+    notices = []
+
+    def fake_publish_event(db, event):
+        notices.append((event.event_id, event.item.title))
+
+    def fake_stream_chat(**kwargs):
+        db = Session()
+        try:
+            message = db.get(SuperAssistantMessage, kwargs["assistant_message_id"])
+            message.content = "整理完成：三项待办。"
+            message.status = "complete"
+            # 模拟收割器在执行期间介入：本行被标成超时失败（含已发出的假失败通知前提）
+            run = db.query(SuperAssistantScheduledRun).filter(
+                SuperAssistantScheduledRun.conversation_id == kwargs["conversation_id"],
+            ).one()
+            run.status = "failed"
+            run.error = REAP_ERROR
+            run.finished_at = as_utc_naive(datetime.now(timezone.utc))
+            db.commit()
+        finally:
+            db.close()
+        if False:
+            yield "unused"
+
+    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", fake_publish_event)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+    with Session() as db:
+        _user(db)
+        task = SuperAssistantScheduledTask(
+            owner_id="owner-1", title="晚报", instruction="整理今日进展",
+            schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
+        )
+        db.add(task)
+        db.flush()
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
+            status="queued",
+        )
+        db.add(run)
+        db.commit()
+        run_id, task_id = run.id, task.id
+
+    execute_run(run_id)
+    with Session() as db:
+        run = get_run(db, "owner-1", task_id, run_id)
+        assert run.status == "completed"
+        assert run.error is None
+        assert run.result_summary == "整理完成：三项待办。"
+    # 更正通知的 eventId 必须带 -corrected 后缀：与收割 alert 同 eventId 不同
+    # payload 会被收件箱收据校验拒收（ValueError），更正通知就永远发不出去。
+    assert any(
+        event_id.endswith(":notice-corrected") and title.startswith("定时任务已完成")
+        for event_id, title in notices
+    )
+
+
+def test_execute_run_overwrites_reaped_run_with_real_failure(tmp_path, monkeypatch):
+    """收割误报后执行真实失败：终态与 error 用真实值覆盖，更正 alert 不撞收据。"""
+    Session = _session(tmp_path)
+    notices = []
+
+    def fake_publish_event(db, event):
+        notices.append((event.event_id, event.item.title))
+
+    def fake_stream_chat(**kwargs):
+        db = Session()
+        try:
+            run = db.query(SuperAssistantScheduledRun).filter(
+                SuperAssistantScheduledRun.conversation_id == kwargs["conversation_id"],
+            ).one()
+            run.status = "failed"
+            run.error = REAP_ERROR
+            run.finished_at = as_utc_naive(datetime.now(timezone.utc))
+            db.commit()
+        finally:
+            db.close()
+        raise RuntimeError("模型通道断开")
+
+    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", fake_publish_event)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+    with Session() as db:
+        _user(db)
+        task = SuperAssistantScheduledTask(
+            owner_id="owner-1", title="晚报", instruction="整理今日进展",
+            schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
+        )
+        db.add(task)
+        db.flush()
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
+            status="queued",
+        )
+        db.add(run)
+        db.commit()
+        run_id, task_id = run.id, task.id
+
+    execute_run(run_id)
+    with Session() as db:
+        run = get_run(db, "owner-1", task_id, run_id)
+        assert run.status == "failed"
+        assert "模型通道断开" in (run.error or "")
+        assert run.error != REAP_ERROR
+    assert any(
+        event_id.endswith(":alert-corrected") and title.startswith("定时任务失败")
+        for event_id, title in notices
+    )
+
+
+def test_reap_falls_back_to_created_at_when_started_at_missing(tmp_path, monkeypatch):
+    """running 行缺 started_at（历史脏数据）时按 created_at 收割兜底。"""
+    Session = _session(tmp_path)
+    monkeypatch.setattr(
+        "app.data_channel.pipeline_tasks.dispatch.dispatch_super_assistant_scheduled_run",
+        lambda run_id: None,
+    )
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *a, **k: None)
+    now = datetime.now(timezone.utc)
+    with Session() as db:
+        _user(db)
+        task = SuperAssistantScheduledTask(
+            owner_id="owner-1", title="每日", instruction="日报",
+            schedule_kind="daily", timezone="Asia/Shanghai", enabled=False,
+        )
+        db.add(task)
+        db.flush()
+        stale = as_utc_naive(now - STALE_RUNNING - timedelta(minutes=1))
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=stale, status="running",
+            created_at=stale, started_at=None,
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+    assert dispatch_due_tasks() == 0
+    with Session() as db:
+        run = db.get(SuperAssistantScheduledRun, run_id)
+        assert run.status == "failed"
+        assert run.error == REAP_ERROR
+
+
+def test_recover_interrupted_streams_window_matches_stale_running(tmp_path, monkeypatch):
+    """重启保护窗口与收割阈值同源：30 分钟~2 小时之间的 running 会话仍受保护，
+    超过 STALE_RUNNING 的不再保护——锁住「两处时钟必须一致」的承诺。"""
+    Session = _session(tmp_path)
+    now = datetime.now(timezone.utc)
+    with Session() as db:
+        _user(db)
+        task = SuperAssistantScheduledTask(
+            owner_id="owner-1", title="每日", instruction="日报",
+            schedule_kind="daily", timezone="Asia/Shanghai", enabled=False,
+        )
+        db.add(task)
+        db.flush()
+        for label, started_ago in (("recent", timedelta(minutes=45)), ("stale", STALE_RUNNING + timedelta(minutes=10))):
+            conversation = SuperAssistantConversation(owner_id="owner-1", title=label)
+            db.add(conversation)
+            db.flush()
+            db.add(SuperAssistantMessage(
+                conversation_id=conversation.id, role="assistant",
+                content="", status="streaming",
+            ))
+            db.add(SuperAssistantScheduledRun(
+                task_id=task.id, owner_id="owner-1",
+                scheduled_for=as_utc_naive(now - started_ago),
+                status="running",
+                created_at=as_utc_naive(now - started_ago),
+                started_at=as_utc_naive(now - started_ago),
+                conversation_id=conversation.id,
+            ))
+        db.commit()
+
+    monkeypatch.setattr("app.super_assistant.conversation_service.SessionLocal", Session)
+    from app.super_assistant.conversation_service import recover_interrupted_streams
+    result = recover_interrupted_streams()
+    assert result == {"interrupted": 1}
+    with Session() as db:
+        statuses = {
+            conversation.title: status
+            for conversation, status in db.query(
+                SuperAssistantConversation, SuperAssistantMessage.status,
+            ).join(
+                SuperAssistantMessage, SuperAssistantMessage.conversation_id == SuperAssistantConversation.id,
+            ).all()
+        }
+    assert statuses["recent"] == "streaming"
+    assert statuses["stale"] == "error"
