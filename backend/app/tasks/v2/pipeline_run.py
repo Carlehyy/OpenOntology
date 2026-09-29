@@ -391,6 +391,10 @@ def _save_curated_dataset_in_lock(db, svc, pl, source: dict, data, ctx, multi_so
     if write_opts:
         if not row_count and write_opts.get("skip_empty", True):
             # 空输出保护：本次流水线输出 0 行，跳过入库，避免误清空资产
+            logger.info(
+                "入湖跳过[空输出保护]: pipeline=%s dataset=%s 本次输出 0 行，"
+                "按 skip_empty 跳过入库（湖中数据保持不变）",
+                pl.id, curated_ds.id)
             writer.drop()
             return {
                 "source_dataset_id": source["dataset_id"],
@@ -478,6 +482,12 @@ def _save_curated_dataset_in_lock(db, svc, pl, source: dict, data, ctx, multi_so
                       "rows_new": row_count, "rows_after": lake_rowcount}
         lake_impact = _lake_impact_from_changeset(
             db, changeset, pk_cols, lake_rows_before, lake_rowcount)
+        logger.info(
+            "入湖完成: pipeline=%s dataset=%s version_no=%s mode=%s 来数=%d "
+            "新增=%d 更新=%d 删除=%d 湖中行数=%d",
+            pl.id, curated_ds.id, ver.version_no, mode, row_count,
+            changeset.added_count, changeset.updated_count,
+            changeset.deleted_count, lake_rowcount)
 
     # 审计：本次流水线输出样本（入库前的产物），供执行记录追溯「流水线的输出是什么」
     from app.data_channel.pipeline_tasks.merge import _slim_row

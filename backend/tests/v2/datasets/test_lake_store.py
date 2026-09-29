@@ -341,6 +341,34 @@ def test_upsert_run_overwrite_redeclare_pk_rebuilds_table(db):
     assert _lake_map(db, ds, ["name"])[("癸",)]["amt"] == "90"
 
 
+def test_upsert_run_rebuild_logs_destructive_warning(db, caplog):
+    """整表重建（DROP+CREATE）必须留 warning：它是本模块破坏性最强的结构
+    操作（旧表数据随 DROP 放弃），成功路径此前完全不可观测。"""
+    import logging
+
+    ds = _make_dataset(db)
+    upsert_run(db, ds, BASE_ROWS, "overwrite", ["id"])
+    ds = db.query(Dataset).filter(Dataset.id == ds.id).first()
+    ds.schema_json = {**ds.schema_json, "primary_key": "name"}
+    db.commit()
+
+    with caplog.at_level(
+            logging.WARNING,
+            logger="app.data_channel.datasets.lake_store"):
+        upsert_run(db, ds, [
+            {"id": "1", "name": "甲", "amt": 10},
+        ], "overwrite", ["name"])
+
+    rebuild_records = [
+        record for record in caplog.records
+        if "整表重建" in record.getMessage() and ds.id in record.getMessage()
+    ]
+    assert rebuild_records, "湖表整表重建必须输出含 dataset id 的 warning"
+    message = rebuild_records[0].getMessage()
+    assert "name" in message  # 记录生效主键
+    assert "1" in message  # 记录新契约列数（本例单列）
+
+
 def test_upsert_run_soft_delete_marks_instead_of_deleting(db):
     ds = _make_dataset(db, columns=("id", "name", "flag"))
     upsert_run(db, ds, [

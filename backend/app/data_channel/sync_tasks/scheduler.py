@@ -10,6 +10,7 @@ import logging
 import threading
 from typing import Any
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -170,6 +171,13 @@ class SyncScheduler:
         except Exception as e:
             self._last_error = str(e)
             self._started = False
+            # 底层调度器可能已在 RUNNING（如 drain 预跑失败）：必须一并停掉，
+            # 否则 _started=False 与实际运行状态错位——已注册的旧 job 会继续
+            # 触发，而所有 reload 都被「调度器未启动」拒绝。
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception:
+                pass
             logger.error(f"DataSyncScheduler 启动失败: {e}")
 
     def shutdown(self) -> None:
@@ -188,25 +196,33 @@ class SyncScheduler:
         job_id = self._job_id(task.id)
         try:
             self._scheduler.remove_job(job_id)
-        except Exception:
+        except JobLookupError:
             pass
         logger.info("DataSyncTask %s 已退休，不注册调度", task.id)
 
-    def _add_job_for_pipeline_task(self, task) -> None:
-        """为流水线调度任务注册 APScheduler Job（与同步任务同一调度器实例）"""
+    def _add_job_for_pipeline_task(self, task) -> bool:
+        """为流水线调度任务注册 APScheduler Job（与同步任务同一调度器实例）。
+
+        返回注册结果供 CRUD 响应呈现「已保存但未注册调度」：
+        True = 已注册或有意不注册（disabled/MANUAL）；False = 注册失败。
+        """
         job_id = f"{_PIPE_JOB_PREFIX}{task.id}"
         try:
             self._scheduler.remove_job(job_id)
-        except Exception:
+        except JobLookupError:
             pass
         if not task.enabled:
-            return
-        if task.schedule_type == "CRON" and task.cron_expression:
+            return True
+        if task.schedule_type == "CRON":
+            if not task.cron_expression:
+                logger.warning(
+                    f"PipelineTask {task.id} schedule_type=CRON 但 cron 表达式为空，未注册调度")
+                return False
             try:
                 parts = task.cron_expression.strip().split()
                 if len(parts) != 5:
                     logger.warning(f"PipelineTask {task.id} cron 表达式不合法: {task.cron_expression}")
-                    return
+                    return False
                 trigger = CronTrigger(
                     minute=parts[0], hour=parts[1], day=parts[2],
                     month=parts[3], day_of_week=parts[4],
@@ -217,9 +233,16 @@ class SyncScheduler:
                     misfire_grace_time=60, coalesce=True, max_instances=1,
                 )
                 logger.info(f"已注册流水线任务 CRON 调度: {task.name} ({task.cron_expression})")
+                return True
             except Exception as e:
                 logger.error(f"注册流水线任务 CRON 失败 {task.id}: {e}")
-        elif task.schedule_type == "INTERVAL" and task.interval_seconds and task.interval_seconds > 0:
+                return False
+        elif task.schedule_type == "INTERVAL":
+            if not task.interval_seconds or task.interval_seconds <= 0:
+                logger.warning(
+                    f"PipelineTask {task.id} schedule_type=INTERVAL 但 "
+                    f"interval_seconds={task.interval_seconds} 非正数，未注册调度")
+                return False
             try:
                 trigger = IntervalTrigger(seconds=task.interval_seconds)
                 self._scheduler.add_job(
@@ -228,9 +251,12 @@ class SyncScheduler:
                     misfire_grace_time=60, coalesce=True, max_instances=1,
                 )
                 logger.info(f"已注册流水线任务 INTERVAL 调度: {task.name} ({task.interval_seconds}s)")
+                return True
             except Exception as e:
                 logger.error(f"注册流水线任务 INTERVAL 失败 {task.id}: {e}")
-        # MANUAL: 不注册调度
+                return False
+        # MANUAL: 不注册调度（有意行为，视为成功）
+        return True
 
     def reload_all(self) -> None:
         """只从 DB 加载 PipelineTask，并清除所有旧 SyncTask Job。"""
@@ -248,8 +274,13 @@ class SyncScheduler:
                             or job.id.startswith(_PIPE_JOB_PREFIX)):
                         try:
                             self._scheduler.remove_job(job.id)
-                        except Exception:
+                        except JobLookupError:
                             pass
+                        except Exception:
+                            # 单个残留 job 清理失败不能打断其余任务的
+                            # 全量重注册（换持久化 jobstore 时可能出现）
+                            logger.exception(
+                                "reload_all 清理 job %s 失败，继续", job.id)
                 for t in db.query(PipelineTask).all():
                     self._add_job_for_pipeline_task(t)
             finally:
@@ -258,10 +289,15 @@ class SyncScheduler:
             self._last_error = str(e)
             logger.error(f"reload_all 失败: {e}")
 
-    def reload_pipeline_task(self, task_id: str) -> None:
-        """更新单个流水线调度任务的 Job（任务 CRUD 后调用）"""
+    def reload_pipeline_task(self, task_id: str) -> bool:
+        """更新单个流水线调度任务的 Job（任务 CRUD 后调用）。
+
+        返回是否成功应用：True = 已注册/有意不注册/任务已删除并清理；
+        False = 调度器未启动、注册失败或查询异常。调用方据此在 CRUD
+        响应中呈现「已保存但未注册调度」。
+        """
         if not self._started:
-            return
+            return False
         try:
             from app.database import SessionLocal
             from app.data_channel.pipeline_tasks.models import PipelineTask
@@ -269,16 +305,17 @@ class SyncScheduler:
             try:
                 task = db.query(PipelineTask).filter(PipelineTask.id == task_id).first()
                 if task:
-                    self._add_job_for_pipeline_task(task)
-                else:
-                    try:
-                        self._scheduler.remove_job(f"{_PIPE_JOB_PREFIX}{task_id}")
-                    except Exception:
-                        pass
+                    return self._add_job_for_pipeline_task(task)
+                try:
+                    self._scheduler.remove_job(f"{_PIPE_JOB_PREFIX}{task_id}")
+                except JobLookupError:
+                    pass
+                return True
             finally:
                 db.close()
         except Exception as e:
             logger.error(f"reload_pipeline_task 失败: {e}")
+            return False
 
     def reload_task(self, task_id: str) -> None:
         """兼容旧路由：只清理残留 Job，绝不重新注册。"""
@@ -286,10 +323,11 @@ class SyncScheduler:
             return
         try:
             self._scheduler.remove_job(self._job_id(task_id))
-        except Exception as e:
+        except JobLookupError:
             # APScheduler 未找到 job 是正常的幂等结果。
-            if e.__class__.__name__ != "JobLookupError":
-                logger.error(f"清理旧 DataSyncTask job 失败: {e}")
+            pass
+        except Exception as e:
+            logger.error(f"清理旧 DataSyncTask job 失败: {e}")
 
 
 def get_sync_scheduler() -> SyncScheduler:

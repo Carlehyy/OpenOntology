@@ -70,3 +70,52 @@ def test_mongo_registry_registered():
     """registry 中包含 mongo"""
     from app.services.connection.registry import CONNECTOR_REGISTRY
     assert "mongo" in CONNECTOR_REGISTRY
+
+
+def test_mongo_pull_full_failure_raises():
+    """pull_full 拉取失败必须抛异常——吞成 [] 会被同步链按
+    「源端 0 行」落一个合法空版本，把故障记成成功同步"""
+    from app.services.connection.mongo_connector import MongoConnector
+    conn = MongoConnector({"uri": "mongodb://localhost/testdb", "database": "testdb"})
+    mock_db = MagicMock()
+    mock_collection = MagicMock()
+    mock_collection.find.side_effect = RuntimeError("mongo unavailable")
+    mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+    conn._db = mock_db
+
+    with pytest.raises(RuntimeError, match="mongo unavailable"):
+        conn.pull_full("items")
+
+
+def test_mongo_pull_delta_failure_raises_without_full_fallback():
+    """带水位线的 pull_delta 失败必须抛异常，不得回退全量重拉——
+    静默整表重拉既掩盖故障，又会把水位线之前的旧数据重新带回"""
+    from app.services.connection.mongo_connector import MongoConnector
+    conn = MongoConnector({"uri": "mongodb://localhost/testdb", "database": "testdb"})
+    mock_db = MagicMock()
+    mock_collection = MagicMock()
+    mock_collection.find.side_effect = RuntimeError("mongo unavailable")
+    mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+    conn._db = mock_db
+
+    with pytest.raises(RuntimeError, match="mongo unavailable"):
+        conn.pull_delta("items", since="507f1f77bcf86cd799439011")
+
+    # 只允许一次带水位线的增量查询；回退全量会再发一次无过滤 find
+    mock_collection.find.assert_called_once()
+
+
+def test_mongo_pull_delta_without_watermark_delegates_to_full():
+    """无水位线时 pull_delta 委托 pull_full（首次同步语义保持不变）"""
+    from app.services.connection.mongo_connector import MongoConnector
+    conn = MongoConnector({"uri": "mongodb://localhost/testdb", "database": "testdb"})
+    mock_db = MagicMock()
+    mock_collection = MagicMock()
+    mock_collection.find.return_value = [{"id": "1", "name": "A"}]
+    mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+    conn._db = mock_db
+
+    result = conn.pull_delta("items")
+
+    assert len(result) == 1
+    mock_collection.find.assert_called_once_with({})

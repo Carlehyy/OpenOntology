@@ -329,7 +329,7 @@ class IncrementalOrchestrator:
                 type(dispatch_error).__name__,
             )
             raise RuntimeError(
-                "Redis/Celery 后台任务服务不可用，Pipeline 未执行"
+                "NATS 后台任务服务不可用，Pipeline 未执行"
             ) from dispatch_error
 
         return run.id

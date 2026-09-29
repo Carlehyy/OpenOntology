@@ -170,6 +170,51 @@ def test_failed_connection_sync_never_creates_empty_success_dataset(
     ).count() == 0
 
 
+def test_mongo_connector_pull_failure_never_creates_version(db, monkeypatch):
+    """Mongo 连接器拉取失败抛异常后：同步失败、不落数据集与版本。
+
+    负向回归——连接器曾把故障吞成 []，被同步链按「源端 0 行」落成
+    合法空版本；空列表本身仍是合法结果（见空版本告警测试），但拉取
+    故障必须走 error 分支。"""
+    from app.data_channel.connections.mongo_connector import MongoConnector
+
+    connection = Connection(
+        id="conn-mongo-pull-failure",
+        name="Mongo 失败连接",
+        kind="mongo",
+        config={},
+        status="inactive",
+    )
+    db.add(connection)
+    db.commit()
+
+    connector = MongoConnector(
+        {"uri": "mongodb://localhost/testdb", "database": "db"})
+    mock_db = MagicMock()
+    mock_collection = MagicMock()
+    mock_collection.find.side_effect = RuntimeError("mongo unavailable")
+    mock_db.list_collection_names.return_value = ["orders"]
+    mock_db.__getitem__ = MagicMock(return_value=mock_collection)
+    connector._db = mock_db
+    monkeypatch.setattr(
+        "app.services.connection.registry.get_connector",
+        lambda _kind, _config: connector,
+    )
+
+    result = sync_connection(connection.id, db=db)
+
+    assert result["status"] == "error"
+    assert "mongo unavailable" in result["error"]
+    db.refresh(connection)
+    assert connection.status == "error"
+    assert db.query(Dataset).filter(
+        Dataset.source_connection_id == connection.id
+    ).count() == 0
+    assert db.query(DatasetVersion).join(
+        Dataset, DatasetVersion.dataset_id == Dataset.id
+    ).filter(Dataset.source_connection_id == connection.id).count() == 0
+
+
 def test_sync_endpoint_surfaces_connector_failure(db, monkeypatch):
     connection = Connection(
         id="conn-route-failure",

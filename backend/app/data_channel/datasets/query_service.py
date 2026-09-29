@@ -267,6 +267,9 @@ def preview_data(
     require_curated_preview_approved_fn(db, ds, version)
     if version is None:
         return []
+    # 与 preview_dataset 同一上限口径：limit 直送 SQL LIMIT，不夹上限会被
+    # 大值拖垮（路由签名没有 Query(le=)，服务层是唯一闸口）
+    limit = max(1, min(limit, 1000))
     # 版本内容不可变：键携带 version id，新版本自动换键，无需失效。
     cache_key = f"ob:lake:previewv:{dataset_id}:{version.id}:{limit}"
     return lake_cache.cached_call(

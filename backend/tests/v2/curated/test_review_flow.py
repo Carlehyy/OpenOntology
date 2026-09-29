@@ -87,6 +87,37 @@ def test_reject_updates_review_and_canonical_status():
     assert dataset.schema_json["review_status"] == "rejected"
 
 
+def test_approve_records_reviewer_id_at_decision_time():
+    """审批决定必须落决定人——reviewer_id 在决定发生时写入"""
+    db, _, _, review = make_db_with_dataset("in_review")
+
+    ReviewService(db).approve("rev-1", notes="ok", reviewer_id="user-admin-1")
+
+    assert review.status == "approved"
+    assert review.reviewer_id == "user-admin-1"
+    assert review.decided_at is not None
+
+
+def test_reject_records_reviewer_id_at_decision_time():
+    """拒绝同样必须落决定人"""
+    db, _, _, review = make_db_with_dataset("in_review")
+
+    ReviewService(db).reject("rev-1", notes="不合格", reviewer_id="user-admin-2")
+
+    assert review.status == "rejected"
+    assert review.reviewer_id == "user-admin-2"
+
+
+def test_decision_without_reviewer_keeps_existing_value():
+    """未传 reviewer_id（兼容旧调用方）时不覆盖已有记录"""
+    db, _, _, review = make_db_with_dataset("in_review")
+    review.reviewer_id = "user-originator"
+
+    ReviewService(db).approve("rev-1", notes="ok")
+
+    assert review.reviewer_id == "user-originator"
+
+
 @patch(
     "app.services.v2.dataset_service.DatasetService.load_all_rows",
     return_value=[{"id": "row-1", "name": "旧名称"}],

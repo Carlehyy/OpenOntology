@@ -356,7 +356,9 @@ def test_pipeline_task_router_and_services_stay_bounded():
         "validation_service.py": 150,
         "query_service.py": 650,
         "history_service.py": 380,
-        "lifecycle_service.py": 180,
+        # 上调自 180：_refresh_scheduler 不再静默吞掉调度失败，改为返回
+        # 状态字典并在 CRUD 响应呈现「已保存但未注册调度」（含注释+日志）
+        "lifecycle_service.py": 220,
         "execution_service.py": 80,
     }
     for filename, maximum in limits.items():

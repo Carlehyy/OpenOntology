@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime
 
@@ -90,6 +91,7 @@ from app.data_channel.datasets.models import (
 )
 from app.data_channel.datasets.snapshot_text import snapshot_cell_text
 from app.data_channel.pipeline_tasks.write_modes import (
+    SOFT_DELETE_TRUTHY,
     _apply_soft_delete,
     normalize_write_mode,
 )
@@ -99,10 +101,13 @@ LAKE_TABLE_PREFIX = "lake_ds_"
 _COLUMN_NAME_MAX_BYTES = 48
 # 批量写入/按键批取的参数包大小（远低于 SQLite 变量上限）
 _BATCH_SIZE = 500
-# 软删除 truthy 词表（与 write_modes._apply_soft_delete 完全一致），仅用于
-# 湖中候选行的 SQL 预筛；精确判定仍在 Python 侧走 _apply_soft_delete
-_SOFT_DELETE_TRUTHY = frozenset({"1", "true", "yes", "y", "t", "是", "删除", "已删除"})
+# 软删除 truthy 词表与 write_modes._apply_soft_delete 共用同一常量：仅用于
+# 湖中候选行的 SQL 预筛，精确判定仍在 Python 侧走 _apply_soft_delete。
+# 引用而非复制——单边改词表会让「打标」与「湖中重评估」口径分裂且无测试会红
+_SOFT_DELETE_TRUTHY = SOFT_DELETE_TRUTHY
 _SOFT_MARKER_COLS = ("__deleted__", "__deleted_at__")
+
+logger = logging.getLogger(__name__)
 
 
 class LakeStoreError(RuntimeError):
@@ -336,6 +341,12 @@ def _rebuild_lake_table(db, conn, dataset, schema: dict, columns: list[str],
         raise LakeStoreError(
             f"数据集「{getattr(dataset, 'name', '')}」overwrite 重建需要至少一列"
             "契约（来数与 schema_json['columns'] 均为空）。")
+    logger.warning(
+        "物理湖表整表重建（DROP+CREATE）: dataset=%s name=%s 新契约列数=%d "
+        "主键=%s —— 旧表数据随 DROP 放弃",
+        dataset.id, getattr(dataset, "name", ""), len(columns),
+        pk_cols or "(无)",
+    )
     drop_lake_table(db, dataset.id)
     mapping = build_lake_column_mapping(columns)
     unknown_pk = [c for c in pk_cols if c not in mapping]

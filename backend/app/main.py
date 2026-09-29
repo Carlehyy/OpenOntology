@@ -11,6 +11,8 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
+import logging
+
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.config import settings
@@ -62,6 +64,18 @@ async def lifespan(app: FastAPI):
 # /docs 不代理本就不可达，此处再关一层防止 backend 端口被误发布；
 # 非 production 环境保留便于调试。契约指纹测试走进程内 app.openapi()，不受影响。
 _disable_docs = settings.environment == "production"
+
+# 应用日志兜底：uvicorn 只配置 uvicorn.* 三个 logger，app.*/root 无 handler 时
+# 有效级别为 WARNING，INFO 级审计日志（如世界模型发布/调用）会被整条丢弃。
+# 为 app.* 挂 stderr handler（幂等，防测试内多次导入/热重载重复挂载）。
+_app_logger = logging.getLogger("app")
+if not _app_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s"))
+    _app_logger.setLevel(logging.INFO)
+    _app_logger.addHandler(_handler)
+
 app = FastAPI(
     title="OntoPrompt API",
     version="0.1.0",
@@ -225,7 +239,12 @@ app.include_router(steward_v2.router, prefix="/api/v2/steward", tags=["v2-stewar
 # steward router.  It intentionally sits outside HTTPBearer dependencies because
 # browsers cannot attach that header to a native WebSocket handshake.
 app.include_router(steward_browser_ws.router, prefix="/api/v2/steward", tags=["v2-steward-browser"])
-app.include_router(test_data_v2.router, prefix="/api/v2/test-data", tags=["v2-test-data"], dependencies=asset_lake_guard)
+# /api/v2/test-data 是 Docker 内 REST Connector 演示用的固定认证 fixture，
+# 不是业务数据源。与 /docs 共用同一环境开关：production 直接不注册，避免
+# 已登录租户（含只读角色，读接口不拦）拉取演示数据或把它配置成数据源；
+# 非生产环境保留供连接器试拉。
+if settings.environment != "production":
+    app.include_router(test_data_v2.router, prefix="/api/v2/test-data", tags=["v2-test-data"], dependencies=asset_lake_guard)
 
 # 正规本体模型 (Palantir 风格) — 平台核心建模 API
 app.include_router(formal_router.router, prefix="/api/v2/formal/ontologies", tags=["formal-ontology"], dependencies=ontology_guard)

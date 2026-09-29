@@ -1,6 +1,7 @@
 """Pipeline Task creation, mutation, deletion, and scheduler refresh."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Callable
 import uuid
@@ -12,19 +13,38 @@ from app.data_channel.pipeline_tasks import cache as _cache
 from app.data_channel.pipeline_tasks.models import PipelineTask
 from app.data_channel.pipelines.models import Pipeline
 
+logger = logging.getLogger(__name__)
+
 
 LifecycleDependency = Callable[..., Any]
 
 
-def _refresh_scheduler(task_id: str) -> None:
+def _refresh_scheduler(task_id: str) -> dict | None:
+    """CRUD 落库后刷新调度器，并把调度不可用带回调用方在响应中呈现。
+
+    过去这里 ``except: pass``：任务已保存但调度未生效时用户无从得知，
+    调度与数据库状态静默漂移。返回 None 表示调用方注入的刷新函数不带
+    状态（兼容旧注入桩），不附加调度状态到响应。
+    """
     try:
         from app.data_channel.sync_tasks.scheduler import (
             get_sync_scheduler,
         )
 
-        get_sync_scheduler().reload_pipeline_task(task_id)
-    except Exception:
-        pass
+        scheduler = get_sync_scheduler()
+        if not scheduler.started:
+            logger.warning(
+                "PipelineTask %s 已保存，但调度器未启动，本次变更未注册调度",
+                task_id)
+            return {"status": "not_started"}
+        if scheduler.reload_pipeline_task(task_id):
+            return {"status": "ok"}
+        logger.warning(
+            "PipelineTask %s 已保存，但调度注册失败（详见调度器日志）", task_id)
+        return {"status": "failed"}
+    except Exception as exc:  # noqa: BLE001 — 状态带回响应，保存结果不被掩盖
+        logger.warning("PipelineTask %s 调度刷新异常: %s", task_id, exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 def create_task(
@@ -59,9 +79,12 @@ def create_task(
     db.add(task)
     db.commit()
     db.refresh(task)
-    refresh_scheduler_fn(task.id)
+    refresh_result = refresh_scheduler_fn(task.id)
     _cache.invalidate_all()
-    return with_pipeline_info_fn(db, [task])[0]
+    payload = with_pipeline_info_fn(db, [task])[0]
+    if isinstance(refresh_result, dict):
+        payload["scheduler_refresh"] = refresh_result
+    return payload
 
 
 def update_task(
@@ -101,9 +124,12 @@ def update_task(
     task.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(task)
-    refresh_scheduler_fn(task.id)
+    refresh_result = refresh_scheduler_fn(task.id)
     _cache.invalidate_all()
-    return with_pipeline_info_fn(db, [task])[0]
+    payload = with_pipeline_info_fn(db, [task])[0]
+    if isinstance(refresh_result, dict):
+        payload["scheduler_refresh"] = refresh_result
+    return payload
 
 
 def delete_task(
@@ -121,9 +147,12 @@ def delete_task(
         raise HTTPException(404, "PipelineTask not found")
     db.delete(task)
     db.commit()
-    refresh_scheduler_fn(task_id)
+    refresh_result = refresh_scheduler_fn(task_id)
     _cache.invalidate_all()
-    return {"status": "ok"}
+    result = {"status": "ok"}
+    if isinstance(refresh_result, dict):
+        result["scheduler_refresh"] = refresh_result
+    return result
 
 
 def toggle_task(
@@ -158,6 +187,9 @@ def toggle_task(
     task.enabled = enabled
     task.updated_at = datetime.utcnow()
     db.commit()
-    refresh_scheduler_fn(task.id)
+    refresh_result = refresh_scheduler_fn(task.id)
     _cache.invalidate_all()
-    return task.to_dict()
+    payload = task.to_dict()
+    if isinstance(refresh_result, dict):
+        payload["scheduler_refresh"] = refresh_result
+    return payload

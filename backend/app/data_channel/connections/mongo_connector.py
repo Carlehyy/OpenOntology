@@ -72,33 +72,31 @@ class MongoConnector(ConnectorBase):
 
     def pull_full(self, resource: str) -> list[dict]:
         """查询全量数据。_id 转字符串保留——它是本连接器增量的水位线，
-        剔除后 engine 取不到水印，APPEND 每次都退化为全量重拉。"""
-        try:
-            collection = self._get_db()[resource]
-            docs = []
-            for doc in collection.find({}):
-                doc["_id"] = str(doc.get("_id", ""))
-                docs.append(doc)
-            return docs
-        except Exception as e:
-            logger.warning(f"MongoDB pull_full 失败: {e}")
-            return []
+        剔除后 engine 取不到水印，APPEND 每次都退化为全量重拉。
+
+        拉取失败必须抛异常：吞成 [] 会被同步链路按「源端 0 行」落一个
+        合法空版本，把源端故障记成一次成功同步。"""
+        collection = self._get_db()[resource]
+        docs = []
+        for doc in collection.find({}):
+            doc["_id"] = str(doc.get("_id", ""))
+            docs.append(doc)
+        return docs
 
     def pull_delta(self, resource: str, since: str | None = None) -> list[dict]:
         """
         增量查询: 以 _id(ObjectId 含插入时间戳)作为水位线。
         since 传入上次同步的最大 _id 字符串。
+
+        失败抛异常，不回退全量——增量故障静默整表重拉既掩盖故障，又会
+        把水位线之前的旧数据重新带回。
         """
         if not since:
             return self.pull_full(resource)
-        try:
-            from bson import ObjectId
-            collection = self._get_db()[resource]
-            docs = []
-            for doc in collection.find({"_id": {"$gt": ObjectId(since)}}):
-                doc["_id"] = str(doc.get("_id", ""))
-                docs.append(doc)
-            return docs
-        except Exception as e:
-            logger.warning(f"MongoDB pull_delta 失败: {e}")
-            return self.pull_full(resource)
+        from bson import ObjectId
+        collection = self._get_db()[resource]
+        docs = []
+        for doc in collection.find({"_id": {"$gt": ObjectId(since)}}):
+            doc["_id"] = str(doc.get("_id", ""))
+            docs.append(doc)
+        return docs

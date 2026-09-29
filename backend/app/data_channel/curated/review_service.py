@@ -1,6 +1,7 @@
 """人工审核服务 — 行级编辑、版本合并、审核状态管理。"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -28,6 +29,8 @@ from app.data_channel.curated.approved_version_reader import (
     version_review,
 )
 from app.data_channel.curated.models import CuratedDataset, CuratedReview, CuratedRowEdit
+
+logger = logging.getLogger(__name__)
 
 
 class ReviewService:
@@ -223,6 +226,12 @@ class ReviewService:
             )
         self._db.commit()
         self._db.refresh(review)
+        # 数据库列是「谁批的」权威审计记录；info 日志是排障附属（日志会
+        # 轮转，不能作为审计依据）。
+        logger.info(
+            "curated review approved: review=%s dataset=%s reviewer=%s",
+            review.id, review.curated_dataset_id, review.reviewer_id,
+        )
         return review
 
     def reject(self, review_id: str, notes: str = "",
@@ -239,6 +248,10 @@ class ReviewService:
         self._set_dataset_status(review.curated_dataset_id, "rejected")
         self._db.commit()
         self._db.refresh(review)
+        logger.info(
+            "curated review rejected: review=%s dataset=%s reviewer=%s",
+            review.id, review.curated_dataset_id, review.reviewer_id,
+        )
         return review
 
     def get_edits(self, review_id: str) -> list[CuratedRowEdit]:

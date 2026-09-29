@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +19,8 @@ from app.data_channel.pipelines.contracts import (
 )
 from app.data_channel.pipelines.execution_service import dry_run_uri
 from app.data_channel.pipelines.models import Pipeline, PipelineVersion
+
+logger = logging.getLogger(__name__)
 
 
 def is_n8n_pipeline(pipeline: Pipeline) -> bool:
@@ -86,6 +89,8 @@ def require_publish_attestation(
         "output_checksum",
     }
     if any(not attestation.get(field) for field in required):
+        logger.warning(
+            "发布凭证拒绝[缺凭证]: pipeline=%s 凭证字段不完整", pipeline.id)
         raise HTTPException(
             400,
             "发布前必须完成最近一次执行预览与字段定义的全量校验。"
@@ -94,6 +99,9 @@ def require_publish_attestation(
     if attestation["column_definitions_hash"] != column_definitions_hash(
         pipeline.column_definitions
     ):
+        logger.warning(
+            "发布凭证拒绝[哈希不符]: pipeline=%s 字段定义在最近一次校验后"
+            "发生变化，旧凭证已作废", pipeline.id)
         invalidate_publish_attestation(pipeline)
         db.commit()
         raise HTTPException(
@@ -101,6 +109,9 @@ def require_publish_attestation(
             "字段定义在最近一次校验后发生变化，旧校验结果已失效。请重新校验字段定义。",
         )
     if attestation["execution_hash"] != current_execution_hash(pipeline):
+        logger.warning(
+            "发布凭证拒绝[哈希不符]: pipeline=%s 编排或数据源在最近一次"
+            "校验后发生变化，旧凭证已作废", pipeline.id)
         invalidate_publish_attestation(pipeline)
         db.commit()
         raise HTTPException(
@@ -115,6 +126,9 @@ def require_publish_attestation(
         )
         payload = json.loads(raw.decode("utf-8"))
     except Exception:
+        logger.warning(
+            "发布凭证拒绝[试运行过期]: pipeline=%s dry_run=%s 暂存对象"
+            "不存在或读取失败", pipeline.id, attestation.get("dry_run_id"))
         invalidate_publish_attestation(pipeline)
         db.commit()
         raise HTTPException(
@@ -132,6 +146,10 @@ def require_publish_attestation(
         or payload_checksum != attestation["output_checksum"]
         or computed_checksum != payload_checksum
     ):
+        logger.warning(
+            "发布凭证拒绝[输出不一致]: pipeline=%s dry_run=%s 暂存输出与"
+            "凭证校验和不一致（truncated=%s）", pipeline.id,
+            attestation.get("dry_run_id"), bool(payload.get("truncated")))
         invalidate_publish_attestation(pipeline)
         db.commit()
         raise HTTPException(
