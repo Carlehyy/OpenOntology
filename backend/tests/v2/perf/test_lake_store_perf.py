@@ -1,6 +1,6 @@
 """物理湖表性能基准：lake_store 行级 upsert / 分页 / 流式读 / 版本回放。
 
-规模设计（CI shard 预算约束，与 test_merge_engine_perf.py 同一惯例）：
+规模设计（CI shard 预算约束，与已退役的合并引擎基准同一惯例）：
 - 默认 CI 规模：10 万行基座 + 1 万行增量。overwrite 全量替换与跨 overwrite
   逆向回放是最重路径（50 万行本机即需 ~114s/~22s），CI 4 vCPU 上会撑爆
   verify-backend shard 的 15 分钟超时（曾导致 run 31499091029 shard 1 被

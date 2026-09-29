@@ -2,7 +2,7 @@
 
 从 datasets.service 下沉：lake_store（物理湖表）与 service（快照读写）共用
 同一规范化口径，独立成叶以避免存储层与服务层互相成环。所有既有导入方
-（merge/merge_engine/测试）继续经 service 的再导出使用同一函数对象。
+（merge/测试）继续经 service 的再导出使用同一函数对象。
 """
 from __future__ import annotations
 
