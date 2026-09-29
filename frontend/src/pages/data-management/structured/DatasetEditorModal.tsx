@@ -10,6 +10,7 @@ import datasetsApi, {
 } from '@/api/v2/datasets'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
+import { cellValueMatchesType } from '@/utils/cellValueValidation'
 
 const PAGE_SIZES = [20, 50, 100, 200, 500, 1000] as const
 const DEFAULT_PAGE_SIZE = 50
@@ -53,21 +54,22 @@ const jsonShape = (column: DatasetSchemaColumn | undefined): 'array' | 'object' 
   return null
 }
 
+const TYPE_HINTS: Record<string, string> = {
+  integer: '请输入整数（可用千分位逗号）',
+  float: '请输入数字',
+  boolean: '请输入 true / false、yes / no 或 1 / 0',
+  timestamp: '请输入有效日期或时间',
+  json: '请输入合法 JSON',
+}
+
 const validateValue = (value: string, column: DatasetSchemaColumn | undefined): string => {
   const text = value.trim()
   if (!column) return ''
   if (!column.nullable && !text) return '此列不允许为空'
   if (!text || column.type === 'string') return ''
-  if (column.type === 'integer' && !/^[+-]?[\d,]+$/.test(text)) return '请输入整数'
-  if (column.type === 'float' && !Number.isFinite(Number(text.replaceAll(',', '')))) return '请输入数字'
-  if (column.type === 'boolean' && !['true', 'false', 'yes', 'no', '1', '0'].includes(text.toLowerCase())) {
-    return '请输入 true / false、yes / no 或 1 / 0'
-  }
-  if (column.type === 'timestamp' && !(
-    /^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(text)
-    || /^\d{1,2}[-/]\d{1,2}[-/]\d{4}/.test(text)
-    || /^\d{8}$/.test(text)
-  )) return '请输入有效日期或时间'
+  // 类型判定与后端 _cell_type_ok 同尺（见 utils/cellValueValidation），
+  // 这里只保留站内编辑器的文案与 JSON 结构提示
+  if (!cellValueMatchesType(column.type, text)) return TYPE_HINTS[column.type] ?? ''
   if (column.type === 'json') {
     try {
       const parsed = JSON.parse(text)

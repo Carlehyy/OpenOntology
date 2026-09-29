@@ -1,4 +1,5 @@
 import { formatDateTime } from '@/utils/datetime'
+import { validateCellValue } from '@/utils/cellValueValidation'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -12,16 +13,6 @@ type EditRow = { orig: CellMap; cur: CellMap; deleted: boolean }
 
 const str = (value: unknown) => value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)
 const fmt = (iso?: string | null) => formatDateTime(iso, { fallback: '—' })
-
-function validateValue(column: string, type: string, value: string): string | null {
-  if (value === '') return null
-  if (type === 'integer' && !/^[+-]?\d+$/.test(value)) return `「${column}」必须是整数`
-  if (type === 'float' && !Number.isFinite(Number(value))) return `「${column}」必须是数字`
-  if (type === 'boolean' && !['true', 'false', '1', '0', '是', '否'].includes(value.toLowerCase())) return `「${column}」必须是布尔值（true/false、1/0 或 是/否）`
-  if (type === 'timestamp' && Number.isNaN(Date.parse(value))) return `「${column}」必须是合法日期时间`
-  if (type === 'json') { try { JSON.parse(value) } catch { return `「${column}」必须是合法 JSON` } }
-  return null
-}
 
 export default function PublicManualDatasetPage() {
   const { token = '' } = useParams()
@@ -96,7 +87,7 @@ export default function PublicManualDatasetPage() {
     for (const row of activeRows) {
       for (const col of columns) {
         if (isNonNull(col) && !String(row[col] || '').trim()) return `「${columnLabel(col)}」不能为空`
-        const issue = validateValue(columnLabel(col), data?.dataset.column_types[col] || 'string', row[col] || '')
+        const issue = validateCellValue(columnLabel(col), data?.dataset.column_types[col] || 'string', row[col] || '')
         if (issue) return issue
       }
     }
