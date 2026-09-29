@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, Plus, Rocket, X } from 'lucide-react'
 
 import { ontologyApi } from '@/api/ontologies'
@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from 'sonner'
+import { findServiceByOntology } from './publishPrefill'
 
 interface OntologyOption {
   id: string
@@ -28,14 +29,15 @@ interface ObjectTypeOption {
 
 /**
  * 发布为推演服务：选定冻结版本 + 本体语义注册（适用对象类型 / 前置条件）。
- * 一个项目对应一个在线服务，重复发布即覆盖更新。
+ * 一个项目可发布多个服务（每个绑定一个本体）：选中已发布过的本体即回填该
+ * 服务的注册信息并覆盖更新；换一个本体则为新增发布（回填项目默认值）。
  */
-export default function PublishServiceDialog({ open, onClose, project, versions, service, onPublished }: {
+export default function PublishServiceDialog({ open, onClose, project, versions, services, onPublished }: {
   open: boolean
   onClose: () => void
   project: WorldModelProjectDetail
   versions: ScriptVersionItem[]
-  service: WorldModelServiceInfo | null
+  services: WorldModelServiceInfo[]
   onPublished: (service: WorldModelServiceInfo) => void
 }) {
   const [name, setName] = useState('')
@@ -50,17 +52,35 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
   const [loadingObjectTypes, setLoadingObjectTypes] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  // 用户是否手动改过名称/描述：切换本体回填时不得覆盖手动输入
+  const [nameTouched, setNameTouched] = useState(false)
+  const [descriptionTouched, setDescriptionTouched] = useState(false)
 
-  // 打开时初始化表单（重新发布时回填当前服务的注册信息）
+  // 当前选中的本体是否已有服务：有 → 本次提交为覆盖更新（标题/按钮/提示随之切换）
+  const matchedService = useMemo(
+    () => findServiceByOntology(services, ontologyId),
+    [services, ontologyId],
+  )
+
+  // 打开上升沿初始化表单：仅在从关到开的瞬间执行。打开期间 project/services
+  // 引用变化（挂载竞态的迟到响应、发布回调刷新）不得重置用户正在填写的表单。
+  // 默认聚焦最近更新的服务（单服务项目与历史行为一致），多本体场景由
+  // 「所属本体」切换时按本体重新回填
+  const prevOpenRef = useRef(false)
   useEffect(() => {
-    if (!open) return
+    const rising = open && !prevOpenRef.current
+    prevOpenRef.current = open
+    if (!rising) return
     setError('')
-    setName(service?.name || project.name)
-    setDescription(service?.description || project.description || '')
+    setNameTouched(false)
+    setDescriptionTouched(false)
+    const initial = services[0] ?? null
+    setName(initial?.name || project.name)
+    setDescription(initial?.description || project.description || '')
     setVersionId('')
-    setOntologyId(service?.applicable_object_types?.ontology_id || '')
-    setObjectTypeIds(service?.applicable_object_types?.object_type_ids || [])
-    setPreconditions(service?.preconditions || [])
+    setOntologyId(initial?.applicable_object_types?.ontology_id || '')
+    setObjectTypeIds(initial?.applicable_object_types?.object_type_ids || [])
+    setPreconditions(initial?.preconditions || [])
     setLoadingOntologies(true)
     ontologyApi.list({ page_size: 200 })
       .then(result => setOntologies(
@@ -70,17 +90,24 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
       ))
       .catch(err => setError(apiError(err)))
       .finally(() => setLoadingOntologies(false))
-  }, [open, project, service])
+  }, [open, project, services])
 
   // 本体变化时加载其对象类型（实体）
   useEffect(() => {
     if (!ontologyId) { setObjectTypes([]); return }
     setLoadingObjectTypes(true)
     ontologyApi.listEntities(ontologyId)
-      .then(entities => setObjectTypes(entities.map(entity => ({
-        id: entity.id,
-        label: entity.name_cn || entity.name_en || entity.id,
-      }))))
+      .then(entities => {
+        const loaded = entities.map(entity => ({
+          id: entity.id,
+          label: entity.name_cn || entity.name_en || entity.id,
+        }))
+        setObjectTypes(loaded)
+        // 回填的 object_type_ids 可能引用已在本体侧被删除的实体：
+        // 交集过滤，避免不可见、不可取消的僵尸 id 随提交再次落库
+        setObjectTypeIds(current =>
+          current.filter(id => loaded.some(type => type.id === id)))
+      })
       .catch(err => setError(apiError(err)))
       .finally(() => setLoadingObjectTypes(false))
   }, [ontologyId])
@@ -108,7 +135,7 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
         applicable_object_type_ids: objectTypeIds,
         preconditions: preconditions.filter(item => item.object_type_id),
       })
-      toast.success(service ? '已重新发布并上线' : '发布成功，服务已上线')
+      toast.success(matchedService ? '已重新发布并上线' : '发布成功，服务已上线')
       onPublished(published)
       onClose()
     } catch (err) {
@@ -124,9 +151,9 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
     <Dialog open={open} onOpenChange={next => { if (!next && !submitting) onClose() }}>
       <DialogContent className="w-[min(92vw,40rem)]">
         <DialogHeader icon={<Rocket size={18} />}>
-          <DialogTitle>{service ? '重新发布推演服务' : '发布为推演服务'}</DialogTitle>
+          <DialogTitle>{matchedService ? '重新发布推演服务' : '发布为推演服务'}</DialogTitle>
           <DialogDescription>
-            发布即上线：选定冻结版本并完成本体语义注册后，服务会获得对外调用端点，重复发布将覆盖更新。
+            发布即上线：选定冻结版本并完成本体语义注册后，服务会获得对外调用端点；同一本体重发布将覆盖更新该本体对应的服务。
           </DialogDescription>
         </DialogHeader>
       <div className="space-y-5">
@@ -136,7 +163,7 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
             required
             maxLength={200}
             value={name}
-            onChange={event => setName(event.target.value)}
+            onChange={event => { setName(event.target.value); setNameTouched(true) }}
             placeholder="例如：台区负荷短期推演服务"
             className=" focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-ring"
           />
@@ -160,7 +187,7 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
           <label className={labelClass}>服务描述</label>
           <textarea
             value={description}
-            onChange={event => setDescription(event.target.value)}
+            onChange={event => { setDescription(event.target.value); setDescriptionTouched(true) }}
             maxLength={500}
             rows={2}
             placeholder="说明该服务回答什么推演问题、适用边界"
@@ -178,7 +205,20 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
               <label className={labelClass}>所属本体</label>
               <Select
                 value={ontologyId || '__none__'}
-                onValueChange={value => { setOntologyId(value === '__none__' ? '' : value); setObjectTypeIds([]); setPreconditions([]) }}
+                onValueChange={value => {
+                  const nextId = value === '__none__' ? '' : value
+                  setOntologyId(nextId)
+                  // 按本体回填：该本体已有服务 → 预填其注册信息（覆盖更新）；
+                  // 新本体 → 回到项目默认值（新增发布）。手动编辑过的名称/
+                  // 描述不覆盖，只回填语义注册（对象类型 / 前置条件）
+                  const matched = findServiceByOntology(services, nextId)
+                  if (!nameTouched) setName(matched?.name || project.name)
+                  if (!descriptionTouched) {
+                    setDescription(matched?.description || project.description || '')
+                  }
+                  setObjectTypeIds(matched?.applicable_object_types?.object_type_ids || [])
+                  setPreconditions(matched?.preconditions || [])
+                }}
               >
                 <SelectTrigger
                   className="h-9 w-full rounded-md bg-card px-3 text-sm"
@@ -283,7 +323,7 @@ export default function PublishServiceDialog({ open, onClose, project, versions,
           loading={submitting}
           disabled={!canSubmit}
         >
-          {service ? '重新发布' : '发布并上线'}
+          {matchedService ? '重新发布' : '发布并上线'}
         </Button>
       </DialogFooter>
       </DialogContent>

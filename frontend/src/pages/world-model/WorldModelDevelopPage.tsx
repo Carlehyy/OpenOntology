@@ -39,7 +39,7 @@ import {
   type WorldModelServiceInfo,
 } from '@/api/worldModel'
 import { ontologyApi } from '@/api/ontologies'
-import { engineTypeLabel } from './WorldModelModelsPage'
+import { engineTypeLabel } from './engines'
 import PublishServiceDialog from './PublishServiceDialog'
 import TrajectoryPreview from './TrajectoryPreview'
 import { extractTrajectorySummary } from './trajectorySummary'
@@ -345,6 +345,11 @@ export default function WorldModelDevelopPage() {
     try {
       setPublishVersions(await worldModelApi.listVersions(modelId))
       setPublishOpen(true)
+      // 打开时刷新服务快照：弹窗按本体匹配"覆盖哪个服务"依赖这份列表，
+      // 挂载时的旧快照在多人/多标签页场景下可能已过期（失败则沿用旧快照）
+      worldModelApi.getServices(modelId)
+        .then(rows => setServices(rows))
+        .catch(() => undefined)
     } catch (error) {
       toast.error('版本列表加载失败', { description: apiError(error) })
     }
@@ -393,7 +398,10 @@ export default function WorldModelDevelopPage() {
     writeTextToClipboard(svc.endpoint_path).then(() => {
       setCopiedServiceId(svc.id)
       window.setTimeout(() => setCopiedServiceId(null), 1400)
-    }).catch(() => undefined)
+    }).catch(() => {
+      // 剪贴板写入可能被浏览器拒绝（HTTP 部署/未聚焦）：提示口径与服务页一致
+      toast.error('未能写入剪贴板', { description: '请手动选中端点文本后复制。' })
+    })
   }, [])
 
   if (loading) {
@@ -859,7 +867,7 @@ export default function WorldModelDevelopPage() {
           onClose={() => setPublishOpen(false)}
           project={project}
           versions={publishVersions}
-          service={services[0] ?? null}
+          services={services}
           onPublished={() => {
             // 多本体发布：重新拉取服务列表，同步项目卡摘要（状态取最近更新的服务）
             worldModelApi.getServices(project.id)

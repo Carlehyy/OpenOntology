@@ -257,10 +257,12 @@ import json as _ob_json
 if "simulate" not in globals():
     raise NameError("脚本未定义入口函数 simulate(context, actions, horizon)")
 _ob_test_input = _ob_json.loads({test_input})
+_ob_horizon = _ob_test_input.get("horizon")
 _ob_payload = simulate(
     context=_ob_test_input.get("context") or {{}},
     actions=_ob_test_input.get("actions") or [],
-    horizon=_ob_test_input.get("horizon") or 1,
+    # 0 是合法推演时域（当前状态快照），不能被 or 收成 1
+    horizon=1 if _ob_horizon is None else _ob_horizon,
 )
 print()
 print("__OB_RESULT_BEGIN__")
@@ -454,10 +456,20 @@ def _normalize_test_input(test_input: dict) -> dict:
     raw = test_input or {}
     if not isinstance(raw, dict):
         raise HTTPException(400, "测试入参必须是 JSON 对象。")
+    # horizon 契约对齐 InvokeRequest（int, ge=0）：0 是合法推演时域（快照推演）
+    # 必须原样透传；bool/非数值回退 1，浮点仅整数值收整，负数钳到 0——
+    # 保证调试入口与 invoke 上线入口的校验口径一致
+    horizon = raw.get("horizon")
+    if isinstance(horizon, bool) or not isinstance(horizon, (int, float)):
+        horizon = 1
+    elif isinstance(horizon, float) and not horizon.is_integer():
+        horizon = 1
+    else:
+        horizon = max(0, int(horizon))
     return {
         "context": raw.get("context") or {},
         "actions": raw.get("actions") or [],
-        "horizon": raw.get("horizon") or 1,
+        "horizon": horizon,
     }
 
 
@@ -485,6 +497,7 @@ def _run_debug(script: str, test_input: dict) -> schemas.ScriptExecutionResult:
         execution = execute_code(code, full_stdout=True)
     except PythonEngineError as exc:
         # 网关未配置/不可达等基础设施失败：话术与数据通道保持一致
+        logger.error("世界模型内核执行失败（基础设施）：%s", exc)
         raise HTTPException(502, str(exc)) from exc
     payload = None
     error = execution.error
@@ -539,10 +552,24 @@ def save_project_script(
     db.add(version)
     db.flush()
 
-    # 修剪历史版本：只保留最近 SCRIPT_VERSION_KEEP 版
+    # 修剪历史版本：只保留最近 SCRIPT_VERSION_KEEP 版。
+    # 仍被推演服务引用的版本不修剪（services.version_id 外键为 ON DELETE SET NULL，
+    # 删掉会把在线服务静默解绑脚本，之后调用一律 409「未绑定可用的脚本版本」）。
+    referenced_version_ids = {
+        row[0]
+        for row in db.query(WorldModelService.version_id)
+        .filter(
+            WorldModelService.project_id == project.id,
+            WorldModelService.version_id.isnot(None),
+        )
+        .all()
+    }
     stale = (
         db.query(WorldModelScriptVersion)
-        .filter(WorldModelScriptVersion.project_id == project.id)
+        .filter(
+            WorldModelScriptVersion.project_id == project.id,
+            WorldModelScriptVersion.id.notin_(referenced_version_ids),
+        )
         .order_by(WorldModelScriptVersion.version_no.desc())
         .offset(SCRIPT_VERSION_KEEP)
         .all()
@@ -788,6 +815,7 @@ def publish_service(
          and s.applicable_object_types.get("ontology_id") == body.applicable_ontology_id),
         None,
     )
+    overridden = service is not None
     if service is None:
         service = WorldModelService(
             project_id=project.id,
@@ -811,6 +839,12 @@ def publish_service(
     db.commit()
     db.refresh(service)
     wm_cache.invalidate_world_model()
+    logger.info(
+        "推演服务发布（%s）：service=%s project=%s version=%s ontology=%s operator=%s",
+        "覆盖更新" if overridden else "新建上线",
+        service.id, project.id, version.id, body.applicable_ontology_id,
+        getattr(current_user, "username", "") or "?",
+    )
     return service
 
 
@@ -876,11 +910,22 @@ def invoke_service(
     try:
         result = _run_debug(version.script, body.model_dump())
     except HTTPException as exc:
-        # 网关不可达等基础设施失败：也留痕（审计），然后原样抛出
+        # 网关不可达等基础设施失败：也留痕（审计），然后原样抛出；
+        # 400 等客户端错误同样留痕（改动前既有行为），但不得按基础设施故障记 ERROR
         record.error = str(exc.detail)
         db.add(record)
         db.commit()
         wm_cache.invalidate_world_model()
+        if exc.status_code >= 500:
+            logger.error(
+                "推演服务调用中断（基础设施）：service=%s call=%s project=%s caller=%s detail=%s",
+                service.id, record.id, service.project_id, caller, exc.detail,
+            )
+        else:
+            logger.warning(
+                "推演服务调用被拒绝（客户端错误）：service=%s call=%s caller=%s status=%s detail=%s",
+                service.id, record.id, caller, exc.status_code, str(exc.detail)[:200],
+            )
         raise
     record.ok = result.ok
     record.duration_ms = result.duration_ms
@@ -890,6 +935,17 @@ def invoke_service(
     db.add(record)
     db.commit()
     wm_cache.invalidate_world_model()
+    if result.ok:
+        logger.info(
+            "推演服务调用完成：service=%s call=%s project=%s caller=%s duration_ms=%s",
+            service.id, record.id, service.project_id, caller, result.duration_ms,
+        )
+    else:
+        logger.warning(
+            "推演服务调用失败（脚本报错）：service=%s call=%s project=%s caller=%s error=%s",
+            service.id, record.id, service.project_id, caller,
+            (result.error or "")[:200],
+        )
     return schemas.InvokeResult(
         ok=result.ok,
         payload=result.payload if result.ok else None,

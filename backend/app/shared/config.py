@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     local_frontend_host: str = "127.0.0.1"
     local_frontend_port: int = Field(default=5173, ge=1, le=65535)
 
+    # app.* 应用日志级别（main.py 为 app.* 挂 stderr 兜底 handler 时使用）。
+    # 生产可通过 APP_LOG_LEVEL=WARNING 关闭 INFO 审计输出（发布/调用记录）。
+    app_log_level: str = "INFO"
+
+    @field_validator("app_log_level", mode="before")
+    @classmethod
+    def validate_app_log_level(cls, value: object) -> str:
+        name = str(value or "").strip().upper()
+        if name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(
+                "APP_LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
+            )
+        return name
+
     # The configuration center provisions the required n8n integration into
     # its database-backed runtime record during startup. LLM providers are
     # intentionally configured later through the model-management UI.

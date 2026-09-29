@@ -967,3 +967,224 @@ def test_overview_endpoints_require_menu(client, custom_headers):
         f"{BASE}/services/overview", headers=custom_headers).status_code == 403
     assert client.get(
         f"{BASE}/calls/daily", headers=custom_headers).status_code == 403
+
+
+# ──────────────────── horizon=0 透传（回归：曾被 or 1 静默改写成 1） ────────────────────
+
+_ECHO_HORIZON_SCRIPT = (
+    "def simulate(context, actions, horizon):\n"
+    "    return {'trajectory': [], 'horizon': horizon}\n"
+)
+
+
+def _fake_execute_inprocess(code, **kwargs):
+    """execute_code 替身：进程内真实执行注入代码并回传 stdout。
+
+    _fake_execute_ok 返回固定 payload，验证不了入参是否真的流进 simulate；
+    horizon 这类「入参透传」回归必须跑在真实执行路径上。
+    """
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        exec(compile(code, "<world-model-debug>", "exec"), {})
+    return _FakeExecution(stdout=buffer.getvalue())
+
+
+def test_debug_epilogue_preserves_horizon_zero():
+    """入参归一与调试收尾模板都不得把 horizon=0 收成 1（0 步快照合法）。"""
+    import contextlib
+    import io
+
+    from app.data_channel.pipelines.python_engine.client import extract_payload
+
+    code = service._build_debug_code(_ECHO_HORIZON_SCRIPT, {
+        "context": {}, "actions": [], "horizon": 0,
+    })
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        exec(compile(code, "<world-model-debug>", "exec"), {})
+    assert extract_payload(buffer.getvalue()) == {"trajectory": [], "horizon": 0}
+
+    # 缺省语义不变：不传 horizon 仍补 1
+    code = service._build_debug_code(_ECHO_HORIZON_SCRIPT, {})
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        exec(compile(code, "<world-model-debug>", "exec"), {})
+    assert extract_payload(buffer.getvalue()) == {"trajectory": [], "horizon": 1}
+
+
+def test_normalize_test_input_horizon_type_gate():
+    """horizon 契约对齐（int, ge=0）：0 透传，垃圾值回退 1，负数钳 0。
+
+    回归：is not None 判断曾把 ""/false 等 falsy 垃圾值原样放进内核，
+    用户脚本 range(horizon) 直接 TypeError；负数/小数也曾与 invoke 入口
+    （int, ge=0 → 422）口径不一。
+    """
+    normalize = service._normalize_test_input
+    assert normalize({"horizon": 0})["horizon"] == 0
+    assert normalize({"horizon": 3})["horizon"] == 3
+    assert normalize({})["horizon"] == 1
+    # 垃圾值回退 1（不透传进内核）
+    for junk in ("", "3", None, False, True, [], {}, [1], 2.5, float("nan")):
+        assert normalize({"horizon": junk})["horizon"] == 1, junk
+    # 数值收整与钳制：与 invoke 契约（int, ge=0）同口径
+    assert normalize({"horizon": 2.0})["horizon"] == 2
+    assert normalize({"horizon": -3})["horizon"] == 0
+
+
+def test_horizon_zero_flows_through_execute_save_and_invoke(
+    client, auth_headers, project, monkeypatch,
+):
+    """execute、save 冻结的 test_input、invoke 三条路径都透传 horizon=0。"""
+    monkeypatch.setattr(service, "execute_code", _fake_execute_inprocess)
+    body = {"script": _ECHO_HORIZON_SCRIPT,
+            "test_input": {"context": {}, "actions": [], "horizon": 0}}
+
+    r = client.post(
+        f"{BASE}/projects/{project['id']}/execute", json=body,
+        headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["payload"]["horizon"] == 0
+
+    r = client.post(
+        f"{BASE}/projects/{project['id']}/save", json=body,
+        headers=auth_headers)
+    assert r.status_code == 200 and r.json()["data"]["ok"] is True
+    r = client.get(
+        f"{BASE}/projects/{project['id']}/versions", headers=auth_headers)
+    assert r.json()["data"][0]["test_input"]["horizon"] == 0
+
+    r = client.post(
+        f"{BASE}/projects/{project['id']}/publish",
+        json=_PUBLISH_BODY, headers=auth_headers)
+    assert r.status_code == 201, r.text
+    svc = r.json()["data"]
+
+    r = client.post(
+        f"{BASE}/services/{svc['id']}/invoke",
+        json={"context": {}, "actions": [], "horizon": 0},
+        headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["payload"]["horizon"] == 0
+
+
+# ──────────────────── 版本修剪：不拆在线服务引用的脚本 ────────────────────
+
+
+def test_prune_keeps_version_bound_to_online_service(
+    client, auth_headers, project, monkeypatch,
+):
+    """超过保留窗口后，仍被推演服务引用的版本不被修剪（否则调用 409）。"""
+    from app.world_model.models import SCRIPT_VERSION_KEEP
+
+    monkeypatch.setattr(service, "execute_code", _fake_execute_ok)
+    pid = project["id"]
+
+    # v1：发布并绑定给在线服务，脚本带标记以证明调用仍打到这一版
+    marker_script = (
+        "def simulate(context, actions, horizon):\n"
+        "    return {'trajectory': ['v1']}\n"
+    )
+    r = client.post(
+        f"{BASE}/projects/{pid}/save",
+        json={"script": marker_script, "test_input": {}},
+        headers=auth_headers)
+    assert r.json()["data"]["ok"] is True
+    r = client.get(f"{BASE}/projects/{pid}/versions", headers=auth_headers)
+    v1 = r.json()["data"][0]
+
+    r = client.post(
+        f"{BASE}/projects/{pid}/publish",
+        json={**_PUBLISH_BODY, "version_id": v1["id"]},
+        headers=auth_headers)
+    assert r.status_code == 201, r.text
+    svc = r.json()["data"]
+
+    # 连续保存超出保留窗口，触发修剪分支（此前从未被测试执行过）
+    for _ in range(SCRIPT_VERSION_KEEP + 5):
+        assert _save_version(client, auth_headers, pid, monkeypatch)
+
+    r = client.get(f"{BASE}/projects/{pid}/versions", headers=auth_headers)
+    versions = r.json()["data"]
+    nos = [v["version_no"] for v in versions]
+    # 最近 KEEP 版 + 被引用的 v1 保留；v2 起未引用的旧版本被修剪
+    assert len(versions) == SCRIPT_VERSION_KEEP + 1
+    assert min(nos) == 1 and max(nos) == SCRIPT_VERSION_KEEP + 6
+
+    # 在线调用仍执行被保护版本的脚本（而非 409 或新版本脚本）
+    monkeypatch.setattr(service, "execute_code", _fake_execute_inprocess)
+    r = client.post(
+        f"{BASE}/services/{svc['id']}/invoke",
+        json={"context": {}, "actions": [], "horizon": 1},
+        headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["payload"] == {"trajectory": ["v1"]}
+
+
+# ──────────────────── 关键路径日志（原模块日志为零） ────────────────────
+
+
+def test_publish_and_invoke_emit_audit_logs(
+    client, auth_headers, project, monkeypatch, caplog,
+):
+    """发布新建/覆盖、调用成功/脚本报错/基础设施 502 均有日志可查。"""
+    import logging as std_logging
+
+    from app.data_channel.pipelines.python_engine.client import PythonEngineError
+
+    monkeypatch.setattr(service, "execute_code", _fake_execute_ok)
+    _save_version(client, auth_headers, project["id"], monkeypatch)
+
+    with caplog.at_level(std_logging.INFO, logger="app.world_model.service"):
+        r = client.post(
+            f"{BASE}/projects/{project['id']}/publish",
+            json=_PUBLISH_BODY, headers=auth_headers)
+        assert r.status_code == 201, r.text
+        assert "新建上线" in caplog.text
+
+        caplog.clear()
+        r = client.post(
+            f"{BASE}/projects/{project['id']}/publish",
+            json=_PUBLISH_BODY, headers=auth_headers)
+        assert r.status_code == 201, r.text
+        assert "覆盖更新" in caplog.text
+
+        svc = r.json()["data"]
+        invoke_url = f"{BASE}/services/{svc['id']}/invoke"
+
+        caplog.clear()
+        r = client.post(invoke_url, json={"horizon": 1}, headers=auth_headers)
+        assert r.status_code == 200
+        assert "推演服务调用完成" in caplog.text
+
+        caplog.clear()
+        monkeypatch.setattr(service, "execute_code", _fake_execute_fail)
+        r = client.post(invoke_url, json={"horizon": 1}, headers=auth_headers)
+        assert r.status_code == 200 and r.json()["data"]["ok"] is False
+        assert "推演服务调用失败" in caplog.text
+
+        def _engine_down(code, **kwargs):
+            raise PythonEngineError("模拟网关不可达")
+
+        caplog.clear()
+        monkeypatch.setattr(service, "execute_code", _engine_down)
+        r = client.post(invoke_url, json={"horizon": 1}, headers=auth_headers)
+        assert r.status_code == 502
+        assert "推演服务调用中断" in caplog.text
+        assert "内核执行失败" in caplog.text
+
+        # 客户端 4xx（入参超大）不得误报为基础设施 ERROR，降为 WARNING 且留审计
+        caplog.clear()
+        monkeypatch.setattr(service, "execute_code", _fake_execute_ok)
+        r = client.post(
+            invoke_url,
+            json={"context": {"blob": "x" * 150_000}, "horizon": 1},
+            headers=auth_headers)
+        assert r.status_code == 400
+        assert "推演服务调用被拒绝" in caplog.text
+        assert "基础设施" not in caplog.text
+        r = client.get(
+            f"{BASE}/calls", params={"result": "failed"}, headers=auth_headers)
+        assert r.json()["data"]["total"] >= 1

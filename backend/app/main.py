@@ -67,14 +67,21 @@ _disable_docs = settings.environment == "production"
 
 # 应用日志兜底：uvicorn 只配置 uvicorn.* 三个 logger，app.*/root 无 handler 时
 # 有效级别为 WARNING，INFO 级审计日志（如世界模型发布/调用）会被整条丢弃。
-# 为 app.* 挂 stderr handler（幂等，防测试内多次导入/热重载重复挂载）。
-_app_logger = logging.getLogger("app")
-if not _app_logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s %(message)s"))
-    _app_logger.setLevel(logging.INFO)
-    _app_logger.addHandler(_handler)
+# 为 app.* 挂 stderr handler（幂等）；级别经 APP_LOG_LEVEL 调节；测试环境不装
+# （避免 pytest -s 刷屏与 --log-cli 双写，caplog 自带级别控制不受影响）。
+if settings.environment != "test":
+    _app_logger = logging.getLogger("app")
+    if not _app_logger.handlers:
+        _handler = logging.StreamHandler()
+        try:
+            from app.platform.observability.middleware import _RequestIdLogFilter
+            _handler.addFilter(_RequestIdLogFilter())
+            _log_fmt = "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"
+        except Exception:  # 可观测性模块不可用时退回无 request_id 的裸格式
+            _log_fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
+        _handler.setFormatter(logging.Formatter(_log_fmt))
+        _app_logger.setLevel(settings.app_log_level)
+        _app_logger.addHandler(_handler)
 
 app = FastAPI(
     title="OntoPrompt API",

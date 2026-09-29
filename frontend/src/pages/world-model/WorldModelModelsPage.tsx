@@ -37,20 +37,10 @@ import {
   CenterMorphModal,
   CenterMorphModalContent,
 } from '@/components/motion-ui/center-morph-modal'
+import { ENGINE_TYPE_OPTIONS, engineTypeLabel } from './engines'
 
 /** 列表走服务端分页：每页卡片数（含新建卡占位的网格为 4 列） */
 const PAGE_SIZE = 12
-
-export const ENGINE_TYPE_OPTIONS: { value: EngineType; label: string; hint: string }[] = [
-  { value: 'statistical', label: '统计预测', hint: '基于历史数据的统计/机器学习方法' },
-  { value: 'mechanistic', label: '机理仿真', hint: '基于物理定律或业务机理的仿真' },
-  { value: 'state_machine', label: '状态机推演', hint: '基于规则与离散状态转移' },
-  { value: 'learned', label: '学习型动力学', hint: '从交互数据学习状态转移规律' },
-]
-
-export function engineTypeLabel(value: string): string {
-  return ENGINE_TYPE_OPTIONS.find(item => item.value === value)?.label ?? value
-}
 
 function formatChangedAt(value: string | null) {
   if (!value) return '—'

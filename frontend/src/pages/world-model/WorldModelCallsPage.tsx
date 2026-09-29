@@ -1,8 +1,10 @@
 import { formatDateTime } from '@/utils/datetime'
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { toast } from 'sonner'
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -27,7 +29,7 @@ import { Button } from '@/components/ui/Button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import CallsTrendChart from './CallsTrendChart'
 import StatCard from './StatCard'
-import { formatDurationMs } from './statsFormat'
+import { formatDurationMs, formatSuccessRate } from './statsFormat'
 
 const PAGE_SIZE = 20
 /** 趋势图窗口：近 N 天按日分桶 */
@@ -49,6 +51,8 @@ export default function WorldModelCallsPage() {
     const [searchParams] = useSearchParams()
   const [items, setItems] = useState<CallRecordItem[]>([])
   const [overview, setOverview] = useState<CallRecordOverview | null>(null)
+  // 概览/趋势接口失败与「真的是 0/无调用」必须区分：失败时提示+重试，不显示误导性的 0
+  const [overviewError, setOverviewError] = useState(false)
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [draftKeyword, setDraftKeyword] = useState('')
@@ -92,18 +96,23 @@ export default function WorldModelCallsPage() {
   const loadOverview = useCallback(async () => {
     try {
       setOverview(await worldModelApi.callsOverview())
+      setOverviewError(false)
     } catch {
       setOverview(null)
+      setOverviewError(true)
     }
   }, [])
 
   const [daily, setDaily] = useState<CallRecordDailyBucket[]>([])
+  const [dailyError, setDailyError] = useState(false)
 
   const loadDaily = useCallback(async () => {
     try {
       setDaily(await worldModelApi.callsDaily(TREND_DAYS))
+      setDailyError(false)
     } catch {
       setDaily([])
+      setDailyError(true)
     }
   }, [])
 
@@ -149,8 +158,10 @@ export default function WorldModelCallsPage() {
     setDetailLoading(true)
     try {
       setDetail(await worldModelApi.getCall(item.id))
-    } catch {
+    } catch (err) {
       setDetail(null)
+      // 详情拉取失败不能只留空白抽屉：明确提示，避免误以为该记录无内容
+      toast.error('调用详情加载失败', { description: apiError(err) })
     } finally {
       setDetailLoading(false)
     }
@@ -160,22 +171,36 @@ export default function WorldModelCallsPage() {
 
   return (
     <div className="space-y-4">
-      {/* 概览统计 */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard icon={<Route size={17} />} label="总调用次数" value={overview?.total ?? 0} />
-        <StatCard icon={<AlertCircle size={17} />} label="失败次数" value={overview?.failed ?? 0} tone="danger" />
-        <StatCard icon={<Gauge size={17} />} label="平均耗时" value={overview?.avg_duration_ms ?? 0} format={formatDurationMs} />
-        <StatCard
-          icon={<CheckCircle2 size={17} />}
-          label="成功率"
-          value={
-            (overview?.total ?? 0) > 0
-              ? (((overview?.total ?? 0) - (overview?.failed ?? 0)) / (overview?.total ?? 1)) * 100
-              : 0
-          }
-          format={n => ((overview?.total ?? 0) > 0 ? `${n.toFixed(1).replace(/\.0$/, '')}%` : '—')}
-        />
-      </div>
+      {/* 概览统计：接口失败时提示+重试，绝不把故障伪装成「0 次调用」 */}
+      {overviewError ? (
+        <section
+          className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--color-warning)] bg-[var(--color-warning-bg)] px-4 py-3 text-xs text-[var(--color-warning)]"
+          aria-label="调用记录概览"
+          role="alert"
+        >
+          <AlertTriangle size={15} className="shrink-0" />
+          <span>调用统计暂时不可用（加载失败），不代表没有调用。</span>
+          <button
+            type="button"
+            onClick={() => void loadOverview()}
+            className="ml-auto inline-flex h-7 items-center gap-1 rounded-lg border border-[var(--color-warning)] bg-card px-2.5 text-[11px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning-bg)]"
+          >
+            <RefreshCw size={12} /> 重试
+          </button>
+        </section>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <StatCard icon={<Route size={17} />} label="总调用次数" value={overview?.total ?? 0} />
+          <StatCard icon={<AlertCircle size={17} />} label="失败次数" value={overview?.failed ?? 0} tone="danger" />
+          <StatCard icon={<Gauge size={17} />} label="平均耗时" value={overview?.avg_duration_ms ?? 0} format={formatDurationMs} />
+          <StatCard
+            icon={<CheckCircle2 size={17} />}
+            label="成功率"
+            value={(overview?.total ?? 0) - (overview?.failed ?? 0)}
+            format={() => formatSuccessRate((overview?.total ?? 0) - (overview?.failed ?? 0), overview?.total ?? 0)}
+          />
+        </div>
+      )}
 
       {/* 调用趋势：总量 + 失败 + 耗时的按日节奏，定位异常日期后再用筛选下钻 */}
       <section className="rounded-xl border border-border bg-card px-4 py-3 shadow-sm/50" aria-label="调用趋势">
@@ -184,7 +209,18 @@ export default function WorldModelCallsPage() {
           <span className="text-[11px] text-muted-foreground">按日统计成功 / 失败调用量与平均耗时</span>
         </div>
         <div className="h-56">
-          {daily.some(day => day.total > 0)
+          {dailyError ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3" role="status">
+              <p className="text-xs text-[var(--color-warning)]">调用趋势暂时不可用（加载失败），不代表没有调用。</p>
+              <button
+                type="button"
+                onClick={() => void loadDaily()}
+                className="inline-flex h-7 items-center gap-1 rounded-lg border border-[var(--color-warning)] bg-card px-2.5 text-[11px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning-bg)]"
+              >
+                <RefreshCw size={12} /> 重试
+              </button>
+            </div>
+          ) : daily.some(day => day.total > 0)
             ? <CallsTrendChart days={daily} />
             : (
               <p className="flex h-full items-center justify-center text-xs text-muted-foreground">

@@ -167,6 +167,15 @@ services:
       SUPER_ASSISTANT_PUBLIC_API_BASE_URL: ${SUPER_ASSISTANT_PUBLIC_API_BASE_URL:-http://localhost:8000}
       PYTHON_KERNEL_GATEWAY_URL: http://python_kernel_gateway:8088
       PYTHON_KERNEL_GATEWAY_AUTH_TOKEN: ${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}
+      # app.* 应用日志级别（main.py 兜底 handler）：生产如需关闭 INFO 审计
+      # 输出（发布/调用记录），覆盖为 WARNING。
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+    # app.* 日志走 stderr → json-file；无上限轮转会在长期运行中吃满磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     depends_on:
       db:
         condition: service_healthy
