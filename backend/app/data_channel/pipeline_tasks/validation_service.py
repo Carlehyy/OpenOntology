@@ -8,6 +8,24 @@ from app.data_channel.pipeline_tasks.models import PipelineTask
 from app.data_channel.pipelines.models import Pipeline
 
 
+def ensure_pipeline_ready_for_enable(db: Session, pipeline_id: str) -> None:
+    """启用任务前校验关联流水线仍可调度（409，与启停开关同一规则）。
+
+    停用期间允许编辑改名/改调度；只有「停用 → 启用」这一转换要求
+    流水线已发布且未停用，避免向导保存绕过开关接口的 409。
+    """
+    pipeline = db.query(Pipeline).filter(Pipeline.id == pipeline_id).first()
+    if (
+        not pipeline
+        or (pipeline.status or "draft") != "published"
+        or pipeline.enabled is False
+    ):
+        raise HTTPException(
+            409,
+            "关联流水线未发布或已停用，不能启用该调度任务",
+        )
+
+
 def _validate(
     db: Session,
     body,

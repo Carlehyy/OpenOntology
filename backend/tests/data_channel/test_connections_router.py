@@ -64,23 +64,23 @@ def test_connection_crud_never_exposes_config_and_encrypts_at_rest(
         app.dependency_overrides.pop(connections_router.get_db, None)
 
 
-def test_connection_schedule_rejects_invalid_cron_and_unknown_connection(
-    client, db, auth_headers,
-):
+def test_connection_schedule_retired_returns_410(client, db, auth_headers):
+    # 端点已退役：无论连接是否存在、表达式是否合法，一律 410 指引数据任务池
     _route_db_to(db)
     try:
         body = _create(client, auth_headers)
-        bad = client.post(
+        retired = client.post(
             f"/api/v2/connections/{body['id']}/schedule?cron_expr=not-a-cron",
             headers=auth_headers,
         )
-        assert bad.status_code == 400
+        assert retired.status_code == 410
+        assert "数据任务池" in retired.json()["detail"]
 
         missing = client.post(
             "/api/v2/connections/no-such-connection/schedule?cron_expr=* * * * *",
             headers=auth_headers,
         )
-        assert missing.status_code == 404
+        assert missing.status_code == 410
     finally:
         app.dependency_overrides.pop(connections_router.get_db, None)
 

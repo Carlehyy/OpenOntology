@@ -36,4 +36,14 @@ describe('formatDateTime 族', () => {
     assert.equal(formatDateTime('2026-08-08T01:12:30', { fallback: '从未' }), formatDateTime('2026-08-08T01:12:30Z'))
     assert.equal(formatDateTime('garbage', { fallback: '时间未知' }), '时间未知')
   })
+
+  it('带秒格式同样遵守 naive=UTC 语义（数据任务池全局历史回归锁）', () => {
+    // GlobalHistoryModal 曾先 new Date(iso) 再交给 formatDateTime：naive 串被
+    // JS 按本地时区解析，上海环境展示比真实时间早 8 小时。正确用法是直接传
+    // 字符串——这里以恒等断言锁住该用法在 { seconds: true } 形态下的正确性。
+    assert.equal(
+      formatDateTime('2026-09-28T10:00:00', { seconds: true }),
+      formatDateTime('2026-09-28T10:00:00Z', { seconds: true }),
+    )
+  })
 })

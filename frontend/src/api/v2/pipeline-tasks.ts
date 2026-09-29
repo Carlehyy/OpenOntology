@@ -34,6 +34,22 @@ export interface PipelineTask {
   last_error: string
   created_at: string | null
   updated_at: string | null
+  /**
+   * 保存/启停后调度器的注册结果（仅写接口响应携带；status 非 ok 时
+   * 前端 toast 提醒用户「自动执行可能不生效」）。
+   */
+  scheduler_refresh?: { status: 'ok' | 'not_started' | 'failed'; error?: string }
+}
+
+/** 把调度注册结果映射为用户可读的降级提示；正常/缺省返回 null */
+export function schedulerRefreshNotice(refresh?: { status: string; error?: string }): string | null {
+  if (!refresh || refresh.status === 'ok') return null
+  if (refresh.status === 'not_started') {
+    return '任务已保存，但调度器未运行，自动执行可能不生效，请检查服务状态'
+  }
+  return refresh.error
+    ? `任务已保存，但调度注册失败（${refresh.error}），自动执行可能不生效`
+    : '任务已保存，但调度注册失败，自动执行可能不生效，请稍后重试'
 }
 
 /** 单次入库对资产湖的行级影响计数（速览） */

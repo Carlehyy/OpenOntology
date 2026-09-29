@@ -10,7 +10,7 @@ import {
   Boxes, Network, ArrowRight, DatabaseBackup,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { pipelineTasksApi, WRITE_MODE_META, type PipelineFilterOption, type PipelineTask, type PipelineTaskRecentRun, type PipelineTaskStats, type WriteMode, type LakeImpact } from '@/api/v2/pipeline-tasks'
+import { pipelineTasksApi, schedulerRefreshNotice, WRITE_MODE_META, type PipelineFilterOption, type PipelineTask, type PipelineTaskRecentRun, type PipelineTaskStats, type WriteMode, type LakeImpact } from '@/api/v2/pipeline-tasks'
 import TaskFormModal from './TaskFormModal'
 import HistoryDrawer from './HistoryDrawer'
 import GlobalHistoryModal from './GlobalHistoryModal'
@@ -37,6 +37,8 @@ const WRITE_MODE_TONE: Record<WriteMode, string> = {
 
 const PANEL = 'rounded-xl border border-border bg-card shadow-sm/50 overflow-hidden'
 const RECENT_RUN_LIMIT = 30
+/** 触发/全量回填成功后延迟补刷列表的等待毫秒数 */
+const TRIGGER_FOLLOWUP_REFRESH_MS = 1200
 
 function FlowArrow() {
   return (
@@ -157,8 +159,12 @@ export default function SyncTasksTab() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [total, setTotal] = useState(0)
+  // 响应世代守卫：切页/改筛选后到达的旧响应整体丢弃，避免旧数据回写、
+  // 以及旧响应里的页码回弹把用户拽回已离开的页
+  const loadSeqRef = useRef(0)
 
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current
     setRefreshing(true)
     try {
       const params: Record<string, unknown> = { page, page_size: pageSize }
@@ -174,15 +180,23 @@ export default function SyncTasksTab() {
         pipelineTasksApi.list(params),
         pipelineTasksApi.stats(),
       ])
+      if (loadSeqRef.current !== seq) return
       setTasks(listRes.items)
       setTotal(listRes.total)
       setStats(statsRes)
+      // 删除末页最后一条后 total 缩水：收回越界页码并触发重取，
+      // 否则停留在空页且「下一页」仍禁用（与历史抽屉/全局历史同规则）
+      const pages = Math.max(1, Math.ceil(listRes.total / pageSize))
+      if (page > pages) setPage(pages)
     } catch (err) {
+      if (loadSeqRef.current !== seq) return
       console.error('加载调度任务失败', err)
       setActionError('任务数据加载失败，请检查服务状态后重试')
     } finally {
-      setLoading(false)
-      setRefreshing(false)
+      if (loadSeqRef.current === seq) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
 
   }, [page, pageSize, activeTab, search, filterPipelineId])
@@ -194,7 +208,9 @@ export default function SyncTasksTab() {
       const res = await pipelineTasksApi.pipelineOptions()
       setPipelineOptions(res.items || [])
     } catch (err) {
+      // 候选拉不到时下拉会是空的，用户无从得知原因——复用页面错误条说明
       console.error('加载流水线筛选候选失败', err)
+      setActionError('流水线筛选候选加载失败，筛选下拉可能不完整；可点击刷新重试')
     }
   }, [])
 
@@ -223,6 +239,17 @@ export default function SyncTasksTab() {
 
   const loadRef = useRef(load)
   loadRef.current = load
+  // 触发/回填成功后的延迟补刷（让「执行中」尽早出现）：定时器入 ref，
+  // 组件卸载时清理，避免卸载后仍发请求并 setState
+  const refreshTimerRef = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current)
+  }, [])
+  const scheduleRefresh = () => {
+    if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current)
+    refreshTimerRef.current = window.setTimeout(
+      () => loadRef.current(), TRIGGER_FOLLOWUP_REFRESH_MS)
+  }
   // 轮询降载：列表存在运行中任务时保持 10s，否则降为 30s；
   // 页面隐藏时暂停轮询，恢复可见时立即补一次刷新。
   // （任务状态契约仅 idle/running/success/failed，running 即唯一活跃态）
@@ -312,7 +339,13 @@ export default function SyncTasksTab() {
     if (togglingIds.has(task.id)) return
     setTogglingIds(prev => new Set(prev).add(task.id))
     try {
-      await pipelineTasksApi.toggle(task.id, !task.enabled)
+      const res = await pipelineTasksApi.toggle(task.id, !task.enabled)
+      // 保存/启停已成功，但调度器可能没挂上 Job（后端 scheduler_refresh）——
+      // 用 toast 提示用户自动执行可能不生效，不阻断操作结果
+      const notice = schedulerRefreshNotice(res?.scheduler_refresh)
+      if (notice) {
+        toast.warning(`「${task.name}」${!task.enabled ? '已启用' : '已停用'}`, { description: notice })
+      }
       load()
     } catch (err: any) {
       setActionError(`切换「${task.name}」启用状态失败：${err?.detail || err?.message || '当前状态未变更，请稍后重试'}`)
@@ -327,7 +360,7 @@ export default function SyncTasksTab() {
     setActionError('')
     try {
       await pipelineTasksApi.trigger(task.id, false)
-      setTimeout(load, 1200)
+      scheduleRefresh()
     } catch (err: any) {
       setActionError(err?.detail || err?.message || '触发失败')
     } finally {
@@ -342,7 +375,7 @@ export default function SyncTasksTab() {
     setActionError('')
     try {
       await pipelineTasksApi.trigger(task.id, false, true)
-      setTimeout(load, 1200)
+      scheduleRefresh()
     } catch (err: any) {
       setActionError(err?.detail || err?.message || '全量回填触发失败')
     } finally {

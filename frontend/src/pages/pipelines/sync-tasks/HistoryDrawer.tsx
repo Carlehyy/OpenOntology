@@ -161,18 +161,21 @@ export default function HistoryDrawer({
     : items
 
   const toggle = (runId: string) => {
+    // 展开状态先更新；审计请求放在 updater 之外——StrictMode 下 updater
+    // 可能双调用，在内部发请求会对同一 run 重复拉取审计明细
+    const expanding = !expanded.has(runId)
     setExpanded(prev => {
       const n = new Set(prev)
-      if (n.has(runId)) { n.delete(runId); return n }
-      n.add(runId)
-      if (!audits[runId]) {
-        setAudits(a => ({ ...a, [runId]: 'loading' }))
-        pipelineTasksApi.runAudit(task.id, runId)
-          .then(res => setAudits(a => ({ ...a, [runId]: res })))
-          .catch(() => setAudits(a => ({ ...a, [runId]: 'error' })))
-      }
+      if (n.has(runId)) n.delete(runId)
+      else n.add(runId)
       return n
     })
+    if (expanding && !audits[runId]) {
+      setAudits(a => ({ ...a, [runId]: 'loading' }))
+      pipelineTasksApi.runAudit(task.id, runId)
+        .then(res => setAudits(a => ({ ...a, [runId]: res })))
+        .catch(() => setAudits(a => ({ ...a, [runId]: 'error' })))
+    }
   }
 
   return (
@@ -453,7 +456,7 @@ function OutputAudit({ out, onOpenLake }: { out: RunAuditOutput; onOpenLake: () 
             )}
           </div>
         ) : (
-          <div className="border-t border-border pt-2 text-[10.5px] text-[var(--color-text-tertiary)]">本次为手动运行，无原始入湖影响记录</div>
+          <div className="border-t border-border pt-2 text-[10.5px] text-[var(--color-text-tertiary)]">这次执行没有行级入湖变化记录</div>
         )}
       </div>
     </div>

@@ -185,22 +185,18 @@ def delete_connection(connection_id: str, db: Session = Depends(get_db)):
 
 @router.post("/{connection_id}/schedule")
 def set_schedule(connection_id: str, cron_expr: str, db: Session = Depends(get_db)):
-    """为连接设置 Cron 调度表达式"""
-    from app.data_channel.sync_tasks.cron_service import CronService
-    svc = CronService()
-    if not svc.validate_cron(cron_expr):
-        raise HTTPException(400, f"无效的 cron 表达式: {cron_expr}")
+    """已退役：该端点只把表达式写进连接配置，从未向调度器注册过 Job。
 
-    conn = db.query(Connection).filter(Connection.id == connection_id).first()
-    if not conn:
-        raise HTTPException(404, "Connection not found")
-
-    result = svc.schedule_connection_sync(connection_id, cron_expr)
-    config = conn.config or {}
-    config["schedule_cron"] = cron_expr
-    conn.config = config
-    db.commit()
-    return result
+    返回 410 指引自数据任务池；存量连接 config["schedule_cron"] 键不在
+    退役清理范围内，保持原样。
+    """
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "连接级 Cron 调度已停用；请使用数据任务池"
+            "（/api/v2/pipeline-tasks）按流水线创建调度任务"
+        ),
+    )
 
 
 class SyncBody(BaseModel):

@@ -94,14 +94,20 @@ async def _execute_pipeline_task_message(payload: dict) -> None:
         execute_pipeline_task, task_id, trigger_type, full_refresh)
     if isinstance(result, dict) and result.get("status") == "ok":
         logger.info("PipelineTask %s 执行完成", task_id)
+        return
+    # 定时触发遇停用流水线属预期暂停（engine 返回 skipped，无 error 键），
+    # 同样不进失败告警
+    if isinstance(result, dict) and result.get("status") == "skipped":
+        logger.info("PipelineTask %s 跳过执行: %s", task_id, result.get("reason"))
+        return
+    error = (result or {}).get("error") if isinstance(result, dict) else result
+    # claim 冲突（租约被前一运行持有）与业务失败都算送达成功：正确性由
+    # 数据库租约兜底，消息直接 ack 丢弃。冲突是调度重叠时的预期结果，
+    # 记 info 避免把正常跳过混进失败告警；其余未成功仍记 warning。
+    if isinstance(error, str) and "任务正在执行中" in error:
+        logger.info("PipelineTask %s 租约冲突，跳过本次触发: %s", task_id, error)
     else:
-        # claim 冲突（"任务正在执行中"）与业务失败都算送达成功：
-        # 正确性由数据库租约兜底，消息直接 ack 丢弃
-        logger.warning(
-            "PipelineTask %s 执行未成功: %s",
-            task_id,
-            (result or {}).get("error") if isinstance(result, dict) else result,
-        )
+        logger.warning("PipelineTask %s 执行未成功: %s", task_id, error)
 
 
 async def _run_pipeline_run_message(payload: dict) -> None:

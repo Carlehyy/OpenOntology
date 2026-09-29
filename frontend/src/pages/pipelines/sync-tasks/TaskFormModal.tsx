@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { toast } from 'sonner'
 import {
   X, Loader2, AlertCircle, CheckCircle2, GitBranch, ArrowRight,
@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import {
-  pipelineTasksApi, WRITE_MODE_META,
+  pipelineTasksApi, schedulerRefreshNotice, WRITE_MODE_META,
   type PipelineTask, type PipelineTaskPayload, type WriteMode,
   type PipelineTaskScheduleType, type SelectablePipeline, type CuratedDataset, type CuratedPreview,
 } from '@/api/v2/pipeline-tasks'
@@ -62,7 +62,8 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
     enabled: true,
   })
 
-  useEffect(() => {
+  // 候选加载失败时可就地重试：整页 reload 会丢掉用户已填的表单内容
+  const loadPipelines = useCallback(() => {
     setPipelinesLoading(true)
     setPipelinesError('')
     pipelineTasksApi.selectablePipelines()
@@ -73,6 +74,8 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
       })
       .finally(() => setPipelinesLoading(false))
   }, [])
+
+  useEffect(() => { loadPipelines() }, [loadPipelines])
 
   const selectedPipeline = pipelines.find(p => p.id === form.pipeline_id) || null
   const curatedList: CuratedDataset[] = selectedPipeline?.curated_datasets || []
@@ -135,11 +138,19 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
     setSubmitting(true)
     setError('')
     try {
+      // 保存已成功但调度器未确认挂上 Job 时，后端在响应里带 scheduler_refresh——
+      // toast 提醒「自动执行可能不生效」，不阻断保存结果
       if (isEdit && initialTask) {
-        await pipelineTasksApi.update(initialTask.id, form)
+        const updated = await pipelineTasksApi.update(initialTask.id, form)
+        const notice = schedulerRefreshNotice(updated?.scheduler_refresh)
+        if (notice) {
+          toast.warning(`任务「${form.name}」已保存`, { description: notice })
+        }
       } else {
-        await pipelineTasksApi.create(form)
-        toast.success(`任务「${form.name}」已创建`)
+        const created = await pipelineTasksApi.create(form)
+        toast.success(`任务「${form.name}」已创建`, {
+          description: schedulerRefreshNotice(created?.scheduler_refresh) || undefined,
+        })
       }
       onSaved()
     } catch (err: any) {
@@ -248,7 +259,7 @@ export default function TaskFormModal({ initialTask, initialPipelineId, onClose,
                 <div className="text-sm text-[var(--color-danger)] p-5 bg-[var(--color-danger-bg)] border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] rounded-xl text-center space-y-2">
                   <AlertCircle size={22} className="mx-auto text-[var(--color-danger)]" />
                   <p>{pipelinesError}</p>
-                  <button type="button" onClick={() => window.location.reload()}
+                  <button type="button" onClick={loadPipelines}
                     className="text-xs px-3 py-1.5 border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] rounded-lg hover:bg-card">重新加载</button>
                 </div>
               ) : pipelines.length === 0 ? (
@@ -623,24 +634,26 @@ function CuratedDataPreview({ datasetId, totalRows, contractColumns, reviewStatu
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<CuratedPreview | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
   const [page, setPage] = useState(1)
   const pageSize = 10
   // 预览接口只放行已通过审核的当前版本；未审核时点开会吃 409 并静默置空，
   // 改为前置禁用并说明原因。
   const previewable = reviewStatus === 'approved'
 
-  useEffect(() => { setOpen(false); setData(null); setPage(1) }, [datasetId])
+  useEffect(() => { setOpen(false); setData(null); setLoadFailed(false); setPage(1) }, [datasetId])
 
   useEffect(() => {
     if (!open) return
     let alive = true
     setLoading(true)
     pipelineTasksApi.previewCurated(datasetId, page, pageSize)
-      .then(res => { if (alive) setData(res) })
-      .catch(() => { if (alive) setData(null) })
+      .then(res => { if (alive) { setData(res); setLoadFailed(false) } })
+      .catch(() => { if (alive) { setData(null); setLoadFailed(true) } })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [datasetId, page, open])
+  }, [datasetId, page, open, reloadKey])
 
   const total = data?.total_rows ?? totalRows
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -663,6 +676,13 @@ function CuratedDataPreview({ datasetId, totalRows, contractColumns, reviewStatu
         {loading ? (
           <div className="py-10 text-center text-xs text-[var(--color-text-tertiary)] flex items-center justify-center gap-1.5">
             <Loader2 size={13} className="animate-spin" /> 加载数据...
+          </div>
+        ) : loadFailed ? (
+          // 请求失败与真正的空页分开：置空会让人误读成「没有数据」
+          <div className="py-10 text-center text-xs text-viz-rose space-y-1.5">
+            <p>实际数据加载失败，请稍后重试</p>
+            <button type="button" onClick={() => setReloadKey(key => key + 1)}
+              className="text-[var(--color-success)] hover:underline">重试</button>
           </div>
         ) : !data || data.rows.length === 0 ? (
           <div className="py-10 text-center text-xs text-[var(--color-text-tertiary)]">该页没有数据</div>

@@ -748,8 +748,10 @@ def delete_dataset(
                 if sched.started:
                     sched.reload_task(sync_task.id)
             except Exception:
+                # 清理失败无数据风险：旧引擎对一切执行请求返回「已停用」，
+                # 残留 Job 最多触发一次被拒绝的空调度
                 logger_obj.warning(
-                    "DELETE dataset %s → 调度器 reload 失败，任务可能仍会执行一次",
+                    "DELETE dataset %s → 调度器清理旧 Job 失败（引擎已拒绝旧任务执行）",
                     dataset_id,
                 )
 

@@ -25,8 +25,11 @@ const STATUS_META: Record<string, { label: string; className: string; icon: 'suc
 }
 
 function formatDate(iso: string | null | undefined): string {
+  // 直接把字符串交给 formatDateTime：内部 parseServerTime 会对无时区
+  // 后缀的服务端时间按 UTC 补 Z。先 new Date(iso) 会被 JS 按本地时区
+  // 解析，上海环境下比真实时间早 8 小时（与任务历史抽屉的规则对齐）。
   if (!iso) return '—'
-  try { return formatDateTime(new Date(iso), { seconds: true }) } catch { return iso }
+  try { return formatDateTime(iso, { seconds: true }) } catch { return iso }
 }
 
 function formatDuration(start: string | null, end: string | null): string {

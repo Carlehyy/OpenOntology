@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.data_channel.pipeline_tasks import cache as _cache
 from app.data_channel.pipeline_tasks.models import PipelineTask
+from app.data_channel.pipeline_tasks.validation_service import (
+    ensure_pipeline_ready_for_enable,
+)
 from app.data_channel.pipelines.models import Pipeline
 
 logger = logging.getLogger(__name__)
@@ -108,10 +111,15 @@ def update_task(
         body,
         existing=task,
     )
+    payload = body.model_dump(exclude_unset=True)
+    # 停用 → 启用走与启停开关相同的流水线校验（409）；已启用任务的
+    # 改名/改调度不受影响。校验作用于保存后生效的流水线（换绑场景
+    # validation 已按新流水线把过关）。
+    effective_pipeline_id = payload.get("pipeline_id", task.pipeline_id)
+    if not task.enabled and payload.get("enabled", task.enabled):
+        ensure_pipeline_ready_for_enable(db, effective_pipeline_id)
     previous_cursor_column = task.cursor_column or ""
-    for field, value in body.model_dump(
-        exclude_unset=True
-    ).items():
+    for field, value in payload.items():
         if field == "primary_key":
             continue
         setattr(task, field, value)

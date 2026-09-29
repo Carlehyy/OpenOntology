@@ -1,6 +1,7 @@
 """Pipeline Task catalog, list enrichment, and operational statistics."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
@@ -16,9 +17,22 @@ from app.data_channel.pipeline_tasks.selection_service import (  # noqa: F401
 )
 from app.data_channel.pipelines.models import Pipeline, PipelineRun
 
+logger = logging.getLogger(__name__)
 
 QueryDependency = Callable[..., Any]
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+# 列表页 10s 级轮询的降级路径：意外异常每个进程只记一次，避免刷屏。
+# 调度器未启动等预期降级走正常返回值，不在此列。
+_LOGGED_DEGRADATIONS: set[str] = set()
+
+
+def _log_degradation_once(site: str, exc: Exception) -> None:
+    if site in _LOGGED_DEGRADATIONS:
+        return
+    _LOGGED_DEGRADATIONS.add(site)
+    logger.warning(
+        "%s 降级（本进程仅记录一次）: %s", site, exc, exc_info=True)
 
 
 def _now_utc() -> datetime:
@@ -69,8 +83,9 @@ def _live_next_run_map(task_ids: list[str]) -> dict[str, str]:
             )
             if job and job.next_run_time:
                 output[task_id] = job.next_run_time.isoformat()
-    except Exception:
-        pass
+    except Exception as exc:
+        # 调度器未启动走上方正常返回；到这里的是意外异常（导入失败等）
+        _log_degradation_once("live_next_run_map", exc)
     return output
 
 
@@ -161,8 +176,8 @@ def _last_impact_map(
             impact = (stats or {}).get("lake_impact")
             if task_id not in output and impact:
                 output[task_id] = impact
-    except Exception:
-        pass
+    except Exception as exc:
+        _log_degradation_once("last_impact_map", exc)
     return output
 
 
