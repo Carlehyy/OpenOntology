@@ -20,6 +20,7 @@ import requests
 
 from . import config, db, mcp_bridge, tls
 from .outbound_security import OutboundTargetError, request_with_safe_redirects
+from .personal_ref import PERSONAL_REF_RE
 
 _MAX_BODY_CHARS = 1_000_000
 _MAX_SNAPSHOT_BODY_CHARS = 100_000
@@ -402,6 +403,18 @@ def run_interface(
 
     if not url:
         result["error"] = "URL 不能为空"
+        result["error_type"] = "configuration"
+        _save_run(iface, result, overrides, None)
+        return result
+
+    # 无用户身份的调用链路（内部代理/数据管家等）不会解析个人变量占位符；
+    # URL 命中占位符时直接按配置错误终止，恢复占位符不出站的 fail-closed
+    # 语义（公开代理在发布时已拦截，此处兜住其余无 actor 入口）。
+    if overrides.actor is None and PERSONAL_REF_RE.search(url):
+        result["error"] = (
+            "接口 URL 含个人变量占位符（{{privacy:}}/{{env:}}），"
+            "该调用链路无用户身份、不会解析占位符"
+        )
         result["error_type"] = "configuration"
         _save_run(iface, result, overrides, None)
         return result

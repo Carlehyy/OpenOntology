@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import requests as executor_requests
 
 from app.api_hub import executor
 from app.api_hub.executor import RequestOverrides, _build_kwargs
@@ -339,7 +340,12 @@ class TestBuildKwargsPersonalInjection:
         assert "internal.example" not in json.dumps(snapshot, ensure_ascii=False)
 
     def test_without_actor_placeholder_url_masked_in_snapshot_only(self):
-        """无 actor（公开代理路径）：URL 占位符原样发出站，快照仍打码。"""
+        """无 actor（公开代理路径）：URL 占位符原样进 kwargs，快照打码。
+
+        注意：run_interface 层对无 actor 且 URL 含占位符的调用另有
+        fail-closed 守卫（见 test_run_interface_without_actor_placeholder_url_fails_closed），
+        本用例只验证 _build_kwargs 的快照脱敏。
+        """
         iface = self._make_iface(url="https://{{env:HOST}}/api/orders")
         overrides = RequestOverrides(source="public_proxy")
         kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
@@ -357,3 +363,32 @@ class TestBuildKwargsPersonalInjection:
         with p_privacy, p_env:
             with pytest.raises(ValueError, match="个人变量未配置"):
                 _build_kwargs(iface, overrides)
+
+
+def test_run_interface_without_actor_placeholder_url_fails_closed(monkeypatch):
+    """无 actor 且 URL 含占位符：不出站、按配置错误返回（安全回归）。
+
+    P0-1 把请求 URL 与快照分离后，占位符原文会随 resolved_url 出站
+    （此前被出站校验拒绝）。run_interface 需对无用户身份的链路恢复
+    fail-closed：变量名不得发给上游主机。
+    """
+
+    def fail_request(*args, **kwargs):
+        raise AssertionError("占位符 URL 不得发出站请求")
+
+    monkeypatch.setattr(executor_requests.Session, "request", fail_request)
+    iface = {
+        "id": None,
+        "method": "GET",
+        "url": "https://api.example.com/users/{{privacy:TOKEN}}/x",
+        "query_params": [],
+        "headers": [],
+        "body_type": "none",
+        "body_content": "",
+    }
+    result = executor.run_interface(
+        iface, executor.RequestOverrides(source="n8n_proxy")
+    )
+    assert result["ok"] is False
+    assert result["error_type"] == "configuration"
+    assert "个人变量" in result["error"]
