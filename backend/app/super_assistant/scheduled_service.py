@@ -31,15 +31,11 @@ from app.super_assistant.models import (
 )
 from app.super_assistant.runtime import stream_chat
 from app.super_assistant.schemas import ScheduledTaskCreate, ScheduledTaskUpdate
+from app.super_assistant.scheduled_constants import STALE_RUNNING
 
 logger = logging.getLogger(__name__)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-# 2 小时而非 30 分钟：默认 50 轮 agent 执行的墙钟可超 30 分钟，30 分钟会把
-# 还在正常执行的长任务收割成失败；日/周计划的下一槽约一天后，2 小时仍能在
-# 下次触发前清掉真正卡死的运行。conversation_service.recover_interrupted_streams
-# 的重启保护窗口复用本常量——两处必须同进退，只改一处会让时钟错开。
-STALE_RUNNING = timedelta(hours=2)
 REAP_ERROR = "执行超时未完成"
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=20)
 OVERDUE_GRACE = timedelta(hours=2)

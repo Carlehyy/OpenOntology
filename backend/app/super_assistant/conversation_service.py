@@ -70,11 +70,12 @@ def recover_interrupted_streams() -> dict[str, int]:
     db = SessionLocal()
     try:
         from app.super_assistant.models import SuperAssistantScheduledRun
-        from app.super_assistant.scheduled_service import STALE_RUNNING
+        from app.super_assistant.scheduled_constants import STALE_RUNNING
 
         # 定时任务执行器在另一进程，会话正文跑完仍会被写回 complete；这里只保护
-        # 「仍在 running 且开跑未超时」的会话。窗口必须与收割器同阈值：只改一处，
-        # 重启时另一处仍按旧时钟处理同一条会话。函数内导入避免模块级循环依赖。
+        # 「仍在 running 且开跑未超时」的会话。窗口必须与收割器同阈值：常量住在
+        # 无依赖的 scheduled_constants，两边各自导入（直接 import scheduled_service
+        # 会与 runtime 链成环，被架构守卫拦截）。
         live_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - STALE_RUNNING
         protected = {
             row[0]
