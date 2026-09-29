@@ -24,6 +24,7 @@ import { apiError, apiHub, type RunDetail, type RunOverview, type RunSummary } f
 import { Alert } from '@/components/ui/Alert'
 import { Button } from '@/components/ui/Button'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
+import { isSensitiveField } from './interfaceUxHelpers'
 import { writeTextToClipboard } from '@/utils/clipboard'
 
 const PAGE_SIZE = 20
@@ -69,10 +70,8 @@ function quickRangeDates(range: (typeof QUICK_RANGES)[number]) {
 }
 
 /** H26：静态密钥类请求头/查询参数原样入库（个人变量占位符除外），展示层默认打码防投屏/截图泄露。 */
-const SENSITIVE_HEADER_RE = /(authorization|x-auth|cookie|token|secret|passwd|password|pwd|api[-_]?key|private[-_]?key|signature|session|jwt)/i
-
 function maskHeaderValue(key: string, value: string) {
-  return SENSITIVE_HEADER_RE.test(key) ? '••••••（敏感头已脱敏展示）' : value
+  return isSensitiveField(key) ? '••••••（敏感头已脱敏展示）' : value
 }
 
 export default function RunHistory() {

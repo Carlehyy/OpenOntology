@@ -245,9 +245,15 @@ export function sortedHeaderEntries(headers: Record<string, string>): Array<[str
   return Object.entries(headers).sort(([a], [b]) => a.toLowerCase().localeCompare(b.toLowerCase()))
 }
 
-const sensitiveHeaderName = /(authorization|cookie|token|secret|credential|session|api[-_]?key|api-hub-key)/i
+// 展示脱敏口径：与后端 backend/app/api_hub/publication.py 的 is_sensitive_name 对齐（改口径时两处同步）；数据管家的写入拒绝名单是另一职责，不并入
+export const SENSITIVE_FIELD_RE = /(authorization|authentication|auth(?:[-_]?(?:code|key|token))?(?:$|[-_])|cookie|credential|token|secret|password|passwd|pwd|x-auth|api[-_]?key|api-hub-key|private[-_]?key|session|signature|bearer|jwt)/i
+
+/** 字段名/参数名是否需要展示脱敏（proxyCallExample / HttpPublicationModal / RunHistory / isSensitiveHeader 的单一口径）。 */
+export function isSensitiveField(name: string): boolean {
+  return SENSITIVE_FIELD_RE.test(name)
+}
 
 /** 响应头值可能携带会话/凭证，默认掩码展示。 */
 export function isSensitiveHeader(name: string): boolean {
-  return sensitiveHeaderName.test(name)
+  return isSensitiveField(name)
 }

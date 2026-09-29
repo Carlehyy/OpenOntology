@@ -17,7 +17,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { ProxyKeysModal, SystemDataModal } from './InterfaceDataModals'
 import { HttpPublicationModal } from './HttpPublicationModal'
-import { buildProxyCallExample } from './proxyCallExample'
+import { buildProxyCallExample, shellQuote } from './proxyCallExample'
 import {
   detectBusinessFailure,
   duplicateInterfaceName,
@@ -424,10 +424,8 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
       setFocusTarget('url')
       return
     }
-    buildCallExample(draft)
     setCallExampleDraft(structuredClone(draft))
     setCallExampleCopyState('idle')
-
   }
 
   const copyCallExample = async () => {
@@ -1541,10 +1539,6 @@ function invokeIcon(method: string) {
   if (normalized === 'DELETE') return <Trash2 size={13} />
   if (isMutatingMethod(normalized)) return <Send size={13} />
   return <Play size={13} />
-}
-
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", "'\\''")}'`
 }
 
 function formatFileSize(bytes: number) {

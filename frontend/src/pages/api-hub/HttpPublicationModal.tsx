@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, Check, CheckCircle2, Code2, Copy, RefreshCw, Share2, ShieldCheck, SlidersHorizontal,
 } from 'lucide-react'
@@ -13,10 +13,12 @@ import {
 } from '@/components/ui/dialog'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import {
+  isSensitiveField,
   publicationBannerIconTone,
   publicationBannerTone,
   publicationStatusChipTone,
 } from './interfaceUxHelpers'
+import { shellQuote } from './proxyCallExample'
 
 interface Props {
   open: boolean
@@ -43,6 +45,12 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
   const [proxyPath, setProxyPath] = useState('/proxy')
   const [configuration, setConfiguration] = useState<PublicationDraft | null>(null)
   const [confirmDisableOpen, setConfirmDisableOpen] = useState(false)
+  // 「已复制」2 秒后自动复位；ref 持有定时器并在卸载时清理，避免对已卸载组件 setState
+  const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => {
+    if (copyResetRef.current) clearTimeout(copyResetRef.current)
+  }, [])
 
   useEffect(() => {
     if (!open || !item) return
@@ -123,7 +131,9 @@ export function HttpPublicationModal({ open, onClose, item, reload, onError }: P
   const copy = async (value: string, key: string) => {
     try {
       await writeTextToClipboard(value)
+      if (copyResetRef.current) clearTimeout(copyResetRef.current)
       setCopied(key)
+      copyResetRef.current = setTimeout(() => setCopied(''), 2000)
     } catch { onError('复制失败，请手动选择代码复制') }
   }
 
@@ -326,7 +336,6 @@ function ParameterGroup({
   )
 }
 
-const sensitiveName = /(authorization|authentication|auth(?:[-_]?(?:code|key|token))?(?:$|[-_])|cookie|credential|token|secret|password|passwd|api[-_]?key|private[-_]?key|session|signature|bearer|jwt)/i
 const managedHeaders = new Set(['accept', 'accept-encoding', 'authorization', 'connection', 'content-length', 'content-type', 'cookie', 'host', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'user-agent', 'x-api-hub-key'])
 // 个人变量占位符（与后端 PERSONAL_REF_RE 同字符集）；不用 g 标志，避免 test 状态残留
 const personalRefPattern = /\{\{(privacy|env):[A-Za-z0-9_.-]+\}\}/
@@ -397,7 +406,7 @@ function uniqueKeys(values: string[], lower: boolean, safeOnly: boolean) {
   values.forEach(value => {
     const key = (value || '').trim()
     const marker = lower ? key.toLowerCase() : key
-    if (!key || seen.has(marker) || (safeOnly && sensitiveName.test(key))) return
+    if (!key || seen.has(marker) || (safeOnly && isSensitiveField(key))) return
     seen.add(marker)
     result.push(key)
   })
@@ -406,7 +415,7 @@ function uniqueKeys(values: string[], lower: boolean, safeOnly: boolean) {
 
 function jsonLeafPaths(value: Record<string, unknown>, prefix = ''): string[] {
   return Object.entries(value).flatMap(([key, item]) => {
-    if (sensitiveName.test(key)) return []
+    if (isSensitiveField(key)) return []
     const path = `${prefix}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`
     return item && typeof item === 'object' && !Array.isArray(item) && Object.keys(item).length
       ? jsonLeafPaths(item as Record<string, unknown>, path)
@@ -542,8 +551,4 @@ function forwardingContentType(bodyType: ForwardingPackage['body_type']) {
   if (bodyType === 'json') return 'application/json'
   if (bodyType === 'form') return 'application/x-www-form-urlencoded'
   return ''
-}
-
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", "'\\''")}'`
 }

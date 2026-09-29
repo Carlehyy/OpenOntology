@@ -1,4 +1,5 @@
 import type { HubInterface, KV } from '@/api/apiHub'
+import { isSensitiveField } from './interfaceUxHelpers.ts'
 
 interface ProxyCallExampleOptions {
   item: HubInterface
@@ -12,8 +13,6 @@ interface ProxyCallExampleOptions {
   bodyEnabled?: boolean
   bodyKeys?: string[]
 }
-
-const SENSITIVE_NAME = /(authorization|cookie|token|secret|password|passwd|api[-_]?key|session)/i
 
 export function buildProxyCallExample({
   item,
@@ -31,7 +30,7 @@ export function buildProxyCallExample({
   const baseUrl = `${origin.replace(/\/$/, '')}${path}/${encodeURIComponent(slug.trim().toLowerCase())}`
   const query = uniqueKeys(queryKeys).map(key => {
     const configured = findValue(item.query_params, key)
-    const value = !SENSITIVE_NAME.test(key) && configured
+    const value = !isSensitiveField(key) && configured
       ? configured
       : `YOUR_${placeholderName(key)}`
     return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`
@@ -107,7 +106,7 @@ function bodyExample(item: HubInterface, bodyKeys: string[]): string {
       if (separator < 0) return field
       const key = field.slice(0, separator).trim()
       const value = field.slice(separator + 1).trim()
-      return `${key}=${SENSITIVE_NAME.test(key) ? `YOUR_${placeholderName(key)}` : value}`
+      return `${key}=${isSensitiveField(key) ? `YOUR_${placeholderName(key)}` : value}`
     }).filter(field => !allowed.size || allowed.has(field.split('=', 1)[0])).join('&') || 'key=value'
   }
   if (item.body_type === 'raw') return 'YOUR_REQUEST_BODY'
@@ -130,7 +129,7 @@ function selectJsonPaths(source: unknown, paths: string[]): unknown {
     const parts = path.startsWith('/')
       ? path.slice(1).split('/').map(part => part.replaceAll('~1', '/').replaceAll('~0', '~'))
       : []
-    if (!parts.length || parts.some(part => SENSITIVE_NAME.test(part))) return
+    if (!parts.length || parts.some(part => isSensitiveField(part))) return
     let current: unknown = source
     for (const part of parts) {
       if (!current || typeof current !== 'object' || Array.isArray(current) || !(part in current)) return
@@ -155,7 +154,7 @@ function redactJson(value: unknown): unknown {
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [
       key,
-      SENSITIVE_NAME.test(key) ? `YOUR_${placeholderName(key)}` : redactJson(item),
+      isSensitiveField(key) ? `YOUR_${placeholderName(key)}` : redactJson(item),
     ]))
   }
   return value
@@ -165,6 +164,7 @@ function placeholderName(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'VALUE'
 }
 
-function shellQuote(value: string): string {
+/** 单引号安全包裹 shell 参数（cURL 示例生成的共用实现）。 */
+export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }

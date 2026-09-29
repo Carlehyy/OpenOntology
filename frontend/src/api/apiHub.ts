@@ -1,18 +1,14 @@
 import axios from 'axios'
+import { attachAuthInterceptor, handleApiError } from './client'
 
 type RuntimeWindow = Window & { __API_BASE_URL__?: string }
 const runtimeBase = (typeof window !== 'undefined' && (window as RuntimeWindow).__API_BASE_URL__) || ''
 const http = axios.create({ baseURL: `${runtimeBase}/api/api-hub` })
 
-http.interceptors.request.use(config => {
-  const token = localStorage.getItem('token')
-  if (token) config.headers.Authorization = `Bearer ${token}`
-  return config
-})
-http.interceptors.response.use(
-  response => response,
-  error => Promise.reject(error.response?.data ?? error),
-)
+// 与 apiClient/apiClientV2 共用同一套登录态注入与 401 跳登录拦截器，
+// 避免 api-hub 会话过期时只 reject 不跳转
+attachAuthInterceptor(http)
+http.interceptors.response.use(response => response, handleApiError)
 
 export interface KV { key: string; value: string }
 export interface FileField { key: string; accept: string; multiple: boolean }
@@ -169,14 +165,10 @@ export const apiHub = {
   moveInterface: (id: number, body: { group_name: string; target_index: number }) =>
     data<{ ok: boolean }>(http.put(`/interfaces/${id}/move`, body)),
   deleteInterface: (id: number) => data<{ ok: boolean }>(http.delete(`/interfaces/${id}`)),
-  deleteGroup: (group_name: string) => data<{ ok: boolean; count: number }>(http.post('/interfaces/groups/delete', { group_name })),
   setHttpPublication: (
     id: number,
     body: { enabled: boolean; slug: string; query_keys: string[]; header_keys: string[]; body_enabled: boolean; body_keys?: string[] },
   ) => data<HubInterface>(http.put(`/interfaces/${id}/http-publication`, body)),
-  autoHttpPublication: (id: number) => data<HubInterface>(http.post(`/interfaces/${id}/http-publication/auto`)),
-  run: (id: number) => data<RunResult>(http.post(`/interfaces/${id}/run`)),
-  runDraft: (body: HubInterface) => data<RunResult>(http.post('/interfaces/preview-run', body)),
   runDraftRaw: async (body: HubInterface, selectedFiles: File[][]) => {
     const requestBody: HubInterface | FormData = body.body_type === 'multipart'
       ? multipartDraft(body, selectedFiles)
@@ -237,6 +229,17 @@ function multipartDraft(body: HubInterface, selectedFiles: File[][]): FormData {
   return form
 }
 
+/** 平台侧（非上游透传）调用失败：detail 承载可展示原因，供 apiError 等统一提取。 */
+export class ApiHubError extends Error {
+  readonly detail: string
+
+  constructor(detail: string) {
+    super(detail)
+    this.name = 'ApiHubError'
+    this.detail = detail
+  }
+}
+
 function rawRunResult(status: number, rawHeaders: Record<string, unknown>, data: ArrayBuffer): RunResult {
   const headers = Object.fromEntries(
     Object.entries(rawHeaders).map(([key, value]) => [key.toLowerCase(), String(value)]),
@@ -244,13 +247,15 @@ function rawRunResult(status: number, rawHeaders: Record<string, unknown>, data:
   const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data).buffer
   if (headers['x-api-hub-upstream'] !== '1') {
     const text = new TextDecoder().decode(bytes)
+    const fallback = `平台调用失败（HTTP ${status}）`
+    let detail: string
     try {
       const payload = JSON.parse(text) as { detail?: string }
-      throw { detail: payload.detail || `平台调用失败（HTTP ${status}）` }
-    } catch (error) {
-      if (error && typeof error === 'object' && 'detail' in error) throw error
-      throw { detail: text || `平台调用失败（HTTP ${status}）` }
+      detail = payload.detail || fallback
+    } catch {
+      detail = text || fallback
     }
+    throw new ApiHubError(detail)
   }
 
   const declaredContentType = headers['content-type'] || ''
