@@ -10,7 +10,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 _SENSITIVE_NAME_RE = re.compile(
     r"(authorization|authentication|auth(?:[-_]?(?:code|key|token))?(?:$|[-_])|"
-    r"cookie|credential|token|secret|password|passwd|api[-_]?key|private[-_]?key|"
+    r"cookie|credential|token|secret|password|passwd|pwd|"
+    r"api[-_]?key|api-hub-key|private[-_]?key|"
     r"session|signature|bearer|jwt)",
     re.IGNORECASE,
 )

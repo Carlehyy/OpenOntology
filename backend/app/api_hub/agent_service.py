@@ -26,12 +26,17 @@ from .interface_service import (
     create_interface,
     update_interface,
 )
+from .publication import is_sensitive_name
 
-
+# 数据管家的「写入拒绝」名单：有意比展示脱敏口径（publication.is_sensitive_name）
+# 窄——管家可以代写哪些字段由本名单决定，加宽需产品明确要求，不随展示口径
+# 联动（二次审查 8.3）。展示/脱敏路径（_redacted_url/_redact_json_value/
+# _agent_view）才使用 is_sensitive_name。
 _SENSITIVE_NAME = re.compile(
     r"(?:authorization|cookie|token|secret|password|passwd|api[-_]?key|session)",
     re.IGNORECASE,
 )
+
 _CALL_BODY_LIMIT = 20_000
 
 
@@ -176,7 +181,7 @@ def _reject_body_secrets(body_type: str, content: str) -> None:
 def _redacted_url(value: str) -> str:
     parsed = urlsplit(value or "")
     query = [
-        (key, "***" if _SENSITIVE_NAME.search(key) else item_value)
+        (key, "***" if is_sensitive_name(key) else item_value)
         for key, item_value in parse_qsl(parsed.query, keep_blank_values=True)
     ]
     return urlunsplit(
@@ -187,7 +192,7 @@ def _redacted_url(value: str) -> str:
 def _redact_json_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            str(key): "***" if _SENSITIVE_NAME.search(str(key)) else _redact_json_value(child)
+            str(key): "***" if is_sensitive_name(str(key)) else _redact_json_value(child)
             for key, child in value.items()
         }
     if isinstance(value, list):
@@ -232,7 +237,7 @@ def _agent_view(interface: dict, *, detail: bool = True) -> dict:
     headers = []
     for item in interface.get("headers") or []:
         key = str(item.get("key") or "")
-        sensitive = bool(_SENSITIVE_NAME.search(key))
+        sensitive = bool(is_sensitive_name(key))
         headers.append(
             {
                 "key": key,
@@ -244,7 +249,7 @@ def _agent_view(interface: dict, *, detail: bool = True) -> dict:
     query = []
     for item in interface.get("query_params") or []:
         key = str(item.get("key") or "")
-        sensitive = bool(_SENSITIVE_NAME.search(key))
+        sensitive = bool(is_sensitive_name(key))
         query.append(
             {
                 "key": key,

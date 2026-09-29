@@ -26,16 +26,15 @@ from ..interface_service import (
     _is_admin,
     _validate_proxy_publish,
 )
+from ..publication import is_sensitive_name
 
 router = APIRouter(prefix="/backup", tags=["api-hub-backup"])
 
 # 备份文件的标识，还原时用于校验来源
 BACKUP_APP = "API-Hub"
 BACKUP_VERSION = 7
-_SENSITIVE_NAME_RE = re.compile(
-    r"(authorization|cookie|token|secret|password|passwd|api[-_]?key|session)",
-    re.IGNORECASE,
-)
+# 展示/导出脱敏口径：与前端 interfaceUxHelpers 的 SENSITIVE_FIELD_RE 同源（publication.is_sensitive_name）；
+# 数据管家的写入拒绝名单是另一职责，不并入
 
 # 可移植的接口字段（不含 id、created_at、updated_at、sort_order 等本地/派生字段）
 _IFACE_FIELDS = (
@@ -64,7 +63,7 @@ class ImportIn(BaseModel):
 def _safe_url(url: str) -> str:
     parsed = urlsplit(url or "")
     query = [
-        (key, "" if _SENSITIVE_NAME_RE.search(key) else value)
+        (key, "" if is_sensitive_name(key) else value)
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
     ]
     return urlunsplit(
@@ -101,7 +100,7 @@ def _row_to_portable(row, *, include_sensitive: bool) -> dict:
         out["query_params"] = [
             {
                 "key": item.get("key", ""),
-                "value": "" if _SENSITIVE_NAME_RE.search(item.get("key", "")) else item.get("value", ""),
+                "value": "" if is_sensitive_name(item.get("key", "")) else item.get("value", ""),
             }
             for item in query_params
             if isinstance(item, dict)

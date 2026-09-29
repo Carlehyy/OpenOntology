@@ -460,7 +460,8 @@ def test_selected_target_rejects_pipeline_that_is_no_longer_orchestrable(
 def test_data_steward_api_hub_management_is_permissioned_and_revision_safe(
         db, tmp_path, monkeypatch):
     from app.api_hub import config as hub_config, db as hub_db
-    from app.api_hub.routers.interfaces import InterfaceIn, KV, create_interface
+    from app.api_hub.interface_contracts import InterfaceIn, KV
+    from app.api_hub.interface_service import create_interface
 
     monkeypatch.setattr(hub_config, "DB_PATH", tmp_path / "agent-api-hub.db")
     hub_db.init_db()
