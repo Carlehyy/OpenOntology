@@ -14,14 +14,22 @@ from app.deps import get_current_user
 from .. import config, db, executor
 from ..interface_contracts import (
     DeleteGroupBody,
+    FileField,
     InterfaceIn,
+    InterfaceParameter,
+    KV,
     PreviewInterfaceIn,
 )
 from ..interface_service import (
     _PROXY_RESERVED_HEADERS,
+    _check_group_name,
+    _dump_kv,
     _get_or_404,
     _is_admin,
+    _load_json_list,
+    _normalize_publish_keys,
     _row_to_dict,
+    _validate_proxy_publish,
     apply_http_publication,
     auto_http_publication as persist_auto_http_publication,
     create_interface,
@@ -30,6 +38,10 @@ from ..interface_service import (
     move_interface as persist_move_interface,
     update_interface,
 )
+# KV/FileField/InterfaceParameter/_check_group_name/_dump_kv/_load_json_list/
+# _normalize_publish_keys/_validate_proxy_publish 等在路由内未直接使用，但被
+# tests/architecture/test_router_dependency_direction.py 锁定为兼容别名
+# （存量调用方经本模块转引），不得删除。
 
 router = APIRouter(prefix="/interfaces", tags=["api-hub-interfaces"])
 
