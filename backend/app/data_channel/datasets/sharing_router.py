@@ -95,6 +95,10 @@ def _dataset(db: Session, dataset_id: str) -> Dataset:
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(404, "Dataset not found")
+    if dataset.kind == "unstructured":
+        # 非结构化文件（pdf/txt 等）没有表格语义，分享维护/浏览只会把二进制
+        # 当文本猜解码渲染成乱码；明确拒绝好过让外链页呈现假数据。
+        raise HTTPException(400, "非结构化文件数据集不支持分享链接")
     _require_manual_dataset(dataset, "分享维护")
     return dataset
 
@@ -106,19 +110,24 @@ def _latest_no(db: Session, dataset_id: str) -> int:
     return latest.version_no if latest else 0
 
 
-def _change_dict(change: ManualDatasetChange) -> dict:
-    return {
+def _change_dict(change: ManualDatasetChange, *,
+                 include_reviewer: bool = True) -> dict:
+    payload = {
         "id": change.id,
         "dataset_id": change.dataset_id,
         "base_version_no": change.base_version_no,
         "status": change.status,
         "summary": change.summary or {},
         "review_comment": change.review_comment or "",
-        "reviewed_by": change.reviewed_by,
         "submitted_at": change.submitted_at.isoformat() if change.submitted_at else None,
         "reviewed_at": change.reviewed_at.isoformat() if change.reviewed_at else None,
         "applied_version_no": change.applied_version_no,
     }
+    # 决定人是内部用户 id：只进管理端响应。匿名公开端点（public_dataset）
+    # 复用本投影时必须显式关闭，不能把内部身份标识泄到外链边界。
+    if include_reviewer:
+        payload["reviewed_by"] = change.reviewed_by
+    return payload
 
 
 @management_router.post("/{dataset_id}/shares", status_code=201)
@@ -247,11 +256,22 @@ def review_change(change_id: str, body: ReviewChangeRequest, db: Session = Depen
         raise HTTPException(409, f"该任务已是 {change.status} 状态，不能重复审批")
 
     if decision == "reject":
-        change.status = "rejected"
-        change.review_comment = comment
-        change.reviewed_by = user.id
-        change.reviewed_at = _now()
+        # CAS 拒绝：UPDATE 带 status=pending 条件，并发批准先提交时本 UPDATE
+        # 落空（0 行），不会出现「驳回应答成功、终态却是 approved」的审计矛盾。
+        reviewed_at = _now()
+        updated = db.query(ManualDatasetChange).filter(
+            ManualDatasetChange.id == change.id,
+            ManualDatasetChange.status == "pending",
+        ).update({
+            "status": "rejected",
+            "review_comment": comment,
+            "reviewed_by": user.id,
+            "reviewed_at": reviewed_at,
+        }, synchronize_session=False)
+        if not updated:
+            raise HTTPException(409, "该任务已被处理，不能重复审批")
         db.commit()
+        db.refresh(change)
         return _change_dict(change)
 
     from app.data_channel.datasets.lock import DatasetLockTimeout, dataset_write_lock
@@ -260,6 +280,10 @@ def review_change(change_id: str, body: ReviewChangeRequest, db: Session = Depen
     svc = DatasetService(db)
     try:
         with dataset_write_lock(f"dataset::{dataset.id}", bind=db.get_bind(), wait_timeout=30):
+            # 锁内重读最新状态：并发驳回不持本锁，可能在进入锁之前刚刚提交。
+            db.refresh(change)
+            if change.status != "pending":
+                raise HTTPException(409, f"该任务已是 {change.status} 状态，不能重复审批")
             current_no = _latest_no(db, dataset.id)
             if current_no != change.base_version_no:
                 raise HTTPException(409, detail={
@@ -276,14 +300,31 @@ def review_change(change_id: str, body: ReviewChangeRequest, db: Session = Depen
                 schema_json=schema if new_rows else None,
                 _lock_held=True, _defer_commit=True)
             # 版本发布与审批落账必须同一次提交：create_version 只 flush 不
-            # commit。若分两次提交，第一次成功后失败会留下「新版本已发布、
-            # 变更仍 pending」，且重试必撞 base_version 409，审批永久卡死。
-            change.status = "approved"
-            change.review_comment = comment
-            change.reviewed_by = user.id
-            change.reviewed_at = _now()
-            change.applied_version_no = version.version_no
-            db.commit()
+            # commit。终局以 status=pending 为条件的 CAS 落账——并发驳回不持
+            # 本锁，可能在合并快照期间提交；CAS 落空时连已 flush 的新版本
+            # 一起回滚，杜绝「驳回应答成功、终态却是 approved」的审计矛盾。
+            decided = db.query(ManualDatasetChange).filter(
+                ManualDatasetChange.id == change.id,
+                ManualDatasetChange.status == "pending",
+            ).update({
+                "status": "approved",
+                "review_comment": comment,
+                "reviewed_by": user.id,
+                "reviewed_at": _now(),
+                "applied_version_no": version.version_no,
+            }, synchronize_session=False)
+            if not decided:
+                db.rollback()
+                raise HTTPException(409, "该任务已被处理，不能重复审批")
+            try:
+                db.commit()
+            except Exception:
+                # 提交失败先回滚再上抛：未终结的事务在 SQLite 单写者下会卡住
+                # 写锁的独立会话释放（PostgreSQL 无此耦合），锁行残留期间
+                # 该数据集的所有写操作都会 423，直到 stale_after 接管。
+                db.rollback()
+                raise
+            db.refresh(change)
             # 旧版本清理与总览缓存失效放在提交成功之后；失败不影响审批结果。
             svc.finalize_version_publish(dataset.id)
     except DatasetLockTimeout as exc:
@@ -305,31 +346,28 @@ def public_dataset(token: str, limit: int = 50, offset: int = 0,
     ).order_by(DatasetVersion.version_no.desc()).first()
     version_no = int(latest_version.version_no) if latest_version else 0
 
-    # UI paging should only materialize the requested window. Historical versions
-    # without rowcount must not fall back to a full-table read either: the public
-    # endpoint caps limit at 500 but that cap cannot bound load_all_rows. Window
-    # the stored payload directly; the total becomes a conservative "at least"
-    # count (exact on the last short page), which is enough for paging. Manual
-    # datasets are blob-backed, so no lake-table replay is involved here.
+    # UI paging should only materialize the requested window. The public
+    # endpoint caps limit at 500 but that cap cannot bound a full-table read,
+    # so both the rowcount path and the legacy path parse the stored payload
+    # strictly by window: a read failure surfaces as 502 instead of a silent
+    # empty table (visitors must not mistake "unreadable" for "no data").
+    # The legacy-no-rowcount total becomes a conservative "at least" count
+    # (exact on the last short page), which is enough for paging.
+    from app.data_channel.datasets.service import _parse_stored_rows
+    try:
+        raw = (svc.load_version_bytes(dataset.id, latest_version.version_no)
+               if latest_version else None)
+        rows = _parse_stored_rows(raw or b"", limit=limit, offset=offset)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            502, "该分享的数据版本内容读取失败，请联系分享发起方重新发布版本")
     if latest_version is None:
         total_rows = 0
-        rows = []
     elif latest_version.rowcount is not None:
         total_rows = max(0, int(latest_version.rowcount))
-        rows = svc.preview(dataset.id, latest_version.version_no, limit, offset)
     else:
-        from app.data_channel.datasets.service import _parse_stored_rows
-        try:
-            raw = svc.load_version_bytes(dataset.id, latest_version.version_no)
-            rows = _parse_stored_rows(raw or b"", limit=limit, offset=offset)
-        except HTTPException:
-            raise
-        except Exception:
-            # 读失败按 502 拒绝并说明：公开分享页不能把「读不出来」伪装成空表，
-            # 也不能借全量读兜底绕过 limit 上限。
-            raise HTTPException(
-                502, "该分享的数据版本缺少行数元数据且内容读取失败，"
-                     "请联系分享发起方重新发布版本")
         total_rows = offset + len(rows) + (1 if len(rows) >= limit else 0)
 
     typed_columns = [
@@ -389,7 +427,8 @@ def public_dataset(token: str, limit: int = 50, offset: int = 0,
             "label": share.label,
             "expires_at": share.expires_at.isoformat() if share.expires_at else None,
         },
-        "changes": [_change_dict(change) for change in changes],
+        "changes": [_change_dict(change, include_reviewer=False)
+                    for change in changes],
     }
 
 

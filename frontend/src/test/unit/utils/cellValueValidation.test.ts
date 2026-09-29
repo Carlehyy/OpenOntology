@@ -75,3 +75,25 @@ describe('validateCellValue', () => {
     assert.doesNotMatch(issue ?? '', /是\/否/)
   })
 })
+
+
+describe('cellValueMatchesType（对抗审查补充：退化输入与后端同拒）', () => {
+  it('integer：纯逗号/逗号残渣后端 int() 必拒，前端必须同样拒绝', () => {
+    for (const bad of [',', ',,+', '+,', ',,']) {
+      assert.equal(cellValueMatchesType('integer', bad), false, bad)
+    }
+    // 后端 int("1000") 接受非常规分组 "10,00"（去逗号后合法），前端同样放行
+    assert.equal(cellValueMatchesType('integer', '10,00'), true)
+  })
+
+  it('float：JS Number 会收、但 Python float 必拒的输入必须拒绝', () => {
+    for (const bad of ['0x10', '0b11', ',']) {
+      assert.equal(cellValueMatchesType('float', bad), false, bad)
+    }
+    // "1,," 去逗号后为 "1"，后端 float() 接受——前端放行才是同尺
+    assert.equal(cellValueMatchesType('float', '1,,'), true)
+    for (const ok of ['1e5', '.5', '+.5', '1,000.5', '-2E-3']) {
+      assert.equal(cellValueMatchesType('float', ok), true, ok)
+    }
+  })
+})

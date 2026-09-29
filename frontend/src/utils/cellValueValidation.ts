@@ -24,11 +24,19 @@ export function cellValueMatchesType(type: string | undefined, value: string): b
   // 与后端一致：空值放行，非空约束由主键/列契约负责，不是类型的职责
   if (expected === 'string' || !text) return true
   switch (expected) {
-    case 'integer':
-      // 后端 int(s.replace(',', ''))：千分位逗号合法，正负号合法
-      return /^[+-]?[\d,]+$/.test(text)
-    case 'float':
-      return Number.isFinite(Number(text.replaceAll(',', '')))
+    case 'integer': {
+      // 后端 int(s.replace(',', ''))：先去千分位逗号再按 Python int 解析。
+      // 残渣（纯逗号、",,+"、空串）后端必拒，这里同样拒绝。
+      const stripped = text.replaceAll(',', '')
+      return stripped !== '' && /^[+-]?\d+$/.test(stripped)
+    }
+    case 'float': {
+      // 后端 Python float：去逗号后按十进制形态解析；不接受 0x/0b 十六进制/
+      // 二进制字面量（JS Number 会收），也不接受空残渣。
+      const stripped = text.replaceAll(',', '')
+      return stripped !== ''
+        && /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(stripped)
+    }
     case 'boolean':
       return BOOLEAN_WORDS.includes(text.toLowerCase())
     case 'timestamp':
