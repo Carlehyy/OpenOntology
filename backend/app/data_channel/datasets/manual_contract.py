@@ -335,10 +335,3 @@ def require_manual_dataset(dataset, action: str) -> None:
             "人工改动会在下次同步时被覆盖",
         )
 
-
-# Private router-era names remain exact aliases for compatibility imports.
-_build_manual_schema = build_manual_schema
-_serialize_manual_contract_rows = serialize_manual_contract_rows
-_normalize_manual_contract_upload = normalize_manual_contract_upload
-_validate_manual_rows = validate_manual_rows
-_require_manual_dataset = require_manual_dataset

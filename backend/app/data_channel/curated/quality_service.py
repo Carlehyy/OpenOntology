@@ -4,7 +4,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 from sqlalchemy.orm import Session
-from app.data_channel.curated.models import CuratedDataset
 
 
 @dataclass

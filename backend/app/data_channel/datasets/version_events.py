@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.data_channel.datasets.models import (
     Dataset, DatasetVersion, DatasetVersionEvent,
 )
+# 该导入同时是 tests/v2/datasets/test_version_automation_events.py 的引用缝，
+# 保留再导出（函数本体在 automation_policy，发布门禁等多处使用）。
 from app.data_channel.datasets.automation_policy import (
     manual_dataset_automation_eligibility,
 )

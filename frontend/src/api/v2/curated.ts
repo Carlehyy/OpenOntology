@@ -117,13 +117,6 @@ const curatedApi = {
     apiClientV2.get<ReviewDiff>(`/curated/${id}/review-diff`, {
       params: { limit, offset, ...(reviewId ? { review_id: reviewId } : {}) },
     }),
-  quality: (id: string) => apiClientV2.get(`/curated/${id}/quality`),
-
-  /** Quick approve/reject (no review session needed) */
-  approve: (id: string, notes = '') =>
-    apiClientV2.post(`/curated/${id}/review?action=approve&notes=${encodeURIComponent(notes)}`),
-  reject: (id: string, notes = '') =>
-    apiClientV2.post(`/curated/${id}/review?action=reject&notes=${encodeURIComponent(notes)}`),
 
   /** 完整删除成品数据集（仅管理员；存在外部引用时拦截） */
   delete: (id: string) => apiClientV2.delete(`/curated/${id}`),
