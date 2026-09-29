@@ -61,6 +61,7 @@ _SUPER_ASSISTANT_REFLECT_FULL_DURABLE = "super-assistant-reflect-full"
 _SUPER_ASSISTANT_REFLECT_FOCUSED_DURABLE = "super-assistant-reflect-focused"
 _SUPER_ASSISTANT_PALACE_EXTRACT_DURABLE = "super-assistant-palace-extract"
 _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE = "super-assistant-palace-consolidate"
+_SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE = "super-assistant-palace-ontology-rebuild"
 _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE = "super-assistant-scheduled-run"
 _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
@@ -197,6 +198,7 @@ def _handler_registry():
         PIPELINE_RUN_SUBJECT,
         SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
         SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT,
+        SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
         SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
         SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT,
         SUPER_ASSISTANT_REFLECT_FULL_SUBJECT,
@@ -256,6 +258,11 @@ def _handler_registry():
             SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
             _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE,
             scheduled_tasks.run_scheduled_task_message,
+        ),
+        (
+            SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
+            _SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE,
+            palace_tasks.run_palace_ontology_rebuild_message,
         ),
     )
 

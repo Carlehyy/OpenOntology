@@ -29,6 +29,7 @@ import {
 import PalaceFileTree, { type PalaceInlineAction } from './PalaceFileTree'
 import PalaceGraphPanel from './PalaceGraphPanel'
 import PalaceMarkdown from './palaceMarkdown'
+import { summarizePalaceUpload } from './palaceUploadSummary'
 import {
   joinPalacePath,
   mergeOntologyDocRows,
@@ -123,6 +124,14 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
   const inputRef = useRef<HTMLInputElement>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
   const replaceInputRef = useRef<HTMLInputElement>(null)
+  /** 文件/本体文档状态请求序号：refreshTree 或新轮询发起即递增，早于它
+   * 发出的在途响应按序号丢弃——弹窗关-开快速切换时旧响应不得盖住新数据 */
+  const statusSeqRef = useRef(0)
+  /** open 的最新值快照：异步回调（上传 finally 等）里判断弹窗是否仍打开 */
+  const openRef = useRef(open)
+  useEffect(() => {
+    openRef.current = open
+  }, [open])
 
   /** 错误统一走 toast（error 音调自动 6s 消失）：内联横幅插拔会把三栏顶得上下跳动 */
   const showError = useCallback((err: unknown, fallback: string) => {
@@ -130,13 +139,16 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
   }, [toast])
 
   const refreshTree = useCallback(async () => {
-    // 权威清单失败不阻断树加载：镜像仍可展示，待同步状态由用户刷新重试
+    // 权威清单失败不阻断树加载：镜像仍可展示，待同步状态由用户刷新重试。
+    // 响应写回与轮询同口径按序号丢弃：慢的旧响应不得盖住其后新轮询/刷新
+    const seq = ++statusSeqRef.current
     const [fileRows, folderRows, docRows, published] = await Promise.all([
       superAssistantApi.palaceFiles(),
       superAssistantApi.palaceFolders(),
       superAssistantApi.palaceOntologyDocuments(),
       ontologyApi.publishedDocuments().then(res => res.items).catch(() => null),
     ])
+    if (seq !== statusSeqRef.current) return
     setFiles(fileRows)
     setFolders(folderRows)
     setOntologyDocs(docRows)
@@ -195,11 +207,14 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
   useEffect(() => {
     if (!open || !building) return
     const timer = setInterval(() => {
+      const seq = ++statusSeqRef.current
       void Promise.all([
         superAssistantApi.palaceFiles(),
         superAssistantApi.palaceOntologyDocuments(),
       ])
         .then(([fileRows, docRows]) => {
+          // 过期响应：期间已有更新的 refreshTree/轮询接管，丢弃以免盖住新数据
+          if (seq !== statusSeqRef.current) return
           setFiles(fileRows)
           setOntologyDocs(docRows)
         })
@@ -292,18 +307,50 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
 
   const handleUpload = async (list: FileList | null) => {
     if (!list || list.length === 0) return
+    // 入口快照：清空 input.value 会同步清空同一 FileList 对象，事后读
+    // list.length 恒为 0（浏览器规范行为），计数必须在动 input 之前取
+    const items = Array.from(list)
     setBusy(true)
+    let last: PalaceFile | null = null
+    const failures: Array<{ name: string, err: unknown }> = []
     try {
-      let last: PalaceFile | null = null
-      for (const file of Array.from(list)) {
-        last = await superAssistantApi.uploadPalaceFile(file, selectedDirPath)
+      // 串行上传：并行更容易触发「队列已满 / 每小时上限」配额闸；单份失败
+      // 不中断后续，成败在 finally 里汇总——前面传成功的文件必须立刻可见
+      for (const file of items) {
+        try {
+          last = await superAssistantApi.uploadPalaceFile(file, selectedDirPath)
+        } catch (err) {
+          failures.push({ name: file.name, err })
+        }
       }
-      await refreshTree()
-      if (last) setSelectedFileId(last.id)
-    } catch (err) {
-      showError(err, '上传失败')    } finally {
+    } finally {
+      let refreshFailed = false
+      try {
+        await refreshTree()
+      } catch (err) {
+        refreshFailed = true
+        showError(err, '刷新文件库失败')
+      }
+      // 上传中关了弹窗就不再恢复选中：关闭清理语义是「重开重新开始」
+      if (last && openRef.current) setSelectedFileId(last.id)
       setBusy(false)
       if (inputRef.current) inputRef.current.value = ''
+      const summary = summarizePalaceUpload({
+        total: items.length,
+        failed: failures.length,
+        failedNames: failures.map(item => item.name),
+        refreshFailed,
+      })
+      if (summary) {
+        if (summary.perFileToasts) {
+          for (const item of failures) showError(item.err, `「${item.name}」上传失败`)
+        }
+        if (summary.variant === 'success') {
+          toast.success(summary.title, { description: summary.description || undefined })
+        } else {
+          toast.error(summary.title, { description: summary.description || undefined })
+        }
+      }
     }
   }
 
@@ -317,7 +364,8 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       setShowSkipped(false)
       await refreshTree()
     } catch (err) {
-      showError(err, 'ZIP 导入失败')    } finally {
+      showError(err, 'ZIP 导入失败')
+    } finally {
       setBusy(false)
       if (zipInputRef.current) zipInputRef.current.value = ''
     }
@@ -333,7 +381,8 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       toast.success('文件已替换', { description: '新文件将自动重新抽取实体与关系。' })
       await refreshTree()
     } catch (err) {
-      showError(err, '替换失败')    } finally {
+      showError(err, '替换失败')
+    } finally {
       setBusy(false)
       setReplaceTarget(null)
       if (replaceInputRef.current) replaceInputRef.current.value = ''
@@ -348,7 +397,8 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       // 删除立即剥离图谱贡献：树与图谱一起刷新
       await refreshTree()
     } catch (err) {
-      showError(err, '删除失败')    } finally {
+      showError(err, '删除失败')
+    } finally {
       setBusy(false)
     }
   }
@@ -359,7 +409,8 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       await superAssistantApi.rebuildPalaceFile(fileId)
       await refreshTree()
     } catch (err) {
-      showError(err, '重建失败')    } finally {
+      showError(err, '重建失败')
+    } finally {
       setBusy(false)
     }
   }
@@ -370,7 +421,8 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       await superAssistantApi.rebuildPalaceOntologyDocument(docId)
       await refreshTree()
     } catch (err) {
-      showError(err, '重建失败')    } finally {
+      showError(err, '重建失败')
+    } finally {
       setBusy(false)
     }
   }
@@ -406,7 +458,8 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       await refreshTree()
     } catch (err) {
       setEditor(prev => prev ? { ...prev, saving: false } : prev)
-      showError(err, '保存失败')    }
+      showError(err, '保存失败')
+    }
   }
 
   // ----- 目录管理（新建/重命名/删除/拖拽移动）与内联输入行 -----------------

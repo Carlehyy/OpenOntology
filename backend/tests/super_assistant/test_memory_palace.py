@@ -142,6 +142,79 @@ def test_rebuild_dispatches_for_terminal_status(env):
     assert response.json() == {"dispatched": True}
 
 
+@pytest.mark.asyncio
+async def test_upload_parsing_runs_off_event_loop(env, monkeypatch):
+    """P0-1 回归：上传端点必须跑在线程池（普通 def）。看门狗线程在解析开始
+    后经 loop.call_soon_threadsafe 投递回调——回调在窗口内被执行才证明事件
+    循环未被同步解析阻塞。async def 版本会把解析直接跑在事件循环线程上，
+    回调与 wait_for 定时器一并停摆，窗口结束后以超时失败收场（不挂死）。"""
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.data_channel.steward import workspace as steward_workspace
+
+    parsing_started = threading.Event()
+    release_parsing = threading.Event()
+    loop_alive = threading.Event()
+
+    def blocking_convert(path, mime):
+        parsing_started.set()
+        # 回归形态（async def）下这里阻塞的是事件循环线程：8 秒自释放
+        # 保证用例以断言失败收场，而不是挂死
+        release_parsing.wait(timeout=8)
+        return SimpleNamespace(ok=True, content="张三 任职 ACME", error=None)
+
+    monkeypatch.setattr(steward_workspace, "convert_document", blocking_convert)
+
+    app = FastAPI()
+    app.include_router(router.router, prefix=_PREFIX)
+
+    def override_db():
+        db = env.session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = lambda: _user("user-1", "owner")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        loop = asyncio.get_running_loop()
+
+        def _watchdog() -> None:
+            parsing_started.wait(timeout=5)
+            loop.call_soon_threadsafe(loop_alive.set)
+
+        watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+        watchdog_thread.start()
+        upload_task = asyncio.create_task(client.post(
+            f"{_PREFIX}/palace/files",
+            files={"file": ("大文档.md", "# 大文档\n张三 任职 ACME".encode(), "text/markdown")},
+        ))
+
+        async def _wait_loop_alive() -> None:
+            while not loop_alive.is_set():
+                await asyncio.sleep(0.05)
+
+        try:
+            # 解析阻塞的窗口内，循环必须消化看门狗回调；回归形态下回调与
+            # 本定时器一并停摆，以 wait_for 超时失败收口
+            await asyncio.wait_for(_wait_loop_alive(), timeout=4)
+            # 功能面：解析阻塞期间另一个请求也能完成（线程池承载，不冻循环）
+            listed = await asyncio.wait_for(client.get(f"{_PREFIX}/palace/files"), timeout=3)
+            assert listed.status_code == 200
+        finally:
+            # 任何断言失败也要先解除解析阻塞并收割上传任务，不留悬挂线程
+            release_parsing.set()
+            uploaded = await asyncio.wait_for(upload_task, timeout=5)
+            watchdog_thread.join(timeout=2)
+    assert uploaded.status_code == 201, uploaded.text
+    assert uploaded.json()["extractedChars"] > 0
+
+
 # ---------------------------------------------------------------------------
 # run_build：抽取管线 + 幂等 + 降级
 # ---------------------------------------------------------------------------
@@ -248,6 +321,69 @@ def test_run_build_strips_even_when_status_reset_to_pending(env, monkeypatch):
     assert removed == [row["id"]]
 
 
+def test_replace_rename_strips_old_filename_contribution(env, monkeypatch):
+    """替换上传改名：旧文件名的图谱贡献（共享节点 source_files）必须在
+    替换请求内用旧名剥离——run_build 只按行内（新）文件名剥离，旧名条目
+    会永久残留。对照本体文档路径的 previous_title 处理。"""
+    row = _seed_built_file(env)
+    removed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        palace_service, "extract_chunk",
+        lambda call_kwargs, chunk: {"entities": [{"name": "张三", "type": "人物", "aliases": []}], "relations": []},
+    )
+    monkeypatch.setattr(palace_service, "_palace_call_kwargs", lambda db: {})
+    monkeypatch.setattr(palace_graph, "merge_extraction", lambda *a, **k: (1, 0))
+    monkeypatch.setattr(
+        palace_graph, "remove_file_graph",
+        lambda owner_id, file_id, filename: removed.append((file_id, filename)),
+    )
+    with env.session() as db:
+        palace_service.run_build(db, "user-1", row["id"])  # 首建：无剥离
+    assert removed == []
+
+    # 改名替换（fixture 已把派发替换为 no-op，聚焦替换请求自身的行为）
+    response = env.client.post(
+        f"{_PREFIX}/palace/files/{row['id']}/replace",
+        files={"file": ("新知识库.md", "# 新内容\n李四 任职 ACME\n".encode(), "text/markdown")},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["filename"] == "新知识库.md"
+    # 旧名剥离发生在替换请求内，且用的是旧文件名
+    assert removed == [(row["id"], "知识库.md")]
+
+
+def test_replace_keeps_strip_path_when_name_unchanged_or_never_built(env, monkeypatch):
+    """不过度剥离：同名替换（run_build 按现行名剥离，不在请求内预剥离）
+    与从未建过图的改名替换都不触发预剥离。"""
+    removed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        palace_graph, "remove_file_graph",
+        lambda owner_id, file_id, filename: removed.append((file_id, filename)),
+    )
+    # 从未建过图的文件：改名替换不预剥离（图中没有它的贡献）
+    fresh = _upload(env.client, "草稿.md", "# 草稿".encode()).json()
+    renamed = env.client.post(
+        f"{_PREFIX}/palace/files/{fresh['id']}/replace",
+        files={"file": ("定稿.md", "# 定稿".encode(), "text/markdown")},
+    )
+    assert renamed.status_code == 200
+    assert removed == []
+
+    # 建过图的文件：同名替换不在请求内预剥离（剥离由重建按同名完成）
+    row = _seed_built_file(env)
+    with env.session() as db:
+        db.add(SuperAssistantPalaceBuild(
+            owner_id="user-1", file_id=row["id"], content_hash=row["sha256"], status="success",
+        ))
+        db.commit()
+    same_name = env.client.post(
+        f"{_PREFIX}/palace/files/{row['id']}/replace",
+        files={"file": ("知识库.md", "# 同名新内容".encode(), "text/markdown")},
+    )
+    assert same_name.status_code == 200
+    assert removed == []
+
+
 def test_run_build_failure_marks_file_failed(env, monkeypatch):
     row = _seed_built_file(env, content="# 空文本将被抽取为空".encode())  # 有文本，走 LLM 失败路径
 
@@ -314,6 +450,31 @@ def test_request_build_falls_back_to_inline_thread_without_nats(env, monkeypatch
     assert recorded == [("user-1", row["id"])]
 
 
+def test_request_build_marks_file_failed_on_dispatch_outage(env, monkeypatch):
+    """JetStream 真实故障（连接超时等非「未配置」异常）：异常上抛且行定格
+    failed——pending 恒被重建端点 409 拒绝且用户文件无对账自愈，必须留下
+    可重试终态，否则改名替换场景下已预剥离的图谱贡献会永久丢失。"""
+    row = _seed_built_file(env)
+
+    def broken_dispatch(owner_id, file_id):
+        raise TimeoutError("nats publish timed out")
+
+    monkeypatch.setattr(palace_service, "dispatch_super_assistant_palace_extract", broken_dispatch)
+    with env.session() as db:
+        file_row = db.get(SuperAssistantPalaceFile, row["id"])
+        with pytest.raises(TimeoutError):
+            palace_service.request_build(file_row)
+        db.refresh(file_row)
+        assert file_row.status == "failed"
+        assert "派发失败" in (file_row.error or "")
+        # 闭环：failed 是重建按钮放行的终态（pending 才恒 409）
+        monkeypatch.setattr(
+            palace_service, "dispatch_super_assistant_palace_extract",
+            lambda owner_id, file_id: None,
+        )
+        assert env.client.post(f"{_PREFIX}/palace/files/{row['id']}/rebuild").status_code == 202
+
+
 def test_palace_extract_message_consumes_slot_and_swallows_errors(monkeypatch):
     # 单飞闸内执行且业务异常不外抛（nak 重投无意义）
     import asyncio
@@ -323,6 +484,40 @@ def test_palace_extract_message_consumes_slot_and_swallows_errors(monkeypatch):
 
     monkeypatch.setattr(palace_service, "run_build", failing_run_build)
     asyncio.run(palace_tasks.run_palace_extract_message({"owner_id": "u", "file_id": "f"}))
+
+
+def test_palace_ontology_rebuild_message_runs_and_swallows_errors(monkeypatch):
+    # 手动重建消息：doc_id 送达 run_ontology_document_build，且必须占抽取
+    # 并发闸（docstring 的硬承诺）；业务异常不外抛（nak 重投无意义）
+    import asyncio
+
+    slot_entries: list[int] = []
+
+    class _RecordingSlot:
+        def __enter__(self):
+            slot_entries.append(1)
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(palace_tasks, "_palace_semaphore", lambda: _RecordingSlot())
+
+    recorded: list[str] = []
+
+    def fake_build(db, doc_id):
+        recorded.append(doc_id)
+
+    monkeypatch.setattr(palace_service, "run_ontology_document_build", fake_build)
+    asyncio.run(palace_tasks.run_palace_ontology_rebuild_message({"doc_id": "doc-1"}))
+    assert recorded == ["doc-1"]
+
+    def failing_build(db, doc_id):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(palace_service, "run_ontology_document_build", failing_build)
+    asyncio.run(palace_tasks.run_palace_ontology_rebuild_message({"doc_id": "doc-1"}))
+    assert slot_entries == [1, 1]  # 两次执行都在并发闸内
 
 
 # ---------------------------------------------------------------------------

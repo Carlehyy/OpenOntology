@@ -94,6 +94,32 @@ async def run_palace_ontology_document_message(payload: dict) -> None:
     await asyncio.to_thread(_run)
 
 
+async def run_palace_ontology_rebuild_message(payload: dict) -> None:
+    """super_assistant.palace.ontology-rebuild：失败本体文档的手动重试建图。
+
+    与抽取同一并发闸（同为分钟级 LLM 长任务，不得绕开并发上限）；消息只
+    带 doc_id——内容已镜像在宫殿工作区，无需发布事件全文重放。业务异常
+    在 handler 内消化（行内 status=failed 记 error），nak 重投无意义。
+    """
+    doc_id = str(payload["doc_id"])
+
+    from app.database import SessionLocal
+    from app.super_assistant import palace_service
+
+    def _run() -> None:
+        with _palace_semaphore():
+            db = SessionLocal()
+            try:
+                palace_service.run_ontology_document_build(db, doc_id)
+                logger.info("本体文档手动重建完成（doc=%s）", doc_id)
+            except Exception:
+                logger.exception("本体文档手动重建执行失败（doc=%s）", doc_id)
+            finally:
+                db.close()
+
+    await asyncio.to_thread(_run)
+
+
 async def run_palace_consolidate_message(payload: dict) -> None:
     """super_assistant.palace.consolidate：用户图谱的定期聚类合并。
 

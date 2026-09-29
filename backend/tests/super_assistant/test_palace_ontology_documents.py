@@ -1,6 +1,7 @@
 """本体发布态业务文档的宫殿共享镜像：摄取幂等、建图管线、图谱 UNION、HTTP。"""
 from __future__ import annotations
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -48,6 +49,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "super_assistant_palace_workspace_root", str(tmp_path / "palace"))
     # 图谱视图缓存默认关闭：单测不触碰 Redis（缓存行为有专项用例）
     monkeypatch.setattr(settings, "super_assistant_palace_graph_cache_enabled", False)
+    # 手动重建默认走「无 NATS」降级（既有 {"dispatched": False} 断言保持
+    # 确定性）；NATS 派发成功/异常传播路径有专项用例覆盖
+    def _no_nats(doc_id):
+        raise RuntimeError("后台任务派发失败：未配置 NATS_URL（JetStream 消息通道）")
+
+    monkeypatch.setattr(
+        palace_service, "dispatch_super_assistant_palace_ontology_rebuild", _no_nats,
+    )
     engine = create_engine(
         f"sqlite:///{tmp_path / 'palace-ontodocs.db'}",
         connect_args={"check_same_thread": False},
@@ -446,3 +455,87 @@ def test_http_list_preview_rebuild(env, monkeypatch):
     assert env.client.get(
         f"{_PREFIX}/palace/ontology-documents/missing/preview",
     ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 手动重建的投递编排：NATS 优先，无 NATS 才降级守护线程
+# ---------------------------------------------------------------------------
+
+
+def _failed_doc_id(env) -> str:
+    with env.session() as db:
+        palace_service.ingest_ontology_document(db, EVENT)
+        row = db.query(SuperAssistantPalaceOntologyDocument).one()
+        row.status = "failed"
+        db.commit()
+        return str(row.id)
+
+
+def test_manual_rebuild_dispatches_nats_message_first(env, monkeypatch):
+    """NATS 可用时手动重建只投短消息（doc_id）：返回 dispatched=True，
+    不在 Web 进程里起守护线程跑分钟级抽取（Thread 构造记录替代计时断言）。"""
+    built: list[str] = []
+    dispatched: list[str] = []
+    threads: list[str] = []
+
+    class _RecordingThread:
+        def __init__(self, *args, **kwargs):
+            threads.append(str(kwargs.get("name") or "anonymous"))
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(palace_service, "threading", SimpleNamespace(Thread=_RecordingThread))
+    monkeypatch.setattr(palace_service, "run_ontology_document_build", _stub_build(built))
+    monkeypatch.setattr(
+        palace_service, "dispatch_super_assistant_palace_ontology_rebuild",
+        dispatched.append,
+    )
+    doc_id = _failed_doc_id(env)
+    with env.session() as db:
+        assert palace_service.rebuild_ontology_document(db, doc_id) == {"dispatched": True}
+    assert dispatched == [doc_id]
+    assert threads == []  # 派发成功绝不降级起线程
+    assert built == [doc_id]  # 只有摄取那一次，无第二次执行
+
+
+def test_manual_rebuild_propagates_non_nats_dispatch_errors(env, monkeypatch):
+    """派发侧非「未配置 NATS_URL」的异常必须向上抛：静默降级会掩盖
+    JetStream 真实故障（权限/连接被拒），重建按钮假成功。同时行定格
+    failed——pending 会在 30 分钟内持续 409，failed 让按钮立即可重试。"""
+    def _broken(doc_id):
+        raise TimeoutError("nats publish timed out")
+
+    monkeypatch.setattr(
+        palace_service, "dispatch_super_assistant_palace_ontology_rebuild", _broken,
+    )
+    doc_id = _failed_doc_id(env)
+    with env.session() as db:
+        with pytest.raises(TimeoutError):
+            palace_service.rebuild_ontology_document(db, doc_id)
+        row = db.get(SuperAssistantPalaceOntologyDocument, doc_id)
+        assert row.status == "failed"
+        assert "派发失败" in (row.error or "")
+        # 闭环：failed 可立即再次发起重建（不用等 30 分钟超龄）
+        monkeypatch.setattr(
+            palace_service, "dispatch_super_assistant_palace_ontology_rebuild",
+            lambda doc_id: None,
+        )
+        assert palace_service.rebuild_ontology_document(db, doc_id) == {"dispatched": True}
+
+
+def test_manual_rebuild_without_nats_falls_back_to_inline_thread(env, monkeypatch):
+    """无 NATS_URL 降级守护线程内联（fixture 已注入 _no_nats 派发失败）。"""
+    built: list[str] = []
+    done = threading.Event()
+
+    def _record_and_signal(db, doc_id):
+        built.append(doc_id)
+        done.set()
+
+    monkeypatch.setattr(palace_service, "run_ontology_document_build", _record_and_signal)
+    doc_id = _failed_doc_id(env)
+    with env.session() as db:
+        assert palace_service.rebuild_ontology_document(db, doc_id) == {"dispatched": False}
+    assert done.wait(timeout=5)
+    assert built == [doc_id, doc_id]  # 首次来自摄取，第二次来自降级线程

@@ -250,7 +250,10 @@ def test_dispatch_subject_and_handler_registration(monkeypatch):
     from app.super_assistant import scheduled_tasks
 
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT == "super_assistant.scheduled.run"
-    assert PIPELINE_STREAM_SUBJECTS[-1] == SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT
+    # 流扩容只能追加：本体文档手动重建为当前尾项，scheduled.run 让出尾位
+    # 但必须仍在流内（旧 subject 与旧 durable 不变是消费兼容的硬约束）
+    assert PIPELINE_STREAM_SUBJECTS[-1] == "super_assistant.palace.ontology-rebuild"
+    assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
     registry = {
         subject: (durable, handler)
         for subject, durable, handler in nats_executor._handler_registry()

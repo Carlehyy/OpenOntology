@@ -303,9 +303,11 @@ def list_palace_files(db: Session = Depends(get_db),
     return palace_service.list_files(db, current_user.id)
 
 @router.post("/palace/files", status_code=201)
-async def upload_palace_file(file: UploadFile = File(...),
-                             db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
-                             folder_path: str = Form("")):
+def upload_palace_file(file: UploadFile = File(...),
+                       db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+                       folder_path: str = Form("")):
+    # 普通 def：save_stream 内含同步落盘与 docx/pdf 解析，async def 会把这些
+    # 阻塞调用直接跑在事件循环上，冻住同进程全部请求（含 SSE/WS 心跳）
     return palace_service.upload_file(db, current_user, file, folder_path)
 
 @router.post("/palace/files/batch", status_code=201)

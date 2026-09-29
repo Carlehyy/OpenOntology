@@ -31,7 +31,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth.models import User
-from app.data_channel.pipeline_tasks.dispatch import dispatch_super_assistant_palace_extract
+from app.data_channel.pipeline_tasks.dispatch import (
+    dispatch_super_assistant_palace_extract,
+    dispatch_super_assistant_palace_ontology_rebuild,
+)
 from app.data_channel.steward.workspace import SessionWorkspace, WorkspaceError
 from app.model_configs.selector import llm_call_kwargs, select_llm_model_config, usage_tags
 from app.shared.config import settings
@@ -463,13 +466,25 @@ def run_build(db: Session, owner_id: str, file_id: str) -> SuperAssistantPalaceB
 def request_build(file_row: SuperAssistantPalaceFile) -> dict:
     """投递抽取任务：NATS 优先；未配置 NATS_URL 的部署形态降级为守护线程。
 
-    上传/重建请求绝不同步执行分钟级抽取。
+    上传/重建请求绝不同步执行分钟级抽取。JetStream 真实故障（连接拒绝/
+    派发超时等非「未配置」异常）时把行定格 failed 再上抛：pending 恒被
+    重建端点 409 拒绝且用户文件无对账自愈，留着 pending 会让图谱贡献
+    （改名替换场景已被预剥离）永久丢失且无法重试。
     """
     try:
         dispatch_super_assistant_palace_extract(file_row.owner_id, file_row.id)
         return {"dispatched": True}
-    except RuntimeError as exc:
-        if "NATS_URL" not in str(exc):
+    except Exception as exc:
+        if isinstance(exc, RuntimeError) and "NATS_URL" in str(exc):
+            # 生产编排依赖 NATS：走到这里说明部署配错，warning 是发现信号
+            logger.warning(
+                "记忆宫殿抽取未配置 NATS_URL，降级为守护线程内联（file=%s）", file_row.id,
+            )
+        else:
+            # JetStream 真实故障（连接拒绝/派发超时）：行定格 failed 再上抛，
+            # 让重建按钮可自愈——pending 恒被重建端点 409 拒绝且用户文件无
+            # 对账兜底，留着 pending 会让图谱贡献永久丢失且无法重试
+            _mark_file_dispatch_failed(file_row, exc)
             raise
 
     def _inline() -> None:
@@ -483,6 +498,23 @@ def request_build(file_row: SuperAssistantPalaceFile) -> dict:
 
     threading.Thread(target=_inline, daemon=True, name="sa-palace-build").start()
     return {"dispatched": False}
+
+
+def _mark_file_dispatch_failed(file_row: SuperAssistantPalaceFile, exc: Exception) -> None:
+    """派发侧真实故障时行定格 failed（重建按钮可自愈）；无会话绑定则跳过。"""
+    session = Session.object_session(file_row)
+    if session is None:
+        return
+    try:
+        file_row.status = "failed"
+        file_row.error = f"后台任务派发失败：{str(exc)[:2000]}"
+        session.commit()
+        logger.warning(
+            "记忆宫殿抽取派发失败，行已定格 failed（file=%s）: %s", file_row.id, exc,
+        )
+    except Exception:  # noqa: BLE001 — 状态收口失败不掩盖原始派发异常
+        session.rollback()
+        logger.exception("记忆宫殿派发失败状态收口失败（file=%s）", file_row.id)
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +776,19 @@ def _replace_artifact_and_rebuild(
     # 先卡大小再删旧 artifact，避免落盘失败把文件行留在坏状态
     if len(data) > int(settings.max_upload_mb) * 1024 * 1024:
         raise HTTPException(422, f"文件超过大小限制 {settings.max_upload_mb}MB")
+    # 改名替换先记旧名与「曾建过图」：DB 行即将改写成新名，事后 run_build
+    # 只按新名剥离，共享节点 source_files 会残留旧名（与本体文档路径的
+    # previous_title 同一问题）。剥离判定与 run_build 一致：以存在成功
+    # build 记录为准，不按当前行状态（本函数会把状态重置为 pending）。
+    previous_filename = row.filename if (
+        db.query(SuperAssistantPalaceBuild.id)
+        .filter(
+            SuperAssistantPalaceBuild.file_id == row.id,
+            SuperAssistantPalaceBuild.status == "success",
+        )
+        .first()
+        is not None
+    ) else None
     workspace = palace_workspace.user_workspace(row.owner_id)
     dir_id = palace_workspace.user_dir_id(row.owner_id)
     image = _is_image(filename)
@@ -770,6 +815,16 @@ def _replace_artifact_and_rebuild(
         row.error = None
     db.commit()
     db.refresh(row)
+    if not image and previous_filename is not None and row.filename != previous_filename:
+        # 旧名剥离在改名落库后、派发抽取前同步执行；失败不阻断替换——
+        # 新贡献整体替换与手动重建可兜底（与本体文档摄取路径同口径）
+        try:
+            palace_graph.remove_file_graph(row.owner_id, row.id, previous_filename)
+        except Exception:  # noqa: BLE001 — 剥离失败不阻断替换主流程
+            logger.warning(
+                "替换改名后旧图谱贡献剥离失败（file=%s，旧名=%s）",
+                row.id, previous_filename, exc_info=True,
+            )
     if not image:
         request_build(row)
 
@@ -1809,6 +1864,36 @@ def rebuild_ontology_document(db: Session, doc_id: str) -> dict:
     db.commit()
     if claimed.rowcount != 1:
         raise HTTPException(409, "该文档正在抽取队列中，请稍候")
+
+    # NATS 优先：手动重试是分钟级 LLM 长任务，必须离开 Web 进程并占用
+    # 抽取信号量（executor 侧 palace_tasks.run_palace_ontology_rebuild_message）。
+    # 无 NATS_URL 的部署形态降级守护线程——Web 进程重启线程即丢，行会停
+    # 在 pending/building 等超龄判定重试，这是降级路径而非常态。JetStream
+    # 真实故障（连接拒绝/超时）时行定格 failed 再上抛：pending 在 30 分钟
+    # 内持续被 409 拒绝，failed 让重试按钮立即可用（与 request_build 同口径）。
+    try:
+        dispatch_super_assistant_palace_ontology_rebuild(doc_id)
+        return {"dispatched": True}
+    except Exception as exc:
+        if isinstance(exc, RuntimeError) and "NATS_URL" in str(exc):
+            logger.warning(
+                "本体文档重建未配置 NATS_URL，降级为守护线程内联（doc=%s）", doc_id,
+            )
+        else:
+            try:
+                db.execute(
+                    update(SuperAssistantPalaceOntologyDocument)
+                    .where(SuperAssistantPalaceOntologyDocument.id == doc_id)
+                    .values(status="failed", error=f"后台任务派发失败：{str(exc)[:2000]}")
+                )
+                db.commit()
+                logger.warning(
+                    "本体文档重建派发失败，行已定格 failed（doc=%s）: %s", doc_id, exc,
+                )
+            except Exception:  # noqa: BLE001 — 状态收口失败不掩盖原始派发异常
+                db.rollback()
+                logger.exception("本体文档重建派发失败状态收口失败（doc=%s）", doc_id)
+            raise
 
     def _inline() -> None:
         build_db = SessionLocal()
