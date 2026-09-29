@@ -14,7 +14,7 @@ API key、连接串、临时数据库或报告提交到 Git。任何新增、移
 必须同步更新本页。
 
 表中临时 SQLite 只服务于隔离脚本或 API Hub，不是平台运行时降级。正常平台
-验收仍要求 PostgreSQL、Redis/Celery worker、Neo4j、MinIO、n8n 和 Chromium
+验收仍要求 PostgreSQL、Redis、NATS executor、Neo4j、MinIO、n8n 和 Chromium
 CDP 全部就绪。LLM 在平台启动后按脚本需要配置；ChromaDB 不再是任何脚本的
 运行依赖。
 

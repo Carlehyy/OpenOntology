@@ -2,6 +2,11 @@
 
 这个小工具只负责本地源码运行配置，不修改 GitHub Actions、生产部署清单或服务器环境变量。
 
+> **状态说明**：配置中心的界面和部分探针代码仍保留旧版 Celery worker 文案与检查，
+> 这不是当前后台任务运行契约。它可以用于生成配置，但不能用旧 worker PONG 作为
+> 平台启动完成的证据；支持的后台执行入口是 NATS JetStream + `nats_executor`。
+> 配置中心代码迁移需要独立的源码与测试变更，本页不把未完成迁移描述成已完成。
+
 ## 启动
 
 - Windows 11：双击 `start.bat`
@@ -18,10 +23,9 @@
 生成配置前必须确认平台与端口、安全与目录，并通过 PostgreSQL、Redis、NATS、
 Neo4j、MinIO 和 n8n 的真实连通性测试。Chromium CDP 地址同样是必填启动配置，但其
 生成前连通测试只用于提示：暂时不可达仍可生成配置并启动 API 诊断，深度
-readiness 会保持失败。生成后启动 API、Celery worker 和前端，再由“启动后
-复检”确认后端深度 readiness 及至少一个 worker 返回 PONG。任一必需依赖或
-worker 未就绪，平台都不算启动完成；配置中心不会提供 SQLite、API 线程任务、
-内存图或本地对象存储降级。
+readiness 会保持失败。生成后启动 API、NATS executor 和前端，再由真实运行检查
+确认后端深度 readiness、executor 消费心跳和前端可用。配置中心旧版 worker 检查
+不作为证据；配置中心不会提供 SQLite、API 线程任务、内存图或本地对象存储降级。
 
 CDP 地址只填写 HTTP(S) 服务根地址，例如 `http://127.0.0.1:9222`。配置中心和
 后端会自行请求 `/json/version`，因此不要把 discovery 路径、查询参数、fragment
@@ -73,11 +77,10 @@ docker run -d --name nats -p 4222:4222 -v nats_data:/data nats:alpine -js --stor
 全部必需探针通过并生成配置后，请分别打开三个终端，按网页给出的顺序启动：
 
 1. 后端
-2. Celery worker
+2. NATS executor
 3. 前端
 
 后端启动命令会读取配置的监听地址和端口。Vite 使用严格端口，如果端口被其他程序占用会明确失败，不会悄悄切换。
-Celery worker 是运行契约的一部分；入队失败不会回退到 API 进程内线程执行。
 流水线调度任务（定时触发与手动异步触发）由独立 executor 进程经 NATS 执行；本地源码运行时另开一个终端启动：
 
 ```bash

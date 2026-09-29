@@ -123,7 +123,7 @@ git diff --check
 - 变更前后测试收集数量；
 - OpenAPI/路由/RBAC diff；
 - Alembic 单 head、新库升级和现存库副本升级；
-- Celery task registry；
+- NATS executor subject、durable consumer 和 handler registry；
 - Docker Compose config 与生产镜像 build；
 - 受影响导航的真实浏览器旅程；
 - staging 健康检查与回滚演练。
@@ -132,7 +132,7 @@ git diff --check
 
 ## 必需依赖验收
 
-正常启动的 PostgreSQL、Redis/Celery worker、Neo4j、MinIO 和 n8n 必须在隔离
+正常启动的 PostgreSQL、Redis、NATS executor、Neo4j、MinIO 和 n8n 必须在隔离
 真实环境验收；Chromium CDP 也必须用真实服务验证完整 readiness，但其连通失败
 不应终止 API 进程。`ENVIRONMENT=test` 下的 SQLite、mock broker、临时对象目录
 或假的 CDP/n8n 响应只证明确定性契约，不证明真实服务 ready。

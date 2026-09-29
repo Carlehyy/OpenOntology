@@ -20,6 +20,12 @@ API Hub 自有 SQLite、测试环境 SQLite 和历史 `local://` 只读迁移兼
 
 ## 推荐：本地配置中心
 
+> **状态说明**：配置中心当前仍包含旧版 Celery 启动提示和 readiness 检查代码，
+> 这部分尚未完成 NATS executor 迁移。因此它可以用于生成本地配置，但不能作为
+> “完整平台已启动”的权威入口。完整栈优先使用 `docker-compose.local.yml`；源码
+> 运行按下方后端、NATS executor 和前端命令执行。配置中心代码迁移需作为独立变更
+> 完成，不能用文档掩盖运行时不一致。
+
 ```bash
 ./config/start.sh
 ```
@@ -27,15 +33,14 @@ API Hub 自有 SQLite、测试环境 SQLite 和历史 `local://` 只读迁移兼
 Windows 使用 `config/start.bat`。配置中心生成
 `config/generated/local/.env`，该文件不进入 Git。生成前必须通过 PostgreSQL、
 Redis、NATS、Neo4j、MinIO 和 n8n 探针；Chromium CDP 地址同样必须配置，但其启动前
-探针是提示性检查，暂时不可达不会阻止生成配置。Celery worker 在配置生成后
-按下列命令启动，CDP 未恢复前深度 readiness 保持失败。
+探针是提示性检查，暂时不可达不会阻止生成配置。配置生成后按下列命令启动后端、
+NATS executor 和前端，CDP 未恢复前深度 readiness 保持失败。
 
 随后分别启动：
 
 ```bash
 # dev_server 先执行 alembic upgrade head；迁移失败时 API 不会启动
 uv run --directory backend python -m app.dev_server
-uv run --directory backend celery -A app.tasks.celery_app:celery_app worker --loglevel=info
 # 流水线 executor：消费 NATS 派发的流水线调度/手动触发、UI 手动运行与数据集导入任务
 uv run --directory backend python -m app.data_channel.pipeline_tasks.nats_executor
 npm --prefix frontend ci
@@ -70,17 +75,17 @@ executor 被打断的执行由数据库租约兜底：租约最长 6 小时过�
 无 NATS 降级例外是超级助手反思任务（`SUPER_ASSISTANT_REFLECT_*`）：未配置
 `NATS_URL` 时降级为 Web 进程内联执行，其余派发一律 fail-closed。
 
-随后执行配置中心的“启动后复检”，确认后端深度 readiness、前端以及至少一个
-Celery worker PONG。复检未通过时平台不算启动完成。
+随后确认后端深度 readiness、前端以及 NATS executor 的进程/消费心跳。配置中心
+页面中的旧 worker PONG 检查不作为当前任务执行链的证据。
 
 n8n 地址、API Key 和超时由配置中心生成的启动环境统一托管，连通性由
-`/health/ready` 实时探测；修改 n8n 后需重启 API 与 worker。生产环境 n8n
+`/health/ready` 实时探测；修改 n8n 后需重启 API 与 NATS executor。生产环境 n8n
 不可达会在启动探针处 fail-closed；开发环境的 n8n 探针为提示性（与
 Chromium CDP 同等待遇）：没有 n8n 的开发机可以正常启动 API 进行诊断，
 深度 readiness 保持失败，工作流相关能力在使用点明确报错。测试代码只有在
 `ENVIRONMENT=test` 下才可注入隔离配置。
 
-API、worker 和前端都启动后，再由管理员登录“模型配置”页面，按需配置 LLM
+API、NATS executor 和前端都启动后，再由管理员登录“模型配置”页面，按需配置 LLM
 提供商、模型和凭据。LLM 未配置不阻断基础平台启动；相关接口会明确报告未配置，
 或在已声明的文本抽取场景使用可识别的确定性规则模式，不会伪装成 LLM 结果。
 
