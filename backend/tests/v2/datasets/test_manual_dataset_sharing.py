@@ -339,3 +339,231 @@ def test_share_listing_and_revocation_are_scoped_to_creator_or_admin(api, auth_h
         headers=auth_headers,
     )
     assert revoked.status_code == 200
+
+
+# ── 外部修改审批与版本发布的原子性（真实 Session） ──────────────────
+
+def test_approve_failure_leaves_no_published_version_and_change_stays_pending(
+        api, auth_headers, db, admin_user):
+    """历史缺陷回归：审批落账与版本发布必须同一次提交。
+
+    旧实现 create_version 先自行 commit，审批状态再单独 commit；两段之间
+    失败会留下「新版本已发布、变更仍 pending」，重试必撞 base_version 409，
+    审批永久卡死。本测试在终局提交处注入一次失败，锁住失败语义。"""
+    from app.data_channel.datasets.models import DatasetVersion
+
+    dataset_id = _dataset(api, auth_headers)
+    token = _share(api, auth_headers, dataset_id)["token"]
+    submitted = api.post(f"/api/public/manual-datasets/{token}/changes", json={
+        "base_version_no": 1,
+        "updates": [{"key": {"编号": "A1"}, "values": {"数量": "77"}}],
+    }).json()
+
+    fired = {"count": 0}
+    original_commit = db.commit
+
+    def failing_commit():
+        # 第一次 commit 就是「版本+审批」的终局提交（建表/分享/提交修改都
+        # 已经完成，锁内其余步骤只读不提交）。真实环境里 commit 失败意味着
+        # 事务已被数据库终结，这里同样先回滚再抛错，避免 SQLite 单写者
+        # 限制把写锁的释放卡死（PostgreSQL 上无此耦合）。
+        if fired["count"] == 0:
+            fired["count"] += 1
+            db.rollback()
+            raise RuntimeError("simulated decision commit failure")
+        return original_commit()
+
+    db.commit = failing_commit
+    try:
+        with pytest.raises(RuntimeError):
+            api.post(
+                f"/api/v2/manual-dataset-sharing/changes/{submitted['id']}/review",
+                json={"decision": "approve", "comment": ""},
+                headers=auth_headers)
+    finally:
+        db.commit = original_commit
+    db.rollback()
+
+    assert fired["count"] == 1
+    # 失败不留半个终局：没有新版本，变更仍 pending、可安全重试
+    assert db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id).count() == 1
+    change = db.query(ManualDatasetChange).filter(
+        ManualDatasetChange.id == submitted["id"]).one()
+    assert change.status == "pending"
+    assert change.applied_version_no is None
+
+    # 同一任务重试成功：版本发布与审批落账同时可见，不再撞 409
+    retried = api.post(
+        f"/api/v2/manual-dataset-sharing/changes/{submitted['id']}/review",
+        json={"decision": "approve", "comment": "二次提交通过"},
+        headers=auth_headers)
+    assert retried.status_code == 200, retried.text
+    body = retried.json()
+    assert body["status"] == "approved"
+    assert body["applied_version_no"] == 2
+    assert body["reviewed_by"] == admin_user.id
+    assert db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id).count() == 2
+
+
+def test_public_share_windows_legacy_versions_without_rowcount(
+        api, auth_headers, db):
+    """旧版本缺 rowcount 的公开分享：按窗口读，不再全量物化后切片。
+
+    历史 fallback 是 load_all_rows 全量读再切片——limit 上限 500 夹不住
+    这次全量读；现在直接对存储载荷做 offset/limit 窗口解析，总数用保守
+    「至少」计数（末页不足一页时即为精确值）。"""
+    import hashlib
+
+    from app.data_channel.datasets.models import Dataset, DatasetVersion
+    from app.data_channel.datasets.service import rows_to_csv_bytes
+
+    columns = ["编号", "数量"]
+    ds = Dataset(name=f"legacy-{uuid.uuid4().hex[:6]}", kind="manual",
+                 schema_json={"columns": columns, "primary_key": "编号"})
+    db.add(ds)
+    db.flush()
+    blob = rows_to_csv_bytes([
+        {"编号": "A1", "数量": "1"},
+        {"编号": "A2", "数量": "2"},
+        {"编号": "A3", "数量": "3"},
+    ], columns)
+    ver = DatasetVersion(
+        dataset_id=ds.id, version_no=1, rowcount=None,
+        data_blob=blob, data_size=len(blob),
+        checksum=hashlib.sha256(blob).hexdigest())
+    db.add(ver)
+    ds.latest_version_id = ver.id
+    db.commit()
+    token = _share(api, auth_headers, ds.id)["token"]
+
+    page1 = api.get(f"/api/public/manual-datasets/{token}",
+                    params={"limit": 2, "offset": 0}).json()
+    assert len(page1["dataset"]["rows"]) == 2
+    assert page1["dataset"]["rows"][0]["编号"] == "A1"
+    # 满页时保守计数至少还有一行：2 + 1 = 3
+    assert page1["dataset"]["total_rows"] == 3
+
+    page2 = api.get(f"/api/public/manual-datasets/{token}",
+                    params={"limit": 2, "offset": 2}).json()
+    assert len(page2["dataset"]["rows"]) == 1
+    assert page2["dataset"]["rows"][0]["编号"] == "A3"
+    # 末页不足一页：2 + 1 + 0 = 3，即精确总数
+    assert page2["dataset"]["total_rows"] == 3
+
+
+# ── 对抗审查修复的回归测试 ────────────────────────────────────────
+
+def test_public_share_changes_do_not_leak_reviewer_identity(api, auth_headers):
+    """决定人是内部用户 id，只能进管理端响应；匿名公开端点不得返回。"""
+    dataset_id = _dataset(api, auth_headers)
+    token = _share(api, auth_headers, dataset_id)["token"]
+    submitted = api.post(f"/api/public/manual-datasets/{token}/changes", json={
+        "base_version_no": 1,
+        "updates": [{"key": {"编号": "A1"}, "values": {"数量": "60"}}],
+    }).json()
+
+    approved = api.post(
+        f"/api/v2/manual-dataset-sharing/changes/{submitted['id']}/review",
+        json={"decision": "approve", "comment": ""}, headers=auth_headers)
+    assert approved.status_code == 200
+    assert approved.json()["reviewed_by"]  # 管理端可见决定人
+
+    public = api.get(f"/api/public/manual-datasets/{token}").json()
+    assert public["changes"], "edit 链接应返回审批进度"
+    for item in public["changes"]:
+        assert "reviewed_by" not in item
+
+
+def test_concurrent_reject_during_approve_loses_cleanly(api, auth_headers, db, monkeypatch):
+    """批准合并快照期间并发驳回（不持写锁）：批准必须整体落空且不留新版本。"""
+    from datetime import datetime, timezone
+
+    from app.data_channel.datasets.models import DatasetVersion
+    from app.data_channel.datasets import sharing_router as sharing_module
+
+    dataset_id = _dataset(api, auth_headers)
+    token = _share(api, auth_headers, dataset_id)["token"]
+    submitted = api.post(f"/api/public/manual-datasets/{token}/changes", json={
+        "base_version_no": 1,
+        "updates": [{"key": {"编号": "A1"}, "values": {"数量": "66"}}],
+    }).json()
+    original_build = sharing_module.build_edited_snapshot
+
+    def racing_build(db_session, svc, ds, body):
+        # 模拟另一管理员在合并期间提交驳回（驳回路径不取数据集写锁）
+        db_session.query(ManualDatasetChange).filter(
+            ManualDatasetChange.id == submitted["id"],
+            ManualDatasetChange.status == "pending",
+        ).update({
+            "status": "rejected",
+            "review_comment": "并发驳回",
+            "reviewed_by": "another-admin",
+            "reviewed_at": datetime.now(timezone.utc),
+        }, synchronize_session=False)
+        db_session.commit()
+        return original_build(db_session, svc, ds, body)
+
+    monkeypatch.setattr(sharing_module, "build_edited_snapshot", racing_build)
+    raced = api.post(
+        f"/api/v2/manual-dataset-sharing/changes/{submitted['id']}/review",
+        json={"decision": "approve", "comment": ""}, headers=auth_headers)
+    assert raced.status_code == 409, raced.text
+
+    db.rollback()
+    change = db.query(ManualDatasetChange).filter(
+        ManualDatasetChange.id == submitted["id"]).one()
+    assert change.status == "rejected"  # 驳回终局保留
+    # 批准整体回滚：不留新版本、不落 applied_version_no
+    assert db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id).count() == 1
+    assert change.applied_version_no is None
+
+
+def test_unstructured_dataset_cannot_be_shared(api, auth_headers, db):
+    """非结构化文件没有表格语义：建分享必须明确拒绝，而不是让外链页渲染乱码。"""
+    import uuid as uuid_mod
+
+    from app.data_channel.datasets.models import Dataset
+
+    ds = Dataset(name=f"doc-{uuid_mod.uuid4().hex[:6]}", kind="unstructured")
+    db.add(ds)
+    db.commit()
+    db.refresh(ds)
+
+    denied = api.post(
+        f"/api/v2/manual-dataset-sharing/{ds.id}/shares",
+        json={"permission": "view", "label": "", "expires_in_days": 30},
+        headers=auth_headers)
+    assert denied.status_code == 400
+    assert "非结构化" in str(denied.json()["detail"])
+
+
+def test_public_share_read_failure_returns_502_not_empty_table(
+        api, auth_headers, db):
+    """rowcount 正常但内容校验失败：按 502 明确拒绝，不能伪装成空表。"""
+    import hashlib
+    import uuid as uuid_mod
+
+    from app.data_channel.datasets.models import Dataset, DatasetVersion
+    from app.data_channel.datasets.service import rows_to_csv_bytes
+
+    columns = ["编号", "数量"]
+    ds = Dataset(name=f"corrupt-{uuid_mod.uuid4().hex[:6]}", kind="manual",
+                 schema_json={"columns": columns, "primary_key": "编号"})
+    db.add(ds)
+    db.flush()
+    blob = rows_to_csv_bytes([{"编号": "A1", "数量": "1"}], columns)
+    ver = DatasetVersion(
+        dataset_id=ds.id, version_no=1, rowcount=1,
+        data_blob=blob, data_size=len(blob),
+        checksum=hashlib.sha256(b"tampered").hexdigest())  # 与内容不匹配
+    db.add(ver)
+    ds.latest_version_id = ver.id
+    db.commit()
+    token = _share(api, auth_headers, ds.id)["token"]
+
+    failed = api.get(f"/api/public/manual-datasets/{token}")
+    assert failed.status_code == 502
+    assert "读取失败" in str(failed.json()["detail"])

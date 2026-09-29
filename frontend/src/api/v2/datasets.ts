@@ -1,7 +1,5 @@
 import { apiClientV2 } from '@/api/client'
 
-export interface Dataset { id: string; name: string; kind: string }
-
 export interface DatasetConsumer {
   id: string
   name: string
@@ -46,14 +44,6 @@ export interface RowEditsResult {
   updated: number
   inserted: number
   deleted: number
-}
-
-export interface DatasetVersionItem {
-  id: string
-  version_no: number
-  rowcount: number | null
-  /** 表格数据存于平台数据库时为 null；文件/历史版本才有对象 URI */
-  storage_uri: string | null
 }
 
 export interface DatasetSchemaColumn {
@@ -163,12 +153,6 @@ export interface DatasetMigrationJob {
 }
 
 const datasetsApi = {
-  list: (kind?: string) => apiClientV2.get<Dataset[]>('/datasets', { params: kind ? { kind } : {} }),
-  get: (id: string) => apiClientV2.get<Dataset>(`/datasets/${id}`),
-  versions: (id: string) => apiClientV2.get<DatasetVersionItem[]>(`/datasets/${id}/versions`),
-  preview: (id: string, versionNo: number, limit = 100) =>
-    apiClientV2.get(`/datasets/${id}/versions/${versionNo}/preview`, { params: { limit } }),
-
   /** 资产湖原始数据集总览：版本/行数/来源/消费流水线 */
   overview: (params?: {
     source?: 'manual' | 'sync'
@@ -180,31 +164,9 @@ const datasetsApi = {
   }): Promise<DatasetOverviewPage> =>
     apiClientV2.get('/datasets/overview', { params }),
 
-  /** 上传文件新建数据集 */
-  upload: (file: File) => {
-    const fd = new FormData()
-    fd.append('file', file)
-    return apiClientV2.post<{ id: string; name: string; kind: string }>('/datasets/upload', fd, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
-  },
-
   /** 在线新建空表格：定义列名/类型/主键，不上传文件，之后在「维护数据」中逐行录入 */
   createTable: (payload: { name: string; columns: CreateTableColumn[]; primary_key?: string }): Promise<CreateTableResult> =>
     apiClientV2.post('/datasets/create-table', payload),
-
-  /** 在统一建表弹窗中上传表格，并将字段设置与文件一起创建为 v1 */
-  uploadConfigured: (
-    file: File,
-    payload: { name: string; columns: CreateTableColumn[]; primary_key?: string },
-  ): Promise<CreateTableResult> => {
-    const fd = new FormData()
-    fd.append('file', file)
-    fd.append('metadata', JSON.stringify(payload))
-    return apiClientV2.post('/datasets/upload', fd, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
-  },
 
   /** 在线建表专用：浏览器只上传文件，首工作表由后端后台任务异步解析 */
   startImport: (
@@ -241,10 +203,6 @@ const datasetsApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
   },
-
-  /** 使用该数据集的流水线列表 */
-  consumers: (datasetId: string): Promise<{ dataset_id: string; consumers: DatasetConsumer[] }> =>
-    apiClientV2.get(`/datasets/${datasetId}/consumers`),
 
   /** 删除数据集；存在流水线或本体映射依赖时必须先解除依赖 */
   delete: (datasetId: string): Promise<{ status: string; id: string }> =>
@@ -297,10 +255,6 @@ const datasetsApi = {
   /** 当前用户最近的成品→人工迁移任务列表 */
   migrations: (limit = 20): Promise<DatasetMigrationJob[]> =>
     apiClientV2.get('/datasets/migrations', { params: { limit } }),
-
-  /** 单个迁移任务状态 */
-  migrationStatus: (jobId: string): Promise<DatasetMigrationJob> =>
-    apiClientV2.get(`/datasets/migrations/${jobId}`),
 }
 
 export default datasetsApi

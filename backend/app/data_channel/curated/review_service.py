@@ -193,7 +193,8 @@ class ReviewService:
         self._db.commit()
         return results
 
-    def approve(self, review_id: str, notes: str = "") -> CuratedReview:
+    def approve(self, review_id: str, notes: str = "",
+                reviewer_id: str | None = None) -> CuratedReview:
         """批准当前版本审核，并原子写入下游自动化 outbox。"""
         review = self._get_review_for_mutation_or_raise(review_id)
         self._ensure_pending(review)
@@ -201,6 +202,10 @@ class ReviewService:
         review.status = "approved"
         review.notes = notes
         review.decided_at = datetime.now(timezone.utc)
+        # 决定人写在决定当时并覆盖发起人：复用 pending 审核时实际拍板的可能
+        # 是另一个人，库里这一列是「谁批的」唯一权威审计记录。
+        if reviewer_id is not None:
+            review.reviewer_id = reviewer_id
         self._set_dataset_status(review.curated_dataset_id, "approved")
         # 审核决定与下游自动灌入意图必须在同一事务提交。过去这里提交后由
         # Router 直接 ``Celery.delay``；进程在两步之间退出、或 broker 接受
@@ -220,7 +225,8 @@ class ReviewService:
         self._db.refresh(review)
         return review
 
-    def reject(self, review_id: str, notes: str = "") -> CuratedReview:
+    def reject(self, review_id: str, notes: str = "",
+               reviewer_id: str | None = None) -> CuratedReview:
         """拒绝当前版本审核。"""
         review = self._get_review_for_mutation_or_raise(review_id)
         self._ensure_pending(review)
@@ -228,6 +234,8 @@ class ReviewService:
         review.status = "rejected"
         review.notes = notes
         review.decided_at = datetime.now(timezone.utc)
+        if reviewer_id is not None:
+            review.reviewer_id = reviewer_id
         self._set_dataset_status(review.curated_dataset_id, "rejected")
         self._db.commit()
         self._db.refresh(review)

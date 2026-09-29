@@ -39,7 +39,3 @@ def dataset_consumer_map(db: Session) -> dict[str, list[dict]]:
         add(pipeline.source_dataset_id, pipeline)
     return mapping
 
-
-# Router-level private names remain aliases for source compatibility.
-_dataset_consumers = dataset_consumers
-_consumer_map = dataset_consumer_map

@@ -25,6 +25,8 @@ export interface ManualChange {
   summary: { updated: number; inserted: number; deleted: number; result_rows: number }
   edits: { updates: RowEditOp[]; inserts: RowEditOp[]; deletes: RowEditOp[] }
   review_comment: string
+  /** 做出审批决定的用户 id；pending 时为 null（管理端响应字段） */
+  reviewed_by?: string | null
   submitted_at: string
   reviewed_at: string | null
   applied_version_no: number | null

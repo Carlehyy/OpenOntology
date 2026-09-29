@@ -805,3 +805,59 @@ def test_manual_delete_blocked_by_mapping(api, auth_headers, db):
     r = api.delete(f"/api/v2/datasets/{ds_id}", headers=auth_headers)
     assert r.status_code == 409, r.text
     assert "本体映射" in r.text
+
+
+# ── 审批决定人：决定时写入 reviewer_id ────────────────────────────
+
+def test_one_step_review_records_decider_admin_id(api, auth_headers, db, admin_user):
+    """一步审批端点必须把 require_admin 给出的管理员 id 写入 reviewer_id。
+
+    历史行为：三个决定端点都把 _admin 丢掉，库里的 reviewer_id 恒为空，
+    无法回答「是谁批的」。"""
+    ds_id = _make_curated_with_versions(db, [[{"id": "1", "name": "a"}]])
+    r = api.post(f"/api/v2/curated/{ds_id}/review",
+                 params={"action": "approve", "notes": "一步审批"},
+                 headers=auth_headers)
+    assert r.status_code == 200, r.text
+    review_id = r.json().get("data", r.json())["review_id"]
+    review = db.query(CuratedReview).filter(CuratedReview.id == review_id).one()
+    assert review.status == "approved"
+    assert review.reviewer_id == admin_user.id
+
+
+def test_decision_overwrites_reviewer_when_reusing_pending_review(
+        api, auth_headers, db, admin_user):
+    """复用已有 pending 审核时，决定人写在决定当时并覆盖（而非沿用发起人）。"""
+    ds_id = _make_curated_with_versions(db, [[{"id": "1", "name": "a"}]])
+    started = api.post(f"/api/v2/curated/{ds_id}/reviews", headers=auth_headers)
+    assert started.status_code == 200, started.text
+    review_id = started.json().get("data", started.json())["review_id"]
+    # 发起端点未登记发起人：决定人必须由决定动作补写
+    assert db.query(CuratedReview).filter(
+        CuratedReview.id == review_id).one().reviewer_id is None
+
+    approved = api.post(f"/api/v2/curated/reviews/{review_id}/approve",
+                        params={"notes": "通过"}, headers=auth_headers)
+    assert approved.status_code == 200, approved.text
+    review = db.query(CuratedReview).filter(
+        CuratedReview.id == review_id).one()
+    assert review.status == "approved"
+    assert review.reviewer_id == admin_user.id
+
+    detail = api.get(f"/api/v2/curated/reviews/{review_id}", headers=auth_headers)
+    body = detail.json().get("data", detail.json())
+    assert body["reviewer_id"] == admin_user.id
+
+
+def test_reject_endpoint_records_decider(api, auth_headers, db, admin_user):
+    ds_id = _make_curated_with_versions(db, [[{"id": "1", "name": "a"}]])
+    started = api.post(f"/api/v2/curated/{ds_id}/reviews", headers=auth_headers)
+    assert started.status_code == 200, started.text
+    review_id = started.json().get("data", started.json())["review_id"]
+    r = api.post(f"/api/v2/curated/reviews/{review_id}/reject",
+                 params={"notes": "质量不达标"}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    review = db.query(CuratedReview).filter(
+        CuratedReview.id == review_id).one()
+    assert review.status == "rejected"
+    assert review.reviewer_id == admin_user.id
