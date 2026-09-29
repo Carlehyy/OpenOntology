@@ -89,13 +89,18 @@ def assert_key_scope(user, *, scope_all: bool, interface_ids: list[int]) -> None
         )
 
 
-def key_visible(user, key: dict) -> bool:
-    """scope_all 密钥仅管理员可见；其余密钥当且仅当绑定的接口全归本人。"""
+def key_visible(user, key: dict, owned: set[int] | None = None) -> bool:
+    """scope_all 密钥仅管理员可见；其余密钥当且仅当绑定的接口全归本人。
+
+    ``owned`` 可传入预取的归属集合（owned_interface_ids 的结果），避免
+    批量过滤时逐密钥重开连接查询（N+1）。
+    """
     if _is_admin(user):
         return True
     if key.get("scope_all"):
         return False
-    owned = owned_interface_ids(user)
+    if owned is None:
+        owned = owned_interface_ids(user)
     ids = [int(item) for item in key.get("interface_ids") or []]
     return bool(ids) and all(item in owned for item in ids)
 

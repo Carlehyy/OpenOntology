@@ -22,6 +22,7 @@ from ..proxy_keys import (
     delete_proxy_key as persist_delete_proxy_key,
     key_visible as _key_visible,
     list_proxy_keys as persist_list_proxy_keys,
+    owned_interface_ids,
     update_proxy_key as persist_update_proxy_key,
 )
 
@@ -61,7 +62,12 @@ def proxy_info():
 
 @admin_router.get("/keys")
 def list_proxy_keys(current_user: User = Depends(get_current_user)):
-    return [item for item in persist_list_proxy_keys() if _key_visible(current_user, item)]
+    owned = owned_interface_ids(current_user)
+    return [
+        item
+        for item in persist_list_proxy_keys()
+        if _key_visible(current_user, item, owned)
+    ]
 
 
 @admin_router.post("/keys")
@@ -156,9 +162,10 @@ def delete_proxy_key(key_id: int, current_user: User = Depends(get_current_user)
 
 def _visible_key_or_404(user: User, key_id: int) -> dict:
     """不可见与不存在同样返回 404，不暴露他人密钥的存在性（与 MCP 口径一致）。"""
+    owned = owned_interface_ids(user)
     for item in persist_list_proxy_keys():
         if int(item["id"]) == key_id:
-            if not _key_visible(user, item):
+            if not _key_visible(user, item, owned):
                 break
             return item
     raise HTTPException(status_code=404, detail="密钥不存在")
