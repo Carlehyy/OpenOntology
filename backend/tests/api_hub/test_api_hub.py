@@ -549,6 +549,33 @@ def test_legacy_open_list_proxy_channel_is_retired(hub_client, monkeypatch):
     ).status_code == 401
 
 
+def test_internal_proxy_token_unconfigured_fails_closed(hub_client, monkeypatch):
+    """令牌未配置 → 503 拒绝服务（此前该分支无直接断言）。"""
+    item = hub_client.post("/interfaces", json=_interface()).json()
+    monkeypatch.setattr(config, "INTERNAL_PROXY_TOKEN", "")
+    res = hub_client.post(
+        f"/api-hub/internal/interfaces/{item['id']}/invoke", json={}
+    )
+    assert res.status_code == 503
+    assert "尚未配置" in res.json()["detail"]
+
+
+def test_run_timeout_maps_to_timeout_error_type(hub_client, monkeypatch):
+    """上游超时 → error_type=timeout 并落审计，而不是抛异常（此前无直接断言）。"""
+
+    def fake_request(session, method, url, **kwargs):
+        raise requests.Timeout("upstream timed out")
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    item = hub_client.post("/interfaces", json=_interface()).json()
+    result = hub_client.post(f"/interfaces/{item['id']}/run").json()
+    assert result["ok"] is False
+    assert result["error_type"] == "timeout"
+    assert "超时" in result["error"]
+    runs = hub_client.get(f"/interfaces/{item['id']}/runs").json()
+    assert runs and not runs[0]["ok"]
+
+
 def test_backup_round_trip_skips_duplicates(hub_client):
     item = hub_client.post(
         "/interfaces",
