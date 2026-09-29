@@ -185,7 +185,13 @@ def _snapshot_headers(headers: dict[str, str]) -> list[dict[str, str]]:
 def _build_kwargs(
     iface: dict,
     overrides: RequestOverrides,
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, str]:
+    """构造 requests kwargs 与审计快照。
+
+    返回 ``(kwargs, snapshot, resolved_url)``：``resolved_url`` 是真正发往
+    上游的地址；``snapshot["url"]`` 在 URL 含个人变量占位符时是 ``***``，
+    仅供审计展示，不能当请求地址用。
+    """
     from .personal_ref import PERSONAL_REF_RE, resolve_personal_refs
 
     actor = overrides.actor
@@ -332,7 +338,7 @@ def _build_kwargs(
         "proxy_key_name": overrides.proxy_key_name,
         "source_ip": overrides.source_ip,
     }
-    return kwargs, snapshot
+    return kwargs, snapshot, resolved_url
 
 
 def _safe_text(resp: requests.Response) -> str:
@@ -424,8 +430,7 @@ def run_interface(
         tls.configure_session(session, use_system_trust=True)
 
         try:
-            kwargs, snapshot = _build_kwargs(iface, overrides)
-            request_url = snapshot["url"]
+            kwargs, snapshot, request_url = _build_kwargs(iface, overrides)
         except ValueError as exc:
             result["error"] = str(exc)
             result["error_type"] = "configuration"

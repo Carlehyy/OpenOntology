@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -260,7 +261,7 @@ class TestBuildKwargsPersonalInjection:
         overrides = RequestOverrides(source="ui", actor=user)
         p_privacy, p_env = self._patch_loaders(privacy={"privacy:cookie": "sid=secret"})
         with p_privacy, p_env:
-            kwargs, snapshot = _build_kwargs(iface, overrides)
+            kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
         # kwargs（发往上游）含明文
         assert kwargs["headers"]["Cookie"] == "sid=secret"
         # snapshot（审计）脱敏
@@ -275,7 +276,7 @@ class TestBuildKwargsPersonalInjection:
         overrides = RequestOverrides(source="ui", actor=user)
         p_privacy, p_env = self._patch_loaders(env={"env:REGION": "cn-north-1"})
         with p_privacy, p_env:
-            kwargs, snapshot = _build_kwargs(iface, overrides)
+            kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
         assert kwargs["headers"]["X-Region"] == "cn-north-1"
         snap_headers = {h["key"]: h["value"] for h in snapshot["headers"]}
         assert snap_headers["X-Region"] == "***"
@@ -289,7 +290,7 @@ class TestBuildKwargsPersonalInjection:
         overrides = RequestOverrides(source="ui", actor=user)
         p_privacy, p_env = self._patch_loaders(env={"env:tk": "real-token"})
         with p_privacy, p_env:
-            kwargs, snapshot = _build_kwargs(iface, overrides)
+            kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
         # body 明文发往上游
         assert b"real-token" in kwargs["data"]
         # snapshot 脱敏
@@ -302,7 +303,7 @@ class TestBuildKwargsPersonalInjection:
             headers=[{"key": "Cookie", "value": "{{privacy:cookie}}"}],
         )
         overrides = RequestOverrides(source="public_proxy")
-        kwargs, snapshot = _build_kwargs(iface, overrides)
+        kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
         # 占位符原样在上游 header 里（未被解析）
         assert kwargs["headers"]["Cookie"] == "{{privacy:cookie}}"
         # snapshot 里脱敏——不泄露变量名
@@ -314,10 +315,36 @@ class TestBuildKwargsPersonalInjection:
             headers=[{"key": "X-Region", "value": "{{env:REGION}}"}],
         )
         overrides = RequestOverrides(source="n8n_internal")
-        kwargs, snapshot = _build_kwargs(iface, overrides)
+        kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
         assert kwargs["headers"]["X-Region"] == "{{env:REGION}}"
         snap_headers = {h["key"]: h["value"] for h in snapshot["headers"]}
         assert snap_headers["X-Region"] == "***"
+
+    def test_with_actor_resolves_url_and_redacts_snapshot_url(self):
+        """URL 含占位符：出站地址用解析结果，快照 URL 打码（P0-1 回归）。
+
+        此前 run_interface 误用 snapshot["url"] 当请求地址，URL 含个人变量的
+        接口发往上游的是 "***"，必然被出站校验拒绝。
+        """
+        user = SimpleNamespace(id="u1", role="editor", is_active=True)
+        iface = self._make_iface(url="https://{{env:HOST}}/api/orders")
+        overrides = RequestOverrides(source="ui", actor=user)
+        p_privacy, p_env = self._patch_loaders(env={"env:HOST": "internal.example"})
+        with p_privacy, p_env:
+            kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
+        # 出站地址是解析后的真实 URL，不是快照里的 ***
+        assert resolved_url == "https://internal.example/api/orders"
+        # 快照 URL 打码，且不含变量明文
+        assert snapshot["url"] == "***"
+        assert "internal.example" not in json.dumps(snapshot, ensure_ascii=False)
+
+    def test_without_actor_placeholder_url_masked_in_snapshot_only(self):
+        """无 actor（公开代理路径）：URL 占位符原样发出站，快照仍打码。"""
+        iface = self._make_iface(url="https://{{env:HOST}}/api/orders")
+        overrides = RequestOverrides(source="public_proxy")
+        kwargs, snapshot, resolved_url = _build_kwargs(iface, overrides)
+        assert resolved_url == "https://{{env:HOST}}/api/orders"
+        assert snapshot["url"] == "***"
 
     def test_missing_personal_var_raises_in_build_kwargs(self):
         """缺 key 时 _build_kwargs 抛 ValueError（被 run_interface 转成 400）。"""

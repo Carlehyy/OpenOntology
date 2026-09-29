@@ -290,6 +290,46 @@ def test_preview_run_resolves_env_placeholders_for_current_user(
     assert observed["kwargs"]["headers"]["X-Region"] == "value-REGION"
 
 
+def test_run_resolves_url_placeholder_outbound_and_masks_snapshot(
+    hub_client, monkeypatch
+):
+    """P0-1 回归：URL 含 {{env:HOST}} 时出站地址是解析结果，快照 URL 是 ***。"""
+    observed = {}
+
+    def fake_request(session, method, url, **kwargs):
+        observed.update({"method": method, "url": url})
+        response = requests.Response()
+        response.status_code = 200
+        response.url = url
+        response.headers["Content-Type"] = "application/json"
+        response._content = json.dumps({"ok": True}).encode()
+        response.encoding = "utf-8"
+        return response
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    monkeypatch.setattr(
+        "app.api_hub.personal_ref._load_env_plaintext",
+        lambda keys, user: {f"env:{key}": f"value-{key}" for key in keys},
+    )
+    item = hub_client.post(
+        "/interfaces",
+        json=_interface(url="https://{{env:HOST}}/health"),
+    ).json()
+    response = hub_client.post(f"/interfaces/{item['id']}/run", json={})
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    # 出站地址是解析后的真实 URL，绝不能是快照里的 "***"
+    assert observed["url"] == "https://value-HOST/health"
+    # 审计快照的 URL 打码，且不含变量明文
+    runs = hub_client.get(f"/interfaces/{item['id']}/runs").json()
+    detail = hub_client.get(
+        f"/interfaces/{item['id']}/runs/{runs[0]['id']}"
+    ).json()
+    snapshot = detail.get("request_snapshot") or {}
+    assert snapshot.get("url") == "***"
+    assert "value-HOST" not in json.dumps(detail, ensure_ascii=False)
+
+
 def test_interface_move_reorders_within_and_across_groups(hub_client):
     first = hub_client.post(
         "/interfaces", json=_interface(name="A", group_name="一组")
