@@ -339,3 +339,115 @@ def test_share_listing_and_revocation_are_scoped_to_creator_or_admin(api, auth_h
         headers=auth_headers,
     )
     assert revoked.status_code == 200
+
+
+# ── 外部修改审批与版本发布的原子性（真实 Session） ──────────────────
+
+def test_approve_failure_leaves_no_published_version_and_change_stays_pending(
+        api, auth_headers, db, admin_user):
+    """历史缺陷回归：审批落账与版本发布必须同一次提交。
+
+    旧实现 create_version 先自行 commit，审批状态再单独 commit；两段之间
+    失败会留下「新版本已发布、变更仍 pending」，重试必撞 base_version 409，
+    审批永久卡死。本测试在终局提交处注入一次失败，锁住失败语义。"""
+    from app.data_channel.datasets.models import DatasetVersion
+
+    dataset_id = _dataset(api, auth_headers)
+    token = _share(api, auth_headers, dataset_id)["token"]
+    submitted = api.post(f"/api/public/manual-datasets/{token}/changes", json={
+        "base_version_no": 1,
+        "updates": [{"key": {"编号": "A1"}, "values": {"数量": "77"}}],
+    }).json()
+
+    fired = {"count": 0}
+    original_commit = db.commit
+
+    def failing_commit():
+        # 第一次 commit 就是「版本+审批」的终局提交（建表/分享/提交修改都
+        # 已经完成，锁内其余步骤只读不提交）。真实环境里 commit 失败意味着
+        # 事务已被数据库终结，这里同样先回滚再抛错，避免 SQLite 单写者
+        # 限制把写锁的释放卡死（PostgreSQL 上无此耦合）。
+        if fired["count"] == 0:
+            fired["count"] += 1
+            db.rollback()
+            raise RuntimeError("simulated decision commit failure")
+        return original_commit()
+
+    db.commit = failing_commit
+    try:
+        with pytest.raises(RuntimeError):
+            api.post(
+                f"/api/v2/manual-dataset-sharing/changes/{submitted['id']}/review",
+                json={"decision": "approve", "comment": ""},
+                headers=auth_headers)
+    finally:
+        db.commit = original_commit
+    db.rollback()
+
+    assert fired["count"] == 1
+    # 失败不留半个终局：没有新版本，变更仍 pending、可安全重试
+    assert db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id).count() == 1
+    change = db.query(ManualDatasetChange).filter(
+        ManualDatasetChange.id == submitted["id"]).one()
+    assert change.status == "pending"
+    assert change.applied_version_no is None
+
+    # 同一任务重试成功：版本发布与审批落账同时可见，不再撞 409
+    retried = api.post(
+        f"/api/v2/manual-dataset-sharing/changes/{submitted['id']}/review",
+        json={"decision": "approve", "comment": "二次提交通过"},
+        headers=auth_headers)
+    assert retried.status_code == 200, retried.text
+    body = retried.json()
+    assert body["status"] == "approved"
+    assert body["applied_version_no"] == 2
+    assert body["reviewed_by"] == admin_user.id
+    assert db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id).count() == 2
+
+
+def test_public_share_windows_legacy_versions_without_rowcount(
+        api, auth_headers, db):
+    """旧版本缺 rowcount 的公开分享：按窗口读，不再全量物化后切片。
+
+    历史 fallback 是 load_all_rows 全量读再切片——limit 上限 500 夹不住
+    这次全量读；现在直接对存储载荷做 offset/limit 窗口解析，总数用保守
+    「至少」计数（末页不足一页时即为精确值）。"""
+    import hashlib
+
+    from app.data_channel.datasets.models import Dataset, DatasetVersion
+    from app.data_channel.datasets.service import rows_to_csv_bytes
+
+    columns = ["编号", "数量"]
+    ds = Dataset(name=f"legacy-{uuid.uuid4().hex[:6]}", kind="manual",
+                 schema_json={"columns": columns, "primary_key": "编号"})
+    db.add(ds)
+    db.flush()
+    blob = rows_to_csv_bytes([
+        {"编号": "A1", "数量": "1"},
+        {"编号": "A2", "数量": "2"},
+        {"编号": "A3", "数量": "3"},
+    ], columns)
+    ver = DatasetVersion(
+        dataset_id=ds.id, version_no=1, rowcount=None,
+        data_blob=blob, data_size=len(blob),
+        checksum=hashlib.sha256(blob).hexdigest())
+    db.add(ver)
+    ds.latest_version_id = ver.id
+    db.commit()
+    token = _share(api, auth_headers, ds.id)["token"]
+
+    page1 = api.get(f"/api/public/manual-datasets/{token}",
+                    params={"limit": 2, "offset": 0}).json()
+    assert len(page1["dataset"]["rows"]) == 2
+    assert page1["dataset"]["rows"][0]["编号"] == "A1"
+    # 满页时保守计数至少还有一行：2 + 1 = 3
+    assert page1["dataset"]["total_rows"] == 3
+
+    page2 = api.get(f"/api/public/manual-datasets/{token}",
+                    params={"limit": 2, "offset": 2}).json()
+    assert len(page2["dataset"]["rows"]) == 1
+    assert page2["dataset"]["rows"][0]["编号"] == "A3"
+    # 末页不足一页：2 + 1 + 0 = 3，即精确总数
+    assert page2["dataset"]["total_rows"] == 3

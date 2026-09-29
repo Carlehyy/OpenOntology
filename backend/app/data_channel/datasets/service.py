@@ -668,7 +668,8 @@ class DatasetService:
 
     def create_version(self, dataset_id: str, data: bytes, rowcount: int | None = None,
                        *, schema_json: dict | None = None,
-                       _lock_held: bool = False) -> DatasetVersion:
+                       _lock_held: bool = False,
+                       _defer_commit: bool = False) -> DatasetVersion:
         """原子发布 DatasetVersion。
 
         结构化、半结构化和成品数据把完整版本载荷与版本元数据放在同一个数据库
@@ -677,7 +678,16 @@ class DatasetService:
 
         ``_lock_held`` 仅供已经覆盖完整读改写临界区的调用方使用；普通调用一律
         通过数据库锁串行化版本号分配。
+
+        ``_defer_commit`` 供需要把「版本发布」与调用方自己的状态落账放进
+        同一次提交的路径使用（外部修改审批）：只 flush 版本与 outbox 事件，
+        不提交、不清理旧版本；调用方写入自己的字段后统一 commit，成功后
+        必须调用 ``finalize_version_publish`` 补做清理与缓存失效。要求
+        ``_lock_held=True``。
         """
+        if _defer_commit and not _lock_held:
+            raise ValueError(
+                "_defer_commit requires the caller to hold dataset_write_lock")
         if not _lock_held:
             from app.data_channel.datasets.lock import dataset_write_lock
             guard = dataset_write_lock(
@@ -687,11 +697,13 @@ class DatasetService:
 
         with guard:
             return self._create_version_locked(
-                dataset_id, data, rowcount=rowcount, schema_json=schema_json)
+                dataset_id, data, rowcount=rowcount, schema_json=schema_json,
+                _defer_commit=_defer_commit)
 
     def _create_version_locked(self, dataset_id: str, data: bytes,
                                rowcount: int | None = None,
-                               schema_json: dict | None = None) -> DatasetVersion:
+                               schema_json: dict | None = None,
+                               _defer_commit: bool = False) -> DatasetVersion:
         # dataset_write_lock 先串行化完整读改写流程；Dataset 行锁再与审核事务
         # 共享同一个数据库终局点。审批按 Dataset → Review 加锁，因此新版本
         # 发布与审批只能形成明确先后关系，不能在“校验 latest”与决定提交之间
@@ -755,7 +767,12 @@ class DatasetService:
                     dataset_version_id=ver.id,
                     event_type="version_published",
                 ))
-                self._db.commit()
+                if _defer_commit:
+                    # 延迟提交：版本与 outbox 事件只 flush 不 commit，由调用方
+                    # 在写入自己的审批字段后同一次 commit 落账。
+                    self._db.flush()
+                else:
+                    self._db.commit()
                 break
             except IntegrityError:
                 self._db.rollback()
@@ -785,6 +802,10 @@ class DatasetService:
                         logger.warning(
                             "清理未提交版本对象失败: %s", uri, exc_info=True)
                 raise
+        if _defer_commit:
+            # refresh/prune/缓存失效都依赖事务已终局，推迟到调用方 commit 后
+            # 由 finalize_version_publish 执行。
+            return ver
         self._db.refresh(ver)
         self._prune_versions_best_effort(dataset_id)
         # 尽力失效资产湖总览缓存（失败静默降级，不影响发布主流程）。
@@ -792,6 +813,17 @@ class DatasetService:
 
         cache.invalidate_overview()
         return ver
+
+    def finalize_version_publish(self, dataset_id: str) -> None:
+        """延迟提交模式的收尾：在调用方 commit 成功后补做清理与缓存失效。
+
+        清理自身失败已被 ``_prune_versions_best_effort`` 吞掉并回滚，不会
+        影响已经提交的版本与审批结果。
+        """
+        self._prune_versions_best_effort(dataset_id)
+        from app.data_channel.datasets import cache
+
+        cache.invalidate_overview()
 
     @staticmethod
     def _checksum_matches(raw: bytes, expected: str | None) -> bool:
@@ -1026,6 +1058,11 @@ class DatasetService:
                     offset = max(0, offset)
                     return rows[offset:] if limit is None else rows[offset:offset + limit]
                 except Exception:
+                    # 容错语义保持返回 []，但留一条日志：湖表预览失败长期
+                    # 静默会让「页面空白」在生产上无从定位。
+                    logger.warning(
+                        "湖表版本预览失败 dataset=%s version_no=%s",
+                        dataset_id, getattr(ver, "version_no", None), exc_info=True)
                     return []
         try:
             raw = self.load_version_bytes(dataset_id, ver.version_no)
@@ -1033,6 +1070,9 @@ class DatasetService:
                 return []
             return _parse_stored_rows(raw, limit=limit, offset=offset)
         except Exception:
+            logger.warning(
+                "版本内容预览解析失败 dataset=%s version_no=%s",
+                dataset_id, getattr(ver, "version_no", None), exc_info=True)
             return []
 
     def bootstrap_lake_base(self, dataset) -> bool:

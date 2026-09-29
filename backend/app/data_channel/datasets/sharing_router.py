@@ -114,6 +114,7 @@ def _change_dict(change: ManualDatasetChange) -> dict:
         "status": change.status,
         "summary": change.summary or {},
         "review_comment": change.review_comment or "",
+        "reviewed_by": change.reviewed_by,
         "submitted_at": change.submitted_at.isoformat() if change.submitted_at else None,
         "reviewed_at": change.reviewed_at.isoformat() if change.reviewed_at else None,
         "applied_version_no": change.applied_version_no,
@@ -272,13 +273,19 @@ def review_change(change_id: str, body: ReviewChangeRequest, db: Session = Depen
             new_rows, columns, schema = build_edited_snapshot(db, svc, dataset, edits)
             version = svc.create_version(
                 dataset.id, rows_to_csv_bytes(new_rows, columns), rowcount=len(new_rows),
-                schema_json=schema if new_rows else None, _lock_held=True)
+                schema_json=schema if new_rows else None,
+                _lock_held=True, _defer_commit=True)
+            # 版本发布与审批落账必须同一次提交：create_version 只 flush 不
+            # commit。若分两次提交，第一次成功后失败会留下「新版本已发布、
+            # 变更仍 pending」，且重试必撞 base_version 409，审批永久卡死。
             change.status = "approved"
             change.review_comment = comment
             change.reviewed_by = user.id
             change.reviewed_at = _now()
             change.applied_version_no = version.version_no
             db.commit()
+            # 旧版本清理与总览缓存失效放在提交成功之后；失败不影响审批结果。
+            svc.finalize_version_publish(dataset.id)
     except DatasetLockTimeout as exc:
         raise HTTPException(423, str(exc))
     return _change_dict(change)
@@ -299,14 +306,31 @@ def public_dataset(token: str, limit: int = 50, offset: int = 0,
     version_no = int(latest_version.version_no) if latest_version else 0
 
     # UI paging should only materialize the requested window. Historical versions
-    # without rowcount keep the strict full-read fallback for backward compatibility.
-    if latest_version and latest_version.rowcount is not None:
+    # without rowcount must not fall back to a full-table read either: the public
+    # endpoint caps limit at 500 but that cap cannot bound load_all_rows. Window
+    # the stored payload directly; the total becomes a conservative "at least"
+    # count (exact on the last short page), which is enough for paging. Manual
+    # datasets are blob-backed, so no lake-table replay is involved here.
+    if latest_version is None:
+        total_rows = 0
+        rows = []
+    elif latest_version.rowcount is not None:
         total_rows = max(0, int(latest_version.rowcount))
         rows = svc.preview(dataset.id, latest_version.version_no, limit, offset)
     else:
-        all_rows = svc.load_all_rows(dataset.id)
-        total_rows = len(all_rows)
-        rows = all_rows[offset:offset + limit]
+        from app.data_channel.datasets.service import _parse_stored_rows
+        try:
+            raw = svc.load_version_bytes(dataset.id, latest_version.version_no)
+            rows = _parse_stored_rows(raw or b"", limit=limit, offset=offset)
+        except HTTPException:
+            raise
+        except Exception:
+            # 读失败按 502 拒绝并说明：公开分享页不能把「读不出来」伪装成空表，
+            # 也不能借全量读兜底绕过 limit 上限。
+            raise HTTPException(
+                502, "该分享的数据版本缺少行数元数据且内容读取失败，"
+                     "请联系分享发起方重新发布版本")
+        total_rows = offset + len(rows) + (1 if len(rows) >= limit else 0)
 
     typed_columns = [
         item for item in (schema.get("columns_typed") or [])
