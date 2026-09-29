@@ -384,12 +384,17 @@ def _cleanup_local_state(
         Dataset.producer_pipeline_id == pipeline_id
     ).all()
     dataset_ids = {item.id for item in datasets}
-    # 直接调用路由函数绕过 HTTP；审计日志需要一个操作者身份，用脚本身份
-    # 占位（路由参数名为 admin，函数内取 admin.id 记入删除告警）。
+    # delete_curated 现在从依赖对象取决定人 id 写删除审计（admin=True 的
+    # 旧占位写法随参数更名失效）；这里传真实管理员，保持审计口径一致。
     from types import SimpleNamespace
-    script_admin = SimpleNamespace(id="steward-live-e2e-script")
+
+    from app.auth.models import User
+
+    cleanup_admin = db.query(User).filter(
+        User.role == "admin", User.is_active.is_(True)).first()
+    cleanup_actor = cleanup_admin or SimpleNamespace(id="live-e2e-cleanup")
     for dataset_id in sorted(dataset_ids):
-        delete_curated(dataset_id, force=False, db=db, admin=script_admin)
+        delete_curated(dataset_id, force=False, db=db, admin=cleanup_actor)
 
     # A failed run may leave a deleted audit row without a DatasetVersion.
     # Queue any still-backed object before removing these test-only rows.
