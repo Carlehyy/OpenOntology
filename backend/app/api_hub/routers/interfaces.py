@@ -13,28 +13,15 @@ from app.auth.models import User
 from app.deps import get_current_user
 from .. import config, db, executor
 from ..interface_contracts import (
-    _ALLOWED_BODY_TYPES,
-    _ALLOWED_METHODS,
-    _HEADER_NAME_RE,
     DeleteGroupBody,
-    FileField,
     InterfaceIn,
-    InterfaceParameter,
-    KV,
     PreviewInterfaceIn,
 )
 from ..interface_service import (
     _PROXY_RESERVED_HEADERS,
-    _PROXY_SLUG_RE,
-    _RESERVED_GROUP,
-    _check_group_name,
-    _dump_kv,
     _get_or_404,
     _is_admin,
-    _load_json_list,
-    _normalize_publish_keys,
     _row_to_dict,
-    _validate_proxy_publish,
     apply_http_publication,
     auto_http_publication as persist_auto_http_publication,
     create_interface,

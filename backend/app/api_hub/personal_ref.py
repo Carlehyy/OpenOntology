@@ -10,12 +10,15 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from app.auth.crypto import decrypt_value
 from app.auth.models import UserEnvVar, UserPrivacyVar
 from app.database import SessionLocal
+
+_LOG = logging.getLogger(__name__)
 
 # 占位符语法：{{privacy:VAR_KEY}} / {{env:VAR_KEY}}，VAR_KEY 与两类个人变量
 # 的 key 同字符集（创建端校验见 auth schemas，此处只做结构约束）。
@@ -84,7 +87,13 @@ def _load_privacy_plaintext(keys: set[str], user) -> dict[str, str]:
             try:
                 out[f"privacy:{row.key}"] = decrypt_value(row.value_encrypted)
             except Exception:  # noqa: BLE001
-                # 解密失败按"无值"处理，由缺失校验统一报错
+                # 解密失败按"无值"处理，由缺失校验统一报错；落 warning
+                # 便于区分「没配置」与「配置了但解不开」（不打印密文/密钥材料）
+                _LOG.warning(
+                    "隐私变量解密失败，按未配置处理：user=%s key=%s",
+                    getattr(user, "id", None),
+                    row.key,
+                )
                 continue
     finally:
         db.close()
@@ -112,6 +121,11 @@ def _load_env_plaintext(keys: set[str], user) -> dict[str, str]:
             try:
                 out[f"env:{row.key}"] = decrypt_value(row.value_encrypted)
             except Exception:  # noqa: BLE001
+                _LOG.warning(
+                    "环境变量解密失败，按未配置处理：user=%s key=%s",
+                    getattr(user, "id", None),
+                    row.key,
+                )
                 continue
     finally:
         db.close()

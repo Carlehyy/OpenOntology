@@ -1,4 +1,9 @@
-"""SQLite 持久化。每次操作开一个新连接，单用户本地工具足够安全。"""
+"""SQLite 持久化（api_hub 私有库，不进平台主库）。
+
+每次操作开一个新连接；生产为单 uvicorn 进程，备份按 docs/operations/
+backup-restore.md 连同 api_hub_data 卷整体处理。多进程直写同一文件
+不受支持。
+"""
 import sqlite3
 
 from . import config
@@ -191,21 +196,4 @@ def _migrate(conn) -> None:
         CREATE INDEX IF NOT EXISTS idx_runs_proxy_key_id ON runs(proxy_key_id);
         """
     )
-
-
-def get_setting(key: str, default=None):
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key = ?", (key,)
-        ).fetchone()
-        return row["value"] if row else default
-
-
-def set_setting(key: str, value: str) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO settings(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
 
