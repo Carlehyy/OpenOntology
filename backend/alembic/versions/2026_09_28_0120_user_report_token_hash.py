@@ -46,6 +46,12 @@ def upgrade() -> None:
     if _INDEX not in indexes:
         op.create_index(_INDEX, "users", [_COLUMN], unique=True)
 
+    # 回填防御：部分迁移测试场景手工建最小 users 表并 stamp 到中间版本
+    # （如 multica 用例只建 id/username 两列），report_token_encrypted 列可能
+    # 不存在——此时无密文可回填，跳过（与 0088/0094 对前置列的防御同口径）。
+    if "report_token_encrypted" not in columns:
+        return
+
     # 回填：解密存量密文 → 写哈希。解不开即失败（见模块 docstring）。
     from app.auth.crypto import decrypt_value, hash_query_key
 

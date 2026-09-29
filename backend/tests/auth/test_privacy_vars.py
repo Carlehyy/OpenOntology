@@ -264,6 +264,47 @@ def test_report_rejects_disabled_user(client, admin_user, db: Session):
     assert r.status_code == 403
     assert r.json()["detail"] == "Invalid report token"
 
+
+def test_report_token_self_heals_when_hash_missing(client, admin_user, db: Session):
+    """对抗审查修复回归：滚动发布/回填中断会留下"有密文、无哈希"的行，
+    该 token 上报 403。管理端点自愈：解密补算哈希，已下发到用户脚本里的
+    旧 token 继续可用（不重置、不回发明文）。"""
+    headers = _login_headers(client, "admin", "admin123")
+    token = _create_var_get_token(client, headers, "K")
+    # 人工制造失同步（模拟旧代码只写密文 / 迁移回填被中断）
+    db.query(User).filter(User.id == admin_user.id).update({"report_token_hash": None})
+    db.commit()
+
+    # 失同步期间 fail-closed：上报 403
+    assert _report(client, token, []).status_code == 403
+
+    # 触发自愈：再建一个变量（走 _ensure_report_token）
+    r = client.post("/api/v1/auth/privacy-vars", json={"key": "K2"}, headers=headers)
+    assert r.status_code == 201
+    assert "report_token" not in r.json()["data"]  # 自愈不是重置，不回发明文
+    row = db.query(User).filter(User.id == admin_user.id).first()
+    assert row.report_token_hash == hash_query_key(token)
+    # 原 token 恢复可用：用户手里的旧上报脚本无需重新下载配置
+    assert _report(client, token, []).status_code == 200
+
+
+def test_report_token_resets_when_ciphertext_corrupted(client, admin_user, db: Session):
+    """密文损坏且无哈希：自愈解不开 → 强制重置，新明文仅此一次返回。"""
+    headers = _login_headers(client, "admin", "admin123")
+    _create_var_get_token(client, headers, "K")
+    db.query(User).filter(User.id == admin_user.id).update({
+        "report_token_hash": None,
+        "report_token_encrypted": "corrupted-not-fernet",
+    })
+    db.commit()
+
+    r = client.post("/api/v1/auth/privacy-vars", json={"key": "K2"}, headers=headers)
+    assert r.status_code == 201
+    new_token = r.json()["data"].get("report_token")
+    assert new_token  # 被迫重置：明文仅此一次返回
+    assert _report(client, new_token, []).status_code == 200
+
+
     admin_user.is_active = True
     db.commit()
 

@@ -393,7 +393,10 @@ export default function ProfileModal({ open, onClose }: { open: boolean; onClose
       description="维护账号信息、登录密码、私有环境变量、隐私变量与移动端远程访问入口"
       size="3xl"
       headerIcon={<CircleUserRound size={19} />}
-      disableClose={busy}
+      /* 一次性明文弹窗打开时禁用外层关闭（含 Esc）：两个 Modal 的 Esc 都挂
+         在 window 上，不禁用则一次 Esc 连关两层并顺带清掉明文状态——违背
+         "整体关闭不清一次性弹窗、等用户自己关"的约定；busy 期同理保护。 */
+      disableClose={busy || secretReveal !== null}
       /* 固定宽高（同外部集成弹窗）：切 tab 弹窗不缩放，内容区各自滚动 */
       panelClassName="h-[min(82dvh,44rem)] w-[min(94vw,48rem)]"
       contentClassName="flex min-h-0 flex-col overflow-hidden p-0"

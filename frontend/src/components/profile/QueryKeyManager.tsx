@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { authApi, type QueryKeyCategory, type QueryKeyItem, type QueryKeyValidity } from '@/api/auth'
+import { keyStatus, STATUS_META } from '@/components/profile/keyStatus.ts'
 import { formatDateTime } from '@/utils/datetime'
 /**
  * 变量查询密钥管理（PAT 式）：环境变量 / 隐私变量两个分区各挂一份。
@@ -47,18 +48,6 @@ function formatTime(iso: string | null | undefined): string {
   // 全站日期展示唯一入口（utils/datetime）：库里的时间无 Z 后缀、语义是
   // UTC，直接 new Date 会被按本地时区解析（上海慢 8 小时）。
   return formatDateTime(iso, { seconds: true, fallback: '—' })
-}
-
-function keyStatus(item: QueryKeyItem): 'active' | 'expired' | 'revoked' {
-  if (item.revoked_at) return 'revoked'
-  if (item.expires_at && new Date(item.expires_at).getTime() <= Date.now()) return 'expired'
-  return 'active'
-}
-
-const STATUS_META: Record<'active' | 'expired' | 'revoked', { label: string; variant: 'success' | 'warning' | 'secondary' }> = {
-  active: { label: '有效', variant: 'success' },
-  expired: { label: '已过期', variant: 'warning' },
-  revoked: { label: '已吊销', variant: 'secondary' },
 }
 
 export default function QueryKeyManager({

@@ -491,7 +491,8 @@ test('隐私变量分区独立生成查询密钥（类别隔离）', async ({ pa
   await mockPlatformShell(page)
 
   const captured: { createBody?: Record<string, unknown> } = {}
-  await page.route('**/api/v1/auth/query-keys', async route => {
+  // 与生成/吊销用例同款宽 glob：GET 实际带 ?category= 查询串，窄 glob 从未命中
+  await page.route('**/api/v1/auth/query-keys**', async route => {
     const method = route.request().method()
     if (method === 'GET') return json(route, [])
     if (method === 'POST') {

@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = authenticate_user(db, body.username, body.password)
     if not user:
-        logger.warning("登录失败（username=%s）", body.username)
+        # %r：username 可含换行等控制字符（schema 未限制），防日志伪造。
+        logger.warning("登录失败（username=%r）", body.username)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_access_token(
         {"sub": user.id, "role": user.role, "ver": user.token_version})
@@ -182,13 +183,24 @@ def _assign_report_token(user: User, token: str) -> None:
 
 
 def _ensure_report_token(db: Session, user: User) -> str:
-    """按需为用户生成上报 token（已存在则不重置，返回空串表示未生成）。
+    """按需为用户生成/修复上报 token（健康状态返回空串表示未生成）。
 
-    明文只在"首次创建"时返回；已存在 token 的后续调用返回空串，避免无意
-    暴露。重置走 reset 端点。
+    明文只在两种情形返回：首次创建；存量密文损坏被迫重置。健康 token 的
+    后续调用返回空串避免无意暴露；主动重置走 reset 端点。
+
+    自愈："有密文、无哈希"的行（滚动发布窗口由旧代码只写密文、或迁移回填
+    被中断产生）持该 token 上报会 403 且原先无法自恢复——能解密则补算
+    哈希（已下发到用户脚本里的旧 token 继续可用），解不开则重置。
     """
     if user.report_token_encrypted:
-        return ""
+        if user.report_token_hash:
+            return ""
+        try:
+            user.report_token_hash = hash_query_key(
+                decrypt_value(user.report_token_encrypted))
+            return ""
+        except Exception:
+            logger.warning("上报 token 密文无法解密，重置（user_id=%s）", user.id)
     token = generate_report_token()
     _assign_report_token(user, token)
     return token
@@ -319,12 +331,13 @@ def download_reporter_script(
     必须断言下载文件内容，不能只断言"提示出现"。
     """
     _ensure_keypair(db, current_user)
-    if not current_user.report_token_encrypted:
-        token = generate_report_token()
-        _assign_report_token(current_user, token)
-        db.commit()
-    else:
+    # 首次生成 / 自愈（补哈希或密文损坏重置）统一走 _ensure_report_token；
+    # 有写入（dirty）才提交，避免健康路径无谓 commit。
+    token = _ensure_report_token(db, current_user)
+    if not token:
         token = decrypt_value(current_user.report_token_encrypted)
+    if current_user in db.dirty:
+        db.commit()
 
     kp = db.query(UserPrivacyKeypair).filter(
         UserPrivacyKeypair.user_id == current_user.id
