@@ -842,7 +842,11 @@ def test_cross_origin_redirect_drops_configured_credentials(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _make_client_as(tmp_path, monkeypatch, user):
-    """Build a hub_client whose get_current_user returns ``user``."""
+    """Build a hub_client whose get_current_user returns ``user``.
+
+    备份与代理密钥路由同挂 interfaces 菜单守卫，一并挂上以便覆盖其
+    非管理员负路径（此前只挂 interfaces/runs，结构上测不到这两组路由）。
+    """
     from app.deps import get_current_user
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "api_hub.db")
     monkeypatch.setattr(config, "INTERNAL_PROXY_TOKEN", "internal-proxy-test-token")
@@ -851,6 +855,8 @@ def _make_client_as(tmp_path, monkeypatch, user):
     app = FastAPI()
     app.include_router(interfaces.router)
     app.include_router(interfaces.runs_router)
+    app.include_router(backup.router)
+    app.include_router(http_proxy.admin_router)
     app.dependency_overrides[get_current_user] = lambda: user
     return TestClient(app)
 
@@ -914,3 +920,97 @@ def test_admin_sees_all_interfaces(tmp_path, monkeypatch):
     # Admin can GET/PUT/DELETE any interface
     iid = listed[0]["id"]
     assert cadmin.get(f"/interfaces/{iid}").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 备份归属：非管理员只能导出自己的接口；导入归属导入者（P0-2）
+# ---------------------------------------------------------------------------
+
+def test_backup_export_scoped_to_owner(tmp_path, monkeypatch):
+    alice = _user("alice-id")
+    bob = _user("bob-id")
+    ca = _make_client_as(tmp_path, monkeypatch, alice)
+    alice_item = ca.post(
+        "/interfaces",
+        json=_interface(
+            name="Alice's API",
+            headers=[{"key": "Authorization", "value": "Bearer alice-secret"}],
+        ),
+    ).json()
+    cb = _make_client_as(tmp_path, monkeypatch, bob)
+    cb.post("/interfaces", json=_interface(name="Bob's API")).json()
+
+    # 非管理员全量导出：只有自己的行，他人的接口与敏感值都带不走
+    exported = cb.post(
+        "/backup/export",
+        json={"name": "bob", "mode": "full", "include_sensitive": True},
+    ).json()
+    assert [item["name"] for item in exported["interfaces"]] == ["Bob's API"]
+
+    # 非管理员部分导出指定他人 ID：结果为空，不 404 也不泄露存在性
+    partial = cb.post(
+        "/backup/export",
+        json={"mode": "partial", "ids": [alice_item["id"]], "include_sensitive": True},
+    ).json()
+    assert partial["interface_count"] == 0
+    assert partial["interfaces"] == []
+
+    # 管理员导出全量（行为保持不变）
+    cadmin = _make_client_as(tmp_path, monkeypatch, _user("admin-id", role="admin"))
+    admin_export = cadmin.post(
+        "/backup/export", json={"name": "all", "mode": "full"}
+    ).json()
+    assert sorted(item["name"] for item in admin_export["interfaces"]) == [
+        "Alice's API",
+        "Bob's API",
+    ]
+
+
+def test_backup_import_stamps_importer_and_scopes_dedup(tmp_path, monkeypatch):
+    alice = _user("alice-id")
+    bob = _user("bob-id")
+    ca = _make_client_as(tmp_path, monkeypatch, alice)
+    cb = _make_client_as(tmp_path, monkeypatch, bob)
+
+    # Alice 先创建自己的接口（与备份 payload 同名同方法同 URL）
+    ca.post("/interfaces", json=_interface(name="Alice's API")).json()
+    exported = ca.post(
+        "/backup/export", json={"name": "alice", "mode": "full"}
+    ).json()
+    assert exported["interface_count"] == 1
+    payload = {
+        "app": "API-Hub",
+        "version": 7,
+        "name": "handover",
+        "mode": "full",
+        "interfaces": [
+            {
+                "name": "Alice's API",
+                "method": "GET",
+                "url": "https://service.example/health",
+                "group_name": "基础服务",
+                "body_type": "none",
+                "body_content": "",
+            }
+        ],
+    }
+
+    # Bob 导入 Alice 的备份：接口归属导入者，自己在列表里看得见
+    imported = cb.post("/backup/import", json=payload).json()
+    assert imported["imported"] == 1
+    bob_items = cb.get("/interfaces").json()
+    assert [item["name"] for item in bob_items] == ["Alice's API"]
+    assert bob_items[0]["created_by"] == "bob-id"
+
+    # Alice 导入同一份备份：她自己的同名接口已存在 → 跳过
+    alice_import = ca.post("/backup/import", json=payload).json()
+    assert alice_import["skipped"] == 1
+    assert alice_import["imported"] == 0
+
+    # 再次重复导入（Bob）：自己的自然键命中 → 跳过
+    repeat = cb.post("/backup/import", json=payload).json()
+    assert repeat["skipped"] == 1
+
+    # 导出的文件同样可以往返（回归保护：既有能力不受影响）
+    round_trip = ca.post("/backup/import", json=exported).json()
+    assert round_trip["skipped"] == 1

@@ -12,14 +12,18 @@ from datetime import datetime, timezone
 from typing import List
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, ValidationError
+
+from app.auth.models import User
+from app.deps import get_current_user
 
 from .. import db
 from ..interface_contracts import InterfaceIn
 from ..interface_service import (
     _check_group_name,
     _dump_kv,
+    _is_admin,
     _validate_proxy_publish,
 )
 
@@ -119,9 +123,14 @@ def _safe_filename(name: str) -> str:
 
 
 @router.post("/export")
-def export_backup(body: ExportIn):
-    """导出接口清单为 JSON 文件（触发浏览器下载）。"""
+def export_backup(body: ExportIn, current_user: User = Depends(get_current_user)):
+    """导出接口清单为 JSON 文件（触发浏览器下载）。
+
+    非管理员只能导出自己创建的接口（部分模式下指定他人的 ID 同样被
+    过滤掉）；管理员导出全量。与接口列表的行级归属口径一致。
+    """
     mode = "partial" if body.mode == "partial" else "full"
+    is_admin = _is_admin(current_user)
     with db.get_conn() as conn:
         if mode == "partial":
             if not body.ids:
@@ -130,14 +139,24 @@ def export_backup(body: ExportIn):
                     detail="部分备份模式下必须提供接口 ID 列表",
                 )
             placeholders = ",".join("?" * len(body.ids))
+            sql = f"SELECT * FROM interfaces WHERE id IN ({placeholders})"
+            params: list = list(body.ids)
+            if not is_admin:
+                sql += " AND created_by = ?"
+                params.append(current_user.id)
             rows = conn.execute(
-                f"SELECT * FROM interfaces WHERE id IN ({placeholders}) "
-                "ORDER BY group_name, sort_order, id",
-                body.ids,
+                sql + " ORDER BY group_name, sort_order, id",
+                params,
+            ).fetchall()
+        elif is_admin:
+            rows = conn.execute(
+                "SELECT * FROM interfaces ORDER BY group_name, sort_order, id"
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM interfaces ORDER BY group_name, sort_order, id"
+                "SELECT * FROM interfaces WHERE created_by = ? "
+                "ORDER BY group_name, sort_order, id",
+                (current_user.id,),
             ).fetchall()
 
     payload = {
@@ -168,8 +187,13 @@ def export_backup(body: ExportIn):
 
 
 @router.post("/import")
-def import_backup(body: ImportIn):
-    """导入备份包：合并到现有接口清单，重复的（名+方法+URL 一致）跳过。"""
+def import_backup(body: ImportIn, current_user: User = Depends(get_current_user)):
+    """导入备份包：合并到现有接口清单，重复的（名+方法+URL 一致）跳过。
+
+    导入的接口归属导入者（created_by=导入者），否则非管理员导入后在自己
+    的列表里看不到。自然键去重只对比导入者可见的行：非管理员不会因他人
+    的同名接口而被计为重复，也不会借此探测他人接口是否存在。
+    """
     # ── 来源校验 ──
     if body.app != BACKUP_APP:
         raise HTTPException(
@@ -190,10 +214,19 @@ def import_backup(body: ImportIn):
     imported = 0
     skipped = 0
     with db.get_conn() as conn:
-        # 预加载已有接口的自然键，做内存去重（接口数通常很少，无需复杂查询）
-        existing = set()
-        for r in conn.execute("SELECT name, method, url FROM interfaces").fetchall():
-            existing.add(_natural_key(r["name"], r["method"], r["url"]))
+        # 预加载导入者可见接口的自然键，做内存去重（接口数通常很少，无需复杂查询）
+        if _is_admin(current_user):
+            existing_rows = conn.execute(
+                "SELECT name, method, url FROM interfaces"
+            ).fetchall()
+        else:
+            existing_rows = conn.execute(
+                "SELECT name, method, url FROM interfaces WHERE created_by = ?",
+                (current_user.id,),
+            ).fetchall()
+        existing = {
+            _natural_key(r["name"], r["method"], r["url"]) for r in existing_rows
+        }
 
         for it in items:
             try:
@@ -230,8 +263,9 @@ def import_backup(body: ImportIn):
                 "INSERT INTO interfaces(name, description, group_name, method, url, query_params, headers, "
                 "body_type, body_content, file_fields, mcp_enabled, open_enabled, http_enabled, "
                 "proxy_slug, proxy_query_keys, proxy_header_keys, proxy_body_enabled, "
-                "proxy_body_keys, parameter_schema, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "proxy_body_keys, parameter_schema, created_by, updated_by, "
+                "created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     name,
                     candidate.description,
@@ -255,6 +289,8 @@ def import_backup(body: ImportIn):
                         [item.model_dump(mode="json") for item in candidate.parameter_schema],
                         ensure_ascii=False,
                     ),
+                    current_user.id,
+                    current_user.id,
                     now, now,
                 ),
             )
