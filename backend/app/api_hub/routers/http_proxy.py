@@ -2,20 +2,25 @@
 from __future__ import annotations
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.datastructures import FormData, UploadFile
 
+from app.auth.models import User
+from app.deps import get_current_user
+
 from .. import config, db, executor, publication
-from ..interface_service import _row_to_dict
+from ..interface_service import _get_or_404, _row_to_dict
 from ..proxy_keys import (
     ProxyKeyCreate,
     ProxyKeyUpdate,
     _insert_proxy_key,
     _now,
+    assert_key_scope as _assert_key_scope,
     authenticate_proxy_key as _authenticate_proxy_key,
     create_proxy_key as persist_create_proxy_key,
     delete_proxy_key as persist_delete_proxy_key,
+    key_visible as _key_visible,
     list_proxy_keys as persist_list_proxy_keys,
     update_proxy_key as persist_update_proxy_key,
 )
@@ -55,24 +60,27 @@ def proxy_info():
 
 
 @admin_router.get("/keys")
-def list_proxy_keys():
-    return persist_list_proxy_keys()
+def list_proxy_keys(current_user: User = Depends(get_current_user)):
+    return [item for item in persist_list_proxy_keys() if _key_visible(current_user, item)]
 
 
 @admin_router.post("/keys")
-def create_proxy_key(body: ProxyKeyCreate):
+def create_proxy_key(body: ProxyKeyCreate, current_user: User = Depends(get_current_user)):
+    _assert_key_scope(
+        current_user, scope_all=body.scope_all, interface_ids=body.interface_ids
+    )
     return persist_create_proxy_key(body)
 
 
 @admin_router.post("/packages/{interface_id}")
-def create_proxy_package(interface_id: int):
+def create_proxy_package(
+    interface_id: int,
+    current_user: User = Depends(get_current_user),
+):
     """Create a ready-to-share caller credential scoped to one published interface."""
     with db.get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM interfaces WHERE id = ?", (interface_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="接口不存在")
+        # 行级归属：非管理员只能为自己的接口代铸凭证（与接口 CRUD 同口径 404）
+        row = _get_or_404(conn, interface_id, user=current_user)
         interface = _row_to_dict(row)
         if not interface.get("http_enabled"):
             raise HTTPException(status_code=409, detail="请先自动生成转发配置")
@@ -128,13 +136,32 @@ def create_proxy_package(interface_id: int):
 
 
 @admin_router.put("/keys/{key_id}")
-def update_proxy_key(key_id: int, body: ProxyKeyUpdate):
+def update_proxy_key(
+    key_id: int,
+    body: ProxyKeyUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    _visible_key_or_404(current_user, key_id)
+    _assert_key_scope(
+        current_user, scope_all=body.scope_all, interface_ids=body.interface_ids
+    )
     return persist_update_proxy_key(key_id, body)
 
 
 @admin_router.delete("/keys/{key_id}")
-def delete_proxy_key(key_id: int):
+def delete_proxy_key(key_id: int, current_user: User = Depends(get_current_user)):
+    _visible_key_or_404(current_user, key_id)
     return persist_delete_proxy_key(key_id)
+
+
+def _visible_key_or_404(user: User, key_id: int) -> dict:
+    """不可见与不存在同样返回 404，不暴露他人密钥的存在性（与 MCP 口径一致）。"""
+    for item in persist_list_proxy_keys():
+        if int(item["id"]) == key_id:
+            if not _key_visible(user, item):
+                break
+            return item
+    raise HTTPException(status_code=404, detail="密钥不存在")
 
 
 def _response_headers(headers: dict) -> dict[str, str]:

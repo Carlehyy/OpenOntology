@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from . import config, db
+from .interface_service import _is_admin
 
 
 class ProxyKeyCreate(BaseModel):
@@ -50,6 +51,53 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 def _hash_key(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 归属与范围校验：REST 管理路由与 MCP 工具共用同一口径。
+# 密钥表没有 created_by 列，可见性由其绑定的接口归属推导。
+# ---------------------------------------------------------------------------
+
+def owned_interface_ids(user) -> set[int]:
+    with db.get_conn() as conn:
+        if _is_admin(user):
+            rows = conn.execute("SELECT id FROM interfaces").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id FROM interfaces WHERE created_by = ?",
+                (user.id,),
+            ).fetchall()
+    return {int(row["id"]) for row in rows}
+
+
+def assert_key_scope(user, *, scope_all: bool, interface_ids: list[int]) -> None:
+    """非管理员不能建/改 scope_all 密钥，绑定的接口必须归属本人。"""
+    if _is_admin(user):
+        return
+    if scope_all:
+        raise HTTPException(
+            status_code=403,
+            detail="非管理员不能创建或修改「授权全部接口」的调用方密钥",
+        )
+    owned = owned_interface_ids(user)
+    foreign = [item for item in interface_ids if item not in owned]
+    if foreign:
+        raise HTTPException(
+            status_code=403,
+            detail="以下接口不属于当前用户，不能写入调用方密钥："
+            + ", ".join(str(item) for item in foreign),
+        )
+
+
+def key_visible(user, key: dict) -> bool:
+    """scope_all 密钥仅管理员可见；其余密钥当且仅当绑定的接口全归本人。"""
+    if _is_admin(user):
+        return True
+    if key.get("scope_all"):
+        return False
+    owned = owned_interface_ids(user)
+    ids = [int(item) for item in key.get("interface_ids") or []]
+    return bool(ids) and all(item in owned for item in ids)
 
 
 def _validate_key_input(

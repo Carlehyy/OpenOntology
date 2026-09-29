@@ -1014,3 +1014,98 @@ def test_backup_import_stamps_importer_and_scopes_dedup(tmp_path, monkeypatch):
     # 导出的文件同样可以往返（回归保护：既有能力不受影响）
     round_trip = ca.post("/backup/import", json=exported).json()
     assert round_trip["skipped"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 代理密钥与代铸凭证：非管理员与 MCP 工具同一口径（P0-3）
+# ---------------------------------------------------------------------------
+
+def test_proxy_key_management_scoped_to_owner(tmp_path, monkeypatch):
+    alice = _user("alice-id")
+    bob = _user("bob-id")
+    ca = _make_client_as(tmp_path, monkeypatch, alice)
+    cb = _make_client_as(tmp_path, monkeypatch, bob)
+
+    a_item = ca.post("/interfaces", json=_interface(name="Alice's API")).json()
+    b_item = cb.post("/interfaces", json=_interface(name="Bob's API")).json()
+
+    # 非管理员不能创建 scope_all 密钥
+    res = cb.post("/proxy/keys", json={"name": "bob-all", "scope_all": True})
+    assert res.status_code == 403
+    assert "授权全部接口" in res.json()["detail"]
+
+    # 非管理员不能把密钥绑到他人接口
+    res = cb.post(
+        "/proxy/keys", json={"name": "bob-key", "interface_ids": [a_item["id"]]}
+    )
+    assert res.status_code == 403
+    assert "不属于当前用户" in res.json()["detail"]
+
+    # 各自绑定自己的接口成功
+    res = cb.post(
+        "/proxy/keys", json={"name": "bob-key", "interface_ids": [b_item["id"]]}
+    )
+    assert res.status_code == 200
+    bob_key = res.json()
+    res = ca.post(
+        "/proxy/keys", json={"name": "alice-key", "interface_ids": [a_item["id"]]}
+    )
+    assert res.status_code == 200
+    alice_key = res.json()
+
+    # 管理员的 scope_all 行为保持不变
+    cadmin = _make_client_as(tmp_path, monkeypatch, _user("admin-id", role="admin"))
+    res = cadmin.post("/proxy/keys", json={"name": "admin-all", "scope_all": True})
+    assert res.status_code == 200
+
+    # 非管理员列表只看到自己的（他人的密钥与 scope_all 均不可见）
+    listed = cb.get("/proxy/keys").json()
+    assert [item["name"] for item in listed] == ["bob-key"]
+
+    # 不能改/删他人密钥：不可见与不存在同样 404，不暴露存在性
+    hijack = {"name": "hijack", "enabled": True, "interface_ids": [b_item["id"]]}
+    assert cb.put(f"/proxy/keys/{alice_key['id']}", json=hijack).status_code == 404
+    assert cb.delete(f"/proxy/keys/{alice_key['id']}").status_code == 404
+
+    # 不能把自己的密钥升格为 scope_all
+    escalate = {"name": "bob-key", "enabled": True, "scope_all": True}
+    res = cb.put(f"/proxy/keys/{bob_key['id']}", json=escalate)
+    assert res.status_code == 403
+    # 原密钥未被破坏
+    assert cb.get("/proxy/keys").json()[0]["scope_all"] is False
+
+
+def test_proxy_package_scoped_to_owner(tmp_path, monkeypatch):
+    alice = _user("alice-id")
+    bob = _user("bob-id")
+    ca = _make_client_as(tmp_path, monkeypatch, alice)
+    cb = _make_client_as(tmp_path, monkeypatch, bob)
+
+    a_item = ca.post("/interfaces", json=_interface(name="Alice's API")).json()
+    b_item = cb.post("/interfaces", json=_interface(name="Bob's API")).json()
+    publish = {
+        "enabled": True,
+        "slug": "",
+        "query_keys": [],
+        "header_keys": [],
+        "body_enabled": False,
+        "body_keys": [],
+    }
+    for client, item, slug in ((ca, a_item, "alice-pub"), (cb, b_item, "bob-pub")):
+        res = client.put(
+            f"/interfaces/{item['id']}/http-publication",
+            json={**publish, "slug": slug},
+        )
+        assert res.status_code == 200
+
+    # 非管理员不能为他人已发布的接口代铸调用凭证（404，不暴露存在性）
+    assert cb.post(f"/proxy/packages/{a_item['id']}").status_code == 404
+
+    # 为自己的接口代铸正常
+    res = cb.post(f"/proxy/packages/{b_item['id']}")
+    assert res.status_code == 200
+    assert res.json()["secret"].startswith("hub_")
+
+    # 管理员仍可为任何已发布接口代铸（行为不变）
+    cadmin = _make_client_as(tmp_path, monkeypatch, _user("admin-id", role="admin"))
+    assert cadmin.post(f"/proxy/packages/{a_item['id']}").status_code == 200

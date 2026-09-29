@@ -475,18 +475,6 @@ def _load_owned(iid: int, user: User) -> dict:
         return _row_to_dict(_get_or_404(conn, iid, user=user))
 
 
-def _owned_ids(user: User) -> set[int]:
-    with db.get_conn() as conn:
-        if _is_admin(user):
-            rows = conn.execute("SELECT id FROM interfaces").fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id FROM interfaces WHERE created_by = ?",
-                (user.id,),
-            ).fetchall()
-    return {int(row["id"]) for row in rows}
-
-
 def _list_owned_rows(user: User) -> list[dict]:
     with db.get_conn() as conn:
         if _is_admin(user):
@@ -896,27 +884,13 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 def _assert_key_scope(user: User, *, scope_all: bool, interface_ids: list[int]) -> None:
-    if _is_admin(user):
-        return
-    if scope_all:
-        raise ApiHubMcpError("非管理员不能创建或修改「授权全部接口」的调用方密钥")
-    owned = _owned_ids(user)
-    foreign = [item for item in interface_ids if item not in owned]
-    if foreign:
-        raise ApiHubMcpError(
-            "以下接口不属于当前用户，不能写入调用方密钥："
-            + ", ".join(str(item) for item in foreign)
-        )
+    # 与 REST /proxy/keys 同一口径（proxy_keys.assert_key_scope）；
+    # HTTPException 由 execute_tool 统一转译为 ApiHubMcpError。
+    proxy_keys.assert_key_scope(user, scope_all=scope_all, interface_ids=interface_ids)
 
 
 def _key_visible(user: User, key: dict) -> bool:
-    if _is_admin(user):
-        return True
-    if key.get("scope_all"):
-        return False
-    owned = _owned_ids(user)
-    ids = [int(item) for item in key.get("interface_ids") or []]
-    return bool(ids) and all(item in owned for item in ids)
+    return proxy_keys.key_visible(user, key)
 
 
 def _list_proxy_keys(user: User) -> dict:
