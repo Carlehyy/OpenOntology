@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Query, Response
@@ -34,10 +35,16 @@ from app.auth.crypto import (
 
 router = APIRouter()
 
+# 关键路径最小日志（安全审计用）：只记标识符（用户名/用户 id/密钥前缀），
+# 永不记录密码、token、密钥明文或变量值。
+logger = logging.getLogger(__name__)
+
 @router.post("/login")
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = authenticate_user(db, body.username, body.password)
     if not user:
+        # %r：username 可含换行等控制字符（schema 未限制），防日志伪造。
+        logger.warning("登录失败（username=%r）", body.username)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_access_token(
         {"sub": user.id, "role": user.role, "ver": user.token_version})
@@ -69,6 +76,7 @@ def change_password(body: PasswordChangeRequest, db: Session = Depends(get_db), 
         synchronize_session=False,
     )
     db.commit()
+    logger.info("密码已修改：吊销全部已签发 token 与查询密钥（user_id=%s）", current_user.id)
     return {"message": "Password updated"}
 
 # 个人资料自助更新（MYW-56）：用户名是账号唯一标识，不允许自改；这里只
@@ -167,16 +175,34 @@ def _ensure_keypair(db: Session, user: User) -> UserPrivacyKeypair:
     return kp
 
 
-def _ensure_report_token(db: Session, user: User) -> str:
-    """按需为用户生成上报 token（已存在则不重置，返回空串表示未生成）。
+def _assign_report_token(user: User, token: str) -> None:
+    """写入上报 token：Fernet 密文（供下载脚本解出明文内嵌）+ sha256 哈希
+    （上报端点查表鉴权）。两列必须同步写，缺哈希的 token 无法通过鉴权。"""
+    user.report_token_encrypted = encrypt_value(token)
+    user.report_token_hash = hash_query_key(token)
 
-    明文只在"首次创建"时返回；已存在 token 的后续调用返回空串，避免无意
-    暴露。重置走 reset 端点。
+
+def _ensure_report_token(db: Session, user: User) -> str:
+    """按需为用户生成/修复上报 token（健康状态返回空串表示未生成）。
+
+    明文只在两种情形返回：首次创建；存量密文损坏被迫重置。健康 token 的
+    后续调用返回空串避免无意暴露；主动重置走 reset 端点。
+
+    自愈："有密文、无哈希"的行（滚动发布窗口由旧代码只写密文、或迁移回填
+    被中断产生）持该 token 上报会 403 且原先无法自恢复——能解密则补算
+    哈希（已下发到用户脚本里的旧 token 继续可用），解不开则重置。
     """
     if user.report_token_encrypted:
-        return ""
+        if user.report_token_hash:
+            return ""
+        try:
+            user.report_token_hash = hash_query_key(
+                decrypt_value(user.report_token_encrypted))
+            return ""
+        except Exception:
+            logger.warning("上报 token 密文无法解密，重置（user_id=%s）", user.id)
     token = generate_report_token()
-    user.report_token_encrypted = encrypt_value(token)
+    _assign_report_token(user, token)
     return token
 
 
@@ -288,8 +314,9 @@ def reset_report_token(
 ):
     """重置上报 token（旧 token 立即失效）。明文仅此一次返回。"""
     token = generate_report_token()
-    current_user.report_token_encrypted = encrypt_value(token)
+    _assign_report_token(current_user, token)
     db.commit()
+    logger.info("上报 token 已重置（user_id=%s）", current_user.id)
     return {"data": {"report_token": token}, "message": "ok"}
 
 
@@ -304,12 +331,13 @@ def download_reporter_script(
     必须断言下载文件内容，不能只断言"提示出现"。
     """
     _ensure_keypair(db, current_user)
-    if not current_user.report_token_encrypted:
-        token = generate_report_token()
-        current_user.report_token_encrypted = encrypt_value(token)
-        db.commit()
-    else:
+    # 首次生成 / 自愈（补哈希或密文损坏重置）统一走 _ensure_report_token；
+    # 有写入（dirty）才提交，避免健康路径无谓 commit。
+    token = _ensure_report_token(db, current_user)
+    if not token:
         token = decrypt_value(current_user.report_token_encrypted)
+    if current_user in db.dirty:
+        db.commit()
 
     kp = db.query(UserPrivacyKeypair).filter(
         UserPrivacyKeypair.user_id == current_user.id
@@ -341,18 +369,21 @@ def download_reporter_script(
 def _build_reporter_script(
     *, base_url: str, report_token: str, public_key_pem: str, var_keys: list[str]
 ) -> str:
-    """生成 Python 上报脚本模板。用户填入 collect_<key>() 采集逻辑后即可运行。"""
+    """生成 Python 上报脚本模板。用户填入 collect_N() 采集逻辑后即可运行。"""
     keys_block = ", ".join(repr(k) for k in var_keys) if var_keys else ""
     if var_keys:
+        # 函数名只用序号（collect_0、collect_1…）：变量名允许数字开头、点和
+        # 连字符，直接充当 Python 标识符会生成无法启动的脚本（如
+        # collect_my-cookie、collect_a.b）。变量名只进 VAR_KEYS 与函数注释。
         collect_funcs = "\n\n".join(
-            f"def collect_{k}():\n"
+            f"def collect_{i}():  # 采集变量 {k!r}\n"
             f"    # TODO: 在此填入采集 {k} 的本地逻辑（如读取本地 Cookie/凭据）\n"
             f"    # 返回字符串值；若当前无值返回 None 则本次跳过该变量。\n"
             f"    return None"
-            for k in var_keys
+            for i, k in enumerate(var_keys)
         )
     else:
-        collect_funcs = "def collect_PLACEHOLDER():\n    return None"
+        collect_funcs = "def collect_0():\n    return None"
     return _REPORTER_TEMPLATE.format(
         BASE_URL=repr(base_url),
         REPORT_TOKEN=repr(report_token),
@@ -362,7 +393,11 @@ def _build_reporter_script(
     )
 
 
-_REPORTER_TEMPLATE = '''#!/usr/bin/env python3
+# raw 字符串：模板内脚本自带的 \n 转义（如 sys.stderr.write("...\n")）
+# 必须原样进入生成文件——普通三引号会把 \n 变成真实换行，生成未闭合的
+# 字符串字面量，脚本从第一行就 SyntaxError（历史上无人 compile 校验所以
+# 一直未被发现；现有下载测试已补 compile 断言防回归）。
+_REPORTER_TEMPLATE = r'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 OpenOntology 隐私变量上报脚本（由平台自动生成）。
@@ -370,7 +405,8 @@ OpenOntology 隐私变量上报脚本（由平台自动生成）。
 用法：
   1. 本脚本已内嵌：平台地址 BASE_URL、上报 token REPORT_TOKEN、
      公钥 PUBLIC_KEY_PEM、当前变量名清单 VAR_KEYS。
-  2. 在 collect_<key>() 函数里填入本地采集逻辑，返回字符串值。
+  2. 在 collect_N() 函数里填入本地采集逻辑（N 为变量在 VAR_KEYS 中的
+     序号，从 0 起；各函数注释标明了它采集的变量名），返回字符串值。
   3. 运行：python privacy_reporter.py
   4. 脚本会按 INTERVAL 间隔周期性把每个变量的值用公钥加密后上报平台。
      平台用对应私钥解密后落库；本脚本不含任何私钥，泄露只有公钥+token。
@@ -397,7 +433,8 @@ VAR_KEYS = [{VAR_KEYS}]
 # 上报间隔（秒），用户可按需调整。默认 300s = 5 分钟。
 INTERVAL = 300
 
-# 采集函数：平台依据当前已创建的变量名生成占位实现，用户自行填写。
+# 采集函数：平台依据当前已创建的变量名生成占位实现，函数名按序号命名
+# （collect_0、collect_1…，与 VAR_KEYS 一一对应），用户按函数注释自行填写。
 {COLLECT_FUNCS}
 
 
@@ -428,8 +465,8 @@ def _report_once():
     import urllib.request
     import json
     items = []
-    for key in VAR_KEYS:
-        fn = globals().get(f"collect_{{key}}")
+    for idx, key in enumerate(VAR_KEYS):
+        fn = globals().get(f"collect_{{idx}}")
         if fn is None:
             continue
         try:
@@ -490,18 +527,17 @@ def report_privacy_vars(
 ):
     """上报端点：独立 token 鉴权，不走 get_current_user。
 
-    鉴权链路：X-Report-Token 明文 → 与 users.report_token_encrypted 解密
-    后比对 → 命中用户的私钥解密上报密文 → 明文再 Fernet 加密落库。
+    鉴权链路：X-Report-Token 明文 → sha256 哈希查表（users.report_token_hash，
+    与查询密钥同一模式，O(1)、不做全表解密）→ 校验账号可用 → 命中用户的
+    私钥解密上报密文 → 明文再 Fernet 加密落库。停用账号与错误 token 同返回
+    403（防枚举，与公开查询端点同口径）。
     """
     if not x_report_token:
         raise HTTPException(status_code=403, detail="Missing report token")
-    users = db.query(User).filter(User.report_token_encrypted.isnot(None)).all()
-    user = None
-    for u in users:
-        if decrypt_value(u.report_token_encrypted) == x_report_token:
-            user = u
-            break
-    if not user:
+    user = db.query(User).filter(
+        User.report_token_hash == hash_query_key(x_report_token)
+    ).first()
+    if not user or not user.is_active:
         raise HTTPException(status_code=403, detail="Invalid report token")
 
     kp = db.query(UserPrivacyKeypair).filter(
@@ -531,7 +567,12 @@ def report_privacy_vars(
                 })
             else:
                 plaintext = rsa_decrypt(private_pem, item.ciphertext)
-        except Exception:
+        except Exception as exc:
+            # 只记异常类型：exc 消息可能含密文/明文片段，严禁入日志或 detail。
+            logger.warning(
+                "上报值解密失败（user_id=%s key=%s error=%s）",
+                user.id, item.key, type(exc).__name__,
+            )
             raise HTTPException(status_code=400, detail=f"Failed to decrypt value for key: {item.key}")
         row = db.query(UserPrivacyVar).filter(
             UserPrivacyVar.user_id == user.id,
@@ -624,6 +665,11 @@ def create_query_key(
     db.add(row)
     db.commit()
     db.refresh(row)
+    # 只记前缀与 id，绝不记明文（明文仅此一次返回给用户）。
+    logger.info(
+        "查询密钥已签发（user_id=%s category=%s key_id=%s key_prefix=%s）",
+        current_user.id, body.category, row.id, row.key_prefix,
+    )
 
     data = _query_key_out(row)
     # 明文仅此一次返回，前端展示后由用户复制保存。
@@ -645,4 +691,5 @@ def revoke_query_key(
         raise HTTPException(status_code=404, detail="Query key not found")
     row.revoked_at = datetime.now(timezone.utc)
     db.commit()
+    logger.info("查询密钥已吊销（user_id=%s key_id=%s）", current_user.id, key_id)
     return {"message": "revoked"}

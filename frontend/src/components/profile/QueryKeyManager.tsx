@@ -1,22 +1,23 @@
 import { useEffect, useState } from 'react'
-import { Copy, KeyRound, Loader2, Plus, ShieldOff } from 'lucide-react'
+import { KeyRound, Loader2, Plus, ShieldOff } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { Modal } from '@/components/ui/Modal'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { authApi, type QueryKeyCategory, type QueryKeyItem, type QueryKeyValidity } from '@/api/auth'
-import { writeTextToClipboard } from '@/utils/clipboard'
+import { keyStatus, STATUS_META } from '@/components/profile/keyStatus.ts'
+import { formatDateTime } from '@/utils/datetime'
 /**
  * 变量查询密钥管理（PAT 式）：环境变量 / 隐私变量两个分区各挂一份。
  *
  * - 密钥跟用户不跟变量、按类别隔离、多把并存：外部流水线（n8n）持某类别
  *   有效密钥即可 GET 对应公开端点，读取该用户该类别全部变量明文。
- * - 明文仅创建时一次性展示（平台只落 sha256 哈希），复制交互按
- *   AGENTS.md §5 副作用验收：提示如实（"已尝试复制"）+ 输入框自动全选
- *   的手动 Cmd+C / Ctrl+C 兜底。
+ * - 明文仅创建时一次性展示（平台只落 sha256 哈希）：展示弹窗由父层
+ *   ProfileModal 托管（onCreated 上抛），切 tab 卸载本组件也不丢明文；
+ *   复制交互按 AGENTS.md §5 副作用验收：提示如实（"已尝试复制"）+
+ *   输入框自动全选的手动 Cmd+C / Ctrl+C 兜底。
  */
 
 const VALIDITY_OPTIONS: Array<{ value: QueryKeyValidity; label: string }> = [
@@ -44,29 +45,19 @@ function errorMessage(error: any, fallback: string) {
 }
 
 function formatTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return '—'
-    return d.toLocaleString()
-  } catch {
-    return '—'
-  }
+  // 全站日期展示唯一入口（utils/datetime）：库里的时间无 Z 后缀、语义是
+  // UTC，直接 new Date 会被按本地时区解析（上海慢 8 小时）。
+  return formatDateTime(iso, { seconds: true, fallback: '—' })
 }
 
-function keyStatus(item: QueryKeyItem): 'active' | 'expired' | 'revoked' {
-  if (item.revoked_at) return 'revoked'
-  if (item.expires_at && new Date(item.expires_at).getTime() <= Date.now()) return 'expired'
-  return 'active'
-}
-
-const STATUS_META: Record<'active' | 'expired' | 'revoked', { label: string; variant: 'success' | 'warning' | 'secondary' }> = {
-  active: { label: '有效', variant: 'success' },
-  expired: { label: '已过期', variant: 'warning' },
-  revoked: { label: '已吊销', variant: 'secondary' },
-}
-
-export default function QueryKeyManager({ category }: { category: QueryKeyCategory }) {
+export default function QueryKeyManager({
+  category,
+  onCreated,
+}: {
+  category: QueryKeyCategory
+  /** 生成成功后把明文上抛给父层的一次性展示弹窗（本组件卸载不丢明文）。 */
+  onCreated: (key: string) => void
+}) {
   const meta = CATEGORY_META[category]
 
   const [keys, setKeys] = useState<QueryKeyItem[]>([])
@@ -74,8 +65,6 @@ export default function QueryKeyManager({ category }: { category: QueryKeyCatego
   const [busy, setBusy] = useState(false)
   const [newName, setNewName] = useState('')
   const [validity, setValidity] = useState<QueryKeyValidity>('365d')
-  // 创建成功后的一次性明文展示弹窗（关闭即不可再查看）。
-  const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [revokeTarget, setRevokeTarget] = useState<QueryKeyItem | null>(null)
 
   useEffect(() => {
@@ -99,7 +88,7 @@ export default function QueryKeyManager({ category }: { category: QueryKeyCatego
       setKeys(current => [created, ...current])
       setNewName('')
       toast.success('已生成。密钥明文仅此一次展示，请立即复制保存')
-      setCreatedKey(created.key)
+      onCreated(created.key)
     } catch (error) {
       toast.error(errorMessage(error, '生成查询密钥失败'))
     } finally {
@@ -118,17 +107,6 @@ export default function QueryKeyManager({ category }: { category: QueryKeyCatego
     } finally {
       setBusy(false)
       setRevokeTarget(null)
-    }
-  }
-
-  const copyCreatedKey = async () => {
-    if (!createdKey) return
-    try {
-      await writeTextToClipboard(createdKey)
-      // 副作用类交互（AGENTS.md §5）：不依据中间返回值宣称已复制，提示如实。
-      toast.success('已尝试复制到剪贴板，请粘贴验证；也可在输入框手动全选复制')
-    } catch (error) {
-      toast.error(errorMessage(error, '自动复制失败，请在输入框全选后按 Cmd+C / Ctrl+C 复制'))
     }
   }
 
@@ -218,38 +196,6 @@ export default function QueryKeyManager({ category }: { category: QueryKeyCatego
           </ul>
         )}
       </div>
-
-      {createdKey && (
-        <Modal
-          open
-          onClose={() => setCreatedKey(null)}
-          title="查询密钥（仅此一次展示）"
-          description="关闭后无法再次查看，请立即复制并保存到外部流水线（如 n8n 凭据）中。"
-          size="sm"
-          headerIcon={<KeyRound size={18} className="text-[var(--color-nav-bg)]" />}
-          footer={(
-            <>
-              <Button variant="outline" onClick={() => setCreatedKey(null)}>关闭</Button>
-              <Button onClick={() => void copyCreatedKey()}>
-                <Copy size={14} /> 复制密钥
-              </Button>
-            </>
-          )}
-        >
-          <input
-            readOnly
-            value={createdKey}
-            autoFocus
-            onFocus={event => event.currentTarget.select()}
-            aria-label="查询密钥"
-            className="h-9 w-full rounded-md border border-border bg-[var(--color-bg-elevated)] px-3 font-mono text-sm text-foreground"
-          />
-          <p className="mt-2 text-xs text-[var(--color-text-tertiary)]">
-            调用方式：GET <code className="font-mono">{meta.publicPath}</code>，请求头
-            {' '}<code className="font-mono">Authorization: Bearer 密钥</code>
-          </p>
-        </Modal>
-      )}
 
       <ConfirmDialog
         open={revokeTarget !== null}

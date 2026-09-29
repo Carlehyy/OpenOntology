@@ -18,9 +18,10 @@ from app.auth.crypto import (
     decrypt_value,
     encrypt_value,
     generate_rsa_keypair,
+    hash_query_key,
     rsa_encrypt,
 )
-from app.auth.models import UserPrivacyKeypair, UserPrivacyVar
+from app.auth.models import User, UserPrivacyKeypair, UserPrivacyVar
 
 
 def _login_headers(client, username: str, password: str) -> dict:
@@ -147,7 +148,10 @@ def test_download_script_contains_required_parts(client, admin_user):
     assert token in body
     assert "BEGIN PUBLIC KEY" in body
     assert "MY_COOKIE" in body
-    assert "def collect_MY_COOKIE" in body
+    # 采集函数按序号命名（变量名只进 VAR_KEYS 与注释，不充当标识符）
+    assert "def collect_0():" in body
+    # 生成的脚本是合法 Python（可用 compile 静态校验）
+    compile(body, "privacy_reporter.py", "exec")
 
 
 def test_download_script_works_without_any_var(client, admin_user):
@@ -156,6 +160,28 @@ def test_download_script_works_without_any_var(client, admin_user):
     r = client.get("/api/v1/auth/privacy-vars/script", headers=headers)
     assert r.status_code == 200
     assert "BEGIN PUBLIC KEY" in r.text
+
+
+def test_download_script_compiles_with_dash_and_dot_keys(client, admin_user):
+    """变量名含连字符/点（如 my-cookie、a.b）时脚本仍可运行。
+
+    回归历史缺陷：模板曾把变量名直接拼进 `def collect_<key>()`，这类名字
+    会生成无法启动的 Python 脚本；现在函数名只用序号，变量名只进 VAR_KEYS。
+    """
+    headers = _login_headers(client, "admin", "admin123")
+    for key in ("my-cookie", "a.b", "0day_token"):
+        r = client.post("/api/v1/auth/privacy-vars", json={"key": key}, headers=headers)
+        assert r.status_code == 201, key
+    r = client.get("/api/v1/auth/privacy-vars/script", headers=headers)
+    assert r.status_code == 200
+    body = r.text
+    # 原变量名完整保留在脚本里（VAR_KEYS 清单 + 采集函数注释）
+    for key in ("my-cookie", "a.b", "0day_token"):
+        assert key in body, key
+    # 函数名不包含变量名片段（只有序号），且整脚本能通过编译
+    assert "collect_my-cookie" not in body
+    assert "collect_a.b" not in body
+    compile(body, "privacy_reporter.py", "exec")
 
 
 # ---- 上报端点（独立 token 鉴权） ----
@@ -207,6 +233,80 @@ def test_report_requires_token(client, admin_user):
     # 错误 token → 403
     r = _report(client, "wrong-token", [])
     assert r.status_code == 403
+
+
+def test_report_token_hash_persisted_on_create_and_reset(client, admin_user, db: Session):
+    """token 落库为「密文 + sha256 哈希」双列；哈希列是鉴权依据。"""
+    headers = _login_headers(client, "admin", "admin123")
+    token = _create_var_get_token(client, headers, "K")
+    row = db.query(User).filter(User.id == admin_user.id).first()
+    assert row.report_token_encrypted  # 密文列保留（供下载脚本解出明文）
+    assert token not in row.report_token_encrypted
+    assert row.report_token_hash == hash_query_key(token)
+
+    # 重置后哈希列同步更新为新 token
+    new = client.post(
+        "/api/v1/auth/privacy-vars/report-token/reset", headers=headers
+    ).json()["data"]["report_token"]
+    db.refresh(row)
+    assert row.report_token_hash == hash_query_key(new)
+    assert row.report_token_hash != hash_query_key(token)
+
+
+def test_report_rejects_disabled_user(client, admin_user, db: Session):
+    """停用账号的 token 不能再上报（与查询密钥公开端点同一口径，403 防枚举）。"""
+    headers = _login_headers(client, "admin", "admin123")
+    token = _create_var_get_token(client, headers, "K")
+    admin_user.is_active = False
+    db.commit()
+
+    r = _report(client, token, [])
+    assert r.status_code == 403
+    assert r.json()["detail"] == "Invalid report token"
+
+
+def test_report_token_self_heals_when_hash_missing(client, admin_user, db: Session):
+    """对抗审查修复回归：滚动发布/回填中断会留下"有密文、无哈希"的行，
+    该 token 上报 403。管理端点自愈：解密补算哈希，已下发到用户脚本里的
+    旧 token 继续可用（不重置、不回发明文）。"""
+    headers = _login_headers(client, "admin", "admin123")
+    token = _create_var_get_token(client, headers, "K")
+    # 人工制造失同步（模拟旧代码只写密文 / 迁移回填被中断）
+    db.query(User).filter(User.id == admin_user.id).update({"report_token_hash": None})
+    db.commit()
+
+    # 失同步期间 fail-closed：上报 403
+    assert _report(client, token, []).status_code == 403
+
+    # 触发自愈：再建一个变量（走 _ensure_report_token）
+    r = client.post("/api/v1/auth/privacy-vars", json={"key": "K2"}, headers=headers)
+    assert r.status_code == 201
+    assert "report_token" not in r.json()["data"]  # 自愈不是重置，不回发明文
+    row = db.query(User).filter(User.id == admin_user.id).first()
+    assert row.report_token_hash == hash_query_key(token)
+    # 原 token 恢复可用：用户手里的旧上报脚本无需重新下载配置
+    assert _report(client, token, []).status_code == 200
+
+
+def test_report_token_resets_when_ciphertext_corrupted(client, admin_user, db: Session):
+    """密文损坏且无哈希：自愈解不开 → 强制重置，新明文仅此一次返回。"""
+    headers = _login_headers(client, "admin", "admin123")
+    _create_var_get_token(client, headers, "K")
+    db.query(User).filter(User.id == admin_user.id).update({
+        "report_token_hash": None,
+        "report_token_encrypted": "corrupted-not-fernet",
+    })
+    db.commit()
+
+    r = client.post("/api/v1/auth/privacy-vars", json={"key": "K2"}, headers=headers)
+    assert r.status_code == 201
+    new_token = r.json()["data"].get("report_token")
+    assert new_token  # 被迫重置：明文仅此一次返回
+    assert _report(client, new_token, []).status_code == 200
+
+
+    admin_user.is_active = True
+    db.commit()
 
 
 def test_report_rejects_unknown_var_key(client, admin_user, db: Session):

@@ -382,7 +382,10 @@ test('环境变量查询密钥支持生成、一次性展示复制与吊销', as
   const captured: { createBody?: Record<string, unknown>; revokeCalled?: boolean } = {}
   let stored: Array<Record<string, unknown>> = []
 
-  await page.route('**/api/v1/auth/query-keys', async route => {
+  // GET 带 ?category= 查询串：glob 需以 ** 收尾才能命中（此前从未命中过——
+  // 创建后列表来自本地 state 不重拉，切 tab 重挂载重拉取才暴露）。
+  // DELETE 走下方后注册的 query-keys/* 路由（后注册优先）。
+  await page.route('**/api/v1/auth/query-keys**', async route => {
     const method = route.request().method()
     if (method === 'GET') return json(route, stored)
     if (method === 'POST') {
@@ -420,6 +423,18 @@ test('环境变量查询密钥支持生成、一次性展示复制与吊销', as
   await expect(reveal).toBeVisible()
   await expect(reveal.getByLabel('查询密钥')).toHaveValue('obk_env_plaintext-once')
   await expect(reveal.getByText('/api/public/env-vars')).toBeVisible()
+
+  // 明文不随 tab 切换丢失（回归历史缺陷）：弹窗曾渲染在 tab 面板内部，
+  // 切 tab 即卸载 QueryKeyManager、明文永久丢失；现由 ProfileModal 托管。
+  // 一次性弹窗的遮罩盖住 tab 栏，真实点击会被遮罩截走，此处走键盘路径
+  // （focus + Enter，与无焦点圈弹窗下用户的可达路径一致）。
+  const profileDialog = page.getByRole('dialog', { name: '个人资料' })
+  await profileDialog.getByRole('tab', { name: '账号信息' }).press('Enter')
+  await expect(reveal).toBeVisible()
+  await expect(reveal.getByLabel('查询密钥')).toHaveValue('obk_env_plaintext-once')
+  await profileDialog.getByRole('tab', { name: '环境变量' }).press('Enter')
+  await expect(reveal).toBeVisible()
+  await expect(reveal.getByLabel('查询密钥')).toHaveValue('obk_env_plaintext-once')
 
   // 复制：断言真实剪贴板内容（AGENTS.md §5：不依据中间提示宣称已复制）
   await reveal.getByRole('button', { name: '复制密钥' }).click()
@@ -476,7 +491,8 @@ test('隐私变量分区独立生成查询密钥（类别隔离）', async ({ pa
   await mockPlatformShell(page)
 
   const captured: { createBody?: Record<string, unknown> } = {}
-  await page.route('**/api/v1/auth/query-keys', async route => {
+  // 与生成/吊销用例同款宽 glob：GET 实际带 ?category= 查询串，窄 glob 从未命中
+  await page.route('**/api/v1/auth/query-keys**', async route => {
     const method = route.request().method()
     if (method === 'GET') return json(route, [])
     if (method === 'POST') {
