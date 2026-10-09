@@ -436,6 +436,13 @@ app.include_router(tickets_router.router, prefix="/api/v2/tickets", tags=["ticke
 # 整个域仅管理员，鉴权在各端点 require_admin 声明
 from app.notifications import router as notifications_router
 app.include_router(notifications_router.router, prefix="/api/v2/notifications", tags=["notifications"])
+# 对外投递入口：X-API-Key 鉴权（与 events ingest 同构），不挂 JWT
+from app.notifications.ingest_router import ingest_router as notifications_ingest_router
+app.include_router(
+    notifications_ingest_router,
+    prefix="/api/v2/notifications/ingest",
+    tags=["notifications-ingest"],
+)
 
 # 世界模型（演化层）— 一级导航域：推演模型项目开发调试 + 调用记录（发布为推演服务属二期）
 world_model_guard = menu_guard("world_model")

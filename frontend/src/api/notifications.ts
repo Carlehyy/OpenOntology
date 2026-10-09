@@ -55,6 +55,19 @@ export interface NotificationStateFields {
   isArchived?: boolean
 }
 
+export interface NotificationIngestKey {
+  id: string
+  name: string
+  keyPrefix: string
+  enabled: boolean
+  allowedSourceSystem: string | null
+  createdAt: string
+  lastUsedAt: string | null
+  revokedAt: string | null
+  /** 明文仅在签发响应中一次性返回 */
+  plaintextKey?: string
+}
+
 export const NOTIFICATION_TABS: { key: NotificationTab; label: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'unread', label: '未读' },
@@ -95,6 +108,17 @@ export const notificationsApi = {
 
   remove: (id: string): Promise<{ deleted: string }> =>
     apiClientV2.delete(`/notifications/${id}`),
+
+  ingestKeys: {
+    list: (): Promise<NotificationIngestKey[]> =>
+      apiClientV2.get('/notifications/ingest-keys'),
+
+    create: (payload: { name: string; allowedSourceSystem?: string | null }): Promise<NotificationIngestKey> =>
+      apiClientV2.post('/notifications/ingest-keys', payload),
+
+    revoke: (id: string): Promise<NotificationIngestKey> =>
+      apiClientV2.delete(`/notifications/ingest-keys/${id}`),
+  },
 
   /** 附件下载地址（需携带登录态请求；正文内嵌媒体同源引用此路径） */
   attachmentUrl: (messageId: string, attachmentId: string): string =>

@@ -13,13 +13,17 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, require_admin
 from app.notifications import service
-from app.notifications.schemas import NotificationCreate, NotificationStateUpdate
+from app.notifications.schemas import (
+    NotificationCreate,
+    NotificationIngestKeyCreate,
+    NotificationStateUpdate,
+)
 
 router = APIRouter()
 
@@ -74,6 +78,46 @@ def create_notification(
 @router.post("/read-all")
 def read_all_notifications(db: Session = Depends(get_db), admin=Depends(require_admin)):
     return _ok({"updated": service.mark_all_read(db, user_id=admin.id)})
+
+
+# —— 对外投递密钥管理（admin；投递端点在 ingest_router，X-API-Key 鉴权）——
+
+
+@router.get("/ingest-keys")
+def list_ingest_keys(db: Session = Depends(get_db), _admin=Depends(require_admin)):
+    rows = (
+        db.query(service.NotificationIngestKey)
+        .order_by(service.NotificationIngestKey.created_at.desc())
+        .all()
+    )
+    return _ok([service.ingest_key_out(row) for row in rows])
+
+
+@router.post("/ingest-keys", status_code=201)
+def create_ingest_key(
+    body: NotificationIngestKeyCreate,
+    db: Session = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    row, plaintext = service.mint_ingest_key(db, body.name, body.allowedSourceSystem, admin)
+    return _ok(service.ingest_key_out(row, plaintext=plaintext))
+
+
+@router.delete("/ingest-keys/{key_id}")
+def revoke_ingest_key(
+    key_id: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    row = (
+        db.query(service.NotificationIngestKey)
+        .filter(service.NotificationIngestKey.id == key_id)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(404, "密钥不存在")
+    service.revoke_ingest_key(db, row)
+    return _ok(service.ingest_key_out(row))
 
 
 # —— 单条消息 ——

@@ -3,14 +3,15 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Archive, ArchiveRestore, Bell, FileText, Loader2, MailOpen, Paperclip,
-  Send, Star, Trash2,
+  Archive, ArchiveRestore, Bell, Copy, FileText, KeyRound, Loader2, MailOpen,
+  Paperclip, Send, Star, Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
   NOTIFICATION_TABS,
   notificationsApi,
+  type NotificationIngestKey,
   type NotificationAttachment,
   type NotificationMessage,
   type NotificationPriority,
@@ -19,6 +20,7 @@ import {
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { formatDateTime } from '@/utils/datetime'
+import { writeTextToClipboard } from '@/utils/clipboard'
 import { useAuthStore } from '@/stores/authStore'
 
 import { DialogShell } from './AssistantConfiguration'
@@ -80,6 +82,11 @@ export default function NotificationsDialog({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<NotificationMessage | null>(null)
   const [composeOpen, setComposeOpen] = useState(false)
+  const [keysOpen, setKeysOpen] = useState(false)
+  const [keyName, setKeyName] = useState('')
+  const [keyScope, setKeyScope] = useState('')
+  const [mintedKey, setMintedKey] = useState<NotificationIngestKey | null>(null)
+  const [revokingKey, setRevokingKey] = useState<NotificationIngestKey | null>(null)
 
   // 手动发送表单
   const [composeTitle, setComposeTitle] = useState('')
@@ -116,6 +123,16 @@ export default function NotificationsDialog({
   })
 
   // 详情接口在服务端把消息标为已读：同步刷新列表与徽章（不刷详情自身，避免循环）
+  // 弹窗关闭即清除密钥明文与面板临时态（“仅此一次”承诺不因重开而失效）
+  useEffect(() => {
+    if (!open) {
+      setMintedKey(null)
+      setKeysOpen(false)
+      setKeyName('')
+      setKeyScope('')
+    }
+  }, [open])
+
   const syncedReadId = useRef<string | null>(null)
   useEffect(() => {
     const id = detail.data?.id
@@ -155,6 +172,32 @@ export default function NotificationsDialog({
       setSelectedId(data.id)
       queryClient.setQueryData(['notifications', 'detail', data.id], data)
       invalidateLists()
+    },
+    onError: error => toast.error(errorText(error)),
+  })
+
+  const ingestKeys = useQuery({
+    queryKey: ['notifications', 'ingest-keys'],
+    queryFn: notificationsApi.ingestKeys.list,
+    enabled: open && keysOpen,
+  })
+
+  const mintKeyMutation = useMutation({
+    mutationFn: notificationsApi.ingestKeys.create,
+    onSuccess: data => {
+      setMintedKey(data)
+      setKeyName('')
+      setKeyScope('')
+      void queryClient.invalidateQueries({ queryKey: ['notifications', 'ingest-keys'] })
+    },
+    onError: error => toast.error(errorText(error)),
+  })
+
+  const revokeKeyMutation = useMutation({
+    mutationFn: notificationsApi.ingestKeys.revoke,
+    onSuccess: () => {
+      toast.success('密钥已吊销')
+      void queryClient.invalidateQueries({ queryKey: ['notifications', 'ingest-keys'] })
     },
     onError: error => toast.error(errorText(error)),
   })
@@ -257,14 +300,24 @@ export default function NotificationsDialog({
               >
                 <MailOpen size={13} /> 全部已读
               </button>
-              <button
-                type="button"
-                onClick={() => setComposeOpen(value => !value)}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                data-notifications-compose-toggle
-              >
-                <Send size={13} /> 发送消息
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => { setComposeOpen(false); setKeysOpen(value => !value) }}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  data-notifications-keys-toggle
+                >
+                  <KeyRound size={13} /> 接入密钥
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setKeysOpen(false); setComposeOpen(value => !value) }}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  data-notifications-compose-toggle
+                >
+                  <Send size={13} /> 发送消息
+                </button>
+              </div>
             </div>
             <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-2">
               {list.isLoading && (
@@ -297,7 +350,7 @@ export default function NotificationsDialog({
                     <button
                       key={item.id}
                       type="button"
-                      onClick={() => { setSelectedId(item.id); setComposeOpen(false) }}
+                      onClick={() => { setSelectedId(item.id); setComposeOpen(false); setKeysOpen(false) }}
                       data-notifications-item={item.id}
                       className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                         active
@@ -346,7 +399,136 @@ export default function NotificationsDialog({
 
           {/* 右栏：发送消息 或 消息详情 */}
           <div className="flex min-w-0 flex-1 flex-col" data-notifications-detail>
-            {composeOpen ? (
+            {keysOpen ? (
+              <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-keys-panel>
+                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">接入密钥</h3>
+                <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
+                  外部系统以 X-API-Key 调用 <code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">POST /api/v2/notifications/ingest</code> 投递消息；密钥明文仅签发时展示一次。
+                </p>
+                {mintedKey && (
+                  <div className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3" data-notifications-key-plaintext>
+                    <p className="text-xs font-medium text-[var(--color-warning)]">
+                      「{mintedKey.name}」密钥明文（仅此一次，请立即保存）：
+                    </p>
+                    <div className="mt-2 flex items-center gap-2">
+                      <code className="min-w-0 flex-1 break-all rounded bg-[var(--color-bg-base)] px-2 py-1.5 font-mono text-[11px] text-[var(--color-text-primary)]">
+                        {mintedKey.plaintextKey}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          writeTextToClipboard(mintedKey.plaintextKey || '')
+                            .then(() => toast.success('已复制到剪贴板'))
+                            .catch(() => toast.error('复制失败，请手动选择复制'))
+                        }}
+                        className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <Copy size={12} /> 复制
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                    密钥名称（来源标识）
+                    <input
+                      value={keyName}
+                      onChange={event => setKeyName(event.target.value)}
+                      maxLength={200}
+                      placeholder="如 billing"
+                      className={inputClass}
+                      data-notifications-key-name
+                    />
+                  </label>
+                  <label className="flex w-44 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                    限定来源系统（可选）
+                    <input
+                      value={keyScope}
+                      onChange={event => setKeyScope(event.target.value)}
+                      maxLength={200}
+                      placeholder="留空不限定"
+                      className={inputClass}
+                      data-notifications-key-scope
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!keyName.trim()) {
+                        toast.error('密钥名称不能为空')
+                        return
+                      }
+                      mintKeyMutation.mutate({
+                        name: keyName.trim(),
+                        allowedSourceSystem: keyScope.trim() || null,
+                      })
+                    }}
+                    disabled={mintKeyMutation.isPending}
+                    className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    style={{ background: 'var(--color-nav-bg)' }}
+                    data-notifications-key-mint
+                  >
+                    {mintKeyMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <KeyRound size={13} />}
+                    签发密钥
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1">
+                  {ingestKeys.isLoading ? (
+                    <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--color-text-tertiary)]">
+                      <Loader2 size={14} className="animate-spin" /> 加载中…
+                    </div>
+                  ) : ingestKeys.isError ? (
+                    <div role="alert" className="flex flex-col items-center gap-2 py-8 text-center">
+                      <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">密钥列表加载失败：{errorText(ingestKeys.error)}</p>
+                      <button
+                        type="button"
+                        onClick={() => void ingestKeys.refetch()}
+                        className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        重试
+                      </button>
+                    </div>
+                  ) : (ingestKeys.data ?? []).length === 0 ? (
+                    <p className="px-2 py-6 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
+                      还没有投递密钥。签发后把密钥与接口地址交给外部系统即可开始投递。
+                    </p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {(ingestKeys.data ?? []).map(key => (
+                        <li
+                          key={key.id}
+                          data-notifications-key-item={key.id}
+                          className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
+                        >
+                          <KeyRound size={14} className={`shrink-0 ${key.enabled ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-tertiary)]'}`} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm text-[var(--color-text-primary)]">
+                              {key.name}
+                              <span className="ml-2 font-mono text-[10px] text-[var(--color-text-tertiary)]">{key.keyPrefix}_…</span>
+                            </p>
+                            <p className="truncate text-[10px] text-[var(--color-text-tertiary)]">
+                              {key.allowedSourceSystem ? `限定来源：${key.allowedSourceSystem} · ` : ''}
+                              {key.enabled ? `最近使用：${key.lastUsedAt ? formatDateTime(key.lastUsedAt) : '未使用'}` : `已吊销：${formatDateTime(key.revokedAt || key.createdAt)}`}
+                            </p>
+                          </div>
+                          {key.enabled && (
+                            <button
+                              type="button"
+                              onClick={() => setRevokingKey(key)}
+                              disabled={revokeKeyMutation.isPending}
+                              className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                              data-notifications-key-revoke
+                            >
+                              吊销
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            ) : composeOpen ? (
               <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4">
                 <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">发送消息</h3>
                 <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
@@ -530,6 +712,19 @@ export default function NotificationsDialog({
         </div>
       </DialogShell>
 
+      <ConfirmDialog
+        open={revokingKey !== null}
+        onClose={() => setRevokingKey(null)}
+        onConfirm={() => {
+          if (revokingKey) revokeKeyMutation.mutate(revokingKey.id)
+          setRevokingKey(null)
+        }}
+        loading={revokeKeyMutation.isPending}
+        title="吊销这枚投递密钥？"
+        description={`「${revokingKey?.name ?? ''}」对应的外部系统将立即无法投递消息，且不可恢复。`}
+        confirmText="吊销"
+        variant="warning"
+      />
       <ConfirmDialog
         open={deleting !== null}
         onClose={() => setDeleting(null)}

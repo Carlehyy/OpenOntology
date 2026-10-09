@@ -22,3 +22,10 @@ class NotificationStateUpdate(BaseModel):
     isRead: bool | None = None
     isStarred: bool | None = None
     isArchived: bool | None = None
+
+
+class NotificationIngestKeyCreate(BaseModel):
+    """签发对外投递密钥；明文仅在创建响应中一次性返回。"""
+
+    name: str = Field(min_length=1, max_length=200)
+    allowedSourceSystem: str | None = Field(default=None, max_length=200)

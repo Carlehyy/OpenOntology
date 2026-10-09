@@ -88,6 +88,8 @@ class NotificationMessage(Base):
     created_by: Mapped[str | None] = mapped_column(
         String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # 投递密钥归属（source_type=ingest 时绑定）：附件追加按此鉴权，防跨密钥注入
+    ingest_key_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
@@ -141,3 +143,26 @@ class NotificationAttachment(Base):
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     uploaded_by: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
+class NotificationIngestKey(Base):
+    """对外投递密钥。key_hash 存 sha256，明文（ob_notif_<tag>_<secret>）仅创建时返回一次。"""
+
+    __tablename__ = "notification_ingest_keys"
+    __table_args__ = (
+        UniqueConstraint("key_hash", name="uq_notification_ingest_keys_hash"),
+        Index("ix_notification_ingest_keys_enabled", "enabled"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # 密钥名 = 外部系统来源标识（投递消息未显式声明 sourceSystem 时以其兜底）
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 可选作用域：限定该密钥只能以某个 sourceSystem 名义投递
+    allowed_source_system: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

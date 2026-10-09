@@ -482,3 +482,222 @@ def test_event_id_scoped_by_source_system(db, admin_user):
         source_type="ingest",
     )
     assert replay.id == billing.id
+
+
+# ── M2：对外投递接口（X-API-Key）──────────────────────────────
+
+INGEST = "/api/v2/notifications/ingest"
+
+
+def _mint_key(client, headers, *, name="billing", allowed=None):
+    payload = {"name": name}
+    if allowed is not None:
+        payload["allowedSourceSystem"] = allowed
+    resp = client.post("/api/v2/notifications/ingest-keys", json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+    return resp.json()["data"]
+
+
+def _ingest_headers(key: dict) -> dict:
+    return {"X-API-Key": key["plaintextKey"]}
+
+
+def test_ingest_key_lifecycle(client, auth_headers):
+    key = _mint_key(client, auth_headers)
+    # 明文一次性返回：前缀可识别、列表永不携带明文
+    assert key["plaintextKey"].startswith(f"{key['keyPrefix']}_")
+    listed = client.get("/api/v2/notifications/ingest-keys", headers=auth_headers).json()["data"]
+    assert [row["id"] for row in listed] == [key["id"]]
+    assert all("plaintextKey" not in row for row in listed)
+    assert key["allowedSourceSystem"] is None
+
+    # 吊销后立即失效；重复吊销 404 语义由不存在处理
+    assert client.delete(f"/api/v2/notifications/ingest-keys/{key['id']}", headers=auth_headers).status_code == 200
+    revoked = client.get("/api/v2/notifications/ingest-keys", headers=auth_headers).json()["data"][0]
+    assert revoked["enabled"] is False and revoked["revokedAt"]
+    assert client.post(INGEST, json={"title": "x"}, headers=_ingest_headers(key)).status_code == 401
+    assert client.delete("/api/v2/notifications/ingest-keys/missing", headers=auth_headers).status_code == 404
+
+
+def test_ingest_key_management_requires_admin(client, auth_headers, editor_user):
+    headers = _editor_headers(client)
+    assert client.get("/api/v2/notifications/ingest-keys", headers=headers).status_code == 403
+    assert client.post("/api/v2/notifications/ingest-keys", json={"name": "x"}, headers=headers).status_code == 403
+    _mint_key(client, auth_headers)
+    key_id = client.get("/api/v2/notifications/ingest-keys", headers=auth_headers).json()["data"][0]["id"]
+    assert client.delete(f"/api/v2/notifications/ingest-keys/{key_id}", headers=headers).status_code == 403
+
+
+def test_ingest_message_creates_and_idempotent(client, auth_headers):
+    key = _mint_key(client, auth_headers, name="billing")
+    headers = _ingest_headers(key)
+
+    first = client.post(INGEST, json={
+        "eventId": "incident-1", "title": "账单异常", "body": "# 详情\n环比 +300%",
+        "priority": "urgent",
+    }, headers=headers)
+    assert first.status_code == 200, first.text
+    payload = first.json()["data"]
+    assert payload["idempotent"] is False
+    message = payload["message"]
+    assert message["sourceType"] == "ingest"
+    assert message["sourceSystem"] == "billing"  # 缺省回退密钥名
+    assert message["eventId"] == "incident-1"
+
+    # 重放同 eventId：幂等命中，不新建
+    replay = client.post(INGEST, json={
+        "eventId": "incident-1", "title": "账单异常（重发）", "body": "changed",
+    }, headers=headers).json()["data"]
+    assert replay["idempotent"] is True
+    assert replay["message"]["id"] == message["id"]
+    assert replay["message"]["title"] == "账单异常"
+
+    # 站内可见且未读；last_used_at 已更新
+    detail = client.get(f"/api/v2/notifications/{message['id']}", headers=auth_headers).json()["data"]
+    assert detail["body"] == "# 详情\n环比 +300%"
+    listed = client.get("/api/v2/notifications/ingest-keys", headers=auth_headers).json()["data"]
+    assert listed[0]["lastUsedAt"] is not None
+
+
+def test_ingest_auth_failures(client, auth_headers):
+    _mint_key(client, auth_headers)
+    assert client.post(INGEST, json={"title": "x"}).status_code == 401  # 无密钥
+    assert client.post(INGEST, json={"title": "x"}, headers={"X-API-Key": "ob_notif_wrong_secret"}).status_code == 401
+    # 畸形 JSON / 非对象
+    key = _mint_key(client, auth_headers, name="k2")
+    headers = _ingest_headers(key)
+    resp = client.post(INGEST, content=b"not-json", headers=headers)
+    assert resp.status_code == 422
+    resp = client.post(INGEST, json=["array"], headers=headers)
+    assert resp.status_code == 422
+
+
+def test_ingest_scope_and_validation(client, auth_headers):
+    scoped = _mint_key(client, auth_headers, name="crm", allowed="crm")
+    headers = _ingest_headers(scoped)
+    ok = client.post(INGEST, json={"sourceSystem": "crm", "title": "客户提醒"}, headers=headers)
+    assert ok.status_code == 200
+    # 伪装其它来源系统 → 403
+    assert client.post(INGEST, json={"sourceSystem": "billing", "title": "越权"}, headers=headers).status_code == 403
+    # 校验：空标题 / 非法优先级
+    assert client.post(INGEST, json={"title": " "}, headers=headers).status_code == 422
+    assert client.post(INGEST, json={"title": "x", "priority": "critical"}, headers=headers).status_code == 422
+
+
+def test_ingest_attachment_flow(client, auth_headers):
+    key = _mint_key(client, auth_headers, name="billing")
+    headers = _ingest_headers(key)
+    message = client.post(INGEST, json={"eventId": "inc-9", "title": "带附件告警"}, headers=headers).json()["data"]["message"]
+
+    att = client.post(
+        f"{INGEST}/{message['id']}/attachments",
+        files={"file": ("证据.png", b"\x89PNG-bytes", "image/png")},
+        headers=headers,
+    )
+    assert att.status_code == 201, att.text
+    data = att.json()["data"]
+    assert data["url"].endswith(f"/notifications/{message['id']}/attachments/{data['id']}/download")
+
+    # 管理员站内可见并可下载（JWT）；附件来源以密钥前缀留痕
+    detail = client.get(f"/api/v2/notifications/{message['id']}", headers=auth_headers).json()["data"]
+    assert detail["attachments"][0]["filename"] == "证据.png"
+    download = client.get(data["url"], headers=auth_headers)
+    assert download.status_code == 200 and download.content == b"\x89PNG-bytes"
+
+
+def test_ingest_attachment_rejects_non_ingest_message(client, auth_headers, tmp_path, monkeypatch):
+    from app.config import settings as cfg
+    monkeypatch.setattr(cfg, "uploads_dir", str(tmp_path))
+    key = _mint_key(client, auth_headers, name="billing")
+    headers = _ingest_headers(key)
+
+    manual = _create(client, auth_headers)  # sourceType=manual
+    resp = client.post(
+        f"{INGEST}/{manual['id']}/attachments",
+        files={"file": ("a.txt", b"x", "text/plain")},
+        headers=headers,
+    )
+    assert resp.status_code == 403  # 仅 ingest 消息可经密钥追加附件
+
+
+def test_ingest_does_not_mark_read(client, auth_headers):
+    key = _mint_key(client, auth_headers, name="billing")
+    message = client.post(INGEST, json={"title": "未读保持"}, headers=_ingest_headers(key)).json()["data"]["message"]
+    summary = client.get("/api/v2/notifications/summary", headers=auth_headers).json()["data"]
+    assert summary["unreadCount"] >= 1  # 投递不改变管理员的阅读状态
+
+
+# ── M2 对抗审查补充：跨密钥注入 / 类型与长度 / 作用域缺省 / 归属留痕 ──
+
+
+def test_ingest_attachment_cross_key_injection_blocked(client, auth_headers, tmp_path, monkeypatch):
+    """密钥 B 不能向密钥 A 投递的消息注入附件（归属列防线）。"""
+    monkeypatch.setattr(settings, "uploads_dir", str(tmp_path))
+    key_a = _mint_key(client, auth_headers, name="billing")
+    key_b = _mint_key(client, auth_headers, name="crm")
+    message = client.post(INGEST, json={"title": "A 的告警"}, headers=_ingest_headers(key_a)).json()["data"]["message"]
+
+    resp = client.post(
+        f"{INGEST}/{message['id']}/attachments",
+        files={"file": ("evil.txt", b"x", "text/plain")},
+        headers=_ingest_headers(key_b),
+    )
+    assert resp.status_code == 403
+    # 密钥 A 本人仍可追加
+    ok = client.post(
+        f"{INGEST}/{message['id']}/attachments",
+        files={"file": ("ok.txt", b"x", "text/plain")},
+        headers=_ingest_headers(key_a),
+    )
+    assert ok.status_code == 201
+
+
+def test_ingest_rejects_oversized_event_id_and_non_string(client, auth_headers):
+    key = _mint_key(client, auth_headers, name="billing")
+    headers = _ingest_headers(key)
+    # 超 255 字符的 eventId 直接 422（不静默截断成撞幂等键）
+    assert client.post(INGEST, json={"title": "x", "eventId": "A" * 256}, headers=headers).status_code == 422
+    # 非字符串字段 422（不做 Python repr 落库）
+    assert client.post(INGEST, json={"title": {"nested": 1}}, headers=headers).status_code == 422
+    assert client.post(INGEST, json={"title": "x", "body": ["list"]}, headers=headers).status_code == 422
+    assert client.post(INGEST, json={"title": "x", "priority": 3}, headers=headers).status_code == 422
+
+
+def test_scoped_key_defaults_source_system_to_scope(client, auth_headers):
+    """作用域密钥缺省 sourceSystem 时强制为作用域（显式异名仍 403）。"""
+    scoped = _mint_key(client, auth_headers, name="crm-key", allowed="crm")
+    headers = _ingest_headers(scoped)
+    ok = client.post(INGEST, json={"title": "缺省来源"}, headers=headers)
+    assert ok.status_code == 200
+    assert ok.json()["data"]["message"]["sourceSystem"] == "crm"
+    denied = client.post(INGEST, json={"title": "x", "sourceSystem": "billing"}, headers=headers)
+    assert denied.status_code == 403
+
+
+def test_ingest_attachment_records_key_prefix_provenance(client, auth_headers, db, tmp_path, monkeypatch):
+    """附件来源以密钥前缀留痕，且随附件行同事务一次提交。"""
+    from app.notifications.models import NotificationAttachment as AttModel
+
+    monkeypatch.setattr(settings, "uploads_dir", str(tmp_path))
+    key = _mint_key(client, auth_headers, name="billing")
+    message = client.post(INGEST, json={"title": "溯源"}, headers=_ingest_headers(key)).json()["data"]["message"]
+    att = client.post(
+        f"{INGEST}/{message['id']}/attachments",
+        files={"file": ("a.txt", b"x", "text/plain")},
+        headers=_ingest_headers(key),
+    ).json()["data"]
+    record = db.query(AttModel).filter(AttModel.id == att["id"]).first()
+    assert record is not None
+    assert record.uploaded_by == key["keyPrefix"]
+    assert record.uploaded_by.startswith("ob_notif_")
+
+
+def test_revoked_key_last_used_at_frozen(client, auth_headers):
+    key = _mint_key(client, auth_headers, name="billing")
+    headers = _ingest_headers(key)
+    client.post(INGEST, json={"title": "first"}, headers=headers)
+    client.delete(f"/api/v2/notifications/ingest-keys/{key['id']}", headers=auth_headers)
+    used_at = client.get("/api/v2/notifications/ingest-keys", headers=auth_headers).json()["data"][0]["lastUsedAt"]
+    assert client.post(INGEST, json={"title": "after revoke"}, headers=headers).status_code == 401
+    frozen = client.get("/api/v2/notifications/ingest-keys", headers=auth_headers).json()["data"][0]["lastUsedAt"]
+    assert frozen == used_at

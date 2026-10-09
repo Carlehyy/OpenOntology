@@ -15,6 +15,7 @@ import base64
 import hashlib
 import json
 import os
+import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -30,6 +31,7 @@ from app.notifications.models import (
     NOTIFICATION_PRIORITIES,
     NOTIFICATION_SOURCE_TYPES,
     NotificationAttachment,
+    NotificationIngestKey,
     NotificationMessage,
     NotificationMessageState,
     PRIORITY_NORMAL,
@@ -81,7 +83,7 @@ def _validate_payload(*, title: str, body_md: str, priority: str, source_type: s
 # ── 写侧：创建 / 内部发布 ─────────────────────────────────────
 
 
-def create_message(
+def create_message_ex(
     db: Session,
     *,
     title: str,
@@ -90,12 +92,13 @@ def create_message(
     source_system: str = "platform",
     source_type: str = SOURCE_TYPE_MANUAL,
     event_id: str | None = None,
+    ingest_key_id: str | None = None,
     user=None,
-) -> NotificationMessage:
-    """创建一条通知消息。
+) -> tuple[NotificationMessage, bool]:
+    """创建一条通知消息，返回 (消息, 是否新建)。
 
-    (source_system, event_id) 幂等：同键重放返回既有消息；并发撞唯一
-    约束时回滚重查，保证“重放无副作用、并发不 500”。
+    (source_system, event_id) 幂等：同键重放返回既有消息且 created=False；
+    并发撞唯一约束时回滚重查，保证“重放无副作用、并发不 500”。
     """
     _validate_payload(title=title, body_md=body_md, priority=priority, source_type=source_type)
     normalized_source = (source_system or "platform").strip()[:80] or "platform"
@@ -104,7 +107,7 @@ def create_message(
     if normalized_event:
         existing = _find_by_source_event(db, normalized_source, normalized_event)
         if existing is not None:
-            return existing
+            return existing, False
 
     message = NotificationMessage(
         event_id=normalized_event,
@@ -114,6 +117,7 @@ def create_message(
         body_md=body_md or "",
         priority=priority,
         created_by=getattr(user, "id", None),
+        ingest_key_id=ingest_key_id,
     )
     db.add(message)
     try:
@@ -123,8 +127,13 @@ def create_message(
         existing = _find_by_source_event(db, normalized_source, normalized_event or "")
         if existing is None:
             raise
-        return existing
+        return existing, False
     db.refresh(message)
+    return message, True
+
+
+def create_message(db: Session, **kwargs) -> NotificationMessage:
+    message, _created = create_message_ex(db, **kwargs)
     return message
 
 
@@ -386,7 +395,12 @@ def notification_summary(db: Session, *, user_id: str) -> dict[str, int]:
 
 
 async def add_attachment(
-    db: Session, message: NotificationMessage, *, upload: UploadFile, user=None
+    db: Session,
+    message: NotificationMessage,
+    *,
+    upload: UploadFile,
+    user=None,
+    uploaded_by: str | None = None,
 ) -> NotificationAttachment:
     filename = upload.filename or ""
     mime = upload.content_type
@@ -426,7 +440,7 @@ async def add_attachment(
         file_size=file_size,
         mime_type=mime,
         sha256=digest.hexdigest(),
-        uploaded_by=getattr(user, "id", None),
+        uploaded_by=uploaded_by or getattr(user, "id", None),
     )
     try:
         db.add(att)
@@ -587,3 +601,147 @@ def _message_dict(
     if attachments is not None:
         out["attachments"] = [attachment_out(att) for att in attachments]
     return out
+
+
+# ── 对外投递：密钥管理 + ingest 入口（M2）─────────────────────
+
+
+def hash_key(plaintext: str) -> str:
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+
+def mint_ingest_key(
+    db: Session, name: str, allowed_source_system: str | None, user=None
+) -> tuple[NotificationIngestKey, str]:
+    """生成对外投递密钥。返回 (记录, 明文全串)；明文只在此刻可见，之后仅存 sha256。"""
+    if not (name or "").strip():
+        raise HTTPException(422, "name 不能为空")
+    tag = secrets.token_hex(3)
+    secret = secrets.token_urlsafe(32)
+    key_prefix = f"ob_notif_{tag}"
+    plaintext = f"{key_prefix}_{secret}"
+    row = NotificationIngestKey(
+        name=name.strip()[:200],
+        key_prefix=key_prefix,
+        key_hash=hash_key(plaintext),
+        enabled=True,
+        allowed_source_system=(allowed_source_system or "").strip()[:200] or None,
+        created_by=getattr(user, "id", None),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row, plaintext
+
+
+def verify_ingest_key(db: Session, plaintext: str) -> NotificationIngestKey | None:
+    if not plaintext:
+        return None
+    return (
+        db.query(NotificationIngestKey)
+        .filter(
+            NotificationIngestKey.key_hash == hash_key(plaintext),
+            NotificationIngestKey.enabled.is_(True),
+            NotificationIngestKey.revoked_at.is_(None),
+        )
+        .first()
+    )
+
+
+def revoke_ingest_key(db: Session, row: NotificationIngestKey) -> None:
+    row.enabled = False
+    row.revoked_at = _now()
+    db.commit()
+
+
+def ingest_key_out(key: NotificationIngestKey, *, plaintext: str | None = None) -> dict[str, Any]:
+    out = {
+        "id": key.id,
+        "name": key.name,
+        "keyPrefix": key.key_prefix,
+        "enabled": key.enabled,
+        "allowedSourceSystem": key.allowed_source_system,
+        "createdAt": _iso(key.created_at),
+        "lastUsedAt": _iso(key.last_used_at),
+        "revokedAt": _iso(key.revoked_at),
+    }
+    if plaintext is not None:
+        # 明文仅创建响应一次性返回；列表/吊销响应永不携带
+        out["plaintextKey"] = plaintext
+    return out
+
+
+def _ingest_str_field(body: dict[str, Any], field: str) -> str | None:
+    """取字符串字段；dict/list/数字等非字符串值一律 422（不做隐式 repr）。"""
+    value = body.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(422, f"{field} 必须是字符串")
+    return value.strip()
+
+
+def ingest_message(db: Session, body: dict[str, Any], key: NotificationIngestKey) -> dict[str, Any]:
+    """外部系统经 X-API-Key 投递一条消息。
+
+    sourceSystem 优先取请求体：缺省回退密钥作用域（无作用域则回退密钥名），
+    显式声明且与密钥作用域不一致时 403。长度超限直接 422（不静默截断，
+    避免不同长 eventId 截断后撞成同一幂等键）。(source_system, eventId) 幂等，
+    idempotent = !created 由创建路径统一判定（含并发竞态）。
+    """
+    source_system = _ingest_str_field(body, "sourceSystem")
+    if source_system and key.allowed_source_system and source_system != key.allowed_source_system:
+        raise HTTPException(403, f"该密钥不允许以来源系统 {source_system!r} 投递")
+    if not source_system:
+        source_system = (key.allowed_source_system or key.name).strip()
+    if not source_system:
+        raise HTTPException(422, "sourceSystem 不能为空")
+    if len(source_system) > 80:
+        raise HTTPException(422, "sourceSystem 过长（上限 80 个字符）")
+
+    event_id = _ingest_str_field(body, "eventId")
+    if event_id:
+        if len(event_id) > 255:
+            raise HTTPException(422, "eventId 过长（上限 255 个字符）")
+    else:
+        event_id = None
+
+    title = _ingest_str_field(body, "title")
+    if not title:
+        raise HTTPException(422, "title 不能为空")
+    body_md = _ingest_str_field(body, "body") or ""
+    priority = _ingest_str_field(body, "priority") or PRIORITY_NORMAL
+
+    message, created = create_message_ex(
+        db,
+        title=title,
+        body_md=body_md,
+        priority=priority,
+        source_system=source_system,
+        source_type="ingest",
+        event_id=event_id,
+        ingest_key_id=key.id,
+    )
+    # 渠道转发（M3）将在消息创建后于此处生成投递单；本期仅入站
+    return {
+        "idempotent": not created,
+        "message": _message_dict(
+            message, None, attachments=_attachments_of(db, message.id), with_body=True
+        ),
+    }
+
+
+def require_ingest_message(
+    db: Session, message_id: str, key: NotificationIngestKey
+) -> NotificationMessage:
+    """附件投递目标校验：仅 ingest 消息可经密钥追加，且须为该密钥投递的消息
+    （历史消息无归属列值时退化为作用域比对）。"""
+    message = require_message(db, message_id)
+    if message.source_type != "ingest":
+        raise HTTPException(403, "仅外部投递的消息允许经投递接口追加附件")
+    if message.ingest_key_id is not None:
+        if message.ingest_key_id != key.id:
+            raise HTTPException(403, "该密钥无权向其它来源投递的消息追加附件")
+    elif key.allowed_source_system and message.source_system != key.allowed_source_system:
+        raise HTTPException(403, "该密钥无权向此来源系统的消息追加附件")
+    return message

@@ -201,6 +201,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifCreates: string[] = []
   const notifReadAllCalls: string[] = []
   const notifDeletes: string[] = []
+  const notifKeyCreates: string[] = []
+  const notifKeyRevokes: string[] = []
   // 可变通知状态：PATCH/read-all/DELETE 会回写，summary 按状态现算
   const notificationsState = notificationsFixture.map(item => ({ ...item }))
   if (options.notificationsPagination) {
@@ -561,6 +563,28 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       }
       return fulfill()
     }
+    // —— 对外投递密钥管理（admin JWT）——
+    if (path === '/api/v2/notifications/ingest-keys') {
+      if (request.method() === 'POST') {
+        notifKeyCreates.push(request.postData() || '')
+        const body = JSON.parse(request.postData() || '{}')
+        return json(route, {
+          id: 'nk-2', name: String(body.name ?? ''), keyPrefix: 'ob_notif_e2e',
+          enabled: true, allowedSourceSystem: body.allowedSourceSystem ?? null,
+          createdAt: at(0, 10), lastUsedAt: null, revokedAt: null,
+          plaintextKey: 'ob_notif_e2e_demo_plaintext_secret',
+        }, 201)
+      }
+      return json(route, [
+        { id: 'nk-1', name: 'billing', keyPrefix: 'ob_notif_abc123', enabled: true,
+          allowedSourceSystem: null, createdAt: at(1, 8), lastUsedAt: at(0, 9), revokedAt: null },
+      ])
+    }
+    const notifKeyMatch = path.match(/^\/api\/v2\/notifications\/ingest-keys\/([^/]+)$/)
+    if (notifKeyMatch && request.method() === 'DELETE') {
+      notifKeyRevokes.push(notifKeyMatch[1])
+      return json(route, { id: notifKeyMatch[1], revoked: true })
+    }
     // —— 消息通知（管理员消息总线；静态路由先于 /{id} 动态段）——
     if (path === '/api/v2/notifications/summary') {
       return json(route, {
@@ -866,6 +890,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifCreates,
     notifReadAllCalls,
     notifDeletes,
+    notifKeyCreates,
+    notifKeyRevokes,
     multicaWorkspaceCalls,
     toolPatchCalls,
     palaceUploads,
@@ -1005,6 +1031,34 @@ test('消息通知：游标分页——首页两条，加载更多补齐后续',
   await expect(page.locator('[data-notifications-item="n-5"]')).toBeVisible()
   // 全部加载完毕后「加载更多」消失
   await expect(page.locator('[data-notifications-load-more]')).toHaveCount(0)
+})
+
+test('消息通知：接入密钥——签发明文仅一次展示、列表与吊销', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-keys-toggle]').click()
+  await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
+
+  // 既有密钥列表可见（不携带明文）
+  await expect(page.locator('[data-notifications-key-item="nk-1"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-key-item="nk-1"]')).toContainText('billing')
+
+  // 签发：明文一次性展示并可复制提示
+  await page.locator('[data-notifications-key-name]').fill('crm')
+  await page.locator('[data-notifications-key-mint]').click()
+  await expect(page.locator('[data-notifications-key-plaintext]')).toBeVisible()
+  await expect(page.locator('[data-notifications-key-plaintext]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
+  await expect.poll(() => mocks.notifKeyCreates.length).toBe(1)
+
+  // 吊销：二次确认后生效
+  await page.locator('[data-notifications-key-revoke]').first().click()
+  const confirmDialog = page.getByRole('dialog').filter({ hasText: '吊销这枚投递密钥' })
+  await expect(confirmDialog).toBeVisible()
+  await confirmDialog.getByRole('button', { name: '吊销' }).click()
+  await expect.poll(() => mocks.notifKeyRevokes.length).toBe(1)
 })
 
 test('会话选中回写地址栏：切会话 URL 跟随，深链直达指定会话', async ({ page }) => {
