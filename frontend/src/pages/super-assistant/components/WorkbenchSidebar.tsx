@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import {
   Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, History, LayoutDashboard, ListChecks, LogOut,
   Network, Plug, Plus, Search, Trash2, X,
 } from 'lucide-react'
 
+import { notificationsApi } from '@/api/notifications'
 import type { SuperConversation } from '@/api/superAssistant'
 import {
   SidebarGroup,
@@ -35,6 +37,8 @@ interface WorkbenchSidebarProps {
   onSetArchived: (id: string, archived: boolean) => void
   onOpenSearch: () => void
   onOpenScheduled: () => void
+  /** 打开消息通知弹窗（仅 admin 入口可见） */
+  onOpenNotifications: () => void
   /** 外部集成保存后回调（页面刷新 multica 配置以同步命令提示可用性） */
   onIntegrationsSaved?: () => void | Promise<void>
 }
@@ -121,6 +125,7 @@ export default function WorkbenchSidebar({
   onSetArchived,
   onOpenSearch,
   onOpenScheduled,
+  onOpenNotifications,
   onIntegrationsSaved,
 }: WorkbenchSidebarProps) {
   const user = useAuthStore(state => state.user)
@@ -131,6 +136,16 @@ export default function WorkbenchSidebar({
   const [profileOpen, setProfileOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
+
+  // 未读徽章：15s 轮询 + 窗口聚焦刷新（与收件箱气泡同节奏；仅 admin 拉取）
+  const notificationsSummary = useQuery({
+    queryKey: ['notifications', 'summary'],
+    queryFn: notificationsApi.summary,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    enabled: user?.role === 'admin',
+  })
+  const unreadCount = notificationsSummary.data?.unreadCount ?? 0
 
   const isMac = /mac|iphone|ipad/i.test(navigator.userAgent)
   // ⌘K（macOS）/ Ctrl+K（其它平台）唤起全局搜索
@@ -219,17 +234,23 @@ export default function WorkbenchSidebar({
             {isMac ? '⌘K' : 'Ctrl K'}
           </kbd>
         </button>
-        {/* 消息通知：版块占位，功能上线后接入真实通知入口并移除禁用态 */}
-        <button
-          type="button"
-          disabled
-          title="消息通知功能规划中"
-          className={`${actionItemClass} cursor-not-allowed opacity-60`}
-          data-workbench-notifications
-        >
-          <Bell size={16} className="shrink-0" /> 消息通知
-          <span className="ml-auto shrink-0 rounded bg-[var(--color-bg-hover)] px-1 py-0.5 text-[9px] leading-none text-[var(--color-text-tertiary)]">规划中</span>
-        </button>
+        {/* 消息通知：管理员消息总线（站内 + 外部投递 + 渠道转发），仅 admin 可见 */}
+        {user?.role === 'admin' && (
+          <button
+            type="button"
+            onClick={() => { onOpenNotifications(); onCloseMobile() }}
+            aria-label={`消息通知${unreadCount > 0 ? `，${unreadCount} 条未读` : ''}`}
+            className={`${actionItemClass} relative`}
+            data-workbench-notifications
+          >
+            <Bell size={16} className="shrink-0" /> 消息通知
+            {unreadCount > 0 && (
+              <span className="ml-auto flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--color-danger)] px-1 text-[10px] font-semibold tabular-nums text-white">
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </button>
+        )}
         <button type="button" onClick={onOpenScheduled} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>

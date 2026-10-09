@@ -9,7 +9,8 @@ import { expectSameBoundingBox } from './support/geometry'
 // 删除确认弹窗、新建会话空会话去重、空态品牌文案与占位符、配置面板白底、
 // 重命名 blur 取消、知识图谱页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
 // 知识图谱过滤/节点详情/邻域检索高亮）、外部集成（multica 配置弹窗 + /multica:
-// 命令提示的配置门控）、⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、
+// 命令提示的配置门控）、消息通知弹窗（未读徽章、tab 筛选、Markdown 详情与附件、
+// 标记/归档/全部已读/发送消息）、⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、
 // 全局搜索 Command 面板检索与跳转、历史分组 shadcn Sidebar 原语、空态品牌字号、
 // 左下角头像个人资料弹窗（固定尺寸、分区 tab 与后台同一弹窗）。
 
@@ -51,6 +52,41 @@ const conversationsFixture = [
   { id: 'c-earlier', title: '上周数据摸底', model_config_id: 'model-1', status: 'active', created_at: at(5, 10), updated_at: at(5, 10) },
   { id: 'c-archived', title: '旧会话存档', model_config_id: 'model-1', status: 'archived', created_at: at(2, 8), updated_at: at(2, 8) },
 ]
+
+// 消息通知夹具：内部告警（带附件）、外部投递（已标记未读）、已归档噪音各一条
+interface NotificationFixtureRow {
+  id: string
+  eventId: string | null
+  sourceSystem: string
+  sourceType: string
+  title: string
+  priority: string
+  isRead: boolean
+  isStarred: boolean
+  isArchived: boolean
+  readAt: string | null
+  starredAt: string | null
+  archivedAt: string | null
+  createdAt: string
+  updatedAt: string
+  bodyPreview: string
+  attachmentCount: number
+}
+const notificationsFixture: NotificationFixtureRow[] = [
+  { id: 'n-1', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '数据任务失败：供应商每日同步', priority: 'high', isRead: false, isStarred: false, isArchived: false, readAt: null, starredAt: null, archivedAt: null, createdAt: at(0, 9), updatedAt: at(0, 9), bodyPreview: '数据库连接超时，已重试 3 次', attachmentCount: 1 },
+  { id: 'n-2', eventId: 'billing:inc-1', sourceSystem: 'billing', sourceType: 'ingest', title: '账单系统异常告警', priority: 'urgent', isRead: false, isStarred: true, isArchived: false, readAt: null, starredAt: at(1, 9), archivedAt: null, createdAt: at(1, 9), updatedAt: at(1, 9), bodyPreview: '本月账单金额环比上涨 300%', attachmentCount: 0 },
+  { id: 'n-3', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '历史巡检完成', priority: 'low', isRead: true, isStarred: false, isArchived: true, readAt: at(2, 8), starredAt: null, archivedAt: at(2, 8), createdAt: at(2, 8), updatedAt: at(2, 8), bodyPreview: '例行巡检完成', attachmentCount: 0 },
+]
+
+const notificationDetailBodies: Record<string, string> = {
+  'n-1': '# 数据任务失败报告\n\n数据库连接超时，重试 3 次后放弃。\n\n| 任务 | 状态 |\n| --- | --- |\n| 供应商每日同步 | 失败 |\n\n```json\n{"code": "ETIMEDOUT"}\n```\n',
+  'n-2': '## 账单异常\n\n本月金额环比上涨 **300%**，请关注。',
+  'n-new': '# 今日巡检\n一切正常',
+}
+
+const notificationDetailAttachments: Record<string, Array<Record<string, unknown>>> = {
+  'n-1': [{ id: 'na-1', filename: '错误日志.txt', fileSize: 2048, mimeType: 'text/plain', sha256: 'ab', createdAt: at(0, 9) }],
+}
 
 const palaceGraphFixture = {
   available: true,
@@ -137,6 +173,8 @@ async function seedAuth(page: Page) {
 interface MockOptions {
   /** chat SSE 响应的延迟毫秒数：用于模拟「生成中」窗口期 */
   chatDelayMs?: number
+  /** 消息通知列表启用游标分页（每页 2 条）：验证「加载更多」链路 */
+  notificationsPagination?: boolean
   /** GET /super-assistant/multica/config 的返回（默认未配置态） */
   multicaConfig?: Record<string, unknown>
   /** 知识图谱「本体文档」目录：true 时提供发布文档镜像 + 权威清单桩 */
@@ -159,6 +197,18 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const multicaPuts: Array<Record<string, unknown>> = []
   const remoteAgentCreates: Array<Record<string, unknown>> = []
   const remoteInviteCreates: string[] = []
+  const notifStatePatches: string[] = []
+  const notifCreates: string[] = []
+  const notifReadAllCalls: string[] = []
+  const notifDeletes: string[] = []
+  // 可变通知状态：PATCH/read-all/DELETE 会回写，summary 按状态现算
+  const notificationsState = notificationsFixture.map(item => ({ ...item }))
+  if (options.notificationsPagination) {
+    notificationsState.push(
+      { id: 'n-4', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '分页样例一', priority: 'normal', isRead: true, isStarred: false, isArchived: false, readAt: at(3, 8), starredAt: null, archivedAt: null, createdAt: at(3, 8), updatedAt: at(3, 8), bodyPreview: '第 4 条', attachmentCount: 0 },
+      { id: 'n-5', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '分页样例二', priority: 'normal', isRead: true, isStarred: false, isArchived: false, readAt: at(4, 8), starredAt: null, archivedAt: null, createdAt: at(4, 8), updatedAt: at(4, 8), bodyPreview: '第 5 条', attachmentCount: 0 },
+    )
+  }
   // 远程助手目录夹具：直连（带端点）+ 回连（在线，仅邀请函路径接入的形态）
   const remoteAgents: Array<Record<string, unknown>> = options.remoteAgents
     ? [...options.remoteAgents]
@@ -511,6 +561,78 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       }
       return fulfill()
     }
+    // —— 消息通知（管理员消息总线；静态路由先于 /{id} 动态段）——
+    if (path === '/api/v2/notifications/summary') {
+      return json(route, {
+        unreadCount: notificationsState.filter(item => !item.isRead && !item.isArchived).length,
+        starredCount: notificationsState.filter(item => item.isStarred && !item.isArchived).length,
+        archivedCount: notificationsState.filter(item => item.isArchived).length,
+        totalCount: notificationsState.filter(item => !item.isArchived).length,
+      })
+    }
+    if (path === '/api/v2/notifications/read-all' && request.method() === 'POST') {
+      notifReadAllCalls.push('read-all')
+      let updated = 0
+      for (const item of notificationsState) {
+        if (!item.isRead) { item.isRead = true; item.readAt = at(0, 10); updated += 1 }
+      }
+      return json(route, { updated })
+    }
+    if (path === '/api/v2/notifications' && request.method() === 'GET') {
+      const searchParams = new URL(request.url()).searchParams
+      const tab = searchParams.get('tab') ?? 'all'
+      let items = notificationsState.filter(item => {
+        if (tab === 'unread') return !item.isRead && !item.isArchived
+        if (tab === 'starred') return item.isStarred && !item.isArchived
+        if (tab === 'archived') return item.isArchived
+        return !item.isArchived
+      })
+      let nextCursor: string | null = null
+      if (options.notificationsPagination) {
+        const cursor = searchParams.get('cursor')
+        const start = cursor === 'p2' ? 2 : 0
+        nextCursor = !cursor && items.length > 2 ? 'p2' : null
+        items = items.slice(start, start + 2)
+      }
+      return json(route, { items, nextCursor, hasMore: nextCursor !== null })
+    }
+    if (path === '/api/v2/notifications' && request.method() === 'POST') {
+      notifCreates.push(request.postData() || '')
+      const body = JSON.parse(request.postData() || '{}')
+      const created: NotificationFixtureRow = {
+        id: 'n-new', eventId: null, sourceSystem: 'platform', sourceType: 'manual',
+        title: String(body.title ?? '巡检通知'), priority: String(body.priority ?? 'normal'),
+        isRead: true, isStarred: false, isArchived: false,
+        readAt: at(0, 10), starredAt: null, archivedAt: null,
+        createdAt: at(0, 10), updatedAt: at(0, 10), bodyPreview: '', attachmentCount: 0,
+      }
+      notificationsState.unshift(created)
+      return json(route, { ...created, body: notificationDetailBodies['n-new'] ?? '', attachments: [] }, 201)
+    }
+    const notificationMatch = path.match(/^\/api\/v2\/notifications\/([^/]+)$/)
+    if (notificationMatch && !['summary', 'read-all'].includes(notificationMatch[1])) {
+      const id = notificationMatch[1]
+      const source = notificationsState.find(item => item.id === id)
+        ?? { id, eventId: null, sourceSystem: 'platform', sourceType: 'manual', title: '巡检通知', priority: 'normal', isRead: false, isStarred: false, isArchived: false, readAt: null, starredAt: null, archivedAt: null, createdAt: at(0, 10), updatedAt: at(0, 10), bodyPreview: '', attachmentCount: 0 }
+      if (request.method() === 'GET') {
+        // 服务端语义：查看详情即自动标为已读
+        source.isRead = true
+        source.readAt = at(0, 10)
+        return json(route, { ...source, body: notificationDetailBodies[id] ?? '', attachments: notificationDetailAttachments[id] ?? [] })
+      }
+      if (request.method() === 'PATCH') {
+        notifStatePatches.push(request.postData() || '')
+        const patchBody = JSON.parse(request.postData() || '{}')
+        Object.assign(source, patchBody)
+        return json(route, { ...source, body: notificationDetailBodies[id] ?? '', attachments: notificationDetailAttachments[id] ?? [] })
+      }
+      if (request.method() === 'DELETE') {
+        notifDeletes.push(id)
+        const index = notificationsState.findIndex(item => item.id === id)
+        if (index >= 0) notificationsState.splice(index, 1)
+        return json(route, { deleted: id })
+      }
+    }
     if (path.startsWith('/api/v2/super-assistant/conversations/') && request.method() === 'PATCH') {
       const id = path.split('/')[5]
       const body = JSON.parse(request.postData() || '{}')
@@ -740,6 +862,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     multicaTests,
     remoteAgentCreates,
     remoteInviteCreates,
+    notifStatePatches,
+    notifCreates,
+    notifReadAllCalls,
+    notifDeletes,
     multicaWorkspaceCalls,
     toolPatchCalls,
     palaceUploads,
@@ -766,11 +892,11 @@ test('工作台骨架：九项入口齐备，近期会话单列表，归档折�
 
   await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
-  // 消息通知/任务实例为占位版块：可见但禁用，带「规划中」徽章
+  // 消息通知已上线：可点击且带未读徽章；任务实例仍为占位版块
   const notificationsEntry = page.getByRole('button', { name: /消息通知/ })
   await expect(notificationsEntry).toBeVisible()
-  await expect(notificationsEntry).toBeDisabled()
-  await expect(notificationsEntry).toContainText('规划中')
+  await expect(notificationsEntry).toBeEnabled()
+  await expect(notificationsEntry).toContainText('2')
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
   const taskInstancesEntry = page.getByRole('button', { name: /任务实例/ })
   await expect(taskInstancesEntry).toBeVisible()
@@ -800,6 +926,85 @@ test('工作台骨架：九项入口齐备，近期会话单列表，归档折�
 
   // 聊天区就绪（输入框占位符来自模型加载成功分支）
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
+})
+
+test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标记/归档/全部已读/发送', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  // 侧栏入口带未读徽章，点击打开弹窗
+  const entry = page.getByRole('button', { name: /消息通知/ })
+  await expect(entry).toBeVisible()
+  await expect(entry).toContainText('2')
+  await entry.click()
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('消息通知')
+
+  // 默认「全部」tab：未归档两条可见，已归档不可见
+  await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toHaveCount(0)
+
+  // tab 筛选语义：已标记仅 n-2；已归档仅 n-3
+  await page.locator('[data-notifications-tab="starred"]').click()
+  await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
+  await page.locator('[data-notifications-tab="archived"]').click()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
+  await page.locator('[data-notifications-tab="all"]').click()
+
+  // 详情：标题、Markdown 表格/代码块、附件行
+  await page.locator('[data-notifications-item="n-1"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('数据任务失败报告')
+  await expect(page.locator('[data-notifications-detail] table')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail] pre')).toBeVisible()
+  await expect(page.locator('[data-notifications-attachment="na-1"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-attachment="na-1"]')).toContainText('错误日志.txt')
+
+  // 标记（星标）与归档触发状态 PATCH
+  await page.locator('[data-notifications-star]').click()
+  await expect.poll(() => mocks.notifStatePatches.length).toBe(1)
+  await expect.poll(() => mocks.notifStatePatches[0] ?? '').toContain('isStarred')
+  await page.locator('[data-notifications-archive]').click()
+  await expect.poll(() => mocks.notifStatePatches.length).toBe(2)
+  await expect.poll(() => mocks.notifStatePatches[1] ?? '').toContain('isArchived')
+
+  // 全部已读
+  await page.locator('[data-notifications-read-all]').click()
+  await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
+
+  // 发送消息：标题 + Markdown 正文
+  await page.locator('[data-notifications-compose-toggle]').click()
+  await page.locator('[data-notifications-compose-title]').fill('巡检通知')
+  await page.locator('[data-notifications-compose-body]').fill('# 今日巡检\n一切正常')
+  await page.locator('[data-notifications-compose-send]').click()
+  await expect.poll(() => mocks.notifCreates.length).toBe(1)
+  await expect(page.locator('[data-notifications-detail]')).toContainText('今日巡检')
+})
+
+test('消息通知：游标分页——首页两条，加载更多补齐后续', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page, { notificationsPagination: true })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+
+  // 首页：最新两条可见，其余未加载
+  await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-4"]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-load-more]')).toBeVisible()
+
+  await page.locator('[data-notifications-load-more]').click()
+  await expect(page.locator('[data-notifications-item="n-4"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-5"]')).toBeVisible()
+  // 全部加载完毕后「加载更多」消失
+  await expect(page.locator('[data-notifications-load-more]')).toHaveCount(0)
 })
 
 test('会话选中回写地址栏：切会话 URL 跟随，深链直达指定会话', async ({ page }) => {
