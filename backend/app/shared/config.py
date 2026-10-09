@@ -302,6 +302,9 @@ class Settings(BaseSettings):
     # 工单附件与事件附件同构：仅安全落盘与下载，默认兼容任意扩展名；
     # 部署方可通过 TICKET_ATTACHMENT_EXTENSIONS 收紧白名单。
     ticket_attachment_extensions: str = "*"
+    # 消息通知附件（Markdown 正文内嵌图片/音视频与独立附件）：仅安全落盘与
+    # 下载，默认兼容任意扩展名；NOTIFICATION_ATTACHMENT_EXTENSIONS 可收紧。
+    notification_attachment_extensions: str = "*"
     # 可选 OfficeCLI 适配器。核心会话空间不依赖它；配置后才向探索 Agent 暴露
     # docx/xlsx/pptx 的结构化增删改工具，避免生产镜像隐式下载第三方二进制。
     exploration_officecli_path: str = ""

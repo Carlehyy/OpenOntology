@@ -216,7 +216,8 @@ function MarkdownCodeBlock({ children }: { children: React.ReactNode }) {
   )
 }
 
-const assistantMarkdownComponents: Components = {
+// 导出复用：消息通知正文采用同一套排版映射（img 由通知侧覆盖为鉴权媒体渲染）
+export const assistantMarkdownComponents: Components = {
   p: ({ className, ...props }) => <p className={`mb-3 text-sm leading-7 text-[var(--color-text-primary)] last:mb-0 ${className || ''}`} {...props} />,
   h1: ({ className, ...props }) => <h2 className={`mb-3 mt-7 text-xl font-semibold leading-tight text-[var(--color-text-primary)] first:mt-0 ${className || ''}`} {...props} />,
   h2: ({ className, ...props }) => <h3 className={`mb-2.5 mt-6 text-base font-semibold leading-snug text-[var(--color-text-primary)] first:mt-0 ${className || ''}`} {...props} />,

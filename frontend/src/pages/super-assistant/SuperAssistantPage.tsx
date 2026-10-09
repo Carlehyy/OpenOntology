@@ -34,6 +34,7 @@ import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './com
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-collaboration/BrowserCollaboration'
+import NotificationsDialog from './components/NotificationsDialog'
 import ScheduledTasksDialog from './components/ScheduledTasksDialog'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import KernelRunTaskCard from './components/KernelRunTaskCard'
@@ -100,6 +101,7 @@ export default function SuperAssistantPage() {
   const scheduleId = searchParams.get('schedule')
   const scheduleRunId = searchParams.get('scheduleRun')
   const [scheduledOpen, setScheduledOpen] = useState(Boolean(scheduleId))
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
   useEffect(() => {
     if (scheduleId) setScheduledOpen(true)
   }, [scheduleId])
@@ -1026,7 +1028,12 @@ export default function SuperAssistantPage() {
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenScheduled={() => setScheduledOpen(true)}
+        onOpenNotifications={() => setNotificationsOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
+      />
+      <NotificationsDialog
+        open={notificationsOpen}
+        onClose={() => setNotificationsOpen(false)}
       />
       <ScheduledTasksDialog
         open={scheduledOpen}

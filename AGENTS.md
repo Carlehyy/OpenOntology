@@ -28,6 +28,7 @@ OpenOntology 是“本体即服务”平台。前端导航是代码发现入口�
 | 系统设置 | `backend/app/settings/` |
 | 鉴权与收件箱 | `backend/app/auth/`、`backend/app/inbox/` |
 | 工单反馈（全角色） | `backend/app/tickets/` |
+| 消息通知（管理员消息总线：站内 + 对外投递 + 渠道转发） | `backend/app/notifications/` |
 
 业务探索与本体的依赖方向固定为 `exploration` → `ontologies`：版本语义一致性
 校验器位于 `backend/app/exploration/semantic_gate.py`，须经
