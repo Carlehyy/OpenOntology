@@ -74,6 +74,10 @@ def seed_database() -> None:
         from app.inbox.models import (  # noqa: F401
             InboxItem, InboxDelivery, InboxEventReceipt, InboxOutboxEvent,
         )
+        # 消息通知（管理员消息总线：消息主体 / 每用户处置状态 / 附件）
+        from app.notifications.models import (  # noqa: F401
+            NotificationMessage, NotificationMessageState, NotificationAttachment,
+        )
         # 三维场景（白模场景管理：主体 / 版本冻结 / 运行日志）
         from app.scenes.models import (  # noqa: F401
             Scene, SceneVersion, SceneRuntimeLog,
