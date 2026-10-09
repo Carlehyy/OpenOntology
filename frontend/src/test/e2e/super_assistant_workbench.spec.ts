@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page, type Route } from '@playwright/t
 
 import { expectSameBoundingBox } from './support/geometry'
 
-// AI 原生工作台（前台）：登录默认落地、七项入口、近期会话单列表、归档流转、
+// AI 原生工作台（前台）：登录默认落地、八项入口、近期会话单列表、归档流转、
 // 本体治理跳后台并返回。全部接口本地 mock，不触真实后端。
 // 本 spec 另覆盖：分组限量展开、naive UTC 时区显示、行悬停不抖动、
 // 会话附件上传/移除/位于输入框上方与跨会话隔离、流式生成跨会话隔离、ReUI 模型选择器、
@@ -759,18 +759,31 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   }
 }
 
-test('工作台骨架：七项入口齐备，近期会话单列表，归档折叠', async ({ page }) => {
+test('工作台骨架：八项入口齐备，近期会话单列表，归档折叠', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
   await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
+  // 消息通知为占位版块：可见但禁用，带「规划中」徽章
+  const notificationsEntry = page.getByRole('button', { name: /消息通知/ })
+  await expect(notificationsEntry).toBeVisible()
+  await expect(notificationsEntry).toBeDisabled()
+  await expect(notificationsEntry).toContainText('规划中')
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
   await expect(page.getByRole('button', { name: '知识图谱' })).toBeVisible()
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
   await expect(page.getByRole('button', { name: '外部集成' })).toBeVisible()
   await expect(page.getByRole('button', { name: /退出登录/ })).toBeVisible()
+
+  // 功能项顺序契约：全局搜索 → 消息通知 → 定时任务 → 知识图谱 → 外部集成 → 本体治理
+  const navEntries = page.locator('nav[aria-label="工作台功能"] > *')
+  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '知识图谱', '外部集成', '本体治理']
+  await expect(navEntries).toHaveCount(expectedOrder.length)
+  for (let index = 0; index < expectedOrder.length; index += 1) {
+    await expect(navEntries.nth(index)).toContainText(expectedOrder[index])
+  }
 
   // 近期会话合并为单列表（不再有今日/昨日/历史分组标签）
   await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(1)

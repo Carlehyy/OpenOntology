@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
-  Archive, ArchiveRestore, Brain, ChevronRight, Clock, History, LayoutDashboard, LogOut,
+  Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, History, LayoutDashboard, LogOut,
   Network, Plug, Plus, Search, Trash2, X,
 } from 'lucide-react'
 
@@ -219,17 +219,23 @@ export default function WorkbenchSidebar({
             {isMac ? '⌘K' : 'Ctrl K'}
           </kbd>
         </button>
+        {/* 消息通知：版块占位，功能上线后接入真实通知入口并移除禁用态 */}
+        <button
+          type="button"
+          disabled
+          title="消息通知功能规划中"
+          className={`${actionItemClass} cursor-not-allowed opacity-60`}
+          data-workbench-notifications
+        >
+          <Bell size={16} className="shrink-0" /> 消息通知
+          <span className="ml-auto shrink-0 rounded bg-[var(--color-bg-hover)] px-1 py-0.5 text-[9px] leading-none text-[var(--color-text-tertiary)]">规划中</span>
+        </button>
         <button type="button" onClick={onOpenScheduled} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
         <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
           <Brain size={16} className="shrink-0" /> 知识图谱
         </button>
-        {hasMenuAccess(user, 'ontologies') && (
-          <Link to="/ontologies" onClick={onCloseMobile} className={actionItemClass} data-workbench-governance>
-            <LayoutDashboard size={16} className="shrink-0" /> 本体治理
-          </Link>
-        )}
         <button
           type="button"
           onClick={() => setIntegrationsOpen(true)}
@@ -238,6 +244,11 @@ export default function WorkbenchSidebar({
         >
           <Plug size={16} className="shrink-0" /> 外部集成
         </button>
+        {hasMenuAccess(user, 'ontologies') && (
+          <Link to="/ontologies" onClick={onCloseMobile} className={actionItemClass} data-workbench-governance>
+            <LayoutDashboard size={16} className="shrink-0" /> 本体治理
+          </Link>
+        )}
       </nav>
 
       {/* 会话时间线：近期会话单列表 + 归档折叠区，shadcn Sidebar 分组原语呈现。
