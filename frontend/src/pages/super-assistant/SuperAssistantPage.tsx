@@ -46,6 +46,7 @@ import {
   appendToolStart, enqueueMessage, mergeServerMessages, patchToolStep,
   sameConversationList, sameMessageList, shiftQueue,
 } from './components/chatTranscript'
+import { readCachedConversations, writeCachedConversations } from './conversationCache'
 import type { ModelConfig } from '@/types/ontology'
 
 const ATTACH_ACCEPT = '.csv,.xlsx,.xls,.json,.xml,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt'
@@ -102,7 +103,12 @@ export default function SuperAssistantPage() {
   useEffect(() => {
     if (scheduleId) setScheduledOpen(true)
   }, [scheduleId])
-  const [conversations, setConversations] = useState<SuperConversation[]>([])
+  // 刷新后侧栏「近期会话」先用上次快照秒开（stale-while-revalidate）：
+  // 网络返回与 2s 轮询立即纠正为最新；无快照/损坏快照回退空列表，行为同旧版。
+  // 快照按 user.id 隔离，见 conversationCache.ts。
+  const [conversations, setConversations] = useState<SuperConversation[]>(
+    () => readCachedConversations(user?.id) ?? [],
+  )
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<SuperMessage[]>([])
   const [models, setModels] = useState<ModelConfig[]>([])
@@ -189,8 +195,20 @@ export default function SuperAssistantPage() {
 
   useEffect(() => {
     let alive = true
+    // 会话清单先行落地：不等模型/Skills/MCP/Tools 四路配置接口全部返回，
+    // 侧栏「近期会话」与初始会话选中尽早可见（原先被 allSettled 栅栏拖到最慢一路）。
+    // 失败提示仍由下方聚合分支统一弹出，这里 catch 吞掉避免重复 toast。
+    const conversationsRequest = superAssistantApi.conversations()
+    conversationsRequest
+      .then(data => {
+        if (!alive) return
+        setConversations(data)
+        const initialId = pickInitialConversationId(data, initialRequestedIdRef.current)
+        if (initialId) setSelectedId(initialId)
+      })
+      .catch(() => { /* 失败聚合与 loading 收口统一走下方 allSettled */ })
     Promise.allSettled([
-      superAssistantApi.conversations(),
+      conversationsRequest,
       modelApi.list(),
       superAssistantApi.skills(),
       superAssistantApi.mcpServers(),
@@ -232,6 +250,13 @@ export default function SuperAssistantPage() {
       .finally(() => alive && setLoading(false))
     return () => { alive = false }
   }, [toast])
+
+  // 会话清单快照写入：新建/改名/归档/删除与 2s 轮询对齐都会更新 conversations，
+  // 此处顺势持久化供下次刷新秒开；轮询在内容未变时经 sameConversationList 跳过
+  // setState，因此不会高频写 localStorage。写入失败（配额/私有模式）静默放弃。
+  useEffect(() => {
+    writeCachedConversations(user?.id, conversations)
+  }, [user?.id, conversations])
 
   useEffect(() => {
     setShowMessageHistory(false)
