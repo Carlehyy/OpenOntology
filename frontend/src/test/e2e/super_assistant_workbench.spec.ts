@@ -203,6 +203,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifDeletes: string[] = []
   const notifKeyCreates: string[] = []
   const notifKeyRevokes: string[] = []
+  const notifChannelCreates: string[] = []
+  const notifChannelUpdates: string[] = []
+  const notifChannelTests: string[] = []
+  const notifChannelDeletes: string[] = []
   // 可变通知状态：PATCH/read-all/DELETE 会回写，summary 按状态现算
   const notificationsState = notificationsFixture.map(item => ({ ...item }))
   if (options.notificationsPagination) {
@@ -563,6 +567,46 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       }
       return fulfill()
     }
+    // —— 转发渠道管理（admin JWT）——
+    if (path === '/api/v2/notifications/channels') {
+      if (request.method() === 'POST') {
+        notifChannelCreates.push(request.postData() || '')
+        const body = JSON.parse(request.postData() || '{}')
+        return json(route, {
+          id: 'ch-2', name: String(body.name ?? ''), urlMasked: 'json://…demo',
+          enabled: true, note: body.note ?? null, lastStatus: null, lastError: '',
+          lastSentAt: null, createdAt: at(0, 10), updatedAt: at(0, 10),
+        }, 201)
+      }
+      return json(route, [
+        { id: 'ch-1', name: '钉钉运维群', urlMasked: 'dingtalk://…abcd', enabled: true,
+          note: '值班告警', lastStatus: 'sent', lastError: '', lastSentAt: at(0, 9),
+          createdAt: at(1, 8), updatedAt: at(0, 9) },
+      ])
+    }
+    const notifChannelTestMatch = path.match(/^\/api\/v2\/notifications\/channels\/([^/]+)\/test$/)
+    if (notifChannelTestMatch && request.method() === 'POST') {
+      notifChannelTests.push(notifChannelTestMatch[1])
+      return json(route, { ok: true, message: '测试消息已发送' })
+    }
+    const notifChannelMatch = path.match(/^\/api\/v2\/notifications\/channels\/([^/]+)$/)
+    if (notifChannelMatch) {
+      if (request.method() === 'PATCH') {
+        notifChannelUpdates.push(request.postData() || '')
+        return json(route, {
+          id: notifChannelMatch[1], name: '钉钉运维群', urlMasked: 'dingtalk://…abcd',
+          enabled: !JSON.parse(request.postData() || '{}').enabled === false
+            ? Boolean(JSON.parse(request.postData() || '{}').enabled)
+            : false,
+          note: '值班告警', lastStatus: 'sent', lastError: '', lastSentAt: at(0, 9),
+          createdAt: at(1, 8), updatedAt: at(0, 10),
+        })
+      }
+      if (request.method() === 'DELETE') {
+        notifChannelDeletes.push(notifChannelMatch[1])
+        return json(route, { deleted: notifChannelMatch[1] })
+      }
+    }
     // —— 对外投递密钥管理（admin JWT）——
     if (path === '/api/v2/notifications/ingest-keys') {
       if (request.method() === 'POST') {
@@ -892,6 +936,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifDeletes,
     notifKeyCreates,
     notifKeyRevokes,
+    notifChannelCreates,
+    notifChannelUpdates,
+    notifChannelTests,
+    notifChannelDeletes,
     multicaWorkspaceCalls,
     toolPatchCalls,
     palaceUploads,
@@ -1059,6 +1107,45 @@ test('消息通知：接入密钥——签发明文仅一次展示、列表与�
   await expect(confirmDialog).toBeVisible()
   await confirmDialog.getByRole('button', { name: '吊销' }).click()
   await expect.poll(() => mocks.notifKeyRevokes.length).toBe(1)
+})
+
+test('消息通知：转发渠道——新建/启停开关/测试直发/删除确认', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-channels-toggle]').click()
+  await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
+
+  // 既有渠道：名称/掩码地址/最近投递状态可见，地址明文不出现在界面
+  const existing = page.locator('[data-notifications-channel-item="ch-1"]')
+  await expect(existing).toBeVisible()
+  await expect(existing).toContainText('钉钉运维群')
+  await expect(existing).toContainText('dingtalk://…abcd')
+  await expect(existing).toContainText('最近投递成功')
+
+  // 新建渠道
+  await page.locator('[data-notifications-channel-name]').fill('飞书值班')
+  await page.locator('[data-notifications-channel-url]').fill('json://hooks.example/xyz')
+  await page.locator('[data-notifications-channel-create]').click()
+  await expect.poll(() => mocks.notifChannelCreates.length).toBe(1)
+
+  // 测试直发：结果 toast 即时反馈
+  await page.locator('[data-notifications-channel-test]').first().click()
+  await expect.poll(() => mocks.notifChannelTests.length).toBe(1)
+  await expect(page.getByText('测试消息已发送')).toBeVisible()
+
+  // 启停开关触发 PATCH
+  await page.locator('[data-notifications-channel-toggle]').first().click()
+  await expect.poll(() => mocks.notifChannelUpdates.length).toBe(1)
+
+  // 删除：二次确认后生效
+  await page.locator('[data-notifications-channel-delete]').first().click()
+  const confirm = page.getByRole('dialog').filter({ hasText: '删除这个转发渠道' })
+  await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: '删除' }).click()
+  await expect.poll(() => mocks.notifChannelDeletes.length).toBe(1)
 })
 
 test('会话选中回写地址栏：切会话 URL 跟随，深链直达指定会话', async ({ page }) => {

@@ -121,6 +121,13 @@ def create_message_ex(
     )
     db.add(message)
     try:
+        # 消息与“到达即转发”的投递单在同一个事务内提交：
+        # 二次提交的窗口里进程被杀会让消息入库而投递单永久丢失，
+        # 且幂等重放走 existing 提前返回，无法自愈。
+        db.flush()
+        from app.notifications.channel_service import fan_out_deliveries
+
+        fan_out_deliveries(db, message)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -722,7 +729,7 @@ def ingest_message(db: Session, body: dict[str, Any], key: NotificationIngestKey
         event_id=event_id,
         ingest_key_id=key.id,
     )
-    # 渠道转发（M3）将在消息创建后于此处生成投递单；本期仅入站
+    # 扇出已在 create_message_ex 内与消息同事务完成
     return {
         "idempotent": not created,
         "message": _message_dict(

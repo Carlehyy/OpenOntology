@@ -94,3 +94,27 @@ def test_0122_ingest_keys_and_ownership_column(tmp_path, monkeypatch):
     assert "ingest_key_id" not in message_columns
     assert "notification_ingest_keys" not in set(inspect(engine).get_table_names())
     engine.dispose()
+
+
+def test_0123_channels_and_deliveries(tmp_path, monkeypatch):
+    """0123 建渠道/投递单表；可干净降级。"""
+    backend = Path(__file__).resolve().parents[2]
+    db_path = tmp_path / "notifications-0123.db"
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    cfg = _alembic_config(backend, db_path)
+
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    tables = set(inspect(engine).get_table_names())
+    assert {"notification_channels", "notification_deliveries"} <= tables
+    delivery_columns = {
+        column["name"] for column in inspect(engine).get_columns("notification_deliveries")
+    }
+    assert {"id", "message_id", "channel_id", "status", "attempts", "sent_at"} <= delivery_columns
+
+    command.downgrade(cfg, "0122_notification_ingest_keys")
+    tables = set(inspect(engine).get_table_names())
+    assert "notification_channels" not in tables
+    assert "notification_deliveries" not in tables
+    engine.dispose()

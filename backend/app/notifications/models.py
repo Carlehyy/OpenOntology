@@ -166,3 +166,68 @@ class NotificationIngestKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class NotificationChannel(Base):
+    """外部转发渠道（apprise URL：邮件/钉钉/飞书/TG/webhook 等上百种）。
+
+    URL 本身即凭据，Fernet 加密落库；界面只回显脱敏掩码。
+    last_* 为渠道维度最近一次投递结果（含测试发送），便于面板直读。
+    """
+
+    __tablename__ = "notification_channels"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_notification_channels_name"),
+        CheckConstraint(
+            "last_status IN ('sent','failed')",
+            name="ck_notification_channels_last_status",
+        ),
+        Index("ix_notification_channels_enabled", "enabled"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    apprise_url_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+    last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class NotificationDelivery(Base):
+    """一条消息到一个渠道的投递单（到达即生成，调度器异步执行）。"""
+
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','sent','failed','skipped')",
+            name="ck_notification_deliveries_status",
+        ),
+        UniqueConstraint("message_id", "channel_id", name="uq_notification_delivery_message_channel"),
+        Index("ix_notification_deliveries_pending", "status", "created_at"),
+        Index("ix_notification_deliveries_channel", "channel_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    message_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("notification_messages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("notification_channels.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)

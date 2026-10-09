@@ -701,3 +701,215 @@ def test_revoked_key_last_used_at_frozen(client, auth_headers):
     assert client.post(INGEST, json={"title": "after revoke"}, headers=headers).status_code == 401
     frozen = client.get("/api/v2/notifications/ingest-keys", headers=auth_headers).json()["data"][0]["lastUsedAt"]
     assert frozen == used_at
+
+
+# ── M3：渠道转发（apprise，测试内 mock 发送函数）──────────────
+
+CHANNELS = "/api/v2/notifications/channels"
+
+
+def _make_channel(client, headers, *, name="钉钉运维群", url="json://hooks.example/abc", enabled=True):
+    resp = client.post(CHANNELS, json={"name": name, "appriseUrl": url}, headers=headers)
+    assert resp.status_code == 201, resp.text
+    row = resp.json()["data"]
+    if not enabled:
+        row = client.patch(f"{CHANNELS}/{row['id']}", json={"enabled": False}, headers=headers).json()["data"]
+    return row
+
+
+def test_channel_crud_and_masking(client, auth_headers, db):
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationChannel
+
+    row = _make_channel(client, auth_headers)
+    # 响应与列表永不携带 URL 明文/密文
+    assert "appriseUrl" not in row and "apprise_url_encrypted" not in row
+    listed = client.get(CHANNELS, headers=auth_headers).json()["data"]
+    assert len(listed) == 1
+
+    # 密文落库且可解回原文（Fernet）
+    record = db.query(NotificationChannel).first()
+    assert record.apprise_url_encrypted != "json://hooks.example/abc"
+    assert cs.channel_url(record) == "json://hooks.example/abc"
+    assert cs.mask_apprise_url("json://hooks.example/abc12345") == "json://…2345"
+    assert cs.mask_apprise_url("json://abc") == "json://…"  # 过短时只留协议
+
+    # 重名 409；改名/启停/换 URL
+    assert client.post(CHANNELS, json={"name": "钉钉运维群", "appriseUrl": "json://x"}, headers=auth_headers).status_code == 409
+    updated = client.patch(f"{CHANNELS}/{row['id']}", json={"name": "值班群", "enabled": False}, headers=auth_headers).json()["data"]
+    assert updated["name"] == "值班群" and updated["enabled"] is False
+    client.patch(f"{CHANNELS}/{row['id']}", json={"appriseUrl": "json://hooks.example/new"}, headers=auth_headers)
+    assert cs.channel_url(db.query(NotificationChannel).first()) == "json://hooks.example/new"
+
+    assert client.delete(f"{CHANNELS}/{row['id']}", headers=auth_headers).status_code == 200
+    assert client.get(CHANNELS, headers=auth_headers).json()["data"] == []
+    assert client.delete(f"{CHANNELS}/{row['id']}", headers=auth_headers).status_code == 404
+
+
+def test_channel_validation(client, auth_headers):
+    assert client.post(CHANNELS, json={"name": "x", "appriseUrl": "no-scheme"}, headers=auth_headers).status_code == 422
+    assert client.post(CHANNELS, json={"name": "", "appriseUrl": "json://a"}, headers=auth_headers).status_code == 422
+    assert client.get(CHANNELS, headers=auth_headers).status_code == 200
+
+
+def test_channel_requires_admin(client, auth_headers, editor_user):
+    headers = _editor_headers(client)
+    assert client.get(CHANNELS, headers=headers).status_code == 403
+    assert client.post(CHANNELS, json={"name": "x", "appriseUrl": "json://a"}, headers=headers).status_code == 403
+
+
+def test_fan_out_on_create_and_no_duplicate_on_replay(client, auth_headers, db, monkeypatch):
+    from app.notifications.models import NotificationDelivery
+
+    _make_channel(client, auth_headers, name="渠道A")
+    _make_channel(client, auth_headers, name="渠道B", enabled=False)  # 停用渠道不扇出
+
+    key = _mint_key(client, auth_headers, name="billing")
+    message = client.post(INGEST, json={"eventId": "inc-fan", "title": "扇出"}, headers=_ingest_headers(key)).json()["data"]["message"]
+
+    rows = db.query(NotificationDelivery).filter_by(message_id=message["id"]).all()
+    assert len(rows) == 1 and rows[0].status == "pending"  # 仅启用渠道
+
+    # 幂等重放不重复扇出、也不产生新投递单
+    client.post(INGEST, json={"eventId": "inc-fan", "title": "扇出重放"}, headers=_ingest_headers(key))
+    assert db.query(NotificationDelivery).filter_by(message_id=message["id"]).count() == 1
+
+    # 手动发送同样扇出
+    manual = _create(client, auth_headers)
+    assert db.query(NotificationDelivery).filter_by(message_id=manual["id"]).count() == 1
+
+
+def test_dispatch_success_marks_sent(client, auth_headers, db, monkeypatch):
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationChannel, NotificationDelivery
+
+    channel = _make_channel(client, auth_headers)
+    sent_calls: list[tuple[str, str, str]] = []
+
+    def fake_send(url, *, title, body):
+        sent_calls.append((url, title, body))
+        return None
+
+    monkeypatch.setattr(cs, "_send_via_apprise", fake_send)
+    _create(client, auth_headers, title="转发成功", body="# 正文")
+
+    result = cs.dispatch_pending_deliveries(db)
+    assert result["sent"] == 1 and result["failed"] == 0
+    delivery = db.query(NotificationDelivery).first()
+    assert delivery.status == "sent" and delivery.sent_at and delivery.last_error == ""
+    record = db.query(NotificationChannel).first()
+    assert record.last_status == "sent" and record.last_sent_at
+    assert sent_calls[0][0] == "json://hooks.example/abc"
+    assert sent_calls[0][1] == "转发成功"
+    assert sent_calls[0][2].startswith("# 正文")
+
+
+def test_dispatch_retry_then_failed(client, auth_headers, db, monkeypatch):
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationChannel, NotificationDelivery
+
+    _make_channel(client, auth_headers)
+
+    def boom(url, *, title, body):
+        raise RuntimeError("connection timeout")
+
+    monkeypatch.setattr(cs, "_send_via_apprise", boom)
+    _create(client, auth_headers, title="会失败的消息")
+
+    # 前两次：仍 pending 等待重试
+    cs.dispatch_pending_deliveries(db)
+    cs.dispatch_pending_deliveries(db)
+    delivery = db.query(NotificationDelivery).first()
+    assert delivery.status == "pending" and delivery.attempts == 2 and "timeout" in delivery.last_error
+
+    # 第三次：达上限转终态 failed，渠道最近状态同步
+    cs.dispatch_pending_deliveries(db)
+    assert delivery.status == "failed" and delivery.attempts == 3
+    assert db.query(NotificationChannel).first().last_status == "failed"
+
+
+def test_channel_test_send_direct(client, auth_headers, db, monkeypatch):
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationChannel, NotificationDelivery, NotificationMessage
+
+    channel = _make_channel(client, auth_headers)
+    calls: list[str] = []
+    monkeypatch.setattr(cs, "_send_via_apprise", lambda url, *, title, body: calls.append(title))
+
+    ok = client.post(f"{CHANNELS}/{channel['id']}/test", headers=auth_headers).json()["data"]
+    assert ok["ok"] is True and "已发送" in ok["message"]
+    assert calls and calls[0].startswith("【消息通知】")
+    # 直发不落消息表、不产生投递单
+    assert db.query(NotificationDelivery).count() == 0
+    assert db.query(NotificationMessage).count() == 0
+    assert db.query(NotificationChannel).first().last_status == "sent"
+
+    # 失败路径：错误回传且渠道状态置 failed
+    def boom(url, *, title, body):
+        raise RuntimeError("bad token")
+    monkeypatch.setattr(cs, "_send_via_apprise", boom)
+    fail = client.post(f"{CHANNELS}/{channel['id']}/test", headers=auth_headers).json()["data"]
+    assert fail["ok"] is False and "bad token" in fail["message"]
+
+
+# ── M3 对抗审查补充：停用冻结 / 密文损坏 / 404 ────────────────
+
+
+def test_disabled_channel_freezes_pending_deliveries(client, auth_headers, db, monkeypatch):
+    """停用渠道：积压 pending 单不外发（止损）；重新启用后恢复投递。"""
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationDelivery
+
+    channel = _make_channel(client, auth_headers)
+    calls: list[str] = []
+    monkeypatch.setattr(cs, "_send_via_apprise", lambda url, *, title, body: calls.append(title))
+    _create(client, auth_headers, title="将被冻结")
+    assert db.query(NotificationDelivery).count() == 1
+
+    client.patch(f"{CHANNELS}/{channel['id']}", json={"enabled": False}, headers=auth_headers)
+    result = cs.dispatch_pending_deliveries(db)
+    assert result["scanned"] == 0 and calls == []  # 停用即冻结
+    delivery = db.query(NotificationDelivery).first()
+    assert delivery.status == "pending" and delivery.attempts == 0  # 次数不被消耗
+
+    client.patch(f"{CHANNELS}/{channel['id']}", json={"enabled": True}, headers=auth_headers)
+    result = cs.dispatch_pending_deliveries(db)
+    assert result["sent"] == 1 and calls == ["将被冻结"]  # 启用即恢复
+
+
+def test_corrupted_ciphertext_fails_delivery_not_500(client, auth_headers, db, monkeypatch):
+    """渠道密文损坏：投递走重试→failed，不抛 500 死循环。"""
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationChannel, NotificationDelivery
+
+    channel = _make_channel(client, auth_headers)
+    record = db.query(NotificationChannel).first()
+    record.apprise_url_encrypted = "not-a-fernet-token"
+    db.commit()
+    _create(client, auth_headers, title="密文损坏场景")
+
+    for _ in range(3):
+        cs.dispatch_pending_deliveries(db)
+    delivery = db.query(NotificationDelivery).first()
+    assert delivery.status == "failed" and delivery.attempts == 3
+    assert db.query(NotificationChannel).first().last_status == "failed"
+
+
+def test_channel_endpoints_404(client, auth_headers):
+    assert client.patch(f"{CHANNELS}/missing", json={"enabled": True}, headers=auth_headers).status_code == 404
+    assert client.delete(f"{CHANNELS}/missing", headers=auth_headers).status_code == 404
+    assert client.post(f"{CHANNELS}/missing/test", headers=auth_headers).status_code == 404
+
+
+def test_delete_channel_removes_pending_deliveries_sqlite(client, auth_headers, db, monkeypatch):
+    """SQLite 无外键强制：删除渠道必须显式清投递单，不留孤儿。"""
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationDelivery
+
+    channel = _make_channel(client, auth_headers)
+    monkeypatch.setattr(cs, "_send_via_apprise", lambda url, *, title, body: None)
+    _create(client, auth_headers, title="待删渠道的投递")
+    assert db.query(NotificationDelivery).count() == 1
+
+    client.delete(f"{CHANNELS}/{channel['id']}", headers=auth_headers)
+    assert db.query(NotificationDelivery).count() == 0

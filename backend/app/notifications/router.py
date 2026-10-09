@@ -18,8 +18,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, require_admin
-from app.notifications import service
+from app.notifications import channel_service, service
 from app.notifications.schemas import (
+    NotificationChannelCreate,
+    NotificationChannelUpdate,
     NotificationCreate,
     NotificationIngestKeyCreate,
     NotificationStateUpdate,
@@ -121,6 +123,75 @@ def revoke_ingest_key(
 
 
 # —— 单条消息 ——
+
+
+# —— 转发渠道管理（admin；apprise URL 加密存储、界面只回脱敏掩码）——
+
+
+@router.get("/channels")
+def list_channels(db: Session = Depends(get_db), _admin=Depends(require_admin)):
+    rows = (
+        db.query(channel_service.NotificationChannel)
+        .order_by(channel_service.NotificationChannel.created_at.desc())
+        .all()
+    )
+    return _ok([channel_service.channel_out(row) for row in rows])
+
+
+@router.post("/channels", status_code=201)
+def create_channel(
+    body: NotificationChannelCreate,
+    db: Session = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    row = channel_service.create_channel(
+        db,
+        name=body.name,
+        apprise_url=body.appriseUrl,
+        note=body.note,
+        user=admin,
+    )
+    return _ok(channel_service.channel_out(row))
+
+
+@router.patch("/channels/{channel_id}")
+def update_channel(
+    channel_id: str,
+    body: NotificationChannelUpdate,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    row = channel_service.require_channel(db, channel_id)
+    row = channel_service.update_channel(
+        db,
+        row,
+        name=body.name,
+        apprise_url=body.appriseUrl,
+        note=body.note,
+        enabled=body.enabled,
+    )
+    return _ok(channel_service.channel_out(row))
+
+
+@router.delete("/channels/{channel_id}")
+def delete_channel(
+    channel_id: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    row = channel_service.require_channel(db, channel_id)
+    channel_service.delete_channel(db, row)
+    return _ok({"deleted": channel_id})
+
+
+@router.post("/channels/{channel_id}/test")
+def test_channel(
+    channel_id: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    row = channel_service.require_channel(db, channel_id)
+    return _ok(channel_service.test_channel(db, row))
 
 
 @router.get("/{message_id}")

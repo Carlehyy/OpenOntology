@@ -55,6 +55,19 @@ export interface NotificationStateFields {
   isArchived?: boolean
 }
 
+export interface NotificationChannel {
+  id: string
+  name: string
+  urlMasked: string
+  enabled: boolean
+  note: string | null
+  lastStatus: 'sent' | 'failed' | null
+  lastError: string
+  lastSentAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface NotificationIngestKey {
   id: string
   name: string
@@ -108,6 +121,26 @@ export const notificationsApi = {
 
   remove: (id: string): Promise<{ deleted: string }> =>
     apiClientV2.delete(`/notifications/${id}`),
+
+  channels: {
+    list: (): Promise<NotificationChannel[]> =>
+      apiClientV2.get('/notifications/channels'),
+
+    create: (payload: { name: string; appriseUrl: string; note?: string | null }): Promise<NotificationChannel> =>
+      apiClientV2.post('/notifications/channels', payload),
+
+    update: (
+      id: string,
+      fields: { name?: string; appriseUrl?: string; note?: string | null; enabled?: boolean },
+    ): Promise<NotificationChannel> =>
+      apiClientV2.patch(`/notifications/channels/${id}`, fields),
+
+    remove: (id: string): Promise<{ deleted: string }> =>
+      apiClientV2.delete(`/notifications/channels/${id}`),
+
+    test: (id: string): Promise<{ ok: boolean; message: string }> =>
+      apiClientV2.post(`/notifications/channels/${id}/test`),
+  },
 
   ingestKeys: {
     list: (): Promise<NotificationIngestKey[]> =>

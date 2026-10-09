@@ -4,13 +4,14 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Archive, ArchiveRestore, Bell, Copy, FileText, KeyRound, Loader2, MailOpen,
-  Paperclip, Send, Star, Trash2,
+  Paperclip, Radio, Send, Star, Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
   NOTIFICATION_TABS,
   notificationsApi,
+  type NotificationChannel,
   type NotificationIngestKey,
   type NotificationAttachment,
   type NotificationMessage,
@@ -87,6 +88,12 @@ export default function NotificationsDialog({
   const [keyScope, setKeyScope] = useState('')
   const [mintedKey, setMintedKey] = useState<NotificationIngestKey | null>(null)
   const [revokingKey, setRevokingKey] = useState<NotificationIngestKey | null>(null)
+  const [channelsOpen, setChannelsOpen] = useState(false)
+  const [channelName, setChannelName] = useState('')
+  const [channelUrl, setChannelUrl] = useState('')
+  const [channelNote, setChannelNote] = useState('')
+  const [deletingChannel, setDeletingChannel] = useState<NotificationChannel | null>(null)
+  const [testingChannelId, setTestingChannelId] = useState<string | null>(null)
 
   // 手动发送表单
   const [composeTitle, setComposeTitle] = useState('')
@@ -130,6 +137,10 @@ export default function NotificationsDialog({
       setKeysOpen(false)
       setKeyName('')
       setKeyScope('')
+      setChannelsOpen(false)
+      setChannelName('')
+      setChannelUrl('')
+      setChannelNote('')
     }
   }, [open])
 
@@ -174,6 +185,54 @@ export default function NotificationsDialog({
       invalidateLists()
     },
     onError: error => toast.error(errorText(error)),
+  })
+
+  const channels = useQuery({
+    queryKey: ['notifications', 'channels'],
+    queryFn: notificationsApi.channels.list,
+    enabled: open && channelsOpen,
+  })
+
+  const createChannelMutation = useMutation({
+    mutationFn: notificationsApi.channels.create,
+    onSuccess: () => {
+      toast.success('渠道已创建')
+      setChannelName('')
+      setChannelUrl('')
+      setChannelNote('')
+      void queryClient.invalidateQueries({ queryKey: ['notifications', 'channels'] })
+    },
+    onError: error => toast.error(errorText(error)),
+  })
+
+  const updateChannelMutation = useMutation({
+    mutationFn: ({ id, fields }: { id: string; fields: { enabled?: boolean; name?: string } }) =>
+      notificationsApi.channels.update(id, fields),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['notifications', 'channels'] })
+    },
+    onError: error => toast.error(errorText(error)),
+  })
+
+  const deleteChannelMutation = useMutation({
+    mutationFn: notificationsApi.channels.remove,
+    onSuccess: () => {
+      toast.success('渠道已删除')
+      setDeletingChannel(null)
+      void queryClient.invalidateQueries({ queryKey: ['notifications', 'channels'] })
+    },
+    onError: error => toast.error(errorText(error)),
+  })
+
+  const testChannelMutation = useMutation({
+    mutationFn: notificationsApi.channels.test,
+    onSuccess: data => {
+      if (data.ok) toast.success(data.message)
+      else toast.error(data.message)
+      void queryClient.invalidateQueries({ queryKey: ['notifications', 'channels'] })
+    },
+    onError: error => toast.error(errorText(error)),
+    onSettled: () => setTestingChannelId(null),
   })
 
   const ingestKeys = useQuery({
@@ -303,7 +362,15 @@ export default function NotificationsDialog({
               <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => { setComposeOpen(false); setKeysOpen(value => !value) }}
+                  onClick={() => { setComposeOpen(false); setKeysOpen(false); setChannelsOpen(value => !value) }}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  data-notifications-channels-toggle
+                >
+                  <Radio size={13} /> 转发渠道
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setComposeOpen(false); setChannelsOpen(false); setKeysOpen(value => !value) }}
                   className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   data-notifications-keys-toggle
                 >
@@ -311,7 +378,7 @@ export default function NotificationsDialog({
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setKeysOpen(false); setComposeOpen(value => !value) }}
+                  onClick={() => { setKeysOpen(false); setChannelsOpen(false); setComposeOpen(value => !value) }}
                   className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   data-notifications-compose-toggle
                 >
@@ -350,7 +417,7 @@ export default function NotificationsDialog({
                     <button
                       key={item.id}
                       type="button"
-                      onClick={() => { setSelectedId(item.id); setComposeOpen(false); setKeysOpen(false) }}
+                      onClick={() => { setSelectedId(item.id); setComposeOpen(false); setKeysOpen(false); setChannelsOpen(false) }}
                       data-notifications-item={item.id}
                       className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                         active
@@ -399,7 +466,155 @@ export default function NotificationsDialog({
 
           {/* 右栏：发送消息 或 消息详情 */}
           <div className="flex min-w-0 flex-1 flex-col" data-notifications-detail>
-            {keysOpen ? (
+            {channelsOpen ? (
+              <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-channels-panel>
+                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">转发渠道</h3>
+                <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
+                  消息到达即为所有启用渠道生成转发（apprise 协议：<code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">mailto://</code>、<code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">dingtalk://</code>、<code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">json://</code> 等）；渠道地址即凭据，加密存储仅回显掩码。
+                </p>
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="flex min-w-36 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                    渠道名称
+                    <input
+                      value={channelName}
+                      onChange={event => setChannelName(event.target.value)}
+                      maxLength={200}
+                      placeholder="如 钉钉运维群"
+                      className={inputClass}
+                      data-notifications-channel-name
+                    />
+                  </label>
+                  <label className="flex min-w-52 flex-[2] flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                    apprise URL
+                    <input
+                      value={channelUrl}
+                      onChange={event => setChannelUrl(event.target.value)}
+                      maxLength={2000}
+                      placeholder="json://host/path 或 mailto://user:pass@host"
+                      className={inputClass}
+                      data-notifications-channel-url
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!channelName.trim()) {
+                        toast.error('渠道名称不能为空')
+                        return
+                      }
+                      if (!channelUrl.trim()) {
+                        toast.error('apprise URL 不能为空')
+                        return
+                      }
+                      createChannelMutation.mutate({
+                        name: channelName.trim(),
+                        appriseUrl: channelUrl.trim(),
+                        note: channelNote.trim() || null,
+                      })
+                    }}
+                    disabled={createChannelMutation.isPending}
+                    className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    style={{ background: 'var(--color-nav-bg)' }}
+                    data-notifications-channel-create
+                  >
+                    {createChannelMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Radio size={13} />}
+                    新建渠道
+                  </button>
+                </div>
+                <input
+                  value={channelNote}
+                  onChange={event => setChannelNote(event.target.value)}
+                  maxLength={500}
+                  placeholder="备注（可选）：渠道用途、接收人范围…"
+                  className={`${inputClass} sm:max-w-md`}
+                  data-notifications-channel-note
+                />
+                <div className="min-h-0 flex-1">
+                  {channels.isLoading ? (
+                    <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--color-text-tertiary)]">
+                      <Loader2 size={14} className="animate-spin" /> 加载中…
+                    </div>
+                  ) : channels.isError ? (
+                    <div role="alert" className="flex flex-col items-center gap-2 py-8 text-center">
+                      <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">渠道列表加载失败：{errorText(channels.error)}</p>
+                      <button
+                        type="button"
+                        onClick={() => void channels.refetch()}
+                        className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        重试
+                      </button>
+                    </div>
+                  ) : (channels.data ?? []).length === 0 ? (
+                    <p className="px-2 py-6 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
+                      还没有转发渠道。新建后，新消息会自动转发到所有启用渠道。
+                    </p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {(channels.data ?? []).map(channel => (
+                        <li
+                          key={channel.id}
+                          data-notifications-channel-item={channel.id}
+                          className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
+                        >
+                          <Radio size={14} className={`shrink-0 ${channel.enabled ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-tertiary)]'}`} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm text-[var(--color-text-primary)]">
+                              {channel.name}
+                              <span className="ml-2 font-mono text-[10px] text-[var(--color-text-tertiary)]">{channel.urlMasked}</span>
+                            </p>
+                            <p className="truncate text-[10px] text-[var(--color-text-tertiary)]">
+                              {channel.note ? `${channel.note} · ` : ''}
+                              {channel.lastStatus === 'sent'
+                                ? `最近投递成功：${formatDateTime(channel.lastSentAt || channel.updatedAt)}`
+                                : channel.lastStatus === 'failed'
+                                  ? `最近投递失败：${channel.lastError}`
+                                  : '尚未投递'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTestingChannelId(channel.id)
+                              testChannelMutation.mutate(channel.id)
+                            }}
+                            disabled={testChannelMutation.isPending && testingChannelId === channel.id}
+                            className="flex shrink-0 items-center rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                            data-notifications-channel-test
+                          >
+                            {testChannelMutation.isPending && testingChannelId === channel.id
+                              ? <Loader2 size={12} className="animate-spin" />
+                              : '测试'}
+                          </button>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={channel.enabled}
+                            aria-label={`${channel.enabled ? '停用' : '启用'}渠道 ${channel.name}`}
+                            onClick={() => updateChannelMutation.mutate({ id: channel.id, fields: { enabled: !channel.enabled } })}
+                            disabled={updateChannelMutation.isPending}
+                            className={`relative flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 ${channel.enabled ? 'bg-[var(--color-nav-bg)]' : 'bg-[var(--color-border)]'}`}
+                            data-notifications-channel-toggle
+                          >
+                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${channel.enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeletingChannel(channel)}
+                            title={`删除渠道 ${channel.name}`}
+                            aria-label={`删除渠道 ${channel.name}`}
+                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            data-notifications-channel-delete
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            ) : keysOpen ? (
               <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-keys-panel>
                 <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">接入密钥</h3>
                 <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
@@ -712,6 +927,18 @@ export default function NotificationsDialog({
         </div>
       </DialogShell>
 
+      <ConfirmDialog
+        open={deletingChannel !== null}
+        onClose={() => setDeletingChannel(null)}
+        onConfirm={() => {
+          if (deletingChannel) deleteChannelMutation.mutate(deletingChannel.id)
+        }}
+        loading={deleteChannelMutation.isPending}
+        title="删除这个转发渠道？"
+        description={`「${deletingChannel?.name ?? ''}」将被删除，之后的新消息不再转发到该渠道（历史投递记录一并移除）。`}
+        confirmText="删除"
+        variant="danger"
+      />
       <ConfirmDialog
         open={revokingKey !== null}
         onClose={() => setRevokingKey(null)}
