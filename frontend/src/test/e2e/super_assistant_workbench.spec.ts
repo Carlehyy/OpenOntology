@@ -1087,17 +1087,10 @@ test('消息通知：接入密钥——签发明文仅一次展示、列表与�
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
-  await page.locator('[data-notifications-keys-toggle]').click()
+  // 布局契约（分区导航）：渠道配置分区承载入口/出口两区块
+  await page.locator('[data-notifications-nav="config"]').click()
   await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
-
-  // 布局契约（管理态）：消息列表整体卸载让位全宽面板，「返回消息」可恢复浏览态
-  await expect(page.locator('[data-notifications-list]')).toHaveCount(0)
-  await expect(page.locator('[data-notifications-back]')).toBeVisible()
-  await page.locator('[data-notifications-back]').click()
-  await expect(page.locator('[data-notifications-list]')).toBeVisible()
-  await expect(page.locator('[data-notifications-keys-panel]')).toHaveCount(0)
-  await page.locator('[data-notifications-keys-toggle]').click()
-  await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
+  await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
 
   // 既有密钥列表可见（不携带明文）
   await expect(page.locator('[data-notifications-key-item="nk-1"]')).toBeVisible()
@@ -1124,15 +1117,7 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
-  await page.locator('[data-notifications-channels-toggle]').click()
-  await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
-  // 布局契约（管理态）：列表卸载、可返回浏览态
-  await expect(page.locator('[data-notifications-list]')).toHaveCount(0)
-  await expect(page.locator('[data-notifications-back]')).toBeVisible()
-  await page.locator('[data-notifications-back]').click()
-  await expect(page.locator('[data-notifications-list]')).toBeVisible()
-  await expect(page.locator('[data-notifications-channels-panel]')).toHaveCount(0)
-  await page.locator('[data-notifications-channels-toggle]').click()
+  await page.locator('[data-notifications-nav="config"]').click()
   await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
 
   // 既有渠道：名称/掩码地址/最近投递状态可见，地址明文不出现在界面
@@ -1148,10 +1133,15 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await page.locator('[data-notifications-channel-create]').click()
   await expect.poll(() => mocks.notifChannelCreates.length).toBe(1)
 
-  // 测试直发：结果 toast 即时反馈
+  // 测试直发（在线测试分区）：结果 toast 即时反馈
+  await page.locator('[data-notifications-nav="test"]').click()
+  await expect(page.locator('[data-notifications-test-panel]')).toBeVisible()
   await page.locator('[data-notifications-channel-test]').first().click()
   await expect.poll(() => mocks.notifChannelTests.length).toBe(1)
   await expect(page.getByText('测试消息已发送')).toBeVisible()
+
+  // 回渠道配置分区做启停与删除
+  await page.locator('[data-notifications-nav="config"]').click()
 
   // 启停开关触发 PATCH
   await page.locator('[data-notifications-channel-toggle]').first().click()
@@ -1190,11 +1180,10 @@ test('消息通知（窄屏390px）：列表⇄详情单栏切换与管理态全
   await expect(page.locator('[data-notifications-list]')).toBeVisible()
   await expect(page.locator('[data-notifications-detail]')).toBeHidden()
 
-  // 管理态：列表卸载、全宽面板、返回消息回浏览态
-  await page.locator('[data-notifications-keys-toggle]').click()
+  // 分区导航在窄屏同样可达：切渠道配置再回消息列表
+  await page.locator('[data-notifications-nav="config"]').click()
   await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
-  await expect(page.locator('[data-notifications-list]')).toHaveCount(0)
-  await page.locator('[data-notifications-back]').click()
+  await page.locator('[data-notifications-nav="messages"]').click()
   await expect(page.locator('[data-notifications-list]')).toBeVisible()
 })
 
