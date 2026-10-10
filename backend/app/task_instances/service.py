@@ -62,13 +62,14 @@ def _dispatch_node(node_run_id: str) -> None:
         logger.exception("节点派发失败（等待对账重投）: %s", node_run_id)
 
 
-def _dispatch_steering(node_run_id: str, message_id: str) -> None:
+def _dispatch_steering(node_run_id: str, message_id: str,
+                       content: str = "") -> None:
     try:
         from app.data_channel.pipeline_tasks.dispatch import dispatch_task
 
         dispatch_task("task_instances.control",
                       {"kind": "steer", "node_run_id": node_run_id,
-                       "message_id": message_id})
+                       "message_id": message_id, "content": content[:60000]})
     except Exception:  # noqa: BLE001
         logger.exception("插话派发失败: %s", node_run_id)
 
@@ -477,7 +478,7 @@ def steering_api(db: Session, instance_id: str, body: schemas.SteeringSubmit,
         idempotency_key=idempotency_key)
     db.add(message)
     db.commit()
-    _dispatch_steering(run.id, message.id)
+    _dispatch_steering(run.id, message.id, body.content)
     return {"id": message.id, "status": message.status,
             "node_run_id": run.id, "instance_id": instance.id}
 

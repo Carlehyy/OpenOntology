@@ -267,6 +267,8 @@ services:
       # executor 会执行整条流水线（含 python 脚本引擎），需要内核网关地址
       PYTHON_KERNEL_GATEWAY_URL: http://python_kernel_gateway:8088
       PYTHON_KERNEL_GATEWAY_AUTH_TOKEN: ${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}
+      # 任务实例控制面由 task_worker 独占消费（本进程无 docker.sock）
+      TASK_INSTANCES_CONTROL_EXCLUDE: "1"
     depends_on:
       db:
         condition: service_healthy
@@ -284,6 +286,50 @@ services:
       - /tmp:size=256m,nosuid,nodev
     healthcheck:
       # executor 没有进程内 ping 接口；主循环每 5 秒刷新心跳文件 mtime。
+      test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/nats_executor.heartbeat')<30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # 任务实例 agent 执行体：消费 task_instances.control，为每个 agent 节点
+  # 起一个 openontology-task-agent 容器（只读 rootfs + bind-mount 工作区 +
+  # 模型凭据容器环境注入）。镜像构建：docker build -t openontology-task-agent:local docker/task-agent
+  task_worker:
+    build:
+      context: ./backend
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      STORAGE_LOCAL_DIR: /uploads/object-storage
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ontoprompt:ontoprompt@db:5432/ontoprompt}
+      REDIS_URL: ${REDIS_URL:-redis://:ontopromptredis123@redis:6379/0}
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
+      # 容器执行体模式 + 执行镜像/网络（egress 默认 bridge，见设计 §6.5）
+      TASK_INSTANCES_EXECUTOR: docker
+      TASK_AGENT_IMAGE: ${TASK_AGENT_IMAGE:-openontology-task-agent:local}
+      TASK_AGENT_NETWORK: ${TASK_AGENT_NETWORK:-bridge}
+    depends_on:
+      db:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - uploads:/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: python -m app.data_channel.pipeline_tasks.nats_executor
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev
+    healthcheck:
       test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/nats_executor.heartbeat')<30 else 1)"]
       interval: 15s
       timeout: 5s

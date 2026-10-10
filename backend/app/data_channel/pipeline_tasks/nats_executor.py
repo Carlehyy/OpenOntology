@@ -216,7 +216,7 @@ def _handler_registry():
     from app.super_assistant import palace_tasks, reflection_tasks, scheduled_tasks
     from app.task_instances import executor as task_instances_executor
 
-    return (
+    entries = [
         (PIPELINE_EXECUTE_SUBJECT, _CONSUMER_DURABLE, _execute_pipeline_task_message),
         (PIPELINE_RUN_SUBJECT, _PIPELINE_RUN_DURABLE, _run_pipeline_run_message),
         (DATASET_IMPORT_SUBJECT, _DATASET_IMPORT_DURABLE, _run_dataset_import_message),
@@ -273,12 +273,18 @@ def _handler_registry():
             _SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE,
             palace_tasks.run_palace_ontology_rebuild_message,
         ),
-        (
-            TASK_INSTANCES_CONTROL_SUBJECT,
-            _TASK_INSTANCES_CONTROL_DURABLE,
-            task_instances_executor.run_control_message,
-        ),
-    )
+    ]
+    # 任务实例控制面的消费归属：生产部署中由 task_worker 服务独占消费
+    # （挂 docker.sock 的容器执行体）；本进程设 TASK_INSTANCES_CONTROL_EXCLUDE
+    # 后让出该 subject，避免同一 durable 在无 sock 的进程间负载均衡。
+    import os as _os
+
+    if _os.environ.get("TASK_INSTANCES_CONTROL_EXCLUDE") != "1":
+        entries.append(
+            (TASK_INSTANCES_CONTROL_SUBJECT,
+             _TASK_INSTANCES_CONTROL_DURABLE,
+             task_instances_executor.run_control_message))
+    return tuple(entries)
 
 
 async def _run_kernel_execution_message(payload: dict) -> None:
