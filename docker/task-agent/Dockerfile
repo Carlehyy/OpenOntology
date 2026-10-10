@@ -13,8 +13,8 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 COPY runner.mjs ./
 
-RUN useradd --create-home --uid 1000 agent
-USER agent
+# node:22-slim 自带 uid 1000 的 node 用户；非 root 运行
+USER node
 WORKDIR /workspace
 
 ENTRYPOINT ["node", "/opt/agent-runner/runner.mjs"]
