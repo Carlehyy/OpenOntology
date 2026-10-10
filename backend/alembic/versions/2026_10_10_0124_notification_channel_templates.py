@@ -21,6 +21,10 @@ _SMTP = "notification_smtp_settings"
 
 def upgrade() -> None:
     bind = op.get_bind()
+    tables = set(sa_inspect(bind).get_table_names())
+    if _CHANNELS not in tables:
+        # 0123 的守卫（无 users 时跳过建表）在极旧基线库上会跳过渠道表——此处同步跳过
+        return
 
     channels_columns = {
         column["name"] for column in sa_inspect(bind).get_columns(_CHANNELS)
@@ -47,6 +51,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    tables = set(sa_inspect(bind).get_table_names())
+    if _CHANNELS not in tables:
+        return
     channels_columns = {
         column["name"] for column in sa_inspect(bind).get_columns(_CHANNELS)
     }

@@ -190,33 +190,6 @@ def channel_out(channel: NotificationChannel) -> dict[str, Any]:
 # ── 到达即生成投递单 + 异步执行 ───────────────────────────────
 
 
-def fan_out_deliveries(db: Session, message: NotificationMessage) -> int:
-    """消息新建即为所有启用渠道生成 pending 投递单（幂等：唯一约束跳过既有对）。"""
-    channels = (
-        db.query(NotificationChannel).filter(NotificationChannel.enabled.is_(True)).all()
-    )
-    existing = {
-        row.channel_id
-        for row in db.query(NotificationDelivery.channel_id).filter(
-            NotificationDelivery.message_id == message.id
-        ).all()
-    }
-    created = 0
-    for channel in channels:
-        if channel.id in existing:
-            continue
-        db.add(
-            NotificationDelivery(
-                message_id=message.id,
-                channel_id=channel.id,
-            )
-        )
-        created += 1
-    if created:
-        db.flush()
-    return created
-
-
 def dispatch_pending_deliveries(
     db: Session,
     *,
