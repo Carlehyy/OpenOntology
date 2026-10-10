@@ -12,7 +12,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # 任务实例 task_worker 以 docker CLI 子进程管理 agent 执行容器（挂载宿主
 # docker.sock，仅客户端；daemon 永不在此镜像内运行）
  && apt-get update \
- && apt-get install -y --no-install-recommends docker.io \
+ && apt-get install -y --no-install-recommends docker-cli \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 \
