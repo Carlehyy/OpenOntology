@@ -599,17 +599,36 @@ def test_super_assistant_handlers_delegate_without_orm_or_transactions():
         })
     for name, (module_name, function_name) in DELEGATES.items():
         function = functions[name]
-        service_calls = [
-            node
-            for statement in function.body
-            for node in ast.walk(statement)
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
+        def is_delegate(node: ast.AST) -> bool:
+            if not isinstance(node, ast.Call):
+                return False
+            direct = (
+                isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == module_name
                 and node.func.attr == function_name
             )
+            if direct:
+                return True
+            # run_in_threadpool(<module>.<fn>, ...) 引用形委托等价：
+            # CPU 密集服务调用让出事件循环（如语音转写），仍是唯一委托
+            if (isinstance(node.func, ast.Name)
+                    and node.func.id == "run_in_threadpool"
+                    and node.args):
+                target = node.args[0]
+                return (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == module_name
+                    and target.attr == function_name
+                )
+            return False
+
+        service_calls = [
+            node
+            for statement in function.body
+            for node in ast.walk(statement)
+            if is_delegate(node)
         ]
         assert len(service_calls) == 1
 

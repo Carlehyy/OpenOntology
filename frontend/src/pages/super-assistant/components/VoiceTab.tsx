@@ -118,7 +118,7 @@ export default function VoiceTab() {
             <p className="flex items-center gap-1.5" data-testid="voice-model-status">
               {status.model_present ? (
                 <>
-                  <CircleCheck size={13} className="shrink-0 text-emerald-500" />
+                  <CircleCheck size={13} className="shrink-0 text-brand" />
                   识别模型已就绪（{status.model_file}）
                 </>
               ) : (

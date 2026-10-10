@@ -34,7 +34,13 @@ async function stubAudioApis(page: Page, options: { secureContext: boolean }) {
     Object.defineProperty(window, 'isSecureContext', { value: secureContext, configurable: true })
     if (!secureContext) return
     Object.defineProperty(navigator, 'mediaDevices', {
-      value: { getUserMedia: async () => ({ getTracks: () => [{ stop: () => undefined }] }) },
+      value: {
+        getUserMedia: async () => {
+          ;(window as unknown as Record<string, number>).__voiceGumCalls =
+            ((window as unknown as Record<string, number>).__voiceGumCalls || 0) + 1
+          return { getTracks: () => [{ stop: () => undefined }] }
+        },
+      },
       configurable: true,
     })
     const fakeBuffer = {
@@ -44,11 +50,9 @@ async function stubAudioApis(page: Page, options: { secureContext: boolean }) {
       getChannelData: () => new Float32Array(4800),
     }
     class FakeAudioContext {
-      constructor() {
-        this.sampleRate = 48000
-        this.state = 'running'
-        this.destination = {}
-      }
+      sampleRate = 48000
+      state = 'running'
+      destination: object = {}
       createMediaStreamSource() { return { connect: () => undefined, disconnect: () => undefined } }
       createAnalyser() {
         return {
@@ -63,12 +67,15 @@ async function stubAudioApis(page: Page, options: { secureContext: boolean }) {
     ;(window as unknown as Record<string, unknown>).AudioContext = FakeAudioContext
     class FakeMediaRecorder {
       static isTypeSupported() { return true }
+      stream: unknown
+      mimeType: string
+      state: 'inactive' | 'recording'
+      ondataavailable: ((event: { data: Blob }) => void) | null = null
+      onstop: (() => void) | null = null
       constructor(stream: unknown, options?: { mimeType?: string }) {
         this.stream = stream
         this.mimeType = options?.mimeType || 'audio/webm'
         this.state = 'inactive'
-        this.ondataavailable = null
-        this.onstop = null
       }
       start() {
         this.state = 'recording'
@@ -91,7 +98,7 @@ interface VoiceMocks {
   chatBodies: string[]
 }
 
-async function mockApis(page: Page): Promise<VoiceMocks> {
+async function mockApis(page: Page, options: { transcribeStatus?: number } = {}): Promise<VoiceMocks> {
   const transcribeCalls: Array<{ language: string; bodySize: number }> = []
   const chatBodies: string[] = []
   let conversationSeq = 0
@@ -157,7 +164,7 @@ async function mockApis(page: Page): Promise<VoiceMocks> {
     }
     if (path === '/api/v2/super-assistant/voice/status') {
       return json(route, {
-        ready: true, model_present: true, model_dir: '/voice-models', model_file: 'model.int8.onnx',
+        ready: true, model_present: true, model_file: 'model.int8.onnx',
         languages: ['auto', 'zh', 'en', 'ja', 'ko', 'yue'], sample_rate: 16000,
         max_duration_seconds: 120, max_body_bytes: 8388608,
       })
@@ -165,6 +172,13 @@ async function mockApis(page: Page): Promise<VoiceMocks> {
     if (path === '/api/v2/super-assistant/voice/transcribe' && request.method() === 'POST') {
       const language = new URL(request.url()).searchParams.get('language') || 'auto'
       transcribeCalls.push({ language, bodySize: (request.postDataBuffer() || Buffer.alloc(0)).length })
+      if (options.transcribeStatus && options.transcribeStatus !== 200) {
+        return route.fulfill({
+          status: options.transcribeStatus,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: '语音模型未就绪：请先在服务器执行 python scripts/download_voice_model.py 下载' }),
+        })
+      }
       return json(route, { text: TRANSCRIPT, duration_ms: 1200, language })
     }
     return route.continue()
@@ -173,6 +187,10 @@ async function mockApis(page: Page): Promise<VoiceMocks> {
 }
 
 async function openWorkbench(page: Page) {
+  page.on('pageerror', error => console.error('[voice-spec pageerror]', error.message))
+  page.on('console', message => {
+    if (message.type() === 'error') console.error('[voice-spec console.error]', message.text())
+  })
   await page.goto('/#/super-assistant')
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
 }
@@ -246,6 +264,42 @@ test.describe('超级助手语音听写', () => {
     await expect(bar).toBeHidden()
     await expect(composerTextarea(page)).toBeVisible()
     expect(mocks.transcribeCalls).toHaveLength(0)
+  })
+
+  test('后端模型未就绪 503：toast 呈现指引并回到输入框', async ({ page }) => {
+    await seedAuth(page)
+    await stubAudioApis(page, { secureContext: true })
+    const mocks = await mockApis(page, { transcribeStatus: 503 })
+    await openWorkbench(page)
+
+    await micButton(page).click()
+    const bar = page.getByTestId('super-assistant-voice-recording-bar')
+    await expect(bar).toBeVisible()
+    await page.waitForTimeout(700)
+    await bar.getByRole('button', { name: '停止录音并转成文字' }).click()
+
+    await expect(composerTextarea(page)).toBeVisible()
+    await expect(page.getByText('语音听写失败').first()).toBeVisible()
+    await expect(page.getByText('语音模型未就绪').first()).toBeVisible()
+    expect(mocks.transcribeCalls).toHaveLength(1)
+  })
+
+  test('连点麦克风防重入：只发起一次 getUserMedia', async ({ page }) => {
+    await seedAuth(page)
+    await stubAudioApis(page, { secureContext: true })
+    const mocks = await mockApis(page)
+    await openWorkbench(page)
+
+    await micButton(page).click()
+    await micButton(page).click({ force: true }) // disabled 生效前的窗口期连点
+    const bar = page.getByTestId('super-assistant-voice-recording-bar')
+    await expect(bar).toBeVisible()
+    const gumCalls = await page.evaluate(() => (window as unknown as Record<string, number>).__voiceGumCalls)
+    expect(gumCalls).toBe(1)
+    await page.waitForTimeout(700)
+    await bar.getByRole('button', { name: '停止录音并转成文字' }).click()
+    await expect(composerTextarea(page)).toHaveValue(TRANSCRIPT)
+    expect(mocks.transcribeCalls).toHaveLength(1)
   })
 
   test('非安全上下文：麦克风按钮隐藏，语音 tab 显示原因说明', async ({ page }) => {

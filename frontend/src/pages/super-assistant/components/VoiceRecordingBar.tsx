@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AudioLines, Loader2, Mic, Send, Square, X } from 'lucide-react'
 
 import type { VoiceDictation } from '../useVoiceDictation'
@@ -26,30 +26,33 @@ export default function VoiceRecordingBar({
   onFinish: (sendAfter: boolean) => void
   onCancel: () => void
 }) {
-  const trailRef = useRef<number[]>([])
+  const [trail, setTrail] = useState<number[]>([])
   const barRef = useRef<HTMLDivElement>(null)
 
   const { phase, level, elapsedMs } = dictation
   const transcribing = phase === 'transcribing'
 
-  // 音量轨迹：滚动窗口保留最近采样，低电平时补最小可见高度
-  if (!transcribing) {
-    trailRef.current = [...trailRef.current, level].slice(-TRAIL_SAMPLES)
-  }
+  // 音量轨迹经 effect 推进：渲染体保持纯函数，避免并发渲染下采样重复
+  useEffect(() => {
+    if (transcribing) return
+    setTrail(current => [...current, level].slice(-TRAIL_SAMPLES))
+  }, [level, transcribing])
 
   useEffect(() => {
     if (transcribing) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented) {
-        event.preventDefault()
-        onCancel()
-      }
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      // 焦点在其他可编辑控件（侧栏搜索、弹窗输入）时，Esc 归属那个控件，
+      // 不越权取消录音；仅面向页面级的 Esc 兜底
+      const target = event.target as HTMLElement | null
+      if (target && (target.isContentEditable
+        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return
+      event.preventDefault()
+      onCancel()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [transcribing, onCancel])
-
-  const trail = trailRef.current
 
   return (
     <div

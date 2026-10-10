@@ -65,7 +65,6 @@ export interface SuperSearchMessageHit {
 export interface VoiceStatus {
   ready: boolean
   model_present: boolean
-  model_dir: string
   model_file: string
   languages: string[]
   sample_rate: number
@@ -717,11 +716,13 @@ export const superAssistantApi = {
     apiClientV2.get<SuperSearchResult>('/super-assistant/search/conversations', { params: { q, limit } }),
   /** 语音听写：后端模型就绪状态（助手配置「语音」tab 展示用） */
   voiceStatus: () => apiClientV2.get<VoiceStatus>('/super-assistant/voice/status'),
-  /** 语音听写：上传 16k 单声道 16-bit PCM WAV（原始字节），返回转写文本 */
+  /** 语音听写：上传 16k 单声道 16-bit PCM WAV（原始字节），返回转写文本。
+   *  显式超时：转写是 CPU 推理（秒级），不能沿用 axios 无默认超时 */
   transcribeVoice: (wav: Uint8Array, language: string) =>
     apiClientV2.post<VoiceTranscription>('/super-assistant/voice/transcribe', wav, {
       params: { language },
       headers: { 'Content-Type': 'audio/wav' },
+      timeout: 90_000,
     }),
   palaceFiles: () => apiClientV2.get<PalaceFile[]>('/super-assistant/palace/files'),
   /** folderPath 非空时上传归位到该目录（目录不存在时后端按 mkdir -p 补行） */

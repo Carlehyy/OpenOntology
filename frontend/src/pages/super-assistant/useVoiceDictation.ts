@@ -12,6 +12,9 @@ import { errorText } from './components/assistantPanelUtils'
 
 export type DictationPhase = 'idle' | 'recording' | 'transcribing'
 
+/** 前端自动停止线：留出余量低于后端 120s 上限，避免录满才吃 413 */
+export const MAX_RECORDING_SECONDS = 110
+
 export interface VoiceDictation {
   phase: DictationPhase
   /** 0~1 实时电平（录音条音量轨迹用） */
@@ -52,8 +55,12 @@ export function useVoiceDictation(options: {
   const [elapsedMs, setElapsedMs] = useState(0)
 
   const recorderRef = useRef<VoiceRecorder | null>(null)
+  // getUserMedia 是异步授权：await 返回前 phase 仍是 idle，按钮防重入
+  // 覆盖不到这个窗口，必须用同步标记挡住连点
+  const startingRef = useRef(false)
   const startedAtRef = useRef(0)
   const pollTimerRef = useRef<number | null>(null)
+  const autoStoppedRef = useRef(false)
   const optionsRef = useRef(options)
   optionsRef.current = options
 
@@ -64,8 +71,6 @@ export function useVoiceDictation(options: {
     }
   }, [])
 
-  useEffect(() => stopPolling, [stopPolling])
-
   const teardown = useCallback(() => {
     stopPolling()
     recorderRef.current = null
@@ -74,27 +79,47 @@ export function useVoiceDictation(options: {
     setPhase('idle')
   }, [stopPolling])
 
+  const finishRef = useRef<(sendAfter: boolean) => Promise<void>>(async () => {})
+
+  // 路由切走/组件卸载：录音中必须立刻释放麦克风，不能只停轮询定时器
+  useEffect(() => () => {
+    recorderRef.current?.abort()
+    recorderRef.current = null
+    stopPolling()
+  }, [stopPolling])
+
   const start = useCallback(async () => {
-    if (recorderRef.current) return
+    if (recorderRef.current || startingRef.current) return
     if (!voiceCaptureSupported()) {
       notifyError(RECORDER_ERROR_MESSAGES['insecure-context'])
       return
     }
+    startingRef.current = true
     try {
       recorderRef.current = await createVoiceRecorder()
+      autoStoppedRef.current = false
+      startedAtRef.current = performance.now()
+      setPhase('recording')
+      pollTimerRef.current = window.setInterval(() => {
+        const recorder = recorderRef.current
+        if (!recorder) return
+        const elapsed = performance.now() - startedAtRef.current
+        setLevel(recorder.level)
+        setElapsedMs(elapsed)
+        // 到达自动停止线：替用户收尾转写，避免录满 120s 才被后端 413 拒掉
+        if (elapsed >= MAX_RECORDING_SECONDS * 1000 && !autoStoppedRef.current) {
+          autoStoppedRef.current = true
+          toast.info('已达到单次录音上限，自动停止并转写')
+          void finishRef.current(false)
+        }
+      }, 100)
     } catch (error) {
+      recorderRef.current = null
       const code = error instanceof Error ? error.message : ''
       notifyError(RECORDER_ERROR_MESSAGES[code] ?? errorText(error, '无法启动录音'))
-      return
+    } finally {
+      startingRef.current = false
     }
-    startedAtRef.current = performance.now()
-    setPhase('recording')
-    pollTimerRef.current = window.setInterval(() => {
-      const recorder = recorderRef.current
-      if (!recorder) return
-      setLevel(recorder.level)
-      setElapsedMs(performance.now() - startedAtRef.current)
-    }, 100)
   }, [])
 
   const finish = useCallback(async (sendAfter: boolean) => {
@@ -121,6 +146,8 @@ export function useVoiceDictation(options: {
       teardown()
     }
   }, [teardown])
+
+  finishRef.current = finish
 
   const cancel = useCallback(() => {
     recorderRef.current?.abort()

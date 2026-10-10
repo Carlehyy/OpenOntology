@@ -79,10 +79,10 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
       audioContext = null
     }
     analyser = null
-    if (mediaRecorder) {
-      mediaRecorder.stream.getTracks().forEach(track => track.stop())
-      mediaRecorder = null
-    }
+    // 直接从闭包持有的原始 stream 释放轨道：AudioContext 构造失败时
+    // mediaRecorder 尚为 null，依赖它会漏掉麦克风
+    stream.getTracks().forEach(track => track.stop())
+    mediaRecorder = null
   }
 
   const stream = await navigator.mediaDevices
@@ -128,7 +128,12 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
       const blobType = recorder.mimeType || 'audio/webm'
       recorder.onstop = async () => {
         cleanup()
-        if (aborted) return
+        if (aborted) {
+          // abort() 只是释放资源、不关心结果；显式 reject 让悬挂的
+          // stop() promise 必然结算，而非依赖调用方“不这样做”的约定
+          reject(recorderError('not-recording'))
+          return
+        }
         if (durationMs < MIN_DURATION_MS) {
           reject(recorderError('too-short'))
           return

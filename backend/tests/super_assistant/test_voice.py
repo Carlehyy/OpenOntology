@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.deps import get_current_user
@@ -227,14 +227,34 @@ def test_status_reports_model_readiness(
 # ---------------------------------------------------------------------------
 
 
-def test_decode_wav_resamples_to_16k_mono() -> None:
+def test_decode_wav_returns_mono_at_source_rate() -> None:
     stereo_44k = _sine_wav(seconds=1.0, sample_rate=44100, channels=2)
     samples, source_rate = voice_service.decode_wav(stereo_44k)
+    # 解码只做声道折叠，不做重采样（重采样前必须先完成时长校验）
     assert source_rate == 44100
-    # 1 秒音频重采样后仍约 1 秒
-    assert abs(len(samples) - 16000) <= 8
+    assert abs(len(samples) - 44100) <= 2
     assert samples.dtype == np.float32
     assert float(np.max(np.abs(samples))) <= 1.0
+
+
+def test_resample_to_16k_length_and_start() -> None:
+    samples = np.sin(np.arange(4800, dtype=np.float32) * 2 * np.pi * 40 / 4800)
+    resampled = voice_service.resample_to_16k(samples, 48000)
+    assert abs(len(resampled) - 1600) <= 1
+    assert abs(resampled[0] - samples[0]) < 1e-6
+
+
+def test_resample_output_capped_by_duration_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 100Hz 声明的超长样本：即使时长校验被绕过，输出样本数也被
+    # voice_max_duration_seconds × 16k 硬顶，不可能无上界分配
+    monkeypatch.setattr(
+        voice_service.settings, "voice_max_duration_seconds", 1, raising=False
+    )
+    samples = np.zeros(50_000, dtype=np.float32)  # 100Hz 下=500s
+    resampled = voice_service.resample_to_16k(samples, 100)
+    assert len(resampled) <= 16000
 
 
 def test_decode_wav_rejects_non_pcm16() -> None:
@@ -278,3 +298,92 @@ def test_recognizer_is_cached_per_language(fake_recognizer: FakeRecognizer) -> N
     voice_service.transcribe(wav, language="zh")
     # 同语言复用缓存实例：两次转写共用同一个假识别器 stream 引用即可证明
     assert fake_recognizer.stream is not None
+
+
+# ---------------------------------------------------------------------------
+# 对抗式审查补充：截断 WAV / 恶意低采样率 / chunked 超限 / 并发转写
+# ---------------------------------------------------------------------------
+
+
+def test_truncated_wav_is_400_not_500(client: TestClient) -> None:
+    response = _post_wav(client, b"RIFF")
+    assert response.status_code == 400
+    assert "WAV" in response.json()["detail"]
+
+
+def test_low_sample_rate_wav_rejected_before_resample(
+    client: TestClient,
+) -> None:
+    # 100Hz 声明、200s 时长（仅 2 万样本）：按原始采样率先判 413，绝不进入重采样
+    low_rate = _sine_wav(seconds=200.0, sample_rate=100)
+    response = _post_wav(client, low_rate)
+    assert response.status_code == 413
+    assert "时长" in response.json()["detail"]
+
+
+def test_read_limited_body_stops_on_chunked_overflow() -> None:
+    """无 Content-Length 的 chunked 请求：边读边累计，超限立即 413。"""
+    import asyncio
+    from types import SimpleNamespace as NS
+
+    from app.super_assistant.voice import read_limited_body
+
+    class FakeRequest:
+        def __init__(self, chunks: list[bytes], headers: dict[str, str]) -> None:
+            self._chunks = chunks
+            self.headers = headers
+
+        async def stream(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    limit = 1024
+    request = FakeRequest([b"x" * 512, b"x" * 512, b"x" * 512], {})
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(read_limited_body(request, limit))  # type: ignore[arg-type]
+    assert excinfo.value.status_code == 413
+
+    # 未超限的正常路径完整拼接
+    ok_request = FakeRequest([b"ab", b"cd"], {})
+    body = asyncio.run(read_limited_body(ok_request, limit))  # type: ignore[arg-type]
+    assert body == b"abcd"
+
+    # 有 Content-Length 且超限：不读流直接 413
+    declared = FakeRequest([], {"content-length": str(limit + 1)})
+    with pytest.raises(HTTPException) as declared_info:
+        asyncio.run(read_limited_body(declared, limit))  # type: ignore[arg-type]
+    assert declared_info.value.status_code == 413
+
+
+def test_concurrent_transcribe_both_succeed(
+    fake_recognizer: FakeRecognizer,
+) -> None:
+    """threadpool 化后并发转写互不阻塞（事件循环不被 CPU 推理冻结）。"""
+    import asyncio
+
+    import httpx
+    from fastapi import FastAPI
+
+    from app.deps import get_current_user
+
+    app = FastAPI()
+    app.include_router(voice_router.router, prefix=_PREFIX)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1")
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            wav = _sine_wav(seconds=0.3)
+            results = await asyncio.gather(*[
+                client.post(
+                    f"{_PREFIX}/voice/transcribe",
+                    content=wav,
+                    headers={"Content-Type": "audio/wav"},
+                )
+                for _ in range(4)
+            ])
+        for response in results:
+            assert response.status_code == 200, response.text
+            assert response.json()["text"] == "你好，帮我把这段话整理成本体需求。"
+
+    asyncio.run(run())

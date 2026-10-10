@@ -821,11 +821,11 @@ class VoiceTranscriptionOut(BaseModel):
 
 
 class VoiceStatusOut(BaseModel):
-    """语音听写后端就绪状态（模型是否已下载、限额等）。"""
+    """语音听写后端就绪状态（模型是否已下载、限额等）。
+    不暴露服务器文件系统路径。"""
 
     ready: bool
     model_present: bool
-    model_dir: str
     model_file: str
     languages: list[str]
     sample_rate: int

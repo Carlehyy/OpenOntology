@@ -71,7 +71,6 @@ class TranscriptionResult:
 class VoiceStatus:
     ready: bool
     model_present: bool
-    model_dir: str
     model_file: str
     languages: tuple[str, ...]
     sample_rate: int
@@ -98,19 +97,22 @@ def model_present() -> bool:
 
 # ---------------------------------------------------------------------------
 # WAV 解码：仅接受 PCM WAV（前端 recorder 统一产出 16-bit PCM），负责
-# 声道折叠与任意采样率的线性重采样到 16k 单声道 float32。
+# 声道折叠；时长校验在重采样之前按原始采样率完成——恶意低采样率 WAV
+# 若先重采样会触发无上界内存分配（如 100Hz 声明可使 8MB 包体膨胀出数
+# 亿样本），必须先拒后转。
 # ---------------------------------------------------------------------------
 
 
 def decode_wav(payload: bytes) -> tuple[np.ndarray, int]:
-    """解码 PCM WAV 为 (float32 mono @16k, 原始采样率)。"""
+    """解码 PCM WAV 为 (原始采样率下的 float32 单声道, 采样率)。"""
     try:
         with wave.open(io.BytesIO(payload), "rb") as reader:
             channels = reader.getnchannels()
             sample_width = reader.getsampwidth()
             sample_rate = reader.getframerate()
             frames = reader.readframes(reader.getnframes())
-    except wave.Error as error:
+    except (wave.Error, EOFError) as error:
+        # CPython wave 对截断文件抛 EOFError 而非 wave.Error
         raise WavFormatError(f"无法解析 WAV 音频：{error}") from error
 
     if sample_width != 2:
@@ -123,19 +125,23 @@ def decode_wav(payload: bytes) -> tuple[np.ndarray, int]:
     samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
     if channels > 1:
         samples = samples.reshape(-1, channels).mean(axis=1)
-
-    if sample_rate != TARGET_SAMPLE_RATE:
-        count = int(round(len(samples) * TARGET_SAMPLE_RATE / sample_rate))
-        count = max(count, 1)
-        positions = np.arange(count, dtype=np.float32) * sample_rate / TARGET_SAMPLE_RATE
-        left = np.floor(positions).astype(np.int64)
-        right = np.minimum(left + 1, len(samples) - 1)
-        weight = positions - left
-        samples = samples[left] * (1.0 - weight) + samples[right] * weight
-
     if not np.isfinite(samples).all():
         raise WavFormatError("WAV 含非法采样值")
     return samples.astype(np.float32, copy=False), sample_rate
+
+
+def resample_to_16k(samples: np.ndarray, source_rate: int) -> np.ndarray:
+    """线性重采样到 16kHz（与前端 recorder 的纯 DSP 同一算法）。"""
+    if source_rate == TARGET_SAMPLE_RATE or samples.size == 0:
+        return samples
+    count = int(round(samples.size * TARGET_SAMPLE_RATE / source_rate))
+    # 双保险：输出样本数绝不超过时长上限对应的 16k 样本量
+    count = min(max(count, 1), settings.voice_max_duration_seconds * TARGET_SAMPLE_RATE)
+    positions = np.arange(count, dtype=np.float32) * source_rate / TARGET_SAMPLE_RATE
+    left = np.floor(positions).astype(np.int64)
+    right = np.minimum(left + 1, samples.size - 1)
+    weight = positions - left
+    return (samples[left] * (1.0 - weight) + samples[right] * weight).astype(np.float32, copy=False)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +162,7 @@ def create_recognizer(language: str) -> object:
     tokens_path = directory / _TOKENS_FILE
     if not model_path.is_file() or not tokens_path.is_file():
         raise ModelNotReadyError(
-            f"语音模型未就绪：请先在模型目录 {directory} 执行 "
+            "语音模型未就绪：请先在服务器执行 "
             "python scripts/download_voice_model.py 下载（sha256 校验通过后生效）"
         )
     return sherpa_onnx.OfflineRecognizer.from_sense_voice(
@@ -192,12 +198,16 @@ def transcribe(payload: bytes, language: str = "auto") -> TranscriptionResult:
         )
 
     samples, source_rate = decode_wav(payload)
-    duration_seconds = len(samples) / TARGET_SAMPLE_RATE
+    # 时长校验必须在重采样之前：按原始采样率计算零额外分配
+    duration_seconds = samples.size / source_rate
     if duration_seconds > settings.voice_max_duration_seconds:
         raise AudioTooLongError(
             f"音频时长 {duration_seconds:.0f}s 超过上限 "
             f"{settings.voice_max_duration_seconds}s"
         )
+
+    if source_rate != TARGET_SAMPLE_RATE:
+        samples = resample_to_16k(samples, source_rate)
 
     try:
         recognizer = _get_recognizer(language)
@@ -223,7 +233,6 @@ def status() -> VoiceStatus:
     return VoiceStatus(
         ready=present,
         model_present=present,
-        model_dir=str(model_dir()),
         model_file=_MODEL_FILE,
         languages=SENSEVOICE_LANGUAGES,
         sample_rate=TARGET_SAMPLE_RATE,

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 
 from app.auth.models import User
 from app.deps import get_current_user
@@ -26,25 +27,43 @@ _WAV_CONTENT_TYPES = {"audio/wav", "audio/x-wav", "audio/wave", "application/oct
 _LANGUAGE_PATTERN = "^(auto|zh|en|ja|ko|yue)$"
 
 
+async def read_limited_body(request: Request, limit: int) -> bytes:
+    """读取请求体并硬性限制字节数。
+
+    Content-Length 只作快速预检：chunked 请求没有该头，必须边读边累计，
+    超限立即中止，避免任意大 body 全量进内存。
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_bytes = int(declared)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Content-Length 非法") from None
+        if declared_bytes > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"音频超过大小上限 {limit // (1024 * 1024)}MB",
+            )
+
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"音频超过大小上限 {limit // (1024 * 1024)}MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/voice/transcribe", response_model=VoiceTranscriptionOut)
 async def voice_transcribe(
     request: Request,
     language: str = Query(default="auto", pattern=_LANGUAGE_PATTERN),
     current_user: User = Depends(get_current_user),
 ) -> VoiceTranscriptionOut:
-    # Content-Length 预检：超限直接 413，不读入大包体。
-    declared_length = request.headers.get("content-length")
-    if declared_length is not None:
-        try:
-            declared_bytes = int(declared_length)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Content-Length 非法") from None
-        if declared_bytes > voice_service.max_body_bytes():
-            raise HTTPException(
-                status_code=413,
-                detail=f"音频超过大小上限 {voice_service.max_body_bytes() // (1024 * 1024)}MB",
-            )
-
     content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
     if content_type and content_type not in _WAV_CONTENT_TYPES:
         raise HTTPException(
@@ -52,9 +71,11 @@ async def voice_transcribe(
             detail=f"Content-Type 需为 audio/wav，收到 {content_type!r}",
         )
 
-    payload = await request.body()
+    payload = await read_limited_body(request, voice_service.max_body_bytes())
     try:
-        result = voice_service.transcribe(payload, language=language)
+        # 转写含 CPU 密集解码与推理（秒级），必须让出事件循环，
+        # 否则会冻结同进程内全部聊天 SSE 流
+        result = await run_in_threadpool(voice_service.transcribe, payload, language=language)
     except (BodyTooLargeError, AudioTooLongError) as error:
         raise HTTPException(status_code=413, detail=str(error)) from error
     except (WavFormatError, UnsupportedLanguageError) as error:
@@ -76,7 +97,6 @@ def voice_status(current_user: User = Depends(get_current_user)) -> VoiceStatusO
     return VoiceStatusOut(
         ready=state.ready,
         model_present=state.model_present,
-        model_dir=state.model_dir,
         model_file=state.model_file,
         languages=list(state.languages),
         sample_rate=state.sample_rate,
