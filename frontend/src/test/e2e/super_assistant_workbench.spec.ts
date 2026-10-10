@@ -1090,6 +1090,15 @@ test('消息通知：接入密钥——签发明文仅一次展示、列表与�
   await page.locator('[data-notifications-keys-toggle]').click()
   await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
 
+  // 布局契约（管理态）：消息列表整体卸载让位全宽面板，「返回消息」可恢复浏览态
+  await expect(page.locator('[data-notifications-list]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-back]')).toBeVisible()
+  await page.locator('[data-notifications-back]').click()
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
+  await expect(page.locator('[data-notifications-keys-panel]')).toHaveCount(0)
+  await page.locator('[data-notifications-keys-toggle]').click()
+  await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
+
   // 既有密钥列表可见（不携带明文）
   await expect(page.locator('[data-notifications-key-item="nk-1"]')).toBeVisible()
   await expect(page.locator('[data-notifications-key-item="nk-1"]')).toContainText('billing')
@@ -1115,6 +1124,14 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-channels-toggle]').click()
+  await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
+  // 布局契约（管理态）：列表卸载、可返回浏览态
+  await expect(page.locator('[data-notifications-list]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-back]')).toBeVisible()
+  await page.locator('[data-notifications-back]').click()
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
+  await expect(page.locator('[data-notifications-channels-panel]')).toHaveCount(0)
   await page.locator('[data-notifications-channels-toggle]').click()
   await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
 
@@ -1146,6 +1163,39 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect(confirm).toBeVisible()
   await confirm.getByRole('button', { name: '删除' }).click()
   await expect.poll(() => mocks.notifChannelDeletes.length).toBe(1)
+})
+
+test('消息通知（窄屏390px）：列表⇄详情单栏切换与管理态全宽', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  // 窄屏下工作台侧栏是抽屉态：先打开导航抽屉，再进入消息通知
+  await page.getByRole('button', { name: '打开工作台导航' }).click()
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+
+  // 列表态：列表可见、详情隐藏；无横向溢出破坏（工具栏可横滚）
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail]')).toBeHidden()
+
+  // 选中消息 → 单栏切到详情，统一返回条可回列表
+  await page.locator('[data-notifications-item="n-1"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toBeVisible()
+  await expect(page.locator('[data-notifications-list]')).toBeHidden()
+  await expect(page.locator('[data-notifications-back-detail]')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('数据任务失败报告')
+  await page.locator('[data-notifications-back-detail]').click()
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail]')).toBeHidden()
+
+  // 管理态：列表卸载、全宽面板、返回消息回浏览态
+  await page.locator('[data-notifications-keys-toggle]').click()
+  await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
+  await expect(page.locator('[data-notifications-list]')).toHaveCount(0)
+  await page.locator('[data-notifications-back]').click()
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
 })
 
 test('会话选中回写地址栏：切会话 URL 跟随，深链直达指定会话', async ({ page }) => {

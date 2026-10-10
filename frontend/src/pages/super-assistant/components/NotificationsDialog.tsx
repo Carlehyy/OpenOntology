@@ -3,7 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Archive, ArchiveRestore, Bell, Copy, FileText, KeyRound, Loader2, MailOpen,
+  Archive, ArchiveRestore, ArrowLeft, Bell, Copy, FileText, KeyRound, Loader2, MailOpen,
   Paperclip, Radio, Send, Star, Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -30,11 +30,26 @@ import { errorText } from './assistantPanelUtils'
 import NotificationMedia from './NotificationMedia'
 import { formatFileSize, priorityStyle, sourceTypeLabel } from './notificationsFormat'
 
+/**
+ * 布局采用「浏览态 / 管理态」双模式：
+ * - 浏览态：全宽工具栏（tab 筛选 + 全局动作）+ 左列表(22rem)/右详情两栏；
+ *   窄屏单栏切换（列表 ⇄ 详情），由选中态驱动。
+ * - 管理态（发送消息 / 接入密钥 / 转发渠道）：主体整体切换为全宽面板，
+ *   面板顶部带「返回消息」——管理表单与列表不再挤占同一帧。
+ */
+type DialogMode = 'browse' | 'compose' | 'keys' | 'channels'
+
+const MODE_TITLES: Record<Exclude<DialogMode, 'browse'>, string> = {
+  compose: '发送消息',
+  keys: '接入密钥',
+  channels: '转发渠道',
+}
+
 /** 通知正文沿用会话排版映射，仅覆盖 img：内嵌媒体走鉴权拉取与音视频原生控件 */
 const notificationMarkdownComponents = {
   ...assistantMarkdownComponents,
   img: ({ src, alt }: { src?: string; alt?: string }) => (
-    <NotificationMedia src={src} alt={alt} />
+    <NotificationMedia src={ src } alt={ alt } />
   ),
 }
 
@@ -51,6 +66,13 @@ function NotificationMarkdown({ content }: { content: string }) {
 const inputClass = 'w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
 
 const iconButtonClass = 'flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60'
+
+/** 工具栏动作按钮：浏览态中性、激活管理态高亮；窄屏只留图标 */
+const modeButtonClass = (active: boolean) => `flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+  active
+    ? 'bg-brand-soft font-medium text-brand-ink'
+    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
+}`
 
 /** 附件鉴权下载：原生标签带不了 Bearer，先取 blob 再触发浏览器另存 */
 async function downloadAttachment(messageId: string, attachment: NotificationAttachment): Promise<void> {
@@ -79,16 +101,14 @@ export default function NotificationsDialog({
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
+  const [mode, setMode] = useState<DialogMode>('browse')
   const [tab, setTab] = useState<NotificationTab>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<NotificationMessage | null>(null)
-  const [composeOpen, setComposeOpen] = useState(false)
-  const [keysOpen, setKeysOpen] = useState(false)
   const [keyName, setKeyName] = useState('')
   const [keyScope, setKeyScope] = useState('')
   const [mintedKey, setMintedKey] = useState<NotificationIngestKey | null>(null)
   const [revokingKey, setRevokingKey] = useState<NotificationIngestKey | null>(null)
-  const [channelsOpen, setChannelsOpen] = useState(false)
   const [channelName, setChannelName] = useState('')
   const [channelUrl, setChannelUrl] = useState('')
   const [channelNote, setChannelNote] = useState('')
@@ -129,21 +149,20 @@ export default function NotificationsDialog({
     queryFn: () => notificationsApi.get(selectedId as string),
   })
 
-  // 详情接口在服务端把消息标为已读：同步刷新列表与徽章（不刷详情自身，避免循环）
-  // 弹窗关闭即清除密钥明文与面板临时态（“仅此一次”承诺不因重开而失效）
+  // 弹窗关闭即回到浏览态并清除密钥明文与表单临时态（“仅此一次”承诺不因重开而失效）
   useEffect(() => {
     if (!open) {
+      setMode('browse')
       setMintedKey(null)
-      setKeysOpen(false)
       setKeyName('')
       setKeyScope('')
-      setChannelsOpen(false)
       setChannelName('')
       setChannelUrl('')
       setChannelNote('')
     }
   }, [open])
 
+  // 详情接口在服务端把消息标为已读：同步刷新列表与徽章（不刷详情自身，避免循环）
   const syncedReadId = useRef<string | null>(null)
   useEffect(() => {
     const id = detail.data?.id
@@ -176,7 +195,7 @@ export default function NotificationsDialog({
     mutationFn: notificationsApi.create,
     onSuccess: data => {
       toast.success('消息已发送')
-      setComposeOpen(false)
+      setMode('browse')
       setComposeTitle('')
       setComposeBody('')
       setComposePriority('normal')
@@ -190,7 +209,7 @@ export default function NotificationsDialog({
   const channels = useQuery({
     queryKey: ['notifications', 'channels'],
     queryFn: notificationsApi.channels.list,
-    enabled: open && channelsOpen,
+    enabled: open && mode === 'channels',
   })
 
   const createChannelMutation = useMutation({
@@ -238,7 +257,7 @@ export default function NotificationsDialog({
   const ingestKeys = useQuery({
     queryKey: ['notifications', 'ingest-keys'],
     queryFn: notificationsApi.ingestKeys.list,
-    enabled: open && keysOpen,
+    enabled: open && mode === 'keys',
   })
 
   const mintKeyMutation = useMutation({
@@ -317,158 +336,321 @@ export default function NotificationsDialog({
         size="wide"
         icon={<Bell size={18} className="text-white" />}
         onClose={onClose}
-        contentClassName="h-[min(82dvh,44rem)]"
+        contentClassName="h-[min(85dvh,46rem)]"
       >
-        <div className="flex min-h-0 flex-1">
-          {/* 左栏：tab 筛选 + 消息列表 */}
-          <div className="flex w-72 shrink-0 flex-col border-r border-[var(--color-border)]" data-notifications-list>
-            <div className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--color-border)] p-2">
-              {NOTIFICATION_TABS.map(({ key, label }) => {
-                const count = tabCount(key)
-                const active = tab === key
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => { setTab(key); setSelectedId(null) }}
-                    aria-pressed={active}
-                    data-notifications-tab={key}
-                    className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                      active
-                        ? 'bg-brand-soft font-medium text-brand-ink'
-                        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
-                    }`}
-                  >
-                    {label}
-                    {count !== null && count > 0 && (
-                      <span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                        {count > 99 ? '99+' : count}
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-            <div className="flex shrink-0 items-center justify-between gap-1 px-2 py-1.5">
+        {/* 全宽工具栏：tab 筛选（左）+ 全局动作（右）。窄屏横向滚动、动作只留图标 */}
+        <div className="scrollbar-none flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--color-border)] px-2 py-1.5">
+          {NOTIFICATION_TABS.map(({ key, label }) => {
+            const count = tabCount(key)
+            const active = mode === 'browse' && tab === key
+            return (
               <button
+                key={key}
                 type="button"
-                onClick={() => readAllMutation.mutate()}
-                disabled={unreadCount === 0 || readAllMutation.isPending}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                data-notifications-read-all
+                onClick={() => { setTab(key); setSelectedId(null); setMode('browse') }}
+                aria-pressed={active}
+                data-notifications-tab={key}
+                className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  active
+                    ? 'bg-brand-soft font-medium text-brand-ink'
+                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                }`}
               >
-                <MailOpen size={13} /> 全部已读
+                {label}
+                {count !== null && count > 0 && (
+                  <span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                    {count > 99 ? '99+' : count}
+                  </span>
+                )}
               </button>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => { setComposeOpen(false); setKeysOpen(false); setChannelsOpen(value => !value) }}
-                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  data-notifications-channels-toggle
-                >
-                  <Radio size={13} /> 转发渠道
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setComposeOpen(false); setChannelsOpen(false); setKeysOpen(value => !value) }}
-                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  data-notifications-keys-toggle
-                >
-                  <KeyRound size={13} /> 接入密钥
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setKeysOpen(false); setChannelsOpen(false); setComposeOpen(value => !value) }}
-                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  data-notifications-compose-toggle
-                >
-                  <Send size={13} /> 发送消息
-                </button>
-              </div>
-            </div>
-            <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-2">
-              {list.isLoading && (
-                <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--color-text-tertiary)]">
-                  <Loader2 size={14} className="animate-spin" /> 加载中…
-                </div>
-              )}
-              {list.isError && (
-                <div role="alert" className="flex flex-col items-center gap-2 px-3 py-8 text-center">
-                  <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">消息列表加载失败：{errorText(list.error)}</p>
-                  <button
-                    type="button"
-                    onClick={() => void list.refetch()}
-                    className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    重试
-                  </button>
-                </div>
-              )}
-              {!list.isLoading && !list.isError && items.length === 0 && (
-                <p className="px-2 py-8 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  {tab === 'archived' ? '没有已归档的消息。' : '没有消息。外部系统可通过投递接口把消息送到这里。'}
-                </p>
-              )}
-              <div className="space-y-1">
-                {items.map(item => {
-                  const active = item.id === selectedId
-                  const priority = priorityStyle(item.priority)
-                  return (
+            )
+          })}
+          <div className="ml-auto flex shrink-0 items-center gap-1 pl-2">
+            <button
+              type="button"
+              onClick={() => readAllMutation.mutate()}
+              disabled={unreadCount === 0 || readAllMutation.isPending}
+              aria-label="全部已读"
+              className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              data-notifications-read-all
+            >
+              <MailOpen size={13} /> <span className="hidden sm:inline">全部已读</span>
+            </button>
+            <span className="mx-0.5 h-4 w-px shrink-0 bg-[var(--color-border)]" aria-hidden />
+            <button
+              type="button"
+              onClick={() => setMode(current => (current === 'channels' ? 'browse' : 'channels'))}
+              aria-pressed={mode === 'channels'}
+              aria-label="转发渠道"
+              title="转发渠道"
+              className={modeButtonClass(mode === 'channels')}
+              data-notifications-channels-toggle
+            >
+              <Radio size={13} /> <span className="hidden sm:inline">转发渠道</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode(current => (current === 'keys' ? 'browse' : 'keys'))}
+              aria-pressed={mode === 'keys'}
+              aria-label="接入密钥"
+              title="接入密钥"
+              className={modeButtonClass(mode === 'keys')}
+              data-notifications-keys-toggle
+            >
+              <KeyRound size={13} /> <span className="hidden sm:inline">接入密钥</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode(current => (current === 'compose' ? 'browse' : 'compose'))}
+              aria-pressed={mode === 'compose'}
+              aria-label="发送消息"
+              title="发送消息"
+              className={modeButtonClass(mode === 'compose')}
+              data-notifications-compose-toggle
+            >
+              <Send size={13} /> <span className="hidden sm:inline">发送消息</span>
+            </button>
+          </div>
+        </div>
+
+        {mode === 'browse' ? (
+          /* —— 浏览态：左列表 / 右详情；窄屏由选中态驱动单栏切换 —— */
+          <div className="flex min-h-0 flex-1">
+            <div
+              className={`${selectedId ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-[var(--color-border)] md:w-[22rem]`}
+              data-notifications-list
+            >
+              <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-2">
+                {list.isLoading && (
+                  <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--color-text-tertiary)]">
+                    <Loader2 size={14} className="animate-spin" /> 加载中…
+                  </div>
+                )}
+                {list.isError && (
+                  <div role="alert" className="flex flex-col items-center gap-2 px-3 py-8 text-center">
+                    <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">消息列表加载失败：{errorText(list.error)}</p>
                     <button
-                      key={item.id}
                       type="button"
-                      onClick={() => { setSelectedId(item.id); setComposeOpen(false); setKeysOpen(false); setChannelsOpen(false) }}
-                      data-notifications-item={item.id}
-                      className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                        active
-                          ? 'bg-brand-soft/70'
-                          : 'hover:bg-[var(--color-bg-hover)]'
-                      }`}
+                      onClick={() => void list.refetch()}
+                      className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      <span className="flex items-center gap-1.5">
-                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${priority.dotClass}`} aria-hidden />
-                        <span className={`min-w-0 flex-1 truncate text-sm ${item.isRead ? 'text-[var(--color-text-primary)]' : 'font-medium text-[var(--color-text-primary)]'}`}>
-                          {item.title}
+                      重试
+                    </button>
+                  </div>
+                )}
+                {!list.isLoading && !list.isError && items.length === 0 && (
+                  <p className="px-2 py-8 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
+                    {tab === 'archived' ? '没有已归档的消息。' : '没有消息。外部系统可通过投递接口把消息送到这里。'}
+                  </p>
+                )}
+                <div className="space-y-1">
+                  {items.map(item => {
+                    const active = item.id === selectedId
+                    const priority = priorityStyle(item.priority)
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setSelectedId(item.id)}
+                        data-notifications-item={item.id}
+                        className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                          active
+                            ? 'bg-brand-soft/70'
+                            : 'hover:bg-[var(--color-bg-hover)]'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${priority.dotClass}`} aria-hidden />
+                          <span className={`min-w-0 flex-1 truncate text-sm ${item.isRead ? 'text-[var(--color-text-primary)]' : 'font-medium text-[var(--color-text-primary)]'}`}>
+                            {item.title}
+                          </span>
+                          {item.isStarred && <Star size={12} className="shrink-0 fill-current text-[var(--color-warning)]" aria-label="已标记" />}
+                          {!!item.attachmentCount && item.attachmentCount > 0 && (
+                            <span className="flex shrink-0 items-center gap-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                              <Paperclip size={10} />{item.attachmentCount}
+                            </span>
+                          )}
                         </span>
-                        {item.isStarred && <Star size={12} className="shrink-0 fill-current text-[var(--color-warning)]" aria-label="已标记" />}
-                        {!!item.attachmentCount && item.attachmentCount > 0 && (
-                          <span className="flex shrink-0 items-center gap-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                            <Paperclip size={10} />{item.attachmentCount}
+                        {item.bodyPreview && (
+                          <span className={`mt-0.5 block truncate text-xs ${item.isRead ? 'text-[var(--color-text-tertiary)]' : 'text-[var(--color-text-secondary)]'}`}>
+                            {item.bodyPreview}
                           </span>
                         )}
-                      </span>
-                      {item.bodyPreview && (
-                        <span className={`mt-0.5 block truncate text-xs ${item.isRead ? 'text-[var(--color-text-tertiary)]' : 'text-[var(--color-text-secondary)]'}`}>
-                          {item.bodyPreview}
+                        <span className="mt-1 block truncate text-[10px] text-[var(--color-text-tertiary)]">
+                          {item.sourceSystem} · {formatDateTime(item.createdAt)}
                         </span>
-                      )}
-                      <span className="mt-1 block truncate text-[10px] text-[var(--color-text-tertiary)]">
-                        {item.sourceSystem} · {formatDateTime(item.createdAt)}
-                      </span>
-                    </button>
-                  )
-                })}
+                      </button>
+                    )
+                  })}
+                </div>
+                {list.hasNextPage && (
+                  <button
+                    type="button"
+                    onClick={() => void list.fetchNextPage()}
+                    disabled={list.isFetchingNextPage}
+                    className="mt-1 flex w-full items-center justify-center gap-1 rounded-lg px-2 py-1.5 text-xs text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    data-notifications-load-more
+                  >
+                    {list.isFetchingNextPage && <Loader2 size={12} className="animate-spin" />}
+                    加载更多
+                  </button>
+                )}
               </div>
-              {list.hasNextPage && (
-                <button
-                  type="button"
-                  onClick={() => void list.fetchNextPage()}
-                  disabled={list.isFetchingNextPage}
-                  className="mt-1 flex w-full items-center justify-center gap-1 rounded-lg px-2 py-1.5 text-xs text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  data-notifications-load-more
-                >
-                  {list.isFetchingNextPage && <Loader2 size={12} className="animate-spin" />}
-                  加载更多
-                </button>
+            </div>
+
+            <div
+              className={`${selectedId ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col`}
+              data-notifications-detail
+            >
+              {/* 窄屏单栏：详情视图统一返回条（成功/加载/错误三分支都可回列表） */}
+              {selectedId && (
+                <div className="flex shrink-0 border-b border-[var(--color-border)] md:hidden">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(null)}
+                    aria-label="返回消息列表"
+                    data-notifications-back-detail
+                    className="flex items-center gap-1 px-3 py-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <ArrowLeft size={13} /> 返回消息列表
+                  </button>
+                </div>
+              )}
+              {selectedId ? (
+                detail.isError ? (
+                  <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
+                    <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">消息详情加载失败：{errorText(detail.error)}</p>
+                    <button
+                      type="button"
+                      onClick={() => void detail.refetch()}
+                      className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      重试
+                    </button>
+                  </div>
+                ) : !selected ? (
+                  <div className="flex flex-1 items-center justify-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+                    <Loader2 size={14} className="animate-spin" /> 加载中…
+                  </div>
+                ) : (
+                  <>
+                    <div className="shrink-0 border-b border-[var(--color-border)] p-4">
+                      <div className="flex items-start gap-2">
+                        <h3 className="min-w-0 flex-1 text-sm font-semibold leading-6 text-[var(--color-text-primary)]">
+                          {selected.title}
+                        </h3>
+                        <div className="flex shrink-0 items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => stateMutation.mutate({ id: selected.id, fields: { isStarred: !selected.isStarred } })}
+                            title={selected.isStarred ? '取消标记' : '标记为重要'}
+                            aria-label={selected.isStarred ? '取消标记' : '标记为重要'}
+                            className={`${iconButtonClass} ${selected.isStarred ? 'text-[var(--color-warning)]' : ''}`}
+                            data-notifications-star
+                          >
+                            <Star size={15} className={selected.isStarred ? 'fill-current' : ''} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => stateMutation.mutate({ id: selected.id, fields: { isArchived: !selected.isArchived } })}
+                            title={selected.isArchived ? '恢复消息' : '归档消息'}
+                            aria-label={selected.isArchived ? '恢复消息' : '归档消息'}
+                            className={iconButtonClass}
+                            data-notifications-archive
+                          >
+                            {selected.isArchived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+                          </button>
+                          {selected.isRead && (
+                            <button
+                              type="button"
+                              onClick={() => stateMutation.mutate({ id: selected.id, fields: { isRead: false } })}
+                              title="标为未读"
+                              aria-label="标为未读"
+                              className={iconButtonClass}
+                              data-notifications-unread
+                            >
+                              <MailOpen size={15} className="rotate-180" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setDeleting(selected)}
+                            title="删除消息"
+                            aria-label="删除消息"
+                            className={`${iconButtonClass} hover:text-[var(--color-danger)]`}
+                            data-notifications-delete
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${priorityStyle(selected.priority).chipClass}`}>
+                          {priorityStyle(selected.priority).label}
+                        </span>
+                        <span>{sourceTypeLabel(selected.sourceType)} · {selected.sourceSystem}</span>
+                        <span>{formatDateTime(selected.createdAt)}</span>
+                      </div>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+                      <NotificationMarkdown content={selected.body || ''} />
+                      {!!selected.attachments?.length && (
+                        <div className="mt-5 border-t border-[var(--color-border)] pt-3">
+                          <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-[var(--color-text-secondary)]">
+                            <Paperclip size={12} /> 附件（{selected.attachments.length}）
+                          </p>
+                          <ul className="space-y-1">
+                            {selected.attachments.map(attachment => (
+                              <li key={attachment.id}>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDownload(selected.id, attachment)}
+                                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  data-notifications-attachment={attachment.id}
+                                >
+                                  <FileText size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                                  <span className="min-w-0 flex-1 truncate text-sm text-[var(--color-text-primary)]">
+                                    {attachment.filename}
+                                  </span>
+                                  <span className="shrink-0 text-xs tabular-nums text-[var(--color-text-tertiary)]">
+                                    {formatFileSize(attachment.fileSize)}
+                                  </span>
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )
+              ) : (
+                <div className="flex flex-1 items-center justify-center p-6">
+                  <p className="max-w-56 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
+                    选择左侧消息查看详情；标记与归档只影响你自己的视图。
+                  </p>
+                </div>
               )}
             </div>
           </div>
+        ) : (
+          /* —— 管理态：主体整体切换为全宽面板（表单与列表不再挤占同一帧）—— */
+          <div className="flex min-h-0 flex-1 flex-col" data-notifications-manage>
+            <div className="flex shrink-0 items-center gap-3 border-b border-[var(--color-border)] px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setMode('browse')}
+                aria-label="返回消息列表"
+                data-notifications-back
+                className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ArrowLeft size={13} /> 返回消息
+              </button>
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">{MODE_TITLES[mode]}</h3>
+            </div>
 
-          {/* 右栏：发送消息 或 消息详情 */}
-          <div className="flex min-w-0 flex-1 flex-col" data-notifications-detail>
-            {channelsOpen ? (
-              <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-channels-panel>
-                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">转发渠道</h3>
+            {mode === 'channels' ? (
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-channels-panel>
                 <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
                   消息到达即为所有启用渠道生成转发（apprise 协议：<code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">mailto://</code>、<code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">dingtalk://</code>、<code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">json://</code> 等）；渠道地址即凭据，加密存储仅回显掩码。
                 </p>
@@ -614,9 +796,8 @@ export default function NotificationsDialog({
                   )}
                 </div>
               </div>
-            ) : keysOpen ? (
-              <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-keys-panel>
-                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">接入密钥</h3>
+            ) : mode === 'keys' ? (
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-keys-panel>
                 <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
                   外部系统以 X-API-Key 调用 <code className="rounded bg-[var(--color-bg-hover)] px-1 py-0.5 font-mono text-[11px]">POST /api/v2/notifications/ingest</code> 投递消息；密钥明文仅签发时展示一次。
                 </p>
@@ -743,54 +924,55 @@ export default function NotificationsDialog({
                   )}
                 </div>
               </div>
-            ) : composeOpen ? (
-              <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-4">
-                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">发送消息</h3>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
                 <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
                   正式消息：进入站内列表，并转发到所有已启用的外部渠道。
                 </p>
-                <label className="flex flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                  标题
-                  <input
-                    value={composeTitle}
-                    onChange={event => setComposeTitle(event.target.value)}
-                    maxLength={300}
-                    placeholder="消息标题"
-                    className={inputClass}
-                    data-notifications-compose-title
-                  />
-                </label>
-                <div className="flex flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                  优先级
-                  <Select
-                    value={composePriority}
-                    onValueChange={value => setComposePriority(value as NotificationPriority)}
-                  >
-                    <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="urgent">紧急</SelectItem>
-                      <SelectItem value="high">高优</SelectItem>
-                      <SelectItem value="normal">普通</SelectItem>
-                      <SelectItem value="low">低优</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div className="flex flex-col gap-4 sm:flex-row">
+                  <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                    标题
+                    <input
+                      value={composeTitle}
+                      onChange={event => setComposeTitle(event.target.value)}
+                      maxLength={300}
+                      placeholder="消息标题"
+                      className={inputClass}
+                      data-notifications-compose-title
+                    />
+                  </label>
+                  <div className="flex w-full flex-col gap-1 text-xs text-[var(--color-text-secondary)] sm:w-40">
+                    优先级
+                    <Select
+                      value={composePriority}
+                      onValueChange={value => setComposePriority(value as NotificationPriority)}
+                    >
+                      <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="urgent">紧急</SelectItem>
+                        <SelectItem value="high">高优</SelectItem>
+                        <SelectItem value="normal">普通</SelectItem>
+                        <SelectItem value="low">低优</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
-                <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                <label className="flex min-h-0 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
                   正文（Markdown）
                   <textarea
                     value={composeBody}
                     onChange={event => setComposeBody(event.target.value)}
                     placeholder="支持 Markdown：图片、表格、代码块……"
-                    className={`${inputClass} min-h-40 flex-1 resize-none font-mono text-xs leading-6`}
+                    className={`${inputClass} min-h-48 flex-1 resize-none font-mono text-xs leading-6`}
                     data-notifications-compose-body
                   />
                 </label>
                 <div className="flex justify-end gap-2">
                   <button
                     type="button"
-                    onClick={() => setComposeOpen(false)}
+                    onClick={() => setMode('browse')}
                     className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     取消
@@ -808,123 +990,9 @@ export default function NotificationsDialog({
                   </button>
                 </div>
               </div>
-            ) : selectedId ? (
-              detail.isError ? (
-                <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
-                  <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">消息详情加载失败：{errorText(detail.error)}</p>
-                  <button
-                    type="button"
-                    onClick={() => void detail.refetch()}
-                    className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    重试
-                  </button>
-                </div>
-              ) : !selected ? (
-                <div className="flex flex-1 items-center justify-center gap-2 text-xs text-[var(--color-text-tertiary)]">
-                  <Loader2 size={14} className="animate-spin" /> 加载中…
-                </div>
-              ) : (
-              <>
-                <div className="shrink-0 border-b border-[var(--color-border)] p-4">
-                  <div className="flex items-start gap-2">
-                    <h3 className="min-w-0 flex-1 text-sm font-semibold leading-6 text-[var(--color-text-primary)]">
-                      {selected.title}
-                    </h3>
-                    <div className="flex shrink-0 items-center gap-0.5">
-                      <button
-                        type="button"
-                        onClick={() => stateMutation.mutate({ id: selected.id, fields: { isStarred: !selected.isStarred } })}
-                        title={selected.isStarred ? '取消标记' : '标记为重要'}
-                        aria-label={selected.isStarred ? '取消标记' : '标记为重要'}
-                        className={`${iconButtonClass} ${selected.isStarred ? 'text-[var(--color-warning)]' : ''}`}
-                        data-notifications-star
-                      >
-                        <Star size={15} className={selected.isStarred ? 'fill-current' : ''} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => stateMutation.mutate({ id: selected.id, fields: { isArchived: !selected.isArchived } })}
-                        title={selected.isArchived ? '恢复消息' : '归档消息'}
-                        aria-label={selected.isArchived ? '恢复消息' : '归档消息'}
-                        className={iconButtonClass}
-                        data-notifications-archive
-                      >
-                        {selected.isArchived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
-                      </button>
-                      {selected.isRead && (
-                        <button
-                          type="button"
-                          onClick={() => stateMutation.mutate({ id: selected.id, fields: { isRead: false } })}
-                          title="标为未读"
-                          aria-label="标为未读"
-                          className={iconButtonClass}
-                          data-notifications-unread
-                        >
-                          <MailOpen size={15} className="rotate-180" />
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setDeleting(selected)}
-                        title="删除消息"
-                        aria-label="删除消息"
-                        className={`${iconButtonClass} hover:text-[var(--color-danger)]`}
-                        data-notifications-delete
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
-                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${priorityStyle(selected.priority).chipClass}`}>
-                      {priorityStyle(selected.priority).label}
-                    </span>
-                    <span>{sourceTypeLabel(selected.sourceType)} · {selected.sourceSystem}</span>
-                    <span>{formatDateTime(selected.createdAt)}</span>
-                  </div>
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                  <NotificationMarkdown content={selected.body || ''} />
-                  {!!selected.attachments?.length && (
-                    <div className="mt-5 border-t border-[var(--color-border)] pt-3">
-                      <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-[var(--color-text-secondary)]">
-                        <Paperclip size={12} /> 附件（{selected.attachments.length}）
-                      </p>
-                      <ul className="space-y-1">
-                        {selected.attachments.map(attachment => (
-                          <li key={attachment.id}>
-                            <button
-                              type="button"
-                              onClick={() => void handleDownload(selected.id, attachment)}
-                              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              data-notifications-attachment={attachment.id}
-                            >
-                              <FileText size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
-                              <span className="min-w-0 flex-1 truncate text-sm text-[var(--color-text-primary)]">
-                                {attachment.filename}
-                              </span>
-                              <span className="shrink-0 text-xs tabular-nums text-[var(--color-text-tertiary)]">
-                                {formatFileSize(attachment.fileSize)}
-                              </span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              </>
-              )
-            ) : (
-              <div className="flex flex-1 items-center justify-center p-6">
-                <p className="max-w-56 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  选择左侧消息查看详情；标记与归档只影响你自己的视图。
-                </p>
-              </div>
             )}
           </div>
-        </div>
+        )}
       </DialogShell>
 
       <ConfirmDialog
