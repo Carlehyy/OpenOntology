@@ -49,7 +49,8 @@ pushable.push({
 // 插话：宿主写 .steering/<hash>.json → 移入 .steering/consumed/ 后注入
 function drainSteering() {
   for (const file of readdirSync(`${WS}/.steering`)) {
-    if (!file.endsWith(".json")) continue;
+    // 跳过已消费（consumed- 前缀）：watch 多次触发不得重复注入
+    if (!file.endsWith(".json") || file.startsWith("consumed-")) continue;
     const source = `${WS}/.steering/${file}`;
     const consumed = `${WS}/.steering/consumed-${file}`;
     try { renameSync(source, consumed); } catch { continue; }
@@ -107,6 +108,8 @@ try {
     } else if (message.type === "result") {
       isError = Boolean(message.is_error);
       process.stdout.write(`[runner] result subtype=${message.subtype} turns=${message.num_turns}\n`);
+      // 开放输入流下 SDK 在 result 后仍等待更多输入；result 即完成信号
+      break;
     }
   }
 } catch (error) {

@@ -57,11 +57,12 @@ def _settings():
 
 
 def workspace_root() -> Path:
-    return Path(_settings().uploads_dir) / "task-instances"
+    return (Path(_settings().uploads_dir) / "task-instances").resolve()
 
 
 def workspace_of(instance_id: str, node_run_id: str) -> Path:
-    return workspace_root() / instance_id / node_run_id
+    # docker bind mount 要求绝对路径；uploads_dir 可能是相对配置
+    return (workspace_root() / instance_id / node_run_id).resolve()
 
 
 def _docker(args: list[str], *, timeout: float = 60.0) -> subprocess.CompletedProcess:
