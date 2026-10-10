@@ -211,6 +211,40 @@ backend 和 frontend，且不得在旧 API 仍可访问数据库时
 脚本自动恢复不可代替备份与恢复演练。对删表迁移，Alembic downgrade 只恢复
 空 schema，不恢复已删行或物理文件。
 
+## 任务实例 worker（task_worker）部署
+
+任务实例（`backend/app/task_instances/`，menu key `task_instances`）的 agent
+节点由 `task_worker` 服务以 Docker 容器执行（Claude Agent SDK + 只读 rootfs +
+bind-mount 工作区 + 模型凭据容器环境注入，详见域内 `container_runtime.py` 头注释）。
+
+- **服务形态**：与 `pipeline_executor` 同镜像、同一 nats_executor 入口；
+  差异仅在三处环境变量与挂载（见 `docker-compose.prod.yml` 的 `task_worker`）：
+  - `TASK_INSTANCES_EXECUTOR=docker`（容器执行模式；本地/测试默认 `fake`
+    确定性假执行器）；
+  - `/var/run/docker.sock` 挂载（唯一需要 Docker 权限的进程）；
+  - `pipeline_executor` 侧设 `TASK_INSTANCES_CONTROL_EXCLUDE=1` 让出
+    `task_instances.control` 消费归属，避免同一 durable 在无 sock 进程间
+    负载均衡。
+- **镜像构建**（部署机或 CI 预构建，产物 `openontology-task-agent:local`）：
+
+  ```bash
+  docker build -t openontology-task-agent:local docker/task-agent
+  ```
+
+  未构建该镜像时 task_worker 仍可启动，但 agent 节点派发将以
+  `docker run 失败` 收口为节点失败（fail-closed，不静默降级）。
+- **本地栈**：`docker compose -f docker-compose.local.yml --profile task-agent up`
+  启用（`pipeline_executor` 需同时置 `TASK_INSTANCES_CONTROL_EXCLUDE=1`）；
+  不启用 profile 时本地以假执行器承接，无需 Docker。
+- **模型要求**：agent 节点仅认 Anthropic 协议的模型配置（provider=anthropic
+  或 api_base 含 anthropic 兼容端点）；密钥只经容器环境注入，不落库、不进
+  事件流。
+- **隔离边界**：执行容器 `--read-only` + 非 root + `/workspace` 唯一可写根；
+  egress 默认 bridge 网络（`TASK_AGENT_NETWORK` 可覆盖）。容器级网络隔离弱于
+  完整方案，生产启用前应在隔离 staging 按 AGENTS.md §5 完成验收：
+  激活 → 容器执行 → 契约校验 → 审批 → 收货全链路 + 插话实测，证据入
+  `.artifacts/`。
+
 ## 部署前检查
 
 超级助手用户进程插件的生产验收需要独立 Linux staging，不能用 macOS Docker

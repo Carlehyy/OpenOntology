@@ -16,6 +16,7 @@ import {
   Globe,
   History,
   LayoutDashboard,
+  ListChecks,
   Network,
   Orbit,
   PlugZap,
@@ -87,6 +88,9 @@ export const PLATFORM_NAV_ITEMS: PlatformNavItem[] = [
       { key: 'world_model.services', to: '/world-model/services', icon: Rocket, label: '推演服务', description: '推演服务注册表、状态管理与试调用' },
       { key: 'world_model.calls', to: '/world-model/calls', icon: History, label: '调用记录', description: '推演服务调用审计与回测依据' },
     ],
+  },
+  {
+    key: 'task_instances', to: '/task-instances', icon: ListChecks, label: '任务实例', description: 'DAG 流程模板与自动化任务轨道（契约验收·人工介入·实时进度）',
   },
   {
     key: 'data', to: '/data', icon: Database, label: '数据集成', description: '数据接入、加工与治理', subItems: [

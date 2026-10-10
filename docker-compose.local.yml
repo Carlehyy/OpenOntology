@@ -160,6 +160,9 @@ services:
       PYTHON_KERNEL_GATEWAY_AUTH_TOKEN: ${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}
       NATS_URL: nats://nats:4222
       SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
+      # 启用 task-agent profile（task_worker 独占消费任务实例控制面）时置 1，
+      # 避免同一 durable 在无 docker.sock 的本进程间负载均衡。
+      TASK_INSTANCES_CONTROL_EXCLUDE: ${TASK_INSTANCES_CONTROL_EXCLUDE:-0}
     depends_on:
       db:
         condition: service_healthy
@@ -176,6 +179,35 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # 任务实例 agent 执行体（opt-in：--profile task-agent 启用）。
+  # 挂载宿主 docker.sock，为每个 agent 节点起 openontology-task-agent 容器；
+  # 镜像需先构建：docker build -t openontology-task-agent:local docker/task-agent
+  task_worker:
+    profiles: ["task-agent"]
+    build: ./backend
+    env_file: .env
+    environment:
+      NATS_URL: nats://nats:4222
+      TASK_INSTANCES_EXECUTOR: docker
+      # 控制面独占开关在本服务必须显式归零：共享 .env 的 EXCLUDE 只应
+      # 作用于让出方（pipeline_executor），不能把消费者自己也排除
+      TASK_INSTANCES_CONTROL_EXCLUDE: "0"
+      TASK_AGENT_IMAGE: ${TASK_AGENT_IMAGE:-openontology-task-agent:local}
+      TASK_AGENT_NETWORK: ${TASK_AGENT_NETWORK:-bridge}
+    depends_on:
+      db:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./backend:/app
+      - ./uploads:/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: python -m app.data_channel.pipeline_tasks.nats_executor
+    restart: unless-stopped
 
   frontend:
     build: ./frontend

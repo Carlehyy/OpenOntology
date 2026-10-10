@@ -81,6 +81,7 @@ export default defineConfig({
     '**/super_assistant_agent_mode.spec.ts',
     '**/super_assistant_browser_collaboration.spec.ts',
     '**/super_assistant_evolution.spec.ts',
+    '**/task_instances.spec.ts',
     '**/super_assistant_workbench.spec.ts',
     '**/theme_toggle.spec.ts',
     '**/tickets.spec.ts',

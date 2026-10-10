@@ -95,6 +95,13 @@
   /* ── 代码块面（深色代码/命令面板，明暗两态近同的近黑底） ── */
   --color-code-bg: #0d1420;
   --color-code-fg: #dbe4f0;
+  /* 代码/YAML 语法高亮（CodeMirror 编辑器；与既有编辑器 GitHub light 观感一致） */
+  --code-syntax-keyword: #cf222e;
+  --code-syntax-string: #0a3069;
+  --code-syntax-comment: #6e7781;
+  --code-syntax-number: #0550ae;
+  --code-syntax-property: #116329;
+  --code-syntax-operator: #cf222e;
 
   /* ── 代码语法高亮（CodeMirror GitHub light 观感；明暗同值，成对维护） ── */
   --color-syntax-keyword: #cf222e;
@@ -247,6 +254,13 @@
   /* ── 代码块面（深色档） ── */
   --color-code-bg: #0a0f18;
   --color-code-fg: #c9d4e3;
+  /* 代码/YAML 语法高亮（CodeMirror 编辑器；与既有编辑器 GitHub light 观感一致） */
+  --code-syntax-keyword: #cf222e;
+  --code-syntax-string: #0a3069;
+  --code-syntax-comment: #6e7781;
+  --code-syntax-number: #0550ae;
+  --code-syntax-property: #116329;
+  --code-syntax-operator: #cf222e;
 
   /* ── 代码语法高亮（深色档同值，成对维护） ── */
   --color-syntax-keyword: #cf222e;

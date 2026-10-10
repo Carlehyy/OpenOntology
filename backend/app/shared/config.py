@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     first_admin_user: str = "admin"
     first_admin_password: str = "admin123"
     uploads_dir: str = "./uploads"
+    # 任务实例 agent 执行容器（task_worker 服务；设计方案 §6）
+    task_agent_image: str = "openontology-task-agent:local"
+    task_agent_network: str = "bridge"
     access_token_expire_minutes: int = 1440
 
     # Formal-ontology actions can call an external webhook.  Keep the request

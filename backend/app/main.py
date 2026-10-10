@@ -454,6 +454,16 @@ app.include_router(
     dependencies=world_model_guard,
 )
 
+# 任务实例 — 独立运行时功能域：声明式 DAG 模板 + 契约验收 + 双形态人工介入
+task_instances_guard = menu_guard("task_instances")
+from app.task_instances import router as task_instances_router
+app.include_router(
+    task_instances_router.router,
+    prefix="/api/v2/task-instances",
+    tags=["task-instances"],
+    dependencies=task_instances_guard,
+)
+
 # 三维场景 — 白模场景管理与建模：卡片列表 / 详情三标签 / 运行日志（场景助手属阶段二）
 scenes_guard = menu_guard("scenes")
 from app.scenes import router as scenes_router
