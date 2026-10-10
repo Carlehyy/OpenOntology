@@ -62,6 +62,14 @@ def _dispatch_node(node_run_id: str) -> None:
         logger.exception("节点派发失败（等待对账重投）: %s", node_run_id)
 
 
+def _drop_steering_direct(node_run_id: str, message_id: str,
+                          content: str) -> None:
+    """steering 直写 seam（测试可 patch；生产走 container_runtime）。"""
+    from app.task_instances.container_runtime import drop_steering
+
+    drop_steering(node_run_id, message_id, content)
+
+
 def _dispatch_steering(node_run_id: str, message_id: str,
                        content: str = "") -> None:
     try:
@@ -482,7 +490,16 @@ def steering_api(db: Session, instance_id: str, body: schemas.SteeringSubmit,
         idempotency_key=idempotency_key)
     db.add(message)
     db.commit()
-    _dispatch_steering(run.id, message.id, body.content)
+    # 插话时效性：同步直写节点工作区 .steering/（backend 与 task_worker
+    # 共享 uploads 卷；纯文件+事件，不依赖 docker.sock）。栈级 E2E 暴露：
+    # 走 NATS steer 会排在长 dispatch 之后（executor 并发被占满），
+    # 插话到达时节点可能已结束。NATS 通道保留给分布式部署，默认不再发。
+    try:
+        _drop_steering_direct(run.id, message.id, body.content)
+    except Exception:  # noqa: BLE001 — 插话旁路，失败靠 NATS/人工重试
+        logger.exception("插话直写失败: %s", run.id)
+        _dispatch_steering(run.id, message.id, body.content)
+    db.expire(message)
     return {"id": message.id, "status": message.status,
             "node_run_id": run.id, "instance_id": instance.id}
 
@@ -538,8 +555,11 @@ def _write_artifact_object(key: str, content: bytes, mime_type: str) -> str:
     即整体 400（产物未落盘不得交活——防容器销毁丢证据，设计 §6.2）。"""
     from app.shared.storage import get_storage_service
 
+    # put_bytes 签名为 (bucket, key, data, content_type)：任务实例产物
+    # 统一落 intermediate 桶的 task-instances/ 前缀（复用既有桶，不新增）
     return get_storage_service().put_bytes(
-        f"task-instances/{key}", content, content_type=mime_type)
+        "intermediate", f"task-instances/{key}", content,
+        content_type=mime_type)
 
 
 def _notify_waiting_parties(db: Session, instance: TaskInstance) -> None:

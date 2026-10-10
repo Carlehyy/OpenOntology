@@ -312,8 +312,10 @@ services:
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
-      # 容器执行体模式 + 执行镜像/网络（egress 默认 bridge，见设计 §6.5）
+      # 容器执行体模式 + 执行镜像/网络（egress 默认 bridge，见设计 §6.5）；
+      # EXCLUDE 显式归零：共享 .env 的排除只作用于让出方 pipeline_executor
       TASK_INSTANCES_EXECUTOR: docker
+      TASK_INSTANCES_CONTROL_EXCLUDE: "0"
       TASK_AGENT_IMAGE: ${TASK_AGENT_IMAGE:-openontology-task-agent:local}
       TASK_AGENT_NETWORK: ${TASK_AGENT_NETWORK:-bridge}
     depends_on:

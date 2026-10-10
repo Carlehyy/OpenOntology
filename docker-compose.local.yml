@@ -190,6 +190,9 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       TASK_INSTANCES_EXECUTOR: docker
+      # 控制面独占开关在本服务必须显式归零：共享 .env 的 EXCLUDE 只应
+      # 作用于让出方（pipeline_executor），不能把消费者自己也排除
+      TASK_INSTANCES_CONTROL_EXCLUDE: "0"
       TASK_AGENT_IMAGE: ${TASK_AGENT_IMAGE:-openontology-task-agent:local}
       TASK_AGENT_NETWORK: ${TASK_AGENT_NETWORK:-bridge}
     depends_on:
