@@ -59,17 +59,29 @@ def synthesize_output(instance: TaskInstance, spec: dict, node_id: str, *,
 
 
 async def run_control_message(payload: dict) -> None:
-    """NATS 消费入口：M1 期由假执行器承接 dispatch；steer 即时确认。
+    """NATS 消费入口（task_worker 服务）。
 
-    业务异常在 handler 内消化（外抛会触发 nak 重投放大），与
-    reflection_tasks 的纪律一致。
+    执行模式由 TASK_INSTANCES_EXECUTOR 决定：docker（生产 task_worker，
+    容器执行体）/ fake（本地开发默认与测试，确定性假执行器）。业务异常在
+    handler 内消化（外抛会触发 nak 重投放大），与 reflection_tasks 同纪律。
     """
+    import asyncio
+    import os
+
     try:
         node_run_id = payload.get("node_run_id")
         if not node_run_id:
             logger.warning("task_instances 控制消息缺少 node_run_id: %s", payload)
             return
+        mode = os.environ.get("TASK_INSTANCES_EXECUTOR", "fake")
         if payload.get("kind") == "steer":
+            if mode == "docker":
+                from app.task_instances.container_runtime import drop_steering
+
+                await asyncio.to_thread(
+                    drop_steering, node_run_id,
+                    payload.get("message_id"), str(payload.get("content") or ""))
+                return
             db: Session = SessionLocal()
             try:
                 _mark_steering_delivered(db, node_run_id,
@@ -78,6 +90,17 @@ async def run_control_message(payload: dict) -> None:
                 db.close()
             return
         if payload.get("kind") == "dispatch":
+            if mode == "docker":
+                from app.task_instances.container_runtime import (
+                    execute_dispatch_docker,
+                )
+
+                cascaded = await asyncio.to_thread(
+                    execute_dispatch_docker, node_run_id)
+                if cascaded is not None:
+                    for cascade_id in cascaded.dispatches:
+                        _publish_dispatch(cascade_id)
+                return
             db = SessionLocal()
             try:
                 cascaded = execute_dispatch_on(db, node_run_id)
