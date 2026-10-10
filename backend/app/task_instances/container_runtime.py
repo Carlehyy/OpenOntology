@@ -271,6 +271,11 @@ def _execute(db: Session, node_run_id: str):
         db.rollback()
         _fail(db, run, f"容器执行失败: {exc}")
         return None
+    except Exception as exc:  # noqa: BLE001 — 基础设施异常同样收口为节点失败，
+        # 不得留 running 等租约过期（栈级 E2E 暴露：docker CLI 缺失时挂死）
+        db.rollback()
+        _fail(db, run, f"容器执行基础设施异常: {type(exc).__name__}: {exc}")
+        return None
 
 
 def _run_container_and_collect(db: Session, run, instance, task: dict,
