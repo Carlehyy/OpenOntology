@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import time
 import uuid
@@ -63,6 +64,56 @@ def workspace_root() -> Path:
 def workspace_of(instance_id: str, node_run_id: str) -> Path:
     # docker bind mount 要求绝对路径；uploads_dir 可能是相对配置
     return (workspace_root() / instance_id / node_run_id).resolve()
+
+
+_UPLOADS_HOST_ROOT: Path | None = None
+
+
+def _uploads_host_root() -> Path | None:
+    """task_worker 容器视角的 uploads 目录在宿主上的真实路径。
+
+    bind mount 源必须是宿主路径：本进程自己就跑在容器里时
+    （/uploads 是 bind 或具名卷挂载），经 docker inspect 自己的挂载表
+    解析 Source；env TASK_INSTANCES_UPLOADS_HOST 可显式覆盖；开发态
+    （进程直接跑在宿主）返回 None（工作区路径即宿主路径，无需重映射）。
+    """
+    global _UPLOADS_HOST_ROOT
+    if _UPLOADS_HOST_ROOT is not None:
+        return _UPLOADS_HOST_ROOT
+    override = os.environ.get("TASK_INSTANCES_UPLOADS_HOST", "").strip()
+    if override:
+        _UPLOADS_HOST_ROOT = Path(override)
+        return _UPLOADS_HOST_ROOT
+    uploads_view = Path(_settings().uploads_dir).resolve()
+    try:
+        import socket
+
+        own = socket.gethostname()
+        info = _docker(["inspect", "-f",
+                        "{{range .Mounts}}{{.Destination}}={{.Source}}\n{{end}}",
+                        own], timeout=15)
+        if info.returncode == 0:
+            for line in info.stdout.splitlines():
+                pair = line.strip().split("=", 1)
+                if len(pair) == 2 and Path(pair[0]).resolve() == uploads_view:
+                    _UPLOADS_HOST_ROOT = Path(pair[1])
+                    return _UPLOADS_HOST_ROOT
+    except Exception:  # noqa: BLE001 — 解析失败按开发态处理
+        logger.debug("uploads 宿主路径解析失败，按本机路径处理", exc_info=True)
+    _UPLOADS_HOST_ROOT = uploads_view
+    return _UPLOADS_HOST_ROOT
+
+
+def mount_source(workspace: Path) -> Path:
+    """把工作区路径重映射为可作 bind mount 源的宿主路径。"""
+    host_root = _uploads_host_root()
+    uploads_view = Path(_settings().uploads_dir).resolve()
+    try:
+        if host_root != uploads_view and workspace.is_relative_to(uploads_view):
+            return (host_root / workspace.relative_to(uploads_view)).resolve()
+    except (OSError, ValueError):
+        pass
+    return workspace
 
 
 def _docker(args: list[str], *, timeout: float = 60.0) -> subprocess.CompletedProcess:
@@ -240,7 +291,9 @@ def _run_container_and_collect(db: Session, run, instance, task: dict,
         "--network", network, "--read-only",
         "--user", "1000:1000",
         "--tmpfs", "/tmp:rw,nosuid,size=64m",
-        "-v", f"{ws}:/workspace", "-w", "/workspace",
+        # bind mount 源必须是宿主路径：task_worker 自身容器内的
+        # /uploads 视图经 _uploads_host_root 重映射
+        "-v", f"{mount_source(ws)}:/workspace", "-w", "/workspace",
     ]
     for key, value in env.items():
         args += ["-e", f"{key}={value}"]

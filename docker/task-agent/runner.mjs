@@ -68,8 +68,9 @@ function drainSteering() {
   }
 }
 mkdirSync(`${WS}/.steering`, { recursive: true });
+// watch 为主、400ms 轮询兜底：bind mount / docker cp 场景事件可能不触发
 watch(`${WS}/.steering`, () => setTimeout(drainSteering, 50));
-drainSteering();
+const steeringPoll = setInterval(drainSteering, 400);
 
 function extractJson(text) {
   if (!text) return null;
@@ -117,6 +118,7 @@ try {
   process.exit(2);
 }
 
+clearInterval(steeringPoll);
 // 产出落盘：模型未写 output.json 时，从最后的 assistant 文本提取 JSON 兜底
 if (!existsSync(`${WS}/.ti-output/output.json`)) {
   const extracted = extractJson(lastAssistantText);
