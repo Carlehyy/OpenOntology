@@ -118,3 +118,26 @@ def test_0123_channels_and_deliveries(tmp_path, monkeypatch):
     assert "notification_channels" not in tables
     assert "notification_deliveries" not in tables
     engine.dispose()
+
+
+def test_0124_template_columns_and_smtp(tmp_path, monkeypatch):
+    backend = Path(__file__).resolve().parents[2]
+    db_path = tmp_path / "notifications-0124.db"
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    cfg = _alembic_config(backend, db_path)
+
+    command.upgrade(cfg, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    channel_columns = {
+        column["name"] for column in inspect(engine).get_columns("notification_channels")
+    }
+    assert {"template", "params_encrypted"} <= channel_columns
+    assert "notification_smtp_settings" in set(inspect(engine).get_table_names())
+
+    command.downgrade(cfg, "0123_notification_channels")
+    channel_columns = {
+        column["name"] for column in inspect(engine).get_columns("notification_channels")
+    }
+    assert "template" not in channel_columns and "params_encrypted" not in channel_columns
+    assert "notification_smtp_settings" not in set(inspect(engine).get_table_names())
+    engine.dispose()

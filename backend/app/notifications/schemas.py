@@ -46,3 +46,36 @@ class NotificationChannelUpdate(BaseModel):
     appriseUrl: str | None = Field(default=None, max_length=2000)
     note: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
+
+
+class NotificationChannelCreateV2(BaseModel):
+    """模板化新建渠道：选类型填关键字段；custom 时 params.url 为完整 apprise URL。"""
+
+    name: str = Field(min_length=1, max_length=200)
+    template: str = Field(min_length=1, max_length=32)
+    params: dict[str, str] = Field(default_factory=dict)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class NotificationChannelUpdateV2(BaseModel):
+    """渠道更新：未携带字段保持原值；params 携带则整体重建 URL。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    note: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+    params: dict[str, str] | None = None
+
+
+class NotificationSmtpUpdate(BaseModel):
+    """平台发件邮箱设置；password 留空/缺省 = 保持不变。"""
+
+    host: str = Field(min_length=1, max_length=200)
+    port: int = Field(default=465, ge=1, le=65535)
+    username: str = Field(max_length=200)
+    password: str | None = Field(default=None, max_length=500)
+    sender: str = Field(default="", max_length=200)
+    useTls: bool = True
+
+
+class NotificationSmtpTest(BaseModel):
+    to: str = Field(min_length=3, max_length=200)

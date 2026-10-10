@@ -188,6 +188,9 @@ class NotificationChannel(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     apprise_url_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # 模板化（L2）：custom 为存量/高级裸 URL；params 加密存用户填写的字段
+    template: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    params_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_by: Mapped[str | None] = mapped_column(
@@ -230,4 +233,22 @@ class NotificationDelivery(Base):
     last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class NotificationSmtpSettings(Base):
+    """平台发件邮箱设置（单例 id='default'，密码 Fernet 加密）。
+
+    邮件渠道模板的用户只需填收件人；SMTP 凭据由管理员在此配置一次。
+    """
+
+    __tablename__ = "notification_smtp_settings"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default="default")
+    host: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    port: Mapped[int] = mapped_column(Integer, nullable=False, default=465)
+    username: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    password_encrypted: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sender: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    use_tls: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)

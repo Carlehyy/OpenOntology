@@ -289,3 +289,254 @@ def test_channel(db: Session, channel: NotificationChannel) -> dict[str, Any]:
         channel.last_error = error
         db.commit()
         return {"ok": False, "message": error}
+
+
+# ── 模板化渠道（L2）+ 平台 SMTP ──────────────────────────────
+
+import json as _json
+
+from app.notifications.channel_templates import (
+    TEMPLATES,
+    mask_field,
+    template_display as _template_display,
+)
+
+
+def list_template_definitions() -> list[dict[str, Any]]:
+    """前端「新建渠道」的类型选择与动态表单定义。"""
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "description": t.description,
+            "fields": [
+                {
+                    "key": f.key,
+                    "label": f.label,
+                    "hint": f.hint,
+                    "required": f.required,
+                    "secret": f.secret,
+                    "placeholder": f.placeholder,
+                }
+                for f in t.fields
+            ],
+        }
+        for t in TEMPLATES.values()
+    ]
+
+
+def _smtp_row(db: Session):
+    from app.notifications.models import NotificationSmtpSettings
+
+    row = db.query(NotificationSmtpSettings).filter(
+        NotificationSmtpSettings.id == "default"
+    ).first()
+    if row is None:
+        row = NotificationSmtpSettings(id="default")
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return row
+
+
+def _smtp_dict(db: Session) -> dict[str, Any]:
+    row = _smtp_row(db)
+    password = ""
+    if row.password_encrypted:
+        try:
+            password = fernet_decrypt(row.password_encrypted)
+        except Exception:  # noqa: BLE001 — 密文损坏按未配置处理
+            password = ""
+    return {
+        "host": row.host or "",
+        "port": int(row.port or 465),
+        "username": row.username or "",
+        "password": password,
+        "sender": row.sender or "",
+        "use_tls": bool(row.use_tls),
+    }
+
+
+def smtp_out(db: Session) -> dict[str, Any]:
+    row = _smtp_row(db)
+    data = _smtp_dict(db)
+    configured = bool(data["host"] and data["username"] and data["password"])
+    return {
+        "host": data["host"],
+        "port": data["port"],
+        "username": data["username"],
+        "sender": data["sender"],
+        "useTls": data["use_tls"],
+        "configured": configured,
+        "hasPassword": bool(data["password"]),
+    }
+
+
+def update_smtp(
+    db: Session,
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str | None,
+    sender: str,
+    use_tls: bool,
+) -> dict[str, Any]:
+    if not (host or "").strip():
+        raise HTTPException(422, "SMTP 主机不能为空")
+    row = _smtp_row(db)
+    row.host = host.strip()[:200]
+    row.port = int(port or 465)
+    row.username = (username or "").strip()[:200]
+    if password is not None and password != "":
+        row.password_encrypted = fernet_encrypt(password)
+    row.sender = (sender or "").strip()[:200]
+    row.use_tls = bool(use_tls)
+    db.commit()
+    return smtp_out(db)
+
+
+def test_smtp(db: Session, to: str) -> dict[str, Any]:
+    """用平台 SMTP 向指定邮箱发测试邮件（复用 apprise mailtos 链路）。"""
+    to = (to or "").strip()
+    if not to or "@" not in to:
+        raise HTTPException(422, "测试收件邮箱无效")
+    data = _smtp_dict(db)
+    if not (data["host"] and data["username"] and data["password"]):
+        raise HTTPException(422, "平台发件邮箱未配置完整（主机/账号/密码）")
+    from app.notifications.channel_templates import _email
+
+    url = _email({"recipients": to}, data)
+    try:
+        _send_via_apprise(url, title="【消息通知】发件邮箱测试", body="这是一封测试邮件，收到即说明平台发件配置可用。")
+        return {"ok": True, "message": f"测试邮件已发送至 {to}"}
+    except Exception as exc:  # noqa: BLE001 — 失败原因要回传给界面
+        return {"ok": False, "message": _safe_error(str(exc))}
+
+
+def _validate_template_params(template_id: str, params: dict[str, Any]) -> dict[str, str]:
+    template = TEMPLATES.get(template_id)
+    if template is None:
+        raise HTTPException(422, f"未知渠道模板：{template_id}")
+    if not isinstance(params, dict):
+        raise HTTPException(422, "params 必须是对象")
+    clean: dict[str, str] = {}
+    for f in template.fields:
+        value = params.get(f.key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            if f.required:
+                raise HTTPException(422, f"{f.label} 不能为空")
+            continue
+        if not isinstance(value, str):
+            raise HTTPException(422, f"{f.label} 必须是字符串")
+        clean[f.key] = value.strip()
+    return clean
+
+
+def build_template_url(db: Session, template_id: str, params: dict[str, str]) -> str:
+    """模板字段 + 平台设置 → apprise URL。"""
+    if template_id == "email":
+        smtp = _smtp_dict(db)
+        if not (smtp["host"] and smtp["username"] and smtp["password"]):
+            raise HTTPException(422, "邮件渠道需要先在「渠道配置 → 平台发件设置」配置 SMTP")
+        from app.notifications.channel_templates import _email
+
+        return _validate_apprise_url(_email(params, smtp))
+    if template_id == "custom":
+        return _validate_apprise_url(params.get("url", ""))
+    template = TEMPLATES[template_id]
+    return _validate_apprise_url(template.build(params))
+
+
+def create_templated_channel(
+    db: Session,
+    *,
+    name: str,
+    note: str | None,
+    template_id: str,
+    params: dict[str, Any],
+    user=None,
+) -> NotificationChannel:
+    clean = _validate_template_params(template_id, params)
+    url = build_template_url(db, template_id, clean)
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(422, "name 不能为空")
+    if len(name) > 200:
+        raise HTTPException(422, "name 过长（上限 200 字符）")
+    if db.query(NotificationChannel).filter(NotificationChannel.name == name).first():
+        raise HTTPException(409, f"同名渠道已存在：{name}")
+    row = NotificationChannel(
+        name=name,
+        apprise_url_encrypted=fernet_encrypt(url),
+        template=template_id,
+        params_encrypted=fernet_encrypt(_json.dumps(clean, ensure_ascii=False)),
+        note=((note or "").strip()[:500] or None),
+        created_by=getattr(user, "id", None),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_channel_params(
+    db: Session, channel: NotificationChannel, *, params: dict[str, Any]
+) -> NotificationChannel:
+    """参数更新为合并语义：提交空/缺省的字段保留原值（敏感字段“留空保持不变”）。"""
+    template_id = channel.template or "custom"
+    template = TEMPLATES[template_id]
+    merged = channel_params(channel)
+    submitted = {
+        key: value
+        for key, value in (params or {}).items()
+        if isinstance(value, str) and value.strip()
+    }
+    merged.update(submitted)
+    clean = _validate_template_params(template_id, merged)
+    channel.apprise_url_encrypted = fernet_encrypt(build_template_url(db, template_id, clean))
+    channel.params_encrypted = fernet_encrypt(_json.dumps(clean, ensure_ascii=False))
+    db.commit()
+    db.refresh(channel)
+    return channel
+
+
+def channel_params(channel: NotificationChannel) -> dict[str, str]:
+    if not channel.params_encrypted:
+        return {}
+    try:
+        data = _json.loads(fernet_decrypt(channel.params_encrypted))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 — 密文损坏按空参数处理（编辑=重填）
+        return {}
+
+
+def templated_channel_out(db: Session, channel: NotificationChannel) -> dict[str, Any]:
+    """模板化渠道序列化：类型名 + 脱敏字段展示 + 编辑用字段表。"""
+    base = channel_out(channel)
+    template = TEMPLATES.get(channel.template or "")
+    if template is None:
+        base.update({"template": "custom", "templateName": TEMPLATES["custom"].name, "display": base.get("urlMasked", ""), "fields": []})
+        return base
+    params = channel_params(channel)
+    base.update(
+        {
+            "template": template.id,
+            "templateName": template.name,
+            "display": _template_display(template.id, params),
+            "fields": [
+                {
+                    "key": f.key,
+                    "label": f.label,
+                    "hint": f.hint,
+                    "required": f.required,
+                    "secret": f.secret,
+                    "placeholder": f.placeholder,
+                    # 编辑预填：非敏感原值；敏感脱敏（留空提交=保持不变由前端控制）
+                    "value": mask_field(params.get(f.key, "")) if f.secret else params.get(f.key, ""),
+                }
+                for f in template.fields
+            ],
+        }
+    )
+    return base
