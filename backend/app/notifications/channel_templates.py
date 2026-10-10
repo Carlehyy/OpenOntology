@@ -54,16 +54,26 @@ def _tgram(params: dict[str, str]) -> str:
 def _webhook(params: dict[str, str]) -> str:
     """用户粘贴完整 http(s) URL → 转换为 apprise json(s):// 语法。"""
     raw = params["url"].strip()
-    parts = urlsplit(raw)
+    if "?" in raw:
+        # apprise 会把 query 当作自身插件参数吞掉，不会出现在 POST 目标上，
+        # token-in-query 型接收端会静默失效——保存期直接拒绝并给出指引
+        raise ValueError("接收地址不支持查询参数（?…）：请把凭证放进路径")
+    try:
+        parts = urlsplit(raw)
+    except ValueError as exc:
+        raise ValueError("接收地址格式无效") from exc
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("接收地址需是完整的 http(s) URL")
     scheme = "jsons" if parts.scheme == "https" else "json"
-    netloc = parts.netloc
-    path = parts.path or "/"
-    query = f"?{parts.query}" if parts.query else ""
-    return f"{scheme}://{netloc}{path}{query}"
+    return f"{scheme}://{parts.netloc}{parts.path or '/'}"
 
 
 def _email(params: dict[str, str], smtp: dict[str, Any]) -> str:
-    """收件人 + 平台 SMTP 设置 → mailtos://（凭据来自 SMTP 配置，用户零感知）。"""
+    """收件人 + 平台 SMTP 设置 → mailtos://（凭据来自 SMTP 配置，用户零感知）。
+
+    TLS 模式按端口/开关显式落位（apprise 默认 STARTTLS，不会按端口推断）：
+    465=SSL（隐式 TLS）、587=STARTTLS、关闭加密用 mailto://（明文 25）。
+    """
     recipients = ",".join(
         addr.strip() for addr in re.split(r"[,;\s]+", params["recipients"]) if addr.strip()
     )
@@ -72,9 +82,17 @@ def _email(params: dict[str, str], smtp: dict[str, Any]) -> str:
     host = smtp["host"]
     port = int(smtp.get("port") or 465)
     sender = quote(str(smtp.get("sender") or smtp["username"] or ""), safe="")
+    use_tls = bool(smtp.get("use_tls", True))
+    if not use_tls:
+        scheme = "mailto"
+        mode_query = ""
+    else:
+        scheme = "mailtos"
+        mode = "SSL" if port == 465 else "STARTTLS"
+        mode_query = f"mode={mode}&"
     return (
-        f"mailtos://{user}:{password}@{host}:{port}/"
-        f"?to={quote(recipients, safe=',@.')}&from={sender}"
+        f"{scheme}://{user}:{password}@{host}:{port}/"
+        f"?{mode_query}to={quote(recipients, safe=',@.')}&from={sender}"
     )
 
 

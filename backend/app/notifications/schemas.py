@@ -79,3 +79,9 @@ class NotificationSmtpUpdate(BaseModel):
 
 class NotificationSmtpTest(BaseModel):
     to: str = Field(min_length=3, max_length=200)
+
+
+class NotificationForwardRequest(BaseModel):
+    """手动转发：单条消息 → 多渠道。"""
+
+    channelIds: list[str] = Field(min_length=1, max_length=50)

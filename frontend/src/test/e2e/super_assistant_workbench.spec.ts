@@ -206,6 +206,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifChannelCreates: string[] = []
   const notifSmtpPuts: string[] = []
   const notifSmtpTests: string[] = []
+  const notifForwards: string[] = []
+  const notifKeyTests: string[] = []
   const notifChannelUpdates: string[] = []
   const notifChannelTests: string[] = []
   const notifChannelDeletes: string[] = []
@@ -568,6 +570,18 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         return new Promise(resolve => setTimeout(() => resolve(fulfill()), options.chatDelayMs))
       }
       return fulfill()
+    }
+    // —— 手动转发 + 入口测试（admin JWT）——
+    const notifForwardMatch = path.match(/^\/api\/v2\/notifications\/([^/]+)\/forward$/)
+    if (notifForwardMatch && request.method() === 'POST') {
+      notifForwards.push(notifForwardMatch[1] + ':' + (request.postData() || ''))
+      const body = JSON.parse(request.postData() || '{}')
+      return json(route, (body.channelIds || []).map((id: string) => ({ channelId: id, ok: true, message: '已转发' })))
+    }
+    const notifKeyTestMatch = path.match(/^\/api\/v2\/notifications\/ingest-keys\/([^/]+)\/test$/)
+    if (notifKeyTestMatch && request.method() === 'POST') {
+      notifKeyTests.push(notifKeyTestMatch[1])
+      return json(route, { ok: true, message: '测试消息已投递（来源 billing），出口即时投递：成功 1 条', messageId: 'n-lt' })
     }
     // —— 渠道模板与 SMTP（admin JWT）——
     if (path === '/api/v2/notifications/channel-templates') {
@@ -975,6 +989,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifChannelCreates,
     notifSmtpPuts,
     notifSmtpTests,
+    notifForwards,
+    notifKeyTests,
     notifChannelUpdates,
     notifChannelTests,
     notifChannelDeletes,
@@ -1096,6 +1112,21 @@ test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标�
   await page.locator('[data-notifications-compose-send]').click()
   await expect.poll(() => mocks.notifCreates.length).toBe(1)
   await expect(page.locator('[data-notifications-detail]')).toContainText('今日巡检')
+
+  // 手动转发：详情操作 → 渠道多选 → 确认
+  await page.locator('[data-notifications-forward]').click()
+  await expect(page.locator('[data-notifications-forward-panel]')).toBeVisible()
+  await page.locator('[data-notifications-forward-channel="ch-1"]').check()
+  await page.locator('[data-notifications-forward-confirm]').click()
+  await expect.poll(() => mocks.notifForwards.length).toBe(1)
+  await expect(page.getByText('已转发到 1 个渠道')).toBeVisible()
+
+  // 在线测试分区：入口模拟投递
+  await page.locator('[data-notifications-nav="test"]').click()
+  await expect(page.locator('[data-notifications-test-key="nk-1"]')).toBeVisible()
+  await page.locator('[data-notifications-key-test]').first().click()
+  await expect.poll(() => mocks.notifKeyTests.length).toBe(1)
+  await expect(page.getByText('出口即时投递：成功 1 条')).toBeVisible()
 })
 
 test('消息通知：游标分页——首页两条，加载更多补齐后续', async ({ page }) => {

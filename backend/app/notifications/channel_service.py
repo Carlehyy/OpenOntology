@@ -217,7 +217,12 @@ def fan_out_deliveries(db: Session, message: NotificationMessage) -> int:
     return created
 
 
-def dispatch_pending_deliveries(db: Session, *, limit: int = DELIVERY_SCAN_LIMIT) -> dict[str, int]:
+def dispatch_pending_deliveries(
+    db: Session,
+    *,
+    limit: int = DELIVERY_SCAN_LIMIT,
+    message_id: str | None = None,
+) -> dict[str, int]:
     """扫描 pending 投递单并同步执行（调用方持有会话；失败重试至上限转 failed）。
 
     单渠道单次一条同步网络调用：apprise 自带请求超时；扫描器 max_instances=1
@@ -237,6 +242,7 @@ def dispatch_pending_deliveries(db: Session, *, limit: int = DELIVERY_SCAN_LIMIT
             NotificationDelivery.status == "pending",
             # 停用渠道即止损：积压单冻结（不外发）；重新启用后按剩余次数恢复重试
             NotificationChannel.enabled.is_(True),
+            *([] if message_id is None else [NotificationDelivery.message_id == message_id]),
         )
         .order_by(NotificationDelivery.created_at.asc())
         .limit(limit)
@@ -433,19 +439,43 @@ def _validate_template_params(template_id: str, params: dict[str, Any]) -> dict[
     return clean
 
 
-def build_template_url(db: Session, template_id: str, params: dict[str, str]) -> str:
-    """模板字段 + 平台设置 → apprise URL。"""
-    if template_id == "email":
-        smtp = _smtp_dict(db)
-        if not (smtp["host"] and smtp["username"] and smtp["password"]):
-            raise HTTPException(422, "邮件渠道需要先在「渠道配置 → 平台发件设置」配置 SMTP")
-        from app.notifications.channel_templates import _email
+def _assert_apprise_parses(url: str, template_name: str) -> str:
+    """保存期离线校验：appprise 无法解析的 URL 当场 422（否则首投才失败，报错泛化）。"""
+    import apprise as _apprise
 
-        return _validate_apprise_url(_email(params, smtp))
-    if template_id == "custom":
-        return _validate_apprise_url(params.get("url", ""))
-    template = TEMPLATES[template_id]
-    return _validate_apprise_url(template.build(params))
+    probe = _apprise.Apprise()
+    if not probe.add(url):
+        probe.clear()
+        raise HTTPException(
+            422,
+            f"{template_name}渠道配置无法解析：请检查填写内容"
+            "（如密钥含特殊字符或地址不完整）",
+        )
+    probe.clear()
+    return url
+
+
+def build_template_url(db: Session, template_id: str, params: dict[str, str]) -> str:
+    """模板字段 + 平台设置 → apprise URL（保存期经 apprise 解析校验）。"""
+    template = TEMPLATES.get(template_id)
+    template_name = template.name if template else template_id
+    try:
+        if template_id == "email":
+            smtp = _smtp_dict(db)
+            if not (smtp["host"] and smtp["username"] and smtp["password"]):
+                raise HTTPException(422, "邮件渠道需要先在「渠道配置 → 平台发件设置」配置 SMTP")
+            from app.notifications.channel_templates import _email
+
+            url = _validate_apprise_url(_email(params, smtp))
+        elif template_id == "custom":
+            url = _validate_apprise_url(params.get("url", ""))
+        else:
+            url = _validate_apprise_url(template.build(params))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _assert_apprise_parses(url, template_name)
 
 
 def create_templated_channel(
@@ -540,3 +570,90 @@ def templated_channel_out(db: Session, channel: NotificationChannel) -> dict[str
         }
     )
     return base
+
+
+# ── 手动转发 + 入口测试（L3）──────────────────────────────────
+
+
+def forward_message(
+    db: Session, message: NotificationMessage, *, channel_ids: list[str]
+) -> list[dict[str, Any]]:
+    """手动转发：单条消息 → 多渠道。已存在的投递单重置为 pending 允许再发，
+    并同步执行一次即时投递（结果即回）。"""
+    if not channel_ids:
+        raise HTTPException(422, "channelIds 不能为空")
+    results: list[dict[str, Any]] = []
+    # 去重（同渠道重复 id 只投一次）；同步串行投递，渠道数少耗时可接受
+    for channel_id in list(dict.fromkeys(channel_ids)):
+        channel = db.query(NotificationChannel).filter(
+            NotificationChannel.id == channel_id
+        ).first()
+        if channel is None:
+            results.append({"channelId": channel_id, "ok": False, "message": "渠道不存在"})
+            continue
+        if not channel.enabled:
+            results.append({"channelId": channel_id, "ok": False, "message": "渠道已停用"})
+            continue
+        delivery = db.query(NotificationDelivery).filter(
+            NotificationDelivery.message_id == message.id,
+            NotificationDelivery.channel_id == channel_id,
+        ).first()
+        if delivery is None:
+            delivery = NotificationDelivery(message_id=message.id, channel_id=channel_id)
+            db.add(delivery)
+        delivery.status = "pending"
+        delivery.attempts = 0
+        delivery.last_error = ""
+        db.flush()
+        # 即时投递一次（成功/失败即回；失败仍会进 30s 扫描器重试至上限）
+        try:
+            _send_via_apprise(
+                channel_url(channel),
+                title=message.title[:500],
+                body=(message.body_md or "")[:BODY_TRUNCATE_CHARS],
+            )
+            delivery.status = "sent"
+            delivery.sent_at = _now()
+            delivery.attempts = 1
+            channel.last_status = "sent"
+            channel.last_error = ""
+            channel.last_sent_at = _now()
+            results.append({"channelId": channel_id, "ok": True, "message": "已转发"})
+        except Exception as exc:  # noqa: BLE001 — 单渠道失败不阻断其余
+            delivery.attempts = 1
+            delivery.last_error = _safe_error(str(exc))
+            channel.last_status = "failed"
+            channel.last_error = delivery.last_error
+            results.append({"channelId": channel_id, "ok": False, "message": delivery.last_error})
+        db.commit()
+    return results
+
+
+def test_ingest_key(db: Session, key) -> dict[str, Any]:
+    """入口测试（真实全链路）：以该密钥真实投递一条「链路测试」消息——
+    走与外部系统完全相同的创建/扇出路径，可在线上识别与删除。"""
+    import uuid as _uuid
+
+    payload = {
+        "eventId": f"link-test:{_uuid.uuid4().hex[:12]}",
+        "title": "【链路测试】入口投递验证",
+        "body": (
+            "这是一条入口链路测试消息（由管理员在「在线测试」发起）。\n\n"
+            "它走了与外部系统完全相同的投递路径：密钥鉴权 → 消息创建 → 渠道扇出。"
+        ),
+        "priority": "low",
+    }
+    from app.notifications.service import ingest_message
+
+    result = ingest_message(db, payload, key)
+    message = result["message"]
+    # 与真实外部调用一致：留下最近使用时间（界面“最近使用”据此展示）
+    key.last_used_at = _now()
+    db.commit()
+    # 仅即时派发该消息的投递单（不扫全库积压，避免误导计数与长阻塞）
+    delivery_stats = dispatch_pending_deliveries(db, message_id=message["id"])
+    return {
+        "ok": True,
+        "message": f"测试消息已投递（来源 {message['sourceSystem']}），出口即时投递：成功 {delivery_stats.get('sent', 0)} 条",
+        "messageId": message["id"],
+    }

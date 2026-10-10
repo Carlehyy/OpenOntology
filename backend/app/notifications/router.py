@@ -21,6 +21,7 @@ from app.deps import get_db, require_admin
 from app.notifications import channel_service, service
 from app.notifications.schemas import (
     NotificationChannelCreateV2,
+    NotificationForwardRequest,
     NotificationChannelUpdateV2,
     NotificationCreate,
     NotificationIngestKeyCreate,
@@ -105,6 +106,24 @@ def create_ingest_key(
 ):
     row, plaintext = service.mint_ingest_key(db, body.name, body.allowedSourceSystem, admin)
     return _ok(service.ingest_key_out(row, plaintext=plaintext))
+
+
+@router.post("/ingest-keys/{key_id}/test")
+def test_ingest_key(
+    key_id: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    row = (
+        db.query(service.NotificationIngestKey)
+        .filter(service.NotificationIngestKey.id == key_id)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(404, "密钥不存在")
+    if not row.enabled:
+        raise HTTPException(422, "密钥已吊销，无法测试")
+    return _ok(channel_service.test_ingest_key(db, row))
 
 
 @router.delete("/ingest-keys/{key_id}")
@@ -223,6 +242,17 @@ def delete_channel(
     row = channel_service.require_channel(db, channel_id)
     channel_service.delete_channel(db, row)
     return _ok({"deleted": channel_id})
+
+
+@router.post("/{message_id}/forward")
+def forward_notification(
+    message_id: str,
+    body: NotificationForwardRequest,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    message = service.require_message(db, message_id)
+    return _ok(channel_service.forward_message(db, message, channel_ids=body.channelIds))
 
 
 @router.post("/channels/{channel_id}/test")

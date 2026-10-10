@@ -3,7 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Archive, ArchiveRestore, ArrowLeft, Bell, Copy, FileText, KeyRound, Loader2, MailOpen,
+  Archive, ArchiveRestore, ArrowLeft, Bell, Copy, FileText, Forward, KeyRound, Loader2, MailOpen,
   Paperclip, Pencil, Plug, Send, Star, Trash2, Zap,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -12,7 +12,6 @@ import {
   NOTIFICATION_TABS,
   notificationsApi,
   type NotificationChannel,
-  type NotificationChannelTemplate,
   type NotificationIngestKey,
   type NotificationAttachment,
   type NotificationMessage,
@@ -130,6 +129,10 @@ export default function NotificationsDialog({
   const [editingChannel, setEditingChannel] = useState<NotificationChannel | null>(null)
   const [deletingChannel, setDeletingChannel] = useState<NotificationChannel | null>(null)
   const [testingChannelId, setTestingChannelId] = useState<string | null>(null)
+  const [testingKeyId, setTestingKeyId] = useState<string | null>(null)
+  // 手动转发面板
+  const [forwardOpen, setForwardOpen] = useState(false)
+  const [forwardChannelIds, setForwardChannelIds] = useState<Set<string>>(new Set())
   // 平台发件设置（SMTP）
   const [smtpHost, setSmtpHost] = useState('')
   const [smtpPort, setSmtpPort] = useState('465')
@@ -172,10 +175,11 @@ export default function NotificationsDialog({
     queryFn: () => notificationsApi.get(selectedId as string),
   })
 
+  // 渠道数据在三个分区都用（配置/测试/消息分区的转发面板）：弹窗打开即拉取
   const channels = useQuery({
     queryKey: ['notifications', 'channels'],
     queryFn: notificationsApi.channels.list,
-    enabled: open && (nav === 'config' || nav === 'test'),
+    enabled: open,
   })
 
   const channelTemplates = useQuery({
@@ -220,6 +224,8 @@ export default function NotificationsDialog({
       setChannelNote('')
       setTemplateParams({})
       setEditingChannel(null)
+      setForwardOpen(false)
+      setForwardChannelIds(new Set())
     }
   }, [open])
 
@@ -295,7 +301,7 @@ export default function NotificationsDialog({
       return
     }
     if (editingChannel) {
-      updateChannelMutation.mutate({ id: editingChannel.id, fields: { name: channelName.trim(), note: channelNote.trim() || null, params } })
+      saveChannelMutation.mutate({ id: editingChannel.id, fields: { name: channelName.trim(), note: channelNote.trim() || null, params } })
     } else {
       createChannelMutation.mutate({ name: channelName.trim(), template: templateId, params, note: channelNote.trim() || null })
     }
@@ -389,6 +395,37 @@ export default function NotificationsDialog({
       void queryClient.invalidateQueries({ queryKey: ['notifications', 'ingest-keys'] })
     },
     onError: error => toast.error(errorText(error)),
+  })
+
+  const forwardMutation = useMutation({
+    mutationFn: ({ messageId, channelIds }: { messageId: string; channelIds: string[] }) =>
+      notificationsApi.forward(messageId, channelIds),
+    onSuccess: results => {
+      const okCount = results.filter(r => r.ok).length
+      const failed = results.filter(r => !r.ok)
+      if (okCount) toast.success(`已转发到 ${okCount} 个渠道`)
+      for (const item of failed) toast.error(`转发失败：${item.message}`)
+      setForwardOpen(false)
+      setForwardChannelIds(new Set())
+      void queryClient.invalidateQueries({ queryKey: ['notifications', 'channels'] })
+    },
+    onError: error => toast.error(errorText(error)),
+  })
+
+  const keyTestMutation = useMutation({
+    mutationFn: notificationsApi.ingestKeys.test,
+    onSuccess: data => {
+      if (data.ok) {
+        toast.success(data.message)
+        invalidateLists()
+        void queryClient.invalidateQueries({ queryKey: ['notifications', 'ingest-keys'] })
+        void queryClient.invalidateQueries({ queryKey: ['notifications', 'channels'] })
+      } else {
+        toast.error(data.message)
+      }
+    },
+    onError: error => toast.error(errorText(error)),
+    onSettled: () => setTestingKeyId(null),
   })
 
   const deleteMutation = useMutation({
@@ -769,6 +806,16 @@ export default function NotificationsDialog({
                                 >
                                   {selected.isArchived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => { setForwardOpen(value => !value); setForwardChannelIds(new Set()) }}
+                                  title="转发到外部渠道"
+                                  aria-label="转发到外部渠道"
+                                  className={iconButtonClass}
+                                  data-notifications-forward
+                                >
+                                  <Forward size={15} />
+                                </button>
                                 {selected.isRead && (
                                   <button
                                     type="button"
@@ -801,6 +848,50 @@ export default function NotificationsDialog({
                               <span>{formatDateTime(selected.createdAt)}</span>
                             </div>
                           </div>
+                          {forwardOpen && (
+                            <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-base)] p-3" data-notifications-forward-panel>
+                              <p className="text-xs font-medium text-[var(--color-text-secondary)]">转发到外部渠道</p>
+                              <div className="mt-2 flex flex-col gap-1">
+                                {enabledChannels.length === 0 ? (
+                                  <p className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                                    没有启用的渠道，请先到「渠道配置」新建。
+                                  </p>
+                                ) : enabledChannels.map(channel => (
+                                  <label key={channel.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)]">
+                                    <input
+                                      type="checkbox"
+                                      checked={forwardChannelIds.has(channel.id)}
+                                      onChange={event => setForwardChannelIds(current => {
+                                        const next = new Set(current)
+                                        if (event.target.checked) next.add(channel.id)
+                                        else next.delete(channel.id)
+                                        return next
+                                      })}
+                                      className="h-3.5 w-3.5 accent-[var(--color-nav-bg)]"
+                                      data-notifications-forward-channel={channel.id}
+                                    />
+                                    <span className="min-w-0 flex-1 truncate">{channel.name}<span className="ml-1.5 text-[10px] text-[var(--color-text-tertiary)]">{channel.templateName}</span></span>
+                                  </label>
+                                ))}
+                              </div>
+                              <div className="mt-2 flex justify-end gap-2">
+                                <button type="button" onClick={() => setForwardOpen(false)} className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                                  取消
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => forwardMutation.mutate({ messageId: selected.id, channelIds: [...forwardChannelIds] })}
+                                  disabled={forwardChannelIds.size === 0 || forwardMutation.isPending}
+                                  className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                                  style={{ background: 'var(--color-nav-bg)' }}
+                                  data-notifications-forward-confirm
+                                >
+                                  {forwardMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Forward size={13} />}
+                                  转发（{forwardChannelIds.size}）
+                                </button>
+                              </div>
+                            </div>
+                          )}
                           <div className="min-h-0 flex-1 overflow-y-auto p-4">
                             <NotificationMarkdown content={selected.body || ''} />
                             {!!selected.attachments?.length && (
@@ -1292,6 +1383,58 @@ export default function NotificationsDialog({
                     <p className="text-xs text-[var(--color-text-tertiary)]">出口 · 启用渠道</p>
                     <p className="mt-1 text-lg font-semibold tabular-nums text-[var(--color-text-primary)]">{enabledChannels.length}</p>
                   </div>
+                </div>
+              </section>
+
+              {/* —— 入口测试（真实全链路） —— */}
+              <section aria-label="入口测试">
+                <h3 className={sectionHeadingClass}>入口 · 连通性测试</h3>
+                <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                  以选定密钥真实投递一条「链路测试」消息：密钥鉴权 → 消息创建 → 渠道扇出全程走真实路径，可在消息列表识别与删除。
+                </p>
+                <div className="mt-3">
+                  {ingestKeys.isLoading ? (
+                    <div className="flex items-center justify-center gap-2 py-6 text-xs text-[var(--color-text-tertiary)]">
+                      <Loader2 size={14} className="animate-spin" /> 加载中…
+                    </div>
+                  ) : activeKeys.length === 0 ? (
+                    <p className="px-2 py-4 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
+                      没有有效密钥。先到「渠道配置 → 入口」签发。
+                    </p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {activeKeys.map(key => (
+                        <li
+                          key={key.id}
+                          data-notifications-test-key={key.id}
+                          className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
+                        >
+                          <KeyRound size={14} className="shrink-0 text-[var(--color-text-secondary)]" />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm text-[var(--color-text-primary)]">{key.name}</p>
+                            <p className="truncate text-[10px] text-[var(--color-text-tertiary)]">
+                              {key.lastUsedAt ? `最近使用：${formatDateTime(key.lastUsedAt)}` : '未使用'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTestingKeyId(key.id)
+                              keyTestMutation.mutate(key.id)
+                            }}
+                            disabled={keyTestMutation.isPending && testingKeyId === key.id}
+                            className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                            style={{ background: 'var(--color-nav-bg)' }}
+                            data-notifications-key-test
+                          >
+                            {keyTestMutation.isPending && testingKeyId === key.id
+                              ? <Loader2 size={12} className="animate-spin" />
+                              : '模拟外部投递'}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               </section>
 

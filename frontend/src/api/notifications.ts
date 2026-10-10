@@ -153,6 +153,13 @@ export const notificationsApi = {
   readAll: (): Promise<{ updated: number }> =>
     apiClientV2.post('/notifications/read-all'),
 
+  /** 手动转发：单条消息 → 多渠道（已存在的投递单重置允许再发） */
+  forward: (
+    messageId: string,
+    channelIds: string[],
+  ): Promise<{ channelId: string; ok: boolean; message: string }[]> =>
+    apiClientV2.post(`/notifications/${messageId}/forward`, { channelIds }),
+
   remove: (id: string): Promise<{ deleted: string }> =>
     apiClientV2.delete(`/notifications/${id}`),
 
@@ -209,6 +216,10 @@ export const notificationsApi = {
 
     revoke: (id: string): Promise<NotificationIngestKey> =>
       apiClientV2.delete(`/notifications/ingest-keys/${id}`),
+
+    /** 入口测试：以该密钥真实投递一条链路测试消息（走完整链路含扇出） */
+    test: (id: string): Promise<{ ok: boolean; message: string; messageId: string }> =>
+      apiClientV2.post(`/notifications/ingest-keys/${id}/test`),
   },
 
   /** 附件下载地址（需携带登录态请求；正文内嵌媒体同源引用此路径） */
