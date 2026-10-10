@@ -61,6 +61,25 @@ export interface SuperSearchMessageHit {
   createdAt: string
 }
 
+/** 语音听写后端就绪状态（snake_case 响应，与 voice.py 子路由契约一致） */
+export interface VoiceStatus {
+  ready: boolean
+  model_present: boolean
+  model_dir: string
+  model_file: string
+  languages: string[]
+  sample_rate: number
+  max_duration_seconds: number
+  max_body_bytes: number
+}
+
+/** 语音听写转写结果 */
+export interface VoiceTranscription {
+  text: string
+  duration_ms: number
+  language: string
+}
+
 export interface SuperSearchConversationHit {
   id: string
   title: string
@@ -696,6 +715,14 @@ export const superAssistantApi = {
     apiClientV2.delete(`/super-assistant/conversations/${id}/files/${fileId}`),
   searchConversations: (q: string, limit = 20) =>
     apiClientV2.get<SuperSearchResult>('/super-assistant/search/conversations', { params: { q, limit } }),
+  /** 语音听写：后端模型就绪状态（助手配置「语音」tab 展示用） */
+  voiceStatus: () => apiClientV2.get<VoiceStatus>('/super-assistant/voice/status'),
+  /** 语音听写：上传 16k 单声道 16-bit PCM WAV（原始字节），返回转写文本 */
+  transcribeVoice: (wav: Uint8Array, language: string) =>
+    apiClientV2.post<VoiceTranscription>('/super-assistant/voice/transcribe', wav, {
+      params: { language },
+      headers: { 'Content-Type': 'audio/wav' },
+    }),
   palaceFiles: () => apiClientV2.get<PalaceFile[]>('/super-assistant/palace/files'),
   /** folderPath 非空时上传归位到该目录（目录不存在时后端按 mkdir -p 补行） */
   uploadPalaceFile: (file: File, folderPath = '') => {

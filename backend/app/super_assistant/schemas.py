@@ -810,3 +810,24 @@ class ScheduledRunOut(ORMModel):
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+
+
+class VoiceTranscriptionOut(BaseModel):
+    """语音听写转写结果（本地 SenseVoice 离线识别）。"""
+
+    text: str
+    duration_ms: int
+    language: str
+
+
+class VoiceStatusOut(BaseModel):
+    """语音听写后端就绪状态（模型是否已下载、限额等）。"""
+
+    ready: bool
+    model_present: bool
+    model_dir: str
+    model_file: str
+    languages: list[str]
+    sample_rate: int
+    max_duration_seconds: int
+    max_body_bytes: int

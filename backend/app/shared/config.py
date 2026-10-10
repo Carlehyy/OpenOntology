@@ -169,6 +169,12 @@ class Settings(BaseSettings):
     super_assistant_max_skill_archive_mb: int = 20
     super_assistant_max_skill_files: int = 500
     super_assistant_max_skill_file_mb: int = 5
+    # 语音听写（本地 SenseVoice 离线转写）：模型目录留空回退仓库内
+    # backend/voice-models/；模型由 scripts/download_voice_model.py 显式
+    # 下载（sha256 校验），缺失时转写接口 fail-closed 返回 503。
+    voice_model_dir: str = ""
+    voice_max_duration_seconds: int = Field(default=120, ge=1, le=600)
+    voice_max_body_mb: int = Field(default=8, ge=1, le=64)
     super_assistant_max_tool_rounds: int = 25
     # 自主 agent 模式（PLAN→EXECUTE→VERIFY，对标 small-rust-hermes run_agent）的
     # 迭代上限；独立于普通对话的 max_tool_rounds，仅在 agent_mode=True 时生效
