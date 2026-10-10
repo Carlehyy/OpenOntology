@@ -35,6 +35,9 @@ import PluginCommunityPage from '@/pages/community/PluginCommunityPage'
 import McpDevPage from '@/pages/community/McpDevPage'
 import OntologyNetworkPage from '@/pages/ontology-model/OntologyNetworkPage'
 import OntologyGraphPage from '@/pages/ontologies/graph/OntologyGraphPage'
+import TaskInstancesPage from '@/pages/task-instances/TaskInstancesPage'
+import TemplateEditorView from '@/pages/task-instances/TemplateEditorView'
+import InstanceDetailView from '@/pages/task-instances/InstanceDetailView'
 import WorldModelModelsPage from '@/pages/world-model/WorldModelModelsPage'
 import WorldModelServicesPage from '@/pages/world-model/WorldModelServicesPage'
 import WorldModelCallsPage from '@/pages/world-model/WorldModelCallsPage'
@@ -200,6 +203,11 @@ export default function App() {
           <Route path="/world-model/models/:modelId/develop" element={<ProtectedRoute><WorldModelDevelopPage /></ProtectedRoute>} />
           <Route path="/world-model/services" element={<ProtectedRoute><WorldModelServicesPage /></ProtectedRoute>} />
           <Route path="/world-model/calls" element={<ProtectedRoute><WorldModelCallsPage /></ProtectedRoute>} />
+          {/* 任务实例 — 独立运行时功能域：DAG 模板编排与任务实例轨道 */}
+          <Route path="/task-instances" element={<ProtectedRoute><TaskInstancesPage /></ProtectedRoute>} />
+          <Route path="/task-instances/templates/new" element={<ProtectedRoute><TemplateEditorView /></ProtectedRoute>} />
+          <Route path="/task-instances/templates/:id" element={<ProtectedRoute><TemplateEditorView /></ProtectedRoute>} />
+          <Route path="/task-instances/instances/:instanceId" element={<ProtectedRoute><InstanceDetailView /></ProtectedRoute>} />
           <Route path="/ontologies/world-model" element={<LegacyWorldModelRedirect />} />
           <Route path="/ontologies/world-model/*" element={<LegacyWorldModelRedirect />} />
           <Route path="/ontologies" element={<ProtectedRoute><OntologyListPage /></ProtectedRoute>} />

@@ -236,6 +236,8 @@ def _template_out(db: Session, template: TaskTemplate, *,
     }
     if with_yaml and revision is not None:
         data["spec_yaml"] = revision.spec_yaml
+        # 编译产物随详情返回：前端编排页的只读 DAG 预览数据源
+        data["spec_compiled"] = revision.spec_compiled
     return data
 
 
@@ -247,6 +249,8 @@ def _revision_out(revision: TaskTemplateRevision) -> dict:
         "note": revision.note,
         "created_by": revision.created_by,
         "created_at": revision.created_at,
+        # 版本回滚/对比需要原文（模板 YAML 体量小，列表内联返回）
+        "spec_yaml": revision.spec_yaml,
     }
 
 
