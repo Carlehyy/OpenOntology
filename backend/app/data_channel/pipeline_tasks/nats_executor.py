@@ -64,6 +64,7 @@ _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE = "super-assistant-palace-consolidat
 _SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE = "super-assistant-palace-ontology-rebuild"
 _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE = "super-assistant-scheduled-run"
 _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
+_TASK_INSTANCES_CONTROL_DURABLE = "task-instances-control"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
 _EXECUTION_CALL_DURABLE = "sa-call-v1"
 _EXECUTION_RECONCILER_DURABLE = "sa-reconciler-v1"
@@ -209,9 +210,11 @@ def _handler_registry():
         SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT,
         SUPER_ASSISTANT_REFLECT_FULL_SUBJECT,
         SUPER_ASSISTANT_REFLECT_MICRO_SUBJECT,
+        TASK_INSTANCES_CONTROL_SUBJECT,
     )
     from app.assistant_evaluation import autopilot_tasks
     from app.super_assistant import palace_tasks, reflection_tasks, scheduled_tasks
+    from app.task_instances import executor as task_instances_executor
 
     return (
         (PIPELINE_EXECUTE_SUBJECT, _CONSUMER_DURABLE, _execute_pipeline_task_message),
@@ -269,6 +272,11 @@ def _handler_registry():
             SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
             _SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE,
             palace_tasks.run_palace_ontology_rebuild_message,
+        ),
+        (
+            TASK_INSTANCES_CONTROL_SUBJECT,
+            _TASK_INSTANCES_CONTROL_DURABLE,
+            task_instances_executor.run_control_message,
         ),
     )
 

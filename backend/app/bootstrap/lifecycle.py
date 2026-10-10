@@ -234,6 +234,16 @@ async def application_lifespan(
             except Exception as exc:
                 _main_logger.warning("超级助手定时任务扫描器启动失败: %s", exc)
 
+        # 任务实例对账定时器（审批过期 / 租约回收 / 派发重投 / 并行补位；
+        # APScheduler 进程内定时，旁路能力，失败不阻断启动）
+        if settings.environment != "test":
+            try:
+                from app.task_instances import reconcile as task_instances_reconcile
+
+                task_instances_reconcile.start()
+            except Exception as exc:
+                _main_logger.warning("任务实例对账定时器启动失败: %s", exc)
+
         from app.data_channel.file_assets.service import (
             file_asset_cleanup_loop,
         )

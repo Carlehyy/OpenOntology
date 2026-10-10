@@ -30,12 +30,15 @@ ALL_MENU_KEYS = (
     "community.skills",
     "community.plugins",
     "models",
+    "task_instances",
 )
 
 # Preserve the former non-admin experience on upgrade: regular users keep all
-# product areas that were previously visible, while API Hub remains opt-in.
+# product areas that were previously visible, while API Hub and the task
+# instance runtime (admin-oriented DAG orchestration) remain opt-in.
 DEFAULT_NON_ADMIN_MENU_KEYS = tuple(
-    key for key in ALL_MENU_KEYS if not key.startswith("api_hub")
+    key for key in ALL_MENU_KEYS
+    if not key.startswith("api_hub") and key != "task_instances"
 )
 
 # A newly assigned custom role starts from the smallest useful surface. Its

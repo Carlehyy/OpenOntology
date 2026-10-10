@@ -35,6 +35,7 @@ SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT = "super_assistant.palace.ontolo
 SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT = "super_assistant.scheduled.run"
 ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT = "ontology.documents.published"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
+TASK_INSTANCES_CONTROL_SUBJECT = "task_instances.control"
 EXECUTION_STREAM = "SA_EXECUTION_V1"
 EXECUTION_RUN_SUBJECT = "sa.execution.run.*"
 EXECUTION_CALL_SUBJECT = "sa.execution.call.*"
@@ -65,6 +66,8 @@ PIPELINE_STREAM_SUBJECTS = (
     SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
     # 只能追加：本体文档手动重建（失败重试离开 Web 进程，占抽取信号量）
     SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
+    # 只能追加：任务实例运行时控制（节点派发/插话；M1 由假执行器承接）
+    TASK_INSTANCES_CONTROL_SUBJECT,
 )
 
 # 进程内缓存：每个进程只在首次派发时确保一次 Stream
