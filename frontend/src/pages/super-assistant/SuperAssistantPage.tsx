@@ -112,6 +112,7 @@ export default function SuperAssistantPage() {
   const scheduleRunId = searchParams.get('scheduleRun')
   const [scheduledOpen, setScheduledOpen] = useState(Boolean(scheduleId))
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [taskInstancesOpen, setTaskInstancesOpen] = useState(false)
   useEffect(() => {
     if (scheduleId) setScheduledOpen(true)
   }, [scheduleId])
@@ -1227,7 +1228,7 @@ export default function SuperAssistantPage() {
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenScheduled={() => setScheduledOpen(true)}
-          onOpenTaskInstances={() => setTaskInstancesOpen(true)}
+        onOpenTaskInstances={() => setTaskInstancesOpen(true)}
         onOpenNotifications={() => setNotificationsOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
         onRename={setRenamingConversation}
