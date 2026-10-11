@@ -7,7 +7,7 @@ import {
   instanceGroup,
   lineDiff,
   waitingNodesOf,
-} from '../../../pages/task-instances/instanceView.ts'
+} from '../../../components/task-instances/instanceView.ts'
 
 const run = (nodeId: string, status: string): NodeRunView => ({
   node_run_id: `r-${nodeId}`, node_id: nodeId, attempt_no: 1, status,

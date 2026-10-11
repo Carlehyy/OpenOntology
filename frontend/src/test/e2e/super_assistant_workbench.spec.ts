@@ -1083,13 +1083,13 @@ test('工作台骨架：九项入口齐备，近期会话单列表，归档折�
 
   await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
-  // 消息通知已上线；任务实例已上线为跳转链接（入口收归超级助手工作台）
+  // 消息通知与任务实例均已上线：可点击（任务实例打开弹窗）
   const notificationsEntry = page.getByRole('button', { name: /消息通知/ })
   await expect(notificationsEntry).toBeVisible()
   await expect(notificationsEntry).toBeEnabled()
   await expect(notificationsEntry).toContainText('2')
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
-  const taskInstancesEntry = page.getByRole('link', { name: /任务实例/ })
+  const taskInstancesEntry = page.getByRole('button', { name: /任务实例/ })
   await expect(taskInstancesEntry).toBeVisible()
   await expect(taskInstancesEntry).toBeEnabled()
   await expect(page.getByRole('button', { name: '知识图谱' })).toBeVisible()

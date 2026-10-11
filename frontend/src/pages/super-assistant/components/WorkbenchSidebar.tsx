@@ -41,6 +41,7 @@ interface WorkbenchSidebarProps {
   onSetArchived: (id: string, archived: boolean) => void
   onOpenSearch: () => void
   onOpenScheduled: () => void
+  onOpenTaskInstances: () => void
   /** 打开消息通知弹窗（仅 admin 入口可见） */
   onOpenNotifications: () => void
   /** 外部集成保存后回调（页面刷新 multica 配置以同步命令提示可用性） */
@@ -327,10 +328,15 @@ export default function WorkbenchSidebar({
         <button type="button" onClick={onOpenScheduled} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
-        {/* 任务实例：DAG 流程模板与自动化任务轨道（跳转独立页面，后续版本弹窗化） */}
-        <Link to="/task-instances" onClick={onCloseMobile} className={actionItemClass} data-workbench-task-instances>
+        {/* 任务实例：DAG 流程模板与自动化任务轨道（弹窗入口收归超级助手） */}
+        <button
+          type="button"
+          onClick={() => { onOpenTaskInstances(); onCloseMobile() }}
+          className={actionItemClass}
+          data-workbench-task-instances
+        >
           <ListChecks size={16} className="shrink-0" /> 任务实例
-        </Link>
+        </button>
         <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
           <Brain size={16} className="shrink-0" /> 知识图谱
         </button>
