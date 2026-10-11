@@ -176,6 +176,7 @@ services:
       VOICE_MAX_DURATION_SECONDS: ${VOICE_MAX_DURATION_SECONDS:-120}
       VOICE_MAX_BODY_MB: ${VOICE_MAX_BODY_MB:-8}
       VOICE_MAX_CONCURRENT: ${VOICE_MAX_CONCURRENT:-2}
+      VOICE_MODEL_DOWNLOAD_BASE: ${VOICE_MODEL_DOWNLOAD_BASE:-https://huggingface.co}
     # app.* 日志走 stderr → json-file；无上限轮转会在长期运行中吃满磁盘
     logging:
       driver: json-file

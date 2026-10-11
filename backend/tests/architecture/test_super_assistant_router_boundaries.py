@@ -24,6 +24,7 @@ from app.super_assistant import (
     search_service,
     skill_service,
     skill_store,
+    voice_model_download,
     voice_service,
 )
 
@@ -318,6 +319,14 @@ DELEGATES = {
     "voice_status": (
         "voice_service",
         "status",
+    ),
+    "voice_model_download_start": (
+        "voice_model_download",
+        "start",
+    ),
+    "voice_model_download_cancel": (
+        "voice_model_download",
+        "cancel",
     ),
     "list_conversation_files": (
         "conversation_files",
@@ -765,6 +774,7 @@ def test_super_assistant_services_do_not_import_http_router():
         reflection_service,
         search_service,
         skill_service,
+        voice_model_download,
         voice_service,
     ):
         imports = _imports(Path(module.__file__))
@@ -876,9 +886,11 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 会话右键菜单配套的会话审计导出新增 /conversations/{id}/export 的
     # GET 共 1 个操作（1 条路径）。
     # 语音听写（voice.py 子路由）新增 /voice/transcribe 的 POST 与
-    # /voice/status 的 GET 共 2 个操作（2 条路径）。
-    assert len(paths) == 106
-    assert sum(len(item) for item in paths.values()) == 137
+    # /voice/status 的 GET 共 2 个操作（2 条路径）；状态响应不暴露服务器
+    # 路径；cc-haha 式在线模型下载新增 /voice/model/download 与
+    # /voice/model/download/cancel 的 POST 共 2 个操作（2 条路径）。
+    assert len(paths) == 108
+    assert sum(len(item) for item in paths.values()) == 139
     assert hashlib.sha256(payload).hexdigest() == (
-        "3a0ba4b344d73a819137fb86947fb133935b96d480099a5619f549096ba028a3"
+        "8493ebca5f47b01422bfc358d92987b8765b1475b1e772b54aab47fae3513445"
     )
