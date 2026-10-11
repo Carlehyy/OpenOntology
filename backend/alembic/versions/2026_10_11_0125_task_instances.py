@@ -8,8 +8,8 @@
 定位），不进入 DEFAULT_NON_ADMIN 回退集；为已持有 data.pipelines 的
 存量角色补 task_instances key（运维型角色的自然扩展）。
 
-Revision ID: 0124_task_instances
-Revises: 0123_notification_channels
+Revision ID: 0125_task_instances
+Revises: 0124_notification_channel_templates
 Create Date: 2026-10-11
 """
 
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
 
-revision = "0124_task_instances"
-down_revision = "0123_notification_channels"
+revision = "0125_task_instances"
+down_revision = "0124_notification_channel_templates"
 branch_labels = None
 depends_on = None
 

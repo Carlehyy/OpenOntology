@@ -66,6 +66,40 @@ export interface NotificationChannel {
   lastSentAt: string | null
   createdAt: string
   updatedAt: string
+  template: string
+  templateName: string
+  /** 脱敏后的关键字段展示（渠道卡片副行） */
+  display: string
+  /** 编辑预填字段表（敏感字段已脱敏，留空提交=保持不变） */
+  fields: NotificationChannelTemplateField[]
+}
+
+export interface NotificationChannelTemplateField {
+  key: string
+  label: string
+  hint: string
+  required: boolean
+  secret: boolean
+  placeholder: string
+  /** 仅渠道回显时有值 */
+  value?: string
+}
+
+export interface NotificationChannelTemplate {
+  id: string
+  name: string
+  description: string
+  fields: NotificationChannelTemplateField[]
+}
+
+export interface NotificationSmtp {
+  host: string
+  port: number
+  username: string
+  sender: string
+  useTls: boolean
+  configured: boolean
+  hasPassword: boolean
 }
 
 export interface NotificationIngestKey {
@@ -119,19 +153,50 @@ export const notificationsApi = {
   readAll: (): Promise<{ updated: number }> =>
     apiClientV2.post('/notifications/read-all'),
 
+  /** 手动转发：单条消息 → 多渠道（已存在的投递单重置允许再发） */
+  forward: (
+    messageId: string,
+    channelIds: string[],
+  ): Promise<{ channelId: string; ok: boolean; message: string }[]> =>
+    apiClientV2.post(`/notifications/${messageId}/forward`, { channelIds }),
+
   remove: (id: string): Promise<{ deleted: string }> =>
     apiClientV2.delete(`/notifications/${id}`),
+
+  channelTemplates: (): Promise<NotificationChannelTemplate[]> =>
+    apiClientV2.get('/notifications/channel-templates'),
+
+  smtp: {
+    get: (): Promise<NotificationSmtp> => apiClientV2.get('/notifications/smtp'),
+
+    put: (payload: {
+      host: string
+      port: number
+      username: string
+      password?: string
+      sender?: string
+      useTls?: boolean
+    }): Promise<NotificationSmtp> => apiClientV2.put('/notifications/smtp', payload),
+
+    test: (to: string): Promise<{ ok: boolean; message: string }> =>
+      apiClientV2.post('/notifications/smtp/test', { to }),
+  },
 
   channels: {
     list: (): Promise<NotificationChannel[]> =>
       apiClientV2.get('/notifications/channels'),
 
-    create: (payload: { name: string; appriseUrl: string; note?: string | null }): Promise<NotificationChannel> =>
+    create: (payload: {
+      name: string
+      template: string
+      params: Record<string, string>
+      note?: string | null
+    }): Promise<NotificationChannel> =>
       apiClientV2.post('/notifications/channels', payload),
 
     update: (
       id: string,
-      fields: { name?: string; appriseUrl?: string; note?: string | null; enabled?: boolean },
+      fields: { name?: string; note?: string | null; enabled?: boolean; params?: Record<string, string> },
     ): Promise<NotificationChannel> =>
       apiClientV2.patch(`/notifications/channels/${id}`, fields),
 
@@ -151,6 +216,10 @@ export const notificationsApi = {
 
     revoke: (id: string): Promise<NotificationIngestKey> =>
       apiClientV2.delete(`/notifications/ingest-keys/${id}`),
+
+    /** 入口测试：以该密钥真实投递一条链路测试消息（走完整链路含扇出） */
+    test: (id: string): Promise<{ ok: boolean; message: string; messageId: string }> =>
+      apiClientV2.post(`/notifications/ingest-keys/${id}/test`),
   },
 
   /** 附件下载地址（需携带登录态请求；正文内嵌媒体同源引用此路径） */

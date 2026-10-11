@@ -20,10 +20,13 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, require_admin
 from app.notifications import channel_service, service
 from app.notifications.schemas import (
-    NotificationChannelCreate,
-    NotificationChannelUpdate,
+    NotificationChannelCreateV2,
+    NotificationForwardRequest,
+    NotificationChannelUpdateV2,
     NotificationCreate,
     NotificationIngestKeyCreate,
+    NotificationSmtpTest,
+    NotificationSmtpUpdate,
     NotificationStateUpdate,
 )
 
@@ -105,6 +108,24 @@ def create_ingest_key(
     return _ok(service.ingest_key_out(row, plaintext=plaintext))
 
 
+@router.post("/ingest-keys/{key_id}/test")
+def test_ingest_key(
+    key_id: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    row = (
+        db.query(service.NotificationIngestKey)
+        .filter(service.NotificationIngestKey.id == key_id)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(404, "密钥不存在")
+    if not row.enabled:
+        raise HTTPException(422, "密钥已吊销，无法测试")
+    return _ok(channel_service.test_ingest_key(db, row))
+
+
 @router.delete("/ingest-keys/{key_id}")
 def revoke_ingest_key(
     key_id: str,
@@ -128,6 +149,42 @@ def revoke_ingest_key(
 # —— 转发渠道管理（admin；apprise URL 加密存储、界面只回脱敏掩码）——
 
 
+@router.get("/channel-templates")
+def list_channel_templates(_admin=Depends(require_admin)):
+    return _ok(channel_service.list_template_definitions())
+
+
+@router.get("/smtp")
+def get_smtp(db: Session = Depends(get_db), _admin=Depends(require_admin)):
+    return _ok(channel_service.smtp_out(db))
+
+
+@router.put("/smtp")
+def put_smtp(
+    body: NotificationSmtpUpdate,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    return _ok(channel_service.update_smtp(
+        db,
+        host=body.host,
+        port=body.port,
+        username=body.username,
+        password=body.password,
+        sender=body.sender,
+        use_tls=body.useTls,
+    ))
+
+
+@router.post("/smtp/test")
+def test_smtp(
+    body: NotificationSmtpTest,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    return _ok(channel_service.test_smtp(db, body.to))
+
+
 @router.get("/channels")
 def list_channels(db: Session = Depends(get_db), _admin=Depends(require_admin)):
     rows = (
@@ -135,42 +192,45 @@ def list_channels(db: Session = Depends(get_db), _admin=Depends(require_admin)):
         .order_by(channel_service.NotificationChannel.created_at.desc())
         .all()
     )
-    return _ok([channel_service.channel_out(row) for row in rows])
+    return _ok([channel_service.templated_channel_out(db, row) for row in rows])
 
 
 @router.post("/channels", status_code=201)
 def create_channel(
-    body: NotificationChannelCreate,
+    body: NotificationChannelCreateV2,
     db: Session = Depends(get_db),
     admin=Depends(require_admin),
 ):
-    row = channel_service.create_channel(
+    row = channel_service.create_templated_channel(
         db,
         name=body.name,
-        apprise_url=body.appriseUrl,
         note=body.note,
+        template_id=body.template,
+        params=body.params,
         user=admin,
     )
-    return _ok(channel_service.channel_out(row))
+    return _ok(channel_service.templated_channel_out(db, row))
 
 
 @router.patch("/channels/{channel_id}")
 def update_channel(
     channel_id: str,
-    body: NotificationChannelUpdate,
+    body: NotificationChannelUpdateV2,
     db: Session = Depends(get_db),
     _admin=Depends(require_admin),
 ):
     row = channel_service.require_channel(db, channel_id)
+    if body.params is not None:
+        row = channel_service.update_channel_params(db, row, params=body.params)
     row = channel_service.update_channel(
         db,
         row,
         name=body.name,
-        apprise_url=body.appriseUrl,
+        apprise_url=None,
         note=body.note,
         enabled=body.enabled,
     )
-    return _ok(channel_service.channel_out(row))
+    return _ok(channel_service.templated_channel_out(db, row))
 
 
 @router.delete("/channels/{channel_id}")
@@ -182,6 +242,17 @@ def delete_channel(
     row = channel_service.require_channel(db, channel_id)
     channel_service.delete_channel(db, row)
     return _ok({"deleted": channel_id})
+
+
+@router.post("/{message_id}/forward")
+def forward_notification(
+    message_id: str,
+    body: NotificationForwardRequest,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    message = service.require_message(db, message_id)
+    return _ok(channel_service.forward_message(db, message, channel_ids=body.channelIds))
 
 
 @router.post("/channels/{channel_id}/test")
