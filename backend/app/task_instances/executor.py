@@ -149,6 +149,8 @@ def execute_dispatch_on(db: Session, node_run_id: str):
         return  # 停在 running（插话/租约对账测试用）
     fail_map = directives.get("fail_nodes") or {}
     if run.attempt_no in (fail_map.get(run.node_id) or []):
+        from app.task_instances.container_runtime import _fail_attempt_on
+
         _fail_attempt_on(db, run, "fake executor simulated failure")
         db.commit()
         return
@@ -165,32 +167,6 @@ def execute_dispatch_on(db: Session, node_run_id: str):
     cascaded = engine.complete_node(db, run.id, output, actor="executor:fake")
     db.commit()
     return cascaded
-
-
-def _fail_attempt_on(db: Session, run: TaskNodeRun, error: str) -> None:
-    from app.task_instances import events as ev
-    from app.task_instances.models import (
-        INSTANCE_FAILED,
-        NODE_FAILED,
-    )
-
-    instance = db.query(TaskInstance).filter(
-        TaskInstance.id == run.instance_id).first()
-    if instance is None:
-        return
-    spec = instance.spec_snapshot or {}
-    run.status = NODE_FAILED
-    run.error = error[:2000]
-    run.finished_at = engine._now()
-    ev.append_event(
-        db, instance.id, ev.NODE_FAILED,
-        {"node_id": run.node_id, "attempt_no": run.attempt_no,
-         "error": error[:2000]},
-        node_run_id=run.id, actor="executor:fake",
-        event_budget=engine._policies(spec).event_budget,
-        allow_over_budget=True)
-    engine._complete_instance(db, instance, spec, INSTANCE_FAILED,
-                               reason=f"node:{run.node_id}:{error}")
 
 
 def _mark_steering_delivered(db: Session, node_run_id: str,

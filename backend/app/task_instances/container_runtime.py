@@ -43,6 +43,11 @@ _OUTPUT_FILE = f"{_OUTPUT_DIR}/output.json"
 _POLL_INTERVAL_SECONDS = 3.0
 
 
+def _now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
 class ContainerRuntimeError(Exception):
     """容器执行基础设施错误（节点按执行失败收口）。"""
 
@@ -364,16 +369,41 @@ def _run_container_and_collect(db: Session, run, instance, task: dict,
 
 def _upload_artifact(instance_id: str, node_run_id: str, name: str,
                      content: bytes, mime_type: str) -> str:
-    """产物上传 seam（测试可替换；默认 MinIO）。"""
-    from app.task_instances.service import _write_artifact_object
+    """产物上传 seam（测试可替换；底层 artifacts 模块，无域内回边）。"""
+    from app.task_instances.artifacts import write_artifact_object
 
-    return _write_artifact_object(
+    return write_artifact_object(
         f"{instance_id}/{node_run_id}/{name}", content, mime_type)
 
 
-def _fail(db: Session, run, error: str) -> None:
-    from app.task_instances.executor import _fail_attempt_on
+def _fail_attempt_on(db: Session, run, error: str) -> None:
+    """执行器侧失败收口（原 executor 移入：切断 executor↔runtime 回边）。"""
+    from app.task_instances import events as ev
+    from app.task_instances.models import (
+        INSTANCE_FAILED,
+        NODE_FAILED,
+        TaskInstance,
+    )
 
+    instance = db.query(TaskInstance).filter(
+        TaskInstance.id == run.instance_id).first()
+    if instance is None:
+        return
+    spec = instance.spec_snapshot or {}
+    run.status = NODE_FAILED
+    run.error = error[:2000]
+    run.finished_at = _now()
+    ev.append_event(
+        db, instance.id, ev.NODE_FAILED,
+        {"node_id": run.node_id, "attempt_no": run.attempt_no,
+         "error": error[:2000]},
+        node_run_id=run.id, actor="executor",
+        event_budget=None, allow_over_budget=True)
+    ti_engine._complete_instance(db, instance, spec, INSTANCE_FAILED,
+                                  reason=f"node:{run.node_id}:{error}")
+
+
+def _fail(db: Session, run, error: str) -> None:
     try:
         _fail_attempt_on(db, run, error)
         db.commit()

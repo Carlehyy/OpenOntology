@@ -93,7 +93,9 @@ def runtime_env(db, monkeypatch, tmp_path):
     from app.task_instances import service as ti_service
 
     monkeypatch.setattr(cr, "SessionLocal", TestSession)
-    monkeypatch.setattr(ti_service, "_write_artifact_object",
+    from app.task_instances import artifacts as ti_artifacts
+
+    monkeypatch.setattr(ti_artifacts, "write_artifact_object",
                         lambda key, content, mime: f"s3://fake/{key}")
     monkeypatch.setattr(
         cr, "_settings",
