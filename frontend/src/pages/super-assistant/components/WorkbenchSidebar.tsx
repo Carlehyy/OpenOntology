@@ -254,17 +254,10 @@ export default function WorkbenchSidebar({
         <button type="button" onClick={onOpenScheduled} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
-        {/* 任务实例：版块占位，功能上线后接入真实任务实例入口并移除禁用态 */}
-        <button
-          type="button"
-          disabled
-          title="任务实例功能规划中"
-          className={`${actionItemClass} cursor-not-allowed opacity-60`}
-          data-workbench-task-instances
-        >
+        {/* 任务实例：DAG 流程模板与自动化任务轨道（跳转独立页面，后续版本弹窗化） */}
+        <Link to="/task-instances" onClick={onCloseMobile} className={actionItemClass} data-workbench-task-instances>
           <ListChecks size={16} className="shrink-0" /> 任务实例
-          <span className="ml-auto shrink-0 rounded bg-[var(--color-bg-hover)] px-1 py-0.5 text-[9px] leading-none text-[var(--color-text-tertiary)]">规划中</span>
-        </button>
+        </Link>
         <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
           <Brain size={16} className="shrink-0" /> 知识图谱
         </button>
