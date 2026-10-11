@@ -2,12 +2,15 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, History, LayoutDashboard, ListChecks, LogOut,
-  Network, Plug, Plus, Search, Trash2, X,
+  Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, Download, History, Inbox, LayoutDashboard, ListChecks, LogOut,
+  Megaphone, Mic, Network, Pencil, Plug, Plus, Search, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react'
 
 import { notificationsApi } from '@/api/notifications'
 import type { SuperConversation } from '@/api/superAssistant'
+import {
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
+} from '@/components/ui/context-menu'
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -25,6 +28,7 @@ import {
 } from '../conversationGroups'
 import IntegrationsDialog from './IntegrationsDialog'
 import MemoryPalaceDialog from './MemoryPalaceDialog'
+import type { AssistantConfigTab } from './AssistantConfiguration'
 
 interface WorkbenchSidebarProps {
   conversations: SuperConversation[]
@@ -37,10 +41,20 @@ interface WorkbenchSidebarProps {
   onSetArchived: (id: string, archived: boolean) => void
   onOpenSearch: () => void
   onOpenScheduled: () => void
+  onOpenTaskInstances: () => void
   /** 打开消息通知弹窗（仅 admin 入口可见） */
   onOpenNotifications: () => void
   /** 外部集成保存后回调（页面刷新 multica 配置以同步命令提示可用性） */
   onIntegrationsSaved?: () => void | Promise<void>
+  /** 会话行右键「重命名会话」：打开行级重命名弹窗 */
+  onRename: (item: SuperConversation) => void
+  /** 会话行右键「导出会话」：下载完整审计 JSON */
+  onExport: (item: SuperConversation) => void
+  /** 会话行右键「助手配置」组：打开配置面板并定位到对应 tab；
+      approval tab 的「完整反思」按选中会话执行，需带上行 id 供页面切换选中 */
+  onOpenConfigTab: (tab: AssistantConfigTab, conversationId: string) => void
+  /** 会话行右键「反馈问题」：打开工单提交弹窗 */
+  onFeedback: () => void
 }
 
 interface ConversationRowProps {
@@ -50,6 +64,10 @@ interface ConversationRowProps {
   onSelect: (id: string) => void
   onDelete: (id: string) => void
   onSetArchived: (id: string, archived: boolean) => void
+  onRename: (item: SuperConversation) => void
+  onExport: (item: SuperConversation) => void
+  onOpenConfigTab: (tab: AssistantConfigTab, conversationId: string) => void
+  onFeedback: () => void
 }
 
 /** 侧栏窄列的紧凑时间：MM-DD HH:mm；完整时间（YYYY-MM-DD HH:mm）挂在 title 上 */
@@ -59,58 +77,107 @@ const formatCompactSessionTime = (value: string) => {
   return match ? match[1] : full
 }
 
-function ConversationRow({ item, current, archived, onSelect, onDelete, onSetArchived }: ConversationRowProps) {
+function ConversationRow({
+  item, current, archived, onSelect, onDelete, onSetArchived, onRename, onExport, onOpenConfigTab, onFeedback,
+}: ConversationRowProps) {
   const title = item.title.trim() || '未命名会话'
   return (
-    <div
-      data-workbench-conversation={item.id}
-      className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 transition-colors ${current
-        ? 'bg-brand-soft/70'
-        : 'hover:bg-[var(--color-bg-hover)]'}`}
-    >
-      <button
-        type="button"
-        onClick={() => onSelect(item.id)}
-        title={title}
-        className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-none"
-      >
-        <span className={`block min-w-0 flex-1 truncate text-sm ${current
-          ? 'font-medium text-brand-ink'
-          : 'text-[var(--color-text-primary)]'}`}
+    // modal={false}：右键菜单不锁 body 滚动/指针（对齐桌面右键菜单惯例）；
+    // modal 模式下菜单与弹窗同批开合会让 react-remove-scroll 的 body 锁竞态残留，
+    // 关闭菜单后全页 hit-test 穿透不可点。
+    <ContextMenu modal={false}>
+      <ContextMenuTrigger asChild>
+        <div
+          data-workbench-conversation={item.id}
+          className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 transition-colors ${current
+            ? 'bg-brand-soft/70'
+            : 'hover:bg-[var(--color-bg-hover)]'}`}
         >
-          {title}
-        </span>
-      </button>
-      {/* 时间戳与 hover 动作按钮都锁定 h-6：两者高度一致，
-          悬停切换时行高不变，列表不抖动。
-          触屏没有悬停：窄屏（<md）隐藏时间戳、常显归档/删除，保证操作可达 */}
-      <span
-        title={formatSessionTime(item.updated_at)}
-        className="flex h-6 shrink-0 items-center text-xs tabular-nums text-[var(--color-text-tertiary)] group-hover:hidden max-md:hidden"
-      >
-        {formatCompactSessionTime(item.updated_at)}
-      </span>
-      <span className="hidden h-6 shrink-0 items-center gap-0.5 group-hover:flex max-md:flex">
-        <button
-          type="button"
-          onClick={() => onSetArchived(item.id, !archived)}
-          title={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
-          aria-label={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
-        </button>
-        <button
-          type="button"
-          onClick={() => onDelete(item.id)}
-          title={`删除会话 ${title}`}
-          aria-label={`删除会话 ${title}`}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <Trash2 size={13} />
-        </button>
-      </span>
-    </div>
+          <button
+            type="button"
+            onClick={() => onSelect(item.id)}
+            title={title}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-none"
+          >
+            <span className={`block min-w-0 flex-1 truncate text-sm ${current
+              ? 'font-medium text-brand-ink'
+              : 'text-[var(--color-text-primary)]'}`}
+            >
+              {title}
+            </span>
+          </button>
+          {/* 时间戳与 hover 动作按钮都锁定 h-6：两者高度一致，
+              悬停切换时行高不变，列表不抖动。
+              触屏没有悬停：窄屏（<md）隐藏时间戳、常显归档/删除，保证操作可达 */}
+          <span
+            title={formatSessionTime(item.updated_at)}
+            className="flex h-6 shrink-0 items-center text-xs tabular-nums text-[var(--color-text-tertiary)] group-hover:hidden max-md:hidden"
+          >
+            {formatCompactSessionTime(item.updated_at)}
+          </span>
+          <span className="hidden h-6 shrink-0 items-center gap-0.5 group-hover:flex max-md:flex">
+            <button
+              type="button"
+              onClick={() => onSetArchived(item.id, !archived)}
+              title={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
+              aria-label={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+            </button>
+            <button
+              type="button"
+              onClick={() => onDelete(item.id)}
+              title={`删除会话 ${title}`}
+              aria-label={`删除会话 ${title}`}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Trash2 size={13} />
+            </button>
+          </span>
+        </div>
+      </ContextMenuTrigger>
+      {/* 会话行右键菜单：会话操作 / 助手配置快捷方式 / 会话审计三段，段间以分隔线划分，分组标题已按需求移除。
+          归档区与近期区共用本行组件，归档态第一段切换为「恢复」。 */}
+      <ContextMenuContent data-ctx-menu={item.id} className="w-52">
+        <ContextMenuItem data-ctx-item="rename" onSelect={() => onRename(item)}>
+          <Pencil size={14} className="shrink-0" /> 重命名会话
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="archive" onSelect={() => onSetArchived(item.id, !archived)}>
+          {archived ? <ArchiveRestore size={14} className="shrink-0" /> : <Archive size={14} className="shrink-0" />}
+          {archived ? '恢复会话' : '归档会话'}
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="delete" className="text-[var(--color-danger)] focus:bg-[var(--color-danger-bg)] focus:text-[var(--color-danger-hover)]" onSelect={() => onDelete(item.id)}>
+          <Trash2 size={14} className="shrink-0" /> 删除会话
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem data-ctx-item="config-skills" onSelect={() => onOpenConfigTab('skills', item.id)}>
+          <Sparkles size={14} className="shrink-0" /> 配置 Skill
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="config-mcp" onSelect={() => onOpenConfigTab('mcp', item.id)}>
+          <Plug size={14} className="shrink-0" /> 配置 MCP
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="config-tools" onSelect={() => onOpenConfigTab('tools', item.id)}>
+          <Wrench size={14} className="shrink-0" /> 配置工具
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="config-approval" onSelect={() => onOpenConfigTab('approval', item.id)}>
+          <Inbox size={14} className="shrink-0" /> 待审批
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="config-memory" onSelect={() => onOpenConfigTab('memory', item.id)}>
+          <Brain size={14} className="shrink-0" /> 记忆
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="config-voice" onSelect={() => onOpenConfigTab('voice', item.id)}>
+          <Mic size={14} className="shrink-0" /> 语音听写
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem data-ctx-item="export" onSelect={() => onExport(item)}>
+          <Download size={14} className="shrink-0" /> 导出会话
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="feedback" onSelect={() => onFeedback()}>
+          <Megaphone size={14} className="shrink-0" /> 反馈问题
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   )
 }
 
@@ -125,8 +192,13 @@ export default function WorkbenchSidebar({
   onSetArchived,
   onOpenSearch,
   onOpenScheduled,
+  onOpenTaskInstances,
   onOpenNotifications,
   onIntegrationsSaved,
+  onRename,
+  onExport,
+  onOpenConfigTab,
+  onFeedback,
 }: WorkbenchSidebarProps) {
   const user = useAuthStore(state => state.user)
   const logout = useAuthStore(state => state.logout)
@@ -254,16 +326,14 @@ export default function WorkbenchSidebar({
         <button type="button" onClick={onOpenScheduled} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
-        {/* 任务实例：版块占位，功能上线后接入真实任务实例入口并移除禁用态 */}
+        {/* 任务实例：DAG 流程模板与自动化任务轨道（弹窗入口收归超级助手） */}
         <button
           type="button"
-          disabled
-          title="任务实例功能规划中"
-          className={`${actionItemClass} cursor-not-allowed opacity-60`}
+          onClick={() => { onOpenTaskInstances(); onCloseMobile() }}
+          className={actionItemClass}
           data-workbench-task-instances
         >
           <ListChecks size={16} className="shrink-0" /> 任务实例
-          <span className="ml-auto shrink-0 rounded bg-[var(--color-bg-hover)] px-1 py-0.5 text-[9px] leading-none text-[var(--color-text-tertiary)]">规划中</span>
         </button>
         <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
           <Brain size={16} className="shrink-0" /> 知识图谱
@@ -310,6 +380,10 @@ export default function WorkbenchSidebar({
                         onSelect={handleSelect}
                         onDelete={onDelete}
                         onSetArchived={onSetArchived}
+                        onRename={onRename}
+                        onExport={onExport}
+                        onOpenConfigTab={onOpenConfigTab}
+                        onFeedback={onFeedback}
                       />
                     </SidebarMenuItem>
                   ))}
@@ -349,6 +423,10 @@ export default function WorkbenchSidebar({
                               onSelect={handleSelect}
                               onDelete={onDelete}
                               onSetArchived={onSetArchived}
+                              onRename={onRename}
+                              onExport={onExport}
+                              onOpenConfigTab={onOpenConfigTab}
+                              onFeedback={onFeedback}
                             />
                           </SidebarMenuItem>
                         ))}

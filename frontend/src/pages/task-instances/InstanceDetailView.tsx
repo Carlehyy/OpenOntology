@@ -22,8 +22,8 @@ import { formatDateTime } from '@/utils/datetime'
 import {
   EVENT_LABELS, INSTANCE_STATUS_LABELS, INSTANCE_STATUS_TONE,
   NODE_KIND_LABELS, NODE_STATUS_LABELS, NODE_STATUS_TONE, waitingNodesOf,
-} from './instanceView'
-import WorkflowPreviewGraph from './WorkflowPreviewGraph'
+} from '@/components/task-instances/instanceView'
+import WorkflowPreviewGraph from '@/components/task-instances/WorkflowPreviewGraph'
 
 interface TimelineEntry {
   seq: number

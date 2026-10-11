@@ -172,6 +172,18 @@ class Settings(BaseSettings):
     super_assistant_max_skill_archive_mb: int = 20
     super_assistant_max_skill_files: int = 500
     super_assistant_max_skill_file_mb: int = 5
+    # 语音听写（本地 SenseVoice 离线转写）：模型目录留空回退仓库内
+    # backend/voice-models/；模型由 scripts/download_voice_model.py 显式
+    # 下载（sha256 校验），缺失时转写接口 fail-closed 返回 503。
+    voice_model_dir: str = ""
+    voice_max_duration_seconds: int = Field(default=120, ge=1, le=600)
+    voice_max_body_mb: int = Field(default=8, ge=1, le=64)
+    # 并发转写闸门：识别器常驻内存 ~0.9GB、每路解码再 +数百 MB，
+    # 且转写与全平台同步端点共享线程池——默认 2 路，超限 429 快速失败
+    voice_max_concurrent: int = Field(default=2, ge=1, le=16)
+    # 在线模型下载源 base（服务端固定，不接受客户端传 URL）；
+    # 国内部署可配 https://hf-mirror.com
+    voice_model_download_base: str = "https://huggingface.co"
     super_assistant_max_tool_rounds: int = 25
     # 自主 agent 模式（PLAN→EXECUTE→VERIFY，对标 small-rust-hermes run_agent）的
     # 迭代上限；独立于普通对话的 max_tool_rounds，仅在 agent_mode=True 时生效

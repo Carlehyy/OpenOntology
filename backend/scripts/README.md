@@ -62,6 +62,7 @@ n8n workflow/credential、对象存储和数据库残留。
 |---|---|---|
 | `migrations/migrate_v1_to_v2.py` | 先停止 API 和全部 worker，再执行 `uv run python scripts/migrations/migrate_v1_to_v2.py --v1-db <sqlite> --pg-url <postgres-url> --dry-run`；正式模式要求当前 Neo4j 配置真实可用 | 每个本体在同一 PostgreSQL 事务中写项目、Entity、Relation 与 `projecting` 围栏，提交后调用平台统一全量投影；成功才转为 `ready`。投影失败立即停止并返回非零，已提交项目保持非 ready，可在修复 Neo4j 后幂等重跑，或按迁移前备份恢复 |
 | `seed_deepseek_models.py` | `uv run python scripts/seed_deepseek_models.py <api-key>` 幂等创建/更新两个 DeepSeek 模型配置 | 写当前数据库；legacy CLI 只能从 argv 接收 key，可能暴露在历史/进程列表。优先使用受控 UI/API，只能在隔离管理终端执行本入口 |
+| `download_voice_model.py` | `uv run python scripts/download_voice_model.py [--mirror https://hf-mirror.com] [--force]`；从 HuggingFace 下载 SenseVoice int8 模型（~228MB）到 `VOICE_MODEL_DIR`（默认 `backend/voice-models/`） | 只下载模型文件并做 sha256 校验（幂等，已就绪自动跳过）；访问 HuggingFace 或镜像源，不触碰数据库与业务数据。容器内运行：`docker compose exec backend python scripts/download_voice_model.py` |
 
 `migrations/migrate_v1_to_v2.py` 仍被
 [`tests/v2/migrations/test_migration.py`](../tests/v2/migrations/test_migration.py)

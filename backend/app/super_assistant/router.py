@@ -232,6 +232,21 @@ def list_messages(
     )
 
 
+@router.get("/conversations/{conversation_id}/export")
+def export_conversation(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """导出完整会话审计 JSON（含全量消息与工具轨迹，供留档与排障）。"""
+    return _conversation_service.export_conversation(
+        conversation_id,
+        db,
+        current_user,
+        conversation_lookup_fn=_conversation,
+    )
+
+
 @router.post("/conversations/{conversation_id}/chat")
 def chat(
     conversation_id: str,

@@ -193,6 +193,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const fileUploads: string[] = []
   const fileDeletes: string[] = []
   const chatCalls: string[] = []
+  const exportCalls: string[] = []
+  const ticketCreates: string[] = []
   // 懒建会话（c-new-*）的消息落库：真实后端在 chat 事务里持久化 user/assistant 两条，
   // 流结束后前端会用服务端列表整体替换乐观行——mock 需同样保真，否则懒建路径的
   // 渲染收尾会被空列表抹掉（c-today 的落库由下方 chatDone 分支单独承载）。
@@ -216,7 +218,11 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifChannelUpdates: string[] = []
   const notifChannelTests: string[] = []
   const notifChannelDeletes: string[] = []
-  // 可变通知状态：PATCH/read-all/DELETE 会回写，summary 按状态现算
+  // 会话夹具 per-test 克隆：PATCH 写回只落在本次 mock 的副本上（归档/改名
+  // 持久化、2s 轮询不洗回，与真实后端一致）；模块级常量保持原样，用例间
+  // 零污染——同 worker 顺序执行下直接改 conversationsFixture 会把改名/
+  // 归档泄漏给后续用例的 aria-label 断言（retries=1 的全新 worker 掩盖它）
+  const conversations = conversationsFixture.map(item => ({ ...item }))
   const notificationsState = notificationsFixture.map(item => ({ ...item }))
   if (options.notificationsPagination) {
     notificationsState.push(
@@ -778,7 +784,9 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       const id = path.split('/')[5]
       const body = JSON.parse(request.postData() || '{}')
       patchBodies.push(request.postData() || '')
-      const source = conversationsFixture.find(item => item.id === id)
+      const source = conversations.find(item => item.id === id)
+      // 写回本用例副本：归档/改名持久化，2s 轮询不再洗回（与真实后端语义一致）
+      if (source) Object.assign(source, body)
       return json(route, { ...source, ...body })
     }
     const conversationMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)$/)
@@ -796,7 +804,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         createdConvs.unshift(row)
         return json(route, row, 201)
       }
-      return json(route, [...createdConvs, ...conversationsFixture])
+      return json(route, [...createdConvs, ...conversations])
     }
     if (/^\/api\/v2\/super-assistant\/conversations\/[^/]+\/messages$/.test(path)) {
       const id = path.split('/')[5]
@@ -817,6 +825,43 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       const persisted = chatPersisted.get(id)
       if (persisted) return json(route, persisted)
       return json(route, [])
+    }
+    // 会话审计导出：完整审计 JSON（与后端 export_conversation 同构，含会话审计字段）
+    const exportMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/export$/)
+    if (exportMatch && request.method() === 'GET') {
+      exportCalls.push(exportMatch[1])
+      const source = conversations.find(item => item.id === exportMatch[1])
+      return json(route, {
+        format: 'openontology.super-assistant.conversation',
+        version: 1,
+        exportedAt: at(0, 10),
+        conversation: {
+          ...(source ?? {}),
+          browser_source_id: null,
+          summary: null,
+          summary_message_count: 0,
+          messageCount: 2,
+          messages: [
+            { id: 'm-x1', conversation_id: exportMatch[1], role: 'user', content: '统计一下订单量', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9) },
+            { id: 'm-x2', conversation_id: exportMatch[1], role: 'assistant', content: '本月订单量 1200', status: 'complete', steps: [{ tool: 'query', arguments: {}, summary: '查库' }], token_usage: { inputTokens: 30, outputTokens: 12 }, created_at: at(0, 9) },
+          ],
+        },
+        summary: { messageCount: 2, toolStepCount: 1, totalTokens: 42 },
+      })
+    }
+    // 工单提交（会话右键「反馈问题」复用全站工单弹窗）；
+    // 形状与后端 ticket_out 对齐（camelCase、无 submitter 对象）
+    if (path === '/api/v2/tickets' && request.method() === 'POST') {
+      ticketCreates.push(request.postData() || '')
+      const body = JSON.parse(request.postData() || '{}')
+      return json(route, {
+        id: 'tk-e2e-1', ticketNo: 'OB-20261011-0001', title: body.title ?? '',
+        category: body.category ?? 'other', content: body.content ?? '',
+        status: 'pending', pageUrl: body.page_url ?? null,
+        submitterId: 'u-1', submitterName: 'workbench-tester',
+        attachmentCount: 0, progressLogs: [],
+        createdAt: at(0, 10), updatedAt: at(0, 10),
+      }, 201)
     }
     // 远程助手：列表/新增（邀请接入的助手在真实后端经公开兑换端点落库，
     // mock 里直接由列表夹具承载；手动配置走 POST）
@@ -1001,6 +1046,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     fileUploads,
     fileDeletes,
     chatCalls,
+    exportCalls,
+    ticketCreates,
     searchQueries,
     multicaPuts,
     multicaTests,
@@ -1046,7 +1093,7 @@ test('工作台骨架：九项入口齐备，近期会话单列表，归档折�
 
   await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
-  // 消息通知已上线：可点击且带未读徽章；任务实例仍为占位版块
+  // 消息通知与任务实例均已上线：可点击（任务实例打开弹窗）
   const notificationsEntry = page.getByRole('button', { name: /消息通知/ })
   await expect(notificationsEntry).toBeVisible()
   await expect(notificationsEntry).toBeEnabled()
@@ -1054,8 +1101,7 @@ test('工作台骨架：九项入口齐备，近期会话单列表，归档折�
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
   const taskInstancesEntry = page.getByRole('button', { name: /任务实例/ })
   await expect(taskInstancesEntry).toBeVisible()
-  await expect(taskInstancesEntry).toBeDisabled()
-  await expect(taskInstancesEntry).toContainText('规划中')
+  await expect(taskInstancesEntry).toBeEnabled()
   await expect(page.getByRole('button', { name: '知识图谱' })).toBeVisible()
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
   await expect(page.getByRole('button', { name: '外部集成' })).toBeVisible()
@@ -1908,7 +1954,7 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 
-  // 外部集成已是真实功能：左侧集成类型 tabs（multica / GitHub 占位），
+  // 外部集成已是真实功能：左侧集成类型 tabs（multica / 远程助手 / 文件夹同步），
   // multica 默认选中并走通「测试连接 → 选工作区 → 保存」
   await page.getByRole('button', { name: '外部集成' }).click()
   const integrationsDialog = page.getByRole('dialog')
@@ -1916,20 +1962,23 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
   await expect(multicaTab).toHaveAttribute('aria-selected', 'true')
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
+  // GitHub 集成已下线：左栏仅剩三个集成 tab
+  await expect(integrationsDialog.locator('[data-integrations-tab]')).toHaveCount(3)
+  await expect(integrationsDialog.locator('[data-integrations-tab="github"]')).toHaveCount(0)
   // 等入场缩放动画结束再量尺寸，避免动画中的包围盒参与比较
   await page.waitForTimeout(300)
 
-  // GitHub tab 为结构化占位：切过去显示规划中，切回 multica 表单仍在
+  // 切到文件夹同步 tab 显示脚本面板，切回 multica 表单仍在
   const shellBefore = await integrationsDialog.boundingBox()
-  await integrationsDialog.locator('[data-integrations-tab="github"]').click()
-  await expect(integrationsDialog.getByTestId('integrations-github-placeholder')).toBeVisible()
+  await integrationsDialog.locator('[data-integrations-tab="folder-sync"]').click()
+  await expect(integrationsDialog.getByTestId('folder-sync-card')).toBeVisible()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toHaveCount(0)
-  // 弹窗固定宽高：切 tab 前后尺寸不变；左栏加宽后 GitHub 全名不截断
+  // 弹窗固定宽高：切 tab 前后尺寸不变；左栏最长文案「文件夹同步」不截断
   const shellAfter = await integrationsDialog.boundingBox()
   expect(Math.abs(shellBefore!.height - shellAfter!.height)).toBeLessThanOrEqual(1)
   expect(Math.abs(shellBefore!.width - shellAfter!.width)).toBeLessThanOrEqual(1)
-  const githubLabel = integrationsDialog.locator('[data-integrations-tab="github"]').locator('span').first()
-  expect(await githubLabel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+  const folderSyncLabel = integrationsDialog.locator('[data-integrations-tab="folder-sync"]').locator('span').first()
+  expect(await folderSyncLabel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   await multicaTab.click()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
 
@@ -2763,4 +2812,94 @@ test('助手完成但无正文时如实展示「助手未返回文本」', async
   await expect(page.getByText('助手未返回文本')).toBeVisible()
   // 旧文案不应残留
   await expect(page.getByText('（无文本）')).toHaveCount(0)
+})
+
+test('会话右键菜单：快捷操作齐备且无分组标题', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  // —— 菜单结构：右键近期会话行弹出，分组标题已移除、十一项齐备 ——
+  await page.locator('[data-workbench-conversation="c-today"]').click({ button: 'right' })
+  const menu = page.locator('[data-ctx-menu="c-today"]')
+  await expect(menu).toBeVisible()
+  // 分组标签（会话操作/助手配置/会话审计）已按需求移除，不应再渲染
+  for (const label of ['会话操作', '助手配置', '会话审计']) {
+    await expect(menu.getByText(label, { exact: true })).toHaveCount(0)
+  }
+  for (const key of [
+    'rename', 'archive', 'delete',
+    'config-skills', 'config-mcp', 'config-tools', 'config-approval', 'config-memory', 'config-voice',
+    'export', 'feedback',
+  ]) {
+    await expect(menu.locator(`[data-ctx-item="${key}"]`)).toBeVisible()
+  }
+
+  // —— 助手配置快捷：配置 MCP → 面板打开并一次性落位到 MCP tab ——
+  await menu.locator('[data-ctx-item="config-mcp"]').click()
+  const configPanel = page.getByRole('region', { name: '助手配置' })
+  await expect(configPanel).toBeVisible()
+  // MCP tab 特征：面板 footer 出现「添加 MCP」入口（skills tab 为「新建 Skill」，approval/memory 无 footer）
+  await expect(page.getByRole('button', { name: '添加 MCP' })).toBeVisible()
+
+  // P1 回归：面板已打开时手动切走 tab，再次右键同 tab 快捷方式仍应重新落位
+  // （一次性 initialTab 消费即清空；若不清空则同值右键静默失效）
+  await configPanel.getByRole('button', { name: '记忆', exact: true }).click()
+  await expect(page.getByRole('button', { name: '添加 MCP' })).toBeHidden()
+  await page.locator('[data-workbench-conversation="c-today"]').click({ button: 'right' })
+  await page.locator('[data-ctx-menu="c-today"] [data-ctx-item="config-mcp"]').click()
+  await expect(page.getByRole('button', { name: '添加 MCP' })).toBeVisible()
+  await configPanel.getByLabel('关闭助手配置').click()
+  await expect(configPanel).toBeHidden()
+
+  // —— 归档：右键归档 → PATCH status，行真实移出近期组（写回持久，轮询不洗回）——
+  await page.locator('[data-workbench-conversation="c-today"]').click({ button: 'right' })
+  await page.locator('[data-ctx-menu="c-today"] [data-ctx-item="archive"]').click()
+  await expect.poll(() => mocks.patchBodies.at(-1) ?? '').toContain('"status":"archived"')
+  await expect(page.locator('[data-workbench-group="recent"] [data-workbench-conversation="c-today"]')).toHaveCount(0)
+
+  // —— 重命名：右键行 → 弹窗改名 → PATCH title，侧栏行即时回显 ——
+  await page.locator('[data-workbench-conversation="c-yesterday"]').click({ button: 'right' })
+  await page.locator('[data-ctx-menu="c-yesterday"] [data-ctx-item="rename"]').click()
+  const renameDialog = page.getByRole('dialog').filter({ hasText: '重命名会话' })
+  await expect(renameDialog).toBeVisible()
+  await renameDialog.locator('[data-rename-input]').fill('改名后的会话')
+  await renameDialog.getByRole('button', { name: '保存' }).click()
+  await expect.poll(() => mocks.patchBodies.at(-1) ?? '').toContain('"title":"改名后的会话"')
+  await expect(page.locator('[data-workbench-conversation="c-yesterday"]')).toContainText('改名后的会话')
+
+  // —— 导出：右键 → 下载完整审计 JSON，文件名带标题与会话 id 前缀 ——
+  const downloadPromise = page.waitForEvent('download')
+  await page.locator('[data-workbench-conversation="c-earlier"]').click({ button: 'right' })
+  await page.locator('[data-ctx-menu="c-earlier"] [data-ctx-item="export"]').click()
+  await expect.poll(() => mocks.exportCalls.length).toBe(1)
+  const download = await downloadPromise
+  expect(mocks.exportCalls).toContain('c-earlier')
+  expect(await download.suggestedFilename()).toBe('上周数据摸底-c-earlie.json')
+  // 下载内容断言（steward 导出同范式）：前端透传完整审计载荷，而非会话列表对象
+  const exportPath = test.info().outputPath('conversation-export.json')
+  await download.saveAs(exportPath)
+  const exported = JSON.parse(await import('node:fs/promises').then(fs => fs.readFile(exportPath, 'utf8')))
+  expect(exported.format).toBe('openontology.super-assistant.conversation')
+  expect(exported.conversation.messageCount).toBe(2)
+  expect(exported.conversation.messages[1].steps[0].tool).toBe('query')
+  expect(exported.summary).toEqual({ messageCount: 2, toolStepCount: 1, totalTokens: 42 })
+
+  // —— 反馈问题：右键 → 打开全站工单提交弹窗（提交链路由 tickets.spec 覆盖）——
+  // 用 c-yesterday：归档段把 c-today 持久移入归档组（mock 写回后不再洗回）
+  await page.locator('[data-workbench-conversation="c-yesterday"]').click({ button: 'right' })
+  await page.locator('[data-ctx-menu="c-yesterday"] [data-ctx-item="feedback"]').click()
+  const ticketDialog = page.getByRole('dialog').filter({ hasText: '反馈内容' })
+  await expect(ticketDialog).toBeVisible()
+  await ticketDialog.getByRole('button', { name: /关闭|取消/ }).first().click()
+
+  // —— 归档区行右键对称：第一组切换为「恢复会话」，删除仍走确认弹窗 ——
+  await page.getByRole('button', { name: '归档会话', exact: true }).click()
+  await page.locator('[data-workbench-conversation="c-archived"]').click({ button: 'right' })
+  const archivedMenu = page.locator('[data-ctx-menu="c-archived"]')
+  await expect(archivedMenu.locator('[data-ctx-item="archive"]')).toContainText('恢复会话')
+  await archivedMenu.locator('[data-ctx-item="delete"]').click()
+  const confirmDelete = page.getByRole('dialog').filter({ hasText: '确定删除会话' })
+  await expect(confirmDelete).toBeVisible()
+  await confirmDelete.getByRole('button', { name: '取消' }).click()
 })

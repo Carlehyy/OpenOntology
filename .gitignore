@@ -22,6 +22,8 @@ deploy/production.dependencies.env
 uploads/
 storage/
 backend/data/
+# 语音听写模型（~230MB，由脚本显式下载）
+backend/voice-models/
 
 # Node
 node_modules/

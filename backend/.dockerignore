@@ -7,5 +7,7 @@ uploads
 storage
 tests
 scripts
+!scripts/download_voice_model.py
+voice-models
 README.md
 requirements.txt
