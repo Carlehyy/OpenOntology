@@ -6,7 +6,8 @@ import { expectSameBoundingBox } from './support/geometry'
 // 本体治理跳后台并返回。全部接口本地 mock，不触真实后端。
 // 本 spec 另覆盖：分组限量展开、naive UTC 时区显示、行悬停不抖动、
 // 会话附件上传/移除/位于输入框上方与跨会话隔离、流式生成跨会话隔离、ReUI 模型选择器、
-// 删除确认弹窗、新建会话空会话去重、空态品牌文案与占位符、配置面板白底、
+// 删除确认弹窗、新建会话不落库（点击仅清空聊天区、发送首条消息才建会话）、
+// 空态品牌文案与占位符、配置面板白底、
 // 重命名 blur 取消、知识图谱页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
 // 知识图谱过滤/节点详情/邻域检索高亮）、外部集成（multica 配置弹窗 + /multica:
 // 命令提示的配置门控）、消息通知弹窗（未读徽章、tab 筛选、Markdown 详情与附件、
@@ -192,6 +193,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const fileUploads: string[] = []
   const fileDeletes: string[] = []
   const chatCalls: string[] = []
+  // 懒建会话（c-new-*）的消息落库：真实后端在 chat 事务里持久化 user/assistant 两条，
+  // 流结束后前端会用服务端列表整体替换乐观行——mock 需同样保真，否则懒建路径的
+  // 渲染收尾会被空列表抹掉（c-today 的落库由下方 chatDone 分支单独承载）。
+  const chatPersisted = new Map<string, Array<Record<string, unknown>>>()
   const searchQueries: string[] = []
   const createdConvs: Array<Record<string, unknown>> = []
   const multicaPuts: Array<Record<string, unknown>> = []
@@ -557,9 +562,17 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     const chatMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/chat$/)
     if (chatMatch && request.method() === 'POST') {
       chatCalls.push(chatMatch[1])
+      const convId = chatMatch[1]
+      const chatBody = JSON.parse(request.postData() || '{}')
       const reply = '你好，我是超级助手'
       const fulfill = () => {
         chatDone = true
+        if (convId !== 'c-today') {
+          chatPersisted.set(convId, [
+            { id: `m-${convId}-u`, conversation_id: convId, role: 'user', content: String(chatBody.message ?? ''), status: 'complete', steps: [], token_usage: {}, created_at: at(0, 12) },
+            { id: `m-${convId}-a`, conversation_id: convId, role: 'assistant', content: reply, status: 'complete', steps: [], token_usage: {}, created_at: at(0, 12) },
+          ])
+        }
         return route.fulfill({
           status: 200,
           contentType: 'text/event-stream',
@@ -790,6 +803,9 @@ async function mockApis(page: Page, options: MockOptions = {}) {
           { id: 'm-e2', conversation_id: 'c-earlier', role: 'assistant', content: '上周的答复', status: 'complete', steps: [], token_usage: {}, created_at: at(5, 10) },
         ])
       }
+      // 懒建会话的消息在 chat 完成后随 chatPersisted 落库可见，流式期间仍返回空列表
+      const persisted = chatPersisted.get(id)
+      if (persisted) return json(route, persisted)
       return json(route, [])
     }
     // 远程助手：列表/新增（邀请接入的助手在真实后端经公开兑换端点落库，
@@ -1637,7 +1653,7 @@ test('删除会话走 ReUI 确认弹窗（非 window.confirm）', async ({ page 
   await expect(page.locator('[data-workbench-conversation="c-earlier"]')).toHaveCount(0)
 })
 
-test('新建会话去重：空会话或全新视图下点击不再创建新会话', async ({ page }) => {
+test('新建会话不落库：有消息会话中点击仅清空聊天区，发送首条消息才建会话', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
@@ -1648,17 +1664,38 @@ test('新建会话去重：空会话或全新视图下点击不再创建新会�
   await page.waitForTimeout(300)
   expect(mocks.createCalls).toHaveLength(0)
 
-  // 切到有消息的 c-earlier：点击新建会话创建新会话并选中
+  // 切到有消息的 c-earlier：点击新建会话仅切到未落地的新会话视图，不建会话
   await page.locator('[data-workbench-conversation="c-earlier"] button').first().click()
   await expect(page.getByText('上周的答复')).toBeVisible()
   await page.getByRole('button', { name: '新建会话' }).click()
-  await expect.poll(() => mocks.createCalls.length).toBe(1)
-  await expect(page.locator('[data-workbench-conversation="c-new-1"]')).toHaveCount(1)
+  await page.waitForTimeout(300)
+  expect(mocks.createCalls).toHaveLength(0)
+  await expect(page.locator('[data-workbench-conversation="c-new-1"]')).toHaveCount(0)
+  // 聊天区已清空：历史消息不可见，回到品牌空态与标题占位，地址栏会话参数移除
+  await expect(page.getByText('上周的答复')).toHaveCount(0)
+  await expect(page.getByText('SuperAgent 工作空间 2.0', { exact: true })).toBeVisible()
+  await expect(page.getByText('新的超级助手会话')).toBeVisible()
+  await expect(page).not.toHaveURL(/conversation=/)
 
-  // 新会话仍是空会话：再次点击不再创建
+  // 未落地视图下再次点击：仍不创建
   await page.getByRole('button', { name: '新建会话' }).click()
   await page.waitForTimeout(300)
-  expect(mocks.createCalls).toHaveLength(1)
+  expect(mocks.createCalls).toHaveLength(0)
+
+  // 未落地视图下外部带同值深链（如悬浮窗跳回刚离开的会话）：不被已消费标记短路，正确切回
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+  await expect(page.getByText('上周的答复')).toBeVisible()
+  // 再次进入未落地视图，随后走发送路径
+  await page.getByRole('button', { name: '新建会话' }).click()
+  await page.waitForTimeout(300)
+  expect(mocks.createCalls).toHaveLength(0)
+
+  // 真正创建会话的时机是发送首条消息：懒建后消息投递进新会话并收到回复
+  await page.getByRole('textbox', { name: '向超级助手发送消息' }).fill('第一条消息')
+  await page.getByRole('button', { name: '发送消息' }).click()
+  await expect.poll(() => mocks.createCalls.length).toBe(1)
+  await expect.poll(() => mocks.chatCalls).toEqual(['c-new-1'])
+  await expect(page.getByText('你好，我是超级助手')).toBeVisible()
 })
 
 test('空态只保留品牌一句话，输入框占位符不混入用户输入', async ({ page }) => {
