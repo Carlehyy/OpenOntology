@@ -22,8 +22,8 @@ export interface VoiceDictation {
   /** 已录制时长 */
   elapsedMs: number
   start: () => Promise<void>
-  /** 停止录音并转写；sendAfter=true 时转写文本插入后立即发送 */
-  finish: (sendAfter: boolean) => Promise<void>
+  /** 停止录音并转写，文本经 onTranscript 插入输入框（不自动发送） */
+  finish: () => Promise<void>
   /** 取消并释放麦克风，丢弃录音 */
   cancel: () => void
 }
@@ -48,7 +48,7 @@ function notifyError(message: string) {
  */
 export function useVoiceDictation(options: {
   getLanguage: () => string
-  onTranscript: (text: string, meta: { sendAfter: boolean }) => void
+  onTranscript: (text: string) => void
 }): VoiceDictation {
   const [phase, setPhase] = useState<DictationPhase>('idle')
   const [level, setLevel] = useState(0)
@@ -79,7 +79,7 @@ export function useVoiceDictation(options: {
     setPhase('idle')
   }, [stopPolling])
 
-  const finishRef = useRef<(sendAfter: boolean) => Promise<void>>(async () => {})
+  const finishRef = useRef<() => Promise<void>>(async () => {})
 
   // 路由切走/组件卸载：录音中必须立刻释放麦克风，不能只停轮询定时器
   useEffect(() => () => {
@@ -110,7 +110,7 @@ export function useVoiceDictation(options: {
         if (elapsed >= MAX_RECORDING_SECONDS * 1000 && !autoStoppedRef.current) {
           autoStoppedRef.current = true
           toast.info('已达到单次录音上限，自动停止并转写')
-          void finishRef.current(false)
+          void finishRef.current()
         }
       }, 100)
     } catch (error) {
@@ -122,7 +122,7 @@ export function useVoiceDictation(options: {
     }
   }, [])
 
-  const finish = useCallback(async (sendAfter: boolean) => {
+  const finish = useCallback(async () => {
     const recorder = recorderRef.current
     if (!recorder) return
     setPhase('transcribing')
@@ -130,7 +130,7 @@ export function useVoiceDictation(options: {
       const recording = await recorder.stop()
       const result = await superAssistantApi.transcribeVoice(recording.wav, optionsRef.current.getLanguage())
       if (result.text) {
-        optionsRef.current.onTranscript(result.text, { sendAfter })
+        optionsRef.current.onTranscript(result.text)
       } else {
         toast.info('没有识别到语音内容', { description: '请靠近麦克风后重试' })
       }

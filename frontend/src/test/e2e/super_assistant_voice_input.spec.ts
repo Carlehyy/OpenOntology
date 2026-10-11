@@ -199,7 +199,7 @@ const micButton = (page: Page) => page.getByTestId('super-assistant-voice-button
 const composerTextarea = (page: Page) => page.getByTestId('super-assistant-composer').locator('textarea')
 
 test.describe('超级助手语音听写', () => {
-  test('转成文字：录音→转写→插入输入框光标处，不自动发送', async ({ page }) => {
+  test('转成文字：录音→转写→插入光标处，二次听写接入新光标', async ({ page }) => {
     await seedAuth(page)
     await stubAudioApis(page, { secureContext: true })
     const mocks = await mockApis(page)
@@ -215,40 +215,29 @@ test.describe('超级助手语音听写', () => {
     await micButton(page).click()
     const bar = page.getByTestId('super-assistant-voice-recording-bar')
     await expect(bar).toBeVisible()
-    await expect(composerTextarea(page)).toBeHidden()
+    // cc-haha 式：输入框与草稿在录音期间保留可见
+    await expect(composerTextarea(page)).toBeVisible()
     // 误触保护窗口（<0.4s）之外再停止
     await page.waitForTimeout(700)
-    await bar.getByRole('button', { name: '停止录音并转成文字' }).click()
+    await bar.getByTestId('super-assistant-voice-stop-button').click()
 
-    await expect(composerTextarea(page)).toBeVisible()
     await expect(bar).toBeHidden()
     // 插入位置在光标锚点（“整理”中间），而不是行尾
     await expect(composerTextarea(page)).toHaveValue(`请整${TRANSCRIPT}理`)
 
-    expect(mocks.transcribeCalls).toHaveLength(1)
-    expect(mocks.transcribeCalls[0].language).toBe('auto')
-    expect(mocks.transcribeCalls[0].bodySize).toBeGreaterThan(44) // 完整 WAV 头 + 样本
-    // 未选择“停止并发送”：不触发对话
-    expect(mocks.chatBodies).toHaveLength(0)
-  })
-
-  test('停止并发送：转写插入后直接提交对话', async ({ page }) => {
-    await seedAuth(page)
-    await stubAudioApis(page, { secureContext: true })
-    const mocks = await mockApis(page)
-    await openWorkbench(page)
-
+    // 二次听写：插入锚点应更新到上一段转写末尾，而不是停留在旧光标（回归：
+    // 曾因锚点未更新导致第二段插到最前面）
     await micButton(page).click()
-    const bar = page.getByTestId('super-assistant-voice-recording-bar')
     await expect(bar).toBeVisible()
     await page.waitForTimeout(700)
-    await bar.getByRole('button', { name: '停止录音，转写后直接发送' }).click()
+    await bar.getByTestId('super-assistant-voice-stop-button').click()
+    await expect(composerTextarea(page)).toHaveValue(`请整${TRANSCRIPT}${TRANSCRIPT}理`)
 
-    // 用户消息（转写文本）出现在对话区，助手回复流式完成
-    await expect(page.getByText(TRANSCRIPT).first()).toBeVisible()
-    await expect(page.getByText('收到，我来整理。').first()).toBeVisible()
-    expect(mocks.chatBodies).toHaveLength(1)
-    expect(mocks.chatBodies[0]).toContain(TRANSCRIPT)
+    expect(mocks.transcribeCalls).toHaveLength(2)
+    expect(mocks.transcribeCalls[0].language).toBe('auto')
+    expect(mocks.transcribeCalls[0].bodySize).toBeGreaterThan(44) // 完整 WAV 头 + 样本
+    // 结束录音只插入文本，不自动发送
+    expect(mocks.chatBodies).toHaveLength(0)
   })
 
   test('Esc 取消录音：不发起转写，回到输入框', async ({ page }) => {
@@ -276,7 +265,7 @@ test.describe('超级助手语音听写', () => {
     const bar = page.getByTestId('super-assistant-voice-recording-bar')
     await expect(bar).toBeVisible()
     await page.waitForTimeout(700)
-    await bar.getByRole('button', { name: '停止录音并转成文字' }).click()
+    await bar.getByTestId('super-assistant-voice-stop-button').click()
 
     await expect(composerTextarea(page)).toBeVisible()
     await expect(page.getByText('语音听写失败').first()).toBeVisible()
@@ -290,14 +279,20 @@ test.describe('超级助手语音听写', () => {
     const mocks = await mockApis(page)
     await openWorkbench(page)
 
-    await micButton(page).click()
-    await micButton(page).click({ force: true }) // disabled 生效前的窗口期连点
+    // 同步双击直达防重入守卫：录音条会替换按钮行，第二次点击必须发生在
+    // getUserMedia 返回之前（disabled 生效前的窗口期）
+    await page.evaluate(() => {
+      const button = document.querySelector('[data-testid="super-assistant-voice-button"]') as HTMLButtonElement | null
+      if (!button) throw new Error('voice button not found')
+      button.click()
+      button.click()
+    })
     const bar = page.getByTestId('super-assistant-voice-recording-bar')
     await expect(bar).toBeVisible()
     const gumCalls = await page.evaluate(() => (window as unknown as Record<string, number>).__voiceGumCalls)
     expect(gumCalls).toBe(1)
     await page.waitForTimeout(700)
-    await bar.getByRole('button', { name: '停止录音并转成文字' }).click()
+    await bar.getByTestId('super-assistant-voice-stop-button').click()
     await expect(composerTextarea(page)).toHaveValue(TRANSCRIPT)
     expect(mocks.transcribeCalls).toHaveLength(1)
   })
@@ -344,7 +339,7 @@ test.describe('超级助手语音听写', () => {
     const bar = page.getByTestId('super-assistant-voice-recording-bar')
     await expect(bar).toBeVisible()
     await page.waitForTimeout(700)
-    await bar.getByRole('button', { name: '停止录音并转成文字' }).click()
+    await bar.getByTestId('super-assistant-voice-stop-button').click()
     await expect(composerTextarea(page)).toHaveValue(TRANSCRIPT)
     expect(mocks.transcribeCalls).toHaveLength(1)
     expect(mocks.transcribeCalls[0].language).toBe('zh')

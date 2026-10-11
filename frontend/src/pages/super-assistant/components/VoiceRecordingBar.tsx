@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { AudioLines, Loader2, Mic, Send, Square, X } from 'lucide-react'
+import { Loader2, Mic, Square, X } from 'lucide-react'
 
 import type { VoiceDictation } from '../useVoiceDictation'
 
@@ -14,20 +14,21 @@ function formatDuration(ms: number): string {
 }
 
 /**
- * 录音态输入条：替换输入框显示（Esc 取消、点击停止并转写）。
- * 音量轨迹是响度可视化（峰值渐隐），不是识别中间结果。
+ * 录音条（cc-haha 式）：录音期间原地替换输入框底部按钮行——输入框与
+ * 草稿保持可见，只留「取消」与「结束录音」两个图标键。音量轨迹是响度
+ * 可视化（峰值渐隐），不是识别中间结果。
  */
 export default function VoiceRecordingBar({
   dictation,
-  onFinish,
+  onStop,
   onCancel,
 }: {
   dictation: VoiceDictation
-  onFinish: (sendAfter: boolean) => void
+  onStop: () => void
   onCancel: () => void
 }) {
   const [trail, setTrail] = useState<number[]>([])
-  const barRef = useRef<HTMLDivElement>(null)
+  const hostRef = useRef<HTMLDivElement>(null)
 
   const { phase, level, elapsedMs } = dictation
   const transcribing = phase === 'transcribing'
@@ -56,27 +57,35 @@ export default function VoiceRecordingBar({
 
   return (
     <div
-      ref={barRef}
+      ref={hostRef}
       data-testid="super-assistant-voice-recording-bar"
-      className="flex min-h-11 items-center gap-3 px-3 pb-1.5 pt-2.5"
+      className="flex min-h-12 items-center gap-3 px-2.5 py-2"
     >
-      <div className="flex shrink-0 items-center gap-2">
-        <span className="relative flex h-7 w-7 items-center justify-center rounded-full bg-brand-soft text-brand-ink">
-          {transcribing ? <Loader2 size={14} className="animate-spin" /> : <Mic size={14} />}
-          {!transcribing && (
-            <span
-              aria-hidden="true"
-              className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full bg-red-500 motion-reduce:animate-none"
-            />
-          )}
-        </span>
-        <span className="font-mono text-xs tabular-nums text-[var(--color-text-secondary)]" aria-live="polite">
-          {transcribing ? '转写中…' : formatDuration(elapsedMs)}
-        </span>
-      </div>
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={transcribing}
+        aria-label="取消录音"
+        title="取消录音（Esc）"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <X size={15} />
+      </button>
+      <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-soft text-brand-ink">
+        {transcribing ? <Loader2 size={14} className="animate-spin" /> : <Mic size={14} />}
+        {!transcribing && (
+          <span
+            aria-hidden="true"
+            className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full bg-red-500 motion-reduce:animate-none"
+          />
+        )}
+      </span>
+      <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--color-text-secondary)]" aria-live="polite">
+        {transcribing ? '转写中…' : formatDuration(elapsedMs)}
+      </span>
       <div
         aria-hidden="true"
-        className="flex h-7 min-w-0 flex-1 items-center justify-center gap-[3px] overflow-hidden"
+        className="flex h-7 min-w-0 flex-1 items-center gap-[3px] overflow-hidden"
       >
         {trail.map((sample, index) => (
           <span
@@ -85,42 +94,18 @@ export default function VoiceRecordingBar({
             style={{ height: `${Math.max(8, Math.min(100, sample * 140))}%`, opacity: 0.35 + (index / trail.length) * 0.65 }}
           />
         ))}
-        {trail.length === 0 && <AudioLines size={16} className="text-[var(--color-text-tertiary)]" />}
       </div>
-      <div className="flex shrink-0 items-center gap-1.5">
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={transcribing}
-          aria-label="取消录音"
-          title="取消录音（Esc）"
-          className="flex h-8 w-8 items-center justify-center rounded-lg border border-border text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <X size={15} />
-        </button>
-        <button
-          type="button"
-          onClick={() => onFinish(false)}
-          disabled={transcribing}
-          aria-label="停止录音并转成文字"
-          title="停止录音并转成文字"
-          className="flex h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <Square size={11} fill="currentColor" />
-          转成文字
-        </button>
-        <button
-          type="button"
-          onClick={() => onFinish(true)}
-          disabled={transcribing}
-          aria-label="停止录音，转写后直接发送"
-          title="停止录音，转写后直接发送"
-          className="flex h-8 items-center gap-1.5 rounded-lg bg-brand px-2.5 text-xs font-medium text-white transition-all hover:bg-brand-deep active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
-        >
-          <Send size={11} />
-          停止并发送
-        </button>
-      </div>
+      <button
+        type="button"
+        onClick={onStop}
+        disabled={transcribing}
+        aria-label="结束录音并转成文字"
+        title="结束录音并转成文字"
+        data-testid="super-assistant-voice-stop-button"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand text-white transition-all hover:bg-brand-deep active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+      >
+        {transcribing ? <Loader2 size={13} className="animate-spin" /> : <Square size={12} fill="currentColor" />}
+      </button>
     </div>
   )
 }
