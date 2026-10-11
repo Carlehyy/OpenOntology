@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { CircleAlert, CircleCheck, Loader2, Mic, RefreshCw } from 'lucide-react'
+import { CircleAlert, CircleCheck, Download, Loader2, Mic, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { superAssistantApi, type VoiceStatus } from '@/api/superAssistant'
+import { useAuthStore } from '@/stores/authStore'
 import { voiceCaptureSupported } from '@/lib/voice/recorder'
 import {
   VOICE_LANGUAGES,
@@ -27,6 +28,7 @@ export default function VoiceTab() {
   const [supported] = useState(voiceCaptureSupported)
   const [status, setStatus] = useState<VoiceStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
+  const isAdmin = useAuthStore(state => state.user?.role === 'admin')
 
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true)
@@ -42,6 +44,32 @@ export default function VoiceTab() {
   useEffect(() => {
     void refreshStatus()
   }, [refreshStatus])
+
+  const startDownload = async () => {
+    try {
+      await superAssistantApi.downloadVoiceModel()
+      await refreshStatus()
+    } catch (error) {
+      toast.error('模型下载启动失败', { description: errorText(error) })
+    }
+  }
+
+  const cancelDownload = async () => {
+    try {
+      await superAssistantApi.cancelVoiceModelDownload()
+      await refreshStatus()
+    } catch (error) {
+      toast.error('取消失败', { description: errorText(error) })
+    }
+  }
+
+  // 下载进行中：1.5s 轮询进度，直到离开 running 态（完成/失败/取消）
+  const downloading = status?.download.state === 'running'
+  useEffect(() => {
+    if (!downloading) return
+    const timer = window.setInterval(() => { void refreshStatus() }, 1500)
+    return () => window.clearInterval(timer)
+  }, [downloading, refreshStatus])
 
   return (
     <div className="grid gap-4" data-testid="voice-tab">
@@ -124,11 +152,51 @@ export default function VoiceTab() {
               ) : (
                 <>
                   <CircleAlert size={13} className="shrink-0 text-amber-500" />
-                  识别模型未下载：转写接口将返回 503，请在服务器执行
-                  <code className="rounded bg-[var(--color-bg-base)] px-1 py-0.5 font-mono text-[10px]">python scripts/download_voice_model.py</code>
+                  识别模型未下载：转写接口将返回 503
                 </>
               )}
             </p>
+            {!status.model_present && isAdmin && !downloading && (
+              <button
+                type="button"
+                onClick={() => { void startDownload() }}
+                data-testid="voice-model-download-button"
+                className="mt-2 inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand px-3 text-xs font-medium text-white transition-all hover:bg-brand-deep active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+              >
+                <Download size={12} />
+                在线下载模型（约 228MB）
+              </button>
+            )}
+            {downloading && (
+              <div className="mt-2 space-y-1.5" data-testid="voice-model-download-progress">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5">
+                    <Loader2 size={12} className="animate-spin text-brand" />
+                    正在下载 {status.download.current_file ?? ''}（{Math.round(status.download.received_bytes / 1024 / 1024)}MB / {Math.round(status.download.total_bytes / 1024 / 1024)}MB）
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => { void cancelDownload() }}
+                    aria-label="取消模型下载"
+                    className="h-6 shrink-0 rounded-md px-2 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    取消
+                  </button>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-[var(--color-bg-base)]">
+                  <div
+                    className="h-full rounded-full bg-brand transition-[width] duration-300"
+                    style={{ width: `${Math.min(100, Math.round((status.download.received_bytes / status.download.total_bytes) * 100))}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            {status.download.state === 'failed' && (
+              <p className="mt-1 text-[11px] text-[var(--color-danger)]" data-testid="voice-model-download-error">
+                下载失败：{status.download.error}（可重试；服务器网络受限时可在服务器执行
+                <code className="mx-1 rounded bg-[var(--color-bg-base)] px-1 font-mono text-[10px]">python scripts/download_voice_model.py --mirror https://hf-mirror.com</code>）
+              </p>
+            )}
             <p className="text-[var(--color-text-tertiary)]">
               单次上限 {status.max_duration_seconds} 秒 / {Math.round(status.max_body_bytes / 1024 / 1024)}MB · 采样率 {status.sample_rate / 1000}kHz
             </p>

@@ -107,11 +107,28 @@ async function stubAudioApis(page: Page, options: { secureContext: boolean }) {
 interface VoiceMocks {
   transcribeCalls: Array<{ language: string; bodySize: number }>
   chatBodies: string[]
+  downloadCalls: string[]
+  downloadCancels: string[]
 }
 
-async function mockApis(page: Page, options: { transcribeStatus?: number } = {}): Promise<VoiceMocks> {
+async function mockApis(
+  page: Page,
+  options: { transcribeStatus?: number; modelReady?: boolean } = {},
+): Promise<VoiceMocks> {
   const transcribeCalls: Array<{ language: string; bodySize: number }> = []
   const chatBodies: string[] = []
+  // 在线下载状态机：start 后 running（进度 60MB），下一次 status 轮询翻为 done+ready
+  const downloadCalls: string[] = []
+  const downloadCancels: string[] = []
+  let statusPolls = 0
+  let postDownloadPolls = 0
+  const downloadState: { value: { ready: boolean; snapshot: Record<string, unknown> } } = {
+    value: {
+      ready: options.modelReady !== false,
+      snapshot: { state: 'idle', received_bytes: 0, total_bytes: 239_549_735, current_file: null, error: null },
+    },
+  }
+  void statusPolls
   let conversationSeq = 0
   // 对话完成后 messages 查询返回已交换的消息：否则 2s 轮询同步会用空列表
   // 把乐观插入的用户/助手消息擦掉（workbench spec 的 chatDone 同款语义）
@@ -174,11 +191,38 @@ async function mockApis(page: Page, options: { transcribeStatus?: number } = {})
       return json(route, { configured: false, enabled: false, base_url: '', workspace_id: '', token_set: false, commands: [], last_test_status: null, last_test_message: null, last_tested_at: null })
     }
     if (path === '/api/v2/super-assistant/voice/status') {
+      statusPolls += 1
+      if (downloadState.value.snapshot.state === 'running') postDownloadPolls += 1
+      // POST 后第 2 次轮询翻为 done：进度条至少渲染一个轮询周期
+      if (downloadState.value.snapshot.state === 'running' && postDownloadPolls >= 2) {
+        downloadState.value = {
+          ready: true,
+          snapshot: { state: 'done', received_bytes: 239_549_735, total_bytes: 239_549_735, current_file: null, error: null },
+        }
+      }
       return json(route, {
-        ready: true, model_present: true, model_file: 'model.int8.onnx',
+        ready: downloadState.value.ready, model_present: downloadState.value.ready,
+        model_file: 'model.int8.onnx',
         languages: ['auto', 'zh', 'en', 'ja', 'ko', 'yue'], sample_rate: 16000,
         max_duration_seconds: 120, max_body_bytes: 8388608,
+        download: downloadState.value.snapshot,
       })
+    }
+    if (path === '/api/v2/super-assistant/voice/model/download' && request.method() === 'POST') {
+      downloadCalls.push('start')
+      postDownloadPolls = 0
+      downloadState.value = {
+        ready: false,
+        snapshot: {
+          state: 'running', received_bytes: 60_000_000, total_bytes: 239_549_735,
+          current_file: 'model.int8.onnx', error: null,
+        },
+      }
+      return json(route, { started: true }, 202)
+    }
+    if (path === '/api/v2/super-assistant/voice/model/download/cancel' && request.method() === 'POST') {
+      downloadCancels.push('cancel')
+      return json(route, { cancelled: true })
     }
     if (path === '/api/v2/super-assistant/voice/transcribe' && request.method() === 'POST') {
       const language = new URL(request.url()).searchParams.get('language') || 'auto'
@@ -194,7 +238,7 @@ async function mockApis(page: Page, options: { transcribeStatus?: number } = {})
     }
     return route.continue()
   })
-  return { transcribeCalls, chatBodies }
+  return { transcribeCalls, chatBodies, downloadCalls, downloadCancels }
 }
 
 async function openWorkbench(page: Page) {
@@ -340,6 +384,28 @@ test.describe('超级助手语音听写', () => {
     await page.getByRole('button', { name: '语音设置' }).click()
     await expect(page.getByTestId('voice-tab')).toBeVisible()
     await expect(page.getByTestId('voice-unsupported-note')).toContainText('HTTPS')
+  })
+
+  test('在线下载模型：管理员一键下载→进度轮询→就绪', async ({ page }) => {
+    await seedAuth(page)
+    await stubAudioApis(page, { secureContext: true })
+    const mocks = await mockApis(page, { modelReady: false })
+    await openWorkbench(page)
+
+    await page.getByRole('button', { name: /打开助手配置|助手配置/ }).first().click()
+    await page.getByRole('button', { name: '语音设置' }).click()
+    await expect(page.getByTestId('voice-model-status')).toContainText('未下载')
+
+    const downloadButton = page.getByTestId('voice-model-download-button')
+    await expect(downloadButton).toBeVisible()
+    await downloadButton.click()
+    expect(mocks.downloadCalls).toHaveLength(1)
+
+    // running 进度条出现；1.5s 轮询两次后翻为 done → 模型已就绪
+    await expect(page.getByTestId('voice-model-download-progress')).toBeVisible()
+    await expect(page.getByTestId('voice-model-status')).toContainText('已就绪', { timeout: 8000 })
+    await expect(page.getByTestId('voice-model-download-progress')).toHaveCount(0)
+    await expect(page.getByTestId('voice-model-download-button')).toHaveCount(0)
   })
 
   test('偏好关闭隐藏按钮；语音 tab 开关与语言透传', async ({ page }) => {

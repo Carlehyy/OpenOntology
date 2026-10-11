@@ -195,6 +195,7 @@ export default function WorkbenchSidebar({
   onSetArchived,
   onOpenSearch,
   onOpenScheduled,
+  onOpenTaskInstances,
   onOpenNotifications,
   onIntegrationsSaved,
   onRename,

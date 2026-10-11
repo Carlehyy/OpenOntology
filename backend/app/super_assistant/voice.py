@@ -11,9 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
 from app.auth.models import User
-from app.deps import get_current_user
-from app.super_assistant import voice_service
-from app.super_assistant.schemas import VoiceStatusOut, VoiceTranscriptionOut
+from app.deps import get_current_user, require_admin
+from app.super_assistant import voice_model_download, voice_service
+from app.super_assistant.schemas import (
+    VoiceModelDownloadOut,
+    VoiceStatusOut,
+    VoiceTranscriptionOut,
+)
 from app.super_assistant.voice_service import (
     AudioTooLongError,
     BodyTooLargeError,
@@ -127,9 +131,30 @@ async def voice_transcribe(
     )
 
 
+@router.post("/voice/model/download", status_code=202)
+def voice_model_download_start(
+    current_user: User = Depends(require_admin),
+) -> dict:
+    # cc-haha 式显式下载：绝不静默后台拉取；重复触发不重入
+    if not voice_model_download.start():
+        raise HTTPException(status_code=409, detail="模型下载已在进行中")
+    logger.info("voice model download started user=%s", current_user.id)
+    return {"started": True}
+
+
+@router.post("/voice/model/download/cancel")
+def voice_model_download_cancel(
+    current_user: User = Depends(require_admin),
+) -> dict:
+    cancelled = voice_model_download.cancel()
+    logger.info("voice model download cancel requested user=%s accepted=%s", current_user.id, cancelled)
+    return {"cancelled": cancelled}
+
+
 @router.get("/voice/status", response_model=VoiceStatusOut)
 def voice_status(current_user: User = Depends(get_current_user)) -> VoiceStatusOut:
     state = voice_service.status()
+    progress = voice_model_download.snapshot()
     return VoiceStatusOut(
         ready=state.ready,
         model_present=state.model_present,
@@ -138,4 +163,11 @@ def voice_status(current_user: User = Depends(get_current_user)) -> VoiceStatusO
         sample_rate=state.sample_rate,
         max_duration_seconds=state.max_duration_seconds,
         max_body_bytes=state.max_body_bytes,
+        download=VoiceModelDownloadOut(
+            state=progress.state,
+            received_bytes=progress.received_bytes,
+            total_bytes=progress.total_bytes,
+            current_file=progress.current_file,
+            error=progress.error,
+        ),
     )

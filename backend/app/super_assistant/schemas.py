@@ -820,8 +820,18 @@ class VoiceTranscriptionOut(BaseModel):
     language: str
 
 
+class VoiceModelDownloadOut(BaseModel):
+    """在线模型下载进度快照（cc-haha 式显式下载）。"""
+
+    state: str
+    received_bytes: int
+    total_bytes: int
+    current_file: str | None = None
+    error: str | None = None
+
+
 class VoiceStatusOut(BaseModel):
-    """语音听写后端就绪状态（模型是否已下载、限额等）。
+    """语音听写后端就绪状态（模型是否已下载、限额、下载进度等）。
     不暴露服务器文件系统路径。"""
 
     ready: bool
@@ -831,3 +841,4 @@ class VoiceStatusOut(BaseModel):
     sample_rate: int
     max_duration_seconds: int
     max_body_bytes: int
+    download: VoiceModelDownloadOut

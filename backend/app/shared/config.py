@@ -181,6 +181,9 @@ class Settings(BaseSettings):
     # 并发转写闸门：识别器常驻内存 ~0.9GB、每路解码再 +数百 MB，
     # 且转写与全平台同步端点共享线程池——默认 2 路，超限 429 快速失败
     voice_max_concurrent: int = Field(default=2, ge=1, le=16)
+    # 在线模型下载源 base（服务端固定，不接受客户端传 URL）；
+    # 国内部署可配 https://hf-mirror.com
+    voice_model_download_base: str = "https://huggingface.co"
     super_assistant_max_tool_rounds: int = 25
     # 自主 agent 模式（PLAN→EXECUTE→VERIFY，对标 small-rust-hermes run_agent）的
     # 迭代上限；独立于普通对话的 max_tool_rounds，仅在 agent_mode=True 时生效

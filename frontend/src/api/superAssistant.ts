@@ -70,6 +70,7 @@ export interface VoiceStatus {
   sample_rate: number
   max_duration_seconds: number
   max_body_bytes: number
+  download: VoiceModelDownload
 }
 
 /** 语音听写转写结果 */
@@ -77,6 +78,15 @@ export interface VoiceTranscription {
   text: string
   duration_ms: number
   language: string
+}
+
+/** 语音模型在线下载进度（cc-haha 式显式下载：idle/running/done/failed/cancelled） */
+export interface VoiceModelDownload {
+  state: 'idle' | 'running' | 'done' | 'failed' | 'cancelled'
+  received_bytes: number
+  total_bytes: number
+  current_file: string | null
+  error: string | null
 }
 
 export interface SuperSearchConversationHit {
@@ -717,8 +727,13 @@ export const superAssistantApi = {
     apiClientV2.delete(`/super-assistant/conversations/${id}/files/${fileId}`),
   searchConversations: (q: string, limit = 20) =>
     apiClientV2.get<SuperSearchResult>('/super-assistant/search/conversations', { params: { q, limit } }),
-  /** 语音听写：后端模型就绪状态（助手配置「语音」tab 展示用） */
+  /** 语音听写：后端模型就绪状态与下载进度（助手配置「语音」tab 展示用） */
   voiceStatus: () => apiClientV2.get<VoiceStatus>('/super-assistant/voice/status'),
+  /** 语音模型在线下载（仅管理员；已在进行中返回 409） */
+  downloadVoiceModel: () =>
+    apiClientV2.post<{ started: boolean }>('/super-assistant/voice/model/download'),
+  cancelVoiceModelDownload: () =>
+    apiClientV2.post<{ cancelled: boolean }>('/super-assistant/voice/model/download/cancel'),
   /** 语音听写：上传 16k 单声道 16-bit PCM WAV（原始字节），返回转写文本。
    *  显式超时：转写是 CPU 推理（秒级），不能沿用 axios 无默认超时 */
   transcribeVoice: (wav: Uint8Array, language: string) =>
