@@ -9,6 +9,7 @@ export function buildConversationExportFilename(
   // 清洗范围：Windows 非法字符、C0 控制字符、换行、Unicode 双向格式符
   // （U+202E 等 RTL override 可在文件管理器里视觉伪装 .json 扩展名）
   const safeTitle = (title.trim() || '未命名会话')
+    // eslint-disable-next-line no-control-regex -- 清洗文件名中的 C0 控制字符是该函数的职责本身
     .replace(/[\\/:*?"<>|\r\n\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
