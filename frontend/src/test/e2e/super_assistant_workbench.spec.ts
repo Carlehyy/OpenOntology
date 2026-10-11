@@ -204,6 +204,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifKeyCreates: string[] = []
   const notifKeyRevokes: string[] = []
   const notifChannelCreates: string[] = []
+  const notifSmtpPuts: string[] = []
+  const notifSmtpTests: string[] = []
+  const notifForwards: string[] = []
+  const notifKeyTests: string[] = []
   const notifChannelUpdates: string[] = []
   const notifChannelTests: string[] = []
   const notifChannelDeletes: string[] = []
@@ -567,20 +571,66 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       }
       return fulfill()
     }
+    // —— 手动转发 + 入口测试（admin JWT）——
+    const notifForwardMatch = path.match(/^\/api\/v2\/notifications\/([^/]+)\/forward$/)
+    if (notifForwardMatch && request.method() === 'POST') {
+      notifForwards.push(notifForwardMatch[1] + ':' + (request.postData() || ''))
+      const body = JSON.parse(request.postData() || '{}')
+      return json(route, (body.channelIds || []).map((id: string) => ({ channelId: id, ok: true, message: '已转发' })))
+    }
+    const notifKeyTestMatch = path.match(/^\/api\/v2\/notifications\/ingest-keys\/([^/]+)\/test$/)
+    if (notifKeyTestMatch && request.method() === 'POST') {
+      notifKeyTests.push(notifKeyTestMatch[1])
+      return json(route, { ok: true, message: '测试消息已投递（来源 billing），出口即时投递：成功 1 条', messageId: 'n-lt' })
+    }
+    // —— 渠道模板与 SMTP（admin JWT）——
+    if (path === '/api/v2/notifications/channel-templates') {
+      return json(route, [
+        { id: 'dingtalk', name: '钉钉机器人', description: '钉钉群', fields: [
+          { key: 'token', label: 'access_token', hint: '钉钉群 → 设置 → 机器人', required: true, secret: true, placeholder: '' },
+          { key: 'secret', label: '加签密钥（可选）', hint: '', required: false, secret: true, placeholder: '' },
+        ] },
+        { id: 'custom', name: '自定义 apprise（高级）', description: '裸 URL', fields: [
+          { key: 'url', label: 'apprise URL', hint: '', required: true, secret: true, placeholder: '' },
+        ] },
+        { id: 'email', name: '邮件', description: '邮件', fields: [
+          { key: 'recipients', label: '收件邮箱', hint: '多个逗号分隔', required: true, secret: false, placeholder: '' },
+        ] },
+      ])
+    }
+    if (path === '/api/v2/notifications/smtp') {
+      if (request.method() === 'PUT') {
+        notifSmtpPuts.push(request.postData() || '')
+        return json(route, { host: 'smtp.test.com', port: 465, username: 'noreply@test.com', sender: '', useTls: true, configured: true, hasPassword: true })
+      }
+      return json(route, { host: '', port: 465, username: '', sender: '', useTls: true, configured: false, hasPassword: false })
+    }
+    if (path === '/api/v2/notifications/smtp/test') {
+      notifSmtpTests.push(request.postData() || '')
+      return json(route, { ok: true, message: '测试邮件已发送至 e2e@test.com' })
+    }
     // —— 转发渠道管理（admin JWT）——
     if (path === '/api/v2/notifications/channels') {
       if (request.method() === 'POST') {
         notifChannelCreates.push(request.postData() || '')
         const body = JSON.parse(request.postData() || '{}')
         return json(route, {
-          id: 'ch-2', name: String(body.name ?? ''), urlMasked: 'json://…demo',
+          id: 'ch-2', name: String(body.name ?? ''), urlMasked: 'dingtalk://…demo',
+          template: String(body.template ?? 'custom'), templateName: '钉钉机器人',
+          display: 'toke…demo', fields: [],
           enabled: true, note: body.note ?? null, lastStatus: null, lastError: '',
           lastSentAt: null, createdAt: at(0, 10), updatedAt: at(0, 10),
         }, 201)
       }
       return json(route, [
-        { id: 'ch-1', name: '钉钉运维群', urlMasked: 'dingtalk://…abcd', enabled: true,
-          note: '值班告警', lastStatus: 'sent', lastError: '', lastSentAt: at(0, 9),
+        { id: 'ch-1', name: '钉钉运维群', urlMasked: 'dingtalk://…abcd',
+          template: 'dingtalk', templateName: '钉钉机器人',
+          display: 'toke…abcd · SEC…wxyz',
+          fields: [
+            { key: 'token', label: 'access_token', hint: '', required: true, secret: true, placeholder: '', value: 'toke…abcd' },
+            { key: 'secret', label: '加签密钥（可选）', hint: '', required: false, secret: true, placeholder: '', value: 'SEC…wxyz' },
+          ],
+          enabled: true, note: '值班告警', lastStatus: 'sent', lastError: '', lastSentAt: at(0, 9),
           createdAt: at(1, 8), updatedAt: at(0, 9) },
       ])
     }
@@ -937,6 +987,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifKeyCreates,
     notifKeyRevokes,
     notifChannelCreates,
+    notifSmtpPuts,
+    notifSmtpTests,
+    notifForwards,
+    notifKeyTests,
     notifChannelUpdates,
     notifChannelTests,
     notifChannelDeletes,
@@ -1058,6 +1112,21 @@ test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标�
   await page.locator('[data-notifications-compose-send]').click()
   await expect.poll(() => mocks.notifCreates.length).toBe(1)
   await expect(page.locator('[data-notifications-detail]')).toContainText('今日巡检')
+
+  // 手动转发：详情操作 → 渠道多选 → 确认
+  await page.locator('[data-notifications-forward]').click()
+  await expect(page.locator('[data-notifications-forward-panel]')).toBeVisible()
+  await page.locator('[data-notifications-forward-channel="ch-1"]').check()
+  await page.locator('[data-notifications-forward-confirm]').click()
+  await expect.poll(() => mocks.notifForwards.length).toBe(1)
+  await expect(page.getByText('已转发到 1 个渠道')).toBeVisible()
+
+  // 在线测试分区：入口模拟投递
+  await page.locator('[data-notifications-nav="test"]').click()
+  await expect(page.locator('[data-notifications-test-key="nk-1"]')).toBeVisible()
+  await page.locator('[data-notifications-key-test]').first().click()
+  await expect.poll(() => mocks.notifKeyTests.length).toBe(1)
+  await expect(page.getByText('出口即时投递：成功 1 条')).toBeVisible()
 })
 
 test('消息通知：游标分页——首页两条，加载更多补齐后续', async ({ page }) => {
@@ -1087,8 +1156,10 @@ test('消息通知：接入密钥——签发明文仅一次展示、列表与�
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
-  await page.locator('[data-notifications-keys-toggle]').click()
+  // 布局契约（分区导航）：渠道配置分区承载入口/出口两区块
+  await page.locator('[data-notifications-nav="config"]').click()
   await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
+  await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
 
   // 既有密钥列表可见（不携带明文）
   await expect(page.locator('[data-notifications-key-item="nk-1"]')).toBeVisible()
@@ -1115,26 +1186,48 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
-  await page.locator('[data-notifications-channels-toggle]').click()
+  await page.locator('[data-notifications-nav="config"]').click()
   await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
 
   // 既有渠道：名称/掩码地址/最近投递状态可见，地址明文不出现在界面
   const existing = page.locator('[data-notifications-channel-item="ch-1"]')
   await expect(existing).toBeVisible()
   await expect(existing).toContainText('钉钉运维群')
-  await expect(existing).toContainText('dingtalk://…abcd')
-  await expect(existing).toContainText('最近投递成功')
+  await expect(existing).toContainText('钉钉机器人')
+  await expect(existing).toContainText('toke…abcd')
+  await expect(existing).toContainText('投递成功')
 
-  // 新建渠道
-  await page.locator('[data-notifications-channel-name]').fill('飞书值班')
-  await page.locator('[data-notifications-channel-url]').fill('json://hooks.example/xyz')
+  // 新建渠道（模板化）：选钉钉类型 → 填关键字段（含指引文案可见）
+  await page.locator('[data-notifications-channel-name]').fill('钉钉值班')
+  await expect(page.getByText('钉钉群 → 设置 → 机器人')).toBeVisible()
+  await page.locator('[data-notifications-channel-param="token"]').fill('6fb1fa7c2b-demo')
   await page.locator('[data-notifications-channel-create]').click()
   await expect.poll(() => mocks.notifChannelCreates.length).toBe(1)
+  const createPayload = JSON.parse(mocks.notifChannelCreates[0])
+  expect(createPayload.template).toBe('dingtalk')
+  expect(createPayload.params.token).toBe('6fb1fa7c2b-demo')
 
-  // 测试直发：结果 toast 即时反馈
+  // SMTP 在线配置：展开卡片保存 + 测试邮件
+  await page.locator('[data-notifications-smtp-card] summary').click()
+  await page.locator('[data-notifications-smtp-host]').fill('smtp.test.com')
+  await page.locator('[data-notifications-smtp-username]').fill('noreply@test.com')
+  await page.locator('[data-notifications-smtp-password]').fill('pass-e2e')
+  await page.locator('[data-notifications-smtp-save]').click()
+  await expect.poll(() => mocks.notifSmtpPuts.length).toBe(1)
+  await page.locator('[data-notifications-smtp-test-to]').fill('e2e@test.com')
+  await page.locator('[data-notifications-smtp-test]').click()
+  await expect.poll(() => mocks.notifSmtpTests.length).toBe(1)
+  await expect(page.getByText('测试邮件已发送至 e2e@test.com')).toBeVisible()
+
+  // 测试直发（在线测试分区）：结果 toast 即时反馈
+  await page.locator('[data-notifications-nav="test"]').click()
+  await expect(page.locator('[data-notifications-test-panel]')).toBeVisible()
   await page.locator('[data-notifications-channel-test]').first().click()
   await expect.poll(() => mocks.notifChannelTests.length).toBe(1)
   await expect(page.getByText('测试消息已发送')).toBeVisible()
+
+  // 回渠道配置分区做启停与删除
+  await page.locator('[data-notifications-nav="config"]').click()
 
   // 启停开关触发 PATCH
   await page.locator('[data-notifications-channel-toggle]').first().click()
@@ -1146,6 +1239,38 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect(confirm).toBeVisible()
   await confirm.getByRole('button', { name: '删除' }).click()
   await expect.poll(() => mocks.notifChannelDeletes.length).toBe(1)
+})
+
+test('消息通知（窄屏390px）：列表⇄详情单栏切换与管理态全宽', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  // 窄屏下工作台侧栏是抽屉态：先打开导航抽屉，再进入消息通知
+  await page.getByRole('button', { name: '打开工作台导航' }).click()
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+
+  // 列表态：列表可见、详情隐藏；无横向溢出破坏（工具栏可横滚）
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail]')).toBeHidden()
+
+  // 选中消息 → 单栏切到详情，统一返回条可回列表
+  await page.locator('[data-notifications-item="n-1"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toBeVisible()
+  await expect(page.locator('[data-notifications-list]')).toBeHidden()
+  await expect(page.locator('[data-notifications-back-detail]')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('数据任务失败报告')
+  await page.locator('[data-notifications-back-detail]').click()
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail]')).toBeHidden()
+
+  // 分区导航在窄屏同样可达：切渠道配置再回消息列表
+  await page.locator('[data-notifications-nav="config"]').click()
+  await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
+  await page.locator('[data-notifications-nav="messages"]').click()
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
 })
 
 test('会话选中回写地址栏：切会话 URL 跟随，深链直达指定会话', async ({ page }) => {

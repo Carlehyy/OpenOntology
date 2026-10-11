@@ -78,6 +78,7 @@ def seed_database() -> None:
         from app.notifications.models import (  # noqa: F401
             NotificationMessage, NotificationMessageState, NotificationAttachment,
             NotificationIngestKey, NotificationChannel, NotificationDelivery,
+            NotificationSmtpSettings,
         )
         # 三维场景（白模场景管理：主体 / 版本冻结 / 运行日志）
         from app.scenes.models import (  # noqa: F401

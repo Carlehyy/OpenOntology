@@ -31,6 +31,8 @@ from app.notifications.models import (
     NOTIFICATION_PRIORITIES,
     NOTIFICATION_SOURCE_TYPES,
     NotificationAttachment,
+    NotificationDelivery,
+    NotificationChannel,
     NotificationIngestKey,
     NotificationMessage,
     NotificationMessageState,
@@ -125,8 +127,6 @@ def create_message_ex(
         # 二次提交的窗口里进程被杀会让消息入库而投递单永久丢失，
         # 且幂等重放走 existing 提前返回，无法自愈。
         db.flush()
-        from app.notifications.channel_service import fan_out_deliveries
-
         fan_out_deliveries(db, message)
         db.commit()
     except IntegrityError:
@@ -317,6 +317,29 @@ def mark_all_read(db: Session, *, user_id: str) -> int:
 
 
 # ── 读侧：列表 / 汇总 ─────────────────────────────────────────
+
+
+def fan_out_deliveries(db: Session, message: NotificationMessage) -> int:
+    """消息新建即为所有启用渠道生成 pending 投递单（幂等：唯一约束跳过既有对）。
+
+    与 create_message_ex 同事务提交：保证“消息入库 ⇄ 投递单生成”原子。
+    """
+    channels = db.query(NotificationChannel).filter(NotificationChannel.enabled.is_(True)).all()
+    existing = {
+        row.channel_id
+        for row in db.query(NotificationDelivery.channel_id).filter(
+            NotificationDelivery.message_id == message.id
+        ).all()
+    }
+    created = 0
+    for channel in channels:
+        if channel.id in existing:
+            continue
+        db.add(NotificationDelivery(message_id=message.id, channel_id=channel.id))
+        created += 1
+    if created:
+        db.flush()
+    return created
 
 
 def list_messages(

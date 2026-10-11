@@ -709,7 +709,7 @@ CHANNELS = "/api/v2/notifications/channels"
 
 
 def _make_channel(client, headers, *, name="钉钉运维群", url="json://hooks.example/abc", enabled=True):
-    resp = client.post(CHANNELS, json={"name": name, "appriseUrl": url}, headers=headers)
+    resp = client.post(CHANNELS, json={"name": name, "template": "custom", "params": {"url": url}}, headers=headers)
     assert resp.status_code == 201, resp.text
     row = resp.json()["data"]
     if not enabled:
@@ -722,8 +722,9 @@ def test_channel_crud_and_masking(client, auth_headers, db):
     from app.notifications.models import NotificationChannel
 
     row = _make_channel(client, auth_headers)
-    # 响应与列表永不携带 URL 明文/密文
+    # 响应与列表永不携带 URL 明文/密文/参数明文
     assert "appriseUrl" not in row and "apprise_url_encrypted" not in row
+    assert row["template"] == "custom" and row["templateName"]
     listed = client.get(CHANNELS, headers=auth_headers).json()["data"]
     assert len(listed) == 1
 
@@ -735,10 +736,10 @@ def test_channel_crud_and_masking(client, auth_headers, db):
     assert cs.mask_apprise_url("json://abc") == "json://…"  # 过短时只留协议
 
     # 重名 409；改名/启停/换 URL
-    assert client.post(CHANNELS, json={"name": "钉钉运维群", "appriseUrl": "json://x"}, headers=auth_headers).status_code == 409
+    assert client.post(CHANNELS, json={"name": "钉钉运维群", "template": "custom", "params": {"url": "json://x"}}, headers=auth_headers).status_code == 409
     updated = client.patch(f"{CHANNELS}/{row['id']}", json={"name": "值班群", "enabled": False}, headers=auth_headers).json()["data"]
     assert updated["name"] == "值班群" and updated["enabled"] is False
-    client.patch(f"{CHANNELS}/{row['id']}", json={"appriseUrl": "json://hooks.example/new"}, headers=auth_headers)
+    client.patch(f"{CHANNELS}/{row['id']}", json={"params": {"url": "json://hooks.example/new"}}, headers=auth_headers)
     assert cs.channel_url(db.query(NotificationChannel).first()) == "json://hooks.example/new"
 
     assert client.delete(f"{CHANNELS}/{row['id']}", headers=auth_headers).status_code == 200
@@ -747,15 +748,15 @@ def test_channel_crud_and_masking(client, auth_headers, db):
 
 
 def test_channel_validation(client, auth_headers):
-    assert client.post(CHANNELS, json={"name": "x", "appriseUrl": "no-scheme"}, headers=auth_headers).status_code == 422
-    assert client.post(CHANNELS, json={"name": "", "appriseUrl": "json://a"}, headers=auth_headers).status_code == 422
+    assert client.post(CHANNELS, json={"name": "x", "template": "custom", "params": {"url": "no-scheme"}}, headers=auth_headers).status_code == 422
+    assert client.post(CHANNELS, json={"name": "", "template": "custom", "params": {"url": "json://a"}}, headers=auth_headers).status_code == 422
     assert client.get(CHANNELS, headers=auth_headers).status_code == 200
 
 
 def test_channel_requires_admin(client, auth_headers, editor_user):
     headers = _editor_headers(client)
     assert client.get(CHANNELS, headers=headers).status_code == 403
-    assert client.post(CHANNELS, json={"name": "x", "appriseUrl": "json://a"}, headers=headers).status_code == 403
+    assert client.post(CHANNELS, json={"name": "x", "template": "custom", "params": {"url": "json://a"}}, headers=headers).status_code == 403
 
 
 def test_fan_out_on_create_and_no_duplicate_on_replay(client, auth_headers, db, monkeypatch):
@@ -913,3 +914,208 @@ def test_delete_channel_removes_pending_deliveries_sqlite(client, auth_headers, 
 
     client.delete(f"{CHANNELS}/{channel['id']}", headers=auth_headers)
     assert db.query(NotificationDelivery).count() == 0
+
+
+# ── L2：渠道模板化 + 平台 SMTP ────────────────────────────────
+
+
+def test_channel_template_definitions(client, auth_headers):
+    defs = client.get("/api/v2/notifications/channel-templates", headers=auth_headers).json()["data"]
+    ids = {d["id"] for d in defs}
+    assert {"dingtalk", "feishu", "wecom", "tgram", "email", "webhook", "custom"} <= ids
+    dingtalk = next(d for d in defs if d["id"] == "dingtalk")
+    assert any(f["key"] == "token" and f["secret"] for f in dingtalk["fields"])
+    assert any(f["hint"] for f in dingtalk["fields"])  # 每个字段带人话指引
+
+
+def test_templated_channel_url_built_and_masked(client, auth_headers, db):
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationChannel
+
+    def create(template, params, name):
+        resp = client.post(CHANNELS, json={"name": name, "template": template, "params": params}, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        return resp.json()["data"]
+
+    # 钉钉：整段 webhook 粘贴解析 + 加签
+    ding = create("dingtalk", {"token": "6fb1fa7c2b1234", "secret": "secxyz123456"}, "钉钉")
+    row = db.query(NotificationChannel).filter_by(name="钉钉").first()
+    assert cs.channel_url(row) == "dingtalk://secxyz123456@6fb1fa7c2b1234/"
+    assert ding["templateName"] == "钉钉机器人"
+    assert ding["display"] == "6fb1…1234 · secx…3456"  # 敏感字段脱敏
+
+    # 飞书：粘贴完整 webhook 自动解析 token
+    fei = create("feishu", {"token": "https://open.feishu.cn/open-apis/bot/v2/hook/abcdef123456789"}, "飞书")
+    row = db.query(NotificationChannel).filter_by(name="飞书").first()
+    assert cs.channel_url(row) == "feishu://abcdef123456789/"
+
+    # 企微：粘贴完整 webhook 解析 key
+    wec = create("wecom", {"key": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc123xyz789"}, "企微")
+    row = db.query(NotificationChannel).filter_by(name="企微").first()
+    assert cs.channel_url(row) == "wecombot://abc123xyz789"
+
+    # Telegram
+    create("tgram", {"botToken": "123456789:AAH3x9zQwertyuIop5s8b2C1", "chatId": "987654321"}, "TG")
+    row = db.query(NotificationChannel).filter_by(name="TG").first()
+    assert cs.channel_url(row) == "tgram://123456789:AAH3x9zQwertyuIop5s8b2C1/987654321"
+
+    # 通用 Webhook：https → jsons（query 被 apprise 吞掉，保存期拒绝——见专项用例）
+    create("webhook", {"url": "https://hooks.example.com/p"}, "钩子")
+    row = db.query(NotificationChannel).filter_by(name="钩子").first()
+    assert cs.channel_url(row) == "jsons://hooks.example.com/p"
+
+    # 必填缺失 422；未知模板 422
+    assert client.post(CHANNELS, json={"name": "x", "template": "dingtalk", "params": {}}, headers=auth_headers).status_code == 422
+    assert client.post(CHANNELS, json={"name": "x", "template": "nope", "params": {}}, headers=auth_headers).status_code == 422
+
+
+def test_update_channel_params_rebuilds_url(client, auth_headers, db):
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationChannel
+
+    client.post(CHANNELS, json={"name": "钉钉", "template": "dingtalk", "params": {"token": "tokenaaaa111"}}, headers=auth_headers)
+    row_id = client.get(CHANNELS, headers=auth_headers).json()["data"][0]["id"]
+    resp = client.patch(f"{CHANNELS}/{row_id}", json={"params": {"token": "tokenbbbb222", "secret": "secretcccc33"}}, headers=auth_headers)
+    assert resp.status_code == 200
+    row = db.query(NotificationChannel).filter_by(id=row_id).first()
+    assert cs.channel_url(row) == "dingtalk://secretcccc33@tokenbbbb222/"
+    data = resp.json()["data"]
+    assert data["display"] == "toke…b222 · secr…cc33"
+
+
+def test_smtp_settings_and_email_channel(client, auth_headers, db, monkeypatch):
+    from app.notifications import channel_service as cs
+
+    # 未配置 SMTP：邮件渠道 422 并提示先配置
+    resp = client.post(CHANNELS, json={"name": "邮件", "template": "email", "params": {"recipients": "ops@example.com"}}, headers=auth_headers)
+    assert resp.status_code == 422 and "发件" in resp.json()["detail"]
+
+    # SMTP 保存（密码不回明文，留空=保持）
+    put = client.put("/api/v2/notifications/smtp", json={
+        "host": "smtp.example.com", "port": 465, "username": "noreply@example.com",
+        "password": "pass123", "sender": "平台通知", "useTls": True,
+    }, headers=auth_headers)
+    assert put.status_code == 200
+    out = put.json()["data"]
+    assert out["configured"] is True and out["hasPassword"] is True
+    assert "password" not in out and "pass123" not in str(out)
+
+    # 留空密码更新不覆盖
+    client.put("/api/v2/notifications/smtp", json={
+        "host": "smtp2.example.com", "port": 587, "username": "noreply@example.com",
+        "sender": "", "useTls": False,
+    }, headers=auth_headers)
+    out2 = client.get("/api/v2/notifications/smtp", headers=auth_headers).json()["data"]
+    assert out2["host"] == "smtp2.example.com" and out2["hasPassword"] is True
+
+    # 邮件渠道可建，URL 由 SMTP 拼装（含多收件人）
+    sent: list[str] = []
+    monkeypatch.setattr(cs, "_send_via_apprise", lambda url, *, title, body: sent.append(url))
+    resp = client.post(CHANNELS, json={"name": "邮件", "template": "email", "params": {"recipients": "ops@example.com, dev@example.com"}}, headers=auth_headers)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["display"] == "ops@example.com, dev@example.com"  # 收件人非敏感回显原文
+
+    # SMTP 测试邮件（走被 mock 的发送）
+    result = client.post("/api/v2/notifications/smtp/test", json={"to": "me@example.com"}, headers=auth_headers).json()["data"]
+    assert result["ok"] is True and sent and sent[0].startswith("mailto://")  # 第二次更新 useTls=False → 明文
+
+
+def test_email_url_tls_mode_matrix():
+    """TLS 模式按端口/开关落位：465=SSL、587=STARTTLS、关闭加密=mailto。"""
+    from app.notifications.channel_templates import _email
+
+    smtp = {"host": "s.example.com", "port": 465, "username": "u@example.com", "password": "p", "sender": "", "use_tls": True}
+    url = _email({"recipients": "a@b.com"}, smtp)
+    assert url.startswith("mailtos://") and "mode=SSL" in url
+    smtp["port"] = 587
+    url = _email({"recipients": "a@b.com"}, smtp)
+    assert "mode=STARTTLS" in url
+    smtp["use_tls"] = False
+    url = _email({"recipients": "a@b.com"}, smtp)
+    assert url.startswith("mailto://") and "mode=" not in url
+
+
+def test_webhook_template_rejects_query_and_bad_url(client, auth_headers):
+    resp = client.post(CHANNELS, json={"name": "x", "template": "webhook", "params": {"url": "https://h.example/p?token=1"}}, headers=auth_headers)
+    assert resp.status_code == 422 and "查询参数" in str(resp.json()["detail"])
+    resp = client.post(CHANNELS, json={"name": "x", "template": "webhook", "params": {"url": "http://[::1"},}, headers=auth_headers)
+    assert resp.status_code == 422
+    resp = client.post(CHANNELS, json={"name": "x", "template": "webhook", "params": {"url": "ftp://h/p"}}, headers=auth_headers)
+    assert resp.status_code == 422
+
+
+def test_smtp_test_requires_complete_config(client, auth_headers):
+    assert client.post("/api/v2/notifications/smtp/test", json={"to": "a@b.com"}, headers=auth_headers).status_code == 422
+
+
+# ── L3：手动转发 + 入口测试（真实全链路）─────────────────────
+
+
+def test_forward_message_multi_channel(client, auth_headers, db, monkeypatch):
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationDelivery
+
+    ch1 = _make_channel(client, auth_headers, name="渠道一", url="json://a.example/1")
+    ch2 = _make_channel(client, auth_headers, name="渠道二", url="json://a.example/2")
+    ch3 = _make_channel(client, auth_headers, name="停用渠道", url="json://a.example/3", enabled=False)
+    sent: list[str] = []
+    monkeypatch.setattr(cs, "_send_via_apprise", lambda url, *, title, body: sent.append(url))
+
+    message = _create(client, auth_headers, title="待转发", body="# 内容")
+
+    resp = client.post(
+        f"/api/v2/notifications/{message['id']}/forward",
+        json={"channelIds": [ch1["id"], ch2["id"], ch3["id"], "missing"]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    results = {r["channelId"]: r for r in resp.json()["data"]}
+    assert results[ch1["id"]]["ok"] is True and results[ch2["id"]]["ok"] is True
+    assert results[ch3["id"]]["ok"] is False and "停用" in results[ch3["id"]]["message"]
+    assert results["missing"]["ok"] is False
+    assert sorted(sent) == ["json://a.example/1", "json://a.example/2"]
+
+    # 投递单已建且 sent；停用渠道被拒绝不建投递单（停用即止损）
+    rows = db.query(NotificationDelivery).filter_by(message_id=message["id"]).all()
+    assert {row.channel_id for row in rows} == {ch1["id"], ch2["id"]}
+    assert all(row.status == "sent" for row in rows)
+    resp2 = client.post(f"/api/v2/notifications/{message['id']}/forward", json={"channelIds": [ch1["id"]]}, headers=auth_headers)
+    assert resp2.status_code == 200 and sent.count("json://a.example/1") == 2
+
+    assert client.post(f"/api/v2/notifications/{message['id']}/forward", json={"channelIds": []}, headers=auth_headers).status_code == 422
+    assert client.post("/api/v2/notifications/missing/forward", json={"channelIds": [ch1["id"]]}, headers=auth_headers).status_code == 404
+
+
+def test_forward_requires_admin(client, auth_headers, editor_user):
+    message = _create(client, auth_headers)
+    assert client.post(
+        f"/api/v2/notifications/{message['id']}/forward",
+        json={"channelIds": ["x"]}, headers=_editor_headers(client),
+    ).status_code == 403
+
+
+def test_ingest_key_link_test_full_chain(client, auth_headers, db, monkeypatch):
+    """入口测试：真实走密钥鉴权→消息创建→扇出→即时投递全链路。"""
+    from app.notifications import channel_service as cs
+    from app.notifications.models import NotificationMessage
+
+    key = _mint_key(client, auth_headers, name="link-check")
+    _make_channel(client, auth_headers, name="链路渠道", url="json://loop.example/9")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(cs, "_send_via_apprise", lambda url, *, title, body: sent.append((url, title)))
+
+    resp = client.post(f"/api/v2/notifications/ingest-keys/{key['id']}/test", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["ok"] is True and "成功 1 条" in data["message"]
+
+    message = db.query(NotificationMessage).filter_by(id=data["messageId"]).first()
+    assert message.source_type == "ingest" and message.source_system == "link-check"
+    assert message.title.startswith("【链路测试】")
+    assert message.event_id.startswith("link-test:")
+    assert sent and sent[0][0] == "json://loop.example/9"
+
+    # 404 / 已吊销
+    assert client.post("/api/v2/notifications/ingest-keys/missing/test", headers=auth_headers).status_code == 404
+    client.delete(f"/api/v2/notifications/ingest-keys/{key['id']}", headers=auth_headers)
+    assert client.post(f"/api/v2/notifications/ingest-keys/{key['id']}/test", headers=auth_headers).status_code == 422
