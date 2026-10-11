@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
@@ -22,6 +24,8 @@ from app.super_assistant.voice_service import (
 )
 
 router = APIRouter()
+
+logger = logging.getLogger("app.super_assistant.voice")
 
 _WAV_CONTENT_TYPES = {"audio/wav", "audio/x-wav", "audio/wave", "application/octet-stream"}
 _LANGUAGE_PATTERN = "^(auto|zh|en|ja|ko|yue)$"
@@ -84,6 +88,15 @@ async def voice_transcribe(
         raise HTTPException(status_code=503, detail=str(error)) from error
     except TranscriptionFailedError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+    # 排障观测：只记长度与时长，不落转写内容（语音属用户隐私）
+    logger.info(
+        "transcribed user=%s language=%s duration_ms=%s body_bytes=%s text_chars=%s",
+        current_user.id,
+        result.language,
+        result.duration_ms,
+        len(payload),
+        len(result.text),
+    )
     return VoiceTranscriptionOut(
         text=result.text,
         duration_ms=result.duration_ms,
