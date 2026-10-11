@@ -24,6 +24,18 @@ def process_dataset_version_event(event_id: str, claim_token: str):
     # 恢复 worker 分工一致，见 mapping_apply 任务）。
     register_cdc(start_worker=False)
 
-    result = run_claimed_event(event_id, claim_token)
+    try:
+        result = run_claimed_event(event_id, claim_token)
+    except RuntimeError as exc:
+        # claim 已被其他 worker 接管（claim 超时回收或并发重派）：本条
+        # 投递已无意义，必须就地消化——外抛会 nak 无限重投，双 executor
+        # 部署下放大为重投风暴（2026-10-11 生产实例：4 条积压事件各
+        # 重试 51+ 次吃满 8 核）。
+        if "claim lost" in str(exc):
+            logger.warning(
+                "DatasetVersion event %s claim 已被接管，丢弃本条投递",
+                event_id)
+            return "lost_claim"
+        raise
     logger.info("DatasetVersion event %s completed in worker", event_id)
     return result

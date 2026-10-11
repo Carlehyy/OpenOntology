@@ -398,7 +398,11 @@ jobs:
       && (needs.changes.outputs.run_docker != 'true'
           || needs.verify-docker-build.result == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 服务器侧 docker compose build 在低配盘上「exporting to image」极慢：
+    # run 38102815363 在 apt 修复后约 5 分钟完成构建，随后四镜像并行导出
+    # 超过 20 分钟仍未完成，撞上步骤 25 分钟超时。把 job/步骤预算抬到
+    # 与 verify-backend 同级，给导出留足墙钟。
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -509,7 +513,7 @@ jobs:
           REMOTE_SOURCE_SWAP
 
       - name: Deploy over SSH
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
