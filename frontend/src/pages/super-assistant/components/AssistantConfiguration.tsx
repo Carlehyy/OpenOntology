@@ -24,6 +24,8 @@ import {
   type ParsedMcpClientServer,
 } from '@/lib/mcpClientConfig'
 import { ApprovalTab, EvolutionPendingBadge, MemoryTab } from './AssistantEvolution'
+import VoiceTab from './VoiceTab'
+import { SettingSwitch } from './SettingSwitch'
 import { errorText } from './assistantPanelUtils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { groupAssistantTools } from './toolLogic'
@@ -472,25 +474,6 @@ function McpDialog({ server, onClose, onSaved }: {
 }
 
 
-function SettingSwitch({ label, ariaLabel, checked, busy, onToggle }: {
-  label: string
-  ariaLabel: string
-  checked: boolean
-  busy: boolean
-  onToggle: () => void
-}) {
-  return (
-    <div className="inline-flex items-center gap-1.5">
-      <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>
-      <button type="button" role="switch" aria-label={ariaLabel} aria-checked={checked} aria-busy={busy} disabled={busy} onClick={onToggle}
-        className="relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60">
-        <span aria-hidden="true" className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors motion-reduce:transition-none ${busy ? 'animate-pulse motion-reduce:animate-none' : ''} ${checked ? 'bg-brand' : 'bg-slate-300'}`}>
-          <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none ${checked ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-        </span>
-      </button>
-    </div>
-  )
-}
 
 
 // 工具分类的稳定展示文案：read_only 同轮可并行、confirmation_required
@@ -625,7 +608,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   refreshTools: () => Promise<void>
   conversationId: string | null
 }) {
-  const [tab, setTab] = useState<'skills' | 'mcp' | 'tools' | 'approval' | 'memory'>('skills')
+  const [tab, setTab] = useState<'skills' | 'mcp' | 'tools' | 'approval' | 'memory' | 'voice'>('skills')
   const [dragging, setDragging] = useState(false)
   const [creatingSkill, setCreatingSkill] = useState(false)
   const [editingSkill, setEditingSkill] = useState<SuperSkill | null>(null)
@@ -781,10 +764,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
               <X size={16} />
             </button>
           </header>
-          <div className="relative mx-4 mt-3 grid grid-cols-5 gap-1 rounded-lg border border-slate-200 bg-slate-50/70 p-0.5">
+          <div className="relative mx-4 mt-3 grid grid-cols-6 gap-1 rounded-lg border border-slate-200 bg-slate-50/70 p-0.5">
             <div
-              className="absolute bottom-0.5 top-0.5 w-[calc(20%_-_4px)] rounded-md bg-brand shadow-sm transition-all duration-300 ease-out"
-              style={{ left: `calc(${(['skills', 'mcp', 'tools', 'approval', 'memory'] as const).indexOf(tab) * 20}% + 2px)` }}
+              className="absolute bottom-0.5 top-0.5 w-[calc(16.6667%_-_4px)] rounded-md bg-brand shadow-sm transition-all duration-300 ease-out"
+              style={{ left: `calc(${(['skills', 'mcp', 'tools', 'approval', 'memory', 'voice'] as const).indexOf(tab) * 16.6667}% + 2px)` }}
             />
             <button type="button" onClick={() => setTab('skills')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'skills' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -806,6 +789,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'memory' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
               记忆
             </button>
+            <button type="button" onClick={() => setTab('voice')} aria-label="语音设置"
+              className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'voice' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
+              语音
+            </button>
           </div>
           {/* scrollbar-none：内容超长时仍可滚轮/拖拽滚动，仅不显示滚动条 */}
           <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-4">
@@ -813,6 +800,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             <ApprovalTab conversationId={conversationId} />
           ) : tab === 'memory' ? (
             <MemoryTab />
+          ) : tab === 'voice' ? (
+            <VoiceTab />
           ) : tab === 'tools' ? (
             <ToolsTab tools={tools} refreshTools={refreshTools} />
           ) : tab === 'skills' ? (
