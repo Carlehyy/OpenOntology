@@ -8,12 +8,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /uvx /bin/
 COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=node:22-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
- && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 # 任务实例 task_worker 以 docker CLI 子进程管理 agent 执行容器（挂载宿主
-# docker.sock，仅客户端；daemon 永不在此镜像内运行）
- && apt-get update \
- && apt-get install -y --no-install-recommends docker-cli \
- && rm -rf /var/lib/apt/lists/*
+# docker.sock，仅客户端；daemon 永不在此镜像内运行）。用官方 cli 镜像的
+# 静态二进制拷贝——避免 apt 网络往返（低配服务器上曾把部署推超 25 分钟
+# SSH 预算），层也更小。
+COPY --from=docker:29.3.1-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
