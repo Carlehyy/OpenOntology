@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, List, Loader2, Menu, Monitor, MoreHorizontal, Paperclip, Pencil,
+  ArrowDown, Check, Cpu, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Paperclip, Pencil,
   Send, Settings2, Square, X,
 } from 'lucide-react'
 
@@ -21,6 +21,11 @@ import {
   type ToolStep,
 } from '@/api/superAssistant'
 import { matchSlashCommands, slashCommandToken } from '@/lib/slashCommands'
+import { insertAtCursor, shouldHoldInsertion } from '@/lib/voice/insertion'
+import { voiceCaptureSupported } from '@/lib/voice/recorder'
+import { useVoicePreferencesStore } from '@/stores/voicePreferencesStore'
+import { useVoiceDictation } from './useVoiceDictation'
+import VoiceRecordingBar from './components/VoiceRecordingBar'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -885,6 +890,74 @@ export default function SuperAssistantPage() {
   const hasDraft = input.trim().length > 0 && models.length > 0
   const canSend = hasDraft
   const showStop = runningHere && !hasDraft
+
+  // ---- 语音听写（本地 SenseVoice 转写，插入策略见 lib/voice/insertion）----
+  const voiceSupported = useMemo(() => voiceCaptureSupported(), [])
+  const voiceEnabled = useVoicePreferencesStore(state => state.enabled)
+  // 插入锚点：录音开始瞬间的光标位置与草稿 revision；转写回来时据此判断
+  // 草稿是否被改过（改过则扣留气泡，绝不覆盖用户正在写的内容）
+  const voiceAnchorRef = useRef({ cursor: 0, revision: 0 })
+  const voiceCursorLiveRef = useRef(0)
+  const voiceRevisionRef = useRef(0)
+  const voiceComposingRef = useRef(false)
+  const composerInputHostRef = useRef<HTMLDivElement | null>(null)
+  const [voiceHold, setVoiceHold] = useState<string | null>(null)
+  const [pendingCaret, setPendingCaret] = useState<number | null>(null)
+
+  // 草稿 revision：任何 input 变化（键入/程序化替换/转写插入）都计一次；
+  // 录音锚点据此判断转写回来时草稿是否被动过（动过即扣留，绝不覆盖）
+  useEffect(() => { voiceRevisionRef.current += 1 }, [input])
+
+  const dictation = useVoiceDictation({
+    getLanguage: () => useVoicePreferencesStore.getState().language,
+    onTranscript: text => {
+      const anchor = voiceAnchorRef.current
+      if (shouldHoldInsertion(anchor.revision, voiceRevisionRef.current, voiceComposingRef.current)) {
+        // 已有暂存时追加而非覆盖：连续两次扣留不丢前一段
+        setVoiceHold(current => (current === null ? text : `${current}\n${text}`))
+        return
+      }
+      const plan = insertAtCursor(inputRef.current, anchor.cursor, text)
+      setInput(plan.text)
+      // 插入后把光标锚点同步到插入文本末尾：下一次听写从新光标处接入，
+      // 而不是停留在过期的旧位置（用户反馈：第二段转写插到了最前面）
+      setPendingCaret(plan.nextCursor)
+    },
+  })
+
+  // 光标锚点唯一权威来源是 DOM textarea 的 selectionStart：select 事件
+  // 在受控值提交后异步排队且会把 caret 报成末尾，靠事件维护 ref 必输给
+  // 这类竞态（用户反馈：第二段转写插到了最前面）。ref 仅作无 DOM 时兜底。
+  const getComposerCursor = () => {
+    const textarea = composerInputHostRef.current?.querySelector('textarea')
+    return textarea ? (textarea.selectionStart ?? voiceCursorLiveRef.current) : voiceCursorLiveRef.current
+  }
+
+  // 插入后的光标落点：setState 批次提交完（effect 阶段）再设置 selection，
+  // setTimeout 方案会与 React 受控值提交竞争、caret 总被弹回末尾
+  useEffect(() => {
+    if (pendingCaret === null) return
+    const textarea = composerInputHostRef.current?.querySelector('textarea')
+    if (textarea) {
+      senderRef.current?.focus()
+      textarea.setSelectionRange(pendingCaret, pendingCaret)
+    }
+    setPendingCaret(null)
+  }, [pendingCaret, input])
+
+  const startDictation = async () => {
+    voiceAnchorRef.current = { cursor: getComposerCursor(), revision: voiceRevisionRef.current }
+    await dictation.start()
+  }
+
+  const insertHeldTranscript = () => {
+    if (voiceHold === null) return
+    const plan = insertAtCursor(inputRef.current, getComposerCursor(), voiceHold)
+    setInput(plan.text)
+    setVoiceHold(null)
+    setPendingCaret(plan.nextCursor)
+  }
+
   // SenderProps 未显式声明原生透传属性，但库内部会转发到内部 textarea
   const senderNativeProps = { autoFocus: true, 'aria-label': '向超级助手发送消息' }
   const placeholder = loading
@@ -979,7 +1052,44 @@ export default function SuperAssistantPage() {
             ))}
           </div>
         )}
-        <div className="px-3 pb-1 pt-2.5">
+        {voiceHold !== null && (
+          <div data-testid="super-assistant-voice-hold" className="flex items-center gap-2 border-b border-border px-2.5 py-2">
+            <Mic size={12} className="shrink-0 text-brand" />
+            <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">转写暂存</span>
+            <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]" title={voiceHold}>{voiceHold}</span>
+            <button
+              type="button"
+              onClick={insertHeldTranscript}
+              aria-label="插入暂存的转写文本"
+              className="h-6 shrink-0 rounded-md border border-brand-line bg-brand-soft/70 px-2 text-[11px] text-brand-ink transition-colors hover:border-brand hover:bg-brand-mist focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              插入
+            </button>
+            <button
+              type="button"
+              onClick={() => setVoiceHold(null)}
+              aria-label="丢弃暂存的转写文本"
+              className="h-6 shrink-0 rounded-md px-2 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              丢弃
+            </button>
+          </div>
+        )}
+        {/* 输入框在录音期间保留可见（cc-haha 式）：草稿不消失，录音条只
+            替换底部按钮行，转写文本按光标锚点插入 */}
+        <div
+          ref={composerInputHostRef}
+          className="px-3 pb-1 pt-2.5"
+          onSelect={event => {
+            // 光标锚点跟踪：select 事件从内部 textarea 冒泡（含点击/方向键移动）
+            const target = event.target
+            if (target instanceof HTMLTextAreaElement) {
+              voiceCursorLiveRef.current = target.selectionStart ?? 0
+            }
+          }}
+          onCompositionStart={() => { voiceComposingRef.current = true }}
+          onCompositionEnd={() => { voiceComposingRef.current = false }}
+        >
           <Sender
             ref={senderRef}
             {...senderNativeProps}
@@ -1007,17 +1117,35 @@ export default function SuperAssistantPage() {
             style={{ border: 'none', boxShadow: 'none', background: 'transparent' }}
           />
         </div>
+        {dictation.phase === 'idle' ? (
         <div className="flex min-h-12 items-center justify-between gap-2 px-2.5 py-2">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            title="上传会话附件（仅本会话可见）"
-            aria-label="上传会话附件"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
-          </button>
+          <div className="flex min-w-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              title="上传会话附件（仅本会话可见）"
+              aria-label="上传会话附件"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
+            </button>
+            {/* 非安全上下文（普通 HTTP）或偏好关闭时整体隐藏；模型未就绪仍显示，
+                点击转写时会收到 503 的明确指引 */}
+            {voiceSupported && voiceEnabled && (
+              <button
+                type="button"
+                onClick={() => { void startDictation() }}
+                disabled={dictation.phase !== 'idle'}
+                title="语音输入：点击开始录音，结束后转成文字插入光标处"
+                aria-label="语音输入"
+                data-testid="super-assistant-voice-button"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Mic size={16} />
+              </button>
+            )}
+          </div>
           <div className="flex shrink-0 items-center gap-2">
             {showStop ? (
               <button type="button" onClick={() => void stop()} disabled={stopping} aria-label="停止生成" title="停止生成"
@@ -1073,6 +1201,9 @@ export default function SuperAssistantPage() {
             </Popover>
           </div>
         </div>
+        ) : (
+          <VoiceRecordingBar dictation={dictation} onStop={() => { void dictation.finish() }} onCancel={dictation.cancel} />
+        )}
       </div>
     </div>
   )

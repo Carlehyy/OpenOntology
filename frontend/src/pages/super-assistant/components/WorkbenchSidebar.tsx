@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, Download, History, Inbox, LayoutDashboard, ListChecks, LogOut,
-  Megaphone, Network, Pencil, Plug, Plus, Search, Sparkles, Trash2, Wrench, X,
+  Megaphone, Mic, Network, Pencil, Plug, Plus, Search, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react'
 
 import { notificationsApi } from '@/api/notifications'
@@ -166,6 +166,9 @@ function ConversationRow({
         </ContextMenuItem>
         <ContextMenuItem data-ctx-item="config-memory" onSelect={() => onOpenConfigTab('memory', item.id)}>
           <Brain size={14} className="shrink-0" /> 记忆
+        </ContextMenuItem>
+        <ContextMenuItem data-ctx-item="config-voice" onSelect={() => onOpenConfigTab('voice', item.id)}>
+          <Mic size={14} className="shrink-0" /> 语音听写
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuLabel>会话审计</ContextMenuLabel>

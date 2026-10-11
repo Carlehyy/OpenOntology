@@ -24,6 +24,7 @@ from app.super_assistant import (
     search_service,
     skill_service,
     skill_store,
+    voice_service,
 )
 
 
@@ -310,6 +311,14 @@ DELEGATES = {
         "search_service",
         "search_conversations",
     ),
+    "voice_transcribe": (
+        "voice_service",
+        "transcribe",
+    ),
+    "voice_status": (
+        "voice_service",
+        "status",
+    ),
     "list_conversation_files": (
         "conversation_files",
         "list_files",
@@ -577,7 +586,7 @@ def test_super_assistant_handlers_delegate_without_orm_or_transactions():
     # router.py 已贴近行数上限，新端点（如搜索、multica 外部集成）落在独立
     # 子路由模块；委托与事务禁令对两者同样生效。
     functions = {}
-    for filename in ("router.py", "search.py", "multica.py", "tools.py"):
+    for filename in ("router.py", "search.py", "multica.py", "tools.py", "voice.py"):
         path = ASSISTANT_DIR / filename
         tree = ast.parse(
             path.read_text(encoding="utf-8"),
@@ -590,17 +599,36 @@ def test_super_assistant_handlers_delegate_without_orm_or_transactions():
         })
     for name, (module_name, function_name) in DELEGATES.items():
         function = functions[name]
-        service_calls = [
-            node
-            for statement in function.body
-            for node in ast.walk(statement)
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
+        def is_delegate(node: ast.AST) -> bool:
+            if not isinstance(node, ast.Call):
+                return False
+            direct = (
+                isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == module_name
                 and node.func.attr == function_name
             )
+            if direct:
+                return True
+            # run_in_threadpool(<module>.<fn>, ...) 引用形委托等价：
+            # CPU 密集服务调用让出事件循环（如语音转写），仍是唯一委托
+            if (isinstance(node.func, ast.Name)
+                    and node.func.id == "run_in_threadpool"
+                    and node.args):
+                target = node.args[0]
+                return (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == module_name
+                    and target.attr == function_name
+                )
+            return False
+
+        service_calls = [
+            node
+            for statement in function.body
+            for node in ast.walk(statement)
+            if is_delegate(node)
         ]
         assert len(service_calls) == 1
 
@@ -737,6 +765,7 @@ def test_super_assistant_services_do_not_import_http_router():
         reflection_service,
         search_service,
         skill_service,
+        voice_service,
     ):
         imports = _imports(Path(module.__file__))
         assert "app.super_assistant.router" not in imports
@@ -846,8 +875,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 共 7 个操作（4 条路径）。
     # 会话右键菜单配套的会话审计导出新增 /conversations/{id}/export 的
     # GET 共 1 个操作（1 条路径）。
-    assert len(paths) == 104
-    assert sum(len(item) for item in paths.values()) == 135
+    # 语音听写（voice.py 子路由）新增 /voice/transcribe 的 POST 与
+    # /voice/status 的 GET 共 2 个操作（2 条路径）。
+    assert len(paths) == 106
+    assert sum(len(item) for item in paths.values()) == 137
     assert hashlib.sha256(payload).hexdigest() == (
-        "165a26621f08a43ef6b2eabfb6c0e561ed59cc8c74a4c24d22e72979e48e4233"
+        "3a0ba4b344d73a819137fb86947fb133935b96d480099a5619f549096ba028a3"
     )
