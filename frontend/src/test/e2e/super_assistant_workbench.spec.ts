@@ -2746,21 +2746,22 @@ test('助手完成但无正文时如实展示「助手未返回文本」', async
   await expect(page.getByText('（无文本）')).toHaveCount(0)
 })
 
-test('会话右键菜单：三组快捷操作（会话操作/助手配置/会话审计）', async ({ page }) => {
+test('会话右键菜单：快捷操作齐备且无分组标题', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  // —— 菜单结构：右键近期会话行弹出，三组标签与十项齐备 ——
+  // —— 菜单结构：右键近期会话行弹出，分组标题已移除、十一项齐备 ——
   await page.locator('[data-workbench-conversation="c-today"]').click({ button: 'right' })
   const menu = page.locator('[data-ctx-menu="c-today"]')
   await expect(menu).toBeVisible()
+  // 分组标签（会话操作/助手配置/会话审计）已按需求移除，不应再渲染
   for (const label of ['会话操作', '助手配置', '会话审计']) {
-    await expect(menu.getByText(label, { exact: true })).toBeVisible()
+    await expect(menu.getByText(label, { exact: true })).toHaveCount(0)
   }
   for (const key of [
     'rename', 'archive', 'delete',
-    'config-skills', 'config-mcp', 'config-tools', 'config-approval', 'config-memory',
+    'config-skills', 'config-mcp', 'config-tools', 'config-approval', 'config-memory', 'config-voice',
     'export', 'feedback',
   ]) {
     await expect(menu.locator(`[data-ctx-item="${key}"]`)).toBeVisible()
