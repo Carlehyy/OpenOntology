@@ -41,11 +41,11 @@ interface WorkflowNodeData {
   defaultTarget?: string
 }
 
-type WorkflowNode = Node<{ data: WorkflowNodeData }>
+type WorkflowNode = Node<WorkflowNodeData>
 
 // ─── 自定义节点渲染 ───
-function WorkflowNodeCard({ data }: { data: WorkflowNodeData }) {
-  const meta = KIND_META[data.kind] ?? KIND_META.agent
+function WorkflowNodeCard({ data }: { data: Record<string, unknown> & WorkflowNodeData }) {
+  const meta = KIND_META[data.kind as NodeKind] ?? KIND_META.agent
   const Icon = meta.icon
   return (
     <div className="min-w-36 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] px-3 py-2 shadow-sm">
@@ -78,16 +78,17 @@ function graphToYaml(nodes: WorkflowNode[], edges: Edge[]): string {
   const idMap = new Map<string, string>()
 
   for (const node of nodes) {
-    const id = node.data.kind === 'agent' || node.data.kind === 'human'
+    const kind = (node.data as WorkflowNodeData).kind
+    const id = kind === 'agent' || kind === 'human'
       ? `n${counter}`
-      : `${node.data.kind}_${counter}`
+      : `${kind}_${counter}`
     idMap.set(node.id, id)
     counter += 1
   }
 
   for (const node of nodes) {
     const id = idMap.get(node.id) ?? node.id
-    const d = node.data
+    const d = node.data as WorkflowNodeData
     switch (d.kind) {
       case 'agent':
         nodeEntries.push(`  ${id}:\n    kind: agent\n    system: ${d.system || '执行任务'}`)
