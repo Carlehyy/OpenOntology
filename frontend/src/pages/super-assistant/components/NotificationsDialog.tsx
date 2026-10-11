@@ -3,9 +3,10 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Archive, ArchiveRestore, ArrowLeft, Bell, ChevronDown, Copy, FileText, Forward, KeyRound, Loader2,
+  Archive, ArchiveRestore, ArrowLeft, BarChart3, Bell, ChevronDown, Copy, FileText, Forward, KeyRound, Loader2,
   Mail, MailOpen, MessageSquare, Paperclip, Pencil, Plug, Plus, Send, Star, Trash2, Users, Webhook, Zap,
 } from 'lucide-react'
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { toast } from 'sonner'
 
 import {
@@ -39,7 +40,7 @@ import { formatFileSize, priorityStyle, sourceTypeLabel } from './notificationsF
  * - 渠道配置：入口（投递密钥 + 接口调用示例）与出口（发件邮箱 + 转发渠道）两个区块，
  *   每个密钥/渠道旁内嵌连通测试。
  */
-type NavSection = 'messages' | 'compose' | 'config'
+type NavSection = 'messages' | 'compose' | 'config' | 'stats'
 
 /** 渠道类型的图形语义（图标盒统一品牌软底，类型间靠图形区分而非颜色） */
 const TEMPLATE_ICONS: Record<string, typeof Bell> = {
@@ -56,6 +57,7 @@ const NAV_ITEMS: { key: NavSection; label: string; icon: typeof Bell }[] = [
   { key: 'messages', label: '消息列表', icon: Bell },
   { key: 'compose', label: '发送消息', icon: Send },
   { key: 'config', label: '渠道配置', icon: Plug },
+  { key: 'stats', label: '消息统计', icon: BarChart3 },
 ]
 
 /** 通知正文沿用会话排版映射，仅覆盖 img：内嵌媒体走鉴权拉取与音视频原生控件 */
@@ -159,6 +161,8 @@ export default function NotificationsDialog({
   const [composeTitle, setComposeTitle] = useState('')
   const [composeBody, setComposeBody] = useState('')
   const [composePriority, setComposePriority] = useState<NotificationPriority>('normal')
+  // 消息统计：时间窗（7/30 天，默认 30）
+  const [statsDays, setStatsDays] = useState<7 | 30>(30)
   // 投递去向：null = 默认全选（跟随启用渠道）；Set = 用户改选后的显式集合
   const [composeChannelIds, setComposeChannelIds] = useState<Set<string> | null>(null)
 
@@ -196,6 +200,13 @@ export default function NotificationsDialog({
     queryKey: ['notifications', 'channels'],
     queryFn: notificationsApi.channels.list,
     enabled: open,
+  })
+
+  const stats = useQuery({
+    queryKey: ['notifications', 'stats', statsDays],
+    queryFn: () => notificationsApi.stats(statsDays),
+    enabled: open && nav === 'stats',
+    placeholderData: previous => previous,
   })
 
   const channelTemplates = useQuery({
@@ -1590,6 +1601,167 @@ export default function NotificationsDialog({
                 </div>
               </section>
 
+            </div>
+          )}
+          {nav === 'stats' && (
+            <div
+              role="tabpanel"
+              id="notifications-panel-stats"
+              aria-labelledby="notifications-tab-stats"
+              className="scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5"
+              data-notifications-stats-panel
+            >
+              {stats.isLoading ? (
+                <div className="flex items-center justify-center gap-2 py-16 text-xs text-[var(--color-text-tertiary)]">
+                  <Loader2 size={14} className="animate-spin" /> 统计加载中…
+                </div>
+              ) : stats.isError ? (
+                <div role="alert" className="flex flex-col items-center gap-2 py-16 text-center">
+                  <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">统计加载失败：{errorText(stats.error)}</p>
+                  <button
+                    type="button"
+                    onClick={() => void stats.refetch()}
+                    className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : !stats.data ? null : (
+                <>
+                  {/* —— 概览卡 —— */}
+                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4" data-notifications-stats-overview>
+                    {[
+                      { label: '消息总量', value: String(stats.data.overview.totalCount) },
+                      { label: '未读', value: String(stats.data.overview.unreadCount) },
+                      { label: '今日入站', value: String(stats.data.overview.todayInbound) },
+                      {
+                        label: '转发成功率',
+                        value: stats.data.overview.forwardSuccessRate === null
+                          ? '—'
+                          : `${Math.round(stats.data.overview.forwardSuccessRate * 1000) / 10}%`,
+                      },
+                    ].map(card => (
+                      <div key={card.label} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3" data-notifications-stats-card={card.label}>
+                        <p className="text-xs text-[var(--color-text-tertiary)]">{card.label}</p>
+                        <p className="mt-1 text-lg font-semibold tabular-nums leading-7 text-[var(--color-text-primary)]">{card.value}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* —— 入站趋势 —— */}
+                  <section className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4" aria-label="入站趋势" data-notifications-stats-trend>
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">入站趋势</h3>
+                      <div className="flex items-center gap-1" role="group" aria-label="统计时间窗">
+                        {([7, 30] as const).map(d => (
+                          <button
+                            key={d}
+                            type="button"
+                            onClick={() => setStatsDays(d)}
+                            aria-pressed={statsDays === d}
+                            data-notifications-stats-range={d}
+                            className={`rounded-md px-2 py-1 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                              statsDays === d
+                                ? 'bg-brand-soft font-medium text-brand-ink'
+                                : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                            }`}
+                          >
+                            近 {d} 天
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="mt-3 h-44" data-notifications-stats-trend-chart>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={stats.data.trend} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
+                          <XAxis
+                            dataKey="date"
+                            tickFormatter={(v: string) => v.slice(5)}
+                            tick={{ fontSize: 10, fill: 'var(--color-text-tertiary)' }}
+                            interval="preserveStartEnd"
+                            axisLine={{ stroke: 'var(--color-border)' }}
+                            tickLine={false}
+                          />
+                          <YAxis
+                            allowDecimals={false}
+                            tick={{ fontSize: 10, fill: 'var(--color-text-tertiary)' }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <Tooltip
+                            cursor={{ fill: 'var(--color-bg-hover)' }}
+                            contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg-elevated)' }}
+                            formatter={value => [`${value ?? 0} 条`, '入站']}
+                            labelFormatter={label => String(label)}
+                          />
+                          <Bar dataKey="count" fill="var(--color-nav-bg)" radius={[3, 3, 0, 0]} maxBarSize={18} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </section>
+
+                  <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+                    {/* —— 来源分布 —— */}
+                    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4" aria-label="来源分布" data-notifications-stats-sources>
+                      <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">来源分布</h3>
+                      {stats.data.sources.length === 0 ? (
+                        <p className="py-8 text-center text-xs text-[var(--color-text-tertiary)]">还没有消息来源。</p>
+                      ) : (
+                        <div className="mt-3 space-y-2" data-notifications-stats-sources-list>
+                          {(() => {
+                            const max = Math.max(...stats.data.sources.map(s => s.count), 1)
+                            return stats.data.sources.map(item => (
+                              <div key={item.source} className="flex items-center gap-2" data-notifications-stats-source={item.source}>
+                                <span className="w-28 shrink-0 truncate text-xs text-[var(--color-text-secondary)]" title={item.source}>{item.source}</span>
+                                <span className="h-4 min-w-1 flex-1 overflow-hidden rounded bg-[var(--color-bg-hover)]">
+                                  <span className="block h-full rounded bg-brand-soft" style={{ width: `${Math.max((item.count / max) * 100, 2)}%` }} />
+                                </span>
+                                <span className="w-8 shrink-0 text-right text-xs tabular-nums text-[var(--color-text-tertiary)]">{item.count}</span>
+                              </div>
+                            ))
+                          })()}
+                        </div>
+                      )}
+                    </section>
+
+                    {/* —— 渠道投递结果 —— */}
+                    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4" aria-label="渠道投递结果" data-notifications-stats-channels>
+                      <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">渠道投递结果</h3>
+                      {stats.data.channels.length === 0 ? (
+                        <p className="py-8 text-center text-xs text-[var(--color-text-tertiary)]">还没有投递记录。到「渠道配置」新建渠道后开始转发。</p>
+                      ) : (
+                        <div className="mt-3 space-y-2.5" data-notifications-stats-channels-list>
+                          {stats.data.channels.map(ch => {
+                            const total = ch.sent + ch.failed + ch.pending
+                            return (
+                              <div key={ch.channelId} data-notifications-stats-channel={ch.channelId}>
+                                <div className="flex items-center justify-between gap-2 text-xs">
+                                  <span className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)]" title={ch.name}>{ch.name}</span>
+                                  <span className="shrink-0 tabular-nums text-[var(--color-text-tertiary)]">
+                                    成功 <span className="text-[var(--color-success)]">{ch.sent}</span>
+                                    {' · '}失败 <span className="text-[var(--color-danger)]">{ch.failed}</span>
+                                    {ch.pending > 0 ? ` · 待发 ${ch.pending}` : ''} · 共 {total}
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex h-2 w-full overflow-hidden rounded bg-[var(--color-bg-hover)]">
+                                  {total > 0 && (
+                                    <>
+                                      <span className="h-full bg-[var(--color-success)]" style={{ width: `${(ch.sent / total) * 100}%` }} />
+                                      <span className="h-full bg-[var(--color-danger)]" style={{ width: `${(ch.failed / total) * 100}%` }} />
+                                      <span className="h-full bg-[var(--color-border)]" style={{ width: `${(ch.pending / total) * 100}%` }} />
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </section>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>

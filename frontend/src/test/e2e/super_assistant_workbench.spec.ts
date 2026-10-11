@@ -207,6 +207,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifStatePatches: string[] = []
   const notifCreates: string[] = []
   const notifReadAllCalls: string[] = []
+  const notifStatsDays: number[] = []
   const notifDeletes: string[] = []
   const notifKeyCreates: string[] = []
   const notifKeyRevokes: string[] = []
@@ -716,6 +717,28 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         totalCount: notificationsState.length,
       })
     }
+    if (path === '/api/v2/notifications/stats') {
+      const days = Number(new URL(request.url()).searchParams.get('days') || 30)
+      notifStatsDays.push(days)
+      // 与真实 API 同序：升序补零，今天在末位
+      const trend = Array.from({ length: days }, (_, i) => ({
+        date: `2026-09-${String(30 - days + 1 + i).padStart(2, '0')}`,
+        count: i === days - 1 ? 1 : i === days - 2 ? 2 : 0,
+      }))
+      return json(route, {
+        overview: { totalCount: 5, unreadCount: 2, todayInbound: 1, forwardSuccessRate: 0.8 },
+        trend,
+        sources: [
+          { source: 'platform', count: 3 },
+          { source: 'warehouse', count: 1 },
+          { source: 'billing', count: 1 },
+        ],
+        channels: [
+          { channelId: 'ch-1', name: '钉钉运维群', sent: 4, failed: 1, pending: 0 },
+          { channelId: 'ch-2', name: '双端收件邮箱', sent: 2, failed: 0, pending: 1 },
+        ],
+      })
+    }
     if (path === '/api/v2/notifications/read-all' && request.method() === 'POST') {
       notifReadAllCalls.push('read-all')
       let updated = 0
@@ -1056,6 +1079,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifStatePatches,
     notifCreates,
     notifReadAllCalls,
+    notifStatsDays,
     notifDeletes,
     notifKeyCreates,
     notifKeyRevokes,
@@ -1147,7 +1171,7 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   const navKeys = await dialog.locator('[data-notifications-nav]').evaluateAll(
     els => els.map(el => (el as HTMLElement).dataset.notificationsNav),
   )
-  expect(navKeys).toEqual(['messages', 'compose', 'config'])
+  expect(navKeys).toEqual(['messages', 'compose', 'config', 'stats'])
 
   // tab 顺序契约：未读(默认) → 已标记 → 已归档 → 全部
   const tabKeys = await dialog.locator('[data-notifications-tab]').evaluateAll(
@@ -1371,6 +1395,46 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect(confirm).toBeVisible()
   await confirm.getByRole('button', { name: '删除' }).click()
   await expect.poll(() => mocks.notifChannelDeletes.length).toBe(1)
+})
+
+test('消息统计：第四分区图表可视化——概览/趋势/来源/渠道与时间窗切换', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-nav="stats"]').click()
+
+  const panel = page.locator('[data-notifications-stats-panel]')
+  await expect(panel).toBeVisible()
+
+  // 概览四卡：数值与空值语义
+  const overview = page.locator('[data-notifications-stats-overview]')
+  await expect(overview).toContainText('消息总量')
+  await expect(page.locator('[data-notifications-stats-card="消息总量"]')).toContainText('5')
+  await expect(page.locator('[data-notifications-stats-card="未读"]')).toContainText('2')
+  await expect(page.locator('[data-notifications-stats-card="今日入站"]')).toContainText('1')
+  await expect(page.locator('[data-notifications-stats-card="转发成功率"]')).toContainText('80%')
+
+  // 入站趋势：recharts 柱状图渲染出 SVG，默认近 30 天
+  await expect(page.locator('[data-notifications-stats-trend-chart] svg')).toBeVisible()
+  await expect.poll(() => mocks.notifStatsDays.at(-1) ?? 0).toBe(30)
+
+  // 时间窗切到 7 天：重新请求且按钮选中态切换
+  await page.locator('[data-notifications-stats-range="7"]').click()
+  await expect(page.locator('[data-notifications-stats-range="7"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => mocks.notifStatsDays.at(-1) ?? 0).toBe(7)
+
+  // 来源分布：三个来源占比条与计数
+  const sources = page.locator('[data-notifications-stats-sources-list]')
+  await expect(sources.locator('[data-notifications-stats-source="platform"]')).toContainText('3')
+  await expect(sources.locator('[data-notifications-stats-source="warehouse"]')).toContainText('1')
+
+  // 渠道投递结果：成功/失败计数与堆叠占比条
+  const channels = page.locator('[data-notifications-stats-channels-list]')
+  await expect(channels.locator('[data-notifications-stats-channel="ch-1"]')).toContainText('成功 4')
+  await expect(channels.locator('[data-notifications-stats-channel="ch-1"]')).toContainText('失败 1')
+  await expect(channels.locator('[data-notifications-stats-channel="ch-2"]')).toContainText('待发 1')
 })
 
 test('消息通知（窄屏390px）：列表⇄详情单栏切换与管理态全宽', async ({ page }) => {
