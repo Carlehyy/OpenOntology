@@ -7,7 +7,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider,
   addEdge, useEdgesState, useNodesState,
-  type Connection, type Edge, type Node, type NodeProps,
+  type Connection, type Edge, type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import Dagre from '@dagrejs/dagre'
@@ -44,8 +44,8 @@ interface WorkflowNodeData {
 type WorkflowNode = Node<{ data: WorkflowNodeData }>
 
 // ─── 自定义节点渲染 ───
-function WorkflowNodeCard({ data }: NodeProps<WorkflowNode>) {
-  const meta = KIND_META[data.data.kind] ?? KIND_META.agent
+function WorkflowNodeCard({ data }: { data: WorkflowNodeData }) {
+  const meta = KIND_META[data.kind] ?? KIND_META.agent
   const Icon = meta.icon
   return (
     <div className="min-w-36 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] px-3 py-2 shadow-sm">
@@ -56,13 +56,13 @@ function WorkflowNodeCard({ data }: NodeProps<WorkflowNode>) {
           {meta.label}
         </span>
       </div>
-      {data.data.system && (
+      {data.system && (
         <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-          {data.data.system}
+          {data.system}
         </p>
       )}
-      {data.data.role && (
-        <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">{data.data.role}</p>
+      {data.role && (
+        <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">{data.role}</p>
       )}
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-[var(--color-text-tertiary)]" />
     </div>
