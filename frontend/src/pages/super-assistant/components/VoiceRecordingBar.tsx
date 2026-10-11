@@ -3,7 +3,7 @@ import { Loader2, Mic, Square, X } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { MAX_RECORDING_SECONDS, type VoiceDictation } from '../useVoiceDictation'
-import VoiceWaveform from './VoiceWaveform'
+import { VoiceWaveform } from './VoiceWaveform'
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -98,7 +98,7 @@ export default function VoiceRecordingBar({
       <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--color-text-secondary)]">
         {transcribing ? '转写中…' : formatDuration(elapsedMs)}
       </span>
-      <VoiceWaveform recorderRef={recorderRef} active={!transcribing} />
+      <VoiceWaveform recorderRef={recorderRef} frozen={transcribing} />
       <button
         type="button"
         onClick={onStop}

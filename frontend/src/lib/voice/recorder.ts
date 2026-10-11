@@ -67,19 +67,13 @@ export async function createVoiceRecorder(interrupt?: RecorderInterrupt): Promis
   let mediaRecorder: MediaRecorder | null = null
   let audioContext: AudioContext | null = null
   let analyser: AnalyserNode | null = null
-  let levelTimer: number | null = null
   let chunks: Blob[] = []
   let startedAt = 0
   let aborted = false
-  let currentLevel = 0
   // 自身发起的清理不再触发 onInterrupt（stop/abort 都先置位）
   let tornDown = false
 
   const cleanup = () => {
-    if (levelTimer !== null) {
-      window.clearInterval(levelTimer)
-      levelTimer = null
-    }
     analyser?.disconnect()
     if (audioContext) {
       audioContext.close().catch(() => undefined)
@@ -117,11 +111,6 @@ export async function createVoiceRecorder(interrupt?: RecorderInterrupt): Promis
   analyser.fftSize = 512
   source.connect(analyser)
   const sampleBuffer = new Float32Array(analyser.fftSize)
-  levelTimer = window.setInterval(() => {
-    if (!analyser) return
-    analyser.getFloatTimeDomainData(sampleBuffer)
-    currentLevel = rmsLevel(sampleBuffer)
-  }, 100)
 
   const mimeType = pickMimeType()
   mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
@@ -179,8 +168,12 @@ export async function createVoiceRecorder(interrupt?: RecorderInterrupt): Promis
     })
 
   return {
+    /** 0~1 实时电平（按需直读分析窗 RMS，未开始/已释放为 0）。
+     *  波形按 requestAnimationFrame 每帧读取——电平跟随帧率而非定时器 */
     get level() {
-      return currentLevel
+      if (!analyser) return 0
+      analyser.getFloatTimeDomainData(sampleBuffer)
+      return rmsLevel(sampleBuffer)
     },
     stop,
     abort: () => {
