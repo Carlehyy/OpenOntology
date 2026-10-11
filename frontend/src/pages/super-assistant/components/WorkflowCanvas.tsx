@@ -3,11 +3,11 @@
  * 用 @xyflow/react（仓内已有）+ @dagrejs/dagre 自动布局。
  * 左侧调色板 6 种节点类型；右侧属性面板；底部校验+保存。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider,
   addEdge, useEdgesState, useNodesState,
-  type Connection, type Edge, type Node, type NodeProps, type ReactFlowInstance,
+  type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import Dagre from '@dagrejs/dagre'
@@ -174,7 +174,6 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
   const [validating, setValidating] = useState(false)
   const [saving, setSaving] = useState(false)
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
-  const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null)
 
   const selectedNode = useMemo(
     () => nodes.find(n => n.id === selectedNodeId) ?? null,
@@ -318,7 +317,6 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
                 onConnect={onConnect}
                 onNodeClick={(_, node) => setSelectedNodeId(node.id)}
                 onPaneClick={() => setSelectedNodeId(null)}
-                onInit={setRfInstance}
                 nodesDraggable
                 nodesConnectable
                 fitView

@@ -9,8 +9,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowLeft, Bot, CheckCircle2, ClipboardList, LayoutGrid, ListChecks,
-  Loader2, Play, Plus, Settings2, User, XCircle,
+  ArrowLeft, CheckCircle2, ClipboardList, LayoutGrid, ListChecks,
+  Loader2, Play, Plus, XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {

@@ -193,6 +193,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    inspector = sa_inspect(bind)
+    tables = set(inspector.get_table_names())
+    if _TEMPLATES not in tables:
+        return
     templates = sa.table(_TEMPLATES, sa.column("id", sa.String),
                          sa.column("name", sa.String))
     for name, _ in SEEDS:
