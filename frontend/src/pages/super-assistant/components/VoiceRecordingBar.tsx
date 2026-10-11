@@ -3,9 +3,7 @@ import { Loader2, Mic, Square, X } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { MAX_RECORDING_SECONDS, type VoiceDictation } from '../useVoiceDictation'
-
-/** 音量轨迹保留的最近采样数（约 3 秒 @100ms） */
-const TRAIL_SAMPLES = 30
+import VoiceWaveform from './VoiceWaveform'
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -16,11 +14,11 @@ function formatDuration(ms: number): string {
 
 /**
  * 录音条（cc-haha 式）：录音期间原地替换输入框底部按钮行——输入框与
- * 草稿保持可见，只留「取消」与「结束录音」两个图标键。
- * 计时/电平由本组件 100ms 轮询录音器并存在局部 state：高频更新只重渲染
- * 录音条自身，不触发整个聊天页面（含消息列表）重协调。音量轨迹是响度
- * 可视化（峰值渐隐），不是识别中间结果；到达自动停止线替用户收尾，
- * 避免录满后端上限才吃 413。
+ * 草稿保持可见，只留「取消」与「结束录音」两个图标键。取消键在转写
+ * 阶段同样可用（中止上传/推理）：转写最长可达 90s，期间必须可退出。
+ * 计时由本组件 100ms 轮询并存在局部 state，波形另由 canvas 组件自绘，
+ * 高频更新不触发整个聊天页面（含消息列表）重协调；到达自动停止线
+ * 替用户收尾，避免录满后端上限才吃 413。
  */
 export default function VoiceRecordingBar({
   dictation,
@@ -31,7 +29,6 @@ export default function VoiceRecordingBar({
   onStop: () => void
   onCancel: () => void
 }) {
-  const [trail, setTrail] = useState<number[]>([])
   const [elapsedMs, setElapsedMs] = useState(0)
   const hostRef = useRef<HTMLDivElement>(null)
   const startedAtRef = useRef(performance.now())
@@ -43,9 +40,7 @@ export default function VoiceRecordingBar({
   useEffect(() => {
     if (transcribing) return
     const timer = window.setInterval(() => {
-      const recorder = recorderRef.current
       const elapsed = performance.now() - startedAtRef.current
-      setTrail(current => [...current, recorder?.level ?? 0].slice(-TRAIL_SAMPLES))
       setElapsedMs(elapsed)
       if (elapsed >= MAX_RECORDING_SECONDS * 1000 && !autoStoppedRef.current) {
         autoStoppedRef.current = true
@@ -55,23 +50,25 @@ export default function VoiceRecordingBar({
     }, 100)
     return () => window.clearInterval(timer)
     // onStop 经由父级 onClick 包装稳定引用；轮询生命周期跟随录音态
-  }, [transcribing, recorderRef])
+  }, [transcribing, onStop])
 
   useEffect(() => {
-    if (transcribing) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
-      // 焦点在其他可编辑控件（侧栏搜索、弹窗输入）时，Esc 归属那个控件，
-      // 不越权取消录音；仅面向页面级的 Esc 兜底
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return
       const target = event.target as HTMLElement | null
+      // Esc 归属更上层的浮层（Radix 弹层/对话框内的输入）：让那边的
+      // Esc 语义先成立（关弹层），不越权取消录音。输入框（TEXTAREA）
+      // 本身没有 Esc 语义，录音期间它的 Esc 就该取消录音
+      if (target?.closest('[data-radix-popper-content-wrapper], [role="dialog"]')) return
+      // INPUT/SELECT/可编辑区（侧栏搜索、弹窗表单）保留自身 Esc 行为
       if (target && (target.isContentEditable
-        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return
+        || ['INPUT', 'SELECT'].includes(target.tagName))) return
       event.preventDefault()
       onCancel()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [transcribing, onCancel])
+  }, [onCancel])
 
   return (
     <div
@@ -82,10 +79,10 @@ export default function VoiceRecordingBar({
       <button
         type="button"
         onClick={onCancel}
-        disabled={transcribing}
-        aria-label="取消录音"
-        title="取消录音（Esc）"
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label={transcribing ? '取消转写' : '取消录音'}
+        title={transcribing ? '取消转写' : '取消录音（Esc）'}
+        data-testid="super-assistant-voice-cancel-button"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <X size={15} />
       </button>
@@ -101,20 +98,7 @@ export default function VoiceRecordingBar({
       <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--color-text-secondary)]">
         {transcribing ? '转写中…' : formatDuration(elapsedMs)}
       </span>
-      <div
-        aria-hidden="true"
-        // justify-end + overflow-hidden：窄屏放不下整条轨迹时裁掉最旧的
-        // 采样，保住最新的（右端）实时变化
-        className="flex h-7 min-w-0 flex-1 items-center justify-end gap-[3px] overflow-hidden"
-      >
-        {trail.map((sample, index) => (
-          <span
-            key={index}
-            className="w-[3px] shrink-0 rounded-full bg-brand/60"
-            style={{ height: `${Math.max(8, Math.min(100, sample * 140))}%`, opacity: 0.35 + (index / trail.length) * 0.65 }}
-          />
-        ))}
-      </div>
+      <VoiceWaveform recorderRef={recorderRef} active={!transcribing} />
       <button
         type="button"
         onClick={onStop}
