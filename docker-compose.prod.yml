@@ -347,6 +347,29 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # 自签证书一次性生成：裸 IP 无域名场景的 HTTPS（语音听写等浏览器
+  # 安全上下文能力的入口）。证书持久化在卷里，跨部署稳定不变，
+  # 浏览器只需在第一次访问时手动信任。
+  frontend_ssl_init:
+    image: alpine:3.20
+    volumes:
+      - frontend_ssl_certs:/certs
+    environment:
+      # SAN 追加的公网 IP（CN 同值）；换服务器时在 .env 覆盖
+      PUBLIC_TLS_IP: ${PUBLIC_TLS_IP:-64.83.14.139}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ -f /certs/server.crt ] && [ -f /certs/server.key ]; then
+          echo "frontend ssl cert already present, skip generation"
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 3650           -keyout /certs/server.key -out /certs/server.crt           -subj "/CN=$${PUBLIC_TLS_IP}"           -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:$${PUBLIC_TLS_IP}"
+        chmod 600 /certs/server.key
+        echo "self-signed cert generated for $$PUBLIC_TLS_IP"
+
   frontend:
     build:
       context: ./frontend
@@ -356,9 +379,15 @@ services:
         NGINX_BASE_IMAGE: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
     ports:
       - "${PUBLIC_PORT:-80}:80"
+      # 裸 IP 自签 HTTPS 入口（浏览器首次访问需信任一次）
+      - "${PUBLIC_HTTPS_PORT:-8443}:443"
     depends_on:
       backend:
         condition: service_healthy
+      frontend_ssl_init:
+        condition: service_completed_successfully
+    volumes:
+      - frontend_ssl_certs:/etc/nginx/certs:ro
     healthcheck:
       # BusyBox resolves localhost to ::1 first, while this Nginx image listens
       # on IPv4.  Pin the probe to IPv4 so a healthy public frontend is not
@@ -370,6 +399,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  frontend_ssl_certs:
   voice_models:
   postgres_data:
   neo4j_data:
