@@ -33,6 +33,7 @@ const KIND_META: Record<NodeKind, { label: string; icon: typeof Bot; color: stri
 }
 
 interface WorkflowNodeData {
+  [key: string]: unknown
   kind: NodeKind
   system?: string
   role?: string
@@ -41,7 +42,7 @@ interface WorkflowNodeData {
   defaultTarget?: string
 }
 
-type WorkflowNode = Node<WorkflowNodeData>
+type WorkflowNode = Node<WorkflowNodeData & Record<string, unknown>>
 
 // ─── 自定义节点渲染 ───
 function WorkflowNodeCard({ data }: { data: Record<string, unknown> & WorkflowNodeData }) {
