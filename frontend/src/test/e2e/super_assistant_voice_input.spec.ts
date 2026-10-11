@@ -113,7 +113,7 @@ interface VoiceMocks {
 
 async function mockApis(
   page: Page,
-  options: { transcribeStatus?: number; modelReady?: boolean } = {},
+  options: { transcribeStatus?: number; transcribeHang?: boolean; modelReady?: boolean } = {},
 ): Promise<VoiceMocks> {
   const transcribeCalls: Array<{ language: string; bodySize: number }> = []
   const chatBodies: string[] = []
@@ -227,6 +227,9 @@ async function mockApis(
     if (path === '/api/v2/super-assistant/voice/transcribe' && request.method() === 'POST') {
       const language = new URL(request.url()).searchParams.get('language') || 'auto'
       transcribeCalls.push({ language, bodySize: (request.postDataBuffer() || Buffer.alloc(0)).length })
+      // 转写挂起模式：不 fulfill 也不 continue，请求停在途中——用于验证
+      // 用户在转写阶段主动取消（AbortController 中止上传/推理）
+      if (options.transcribeHang) return new Promise(() => undefined)
       if (options.transcribeStatus && options.transcribeStatus !== 200) {
         return route.fulfill({
           status: options.transcribeStatus,
@@ -308,6 +311,77 @@ test.describe('超级助手语音听写', () => {
     await expect(bar).toBeHidden()
     await expect(composerTextarea(page)).toBeVisible()
     expect(mocks.transcribeCalls).toHaveLength(0)
+  })
+
+  test('✕ 按钮取消录音：波形随录音出现随取消移除，不发转写', async ({ page }) => {
+    await seedAuth(page)
+    await stubAudioApis(page, { secureContext: true })
+    const mocks = await mockApis(page)
+    await openWorkbench(page)
+
+    await micButton(page).click()
+    const bar = page.getByTestId('super-assistant-voice-recording-bar')
+    await expect(bar).toBeVisible()
+    // cc-haha 式波形：canvas 随录音条出现
+    const waveform = bar.getByTestId('super-assistant-voice-waveform')
+    await expect(waveform).toBeVisible()
+    await bar.getByTestId('super-assistant-voice-cancel-button').click()
+
+    await expect(bar).toBeHidden()
+    await expect(waveform).toHaveCount(0)
+    await expect(composerTextarea(page)).toBeVisible()
+    expect(mocks.transcribeCalls).toHaveLength(0)
+  })
+
+  test('输入框聚焦时 Esc 取消录音（草稿编辑不被 Esc 守卫拦截）', async ({ page }) => {
+    await seedAuth(page)
+    await stubAudioApis(page, { secureContext: true })
+    const mocks = await mockApis(page)
+    await openWorkbench(page)
+
+    await micButton(page).click()
+    const bar = page.getByTestId('super-assistant-voice-recording-bar')
+    await expect(bar).toBeVisible()
+    // 录音期间输入框可见可编辑：焦点放回输入框再按 Esc，应取消录音而非无响应
+    const textarea = composerTextarea(page)
+    await textarea.click()
+    await textarea.pressSequentially('草稿')
+    await textarea.press('Escape')
+
+    await expect(bar).toBeHidden()
+    await expect(textarea).toHaveValue('草稿')
+    expect(mocks.transcribeCalls).toHaveLength(0)
+  })
+
+  test('转写中可取消：中止挂起的转写请求，无错误 toast，且可立即开始下一次录音', async ({ page }) => {
+    await seedAuth(page)
+    await stubAudioApis(page, { secureContext: true })
+    const mocks = await mockApis(page, { transcribeHang: true })
+    await openWorkbench(page)
+
+    await micButton(page).click()
+    const bar = page.getByTestId('super-assistant-voice-recording-bar')
+    await expect(bar).toBeVisible()
+    await page.waitForTimeout(700)
+    await bar.getByTestId('super-assistant-voice-stop-button').click()
+
+    // 转写请求挂起：录音条停在「转写中…」，取消键保持可用（回归：曾整段禁用）
+    await expect(bar.getByText('转写中…')).toBeVisible()
+    await bar.getByTestId('super-assistant-voice-cancel-button').click()
+
+    await expect(bar).toBeHidden()
+    await expect(page.getByText('已取消转写').first()).toBeVisible()
+    // 主动取消不应呈现为失败
+    await expect(page.getByText('语音听写失败')).toHaveCount(0)
+    expect(mocks.transcribeCalls).toHaveLength(1)
+
+    // 立刻开始下一次录音：旧转写的收尾不得清掉新录音状态（归属守卫回归）
+    await micButton(page).click()
+    await expect(bar).toBeVisible()
+    await page.waitForTimeout(700)
+    await bar.getByTestId('super-assistant-voice-cancel-button').click()
+    await expect(bar).toBeHidden()
+    expect(mocks.transcribeCalls).toHaveLength(1)
   })
 
   test('麦克风热拔：提示已断开、回到输入框、不发起转写', async ({ page }) => {

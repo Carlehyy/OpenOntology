@@ -54,6 +54,9 @@ export function useVoiceDictation(options: {
   const [phase, setPhase] = useState<DictationPhase>('idle')
 
   const recorderRef = useRef<VoiceRecorder | null>(null)
+  // 转写请求的中止控制器：转写阶段（上传+推理可能数秒到数十秒）
+  // 必须可取消，否则 UI 卡在「转写中…」且按钮全灰
+  const transcribeAbortRef = useRef<AbortController | null>(null)
   // getUserMedia 是异步授权：await 返回前 phase 仍是 idle，按钮防重入
   // 覆盖不到这个窗口，必须用同步标记挡住连点
   const startingRef = useRef(false)
@@ -105,15 +108,19 @@ export function useVoiceDictation(options: {
     if (!recorderRef.current || finishingRef.current) return
     finishingRef.current = true
     setPhase('transcribing')
+    const abort = new AbortController()
+    transcribeAbortRef.current = abort
     try {
       const recording = await recorderRef.current.stop()
-      const result = await superAssistantApi.transcribeVoice(recording.wav, optionsRef.current.getLanguage())
+      const result = await superAssistantApi.transcribeVoice(recording.wav, optionsRef.current.getLanguage(), { signal: abort.signal })
       if (result.text) {
         optionsRef.current.onTranscript(result.text)
       } else {
         toast.info('没有识别到语音内容', { description: '请靠近麦克风后重试' })
       }
     } catch (error) {
+      // 用户在转写阶段主动取消：不弹错误（cancel 已给出反馈并清理）
+      if (abort.signal.aborted) return
       if (isRecorderError(error, 'too-short')) {
         toast.info(RECORDER_ERROR_MESSAGES['too-short'])
       } else if (error instanceof Error && error.message in RECORDER_ERROR_MESSAGES) {
@@ -122,11 +129,22 @@ export function useVoiceDictation(options: {
         notifyError(errorText(error, '转写失败，请重试'))
       }
     } finally {
-      teardown()
+      // 归属守卫：取消转写后用户可能已开始下一次录音，只有仍持有
+      // 当前控制权的调用才允许收尾，避免旧 finish 清掉新录音的状态
+      if (transcribeAbortRef.current === abort) {
+        transcribeAbortRef.current = null
+        teardown()
+      }
     }
   }, [teardown])
 
   const cancel = useCallback(() => {
+    // 转写中取消：中止上传/推理请求；录音中取消：丢弃录音释放麦克风
+    if (transcribeAbortRef.current) {
+      transcribeAbortRef.current.abort()
+      transcribeAbortRef.current = null
+      toast.info('已取消转写')
+    }
     recorderRef.current?.abort()
     teardown()
   }, [teardown])

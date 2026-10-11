@@ -735,12 +735,14 @@ export const superAssistantApi = {
   cancelVoiceModelDownload: () =>
     apiClientV2.post<{ cancelled: boolean }>('/super-assistant/voice/model/download/cancel'),
   /** 语音听写：上传 16k 单声道 16-bit PCM WAV（原始字节），返回转写文本。
-   *  显式超时：转写是 CPU 推理（秒级），不能沿用 axios 无默认超时 */
-  transcribeVoice: (wav: Uint8Array, language: string) =>
+   *  显式超时：转写是 CPU 推理（秒级），不能沿用 axios 无默认超时；
+   *  signal 支持转写阶段用户主动取消 */
+  transcribeVoice: (wav: Uint8Array, language: string, config?: { signal?: AbortSignal }) =>
     apiClientV2.post<VoiceTranscription>('/super-assistant/voice/transcribe', wav, {
       params: { language },
       headers: { 'Content-Type': 'audio/wav' },
       timeout: 90_000,
+      signal: config?.signal,
     }),
   palaceFiles: () => apiClientV2.get<PalaceFile[]>('/super-assistant/palace/files'),
   /** folderPath 非空时上传归位到该目录（目录不存在时后端按 mkdir -p 补行） */
