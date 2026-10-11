@@ -116,6 +116,21 @@ export interface NotificationIngestKey {
 }
 
 /** tab 顺序即用户处理路径：未读优先，全部 = 真全量（含已归档） */
+export interface NotificationStatsOverview {
+  totalCount: number
+  unreadCount: number
+  todayInbound: number
+  /** 终态口径 sent/(sent+failed)；无终态投递时为 null */
+  forwardSuccessRate: number | null
+}
+
+export interface NotificationStats {
+  overview: NotificationStatsOverview
+  trend: { date: string; count: number }[]
+  sources: { source: string; count: number }[]
+  channels: { channelId: string; name: string; sent: number; failed: number; pending: number }[]
+}
+
 export const NOTIFICATION_TABS: { key: NotificationTab; label: string }[] = [
   { key: 'unread', label: '未读' },
   { key: 'starred', label: '已标记' },
@@ -154,6 +169,10 @@ export const notificationsApi = {
 
   readAll: (): Promise<{ updated: number }> =>
     apiClientV2.post('/notifications/read-all'),
+
+  /** 消息统计（只读聚合）：概览/入站趋势/来源分布/渠道投递结果 */
+  stats: (days = 30): Promise<NotificationStats> =>
+    apiClientV2.get('/notifications/stats', { params: { days } }),
 
   /** 手动转发：单条消息 → 多渠道（已存在的投递单重置允许再发） */
   forward: (

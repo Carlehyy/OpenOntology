@@ -1222,3 +1222,99 @@ def test_ingest_key_link_test_full_chain(client, auth_headers, db, monkeypatch):
     assert client.post("/api/v2/notifications/ingest-keys/missing/test", headers=auth_headers).status_code == 404
     client.delete(f"/api/v2/notifications/ingest-keys/{key['id']}", headers=auth_headers)
     assert client.post(f"/api/v2/notifications/ingest-keys/{key['id']}/test", headers=auth_headers).status_code == 422
+
+
+# ── 消息统计（R3）─────────────────────────────────────────────
+
+
+def _backdate(db, message_id: str, created_at) -> None:
+    from app.notifications.models import NotificationMessage
+
+    db.query(NotificationMessage).filter_by(id=message_id).update({"created_at": created_at})
+    db.commit()
+
+
+def test_stats_empty_database(client, auth_headers):
+    data = client.get("/api/v2/notifications/stats", headers=auth_headers).json()["data"]
+    assert data["overview"] == {
+        "totalCount": 0,
+        "unreadCount": 0,
+        "todayInbound": 0,
+        "forwardSuccessRate": None,
+    }
+    assert len(data["trend"]) == 30
+    assert all(point["count"] == 0 for point in data["trend"])
+    assert data["sources"] == [] and data["channels"] == []
+
+
+def test_stats_aggregates_and_days_param(client, auth_headers, db):
+    from datetime import timedelta
+
+    from app.notifications.models import NotificationDelivery, NotificationMessage
+
+    channel_a = _make_channel(client, auth_headers, name="渠道A")
+    channel_b = _make_channel(client, auth_headers, name="渠道B", url="json://hooks.example/b")
+
+    m_today_1 = _create(client, auth_headers, title="今日告警一", body="x")
+    m_today_2 = _create(client, auth_headers, title="今日告警二", body="y")
+    m_old = _create(client, auth_headers, title="三天前旧闻", body="z")
+    # 外部来源消息
+    key = _mint_key(client, auth_headers, name="warehouse")
+    client.post(INGEST, json={"eventId": "st-1", "title": "仓库事件"}, headers=_ingest_headers(key))
+
+    now = notification_service._now()
+    _backdate(db, m_old["id"], now - timedelta(days=3))
+
+    # 旧消息移出今天：今日入站 = 3（两条今日 + 一条 ingest）
+    # 投递状态：创建消息时已自动向 A/B 扇出 pending 单，这里改写终态
+    # 目标：A sent×2、B failed×1、B pending×1（pending 不计入成功率）
+    by_id = {row.id: row for row in db.query(NotificationMessage).all()}
+    for delivery in db.query(NotificationDelivery).all():
+        if delivery.channel_id == channel_a["id"] and delivery.attempts == 0:
+            delivery.status = "sent"
+            delivery.attempts = 1
+            delivery.sent_at = notification_service._now()
+    b_rows = [d for d in db.query(NotificationDelivery).all() if d.channel_id == channel_b["id"]]
+    b_rows.sort(key=lambda d: by_id[d.message_id].title)
+    if b_rows:
+        b_rows[0].status = "failed"
+        b_rows[0].attempts = 3
+    # 今日告警一保持未读（创建即已读），标一条回未读
+    client.patch(f"/api/v2/notifications/{m_today_1['id']}", json={"isRead": False}, headers=auth_headers)
+    db.commit()
+
+    data = client.get("/api/v2/notifications/stats", headers=auth_headers).json()["data"]
+    ov = data["overview"]
+    assert ov["totalCount"] == 4
+    assert ov["unreadCount"] == 2  # 今日告警一标回未读 + ingest 消息天然未读
+    assert ov["todayInbound"] == 3
+    assert ov["forwardSuccessRate"] == round(4 / 5, 4)  # 4 sent / (4 sent + 1 failed)，pending 不进分母
+
+    # 趋势：30 桶、今日 3、三天前 1、其余 0
+    assert len(data["trend"]) == 30
+    assert data["trend"][-1]["count"] == 3
+    assert data["trend"][-4]["count"] == 1
+    assert sum(point["count"] for point in data["trend"]) == 4
+
+    # 来源分布：platform 3 + warehouse 1（按量降序）
+    assert data["sources"][0] == {"source": "platform", "count": 3}
+    assert {"source": "warehouse", "count": 1} in data["sources"]
+
+    # 渠道结果：A sent=2；B failed=1 + pending=1
+    by_name = {item["name"]: item for item in data["channels"]}
+    assert by_name["渠道A"]["sent"] >= 2 and by_name["渠道A"]["failed"] == 0 and by_name["渠道A"]["pending"] == 0
+    assert by_name["渠道B"]["failed"] == 1 and by_name["渠道B"]["pending"] >= 1
+
+    # days 参数：7 桶与边界校验
+    short = client.get("/api/v2/notifications/stats?days=7", headers=auth_headers).json()["data"]
+    assert len(short["trend"]) == 7
+    assert short["trend"][-1]["count"] == 3  # 三天前仍在 7 天窗内
+    assert client.get("/api/v2/notifications/stats?days=0", headers=auth_headers).status_code == 422
+    assert client.get("/api/v2/notifications/stats?days=91", headers=auth_headers).status_code == 422
+
+
+def test_stats_requires_admin(client, editor_user):
+    assert (
+        client.get("/api/v2/notifications/stats", headers=_editor_headers(client)).status_code
+        == 403
+    )

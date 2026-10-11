@@ -3,6 +3,7 @@
 
   GET    /                                列表（tab=all|unread|starred|archived，游标分页）
   GET    /summary                         未读/标记/归档计数（侧栏徽章数据源）
+  GET    /stats                           消息统计聚合（概览/趋势/来源/渠道）
   POST   /                                手动发送消息（正式消息：入站内并触发渠道转发）
   POST   /read-all                        全部未读标为已读
   GET    /{message_id}                    详情（Markdown 正文 + 附件；查看即自动已读）
@@ -58,6 +59,15 @@ def list_notifications(
 @router.get("/summary")
 def notifications_summary(db: Session = Depends(get_db), admin=Depends(require_admin)):
     return _ok(service.notification_summary(db, user_id=admin.id))
+
+
+@router.get("/stats")
+def notifications_stats(
+    days: int = Query(30, ge=1, le=90),
+    db: Session = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    return _ok(service.notification_stats(db, user_id=admin.id, days=days))
 
 
 @router.post("", status_code=201)

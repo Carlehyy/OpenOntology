@@ -17,7 +17,7 @@ import json
 import os
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiofiles
@@ -465,6 +465,118 @@ def notification_summary(db: Session, *, user_id: str) -> dict[str, int]:
         "starredCount": starred,
         "archivedCount": archived,
         "totalCount": total,
+    }
+
+
+def notification_stats(db: Session, *, user_id: str, days: int = 30) -> dict[str, Any]:
+    """消息统计（只读聚合，admin）：概览 / 入站趋势 / 来源分布 / 渠道投递结果。
+
+    天界按 UTC 日切（与列表时间戳同口径）；趋势补齐缺失日为 0。
+    days 仅作用于入站趋势；总数/未读/成功率/来源/渠道均为全量口径。
+    转发成功率只统计终态（sent+failed），pending 不计入分母。
+    """
+    days = max(1, min(days, 90))
+    now = _now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since = today_start - timedelta(days=days - 1)
+
+    total = db.query(func.count(NotificationMessage.id)).scalar() or 0
+    unread = (
+        db.query(func.count(NotificationMessage.id))
+        .outerjoin(NotificationMessageState, _state_join_condition(user_id))
+        .filter(_archived_flag().is_(False), _read_flag().is_(False))
+        .scalar()
+        or 0
+    )
+    today_inbound = (
+        db.query(func.count(NotificationMessage.id))
+        .filter(NotificationMessage.created_at >= today_start)
+        .scalar()
+        or 0
+    )
+
+    sent_count = (
+        db.query(func.count(NotificationDelivery.id))
+        .filter(NotificationDelivery.status == "sent")
+        .scalar()
+        or 0
+    )
+    failed_count = (
+        db.query(func.count(NotificationDelivery.id))
+        .filter(NotificationDelivery.status == "failed")
+        .scalar()
+        or 0
+    )
+    finished = sent_count + failed_count
+    success_rate = round(sent_count / finished, 4) if finished else None
+
+    # 入站趋势：按 UTC 日聚合，补零
+    trend_rows = (
+        db.query(
+            func.date(NotificationMessage.created_at).label("day"),
+            func.count(NotificationMessage.id),
+        )
+        .filter(NotificationMessage.created_at >= since)
+        .group_by("day")
+        .all()
+    )
+    trend_map = {str(day): count for day, count in trend_rows}
+    trend = []
+    for offset in range(days):
+        day = (since + timedelta(days=offset)).date()
+        trend.append({"date": day.isoformat(), "count": trend_map.get(day.isoformat(), 0)})
+
+    # 来源分布：全量按来源计数（近 N 天趋势外的历史一并呈现），Top 10
+    source_rows = (
+        db.query(
+            NotificationMessage.source_system,
+            func.count(NotificationMessage.id),
+        )
+        .group_by(NotificationMessage.source_system)
+        .order_by(func.count(NotificationMessage.id).desc())
+        .limit(10)
+        .all()
+    )
+    sources = [{"source": name, "count": count} for name, count in source_rows]
+
+    # 渠道投递结果：按渠道聚合终态
+    channel_rows = (
+        db.query(
+            NotificationChannel.id,
+            NotificationChannel.name,
+            NotificationDelivery.status,
+            func.count(NotificationDelivery.id),
+        )
+        .join(
+            NotificationDelivery,
+            NotificationDelivery.channel_id == NotificationChannel.id,
+        )
+        .group_by(
+            NotificationChannel.id,
+            NotificationChannel.name,
+            NotificationDelivery.status,
+        )
+        .all()
+    )
+    channels_map: dict[str, dict[str, Any]] = {}
+    for channel_id, name, status, count in channel_rows:
+        entry = channels_map.setdefault(channel_id, {"channelId": channel_id, "name": name, "sent": 0, "failed": 0, "pending": 0})
+        # 约束层尚无 skipped 写入方；若未来引入，此处需显式聚合而非并入 pending
+        entry[status if status in ("sent", "failed", "pending") else "pending"] = count
+    channel_stats = sorted(
+        channels_map.values(), key=lambda c: -(c["sent"] + c["failed"] + c["pending"])
+    )
+
+    return {
+        "overview": {
+            "totalCount": total,
+            "unreadCount": unread,
+            "todayInbound": today_inbound,
+            "forwardSuccessRate": success_rate,
+        },
+        "trend": trend,
+        "sources": sources,
+        "channels": channel_stats,
     }
 
 
