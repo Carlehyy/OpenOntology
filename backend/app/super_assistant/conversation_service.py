@@ -239,6 +239,79 @@ def list_messages(
     ).order_by(SuperAssistantMessage.created_at.asc()).all()
 
 
+def export_conversation(
+    conversation_id: str,
+    db: Session,
+    current_user: User,
+    *,
+    conversation_lookup_fn: ConversationLookup = _conversation,
+) -> dict:
+    """导出完整会话审计记录（与会话操作右键菜单「导出会话」配套）。
+
+    与 steward 域导出同约定：format/version 标识负载结构；messages 携带
+    steps 工具轨迹与 token 用量，summary 汇总统计。导出前与 list_messages
+    同口径回收死流，避免进程死亡遗留的 streaming 空消息被定格进审计快照。
+    """
+    item = conversation_lookup_fn(
+        db,
+        current_user.id,
+        conversation_id,
+    )
+    _reap_stale_streaming(db, item.id)
+    messages = (
+        db.query(SuperAssistantMessage)
+        .filter(SuperAssistantMessage.conversation_id == item.id)
+        .order_by(
+            SuperAssistantMessage.created_at.asc(),
+            SuperAssistantMessage.id.asc(),
+        )
+        .all()
+    )
+    tool_step_count = sum(len(message.steps or []) for message in messages)
+    # runtime 写入的 token_usage 键名为 camelCase（inputTokens/outputTokens，
+    # 见 runtime.py 组装处），导出统计按真实键名求和，勿用 total_tokens 假键
+    total_tokens = sum(
+        int((message.token_usage or {}).get("inputTokens", 0))
+        + int((message.token_usage or {}).get("outputTokens", 0))
+        for message in messages
+    )
+    return {
+        "format": "openontology.super-assistant.conversation",
+        "version": 1,
+        "exportedAt": datetime.now(timezone.utc).isoformat(),
+        "conversation": {
+            "id": item.id,
+            "title": item.title,
+            "model_config_id": item.model_config_id,
+            "browser_source_id": item.browser_source_id,
+            "status": item.status,
+            "summary": item.summary,
+            "summary_message_count": item.summary_message_count,
+            "created_at": item.created_at,
+            "updated_at": item.updated_at,
+            "messageCount": len(messages),
+            "messages": [
+                {
+                    "id": message.id,
+                    "conversation_id": message.conversation_id,
+                    "role": message.role,
+                    "content": message.content,
+                    "status": message.status,
+                    "steps": message.steps,
+                    "token_usage": message.token_usage,
+                    "created_at": message.created_at,
+                }
+                for message in messages
+            ],
+        },
+        "summary": {
+            "messageCount": len(messages),
+            "toolStepCount": tool_step_count,
+            "totalTokens": total_tokens,
+        },
+    }
+
+
 def chat(
     conversation_id: str,
     body: ChatRequest,

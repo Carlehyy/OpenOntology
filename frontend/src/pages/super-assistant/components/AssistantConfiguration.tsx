@@ -34,7 +34,7 @@ export { errorText }
 // 薄封装 ui/dialog：统一配置域弹层的头部与尺寸语言；
 // 遮罩、Esc 关闭与焦点管理交给 Radix，不再自绘 fixed 弹层和焦点陷阱。
 // （外部集成弹层等同语言复用，故导出）
-export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, icon }: {
+export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, icon, open = true }: {
   title: string
   description?: string
   size?: 'default' | 'large' | 'wide'
@@ -46,6 +46,9 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
   onOpenAutoFocus?: (event: Event) => void
   /** 标准头部图标盒（DESIGN.md §4.5：h-10 w-10 rounded-xl 品牌底 + 18px lucide） */
   icon?: React.ReactNode
+  /** 受控开合：缺省 true（既有条件渲染消费方零影响）；常挂消费方传 open
+      让 Radix 走自身关闭流程移除 overlay，避免条件渲染卸载的 overlay 残留 */
+  open?: boolean
 }) {
   const sizeClass = {
     default: 'max-h-[90dvh] w-[min(92vw,36rem)]',
@@ -54,7 +57,7 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
   }[size]
 
   return (
-    <Dialog open onOpenChange={value => { if (!value) onClose() }}>
+    <Dialog open={open} onOpenChange={value => { if (!value) onClose() }}>
       <DialogContent
         onOpenAutoFocus={onOpenAutoFocus}
         className={`flex flex-col overflow-hidden p-0 ${sizeClass} ${contentClassName ?? ''}`}
@@ -602,6 +605,9 @@ function ToolsTab({ tools, refreshTools }: {
 }
 
 
+/** 配置面板的五个 tab 键（会话右键菜单「助手配置」组与此同源） */
+export type AssistantConfigTab = 'skills' | 'mcp' | 'tools' | 'approval' | 'memory'
+
 /** 配置面板宽度边界：默认 26rem，拖拽/键盘在 [288, min(600, 视口-720)] 内调整，
     为聊天卡头部（品牌区已让出）与标题保底最小可用宽度 */
 export const DEFAULT_CONFIG_PANEL_WIDTH = 416
@@ -609,7 +615,7 @@ const MIN_PANEL_WIDTH = 288
 const maxPanelWidth = () => Math.max(MIN_PANEL_WIDTH, Math.min(600, window.innerWidth - 720))
 const clampPanelWidth = (width: number) => Math.min(Math.max(width, MIN_PANEL_WIDTH), maxPanelWidth())
 
-export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, refreshSkills, refreshServers, refreshTools, conversationId }: {
+export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, refreshSkills, refreshServers, refreshTools, conversationId, initialTab, onInitialTabConsumed }: {
   open: boolean
   onClose: () => void
   /** 面板宽度（px）：受控于页面级状态（聊天列据此让位），拖拽/键盘经 onWidthResize 回写 */
@@ -624,8 +630,12 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   refreshServers: () => Promise<void>
   refreshTools: () => Promise<void>
   conversationId: string | null
+  /** 一次性落位 tab（会话右键「助手配置」快捷方式）：面板打开时切到该 tab 后由页面清空 */
+  initialTab?: AssistantConfigTab | null
+  /** 落位完成后回调：页面据此清空 initialTab，同 tab 重复右键也能再次生效 */
+  onInitialTabConsumed?: () => void
 }) {
-  const [tab, setTab] = useState<'skills' | 'mcp' | 'tools' | 'approval' | 'memory'>('skills')
+  const [tab, setTab] = useState<AssistantConfigTab>('skills')
   const [dragging, setDragging] = useState(false)
   const [creatingSkill, setCreatingSkill] = useState(false)
   const [editingSkill, setEditingSkill] = useState<SuperSkill | null>(null)
@@ -638,6 +648,16 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   const [removeBusy, setRemoveBusy] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
   const configurableServers = servers.filter(server => server.builtin_key !== 'minio')
+
+  // 一次性落位：面板打开且带 initialTab 时切过去（右键「助手配置」快捷方式），
+  // 消费后立刻通知页面清空——否则面板已打开时同 tab 重复右键（initialTab 值
+  // 不变、open 不变）不会重新触发本 effect，菜单点了没反应。
+  useEffect(() => {
+    if (open && initialTab) {
+      setTab(initialTab)
+      onInitialTabConsumed?.()
+    }
+  }, [open, initialTab, onInitialTabConsumed])
 
   const importZip = async (file?: File) => {
     if (!file) return

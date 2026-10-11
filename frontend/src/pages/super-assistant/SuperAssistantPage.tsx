@@ -48,7 +48,11 @@ import {
   sameConversationList, sameMessageList, shiftQueue,
 } from './components/chatTranscript'
 import { readCachedConversations, writeCachedConversations } from './conversationCache'
+import { buildConversationExportFilename } from './exportFilename'
 import type { ModelConfig } from '@/types/ontology'
+import TicketFormModal from '@/components/tickets/TicketFormModal'
+import ConversationRenameDialog from './components/ConversationRenameDialog'
+import type { AssistantConfigTab } from './components/AssistantConfiguration'
 
 const ATTACH_ACCEPT = '.csv,.xlsx,.xls,.json,.xml,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt'
 
@@ -136,6 +140,13 @@ export default function SuperAssistantPage() {
   // 助手配置面板默认收起，由用户点击右上角按钮展开/收起；
   // 按钮保持绿色选中态外观（仅卡片显隐变化），避免进页即展开挤占聊天区
   const [configOpen, setConfigOpen] = useState(false)
+  // 会话右键「助手配置」快捷方式的一次性落位 tab：面板打开时消费，
+  // 关闭面板即清空，普通开合不重置用户上次所在 tab
+  const [configPendingTab, setConfigPendingTab] = useState<AssistantConfigTab | null>(null)
+  // 会话右键「重命名会话」行级改名目标（区别于聊天区顶部的选中会话标题编辑）
+  const [renamingConversation, setRenamingConversation] = useState<SuperConversation | null>(null)
+  // 会话右键「反馈问题」：复用全站工单提交弹窗（自动携带当前页面地址）
+  const [ticketOpen, setTicketOpen] = useState(false)
   // 面板宽度（px）：单一卡片结构下聊天列经 --config-w 让位，宽度状态提升到页面级；
   // 拖拽中禁用 padding 过渡，聊天列跟手移动，松手后才恢复开合动画
   const [configPanelWidth, setConfigPanelWidth] = useState(DEFAULT_CONFIG_PANEL_WIDTH)
@@ -545,6 +556,46 @@ export default function SuperAssistantPage() {
         block: 'center',
       })
     })
+  }
+
+  // 会话右键「重命名会话」保存回写（弹窗内部负责 PATCH 与提示）
+  const handleRenameSaved = (updated: SuperConversation) => {
+    setConversations(current => current.map(item => item.id === updated.id ? updated : item))
+  }
+
+  // 会话右键「助手配置」快捷方式：打开面板并一次性落位到目标 tab。
+  // 待审批 tab 的「完整反思」按当前选中会话执行——右键哪行就切到哪行，
+  // 保证审批作用域与所见行一致（其余 tab 是全局配置，不切聊天视图）
+  const openAssistantConfigTab = (tab: AssistantConfigTab, conversationId: string) => {
+    if (tab === 'approval') setSelectedId(conversationId)
+    setConfigPendingTab(tab)
+    setConfigOpen(true)
+    // 移动端抽屉让位（右键为桌面交互，此行为窄屏菜单兜底）
+    setSidebarOpen(false)
+  }
+
+  // 会话右键「导出会话」：下载完整审计 JSON（含消息与工具调用轨迹）
+  const exportConversation = async (item: SuperConversation) => {
+    try {
+      const payload = await superAssistantApi.exportConversation(item.id)
+      const filename = buildConversationExportFilename(item.title, item.id)
+      // 下载方式与 steward 会话导出同款：anchor 先挂 body 再 click，
+      // headless 环境下未连接的 anchor 不触发浏览器下载事件
+      const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+        type: 'application/json;charset=utf-8',
+      })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      toast.success('会话已导出', { description: filename })
+    } catch (error) {
+      toast.error('导出失败', { description: errorText(error) })
+    }
   }
 
   // 全局搜索选中结果：切到目标会话；消息命中时登记待定位消息
@@ -1030,6 +1081,10 @@ export default function SuperAssistantPage() {
         onOpenScheduled={() => setScheduledOpen(true)}
         onOpenNotifications={() => setNotificationsOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
+        onRename={setRenamingConversation}
+        onExport={item => void exportConversation(item)}
+        onOpenConfigTab={openAssistantConfigTab}
+        onFeedback={() => setTicketOpen(true)}
       />
       <NotificationsDialog
         open={notificationsOpen}
@@ -1307,10 +1362,11 @@ export default function SuperAssistantPage() {
           )}
         </ConfigProvider>
 
-      {/* 助手配置面板：单一大卡内的右侧栏（移动端为卡内覆盖抽屉） */}
+      {/* 助手配置面板：单一大卡内的右侧栏（移动端为卡内覆盖抽屉）。
+          initialTab 为右键快捷方式的一次性落位 tab，关闭面板时清空。 */}
       <ConfigurationPanel
         open={configOpen}
-        onClose={() => setConfigOpen(false)}
+        onClose={() => { setConfigOpen(false); setConfigPendingTab(null) }}
         width={configPanelWidth}
         onWidthResize={setConfigPanelWidth}
         onDraggingChange={setConfigPanelDragging}
@@ -1321,6 +1377,8 @@ export default function SuperAssistantPage() {
         refreshServers={refreshServers}
         refreshTools={refreshTools}
         conversationId={selectedId}
+        initialTab={configPendingTab}
+        onInitialTabConsumed={() => setConfigPendingTab(null)}
       />
       </section>
 
@@ -1355,6 +1413,15 @@ export default function SuperAssistantPage() {
         onConfirm={() => void deleteConversation()}
         onClose={() => setDeletingConversation(null)}
       />
+
+      <ConversationRenameDialog
+        open={renamingConversation !== null}
+        conversation={renamingConversation}
+        onClose={() => setRenamingConversation(null)}
+        onSaved={handleRenameSaved}
+      />
+
+      <TicketFormModal open={ticketOpen} onClose={() => setTicketOpen(false)} />
     </div>
   )
 }

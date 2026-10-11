@@ -684,6 +684,9 @@ export const superAssistantApi = {
   updateConversation: (id: string, body: { title?: string; model_config_id?: string | null; status?: 'active' | 'archived' }) =>
     apiClientV2.patch<SuperConversation>(`/super-assistant/conversations/${id}`, body),
   deleteConversation: (id: string) => apiClientV2.delete(`/super-assistant/conversations/${id}`),
+  /** 导出完整会话审计 JSON（format: openontology.super-assistant.conversation，不截断消息） */
+  exportConversation: (id: string) =>
+    apiClientV2.get<Record<string, unknown>>(`/super-assistant/conversations/${id}/export`),
   messages: (id: string) => apiClientV2.get<SuperMessage[]>(`/super-assistant/conversations/${id}/messages`),
   conversationFiles: (id: string) =>
     apiClientV2.get<SuperConversationFile[]>(`/super-assistant/conversations/${id}/files`),
