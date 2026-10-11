@@ -1328,7 +1328,12 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect(existing).toContainText('toke…abcd')
   await expect(existing).toContainText('投递成功')
 
-  // 新建渠道（模板化）：选钉钉类型 → 填关键字段（含指引文案可见）
+  // 新建渠道（模板网格起手）：打开向导 → 选钉钉类型卡 → 填关键字段（含指引文案可见）
+  await page.locator('[data-notifications-channel-create-open]').click()
+  await expect(page.locator('[data-notifications-template-grid]')).toBeVisible()
+  await expect(page.locator('[data-notifications-template-card="dingtalk"]')).toBeVisible()
+  await page.locator('[data-notifications-template-card="dingtalk"]').click()
+  await expect(page.locator('[data-notifications-channel-form]')).toBeVisible()
   await page.locator('[data-notifications-channel-name]').fill('钉钉值班')
   await expect(page.getByText('钉钉群 → 设置 → 机器人')).toBeVisible()
   await page.locator('[data-notifications-channel-param="token"]').fill('6fb1fa7c2b-demo')
