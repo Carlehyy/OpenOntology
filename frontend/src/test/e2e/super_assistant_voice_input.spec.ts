@@ -38,7 +38,18 @@ async function stubAudioApis(page: Page, options: { secureContext: boolean }) {
         getUserMedia: async () => {
           ;(window as unknown as Record<string, number>).__voiceGumCalls =
             ((window as unknown as Record<string, number>).__voiceGumCalls || 0) + 1
-          return { getTracks: () => [{ stop: () => undefined }] }
+          // 假 track 支持事件接口：recorder 会挂 ended 监听（热拔兜底），
+          // 监听器存到 window 供设备断开用例手动触发
+          const listeners: Record<string, Array<() => void>> = {}
+          const track = {
+            stop: () => undefined,
+            addEventListener: (name: string, handler: () => void) => {
+              ;(listeners[name] ||= []).push(handler)
+            },
+            removeEventListener: () => undefined,
+          }
+          ;(window as unknown as Record<string, unknown>).__voiceTrackListeners = listeners
+          return { getTracks: () => [track] }
         },
       },
       configurable: true,
@@ -252,6 +263,26 @@ test.describe('超级助手语音听写', () => {
     await page.keyboard.press('Escape')
     await expect(bar).toBeHidden()
     await expect(composerTextarea(page)).toBeVisible()
+    expect(mocks.transcribeCalls).toHaveLength(0)
+  })
+
+  test('麦克风热拔：提示已断开、回到输入框、不发起转写', async ({ page }) => {
+    await seedAuth(page)
+    await stubAudioApis(page, { secureContext: true })
+    const mocks = await mockApis(page)
+    await openWorkbench(page)
+
+    await micButton(page).click()
+    const bar = page.getByTestId('super-assistant-voice-recording-bar')
+    await expect(bar).toBeVisible()
+    // 模拟设备热拔：触发 recorder 挂在 track 上的 ended 监听
+    await page.evaluate(() => {
+      const listeners = (window as unknown as { __voiceTrackListeners?: Record<string, Array<() => void>> }).__voiceTrackListeners
+      for (const handler of listeners?.ended ?? []) handler()
+    })
+    await expect(bar).toBeHidden()
+    await expect(composerTextarea(page)).toBeVisible()
+    await expect(page.getByText('麦克风已断开').first()).toBeVisible()
     expect(mocks.transcribeCalls).toHaveLength(0)
   })
 

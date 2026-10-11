@@ -36,6 +36,11 @@ export function recorderError(code: RecorderError): Error {
   return new Error(code)
 }
 
+export interface RecorderInterrupt {
+  /** 麦克风被系统/用户中断（设备热拔、系统抢占）：录音已终止且数据不可用 */
+  onInterrupt: (reason: 'device-lost') => void
+}
+
 export function isRecorderError(error: unknown, code: RecorderError): boolean {
   return error instanceof Error && error.message === code
 }
@@ -54,7 +59,7 @@ function pickMimeType(): string | undefined {
   return candidates.find(type => MediaRecorder.isTypeSupported(type))
 }
 
-export async function createVoiceRecorder(): Promise<VoiceRecorder> {
+export async function createVoiceRecorder(interrupt?: RecorderInterrupt): Promise<VoiceRecorder> {
   if (!voiceCaptureSupported()) {
     throw recorderError('insecure-context')
   }
@@ -67,6 +72,8 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
   let startedAt = 0
   let aborted = false
   let currentLevel = 0
+  // 自身发起的清理不再触发 onInterrupt（stop/abort 都先置位）
+  let tornDown = false
 
   const cleanup = () => {
     if (levelTimer !== null) {
@@ -83,6 +90,13 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
     // mediaRecorder 尚为 null，依赖它会漏掉麦克风
     stream.getTracks().forEach(track => track.stop())
     mediaRecorder = null
+  }
+
+  const handleInterrupt = () => {
+    if (tornDown || aborted) return
+    tornDown = true
+    cleanup()
+    interrupt?.onInterrupt('device-lost')
   }
 
   const stream = await navigator.mediaDevices
@@ -114,6 +128,14 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
   mediaRecorder.ondataavailable = event => {
     if (event.data.size > 0) chunks.push(event.data)
   }
+  // 个别浏览器的非规范行为：出错后不发 stop——onerror 兜底保证
+  // stop() promise 与资源释放必然结算
+  mediaRecorder.onerror = () => handleInterrupt()
+  // 麦克风热拔/系统抢占：track 提前 ended 且部分实现不补发 stop，
+  // 已采数据不可信，按中断处理而不是让 UI 卡在录音态
+  for (const track of stream.getTracks()) {
+    track.addEventListener('ended', handleInterrupt)
+  }
   mediaRecorder.start(250)
   startedAt = performance.now()
 
@@ -124,6 +146,7 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
         reject(recorderError('not-recording'))
         return
       }
+      tornDown = true
       const durationMs = performance.now() - startedAt
       const blobType = recorder.mimeType || 'audio/webm'
       recorder.onstop = async () => {
@@ -162,6 +185,7 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
     stop,
     abort: () => {
       aborted = true
+      tornDown = true
       cleanup()
     },
   }

@@ -20,6 +20,7 @@ required_paths=(
   "backend/pyproject.toml"
   "backend/uv.lock"
   "backend/scripts/maintenance"
+  "backend/scripts/download_voice_model.py"
   "frontend/.dockerignore"
   "frontend/Dockerfile.prod"
   "frontend/dist"

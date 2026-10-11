@@ -844,7 +844,8 @@ export default function SuperAssistantPage() {
     onTranscript: text => {
       const anchor = voiceAnchorRef.current
       if (shouldHoldInsertion(anchor.revision, voiceRevisionRef.current, voiceComposingRef.current)) {
-        setVoiceHold(text)
+        // 已有暂存时追加而非覆盖：连续两次扣留不丢前一段
+        setVoiceHold(current => (current === null ? text : `${current}\n${text}`))
         return
       }
       const plan = insertAtCursor(inputRef.current, anchor.cursor, text)

@@ -18,6 +18,7 @@ from app.super_assistant.voice_service import (
     AudioTooLongError,
     BodyTooLargeError,
     ModelNotReadyError,
+    TranscriptionBusyError,
     TranscriptionFailedError,
     UnsupportedLanguageError,
     WavFormatError,
@@ -81,12 +82,34 @@ async def voice_transcribe(
         # 否则会冻结同进程内全部聊天 SSE 流
         result = await run_in_threadpool(voice_service.transcribe, payload, language=language)
     except (BodyTooLargeError, AudioTooLongError) as error:
+        logger.warning(
+            "transcribe rejected status=413 user=%s bytes=%s reason=%s",
+            current_user.id, len(payload), error,
+        )
         raise HTTPException(status_code=413, detail=str(error)) from error
+    except TranscriptionBusyError as error:
+        logger.warning(
+            "transcribe busy status=429 user=%s bytes=%s", current_user.id, len(payload)
+        )
+        raise HTTPException(status_code=429, detail=str(error)) from error
     except (WavFormatError, UnsupportedLanguageError) as error:
+        logger.warning(
+            "transcribe rejected status=400 user=%s bytes=%s reason=%s",
+            current_user.id, len(payload), error,
+        )
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ModelNotReadyError as error:
+        logger.warning(
+            "transcribe rejected status=503 user=%s bytes=%s reason=%s",
+            current_user.id, len(payload), error,
+        )
         raise HTTPException(status_code=503, detail=str(error)) from error
     except TranscriptionFailedError as error:
+        # 客户端只拿固定文案；原生异常（可能含模型路径）留在服务端日志
+        logger.error(
+            "transcribe failed status=500 user=%s bytes=%s",
+            current_user.id, len(payload), exc_info=error,
+        )
         raise HTTPException(status_code=500, detail=str(error)) from error
     # 排障观测：只记长度与时长，不落转写内容（语音属用户隐私）
     logger.info(

@@ -71,10 +71,13 @@ def _sine_wav(
 
 @pytest.fixture(autouse=True)
 def _reset_recognizer_cache() -> None:
-    # 识别器缓存是模块级单例，跨用例清空避免不同替换缝实现串味
+    # 识别器缓存是模块级单例，跨用例清空避免不同替换缝实现串味；
+    # 并发计数一并复位（异常中断的用例可能残留占用）
     voice_service._recognizer_cache.clear()
+    voice_service._inflight_count = 0
     yield
     voice_service._recognizer_cache.clear()
+    voice_service._inflight_count = 0
 
 
 @pytest.fixture
@@ -357,9 +360,14 @@ def test_read_limited_body_stops_on_chunked_overflow() -> None:
 
 def test_concurrent_transcribe_both_succeed(
     fake_recognizer: FakeRecognizer,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """threadpool 化后并发转写互不阻塞（事件循环不被 CPU 推理冻结）。"""
     import asyncio
+
+    monkeypatch.setattr(
+        voice_service.settings, "voice_max_concurrent", 4, raising=False
+    )
 
     import httpx
     from fastapi import FastAPI
@@ -374,6 +382,7 @@ def test_concurrent_transcribe_both_succeed(
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             wav = _sine_wav(seconds=0.3)
+            # 闸门实时读上限：放宽到与并发数一致
             results = await asyncio.gather(*[
                 client.post(
                     f"{_PREFIX}/voice/transcribe",
@@ -387,3 +396,101 @@ def test_concurrent_transcribe_both_succeed(
             assert response.json()["text"] == "你好，帮我把这段话整理成本体需求。"
 
     asyncio.run(run())
+
+
+def test_transcribe_busy_returns_429(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发闸门：占满名额后新请求立即 429 快速失败，不排队。"""
+    monkeypatch.setattr(
+        voice_service.settings, "voice_max_concurrent", 1, raising=False
+    )
+    with voice_service._InflightSlot():
+        response = _post_wav(client, _sine_wav(0.3))
+    assert response.status_code == 429
+    assert "繁忙" in response.json()["detail"]
+    # 释放后恢复可用
+    assert _post_wav(client, _sine_wav(0.3)).status_code == 200
+
+
+def test_odd_byte_truncated_wav_is_400(client: TestClient) -> None:
+    wav = bytearray(_sine_wav(seconds=0.2))
+    wav.pop()  # data 区少一个字节：frombuffer 非整倍数
+    response = _post_wav(client, bytes(wav))
+    assert response.status_code == 400
+    assert "WAV" in response.json()["detail"]
+
+
+# 注：声道错配分支（reshape 不整除）经 stdlib wave 读取时按帧对齐后
+# 不可达，try/except 仅作纯防御保留，无对应测试。
+
+
+def test_corrupt_model_is_503_with_guidance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """模型文件存在但解析失败：按未就绪处理（503 + 重新下载指引），
+    不再以 500 透出 sherpa/onnxruntime 原生异常。"""
+    import sys
+    import types as types_module
+
+    (tmp_path / "model.int8.onnx").write_bytes(b"corrupt")
+    (tmp_path / "tokens.txt").write_bytes(b"tokens")
+    monkeypatch.setattr(voice_service, "model_dir", lambda: tmp_path)
+
+    fake_sherpa = types_module.ModuleType("sherpa_onnx")
+    fake_sherpa.OfflineRecognizer = SimpleNamespace(
+        from_sense_voice=lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("onnx parse error at /voice-models/model.int8.onnx")
+        )
+    )
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", fake_sherpa)
+
+    app = FastAPI()
+    app.include_router(voice_router.router, prefix=_PREFIX)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1")
+    client = TestClient(app)
+    response = _post_wav(client, _sine_wav(0.3))
+    assert response.status_code == 503
+    assert "重新执行" in response.json()["detail"]
+    assert "/voice-models" not in response.json()["detail"]
+
+
+def test_native_decode_error_detail_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """解码期原生异常只进服务端日志；客户端拿固定文案（防模型路径泄露）。"""
+
+    class BrokenRecognizer:
+        def create_stream(self) -> None:
+            raise RuntimeError("native crash with /voice-models/model.int8.onnx")
+
+        def decode_stream(self, stream: None) -> None:
+            raise AssertionError("不应到达")
+
+    monkeypatch.setattr(
+        voice_service, "create_recognizer", lambda language: BrokenRecognizer()
+    )
+    app = FastAPI()
+    app.include_router(voice_router.router, prefix=_PREFIX)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1")
+    client = TestClient(app)
+    response = _post_wav(client, _sine_wav(0.3))
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail == "语音识别失败，请重试"
+    assert "/voice-models" not in detail
+
+
+def test_model_present_requires_exact_file_sizes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """尺寸不符（磁盘满/误截断）不算就绪：状态接口不谎报 ready。"""
+    model = tmp_path / "model.int8.onnx"
+    tokens = tmp_path / "tokens.txt"
+    model.write_bytes(b"x" * 100)
+    tokens.write_bytes(b"x" * 100)
+    monkeypatch.setattr(voice_service, "model_dir", lambda: tmp_path)
+    assert voice_service.model_present() is False
+    monkeypatch.setattr(voice_service, "_MODEL_FILE_SIZE", 100)
+    monkeypatch.setattr(voice_service, "_TOKENS_FILE_SIZE", 100)
+    assert voice_service.model_present() is True

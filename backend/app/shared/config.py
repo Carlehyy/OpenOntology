@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     voice_model_dir: str = ""
     voice_max_duration_seconds: int = Field(default=120, ge=1, le=600)
     voice_max_body_mb: int = Field(default=8, ge=1, le=64)
+    # 并发转写闸门：识别器常驻内存 ~0.9GB、每路解码再 +数百 MB，
+    # 且转写与全平台同步端点共享线程池——默认 2 路，超限 429 快速失败
+    voice_max_concurrent: int = Field(default=2, ge=1, le=16)
     super_assistant_max_tool_rounds: int = 25
     # 自主 agent 模式（PLAN→EXECUTE→VERIFY，对标 small-rust-hermes run_agent）的
     # 迭代上限；独立于普通对话的 max_tool_rounds，仅在 agent_mode=True 时生效

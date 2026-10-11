@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Loader2, Mic, Square, X } from 'lucide-react'
+import { toast } from 'sonner'
 
-import type { VoiceDictation } from '../useVoiceDictation'
+import { MAX_RECORDING_SECONDS, type VoiceDictation } from '../useVoiceDictation'
 
 /** 音量轨迹保留的最近采样数（约 3 秒 @100ms） */
 const TRAIL_SAMPLES = 30
@@ -15,8 +16,11 @@ function formatDuration(ms: number): string {
 
 /**
  * 录音条（cc-haha 式）：录音期间原地替换输入框底部按钮行——输入框与
- * 草稿保持可见，只留「取消」与「结束录音」两个图标键。音量轨迹是响度
- * 可视化（峰值渐隐），不是识别中间结果。
+ * 草稿保持可见，只留「取消」与「结束录音」两个图标键。
+ * 计时/电平由本组件 100ms 轮询录音器并存在局部 state：高频更新只重渲染
+ * 录音条自身，不触发整个聊天页面（含消息列表）重协调。音量轨迹是响度
+ * 可视化（峰值渐隐），不是识别中间结果；到达自动停止线替用户收尾，
+ * 避免录满后端上限才吃 413。
  */
 export default function VoiceRecordingBar({
   dictation,
@@ -28,16 +32,30 @@ export default function VoiceRecordingBar({
   onCancel: () => void
 }) {
   const [trail, setTrail] = useState<number[]>([])
+  const [elapsedMs, setElapsedMs] = useState(0)
   const hostRef = useRef<HTMLDivElement>(null)
+  const startedAtRef = useRef(performance.now())
+  const autoStoppedRef = useRef(false)
 
-  const { phase, level, elapsedMs } = dictation
+  const { phase, recorderRef } = dictation
   const transcribing = phase === 'transcribing'
 
-  // 音量轨迹经 effect 推进：渲染体保持纯函数，避免并发渲染下采样重复
   useEffect(() => {
     if (transcribing) return
-    setTrail(current => [...current, level].slice(-TRAIL_SAMPLES))
-  }, [level, transcribing])
+    const timer = window.setInterval(() => {
+      const recorder = recorderRef.current
+      const elapsed = performance.now() - startedAtRef.current
+      setTrail(current => [...current, recorder?.level ?? 0].slice(-TRAIL_SAMPLES))
+      setElapsedMs(elapsed)
+      if (elapsed >= MAX_RECORDING_SECONDS * 1000 && !autoStoppedRef.current) {
+        autoStoppedRef.current = true
+        toast.info('已达到单次录音上限，自动停止并转写')
+        onStop()
+      }
+    }, 100)
+    return () => window.clearInterval(timer)
+    // onStop 经由父级 onClick 包装稳定引用；轮询生命周期跟随录音态
+  }, [transcribing, recorderRef])
 
   useEffect(() => {
     if (transcribing) return
@@ -80,12 +98,14 @@ export default function VoiceRecordingBar({
           />
         )}
       </span>
-      <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--color-text-secondary)]" aria-live="polite">
+      <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--color-text-secondary)]">
         {transcribing ? '转写中…' : formatDuration(elapsedMs)}
       </span>
       <div
         aria-hidden="true"
-        className="flex h-7 min-w-0 flex-1 items-center gap-[3px] overflow-hidden"
+        // justify-end + overflow-hidden：窄屏放不下整条轨迹时裁掉最旧的
+        // 采样，保住最新的（右端）实时变化
+        className="flex h-7 min-w-0 flex-1 items-center justify-end gap-[3px] overflow-hidden"
       >
         {trail.map((sample, index) => (
           <span
