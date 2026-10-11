@@ -239,6 +239,7 @@ archive_fixture_paths=(
   "backend/pyproject.toml"
   "backend/uv.lock"
   "backend/scripts/maintenance/reset_admin_password.py"
+  "backend/scripts/download_voice_model.py"
   "frontend/.dockerignore"
   "frontend/Dockerfile.prod"
   "frontend/dist/index.html"
@@ -284,6 +285,7 @@ for required_member in \
   ".env.example" \
   "backend/app/main.py" \
   "backend/scripts/maintenance/reset_admin_password.py" \
+  "backend/scripts/download_voice_model.py" \
   "frontend/dist/index.html" \
   "frontend/src/main.tsx" \
   "docker/browser/Dockerfile" \

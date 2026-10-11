@@ -115,6 +115,12 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     note: '存量消费方：世界模型开发页 / 数据流水线脚本页 / 插件社区开发页；语言包按需追加（lang-python 已入库，任务实例编排页引入 lang-yaml）。高亮配色沿用 GitHub light 风格常量，注释不用斜体（中文字形防糊）。',
   },
   {
+    scenario: '右键上下文菜单（对象行/画布元素的右键快捷操作）',
+    component: "ContextMenu 系列（@/components/ui/context-menu）",
+    status: 'vendored',
+    note: 'shadcn 官方 context-menu（Radix @radix-ui/react-context-menu）按引入流程入库，色板换平台 token；Portal 定位、键盘导航、Esc/点击外部关闭内置。首个消费方：超级助手工作台会话列表（会话操作/助手配置/会话审计三组）。存量 palantir-graph Canvas.tsx 手写右键菜单为收敛对象（touch-to-migrate），迁移时替换为该标准件。',
+  },
+  {
     scenario: '二维码展示（扫码访问 / 设备配对）',
     component: "antd QRCode（import { QRCode } from 'antd'）",
     status: 'vendored',

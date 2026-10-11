@@ -170,6 +170,12 @@ services:
       # app.* 应用日志级别（main.py 兜底 handler）：生产如需关闭 INFO 审计
       # 输出（发布/调用记录），覆盖为 WARNING。
       APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      # 语音听写模型目录（宿主机经 docker compose exec backend python
+      # scripts/download_voice_model.py 预下载；缺失时转写接口 503）
+      VOICE_MODEL_DIR: /voice-models
+      VOICE_MAX_DURATION_SECONDS: ${VOICE_MAX_DURATION_SECONDS:-120}
+      VOICE_MAX_BODY_MB: ${VOICE_MAX_BODY_MB:-8}
+      VOICE_MAX_CONCURRENT: ${VOICE_MAX_CONCURRENT:-2}
     # app.* 日志走 stderr → json-file；无上限轮转会在长期运行中吃满磁盘
     logging:
       driver: json-file
@@ -195,6 +201,7 @@ services:
     volumes:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
+      - voice_models:/voice-models
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     # Container hardening is defense in depth; user plugins still require the
     # dedicated rootless runner described in the commercial release gate.
@@ -362,6 +369,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  voice_models:
   postgres_data:
   neo4j_data:
   minio_data:

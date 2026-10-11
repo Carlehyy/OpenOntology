@@ -325,6 +325,14 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 语音听写（录音 WAV 上传 → 本地 SenseVoice 离线转写）：同前缀同守卫的独立子路由
+from app.super_assistant import voice as super_assistant_voice
+app.include_router(
+    super_assistant_voice.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 远程助手（声明式注册目录：CRUD/连接测试）：同前缀同守卫的独立子路由
 from app.super_assistant import remote_agents as super_assistant_remote_agents
 app.include_router(

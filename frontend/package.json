@@ -33,6 +33,7 @@
     "@headless-tree/react": "^1.7.0",
     "@heroicons/react": "^2.2.0",
     "@lezer/highlight": "^1.2.3",
+    "@radix-ui/react-context-menu": "^2.3.8",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-popover": "^1.1.23",
     "@radix-ui/react-select": "^2.3.7",
