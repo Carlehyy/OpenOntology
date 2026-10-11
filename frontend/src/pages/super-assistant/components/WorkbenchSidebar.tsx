@@ -9,7 +9,7 @@ import {
 import { notificationsApi } from '@/api/notifications'
 import type { SuperConversation } from '@/api/superAssistant'
 import {
-  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuTrigger,
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from '@/components/ui/context-menu'
 import {
   SidebarGroup,
@@ -137,10 +137,9 @@ function ConversationRow({
           </span>
         </div>
       </ContextMenuTrigger>
-      {/* 会话行右键菜单：会话操作 / 助手配置快捷方式 / 会话审计三组。
-          归档区与近期区共用本行组件，归档态第一组切换为「恢复」。 */}
+      {/* 会话行右键菜单：会话操作 / 助手配置快捷方式 / 会话审计三段，段间以分隔线划分，分组标题已按需求移除。
+          归档区与近期区共用本行组件，归档态第一段切换为「恢复」。 */}
       <ContextMenuContent data-ctx-menu={item.id} className="w-52">
-        <ContextMenuLabel>会话操作</ContextMenuLabel>
         <ContextMenuItem data-ctx-item="rename" onSelect={() => onRename(item)}>
           <Pencil size={14} className="shrink-0" /> 重命名会话
         </ContextMenuItem>
@@ -152,7 +151,6 @@ function ConversationRow({
           <Trash2 size={14} className="shrink-0" /> 删除会话
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuLabel>助手配置</ContextMenuLabel>
         <ContextMenuItem data-ctx-item="config-skills" onSelect={() => onOpenConfigTab('skills', item.id)}>
           <Sparkles size={14} className="shrink-0" /> 配置 Skill
         </ContextMenuItem>
@@ -172,7 +170,6 @@ function ConversationRow({
           <Mic size={14} className="shrink-0" /> 语音听写
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuLabel>会话审计</ContextMenuLabel>
         <ContextMenuItem data-ctx-item="export" onSelect={() => onExport(item)}>
           <Download size={14} className="shrink-0" /> 导出会话
         </ContextMenuItem>
