@@ -333,6 +333,8 @@ export default function SuperAssistantPage() {
   // 误清成无参；selectedId 为 null（未落地的新会话视图）时移除参数。
   // writtenParamRef 记录已回写值：setSearchParams 的函数身份随 URL 变化，
   // 外部导航（悬浮窗跳转/深链）也会触发本 effect 重跑，此时不得用旧选中抢写参数。
+  // writtenParamRef 记录已回写值：setSearchParams 的函数身份随 URL 变化，
+  // 外部导航（悬浮窗跳转/深链）也会触发本 effect 重跑，此时不得用旧选中抢写参数。
   const writtenParamRef = useRef<string | null | undefined>(undefined)
   useEffect(() => {
     if (loading || writtenParamRef.current === selectedId) return
@@ -345,7 +347,16 @@ export default function SuperAssistantPage() {
     }, { replace: true })
   }, [selectedId, loading, setSearchParams])
   useEffect(() => {
-    if (!requestedConversationId || requestedConversationId === lastAppliedParamRef.current) return
+    // 参数已被回写删除（如进入未落地新会话视图）时同样视为已消费并清空记录：
+    // 否则外部随后带同值参数跳转（如悬浮窗跳回刚离开的会话）会被旧消费记录
+    // 短路，出现「地址栏有参数、界面停在空态」的挂空。不能改在回写 effect 里
+    // 同步登记——那会让深链参数尚在 URL 的窗口期绕过消费守卫，把刚手动切换的
+    // 选中拉回旧会话。
+    if (!requestedConversationId) {
+      lastAppliedParamRef.current = null
+      return
+    }
+    if (requestedConversationId === lastAppliedParamRef.current) return
     // 参数与当前选中一致（含页内切换后 URL 回写的滞后到达）：视为已消费
     if (requestedConversationId === selectedIdRef.current) {
       lastAppliedParamRef.current = requestedConversationId
@@ -470,14 +481,19 @@ export default function SuperAssistantPage() {
     if (created) setBrowserDisplay('modal')
   }
 
-  // 「新建会话」去重：当前已在未落地的全新视图、或选中的会话还是空会话（无消息且未在生成）
-  // 时不再创建新会话，避免空会话堆积；仅把焦点放回输入框。
-  const handleNewConversation = async () => {
+  // 「新建会话」只把工作台切到未落地的新会话视图（selectedId 置 null：聊天区/附件清空、
+  // 地址栏会话参数移除、草稿换 '__new__' 槽），不立即向后端建会话——空会话堆积治理的
+  // 收口：会话真正落地统一发生在首条消息发送、附件上传或打开实时浏览器的懒建时刻。
+  // 当前已在未落地视图、或选中的会话还是空会话（无消息且未在生成）时仅回到输入框。
+  const handleNewConversation = () => {
     if (!selectedId || (selectedConversation && messages.length === 0 && !streamingIds.has(selectedConversation.id))) {
       senderRef.current?.focus()
       return
     }
-    await createConversation()
+    // 实时浏览器面板跟随会话挂载：进入未落地视图时显式收起，
+    // 避免残留的 modal/pip 状态在下次选中任意会话时突然重现
+    setBrowserDisplay('closed')
+    setSelectedId(null)
   }
 
   const deleteConversation = async () => {
@@ -1019,7 +1035,7 @@ export default function SuperAssistantPage() {
         selectedId={selectedId}
         mobileOpen={sidebarOpen}
         onCloseMobile={() => setSidebarOpen(false)}
-        onCreate={() => void handleNewConversation()}
+        onCreate={handleNewConversation}
         onSelect={id => setSelectedId(id)}
         onDelete={id => {
           const conversation = conversations.find(item => item.id === id)
