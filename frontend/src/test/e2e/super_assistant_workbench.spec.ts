@@ -1889,7 +1889,7 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 
-  // 外部集成已是真实功能：左侧集成类型 tabs（multica / GitHub 占位），
+  // 外部集成已是真实功能：左侧集成类型 tabs（multica / 远程助手 / 文件夹同步），
   // multica 默认选中并走通「测试连接 → 选工作区 → 保存」
   await page.getByRole('button', { name: '外部集成' }).click()
   const integrationsDialog = page.getByRole('dialog')
@@ -1897,20 +1897,23 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
   await expect(multicaTab).toHaveAttribute('aria-selected', 'true')
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
+  // GitHub 集成已下线：左栏仅剩三个集成 tab
+  await expect(integrationsDialog.locator('[data-integrations-tab]')).toHaveCount(3)
+  await expect(integrationsDialog.locator('[data-integrations-tab="github"]')).toHaveCount(0)
   // 等入场缩放动画结束再量尺寸，避免动画中的包围盒参与比较
   await page.waitForTimeout(300)
 
-  // GitHub tab 为结构化占位：切过去显示规划中，切回 multica 表单仍在
+  // 切到文件夹同步 tab 显示脚本面板，切回 multica 表单仍在
   const shellBefore = await integrationsDialog.boundingBox()
-  await integrationsDialog.locator('[data-integrations-tab="github"]').click()
-  await expect(integrationsDialog.getByTestId('integrations-github-placeholder')).toBeVisible()
+  await integrationsDialog.locator('[data-integrations-tab="folder-sync"]').click()
+  await expect(integrationsDialog.getByTestId('folder-sync-card')).toBeVisible()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toHaveCount(0)
-  // 弹窗固定宽高：切 tab 前后尺寸不变；左栏加宽后 GitHub 全名不截断
+  // 弹窗固定宽高：切 tab 前后尺寸不变；左栏最长文案「文件夹同步」不截断
   const shellAfter = await integrationsDialog.boundingBox()
   expect(Math.abs(shellBefore!.height - shellAfter!.height)).toBeLessThanOrEqual(1)
   expect(Math.abs(shellBefore!.width - shellAfter!.width)).toBeLessThanOrEqual(1)
-  const githubLabel = integrationsDialog.locator('[data-integrations-tab="github"]').locator('span').first()
-  expect(await githubLabel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+  const folderSyncLabel = integrationsDialog.locator('[data-integrations-tab="folder-sync"]').locator('span').first()
+  expect(await folderSyncLabel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   await multicaTab.click()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
 
@@ -2746,21 +2749,22 @@ test('助手完成但无正文时如实展示「助手未返回文本」', async
   await expect(page.getByText('（无文本）')).toHaveCount(0)
 })
 
-test('会话右键菜单：三组快捷操作（会话操作/助手配置/会话审计）', async ({ page }) => {
+test('会话右键菜单：快捷操作齐备且无分组标题', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  // —— 菜单结构：右键近期会话行弹出，三组标签与十项齐备 ——
+  // —— 菜单结构：右键近期会话行弹出，分组标题已移除、十一项齐备 ——
   await page.locator('[data-workbench-conversation="c-today"]').click({ button: 'right' })
   const menu = page.locator('[data-ctx-menu="c-today"]')
   await expect(menu).toBeVisible()
+  // 分组标签（会话操作/助手配置/会话审计）已按需求移除，不应再渲染
   for (const label of ['会话操作', '助手配置', '会话审计']) {
-    await expect(menu.getByText(label, { exact: true })).toBeVisible()
+    await expect(menu.getByText(label, { exact: true })).toHaveCount(0)
   }
   for (const key of [
     'rename', 'archive', 'delete',
-    'config-skills', 'config-mcp', 'config-tools', 'config-approval', 'config-memory',
+    'config-skills', 'config-mcp', 'config-tools', 'config-approval', 'config-memory', 'config-voice',
     'export', 'feedback',
   ]) {
     await expect(menu.locator(`[data-ctx-item="${key}"]`)).toBeVisible()

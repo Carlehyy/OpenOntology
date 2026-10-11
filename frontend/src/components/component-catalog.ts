@@ -118,7 +118,7 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     scenario: '右键上下文菜单（对象行/画布元素的右键快捷操作）',
     component: "ContextMenu 系列（@/components/ui/context-menu）",
     status: 'vendored',
-    note: 'shadcn 官方 context-menu（Radix @radix-ui/react-context-menu）按引入流程入库，色板换平台 token；Portal 定位、键盘导航、Esc/点击外部关闭内置。首个消费方：超级助手工作台会话列表（会话操作/助手配置/会话审计三组）。存量 palantir-graph Canvas.tsx 手写右键菜单为收敛对象（touch-to-migrate），迁移时替换为该标准件。',
+    note: 'shadcn 官方 context-menu（Radix @radix-ui/react-context-menu）按引入流程入库，色板换平台 token；Portal 定位、键盘导航、Esc/点击外部关闭内置。首个消费方：超级助手工作台会话列表（操作/配置快捷/审计三段，段间分隔线，无分组标题）。存量 palantir-graph Canvas.tsx 手写右键菜单为收敛对象（touch-to-migrate），迁移时替换为该标准件。',
   },
   {
     scenario: '二维码展示（扫码访问 / 设备配对）',
