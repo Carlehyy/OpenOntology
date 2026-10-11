@@ -115,11 +115,12 @@ export interface NotificationIngestKey {
   plaintextKey?: string
 }
 
+/** tab 顺序即用户处理路径：未读优先，全部 = 真全量（含已归档） */
 export const NOTIFICATION_TABS: { key: NotificationTab; label: string }[] = [
-  { key: 'all', label: '全部' },
   { key: 'unread', label: '未读' },
   { key: 'starred', label: '已标记' },
   { key: 'archived', label: '已归档' },
+  { key: 'all', label: '全部' },
 ]
 
 export const notificationsApi = {
@@ -136,11 +137,12 @@ export const notificationsApi = {
   get: (id: string): Promise<NotificationMessage> =>
     apiClientV2.get(`/notifications/${id}`),
 
-  /** 管理员手动发送（正式消息：入站内并触发渠道转发） */
+  /** 管理员手动发送（正式消息：入站内并转发到渠道；channelIds 指定投递范围，缺省=全部启用渠道） */
   create: (payload: {
     title: string
     body?: string
     priority?: NotificationPriority
+    channelIds?: string[]
   }): Promise<NotificationMessage> =>
     apiClientV2.post('/notifications', payload),
 

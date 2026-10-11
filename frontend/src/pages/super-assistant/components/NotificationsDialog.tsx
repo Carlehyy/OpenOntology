@@ -32,17 +32,19 @@ import NotificationMedia from './NotificationMedia'
 import { formatFileSize, priorityStyle, sourceTypeLabel } from './notificationsFormat'
 
 /**
- * 布局参考个人资料弹窗：左侧分区导航（消息列表 / 渠道配置 / 在线测试）+ 右侧内容。
- * - 消息列表：筛选 tab + 列表/详情两栏；窄屏由选中态驱动单栏切换；发送消息在该分区内切换。
- * - 渠道配置：入口（投递密钥 + 接口调用示例）与出口（转发渠道）两个区块。
- * - 在线测试：链路总览 + 出口连通性测试。
+ * 布局参考个人资料弹窗：左侧分区导航（消息列表 / 发送消息 / 渠道配置）+ 右侧内容。
+ * - 消息列表：筛选 tab（未读默认 → 已标记 → 已归档 → 全部=真全量）+ 列表/详情两栏；
+ *   窄屏由选中态驱动单栏切换。
+ * - 发送消息：独立分区——向所选启用渠道发布通知（默认全选），消息同时进入站内列表。
+ * - 渠道配置：入口（投递密钥 + 接口调用示例）与出口（发件邮箱 + 转发渠道）两个区块，
+ *   每个密钥/渠道旁内嵌连通测试。
  */
-type NavSection = 'messages' | 'config' | 'test'
+type NavSection = 'messages' | 'compose' | 'config'
 
 const NAV_ITEMS: { key: NavSection; label: string; icon: typeof Bell }[] = [
   { key: 'messages', label: '消息列表', icon: Bell },
+  { key: 'compose', label: '发送消息', icon: Send },
   { key: 'config', label: '渠道配置', icon: Plug },
-  { key: 'test', label: '在线测试', icon: Zap },
 ]
 
 /** 通知正文沿用会话排版映射，仅覆盖 img：内嵌媒体走鉴权拉取与音视频原生控件 */
@@ -114,9 +116,8 @@ export default function NotificationsDialog({
 }) {
   const queryClient = useQueryClient()
   const [nav, setNav] = useState<NavSection>('messages')
-  const [tab, setTab] = useState<NotificationTab>('all')
+  const [tab, setTab] = useState<NotificationTab>('unread')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [composeOpen, setComposeOpen] = useState(false)
   const [deleting, setDeleting] = useState<NotificationMessage | null>(null)
   const [keyName, setKeyName] = useState('')
   const [keyScope, setKeyScope] = useState('')
@@ -141,10 +142,12 @@ export default function NotificationsDialog({
   const [smtpSender, setSmtpSender] = useState('')
   const [smtpTestTo, setSmtpTestTo] = useState('')
 
-  // 手动发送表单
+  // 手动发送表单（独立分区）
   const [composeTitle, setComposeTitle] = useState('')
   const [composeBody, setComposeBody] = useState('')
   const [composePriority, setComposePriority] = useState<NotificationPriority>('normal')
+  // 投递去向：null = 默认全选（跟随启用渠道）；Set = 用户改选后的显式集合
+  const [composeChannelIds, setComposeChannelIds] = useState<Set<string> | null>(null)
 
   // 只失效列表与徽章；detail 缓存由 setQueryData 精确写入——
   // 若前缀失效命中 detail，会触发「GET 详情即自动已读」把刚标回的未读打回，
@@ -209,14 +212,13 @@ export default function NotificationsDialog({
   const ingestKeys = useQuery({
     queryKey: ['notifications', 'ingest-keys'],
     queryFn: notificationsApi.ingestKeys.list,
-    enabled: open && (nav === 'config' || nav === 'test'),
+    enabled: open && nav === 'config',
   })
 
   // 弹窗关闭即回消息分区并清除密钥明文与表单临时态（“仅此一次”承诺不因重开而失效）
   useEffect(() => {
     if (!open) {
       setNav('messages')
-      setComposeOpen(false)
       setMintedKey(null)
       setKeyName('')
       setKeyScope('')
@@ -226,6 +228,10 @@ export default function NotificationsDialog({
       setEditingChannel(null)
       setForwardOpen(false)
       setForwardChannelIds(new Set())
+      setComposeTitle('')
+      setComposeBody('')
+      setComposePriority('normal')
+      setComposeChannelIds(null)
     }
   }, [open])
 
@@ -262,11 +268,14 @@ export default function NotificationsDialog({
     mutationFn: notificationsApi.create,
     onSuccess: data => {
       toast.success('消息已发送')
-      setComposeOpen(false)
       setComposeTitle('')
       setComposeBody('')
       setComposePriority('normal')
+      setComposeChannelIds(null)
       setSelectedId(data.id)
+      // 新消息未读未归档：切到未读视图保证列表与选中详情同屏可见
+      setTab('unread')
+      setNav('messages')
       queryClient.setQueryData(['notifications', 'detail', data.id], data)
       invalidateLists()
     },
@@ -462,20 +471,56 @@ export default function NotificationsDialog({
     }
   }
 
+  const enabledChannels = (channels.data ?? []).filter(channel => channel.enabled)
+
   const handleCompose = () => {
     if (!composeTitle.trim()) {
       toast.error('标题不能为空')
+      return
+    }
+    // 渠道列表加载失败：去向不明，拒绝发送（界面提示错误并给重试入口）
+    if (channels.isError) {
+      toast.error('渠道列表加载失败，无法确定投递去向，请重试')
+      return
+    }
+    // 无启用渠道：消息仅入站内（后端缺省扇出到空集，语义一致）
+    if (enabledChannels.length === 0) {
+      createMutation.mutate({ title: composeTitle.trim(), body: composeBody, priority: composePriority })
+      return
+    }
+    // 勾选集与当前启用渠道求交集：同会话内渠道被停用/删除后，失效 id 不再随请求发出
+    const enabledIds = new Set(enabledChannels.map(channel => channel.id))
+    const selected = composeChannelIds
+      ? [...composeChannelIds].filter(id => enabledIds.has(id))
+      : [...enabledIds]
+    if (selected.length === 0) {
+      toast.error('至少选择一个投递渠道')
       return
     }
     createMutation.mutate({
       title: composeTitle.trim(),
       body: composeBody,
       priority: composePriority,
+      // 勾选集恰为全量时省略字段：走后端缺省语义（无渠道数上限、渠道新增即覆盖）
+      ...(selected.length === enabledIds.size ? {} : { channelIds: selected }),
     })
   }
 
-  const activeKeys = (ingestKeys.data ?? []).filter(key => key.enabled)
-  const enabledChannels = (channels.data ?? []).filter(channel => channel.enabled)
+  /** 发送分区的渠道勾选集：null 视为全选，与启用渠道列表求最终勾选态 */
+  const composeSelection = (channelId: string): boolean => {
+    if (!composeChannelIds) return true
+    return composeChannelIds.has(channelId)
+  }
+
+  const toggleComposeChannel = (channelId: string) => {
+    setComposeChannelIds(current => {
+      const base = current ?? new Set(enabledChannels.map(channel => channel.id))
+      const next = new Set(base)
+      if (next.has(channelId)) next.delete(channelId)
+      else next.add(channelId)
+      return next
+    })
+  }
 
   if (!open) return null
 
@@ -485,7 +530,7 @@ export default function NotificationsDialog({
         title="消息通知"
         description="消息中转站：多入口接收，站内查看处置，按配置的渠道自动或手动转发"
         size="wide"
-        icon={<Bell size={18} className="text-white" />}
+        icon={<Bell size={18} />}
         onClose={onClose}
         contentClassName="h-[min(85dvh,46rem)]"
       >
@@ -535,7 +580,7 @@ export default function NotificationsDialog({
               aria-labelledby="notifications-tab-messages"
               className="flex min-h-0 flex-col"
             >
-              {/* 消息分区内工具栏：筛选 + 全部已读 + 发送 */}
+              {/* 消息分区内工具栏：筛选 + 全部已读 */}
               <div className="scrollbar-none flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--color-border)] px-2 py-1.5">
                 {NOTIFICATION_TABS.map(({ key, label }) => {
                   const count = tabCount(key)
@@ -544,7 +589,7 @@ export default function NotificationsDialog({
                     <button
                       key={key}
                       type="button"
-                      onClick={() => { setTab(key); setSelectedId(null); setComposeOpen(false) }}
+                      onClick={() => { setTab(key); setSelectedId(null) }}
                       aria-pressed={active}
                       data-notifications-tab={key}
                       className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
@@ -573,95 +618,11 @@ export default function NotificationsDialog({
                   >
                     <MailOpen size={13} /> <span className="hidden sm:inline">全部已读</span>
                   </button>
-                  <span className="mx-0.5 h-4 w-px shrink-0 bg-[var(--color-border)]" aria-hidden />
-                  <button
-                    type="button"
-                    onClick={() => setComposeOpen(value => !value)}
-                    aria-pressed={composeOpen}
-                    aria-label="发送消息"
-                    title="发送消息"
-                    className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                      composeOpen
-                        ? 'bg-brand-soft font-medium text-brand-ink'
-                        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
-                    }`}
-                    data-notifications-compose-toggle
-                  >
-                    <Send size={13} /> <span className="hidden sm:inline">发送消息</span>
-                  </button>
                 </div>
               </div>
 
-              {composeOpen ? (
-                /* —— 发送消息（消息分区内切换）—— */
-                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4" data-notifications-compose-panel>
-                  <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-                    正式消息：进入站内列表，并转发到所有已启用的外部渠道。
-                  </p>
-                  <div className="flex flex-col gap-4 sm:flex-row">
-                    <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                      标题
-                      <input
-                        value={composeTitle}
-                        onChange={event => setComposeTitle(event.target.value)}
-                        maxLength={300}
-                        placeholder="消息标题"
-                        className={inputClass}
-                        data-notifications-compose-title
-                      />
-                    </label>
-                    <div className="flex w-full flex-col gap-1 text-xs text-[var(--color-text-secondary)] sm:w-40">
-                      优先级
-                      <Select
-                        value={composePriority}
-                        onValueChange={value => setComposePriority(value as NotificationPriority)}
-                      >
-                        <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="urgent">紧急</SelectItem>
-                          <SelectItem value="high">高优</SelectItem>
-                          <SelectItem value="normal">普通</SelectItem>
-                          <SelectItem value="low">低优</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <label className="flex min-h-0 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                    正文（Markdown）
-                    <textarea
-                      value={composeBody}
-                      onChange={event => setComposeBody(event.target.value)}
-                      placeholder="支持 Markdown：图片、表格、代码块……"
-                      className={`${inputClass} min-h-48 flex-1 resize-none font-mono text-xs leading-6`}
-                      data-notifications-compose-body
-                    />
-                  </label>
-                  <div className="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setComposeOpen(false)}
-                      className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      取消
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCompose}
-                      disabled={createMutation.isPending}
-                      className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                      style={{ background: 'var(--color-nav-bg)' }}
-                      data-notifications-compose-send
-                    >
-                      {createMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
-                      发送
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                /* —— 列表 / 详情两栏；窄屏由选中态驱动单栏切换 —— */
-                <div className="flex min-h-0 flex-1">
+              {/* —— 列表 / 详情两栏；窄屏由选中态驱动单栏切换 —— */}
+              <div className="flex min-h-0 flex-1">
                   <div
                     className={`${selectedId ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-[var(--color-border)] md:w-[22rem]`}
                     data-notifications-list
@@ -933,7 +894,139 @@ export default function NotificationsDialog({
                     )}
                   </div>
                 </div>
-              )}
+            </div>
+          )}
+
+          {nav === 'compose' && (
+            <div
+              role="tabpanel"
+              id="notifications-panel-compose"
+              aria-labelledby="notifications-tab-compose"
+              className="scrollbar-none flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 sm:p-5"
+              data-notifications-compose-panel
+            >
+              <div>
+                <h3 className={sectionHeadingClass}>发布通知</h3>
+                <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                  消息进入站内列表，并立即转发到下方所选的启用渠道。
+                </p>
+              </div>
+
+              {/* 投递去向：启用渠道 chips（默认全选，可点选增减） */}
+              <div className="rounded-lg border border-[var(--color-border)] p-3" data-notifications-compose-destinations>
+                <p className="text-xs font-medium text-[var(--color-text-secondary)]">
+                  投递渠道
+                  <span className="ml-1.5 font-normal text-[10px] text-[var(--color-text-tertiary)]">
+                    默认全选，点击可增减
+                  </span>
+                </p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {channels.isLoading ? (
+                    <span className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
+                      <Loader2 size={12} className="animate-spin" /> 渠道加载中…
+                    </span>
+                  ) : channels.isError ? (
+                    <span role="alert" className="flex flex-wrap items-center gap-2 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                      渠道列表加载失败：{errorText(channels.error)}
+                      <button
+                        type="button"
+                        onClick={() => void channels.refetch()}
+                        className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        重试
+                      </button>
+                    </span>
+                  ) : enabledChannels.length === 0 ? (
+                    <span className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                      暂无启用的渠道，消息将仅进入站内列表；可到「渠道配置」新建。
+                    </span>
+                  ) : (
+                    enabledChannels.map(channel => {
+                      const checked = composeSelection(channel.id)
+                      return (
+                        <button
+                          key={channel.id}
+                          type="button"
+                          role="switch"
+                          aria-checked={checked}
+                          onClick={() => toggleComposeChannel(channel.id)}
+                          data-notifications-compose-channel={channel.id}
+                          className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                            checked
+                              ? 'border-transparent bg-brand-soft font-medium text-brand-ink'
+                              : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                          }`}
+                        >
+                          {checked && <Send size={11} className="shrink-0" />}
+                          <span className="max-w-40 truncate">{channel.name}</span>
+                          <span className="text-[10px] font-normal opacity-70">{channel.templateName}</span>
+                        </button>
+                      )
+                    })
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-4 sm:flex-row">
+                <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                  标题
+                  <input
+                    value={composeTitle}
+                    onChange={event => setComposeTitle(event.target.value)}
+                    maxLength={300}
+                    placeholder="消息标题"
+                    className={inputClass}
+                    data-notifications-compose-title
+                  />
+                </label>
+                <div className="flex w-full flex-col gap-1 text-xs text-[var(--color-text-secondary)] sm:w-40">
+                  优先级
+                  <Select
+                    value={composePriority}
+                    onValueChange={value => setComposePriority(value as NotificationPriority)}
+                  >
+                    <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="urgent">紧急</SelectItem>
+                      <SelectItem value="high">高优</SelectItem>
+                      <SelectItem value="normal">普通</SelectItem>
+                      <SelectItem value="low">低优</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                正文（Markdown）
+                <textarea
+                  value={composeBody}
+                  onChange={event => setComposeBody(event.target.value)}
+                  placeholder="支持 Markdown：图片、表格、代码块……"
+                  className={`${inputClass} min-h-48 flex-1 resize-none font-mono text-xs leading-6`}
+                  data-notifications-compose-body
+                />
+              </label>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                  {enabledChannels.length > 0 && !channels.isError && `将投递到 ${
+                    composeChannelIds
+                      ? [...composeChannelIds].filter(id => enabledChannels.some(channel => channel.id === id)).length
+                      : enabledChannels.length
+                  } 个渠道`}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleCompose}
+                  disabled={createMutation.isPending}
+                  className="flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                  style={{ background: 'var(--color-nav-bg)' }}
+                  data-notifications-compose-send
+                >
+                  {createMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
+                  发送
+                </button>
+              </div>
             </div>
           )}
 
@@ -1077,15 +1170,34 @@ export default function NotificationsDialog({
                             </p>
                           </div>
                           {key.enabled && (
-                            <button
-                              type="button"
-                              onClick={() => setRevokingKey(key)}
-                              disabled={revokeKeyMutation.isPending}
-                              className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                              data-notifications-key-revoke
-                            >
-                              吊销
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setTestingKeyId(key.id)
+                                  keyTestMutation.mutate(key.id)
+                                }}
+                                disabled={keyTestMutation.isPending && testingKeyId === key.id}
+                                title="以该密钥真实投递一条链路测试消息"
+                                aria-label={`以密钥 ${key.name} 测试入口链路`}
+                                className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                                style={{ background: 'var(--color-nav-bg)' }}
+                                data-notifications-key-test
+                              >
+                                {keyTestMutation.isPending && testingKeyId === key.id
+                                  ? <Loader2 size={12} className="animate-spin" />
+                                  : <Zap size={12} />}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRevokingKey(key)}
+                                disabled={revokeKeyMutation.isPending}
+                                className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                                data-notifications-key-revoke
+                              >
+                                吊销
+                              </button>
+                            </>
                           )}
                         </li>
                       ))}
@@ -1100,7 +1212,7 @@ export default function NotificationsDialog({
               <section aria-label="出口配置" data-notifications-channels-panel>
                 <h3 className={sectionHeadingClass}>出口 · 转发渠道</h3>
                 <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  消息到达即为所有启用渠道生成转发。选择类型后只需填写关键信息（每个字段都附获取指引）；连通性验证请到「在线测试」。
+                  消息到达即为所有启用渠道生成转发。选择类型后只需填写关键信息（每个字段都附获取指引）；渠道旁可直发测试消息验证连通。
                 </p>
 
                 {/* 平台发件设置（邮件渠道依赖） */}
@@ -1304,6 +1416,24 @@ export default function NotificationsDialog({
                                   : '尚未投递'}
                             </p>
                           </div>
+                          {channel.enabled && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTestingChannelId(channel.id)
+                                testChannelMutation.mutate(channel.id)
+                              }}
+                              disabled={testChannelMutation.isPending && testingChannelId === channel.id}
+                              title={`向 ${channel.name} 直发测试消息`}
+                              aria-label={`向 ${channel.name} 直发测试消息`}
+                              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                              data-notifications-channel-test
+                            >
+                              {testChannelMutation.isPending && testingChannelId === channel.id
+                                ? <Loader2 size={14} className="animate-spin" />
+                                : <Zap size={14} />}
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => {
@@ -1353,148 +1483,6 @@ export default function NotificationsDialog({
                 </div>
               </section>
 
-            </div>
-          )}
-
-          {nav === 'test' && (
-            <div
-              role="tabpanel"
-              id="notifications-panel-test"
-              aria-labelledby="notifications-tab-test"
-              className="scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5"
-              data-notifications-test-panel
-            >
-              {/* —— 链路总览 —— */}
-              <section aria-label="链路总览">
-                <h3 className={sectionHeadingClass}>链路总览</h3>
-                <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  入口接收 → 中转站存储与呈现 → 出口转发。任一环节出问题，都会在下方对应位置暴露。
-                </p>
-                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                  <div className="rounded-lg border border-[var(--color-border)] p-3">
-                    <p className="text-xs text-[var(--color-text-tertiary)]">入口 · 有效投递密钥</p>
-                    <p className="mt-1 text-lg font-semibold tabular-nums text-[var(--color-text-primary)]">{activeKeys.length}</p>
-                  </div>
-                  <div className="rounded-lg border border-[var(--color-border)] p-3">
-                    <p className="text-xs text-[var(--color-text-tertiary)]">中转 · 消息总量</p>
-                    <p className="mt-1 text-lg font-semibold tabular-nums text-[var(--color-text-primary)]">{summary.data?.totalCount ?? 0}</p>
-                  </div>
-                  <div className="rounded-lg border border-[var(--color-border)] p-3">
-                    <p className="text-xs text-[var(--color-text-tertiary)]">出口 · 启用渠道</p>
-                    <p className="mt-1 text-lg font-semibold tabular-nums text-[var(--color-text-primary)]">{enabledChannels.length}</p>
-                  </div>
-                </div>
-              </section>
-
-              {/* —— 入口测试（真实全链路） —— */}
-              <section aria-label="入口测试">
-                <h3 className={sectionHeadingClass}>入口 · 连通性测试</h3>
-                <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  以选定密钥真实投递一条「链路测试」消息：密钥鉴权 → 消息创建 → 渠道扇出全程走真实路径，可在消息列表识别与删除。
-                </p>
-                <div className="mt-3">
-                  {ingestKeys.isLoading ? (
-                    <div className="flex items-center justify-center gap-2 py-6 text-xs text-[var(--color-text-tertiary)]">
-                      <Loader2 size={14} className="animate-spin" /> 加载中…
-                    </div>
-                  ) : activeKeys.length === 0 ? (
-                    <p className="px-2 py-4 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                      没有有效密钥。先到「渠道配置 → 入口」签发。
-                    </p>
-                  ) : (
-                    <ul className="space-y-1">
-                      {activeKeys.map(key => (
-                        <li
-                          key={key.id}
-                          data-notifications-test-key={key.id}
-                          className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
-                        >
-                          <KeyRound size={14} className="shrink-0 text-[var(--color-text-secondary)]" />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm text-[var(--color-text-primary)]">{key.name}</p>
-                            <p className="truncate text-[10px] text-[var(--color-text-tertiary)]">
-                              {key.lastUsedAt ? `最近使用：${formatDateTime(key.lastUsedAt)}` : '未使用'}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setTestingKeyId(key.id)
-                              keyTestMutation.mutate(key.id)
-                            }}
-                            disabled={keyTestMutation.isPending && testingKeyId === key.id}
-                            className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                            style={{ background: 'var(--color-nav-bg)' }}
-                            data-notifications-key-test
-                          >
-                            {keyTestMutation.isPending && testingKeyId === key.id
-                              ? <Loader2 size={12} className="animate-spin" />
-                              : '模拟外部投递'}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </section>
-
-              <hr className="my-6 border-[var(--color-border)]" />
-
-              {/* —— 出口测试 —— */}
-              <section aria-label="出口测试">
-                <h3 className={sectionHeadingClass}>出口 · 连通性测试</h3>
-                <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  向指定渠道直发一条测试消息（不落消息列表），验证渠道凭据与网络连通。
-                </p>
-                <div className="mt-3">
-                  {channels.isLoading ? (
-                    <div className="flex items-center justify-center gap-2 py-6 text-xs text-[var(--color-text-tertiary)]">
-                      <Loader2 size={14} className="animate-spin" /> 加载中…
-                    </div>
-                  ) : enabledChannels.length === 0 ? (
-                    <p className="px-2 py-4 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                      没有启用的渠道。先到「渠道配置」新建并启用。
-                    </p>
-                  ) : (
-                    <ul className="space-y-1">
-                      {enabledChannels.map(channel => (
-                        <li
-                          key={channel.id}
-                          data-notifications-test-channel={channel.id}
-                          className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
-                        >
-                          <Plug size={14} className="shrink-0 text-[var(--color-text-secondary)]" />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm text-[var(--color-text-primary)]">{channel.name}</p>
-                            <p className="truncate text-[10px] text-[var(--color-text-tertiary)]">
-                              {channel.lastStatus === 'sent'
-                                ? `最近投递成功：${formatDateTime(channel.lastSentAt || channel.updatedAt)}`
-                                : channel.lastStatus === 'failed'
-                                  ? `最近投递失败：${channel.lastError}`
-                                  : '尚未投递'}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setTestingChannelId(channel.id)
-                              testChannelMutation.mutate(channel.id)
-                            }}
-                            disabled={testChannelMutation.isPending && testingChannelId === channel.id}
-                            className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                            style={{ background: 'var(--color-nav-bg)' }}
-                            data-notifications-channel-test
-                          >
-                            {testChannelMutation.isPending && testingChannelId === channel.id
-                              ? <Loader2 size={12} className="animate-spin" />
-                              : '发送测试消息'}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </section>
             </div>
           )}
         </div>

@@ -95,12 +95,16 @@ def create_message_ex(
     source_type: str = SOURCE_TYPE_MANUAL,
     event_id: str | None = None,
     ingest_key_id: str | None = None,
+    channel_ids: list[str] | None = None,
     user=None,
 ) -> tuple[NotificationMessage, bool]:
     """创建一条通知消息，返回 (消息, 是否新建)。
 
     (source_system, event_id) 幂等：同键重放返回既有消息且 created=False；
     并发撞唯一约束时回滚重查，保证“重放无副作用、并发不 500”。
+
+    channel_ids：指定投递范围（仅这些渠道生成投递单）。None = 全部启用渠道
+    （外部入口与默认语义）；给定值须全部存在且启用，否则 4xx 且消息不落库。
     """
     _validate_payload(title=title, body_md=body_md, priority=priority, source_type=source_type)
     normalized_source = (source_system or "platform").strip()[:80] or "platform"
@@ -110,6 +114,11 @@ def create_message_ex(
         existing = _find_by_source_event(db, normalized_source, normalized_event)
         if existing is not None:
             return existing, False
+
+    # 指定渠道须在消息落库前校验通过：任一不存在/停用即拒绝整次创建
+    fanout_channels = (
+        None if channel_ids is None else _resolve_fanout_channels(db, channel_ids)
+    )
 
     message = NotificationMessage(
         event_id=normalized_event,
@@ -127,7 +136,7 @@ def create_message_ex(
         # 二次提交的窗口里进程被杀会让消息入库而投递单永久丢失，
         # 且幂等重放走 existing 提前返回，无法自愈。
         db.flush()
-        fan_out_deliveries(db, message)
+        fan_out_deliveries(db, message, channels=fanout_channels)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -319,12 +328,48 @@ def mark_all_read(db: Session, *, user_id: str) -> int:
 # ── 读侧：列表 / 汇总 ─────────────────────────────────────────
 
 
-def fan_out_deliveries(db: Session, message: NotificationMessage) -> int:
-    """消息新建即为所有启用渠道生成 pending 投递单（幂等：唯一约束跳过既有对）。
+def _resolve_fanout_channels(
+    db: Session, channel_ids: list[str]
+) -> list[NotificationChannel]:
+    """校验指定的投递渠道集：去重后须全部存在且启用，否则 4xx（消息不落库）。"""
+    unique_ids = list(dict.fromkeys(channel_ids))
+    if not unique_ids:
+        raise HTTPException(422, "channelIds 不能为空")
+    rows = (
+        db.query(NotificationChannel)
+        .filter(NotificationChannel.id.in_(unique_ids))
+        .all()
+    )
+    by_id = {row.id: row for row in rows}
+    missing = [cid for cid in unique_ids if cid not in by_id]
+    if missing:
+        raise HTTPException(404, f"渠道不存在：{missing[0]}")
+    disabled = [cid for cid in unique_ids if not by_id[cid].enabled]
+    if disabled:
+        name = by_id[disabled[0]].name
+        raise HTTPException(422, f"渠道「{name}」已停用，无法投递")
+    # 保持调用方给定顺序（与去重后的 unique_ids 一致）
+    return [by_id[cid] for cid in unique_ids]
 
+
+def fan_out_deliveries(
+    db: Session,
+    message: NotificationMessage,
+    *,
+    channels: list[NotificationChannel] | None = None,
+) -> int:
+    """消息新建即为启用渠道生成 pending 投递单（幂等：唯一约束跳过既有对）。
+
+    channels=None 时取全部启用渠道；显式传入时只向给定渠道扇出
+    （调用方 create_message_ex 已完成存在性/启用校验）。
     与 create_message_ex 同事务提交：保证“消息入库 ⇄ 投递单生成”原子。
     """
-    channels = db.query(NotificationChannel).filter(NotificationChannel.enabled.is_(True)).all()
+    if channels is None:
+        channels = (
+            db.query(NotificationChannel)
+            .filter(NotificationChannel.enabled.is_(True))
+            .all()
+        )
     existing = {
         row.channel_id
         for row in db.query(NotificationDelivery.channel_id).filter(
@@ -355,7 +400,8 @@ def list_messages(
         .outerjoin(NotificationMessageState, _state_join_condition(user_id))
     )
     if tab == "all":
-        query = query.filter(_archived_flag().is_(False))
+        # 全部 = 真全量：归档消息也可见（与「已归档」视图并集）；未读/已标记不含已归档
+        pass
     elif tab == "unread":
         query = query.filter(_archived_flag().is_(False), _read_flag().is_(False))
     elif tab == "starred":
@@ -412,7 +458,8 @@ def notification_summary(db: Session, *, user_id: str) -> dict[str, int]:
     unread = base.filter(_archived_flag().is_(False), _read_flag().is_(False)).scalar() or 0
     starred = base.filter(_archived_flag().is_(False), _starred_flag().is_(True)).scalar() or 0
     archived = base.filter(_archived_flag().is_(True)).scalar() or 0
-    total = base.filter(_archived_flag().is_(False)).scalar() or 0
+    # 与「全部消息」视图同口径：真全量（含已归档）
+    total = base.scalar() or 0
     return {
         "unreadCount": unread,
         "starredCount": starred,

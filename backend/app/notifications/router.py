@@ -73,6 +73,7 @@ def create_notification(
         priority=body.priority,
         source_system="platform",
         source_type="manual",
+        channel_ids=body.channelIds,
         user=admin,
     )
     return _ok(
