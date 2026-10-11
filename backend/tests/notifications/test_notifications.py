@@ -115,13 +115,14 @@ def test_list_tabs_and_summary(client, auth_headers):
         assert resp.status_code == 200
         return [item["id"] for item in resp.json()["data"]["items"]]
 
-    assert set(_ids("all")) == {a["id"], b["id"]}      # 归档不进默认视图
+    # 全部 = 真全量（含已归档）；未读/已标记不含已归档
+    assert set(_ids("all")) == {a["id"], b["id"], c["id"]}
     assert _ids("unread") == [a["id"]]
     assert _ids("starred") == [b["id"]]
     assert _ids("archived") == [c["id"]]
 
     summary = client.get("/api/v2/notifications/summary", headers=auth_headers).json()["data"]
-    assert summary == {"unreadCount": 1, "starredCount": 1, "archivedCount": 1, "totalCount": 2}
+    assert summary == {"unreadCount": 1, "starredCount": 1, "archivedCount": 1, "totalCount": 3}
 
     # 列表条目只带预览与计数，不携带全文
     listing = client.get("/api/v2/notifications?tab=all", headers=auth_headers).json()["data"]["items"]
@@ -778,6 +779,108 @@ def test_fan_out_on_create_and_no_duplicate_on_replay(client, auth_headers, db, 
     # 手动发送同样扇出
     manual = _create(client, auth_headers)
     assert db.query(NotificationDelivery).filter_by(message_id=manual["id"]).count() == 1
+
+
+def test_ingest_ignores_channel_ids_in_body(client, auth_headers, db):
+    """对外入口不认 channelIds：即便请求体携带也按缺省语义扇出全部启用渠道。"""
+    from app.notifications.models import NotificationDelivery
+
+    _make_channel(client, auth_headers, name="渠道A")
+    key = _mint_key(client, auth_headers, name="billing")
+
+    resp = client.post(
+        INGEST,
+        json={"eventId": "inc-chan-scope", "title": "带渠道字段", "channelIds": ["no-such-id"]},
+        headers=_ingest_headers(key),
+    )
+    assert resp.status_code == 200, resp.text
+    message_id = resp.json()["data"]["message"]["id"]
+    assert db.query(NotificationDelivery).filter_by(message_id=message_id).count() == 1
+
+
+def test_create_with_channel_ids_subset_fanout(client, auth_headers, db):
+    from app.notifications.models import NotificationDelivery
+
+    channel_a = _make_channel(client, auth_headers, name="渠道A")
+    channel_b = _make_channel(client, auth_headers, name="渠道B", url="json://hooks.example/b")
+    _make_channel(client, auth_headers, name="渠道C", enabled=False)
+
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "定向投递", "channelIds": [channel_a["id"], channel_b["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    message_id = resp.json()["data"]["id"]
+
+    delivered = {
+        row.channel_id
+        for row in db.query(NotificationDelivery).filter_by(message_id=message_id).all()
+    }
+    # 只向指定渠道扇出（停用渠道本就不可入选，两启用渠道各自一张投递单）
+    assert delivered == {channel_a["id"], channel_b["id"]}
+
+    # 只选其一
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "再定向", "channelIds": [channel_b["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    delivered = {
+        row.channel_id
+        for row in db.query(NotificationDelivery).filter_by(message_id=resp.json()["data"]["id"]).all()
+    }
+    assert delivered == {channel_b["id"]}
+
+
+def test_create_with_channel_ids_deduplicated(client, auth_headers, db):
+    from app.notifications.models import NotificationDelivery
+
+    channel = _make_channel(client, auth_headers, name="渠道A")
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "重复指定", "channelIds": [channel["id"], channel["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    assert db.query(NotificationDelivery).filter_by(message_id=resp.json()["data"]["id"]).count() == 1
+
+
+def test_create_with_channel_ids_rejections(client, auth_headers, db):
+    from app.notifications.models import NotificationMessage
+
+    channel = _make_channel(client, auth_headers, name="渠道A")
+    disabled = _make_channel(client, auth_headers, name="停用渠道", enabled=False)
+
+    # 不存在的渠道：404 且消息不落库
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "幽灵渠道", "channelIds": ["no-such-id"]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404 and "渠道不存在" in resp.json()["detail"]
+
+    # 停用渠道：422 且消息不落库
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "停用渠道", "channelIds": [channel["id"], disabled["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422 and "已停用" in resp.json()["detail"]
+
+    # 空列表：schema 层 422
+    assert (
+        client.post(
+            "/api/v2/notifications",
+            json={"title": "空列表", "channelIds": []},
+            headers=auth_headers,
+        ).status_code
+        == 422
+    )
+
+    # 两次拒绝后库里没有残留消息（校验先于落库）
+    assert db.query(NotificationMessage).filter(NotificationMessage.title.like("%渠道")).count() == 0
 
 
 def test_dispatch_success_marks_sent(client, auth_headers, db, monkeypatch):
