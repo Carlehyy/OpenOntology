@@ -7,8 +7,8 @@ import { useNavigate } from 'react-router-dom'
 import { ListChecks, LayoutGrid } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { taskInstancesApi } from '@/api/taskInstances'
-import InstancesBoardView from './InstancesBoardView'
-import TemplatesView from './TemplatesView'
+import InstancesBoardView from '@/components/task-instances/InstancesBoardView'
+import TemplatesView from '@/components/task-instances/TemplatesView'
 
 type ViewKey = 'templates' | 'instances'
 

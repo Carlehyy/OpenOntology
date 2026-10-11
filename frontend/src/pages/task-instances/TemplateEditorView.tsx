@@ -27,8 +27,8 @@ import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { formatDateTime } from '@/utils/datetime'
-import { lineDiff } from './instanceView'
-import WorkflowPreviewGraph from './WorkflowPreviewGraph'
+import { lineDiff } from '@/components/task-instances/instanceView'
+import WorkflowPreviewGraph from '@/components/task-instances/WorkflowPreviewGraph'
 
 // 与世界模型开发页一致的编辑器观感（GitHub light 高亮；注释不用斜体）
 const editorTheme = EditorView.theme({

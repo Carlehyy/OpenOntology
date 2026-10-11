@@ -36,6 +36,7 @@ import GlobalSearchPalette from './components/GlobalSearchPalette'
 import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-collaboration/BrowserCollaboration'
 import NotificationsDialog from './components/NotificationsDialog'
 import ScheduledTasksDialog from './components/ScheduledTasksDialog'
+import TaskInstancesDialog from './components/TaskInstancesDialog'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import KernelRunTaskCard from './components/KernelRunTaskCard'
 import KernelRunList from './components/KernelRunList'
@@ -1044,12 +1045,17 @@ export default function SuperAssistantPage() {
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenScheduled={() => setScheduledOpen(true)}
+          onOpenTaskInstances={() => setTaskInstancesOpen(true)}
         onOpenNotifications={() => setNotificationsOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
       />
       <NotificationsDialog
         open={notificationsOpen}
         onClose={() => setNotificationsOpen(false)}
+      />
+      <TaskInstancesDialog
+        open={taskInstancesOpen}
+        onClose={() => setTaskInstancesOpen(false)}
       />
       <ScheduledTasksDialog
         open={scheduledOpen}
