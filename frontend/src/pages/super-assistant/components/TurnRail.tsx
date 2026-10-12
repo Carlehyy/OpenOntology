@@ -44,23 +44,45 @@ export function TurnRail({ items, scrollHostRef, onJump }: TurnRailProps) {
 
   const visible = items.length >= 2 && hostWidth >= RAIL_HOST_MIN_WIDTH
 
-  // 聊天区宽度受右侧配置面板拖拽影响。初测直接读 clientWidth：
-  // 部分内嵌 webview（如 ZCode IAB）不派发 ResizeObserver 的首次回调，
-  // 只依赖 observe() 首回调会让 hostWidth 恒为 0、竖条永不渲染
+  // 聊天区宽度受右侧配置面板拖拽影响。内嵌 webview（如 ZCode IAB）实测存在
+  // 两种脏态：ResizeObserver 首回调不派发、或派发 0 宽脏值；挂载瞬间布局
+  // 未就绪时 clientWidth 也可能读到 0——单次测量会把这些瞬态固化成「竖条
+  // 永不渲染」。因此初测用有界重试（每次从 ref 现取宿主），RO 回调忽略 0 宽
+  // 脏值，并常驻 window resize 兜底
   useEffect(() => {
-    const host = scrollHostRef.current
-    if (!host) return
-    const measure = () => setHostWidth(host.clientWidth)
-    measure()
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', measure)
-      return () => window.removeEventListener('resize', measure)
+    let timer = 0
+    let tries = 0
+    const measure = () => {
+      const host = scrollHostRef.current
+      if (!host || host.clientWidth === 0) {
+        if (tries < 40) {
+          tries += 1
+          timer = window.setTimeout(measure, 150)
+        }
+        return
+      }
+      setHostWidth(host.clientWidth)
     }
-    const observer = new ResizeObserver(entries => {
-      setHostWidth(entries[0]?.contentRect.width ?? 0)
-    })
-    observer.observe(host)
-    return () => observer.disconnect()
+    measure()
+    const onResize = () => {
+      const host = scrollHostRef.current
+      if (host && host.clientWidth > 0) setHostWidth(host.clientWidth)
+    }
+    window.addEventListener('resize', onResize)
+    let observer: ResizeObserver | undefined
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(entries => {
+        const width = entries[0]?.contentRect.width ?? 0
+        if (width > 0) setHostWidth(width)
+      })
+      const host = scrollHostRef.current
+      if (host) observer.observe(host)
+    }
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('resize', onResize)
+      observer?.disconnect()
+    }
   }, [scrollHostRef, visible])
 
   const measureActive = useCallback(() => {
