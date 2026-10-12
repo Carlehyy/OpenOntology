@@ -44,13 +44,17 @@ export function TurnRail({ items, scrollHostRef, onJump }: TurnRailProps) {
 
   const visible = items.length >= 2 && hostWidth >= RAIL_HOST_MIN_WIDTH
 
-  // 聊天区宽度受右侧配置面板拖拽影响，用 ResizeObserver 实时测量
+  // 聊天区宽度受右侧配置面板拖拽影响。初测直接读 clientWidth：
+  // 部分内嵌 webview（如 ZCode IAB）不派发 ResizeObserver 的首次回调，
+  // 只依赖 observe() 首回调会让 hostWidth 恒为 0、竖条永不渲染
   useEffect(() => {
     const host = scrollHostRef.current
     if (!host) return
+    const measure = () => setHostWidth(host.clientWidth)
+    measure()
     if (typeof ResizeObserver === 'undefined') {
-      setHostWidth(host.clientWidth)
-      return
+      window.addEventListener('resize', measure)
+      return () => window.removeEventListener('resize', measure)
     }
     const observer = new ResizeObserver(entries => {
       setHostWidth(entries[0]?.contentRect.width ?? 0)
