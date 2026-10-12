@@ -325,6 +325,14 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 输入框快捷内容（常用文本片段 CRUD + 优先级重排）：同前缀同守卫的独立子路由
+from app.super_assistant import quick_inputs as super_assistant_quick_inputs
+app.include_router(
+    super_assistant_quick_inputs.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 语音听写（录音 WAV 上传 → 本地 SenseVoice 离线转写）：同前缀同守卫的独立子路由
 from app.super_assistant import voice as super_assistant_voice
 app.include_router(
