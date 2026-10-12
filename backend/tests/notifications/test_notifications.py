@@ -115,13 +115,14 @@ def test_list_tabs_and_summary(client, auth_headers):
         assert resp.status_code == 200
         return [item["id"] for item in resp.json()["data"]["items"]]
 
-    assert set(_ids("all")) == {a["id"], b["id"]}      # 归档不进默认视图
+    # 全部 = 真全量（含已归档）；未读/已标记不含已归档
+    assert set(_ids("all")) == {a["id"], b["id"], c["id"]}
     assert _ids("unread") == [a["id"]]
     assert _ids("starred") == [b["id"]]
     assert _ids("archived") == [c["id"]]
 
     summary = client.get("/api/v2/notifications/summary", headers=auth_headers).json()["data"]
-    assert summary == {"unreadCount": 1, "starredCount": 1, "archivedCount": 1, "totalCount": 2}
+    assert summary == {"unreadCount": 1, "starredCount": 1, "archivedCount": 1, "totalCount": 3}
 
     # 列表条目只带预览与计数，不携带全文
     listing = client.get("/api/v2/notifications?tab=all", headers=auth_headers).json()["data"]["items"]
@@ -780,6 +781,108 @@ def test_fan_out_on_create_and_no_duplicate_on_replay(client, auth_headers, db, 
     assert db.query(NotificationDelivery).filter_by(message_id=manual["id"]).count() == 1
 
 
+def test_ingest_ignores_channel_ids_in_body(client, auth_headers, db):
+    """对外入口不认 channelIds：即便请求体携带也按缺省语义扇出全部启用渠道。"""
+    from app.notifications.models import NotificationDelivery
+
+    _make_channel(client, auth_headers, name="渠道A")
+    key = _mint_key(client, auth_headers, name="billing")
+
+    resp = client.post(
+        INGEST,
+        json={"eventId": "inc-chan-scope", "title": "带渠道字段", "channelIds": ["no-such-id"]},
+        headers=_ingest_headers(key),
+    )
+    assert resp.status_code == 200, resp.text
+    message_id = resp.json()["data"]["message"]["id"]
+    assert db.query(NotificationDelivery).filter_by(message_id=message_id).count() == 1
+
+
+def test_create_with_channel_ids_subset_fanout(client, auth_headers, db):
+    from app.notifications.models import NotificationDelivery
+
+    channel_a = _make_channel(client, auth_headers, name="渠道A")
+    channel_b = _make_channel(client, auth_headers, name="渠道B", url="json://hooks.example/b")
+    _make_channel(client, auth_headers, name="渠道C", enabled=False)
+
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "定向投递", "channelIds": [channel_a["id"], channel_b["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    message_id = resp.json()["data"]["id"]
+
+    delivered = {
+        row.channel_id
+        for row in db.query(NotificationDelivery).filter_by(message_id=message_id).all()
+    }
+    # 只向指定渠道扇出（停用渠道本就不可入选，两启用渠道各自一张投递单）
+    assert delivered == {channel_a["id"], channel_b["id"]}
+
+    # 只选其一
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "再定向", "channelIds": [channel_b["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    delivered = {
+        row.channel_id
+        for row in db.query(NotificationDelivery).filter_by(message_id=resp.json()["data"]["id"]).all()
+    }
+    assert delivered == {channel_b["id"]}
+
+
+def test_create_with_channel_ids_deduplicated(client, auth_headers, db):
+    from app.notifications.models import NotificationDelivery
+
+    channel = _make_channel(client, auth_headers, name="渠道A")
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "重复指定", "channelIds": [channel["id"], channel["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    assert db.query(NotificationDelivery).filter_by(message_id=resp.json()["data"]["id"]).count() == 1
+
+
+def test_create_with_channel_ids_rejections(client, auth_headers, db):
+    from app.notifications.models import NotificationMessage
+
+    channel = _make_channel(client, auth_headers, name="渠道A")
+    disabled = _make_channel(client, auth_headers, name="停用渠道", enabled=False)
+
+    # 不存在的渠道：404 且消息不落库
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "幽灵渠道", "channelIds": ["no-such-id"]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404 and "渠道不存在" in resp.json()["detail"]
+
+    # 停用渠道：422 且消息不落库
+    resp = client.post(
+        "/api/v2/notifications",
+        json={"title": "停用渠道", "channelIds": [channel["id"], disabled["id"]]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422 and "已停用" in resp.json()["detail"]
+
+    # 空列表：schema 层 422
+    assert (
+        client.post(
+            "/api/v2/notifications",
+            json={"title": "空列表", "channelIds": []},
+            headers=auth_headers,
+        ).status_code
+        == 422
+    )
+
+    # 两次拒绝后库里没有残留消息（校验先于落库）
+    assert db.query(NotificationMessage).filter(NotificationMessage.title.like("%渠道")).count() == 0
+
+
 def test_dispatch_success_marks_sent(client, auth_headers, db, monkeypatch):
     from app.notifications import channel_service as cs
     from app.notifications.models import NotificationChannel, NotificationDelivery
@@ -1119,3 +1222,99 @@ def test_ingest_key_link_test_full_chain(client, auth_headers, db, monkeypatch):
     assert client.post("/api/v2/notifications/ingest-keys/missing/test", headers=auth_headers).status_code == 404
     client.delete(f"/api/v2/notifications/ingest-keys/{key['id']}", headers=auth_headers)
     assert client.post(f"/api/v2/notifications/ingest-keys/{key['id']}/test", headers=auth_headers).status_code == 422
+
+
+# ── 消息统计（R3）─────────────────────────────────────────────
+
+
+def _backdate(db, message_id: str, created_at) -> None:
+    from app.notifications.models import NotificationMessage
+
+    db.query(NotificationMessage).filter_by(id=message_id).update({"created_at": created_at})
+    db.commit()
+
+
+def test_stats_empty_database(client, auth_headers):
+    data = client.get("/api/v2/notifications/stats", headers=auth_headers).json()["data"]
+    assert data["overview"] == {
+        "totalCount": 0,
+        "unreadCount": 0,
+        "todayInbound": 0,
+        "forwardSuccessRate": None,
+    }
+    assert len(data["trend"]) == 30
+    assert all(point["count"] == 0 for point in data["trend"])
+    assert data["sources"] == [] and data["channels"] == []
+
+
+def test_stats_aggregates_and_days_param(client, auth_headers, db):
+    from datetime import timedelta
+
+    from app.notifications.models import NotificationDelivery, NotificationMessage
+
+    channel_a = _make_channel(client, auth_headers, name="渠道A")
+    channel_b = _make_channel(client, auth_headers, name="渠道B", url="json://hooks.example/b")
+
+    m_today_1 = _create(client, auth_headers, title="今日告警一", body="x")
+    m_today_2 = _create(client, auth_headers, title="今日告警二", body="y")
+    m_old = _create(client, auth_headers, title="三天前旧闻", body="z")
+    # 外部来源消息
+    key = _mint_key(client, auth_headers, name="warehouse")
+    client.post(INGEST, json={"eventId": "st-1", "title": "仓库事件"}, headers=_ingest_headers(key))
+
+    now = notification_service._now()
+    _backdate(db, m_old["id"], now - timedelta(days=3))
+
+    # 旧消息移出今天：今日入站 = 3（两条今日 + 一条 ingest）
+    # 投递状态：创建消息时已自动向 A/B 扇出 pending 单，这里改写终态
+    # 目标：A sent×2、B failed×1、B pending×1（pending 不计入成功率）
+    by_id = {row.id: row for row in db.query(NotificationMessage).all()}
+    for delivery in db.query(NotificationDelivery).all():
+        if delivery.channel_id == channel_a["id"] and delivery.attempts == 0:
+            delivery.status = "sent"
+            delivery.attempts = 1
+            delivery.sent_at = notification_service._now()
+    b_rows = [d for d in db.query(NotificationDelivery).all() if d.channel_id == channel_b["id"]]
+    b_rows.sort(key=lambda d: by_id[d.message_id].title)
+    if b_rows:
+        b_rows[0].status = "failed"
+        b_rows[0].attempts = 3
+    # 今日告警一保持未读（创建即已读），标一条回未读
+    client.patch(f"/api/v2/notifications/{m_today_1['id']}", json={"isRead": False}, headers=auth_headers)
+    db.commit()
+
+    data = client.get("/api/v2/notifications/stats", headers=auth_headers).json()["data"]
+    ov = data["overview"]
+    assert ov["totalCount"] == 4
+    assert ov["unreadCount"] == 2  # 今日告警一标回未读 + ingest 消息天然未读
+    assert ov["todayInbound"] == 3
+    assert ov["forwardSuccessRate"] == round(4 / 5, 4)  # 4 sent / (4 sent + 1 failed)，pending 不进分母
+
+    # 趋势：30 桶、今日 3、三天前 1、其余 0
+    assert len(data["trend"]) == 30
+    assert data["trend"][-1]["count"] == 3
+    assert data["trend"][-4]["count"] == 1
+    assert sum(point["count"] for point in data["trend"]) == 4
+
+    # 来源分布：platform 3 + warehouse 1（按量降序）
+    assert data["sources"][0] == {"source": "platform", "count": 3}
+    assert {"source": "warehouse", "count": 1} in data["sources"]
+
+    # 渠道结果：A sent=2；B failed=1 + pending=1
+    by_name = {item["name"]: item for item in data["channels"]}
+    assert by_name["渠道A"]["sent"] >= 2 and by_name["渠道A"]["failed"] == 0 and by_name["渠道A"]["pending"] == 0
+    assert by_name["渠道B"]["failed"] == 1 and by_name["渠道B"]["pending"] >= 1
+
+    # days 参数：7 桶与边界校验
+    short = client.get("/api/v2/notifications/stats?days=7", headers=auth_headers).json()["data"]
+    assert len(short["trend"]) == 7
+    assert short["trend"][-1]["count"] == 3  # 三天前仍在 7 天窗内
+    assert client.get("/api/v2/notifications/stats?days=0", headers=auth_headers).status_code == 422
+    assert client.get("/api/v2/notifications/stats?days=91", headers=auth_headers).status_code == 422
+
+
+def test_stats_requires_admin(client, editor_user):
+    assert (
+        client.get("/api/v2/notifications/stats", headers=_editor_headers(client)).status_code
+        == 403
+    )

@@ -290,6 +290,11 @@ def _run_container_and_collect(db: Session, run, instance, task: dict,
     (ws / _OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     (ws / _STEERING_DIR).mkdir(parents=True, exist_ok=True)
     (ws / _ARTIFACT_DIR).mkdir(parents=True, exist_ok=True)
+    # agent 容器以 node 用户（uid 1000）运行，而 task_worker 以 root 创建目录：
+    # 必须放开写权限，否则 runner 的 output.json 写入 EACCES
+    import os as _os
+    for _dir in (ws, ws / _OUTPUT_DIR, ws / _STEERING_DIR, ws / _ARTIFACT_DIR):
+        _os.chmod(_dir, 0o1777)
     (ws / _TASK_FILE).write_text(json.dumps(task, ensure_ascii=False),
                                  encoding="utf-8")
     settings = _settings()

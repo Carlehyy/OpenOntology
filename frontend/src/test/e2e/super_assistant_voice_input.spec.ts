@@ -458,6 +458,8 @@ test.describe('超级助手语音听写', () => {
     await page.getByRole('button', { name: '语音设置' }).click()
     await expect(page.getByTestId('voice-tab')).toBeVisible()
     await expect(page.getByTestId('voice-unsupported-note')).toContainText('HTTPS')
+    // E2E 构建未烧入 HTTPS 入口（CI 生产构建才注入），降级提示不出现入口链接
+    await expect(page.getByTestId('voice-https-entrance-link')).toHaveCount(0)
   })
 
   test('在线下载模型：管理员一键下载→进度轮询→就绪', async ({ page }) => {

@@ -207,6 +207,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifStatePatches: string[] = []
   const notifCreates: string[] = []
   const notifReadAllCalls: string[] = []
+  const notifStatsDays: number[] = []
   const notifDeletes: string[] = []
   const notifKeyCreates: string[] = []
   const notifKeyRevokes: string[] = []
@@ -651,6 +652,14 @@ async function mockApis(page: Page, options: MockOptions = {}) {
           ],
           enabled: true, note: '值班告警', lastStatus: 'sent', lastError: '', lastSentAt: at(0, 9),
           createdAt: at(1, 8), updatedAt: at(0, 9) },
+        { id: 'ch-2', name: '双端收件邮箱', urlMasked: 'mailtos://…2925.com',
+          template: 'email', templateName: '邮件',
+          display: 'ops@example.com',
+          fields: [
+            { key: 'recipients', label: '收件邮箱', hint: '', required: true, secret: false, placeholder: '', value: 'ops@example.com' },
+          ],
+          enabled: true, note: null, lastStatus: null, lastError: '', lastSentAt: null,
+          createdAt: at(1, 8), updatedAt: at(1, 8) },
       ])
     }
     const notifChannelTestMatch = path.match(/^\/api\/v2\/notifications\/channels\/([^/]+)\/test$/)
@@ -704,7 +713,30 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         unreadCount: notificationsState.filter(item => !item.isRead && !item.isArchived).length,
         starredCount: notificationsState.filter(item => item.isStarred && !item.isArchived).length,
         archivedCount: notificationsState.filter(item => item.isArchived).length,
-        totalCount: notificationsState.filter(item => !item.isArchived).length,
+        // 全部 = 真全量（含已归档）
+        totalCount: notificationsState.length,
+      })
+    }
+    if (path === '/api/v2/notifications/stats') {
+      const days = Number(new URL(request.url()).searchParams.get('days') || 30)
+      notifStatsDays.push(days)
+      // 与真实 API 同序：升序补零，今天在末位
+      const trend = Array.from({ length: days }, (_, i) => ({
+        date: `2026-09-${String(30 - days + 1 + i).padStart(2, '0')}`,
+        count: i === days - 1 ? 1 : i === days - 2 ? 2 : 0,
+      }))
+      return json(route, {
+        overview: { totalCount: 5, unreadCount: 2, todayInbound: 1, forwardSuccessRate: 0.8 },
+        trend,
+        sources: [
+          { source: 'platform', count: 3 },
+          { source: 'warehouse', count: 1 },
+          { source: 'billing', count: 1 },
+        ],
+        channels: [
+          { channelId: 'ch-1', name: '钉钉运维群', sent: 4, failed: 1, pending: 0 },
+          { channelId: 'ch-2', name: '双端收件邮箱', sent: 2, failed: 0, pending: 1 },
+        ],
       })
     }
     if (path === '/api/v2/notifications/read-all' && request.method() === 'POST') {
@@ -722,13 +754,14 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         if (tab === 'unread') return !item.isRead && !item.isArchived
         if (tab === 'starred') return item.isStarred && !item.isArchived
         if (tab === 'archived') return item.isArchived
-        return !item.isArchived
+        return true // all = 真全量（含已归档）
       })
       let nextCursor: string | null = null
       if (options.notificationsPagination) {
+        // 数值游标按 2 条/页翻到底（全部=真全量含归档，共 5 条）
         const cursor = searchParams.get('cursor')
-        const start = cursor === 'p2' ? 2 : 0
-        nextCursor = !cursor && items.length > 2 ? 'p2' : null
+        const start = cursor ? Number(cursor) : 0
+        nextCursor = start + 2 < items.length ? String(start + 2) : null
         items = items.slice(start, start + 2)
       }
       return json(route, { items, nextCursor, hasMore: nextCursor !== null })
@@ -1046,6 +1079,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifStatePatches,
     notifCreates,
     notifReadAllCalls,
+    notifStatsDays,
     notifDeletes,
     notifKeyCreates,
     notifKeyRevokes,
@@ -1118,7 +1152,7 @@ test('工作台骨架：九项入口齐备，近期会话单列表，归档折�
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
 })
 
-test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标记/归档/全部已读/发送', async ({ page }) => {
+test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附件、标记/归档/全部已读/定向发送', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
@@ -1133,12 +1167,25 @@ test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标�
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('消息通知')
 
-  // 默认「全部」tab：未归档两条可见，已归档不可见
+  // 分区导航三区：消息列表 / 发送消息 / 渠道配置（在线测试已并入配置）
+  const navKeys = await dialog.locator('[data-notifications-nav]').evaluateAll(
+    els => els.map(el => (el as HTMLElement).dataset.notificationsNav),
+  )
+  expect(navKeys).toEqual(['messages', 'compose', 'config', 'stats'])
+
+  // tab 顺序契约：未读(默认) → 已标记 → 已归档 → 全部
+  const tabKeys = await dialog.locator('[data-notifications-tab]').evaluateAll(
+    els => els.map(el => (el as HTMLElement).dataset.notificationsTab),
+  )
+  expect(tabKeys).toEqual(['unread', 'starred', 'archived', 'all'])
+  await expect(dialog.locator('[data-notifications-tab="unread"]')).toHaveAttribute('aria-pressed', 'true')
+
+  // 默认「未读」tab：两条未读可见（n-1 平台告警、n-2 外部告警），已读与已归档不可见
   await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-3"]')).toHaveCount(0)
 
-  // tab 筛选语义：已标记仅 n-2；已归档仅 n-3
+  // tab 筛选语义：已标记仅 n-2；已归档仅 n-3；全部 = 真全量（n-3 也可见）
   await page.locator('[data-notifications-tab="starred"]').click()
   await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
@@ -1146,6 +1193,8 @@ test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标�
   await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
   await page.locator('[data-notifications-tab="all"]').click()
+  await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
 
   // 详情：标题、Markdown 表格/代码块、附件行
   await page.locator('[data-notifications-item="n-1"]').click()
@@ -1167,15 +1216,52 @@ test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标�
   await page.locator('[data-notifications-read-all]').click()
   await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
 
-  // 发送消息：标题 + Markdown 正文
-  await page.locator('[data-notifications-compose-toggle]').click()
+  // 发送消息（独立分区）：渠道 chips 默认全选，取消其一后定向投递
+  await page.locator('[data-notifications-nav="compose"]').click()
+  await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
+  const chipCh1 = page.locator('[data-notifications-compose-channel="ch-1"]')
+  const chipCh2 = page.locator('[data-notifications-compose-channel="ch-2"]')
+  await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
+  await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
+  await chipCh2.click() // 取消邮件渠道 → 仅投递钉钉
+  await expect(chipCh2).toHaveAttribute('aria-checked', 'false')
+  await expect(page.getByText('将投递到 1 个渠道')).toBeVisible()
   await page.locator('[data-notifications-compose-title]').fill('巡检通知')
   await page.locator('[data-notifications-compose-body]').fill('# 今日巡检\n一切正常')
   await page.locator('[data-notifications-compose-send]').click()
   await expect.poll(() => mocks.notifCreates.length).toBe(1)
+  const createPayload = JSON.parse(mocks.notifCreates[0])
+  expect(createPayload.title).toBe('巡检通知')
+  expect(createPayload.channelIds).toEqual(['ch-1'])
+  // 发送成功自动回到消息列表并选中新消息（未读视图，列表与详情同屏）
   await expect(page.locator('[data-notifications-detail]')).toContainText('今日巡检')
+  await expect(page.locator('[data-notifications-tab="unread"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('[data-notifications-compose-panel]')).toHaveCount(0)
 
-  // 手动转发：详情操作 → 渠道多选 → 确认
+  // 再发一条不动 chips：默认全选 = 省略 channelIds（后端缺省语义，无渠道数上限）
+  await page.locator('[data-notifications-nav="compose"]').click()
+  await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
+  await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
+  await page.locator('[data-notifications-compose-title]').fill('全渠道广播')
+  await page.locator('[data-notifications-compose-send]').click()
+  await expect.poll(() => mocks.notifCreates.length).toBe(2)
+  const broadcastPayload = JSON.parse(mocks.notifCreates[1])
+  expect(broadcastPayload.title).toBe('全渠道广播')
+  expect(broadcastPayload.channelIds).toBeUndefined()
+
+  // 弹窗关闭重开：compose 表单与 chips 状态复位
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await entry.click()
+  await page.locator('[data-notifications-nav="compose"]').click()
+  await expect(page.locator('[data-notifications-compose-title]')).toHaveValue('')
+  await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
+  await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByText('将投递到 2 个渠道')).toBeVisible()
+
+  // 手动转发：回消息列表（重开后详情仍选中），详情操作 → 渠道多选 → 确认
+  await page.locator('[data-notifications-nav="messages"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('全渠道广播')
   await page.locator('[data-notifications-forward]').click()
   await expect(page.locator('[data-notifications-forward-panel]')).toBeVisible()
   await page.locator('[data-notifications-forward-channel="ch-1"]').check()
@@ -1183,9 +1269,9 @@ test('消息通知：徽章弹窗、tab 筛选、Markdown 详情与附件、标�
   await expect.poll(() => mocks.notifForwards.length).toBe(1)
   await expect(page.getByText('已转发到 1 个渠道')).toBeVisible()
 
-  // 在线测试分区：入口模拟投递
-  await page.locator('[data-notifications-nav="test"]').click()
-  await expect(page.locator('[data-notifications-test-key="nk-1"]')).toBeVisible()
+  // 渠道配置分区：密钥旁内嵌「入口测试」（真实投递全链路）
+  await page.locator('[data-notifications-nav="config"]').click()
+  await expect(page.locator('[data-notifications-key-item="nk-1"]')).toBeVisible()
   await page.locator('[data-notifications-key-test]').first().click()
   await expect.poll(() => mocks.notifKeyTests.length).toBe(1)
   await expect(page.getByText('出口即时投递：成功 1 条')).toBeVisible()
@@ -1199,6 +1285,9 @@ test('消息通知：游标分页——首页两条，加载更多补齐后续',
   await page.getByRole('button', { name: /消息通知/ }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
 
+  // 分页夹具的追加行均为已读；「全部」= 真全量 5 条（含归档 n-3），2 条/页共三页
+  await page.locator('[data-notifications-tab="all"]').click()
+
   // 首页：最新两条可见，其余未加载
   await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
@@ -1206,7 +1295,11 @@ test('消息通知：游标分页——首页两条，加载更多补齐后续',
   await expect(page.locator('[data-notifications-load-more]')).toBeVisible()
 
   await page.locator('[data-notifications-load-more]').click()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-4"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-5"]')).toHaveCount(0)
+  // 第三页补齐最后一条
+  await page.locator('[data-notifications-load-more]').click()
   await expect(page.locator('[data-notifications-item="n-5"]')).toBeVisible()
   // 全部加载完毕后「加载更多」消失
   await expect(page.locator('[data-notifications-load-more]')).toHaveCount(0)
@@ -1259,7 +1352,12 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect(existing).toContainText('toke…abcd')
   await expect(existing).toContainText('投递成功')
 
-  // 新建渠道（模板化）：选钉钉类型 → 填关键字段（含指引文案可见）
+  // 新建渠道（模板网格起手）：打开向导 → 选钉钉类型卡 → 填关键字段（含指引文案可见）
+  await page.locator('[data-notifications-channel-create-open]').click()
+  await expect(page.locator('[data-notifications-template-grid]')).toBeVisible()
+  await expect(page.locator('[data-notifications-template-card="dingtalk"]')).toBeVisible()
+  await page.locator('[data-notifications-template-card="dingtalk"]').click()
+  await expect(page.locator('[data-notifications-channel-form]')).toBeVisible()
   await page.locator('[data-notifications-channel-name]').fill('钉钉值班')
   await expect(page.getByText('钉钉群 → 设置 → 机器人')).toBeVisible()
   await page.locator('[data-notifications-channel-param="token"]').fill('6fb1fa7c2b-demo')
@@ -1281,17 +1379,13 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect.poll(() => mocks.notifSmtpTests.length).toBe(1)
   await expect(page.getByText('测试邮件已发送至 e2e@test.com')).toBeVisible()
 
-  // 测试直发（在线测试分区）：结果 toast 即时反馈
-  await page.locator('[data-notifications-nav="test"]').click()
-  await expect(page.locator('[data-notifications-test-panel]')).toBeVisible()
+  // 测试直发（渠道行内嵌测试按钮）：结果 toast 即时反馈
+  await expect(page.locator('[data-notifications-channel-item="ch-1"] [data-notifications-channel-test]')).toBeVisible()
   await page.locator('[data-notifications-channel-test]').first().click()
   await expect.poll(() => mocks.notifChannelTests.length).toBe(1)
   await expect(page.getByText('测试消息已发送')).toBeVisible()
 
-  // 回渠道配置分区做启停与删除
-  await page.locator('[data-notifications-nav="config"]').click()
-
-  // 启停开关触发 PATCH
+  // 启停开关触发 PATCH（仍在渠道配置分区）
   await page.locator('[data-notifications-channel-toggle]').first().click()
   await expect.poll(() => mocks.notifChannelUpdates.length).toBe(1)
 
@@ -1301,6 +1395,46 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect(confirm).toBeVisible()
   await confirm.getByRole('button', { name: '删除' }).click()
   await expect.poll(() => mocks.notifChannelDeletes.length).toBe(1)
+})
+
+test('消息统计：第四分区图表可视化——概览/趋势/来源/渠道与时间窗切换', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-nav="stats"]').click()
+
+  const panel = page.locator('[data-notifications-stats-panel]')
+  await expect(panel).toBeVisible()
+
+  // 概览四卡：数值与空值语义
+  const overview = page.locator('[data-notifications-stats-overview]')
+  await expect(overview).toContainText('消息总量')
+  await expect(page.locator('[data-notifications-stats-card="消息总量"]')).toContainText('5')
+  await expect(page.locator('[data-notifications-stats-card="未读"]')).toContainText('2')
+  await expect(page.locator('[data-notifications-stats-card="今日入站"]')).toContainText('1')
+  await expect(page.locator('[data-notifications-stats-card="转发成功率"]')).toContainText('80%')
+
+  // 入站趋势：recharts 柱状图渲染出 SVG，默认近 30 天
+  await expect(page.locator('[data-notifications-stats-trend-chart] svg')).toBeVisible()
+  await expect.poll(() => mocks.notifStatsDays.at(-1) ?? 0).toBe(30)
+
+  // 时间窗切到 7 天：重新请求且按钮选中态切换
+  await page.locator('[data-notifications-stats-range="7"]').click()
+  await expect(page.locator('[data-notifications-stats-range="7"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => mocks.notifStatsDays.at(-1) ?? 0).toBe(7)
+
+  // 来源分布：三个来源占比条与计数
+  const sources = page.locator('[data-notifications-stats-sources-list]')
+  await expect(sources.locator('[data-notifications-stats-source="platform"]')).toContainText('3')
+  await expect(sources.locator('[data-notifications-stats-source="warehouse"]')).toContainText('1')
+
+  // 渠道投递结果：成功/失败计数与堆叠占比条
+  const channels = page.locator('[data-notifications-stats-channels-list]')
+  await expect(channels.locator('[data-notifications-stats-channel="ch-1"]')).toContainText('成功 4')
+  await expect(channels.locator('[data-notifications-stats-channel="ch-1"]')).toContainText('失败 1')
+  await expect(channels.locator('[data-notifications-stats-channel="ch-2"]')).toContainText('待发 1')
 })
 
 test('消息通知（窄屏390px）：列表⇄详情单栏切换与管理态全宽', async ({ page }) => {

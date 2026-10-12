@@ -9,11 +9,16 @@ Priority = Literal["urgent", "high", "normal", "low"]
 
 
 class NotificationCreate(BaseModel):
-    """管理员手动发送消息（= 正式消息，会进入站内并触发渠道转发）。"""
+    """管理员手动发送消息（= 正式消息，会进入站内并触发渠道转发）。
+
+    channelIds 指定投递范围（仅这些渠道收到转发，须全部存在且启用）；
+    缺省 = 全部启用渠道。
+    """
 
     title: str = Field(min_length=1, max_length=300)
     body: str = Field(default="", max_length=524288)  # 512 KiB 正文上限
     priority: Priority = "normal"
+    channelIds: list[str] | None = Field(default=None, min_length=1, max_length=50)
 
 
 class NotificationStateUpdate(BaseModel):
