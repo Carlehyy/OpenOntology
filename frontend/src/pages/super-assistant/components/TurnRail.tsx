@@ -193,14 +193,18 @@ export function TurnRail({ items, scrollHostRef, onJump }: TurnRailProps) {
               className="group flex h-3 w-9 items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {/* 鱼眼波形纯 CSS：命中刻度 scaleX(2.6) 变实，相邻 ±1 scaleX(1.7)、
-                  ±2 scaleX(1.25) 依次衰减（正向用相邻选择器，反向用 :has） */}
+                  ±2 scaleX(1.25) 依次衰减（正向用相邻选择器，反向用 :has）。
+                  transform 用字面量任意属性而非 scale-x-* 工具类：后者经
+                  --tw-* 自定义属性间接寻址，部分内嵌 webview（如 ZCode IAB）
+                  对「自定义属性变化 → transform 重算」的失效传播有缺陷，
+                  字面量在 :hover 重匹配时稳定重算 */}
               <span
                 className={`block h-0.5 w-3.5 origin-left rounded-full transition-[transform,opacity,background-color] duration-150 ease-out motion-reduce:transition-none ${tone} ${baseOpacity}
-                  group-hover:scale-x-[2.6] group-hover:opacity-100 group-hover:bg-[var(--color-text-primary)]
-                  [[data-turn-rail-item]:hover+[data-turn-rail-item]_&]:scale-x-[1.7] [[data-turn-rail-item]:hover+[data-turn-rail-item]_&]:opacity-[0.86]
-                  [[data-turn-rail-item]:has(+[data-turn-rail-item]:hover)_&]:scale-x-[1.7] [[data-turn-rail-item]:has(+[data-turn-rail-item]:hover)_&]:opacity-[0.86]
-                  [[data-turn-rail-item]:hover+[data-turn-rail-item]+[data-turn-rail-item]_&]:scale-x-[1.25] [[data-turn-rail-item]:hover+[data-turn-rail-item]+[data-turn-rail-item]_&]:opacity-[0.72]
-                  [[data-turn-rail-item]:has(+[data-turn-rail-item]+[data-turn-rail-item]:hover)_&]:scale-x-[1.25] [[data-turn-rail-item]:has(+[data-turn-rail-item]+[data-turn-rail-item]:hover)_&]:opacity-[0.72]`}
+                  group-hover:[transform:scaleX(2.6)] group-hover:opacity-100 group-hover:bg-[var(--color-text-primary)]
+                  [[data-turn-rail-item]:hover+[data-turn-rail-item]_&]:[transform:scaleX(1.7)] [[data-turn-rail-item]:hover+[data-turn-rail-item]_&]:opacity-[0.86]
+                  [[data-turn-rail-item]:has(+[data-turn-rail-item]:hover)_&]:[transform:scaleX(1.7)] [[data-turn-rail-item]:has(+[data-turn-rail-item]:hover)_&]:opacity-[0.86]
+                  [[data-turn-rail-item]:hover+[data-turn-rail-item]+[data-turn-rail-item]_&]:[transform:scaleX(1.25)] [[data-turn-rail-item]:hover+[data-turn-rail-item]+[data-turn-rail-item]_&]:opacity-[0.72]
+                  [[data-turn-rail-item]:has(+[data-turn-rail-item]+[data-turn-rail-item]:hover)_&]:[transform:scaleX(1.25)] [[data-turn-rail-item]:has(+[data-turn-rail-item]+[data-turn-rail-item]:hover)_&]:opacity-[0.72]`}
               />
             </button>
           )
