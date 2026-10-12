@@ -4,6 +4,7 @@
  * 左侧调色板 6 种节点类型；右侧属性面板；底部校验+保存。
  */
 import { useCallback, useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider,
   addEdge, useEdgesState, useNodesState,
@@ -165,6 +166,7 @@ interface WorkflowCanvasProps {
 }
 
 export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
+  const queryClient = useQueryClient()
   const [nodes, setNodes, onNodesChange] = useNodesState<WorkflowNode>(defaultNodes())
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([
     { id: 'e1', source: 'start', target: 'gate' },
@@ -224,6 +226,8 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
       const yaml = yamlMode ? yamlText : graphToYaml(nodes, edges)
       await taskInstancesApi.createTemplate(yaml)
       toast.success('流程模板已创建')
+      // 新建流程入口在模板区头部：保存后失效列表，返回即可见新模板
+      void queryClient.invalidateQueries({ queryKey: ['task-instances', 'templates'] })
       onClose()
     } catch (error) {
       toast.error(apiError(error))

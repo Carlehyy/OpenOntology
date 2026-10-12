@@ -4,7 +4,9 @@ import { describe, it } from 'node:test'
 import type { NodeRunView } from '../../../api/taskInstances.ts'
 import {
   buildGraph,
+  dialogNavOf,
   instanceGroup,
+  isTerminalStatus,
   lineDiff,
   waitingNodesOf,
 } from '../../../components/task-instances/instanceView.ts'
@@ -89,6 +91,30 @@ describe('task instances instanceView', () => {
     it('identical text yields no signed lines', () => {
       const diff = lineDiff('a\nb', 'a\nb')
       assert.equal(diff.filter(line => line.sign).length, 0)
+    })
+  })
+
+  describe('isTerminalStatus', () => {
+    it('completed/failed/cancelled are terminal', () => {
+      assert.equal(isTerminalStatus('completed'), true)
+      assert.equal(isTerminalStatus('failed'), true)
+      assert.equal(isTerminalStatus('cancelled'), true)
+    })
+    it('active/cancelling are not terminal', () => {
+      assert.equal(isTerminalStatus('active'), false)
+      assert.equal(isTerminalStatus('cancelling'), false)
+    })
+  })
+
+  describe('dialogNavOf', () => {
+    it('board and instance detail belong to instances nav', () => {
+      assert.equal(dialogNavOf('board'), 'instances')
+      assert.equal(dialogNavOf('instance'), 'instances')
+    })
+    it('templates, activate form and canvas editor belong to templates nav', () => {
+      assert.equal(dialogNavOf('templates'), 'templates')
+      assert.equal(dialogNavOf('activate'), 'templates')
+      assert.equal(dialogNavOf('canvas'), 'templates')
     })
   })
 })

@@ -207,3 +207,20 @@ export function waitingNodesOf(instance: InstanceDetail | null | undefined): {
     approval: nodes.filter(node => node.status === 'waiting_approval'),
   }
 }
+
+/** 实例是否已到终态（交互面板关闭/轮询收尾判定） */
+export function isTerminalStatus(status: string): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+}
+
+/** 任务实例弹窗（超级助手内嵌）的视图集合 */
+export type TaskDialogView =
+  | 'board' | 'instance' | 'templates' | 'activate' | 'canvas'
+
+/**
+ * 弹窗视图 → 左栏导航归属：
+ * 看板域 = 看板 + 实例轻量详情；模板域 = 模板列表 + 激活表单 + 画布编辑。
+ */
+export function dialogNavOf(view: TaskDialogView): 'instances' | 'templates' {
+  return view === 'board' || view === 'instance' ? 'instances' : 'templates'
+}
