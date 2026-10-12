@@ -1789,8 +1789,13 @@ test('会话模型选择器为 ReUI Select，选择后 PATCH 持久化', async (
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
 
+  // 触发器背景与左侧「上下文」胶囊同 token（浅色 rgba(240,253,250,0.8)），
+  // 锁死以防 bg-brand-soft/80 这类 alpha 死类回潮（该写法不生成 CSS，视觉无背景）
+  const trigger = page.getByRole('combobox', { name: '会话模型' })
+  await expect(trigger).toHaveCSS('background-color', 'rgba(240, 253, 250, 0.8)')
+
   // c-today 当前为 model-1（DeepSeek）；Radix Select 选中相同值不触发 onValueChange，切到 Qwen
-  await page.getByRole('combobox', { name: '会话模型' }).click()
+  await trigger.click()
   await page.getByRole('option', { name: /Qwen/ }).click()
   await expect.poll(() => mocks.patchBodies.length).toBe(1)
   expect(JSON.parse(mocks.patchBodies[0])).toMatchObject({ model_config_id: 'model-2' })
