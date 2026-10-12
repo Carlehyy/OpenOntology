@@ -53,6 +53,8 @@ import {
   appendToolStart, enqueueMessage, mergeServerMessages, patchToolStep,
   sameConversationList, sameMessageList, shiftQueue,
 } from './components/chatTranscript'
+import { TurnRail } from './components/TurnRail'
+import { deriveTurnRailItems, type TurnRailItem } from './components/turnRailModel'
 import { readCachedConversations, writeCachedConversations } from './conversationCache'
 import { buildConversationExportFilename } from './exportFilename'
 import type { ModelConfig } from '@/types/ontology'
@@ -404,6 +406,8 @@ export default function SuperAssistantPage() {
   // 让触发器回落占位符；发送仍使用会话已保存的 model_config_id，不因展示而切换
   const selectedModelIdForDisplay = models.some(model => model.id === selectedModelId) ? selectedModelId : ''
   const myMessages = useMemo(() => messages.filter(message => message.role === 'user'), [messages])
+  // 对话问题导航竖条的刻度：每条用户提问一根，随消息列表（含流式增量）派生
+  const turnRailItems = useMemo(() => deriveTurnRailItems(messages), [messages])
   const runningHere = selectedId !== null && streamingIds.has(selectedId)
   const pendingHere = selectedId ? pendingByConv[selectedId] ?? null : null
   const queuedHere = selectedId ? queuedByConv[selectedId] || [] : []
@@ -474,6 +478,26 @@ export default function SuperAssistantPage() {
     setShowJumpToLatest(false)
     jumpFlightRef.current = true
     host.scrollTo({ top: host.scrollHeight, behavior: 'smooth' })
+    window.setTimeout(() => {
+      jumpFlightRef.current = false
+      const atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 96
+      stickToBottomRef.current = atBottom
+      setShowJumpToLatest(!atBottom)
+    }, 700)
+  }
+
+  /** 竖条刻度跳转：定位到该轮提问（顶到滚动区顶缘），并解除贴底跟随；
+   *  平滑飞行期间沿用「回到最新」的飞行守卫，避免中间 scroll 事件误判回贴底 */
+  const jumpToTurn = (item: TurnRailItem) => {
+    const host = scrollHostRef.current
+    const anchor = document.getElementById(`super-assistant-msg-${item.userMessageId}`)
+    if (!host || !anchor) return
+    stickToBottomRef.current = false
+    jumpFlightRef.current = true
+    host.scrollTo({
+      top: host.scrollTop + anchor.getBoundingClientRect().top - host.getBoundingClientRect().top - 12,
+      behavior: 'smooth',
+    })
     window.setTimeout(() => {
       jumpFlightRef.current = false
       const atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 96
@@ -1496,6 +1520,11 @@ export default function SuperAssistantPage() {
                   <div ref={messagesEndRef} />
                 </div>
               </div>
+            )}
+            {/* 对话问题导航竖条（对齐 zcode Turn Navigator）：左缘按提问轮次刻度，
+                hover 预览、点击定位；刻度不足 2 根或聊天区过窄时组件自身不渲染 */}
+            {hasMessages && (
+              <TurnRail items={turnRailItems} scrollHostRef={scrollHostRef} onJump={jumpToTurn} />
             )}
             {/* 离底较远时的兜底入口：一键回到最新消息（与贴底判定同一 96px 阈值） */}
             {hasMessages && showJumpToLatest && (

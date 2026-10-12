@@ -2985,3 +2985,97 @@ test('会话右键菜单：快捷操作齐备且无分组标题', async ({ page 
   await expect(confirmDelete).toBeVisible()
   await confirmDelete.getByRole('button', { name: '取消' }).click()
 })
+
+test('对话问题导航竖条：长会话展示每条提问刻度，点击定位并高亮当前视口轮次', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await seedAuth(page)
+  await mockApis(page)
+  const longMessages = Array.from({ length: 30 }, (_, index) => ({
+    id: `m-long-${index}`, conversation_id: 'c-long',
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `第 ${index + 1} 条消息：${'内容'.repeat(30)}`,
+    status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9),
+  }))
+  await page.route('**/api/v2/super-assistant/conversations', route => {
+    if (route.request().method() === 'GET') {
+      return json(route, [{
+        id: 'c-long', title: '长会话', model_config_id: 'model-1',
+        status: 'active', created_at: at(0, 9), updated_at: at(0, 9),
+      }])
+    }
+    return route.fallback()
+  })
+  await page.route('**/api/v2/super-assistant/conversations/c-long/messages', route => json(route, longMessages))
+
+  await page.goto('/#/super-assistant?conversation=c-long')
+  const scroller = page.locator('main div.h-full.overflow-y-auto')
+  await expect(scroller.getByText('第 30 条消息')).toBeVisible()
+
+  // 宽视口 + 多轮会话：竖条渲染，刻度数与用户提问数一致（30 条消息 15 轮）
+  const rail = page.getByTestId('super-assistant-turn-rail')
+  await expect(rail).toBeVisible()
+  await expect(rail.locator('[data-turn-rail-item]')).toHaveCount(15)
+  // 助手消息锚点补齐：导航与全局搜索共用 super-assistant-msg-<id> 锚点体系
+  await expect(page.locator('#super-assistant-msg-m-long-1')).toBeAttached()
+
+  // 滚到顶：第 1 条提问为当前视口轮次
+  await scroller.evaluate(el => { el.scrollTop = 0 })
+  await expect(rail.locator('[data-turn-rail-item][data-index="0"]')).toHaveAttribute('data-active', 'true')
+
+  // 点击第 8 根刻度：平滑滚动定位到第 8 条提问（锚点顶到滚动区顶缘附近）
+  await rail.locator('[data-turn-rail-item][data-index="7"]').click()
+  await expect.poll(async () => {
+    return await page.evaluate(() => {
+      const host = document.querySelector('main div.h-full.overflow-y-auto')
+      const anchor = document.getElementById('super-assistant-msg-m-long-14')
+      if (!host || !anchor) return 9999
+      return Math.round(anchor.getBoundingClientRect().top - host.getBoundingClientRect().top)
+    })
+  }).toBeLessThan(48)
+  await expect(rail.locator('[data-turn-rail-item][data-index="7"]')).toHaveAttribute('data-active', 'true')
+
+  // 悬停刻度弹出两段式预览：用户提问 + 助手回复摘要
+  await rail.locator('[data-turn-rail-item][data-index="0"]').hover()
+  const preview = page.getByTestId('super-assistant-turn-rail-preview')
+  await expect(preview).toBeVisible()
+  await expect(preview).toContainText('第 1 条消息')
+  await expect(preview).toContainText('第 2 条消息')
+})
+
+test('对话问题导航竖条：单轮会话与窄聊天区不渲染', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  const shortMessages = [
+    { id: 'm-s-0', conversation_id: 'c-short', role: 'user', content: '唯一一问', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9) },
+    { id: 'm-s-1', conversation_id: 'c-short', role: 'assistant', content: '唯一一答', status: 'complete', steps: [], token_usage: {}, created_at: at(0, 8) },
+  ]
+  const longMessages = Array.from({ length: 30 }, (_, index) => ({
+    id: `m-long-${index}`, conversation_id: 'c-long',
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `第 ${index + 1} 条消息：${'内容'.repeat(30)}`,
+    status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9),
+  }))
+  await page.route('**/api/v2/super-assistant/conversations', route => {
+    if (route.request().method() === 'GET') {
+      return json(route, [
+        { id: 'c-short', title: '单轮会话', model_config_id: 'model-1', status: 'active', created_at: at(0, 9), updated_at: at(0, 9) },
+        { id: 'c-long', title: '长会话', model_config_id: 'model-1', status: 'active', created_at: at(0, 9), updated_at: at(0, 9) },
+      ])
+    }
+    return route.fallback()
+  })
+  await page.route('**/api/v2/super-assistant/conversations/c-short/messages', route => json(route, shortMessages))
+  await page.route('**/api/v2/super-assistant/conversations/c-long/messages', route => json(route, longMessages))
+
+  // 宽视口但只有一轮提问：刻度不足 2 根，竖条不渲染
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await page.goto('/#/super-assistant?conversation=c-short')
+  await expect(page.getByText('唯一一答')).toBeVisible()
+  await expect(page.getByTestId('super-assistant-turn-rail')).toHaveCount(0)
+
+  // 多轮会话但聊天区过窄：左缘没有留白，竖条让位不渲染
+  await page.setViewportSize({ width: 1024, height: 768 })
+  await page.goto('/#/super-assistant?conversation=c-long')
+  await expect(page.getByText('第 30 条消息').first()).toBeVisible()
+  await expect(page.getByTestId('super-assistant-turn-rail')).toHaveCount(0)
+})
