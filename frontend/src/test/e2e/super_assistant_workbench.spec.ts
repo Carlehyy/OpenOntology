@@ -2977,3 +2977,184 @@ test('会话右键菜单：快捷操作齐备且无分组标题', async ({ page 
   await expect(confirmDelete).toBeVisible()
   await confirmDelete.getByRole('button', { name: '取消' }).click()
 })
+
+// ═══ 任务实例弹窗改版：看板卡片→轻量详情（状态图+审批直达）、激活表单内嵌
+// 只读流程结构预览、新建流程归位模板区、导航高亮随视图域同步 ═══
+
+const tiSpecCompiled = {
+  api_version: 'openontology.task/v1',
+  kind: 'Workflow',
+  metadata: { name: '代码变更评审', description: null },
+  contracts: {},
+  nodes: {
+    analyze: { kind: 'agent' },
+    gate: { kind: 'approval' },
+    end_ok: { kind: 'terminal' },
+  },
+  edges: [
+    { from: 'analyze.done', to: 'gate', rework: false },
+    { from: 'gate.approved', to: 'end_ok', rework: false },
+  ],
+}
+
+const tiTemplatesFixture = [
+  { id: 'tpl-1', name: '代码变更评审', description: '条件分流 + 关口审批',
+    latest_revision_no: 3, latest_revision_id: 'rev-3',
+    canonical_hash: 'a'.repeat(64), instance_count: 5,
+    created_at: '2026-10-11T02:00:00Z', updated_at: '2026-10-11T03:00:00Z' },
+]
+
+const tiInstancesFixture = {
+  total: 2, page: 1, size: 50,
+  items: [
+    { id: 'ins-1', name: '登录页改版评审', goal: '评审登录页改版',
+      status: 'active', needs_attention: true, template_revision_id: 'rev-3',
+      created_by: 'u-1', created_at: '2026-10-11T03:10:00Z', finished_at: null,
+      fail_reason: null, cancel_reason: null, nodes: [] },
+    { id: 'ins-2', name: '缺陷修复流水', goal: '修复登录崩溃',
+      status: 'completed', needs_attention: false, template_revision_id: 'rev-3',
+      created_by: 'u-1', created_at: '2026-10-10T08:00:00Z',
+      finished_at: '2026-10-10T09:00:00Z', fail_reason: null,
+      cancel_reason: null, nodes: [] },
+  ],
+}
+
+const tiInstanceDetailFixture = {
+  ...tiInstancesFixture.items[0],
+  nodes: [
+    { node_run_id: 'nr-1', node_id: 'analyze', attempt_no: 1,
+      status: 'completed', waiting: false, error: null, correction_count: 0,
+      rework_count: 0, output: { summary: '涉及登录页' },
+      dispatched_at: '2026-10-11T03:11:00Z', started_at: null,
+      finished_at: '2026-10-11T03:12:00Z', created_at: '2026-10-11T03:11:00Z' },
+    { node_run_id: 'nr-2', node_id: 'gate', attempt_no: 1,
+      status: 'waiting_approval', waiting: true, error: null,
+      correction_count: 0, rework_count: 0, output: null,
+      dispatched_at: null, started_at: null, finished_at: null,
+      created_at: '2026-10-11T03:12:00Z' },
+  ],
+  approvals: [
+    { id: 'apr-1', node_run_id: 'nr-2', status: 'pending', reason: null,
+      proposal: { inputs: { analyze: { summary: '涉及登录页' } } },
+      expires_at: '2026-10-14T03:12:00Z', decided_by: null, decided_at: null },
+  ],
+  artifacts: [],
+  spec_snapshot: tiSpecCompiled,
+}
+
+/** 任务实例域路由 mock（在 mockApis 之后注册，优先于其 catch-all） */
+async function mockTaskInstancesApis(page: Page) {
+  await page.route('**/api/v2/task-instances/templates**', route => {
+    if (route.request().method() === 'GET') return json(route, tiTemplatesFixture)
+    return json(route, {})
+  })
+  await page.route('**/api/v2/task-instances/templates/tpl-1', route =>
+    json(route, { ...tiTemplatesFixture[0],
+      spec_yaml: 'api_version: openontology.task/v1\n',
+      spec_compiled: tiSpecCompiled }))
+  await page.route('**/api/v2/task-instances/instances**', route => {
+    const url = route.request().url()
+    if (url.includes('/events')) {
+      return route.fulfill({
+        status: 200, contentType: 'text/event-stream',
+        body: [
+          ['event: instance.snapshot',
+            'data: ' + JSON.stringify({ instance: { id: 'ins-1' } })].join('\n'),
+          '',
+        ].join('\n\n'),
+      })
+    }
+    if (url.match(/instances\/ins-1$/)) return json(route, tiInstanceDetailFixture)
+    if (route.request().method() === 'POST') return json(route, tiInstanceDetailFixture, 202)
+    return json(route, tiInstancesFixture)
+  })
+}
+
+test('任务实例弹窗：看板卡片可点进轻量详情（状态图+审批直达），完整详情跳独立页', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  const dialog = page.getByTestId('task-instances-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(page.getByText('需介入').first()).toBeVisible()
+
+  // 卡片点击 → 弹窗内轻量详情（修复前卡片无 onClick，点击零反应）
+  const attentionCard = page.getByTestId('task-instance-card').filter({ hasText: '登录页改版评审' })
+  await expect(attentionCard).toBeVisible()
+  await attentionCard.click()
+  const lite = page.getByTestId('task-instance-lite')
+  await expect(lite).toBeVisible()
+  await expect(lite.getByRole('button', { name: '返回看板' })).toBeVisible()
+  await expect(lite.getByText('流程快照')).toBeVisible()
+  // 状态 DAG 按 spec_snapshot 投影渲染
+  await expect(lite.locator('.react-flow')).toBeVisible()
+  await expect(lite.getByText('analyze').first()).toBeVisible()
+  // 需介入实例的审批关口直达操作
+  await expect(lite.getByText('审批关口 gate').first()).toBeVisible()
+  await expect(lite.getByRole('button', { name: '批准' })).toBeVisible()
+  await expect(lite.getByRole('button', { name: '驳回并打回' })).toBeVisible()
+
+  // 批准动作走通完整链路（decision POST 命中正确端点与载荷；
+  // handler 内只记录不抛错，避免断言失败把 route 挂起成假绿）
+  let decided: { method: string; decision: string } | null = null
+  await page.route('**/task-instances/instances/ins-1/nodes/gate/approvals/apr-1/decision', route => {
+    const body = route.request().postDataJSON() as { decision: string }
+    decided = { method: route.request().method(), decision: body.decision }
+    return json(route, tiInstanceDetailFixture)
+  })
+  await lite.getByRole('button', { name: '批准' }).click()
+  await expect.poll(() => decided).toEqual({ method: 'POST', decision: 'approved' })
+
+  // 返回看板可回退，再次进入轻量详情
+  await lite.getByRole('button', { name: '返回看板' }).click()
+  await expect(page.getByTestId('task-instances-board')).toBeVisible()
+  await attentionCard.click()
+  await expect(page.getByTestId('task-instance-lite')).toBeVisible()
+
+  // 查看完整详情 → 关闭弹窗并跳转独立实例详情页
+  await page.getByTestId('task-instance-lite').getByRole('button', { name: /查看完整详情/ }).click()
+  await expect(page).toHaveURL(/#\/task-instances\/instances\/ins-1/)
+  await expect(page.getByText('流程快照')).toBeVisible()
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+})
+
+test('任务实例弹窗：激活表单内嵌只读流程结构，新建流程归位模板区，导航高亮随视图域同步', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  const nav = page.locator('nav[aria-label="任务实例视图"]')
+
+  // 初始看板视图：实例看板高亮
+  await expect(nav.getByRole('button', { name: '实例看板' })).toHaveAttribute('aria-pressed', 'true')
+
+  // 模板区：头部有「新建流程」且全弹窗唯一（左下角入口已移除）
+  await nav.getByRole('button', { name: '流程模板' }).click()
+  await expect(page.getByTestId('new-flow-button')).toBeVisible()
+  await expect(page.getByRole('button', { name: '新建流程' })).toHaveCount(1)
+  await expect(page.getByText('代码变更评审').first()).toBeVisible()
+
+  // 点击模板 → 激活表单携带只读流程结构预览（预览数据来自模板详情接口）
+  await page.getByTestId('task-instances-templates').getByRole('button', { name: /代码变更评审/ }).click()
+  await expect(page.getByText('激活「代码变更评审」')).toBeVisible()
+  const preview = page.getByTestId('template-graph-preview')
+  await expect(preview).toBeVisible()
+  await expect(preview.locator('.react-flow')).toBeVisible()
+  await expect(preview.getByText('analyze').first()).toBeVisible()
+  await expect(preview.getByText('gate').first()).toBeVisible()
+
+  // 导航高亮修复：激活表单属模板域（修复前高亮跳回实例看板）
+  await expect(nav.getByRole('button', { name: '流程模板' })).toHaveAttribute('aria-pressed', 'true')
+  await expect(nav.getByRole('button', { name: '实例看板' })).toHaveAttribute('aria-pressed', 'false')
+
+  // 返回模板列表 → 新建流程进入画布编辑器（高亮仍在模板域）
+  await page.getByRole('button', { name: '返回', exact: true }).click()
+  await page.getByTestId('new-flow-button').click()
+  await expect(page.getByRole('button', { name: '校验' })).toBeVisible()
+  await expect(nav.getByRole('button', { name: '流程模板' })).toHaveAttribute('aria-pressed', 'true')
+})
