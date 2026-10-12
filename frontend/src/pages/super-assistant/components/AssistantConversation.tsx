@@ -322,7 +322,7 @@ export function ChatMessage({ message, onRetry }: { message: SuperMessage; onRet
   }
 
   return (
-    <article className="group min-w-0 max-w-3xl space-y-3">
+    <article id={`super-assistant-msg-${message.id}`} className="group min-w-0 max-w-3xl space-y-3 scroll-mt-6">
       <TurnProcess
         steps={message.steps}
         status={message.status}
