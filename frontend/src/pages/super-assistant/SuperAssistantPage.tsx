@@ -1352,11 +1352,13 @@ export default function SuperAssistantPage() {
             disabled={!selectedId || runningHere}
           >
             {/* 与左侧「上下文」框同一语言：1px 绿色细边框、浅绿底、无阴影。
+                背景直连胶囊同款 token：brand.soft 是纯 var 映射无 alpha 通道，
+                bg-brand-soft/80 这类透明度修饰符不生成规则（历史踩坑），var() 直挂才生效。
                 选完模型焦点留在触发器上（Radix/Chromium 下鼠标选中也会命中 :focus-visible），
                 一律去粗焦点环只保留细边——细边即焦点指示，键盘操作同样可见 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-36 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
+              className="h-9 w-36 border-brand-line bg-[var(--color-context-usage-bg)] text-xs shadow-none hover:border-brand focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
             >
               {/* 触发器只显示配置名；底座模型放在选项第二行，不再拼接撑满一行 */}
               <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'}>
