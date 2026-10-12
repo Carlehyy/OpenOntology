@@ -1574,8 +1574,11 @@ export default function SuperAssistantPage() {
               </div>
             )}
             {/* 对话问题导航竖条（对齐 zcode Turn Navigator）：左缘按提问轮次刻度，
-                hover 预览、点击定位；刻度不足 2 根或聊天区过窄时组件自身不渲染 */}
-            {hasMessages && (
+                hover 预览、点击定位；刻度不足 2 根或聊天区过窄时组件自身不渲染。
+                挂载条件与滚动容器严格同帧（!loading && hasMessages）：竖条挂载时
+                初测读 scrollHostRef，若早于滚动容器挂载（消息先于 loading 收口返回）
+                会读到 null 且此后无重测时机，竖条将永不渲染 */}
+            {!loading && hasMessages && (
               <TurnRail items={turnRailItems} scrollHostRef={scrollHostRef} onJump={jumpToTurn} />
             )}
             {/* 离底较远时的兜底入口：一键回到最新消息（与贴底判定同一 96px 阈值） */}

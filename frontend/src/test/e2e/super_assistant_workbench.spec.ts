@@ -3167,3 +3167,38 @@ test('对话问题导航竖条：单轮会话与窄聊天区不渲染', async ({
   await expect(page.getByText('第 30 条消息').first()).toBeVisible()
   await expect(page.getByTestId('super-assistant-turn-rail')).toHaveCount(0)
 })
+
+test('对话问题导航竖条：配置接口慢于消息返回（loading 后收口）时仍渲染', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await seedAuth(page)
+  await mockApis(page)
+  const longMessages = Array.from({ length: 30 }, (_, index) => ({
+    id: `m-long-${index}`, conversation_id: 'c-long',
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `第 ${index + 1} 条消息：${'内容'.repeat(30)}`,
+    status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9),
+  }))
+  await page.route('**/api/v2/super-assistant/conversations', route => {
+    if (route.request().method() === 'GET') {
+      return json(route, [{
+        id: 'c-long', title: '长会话', model_config_id: 'model-1',
+        status: 'active', created_at: at(0, 9), updated_at: at(0, 9),
+      }])
+    }
+    return route.fallback()
+  })
+  await page.route('**/api/v2/super-assistant/conversations/c-long/messages', route => json(route, longMessages))
+  // 消息接口即时返回，而页面初始 loading 等待的模型配置接口延迟返回：
+  // 复现「消息先到、loading 后收口」的时序——竖条挂载必须与滚动容器同帧，
+  // 否则初测读到空的 scrollHostRef 后将永不渲染
+  await page.route('**/api/v1/models', async route => {
+    await page.waitForTimeout(900)
+    await route.fallback()
+  })
+
+  await page.goto('/#/super-assistant?conversation=c-long')
+  await expect(page.locator('main div.h-full.overflow-y-auto').getByText('第 30 条消息')).toBeVisible()
+  const rail = page.getByTestId('super-assistant-turn-rail')
+  await expect(rail).toBeVisible()
+  await expect(rail.locator('[data-turn-rail-item]')).toHaveCount(15)
+})
