@@ -1794,6 +1794,14 @@ test('会话模型选择器为 ReUI Select，选择后 PATCH 持久化', async (
   const trigger = page.getByRole('combobox', { name: '会话模型' })
   await expect(trigger).toHaveCSS('background-color', 'rgba(240, 253, 250, 0.8)')
 
+  // 取消选择（Escape）后 Radix 把焦点程序化还给触发器并命中 :focus-visible：
+  // 只允许 1px brand 细边（#059669）作焦点指示，基础组件的 2px 粗环必须被 ring-0 压掉
+  //（ring-0 的 box-shadow 是 0 宽多段阴影而非字面量 none，故断言"不含 2px 环"）
+  await trigger.click()
+  await page.keyboard.press('Escape')
+  await expect(trigger).not.toHaveCSS('box-shadow', /2px/)
+  await expect(trigger).toHaveCSS('border-color', 'rgb(5, 150, 105)')
+
   // c-today 当前为 model-1（DeepSeek）；Radix Select 选中相同值不触发 onValueChange，切到 Qwen
   await trigger.click()
   await page.getByRole('option', { name: /Qwen/ }).click()
