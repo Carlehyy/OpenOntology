@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 
 import { superAssistantApi, type VoiceStatus } from '@/api/superAssistant'
 import { useAuthStore } from '@/stores/authStore'
+import { buildHttpsEntranceHref, httpsUpgradeTargetFromBuild } from '@/lib/httpsUpgrade'
 import { voiceCaptureSupported } from '@/lib/voice/recorder'
 import {
   VOICE_LANGUAGES,
@@ -26,6 +27,16 @@ export default function VoiceTab() {
   const setLanguage = useVoicePreferencesStore(state => state.setLanguage)
 
   const [supported] = useState(voiceCaptureSupported)
+  // 烧入了 HTTPS 入口时，降级提示附一键前往链接（当前页面深链原样带过去）；
+  // CI 生产构建之外（本地开发 / E2E 的 dev server）通常未烧入，保持纯文字说明。
+  const [httpsEntrance] = useState(() => {
+    const target = httpsUpgradeTargetFromBuild()
+    if (!target) return null
+    return {
+      href: buildHttpsEntranceHref(target, window.location),
+      label: `${target.host}:${target.port}`,
+    }
+  })
   const [status, setStatus] = useState<VoiceStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const isAdmin = useAuthStore(state => state.user?.role === 'admin')
@@ -124,6 +135,15 @@ export default function VoiceTab() {
           <div className="min-w-0 text-[11px] leading-5 text-[var(--color-text-secondary)]">
             <p className="font-medium text-[var(--color-text-primary)]">当前环境无法使用麦克风</p>
             <p className="mt-1">浏览器仅在安全上下文（HTTPS 或 localhost）开放麦克风 API。当前页面通过普通 HTTP 访问，语音按钮已隐藏；用 localhost 打开或为平台配置 HTTPS 后即可使用。</p>
+            {httpsEntrance && (
+              <a
+                href={httpsEntrance.href}
+                data-testid="voice-https-entrance-link"
+                className="mt-2 inline-flex h-7 items-center rounded-lg bg-brand px-2.5 text-[11px] font-medium text-white transition-all hover:bg-brand-deep active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+              >
+                前往 HTTPS 入口（{httpsEntrance.label}）使用语音
+              </a>
+            )}
           </div>
         </section>
       )}

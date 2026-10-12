@@ -31,7 +31,11 @@ diff、未知路径、rename 源路径，以及改到分类器或本工作流时
 4. 执行文档链接、目录索引与仓库卫生守卫；
 5. 执行前端单元测试、feature boundary、E2E 分类、lint、生产构建和离线
    Playwright 回归；通过门禁的 `frontend/dist` 作为本次部署的静态产物
-   上传；
+   上传。生产构建同时烧入 HTTPS 入口（`VITE_HTTPS_UPGRADE_HOST/PORT`，
+   取自 `PROD_PUBLIC_TLS_IP` / `PROD_PUBLIC_HTTPS_PORT` 变量，缺省
+   64.83.14.139:8443）：SPA 在同主机普通 HTTP 页面启动时自动跳转到该
+   入口，解锁麦克风等浏览器安全上下文能力；localhost、局域网 IP 与
+   E2E 环境不受影响；直调 HTTP API 的机器客户端不经过 SPA，行为不变；
 6. 并行验证生产镜像可构建；前端镜像为预构建形态（`Dockerfile.prod` 直接
    打包上一步的 `dist`），服务器端不再执行 npm/vite 构建——本地手动构建
    前端镜像前需先在 `frontend/` 下执行 `npm ci && npm run build`；
