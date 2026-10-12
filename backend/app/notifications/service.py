@@ -17,7 +17,7 @@ import json
 import os
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiofiles
@@ -95,12 +95,16 @@ def create_message_ex(
     source_type: str = SOURCE_TYPE_MANUAL,
     event_id: str | None = None,
     ingest_key_id: str | None = None,
+    channel_ids: list[str] | None = None,
     user=None,
 ) -> tuple[NotificationMessage, bool]:
     """创建一条通知消息，返回 (消息, 是否新建)。
 
     (source_system, event_id) 幂等：同键重放返回既有消息且 created=False；
     并发撞唯一约束时回滚重查，保证“重放无副作用、并发不 500”。
+
+    channel_ids：指定投递范围（仅这些渠道生成投递单）。None = 全部启用渠道
+    （外部入口与默认语义）；给定值须全部存在且启用，否则 4xx 且消息不落库。
     """
     _validate_payload(title=title, body_md=body_md, priority=priority, source_type=source_type)
     normalized_source = (source_system or "platform").strip()[:80] or "platform"
@@ -110,6 +114,11 @@ def create_message_ex(
         existing = _find_by_source_event(db, normalized_source, normalized_event)
         if existing is not None:
             return existing, False
+
+    # 指定渠道须在消息落库前校验通过：任一不存在/停用即拒绝整次创建
+    fanout_channels = (
+        None if channel_ids is None else _resolve_fanout_channels(db, channel_ids)
+    )
 
     message = NotificationMessage(
         event_id=normalized_event,
@@ -127,7 +136,7 @@ def create_message_ex(
         # 二次提交的窗口里进程被杀会让消息入库而投递单永久丢失，
         # 且幂等重放走 existing 提前返回，无法自愈。
         db.flush()
-        fan_out_deliveries(db, message)
+        fan_out_deliveries(db, message, channels=fanout_channels)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -319,12 +328,48 @@ def mark_all_read(db: Session, *, user_id: str) -> int:
 # ── 读侧：列表 / 汇总 ─────────────────────────────────────────
 
 
-def fan_out_deliveries(db: Session, message: NotificationMessage) -> int:
-    """消息新建即为所有启用渠道生成 pending 投递单（幂等：唯一约束跳过既有对）。
+def _resolve_fanout_channels(
+    db: Session, channel_ids: list[str]
+) -> list[NotificationChannel]:
+    """校验指定的投递渠道集：去重后须全部存在且启用，否则 4xx（消息不落库）。"""
+    unique_ids = list(dict.fromkeys(channel_ids))
+    if not unique_ids:
+        raise HTTPException(422, "channelIds 不能为空")
+    rows = (
+        db.query(NotificationChannel)
+        .filter(NotificationChannel.id.in_(unique_ids))
+        .all()
+    )
+    by_id = {row.id: row for row in rows}
+    missing = [cid for cid in unique_ids if cid not in by_id]
+    if missing:
+        raise HTTPException(404, f"渠道不存在：{missing[0]}")
+    disabled = [cid for cid in unique_ids if not by_id[cid].enabled]
+    if disabled:
+        name = by_id[disabled[0]].name
+        raise HTTPException(422, f"渠道「{name}」已停用，无法投递")
+    # 保持调用方给定顺序（与去重后的 unique_ids 一致）
+    return [by_id[cid] for cid in unique_ids]
 
+
+def fan_out_deliveries(
+    db: Session,
+    message: NotificationMessage,
+    *,
+    channels: list[NotificationChannel] | None = None,
+) -> int:
+    """消息新建即为启用渠道生成 pending 投递单（幂等：唯一约束跳过既有对）。
+
+    channels=None 时取全部启用渠道；显式传入时只向给定渠道扇出
+    （调用方 create_message_ex 已完成存在性/启用校验）。
     与 create_message_ex 同事务提交：保证“消息入库 ⇄ 投递单生成”原子。
     """
-    channels = db.query(NotificationChannel).filter(NotificationChannel.enabled.is_(True)).all()
+    if channels is None:
+        channels = (
+            db.query(NotificationChannel)
+            .filter(NotificationChannel.enabled.is_(True))
+            .all()
+        )
     existing = {
         row.channel_id
         for row in db.query(NotificationDelivery.channel_id).filter(
@@ -355,7 +400,8 @@ def list_messages(
         .outerjoin(NotificationMessageState, _state_join_condition(user_id))
     )
     if tab == "all":
-        query = query.filter(_archived_flag().is_(False))
+        # 全部 = 真全量：归档消息也可见（与「已归档」视图并集）；未读/已标记不含已归档
+        pass
     elif tab == "unread":
         query = query.filter(_archived_flag().is_(False), _read_flag().is_(False))
     elif tab == "starred":
@@ -412,12 +458,125 @@ def notification_summary(db: Session, *, user_id: str) -> dict[str, int]:
     unread = base.filter(_archived_flag().is_(False), _read_flag().is_(False)).scalar() or 0
     starred = base.filter(_archived_flag().is_(False), _starred_flag().is_(True)).scalar() or 0
     archived = base.filter(_archived_flag().is_(True)).scalar() or 0
-    total = base.filter(_archived_flag().is_(False)).scalar() or 0
+    # 与「全部消息」视图同口径：真全量（含已归档）
+    total = base.scalar() or 0
     return {
         "unreadCount": unread,
         "starredCount": starred,
         "archivedCount": archived,
         "totalCount": total,
+    }
+
+
+def notification_stats(db: Session, *, user_id: str, days: int = 30) -> dict[str, Any]:
+    """消息统计（只读聚合，admin）：概览 / 入站趋势 / 来源分布 / 渠道投递结果。
+
+    天界按 UTC 日切（与列表时间戳同口径）；趋势补齐缺失日为 0。
+    days 仅作用于入站趋势；总数/未读/成功率/来源/渠道均为全量口径。
+    转发成功率只统计终态（sent+failed），pending 不计入分母。
+    """
+    days = max(1, min(days, 90))
+    now = _now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since = today_start - timedelta(days=days - 1)
+
+    total = db.query(func.count(NotificationMessage.id)).scalar() or 0
+    unread = (
+        db.query(func.count(NotificationMessage.id))
+        .outerjoin(NotificationMessageState, _state_join_condition(user_id))
+        .filter(_archived_flag().is_(False), _read_flag().is_(False))
+        .scalar()
+        or 0
+    )
+    today_inbound = (
+        db.query(func.count(NotificationMessage.id))
+        .filter(NotificationMessage.created_at >= today_start)
+        .scalar()
+        or 0
+    )
+
+    sent_count = (
+        db.query(func.count(NotificationDelivery.id))
+        .filter(NotificationDelivery.status == "sent")
+        .scalar()
+        or 0
+    )
+    failed_count = (
+        db.query(func.count(NotificationDelivery.id))
+        .filter(NotificationDelivery.status == "failed")
+        .scalar()
+        or 0
+    )
+    finished = sent_count + failed_count
+    success_rate = round(sent_count / finished, 4) if finished else None
+
+    # 入站趋势：按 UTC 日聚合，补零
+    trend_rows = (
+        db.query(
+            func.date(NotificationMessage.created_at).label("day"),
+            func.count(NotificationMessage.id),
+        )
+        .filter(NotificationMessage.created_at >= since)
+        .group_by("day")
+        .all()
+    )
+    trend_map = {str(day): count for day, count in trend_rows}
+    trend = []
+    for offset in range(days):
+        day = (since + timedelta(days=offset)).date()
+        trend.append({"date": day.isoformat(), "count": trend_map.get(day.isoformat(), 0)})
+
+    # 来源分布：全量按来源计数（近 N 天趋势外的历史一并呈现），Top 10
+    source_rows = (
+        db.query(
+            NotificationMessage.source_system,
+            func.count(NotificationMessage.id),
+        )
+        .group_by(NotificationMessage.source_system)
+        .order_by(func.count(NotificationMessage.id).desc())
+        .limit(10)
+        .all()
+    )
+    sources = [{"source": name, "count": count} for name, count in source_rows]
+
+    # 渠道投递结果：按渠道聚合终态
+    channel_rows = (
+        db.query(
+            NotificationChannel.id,
+            NotificationChannel.name,
+            NotificationDelivery.status,
+            func.count(NotificationDelivery.id),
+        )
+        .join(
+            NotificationDelivery,
+            NotificationDelivery.channel_id == NotificationChannel.id,
+        )
+        .group_by(
+            NotificationChannel.id,
+            NotificationChannel.name,
+            NotificationDelivery.status,
+        )
+        .all()
+    )
+    channels_map: dict[str, dict[str, Any]] = {}
+    for channel_id, name, status, count in channel_rows:
+        entry = channels_map.setdefault(channel_id, {"channelId": channel_id, "name": name, "sent": 0, "failed": 0, "pending": 0})
+        # 约束层尚无 skipped 写入方；若未来引入，此处需显式聚合而非并入 pending
+        entry[status if status in ("sent", "failed", "pending") else "pending"] = count
+    channel_stats = sorted(
+        channels_map.values(), key=lambda c: -(c["sent"] + c["failed"] + c["pending"])
+    )
+
+    return {
+        "overview": {
+            "totalCount": total,
+            "unreadCount": unread,
+            "todayInbound": today_inbound,
+            "forwardSuccessRate": success_rate,
+        },
+        "trend": trend,
+        "sources": sources,
+        "channels": channel_stats,
     }
 
 
