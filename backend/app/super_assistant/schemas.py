@@ -741,6 +741,52 @@ class AssistantToolEnabledUpdate(BaseModel):
     enabled: bool
 
 
+class QuickInputCreate(BaseModel):
+    """新建快捷内容：标题+内容详情；sort_order 由服务端追加到末尾。"""
+
+    title: str = Field(min_length=1, max_length=100)
+    content: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("title", "content", mode="before")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+
+class QuickInputUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=100)
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+
+    @field_validator("title", "content", mode="before")
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+
+class QuickInputReorder(BaseModel):
+    """全量顺序重排：ids 为该用户快捷内容的目标顺序（越靠前优先级越高）。
+
+    宽松口径：不属于该用户的 id 静默忽略（并发删除/越权不打挂重排），
+    未列出的条目保持原 sort_order，列表排序兜底 (sort_order, created_at)。
+    不设长度上限：前端恒发全量 ids，上限会让多条用户永久无法排序。
+    """
+
+    ids: list[str] = Field(min_length=1)
+
+
+class QuickInputOut(ORMModel):
+    id: str
+    title: str
+    content: str
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
 ScheduleKind = Literal["once", "daily", "weekly"]
 ScheduledRunStatus = Literal["queued", "running", "completed", "failed", "skipped"]
 

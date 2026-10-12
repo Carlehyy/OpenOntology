@@ -176,6 +176,10 @@ interface MockOptions {
   chatDelayMs?: number
   /** 消息通知列表启用游标分页（每页 2 条）：验证「加载更多」链路 */
   notificationsPagination?: boolean
+  /** 全部消息置为已读：制造「未读空态但站内有历史消息」的引导场景 */
+  notificationsAllRead?: boolean
+  /** 完全无消息：制造中转站冷启动空态 */
+  notificationsNone?: boolean
   /** GET /super-assistant/multica/config 的返回（默认未配置态） */
   multicaConfig?: Record<string, unknown>
   /** 知识图谱「本体文档」目录：true 时提供发布文档镜像 + 权威清单桩 */
@@ -224,7 +228,13 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   // 零污染——同 worker 顺序执行下直接改 conversationsFixture 会把改名/
   // 归档泄漏给后续用例的 aria-label 断言（retries=1 的全新 worker 掩盖它）
   const conversations = conversationsFixture.map(item => ({ ...item }))
-  const notificationsState = notificationsFixture.map(item => ({ ...item }))
+  const notificationsState = options.notificationsNone
+    ? []
+    : notificationsFixture.map(item => ({
+        ...item,
+        // 可选变体：全部置为已读，只留星标/归档维度的差异（未读空态引导场景）
+        ...(options.notificationsAllRead ? { isRead: true, readAt: item.readAt ?? at(0, 10) } : {}),
+      }))
   if (options.notificationsPagination) {
     notificationsState.push(
       { id: 'n-4', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '分页样例一', priority: 'normal', isRead: true, isStarred: false, isArchived: false, readAt: at(3, 8), starredAt: null, archivedAt: null, createdAt: at(3, 8), updatedAt: at(3, 8), bodyPreview: '第 4 条', attachmentCount: 0 },
@@ -700,6 +710,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       return json(route, [
         { id: 'nk-1', name: 'billing', keyPrefix: 'ob_notif_abc123', enabled: true,
           allowedSourceSystem: null, createdAt: at(1, 8), lastUsedAt: at(0, 9), revokedAt: null },
+        { id: 'nk-0', name: 'legacy-portal', keyPrefix: 'ob_notif_old', enabled: false,
+          allowedSourceSystem: null, createdAt: at(3, 8), lastUsedAt: at(2, 8), revokedAt: at(2, 9) },
       ])
     }
     const notifKeyMatch = path.match(/^\/api\/v2\/notifications\/ingest-keys\/([^/]+)$/)
@@ -1167,7 +1179,7 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('消息通知')
 
-  // 分区导航三区：消息列表 / 发送消息 / 渠道配置（在线测试已并入配置）
+  // 分区导航四区：消息列表 / 发送消息 / 渠道配置 / 消息统计
   const navKeys = await dialog.locator('[data-notifications-nav]').evaluateAll(
     els => els.map(el => (el as HTMLElement).dataset.notificationsNav),
   )
@@ -1269,10 +1281,13 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect.poll(() => mocks.notifForwards.length).toBe(1)
   await expect(page.getByText('已转发到 1 个渠道')).toBeVisible()
 
-  // 渠道配置分区：密钥旁内嵌「入口测试」（真实投递全链路）
+  // 渠道配置分区：密钥旁内嵌「入口测试」（真实投递全链路，二次确认后才发请求）
   await page.locator('[data-notifications-nav="config"]').click()
   await expect(page.locator('[data-notifications-key-item="nk-1"]')).toBeVisible()
   await page.locator('[data-notifications-key-test]').first().click()
+  const keyTestConfirm = page.getByRole('dialog').filter({ hasText: '发起入口链路测试' })
+  await expect(keyTestConfirm).toBeVisible()
+  await keyTestConfirm.getByRole('button', { name: '开始测试' }).click()
   await expect.poll(() => mocks.notifKeyTests.length).toBe(1)
   await expect(page.getByText('出口即时投递：成功 1 条')).toBeVisible()
 })
@@ -1305,22 +1320,87 @@ test('消息通知：游标分页——首页两条，加载更多补齐后续',
   await expect(page.locator('[data-notifications-load-more]')).toHaveCount(0)
 })
 
+test('消息通知：未读空态——引导查看全部历史消息，一键切到「全部」', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page, { notificationsAllRead: true })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+
+  // 默认未读 tab 为空：空态标题 + 「查看全部 N 条」引导（N=真全量含归档）
+  const emptyState = page.locator('[data-notifications-list-empty="unread"]')
+  await expect(emptyState).toBeVisible()
+  await expect(emptyState).toContainText('没有未读消息')
+  await expect(emptyState).toContainText('查看全部 3 条消息')
+  // 「全部已读」在无未读时禁用（图标化按钮仍可定位）
+  await expect(page.locator('[data-notifications-read-all]')).toBeDisabled()
+
+  // 一键引导：切到「全部」并可见历史消息
+  await page.locator('[data-notifications-empty-all]').click()
+  await expect(page.locator('[data-notifications-tab="all"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
+
+  // 已标记 tab 有内容（n-2 已读但已标记仍可见）；已归档 tab 显示归档项 n-3
+  // （已标记/已归档的空态文案语义由 notificationsFormat 单测覆盖）
+  await page.locator('[data-notifications-tab="starred"]').click()
+  await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
+  await page.locator('[data-notifications-tab="archived"]').click()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
+})
+
+test('消息通知：冷启动空态——站内无任何消息时引导去发送', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page, { notificationsNone: true })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+
+  // 未读空态：无历史可引，只说明现状（不出现「查看全部」按钮）
+  const unreadEmpty = page.locator('[data-notifications-list-empty="unread"]')
+  await expect(unreadEmpty).toBeVisible()
+  await expect(unreadEmpty).toContainText('没有未读消息')
+  await expect(page.locator('[data-notifications-empty-all]')).toHaveCount(0)
+
+  // 「全部」空态 = 中转站冷启动：引导去发送，直达发送分区
+  await page.locator('[data-notifications-tab="all"]').click()
+  const allEmpty = page.locator('[data-notifications-list-empty="all"]')
+  await expect(allEmpty).toBeVisible()
+  await expect(allEmpty).toContainText('还没有消息')
+  await page.locator('[data-notifications-empty-compose]').click()
+  await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
+})
+
 test('消息通知：接入密钥——签发明文仅一次展示、列表与吊销', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
-  // 布局契约（分区导航）：渠道配置分区承载入口/出口两区块
+  // 布局契约：渠道配置按「消息入口 / 消息出口」两大分组组织（入口=投递接入，出口=发件邮箱+转发渠道）
   await page.locator('[data-notifications-nav="config"]').click()
+  await expect(page.locator('[data-notifications-group="inbound"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-group="outbound"]')).toBeVisible()
   await expect(page.locator('[data-notifications-keys-panel]')).toBeVisible()
   await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
 
-  // 既有密钥列表可见（不携带明文）
+  // 有效密钥平铺可见（不携带明文）；已吊销密钥默认折叠留痕
   await expect(page.locator('[data-notifications-key-item="nk-1"]')).toBeVisible()
   await expect(page.locator('[data-notifications-key-item="nk-1"]')).toContainText('billing')
+  await expect(page.locator('[data-notifications-revoked-keys]')).toContainText('已吊销密钥（1）')
+  await expect(page.locator('[data-notifications-key-item="nk-0"]')).toBeHidden()
+  await page.locator('[data-notifications-revoked-keys] summary').click()
+  await expect(page.locator('[data-notifications-key-item="nk-0"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-key-item="nk-0"]')).toContainText('legacy-portal')
 
-  // 签发：明文一次性展示并可复制提示
+  // 签发表单默认收起：展开后填写
+  await expect(page.locator('[data-notifications-key-name]')).toBeHidden()
+  await page.locator('[data-notifications-key-mint-toggle]').click()
+  await expect(page.locator('[data-notifications-key-name]')).toBeVisible()
   await page.locator('[data-notifications-key-name]').fill('crm')
   await page.locator('[data-notifications-key-mint]').click()
   await expect(page.locator('[data-notifications-key-plaintext]')).toBeVisible()
@@ -1461,6 +1541,14 @@ test('消息通知（窄屏390px）：列表⇄详情单栏切换与管理态全
   await page.locator('[data-notifications-back-detail]').click()
   await expect(page.locator('[data-notifications-list]')).toBeVisible()
   await expect(page.locator('[data-notifications-detail]')).toBeHidden()
+
+  // Esc 分层回退：窄屏详情态按 Esc 先回列表，而不是关掉整个弹窗
+  // （n-1 首次查看详情时已被「GET 即已读」从未读列表移除，这里用仍未读的 n-2）
+  await page.locator('[data-notifications-item="n-2"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-notifications-list]')).toBeVisible()
+  await expect(page.getByRole('dialog')).toBeVisible()
 
   // 分区导航在窄屏同样可达：切渠道配置再回消息列表
   await page.locator('[data-notifications-nav="config"]').click()

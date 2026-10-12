@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import ReactECharts from 'echarts-for-react'
+import type { EChartsOption } from 'echarts'
 import {
-  Archive, ArchiveRestore, ArrowLeft, BarChart3, Bell, ChevronDown, Copy, FileText, Forward, KeyRound, Loader2,
+  Archive, ArchiveRestore, ArrowLeft, BarChart3, Bell, ChevronDown, Copy, FileText, Forward, Inbox, KeyRound, Loader2,
   Mail, MailOpen, MessageSquare, Paperclip, Pencil, Plug, Plus, Send, Star, Trash2, Users, Webhook, Zap,
 } from 'lucide-react'
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { toast } from 'sonner'
 
 import {
@@ -20,8 +22,13 @@ import {
   type NotificationTab,
 } from '@/api/notifications'
 import { absoluteFileUrl } from '@/api/fileAssets'
+import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  baseChartOption, categoryAxisBase, valueAxisBase,
+  CHART_TEAL, CHART_TEXT_STRONG,
+} from '@/lib/echartsTheme'
 import { formatDateTime } from '@/utils/datetime'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { useAuthStore } from '@/stores/authStore'
@@ -30,15 +37,15 @@ import { DialogShell } from './AssistantConfiguration'
 import { assistantMarkdownComponents } from './AssistantConversation'
 import { errorText } from './assistantPanelUtils'
 import NotificationMedia from './NotificationMedia'
-import { formatFileSize, priorityStyle, sourceTypeLabel } from './notificationsFormat'
+import { formatFileSize, listEmptyCopy, priorityStyle, sourceTypeLabel, stripMarkdownPreview } from './notificationsFormat'
 
 /**
- * 布局参考个人资料弹窗：左侧分区导航（消息列表 / 发送消息 / 渠道配置）+ 右侧内容。
- * - 消息列表：筛选 tab（未读默认 → 已标记 → 已归档 → 全部=真全量）+ 列表/详情两栏；
- *   窄屏由选中态驱动单栏切换。
- * - 发送消息：独立分区——向所选启用渠道发布通知（默认全选），消息同时进入站内列表。
- * - 渠道配置：入口（投递密钥 + 接口调用示例）与出口（发件邮箱 + 转发渠道）两个区块，
- *   每个密钥/渠道旁内嵌连通测试。
+ * 消息中转站弹窗：左侧分区导航（消息列表 / 发送消息 / 渠道配置 / 消息统计）+ 右侧内容。
+ * - 消息列表：列表列自带筛选头（未读默认 → 已标记 → 已归档 → 全部=真全量）+ 图标化「全部已读」，
+ *   右区只有「列表 / 详情」两块；窄屏由选中态驱动单栏切换（Esc 先回列表再关弹窗）。
+ * - 渠道配置：按「消息入口（外部 → 平台）」「消息出口（平台 → 外部）」两大分组组织——
+ *   入口=投递接入（端点/密钥，签发表单收起、已吊销密钥折叠），出口=发件邮箱 + 转发渠道。
+ * - 消息统计：ECharts（平台唯一图表标准，svg 渲染器），渠道口径与测试直发在卡片上明示。
  */
 type NavSection = 'messages' | 'compose' | 'config' | 'stats'
 
@@ -99,8 +106,8 @@ async function downloadAttachment(messageId: string, attachment: NotificationAtt
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
-  // 同步 click 已启动下载；revoke 延后一拍避免个别浏览器截断流
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+  // 同步 click 已启动下载；revoke 需给慢浏览器/大附件留出建流时间（过早回收会截断）
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000)
 }
 
 function ingestEndpoint(): string {
@@ -146,6 +153,10 @@ export default function NotificationsDialog({
   const [deletingChannel, setDeletingChannel] = useState<NotificationChannel | null>(null)
   const [testingChannelId, setTestingChannelId] = useState<string | null>(null)
   const [testingKeyId, setTestingKeyId] = useState<string | null>(null)
+  // 链路测试二次确认（真实投递到所有启用渠道，误触代价高）
+  const [confirmingKeyTest, setConfirmingKeyTest] = useState<NotificationIngestKey | null>(null)
+  // 签发表单收起态：默认收起，卡头按钮展开（降低入口卡的常态噪音）
+  const [mintFormOpen, setMintFormOpen] = useState(false)
   // 手动转发面板
   const [forwardOpen, setForwardOpen] = useState(false)
   const [forwardChannelIds, setForwardChannelIds] = useState<Set<string>>(new Set())
@@ -178,7 +189,9 @@ export default function NotificationsDialog({
     queryKey: ['notifications', 'summary'],
     queryFn: notificationsApi.summary,
     enabled: open,
-    refetchInterval: 15_000,
+    // 15s 轮询由工作台侧栏那路常驻 observer 负责（同一 queryKey 会合并通知），
+    // 弹窗内不再挂第二个 interval，避免开启期间轮询频率翻倍
+    refetchInterval: false,
   })
 
   const list = useInfiniteQuery({
@@ -187,12 +200,18 @@ export default function NotificationsDialog({
     initialPageParam: null as string | null,
     queryFn: ({ pageParam }) => notificationsApi.list({ tab, cursor: pageParam, limit: 30 }),
     getNextPageParam: page => page.nextCursor || undefined,
+    // 切 tab 期间保留上一屏列表，避免闪一帧空态
+    placeholderData: keepPreviousData,
   })
 
   const detail = useQuery({
     queryKey: ['notifications', 'detail', selectedId],
     enabled: open && !!selectedId,
     queryFn: () => notificationsApi.get(selectedId as string),
+    // 服务端「GET 详情即已读」；短暂 stale 期内复用缓存：
+    // ① 避免刚「标为未读」的消息因切 tab 重挂载被再次自动已读；
+    // ② 刚发送的消息复用 create 响应（本身即完整 detail 形状），不会立刻 GET 被置读
+    staleTime: 30_000,
   })
 
   // 渠道数据在三个分区都用（配置/测试/消息分区的转发面板）：弹窗打开即拉取
@@ -244,6 +263,8 @@ export default function NotificationsDialog({
     if (!open) {
       setNav('messages')
       setMintedKey(null)
+      setMintFormOpen(false)
+      setConfirmingKeyTest(null)
       setKeyName('')
       setKeyScope('')
       setChannelName('')
@@ -269,6 +290,14 @@ export default function NotificationsDialog({
     void queryClient.invalidateQueries({ queryKey: ['notifications', 'page'] })
     void queryClient.invalidateQueries({ queryKey: ['notifications', 'summary'] })
   }, [detail.data?.id, queryClient])
+
+  // 转发面板是消息分区的临时态：离开该分区即收起，避免 Esc/返回语义被不可见面板吃掉
+  useEffect(() => {
+    if (nav !== 'messages') {
+      setForwardOpen(false)
+      setForwardChannelIds(new Set())
+    }
+  }, [nav])
 
   const stateMutation = useMutation({
     mutationFn: ({ id, fields }: { id: string; fields: { isRead?: boolean; isStarred?: boolean; isArchived?: boolean } }) =>
@@ -482,12 +511,46 @@ export default function NotificationsDialog({
   const selected = detail.data ?? null
   const unreadCount = summary.data?.unreadCount ?? 0
 
+  // 列表头空间有限：计数徽标只保留「未读」（与侧栏红点同源同义），其余 tab 靠列表内容自证
   const tabCount = (key: NotificationTab): number | null => {
     if (key === 'unread') return summary.data?.unreadCount ?? null
-    if (key === 'starred') return summary.data?.starredCount ?? null
-    if (key === 'archived') return summary.data?.archivedCount ?? null
     return null
   }
+
+  const activeIngestKeys = (ingestKeys.data ?? []).filter(key => key.enabled)
+  const revokedIngestKeys = (ingestKeys.data ?? []).filter(key => !key.enabled)
+
+  // 入站趋势（ECharts 平台标准；svg 渲染器保证容器内渲染出 <svg> 供 e2e 锚定）
+  const trendOption = useMemo<EChartsOption | null>(() => {
+    const trend = stats.data?.trend ?? []
+    if (trend.length === 0) return null
+    const base = baseChartOption()
+    return {
+      ...base,
+      aria: { enabled: true, description: '每日入站消息量柱状趋势' },
+      grid: { left: 4, right: 8, top: 16, bottom: 2, containLabel: true },
+      tooltip: {
+        ...base.tooltip,
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        textStyle: { color: CHART_TEXT_STRONG, fontSize: 12 },
+      },
+      xAxis: {
+        ...categoryAxisBase,
+        type: 'category',
+        data: trend.map(item => item.date.slice(5)),
+      },
+      yAxis: { ...valueAxisBase, type: 'value', minInterval: 1 },
+      series: [{
+        name: '入站',
+        type: 'bar',
+        barMaxWidth: 18,
+        itemStyle: { color: CHART_TEAL, borderRadius: [3, 3, 0, 0] },
+        emphasis: { focus: 'series' },
+        data: trend.map(item => item.count),
+      }],
+    }
+  }, [stats.data?.trend])
 
   const handleDownload = async (messageId: string, attachment: NotificationAttachment) => {
     try {
@@ -516,10 +579,10 @@ export default function NotificationsDialog({
     }
     // 勾选集与当前启用渠道求交集：同会话内渠道被停用/删除后，失效 id 不再随请求发出
     const enabledIds = new Set(enabledChannels.map(channel => channel.id))
-    const selected = composeChannelIds
+    const selectedIds = composeChannelIds
       ? [...composeChannelIds].filter(id => enabledIds.has(id))
       : [...enabledIds]
-    if (selected.length === 0) {
+    if (selectedIds.length === 0) {
       toast.error('至少选择一个投递渠道')
       return
     }
@@ -528,7 +591,7 @@ export default function NotificationsDialog({
       body: composeBody,
       priority: composePriority,
       // 勾选集恰为全量时省略字段：走后端缺省语义（无渠道数上限、渠道新增即覆盖）
-      ...(selected.length === enabledIds.size ? {} : { channelIds: selected }),
+      ...(selectedIds.length === enabledIds.size ? {} : { channelIds: selectedIds }),
     })
   }
 
@@ -548,6 +611,45 @@ export default function NotificationsDialog({
     })
   }
 
+  // Esc 分层回退：内层临时态先关（转发面板/渠道表单/签发表单），窄屏详情态先回列表；
+  // 其余交给 Radix 关闭弹窗。密钥明文不参与回退——「仅此一次」，误触 Esc 不应吞掉它。
+  const handleDialogEscape = (event: KeyboardEvent) => {
+    if (nav === 'messages' && forwardOpen) {
+      event.preventDefault()
+      setForwardOpen(false)
+      setForwardChannelIds(new Set())
+      return
+    }
+    if (nav === 'config' && channelFormStage !== 'idle') {
+      event.preventDefault()
+      resetChannelForm()
+      return
+    }
+    if (nav === 'config' && mintFormOpen) {
+      event.preventDefault()
+      setMintFormOpen(false)
+      return
+    }
+    if (nav === 'messages' && selectedId && window.matchMedia('(max-width: 767px)').matches) {
+      event.preventDefault()
+      setSelectedId(null)
+    }
+  }
+
+  // 分区导航 tablist 的方向键漫游（WAI-ARIA tabs 模式；窄屏横排/宽屏竖排都支持四向 + Home/End）
+  const navItemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const handleNavKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next: number | null = null
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = (index + 1) % NAV_ITEMS.length
+    else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') next = (index - 1 + NAV_ITEMS.length) % NAV_ITEMS.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = NAV_ITEMS.length - 1
+    if (next === null) return
+    event.preventDefault()
+    navItemRefs.current[next]?.focus()
+    setNav(NAV_ITEMS[next].key)
+  }
+
   if (!open) return null
 
   return (
@@ -558,17 +660,17 @@ export default function NotificationsDialog({
         size="wide"
         icon={<Bell size={18} />}
         onClose={onClose}
+        onEscapeKeyDown={handleDialogEscape}
         contentClassName="h-[min(85dvh,46rem)]"
       >
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[9.5rem_minmax(0,1fr)]">
-          {/* 左侧分区导航（参考个人资料弹窗） */}
+          {/* 左侧分区导航：宽屏竖排；窄屏横排单行可横滚（避免纵向按钮列吞掉首屏） */}
           <nav
             role="tablist"
             aria-label="消息通知分区"
-            aria-orientation="vertical"
-            className="flex min-h-0 flex-col gap-1 border-b border-[var(--color-border)] p-2 md:border-b-0 md:border-r"
+            className="scrollbar-none flex min-h-0 shrink-0 flex-row gap-1 overflow-x-auto border-b border-[var(--color-border)] p-2 md:flex-col md:overflow-x-visible md:border-b-0 md:border-r"
           >
-            {NAV_ITEMS.map(({ key, label, icon: Icon }) => {
+            {NAV_ITEMS.map(({ key, label, icon: Icon }, index) => {
               const active = nav === key
               return (
                 <button
@@ -580,17 +682,19 @@ export default function NotificationsDialog({
                   aria-controls={`notifications-panel-${key}`}
                   tabIndex={active ? 0 : -1}
                   onClick={() => setNav(key)}
+                  onKeyDown={event => handleNavKeyDown(event, index)}
+                  ref={element => { navItemRefs.current[index] = element }}
                   data-notifications-nav={key}
-                  className={`flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  className={`flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     active
                       ? 'bg-brand-soft font-medium text-brand-ink'
                       : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
                   }`}
                 >
                   <Icon size={14} className="shrink-0" aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate">{label}</span>
+                  <span className="min-w-0 flex-1 whitespace-nowrap md:truncate">{label}</span>
                   {key === 'messages' && unreadCount > 0 && (
-                    <span className="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--color-danger)] px-1 text-[10px] font-semibold tabular-nums text-white">
+                    <span className="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--color-danger)] px-1 text-xs font-semibold tabular-nums text-white">
                       {unreadCount > 99 ? '99+' : unreadCount}
                     </span>
                   )}
@@ -606,53 +710,51 @@ export default function NotificationsDialog({
               aria-labelledby="notifications-tab-messages"
               className="flex min-h-0 flex-col"
             >
-              {/* 消息分区内工具栏：筛选 + 全部已读 */}
-              <div className="scrollbar-none flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--color-border)] px-2 py-1.5">
-                {NOTIFICATION_TABS.map(({ key, label }) => {
-                  const count = tabCount(key)
-                  const active = tab === key
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => { setTab(key); setSelectedId(null) }}
-                      aria-pressed={active}
-                      data-notifications-tab={key}
-                      className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                        active
-                          ? 'bg-brand-soft font-medium text-brand-ink'
-                          : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
-                      }`}
-                    >
-                      {label}
-                      {count !== null && count > 0 && (
-                        <span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                          {count > 99 ? '99+' : count}
-                        </span>
-                      )}
-                    </button>
-                  )
-                })}
-                <div className="ml-auto flex shrink-0 items-center gap-1 pl-2">
-                  <button
-                    type="button"
-                    onClick={() => readAllMutation.mutate()}
-                    disabled={unreadCount === 0 || readAllMutation.isPending}
-                    aria-label="全部已读"
-                    className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                    data-notifications-read-all
-                  >
-                    <MailOpen size={13} /> <span className="hidden sm:inline">全部已读</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* —— 列表 / 详情两栏；窄屏由选中态驱动单栏切换 —— */}
+              {/* —— 列表 / 详情两块；窄屏由选中态驱动单栏切换 —— */}
               <div className="flex min-h-0 flex-1">
                   <div
                     className={`${selectedId ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-[var(--color-border)] md:w-[22rem]`}
                     data-notifications-list
                   >
+                    {/* 列表列头：筛选只作用于本列（控件贴作用对象）+ 图标化「全部已读」，单行紧凑 */}
+                    <div className="scrollbar-none flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--color-border)] px-1.5 py-1.5">
+                      {NOTIFICATION_TABS.map(({ key, label }) => {
+                        const count = tabCount(key)
+                        const active = tab === key
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => { setTab(key); setSelectedId(null) }}
+                            aria-pressed={active}
+                            data-notifications-tab={key}
+                            className={`flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                              active
+                                ? 'bg-brand-soft font-medium text-brand-ink'
+                                : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                            }`}
+                          >
+                            {label}
+                            {count !== null && count > 0 && (
+                              <span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
+                                {count > 99 ? '99+' : count}
+                              </span>
+                            )}
+                          </button>
+                        )
+                      })}
+                      <button
+                        type="button"
+                        onClick={() => readAllMutation.mutate()}
+                        disabled={unreadCount === 0 || readAllMutation.isPending}
+                        title="将全部未读消息标为已读"
+                        aria-label="全部已读"
+                        className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                        data-notifications-read-all
+                      >
+                        <MailOpen size={13} />
+                      </button>
+                    </div>
                     <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-2">
                       {list.isLoading && (
                         <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--color-text-tertiary)]">
@@ -671,45 +773,76 @@ export default function NotificationsDialog({
                           </button>
                         </div>
                       )}
-                      {!list.isLoading && !list.isError && items.length === 0 && (
-                        <p className="px-2 py-8 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                          {tab === 'archived' ? '没有已归档的消息。' : '没有消息。外部系统可通过投递接口把消息送到这里。'}
-                        </p>
-                      )}
+                      {!list.isLoading && !list.isError && !list.isPlaceholderData && items.length === 0 && (() => {
+                        const empty = listEmptyCopy(tab, summary.data?.totalCount ?? 0)
+                        return (
+                          <div className="flex flex-col items-center gap-1.5 px-4 py-10 text-center" data-notifications-list-empty={tab}>
+                            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]" aria-hidden="true">
+                              {tab === 'starred' ? <Star size={16} /> : tab === 'archived' ? <Archive size={16} /> : tab === 'all' ? <Inbox size={16} /> : <MailOpen size={16} />}
+                            </span>
+                            <p className="mt-1 text-xs font-medium text-[var(--color-text-secondary)]">{empty.title}</p>
+                            <p className="max-w-60 text-xs leading-5 text-[var(--color-text-tertiary)]">{empty.description}</p>
+                            {empty.allCtaTotal ? (
+                              <button
+                                type="button"
+                                onClick={() => { setTab('all'); setSelectedId(null) }}
+                                className="mt-2 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                data-notifications-empty-all
+                              >
+                                查看全部 {empty.allCtaTotal} 条消息
+                              </button>
+                            ) : empty.composeCta ? (
+                              <button
+                                type="button"
+                                onClick={() => setNav('compose')}
+                                className="mt-2 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                data-notifications-empty-compose
+                              >
+                                去发送一条
+                              </button>
+                            ) : null}
+                          </div>
+                        )
+                      })()}
                       <div className="space-y-1">
                         {items.map(item => {
                           const active = item.id === selectedId
                           const priority = priorityStyle(item.priority)
+                          const previewText = item.bodyPreview ? stripMarkdownPreview(item.bodyPreview) : ''
                           return (
                             <button
                               key={item.id}
                               type="button"
-                              onClick={() => setSelectedId(item.id)}
+                              onClick={() => { if (!list.isPlaceholderData) setSelectedId(item.id) }}
                               data-notifications-item={item.id}
                               className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                                 active
-                                  ? 'bg-brand-soft/70'
-                                  : 'hover:bg-[var(--color-bg-hover)]'
+                                  ? 'bg-brand-soft'
+                                  : item.isRead
+                                    ? 'hover:bg-[var(--color-bg-hover)]'
+                                    // 品牌软底令牌不带 alpha 通道（tailwind 的 /N 修饰符对裸 var 不生效），
+                                    // 半透明档用 color-mix 现场合成
+                                    : 'bg-[color-mix(in_srgb,var(--color-accent-soft)_55%,transparent)] hover:bg-brand-soft'
                               }`}
                             >
                               <span className="flex items-center gap-1.5">
                                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${priority.dotClass}`} aria-hidden />
-                                <span className={`min-w-0 flex-1 truncate text-sm ${item.isRead ? 'text-[var(--color-text-primary)]' : 'font-medium text-[var(--color-text-primary)]'}`}>
+                                <span className={`min-w-0 flex-1 truncate text-sm ${item.isRead ? 'text-[var(--color-text-primary)]' : 'font-semibold text-[var(--color-text-primary)]'}`}>
                                   {item.title}
                                 </span>
                                 {item.isStarred && <Star size={12} className="shrink-0 fill-current text-[var(--color-warning)]" aria-label="已标记" />}
                                 {!!item.attachmentCount && item.attachmentCount > 0 && (
-                                  <span className="flex shrink-0 items-center gap-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                                  <span className="flex shrink-0 items-center gap-0.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
                                     <Paperclip size={10} />{item.attachmentCount}
                                   </span>
                                 )}
                               </span>
-                              {item.bodyPreview && (
+                              {previewText && (
                                 <span className={`mt-0.5 block truncate text-xs ${item.isRead ? 'text-[var(--color-text-tertiary)]' : 'text-[var(--color-text-secondary)]'}`}>
-                                  {item.bodyPreview}
+                                  {previewText}
                                 </span>
                               )}
-                              <span className="mt-1 block truncate text-[10px] text-[var(--color-text-tertiary)]">
+                              <span className="mt-1 block truncate text-xs text-[var(--color-text-tertiary)]">
                                 {item.sourceSystem} · {formatDateTime(item.createdAt)}
                               </span>
                             </button>
@@ -776,7 +909,6 @@ export default function NotificationsDialog({
                                 <button
                                   type="button"
                                   onClick={() => stateMutation.mutate({ id: selected.id, fields: { isStarred: !selected.isStarred } })}
-                                  title={selected.isStarred ? '取消标记' : '标记为重要'}
                                   aria-label={selected.isStarred ? '取消标记' : '标记为重要'}
                                   className={`${iconButtonClass} ${selected.isStarred ? 'text-[var(--color-warning)]' : ''}`}
                                   data-notifications-star
@@ -786,7 +918,6 @@ export default function NotificationsDialog({
                                 <button
                                   type="button"
                                   onClick={() => stateMutation.mutate({ id: selected.id, fields: { isArchived: !selected.isArchived } })}
-                                  title={selected.isArchived ? '恢复消息' : '归档消息'}
                                   aria-label={selected.isArchived ? '恢复消息' : '归档消息'}
                                   className={iconButtonClass}
                                   data-notifications-archive
@@ -796,7 +927,6 @@ export default function NotificationsDialog({
                                 <button
                                   type="button"
                                   onClick={() => { setForwardOpen(value => !value); setForwardChannelIds(new Set()) }}
-                                  title="转发到外部渠道"
                                   aria-label="转发到外部渠道"
                                   className={iconButtonClass}
                                   data-notifications-forward
@@ -807,18 +937,16 @@ export default function NotificationsDialog({
                                   <button
                                     type="button"
                                     onClick={() => stateMutation.mutate({ id: selected.id, fields: { isRead: false } })}
-                                    title="标为未读"
                                     aria-label="标为未读"
                                     className={iconButtonClass}
                                     data-notifications-unread
                                   >
-                                    <MailOpen size={15} className="rotate-180" />
+                                    <Mail size={15} />
                                   </button>
                                 )}
                                 <button
                                   type="button"
                                   onClick={() => setDeleting(selected)}
-                                  title="删除消息"
                                   aria-label="删除消息"
                                   className={`${iconButtonClass} hover:text-[var(--color-danger)]`}
                                   data-notifications-delete
@@ -828,7 +956,7 @@ export default function NotificationsDialog({
                               </div>
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
-                              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${priorityStyle(selected.priority).chipClass}`}>
+                              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${priorityStyle(selected.priority).chipClass}`}>
                                 {priorityStyle(selected.priority).label}
                               </span>
                               <span>{sourceTypeLabel(selected.sourceType)} · {selected.sourceSystem}</span>
@@ -840,7 +968,7 @@ export default function NotificationsDialog({
                               <p className="text-xs font-medium text-[var(--color-text-secondary)]">转发到外部渠道</p>
                               <div className="mt-2 flex flex-col gap-1">
                                 {enabledChannels.length === 0 ? (
-                                  <p className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                                  <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
                                     没有启用的渠道，请先到「渠道配置」新建。
                                   </p>
                                 ) : enabledChannels.map(channel => (
@@ -857,7 +985,7 @@ export default function NotificationsDialog({
                                       className="h-3.5 w-3.5 accent-[var(--color-nav-bg)]"
                                       data-notifications-forward-channel={channel.id}
                                     />
-                                    <span className="min-w-0 flex-1 truncate">{channel.name}<span className="ml-1.5 text-[10px] text-[var(--color-text-tertiary)]">{channel.templateName}</span></span>
+                                    <span className="min-w-0 flex-1 truncate">{channel.name}<span className="ml-1.5 text-xs text-[var(--color-text-tertiary)]">{channel.templateName}</span></span>
                                   </label>
                                 ))}
                               </div>
@@ -865,17 +993,16 @@ export default function NotificationsDialog({
                                 <button type="button" onClick={() => setForwardOpen(false)} className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                                   取消
                                 </button>
-                                <button
-                                  type="button"
+                                <Button
+                                  size="sm"
                                   onClick={() => forwardMutation.mutate({ messageId: selected.id, channelIds: [...forwardChannelIds] })}
-                                  disabled={forwardChannelIds.size === 0 || forwardMutation.isPending}
-                                  className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                                  style={{ background: 'var(--color-nav-bg)' }}
+                                  disabled={forwardChannelIds.size === 0}
+                                  loading={forwardMutation.isPending}
+                                  className="rounded-lg"
                                   data-notifications-forward-confirm
                                 >
-                                  {forwardMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Forward size={13} />}
-                                  转发（{forwardChannelIds.size}）
-                                </button>
+                                  <Forward size={13} /> 转发（{forwardChannelIds.size}）
+                                </Button>
                               </div>
                             </div>
                           )}
@@ -932,7 +1059,7 @@ export default function NotificationsDialog({
               data-notifications-compose-panel
             >
               <div>
-                <h3 className={sectionHeadingClass}>发布通知</h3>
+                <h3 className={sectionHeadingClass}>发送消息</h3>
                 <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
                   消息进入站内列表，并立即转发到下方所选的启用渠道。
                 </p>
@@ -942,7 +1069,7 @@ export default function NotificationsDialog({
               <div className="rounded-lg border border-[var(--color-border)] p-3" data-notifications-compose-destinations>
                 <p className="text-xs font-medium text-[var(--color-text-secondary)]">
                   投递渠道
-                  <span className="ml-1.5 font-normal text-[10px] text-[var(--color-text-tertiary)]">
+                  <span className="ml-1.5 font-normal text-xs text-[var(--color-text-tertiary)]">
                     默认全选，点击可增减
                   </span>
                 </p>
@@ -952,18 +1079,18 @@ export default function NotificationsDialog({
                       <Loader2 size={12} className="animate-spin" /> 渠道加载中…
                     </span>
                   ) : channels.isError ? (
-                    <span role="alert" className="flex flex-wrap items-center gap-2 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                    <span role="alert" className="flex flex-wrap items-center gap-2 text-xs leading-5 text-[var(--color-text-tertiary)]">
                       渠道列表加载失败：{errorText(channels.error)}
                       <button
                         type="button"
                         onClick={() => void channels.refetch()}
-                        className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         重试
                       </button>
                     </span>
                   ) : enabledChannels.length === 0 ? (
-                    <span className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                    <span className="text-xs leading-5 text-[var(--color-text-tertiary)]">
                       暂无启用的渠道，消息将仅进入站内列表；可到「渠道配置」新建。
                     </span>
                   ) : (
@@ -985,7 +1112,7 @@ export default function NotificationsDialog({
                         >
                           {checked && <Send size={11} className="shrink-0" />}
                           <span className="max-w-40 truncate">{channel.name}</span>
-                          <span className="text-[10px] font-normal opacity-70">{channel.templateName}</span>
+                          <span className="text-xs font-normal opacity-70">{channel.templateName}</span>
                         </button>
                       )
                     })
@@ -1028,30 +1155,28 @@ export default function NotificationsDialog({
                 <textarea
                   value={composeBody}
                   onChange={event => setComposeBody(event.target.value)}
-                  placeholder="支持 Markdown：图片、表格、代码块……"
+                  placeholder="支持 Markdown：图片、表格、代码块…"
                   className={`${inputClass} min-h-48 flex-1 resize-none font-mono text-xs leading-6`}
                   data-notifications-compose-body
                 />
               </label>
               <div className="flex items-center justify-between gap-2">
-                <p className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
                   {enabledChannels.length > 0 && !channels.isError && `将投递到 ${
                     composeChannelIds
                       ? [...composeChannelIds].filter(id => enabledChannels.some(channel => channel.id === id)).length
                       : enabledChannels.length
                   } 个渠道`}
                 </p>
-                <button
-                  type="button"
+                <Button
+                  size="sm"
                   onClick={handleCompose}
-                  disabled={createMutation.isPending}
-                  className="flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                  style={{ background: 'var(--color-nav-bg)' }}
+                  loading={createMutation.isPending}
+                  className="rounded-lg"
                   data-notifications-compose-send
                 >
-                  {createMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
-                  发送
-                </button>
+                  <Send size={13} /> 发送
+                </Button>
               </div>
             </div>
           )}
@@ -1063,19 +1188,41 @@ export default function NotificationsDialog({
               aria-labelledby="notifications-tab-config"
               className="scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5"
             >
-              {/* —— 设置组一：入口 · 对外投递 —— */}
-              <section aria-label="入口配置" data-notifications-keys-panel className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]">
-                <header className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">入口 · 对外投递</h3>
-                    <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                      外部系统以 X-API-Key 调用投递接口，消息进入中转站并自动转发；密钥明文仅签发时展示一次。
-                    </p>
-                  </div>
-                  <span className="mt-0.5 shrink-0 rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                    {(ingestKeys.data ?? []).filter(key => key.enabled).length} 枚有效
+              {/* —— 分组一：消息入口（外部 → 平台） —— */}
+              <section aria-label="消息入口" data-notifications-group="inbound" className="space-y-3">
+                <div className="flex items-center gap-2.5 px-0.5">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink" aria-hidden="true">
+                    <Inbox size={14} />
                   </span>
-                </header>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">消息入口</h3>
+                    <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">外部系统把消息投递进平台：签发密钥交给对方，消息自动进入站内并转发。</p>
+                  </div>
+                </div>
+                <section aria-label="投递接入" data-notifications-keys-panel className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]">
+                  <header className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
+                    <div className="min-w-0">
+                      <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">投递接入 · X-API-Key</h4>
+                      <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                        密钥明文仅签发时展示一次；调用示例可直接复制给外部系统。
+                      </p>
+                    </div>
+                    <div className="mt-0.5 flex shrink-0 items-center gap-2">
+                      <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
+                        {activeIngestKeys.length} 枚有效
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setMintFormOpen(value => !value)}
+                        aria-expanded={mintFormOpen}
+                        className="rounded-lg"
+                        data-notifications-key-mint-toggle
+                      >
+                        <KeyRound size={13} /> {mintFormOpen ? '收起' : '签发密钥'}
+                      </Button>
+                    </div>
+                  </header>
                 <div className="space-y-3 p-4">
                   <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3" data-notifications-endpoint-card>
                     <div className="flex items-center justify-between gap-2">
@@ -1087,17 +1234,17 @@ export default function NotificationsDialog({
                             .then(() => toast.success('调用示例已复制'))
                             .catch(() => toast.error('复制失败，请手动选择复制'))
                         }}
-                        className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         data-notifications-copy-curl
                       >
                         <Copy size={11} /> 复制调用示例
                       </button>
                     </div>
-                    <pre className="scrollbar-none mt-2 overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 font-mono text-[10px] leading-5 text-[var(--color-code-fg)]">{ingestCurlSample()}</pre>
+                    <pre className="scrollbar-none mt-2 overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 font-mono text-[11px] leading-5 text-[var(--color-code-fg)]">{ingestCurlSample()}</pre>
                   </div>
 
                   {mintedKey && (
-                    <div className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3" data-notifications-key-plaintext>
+                    <div role="alert" className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3" data-notifications-key-plaintext>
                       <p className="text-xs font-medium text-[var(--color-warning)]">
                         「{mintedKey.name}」密钥明文（仅此一次，请立即保存）：
                       </p>
@@ -1120,50 +1267,51 @@ export default function NotificationsDialog({
                     </div>
                   )}
 
-                  <div className="flex flex-wrap items-end gap-2">
-                    <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                      密钥名称（来源标识）
-                      <input
-                        value={keyName}
-                        onChange={event => setKeyName(event.target.value)}
-                        maxLength={200}
-                        placeholder="如 billing"
-                        className={inputClass}
-                        data-notifications-key-name
-                      />
-                    </label>
-                    <label className="flex w-44 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                      限定来源系统（可选）
-                      <input
-                        value={keyScope}
-                        onChange={event => setKeyScope(event.target.value)}
-                        maxLength={200}
-                        placeholder="留空不限定"
-                        className={inputClass}
-                        data-notifications-key-scope
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!keyName.trim()) {
-                          toast.error('密钥名称不能为空')
-                          return
-                        }
-                        mintKeyMutation.mutate({
-                          name: keyName.trim(),
-                          allowedSourceSystem: keyScope.trim() || null,
-                        })
-                      }}
-                      disabled={mintKeyMutation.isPending}
-                      className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                      style={{ background: 'var(--color-nav-bg)' }}
-                      data-notifications-key-mint
-                    >
-                      {mintKeyMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <KeyRound size={13} />}
-                      签发密钥
-                    </button>
-                  </div>
+                  {/* 签发表单默认收起：入口卡常态只看端点与密钥清单，需要时再展开 */}
+                  {mintFormOpen && (
+                    <div className="flex flex-wrap items-end gap-2 rounded-lg border border-dashed border-[var(--color-border)] p-3">
+                      <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                        密钥名称（来源标识）
+                        <input
+                          value={keyName}
+                          onChange={event => setKeyName(event.target.value)}
+                          maxLength={200}
+                          placeholder="如 billing"
+                          className={inputClass}
+                          data-notifications-key-name
+                        />
+                      </label>
+                      <label className="flex w-44 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                        限定来源系统（可选）
+                        <input
+                          value={keyScope}
+                          onChange={event => setKeyScope(event.target.value)}
+                          maxLength={200}
+                          placeholder="留空不限定"
+                          className={inputClass}
+                          data-notifications-key-scope
+                        />
+                      </label>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          if (!keyName.trim()) {
+                            toast.error('密钥名称不能为空')
+                            return
+                          }
+                          mintKeyMutation.mutate({
+                            name: keyName.trim(),
+                            allowedSourceSystem: keyScope.trim() || null,
+                          })
+                        }}
+                        loading={mintKeyMutation.isPending}
+                        className="rounded-lg"
+                        data-notifications-key-mint
+                      >
+                        <KeyRound size={13} /> 签发密钥
+                      </Button>
+                    </div>
+                  )}
 
                   {ingestKeys.isLoading ? (
                     <div className="flex items-center justify-center gap-2 py-6 text-xs text-[var(--color-text-tertiary)]">
@@ -1180,68 +1328,100 @@ export default function NotificationsDialog({
                         重试
                       </button>
                     </div>
-                  ) : (ingestKeys.data ?? []).length === 0 ? (
+                  ) : activeIngestKeys.length === 0 ? (
                     <p className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-5 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                      还没有投递密钥。签发后把密钥与调用示例交给外部系统即可开始投递。
+                      还没有有效密钥。点右上「签发密钥」，把密钥与调用示例交给外部系统即可开始投递。
                     </p>
                   ) : (
                     <ul className="space-y-1">
-                      {(ingestKeys.data ?? []).map(key => (
+                      {activeIngestKeys.map(key => (
                         <li
                           key={key.id}
                           data-notifications-key-item={key.id}
                           className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
                         >
-                          <KeyRound size={14} className={`shrink-0 ${key.enabled ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-tertiary)]'}`} />
+                          <KeyRound size={14} className="shrink-0 text-[var(--color-text-secondary)]" />
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-sm text-[var(--color-text-primary)]">
                               {key.name}
-                              <span className="ml-2 font-mono text-[10px] text-[var(--color-text-tertiary)]">{key.keyPrefix}_…</span>
+                              <span className="ml-2 font-mono text-[11px] text-[var(--color-text-tertiary)]">{key.keyPrefix}_…</span>
                             </p>
-                            <p className="truncate text-[10px] text-[var(--color-text-tertiary)]">
+                            <p className="truncate text-xs text-[var(--color-text-tertiary)]">
                               {key.allowedSourceSystem ? `限定来源：${key.allowedSourceSystem} · ` : ''}
-                              {key.enabled ? `最近使用：${key.lastUsedAt ? formatDateTime(key.lastUsedAt) : '未使用'}` : `已吊销：${formatDateTime(key.revokedAt || key.createdAt)}`}
+                              最近使用：{key.lastUsedAt ? formatDateTime(key.lastUsedAt) : '未使用'}
                             </p>
                           </div>
-                          {key.enabled && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setTestingKeyId(key.id)
-                                  keyTestMutation.mutate(key.id)
-                                }}
-                                disabled={keyTestMutation.isPending && testingKeyId === key.id}
-                                title="以该密钥真实投递一条链路测试消息"
-                                aria-label={`以密钥 ${key.name} 测试入口链路`}
-                                className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                                style={{ background: 'var(--color-nav-bg)' }}
-                                data-notifications-key-test
-                              >
-                                {keyTestMutation.isPending && testingKeyId === key.id
-                                  ? <Loader2 size={12} className="animate-spin" />
-                                  : <Zap size={12} />}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setRevokingKey(key)}
-                                disabled={revokeKeyMutation.isPending}
-                                className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                                data-notifications-key-revoke
-                              >
-                                吊销
-                              </button>
-                            </>
-                          )}
+                          {/* 链路测试会真实投递并扇出到所有启用渠道：幽灵样式 + 二次确认防误触 */}
+                          <button
+                            type="button"
+                            onClick={() => setConfirmingKeyTest(key)}
+                            disabled={keyTestMutation.isPending && testingKeyId === key.id}
+                            aria-label={`以密钥 ${key.name} 测试入口链路`}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                            data-notifications-key-test
+                          >
+                            {keyTestMutation.isPending && testingKeyId === key.id
+                              ? <Loader2 size={13} className="animate-spin" />
+                              : <Zap size={13} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRevokingKey(key)}
+                            disabled={revokeKeyMutation.isPending}
+                            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                            data-notifications-key-revoke
+                          >
+                            吊销
+                          </button>
                         </li>
                       ))}
                     </ul>
                   )}
+                  {/* 已吊销密钥默认折叠：留痕可查，但不占入口卡常态空间 */}
+                  {revokedIngestKeys.length > 0 && (
+                    <details className="rounded-lg border border-[var(--color-border)] px-3 py-2" data-notifications-revoked-keys>
+                      <summary className="cursor-pointer list-none text-xs text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)]">
+                        已吊销密钥（{revokedIngestKeys.length}）
+                      </summary>
+                      <ul className="mt-2 space-y-1">
+                        {revokedIngestKeys.map(key => (
+                          <li
+                            key={key.id}
+                            data-notifications-key-item={key.id}
+                            className="flex items-center gap-2 rounded-lg px-2 py-2 opacity-75"
+                          >
+                            <KeyRound size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm text-[var(--color-text-primary)]">
+                                {key.name}
+                                <span className="ml-2 font-mono text-[11px] text-[var(--color-text-tertiary)]">{key.keyPrefix}_…</span>
+                              </p>
+                              <p className="truncate text-xs text-[var(--color-text-tertiary)]">
+                                {key.revokedAt ? `已吊销：${formatDateTime(key.revokedAt)}` : '已吊销（时间未知）'}
+                              </p>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                 </div>
+                </section>
               </section>
 
-              {/* —— 设置组二：发件邮箱（SMTP）—— */}
-              <details className="group mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]" data-notifications-smtp-card>
+              {/* —— 分组二：消息出口（平台 → 外部） —— */}
+              <section aria-label="消息出口" data-notifications-group="outbound" className="mt-6 space-y-3">
+                <div className="flex items-center gap-2.5 px-0.5">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink" aria-hidden="true">
+                    <Send size={14} />
+                  </span>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">消息出口</h3>
+                    <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">平台把消息转发到外部渠道：邮件依赖平台发件邮箱，机器人 / HTTP 渠道各自配置。</p>
+                  </div>
+                </div>
+                {/* 发件邮箱是邮件渠道的平台级依赖，归入出口分组 */}
+                <details className="group rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]" data-notifications-smtp-card>
                 <summary className="flex cursor-pointer list-none items-center gap-2.5 border-b border-transparent px-4 py-3 transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-open:border-[var(--color-border)]">
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink">
                     <Mail size={14} />
@@ -1250,7 +1430,7 @@ export default function NotificationsDialog({
                     <span className="block text-sm font-semibold text-[var(--color-text-primary)]">发件邮箱</span>
                     <span className="block text-xs leading-5 text-[var(--color-text-tertiary)]">配置一次 SMTP，邮件渠道只需填收件人；密码加密存储。</span>
                   </span>
-                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${smtp.data?.configured ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'}`}>
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${smtp.data?.configured ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'}`}>
                     {smtp.data?.configured ? '已配置' : '未配置'}
                   </span>
                   <ChevronDown size={14} className="shrink-0 text-[var(--color-text-tertiary)] transition-transform group-open:rotate-180" aria-hidden />
@@ -1263,7 +1443,7 @@ export default function NotificationsDialog({
                     </label>
                     <label className="flex w-24 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
                       端口
-                      <input value={smtpPort} onChange={e => setSmtpPort(e.target.value)} inputMode="numeric" className={inputClass} data-notifications-smtp-port />
+                      <input value={smtpPort} onChange={e => setSmtpPort(e.target.value.replace(/[^0-9]/g, ''))} inputMode="numeric" className={inputClass} data-notifications-smtp-port />
                     </label>
                     <label className="flex min-w-44 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
                       账号
@@ -1277,8 +1457,8 @@ export default function NotificationsDialog({
                       发件人名称（可选）
                       <input value={smtpSender} onChange={e => setSmtpSender(e.target.value)} maxLength={200} placeholder="平台通知" className={inputClass} data-notifications-smtp-sender />
                     </label>
-                    <button
-                      type="button"
+                    <Button
+                      size="sm"
                       onClick={() => {
                         if (!smtpHost.trim()) { toast.error('SMTP 主机不能为空'); return }
                         const port = Number(smtpPort)
@@ -1291,14 +1471,12 @@ export default function NotificationsDialog({
                           sender: smtpSender.trim(), useTls: true,
                         })
                       }}
-                      disabled={smtpPutMutation.isPending}
-                      className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                      style={{ background: 'var(--color-nav-bg)' }}
+                      loading={smtpPutMutation.isPending}
+                      className="ml-auto rounded-lg"
                       data-notifications-smtp-save
                     >
-                      {smtpPutMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Mail size={13} />}
-                      保存
-                    </button>
+                      <Mail size={13} /> 保存
+                    </Button>
                   </div>
                   <div className="mt-2 flex flex-wrap items-end gap-2">
                     <label className="flex min-w-52 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
@@ -1322,25 +1500,24 @@ export default function NotificationsDialog({
                 </div>
               </details>
 
-              {/* —— 设置组三：转发渠道 —— */}
-              <section aria-label="出口配置" data-notifications-channels-panel className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]">
+                {/* —— 转发渠道：消息到达即为启用渠道生成投递 —— */}
+                <section aria-label="转发渠道" data-notifications-channels-panel className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]">
                 <header className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
                   <div className="min-w-0">
-                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">转发渠道</h3>
+                    <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">转发渠道</h4>
                     <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
                       消息到达即为启用渠道生成转发；渠道旁可直发测试消息验证连通。
                     </p>
                   </div>
                   {channelFormStage === 'idle' && (
-                    <button
-                      type="button"
+                    <Button
+                      size="sm"
                       onClick={() => { setTemplateId('dingtalk'); setTemplateParams({}); setChannelFormStage('pick') }}
-                      className="mt-0.5 flex shrink-0 items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      style={{ background: 'var(--color-nav-bg)' }}
+                      className="rounded-lg"
                       data-notifications-channel-create-open
                     >
                       <Plus size={13} /> 新建渠道
-                    </button>
+                    </Button>
                   )}
                 </header>
                 <div className="p-4">
@@ -1352,7 +1529,7 @@ export default function NotificationsDialog({
                         <button
                           type="button"
                           onClick={resetChannelForm}
-                          className="rounded-md px-2 py-1 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="rounded-md px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           取消
                         </button>
@@ -1395,7 +1572,7 @@ export default function NotificationsDialog({
                               </span>
                               <span className="min-w-0">
                                 <span className="block truncate text-sm font-medium text-[var(--color-text-primary)]">{t.name}</span>
-                                <span className="mt-0.5 block line-clamp-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">{t.description}</span>
+                                <span className="mt-0.5 block line-clamp-2 text-xs leading-4 text-[var(--color-text-tertiary)]">{t.description}</span>
                               </span>
                             </button>
                           )
@@ -1424,7 +1601,7 @@ export default function NotificationsDialog({
                           <button
                             type="button"
                             onClick={() => setChannelFormStage('pick')}
-                            className="shrink-0 rounded-md px-2 py-1 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            className="shrink-0 rounded-md px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           >
                             换类型
                           </button>
@@ -1453,30 +1630,28 @@ export default function NotificationsDialog({
                               className={inputClass}
                               data-notifications-channel-param={f.key}
                             />
-                            {f.hint && <span className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">{f.hint}</span>}
+                            {f.hint && <span className="text-xs leading-4 text-[var(--color-text-tertiary)]">{f.hint}</span>}
                           </label>
                         ))}
                       </div>
                       {templateId === 'email' && smtp.data && !smtp.data.configured && (
-                        <p className="mt-2 rounded-md bg-[var(--color-warning-bg)] px-2.5 py-1.5 text-[11px] leading-5 text-[var(--color-warning)]" data-notifications-email-needs-smtp>
-                          邮件渠道需要先配置上方「发件邮箱」。
+                        <p className="mt-2 rounded-md bg-[var(--color-warning-bg)] px-2.5 py-1.5 text-xs leading-5 text-[var(--color-warning)]" data-notifications-email-needs-smtp>
+                          邮件渠道需要先配置「发件邮箱」。
                         </p>
                       )}
                       <div className="mt-3 flex justify-end gap-2">
                         <button type="button" onClick={resetChannelForm} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                           取消
                         </button>
-                        <button
-                          type="button"
+                        <Button
+                          size="sm"
                           onClick={submitChannelForm}
-                          disabled={createChannelMutation.isPending || saveChannelMutation.isPending}
-                          className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                          style={{ background: 'var(--color-nav-bg)' }}
+                          loading={createChannelMutation.isPending || saveChannelMutation.isPending}
+                          className="rounded-lg"
                           data-notifications-channel-create
                         >
-                          {(createChannelMutation.isPending || saveChannelMutation.isPending) ? <Loader2 size={13} className="animate-spin" /> : <Plug size={13} />}
-                          {editingChannel ? '保存修改' : '新建渠道'}
-                        </button>
+                          <Plug size={13} /> {editingChannel ? '保存修改' : '新建渠道'}
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -1508,7 +1683,7 @@ export default function NotificationsDialog({
                           <div
                             key={channel.id}
                             data-notifications-channel-item={channel.id}
-                            className="flex flex-col gap-2 rounded-lg border border-[var(--color-border)] p-3 transition-colors hover:border-[var(--color-text-tertiary)]"
+                            className="flex flex-col gap-2 rounded-lg border border-[var(--color-border)] p-3 transition-colors hover:border-[var(--color-border-hover)]"
                           >
                             <div className="flex items-center gap-2">
                               <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${channel.enabled ? 'bg-brand-soft text-brand-ink' : 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]'}`}>
@@ -1516,7 +1691,7 @@ export default function NotificationsDialog({
                               </span>
                               <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-medium text-[var(--color-text-primary)]" title={channel.name}>{channel.name}</p>
-                                <p className="text-[10px] text-[var(--color-text-tertiary)]">{channel.templateName}</p>
+                                <p className="text-xs text-[var(--color-text-tertiary)]">{channel.templateName}</p>
                               </div>
                               <button
                                 type="button"
@@ -1528,17 +1703,18 @@ export default function NotificationsDialog({
                                 className={`relative flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 ${channel.enabled ? 'bg-[var(--color-nav-bg)]' : 'bg-[var(--color-border)]'}`}
                                 data-notifications-channel-toggle
                               >
-                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${channel.enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-[var(--color-text-inverse)] shadow transition-transform ${channel.enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
                               </button>
                             </div>
-                            <p className="truncate text-[11px] text-[var(--color-text-secondary)]" title={channel.display || channel.urlMasked}>
+                            <p className="truncate text-xs text-[var(--color-text-secondary)]" title={channel.display || channel.urlMasked}>
                               {channel.display || channel.urlMasked}
                             </p>
-                            <p className={`text-[10px] leading-4 ${channel.lastStatus === 'failed' ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-tertiary)]'}`}>
+                            {/* 最近一次投递/测试直发的结果；统计区按正式投递单聚合，两者口径在此明示 */}
+                            <p className={`text-xs leading-4 ${channel.lastStatus === 'failed' ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-tertiary)]'}`}>
                               {channel.lastStatus === 'sent'
                                 ? `投递成功 ${formatDateTime(channel.lastSentAt || channel.updatedAt)}`
                                 : channel.lastStatus === 'failed'
-                                  ? <span className="line-clamp-2" title={`投递失败：${channel.lastError}`}>投递失败：{channel.lastError}</span>
+                                  ? <span className="line-clamp-2" title={`最近一次尝试失败（${formatDateTime(channel.updatedAt)}）：${channel.lastError}；此处含测试直发，统计区仅计正式投递单`}>投递失败 {formatDateTime(channel.updatedAt)}：{channel.lastError}</span>
                                   : '尚未投递'}
                             </p>
                             <div className="mt-auto flex items-center gap-1 border-t border-[var(--color-border)] pt-2">
@@ -1550,7 +1726,6 @@ export default function NotificationsDialog({
                                     testChannelMutation.mutate(channel.id)
                                   }}
                                   disabled={testChannelMutation.isPending && testingChannelId === channel.id}
-                                  title={`向 ${channel.name} 直发测试消息`}
                                   aria-label={`向 ${channel.name} 直发测试消息`}
                                   className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
                                   data-notifications-channel-test
@@ -1574,7 +1749,6 @@ export default function NotificationsDialog({
                                   setTemplateParams(prefill)
                                   setChannelFormStage('form')
                                 }}
-                                title={`编辑渠道 ${channel.name}`}
                                 aria-label={`编辑渠道 ${channel.name}`}
                                 className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                 data-notifications-channel-edit
@@ -1585,7 +1759,6 @@ export default function NotificationsDialog({
                               <button
                                 type="button"
                                 onClick={() => setDeletingChannel(channel)}
-                                title={`删除渠道 ${channel.name}`}
                                 aria-label={`删除渠道 ${channel.name}`}
                                 className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                 data-notifications-channel-delete
@@ -1599,6 +1772,7 @@ export default function NotificationsDialog({
                     </div>
                   )}
                 </div>
+                </section>
               </section>
 
             </div>
@@ -1639,16 +1813,19 @@ export default function NotificationsDialog({
                         value: stats.data.overview.forwardSuccessRate === null
                           ? '—'
                           : `${Math.round(stats.data.overview.forwardSuccessRate * 1000) / 10}%`,
+                        // 渠道卡的「投递失败」含测试直发，与这里口径不同——写明避免两边数字互相打架
+                        note: '仅计正式投递单，不含渠道测试直发',
                       },
                     ].map(card => (
                       <div key={card.label} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)] p-3" data-notifications-stats-card={card.label}>
                         <p className="text-xs text-[var(--color-text-tertiary)]">{card.label}</p>
                         <p className="mt-1 text-lg font-semibold tabular-nums leading-7 text-[var(--color-text-primary)]">{card.value}</p>
+                        {card.note && <p className="mt-0.5 text-xs leading-4 text-[var(--color-text-tertiary)]">{card.note}</p>}
                       </div>
                     ))}
                   </div>
 
-                  {/* —— 入站趋势 —— */}
+                  {/* —— 入站趋势（ECharts 平台标准；svg 渲染器保证容器内渲染出 <svg>） —— */}
                   <section className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)] p-4" aria-label="入站趋势" data-notifications-stats-trend>
                     <div className="flex items-center justify-between gap-2">
                       <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">入站趋势</h3>
@@ -1660,7 +1837,7 @@ export default function NotificationsDialog({
                             onClick={() => setStatsDays(d)}
                             aria-pressed={statsDays === d}
                             data-notifications-stats-range={d}
-                            className={`rounded-md px-2 py-1 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                            className={`rounded-md px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                               statsDays === d
                                 ? 'bg-brand-soft font-medium text-brand-ink'
                                 : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
@@ -1672,32 +1849,14 @@ export default function NotificationsDialog({
                       </div>
                     </div>
                     <div className="mt-3 h-44" data-notifications-stats-trend-chart>
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={stats.data.trend} margin={{ top: 4, right: 4, bottom: 0, left: -28 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
-                          <XAxis
-                            dataKey="date"
-                            tickFormatter={(v: string) => v.slice(5)}
-                            tick={{ fontSize: 10, fill: 'var(--color-text-tertiary)' }}
-                            interval="preserveStartEnd"
-                            axisLine={{ stroke: 'var(--color-border)' }}
-                            tickLine={false}
-                          />
-                          <YAxis
-                            allowDecimals={false}
-                            tick={{ fontSize: 10, fill: 'var(--color-text-tertiary)' }}
-                            axisLine={false}
-                            tickLine={false}
-                          />
-                          <Tooltip
-                            cursor={{ fill: 'var(--color-bg-hover)' }}
-                            contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg-elevated)' }}
-                            formatter={value => [`${value ?? 0} 条`, '入站']}
-                            labelFormatter={label => String(label)}
-                          />
-                          <Bar dataKey="count" fill="var(--color-nav-bg)" radius={[3, 3, 0, 0]} maxBarSize={18} />
-                        </BarChart>
-                      </ResponsiveContainer>
+                      {trendOption && (
+                        <ReactECharts
+                          option={trendOption}
+                          style={{ width: '100%', height: '100%' }}
+                          opts={{ renderer: 'svg' }}
+                          notMerge
+                        />
+                      )}
                     </div>
                   </section>
 
@@ -1778,6 +1937,21 @@ export default function NotificationsDialog({
         description={`「${deletingChannel?.name ?? ''}」将被删除，之后的新消息不再转发到该渠道（历史投递记录一并移除）。`}
         confirmText="删除"
         variant="danger"
+      />
+      <ConfirmDialog
+        open={confirmingKeyTest !== null}
+        onClose={() => setConfirmingKeyTest(null)}
+        onConfirm={() => {
+          if (confirmingKeyTest) {
+            setTestingKeyId(confirmingKeyTest.id)
+            keyTestMutation.mutate(confirmingKeyTest.id)
+          }
+          setConfirmingKeyTest(null)
+        }}
+        loading={keyTestMutation.isPending}
+        title="发起入口链路测试？"
+        description={`将用「${confirmingKeyTest?.name ?? ''}」真实投递一条测试消息，并立即转发到所有启用渠道（外部收件方会收到）。`}
+        confirmText="开始测试"
       />
       <ConfirmDialog
         open={revokingKey !== null}

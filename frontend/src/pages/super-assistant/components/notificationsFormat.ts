@@ -88,3 +88,61 @@ const PLATFORM_ATTACHMENT_SRC = /^\/api\/v2\/notifications\/[^/]+\/attachments\/
 export function isPlatformMediaSrc(src: string | undefined): boolean {
   return typeof src === 'string' && PLATFORM_ATTACHMENT_SRC.test(src)
 }
+
+/**
+ * 列表预览去 Markdown 语法：列表是单行纯文本场景，`# 标题 **加粗**` 之类的
+ * 原样露出会与详情渲染态割裂。只做展示级剥离，不求完整解析；
+ * 强调语法按 CommonMark 方向加词边界——蛇形命名（user_name）与「2 * 3 * 5」
+ * 这类两侧贴字母/数字/空格的符号不当强调处理。
+ */
+export function stripMarkdownPreview(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*\*?(?!\s)([^*_\n]+?)(?<!\s)\*\*\*?/g, '$1')
+    .replace(/__(?!\s)([^_\n]+?)(?<!\s)__/g, '$1')
+    .replace(/(?<![A-Za-z0-9_])\*(?!\s)([^*\n]+?)(?<!\s)\*/g, '$1')
+    .replace(/(?<![A-Za-z0-9_])_(?!\s)([^_\n]+?)(?<!\s)_(?![A-Za-z0-9_])/g, '$1')
+    .replace(/~~(?!\s)([^~\n]+?)(?<!\s)~~/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/\|/g, ' ')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+export interface ListEmptyCopy {
+  title: string
+  description: string
+  /** 未读空态且站内还有历史消息：提供「查看全部」引导（值为总量） */
+  allCtaTotal?: number
+  /** 全部空态（中转站冷启动）：引导去发送第一条 */
+  composeCta?: boolean
+}
+
+/** 各筛选 tab 的空态文案；未读/全部带行动引导，已标记/已归档只说明语义 */
+export function listEmptyCopy(tab: string, totalCount: number): ListEmptyCopy {
+  switch (tab) {
+    case 'unread':
+      return {
+        title: '没有未读消息',
+        description: '待处理的都清完了；历史消息都在「全部」里。',
+        ...(totalCount > 0 ? { allCtaTotal: totalCount } : {}),
+      }
+    case 'starred':
+      return { title: '还没有标记的消息', description: '在消息详情里点星标，重要消息会集中到这里。' }
+    case 'archived':
+      return { title: '没有已归档消息', description: '归档不会删除消息，归档项会保留在这里与「全部」。' }
+    default:
+      return {
+        title: '还没有消息',
+        description: '外部系统可经投递入口送消息进来，也可以在「发送消息」手动发布。',
+        composeCta: true,
+      }
+  }
+}

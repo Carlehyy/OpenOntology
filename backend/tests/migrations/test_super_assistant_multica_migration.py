@@ -110,4 +110,4 @@ def test_head_is_single_and_follows_token_version(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     heads = ScriptDirectory.from_config(cfg).get_heads()
     # 0094 palace folders 在本迁移之后线性追加，head 随之演进
-    assert heads == ["0126_seed_task_templates"]
+    assert heads == ["0127_super_assistant_quick_inputs"]

@@ -121,7 +121,7 @@ function ConversationRow({
               onClick={() => onSetArchived(item.id, !archived)}
               title={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
               aria-label={archived ? `恢复会话 ${title}` : `归档会话 ${title}`}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-warning-bg)] hover:text-[var(--color-warning)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
             </button>
@@ -130,7 +130,7 @@ function ConversationRow({
               onClick={() => onDelete(item.id)}
               title={`删除会话 ${title}`}
               aria-label={`删除会话 ${title}`}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <Trash2 size={13} />
             </button>
@@ -209,7 +209,9 @@ export default function WorkbenchSidebar({
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
 
-  // 未读徽章：15s 轮询 + 窗口聚焦刷新（与收件箱气泡同节奏；仅 admin 拉取）
+  // 未读徽章：15s 轮询 + 窗口聚焦刷新（与收件箱气泡同节奏；仅 admin 拉取）。
+  // 注意：NotificationsDialog 弹窗内的 summary 查询不再自带轮询，依赖本观察者
+  // 同 queryKey 的合并通知——两处是隐式配对，复用弹窗到他页时需一并带上轮询。
   const notificationsSummary = useQuery({
     queryKey: ['notifications', 'summary'],
     queryFn: notificationsApi.summary,
@@ -471,11 +473,12 @@ export default function WorkbenchSidebar({
     <>
       {/* 与 Layout 侧栏同款模式：单个 aside，移动端固定抽屉、桌面端静态栏（CSS 切换，避免双份 DOM） */}
       {mobileOpen && (
+        /* 遮罩：语义遮罩令牌（暗色 0.6）；纯点击关闭区域无需与抽屉关闭按钮同名可及 */
         <button
           type="button"
-          aria-label="关闭工作台导航"
+          aria-label="关闭工作台导航遮罩"
           onClick={onCloseMobile}
-          className="fixed inset-0 z-40 bg-black/30 md:hidden"
+          className="fixed inset-0 z-40 bg-[var(--color-bg-overlay)] md:hidden"
         />
       )}
       {/* 移动端抽屉保持实底卡片；桌面端融入画布（与内容卡之间靠画布缝隙分隔，不画边线） */}

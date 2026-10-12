@@ -266,6 +266,16 @@ export interface AssistantTool {
   enabled: boolean
 }
 
+// 输入框快捷内容（用户自管常用文本片段）：sort_order 为相对展示优先级
+export interface QuickInput {
+  id: string
+  title: string
+  content: string
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
 export interface SuperMcpServer {
   id: string
   name: string
@@ -895,6 +905,15 @@ export const superAssistantApi = {
   assistantTools: () => apiClientV2.get<AssistantTool[]>('/super-assistant/tools'),
   updateAssistantTool: (name: string, enabled: boolean) =>
     apiClientV2.patch<AssistantTool>(`/super-assistant/tools/${encodeURIComponent(name)}`, { enabled }),
+
+  listQuickInputs: () => apiClientV2.get<QuickInput[]>('/super-assistant/quick-inputs'),
+  createQuickInput: (body: { title: string; content: string }) =>
+    apiClientV2.post<QuickInput>('/super-assistant/quick-inputs', body),
+  updateQuickInput: (id: string, body: { title?: string; content?: string }) =>
+    apiClientV2.patch<QuickInput>(`/super-assistant/quick-inputs/${id}`, body),
+  deleteQuickInput: (id: string) => apiClientV2.delete(`/super-assistant/quick-inputs/${id}`),
+  reorderQuickInputs: (ids: string[]) =>
+    apiClientV2.put<QuickInput[]>('/super-assistant/quick-inputs/reorder', { ids }),
 
   memories: (params: { zone?: string; include_superseded?: boolean } = {}) => {
     const search = new URLSearchParams()
