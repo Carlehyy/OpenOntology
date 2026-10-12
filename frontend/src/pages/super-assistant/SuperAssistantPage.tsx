@@ -25,7 +25,10 @@ import { insertAtCursor, shouldHoldInsertion } from '@/lib/voice/insertion'
 import { voiceCaptureSupported } from '@/lib/voice/recorder'
 import { useVoicePreferencesStore } from '@/stores/voicePreferencesStore'
 import { useVoiceDictation } from './useVoiceDictation'
+import { useQuickInputs } from './useQuickInputs'
 import VoiceRecordingBar from './components/VoiceRecordingBar'
+import QuickInputMenu from './components/QuickInputMenu'
+import QuickInputsDialog from './components/QuickInputsDialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -139,6 +142,9 @@ export default function SuperAssistantPage() {
   const [queuedByConv, setQueuedByConv] = useState<Record<string, string[]>>({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showMessageHistory, setShowMessageHistory] = useState(false)
+  // 快捷输入：小卡片（Popover）与设置弹窗互斥打开——从卡片跳设置时先收卡片
+  const [quickInputOpen, setQuickInputOpen] = useState(false)
+  const [quickInputsSettingsOpen, setQuickInputsSettingsOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   // 窄屏顶栏溢出菜单：实时浏览器/助手配置收进「⋯」，避免与标题、模型选择器挤出视口
   const [headerOverflowOpen, setHeaderOverflowOpen] = useState(false)
@@ -960,6 +966,27 @@ export default function SuperAssistantPage() {
     setPendingCaret(plan.nextCursor)
   }
 
+  // ---- 快捷输入（小卡片 + 设置弹窗共用 useQuickInputs 数据源）----
+  const quickInputs = useQuickInputs()
+  // 用户是否在输入框放置过光标（select 由点击/键入/方向键触发，autoFocus 不触发）：
+  // 从未交互则无用户光标，插入语义退化为「拼接到末尾」而非插到开头
+  const composerInteractedRef = useRef(false)
+
+  const insertQuickInput = (content: string) => {
+    const cursor = composerInteractedRef.current ? getComposerCursor() : inputRef.current.length
+    const plan = insertAtCursor(inputRef.current, cursor, content)
+    setInput(plan.text)
+    setQuickInputOpen(false)
+    // 光标落点/焦点回输入框由 pendingCaret effect 统一处理（与语音插入同机制）
+    setPendingCaret(plan.nextCursor)
+  }
+
+  const handleQuickInputOpenChange = (open: boolean) => {
+    setQuickInputOpen(open)
+    // 每次打开即刷新：设置弹窗在其它端改过也能拿到最新顺序与内容
+    if (open) void quickInputs.refresh()
+  }
+
   // SenderProps 未显式声明原生透传属性，但库内部会转发到内部 textarea
   const senderNativeProps = { autoFocus: true, 'aria-label': '向超级助手发送消息' }
   const placeholder = loading
@@ -1083,10 +1110,12 @@ export default function SuperAssistantPage() {
           ref={composerInputHostRef}
           className="px-3 pb-1 pt-2.5"
           onSelect={event => {
-            // 光标锚点跟踪：select 事件从内部 textarea 冒泡（含点击/方向键移动）
+            // 光标锚点跟踪：select 事件从内部 textarea 冒泡（含点击/方向键移动）；
+            // 同时标记「用户放置过光标」——快捷内容据此区分插入锚点与拼接到末尾
             const target = event.target
             if (target instanceof HTMLTextAreaElement) {
               voiceCursorLiveRef.current = target.selectionStart ?? 0
+              composerInteractedRef.current = true
             }
           }}
           onCompositionStart={() => { voiceComposingRef.current = true }}
@@ -1147,6 +1176,20 @@ export default function SuperAssistantPage() {
                 <Mic size={16} />
               </button>
             )}
+            {/* 快捷输入：麦克风右侧，卡片列表点击即插入光标处（无光标拼末尾） */}
+            <QuickInputMenu
+              open={quickInputOpen}
+              onOpenChange={handleQuickInputOpenChange}
+              items={quickInputs.items}
+              loading={quickInputs.loading}
+              error={quickInputs.error}
+              onRetry={() => void quickInputs.refresh()}
+              onInsert={insertQuickInput}
+              onOpenSettings={() => {
+                setQuickInputOpen(false)
+                setQuickInputsSettingsOpen(true)
+              }}
+            />
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {showStop ? (
@@ -1269,6 +1312,15 @@ export default function SuperAssistantPage() {
           }, { replace: true })
         }}
       />
+      <QuickInputsDialog
+        open={quickInputsSettingsOpen}
+        onClose={() => setQuickInputsSettingsOpen(false)}
+        items={quickInputs.items}
+        onCreate={quickInputs.create}
+        onUpdate={quickInputs.update}
+        onDelete={quickInputs.remove}
+        onReorder={quickInputs.reorder}
+      />
       {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
           面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}
       <section
@@ -1354,11 +1406,12 @@ export default function SuperAssistantPage() {
             {/* 与左侧「上下文」框同一语言：1px 绿色细边框、浅绿底、无阴影。
                 背景直连胶囊同款 token：brand.soft 是纯 var 映射无 alpha 通道，
                 bg-brand-soft/80 这类透明度修饰符不生成规则（历史踩坑），var() 直挂才生效。
-                选完模型焦点留在触发器上（Radix/Chromium 下鼠标选中也会命中 :focus-visible），
-                一律去粗焦点环只保留细边——细边即焦点指示，键盘操作同样可见 */}
+                Radix 关闭下拉（选中或取消）都会把焦点程序化还给触发器并命中 :focus-visible，
+                基础组件的 2px ring 会叠加 1px 边框显得很粗且常驻——ring-0 显式压掉，
+                焦点/悬停统一用 1px brand 细边指示，与胶囊框型始终一致，键盘操作同样可见 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-36 border-brand-line bg-[var(--color-context-usage-bg)] text-xs shadow-none hover:border-brand focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
+              className="h-9 w-36 border-brand-line bg-[var(--color-context-usage-bg)] text-xs shadow-none hover:border-brand focus-visible:ring-0 focus-visible:border-brand sm:w-48 xl:w-60"
             >
               {/* 触发器只显示配置名；底座模型放在选项第二行，不再拼接撑满一行 */}
               <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'}>

@@ -623,6 +623,26 @@ class SuperAssistantWidgetConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SuperAssistantQuickInput(Base):
+    """输入框快捷内容（用户自管常用文本片段）。
+
+    sort_order 是相对展示优先级（越小越靠前）：新建追加到末尾（max+1），
+    弹窗内拖拽/上移下移经 PUT /quick-inputs/reorder 按全量顺序归一化为
+    0..n-1。并发下可能出现同值，列表排序以 (sort_order, created_at) 兜底
+    保持稳定，下一次重排即收敛。
+    """
+
+    __tablename__ = "super_assistant_quick_inputs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class SuperAssistantDelegation(Base):
     """超级会话 → 平台助手子会话的委派映射（追加式历史，latest=active）。
 

@@ -889,8 +889,11 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # /voice/status 的 GET 共 2 个操作（2 条路径）；状态响应不暴露服务器
     # 路径；cc-haha 式在线模型下载新增 /voice/model/download 与
     # /voice/model/download/cancel 的 POST 共 2 个操作（2 条路径）。
-    assert len(paths) == 108
-    assert sum(len(item) for item in paths.values()) == 139
+    # 输入框快捷内容（quick_inputs.py 子路由）新增 /quick-inputs 的
+    # list/create、/quick-inputs/{entry_id} 的 patch/delete、
+    # /quick-inputs/reorder 的 put 共 5 个操作（3 条路径）。
+    assert len(paths) == 111
+    assert sum(len(item) for item in paths.values()) == 144
     assert hashlib.sha256(payload).hexdigest() == (
-        "8493ebca5f47b01422bfc358d92987b8765b1475b1e772b54aab47fae3513445"
+        "328d138b0ea097e35e16746de0d068b12c61f457d84288953be56b8b328ec695"
     )
