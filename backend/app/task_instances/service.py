@@ -246,6 +246,13 @@ def _template_out(db: Session, template: TaskTemplate, *,
         data["spec_yaml"] = revision.spec_yaml
         # 编译产物随详情返回：前端编排页的只读 DAG 预览数据源
         data["spec_compiled"] = revision.spec_compiled
+        # 存量模板（seed/早期创建）无编译产物：读取时惰性补算（不落库），
+        # 编译失败维持 None 由前端空态降级
+        if data["spec_compiled"] is None and revision.spec_yaml:
+            try:
+                data["spec_compiled"] = compile_and_validate(revision.spec_yaml)[2]
+            except Exception:
+                data["spec_compiled"] = None
     return data
 
 

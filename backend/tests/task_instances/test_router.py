@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from app.task_instances.models import TaskTemplate, TaskTemplateRevision
 from tests.task_instances.conftest import make_spec
 
 BASE = "/api/v2/task-instances"
@@ -58,6 +59,46 @@ class TestTemplates:
         assert deleted["status"] == "deleted"
         assert client.get(f"{BASE}/templates/{template['id']}",
                           headers=auth_headers).status_code == 404
+
+    def test_legacy_null_compiled_backfilled_on_detail(
+            self, client, auth_headers, db):
+        # 存量模板（seed/早期创建）revision.spec_compiled 为空：
+        # 详情读取时惰性补算，不落库
+        template = TaskTemplate(name="legacy-tpl")
+        db.add(template)
+        db.flush()
+        revision = TaskTemplateRevision(
+            template_id=template.id, revision_no=1,
+            spec_yaml=make_spec(), spec_compiled=None,
+            canonical_hash="c" * 64)
+        db.add(revision)
+        db.flush()
+        template.latest_revision_id = revision.id
+        db.commit()
+        detail = client.get(f"{BASE}/templates/{template.id}",
+                            headers=auth_headers).json()["data"]
+        assert detail["spec_compiled"] is not None
+        assert detail["spec_compiled"].get("nodes"), "编译产物应含节点结构"
+        db.refresh(revision)
+        assert revision.spec_compiled is None, "读取补算不得写脏库内数据"
+
+    def test_legacy_invalid_yaml_degrades_to_none(
+            self, client, auth_headers, db):
+        # 无效存量 YAML：补算失败维持 None，前端空态降级，GET 不 5xx
+        template = TaskTemplate(name="broken-tpl")
+        db.add(template)
+        db.flush()
+        revision = TaskTemplateRevision(
+            template_id=template.id, revision_no=1,
+            spec_yaml="not: [valid: workflow", spec_compiled=None,
+            canonical_hash="d" * 64)
+        db.add(revision)
+        db.flush()
+        template.latest_revision_id = revision.id
+        db.commit()
+        detail = client.get(f"{BASE}/templates/{template.id}",
+                            headers=auth_headers).json()["data"]
+        assert detail["spec_compiled"] is None
 
     def test_validate_and_invalid_spec(self, client, auth_headers):
         ok = client.post(f"{BASE}/templates/validate",
