@@ -116,6 +116,18 @@ describe('stripMarkdownPreview', () => {
     assert.equal(stripMarkdownPreview('配额 2 * 3 * 5 已用尽'), '配额 2 * 3 * 5 已用尽')
     assert.equal(stripMarkdownPreview('**加粗**仍应剥离'), '加粗仍应剥离')
   })
+
+  it('未闭合围栏/反引号（服务端 200 码点截断可造成）补齐成对后整体折叠', () => {
+    // 截断砍掉闭合围栏：代码内容不漏进单行预览，也不残留孤立反引号
+    assert.equal(stripMarkdownPreview('```\n' + 'x'.repeat(60)), '')
+    // 孤立行内反引号补齐后按空处理
+    assert.equal(stripMarkdownPreview('错误码 `ETIMEDOUT'), '错误码 ETIMEDOUT')
+  })
+
+  it('截断锯齿的行首语法残留（结尾孤立 # / - 等）被收尾清理', () => {
+    assert.equal(stripMarkdownPreview('x'.repeat(198) + '\n#'), 'x'.repeat(198))
+    assert.equal(stripMarkdownPreview('y'.repeat(199) + '\n-'), 'y'.repeat(199))
+  })
 })
 
 describe('listEmptyCopy', () => {
@@ -157,10 +169,42 @@ describe('channelFailureHint', () => {
     assert.equal(channelFailureHint('422 收件人地址无效'), '参数被渠道拒绝，请检查收件人与配置格式')
   })
 
+  it('超时先于 smtp 字样判定：SMTP 主机名里的 smtp 不再把超时误导成邮箱鉴权', () => {
+    assert.equal(
+      channelFailureHint('A timeout occurred while connecting to smtp.qq.com:465'),
+      '连接超时，请检查网络或渠道地址',
+    )
+    assert.equal(channelFailureHint('SMTP 连接超时'), '连接超时，请检查网络或渠道地址')
+  })
+
+  it('永久性收件人错误先于 5xx 瞬时档：550 不再指引「稍后重试」', () => {
+    assert.equal(
+      channelFailureHint('550 5.1.1 Recipient address rejected: user not found'),
+      '参数被渠道拒绝，请检查收件人与配置格式',
+    )
+  })
+
+  it('邮箱鉴权要求邮件特征共现：webhook 的 username/登录 不误入邮箱档', () => {
+    assert.equal(channelFailureHint('参数 invalid: username'), '参数被渠道拒绝，请检查收件人与配置格式')
+  })
+
+  it('auth 词边界容忍下划线邻接（invalid_auth 等错误码走渠道鉴权档）', () => {
+    assert.equal(channelFailureHint('invalid_auth'), '渠道鉴权失败，请检查渠道密钥配置')
+    assert.equal(channelFailureHint('authentication_failed'), '渠道鉴权失败，请检查渠道密钥配置')
+  })
+
+  it('限频单独成档；最高频的 notify 拒收给定向排查提示', () => {
+    assert.equal(channelFailureHint('webhook 返回 429 Too Many Requests'), '触发渠道限频，请稍后重试或降低发送频率')
+    assert.equal(
+      channelFailureHint('渠道投递失败（notify 返回失败）'),
+      '渠道端拒收，可直发测试核对（常见：关键词过滤或机器人权限）',
+    )
+  })
+
   it('空原因给复现引导；无法归类的原文兜底到悬浮提示', () => {
     assert.equal(channelFailureHint(''), '原因未知，可直发测试消息复现')
     assert.equal(channelFailureHint('   '), '原因未知，可直发测试消息复现')
-    assert.equal(channelFailureHint('notify 返回失败'), '原因详见悬浮提示')
+    assert.equal(channelFailureHint('apprise URL 无法解析'), '原因详见悬浮提示')
   })
 })
 

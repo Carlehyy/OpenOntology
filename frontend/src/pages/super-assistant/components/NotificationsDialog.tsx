@@ -757,6 +757,9 @@ export default function NotificationsDialog({
                             onClick={() => readAllMutation.mutate()}
                             disabled={unreadCount === 0 || readAllMutation.isPending}
                             aria-label="全部已读"
+                            // 禁用态不派发 pointer 事件，Radix tooltip 悬停不出来；
+                            // 原生 title 走浏览器 hit-testing 仍可显示，补一句禁用原因
+                            title={unreadCount === 0 ? '暂无未读消息' : undefined}
                             className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                             data-notifications-read-all
                           >
@@ -833,8 +836,9 @@ export default function NotificationsDialog({
                                   : item.isRead
                                     ? 'hover:bg-[var(--color-bg-hover)]'
                                     // 品牌软底令牌不带 alpha 通道（tailwind 的 /N 修饰符对裸 var 不生效），
-                                    // 半透明档用 color-mix 现场合成；30% 与选中态拉开层次，未读另有标题加粗双信号
-                                    : 'bg-[color-mix(in_srgb,var(--color-accent-soft)_30%,transparent)] hover:bg-brand-soft'
+                                    // 半透明档用 color-mix 现场合成；未读 35% / 悬停 60% / 选中 100%
+                                    // 三档递进——悬停与选中必须可区分（窄屏单栏下 hover≠选中）
+                                    : 'bg-[color-mix(in_srgb,var(--color-accent-soft)_35%,transparent)] hover:bg-[color-mix(in_srgb,var(--color-accent-soft)_60%,transparent)]'
                               }`}
                             >
                               {/* urgent 左缘色条：优先级不止靠 6px 圆点的颜色编码（色弱不可辨），有无色条是可扫视的二值信号 */}
@@ -854,7 +858,7 @@ export default function NotificationsDialog({
                                 )}
                               </span>
                               {previewText && (
-                                <span className={`mt-0.5 block truncate text-xs ${item.isRead ? 'text-[var(--color-text-tertiary)]' : 'text-[var(--color-text-secondary)]'}`}>
+                                <span data-notifications-preview className={`mt-0.5 block truncate text-xs ${item.isRead ? 'text-[var(--color-text-tertiary)]' : 'text-[var(--color-text-secondary)]'}`}>
                                   {previewText}
                                 </span>
                               )}

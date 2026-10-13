@@ -96,7 +96,12 @@ export function isPlatformMediaSrc(src: string | undefined): boolean {
  * 这类两侧贴字母/数字/空格的符号不当强调处理。
  */
 export function stripMarkdownPreview(text: string): string {
-  return text
+  // 服务端按 200 码点截断可能砍出未闭合的围栏/反引号：先补齐成对再剥离，
+  // 否则围栏正则（```…```）不命中，代码内容会带残留反引号漏进单行预览
+  let source = text
+  if (((source.match(/```/g) ?? []).length) % 2 === 1) source += '\n```'
+  if (((source.match(/`/g) ?? []).length) % 2 === 1) source += '`'
+  return source
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`([^`]*)`/g, '$1')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
@@ -114,6 +119,8 @@ export function stripMarkdownPreview(text: string): string {
     .replace(/[\r\n]+/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim()
+    // 截断还可能把行首语法切成结尾孤立标点（如尾部残留 "#" 或 "-"），收尾清一次
+    .replace(/\s*[#>*_~`|-]+$/, '')
 }
 
 export interface ListEmptyCopy {
@@ -151,18 +158,32 @@ export function listEmptyCopy(tab: string, totalCount: number): ListEmptyCopy {
  * 渠道最近一次投递失败的可行动摘要：lastError 原文常带「渠道投递失败（…）」
  * 包装与内部术语（如 notify 返回失败），行内只给去重后的行动化提示，
  * 原文留给 title 悬浮层（悬停可见完整上下文）。
+ * 分支顺序即优先级（对抗审查 2026-10-13 定稿）：超时先于 smtp 字样（SMTP
+ * 主机名几乎总含 "smtp"，放后面会让超时档不可达）；邮箱鉴权先于渠道鉴权但
+ * 要求邮件特征共现（否则 webhook 的 username/登录 会误入）；收件人/参数档
+ * 先于 5xx 瞬时档（550/554 等永久性收件人错误重试无效）。
  */
 export function channelFailureHint(lastError: string): string {
   const raw = lastError.trim()
   if (!raw) return '原因未知，可直发测试消息复现'
-  // 去掉与状态行重复的「投递失败」包装，取内层原因做模式归类
-  const inner = raw.replace(/^渠道投递失败[（(]/, '').replace(/[)）]$/, '').trim() || raw
-  // 词边界防误伤：如「Unauthorized」包含 auth 子串但不是邮箱鉴权失败
-  if (/smtp|授权码|\bauth(entication)?\b|535|登录|username|password/i.test(inner)) return '邮箱鉴权失败，请检查发件邮箱账号与授权码'
-  if (/\b40[13]\b|鉴权|token|密钥|api[_ -]?key/i.test(inner)) return '渠道鉴权失败，请检查渠道密钥配置'
+  // 成对剥离「渠道投递失败（…）」包装：首尾括号必须配对，
+  // 不做盲剥尾括号（「连接超时（代理）」这类自然语句会被破坏）
+  const wrapped = raw.match(/^渠道投递失败[（(]([\s\S]*)[)）]$/)
+  const inner = (wrapped?.[1] ?? raw).trim() || raw
   if (/超时|timeout|timed?\s*out/i.test(inner)) return '连接超时，请检查网络或渠道地址'
+  if (/限频|rate\s*limit|\b429\b/i.test(inner)) return '触发渠道限频，请稍后重试或降低发送频率'
+  // 邮箱鉴权：要求邮件特征共现（smtp/授权码/535/@），auth 在此语境下放宽为子串匹配
+  if (/smtp|邮件|邮箱|授权码|\b535\b|@/i.test(inner) && /授权码|登录|username|password|auth/i.test(inner)) {
+    return '邮箱鉴权失败，请检查发件邮箱账号与授权码'
+  }
+  // 渠道鉴权：auth 词边界允许下划线邻接（invalid_auth / authentication_failed 这类错误码）
+  if (/\b40[13]\b|鉴权|token|密钥|api[_ -]?key|(?<![A-Za-z])auth(entication)?(?![A-Za-z])/i.test(inner)) {
+    return '渠道鉴权失败，请检查渠道密钥配置'
+  }
+  if (/收件人|recipient|invalid|参数|格式|\b4\d{2}\b/i.test(inner)) return '参数被渠道拒绝，请检查收件人与配置格式'
   if (/\b5\d{2}\b|服务(暂时)?不可用|internal error/i.test(inner)) return '渠道服务暂不可用，可稍后重试或直发测试'
-  if (/\b4\d{2}\b|参数|格式|收件人|invalid|recipient/i.test(inner)) return '参数被渠道拒绝，请检查收件人与配置格式'
+  // apprise notify() 返回 False 是最高频失败（渠道端拒收），原文无信息量，给定向排查提示
+  if (/notify/i.test(inner)) return '渠道端拒收，可直发测试核对（常见：关键词过滤或机器人权限）'
   return '原因详见悬浮提示'
 }
 

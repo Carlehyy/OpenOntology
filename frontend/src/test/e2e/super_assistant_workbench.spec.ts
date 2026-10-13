@@ -74,7 +74,7 @@ interface NotificationFixtureRow {
   attachmentCount: number
 }
 const notificationsFixture: NotificationFixtureRow[] = [
-  { id: 'n-1', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '数据任务失败：供应商每日同步', priority: 'high', isRead: false, isStarred: false, isArchived: false, readAt: null, starredAt: null, archivedAt: null, createdAt: at(0, 9), updatedAt: at(0, 9), bodyPreview: '# 数据库连接超时\n已重试 3 次', attachmentCount: 1 },
+  { id: 'n-1', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '数据任务失败：供应商每日同步', priority: 'high', isRead: false, isStarred: false, isArchived: false, readAt: null, starredAt: null, archivedAt: null, createdAt: at(0, 9), updatedAt: at(0, 9), bodyPreview: '# 数据任务失败报告\n\n数据库连接超时，重试 3 次后放弃。', attachmentCount: 1 },
   { id: 'n-2', eventId: 'billing:inc-1', sourceSystem: 'billing', sourceType: 'ingest', title: '账单系统异常告警', priority: 'urgent', isRead: false, isStarred: true, isArchived: false, readAt: null, starredAt: at(1, 9), archivedAt: null, createdAt: at(1, 9), updatedAt: at(1, 9), bodyPreview: '本月账单金额环比上涨 300%', attachmentCount: 0 },
   { id: 'n-3', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '历史巡检完成', priority: 'low', isRead: true, isStarred: false, isArchived: true, readAt: at(2, 8), starredAt: null, archivedAt: at(2, 8), createdAt: at(2, 8), updatedAt: at(2, 8), bodyPreview: '例行巡检完成', attachmentCount: 0 },
 ]
@@ -1204,10 +1204,10 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
 
   // urgent 带左缘色条锚点（优先级不止 6px 圆点的颜色编码，有无色条是二值信号）
   await expect(page.locator('[data-notifications-item="n-2"]')).toHaveAttribute('data-notifications-priority', 'urgent')
-  // 列表预览按行首锚定剥离 Markdown 语法：服务端预览保留原始换行，剥离由前端完成
-  const previewText = await page.locator('[data-notifications-item="n-1"]').innerText()
-  expect(previewText).toContain('数据库连接超时 已重试 3 次')
-  expect(previewText).not.toContain('#')
+  // 列表预览按行首锚定剥离 Markdown 语法：预览从正文派生（含标题行与换行），剥离由前端完成
+  const preview = page.locator('[data-notifications-item="n-1"] [data-notifications-preview]')
+  await expect(preview).toContainText('数据任务失败报告 数据库连接超时')
+  await expect(preview).not.toContainText('#')
 
   // tab 筛选语义：已标记仅 n-2；已归档仅 n-3；全部 = 真全量（n-3 也可见）
   await page.locator('[data-notifications-tab="starred"]').click()
@@ -1354,8 +1354,10 @@ test('消息通知：未读空态——引导查看全部历史消息，一键�
   await expect(emptyState).toBeVisible()
   await expect(emptyState).toContainText('没有未读消息')
   await expect(emptyState).toContainText('查看全部 3 条消息')
-  // 「全部已读」在无未读时禁用（图标化按钮仍可定位）
+  // 「全部已读」在无未读时禁用（图标化按钮仍可定位）；禁用态不派发 pointer 事件、
+  // tooltip 悬停不出，用原生 title 提示禁用原因
   await expect(page.locator('[data-notifications-read-all]')).toBeDisabled()
+  await expect(page.locator('[data-notifications-read-all]')).toHaveAttribute('title', '暂无未读消息')
 
   // 一键引导：切到「全部」并可见历史消息
   await page.locator('[data-notifications-empty-all]').click()
