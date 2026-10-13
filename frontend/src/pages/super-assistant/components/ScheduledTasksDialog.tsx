@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft, CheckCircle2, Clock, Loader2, Pause, Play, Plus, Trash2, XCircle,
 } from 'lucide-react'
@@ -10,7 +10,9 @@ import {
   type ScheduledRunStatus,
   type ScheduledTask,
 } from '@/api/superAssistant'
+import { Alert } from '@/components/ui/Alert'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { LoadingState } from '@/components/ui/LoadingState'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -19,52 +21,11 @@ import { toast } from 'sonner'
 
 import { DialogShell } from './AssistantConfiguration'
 import { errorText } from './assistantPanelUtils'
-
-const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'] as const
-
-const STATUS_LABEL: Record<ScheduledRunStatus, string> = {
-  queued: '排队中',
-  running: '执行中',
-  completed: '已完成',
-  failed: '失败',
-  skipped: '已跳过',
-}
-
-function pad2(n: number) {
-  return String(n).padStart(2, '0')
-}
-
-function scheduleLabel(task: ScheduledTask) {
-  if (task.schedule_kind === 'once') {
-    return task.run_at ? `一次 · ${formatDateTime(task.run_at)}` : '执行一次'
-  }
-  const time = `${pad2(task.hour ?? 0)}:${pad2(task.minute ?? 0)}`
-  if (task.schedule_kind === 'daily') return `每天 ${time}`
-  return `每${WEEKDAYS[task.weekday ?? 0] ?? '周'} ${time}`
-}
-
-function shanghaiDatetimeLocal(from = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(from)
-  const get = (type: string) => parts.find(part => part.type === type)?.value || '00'
-  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`
-}
-
-function defaultDatetimeLocal() {
-  return shanghaiDatetimeLocal(new Date(Date.now() + 30 * 60 * 1000))
-}
-
-function shanghaiIsoFromLocal(value: string) {
-  if (!value) return null
-  return value.length === 16 ? `${value}:00+08:00` : `${value}+08:00`
-}
+import {
+  STATUS_LABEL, WEEKDAYS, freshCreateForm, isCreateFormDirty, scheduleLabel,
+  shanghaiDatetimeLocal, shanghaiIsoFromLocal, validateCreateForm,
+  type CreateFormState, type CreateFormValidation,
+} from './scheduledTaskLogic'
 
 export default function ScheduledTasksDialog({
   open,
@@ -90,11 +51,14 @@ export default function ScheduledTasksDialog({
   const [runDetail, setRunDetail] = useState<ScheduledRun | null>(null)
   const [deleting, setDeleting] = useState<ScheduledTask | null>(null)
   const [deletePending, setDeletePending] = useState(false)
+  const [discardOpen, setDiscardOpen] = useState(false)
+  const [formBaseline, setFormBaseline] = useState<CreateFormState>(() => freshCreateForm())
+  const [validation, setValidation] = useState<CreateFormValidation>({})
 
   const [title, setTitle] = useState('')
   const [instruction, setInstruction] = useState('')
   const [kind, setKind] = useState<ScheduledKind>('once')
-  const [onceAt, setOnceAt] = useState(defaultDatetimeLocal)
+  const [onceAt, setOnceAt] = useState(() => freshCreateForm().onceAt)
   const [timeOfDay, setTimeOfDay] = useState('09:00')
   const [weekday, setWeekday] = useState('0')
 
@@ -104,12 +68,15 @@ export default function ScheduledTasksDialog({
   )
 
   const resetForm = () => {
-    setTitle('')
-    setInstruction('')
-    setKind('once')
-    setOnceAt(defaultDatetimeLocal())
-    setTimeOfDay('09:00')
-    setWeekday('0')
+    const fresh = freshCreateForm()
+    setTitle(fresh.title)
+    setInstruction(fresh.instruction)
+    setKind(fresh.kind)
+    setOnceAt(fresh.onceAt)
+    setTimeOfDay(fresh.timeOfDay)
+    setWeekday(fresh.weekday)
+    setFormBaseline(fresh)
+    setValidation({})
     setError('')
   }
 
@@ -192,8 +159,9 @@ export default function ScheduledTasksDialog({
   }
 
   const create = async () => {
-    if (!instruction.trim()) { setError('请填写指令内容'); return }
-    if (kind === 'once' && !onceAt) { setError('请选择触发时间'); return }
+    const errors = validateCreateForm({ title, instruction, kind, onceAt, timeOfDay, weekday })
+    setValidation(errors)
+    if (errors.instruction || errors.onceAt) return
     setSaving(true); setError('')
     try {
       const created = await superAssistantApi.createScheduledTask(payloadFromForm())
@@ -246,13 +214,44 @@ export default function ScheduledTasksDialog({
     setRunDetail(null)
   }
 
+  /** P0-2（UX 评审）：脏表单下 Esc/遮罩/关闭符统一走二次确认，防误触丢失已填内容 */
+  const requestClose = () => {
+    if (saving) return
+    if (creating && isCreateFormDirty({ title, instruction, kind, onceAt, timeOfDay, weekday }, formBaseline)) {
+      setDiscardOpen(true)
+      return
+    }
+    onClose()
+  }
+
+  const discardCreate = () => {
+    setDiscardOpen(false)
+    resetForm()
+    setCreating(false)
+    onClose()
+  }
+
+  /** P0-4：错误锚定字段后，输入即清除对应错误，避免红色提示挂到下次提交 */
+  const changeInstruction = (value: string) => {
+    setInstruction(value)
+    if (validation.instruction) setValidation(current => ({ ...current, instruction: undefined }))
+  }
+  const changeOnceAt = (value: string) => {
+    setOnceAt(value)
+    if (validation.onceAt) setValidation(current => ({ ...current, onceAt: undefined }))
+  }
+  const changeKind = (value: ScheduledKind) => {
+    setKind(value)
+    setValidation({})
+  }
+
   return (
     <>
       <DialogShell
         size="wide"
         title="定时任务"
-        description="到点后助手在后台执行。需确认的操作不会替你点头；你已关闭确认的外部工具会按指令直接执行。"
-        onClose={onClose}
+        description="到点后自动执行。需要确认的操作会跳过并记录，不会代替你确认。"
+        onClose={requestClose}
         icon={<Clock size={18} />}
         contentClassName="h-[min(82dvh,44rem)]"
       >
@@ -268,12 +267,10 @@ export default function ScheduledTasksDialog({
               </button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-              {loading && (
-                <p className="px-2 py-6 text-center text-xs text-[var(--color-text-tertiary)]">加载中…</p>
-              )}
+              {loading && <LoadingState className="py-6" message="加载中…" />}
               {!loading && tasks.length === 0 && (
                 <p className="px-2 py-6 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  还没有定时任务。创建一个，到点后助手会在后台做完。
+                  还没有定时任务
                 </p>
               )}
               {tasks.map(task => {
@@ -290,7 +287,7 @@ export default function ScheduledTasksDialog({
                     <div className={`truncate text-xs ${current ? 'font-medium text-brand-ink' : 'text-[var(--color-text-primary)]'}`}>
                       {task.title}
                     </div>
-                    <div className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]">
+                    <div className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]">
                       {task.enabled ? scheduleLabel(task) : '已暂停'}
                       {task.last_run_status ? ` · ${STATUS_LABEL[task.last_run_status]}` : ''}
                     </div>
@@ -302,16 +299,19 @@ export default function ScheduledTasksDialog({
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             {error && (
-              <p className="shrink-0 border-b border-[var(--color-border)] px-5 py-2 text-xs text-[var(--color-danger)]">{error}</p>
+              <div className="shrink-0 border-b border-[var(--color-border)] px-5 py-3">
+                <Alert variant="danger" role="alert">{error}</Alert>
+              </div>
             )}
             {creating ? (
               <CreateForm
                 title={title} setTitle={setTitle}
-                instruction={instruction} setInstruction={setInstruction}
-                kind={kind} setKind={setKind}
-                onceAt={onceAt} setOnceAt={setOnceAt}
+                instruction={instruction} setInstruction={changeInstruction}
+                kind={kind} setKind={changeKind}
+                onceAt={onceAt} setOnceAt={changeOnceAt}
                 timeOfDay={timeOfDay} setTimeOfDay={setTimeOfDay}
                 weekday={weekday} setWeekday={setWeekday}
+                validation={validation}
                 saving={saving}
                 onSubmit={() => void create()}
               />
@@ -333,7 +333,7 @@ export default function ScheduledTasksDialog({
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
                 <Clock size={22} className="text-[var(--color-text-tertiary)]" />
-                <p className="text-sm text-[var(--color-text-secondary)]">选择左侧任务查看计划与执行，或创建一个新的定时任务。</p>
+                <p className="text-sm text-[var(--color-text-secondary)]">让助手定时替你做事，例如「每天 9 点汇总昨天的待办并给出建议」。</p>
               </div>
             )}
           </div>
@@ -350,13 +350,24 @@ export default function ScheduledTasksDialog({
         confirmText="删除"
         variant="danger"
       />
+
+      <ConfirmDialog
+        open={discardOpen}
+        onClose={() => setDiscardOpen(false)}
+        onConfirm={discardCreate}
+        title="放弃创建？"
+        description="已填写的内容将丢失。"
+        confirmText="放弃"
+        cancelText="继续编辑"
+        variant="warning"
+      />
     </>
   )
 }
 
 function CreateForm({
   title, setTitle, instruction, setInstruction, kind, setKind,
-  onceAt, setOnceAt, timeOfDay, setTimeOfDay, weekday, setWeekday, saving, onSubmit,
+  onceAt, setOnceAt, timeOfDay, setTimeOfDay, weekday, setWeekday, validation, saving, onSubmit,
 }: {
   title: string
   setTitle: (value: string) => void
@@ -370,9 +381,12 @@ function CreateForm({
   setTimeOfDay: (value: string) => void
   weekday: string
   setWeekday: (value: string) => void
+  validation: CreateFormValidation
   saving: boolean
   onSubmit: () => void
 }) {
+  const inputClass = (invalid?: string) =>
+    `mt-1.5 h-9 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${invalid ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]'}`
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
@@ -382,7 +396,7 @@ function CreateForm({
             value={title}
             onChange={event => setTitle(event.target.value)}
             placeholder="可留空，将用指令前几字作为标题"
-            className="mt-1.5 h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className={inputClass()}
           />
         </label>
         <div className="space-y-1.5">
@@ -397,15 +411,25 @@ function CreateForm({
           </Select>
         </div>
         {kind === 'once' && (
-          <label className="block text-xs font-medium text-[var(--color-text-primary)]">
-            触发时间（北京时间）
+          <div>
+            <label htmlFor="scheduled-once-at" className="block text-xs font-medium text-[var(--color-text-primary)]">
+              执行时间（北京时间）
+            </label>
             <input
+              id="scheduled-once-at"
               type="datetime-local"
               value={onceAt}
+              min={shanghaiDatetimeLocal()}
               onChange={event => setOnceAt(event.target.value)}
-              className="mt-1.5 h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-describedby={validation.onceAt ? 'scheduled-once-at-error' : undefined}
+              className={inputClass(validation.onceAt)}
             />
-          </label>
+            {validation.onceAt && (
+              <p id="scheduled-once-at-error" role="alert" className="mt-1.5 text-xs leading-5 text-[var(--color-danger)]">
+                {validation.onceAt}
+              </p>
+            )}
+          </div>
         )}
         {kind !== 'once' && (
           <div className="flex gap-3">
@@ -423,29 +447,38 @@ function CreateForm({
               </div>
             )}
             <label className="block min-w-0 flex-1 text-xs font-medium text-[var(--color-text-primary)]">
-              时间（北京时间）
+              执行时间（北京时间）
               <input
                 type="time"
                 value={timeOfDay}
                 onChange={event => setTimeOfDay(event.target.value)}
-                className="mt-1.5 h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className={inputClass()}
               />
             </label>
           </div>
         )}
-        <label className="block text-xs font-medium text-[var(--color-text-primary)]">
-          指令内容
+        <div>
+          <label htmlFor="scheduled-instruction" className="block text-xs font-medium text-[var(--color-text-primary)]">
+            指令内容
+          </label>
           <textarea
+            id="scheduled-instruction"
             value={instruction}
             onChange={event => setInstruction(event.target.value)}
             rows={8}
             placeholder="到点后助手会按这段指令在后台执行，例如：汇总昨天的待办并给出建议。"
-            className="mt-1.5 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-describedby={validation.instruction ? 'scheduled-instruction-error' : undefined}
+            className={`mt-1.5 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${validation.instruction ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]'}`}
           />
-        </label>
-        <p className="text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-          浏览器、委派等平台写操作不会在后台自动执行。外部工具是否直接调用，以该工具的「需要确认」为准。
-        </p>
+          {validation.instruction && (
+            <p id="scheduled-instruction-error" role="alert" className="mt-1.5 text-xs leading-5 text-[var(--color-danger)]">
+              {validation.instruction}
+            </p>
+          )}
+          <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
+            浏览器、委派等平台写操作到点不会自动执行；外部工具是否直接执行，取决于其「需要确认」设置。
+          </p>
+        </div>
       </div>
       <footer className="flex shrink-0 justify-end border-t border-[var(--color-border)] px-5 py-3.5">
         <button
@@ -470,21 +503,24 @@ function TaskDetail({
   onDelete: () => void
   onOpenRun: (id: string) => void
 }) {
+  // P2-6：详情挂载（创建成功/深链打开）后焦点落到标题，键盘与读屏用户免于重新 Tab 定位
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  useEffect(() => { titleRef.current?.focus() }, [])
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 border-b border-[var(--color-border)] px-5 py-4">
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{task.title}</h3>
+            <h3 ref={titleRef} tabIndex={-1} className="truncate text-sm font-semibold text-[var(--color-text-primary)] outline-none">{task.title}</h3>
             <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
               {scheduleLabel(task)}
-              {task.next_run_at && task.enabled ? ` · 下次 ${formatDateTime(task.next_run_at)}` : ''}
+              {task.next_run_at && task.enabled && task.schedule_kind !== 'once' ? ` · 下次 ${formatDateTime(task.next_run_at)}` : ''}
             </p>
           </div>
           <button
             type="button"
             onClick={onToggle}
-            className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+            className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
           >
             {task.enabled ? <Pause size={12} /> : <Play size={12} />}
             {task.enabled ? '暂停' : '启用'}
@@ -492,15 +528,15 @@ function TaskDetail({
           <button
             type="button"
             onClick={onDelete}
-            className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 text-[11px] text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]"
+            className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]"
           >
             <Trash2 size={12} /> 删除
           </button>
         </div>
-        <p className="mt-3 max-h-24 overflow-y-auto whitespace-pre-wrap text-xs leading-5 text-[var(--color-text-secondary)]">{task.instruction}</p>
+        <p className="mt-3 max-h-24 overflow-y-auto whitespace-pre-wrap border-l-2 border-[var(--color-border-active)] pl-3 text-[13px] leading-6 text-[var(--color-text-secondary)]">{task.instruction}</p>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <p className="px-2 pb-2 text-[11px] text-[var(--color-text-tertiary)]">执行记录</p>
+        <p className="px-2 pb-2 text-xs text-[var(--color-text-tertiary)]">执行记录</p>
         {runs.length === 0 && (
           <p className="px-2 py-8 text-center text-xs text-[var(--color-text-tertiary)]">还没有执行过。到点后会出现在这里。</p>
         )}
@@ -515,7 +551,7 @@ function TaskDetail({
             <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-primary)]">
               {formatDateTime(run.scheduled_for)}
             </span>
-            <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">{STATUS_LABEL[run.status]}</span>
+            <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">{STATUS_LABEL[run.status]}</span>
           </button>
         ))}
       </div>
@@ -543,7 +579,7 @@ function RunDetail({
         </button>
       </div>
       {!run ? (
-        <div className="flex flex-1 items-center justify-center text-xs text-[var(--color-text-tertiary)]">加载执行详情…</div>
+        <LoadingState className="min-h-0 flex-1" message="加载执行详情…" />
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           <div className="flex items-center gap-2">
@@ -552,13 +588,13 @@ function RunDetail({
             <span className="text-xs text-[var(--color-text-tertiary)]">{formatDateTime(run.scheduled_for)}</span>
           </div>
           {run.started_at && (
-            <p className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">
+            <p className="mt-2 text-xs text-[var(--color-text-tertiary)]">
               开始 {formatDateTime(run.started_at, { seconds: true })}
               {run.finished_at ? ` · 结束 ${formatDateTime(run.finished_at, { seconds: true })}` : ''}
             </p>
           )}
           {run.error && (
-            <p className="mt-3 rounded-lg border border-[var(--color-danger)]/20 bg-[var(--color-danger-bg)] px-3 py-2 text-xs leading-5 text-[var(--color-danger)]">{run.error}</p>
+            <p className="mt-3 rounded-lg border border-[var(--color-danger)] bg-[var(--color-danger-bg)] px-3 py-2 text-xs leading-5 text-[var(--color-danger)]">{run.error}</p>
           )}
           {run.result_summary && (
             <pre className="mt-3 whitespace-pre-wrap rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 text-xs leading-5 text-[var(--color-text-primary)]">{run.result_summary}</pre>

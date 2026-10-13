@@ -1676,7 +1676,7 @@ test('定时任务弹窗：查看已有计划、创建、点进某次执行', as
   await expect(dialog.getByRole('button', { name: '在会话中继续' })).toBeVisible()
 
   await page.getByRole('button', { name: '创建定时任务' }).click()
-  await expect(dialog.getByText(/外部工具是否直接调用/)).toBeVisible()
+  await expect(dialog.getByText(/外部工具是否直接执行/)).toBeVisible()
   await dialog.getByPlaceholder('到点后助手会按这段指令在后台执行').fill('明早汇总待办')
   await page.getByRole('button', { name: '创建', exact: true }).click()
   await expect(dialog.getByText('明早汇总待办')).toBeVisible()
@@ -1702,6 +1702,41 @@ test('multica 命令提示：输入 / 即列出全部，前缀收窄、点选填
   await page.goto('/#/super-assistant')
 
   const composer = page.getByRole('textbox', { name: '向超级助手发送消息' })
+test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留、放弃后清空', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: '定时任务' }).click()
+  const dialog = page.getByTestId('scheduled-tasks-dialog')
+  await expect(dialog).toBeVisible()
+
+  await page.getByRole('button', { name: '创建定时任务' }).click()
+  const titleInput = dialog.getByPlaceholder('可留空，将用指令前几字作为标题')
+  await titleInput.fill('脏数据保护验证')
+  await dialog.getByPlaceholder('到点后助手会按这段指令在后台执行').fill('汇总昨天的待办')
+
+  // 脏表单下 Esc 不直接关闭：先出现「放弃创建？」确认，原表单仍在
+  await page.keyboard.press('Escape')
+  const discard = page.getByRole('dialog').filter({ hasText: '放弃创建？' })
+  await expect(discard).toBeVisible()
+  await expect(dialog).toBeVisible()
+  await discard.getByRole('button', { name: '继续编辑' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(titleInput).toHaveValue('脏数据保护验证')
+
+  // 再次 Esc 并放弃：弹窗关闭，重开后表单为干净初始态
+  await page.keyboard.press('Escape')
+  await discard.getByRole('button', { name: '放弃' }).click()
+  await expect(dialog).toHaveCount(0)
+
+  await page.getByRole('button', { name: '定时任务' }).click()
+  await expect(dialog).toBeVisible()
+  await page.getByRole('button', { name: '创建定时任务' }).click()
+  await expect(titleInput).toHaveValue('')
+  await expect(dialog.getByPlaceholder('到点后助手会按这段指令在后台执行')).toHaveValue('')
+})
+
   const hints = page.getByTestId('multica-command-hints')
 
   // 仅输入 / 即列出全部可用命令（由已启用集成的命令目录驱动）
