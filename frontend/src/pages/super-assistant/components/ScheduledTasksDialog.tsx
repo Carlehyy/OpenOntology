@@ -68,6 +68,15 @@ export default function ScheduledTasksDialog({
     [tasks, selectedTaskId],
   )
 
+  // 深链 effect 的 .then 闭包捕获的是 effect 运行那次渲染的快照；列表请求在途
+  // 期间用户可能已进入创建态输入——判脏必须读最新草稿（对抗复审：在途窗口静默丢草稿）
+  const draftDirtyRef = useRef(false)
+  useEffect(() => {
+    draftDirtyRef.current = creating && isCreateFormDirty(
+      { title, instruction, kind, onceAt, timeOfDay, weekday }, formBaseline,
+    )
+  })
+
   const resetForm = useCallback(() => {
     const fresh = freshCreateForm()
     setTitle(fresh.title)
@@ -97,10 +106,7 @@ export default function ScheduledTasksDialog({
         if (!alive) return
         if (initialTaskId && data.some(item => item.id === initialTaskId)) {
           // 脏草稿优先于深链自动选中：URL 参数变化（后退/前进）不得静默丢弃用户输入
-          const dirty = creating && isCreateFormDirty(
-            { title, instruction, kind, onceAt, timeOfDay, weekday }, formBaseline,
-          )
-          if (!dirty) {
+          if (!draftDirtyRef.current) {
             setSelectedTaskId(initialTaskId)
             setCreating(false)
           }
@@ -193,7 +199,11 @@ export default function ScheduledTasksDialog({
       resetForm()
       toast.success('定时任务已创建', { description: '到点后会在后台执行，结果会出现在本弹窗的执行记录里。' })
     } catch (err) {
-      setError(errorText(err, '创建失败'))
+      // axios 超时（ECONNABORTED）无 response，errorText 会透出英文技术串；
+      // 客户端超时不回滚服务端，须提示用户先查列表避免重复创建
+      setError((err as { code?: string })?.code === 'ECONNABORTED'
+        ? '创建请求超时。请稍后重开列表确认是否已创建，避免重复创建。'
+        : errorText(err, '创建失败'))
     } finally {
       setSaving(false)
     }
@@ -537,7 +547,7 @@ function CreateForm({
           type="button"
           disabled={saving}
           onClick={onSubmit}
-          className="inline-flex h-9 min-w-28 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          className="inline-flex h-9 min-w-28 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         >
           {saving ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} 创建
         </button>

@@ -109,7 +109,8 @@ export function validateCreateForm(form: CreateFormState, now = new Date()): Cre
   if (!form.instruction.trim()) errors.instruction = '请输入到点执行的指令'
   if (form.kind === 'once') {
     if (!form.onceAt) errors.onceAt = '请选择执行时间'
-    else if (form.onceAt <= shanghaiDatetimeLocal(now)) errors.onceAt = '执行时间已过，请选择未来的时间'
+    // 带秒的 19 字符值按分钟前缀归一后再比，否则同分钟的过去值绕过拦截
+    else if (form.onceAt.slice(0, 16) <= shanghaiDatetimeLocal(now)) errors.onceAt = '执行时间已过，请选择未来的时间'
   } else if (!form.timeOfDay) {
     // time 输入清空后提交会静默创建 00:00 的任务（hour/minute 由 split('') 得 0）
     errors.timeOfDay = '请选择执行时间'

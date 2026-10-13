@@ -36,6 +36,15 @@ describe('scheduleLabel（频率摘要，S-7：once 用「单次」）', () => {
     assert.match(scheduleLabel(task()), /^单次 · \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
   })
 
+  it('once 固定瞬间按本机时区渲染：带 Z 与 naive 串（按 UTC 解析的全站约定）结果一致', () => {
+    // 独立推导期望值（不经被测函数），时区解析回归（差 8 小时）会被钉住
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const fmt = (d: Date) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
+    const expected = `单次 · ${fmt(new Date('2026-10-14T01:05:00Z'))}`
+    assert.equal(scheduleLabel(task()), expected)
+    assert.equal(scheduleLabel(task({ run_at: '2026-10-14T01:05:00' })), expected)
+  })
+
   it('once 无时间 → 仅「单次」', () => {
     assert.equal(scheduleLabel(task({ run_at: null })), '单次')
   })
@@ -140,11 +149,14 @@ describe('validateCreateForm（P0-4 字段级校验 + S-2/S-3 文案）', () => 
     assert.deepEqual(errors, { instruction: '请输入到点执行的指令', onceAt: '请选择执行时间' })
   })
 
-  it('once 执行时间已过（含等于当前分钟）→ 字段级拦截，不再依赖后端报错往返', () => {
+  it('once 执行时间已过（含等于当前分钟、带秒的 19 字符值）→ 字段级拦截', () => {
     const past = { ...base(), kind: 'once' as const, onceAt: '2026-10-14T09:05' }
     assert.equal(validateCreateForm(past, NOW).onceAt, '执行时间已过，请选择未来的时间')
     const earlier = { ...past, onceAt: '2026-10-13T09:05' }
     assert.equal(validateCreateForm(earlier, NOW).onceAt, '执行时间已过，请选择未来的时间')
+    // 带秒值按分钟前缀归一比较：同分钟的过去带秒值不得绕过
+    const withSeconds = { ...past, onceAt: '2026-10-14T09:05:30' }
+    assert.equal(validateCreateForm(withSeconds, NOW).onceAt, '执行时间已过，请选择未来的时间')
   })
 
   it('once 未来时间（默认 +30 分钟即合法）无错误', () => {

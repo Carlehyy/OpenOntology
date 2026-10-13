@@ -1680,6 +1680,8 @@ test('定时任务弹窗：查看已有计划、创建、点进某次执行', as
   await dialog.getByPlaceholder('到点后助手会按这段指令在后台执行').fill('明早汇总待办')
   await page.getByRole('button', { name: '创建', exact: true }).click()
   await expect(dialog.getByText('明早汇总待办')).toBeVisible()
+  // once 类型详情不重复展示「下次」（P1-3：下次即触发时间本身）
+  await expect(dialog.getByText(/· 下次/)).toHaveCount(0)
 })
 
 test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留、放弃后清空', async ({ page }) => {
@@ -1690,23 +1692,31 @@ test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留�
   await page.getByRole('button', { name: '定时任务' }).click()
   const dialog = page.getByTestId('scheduled-tasks-dialog')
   await expect(dialog).toBeVisible()
-
   await page.getByRole('button', { name: '创建定时任务' }).click()
   const titleInput = dialog.getByPlaceholder('可留空，将用指令前几字作为标题')
   const instructionInput = dialog.getByPlaceholder('到点后助手会按这段指令在后台执行')
   await titleInput.fill('脏数据保护验证')
   await instructionInput.fill('汇总昨天的待办')
-
-  // 脏表单下 Esc 不直接关闭：先出现「放弃创建？」确认，原表单仍在
-  await page.keyboard.press('Escape')
+  // SelectTrigger 的 aria-label（对抗审查 a11y 修补）
+  await expect(dialog.getByRole('combobox', { name: '触发方式' })).toBeVisible()
   const discard = page.getByRole('dialog').filter({ hasText: '放弃创建？' })
+
+  // 遮罩点击（全新状态、无前置确认交互）：脏表单应弹确认，「继续编辑」保留草稿
+  await page.mouse.click(5, 400)
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: '继续编辑' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(titleInput).toHaveValue('脏数据保护验证')
+
+  // Esc：脏表单不直接关闭，确认后「继续编辑」保留草稿
+  await page.keyboard.press('Escape')
   await expect(discard).toBeVisible()
   await expect(dialog).toBeVisible()
   await discard.getByRole('button', { name: '继续编辑' }).click()
   await expect(discard).toHaveCount(0)
   await expect(titleInput).toHaveValue('脏数据保护验证')
 
-  // 脏表单下点左栏任务同样走确认：继续编辑留在表单，放弃后切换到该任务详情
+  // 左栏任务切换：同样确认，「放弃」后落在该任务详情
   await dialog.getByRole('button', { name: /每日站会纪要/ }).click()
   await expect(discard).toBeVisible()
   await expect(titleInput).toHaveValue('脏数据保护验证')
@@ -1718,7 +1728,19 @@ test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留�
   await expect(dialog.getByText('执行记录')).toBeVisible()
   await expect(dialog.getByRole('heading', { name: '每日站会纪要' })).toBeVisible()
 
-  // 干净表单触发校验错误后直接 Esc 关闭：重开弹窗不得残留红色校验态
+  // 关闭符路径同样确认；放弃后弹窗关闭
+  await page.getByRole('button', { name: '创建定时任务' }).click()
+  await titleInput.fill('脏数据保护验证')
+  await page.getByRole('button', { name: '关闭' }).click()
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: '放弃' }).click()
+  await expect(dialog).toHaveCount(0)
+
+  // 重开不残留创建态：先断言再点「创建定时任务」（其自带重置，先点会掩蔽残留缺陷）
+  await page.getByRole('button', { name: '定时任务' }).click()
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByText('执行记录')).toBeVisible()
+  await expect(dialog.getByText('请输入到点执行的指令')).toHaveCount(0)
   await page.getByRole('button', { name: '创建定时任务' }).click()
   await page.getByRole('button', { name: '创建', exact: true }).click()
   await expect(dialog.getByText('请输入到点执行的指令')).toBeVisible()
@@ -1727,10 +1749,24 @@ test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留�
 
   await page.getByRole('button', { name: '定时任务' }).click()
   await expect(dialog).toBeVisible()
-  await page.getByRole('button', { name: '创建定时任务' }).click()
+  await expect(dialog.getByText('执行记录')).toBeVisible()
   await expect(dialog.getByText('请输入到点执行的指令')).toHaveCount(0)
+  await page.getByRole('button', { name: '创建定时任务' }).click()
   await expect(titleInput).toHaveValue('')
   await expect(instructionInput).toHaveValue('')
+
+  // saving 中不静默锁死：悬挂 POST 期间创建按钮禁用、Esc 给 toast 反馈且弹窗保留
+  await page.route('**/api/v2/super-assistant/scheduled-tasks', async route => {
+    if (route.request().method() === 'POST') return
+    return route.fallback()
+  })
+  await instructionInput.fill('慢创建验证')
+  await page.getByRole('button', { name: '创建', exact: true }).click()
+  await expect(page.getByRole('button', { name: '创建', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: '创建定时任务' })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(page.getByText('正在创建定时任务，请稍候…')).toBeVisible()
+  await expect(dialog).toBeVisible()
 })
 
 test('multica 命令提示：未配置/未启用时输入 / 也不提供任何命令', async ({ page }) => {
