@@ -18,7 +18,7 @@ const DRAG_MIME = 'application/x-openontology-quick-input'
 
 /**
  * 快捷内容设置弹窗：新增/编辑/删除 + 展示优先级排序。
- * 列表顺序即小卡片的展示顺序（上者优先），拖拽手柄与↑↓按钮是同一重排
+ * 列表顺序即快捷内容的展示顺序（上者优先），拖拽手柄与↑↓按钮是同一重排
  * 通道的两个入口（键盘等价路径）；重排乐观更新、失败回滚由 useQuickInputs
  * 数据源负责，这里只 toast。布局语言对齐 ScheduledTasksDialog。
  */
@@ -77,6 +77,17 @@ export default function QuickInputsDialog({
     if (editingId) editTitleRef.current?.focus()
   }, [editingId])
 
+  // 编辑收起（保存/取消）后回焦该行「编辑」按钮：焦点所在的提交按钮随行内表单卸载，
+  // 不主动归还的话键盘焦点会掉回弹窗容器，长列表需从头 Tab
+  const editEntryRefs = useRef(new Map<string, HTMLButtonElement>())
+  const [pendingFocusEditId, setPendingFocusEditId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!editingId && pendingFocusEditId) {
+      editEntryRefs.current.get(pendingFocusEditId)?.focus()
+      setPendingFocusEditId(null)
+    }
+  }, [editingId, pendingFocusEditId])
+
   if (!open) return null
 
   const closeDialog = () => {
@@ -87,6 +98,7 @@ export default function QuickInputsDialog({
     setCreateContent('')
     setCreateError('')
     setCreateErrorField(null)
+    setPendingFocusEditId(null)
     setDragId(null)
     setDropIndex(null)
     onClose()
@@ -162,6 +174,7 @@ export default function QuickInputsDialog({
     try {
       await onUpdate(editingId, { title: editTitle.trim(), content: editContent.trim() })
       setEditingId(null)
+      setPendingFocusEditId(editingId)
       toast.success('快捷内容已保存')
     }
     catch (err) {
@@ -318,7 +331,7 @@ export default function QuickInputsDialog({
                               contentRef={editContentRef}
                             />
                             <div className="mt-3 flex justify-end gap-2">
-                              <Button type="button" variant="outline" onClick={() => setEditingId(null)}>
+                              <Button type="button" variant="outline" onClick={() => { setPendingFocusEditId(item.id); setEditingId(null) }}>
                                 取消
                               </Button>
                               <Button type="submit" loading={savingEdit} data-testid="quick-input-edit-submit">
@@ -372,6 +385,10 @@ export default function QuickInputsDialog({
                               </button>
                               <button
                                 type="button"
+                                ref={el => {
+                                  if (el) editEntryRefs.current.set(item.id, el)
+                                  else editEntryRefs.current.delete(item.id)
+                                }}
                                 onClick={() => startEdit(item)}
                                 aria-label={`编辑 ${item.title}`}
                                 title="编辑"

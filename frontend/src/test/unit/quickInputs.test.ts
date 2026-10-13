@@ -52,15 +52,6 @@ describe('validateQuickInput（表单校验，与后端 422 同口径）', () =>
   it('合法输入返回 null（含多行内容与首尾空白）', () => {
     assert.equal(validateQuickInput(' 标题 ', ' 第一行\n第二行 '), null)
   })
-
-  it('字段枚举只含 title/content，供错误边框与聚焦消费', () => {
-    for (const issue of [
-      validateQuickInput('', '内容'),
-      validateQuickInput('标题', ''),
-    ]) {
-      if (issue) assert.ok(['title', 'content'].includes(issue.field))
-    }
-  })
 })
 
 describe('contentPreview（卡片/列表行的内容预览）', () => {

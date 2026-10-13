@@ -76,7 +76,7 @@ export default function QuickInputMenu({
             <button
               type="button"
               onClick={onRetry}
-              className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
+              className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               重试
             </button>
