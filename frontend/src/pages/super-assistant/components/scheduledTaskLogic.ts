@@ -96,12 +96,23 @@ export function isCreateFormDirty(form: CreateFormState, baseline: CreateFormSta
 export interface CreateFormValidation {
   instruction?: string
   onceAt?: string
+  timeOfDay?: string
 }
 
-/** 字段级校验：错误文案与字段 label（「执行时间」）对齐（S-2/S-3） */
-export function validateCreateForm(form: CreateFormState): CreateFormValidation {
+/**
+ * 字段级校验：错误文案与字段 label（「执行时间」）对齐（S-2/S-3）。
+ * now 可注入固定时刻供单测；过去时间在控件层拦截（min 只约束选择器，
+ * 手动键入的过去值仍会提交，须在此兜住——对抗审查发现 6）。
+ */
+export function validateCreateForm(form: CreateFormState, now = new Date()): CreateFormValidation {
   const errors: CreateFormValidation = {}
   if (!form.instruction.trim()) errors.instruction = '请输入到点执行的指令'
-  if (form.kind === 'once' && !form.onceAt) errors.onceAt = '请选择执行时间'
+  if (form.kind === 'once') {
+    if (!form.onceAt) errors.onceAt = '请选择执行时间'
+    else if (form.onceAt <= shanghaiDatetimeLocal(now)) errors.onceAt = '执行时间已过，请选择未来的时间'
+  } else if (!form.timeOfDay) {
+    // time 输入清空后提交会静默创建 00:00 的任务（hour/minute 由 split('') 得 0）
+    errors.timeOfDay = '请选择执行时间'
+  }
   return errors
 }

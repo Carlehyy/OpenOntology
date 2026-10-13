@@ -52,6 +52,7 @@ export default function ScheduledTasksDialog({
   const [deleting, setDeleting] = useState<ScheduledTask | null>(null)
   const [deletePending, setDeletePending] = useState(false)
   const [discardOpen, setDiscardOpen] = useState(false)
+  const [pendingExit, setPendingExit] = useState<{ run: () => void } | null>(null)
   const [formBaseline, setFormBaseline] = useState<CreateFormState>(() => freshCreateForm())
   const [validation, setValidation] = useState<CreateFormValidation>({})
 
@@ -67,7 +68,7 @@ export default function ScheduledTasksDialog({
     [tasks, selectedTaskId],
   )
 
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
     const fresh = freshCreateForm()
     setTitle(fresh.title)
     setInstruction(fresh.instruction)
@@ -78,7 +79,7 @@ export default function ScheduledTasksDialog({
     setFormBaseline(fresh)
     setValidation({})
     setError('')
-  }
+  }, [])
 
   const refreshTasks = useCallback(async () => {
     const data = await superAssistantApi.listScheduledTasks()
@@ -95,8 +96,14 @@ export default function ScheduledTasksDialog({
       .then(data => {
         if (!alive) return
         if (initialTaskId && data.some(item => item.id === initialTaskId)) {
-          setSelectedTaskId(initialTaskId)
-          setCreating(false)
+          // 脏草稿优先于深链自动选中：URL 参数变化（后退/前进）不得静默丢弃用户输入
+          const dirty = creating && isCreateFormDirty(
+            { title, instruction, kind, onceAt, timeOfDay, weekday }, formBaseline,
+          )
+          if (!dirty) {
+            setSelectedTaskId(initialTaskId)
+            setCreating(false)
+          }
         }
         if (initialRunId) setSelectedRunId(initialRunId)
       })
@@ -104,6 +111,16 @@ export default function ScheduledTasksDialog({
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [open, initialTaskId, initialRunId, refreshTasks])
+
+  // 关闭即复位创建态：脏草稿不可能在未确认的情况下离开（exitCreate 守卫），
+  // 因此这里重置的必然是干净基线——杜绝校验错误与陈旧默认时间跨开合残留
+  useEffect(() => {
+    if (open) return
+    resetForm()
+    setCreating(false)
+    setDiscardOpen(false)
+    setPendingExit(null)
+  }, [open, resetForm])
 
   useEffect(() => {
     if (!open || !selectedTaskId || creating) { setRuns([]); return }
@@ -161,7 +178,11 @@ export default function ScheduledTasksDialog({
   const create = async () => {
     const errors = validateCreateForm({ title, instruction, kind, onceAt, timeOfDay, weekday })
     setValidation(errors)
-    if (errors.instruction || errors.onceAt) return
+    if (errors.instruction || errors.onceAt || errors.timeOfDay) {
+      // 清掉上一轮后端报错，避免顶部横幅与新字段错误同屏矛盾
+      setError('')
+      return
+    }
     setSaving(true); setError('')
     try {
       const created = await superAssistantApi.createScheduledTask(payloadFromForm())
@@ -214,21 +235,32 @@ export default function ScheduledTasksDialog({
     setRunDetail(null)
   }
 
-  /** P0-2（UX 评审）：脏表单下 Esc/遮罩/关闭符统一走二次确认，防误触丢失已填内容 */
-  const requestClose = () => {
-    if (saving) return
+  /** 离开创建态的统一守卫（P0-2，对抗审查收敛为单点）：关闭弹窗、左栏切换任务、
+   *  重新开始创建，脏草稿一律先弹「放弃创建？」确认，放弃后执行原本要做的去向；
+   *  saving 中所有离开动作改为 toast 反馈（请求已有 30s 超时，不会永久锁死） */
+  const exitCreate = (after: () => void) => {
+    if (saving) {
+      toast.info('正在创建定时任务，请稍候…')
+      return
+    }
     if (creating && isCreateFormDirty({ title, instruction, kind, onceAt, timeOfDay, weekday }, formBaseline)) {
+      setPendingExit({ run: after })
       setDiscardOpen(true)
       return
     }
-    onClose()
+    after()
   }
 
+  const requestClose = () => exitCreate(onClose)
+
   const discardCreate = () => {
+    const exit = pendingExit
     setDiscardOpen(false)
+    setPendingExit(null)
     resetForm()
     setCreating(false)
-    onClose()
+    if (exit) exit.run()
+    else onClose()
   }
 
   /** P0-4：错误锚定字段后，输入即清除对应错误，避免红色提示挂到下次提交 */
@@ -239,6 +271,10 @@ export default function ScheduledTasksDialog({
   const changeOnceAt = (value: string) => {
     setOnceAt(value)
     if (validation.onceAt) setValidation(current => ({ ...current, onceAt: undefined }))
+  }
+  const changeTimeOfDay = (value: string) => {
+    setTimeOfDay(value)
+    if (validation.timeOfDay) setValidation(current => ({ ...current, timeOfDay: undefined }))
   }
   const changeKind = (value: ScheduledKind) => {
     setKind(value)
@@ -260,8 +296,9 @@ export default function ScheduledTasksDialog({
             <div className="p-2">
               <button
                 type="button"
-                onClick={openCreate}
-                className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-brand text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                disabled={saving}
+                onClick={() => exitCreate(openCreate)}
+                className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-brand text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Plus size={14} /> 创建定时任务
               </button>
@@ -279,8 +316,14 @@ export default function ScheduledTasksDialog({
                   <button
                     key={task.id}
                     type="button"
-                    onClick={() => { setCreating(false); setSelectedTaskId(task.id); setSelectedRunId(null); setRunDetail(null) }}
-                    className={`mb-1 w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                    disabled={saving}
+                    onClick={() => exitCreate(() => {
+                      setCreating(false)
+                      setSelectedTaskId(task.id)
+                      setSelectedRunId(null)
+                      setRunDetail(null)
+                    })}
+                    className={`mb-1 w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 ${
                       current ? 'bg-brand-soft' : 'hover:bg-[var(--color-bg-hover)]'
                     }`}
                   >
@@ -309,7 +352,7 @@ export default function ScheduledTasksDialog({
                 instruction={instruction} setInstruction={changeInstruction}
                 kind={kind} setKind={changeKind}
                 onceAt={onceAt} setOnceAt={changeOnceAt}
-                timeOfDay={timeOfDay} setTimeOfDay={setTimeOfDay}
+                timeOfDay={timeOfDay} setTimeOfDay={changeTimeOfDay}
                 weekday={weekday} setWeekday={setWeekday}
                 validation={validation}
                 saving={saving}
@@ -353,7 +396,7 @@ export default function ScheduledTasksDialog({
 
       <ConfirmDialog
         open={discardOpen}
-        onClose={() => setDiscardOpen(false)}
+        onClose={() => { setDiscardOpen(false); setPendingExit(null) }}
         onConfirm={discardCreate}
         title="放弃创建？"
         description="已填写的内容将丢失。"
@@ -402,7 +445,7 @@ function CreateForm({
         <div className="space-y-1.5">
           <span className="text-xs font-medium text-[var(--color-text-primary)]">触发方式</span>
           <Select value={kind} onValueChange={value => setKind(value as ScheduledKind)}>
-            <SelectTrigger className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="触发方式" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="once">执行一次</SelectItem>
               <SelectItem value="daily">每天</SelectItem>
@@ -437,7 +480,7 @@ function CreateForm({
               <div className="min-w-0 flex-1 space-y-1.5">
                 <span className="text-xs font-medium text-[var(--color-text-primary)]">星期</span>
                 <Select value={weekday} onValueChange={setWeekday}>
-                  <SelectTrigger className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
+                  <SelectTrigger aria-label="星期" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {WEEKDAYS.map((label, index) => (
                       <SelectItem key={label} value={String(index)}>{label}</SelectItem>
@@ -446,15 +489,24 @@ function CreateForm({
                 </Select>
               </div>
             )}
-            <label className="block min-w-0 flex-1 text-xs font-medium text-[var(--color-text-primary)]">
-              执行时间（北京时间）
+            <div className="min-w-0 flex-1">
+              <label htmlFor="scheduled-time-of-day" className="block text-xs font-medium text-[var(--color-text-primary)]">
+                执行时间（北京时间）
+              </label>
               <input
+                id="scheduled-time-of-day"
                 type="time"
                 value={timeOfDay}
                 onChange={event => setTimeOfDay(event.target.value)}
-                className={inputClass()}
+                aria-describedby={validation.timeOfDay ? 'scheduled-time-of-day-error' : undefined}
+                className={inputClass(validation.timeOfDay)}
               />
-            </label>
+              {validation.timeOfDay && (
+                <p id="scheduled-time-of-day-error" role="alert" className="mt-1.5 text-xs leading-5 text-[var(--color-danger)]">
+                  {validation.timeOfDay}
+                </p>
+              )}
+            </div>
           </div>
         )}
         <div>
@@ -533,7 +585,7 @@ function TaskDetail({
             <Trash2 size={12} /> 删除
           </button>
         </div>
-        <p className="mt-3 max-h-24 overflow-y-auto whitespace-pre-wrap border-l-2 border-[var(--color-border-active)] pl-3 text-[13px] leading-6 text-[var(--color-text-secondary)]">{task.instruction}</p>
+        <p className="mt-3 max-h-24 overflow-y-auto whitespace-pre-wrap border-l-2 border-[var(--color-border)] pl-3 text-[13px] leading-6 text-[var(--color-text-secondary)]">{task.instruction}</p>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         <p className="px-2 pb-2 text-xs text-[var(--color-text-tertiary)]">执行记录</p>

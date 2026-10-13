@@ -304,7 +304,7 @@ export default function WorkbenchSidebar({
       <nav className="shrink-0 space-y-1 px-2 py-3" aria-label="工作台功能">
         <button type="button" onClick={() => { onOpenSearch(); onCloseMobile() }} className={actionItemClass}>
           <Search size={16} className="shrink-0" /> 全局搜索
-          <kbd className="ml-auto rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] leading-none text-[var(--color-text-tertiary)]">
+          <kbd className="ml-auto rounded border border-[var(--color-border)] px-1 py-0.5 font-mono text-[11px] leading-none text-[var(--color-text-tertiary)]">
             {isMac ? '⌘K' : 'Ctrl K'}
           </kbd>
         </button>

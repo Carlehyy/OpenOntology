@@ -126,22 +126,41 @@ describe('freshCreateForm / isCreateFormDirty（P0-2 脏判定基线）', () => 
 })
 
 describe('validateCreateForm（P0-4 字段级校验 + S-2/S-3 文案）', () => {
+  // 固定 now 供过去时间断言，避免真实时钟带来的边界抖动
+  const NOW = new Date('2026-10-14T01:05:00Z') // 上海 2026-10-14 09:05
+  const base = () => ({ ...freshCreateForm(), instruction: '汇总昨天的待办' })
+
   it('指令为空/纯空白 → 字段错误「请输入到点执行的指令」', () => {
     assert.equal(validateCreateForm({ ...freshCreateForm(), instruction: '' }).instruction, '请输入到点执行的指令')
     assert.equal(validateCreateForm({ ...freshCreateForm(), instruction: '   ' }).instruction, '请输入到点执行的指令')
   })
 
-  it('once 缺执行时间 → 字段错误「请选择执行时间」；指令错误同时返回', () => {
-    const errors = validateCreateForm({ ...freshCreateForm(), instruction: '', onceAt: '' })
+  it('once 缺执行时间 → 「请选择执行时间」；指令错误同时返回', () => {
+    const errors = validateCreateForm({ ...freshCreateForm(), instruction: '', onceAt: '' }, NOW)
     assert.deepEqual(errors, { instruction: '请输入到点执行的指令', onceAt: '请选择执行时间' })
   })
 
-  it('填了指令的 once 表单无错误（时间默认值即合法）', () => {
-    assert.deepEqual(validateCreateForm({ ...freshCreateForm(), instruction: '汇总昨天的待办' }), {})
+  it('once 执行时间已过（含等于当前分钟）→ 字段级拦截，不再依赖后端报错往返', () => {
+    const past = { ...base(), kind: 'once' as const, onceAt: '2026-10-14T09:05' }
+    assert.equal(validateCreateForm(past, NOW).onceAt, '执行时间已过，请选择未来的时间')
+    const earlier = { ...past, onceAt: '2026-10-13T09:05' }
+    assert.equal(validateCreateForm(earlier, NOW).onceAt, '执行时间已过，请选择未来的时间')
   })
 
-  it('daily/weekly 不校验 onceAt（该字段此时不参与提交）', () => {
-    assert.deepEqual(validateCreateForm({ ...freshCreateForm(), kind: 'daily', instruction: '汇总', onceAt: '' }), {})
+  it('once 未来时间（默认 +30 分钟即合法）无错误', () => {
+    assert.deepEqual(validateCreateForm(base()), {})
+    assert.deepEqual(validateCreateForm({ ...base(), onceAt: '2026-10-14T09:06' }, NOW), {})
+  })
+
+  it('daily/weekly 清空时间 → 拦截静默创建 00:00 任务；onceAt 不再参与校验', () => {
+    assert.equal(validateCreateForm({ ...base(), kind: 'daily', timeOfDay: '' }, NOW).timeOfDay, '请选择执行时间')
+    assert.equal(validateCreateForm({ ...base(), kind: 'weekly', timeOfDay: '' }, NOW).timeOfDay, '请选择执行时间')
+    assert.deepEqual(validateCreateForm({ ...base(), kind: 'daily', onceAt: '' }, NOW), {})
+  })
+
+  it('其余字段错误与时间错误可并存（一次性返回全部错误）', () => {
+    const errors = validateCreateForm({ ...freshCreateForm(), instruction: ' ', kind: 'daily', timeOfDay: '' }, NOW)
+    assert.deepEqual(errors, { instruction: '请输入到点执行的指令', timeOfDay: '请选择执行时间' })
   })
 })
 

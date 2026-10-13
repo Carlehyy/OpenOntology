@@ -982,8 +982,10 @@ export const superAssistantApi = {
 
   listScheduledTasks: () =>
     apiClientV2.get<ScheduledTask[]>('/super-assistant/scheduled-tasks'),
+  /** 创建定时任务：显式超时对齐 transcribeVoice 先例——axios 默认无超时，
+   *  请求悬挂会让弹窗 saving 态永久锁死所有关闭路径（UX 对抗审查 P1） */
   createScheduledTask: (body: ScheduledTaskPayload) =>
-    apiClientV2.post<ScheduledTask>('/super-assistant/scheduled-tasks', body),
+    apiClientV2.post<ScheduledTask>('/super-assistant/scheduled-tasks', body, { timeout: 30_000 }),
   getScheduledTask: (id: string) =>
     apiClientV2.get<ScheduledTask>(`/super-assistant/scheduled-tasks/${id}`),
   updateScheduledTask: (id: string, body: ScheduledTaskUpdatePayload) =>
