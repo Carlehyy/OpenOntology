@@ -302,7 +302,7 @@ export default function WorkbenchSidebar({
 
       {/* 功能项 */}
       <nav className="shrink-0 space-y-1 px-2 py-3" aria-label="工作台功能">
-        <button type="button" onClick={onOpenSearch} className={actionItemClass}>
+        <button type="button" onClick={() => { onOpenSearch(); onCloseMobile() }} className={actionItemClass}>
           <Search size={16} className="shrink-0" /> 全局搜索
           <kbd className="ml-auto rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] leading-none text-[var(--color-text-tertiary)]">
             {isMac ? '⌘K' : 'Ctrl K'}
@@ -325,7 +325,7 @@ export default function WorkbenchSidebar({
             )}
           </button>
         )}
-        <button type="button" onClick={onOpenScheduled} className={actionItemClass}>
+        <button type="button" onClick={() => { onOpenScheduled(); onCloseMobile() }} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
         {/* 任务实例：DAG 流程模板与自动化任务轨道（弹窗入口收归超级助手） */}
@@ -337,12 +337,12 @@ export default function WorkbenchSidebar({
         >
           <ListChecks size={16} className="shrink-0" /> 任务实例
         </button>
-        <button type="button" onClick={() => setPalaceOpen(true)} className={actionItemClass} data-workbench-palace>
+        <button type="button" onClick={() => { setPalaceOpen(true); onCloseMobile() }} className={actionItemClass} data-workbench-palace>
           <Brain size={16} className="shrink-0" /> 知识图谱
         </button>
         <button
           type="button"
-          onClick={() => setIntegrationsOpen(true)}
+          onClick={() => { setIntegrationsOpen(true); onCloseMobile() }}
           className={actionItemClass}
           data-workbench-integrations
         >
