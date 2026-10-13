@@ -133,6 +133,22 @@ def test_list_tabs_and_summary(client, auth_headers):
     assert "attachmentCount" in item
 
 
+def test_list_preview_keeps_line_breaks(client, auth_headers):
+    # 预览必须保留原始换行：客户端 stripMarkdownPreview 按行首锚定剥离
+    # 标题/列表/引用语法（^…/gm），服务端先拍平换行会让剥离规则全部失效，
+    # 列表预览退化成「# 库存警报 - 轴承缺货 > 引用行」式的带符号拼接坨
+    _create(client, auth_headers, title="预览换行", body="# 库存警报\n- 轴承缺货\n> 引用行")
+    item = client.get("/api/v2/notifications?tab=all", headers=auth_headers).json()["data"]["items"][0]
+    assert item["bodyPreview"] == "# 库存警报\n- 轴承缺货\n> 引用行"
+
+
+def test_list_preview_truncates_at_limit(client, auth_headers):
+    _create(client, auth_headers, title="预览截断", body="字" * 300)
+    item = client.get("/api/v2/notifications?tab=all", headers=auth_headers).json()["data"]["items"][0]
+    assert len(item["bodyPreview"]) == 200
+    assert item["bodyPreview"] == "字" * 200
+
+
 def test_list_pagination_cursor(client, auth_headers):
     created = [_create(client, auth_headers, title=f"分页-{i}") for i in range(5)]
     expected = [row["id"] for row in reversed(created)]

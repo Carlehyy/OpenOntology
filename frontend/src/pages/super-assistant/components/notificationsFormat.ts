@@ -146,3 +146,30 @@ export function listEmptyCopy(tab: string, totalCount: number): ListEmptyCopy {
       }
   }
 }
+
+/**
+ * 渠道最近一次投递失败的可行动摘要：lastError 原文常带「渠道投递失败（…）」
+ * 包装与内部术语（如 notify 返回失败），行内只给去重后的行动化提示，
+ * 原文留给 title 悬浮层（悬停可见完整上下文）。
+ */
+export function channelFailureHint(lastError: string): string {
+  const raw = lastError.trim()
+  if (!raw) return '原因未知，可直发测试消息复现'
+  // 去掉与状态行重复的「投递失败」包装，取内层原因做模式归类
+  const inner = raw.replace(/^渠道投递失败[（(]/, '').replace(/[)）]$/, '').trim() || raw
+  // 词边界防误伤：如「Unauthorized」包含 auth 子串但不是邮箱鉴权失败
+  if (/smtp|授权码|\bauth(entication)?\b|535|登录|username|password/i.test(inner)) return '邮箱鉴权失败，请检查发件邮箱账号与授权码'
+  if (/\b40[13]\b|鉴权|token|密钥|api[_ -]?key/i.test(inner)) return '渠道鉴权失败，请检查渠道密钥配置'
+  if (/超时|timeout|timed?\s*out/i.test(inner)) return '连接超时，请检查网络或渠道地址'
+  if (/\b5\d{2}\b|服务(暂时)?不可用|internal error/i.test(inner)) return '渠道服务暂不可用，可稍后重试或直发测试'
+  if (/\b4\d{2}\b|参数|格式|收件人|invalid|recipient/i.test(inner)) return '参数被渠道拒绝，请检查收件人与配置格式'
+  return '原因详见悬浮提示'
+}
+
+/**
+ * 转发确认钮文案：未选渠道时明示「先选择」，避免「转发（0）」被误读为
+ * 「0 条转发成功」；选中后按渠道数计数。
+ */
+export function forwardButtonLabel(selectedCount: number): string {
+  return selectedCount === 0 ? '选择渠道后转发' : `转发（${selectedCount} 个渠道）`
+}

@@ -7,7 +7,8 @@
 docs/
 ├── development/      本地环境搭建与测试门禁
 ├── operations/       配置、部署、回滚、备份与排障
-└── architecture/     处于讨论阶段的架构设计提案
+├── architecture/     处于讨论阶段的架构设计提案
+└── ux/               UX 评审与二次审查意见（按日期归档）
 ```
 
 ## 开发
@@ -37,6 +38,10 @@ docs/
 - [回滚](./operations/rollback.md)
 - [备份与恢复](./operations/backup-restore.md)
 - [排障](./operations/troubleshooting.md)
+
+## UX 评审
+
+- [超级助手消息通知弹窗 UX 评审与二次审查（2026-10-12/13）](./ux/super-assistant-notifications-ux-review-20261012.md)
 
 ## 当前事实源
 

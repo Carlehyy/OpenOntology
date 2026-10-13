@@ -784,7 +784,10 @@ def _message_dict(
     if with_body:
         out["body"] = message.body_md or ""
     else:
-        out["bodyPreview"] = (message.body_md or "").strip().replace("\n", " ")[:PREVIEW_CHARS]
+        # 保留原始换行截断：客户端 stripMarkdownPreview 依赖行首锚定语法
+        # （井号标题 / 列表符 / 引用符等 ^…/gm 规则）做展示级剥离，
+        # 服务端先拍平换行会让这些规则全部失效，列表预览退化成带符号的拼接坨
+        out["bodyPreview"] = (message.body_md or "").strip()[:PREVIEW_CHARS]
     if attachment_count is not None:
         out["attachmentCount"] = attachment_count
     if attachments is not None:

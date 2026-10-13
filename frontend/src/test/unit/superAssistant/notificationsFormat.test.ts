@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  channelFailureHint,
   formatFileSize,
+  forwardButtonLabel,
   isPlatformMediaSrc,
   listEmptyCopy,
   mediaKind,
@@ -140,5 +142,31 @@ describe('listEmptyCopy', () => {
     const all = listEmptyCopy('all', 0)
     assert.equal(all.composeCta, true)
     assert.equal(listEmptyCopy('whatever', 0).title, '还没有消息')
+  })
+})
+
+describe('channelFailureHint', () => {
+  it('去掉与状态行重复的「渠道投递失败」包装后按内因归类', () => {
+    assert.equal(
+      channelFailureHint('渠道投递失败（SMTP 授权码错误 535）'),
+      '邮箱鉴权失败，请检查发件邮箱账号与授权码',
+    )
+    assert.equal(channelFailureHint('webhook 返回 401 Unauthorized'), '渠道鉴权失败，请检查渠道密钥配置')
+    assert.equal(channelFailureHint('连接超时'), '连接超时，请检查网络或渠道地址')
+    assert.equal(channelFailureHint('渠道投递失败（对方服务 502）'), '渠道服务暂不可用，可稍后重试或直发测试')
+    assert.equal(channelFailureHint('422 收件人地址无效'), '参数被渠道拒绝，请检查收件人与配置格式')
+  })
+
+  it('空原因给复现引导；无法归类的原文兜底到悬浮提示', () => {
+    assert.equal(channelFailureHint(''), '原因未知，可直发测试消息复现')
+    assert.equal(channelFailureHint('   '), '原因未知，可直发测试消息复现')
+    assert.equal(channelFailureHint('notify 返回失败'), '原因详见悬浮提示')
+  })
+})
+
+describe('forwardButtonLabel', () => {
+  it('未选渠道明示「先选择」，避免「转发（0）」被误读为 0 条成功', () => {
+    assert.equal(forwardButtonLabel(0), '选择渠道后转发')
+    assert.equal(forwardButtonLabel(2), '转发（2 个渠道）')
   })
 })

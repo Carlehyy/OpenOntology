@@ -25,6 +25,7 @@ import { absoluteFileUrl } from '@/api/fileAssets'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   baseChartOption, categoryAxisBase, valueAxisBase,
   CHART_TEAL, CHART_TEXT_STRONG,
@@ -37,7 +38,9 @@ import { DialogShell } from './AssistantConfiguration'
 import { assistantMarkdownComponents } from './AssistantConversation'
 import { errorText } from './assistantPanelUtils'
 import NotificationMedia from './NotificationMedia'
-import { formatFileSize, listEmptyCopy, priorityStyle, sourceTypeLabel, stripMarkdownPreview } from './notificationsFormat'
+import {
+  channelFailureHint, formatFileSize, forwardButtonLabel, listEmptyCopy, priorityStyle, sourceTypeLabel, stripMarkdownPreview,
+} from './notificationsFormat'
 
 /**
  * 消息中转站弹窗：左侧分区导航（消息列表 / 发送消息 / 渠道配置 / 消息统计）+ 右侧内容。
@@ -653,7 +656,7 @@ export default function NotificationsDialog({
   if (!open) return null
 
   return (
-    <>
+    <TooltipProvider delayDuration={300}>
       <DialogShell
         title="消息通知"
         description="消息中转站：多入口接收，站内查看处置，按配置的渠道自动或手动转发"
@@ -661,6 +664,10 @@ export default function NotificationsDialog({
         icon={<Bell size={18} />}
         onClose={onClose}
         onEscapeKeyDown={handleDialogEscape}
+        // 误触遮罩不应关弹窗：发送分区的草稿与列表滚动位置会随关闭一并丢失。
+        // 只挡遮罩——Esc 分层回退与右上关闭按钮保持可用（工作台型弹窗惯例，
+        // 不用 DialogContent 的 dismissible，它会连 Esc 一起禁掉）
+        onInteractOutside={event => event.preventDefault()}
         contentClassName="h-[min(85dvh,46rem)]"
       >
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[9.5rem_minmax(0,1fr)]">
@@ -691,7 +698,7 @@ export default function NotificationsDialog({
                       : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
                   }`}
                 >
-                  <Icon size={14} className="shrink-0" aria-hidden="true" />
+                  <Icon size={15} className="shrink-0" aria-hidden="true" />
                   <span className="min-w-0 flex-1 whitespace-nowrap md:truncate">{label}</span>
                   {key === 'messages' && unreadCount > 0 && (
                     <span className="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--color-danger)] px-1 text-xs font-semibold tabular-nums text-white">
@@ -743,22 +750,26 @@ export default function NotificationsDialog({
                           </button>
                         )
                       })}
-                      <button
-                        type="button"
-                        onClick={() => readAllMutation.mutate()}
-                        disabled={unreadCount === 0 || readAllMutation.isPending}
-                        title="将全部未读消息标为已读"
-                        aria-label="全部已读"
-                        className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                        data-notifications-read-all
-                      >
-                        <MailOpen size={13} />
-                      </button>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            onClick={() => readAllMutation.mutate()}
+                            disabled={unreadCount === 0 || readAllMutation.isPending}
+                            aria-label="全部已读"
+                            className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                            data-notifications-read-all
+                          >
+                            <MailOpen size={15} />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>将全部未读消息标为已读</TooltipContent>
+                      </Tooltip>
                     </div>
                     <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-2">
                       {list.isLoading && (
                         <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--color-text-tertiary)]">
-                          <Loader2 size={14} className="animate-spin" /> 加载中…
+                          <Loader2 size={12} className="animate-spin" /> 加载中…
                         </div>
                       )}
                       {list.isError && (
@@ -778,7 +789,7 @@ export default function NotificationsDialog({
                         return (
                           <div className="flex flex-col items-center gap-1.5 px-4 py-10 text-center" data-notifications-list-empty={tab}>
                             <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]" aria-hidden="true">
-                              {tab === 'starred' ? <Star size={16} /> : tab === 'archived' ? <Archive size={16} /> : tab === 'all' ? <Inbox size={16} /> : <MailOpen size={16} />}
+                              {tab === 'starred' ? <Star size={18} /> : tab === 'archived' ? <Archive size={18} /> : tab === 'all' ? <Inbox size={18} /> : <MailOpen size={18} />}
                             </span>
                             <p className="mt-1 text-xs font-medium text-[var(--color-text-secondary)]">{empty.title}</p>
                             <p className="max-w-60 text-xs leading-5 text-[var(--color-text-tertiary)]">{empty.description}</p>
@@ -815,16 +826,21 @@ export default function NotificationsDialog({
                               type="button"
                               onClick={() => { if (!list.isPlaceholderData) setSelectedId(item.id) }}
                               data-notifications-item={item.id}
-                              className={`w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                              data-notifications-priority={item.priority}
+                              className={`relative w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                                 active
                                   ? 'bg-brand-soft'
                                   : item.isRead
                                     ? 'hover:bg-[var(--color-bg-hover)]'
                                     // 品牌软底令牌不带 alpha 通道（tailwind 的 /N 修饰符对裸 var 不生效），
-                                    // 半透明档用 color-mix 现场合成
-                                    : 'bg-[color-mix(in_srgb,var(--color-accent-soft)_55%,transparent)] hover:bg-brand-soft'
+                                    // 半透明档用 color-mix 现场合成；30% 与选中态拉开层次，未读另有标题加粗双信号
+                                    : 'bg-[color-mix(in_srgb,var(--color-accent-soft)_30%,transparent)] hover:bg-brand-soft'
                               }`}
                             >
+                              {/* urgent 左缘色条：优先级不止靠 6px 圆点的颜色编码（色弱不可辨），有无色条是可扫视的二值信号 */}
+                              {item.priority === 'urgent' && (
+                                <span className="absolute inset-y-1.5 left-0 w-[2px] rounded-full bg-[var(--color-danger)]" aria-hidden="true" />
+                              )}
                               <span className="flex items-center gap-1.5">
                                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${priority.dotClass}`} aria-hidden />
                                 <span className={`min-w-0 flex-1 truncate text-sm ${item.isRead ? 'text-[var(--color-text-primary)]' : 'font-semibold text-[var(--color-text-primary)]'}`}>
@@ -833,7 +849,7 @@ export default function NotificationsDialog({
                                 {item.isStarred && <Star size={12} className="shrink-0 fill-current text-[var(--color-warning)]" aria-label="已标记" />}
                                 {!!item.attachmentCount && item.attachmentCount > 0 && (
                                   <span className="flex shrink-0 items-center gap-0.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
-                                    <Paperclip size={10} />{item.attachmentCount}
+                                    <Paperclip size={12} />{item.attachmentCount}
                                   </span>
                                 )}
                               </span>
@@ -878,7 +894,7 @@ export default function NotificationsDialog({
                           data-notifications-back-detail
                           className="flex items-center gap-1 px-3 py-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
-                          <ArrowLeft size={13} /> 返回消息列表
+                          <ArrowLeft size={12} /> 返回消息列表
                         </button>
                       </div>
                     )}
@@ -896,7 +912,7 @@ export default function NotificationsDialog({
                         </div>
                       ) : !selected ? (
                         <div className="flex flex-1 items-center justify-center gap-2 text-xs text-[var(--color-text-tertiary)]">
-                          <Loader2 size={14} className="animate-spin" /> 加载中…
+                          <Loader2 size={12} className="animate-spin" /> 加载中…
                         </div>
                       ) : (
                         <>
@@ -906,53 +922,78 @@ export default function NotificationsDialog({
                                 {selected.title}
                               </h3>
                               <div className="flex shrink-0 items-center gap-0.5">
-                                <button
-                                  type="button"
-                                  onClick={() => stateMutation.mutate({ id: selected.id, fields: { isStarred: !selected.isStarred } })}
-                                  aria-label={selected.isStarred ? '取消标记' : '标记为重要'}
-                                  className={`${iconButtonClass} ${selected.isStarred ? 'text-[var(--color-warning)]' : ''}`}
-                                  data-notifications-star
-                                >
-                                  <Star size={15} className={selected.isStarred ? 'fill-current' : ''} />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => stateMutation.mutate({ id: selected.id, fields: { isArchived: !selected.isArchived } })}
-                                  aria-label={selected.isArchived ? '恢复消息' : '归档消息'}
-                                  className={iconButtonClass}
-                                  data-notifications-archive
-                                >
-                                  {selected.isArchived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => { setForwardOpen(value => !value); setForwardChannelIds(new Set()) }}
-                                  aria-label="转发到外部渠道"
-                                  className={iconButtonClass}
-                                  data-notifications-forward
-                                >
-                                  <Forward size={15} />
-                                </button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => stateMutation.mutate({ id: selected.id, fields: { isStarred: !selected.isStarred } })}
+                                      aria-label={selected.isStarred ? '取消标记' : '标记为重要'}
+                                      className={`${iconButtonClass} ${selected.isStarred ? 'text-[var(--color-warning)]' : ''}`}
+                                      data-notifications-star
+                                    >
+                                      <Star size={15} className={selected.isStarred ? 'fill-current' : ''} />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>{selected.isStarred ? '取消标记' : '标记为重要'}</TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => stateMutation.mutate({ id: selected.id, fields: { isArchived: !selected.isArchived } })}
+                                      aria-label={selected.isArchived ? '恢复消息' : '归档消息'}
+                                      className={iconButtonClass}
+                                      data-notifications-archive
+                                    >
+                                      {selected.isArchived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>{selected.isArchived ? '恢复消息' : '归档消息'}</TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => { setForwardOpen(value => !value); setForwardChannelIds(new Set()) }}
+                                      aria-label="转发到外部渠道"
+                                      className={iconButtonClass}
+                                      data-notifications-forward
+                                    >
+                                      <Forward size={15} />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>转发到外部渠道</TooltipContent>
+                                </Tooltip>
                                 {selected.isRead && (
-                                  <button
-                                    type="button"
-                                    onClick={() => stateMutation.mutate({ id: selected.id, fields: { isRead: false } })}
-                                    aria-label="标为未读"
-                                    className={iconButtonClass}
-                                    data-notifications-unread
-                                  >
-                                    <Mail size={15} />
-                                  </button>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <button
+                                        type="button"
+                                        onClick={() => stateMutation.mutate({ id: selected.id, fields: { isRead: false } })}
+                                        aria-label="标为未读"
+                                        className={iconButtonClass}
+                                        data-notifications-unread
+                                      >
+                                        <Mail size={15} />
+                                      </button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>标为未读</TooltipContent>
+                                  </Tooltip>
                                 )}
-                                <button
-                                  type="button"
-                                  onClick={() => setDeleting(selected)}
-                                  aria-label="删除消息"
-                                  className={`${iconButtonClass} hover:text-[var(--color-danger)]`}
-                                  data-notifications-delete
-                                >
-                                  <Trash2 size={15} />
-                                </button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeleting(selected)}
+                                      aria-label="删除消息"
+                                      className={`${iconButtonClass} hover:text-[var(--color-danger)]`}
+                                      data-notifications-delete
+                                    >
+                                      <Trash2 size={15} />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>删除消息</TooltipContent>
+                                </Tooltip>
                               </div>
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
@@ -1001,7 +1042,7 @@ export default function NotificationsDialog({
                                   className="rounded-lg"
                                   data-notifications-forward-confirm
                                 >
-                                  <Forward size={13} /> 转发（{forwardChannelIds.size}）
+                                  <Forward size={12} /> {forwardButtonLabel(forwardChannelIds.size)}
                                 </Button>
                               </div>
                             </div>
@@ -1022,7 +1063,7 @@ export default function NotificationsDialog({
                                         className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                         data-notifications-attachment={attachment.id}
                                       >
-                                        <FileText size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                                        <FileText size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
                                         <span className="min-w-0 flex-1 truncate text-sm text-[var(--color-text-primary)]">
                                           {attachment.filename}
                                         </span>
@@ -1110,7 +1151,7 @@ export default function NotificationsDialog({
                               : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
                           }`}
                         >
-                          {checked && <Send size={11} className="shrink-0" />}
+                          {checked && <Send size={12} className="shrink-0" />}
                           <span className="max-w-40 truncate">{channel.name}</span>
                           <span className="text-xs font-normal opacity-70">{channel.templateName}</span>
                         </button>
@@ -1175,7 +1216,7 @@ export default function NotificationsDialog({
                   className="rounded-lg"
                   data-notifications-compose-send
                 >
-                  <Send size={13} /> 发送
+                  <Send size={12} /> 发送
                 </Button>
               </div>
             </div>
@@ -1192,7 +1233,7 @@ export default function NotificationsDialog({
               <section aria-label="消息入口" data-notifications-group="inbound" className="space-y-3">
                 <div className="flex items-center gap-2.5 px-0.5">
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink" aria-hidden="true">
-                    <Inbox size={14} />
+                    <Inbox size={15} />
                   </span>
                   <div className="min-w-0">
                     <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">消息入口</h3>
@@ -1219,7 +1260,7 @@ export default function NotificationsDialog({
                         className="rounded-lg"
                         data-notifications-key-mint-toggle
                       >
-                        <KeyRound size={13} /> {mintFormOpen ? '收起' : '签发密钥'}
+                        <KeyRound size={12} /> {mintFormOpen ? '收起' : '签发密钥'}
                       </Button>
                     </div>
                   </header>
@@ -1237,7 +1278,7 @@ export default function NotificationsDialog({
                         className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         data-notifications-copy-curl
                       >
-                        <Copy size={11} /> 复制调用示例
+                        <Copy size={12} /> 复制调用示例
                       </button>
                     </div>
                     <pre className="scrollbar-none mt-2 overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 font-mono text-[11px] leading-5 text-[var(--color-code-fg)]">{ingestCurlSample()}</pre>
@@ -1308,14 +1349,14 @@ export default function NotificationsDialog({
                         className="rounded-lg"
                         data-notifications-key-mint
                       >
-                        <KeyRound size={13} /> 签发密钥
+                        <KeyRound size={12} /> 签发密钥
                       </Button>
                     </div>
                   )}
 
                   {ingestKeys.isLoading ? (
                     <div className="flex items-center justify-center gap-2 py-6 text-xs text-[var(--color-text-tertiary)]">
-                      <Loader2 size={14} className="animate-spin" /> 加载中…
+                      <Loader2 size={12} className="animate-spin" /> 加载中…
                     </div>
                   ) : ingestKeys.isError ? (
                     <div role="alert" className="flex flex-col items-center gap-2 py-6 text-center">
@@ -1340,30 +1381,33 @@ export default function NotificationsDialog({
                           data-notifications-key-item={key.id}
                           className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
                         >
-                          <KeyRound size={14} className="shrink-0 text-[var(--color-text-secondary)]" />
+                          <KeyRound size={15} className="shrink-0 text-[var(--color-text-secondary)]" />
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm text-[var(--color-text-primary)]">
-                              {key.name}
-                              <span className="ml-2 font-mono text-[11px] text-[var(--color-text-tertiary)]">{key.keyPrefix}_…</span>
-                            </p>
+                            {/* 名称与密钥前缀分行：此前同行拼接（如 11111ob_notif_…）连成一片难扫读 */}
+                            <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">{key.name}</p>
                             <p className="truncate text-xs text-[var(--color-text-tertiary)]">
-                              {key.allowedSourceSystem ? `限定来源：${key.allowedSourceSystem} · ` : ''}
-                              最近使用：{key.lastUsedAt ? formatDateTime(key.lastUsedAt) : '未使用'}
+                              <span className="font-mono text-[11px]">{key.keyPrefix}_…</span>
+                              {key.allowedSourceSystem ? ` · 限定来源：${key.allowedSourceSystem}` : ''} · 最近使用：{key.lastUsedAt ? formatDateTime(key.lastUsedAt) : '未使用'}
                             </p>
                           </div>
                           {/* 链路测试会真实投递并扇出到所有启用渠道：幽灵样式 + 二次确认防误触 */}
-                          <button
-                            type="button"
-                            onClick={() => setConfirmingKeyTest(key)}
-                            disabled={keyTestMutation.isPending && testingKeyId === key.id}
-                            aria-label={`以密钥 ${key.name} 测试入口链路`}
-                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                            data-notifications-key-test
-                          >
-                            {keyTestMutation.isPending && testingKeyId === key.id
-                              ? <Loader2 size={13} className="animate-spin" />
-                              : <Zap size={13} />}
-                          </button>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmingKeyTest(key)}
+                                disabled={keyTestMutation.isPending && testingKeyId === key.id}
+                                aria-label={`以密钥 ${key.name} 测试入口链路`}
+                                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                                data-notifications-key-test
+                              >
+                                {keyTestMutation.isPending && testingKeyId === key.id
+                                  ? <Loader2 size={12} className="animate-spin" />
+                                  : <Zap size={15} />}
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>以密钥 {key.name} 测试入口链路</TooltipContent>
+                          </Tooltip>
                           <button
                             type="button"
                             onClick={() => setRevokingKey(key)}
@@ -1390,14 +1434,11 @@ export default function NotificationsDialog({
                             data-notifications-key-item={key.id}
                             className="flex items-center gap-2 rounded-lg px-2 py-2 opacity-75"
                           >
-                            <KeyRound size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                            <KeyRound size={15} className="shrink-0 text-[var(--color-text-tertiary)]" />
                             <div className="min-w-0 flex-1">
-                              <p className="truncate text-sm text-[var(--color-text-primary)]">
-                                {key.name}
-                                <span className="ml-2 font-mono text-[11px] text-[var(--color-text-tertiary)]">{key.keyPrefix}_…</span>
-                              </p>
+                              <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">{key.name}</p>
                               <p className="truncate text-xs text-[var(--color-text-tertiary)]">
-                                {key.revokedAt ? `已吊销：${formatDateTime(key.revokedAt)}` : '已吊销（时间未知）'}
+                                <span className="font-mono text-[11px]">{key.keyPrefix}_…</span> · {key.revokedAt ? `已吊销：${formatDateTime(key.revokedAt)}` : '已吊销（时间未知）'}
                               </p>
                             </div>
                           </li>
@@ -1413,7 +1454,7 @@ export default function NotificationsDialog({
               <section aria-label="消息出口" data-notifications-group="outbound" className="mt-6 space-y-3">
                 <div className="flex items-center gap-2.5 px-0.5">
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink" aria-hidden="true">
-                    <Send size={14} />
+                    <Send size={15} />
                   </span>
                   <div className="min-w-0">
                     <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">消息出口</h3>
@@ -1424,7 +1465,7 @@ export default function NotificationsDialog({
                 <details className="group rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]" data-notifications-smtp-card>
                 <summary className="flex cursor-pointer list-none items-center gap-2.5 border-b border-transparent px-4 py-3 transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-open:border-[var(--color-border)]">
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink">
-                    <Mail size={14} />
+                    <Mail size={15} />
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm font-semibold text-[var(--color-text-primary)]">发件邮箱</span>
@@ -1433,7 +1474,7 @@ export default function NotificationsDialog({
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${smtp.data?.configured ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'}`}>
                     {smtp.data?.configured ? '已配置' : '未配置'}
                   </span>
-                  <ChevronDown size={14} className="shrink-0 text-[var(--color-text-tertiary)] transition-transform group-open:rotate-180" aria-hidden />
+                  <ChevronDown size={12} className="shrink-0 text-[var(--color-text-tertiary)] transition-transform group-open:rotate-180" aria-hidden />
                 </summary>
                 <div className="border-t-0 p-4">
                   <div className="flex flex-wrap items-end gap-2">
@@ -1475,7 +1516,7 @@ export default function NotificationsDialog({
                       className="ml-auto rounded-lg"
                       data-notifications-smtp-save
                     >
-                      <Mail size={13} /> 保存
+                      <Mail size={12} /> 保存
                     </Button>
                   </div>
                   <div className="mt-2 flex flex-wrap items-end gap-2">
@@ -1493,7 +1534,7 @@ export default function NotificationsDialog({
                       className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
                       data-notifications-smtp-test
                     >
-                      {smtpTestMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
+                      {smtpTestMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
                       发送测试邮件
                     </button>
                   </div>
@@ -1516,7 +1557,7 @@ export default function NotificationsDialog({
                       className="rounded-lg"
                       data-notifications-channel-create-open
                     >
-                      <Plus size={13} /> 新建渠道
+                      <Plus size={12} /> 新建渠道
                     </Button>
                   )}
                 </header>
@@ -1536,7 +1577,7 @@ export default function NotificationsDialog({
                       </div>
                       {channelTemplates.isLoading && (
                         <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] py-6 text-xs text-[var(--color-text-tertiary)]">
-                          <Loader2 size={14} className="animate-spin" /> 渠道类型加载中…
+                          <Loader2 size={12} className="animate-spin" /> 渠道类型加载中…
                         </div>
                       )}
                       {channelTemplates.isError && (
@@ -1568,7 +1609,7 @@ export default function NotificationsDialog({
                               data-notifications-template-card={t.id}
                             >
                               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink">
-                                <Icon size={14} />
+                                <Icon size={15} />
                               </span>
                               <span className="min-w-0">
                                 <span className="block truncate text-sm font-medium text-[var(--color-text-primary)]">{t.name}</span>
@@ -1583,7 +1624,7 @@ export default function NotificationsDialog({
 
                   {channelFormStage === 'form' && !currentTemplate && (
                     <div className="mb-4 flex items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] py-6 text-xs text-[var(--color-text-tertiary)]">
-                      <Loader2 size={14} className="animate-spin" /> 正在加载渠道类型…
+                      <Loader2 size={12} className="animate-spin" /> 正在加载渠道类型…
                     </div>
                   )}
 
@@ -1592,7 +1633,7 @@ export default function NotificationsDialog({
                     <div className="mb-4 rounded-lg border border-[var(--color-border)] p-3" data-notifications-channel-form>
                       <div className="flex items-center gap-2">
                         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink">
-                          {(() => { const Icon = TEMPLATE_ICONS[currentTemplate.id] ?? Plug; return <Icon size={14} /> })()}
+                          {(() => { const Icon = TEMPLATE_ICONS[currentTemplate.id] ?? Plug; return <Icon size={15} /> })()}
                         </span>
                         <p className="min-w-0 flex-1 text-sm font-medium text-[var(--color-text-primary)]">
                           {editingChannel ? `编辑 · ${editingChannel.name}` : `新建 ${currentTemplate.name}`}
@@ -1650,7 +1691,7 @@ export default function NotificationsDialog({
                           className="rounded-lg"
                           data-notifications-channel-create
                         >
-                          <Plug size={13} /> {editingChannel ? '保存修改' : '新建渠道'}
+                          <Plug size={12} /> {editingChannel ? '保存修改' : '新建渠道'}
                         </Button>
                       </div>
                     </div>
@@ -1658,7 +1699,7 @@ export default function NotificationsDialog({
 
                   {channels.isLoading ? (
                     <div className="flex items-center justify-center gap-2 py-6 text-xs text-[var(--color-text-tertiary)]">
-                      <Loader2 size={14} className="animate-spin" /> 加载中…
+                      <Loader2 size={12} className="animate-spin" /> 加载中…
                     </div>
                   ) : channels.isError ? (
                     <div role="alert" className="flex flex-col items-center gap-2 py-6 text-center">
@@ -1687,7 +1728,7 @@ export default function NotificationsDialog({
                           >
                             <div className="flex items-center gap-2">
                               <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${channel.enabled ? 'bg-brand-soft text-brand-ink' : 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]'}`}>
-                                <Icon size={14} />
+                                <Icon size={15} />
                               </span>
                               <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-medium text-[var(--color-text-primary)]" title={channel.name}>{channel.name}</p>
@@ -1709,62 +1750,78 @@ export default function NotificationsDialog({
                             <p className="truncate text-xs text-[var(--color-text-secondary)]" title={channel.display || channel.urlMasked}>
                               {channel.display || channel.urlMasked}
                             </p>
-                            {/* 最近一次投递/测试直发的结果；统计区按正式投递单聚合，两者口径在此明示 */}
+                            {/* 最近一次投递/测试直发的结果；统计区按正式投递单聚合，两者口径在此明示。
+                                失败行只给行动化摘要，原始错误（含内部术语）留给 title 悬浮层 */}
                             <p className={`text-xs leading-4 ${channel.lastStatus === 'failed' ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-tertiary)]'}`}>
                               {channel.lastStatus === 'sent'
                                 ? `投递成功 ${formatDateTime(channel.lastSentAt || channel.updatedAt)}`
                                 : channel.lastStatus === 'failed'
-                                  ? <span className="line-clamp-2" title={`最近一次尝试失败（${formatDateTime(channel.updatedAt)}）：${channel.lastError}；此处含测试直发，统计区仅计正式投递单`}>投递失败 {formatDateTime(channel.updatedAt)}：{channel.lastError}</span>
+                                  ? <span className="line-clamp-2" title={`最近一次尝试失败（${formatDateTime(channel.updatedAt)}）：${channel.lastError}；此处含测试直发，统计区仅计正式投递单`}>投递失败 {formatDateTime(channel.updatedAt)} · {channelFailureHint(channel.lastError || '')}</span>
                                   : '尚未投递'}
                             </p>
                             <div className="mt-auto flex items-center gap-1 border-t border-[var(--color-border)] pt-2">
                               {channel.enabled && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setTestingChannelId(channel.id)
-                                    testChannelMutation.mutate(channel.id)
-                                  }}
-                                  disabled={testChannelMutation.isPending && testingChannelId === channel.id}
-                                  aria-label={`向 ${channel.name} 直发测试消息`}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                                  data-notifications-channel-test
-                                >
-                                  {testChannelMutation.isPending && testingChannelId === channel.id
-                                    ? <Loader2 size={13} className="animate-spin" />
-                                    : <Zap size={13} />}
-                                </button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setTestingChannelId(channel.id)
+                                        testChannelMutation.mutate(channel.id)
+                                      }}
+                                      disabled={testChannelMutation.isPending && testingChannelId === channel.id}
+                                      aria-label={`向 ${channel.name} 直发测试消息`}
+                                      className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                                      data-notifications-channel-test
+                                    >
+                                      {testChannelMutation.isPending && testingChannelId === channel.id
+                                        ? <Loader2 size={12} className="animate-spin" />
+                                        : <Zap size={15} />}
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>向 {channel.name} 直发测试消息</TooltipContent>
+                                </Tooltip>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingChannel(channel)
-                                  setChannelName(channel.name)
-                                  setChannelNote(channel.note || '')
-                                  setTemplateId(channel.template)
-                                  const prefill: Record<string, string> = {}
-                                  for (const f of channel.fields) {
-                                    if (!f.secret && f.value) prefill[f.key] = f.value
-                                  }
-                                  setTemplateParams(prefill)
-                                  setChannelFormStage('form')
-                                }}
-                                aria-label={`编辑渠道 ${channel.name}`}
-                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                data-notifications-channel-edit
-                              >
-                                <Pencil size={13} />
-                              </button>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingChannel(channel)
+                                      setChannelName(channel.name)
+                                      setChannelNote(channel.note || '')
+                                      setTemplateId(channel.template)
+                                      const prefill: Record<string, string> = {}
+                                      for (const f of channel.fields) {
+                                        if (!f.secret && f.value) prefill[f.key] = f.value
+                                      }
+                                      setTemplateParams(prefill)
+                                      setChannelFormStage('form')
+                                    }}
+                                    aria-label={`编辑渠道 ${channel.name}`}
+                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    data-notifications-channel-edit
+                                  >
+                                    <Pencil size={15} />
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent>编辑渠道 {channel.name}</TooltipContent>
+                              </Tooltip>
                               <span className="flex-1" aria-hidden />
-                              <button
-                                type="button"
-                                onClick={() => setDeletingChannel(channel)}
-                                aria-label={`删除渠道 ${channel.name}`}
-                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                data-notifications-channel-delete
-                              >
-                                <Trash2 size={13} />
-                              </button>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletingChannel(channel)}
+                                    aria-label={`删除渠道 ${channel.name}`}
+                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    data-notifications-channel-delete
+                                  >
+                                    <Trash2 size={15} />
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent>删除渠道 {channel.name}</TooltipContent>
+                              </Tooltip>
                             </div>
                           </div>
                         )
@@ -1787,7 +1844,7 @@ export default function NotificationsDialog({
             >
               {stats.isLoading ? (
                 <div className="flex items-center justify-center gap-2 py-16 text-xs text-[var(--color-text-tertiary)]">
-                  <Loader2 size={14} className="animate-spin" /> 统计加载中…
+                  <Loader2 size={12} className="animate-spin" /> 统计加载中…
                 </div>
               ) : stats.isError ? (
                 <div role="alert" className="flex flex-col items-center gap-2 py-16 text-center">
@@ -1976,6 +2033,6 @@ export default function NotificationsDialog({
         confirmText="删除"
         variant="danger"
       />
-    </>
+    </TooltipProvider>
   )
 }

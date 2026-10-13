@@ -36,7 +36,7 @@ export { errorText }
 // 薄封装 ui/dialog：统一配置域弹层的头部与尺寸语言；
 // 遮罩、Esc 关闭与焦点管理交给 Radix，不再自绘 fixed 弹层和焦点陷阱。
 // （外部集成弹层等同语言复用，故导出）
-export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, onEscapeKeyDown, icon, open = true }: {
+export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, onEscapeKeyDown, onInteractOutside, icon, open = true }: {
   title: string
   description?: string
   size?: 'default' | 'large' | 'wide'
@@ -48,6 +48,9 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
   onOpenAutoFocus?: (event: Event) => void
   /** 拦截 Esc（如内层临时态先回退；preventDefault 可阻止 Radix 关闭弹窗） */
   onEscapeKeyDown?: (event: KeyboardEvent) => void
+  /** 拦截遮罩/外部点击（工作台型弹窗 preventDefault 阻止误触关闭；
+      Esc 分层与右上关闭按钮不受影响） */
+  onInteractOutside?: (event: Event) => void
   /** 标准头部图标盒（DESIGN.md §4.5：h-10 w-10 rounded-xl 品牌底 + 18px lucide） */
   icon?: React.ReactNode
   /** 受控开合：缺省 true（既有条件渲染消费方零影响）；常挂消费方传 open
@@ -65,6 +68,7 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
       <DialogContent
         onOpenAutoFocus={onOpenAutoFocus}
         {...(onEscapeKeyDown ? { onEscapeKeyDown } : {})}
+        {...(onInteractOutside ? { onInteractOutside } : {})}
         className={`flex flex-col overflow-hidden p-0 ${sizeClass} ${contentClassName ?? ''}`}
       >
         <DialogHeader

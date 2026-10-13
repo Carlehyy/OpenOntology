@@ -56,9 +56,9 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
   },
   {
     scenario: 'Tooltip 气泡提示',
-    component: 'reUI Tooltip',
-    status: 'available',
-    note: '存量 motion-ui Tooltip 为世界模型/插件社区页 exception；新代码引入 reUI 版。',
+    component: "Tooltip（@/components/ui/tooltip，Radix 原语）",
+    status: 'vendored',
+    note: 'shadcn/reUI 同源，按 components/README.md 引入流程入库（token 换肤 + --z-tooltip 层级）；首个消费方：超级助手消息通知弹窗图标操作钮。存量 motion-ui Tooltip 为世界模型/插件社区页 exception。',
   },
   {
     scenario: '瞬时消息提示（操作结果/全局反馈 toast）',
