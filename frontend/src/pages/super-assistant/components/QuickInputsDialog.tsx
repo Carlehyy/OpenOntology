@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ChevronDown, ChevronUp, GripVertical, Loader2, Pencil, Plus, Trash2, X, Zap,
+  ChevronDown, ChevronUp, GripVertical, Pencil, Plus, Trash2, Zap,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import type { QuickInput } from '@/api/superAssistant'
+import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 import { DialogShell } from './AssistantConfiguration'
@@ -258,21 +259,16 @@ export default function QuickInputsDialog({
                   contentRef={createContentRef}
                 />
                 <div className="mt-3 flex justify-end gap-2">
-                  <button
+                  <Button
                     type="button"
+                    variant="outline"
                     onClick={() => { setCreateOpen(false); setCreateError(''); setCreateErrorField(null) }}
-                    className="inline-flex h-8 items-center rounded-lg border border-border px-3 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
                   >
                     收起
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={creating}
-                    data-testid="quick-input-create-submit"
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                  >
-                    {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} 添加
-                  </button>
+                  </Button>
+                  <Button type="submit" loading={creating} data-testid="quick-input-create-submit">
+                    添加
+                  </Button>
                 </div>
               </form>
             ) : (
@@ -280,15 +276,15 @@ export default function QuickInputsDialog({
                 type="button"
                 onClick={() => setCreateOpen(true)}
                 data-testid="quick-input-create-toggle"
-                className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-brand hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:border-brand hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                <Plus size={14} /> 新增快捷内容
+                <Plus size={16} /> 新增快捷内容
               </button>
             )}
 
             {items.length > 0 && (
               <div>
-                <p className="px-1 pb-2 text-[11px] text-[var(--color-text-tertiary)]">
+                <p className="px-1 pb-2 text-xs text-[var(--color-text-tertiary)]">
                   共 {items.length} 条
                 </p>
                 <div className="space-y-1" role="list" aria-label="快捷内容列表，拖拽或使用上移下移调整展示优先级">
@@ -322,21 +318,12 @@ export default function QuickInputsDialog({
                               contentRef={editContentRef}
                             />
                             <div className="mt-3 flex justify-end gap-2">
-                              <button
-                                type="button"
-                                onClick={() => setEditingId(null)}
-                                className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-3 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
-                              >
-                                <X size={12} /> 取消
-                              </button>
-                              <button
-                                type="submit"
-                                disabled={savingEdit}
-                                data-testid="quick-input-edit-submit"
-                                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                              >
-                                {savingEdit ? <Loader2 size={13} className="animate-spin" /> : <Pencil size={12} />} 保存
-                              </button>
+                              <Button type="button" variant="outline" onClick={() => setEditingId(null)}>
+                                取消
+                              </Button>
+                              <Button type="submit" loading={savingEdit} data-testid="quick-input-edit-submit">
+                                保存
+                              </Button>
                             </div>
                           </form>
                         ) : (
@@ -349,16 +336,16 @@ export default function QuickInputsDialog({
                                 setDragId(item.id)
                               }}
                               onDragEnd={() => { setDragId(null); setDropIndex(null) }}
-                              aria-label={`拖拽调整 ${item.title} 的展示顺序`}
+                              aria-label={`拖拽调整 ${item.title} 的展示顺序（键盘用户请使用上移/下移按钮）`}
                               title="拖拽调整展示顺序"
-                              className="flex h-8 w-6 shrink-0 cursor-grab items-center justify-center rounded text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] active:cursor-grabbing"
+                              className="flex h-8 w-7 shrink-0 cursor-grab items-center justify-center rounded text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] active:cursor-grabbing"
                             >
                               <GripVertical size={14} />
                             </span>
-                            <span className="w-6 shrink-0 text-center font-mono text-[10px] text-[var(--color-text-tertiary)]">#{index + 1}</span>
+                            <span className="w-6 shrink-0 text-center font-mono text-xs text-[var(--color-text-tertiary)]">#{index + 1}</span>
                             <div className="min-w-0 flex-1" title={item.content}>
                               <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</p>
-                              <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">{contentPreview(item.content)}</p>
+                              <p className="truncate text-xs text-[var(--color-text-tertiary)]">{contentPreview(item.content)}</p>
                             </div>
                             <div className="flex shrink-0 items-center gap-0.5">
                               <button

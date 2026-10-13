@@ -55,14 +55,14 @@ export default function QuickInputMenu({
         className="w-72 overflow-hidden rounded-lg border-border p-0"
       >
         <div className="flex items-center justify-between border-b border-border px-3 py-2">
-          <span className="text-[11px] font-medium text-[var(--color-text-secondary)]">快捷内容</span>
+          <span className="text-xs font-medium text-[var(--color-text-secondary)]">快捷内容</span>
           <button
             type="button"
             onClick={onOpenSettings}
             data-testid="super-assistant-quick-input-settings"
-            className="inline-flex items-center gap-1 rounded text-xs font-medium text-brand-ink transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="-my-1 inline-flex h-7 items-center gap-1 rounded px-1.5 text-xs font-medium text-brand-ink transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <Settings2 size={11} /> 快捷内容设置
+            <Settings2 size={13} /> 快捷内容设置
           </button>
         </div>
         {/* stale-while-revalidate：已有列表时后台刷新不打断浏览，仅首开/空列表走 spinner 与错误块 */}
@@ -76,7 +76,7 @@ export default function QuickInputMenu({
             <button
               type="button"
               onClick={onRetry}
-              className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
+              className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
             >
               重试
             </button>
@@ -104,7 +104,7 @@ export default function QuickInputMenu({
                 <Zap size={11} className="mt-1 shrink-0 text-brand-ink" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</span>
-                  <span className="block truncate text-[11px] text-[var(--color-text-tertiary)]">{contentPreview(item.content)}</span>
+                  <span className="block truncate text-xs text-[var(--color-text-tertiary)]">{contentPreview(item.content)}</span>
                 </span>
               </button>
             ))}
