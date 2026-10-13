@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ChevronDown, ChevronUp, GripVertical, Loader2, Pencil, Plus, Trash2, X, Zap,
 } from 'lucide-react'
@@ -9,7 +9,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 import { DialogShell } from './AssistantConfiguration'
 import { errorText } from './assistantPanelUtils'
-import { QuickInputFormFields } from './QuickInputFormFields'
+import { QuickInputFormFields, type QuickInputErrorField } from './QuickInputFormFields'
 import { contentPreview, isAboveMidline, moveItem, validateQuickInput } from './quickInputLogic'
 
 // 自定义 MIME：行内 dragover/drop 只响应本列表发起的拖拽（文件拖入等互不干扰）
@@ -42,13 +42,20 @@ export default function QuickInputsDialog({
   const [createTitle, setCreateTitle] = useState('')
   const [createContent, setCreateContent] = useState('')
   const [createError, setCreateError] = useState('')
+  const [createErrorField, setCreateErrorField] = useState<QuickInputErrorField | null>(null)
   const [creating, setCreating] = useState(false)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [editContent, setEditContent] = useState('')
   const [editError, setEditError] = useState('')
+  const [editErrorField, setEditErrorField] = useState<QuickInputErrorField | null>(null)
   const [savingEdit, setSavingEdit] = useState(false)
+
+  const createTitleRef = useRef<HTMLInputElement>(null)
+  const createContentRef = useRef<HTMLTextAreaElement>(null)
+  const editTitleRef = useRef<HTMLInputElement>(null)
+  const editContentRef = useRef<HTMLTextAreaElement>(null)
 
   const [deleting, setDeleting] = useState<QuickInput | null>(null)
   const [deletePending, setDeletePending] = useState(false)
@@ -64,6 +71,11 @@ export default function QuickInputsDialog({
     setPrevOpen(open)
   }, [open, prevOpen, items.length])
 
+  // 进入行内编辑即聚焦标题框：键盘用户可直接开始修改
+  useEffect(() => {
+    if (editingId) editTitleRef.current?.focus()
+  }, [editingId])
+
   if (!open) return null
 
   const closeDialog = () => {
@@ -73,26 +85,53 @@ export default function QuickInputsDialog({
     setCreateTitle('')
     setCreateContent('')
     setCreateError('')
+    setCreateErrorField(null)
     setDragId(null)
     setDropIndex(null)
     onClose()
   }
 
+  // 错误随输入清除：任一字段变化即撤销当前报错（含服务端错误），下次提交重新校验
+  const changeCreateTitle = (value: string) => {
+    setCreateTitle(value)
+    if (createError) { setCreateError(''); setCreateErrorField(null) }
+  }
+  const changeCreateContent = (value: string) => {
+    setCreateContent(value)
+    if (createError) { setCreateError(''); setCreateErrorField(null) }
+  }
+  const changeEditTitle = (value: string) => {
+    setEditTitle(value)
+    if (editError) { setEditError(''); setEditErrorField(null) }
+  }
+  const changeEditContent = (value: string) => {
+    setEditContent(value)
+    if (editError) { setEditError(''); setEditErrorField(null) }
+  }
+
   const submitCreate = async () => {
     if (creating) return
     const validation = validateQuickInput(createTitle, createContent)
-    if (validation) { setCreateError(validation); return }
+    if (validation) {
+      setCreateError(validation.message)
+      setCreateErrorField(validation.field)
+      ;(validation.field === 'title' ? createTitleRef : createContentRef).current?.focus()
+      return
+    }
     setCreating(true)
     setCreateError('')
+    setCreateErrorField(null)
     try {
       await onCreate(createTitle.trim(), createContent.trim())
       toast.success('快捷内容已添加', { description: '在输入框点击 ⚡ 即可插入光标处。' })
       // 连续录入：保持表单展开、清空字段并回焦标题
       setCreateTitle('')
       setCreateContent('')
+      createTitleRef.current?.focus()
     }
     catch (err) {
       setCreateError(errorText(err, '添加失败'))
+      setCreateErrorField(null)
     }
     finally {
       setCreating(false)
@@ -104,14 +143,21 @@ export default function QuickInputsDialog({
     setEditTitle(item.title)
     setEditContent(item.content)
     setEditError('')
+    setEditErrorField(null)
   }
 
   const submitEdit = async () => {
     if (!editingId || savingEdit) return
     const validation = validateQuickInput(editTitle, editContent)
-    if (validation) { setEditError(validation); return }
+    if (validation) {
+      setEditError(validation.message)
+      setEditErrorField(validation.field)
+      ;(validation.field === 'title' ? editTitleRef : editContentRef).current?.focus()
+      return
+    }
     setSavingEdit(true)
     setEditError('')
+    setEditErrorField(null)
     try {
       await onUpdate(editingId, { title: editTitle.trim(), content: editContent.trim() })
       setEditingId(null)
@@ -119,6 +165,7 @@ export default function QuickInputsDialog({
     }
     catch (err) {
       setEditError(errorText(err, '保存失败'))
+      setEditErrorField(null)
     }
     finally {
       setSavingEdit(false)
@@ -185,7 +232,7 @@ export default function QuickInputsDialog({
       <DialogShell
         size="large"
         title="快捷内容设置"
-        description="在输入框点击 ⚡ 选择标题即可把内容插入光标处；列表越靠前展示越靠前，拖拽或用 ↑↓ 调整。"
+        description="在输入框点击 ⚡ 即可将所选内容插入光标处；列表顺序即展示顺序，可拖拽或用箭头按钮调整。"
         onClose={closeDialog}
         icon={<Zap size={18} />}
       >
@@ -194,34 +241,40 @@ export default function QuickInputsDialog({
             <p className="sr-only" aria-live="polite">{dragId ? '正在拖拽调整顺序，松开完成' : ''}</p>
 
             {createOpen ? (
-              <div className="rounded-xl border border-border p-3.5" data-testid="quick-input-create-form">
+              <form
+                onSubmit={event => { event.preventDefault(); void submitCreate() }}
+                className="rounded-xl border border-border p-3.5"
+                data-testid="quick-input-create-form"
+              >
                 <QuickInputFormFields
                   idPrefix="quick-input-create"
                   title={createTitle}
                   content={createContent}
-                  onTitleChange={setCreateTitle}
-                  onContentChange={setCreateContent}
+                  error={createError}
+                  errorField={createErrorField}
+                  onTitleChange={changeCreateTitle}
+                  onContentChange={changeCreateContent}
+                  titleRef={createTitleRef}
+                  contentRef={createContentRef}
                 />
-                {createError && <p className="mt-2 text-xs text-[var(--color-danger)]">{createError}</p>}
                 <div className="mt-3 flex justify-end gap-2">
                   <button
                     type="button"
-                    onClick={() => { setCreateOpen(false); setCreateError('') }}
+                    onClick={() => { setCreateOpen(false); setCreateError(''); setCreateErrorField(null) }}
                     className="inline-flex h-8 items-center rounded-lg border border-border px-3 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
                   >
                     收起
                   </button>
                   <button
-                    type="button"
+                    type="submit"
                     disabled={creating}
-                    onClick={() => void submitCreate()}
                     data-testid="quick-input-create-submit"
                     className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                   >
                     {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} 添加
                   </button>
                 </div>
-              </div>
+              </form>
             ) : (
               <button
                 type="button"
@@ -236,7 +289,7 @@ export default function QuickInputsDialog({
             {items.length > 0 && (
               <div>
                 <p className="px-1 pb-2 text-[11px] text-[var(--color-text-tertiary)]">
-                  展示优先级（上者优先） · 共 {items.length} 条
+                  共 {items.length} 条
                 </p>
                 <div className="space-y-1" role="list" aria-label="快捷内容列表，拖拽或使用上移下移调整展示优先级">
                   {items.map((item, index) => (
@@ -256,15 +309,18 @@ export default function QuickInputsDialog({
                         }`}
                       >
                         {editingId === item.id ? (
-                          <div>
+                          <form onSubmit={event => { event.preventDefault(); void submitEdit() }}>
                             <QuickInputFormFields
                               idPrefix="quick-input-edit"
                               title={editTitle}
                               content={editContent}
-                              onTitleChange={setEditTitle}
-                              onContentChange={setEditContent}
+                              error={editError}
+                              errorField={editErrorField}
+                              onTitleChange={changeEditTitle}
+                              onContentChange={changeEditContent}
+                              titleRef={editTitleRef}
+                              contentRef={editContentRef}
                             />
-                            {editError && <p className="mt-2 text-xs text-[var(--color-danger)]">{editError}</p>}
                             <div className="mt-3 flex justify-end gap-2">
                               <button
                                 type="button"
@@ -274,16 +330,15 @@ export default function QuickInputsDialog({
                                 <X size={12} /> 取消
                               </button>
                               <button
-                                type="button"
+                                type="submit"
                                 disabled={savingEdit}
-                                onClick={() => void submitEdit()}
                                 data-testid="quick-input-edit-submit"
                                 className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                               >
                                 {savingEdit ? <Loader2 size={13} className="animate-spin" /> : <Pencil size={12} />} 保存
                               </button>
                             </div>
-                          </div>
+                          </form>
                         ) : (
                           <div className="flex items-center gap-1">
                             <span
@@ -375,7 +430,7 @@ export default function QuickInputsDialog({
         onConfirm={() => void confirmDelete()}
         loading={deletePending}
         title="删除快捷内容？"
-        description={deleting ? `「${deleting.title}」将从小卡片中移除，不影响已发送的消息。` : ''}
+        description={deleting ? `「${deleting.title}」将从快捷内容列表中移除，不影响已发送的消息。` : ''}
         confirmText="删除"
         variant="danger"
       />

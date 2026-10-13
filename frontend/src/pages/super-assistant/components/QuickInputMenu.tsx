@@ -35,8 +35,8 @@ export default function QuickInputMenu({
       <PopoverTrigger asChild>
         <button
           type="button"
-          title="快捷输入：点击选择常用内容插入光标处"
-          aria-label="快捷输入"
+          title="快捷内容：点击插入常用内容到光标处"
+          aria-label="快捷内容"
           aria-haspopup="dialog"
           data-testid="super-assistant-quick-input-button"
           className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
