@@ -9,6 +9,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 import { DialogShell } from './AssistantConfiguration'
 import { errorText } from './assistantPanelUtils'
+import { QuickInputFormFields } from './QuickInputFormFields'
 import { contentPreview, isAboveMidline, moveItem, validateQuickInput } from './quickInputLogic'
 
 // 自定义 MIME：行内 dragover/drop 只响应本列表发起的拖拽（文件拖入等互不干扰）
@@ -194,31 +195,13 @@ export default function QuickInputsDialog({
 
             {createOpen ? (
               <div className="rounded-xl border border-border p-3.5" data-testid="quick-input-create-form">
-                <div className="space-y-1.5">
-                  <span className="text-xs font-medium text-[var(--color-text-primary)]">内容标题</span>
-                  <input
-                    value={createTitle}
-                    onChange={event => setCreateTitle(event.target.value)}
-                    placeholder="例如：自我介绍"
-                    maxLength={100}
-                    aria-label="内容标题"
-                    data-testid="quick-input-create-title"
-                    className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  />
-                </div>
-                <div className="mt-3 space-y-1.5">
-                  <span className="text-xs font-medium text-[var(--color-text-primary)]">内容详情</span>
-                  <textarea
-                    value={createContent}
-                    onChange={event => setCreateContent(event.target.value)}
-                    rows={4}
-                    placeholder="点击标题后插入到输入框光标处的完整内容，支持多行。"
-                    maxLength={2000}
-                    aria-label="内容详情"
-                    data-testid="quick-input-create-content"
-                    className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  />
-                </div>
+                <QuickInputFormFields
+                  idPrefix="quick-input-create"
+                  title={createTitle}
+                  content={createContent}
+                  onTitleChange={setCreateTitle}
+                  onContentChange={setCreateContent}
+                />
                 {createError && <p className="mt-2 text-xs text-[var(--color-danger)]">{createError}</p>}
                 <div className="mt-3 flex justify-end gap-2">
                   <button
@@ -273,32 +256,16 @@ export default function QuickInputsDialog({
                         }`}
                       >
                         {editingId === item.id ? (
-                          <div className="space-y-2">
-                            <div className="space-y-1.5">
-                              <span className="text-xs font-medium text-[var(--color-text-primary)]">内容标题</span>
-                              <input
-                                value={editTitle}
-                                onChange={event => setEditTitle(event.target.value)}
-                                maxLength={100}
-                                aria-label="内容标题"
-                                data-testid="quick-input-edit-title"
-                                className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              />
-                            </div>
-                            <div className="space-y-1.5">
-                              <span className="text-xs font-medium text-[var(--color-text-primary)]">内容详情</span>
-                              <textarea
-                                value={editContent}
-                                onChange={event => setEditContent(event.target.value)}
-                                rows={4}
-                                maxLength={2000}
-                                aria-label="内容详情"
-                                data-testid="quick-input-edit-content"
-                                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              />
-                            </div>
-                            {editError && <p className="text-xs text-[var(--color-danger)]">{editError}</p>}
-                            <div className="flex justify-end gap-2">
+                          <div>
+                            <QuickInputFormFields
+                              idPrefix="quick-input-edit"
+                              title={editTitle}
+                              content={editContent}
+                              onTitleChange={setEditTitle}
+                              onContentChange={setEditContent}
+                            />
+                            {editError && <p className="mt-2 text-xs text-[var(--color-danger)]">{editError}</p>}
+                            <div className="mt-3 flex justify-end gap-2">
                               <button
                                 type="button"
                                 onClick={() => setEditingId(null)}
