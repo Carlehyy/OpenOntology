@@ -69,8 +69,11 @@ success `--color-success #2d8a4e` · warning `#c9861a` · danger
 success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引用
 （映射见 `tailwind.config.ts`，取值明暗自适应），勿用绿色族原生色板类。
 状态表达优先「浅底 + 深字」组合，而非大面积实色。
-代码/命令展示块统一用深色面板 `--color-code-bg` / `--color-code-fg`
-（明暗两态近同的近黑底），替代页域私设的 `bg-slate-950` 类色板。
+命令/接口展示面板（curl 示例、事件 tooltip 等工具性面板）统一用深色面板
+`--color-code-bg` / `--color-code-fg`（明暗两态近同的近黑底），替代页域
+私设的 `bg-slate-950` 类色板；聊天/文档正文 markdown 内的代码块属浅色
+阅读面，用 `--color-bg-elevated` 底 + `--color-text-primary` 字（超级
+助手聊天与消息通知正文），近黑块不得打断浅色阅读画布。
 类型编码色（图例、类型徽章、结构图节点等分类数据可视化）使用
 `viz-*` 分类色组（violet/fuchsia/rose/orange/indigo/cyan 及各自 -soft
 浅底），取值与 §5 图表序列同源、`:root`/`.dark` 成对维护；禁止在页面
