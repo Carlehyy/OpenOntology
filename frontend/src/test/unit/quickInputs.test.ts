@@ -37,20 +37,29 @@ describe('isAboveMidline（拖拽投放位置判定）', () => {
 })
 
 describe('validateQuickInput（表单校验，与后端 422 同口径）', () => {
-  it('必填：空白标题/内容报错，strip 后判空', () => {
-    assert.equal(validateQuickInput('', '内容'), '请填写内容标题')
-    assert.equal(validateQuickInput('   ', '内容'), '请填写内容标题')
-    assert.equal(validateQuickInput('标题', ''), '请填写内容详情')
-    assert.equal(validateQuickInput('标题', ' \n '), '请填写内容详情')
+  it('必填：空白标题/内容报错并定位到对应字段，strip 后判空', () => {
+    assert.deepEqual(validateQuickInput('', '内容'), { field: 'title', message: '请填写内容标题' })
+    assert.deepEqual(validateQuickInput('   ', '内容'), { field: 'title', message: '请填写内容标题' })
+    assert.deepEqual(validateQuickInput('标题', ''), { field: 'content', message: '请填写内容详情' })
+    assert.deepEqual(validateQuickInput('标题', ' \n '), { field: 'content', message: '请填写内容详情' })
   })
 
-  it('长度上限：标题 100、内容 2000', () => {
-    assert.equal(validateQuickInput('x'.repeat(101), '内容'), '标题最长 100 字')
-    assert.equal(validateQuickInput('标题', 'x'.repeat(2001)), '内容详情最长 2000 字')
+  it('长度上限：标题 100、内容 2000，错误同样携带字段定位', () => {
+    assert.deepEqual(validateQuickInput('x'.repeat(101), '内容'), { field: 'title', message: '标题最长 100 字' })
+    assert.deepEqual(validateQuickInput('标题', 'x'.repeat(2001)), { field: 'content', message: '内容详情最长 2000 字' })
   })
 
-  it('合法输入返回空串（含多行内容与首尾空白）', () => {
-    assert.equal(validateQuickInput(' 标题 ', ' 第一行\n第二行 '), '')
+  it('合法输入返回 null（含多行内容与首尾空白）', () => {
+    assert.equal(validateQuickInput(' 标题 ', ' 第一行\n第二行 '), null)
+  })
+
+  it('字段枚举只含 title/content，供错误边框与聚焦消费', () => {
+    for (const issue of [
+      validateQuickInput('', '内容'),
+      validateQuickInput('标题', ''),
+    ]) {
+      if (issue) assert.ok(['title', 'content'].includes(issue.field))
+    }
   })
 })
 

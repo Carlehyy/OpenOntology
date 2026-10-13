@@ -19,13 +19,19 @@ export function isAboveMidline(clientY: number, rect: { top: number; height: num
   return clientY < rect.top + rect.height / 2
 }
 
-/** 快捷内容表单校验：返回首个错误文案；通过返回空串（与后端 422 同口径）。 */
-export function validateQuickInput(title: string, content: string): string {
-  if (!title.trim()) return '请填写内容标题'
-  if (title.trim().length > 100) return '标题最长 100 字'
-  if (!content.trim()) return '请填写内容详情'
-  if (content.trim().length > 2000) return '内容详情最长 2000 字'
-  return ''
+/** 快捷内容表单校验结果：字段定位（错误边框/聚焦用）+ 文案（与后端 422 同口径）。 */
+export interface QuickInputValidationIssue {
+  field: 'title' | 'content'
+  message: string
+}
+
+/** 快捷内容表单校验：返回首个错误；通过返回 null。 */
+export function validateQuickInput(title: string, content: string): QuickInputValidationIssue | null {
+  if (!title.trim()) return { field: 'title', message: '请填写内容标题' }
+  if (title.trim().length > 100) return { field: 'title', message: '标题最长 100 字' }
+  if (!content.trim()) return { field: 'content', message: '请填写内容详情' }
+  if (content.trim().length > 2000) return { field: 'content', message: '内容详情最长 2000 字' }
+  return null
 }
 
 /** 卡片/列表行的内容预览：首个非空行去首尾空白，多行折叠为单行省略展示。 */
