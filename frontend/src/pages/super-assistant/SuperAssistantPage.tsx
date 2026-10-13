@@ -1542,7 +1542,7 @@ export default function SuperAssistantPage() {
             ) : !hasMessages ? (
               <div className="flex flex-1 items-center justify-center px-4 sm:px-8">
                 <div className="relative w-full max-w-3xl -translate-y-14 sm:-translate-y-20">
-                  <p className="super-assistant-hero-shimmer absolute inset-x-0 bottom-full mb-8 text-center text-3xl font-semibold tracking-tight sm:text-4xl">
+                  <p className="super-assistant-hero-shimmer absolute inset-x-0 bottom-full z-10 mb-12 pb-1 text-center text-3xl font-semibold tracking-tight sm:text-4xl">
                     SuperAgent 工作空间 2.0
                   </p>
                   {renderComposer(true)}

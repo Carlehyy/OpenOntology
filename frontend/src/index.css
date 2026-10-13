@@ -140,25 +140,37 @@
   }
 }
 
-/* 超级助手空态 hero：极光紫青流光字（style B） */
+/* 超级助手空态 hero：经典银白扫光（style A，白底略加深底色） */
 @keyframes super-assistant-hero-sweep {
   0% { background-position: 100% 50%; }
   100% { background-position: 0% 50%; }
 }
 
 .super-assistant-hero-shimmer {
-  background: linear-gradient(90deg, #7c8cff, #b388ff, #5eead4, #7c8cff);
-  background-size: 300% 100%;
+  /* 银灰底 + 柔和白高光；底色略深于预览，保证白底对比 */
+  background: linear-gradient(
+    105deg,
+    #6b7280 0%,
+    #8b93a7 38%,
+    #ffffff 50%,
+    #8b93a7 62%,
+    #6b7280 100%
+  );
+  background-size: 220% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: super-assistant-hero-sweep 4s linear infinite;
+  /* 给 g/y 等下行字母留出裁切余量（background-clip:text 常见问题） */
+  line-height: 1.35;
+  padding-bottom: 0.2em;
+  overflow: visible;
+  animation: super-assistant-hero-sweep 3.6s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .super-assistant-hero-shimmer {
     animation: none;
-    background-position: 50% 50%;
+    background-position: 40% 50%;
   }
 }
 
