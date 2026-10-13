@@ -69,7 +69,7 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
       >
         <DialogHeader
           icon={icon}
-          className="mb-0 shrink-0 border-b border-[var(--color-border)] px-5 py-4 pr-12"
+          className="mb-0 shrink-0 border-b border-[var(--color-border)] px-5 py-4 pr-14"
         >
           <div>
             <DialogTitle className="text-base font-semibold leading-6">{title}</DialogTitle>
