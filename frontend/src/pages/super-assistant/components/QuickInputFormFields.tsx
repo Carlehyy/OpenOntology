@@ -50,6 +50,7 @@ export function QuickInputFormFields({
           placeholder="例如：自我介绍"
           maxLength={100}
           aria-invalid={errorField === 'title' || undefined}
+          aria-describedby={error && errorField === 'title' ? `${idPrefix}-error` : undefined}
           data-testid={`${idPrefix}-title`}
           className={cn(
             'h-9 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring',
@@ -70,6 +71,7 @@ export function QuickInputFormFields({
           placeholder="要插入的完整内容，支持多行。"
           maxLength={2000}
           aria-invalid={errorField === 'content' || undefined}
+          aria-describedby={error && errorField === 'content' ? `${idPrefix}-error` : undefined}
           data-testid={`${idPrefix}-content`}
           className={cn(
             'w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring',
@@ -77,7 +79,7 @@ export function QuickInputFormFields({
           )}
         />
       </div>
-      {error && <p className="mt-2 text-xs text-[var(--color-danger)]">{error}</p>}
+      {error && <p id={`${idPrefix}-error`} className="mt-2 text-xs text-[var(--color-danger)]">{error}</p>}
     </>
   )
 }
