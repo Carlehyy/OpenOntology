@@ -140,6 +140,28 @@
   }
 }
 
+/* 超级助手空态 hero：极光紫青流光字（style B） */
+@keyframes super-assistant-hero-sweep {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.super-assistant-hero-shimmer {
+  background: linear-gradient(90deg, #7c8cff, #b388ff, #5eead4, #7c8cff);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: super-assistant-hero-sweep 4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .super-assistant-hero-shimmer {
+    animation: none;
+    background-position: 50% 50%;
+  }
+}
+
 /* 脚本编辑器：去掉聚焦时的点状轮廓（@uiw 默认主题注入的 1px dotted outline，
    theme 扩展在顺序上压不过它，这里用 !important 显式覆盖）；同理字体也直接
    用 !important 落到内容区，避免被默认主题的 monospace 抢回。 */
