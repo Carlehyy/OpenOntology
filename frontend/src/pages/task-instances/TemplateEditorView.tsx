@@ -10,9 +10,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
-import { EditorView } from '@codemirror/view'
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
-import { tags } from '@lezer/highlight'
 import { yaml } from '@codemirror/lang-yaml'
 import {
   ArrowLeft, CheckCircle2, FileCode2, GitCompare, History, Save,
@@ -28,32 +25,19 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { formatDateTime } from '@/utils/datetime'
 import { lineDiff } from '@/components/task-instances/instanceView'
+import * as copy from '@/components/task-instances/copy'
+import { yamlEditorTheme, yamlHighlight } from '@/components/task-instances/yamlEditorTheme'
 import WorkflowPreviewGraph from '@/components/task-instances/WorkflowPreviewGraph'
 
-// 与世界模型开发页一致的编辑器观感（GitHub light 高亮；注释不用斜体）
-const editorTheme = EditorView.theme({
-  '.cm-content': { lineHeight: '1.6' },
-})
-
-// 语法色引用 tokens.css 语义令牌（颜色唯一事实源；check:color-tokens 约束）
-const yamlHighlight = syntaxHighlighting(HighlightStyle.define([
-  { tag: tags.keyword, color: 'var(--code-syntax-keyword)', fontWeight: '600' },
-  { tag: [tags.string, tags.docComment], color: 'var(--code-syntax-string)' },
-  { tag: tags.comment, color: 'var(--code-syntax-comment)' },
-  { tag: [tags.number, tags.bool, tags.null], color: 'var(--code-syntax-number)' },
-  { tag: tags.propertyName, color: 'var(--code-syntax-property)' },
-  { tag: tags.operator, color: 'var(--code-syntax-operator)' },
-]))
-
 const SPEC_SNIPPETS: Array<{ label: string; code: string }> = [
-  { label: 'agent 节点', code: '  <id>:\n    kind: agent\n    system: 执行说明\n    outputs:\n      done: { contract: <契约名> }' },
+  { label: 'Agent 节点', code: '  <id>:\n    kind: agent\n    system: 执行说明\n    outputs:\n      done: { contract: <契约名> }' },
   { label: 'human 节点', code: '  <id>:\n    kind: human\n    role: 角色说明' },
   { label: 'approval 节点', code: '  <id>:\n    kind: approval\n    approvers: [admin]' },
   { label: 'condition 节点', code: '  <id>:\n    kind: condition\n    on: <上游>.done\n    branches:\n      - { when: { field: <字段>, equals: <值> }, to: [<目标>] }\n    default: [<目标>]' },
   { label: 'join 节点', code: '  <id>:\n    kind: join\n    mode: all' },
   { label: 'terminal 节点', code: '  <id>: { kind: terminal, outcome: success }' },
   { label: '契约', code: '  <契约名>:\n    type: object\n    required: [<字段>]\n    properties:\n      <字段>: { type: string, minLength: 1 }' },
-  { label: '打回边', code: '  - { from: <审批>.rejected, to: <目标>, rework: true }' },
+  { label: '退回边', code: '  - { from: <审批>.rejected, to: <目标>, rework: true }' },
 ]
 
 const STARTER_SPEC = `api_version: openontology.task/v1
@@ -200,15 +184,15 @@ export default function TemplateEditorView({ templateId }: { templateId?: string
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <Button variant="ghost" size="sm" onClick={() => navigate('/task-instances')} className="gap-1.5">
-          <ArrowLeft className="h-4 w-4" />返回
+          <ArrowLeft className="h-4 w-4" />返回列表
         </Button>
         <div className="flex items-center gap-2">
           <FileCode2 className="h-4 w-4 text-[var(--color-text-tertiary)]" />
           <span className="text-sm font-medium text-[var(--color-text-primary)]">
-            {isNew ? '新建流程模板' : (template.data?.name ?? '流程模板')}
+            {isNew ? copy.TEMPLATE_NEW_BUTTON : (template.data?.name ?? '流程模板')}
           </span>
           {dirty ? (
-            <span className="rounded bg-[var(--color-bg-warning)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">未保存</span>
+            <span className="rounded bg-[var(--color-warning-bg)] px-1.5 py-0.5 text-[11px] text-[var(--color-warning)]">未保存</span>
           ) : null}
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -216,7 +200,7 @@ export default function TemplateEditorView({ templateId }: { templateId?: string
             <ShieldAlert className="h-4 w-4" />校验
           </Button>
           <Button size="sm" onClick={() => save.mutate()} disabled={save.isPending} className="gap-1.5">
-            <Save className="h-4 w-4" />{isNew ? '创建模板' : '保存新版本'}
+            <Save className="h-4 w-4" />{isNew ? '创建' : '保存新版本'}
           </Button>
         </div>
       </div>
@@ -288,7 +272,7 @@ export default function TemplateEditorView({ templateId }: { templateId?: string
               ref={editorRef}
               value={specYaml}
               onChange={setSpecYaml}
-              extensions={[yaml(), editorTheme, yamlHighlight]}
+              extensions={[yaml(), yamlEditorTheme, yamlHighlight]}
               height="480px"
               aria-label="WorkflowSpec YAML 编辑器"
             />
@@ -331,7 +315,7 @@ export default function TemplateEditorView({ templateId }: { templateId?: string
             ) : (
               <div className="space-y-1.5">
                 {issues.map((issue, index) => (
-                  <div key={index} className="rounded-md bg-[var(--color-bg-danger)] px-2 py-1.5 text-xs">
+                  <div key={index} className="rounded-md bg-[var(--color-danger-bg)] px-2 py-1.5 text-xs">
                     <div className="font-mono text-[10px] text-[var(--color-danger)]">{issue.code}</div>
                     <div className="text-[var(--color-text-secondary)]">{issue.message}</div>
                     {issue.ref ? (
@@ -343,7 +327,7 @@ export default function TemplateEditorView({ templateId }: { templateId?: string
             )}
             <div className="border-t border-border pt-2">
               <p className="text-xs text-[var(--color-text-tertiary)]">
-                契约可选、逐端口收紧；打回边携带理由触发上游重做（驳回-修复环）。
+                契约可选、逐端口收紧；退回边携带理由触发上游重做（退回重做环）。
               </p>
             </div>
           </CardContent>

@@ -6,29 +6,34 @@
  * 右栏：当前视图内容（看板/实例轻量详情/模板列表/激活表单/画布编辑器；
  * 模板列表头部承载「新建流程」入口，激活表单内嵌只读流程结构预览）
  * 全程不离开超级助手 HashRouter 上下文。
+ * 跨视图共享文案统一取自 components/task-instances/copy.ts。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowLeft, CheckCircle2, ClipboardList, ExternalLink, LayoutGrid, ListChecks,
-  Loader2, Play, Plus, Send, ThumbsDown, XCircle,
+  ArrowLeft, CheckCircle2, ClipboardList, ChevronDown, ChevronRight, ExternalLink,
+  LayoutGrid, ListChecks, Loader2, Play, Plus, RefreshCw, Send, ThumbsDown, XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   apiError, taskInstancesApi,
-  type TemplateSummary, type InstanceListItem, type WorkflowSpecSnapshot,
+  type TemplateSummary, type InstanceDetail, type InstanceListItem,
+  type WorkflowSpecSnapshot,
 } from '@/api/taskInstances'
 import { DialogShell } from './AssistantConfiguration'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import {
-  BOARD_GROUPS, INSTANCE_STATUS_LABELS, INSTANCE_STATUS_TONE, NODE_KIND_LABELS,
-  dialogNavOf, instanceGroup, isTerminalStatus, waitingNodesOf,
-  type TaskDialogView,
+  ATTENTION_REASON_LABELS, BOARD_GROUPS, INSTANCE_STATUS_LABELS, INSTANCE_STATUS_TONE,
+  attentionReasonOf, dialogNavOf, instanceCardTimeLabel, instanceGroup, isTerminalStatus,
+  waitingNodesOf, type TaskDialogView,
 } from '@/components/task-instances/instanceView'
+import * as copy from '@/components/task-instances/copy'
+import ProposalCard from '@/components/task-instances/ProposalCard'
+import FailureNotice from '@/components/task-instances/FailureNotice'
 import WorkflowPreviewGraph from '@/components/task-instances/WorkflowPreviewGraph'
-import { formatDateTime } from '@/utils/datetime'
+import { formatRelativeTime } from '@/utils/datetime'
 import WorkflowCanvas from './WorkflowCanvas'
 
 // ─── 视图类型 ───
@@ -90,7 +95,7 @@ export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDial
       { name: instanceName, goal },
       `dialog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
     onSuccess: () => {
-      toast.success('实例已激活')
+      toast.success(copy.ACTIVATED_TOAST)
       setView('board'); setInstanceName(''); setGoal(''); setSelectedTemplate(null)
       void queryClient.invalidateQueries({ queryKey: ['task-instances', 'instances'] })
     },
@@ -115,6 +120,21 @@ export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDial
     navigate(`/task-instances/instances/${id}`)
   }, [navigate, onClose])
 
+  // 失败实例「用相同目标重新激活」：按快照 revision 定位模板。
+  // 三态返回：模板列表未就绪（loading）/ 模板已演进或删除（missing）/
+  // 已进入激活表单（ok）；调用方按态提示，避免把「未就绪」误报成「已删除」
+  const handleReactivate = useCallback((detail: InstanceDetail): 'ok' | 'loading' | 'missing' => {
+    if (templates.isLoading) return 'loading'
+    const template = (templates.data ?? []).find(
+      item => item.latest_revision_id === detail.template_revision_id)
+    if (!template) return 'missing'
+    setSelectedTemplate(template)
+    setInstanceName(`${detail.name}·重试`.slice(0, 200))
+    setGoal(detail.goal)
+    setView('activate')
+    return 'ok'
+  }, [templates.data, templates.isLoading])
+
   const grouped = useMemo(() => {
     const map = new Map<string, InstanceListItem[]>(
       BOARD_GROUPS.map(g => [g.key, []]))
@@ -131,9 +151,10 @@ export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDial
   return (
     <DialogShell
       title="任务实例"
-      description="DAG 流程模板 → 契约验收的自动化任务轨道"
+      description={copy.DOMAIN_SUBTITLE}
       size="wide"
       onClose={onClose}
+      onInteractOutside={event => event.preventDefault()}
       icon={<ListChecks size={18} />}
       contentClassName="h-[min(82dvh,44rem)]"
     >
@@ -170,12 +191,23 @@ export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDial
 
         {/* ─── 右栏：视图内容 ─── */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {view === 'board' && <BoardView grouped={grouped} total={instances.data?.total ?? 0} onRefresh={() => void instances.refetch()} onSelectInstance={handleSelectInstance} />}
+          {view === 'board' && (
+            <BoardView
+              grouped={grouped}
+              total={instances.data?.total ?? 0}
+              loading={instances.isLoading}
+              error={instances.isError}
+              onRefresh={() => void instances.refetch()}
+              onSelectInstance={handleSelectInstance}
+              onGoTemplates={() => setView('templates')}
+            />
+          )}
           {view === 'instance' && selectedInstanceId && (
             <InstanceLiteView
               instanceId={selectedInstanceId}
               onBack={backToBoard}
               onOpenFull={openFullDetail}
+              onReactivate={handleReactivate}
             />
           )}
           {view === 'activate' && selectedTemplate && (
@@ -195,6 +227,8 @@ export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDial
             <TemplatesPanel
               templates={templates.data ?? []}
               loading={templates.isLoading}
+              error={templates.isError}
+              onRetry={() => void templates.refetch()}
               onNewFlow={() => setView('canvas')}
               onSelect={handleSelectTemplate}
             />
@@ -211,20 +245,58 @@ export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDial
 // ═══════════════════════════════════════════════════════════
 // 子组件：实例看板
 // ═══════════════════════════════════════════════════════════
-function BoardView({ grouped, total, onRefresh, onSelectInstance }: {
+function BoardView({ grouped, total, loading, error, onRefresh, onSelectInstance, onGoTemplates }: {
   grouped: Map<string, InstanceListItem[]>
   total: number
+  loading: boolean
+  error: boolean
   onRefresh: () => void
   onSelectInstance: (id: string) => void
+  onGoTemplates: () => void
 }) {
+  if (loading) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-[var(--color-text-tertiary)]" data-testid="task-instances-board">
+        加载中…
+      </div>
+    )
+  }
+  if (error) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 text-center" data-testid="task-instances-board">
+        <XCircle size={24} className="text-[var(--color-danger)]" />
+        <p className="text-sm text-[var(--color-text-secondary)]">实例列表加载失败</p>
+        <Button size="sm" variant="outline" className="h-8 gap-1 text-xs" onClick={onRefresh}>
+          <RefreshCw size={12} /> 重试
+        </Button>
+      </div>
+    )
+  }
+  if (!total) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 text-center" data-testid="task-instances-board">
+        <ListChecks size={24} className="text-[var(--color-text-tertiary)]" />
+        <p className="text-sm text-[var(--color-text-secondary)]">{copy.BOARD_EMPTY_TITLE}</p>
+        <p className="text-xs text-[var(--color-text-tertiary)]">{copy.BOARD_EMPTY_HINT}</p>
+        <Button size="sm" className="h-8 gap-1.5 text-xs" onClick={onGoTemplates}>
+          <Play size={14} /> {copy.BOARD_EMPTY_ACTION}
+        </Button>
+      </div>
+    )
+  }
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4" data-testid="task-instances-board">
       <div className="mb-3 flex items-center justify-between">
         <span className="text-xs text-[var(--color-text-tertiary)]">
-          共 {total} 个实例 · 8 秒自动刷新
+          {copy.BOARD_COUNT_LABEL(total)}
         </span>
-        <Button variant="outline" size="sm" className="h-7 gap-1 px-2 text-[11px]" onClick={onRefresh}>
-          <Loader2 size={12} /> 刷新
+        <Button
+          variant="outline" size="sm"
+          className="h-7 gap-1 px-2 text-[11px]"
+          title="看板自动刷新中（每 8 秒），也可手动刷新"
+          onClick={onRefresh}
+        >
+          <RefreshCw size={12} /> 刷新
         </Button>
       </div>
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
@@ -234,39 +306,56 @@ function BoardView({ grouped, total, onRefresh, onSelectInstance }: {
             <div key={group.key} className="space-y-1.5">
               <div className="flex items-center gap-1.5 px-1 text-xs font-medium text-[var(--color-text-secondary)]">
                 {group.label}
-                <span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                <span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] font-medium tabular-nums text-[var(--color-text-secondary)]">
                   {items.length}
                 </span>
               </div>
-              {items.map(item => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => onSelectInstance(item.id)}
-                  data-testid="task-instance-card"
-                  className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] p-2.5 text-left transition-all hover:border-[var(--color-primary)]/40 hover:shadow-sm focus-visible:ring-2 ring-ring"
-                >
-                  <div className="flex items-start justify-between gap-1.5">
-                    <span className="min-w-0 truncate text-xs font-medium text-[var(--color-text-primary)]">
-                      {item.name}
-                    </span>
-                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${INSTANCE_STATUS_TONE[item.status] ?? ''}`}>
-                      {INSTANCE_STATUS_LABELS[item.status] ?? item.status}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex items-center gap-1.5">
-                    <StatusIcon status={item.status} />
-                    <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
-                      {item.goal || '（无目标描述）'}
-                    </span>
-                  </div>
-                </button>
-              ))}
-              {!items.length && (
-                <div className="rounded-lg border border-dashed border-[var(--color-border)] py-6 text-center text-[10px] text-[var(--color-text-tertiary)]">
-                  暂无
-                </div>
-              )}
+              {items.map(item => {
+                const reason = attentionReasonOf(item.nodes)
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => onSelectInstance(item.id)}
+                    data-testid="task-instance-card"
+                    className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] p-2.5 text-left transition-all hover:border-[var(--color-primary)]/40 hover:shadow-sm focus-visible:ring-2 ring-ring"
+                  >
+                    <div className="flex items-start justify-between gap-1.5">
+                      <span className="min-w-0 truncate text-xs font-medium text-[var(--color-text-primary)]">
+                        {item.name}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        {reason ? (
+                          <span className={`rounded px-1.5 py-0.5 text-[11px] ${
+                            reason === 'approval'
+                              ? 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'
+                              : 'bg-[var(--color-info-bg)] text-[var(--color-text-primary)]'
+                          }`}>
+                            {ATTENTION_REASON_LABELS[reason]}
+                          </span>
+                        ) : null}
+                        <span className={`rounded px-1.5 py-0.5 text-[11px] ${INSTANCE_STATUS_TONE[item.status] ?? ''}`}>
+                          {INSTANCE_STATUS_LABELS[item.status] ?? item.status}
+                        </span>
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-center gap-1.5">
+                      <StatusIcon status={item.status} />
+                      <span className="truncate text-[11px] text-[var(--color-text-tertiary)]">
+                        {item.goal || copy.TEMPLATE_UNTITLED_GOAL}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+                      {instanceCardTimeLabel(item)}
+                    </div>
+                  </button>
+                )
+              })}
+              {!items.length ? (
+                <p className="px-1 py-2 text-[11px] text-[var(--color-text-tertiary)]">
+                  {copy.BOARD_GROUP_EMPTY}
+                </p>
+              ) : null}
             </div>
           )
         })}
@@ -278,9 +367,11 @@ function BoardView({ grouped, total, onRefresh, onSelectInstance }: {
 // ═══════════════════════════════════════════════════════════
 // 子组件：模板列表面板
 // ═══════════════════════════════════════════════════════════
-function TemplatesPanel({ templates, loading, onNewFlow, onSelect }: {
+function TemplatesPanel({ templates, loading, error, onRetry, onNewFlow, onSelect }: {
   templates: TemplateSummary[]
   loading: boolean
+  error: boolean
+  onRetry: () => void
   onNewFlow: () => void
   onSelect: (template: TemplateSummary) => void
 }) {
@@ -289,18 +380,24 @@ function TemplatesPanel({ templates, loading, onNewFlow, onSelect }: {
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--color-border)] px-4 py-2.5">
         <span className="text-xs text-[var(--color-text-tertiary)]">共 {templates.length} 个模板</span>
         <Button size="sm" className="h-8 gap-1.5 text-xs" onClick={onNewFlow} data-testid="new-flow-button">
-          <Plus size={14} /> 新建流程
+          <Plus size={14} /> {copy.TEMPLATE_NEW_BUTTON}
         </Button>
       </div>
       {loading ? (
         <div className="px-4 py-12 text-center text-xs text-[var(--color-text-tertiary)]">加载中…</div>
+      ) : error ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
+          <XCircle size={24} className="text-[var(--color-danger)]" />
+          <p className="text-sm text-[var(--color-text-secondary)]">模板列表加载失败</p>
+          <Button size="sm" variant="outline" className="h-8 gap-1 text-xs" onClick={onRetry}>
+            <RefreshCw size={12} /> 重试
+          </Button>
+        </div>
       ) : !templates.length ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
           <ListChecks size={24} className="text-[var(--color-text-tertiary)]" />
-          <p className="text-sm text-[var(--color-text-secondary)]">还没有流程模板</p>
-          <p className="text-xs text-[var(--color-text-tertiary)]">
-            点击右上角「新建流程」用画布创建第一个自动化流程
-          </p>
+          <p className="text-sm text-[var(--color-text-secondary)]">{copy.TEMPLATE_EMPTY_TITLE}</p>
+          <p className="text-xs text-[var(--color-text-tertiary)]">{copy.TEMPLATE_EMPTY_HINT}</p>
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -316,17 +413,32 @@ function TemplatesPanel({ templates, loading, onNewFlow, onSelect }: {
                   <span className="min-w-0 truncate text-sm font-medium text-[var(--color-text-primary)]">
                     {template.name}
                   </span>
-                  <span className="shrink-0 rounded bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                    v{template.latest_revision_no ?? '-'}
+                  <span className="flex shrink-0 items-center gap-1">
+                    {template.is_preset ? (
+                      <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[11px] font-medium text-brand-ink">
+                        预置
+                      </span>
+                    ) : null}
+                    {template.node_count ? (
+                      <span className="rounded bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                        {template.node_count} 节点
+                      </span>
+                    ) : null}
+                    <span className="rounded bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                      v{template.latest_revision_no ?? '-'}
+                    </span>
                   </span>
                 </div>
                 <p className="mt-1 line-clamp-2 text-xs leading-4 text-[var(--color-text-tertiary)]">
-                  {template.description || '（无描述）'}
+                  {template.description || copy.TEMPLATE_UNTITLED_DESC}
                 </p>
-                <div className="mt-2.5 flex items-center gap-3 text-[10px] text-[var(--color-text-tertiary)]">
+                <div className="mt-2.5 flex items-center gap-3 text-[11px] text-[var(--color-text-tertiary)]">
                   <span className="flex items-center gap-1">
-                    <Play size={11} /> {template.instance_count} 次激活
+                    <Play size={12} /> {template.instance_count} 次激活
                   </span>
+                  {template.updated_at ? (
+                    <span>更新于 {formatRelativeTime(template.updated_at)}</span>
+                  ) : null}
                 </div>
               </button>
             ))}
@@ -338,7 +450,7 @@ function TemplatesPanel({ templates, loading, onNewFlow, onSelect }: {
 }
 
 // ═══════════════════════════════════════════════════════════
-// 子组件：激活表单
+// 子组件：激活表单（字段前置；流程结构作为确认区可折叠）
 // ═══════════════════════════════════════════════════════════
 function ActivateForm({ template, previewSpec, previewLoading, previewError, instanceName, setInstanceName, goal, setGoal, onBack, onActivate, loading }: {
   template: TemplateSummary
@@ -353,6 +465,7 @@ function ActivateForm({ template, previewSpec, previewLoading, previewError, ins
   onActivate: () => void
   loading: boolean
 }) {
+  const [showGraph, setShowGraph] = useState(true)
   return (
     <>
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
@@ -361,38 +474,13 @@ function ActivateForm({ template, previewSpec, previewLoading, previewError, ins
           onClick={onBack}
           className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 ring-ring"
         >
-          <ArrowLeft size={13} /> 返回
+          <ArrowLeft size={14} /> {copy.RETURN_TO_TEMPLATES}
         </button>
         <span className="text-sm font-semibold text-[var(--color-text-primary)]">
           激活「{template.name}」
         </span>
       </div>
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
-        <div>
-          <div className="mb-1.5 text-xs font-medium text-[var(--color-text-primary)]">
-            流程结构
-            <span className="ml-1.5 font-normal text-[var(--color-text-tertiary)]">
-              （只读 · 激活前确认节点编排）
-            </span>
-          </div>
-          {previewLoading ? (
-            <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
-              流程结构加载中…
-            </div>
-          ) : previewError ? (
-            <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
-              流程结构加载失败，可返回后重试
-            </div>
-          ) : previewSpec?.nodes && Object.keys(previewSpec.nodes).length ? (
-            <div data-testid="template-graph-preview">
-              <WorkflowPreviewGraph spec={previewSpec} />
-            </div>
-          ) : (
-            <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
-              该模板暂无节点结构数据
-            </div>
-          )}
-        </div>
         <div>
           <label htmlFor="ti-instance-name" className="mb-1.5 block text-xs font-medium text-[var(--color-text-primary)]">
             实例名称 <span className="text-[var(--color-danger)]">*</span>
@@ -402,7 +490,7 @@ function ActivateForm({ template, previewSpec, previewLoading, previewError, ins
             required maxLength={200}
             value={instanceName}
             onChange={event => setInstanceName(event.target.value)}
-            placeholder="例如：登录页改版评审-1023"
+            placeholder={copy.TEMPLATE_NAME_PLACEHOLDER}
           />
         </div>
         <div>
@@ -414,20 +502,55 @@ function ActivateForm({ template, previewSpec, previewLoading, previewError, ins
             className="min-h-28 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2 text-sm leading-6 focus-visible:ring-2 ring-ring"
             value={goal}
             onChange={event => setGoal(event.target.value)}
-            placeholder="这次任务要完成什么？agent 节点的执行以此为骨干……"
+            placeholder={copy.TEMPLATE_GOAL_PLACEHOLDER}
           />
           <p className="mt-1.5 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-            目标描述越具体，agent 产出质量越高。可包含背景、约束、期望产出格式等。
+            目标描述越具体，Agent 产出质量越高。可包含背景、约束、期望产出格式等。
           </p>
+        </div>
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowGraph(previous => !previous)}
+            className="flex w-full items-center gap-1.5 text-xs font-medium text-[var(--color-text-primary)] focus-visible:ring-2 ring-ring"
+            aria-expanded={showGraph}
+          >
+            {showGraph ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            流程结构
+            <span className="font-normal text-[var(--color-text-tertiary)]">
+              （只读 · 激活前确认节点编排）
+            </span>
+          </button>
+          {showGraph ? (
+            <div className="mt-2">
+              {previewLoading ? (
+                <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+                  流程结构加载中…
+                </div>
+              ) : previewError ? (
+                <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+                  流程结构加载失败，可返回后重试
+                </div>
+              ) : previewSpec?.nodes && Object.keys(previewSpec.nodes).length ? (
+                <div data-testid="template-graph-preview">
+                  <WorkflowPreviewGraph spec={previewSpec} />
+                </div>
+              ) : (
+                <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+                  该模板暂无节点结构数据
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
       <div className="flex shrink-0 justify-end border-t border-[var(--color-border)] px-5 py-3.5">
         <Button
           onClick={onActivate}
           disabled={loading || !instanceName.trim() || !goal.trim()}
-          className="h-9 min-w-28 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep disabled:opacity-50"
+          className="h-9 min-w-28 rounded-lg px-4 text-xs font-medium"
         >
-          {loading ? '激活中…' : '激活实例'}
+          {loading ? copy.ACTIVATE_RUNNING : copy.ACTIVATE_BUTTON}
         </Button>
       </div>
     </>
@@ -437,14 +560,17 @@ function ActivateForm({ template, previewSpec, previewLoading, previewError, ins
 // ═══════════════════════════════════════════════════════════
 // 子组件：实例轻量详情（看板卡片就地处置；重操作与时间线走独立详情页）
 // ═══════════════════════════════════════════════════════════
-function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
+function InstanceLiteView({ instanceId, onBack, onOpenFull, onReactivate }: {
   instanceId: string
   onBack: () => void
   onOpenFull: (id: string) => void
+  onReactivate: (detail: InstanceDetail) => 'ok' | 'loading' | 'missing'
 }) {
   const queryClient = useQueryClient()
   const [humanOutput, setHumanOutput] = useState('{}')
-  const [rejectReason, setRejectReason] = useState('')
+  // 审批与人工是两个独立表单，理由分别持有（共用会在双等待时串值）
+  const [approvalReason, setApprovalReason] = useState('')
+  const [humanRejectReason, setHumanRejectReason] = useState('')
 
   const instance = useQuery({
     queryKey: ['task-instances', 'instance', instanceId],
@@ -467,8 +593,8 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
         instanceId, waitingNodesOf(instance.data).approval[0]?.node_id ?? '',
         input.approvalId, input.decision, input.reason),
     onSuccess: () => {
-      toast.success('审批决定已提交')
-      setRejectReason('')
+      toast.success(copy.DECIDED_TOAST)
+      setApprovalReason('')
       refresh()
     },
     onError: error => toast.error(apiError(error)),
@@ -480,13 +606,13 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
       try {
         output = JSON.parse(humanOutput) as Record<string, unknown>
       } catch {
-        throw new Error('交活产出必须是合法 JSON 对象')
+        throw new Error(copy.HUMAN_OUTPUT_INVALID)
       }
       return taskInstancesApi.humanSubmit(
         instanceId, waitingNodesOf(instance.data).human[0]?.node_id ?? '', output)
     },
     onSuccess: () => {
-      toast.success('已交活')
+      toast.success(copy.HUMAN_SUBMITTED_TOAST)
       setHumanOutput('{}')
       refresh()
     },
@@ -496,10 +622,10 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
   const reject = useMutation({
     mutationFn: () => taskInstancesApi.humanReject(
       instanceId, waitingNodesOf(instance.data).human[0]?.node_id ?? '',
-      rejectReason),
+      humanRejectReason),
     onSuccess: () => {
-      toast.success('已打回上游，等待重做')
-      setRejectReason('')
+      toast.success(copy.HUMAN_REJECTED_TOAST)
+      setHumanRejectReason('')
       refresh()
     },
     onError: error => toast.error(apiError(error)),
@@ -528,6 +654,8 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
       && item.status === 'pending')
     : undefined
   const humanNode = waiting.human[0]
+  const isFailed = detail.status === 'failed'
+  const reactivateHint = isFailed && !approvalNode && !humanNode
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto" data-testid="task-instance-lite">
@@ -537,12 +665,12 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
           onClick={onBack}
           className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 ring-ring"
         >
-          <ArrowLeft size={13} /> 返回看板
+          <ArrowLeft size={14} /> {copy.RETURN_TO_BOARD}
         </button>
         <span className="min-w-0 truncate text-sm font-semibold text-[var(--color-text-primary)]">
           {detail.name}
         </span>
-        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${INSTANCE_STATUS_TONE[detail.status] ?? ''}`}>
+        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${INSTANCE_STATUS_TONE[detail.status] ?? ''}`}>
           {INSTANCE_STATUS_LABELS[detail.status] ?? detail.status}
         </span>
         <button
@@ -550,23 +678,19 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
           onClick={() => onOpenFull(detail.id)}
           className="ml-auto inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-[var(--color-primary)] hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 ring-ring"
         >
-          查看完整详情 <ExternalLink size={12} />
+          {copy.OPEN_FULL_DETAIL} <ExternalLink size={12} />
         </button>
       </div>
 
       <div className="space-y-4 p-5">
         <div>
-          <div className="text-xs text-[var(--color-text-tertiary)]">
-            目标 · 创建于 {formatDateTime(detail.created_at)}
+          <div className="text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+            {instanceCardTimeLabel(detail)}
           </div>
           <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">
-            {detail.goal || '（无目标描述）'}
+            {detail.goal || copy.TEMPLATE_UNTITLED_GOAL}
           </p>
-          {detail.fail_reason ? (
-            <p className="mt-1.5 rounded bg-[var(--color-bg-danger)] px-2 py-1 text-xs text-[var(--color-danger)]">
-              失败原因：{detail.fail_reason}
-            </p>
-          ) : null}
+          {detail.fail_reason ? <FailureNotice failReason={detail.fail_reason} /> : null}
           {detail.cancel_reason ? (
             <p className="mt-1.5 rounded bg-[var(--color-bg-hover)] px-2 py-1 text-xs text-[var(--color-text-tertiary)]">
               取消原因：{detail.cancel_reason}
@@ -584,26 +708,27 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
             <div className="flex items-center gap-2 text-xs">
               <CheckCircle2 size={14} className="text-[var(--color-warning)]" />
               <span className="font-medium text-[var(--color-text-primary)]">
-                审批关口 {approvalNode.node_id}
+                {copy.APPROVAL_SECTION_TITLE}
+              </span>
+              <span className="font-mono text-[11px] text-[var(--color-text-tertiary)]">
+                节点 {approvalNode.node_id}
               </span>
             </div>
-            <pre className="max-h-32 overflow-auto rounded bg-[var(--color-bg-hover)] p-2 font-mono text-[10px] text-[var(--color-text-secondary)]">
-              {JSON.stringify(approval.proposal, null, 2)}
-            </pre>
+            <ProposalCard proposal={approval.proposal} />
             <Input
-              aria-label="驳回理由（驳回时必填）"
-              placeholder="驳回理由（驳回时必填，将随打回送达上游）"
-              value={rejectReason}
-              onChange={event => setRejectReason(event.target.value)}
+              aria-label={copy.REJECT_INPUT_ARIA}
+              placeholder={copy.REJECT_INPUT_PLACEHOLDER}
+              value={approvalReason}
+              onChange={event => setApprovalReason(event.target.value)}
             />
             <div className="flex gap-2">
               <Button size="sm" className="flex-1 gap-1.5"
                 onClick={() => decide.mutate({ approvalId: approval.id, decision: 'approved' })}>
-                <CheckCircle2 size={14} />批准
+                <CheckCircle2 size={14} />{copy.APPROVE_BUTTON}
               </Button>
               <Button size="sm" variant="outline" className="flex-1 gap-1.5 text-[var(--color-danger)]"
-                onClick={() => decide.mutate({ approvalId: approval.id, decision: 'rejected', reason: rejectReason })}>
-                <ThumbsDown size={14} />驳回并打回
+                onClick={() => decide.mutate({ approvalId: approval.id, decision: 'rejected', reason: approvalReason })}>
+                <ThumbsDown size={14} />{copy.REJECT_BUTTON}
               </Button>
             </div>
           </div>
@@ -611,38 +736,58 @@ function InstanceLiteView({ instanceId, onBack, onOpenFull }: {
 
         {humanNode ? (
           <div className="space-y-2 rounded-lg border border-[var(--color-border)] p-2.5">
-            <div className="text-xs font-medium text-[var(--color-text-primary)]">
-              人工待办 {humanNode.node_id}
-              <span className="ml-1.5 font-normal text-[var(--color-text-tertiary)]">
-                {NODE_KIND_LABELS.human} · 尝试#{humanNode.attempt_no}
+            <div className="flex items-center gap-2 text-xs">
+              <span className="font-medium text-[var(--color-text-primary)]">
+                {copy.HUMAN_SECTION_TITLE}
+              </span>
+              <span className="font-mono text-[11px] text-[var(--color-text-tertiary)]">
+                节点 {humanNode.node_id} · 尝试 #{humanNode.attempt_no}
               </span>
             </div>
             <textarea
-              aria-label="交活产出 JSON"
+              aria-label={copy.HUMAN_OUTPUT_ARIA}
               className="min-h-20 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2 font-mono text-xs focus-visible:ring-2 ring-ring"
               value={humanOutput}
               onChange={event => setHumanOutput(event.target.value)}
-              placeholder='交活产出（JSON 对象，须满足端口契约）'
+              placeholder={copy.HUMAN_OUTPUT_PLACEHOLDER}
             />
             <Input
-              aria-label="打回理由"
-              placeholder="打回直接上游的理由（可选操作）"
-              value={rejectReason}
-              onChange={event => setRejectReason(event.target.value)}
+              aria-label={copy.HUMAN_REJECT_INPUT_ARIA}
+              placeholder={copy.HUMAN_REJECT_INPUT_PLACEHOLDER}
+              value={humanRejectReason}
+              onChange={event => setHumanRejectReason(event.target.value)}
             />
             <div className="flex gap-2">
               <Button size="sm" className="flex-1 gap-1.5" onClick={() => submit.mutate()}>
-                <Send size={14} />交活
+                <Send size={14} />{copy.HUMAN_SUBMIT_BUTTON}
               </Button>
               <Button size="sm" variant="outline" className="flex-1 gap-1.5 text-[var(--color-danger)]" onClick={() => reject.mutate()}>
-                <ThumbsDown size={14} />打回上游
+                <ThumbsDown size={14} />{copy.REJECT_BUTTON}
               </Button>
             </div>
           </div>
         ) : null}
 
         {isTerminalStatus(detail.status) && !approvalNode && !humanNode ? (
-          <p className="text-xs text-[var(--color-text-tertiary)]">实例已结束，无待处理事项</p>
+          <div className="space-y-2 rounded-lg border border-dashed border-[var(--color-border)] p-3 text-xs text-[var(--color-text-tertiary)]">
+            <p>{copy.TERMINAL_NO_ACTION}</p>
+            {reactivateHint ? (
+              <Button
+                size="sm" className="h-8 gap-1.5 text-xs"
+                onClick={() => {
+                  const result = onReactivate(detail)
+                  if (result === 'loading') {
+                    toast.info('模板列表加载中，请稍后重试')
+                  } else if (result === 'missing') {
+                    toast.info('原模板已更新或删除，请在流程模板中选择模板重新激活')
+                  }
+                }}
+              >
+                <RefreshCw size={12} /> {copy.REACTIVATE_BUTTON}
+              </Button>
+            ) : null}
+            <p>{copy.FULL_PAGE_HINT}</p>
+          </div>
         ) : null}
       </div>
     </div>

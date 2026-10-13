@@ -18,8 +18,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { formatDateTime } from '@/utils/datetime'
-import { BOARD_GROUPS, INSTANCE_STATUS_LABELS, INSTANCE_STATUS_TONE, instanceGroup } from './instanceView'
+import { BOARD_GROUPS, INSTANCE_STATUS_LABELS, INSTANCE_STATUS_TONE, instanceCardTimeLabel, instanceGroup } from './instanceView'
+import * as copy from './copy'
 
 const GROUP_ICONS = {
   attention: AlertCircle,
@@ -64,7 +64,7 @@ export default function InstancesBoardView({ templates }: {
         randomIdempotencyKey())
     },
     onSuccess: data => {
-      toast.success('实例已激活')
+      toast.success(copy.ACTIVATED_TOAST)
       setActivating(null)
       void queryClient.invalidateQueries({ queryKey: ['task-instances', 'instances'] })
       navigate(`/task-instances/instances/${data.id}`)
@@ -92,9 +92,8 @@ export default function InstancesBoardView({ templates }: {
     <div className="space-y-4">
       <div className="flex items-center gap-3">
         <div className="flex gap-4 text-xs text-[var(--color-text-tertiary)]">
-          <span>共 {instances.data?.total ?? 0} 个实例</span>
+          <span>{copy.BOARD_COUNT_LABEL(instances.data?.total ?? 0)}</span>
           <span>需介入 {(byGroup.get('attention') ?? []).length}</span>
-          <span>7 秒轮询刷新</span>
         </div>
         <Button
           size="sm" className="ml-auto gap-1.5"
@@ -109,7 +108,7 @@ export default function InstancesBoardView({ templates }: {
             setActivating(templates[0])
           }}
         >
-          <Play className="h-4 w-4" />激活实例
+          <Play className="h-4 w-4" />{copy.ACTIVATE_BUTTON}
         </Button>
       </div>
 
@@ -122,7 +121,7 @@ export default function InstancesBoardView({ templates }: {
               <div className="flex items-center gap-1.5 px-1 text-sm font-medium text-[var(--color-text-secondary)]">
                 <Icon className="h-4 w-4 text-[var(--color-text-tertiary)]" />
                 {group.label}
-                <span className="text-xs text-[var(--color-text-tertiary)]">{items.length}</span>
+                <span className="text-xs font-medium tabular-nums text-[var(--color-text-secondary)]">{items.length}</span>
               </div>
               <div className="space-y-2">
                 {items.map(item => (
@@ -140,9 +139,9 @@ export default function InstancesBoardView({ templates }: {
                           {INSTANCE_STATUS_LABELS[item.status] ?? item.status}
                         </span>
                       </div>
-                      <p className="line-clamp-2 text-xs text-[var(--color-text-tertiary)]">{item.goal}</p>
+                      <p className="line-clamp-2 text-xs text-[var(--color-text-tertiary)]">{item.goal || copy.TEMPLATE_UNTITLED_GOAL}</p>
                       <div className="flex items-center justify-between text-[11px] text-[var(--color-text-tertiary)]">
-                        <span>{formatDateTime(item.created_at)}</span>
+                        <span className="tabular-nums">{instanceCardTimeLabel(item)}</span>
                         {item.status === 'active' ? (
                           <Button variant="ghost" size="sm" className="h-6 px-1.5 text-[11px] text-[var(--color-danger)]"
                             onClick={event => {
@@ -157,9 +156,9 @@ export default function InstancesBoardView({ templates }: {
                   </Card>
                 ))}
                 {!items.length ? (
-                  <div className="rounded-lg border border-dashed border-border py-8 text-center text-xs text-[var(--color-text-tertiary)]">
-                    暂无
-                  </div>
+                  <p className="px-1 py-2 text-xs text-[var(--color-text-tertiary)]">
+                    {copy.BOARD_GROUP_EMPTY}
+                  </p>
                 ) : null}
               </div>
             </div>
@@ -171,7 +170,7 @@ export default function InstancesBoardView({ templates }: {
       <Modal
         open={activating !== null}
         onClose={() => setActivating(null)}
-        title="激活任务实例"
+        title={copy.ACTIVATE_MODAL_TITLE}
       >
         <div className="space-y-4">
           <div>
@@ -201,7 +200,7 @@ export default function InstancesBoardView({ templates }: {
             label="实例名称" required maxLength={200}
             value={instanceName}
             onChange={event => setInstanceName(event.target.value)}
-            placeholder="例如：登录页改版评审-1023"
+            placeholder={copy.TEMPLATE_NAME_PLACEHOLDER}
           />
           <div>
             <label className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
@@ -212,7 +211,7 @@ export default function InstancesBoardView({ templates }: {
               className="min-h-24 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
               value={goal}
               onChange={event => setGoal(event.target.value)}
-              placeholder="这次任务要完成什么；agent 节点的执行提示以此为骨干"
+              placeholder={copy.TEMPLATE_GOAL_PLACEHOLDER}
             />
           </div>
           <div>
@@ -232,7 +231,7 @@ export default function InstancesBoardView({ templates }: {
               onClick={() => activate.mutate()}
               disabled={activate.isPending || !instanceName.trim() || !goal.trim()}
             >
-              {activate.isPending ? '激活中…' : '激活'}
+              {activate.isPending ? copy.ACTIVATE_RUNNING : copy.ACTIVATE_BUTTON}
             </Button>
           </div>
         </div>

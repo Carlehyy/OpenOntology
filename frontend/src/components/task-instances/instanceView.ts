@@ -3,6 +3,7 @@
  * 零 DOM 依赖，node:test + --experimental-strip-types 直接单测。
  */
 import type { InstanceDetail, NodeRunView, WorkflowSpecSnapshot } from '@/api/taskInstances'
+import { formatDuration, formatRelativeTime } from '../../utils/datetime.ts'
 
 export type InstanceStatusGroup = 'attention' | 'running' | 'done' | 'stopped'
 
@@ -36,25 +37,25 @@ export const NODE_KIND_LABELS: Record<string, string> = {
   terminal: '终点',
 }
 
-/** 语义令牌类（tokens.css 语义色；不引入新色值） */
+/** 语义令牌类（tokens.css 语义色；不引入新色值；浅底令牌正名为 --color-*-bg） */
 export const NODE_STATUS_TONE: Record<string, string> = {
   pending: 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]',
-  dispatched: 'bg-[var(--color-bg-info)] text-[var(--color-text-primary)]',
-  running: 'bg-[var(--color-bg-info)] text-[var(--color-text-primary)]',
-  waiting_human: 'bg-[var(--color-bg-warning)] text-[var(--color-warning)]',
-  waiting_approval: 'bg-[var(--color-bg-warning)] text-[var(--color-warning)]',
-  completed: 'bg-[var(--color-bg-success)] text-[var(--color-success)]',
-  failed: 'bg-[var(--color-bg-danger)] text-[var(--color-danger)]',
+  dispatched: 'bg-[var(--color-info-bg)] text-[var(--color-text-primary)]',
+  running: 'bg-[var(--color-info-bg)] text-[var(--color-text-primary)]',
+  waiting_human: 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
+  waiting_approval: 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
+  completed: 'bg-[var(--color-success-bg)] text-[var(--color-success)]',
+  failed: 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
   voided: 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]',
   skipped: 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]',
   cancelled: 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]',
 }
 
 export const INSTANCE_STATUS_TONE: Record<string, string> = {
-  active: 'bg-[var(--color-bg-info)] text-[var(--color-text-primary)]',
-  cancelling: 'bg-[var(--color-bg-warning)] text-[var(--color-warning)]',
-  completed: 'bg-[var(--color-bg-success)] text-[var(--color-success)]',
-  failed: 'bg-[var(--color-bg-danger)] text-[var(--color-danger)]',
+  active: 'bg-[var(--color-info-bg)] text-[var(--color-text-primary)]',
+  cancelling: 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
+  completed: 'bg-[var(--color-success-bg)] text-[var(--color-success)]',
+  failed: 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
   cancelled: 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]',
 }
 
@@ -99,8 +100,8 @@ export const EVENT_LABELS: Record<string, string> = {
   'approval.decided': '审批决定',
   'approval.expired': '审批过期',
   'human.assigned': '人工待办',
-  'human.submitted': '人工交活',
-  'node.rejected': '产出被驳回',
+  'human.submitted': '人工提交成果',
+  'node.rejected': '产出被退回',
   'steering.delivered': '插话送达',
   'artifact.declared': '产物登记',
   'artifact.completed': '产物落档',
@@ -223,4 +224,144 @@ export type TaskDialogView =
  */
 export function dialogNavOf(view: TaskDialogView): 'instances' | 'templates' {
   return view === 'board' || view === 'instance' ? 'instances' : 'templates'
+}
+
+// ─────────────────────────────────────────────────────────────
+// 看板卡片辅助（时间 meta / 需介入原因徽章）
+// ─────────────────────────────────────────────────────────────
+
+/** 「需介入」原因：等待审批优先（关口未过最阻塞），其次等待人工；无则 null */
+export function attentionReasonOf(
+  nodes: Array<{ status: string }> | null | undefined,
+): 'approval' | 'human' | null {
+  const statuses = new Set((nodes ?? []).map(node => node.status))
+  if (statuses.has('waiting_approval')) return 'approval'
+  if (statuses.has('waiting_human')) return 'human'
+  return null
+}
+
+export const ATTENTION_REASON_LABELS: Record<'approval' | 'human', string> = {
+  approval: '待审批',
+  human: '待人工',
+}
+
+/**
+ * 看板卡片时间 meta：「创建于 X · 耗时 Y」（终态用 finished_at 计耗时）/
+ * 「创建于 X · 已运行 Y」（进行中）。缺时间字段的降级只显示创建时间。
+ */
+export function instanceCardTimeLabel(
+  item: { status: string; created_at: string | null; finished_at: string | null },
+  now?: Date,
+): string {
+  // created_at 缺失/非法时不算时长（formatDuration 的 '—' 占位符
+  // 不是有效时长，拼进文案会输出「已运行 —」残缺句）
+  const hasCreated = Boolean(item.created_at)
+  const created = item.created_at
+    ? formatRelativeTime(item.created_at, { now }) : null
+  const duration = hasCreated
+    ? item.finished_at
+      ? formatDuration(item.created_at, { until: item.finished_at })
+      : item.status === 'active' || item.status === 'cancelling'
+        ? formatDuration(item.created_at, { until: now })
+        : null
+    : null
+  const parts = [
+    created ? `创建于 ${created}` : null,
+    duration ? (item.finished_at ? `耗时 ${duration}` : `已运行 ${duration}`) : null,
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+
+// ─────────────────────────────────────────────────────────────
+// 失败原因人话化（首行摘要；技术原文进可展开详情）
+// ─────────────────────────────────────────────────────────────
+
+/** fail_reason → 一句人话；未匹配的执行类错误给通用兜底。 */
+export function humanizeFailReason(reason: string | null | undefined): string {
+  if (!reason) return ''
+  if (/容器执行失败|runner 异常退出/i.test(reason)) {
+    return '执行环境异常退出，任务未能完成'
+  }
+  if (/超时|timeout/i.test(reason)) return '执行超时，任务未能完成'
+  if (/契约|contract/i.test(reason)) return '产出未通过契约校验'
+  if (/取消|cancel/i.test(reason)) return '任务被取消'
+  return '任务执行失败'
+}
+
+// ─────────────────────────────────────────────────────────────
+// 审批提案结构化摘要（P1-1：10 秒可读懂的审批卡片）
+// ─────────────────────────────────────────────────────────────
+
+export interface ProposalSummary {
+  goal: string | null
+  sections: Array<{ label: string; text: string }>
+  artifacts: Array<{ name: string; mime: string }>
+}
+
+const SUMMARY_TEXT_KEYS = ['summary', 'title', 'name', 'rationale'] as const
+
+function clampSummaryText(value: string): string {
+  return value.length > 120 ? `${value.slice(0, 120)}…` : value
+}
+
+function pickSummaryText(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  for (const key of SUMMARY_TEXT_KEYS) {
+    const candidate = record[key]
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return clampSummaryText(candidate)
+    }
+  }
+  return null
+}
+
+function collectArtifacts(value: unknown, out: ProposalSummary['artifacts'], depth: number): void {
+  if (!value || typeof value !== 'object' || out.length >= 8 || depth > 4) return
+  if (Array.isArray(value)) {
+    for (const item of value) collectArtifacts(item, out, depth + 1)
+    return
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'artifacts' && Array.isArray(child)) {
+      for (const item of child) {
+        if (out.length >= 8) return
+        if (item && typeof item === 'object'
+          && typeof (item as { name?: unknown }).name === 'string') {
+          const entry = item as { name: string; mime_type?: unknown }
+          out.push({ name: entry.name, mime: typeof entry.mime_type === 'string' ? entry.mime_type : '' })
+        }
+      }
+      continue
+    }
+    collectArtifacts(child, out, depth + 1)
+  }
+}
+
+/**
+ * 审批 proposal → {目标 / 上游产出摘要 / 产物清单}；无可提取字段时返回
+ * null，调用方降级为仅展示可折叠原始 JSON。
+ */
+export function summarizeProposal(
+  proposal: Record<string, unknown> | null | undefined,
+): ProposalSummary | null {
+  if (!proposal || typeof proposal !== 'object') return null
+  const context = proposal.taskContext as Record<string, unknown> | undefined
+  const goalText = typeof context?.goal === 'string' && context.goal.trim()
+    ? context.goal
+    : typeof proposal.goal === 'string' && proposal.goal.trim() ? proposal.goal : null
+  const goal = goalText ? clampSummaryText(goalText) : null
+  const sections: ProposalSummary['sections'] = []
+  const inputs = proposal.inputs
+  if (inputs && typeof inputs === 'object' && !Array.isArray(inputs)) {
+    for (const [label, value] of Object.entries(inputs as Record<string, unknown>)) {
+      if (sections.length >= 4) break
+      const text = pickSummaryText(value)
+      if (text) sections.push({ label, text })
+    }
+  }
+  const artifacts: ProposalSummary['artifacts'] = []
+  collectArtifacts(proposal, artifacts, 0)
+  if (!goal && !sections.length && !artifacts.length) return null
+  return { goal, sections, artifacts }
 }

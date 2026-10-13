@@ -34,14 +34,11 @@ function SpecNode({ data }: NodeProps<Node<SpecNodeData>>) {
     ? NODE_STATUS_TONE[datum.status] ?? ''
     : 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]'
   return (
-    <div className={`min-w-28 rounded-lg border border-border bg-card px-3 py-2 text-left shadow-sm ${tone ? '' : ''}`}>
+    <div className="min-w-28 rounded-lg border border-border bg-card px-3 py-2 text-left shadow-sm">
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-[var(--color-text-tertiary)]" />
-      <div className="text-sm font-medium text-[var(--color-text-primary)]">
-        {datum.label}
-      </div>
-      <div className="mt-0.5 flex items-center gap-1.5">
-        <span className="text-xs text-[var(--color-text-tertiary)]">
-          {NODE_KIND_LABELS[datum.kind] ?? datum.kind}
+      <div className="flex items-center gap-1.5">
+        <span className="text-sm font-medium text-[var(--color-text-primary)]">
+          {NODE_KIND_LABELS[datum.kind] ?? (datum.kind || '未知')}
         </span>
         {datum.status ? (
           <span className={`rounded px-1.5 py-0.5 text-[11px] ${tone}`}>
@@ -49,6 +46,14 @@ function SpecNode({ data }: NodeProps<Node<SpecNodeData>>) {
             {datum.attempt && datum.attempt > 1 ? ` #${datum.attempt}` : ''}
           </span>
         ) : null}
+      </div>
+      {/* 节点原始 ID：排障用技术标签（DESIGN.md §3），不作主文案；
+          超长 ID 截断避免撑宽节点卡 */}
+      <div
+        className="mt-0.5 max-w-40 truncate font-mono text-[11px] uppercase tracking-wider text-[var(--color-text-tertiary)]"
+        title={datum.id}
+      >
+        {datum.id}
       </div>
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-[var(--color-text-tertiary)]" />
     </div>
@@ -113,7 +118,14 @@ export default function WorkflowPreviewGraph({ spec, nodes }: {
         ? { strokeDasharray: '6 4', stroke: 'var(--color-warning)' }
         : undefined,
     })), [graph.edges])
-  if (!graph.nodes.length) return null
+  // 空快照（存量实例 spec_snapshot 可空）给一行降级文案而非空白区
+  if (!graph.nodes.length) {
+    return (
+      <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-border text-xs text-[var(--color-text-tertiary)]">
+        暂无流程结构数据
+      </div>
+    )
+  }
   return (
     <div className="h-72 w-full overflow-hidden rounded-lg border border-border">
       <ReactFlowProvider>
@@ -126,6 +138,7 @@ export default function WorkflowPreviewGraph({ spec, nodes }: {
           edgesFocusable={false}
           proOptions={{ hideAttribution: true }}
           fitView
+          fitViewOptions={{ maxZoom: 1 }}
         >
           <Background gap={16} size={1} />
           <Controls showInteractive={false} position="bottom-right" />

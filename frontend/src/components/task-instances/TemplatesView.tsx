@@ -11,7 +11,8 @@ import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { formatDateTime } from '@/utils/datetime'
+import { formatRelativeTime } from '@/utils/datetime'
+import * as copy from './copy'
 
 export default function TemplatesView({ onNew }: { onNew: () => void }) {
   const navigate = useNavigate()
@@ -48,7 +49,7 @@ export default function TemplatesView({ onNew }: { onNew: () => void }) {
           />
         </div>
         <Button onClick={onNew} className="ml-auto gap-1.5">
-          <Plus className="h-4 w-4" />新建模板
+          <Plus className="h-4 w-4" />{copy.TEMPLATE_NEW_BUTTON}
         </Button>
       </div>
 
@@ -56,8 +57,8 @@ export default function TemplatesView({ onNew }: { onNew: () => void }) {
         <div className="py-16 text-center text-sm text-[var(--color-text-tertiary)]">加载中…</div>
       ) : !templates.data?.length ? (
         <div className="rounded-lg border border-dashed border-border py-16 text-center">
-          <p className="text-sm text-[var(--color-text-tertiary)]">此处尚待落墨</p>
-          <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">创建第一个流程模板，开启任务轨道</p>
+          <p className="text-sm text-[var(--color-text-tertiary)]">{copy.TEMPLATE_EMPTY_TITLE}</p>
+          <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">{copy.TEMPLATE_EMPTY_HINT}</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -71,11 +72,18 @@ export default function TemplatesView({ onNew }: { onNew: () => void }) {
                 <div className="flex items-start gap-2">
                   <FileCode2 className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-text-tertiary)]" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-medium text-[var(--color-text-primary)]">
-                      {template.name}
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate font-medium text-[var(--color-text-primary)]">
+                        {template.name}
+                      </span>
+                      {template.is_preset ? (
+                        <span className="shrink-0 rounded bg-brand-soft px-1.5 py-0.5 text-[10px] font-medium text-brand-ink">
+                          预置
+                        </span>
+                      ) : null}
                     </div>
                     <div className="mt-0.5 line-clamp-2 text-xs text-[var(--color-text-tertiary)]">
-                      {template.description || '（无描述）'}
+                      {template.description || copy.TEMPLATE_UNTITLED_DESC}
                     </div>
                   </div>
                   <Button
@@ -90,8 +98,11 @@ export default function TemplatesView({ onNew }: { onNew: () => void }) {
                   </Button>
                 </div>
                 <div className="flex items-center justify-between text-xs text-[var(--color-text-tertiary)]">
-                  <span>v{template.latest_revision_no ?? '-'} · {template.instance_count} 次实例</span>
-                  <span>{formatDateTime(template.updated_at)}</span>
+                  <span>
+                    v{template.latest_revision_no ?? '-'} · {template.instance_count} 次激活
+                    {template.node_count ? ` · ${template.node_count} 节点` : ''}
+                  </span>
+                  <span>更新于 {formatRelativeTime(template.updated_at)}</span>
                 </div>
               </CardContent>
             </Card>

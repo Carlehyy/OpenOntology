@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query'
 import { taskInstancesApi } from '@/api/taskInstances'
 import InstancesBoardView from '@/components/task-instances/InstancesBoardView'
 import TemplatesView from '@/components/task-instances/TemplatesView'
+import { DOMAIN_SUBTITLE } from '@/components/task-instances/copy'
 
 type ViewKey = 'templates' | 'instances'
 
@@ -30,7 +31,7 @@ export default function TaskInstancesPage({ initialView = 'templates' }: {
           <div>
             <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">任务实例</h1>
             <p className="text-xs text-[var(--color-text-tertiary)]">
-              声明式 DAG 流程模板 → 契约验收的自动化任务轨道
+              {DOMAIN_SUBTITLE}
             </p>
           </div>
         </div>
@@ -45,7 +46,7 @@ export default function TaskInstancesPage({ initialView = 'templates' }: {
             }`}
             onClick={() => setView('templates')}
           >
-            <ListChecks className="h-4 w-4" />模板
+            <ListChecks className="h-4 w-4" />流程模板
           </button>
           <button
             type="button"

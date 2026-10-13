@@ -11,7 +11,11 @@
  * 3. 绿色族 Tailwind 原生色板类（teal/emerald/cyan/green/lime-*，含透明度
  *    后缀）同受棘轮约束：它们与品牌强调色（祖母绿 brand-* 语义阶）争抢
  *    色相，不得新增；存量登记在 LEGACY_PALETTE_LIMITS。
- * 4. 棘轮下沉：登记文件的数量减少时必须同步收紧 manifest（数量改小、
+ * 4. 未定义 var(--color-*) 死链：ts/tsx/css 中引用的 --color-* 变量必须在
+ *    某个 css 源（tokens.css 或组件级 css）中有定义。引用不存在的语义令牌
+ *    （如把 --color-danger-bg 写成 --color-bg-danger）会静默失效——背景/
+ *    文字色不渲染且 hex 扫描抓不住，此规则补上该盲区。不设棘轮：存量已清零。
+ * 5. 棘轮下沉：登记文件的数量减少时必须同步收紧 manifest（数量改小、
  *    清零即移除登记），否则报“棘轮可下沉”。新文件不允许登记进 manifest。
  *
  * TS/TSX 侧另有 ESLint 同源约束（编辑器实时报错），豁免名单同样派生自
@@ -93,6 +97,28 @@ checkRatchet(
   '绿色族色板类',
   '强调色请使用 brand-* 语义色阶（tailwind.config.ts）或 tokens.css 语义 token，不得直接使用 teal/emerald/cyan/green/lime-* 原生色板类；存量迁移后同步收紧 manifest。',
 )
+
+// —— 未定义 var(--color-*) 死链 ——
+// 定义集合取全部 css 源（tokens.css 为语义源头；palantir-graph 等组件级
+// css 可自带局部 --color-* 变量，一并纳入定义侧避免误报）。
+const COLOR_VAR_DEF_RE = /(--color-[a-z0-9-]+)\s*:/g
+const COLOR_VAR_REF_RE = /var\(\s*(--color-[a-z0-9-]+)/g
+const definedColorVars = new Set()
+for (const file of sourceFiles(srcRoot)) {
+  if (!file.endsWith('.css')) continue
+  for (const match of readFileSync(file, 'utf8').matchAll(COLOR_VAR_DEF_RE)) {
+    definedColorVars.add(match[1])
+  }
+}
+for (const file of sourceFiles(srcRoot)) {
+  const rel = relative(srcRoot, file).split(sep).join('/')
+  if (rel.startsWith('test/')) continue
+  for (const match of readFileSync(file, 'utf8').matchAll(COLOR_VAR_REF_RE)) {
+    if (!definedColorVars.has(match[1])) {
+      errors.push(`未定义 var 引用：${rel} 引用了 ${match[1]}，但所有 css 源中均无此定义（令牌名笔误会让背景/文字色静默失效；正确浅底令牌形如 --color-danger-bg）。`)
+    }
+  }
+}
 
 if (errors.length > 0) {
   console.error('颜色令牌门禁未通过：\n')

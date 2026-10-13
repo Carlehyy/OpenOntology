@@ -17,6 +17,10 @@ export interface TemplateSummary {
   latest_revision_id: string | null
   canonical_hash: string | null
   instance_count: number
+  /** 官方预置模板（种子迁移标记）；缺省视为用户自建 */
+  is_preset?: boolean
+  /** 最新版本节点数（spec_compiled 统计；存量无编译产物时为 null） */
+  node_count?: number | null
   created_at: string | null
   updated_at: string | null
 }

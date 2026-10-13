@@ -24,6 +24,9 @@ import {
   NODE_KIND_LABELS, NODE_STATUS_LABELS, NODE_STATUS_TONE,
   isTerminalStatus, waitingNodesOf,
 } from '@/components/task-instances/instanceView'
+import * as copy from '@/components/task-instances/copy'
+import ProposalCard from '@/components/task-instances/ProposalCard'
+import FailureNotice from '@/components/task-instances/FailureNotice'
 import WorkflowPreviewGraph from '@/components/task-instances/WorkflowPreviewGraph'
 
 interface TimelineEntry {
@@ -40,7 +43,9 @@ export default function InstanceDetailView() {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([])
   const [streamError, setStreamError] = useState(false)
   const [humanOutput, setHumanOutput] = useState('{}')
-  const [rejectReason, setRejectReason] = useState('')
+  // 审批与人工是两个独立表单，理由分别持有（共用会在双等待时串值）
+  const [approvalReason, setApprovalReason] = useState('')
+  const [humanRejectReason, setHumanRejectReason] = useState('')
   const [steeringText, setSteeringText] = useState('')
   const abortRef = useRef<AbortController | null>(null)
 
@@ -100,8 +105,8 @@ export default function InstanceDetailView() {
         instanceId as string, waiting.approval[0]?.node_id ?? '',
         input.approvalId, input.decision, input.reason),
     onSuccess: () => {
-      toast.success('审批决定已提交')
-      setRejectReason('')
+      toast.success(copy.DECIDED_TOAST)
+      setApprovalReason('')
       refresh()
     },
     onError: error => toast.error(apiError(error)),
@@ -113,13 +118,13 @@ export default function InstanceDetailView() {
       try {
         output = JSON.parse(humanOutput) as Record<string, unknown>
       } catch {
-        throw new Error('交活产出必须是合法 JSON 对象')
+        throw new Error(copy.HUMAN_OUTPUT_INVALID)
       }
       return taskInstancesApi.humanSubmit(
         instanceId as string, waiting.human[0]?.node_id ?? '', output)
     },
     onSuccess: () => {
-      toast.success('已交活')
+      toast.success(copy.HUMAN_SUBMITTED_TOAST)
       setHumanOutput('{}')
       refresh()
     },
@@ -128,10 +133,10 @@ export default function InstanceDetailView() {
 
   const reject = useMutation({
     mutationFn: () => taskInstancesApi.humanReject(
-      instanceId as string, waiting.human[0]?.node_id ?? '', rejectReason),
+      instanceId as string, waiting.human[0]?.node_id ?? '', humanRejectReason),
     onSuccess: () => {
-      toast.success('已打回上游，等待重做')
-      setRejectReason('')
+      toast.success(copy.HUMAN_REJECTED_TOAST)
+      setHumanRejectReason('')
       refresh()
     },
     onError: error => toast.error(apiError(error)),
@@ -159,7 +164,7 @@ export default function InstanceDetailView() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <Button variant="ghost" size="sm" onClick={() => navigate('/task-instances')} className="gap-1.5">
-          <ArrowLeft className="h-4 w-4" />返回
+          <ArrowLeft className="h-4 w-4" />{copy.RETURN_TO_LIST}
         </Button>
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-[var(--color-text-primary)]">{detail.name}</span>
@@ -178,12 +183,8 @@ export default function InstanceDetailView() {
       <Card>
         <CardContent className="space-y-1.5">
           <div className="text-xs text-[var(--color-text-tertiary)]">目标</div>
-          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{detail.goal}</p>
-          {detail.fail_reason ? (
-            <p className="rounded bg-[var(--color-bg-danger)] px-2 py-1 text-xs text-[var(--color-danger)]">
-              失败原因：{detail.fail_reason}
-            </p>
-          ) : null}
+          <p className="whitespace-pre-wrap text-sm text-[var(--color-text-secondary)]">{detail.goal || copy.TEMPLATE_UNTITLED_GOAL}</p>
+          {detail.fail_reason ? <FailureNotice failReason={detail.fail_reason} /> : null}
           {detail.cancel_reason ? (
             <p className="rounded bg-[var(--color-bg-hover)] px-2 py-1 text-xs text-[var(--color-text-tertiary)]">
               取消原因：{detail.cancel_reason}
@@ -248,7 +249,8 @@ export default function InstanceDetailView() {
             waiting={waiting}
             runningCount={runningNodes.length}
             humanOutput={humanOutput} setHumanOutput={setHumanOutput}
-            rejectReason={rejectReason} setRejectReason={setRejectReason}
+            approvalReason={approvalReason} setApprovalReason={setApprovalReason}
+            humanRejectReason={humanRejectReason} setHumanRejectReason={setHumanRejectReason}
             steeringText={steeringText} setSteeringText={setSteeringText}
             onDecide={(approvalId, decision, reason) =>
               decide.mutate({ approvalId, decision, reason })}
@@ -322,8 +324,10 @@ function InteractionPanel(props: {
   runningCount: number
   humanOutput: string
   setHumanOutput: (value: string) => void
-  rejectReason: string
-  setRejectReason: (value: string) => void
+  approvalReason: string
+  setApprovalReason: (value: string) => void
+  humanRejectReason: string
+  setHumanRejectReason: (value: string) => void
   steeringText: string
   setSteeringText: (value: string) => void
   onDecide: (approvalId: string, decision: 'approved' | 'rejected', reason?: string) => void
@@ -343,8 +347,11 @@ function InteractionPanel(props: {
   if (isTerminal && !approvalNode && !humanNode) {
     return (
       <Card>
-        <CardContent className="flex items-center gap-2 text-sm text-[var(--color-text-tertiary)]">
-          <Ban className="h-4 w-4" />实例已结束，交互面板关闭
+        <CardContent className="space-y-1.5 text-sm text-[var(--color-text-tertiary)]">
+          <div className="flex items-center gap-2">
+            <Ban className="h-4 w-4" />{copy.TERMINAL_NO_ACTION}
+          </div>
+          <p className="text-xs">{copy.FULL_PAGE_HINT}</p>
         </CardContent>
       </Card>
     )
@@ -361,60 +368,61 @@ function InteractionPanel(props: {
             <div className="flex items-center gap-2 text-xs">
               <CheckCircle2 className="h-4 w-4 text-[var(--color-warning)]" />
               <span className="font-medium text-[var(--color-text-primary)]">
-                审批关口 {approvalNode.node_id}
+                {copy.APPROVAL_SECTION_TITLE}
+              </span>
+              <span className="font-mono text-[11px] text-[var(--color-text-tertiary)]">
+                节点 {approvalNode.node_id}
               </span>
             </div>
-            <pre className="max-h-32 overflow-auto rounded bg-[var(--color-bg-hover)] p-2 font-mono text-[10px] text-[var(--color-text-secondary)]">
-              {JSON.stringify(approval.proposal, null, 2)}
-            </pre>
+            <ProposalCard proposal={approval.proposal} />
             <Input
-              aria-label="驳回理由（驳回时必填）"
-              placeholder="驳回理由（驳回时必填，将随打回送达上游）"
-              value={props.rejectReason}
-              onChange={event => props.setRejectReason(event.target.value)}
+              aria-label={copy.REJECT_INPUT_ARIA}
+              placeholder={copy.REJECT_INPUT_PLACEHOLDER}
+              value={props.approvalReason}
+              onChange={event => props.setApprovalReason(event.target.value)}
             />
             <div className="flex gap-2">
               <Button size="sm" className="flex-1 gap-1.5"
                 onClick={() => props.onDecide(approval.id, 'approved')}>
-                <CheckCircle2 className="h-4 w-4" />批准
+                <CheckCircle2 className="h-4 w-4" />{copy.APPROVE_BUTTON}
               </Button>
               <Button size="sm" variant="outline" className="flex-1 gap-1.5 text-[var(--color-danger)]"
-                onClick={() => props.onDecide(approval.id, 'rejected', props.rejectReason)}>
-                <ThumbsDown className="h-4 w-4" />驳回并打回
+                onClick={() => props.onDecide(approval.id, 'rejected', props.approvalReason)}>
+                <ThumbsDown className="h-4 w-4" />{copy.REJECT_BUTTON}
               </Button>
             </div>
           </div>
         ) : null}
 
-        {/* 人工交活 / 打回 */}
+        {/* 人工提交成果 / 退回重做 */}
         {humanNode ? (
           <div className="space-y-2 rounded-md border border-border p-2.5">
-            <div className="text-xs font-medium text-[var(--color-text-primary)]">
-              人工待办 {humanNode.node_id}
-              <span className="ml-1.5 font-normal text-[var(--color-text-tertiary)]">
-                {NODE_KIND_LABELS.human} · 尝试#{humanNode.attempt_no}
+            <div className="flex items-center gap-2 text-xs font-medium text-[var(--color-text-primary)]">
+              {copy.HUMAN_SECTION_TITLE}
+              <span className="font-mono text-[11px] font-normal text-[var(--color-text-tertiary)]">
+                节点 {humanNode.node_id} · {NODE_KIND_LABELS.human} · 尝试 #{humanNode.attempt_no}
               </span>
             </div>
             <textarea
-              aria-label="交活产出 JSON"
+              aria-label={copy.HUMAN_OUTPUT_ARIA}
               className="min-h-20 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs"
               value={props.humanOutput}
               onChange={event => props.setHumanOutput(event.target.value)}
-              placeholder='交活产出（JSON 对象，须满足端口契约）'
+              placeholder={copy.HUMAN_OUTPUT_PLACEHOLDER}
             />
             <Input
-              aria-label="打回理由"
-              placeholder="打回直接上游的理由（可选操作）"
-              value={props.rejectReason}
-              onChange={event => props.setRejectReason(event.target.value)}
+              aria-label={copy.HUMAN_REJECT_INPUT_ARIA}
+              placeholder={copy.HUMAN_REJECT_INPUT_PLACEHOLDER}
+              value={props.humanRejectReason}
+              onChange={event => props.setHumanRejectReason(event.target.value)}
             />
             <div className="flex gap-2">
               <Button size="sm" className="flex-1 gap-1.5" onClick={props.onSubmit}>
-                <Send className="h-4 w-4" />交活
+                <Send className="h-4 w-4" />{copy.HUMAN_SUBMIT_BUTTON}
               </Button>
               <Button size="sm" variant="outline" className="flex-1 gap-1.5 text-[var(--color-danger)]"
                 onClick={props.onReject}>
-                <ThumbsDown className="h-4 w-4" />打回上游
+                <ThumbsDown className="h-4 w-4" />{copy.REJECT_BUTTON}
               </Button>
             </div>
           </div>

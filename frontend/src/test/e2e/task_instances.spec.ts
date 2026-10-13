@@ -70,6 +70,7 @@ const instancesFixture = {
 
 const instanceDetailFixture = {
   ...instancesFixture.items[0],
+  fail_reason: 'agent 执行超时（120s）',
   nodes: [
     { node_run_id: 'nr-1', node_id: 'analyze', attempt_no: 1,
       status: 'completed', waiting: false, error: null, correction_count: 0,
@@ -186,7 +187,7 @@ test.describe('任务实例（mocked）', () => {
     await page.goto('/#/task-instances')
     await expect(page.getByRole('heading', { name: '任务实例' })).toBeVisible()
     await expect(page.getByText('代码变更评审').first()).toBeVisible()
-    await expect(page.getByText('v3 · 5 次实例')).toBeVisible()
+    await expect(page.getByText('v3 · 5 次激活')).toBeVisible()
   })
 
   test('切换实例看板：四阶分组与需介入卡片', async ({ page }) => {
@@ -219,10 +220,14 @@ test.describe('任务实例（mocked）', () => {
     await page.goto('/#/task-instances/instances/ins-1')
     await expect(page.getByText('登录页改版评审').first()).toBeVisible()
     await expect(page.getByText('流程快照')).toBeVisible()
+    // FailureNotice：人话首行 + 可展开技术详情
+    await expect(page.getByText('执行超时，任务未能完成')).toBeVisible()
+    await page.getByRole('button', { name: '技术详情' }).click()
+    await expect(page.getByText(/agent 执行超时/)).toBeVisible()
     // 审批关口面板（pending 审批 + 提案 JSON）
-    await expect(page.getByText('审批关口 gate').first()).toBeVisible()
+    await expect(page.getByText('审批关口').first()).toBeVisible()
     await expect(page.getByRole('button', { name: '批准' })).toBeVisible()
-    await expect(page.getByRole('button', { name: '驳回并打回' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '退回重做' })).toBeVisible()
     // 产物清单
     await expect(page.getByText('work-report.md')).toBeVisible()
     // SSE 时间线事件（断流前送达的两条）
@@ -233,8 +238,8 @@ test.describe('任务实例（mocked）', () => {
 
   test('审批驳回交互：必填理由内联提交', async ({ page }) => {
     await page.goto('/#/task-instances/instances/ins-1')
-    await expect(page.getByText('审批关口 gate').first()).toBeVisible()
-    await page.getByLabel('驳回理由（驳回时必填）')
+    await expect(page.getByText('审批关口').first()).toBeVisible()
+    await page.getByLabel('退回理由（退回时必填，将随退回送达上游重做）')
       .fill('补丁不完整，缺少回归测试')
     let decided = false
     await page.route('**/approvals/apr-1/decision', route => {
@@ -246,7 +251,7 @@ test.describe('任务实例（mocked）', () => {
       expect(body.reason).toContain('回归测试')
       return json(route, { ...instanceDetailFixture, status: 'active' })
     })
-    await page.getByRole('button', { name: '驳回并打回' }).click()
+    await page.getByRole('button', { name: '退回重做' }).click()
     await expect.poll(() => decided).toBe(true)
   })
 })

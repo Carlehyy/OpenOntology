@@ -60,6 +60,43 @@ class TestTemplates:
         assert client.get(f"{BASE}/templates/{template['id']}",
                           headers=auth_headers).status_code == 404
 
+    def test_preset_metadata_and_node_count(self, client, auth_headers, db):
+        """is_preset / node_count：用户自建为 False + 节点数来自编译产物。"""
+        template = _create_template(client, auth_headers)
+        assert template["is_preset"] is False
+        detail = client.get(f"{BASE}/templates/{template['id']}",
+                            headers=auth_headers).json()["data"]
+        compiled_nodes = detail["spec_compiled"]["nodes"]
+        listed = client.get(f"{BASE}/templates",
+                            headers=auth_headers).json()["data"]
+        entry = next(t for t in listed if t["id"] == template["id"])
+        assert entry["node_count"] == len(compiled_nodes)
+        # 种子预置标记：直接落库 is_preset=True 的模板在列表原样返回；
+        # 无版本的模板 node_count 为 None（前端隐藏「N 节点」徽章）
+        preset = TaskTemplate(name="预设占位", description="占位", is_preset=True)
+        db.add(preset)
+        db.commit()
+        listed_after = client.get(f"{BASE}/templates",
+                                  headers=auth_headers).json()["data"]
+        preset_entry = next(t for t in listed_after if t["id"] == preset.id)
+        assert preset_entry["is_preset"] is True
+        assert preset_entry["node_count"] is None
+
+        # 存量无编译产物的 revision：详情惰性补算时同步回填 node_count，
+        # 列表维持 None（不为性能在列表侧编译）——口径行为钉死
+        db.query(TaskTemplateRevision).filter(
+            TaskTemplateRevision.template_id == template["id"]
+        ).update({"spec_compiled": None})
+        db.commit()
+        detail_after = client.get(f"{BASE}/templates/{template['id']}",
+                                  headers=auth_headers).json()["data"]
+        assert detail_after["spec_compiled"] is not None
+        assert detail_after["node_count"] == len(compiled_nodes)
+        listed_legacy = client.get(f"{BASE}/templates",
+                                   headers=auth_headers).json()["data"]
+        legacy_entry = next(t for t in listed_legacy if t["id"] == template["id"])
+        assert legacy_entry["node_count"] is None
+
     def test_legacy_null_compiled_backfilled_on_detail(
             self, client, auth_headers, db):
         # 存量模板（seed/早期创建）revision.spec_compiled 为空：

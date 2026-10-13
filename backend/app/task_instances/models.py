@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -26,6 +27,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -103,6 +105,9 @@ class TaskTemplate(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
+    # 官方预置模板（种子迁移标记）：模板列表「预置」徽章的依据
+    is_preset: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false())
     # 指向本表 revisions 的最新版本（应用层维护；不设 FK 避免
     # templates ↔ revisions 循环外键，SQLite 测试库无法 ALTER 补挂）
     latest_revision_id: Mapped[str | None] = mapped_column(

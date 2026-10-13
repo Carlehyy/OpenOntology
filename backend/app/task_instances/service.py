@@ -235,6 +235,11 @@ def _template_out(db: Session, template: TaskTemplate, *,
         "id": template.id,
         "name": template.name,
         "description": template.description or "",
+        "is_preset": bool(template.is_preset),
+        # 最新版本节点数（模板卡「N 节点」徽章；存量无编译产物时为 None）
+        "node_count": (
+            len((revision.spec_compiled or {}).get("nodes") or {})
+            if revision and isinstance(revision.spec_compiled, dict) else None),
         "latest_revision_no": revision.revision_no if revision else None,
         "latest_revision_id": template.latest_revision_id,
         "canonical_hash": revision.canonical_hash if revision else None,
@@ -247,10 +252,14 @@ def _template_out(db: Session, template: TaskTemplate, *,
         # 编译产物随详情返回：前端编排页的只读 DAG 预览数据源
         data["spec_compiled"] = revision.spec_compiled
         # 存量模板（seed/早期创建）无编译产物：读取时惰性补算（不落库），
-        # 编译失败维持 None 由前端空态降级
+        # 编译失败维持 None 由前端空态降级；补算成功时同步回填 node_count，
+        # 否则详情与列表的「N 节点」徽章口径分裂
         if data["spec_compiled"] is None and revision.spec_yaml:
             try:
-                data["spec_compiled"] = compile_and_validate(revision.spec_yaml)[2]
+                compiled = compile_and_validate(revision.spec_yaml)[2]
+                data["spec_compiled"] = compiled
+                data["node_count"] = len(
+                    (compiled or {}).get("nodes") or {})
             except Exception:
                 data["spec_compiled"] = None
     return data

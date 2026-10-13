@@ -74,7 +74,7 @@ interface NotificationFixtureRow {
   attachmentCount: number
 }
 const notificationsFixture: NotificationFixtureRow[] = [
-  { id: 'n-1', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '数据任务失败：供应商每日同步', priority: 'high', isRead: false, isStarred: false, isArchived: false, readAt: null, starredAt: null, archivedAt: null, createdAt: at(0, 9), updatedAt: at(0, 9), bodyPreview: '数据库连接超时，已重试 3 次', attachmentCount: 1 },
+  { id: 'n-1', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '数据任务失败：供应商每日同步', priority: 'high', isRead: false, isStarred: false, isArchived: false, readAt: null, starredAt: null, archivedAt: null, createdAt: at(0, 9), updatedAt: at(0, 9), bodyPreview: '# 数据库连接超时\n已重试 3 次', attachmentCount: 1 },
   { id: 'n-2', eventId: 'billing:inc-1', sourceSystem: 'billing', sourceType: 'ingest', title: '账单系统异常告警', priority: 'urgent', isRead: false, isStarred: true, isArchived: false, readAt: null, starredAt: at(1, 9), archivedAt: null, createdAt: at(1, 9), updatedAt: at(1, 9), bodyPreview: '本月账单金额环比上涨 300%', attachmentCount: 0 },
   { id: 'n-3', eventId: null, sourceSystem: 'platform', sourceType: 'internal', title: '历史巡检完成', priority: 'low', isRead: true, isStarred: false, isArchived: true, readAt: at(2, 8), starredAt: null, archivedAt: at(2, 8), createdAt: at(2, 8), updatedAt: at(2, 8), bodyPreview: '例行巡检完成', attachmentCount: 0 },
 ]
@@ -1179,6 +1179,11 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('消息通知')
 
+  // 误触遮罩不关闭弹窗：发送分区草稿与列表滚动位置不因误触丢失
+  //（Esc 分层回退与右上关闭按钮不受影响，下文的 Esc 关闭契约仍生效）
+  await page.mouse.click(5, 400)
+  await expect(dialog).toBeVisible()
+
   // 分区导航四区：消息列表 / 发送消息 / 渠道配置 / 消息统计
   const navKeys = await dialog.locator('[data-notifications-nav]').evaluateAll(
     els => els.map(el => (el as HTMLElement).dataset.notificationsNav),
@@ -1196,6 +1201,13 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-3"]')).toHaveCount(0)
+
+  // urgent 带左缘色条锚点（优先级不止 6px 圆点的颜色编码，有无色条是二值信号）
+  await expect(page.locator('[data-notifications-item="n-2"]')).toHaveAttribute('data-notifications-priority', 'urgent')
+  // 列表预览按行首锚定剥离 Markdown 语法：服务端预览保留原始换行，剥离由前端完成
+  const previewText = await page.locator('[data-notifications-item="n-1"]').innerText()
+  expect(previewText).toContain('数据库连接超时 已重试 3 次')
+  expect(previewText).not.toContain('#')
 
   // tab 筛选语义：已标记仅 n-2；已归档仅 n-3；全部 = 真全量（n-3 也可见）
   await page.locator('[data-notifications-tab="starred"]').click()
@@ -1215,6 +1227,10 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.locator('[data-notifications-detail] pre')).toBeVisible()
   await expect(page.locator('[data-notifications-attachment="na-1"]')).toBeVisible()
   await expect(page.locator('[data-notifications-attachment="na-1"]')).toContainText('错误日志.txt')
+
+  // 图标操作钮带 Tooltip（与 aria-label 同源文案，鼠标悬停可见）
+  await page.locator('[data-notifications-star]').hover()
+  await expect(page.getByRole('tooltip')).toContainText('标记为重要')
 
   // 标记（星标）与归档触发状态 PATCH
   await page.locator('[data-notifications-star]').click()
@@ -1276,7 +1292,11 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.locator('[data-notifications-detail]')).toContainText('全渠道广播')
   await page.locator('[data-notifications-forward]').click()
   await expect(page.locator('[data-notifications-forward-panel]')).toBeVisible()
+  // 未选渠道时禁用并明示「先选择」，避免「转发（0）」被误读为 0 条成功
+  await expect(page.locator('[data-notifications-forward-confirm]')).toBeDisabled()
+  await expect(page.locator('[data-notifications-forward-confirm]')).toContainText('选择渠道后转发')
   await page.locator('[data-notifications-forward-channel="ch-1"]').check()
+  await expect(page.locator('[data-notifications-forward-confirm]')).toContainText('转发（1 个渠道）')
   await page.locator('[data-notifications-forward-confirm]').click()
   await expect.poll(() => mocks.notifForwards.length).toBe(1)
   await expect(page.getByText('已转发到 1 个渠道')).toBeVisible()
@@ -3193,12 +3213,22 @@ const tiInstancesFixture = {
     { id: 'ins-1', name: '登录页改版评审', goal: '评审登录页改版',
       status: 'active', needs_attention: true, template_revision_id: 'rev-3',
       created_by: 'u-1', created_at: '2026-10-11T03:10:00Z', finished_at: null,
-      fail_reason: null, cancel_reason: null, nodes: [] },
+      fail_reason: null, cancel_reason: null,
+      nodes: [{ node_run_id: 'nr-list-1', node_id: 'gate', attempt_no: 1,
+        status: 'waiting_approval', waiting: true, error: null,
+        correction_count: 0, rework_count: 0, output: null,
+        dispatched_at: null, started_at: null, finished_at: null,
+        created_at: '2026-10-11T03:12:00Z' }] },
     { id: 'ins-2', name: '缺陷修复流水', goal: '修复登录崩溃',
       status: 'completed', needs_attention: false, template_revision_id: 'rev-3',
       created_by: 'u-1', created_at: '2026-10-10T08:00:00Z',
       finished_at: '2026-10-10T09:00:00Z', fail_reason: null,
-      cancel_reason: null, nodes: [] },
+      cancel_reason: null,
+      nodes: [{ node_run_id: 'nr-list-2', node_id: 'review', attempt_no: 1,
+        status: 'waiting_human', waiting: true, error: null,
+        correction_count: 0, rework_count: 0, output: null,
+        dispatched_at: null, started_at: null, finished_at: null,
+        created_at: '2026-10-10T08:30:00Z' }] },
   ],
 }
 
@@ -3263,6 +3293,11 @@ test('任务实例弹窗：看板卡片可点进轻量详情（状态图+审批�
   const dialog = page.getByTestId('task-instances-dialog')
   await expect(dialog).toBeVisible()
   await expect(page.getByText('需介入').first()).toBeVisible()
+  // 需介入卡片的原因徽章：等待审批（来自列表项 nodes 状态投影）
+  await expect(page.getByTestId('task-instance-card')
+    .filter({ hasText: '登录页改版评审' }).getByText('待审批')).toBeVisible()
+  await expect(page.getByTestId('task-instance-card')
+    .filter({ hasText: '缺陷修复流水' }).getByText('待人工')).toBeVisible()
 
   // 卡片点击 → 弹窗内轻量详情（修复前卡片无 onClick，点击零反应）
   const attentionCard = page.getByTestId('task-instance-card').filter({ hasText: '登录页改版评审' })
@@ -3276,9 +3311,13 @@ test('任务实例弹窗：看板卡片可点进轻量详情（状态图+审批�
   await expect(lite.locator('.react-flow')).toBeVisible()
   await expect(lite.getByText('analyze').first()).toBeVisible()
   // 需介入实例的审批关口直达操作
-  await expect(lite.getByText('审批关口 gate').first()).toBeVisible()
+  await expect(lite.getByText('审批关口').first()).toBeVisible()
   await expect(lite.getByRole('button', { name: '批准' })).toBeVisible()
-  await expect(lite.getByRole('button', { name: '驳回并打回' })).toBeVisible()
+  await expect(lite.getByRole('button', { name: '退回重做' })).toBeVisible()
+  // 审批卡片：结构化摘要可见，原始 JSON 默认折叠、可展开
+  await expect(lite.getByText('涉及登录页').first()).toBeVisible()
+  await lite.getByRole('button', { name: '查看原始数据' }).click()
+  await expect(lite.locator('pre').filter({ hasText: 'summary' })).toBeVisible()
 
   // 批准动作走通完整链路（decision POST 命中正确端点与载荷；
   // handler 内只记录不抛错，避免断言失败把 route 挂起成假绿）
@@ -3297,8 +3336,8 @@ test('任务实例弹窗：看板卡片可点进轻量详情（状态图+审批�
   await attentionCard.click()
   await expect(page.getByTestId('task-instance-lite')).toBeVisible()
 
-  // 查看完整详情 → 关闭弹窗并跳转独立实例详情页
-  await page.getByTestId('task-instance-lite').getByRole('button', { name: /查看完整详情/ }).click()
+  // 在完整页面打开 → 关闭弹窗并跳转独立实例详情页
+  await page.getByTestId('task-instance-lite').getByRole('button', { name: /在完整页面打开/ }).click()
   await expect(page).toHaveURL(/#\/task-instances\/instances\/ins-1/)
   await expect(page.getByText('流程快照')).toBeVisible()
   await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
@@ -3336,10 +3375,149 @@ test('任务实例弹窗：激活表单内嵌只读流程结构，新建流程�
   await expect(nav.getByRole('button', { name: '实例看板' })).toHaveAttribute('aria-pressed', 'false')
 
   // 返回模板列表 → 新建流程进入画布编辑器（高亮仍在模板域）
-  await page.getByRole('button', { name: '返回', exact: true }).click()
+  await page.getByRole('button', { name: '返回模板', exact: true }).click()
   await page.getByTestId('new-flow-button').click()
   await expect(page.getByRole('button', { name: '校验' })).toBeVisible()
   await expect(nav.getByRole('button', { name: '流程模板' })).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('任务实例弹窗：零实例看板渲染引导空态并可直达流程模板', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  // 覆盖实例列表为空（后注册的 route 优先）
+  await page.route('**/api/v2/task-instances/instances**', route =>
+    json(route, { total: 0, page: 1, size: 50, items: [] }))
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  const board = page.getByTestId('task-instances-board')
+  await expect(board).toBeVisible()
+  await expect(board.getByText('还没有任务实例')).toBeVisible()
+  await expect(board.getByText(/从流程模板激活第一个任务/)).toBeVisible()
+
+  await board.getByRole('button', { name: '去流程模板' }).click()
+  await expect(page.getByTestId('task-instances-templates')).toBeVisible()
+})
+
+test('任务实例弹窗：失败实例展示人话失败原因，可展开技术详情并用相同目标重新激活', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  const failedSummary = {
+    id: 'ins-fail', name: 'E2E失败实例', goal: '重跑冒烟目标',
+    status: 'failed', needs_attention: false, template_revision_id: 'rev-3',
+    created_by: 'u-1', created_at: '2026-10-11T03:10:00Z',
+    finished_at: '2026-10-11T03:20:00Z',
+    fail_reason: "node:outline:容器执行失败: runner 异常退出 code=None output=''",
+    cancel_reason: null, nodes: [],
+  }
+  const failedDetail = {
+    ...failedSummary,
+    approvals: [], artifacts: [], spec_snapshot: tiSpecCompiled,
+  }
+  await page.route('**/api/v2/task-instances/instances**', route => {
+    const url = route.request().url()
+    if (url.includes('/events')) {
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' })
+    }
+    if (url.match(/instances\/ins-fail$/)) return json(route, failedDetail)
+    return json(route, { total: 1, page: 1, size: 50, items: [failedSummary] })
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByTestId('task-instance-card').filter({ hasText: 'E2E失败实例' }).click()
+  const lite = page.getByTestId('task-instance-lite')
+  await expect(lite).toBeVisible()
+
+  // FailureNotice：人话首行 + 技术详情折叠展开
+  await expect(lite.getByText('执行环境异常退出，任务未能完成')).toBeVisible()
+  await lite.getByRole('button', { name: '技术详情' }).click()
+  await expect(lite.getByText(/runner 异常退出/)).toBeVisible()
+  await expect(lite.getByRole('button', { name: '复制' })).toBeVisible()
+
+  // 用相同目标重新激活 → 进入激活表单，名称/目标预填
+  await lite.getByRole('button', { name: '用相同目标重新激活' }).click()
+  await expect(page.getByText('激活「代码变更评审」')).toBeVisible()
+  await expect(page.getByLabel(/实例名称/)).toHaveValue(/E2E失败实例·重试/)
+  await expect(page.getByLabel(/任务目标/)).toHaveValue('重跑冒烟目标')
+})
+
+test('任务实例弹窗：画布保存门禁——名称必填且写入 metadata（画布与 YAML 双模式）', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  let createdBody: { spec_yaml?: string } | null = null
+  await page.route('**/api/v2/task-instances/templates', route => {
+    if (route.request().method() === 'POST') {
+      createdBody = route.request().postDataJSON() as { spec_yaml?: string }
+      return json(route, { id: 'tpl-new', name: 'x' }, 201)
+    }
+    return json(route, tiTemplatesFixture)
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await page.getByTestId('new-flow-button').click()
+  await expect(page.getByRole('button', { name: '校验' })).toBeVisible()
+
+  // 画布模式：保存必经名称表单；空名禁用
+  await page.getByRole('button', { name: '保存模板' }).click()
+  const nameInput = page.getByLabel(/模板名称/)
+  await expect(nameInput).toBeVisible()
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await nameInput.fill('冒烟流程')
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => createdBody?.spec_yaml ?? '').toContain('name: 冒烟流程')
+  // 保存成功后回到模板列表
+  await expect(page.getByTestId('task-instances-templates')).toBeVisible()
+
+  // YAML 模式：直接点保存同样被表单拦截，名称从 metadata 预填并回写
+  await page.getByTestId('new-flow-button').click()
+  await page.getByRole('button', { name: 'YAML 模式' }).click()
+  await page.getByRole('button', { name: '保存模板' }).click()
+  await expect(nameInput).toBeVisible()
+  await expect(nameInput).toHaveValue('我的流程') // 默认画布序列化的占位名被解析预填
+  await nameInput.fill('YAML命名流程')
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => createdBody?.spec_yaml ?? '').toContain('name: YAML命名流程')
+})
+
+test('任务实例弹窗：激活表单必填校验与提交链路（POST 载荷 + 成功回看板 + 流程结构折叠）', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  let activated: { name?: string; goal?: string } | null = null
+  await page.route('**/task-instances/templates/tpl-1/instances', route => {
+    activated = route.request().postDataJSON() as { name?: string; goal?: string }
+    return json(route, tiInstanceDetailFixture, 202)
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await page.getByTestId('task-instances-templates')
+    .getByRole('button', { name: /代码变更评审/ }).click()
+  await expect(page.getByText('激活「代码变更评审」')).toBeVisible()
+
+  // 未填名称/目标时提交禁用；流程结构默认展开可折叠
+  const submit = page.getByRole('button', { name: '激活实例', exact: true })
+  await expect(submit).toBeDisabled()
+  const graphToggle = page.getByRole('button', { name: /流程结构/ })
+  await expect(page.getByTestId('template-graph-preview')).toBeVisible()
+  await graphToggle.click()
+  await expect(page.getByTestId('template-graph-preview')).toBeHidden()
+
+  await page.getByLabel(/实例名称/).fill('冒烟实例')
+  await page.getByLabel(/任务目标/).fill('跑通激活链路')
+  await submit.click()
+  await expect.poll(() => activated).toEqual({ name: '冒烟实例', goal: '跑通激活链路' })
+  // 激活成功回看板
+  await expect(page.getByTestId('task-instances-board')).toBeVisible()
 })
 
 test('对话问题导航竖条：长会话展示每条提问刻度，点击定位并高亮当前视口轮次', async ({ page }) => {
@@ -3470,3 +3648,4 @@ test('对话问题导航竖条：配置接口慢于消息返回（loading 后收
   await expect(rail).toBeVisible()
   await expect(rail.locator('[data-turn-rail-item]')).toHaveCount(15)
 })
+
