@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Paperclip, Pencil,
+  ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Paperclip, Pencil,
   Send, Settings2, Square, X,
 } from 'lucide-react'
 
@@ -30,6 +30,8 @@ import VoiceRecordingBar from './components/VoiceRecordingBar'
 import QuickInputMenu from './components/QuickInputMenu'
 import QuickInputsDialog from './components/QuickInputsDialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Dialog, DialogTrigger } from '@/components/ui/dialog'
+import CapabilityMapDialog from './components/CapabilityMapDialog'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -1411,6 +1413,19 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
+          <Dialog>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                aria-label="查看能力地图"
+                title="能力地图"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Layers3 size={16} aria-hidden="true" />
+              </button>
+            </DialogTrigger>
+            <CapabilityMapDialog />
+          </Dialog>
           {/* 面板展开时头部宽度吃紧：上下文胶囊仅在 ≥2xl 视口展示（2xl 以上面板展开仍放得下）；
               窄屏（<md）胶囊整体让位，横向空间优先留给标题与模型选择器 */}
           {!loading && selectedConversation && (

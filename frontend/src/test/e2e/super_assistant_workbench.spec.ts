@@ -3651,3 +3651,124 @@ test('对话问题导航竖条：配置接口慢于消息返回（loading 后收
   await expect(rail.locator('[data-turn-rail-item]')).toHaveCount(15)
 })
 
+// 能力地图是业务说明入口，不读取新的后台数据，也不触发业务操作。
+test('能力地图：上下文左侧入口、分层与连接边界、关闭后聊天可用', async ({ page }) => {
+  await seedAuth(page)
+  const api = await mockApis(page)
+  await page.goto('/#/super-assistant?conversation=c-today')
+  const entry = page.getByRole('button', { name: '查看能力地图' })
+  const context = page.getByTestId('super-assistant-context-usage')
+  await expect(context).toBeVisible()
+  const entryBox = await entry.boundingBox()
+  const contextBox = await context.boundingBox()
+  expect(entryBox).not.toBeNull()
+  expect(contextBox).not.toBeNull()
+  expect(entryBox!.x + entryBox!.width).toBeLessThanOrEqual(contextBox!.x)
+
+  const failures: string[] = []
+  page.on('pageerror', error => failures.push(error.message))
+  await entry.click()
+  const dialog = page.getByRole('dialog', { name: '超级助手能力地图' })
+  await expect(dialog).toBeVisible()
+  for (const title of ['01 · 信息与业务背景', '02 · 理解与协调', '03 · 执行与协作']) {
+    await expect(dialog.getByRole('heading', { name: title })).toBeVisible()
+  }
+  for (const title of ['消息通知', '知识图谱', '本体治理', '定时任务', '任务实例', '外部集成']) {
+    await expect(dialog.getByRole('heading', { name: title, exact: true })).toBeVisible()
+  }
+  await expect(dialog.locator('[data-capability-scenario="从消息到任务"]')).toContainText('待打通')
+  await expect(dialog.locator('[data-capability-scenario="从知识到业务操作"]')).toContainText('待打通')
+  await expect(dialog.locator('[data-capability-scenario="从助手到外部协作"]')).toContainText('按配置接入')
+  await expect(dialog).not.toContainText(/Skill|MCP|记忆/)
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(entry).toBeFocused()
+  expect(api.chatCalls).toHaveLength(0)
+  expect(api.createCalls).toHaveLength(0)
+
+  // 空会话也能认识助手边界；开关弹窗不改变输入草稿或触发懒建会话。
+  await page.getByRole('button', { name: '新建会话' }).click()
+  const input = page.getByRole('textbox', { name: '向超级助手发送消息' })
+  await input.fill('能力地图关闭后的草稿')
+  await entry.focus()
+  await page.keyboard.press('Enter')
+  await expect(dialog).toBeVisible()
+  const close = dialog.getByRole('button', { name: '关闭', exact: true })
+  await expect(close).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(close).toBeFocused()
+  await close.click()
+  await expect(entry).toBeFocused()
+  await expect(input).toHaveValue('能力地图关闭后的草稿')
+  await input.fill('你好')
+  await input.press('Enter')
+  await expect.poll(() => api.chatCalls.length).toBe(1)
+  await expect(page.getByText('你好，我是超级助手', { exact: true })).toBeVisible()
+  expect(failures).toEqual([])
+})
+
+for (const viewport of [{ width: 390, height: 844 }, { width: 1024, height: 768 }]) {
+  test(`能力地图：${viewport.width}px 入口可达、视口内滚动、遮罩关闭`, async ({ page }) => {
+    await page.setViewportSize(viewport)
+    await seedAuth(page)
+    await mockApis(page)
+    await page.goto('/#/super-assistant?conversation=c-today')
+    if (viewport.width >= 768) {
+      await page.getByRole('button', { name: '打开助手配置' }).click()
+      await expect(page.getByTestId('super-assistant-context-usage')).toBeHidden()
+    }
+    const entry = page.getByRole('button', { name: '查看能力地图' })
+    await expect(entry).toBeVisible()
+    await expect(page.getByRole('combobox', { name: '会话模型' })).toBeVisible()
+    await entry.click()
+    const dialog = page.getByRole('dialog', { name: '超级助手能力地图' })
+    await expect(dialog).toBeVisible()
+    const box = await dialog.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.y).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width)
+    expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height)
+    const body = dialog.locator('[data-capability-map-body]')
+    expect(await body.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+    await body.evaluate(el => { el.scrollTop = el.scrollHeight })
+    await expect(dialog.getByRole('heading', { name: '典型场景与连接进度' })).toBeVisible()
+    const close = dialog.getByRole('button', { name: '关闭', exact: true })
+    expect(await close.evaluate(el => {
+      const r = el.getBoundingClientRect()
+      return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2))
+    })).toBe(true)
+    await page.mouse.click(2, 2)
+    await expect(dialog).toHaveCount(0)
+    await expect(entry).toBeFocused()
+  })
+}
+
+test('能力地图：暗色令牌、无导航授权账号可读说明且不增加操作权限', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.addInitScript(() => {
+    localStorage.setItem('auth-store', JSON.stringify({ state: {
+      token: 'e2e-token', user: { id: 'u-1', username: 'viewer', role: 'viewer', menu_permissions: ['super_assistant'] },
+    }, version: 0 }))
+    localStorage.setItem('theme', JSON.stringify({ state: { theme: 'dark' }, version: 0 }))
+  })
+  await page.goto('/#/super-assistant?conversation=c-today')
+  await expect(page.getByRole('link', { name: '本体治理' })).toHaveCount(0)
+  await page.getByRole('button', { name: '查看能力地图' }).click()
+  const dialog = page.getByRole('dialog', { name: '超级助手能力地图' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('账号权限、配置与授权约束')
+  await expect(dialog.getByRole('button')).toHaveCount(1)
+  await expect(dialog.getByRole('link')).toHaveCount(0)
+  expect(await dialog.evaluate(el => {
+    const probe = document.createElement('span')
+    probe.style.backgroundColor = 'var(--popover)'
+    el.appendChild(probe)
+    const expected = getComputedStyle(probe).backgroundColor
+    probe.remove()
+    return document.documentElement.classList.contains('dark')
+      && getComputedStyle(el).backgroundColor === expected
+  })).toBe(true)
+})
+
