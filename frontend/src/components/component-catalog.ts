@@ -56,9 +56,9 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
   },
   {
     scenario: 'Tooltip 气泡提示',
-    component: 'reUI Tooltip',
-    status: 'available',
-    note: '存量 motion-ui Tooltip 为世界模型/插件社区页 exception；新代码引入 reUI 版。',
+    component: "Tooltip（@/components/ui/tooltip，Radix 原语）",
+    status: 'vendored',
+    note: 'shadcn/reUI 同源，按 components/README.md 引入流程入库（token 换肤 + --z-tooltip 层级）；首个消费方：超级助手消息通知弹窗图标操作钮。存量 motion-ui Tooltip 为世界模型/插件社区页 exception。',
   },
   {
     scenario: '瞬时消息提示（操作结果/全局反馈 toast）',
@@ -107,6 +107,18 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     component: "Sidebar 展示原语（@/components/ui/sidebar）",
     status: 'vendored',
     note: 'shadcn Sidebar 的展示子集（Group/Menu/MenuButton 等），不含应用壳折叠逻辑；首个消费方：超级助手工作台历史会话分组。',
+  },
+  {
+    scenario: '代码 / YAML / 脚本编辑器（行号、语法高亮、受控文本）',
+    component: "CodeMirror（@uiw/react-codemirror + @codemirror/* 扩展）",
+    status: 'vendored',
+    note: '存量消费方：世界模型开发页 / 数据流水线脚本页 / 插件社区开发页；语言包按需追加（lang-python 已入库，任务实例编排页引入 lang-yaml）。高亮配色沿用 GitHub light 风格常量，注释不用斜体（中文字形防糊）。',
+  },
+  {
+    scenario: '右键上下文菜单（对象行/画布元素的右键快捷操作）',
+    component: "ContextMenu 系列（@/components/ui/context-menu）",
+    status: 'vendored',
+    note: 'shadcn 官方 context-menu（Radix @radix-ui/react-context-menu）按引入流程入库，色板换平台 token；Portal 定位、键盘导航、Esc/点击外部关闭内置。首个消费方：超级助手工作台会话列表（操作/配置快捷/审计三段，段间分隔线，无分组标题）。存量 palantir-graph Canvas.tsx 手写右键菜单为收敛对象（touch-to-migrate），迁移时替换为该标准件。',
   },
   {
     scenario: '二维码展示（扫码访问 / 设备配对）',

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Bot, Copy, Download, FolderSync, GitPullRequest, KeyRound, Loader2,
+  Bot, Copy, Download, FolderSync, KeyRound, Loader2,
   MailPlus, PlugZap, RotateCcw, Save, ShieldCheck, SlidersHorizontal, Trash2,
 } from 'lucide-react'
 
@@ -20,13 +20,12 @@ import { writeTextToClipboard } from '@/utils/clipboard'
 import { errorText } from './assistantPanelUtils'
 import { DialogShell } from './AssistantConfiguration'
 
-type IntegrationTab = 'multica' | 'remote-agents' | 'folder-sync' | 'github'
+type IntegrationTab = 'multica' | 'remote-agents' | 'folder-sync'
 
-const INTEGRATION_TABS: Array<{ key: IntegrationTab; label: string; soon?: boolean }> = [
+const INTEGRATION_TABS: Array<{ key: IntegrationTab; label: string }> = [
   { key: 'multica', label: 'Multica' },
   { key: 'remote-agents', label: '远程助手' },
   { key: 'folder-sync', label: '文件夹同步' },
-  { key: 'github', label: 'GitHub', soon: true },
 ]
 
 /** 已保存工作区的兜底选项：优先显示回填名称，历史行无名称时回落 ID */
@@ -754,7 +753,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
 }
 
 /** 外部集成面板：左侧集成类型 tabs，multica 为首个落地集成，远程助手为
- *  声明式注册目录，GitHub 为结构化占位（后续新集成在此追加 tab）。
+ *  声明式注册目录（后续新集成在此追加 tab）。
  *  DialogShell 为常开弹层，调用方以条件挂载控制显隐（同 McpDialog 用法）。
  */
 export default function IntegrationsDialog({ onClose, onSaved }: {
@@ -885,9 +884,8 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
                 ? 'bg-brand-soft font-medium text-brand-ink'
                 : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'}`}
             >
-              {item.key === 'multica' ? <PlugZap size={14} className="shrink-0" /> : item.key === 'remote-agents' ? <Bot size={14} className="shrink-0" /> : item.key === 'folder-sync' ? <FolderSync size={14} className="shrink-0" /> : <GitPullRequest size={14} className="shrink-0" />}
+              {item.key === 'multica' ? <PlugZap size={14} className="shrink-0" /> : item.key === 'remote-agents' ? <Bot size={14} className="shrink-0" /> : <FolderSync size={14} className="shrink-0" />}
               <span className="min-w-0 truncate">{item.label}</span>
-              {item.soon && <span className="ml-auto shrink-0 rounded bg-slate-100 px-1 py-0.5 text-[9px] text-slate-400">规划中</span>}
             </button>
           ))}
         </nav>
@@ -1012,15 +1010,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
           />
         ) : tab === 'folder-sync' ? (
           <FolderSyncPanel />
-        ) : (
-          <div data-testid="integrations-github-placeholder" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-50 text-slate-300"><GitPullRequest size={20} /></div>
-            <p className="text-xs font-medium text-[var(--color-text-secondary)]">GitHub 集成规划中</p>
-            <p className="max-w-64 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-              计划支持 Issue 查询与创建、仓库事件接入；上线后在此配置，输入框将同步提供对应命令。
-            </p>
-          </div>
-        )}
+        ) : null}
       </div>
       {tab === 'remote-agents' && error && (
         <p role="alert" className="px-5 pb-2 text-xs text-red-600">{error}</p>

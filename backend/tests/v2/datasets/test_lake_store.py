@@ -366,7 +366,9 @@ def test_upsert_run_rebuild_logs_destructive_warning(db, caplog):
     assert rebuild_records, "湖表整表重建必须输出含 dataset id 的 warning"
     message = rebuild_records[0].getMessage()
     assert "name" in message  # 记录生效主键
-    assert "1" in message  # 记录新契约列数（本例单列）
+    # 新契约列数随行数据全列（本例 id/name/amt 三列）；不能断言裸 "1"——
+    # 那只是碰巧命中 UUID 十六进制里的 '1'，约 13% 概率随机翻车
+    assert "新契约列数=3" in message
 
 
 def test_upsert_run_soft_delete_marks_instead_of_deleting(db):

@@ -51,7 +51,9 @@
 3. 平台适配四件事：语义令牌映射（示例色 hex → token）、Tailwind 3.4 兼容
    （TW4 语法与透明度修饰符改写；动画类由已装 `tailwindcss-animate` 提供，
    圆角沿用默认 scale——md=0.375rem、lg=0.5rem 恰与 `--radius` 0.5rem 的
-   shadcn 推导值一致，无需覆盖映射）、中文默认文案 + 可覆盖 props、无障碍标签中文化；
+   shadcn 推导值一致，无需覆盖映射；**令牌阴影必须写任意属性
+   `[box-shadow:var(--shadow-*)]`——TW3 把 `shadow-[var(...)]` 解析成阴影
+   颜色任意值，不产出 box-shadow 声明**）、中文默认文案 + 可覆盖 props、无障碍标签中文化；
 4. 为组件补 mocked E2E（注册进 `playwright.mocked.config.ts` 的 allowlist），
    或在首个消费页面的既有 e2e 中覆盖关键交互；
 5. 跑完整前端门禁（含 `check:component-convergence`）；同步更新 catalog 条目、

@@ -1,0 +1,443 @@
+import { useEffect, useRef, useState } from 'react'
+import {
+  ChevronDown, ChevronUp, GripVertical, Pencil, Plus, Trash2, Zap,
+} from 'lucide-react'
+import { toast } from 'sonner'
+
+import type { QuickInput } from '@/api/superAssistant'
+import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+
+import { DialogShell } from './AssistantConfiguration'
+import { errorText } from './assistantPanelUtils'
+import { QuickInputFormFields, type QuickInputErrorField } from './QuickInputFormFields'
+import { contentPreview, isAboveMidline, moveItem, validateQuickInput } from './quickInputLogic'
+
+// 自定义 MIME：行内 dragover/drop 只响应本列表发起的拖拽（文件拖入等互不干扰）
+const DRAG_MIME = 'application/x-openontology-quick-input'
+
+/**
+ * 快捷内容设置弹窗：新增/编辑/删除 + 展示优先级排序。
+ * 列表顺序即快捷内容的展示顺序（上者优先），拖拽手柄与↑↓按钮是同一重排
+ * 通道的两个入口（键盘等价路径）；重排乐观更新、失败回滚由 useQuickInputs
+ * 数据源负责，这里只 toast。布局语言对齐 ScheduledTasksDialog。
+ */
+export default function QuickInputsDialog({
+  open,
+  onClose,
+  items,
+  onCreate,
+  onUpdate,
+  onDelete,
+  onReorder,
+}: {
+  open: boolean
+  onClose: () => void
+  items: QuickInput[]
+  onCreate: (title: string, content: string) => Promise<unknown>
+  onUpdate: (id: string, patch: { title?: string; content?: string }) => Promise<unknown>
+  onDelete: (id: string) => Promise<void>
+  onReorder: (ids: string[]) => Promise<unknown>
+}) {
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createTitle, setCreateTitle] = useState('')
+  const [createContent, setCreateContent] = useState('')
+  const [createError, setCreateError] = useState('')
+  const [createErrorField, setCreateErrorField] = useState<QuickInputErrorField | null>(null)
+  const [creating, setCreating] = useState(false)
+
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editTitle, setEditTitle] = useState('')
+  const [editContent, setEditContent] = useState('')
+  const [editError, setEditError] = useState('')
+  const [editErrorField, setEditErrorField] = useState<QuickInputErrorField | null>(null)
+  const [savingEdit, setSavingEdit] = useState(false)
+
+  const createTitleRef = useRef<HTMLInputElement>(null)
+  const createContentRef = useRef<HTMLTextAreaElement>(null)
+  const editTitleRef = useRef<HTMLInputElement>(null)
+  const editContentRef = useRef<HTMLTextAreaElement>(null)
+
+  const [deleting, setDeleting] = useState<QuickInput | null>(null)
+  const [deletePending, setDeletePending] = useState(false)
+
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const [reorderPending, setReorderPending] = useState(false)
+
+  const [prevOpen, setPrevOpen] = useState(false)
+  useEffect(() => {
+    // 打开时列表为空 → 直接展开新增表单，少一次点击
+    if (open && !prevOpen && items.length === 0) setCreateOpen(true)
+    setPrevOpen(open)
+  }, [open, prevOpen, items.length])
+
+  // 进入行内编辑即聚焦标题框：键盘用户可直接开始修改
+  useEffect(() => {
+    if (editingId) editTitleRef.current?.focus()
+  }, [editingId])
+
+  // 编辑收起（保存/取消）后回焦该行「编辑」按钮：焦点所在的提交按钮随行内表单卸载，
+  // 不主动归还的话键盘焦点会掉回弹窗容器，长列表需从头 Tab
+  const editEntryRefs = useRef(new Map<string, HTMLButtonElement>())
+  const [pendingFocusEditId, setPendingFocusEditId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!editingId && pendingFocusEditId) {
+      editEntryRefs.current.get(pendingFocusEditId)?.focus()
+      setPendingFocusEditId(null)
+    }
+  }, [editingId, pendingFocusEditId])
+
+  if (!open) return null
+
+  const closeDialog = () => {
+    setEditingId(null)
+    setDeleting(null)
+    setCreateOpen(false)
+    setCreateTitle('')
+    setCreateContent('')
+    setCreateError('')
+    setCreateErrorField(null)
+    setPendingFocusEditId(null)
+    setDragId(null)
+    setDropIndex(null)
+    onClose()
+  }
+
+  // 错误随输入清除：任一字段变化即撤销当前报错（含服务端错误），下次提交重新校验
+  const changeCreateTitle = (value: string) => {
+    setCreateTitle(value)
+    if (createError) { setCreateError(''); setCreateErrorField(null) }
+  }
+  const changeCreateContent = (value: string) => {
+    setCreateContent(value)
+    if (createError) { setCreateError(''); setCreateErrorField(null) }
+  }
+  const changeEditTitle = (value: string) => {
+    setEditTitle(value)
+    if (editError) { setEditError(''); setEditErrorField(null) }
+  }
+  const changeEditContent = (value: string) => {
+    setEditContent(value)
+    if (editError) { setEditError(''); setEditErrorField(null) }
+  }
+
+  const submitCreate = async () => {
+    if (creating) return
+    const validation = validateQuickInput(createTitle, createContent)
+    if (validation) {
+      setCreateError(validation.message)
+      setCreateErrorField(validation.field)
+      ;(validation.field === 'title' ? createTitleRef : createContentRef).current?.focus()
+      return
+    }
+    setCreating(true)
+    setCreateError('')
+    setCreateErrorField(null)
+    try {
+      await onCreate(createTitle.trim(), createContent.trim())
+      toast.success('快捷内容已添加', { description: '在输入框点击 ⚡ 即可插入光标处。' })
+      // 连续录入：保持表单展开、清空字段并回焦标题
+      setCreateTitle('')
+      setCreateContent('')
+      createTitleRef.current?.focus()
+    }
+    catch (err) {
+      setCreateError(errorText(err, '添加失败'))
+      setCreateErrorField(null)
+    }
+    finally {
+      setCreating(false)
+    }
+  }
+
+  const startEdit = (item: QuickInput) => {
+    setEditingId(item.id)
+    setEditTitle(item.title)
+    setEditContent(item.content)
+    setEditError('')
+    setEditErrorField(null)
+  }
+
+  const submitEdit = async () => {
+    if (!editingId || savingEdit) return
+    const validation = validateQuickInput(editTitle, editContent)
+    if (validation) {
+      setEditError(validation.message)
+      setEditErrorField(validation.field)
+      ;(validation.field === 'title' ? editTitleRef : editContentRef).current?.focus()
+      return
+    }
+    setSavingEdit(true)
+    setEditError('')
+    setEditErrorField(null)
+    try {
+      await onUpdate(editingId, { title: editTitle.trim(), content: editContent.trim() })
+      setEditingId(null)
+      setPendingFocusEditId(editingId)
+      toast.success('快捷内容已保存')
+    }
+    catch (err) {
+      setEditError(errorText(err, '保存失败'))
+      setEditErrorField(null)
+    }
+    finally {
+      setSavingEdit(false)
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!deleting || deletePending) return
+    setDeletePending(true)
+    try {
+      await onDelete(deleting.id)
+      setDeleting(null)
+      toast.success('快捷内容已删除')
+    }
+    catch (err) {
+      toast.error(errorText(err, '删除失败'))
+    }
+    finally {
+      setDeletePending(false)
+    }
+  }
+
+  const commitReorder = (nextIds: string[]) => {
+    if (reorderPending) return
+    setReorderPending(true)
+    onReorder(nextIds)
+      .catch(err => toast.error(errorText(err, '顺序保存失败')))
+      .finally(() => setReorderPending(false))
+  }
+
+  const moveBy = (index: number, delta: -1 | 1) => {
+    const next = moveItem(items, index, index + delta)
+    if (next.length !== items.length || next.some((item, i) => item.id !== items[i].id)) {
+      commitReorder(next.map(item => item.id))
+    }
+  }
+
+  const dragFrom = dragId ? items.findIndex(item => item.id === dragId) : -1
+  const effectiveTo = dropIndex === null ? -1 : (dropIndex > dragFrom ? dropIndex - 1 : dropIndex)
+  const dragging = dragId !== null && effectiveTo !== dragFrom
+  const lineClass = 'h-0.5 rounded-full bg-brand'
+
+  const handleDragOver = (event: React.DragEvent, index: number) => {
+    // 重排在途时不给投放反馈：指示线会暗示“松手即生效”，但 commitReorder 会拒绝
+    if (reorderPending) return
+    if (!event.dataTransfer.types.includes(DRAG_MIME) || dragId === null) return
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    const target = isAboveMidline(event.clientY, rect) ? index : index + 1
+    if (target !== dropIndex) setDropIndex(target)
+  }
+
+  const handleDrop = (event: React.DragEvent) => {
+    if (!event.dataTransfer.types.includes(DRAG_MIME) || dragId === null || dropIndex === null) return
+    event.preventDefault()
+    const next = moveItem(items, dragFrom, effectiveTo)
+    setDragId(null)
+    setDropIndex(null)
+    if (next.some((item, i) => item.id !== items[i].id)) commitReorder(next.map(item => item.id))
+  }
+
+  return (
+    <>
+      <DialogShell
+        size="large"
+        title="快捷内容设置"
+        description="在输入框点击 ⚡ 即可将所选内容插入光标处；列表顺序即展示顺序，可拖拽或用箭头按钮调整。"
+        onClose={closeDialog}
+        icon={<Zap size={18} />}
+      >
+        <div className="flex min-h-0 flex-1 flex-col" data-testid="quick-inputs-dialog">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+            <p className="sr-only" aria-live="polite">{dragId ? '正在拖拽调整顺序，松开完成' : ''}</p>
+
+            {createOpen ? (
+              <form
+                onSubmit={event => { event.preventDefault(); void submitCreate() }}
+                className="rounded-xl border border-border p-3.5"
+                data-testid="quick-input-create-form"
+              >
+                <QuickInputFormFields
+                  idPrefix="quick-input-create"
+                  title={createTitle}
+                  content={createContent}
+                  error={createError}
+                  errorField={createErrorField}
+                  onTitleChange={changeCreateTitle}
+                  onContentChange={changeCreateContent}
+                  titleRef={createTitleRef}
+                  contentRef={createContentRef}
+                />
+                <div className="mt-3 flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => { setCreateOpen(false); setCreateError(''); setCreateErrorField(null) }}
+                  >
+                    收起
+                  </Button>
+                  <Button type="submit" loading={creating} data-testid="quick-input-create-submit">
+                    添加
+                  </Button>
+                </div>
+              </form>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setCreateOpen(true)}
+                data-testid="quick-input-create-toggle"
+                className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:border-brand hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Plus size={16} /> 新增快捷内容
+              </button>
+            )}
+
+            {items.length > 0 && (
+              <div>
+                <p className="px-1 pb-2 text-xs text-[var(--color-text-tertiary)]">
+                  共 {items.length} 条
+                </p>
+                <div className="space-y-1" role="list" aria-label="快捷内容列表，拖拽或使用上移下移调整展示优先级">
+                  {items.map((item, index) => (
+                    <div key={item.id}>
+                      {dragging && dropIndex === index && <div className={lineClass} />}
+                      <div
+                        role="listitem"
+                        data-testid="quick-input-row"
+                        onDragOver={event => handleDragOver(event, index)}
+                        onDrop={handleDrop}
+                        className={`rounded-lg border transition-colors ${
+                          editingId === item.id
+                            ? 'border-brand bg-brand-soft/40 p-3.5'
+                            : dragId === item.id
+                              ? 'border-border bg-[var(--color-bg-elevated)] opacity-45'
+                              : 'border-border bg-[var(--color-bg-elevated)] px-2.5 py-2 hover:border-brand/50'
+                        }`}
+                      >
+                        {editingId === item.id ? (
+                          <form onSubmit={event => { event.preventDefault(); void submitEdit() }}>
+                            <QuickInputFormFields
+                              idPrefix="quick-input-edit"
+                              title={editTitle}
+                              content={editContent}
+                              error={editError}
+                              errorField={editErrorField}
+                              onTitleChange={changeEditTitle}
+                              onContentChange={changeEditContent}
+                              titleRef={editTitleRef}
+                              contentRef={editContentRef}
+                            />
+                            <div className="mt-3 flex justify-end gap-2">
+                              <Button type="button" variant="outline" onClick={() => { setPendingFocusEditId(item.id); setEditingId(null) }}>
+                                取消
+                              </Button>
+                              <Button type="submit" loading={savingEdit} data-testid="quick-input-edit-submit">
+                                保存
+                              </Button>
+                            </div>
+                          </form>
+                        ) : (
+                          <div className="flex items-center gap-1">
+                            <span
+                              draggable
+                              onDragStart={event => {
+                                event.dataTransfer.effectAllowed = 'move'
+                                event.dataTransfer.setData(DRAG_MIME, item.id)
+                                setDragId(item.id)
+                              }}
+                              onDragEnd={() => { setDragId(null); setDropIndex(null) }}
+                              aria-label={`拖拽调整 ${item.title} 的展示顺序（键盘用户请使用上移/下移按钮）`}
+                              title="拖拽调整展示顺序"
+                              className="flex h-8 w-7 shrink-0 cursor-grab items-center justify-center rounded text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] active:cursor-grabbing"
+                            >
+                              <GripVertical size={14} />
+                            </span>
+                            <span className="w-6 shrink-0 text-center font-mono text-xs text-[var(--color-text-tertiary)]">#{index + 1}</span>
+                            <div className="min-w-0 flex-1" title={item.content}>
+                              <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</p>
+                              <p className="truncate text-xs text-[var(--color-text-tertiary)]">{contentPreview(item.content)}</p>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-0.5">
+                              <button
+                                type="button"
+                                onClick={() => moveBy(index, -1)}
+                                disabled={index === 0 || reorderPending}
+                                aria-label={`上移 ${item.title}`}
+                                title="上移（提高展示优先级）"
+                                data-testid="quick-input-move-up"
+                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] disabled:opacity-30"
+                              >
+                                <ChevronUp size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => moveBy(index, 1)}
+                                disabled={index === items.length - 1 || reorderPending}
+                                aria-label={`下移 ${item.title}`}
+                                title="下移（降低展示优先级）"
+                                data-testid="quick-input-move-down"
+                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] disabled:opacity-30"
+                              >
+                                <ChevronDown size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                ref={el => {
+                                  if (el) editEntryRefs.current.set(item.id, el)
+                                  else editEntryRefs.current.delete(item.id)
+                                }}
+                                onClick={() => startEdit(item)}
+                                aria-label={`编辑 ${item.title}`}
+                                title="编辑"
+                                data-testid="quick-input-edit"
+                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)]"
+                              >
+                                <Pencil size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeleting(item)}
+                                aria-label={`删除 ${item.title}`}
+                                title="删除"
+                                data-testid="quick-input-delete"
+                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      {index === items.length - 1 && dragging && dropIndex === items.length && <div className={lineClass} />}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {items.length === 0 && !createOpen && (
+              <div className="flex flex-col items-center gap-2 py-10 text-center">
+                <Zap size={20} className="text-[var(--color-text-tertiary)]" />
+                <p className="text-sm text-[var(--color-text-secondary)]">还没有快捷内容，添加一条常用内容试试。</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </DialogShell>
+
+      <ConfirmDialog
+        open={deleting !== null}
+        onClose={() => setDeleting(null)}
+        onConfirm={() => void confirmDelete()}
+        loading={deletePending}
+        title="删除快捷内容？"
+        description={deleting ? `「${deleting.title}」将从快捷内容列表中移除，不影响已发送的消息。` : ''}
+        confirmText="删除"
+        variant="danger"
+      />
+    </>
+  )
+}

@@ -196,27 +196,28 @@ function MarkdownCodeBlock({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="my-4 overflow-hidden rounded-lg border border-[var(--color-border)]">
-      <div className="flex min-h-9 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-code-bg)] px-3">
-        <span className="font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--color-code-fg)] opacity-70">
+      <div className="flex min-h-9 items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3">
+        <span className="font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
           {language || 'code'}
         </span>
         <button
           type="button"
           onClick={copy}
-          className={`inline-flex min-h-7 items-center gap-1.5 rounded-md px-2 text-[11px] transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${copyState === 'failed' ? 'text-[var(--color-warning)] opacity-100' : 'text-[var(--color-code-fg)] opacity-70 hover:opacity-100'}`}
+          className={`inline-flex min-h-7 items-center gap-1.5 rounded-md px-2 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${copyState === 'failed' ? 'text-[var(--color-warning)]' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'}`}
         >
           {copyState === 'copied' ? <Check size={11} /> : copyState === 'failed' ? <CircleAlert size={11} /> : <Copy size={11} />}
           {copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败，可手动复制' : '复制'}
         </button>
       </div>
-      <pre ref={codeBlockRef} className="overflow-x-auto bg-[var(--color-code-bg)] p-4 text-[12px] leading-6 text-[var(--color-code-fg)] selection:bg-brand-mist selection:text-brand-ink">
+      <pre ref={codeBlockRef} className="overflow-x-auto bg-[var(--color-bg-elevated)] p-4 text-[12px] leading-6 text-[var(--color-text-primary)] selection:bg-brand-mist selection:text-brand-ink">
         <code className="font-mono">{source}</code>
       </pre>
     </div>
   )
 }
 
-const assistantMarkdownComponents: Components = {
+// 导出复用：消息通知正文采用同一套排版映射（img 由通知侧覆盖为鉴权媒体渲染）
+export const assistantMarkdownComponents: Components = {
   p: ({ className, ...props }) => <p className={`mb-3 text-sm leading-7 text-[var(--color-text-primary)] last:mb-0 ${className || ''}`} {...props} />,
   h1: ({ className, ...props }) => <h2 className={`mb-3 mt-7 text-xl font-semibold leading-tight text-[var(--color-text-primary)] first:mt-0 ${className || ''}`} {...props} />,
   h2: ({ className, ...props }) => <h3 className={`mb-2.5 mt-6 text-base font-semibold leading-snug text-[var(--color-text-primary)] first:mt-0 ${className || ''}`} {...props} />,
@@ -321,7 +322,7 @@ export function ChatMessage({ message, onRetry }: { message: SuperMessage; onRet
   }
 
   return (
-    <article className="group min-w-0 max-w-3xl space-y-3">
+    <article id={`super-assistant-msg-${message.id}`} className="group min-w-0 max-w-3xl space-y-3 scroll-mt-6">
       <TurnProcess
         steps={message.steps}
         status={message.status}

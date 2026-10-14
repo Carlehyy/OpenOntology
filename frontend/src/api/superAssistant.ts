@@ -61,6 +61,34 @@ export interface SuperSearchMessageHit {
   createdAt: string
 }
 
+/** 语音听写后端就绪状态（snake_case 响应，与 voice.py 子路由契约一致） */
+export interface VoiceStatus {
+  ready: boolean
+  model_present: boolean
+  model_file: string
+  languages: string[]
+  sample_rate: number
+  max_duration_seconds: number
+  max_body_bytes: number
+  download: VoiceModelDownload
+}
+
+/** 语音听写转写结果 */
+export interface VoiceTranscription {
+  text: string
+  duration_ms: number
+  language: string
+}
+
+/** 语音模型在线下载进度（cc-haha 式显式下载：idle/running/done/failed/cancelled） */
+export interface VoiceModelDownload {
+  state: 'idle' | 'running' | 'done' | 'failed' | 'cancelled'
+  received_bytes: number
+  total_bytes: number
+  current_file: string | null
+  error: string | null
+}
+
 export interface SuperSearchConversationHit {
   id: string
   title: string
@@ -236,6 +264,16 @@ export interface AssistantTool {
   available: boolean
   unavailable_reason: string | null
   enabled: boolean
+}
+
+// 输入框快捷内容（用户自管常用文本片段）：sort_order 为相对展示优先级
+export interface QuickInput {
+  id: string
+  title: string
+  content: string
+  sort_order: number
+  created_at: string
+  updated_at: string
 }
 
 export interface SuperMcpServer {
@@ -684,6 +722,9 @@ export const superAssistantApi = {
   updateConversation: (id: string, body: { title?: string; model_config_id?: string | null; status?: 'active' | 'archived' }) =>
     apiClientV2.patch<SuperConversation>(`/super-assistant/conversations/${id}`, body),
   deleteConversation: (id: string) => apiClientV2.delete(`/super-assistant/conversations/${id}`),
+  /** 导出完整会话审计 JSON（format: openontology.super-assistant.conversation，不截断消息） */
+  exportConversation: (id: string) =>
+    apiClientV2.get<Record<string, unknown>>(`/super-assistant/conversations/${id}/export`),
   messages: (id: string) => apiClientV2.get<SuperMessage[]>(`/super-assistant/conversations/${id}/messages`),
   conversationFiles: (id: string) =>
     apiClientV2.get<SuperConversationFile[]>(`/super-assistant/conversations/${id}/files`),
@@ -696,6 +737,23 @@ export const superAssistantApi = {
     apiClientV2.delete(`/super-assistant/conversations/${id}/files/${fileId}`),
   searchConversations: (q: string, limit = 20) =>
     apiClientV2.get<SuperSearchResult>('/super-assistant/search/conversations', { params: { q, limit } }),
+  /** 语音听写：后端模型就绪状态与下载进度（助手配置「语音」tab 展示用） */
+  voiceStatus: () => apiClientV2.get<VoiceStatus>('/super-assistant/voice/status'),
+  /** 语音模型在线下载（仅管理员；已在进行中返回 409） */
+  downloadVoiceModel: () =>
+    apiClientV2.post<{ started: boolean }>('/super-assistant/voice/model/download'),
+  cancelVoiceModelDownload: () =>
+    apiClientV2.post<{ cancelled: boolean }>('/super-assistant/voice/model/download/cancel'),
+  /** 语音听写：上传 16k 单声道 16-bit PCM WAV（原始字节），返回转写文本。
+   *  显式超时：转写是 CPU 推理（秒级），不能沿用 axios 无默认超时；
+   *  signal 支持转写阶段用户主动取消 */
+  transcribeVoice: (wav: Uint8Array, language: string, config?: { signal?: AbortSignal }) =>
+    apiClientV2.post<VoiceTranscription>('/super-assistant/voice/transcribe', wav, {
+      params: { language },
+      headers: { 'Content-Type': 'audio/wav' },
+      timeout: 90_000,
+      signal: config?.signal,
+    }),
   palaceFiles: () => apiClientV2.get<PalaceFile[]>('/super-assistant/palace/files'),
   /** folderPath 非空时上传归位到该目录（目录不存在时后端按 mkdir -p 补行） */
   uploadPalaceFile: (file: File, folderPath = '') => {
@@ -848,6 +906,15 @@ export const superAssistantApi = {
   updateAssistantTool: (name: string, enabled: boolean) =>
     apiClientV2.patch<AssistantTool>(`/super-assistant/tools/${encodeURIComponent(name)}`, { enabled }),
 
+  listQuickInputs: () => apiClientV2.get<QuickInput[]>('/super-assistant/quick-inputs'),
+  createQuickInput: (body: { title: string; content: string }) =>
+    apiClientV2.post<QuickInput>('/super-assistant/quick-inputs', body),
+  updateQuickInput: (id: string, body: { title?: string; content?: string }) =>
+    apiClientV2.patch<QuickInput>(`/super-assistant/quick-inputs/${id}`, body),
+  deleteQuickInput: (id: string) => apiClientV2.delete(`/super-assistant/quick-inputs/${id}`),
+  reorderQuickInputs: (ids: string[]) =>
+    apiClientV2.put<QuickInput[]>('/super-assistant/quick-inputs/reorder', { ids }),
+
   memories: (params: { zone?: string; include_superseded?: boolean } = {}) => {
     const search = new URLSearchParams()
     if (params.zone) search.set('zone', params.zone)
@@ -915,8 +982,10 @@ export const superAssistantApi = {
 
   listScheduledTasks: () =>
     apiClientV2.get<ScheduledTask[]>('/super-assistant/scheduled-tasks'),
+  /** 创建定时任务：显式超时对齐 transcribeVoice 先例——axios 默认无超时，
+   *  请求悬挂会让弹窗 saving 态永久锁死所有关闭路径（UX 对抗审查 P1） */
   createScheduledTask: (body: ScheduledTaskPayload) =>
-    apiClientV2.post<ScheduledTask>('/super-assistant/scheduled-tasks', body),
+    apiClientV2.post<ScheduledTask>('/super-assistant/scheduled-tasks', body, { timeout: 30_000 }),
   getScheduledTask: (id: string) =>
     apiClientV2.get<ScheduledTask>(`/super-assistant/scheduled-tasks/${id}`),
   updateScheduledTask: (id: string, body: ScheduledTaskUpdatePayload) =>

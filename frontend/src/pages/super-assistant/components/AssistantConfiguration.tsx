@@ -24,6 +24,8 @@ import {
   type ParsedMcpClientServer,
 } from '@/lib/mcpClientConfig'
 import { ApprovalTab, EvolutionPendingBadge, MemoryTab } from './AssistantEvolution'
+import VoiceTab from './VoiceTab'
+import { SettingSwitch } from './SettingSwitch'
 import { errorText } from './assistantPanelUtils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { groupAssistantTools } from './toolLogic'
@@ -34,7 +36,7 @@ export { errorText }
 // 薄封装 ui/dialog：统一配置域弹层的头部与尺寸语言；
 // 遮罩、Esc 关闭与焦点管理交给 Radix，不再自绘 fixed 弹层和焦点陷阱。
 // （外部集成弹层等同语言复用，故导出）
-export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, icon }: {
+export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, onEscapeKeyDown, onInteractOutside, icon, open = true }: {
   title: string
   description?: string
   size?: 'default' | 'large' | 'wide'
@@ -44,8 +46,16 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
   contentClassName?: string
   /** 覆盖 Radix 默认的首个可聚焦元素聚焦（如聚焦首个输入框而非左栏 tab） */
   onOpenAutoFocus?: (event: Event) => void
+  /** 拦截 Esc（如内层临时态先回退；preventDefault 可阻止 Radix 关闭弹窗） */
+  onEscapeKeyDown?: (event: KeyboardEvent) => void
+  /** 拦截遮罩/外部点击（工作台型弹窗 preventDefault 阻止误触关闭；
+      Esc 分层与右上关闭按钮不受影响） */
+  onInteractOutside?: (event: Event) => void
   /** 标准头部图标盒（DESIGN.md §4.5：h-10 w-10 rounded-xl 品牌底 + 18px lucide） */
   icon?: React.ReactNode
+  /** 受控开合：缺省 true（既有条件渲染消费方零影响）；常挂消费方传 open
+      让 Radix 走自身关闭流程移除 overlay，避免条件渲染卸载的 overlay 残留 */
+  open?: boolean
 }) {
   const sizeClass = {
     default: 'max-h-[90dvh] w-[min(92vw,36rem)]',
@@ -54,14 +64,16 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
   }[size]
 
   return (
-    <Dialog open onOpenChange={value => { if (!value) onClose() }}>
+    <Dialog open={open} onOpenChange={value => { if (!value) onClose() }}>
       <DialogContent
         onOpenAutoFocus={onOpenAutoFocus}
+        {...(onEscapeKeyDown ? { onEscapeKeyDown } : {})}
+        {...(onInteractOutside ? { onInteractOutside } : {})}
         className={`flex flex-col overflow-hidden p-0 ${sizeClass} ${contentClassName ?? ''}`}
       >
         <DialogHeader
           icon={icon}
-          className="mb-0 shrink-0 border-b border-[var(--color-border)] px-5 py-4 pr-12"
+          className="mb-0 shrink-0 border-b border-[var(--color-border)] px-5 py-4 pr-14"
         >
           <div>
             <DialogTitle className="text-base font-semibold leading-6">{title}</DialogTitle>
@@ -472,25 +484,6 @@ function McpDialog({ server, onClose, onSaved }: {
 }
 
 
-function SettingSwitch({ label, ariaLabel, checked, busy, onToggle }: {
-  label: string
-  ariaLabel: string
-  checked: boolean
-  busy: boolean
-  onToggle: () => void
-}) {
-  return (
-    <div className="inline-flex items-center gap-1.5">
-      <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>
-      <button type="button" role="switch" aria-label={ariaLabel} aria-checked={checked} aria-busy={busy} disabled={busy} onClick={onToggle}
-        className="relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60">
-        <span aria-hidden="true" className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors motion-reduce:transition-none ${busy ? 'animate-pulse motion-reduce:animate-none' : ''} ${checked ? 'bg-brand' : 'bg-slate-300'}`}>
-          <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none ${checked ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-        </span>
-      </button>
-    </div>
-  )
-}
 
 
 // 工具分类的稳定展示文案：read_only 同轮可并行、confirmation_required
@@ -602,6 +595,9 @@ function ToolsTab({ tools, refreshTools }: {
 }
 
 
+/** 配置面板的 tab 键（会话右键菜单「助手配置」组与此同源；voice 为语音听写设置） */
+export type AssistantConfigTab = 'skills' | 'mcp' | 'tools' | 'approval' | 'memory' | 'voice'
+
 /** 配置面板宽度边界：默认 26rem，拖拽/键盘在 [288, min(600, 视口-720)] 内调整，
     为聊天卡头部（品牌区已让出）与标题保底最小可用宽度 */
 export const DEFAULT_CONFIG_PANEL_WIDTH = 416
@@ -609,7 +605,7 @@ const MIN_PANEL_WIDTH = 288
 const maxPanelWidth = () => Math.max(MIN_PANEL_WIDTH, Math.min(600, window.innerWidth - 720))
 const clampPanelWidth = (width: number) => Math.min(Math.max(width, MIN_PANEL_WIDTH), maxPanelWidth())
 
-export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, refreshSkills, refreshServers, refreshTools, conversationId }: {
+export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, refreshSkills, refreshServers, refreshTools, conversationId, initialTab, onInitialTabConsumed }: {
   open: boolean
   onClose: () => void
   /** 面板宽度（px）：受控于页面级状态（聊天列据此让位），拖拽/键盘经 onWidthResize 回写 */
@@ -624,8 +620,12 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   refreshServers: () => Promise<void>
   refreshTools: () => Promise<void>
   conversationId: string | null
+  /** 一次性落位 tab（会话右键「助手配置」快捷方式）：面板打开时切到该 tab 后由页面清空 */
+  initialTab?: AssistantConfigTab | null
+  /** 落位完成后回调：页面据此清空 initialTab，同 tab 重复右键也能再次生效 */
+  onInitialTabConsumed?: () => void
 }) {
-  const [tab, setTab] = useState<'skills' | 'mcp' | 'tools' | 'approval' | 'memory'>('skills')
+  const [tab, setTab] = useState<AssistantConfigTab>('skills')
   const [dragging, setDragging] = useState(false)
   const [creatingSkill, setCreatingSkill] = useState(false)
   const [editingSkill, setEditingSkill] = useState<SuperSkill | null>(null)
@@ -638,6 +638,16 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   const [removeBusy, setRemoveBusy] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
   const configurableServers = servers.filter(server => server.builtin_key !== 'minio')
+
+  // 一次性落位：面板打开且带 initialTab 时切过去（右键「助手配置」快捷方式），
+  // 消费后立刻通知页面清空——否则面板已打开时同 tab 重复右键（initialTab 值
+  // 不变、open 不变）不会重新触发本 effect，菜单点了没反应。
+  useEffect(() => {
+    if (open && initialTab) {
+      setTab(initialTab)
+      onInitialTabConsumed?.()
+    }
+  }, [open, initialTab, onInitialTabConsumed])
 
   const importZip = async (file?: File) => {
     if (!file) return
@@ -781,10 +791,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
               <X size={16} />
             </button>
           </header>
-          <div className="relative mx-4 mt-3 grid grid-cols-5 gap-1 rounded-lg border border-slate-200 bg-slate-50/70 p-0.5">
+          <div className="relative mx-4 mt-3 grid grid-cols-6 gap-1 rounded-lg border border-slate-200 bg-slate-50/70 p-0.5">
             <div
-              className="absolute bottom-0.5 top-0.5 w-[calc(20%_-_4px)] rounded-md bg-brand shadow-sm transition-all duration-300 ease-out"
-              style={{ left: `calc(${(['skills', 'mcp', 'tools', 'approval', 'memory'] as const).indexOf(tab) * 20}% + 2px)` }}
+              className="absolute bottom-0.5 top-0.5 w-[calc(16.6667%_-_4px)] rounded-md bg-brand shadow-sm transition-all duration-300 ease-out"
+              style={{ left: `calc(${(['skills', 'mcp', 'tools', 'approval', 'memory', 'voice'] as const).indexOf(tab) * 16.6667}% + 2px)` }}
             />
             <button type="button" onClick={() => setTab('skills')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'skills' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -806,6 +816,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'memory' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
               记忆
             </button>
+            <button type="button" onClick={() => setTab('voice')} aria-label="语音设置"
+              className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'voice' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
+              语音
+            </button>
           </div>
           {/* scrollbar-none：内容超长时仍可滚轮/拖拽滚动，仅不显示滚动条 */}
           <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-4">
@@ -813,6 +827,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             <ApprovalTab conversationId={conversationId} />
           ) : tab === 'memory' ? (
             <MemoryTab />
+          ) : tab === 'voice' ? (
+            <VoiceTab />
           ) : tab === 'tools' ? (
             <ToolsTab tools={tools} refreshTools={refreshTools} />
           ) : tab === 'skills' ? (

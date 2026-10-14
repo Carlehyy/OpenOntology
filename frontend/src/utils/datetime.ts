@@ -67,3 +67,62 @@ export function formatTime(value: DateInput, opts?: DateTimeFormatOptions): stri
 export function formatSessionTime(value: DateInput, opts?: FormatOptions): string {
   return formatDateTime(value, { fallback: '时间未知', ...opts })
 }
+
+export interface RelativeTimeOptions extends FormatOptions {
+  /** 计算相对值的基准时刻（测试注入）；缺省取当前时间 */
+  now?: Date
+}
+
+/**
+ * 相对时间：刚刚 / N 分钟前 / N 小时前 / 昨天 HH:mm / MM-DD HH:mm /
+ * 跨年 YYYY-MM-DD HH:mm。未来时刻（时钟偏差）回退绝对时间。
+ * 用于列表卡片 meta 行等「多久之前」场景；精确时间仍走 formatDateTime。
+ */
+export function formatRelativeTime(value: DateInput, opts?: RelativeTimeOptions): string {
+  const date = toSafeDate(value)
+  if (!date) return opts?.fallback ?? '—'
+  const now = opts?.now ?? new Date()
+  const diffMs = now.getTime() - date.getTime()
+  if (diffMs < 0) return formatDateTime(date, { fallback: opts?.fallback })
+  const diffMinutes = Math.floor(diffMs / 60_000)
+  if (diffMinutes < 1) return '刚刚'
+  if (diffMinutes < 60) return `${diffMinutes} 分钟前`
+  const diffHours = Math.floor(diffMinutes / 60)
+  if (diffHours < 24) return `${diffHours} 小时前`
+  // 按日历日差判断「昨天」（跨夏令时的天长可能是 23/25 小时，取 round）
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const startOfValue = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const days = Math.round((startOfToday.getTime() - startOfValue.getTime()) / 86_400_000)
+  if (days === 1) return `昨天 ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  }
+  return formatDateTime(date, { fallback: opts?.fallback })
+}
+
+export interface DurationOptions extends FormatOptions {
+  /** 区间终点；缺省取当前时间（进行中的已运行时长） */
+  until?: DateInput
+}
+
+/**
+ * 时长：N 秒 / N 分钟 / N 小时 M 分 / N 天 M 小时（不足 1 秒按 1 秒计）。
+ * 用于任务耗时、已运行时长等区间展示。
+ */
+export function formatDuration(from: DateInput, opts?: DurationOptions): string {
+  const start = toSafeDate(from)
+  if (!start) return opts?.fallback ?? '—'
+  const end = toSafeDate(opts?.until) ?? new Date()
+  const totalSeconds = Math.max(1, Math.round((end.getTime() - start.getTime()) / 1000))
+  if (totalSeconds < 60) return `${totalSeconds} 秒`
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes} 分钟`
+  const totalHours = Math.floor(totalMinutes / 60)
+  if (totalHours < 24) {
+    const minutes = totalMinutes % 60
+    return minutes ? `${totalHours} 小时 ${minutes} 分` : `${totalHours} 小时`
+  }
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+  return hours ? `${days} 天 ${hours} 小时` : `${days} 天`
+}

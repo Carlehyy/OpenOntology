@@ -69,8 +69,11 @@ success `--color-success #2d8a4e` · warning `#c9861a` · danger
 success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引用
 （映射见 `tailwind.config.ts`，取值明暗自适应），勿用绿色族原生色板类。
 状态表达优先「浅底 + 深字」组合，而非大面积实色。
-代码/命令展示块统一用深色面板 `--color-code-bg` / `--color-code-fg`
-（明暗两态近同的近黑底），替代页域私设的 `bg-slate-950` 类色板。
+命令/接口展示面板（curl 示例、事件 tooltip 等工具性面板）统一用深色面板
+`--color-code-bg` / `--color-code-fg`（明暗两态近同的近黑底），替代页域
+私设的 `bg-slate-950` 类色板；聊天/文档正文 markdown 内的代码块属浅色
+阅读面，用 `--color-bg-elevated` 底 + `--color-text-primary` 字（超级
+助手聊天与消息通知正文），近黑块不得打断浅色阅读画布。
 类型编码色（图例、类型徽章、结构图节点等分类数据可视化）使用
 `viz-*` 分类色组（violet/fuchsia/rose/orange/indigo/cyan 及各自 -soft
 浅底），取值与 §5 图表序列同源、`:root`/`.dark` 成对维护；禁止在页面
@@ -103,7 +106,7 @@ success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引�
 
 | 层 | 来源 | 说明 |
 |---|---|---|
-| 基础件 | `components/ui/*`（shadcn 语义约定） | Button/Card/Badge/Input/Dialog/Select/Command/Sidebar 原语等，样式全部走 token |
+| 基础件 | `components/ui/*`（shadcn 语义约定） | Button/Card/Badge/Input/Dialog/Select/Command/Sidebar/Tooltip 原语等，样式全部走 token |
 | 交互与复合控件 | ReUI（[reui.io](https://reui.io)，shadcn 注册表扩展，copy-and-own） | **默认来源**：筛选、表单、日期、看板、甘特、步骤条等交互/复合控件一律先用 ReUI；场景→组件映射查 `frontend/src/components/component-catalog.ts`，拷贝后按 4.2 规则换肤 |
 | 复杂件 | antd 6 | 表格/树/穿梭等重组件，经 ConfigProvider token 对齐平台色 |
 | 动效例外层 | beUI 存量（`components/motion-ui/`、`components/availability-scheduler/`，上游 starc007/ui-components @ afba7fa055dd） | 仅限 ReUI 无平替的动效能力（morph 弹窗、弹簧手势、AnimatedNumber 等）；**只维护现存消费方，新代码禁用**，由 `npm run check:component-convergence` 强制；预览路由 `/design/components` |

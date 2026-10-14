@@ -255,6 +255,15 @@ jobs:
         if: needs.changes.outputs.run_frontend_build == 'true'
         run: npm run build
         working-directory: frontend
+        env:
+          # 烧入 HTTPS 入口（裸 IP 自签，缺省与 compose 的 PUBLIC_TLS_IP /
+          # PUBLIC_HTTPS_PORT 兜底一致，可用仓库变量覆盖）：SPA 在同主机普通
+          # HTTP 页面启动时自动跳转，解锁麦克风等安全上下文能力。主机名不
+          # 匹配（localhost / 局域网 / E2E）不生效；机器客户端不经 SPA 不受
+          # 影响。换服务器 IP 时除 compose .env 外需同步更新这里（或设置
+          # PROD_PUBLIC_TLS_IP / PROD_PUBLIC_HTTPS_PORT 变量）。
+          VITE_HTTPS_UPGRADE_HOST: ${{ vars.PROD_PUBLIC_TLS_IP || '64.83.14.139' }}
+          VITE_HTTPS_UPGRADE_PORT: ${{ vars.PROD_PUBLIC_HTTPS_PORT || '8443' }}
 
       # 部署镜像直接使用本 job 构建的 dist，保证上线产物与通过门禁的产物一致，
       # 服务器端不再重复执行 vite build。
@@ -398,7 +407,11 @@ jobs:
       && (needs.changes.outputs.run_docker != 'true'
           || needs.verify-docker-build.result == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 服务器侧 docker compose build 在低配盘上「exporting to image」极慢：
+    # run 38102815363 在 apt 修复后约 5 分钟完成构建，随后四镜像并行导出
+    # 超过 20 分钟仍未完成，撞上步骤 25 分钟超时。把 job/步骤预算抬到
+    # 与 verify-backend 同级，给导出留足墙钟。
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -509,7 +522,7 @@ jobs:
           REMOTE_SOURCE_SWAP
 
       - name: Deploy over SSH
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}

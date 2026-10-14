@@ -57,9 +57,16 @@ dependencies = [
   "tqdm==4.67.1",
   "dashscope==1.23.6",
   "scikit-learn==1.7.2",
+  # 语音听写（超级助手 /voice/transcribe）：sherpa-onnx 声明依赖
+  # sherpa-onnx-core（onnxruntime 等原生库所在），但 uv 从 sdist 元数据
+  # 解析时看不到该 wheel 级依赖，必须显式钉住两个包；SenseVoice int8
+  # 模型由 scripts/download_voice_model.py 显式下载，不在镜像内打包。
+  "sherpa-onnx==1.13.8",
+  "sherpa-onnx-core==1.13.8",
   # tenacity：openjudge.generator（SimpleRubricsGenerator 评分标准生成）所必需；
   # 约束与 py-openjudge 0.2.1 声明一致（>=9.1,<10）。
   "tenacity==9.1.2",
+  "apprise==2.0.1",
 ]
 
 [dependency-groups]

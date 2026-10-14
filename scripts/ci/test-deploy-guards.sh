@@ -7,7 +7,9 @@ APP_DIR_VALIDATOR="$SCRIPT_DIR/validate-deploy-app-dir.sh"
 DEPLOY_SCRIPT="$REPO_ROOT/deploy/deploy-prod.sh"
 DEPLOY_WORKFLOW="$REPO_ROOT/.github/workflows/deploy-nano-ontoprompt.yml"
 ARCHIVE_SCRIPT="$SCRIPT_DIR/create-deployment-archive.sh"
-NGINX_CONFIG="$REPO_ROOT/frontend/nginx/default.conf"
+# 80/443 两个 server 共享 locations.inc；location 级契约的事实源在 inc
+NGINX_CONFIG="$REPO_ROOT/frontend/nginx/locations.inc"
+NGINX_SERVER_CONFS="$REPO_ROOT/frontend/nginx/default.conf $REPO_ROOT/frontend/nginx/ssl-443.conf"
 PROD_COMPOSE="$REPO_ROOT/docker-compose.prod.yml"
 
 assert_accepted() {
@@ -87,6 +89,12 @@ if ! grep -Fq 'ENVIRONMENT: test' <<<"$fresh_database_migration_block" \
   printf 'fresh migration verification must use the test config with real PostgreSQL\n' >&2
   exit 1
 fi
+for _conf in $NGINX_SERVER_CONFS; do
+  if ! grep -Fq 'include /etc/nginx/conf.d/locations.inc;' "$_conf"; then
+    printf 'every nginx server conf must include the shared locations snippet: %s\n' "$_conf" >&2
+    exit 1
+  fi
+done
 if ! grep -Fq 'location = /mcp {' "$NGINX_CONFIG" \
     || ! grep -Fq 'location /mcp/ {' "$NGINX_CONFIG"; then
   printf 'retired generic MCP paths must return an explicit production 404\n' >&2
@@ -239,6 +247,7 @@ archive_fixture_paths=(
   "backend/pyproject.toml"
   "backend/uv.lock"
   "backend/scripts/maintenance/reset_admin_password.py"
+  "backend/scripts/download_voice_model.py"
   "frontend/.dockerignore"
   "frontend/Dockerfile.prod"
   "frontend/dist/index.html"
@@ -284,6 +293,7 @@ for required_member in \
   ".env.example" \
   "backend/app/main.py" \
   "backend/scripts/maintenance/reset_admin_password.py" \
+  "backend/scripts/download_voice_model.py" \
   "frontend/dist/index.html" \
   "frontend/src/main.tsx" \
   "docker/browser/Dockerfile" \

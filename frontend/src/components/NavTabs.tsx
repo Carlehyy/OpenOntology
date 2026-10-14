@@ -164,7 +164,7 @@ export default function NavTabs() {
           </PopoverTrigger>
           <PopoverContent
             align="end"
-            className="w-64 border-[var(--color-border)] bg-[var(--color-card)] p-1.5 text-[var(--color-card-foreground)]"
+            className="w-64 border-[var(--color-border)] bg-[var(--card)] p-1.5 text-[var(--card-foreground)]"
           >
             <div className="max-h-80 overflow-y-auto">
               {tabs.map(tab => tabRow(tab, true))}

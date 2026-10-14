@@ -24,6 +24,8 @@ from app.super_assistant import (
     search_service,
     skill_service,
     skill_store,
+    voice_model_download,
+    voice_service,
 )
 
 
@@ -310,6 +312,22 @@ DELEGATES = {
         "search_service",
         "search_conversations",
     ),
+    "voice_transcribe": (
+        "voice_service",
+        "transcribe",
+    ),
+    "voice_status": (
+        "voice_service",
+        "status",
+    ),
+    "voice_model_download_start": (
+        "voice_model_download",
+        "start",
+    ),
+    "voice_model_download_cancel": (
+        "voice_model_download",
+        "cancel",
+    ),
     "list_conversation_files": (
         "conversation_files",
         "list_files",
@@ -577,7 +595,7 @@ def test_super_assistant_handlers_delegate_without_orm_or_transactions():
     # router.py 已贴近行数上限，新端点（如搜索、multica 外部集成）落在独立
     # 子路由模块；委托与事务禁令对两者同样生效。
     functions = {}
-    for filename in ("router.py", "search.py", "multica.py", "tools.py"):
+    for filename in ("router.py", "search.py", "multica.py", "tools.py", "voice.py"):
         path = ASSISTANT_DIR / filename
         tree = ast.parse(
             path.read_text(encoding="utf-8"),
@@ -590,17 +608,36 @@ def test_super_assistant_handlers_delegate_without_orm_or_transactions():
         })
     for name, (module_name, function_name) in DELEGATES.items():
         function = functions[name]
-        service_calls = [
-            node
-            for statement in function.body
-            for node in ast.walk(statement)
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
+        def is_delegate(node: ast.AST) -> bool:
+            if not isinstance(node, ast.Call):
+                return False
+            direct = (
+                isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == module_name
                 and node.func.attr == function_name
             )
+            if direct:
+                return True
+            # run_in_threadpool(<module>.<fn>, ...) 引用形委托等价：
+            # CPU 密集服务调用让出事件循环（如语音转写），仍是唯一委托
+            if (isinstance(node.func, ast.Name)
+                    and node.func.id == "run_in_threadpool"
+                    and node.args):
+                target = node.args[0]
+                return (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == module_name
+                    and target.attr == function_name
+                )
+            return False
+
+        service_calls = [
+            node
+            for statement in function.body
+            for node in ast.walk(statement)
+            if is_delegate(node)
         ]
         assert len(service_calls) == 1
 
@@ -737,6 +774,8 @@ def test_super_assistant_services_do_not_import_http_router():
         reflection_service,
         search_service,
         skill_service,
+        voice_model_download,
+        voice_service,
     ):
         imports = _imports(Path(module.__file__))
         assert "app.super_assistant.router" not in imports
@@ -751,11 +790,13 @@ def test_super_assistant_router_and_services_stay_bounded():
         # multica 外部集成子路由接线 → 860；本体发布文档共享镜像新增
         # ontology-documents list/preview/rebuild 3 个端点 → 885
         # process-plugin 持久化生命周期新增 list/install/enable/disable/uninstall
-        # 五个端点；保持边界只允许随能力域增长的小幅预算。
-        "router.py": 980,
+        # 五个端点；会话右键菜单配套的会话审计导出端点
+        # /conversations/{id}/export → 994；保持边界只允许随能力域增长的小幅预算。
+        "router.py": 1000,
         # 死流回收（_reap_stale_streaming 读取兜底）与启动恢复
         # （recover_interrupted_streams 跳过进行中的定时任务会话）落地：360 → 380
-        "conversation_service.py": 380,
+        # 会话审计导出 export_conversation（完整审计 JSON，不截断消息）→ 437
+        "conversation_service.py": 460,
         "skill_service.py": 380,
         # MCP lifecycle/revision fencing and probe diagnostics now live in
         # this domain service; keep the guard above the current bounded size.
@@ -842,8 +883,17 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # /scheduled-tasks/{task_id} 的 get/patch/delete、
     # /scheduled-tasks/{task_id}/runs 与 /runs/{run_id} 的 get
     # 共 7 个操作（4 条路径）。
-    assert len(paths) == 103
-    assert sum(len(item) for item in paths.values()) == 134
+    # 会话右键菜单配套的会话审计导出新增 /conversations/{id}/export 的
+    # GET 共 1 个操作（1 条路径）。
+    # 语音听写（voice.py 子路由）新增 /voice/transcribe 的 POST 与
+    # /voice/status 的 GET 共 2 个操作（2 条路径）；状态响应不暴露服务器
+    # 路径；cc-haha 式在线模型下载新增 /voice/model/download 与
+    # /voice/model/download/cancel 的 POST 共 2 个操作（2 条路径）。
+    # 输入框快捷内容（quick_inputs.py 子路由）新增 /quick-inputs 的
+    # list/create、/quick-inputs/{entry_id} 的 patch/delete、
+    # /quick-inputs/reorder 的 put 共 5 个操作（3 条路径）。
+    assert len(paths) == 111
+    assert sum(len(item) for item in paths.values()) == 144
     assert hashlib.sha256(payload).hexdigest() == (
-        "b84db0c87ebc52215d4b88336ef7250b4eee27e071e79a10c11ff3bda74f0ede"
+        "328d138b0ea097e35e16746de0d068b12c61f457d84288953be56b8b328ec695"
     )

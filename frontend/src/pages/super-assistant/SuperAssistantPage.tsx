@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, List, Loader2, Menu, Monitor, MoreHorizontal, Paperclip, Pencil,
+  ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Paperclip, Pencil,
   Send, Settings2, Square, X,
 } from 'lucide-react'
 
@@ -21,7 +21,17 @@ import {
   type ToolStep,
 } from '@/api/superAssistant'
 import { matchSlashCommands, slashCommandToken } from '@/lib/slashCommands'
+import { insertAtCursor, shouldHoldInsertion } from '@/lib/voice/insertion'
+import { voiceCaptureSupported } from '@/lib/voice/recorder'
+import { useVoicePreferencesStore } from '@/stores/voicePreferencesStore'
+import { useVoiceDictation } from './useVoiceDictation'
+import { useQuickInputs } from './useQuickInputs'
+import VoiceRecordingBar from './components/VoiceRecordingBar'
+import QuickInputMenu from './components/QuickInputMenu'
+import QuickInputsDialog from './components/QuickInputsDialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Dialog, DialogTrigger } from '@/components/ui/dialog'
+import CapabilityMapDialog from './components/CapabilityMapDialog'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -34,7 +44,9 @@ import ConfigurationPanel, { DEFAULT_CONFIG_PANEL_WIDTH, errorText } from './com
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-collaboration/BrowserCollaboration'
+import NotificationsDialog from './components/NotificationsDialog'
 import ScheduledTasksDialog from './components/ScheduledTasksDialog'
+import TaskInstancesDialog from './components/TaskInstancesDialog'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import KernelRunTaskCard from './components/KernelRunTaskCard'
 import KernelRunList from './components/KernelRunList'
@@ -46,8 +58,14 @@ import {
   appendToolStart, enqueueMessage, mergeServerMessages, patchToolStep,
   sameConversationList, sameMessageList, shiftQueue,
 } from './components/chatTranscript'
+import { TurnRail } from './components/TurnRail'
+import { deriveTurnRailItems, type TurnRailItem } from './components/turnRailModel'
 import { readCachedConversations, writeCachedConversations } from './conversationCache'
+import { buildConversationExportFilename } from './exportFilename'
 import type { ModelConfig } from '@/types/ontology'
+import TicketFormModal from '@/components/tickets/TicketFormModal'
+import ConversationRenameDialog from './components/ConversationRenameDialog'
+import type { AssistantConfigTab } from './components/AssistantConfiguration'
 
 const ATTACH_ACCEPT = '.csv,.xlsx,.xls,.json,.xml,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt'
 
@@ -100,6 +118,8 @@ export default function SuperAssistantPage() {
   const scheduleId = searchParams.get('schedule')
   const scheduleRunId = searchParams.get('scheduleRun')
   const [scheduledOpen, setScheduledOpen] = useState(Boolean(scheduleId))
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [taskInstancesOpen, setTaskInstancesOpen] = useState(false)
   useEffect(() => {
     if (scheduleId) setScheduledOpen(true)
   }, [scheduleId])
@@ -126,6 +146,9 @@ export default function SuperAssistantPage() {
   const [queuedByConv, setQueuedByConv] = useState<Record<string, string[]>>({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showMessageHistory, setShowMessageHistory] = useState(false)
+  // 快捷输入：小卡片（Popover）与设置弹窗互斥打开——从卡片跳设置时先收卡片
+  const [quickInputOpen, setQuickInputOpen] = useState(false)
+  const [quickInputsSettingsOpen, setQuickInputsSettingsOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   // 窄屏顶栏溢出菜单：实时浏览器/助手配置收进「⋯」，避免与标题、模型选择器挤出视口
   const [headerOverflowOpen, setHeaderOverflowOpen] = useState(false)
@@ -134,6 +157,13 @@ export default function SuperAssistantPage() {
   // 助手配置面板默认收起，由用户点击右上角按钮展开/收起；
   // 按钮保持绿色选中态外观（仅卡片显隐变化），避免进页即展开挤占聊天区
   const [configOpen, setConfigOpen] = useState(false)
+  // 会话右键「助手配置」快捷方式的一次性落位 tab：面板打开时消费，
+  // 关闭面板即清空，普通开合不重置用户上次所在 tab
+  const [configPendingTab, setConfigPendingTab] = useState<AssistantConfigTab | null>(null)
+  // 会话右键「重命名会话」行级改名目标（区别于聊天区顶部的选中会话标题编辑）
+  const [renamingConversation, setRenamingConversation] = useState<SuperConversation | null>(null)
+  // 会话右键「反馈问题」：复用全站工单提交弹窗（自动携带当前页面地址）
+  const [ticketOpen, setTicketOpen] = useState(false)
   // 面板宽度（px）：单一卡片结构下聊天列经 --config-w 让位，宽度状态提升到页面级；
   // 拖拽中禁用 padding 过渡，聊天列跟手移动，松手后才恢复开合动画
   const [configPanelWidth, setConfigPanelWidth] = useState(DEFAULT_CONFIG_PANEL_WIDTH)
@@ -331,6 +361,8 @@ export default function SuperAssistantPage() {
   // 误清成无参；selectedId 为 null（未落地的新会话视图）时移除参数。
   // writtenParamRef 记录已回写值：setSearchParams 的函数身份随 URL 变化，
   // 外部导航（悬浮窗跳转/深链）也会触发本 effect 重跑，此时不得用旧选中抢写参数。
+  // writtenParamRef 记录已回写值：setSearchParams 的函数身份随 URL 变化，
+  // 外部导航（悬浮窗跳转/深链）也会触发本 effect 重跑，此时不得用旧选中抢写参数。
   const writtenParamRef = useRef<string | null | undefined>(undefined)
   useEffect(() => {
     if (loading || writtenParamRef.current === selectedId) return
@@ -343,7 +375,16 @@ export default function SuperAssistantPage() {
     }, { replace: true })
   }, [selectedId, loading, setSearchParams])
   useEffect(() => {
-    if (!requestedConversationId || requestedConversationId === lastAppliedParamRef.current) return
+    // 参数已被回写删除（如进入未落地新会话视图）时同样视为已消费并清空记录：
+    // 否则外部随后带同值参数跳转（如悬浮窗跳回刚离开的会话）会被旧消费记录
+    // 短路，出现「地址栏有参数、界面停在空态」的挂空。不能改在回写 effect 里
+    // 同步登记——那会让深链参数尚在 URL 的窗口期绕过消费守卫，把刚手动切换的
+    // 选中拉回旧会话。
+    if (!requestedConversationId) {
+      lastAppliedParamRef.current = null
+      return
+    }
+    if (requestedConversationId === lastAppliedParamRef.current) return
     // 参数与当前选中一致（含页内切换后 URL 回写的滞后到达）：视为已消费
     if (requestedConversationId === selectedIdRef.current) {
       lastAppliedParamRef.current = requestedConversationId
@@ -373,6 +414,8 @@ export default function SuperAssistantPage() {
   // 让触发器回落占位符；发送仍使用会话已保存的 model_config_id，不因展示而切换
   const selectedModelIdForDisplay = models.some(model => model.id === selectedModelId) ? selectedModelId : ''
   const myMessages = useMemo(() => messages.filter(message => message.role === 'user'), [messages])
+  // 对话问题导航竖条的刻度：每条用户提问一根，随消息列表（含流式增量）派生
+  const turnRailItems = useMemo(() => deriveTurnRailItems(messages), [messages])
   const runningHere = selectedId !== null && streamingIds.has(selectedId)
   const pendingHere = selectedId ? pendingByConv[selectedId] ?? null : null
   const queuedHere = selectedId ? queuedByConv[selectedId] || [] : []
@@ -451,6 +494,26 @@ export default function SuperAssistantPage() {
     }, 700)
   }
 
+  /** 竖条刻度跳转：定位到该轮提问（顶到滚动区顶缘），并解除贴底跟随；
+   *  平滑飞行期间沿用「回到最新」的飞行守卫，避免中间 scroll 事件误判回贴底 */
+  const jumpToTurn = (item: TurnRailItem) => {
+    const host = scrollHostRef.current
+    const anchor = document.getElementById(`super-assistant-msg-${item.userMessageId}`)
+    if (!host || !anchor) return
+    stickToBottomRef.current = false
+    jumpFlightRef.current = true
+    host.scrollTo({
+      top: host.scrollTop + anchor.getBoundingClientRect().top - host.getBoundingClientRect().top - 12,
+      behavior: 'smooth',
+    })
+    window.setTimeout(() => {
+      jumpFlightRef.current = false
+      const atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 96
+      stickToBottomRef.current = atBottom
+      setShowJumpToLatest(!atBottom)
+    }, 700)
+  }
+
   const createConversation = async () => {
     try {
       const item = await superAssistantApi.createConversation({ model_config_id: selectedModelId || null })
@@ -468,14 +531,19 @@ export default function SuperAssistantPage() {
     if (created) setBrowserDisplay('modal')
   }
 
-  // 「新建会话」去重：当前已在未落地的全新视图、或选中的会话还是空会话（无消息且未在生成）
-  // 时不再创建新会话，避免空会话堆积；仅把焦点放回输入框。
-  const handleNewConversation = async () => {
+  // 「新建会话」只把工作台切到未落地的新会话视图（selectedId 置 null：聊天区/附件清空、
+  // 地址栏会话参数移除、草稿换 '__new__' 槽），不立即向后端建会话——空会话堆积治理的
+  // 收口：会话真正落地统一发生在首条消息发送、附件上传或打开实时浏览器的懒建时刻。
+  // 当前已在未落地视图、或选中的会话还是空会话（无消息且未在生成）时仅回到输入框。
+  const handleNewConversation = () => {
     if (!selectedId || (selectedConversation && messages.length === 0 && !streamingIds.has(selectedConversation.id))) {
       senderRef.current?.focus()
       return
     }
-    await createConversation()
+    // 实时浏览器面板跟随会话挂载：进入未落地视图时显式收起，
+    // 避免残留的 modal/pip 状态在下次选中任意会话时突然重现
+    setBrowserDisplay('closed')
+    setSelectedId(null)
   }
 
   const deleteConversation = async () => {
@@ -543,6 +611,46 @@ export default function SuperAssistantPage() {
         block: 'center',
       })
     })
+  }
+
+  // 会话右键「重命名会话」保存回写（弹窗内部负责 PATCH 与提示）
+  const handleRenameSaved = (updated: SuperConversation) => {
+    setConversations(current => current.map(item => item.id === updated.id ? updated : item))
+  }
+
+  // 会话右键「助手配置」快捷方式：打开面板并一次性落位到目标 tab。
+  // 待审批 tab 的「完整反思」按当前选中会话执行——右键哪行就切到哪行，
+  // 保证审批作用域与所见行一致（其余 tab 是全局配置，不切聊天视图）
+  const openAssistantConfigTab = (tab: AssistantConfigTab, conversationId: string) => {
+    if (tab === 'approval') setSelectedId(conversationId)
+    setConfigPendingTab(tab)
+    setConfigOpen(true)
+    // 移动端抽屉让位（右键为桌面交互，此行为窄屏菜单兜底）
+    setSidebarOpen(false)
+  }
+
+  // 会话右键「导出会话」：下载完整审计 JSON（含消息与工具调用轨迹）
+  const exportConversation = async (item: SuperConversation) => {
+    try {
+      const payload = await superAssistantApi.exportConversation(item.id)
+      const filename = buildConversationExportFilename(item.title, item.id)
+      // 下载方式与 steward 会话导出同款：anchor 先挂 body 再 click，
+      // headless 环境下未连接的 anchor 不触发浏览器下载事件
+      const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+        type: 'application/json;charset=utf-8',
+      })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      toast.success('会话已导出', { description: filename })
+    } catch (error) {
+      toast.error('导出失败', { description: errorText(error) })
+    }
   }
 
   // 全局搜索选中结果：切到目标会话；消息命中时登记待定位消息
@@ -816,6 +924,95 @@ export default function SuperAssistantPage() {
   const hasDraft = input.trim().length > 0 && models.length > 0
   const canSend = hasDraft
   const showStop = runningHere && !hasDraft
+
+  // ---- 语音听写（本地 SenseVoice 转写，插入策略见 lib/voice/insertion）----
+  const voiceSupported = useMemo(() => voiceCaptureSupported(), [])
+  const voiceEnabled = useVoicePreferencesStore(state => state.enabled)
+  // 插入锚点：录音开始瞬间的光标位置与草稿 revision；转写回来时据此判断
+  // 草稿是否被改过（改过则扣留气泡，绝不覆盖用户正在写的内容）
+  const voiceAnchorRef = useRef({ cursor: 0, revision: 0 })
+  const voiceCursorLiveRef = useRef(0)
+  const voiceRevisionRef = useRef(0)
+  const voiceComposingRef = useRef(false)
+  const composerInputHostRef = useRef<HTMLDivElement | null>(null)
+  const [voiceHold, setVoiceHold] = useState<string | null>(null)
+  const [pendingCaret, setPendingCaret] = useState<number | null>(null)
+
+  // 草稿 revision：任何 input 变化（键入/程序化替换/转写插入）都计一次；
+  // 录音锚点据此判断转写回来时草稿是否被动过（动过即扣留，绝不覆盖）
+  useEffect(() => { voiceRevisionRef.current += 1 }, [input])
+
+  const dictation = useVoiceDictation({
+    getLanguage: () => useVoicePreferencesStore.getState().language,
+    onTranscript: text => {
+      const anchor = voiceAnchorRef.current
+      if (shouldHoldInsertion(anchor.revision, voiceRevisionRef.current, voiceComposingRef.current)) {
+        // 已有暂存时追加而非覆盖：连续两次扣留不丢前一段
+        setVoiceHold(current => (current === null ? text : `${current}\n${text}`))
+        return
+      }
+      const plan = insertAtCursor(inputRef.current, anchor.cursor, text)
+      setInput(plan.text)
+      // 插入后把光标锚点同步到插入文本末尾：下一次听写从新光标处接入，
+      // 而不是停留在过期的旧位置（用户反馈：第二段转写插到了最前面）
+      setPendingCaret(plan.nextCursor)
+    },
+  })
+
+  // 光标锚点唯一权威来源是 DOM textarea 的 selectionStart：select 事件
+  // 在受控值提交后异步排队且会把 caret 报成末尾，靠事件维护 ref 必输给
+  // 这类竞态（用户反馈：第二段转写插到了最前面）。ref 仅作无 DOM 时兜底。
+  const getComposerCursor = () => {
+    const textarea = composerInputHostRef.current?.querySelector('textarea')
+    return textarea ? (textarea.selectionStart ?? voiceCursorLiveRef.current) : voiceCursorLiveRef.current
+  }
+
+  // 插入后的光标落点：setState 批次提交完（effect 阶段）再设置 selection，
+  // setTimeout 方案会与 React 受控值提交竞争、caret 总被弹回末尾
+  useEffect(() => {
+    if (pendingCaret === null) return
+    const textarea = composerInputHostRef.current?.querySelector('textarea')
+    if (textarea) {
+      senderRef.current?.focus()
+      textarea.setSelectionRange(pendingCaret, pendingCaret)
+    }
+    setPendingCaret(null)
+  }, [pendingCaret, input])
+
+  const startDictation = async () => {
+    voiceAnchorRef.current = { cursor: getComposerCursor(), revision: voiceRevisionRef.current }
+    await dictation.start()
+  }
+
+  const insertHeldTranscript = () => {
+    if (voiceHold === null) return
+    const plan = insertAtCursor(inputRef.current, getComposerCursor(), voiceHold)
+    setInput(plan.text)
+    setVoiceHold(null)
+    setPendingCaret(plan.nextCursor)
+  }
+
+  // ---- 快捷输入（小卡片 + 设置弹窗共用 useQuickInputs 数据源）----
+  const quickInputs = useQuickInputs()
+  // 用户是否在输入框放置过光标（select 由点击/键入/方向键触发，autoFocus 不触发）：
+  // 从未交互则无用户光标，插入语义退化为「拼接到末尾」而非插到开头
+  const composerInteractedRef = useRef(false)
+
+  const insertQuickInput = (content: string) => {
+    const cursor = composerInteractedRef.current ? getComposerCursor() : inputRef.current.length
+    const plan = insertAtCursor(inputRef.current, cursor, content)
+    setInput(plan.text)
+    setQuickInputOpen(false)
+    // 光标落点/焦点回输入框由 pendingCaret effect 统一处理（与语音插入同机制）
+    setPendingCaret(plan.nextCursor)
+  }
+
+  const handleQuickInputOpenChange = (open: boolean) => {
+    setQuickInputOpen(open)
+    // 每次打开即刷新：设置弹窗在其它端改过也能拿到最新顺序与内容
+    if (open) void quickInputs.refresh()
+  }
+
   // SenderProps 未显式声明原生透传属性，但库内部会转发到内部 textarea
   const senderNativeProps = { autoFocus: true, 'aria-label': '向超级助手发送消息' }
   const placeholder = loading
@@ -910,7 +1107,46 @@ export default function SuperAssistantPage() {
             ))}
           </div>
         )}
-        <div className="px-3 pb-1 pt-2.5">
+        {voiceHold !== null && (
+          <div data-testid="super-assistant-voice-hold" className="flex items-center gap-2 border-b border-border px-2.5 py-2">
+            <Mic size={12} className="shrink-0 text-brand" />
+            <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">转写暂存</span>
+            <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]" title={voiceHold}>{voiceHold}</span>
+            <button
+              type="button"
+              onClick={insertHeldTranscript}
+              aria-label="插入暂存的转写文本"
+              className="h-6 shrink-0 rounded-md border border-brand-line bg-brand-soft/70 px-2 text-[11px] text-brand-ink transition-colors hover:border-brand hover:bg-brand-mist focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              插入
+            </button>
+            <button
+              type="button"
+              onClick={() => setVoiceHold(null)}
+              aria-label="丢弃暂存的转写文本"
+              className="h-6 shrink-0 rounded-md px-2 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              丢弃
+            </button>
+          </div>
+        )}
+        {/* 输入框在录音期间保留可见（cc-haha 式）：草稿不消失，录音条只
+            替换底部按钮行，转写文本按光标锚点插入 */}
+        <div
+          ref={composerInputHostRef}
+          className="px-3 pb-1 pt-2.5"
+          onSelect={event => {
+            // 光标锚点跟踪：select 事件从内部 textarea 冒泡（含点击/方向键移动）；
+            // 同时标记「用户放置过光标」——快捷内容据此区分插入锚点与拼接到末尾
+            const target = event.target
+            if (target instanceof HTMLTextAreaElement) {
+              voiceCursorLiveRef.current = target.selectionStart ?? 0
+              composerInteractedRef.current = true
+            }
+          }}
+          onCompositionStart={() => { voiceComposingRef.current = true }}
+          onCompositionEnd={() => { voiceComposingRef.current = false }}
+        >
           <Sender
             ref={senderRef}
             {...senderNativeProps}
@@ -938,17 +1174,49 @@ export default function SuperAssistantPage() {
             style={{ border: 'none', boxShadow: 'none', background: 'transparent' }}
           />
         </div>
+        {dictation.phase === 'idle' ? (
         <div className="flex min-h-12 items-center justify-between gap-2 px-2.5 py-2">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            title="上传会话附件（仅本会话可见）"
-            aria-label="上传会话附件"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
-          </button>
+          <div className="flex min-w-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              title="上传会话附件（仅本会话可见）"
+              aria-label="上传会话附件"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
+            </button>
+            {/* 非安全上下文（普通 HTTP）或偏好关闭时整体隐藏；模型未就绪仍显示，
+                点击转写时会收到 503 的明确指引 */}
+            {voiceSupported && voiceEnabled && (
+              <button
+                type="button"
+                onClick={() => { void startDictation() }}
+                disabled={dictation.phase !== 'idle'}
+                title="语音输入：点击开始录音，结束后转成文字插入光标处"
+                aria-label="语音输入"
+                data-testid="super-assistant-voice-button"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-brand-ink active:scale-[0.98] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Mic size={16} />
+              </button>
+            )}
+            {/* 快捷输入：麦克风右侧，卡片列表点击即插入光标处（无光标拼末尾） */}
+            <QuickInputMenu
+              open={quickInputOpen}
+              onOpenChange={handleQuickInputOpenChange}
+              items={quickInputs.items}
+              loading={quickInputs.loading}
+              error={quickInputs.error}
+              onRetry={() => void quickInputs.refresh()}
+              onInsert={insertQuickInput}
+              onOpenSettings={() => {
+                setQuickInputOpen(false)
+                setQuickInputsSettingsOpen(true)
+              }}
+            />
+          </div>
           <div className="flex shrink-0 items-center gap-2">
             {showStop ? (
               <button type="button" onClick={() => void stop()} disabled={stopping} aria-label="停止生成" title="停止生成"
@@ -1004,6 +1272,9 @@ export default function SuperAssistantPage() {
             </Popover>
           </div>
         </div>
+        ) : (
+          <VoiceRecordingBar dictation={dictation} onStop={() => { void dictation.finish() }} onCancel={dictation.cancel} />
+        )}
       </div>
     </div>
   )
@@ -1017,7 +1288,7 @@ export default function SuperAssistantPage() {
         selectedId={selectedId}
         mobileOpen={sidebarOpen}
         onCloseMobile={() => setSidebarOpen(false)}
-        onCreate={() => void handleNewConversation()}
+        onCreate={handleNewConversation}
         onSelect={id => setSelectedId(id)}
         onDelete={id => {
           const conversation = conversations.find(item => item.id === id)
@@ -1026,7 +1297,21 @@ export default function SuperAssistantPage() {
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenScheduled={() => setScheduledOpen(true)}
+        onOpenTaskInstances={() => setTaskInstancesOpen(true)}
+        onOpenNotifications={() => setNotificationsOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
+        onRename={setRenamingConversation}
+        onExport={item => void exportConversation(item)}
+        onOpenConfigTab={openAssistantConfigTab}
+        onFeedback={() => setTicketOpen(true)}
+      />
+      <NotificationsDialog
+        open={notificationsOpen}
+        onClose={() => setNotificationsOpen(false)}
+      />
+      <TaskInstancesDialog
+        open={taskInstancesOpen}
+        onClose={() => setTaskInstancesOpen(false)}
       />
       <ScheduledTasksDialog
         open={scheduledOpen}
@@ -1052,6 +1337,15 @@ export default function SuperAssistantPage() {
             return next
           }, { replace: true })
         }}
+      />
+      <QuickInputsDialog
+        open={quickInputsSettingsOpen}
+        onClose={() => setQuickInputsSettingsOpen(false)}
+        items={quickInputs.items}
+        onCreate={quickInputs.create}
+        onUpdate={quickInputs.update}
+        onDelete={quickInputs.remove}
+        onReorder={quickInputs.reorder}
       />
       {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
           面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}
@@ -1119,6 +1413,19 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
+          <Dialog>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                aria-label="查看能力地图"
+                title="能力地图"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Layers3 size={16} aria-hidden="true" />
+              </button>
+            </DialogTrigger>
+            <CapabilityMapDialog />
+          </Dialog>
           {/* 面板展开时头部宽度吃紧：上下文胶囊仅在 ≥2xl 视口展示（2xl 以上面板展开仍放得下）；
               窄屏（<md）胶囊整体让位，横向空间优先留给标题与模型选择器 */}
           {!loading && selectedConversation && (
@@ -1136,11 +1443,14 @@ export default function SuperAssistantPage() {
             disabled={!selectedId || runningHere}
           >
             {/* 与左侧「上下文」框同一语言：1px 绿色细边框、浅绿底、无阴影。
-                选完模型焦点留在触发器上（Radix/Chromium 下鼠标选中也会命中 :focus-visible），
-                一律去粗焦点环只保留细边——细边即焦点指示，键盘操作同样可见 */}
+                背景直连胶囊同款 token：brand.soft 是纯 var 映射无 alpha 通道，
+                bg-brand-soft/80 这类透明度修饰符不生成规则（历史踩坑），var() 直挂才生效。
+                Radix 关闭下拉（选中或取消）都会把焦点程序化还给触发器并命中 :focus-visible，
+                基础组件的 2px ring 会叠加 1px 边框显得很粗且常驻——ring-0 显式压掉，
+                焦点/悬停统一用 1px brand 细边指示，与胶囊框型始终一致，键盘操作同样可见 */}
             <SelectTrigger
               aria-label="会话模型"
-              className="h-9 w-36 border-brand-line bg-brand-soft/80 text-xs shadow-none hover:border-brand focus-visible:ring-2 focus-visible:ring-ring sm:w-48 xl:w-60"
+              className="h-9 w-36 border-brand-line bg-[var(--color-context-usage-bg)] text-xs shadow-none hover:border-brand focus-visible:ring-0 focus-visible:border-brand sm:w-48 xl:w-60"
             >
               {/* 触发器只显示配置名；底座模型放在选项第二行，不再拼接撑满一行 */}
               <SelectValue placeholder={models.length === 0 ? '无可用模型' : '选择模型'}>
@@ -1247,7 +1557,7 @@ export default function SuperAssistantPage() {
             ) : !hasMessages ? (
               <div className="flex flex-1 items-center justify-center px-4 sm:px-8">
                 <div className="relative w-full max-w-3xl -translate-y-14 sm:-translate-y-20">
-                  <p className="absolute inset-x-0 bottom-full mb-8 text-center text-3xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-4xl">
+                  <p className="super-assistant-hero-shimmer absolute inset-x-0 bottom-full z-10 mb-12 pb-1 text-center text-3xl font-semibold tracking-tight sm:text-4xl">
                     SuperAgent 工作空间 2.0
                   </p>
                   {renderComposer(true)}
@@ -1278,6 +1588,14 @@ export default function SuperAssistantPage() {
                 </div>
               </div>
             )}
+            {/* 对话问题导航竖条（对齐 zcode Turn Navigator）：左缘按提问轮次刻度，
+                hover 预览、点击定位；刻度不足 2 根或聊天区过窄时组件自身不渲染。
+                挂载条件与滚动容器严格同帧（!loading && hasMessages）：竖条挂载时
+                初测读 scrollHostRef，若早于滚动容器挂载（消息先于 loading 收口返回）
+                会读到 null 且此后无重测时机，竖条将永不渲染 */}
+            {!loading && hasMessages && (
+              <TurnRail items={turnRailItems} scrollHostRef={scrollHostRef} onJump={jumpToTurn} />
+            )}
             {/* 离底较远时的兜底入口：一键回到最新消息（与贴底判定同一 96px 阈值） */}
             {hasMessages && showJumpToLatest && (
               <button
@@ -1300,10 +1618,11 @@ export default function SuperAssistantPage() {
           )}
         </ConfigProvider>
 
-      {/* 助手配置面板：单一大卡内的右侧栏（移动端为卡内覆盖抽屉） */}
+      {/* 助手配置面板：单一大卡内的右侧栏（移动端为卡内覆盖抽屉）。
+          initialTab 为右键快捷方式的一次性落位 tab，关闭面板时清空。 */}
       <ConfigurationPanel
         open={configOpen}
-        onClose={() => setConfigOpen(false)}
+        onClose={() => { setConfigOpen(false); setConfigPendingTab(null) }}
         width={configPanelWidth}
         onWidthResize={setConfigPanelWidth}
         onDraggingChange={setConfigPanelDragging}
@@ -1314,6 +1633,8 @@ export default function SuperAssistantPage() {
         refreshServers={refreshServers}
         refreshTools={refreshTools}
         conversationId={selectedId}
+        initialTab={configPendingTab}
+        onInitialTabConsumed={() => setConfigPendingTab(null)}
       />
       </section>
 
@@ -1348,6 +1669,15 @@ export default function SuperAssistantPage() {
         onConfirm={() => void deleteConversation()}
         onClose={() => setDeletingConversation(null)}
       />
+
+      <ConversationRenameDialog
+        open={renamingConversation !== null}
+        conversation={renamingConversation}
+        onClose={() => setRenamingConversation(null)}
+        onSaved={handleRenameSaved}
+      />
+
+      <TicketFormModal open={ticketOpen} onClose={() => setTicketOpen(false)} />
     </div>
   )
 }

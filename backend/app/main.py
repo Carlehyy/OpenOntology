@@ -325,6 +325,22 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 输入框快捷内容（常用文本片段 CRUD + 优先级重排）：同前缀同守卫的独立子路由
+from app.super_assistant import quick_inputs as super_assistant_quick_inputs
+app.include_router(
+    super_assistant_quick_inputs.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
+# 语音听写（录音 WAV 上传 → 本地 SenseVoice 离线转写）：同前缀同守卫的独立子路由
+from app.super_assistant import voice as super_assistant_voice
+app.include_router(
+    super_assistant_voice.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 远程助手（声明式注册目录：CRUD/连接测试）：同前缀同守卫的独立子路由
 from app.super_assistant import remote_agents as super_assistant_remote_agents
 app.include_router(
@@ -432,6 +448,18 @@ app.include_router(events_router.ingest_router, prefix="/api/v2/ingest", tags=["
 from app.tickets import router as tickets_router
 app.include_router(tickets_router.router, prefix="/api/v2/tickets", tags=["tickets"])
 
+# 消息通知 — 管理员消息总线（站内弹窗 + 对外投递接口 + 多渠道转发）；
+# 整个域仅管理员，鉴权在各端点 require_admin 声明
+from app.notifications import router as notifications_router
+app.include_router(notifications_router.router, prefix="/api/v2/notifications", tags=["notifications"])
+# 对外投递入口：X-API-Key 鉴权（与 events ingest 同构），不挂 JWT
+from app.notifications.ingest_router import ingest_router as notifications_ingest_router
+app.include_router(
+    notifications_ingest_router,
+    prefix="/api/v2/notifications/ingest",
+    tags=["notifications-ingest"],
+)
+
 # 世界模型（演化层）— 一级导航域：推演模型项目开发调试 + 调用记录（发布为推演服务属二期）
 world_model_guard = menu_guard("world_model")
 from app.world_model import router as world_model_router
@@ -440,6 +468,16 @@ app.include_router(
     prefix="/api/v2/world-model",
     tags=["world-model"],
     dependencies=world_model_guard,
+)
+
+# 任务实例 — 独立运行时功能域：声明式 DAG 模板 + 契约验收 + 双形态人工介入
+task_instances_guard = menu_guard("task_instances")
+from app.task_instances import router as task_instances_router
+app.include_router(
+    task_instances_router.router,
+    prefix="/api/v2/task-instances",
+    tags=["task-instances"],
+    dependencies=task_instances_guard,
 )
 
 # 三维场景 — 白模场景管理与建模：卡片列表 / 详情三标签 / 运行日志（场景助手属阶段二）

@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     first_admin_user: str = "admin"
     first_admin_password: str = "admin123"
     uploads_dir: str = "./uploads"
+    # 任务实例 agent 执行容器（task_worker 服务；设计方案 §6）
+    task_agent_image: str = "openontology-task-agent:local"
+    task_agent_network: str = "bridge"
     access_token_expire_minutes: int = 1440
 
     # Formal-ontology actions can call an external webhook.  Keep the request
@@ -169,6 +172,18 @@ class Settings(BaseSettings):
     super_assistant_max_skill_archive_mb: int = 20
     super_assistant_max_skill_files: int = 500
     super_assistant_max_skill_file_mb: int = 5
+    # 语音听写（本地 SenseVoice 离线转写）：模型目录留空回退仓库内
+    # backend/voice-models/；模型由 scripts/download_voice_model.py 显式
+    # 下载（sha256 校验），缺失时转写接口 fail-closed 返回 503。
+    voice_model_dir: str = ""
+    voice_max_duration_seconds: int = Field(default=120, ge=1, le=600)
+    voice_max_body_mb: int = Field(default=8, ge=1, le=64)
+    # 并发转写闸门：识别器常驻内存 ~0.9GB、每路解码再 +数百 MB，
+    # 且转写与全平台同步端点共享线程池——默认 2 路，超限 429 快速失败
+    voice_max_concurrent: int = Field(default=2, ge=1, le=16)
+    # 在线模型下载源 base（服务端固定，不接受客户端传 URL）；
+    # 国内部署可配 https://hf-mirror.com
+    voice_model_download_base: str = "https://huggingface.co"
     super_assistant_max_tool_rounds: int = 25
     # 自主 agent 模式（PLAN→EXECUTE→VERIFY，对标 small-rust-hermes run_agent）的
     # 迭代上限；独立于普通对话的 max_tool_rounds，仅在 agent_mode=True 时生效
@@ -302,6 +317,9 @@ class Settings(BaseSettings):
     # 工单附件与事件附件同构：仅安全落盘与下载，默认兼容任意扩展名；
     # 部署方可通过 TICKET_ATTACHMENT_EXTENSIONS 收紧白名单。
     ticket_attachment_extensions: str = "*"
+    # 消息通知附件（Markdown 正文内嵌图片/音视频与独立附件）：仅安全落盘与
+    # 下载，默认兼容任意扩展名；NOTIFICATION_ATTACHMENT_EXTENSIONS 可收紧。
+    notification_attachment_extensions: str = "*"
     # 可选 OfficeCLI 适配器。核心会话空间不依赖它；配置后才向探索 Agent 暴露
     # docx/xlsx/pptx 的结构化增删改工具，避免生产镜像隐式下载第三方二进制。
     exploration_officecli_path: str = ""
