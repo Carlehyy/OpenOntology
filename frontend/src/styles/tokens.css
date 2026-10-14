@@ -58,6 +58,11 @@
   --color-accent-ink: #047857;
   --color-context-usage-bg: rgba(240, 253, 250, 0.8);
 
+  /* 超级助手银白扫光标题：保留既有色值，明暗两态同值维护。 */
+  --color-assistant-hero-base: #6b7280;
+  --color-assistant-hero-mid: #8b93a7;
+  --color-assistant-hero-highlight: #ffffff;
+
   /* ── 背景 ── */
   --color-bg-base: var(--background);
   --color-bg-elevated: #f5f7fa;

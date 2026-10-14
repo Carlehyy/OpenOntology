@@ -150,11 +150,11 @@
   /* 银灰底 + 柔和白高光；底色略深于预览，保证白底对比 */
   background: linear-gradient(
     105deg,
-    #6b7280 0%,
-    #8b93a7 38%,
-    #ffffff 50%,
-    #8b93a7 62%,
-    #6b7280 100%
+    var(--color-assistant-hero-base) 0%,
+    var(--color-assistant-hero-mid) 38%,
+    var(--color-assistant-hero-highlight) 50%,
+    var(--color-assistant-hero-mid) 62%,
+    var(--color-assistant-hero-base) 100%
   );
   background-size: 220% 100%;
   -webkit-background-clip: text;
