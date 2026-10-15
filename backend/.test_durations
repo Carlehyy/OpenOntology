@@ -1350,6 +1350,7 @@
   "tests/notifications/test_notifications.py::test_ingest_rejects_oversized_event_id_and_non_string": 1.2437639999989187,
   "tests/notifications/test_notifications.py::test_ingest_scope_and_validation": 1.3785407499963185,
   "tests/notifications/test_notifications.py::test_internal_publish_helper": 0.6794252510007937,
+  "tests/notifications/test_notifications.py::test_list_pagination_all_tab_skips_archived_rows": 1.0,
   "tests/notifications/test_notifications.py::test_list_pagination_cursor": 2.034563543013064,
   "tests/notifications/test_notifications.py::test_list_preview_keeps_line_breaks": 1.632037582952762,
   "tests/notifications/test_notifications.py::test_list_preview_truncates_at_limit": 1.2309378329664469,

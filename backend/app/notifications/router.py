@@ -1,14 +1,14 @@
 """
 消息通知 API — /api/v2/notifications（整个域仅管理员）
 
-  GET    /                                列表（tab=all|unread|starred|archived，游标分页）
+  GET    /                                列表（tab=all|unread|starred|archived，游标分页；all=未归档收件箱，与 archived 并集=全部）
   GET    /summary                         未读/标记/归档计数（侧栏徽章数据源）
   GET    /stats                           消息统计聚合（概览/趋势/来源/渠道）
   POST   /                                手动发送消息（正式消息：入站内并触发渠道转发）
   POST   /read-all                        全部未读标为已读
   GET    /{message_id}                    详情（Markdown 正文 + 附件；查看即自动已读）
   PATCH  /{message_id}                    处置状态更新（isRead/isStarred/isArchived 部分更新）
-  DELETE /{message_id}                    单条删除（连带附件，用于误投敏感消息处置）
+  DELETE /{message_id}                    单条删除（连带附件，用于误投敏感消息处置；消息列表 UI 已无删除入口）
   POST   /{message_id}/attachments        上传附件
   GET    /{message_id}/attachments/{att_id}/download  下载附件
 """

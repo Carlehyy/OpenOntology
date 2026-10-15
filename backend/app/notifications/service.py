@@ -7,7 +7,8 @@
 语义要点：
   - 查看详情即自动标为已读（可再标回未读）；
   - 归档/标记互不影响，全部可逆；
-  - 单条删除为物理删除（连带附件文件与状态行），用于误投敏感消息处置。
+  - 单条删除为物理删除（连带附件文件与状态行），用于误投敏感消息处置
+    （消息列表 UI 已无删除入口，仅保留 API）。
 """
 from __future__ import annotations
 
@@ -400,8 +401,9 @@ def list_messages(
         .outerjoin(NotificationMessageState, _state_join_condition(user_id))
     )
     if tab == "all":
-        # 全部 = 真全量：归档消息也可见（与「已归档」视图并集）；未读/已标记不含已归档
-        pass
+        # 全部消息 = 未归档的活跃收件箱；与「已归档」互补，两者并集 = 历史全部消息
+        # （与 summary.totalCount 对账）。unread/starred 同样不含已归档。
+        query = query.filter(_archived_flag().is_(False))
     elif tab == "unread":
         query = query.filter(_archived_flag().is_(False), _read_flag().is_(False))
     elif tab == "starred":
@@ -458,7 +460,7 @@ def notification_summary(db: Session, *, user_id: str) -> dict[str, int]:
     unread = base.filter(_archived_flag().is_(False), _read_flag().is_(False)).scalar() or 0
     starred = base.filter(_archived_flag().is_(False), _starred_flag().is_(True)).scalar() or 0
     archived = base.filter(_archived_flag().is_(True)).scalar() or 0
-    # 与「全部消息」视图同口径：真全量（含已归档）
+    # 真全量（含已归档）：=「全部消息」（未归档）+「已归档」两视图之和，供对账
     total = base.scalar() or 0
     return {
         "unreadCount": unread,
