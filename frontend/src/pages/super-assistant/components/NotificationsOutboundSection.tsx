@@ -231,11 +231,25 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
               <span className="block text-sm font-semibold text-[var(--color-text-primary)]">发件邮箱</span>
               <span className="block text-xs leading-5 text-[var(--color-text-tertiary)]">配置一次 SMTP，邮件渠道只需填收件人；密码加密存储。</span>
             </span>
-            <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${smtp.data?.configured ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'}`}>
-              {smtp.data?.configured ? '已配置' : '未配置'}
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${smtp.isError ? 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]' : smtp.data?.configured ? 'bg-[var(--color-success-bg)] text-[var(--color-success)]' : 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]'}`}>
+              {smtp.isError ? '加载失败' : smtp.data?.configured ? '已配置' : '未配置'}
             </span>
             <ChevronDown size={12} className="shrink-0 text-[var(--color-text-tertiary)] transition-transform group-open:rotate-180" aria-hidden />
           </summary>
+          {smtp.isError ? (
+            /* 与密钥/模板/渠道三块对齐：加载失败给错误态 + 重试，而不是渲染空白可编辑表单 */
+            <div role="alert" className="flex flex-col items-center gap-2 p-6 text-center">
+              <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">发件邮箱配置加载失败：{errorText(smtp.error)}</p>
+              <button
+                type="button"
+                onClick={() => void smtp.refetch()}
+                className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                data-notifications-smtp-retry
+              >
+                重试
+              </button>
+            </div>
+          ) : (
           <div className="border-t-0 p-4">
             <div className="flex flex-wrap items-end gap-2">
               <label className="flex min-w-40 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
@@ -299,6 +313,7 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
               </button>
             </div>
           </div>
+          )}
         </details>
 
         {/* —— 转发渠道：消息到达即为启用渠道生成投递 —— */}
@@ -354,9 +369,18 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
                 )}
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,13rem),1fr))] gap-2">
                   {!channelTemplates.isLoading && !channelTemplates.isError && (channelTemplates.data ?? []).length === 0 && (
-                    <p className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-5 text-center text-xs text-[var(--color-text-tertiary)]">
-                      渠道类型定义加载为空，请稍后重试。
-                    </p>
+                    /* 空数据分支与 error 分支对齐：给重试入口，而不是把恢复动作推给用户手动刷新 */
+                    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] px-3 py-5 text-center">
+                      <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">渠道类型定义加载为空。</p>
+                      <button
+                        type="button"
+                        onClick={() => void channelTemplates.refetch()}
+                        className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        data-notifications-templates-retry
+                      >
+                        重试
+                      </button>
+                    </div>
                   )}
                   {(channelTemplates.data ?? []).map(t => {
                     const Icon = TEMPLATE_ICONS[t.id] ?? Plug

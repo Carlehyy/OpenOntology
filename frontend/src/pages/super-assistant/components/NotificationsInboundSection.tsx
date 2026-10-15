@@ -1,6 +1,6 @@
-import { forwardRef, useEffect, useImperativeHandle, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Copy, Inbox, KeyRound, Loader2, Zap } from 'lucide-react'
+import { CheckCircle2, Copy, Inbox, KeyRound, Loader2, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { absoluteFileUrl } from '@/api/fileAssets'
@@ -13,6 +13,7 @@ import { writeTextToClipboard } from '@/utils/clipboard'
 
 import { errorText } from './assistantPanelUtils'
 import { inputClass } from './notificationsConfigShared'
+import { INGEST_ENDPOINT_PATH, ingestCurlScript } from './notificationsIngestScript'
 
 /**
  * 渠道配置 · 消息入口分区（外部 → 平台）：投递接入（端点 + 调用示例 + 密钥签发/吊销/链路测试）。
@@ -26,19 +27,10 @@ export interface InboundSectionHandle {
 
 function ingestEndpoint(): string {
   try {
-    return absoluteFileUrl('/api/v2/notifications/ingest')
+    return absoluteFileUrl(INGEST_ENDPOINT_PATH)
   } catch {
-    return '/api/v2/notifications/ingest'
+    return INGEST_ENDPOINT_PATH
   }
-}
-
-function ingestCurlSample(): string {
-  return [
-    `curl -X POST ${ingestEndpoint()} \\`,
-    '  -H "X-API-Key: <你的密钥>" \\',
-    '  -H "Content-Type: application/json" \\',
-    `  -d '{"eventId":"order-123","title":"订单异常","body":"# 详情\\n金额超限","priority":"high"}'`,
-  ].join('\n')
 }
 
 interface NotificationsInboundSectionProps {
@@ -103,9 +95,15 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
       onSettled: () => setTestingKeyId(null),
     })
 
-    // 弹窗关闭即清除密钥明文与表单临时态（“仅此一次”承诺不因重开而失效）
+    // 弹窗关闭即清除密钥明文与表单临时态（“仅此一次”承诺不因重开而失效）。
+    // 明文未确认保存就关闭：toast 告知补救路径（ref 镜像读取，避免 effect 依赖扩张）
+    const mintedKeyRef = useRef(mintedKey)
+    mintedKeyRef.current = mintedKey
     useEffect(() => {
       if (!open) {
+        if (mintedKeyRef.current) {
+          toast.info('密钥明文未确认保存已清除；如需新明文请重新签发并吊销旧密钥')
+        }
         setMintedKey(null)
         setMintFormOpen(false)
         setConfirmingKeyTest(null)
@@ -167,8 +165,8 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                 <button
                   type="button"
                   onClick={() => {
-                    writeTextToClipboard(ingestCurlSample())
-                      .then(() => toast.success('调用示例已复制'))
+                    writeTextToClipboard(ingestCurlScript(ingestEndpoint()))
+                      .then(() => toast.success('调用示例已复制（需替换密钥占位符）'))
                       .catch(() => toast.error('复制失败，请手动选择复制'))
                   }}
                   className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -177,29 +175,69 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                   <Copy size={12} /> 复制调用示例
                 </button>
               </div>
-              <pre className="scrollbar-none mt-2 overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 font-mono text-[11px] leading-5 text-[var(--color-code-fg)]">{ingestCurlSample()}</pre>
+              <pre className="scrollbar-none mt-2 overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 font-mono text-[11px] leading-5 text-[var(--color-code-fg)] select-text">{ingestCurlScript(ingestEndpoint())}</pre>
             </div>
 
             {mintedKey && (
-              <div role="alert" className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3" data-notifications-key-plaintext>
-                <p className="text-xs font-medium text-[var(--color-warning)]">
-                  「{mintedKey.name}」密钥明文（仅此一次，请立即保存）：
+              /* 一次性交付卡：明文唯一可见窗口。脚本已注入真实密钥，复制即可交给外部系统；
+                 视觉走品牌正向情绪（签发是成功事件），「仅此一次」警示留在文案行 */
+              <div role="alert" className="rounded-lg border border-[var(--color-nav-bg)] bg-brand-soft p-3" data-notifications-key-delivery>
+                <p className="flex items-center gap-1.5 text-sm font-semibold text-brand-ink">
+                  <CheckCircle2 size={15} className="shrink-0" /> 密钥已签发 ——「{mintedKey.name}」
+                </p>
+                <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-secondary)]">
+                  明文仅此次展示，请立即交付；下方脚本已注入该密钥，可直接交给外部系统。
                 </p>
                 <div className="mt-2 flex items-center gap-2">
-                  <code className="min-w-0 flex-1 break-all rounded bg-[var(--color-bg-base)] px-2 py-1.5 font-mono text-[11px] text-[var(--color-text-primary)]">
+                  <code
+                    className="min-w-0 flex-1 break-all rounded bg-[var(--color-bg-base)] px-2 py-1.5 font-mono text-[11px] text-[var(--color-text-primary)] select-all"
+                    data-notifications-key-plaintext
+                  >
                     {mintedKey.plaintextKey}
                   </code>
                   <button
                     type="button"
                     onClick={() => {
                       writeTextToClipboard(mintedKey.plaintextKey || '')
-                        .then(() => toast.success('已复制到剪贴板'))
-                        .catch(() => toast.error('复制失败，请手动选择复制'))
+                        .then(() => toast.success('密钥已复制'))
+                        .catch(() => toast.error('复制失败，请点击上方密钥全选后手动复制'))
                     }}
                     className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    data-notifications-key-copy-plaintext
                   >
-                    <Copy size={12} /> 复制
+                    <Copy size={12} /> 复制密钥
                   </button>
+                </div>
+                <div className="relative mt-2">
+                  <pre className="scrollbar-none overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 pr-28 font-mono text-[11px] leading-5 text-[var(--color-code-fg)] select-text" data-notifications-key-script>{ingestCurlScript(ingestEndpoint(), mintedKey.plaintextKey)}</pre>
+                  <div className="absolute right-1.5 top-1.5">
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        writeTextToClipboard(ingestCurlScript(ingestEndpoint(), mintedKey.plaintextKey))
+                          .then(() => toast.success('完整脚本已复制（含密钥明文）'))
+                          .catch(() => toast.error('复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制'))
+                      }}
+                      className="rounded-lg"
+                      data-notifications-key-copy-fullscript
+                    >
+                      <Copy size={12} /> 复制完整脚本
+                    </Button>
+                  </div>
+                </div>
+                <p className="mt-1.5 text-xs leading-5 text-[var(--color-warning)]">
+                  剪贴板中的脚本含密钥明文，请勿粘贴到公开场合。
+                </p>
+                <div className="mt-2 flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => { setMintedKey(null); setMintFormOpen(false) }}
+                    className="rounded-lg"
+                    data-notifications-key-dismiss
+                  >
+                    我已妥善保存，关闭
+                  </Button>
                 </div>
               </div>
             )}
@@ -270,23 +308,43 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                 还没有有效密钥。点右上「签发密钥」，把密钥与调用示例交给外部系统即可开始投递。
               </p>
             ) : (
-              <ul className="space-y-1">
+              <ul className="space-y-1.5">
                 {activeIngestKeys.map(key => (
                   <li
                     key={key.id}
                     data-notifications-key-item={key.id}
-                    className="flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--color-bg-hover)]"
+                    className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--color-bg-hover)]"
                   >
-                    <KeyRound size={15} className="shrink-0 text-[var(--color-text-secondary)]" />
                     <div className="min-w-0 flex-1">
-                      {/* 名称与密钥前缀分行：此前同行拼接（如 11111ob_notif_…）连成一片难扫读 */}
-                      <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">{key.name}</p>
-                      <p className="truncate text-xs text-[var(--color-text-tertiary)]">
-                        <span className="font-mono text-[11px]">{key.keyPrefix}_…</span>
-                        {key.allowedSourceSystem ? ` · 限定来源：${key.allowedSourceSystem}` : ''} · 最近使用：{key.lastUsedAt ? formatDateTime(key.lastUsedAt) : '未使用'}
+                      {/* 第一行=身份（名称 + 限定来源）；第二行=技术元信息（前缀/最近使用，等宽弱化） */}
+                      <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">
+                        {key.name}
+                        {key.allowedSourceSystem && <span className="ml-1.5 font-normal text-xs text-[var(--color-text-tertiary)]">· {key.allowedSourceSystem}</span>}
+                      </p>
+                      <p className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]">
+                        <span className="font-mono text-[11px]">{key.keyPrefix}_…</span> · 最近使用 {key.lastUsedAt ? formatDateTime(key.lastUsedAt) : '未使用'}
                       </p>
                     </div>
-                    {/* 链路测试会真实投递并扇出到所有启用渠道：幽灵样式 + 二次确认防误触 */}
+                    {/* 存量密钥明文不可再取（安全设计）：复制的是占位符版脚本，toast 诚实告知替换位置 */}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            writeTextToClipboard(ingestCurlScript(ingestEndpoint()))
+                              .then(() => toast.success('脚本已复制，需将 <你的密钥> 替换为明文（明文仅在签发时展示）'))
+                              .catch(() => toast.error('复制失败，请手动选择复制'))
+                          }}
+                          aria-label={`复制 ${key.name} 的调用脚本`}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          data-notifications-key-copy-script
+                        >
+                          <Copy size={15} />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent align="end">复制调用脚本（占位符版）</TooltipContent>
+                    </Tooltip>
+                    {/* 链路测试会真实投递并扇出到所有启用渠道：二次确认防误触 */}
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
@@ -330,7 +388,6 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                       data-notifications-key-item={key.id}
                       className="flex items-center gap-2 rounded-lg px-2 py-2 opacity-75"
                     >
-                      <KeyRound size={15} className="shrink-0 text-[var(--color-text-tertiary)]" />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">{key.name}</p>
                         <p className="truncate text-xs text-[var(--color-text-tertiary)]">

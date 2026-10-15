@@ -1454,9 +1454,10 @@ test('消息通知：冷启动空态——站内无任何消息时引导去发�
   await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
 })
 
-test('消息通知：接入密钥——签发明文仅一次展示、列表与吊销', async ({ page }) => {
+test('消息通知：接入密钥——签发交付卡、明文仅一次展示、列表与吊销', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
@@ -1485,6 +1486,23 @@ test('消息通知：接入密钥——签发明文仅一次展示、列表与�
   await expect(page.locator('[data-notifications-key-plaintext]')).toBeVisible()
   await expect(page.locator('[data-notifications-key-plaintext]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
   await expect.poll(() => mocks.notifKeyCreates.length).toBe(1)
+
+  // 一次性交付卡：脚本注入真实密钥（复制即可用），消灭「复制密钥→复制示例→手改占位符」三步拼接
+  const delivery = page.locator('[data-notifications-key-delivery]')
+  await expect(delivery).toBeVisible()
+  await expect(page.locator('[data-notifications-key-script]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
+  await expect(page.locator('[data-notifications-key-script]')).toContainText('/api/v2/notifications/ingest')
+  // 副作用类交互按验收标准断言最终结果：真实剪贴板内容含密钥（不以 toast 出现代替）
+  await page.locator('[data-notifications-key-copy-fullscript]').click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('X-API-Key: ob_notif_e2e_demo_plaintext_secret')
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/api/v2/notifications/ingest')
+  // 「我已妥善保存」主动关闭：明文与交付卡一起消失
+  await page.locator('[data-notifications-key-dismiss]').click()
+  await expect(delivery).toBeHidden()
+
+  // 存量密钥行复制脚本：明文不可再取（安全设计），复制的是占位符版
+  await page.locator('[data-notifications-key-copy-script]').first().click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('<你的密钥>')
 
   // 吊销：二次确认后生效
   await page.locator('[data-notifications-key-revoke]').first().click()
