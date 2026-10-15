@@ -498,18 +498,51 @@ function CreateForm({
   const inputClass = (invalid?: string) =>
     `mt-1.5 h-9 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${invalid ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]'}`
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
-        <label className="block text-xs font-medium text-[var(--color-text-primary)]">
-          任务标题
-          <input
-            value={title}
-            onChange={event => setTitle(event.target.value)}
-            placeholder="可留空，将用指令前几字作为标题"
-            className={inputClass()}
-          />
+    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+      <label className="block text-xs font-medium text-[var(--color-text-primary)]">
+        任务标题
+        <input
+          value={title}
+          onChange={event => setTitle(event.target.value)}
+          placeholder="可留空，将用任务内容前几字作为标题"
+          className={inputClass()}
+        />
+      </label>
+      <div>
+        <label htmlFor="scheduled-instruction" className="block text-xs font-medium text-[var(--color-text-primary)]">
+          任务内容
         </label>
-        <div className="space-y-1.5">
+        <textarea
+          id="scheduled-instruction"
+          value={instruction}
+          onChange={event => setInstruction(event.target.value)}
+          rows={8}
+          maxLength={target === 'task_template' ? TEMPLATE_GOAL_MAX_CHARS : undefined}
+          placeholder={target === 'task_template'
+            ? '到点后会以这段内容作为任务目标，按所选模板的流程创建并运行实例。'
+            : '到点后助手会按这段任务内容在后台执行，例如：汇总昨天的待办并给出建议。'}
+          aria-describedby={validation.instruction ? 'scheduled-instruction-error' : undefined}
+          className={`mt-1.5 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${validation.instruction ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]'}`}
+        />
+        {validation.instruction && (
+          <p id="scheduled-instruction-error" role="alert" className="mt-1.5 text-xs leading-5 text-[var(--color-danger)]">
+            {validation.instruction}
+          </p>
+        )}
+        {target === 'super_assistant' && (
+          <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
+            浏览器、委派等平台写操作到点不会自动执行；外部工具是否直接执行，取决于其「需要确认」设置。
+          </p>
+        )}
+        {target === 'task_template' && (
+          <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
+            到点后按模板创建实例并自动开跑；需要人工把关的节点会停下等你处理。
+          </p>
+        )}
+      </div>
+      {/* 触发设置：短下拉并排成网格，标题与内容两行核心输入之后的紧凑区 */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="min-w-0 space-y-1.5">
           <span className="text-xs font-medium text-[var(--color-text-primary)]">触发方式</span>
           <Select value={kind} onValueChange={value => setKind(value as ScheduledKind)}>
             <SelectTrigger aria-label="触发方式" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
@@ -520,7 +553,7 @@ function CreateForm({
             </SelectContent>
           </Select>
         </div>
-        <div className="space-y-1.5">
+        <div className="min-w-0 space-y-1.5">
           <span className="text-xs font-medium text-[var(--color-text-primary)]">触发对象</span>
           <Select value={target} onValueChange={value => setTarget(value as ScheduledTargetKind)}>
             <SelectTrigger aria-label="触发对象" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
@@ -531,7 +564,7 @@ function CreateForm({
           </Select>
         </div>
         {target === 'task_template' && (
-          <div className="space-y-1.5">
+          <div className="col-span-2 space-y-1.5">
             <span className="text-xs font-medium text-[var(--color-text-primary)]">流程模板</span>
             <Select value={templateId} onValueChange={setTemplateId}>
               <SelectTrigger
@@ -570,7 +603,7 @@ function CreateForm({
           </div>
         )}
         {kind === 'once' && (
-          <div>
+          <div className="col-span-2">
             <label htmlFor="scheduled-once-at" className="block text-xs font-medium text-[var(--color-text-primary)]">
               执行时间
             </label>
@@ -591,9 +624,9 @@ function CreateForm({
           </div>
         )}
         {kind !== 'once' && (
-          <div className="flex gap-3">
+          <>
             {kind === 'weekly' && (
-              <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="min-w-0 space-y-1.5">
                 <span className="text-xs font-medium text-[var(--color-text-primary)]">星期</span>
                 <Select value={weekday} onValueChange={setWeekday}>
                   <SelectTrigger aria-label="星期" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
@@ -605,7 +638,7 @@ function CreateForm({
                 </Select>
               </div>
             )}
-            <div className="min-w-0 flex-1">
+            <div className={kind === 'weekly' ? 'min-w-0' : 'col-span-2'}>
               <label htmlFor="scheduled-time-of-day" className="block text-xs font-medium text-[var(--color-text-primary)]">
                 执行时间
               </label>
@@ -623,42 +656,10 @@ function CreateForm({
                 </p>
               )}
             </div>
-          </div>
+          </>
         )}
-        <div>
-          <label htmlFor="scheduled-instruction" className="block text-xs font-medium text-[var(--color-text-primary)]">
-            任务内容
-          </label>
-          <textarea
-            id="scheduled-instruction"
-            value={instruction}
-            onChange={event => setInstruction(event.target.value)}
-            rows={8}
-            maxLength={target === 'task_template' ? TEMPLATE_GOAL_MAX_CHARS : undefined}
-            placeholder={target === 'task_template'
-              ? '到点后会以这段内容作为任务目标，按所选模板的流程创建并运行实例。'
-              : '到点后助手会按这段任务内容在后台执行，例如：汇总昨天的待办并给出建议。'}
-            aria-describedby={validation.instruction ? 'scheduled-instruction-error' : undefined}
-            className={`mt-1.5 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${validation.instruction ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]'}`}
-          />
-          {validation.instruction && (
-            <p id="scheduled-instruction-error" role="alert" className="mt-1.5 text-xs leading-5 text-[var(--color-danger)]">
-              {validation.instruction}
-            </p>
-          )}
-          {target === 'super_assistant' && (
-            <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
-              浏览器、委派等平台写操作到点不会自动执行；外部工具是否直接执行，取决于其「需要确认」设置。
-            </p>
-          )}
-          {target === 'task_template' && (
-            <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
-              到点后按模板创建实例并自动开跑；需要人工把关的节点会停下等你处理。
-            </p>
-          )}
-        </div>
       </div>
-      <footer className="flex shrink-0 justify-end border-t border-[var(--color-border)] px-5 py-3.5">
+      <div className="flex justify-end">
         <button
           type="button"
           disabled={saving}
@@ -667,7 +668,7 @@ function CreateForm({
         >
           {saving ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} 创建
         </button>
-      </footer>
+      </div>
     </div>
   )
 }
