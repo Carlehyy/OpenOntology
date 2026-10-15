@@ -1274,16 +1274,28 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await page.locator('[data-notifications-read-all]').click()
   await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
 
-  // 发送消息（独立分区）：渠道 chips 默认全选，取消其一后定向投递
+  // 发送消息（独立分区）：渠道 chips 默认全选，取消其一后定向转发
   await page.locator('[data-notifications-nav="compose"]').click()
   await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
   const chipCh1 = page.locator('[data-notifications-compose-channel="ch-1"]')
   const chipCh2 = page.locator('[data-notifications-compose-channel="ch-2"]')
   await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
   await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
-  await chipCh2.click() // 取消邮件渠道 → 仅投递钉钉
+  await chipCh2.click() // 取消邮件渠道 → 仅转发钉钉
   await expect(chipCh2).toHaveAttribute('aria-checked', 'false')
-  await expect(page.getByText('将投递到 1 个渠道')).toBeVisible()
+  await expect(page.getByText('已选 1 / 2')).toBeVisible()
+  // 全不选：计数红化为 0 + 行内警示，发送被拦截——后端缺省=广播全部启用渠道，
+  // 不能把「仅站内」的直觉发成全渠道扇出（2026-10-15 二次审查定稿）
+  await chipCh1.click()
+  await expect(page.getByText('已选 0 / 2')).toBeVisible()
+  await expect(page.getByText('未选择转发渠道，发送前请至少选择一个')).toBeVisible()
+  await page.locator('[data-notifications-compose-title]').fill('不应发出')
+  await page.locator('[data-notifications-compose-send]').click()
+  await expect(page.getByText('请至少选择一个转发渠道')).toBeVisible()
+  await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
+  await expect.poll(() => mocks.notifCreates.length).toBe(0)
+  await chipCh1.click() // 恢复仅钉钉
+  await expect(page.getByText('已选 1 / 2')).toBeVisible()
   await page.locator('[data-notifications-compose-title]').fill('巡检通知')
   await page.locator('[data-notifications-compose-body]').fill('# 今日巡检\n一切正常')
   await page.locator('[data-notifications-compose-send]').click()
@@ -1315,7 +1327,7 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.locator('[data-notifications-compose-title]')).toHaveValue('')
   await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
   await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
-  await expect(page.getByText('将投递到 2 个渠道')).toBeVisible()
+  await expect(page.getByText('已选 2 / 2')).toBeVisible()
 
   // 手动转发：回消息列表（重开后详情仍选中），详情操作 → 渠道多选 → 确认
   await page.locator('[data-notifications-nav="messages"]').click()
@@ -1452,6 +1464,47 @@ test('消息通知：冷启动空态——站内无任何消息时引导去发�
   await expect(allEmpty).toContainText('还没有消息')
   await page.locator('[data-notifications-empty-compose]').click()
   await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
+})
+
+test('消息通知：三渠道时「全选」恢复默认广播——部分选后一键回到省略 channelIds 语义', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  // 本用例专属三渠道列表（后注册的 route 先匹配，覆盖共享 handler）；
+  // 不动共享 fixture，避免波及渠道配置/消息统计对 ch-1/ch-2 数量的断言
+  await page.route('**/api/v2/notifications/channels', async route => {
+    if (route.request().method() === 'POST') return route.fallback()
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(
+        ['ch-1', 'ch-2', 'ch-3'].map((id, index) => ({
+          id,
+          name: `渠道${index + 1}`,
+          template: 'email',
+          templateName: '邮件',
+          enabled: true,
+        })),
+      ),
+    })
+  })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-nav="compose"]').click()
+  await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
+  // 默认全选时不出「全选」；取消一个后出现，计数随之从 3/3 到 2/3
+  await expect(page.locator('[data-notifications-compose-select-all]')).toHaveCount(0)
+  await expect(page.getByText('已选 3 / 3')).toBeVisible()
+  await page.locator('[data-notifications-compose-channel="ch-3"]').click()
+  await expect(page.getByText('已选 2 / 3')).toBeVisible()
+  await expect(page.locator('[data-notifications-compose-select-all]')).toBeVisible()
+  // 全选 = 恢复默认态（null），发送省略 channelIds（后端缺省=全部启用渠道）
+  await page.locator('[data-notifications-compose-select-all]').click()
+  await expect(page.getByText('已选 3 / 3')).toBeVisible()
+  await expect(page.locator('[data-notifications-compose-select-all]')).toHaveCount(0)
+  await page.locator('[data-notifications-compose-title]').fill('三渠道广播')
+  await page.locator('[data-notifications-compose-send]').click()
+  await expect.poll(() => mocks.notifCreates.length).toBe(1)
+  expect(JSON.parse(mocks.notifCreates[0]).channelIds).toBeUndefined()
 })
 
 test('消息通知：接入密钥——签发明文仅一次展示、列表与吊销', async ({ page }) => {

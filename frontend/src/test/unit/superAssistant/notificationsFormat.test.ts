@@ -3,6 +3,9 @@ import { describe, it } from 'node:test'
 
 import {
   channelFailureHint,
+  COMPOSE_BODY_SOFT_LIMIT,
+  composeBodyHint,
+  composeSelectedCount,
   formatFileSize,
   forwardButtonLabel,
   isPlatformMediaSrc,
@@ -204,5 +207,44 @@ describe('forwardButtonLabel', () => {
   it('未选渠道明示「先选择」，避免「转发（0）」被误读为 0 条成功', () => {
     assert.equal(forwardButtonLabel(0), '选择渠道后转发')
     assert.equal(forwardButtonLabel(2), '转发（2 个渠道）')
+  })
+})
+
+describe('composeSelectedCount', () => {
+  it('null 视为默认全选，计数跟随启用渠道数', () => {
+    assert.equal(composeSelectedCount(null, ['ch-1', 'ch-2', 'ch-3']), 3)
+    assert.equal(composeSelectedCount(null, []), 0)
+  })
+
+  it('显式集合与启用渠道求交集：停用/删除的失效 id 不计数', () => {
+    assert.equal(composeSelectedCount(new Set(['ch-1', 'ch-2']), ['ch-1', 'ch-2', 'ch-3']), 2)
+    assert.equal(composeSelectedCount(new Set(['ch-1', 'gone']), ['ch-1', 'ch-2']), 1)
+    assert.equal(composeSelectedCount(new Set(['gone']), ['ch-1']), 0)
+  })
+
+  it('全不选（空集）为 0——发送分区据此亮 0 选中警示并拦截发送', () => {
+    assert.equal(composeSelectedCount(new Set(), ['ch-1', 'ch-2']), 0)
+  })
+})
+
+describe('composeBodyHint', () => {
+  it('空正文不显示任何字数反馈', () => {
+    assert.equal(composeBodyHint(0), null)
+    assert.equal(composeBodyHint(-1), null)
+  })
+
+  it('软阈值内为常规字数提示', () => {
+    assert.deepEqual(composeBodyHint(1), { text: '已输入 1 字', warn: false })
+    assert.deepEqual(composeBodyHint(COMPOSE_BODY_SOFT_LIMIT), {
+      text: `已输入 ${COMPOSE_BODY_SOFT_LIMIT} 字`,
+      warn: false,
+    })
+  })
+
+  it('超软阈值提示 IM 渠道截断风险并转警示色', () => {
+    assert.deepEqual(composeBodyHint(COMPOSE_BODY_SOFT_LIMIT + 1), {
+      text: `已输入 ${COMPOSE_BODY_SOFT_LIMIT + 1} 字，部分渠道可能截断`,
+      warn: true,
+    })
   })
 })

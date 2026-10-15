@@ -39,7 +39,7 @@ import { assistantMarkdownComponents } from './AssistantConversation'
 import { errorText } from './assistantPanelUtils'
 import NotificationMedia from './NotificationMedia'
 import {
-  channelFailureHint, formatFileSize, forwardButtonLabel, listEmptyCopy, priorityStyle, sourceTypeLabel, stripMarkdownPreview,
+  channelFailureHint, composeBodyHint, composeSelectedCount, formatFileSize, forwardButtonLabel, listEmptyCopy, priorityStyle, sourceTypeLabel, stripMarkdownPreview,
 } from './notificationsFormat'
 
 /**
@@ -176,7 +176,7 @@ export default function NotificationsDialog({
   const [composePriority, setComposePriority] = useState<NotificationPriority>('normal')
   // 消息统计：时间窗（7/30 天，默认 30）
   const [statsDays, setStatsDays] = useState<7 | 30>(30)
-  // 投递去向：null = 默认全选（跟随启用渠道）；Set = 用户改选后的显式集合
+  // 转发去向：null = 默认全选（跟随启用渠道）；Set = 用户改选后的显式集合
   const [composeChannelIds, setComposeChannelIds] = useState<Set<string> | null>(null)
 
   // 只失效列表与徽章；detail 缓存由 setQueryData 精确写入——
@@ -561,17 +561,34 @@ export default function NotificationsDialog({
 
   const enabledChannels = (channels.data ?? []).filter(channel => channel.enabled)
 
+  // 发送分区的派生态：计数与「全选」随启用渠道求交（null=默认全选）；
+  // 渠道未就绪（加载中/失败）时不显示计数与 0 选中警示，避免误导
+  const channelsReady = !channels.isLoading && !channels.isError
+  const selectedChannelCount = composeSelectedCount(
+    composeChannelIds,
+    enabledChannels.map(channel => channel.id),
+  )
+  const showComposeSelectAll =
+    channelsReady && enabledChannels.length >= 3 && selectedChannelCount < enabledChannels.length
+  const composeBodyCharHint = composeBodyHint(composeBody.length)
+
   const handleCompose = () => {
     if (!composeTitle.trim()) {
       toast.error('标题不能为空')
       return
     }
-    // 渠道列表加载失败：去向不明，拒绝发送（界面提示错误并给重试入口）
-    if (channels.isError) {
-      toast.error('渠道列表加载失败，无法确定投递去向，请重试')
+    // 渠道首载未返回：去向不明（缺省=广播全部启用渠道），拒绝发送直到列表就绪；
+    // 已加载且确为 0 个启用渠道的分支在下方——那是「仅站内保存」的合法语义
+    if (channels.isLoading) {
+      toast.error('渠道列表加载中，请稍候再发送')
       return
     }
-    // 无启用渠道：消息仅入站内（后端缺省扇出到空集，语义一致）
+    // 渠道列表加载失败：去向不明，拒绝发送（界面提示错误并给重试入口，发送钮同步禁用）
+    if (channels.isError) {
+      toast.error('渠道列表加载失败，无法确定转发去向，请重试')
+      return
+    }
+    // 无启用渠道：消息仅保存到站内（后端缺省扇出到空集，语义一致）
     if (enabledChannels.length === 0) {
       createMutation.mutate({ title: composeTitle.trim(), body: composeBody, priority: composePriority })
       return
@@ -582,7 +599,7 @@ export default function NotificationsDialog({
       ? [...composeChannelIds].filter(id => enabledIds.has(id))
       : [...enabledIds]
     if (selectedIds.length === 0) {
-      toast.error('至少选择一个投递渠道')
+      toast.error('请至少选择一个转发渠道')
       return
     }
     createMutation.mutate({
@@ -1083,121 +1100,190 @@ export default function NotificationsDialog({
               <div>
                 <h3 className={sectionHeadingClass}>发送消息</h3>
                 <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  消息进入站内列表，并立即转发到下方所选的启用渠道。
+                  消息将保存到站内列表，并即时转发到所选渠道。
                 </p>
               </div>
 
-              {/* 投递去向：启用渠道 chips（默认全选，可点选增减） */}
-              <div className="rounded-lg border border-[var(--color-border)] p-3" data-notifications-compose-destinations>
-                <p className="text-xs font-medium text-[var(--color-text-secondary)]">
-                  投递渠道
-                  <span className="ml-1.5 font-normal text-xs text-[var(--color-text-tertiary)]">
-                    默认全选，点击可增减
-                  </span>
-                </p>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {channels.isLoading ? (
-                    <span className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
-                      <Loader2 size={12} className="animate-spin" /> 渠道加载中…
-                    </span>
-                  ) : channels.isError ? (
-                    <span role="alert" className="flex flex-wrap items-center gap-2 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                      渠道列表加载失败：{errorText(channels.error)}
-                      <button
-                        type="button"
-                        onClick={() => void channels.refetch()}
-                        className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              {/* 先写内容再定去向（写信模型）：≥xl 左主栏限宽 40rem 控制行长、右辅栏为转发渠道，
+                  利用弹窗宽度而非拉长输入框；<xl 退化为单列，顺序仍为 标题/优先级 → 正文 → 转发渠道 */}
+              <div className="flex min-h-0 flex-1 flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,40rem)_minmax(0,1fr)] xl:gap-6">
+                <div className="flex min-w-0 flex-1 flex-col gap-4">
+                  <div className="flex flex-col gap-4 sm:flex-row">
+                    <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                      标题
+                      <input
+                        value={composeTitle}
+                        onChange={event => setComposeTitle(event.target.value)}
+                        maxLength={300}
+                        placeholder="消息标题"
+                        className={`${inputClass} h-9`}
+                        data-notifications-compose-title
+                      />
+                    </label>
+                    <div className="flex w-full flex-col gap-1 text-xs text-[var(--color-text-secondary)] sm:w-40">
+                      优先级
+                      <Select
+                        value={composePriority}
+                        onValueChange={value => setComposePriority(value as NotificationPriority)}
                       >
-                        重试
-                      </button>
-                    </span>
-                  ) : enabledChannels.length === 0 ? (
-                    <span className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-                      暂无启用的渠道，消息将仅进入站内列表；可到「渠道配置」新建。
-                    </span>
-                  ) : (
-                    enabledChannels.map(channel => {
-                      const checked = composeSelection(channel.id)
-                      return (
+                        <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(['urgent', 'high', 'normal', 'low'] as const).map(priority => {
+                            const style = priorityStyle(priority)
+                            return (
+                              <SelectItem key={priority} value={priority}>
+                                <span className={`mr-1.5 inline-block h-2 w-2 shrink-0 rounded-full align-middle ${style.dotClass}`} />
+                                {style.label}
+                              </SelectItem>
+                            )
+                          })}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <label className="flex min-h-0 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                    正文（Markdown）
+                    <textarea
+                      value={composeBody}
+                      onChange={event => setComposeBody(event.target.value)}
+                      placeholder="支持 Markdown 语法，实际渲染效果因转发渠道而异"
+                      className={`${inputClass} min-h-36 flex-1 resize-none text-sm leading-6 sm:min-h-48`}
+                      data-notifications-compose-body
+                    />
+                  </label>
+                  {composeBodyCharHint && (
+                    <p
+                      className={`text-right text-xs leading-5 ${
+                        composeBodyCharHint.warn
+                          ? 'text-[var(--color-warning)]'
+                          : 'text-[var(--color-text-tertiary)]'
+                      }`}
+                    >
+                      {composeBodyCharHint.text}
+                    </p>
+                  )}
+                </div>
+
+                {/* 转发渠道（原「投递渠道」）：正文写完再选去向，计数与警示随 chips 即时反馈。
+                    浅底色块区分「配置区 vs 输入区」，去边框避免弹窗内双层框 */}
+                <div
+                  role="group"
+                  aria-label="转发渠道"
+                  className="flex min-w-0 flex-col gap-2 rounded-lg bg-[var(--color-bg-hover)] p-3"
+                  data-notifications-compose-destinations
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-[var(--color-text-secondary)]">转发渠道</p>
+                    {channelsReady && enabledChannels.length > 0 && (
+                      <span
+                        className={`text-xs ${
+                          selectedChannelCount === 0
+                            ? 'font-medium text-[var(--color-danger)]'
+                            : 'text-[var(--color-text-tertiary)]'
+                        }`}
+                      >
+                        已选 {selectedChannelCount} / {enabledChannels.length}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {channels.isLoading ? (
+                      <span className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
+                        <Loader2 size={12} className="animate-spin" /> 渠道加载中…
+                      </span>
+                    ) : channels.isError ? (
+                      <span role="alert" className="flex flex-wrap items-center gap-2 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                        渠道列表加载失败：{errorText(channels.error)}
                         <button
-                          key={channel.id}
                           type="button"
-                          role="switch"
-                          aria-checked={checked}
-                          onClick={() => toggleComposeChannel(channel.id)}
-                          data-notifications-compose-channel={channel.id}
-                          className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                            checked
-                              ? 'border-transparent bg-brand-soft font-medium text-brand-ink'
-                              : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
-                          }`}
+                          onClick={() => void channels.refetch()}
+                          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
-                          {checked && <Send size={12} className="shrink-0" />}
-                          <span className="max-w-40 truncate">{channel.name}</span>
-                          <span className="text-xs font-normal opacity-70">{channel.templateName}</span>
+                          重试
                         </button>
-                      )
-                    })
+                      </span>
+                    ) : enabledChannels.length === 0 ? (
+                      <span className="text-xs leading-5 text-[var(--color-text-tertiary)]">
+                        暂无启用的渠道，消息将仅保存到站内列表；可到
+                        <button
+                          type="button"
+                          onClick={() => setNav('config')}
+                          className="mx-0.5 rounded-sm text-xs text-[var(--color-primary)] underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          渠道配置
+                        </button>
+                        新建。
+                      </span>
+                    ) : (
+                      <>
+                        {enabledChannels.map(channel => {
+                          const checked = composeSelection(channel.id)
+                          const TemplateIcon = TEMPLATE_ICONS[channel.template] ?? Plug
+                          return (
+                            <button
+                              key={channel.id}
+                              type="button"
+                              role="checkbox"
+                              aria-checked={checked}
+                              onClick={() => toggleComposeChannel(channel.id)}
+                              data-notifications-compose-channel={channel.id}
+                              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                                checked
+                                  ? 'border-transparent bg-brand-soft font-medium text-brand-ink'
+                                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-hover)] hover:bg-[var(--color-bg-base)]'
+                              }`}
+                            >
+                              <TemplateIcon size={12} className="shrink-0 opacity-80" />
+                              <span className="max-w-40 truncate">{channel.name}</span>
+                              <span className="text-xs font-normal opacity-70">· {channel.templateName}</span>
+                            </button>
+                          )
+                        })}
+                        {showComposeSelectAll && (
+                          <button
+                            type="button"
+                            onClick={() => setComposeChannelIds(null)}
+                            data-notifications-compose-select-all
+                            className="rounded-md px-1.5 py-1 text-xs text-[var(--color-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            全选
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {channelsReady && enabledChannels.length > 0 && selectedChannelCount === 0 && (
+                    <p role="alert" className="text-xs leading-5 text-[var(--color-danger)]">
+                      未选择转发渠道，发送前请至少选择一个
+                    </p>
                   )}
                 </div>
               </div>
 
-              <div className="flex flex-col gap-4 sm:flex-row">
-                <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                  标题
-                  <input
-                    value={composeTitle}
-                    onChange={event => setComposeTitle(event.target.value)}
-                    maxLength={300}
-                    placeholder="消息标题"
-                    className={inputClass}
-                    data-notifications-compose-title
-                  />
-                </label>
-                <div className="flex w-full flex-col gap-1 text-xs text-[var(--color-text-secondary)] sm:w-40">
-                  优先级
-                  <Select
-                    value={composePriority}
-                    onValueChange={value => setComposePriority(value as NotificationPriority)}
-                  >
-                    <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="urgent">紧急</SelectItem>
-                      <SelectItem value="high">高优</SelectItem>
-                      <SelectItem value="normal">普通</SelectItem>
-                      <SelectItem value="low">低优</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                正文（Markdown）
-                <textarea
-                  value={composeBody}
-                  onChange={event => setComposeBody(event.target.value)}
-                  placeholder="支持 Markdown：图片、表格、代码块…"
-                  className={`${inputClass} min-h-48 flex-1 resize-none font-mono text-xs leading-6`}
-                  data-notifications-compose-body
-                />
-              </label>
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-                  {enabledChannels.length > 0 && !channels.isError && `将投递到 ${
-                    composeChannelIds
-                      ? [...composeChannelIds].filter(id => enabledChannels.some(channel => channel.id === id)).length
-                      : enabledChannels.length
-                  } 个渠道`}
-                </p>
+              <div className="flex items-center justify-end gap-2">
                 <Button
-                  size="sm"
                   onClick={handleCompose}
                   loading={createMutation.isPending}
+                  disabled={channels.isError || channels.isLoading}
+                  title={
+                    channels.isError
+                      ? '渠道列表加载失败，无法确定转发去向，请先重试'
+                      : channels.isLoading
+                        ? '渠道列表加载中…'
+                        : undefined
+                  }
                   className="rounded-lg"
                   data-notifications-compose-send
                 >
-                  <Send size={12} /> 发送
+                  {createMutation.isPending ? (
+                    '发送中…'
+                  ) : (
+                    <>
+                      <Send size={14} /> 发送
+                    </>
+                  )}
                 </Button>
               </div>
             </div>
