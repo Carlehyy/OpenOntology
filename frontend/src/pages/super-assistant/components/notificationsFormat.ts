@@ -186,3 +186,33 @@ export function channelFailureHint(lastError: string): string {
 export function forwardButtonLabel(selectedCount: number): string {
   return selectedCount === 0 ? '选择渠道后转发' : `转发（${selectedCount} 个渠道）`
 }
+
+/**
+ * 发送分区渠道勾选数：null = 默认全选（跟随启用渠道）；
+ * 显式集合与启用渠道求交集——同会话内渠道被停用/删除后，失效 id 不计数。
+ */
+export function composeSelectedCount(
+  explicit: ReadonlySet<string> | null,
+  enabledIds: readonly string[],
+): number {
+  if (!explicit) return enabledIds.length
+  const enabled = new Set(enabledIds)
+  let count = 0
+  for (const id of explicit) if (enabled.has(id)) count += 1
+  return count
+}
+
+/**
+ * 正文软阈值（字）：后端上限 512KiB 不做硬限制，但钉钉/飞书等 IM 渠道
+ * 单条消息有各自长度上限，超长后到达端可能截断——给行内信号提示风险。
+ */
+export const COMPOSE_BODY_SOFT_LIMIT = 2000
+
+/** 发送分区正文字数反馈：空正文不显示；超软阈值转警示并提示截断风险 */
+export function composeBodyHint(length: number): { text: string; warn: boolean } | null {
+  if (length <= 0) return null
+  const base = `已输入 ${length} 字`
+  return length > COMPOSE_BODY_SOFT_LIMIT
+    ? { text: `${base}，部分渠道可能截断`, warn: true }
+    : { text: base, warn: false }
+}
