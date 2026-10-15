@@ -561,12 +561,17 @@ export interface RemoteAgentInviteCreated {
 }
 
 export type ScheduledKind = 'once' | 'daily' | 'weekly'
+export type ScheduledTargetKind = 'super_assistant' | 'task_template'
 export type ScheduledRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'skipped'
 
 export interface ScheduledTask {
   id: string
   title: string
   instruction: string
+  target_kind: ScheduledTargetKind
+  target_template_id: string | null
+  /** 模板目标的服务端回填名；模板已删/不存在为 null（界面显示「已删除」） */
+  target_template_name: string | null
   schedule_kind: ScheduledKind
   timezone: string
   run_at: string | null
@@ -586,6 +591,8 @@ export interface ScheduledTask {
 export interface ScheduledTaskPayload {
   title?: string
   instruction: string
+  target_kind?: ScheduledTargetKind
+  target_template_id?: string | null
   schedule_kind: ScheduledKind
   run_at?: string | null
   hour?: number | null
@@ -600,6 +607,8 @@ export interface ScheduledRun {
   id: string
   task_id: string
   conversation_id: string | null
+  /** 模板目标触发创建的任务实例 id；超级助手目标为 null */
+  instance_id: string | null
   scheduled_for: string
   status: ScheduledRunStatus
   error: string | null

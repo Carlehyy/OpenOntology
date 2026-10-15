@@ -42,6 +42,8 @@ type View = TaskDialogView
 interface TaskInstancesDialogProps {
   open: boolean
   onClose: () => void
+  /** 深链选中某实例（定时任务「查看实例」跳转入口）；打开时生效一次 */
+  initialInstanceId?: string | null
 }
 
 // ─── 状态图标 ───
@@ -52,7 +54,7 @@ function StatusIcon({ status }: { status: string }) {
   return <ClipboardList size={14} className="text-[var(--color-text-tertiary)]" />
 }
 
-export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDialogProps) {
+export default function TaskInstancesDialog({ open, onClose, initialInstanceId }: TaskInstancesDialogProps) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [view, setView] = useState<View>('board')
@@ -87,6 +89,14 @@ export default function TaskInstancesDialog({ open, onClose }: TaskInstancesDial
       setInstanceName(''); setGoal('')
     }
   }, [open])
+
+  // 打开时按深链直接选中实例（定时任务「查看实例」入口），与关闭重置互不干扰
+  useEffect(() => {
+    if (open && initialInstanceId) {
+      setSelectedInstanceId(initialInstanceId)
+      setView('instance')
+    }
+  }, [open, initialInstanceId])
 
   // ─── 激活实例 ───
   const activate = useMutation({

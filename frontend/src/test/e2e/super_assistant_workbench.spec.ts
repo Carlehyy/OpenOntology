@@ -252,17 +252,34 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const scheduledTasks: Array<Record<string, unknown>> = [
     {
       id: 'st-daily', title: '每日站会纪要', instruction: '根据昨天的会话整理站会纪要。',
+      target_kind: 'super_assistant', target_template_id: null, target_template_name: null,
       schedule_kind: 'daily', timezone: 'Asia/Shanghai', run_at: null, hour: 9, minute: 0, weekday: null,
       enabled: true, next_run_at: at(0, 9), last_dispatched_at: at(1, 9),
       last_run_id: 'sr-1', last_run_status: 'completed', last_run_at: at(1, 9),
       created_at: at(5, 9), updated_at: at(1, 9),
     },
+    {
+      id: 'st-tpl', title: '变更评审例会', instruction: '例行跑一遍代码变更评审流程。',
+      target_kind: 'task_template', target_template_id: 'tpl-1', target_template_name: '代码变更评审',
+      schedule_kind: 'weekly', timezone: 'Asia/Shanghai', run_at: null, hour: 10, minute: 30, weekday: 0,
+      enabled: true, next_run_at: at(1, 10), last_dispatched_at: at(0, 10),
+      last_run_id: 'sr-2', last_run_status: 'completed', last_run_at: at(0, 10),
+      created_at: at(5, 10), updated_at: at(0, 10),
+    },
   ]
   const scheduledRuns: Array<Record<string, unknown>> = [
     {
-      id: 'sr-1', task_id: 'st-daily', conversation_id: 'c-today', scheduled_for: at(1, 9),
+      id: 'sr-1', task_id: 'st-daily', conversation_id: 'c-today', instance_id: null,
+      scheduled_for: at(1, 9),
       status: 'completed', error: null, result_summary: '昨日三项待办均已推进。',
       started_at: at(1, 9), finished_at: at(1, 9), created_at: at(1, 9),
+    },
+    {
+      id: 'sr-2', task_id: 'st-tpl', conversation_id: null, instance_id: 'ins-1',
+      scheduled_for: at(0, 10),
+      status: 'completed', error: null,
+      result_summary: '已按模板「代码变更评审」创建实例「变更评审例会 · 10-13 10:30」，进度与结果请在任务实例中查看',
+      started_at: at(0, 10), finished_at: at(0, 10), created_at: at(0, 10),
     },
   ]
   const multicaTests: Array<Record<string, unknown>> = []
@@ -1013,10 +1030,17 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     if (path === '/api/v2/super-assistant/scheduled-tasks') {
       if (request.method() === 'POST') {
         const body = request.postDataJSON() as Record<string, unknown>
+        const targetKind = body.target_kind ?? 'super_assistant'
+        const targetTemplateId = (body.target_template_id ?? null) as string | null
         const created = {
           id: `st-${Date.now()}`,
           title: body.title || String(body.instruction || '定时任务').slice(0, 40),
           instruction: body.instruction,
+          target_kind: targetKind,
+          target_template_id: targetTemplateId,
+          target_template_name: targetTemplateId
+            ? tiTemplatesFixture.find(item => item.id === targetTemplateId)?.name ?? null
+            : null,
           schedule_kind: body.schedule_kind,
           timezone: 'Asia/Shanghai',
           run_at: body.run_at || null,
@@ -1691,7 +1715,7 @@ test('定时任务弹窗：查看已有计划、创建、点进某次执行', as
 
   await page.getByRole('button', { name: '创建定时任务' }).click()
   await expect(dialog.getByText(/外部工具是否直接执行/)).toBeVisible()
-  await dialog.getByPlaceholder('到点后助手会按这段指令在后台执行').fill('明早汇总待办')
+  await dialog.getByPlaceholder('到点后助手会按这段任务内容在后台执行').fill('明早汇总待办')
   await page.getByRole('button', { name: '创建', exact: true }).click()
   await expect(dialog.getByText('明早汇总待办')).toBeVisible()
   // once 类型详情不重复展示「下次」（P1-3：下次即触发时间本身）
@@ -1708,7 +1732,7 @@ test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留�
   await expect(dialog).toBeVisible()
   await page.getByRole('button', { name: '创建定时任务' }).click()
   const titleInput = dialog.getByPlaceholder('可留空，将用指令前几字作为标题')
-  const instructionInput = dialog.getByPlaceholder('到点后助手会按这段指令在后台执行')
+  const instructionInput = dialog.getByPlaceholder('到点后助手会按这段任务内容在后台执行')
   await titleInput.fill('脏数据保护验证')
   await instructionInput.fill('汇总昨天的待办')
   // SelectTrigger 的 aria-label（对抗审查 a11y 修补）
@@ -1754,17 +1778,17 @@ test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留�
   await page.getByRole('button', { name: '定时任务' }).click()
   await expect(dialog).toBeVisible()
   await expect(dialog.getByText('执行记录')).toBeVisible()
-  await expect(dialog.getByText('请输入到点执行的指令')).toHaveCount(0)
+  await expect(dialog.getByText('请输入任务内容')).toHaveCount(0)
   await page.getByRole('button', { name: '创建定时任务' }).click()
   await page.getByRole('button', { name: '创建', exact: true }).click()
-  await expect(dialog.getByText('请输入到点执行的指令')).toBeVisible()
+  await expect(dialog.getByText('请输入任务内容')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 
   await page.getByRole('button', { name: '定时任务' }).click()
   await expect(dialog).toBeVisible()
   await expect(dialog.getByText('执行记录')).toBeVisible()
-  await expect(dialog.getByText('请输入到点执行的指令')).toHaveCount(0)
+  await expect(dialog.getByText('请输入任务内容')).toHaveCount(0)
   await page.getByRole('button', { name: '创建定时任务' }).click()
   await expect(titleInput).toHaveValue('')
   await expect(instructionInput).toHaveValue('')
@@ -1781,6 +1805,70 @@ test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留�
   await page.keyboard.press('Escape')
   await expect(page.getByText('正在创建定时任务，请稍候…')).toBeVisible()
   await expect(dialog).toBeVisible()
+})
+
+test('定时任务弹窗：触发对象可选流程模板，执行记录可跳转任务实例', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: '定时任务' }).click()
+  const dialog = page.getByTestId('scheduled-tasks-dialog')
+  await expect(dialog).toBeVisible()
+
+  // 既有模板目标任务：详情展示触发对象，执行记录是「触发即完成」语义
+  await dialog.getByRole('button', { name: /变更评审例会/ }).click()
+  await expect(dialog.getByText(/触发对象：流程模板 · 代码变更评审/)).toBeVisible()
+  await dialog.getByRole('button', { name: /\d{4}-\d{2}-\d{2}.*已完成/ }).click()
+  await expect(dialog.getByText(/已按模板「代码变更评审」创建实例/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '在会话中继续' })).toHaveCount(0)
+  await dialog.getByRole('button', { name: '查看实例' }).click()
+  // 查看实例：定时任务弹窗关闭，任务实例弹窗深链选中该实例
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
+  await expect(page.getByTestId('task-instance-lite')).toBeVisible()
+  // 关闭再从侧栏重开：深链不残留、回到看板（TaskInstancesDialog 两个 effect 的顺序契约锚点）
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await expect(page.getByTestId('task-instances-board')).toBeVisible()
+  await expect(page.getByTestId('task-instance-lite')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+
+  // 创建流程模板目标的新任务：载荷真实带 target_kind/target_template_id
+  await page.getByRole('button', { name: '定时任务' }).click()
+  await expect(dialog).toBeVisible()
+  await page.getByRole('button', { name: '创建定时任务' }).click()
+  await dialog.getByRole('combobox', { name: '触发方式' }).click()
+  await page.getByRole('option', { name: '每天' }).click()
+  await dialog.getByRole('combobox', { name: '触发对象' }).click()
+  await page.getByRole('option', { name: '流程模板' }).click()
+  const templateSelect = dialog.getByRole('combobox', { name: '流程模板' })
+  await expect(templateSelect).toBeVisible()
+  // 未选模板时提交被字段级校验拦截（错误文案与下拉占位符同文，钉到错误节点断言）
+  await dialog.getByPlaceholder('到点后会以这段内容作为任务目标').fill('例行跑一遍评审流程')
+  await page.getByRole('button', { name: '创建', exact: true }).click()
+  await expect(dialog.locator('#scheduled-template-error')).toBeVisible()
+  await expect(dialog.locator('#scheduled-template-error')).toHaveText('请选择流程模板')
+  await templateSelect.click()
+  await page.getByRole('option', { name: '代码变更评审' }).click()
+  // 模板目标的助手专属提示让位给实例语义提示
+  await expect(dialog.getByText(/外部工具是否直接执行/)).toHaveCount(0)
+  await expect(dialog.getByText(/需要人工把关的节点会停下等你处理/)).toBeVisible()
+
+  const posted: Array<Record<string, unknown>> = []
+  await page.route('**/api/v2/super-assistant/scheduled-tasks', route => {
+    if (route.request().method() === 'POST') posted.push(route.request().postDataJSON())
+    return route.fallback()
+  })
+  await page.getByRole('button', { name: '创建', exact: true }).click()
+  await expect(dialog.getByText(/触发对象：流程模板 · 代码变更评审/)).toBeVisible()
+  expect(posted.length).toBeGreaterThan(0)
+  expect(posted[posted.length - 1].target_kind).toBe('task_template')
+  expect(posted[posted.length - 1].target_template_id).toBe('tpl-1')
+  expect(posted[posted.length - 1].instruction).toBe('例行跑一遍评审流程')
 })
 
 test('multica 命令提示：未配置/未启用时输入 / 也不提供任何命令', async ({ page }) => {

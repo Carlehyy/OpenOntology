@@ -120,6 +120,7 @@ export default function SuperAssistantPage() {
   const [scheduledOpen, setScheduledOpen] = useState(Boolean(scheduleId))
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [taskInstancesOpen, setTaskInstancesOpen] = useState(false)
+  const [taskInstanceId, setTaskInstanceId] = useState<string | null>(null)
   useEffect(() => {
     if (scheduleId) setScheduledOpen(true)
   }, [scheduleId])
@@ -1311,7 +1312,8 @@ export default function SuperAssistantPage() {
       />
       <TaskInstancesDialog
         open={taskInstancesOpen}
-        onClose={() => setTaskInstancesOpen(false)}
+        initialInstanceId={taskInstanceId}
+        onClose={() => { setTaskInstancesOpen(false); setTaskInstanceId(null) }}
       />
       <ScheduledTasksDialog
         open={scheduledOpen}
@@ -1336,6 +1338,10 @@ export default function SuperAssistantPage() {
             next.delete('scheduleRun')
             return next
           }, { replace: true })
+        }}
+        onOpenTaskInstance={id => {
+          setTaskInstanceId(id)
+          setTaskInstancesOpen(true)
         }}
       />
       <QuickInputsDialog
