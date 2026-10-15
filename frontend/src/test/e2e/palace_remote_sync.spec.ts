@@ -1,8 +1,9 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
-// 外部集成弹窗「文件夹同步」tab：脚本下载（断言下载文件内容，AGENTS.md §5
-// 副作用验收标准——不依据中间提示，断言最终结果）、令牌重置一次性展示、
-// 复制断言真实剪贴板内容。
+// 知识图谱弹窗「远程同步」一级目录（原外部集成「文件夹同步」入口迁移后的
+// 新家）：右键操作卡与目录行可见设置按钮双入口。脚本下载断言下载文件内容
+// （AGENTS.md §5 副作用验收标准——不依据中间提示，断言最终结果）、令牌重置
+// 一次性展示、复制断言真实剪贴板内容。
 
 const now = '2026-09-11T08:00:00+00:00'
 
@@ -34,6 +35,13 @@ const scriptContent = [
   '# END',
 ].join('\n')
 
+/** 空图谱（PalaceGraph 全字段）：树与右侧图谱画布都走空态 */
+const palaceGraphFixture = {
+  available: false, nodes: [], edges: [],
+  totals: { entities: 0, relations: 0 }, truncated: false,
+  builtFiles: 0, totalFiles: 0, updatedAt: null,
+}
+
 async function mockSuperAssistantApi(page: Page, captured: { resetCalled?: boolean }) {
   const multicaUnconfigured = {
     configured: false, enabled: false, base_url: '', workspace_id: '', token_set: false,
@@ -45,7 +53,7 @@ async function mockSuperAssistantApi(page: Page, captured: { resetCalled?: boole
       return json(route, [{
         id: 'model-1', name: 'Fake model', config_type: 'llm', provider: 'openai',
         api_base: 'https://example.com', has_api_key: true, enabled: true, is_default: true,
-        last_test_status: 'success', last_tested_at: now, last_test_message: 'ok',
+        last_test_status: 'success', last_test_at: now, last_test_message: 'ok',
         models: ['fake-model'], options: {}, created_by: 'admin',
         created_at: now, updated_at: now,
       }])
@@ -64,6 +72,9 @@ async function mockSuperAssistantApi(page: Page, captured: { resetCalled?: boole
     if (path === '/api/v2/super-assistant/skills') return json(route, [])
     if (path === '/api/v2/super-assistant/multica/config' && method === 'GET') {
       return json(route, multicaUnconfigured)
+    }
+    if (path === '/api/v2/super-assistant/palace/graph' && method === 'GET') {
+      return json(route, palaceGraphFixture)
     }
     if (path === '/api/v2/super-assistant/palace/sync/script' && method === 'GET') {
       return route.fulfill({
@@ -85,32 +96,34 @@ async function mockSuperAssistantApi(page: Page, captured: { resetCalled?: boole
   })
 }
 
-async function openFolderSyncPanel(page: Page) {
-  await page.locator('[data-workbench-integrations]').click()
-  // DialogShell 不以 title 为 dialog 可访问名：按现有用例口径用 heading 消歧
+async function openKnowledgeGraph(page: Page) {
+  await page.locator('[data-workbench-palace]').click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
-  await dialog.getByRole('tab', { name: '文件夹同步' }).click()
-  const card = dialog.getByTestId('folder-sync-card')
-  await expect(card).toBeVisible()
-  return { dialog, card }
+  // level:2 消歧：弹窗标题 h2 与图谱面板 h3 同名「知识图谱」
+  await expect(dialog.getByRole('heading', { name: '知识图谱', level: 2 })).toBeVisible()
+  const tree = dialog.getByTestId('palace-file-tree')
+  await expect(tree).toBeVisible()
+  // 「远程同步」常显（空库也在：右键卡/设置按钮是配置的唯一入口）
+  const remoteDir = tree.locator('[data-palace-dir="__remote_sync__"]')
+  await expect(remoteDir).toContainText('远程同步')
+  return { dialog, tree, remoteDir }
 }
 
-test('文件夹同步：下载脚本断言文件内容，重置令牌一次性展示', async ({ page }) => {
+test('远程同步：右键直下载断言文件内容，设置弹窗内重置令牌一次性展示', async ({ page }) => {
   await seedAuth(page)
   const captured: { resetCalled?: boolean } = {}
   await mockSuperAssistantApi(page, captured)
 
   await page.goto('/#/super-assistant', { waitUntil: 'domcontentloaded' })
-  const { card } = await openFolderSyncPanel(page)
+  const { remoteDir } = await openKnowledgeGraph(page)
 
-  // 三步指引与隐私提示在场
-  await expect(card.getByText('LOCAL_DIR')).toBeVisible()
-  await expect(card.getByText('synced/')).toBeVisible()
+  // 空态引导常驻：右键交互不可见的可见兜底
+  await expect(page.getByTestId('palace-sync-empty-hint')).toBeVisible()
 
-  // 下载脚本：断言下载文件的真实内容（非中间提示，AGENTS.md §5）
+  // 右键目录 → 操作卡「下载同步脚本」直接触发下载；断言下载文件的真实内容（非中间提示，AGENTS.md §5）
   const downloadPromise = page.waitForEvent('download')
-  await card.getByRole('button', { name: '下载同步脚本' }).click()
+  await remoteDir.click({ button: 'right' })
+  await page.getByRole('menuitem', { name: '下载同步脚本' }).click()
   const download = await downloadPromise
   expect(download.suggestedFilename()).toBe('palace_sync.py')
   const stream = await download.createReadStream()
@@ -119,6 +132,15 @@ test('文件夹同步：下载脚本断言文件内容，重置令牌一次性�
   const downloadText = Buffer.concat(chunks).toString('utf-8')
   expect(downloadText).toContain('BASE_URL')
   expect(downloadText).toContain('pal_sync_e2e_current_token')
+
+  // 右键 → 「远程同步设置」打开二级弹窗；三步指引与 synced/ 提示在场
+  await remoteDir.click({ button: 'right' })
+  await page.getByRole('menuitem', { name: '远程同步设置' }).click()
+  await expect(page.getByRole('heading', { name: '远程同步设置' })).toBeVisible()
+  const card = page.getByTestId('folder-sync-card')
+  await expect(card).toBeVisible()
+  await expect(card.getByText('LOCAL_DIR')).toBeVisible()
+  await expect(card.getByText('synced/')).toBeVisible()
 
   // 重置令牌：两段式确认；新令牌仅此一次展示
   await card.getByRole('button', { name: '重置同步令牌' }).click()
@@ -130,13 +152,19 @@ test('文件夹同步：下载脚本断言文件内容，重置令牌一次性�
 
 // 复制令牌：授予剪贴板权限，断言真实剪贴板内容（AGENTS.md §5 副作用验收）。
 test.use({ contextOptions: { permissions: ['clipboard-read', 'clipboard-write'] } })
-test('文件夹同步：复制新令牌到剪贴板', async ({ page }) => {
+test('远程同步：目录行可见设置按钮打开弹窗，复制新令牌到剪贴板', async ({ page }) => {
   await seedAuth(page)
   const captured: { resetCalled?: boolean } = {}
   await mockSuperAssistantApi(page, captured)
 
   await page.goto('/#/super-assistant', { waitUntil: 'domcontentloaded' })
-  const { card } = await openFolderSyncPanel(page)
+  await openKnowledgeGraph(page)
+
+  // 可见设置按钮（右键之外的常显入口）：点击直接打开设置二级弹窗
+  await page.getByTestId('palace-sync-settings-button').click()
+  await expect(page.getByRole('heading', { name: '远程同步设置' })).toBeVisible()
+  const card = page.getByTestId('folder-sync-card')
+  await expect(card).toBeVisible()
 
   await card.getByRole('button', { name: '重置同步令牌' }).click()
   await card.getByRole('button', { name: '确认重置' }).click()

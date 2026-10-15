@@ -7,8 +7,11 @@
  * 各自按名称 zh locale 排序。
  * 「本体文档」是固定在根级首位的只读虚拟目录（不落 palace_folders 行）：
  * 子项来自「本体侧权威清单 ∪ 宫殿镜像状态」的合并（见 mergeOntologyDocRows），
- * 空清单时整个目录不出现。节点 id：目录 dir:<path>、文件 file:<id>、
- * 本体文档 ontodoc:<镜像行 id>，供 headless-tree dataLoader 使用。
+ * 空清单时整个目录不出现。「远程同步」同为只读虚拟目录，钉根级次位且常显
+ * （空目录也是设置/下载入口），收编 folder_path 落在 synced/ 子树的全部内容：
+ * 顶层 synced 目录行不再单独展示，其子项直接挂到虚拟目录下（节点 id 与
+ * 路径不变，仅父级重挂，同步脚本契约零感知）。节点 id：目录 dir:<path>、
+ * 文件 file:<id>、本体文档 ontodoc:<镜像行 id>，供 headless-tree dataLoader 使用。
  */
 import type {
   PalaceFile,
@@ -28,6 +31,20 @@ export const PALACE_ONTOLOGY_DOCS_DIR_ID = 'ontology-docs-dir'
  */
 export const PALACE_ONTOLOGY_DOCS_DIR_PATH = '__ontology_docs__'
 
+/** 远程同步虚拟目录的节点 id（非 dir: 前缀，杜绝与用户目录行碰撞） */
+export const PALACE_REMOTE_SYNC_DIR_ID = 'remote-sync-dir'
+/** 远程同步目录的选中路由哨兵：仅用于 selectedDirPath 通信与工具栏门控，
+ *  不参与 palace_folders / folder_path 语义（同本体文档哨兵）。 */
+export const PALACE_REMOTE_SYNC_DIR_PATH = '__remote_sync__'
+/** 文件夹同步脚本的镜像落点子树（palace_sync.py 契约：REMOTE_ROOT 强制 synced/） */
+export const REMOTE_SYNC_TREE_ROOT = 'synced'
+
+/** 归一路径是否属于远程同步子树（顶层 synced 或其下任意层级） */
+export const isRemoteSyncPath = (path: string | null | undefined): boolean => {
+  const normalized = normalizePalacePath(path)
+  return normalized === REMOTE_SYNC_TREE_ROOT || normalized.startsWith(`${REMOTE_SYNC_TREE_ROOT}/`)
+}
+
 export interface PalaceTreeItemData {
   kind: 'dir' | 'file' | 'ontology-doc'
   name: string
@@ -37,6 +54,8 @@ export interface PalaceTreeItemData {
   dirId?: string
   /** 本体文档虚拟目录标记（只读：禁建/禁删/禁拖入） */
   ontologyDocsDir?: boolean
+  /** 远程同步虚拟目录标记（只读：禁建/禁删/禁拖入，右键提供设置/下载入口） */
+  remoteSyncDir?: boolean
   file?: PalaceFile
   ontologyDoc?: PalaceOntologyDocRow
 }
@@ -154,8 +173,17 @@ export function buildPalaceTree(
   }
   const children: Record<string, string[]> = { [PALACE_TREE_ROOT]: [] }
 
+  // 「远程同步」只读虚拟目录：常显（空目录也是设置/下载入口），钉根级次位
+  items[PALACE_REMOTE_SYNC_DIR_ID] = {
+    kind: 'dir', name: '远程同步', path: PALACE_REMOTE_SYNC_DIR_PATH, remoteSyncDir: true,
+  }
+  children[PALACE_REMOTE_SYNC_DIR_ID] = []
+  children[PALACE_TREE_ROOT].push(PALACE_REMOTE_SYNC_DIR_ID)
+
   const ensureDir = (path: string, dirId?: string): string => {
     if (!path) return PALACE_TREE_ROOT
+    // synced 根重挂到「远程同步」虚拟目录（目录行 id 丢弃——只读无操作）
+    if (path === REMOTE_SYNC_TREE_ROOT) return PALACE_REMOTE_SYNC_DIR_ID
     const id = palaceDirId(path)
     if (!items[id]) {
       items[id] = { kind: 'dir', name: path.slice(path.lastIndexOf('/') + 1), path, dirId }
@@ -195,16 +223,18 @@ export function buildPalaceTree(
     children[dirId].push(id)
   }
 
-  // 深度优先排序：目录在前、文件在后，同组按名称排序；本体文档目录钉在根级首位
+  // 深度优先排序：目录在前、文件在后，同组按名称排序；
+  // 根级钉位：本体文档首位、远程同步次位，其余目录按名称排序跟随
   const byName = (a: string, b: string) => collator.compare(items[a].name, items[b].name)
   const walk = (id: string) => {
     const list = children[id] ?? []
     let dirs = list.filter(child => items[child]?.kind === 'dir').sort(byName)
-    if (id === PALACE_TREE_ROOT && dirs.includes(PALACE_ONTOLOGY_DOCS_DIR_ID)) {
-      dirs = [
-        PALACE_ONTOLOGY_DOCS_DIR_ID,
-        ...dirs.filter(child => child !== PALACE_ONTOLOGY_DOCS_DIR_ID),
-      ]
+    if (id === PALACE_TREE_ROOT) {
+      const pinned = [PALACE_ONTOLOGY_DOCS_DIR_ID, PALACE_REMOTE_SYNC_DIR_ID]
+        .filter(pin => dirs.includes(pin))
+      if (pinned.length > 0) {
+        dirs = [...pinned, ...dirs.filter(child => !pinned.includes(child))]
+      }
     }
     const fileLikes = list
       .filter(child => items[child]?.kind !== 'dir')

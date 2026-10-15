@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle, BookMarked, Brain, CheckCircle2, Clock, FileArchive, FilePlus2, FileText, FolderPlus,
-  FolderPen, FolderMinus, Image as ImageIcon, Loader2, Maximize2, Minimize2, Pencil,
+  FolderPen, FolderMinus, FolderSync, Image as ImageIcon, Loader2, Maximize2, Minimize2, Pencil,
   RefreshCw, Trash2, Upload, X,
 } from 'lucide-react'
 
@@ -29,11 +29,14 @@ import {
 import PalaceFileTree, { type PalaceInlineAction } from './PalaceFileTree'
 import PalaceGraphPanel from './PalaceGraphPanel'
 import PalaceMarkdown from './palaceMarkdown'
+import PalaceSyncDialog, { downloadSyncScript } from './PalaceSyncDialog'
 import { summarizePalaceUpload } from './palaceUploadSummary'
 import {
+  isRemoteSyncPath,
   joinPalacePath,
   mergeOntologyDocRows,
   PALACE_ONTOLOGY_DOCS_DIR_PATH,
+  PALACE_REMOTE_SYNC_DIR_PATH,
   type PalaceOntologyDocRow,
 } from './palaceTreeModel'
 
@@ -121,6 +124,9 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
   const [previewMode, setPreviewMode] = useState<'render' | 'source'>('render')
   /** 工作台全屏：占满视口并放宽图谱栏（Esc 仍关闭弹窗） */
   const [maximized, setMaximized] = useState(false)
+  /** 远程同步设置二级弹窗（文件树「远程同步」目录右键/设置按钮唤起） */
+  const [syncSettingsOpen, setSyncSettingsOpen] = useState(false)
+  const [syncDownloading, setSyncDownloading] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
   const replaceInputRef = useRef<HTMLInputElement>(null)
@@ -189,6 +195,8 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
       setReplaceTarget(null)
       setPreviewMode('render')
       setMaximized(false)
+      setSyncSettingsOpen(false)
+      setSyncDownloading(false)
     }
   }, [open])
 
@@ -304,6 +312,19 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
     setSelectedOntologyId(null)
     setSelectedDirPath(path)
   }, [])
+
+  /** 右键卡/空态引导直接下载同步脚本（与设置弹窗内按钮共用同一实现） */
+  const handleDownloadSyncScript = useCallback(async () => {
+    if (syncDownloading) return
+    setSyncDownloading(true)
+    try {
+      await downloadSyncScript()
+    } catch (err) {
+      showError(err, '脚本下载失败')
+    } finally {
+      setSyncDownloading(false)
+    }
+  }, [syncDownloading, showError])
 
   const handleUpload = async (list: FileList | null) => {
     if (!list || list.length === 0) return
@@ -634,9 +655,24 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
   const editingThis = editor !== null && editor.fileId === selected?.id
   const isMarkdown = (selected?.filename ?? '').toLowerCase().endsWith('.md')
   const ontologyDirSelected = selectedDirPath === PALACE_ONTOLOGY_DOCS_DIR_PATH
+  /** 远程同步域选中：虚拟目录本身或 synced/ 子树内任意目录（均只读） */
+  const remoteSyncDirSelected = selectedDirPath === PALACE_REMOTE_SYNC_DIR_PATH
+  const remoteSyncAreaSelected = remoteSyncDirSelected || isRemoteSyncPath(selectedDirPath)
+  /** 远程同步文件（synced/ 子树内）：只读，禁编辑/替换/删除 */
+  const remoteSyncFileSelected = selected != null && isRemoteSyncPath(selected.path)
 
   const renderMiddleBody = () => {
     if (!selected) {
+      if (remoteSyncDirSelected) {
+        return (
+          <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 py-8 text-center">
+            <FolderSync size={18} className="text-[var(--color-text-tertiary)]" />
+            <p className="text-xs text-[var(--color-text-tertiary)]">
+              「远程同步」目录为只读：内容来自本机同步脚本对指定文件夹的镜像。右键目录或点击目录行右侧按钮，可打开设置或下载脚本。
+            </p>
+          </div>
+        )
+      }
       return (
         <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 py-8 text-center">
           <FileText size={18} className="text-[var(--color-text-tertiary)]" />
@@ -819,8 +855,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 className="h-7 px-2 text-xs"
                 onClick={() => inputRef.current?.click()}
                 loading={busy}
-                disabled={ontologyDirSelected}
-                title={ontologyDirSelected ? '「本体文档」为只读目录，请选择其他目录上传' : undefined}
+                disabled={ontologyDirSelected || remoteSyncAreaSelected}
+                title={(ontologyDirSelected || remoteSyncAreaSelected)
+                  ? `「${ontologyDirSelected ? '本体文档' : '远程同步'}」为只读目录，请选择其他目录上传`
+                  : undefined}
               >
                 <Upload size={12} /> 上传
               </Button>
@@ -829,8 +867,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 variant="outline"
                 className="h-7 px-2 text-xs"
                 onClick={() => zipInputRef.current?.click()}
-                disabled={busy || ontologyDirSelected}
-                title={ontologyDirSelected ? '「本体文档」为只读目录，请选择其他目录导入' : undefined}
+                disabled={busy || ontologyDirSelected || remoteSyncAreaSelected}
+                title={(ontologyDirSelected || remoteSyncAreaSelected)
+                  ? `「${ontologyDirSelected ? '本体文档' : '远程同步'}」为只读目录，请选择其他目录导入`
+                  : undefined}
               >
                 <FileArchive size={12} /> ZIP
               </Button>
@@ -852,17 +892,23 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
             >
               <span
                 className="min-w-0 flex-1 truncate text-[10px] text-[var(--color-text-tertiary)]"
-                title={ontologyDirSelected ? '本体文档（只读目录）' : selectedDirPath ? selectedDirPath : '根目录'}
+                title={ontologyDirSelected ? '本体文档（只读目录）' : remoteSyncDirSelected ? '远程同步（只读目录）' : selectedDirPath ? selectedDirPath : '根目录'}
               >
-                {ontologyDirSelected ? '当前目录：本体文档（只读，随本体发布自动更新）' : `当前目录：/${selectedDirPath}`}
+                {ontologyDirSelected
+                  ? '当前目录：本体文档（只读，随本体发布自动更新）'
+                  : remoteSyncDirSelected
+                    ? '当前目录：远程同步（只读，由本机同步脚本镜像写入）'
+                    : `当前目录：/${selectedDirPath}${isRemoteSyncPath(selectedDirPath) ? '（只读）' : ''}`}
               </span>
               <Button
                 variant="ghost"
                 size="icon-sm"
                 className="h-6 w-6 text-slate-400 hover:text-[var(--color-text-primary)]"
                 onClick={() => setInline({ kind: 'new-folder', targetPath: selectedDirPath })}
-                disabled={busy || inline !== null || ontologyDirSelected}
-                title={ontologyDirSelected ? '「本体文档」为只读目录' : '在当前目录下新建子目录'}
+                disabled={busy || inline !== null || ontologyDirSelected || remoteSyncAreaSelected}
+                title={(ontologyDirSelected || remoteSyncAreaSelected)
+                  ? `「${ontologyDirSelected ? '本体文档' : '远程同步'}」为只读目录`
+                  : '在当前目录下新建子目录'}
                 aria-label="新建子目录"
                 data-testid="palace-new-folder"
               >
@@ -873,8 +919,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 size="icon-sm"
                 className="h-6 w-6 text-slate-400 hover:text-[var(--color-text-primary)]"
                 onClick={() => setInline({ kind: 'new-note', targetPath: selectedDirPath })}
-                disabled={busy || inline !== null || ontologyDirSelected}
-                title={ontologyDirSelected ? '「本体文档」为只读目录' : '在当前目录下新建 md 笔记（文件名自动补 .md）'}
+                disabled={busy || inline !== null || ontologyDirSelected || remoteSyncAreaSelected}
+                title={(ontologyDirSelected || remoteSyncAreaSelected)
+                  ? `「${ontologyDirSelected ? '本体文档' : '远程同步'}」为只读目录`
+                  : '在当前目录下新建 md 笔记（文件名自动补 .md）'}
                 aria-label="新建笔记"
                 data-testid="palace-new-note"
               >
@@ -885,8 +933,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 size="icon-sm"
                 className="h-6 w-6 text-slate-400 hover:text-[var(--color-text-primary)]"
                 onClick={() => selectedDirRow && setInline({ kind: 'rename', targetPath: selectedDirRow.path, dirId: selectedDirRow.id })}
-                disabled={busy || inline !== null || !selectedDirRow}
-                title={selectedDirRow ? `重命名目录 ${selectedDirRow.path}` : '先在树中选中一个目录'}
+                disabled={busy || inline !== null || !selectedDirRow || remoteSyncAreaSelected}
+                title={remoteSyncAreaSelected
+                  ? '「远程同步」目录为只读，结构由同步脚本维护'
+                  : selectedDirRow ? `重命名目录 ${selectedDirRow.path}` : '先在树中选中一个目录'}
                 aria-label="重命名目录"
                 data-testid="palace-rename-folder"
               >
@@ -897,8 +947,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 size="icon-sm"
                 className="h-6 w-6 text-slate-400 hover:bg-red-50 hover:text-red-600"
                 onClick={() => { void handleDeleteFolder() }}
-                disabled={busy || !selectedDirRow}
-                title={selectedDirRow ? `删除空目录 ${selectedDirRow.path}` : '先在树中选中一个目录（仅可删除空目录）'}
+                disabled={busy || !selectedDirRow || remoteSyncAreaSelected}
+                title={remoteSyncAreaSelected
+                  ? '「远程同步」目录为只读，结构由同步脚本维护'
+                  : selectedDirRow ? `删除空目录 ${selectedDirRow.path}` : '先在树中选中一个目录（仅可删除空目录）'}
                 aria-label="删除目录"
                 data-testid="palace-delete-folder"
               >
@@ -942,31 +994,25 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                 )}
               </div>
             )}
-            {files.length === 0 && folders.length === 0 && mergedOntologyDocs.length === 0 ? (
-              <div className="flex flex-1 flex-col items-center justify-center gap-1 px-3 py-6 text-center">
-                <FileText size={18} className="text-[var(--color-text-tertiary)]" />
-                <p className="text-xs text-[var(--color-text-tertiary)]">
-                  还没有文档。上传或导入 ZIP，自动抽取实体关系生成知识图谱。
-                </p>
-              </div>
-            ) : (
-              <PalaceFileTree
-                files={files}
-                folders={folders}
-                ontologyDocs={mergedOntologyDocs}
-                selectedFileId={selectedFileId}
-                selectedOntologyDocId={selectedOntologyDoc?.id ?? null}
-                selectedDirPath={selectedDirPath}
-                onSelectFile={handleSelectFile}
-                onSelectOntologyDoc={handleSelectOntologyDoc}
-                onSelectDir={handleSelectDir}
-                onMoveFile={(fileId, targetPath) => { void handleMoveFile(fileId, targetPath) }}
-                onMoveFolder={(folderId, targetPath) => { void handleMoveFolder(folderId, targetPath) }}
-                inline={inline}
-                onInlineSubmit={handleInlineSubmit}
-                onInlineCancel={() => setInline(null)}
-              />
-            )}
+            {/* 树恒渲染：「远程同步」常显目录承载设置/下载入口，空库也不例外 */}
+            <PalaceFileTree
+              files={files}
+              folders={folders}
+              ontologyDocs={mergedOntologyDocs}
+              selectedFileId={selectedFileId}
+              selectedOntologyDocId={selectedOntologyDoc?.id ?? null}
+              selectedDirPath={selectedDirPath}
+              onSelectFile={handleSelectFile}
+              onSelectOntologyDoc={handleSelectOntologyDoc}
+              onSelectDir={handleSelectDir}
+              onMoveFile={(fileId, targetPath) => { void handleMoveFile(fileId, targetPath) }}
+              onMoveFolder={(folderId, targetPath) => { void handleMoveFolder(folderId, targetPath) }}
+              inline={inline}
+              onInlineSubmit={handleInlineSubmit}
+              onInlineCancel={() => setInline(null)}
+              onOpenSyncSettings={() => setSyncSettingsOpen(true)}
+              onDownloadSyncScript={() => { void handleDownloadSyncScript() }}
+            />
           </aside>
 
           {/* 中：内容阅读/编辑/图片预览 */}
@@ -1127,8 +1173,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                         variant="ghost"
                         size="icon-sm"
                         onClick={() => { void handleEdit(selected) }}
-                        disabled={busy || extracting || editingThis}
-                        title={extracting ? '抽取完成后才能编辑' : `编辑 ${selected.filename}`}
+                        disabled={busy || extracting || editingThis || remoteSyncFileSelected}
+                        title={remoteSyncFileSelected
+                          ? '远程同步内容为只读：请在本地文件夹修改后重新运行同步脚本'
+                          : extracting ? '抽取完成后才能编辑' : `编辑 ${selected.filename}`}
                         aria-label={`编辑 ${selected.filename}`}
                         className="h-6 w-6 text-slate-400 hover:text-[var(--color-text-primary)]"
                       >
@@ -1142,8 +1190,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                         setReplaceTarget(selected.id)
                         replaceInputRef.current?.click()
                       }}
-                      disabled={busy || extracting}
-                      title={extracting ? '抽取完成后才能替换' : `用新文件替换 ${selected.filename}`}
+                      disabled={busy || extracting || remoteSyncFileSelected}
+                      title={remoteSyncFileSelected
+                        ? '远程同步内容为只读：请在本地文件夹替换后重新运行同步脚本'
+                        : extracting ? '抽取完成后才能替换' : `用新文件替换 ${selected.filename}`}
                       aria-label={`替换 ${selected.filename}`}
                       className="h-6 w-6 text-slate-400 hover:text-[var(--color-text-primary)]"
                     >
@@ -1166,8 +1216,10 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
                       variant="ghost"
                       size="icon-sm"
                       onClick={() => { void handleDelete(selected.id) }}
-                      disabled={busy}
-                      title={`删除 ${selected.filename}`}
+                      disabled={busy || remoteSyncFileSelected}
+                      title={remoteSyncFileSelected
+                        ? '远程同步内容为只读：请在本地删除后重新运行同步脚本'
+                        : `删除 ${selected.filename}`}
                       aria-label={`删除 ${selected.filename}`}
                       className="h-6 w-6 text-slate-400 hover:bg-red-50 hover:text-red-600"
                     >
@@ -1228,6 +1280,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
         confirmText="删除"
         variant="danger"
       />
+      <PalaceSyncDialog open={syncSettingsOpen} onClose={() => setSyncSettingsOpen(false)} />
     </Dialog>
   )
 }

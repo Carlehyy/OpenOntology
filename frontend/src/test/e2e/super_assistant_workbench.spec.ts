@@ -2233,7 +2233,7 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 
-  // 外部集成已是真实功能：左侧集成类型 tabs（multica / 远程助手 / 文件夹同步），
+  // 外部集成已是真实功能：左侧集成类型 tabs（multica / 远程助手），
   // multica 默认选中并走通「测试连接 → 选工作区 → 保存」
   await page.getByRole('button', { name: '外部集成' }).click()
   const integrationsDialog = page.getByRole('dialog')
@@ -2241,23 +2241,21 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
   await expect(multicaTab).toHaveAttribute('aria-selected', 'true')
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
-  // GitHub 集成已下线：左栏仅剩三个集成 tab
-  await expect(integrationsDialog.locator('[data-integrations-tab]')).toHaveCount(3)
-  await expect(integrationsDialog.locator('[data-integrations-tab="github"]')).toHaveCount(0)
+  // 文件夹同步已迁至知识图谱「远程同步」目录：左栏仅剩两个集成 tab
+  await expect(integrationsDialog.locator('[data-integrations-tab]')).toHaveCount(2)
+  await expect(integrationsDialog.locator('[data-integrations-tab="folder-sync"]')).toHaveCount(0)
   // 等入场缩放动画结束再量尺寸，避免动画中的包围盒参与比较
   await page.waitForTimeout(300)
 
-  // 切到文件夹同步 tab 显示脚本面板，切回 multica 表单仍在
+  // 切到远程助手 tab 面板替换，切回 multica 表单仍在；弹窗固定宽高：切 tab 前后尺寸不变
   const shellBefore = await integrationsDialog.boundingBox()
-  await integrationsDialog.locator('[data-integrations-tab="folder-sync"]').click()
-  await expect(integrationsDialog.getByTestId('folder-sync-card')).toBeVisible()
+  await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toHaveCount(0)
-  // 弹窗固定宽高：切 tab 前后尺寸不变；左栏最长文案「文件夹同步」不截断
   const shellAfter = await integrationsDialog.boundingBox()
   expect(Math.abs(shellBefore!.height - shellAfter!.height)).toBeLessThanOrEqual(1)
   expect(Math.abs(shellBefore!.width - shellAfter!.width)).toBeLessThanOrEqual(1)
-  const folderSyncLabel = integrationsDialog.locator('[data-integrations-tab="folder-sync"]').locator('span').first()
-  expect(await folderSyncLabel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+  const remoteAgentsLabel = integrationsDialog.locator('[data-integrations-tab="remote-agents"]').locator('span').first()
+  expect(await remoteAgentsLabel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   await multicaTab.click()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
 
