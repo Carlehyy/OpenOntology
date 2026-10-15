@@ -1342,6 +1342,39 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.getByText('出口即时投递：成功 1 条')).toBeVisible()
 })
 
+test('消息通知：标为未读后重新查阅即时回已读（staleTime 不吞查阅动作）', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  // 未读数断言用弹窗内「消息列表」导航徽章（与侧栏角标同源 summary）——
+  // 弹窗打开后 Radix 会把背景置 aria-hidden，getByRole 定位不到侧栏按钮
+  const entry = page.getByRole('button', { name: /消息通知/ })
+  const navBadge = page.locator('[data-notifications-nav="messages"]')
+  await expect(entry).toContainText('2') // n-1、n-2 未读
+  await entry.click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await expect(navBadge).toContainText('2')
+
+  // 打开未读 n-1：GET 落已读，「标为未读」钮出现、徽章降为 1
+  await page.locator('[data-notifications-item="n-1"]').click()
+  await expect(page.locator('[data-notifications-unread]')).toBeVisible()
+  await expect(navBadge).toContainText('1')
+
+  // 标为未读：钮消失、徽章回 2（详情缓存此时在 30s staleTime 内且为未读）
+  await page.locator('[data-notifications-unread]').click()
+  await expect(page.locator('[data-notifications-unread]')).toHaveCount(0)
+  await expect(navBadge).toContainText('2')
+
+  // 切到 n-2 再点回 n-1：主动查阅必须穿透 staleTime 强制 GET——
+  // 服务端落已读后「标为未读」钮重现（未修时钮不回来，未读态最长滞留 30s+15s 轮询）
+  await page.locator('[data-notifications-item="n-2"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('账单系统异常告警')
+  await page.locator('[data-notifications-item="n-1"]').click()
+  await expect(page.locator('[data-notifications-unread]')).toBeVisible({ timeout: 10_000 })
+  await expect(navBadge).not.toContainText(/\d/) // n-1、n-2 均已读，无未读徽章
+})
+
 test('消息通知：游标分页——首页两条，加载更多补齐后续', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page, { notificationsPagination: true })
