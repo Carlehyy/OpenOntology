@@ -511,8 +511,9 @@ test('拖拽节点后自动保存提示按 3→2→1 倒计时并复位', async 
 
   const status = page.getByTestId('structure-save-status')
   await expect(status).toContainText('3 秒后自动保存')
-  // 倒计时阶段使用琥珀色强调（--color-warning 语义令牌）
-  expect(await status.evaluate(element => getComputedStyle(element).color)).toBe('rgb(201, 134, 26)')
+  // 倒计时阶段使用琥珀色强调（--color-warning 语义令牌；
+  // #b45309=2026-10-16 校准值，12px 文字对白底 4.5:1 过 AA，旧值 #c9861a 仅 3.04）
+  expect(await status.evaluate(element => getComputedStyle(element).color)).toBe('rgb(180, 83, 9)')
   await expect(status).toContainText('2 秒后自动保存', { timeout: 2500 })
   await expect(status).toContainText('1 秒后自动保存', { timeout: 2500 })
   // 布局接口响应被 mock 挂起：「正在保存布局」会稳定停留，消除慢 CI 上

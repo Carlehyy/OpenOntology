@@ -121,6 +121,14 @@ export default function NotificationsDialog({
   const [statsDays, setStatsDays] = useState<7 | 30>(30)
   // 转发去向：null = 默认全选（跟随启用渠道）；Set = 用户改选后的显式集合
   const [composeChannelIds, setComposeChannelIds] = useState<Set<string> | null>(null)
+  // 发送时刻表单快照 + 当前表单镜像：POST 在飞时用户可能已开始写下一封（甚至关弹窗重开），
+  // onSuccess 只有在「表单仍是发送的那份」时才清空+跳转，否则只报成功不动新草稿。
+  // 镜像走 ref 而非闭包 state——mutation 回调闭包停留在 mutate 时刻，读不到后续输入
+  const composeFormRef = useRef({ title: '', body: '' })
+  composeFormRef.current = { title: composeTitle, body: composeBody }
+  const composeSentSnapshotRef = useRef<{ title: string; body: string } | null>(null)
+  // 全选恢复默认态后「全选」按钮即卸载：主动把焦点交给组内第一个 chip，防 Tab 位序重置
+  const composeChipsRef = useRef<HTMLDivElement>(null)
 
   // 只失效列表与徽章；detail 缓存由 setQueryData 精确写入——
   // 若前缀失效命中 detail，会触发「GET 详情即自动已读」把刚标回的未读打回
@@ -192,6 +200,7 @@ export default function NotificationsDialog({
       setComposeBody('')
       setComposePriority('normal')
       setComposeChannelIds(null)
+      composeSentSnapshotRef.current = null
     }
   }, [open, mintedKey])
 
@@ -251,15 +260,26 @@ export default function NotificationsDialog({
   const createMutation = useMutation({
     mutationFn: notificationsApi.create,
     onSuccess: data => {
-      toast.success('消息已发送')
-      setComposeTitle('')
-      setComposeBody('')
-      setComposePriority('normal')
-      setComposeChannelIds(null)
-      setSelectedId(data.id)
-      // 新消息未读未归档：切到全部消息视图保证列表与选中详情同屏可见
-      setTab('all')
-      setNav('messages')
+      const sent = composeSentSnapshotRef.current
+      composeSentSnapshotRef.current = null
+      const untouched =
+        sent !== null &&
+        sent.title === composeFormRef.current.title &&
+        sent.body === composeFormRef.current.body
+      if (untouched) {
+        toast.success('消息已发送')
+        setComposeTitle('')
+        setComposeBody('')
+        setComposePriority('normal')
+        setComposeChannelIds(null)
+        setSelectedId(data.id)
+        // 新消息未读未归档：切到全部消息视图保证列表与选中详情同屏可见
+        setTab('all')
+        setNav('messages')
+      } else {
+        // 发送期间表单已有新输入（或弹窗关闭重开被复位）：只报成功，不清草稿不拽走当前视图
+        toast.success('消息已发送；表单已有新内容，草稿未清空')
+      }
       queryClient.setQueryData(['notifications', 'detail', data.id], data)
       invalidateLists()
     },
@@ -341,7 +361,7 @@ export default function NotificationsDialog({
     channelsReady && enabledChannels.length >= 3 && selectedChannelCount < enabledChannels.length
   const composeBodyCharHint = composeBodyHint(composeBody.length)
 
-  const handleCompose = () => {
+  const handleCompose = async () => {
     if (!composeTitle.trim()) {
       toast.error('标题不能为空')
       return
@@ -357,13 +377,25 @@ export default function NotificationsDialog({
       toast.error('渠道列表加载失败，无法确定转发去向，请重试')
       return
     }
+    // 「0 启用渠道=仅站内保存」是界面承诺；缓存可能落后于服务端现势（他端刚启用渠道），
+    // 过期时先重拉再判定——否则省略 channelIds 会被后端按全部启用渠道广播，违背承诺
+    let currentEnabled = enabledChannels
+    if (currentEnabled.length === 0 && channels.isStale) {
+      const result = await channels.refetch()
+      currentEnabled = (result.data ?? []).filter(channel => channel.enabled)
+      if (currentEnabled.length > 0) {
+        toast.info('渠道列表已刷新，请确认转发去向后再次发送')
+        return
+      }
+    }
     // 无启用渠道：消息仅保存到站内（后端缺省扇出到空集，语义一致）
-    if (enabledChannels.length === 0) {
+    if (currentEnabled.length === 0) {
+      composeSentSnapshotRef.current = { title: composeTitle, body: composeBody }
       createMutation.mutate({ title: composeTitle.trim(), body: composeBody, priority: composePriority })
       return
     }
     // 勾选集与当前启用渠道求交集：同会话内渠道被停用/删除后，失效 id 不再随请求发出
-    const enabledIds = new Set(enabledChannels.map(channel => channel.id))
+    const enabledIds = new Set(currentEnabled.map(channel => channel.id))
     const selectedIds = composeChannelIds
       ? [...composeChannelIds].filter(id => enabledIds.has(id))
       : [...enabledIds]
@@ -371,6 +403,7 @@ export default function NotificationsDialog({
       toast.error('请至少选择一个转发渠道')
       return
     }
+    composeSentSnapshotRef.current = { title: composeTitle, body: composeBody }
     createMutation.mutate({
       title: composeTitle.trim(),
       body: composeBody,
@@ -864,7 +897,7 @@ export default function NotificationsDialog({
               role="tabpanel"
               id="notifications-panel-compose"
               aria-labelledby="notifications-tab-compose"
-              className="scrollbar-none flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 sm:p-5"
+              className="scrollbar-none flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain p-4 sm:p-5"
               data-notifications-compose-panel
             >
               <div>
@@ -877,7 +910,7 @@ export default function NotificationsDialog({
               {/* 先写内容再定去向（写信模型）：≥xl 左主栏限宽 40rem 控制行长、右辅栏为转发渠道，
                   利用弹窗宽度而非拉长输入框；<xl 退化为单列，顺序仍为 标题/优先级 → 正文 → 转发渠道 */}
               <div className="flex min-h-0 flex-1 flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,40rem)_minmax(0,1fr)] xl:gap-6">
-                <div className="flex min-w-0 flex-1 flex-col gap-4">
+                <div className="flex min-w-0 flex-1 flex-col gap-4 md:max-w-[40rem]">
                   <div className="flex flex-col gap-4 sm:flex-row">
                     <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
                       标题
@@ -904,8 +937,10 @@ export default function NotificationsDialog({
                             const style = priorityStyle(priority)
                             return (
                               <SelectItem key={priority} value={priority}>
-                                <span className={`mr-1.5 inline-block h-2 w-2 shrink-0 rounded-full align-middle ${style.dotClass}`} />
-                                {style.label}
+                                <span className="flex items-center gap-1.5">
+                                  <span className={`h-2 w-2 shrink-0 rounded-full ${style.dotClass}`} />
+                                  {style.label}
+                                </span>
                               </SelectItem>
                             )
                           })}
@@ -919,21 +954,21 @@ export default function NotificationsDialog({
                       value={composeBody}
                       onChange={event => setComposeBody(event.target.value)}
                       placeholder="支持 Markdown 语法，实际渲染效果因转发渠道而异"
-                      className={`${inputClass} min-h-36 flex-1 resize-none text-sm leading-6 sm:min-h-48`}
+                      className={`${inputClass} min-h-36 flex-1 resize-none text-sm leading-6 xl:min-h-48`}
                       data-notifications-compose-body
                     />
                   </label>
-                  {composeBodyCharHint && (
-                    <p
-                      className={`text-right text-xs leading-5 ${
-                        composeBodyCharHint.warn
-                          ? 'text-[var(--color-warning)]'
-                          : 'text-[var(--color-text-tertiary)]'
-                      }`}
-                    >
-                      {composeBodyCharHint.text}
-                    </p>
-                  )}
+                  {/* 常驻占位（min-h-5）：避免首字符输入时字数行出现引发 textarea 高度跳动 */}
+                  <p
+                    className={`min-h-5 text-right text-xs leading-5 ${
+                      composeBodyCharHint?.warn
+                        ? 'text-[var(--color-warning)]'
+                        : 'text-[var(--color-text-tertiary)]'
+                    }`}
+                    data-notifications-compose-char-hint
+                  >
+                    {composeBodyCharHint?.text ?? ''}
+                  </p>
                 </div>
 
                 {/* 转发渠道（原「投递渠道」）：正文写完再选去向，计数与警示随 chips 即时反馈。
@@ -941,13 +976,14 @@ export default function NotificationsDialog({
                 <div
                   role="group"
                   aria-label="转发渠道"
-                  className="flex min-w-0 flex-col gap-2 rounded-lg bg-[var(--color-bg-hover)] p-3"
+                  className="flex min-w-0 flex-col gap-2 self-start rounded-lg bg-[var(--color-bg-hover)] p-3"
                   data-notifications-compose-destinations
                 >
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-xs font-medium text-[var(--color-text-secondary)]">转发渠道</p>
                     {channelsReady && enabledChannels.length > 0 && (
                       <span
+                        aria-live="polite"
                         className={`text-xs ${
                           selectedChannelCount === 0
                             ? 'font-medium text-[var(--color-danger)]'
@@ -958,7 +994,7 @@ export default function NotificationsDialog({
                       </span>
                     )}
                   </div>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div ref={composeChipsRef} className="flex flex-wrap gap-1.5">
                     {channels.isLoading ? (
                       <span className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
                         <Loader2 size={12} className="animate-spin" /> 渠道加载中…
@@ -979,7 +1015,13 @@ export default function NotificationsDialog({
                         暂无启用的渠道，消息将仅保存到站内列表；可到
                         <button
                           type="button"
-                          onClick={() => setNav('config')}
+                          onClick={() => {
+                            setNav('config')
+                            // 程序化切换分区后把焦点送到新选中的 tab（WAI-ARIA tabs 模式），
+                            // 避免本按钮随分区卸载后焦点被弹窗容器回收、Tab 位序重置
+                            navItemRefs.current[NAV_ITEMS.findIndex(item => item.key === 'config')]?.focus()
+                          }}
+                          data-notifications-compose-goto-config
                           className="mx-0.5 rounded-sm text-xs text-[var(--color-primary)] underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           渠道配置
@@ -1007,14 +1049,22 @@ export default function NotificationsDialog({
                             >
                               <TemplateIcon size={12} className="shrink-0 opacity-80" />
                               <span className="max-w-40 truncate">{channel.name}</span>
-                              <span className="text-xs font-normal opacity-70">· {channel.templateName}</span>
+                              <span className="max-w-32 truncate text-xs font-normal opacity-70">· {channel.templateName}</span>
                             </button>
                           )
                         })}
                         {showComposeSelectAll && (
                           <button
                             type="button"
-                            onClick={() => setComposeChannelIds(null)}
+                            aria-label="全选转发渠道"
+                            onClick={() => {
+                              setComposeChannelIds(null)
+                              requestAnimationFrame(() =>
+                                composeChipsRef.current
+                                  ?.querySelector<HTMLButtonElement>('[data-notifications-compose-channel]')
+                                  ?.focus(),
+                              )
+                            }}
                             data-notifications-compose-select-all
                             className="rounded-md px-1.5 py-1 text-xs text-[var(--color-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           >
@@ -1037,13 +1087,6 @@ export default function NotificationsDialog({
                   onClick={handleCompose}
                   loading={createMutation.isPending}
                   disabled={channels.isError || channels.isLoading}
-                  title={
-                    channels.isError
-                      ? '渠道列表加载失败，无法确定转发去向，请先重试'
-                      : channels.isLoading
-                        ? '渠道列表加载中…'
-                        : undefined
-                  }
                   className="rounded-lg"
                   data-notifications-compose-send
                 >
