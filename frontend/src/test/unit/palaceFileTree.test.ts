@@ -3,9 +3,11 @@ import { describe, it } from 'node:test'
 
 import {
   buildPalaceTree,
+  isRemoteSyncPath,
   mergeOntologyDocRows,
   normalizePalacePath,
   PALACE_ONTOLOGY_DOCS_DIR_ID,
+  PALACE_REMOTE_SYNC_DIR_ID,
   PALACE_TREE_ROOT,
   palaceDirId,
   palaceFileId,
@@ -49,10 +51,13 @@ describe('normalizePalacePath', () => {
 })
 
 describe('buildPalaceTree', () => {
-  it('空库只有根哨兵', () => {
+  it('空库仍常显「远程同步」虚拟目录（设置/下载入口不依赖内容）', () => {
     const model = buildPalaceTree([])
-    assert.deepEqual(Object.keys(model.items), [PALACE_TREE_ROOT])
-    assert.deepEqual(model.children[PALACE_TREE_ROOT], [])
+    assert.deepEqual(Object.keys(model.items), [PALACE_TREE_ROOT, PALACE_REMOTE_SYNC_DIR_ID])
+    assert.deepEqual(model.children[PALACE_TREE_ROOT], [PALACE_REMOTE_SYNC_DIR_ID])
+    assert.deepEqual(model.children[PALACE_REMOTE_SYNC_DIR_ID], [])
+    assert.equal(model.items[PALACE_REMOTE_SYNC_DIR_ID].remoteSyncDir, true)
+    assert.equal(model.items[PALACE_REMOTE_SYNC_DIR_ID].name, '远程同步')
   })
 
   it('根目录文件直接挂在根下；目录排前、文件排后，同组按名称排序', () => {
@@ -62,8 +67,9 @@ describe('buildPalaceTree', () => {
       makeFile({ filename: 'doc.md', path: '资料包' }),
       makeFile({ filename: 'nested.txt', path: '资料包/sub' }),
     ])
-    // 目录在前，文件按名称排序：a.md(f-2)、b.md(f-1)
+    // 远程同步目录钉位在前（无本体文档时），目录在前，文件按名称排序：a.md(f-2)、b.md(f-1)
     assert.deepEqual(model.children[PALACE_TREE_ROOT], [
+      PALACE_REMOTE_SYNC_DIR_ID,
       palaceDirId('资料包'),
       palaceFileId('f-2'),
       palaceFileId('f-1'),
@@ -88,15 +94,15 @@ describe('buildPalaceTree', () => {
     ])
     assert.deepEqual(model.children[palaceDirId('b')], [palaceFileId('fb')])
     assert.deepEqual(model.children[palaceDirId('a/deep')], [palaceFileId('fd')])
-    // 目录节点只创建一次（a 与 a/deep 各一）
-    assert.deepEqual(palaceTreeDirIds(model).sort(), ['dir:a', 'dir:a/deep', 'dir:b'])
+    // 目录节点只创建一次（a 与 a/deep 各一），外加常显的远程同步虚拟目录
+    assert.deepEqual(palaceTreeDirIds(model).sort(), ['dir:a', 'dir:a/deep', 'dir:b', PALACE_REMOTE_SYNC_DIR_ID])
   })
 
   it('path 反斜杠与空白段被规整后再建树', () => {
     const model = buildPalaceTree([
       makeFile({ id: 'fx', filename: 'x.md', path: '\\导入\\ 子目录\\' }),
     ])
-    assert.deepEqual(palaceTreeDirIds(model).sort(), ['dir:导入', 'dir:导入/子目录'])
+    assert.deepEqual(palaceTreeDirIds(model).sort(), ['dir:导入', 'dir:导入/子目录', PALACE_REMOTE_SYNC_DIR_ID])
     assert.deepEqual(model.children[palaceDirId('导入/子目录')], [palaceFileId('fx')])
   })
 })
@@ -119,10 +125,10 @@ function makeFolder(partial: Partial<PalaceFolder> & { path: string }): PalaceFo
 describe('buildPalaceTree（目录行）', () => {
   it('空目录（无文件）也是树节点，携带目录行 id', () => {
     const model = buildPalaceTree([], [makeFolder({ id: 'fd-1', path: '空目录' })])
-    assert.deepEqual(model.children[PALACE_TREE_ROOT], [palaceDirId('空目录')])
+    assert.deepEqual(model.children[PALACE_TREE_ROOT], [PALACE_REMOTE_SYNC_DIR_ID, palaceDirId('空目录')])
     assert.equal(model.items[palaceDirId('空目录')].dirId, 'fd-1')
     assert.equal(model.items[palaceDirId('空目录')].path, '空目录')
-    assert.deepEqual(palaceTreeDirIds(model), ['dir:空目录'])
+    assert.deepEqual(palaceTreeDirIds(model), [PALACE_REMOTE_SYNC_DIR_ID, 'dir:空目录'])
   })
 
   it('目录行与文件路径同时存在时合并，目录行 id 保留；祖先目录补齐', () => {
@@ -272,5 +278,71 @@ describe('buildPalaceTree（本体文档目录）', () => {
     assert.notEqual(PALACE_ONTOLOGY_DOCS_DIR_ID, palaceDirId('__ontology_docs__'))
     assert.equal(model.items[palaceDirId('__ontology_docs__')].dirId, 'fd-x')
     assert.equal(model.items[PALACE_ONTOLOGY_DOCS_DIR_ID].ontologyDocsDir, true)
+  })
+})
+
+// ----- 远程同步：synced/ 子树收编 + 常显只读虚拟目录 + 路径判定 ---------------
+
+describe('buildPalaceTree（远程同步目录）', () => {
+  it('synced/ 子树整体收编：顶层 synced 目录行不出现，子项直挂虚拟目录', () => {
+    const model = buildPalaceTree(
+      [
+        makeFile({ id: 'fs1', filename: '说明.md', path: 'synced' }),
+        makeFile({ id: 'fs2', filename: '笔记.txt', path: 'synced/子目录' }),
+        makeFile({ id: 'fn', filename: '手动.md', path: '资料' }),
+      ],
+      [
+        makeFolder({ id: 'fd-synced', path: 'synced' }),
+        makeFolder({ id: 'fd-sub', path: 'synced/子目录' }),
+        makeFolder({ id: 'fd-other', path: '资料' }),
+      ],
+    )
+    assert.equal(model.items[palaceDirId('synced')], undefined, '顶层 synced 目录行被虚拟目录取代')
+    assert.equal(model.children[PALACE_REMOTE_SYNC_DIR_ID].includes(palaceFileId('fs1')), true)
+    assert.equal(model.children[PALACE_REMOTE_SYNC_DIR_ID].includes(palaceDirId('synced/子目录')), true)
+    // 节点 id 与路径不变（仅父级重挂）：子目录行 id 保留
+    assert.equal(model.items[palaceDirId('synced/子目录')].dirId, 'fd-sub')
+    assert.deepEqual(model.children[palaceDirId('synced/子目录')], [palaceFileId('fs2')])
+    // 非同步内容不受影响
+    assert.deepEqual(model.children[palaceDirId('资料')], [palaceFileId('fn')])
+    // 根级：远程同步钉位在前，其余目录按名称排序跟随
+    assert.deepEqual(model.children[PALACE_TREE_ROOT], [
+      PALACE_REMOTE_SYNC_DIR_ID,
+      palaceDirId('资料'),
+    ])
+  })
+
+  it('仅文件路径派生的 synced 目录同样收编（无目录行）', () => {
+    const model = buildPalaceTree([makeFile({ id: 'fx', filename: 'x.md', path: 'synced/深层' })])
+    assert.equal(model.items[palaceDirId('synced')], undefined)
+    assert.deepEqual(model.children[PALACE_REMOTE_SYNC_DIR_ID], [palaceDirId('synced/深层')])
+    assert.equal(model.items[palaceDirId('synced/深层')].dirId, undefined)
+    assert.deepEqual(model.children[palaceDirId('synced/深层')], [palaceFileId('fx')])
+  })
+
+  it('与本体文档目录同现：本体文档首位、远程同步次位', () => {
+    const rows = mergeOntologyDocRows(
+      [makePublished({ ontologyId: 'o1', title: 'T' })],
+      [makeMirror({ id: 'd1', ontologyId: 'o1' })],
+    )
+    const model = buildPalaceTree([], [makeFolder({ id: 'fd-1', path: '资料' })], rows)
+    assert.deepEqual(model.children[PALACE_TREE_ROOT].slice(0, 2), [
+      PALACE_ONTOLOGY_DOCS_DIR_ID,
+      PALACE_REMOTE_SYNC_DIR_ID,
+    ])
+    assert.equal(model.children[PALACE_TREE_ROOT][2], palaceDirId('资料'))
+  })
+})
+
+describe('isRemoteSyncPath', () => {
+  it('顶层 synced 与其子树为真；同名前缀与其他位置不误判', () => {
+    assert.equal(isRemoteSyncPath('synced'), true)
+    assert.equal(isRemoteSyncPath('synced/'), true)
+    assert.equal(isRemoteSyncPath('synced/a/b'), true)
+    assert.equal(isRemoteSyncPath('synced2/x'), false)
+    assert.equal(isRemoteSyncPath('x/synced'), false)
+    assert.equal(isRemoteSyncPath('asynced'), false)
+    assert.equal(isRemoteSyncPath(''), false)
+    assert.equal(isRemoteSyncPath(null), false)
   })
 })

@@ -7,6 +7,8 @@
  * 把目录拖进自身或其子目录、目录必须有行才能拖；落下后由父组件调 API
  * 持久化，本组件不做乐观移动。内联输入行（新建目录/新建笔记/目录重命名）
  * 的开闭由父组件（工具栏按钮）驱动，提交/取消上抛。
+ * 「远程同步」虚拟目录（常显、只读）是唯一挂右键菜单的行：右键卡与目录行
+ * 设置按钮唤起设置弹窗/直接下载脚本，空态常驻一行引导（右键不可见的兜底）。
  */
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
@@ -16,21 +18,27 @@ import {
 import type { ItemInstance } from '@headless-tree/core'
 import { useTree } from '@headless-tree/react'
 import {
-  AlertCircle, BookMarked, CircleDashed, Clock, FileJson, FileSpreadsheet, FileText, Folder, FolderOpen,
-  Image as ImageIcon, Loader2, type LucideIcon,
+  AlertCircle, BookMarked, CircleDashed, Clock, Download, FileJson, FileSpreadsheet, FileText, Folder, FolderOpen,
+  FolderSync, Image as ImageIcon, Loader2, Settings2, type LucideIcon,
 } from 'lucide-react'
 
 import type { PalaceFile, PalaceFolder } from '@/api/superAssistant'
+import {
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger,
+} from '@/components/ui/context-menu'
 import { Tree, TreeItem, TreeItemLabel } from '@/components/ui/tree'
 import {
   buildPalaceTree,
+  isRemoteSyncPath,
   normalizePalacePath,
   PALACE_ONTOLOGY_DOCS_DIR_ID,
+  PALACE_REMOTE_SYNC_DIR_ID,
   PALACE_TREE_ROOT,
   palaceDirId,
   palaceFileId,
   palaceOntologyDocId,
   palaceTreeDirIds,
+  REMOTE_SYNC_TREE_ROOT,
   type PalaceOntologyDocRow,
   type PalaceTreeItemData,
 } from './palaceTreeModel'
@@ -63,6 +71,12 @@ interface PalaceFileTreeProps {
   inline: PalaceInlineAction | null
   onInlineSubmit: (value: string) => void
   onInlineCancel: () => void
+  /** 打开「远程同步设置」二级弹窗（右键卡/目录行设置按钮/空态引导） */
+  onOpenSyncSettings: () => void
+  /** 直接触发同步脚本下载（右键卡「下载同步脚本」/空态引导按钮） */
+  onDownloadSyncScript: () => void
+  /** 同步脚本下载进行中：空态引导按钮的防重与加载态 */
+  syncDownloading: boolean
 }
 
 const FILE_ICON_SIZE = 14
@@ -100,6 +114,7 @@ export default function PalaceFileTree({
   files, folders, ontologyDocs, selectedFileId, selectedOntologyDocId, selectedDirPath,
   onSelectFile, onSelectOntologyDoc, onSelectDir,
   onMoveFile, onMoveFolder, inline, onInlineSubmit, onInlineCancel,
+  onOpenSyncSettings, onDownloadSyncScript, syncDownloading,
 }: PalaceFileTreeProps) {
   const model = useMemo(() => buildPalaceTree(files, folders, ontologyDocs), [files, folders, ontologyDocs])
   const modelRef = useRef(model)
@@ -135,17 +150,23 @@ export default function PalaceFileTree({
     // draggedItemOverwritesSelection 保持默认 true：未选中直接拖拽时拖的就是
     // 被拖项（若为 false，空选中会让拖拽变成拖「零个条目」，onDrop 不生效）
     canReorder: false,
-    // 本体文档行与「本体文档」虚拟目录均不可拖拽（只读，随发布事件演化）
+    // 本体文档行、「本体文档」与「远程同步」虚拟目录及其子树均不可拖拽
+    // （只读：前者随发布事件演化，后者由同步脚本镜像写入）
     canDrag: items => items.every(item => {
       const data = item.getItemData()
-      if (data?.kind === 'file') return true
-      if (data?.kind === 'dir' && !data.ontologyDocsDir) return !!data.dirId
+      if (data?.kind === 'file') return !isRemoteSyncPath(data.file?.path)
+      if (data?.kind === 'dir' && !data.ontologyDocsDir && !data.remoteSyncDir) {
+        return !!data.dirId && !isRemoteSyncPath(data.path)
+      }
       return false
     }),
     canDrop: (items, target) => {
       if (!target.item.isFolder()) return false
       // 「本体文档」目录只读：禁止任何拖入
       if (target.item.getId() === PALACE_ONTOLOGY_DOCS_DIR_ID) return false
+      // 「远程同步」目录与其 synced/ 子树只读：脚本为唯一写入方
+      if (target.item.getId() === PALACE_REMOTE_SYNC_DIR_ID) return false
+      if (isRemoteSyncPath(target.item.getItemData()?.path)) return false
       const targetPath = target.item.getId() === PALACE_TREE_ROOT
         ? '' : target.item.getItemData()?.path ?? ''
       return items.every(item => {
@@ -212,8 +233,14 @@ export default function PalaceFileTree({
     if (!selectedFileId) return
     const dirPath = normalizePalacePath(files.find(file => file.id === selectedFileId)?.path)
     if (!dirPath) return
+    // 顶层 synced 收编后模型中没有 dir:synced 节点：定位其下文件须展开虚拟目录本体
+    const containerId = dirPath === REMOTE_SYNC_TREE_ROOT
+      ? PALACE_REMOTE_SYNC_DIR_ID
+      : palaceDirId(dirPath)
     try {
-      instance.getItemInstance(palaceDirId(dirPath)).expand()
+      const container = instance.getItemInstance(containerId)
+      // 已展开则跳过：headless-tree 对 expandedItems 追加不去重，4s 轮询会无限累积
+      if (!container.isExpanded()) container.expand()
     } catch {
       // 结构缓存尚未收敛（layout rebuild 前），跳过本次 reveal
     }
@@ -273,6 +300,37 @@ export default function PalaceFileTree({
     </div>
   )
 
+  // 「远程同步」空态引导：目录常显但从未同步时给出可见入口（右键不可见的
+  // 兜底）。两行堆叠防截断（248px 窄档单行放不下整句指引）；本行不是
+  // TreeItem，须阻断 dragover 冒泡——树容器对 dragover 无条件 preventDefault，
+  // 放任冒泡会把拖放落点判成根目录（容器级 drop 的存量语义）。
+  const renderSyncHintRow = (level: number): ReactNode => (
+    <div
+      key="palace-sync-hint-row"
+      role="none"
+      data-testid="palace-sync-empty-hint"
+      style={{ '--tree-padding': `${level * 16}px` } as CSSProperties}
+      onDragOver={event => event.stopPropagation()}
+      onDrop={event => { event.stopPropagation(); event.preventDefault() }}
+      className="flex flex-col gap-0.5 py-1 pe-2 ps-[var(--tree-padding)]"
+    >
+      <span
+        className="text-[11px] leading-4 text-[var(--color-text-tertiary)]"
+        title="尚未同步内容；右键本目录或点击目录行右侧按钮打开设置，设置弹窗内也可下载脚本"
+      >
+        尚未同步内容；右键本目录或点右侧按钮打开设置。
+      </span>
+      <button
+        type="button"
+        onClick={onDownloadSyncScript}
+        disabled={syncDownloading}
+        className="inline-flex w-fit items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+      >
+        {syncDownloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />} 下载同步脚本
+      </button>
+    </div>
+  )
+
   const rows: ReactNode[] = []
   if (inline && inlineDirItemId === PALACE_TREE_ROOT) rows.push(renderInlineRow(0))
   for (const item of tree.getItems()) {
@@ -287,76 +345,139 @@ export default function PalaceFileTree({
     const selectedDir = dirPath != null && dirPath === selectedDirPath && !selectedFileId
     // 目录直接子节点数（含子目录与文件；本体文档目录同理），右侧徽章展示
     const childCount = data?.kind === 'dir' ? (model.children[item.getId()]?.length ?? 0) : 0
+    const remoteSyncDirRow = data?.kind === 'dir' && data.remoteSyncDir === true
+    const row = (
+      <TreeItem
+        item={item}
+        onItemSelect={handleSelect}
+        data-palace-file={file ? file.id : undefined}
+        data-palace-dir={dirPath}
+        data-selected-dir={selectedDir || undefined}
+        className={`py-0.5 ${dragTarget ? 'rounded-lg ring-2 ring-inset ring-[var(--color-primary)]' : ''}`}
+      >
+        <TreeItemLabel
+          item={item}
+          className={(selectedDir || remoteSyncDirRow)
+            ? `${selectedDir ? 'bg-[var(--color-bg-hover)] ' : ''}${remoteSyncDirRow ? 'pe-8' : ''}`
+            : undefined}
+        >
+          {data?.kind === 'dir' ? (
+            <>
+              {data.remoteSyncDir ? (
+                <FolderSync size={FILE_ICON_SIZE} className="shrink-0 text-[var(--color-primary)]" />
+              ) : item.isExpanded() ? (
+                <FolderOpen size={FILE_ICON_SIZE} className="shrink-0 text-[var(--color-primary)]" />
+              ) : (
+                <Folder size={FILE_ICON_SIZE} className="shrink-0 text-[var(--color-primary)]" />
+              )}
+              <span
+                className="truncate text-[13px]"
+                title={data.remoteSyncDir ? '远程同步（只读，由同步脚本镜像写入）· 右键或点右侧按钮打开设置' : dirPath || undefined}
+              >
+                {data.name}
+              </span>
+              <span
+                aria-label={`${data.name} 下共 ${childCount} 项`}
+                className="ml-auto shrink-0 rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] tabular-nums leading-4 text-[var(--color-text-tertiary)]"
+              >
+                {childCount}
+              </span>
+            </>
+          ) : data?.kind === 'ontology-doc' && ontologyDoc ? (
+            <>
+              <BookMarked size={FILE_ICON_SIZE} className="shrink-0 text-brand-ink" />
+              <span
+                className="truncate text-[13px]"
+                title={`${ontologyDoc.ontologyName} · ${ontologyDoc.versionNumber}${ontologyDoc.error ? ` · ${ontologyDoc.error}` : ''}`}
+              >
+                {ontologyDoc.title}
+              </span>
+              {ontologyDoc.status === 'pending-sync' && (
+                <Clock size={11} className="ml-auto shrink-0 text-slate-300" aria-label="待同步" />
+              )}
+              {ontologyDoc.status === 'failed' && (
+                <AlertCircle size={11} className="ml-auto shrink-0 text-red-500" aria-label="抽取失败" />
+              )}
+              {extracting && (
+                <Loader2 size={11} className="ml-auto shrink-0 animate-spin text-amber-500" aria-label="抽取中" />
+              )}
+            </>
+          ) : (
+            <>
+              <FileIcon
+                size={FILE_ICON_SIZE}
+                className={`shrink-0 ${file?.status === 'draft' ? 'opacity-50' : ''} ${iconClass}`}
+              />
+              <span
+                className={`truncate text-[13px] ${file?.status === 'draft' ? 'text-[var(--color-text-tertiary)]' : ''}`}
+                title={file?.error || file?.filename}
+              >
+                {file?.filename}
+              </span>
+              {file?.status === 'draft' && (
+                <CircleDashed size={11} className="ml-auto shrink-0 text-slate-300" aria-label="草稿" />
+              )}
+              {file?.status === 'failed' && (
+                <AlertCircle size={11} className="ml-auto shrink-0 text-red-500" aria-label="抽取失败" />
+              )}
+              {extracting && (
+                <Loader2 size={11} className="ml-auto shrink-0 animate-spin text-amber-500" aria-label="抽取中" />
+              )}
+            </>
+          )}
+        </TreeItemLabel>
+      </TreeItem>
+    )
+    if (remoteSyncDirRow) {
+      // 右键卡只包目录行本体：设置按钮绝对定位随行（wrapper 只含行则 top-1/2
+      // 恒为行中心），空态引导行作为兄弟 DOM 随后推入；wrapper 与引导行都非
+      // TreeItem 表面，须自带 dragover 阻断（否则容器级 drop 落根目录）
+      rows.push(
+        // modal 缺省 true：模态菜单自带 FocusScope，可与外层模态弹窗的
+        // 焦点域正确交接；modal={false}（会话列表先例，弹窗外专用）在模态
+        // 弹窗内会被弹窗焦点陷阱立即关闭（Radix 双运行时层互不识别，
+        // 见 components/README「Radix 弹层叠加已知坑」）
+        <ContextMenu key={`row-${item.getId()}`}>
+          <ContextMenuTrigger asChild>
+            <div
+              role="none"
+              className="relative"
+              data-testid="palace-remote-sync-row"
+              onDragOver={event => event.stopPropagation()}
+              onDrop={event => { event.stopPropagation(); event.preventDefault() }}
+            >
+              {row}
+              {/* 设置按钮绝对定位在 TreeItem（button 元素）之外：避免 button 嵌套；行内 pe-8 让位（24px 热区） */}
+              <button
+                type="button"
+                data-testid="palace-sync-settings-button"
+                aria-label="远程同步设置"
+                title="远程同步设置（也可右键本目录）"
+                onClick={event => { event.stopPropagation(); onOpenSyncSettings() }}
+                className="absolute right-1 top-1/2 z-20 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Settings2 size={12} />
+              </button>
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="w-52">
+            <ContextMenuItem data-ctx-item="palace-sync-settings" onSelect={() => onOpenSyncSettings()}>
+              <Settings2 size={13} className="shrink-0" /> 远程同步设置
+            </ContextMenuItem>
+            <ContextMenuItem data-ctx-item="palace-sync-download" onSelect={() => onDownloadSyncScript()}>
+              <Download size={13} className="shrink-0" /> 下载同步脚本
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>,
+      )
+      if (item.isExpanded() && childCount === 0) {
+        rows.push(renderSyncHintRow(item.getItemMeta().level + 1))
+      }
+      continue
+    }
     rows.push(
       <div key={`row-${item.getId()}`}>
-        <TreeItem
-          item={item}
-          onItemSelect={handleSelect}
-          data-palace-file={file ? file.id : undefined}
-          data-palace-dir={dirPath}
-          data-selected-dir={selectedDir || undefined}
-          className={`py-0.5 ${dragTarget ? 'rounded-lg ring-2 ring-inset ring-[var(--color-primary)]' : ''}`}
-        >
-          <TreeItemLabel item={item} className={selectedDir ? 'bg-[var(--color-bg-hover)]' : undefined}>
-            {data?.kind === 'dir' ? (
-              <>
-                {item.isExpanded() ? (
-                  <FolderOpen size={FILE_ICON_SIZE} className="shrink-0 text-[var(--color-primary)]" />
-                ) : (
-                  <Folder size={FILE_ICON_SIZE} className="shrink-0 text-[var(--color-primary)]" />
-                )}
-                <span className="truncate text-[13px]" title={dirPath || undefined}>{data.name}</span>
-                <span
-                  aria-label={`${data.name} 下共 ${childCount} 项`}
-                  className="ml-auto shrink-0 rounded-full bg-[var(--color-bg-hover)] px-1.5 text-[10px] tabular-nums leading-4 text-[var(--color-text-tertiary)]"
-                >
-                  {childCount}
-                </span>
-              </>
-            ) : data?.kind === 'ontology-doc' && ontologyDoc ? (
-              <>
-                <BookMarked size={FILE_ICON_SIZE} className="shrink-0 text-brand-ink" />
-                <span
-                  className="truncate text-[13px]"
-                  title={`${ontologyDoc.ontologyName} · ${ontologyDoc.versionNumber}${ontologyDoc.error ? ` · ${ontologyDoc.error}` : ''}`}
-                >
-                  {ontologyDoc.title}
-                </span>
-                {ontologyDoc.status === 'pending-sync' && (
-                  <Clock size={11} className="ml-auto shrink-0 text-slate-300" aria-label="待同步" />
-                )}
-                {ontologyDoc.status === 'failed' && (
-                  <AlertCircle size={11} className="ml-auto shrink-0 text-red-500" aria-label="抽取失败" />
-                )}
-                {extracting && (
-                  <Loader2 size={11} className="ml-auto shrink-0 animate-spin text-amber-500" aria-label="抽取中" />
-                )}
-              </>
-            ) : (
-              <>
-                <FileIcon
-                  size={FILE_ICON_SIZE}
-                  className={`shrink-0 ${file?.status === 'draft' ? 'opacity-50' : ''} ${iconClass}`}
-                />
-                <span
-                  className={`truncate text-[13px] ${file?.status === 'draft' ? 'text-[var(--color-text-tertiary)]' : ''}`}
-                  title={file?.error || file?.filename}
-                >
-                  {file?.filename}
-                </span>
-                {file?.status === 'draft' && (
-                  <CircleDashed size={11} className="ml-auto shrink-0 text-slate-300" aria-label="草稿" />
-                )}
-                {file?.status === 'failed' && (
-                  <AlertCircle size={11} className="ml-auto shrink-0 text-red-500" aria-label="抽取失败" />
-                )}
-                {extracting && (
-                  <Loader2 size={11} className="ml-auto shrink-0 animate-spin text-amber-500" aria-label="抽取中" />
-                )}
-              </>
-            )}
-          </TreeItemLabel>
-        </TreeItem>
+        {row}
         {inline && inlineDirItemId === item.getId() && renderInlineRow(item.getItemMeta().level + 1)}
       </div>,
     )

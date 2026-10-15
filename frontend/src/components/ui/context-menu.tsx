@@ -55,7 +55,9 @@ const ContextMenuSubContent = React.forwardRef<
   <ContextMenuPrimitive.SubContent
     ref={ref}
     className={cn(
-      'z-50 min-w-[8rem] overflow-hidden rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-lg animate-fade-in',
+      // z 与模态弹窗同层（portal 后挂载必在其上）：弹窗内右键菜单曾被
+      // z-50 压在 DialogContent(--z-modal) 之下而不可点击
+      'z-[var(--z-modal)] min-w-[8rem] overflow-hidden rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-lg animate-fade-in',
       className,
     )}
     {...props}
@@ -71,7 +73,9 @@ const ContextMenuContent = React.forwardRef<
     <ContextMenuPrimitive.Content
       ref={ref}
       className={cn(
-        'z-50 min-w-[9rem] overflow-hidden rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-lg animate-fade-in',
+        // z 与模态弹窗同层（portal 后挂载必在其上）：弹窗内右键菜单曾被
+        // z-50 压在 DialogContent(--z-modal) 之下而不可点击
+        'z-[var(--z-modal)] min-w-[9rem] overflow-hidden rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-lg animate-fade-in',
         className,
       )}
       {...props}

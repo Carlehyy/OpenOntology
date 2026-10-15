@@ -286,7 +286,7 @@ def render_sync_script(
 _SYNC_SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OpenOntology 知识图谱「文件夹同步」脚本（由平台自动生成）。
+OpenOntology 知识图谱「远程同步」脚本（由平台自动生成）。
 
 把 CONFIG 里 LOCAL_DIR 指定的本地文件夹镜像同步到平台知识图谱（记忆宫殿）
 的 synced/ 子树：新增/变更文件上传后自动触发图谱抽取；本地删除/改名的
@@ -325,7 +325,7 @@ import uuid
 
 CONFIG = {
     "BASE_URL": __BASE_URL__,  # 平台地址（形如 http://your-host:8000）；部署在远端时请按实际地址修改
-    "TOKEN": __TOKEN__,        # 同步令牌（已内嵌；若失效请在平台「外部集成 → 文件夹同步」重新下载）
+    "TOKEN": __TOKEN__,        # 同步令牌（已内嵌；若失效请在平台「知识图谱 → 远程同步」重新下载）
     "LOCAL_DIR": "",           # 要同步的本地文件夹，例如 %USERPROFILE%/Documents/mydocs 或 ~/Documents/mydocs
     "REMOTE_ROOT": "",         # 平台侧目标子树；留空自动使用 synced/<本地文件夹名>
 }
@@ -654,7 +654,7 @@ def remote_label(item):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenOntology 知识图谱文件夹同步")
+    parser = argparse.ArgumentParser(description="OpenOntology 知识图谱远程同步")
     parser.add_argument("--folder", help="本地文件夹路径（缺省用 CONFIG['LOCAL_DIR']）")
     parser.add_argument("--root", help="平台侧目标子树（缺省用 CONFIG['REMOTE_ROOT'] 或 synced/<文件夹名>）")
     parser.add_argument("--dry-run", action="store_true", help="只预览计划，不执行任何改动")
@@ -666,7 +666,7 @@ def main():
     if not base_url or not base_url.lower().startswith(("http://", "https://")):
         die("CONFIG['BASE_URL'] 未配置：请填写平台地址（例如 http://your-host:8000）")
     if not token:
-        die("CONFIG['TOKEN'] 未配置：请在平台「外部集成 → 文件夹同步」重新下载脚本")
+        die("CONFIG['TOKEN'] 未配置：请在平台「知识图谱 → 远程同步」重新下载脚本")
     lowered = base_url.lower()
     if lowered.startswith("http://") and "localhost" not in lowered and "127." not in lowered:
         log("[提示] 当前经未加密 HTTP 传输，建议平台侧启用 HTTPS 后改用 https 地址")
@@ -705,7 +705,7 @@ def main():
         file_map, folder_paths, in_flight = remote_state(remote_root)
     except ApiError as exc:
         if exc.status == 401:
-            die("令牌无效或已被重置：请在平台「外部集成 → 文件夹同步」重新下载脚本")
+            die("令牌无效或已被重置：请在平台「知识图谱 → 远程同步」重新下载脚本")
         die("连接平台失败: %s（请检查 CONFIG['BASE_URL'] 是否指向正确地址）" % exc.message)
     _state["in_flight"] = in_flight
 
