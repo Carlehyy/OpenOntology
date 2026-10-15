@@ -89,7 +89,8 @@
   --color-success: #2d8a4e;
   --color-success-hover: #247a3e;
   --color-success-bg: #e8f5e9;
-  --color-warning: #c9861a;
+  /* 文字级警示（12px 小字常态使用）须过 AA 4.5:1：旧值 #c9861a 对白底仅 3.04 */
+  --color-warning: #b45309;
   --color-warning-bg: #fff8e1;
   --color-danger: var(--destructive);
   --color-danger-hover: #a83232;
@@ -225,7 +226,10 @@
 
   /* ── 强调色语义阶（accent 深色档）── */
   --color-accent-deep: #065f46;
-  --color-accent-soft: #022c22;
+  /* 深色档软底校准（2026-10-16 对抗审查）：旧值 #022c22 比弹窗底 #161c26 还暗，
+     选中 chip（bg-brand-soft）呈现为"更暗的洞"、悬停反馈(1.35)强于选中态(1.08)。
+     #065f46=emerald-800：对弹窗底 2.2:1、对 hover 轨 1.8:1，brand-ink 文字其上 5.0:1 全档达标 */
+  --color-accent-soft: #065f46;
   --color-accent-mist: #064e3b;
   --color-accent-line: #065f46;
   --color-accent-ink: #6ee7b7;

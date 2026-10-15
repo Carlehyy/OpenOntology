@@ -1507,6 +1507,76 @@ test('消息通知：三渠道时「全选」恢复默认广播——部分选�
   expect(JSON.parse(mocks.notifCreates[0]).channelIds).toBeUndefined()
 })
 
+test('消息通知：渠道列表加载失败——行内报错可重试，发送钮禁用到列表就绪', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  let failChannels = true
+  await page.route('**/api/v2/notifications/channels', async route => {
+    if (route.request().method() === 'POST') return route.fallback()
+    if (failChannels) {
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Internal Server Error' }) })
+    }
+    return route.fallback()
+  })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-nav="compose"]').click()
+  const composePanel = page.locator('[data-notifications-compose-panel]')
+  await expect(composePanel).toBeVisible()
+  // 失败态：行内 role=alert + 重试入口；发送钮视觉禁用（拒绝从点击后提前到禁用态）。
+  // 渠道配置分区常挂载（隐藏不卸载）也渲染同款错误文案，断言须限定 compose 面板作用域
+  await expect(composePanel.getByText('渠道列表加载失败：Internal Server Error')).toBeVisible()
+  const send = page.locator('[data-notifications-compose-send]')
+  await expect(send).toBeDisabled()
+  // 重试成功后恢复：chips 回来（默认全选），按钮可用
+  failChannels = false
+  await composePanel.getByRole('button', { name: '重试' }).click()
+  await expect(page.locator('[data-notifications-compose-channel="ch-1"]')).toHaveAttribute('aria-checked', 'true')
+  await expect(send).toBeEnabled()
+})
+
+test('消息通知：无启用渠道空态——「渠道配置」直达跳转且焦点落在分区 tab 上', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.route('**/api/v2/notifications/channels', async route => {
+    if (route.request().method() === 'POST') return route.fallback()
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify([]) })
+  })
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-nav="compose"]').click()
+  await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
+  await expect(page.getByText(/暂无启用的渠道，消息将仅保存到站内列表/)).toBeVisible()
+  await page.locator('[data-notifications-compose-goto-config]').click()
+  // 同弹窗切到渠道配置分区：tab 选中态同步 + 焦点送上新 tab（不逃出弹窗）
+  await expect(page.getByRole('tab', { name: '渠道配置' })).toBeFocused()
+  await expect(page.getByRole('tab', { name: '渠道配置' })).toHaveAttribute('aria-selected', 'true')
+  const focusInDialog = await page.evaluate(() => {
+    const dialog = document.querySelector('[role="dialog"]')
+    return !!dialog && dialog.contains(document.activeElement)
+  })
+  expect(focusInDialog).toBe(true)
+})
+
+test('消息通知（窄屏390px）：发送分区单列冒烟——chips 可点选、计数即时', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  // 窄屏下工作台侧栏是抽屉态：先打开导航抽屉，再进入消息通知
+  await page.getByRole('button', { name: '打开工作台导航' }).click()
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await page.locator('[data-notifications-nav="compose"]').click()
+  await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
+  // <xl 单列：转发渠道区位于正文之后，点选反馈即时
+  await page.locator('[data-notifications-compose-channel="ch-1"]').click()
+  await expect(page.locator('[data-notifications-compose-channel="ch-1"]')).toHaveAttribute('aria-checked', 'false')
+  await expect(page.getByText('已选 1 / 2')).toBeVisible()
+})
+
 test('消息通知：接入密钥——签发交付卡、明文仅一次展示、列表与吊销', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
