@@ -39,7 +39,7 @@ export { errorText }
 export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, onEscapeKeyDown, onInteractOutside, icon, open = true }: {
   title: string
   description?: string
-  size?: 'default' | 'large' | 'wide'
+  size?: 'default' | 'large' | 'wide' | 'xwide'
   onClose: () => void
   children: React.ReactNode
   /** 追加到弹层根节点的类（如外部集成的固定高度） */
@@ -61,6 +61,7 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
     default: 'max-h-[90dvh] w-[min(92vw,36rem)]',
     large: 'max-h-[85dvh] w-[min(94vw,48rem)]',
     wide: 'max-h-[90dvh] w-[min(96vw,64rem)]',
+    xwide: 'max-h-[90dvh] w-[min(96vw,88rem)]',
   }[size]
 
   return (

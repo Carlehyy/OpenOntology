@@ -639,7 +639,7 @@ export default function NotificationsDialog({
       <DialogShell
         title="消息通知"
         description="消息中转站：多入口接收，站内查看处置，按配置的渠道自动或手动转发"
-        size="wide"
+        size="xwide"
         icon={<Bell size={18} />}
         onClose={onClose}
         onEscapeKeyDown={handleDialogEscape}
@@ -647,7 +647,7 @@ export default function NotificationsDialog({
         // 只挡遮罩——Esc 分层回退与右上关闭按钮保持可用（工作台型弹窗惯例，
         // 不用 DialogContent 的 dismissible，它会连 Esc 一起禁掉）
         onInteractOutside={event => event.preventDefault()}
-        contentClassName="h-[min(85dvh,46rem)]"
+        contentClassName="h-[min(88dvh,52rem)]"
       >
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[9.5rem_minmax(0,1fr)]">
           {/* 左侧分区导航：宽屏竖排；窄屏横排单行可横滚（避免纵向按钮列吞掉首屏） */}
@@ -702,8 +702,9 @@ export default function NotificationsDialog({
                     className={`${selectedId ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-[var(--color-border)] md:w-[22rem]`}
                     data-notifications-list
                   >
-                    {/* 列表列头：筛选只作用于本列（控件贴作用对象）+ 图标化「全部已读」，单行紧凑 */}
-                    <div className="scrollbar-none flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--color-border)] px-1.5 py-1.5">
+                    {/* 列表列头：筛选只作用于本列（控件贴作用对象）+ 图标化「全部已读」；
+                        h-10 与右栏详情头同行高钉死——两列分割线必须落在同一水平线 */}
+                    <div className="scrollbar-none flex h-10 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--color-border)] px-1.5">
                       {NOTIFICATION_TABS.map(({ key, label }) => {
                         const active = tab === key
                         return (
@@ -884,12 +885,20 @@ export default function NotificationsDialog({
                         </div>
                       ) : (
                         <>
-                          <div className="shrink-0 border-b border-[var(--color-border)] p-4">
-                            <div className="flex items-start gap-2">
-                              <h3 className="min-w-0 flex-1 text-sm font-semibold leading-6 text-[var(--color-text-primary)]">
-                                {selected.title}
-                              </h3>
-                              <div className="flex shrink-0 items-center gap-0.5">
+                          {/* 详情头：≥lg 单行收纳（优先级章 + 标题 + 来源/时间 + 操作图标同排），
+                              h-10 与左栏过滤行钉同高——两列分割线落在同一水平线；
+                              <lg 右栏窄（md 带仅 ~233px），标题整行换到第二行截断，避免被图标挤到不可读 */}
+                          <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-[var(--color-border)] px-3 py-1 lg:h-10 lg:flex-nowrap lg:py-0">
+                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${priorityStyle(selected.priority).chipClass}`}>
+                              {priorityStyle(selected.priority).label}
+                            </span>
+                            <h3 className="order-last mb-0.5 w-full truncate text-sm font-semibold text-[var(--color-text-primary)] lg:order-none lg:mb-0 lg:min-w-0 lg:w-auto lg:flex-1" title={selected.title}>
+                              {selected.title}
+                            </h3>
+                            <span className="hidden shrink-0 text-xs text-[var(--color-text-tertiary)] lg:inline" data-notifications-detail-meta>
+                              {sourceTypeLabel(selected.sourceType)} · {selected.sourceSystem} · {formatDateTime(selected.createdAt)}
+                            </span>
+                            <div className="ml-auto flex shrink-0 items-center gap-0.5 lg:ml-0">
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <button
@@ -949,14 +958,6 @@ export default function NotificationsDialog({
                                   </Tooltip>
                                 )}
                               </div>
-                            </div>
-                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
-                              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${priorityStyle(selected.priority).chipClass}`}>
-                                {priorityStyle(selected.priority).label}
-                              </span>
-                              <span>{sourceTypeLabel(selected.sourceType)} · {selected.sourceSystem}</span>
-                              <span>{formatDateTime(selected.createdAt)}</span>
-                            </div>
                           </div>
                           {forwardOpen && (
                             <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-base)] p-3" data-notifications-forward-panel>

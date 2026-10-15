@@ -1226,6 +1226,9 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.locator('[data-notifications-detail]')).toContainText('数据任务失败报告')
   // 详情头无删除入口：处置只保留标记/归档/转发/标为未读（详情已渲染，此时计数才有守护力）
   await expect(page.locator('[data-notifications-delete]')).toHaveCount(0)
+  // 详情头单行化：lg+ 宽度下来源/时间与优先级章、标题、操作图标同排（<lg 标题退居第二行保可读）
+  await expect(page.locator('[data-notifications-detail-meta]')).toBeVisible()
+  await expect(page.locator('[data-notifications-detail-meta]')).toContainText('platform')
   await expect(page.locator('[data-notifications-detail] table')).toBeVisible()
   await expect(page.locator('[data-notifications-detail] pre')).toBeVisible()
   await expect(page.locator('[data-notifications-attachment="na-1"]')).toBeVisible()
