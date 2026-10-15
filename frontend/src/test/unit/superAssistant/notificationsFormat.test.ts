@@ -131,29 +131,21 @@ describe('stripMarkdownPreview', () => {
 })
 
 describe('listEmptyCopy', () => {
-  it('未读空态：有历史消息时给「查看全部」引导，否则只说明', () => {
-    const withHistory = listEmptyCopy('unread', 3)
-    assert.equal(withHistory.title, '没有未读消息')
-    assert.equal(withHistory.allCtaTotal, 3)
-    const coldStart = listEmptyCopy('unread', 0)
-    assert.equal(coldStart.allCtaTotal, undefined)
-    assert.equal(coldStart.composeCta, undefined)
-  })
-
   it('已标记/已归档空态：只讲语义，不带投递接入话术', () => {
-    const starred = listEmptyCopy('starred', 5)
+    const starred = listEmptyCopy('starred')
     assert.equal(starred.title, '还没有标记的消息')
-    assert.equal(starred.allCtaTotal, undefined)
+    assert.equal(starred.composeCta, undefined)
     assert.match(starred.description, /星标/)
-    const archived = listEmptyCopy('archived', 5)
+    const archived = listEmptyCopy('archived')
     assert.equal(archived.title, '没有已归档消息')
     assert.match(archived.description, /归档不会删除/)
+    assert.match(archived.description, /全部消息/)
   })
 
-  it('全部空态：冷启动引导去发送；未知 tab 回退全部语义', () => {
-    const all = listEmptyCopy('all', 0)
+  it('全部消息空态：冷启动引导去发送；未知 tab 回退全部消息语义', () => {
+    const all = listEmptyCopy('all')
     assert.equal(all.composeCta, true)
-    assert.equal(listEmptyCopy('whatever', 0).title, '还没有消息')
+    assert.equal(listEmptyCopy('whatever').title, '还没有消息')
   })
 })
 

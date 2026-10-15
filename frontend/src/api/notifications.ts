@@ -3,7 +3,7 @@ import { absoluteFileUrl } from './fileAssets'
 
 export type NotificationPriority = 'urgent' | 'high' | 'normal' | 'low'
 export type NotificationSourceType = 'manual' | 'internal' | 'ingest'
-export type NotificationTab = 'all' | 'unread' | 'starred' | 'archived'
+export type NotificationTab = 'all' | 'starred' | 'archived'
 
 export interface NotificationAttachment {
   id: string
@@ -115,7 +115,6 @@ export interface NotificationIngestKey {
   plaintextKey?: string
 }
 
-/** tab 顺序即用户处理路径：未读优先，全部 = 真全量（含已归档） */
 export interface NotificationStatsOverview {
   totalCount: number
   unreadCount: number
@@ -131,11 +130,11 @@ export interface NotificationStats {
   channels: { channelId: string; name: string; sent: number; failed: number; pending: number }[]
 }
 
+/** tab 顺序即用户处理路径：全部消息（未归档收件箱）优先；与「已归档」互补，两者并集 = 历史全部消息（summary.totalCount） */
 export const NOTIFICATION_TABS: { key: NotificationTab; label: string }[] = [
-  { key: 'unread', label: '未读' },
+  { key: 'all', label: '全部消息' },
   { key: 'starred', label: '已标记' },
   { key: 'archived', label: '已归档' },
-  { key: 'all', label: '全部' },
 ]
 
 export const notificationsApi = {
@@ -180,9 +179,6 @@ export const notificationsApi = {
     channelIds: string[],
   ): Promise<{ channelId: string; ok: boolean; message: string }[]> =>
     apiClientV2.post(`/notifications/${messageId}/forward`, { channelIds }),
-
-  remove: (id: string): Promise<{ deleted: string }> =>
-    apiClientV2.delete(`/notifications/${id}`),
 
   channelTemplates: (): Promise<NotificationChannelTemplate[]> =>
     apiClientV2.get('/notifications/channel-templates'),

@@ -17,7 +17,6 @@ import {
   type NotificationChannel,
   type NotificationIngestKey,
   type NotificationAttachment,
-  type NotificationMessage,
   type NotificationPriority,
   type NotificationTab,
 } from '@/api/notifications'
@@ -44,7 +43,7 @@ import {
 
 /**
  * 消息中转站弹窗：左侧分区导航（消息列表 / 发送消息 / 渠道配置 / 消息统计）+ 右侧内容。
- * - 消息列表：列表列自带筛选头（未读默认 → 已标记 → 已归档 → 全部=真全量）+ 图标化「全部已读」，
+ * - 消息列表：列表列自带筛选头（全部消息默认 → 已标记 → 已归档；全部消息=未归档收件箱，与已归档互补）+ 图标化「全部已读」，
  *   右区只有「列表 / 详情」两块；窄屏由选中态驱动单栏切换（Esc 先回列表再关弹窗）。
  * - 渠道配置：按「消息入口（外部 → 平台）」「消息出口（平台 → 外部）」两大分组组织——
  *   入口=投递接入（端点/密钥，签发表单收起、已吊销密钥折叠），出口=发件邮箱 + 转发渠道。
@@ -139,9 +138,8 @@ export default function NotificationsDialog({
 }) {
   const queryClient = useQueryClient()
   const [nav, setNav] = useState<NavSection>('messages')
-  const [tab, setTab] = useState<NotificationTab>('unread')
+  const [tab, setTab] = useState<NotificationTab>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [deleting, setDeleting] = useState<NotificationMessage | null>(null)
   const [keyName, setKeyName] = useState('')
   const [keyScope, setKeyScope] = useState('')
   const [mintedKey, setMintedKey] = useState<NotificationIngestKey | null>(null)
@@ -181,8 +179,7 @@ export default function NotificationsDialog({
   const [composeChannelIds, setComposeChannelIds] = useState<Set<string> | null>(null)
 
   // 只失效列表与徽章；detail 缓存由 setQueryData 精确写入——
-  // 若前缀失效命中 detail，会触发「GET 详情即自动已读」把刚标回的未读打回，
-  // 删除场景还会对已删消息发起 404 请求
+  // 若前缀失效命中 detail，会触发「GET 详情即自动已读」把刚标回的未读打回
   const invalidateLists = () => {
     void queryClient.invalidateQueries({ queryKey: ['notifications', 'page'] })
     void queryClient.invalidateQueries({ queryKey: ['notifications', 'summary'] })
@@ -330,8 +327,8 @@ export default function NotificationsDialog({
       setComposePriority('normal')
       setComposeChannelIds(null)
       setSelectedId(data.id)
-      // 新消息未读未归档：切到未读视图保证列表与选中详情同屏可见
-      setTab('unread')
+      // 新消息未读未归档：切到全部消息视图保证列表与选中详情同屏可见
+      setTab('all')
       setNav('messages')
       queryClient.setQueryData(['notifications', 'detail', data.id], data)
       invalidateLists()
@@ -495,30 +492,12 @@ export default function NotificationsDialog({
     onSettled: () => setTestingKeyId(null),
   })
 
-  const deleteMutation = useMutation({
-    mutationFn: notificationsApi.remove,
-    onSuccess: (_result, messageId) => {
-      toast.success('消息已删除')
-      if (selectedId === messageId) setSelectedId(null)
-      setDeleting(null)
-      queryClient.removeQueries({ queryKey: ['notifications', 'detail', messageId] })
-      invalidateLists()
-    },
-    onError: error => toast.error(errorText(error)),
-  })
-
   const items = useMemo(
     () => list.data?.pages.flatMap(page => page.items) ?? [],
     [list.data],
   )
   const selected = detail.data ?? null
   const unreadCount = summary.data?.unreadCount ?? 0
-
-  // 列表头空间有限：计数徽标只保留「未读」（与侧栏红点同源同义），其余 tab 靠列表内容自证
-  const tabCount = (key: NotificationTab): number | null => {
-    if (key === 'unread') return summary.data?.unreadCount ?? null
-    return null
-  }
 
   const activeIngestKeys = (ingestKeys.data ?? []).filter(key => key.enabled)
   const revokedIngestKeys = (ingestKeys.data ?? []).filter(key => !key.enabled)
@@ -726,7 +705,6 @@ export default function NotificationsDialog({
                     {/* 列表列头：筛选只作用于本列（控件贴作用对象）+ 图标化「全部已读」，单行紧凑 */}
                     <div className="scrollbar-none flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--color-border)] px-1.5 py-1.5">
                       {NOTIFICATION_TABS.map(({ key, label }) => {
-                        const count = tabCount(key)
                         const active = tab === key
                         return (
                           <button
@@ -742,11 +720,6 @@ export default function NotificationsDialog({
                             }`}
                           >
                             {label}
-                            {count !== null && count > 0 && (
-                              <span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
-                                {count > 99 ? '99+' : count}
-                              </span>
-                            )}
                           </button>
                         )
                       })}
@@ -788,24 +761,15 @@ export default function NotificationsDialog({
                         </div>
                       )}
                       {!list.isLoading && !list.isError && !list.isPlaceholderData && items.length === 0 && (() => {
-                        const empty = listEmptyCopy(tab, summary.data?.totalCount ?? 0)
+                        const empty = listEmptyCopy(tab)
                         return (
                           <div className="flex flex-col items-center gap-1.5 px-4 py-10 text-center" data-notifications-list-empty={tab}>
                             <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]" aria-hidden="true">
-                              {tab === 'starred' ? <Star size={18} /> : tab === 'archived' ? <Archive size={18} /> : tab === 'all' ? <Inbox size={18} /> : <MailOpen size={18} />}
+                              {tab === 'starred' ? <Star size={18} /> : tab === 'archived' ? <Archive size={18} /> : <Inbox size={18} />}
                             </span>
                             <p className="mt-1 text-xs font-medium text-[var(--color-text-secondary)]">{empty.title}</p>
                             <p className="max-w-60 text-xs leading-5 text-[var(--color-text-tertiary)]">{empty.description}</p>
-                            {empty.allCtaTotal ? (
-                              <button
-                                type="button"
-                                onClick={() => { setTab('all'); setSelectedId(null) }}
-                                className="mt-2 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-brand-ink transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                data-notifications-empty-all
-                              >
-                                查看全部 {empty.allCtaTotal} 条消息
-                              </button>
-                            ) : empty.composeCta ? (
+                            {empty.composeCta ? (
                               <button
                                 type="button"
                                 onClick={() => setNav('compose')}
@@ -984,20 +948,6 @@ export default function NotificationsDialog({
                                     <TooltipContent>标为未读</TooltipContent>
                                   </Tooltip>
                                 )}
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      onClick={() => setDeleting(selected)}
-                                      aria-label="删除消息"
-                                      className={`${iconButtonClass} hover:text-[var(--color-danger)]`}
-                                      data-notifications-delete
-                                    >
-                                      <Trash2 size={15} />
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>删除消息</TooltipContent>
-                                </Tooltip>
                               </div>
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
@@ -2026,16 +1976,6 @@ export default function NotificationsDialog({
         description={`「${revokingKey?.name ?? ''}」对应的外部系统将立即无法投递消息，且不可恢复。`}
         confirmText="吊销"
         variant="warning"
-      />
-      <ConfirmDialog
-        open={deleting !== null}
-        onClose={() => setDeleting(null)}
-        onConfirm={() => deleting && deleteMutation.mutate(deleting.id)}
-        loading={deleteMutation.isPending}
-        title="删除这条消息？"
-        description="消息与附件将从平台永久删除，所有管理员的视图都会移除。"
-        confirmText="删除"
-        variant="danger"
       />
     </TooltipProvider>
   )

@@ -176,7 +176,7 @@ interface MockOptions {
   chatDelayMs?: number
   /** 消息通知列表启用游标分页（每页 2 条）：验证「加载更多」链路 */
   notificationsPagination?: boolean
-  /** 全部消息置为已读：制造「未读空态但站内有历史消息」的引导场景 */
+  /** 全部消息置为已读：制造「无未读 + 站内有历史」场景（默认全部消息视图收纳历史、「全部已读」禁用） */
   notificationsAllRead?: boolean
   /** 完全无消息：制造中转站冷启动空态 */
   notificationsNone?: boolean
@@ -725,7 +725,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         unreadCount: notificationsState.filter(item => !item.isRead && !item.isArchived).length,
         starredCount: notificationsState.filter(item => item.isStarred && !item.isArchived).length,
         archivedCount: notificationsState.filter(item => item.isArchived).length,
-        // 全部 = 真全量（含已归档）
+        // totalCount = 真全量（= 全部消息未归档 + 已归档，对账锚点）
         totalCount: notificationsState.length,
       })
     }
@@ -766,11 +766,11 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         if (tab === 'unread') return !item.isRead && !item.isArchived
         if (tab === 'starred') return item.isStarred && !item.isArchived
         if (tab === 'archived') return item.isArchived
-        return true // all = 真全量（含已归档）
+        return !item.isArchived // all = 未归档收件箱（与已归档互补）
       })
       let nextCursor: string | null = null
       if (options.notificationsPagination) {
-        // 数值游标按 2 条/页翻到底（全部=真全量含归档，共 5 条）
+        // 数值游标按 2 条/页翻到底（作用于 tab 过滤后的条数；all 视图=未归档）
         const cursor = searchParams.get('cursor')
         const start = cursor ? Number(cursor) : 0
         nextCursor = start + 2 < items.length ? String(start + 2) : null
@@ -1190,14 +1190,15 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   )
   expect(navKeys).toEqual(['messages', 'compose', 'config', 'stats'])
 
-  // tab 顺序契约：未读(默认) → 已标记 → 已归档 → 全部
+  // tab 顺序契约：全部消息(默认) → 已标记 → 已归档
   const tabKeys = await dialog.locator('[data-notifications-tab]').evaluateAll(
     els => els.map(el => (el as HTMLElement).dataset.notificationsTab),
   )
-  expect(tabKeys).toEqual(['unread', 'starred', 'archived', 'all'])
-  await expect(dialog.locator('[data-notifications-tab="unread"]')).toHaveAttribute('aria-pressed', 'true')
+  expect(tabKeys).toEqual(['all', 'starred', 'archived'])
+  await expect(dialog.locator('[data-notifications-tab="all"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(dialog.locator('[data-notifications-tab="all"]')).toContainText('全部消息')
 
-  // 默认「未读」tab：两条未读可见（n-1 平台告警、n-2 外部告警），已读与已归档不可见
+  // 默认「全部消息」tab：未归档消息可见（n-1 平台告警、n-2 外部告警），已归档不可见
   await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-3"]')).toHaveCount(0)
@@ -1209,7 +1210,7 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(preview).toContainText('数据任务失败报告 数据库连接超时')
   await expect(preview).not.toContainText('#')
 
-  // tab 筛选语义：已标记仅 n-2；已归档仅 n-3；全部 = 真全量（n-3 也可见）
+  // tab 筛选语义：已标记仅 n-2；已归档仅 n-3；全部消息 = 未归档收件箱（n-3 不可见，与已归档互补）
   await page.locator('[data-notifications-tab="starred"]').click()
   await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
@@ -1218,11 +1219,13 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
   await page.locator('[data-notifications-tab="all"]').click()
   await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
-  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toHaveCount(0)
 
   // 详情：标题、Markdown 表格/代码块、附件行
   await page.locator('[data-notifications-item="n-1"]').click()
   await expect(page.locator('[data-notifications-detail]')).toContainText('数据任务失败报告')
+  // 详情头无删除入口：处置只保留标记/归档/转发/标为未读（详情已渲染，此时计数才有守护力）
+  await expect(page.locator('[data-notifications-delete]')).toHaveCount(0)
   await expect(page.locator('[data-notifications-detail] table')).toBeVisible()
   await expect(page.locator('[data-notifications-detail] pre')).toBeVisible()
   await expect(page.locator('[data-notifications-attachment="na-1"]')).toBeVisible()
@@ -1261,9 +1264,9 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   const createPayload = JSON.parse(mocks.notifCreates[0])
   expect(createPayload.title).toBe('巡检通知')
   expect(createPayload.channelIds).toEqual(['ch-1'])
-  // 发送成功自动回到消息列表并选中新消息（未读视图，列表与详情同屏）
+  // 发送成功自动回到消息列表并选中新消息（全部消息视图，列表与详情同屏）
   await expect(page.locator('[data-notifications-detail]')).toContainText('今日巡检')
-  await expect(page.locator('[data-notifications-tab="unread"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('[data-notifications-tab="all"]')).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('[data-notifications-compose-panel]')).toHaveCount(0)
 
   // 再发一条不动 chips：默认全选 = 省略 channelIds（后端缺省语义，无渠道数上限）
@@ -1320,7 +1323,7 @@ test('消息通知：游标分页——首页两条，加载更多补齐后续',
   await page.getByRole('button', { name: /消息通知/ }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
 
-  // 分页夹具的追加行均为已读；「全部」= 真全量 5 条（含归档 n-3），2 条/页共三页
+  // 分页夹具的追加行均为已读；「全部消息」= 未归档 4 条（归档 n-3 不在本视图），2 条/页共两页
   await page.locator('[data-notifications-tab="all"]').click()
 
   // 首页：最新两条可见，其余未加载
@@ -1330,17 +1333,15 @@ test('消息通知：游标分页——首页两条，加载更多补齐后续',
   await expect(page.locator('[data-notifications-load-more]')).toBeVisible()
 
   await page.locator('[data-notifications-load-more]').click()
-  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
   await expect(page.locator('[data-notifications-item="n-4"]')).toBeVisible()
-  await expect(page.locator('[data-notifications-item="n-5"]')).toHaveCount(0)
-  // 第三页补齐最后一条
-  await page.locator('[data-notifications-load-more]').click()
   await expect(page.locator('[data-notifications-item="n-5"]')).toBeVisible()
+  // 归档项 n-3 永不出现在「全部消息」分页里
+  await expect(page.locator('[data-notifications-item="n-3"]')).toHaveCount(0)
   // 全部加载完毕后「加载更多」消失
   await expect(page.locator('[data-notifications-load-more]')).toHaveCount(0)
 })
 
-test('消息通知：未读空态——引导查看全部历史消息，一键切到「全部」', async ({ page }) => {
+test('消息通知：无未读时——默认全部消息视图收纳未归档历史，「全部已读」禁用', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page, { notificationsAllRead: true })
   await page.goto('/#/super-assistant')
@@ -1349,21 +1350,15 @@ test('消息通知：未读空态——引导查看全部历史消息，一键�
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
 
-  // 默认未读 tab 为空：空态标题 + 「查看全部 N 条」引导（N=真全量含归档）
-  const emptyState = page.locator('[data-notifications-list-empty="unread"]')
-  await expect(emptyState).toBeVisible()
-  await expect(emptyState).toContainText('没有未读消息')
-  await expect(emptyState).toContainText('查看全部 3 条消息')
+  // 默认「全部消息」tab：未归档历史可见（n-1、n-2），已归档 n-3 不在本视图（在「已归档」里）
+  await expect(page.locator('[data-notifications-tab="all"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
+  await expect(page.locator('[data-notifications-item="n-3"]')).toHaveCount(0)
   // 「全部已读」在无未读时禁用（图标化按钮仍可定位）；禁用态不派发 pointer 事件、
   // tooltip 悬停不出，用原生 title 提示禁用原因
   await expect(page.locator('[data-notifications-read-all]')).toBeDisabled()
   await expect(page.locator('[data-notifications-read-all]')).toHaveAttribute('title', '暂无未读消息')
-
-  // 一键引导：切到「全部」并可见历史消息
-  await page.locator('[data-notifications-empty-all]').click()
-  await expect(page.locator('[data-notifications-tab="all"]')).toHaveAttribute('aria-pressed', 'true')
-  await expect(page.locator('[data-notifications-item="n-1"]')).toBeVisible()
-  await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
 
   // 已标记 tab 有内容（n-2 已读但已标记仍可见）；已归档 tab 显示归档项 n-3
   // （已标记/已归档的空态文案语义由 notificationsFormat 单测覆盖）
@@ -1382,14 +1377,8 @@ test('消息通知：冷启动空态——站内无任何消息时引导去发�
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
 
-  // 未读空态：无历史可引，只说明现状（不出现「查看全部」按钮）
-  const unreadEmpty = page.locator('[data-notifications-list-empty="unread"]')
-  await expect(unreadEmpty).toBeVisible()
-  await expect(unreadEmpty).toContainText('没有未读消息')
-  await expect(page.locator('[data-notifications-empty-all]')).toHaveCount(0)
-
-  // 「全部」空态 = 中转站冷启动：引导去发送，直达发送分区
-  await page.locator('[data-notifications-tab="all"]').click()
+  // 默认「全部消息」空态 = 中转站冷启动：引导去发送，直达发送分区
+  await expect(page.locator('[data-notifications-tab="all"]')).toHaveAttribute('aria-pressed', 'true')
   const allEmpty = page.locator('[data-notifications-list-empty="all"]')
   await expect(allEmpty).toBeVisible()
   await expect(allEmpty).toContainText('还没有消息')

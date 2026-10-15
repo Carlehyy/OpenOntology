@@ -126,25 +126,17 @@ export function stripMarkdownPreview(text: string): string {
 export interface ListEmptyCopy {
   title: string
   description: string
-  /** 未读空态且站内还有历史消息：提供「查看全部」引导（值为总量） */
-  allCtaTotal?: number
-  /** 全部空态（中转站冷启动）：引导去发送第一条 */
+  /** 全部消息空态（中转站冷启动）：引导去发送第一条 */
   composeCta?: boolean
 }
 
-/** 各筛选 tab 的空态文案；未读/全部带行动引导，已标记/已归档只说明语义 */
-export function listEmptyCopy(tab: string, totalCount: number): ListEmptyCopy {
+/** 各筛选 tab 的空态文案；全部消息带行动引导，已标记/已归档只说明语义 */
+export function listEmptyCopy(tab: string): ListEmptyCopy {
   switch (tab) {
-    case 'unread':
-      return {
-        title: '没有未读消息',
-        description: '待处理的都清完了；历史消息都在「全部」里。',
-        ...(totalCount > 0 ? { allCtaTotal: totalCount } : {}),
-      }
     case 'starred':
       return { title: '还没有标记的消息', description: '在消息详情里点星标，重要消息会集中到这里。' }
     case 'archived':
-      return { title: '没有已归档消息', description: '归档不会删除消息，归档项会保留在这里与「全部」。' }
+      return { title: '没有已归档消息', description: '归档不会删除消息，归档项会保留在这里与「全部消息」互补呈现。' }
     default:
       return {
         title: '还没有消息',

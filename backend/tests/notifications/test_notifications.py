@@ -115,14 +115,16 @@ def test_list_tabs_and_summary(client, auth_headers):
         assert resp.status_code == 200
         return [item["id"] for item in resp.json()["data"]["items"]]
 
-    # 全部 = 真全量（含已归档）；未读/已标记不含已归档
-    assert set(_ids("all")) == {a["id"], b["id"], c["id"]}
+    # 全部 = 未归档收件箱；未读/已标记同样不含已归档；已归档独立成视图
+    assert set(_ids("all")) == {a["id"], b["id"]}
     assert _ids("unread") == [a["id"]]
     assert _ids("starred") == [b["id"]]
     assert _ids("archived") == [c["id"]]
 
     summary = client.get("/api/v2/notifications/summary", headers=auth_headers).json()["data"]
     assert summary == {"unreadCount": 1, "starredCount": 1, "archivedCount": 1, "totalCount": 3}
+    # 不变量：全部消息（未归档）+ 已归档 = 历史全部消息（summary.totalCount）
+    assert len(_ids("all")) + summary["archivedCount"] == summary["totalCount"]
 
     # 列表条目只带预览与计数，不携带全文
     listing = client.get("/api/v2/notifications?tab=all", headers=auth_headers).json()["data"]["items"]
@@ -168,6 +170,35 @@ def test_list_pagination_cursor(client, auth_headers):
         if not cursor:
             break
     assert collected == expected  # 按创建时间倒序、无重无漏
+
+
+def test_list_pagination_all_tab_skips_archived_rows(client, auth_headers):
+    # 归档行夹在游标区间：tab=all 的 keyset 分页必须跳过归档行且无重无漏
+    created = [_create(client, auth_headers, title=f"过滤分页-{i}") for i in range(5)]
+    archived_ids = {created[1]["id"], created[3]["id"]}
+    for message_id in archived_ids:
+        resp = client.patch(
+            f"/api/v2/notifications/{message_id}",
+            json={"isArchived": True},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+    expected = [row["id"] for row in reversed(created) if row["id"] not in archived_ids]
+
+    collected = []
+    cursor = None
+    for _ in range(4):
+        url = "/api/v2/notifications?tab=all&limit=2"
+        if cursor:
+            url += f"&cursor={cursor}"
+        payload = client.get(url, headers=auth_headers).json()["data"]
+        collected.extend(item["id"] for item in payload["items"])
+        cursor = payload["nextCursor"]
+        if not cursor:
+            break
+    assert collected == expected  # 未归档 3 条、跳过 2 条归档，倒序无重无漏
+    assert set(collected).isdisjoint(archived_ids)
 
 
 def test_list_rejects_invalid_tab_and_cursor(client, auth_headers):
