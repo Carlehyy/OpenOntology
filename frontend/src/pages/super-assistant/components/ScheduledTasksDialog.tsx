@@ -496,7 +496,9 @@ function CreateForm({
   onSubmit: () => void
 }) {
   const inputClass = (invalid?: string) =>
-    `mt-1.5 h-9 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${invalid ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]'}`
+    // 与 SelectTrigger 同款令牌（rounded-lg/border-input/bg-background/shadow-sm），
+    // 原生输入与下拉并排时视觉一致；label 一律 block 盒（16px 行高）保证同排控件基线对齐
+    `mt-1.5 h-9 w-full rounded-lg border bg-background px-3 text-sm shadow-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${invalid ? 'border-[var(--color-danger)]' : 'border-input'}`
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
       <label className="block text-xs font-medium text-[var(--color-text-primary)]">
@@ -522,7 +524,7 @@ function CreateForm({
             ? '到点后会以这段内容作为任务目标，按所选模板的流程创建并运行实例。'
             : '到点后助手会按这段任务内容在后台执行，例如：汇总昨天的待办并给出建议。'}
           aria-describedby={validation.instruction ? 'scheduled-instruction-error' : undefined}
-          className={`mt-1.5 w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${validation.instruction ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]'}`}
+          className={`mt-1.5 w-full rounded-lg border bg-background px-3 py-2 text-sm shadow-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${validation.instruction ? 'border-[var(--color-danger)]' : 'border-input'}`}
         />
         {validation.instruction && (
           <p id="scheduled-instruction-error" role="alert" className="mt-1.5 text-xs leading-5 text-[var(--color-danger)]">
@@ -543,7 +545,7 @@ function CreateForm({
       {/* 触发设置：短下拉并排成网格，标题与内容两行核心输入之后的紧凑区 */}
       <div className="grid grid-cols-2 gap-3">
         <div className="min-w-0 space-y-1.5">
-          <span className="text-xs font-medium text-[var(--color-text-primary)]">触发方式</span>
+          <span className="block text-xs font-medium text-[var(--color-text-primary)]">触发方式</span>
           <Select value={kind} onValueChange={value => setKind(value as ScheduledKind)}>
             <SelectTrigger aria-label="触发方式" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -554,7 +556,7 @@ function CreateForm({
           </Select>
         </div>
         <div className="min-w-0 space-y-1.5">
-          <span className="text-xs font-medium text-[var(--color-text-primary)]">触发对象</span>
+          <span className="block text-xs font-medium text-[var(--color-text-primary)]">触发对象</span>
           <Select value={target} onValueChange={value => setTarget(value as ScheduledTargetKind)}>
             <SelectTrigger aria-label="触发对象" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -565,7 +567,7 @@ function CreateForm({
         </div>
         {target === 'task_template' && (
           <div className="col-span-2 space-y-1.5">
-            <span className="text-xs font-medium text-[var(--color-text-primary)]">流程模板</span>
+            <span className="block text-xs font-medium text-[var(--color-text-primary)]">流程模板</span>
             <Select value={templateId} onValueChange={setTemplateId}>
               <SelectTrigger
                 aria-label="流程模板"
@@ -627,7 +629,7 @@ function CreateForm({
           <>
             {kind === 'weekly' && (
               <div className="min-w-0 space-y-1.5">
-                <span className="text-xs font-medium text-[var(--color-text-primary)]">星期</span>
+                <span className="block text-xs font-medium text-[var(--color-text-primary)]">星期</span>
                 <Select value={weekday} onValueChange={setWeekday}>
                   <SelectTrigger aria-label="星期" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
                   <SelectContent>
