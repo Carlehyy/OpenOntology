@@ -137,6 +137,15 @@ test('远程同步：右键直下载断言文件内容，设置弹窗内重置�
   // 右键目录 → 操作卡「下载同步脚本」直接触发下载；断言下载文件的真实内容（非中间提示，AGENTS.md §5）
   const downloadPromise = page.waitForEvent('download')
   await remoteDir.click({ button: 'right' })
+  // 菜单项悬停高亮（真 Chromium 断言 hover:bg-accent 生效：模态弹窗内 focus 跟随悬停会失效，
+  // 原生 hover 类是唯一可靠反馈；线上 IAB webview 不重绘 :hover 计算样式属环境怪癖）
+  const menuSettingsItem = page.locator('[data-ctx-item="palace-sync-settings"]')
+  await menuSettingsItem.hover()
+  // transition-colors 150ms：等过渡结束再读计算样式，避免 t=0 竞态读到透明
+  await page.waitForTimeout(300)
+  const hoverBg = await menuSettingsItem.evaluate(el => getComputedStyle(el).backgroundColor)
+  expect(hoverBg).not.toBe('rgba(0, 0, 0, 0)')
+  expect(hoverBg).not.toBe('transparent')
   await page.getByRole('menuitem', { name: '下载同步脚本' }).click()
   const download = await downloadPromise
   expect(download.suggestedFilename()).toBe('palace_sync.py')
