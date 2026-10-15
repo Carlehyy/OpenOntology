@@ -968,10 +968,12 @@ export default function NotificationsDialog({
               role="tabpanel"
               id="notifications-panel-config"
               aria-labelledby="notifications-tab-config"
-              className="scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5"
+              className="scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 min-[1440px]:grid min-[1440px]:grid-cols-2 min-[1440px]:items-start min-[1440px]:gap-x-6"
             >
+              {/* ≥1440px 双列（入口左/出口右，两组高度基本各自入屏，滚动需求减半）；
+                  更窄视口回落单列，此时保留分组间分隔线 */}
               <NotificationInboundSection ref={inboundSectionRef} open={open} invalidateLists={invalidateLists} />
-              <hr className="my-6 border-[var(--color-border)]" aria-hidden />
+              <hr className="my-6 border-[var(--color-border)] min-[1440px]:my-0 min-[1440px]:hidden" aria-hidden />
               <NotificationOutboundSection ref={outboundSectionRef} open={open} channels={channels} />
             </div>
           )}
