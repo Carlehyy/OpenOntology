@@ -812,16 +812,18 @@ export default function NotificationsDialog({
                               onClick={() => { if (!list.isPlaceholderData) openMessage(item.id, item.isRead) }}
                               data-notifications-item={item.id}
                               data-notifications-priority={item.priority}
-                              className={`relative w-full rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                              // 边框色必须各分支自带（含透明档）：与基线类并存的 border-transparent
+                              // 在产物样式表中排在任意值 border-[…] 之后，会压掉未读描边（线上实测踩坑）
+                              className={`relative w-full rounded-lg border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                                 active
-                                  ? 'bg-brand-soft'
+                                  ? 'border-transparent bg-brand-soft'
                                   : item.isRead
-                                    ? 'hover:bg-[var(--color-bg-hover)]'
+                                    ? 'border-transparent hover:bg-[var(--color-bg-hover)]'
                                     // 品牌软底令牌不带 alpha 通道（tailwind 的 /N 修饰符对裸 var 不生效），
                                     // 半透明档用 color-mix 现场合成；未读底 35% / 悬停 60% / 选中 100%
                                     // 三档递进——悬停与选中必须可区分（窄屏单栏下 hover≠选中）；
-                                    // 未读再加 70% 描边强化辨识（所有条目垫透明边框基线，已读↔未读
-                                    // 翻转不引起 1px 内容跳动；选中态自身已足够醒目，不叠描边）
+                                    // 未读再加 70% 描边强化辨识（统一 1px 边框占位，已读↔未读
+                                    // 翻转不引起内容跳动；选中态自身已足够醒目，不叠描边）
                                     : 'border-[color-mix(in_srgb,var(--color-accent-soft)_70%,transparent)] bg-[color-mix(in_srgb,var(--color-accent-soft)_35%,transparent)] hover:bg-[color-mix(in_srgb,var(--color-accent-soft)_60%,transparent)]'
                               }`}
                             >
