@@ -1507,9 +1507,10 @@ test('消息通知：三渠道时「全选」恢复默认广播——部分选�
   expect(JSON.parse(mocks.notifCreates[0]).channelIds).toBeUndefined()
 })
 
-test('消息通知：接入密钥——签发明文仅一次展示、列表与吊销', async ({ page }) => {
+test('消息通知：接入密钥——签发交付卡、明文仅一次展示、列表与吊销', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.goto('/#/super-assistant')
 
   await page.getByRole('button', { name: /消息通知/ }).click()
@@ -1539,6 +1540,39 @@ test('消息通知：接入密钥——签发明文仅一次展示、列表与�
   await expect(page.locator('[data-notifications-key-plaintext]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
   await expect.poll(() => mocks.notifKeyCreates.length).toBe(1)
 
+  // 一次性交付卡：脚本注入真实密钥（复制即可用），消灭「复制密钥→复制示例→手改占位符」三步拼接
+  const delivery = page.locator('[data-notifications-key-delivery]')
+  await expect(delivery).toBeVisible()
+  await expect(page.locator('[data-notifications-key-script]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
+  await expect(page.locator('[data-notifications-key-script]')).toContainText('/api/v2/notifications/ingest')
+  // 副作用类交互按验收标准断言最终结果：真实剪贴板内容含密钥（不以 toast 出现代替）
+  await page.locator('[data-notifications-copy-fullscript]').click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('X-API-Key: ob_notif_e2e_demo_plaintext_secret')
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/api/v2/notifications/ingest')
+  // 「我已妥善保存」主动关闭：明文与交付卡一起消失
+  await page.locator('[data-notifications-key-dismiss]').click()
+  await expect(delivery).toBeHidden()
+
+  // P0 回归（对抗审查修复）：明文随父组件持有——切到消息列表再切回，交付卡与明文不丢
+  await page.locator('[data-notifications-key-mint-toggle]').click()
+  await page.locator('[data-notifications-key-name]').fill('keep-alive')
+  await page.locator('[data-notifications-key-mint]').last().click()
+  await expect(page.locator('[data-notifications-key-delivery]')).toBeVisible()
+  await page.locator('[data-notifications-nav="messages"]').click()
+  await page.waitForTimeout(200)
+  await page.locator('[data-notifications-nav="config"]').click()
+  await expect(page.locator('[data-notifications-key-delivery]')).toBeVisible()
+  await expect(page.locator('[data-notifications-key-plaintext]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
+  await page.locator('[data-notifications-key-dismiss]').click()
+
+  // 端点独立复制：剪贴板拿到端点地址（副作用真实验收）
+  await page.locator('[data-notifications-copy-endpoint]').click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/api/v2/notifications/ingest')
+
+  // 存量密钥行复制脚本：明文不可再取（安全设计），复制的是占位符版
+  await page.locator('[data-notifications-key-copy-script]').first().click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('<你的密钥>')
+
   // 吊销：二次确认后生效
   await page.locator('[data-notifications-key-revoke]').first().click()
   const confirmDialog = page.getByRole('dialog').filter({ hasText: '吊销这枚投递密钥' })
@@ -1557,6 +1591,25 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
 
   // 既有渠道：名称/掩码地址/最近投递状态可见，地址明文不出现在界面
+  // 出口主次重排：转发渠道（主面板）位于发件邮箱（依赖配置）之前
+  await expect(page.locator('[data-notifications-channels-panel]')).toBeVisible()
+  const channelsPanel = await page.locator('[data-notifications-channels-panel]').evaluate(el => el.getBoundingClientRect().top)
+  const smtpCard = await page.locator('[data-notifications-smtp-card]').evaluate(el => el.getBoundingClientRect().top)
+  expect(channelsPanel).toBeLessThan(smtpCard)
+  // 邮件渠道依赖显性化：SMTP 未配置（GET mock）→ 渠道卡直接给「去配置」引导，
+  // 点击后展开发件邮箱卡（不再等用户点进新建表单才发现依赖）
+  const smtpDep = page.locator('[data-notifications-channel-item="ch-2"] [data-notifications-channel-smtp-dep="missing"]')
+  await expect(smtpDep).toContainText('需先配置「发件邮箱」')
+  await smtpDep.click()
+  await expect(page.locator('[data-notifications-smtp-card]')).toHaveAttribute('open', '')
+  // 收回展开态，让下方既有 SMTP 流程仍从 summary 点击开始
+  await page.locator('[data-notifications-smtp-card] summary').click()
+  await expect(page.locator('[data-notifications-smtp-card]')).not.toHaveAttribute('open', '')
+  // 渠道卡状态行：最近成功渠道显示投递成功；非失败行是纯文本（不伪装成可展开按钮）
+  await expect(page.locator('[data-notifications-channel-item="ch-1"] [data-notifications-channel-status]')).toContainText('投递成功')
+  await expect(page.locator('[data-notifications-channel-item="ch-1"] [data-notifications-channel-status]')).not.toHaveRole('button')
+  await expect(page.locator('[data-notifications-channel-failure-detail]')).toHaveCount(0)
+
   const existing = page.locator('[data-notifications-channel-item="ch-1"]')
   await expect(existing).toBeVisible()
   await expect(existing).toContainText('钉钉运维群')

@@ -77,7 +77,9 @@ success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引�
 类型编码色（图例、类型徽章、结构图节点等分类数据可视化）使用
 `viz-*` 分类色组（violet/fuchsia/rose/orange/indigo/cyan 及各自 -soft
 浅底），取值与 §5 图表序列同源、`:root`/`.dark` 成对维护；禁止在页面
-直接使用 Tailwind 默认色板表达类型编码。
+直接使用 Tailwind 默认色板表达类型编码。深色工具面板（如 curl 调用
+示例）内需要单一「需注意」强调信号时，允许借用一支 viz token（明暗
+同值、深底可读），一支为限、不得演变为面板内多色高亮。
 
 ### 2.4 使用规则
 

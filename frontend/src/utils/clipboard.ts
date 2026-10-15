@@ -1,10 +1,17 @@
-export async function writeTextToClipboard(value: string): Promise<void> {
+/**
+ * 写入剪贴板并返回实际使用的路径：
+ * - 'clipboard-api'：异步 Clipboard API（secure context），结果可靠；
+ * - 'fallback'：execCommand 降级（普通 HTTP 部署）——按 AGENTS.md §5，
+ *   该路径「返回 true」不代表已真实写入（非聚焦页面等场景会假成功），
+ *   调用方据此把成功文案降级为「已尝试写入，请粘贴验证」，不得宣称「已复制」。
+ */
+export async function writeTextToClipboard(value: string): Promise<'clipboard-api' | 'fallback'> {
   let clipboardError: unknown
 
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(value)
-      return
+      return 'clipboard-api'
     } catch (error) {
       clipboardError = error
       // Clipboard API is unavailable on ordinary HTTP deployments; fall back below.
@@ -49,4 +56,5 @@ export async function writeTextToClipboard(value: string): Promise<void> {
       ? clipboardError
       : new Error('Clipboard copy was rejected')
   }
+  return 'fallback'
 }
