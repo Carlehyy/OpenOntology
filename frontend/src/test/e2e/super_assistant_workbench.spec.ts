@@ -1426,6 +1426,14 @@ test('消息通知：无未读时——默认全部消息视图收纳未归档�
   await expect(page.locator('[data-notifications-item="n-2"]')).toBeVisible()
   await page.locator('[data-notifications-tab="archived"]').click()
   await expect(page.locator('[data-notifications-item="n-3"]')).toBeVisible()
+
+  // 已归档 = 处置终态：详情只保留恢复/转发，标记与标为未读不出现
+  await page.locator('[data-notifications-item="n-3"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('历史巡检完成')
+  await expect(page.locator('[data-notifications-archive]')).toHaveAttribute('aria-label', '恢复消息')
+  await expect(page.locator('[data-notifications-forward]')).toBeVisible()
+  await expect(page.locator('[data-notifications-star]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-unread]')).toHaveCount(0)
 })
 
 test('消息通知：冷启动空态——站内无任何消息时引导去发送', async ({ page }) => {

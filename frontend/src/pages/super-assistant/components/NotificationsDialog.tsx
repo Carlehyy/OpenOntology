@@ -812,15 +812,17 @@ export default function NotificationsDialog({
                               onClick={() => { if (!list.isPlaceholderData) openMessage(item.id, item.isRead) }}
                               data-notifications-item={item.id}
                               data-notifications-priority={item.priority}
-                              className={`relative w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                              className={`relative w-full rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                                 active
                                   ? 'bg-brand-soft'
                                   : item.isRead
                                     ? 'hover:bg-[var(--color-bg-hover)]'
                                     // 品牌软底令牌不带 alpha 通道（tailwind 的 /N 修饰符对裸 var 不生效），
-                                    // 半透明档用 color-mix 现场合成；未读 35% / 悬停 60% / 选中 100%
-                                    // 三档递进——悬停与选中必须可区分（窄屏单栏下 hover≠选中）
-                                    : 'bg-[color-mix(in_srgb,var(--color-accent-soft)_35%,transparent)] hover:bg-[color-mix(in_srgb,var(--color-accent-soft)_60%,transparent)]'
+                                    // 半透明档用 color-mix 现场合成；未读底 35% / 悬停 60% / 选中 100%
+                                    // 三档递进——悬停与选中必须可区分（窄屏单栏下 hover≠选中）；
+                                    // 未读再加 70% 描边强化辨识（所有条目垫透明边框基线，已读↔未读
+                                    // 翻转不引起 1px 内容跳动；选中态自身已足够醒目，不叠描边）
+                                    : 'border-[color-mix(in_srgb,var(--color-accent-soft)_70%,transparent)] bg-[color-mix(in_srgb,var(--color-accent-soft)_35%,transparent)] hover:bg-[color-mix(in_srgb,var(--color-accent-soft)_60%,transparent)]'
                               }`}
                             >
                               {/* urgent 左缘色条：优先级不止靠 6px 圆点的颜色编码（色弱不可辨），有无色条是可扫视的二值信号 */}
@@ -867,7 +869,9 @@ export default function NotificationsDialog({
                   </div>
 
                   <div
-                    className={`${selectedId ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col`}
+                    // 阅读栏宽度 = 列表两倍（22rem×2=44rem）：弹窗保持 xwide，富余空间
+                    // 由 auto 边距对称留白（窄于 44rem 的视口不封顶、行为不变）
+                    className={`${selectedId ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col md:max-w-[44rem] md:mx-auto`}
                     data-notifications-detail
                   >
                     {/* 窄屏单栏：详情视图统一返回条（成功/加载/错误三分支都可回列表） */}
@@ -916,20 +920,23 @@ export default function NotificationsDialog({
                               {sourceTypeLabel(selected.sourceType)} · {selected.sourceSystem} · {formatDateTime(selected.createdAt)}
                             </span>
                             <div className="ml-auto flex shrink-0 items-center gap-0.5 lg:ml-0">
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      onClick={() => stateMutation.mutate({ id: selected.id, fields: { isStarred: !selected.isStarred } })}
-                                      aria-label={selected.isStarred ? '取消标记' : '标记为重要'}
-                                      className={`${iconButtonClass} ${selected.isStarred ? 'text-[var(--color-warning)]' : ''}`}
-                                      data-notifications-star
-                                    >
-                                      <Star size={15} className={selected.isStarred ? 'fill-current' : ''} />
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent align="end">{selected.isStarred ? '取消标记' : '标记为重要'}</TooltipContent>
-                                </Tooltip>
+                                {/* 已归档 = 处置终态：只留恢复/转发；标记与未读是收件箱态操作 */}
+                                {!selected.isArchived && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <button
+                                        type="button"
+                                        onClick={() => stateMutation.mutate({ id: selected.id, fields: { isStarred: !selected.isStarred } })}
+                                        aria-label={selected.isStarred ? '取消标记' : '标记为重要'}
+                                        className={`${iconButtonClass} ${selected.isStarred ? 'text-[var(--color-warning)]' : ''}`}
+                                        data-notifications-star
+                                      >
+                                        <Star size={15} className={selected.isStarred ? 'fill-current' : ''} />
+                                      </button>
+                                    </TooltipTrigger>
+                                    <TooltipContent align="end">{selected.isStarred ? '取消标记' : '标记为重要'}</TooltipContent>
+                                  </Tooltip>
+                                )}
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <button
@@ -958,7 +965,7 @@ export default function NotificationsDialog({
                                   </TooltipTrigger>
                                   <TooltipContent align="end">转发到外部渠道</TooltipContent>
                                 </Tooltip>
-                                {selected.isRead && (
+                                {selected.isRead && !selected.isArchived && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <button
