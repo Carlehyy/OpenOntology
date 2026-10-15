@@ -788,12 +788,15 @@ class QuickInputOut(ORMModel):
 
 
 ScheduleKind = Literal["once", "daily", "weekly"]
+ScheduledTargetKind = Literal["super_assistant", "task_template"]
 ScheduledRunStatus = Literal["queued", "running", "completed", "failed", "skipped"]
 
 
 class ScheduledTaskCreate(BaseModel):
     title: str = Field(default="", max_length=200)
     instruction: str = Field(min_length=1, max_length=100_000)
+    target_kind: ScheduledTargetKind = "super_assistant"
+    target_template_id: str | None = Field(default=None, max_length=64)
     schedule_kind: ScheduleKind
     run_at: datetime | None = None
     hour: int | None = Field(default=None, ge=0, le=23)
@@ -810,6 +813,8 @@ class ScheduledTaskCreate(BaseModel):
 class ScheduledTaskUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     instruction: str | None = Field(default=None, min_length=1, max_length=100_000)
+    target_kind: ScheduledTargetKind | None = None
+    target_template_id: str | None = Field(default=None, max_length=64)
     schedule_kind: ScheduleKind | None = None
     run_at: datetime | None = None
     hour: int | None = Field(default=None, ge=0, le=23)
@@ -829,6 +834,10 @@ class ScheduledTaskOut(ORMModel):
     id: str
     title: str
     instruction: str
+    target_kind: str
+    target_template_id: str | None
+    # 服务层读取侧回填的当前模板名；模板已删/不存在为 None，前端显示「已删除」
+    target_template_name: str | None = None
     schedule_kind: str
     timezone: str
     run_at: datetime | None
@@ -849,6 +858,8 @@ class ScheduledRunOut(ORMModel):
     id: str
     task_id: str
     conversation_id: str | None
+    # task_template 目标触发创建的任务实例 id；超级助手目标为 None
+    instance_id: str | None
     scheduled_for: datetime
     status: str
     error: str | None

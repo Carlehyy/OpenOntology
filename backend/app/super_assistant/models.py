@@ -803,6 +803,11 @@ class SuperAssistantScheduledTask(Base):
     owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    # 触发对象：super_assistant=超级助手会话（存量行同义归一）；task_template=任务实例流程模板
+    target_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="super_assistant", server_default="super_assistant")
+    # task_template 目标指向 task_templates.id；模板为软删模型，不设外键，触发时校验存亡
+    target_template_id: Mapped[str | None] = mapped_column(String, nullable=True)
     schedule_kind: Mapped[str] = mapped_column(String(16), nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Shanghai")
     run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -834,6 +839,8 @@ class SuperAssistantScheduledRun(Base):
     conversation_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("super_assistant_conversations.id", ondelete="SET NULL"), nullable=True, index=True,
     )
+    # task_template 目标触发创建的任务实例 id（超级助手目标恒为空），「查看实例」跳转依据
+    instance_id: Mapped[str | None] = mapped_column(String, nullable=True)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -13,6 +13,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.auth.models import User
 from app.inbox.schemas import (
     InboxAction,
     InboxAudience,
@@ -32,6 +33,7 @@ from app.super_assistant.models import (
 from app.super_assistant.runtime import stream_chat
 from app.super_assistant.schemas import ScheduledTaskCreate, ScheduledTaskUpdate
 from app.super_assistant.scheduled_constants import STALE_RUNNING
+from app.task_instances.models import TaskTemplate
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,8 @@ QUEUED_REDISPATCH_AFTER = timedelta(seconds=20)
 OVERDUE_GRACE = timedelta(hours=2)
 ONCE_PAST_GRACE = timedelta(minutes=2)
 RESULT_SUMMARY_CHARS = 4000
+# 模板目标的任务内容即实例 goal（InstanceActivate.goal 上限），创建/更新时校验
+TEMPLATE_GOAL_MAX_CHARS = 20_000
 IN_FLIGHT = ("queued", "running")
 INBOX_HREF = "/super-assistant?schedule={task_id}&scheduleRun={run_id}"
 
@@ -135,11 +139,50 @@ def _latest_run(db: Session, task_id: str) -> SuperAssistantScheduledRun | None:
     )
 
 
+def _validate_target(
+    db: Session, target_kind: str, template_id: str | None, instruction: str,
+) -> TaskTemplate | None:
+    """触发对象校验：模板目标要求模板存在且未软删，任务内容受实例 goal 上限约束。"""
+    if target_kind == "super_assistant":
+        if template_id:
+            raise ScheduledTaskError("超级助手目标不需要选择流程模板")
+        return None
+    if not template_id:
+        raise ScheduledTaskError("请选择流程模板")
+    template = (
+        db.query(TaskTemplate)
+        .filter(TaskTemplate.id == template_id, TaskTemplate.deleted_at.is_(None))
+        .first()
+    )
+    if template is None:
+        raise ScheduledTaskNotFoundError("流程模板不存在或已删除")
+    if len(instruction) > TEMPLATE_GOAL_MAX_CHARS:
+        raise ScheduledTaskError(f"流程模板目标的任务内容不能超过 {TEMPLATE_GOAL_MAX_CHARS} 字")
+    return template
+
+
+def _attach_target_name(db: Session, task: SuperAssistantScheduledTask) -> None:
+    """Out.target_template_name 读取侧回填：跟随模板最新名，软删/丢失为 None。"""
+    task.target_template_name = None
+    if task.target_kind == "task_template" and task.target_template_id:
+        template = (
+            db.query(TaskTemplate)
+            .filter(
+                TaskTemplate.id == task.target_template_id,
+                TaskTemplate.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if template is not None:
+            task.target_template_name = template.name
+
+
 def _with_last_run(db: Session, task: SuperAssistantScheduledTask) -> SuperAssistantScheduledTask:
     run = _latest_run(db, task.id)
     task.last_run_id = run.id if run else None
     task.last_run_status = run.status if run else None
     task.last_run_at = run.finished_at or run.started_at or run.created_at if run else None
+    _attach_target_name(db, task)
     return task
 
 
@@ -169,6 +212,7 @@ def list_tasks(db: Session, owner_id: str) -> list[SuperAssistantScheduledTask]:
 
 def create_task(db: Session, owner_id: str, body: ScheduledTaskCreate) -> SuperAssistantScheduledTask:
     _validate_schedule(body.schedule_kind, body.run_at, body.hour, body.minute, body.weekday)
+    template = _validate_target(db, body.target_kind, body.target_template_id, body.instruction)
     now = _now()
     run_at = parse_user_run_at(body.run_at) if body.run_at is not None else None
     if body.schedule_kind == "once":
@@ -186,6 +230,8 @@ def create_task(db: Session, owner_id: str, body: ScheduledTaskCreate) -> SuperA
         owner_id=owner_id,
         title=_title_from(body.instruction, body.title),
         instruction=body.instruction,
+        target_kind=body.target_kind,
+        target_template_id=template.id if template is not None else None,
         schedule_kind=body.schedule_kind,
         timezone="Asia/Shanghai",
         run_at=run_at,
@@ -211,6 +257,23 @@ def update_task(db: Session, owner_id: str, task_id: str, body: ScheduledTaskUpd
         task.title = body.title
     if body.instruction is not None:
         task.instruction = body.instruction
+    if (body.target_kind is not None or "target_template_id" in body.model_fields_set
+            or body.instruction is not None):
+        # 触发对象或任务内容任一变化都按合并后的最终值校验（模板目标的内容受
+        # 实例 goal 上限约束）；非模板目标一律清空模板指针（切换回超级助手时
+        # 携带的存量指针不算矛盾）
+        target_kind = body.target_kind if body.target_kind is not None else task.target_kind
+        target_template_id = (
+            body.target_template_id
+            if "target_template_id" in body.model_fields_set
+            else task.target_template_id
+        )
+        if target_kind != "task_template":
+            target_template_id = None
+        instruction = body.instruction if body.instruction is not None else task.instruction
+        _validate_target(db, target_kind, target_template_id, instruction)
+        task.target_kind = target_kind
+        task.target_template_id = target_template_id
     if body.schedule_kind is not None:
         task.schedule_kind = body.schedule_kind
     if "run_at" in body.model_fields_set:
@@ -527,6 +590,10 @@ def execute_run(run_id: str) -> None:
             _fail_run_row(db, run, _now(), "计划已删除")
             db.commit()
             return
+        if task.target_kind == "task_template":
+            scheduled_for = run.scheduled_for
+            db.close()
+            return _execute_template_target_run(run_id, task, scheduled_for)
         conversation = SuperAssistantConversation(
             owner_id=task.owner_id,
             title=_conversation_title(task, run.scheduled_for),
@@ -628,6 +695,88 @@ def execute_run(run_id: str) -> None:
                 event_suffix="-corrected" if reaped else "",
             )
             db.commit()
+    finally:
+        db.close()
+
+
+def _fail_run_by_id(db: Session, run_id: str, error: str) -> None:
+    run = db.get(SuperAssistantScheduledRun, run_id)
+    if run is None:
+        return
+    _fail_run_row(db, run, _now(), error)
+    db.commit()
+
+
+def _execute_template_target_run(
+    run_id: str, task: SuperAssistantScheduledTask, scheduled_for: datetime,
+) -> None:
+    """模板目标执行：从模板拉起实例即视为本次触发完成（触发即完成语义），
+    实例自身的进度与成败在任务实例域查询；实例名沿用会话标题同款时间戳格式。"""
+    from fastapi import HTTPException
+
+    from app.task_instances import schemas as task_instance_schemas
+    from app.task_instances import service as task_instance_service
+
+    db = SessionLocal()
+    try:
+        template = (
+            db.query(TaskTemplate)
+            .filter(
+                TaskTemplate.id == task.target_template_id,
+                TaskTemplate.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if template is None:
+            _fail_run_by_id(db, run_id, "流程模板不存在或已删除")
+            return
+        run = db.get(SuperAssistantScheduledRun, run_id)
+        if run is None:
+            return
+        owner = db.get(User, task.owner_id)
+        result = task_instance_service.activate_instance(
+            db,
+            task.target_template_id,
+            task_instance_schemas.InstanceActivate(
+                name=_conversation_title(task, scheduled_for),
+                goal=task.instruction,
+            ),
+            owner,
+            idempotency_key=f"sa-scheduled:{run_id}",
+        )
+        # activate_instance 内部已 commit，run 随会话过期重读；仅 running 行
+        # 写终态，被收割等他处变更的行不覆盖（与超级助手目标写回守卫同款）
+        if run.status != "running":
+            logger.warning(
+                "定时任务模板目标写回跳过：状态已被他处变更 run=%s status=%s",
+                run_id, run.status,
+            )
+            return
+        run.status = "completed"
+        run.error = None
+        run.instance_id = result["id"]
+        run.result_summary = (
+            f"已按模板「{template.name}」创建实例「{result['name']}」，"
+            "进度与结果请在任务实例中查看"
+        )
+        run.finished_at = _now()
+        db.commit()
+        _notify(
+            db, run=run, task=task, kind="notice",
+            title=f"定时任务已完成：{task.title}",
+            summary=run.result_summary,
+        )
+        db.commit()
+    except HTTPException as exc:
+        # activate_instance 以 HTTP 404 表达模板/版本缺失（触达前的软删竞态等）
+        db.rollback()
+        detail = exc.detail if isinstance(exc.detail, str) else "流程模板或其版本不存在或已删除"
+        logger.warning("定时任务模板目标执行失败 run=%s detail=%s", run_id, detail)
+        _fail_run_by_id(db, run_id, f"实例创建失败：{detail}")
+    except Exception as exc:  # noqa: BLE001 — 失败写回 run，不向上抛以免 NATS 空烧
+        db.rollback()
+        logger.exception("定时任务模板目标执行失败 run=%s", run_id)
+        _fail_run_by_id(db, run_id, f"实例创建失败：{exc}")
     finally:
         db.close()
 

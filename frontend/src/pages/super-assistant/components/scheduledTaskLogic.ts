@@ -7,7 +7,9 @@
  * - 脏表单关闭前必须二次确认（P0-2）；
  * - 校验错误锚定到出错字段而非仅顶部横幅（P0-4）。
  */
-import type { ScheduledKind, ScheduledRunStatus, ScheduledTask } from '@/api/superAssistant'
+import type {
+  ScheduledKind, ScheduledRunStatus, ScheduledTargetKind, ScheduledTask,
+} from '@/api/superAssistant'
 
 import { formatDateTime } from '../../../utils/datetime.ts'
 
@@ -61,9 +63,17 @@ export function shanghaiIsoFromLocal(value: string) {
   return value.length === 16 ? `${value}:00+08:00` : `${value}+08:00`
 }
 
+/** 详情/列表共用的触发对象标签：模板已删（服务端名字回填为 null）时如实显示「已删除」 */
+export function targetLabel(task: ScheduledTask) {
+  if (task.target_kind !== 'task_template') return '超级助手'
+  return `流程模板 · ${task.target_template_name ?? '已删除'}`
+}
+
 export interface CreateFormState {
   title: string
   instruction: string
+  target: ScheduledTargetKind
+  templateId: string
   kind: ScheduledKind
   onceAt: string
   timeOfDay: string
@@ -74,6 +84,8 @@ export function freshCreateForm(): CreateFormState {
   return {
     title: '',
     instruction: '',
+    target: 'super_assistant',
+    templateId: '',
     kind: 'once',
     onceAt: defaultDatetimeLocal(),
     timeOfDay: '09:00',
@@ -86,6 +98,8 @@ export function isCreateFormDirty(form: CreateFormState, baseline: CreateFormSta
   return (
     form.title !== baseline.title ||
     form.instruction !== baseline.instruction ||
+    form.target !== baseline.target ||
+    form.templateId !== baseline.templateId ||
     form.kind !== baseline.kind ||
     form.onceAt !== baseline.onceAt ||
     form.timeOfDay !== baseline.timeOfDay ||
@@ -95,18 +109,21 @@ export function isCreateFormDirty(form: CreateFormState, baseline: CreateFormSta
 
 export interface CreateFormValidation {
   instruction?: string
+  templateId?: string
   onceAt?: string
   timeOfDay?: string
 }
 
 /**
- * 字段级校验：错误文案与字段 label（「执行时间」）对齐（S-2/S-3）。
+ * 字段级校验：错误文案与字段 label 对齐（S-2/S-3）。
  * now 可注入固定时刻供单测；过去时间在控件层拦截（min 只约束选择器，
  * 手动键入的过去值仍会提交，须在此兜住——对抗审查发现 6）。
+ * 模板目标的任务内容受实例 goal 2 万字上限约束（后端最终校验，控件 maxLength 先拦）。
  */
 export function validateCreateForm(form: CreateFormState, now = new Date()): CreateFormValidation {
   const errors: CreateFormValidation = {}
-  if (!form.instruction.trim()) errors.instruction = '请输入到点执行的指令'
+  if (!form.instruction.trim()) errors.instruction = '请输入任务内容'
+  if (form.target === 'task_template' && !form.templateId) errors.templateId = '请选择流程模板'
   if (form.kind === 'once') {
     if (!form.onceAt) errors.onceAt = '请选择执行时间'
     // 带秒的 19 字符值按分钟前缀归一后再比，否则同分钟的过去值绕过拦截

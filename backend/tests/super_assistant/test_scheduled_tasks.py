@@ -16,6 +16,17 @@ from app.super_assistant.models import (
     SuperAssistantScheduledRun,
     SuperAssistantScheduledTask,
 )
+from app.task_instances.models import (
+    TaskApproval,
+    TaskArtifact,
+    TaskEvent,
+    TaskInstance,
+    TaskNodeRun,
+    TaskTemplate,
+    TaskTemplateRevision,
+)
+from app.task_instances.spec import compile_workflow_yaml
+from tests.task_instances.conftest import make_spec
 from app.super_assistant.scheduled_service import (
     INBOX_HREF,
     REAP_ERROR,
@@ -50,6 +61,14 @@ def _session(tmp_path):
             SuperAssistantMessage.__table__,
             SuperAssistantScheduledTask.__table__,
             SuperAssistantScheduledRun.__table__,
+            # 模板目标（触发对象=流程模板）链路需要任务实例域的表
+            TaskTemplate.__table__,
+            TaskTemplateRevision.__table__,
+            TaskInstance.__table__,
+            TaskNodeRun.__table__,
+            TaskApproval.__table__,
+            TaskArtifact.__table__,
+            TaskEvent.__table__,
         ],
     )
     return sessionmaker(bind=engine, expire_on_commit=False)
@@ -665,3 +684,174 @@ def test_recover_interrupted_streams_window_matches_stale_running(tmp_path, monk
         }
     assert statuses["recent"] == "streaming"
     assert statuses["stale"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# 触发对象=流程模板（target_kind=task_template）
+# ---------------------------------------------------------------------------
+
+def _template(db, name="例行汇总"):
+    """在定时任务测试库造一个已编译流程模板（复用任务实例域夹具同款 YAML）。"""
+    spec_yaml = make_spec()
+    template = TaskTemplate(name=name)
+    db.add(template)
+    db.flush()
+    compiled = compile_workflow_yaml(spec_yaml)
+    revision = TaskTemplateRevision(
+        template_id=template.id, revision_no=1,
+        spec_yaml=spec_yaml, spec_compiled=compiled.canonical,
+        canonical_hash=compiled.canonical_hash)
+    db.add(revision)
+    db.flush()
+    template.latest_revision_id = revision.id
+    db.commit()
+    return template
+
+
+def _future_body(**overrides):
+    body = ScheduledTaskCreate(
+        instruction="汇总昨天的待办", schedule_kind="once",
+        run_at=datetime.now(timezone.utc) + timedelta(hours=2),
+    )
+    for key, value in overrides.items():
+        setattr(body, key, value)
+    return body
+
+
+def test_create_template_target_validation_and_name_backfill(tmp_path):
+    Session = _session(tmp_path)
+    with Session() as db:
+        _user(db)
+        template = _template(db)
+
+        with pytest.raises(ScheduledTaskError, match="请选择流程模板"):
+            create_task(db, "owner-1", _future_body(target_kind="task_template"))
+        with pytest.raises(ScheduledTaskNotFoundError, match="流程模板不存在或已删除"):
+            create_task(db, "owner-1", _future_body(
+                target_kind="task_template", target_template_id="tpl-missing"))
+        with pytest.raises(ScheduledTaskError, match="不需要选择流程模板"):
+            create_task(db, "owner-1", _future_body(
+                target_kind="super_assistant", target_template_id=template.id))
+
+        created = create_task(db, "owner-1", _future_body(
+            target_kind="task_template", target_template_id=template.id))
+        assert created.target_kind == "task_template"
+        assert created.target_template_id == template.id
+        ScheduledTaskOut.model_validate(created)
+        fetched = get_task(db, "owner-1", created.id)
+        assert fetched.target_template_name == "例行汇总"
+
+        # 模板软删后：读取侧名字回填为 None（前端显示「已删除」），创建侧拒绝
+        template.deleted_at = datetime.now(timezone.utc)
+        db.commit()
+        assert get_task(db, "owner-1", created.id).target_template_name is None
+        with pytest.raises(ScheduledTaskNotFoundError, match="流程模板不存在或已删除"):
+            create_task(db, "owner-1", _future_body(
+                target_kind="task_template", target_template_id=template.id))
+
+
+def test_create_template_target_rejects_instruction_over_goal_limit(tmp_path):
+    Session = _session(tmp_path)
+    with Session() as db:
+        _user(db)
+        template = _template(db)
+        with pytest.raises(ScheduledTaskError, match="20000"):
+            create_task(db, "owner-1", _future_body(
+                instruction="长" * 20_001,
+                target_kind="task_template", target_template_id=template.id))
+
+
+def test_update_task_target_change_validates_and_merges(tmp_path):
+    Session = _session(tmp_path)
+    with Session() as db:
+        _user(db)
+        template = _template(db)
+        created = create_task(db, "owner-1", _future_body())
+        assert created.target_kind == "super_assistant"
+        assert created.target_template_id is None
+
+        switched = update_task(db, "owner-1", created.id, ScheduledTaskUpdate(
+            target_kind="task_template", target_template_id=template.id))
+        assert switched.target_kind == "task_template"
+        assert switched.target_template_id == template.id
+        assert switched.target_template_name == "例行汇总"
+
+        # 切回超级助手时清空模板指针；合并后的任务内容超限同样拦截
+        reverted = update_task(db, "owner-1", created.id, ScheduledTaskUpdate(
+            target_kind="super_assistant"))
+        assert reverted.target_template_id is None
+        update_task(db, "owner-1", created.id, ScheduledTaskUpdate(
+            target_kind="task_template", target_template_id=template.id))
+        with pytest.raises(ScheduledTaskError, match="20000"):
+            update_task(db, "owner-1", created.id, ScheduledTaskUpdate(
+                instruction="长" * 20_001))
+
+
+def test_execute_run_template_target_creates_instance(tmp_path, monkeypatch):
+    Session = _session(tmp_path)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event",
+                        lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+    # 节点派发走 NATS：测试内联 no-op，实例停在 active 即可（触发即完成语义）
+    monkeypatch.setattr("app.task_instances.service._dispatch_node",
+                        lambda node_run_id: None)
+
+    with Session() as db:
+        _user(db)
+        template = _template(db)
+        task = create_task(db, "owner-1", _future_body(
+            target_kind="task_template", target_template_id=template.id))
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=as_utc_naive(datetime.now(timezone.utc)), status="queued",
+        )
+        db.add(run)
+        db.commit()
+        run_id, task_id = run.id, task.id
+
+    execute_run(run_id)
+    with Session() as db:
+        run = get_run(db, "owner-1", task_id, run_id)
+        assert run.status == "completed"
+        assert run.instance_id
+        assert run.conversation_id is None  # 模板目标不建会话
+        assert "例行汇总" in run.result_summary
+        instance = db.get(TaskInstance, run.instance_id)
+        assert instance is not None
+        assert instance.goal == "汇总昨天的待办"  # 任务内容即实例目标
+        assert instance.created_by == "owner-1"
+        assert instance.status == "active"
+        # 幂等重放：终态 run 不再认领，实例不重复创建
+        execute_run(run_id)
+        assert db.query(TaskInstance).count() == 1
+        assert db.query(SuperAssistantConversation).count() == 0
+
+
+def test_execute_run_template_target_missing_template_fails(tmp_path, monkeypatch):
+    Session = _session(tmp_path)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event",
+                        lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+
+    with Session() as db:
+        _user(db)
+        template = _template(db)
+        task = create_task(db, "owner-1", _future_body(
+            target_kind="task_template", target_template_id=template.id))
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=as_utc_naive(datetime.now(timezone.utc)), status="queued",
+        )
+        db.add(run)
+        db.commit()
+        run_id, task_id = run.id, task.id
+        # 创建后模板被软删：触发时如实失败，不静默跳过
+        template.deleted_at = datetime.now(timezone.utc)
+        db.commit()
+
+    execute_run(run_id)
+    with Session() as db:
+        run = get_run(db, "owner-1", task_id, run_id)
+        assert run.status == "failed"
+        assert "流程模板不存在或已删除" in run.error
+        assert run.instance_id is None

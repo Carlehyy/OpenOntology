@@ -4,7 +4,7 @@ import { describe, it } from 'node:test'
 import type { ScheduledTask } from '../../api/superAssistant.ts'
 import {
   STATUS_LABEL, WEEKDAYS, defaultDatetimeLocal, freshCreateForm, isCreateFormDirty,
-  scheduleLabel, shanghaiDatetimeLocal, shanghaiIsoFromLocal, validateCreateForm,
+  scheduleLabel, shanghaiDatetimeLocal, shanghaiIsoFromLocal, targetLabel, validateCreateForm,
 } from '../../pages/super-assistant/components/scheduledTaskLogic.ts'
 
 function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
@@ -12,6 +12,9 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     id: 'st-1',
     title: '每日待办汇总',
     instruction: '汇总昨天的待办并给出建议。',
+    target_kind: 'super_assistant',
+    target_template_id: null,
+    target_template_name: null,
     schedule_kind: 'once',
     timezone: 'Asia/Shanghai',
     run_at: '2026-10-14T01:05:00Z',
@@ -102,11 +105,13 @@ describe('freshCreateForm / isCreateFormDirty（P0-2 脏判定基线）', () => 
     assert.equal(isCreateFormDirty(freshCreateForm(), { ...fresh }), false)
   })
 
-  it('任一字段偏离基线即脏（六字段逐一验证）', () => {
+  it('任一字段偏离基线即脏（八字段逐一验证）', () => {
     const baseline = freshCreateForm()
     const cases: Array<[string, object]> = [
       ['title', { title: '待办汇总' }],
       ['instruction', { instruction: '汇总昨天的待办' }],
+      ['target', { target: 'task_template' }],
+      ['templateId', { templateId: 'tpl-1' }],
       ['kind', { kind: 'daily' }],
       ['onceAt', { onceAt: '2026-10-15T08:00' }],
       ['timeOfDay', { timeOfDay: '10:30' }],
@@ -139,14 +144,14 @@ describe('validateCreateForm（P0-4 字段级校验 + S-2/S-3 文案）', () => 
   const NOW = new Date('2026-10-14T01:05:00Z') // 上海 2026-10-14 09:05
   const base = () => ({ ...freshCreateForm(), instruction: '汇总昨天的待办' })
 
-  it('指令为空/纯空白 → 字段错误「请输入到点执行的指令」', () => {
-    assert.equal(validateCreateForm({ ...freshCreateForm(), instruction: '' }).instruction, '请输入到点执行的指令')
-    assert.equal(validateCreateForm({ ...freshCreateForm(), instruction: '   ' }).instruction, '请输入到点执行的指令')
+  it('任务内容为空/纯空白 → 字段错误「请输入任务内容」', () => {
+    assert.equal(validateCreateForm({ ...freshCreateForm(), instruction: '' }).instruction, '请输入任务内容')
+    assert.equal(validateCreateForm({ ...freshCreateForm(), instruction: '   ' }).instruction, '请输入任务内容')
   })
 
-  it('once 缺执行时间 → 「请选择执行时间」；指令错误同时返回', () => {
+  it('once 缺执行时间 → 「请选择执行时间」；任务内容错误同时返回', () => {
     const errors = validateCreateForm({ ...freshCreateForm(), instruction: '', onceAt: '' }, NOW)
-    assert.deepEqual(errors, { instruction: '请输入到点执行的指令', onceAt: '请选择执行时间' })
+    assert.deepEqual(errors, { instruction: '请输入任务内容', onceAt: '请选择执行时间' })
   })
 
   it('once 执行时间已过（含等于当前分钟、带秒的 19 字符值）→ 字段级拦截', () => {
@@ -172,7 +177,29 @@ describe('validateCreateForm（P0-4 字段级校验 + S-2/S-3 文案）', () => 
 
   it('其余字段错误与时间错误可并存（一次性返回全部错误）', () => {
     const errors = validateCreateForm({ ...freshCreateForm(), instruction: ' ', kind: 'daily', timeOfDay: '' }, NOW)
-    assert.deepEqual(errors, { instruction: '请输入到点执行的指令', timeOfDay: '请选择执行时间' })
+    assert.deepEqual(errors, { instruction: '请输入任务内容', timeOfDay: '请选择执行时间' })
+  })
+
+  it('模板目标未选模板 → 「请选择流程模板」；超级助手目标不校验模板', () => {
+    const form = { ...freshCreateForm(), instruction: '例行汇总', target: 'task_template' as const }
+    assert.deepEqual(validateCreateForm(form, NOW), { templateId: '请选择流程模板' })
+    assert.deepEqual(validateCreateForm({ ...form, templateId: 'tpl-1' }, NOW), {})
+    assert.deepEqual(validateCreateForm({ ...freshCreateForm(), instruction: 'x' }, NOW), {})
+  })
+})
+
+describe('targetLabel（触发对象标签）', () => {
+  it('超级助手目标 → 「超级助手」', () => {
+    assert.equal(targetLabel(task()), '超级助手')
+  })
+
+  it('模板目标 → 「流程模板 · 名称」；模板已删（名字回填为 null）如实显示「已删除」', () => {
+    assert.equal(targetLabel(task({
+      target_kind: 'task_template', target_template_id: 'tpl-1', target_template_name: '例行汇总',
+    })), '流程模板 · 例行汇总')
+    assert.equal(targetLabel(task({
+      target_kind: 'task_template', target_template_id: 'tpl-1', target_template_name: null,
+    })), '流程模板 · 已删除')
   })
 })
 
