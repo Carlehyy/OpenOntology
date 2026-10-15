@@ -61,7 +61,9 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
     default: 'max-h-[90dvh] w-[min(92vw,36rem)]',
     large: 'max-h-[85dvh] w-[min(94vw,48rem)]',
     wide: 'max-h-[90dvh] w-[min(96vw,64rem)]',
-    xwide: 'max-h-[90dvh] w-[min(96vw,88rem)]',
+    // 76rem = 分区导航 9.5 + 消息列表 22 + 阅读栏 44（=列表两倍）——内容自洽宽度，
+    // 弹窗随内容收窄，避免右侧大片留白（88rem 档实测两侧各空 ~6rem 被用户标注）
+    xwide: 'max-h-[90dvh] w-[min(96vw,76rem)]',
   }[size]
 
   return (
