@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useImperativeHandle, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle2, ChevronDown, Copy, Inbox, KeyRound, Loader2, Zap } from 'lucide-react'
 import { toast } from 'sonner'
@@ -34,18 +34,32 @@ function ingestEndpoint(): string {
 }
 
 interface NotificationsInboundSectionProps {
-  /** 弹窗开关：关闭时清理密钥明文与表单临时态 */
+  /** 弹窗开关：关闭时本组件随父级 return null 卸载，state 即毁（明文安全底线） */
   open: boolean
+  /** 本分区是否可见（常挂载 + CSS 隐藏模式下控制 query 拉取时机与基线一致） */
+  visible: boolean
+  /** 签发密钥明文（父组件持有——「保持展示直至确认」要求跨分区存活，子组件卸载不丢） */
+  mintedKey: NotificationIngestKey | null
+  onMintedKeyChange: (key: NotificationIngestKey | null) => void
   /** 链路测试成功会真实入站一条消息：刷新列表与徽章 */
   invalidateLists: () => void
 }
 
+/**
+ * 复制并如实反馈：clipboard-api 路径可宣称「已复制」；execCommand 降级路径
+ * 可能假成功（AGENTS.md §5），文案降级为「已尝试写入，请粘贴验证」。
+ */
+function copyWithToast(value: string, copiedMessage: string, manualHint: string) {
+  writeTextToClipboard(value)
+    .then(via => toast.success(via === 'clipboard-api' ? copiedMessage : `${copiedMessage}（已尝试写入剪贴板，请粘贴验证）`))
+    .catch(() => toast.error(manualHint))
+}
+
 const NotificationsInboundSection = forwardRef<InboundSectionHandle, NotificationsInboundSectionProps>(
-  function NotificationsInboundSection({ open, invalidateLists }, ref) {
+  function NotificationsInboundSection({ open, visible, mintedKey, onMintedKeyChange, invalidateLists }, ref) {
     const queryClient = useQueryClient()
     const [keyName, setKeyName] = useState('')
     const [keyScope, setKeyScope] = useState('')
-    const [mintedKey, setMintedKey] = useState<NotificationIngestKey | null>(null)
     const [revokingKey, setRevokingKey] = useState<NotificationIngestKey | null>(null)
     const [testingKeyId, setTestingKeyId] = useState<string | null>(null)
     // 链路测试二次确认（真实投递到所有启用渠道，误触代价高）
@@ -53,16 +67,16 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
     // 签发表单收起态：默认收起，卡头按钮展开（降低入口卡的常态噪音）
     const [mintFormOpen, setMintFormOpen] = useState(false)
 
-    const ingestKeys = useQuery({
+const ingestKeys = useQuery({
       queryKey: ['notifications', 'ingest-keys'],
       queryFn: notificationsApi.ingestKeys.list,
-      enabled: open,
+      enabled: open && visible,
     })
 
     const mintKeyMutation = useMutation({
       mutationFn: notificationsApi.ingestKeys.create,
       onSuccess: data => {
-        setMintedKey(data)
+        onMintedKeyChange(data)
         setKeyName('')
         setKeyScope('')
         void queryClient.invalidateQueries({ queryKey: ['notifications', 'ingest-keys'] })
@@ -95,23 +109,8 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
       onSettled: () => setTestingKeyId(null),
     })
 
-    // 弹窗关闭即清除密钥明文与表单临时态（“仅此一次”承诺不因重开而失效）。
-    // 明文未确认保存就关闭：toast 告知补救路径（ref 镜像读取，避免 effect 依赖扩张）
-    const mintedKeyRef = useRef(mintedKey)
-    mintedKeyRef.current = mintedKey
-    useEffect(() => {
-      if (!open) {
-        if (mintedKeyRef.current) {
-          toast.info('密钥明文未确认保存已清除；如需新明文请重新签发并吊销旧密钥')
-        }
-        setMintedKey(null)
-        setMintFormOpen(false)
-        setConfirmingKeyTest(null)
-        setKeyName('')
-        setKeyScope('')
-      }
-    }, [open])
-
+    // 「弹窗关闭即焚」由两层兜底：明文在父组件 state（父级关闭 effect 清空 + toast），
+    // 表单草稿随本组件卸载销毁——挂载期 open 恒 true，此处不再需要 !open effect
     useImperativeHandle(ref, () => ({
       collapseTransient: () => {
         if (!mintFormOpen) return false
@@ -168,9 +167,7 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                   <button
                     type="button"
                     onClick={() => {
-                      writeTextToClipboard(ingestEndpoint())
-                        .then(() => toast.success('端点地址已复制'))
-                        .catch(() => toast.error('复制失败，请手动选择复制'))
+                      copyWithToast(ingestEndpoint(), '端点地址已复制', '复制失败，请手动选择复制')
                     }}
                     aria-label="复制端点地址"
                     className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -185,26 +182,30 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                 copyLabel="复制调用示例"
                 copyAnchor="curl"
                 onCopy={() => {
-                  writeTextToClipboard(ingestCurlScript(ingestEndpoint()))
-                    .then(() => toast.success('调用示例已复制（需替换密钥占位符）'))
-                    .catch(() => toast.error('复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制'))
+                  copyWithToast(ingestCurlScript(ingestEndpoint()), '调用示例已复制（需替换密钥占位符）', '复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制')
                 }}
               />
             </div>
 
             {mintedKey && (
               /* 一次性交付卡：明文唯一可见窗口。脚本已注入真实密钥，复制即可交给外部系统；
-                 视觉走品牌正向情绪（签发是成功事件），「仅此一次」警示留在文案行 */
-              <div role="alert" className="rounded-lg border border-[var(--color-nav-bg)] bg-brand-soft p-3" data-notifications-key-delivery>
+                 视觉走品牌正向情绪（签发是成功事件——role=status 不打断读屏，区别于警示 alert） */
+              <div role="status" className="rounded-lg border border-brand-line bg-brand-soft p-3" data-notifications-key-delivery>
                 <p className="flex items-center gap-1.5 text-sm font-semibold text-brand-ink">
                   <CheckCircle2 size={15} className="shrink-0" /> 密钥已签发 ——「{mintedKey.name}」
                 </p>
-                <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-secondary)]">
-                  明文仅此次展示，请立即交付；下方脚本已注入该密钥，可直接交给外部系统。
-                </p>
+                {mintedKey.plaintextKey ? (
+                  <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-secondary)]">
+                    明文仅此次展示，请立即交付；下方脚本已注入该密钥，可直接交给外部系统。
+                  </p>
+                ) : (
+                  <p className="mt-0.5 text-xs leading-5 text-[var(--color-warning)]">
+                    签发响应未携带明文（异常），请吊销本枚后重新签发；下方脚本为占位符版。
+                  </p>
+                )}
                 <div className="mt-2 flex items-center gap-2">
                   <code
-                    className="min-w-0 flex-1 break-all rounded bg-[var(--color-bg-base)] px-2 py-1.5 font-mono text-[11px] text-[var(--color-text-primary)] select-all"
+                    className="min-w-0 flex-1 break-all rounded bg-[var(--color-bg-base)] px-2 py-1.5 font-mono text-xs text-[var(--color-text-primary)] select-all"
                     data-notifications-key-plaintext
                   >
                     {mintedKey.plaintextKey}
@@ -212,9 +213,7 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                   <button
                     type="button"
                     onClick={() => {
-                      writeTextToClipboard(mintedKey.plaintextKey || '')
-                        .then(() => toast.success('密钥已复制'))
-                        .catch(() => toast.error('复制失败，请点击上方密钥全选后手动复制'))
+                      copyWithToast(mintedKey.plaintextKey || '', '密钥已复制', '复制失败，请点击上方密钥全选后手动复制')
                     }}
                     className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     data-notifications-key-copy-plaintext
@@ -229,9 +228,7 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                   copyVariant="primary"
                   preAnchorName="key-script"
                   onCopy={() => {
-                    writeTextToClipboard(ingestCurlScript(ingestEndpoint(), mintedKey.plaintextKey))
-                      .then(() => toast.success('完整脚本已复制（含密钥明文）'))
-                      .catch(() => toast.error('复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制'))
+                    copyWithToast(ingestCurlScript(ingestEndpoint(), mintedKey.plaintextKey), '完整脚本已复制（含密钥明文）', '复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制')
                   }}
                 />
                 <p className="mt-1.5 text-xs leading-5 text-[var(--color-warning)]">
@@ -241,7 +238,7 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => { setMintedKey(null); setMintFormOpen(false) }}
+                    onClick={() => { onMintedKeyChange(null); setMintFormOpen(false) }}
                     className="rounded-lg"
                     data-notifications-key-dismiss
                   >
@@ -340,9 +337,7 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                         <button
                           type="button"
                           onClick={() => {
-                            writeTextToClipboard(ingestCurlScript(ingestEndpoint()))
-                              .then(() => toast.success('脚本已复制，需将 <你的密钥> 替换为明文（明文仅在签发时展示）'))
-                              .catch(() => toast.error('复制失败，请手动选择复制'))
+                            copyWithToast(ingestCurlScript(ingestEndpoint()), '脚本已复制，需将 <你的密钥> 替换为明文（明文仅在签发时展示）', '复制失败，请手动选择复制')
                           }}
                           aria-label={`复制 ${key.name} 的调用脚本`}
                           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

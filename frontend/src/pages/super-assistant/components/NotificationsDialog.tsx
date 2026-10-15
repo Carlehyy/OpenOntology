@@ -15,6 +15,7 @@ import {
   NOTIFICATION_TABS,
   notificationsApi,
   type NotificationAttachment,
+  type NotificationIngestKey,
   type NotificationMessage,
   type NotificationPriority,
   type NotificationTab,
@@ -105,6 +106,9 @@ export default function NotificationsDialog({
   const [nav, setNav] = useState<NavSection>('messages')
   const [tab, setTab] = useState<NotificationTab>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // 签发密钥明文归父组件持有：子组件随弹窗 return null 卸载会即焚，
+  // 而「保持展示直至用户主动确认」的承诺要求跨分区存活（切去看一眼消息再回来不能丢）
+  const [mintedKey, setMintedKey] = useState<NotificationIngestKey | null>(null)
   // 手动转发面板
   const [forwardOpen, setForwardOpen] = useState(false)
   const [forwardChannelIds, setForwardChannelIds] = useState<Set<string>>(new Set())
@@ -172,9 +176,15 @@ export default function NotificationsDialog({
   const inboundSectionRef = useRef<InboundSectionHandle>(null)
   const outboundSectionRef = useRef<OutboundSectionHandle>(null)
 
-  // 弹窗关闭即回消息分区并清空转发/发送临时态；密钥明文与渠道表单的清理随子组件各自收口
+  // 弹窗关闭即回消息分区并清空转发/发送临时态；渠道/SMTP 表单由子组件卸载兜底。
+  // 密钥明文未确认保存就关闭：即焚（安全底线）但 toast 告知补救路径——
+  // 本 effect 在父组件（常驻挂载）上，open=false 时必然运行（子组件里的同款 effect 不可达）
   useEffect(() => {
     if (!open) {
+      if (mintedKey) {
+        toast.info('密钥明文未确认保存已清除；如需新明文请重新签发并吊销旧密钥')
+      }
+      setMintedKey(null)
       setNav('messages')
       setForwardOpen(false)
       setForwardChannelIds(new Set())
@@ -183,7 +193,7 @@ export default function NotificationsDialog({
       setComposePriority('normal')
       setComposeChannelIds(null)
     }
-  }, [open])
+  }, [open, mintedKey])
 
   // 详情接口在服务端把消息标为已读：同步刷新列表与徽章（不刷详情自身，避免循环）。
   // 键含 isRead：同一条消息「标为未读后重新查阅」的已读回翻也要即时刷——
@@ -963,20 +973,32 @@ export default function NotificationsDialog({
             </div>
           )}
 
-          {nav === 'config' && (
-            <div
-              role="tabpanel"
-              id="notifications-panel-config"
-              aria-labelledby="notifications-tab-config"
-              className="scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 min-[1440px]:grid min-[1440px]:grid-cols-2 min-[1440px]:items-start min-[1440px]:gap-x-6"
-            >
-              {/* ≥1440px 双列（入口左/出口右，两组高度基本各自入屏，滚动需求减半）；
-                  更窄视口回落单列，此时保留分组间分隔线 */}
-              <NotificationInboundSection ref={inboundSectionRef} open={open} invalidateLists={invalidateLists} />
-              <hr className="my-6 border-[var(--color-border)] min-[1440px]:my-0 min-[1440px]:hidden" aria-hidden />
-              <NotificationOutboundSection ref={outboundSectionRef} open={open} channels={channels} />
-            </div>
-          )}
+          {/* 常挂载 + CSS 隐藏（WAI-ARIA tabs 对非活动面板的标准形态）：
+              条件卸载会让子组件 state（密钥明文、渠道/SMTP 表单草稿）在分区切换时即毁，
+              与基线（state 全在常驻父组件上、切分区保留）不等价 */}
+          <div
+            role="tabpanel"
+            id="notifications-panel-config"
+            aria-labelledby="notifications-tab-config"
+            className={`scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 ${
+              nav === 'config'
+                ? 'min-[1440px]:grid min-[1440px]:grid-cols-2 min-[1440px]:items-start min-[1440px]:gap-x-6'
+                : 'hidden'
+            }`}
+          >
+            {/* ≥1440px 双列（入口左/出口右，两组高度基本各自入屏，滚动需求减半）；
+                更窄视口回落单列，此时保留分组间分隔线 */}
+            <NotificationInboundSection
+              ref={inboundSectionRef}
+              open={open}
+              visible={nav === 'config'}
+              mintedKey={mintedKey}
+              onMintedKeyChange={setMintedKey}
+              invalidateLists={invalidateLists}
+            />
+            <hr className="my-6 border-[var(--color-border)] min-[1440px]:hidden" aria-hidden />
+            <NotificationOutboundSection ref={outboundSectionRef} open={open} visible={nav === 'config'} channels={channels} />
+          </div>
           {nav === 'stats' && (
             <div
               role="tabpanel"

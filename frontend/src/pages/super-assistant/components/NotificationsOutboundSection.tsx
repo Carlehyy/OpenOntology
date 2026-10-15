@@ -37,14 +37,16 @@ const TEMPLATE_ICONS: Record<string, typeof Bell> = {
 }
 
 interface NotificationsOutboundSectionProps {
-  /** 弹窗开关：关闭时清理表单临时态 */
+  /** 弹窗开关：关闭时本组件随父级 return null 卸载，表单 state 即毁 */
   open: boolean
+  /** 本分区是否可见（常挂载 + CSS 隐藏模式下控制 query 拉取时机与基线一致） */
+  visible: boolean
   /** 渠道列表 query 由父组件持有（发送分区与转发面板共用同一 observer） */
   channels: UseQueryResult<NotificationChannel[]>
 }
 
 const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, NotificationsOutboundSectionProps>(
-  function NotificationsOutboundSection({ open, channels }, ref) {
+  function NotificationsOutboundSection({ open, visible, channels }, ref) {
     const queryClient = useQueryClient()
     const [channelName, setChannelName] = useState('')
     const [channelNote, setChannelNote] = useState('')
@@ -72,14 +74,17 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
     const channelTemplates = useQuery({
       queryKey: ['notifications', 'channel-templates'],
       queryFn: notificationsApi.channelTemplates,
-      enabled: open,
+      enabled: open && visible,
       staleTime: Infinity,
+      // 分区隐藏期间 observer 仍在（常挂载），但关闭弹窗退订后默认 gcTime 5min 会回收缓存——
+      // 模板是静态定义，钉住缓存与基线（常驻 observer 永不重拉）行为对齐
+      gcTime: Infinity,
     })
 
     const smtp = useQuery({
       queryKey: ['notifications', 'smtp'],
       queryFn: notificationsApi.smtp.get,
-      enabled: open,
+      enabled: open && visible,
     })
 
     // SMTP 表单首载回填（保存后不覆盖正在编辑的输入）
@@ -171,13 +176,14 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
     const updateChannelMutation = useMutation({
       mutationFn: ({ id, fields }: { id: string; fields: { enabled?: boolean; name?: string; note?: string | null; params?: Record<string, string> } }) =>
         notificationsApi.channels.update(id, fields),
-      onMutate: ({ id }) => setTogglingChannelId(id),
+      onMutate: ({ id }) => setTogglingChannelId(current => current ?? id),
       onSuccess: (_data, variables) => {
         toast.success(variables.fields.enabled ? '渠道已启用' : '渠道已停用')
         void queryClient.invalidateQueries({ queryKey: ['notifications', 'channels'] })
       },
       onError: error => toast.error(errorText(error)),
-      onSettled: () => setTogglingChannelId(null),
+      // 条件清理：连点两行时先完成的那次 settle 不清掉仍在飞行中的另一行 busy
+      onSettled: (_data, _error, variables) => setTogglingChannelId(current => current === variables.id ? null : current),
     })
 
     const deleteChannelMutation = useMutation({
@@ -201,24 +207,9 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
       onSettled: () => setTestingChannelId(null),
     })
 
-    // 弹窗关闭即清理渠道/SMTP 表单临时态（SMTP 密码等不再跨会话残留，回填标记一并重置）
-    useEffect(() => {
-      if (!open) {
-        setChannelName('')
-        setChannelNote('')
-        setTemplateParams({})
-        setEditingChannel(null)
-        setChannelFormStage('idle')
-        setFailedDetailId(null)
-        setSmtpHost('')
-        setSmtpPort('465')
-        setSmtpUsername('')
-        setSmtpPassword('')
-        setSmtpSender('')
-        setSmtpTestTo('')
-        smtpLoadedRef.current = false
-      }
-    }, [open])
+    // 「关闭弹窗清空表单（含 SMTP 密码）」由卸载兜底：父级 return null 时本组件销毁，
+    // 全部 state 与 smtpLoadedRef 随实例重建——挂载期 open 恒 true，无需 !open effect。
+    // 分区切换（弹窗仍开）不卸载（父级常挂载保活），草稿按基线行为保留。
 
     useImperativeHandle(ref, () => ({
       collapseTransient: () => {
@@ -276,7 +267,7 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
           <div className="p-4">
             {channelFormStage === 'pick' && (
               /* —— 模板选择网格：选类型起手，每类一句人话（限高内滚防页面高度突变） —— */
-              <div className="mb-4 max-h-[55dvh] overflow-y-auto" data-notifications-template-grid>
+              <div className="mb-4 max-h-[55svh] overflow-y-auto" data-notifications-template-grid>
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-medium text-[var(--color-text-secondary)]">选择渠道类型</p>
                   <button
@@ -352,7 +343,7 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
             {channelFormStage === 'form' && currentTemplate && (
               /* —— 字段表单：新建/编辑共用；敏感字段留空=保持不变。
                   限高内滚 + 操作行吸底：窄视口下保存按钮不再被顶出屏外 —— */
-              <div className="mb-4 flex max-h-[60dvh] flex-col overflow-y-auto rounded-lg border border-[var(--color-border)]" data-notifications-channel-form>
+              <div className="mb-4 flex max-h-[60svh] flex-col overflow-y-auto rounded-lg border border-[var(--color-border)]" data-notifications-channel-form>
                 <div className="p-3">
                   <div className="flex items-center gap-2">
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink">
@@ -490,21 +481,25 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
                       )}
                       {/* 层3 最近一次投递/测试直发结果；失败行可点开完整错误（不再只靠 title 悬浮）。
                           统计区按正式投递单聚合，口径差异在展开详情里明示 */}
-                      <button
-                        type="button"
-                        onClick={() => channel.lastStatus === 'failed' && setFailedDetailId(current => current === channel.id ? null : channel.id)}
-                        className={`flex items-start gap-1 text-left text-xs leading-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${channel.lastStatus === 'failed' ? 'text-[var(--color-danger)]' : 'cursor-default text-[var(--color-text-tertiary)]'}`}
-                        data-notifications-channel-status
-                        aria-expanded={channel.lastStatus === 'failed' && failedDetailId === channel.id}
-                      >
-                        {channel.lastStatus === 'sent'
-                          ? `投递成功 ${formatDateTime(channel.lastSentAt || channel.updatedAt)}`
-                          : channel.lastStatus === 'failed'
-                            ? <span className="line-clamp-2">投递失败 {formatDateTime(channel.updatedAt)} · {channelFailureHint(channel.lastError || '')}</span>
+                      {channel.lastStatus === 'failed' ? (
+                        <button
+                          type="button"
+                          onClick={() => setFailedDetailId(current => current === channel.id ? null : channel.id)}
+                          className="flex items-start gap-1 text-left text-xs leading-4 text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          data-notifications-channel-status
+                          aria-expanded={failedDetailId === channel.id}
+                        >
+                          <span className="line-clamp-2">投递失败 {formatDateTime(channel.updatedAt)} · {channelFailureHint(channel.lastError || '')}</span>
+                        </button>
+                      ) : (
+                        <p className="text-xs leading-4 text-[var(--color-text-tertiary)]" data-notifications-channel-status>
+                          {channel.lastStatus === 'sent'
+                            ? `投递成功 ${formatDateTime(channel.lastSentAt || channel.updatedAt)}`
                             : '尚未投递'}
-                      </button>
+                        </p>
+                      )}
                       {channel.lastStatus === 'failed' && failedDetailId === channel.id && (
-                        <div className="rounded-md bg-[var(--color-danger-bg)] px-2 py-1.5 text-xs leading-5" data-notifications-channel-failure-detail>
+                        <div className="max-h-40 overflow-y-auto rounded-md bg-[var(--color-danger-bg)] px-2 py-1.5 text-xs leading-5" data-notifications-channel-failure-detail>
                           <p className="break-all text-[var(--color-danger)]">最近一次尝试失败（{formatDateTime(channel.updatedAt)}）：{channel.lastError}</p>
                           <p className="mt-0.5 text-[var(--color-text-tertiary)]">此处含测试直发；统计区仅计正式投递单。可点「测试」重发验证。</p>
                         </div>
@@ -627,7 +622,7 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
               </label>
               <label className="flex min-w-36 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
                 密码/授权码
-                <input type="password" value={smtpPassword} onChange={e => setSmtpPassword(e.target.value)} maxLength={500} placeholder={smtp.data?.hasPassword ? '留空保持不变' : 'SMTP 密码或授权码'} className={inputClass} data-notifications-smtp-password />
+                <input type="password" autoComplete="new-password" value={smtpPassword} onChange={e => setSmtpPassword(e.target.value)} maxLength={500} placeholder={smtp.data?.hasPassword ? '留空保持不变' : 'SMTP 密码或授权码'} className={inputClass} data-notifications-smtp-password />
               </label>
               <label className="flex w-40 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
                 发件人名称（可选）

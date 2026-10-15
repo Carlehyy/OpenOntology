@@ -8,19 +8,22 @@
  */
 import type { ButtonHTMLAttributes } from 'react'
 
-export function SettingSwitch({ label, ariaLabel, checked, busy, onToggle, ...rest }: {
+import { cn } from '@/lib/utils'
+
+export function SettingSwitch({ label, ariaLabel, checked, busy, onToggle, className, ...rest }: {
   label?: string
   ariaLabel: string
   checked: boolean
   busy: boolean
   onToggle: () => void
-} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'aria-checked' | 'role' | 'onClick' | 'disabled'>) {
+} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'aria-checked' | 'aria-busy' | 'role' | 'onClick' | 'disabled'>) {
   return (
     <div className="inline-flex items-center gap-1.5">
       {label && <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>}
       <button type="button" role="switch" aria-label={ariaLabel} aria-checked={checked} aria-busy={busy} disabled={busy} onClick={onToggle} {...rest}
-        className="relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60">
-        <span aria-hidden="true" className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors motion-reduce:transition-none ${busy ? 'animate-pulse motion-reduce:animate-none' : ''} ${checked ? 'bg-brand' : 'bg-slate-300'}`}>
+        className={cn('relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60', className)}>
+        {/* off 轨道用语义边框令牌：明暗两态都比所在表面亮一档，修掉 slate-300 在暗色下比 on 态更亮的信号倒置 */}
+        <span aria-hidden="true" className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors motion-reduce:transition-none ${busy ? 'animate-pulse motion-reduce:animate-none' : ''} ${checked ? 'bg-brand' : 'bg-[var(--color-border-hover)]'}`}>
           <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none ${checked ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
         </span>
       </button>

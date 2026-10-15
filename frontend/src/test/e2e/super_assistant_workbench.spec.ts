@@ -1500,6 +1500,22 @@ test('消息通知：接入密钥——签发交付卡、明文仅一次展示�
   await page.locator('[data-notifications-key-dismiss]').click()
   await expect(delivery).toBeHidden()
 
+  // P0 回归（对抗审查修复）：明文随父组件持有——切到消息列表再切回，交付卡与明文不丢
+  await page.locator('[data-notifications-key-mint-toggle]').click()
+  await page.locator('[data-notifications-key-name]').fill('keep-alive')
+  await page.locator('[data-notifications-key-mint]').last().click()
+  await expect(page.locator('[data-notifications-key-delivery]')).toBeVisible()
+  await page.locator('[data-notifications-nav="messages"]').click()
+  await page.waitForTimeout(200)
+  await page.locator('[data-notifications-nav="config"]').click()
+  await expect(page.locator('[data-notifications-key-delivery]')).toBeVisible()
+  await expect(page.locator('[data-notifications-key-plaintext]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
+  await page.locator('[data-notifications-key-dismiss]').click()
+
+  // 端点独立复制：剪贴板拿到端点地址（副作用真实验收）
+  await page.locator('[data-notifications-copy-endpoint]').click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/api/v2/notifications/ingest')
+
   // 存量密钥行复制脚本：明文不可再取（安全设计），复制的是占位符版
   await page.locator('[data-notifications-key-copy-script]').first().click()
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('<你的密钥>')
@@ -1536,8 +1552,9 @@ test('消息通知：转发渠道——新建/启停开关/测试直发/删除�
   // 收回展开态，让下方既有 SMTP 流程仍从 summary 点击开始
   await page.locator('[data-notifications-smtp-card] summary').click()
   await expect(page.locator('[data-notifications-smtp-card]')).not.toHaveAttribute('open', '')
-  // 渠道卡状态行：最近成功渠道显示投递成功；状态行非失败时点击无展开
+  // 渠道卡状态行：最近成功渠道显示投递成功；非失败行是纯文本（不伪装成可展开按钮）
   await expect(page.locator('[data-notifications-channel-item="ch-1"] [data-notifications-channel-status]')).toContainText('投递成功')
+  await expect(page.locator('[data-notifications-channel-item="ch-1"] [data-notifications-channel-status]')).not.toHaveRole('button')
   await expect(page.locator('[data-notifications-channel-failure-detail]')).toHaveCount(0)
 
   const existing = page.locator('[data-notifications-channel-item="ch-1"]')

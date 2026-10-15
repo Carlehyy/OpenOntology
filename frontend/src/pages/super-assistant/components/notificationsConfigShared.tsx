@@ -51,11 +51,14 @@ export function CurlCodeBlock({ lines, onCopy, copyLabel, copyAnchor, copyVarian
 }) {
   return (
     <div className="relative mt-2 rounded-md bg-[var(--color-code-bg)]">
+      {/* 复制钮放右下而非右上：首行 curl 命令行在 12px 等宽下最长（URL+密钥），
+          右上按钮会压住尾部——尤其 390px 下密钥行尾在最大滚动位仍被遮死；
+          末行 `  }'` 仅约 36px 宽，右下永不碰撞 */}
       {copyVariant === 'ghost' ? (
         <button
           type="button"
           onClick={onCopy}
-          className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md border border-[color-mix(in_srgb,var(--color-code-fg)_25%,transparent)] px-2 py-0.5 text-xs text-[var(--color-code-fg)] opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-1 rounded-md border border-[color-mix(in_srgb,var(--color-code-fg)_25%,transparent)] bg-[color-mix(in_srgb,var(--color-code-bg)_80%,transparent)] px-2 py-0.5 text-xs text-[var(--color-code-fg)] opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           {...{ [`data-notifications-copy-${copyAnchor}`]: '' }}
         >
           <Copy size={12} /> {copyLabel}
@@ -64,7 +67,7 @@ export function CurlCodeBlock({ lines, onCopy, copyLabel, copyAnchor, copyVarian
         <button
           type="button"
           onClick={onCopy}
-          className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-lg bg-[var(--color-nav-bg)] px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-1 rounded-lg bg-[var(--color-primary)] px-2.5 py-1 text-xs font-medium text-[var(--color-primary-foreground)] transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           {...{ [`data-notifications-copy-${copyAnchor}`]: '' }}
         >
           <Copy size={12} /> {copyLabel}
