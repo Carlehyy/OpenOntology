@@ -25,8 +25,8 @@ import { toast } from 'sonner'
 import { DialogShell } from './AssistantConfiguration'
 import { errorText } from './assistantPanelUtils'
 import {
-  STATUS_LABEL, WEEKDAYS, freshCreateForm, isCreateFormDirty, scheduleLabel, targetLabel,
-  shanghaiDatetimeLocal, shanghaiIsoFromLocal, validateCreateForm,
+  STATUS_LABEL, TEMPLATE_GOAL_MAX_CHARS, WEEKDAYS, freshCreateForm, isCreateFormDirty,
+  scheduleLabel, targetLabel, shanghaiDatetimeLocal, shanghaiIsoFromLocal, validateCreateForm,
   type CreateFormState, type CreateFormValidation,
 } from './scheduledTaskLogic'
 
@@ -216,7 +216,11 @@ export default function ScheduledTasksDialog({
       setSelectedTaskId(created.id)
       setSelectedRunId(null)
       resetForm()
-      toast.success('定时任务已创建', { description: '到点后会在后台执行，结果会出现在本弹窗的执行记录里。' })
+      toast.success('定时任务已创建', {
+        description: target === 'task_template'
+          ? '到点后会按所选模板创建实例，进度与结果在任务实例中查看。'
+          : '到点后会在后台执行，结果会出现在本弹窗的执行记录里。',
+      })
     } catch (err) {
       // axios 超时（ECONNABORTED）无 response，errorText 会透出英文技术串；
       // 客户端超时不回滚服务端，须提示用户先查列表避免重复创建
@@ -313,7 +317,10 @@ export default function ScheduledTasksDialog({
   }
   const changeTarget = (value: ScheduledTargetKind) => {
     setTarget(value)
-    setValidation({})
+    // 切回超级助手清掉残留选择：否则脏判定假阳性（可见表单与默认一致却拦放弃），
+    // 且再切回模板时旧选择无声复现；载荷侧本就发 null，状态与语义对齐
+    if (value === 'super_assistant') setTemplateId('')
+    setValidation(current => ({ ...current, templateId: undefined }))
   }
   const changeTemplateId = (value: string) => {
     setTemplateId(value)
@@ -325,7 +332,9 @@ export default function ScheduledTasksDialog({
       <DialogShell
         size="wide"
         title="定时任务"
-        description="到点后自动执行。需要确认的操作会跳过并记录，不会代替你确认。"
+        description={creating && target === 'task_template'
+          ? '到点后按所选模板创建实例并运行；需要人工把关的节点会停下等你处理。'
+          : '到点后自动执行。需要确认的操作会跳过并记录，不会代替你确认。'}
         onClose={requestClose}
         icon={<Clock size={18} />}
         contentClassName="h-[min(82dvh,44rem)]"
@@ -393,6 +402,8 @@ export default function ScheduledTasksDialog({
                 templateId={templateId} setTemplateId={changeTemplateId}
                 templates={templates}
                 templatesLoading={templatesQuery.isLoading}
+                templatesError={templatesQuery.isError}
+                onRetryTemplates={() => void templatesQuery.refetch()}
                 kind={kind} setKind={changeKind}
                 onceAt={onceAt} setOnceAt={changeOnceAt}
                 timeOfDay={timeOfDay} setTimeOfDay={changeTimeOfDay}
@@ -433,7 +444,9 @@ export default function ScheduledTasksDialog({
         onConfirm={() => void confirmDelete()}
         loading={deletePending}
         title="删除定时任务？"
-        description="计划会停止，已经生成的会话还在近期会话里。"
+        description={deleting?.target_kind === 'task_template'
+          ? '计划会停止，已创建的实例仍在任务实例中。'
+          : '计划会停止，已经生成的会话还在近期会话里。'}
         confirmText="删除"
         variant="danger"
       />
@@ -454,7 +467,7 @@ export default function ScheduledTasksDialog({
 
 function CreateForm({
   title, setTitle, instruction, setInstruction, target, setTarget,
-  templateId, setTemplateId, templates, templatesLoading,
+  templateId, setTemplateId, templates, templatesLoading, templatesError, onRetryTemplates,
   kind, setKind,
   onceAt, setOnceAt, timeOfDay, setTimeOfDay, weekday, setWeekday, validation, saving, onSubmit,
 }: {
@@ -468,6 +481,8 @@ function CreateForm({
   setTemplateId: (value: string) => void
   templates: TemplateSummary[]
   templatesLoading: boolean
+  templatesError: boolean
+  onRetryTemplates: () => void
   kind: ScheduledKind
   setKind: (value: ScheduledKind) => void
   onceAt: string
@@ -519,7 +534,12 @@ function CreateForm({
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-[var(--color-text-primary)]">流程模板</span>
             <Select value={templateId} onValueChange={setTemplateId}>
-              <SelectTrigger aria-label="流程模板" className="h-9 w-full text-sm">
+              <SelectTrigger
+                aria-label="流程模板"
+                aria-invalid={validation.templateId ? true : undefined}
+                aria-describedby={validation.templateId ? 'scheduled-template-error' : undefined}
+                className={`h-9 w-full text-sm ${validation.templateId ? 'border-[var(--color-danger)]' : ''}`}
+              >
                 <SelectValue placeholder={templatesLoading ? '模板加载中…' : '请选择流程模板'} />
               </SelectTrigger>
               <SelectContent>
@@ -529,9 +549,20 @@ function CreateForm({
               </SelectContent>
             </Select>
             {validation.templateId && (
-              <p role="alert" className="text-xs leading-5 text-[var(--color-danger)]">{validation.templateId}</p>
+              <p id="scheduled-template-error" role="alert" className="text-xs leading-5 text-[var(--color-danger)]">{validation.templateId}</p>
             )}
-            {!templatesLoading && templates.length === 0 && !validation.templateId && (
+            {templatesError ? (
+              <p className="text-xs leading-5 text-[var(--color-danger)]">
+                模板加载失败。
+                <button
+                  type="button"
+                  onClick={onRetryTemplates}
+                  className="ml-1 text-brand-ink underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  重试
+                </button>
+              </p>
+            ) : !templatesLoading && templates.length === 0 && !validation.templateId && (
               <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
                 还没有可用的流程模板，可先在「任务实例」中创建后再来设置。
               </p>
@@ -603,7 +634,7 @@ function CreateForm({
             value={instruction}
             onChange={event => setInstruction(event.target.value)}
             rows={8}
-            maxLength={target === 'task_template' ? 20_000 : undefined}
+            maxLength={target === 'task_template' ? TEMPLATE_GOAL_MAX_CHARS : undefined}
             placeholder={target === 'task_template'
               ? '到点后会以这段内容作为任务目标，按所选模板的流程创建并运行实例。'
               : '到点后助手会按这段任务内容在后台执行，例如：汇总昨天的待办并给出建议。'}

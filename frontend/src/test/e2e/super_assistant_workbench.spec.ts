@@ -1836,6 +1836,14 @@ test('定时任务弹窗：触发对象可选流程模板，执行记录可跳�
   await expect(dialog).toHaveCount(0)
   await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
   await expect(page.getByTestId('task-instance-lite')).toBeVisible()
+  // 关闭再从侧栏重开：深链不残留、回到看板（TaskInstancesDialog 两个 effect 的顺序契约锚点）
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await expect(page.getByTestId('task-instances-board')).toBeVisible()
+  await expect(page.getByTestId('task-instance-lite')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
 
   // 创建流程模板目标的新任务：载荷真实带 target_kind/target_template_id
   await page.getByRole('button', { name: '定时任务' }).click()
@@ -1847,10 +1855,11 @@ test('定时任务弹窗：触发对象可选流程模板，执行记录可跳�
   await page.getByRole('option', { name: '流程模板' }).click()
   const templateSelect = dialog.getByRole('combobox', { name: '流程模板' })
   await expect(templateSelect).toBeVisible()
-  // 未选模板时提交被字段级校验拦截
+  // 未选模板时提交被字段级校验拦截（错误文案与下拉占位符同文，钉到错误节点断言）
   await dialog.getByPlaceholder('到点后会以这段内容作为任务目标').fill('例行跑一遍评审流程')
   await page.getByRole('button', { name: '创建', exact: true }).click()
-  await expect(dialog.getByText('请选择流程模板')).toBeVisible()
+  await expect(dialog.locator('#scheduled-template-error')).toBeVisible()
+  await expect(dialog.locator('#scheduled-template-error')).toHaveText('请选择流程模板')
   await templateSelect.click()
   await page.getByRole('option', { name: '代码变更评审' }).click()
   // 模板目标的助手专属提示让位给实例语义提示

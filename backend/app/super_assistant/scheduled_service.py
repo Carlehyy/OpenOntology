@@ -33,7 +33,7 @@ from app.super_assistant.models import (
 from app.super_assistant.runtime import stream_chat
 from app.super_assistant.schemas import ScheduledTaskCreate, ScheduledTaskUpdate
 from app.super_assistant.scheduled_constants import STALE_RUNNING
-from app.task_instances.models import TaskTemplate
+from app.task_instances.models import TaskInstance, TaskTemplate
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +155,8 @@ def _validate_target(
         .first()
     )
     if template is None:
-        raise ScheduledTaskNotFoundError("流程模板不存在或已删除")
+        # 引用实体缺失属请求校验错误（400），与任务归属缺失的 404 区分语义
+        raise ScheduledTaskError("流程模板不存在或已删除")
     if len(instruction) > TEMPLATE_GOAL_MAX_CHARS:
         raise ScheduledTaskError(f"流程模板目标的任务内容不能超过 {TEMPLATE_GOAL_MAX_CHARS} 字")
     return template
@@ -383,6 +384,9 @@ def _reap_stale_runs(db: Session, now: datetime) -> None:
             "收割超时运行 run=%s task=%s status=%s started_at=%s created_at=%s",
             run.id, run.task_id, run.status, run.started_at, run.created_at,
         )
+        # 模板目标收割前先对账：activate 已成功的实例要把 run 补记为完成
+        if _reconcile_template_run(db, run, db.get(SuperAssistantScheduledTask, run.task_id)):
+            continue
         _fail_run_row(db, run, now, REAP_ERROR)
 
 
@@ -707,6 +711,42 @@ def _fail_run_by_id(db: Session, run_id: str, error: str) -> None:
     db.commit()
 
 
+def _reconcile_template_run(
+    db: Session, run: SuperAssistantScheduledRun, task: SuperAssistantScheduledTask | None,
+) -> bool:
+    """模板目标 run 的对账兜底：activate_instance 内部自 commit，其后的
+    终态写回异常、进程崩溃或收割误报都不代表实例未创建。按幂等键反查
+    实例，查到则照实补记完成并回链实例，避免「实例在跑、run 却记失败」。"""
+    if task is None or task.target_kind != "task_template":
+        return False
+    instance = (
+        db.query(TaskInstance)
+        .filter(TaskInstance.idempotency_key == f"sa-scheduled:{run.id}")
+        .first()
+    )
+    if instance is None:
+        return False
+    reaped = run.status == "failed" and run.error == REAP_ERROR
+    if run.status != "running" and not reaped:
+        return False
+    run.status = "completed"
+    run.error = None
+    run.instance_id = instance.id
+    run.result_summary = (
+        f"已创建实例「{instance.name}」，进度与结果请在任务实例中查看"
+    )
+    run.finished_at = _now()
+    db.commit()
+    _notify(
+        db, run=run, task=task, kind="notice",
+        title=f"定时任务已完成：{task.title}",
+        summary=run.result_summary,
+        event_suffix="-corrected" if reaped else "",
+    )
+    db.commit()
+    return True
+
+
 def _execute_template_target_run(
     run_id: str, task: SuperAssistantScheduledTask, scheduled_for: datetime,
 ) -> None:
@@ -745,8 +785,10 @@ def _execute_template_target_run(
             idempotency_key=f"sa-scheduled:{run_id}",
         )
         # activate_instance 内部已 commit，run 随会话过期重读；仅 running 行
-        # 写终态，被收割等他处变更的行不覆盖（与超级助手目标写回守卫同款）
-        if run.status != "running":
+        # 写终态，收割误报照实覆盖并按真实结果补发 -corrected 更正通知
+        # （与超级助手目标写回守卫同款）
+        reaped = run.status == "failed" and run.error == REAP_ERROR
+        if run.status != "running" and not reaped:
             logger.warning(
                 "定时任务模板目标写回跳过：状态已被他处变更 run=%s status=%s",
                 run_id, run.status,
@@ -765,10 +807,12 @@ def _execute_template_target_run(
             db, run=run, task=task, kind="notice",
             title=f"定时任务已完成：{task.title}",
             summary=run.result_summary,
+            event_suffix="-corrected" if reaped else "",
         )
         db.commit()
     except HTTPException as exc:
-        # activate_instance 以 HTTP 404 表达模板/版本缺失（触达前的软删竞态等）
+        # activate_instance 以 HTTP 404 表达模板/版本缺失（触达前的软删竞态等，
+        # 均发生在引擎激活之前，实例不可能已创建）
         db.rollback()
         detail = exc.detail if isinstance(exc.detail, str) else "流程模板或其版本不存在或已删除"
         logger.warning("定时任务模板目标执行失败 run=%s detail=%s", run_id, detail)
@@ -776,7 +820,14 @@ def _execute_template_target_run(
     except Exception as exc:  # noqa: BLE001 — 失败写回 run，不向上抛以免 NATS 空烧
         db.rollback()
         logger.exception("定时任务模板目标执行失败 run=%s", run_id)
-        _fail_run_by_id(db, run_id, f"实例创建失败：{exc}")
+        # activate 内部自 commit：异常不代表实例未创建，先按幂等键对账补记
+        error_text = str(exc)[:2000]
+        try:
+            run = db.get(SuperAssistantScheduledRun, run_id)
+            if run is None or not _reconcile_template_run(db, run, task):
+                _fail_run_by_id(db, run_id, f"实例创建失败：{error_text}")
+        except Exception:
+            logger.exception("定时任务模板目标失败写回未完成 run=%s", run_id)
     finally:
         db.close()
 

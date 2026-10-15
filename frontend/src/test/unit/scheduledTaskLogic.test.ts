@@ -186,6 +186,18 @@ describe('validateCreateForm（P0-4 字段级校验 + S-2/S-3 文案）', () => 
     assert.deepEqual(validateCreateForm({ ...form, templateId: 'tpl-1' }, NOW), {})
     assert.deepEqual(validateCreateForm({ ...freshCreateForm(), instruction: 'x' }, NOW), {})
   })
+
+  it('模板目标任务内容超 2 万字（切换目标后的存量长文）→ 字段级拦截，不流到后端 400', () => {
+    const form = {
+      ...freshCreateForm(),
+      instruction: '长'.repeat(20_001),
+      target: 'task_template' as const,
+      templateId: 'tpl-1',
+    }
+    assert.equal(validateCreateForm(form, NOW).instruction, '流程模板目标的任务内容不能超过 20000 字')
+    // 超级助手目标同长度不拦（后端上限 10 万字）
+    assert.deepEqual(validateCreateForm({ ...form, target: 'super_assistant' }, NOW), {})
+  })
 })
 
 describe('targetLabel（触发对象标签）', () => {

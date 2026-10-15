@@ -15,6 +15,9 @@ import { formatDateTime } from '../../../utils/datetime.ts'
 
 export const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'] as const
 
+/** 模板目标的任务内容即实例 goal，受其后端上限约束（字段级校验 + 控件 maxLength 双拦） */
+export const TEMPLATE_GOAL_MAX_CHARS = 20_000
+
 export const STATUS_LABEL: Record<ScheduledRunStatus, string> = {
   queued: '排队中',
   running: '执行中',
@@ -122,7 +125,12 @@ export interface CreateFormValidation {
  */
 export function validateCreateForm(form: CreateFormState, now = new Date()): CreateFormValidation {
   const errors: CreateFormValidation = {}
-  if (!form.instruction.trim()) errors.instruction = '请输入任务内容'
+  if (!form.instruction.trim()) {
+    errors.instruction = '请输入任务内容'
+  } else if (form.target === 'task_template' && form.instruction.length > TEMPLATE_GOAL_MAX_CHARS) {
+    // 切换目标后存量长文不受控件 maxLength 约束，须在此字段级拦截
+    errors.instruction = `流程模板目标的任务内容不能超过 ${TEMPLATE_GOAL_MAX_CHARS} 字`
+  }
   if (form.target === 'task_template' && !form.templateId) errors.templateId = '请选择流程模板'
   if (form.kind === 'once') {
     if (!form.onceAt) errors.onceAt = '请选择执行时间'

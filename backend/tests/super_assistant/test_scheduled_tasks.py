@@ -726,7 +726,8 @@ def test_create_template_target_validation_and_name_backfill(tmp_path):
 
         with pytest.raises(ScheduledTaskError, match="请选择流程模板"):
             create_task(db, "owner-1", _future_body(target_kind="task_template"))
-        with pytest.raises(ScheduledTaskNotFoundError, match="流程模板不存在或已删除"):
+        # 引用实体缺失 → 400 语义（ScheduledTaskError），与任务归属缺失的 404 区分
+        with pytest.raises(ScheduledTaskError, match="流程模板不存在或已删除"):
             create_task(db, "owner-1", _future_body(
                 target_kind="task_template", target_template_id="tpl-missing"))
         with pytest.raises(ScheduledTaskError, match="不需要选择流程模板"):
@@ -745,7 +746,7 @@ def test_create_template_target_validation_and_name_backfill(tmp_path):
         template.deleted_at = datetime.now(timezone.utc)
         db.commit()
         assert get_task(db, "owner-1", created.id).target_template_name is None
-        with pytest.raises(ScheduledTaskNotFoundError, match="流程模板不存在或已删除"):
+        with pytest.raises(ScheduledTaskError, match="流程模板不存在或已删除"):
             create_task(db, "owner-1", _future_body(
                 target_kind="task_template", target_template_id=template.id))
 
@@ -855,3 +856,44 @@ def test_execute_run_template_target_missing_template_fails(tmp_path, monkeypatc
         assert run.status == "failed"
         assert "流程模板不存在或已删除" in run.error
         assert run.instance_id is None
+
+def test_reap_reconciles_template_run_with_existing_instance(tmp_path, monkeypatch):
+    """收割对账（对抗审查 F1）：activate 已成功、终态写回因进程崩溃丢失——
+    run 卡 running 超 2h，收割器须按幂等键反查实例并补记完成，不记假失败。"""
+    from app.super_assistant.scheduled_service import _reap_stale_runs
+    from app.task_instances import engine as ti_engine
+
+    Session = _session(tmp_path)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event",
+                        lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.task_instances.service._dispatch_node",
+                        lambda node_run_id: None)
+
+    with Session() as db:
+        _user(db)
+        template = _template(db)
+        task = create_task(db, "owner-1", _future_body(
+            target_kind="task_template", target_template_id=template.id))
+        stale_since = as_utc_naive(datetime.now(timezone.utc) - timedelta(hours=3))
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=stale_since, status="running", started_at=stale_since,
+        )
+        db.add(run)
+        db.commit()
+        # 模拟崩溃前 activate 已成功：实例带同一幂等键落库
+        revision = db.query(TaskTemplateRevision).filter_by(
+            template_id=template.id).first()
+        instance, _ = ti_engine.activate(
+            db, revision=revision, name="崩溃前已建实例", goal=task.instruction,
+            inputs=None, created_by=None, idempotency_key=f"sa-scheduled:{run.id}")
+        db.commit()
+        run_id, instance_id = run.id, instance.id
+
+    with Session() as db:
+        _reap_stale_runs(db, as_utc_naive(datetime.now(timezone.utc)))
+        db.commit()
+        row = db.get(SuperAssistantScheduledRun, run_id)
+        assert row.status == "completed"
+        assert row.instance_id == instance_id
+        assert row.error is None
