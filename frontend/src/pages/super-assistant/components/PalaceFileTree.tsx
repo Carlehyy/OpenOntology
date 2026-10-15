@@ -8,7 +8,7 @@
  * 持久化，本组件不做乐观移动。内联输入行（新建目录/新建笔记/目录重命名）
  * 的开闭由父组件（工具栏按钮）驱动，提交/取消上抛。
  * 「远程同步」虚拟目录（常显、只读）是唯一挂右键菜单的行：右键卡与目录行
- * 设置按钮唤起设置弹窗/直接下载脚本，空态常驻一行引导（右键不可见的兜底）。
+ * 设置按钮唤起设置弹窗/直接下载脚本。
  */
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
@@ -71,12 +71,10 @@ interface PalaceFileTreeProps {
   inline: PalaceInlineAction | null
   onInlineSubmit: (value: string) => void
   onInlineCancel: () => void
-  /** 打开「远程同步设置」二级弹窗（右键卡/目录行设置按钮/空态引导） */
+  /** 打开「远程同步设置」二级弹窗（右键卡/目录行设置按钮） */
   onOpenSyncSettings: () => void
-  /** 直接触发同步脚本下载（右键卡「下载同步脚本」/空态引导按钮） */
+  /** 直接触发同步脚本下载（右键卡「下载同步脚本」） */
   onDownloadSyncScript: () => void
-  /** 同步脚本下载进行中：空态引导按钮的防重与加载态 */
-  syncDownloading: boolean
 }
 
 const FILE_ICON_SIZE = 14
@@ -114,7 +112,7 @@ export default function PalaceFileTree({
   files, folders, ontologyDocs, selectedFileId, selectedOntologyDocId, selectedDirPath,
   onSelectFile, onSelectOntologyDoc, onSelectDir,
   onMoveFile, onMoveFolder, inline, onInlineSubmit, onInlineCancel,
-  onOpenSyncSettings, onDownloadSyncScript, syncDownloading,
+  onOpenSyncSettings, onDownloadSyncScript,
 }: PalaceFileTreeProps) {
   const model = useMemo(() => buildPalaceTree(files, folders, ontologyDocs), [files, folders, ontologyDocs])
   const modelRef = useRef(model)
@@ -300,37 +298,6 @@ export default function PalaceFileTree({
     </div>
   )
 
-  // 「远程同步」空态引导：目录常显但从未同步时给出可见入口（右键不可见的
-  // 兜底）。两行堆叠防截断（248px 窄档单行放不下整句指引）；本行不是
-  // TreeItem，须阻断 dragover 冒泡——树容器对 dragover 无条件 preventDefault，
-  // 放任冒泡会把拖放落点判成根目录（容器级 drop 的存量语义）。
-  const renderSyncHintRow = (level: number): ReactNode => (
-    <div
-      key="palace-sync-hint-row"
-      role="none"
-      data-testid="palace-sync-empty-hint"
-      style={{ '--tree-padding': `${level * 16}px` } as CSSProperties}
-      onDragOver={event => event.stopPropagation()}
-      onDrop={event => { event.stopPropagation(); event.preventDefault() }}
-      className="flex flex-col gap-0.5 py-1 pe-2 ps-[var(--tree-padding)]"
-    >
-      <span
-        className="text-[11px] leading-4 text-[var(--color-text-tertiary)]"
-        title="尚未同步内容；右键本目录或点击目录行右侧按钮打开设置，设置弹窗内也可下载脚本"
-      >
-        尚未同步内容；右键本目录或点右侧按钮打开设置。
-      </span>
-      <button
-        type="button"
-        onClick={onDownloadSyncScript}
-        disabled={syncDownloading}
-        className="inline-flex w-fit items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-      >
-        {syncDownloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />} 下载同步脚本
-      </button>
-    </div>
-  )
-
   const rows: ReactNode[] = []
   if (inline && inlineDirItemId === PALACE_TREE_ROOT) rows.push(renderInlineRow(0))
   for (const item of tree.getItems()) {
@@ -470,9 +437,6 @@ export default function PalaceFileTree({
           </ContextMenuContent>
         </ContextMenu>,
       )
-      if (item.isExpanded() && childCount === 0) {
-        rows.push(renderSyncHintRow(item.getItemMeta().level + 1))
-      }
       continue
     }
     rows.push(

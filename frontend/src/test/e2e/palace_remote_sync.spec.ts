@@ -103,9 +103,10 @@ async function openKnowledgeGraph(page: Page) {
   await expect(dialog.getByRole('heading', { name: '知识图谱', level: 2 })).toBeVisible()
   const tree = dialog.getByTestId('palace-file-tree')
   await expect(tree).toBeVisible()
-  // 「远程同步」常显（空库也在：右键卡/设置按钮是配置的唯一入口）
+  // 「远程同步」常显（空库也在：右键卡/设置按钮是配置的唯一入口），空目录下无引导行（保持简洁）
   const remoteDir = tree.locator('[data-palace-dir="__remote_sync__"]')
   await expect(remoteDir).toContainText('远程同步')
+  await expect(page.getByTestId('palace-sync-empty-hint')).toHaveCount(0)
   return { dialog, tree, remoteDir }
 }
 
@@ -115,19 +116,16 @@ test('远程同步：右键直下载断言文件内容，设置弹窗内重置�
   await mockSuperAssistantApi(page, captured)
 
   await page.goto('/#/super-assistant', { waitUntil: 'domcontentloaded' })
-  const { remoteDir } = await openKnowledgeGraph(page)
-
-  // 空态引导常驻：右键交互不可见的可见兜底
-  await expect(page.getByTestId('palace-sync-empty-hint')).toBeVisible()
+  const { tree, remoteDir } = await openKnowledgeGraph(page)
 
   // synced/ 域唯一写入方是同步脚本：新建目录名带斜杠拐进 synced/ 的路径被拒，
-  // 且不发任何创建请求（内联行消失、目录保持空态）
+  // 且不发任何创建请求（内联行消失、树中不出现该目录）
   await page.getByTestId('palace-new-folder').click()
   await page.getByTestId('palace-inline-input').fill('synced/x')
   await page.getByTestId('palace-inline-input').press('Enter')
   await expect(page.getByText('不能在「远程同步」域内新建或移入目录')).toBeVisible()
   await expect(page.getByTestId('palace-inline-input')).toHaveCount(0)
-  await expect(page.getByTestId('palace-sync-empty-hint')).toBeVisible()
+  await expect(tree).not.toContainText('x')
 
   // 选中「远程同步」目录：工具栏只读说明 + 上传/新建全部禁用（同本体文档先例口径）
   await remoteDir.click()
