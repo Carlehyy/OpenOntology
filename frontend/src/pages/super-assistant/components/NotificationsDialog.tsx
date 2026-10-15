@@ -17,6 +17,7 @@ import {
   type NotificationChannel,
   type NotificationIngestKey,
   type NotificationAttachment,
+  type NotificationMessage,
   type NotificationPriority,
   type NotificationTab,
 } from '@/api/notifications'
@@ -281,15 +282,31 @@ export default function NotificationsDialog({
     }
   }, [open])
 
-  // 详情接口在服务端把消息标为已读：同步刷新列表与徽章（不刷详情自身，避免循环）
-  const syncedReadId = useRef<string | null>(null)
+  // 详情接口在服务端把消息标为已读：同步刷新列表与徽章（不刷详情自身，避免循环）。
+  // 键含 isRead：同一条消息「标为未读后重新查阅」的已读回翻也要即时刷——
+  // 只看 id 会漏掉翻转，未读底色与徽章要等 15s 轮询才纠正（观感即"查阅了标识还在"）
+  const syncedReadKey = useRef<string | null>(null)
   useEffect(() => {
-    const id = detail.data?.id
-    if (!id || syncedReadId.current === id) return
-    syncedReadId.current = id
+    const message = detail.data
+    if (!message) return
+    const key = `${message.id}:${message.isRead}`
+    if (syncedReadKey.current === key) return
+    syncedReadKey.current = key
     void queryClient.invalidateQueries({ queryKey: ['notifications', 'page'] })
     void queryClient.invalidateQueries({ queryKey: ['notifications', 'summary'] })
-  }, [detail.data?.id, queryClient])
+  }, [detail.data, queryClient])
+
+  // 点击即查阅：detail 缓存在 staleTime 内被视为新鲜不会发 GET，但用户主动点开的
+  // 未读消息必须真实请求一次让服务端落已读；无缓存时挂载本身就会 GET，无需干预。
+  // 非点击路径（切 tab 重挂载/弹窗重开沿用选中）不强制——保住"标为未读稍后处理"不被自动打回
+  const openMessage = (id: string, isRead: boolean) => {
+    setSelectedId(id)
+    if (isRead) return
+    const cached = queryClient.getQueryData<NotificationMessage>(['notifications', 'detail', id])
+    if (cached && !cached.isRead) {
+      void queryClient.refetchQueries({ queryKey: ['notifications', 'detail', id] })
+    }
+  }
 
   // 转发面板是消息分区的临时态：离开该分区即收起，避免 Esc/返回语义被不可见面板吃掉
   useEffect(() => {
@@ -792,7 +809,7 @@ export default function NotificationsDialog({
                             <button
                               key={item.id}
                               type="button"
-                              onClick={() => { if (!list.isPlaceholderData) setSelectedId(item.id) }}
+                              onClick={() => { if (!list.isPlaceholderData) openMessage(item.id, item.isRead) }}
                               data-notifications-item={item.id}
                               data-notifications-priority={item.priority}
                               className={`relative w-full rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
@@ -911,7 +928,7 @@ export default function NotificationsDialog({
                                       <Star size={15} className={selected.isStarred ? 'fill-current' : ''} />
                                     </button>
                                   </TooltipTrigger>
-                                  <TooltipContent>{selected.isStarred ? '取消标记' : '标记为重要'}</TooltipContent>
+                                  <TooltipContent align="end">{selected.isStarred ? '取消标记' : '标记为重要'}</TooltipContent>
                                 </Tooltip>
                                 <Tooltip>
                                   <TooltipTrigger asChild>
@@ -925,7 +942,7 @@ export default function NotificationsDialog({
                                       {selected.isArchived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
                                     </button>
                                   </TooltipTrigger>
-                                  <TooltipContent>{selected.isArchived ? '恢复消息' : '归档消息'}</TooltipContent>
+                                  <TooltipContent align="end">{selected.isArchived ? '恢复消息' : '归档消息'}</TooltipContent>
                                 </Tooltip>
                                 <Tooltip>
                                   <TooltipTrigger asChild>
@@ -939,7 +956,7 @@ export default function NotificationsDialog({
                                       <Forward size={15} />
                                     </button>
                                   </TooltipTrigger>
-                                  <TooltipContent>转发到外部渠道</TooltipContent>
+                                  <TooltipContent align="end">转发到外部渠道</TooltipContent>
                                 </Tooltip>
                                 {selected.isRead && (
                                   <Tooltip>
@@ -954,7 +971,7 @@ export default function NotificationsDialog({
                                         <Mail size={15} />
                                       </button>
                                     </TooltipTrigger>
-                                    <TooltipContent>标为未读</TooltipContent>
+                                    <TooltipContent align="end">标为未读</TooltipContent>
                                   </Tooltip>
                                 )}
                               </div>
@@ -1361,7 +1378,7 @@ export default function NotificationsDialog({
                                   : <Zap size={15} />}
                               </button>
                             </TooltipTrigger>
-                            <TooltipContent>以密钥 {key.name} 测试入口链路</TooltipContent>
+                            <TooltipContent align="end">以密钥 {key.name} 测试入口链路</TooltipContent>
                           </Tooltip>
                           <button
                             type="button"
@@ -1734,7 +1751,7 @@ export default function NotificationsDialog({
                                         : <Zap size={15} />}
                                     </button>
                                   </TooltipTrigger>
-                                  <TooltipContent>向 {channel.name} 直发测试消息</TooltipContent>
+                                  <TooltipContent align="end">向 {channel.name} 直发测试消息</TooltipContent>
                                 </Tooltip>
                               )}
                               <Tooltip>
@@ -1760,7 +1777,7 @@ export default function NotificationsDialog({
                                     <Pencil size={15} />
                                   </button>
                                 </TooltipTrigger>
-                                <TooltipContent>编辑渠道 {channel.name}</TooltipContent>
+                                <TooltipContent align="end">编辑渠道 {channel.name}</TooltipContent>
                               </Tooltip>
                               <span className="flex-1" aria-hidden />
                               <Tooltip>
@@ -1775,7 +1792,7 @@ export default function NotificationsDialog({
                                     <Trash2 size={15} />
                                   </button>
                                 </TooltipTrigger>
-                                <TooltipContent>删除渠道 {channel.name}</TooltipContent>
+                                <TooltipContent align="end">删除渠道 {channel.name}</TooltipContent>
                               </Tooltip>
                             </div>
                           </div>
