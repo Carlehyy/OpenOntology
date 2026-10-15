@@ -1731,7 +1731,7 @@ test('定时任务弹窗：脏表单关闭需二次确认，继续编辑保留�
   const dialog = page.getByTestId('scheduled-tasks-dialog')
   await expect(dialog).toBeVisible()
   await page.getByRole('button', { name: '创建定时任务' }).click()
-  const titleInput = dialog.getByPlaceholder('可留空，将用指令前几字作为标题')
+  const titleInput = dialog.getByPlaceholder('可留空，将用任务内容前几字作为标题')
   const instructionInput = dialog.getByPlaceholder('到点后助手会按这段任务内容在后台执行')
   await titleInput.fill('脏数据保护验证')
   await instructionInput.fill('汇总昨天的待办')
