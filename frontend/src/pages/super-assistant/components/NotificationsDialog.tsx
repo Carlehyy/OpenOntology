@@ -971,6 +971,7 @@ export default function NotificationsDialog({
               className="scrollbar-none min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5"
             >
               <NotificationInboundSection ref={inboundSectionRef} open={open} invalidateLists={invalidateLists} />
+              <hr className="my-6 border-[var(--color-border)]" aria-hidden />
               <NotificationOutboundSection ref={outboundSectionRef} open={open} channels={channels} />
             </div>
           )}

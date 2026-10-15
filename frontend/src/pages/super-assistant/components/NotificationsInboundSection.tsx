@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, Copy, Inbox, KeyRound, Loader2, Zap } from 'lucide-react'
+import { CheckCircle2, ChevronDown, Copy, Inbox, KeyRound, Loader2, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { absoluteFileUrl } from '@/api/fileAssets'
@@ -12,8 +12,8 @@ import { formatDateTime } from '@/utils/datetime'
 import { writeTextToClipboard } from '@/utils/clipboard'
 
 import { errorText } from './assistantPanelUtils'
-import { inputClass } from './notificationsConfigShared'
-import { INGEST_ENDPOINT_PATH, ingestCurlScript } from './notificationsIngestScript'
+import { CurlCodeBlock, inputClass } from './notificationsConfigShared'
+import { INGEST_ENDPOINT_PATH, ingestCurlLines, ingestCurlScript } from './notificationsIngestScript'
 
 /**
  * 渠道配置 · 消息入口分区（外部 → 平台）：投递接入（端点 + 调用示例 + 密钥签发/吊销/链路测试）。
@@ -129,23 +129,25 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink" aria-hidden="true">
             <Inbox size={15} />
           </span>
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">消息入口</h3>
-            <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">外部系统把消息投递进平台：签发密钥交给对方，消息自动进入站内并转发。</p>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
+              <span className="mr-1.5 font-mono text-xs font-normal text-[var(--color-text-tertiary)]">01</span>消息入口
+            </h3>
+            <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">签发密钥给外部系统，消息即自动进入平台并转发。</p>
           </div>
+          <span className="shrink-0 self-center rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
+            {activeIngestKeys.length} 枚有效
+          </span>
         </div>
         <section aria-label="投递接入" data-notifications-keys-panel className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]">
           <header className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
             <div className="min-w-0">
               <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">投递接入 · X-API-Key</h4>
               <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                密钥明文仅签发时展示一次；调用示例可直接复制给外部系统。
+                明文仅签发时可见，请当场交付。
               </p>
             </div>
             <div className="mt-0.5 flex shrink-0 items-center gap-2">
-              <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
-                {activeIngestKeys.length} 枚有效
-              </span>
               <Button
                 size="sm"
                 variant="outline"
@@ -161,21 +163,33 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
           <div className="space-y-3 p-4">
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3" data-notifications-endpoint-card>
               <div className="flex items-center justify-between gap-2">
-                <code className="min-w-0 truncate font-mono text-[11px] text-[var(--color-text-primary)]">{ingestEndpoint()}</code>
-                <button
-                  type="button"
-                  onClick={() => {
-                    writeTextToClipboard(ingestCurlScript(ingestEndpoint()))
-                      .then(() => toast.success('调用示例已复制（需替换密钥占位符）'))
-                      .catch(() => toast.error('复制失败，请手动选择复制'))
-                  }}
-                  className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  data-notifications-copy-curl
-                >
-                  <Copy size={12} /> 复制调用示例
-                </button>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <code className="min-w-0 truncate font-mono text-[11px] text-[var(--color-text-primary)]">{ingestEndpoint()}</code>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      writeTextToClipboard(ingestEndpoint())
+                        .then(() => toast.success('端点地址已复制'))
+                        .catch(() => toast.error('复制失败，请手动选择复制'))
+                    }}
+                    aria-label="复制端点地址"
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    data-notifications-copy-endpoint
+                  >
+                    <Copy size={12} />
+                  </button>
+                </div>
               </div>
-              <pre className="scrollbar-none mt-2 overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 font-mono text-[11px] leading-5 text-[var(--color-code-fg)] select-text">{ingestCurlScript(ingestEndpoint())}</pre>
+              <CurlCodeBlock
+                lines={ingestCurlLines(ingestEndpoint())}
+                copyLabel="复制调用示例"
+                copyAnchor="curl"
+                onCopy={() => {
+                  writeTextToClipboard(ingestCurlScript(ingestEndpoint()))
+                    .then(() => toast.success('调用示例已复制（需替换密钥占位符）'))
+                    .catch(() => toast.error('复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制'))
+                }}
+              />
             </div>
 
             {mintedKey && (
@@ -208,23 +222,18 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
                     <Copy size={12} /> 复制密钥
                   </button>
                 </div>
-                <div className="relative mt-2">
-                  <pre className="scrollbar-none overflow-x-auto rounded-md bg-[var(--color-code-bg)] px-2.5 py-2 pr-28 font-mono text-[11px] leading-5 text-[var(--color-code-fg)] select-text" data-notifications-key-script>{ingestCurlScript(ingestEndpoint(), mintedKey.plaintextKey)}</pre>
-                  <div className="absolute right-1.5 top-1.5">
-                    <Button
-                      size="sm"
-                      onClick={() => {
-                        writeTextToClipboard(ingestCurlScript(ingestEndpoint(), mintedKey.plaintextKey))
-                          .then(() => toast.success('完整脚本已复制（含密钥明文）'))
-                          .catch(() => toast.error('复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制'))
-                      }}
-                      className="rounded-lg"
-                      data-notifications-key-copy-fullscript
-                    >
-                      <Copy size={12} /> 复制完整脚本
-                    </Button>
-                  </div>
-                </div>
+                <CurlCodeBlock
+                  lines={ingestCurlLines(ingestEndpoint(), mintedKey.plaintextKey)}
+                  copyLabel="复制完整脚本"
+                  copyAnchor="fullscript"
+                  copyVariant="primary"
+                  preAnchorName="key-script"
+                  onCopy={() => {
+                    writeTextToClipboard(ingestCurlScript(ingestEndpoint(), mintedKey.plaintextKey))
+                      .then(() => toast.success('完整脚本已复制（含密钥明文）'))
+                      .catch(() => toast.error('复制失败，请直接选中脚本按 ⌘C / Ctrl+C 复制'))
+                  }}
+                />
                 <p className="mt-1.5 text-xs leading-5 text-[var(--color-warning)]">
                   剪贴板中的脚本含密钥明文，请勿粘贴到公开场合。
                 </p>
@@ -246,12 +255,12 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
             {mintFormOpen && (
               <div className="flex flex-wrap items-end gap-2 rounded-lg border border-dashed border-[var(--color-border)] p-3">
                 <label className="flex min-w-40 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                  密钥名称（来源标识）
+                  密钥名称
                   <input
                     value={keyName}
                     onChange={event => setKeyName(event.target.value)}
                     maxLength={200}
-                    placeholder="如 billing"
+                    placeholder="如 billing（标识哪个外部系统在用）"
                     className={inputClass}
                     data-notifications-key-name
                   />
@@ -305,7 +314,7 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
               </div>
             ) : activeIngestKeys.length === 0 ? (
               <p className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-5 text-center text-xs leading-5 text-[var(--color-text-tertiary)]">
-                还没有有效密钥。点右上「签发密钥」，把密钥与调用示例交给外部系统即可开始投递。
+                还没有密钥——签发一枚，把脚本交给外部系统即可开始。
               </p>
             ) : (
               <ul className="space-y-1.5">
@@ -377,9 +386,10 @@ const NotificationsInboundSection = forwardRef<InboundSectionHandle, Notificatio
             )}
             {/* 已吊销密钥默认折叠：留痕可查，但不占入口卡常态空间 */}
             {revokedIngestKeys.length > 0 && (
-              <details className="rounded-lg border border-[var(--color-border)] px-3 py-2" data-notifications-revoked-keys>
-                <summary className="cursor-pointer list-none text-xs text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)]">
+              <details className="group rounded-lg border border-[var(--color-border)] px-3 py-2" data-notifications-revoked-keys>
+                <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)]">
                   已吊销密钥（{revokedIngestKeys.length}）
+                  <ChevronDown size={12} className="transition-transform group-open:rotate-180" aria-hidden />
                 </summary>
                 <ul className="mt-2 space-y-1">
                   {revokedIngestKeys.map(key => (

@@ -1493,7 +1493,7 @@ test('消息通知：接入密钥——签发交付卡、明文仅一次展示�
   await expect(page.locator('[data-notifications-key-script]')).toContainText('ob_notif_e2e_demo_plaintext_secret')
   await expect(page.locator('[data-notifications-key-script]')).toContainText('/api/v2/notifications/ingest')
   // 副作用类交互按验收标准断言最终结果：真实剪贴板内容含密钥（不以 toast 出现代替）
-  await page.locator('[data-notifications-key-copy-fullscript]').click()
+  await page.locator('[data-notifications-copy-fullscript]').click()
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('X-API-Key: ob_notif_e2e_demo_plaintext_secret')
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('/api/v2/notifications/ingest')
   // 「我已妥善保存」主动关闭：明文与交付卡一起消失

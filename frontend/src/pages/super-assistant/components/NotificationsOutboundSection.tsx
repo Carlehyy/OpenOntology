@@ -210,16 +210,23 @@ const NotificationsOutboundSection = forwardRef<OutboundSectionHandle, Notificat
       },
     }), [channelFormStage])
 
+    const enabledChannels = (channels.data ?? []).filter(channel => channel.enabled)
+
     return (
-      <section aria-label="消息出口" data-notifications-group="outbound" className="mt-6 space-y-3">
+      <section aria-label="消息出口" data-notifications-group="outbound" className="space-y-3">
         <div className="flex items-center gap-2.5 px-0.5">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-ink" aria-hidden="true">
             <Send size={15} />
           </span>
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">消息出口</h3>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
+              <span className="mr-1.5 font-mono text-xs font-normal text-[var(--color-text-tertiary)]">02</span>消息出口
+            </h3>
             <p className="mt-0.5 text-xs leading-5 text-[var(--color-text-tertiary)]">平台把消息转发到外部渠道：邮件依赖平台发件邮箱，机器人 / HTTP 渠道各自配置。</p>
           </div>
+          <span className="shrink-0 self-center rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-xs tabular-nums text-[var(--color-text-tertiary)]">
+            {enabledChannels.length} 个渠道启用
+          </span>
         </div>
         {/* 发件邮箱是邮件渠道的平台级依赖，归入出口分组 */}
         <details className="group rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-base)]" data-notifications-smtp-card>
