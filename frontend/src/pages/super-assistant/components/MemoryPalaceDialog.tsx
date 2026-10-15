@@ -1025,7 +1025,6 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
               onInlineCancel={() => setInline(null)}
               onOpenSyncSettings={() => setSyncSettingsOpen(true)}
               onDownloadSyncScript={() => { void handleDownloadSyncScript() }}
-              syncDownloading={syncDownloading}
             />
           </aside>
 
