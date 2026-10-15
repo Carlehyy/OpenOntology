@@ -6,21 +6,8 @@ import {
 import { superAssistantApi } from '@/api/superAssistant'
 import { toast } from 'sonner'
 import { writeTextToClipboard } from '@/utils/clipboard'
-import { errorText } from './assistantPanelUtils'
+import { errorText, saveBlob } from './assistantPanelUtils'
 import { DialogShell } from './AssistantConfiguration'
-
-/** 触发浏览器下载（Blob → objectURL → <a download>）；副作用兜底见 AGENTS.md §5 */
-export function saveBlob(blob: Blob, filename: string) {
-  // 下载结果由 E2E 断言最终文件内容，提示文案如实（"已尝试下载"）。
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
 
 /** 下载同步脚本：设置弹窗按钮与知识图谱文件树「远程同步」右键直下载共用 */
 export async function downloadSyncScript(): Promise<void> {

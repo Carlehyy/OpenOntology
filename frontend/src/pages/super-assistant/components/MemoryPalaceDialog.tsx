@@ -587,13 +587,23 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
     setInline(null)
     const name = value.trim()
     if (!action || !name || busy) return
+    // rename 的父路径：目标目录含斜杠取上级，根级目录为空串（重命名落在根下）
+    const renameParent = action.kind === 'rename' && action.targetPath.includes('/')
+      ? action.targetPath.slice(0, action.targetPath.lastIndexOf('/'))
+      : ''
+    const parentPath = action.kind === 'rename' ? renameParent : action.targetPath
+    // 名字含斜杠可把结果路径拐进 synced/ 域（如新建/改名输入 synced/x）——该域
+    // 由同步脚本唯一维护（脚本镜像清理会删除其本地没有的远端文件），UI 侧拒绝写入
+    if (isRemoteSyncPath(joinPalacePath(parentPath, name))) {
+      toast.error('不能在「远程同步」域内新建或移入目录', {
+        description: '该目录由本机同步脚本维护；请在本地文件夹整理后重新同步。',
+      })
+      return
+    }
     if (action.kind === 'new-folder') void handleCreateFolder(action.targetPath, name)
     else if (action.kind === 'new-note') void handleCreateNote(action.targetPath, name)
     else if (action.dirId) {
-      const parent = action.targetPath.includes('/')
-        ? action.targetPath.slice(0, action.targetPath.lastIndexOf('/'))
-        : ''
-      void handleRenameFolder(action.dirId, joinPalacePath(parent, name))
+      void handleRenameFolder(action.dirId, joinPalacePath(renameParent, name))
     }
   }
 
@@ -663,12 +673,12 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
 
   const renderMiddleBody = () => {
     if (!selected) {
-      if (remoteSyncDirSelected) {
+      if (remoteSyncAreaSelected) {
         return (
           <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 py-8 text-center">
             <FolderSync size={18} className="text-[var(--color-text-tertiary)]" />
             <p className="text-xs text-[var(--color-text-tertiary)]">
-              「远程同步」目录为只读：内容来自本机同步脚本对指定文件夹的镜像。右键目录或点击目录行右侧按钮，可打开设置或下载脚本。
+              「远程同步」目录为只读：内容来自本机同步脚本对指定文件夹的镜像。点击目录行右侧按钮或右键目录打开设置；下载脚本也可在设置弹窗内进行。
             </p>
           </div>
         )
@@ -892,13 +902,16 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
             >
               <span
                 className="min-w-0 flex-1 truncate text-[10px] text-[var(--color-text-tertiary)]"
-                title={ontologyDirSelected ? '本体文档（只读目录）' : remoteSyncDirSelected ? '远程同步（只读目录）' : selectedDirPath ? selectedDirPath : '根目录'}
+                title={ontologyDirSelected ? '本体文档（只读目录）' : remoteSyncAreaSelected ? '远程同步（只读目录）' : selectedDirPath ? selectedDirPath : '根目录'}
               >
                 {ontologyDirSelected
                   ? '当前目录：本体文档（只读，随本体发布自动更新）'
                   : remoteSyncDirSelected
                     ? '当前目录：远程同步（只读，由本机同步脚本镜像写入）'
-                    : `当前目录：/${selectedDirPath}${isRemoteSyncPath(selectedDirPath) ? '（只读）' : ''}`}
+                    : isRemoteSyncPath(selectedDirPath)
+                      // synced/ 子树收编后树中无 synced 层级：按用户视角展示为 远程同步/<子路径>
+                      ? `当前目录：远程同步/${selectedDirPath.replace(/^synced\/?/, '')}（只读）`
+                      : `当前目录：/${selectedDirPath}`}
               </span>
               <Button
                 variant="ghost"
@@ -1012,6 +1025,7 @@ export default function MemoryPalaceDialog({ open, onOpenChange }: MemoryPalaceD
               onInlineCancel={() => setInline(null)}
               onOpenSyncSettings={() => setSyncSettingsOpen(true)}
               onDownloadSyncScript={() => { void handleDownloadSyncScript() }}
+              syncDownloading={syncDownloading}
             />
           </aside>
 

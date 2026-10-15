@@ -53,7 +53,7 @@ async function mockSuperAssistantApi(page: Page, captured: { resetCalled?: boole
       return json(route, [{
         id: 'model-1', name: 'Fake model', config_type: 'llm', provider: 'openai',
         api_base: 'https://example.com', has_api_key: true, enabled: true, is_default: true,
-        last_test_status: 'success', last_test_at: now, last_test_message: 'ok',
+        last_test_status: 'success', last_tested_at: now, last_test_message: 'ok',
         models: ['fake-model'], options: {}, created_by: 'admin',
         created_at: now, updated_at: now,
       }])
@@ -120,6 +120,22 @@ test('远程同步：右键直下载断言文件内容，设置弹窗内重置�
   // 空态引导常驻：右键交互不可见的可见兜底
   await expect(page.getByTestId('palace-sync-empty-hint')).toBeVisible()
 
+  // synced/ 域唯一写入方是同步脚本：新建目录名带斜杠拐进 synced/ 的路径被拒，
+  // 且不发任何创建请求（内联行消失、目录保持空态）
+  await page.getByTestId('palace-new-folder').click()
+  await page.getByTestId('palace-inline-input').fill('synced/x')
+  await page.getByTestId('palace-inline-input').press('Enter')
+  await expect(page.getByText('不能在「远程同步」域内新建或移入目录')).toBeVisible()
+  await expect(page.getByTestId('palace-inline-input')).toHaveCount(0)
+  await expect(page.getByTestId('palace-sync-empty-hint')).toBeVisible()
+
+  // 选中「远程同步」目录：工具栏只读说明 + 上传/新建全部禁用（同本体文档先例口径）
+  await remoteDir.click()
+  await expect(page.getByTestId('palace-dir-toolbar')).toContainText('远程同步（只读')
+  await expect(page.getByRole('button', { name: '上传', exact: true })).toBeDisabled()
+  await expect(page.getByTestId('palace-new-folder')).toBeDisabled()
+  await expect(page.getByTestId('palace-new-note')).toBeDisabled()
+
   // 右键目录 → 操作卡「下载同步脚本」直接触发下载；断言下载文件的真实内容（非中间提示，AGENTS.md §5）
   const downloadPromise = page.waitForEvent('download')
   await remoteDir.click({ button: 'right' })
@@ -141,6 +157,12 @@ test('远程同步：右键直下载断言文件内容，设置弹窗内重置�
   await expect(card).toBeVisible()
   await expect(card.getByText('LOCAL_DIR')).toBeVisible()
   await expect(card.getByText('synced/')).toBeVisible()
+
+  // 设置弹窗内的下载按钮与右键直下载共用实现：按钮自身 wiring 也要被触达
+  const secondDownloadPromise = page.waitForEvent('download')
+  await card.getByRole('button', { name: '下载同步脚本' }).click()
+  const secondDownload = await secondDownloadPromise
+  expect(secondDownload.suggestedFilename()).toBe('palace_sync.py')
 
   // 重置令牌：两段式确认；新令牌仅此一次展示
   await card.getByRole('button', { name: '重置同步令牌' }).click()

@@ -17,8 +17,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { writeTextToClipboard } from '@/utils/clipboard'
-import { errorText } from './assistantPanelUtils'
-import { saveBlob } from './PalaceSyncDialog'
+import { errorText, saveBlob } from './assistantPanelUtils'
 import { DialogShell } from './AssistantConfiguration'
 
 type IntegrationTab = 'multica' | 'remote-agents'

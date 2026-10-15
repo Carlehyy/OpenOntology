@@ -286,7 +286,7 @@ def render_sync_script(
 _SYNC_SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OpenOntology 知识图谱「文件夹同步」脚本（由平台自动生成）。
+OpenOntology 知识图谱「远程同步」脚本（由平台自动生成）。
 
 把 CONFIG 里 LOCAL_DIR 指定的本地文件夹镜像同步到平台知识图谱（记忆宫殿）
 的 synced/ 子树：新增/变更文件上传后自动触发图谱抽取；本地删除/改名的
@@ -654,7 +654,7 @@ def remote_label(item):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenOntology 知识图谱文件夹同步")
+    parser = argparse.ArgumentParser(description="OpenOntology 知识图谱远程同步")
     parser.add_argument("--folder", help="本地文件夹路径（缺省用 CONFIG['LOCAL_DIR']）")
     parser.add_argument("--root", help="平台侧目标子树（缺省用 CONFIG['REMOTE_ROOT'] 或 synced/<文件夹名>）")
     parser.add_argument("--dry-run", action="store_true", help="只预览计划，不执行任何改动")

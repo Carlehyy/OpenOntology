@@ -59,6 +59,18 @@
 5. 跑完整前端门禁（含 `check:component-convergence`）；同步更新 catalog 条目、
    DESIGN.md §4.1 与本文件。
 
+## Radix 弹层叠加已知坑（双运行时）
+
+dialog@1.1.x 与 context-menu/tooltip 等新原语各带一份 dismissable-layer（包版本
+不同、层栈互不识别），叠加使用时注意：
+
+- **模态 Dialog 内的 ContextMenu 必须用默认 modal**：`modal={false}`（页面级
+  先例：会话列表右键卡）在模态弹窗内会被弹窗焦点域"打开即关"；
+- **浮层 z 须与 `--z-modal` 同层或更高**（`ui/context-menu` 已用
+  `z-[var(--z-modal)]`，portal 后挂载故必在弹窗内容之上；tooltip 400 与
+  toast 1100 恒在上）。antd Modal/Drawer 在 z-1000 层，在其内右键会被压住
+  （同构坑，出现实际需求时再议专属层令牌）。
+
 ## 存量页面如何渐进收敛
 
 - **新功能**：按分层决策与 catalog 直接选型，无历史包袱；
