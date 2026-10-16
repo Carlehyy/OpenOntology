@@ -31,8 +31,9 @@ export const rowIconButtonClass = 'flex h-7 w-7 shrink-0 items-center justify-ce
 export const outlineSmallButtonClass = 'rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
 
 /**
- * 深色命令面板的分段着色映射（DESIGN.md §2.3：curl 等工具性面板统一近黑底）。
- * 克制两处分层：参数名/JSON key 灰阶弱化、密钥占位符 viz-cyan 作为「需替换」信号；
+ * 命令面板的分段着色映射（DESIGN.md §2.3：工具面板跟随主题——浅色浅灰面板/深色近黑面板，
+ * 均经 --color-code-* 令牌取色）。克制两处分层：参数名/JSON key 灰阶弱化、密钥占位符用
+ * --color-code-accent 作「需替换」信号（明暗成对，浅档深青/深档亮青）；
  * 不引入色相更多的语法高亮（近单色 + 单一强调的设计纪律同样适用于代码面）。
  */
 const curlSegmentClass: Record<CurlSegmentKind, string> = {
@@ -41,7 +42,7 @@ const curlSegmentClass: Record<CurlSegmentKind, string> = {
   flag: 'text-[color-mix(in_srgb,var(--color-code-fg)_62%,transparent)]',
   'header-value': '',
   'json-key': 'text-[color-mix(in_srgb,var(--color-code-fg)_62%,transparent)]',
-  placeholder: 'text-[var(--color-viz-cyan)]',
+  placeholder: 'text-[var(--color-code-accent)]',
   plain: '',
 }
 

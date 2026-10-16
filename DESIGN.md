@@ -69,17 +69,18 @@ success `--color-success #2d8a4e` · warning `#c9861a` · danger
 success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引用
 （映射见 `tailwind.config.ts`，取值明暗自适应），勿用绿色族原生色板类。
 状态表达优先「浅底 + 深字」组合，而非大面积实色。
-命令/接口展示面板（curl 示例、事件 tooltip 等工具性面板）统一用深色面板
-`--color-code-bg` / `--color-code-fg`（明暗两态近同的近黑底），替代页域
-私设的 `bg-slate-950` 类色板；聊天/文档正文 markdown 内的代码块属浅色
-阅读面，用 `--color-bg-elevated` 底 + `--color-text-primary` 字（超级
-助手聊天与消息通知正文），近黑块不得打断浅色阅读画布。
+命令/接口展示面板（curl 示例、事件 tooltip 等工具性面板）统一用
+`--color-code-bg` / `--color-code-fg`，**跟随主题**：浅色模式为浅灰嵌入
+面板（浅冷灰底 + 深字；2026-10-16 由创始人拍板，替代此前「明暗两态近同
+的近黑底」条款），深色模式保持近黑面板——两态各自保证前景可读；仍替代
+页域私设的 `bg-slate-950` 类色板。聊天/文档正文 markdown 内的代码块属
+浅色阅读面，用 `--color-bg-elevated` 底 + `--color-text-primary` 字
+（超级助手聊天与消息通知正文），阅读画布不被打断。
 类型编码色（图例、类型徽章、结构图节点等分类数据可视化）使用
 `viz-*` 分类色组（violet/fuchsia/rose/orange/indigo/cyan 及各自 -soft
 浅底），取值与 §5 图表序列同源、`:root`/`.dark` 成对维护；禁止在页面
-直接使用 Tailwind 默认色板表达类型编码。深色工具面板（如 curl 调用
-示例）内需要单一「需注意」强调信号时，允许借用一支 viz token（明暗
-同值、深底可读），一支为限、不得演变为面板内多色高亮。
+直接使用 Tailwind 默认色板表达类型编码。（工具面板内的强调信号不占用
+viz 色组，统一走 `--color-code-accent`，见上文工具面板条款。）
 
 ### 2.4 使用规则
 

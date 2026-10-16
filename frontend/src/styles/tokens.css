@@ -99,8 +99,12 @@
   --color-info-bg: #dbeafe;
 
   /* ── 代码块面（深色代码/命令面板，明暗两态近同的近黑底） ── */
-  --color-code-bg: #0d1420;
-  --color-code-fg: #dbe4f0;
+  /* 工具性命令面板（curl 示例/ID/事件 tooltip）跟随主题：
+     浅色=浅灰嵌入面板+深字（用户 2026-10-16 拍板浅色系，替代原“明暗两态近同的近黑底”）；
+     深色模式保持近黑面板（见 .dark）。accent 为面板内“需注意”强调信号（如密钥占位符） */
+  --color-code-bg: #f6f8fa;
+  --color-code-fg: #24292f;
+  --color-code-accent: #0e7490;
   /* 代码/YAML 语法高亮（CodeMirror 编辑器；与既有编辑器 GitHub light 观感一致） */
   --code-syntax-keyword: #cf222e;
   --code-syntax-string: #0a3069;
@@ -263,6 +267,7 @@
   /* ── 代码块面（深色档） ── */
   --color-code-bg: #0a0f18;
   --color-code-fg: #c9d4e3;
+  --color-code-accent: #14b8a6;
   /* 代码/YAML 语法高亮（CodeMirror 编辑器；与既有编辑器 GitHub light 观感一致） */
   --code-syntax-keyword: #cf222e;
   --code-syntax-string: #0a3069;
