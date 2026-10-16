@@ -1274,11 +1274,17 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await page.locator('[data-notifications-read-all]').click()
   await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
 
-  // 发送消息（独立分区）：渠道 chips 默认全选，取消其一后定向转发
+  // 发送消息（独立分区）：转发渠道为下拉多选（触发器常显已选去向），默认全选，取消其一后定向转发
   await page.locator('[data-notifications-nav="compose"]').click()
   await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
   const chipCh1 = page.locator('[data-notifications-compose-channel="ch-1"]')
   const chipCh2 = page.locator('[data-notifications-compose-channel="ch-2"]')
+  const openChannelPicker = async () => {
+    await page.locator('[data-notifications-compose-multiselect]').click()
+    // toggle 语义防翻转：以 Radix 自带的 aria-expanded 断言真的打开了
+    await expect(page.locator('[data-notifications-compose-multiselect]')).toHaveAttribute('aria-expanded', 'true')
+  }
+  await openChannelPicker() // 打开下拉勾选列表（列表常开，可连续多选）
   await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
   await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
   await chipCh2.click() // 取消邮件渠道 → 仅转发钉钉
@@ -1289,12 +1295,16 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await chipCh1.click()
   await expect(page.getByText('已选 0 / 2')).toBeVisible()
   await expect(page.getByText('未选择转发渠道，发送前请至少选择一个')).toBeVisible()
+  await page.keyboard.press('Escape') // Esc 分层：先关下拉弹层再走发送路径
   await page.locator('[data-notifications-compose-title]').fill('不应发出')
   await page.locator('[data-notifications-compose-send]').click()
   await expect(page.getByText('请至少选择一个转发渠道')).toBeVisible()
   await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
   await expect.poll(() => mocks.notifCreates.length).toBe(0)
+  await openChannelPicker()
   await chipCh1.click() // 恢复仅钉钉
+  await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
   await expect(page.getByText('已选 1 / 2')).toBeVisible()
   await page.locator('[data-notifications-compose-title]').fill('巡检通知')
   await page.locator('[data-notifications-compose-body]').fill('# 今日巡检\n一切正常')
@@ -1308,10 +1318,12 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(page.locator('[data-notifications-tab="all"]')).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('[data-notifications-compose-panel]')).toHaveCount(0)
 
-  // 再发一条不动 chips：默认全选 = 省略 channelIds（后端缺省语义，无渠道数上限）
+  // 再发一条不动选择：默认全选 = 省略 channelIds（后端缺省语义，无渠道数上限）
   await page.locator('[data-notifications-nav="compose"]').click()
+  await openChannelPicker()
   await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
   await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
   await page.locator('[data-notifications-compose-title]').fill('全渠道广播')
   await page.locator('[data-notifications-compose-send]').click()
   await expect.poll(() => mocks.notifCreates.length).toBe(2)
@@ -1319,14 +1331,16 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   expect(broadcastPayload.title).toBe('全渠道广播')
   expect(broadcastPayload.channelIds).toBeUndefined()
 
-  // 弹窗关闭重开：compose 表单与 chips 状态复位
+  // 弹窗关闭重开：compose 表单与渠道选择状态复位
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await entry.click()
   await page.locator('[data-notifications-nav="compose"]').click()
   await expect(page.locator('[data-notifications-compose-title]')).toHaveValue('')
+  await openChannelPicker()
   await expect(chipCh1).toHaveAttribute('aria-checked', 'true')
   await expect(chipCh2).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
   await expect(page.getByText('已选 2 / 2')).toBeVisible()
 
   // 手动转发：回消息列表（重开后详情仍选中），详情操作 → 渠道多选 → 确认
@@ -1491,7 +1505,8 @@ test('消息通知：三渠道时「全选」恢复默认广播——部分选�
   await page.getByRole('button', { name: /消息通知/ }).click()
   await page.locator('[data-notifications-nav="compose"]').click()
   await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
-  // 默认全选时不出「全选」；取消一个后出现，计数随之从 3/3 到 2/3
+  // 打开下拉勾选列表；默认全选时不渲染「全选」行，取消一个后出现（计数 3/3 → 2/3）
+  await page.locator('[data-notifications-compose-multiselect]').click()
   await expect(page.locator('[data-notifications-compose-select-all]')).toHaveCount(0)
   await expect(page.getByText('已选 3 / 3')).toBeVisible()
   await page.locator('[data-notifications-compose-channel="ch-3"]').click()
@@ -1501,6 +1516,7 @@ test('消息通知：三渠道时「全选」恢复默认广播——部分选�
   await page.locator('[data-notifications-compose-select-all]').click()
   await expect(page.getByText('已选 3 / 3')).toBeVisible()
   await expect(page.locator('[data-notifications-compose-select-all]')).toHaveCount(0)
+  await page.keyboard.press('Escape')
   await page.locator('[data-notifications-compose-title]').fill('三渠道广播')
   await page.locator('[data-notifications-compose-send]').click()
   await expect.poll(() => mocks.notifCreates.length).toBe(1)
@@ -1532,7 +1548,9 @@ test('消息通知：渠道列表加载失败——行内报错可重试，发�
   // 重试成功后恢复：chips 回来（默认全选），按钮可用
   failChannels = false
   await composePanel.getByRole('button', { name: '重试' }).click()
+  await page.locator('[data-notifications-compose-multiselect]').click()
   await expect(page.locator('[data-notifications-compose-channel="ch-1"]')).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
   await expect(send).toBeEnabled()
 })
 
@@ -1560,7 +1578,7 @@ test('消息通知：无启用渠道空态——「渠道配置」直达跳转�
   expect(focusInDialog).toBe(true)
 })
 
-test('消息通知（窄屏390px）：发送分区单列冒烟——chips 可点选、计数即时', async ({ page }) => {
+test('消息通知（窄屏390px）：发送分区单列冒烟——下拉多选可点选、计数即时', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await seedAuth(page)
   await mockApis(page)
@@ -1571,7 +1589,8 @@ test('消息通知（窄屏390px）：发送分区单列冒烟——chips 可点
   await page.getByRole('button', { name: /消息通知/ }).click()
   await page.locator('[data-notifications-nav="compose"]').click()
   await expect(page.locator('[data-notifications-compose-panel]')).toBeVisible()
-  // <xl 单列：转发渠道区位于正文之后，点选反馈即时
+  // <xl 单列：转发渠道多选框位于正文之后；下拉宽度跟随触发器（不横向溢出），点选反馈即时
+  await page.locator('[data-notifications-compose-multiselect]').click()
   await page.locator('[data-notifications-compose-channel="ch-1"]').click()
   await expect(page.locator('[data-notifications-compose-channel="ch-1"]')).toHaveAttribute('aria-checked', 'false')
   await expect(page.getByText('已选 1 / 2')).toBeVisible()

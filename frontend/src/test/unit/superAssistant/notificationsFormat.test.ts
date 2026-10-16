@@ -5,7 +5,7 @@ import {
   channelFailureHint,
   COMPOSE_BODY_SOFT_LIMIT,
   composeBodyHint,
-  composeSelectedCount,
+  composeResolvedSelection,
   formatFileSize,
   forwardButtonLabel,
   isPlatformMediaSrc,
@@ -210,20 +210,20 @@ describe('forwardButtonLabel', () => {
   })
 })
 
-describe('composeSelectedCount', () => {
-  it('null 视为默认全选，计数跟随启用渠道数', () => {
-    assert.equal(composeSelectedCount(null, ['ch-1', 'ch-2', 'ch-3']), 3)
-    assert.equal(composeSelectedCount(null, []), 0)
+describe('composeResolvedSelection', () => {
+  it('null 视为默认全选，集合跟随启用渠道', () => {
+    assert.deepEqual([...composeResolvedSelection(null, ['ch-1', 'ch-2', 'ch-3'])].sort(), ['ch-1', 'ch-2', 'ch-3'])
+    assert.deepEqual([...composeResolvedSelection(null, [])], [])
   })
 
-  it('显式集合与启用渠道求交集：停用/删除的失效 id 不计数', () => {
-    assert.equal(composeSelectedCount(new Set(['ch-1', 'ch-2']), ['ch-1', 'ch-2', 'ch-3']), 2)
-    assert.equal(composeSelectedCount(new Set(['ch-1', 'gone']), ['ch-1', 'ch-2']), 1)
-    assert.equal(composeSelectedCount(new Set(['gone']), ['ch-1']), 0)
+  it('显式集合与启用渠道求交集：停用/删除的失效 id 不计入', () => {
+    assert.deepEqual([...composeResolvedSelection(new Set(['ch-1', 'ch-2']), ['ch-1', 'ch-2', 'ch-3'])].sort(), ['ch-1', 'ch-2'])
+    assert.deepEqual([...composeResolvedSelection(new Set(['ch-1', 'gone']), ['ch-1', 'ch-2'])], ['ch-1'])
+    assert.deepEqual([...composeResolvedSelection(new Set(['gone']), ['ch-1'])], [])
   })
 
-  it('全不选（空集）为 0——发送分区据此亮 0 选中警示并拦截发送', () => {
-    assert.equal(composeSelectedCount(new Set(), ['ch-1', 'ch-2']), 0)
+  it('全不选（空集）解析为空集——发送分区据此亮 0 选中警示并拦截发送', () => {
+    assert.deepEqual([...composeResolvedSelection(new Set(), ['ch-1', 'ch-2'])], [])
   })
 })
 
