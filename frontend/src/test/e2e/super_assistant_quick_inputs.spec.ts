@@ -321,6 +321,10 @@ test.describe('超级助手快捷输入', () => {
     await expect(detail).toContainText('自我介绍')
     await expect(detail).toContainText(INTRO)
     await expect(detail).toContainText('更新于')
+    // meta 已内联进详情头（≥lg 可见，对齐 NotificationsDialog 详情头）
+    const meta = dialog(page).getByTestId('quick-input-detail-meta')
+    await expect(meta).toBeVisible()
+    await expect(meta).toContainText('更新于')
 
     // 再选另一行：详情头部与正文跟随切换
     await rows.nth(1).getByText('追问模板').click()

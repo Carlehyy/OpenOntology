@@ -540,9 +540,12 @@ export default function QuickInputsDialog({
                 </form>
               ) : selected ? (
                 <>
-                  {/* 详情头：标题 + 操作图标组；h-10 与左列列头同高——两列分割线落在同一水平线 */}
+                  {/* 详情头：标题 + 更新时间 meta + 操作图标组；h-10 与左列列头同高——两列分割线落在同一水平线（对齐 NotificationsDialog 详情头同排手法） */}
                   <div className="flex h-10 shrink-0 items-center gap-1 border-b border-[var(--color-border)] px-4">
                     <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-text-primary)]" title={selected.title}>{selected.title}</h3>
+                    <span className="hidden shrink-0 text-xs text-[var(--color-text-tertiary)] lg:inline" data-testid="quick-input-detail-meta">
+                      更新于 {formatDateTime(selected.updated_at)}
+                    </span>
                     <div className="ml-auto flex shrink-0 items-center gap-0.5">
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -575,9 +578,6 @@ export default function QuickInputsDialog({
                       </Tooltip>
                     </div>
                   </div>
-                  <p className="shrink-0 border-b border-[var(--color-border)] px-4 py-1.5 text-xs text-[var(--color-text-tertiary)]">
-                    更新于 {formatDateTime(selected.updated_at)}
-                  </p>
                   {/* 正文完整展示：单行截断、长内容不可读正是旧布局被诟病的核心 */}
                   <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-4">
                     <p className="whitespace-pre-wrap break-words text-sm leading-6 text-[var(--color-text-primary)]">{selected.content}</p>
