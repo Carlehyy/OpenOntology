@@ -1,8 +1,9 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 // 超级助手快捷输入（mocked）：小卡片展示与插入语义（光标锚点插入 / 未交互
-// 拼接末尾）、设置弹窗全链路（新增/编辑/删除/键盘上移下移的 reorder 契约）、
-// 空态与加载失败重试。按 AGENTS.md 副作用交互规范，插入效果断言最终落在
+// 拼接末尾）、设置弹窗全链路（列表+详情双栏：新增/编辑/删除/键盘上移下移的
+// reorder 契约、点选与切换、Esc 分层回退、窄屏列表⇄详情单栏切换）、空态与
+// 加载失败重试。按 AGENTS.md 副作用交互规范，插入效果断言最终落在
 // textarea 实际值上（含插入位置），不以提示出现代替；真实拖拽排序在
 // 真实环境人工验收（HTML5 DnD 在无头下的合成事件不可靠）。
 
@@ -232,24 +233,29 @@ test.describe('超级助手快捷输入', () => {
     const mocks = await mockApis(page)
     await openWorkbench(page)
 
-    // 卡片右上入口跳设置：卡片收起、弹窗打开
+    // 卡片右上入口跳设置：卡片收起、弹窗打开；未选中时详情区为占位
     await quickButton(page).click()
     await menu(page).getByTestId('super-assistant-quick-input-settings').click()
     await expect(menu(page)).toBeHidden()
     await expect(dialog(page)).toBeVisible()
     const rows = dialog(page).getByTestId('quick-input-row')
+    const detail = dialog(page).getByTestId('quick-input-detail')
     await expect(rows).toHaveCount(2)
     await expect(rows.nth(0)).toContainText('自我介绍')
     await expect(rows.nth(1)).toContainText('追问模板')
+    await expect(dialog(page).getByTestId('quick-input-detail-empty')).toBeVisible()
 
-    // 新增
+    // 新增：入口在列表列头，表单渲染在详情区
     await dialog(page).getByTestId('quick-input-create-toggle').click()
     await dialog(page).getByTestId('quick-input-create-title').fill('周报模板')
     await dialog(page).getByTestId('quick-input-create-content').fill('本周进展：')
     await dialog(page).getByTestId('quick-input-create-submit').click()
     await expect(rows).toHaveCount(3)
     await expect(rows.nth(2)).toContainText('周报模板')
+    await expect(dialog(page).getByText('共 3 条')).toBeVisible()
     expect(mocks.createBodies).toEqual([{ title: '周报模板', content: '本周进展：' }])
+    // 连续录入：成功后表单保持展开、字段清空回焦标题
+    await expect(dialog(page).getByTestId('quick-input-create-title')).toHaveValue('')
 
     // 空标题行内校验（不发请求）
     await dialog(page).getByTestId('quick-input-create-title').fill('  ')
@@ -257,11 +263,20 @@ test.describe('超级助手快捷输入', () => {
     await expect(dialog(page).getByText('请填写内容标题')).toBeVisible()
     expect(mocks.createBodies).toHaveLength(1)
 
-    // 编辑首条：改标题
-    await rows.nth(0).getByTestId('quick-input-edit').click()
+    // 取消新增：详情回未选中占位
+    await dialog(page).getByRole('button', { name: '取消' }).click()
+    await expect(dialog(page).getByTestId('quick-input-detail-empty')).toBeVisible()
+
+    // 编辑首条：先点选行 → 详情区展示 → 详情头部编辑
+    await rows.nth(0).getByText('自我介绍').click()
+    await expect(detail).toContainText(INTRO)
+    await dialog(page).getByTestId('quick-input-edit').click()
     await dialog(page).getByTestId('quick-input-edit-title').fill('自我介绍（新版）')
     await dialog(page).getByTestId('quick-input-edit-submit').click()
+    // 保存成功回查看态：列表行与详情标题都已是新标题
     await expect(rows.nth(0)).toContainText('自我介绍（新版）')
+    await expect(dialog(page).getByTestId('quick-input-edit-title')).toBeHidden()
+    await expect(detail).toContainText('自我介绍（新版）')
     expect(mocks.updateBodies).toEqual([{ title: '自我介绍（新版）', content: INTRO }])
 
     // 键盘等价排序：第 2 行上移 → PUT reorder 携带全量新顺序，列表即时重排
@@ -271,10 +286,12 @@ test.describe('超级助手快捷输入', () => {
     // 全量顺序契约：ids 覆盖该用户全部条目（含本次新建的周报模板）
     expect(mocks.reorderBodies).toEqual([['qi-2', 'qi-1', 'qi-created-1']])
 
-    // 删除：确认弹窗 → 行消失
-    await rows.nth(0).getByTestId('quick-input-delete').click()
+    // 删除：点选行 → 详情头部删除 → 确认框 → 行消失、选中清空回占位
+    await rows.nth(0).getByText('追问模板').click()
+    await dialog(page).getByTestId('quick-input-delete').click()
     await page.getByRole('button', { name: '删除', exact: true }).click()
     await expect(rows).toHaveCount(2)
+    await expect(dialog(page).getByTestId('quick-input-detail-empty')).toBeVisible()
     expect(mocks.deletedIds).toEqual(['qi-2'])
 
     // 关闭弹窗后卡片与设置同源：新顺序/新条目即时反映
@@ -283,5 +300,88 @@ test.describe('超级助手快捷输入', () => {
     await quickButton(page).click()
     await expect(menu(page).getByText('自我介绍（新版）')).toBeVisible()
     await expect(menu(page).getByText('周报模板')).toBeVisible()
+  })
+
+  test('列表点选 → 详情展示全文，切换选中跟随', async ({ page }) => {
+    await seedAuth(page)
+    await mockApis(page)
+    await openWorkbench(page)
+
+    await quickButton(page).click()
+    await menu(page).getByTestId('super-assistant-quick-input-settings').click()
+    await expect(dialog(page)).toBeVisible()
+    const rows = dialog(page).getByTestId('quick-input-row')
+    const detail = dialog(page).getByTestId('quick-input-detail')
+
+    // 未选中：占位可见
+    await expect(dialog(page).getByTestId('quick-input-detail-empty')).toBeVisible()
+
+    // 点选首行 → 详情区完整展示标题与内容（列表行只有截断预览）+ 更新时间 meta
+    await rows.nth(0).getByText('自我介绍').click()
+    await expect(detail).toContainText('自我介绍')
+    await expect(detail).toContainText(INTRO)
+    await expect(detail).toContainText('更新于')
+
+    // 再选另一行：详情头部与正文跟随切换
+    await rows.nth(1).getByText('追问模板').click()
+    await expect(detail).toContainText('追问模板')
+    await expect(detail).toContainText(FOLLOW_UP)
+    await expect(detail).not.toContainText(INTRO)
+  })
+
+  test('Esc 分层：编辑态先退表单不关弹窗，再 Esc 才关闭', async ({ page }) => {
+    await seedAuth(page)
+    const mocks = await mockApis(page)
+    await openWorkbench(page)
+
+    await quickButton(page).click()
+    await menu(page).getByTestId('super-assistant-quick-input-settings').click()
+    await expect(dialog(page)).toBeVisible()
+    const rows = dialog(page).getByTestId('quick-input-row')
+    const detail = dialog(page).getByTestId('quick-input-detail')
+
+    await rows.nth(0).getByText('自我介绍').click()
+    await dialog(page).getByTestId('quick-input-edit').click()
+    await expect(dialog(page).getByTestId('quick-input-edit-title')).toBeVisible()
+    // 未保存修改随 Esc 退出一并丢弃
+    await dialog(page).getByTestId('quick-input-edit-title').fill('不应保存的草稿')
+    await page.keyboard.press('Escape')
+    // 第一层：退编辑表单回查看态，弹窗仍在，修改未落库
+    await expect(dialog(page).getByTestId('quick-input-edit-title')).toBeHidden()
+    await expect(dialog(page)).toBeVisible()
+    await expect(detail).toContainText('自我介绍')
+    expect(mocks.updateBodies).toHaveLength(0)
+    // 第二层：桌面视口无选中回退层，Esc 交 Radix 关弹窗
+    await page.keyboard.press('Escape')
+    await expect(dialog(page)).toBeHidden()
+  })
+
+  test('窄屏单栏：选中后列表隐藏、返回条可见，点返回回列表', async ({ page }) => {
+    await page.setViewportSize({ width: 500, height: 800 })
+    await seedAuth(page)
+    await mockApis(page)
+    await openWorkbench(page)
+
+    await quickButton(page).click()
+    await menu(page).getByTestId('super-assistant-quick-input-settings').click()
+    await expect(dialog(page)).toBeVisible()
+    const rows = dialog(page).getByTestId('quick-input-row')
+    const detail = dialog(page).getByTestId('quick-input-detail')
+
+    // 列表态（未选中）：列表可见、详情隐藏
+    await expect(rows.nth(0)).toBeVisible()
+    await expect(detail).toBeHidden()
+
+    // 选中 → 单栏切详情：列表隐藏、返回条可见、正文可读
+    await rows.nth(0).getByText('自我介绍').click()
+    await expect(detail).toBeVisible()
+    await expect(rows.nth(0)).toBeHidden()
+    await expect(dialog(page).getByTestId('quick-input-back-list')).toBeVisible()
+    await expect(detail).toContainText(INTRO)
+
+    // 点返回条回列表
+    await dialog(page).getByTestId('quick-input-back-list').click()
+    await expect(rows.nth(0)).toBeVisible()
+    await expect(detail).toBeHidden()
   })
 })
