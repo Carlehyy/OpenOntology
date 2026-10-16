@@ -188,18 +188,17 @@ export function forwardButtonLabel(selectedCount: number): string {
 }
 
 /**
- * 发送分区渠道勾选数：null = 默认全选（跟随启用渠道）；
- * 显式集合与启用渠道求交集——同会话内渠道被停用/删除后，失效 id 不计数。
+ * 发送分区渠道勾选集（解析后）：null = 默认全选（跟随启用渠道）；
+ * 显式集合与启用渠道求交集——同会话内渠道被停用/删除后，失效 id 不计入。
+ * 下拉多选框、计数与 0 选中警示共用该集合，所见即所发（单一事实源）。
  */
-export function composeSelectedCount(
+export function composeResolvedSelection(
   explicit: ReadonlySet<string> | null,
   enabledIds: readonly string[],
-): number {
-  if (!explicit) return enabledIds.length
+): Set<string> {
+  if (!explicit) return new Set(enabledIds)
   const enabled = new Set(enabledIds)
-  let count = 0
-  for (const id of explicit) if (enabled.has(id)) count += 1
-  return count
+  return new Set([...explicit].filter(id => enabled.has(id)))
 }
 
 /**

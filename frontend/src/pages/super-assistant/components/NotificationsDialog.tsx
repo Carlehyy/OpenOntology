@@ -38,8 +38,9 @@ import NotificationOutboundSection, { type OutboundSectionHandle } from './Notif
 import NotificationMedia from './NotificationMedia'
 import { TEMPLATE_ICONS, iconButtonClass, inputClass, sectionHeadingClass } from './notificationsConfigShared'
 import {
-  composeBodyHint, composeSelectedCount, formatFileSize, forwardButtonLabel, listEmptyCopy, priorityStyle, sourceTypeLabel, stripMarkdownPreview,
+  composeBodyHint, composeResolvedSelection as resolveSelection, formatFileSize, forwardButtonLabel, listEmptyCopy, priorityStyle, sourceTypeLabel, stripMarkdownPreview,
 } from './notificationsFormat'
+import MultiSelectBox from './MultiSelectBox'
 
 /**
  * 消息中转站弹窗：左侧分区导航（消息列表 / 发送消息 / 渠道配置 / 消息统计）+ 右侧内容。
@@ -127,8 +128,6 @@ export default function NotificationsDialog({
   const composeFormRef = useRef({ title: '', body: '' })
   composeFormRef.current = { title: composeTitle, body: composeBody }
   const composeSentSnapshotRef = useRef<{ title: string; body: string } | null>(null)
-  // 全选恢复默认态后「全选」按钮即卸载：主动把焦点交给组内第一个 chip，防 Tab 位序重置
-  const composeChipsRef = useRef<HTMLDivElement>(null)
 
   // 只失效列表与徽章；detail 缓存由 setQueryData 精确写入——
   // 若前缀失效命中 detail，会触发「GET 详情即自动已读」把刚标回的未读打回
@@ -350,15 +349,14 @@ export default function NotificationsDialog({
 
   const enabledChannels = (channels.data ?? []).filter(channel => channel.enabled)
 
-  // 发送分区的派生态：计数与「全选」随启用渠道求交（null=默认全选）；
-  // 渠道未就绪（加载中/失败）时不显示计数与 0 选中警示，避免误导
+  // 发送分区的派生态：解析后的显式选中集（null=默认全选，与启用渠道求交——失效 id 不计入），
+  // 下拉多选框与计数/警示共用同一集合，所见即所发；渠道未就绪时不显示计数与 0 选中警示
   const channelsReady = !channels.isLoading && !channels.isError
-  const selectedChannelCount = composeSelectedCount(
-    composeChannelIds,
-    enabledChannels.map(channel => channel.id),
+  const composeSelection = useMemo(
+    () => resolveSelection(composeChannelIds, enabledChannels.map(channel => channel.id)),
+    [composeChannelIds, enabledChannels],
   )
-  const showComposeSelectAll =
-    channelsReady && enabledChannels.length >= 3 && selectedChannelCount < enabledChannels.length
+  const selectedChannelCount = composeSelection.size
   const composeBodyCharHint = composeBodyHint(composeBody.length)
 
   const handleCompose = async () => {
@@ -411,12 +409,6 @@ export default function NotificationsDialog({
       // 勾选集恰为全量时省略字段：走后端缺省语义（无渠道数上限、渠道新增即覆盖）
       ...(selectedIds.length === enabledIds.size ? {} : { channelIds: selectedIds }),
     })
-  }
-
-  /** 发送分区的渠道勾选集：null 视为全选，与启用渠道列表求最终勾选态 */
-  const composeSelection = (channelId: string): boolean => {
-    if (!composeChannelIds) return true
-    return composeChannelIds.has(channelId)
   }
 
   const toggleComposeChannel = (channelId: string) => {
@@ -907,80 +899,78 @@ export default function NotificationsDialog({
                 </p>
               </div>
 
-              {/* 先写内容再定去向（写信模型）：≥xl 左主栏限宽 40rem 控制行长、右辅栏为转发渠道，
-                  利用弹窗宽度而非拉长输入框；<xl 退化为单列，顺序仍为 标题/优先级 → 正文 → 转发渠道 */}
-              <div className="flex min-h-0 flex-1 flex-col gap-4 xl:grid xl:grid-cols-[minmax(0,40rem)_minmax(0,1fr)] xl:gap-6">
-                <div className="flex min-w-0 flex-1 flex-col gap-4 md:max-w-[40rem]">
-                  <div className="flex flex-col gap-4 sm:flex-row">
-                    <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                      标题
-                      <input
-                        value={composeTitle}
-                        onChange={event => setComposeTitle(event.target.value)}
-                        maxLength={300}
-                        placeholder="消息标题"
-                        className={`${inputClass} h-9`}
-                        data-notifications-compose-title
-                      />
-                    </label>
-                    <div className="flex w-full flex-col gap-1 text-xs text-[var(--color-text-secondary)] sm:w-40">
-                      优先级
-                      <Select
-                        value={composePriority}
-                        onValueChange={value => setComposePriority(value as NotificationPriority)}
-                      >
-                        <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {(['urgent', 'high', 'normal', 'low'] as const).map(priority => {
-                            const style = priorityStyle(priority)
-                            return (
-                              <SelectItem key={priority} value={priority}>
-                                <span className="flex items-center gap-1.5">
-                                  <span className={`h-2 w-2 shrink-0 rounded-full ${style.dotClass}`} />
-                                  {style.label}
-                                </span>
-                              </SelectItem>
-                            )
-                          })}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <label className="flex min-h-0 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
-                    正文（Markdown）
-                    <textarea
-                      value={composeBody}
-                      onChange={event => setComposeBody(event.target.value)}
-                      placeholder="支持 Markdown 语法，实际渲染效果因转发渠道而异"
-                      className={`${inputClass} min-h-36 flex-1 resize-none text-sm leading-6 xl:min-h-48`}
-                      data-notifications-compose-body
+              {/* 先写内容再定去向（写信模型）：标题/优先级 → 正文 → 转发渠道（下拉多选）
+                  四个字段单列排布；限宽 40rem 控制行长，不靠拉长输入框填满弹窗 */}
+              <div className="flex min-h-0 flex-1 flex-col gap-4 md:max-w-[40rem]">
+                <div className="flex flex-col gap-4 sm:flex-row">
+                  <label className="flex flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                    标题
+                    <input
+                      value={composeTitle}
+                      onChange={event => setComposeTitle(event.target.value)}
+                      maxLength={300}
+                      placeholder="消息标题"
+                      className={`${inputClass} h-9`}
+                      data-notifications-compose-title
                     />
                   </label>
-                  {/* 常驻占位（min-h-5）：避免首字符输入时字数行出现引发 textarea 高度跳动 */}
-                  <p
-                    className={`min-h-5 text-right text-xs leading-5 ${
-                      composeBodyCharHint?.warn
-                        ? 'text-[var(--color-warning)]'
-                        : 'text-[var(--color-text-tertiary)]'
-                    }`}
-                    data-notifications-compose-char-hint
-                  >
-                    {composeBodyCharHint?.text ?? ''}
-                  </p>
+                  <div className="flex w-full flex-col gap-1 text-xs text-[var(--color-text-secondary)] sm:w-40">
+                    优先级
+                    <Select
+                      value={composePriority}
+                      onValueChange={value => setComposePriority(value as NotificationPriority)}
+                    >
+                      <SelectTrigger className="h-9 w-full text-sm" data-notifications-compose-priority>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(['urgent', 'high', 'normal', 'low'] as const).map(priority => {
+                          const style = priorityStyle(priority)
+                          return (
+                            <SelectItem key={priority} value={priority}>
+                              <span className="flex items-center gap-1.5">
+                                <span className={`h-2 w-2 shrink-0 rounded-full ${style.dotClass}`} />
+                                {style.label}
+                              </span>
+                            </SelectItem>
+                          )
+                        })}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
+                <label className="flex min-h-0 flex-1 flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+                  正文（Markdown）
+                  <textarea
+                    value={composeBody}
+                    onChange={event => setComposeBody(event.target.value)}
+                    placeholder="支持 Markdown 语法，实际渲染效果因转发渠道而异"
+                    className={`${inputClass} min-h-36 flex-1 resize-none text-sm leading-6 xl:min-h-48`}
+                    data-notifications-compose-body
+                  />
+                </label>
+                {/* 常驻占位（min-h-5）：避免首字符输入时字数行出现引发 textarea 高度跳动 */}
+                <p
+                  className={`min-h-5 text-right text-xs leading-5 ${
+                    composeBodyCharHint?.warn
+                      ? 'text-[var(--color-warning)]'
+                      : 'text-[var(--color-text-tertiary)]'
+                  }`}
+                  data-notifications-compose-char-hint
+                >
+                  {composeBodyCharHint?.text ?? ''}
+                </p>
 
-                {/* 转发渠道（原「投递渠道」）：正文写完再选去向，计数与警示随 chips 即时反馈。
-                    浅底色块区分「配置区 vs 输入区」，去边框避免弹窗内双层框 */}
+                {/* 转发渠道（原「投递渠道」）：正文之后的标准表单字段——下拉多选（邮件收件人模式），
+                    框内 chips 常显去向（发送类操作的去向可见性是硬约束），点开为勾选列表 */}
                 <div
                   role="group"
                   aria-label="转发渠道"
-                  className="flex min-w-0 flex-col gap-2 self-start rounded-lg bg-[var(--color-bg-hover)] p-3"
+                  className="flex flex-col gap-1"
                   data-notifications-compose-destinations
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-medium text-[var(--color-text-secondary)]">转发渠道</p>
+                    <span className="text-xs text-[var(--color-text-secondary)]">转发渠道</span>
                     {channelsReady && enabledChannels.length > 0 && (
                       <span
                         aria-live="polite"
@@ -994,86 +984,56 @@ export default function NotificationsDialog({
                       </span>
                     )}
                   </div>
-                  <div ref={composeChipsRef} className="flex flex-wrap gap-1.5">
-                    {channels.isLoading ? (
-                      <span className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
-                        <Loader2 size={12} className="animate-spin" /> 渠道加载中…
-                      </span>
-                    ) : channels.isError ? (
-                      <span role="alert" className="flex flex-wrap items-center gap-2 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                        渠道列表加载失败：{errorText(channels.error)}
-                        <button
-                          type="button"
-                          onClick={() => void channels.refetch()}
-                          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          重试
-                        </button>
-                      </span>
-                    ) : enabledChannels.length === 0 ? (
-                      <span className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-                        暂无启用的渠道，消息将仅保存到站内列表；可到
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setNav('config')
-                            // 程序化切换分区后把焦点送到新选中的 tab（WAI-ARIA tabs 模式），
-                            // 避免本按钮随分区卸载后焦点被弹窗容器回收、Tab 位序重置
-                            navItemRefs.current[NAV_ITEMS.findIndex(item => item.key === 'config')]?.focus()
-                          }}
-                          data-notifications-compose-goto-config
-                          className="mx-0.5 rounded-sm text-xs text-[var(--color-primary)] underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          渠道配置
-                        </button>
-                        新建。
-                      </span>
-                    ) : (
-                      <>
-                        {enabledChannels.map(channel => {
-                          const checked = composeSelection(channel.id)
-                          const TemplateIcon = TEMPLATE_ICONS[channel.template] ?? Plug
-                          return (
-                            <button
-                              key={channel.id}
-                              type="button"
-                              role="checkbox"
-                              aria-checked={checked}
-                              onClick={() => toggleComposeChannel(channel.id)}
-                              data-notifications-compose-channel={channel.id}
-                              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                                checked
-                                  ? 'border-transparent bg-brand-soft font-medium text-brand-ink'
-                                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-hover)] hover:bg-[var(--color-bg-base)]'
-                              }`}
-                            >
-                              <TemplateIcon size={12} className="shrink-0 opacity-80" />
-                              <span className="max-w-40 truncate">{channel.name}</span>
-                              <span className="max-w-32 truncate text-xs font-normal opacity-70">· {channel.templateName}</span>
-                            </button>
-                          )
-                        })}
-                        {showComposeSelectAll && (
-                          <button
-                            type="button"
-                            aria-label="全选转发渠道"
-                            onClick={() => {
-                              setComposeChannelIds(null)
-                              requestAnimationFrame(() =>
-                                composeChipsRef.current
-                                  ?.querySelector<HTMLButtonElement>('[data-notifications-compose-channel]')
-                                  ?.focus(),
-                              )
-                            }}
-                            data-notifications-compose-select-all
-                            className="rounded-md px-1.5 py-1 text-xs text-[var(--color-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          >
-                            全选
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
+                  {channels.isLoading ? (
+                    <div className="flex min-h-9 items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 text-sm text-[var(--color-text-tertiary)]">
+                      <Loader2 size={14} className="animate-spin" /> 渠道加载中…
+                    </div>
+                  ) : channels.isError ? (
+                    <div
+                      role="alert"
+                      className="flex min-h-9 flex-wrap items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]"
+                    >
+                      渠道列表加载失败：{errorText(channels.error)}
+                      <button
+                        type="button"
+                        onClick={() => void channels.refetch()}
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        重试
+                      </button>
+                    </div>
+                  ) : enabledChannels.length === 0 ? (
+                    <div className="flex min-h-9 flex-wrap items-center rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                      暂无启用的渠道，消息将仅保存到站内列表；可到
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNav('config')
+                          // 程序化切换分区后把焦点送到新选中的 tab（WAI-ARIA tabs 模式），
+                          // 避免本按钮随分区卸载后焦点被弹窗容器回收、Tab 位序重置
+                          navItemRefs.current[NAV_ITEMS.findIndex(item => item.key === 'config')]?.focus()
+                        }}
+                        data-notifications-compose-goto-config
+                        className="mx-0.5 rounded-sm text-xs text-[var(--color-primary)] underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        渠道配置
+                      </button>
+                      新建。
+                    </div>
+                  ) : (
+                    <MultiSelectBox
+                      options={enabledChannels.map(channel => ({
+                        value: channel.id,
+                        label: channel.name,
+                        secondary: channel.templateName,
+                        icon: TEMPLATE_ICONS[channel.template] ?? Plug,
+                      }))}
+                      selectedIds={composeSelection}
+                      onToggle={toggleComposeChannel}
+                      onSelectAll={() => setComposeChannelIds(null)}
+                      placeholder="未选择转发渠道"
+                    />
+                  )}
                   {channelsReady && enabledChannels.length > 0 && selectedChannelCount === 0 && (
                     <p role="alert" className="text-xs leading-5 text-[var(--color-danger)]">
                       未选择转发渠道，发送前请至少选择一个
@@ -1082,7 +1042,7 @@ export default function NotificationsDialog({
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2">
+              <div className="flex items-center justify-end gap-2 md:max-w-[40rem]">
                 <Button
                   onClick={handleCompose}
                   loading={createMutation.isPending}
