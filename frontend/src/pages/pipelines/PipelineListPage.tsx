@@ -518,7 +518,7 @@ export default function PipelineListPage() {
                           <span className="text-xs text-[var(--color-text-tertiary)] group-hover/hist:text-brand-ink">{formatTime(pl.last_run_at)}</span>
                           {runFailed && (
                             <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-full mt-1.5 z-30 hidden group-hover/err:block w-80 text-left">
-                              <div className="bg-[var(--color-code-bg)] text-[var(--color-text-inverse)] text-xs rounded-lg px-3 py-2.5 shadow-xl whitespace-normal break-all leading-relaxed">
+                              <div className="bg-[var(--color-code-bg)] text-[var(--color-code-fg)] text-xs rounded-lg px-3 py-2.5 shadow-xl whitespace-normal break-all leading-relaxed">
                                 {pl.last_run_error}
                               </div>
                             </div>
