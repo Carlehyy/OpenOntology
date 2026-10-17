@@ -117,37 +117,44 @@ class TestTemplates:
         db.commit()
         template_id = preset.id
 
+        def snapshot() -> tuple:
+            """逐次拒绝后的完整状态快照：字段、指针、版本集、软删标记"""
+            db.refresh(preset)
+            db.refresh(revision)
+            revs = db.query(TaskTemplateRevision).filter(
+                TaskTemplateRevision.template_id == template_id
+            ).order_by(TaskTemplateRevision.revision_no).all()
+            return (preset.name, preset.description, preset.latest_revision_id,
+                    preset.deleted_at, tuple((r.revision_no, r.spec_yaml,
+                                              r.canonical_hash) for r in revs))
+
+        baseline = snapshot()
+
+        # 1) PUT 预置（合法 YAML）→ 403，且本次拒绝后状态与基线逐项一致
         updated = client.put(
             f"{BASE}/templates/{template_id}",
             json={"spec_yaml": make_spec(corrections=9)},
             headers=auth_headers)
         assert updated.status_code == 403, updated.text
         assert updated.json()["detail"]["code"] == "TEMPLATE_IS_PRESET"
+        assert snapshot() == baseline
 
-        # 预置 + 非法 YAML：权限拒绝先于编译校验，仍稳定 403 而非 400
+        # 2) PUT 预置（非法 YAML）：权限拒绝先于编译校验，仍 403 而非 400
         illegal = client.put(
             f"{BASE}/templates/{template_id}",
             json={"spec_yaml": "not: [valid: workflow"},
             headers=auth_headers)
         assert illegal.status_code == 403, illegal.text
         assert illegal.json()["detail"]["code"] == "TEMPLATE_IS_PRESET"
+        assert snapshot() == baseline
 
+        # 3) DELETE 预置 → 403，状态仍逐项一致（含 deleted_at 为 NULL）
         deleted = client.delete(f"{BASE}/templates/{template_id}",
                                 headers=auth_headers)
         assert deleted.status_code == 403, deleted.text
         assert deleted.json()["detail"]["code"] == "TEMPLATE_IS_PRESET"
-
-        # 写入被拒后数据完全不变：无新版本、指针不动、未软删、字段原样
-        db.refresh(preset)
-        db.refresh(revision)
+        assert snapshot() == baseline
         assert preset.deleted_at is None
-        assert preset.latest_revision_id == revision.id
-        assert preset.name == "预置评审流"
-        assert preset.description == "官方预置"
-        revisions = db.query(TaskTemplateRevision).filter(
-            TaskTemplateRevision.template_id == template_id).all()
-        assert len(revisions) == 1
-        assert revisions[0].spec_yaml == make_spec()
 
         # 不存在 / 已软删（含已软删预置）优先 404，不被 403 遮盖
         missing = client.put(f"{BASE}/templates/nonexistent",
@@ -242,6 +249,14 @@ class TestTemplates:
             "Authorization": f"Bearer {token_response.json()['data']['access_token']}"}
         response = client.get(f"{BASE}/templates", headers=editor_headers)
         assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "MENU_ACCESS_DENIED"
+        # 菜单守卫包整个 router：无 task_instances 菜单角色对写操作同样 403，
+        # 且先于任何模板级判定（不泄露模板存在性）
+        assert client.put(f"{BASE}/templates/any-id",
+                          json={"spec_yaml": make_spec()},
+                          headers=editor_headers).status_code == 403
+        assert client.delete(f"{BASE}/templates/any-id",
+                             headers=editor_headers).status_code == 403
 
 
 class TestInstances:

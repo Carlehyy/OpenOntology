@@ -73,6 +73,11 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
   // 关闭弹窗恢复默认（预置 + 空关键词）
   const [templateKeyword, setTemplateKeyword] = useState('')
   const [templateSource, setTemplateSource] = useState<TemplateSource>('preset')
+  // 编辑器脏稿（TemplateEditorPanel 上报）：所有离开 template-edit 的弹窗级出口
+  // （右上关闭/Esc/左栏切视图）统一走确认守卫；面板自身返回按钮由面板内确认负责
+  const [editorDirty, setEditorDirty] = useState(false)
+  const [pendingExit, setPendingExit] = useState<(() => void) | null>(null)
+  const [discardOpen, setDiscardOpen] = useState(false)
 
   // ─── 数据 ───
   const templates = useQuery({
@@ -100,8 +105,14 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
       setView('board'); setSelectedTemplate(null); setSelectedInstanceId(null)
       setInstanceName(''); setGoal('')
       setTemplateKeyword(''); setTemplateSource('preset')
+      setEditorDirty(false); setPendingExit(null); setDiscardOpen(false)
     }
   }, [open])
+
+  // 离开编辑视图（含面板自身确认后的返回）即复位脏稿标记，避免残留拦截下一次出口
+  useEffect(() => {
+    if (view !== 'template-edit') setEditorDirty(false)
+  }, [view])
 
   // 打开时按深链直接选中实例（定时任务「查看实例」入口），与关闭重置互不干扰
   useEffect(() => {
@@ -137,6 +148,26 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
   const backToBoard = useCallback(() => {
     setView('board'); setSelectedInstanceId(null)
   }, [])
+
+  /** 离开编辑态的统一守卫（R2）：编辑器有脏稿时先弹「放弃未保存修改？」；
+   *  「继续编辑」保留草稿且不执行原去向，「放弃」才执行原动作 */
+  const exitEditGuard = useCallback((after: () => void) => {
+    if (view === 'template-edit' && editorDirty) {
+      setPendingExit(() => after)
+      setDiscardOpen(true)
+      return
+    }
+    after()
+  }, [view, editorDirty])
+
+  const requestClose = useCallback(() => exitEditGuard(onClose), [exitEditGuard, onClose])
+
+  const discardDraft = () => {
+    const exit = pendingExit
+    setDiscardOpen(false); setPendingExit(null)
+    if (exit) exit()
+    else onClose()
+  }
 
   const openFullDetail = useCallback((id: string) => {
     onClose()
@@ -180,11 +211,12 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
   const navKey = dialogNavOf(view)
 
   return (
+    <>
     <DialogShell
       title="任务实例"
       description={copy.DOMAIN_SUBTITLE}
       size="wide"
-      onClose={onClose}
+      onClose={requestClose}
       onInteractOutside={event => event.preventDefault()}
       icon={<ListChecks size={18} />}
       contentClassName="h-[min(82dvh,44rem)]"
@@ -195,7 +227,7 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
           <div className="p-2">
             <button
               type="button"
-              onClick={backToBoard}
+              onClick={() => exitEditGuard(backToBoard)}
               aria-pressed={navKey === 'instances'}
               className={`mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors focus-visible:ring-2 ring-ring ${
                 navKey === 'instances'
@@ -207,7 +239,7 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
             </button>
             <button
               type="button"
-              onClick={() => setView('templates')}
+              onClick={() => exitEditGuard(() => setView('templates'))}
               aria-pressed={navKey === 'templates'}
               className={`mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors focus-visible:ring-2 ring-ring ${
                 navKey === 'templates'
@@ -289,6 +321,7 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
               <TemplateEditorPanel
                 templateId={selectedTemplate.id}
                 exitLabel={copy.RETURN_TO_TEMPLATES}
+                onDirtyChange={setEditorDirty}
                 onExit={() => { setView('templates'); setSelectedTemplate(null) }}
               />
             </div>
@@ -305,6 +338,19 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
         </div>
       </div>
     </DialogShell>
+
+    {/* 离开编辑态统一守卫的确认框（ScheduledTasksDialog 同款模式） */}
+    <ConfirmDialog
+      open={discardOpen}
+      onClose={() => { setDiscardOpen(false); setPendingExit(null) }}
+      onConfirm={discardDraft}
+      title="放弃未保存修改？"
+      description="编辑器中未保存的草稿将丢失。"
+      confirmText="放弃"
+      cancelText="继续编辑"
+      variant="warning"
+    />
+    </>
   )
 }
 

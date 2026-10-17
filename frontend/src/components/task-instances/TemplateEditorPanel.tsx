@@ -82,11 +82,13 @@ export interface TemplateEditorPanelProps {
   onExit: () => void
   /** 保存成功后回调（面板已失效模板列表与详情缓存） */
   onSaved?: (template: TemplateDetail) => void
+  /** 脏稿变化上报（宿主对「离开编辑态」的外部出口做统一确认守卫） */
+  onDirtyChange?: (dirty: boolean) => void
   exitLabel?: string
 }
 
 export default function TemplateEditorPanel({
-  templateId, onExit, onSaved, exitLabel = copy.RETURN_TO_LIST,
+  templateId, onExit, onSaved, onDirtyChange, exitLabel = copy.RETURN_TO_LIST,
 }: TemplateEditorPanelProps) {
   const queryClient = useQueryClient()
   const isNew = !templateId
@@ -167,6 +169,11 @@ export default function TemplateEditorPanel({
   const diffLines = useMemo(
     () => diffRevision ? lineDiff(diffRevision.spec_yaml ?? '', specYaml) : [],
     [diffRevision, specYaml])
+
+  // 脏稿上报：宿主（弹窗）对外部出口（关闭/左栏切视图/Esc）做统一确认守卫
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
 
   const previewSpec = template.data?.spec_compiled ?? null
 

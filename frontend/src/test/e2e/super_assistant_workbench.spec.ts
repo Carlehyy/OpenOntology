@@ -4004,17 +4004,147 @@ test('任务实例弹窗：个人模板查看/编辑/激活可用，编辑载入
   await expect(personalCard.getByRole('button', { name: '激活模板 我的冒烟流程' })).toBeEnabled()
   await expect(personalCard.getByRole('button', { name: '删除模板 我的冒烟流程' })).toBeEnabled()
 
-  // 弹窗内编辑：载入既有模板 YAML，保存 PUT 同一 template ID 的新 revision
+  // 弹窗内编辑：载入既有模板 YAML，真实修改草稿（含未知字段），保存 PUT
+  // 同一 template ID 的完整修改后原文（不丢字段、不误建新模板）
   await personalCard.getByRole('button', { name: '编辑模板 我的冒烟流程' }).click()
   const editView = page.getByTestId('template-edit-view')
   await expect(editView).toBeVisible()
   await expect(editView.getByText('保存新版本')).toBeVisible()
-  await expect(editView.locator('.cm-content')).toContainText('kind: Workflow')
+  const editor = editView.locator('.cm-content')
+  await expect(editor).toContainText('kind: Workflow')
+  await editor.click()
+  await page.keyboard.press('ControlOrMeta+End')
+  await page.keyboard.type('\nx-custom-unknown-field: 保留未知字段\n')
   await editView.getByRole('button', { name: '保存新版本' }).click()
   await expect.poll(() => updated.value?.url ?? '').toContain('/task-instances/templates/tpl-2')
   expect(updated.value?.method).toBe('PUT')
+  // 提交的是完整修改后草稿：原文每行原样保留 + 追加的未知字段行逐字可见，
+  // 不是未修改原文的转发（Ctrl+End 落在原文末尾空行，Enter 再开一行）
+  const submitted = updated.value?.body?.spec_yaml ?? ''
+  const expected = tiSpecYaml + '\nx-custom-unknown-field: 保留未知字段\n'
+  expect(submitted).toBe(expected)
+  expect(submitted).not.toBe(tiSpecYaml)
   // 保存成功留在编辑器（已保存 toast），返回列表保留「个人」筛选
   await editView.getByRole('button', { name: '返回模板', exact: true }).click()
+  await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toBeVisible()
+})
+
+test('任务实例弹窗：编辑脏稿出口守卫——Esc/左栏切视图/右上关闭统一确认', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  let putCount = 0
+  await page.route('**/api/v2/task-instances/templates/tpl-2', route => {
+    if (route.request().method() === 'PUT') {
+      putCount += 1
+      return json(route, { ...tiTemplatesFixture[1], latest_revision_no: 2,
+        spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+    }
+    return json(route, { ...tiTemplatesFixture[1],
+      spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+  })
+
+  const enterEditorFromList = async () => {
+    // 弹窗已开且在模板列表：直接从个人卡进入编辑（工作台导航在弹窗遮罩后不可点）
+    await page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })
+      .getByRole('button', { name: '编辑模板 我的冒烟流程' }).click()
+    const editView = page.getByTestId('template-edit-view')
+    await expect(editView).toBeVisible()
+    await expect(editView.locator('.cm-content')).toContainText('kind: Workflow')
+    await editView.locator('.cm-content').click()
+    await page.keyboard.press('ControlOrMeta+End')
+    await page.keyboard.type('\n# 脏稿标记')
+    await expect(editView.getByText('未保存')).toBeVisible()
+    return editView
+  }
+
+  const openDirtyEditor = async () => {
+    await page.getByRole('button', { name: /任务实例/ }).click()
+    await page.getByRole('navigation', { name: '任务实例视图' })
+      .getByRole('button', { name: '流程模板' }).click()
+    await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
+    return enterEditorFromList()
+  }
+
+  await page.goto('/#/super-assistant')
+  const discard = page.getByRole('dialog').filter({ hasText: '放弃未保存修改？' })
+
+  // Esc：脏稿不直接丢，确认后「继续编辑」保留草稿且不执行关闭
+  const editView = await openDirtyEditor()
+  await page.keyboard.press('Escape')
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: '继续编辑' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(editView).toBeVisible()
+  await expect(editView.locator('.cm-content')).toContainText('# 脏稿标记')
+  await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
+
+  // 左栏切视图：同样确认；「放弃」才执行原去向（落在流程模板列表）
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await expect(discard).toBeVisible()
+  await expect(editView.locator('.cm-content')).toContainText('# 脏稿标记')
+  await discard.getByRole('button', { name: '继续编辑' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(editView).toBeVisible()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await discard.getByRole('button', { name: '放弃' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(page.getByTestId('task-instances-templates')).toBeVisible()
+
+  // 右上关闭：同样确认；「放弃」后弹窗关闭（弹窗仍开，从列表重进编辑）
+  await enterEditorFromList()
+  await page.getByRole('button', { name: '关闭' }).click()
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: '放弃' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+
+  // 全程守卫确认不发 PUT（「继续编辑」与「放弃」都不触发保存）
+  await expect.poll(() => putCount, { timeout: 500 }).toBe(0)
+})
+
+test('任务实例弹窗：保存失败保留草稿，确认后才退出', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await page.route('**/api/v2/task-instances/templates/tpl-2', route => {
+    if (route.request().method() === 'PUT') {
+      return route.fulfill({
+        status: 400, contentType: 'application/json',
+        body: JSON.stringify({ detail: { code: 'TEMPLATE_INVALID',
+          message: 'edges 引用了不存在的节点' } }),
+      })
+    }
+    return json(route, { ...tiTemplatesFixture[1],
+      spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
+  await page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })
+    .getByRole('button', { name: '编辑模板 我的冒烟流程' }).click()
+  const editView = page.getByTestId('template-edit-view')
+  await expect(editView.locator('.cm-content')).toContainText('kind: Workflow')
+  await editView.locator('.cm-content').click()
+  await page.keyboard.press('ControlOrMeta+End')
+  await page.keyboard.type('\n# 失败保留草稿')
+
+  // 保存失败：错误可见、草稿保留在编辑器
+  await editView.getByRole('button', { name: '保存新版本' }).click()
+  await expect(editView.getByText('edges 引用了不存在的节点')).toBeVisible()
+  await expect(editView.locator('.cm-content')).toContainText('# 失败保留草稿')
+  await expect(editView.getByText('未保存')).toBeVisible()
+
+  // 失败后退出仍走确认：面板自身返回按钮 → 面板确认「放弃修改并退出」
+  await editView.getByRole('button', { name: '返回模板', exact: true }).click()
+  const panelConfirm = page.getByRole('dialog').filter({ hasText: '放弃未保存的修改' })
+  await expect(panelConfirm).toBeVisible()
+  await panelConfirm.getByRole('button', { name: '放弃修改并退出' }).click()
   await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toBeVisible()
 })
 
