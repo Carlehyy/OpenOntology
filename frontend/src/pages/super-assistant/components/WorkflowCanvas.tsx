@@ -107,9 +107,11 @@ function defaultNodes(): WorkflowNode[] {
 // ═══════════════════════════════════════════════════════════
 interface WorkflowCanvasProps {
   onClose: () => void
+  /** 新建保存成功时先于 onClose 触发：调用方据此归位「个人」筛选 */
+  onCreated?: () => void
 }
 
-export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
+export default function WorkflowCanvas({ onClose, onCreated }: WorkflowCanvasProps) {
   const queryClient = useQueryClient()
   const [nodes, setNodes, onNodesChange] = useNodesState<WorkflowNode>(defaultNodes())
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([
@@ -189,8 +191,10 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
     try {
       await taskInstancesApi.createTemplate(specYaml)
       toast.success(`流程模板「${name}」已创建`)
-      // 新建流程入口在模板区头部：保存后失效列表，返回即可见新模板
+      // 新建流程入口在模板区头部：保存后失效列表，返回即可见新模板；
+      // onCreated 先于 onClose 让调用方归位「个人」筛选（YIYA-44/45）
       void queryClient.invalidateQueries({ queryKey: ['task-instances', 'templates'] })
+      onCreated?.()
       onClose()
     } catch (error) {
       toast.error(apiError(error))

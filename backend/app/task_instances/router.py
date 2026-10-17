@@ -3,10 +3,9 @@
   模板与版本：
   GET    /templates                          列表（keyword）
   POST   /templates                          创建（YAML 编译 + 语义校验）
-  GET    /templates/{id}                     详情（含 spec_yaml）
   PUT    /templates/{id}                     更新（新 revision，canonical_hash 幂等）
-  DELETE /templates/{id}                     软删
-  POST   /templates/validate                 干校验（不落库）
+                                             预置模板 403 TEMPLATE_IS_PRESET
+  DELETE /templates/{id}                     软删（预置模板同上 403 拒绝）
   GET    /templates/{id}/revisions           版本历史
 
   实例：

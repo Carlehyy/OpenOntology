@@ -21,6 +21,33 @@ export const TEMPLATE_NAME_PLACEHOLDER = '例如：登录页改版评审-1023'
 export const TEMPLATE_UNTITLED_GOAL = '未填写目标'
 export const TEMPLATE_UNTITLED_DESC = '未填写描述'
 
+// —— 模板搜索 / 来源单选（弹窗模板列表，YIYA-44/45）——
+export const TEMPLATE_SEARCH_LABEL = '搜索模板名称'
+export const TEMPLATE_SOURCE_LABEL = '模板来源'
+export const TEMPLATE_SOURCE_PRESET = '预置'
+export const TEMPLATE_SOURCE_PERSONAL = '个人'
+export const TEMPLATE_PERSONAL_EMPTY_TITLE = '还没有个人模板'
+export const TEMPLATE_PERSONAL_EMPTY_HINT = '点击右上角「新建流程」创建属于你的流程'
+export const TEMPLATE_PRESET_EMPTY_TITLE = '暂无预置模板'
+export const TEMPLATE_PRESET_EMPTY_HINT = '预置模板由平台统一提供'
+export const TEMPLATE_NOMATCH_TITLE = '没有匹配的模板'
+export const TEMPLATE_NOMATCH_HINT = (keyword: string, sourceLabel: string) =>
+  `未找到名称包含「${keyword.trim()}」的${sourceLabel}模板`
+
+// —— 模板卡四操作（可访问名称/禁用原因）——
+export const TEMPLATE_VIEW_BUTTON = '查看'
+export const TEMPLATE_EDIT_BUTTON = '编辑'
+export const TEMPLATE_ACTIVATE_BUTTON = '激活'
+export const TEMPLATE_DELETE_NAME = (name: string) => `删除模板 ${name}`
+export const TEMPLATE_PRESET_EDIT_DISABLED = '预置模板不允许编辑'
+export const TEMPLATE_PRESET_DELETE_DISABLED = '预置模板不允许删除'
+export const TEMPLATE_DELETE_TITLE = '删除模板'
+export const TEMPLATE_DELETE_DESC = '删除后不可恢复；已创建的实例及其事件历史不受影响。'
+export const TEMPLATE_DELETED_TOAST = '模板已删除'
+export const TEMPLATE_VIEW_TITLE = '模板详情'
+export const TEMPLATE_EDIT_TITLE = '编辑模板'
+export const TEMPLATE_YAML_SOURCE = 'YAML 原文'
+
 // —— 激活 ——
 export const ACTIVATE_MODAL_TITLE = '激活实例'
 export const ACTIVATE_BUTTON = '激活实例'
