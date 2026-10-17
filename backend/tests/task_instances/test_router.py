@@ -97,6 +97,57 @@ class TestTemplates:
         legacy_entry = next(t for t in listed_legacy if t["id"] == template["id"])
         assert legacy_entry["node_count"] is None
 
+
+    def test_preset_templates_reject_update_and_delete(
+            self, client, auth_headers, db, inline_dispatch):
+        """预置模板写入保护（YIYA-44/45）：PUT/DELETE 在任何写入前 403，
+        内容/版本/deleted_at 不变；读取与激活不受影响。"""
+        preset = TaskTemplate(name="预置评审流", description="官方预置",
+                              is_preset=True)
+        db.add(preset)
+        db.flush()
+        revision = TaskTemplateRevision(
+            template_id=preset.id, revision_no=1,
+            spec_yaml=make_spec(), canonical_hash="d" * 64)
+        db.add(revision)
+        db.flush()
+        preset.latest_revision_id = revision.id
+        db.commit()
+        template_id = preset.id
+
+        updated = client.put(
+            f"{BASE}/templates/{template_id}",
+            json={"spec_yaml": make_spec(corrections=9)},
+            headers=auth_headers)
+        assert updated.status_code == 403, updated.text
+        assert updated.json()["detail"]["code"] == "TEMPLATE_PRESET_PROTECTED"
+
+        deleted = client.delete(f"{BASE}/templates/{template_id}",
+                                headers=auth_headers)
+        assert deleted.status_code == 403, deleted.text
+        assert deleted.json()["detail"]["code"] == "TEMPLATE_PRESET_PROTECTED"
+
+        # 写入被拒后数据完全不变：无新版本、指针不动、未软删
+        db.refresh(preset)
+        db.refresh(revision)
+        assert preset.deleted_at is None
+        assert preset.latest_revision_id == revision.id
+        revisions = db.query(TaskTemplateRevision).filter(
+            TaskTemplateRevision.template_id == template_id).all()
+        assert len(revisions) == 1
+        assert revisions[0].spec_yaml == make_spec()
+
+        # 读取与激活不受保护影响
+        detail = client.get(f"{BASE}/templates/{template_id}",
+                            headers=auth_headers).json()["data"]
+        assert detail["is_preset"] is True
+        listed = client.get(f"{BASE}/templates",
+                            headers=auth_headers).json()["data"]
+        assert any(t["id"] == template_id for t in listed)
+        instance = _activate(client, auth_headers, template_id,
+                             key="preset-act")
+        assert instance["template_revision_id"] == revision.id
+
     def test_legacy_null_compiled_backfilled_on_detail(
             self, client, auth_headers, db):
         # 存量模板（seed/早期创建）revision.spec_compiled 为空：

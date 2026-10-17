@@ -12,27 +12,34 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowLeft, CheckCircle2, ClipboardList, ChevronDown, ChevronRight, ExternalLink,
-  LayoutGrid, ListChecks, Loader2, Play, Plus, RefreshCw, Send, ThumbsDown, XCircle,
+  ArrowLeft, CheckCircle2, ClipboardList, ChevronDown, ChevronRight, Eye,
+  ExternalLink, LayoutGrid, ListChecks, Loader2, Pencil, Play, Plus,
+  RefreshCw, Search, Send, ThumbsDown, Trash2, XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   apiError, taskInstancesApi,
-  type TemplateSummary, type InstanceDetail, type InstanceListItem,
-  type WorkflowSpecSnapshot,
+  type TemplateDetail, type TemplateSummary, type InstanceDetail,
+  type InstanceListItem, type WorkflowSpecSnapshot,
 } from '@/api/taskInstances'
 import { DialogShell } from './AssistantConfiguration'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   ATTENTION_REASON_LABELS, BOARD_GROUPS, INSTANCE_STATUS_LABELS, INSTANCE_STATUS_TONE,
   attentionReasonOf, dialogNavOf, instanceCardTimeLabel, instanceGroup, isTerminalStatus,
   waitingNodesOf, type TaskDialogView,
 } from '@/components/task-instances/instanceView'
+import {
+  filterTemplates, isPresetTemplate, templateEmptyKind,
+  type TemplateEmptyKind, type TemplateSource,
+} from '@/components/task-instances/templateFilters'
 import * as copy from '@/components/task-instances/copy'
 import ProposalCard from '@/components/task-instances/ProposalCard'
 import FailureNotice from '@/components/task-instances/FailureNotice'
 import WorkflowPreviewGraph from '@/components/task-instances/WorkflowPreviewGraph'
+import TemplateEditorPanel from '@/components/task-instances/TemplateEditorPanel'
 import { formatRelativeTime } from '@/utils/datetime'
 import WorkflowCanvas from './WorkflowCanvas'
 
@@ -62,6 +69,10 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null)
   const [instanceName, setInstanceName] = useState('')
   const [goal, setGoal] = useState('')
+  // 模板列表筛选（仅弹窗内派生，不改服务端搜索契约）；各视图往返保留，
+  // 关闭弹窗恢复默认（预置 + 空关键词）
+  const [templateKeyword, setTemplateKeyword] = useState('')
+  const [templateSource, setTemplateSource] = useState<TemplateSource>('preset')
 
   // ─── 数据 ───
   const templates = useQuery({
@@ -75,18 +86,20 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
     enabled: open,
     refetchInterval: 8000,
   })
-  // 激活视图的模板详情（只读 DAG 预览数据源）
+  // 激活/查看/编辑视图共用的模板详情（只读 DAG 预览与 YAML 原文数据源）
   const templateDetail = useQuery({
     queryKey: ['task-instances', 'template', selectedTemplate?.id],
     queryFn: () => taskInstancesApi.getTemplate(selectedTemplate?.id as string),
-    enabled: view === 'activate' && Boolean(selectedTemplate),
+    enabled: (view === 'activate' || view === 'template-view' || view === 'template-edit')
+      && Boolean(selectedTemplate),
   })
 
-  // 关闭时重置
+  // 关闭时重置（筛选恢复默认）
   useEffect(() => {
     if (!open) {
       setView('board'); setSelectedTemplate(null); setSelectedInstanceId(null)
       setInstanceName(''); setGoal('')
+      setTemplateKeyword(''); setTemplateSource('preset')
     }
   }, [open])
 
@@ -153,6 +166,14 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
     }
     return map
   }, [instances.data])
+
+  // 弹窗内派生筛选：完整列表 ×（名称关键词 ∩ 来源单选）
+  const filteredTemplates = useMemo(
+    () => filterTemplates(templates.data ?? [], {
+      keyword: templateKeyword, source: templateSource }),
+    [templates.data, templateKeyword, templateSource])
+  const templateEmpty = templateEmptyKind(templates.data ?? [], {
+    keyword: templateKeyword, source: templateSource })
 
   if (!open) return null
 
@@ -235,16 +256,51 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
           )}
           {view === 'templates' && (
             <TemplatesPanel
-              templates={templates.data ?? []}
+              templates={filteredTemplates}
+              emptyKind={templateEmpty}
+              source={templateSource}
+              keyword={templateKeyword}
               loading={templates.isLoading}
               error={templates.isError}
               onRetry={() => void templates.refetch()}
+              onKeywordChange={setTemplateKeyword}
+              onSourceChange={setTemplateSource}
               onNewFlow={() => setView('canvas')}
               onSelect={handleSelectTemplate}
+              onView={template => {
+                setSelectedTemplate(template); setView('template-view')
+              }}
+              onEdit={template => {
+                setSelectedTemplate(template); setView('template-edit')
+              }}
             />
           )}
+          {view === 'template-view' && selectedTemplate && (
+            <TemplateDetailView
+              template={selectedTemplate}
+              detail={templateDetail.data}
+              loading={templateDetail.isLoading}
+              error={templateDetail.isError}
+              onBack={() => { setView('templates'); setSelectedTemplate(null) }}
+            />
+          )}
+          {view === 'template-edit' && selectedTemplate && (
+            <div className="min-h-0 flex-1 overflow-y-auto p-4" data-testid="template-edit-view">
+              <TemplateEditorPanel
+                templateId={selectedTemplate.id}
+                exitLabel={copy.RETURN_TO_TEMPLATES}
+                onExit={() => { setView('templates'); setSelectedTemplate(null) }}
+              />
+            </div>
+          )}
           {view === 'canvas' && (
-            <WorkflowCanvas onClose={() => setView('templates')} />
+            <WorkflowCanvas
+              onCreated={() => {
+                // 新建成功归位「个人」并清空关键词，让刚创建的模板可见
+                setTemplateSource('personal')
+                setTemplateKeyword('')
+              }}
+              onClose={() => setView('templates')} />
           )}
         </div>
       </div>
@@ -375,24 +431,88 @@ function BoardView({ grouped, total, loading, error, onRefresh, onSelectInstance
 }
 
 // ═══════════════════════════════════════════════════════════
-// 子组件：模板列表面板
+// 子组件：模板列表面板（搜索 + 来源单选 + 卡片四操作，YIYA-44/45）
 // ═══════════════════════════════════════════════════════════
-function TemplatesPanel({ templates, loading, error, onRetry, onNewFlow, onSelect }: {
+function TemplatesPanel({ templates, emptyKind, source, keyword, loading, error,
+  onRetry, onKeywordChange, onSourceChange, onNewFlow, onSelect, onView, onEdit }: {
   templates: TemplateSummary[]
+  emptyKind: TemplateEmptyKind | null
+  source: TemplateSource
+  keyword: string
   loading: boolean
   error: boolean
   onRetry: () => void
+  onKeywordChange: (keyword: string) => void
+  onSourceChange: (source: TemplateSource) => void
   onNewFlow: () => void
   onSelect: (template: TemplateSummary) => void
+  onView: (template: TemplateSummary) => void
+  onEdit: (template: TemplateSummary) => void
 }) {
+  const queryClient = useQueryClient()
+  const [pendingDelete, setPendingDelete] = useState<TemplateSummary | null>(null)
+
+  // 个人模板删除：确认后请求；取消不发请求；失败仅提示，不虚假移除卡片
+  const remove = useMutation({
+    mutationFn: (id: string) => taskInstancesApi.deleteTemplate(id),
+    onSuccess: () => {
+      toast.success(copy.TEMPLATE_DELETED_TOAST)
+      void queryClient.invalidateQueries({ queryKey: ['task-instances', 'templates'] })
+    },
+    onError: mutationError => toast.error(apiError(mutationError)),
+  })
+
+  const sourceLabel = source === 'preset'
+    ? copy.TEMPLATE_SOURCE_PRESET : copy.TEMPLATE_SOURCE_PERSONAL
+
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="task-instances-templates">
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--color-border)] px-4 py-2.5">
-        <span className="text-xs text-[var(--color-text-tertiary)]">共 {templates.length} 个模板</span>
-        <Button size="sm" className="h-8 gap-1.5 text-xs" onClick={onNewFlow} data-testid="new-flow-button">
+      {/* 头部：搜索（仅名称）+ 来源两项单选 + 新建；窄屏允许换行，动作不溢出 */}
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+        <div className="relative w-56 max-w-full">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
+          <Input
+            aria-label={copy.TEMPLATE_SEARCH_LABEL}
+            placeholder={copy.TEMPLATE_SEARCH_LABEL}
+            className="h-8 pl-8 text-xs"
+            value={keyword}
+            onChange={event => onKeywordChange(event.target.value)}
+            data-testid="template-search-input"
+          />
+        </div>
+        <div
+          role="radiogroup"
+          aria-label={copy.TEMPLATE_SOURCE_LABEL}
+          className="flex shrink-0 rounded-lg border border-[var(--color-border)] p-0.5"
+          data-testid="template-source-group"
+        >
+          {(['preset', 'personal'] as const).map(option => {
+            const active = source === option
+            return (
+              <button
+                key={option}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => onSourceChange(option)}
+                data-testid={`template-source-${option}`}
+                className={`rounded-md px-2.5 py-1 text-xs transition-colors focus-visible:ring-2 ring-ring ${
+                  active
+                    ? 'bg-brand-soft font-medium text-brand-ink'
+                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                }`}
+              >
+                {option === 'preset'
+                  ? copy.TEMPLATE_SOURCE_PRESET : copy.TEMPLATE_SOURCE_PERSONAL}
+              </button>
+            )
+          })}
+        </div>
+        <Button size="sm" className="ml-auto h-8 gap-1.5 text-xs" onClick={onNewFlow} data-testid="new-flow-button">
           <Plus size={14} /> {copy.TEMPLATE_NEW_BUTTON}
         </Button>
       </div>
+
       {loading ? (
         <div className="px-4 py-12 text-center text-xs text-[var(--color-text-tertiary)]">加载中…</div>
       ) : error ? (
@@ -403,59 +523,256 @@ function TemplatesPanel({ templates, loading, error, onRetry, onNewFlow, onSelec
             <RefreshCw size={12} /> 重试
           </Button>
         </div>
-      ) : !templates.length ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
+      ) : emptyKind !== null ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center" data-testid="template-empty-state">
           <ListChecks size={24} className="text-[var(--color-text-tertiary)]" />
-          <p className="text-sm text-[var(--color-text-secondary)]">{copy.TEMPLATE_EMPTY_TITLE}</p>
-          <p className="text-xs text-[var(--color-text-tertiary)]">{copy.TEMPLATE_EMPTY_HINT}</p>
+          {emptyKind === 'none' ? (
+            <>
+              <p className="text-sm text-[var(--color-text-secondary)]">{copy.TEMPLATE_EMPTY_TITLE}</p>
+              <p className="text-xs text-[var(--color-text-tertiary)]">{copy.TEMPLATE_EMPTY_HINT}</p>
+            </>
+          ) : emptyKind === 'category' ? (
+            <>
+              <p className="text-sm text-[var(--color-text-secondary)]">
+                {source === 'personal'
+                  ? copy.TEMPLATE_PERSONAL_EMPTY_TITLE : copy.TEMPLATE_PRESET_EMPTY_TITLE}
+              </p>
+              <p className="text-xs text-[var(--color-text-tertiary)]">
+                {source === 'personal'
+                  ? copy.TEMPLATE_PERSONAL_EMPTY_HINT : copy.TEMPLATE_PRESET_EMPTY_HINT}
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-[var(--color-text-secondary)]">{copy.TEMPLATE_NOMATCH_TITLE}</p>
+              <p className="text-xs text-[var(--color-text-tertiary)]">
+                {copy.TEMPLATE_NOMATCH_HINT(keyword, sourceLabel)}
+              </p>
+            </>
+          )}
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {templates.map(template => (
-              <button
+              <TemplateCard
                 key={template.id}
-                type="button"
-                onClick={() => onSelect(template)}
-                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] p-3.5 text-left transition-all hover:border-[var(--color-primary)]/40 hover:shadow-sm focus-visible:ring-2 ring-ring"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <span className="min-w-0 truncate text-sm font-medium text-[var(--color-text-primary)]">
-                    {template.name}
-                  </span>
-                  <span className="flex shrink-0 items-center gap-1">
-                    {template.is_preset ? (
-                      <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[11px] font-medium text-brand-ink">
-                        预置
-                      </span>
-                    ) : null}
-                    {template.node_count ? (
-                      <span className="rounded bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                        {template.node_count} 节点
-                      </span>
-                    ) : null}
-                    <span className="rounded bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                      v{template.latest_revision_no ?? '-'}
-                    </span>
-                  </span>
-                </div>
-                <p className="mt-1 line-clamp-2 text-xs leading-4 text-[var(--color-text-tertiary)]">
-                  {template.description || copy.TEMPLATE_UNTITLED_DESC}
-                </p>
-                <div className="mt-2.5 flex items-center gap-3 text-[11px] text-[var(--color-text-tertiary)]">
-                  <span className="flex items-center gap-1">
-                    <Play size={12} /> {template.instance_count} 次激活
-                  </span>
-                  {template.updated_at ? (
-                    <span>更新于 {formatRelativeTime(template.updated_at)}</span>
-                  ) : null}
-                </div>
-              </button>
+                template={template}
+                onSelect={onSelect}
+                onView={onView}
+                onEdit={onEdit}
+                onDelete={setPendingDelete}
+              />
             ))}
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={copy.TEMPLATE_DELETE_TITLE}
+        description={copy.TEMPLATE_DELETE_DESC}
+        confirmText="删除"
+        variant="danger"
+        loading={remove.isPending}
+        onConfirm={() => {
+          if (pendingDelete) remove.mutate(pendingDelete.id)
+          setPendingDelete(null)
+        }}
+        onClose={() => setPendingDelete(null)}
+      />
     </div>
+  )
+}
+
+// ─── 模板卡：主体点击 → 既有激活表单；操作区四项互不冒泡 ───
+function TemplateCard({ template, onSelect, onView, onEdit, onDelete }: {
+  template: TemplateSummary
+  onSelect: (template: TemplateSummary) => void
+  onView: (template: TemplateSummary) => void
+  onEdit: (template: TemplateSummary) => void
+  onDelete: (template: TemplateSummary) => void
+}) {
+  const preset = isPresetTemplate(template)
+  // 扫描顺序：名称 → 预置/个人及版本徽章 → 描述（两行）→ 元信息 → 操作区
+  return (
+    <div
+      data-testid="template-card"
+      className="flex flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] text-left transition-all hover:border-[var(--color-primary)]/40 hover:shadow-sm"
+    >
+      {/* 主体快捷入口 = 激活（键盘等价路径：操作区「激活」按钮） */}
+      <div
+        className="flex flex-1 cursor-pointer flex-col gap-1.5 p-3.5"
+        onClick={() => onSelect(template)}
+      >
+        <span className="min-w-0 truncate text-sm font-medium text-[var(--color-text-primary)]" title={template.name}>
+          {template.name}
+        </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${
+            preset ? 'bg-brand-soft text-brand-ink' : 'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]'
+          }`}>
+            {preset ? copy.TEMPLATE_SOURCE_PRESET : copy.TEMPLATE_SOURCE_PERSONAL}
+          </span>
+          <span className="shrink-0 rounded bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+            v{template.latest_revision_no ?? '-'}
+          </span>
+        </div>
+        <p className="line-clamp-2 text-xs leading-4 text-[var(--color-text-tertiary)]">
+          {template.description || copy.TEMPLATE_UNTITLED_DESC}
+        </p>
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-text-tertiary)]">
+          {template.node_count ? (
+            <span className="tabular-nums">{template.node_count} 节点</span>
+          ) : null}
+          <span className="flex items-center gap-1 tabular-nums">
+            <Play size={12} /> {template.instance_count} 次激活
+          </span>
+          {template.updated_at ? (
+            <span>更新于 {formatRelativeTime(template.updated_at)}</span>
+          ) : null}
+        </div>
+      </div>
+      {/* 操作区：与主体分栏，点击/禁用不可能冒泡触发激活 */}
+      <div className="flex flex-wrap items-center gap-0.5 border-t border-[var(--color-border)] px-2.5 py-1.5">
+        <button
+          type="button"
+          onClick={() => onView(template)}
+          className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg px-1.5 py-1.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-brand-soft hover:text-brand-ink focus-visible:ring-2 ring-ring"
+        >
+          <Eye size={12} /> {copy.TEMPLATE_VIEW_BUTTON}
+        </button>
+        <span title={preset ? copy.TEMPLATE_PRESET_EDIT_DISABLED : undefined}>
+          <button
+            type="button"
+            disabled={preset}
+            onClick={() => onEdit(template)}
+            aria-label={preset
+              ? `编辑模板 ${template.name}（${copy.TEMPLATE_PRESET_EDIT_DISABLED}）`
+              : `编辑模板 ${template.name}`}
+            className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg px-1.5 py-1.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-brand-soft hover:text-brand-ink focus-visible:ring-2 ring-ring disabled:pointer-events-none disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)]"
+          >
+            <Pencil size={12} /> {copy.TEMPLATE_EDIT_BUTTON}
+          </button>
+        </span>
+        <button
+          type="button"
+          onClick={() => onSelect(template)}
+          aria-label={`激活模板 ${template.name}`}
+          className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg px-1.5 py-1.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-brand-soft hover:text-brand-ink focus-visible:ring-2 ring-ring"
+        >
+          <Play size={12} /> {copy.TEMPLATE_ACTIVATE_BUTTON}
+        </button>
+        <span
+          className="ml-auto shrink-0"
+          title={preset
+            ? copy.TEMPLATE_PRESET_DELETE_DISABLED
+            : copy.TEMPLATE_DELETE_NAME(template.name)}
+        >
+          <button
+            type="button"
+            disabled={preset}
+            onClick={() => onDelete(template)}
+            aria-label={preset
+              ? `${copy.TEMPLATE_DELETE_NAME(template.name)}（${copy.TEMPLATE_PRESET_DELETE_DISABLED}）`
+              : copy.TEMPLATE_DELETE_NAME(template.name)}
+            className="rounded-lg p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:ring-2 ring-ring disabled:pointer-events-none disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:hover:bg-transparent"
+          >
+            <Trash2 size={14} />
+          </button>
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════
+// 子组件：模板只读详情（查看；无任何保存/提交副作用）
+// ═══════════════════════════════════════════════════════════
+function TemplateDetailView({ template, detail, loading, error, onBack }: {
+  template: TemplateSummary
+  detail: TemplateDetail | undefined
+  loading: boolean
+  error: boolean
+  onBack: () => void
+}) {
+  const [showYaml, setShowYaml] = useState(false)
+  const preset = isPresetTemplate(template)
+  return (
+    <>
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 ring-ring"
+        >
+          <ArrowLeft size={14} /> {copy.RETURN_TO_TEMPLATES}
+        </button>
+        <span className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+          {copy.TEMPLATE_VIEW_TITLE}「{template.name}」
+        </span>
+      </div>
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5" data-testid="template-detail-view">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-base font-semibold text-[var(--color-text-primary)]">{template.name}</span>
+          <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+            preset ? 'bg-brand-soft text-brand-ink' : 'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]'
+          }`}>
+            {preset ? copy.TEMPLATE_SOURCE_PRESET : copy.TEMPLATE_SOURCE_PERSONAL}
+          </span>
+          <span className="rounded bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+            v{template.latest_revision_no ?? '-'}
+          </span>
+        </div>
+        <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
+          {template.description || copy.TEMPLATE_UNTITLED_DESC}
+        </p>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--color-text-tertiary)]">
+          {detail?.node_count ? <span className="tabular-nums">{detail.node_count} 节点</span> : null}
+          <span className="tabular-nums">{template.instance_count} 次激活</span>
+          {template.updated_at ? <span>更新于 {formatRelativeTime(template.updated_at)}</span> : null}
+          {template.created_at ? <span>创建于 {formatRelativeTime(template.created_at)}</span> : null}
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-medium text-[var(--color-text-primary)]">流程结构（只读）</p>
+          {loading ? (
+            <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+              流程结构加载中…
+            </div>
+          ) : error ? (
+            <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+              流程结构加载失败，可返回后重试
+            </div>
+          ) : detail?.spec_compiled?.nodes && Object.keys(detail.spec_compiled.nodes).length ? (
+            <div data-testid="template-detail-graph">
+              <WorkflowPreviewGraph spec={detail.spec_compiled} />
+            </div>
+          ) : (
+            <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+              该模板暂无节点结构数据
+            </div>
+          )}
+        </div>
+
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowYaml(previous => !previous)}
+            aria-expanded={showYaml}
+            className="flex items-center gap-1.5 text-xs font-medium text-[var(--color-text-primary)] focus-visible:ring-2 ring-ring"
+          >
+            {showYaml ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {copy.TEMPLATE_YAML_SOURCE}
+          </button>
+          {showYaml ? (
+            <pre className="mt-2 max-h-72 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-hover)] p-3 font-mono text-xs leading-5 text-[var(--color-text-secondary)]">
+              {detail?.spec_yaml ?? '暂无 YAML 原文'}
+            </pre>
+          ) : null}
+        </div>
+      </div>
+    </>
   )
 }
 

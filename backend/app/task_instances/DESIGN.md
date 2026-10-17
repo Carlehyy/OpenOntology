@@ -286,7 +286,7 @@ worker 提交产出时依次校验：① 产出 JSON 可解析；② 端口契�
 | 方法与路径 | 语义 | 备注 |
 |---|---|---|
 | GET/POST `/templates` | 列表 / 创建（YAML 入参） | 创建即编译+校验 |
-| GET/PUT `/templates/{id}` | 详情（含 revisions）/ 更新（新 revision，canonical_hash 幂等） | PUT 400 携结构化校验错误（行号定位） |
+| GET/PUT `/templates/{id}` | 详情（含 revisions）/ 更新（新 revision，canonical_hash 幂等） | PUT 400 携结构化校验错误（行号定位）；预置模板 PUT/DELETE 403（见附录 C 2026-10-17） |
 | POST `/templates/{id}/validate` | 干校验（不落库） | 编辑器「校验」按钮 |
 | GET `/templates/{id}/revisions[/{rev}]` | 版本历史 / 单版 | diff 由前端行级对比两版 spec_yaml |
 | POST `/templates/{id or rev}/instances` | 激活实例（goal + inputs） | 202 + `Idempotency-Key` 必填（kernel 先例） |
@@ -300,7 +300,7 @@ worker 提交产出时依次校验：① 产出 JSON 可解析；② 端口契�
 | POST `/instances/{id}/steering` | 插话（node 定位 + content） | 仅 running 节点接受；`Idempotency-Key` |
 | GET `/instances/{id}/artifacts/{aid}[ /download]` | 产物元数据 / 流式下载（带 sha256 头） | |
 
-错误码族（4xx，命名风格随平台）：`TEMPLATE_INVALID / TEMPLATE_NOT_FOUND / INSTANCE_NOT_ACTIVE / NODE_NOT_WAITING / NODE_NOT_RUNNING / CONTRACT_VIOLATION(附细节) / REWORK_BUDGET_EXHAUSTED / STEERING_UNDELIVERABLE / VERSION_CONFLICT / IDEMPOTENCY_CONFLICT`。
+错误码族（4xx，命名风格随平台）：`TEMPLATE_INVALID / TEMPLATE_NOT_FOUND / TEMPLATE_PRESET_PROTECTED / INSTANCE_NOT_ACTIVE / NODE_NOT_WAITING / NODE_NOT_RUNNING / CONTRACT_VIOLATION(附细节) / REWORK_BUDGET_EXHAUSTED / STEERING_UNDELIVERABLE / VERSION_CONFLICT / IDEMPOTENCY_CONFLICT`。
 
 ---
 
@@ -426,6 +426,16 @@ worker 提交产出时依次校验：① 产出 JSON 可解析；② 端口契�
 | 弹窗内激活 | 点击模板卡片 → 弹窗内填表单（实例名+Goal）→ 激活，全程不离开超级助手 |
 | 视图组件提升 | TemplatesView/InstancesBoardView/instanceView/WorkflowPreviewGraph 从 pages/task-instances/ 提升至 components/task-instances/（feature-boundaries 允许） |
 | alembic 版本 | 实际交付 head 为 0126_seed_task_templates（0125_task_instances + 0126 种子） |
+
+
+### 预置模板写入保护与弹窗模板列表重排（2026-10-17，YIYA-44/45）
+
+| 变更 | 说明 |
+|---|---|
+| 预置写入拒绝 | `PUT/DELETE /templates/{id}` 对 `is_preset=true` 在任何写入前拒绝（403 `TEMPLATE_PRESET_PROTECTED`）；读取/激活不受影响。独立页与弹窗同步禁用预置编辑/删除/回滚入口，服务端为最终防线（直接 API/深链亦不可写） |
+| 弹窗模板列表 | 头部改为「搜索模板名称（仅名称、忽略首尾空格、不区分大小写子串）× 预置/个人两项单选（默认预置）+ 新建流程」；筛选在弹窗内对完整列表派生（templateFilters.ts），不改独立页 name OR description 搜索契约与按 revision 匹配的重新激活路径 |
+| 模板卡四操作 | 查看（弹窗内只读详情：元信息 + WorkflowPreviewGraph + 可折叠 YAML）/编辑（复用抽取的 TemplateEditorPanel，同 ID 新 revision）/激活（与卡片主体点击同路径）/删除（个人确认框，取消不发请求）；预置编辑/删除禁用并说明原因，操作区与主体分栏不冒泡 |
+| 闭环归位 | 新建保存成功归位「个人」并清空关键词；各视图往返保留筛选，关闭弹窗恢复默认；空态区分全局无模板/个人分类空/关键词无匹配 |
 
 ### 技术事实补录
 
