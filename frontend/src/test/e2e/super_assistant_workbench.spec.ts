@@ -4122,6 +4122,11 @@ const scriptedValidate = (specYaml: string): { status: number, body: unknown } =
       { code: 'TERMINAL_UNREACHABLE', message: "没有任何 terminal 节点从源点可达（源点: ['n1']）" },
     ])
   }
+  if (/from: n1\.bogus,/m.test(specYaml)) {
+    return semanticDetail([
+      { code: 'PORT_REF', message: "edges[1]: 节点 n1 不存在端口 'bogus'（合法: ['done']）", ref: 'edges[1]' },
+    ])
+  }
   if (!/to: terminal_\d+/m.test(specYaml)) {
     return semanticDetail([
       { code: 'TERMINAL_UNREACHABLE', message: "没有任何 terminal 节点从源点可达（源点: ['n1']）" },
@@ -4184,15 +4189,23 @@ test('画布校验：预置图首验给中文引导（审批未选去向），�
   await expect(dialog.getByText('通过')).toBeVisible()
   await expect(dialog.getByText('驳回')).toBeVisible()
 
+  // F1：预置审批出边（数据无 sourceHandle）以虚线＋「未选去向」标签呈现，
+  // 不暗示已选「通过」（锚点实测：修复前该边起笔在通过口圆心 3px 内）
+  const presetEdge = page.locator('.react-flow__edge[data-id="e2"]')
+  await expect(presetEdge.getByText('未选去向')).toBeVisible()
+  await expect(presetEdge.locator('path.react-flow__edge-path')).toHaveCSS(
+    'stroke-dasharray', '6px, 4px')
+
   // 预置图原样首验：审批出边未选去向 → 中文引导（PM 选项 1），两条独立问题都可见（M7）
   await page.getByRole('button', { name: '校验' }).click()
   const panel = page.getByTestId('workflow-validation-panel')
   await expect(panel).toBeVisible()
   await expect(panel.getByText('发现 2 个问题')).toBeVisible()
-  await expect(panel.getByText(/连线「审批 1 → 终点 1」/)).toBeVisible()
+  await expect(panel.getByText(/连线「审批 1 → 终点 1」: 审批节点的出边必须显式端口（通过／驳回）/)).toBeVisible()
   await expect(panel.getByText(/从审批节点的「通过」或「驳回」输出端口重新拖出/)).toBeVisible()
-  await expect(panel.getByText(/没有任何 terminal 节点从源点可达（源点: \['Agent 1'\]）/)).toBeVisible()
+  await expect(panel.getByText('没有任何终点节点从源点可达（源点: [「Agent 1」]）')).toBeVisible()
   await dialog.screenshot({ path: '../../yiya35-evidence/shots/01-preset-first-validate.png' })
+
 
   // 点击问题定位到对应连线（React Flow 选中态）
   await panel.getByRole('button', { name: /审批 1 → 终点 1/ }).click()
@@ -4285,7 +4298,7 @@ test('画布校验：YAML 模式结构错误给中文定位，英文原文折叠
     + 'edges:\n  - { from: n1.done, to: end }\n')
   await page.getByRole('button', { name: '校验' }).click()
   await expect(panel.getByText('模板名称至少 5 个字符')).toBeVisible()
-  await expect(panel.getByText(/名称栏填写至少 5 个字符/)).toBeVisible()
+  await expect(panel.getByText(/在 metadata\.name 处填写至少 5 个字符的模板名称，然后重新校验/)).toBeVisible()
   await expect(panel.getByText(/pydantic/)).toHaveCount(0) // 英文原文默认折叠，不在主清单
   await panel.getByRole('button', { name: '技术详情' }).click()
   await expect(panel.getByText(/string_too_short/)).toBeVisible()
@@ -4341,5 +4354,52 @@ test('画布校验：YAML 模式语义错误同样人化（无内部索引／英
   await editor.click()
   await page.keyboard.press('Enter')
   await expect(panel).toHaveCount(0)
+})
+
+test('画布校验：PORT_REF 给 YAML 可执行改法（F2）；弃置 YAML 切回画布后旧结论失效，取消切换保留编辑（F4）', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await mockCanvasValidate(page)
+  await openCanvas(page)
+  const dialog = page.getByTestId('task-instances-dialog')
+  const panel = page.getByTestId('workflow-validation-panel')
+
+  await page.getByRole('button', { name: 'YAML 模式' }).click()
+  const editor = dialog.locator('.cm-content')
+  await editor.click()
+  await page.keyboard.press('ControlOrMeta+a')
+  await page.keyboard.insertText(
+    'api_version: openontology.task/v1\nkind: Workflow\nmetadata:\n  name: 端口写错模板\nnodes:\n'
+    + '  n1: { kind: agent, system: 执行任务 }\n  end: { kind: terminal, outcome: success }\n'
+    + 'edges:\n  - { from: n1.bogus, to: end }\n')
+  await page.getByRole('button', { name: '校验' }).click()
+
+  // F2：PORT_REF 按错误类型给 YAML 文本改法（端口值只出现在修复示例里）
+  await expect(panel.getByText('发现 1 个问题')).toBeVisible()
+  await expect(panel.getByText('第 1 条连线: 节点 n1 不存在端口「bogus」（合法: [「done」]）')).toBeVisible()
+  await expect(panel.getByText(/把该出边 from 引用的端口改为实际存在的输出端口/)).toBeVisible()
+  // 端口值只出现在修复示例（动作）里；主提示消息已在上一行整串断言，无英文词
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/10-yaml-port-ref-action.png' })
+
+  // F4：取消切换留在 YAML，编辑内容不丢
+  await page.getByRole('button', { name: '画布模式', exact: false }).click()
+  await page.getByRole('button', { name: '仍切回画布' }).waitFor()
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(editor).toBeVisible()
+  await expect(editor).toContainText('n1.bogus')
+  await expect(panel.getByText('发现 1 个问题')).toBeVisible()
+
+  // F4：确认弃置 → 回到画布，被弃置 YAML 的旧结论不再作为当前结论展示
+  await page.getByRole('button', { name: '画布模式', exact: false }).click()
+  await page.getByRole('button', { name: '仍切回画布' }).click()
+  await expect(page.locator('.react-flow__node[data-id="gate"]')).toBeVisible()
+  await expect(panel).toHaveCount(0)
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/11-canvas-after-discard.png' })
+
+  // 当前画布重验返回真实结果（预置图首验两条阻断），不残留 YAML 侧结论
+  await page.getByRole('button', { name: '校验' }).click()
+  await expect(panel.getByText('发现 2 个问题')).toBeVisible()
+  await expect(panel.getByText(/审批节点的出边必须显式端口（通过／驳回）/)).toBeVisible()
 })
 

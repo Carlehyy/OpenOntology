@@ -147,10 +147,10 @@ describe('validationFeedback 语义层（后端中文 + 内部索引）', () => 
     const feedback = buildValidationFeedback(error, presetGraph)
     assert.equal(feedback.status, 'problems')
     assert.equal(feedback.summary, '发现 2 个问题')
-    assert.equal(feedback.items[0].message, '连线「审批 1 → 终点 1」: approval 节点的出边必须显式端口（approved/rejected）')
+    assert.equal(feedback.items[0].message, '连线「审批 1 → 终点 1」: 审批节点的出边必须显式端口（通过／驳回）')
     assert.match(feedback.items[0].action ?? '', /通过.*驳回/)
     assert.equal(feedback.items[0].edgeId, 'e2')
-    assert.equal(feedback.items[1].message, "没有任何 terminal 节点从源点可达（源点: ['Agent 1']）")
+    assert.equal(feedback.items[1].message, '没有任何终点节点从源点可达（源点: [「Agent 1」]）')
     assert.match(feedback.items[1].action ?? '', /连线/)
   })
 
@@ -183,6 +183,7 @@ describe('validationFeedback 语义层（后端中文 + 内部索引）', () => 
         message: '语义校验未通过',
         errors: [
           { code: 'PORT_REQUIRED', message: 'edges[2]: approval 节点的出边必须显式端口（approved/rejected）', ref: 'edges[2]' },
+          { code: 'PORT_REF', message: "edges[4]: 节点 n1 不存在端口 'bogus'（合法: ['done']）", ref: 'edges[4]' },
           { code: 'TERMINAL_UNREACHABLE', message: "没有任何 terminal 节点从源点可达（源点: ['n1']）" },
           { code: 'CONDITION_DEFAULT', message: '节点 n1: condition 必须配置 default 兜底路由', ref: 'n1' },
           { code: 'SOME_UNKNOWN_CODE', message: "edges[3]: from 引用了不存在的节点 'n9'" },
@@ -190,20 +191,40 @@ describe('validationFeedback 语义层（后端中文 + 内部索引）', () => 
       },
     }
     const feedback = buildValidationFeedback(error, null)
-    assert.equal(feedback.summary, '发现 4 个问题')
-    assert.equal(feedback.items[0].message, '第 2 条连线: 审批节点的出边必须显式端口（approved/rejected）')
-    assert.match(feedback.items[0].action ?? '', /\.approved.*\.rejected/)
-    assert.equal(feedback.items[1].message, '没有任何终点节点从源点可达（源点: [「n1」]）')
-    assert.equal(feedback.items[2].message, '节点 n1: 条件必须配置 default 兜底路由')
-    assert.match(feedback.items[2].action ?? '', /default 兜底路由/)
-    assert.equal(feedback.items[3].message, '第 3 条连线: from 引用了不存在的节点「n9」')
-    assert.match(feedback.items[3].action ?? '', /技术详情/)
+    assert.equal(feedback.summary, '发现 5 个问题')
+    assert.equal(feedback.items[0].message, '第 2 条连线: 审批节点的出边必须显式端口（通过／驳回）')
+    assert.match(feedback.items[0].action ?? '', /\.approved（通过）.*\.rejected（驳回）/)
+    assert.equal(feedback.items[1].message, '第 4 条连线: 节点 n1 不存在端口「bogus」（合法: [「done」]）')
+    assert.match(feedback.items[1].action ?? '', /实际存在的输出端口/)
+    assert.equal(feedback.items[2].message, '没有任何终点节点从源点可达（源点: [「n1」]）')
+    assert.equal(feedback.items[3].message, '节点 n1: 条件必须配置 default 兜底路由')
+    assert.match(feedback.items[3].action ?? '', /default 兜底路由/)
+    assert.equal(feedback.items[4].message, '第 3 条连线: from 引用了不存在的节点「n9」')
+    assert.match(feedback.items[4].action ?? '', /技术详情/)
+    // 主清单无内部索引／英文类型／英文端口值；原文折叠进技术详情
     for (const item of feedback.items) {
-      assert.doesNotMatch(item.message, /edges\[|terminal|approval|condition/)
+      assert.doesNotMatch(item.message, /edges\[|terminal|approval|condition|approved|rejected/)
     }
     assert.match(feedback.technicalDetail ?? '', /PORT_REQUIRED \| edges\[2\]/)
+    assert.match(feedback.technicalDetail ?? '', /PORT_REF/)
     assert.match(feedback.technicalDetail ?? '', /SOME_UNKNOWN_CODE/)
     assert.match(feedback.technicalDetail ?? '', /terminal/)
+  })
+
+  it('YAML 模式名称过短 → 指引直接改 metadata.name 并重验（F5），画布仍走保存弹窗', () => {
+    const error = {
+      detail: {
+        code: 'TEMPLATE_INVALID',
+        message: '结构不合法: 1 validation error for WorkflowSpec\n'
+          + 'metadata.name\n'
+          + "  String should have at least 5 characters [type=string_too_short, input_value='abc', input_type=str]",
+      },
+    }
+    const feedback = buildValidationFeedback(error, null)
+    assert.equal(feedback.items[0].message, '模板名称至少 5 个字符')
+    assert.match(feedback.items[0].action ?? '', /metadata\.name/)
+    assert.match(feedback.items[0].action ?? '', /重新校验/)
+    assert.match(buildValidationFeedback(error, presetGraph).items[0].action ?? '', /保存模板/)
   })
 })
 

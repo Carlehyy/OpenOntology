@@ -63,15 +63,29 @@ const SEMANTIC_ACTIONS: Record<string, string> = {
   NODE_ID: '节点 id 只允许字母／数字／下划线／连字符，请修正后重试',
 }
 
-/** YAML 模式的修复动作：画布动作里的拖拽／属性面板在文本编辑场景不可执行。 */
+/** YAML 模式的修复动作（全错误码分表）：画布的拖拽／属性面板动作在文本
+ * 编辑场景不可执行，每条都给可直接落笔的 YAML 改法；端口值 .approved／
+ * .rejected 只作为修复示例出现，由用户按意图选择。 */
 const SEMANTIC_ACTIONS_YAML: Record<string, string> = {
+  NODE_COUNT: '调整 nodes 数量到 1~200 个之间',
   EDGE_COUNT: '在 edges 列表补一条连线（如 { from: n1.done, to: end }）',
-  EDGE_TO_CONDITION: '删除这条连线，改在条件节点的 on 字段声明上游',
-  PORT_REQUIRED: '为这条审批出边的 from 写明端口：节点 id 后加 .approved（通过）或 .rejected（驳回）',
+  EDGE_REF: '修正或删除对应的 edges 条目：from／to 必须写 nodes 中存在的节点 id',
+  EDGE_FROM_FORBIDDEN: '删除这条出边：终点／条件节点不能向外连线（条件节点的去向在 branches／default 声明）',
+  EDGE_TO_CONDITION: '删除这条入边：条件节点的上游在其 on 字段声明',
+  PORT_REQUIRED: '为这条审批出边的 from 写明端口：节点 id 后加 .approved（通过）或 .rejected（驳回），按实际意图二选一',
+  PORT_REF: '把该出边 from 引用的端口改为实际存在的输出端口；审批节点的端口是 .approved（通过）或 .rejected（驳回）',
+  REWORK_TARGET: '打回边目标须为可重做的 agent／human 节点：修正 to，或去掉 rework 标记',
+  CYCLE: '删除构成环的一条 edges 条目，打断循环后重新校验',
+  REWORK_CYCLE: '删除构成环的一条打回边（rework: true），打断循环后重新校验',
   NO_TERMINAL: '在 nodes 中添加 kind 为 terminal 的终点节点',
+  TERMINAL_UNREACHABLE: '检查 edges 与条件分支目标：从起始节点沿连线必须能到达终点节点',
   CONDITION_ON: '把条件节点的 on 字段改为引用存在的节点输出（如 n1.done）',
   CONDITION_DEFAULT: '为条件节点填写 default 兜底路由，作为所有分支都不命中时的去向',
   BRANCH_REF: '修正条件节点 branches／default 引用的目标节点 id，指向 nodes 中存在的节点',
+  CONTRACT_REF: '在 contracts 中先声明该契约，或删除端口对它的引用',
+  CONTRACT_INVALID: '按契约白名单修正 contracts 中的声明',
+  CONTRACT_COUNT: '精简 contracts 数量（最多 128 个）',
+  NODE_ID: '修正 nodes 里的节点 id：只允许字母／数字／下划线／连字符',
 }
 
 /** 结构错误已知映射之外的 loc 首段 → 安全的中文区域名（主提示不出现 schema 路径） */
@@ -126,6 +140,24 @@ export function buildCanvasNames(graph: CanvasGraphContext): CanvasNames {
   return { node, canvasNodeId, edge, canvasEdgeId }
 }
 
+/**
+ * 语义文案中文化（画布／YAML 共用）：英文节点类型换中文标签、端口值用
+ * 「通过／驳回」说法（具体 .approved／.rejected 只出现在修复示例）、repr
+ * 引号统一「」，并收敛替换后残留的中文字间空格。节点 id 是可见字段值，
+ * 保留即可定位；服务端原文进 technicalDetail。
+ */
+function localizeSemanticText(text: string): string {
+  return text
+    .replace(/\b(agent|human|approval|condition|terminal|join)\b/g,
+      kind => WORKFLOW_KIND_LABELS[kind as keyof typeof WORKFLOW_KIND_LABELS])
+    .replace(/\bapproved\b/g, '通过')
+    .replace(/\brejected\b/g, '驳回')
+    .replace(/通过\/驳回/g, '通过／驳回')
+    .replace(/'([^']*)'/g, '「$1」')
+    // 英文词换成中文标签／「」引号后残留的空格收敛（中文与中文、中文与「之间）
+    .replace(/([\u4e00-\u9fff」]) +(?=[\u4e00-\u9fff「])/g, '$1')
+}
+
 /** 把语义错误文案里的序列化 id／edges[N] 替换为画布可读名。 */
 function humanizeSemanticText(text: string, names: CanvasNames): string {
   let result = text.replace(/edges\[(\d+)\]/g, (whole, index: string) =>
@@ -133,22 +165,13 @@ function humanizeSemanticText(text: string, names: CanvasNames): string {
   for (const [serialId, label] of names.node) {
     result = result.replace(new RegExp(`\\b${serialId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), label)
   }
-  return result
+  return localizeSemanticText(result)
 }
 
-/**
- * YAML 模式语义文案人化：`edges[N]` 内部索引改为序号说法、英文节点类型换
- * 中文标签、Python repr 引号统一为「」。节点 id／端口名是用户 YAML 里可见
- * 的字段值，保留即可定位；服务端原文进 technicalDetail。
- */
+/** YAML 模式：`edges[N]` 内部索引改为序号说法后再做同套中文化。 */
 function humanizeYamlSemanticText(text: string): string {
-  return text
-    .replace(/edges\[(\d+)\]/g, (_whole, index: string) => `第 ${index} 条连线`)
-    .replace(/\b(agent|human|approval|condition|terminal|join)\b/g,
-      kind => WORKFLOW_KIND_LABELS[kind as keyof typeof WORKFLOW_KIND_LABELS])
-    .replace(/'([^']*)'/g, '「$1」')
-    // 英文词换成中文标签／「」引号后残留的空格收敛（中文与中文、中文与「之间）
-    .replace(/([\u4e00-\u9fff」]) +(?=[\u4e00-\u9fff「])/g, '$1')
+  return localizeSemanticText(
+    text.replace(/edges\[(\d+)\]/g, (_whole, index: string) => `第 ${index} 条连线`))
 }
 
 /** 语义条目的定位：ref（edges[N]／节点 id）→ 画布 node／edge id */
@@ -211,7 +234,9 @@ function structuralItem(entry: StructuralEntry, names: CanvasNames | null,
     return {
       key: `struct:${entry.loc}:${entry.type}`,
       message: '模板名称至少 5 个字符',
-      action: '点「保存模板」，在名称栏填写至少 5 个字符的名称（名称会成为模板的唯一标识）',
+      action: names
+        ? '点「保存模板」，在名称栏填写至少 5 个字符的名称（名称会成为模板的唯一标识）'
+        : '在 metadata.name 处填写至少 5 个字符的模板名称，然后重新校验（名称会成为模板的唯一标识）',
     }
   }
   if (entry.type === 'list_type' && entry.loc === 'edges') {
@@ -228,7 +253,9 @@ function structuralItem(entry: StructuralEntry, names: CanvasNames | null,
     return {
       key: `struct:${entry.loc}:${entry.type}`,
       message: `Agent 节点「${label}」缺少系统提示词（至少 1 个字符）`,
-      action: '点击该节点，在右侧属性面板填写「系统提示词」',
+      action: names
+        ? '点击该节点，在右侧属性面板填写「系统提示词」'
+        : '为该节点的 system 字段填写系统提示词（至少 1 个字符）后重新校验',
       ...(nodeId ? { nodeId } : {}),
     }
   }
@@ -288,9 +315,9 @@ function semanticFeedback(
     const located = names ? locateRef(issue.ref, names) : {}
     const action = names
       ? issue.code ? SEMANTIC_ACTIONS[issue.code] : undefined
-      : (issue.code
-        && (SEMANTIC_ACTIONS_YAML[issue.code] ?? SEMANTIC_ACTIONS[issue.code]))
-        ?? '对照下方「技术详情」中的原始报错修正 YAML'
+      // YAML 全错误码分表；表外新码不回退画布措辞，给对照修正并重验的兜底
+      : (issue.code && SEMANTIC_ACTIONS_YAML[issue.code])
+        ?? '对照下方「技术详情」中的原始报错修正 YAML 后重新校验'
     items.push({
       key: `semantic:${key}:${items.length}`,
       message: names ? humanizeSemanticText(rawMessage, names)
@@ -316,6 +343,9 @@ function semanticFeedback(
 function structuralFeedback(rawMessage: string, graph: CanvasGraphContext | null): ValidationFeedback {
   const names = graph ? buildCanvasNames(graph) : null
   const text = rawMessage.replace(/^结构不合法:\s*/, '')
+  const fallbackAction = names
+    ? '对照「技术详情」中的原始报错修正画布配置后重新校验'
+    : '对照「技术详情」中的原始报错修正 YAML 后重新校验'
   const items: ValidationItem[] = []
   for (const entry of parseStructuralErrors(text)) {
     const known = structuralItem(entry, names)
@@ -327,7 +357,7 @@ function structuralFeedback(rawMessage: string, graph: CanvasGraphContext | null
     items.push({
       key: `struct-generic:${entry.loc}:${items.length}`,
       message: area ? `模板${area}不合规` : '模板结构不合规',
-      action: '展开「技术详情」查看服务端原始信息',
+      action: fallbackAction,
     })
   }
   // 解析不出任何条目时保底一条，保证用户始终能看到问题存在
@@ -335,7 +365,7 @@ function structuralFeedback(rawMessage: string, graph: CanvasGraphContext | null
     items.push({
       key: 'struct-unknown:0',
       message: '模板基本信息或结构不合规',
-      action: '展开「技术详情」查看服务端原始信息',
+      action: fallbackAction,
     })
   }
   return {

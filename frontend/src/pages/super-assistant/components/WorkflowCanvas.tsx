@@ -266,6 +266,24 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
     () => nodes.find(n => n.id === selectedNodeId) ?? null,
     [nodes, selectedNodeId])
 
+  // 审批节点未带端口的出边（仅预置）：React Flow 会把它画在「通过」口上，
+  // 数据却无 sourceHandle。以虚线＋「未选去向」标签澄清意图未定，不改
+  // 序列化与校验语义（阻断与端口选择逻辑保持原样）。
+  const displayEdges = useMemo(
+    () => edges.map(edge => {
+      if (edge.sourceHandle) return edge
+      const source = nodes.find(node => node.id === edge.source)
+      if (source?.data.kind !== 'approval') return edge
+      return {
+        ...edge,
+        label: '未选去向',
+        style: { stroke: 'var(--color-warning)', strokeDasharray: '6 4' },
+        labelStyle: { fill: 'var(--color-warning)', fontSize: 11 },
+        labelBgStyle: { fill: 'var(--color-bg-elevated)' },
+      }
+    }),
+    [edges, nodes])
+
   // 当前画布图 → YAML（表单门禁前的草稿序列化；未命名用合规占位名
   // （≥5 字符），保存必经表单覆盖，占位名不会落库）
   const currentGraphYaml = useCallback((): string =>
@@ -469,7 +487,7 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
             <ReactFlowProvider>
               <ReactFlow
                 nodes={nodes}
-                edges={edges}
+                edges={displayEdges}
                 nodeTypes={nodeTypes}
                 onNodesChange={handleNodesChange}
                 onEdgesChange={handleEdgesChange}
@@ -570,6 +588,8 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
           setConfirmBackToCanvas(false)
           setYamlDirty(false)
           setYamlMode(false)
+          // 结论针对的是被弃置的 YAML 文本，回到画布后不再对应当前内容
+          setValidation(null)
         }}
       />
 
