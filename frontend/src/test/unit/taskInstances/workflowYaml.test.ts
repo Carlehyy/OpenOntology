@@ -36,11 +36,48 @@ describe('task instances workflowYaml', () => {
       assert.match(yaml, /approval_2:\n {4}kind: approval\n {4}approvers: \[admin,reviewer\]/)
       assert.match(yaml, /terminal_3: \{ kind: terminal, outcome: success \}/)
       assert.match(yaml, /- \{ from: n1\.done, to: approval_2 \}/)
-      assert.match(yaml, /- \{ from: approval_2\.done, to: terminal_3 \}/)
+      assert.match(yaml, /- \{ from: approval_2, to: terminal_3 \}/) // 审批边无 sourceHandle → 不带端口
     })
     it('描述中的换行被折叠为空格，避免破坏 YAML 结构', () => {
       const yaml = graphToYaml(nodes, edges, { name: 'X', description: '第一行\n第二行' })
       assert.match(yaml, / {2}description: 第一行 第二行/)
+    })
+    it('零连线序列化为合法空数组（edges: []），不再是 YAML null（YIYA-26）', () => {
+      const yaml = graphToYaml([node('a', { kind: 'agent', system: '写发布说明' }), node('c', { kind: 'terminal' })], [], { name: 'X' })
+      assert.match(yaml, /^edges: \[\]$/m)
+      assert.doesNotMatch(yaml, /^edges:\s*$/m)
+    })
+    it('审批出边带明确 sourceHandle 时原样保留，approved 与 rejected 互不串线（YIYA-26/M11）', () => {
+      const yaml = graphToYaml(nodes, [
+        { id: 'e1', source: 'a', target: 'b', sourceHandle: null },
+        { id: 'e2', source: 'b', target: 'c', sourceHandle: 'approved' },
+        { id: 'e3', source: 'b', target: 'a', sourceHandle: 'rejected' },
+      ], { name: 'X' })
+      assert.match(yaml, /- \{ from: approval_2\.approved, to: terminal_3 \}/)
+      assert.match(yaml, /- \{ from: approval_2\.rejected, to: n1 \}/)
+    })
+    it('审批出边缺失/非法端口时不猜去向：输出不带端口，绝不自动补 done/approved（YIYA-43 选项1）', () => {
+      const yaml = graphToYaml(nodes, [
+        { id: 'e2', source: 'b', target: 'c' },
+        { id: 'e3', source: 'b', target: 'a', sourceHandle: 'done' },
+      ], { name: 'X' })
+      assert.match(yaml, /- \{ from: approval_2, to: terminal_3 \}/)
+      assert.match(yaml, /- \{ from: approval_2, to: n1 \}/)
+      assert.doesNotMatch(yaml, /approval_2\./)
+    })
+    it('agent/human/join 出边仍是默认端口 .done（回归锚点）', () => {
+      const human = node('h', { kind: 'human', role: '评审' })
+      const join = node('j', { kind: 'join' })
+      const end = node('c2', { kind: 'terminal' })
+      const yaml = graphToYaml(
+        [node('a', { kind: 'agent', system: 'x' }), human, join, end],
+        [
+          { id: 'e1', source: 'h', target: 'j', sourceHandle: 'approved' },
+          { id: 'e2', source: 'j', target: 'c2' },
+        ],
+        { name: 'X' })
+      assert.match(yaml, /- \{ from: n2\.done, to: join_3 \}/)
+      assert.match(yaml, /- \{ from: join_3\.done, to: terminal_4 \}/)
     })
   })
 })

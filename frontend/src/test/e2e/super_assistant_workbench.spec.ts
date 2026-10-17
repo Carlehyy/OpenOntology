@@ -3785,9 +3785,9 @@ test('任务实例弹窗：画布保存门禁——名称必填且写入 metadat
   const nameInput = page.getByLabel(/模板名称/)
   await expect(nameInput).toBeVisible()
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
-  await nameInput.fill('冒烟流程')
+  await nameInput.fill('冒烟流程模板')
   await page.getByRole('button', { name: '保存', exact: true }).click()
-  await expect.poll(() => createdBody?.spec_yaml ?? '').toContain('name: 冒烟流程')
+  await expect.poll(() => createdBody?.spec_yaml ?? '').toContain('name: 冒烟流程模板')
   // 保存成功后回到模板列表
   await expect(page.getByTestId('task-instances-templates')).toBeVisible()
 
@@ -3796,7 +3796,7 @@ test('任务实例弹窗：画布保存门禁——名称必填且写入 metadat
   await page.getByRole('button', { name: 'YAML 模式' }).click()
   await page.getByRole('button', { name: '保存模板' }).click()
   await expect(nameInput).toBeVisible()
-  await expect(nameInput).toHaveValue('我的流程') // 默认画布序列化的占位名被解析预填
+  await expect(nameInput).toHaveValue('未命名流程') // 默认画布序列化的合规占位名（≥5 字符）被解析预填
   await nameInput.fill('YAML命名流程')
   await page.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => createdBody?.spec_yaml ?? '').toContain('name: YAML命名流程')
@@ -4084,5 +4084,224 @@ test('能力地图：暗色令牌、无导航授权账号可读说明且不增�
     return document.documentElement.classList.contains('dark')
       && getComputedStyle(el).backgroundColor === expected
   })).toBe(true)
+})
+
+// ═══ YIYA-26/35 画布校验反馈：中文问题清单、审批双端口、服务错误区分 ═══
+// validate 响应按提交的 spec_yaml 脚本化复刻真实后端（消息与本地
+// backend venv 实测逐字一致），证明的是前端呈现与序列化链路。
+
+const structuralNameTooShort = (name: string) => ({
+  status: 400,
+  body: { detail: {
+    code: 'TEMPLATE_INVALID',
+    message: '结构不合法: 1 validation error for WorkflowSpec\n'
+      + 'metadata.name\n'
+      + `  String should have at least 5 characters [type=string_too_short, input_value='${name}', input_type=str]\n`
+      + '    For further information visit https://errors.pydantic.dev/2.13/v/string_too_short',
+  } },
+})
+
+const semanticDetail = (errors: unknown[]) => ({
+  status: 400,
+  body: { detail: { code: 'TEMPLATE_INVALID', message: '语义校验未通过', errors } },
+})
+
+/** 按提交 YAML 特征返回与真实后端一致的响应 */
+const scriptedValidate = (specYaml: string): { status: number, body: unknown } => {
+  const name = specYaml.match(/^ {2}name: (.+)$/m)?.[1]?.trim() ?? ''
+  if (name.length < 5) return structuralNameTooShort(name)
+  if (/^edges: \[\]$/m.test(specYaml)) {
+    return semanticDetail([
+      { code: 'EDGE_COUNT', message: '边数必须在 1~1000 之间，当前 0' },
+      { code: 'TERMINAL_UNREACHABLE', message: "没有任何 terminal 节点从源点可达（源点: ['n1']）" },
+    ])
+  }
+  if (/^ {2}- \{ from: approval_\d+, /m.test(specYaml)) {
+    return semanticDetail([
+      { code: 'PORT_REQUIRED', message: 'edges[2]: approval 节点的出边必须显式端口（approved/rejected）', ref: 'edges[2]' },
+      { code: 'TERMINAL_UNREACHABLE', message: "没有任何 terminal 节点从源点可达（源点: ['n1']）" },
+    ])
+  }
+  if (!/to: terminal_\d+/m.test(specYaml)) {
+    return semanticDetail([
+      { code: 'TERMINAL_UNREACHABLE', message: "没有任何 terminal 节点从源点可达（源点: ['n1']）" },
+    ])
+  }
+  return { status: 200, body: { data: { valid: true } } }
+}
+
+async function openCanvas(page: Page) {
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await page.getByTestId('new-flow-button').click()
+  await expect(page.getByRole('button', { name: '校验' })).toBeVisible()
+}
+
+async function dragConnection(page: Page, source: Locator, target: Locator) {
+  const from = await source.boundingBox()
+  const to = await target.boundingBox()
+  if (!from || !to) throw new Error('连接桩不可见，无法拖拽连线')
+  // React Flow 的连接桩命中区（内部 handle bounds）在视图/节点变化后异步刷新，
+  // 不等一拍会把拖拽当成节点拖动或丢掉落点
+  await page.waitForTimeout(300)
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 })
+  await page.waitForTimeout(120)
+  await page.mouse.up()
+  await page.waitForTimeout(150)
+}
+
+async function mockCanvasValidate(page: Page) {
+  const requests: string[] = []
+  await page.route('**/api/v2/task-instances/templates/validate', route => {
+    const payload: unknown = route.request().postDataJSON()
+    const specYaml = payload && typeof payload === 'object' && 'spec_yaml' in payload
+      && typeof payload.spec_yaml === 'string' ? payload.spec_yaml : ''
+    requests.push(specYaml)
+    const scripted = scriptedValidate(specYaml)
+    return route.fulfill({
+      status: scripted.status, contentType: 'application/json',
+      body: JSON.stringify(scripted.body),
+    })
+  })
+  return requests
+}
+
+test('画布校验：预置图首验给中文引导（审批未选去向），双端口连线后通过，问题可点击定位', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  const requests = await mockCanvasValidate(page)
+  await openCanvas(page)
+  const dialog = page.getByTestId('task-instances-dialog')
+
+  // 审批节点带明确的「通过/驳回」两个输出端口（M11 端口表达）
+  await expect(page.locator('[data-id="gate"] [data-handleid="approved"]')).toBeVisible()
+  await expect(page.locator('[data-id="gate"] [data-handleid="rejected"]')).toBeVisible()
+  await expect(dialog.getByText('通过')).toBeVisible()
+  await expect(dialog.getByText('驳回')).toBeVisible()
+
+  // 预置图原样首验：审批出边未选去向 → 中文引导（PM 选项 1），两条独立问题都可见（M7）
+  await page.getByRole('button', { name: '校验' }).click()
+  const panel = page.getByTestId('workflow-validation-panel')
+  await expect(panel).toBeVisible()
+  await expect(panel.getByText('发现 2 个问题')).toBeVisible()
+  await expect(panel.getByText(/连线「审批 1 → 终点 1」/)).toBeVisible()
+  await expect(panel.getByText(/从审批节点的「通过」或「驳回」输出端口重新拖出/)).toBeVisible()
+  await expect(panel.getByText(/没有任何 terminal 节点从源点可达（源点: \['Agent 1'\]）/)).toBeVisible()
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/01-preset-first-validate.png' })
+
+  // 点击问题定位到对应连线（React Flow 选中态）
+  await panel.getByRole('button', { name: /审批 1 → 终点 1/ }).click()
+  await expect(page.locator('.react-flow__edge.selected')).toHaveCount(1)
+
+  // 从「通过」端口重新连接审批→终点后通过；请求体保留显式端口（序列化不猜、不丢）
+  await page.locator('[data-id="gate"]').click()
+  await page.keyboard.press('Backspace') // 删除审批节点（连同两条预置边）
+  await dialog.getByRole('button', { name: /审批/ }).click() // 调色板重新添加审批
+  await page.getByRole('button', { name: 'Fit View' }).click() // 新节点在固定坐标，先适配视口再拖拽
+  // fitView 后节点贴近视口边缘，连线拖拽会触发画布自动平移导致落点漂移；先缩小一级
+  await page.getByRole('button', { name: 'Zoom Out' }).click()
+  await page.waitForTimeout(200)
+  const approval = page.locator('[data-id^="node_"]')
+  await dragConnection(page,
+    approval.locator('[data-handleid="approved"]'),
+    page.locator('[data-id="end"] [data-handlepos="left"]'))
+  await dragConnection(page,
+    page.locator('[data-id="start"] [data-handlepos="right"]'),
+    approval.locator('[data-handlepos="left"]'))
+  await page.getByRole('button', { name: '校验' }).click()
+  await expect(panel.getByText(/校验通过：3 个节点、2 条连线/)).toBeVisible()
+  expect(requests.at(-1)).toMatch(/from: approval_\d+\.approved, to: terminal_\d+/)
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/02-approved-port-pass.png' })
+})
+
+test('画布校验：失败→修复→成功→再失败，结果条始终反映最新画布（M8），服务异常与配置错误可分辨（M10）', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  const requests = await mockCanvasValidate(page)
+  await openCanvas(page)
+  const dialog = page.getByTestId('task-instances-dialog')
+  const panel = page.getByTestId('workflow-validation-panel')
+
+  // 用户原始路径（M1）：删审批仅剩 Agent+终点、零连线 → 语义层两条中文阻断全部可见
+  await page.locator('[data-id="gate"]').click()
+  await page.keyboard.press('Backspace')
+  await page.getByRole('button', { name: '校验' }).click()
+  await expect(panel.getByText('发现 2 个问题')).toBeVisible()
+  await expect(panel.getByText(/把节点串起来/)).toBeVisible()
+  await expect(panel.getByText(/沿着连线能够到达终点节点/)).toBeVisible()
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/03-user-path-zero-edges.png' })
+
+  // 补 Agent→终点连线 + 合规名称（保存表单填后取消，名称保留）→ 通过（M2/B4）
+  await dragConnection(page,
+    page.locator('[data-id="start"] [data-handlepos="right"]'),
+    page.locator('[data-id="end"] [data-handlepos="left"]'))
+  await page.getByRole('button', { name: '保存模板' }).click()
+  await page.getByLabel(/模板名称/).fill('冒烟流程模板')
+  await page.getByRole('button', { name: '取消' }).click()
+  await page.getByRole('button', { name: '校验' }).click()
+  await expect(panel.getByText(/校验通过：2 个节点、1 条连线/)).toBeVisible()
+  expect(requests.at(-1)).toContain('name: 冒烟流程模板')
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/04-minimal-pass.png' })
+
+  // 再删 Agent 节点 → 再次失败：清单替换，无旧「通过」残留（M8）
+  await page.locator('[data-id="start"]').click()
+  await page.keyboard.press('Backspace')
+  await page.getByRole('button', { name: '校验' }).click()
+  await expect(panel.getByText(/发现 \d+ 个问题/)).toBeVisible()
+  await expect(panel.getByText(/校验通过/)).toHaveCount(0)
+
+  // 服务异常（网络中断）：文案明确「不是流程配置问题」，与校验错误可分辨（M10）
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  await page.route('**/api/v2/task-instances/templates/validate',
+    route => route.abort('connectionfailed'))
+  await page.getByRole('button', { name: '校验' }).click()
+  await expect(panel.getByText(/校验服务暂时不可用/)).toBeVisible()
+  await expect(panel.getByText(/这不是流程配置问题/)).toBeVisible()
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/05-service-error.png' })
+})
+
+test('画布校验：YAML 模式结构错误给中文定位，英文原文折叠进技术详情；名称门禁提示用「字符」', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await mockCanvasValidate(page)
+  await openCanvas(page)
+  const dialog = page.getByTestId('task-instances-dialog')
+  const panel = page.getByTestId('workflow-validation-panel')
+
+  await page.getByRole('button', { name: 'YAML 模式' }).click()
+  const editor = dialog.locator('.cm-content')
+  await editor.click()
+  await page.keyboard.press('ControlOrMeta+a')
+  await page.keyboard.insertText(
+    'api_version: openontology.task/v1\nkind: Workflow\nmetadata:\n  name: abc\nnodes:\n'
+    + '  n1: { kind: agent, system: 执行任务 }\n  end: { kind: terminal, outcome: success }\n'
+    + 'edges:\n  - { from: n1.done, to: end }\n')
+  await page.getByRole('button', { name: '校验' }).click()
+  await expect(panel.getByText('模板名称至少 5 个字符')).toBeVisible()
+  await expect(panel.getByText(/名称栏填写至少 5 个字符/)).toBeVisible()
+  await expect(panel.getByText(/pydantic/)).toHaveCount(0) // 英文原文默认折叠，不在主清单
+  await panel.getByRole('button', { name: '技术详情' }).click()
+  await expect(panel.getByText(/string_too_short/)).toBeVisible()
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/06-yaml-structural-detail.png' })
+
+  // 名称门禁：保存表单 <5 字符给中文提示并禁用保存（不逼用户进 YAML 改内部字段）
+  await page.getByRole('button', { name: '画布模式', exact: false }).click()
+  // YAML 有未应用修改 → 确认弹窗；仍切回画布（丢弃 YAML 侧文本）
+  await page.getByRole('button', { name: '仍切回画布' }).click()
+  await page.getByRole('button', { name: '保存模板' }).click()
+  const nameInput = page.getByLabel(/模板名称/)
+  await nameInput.fill('四字名称')
+  await expect(page.getByText(/名称至少 5 个字符（当前 4 个）/)).toBeVisible()
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await nameInput.fill('五字名称啦')
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/07-name-gate.png' })
 })
 

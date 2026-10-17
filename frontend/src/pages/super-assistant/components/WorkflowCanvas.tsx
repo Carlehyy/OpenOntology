@@ -20,39 +20,43 @@ import Dagre from '@dagrejs/dagre'
 import CodeMirror from '@uiw/react-codemirror'
 import { yaml } from '@codemirror/lang-yaml'
 import {
-  ArrowLeft, Bot, CheckCircle2, Code2, FileCheck2, GitBranch, ListChecks, Save,
-  User, XCircle,
+  ArrowLeft, Bot, CheckCircle2, ChevronDown, ChevronRight, CloudOff, Code2,
+  FileCheck2, GitBranch, ListChecks, Save, TriangleAlert, User, XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { apiError, taskInstancesApi } from '@/api/taskInstances'
+import { taskInstancesApi } from '@/api/taskInstances'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import * as copy from '@/components/task-instances/copy'
 import {
-  graphToYaml, parseYamlName, withMetadataName,
+  graphToYaml, parseYamlName, withMetadataName, WORKFLOW_KIND_LABELS,
   type WorkflowNode, type WorkflowNodeData,
 } from '@/components/task-instances/workflowYaml'
+import {
+  buildOkFeedback, buildValidationFeedback, type ValidationFeedback,
+} from '@/components/task-instances/validationFeedback'
 import { yamlEditorTheme, yamlHighlight } from '@/components/task-instances/yamlEditorTheme'
 
 // ─── 节点类型定义 ───
 type NodeKind = 'agent' | 'human' | 'approval' | 'condition' | 'join' | 'terminal'
 
 const KIND_META: Record<NodeKind, { label: string; icon: typeof Bot; color: string }> = {
-  agent: { label: 'Agent', icon: Bot, color: 'text-[var(--color-info)]' },
-  human: { label: '人工', icon: User, color: 'text-[var(--color-warning)]' },
-  approval: { label: '审批', icon: CheckCircle2, color: 'text-[var(--color-warning)]' },
-  condition: { label: '条件', icon: GitBranch, color: 'text-[var(--color-info)]' },
-  join: { label: '汇合', icon: ListChecks, color: 'text-[var(--color-text-secondary)]' },
-  terminal: { label: '终点', icon: XCircle, color: 'text-[var(--color-text-tertiary)]' },
+  agent: { label: WORKFLOW_KIND_LABELS.agent, icon: Bot, color: 'text-[var(--color-info)]' },
+  human: { label: WORKFLOW_KIND_LABELS.human, icon: User, color: 'text-[var(--color-warning)]' },
+  approval: { label: WORKFLOW_KIND_LABELS.approval, icon: CheckCircle2, color: 'text-[var(--color-warning)]' },
+  condition: { label: WORKFLOW_KIND_LABELS.condition, icon: GitBranch, color: 'text-[var(--color-info)]' },
+  join: { label: WORKFLOW_KIND_LABELS.join, icon: ListChecks, color: 'text-[var(--color-text-secondary)]' },
+  terminal: { label: WORKFLOW_KIND_LABELS.terminal, icon: XCircle, color: 'text-[var(--color-text-tertiary)]' },
 }
 
 // ─── 自定义节点渲染 ───
 function WorkflowNodeCard({ data }: { data: Record<string, unknown> & WorkflowNodeData }) {
   const meta = KIND_META[data.kind as NodeKind] ?? KIND_META.agent
   const Icon = meta.icon
+  const isApproval = data.kind === 'approval'
   return (
-    <div className="min-w-36 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] px-3 py-2 shadow-sm">
+    <div className={`relative ${isApproval ? 'min-h-16 ' : ''}min-w-36 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-sidebar)] px-3 py-2 shadow-sm`}>
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-[var(--color-text-tertiary)]" />
       <div className="flex items-center gap-2">
         <Icon size={16} className={meta.color} />
@@ -68,7 +72,18 @@ function WorkflowNodeCard({ data }: { data: Record<string, unknown> & WorkflowNo
       {data.role ? (
         <p className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">{data.role}</p>
       ) : null}
-      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-[var(--color-text-tertiary)]" />
+      {isApproval ? (
+        // 审批必须从明确的「通过／驳回」端口出线：两个带 id 的 source
+        // Handle 让 sourceHandle 进入连线，序列化保留端口；缺失时不猜去向。
+        <>
+          <span className="pointer-events-none absolute right-3 top-2 text-[10px] leading-3 text-[var(--color-success)]">通过</span>
+          <span className="pointer-events-none absolute bottom-2 right-3 text-[10px] leading-3 text-[var(--color-danger)]">驳回</span>
+          <Handle type="source" id="approved" position={Position.Right} style={{ top: '18px' }} className="!h-2 !w-2 !border-0 !bg-[var(--color-success)]" />
+          <Handle type="source" id="rejected" position={Position.Right} style={{ bottom: '18px' }} className="!h-2 !w-2 !border-0 !bg-[var(--color-danger)]" />
+        </>
+      ) : (
+        <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-[var(--color-text-tertiary)]" />
+      )}
     </div>
   )
 }
@@ -102,6 +117,121 @@ function defaultNodes(): WorkflowNode[] {
   )
 }
 
+// ─── 校验结果常驻清单（成功／问题／服务异常三态；替换式，不留旧结论） ───
+function ValidationPanel({ feedback, onLocate }: {
+  feedback: ValidationFeedback
+  onLocate: (nodeId?: string, edgeId?: string) => void
+}) {
+  const [showDetail, setShowDetail] = useState(false)
+  if (feedback.status === 'ok') {
+    return (
+      <div
+        data-testid="workflow-validation-panel"
+        className="shrink-0 border-b border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] px-4 py-2 text-xs text-[var(--color-success)]"
+        role="status"
+      >
+        <span className="inline-flex items-center gap-1.5 font-medium">
+          <CheckCircle2 size={14} className="shrink-0" /> {feedback.summary}
+        </span>
+      </div>
+    )
+  }
+  if (feedback.status === 'service') {
+    return (
+      <div
+        data-testid="workflow-validation-panel"
+        className="shrink-0 border-b border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] px-4 py-2 text-xs leading-5 text-[var(--color-warning)]"
+        role="alert"
+      >
+        <span className="inline-flex items-center gap-1.5 font-medium">
+          <CloudOff size={14} className="shrink-0" /> {feedback.summary}
+        </span>
+        {feedback.technicalDetail ? (
+          <TechnicalDetail
+            text={feedback.technicalDetail}
+            showDetail={showDetail}
+            onToggle={() => setShowDetail(previous => !previous)}
+          />
+        ) : null}
+      </div>
+    )
+  }
+  return (
+    <div
+      data-testid="workflow-validation-panel"
+      className="max-h-56 shrink-0 overflow-y-auto border-b border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-4 py-2 text-xs leading-5"
+      role="alert"
+    >
+      <p className="flex items-center gap-1.5 font-medium text-[var(--color-danger)]">
+        <TriangleAlert size={14} className="shrink-0" /> {feedback.summary}：
+      </p>
+      <ul className="mt-1 space-y-1.5">
+        {feedback.items.map(item => {
+          const locatable = Boolean(item.nodeId || item.edgeId)
+          const body = (
+            <>
+              <span className="text-[var(--color-text-primary)]">{item.message}</span>
+              {item.action ? (
+                <span className="mt-0.5 block text-[var(--color-text-secondary)]">
+                  修复：{item.action}{locatable ? '（点击可定位）' : ''}
+                </span>
+              ) : null}
+            </>
+          )
+          return (
+            <li key={item.key}>
+              {locatable ? (
+                <button
+                  type="button"
+                  onClick={() => onLocate(item.nodeId, item.edgeId)}
+                  className="block w-full rounded px-1.5 py-1 text-left hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 ring-ring"
+                >
+                  {body}
+                </button>
+              ) : (
+                <div className="px-1.5 py-1">{body}</div>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {feedback.technicalDetail ? (
+        <TechnicalDetail
+          text={feedback.technicalDetail}
+          showDetail={showDetail}
+          onToggle={() => setShowDetail(previous => !previous)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/** 折叠的服务端原始信息（结构层英文原文／服务错误），默认收起。 */
+function TechnicalDetail({ text, showDetail, onToggle }: {
+  text: string
+  showDetail: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={showDetail}
+        className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[11px] hover:bg-[var(--color-bg-hover)] focus-visible:ring-2 ring-ring"
+      >
+        {showDetail ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        技术详情
+      </button>
+      {showDetail ? (
+        <p className="mt-1 overflow-x-auto whitespace-pre-wrap rounded bg-[var(--color-bg-elevated)] px-2 py-1.5 font-mono text-[11px] leading-4 text-[var(--color-text-secondary)]">
+          {text}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 // ═══════════════════════════════════════════════════════════
 // 主组件
 // ═══════════════════════════════════════════════════════════
@@ -124,6 +254,8 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
   const [confirmBackToCanvas, setConfirmBackToCanvas] = useState(false)
   const [validating, setValidating] = useState(false)
   const [saving, setSaving] = useState(false)
+  // 最近一次校验/保存的结果（可驻留清单，画布变更后失效清空）
+  const [validation, setValidation] = useState<ValidationFeedback | null>(null)
   // 保存小表单：两种模式统一门禁，名称必填写入 metadata
   const [saveOpen, setSaveOpen] = useState(false)
   const [saveName, setSaveName] = useState('')
@@ -134,10 +266,10 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
     () => nodes.find(n => n.id === selectedNodeId) ?? null,
     [nodes, selectedNodeId])
 
-  // 当前画布图 → YAML（表单门禁前的草稿序列化；未命名用占位名，
-  // 保存必经表单覆盖，占位名不会落库）
+  // 当前画布图 → YAML（表单门禁前的草稿序列化；未命名用合规占位名
+  // （≥5 字符），保存必经表单覆盖，占位名不会落库）
   const currentGraphYaml = useCallback((): string =>
-    graphToYaml(nodes, edges, { name: saveName.trim() || '我的流程', description: saveDesc }),
+    graphToYaml(nodes, edges, { name: saveName.trim() || '未命名流程', description: saveDesc }),
   [nodes, edges, saveName, saveDesc])
 
   // 添加节点（调色板点击添加；操作提示随调色板展示）
@@ -149,27 +281,33 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
     }
     setNodes(prev => [...prev, newNode])
     setSelectedNodeId(id)
+    setValidation(null)
   }, [setNodes])
 
-  // 连线
+  // 连线（连线自带 sourceHandle：审批节点从「通过/驳回」端口拖出）
   const onConnect = useCallback(
-    (connection: Connection) => setEdges(prev => addEdge({ ...connection, animated: false }, prev)),
+    (connection: Connection) => {
+      setEdges(prev => addEdge({ ...connection, animated: false }, prev))
+      setValidation(null)
+    },
     [setEdges])
 
-  // 校验：当前模式各自的数据源（画布=图序列化；YAML=文本）
+  // 校验：当前模式各自的数据源（画布=图序列化；YAML=文本）。
+  // 结果进常驻清单（替换上一轮），toast 只做短提示且固定 id，不残留旧结论。
   const handleValidate = async () => {
     setValidating(true)
     try {
       await taskInstancesApi.validateTemplate(yamlMode ? yamlText : currentGraphYaml())
-      toast.success('校验通过，可以保存了')
+      setValidation(buildOkFeedback(yamlMode ? null : { nodes, edges }))
+      toast.success('校验通过', { id: 'workflow-validate' })
     } catch (error) {
-      const detail = (error as { detail?: unknown }).detail
-      if (detail && typeof detail === 'object') {
-        const parsed = detail as { message?: string; errors?: Array<{ message: string }> }
-        toast.error(parsed.errors?.[0]?.message ?? parsed.message ?? '校验未通过')
-      } else {
-        toast.error(apiError(error))
-      }
+      const feedback = buildValidationFeedback(error, yamlMode ? null : { nodes, edges })
+      setValidation(feedback)
+      toast.error(
+        feedback.status === 'service' ? feedback.summary
+          : feedback.status === 'ok' ? '校验通过'
+            : `校验未通过：${feedback.summary}`,
+        { id: 'workflow-validate' })
     } finally {
       setValidating(false)
     }
@@ -184,16 +322,22 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
     setSaveOpen(true)
   }
 
+  // 保存与校验走同一编译门禁：保存失败也进常驻清单（同一套中文反馈）
   const doSave = async (specYaml: string, name: string) => {
     setSaving(true)
     try {
       await taskInstancesApi.createTemplate(specYaml)
-      toast.success(`流程模板「${name}」已创建`)
+      toast.success(`流程模板「${name}」已创建`, { id: 'workflow-validate' })
       // 新建流程入口在模板区头部：保存后失效列表，返回即可见新模板
       void queryClient.invalidateQueries({ queryKey: ['task-instances', 'templates'] })
       onClose()
     } catch (error) {
-      toast.error(apiError(error))
+      const feedback = buildValidationFeedback(error, yamlMode ? null : { nodes, edges })
+      setValidation(feedback)
+      toast.error(
+        feedback.status === 'service' ? feedback.summary
+          : `保存未通过校验：${feedback.summary}`,
+        { id: 'workflow-validate' })
     } finally {
       setSaving(false)
     }
@@ -221,6 +365,28 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
       node.id === selectedNodeId
         ? { ...node, data: { ...node.data, [key]: value } }
         : node))
+    setValidation(null)
+  }
+
+  // 点击问题清单定位：节点问题打开属性面板；连线问题高亮该连线
+  const locateIssue = (nodeId?: string, edgeId?: string) => {
+    if (nodeId) {
+      setSelectedNodeId(nodeId)
+      return
+    }
+    if (edgeId) {
+      setEdges(prev => prev.map(edge => ({ ...edge, selected: edge.id === edgeId })))
+    }
+  }
+
+  // 节点删除（Backspace）等图结构变化让上一轮校验结论失效
+  const handleNodesChange: typeof onNodesChange = changes => {
+    onNodesChange(changes)
+    if (changes.some(change => change.type === 'remove')) setValidation(null)
+  }
+  const handleEdgesChange: typeof onEdgesChange = changes => {
+    onEdgesChange(changes)
+    if (changes.some(change => change.type === 'remove')) setValidation(null)
   }
 
   return (
@@ -249,6 +415,11 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
           </Button>
         </div>
       </div>
+
+      {/* 最近一次校验/保存结果：常驻清单，画布结构变化即失效 */}
+      {validation ? (
+        <ValidationPanel feedback={validation} onLocate={locateIssue} />
+      ) : null}
 
       <div className="flex min-h-0 flex-1">
         {/* 左侧调色板 */}
@@ -298,8 +469,8 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
                 nodes={nodes}
                 edges={edges}
                 nodeTypes={nodeTypes}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
+                onNodesChange={handleNodesChange}
+                onEdgesChange={handleEdgesChange}
                 onConnect={onConnect}
                 onNodeClick={(_, node) => setSelectedNodeId(node.id)}
                 onPaneClick={() => setSelectedNodeId(null)}
@@ -419,16 +590,23 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
             <div>
               <label htmlFor="wf-save-name" className="mb-1.5 block text-xs font-medium text-[var(--color-text-primary)]">
                 模板名称 <span className="text-[var(--color-danger)]">*</span>
+                <span className="ml-1 font-normal text-[var(--color-text-tertiary)]">（至少 5 个字符）</span>
               </label>
               <Input
                 id="wf-save-name"
                 autoFocus
                 required
+                minLength={5}
                 maxLength={64}
                 value={saveName}
                 onChange={event => setSaveName(event.target.value)}
                 placeholder="如：发布说明生成"
               />
+              {saveOpen && saveName.trim().length > 0 && saveName.trim().length < 5 ? (
+                <p className="mt-1 text-[11px] leading-4 text-[var(--color-danger)]">
+                  名称至少 5 个字符（当前 {saveName.trim().length} 个），补足后再保存。
+                </p>
+              ) : null}
             </div>
             <div>
               <label htmlFor="wf-save-desc" className="mb-1.5 block text-xs font-medium text-[var(--color-text-primary)]">
@@ -448,7 +626,7 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
               </Button>
               <Button
                 size="sm" className="h-8 text-xs"
-                disabled={!saveName.trim() || saving}
+                disabled={saveName.trim().length < 5 || saving}
                 onClick={() => {
                   const name = saveName.trim()
                   const specYaml = yamlMode
