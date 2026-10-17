@@ -3,11 +3,12 @@
  * 报错翻译成可执行的中文问题清单，并区分服务异常与配置错误。
  *
  * - 结构层（pydantic 英文原文）：已知错误（名称过短／连线列表缺失／
- *   Agent 提示词为空）映射为「问题 + 修复动作」，未知错误逐条给中文
- *   定位并折叠原始英文进技术详情，不再整段透传。
- * - 语义层（后端已中文，但引用序列化 id／edges[N] 内部索引）：借助
- *   graphToYaml 同一套 stableNodeIds 把内部 id 映射回画布对象名
- *   （如「审批 1」「连线「Agent 1 → 终点 1」」），并按错误码补修复动作。
+ *   Agent 提示词为空）映射为「问题 + 修复动作」；未知错误只给安全的中文
+ *   区域摘要（主提示不出现 schema／内部字段路径），原文折叠进技术详情。
+ * - 语义层（后端已中文，但引用序列化 id／edges[N] 内部索引）：画布模式
+ *   借助 graphToYaml 同一套 stableNodeIds 把内部 id 映射回画布对象名
+ *   （如「审批 1」「连线「Agent 1 → 终点 1」」）；YAML 模式同样人化——
+ *   索引改序号说法、英文类型换中文标签，两种模式都按错误码补修复动作。
  * - 服务层（网络／5xx／422）：统一「非流程配置问题」文案，与配置错误
  *   可分辨；技术详情折叠可查。
  */
@@ -62,6 +63,27 @@ const SEMANTIC_ACTIONS: Record<string, string> = {
   NODE_ID: '节点 id 只允许字母／数字／下划线／连字符，请修正后重试',
 }
 
+/** YAML 模式的修复动作：画布动作里的拖拽／属性面板在文本编辑场景不可执行。 */
+const SEMANTIC_ACTIONS_YAML: Record<string, string> = {
+  EDGE_COUNT: '在 edges 列表补一条连线（如 { from: n1.done, to: end }）',
+  EDGE_TO_CONDITION: '删除这条连线，改在条件节点的 on 字段声明上游',
+  PORT_REQUIRED: '为这条审批出边的 from 写明端口：节点 id 后加 .approved（通过）或 .rejected（驳回）',
+  NO_TERMINAL: '在 nodes 中添加 kind 为 terminal 的终点节点',
+  CONDITION_ON: '把条件节点的 on 字段改为引用存在的节点输出（如 n1.done）',
+  CONDITION_DEFAULT: '为条件节点填写 default 兜底路由，作为所有分支都不命中时的去向',
+  BRANCH_REF: '修正条件节点 branches／default 引用的目标节点 id，指向 nodes 中存在的节点',
+}
+
+/** 结构错误已知映射之外的 loc 首段 → 安全的中文区域名（主提示不出现 schema 路径） */
+const STRUCTURAL_AREA_LABELS: Record<string, string> = {
+  metadata: '基本信息',
+  nodes: '节点配置',
+  edges: '连线配置',
+  policies: '执行策略',
+  contracts: '契约声明',
+  entry: '入口配置',
+}
+
 // ─── 画布对象命名 ───
 
 interface CanvasNames {
@@ -112,6 +134,21 @@ function humanizeSemanticText(text: string, names: CanvasNames): string {
     result = result.replace(new RegExp(`\\b${serialId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), label)
   }
   return result
+}
+
+/**
+ * YAML 模式语义文案人化：`edges[N]` 内部索引改为序号说法、英文节点类型换
+ * 中文标签、Python repr 引号统一为「」。节点 id／端口名是用户 YAML 里可见
+ * 的字段值，保留即可定位；服务端原文进 technicalDetail。
+ */
+function humanizeYamlSemanticText(text: string): string {
+  return text
+    .replace(/edges\[(\d+)\]/g, (_whole, index: string) => `第 ${index} 条连线`)
+    .replace(/\b(agent|human|approval|condition|terminal|join)\b/g,
+      kind => WORKFLOW_KIND_LABELS[kind as keyof typeof WORKFLOW_KIND_LABELS])
+    .replace(/'([^']*)'/g, '「$1」')
+    // 英文词换成中文标签／「」引号后残留的空格收敛（中文与中文、中文与「之间）
+    .replace(/([\u4e00-\u9fff」]) +(?=[\u4e00-\u9fff「])/g, '$1')
 }
 
 /** 语义条目的定位：ref（edges[N]／节点 id）→ 画布 node／edge id */
@@ -249,18 +286,31 @@ function semanticFeedback(
     if (seen.has(key)) continue
     seen.add(key)
     const located = names ? locateRef(issue.ref, names) : {}
+    const action = names
+      ? issue.code ? SEMANTIC_ACTIONS[issue.code] : undefined
+      : (issue.code
+        && (SEMANTIC_ACTIONS_YAML[issue.code] ?? SEMANTIC_ACTIONS[issue.code]))
+        ?? '对照下方「技术详情」中的原始报错修正 YAML'
     items.push({
       key: `semantic:${key}:${items.length}`,
-      message: names ? humanizeSemanticText(rawMessage, names) : rawMessage,
-      ...(issue.code && SEMANTIC_ACTIONS[issue.code] ? { action: SEMANTIC_ACTIONS[issue.code] } : {}),
+      message: names ? humanizeSemanticText(rawMessage, names)
+        : humanizeYamlSemanticText(rawMessage),
+      ...(action ? { action } : {}),
       ...located,
     })
   }
-  return {
+  const feedback: ValidationFeedback = {
     status: 'problems',
     summary: items.length === 1 ? '发现 1 个问题' : `发现 ${items.length} 个问题`,
     items,
   }
+  if (!names) {
+    // YAML 模式：人化后的主清单不出现内部索引／英文类型，服务端原文折叠进详情
+    feedback.technicalDetail = errors
+      .map(issue => [issue.code, issue.message, issue.ref].filter(Boolean).join(' | '))
+      .join('\n')
+  }
+  return feedback
 }
 
 function structuralFeedback(rawMessage: string, graph: CanvasGraphContext | null): ValidationFeedback {
@@ -273,9 +323,10 @@ function structuralFeedback(rawMessage: string, graph: CanvasGraphContext | null
       items.push(known)
       continue
     }
+    const area = STRUCTURAL_AREA_LABELS[entry.loc.split('.')[0]]
     items.push({
       key: `struct-generic:${entry.loc}:${items.length}`,
-      message: `模板结构不合规：${entry.loc || '未定位'}`,
+      message: area ? `模板${area}不合规` : '模板结构不合规',
       action: '展开「技术详情」查看服务端原始信息',
     })
   }

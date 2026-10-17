@@ -455,6 +455,8 @@ export default function WorkflowCanvas({ onClose }: WorkflowCanvasProps) {
                 onChange={value => {
                   setYamlText(value)
                   setYamlDirty(true)
+                  // 文本已变，上一轮校验结论对当前 YAML 失效（与画布修改一致）
+                  setValidation(null)
                 }}
                 extensions={[yaml(), yamlEditorTheme, yamlHighlight]}
                 height="100%"

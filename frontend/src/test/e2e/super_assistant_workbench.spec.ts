@@ -4305,3 +4305,41 @@ test('画布校验：YAML 模式结构错误给中文定位，英文原文折叠
   await dialog.screenshot({ path: '../../yiya35-evidence/shots/07-name-gate.png' })
 })
 
+test('画布校验：YAML 模式语义错误同样人化（无内部索引／英文类型），原文折叠进技术详情；编辑 YAML 即失效旧结果', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await mockCanvasValidate(page)
+  await openCanvas(page)
+  const dialog = page.getByTestId('task-instances-dialog')
+  const panel = page.getByTestId('workflow-validation-panel')
+
+  await page.getByRole('button', { name: 'YAML 模式' }).click()
+  const editor = dialog.locator('.cm-content')
+  await editor.click()
+  await page.keyboard.press('ControlOrMeta+a')
+  await page.keyboard.insertText(
+    'api_version: openontology.task/v1\nkind: Workflow\nmetadata:\n  name: 零连线模板\nnodes:\n'
+    + '  n1: { kind: agent, system: 执行任务 }\n  end: { kind: terminal, outcome: success }\n'
+    + 'edges: []\n')
+  await page.getByRole('button', { name: '校验' }).click()
+
+  // 主清单：中文位置与可执行动作；不出现 edges[N]／terminal 等内部索引／英文类型
+  await expect(panel.getByText('发现 2 个问题')).toBeVisible()
+  await expect(panel.getByText('边数必须在 1~1000 之间，当前 0')).toBeVisible()
+  await expect(panel.getByText('在 edges 列表补一条连线（如 { from: n1.done, to: end }）')).toBeVisible()
+  await expect(panel.getByText('没有任何终点节点从源点可达（源点: [「n1」]）')).toBeVisible()
+  await expect(panel.getByText(/terminal|edges\[/)).toHaveCount(0)
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/08-yaml-semantic-humanized.png' })
+
+  // 服务端原文（含错误码与内部索引）折叠进技术详情
+  await panel.getByRole('button', { name: '技术详情' }).click()
+  await expect(panel.getByText(/TERMINAL_UNREACHABLE \| 没有任何 terminal 节点从源点可达/)).toBeVisible()
+  await dialog.screenshot({ path: '../../yiya35-evidence/shots/09-yaml-semantic-detail.png' })
+
+  // 编辑 YAML → 上一轮结论立即失效（与画布修改一致），不残留旧结果
+  await editor.click()
+  await page.keyboard.press('Enter')
+  await expect(panel).toHaveCount(0)
+})
+
