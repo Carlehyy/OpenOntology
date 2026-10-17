@@ -4,7 +4,7 @@
   GET    /templates                          列表（keyword）
   POST   /templates                          创建（YAML 编译 + 语义校验）
   PUT    /templates/{id}                     更新（新 revision，canonical_hash 幂等）
-                                             预置模板 403 TEMPLATE_PRESET_PROTECTED
+                                             预置模板 403 TEMPLATE_IS_PRESET
   DELETE /templates/{id}                     软删（预置模板同上 403 拒绝）
   GET    /templates/{id}/revisions           版本历史
 

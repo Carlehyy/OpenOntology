@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from app.task_instances.models import TaskTemplate, TaskTemplateRevision
 from tests.task_instances.conftest import make_spec
@@ -100,8 +101,9 @@ class TestTemplates:
 
     def test_preset_templates_reject_update_and_delete(
             self, client, auth_headers, db, inline_dispatch):
-        """预置模板写入保护（YIYA-44/45）：PUT/DELETE 在任何写入前 403，
-        内容/版本/deleted_at 不变；读取与激活不受影响。"""
+        """预置模板写入保护（YIYA-44/45）：PUT/DELETE 在任何写入前 403
+        `TEMPLATE_IS_PRESET`（权限先于编译校验，合法/非法 YAML 均 403），
+        内容/版本/deleted_at 不变；不存在/已软删仍 404；读取/激活不受影响。"""
         preset = TaskTemplate(name="预置评审流", description="官方预置",
                               is_preset=True)
         db.add(preset)
@@ -120,27 +122,58 @@ class TestTemplates:
             json={"spec_yaml": make_spec(corrections=9)},
             headers=auth_headers)
         assert updated.status_code == 403, updated.text
-        assert updated.json()["detail"]["code"] == "TEMPLATE_PRESET_PROTECTED"
+        assert updated.json()["detail"]["code"] == "TEMPLATE_IS_PRESET"
+
+        # 预置 + 非法 YAML：权限拒绝先于编译校验，仍稳定 403 而非 400
+        illegal = client.put(
+            f"{BASE}/templates/{template_id}",
+            json={"spec_yaml": "not: [valid: workflow"},
+            headers=auth_headers)
+        assert illegal.status_code == 403, illegal.text
+        assert illegal.json()["detail"]["code"] == "TEMPLATE_IS_PRESET"
 
         deleted = client.delete(f"{BASE}/templates/{template_id}",
                                 headers=auth_headers)
         assert deleted.status_code == 403, deleted.text
-        assert deleted.json()["detail"]["code"] == "TEMPLATE_PRESET_PROTECTED"
+        assert deleted.json()["detail"]["code"] == "TEMPLATE_IS_PRESET"
 
-        # 写入被拒后数据完全不变：无新版本、指针不动、未软删
+        # 写入被拒后数据完全不变：无新版本、指针不动、未软删、字段原样
         db.refresh(preset)
         db.refresh(revision)
         assert preset.deleted_at is None
         assert preset.latest_revision_id == revision.id
+        assert preset.name == "预置评审流"
+        assert preset.description == "官方预置"
         revisions = db.query(TaskTemplateRevision).filter(
             TaskTemplateRevision.template_id == template_id).all()
         assert len(revisions) == 1
         assert revisions[0].spec_yaml == make_spec()
 
-        # 读取与激活不受保护影响
+        # 不存在 / 已软删（含已软删预置）优先 404，不被 403 遮盖
+        missing = client.put(f"{BASE}/templates/nonexistent",
+                             json={"spec_yaml": make_spec()},
+                             headers=auth_headers)
+        assert missing.status_code == 404, missing.text
+        assert client.delete(f"{BASE}/templates/nonexistent",
+                             headers=auth_headers).status_code == 404
+        preset.deleted_at = datetime(2026, 10, 17, tzinfo=timezone.utc)
+        db.commit()
+        assert client.put(f"{BASE}/templates/{template_id}",
+                          json={"spec_yaml": make_spec()},
+                          headers=auth_headers).status_code == 404
+        assert client.delete(f"{BASE}/templates/{template_id}",
+                             headers=auth_headers).status_code == 404
+        preset.deleted_at = None
+        db.commit()
+
+        # 读取、版本查询与激活不受保护影响
         detail = client.get(f"{BASE}/templates/{template_id}",
                             headers=auth_headers).json()["data"]
         assert detail["is_preset"] is True
+        assert detail["spec_yaml"] == make_spec()
+        history = client.get(f"{BASE}/templates/{template_id}/revisions",
+                             headers=auth_headers).json()["data"]
+        assert len(history) == 1
         listed = client.get(f"{BASE}/templates",
                             headers=auth_headers).json()["data"]
         assert any(t["id"] == template_id for t in listed)

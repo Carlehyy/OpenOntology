@@ -153,7 +153,7 @@ def _reject_preset_write(template: TaskTemplate, action: str) -> None:
     UI 禁用只是引导，服务端 403 是最终防线（含直接 API/深链路径）。"""
     if template.is_preset:
         raise HTTPException(status_code=403, detail={
-            "code": "TEMPLATE_PRESET_PROTECTED",
+            "code": "TEMPLATE_IS_PRESET",
             "message": f"预置模板不允许{action}"})
 
 

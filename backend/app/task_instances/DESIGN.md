@@ -300,7 +300,7 @@ worker 提交产出时依次校验：① 产出 JSON 可解析；② 端口契�
 | POST `/instances/{id}/steering` | 插话（node 定位 + content） | 仅 running 节点接受；`Idempotency-Key` |
 | GET `/instances/{id}/artifacts/{aid}[ /download]` | 产物元数据 / 流式下载（带 sha256 头） | |
 
-错误码族（4xx，命名风格随平台）：`TEMPLATE_INVALID / TEMPLATE_NOT_FOUND / TEMPLATE_PRESET_PROTECTED / INSTANCE_NOT_ACTIVE / NODE_NOT_WAITING / NODE_NOT_RUNNING / CONTRACT_VIOLATION(附细节) / REWORK_BUDGET_EXHAUSTED / STEERING_UNDELIVERABLE / VERSION_CONFLICT / IDEMPOTENCY_CONFLICT`。
+错误码族（4xx，命名风格随平台）：`TEMPLATE_INVALID / TEMPLATE_NOT_FOUND / TEMPLATE_IS_PRESET / INSTANCE_NOT_ACTIVE / NODE_NOT_WAITING / NODE_NOT_RUNNING / CONTRACT_VIOLATION(附细节) / REWORK_BUDGET_EXHAUSTED / STEERING_UNDELIVERABLE / VERSION_CONFLICT / IDEMPOTENCY_CONFLICT`。
 
 ---
 
@@ -432,7 +432,7 @@ worker 提交产出时依次校验：① 产出 JSON 可解析；② 端口契�
 
 | 变更 | 说明 |
 |---|---|
-| 预置写入拒绝 | `PUT/DELETE /templates/{id}` 对 `is_preset=true` 在任何写入前拒绝（403 `TEMPLATE_PRESET_PROTECTED`）；读取/激活不受影响。独立页与弹窗同步禁用预置编辑/删除/回滚入口，服务端为最终防线（直接 API/深链亦不可写） |
+| 预置写入拒绝 | `PUT/DELETE /templates/{id}` 对 `is_preset=true` 在任何写入前拒绝（403 `TEMPLATE_IS_PRESET`，`_get_template` 之后、编译校验之前，故预置+非法 YAML 亦稳定 403）；不存在/已软删仍 404。读取/激活不受影响。独立页与弹窗同步禁用预置编辑/删除/回滚入口，服务端为最终防线（直接 API/深链亦不可写） |
 | 弹窗模板列表 | 头部改为「搜索模板名称（仅名称、忽略首尾空格、不区分大小写子串）× 预置/个人两项单选（默认预置）+ 新建流程」；筛选在弹窗内对完整列表派生（templateFilters.ts），不改独立页 name OR description 搜索契约与按 revision 匹配的重新激活路径 |
 | 模板卡四操作 | 查看（弹窗内只读详情：元信息 + WorkflowPreviewGraph + 可折叠 YAML）/编辑（复用抽取的 TemplateEditorPanel，同 ID 新 revision）/激活（与卡片主体点击同路径）/删除（个人确认框，取消不发请求）；预置编辑/删除禁用并说明原因，操作区与主体分栏不冒泡 |
 | 闭环归位 | 新建保存成功归位「个人」并清空关键词；各视图往返保留筛选，关闭弹窗恢复默认；空态区分全局无模板/个人分类空/关键词无匹配 |
