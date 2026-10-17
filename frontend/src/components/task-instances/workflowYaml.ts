@@ -17,6 +17,16 @@ export interface WorkflowNodeData {
   defaultTarget?: string
 }
 
+/** 节点类型的用户可见名（画布卡片与校验反馈共用同一命名）。 */
+export const WORKFLOW_KIND_LABELS = {
+  agent: 'Agent',
+  human: '人工',
+  approval: '审批',
+  condition: '条件',
+  join: '汇合',
+  terminal: '终点',
+} as const
+
 export type WorkflowNode = Node<WorkflowNodeData & Record<string, unknown>>
 
 export interface FlowMeta {
@@ -30,13 +40,10 @@ function scalar(value: string | undefined, fallback: string): string {
   return text || fallback
 }
 
-/** 图 → YAML 文本；meta.name 必填（保存弹单已校验），描述可选。 */
-export function graphToYaml(nodes: WorkflowNode[], edges: Edge[], meta: FlowMeta): string {
-  const nodeEntries: string[] = []
-  const edgeEntries: string[] = []
-  let counter = 1
+/** 节点序列化 id（graphToYaml 同一套编号；校验反馈据此做内部 id ↔ 画布对象映射）。 */
+export function stableNodeIds(nodes: WorkflowNode[]): Map<string, string> {
   const idMap = new Map<string, string>()
-
+  let counter = 1
   for (const node of nodes) {
     const kind = (node.data as WorkflowNodeData).kind
     const id = kind === 'agent' || kind === 'human'
@@ -45,6 +52,16 @@ export function graphToYaml(nodes: WorkflowNode[], edges: Edge[], meta: FlowMeta
     idMap.set(node.id, id)
     counter += 1
   }
+  return idMap
+}
+
+/** 图 → YAML 文本；meta.name 必填（保存弹单已校验），描述可选。 */
+export function graphToYaml(nodes: WorkflowNode[], edges: Edge[], meta: FlowMeta): string {
+  const nodeEntries: string[] = []
+  const edgeEntries: string[] = []
+  const idMap = stableNodeIds(nodes)
+  const kindMap = new Map(nodes.map(node =>
+    [node.id, (node.data as WorkflowNodeData).kind]))
 
   for (const node of nodes) {
     const id = idMap.get(node.id) ?? node.id
@@ -86,7 +103,16 @@ export function graphToYaml(nodes: WorkflowNode[], edges: Edge[], meta: FlowMeta
   for (const edge of edges) {
     const src = idMap.get(edge.source) ?? edge.source
     const dst = idMap.get(edge.target) ?? edge.target
-    edgeEntries.push(`  - { from: ${src}.done, to: ${dst} }`)
+    // 端口分派：agent/human/join 固定默认端口 done（后端认可）；
+    // approval 只有 approved/rejected 两个输出，带明确 sourceHandle 时原样保留，
+    // 缺失／非法时不猜去向——序列化为不带端口的 from，交给后端
+    // PORT_REQUIRED 阻断并由前端引导选择，绝不自动补 done／approved。
+    const from = kindMap.get(edge.source) === 'approval'
+      ? (edge.sourceHandle === 'approved' || edge.sourceHandle === 'rejected'
+        ? `${src}.${edge.sourceHandle}`
+        : src)
+      : `${src}.done`
+    edgeEntries.push(`  - { from: ${from}, to: ${dst} }`)
   }
 
   const descriptionLine = meta.description?.trim()
@@ -97,8 +123,7 @@ metadata:
   name: ${meta.name}${descriptionLine}
 nodes:
 ${nodeEntries.join('\n')}
-edges:
-${edgeEntries.join('\n')}
+edges: ${edgeEntries.length ? `\n${edgeEntries.join('\n')}` : '[]'}
 `
 }
 

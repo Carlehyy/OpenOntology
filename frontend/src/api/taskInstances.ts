@@ -5,7 +5,7 @@
  * 查看/激活/审批/交活/打回/插话。字段命名对齐后端 snake_case，
  * apiClientV2 已解包 {data} 信封；SSE 走 fetch 流（复用 Bearer 鉴权）。
  */
-import { apiClientV2 } from './client'
+import { apiClientV2 } from './client.ts'
 
 // ---------- 类型 ----------
 
