@@ -45,6 +45,16 @@ def modeled(client, auth_headers, ontology, db):
                         "config": {"targetProperty": "status",
                                    "valueSource": "constant",
                                    "value": "\"cancelled\""}}]},
+            {"id": "act-3", "name": "notify_party", "displayName": "通知外部系统",
+             "objectTypeId": "ot-order", "requiresApproval": False,
+             "parameters": [],
+             "rules": [{
+                 "id": "hook", "type": "webhook", "name": "notify partner",
+                 "enabled": True, "order": 0,
+                 "config": {"url": "http://127.0.0.1:9/hook",
+                            "method": "POST",
+                            "bodyTemplate": "{\"order\":\"{{object.order_no}}\"}"},
+             }]},
         ],
         "functions": [],
         "instances": [
@@ -56,7 +66,7 @@ def modeled(client, auth_headers, ontology, db):
     r = client.put(f"{_fo(oid)}/full", headers=auth_headers, json=body)
     assert r.status_code == 200, r.text
     pr = client.put(f"{_fo(oid)}/agent/profile", headers=auth_headers,
-                    json={"allowedActionIds": ["act-1", "act-2"]})
+                    json={"allowedActionIds": ["act-1", "act-2", "act-3"]})
     assert pr.status_code == 200, pr.text
     from app.models.ontology import OntologyProject
     from app.models.ontology_formal import ObjectInstance
@@ -443,6 +453,175 @@ def test_cross_user_get_returns_404(client, auth_headers, modeled,
                 "session_id": conversation["conv"].id})
     assert r.status_code == 404
 
+
+
+# ------------------------------------------------- P1 整改：guard 释放缺陷
+
+
+def _second_session_same_payload(client, auth_headers, modeled, db,
+                                 action_id, parameters):
+    """另一会话对同一载荷 prepare+approve：返回 (cid2, approve 响应)。"""
+    from app.ontologies.agent_runtime.models import (
+        AgentConversation, AgentMessage,
+    )
+    from app.models.user import User
+
+    user = db.query(User).first()
+    conv2 = AgentConversation(id=f"conv-{uuid.uuid4().hex[:8]}",
+                              ontology_id=modeled["oid"], user_id=user.id)
+    db.add(conv2)
+    db.flush()
+    db.add(AgentMessage(id=f"mu-{uuid.uuid4().hex[:6]}",
+                        conversation_id=conv2.id, role="user", content="again"))
+    db.add(AgentMessage(
+        id=f"ma-{uuid.uuid4().hex[:6]}", conversation_id=conv2.id,
+        role="assistant", content="re-prepared",
+        proposals=[{"kind": "action", "proposalId": "prop-x",
+                    "actionId": action_id, "parameters": parameters,
+                    "targetInstanceId": "inst-o1",
+                    "releaseId": modeled["releaseId"],
+                    "status": "success", "validationErrors": [],
+                    "effects": []}]))
+    db.commit()
+    r = client.post(
+        f"{_fo(modeled['oid'])}/agent/proposals", headers=auth_headers,
+        json={"sessionKind": "ontology_agent", "sessionId": conv2.id,
+              "clientSubmissionId": "prop-x", "actionId": action_id,
+              "releaseId": modeled["releaseId"],
+              "targetInstanceId": "inst-o1", "parameters": parameters})
+    assert r.status_code in (200, 201), r.text
+    data = r.json()["data"]
+    r2 = client.post(
+        f"{_fo(modeled['oid'])}/agent/proposals/{data['confirmationId']}/decision",
+        headers=auth_headers,
+        json={"decision": "approve", "sessionKind": "ontology_agent",
+              "sessionId": conv2.id, "decisionId": "dx",
+              "payloadHash": data["payloadHash"]})
+    return data["confirmationId"], r2
+
+
+def test_engine_exception_with_external_attempt_keeps_guard(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    """P1 契约：引擎异常 + 未结案外部 attempt → unknown，guard 不释放。"""
+    from app.ontologies.formal_modeling import action_engine as engine_mod
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("engine crashed mid-effects")
+
+    monkeypatch.setattr(engine_mod, "execute_action", _boom)
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-1", actionId="act-3",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    r = _decide(client, auth_headers, modeled, conversation, cid,
+                payload_hash, "approve")
+    assert r.status_code == 200, r.text
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["state"] == "unknown"
+    assert data["failureCode"] == "execution_result_unknown"
+
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    assert operation.state == "unknown"
+    attempts = db.query(CM.ActionExternalAttempt).filter_by(
+        operation_id=operation.id).all()
+    assert attempts, "外部 attempt 必须在引擎调用前持久化"
+    assert all(a.state in ("started", "unknown") for a in attempts)
+    assert {a.stable_delivery_key for a in attempts} == {
+        f"proposal-external:{cid}:{a.effect_ordinal}" for a in attempts}
+
+    # guard 保留的持久证据：另一会话同载荷确认被拒
+    _, r2 = _second_session_same_payload(
+        client, auth_headers, modeled, db, "act-3", {})
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["code"] == "operation_unresolved"
+
+
+def test_engine_failed_result_with_attempt_stays_unknown(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    """P1 契约：引擎返回 failed（无 uncertainty 标记）但存在未结案
+    attempt 且 engine_entered 已落库 → 同样 unknown，不释放 guard。"""
+    from app.ontologies.formal_modeling import action_engine as engine_mod
+
+    monkeypatch.setattr(
+        engine_mod, "execute_action",
+        lambda *a, **k: {"status": "failed", "errorMessage": "hook 5xx"})
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-1", actionId="act-3",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["state"] == "unknown"
+    _, r2 = _second_session_same_payload(
+        client, auth_headers, modeled, db, "act-3", {})
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["code"] == "operation_unresolved"
+
+
+def test_local_failure_without_external_effects_releases_guard(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    """无外部效果点的本地失败可证明未执行 → failed_not_executed 且
+    guard 释放（另一会话同载荷可确认）。"""
+    from app.ontologies.formal_modeling import action_engine as engine_mod
+
+    monkeypatch.setattr(
+        engine_mod, "execute_action",
+        lambda *a, **k: {"status": "failed", "errorMessage": "validation"})
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-1", actionId="act-1",
+                   parameters={"note": "n", "level": 1}).json()[
+                       "data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["state"] == "failed_not_executed"
+    _, r2 = _second_session_same_payload(
+        client, auth_headers, modeled, db, "act-1",
+        {"note": "n", "level": 1})
+    assert r2.status_code == 200, r2.text
+
+
+def test_crash_after_commit_recovers_from_same_key_log(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    """崩溃窗口：引擎已提交 success 日志（proposal:{cid} 键）后异常 →
+    恢复按同 key 结案日志映射 succeeded，不重执行。"""
+    from app.ontologies.formal_modeling import action_engine as engine_mod
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+
+    def _commit_then_die(db, ontology_id, body, **kwargs):
+        log = ActionExecutionLog(
+            id=f"log-{uuid.uuid4().hex[:6]}", ontology_id=ontology_id,
+            action_id=body.action_id, status="success",
+            parameters=body.parameters,
+            idempotency_key=body.idempotency_key)
+        db.add(log)
+        db.commit()
+        raise RuntimeError("response lost after commit")
+
+    monkeypatch.setattr(engine_mod, "execute_action", _commit_then_die)
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-1", actionId="act-3",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["state"] == "succeeded"
+    assert data["executionLogId"]
+    # 同 key 日志恰一条，未发生重复执行
+    logs = db.query(ActionExecutionLog).filter(
+        ActionExecutionLog.ontology_id == modeled["oid"],
+        ActionExecutionLog.idempotency_key == f"proposal:{cid}").all()
+    assert len(logs) == 1
 
 def _login(db, username, password):
     from fastapi.testclient import TestClient
