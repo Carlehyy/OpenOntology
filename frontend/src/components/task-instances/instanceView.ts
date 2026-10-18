@@ -217,10 +217,12 @@ export function isTerminalStatus(status: string): boolean {
 /** 任务实例弹窗（超级助手内嵌）的视图集合 */
 export type TaskDialogView =
   | 'board' | 'instance' | 'templates' | 'activate' | 'canvas'
+  | 'template-view' | 'template-edit'
 
 /**
  * 弹窗视图 → 左栏导航归属：
- * 看板域 = 看板 + 实例轻量详情；模板域 = 模板列表 + 激活表单 + 画布编辑。
+ * 看板域 = 看板 + 实例轻量详情；模板域 = 模板列表 + 激活表单 + 画布编辑
+ * + 模板只读详情/编辑（YIYA-44/45）。
  */
 export function dialogNavOf(view: TaskDialogView): 'instances' | 'templates' {
   return view === 'board' || view === 'instance' ? 'instances' : 'templates'
