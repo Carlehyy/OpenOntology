@@ -151,7 +151,36 @@ class AgentScope:
             raise ToolError("该实例所属的对象类型不在授权范围内")
         return inst
 
-    # ---------- 本体技能卡 ----------
+    def allowed_property_names(self, object_type_id: str) -> Optional[set]:
+        """属性级授权的规范名集合；None=该类型全部已声明属性允许。
+
+        ``AgentProfile.allowed_properties`` 语义（与对象/链接/动作白名单一致）：
+        整列为 NULL=全部声明属性；map 中类型键为 NULL=该类型全部、[]=无业务
+        属性、列表=仅列出属性；map 非空时未列出的类型默认无业务属性。
+        """
+        allowed_map = getattr(self.profile, "allowed_properties", None)
+        if allowed_map is None:
+            return None
+        if not isinstance(allowed_map, dict):
+            return set()
+        entry = allowed_map.get(object_type_id)
+        if entry is None:
+            if object_type_id in allowed_map:
+                return None
+            return set()
+        if isinstance(entry, list):
+            return {str(name) for name in entry}
+        return set()
+
+    def resolve_visible_property(self, object_type, ref: str) -> str:
+        """声明检查 + 属性授权合一的解析入口；越界即 ToolError。"""
+        name = self.resolve_property(object_type, ref)
+        allowed = self.allowed_property_names(object_type.id)
+        if allowed is not None and name not in allowed:
+            raise ToolError(
+                f"属性「{ref}」不在对象类型「{object_type.display_name}」的授权范围内"
+            )
+        return name
 
     def instance_counts(self, *, fresh: bool = False) -> dict[str, int]:
         """按类型计数实例。

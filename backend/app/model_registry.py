@@ -28,6 +28,8 @@ MODEL_MODULES = (
     "app.ontologies.actions.models",
     "app.ontologies.actions.v2_models",
     "app.ontologies.agent_runtime.models",
+    "app.ontologies.agent_confirmation.models",
+    "app.ontologies.agent_query.models",
     "app.ontologies.decision_simulation.models",
     "app.ontologies.attribute_schemas.models",
     "app.ontologies.entities.models",

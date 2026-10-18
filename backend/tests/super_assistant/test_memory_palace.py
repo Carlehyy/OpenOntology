@@ -654,7 +654,7 @@ def test_palace_tools_are_read_only_and_fast_fail(env, monkeypatch):
         ))
     assert [item["filename"] for item in listed["files"]] == ["知识库.md"]
 
-    def unavailable(owner_id, query):
+    def unavailable(owner_id, query, db=None):
         raise palace_graph.PalaceGraphUnavailable("Neo4j 不可用")
 
     monkeypatch.setattr(palace_service, "search_for_tool", unavailable)

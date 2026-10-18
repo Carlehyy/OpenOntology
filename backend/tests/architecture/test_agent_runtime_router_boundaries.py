@@ -19,7 +19,6 @@ from app.ontologies.agent_runtime import (
     dynamic_workflow,
     graph_queries,
     profile_service,
-    proposal_service,
     report_service,
     router as agent_router,
     schemas,
@@ -105,7 +104,6 @@ ROUTE_PARAMETERS = {
     "delete_conversation": (
         "ontology_id", "conversation_id", "db", "current_user",
     ),
-    "execute_proposal": ("ontology_id", "body", "db", "current_user"),
 }
 
 BODY_TYPES = {
@@ -123,12 +121,12 @@ BODY_TYPES = {
     "run_published_report": schemas.ReportRunRequest,
     "chat": schemas.ChatRequest,
     "cancel_chat": schemas.ChatCancelRequest,
-    "execute_proposal": schemas.ExecuteProposalRequest,
 }
 
 
 def test_agent_runtime_route_signatures_remain_stable():
-    assert len(agent_router.router.routes) == 33
+    # YIYA-36：execute-proposal 迁往 proposals_router（同前缀），此处 -1
+    assert len(agent_router.router.routes) == 32
     for name, expected in ROUTE_PARAMETERS.items():
         parameters = inspect.signature(
             getattr(agent_router, name), eval_str=True
@@ -304,7 +302,6 @@ def test_service_modules_do_not_depend_on_fastapi():
         dynamic_workflow,
         graph_queries,
         profile_service,
-        proposal_service,
         report_service,
     )
     for module in modules:
@@ -455,7 +452,8 @@ def test_agent_runtime_modules_stay_bounded():
         "dynamic_workflow.py": 200,
         # 130: stream_events 桥接执行线程与 SSE 推送（MYW-71 断开不中断回合）
         "chat_service.py": 130,
-        "proposal_service.py": 100,
+        # YIYA-36 确认协议端点（prepare/decision/execute/structure）
+        "proposals_router.py": 180,
         "report_service.py": 350,
         "conversation_service.py": 240,
     }
@@ -491,14 +489,15 @@ def test_agent_runtime_openapi_contract_is_stable():
         sort_keys=True,
         separators=(",", ":"),
     )
-    assert len(paths) == 28
+    # YIYA-36：+structure/+proposals/+decision/+proposals/{cid}/+formal/agent/query
+    assert len(paths) == 33
     assert sum(
         method in {"get", "post", "put", "patch", "delete"}
         for operations in paths.values()
         for method in operations
-    ) == 36
+    ) == 41
     assert hashlib.sha256(payload.encode()).hexdigest() == (
-        "6d131eb117b8cbdbc1b11de9d055ad1062641854146527205a565e4d9d98457a"
+        "f3efc465d7d470a3c795e33865635b7bd0c1616b50c192779d0546fc8e841418"
     )
     normalized_payload = json.dumps(
         normalize(paths),
@@ -507,5 +506,5 @@ def test_agent_runtime_openapi_contract_is_stable():
         separators=(",", ":"),
     )
     assert hashlib.sha256(normalized_payload.encode()).hexdigest() == (
-        "23c6afcf09809bb141426a833f858a1d99e9f055537904e50715fdcb712ddb97"
+        "9fb8f7f3f0d3c552823b200fe95ef314d756faffbbf49bfe51619dab9e8ca486"
     )

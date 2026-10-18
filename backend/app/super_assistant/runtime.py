@@ -146,10 +146,17 @@ _READ_ONLY_BUILTIN_TOOLS = frozenset({
     "browser_state",
     "browser_page_resources",
     "browser_network_requests",
+    # 本体只读能力（经白名单门面）：结构与统一关联查询
+    "ontology_structure",
+    "ontology_query",
 })
 
 # 需要用户审批确认的内置工具：目前是 multica 下发任务（外部系统写操作）
-_CONFIRMATION_REQUIRED_BUILTIN_TOOLS = frozenset({"multica_create_task"})
+_CONFIRMATION_REQUIRED_BUILTIN_TOOLS = frozenset({
+    "multica_create_task",
+    # 本体业务动作执行：唯一的用户二次确认闸门（prepare 不设闸门）
+    "ontology_execute_action",
+})
 
 # 条件进入目录的联网工具声明：settings 未启用时也要在工具目录 API 中
 # 展示（标注不可用原因），故提为模块级常量供 _builtin_tools 与
@@ -420,6 +427,8 @@ def _builtin_tools(agent_mode: bool = False) -> list[dict[str, Any]]:
     if str(settings.super_assistant_web_search_backend or "").strip():
         tools.append(dict(_WEB_SEARCH_TOOL_SCHEMA))
     tools.extend(browser_tools.BROWSER_TOOL_SCHEMAS)
+    from app.super_assistant import ontology_tools as _ontology_tools
+    tools.extend(_ontology_tools.ontology_tool_schemas())
     return tools
 
 
@@ -818,7 +827,7 @@ def _execute_builtin_tool(
         if not query:
             return json.dumps({"error": "query 不能为空"}, ensure_ascii=False)
         try:
-            result = palace_service.search_for_tool(owner_id, query)
+            result = palace_service.search_for_tool(owner_id, query, db)
         except Exception as exc:  # Neo4j 故障不得打断对话轮：只读工具快速失败
             logger.warning("palace_graph_search 执行失败", exc_info=True)
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
@@ -857,6 +866,14 @@ def _execute_builtin_tool(
         return multica_service.execute_tool(db, owner_id, name, arguments)
     if name in browser_tools.BROWSER_TOOL_NAMES:
         return browser_tools.execute_browser_tool(
+            db, owner_id=owner_id, conversation_id=conversation_id,
+            name=name, arguments=arguments,
+        )
+    if name in {"ontology_structure", "ontology_query",
+                "ontology_prepare_action", "ontology_execute_action"}:
+        from app.super_assistant import ontology_tools as _ontology_tools
+
+        return _ontology_tools.execute_ontology_tool(
             db, owner_id=owner_id, conversation_id=conversation_id,
             name=name, arguments=arguments,
         )

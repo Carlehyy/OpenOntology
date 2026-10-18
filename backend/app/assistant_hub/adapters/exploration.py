@@ -160,7 +160,9 @@ class ExplorationAdapter:
         answer_content = ""
         error_message: Optional[str] = None
         usage: Optional[dict] = None
-        for event in run_exploration_turn(db, session_id, user, message):
+        for event in run_exploration_turn(
+                db, session_id, user, message,
+                origin="super_assistant"):
             event_type = str(event.get("type") or "")
             if event_type == "answer":
                 answer_content = str(event.get("content") or "")

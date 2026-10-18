@@ -15,6 +15,7 @@ PROFILE_FIELDS = [
     "allowed_object_type_ids",
     "allowed_link_type_ids",
     "allowed_action_ids",
+    "allowed_properties",
     "allow_action_proposals",
     "max_rows_per_query",
     "max_steps",
@@ -25,6 +26,7 @@ RESETTABLE_FIELDS = {
     "allowed_object_type_ids",
     "allowed_link_type_ids",
     "allowed_action_ids",
+    "allowed_properties",
 }
 
 

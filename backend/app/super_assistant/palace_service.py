@@ -1525,14 +1525,72 @@ def build_prompt_section(db: Session, owner_id: str, query: str = "") -> str:
     return "\n".join(lines)[:_SECTION_BUDGET]
 
 
-def search_for_tool(owner_id: str, query: str) -> dict:
+def search_for_tool(owner_id: str, query: str, db: Session | None = None) -> dict:
     from app.data_channel.steward.workspace import _context_terms
 
     terms = _context_terms(query)
     shared = palace_graph.search(palace_graph.ONTOLOGY_DOCUMENTS_SCOPE, terms)
+    file_sources = _ontology_file_sources(db) if db is not None else {}
     for entity in shared.get("entities") or []:
         entity.setdefault("origin", "ontology")
-    return _merge_search_results(palace_graph.search(owner_id, terms), shared)
+        _annotate_entity_sources(entity, file_sources)
+    result = _merge_search_results(palace_graph.search(owner_id, terms), shared)
+    # 候选集合有界：≤20 实体 / ≤30 边，文本超限标记 truncated
+    entities = result.get("entities") or []
+    relations = result.get("relations") or []
+    truncated = len(entities) > 20 or len(relations) > 30
+    result["entities"] = entities[:20]
+    result["relations"] = relations[:30]
+    result["truncated"] = bool(truncated)
+    return result
+
+
+def _ontology_file_sources(db: Session) -> dict[str, dict]:
+    """文件 id → 结构化来源元组（ontology/release/version/fingerprint/status）。
+
+    来源状态是发现层 advisory 元数据（授权在 structure/query 入口强制），
+    元数据核对失败按 unverified 降级，不打断只读检索。
+    """
+    from app.super_assistant.ontology_tools import current_release_map
+
+    try:
+        docs = db.query(SuperAssistantPalaceOntologyDocument).all()
+        release_map = current_release_map(db, [d.ontology_id for d in docs])
+    except Exception:  # noqa: BLE001 - 隔离环境缺表/元数据不可得 → unverified
+        return {}
+    sources: dict[str, dict] = {}
+    for doc in docs:
+        current = release_map.get(doc.ontology_id)
+        status = "current" if (current and doc.version_id == current) \
+            else "stale"
+        info = {
+            "ontologyId": doc.ontology_id,
+            "releaseId": doc.version_id,
+            "versionNumber": doc.version_number,
+            "documentId": doc.id,
+            "fingerprint": doc.fingerprint,
+            "sourceStatus": status,
+        }
+        if doc.artifact_id:
+            sources[str(doc.artifact_id)] = info
+    return sources
+
+
+def _annotate_entity_sources(entity: dict, file_sources: dict[str, dict]) -> None:
+    """同名合并节点保留全部候选来源集合；无可证明抽取来源 → unverified。"""
+    candidates = []
+    for file_id in (entity.get("file_ids") or []):
+        info = file_sources.get(str(file_id))
+        if info is not None:
+            candidates.append(info)
+    entity["sources"] = candidates
+    statuses = {item["sourceStatus"] for item in candidates}
+    if "current" in statuses:
+        entity["sourceStatus"] = "current"
+    elif "stale" in statuses:
+        entity["sourceStatus"] = "stale"
+    else:
+        entity["sourceStatus"] = "unverified"
 
 
 def list_files_for_tool(db: Session, owner_id: str) -> list[dict]:
@@ -1552,9 +1610,24 @@ def list_files_for_tool(db: Session, owner_id: str) -> list[dict]:
             .all()
         )
     ]
-    # 平台共享的本体发布文档与个人文件并列列出（来源标记区分）
-    rows.extend(
-        {
+    # 平台共享的本体发布文档与个人文件并列列出（来源标记区分）；
+    # 携带结构化来源/版本证据与 current/stale/unverified 状态（YIYA-36 §6）
+    docs = (
+        db.query(SuperAssistantPalaceOntologyDocument)
+        .order_by(SuperAssistantPalaceOntologyDocument.ontology_name.asc())
+        .all()
+    )
+    file_sources = _ontology_file_sources(db)
+    for doc in docs:
+        info = file_sources.get(str(doc.artifact_id)) or {
+            "ontologyId": doc.ontology_id,
+            "releaseId": doc.version_id,
+            "versionNumber": doc.version_number,
+            "documentId": doc.id,
+            "fingerprint": doc.fingerprint,
+            "sourceStatus": "stale",
+        }
+        rows.append({
             "id": doc.id,
             "filename": doc.title,
             "status": doc.status,
@@ -1562,13 +1635,8 @@ def list_files_for_tool(db: Session, owner_id: str) -> list[dict]:
             "relationCount": doc.relation_count,
             "createdAt": doc.created_at.isoformat() if doc.created_at else None,
             "source": "ontology",
-        }
-        for doc in (
-            db.query(SuperAssistantPalaceOntologyDocument)
-            .order_by(SuperAssistantPalaceOntologyDocument.ontology_name.asc())
-            .all()
-        )
-    )
+            **info,
+        })
     return rows
 
 

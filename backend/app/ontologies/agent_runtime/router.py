@@ -21,7 +21,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, get_current_user, require_admin
@@ -34,7 +34,6 @@ from app.ontologies.agent_runtime import (
     dynamic_workflow as _dynamic_workflow,
     graph_queries as _graph_queries,
     profile_service as _profile_service,
-    proposal_service as _proposal_service,
     report_service as _report_service,
     reporting,
     schemas as S,
@@ -593,28 +592,3 @@ def delete_conversation(ontology_id: str, conversation_id: str,
         db, ontology_id, conversation_id, current_user
     )
     return _conversation_service.delete_conversation(db, conversation)
-
-
-@router.post("/{ontology_id}/agent/execute-proposal")
-def execute_proposal(ontology_id: str, body: S.ExecuteProposalRequest,
-                     db: Session = Depends(get_db),
-                     current_user=Depends(get_current_user)):
-    """用户在界面确认提案后的真实执行。
-
-    仍然只放行授权边界内的动作；执行走动作引擎全套治理（校验 / HITL 审批 /
-    事实追加），actor 记为确认执行的用户 —— agent 只提案，人签字。
-    """
-    # 提案执行是真实写路径：与 dynamic-sentinels 写路由同口径，必须按本体做写权限裁决。
-    require_ontology_access(db, ontology_id, current_user, write=True)
-    try:
-        release, action = _proposal_service.authorize(
-            db, ontology_id, body,
-            current_release_fn=current_release_context,
-            build_scope_fn=build_scope,
-        )
-    except ToolError as error:
-        raise HTTPException(403, str(error)) from error
-    log = _proposal_service.execute(
-        db, ontology_id, body, current_user, release, action
-    )
-    return _ok(log)

@@ -43,6 +43,11 @@ class AgentProfile(Base):
     allowed_object_type_ids: Mapped[list] = mapped_column(JSON, nullable=True)   # None=全部
     allowed_link_type_ids: Mapped[list] = mapped_column(JSON, nullable=True)     # None=全部
     allowed_action_ids: Mapped[list] = mapped_column(JSON, nullable=True, default=list)  # 默认拒绝
+    # 属性级授权（JSON 可空）：None=现有已声明属性全允许；
+    # {object_type_id: None}=该类型全部声明属性、[]=无业务属性、[prop...]=仅列出属性；
+    # map 非空时未列出的类型默认无业务属性。系统 id/release/ontology/type 仅作为
+    # 必要身份元数据，不视为业务字段授权。
+    allowed_properties: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # 是否允许 agent 提出动作提案（dry-run 预演）。真实执行永远走用户确认 + HITL 闸门。
     allow_action_proposals: Mapped[bool] = mapped_column(Boolean, default=True)

@@ -244,6 +244,17 @@ async def application_lifespan(
                 start_notification_dispatcher()
             except Exception as exc:
                 _main_logger.warning("消息通知转发扫描器启动失败: %s", exc)
+
+        # 本体确认操作派发 worker（每 30 秒扫描 dispatch/reconcile；旁路能力，
+        # 失败不阻断启动）
+        if settings.environment != "test":
+            try:
+                from app.ontologies.agent_confirmation import worker as confirmation_worker
+
+                confirmation_worker.start()
+            except Exception as exc:
+                _main_logger.warning("本体确认操作 worker 启动失败: %s", exc)
+
         # 任务实例对账定时器（审批过期 / 租约回收 / 派发重投 / 并行补位；
         # APScheduler 进程内定时，旁路能力，失败不阻断启动）
         if settings.environment != "test":
@@ -309,6 +320,12 @@ async def application_lifespan(
                 stop_kernel_scheduler()
             except Exception:  # noqa: BLE001
                 _main_logger.exception("kernel execution scheduler cleanup failed")
+        try:
+            from app.ontologies.agent_confirmation import worker as confirmation_worker
+
+            confirmation_worker.shutdown()
+        except Exception:  # noqa: BLE001
+            _main_logger.exception("本体确认操作 worker cleanup failed")
         if sentinel_attempted:
             try:
                 from app.services.sentinel import (

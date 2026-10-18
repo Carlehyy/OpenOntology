@@ -258,6 +258,11 @@ app.include_router(formal_router.router, prefix="/api/v2/formal/ontologies", tag
 # 本体智能体 — 授权边界内的 LLM agent（对象/链接/事实/动作是它的全部世界）
 from app.ontologies.agent_runtime import router as agent_runtime_router
 app.include_router(agent_runtime_router.router, prefix="/api/v2/formal/ontologies", tags=["ontology-agent"], dependencies=agent_guard)
+from app.ontologies.agent_runtime import proposals_router as agent_proposals_router
+app.include_router(agent_proposals_router.router, prefix="/api/v2/formal/ontologies", tags=["ontology-agent"], dependencies=agent_guard)
+# 统一关联查询 — 同本体多对象与跨本体同一执行核（受认证读保护）
+from app.ontologies.agent_query import router as agent_query_router
+app.include_router(agent_query_router.router, prefix="/api/v2/formal", tags=["ontology-agent-query"], dependencies=agent_guard)
 # 本体网络 — 跨本体全局图视图（只读，PG fo_*/发布快照，不依赖 Neo4j 投影就绪）
 from app.ontologies.network import router as ontology_network_router_module
 app.include_router(

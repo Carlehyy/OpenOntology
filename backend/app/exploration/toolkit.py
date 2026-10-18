@@ -774,12 +774,16 @@ class ExplorationToolRunner:
 
     def __init__(self, db: Session, session: ExplorationSession,
                  skills: dict[str, ExplorationSkill] | None = None,
-                 user_message: str = "", user=None):
+                 user_message: str = "", user=None,
+                 origin: str = "user_direct"):
         self.db = db
         self.session = session
         self.skills = skills or {}
         self.user_message = str(user_message or "")
         self.user = user
+        # 受限调用链来源（YIYA-36「用不改」）：assistant 委派的探索会话拒绝
+        # 本体定义写；用户直连探索不受影响。
+        self.origin = origin
         self.canvas_dirty = False
         self.last_diagram: dict | None = None
         self._known_canvas_version = int(session.canvas_version or 0)
@@ -812,6 +816,12 @@ class ExplorationToolRunner:
         if name == "generate_draft":
             return self._generate_draft(args)
         if name == "apply_draft":
+            if self.origin != "user_direct":
+                return {
+                    "error": "assistant_definition_write_forbidden",
+                    "message": "超级助手委派的业务探索对本体定义为「用不改」："
+                               "草稿沉淀/应用只能由用户直连探索或既有管理路径执行",
+                }
             return self._apply_draft(args)
         if name == "get_mapping_overview":
             return self._get_mapping_overview(args)

@@ -428,7 +428,9 @@ def test_propose_is_dry_run_only(client, auth_headers, modeled_ontology, db):
                                       "target_instance_id": "inst-o1"})
 
 
-def test_execute_proposal_respects_boundary_and_hitl(client, auth_headers, modeled_ontology, db):
+def test_execute_proposal_respects_boundary_and_hitl(client, auth_headers,
+                                                     modeled_ontology, db):
+    """确认协议（YIYA-36）：prepare → 用户确认 → 执行 / HITL；旧直发形态 400。"""
     oid = modeled_ontology["id"]
     _grant_actions(client, auth_headers, oid, ["act-1", "act-2"])
     release_id = _freeze_modeled_current_release(db, oid)
@@ -437,33 +439,109 @@ def test_execute_proposal_respects_boundary_and_hitl(client, auth_headers, model
     project = db.query(OntologyProject).filter_by(id=oid).one()
     assert project.status == "draft"
 
-    # 普通动作：真实执行 → 属性变更 + 事实追加
+    # 会话 + 提案消息：clientSubmissionId 的映射目标
+    from app.ontologies.agent_runtime.models import (
+        AgentConversation, AgentMessage,
+    )
+    from app.models.user import User
+    import uuid as _uuid
+
+    user = db.query(User).first()
+    conv = AgentConversation(id=f"conv-{_uuid.uuid4().hex[:8]}",
+                             ontology_id=oid, user_id=user.id, title="t")
+    db.add(conv)
+    db.flush()
+    db.add(AgentMessage(id=f"mu-{_uuid.uuid4().hex[:6]}",
+                        conversation_id=conv.id, role="user",
+                        content="执行"))
+    db.add(AgentMessage(
+        id=f"ma-{_uuid.uuid4().hex[:6]}", conversation_id=conv.id,
+        role="assistant", content="已准备",
+        proposals=[
+            {"kind": "action", "proposalId": "prop-1",
+             "actionId": "act-1", "actionName": "标记已支付",
+             "parameters": {"note": "confirmed"},
+             "targetInstanceId": "inst-o1",
+             "releaseId": release_id, "requiresApproval": False,
+             "status": "success", "validationErrors": [], "effects": []},
+            {"kind": "action", "proposalId": "prop-2",
+             "actionId": "act-2", "actionName": "取消订单",
+             "parameters": {}, "targetInstanceId": "inst-o1",
+             "releaseId": release_id, "requiresApproval": True,
+             "status": "success", "validationErrors": [], "effects": []},
+            {"kind": "action", "proposalId": "prop-3",
+             "actionId": "act-2", "actionName": "取消订单",
+             "parameters": {}, "targetInstanceId": "inst-o1",
+             "releaseId": release_id, "requiresApproval": True,
+             "status": "success", "validationErrors": [], "effects": []},
+        ]))
+    db.commit()
+
+    # 旧形态（actionId/parameters 直发）被拒绝：必须走持久确认
     r = client.post(f"{_fo(oid)}/agent/execute-proposal", headers=auth_headers,
                     json={"actionId": "act-1", "targetInstanceId": "inst-o1",
                           "parameters": {"note": "confirmed"},
                           "releaseId": release_id})
-    assert r.status_code == 200
-    log = r.json()["data"]
-    assert log["status"] == "success"
-    assert log["actorId"]                      # 执行者 = 确认的用户
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "confirmation_required"
+
+    def _prepare(action_id, parameters, submission="prop-1"):
+        return client.post(
+            f"{_fo(oid)}/agent/proposals", headers=auth_headers,
+            json={"sessionKind": "ontology_agent", "sessionId": conv.id,
+                  "clientSubmissionId": submission, "actionId": action_id,
+                  "releaseId": release_id, "targetInstanceId": "inst-o1",
+                  "parameters": parameters})
+
+    # 普通动作：prepare → approve → execute 真实执行（属性变更 + 幂等）
+    r = _prepare("act-1", {"note": "confirmed"})
+    assert r.status_code == 201, r.text
+    cid = r.json()["data"]["confirmationId"]
+    payload_hash = r.json()["data"]["payloadHash"]
+    r = client.post(
+        f"{_fo(oid)}/agent/proposals/{cid}/decision", headers=auth_headers,
+        json={"decision": "approve", "sessionKind": "ontology_agent",
+              "sessionId": conv.id, "decisionId": "d1",
+              "payloadHash": payload_hash})
+    assert r.status_code == 200, r.text
+    r = client.post(
+        f"{_fo(oid)}/agent/execute-proposal", headers=auth_headers,
+        json={"confirmationId": cid, "sessionKind": "ontology_agent",
+              "sessionId": conv.id})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["state"] == "succeeded"
 
     from app.models.ontology_formal import ObjectInstance
     inst = db.query(ObjectInstance).filter(ObjectInstance.id == "inst-o1").first()
     db.refresh(inst)
     assert inst.properties["status"] == "paid"
 
-    # 需审批动作 → pending，进 HITL 队列，属性不变
-    r = client.post(f"{_fo(oid)}/agent/execute-proposal", headers=auth_headers,
-                    json={"actionId": "act-2", "targetInstanceId": "inst-o1",
-                          "releaseId": release_id})
+    # 需审批动作：确认只提交审批，属性不变
+    r = _prepare("act-2", {}, submission="prop-2")
+    assert r.status_code == 201, r.text
+    cid2 = r.json()["data"]["confirmationId"]
+    payload2 = r.json()["data"]["payloadHash"]
+    r = client.post(
+        f"{_fo(oid)}/agent/proposals/{cid2}/decision", headers=auth_headers,
+        json={"decision": "approve", "sessionKind": "ontology_agent",
+              "sessionId": conv.id, "decisionId": "d2",
+              "payloadHash": payload2})
+    assert r.status_code == 200, r.text
+    r = client.post(
+        f"{_fo(oid)}/agent/execute-proposal", headers=auth_headers,
+        json={"confirmationId": cid2, "sessionKind": "ontology_agent",
+              "sessionId": conv.id})
+    assert r.status_code == 200, r.text
     pending = r.json()["data"]
-    assert pending["status"] == "pending"
+    assert pending["state"] == "pending_approval"
+    approval_log_id = pending["approvalLogId"]
     db.refresh(inst)
     assert inst.properties["status"] == "paid"     # 没被取消
 
     # 审批通过后仍按提案记录的同一发布节点继续执行。
     approved = client.post(
-        f"{_fo(oid)}/action-logs/{pending['id']}/decide",
+        f"{_fo(oid)}/action-logs/{approval_log_id}/decide",
         headers=auth_headers,
         json={"decision": "approved", "reason": "版本一致，确认执行",
               "releaseId": release_id},
@@ -473,11 +551,9 @@ def test_execute_proposal_respects_boundary_and_hitl(client, auth_headers, model
     assert decision["pendingLog"]["status"] == "approved"
     assert decision["executionLog"]["status"] == "success"
 
-    # 边界外动作 → 403
+    # 边界外动作 → 403（收紧 allowlist 后 prepare 即拒绝）
     _grant_actions(client, auth_headers, oid, ["act-1"])
-    r = client.post(f"{_fo(oid)}/agent/execute-proposal", headers=auth_headers,
-                    json={"actionId": "act-2", "targetInstanceId": "inst-o1",
-                          "releaseId": release_id})
+    r = _prepare("act-2", {}, submission="prop-3")
     assert r.status_code == 403
 
 

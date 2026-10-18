@@ -16,6 +16,7 @@ class AgentProfileOut(CamelModel):
     allowed_object_type_ids: Optional[list[str]] = None
     allowed_link_type_ids: Optional[list[str]] = None
     allowed_action_ids: Optional[list[str]] = None
+    allowed_properties: Optional[dict[str, Optional[list[str]]]] = None
     allow_action_proposals: bool = True
     max_rows_per_query: int = 50
     max_steps: int = 8
@@ -29,6 +30,7 @@ class AgentProfileUpdate(CamelModel):
     allowed_object_type_ids: Optional[list[str]] = None
     allowed_link_type_ids: Optional[list[str]] = None
     allowed_action_ids: Optional[list[str]] = None
+    allowed_properties: Optional[dict[str, Optional[list[str]]]] = None
     allow_action_proposals: Optional[bool] = None
     max_rows_per_query: Optional[int] = None
     max_steps: Optional[int] = None

@@ -478,10 +478,12 @@ def _canvas_event(session: ExplorationSession) -> dict:
 
 def run_exploration_turn(db: Session, session_id: str, user, message: str,
                          model_id: Optional[str] = None,
-                         web_search: bool = False) -> Iterator[dict]:
+                         web_search: bool = False,
+                         origin: str = "user_direct") -> Iterator[dict]:
     """执行一个探索回合。所有异常转 error 事件，绝不让 SSE 裸断。"""
     try:
-        yield from _run(db, session_id, user, message, model_id, web_search)
+        yield from _run(db, session_id, user, message, model_id, web_search,
+                        origin)
     except Exception as e:  # noqa: BLE001
         logger.exception("业务探索回合失败")
         yield {"type": "error", "message": f"探索回合执行失败: {e}"}
@@ -517,7 +519,8 @@ def _stream_llm_round(call_kwargs: dict, provider_messages: list[dict],
 
 
 def _run(db: Session, session_id: str, user, message: str,
-         model_id: Optional[str], web_search: bool) -> Iterator[dict]:
+         model_id: Optional[str], web_search: bool,
+         origin: str = "user_direct") -> Iterator[dict]:
     session = db.query(ExplorationSession).filter(ExplorationSession.id == session_id).first()
     if not session:
         yield {"type": "error", "message": "会话不存在"}
@@ -583,6 +586,7 @@ def _run(db: Session, session_id: str, user, message: str,
 
     runner = ExplorationToolRunner(
         db, session, skills=skills, user_message=message, user=user,
+        origin=origin,
     )
     steps: list[dict] = []
     web_search_count = 0

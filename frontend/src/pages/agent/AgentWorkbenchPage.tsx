@@ -941,7 +941,8 @@ export default function AgentWorkbenchPage() {
                       )}
                       {msg.proposals.map(p => p.kind === 'sentinel'
                         ? <SentinelProposalCard key={p.proposalId} oid={oid} proposal={p} />
-                        : <ProposalCard key={p.proposalId} oid={oid} proposal={p} />)}
+                        : <ProposalCard key={p.proposalId} oid={oid} proposal={p}
+                          conversationId={conversationId} />)}
                       {!msg.loading && !msg.error && <ProvenanceBar steps={msg.steps} cited={msg.citations.length} />}
                     </div>
                   </div>

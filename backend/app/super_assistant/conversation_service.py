@@ -432,6 +432,14 @@ def decide_tool_run(
             status_code=409,
             detail="该工具调用已处理或已过期",
         )
+    confirmation_result = None
+    if tool_run.tool_name == "ontology_execute_action":
+        # direct 入口的唯一用户二次确认：approve/deny 原子映射到确认协议，
+        # 不能只改本地 tool_run 状态而漏掉领域决策。
+        from app.super_assistant import ontology_tools
+
+        confirmation_result = ontology_tools.decide_from_tool_run(
+            db, current_user, tool_run, body.decision)
     tool_run.decision = body.decision
     tool_run.status = (
         "approved" if body.decision == "approve" else "denied"
@@ -439,4 +447,10 @@ def decide_tool_run(
     if body.decision == "deny":
         tool_run.completed_at = datetime.now(timezone.utc)
     db.commit()
+    if confirmation_result is not None:
+        return {
+            "id": tool_run.id,
+            "status": tool_run.status,
+            "confirmation": confirmation_result,
+        }
     return {"id": tool_run.id, "status": tool_run.status}

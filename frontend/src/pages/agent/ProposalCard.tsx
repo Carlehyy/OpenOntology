@@ -1,36 +1,68 @@
 /**
- * 动作提案卡片 — agent 只提案，人签字。
+ * 动作提案卡片 — agent 只提案，人签字（YIYA-36 持久确认协议）。
  *
- * 展示 dry-run 预演结果（参数 + 模拟效果 + 校验错误），用户点「确认执行」
- * 才经动作引擎真实执行；requires_approval 的动作执行后进入 HITL 审批队列。
+ * 展示 dry-run 预演结果（参数 + 模拟效果 + 校验错误）；「确认执行」先建立
+ * 持久确认请求（prepare），再提交用户二次确认（approve），最后唤醒执行并
+ * 展示真实业务状态 — requires_approval 的动作确认后进入 HITL 审批队列。
  */
 import { useState } from 'react'
 import {
   Play, ShieldCheck, CheckCircle2, XCircle, Clock3, Loader2, FlaskConical,
 } from 'lucide-react'
-import { agentApi, type AgentActionProposal, type ExecuteProposalResult } from '@/api/agent'
+import {
+  agentApi, type AgentActionProposal, type AgentConfirmationState,
+} from '@/api/agent'
 
-export function ProposalCard({ oid, proposal }: { oid: string; proposal: AgentActionProposal }) {
+export function ProposalCard({ oid, proposal, conversationId }: {
+  oid: string
+  proposal: AgentActionProposal
+  conversationId: string | null
+}) {
   const [executing, setExecuting] = useState(false)
-  const [result, setResult] = useState<ExecuteProposalResult | null>(null)
+  const [result, setResult] = useState<AgentConfirmationState | null>(null)
   const [error, setError] = useState('')
 
   const dryRunOk = proposal.status === 'success'
   const params = Object.entries(proposal.parameters || {})
 
   const execute = async () => {
+    if (!conversationId) {
+      setError('缺少会话上下文，无法建立确认请求')
+      return
+    }
     setExecuting(true)
     setError('')
     try {
-      const r = await agentApi.executeProposal(oid, {
+      // 1) 持久准备（不可变载荷；重复提交回放同一确认请求）
+      const prepared = await agentApi.prepareProposal(oid, {
+        sessionKind: 'ontology_agent',
+        sessionId: conversationId,
+        clientSubmissionId: proposal.proposalId,
         actionId: proposal.actionId,
-        parameters: proposal.parameters,
+        releaseId: proposal.releaseId || '',
         targetInstanceId: proposal.targetInstanceId,
-        releaseId: proposal.releaseId,
+        parameters: proposal.parameters || {},
       })
-      setResult(r)
-    } catch (e: any) {
-      setError(e?.detail || e?.message || '执行失败')
+      // 2) 用户二次确认（approve = 同意提交/执行，非成功保证）
+      const decisionId = `ui:${prepared.confirmationId}`
+      const decided = await agentApi.decideProposal(oid, prepared.confirmationId, {
+        decision: 'approve',
+        sessionKind: 'ontology_agent',
+        sessionId: conversationId,
+        decisionId,
+        payloadHash: prepared.payloadHash,
+      })
+      // 3) 唤醒执行并读取真实状态
+      const executed = await agentApi.executeProposal(oid, {
+        confirmationId: prepared.confirmationId,
+        sessionKind: 'ontology_agent',
+        sessionId: conversationId,
+      })
+      setResult(executed.state ? executed : decided)
+    } catch (e: unknown) {
+      const detail = (e as { detail?: { message?: string } } | null)?.detail
+      const message = (e as { message?: string } | null)?.message
+      setError(detail?.message || message || '执行失败')
     } finally {
       setExecuting(false)
     }
@@ -38,23 +70,42 @@ export function ProposalCard({ oid, proposal }: { oid: string; proposal: AgentAc
 
   const resultBanner = () => {
     if (!result) return null
-    if (result.pendingApproval || result.status === 'pending') {
+    if (result.state === 'pending_approval') {
       return (
         <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--color-warning-bg)] text-xs font-medium text-[var(--color-warning)]">
-          <Clock3 size={13} /> 已提交，等待人工审批 — 批准后才会真正落库
+          <Clock3 size={13} /> 已确认并提交审批，等待管理员批准 — 批准后才会真正落库
         </div>
       )
     }
-    if (result.status === 'success') {
+    if (result.state === 'succeeded') {
       return (
         <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--color-success-bg)] text-xs font-medium text-[var(--color-success)]">
           <CheckCircle2 size={13} /> 已执行成功，变更已写入事实流（可在实例历史中溯源）
         </div>
       )
     }
+    if (result.state === 'unknown') {
+      return (
+        <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--color-warning-bg)] text-xs font-medium text-[var(--color-warning)]">
+          <Clock3 size={13} /> 执行结果待核实（{result.blockReason || 'execution_result_unknown'}）
+        </div>
+      )
+    }
+    if (result.state === 'executing' || result.state === 'dispatch_queued') {
+      return (
+        <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--color-warning-bg)] text-xs font-medium text-[var(--color-warning)]">
+          <Clock3 size={13} /> 已确认，正在执行…
+        </div>
+      )
+    }
+    const label = result.state === 'denied' ? '已拒绝'
+      : result.state === 'cancelled' ? '已取消'
+        : result.state === 'expired' ? '确认已过期（版本或权限变化），请重新准备'
+          : result.state === 'approval_rejected' ? '审批被拒绝，未产生业务变更'
+            : `未执行（${result.failureCode || result.state}）`
     return (
       <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--color-danger-bg)] text-xs font-medium text-[var(--color-danger)]">
-        <XCircle size={13} /> 执行失败：{result.errorMessage || (result.validationErrors || []).join('；')}
+        <XCircle size={13} /> {label}
       </div>
     )
   }

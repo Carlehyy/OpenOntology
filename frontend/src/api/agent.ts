@@ -274,6 +274,24 @@ export interface ExecuteProposalResult {
   id?: string
 }
 
+/** 持久确认请求的真实状态（YIYA-36 确认协议）。 */
+export interface AgentConfirmationState {
+  confirmationId: string
+  state: 'prepared' | 'dispatch_queued' | 'executing' | 'pending_approval'
+    | 'succeeded' | 'failed_not_executed' | 'approval_rejected' | 'denied'
+    | 'cancelled' | 'expired' | 'unknown' | 'compensation_required' | string
+  payloadHash: string
+  display: Record<string, unknown>
+  expiresAt: string
+  requiresApproval: boolean
+  replayed?: boolean
+  operationId?: string | null
+  executionLogId?: string | null
+  approvalLogId?: string | null
+  failureCode?: string | null
+  blockReason?: string | null
+}
+
 export type AgentGraphNodeKind = 'object_type' | 'instance' | 'property'
 export type AgentGraphEdgeKind = 'schema_relation' | 'contains' | 'relation' | 'attribute'
 
@@ -676,8 +694,28 @@ export const agentApi = {
     apiClientV2.get<AgentConversationExport>(`${base(oid)}/conversations/${cid}/export`),
   deleteConversation: (oid: string, cid: string) =>
     apiClientV2.delete(`${base(oid)}/conversations/${cid}`),
-  executeProposal: (oid: string, body: { actionId: string; parameters: Record<string, unknown>; targetInstanceId?: string | null; releaseId?: string | null }) =>
-    apiClientV2.post<ExecuteProposalResult>(`${base(oid)}/execute-proposal`, body),
+  prepareProposal: (oid: string, body: {
+    sessionKind: string
+    sessionId: string
+    clientSubmissionId: string
+    actionId: string
+    releaseId: string
+    targetInstanceId?: string | null
+    parameters: Record<string, unknown>
+  }) => apiClientV2.post<AgentConfirmationState>(`${base(oid)}/proposals`, body),
+  getProposal: (oid: string, cid: string, sessionKind: string, sessionId: string) =>
+    apiClientV2.get<AgentConfirmationState>(`${base(oid)}/proposals/${cid}`, {
+      params: { session_kind: sessionKind, session_id: sessionId },
+    }),
+  decideProposal: (oid: string, cid: string, body: {
+    decision: 'approve' | 'deny' | 'cancel'
+    sessionKind: string
+    sessionId: string
+    decisionId: string
+    payloadHash: string
+  }) => apiClientV2.post<AgentConfirmationState>(`${base(oid)}/proposals/${cid}/decision`, body),
+  executeProposal: (oid: string, body: { confirmationId: string; sessionKind: string; sessionId: string }) =>
+    apiClientV2.post<AgentConfirmationState>(`${base(oid)}/execute-proposal`, body),
   cancelChat: (oid: string, runId: string) =>
     apiClientV2.post<{ runId: string; cancelled: boolean; note: string }>(
       `${base(oid)}/chat/cancel`, { runId }),
