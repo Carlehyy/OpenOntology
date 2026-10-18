@@ -44,9 +44,15 @@ const SPEC_COMPILED = {
 
 const templatesFixture = [
   { id: 'tpl-1', name: '代码变更评审', description: '条件分流 + 关口审批',
+    is_preset: false,
     latest_revision_no: 3, latest_revision_id: 'rev-3',
     canonical_hash: 'a'.repeat(64), instance_count: 5,
     created_at: '2026-10-11T02:00:00Z', updated_at: '2026-10-11T03:00:00Z' },
+  { id: 'tpl-p', name: '预置发布说明', description: '官方预置流程',
+    is_preset: true,
+    latest_revision_no: 2, latest_revision_id: 'rev-p2',
+    canonical_hash: 'e'.repeat(64), instance_count: 7,
+    created_at: '2026-10-10T02:00:00Z', updated_at: '2026-10-10T03:00:00Z' },
 ]
 
 const instancesFixture = {
@@ -138,6 +144,15 @@ async function mockApis(page: Page) {
     json(route, [
       { id: 'rev-3', revision_no: 3, canonical_hash: 'a'.repeat(64),
         note: null, created_by: 'u-1', created_at: '2026-10-11T03:00:00Z',
+        spec_yaml: SPEC_YAML },
+    ]))
+  await page.route('**/api/v2/task-instances/templates/tpl-p', route =>
+    json(route, { ...templatesFixture[1], spec_yaml: SPEC_YAML,
+      spec_compiled: SPEC_COMPILED }))
+  await page.route('**/api/v2/task-instances/templates/tpl-p/revisions', route =>
+    json(route, [
+      { id: 'rev-p2', revision_no: 2, canonical_hash: 'e'.repeat(64),
+        note: null, created_by: null, created_at: '2026-10-10T03:00:00Z',
         spec_yaml: SPEC_YAML },
     ]))
   await page.route('**/api/v2/task-instances/instances**', route => {
@@ -253,5 +268,25 @@ test.describe('任务实例（mocked）', () => {
     })
     await page.getByRole('button', { name: '退回重做' }).click()
     await expect.poll(() => decided).toBe(true)
+  })
+
+  test('预置模板保护：列表删除禁用并说明原因，深链编排页保存/回滚禁用', async ({ page }) => {
+    await page.goto('/#/task-instances')
+    const presetCard = page.locator('.grid').filter({ hasText: '预置发布说明' }).first()
+    await expect(presetCard.getByText('预置', { exact: true })).toBeVisible()
+    // 预置删除入口禁用并说明原因；个人模板删除仍可用
+    await expect(presetCard.getByRole('button', {
+      name: /删除模板 预置发布说明（预置模板不允许删除）/ })).toBeDisabled()
+    const personalCard = page.locator('.grid').filter({ hasText: '代码变更评审' }).first()
+    await expect(personalCard.getByRole('button', {
+      name: '删除模板 代码变更评审' })).toBeEnabled()
+
+    // 直接深链进入预置模板编排页：保存与回滚入口禁用（服务端 403 兜底）
+    await page.goto('/#/task-instances/templates/tpl-p')
+    await expect(page.getByText('预置发布说明').first()).toBeVisible()
+    await expect(page.getByText('预置模板不允许编辑').first()).toBeVisible()
+    await expect(page.getByRole('button', { name: '保存新版本' })).toBeDisabled()
+    await page.getByRole('button', { name: '版本历史' }).click()
+    await expect(page.getByRole('button', { name: /回滚到 v2（预置模板不允许编辑）/ })).toBeDisabled()
   })
 })

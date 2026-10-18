@@ -3516,11 +3516,30 @@ const tiSpecCompiled = {
   ],
 }
 
+const tiSpecYaml = `api_version: openontology.task/v1
+kind: Workflow
+metadata:
+  name: 代码变更评审
+nodes:
+  analyze: { kind: agent, system: 分析变更 }
+  gate: { kind: approval, approvers: [admin] }
+  end_ok: { kind: terminal, outcome: success }
+edges:
+  - { from: analyze.done, to: gate }
+  - { from: gate.approved, to: end_ok }
+`
+
 const tiTemplatesFixture = [
   { id: 'tpl-1', name: '代码变更评审', description: '条件分流 + 关口审批',
+    is_preset: true,
     latest_revision_no: 3, latest_revision_id: 'rev-3',
     canonical_hash: 'a'.repeat(64), instance_count: 5,
     created_at: '2026-10-11T02:00:00Z', updated_at: '2026-10-11T03:00:00Z' },
+  { id: 'tpl-2', name: '我的冒烟流程', description: '条件分流 + 关口审批（个人副本）',
+    is_preset: false,
+    latest_revision_no: 1, latest_revision_id: 'rev-9',
+    canonical_hash: 'b'.repeat(64), instance_count: 0,
+    created_at: '2026-10-12T02:00:00Z', updated_at: '2026-10-12T03:00:00Z' },
 ]
 
 const tiInstancesFixture = {
@@ -3579,8 +3598,16 @@ async function mockTaskInstancesApis(page: Page) {
   })
   await page.route('**/api/v2/task-instances/templates/tpl-1', route =>
     json(route, { ...tiTemplatesFixture[0],
-      spec_yaml: 'api_version: openontology.task/v1\n',
-      spec_compiled: tiSpecCompiled }))
+      spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled }))
+  await page.route('**/api/v2/task-instances/templates/tpl-2', route =>
+    json(route, { ...tiTemplatesFixture[1],
+      spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled }))
+  await page.route('**/api/v2/task-instances/templates/tpl-2/revisions', route =>
+    json(route, [
+      { id: 'rev-9', revision_no: 1, canonical_hash: 'b'.repeat(64),
+        note: null, created_by: 'u-1', created_at: '2026-10-12T03:00:00Z',
+        spec_yaml: tiSpecYaml },
+    ]))
   await page.route('**/api/v2/task-instances/instances**', route => {
     const url = route.request().url()
     if (url.includes('/events')) {
@@ -3677,8 +3704,8 @@ test('任务实例弹窗：激活表单内嵌只读流程结构，新建流程�
   await expect(page.getByRole('button', { name: '新建流程' })).toHaveCount(1)
   await expect(page.getByText('代码变更评审').first()).toBeVisible()
 
-  // 点击模板 → 激活表单携带只读流程结构预览（预览数据来自模板详情接口）
-  await page.getByTestId('task-instances-templates').getByRole('button', { name: /代码变更评审/ }).click()
+  // 卡片主体点击 → 激活表单携带只读流程结构预览（预览数据来自模板详情接口）
+  await page.getByTestId('template-card').filter({ hasText: '代码变更评审' }).click()
   await expect(page.getByText('激活「代码变更评审」')).toBeVisible()
   const preview = page.getByTestId('template-graph-preview')
   await expect(preview).toBeVisible()
@@ -3816,8 +3843,7 @@ test('任务实例弹窗：激活表单必填校验与提交链路（POST 载荷
   await page.getByRole('button', { name: /任务实例/ }).click()
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
-  await page.getByTestId('task-instances-templates')
-    .getByRole('button', { name: /代码变更评审/ }).click()
+  await page.getByTestId('template-card').filter({ hasText: '代码变更评审' }).click()
   await expect(page.getByText('激活「代码变更评审」')).toBeVisible()
 
   // 未填名称/目标时提交禁用；流程结构默认展开可折叠
@@ -3834,6 +3860,372 @@ test('任务实例弹窗：激活表单必填校验与提交链路（POST 载荷
   await expect.poll(() => activated).toEqual({ name: '冒烟实例', goal: '跑通激活链路' })
   // 激活成功回看板
   await expect(page.getByTestId('task-instances-board')).toBeVisible()
+})
+
+test('任务实例弹窗：模板搜索仅匹配名称，来源单选与关键词取交集，空态三态可区分', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  const panel = page.getByTestId('task-instances-templates')
+  await expect(panel).toBeVisible()
+
+  // 默认「预置」：预置模板可见、个人模板不可见
+  const sourceGroup = page.getByTestId('template-source-group')
+  await expect(sourceGroup.getByRole('radio', { name: '预置' })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByTestId('template-card').filter({ hasText: '代码变更评审' })).toBeVisible()
+  await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toHaveCount(0)
+
+  // 搜索仅匹配名称：关键词命中 tpl-1 描述（条件分流）不命中任何预置名称 → 无匹配空态
+  await page.getByTestId('template-search-input').fill('条件分流')
+  await expect(page.getByTestId('template-empty-state')).toBeVisible()
+  await expect(page.getByText('没有匹配的模板')).toBeVisible()
+  await expect(page.getByText('未找到名称包含「条件分流」的预置模板')).toBeVisible()
+
+  // 切个人：关键词仍在（条件分流只在描述中出现）→ 交集语义继续无匹配
+  await sourceGroup.getByRole('radio', { name: '个人' }).click()
+  await expect(sourceGroup.getByRole('radio', { name: '个人' })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByText('未找到名称包含「条件分流」的个人模板')).toBeVisible()
+  // 个人来源下用预置名称搜索 → 无匹配（关键词与来源取交集，不是并集）
+  await page.getByTestId('template-search-input').fill('代码变更评审')
+  await expect(page.getByTestId('template-empty-state')).toBeVisible()
+  await expect(page.getByText('未找到名称包含「代码变更评审」的个人模板')).toBeVisible()
+
+  // 清空关键词保留「个人」来源
+  await page.getByTestId('template-search-input').fill('')
+  await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toBeVisible()
+  await expect(page.getByTestId('template-card').filter({ hasText: '代码变更评审' })).toHaveCount(0)
+})
+
+test('任务实例弹窗：个人分类空态与全局空态区分', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  // 只保留预置模板（后注册 route 优先）
+  await page.route('**/api/v2/task-instances/templates**', route => {
+    if (route.request().method() === 'GET') return json(route, [tiTemplatesFixture[0]])
+    return json(route, {})
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+
+  // 个人分类下没有任何模板 → 分类空态（不是「从未创建过模板」的全局空态）
+  await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
+  await expect(page.getByTestId('template-empty-state')).toBeVisible()
+  await expect(page.getByText('还没有个人模板')).toBeVisible()
+
+  // 全局无模板 → 全局空态
+  await page.route('**/api/v2/task-instances/templates**', route => {
+    if (route.request().method() === 'GET') return json(route, [])
+    return json(route, {})
+  })
+  await page.getByTestId('template-source-group').getByRole('radio', { name: '预置' }).click()
+  await page.reload()
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await expect(page.getByText('还没有流程模板')).toBeVisible()
+})
+
+test('任务实例弹窗：模板卡四操作——预置编辑/删除禁用不冒泡，查看/激活可用', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+
+  const presetCard = page.getByTestId('template-card').filter({ hasText: '代码变更评审' })
+  await expect(presetCard.getByRole('button', { name: '查看' })).toBeEnabled()
+  await expect(presetCard.getByRole('button', { name: '激活模板 代码变更评审' })).toBeEnabled()
+  // 预置编辑/删除始终可见但禁用，且说明原因
+  await expect(presetCard.getByRole('button', { name: /编辑模板 代码变更评审（预置模板不允许编辑）/ })).toBeDisabled()
+  await expect(presetCard.getByRole('button', { name: /删除模板 代码变更评审（预置模板不允许删除）/ })).toBeDisabled()
+
+  // 禁用区域点击不得冒泡触发激活
+  await presetCard.getByRole('button', { name: /编辑模板/ }).click({ force: true })
+  await expect(page.getByText(/激活「代码变更评审」/)).toHaveCount(0)
+
+  // 先落关键词，再进「查看」→ 弹窗内只读详情（结构图 + 可折叠 YAML 原文），无保存/提交入口
+  await page.getByTestId('template-search-input').fill('评审')
+  await presetCard.getByRole('button', { name: '查看' }).click()
+  const detail = page.getByTestId('template-detail-view')
+  await expect(detail).toBeVisible()
+  await expect(detail.getByText('预置', { exact: true })).toBeVisible()
+  await expect(detail.getByTestId('template-detail-graph').locator('.react-flow')).toBeVisible()
+  await expect(detail.getByRole('button', { name: /保存|提交|激活/ })).toHaveCount(0)
+  await detail.getByRole('button', { name: 'YAML 原文' }).click()
+  await expect(detail.getByText('api_version: openontology.task/v1').first()).toBeVisible()
+  // 返回列表保留筛选（预置 + 关键词）；返回按钮在详情头部（testid 容器之外）
+  await page.getByTestId('task-instances-dialog')
+    .getByRole('button', { name: '返回模板' }).click()
+  await expect(page.getByTestId('task-instances-templates')).toBeVisible()
+  await expect(page.getByTestId('template-search-input')).toHaveValue('评审')
+  await expect(page.getByTestId('template-card').filter({ hasText: '代码变更评审' })).toBeVisible()
+})
+
+test('任务实例弹窗：个人模板查看/编辑/激活可用，编辑载入既有 ID 的 YAML', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  const updated: { value?: { method: string; url: string; body?: { spec_yaml?: string } } } = {}
+  await page.route('**/api/v2/task-instances/templates/tpl-2', route => {
+    if (route.request().method() === 'PUT') {
+      updated.value = {
+        method: route.request().method(),
+        url: route.request().url(),
+        body: route.request().postDataJSON() as { spec_yaml?: string },
+      }
+      return json(route, { ...tiTemplatesFixture[1], latest_revision_no: 2,
+        spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+    }
+    return json(route, { ...tiTemplatesFixture[1],
+      spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
+
+  const personalCard = page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })
+  await expect(personalCard.getByRole('button', { name: '查看' })).toBeEnabled()
+  await expect(personalCard.getByRole('button', { name: '编辑模板 我的冒烟流程' })).toBeEnabled()
+  await expect(personalCard.getByRole('button', { name: '激活模板 我的冒烟流程' })).toBeEnabled()
+  await expect(personalCard.getByRole('button', { name: '删除模板 我的冒烟流程' })).toBeEnabled()
+
+  // 弹窗内编辑：载入既有模板 YAML，真实修改草稿（含未知字段），保存 PUT
+  // 同一 template ID 的完整修改后原文（不丢字段、不误建新模板）
+  await personalCard.getByRole('button', { name: '编辑模板 我的冒烟流程' }).click()
+  const editView = page.getByTestId('template-edit-view')
+  await expect(editView).toBeVisible()
+  await expect(editView.getByText('保存新版本')).toBeVisible()
+  const editor = editView.locator('.cm-content')
+  await expect(editor).toContainText('kind: Workflow')
+  await editor.click()
+  await page.keyboard.press('ControlOrMeta+End')
+  await page.keyboard.type('\nx-custom-unknown-field: 保留未知字段\n')
+  await editView.getByRole('button', { name: '保存新版本' }).click()
+  await expect.poll(() => updated.value?.url ?? '').toContain('/task-instances/templates/tpl-2')
+  expect(updated.value?.method).toBe('PUT')
+  // 提交的是完整修改后草稿：原文每行原样保留 + 追加的未知字段行逐字可见，
+  // 不是未修改原文的转发（Ctrl+End 落在原文末尾空行，Enter 再开一行）
+  const submitted = updated.value?.body?.spec_yaml ?? ''
+  const expected = tiSpecYaml + '\nx-custom-unknown-field: 保留未知字段\n'
+  expect(submitted).toBe(expected)
+  expect(submitted).not.toBe(tiSpecYaml)
+  // 保存成功留在编辑器（已保存 toast），返回列表保留「个人」筛选
+  await editView.getByRole('button', { name: '返回模板', exact: true }).click()
+  await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toBeVisible()
+})
+
+test('任务实例弹窗：编辑脏稿出口守卫——Esc/左栏切视图/右上关闭统一确认', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  let putCount = 0
+  await page.route('**/api/v2/task-instances/templates/tpl-2', route => {
+    if (route.request().method() === 'PUT') {
+      putCount += 1
+      return json(route, { ...tiTemplatesFixture[1], latest_revision_no: 2,
+        spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+    }
+    return json(route, { ...tiTemplatesFixture[1],
+      spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+  })
+
+  const enterEditorFromList = async () => {
+    // 弹窗已开且在模板列表：直接从个人卡进入编辑（工作台导航在弹窗遮罩后不可点）
+    await page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })
+      .getByRole('button', { name: '编辑模板 我的冒烟流程' }).click()
+    const editView = page.getByTestId('template-edit-view')
+    await expect(editView).toBeVisible()
+    await expect(editView.locator('.cm-content')).toContainText('kind: Workflow')
+    await editView.locator('.cm-content').click()
+    await page.keyboard.press('ControlOrMeta+End')
+    await page.keyboard.type('\n# 脏稿标记')
+    await expect(editView.getByText('未保存')).toBeVisible()
+    return editView
+  }
+
+  const openDirtyEditor = async () => {
+    await page.getByRole('button', { name: /任务实例/ }).click()
+    await page.getByRole('navigation', { name: '任务实例视图' })
+      .getByRole('button', { name: '流程模板' }).click()
+    await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
+    return enterEditorFromList()
+  }
+
+  await page.goto('/#/super-assistant')
+  const discard = page.getByRole('dialog').filter({ hasText: '放弃未保存修改？' })
+
+  // Esc：脏稿不直接丢，确认后「继续编辑」保留草稿且不执行关闭
+  const editView = await openDirtyEditor()
+  await page.keyboard.press('Escape')
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: '继续编辑' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(editView).toBeVisible()
+  await expect(editView.locator('.cm-content')).toContainText('# 脏稿标记')
+  await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
+
+  // 左栏切视图：同样确认；「放弃」才执行原去向（落在流程模板列表）
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await expect(discard).toBeVisible()
+  await expect(editView.locator('.cm-content')).toContainText('# 脏稿标记')
+  await discard.getByRole('button', { name: '继续编辑' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(editView).toBeVisible()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await discard.getByRole('button', { name: '放弃' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(page.getByTestId('task-instances-templates')).toBeVisible()
+
+  // 右上关闭：同样确认；「放弃」后弹窗关闭（弹窗仍开，从列表重进编辑）
+  await enterEditorFromList()
+  await page.getByRole('button', { name: '关闭' }).click()
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: '放弃' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+
+  // 全程守卫确认不发 PUT（「继续编辑」与「放弃」都不触发保存）
+  await expect.poll(() => putCount, { timeout: 500 }).toBe(0)
+})
+
+test('任务实例弹窗：保存失败保留草稿，确认后才退出', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  await page.route('**/api/v2/task-instances/templates/tpl-2', route => {
+    if (route.request().method() === 'PUT') {
+      return route.fulfill({
+        status: 400, contentType: 'application/json',
+        body: JSON.stringify({ detail: { code: 'TEMPLATE_INVALID',
+          message: 'edges 引用了不存在的节点' } }),
+      })
+    }
+    return json(route, { ...tiTemplatesFixture[1],
+      spec_yaml: tiSpecYaml, spec_compiled: tiSpecCompiled })
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
+  await page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })
+    .getByRole('button', { name: '编辑模板 我的冒烟流程' }).click()
+  const editView = page.getByTestId('template-edit-view')
+  await expect(editView.locator('.cm-content')).toContainText('kind: Workflow')
+  await editView.locator('.cm-content').click()
+  await page.keyboard.press('ControlOrMeta+End')
+  await page.keyboard.type('\n# 失败保留草稿')
+
+  // 保存失败：错误可见、草稿保留在编辑器
+  await editView.getByRole('button', { name: '保存新版本' }).click()
+  await expect(editView.getByText('edges 引用了不存在的节点')).toBeVisible()
+  await expect(editView.locator('.cm-content')).toContainText('# 失败保留草稿')
+  await expect(editView.getByText('未保存')).toBeVisible()
+
+  // 失败后退出仍走确认：面板自身返回按钮 → 面板确认「放弃修改并退出」
+  await editView.getByRole('button', { name: '返回模板', exact: true }).click()
+  const panelConfirm = page.getByRole('dialog').filter({ hasText: '放弃未保存的修改' })
+  await expect(panelConfirm).toBeVisible()
+  await panelConfirm.getByRole('button', { name: '放弃修改并退出' }).click()
+  await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toBeVisible()
+})
+
+test('任务实例弹窗：个人删除走确认框——取消不发请求，成功后列表刷新', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  const deleted: string[] = []
+  let remaining = [...tiTemplatesFixture]
+  await page.route('**/api/v2/task-instances/templates**', route => {
+    if (route.request().method() === 'DELETE') {
+      deleted.push(route.request().url())
+      remaining = remaining.filter(t => !route.request().url().includes(t.id))
+      return json(route, { status: 'deleted' })
+    }
+    if (route.request().method() === 'GET') return json(route, remaining)
+    return json(route, {})
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
+
+  const personalCard = page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })
+  await personalCard.getByRole('button', { name: '删除模板 我的冒烟流程' }).click()
+  await expect(page.getByText('删除模板')).toBeVisible()
+  // 取消：不发删除请求，卡片仍在
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(personalCard).toBeVisible()
+  await expect.poll(() => deleted.length, { timeout: 500 }).toBe(0)
+
+  // 确认：发 DELETE，成功后列表刷新、卡片消失
+  await personalCard.getByRole('button', { name: '删除模板 我的冒烟流程' }).click()
+  await page.getByRole('button', { name: '删除', exact: true }).click()
+  await expect.poll(() => deleted.length).toBe(1)
+  expect(deleted[0]).toContain('/task-instances/templates/tpl-2')
+  await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toHaveCount(0)
+})
+
+test('任务实例弹窗：新建保存成功归位「个人」并清空关键词', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockTaskInstancesApis(page)
+  const listedWithNew = [
+    ...tiTemplatesFixture,
+    { id: 'tpl-new', name: '刚创建的流程', description: '',
+      is_preset: false, latest_revision_no: 1, latest_revision_id: 'rev-new',
+      canonical_hash: 'c'.repeat(64), instance_count: 0,
+      created_at: '2026-10-17T02:00:00Z', updated_at: '2026-10-17T02:00:00Z' },
+  ]
+  await page.route('**/api/v2/task-instances/templates**', route => {
+    const url = route.request().url()
+    if (route.request().method() === 'POST' && url.endsWith('/templates')) {
+      return json(route, { id: 'tpl-new', name: '刚创建的流程' }, 201)
+    }
+    if (route.request().method() === 'GET' && !/\/templates\/[^/]+/.test(
+      url.replace(/([?]).*$/, ''))) {
+      return json(route, listedWithNew)
+    }
+    return json(route, {})
+  })
+
+  await page.goto('/#/super-assistant')
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '流程模板' }).click()
+  // 预置来源 + 无关关键词：新建成功后必须切换到「个人」并清空关键词
+  await page.getByTestId('template-search-input').fill('评审')
+
+  await page.getByTestId('new-flow-button').click()
+  await page.getByRole('button', { name: '保存模板' }).click()
+  await page.getByLabel(/模板名称/).fill('刚创建的流程')
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+
+  await expect(page.getByTestId('task-instances-templates')).toBeVisible()
+  await expect(page.getByTestId('template-source-group')
+    .getByRole('radio', { name: '个人' })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByTestId('template-search-input')).toHaveValue('')
+  await expect(page.getByTestId('template-card').filter({ hasText: '刚创建的流程' })).toBeVisible()
 })
 
 test('对话问题导航竖条：长会话展示每条提问刻度，点击定位并高亮当前视口轮次', async ({ page }) => {

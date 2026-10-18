@@ -148,9 +148,19 @@ def create_template(db: Session, body: schemas.TemplateCreate, user) -> dict:
     return _template_out(db, template)
 
 
+def _reject_preset_write(template: TaskTemplate, action: str) -> None:
+    """预置模板写入保护（YIYA-44/45）：共享入口在任何写入前拒绝，
+    UI 禁用只是引导，服务端 403 是最终防线（含直接 API/深链路径）。"""
+    if template.is_preset:
+        raise HTTPException(status_code=403, detail={
+            "code": "TEMPLATE_IS_PRESET",
+            "message": f"预置模板不允许{action}"})
+
+
 def update_template(db: Session, template_id: str,
                     body: schemas.TemplateUpdate, user) -> dict:
     template = _get_template(db, template_id)
+    _reject_preset_write(template, "编辑")
     spec, canonical_hash, canonical = compile_and_validate(body.spec_yaml)
     existing = db.query(TaskTemplateRevision).filter(
         TaskTemplateRevision.template_id == template.id,
@@ -198,6 +208,7 @@ def get_template(db: Session, template_id: str) -> dict:
 
 def delete_template(db: Session, template_id: str) -> dict:
     template = _get_template(db, template_id)
+    _reject_preset_write(template, "删除")
     from datetime import datetime, timezone
     template.deleted_at = datetime.now(timezone.utc)
     db.commit()
