@@ -107,6 +107,8 @@ def test_chat_with_web_search_exposes_real_tool_and_persists_sources(
         }
 
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     response = client.post(
         f"{BASE}/sessions/{session['id']}/chat",
         headers=auth_headers,
@@ -152,6 +154,8 @@ def test_chat_without_web_search_does_not_expose_tool(
         return {"content": "本回合按离线模式继续。", "tool_calls": [], "usage": None}
 
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     response = client.post(
         f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
         json={"message": "继续梳理", "webSearch": False, "stream": False},

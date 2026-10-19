@@ -38,6 +38,20 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: openontology_ci
+          POSTGRES_USER: openontology_ci
+          POSTGRES_PASSWORD: openontology_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openontology_ci -d openontology_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -64,6 +78,26 @@ jobs:
           ENVIRONMENT=test DATABASE_URL="sqlite:///${DB_FILE}" uv run alembic upgrade head
           test "$(ENVIRONMENT=test uv run alembic heads | grep -c '(head)')" -eq 1
         working-directory: backend
+
+      - name: Ontology assistant PostgreSQL acceptance
+        env:
+          ENVIRONMENT: test
+          DATABASE_URL: postgresql://openontology_ci:openontology_ci@127.0.0.1:5432/openontology_ci
+          OPENONTOLOGY_ONTOLOGY_ASSISTANT_E2E: "1"
+        run: |
+          mkdir -p ../.artifacts/ontology-assistant
+          uv run python scripts/ontology_assistant_postgres_e2e.py --report ../.artifacts/ontology-assistant/query-postgres.json
+          uv run python scripts/ontology_action_confirmation_postgres_e2e.py --report ../.artifacts/ontology-assistant/action-postgres.json
+        working-directory: backend
+
+      - name: Upload ontology assistant acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ontology-assistant-postgres-${{ github.run_id }}
+          path: .artifacts/ontology-assistant/
+          if-no-files-found: warn
+          retention-days: 14
 
   configuration-center:
     runs-on: ubuntu-latest

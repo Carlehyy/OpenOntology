@@ -9,6 +9,13 @@ import {
   type SuperMessage, type ToolStep,
 } from '@/api/superAssistant'
 import MermaidBlock from '@/components/MermaidBlock'
+import OntologyConfirmationSummary from '@/components/OntologyConfirmationSummary'
+import {
+  hasVerifiableDisplay,
+  JOIN_ASSERTION_TOOL_NAME,
+  parseJoinAssertionArguments,
+  type PendingToolConfirmation,
+} from '@/components/ontologyConfirmationModel'
 import ZoomableImage from '@/components/ZoomableImage'
 import type { ModelConfig } from '@/types/ontology'
 import { writeTextToClipboard } from '@/utils/clipboard'
@@ -451,11 +458,30 @@ export function ContextUsage({ messages, model }: { messages: SuperMessage[]; mo
 }
 
 
-export interface PendingConfirmation {
-  toolRunId: string
-  toolName: string
-  serverName: string
-  arguments: Record<string, unknown>
+/** direct 流待确认载荷：本体动作确认时携带服务端持久 display（见 ontologyConfirmationModel） */
+export type PendingConfirmation = PendingToolConfirmation
+
+function JoinAssertionDetails({ view }: { view: NonNullable<ReturnType<typeof parseJoinAssertionArguments>> }) {
+  const side = (label: string, value: { ontologyId: string; objectTypeId: string; property: string }) => (
+    <p className="text-xs leading-5 text-[var(--color-text-secondary)]">
+      <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">{label}</span>
+      <span className="break-all">{value.ontologyId} · {value.objectTypeId} · <span className="font-mono">{value.property}</span></span>
+    </p>
+  )
+  return (
+    <div className="mt-3 space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">
+      {side('左端', view.left)}
+      {side('右端', view.right)}
+      <p className="text-xs leading-5 text-[var(--color-text-secondary)]">
+        <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">键类型</span>
+        <span className="font-mono">{view.keyType}</span>
+      </p>
+      <p className="text-xs leading-5 text-[var(--color-text-primary)]">
+        <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">业务含义</span>
+        <span className="break-all">{view.businessMeaning}</span>
+      </p>
+    </div>
+  )
 }
 
 export function ConfirmationCard({ pending, busyDecision, onDecision }: {
@@ -465,26 +491,71 @@ export function ConfirmationCard({ pending, busyDecision, onDecision }: {
   onDecision: (decision: 'approve' | 'deny') => void
 }) {
   const busy = busyDecision !== null
+  const ontologyConfirmation = pending.ontologyConfirmation || null
+  // 本体动作确认的服务端详情不完整时不可核对 → 禁批（deny 仍可用），不退回 MCP 裸参数卡放行
+  const isOntologyAction = pending.toolName === 'ontology_execute_action' || ontologyConfirmation !== null
+  const verifiable = !isOntologyAction || hasVerifiableDisplay(ontologyConfirmation)
+  // 跨本体业务关联声明：复用同一确认卡，但用户必须看懂两端键 + 业务含义
+  const isJoinAssertion = !ontologyConfirmation && pending.toolName === JOIN_ASSERTION_TOOL_NAME
+  const joinAssertion = isJoinAssertion ? parseJoinAssertionArguments(pending.arguments) : null
+  const joinAssertionVerifiable = !isJoinAssertion || joinAssertion !== null
+  const canApprove = verifiable && joinAssertionVerifiable
+  const approveLabel = isJoinAssertion ? '确认关联' : '确认执行'
   return (
-    <div role="alert" className="max-w-3xl rounded-xl border border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-4">
+    <div role="alert" data-testid="super-assistant-confirmation-card" className="max-w-3xl rounded-xl border border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-4">
       <div className="flex items-start gap-3">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-bg-elevated)] text-[var(--color-warning)]"><ShieldCheck size={18} /></div>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-[var(--color-text-primary)]">等待执行确认</p>
-          <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">
-            MCP「{pending.serverName}」请求调用 <span className="font-mono font-medium">{pending.toolName}</span>
-          </p>
-          <pre className="mt-3 max-h-40 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 text-[11px] leading-5 text-[var(--color-text-secondary)] whitespace-pre-wrap break-all">
-            {JSON.stringify(pending.arguments, null, 2)}
-          </pre>
+          {isOntologyAction ? (
+            <>
+              <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">
+                助手请求对本体执行写操作，请核对以下服务端记录的最终内容后确认
+              </p>
+              <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">
+                {ontologyConfirmation && <OntologyConfirmationSummary display={ontologyConfirmation.display} />}
+              </div>
+              {!verifiable && (
+                <p role="alert" className="mt-2 rounded-lg border border-[var(--color-danger)] bg-[var(--color-danger-bg)] px-3 py-2 text-xs font-medium text-[var(--color-danger)]">
+                  服务端确认详情不完整（缺少本体/动作/发布版本），无法核对本次写入；已禁用确认执行，可拒绝或刷新后重试
+                </p>
+              )}
+            </>
+          ) : isJoinAssertion ? (
+            <>
+              <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">
+                确认业务关联：助手请求登记以下两条业务键的关联含义（仅保存本人声明，不修改本体定义）
+              </p>
+              {joinAssertion
+                ? <JoinAssertionDetails view={joinAssertion} />
+                : (
+                  <p role="alert" className="mt-2 rounded-lg border border-[var(--color-danger)] bg-[var(--color-danger-bg)] px-3 py-2 text-xs font-medium text-[var(--color-danger)]">
+                    关联声明内容不完整（缺少两端键或业务含义），无法核对；已禁用确认关联，可拒绝或刷新后重试
+                  </p>
+                )}
+            </>
+          ) : (
+            <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">
+              MCP「{pending.serverName}」请求调用 <span className="font-mono font-medium">{pending.toolName}</span>
+            </p>
+          )}
+          <details className="mt-2 group">
+            <summary className="inline-flex cursor-pointer list-none items-center gap-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
+              技术详情（来源与原始参数，只读）
+            </summary>
+            <pre className="mt-1.5 max-h-40 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 text-[11px] leading-5 text-[var(--color-text-secondary)] whitespace-pre-wrap break-all">
+              {JSON.stringify({ server: pending.serverName, tool: pending.toolName, arguments: pending.arguments }, null, 2)}
+            </pre>
+          </details>
           <div className="mt-3 flex gap-2">
             <button type="button" disabled={busy} onClick={() => onDecision('deny')}
               className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-[var(--color-border)] px-4 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
               {busyDecision === 'deny' && <Loader2 size={13} className="animate-spin" />} 拒绝
             </button>
-            <button type="button" disabled={busy} onClick={() => onDecision('approve')}
+            <button type="button" disabled={busy || !canApprove} onClick={() => onDecision('approve')}
               className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50">
-              {busyDecision === 'approve' && <Loader2 size={13} className="animate-spin" />} 确认执行
+              {busyDecision === 'approve' && <Loader2 size={13} className="animate-spin" />} {approveLabel}
             </button>
           </div>
         </div>

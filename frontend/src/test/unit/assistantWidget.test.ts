@@ -108,7 +108,37 @@ describe('reduceStreamEvent', () => {
       toolName: 'minio.list',
       serverName: 'MinIO',
       arguments: { bucket: 'b' },
+      ontologyConfirmation: null,
     })
+  })
+
+  it('carries the server ontology confirmation onto the pending card for ontology deliveries', () => {
+    const running = reduceStreamEvent(baseMessage(), {
+      event: 'tool_start',
+      data: { toolRunId: 'run-2', toolName: 'multica_create_task', arguments: {} },
+    }).message
+    const result = reduceStreamEvent(running, {
+      event: 'tool_confirmation_required',
+      data: {
+        toolRunId: 'run-2', toolName: 'multica_create_task', serverName: 'multica',
+        arguments: { title: '周报' },
+        ontologyConfirmation: {
+          confirmationId: 'conf-2', state: 'prepared',
+          display: {
+            ontology: { id: 'o', name: '供应商域' },
+            action: { id: 'a', name: '下调供应商等级' },
+            target: { id: 'i', label: 'SUP-0042' },
+            parameters: [{ name: 'level', value: 'C', source: 'user_input' }],
+            release: { id: 'r', version: '7' },
+            requiresApproval: true,
+          },
+        },
+      },
+    })
+    const pending = result.pendingConfirmation
+    assert.equal(pending?.ontologyConfirmation?.display.action.name, '下调供应商等级')
+    assert.equal(pending?.ontologyConfirmation?.display.release.version, '7')
+    assert.equal(pending?.ontologyConfirmation?.requiresApproval ?? pending?.ontologyConfirmation?.display.requiresApproval, true)
   })
 
   it('updates the last step on tool_result and asks to clear the pending card', () => {

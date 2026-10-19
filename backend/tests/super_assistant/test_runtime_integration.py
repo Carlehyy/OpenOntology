@@ -311,6 +311,11 @@ def test_micro_reflection_falls_back_inline_without_nats(tmp_path, monkeypatch):
         lambda *_args: (_ for _ in ()).throw(RuntimeError("后台任务派发失败：未配置 NATS_URL")),
     )
     threads: list = []
+    reflected = runtime.threading.Event()
+    monkeypatch.setattr(
+        runtime.reflection_service, "run_micro_reflection",
+        lambda *_args: reflected.set(),
+    )
     real_thread = runtime.threading.Thread
 
     class _SpyThread(real_thread):
@@ -324,6 +329,7 @@ def test_micro_reflection_falls_back_inline_without_nats(tmp_path, monkeypatch):
     )
     "".join(runtime.stream_chat(**_stream_args(ids)))
     assert "sa-micro-reflect" in threads
+    assert reflected.wait(timeout=5)
 
 
 def test_compaction_invoked_each_round(tmp_path, monkeypatch):

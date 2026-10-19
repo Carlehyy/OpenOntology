@@ -171,6 +171,64 @@ minio*` 接口、`minio_config` 表、外部 `/mcp/minio` 端点）已整体移�
 `assistant-workspace`）专用桶，无法接触平台数据桶；删除/移动类操作默认关闭，
 需要时由部署方设置 `MINIO_MCP_ALLOW_DELETE=true` 放开。
 
+## 助手本体查询与动作
+
+助手只使用 `current_release_id` 指向的当前发布结构。知识图谱提供发现线索，
+不能作为业务实例身份或跨本体关联键的授权依据；关联必须引用已发布关系或
+已验证的显式键依据。发布、权限或参数变化后，需要重新准备动作并再次确认。
+
+`explicit_key` 关联需要本人已确认的业务键声明；仅字段存在、字段同名或知识图谱
+中的相似描述都不足以证明关联。助手通过 `ontology_register_join_assertion` 展示
+两端本体、类型、属性、键类型与业务含义，用户确认后保存本人声明；后续结构片段
+只返回当前用户相关的有限声明，查询时再次核验两端和键类型。已发布关系实例使用
+`declared_relation`。这些声明不修改本体定义，也不代表组织级治理认证。
+
+统一查询在 PostgreSQL 的独立 `REPEATABLE READ` 事务内执行，以下配置由
+backend 和 pipeline_executor 同时读取：
+
+| 变量 | 默认值 | 作用 |
+|---|---:|---|
+| `AGENT_QUERY_STATEMENT_TIMEOUT_MS` | 3000 | 单条 SQL 的执行时限 |
+| `AGENT_QUERY_LOCK_TIMEOUT_MS` | 1000 | 等待数据库锁的时限 |
+| `AGENT_QUERY_WORK_MEM_MIB` | 4 | 单个排序或哈希操作的内存预算 |
+| `AGENT_QUERY_TEMP_FILE_LIMIT_MIB` | 32 | 查询临时文件上限 |
+
+超时和内存预算使用 `SET LOCAL`，事务结束后不污染连接池。`temp_file_limit`
+是 PostgreSQL 管理员参数：应用以普通数据库角色运行时，数据库管理员须先执行
+`ALTER ROLE <app_role> SET temp_file_limit = '32MB'`，然后重建应用连接池。
+自定义上限时应与 `AGENT_QUERY_TEMP_FILE_LIMIT_MIB` 一致或更严格。应用会检查
+当前连接的有效上限；未配置、无限制或宽于所需预算时，查询返回
+`503 query_budget_unavailable`，不会为可用性取消预算，也不需要给应用超级用户
+权限。源行数、关联行数和结果大小上限仍由查询服务独立强制执行。
+
+`ASSISTANT_ACTION_EXECUTION_ENABLED` 是助手业务动作写入总闸。直接启动生产
+应用且未配置时默认关闭；生产 Compose 显式默认开启，以交付确认后的业务
+动作执行能力。部署方可在服务器 `.env` 设置为 `false`，重建 backend 和
+pipeline_executor 后停止新的批准和 worker 领取。已批准但未领取的动作保留在
+`dispatch_queued`，重新开启后可继续领取；已经进入执行的外部请求不能通过
+关闭开关撤回。用户二次确认与动作自身的 `requiresApproval` 组织审批始终保留，
+开启总闸不会跳过它们。
+
+动作确认、执行操作和外部尝试均持久化。`unknown` 表示外部执行结果待核实，
+`compensation_required` 表示外部已生效而本地提交失败、需要人工处理。这两种
+状态都保留相同载荷的执行保护，同一请求的新确认会被
+`409 operation_unresolved` 拒绝，不能用刷新、重试或新会话重复执行。维护者
+应结合操作审计、`reconcile_evidence` 和外部系统结果核实；当前没有自动解除
+保护或自动补偿端点，不得仅凭本地日志成功就宣称业务成功。
+
+超级助手的外部与自研 MCP 仅在管理员审核凭据隔离、工具清单与出网边界后，
+通过已有 MCP 更新接口登记 `constrained=true` 才可调用。管理员可跨用户只更新
+该登记位；连接、凭据、工具清单或自研发布代码变化会撤销登记，需重新审核。
+内置 MinIO 和 API Hub 由平台执行边界约束，不能手工改变信任位。等待用户确认
+期间发生停用、清单变更或授权撤销，执行时会重新检查并拒绝过时授权。
+
+浏览器和 API Hub 的助手调用通道拒绝平台自身管理来源。保护主机包含回环地址、
+Compose 服务名，以及从平台公开 API、文件公开应用和 API 地址派生的主机；
+反向代理的其他别名通过 `ASSISTANT_BROWSER_PROTECTED_ORIGINS` 逗号分隔补充，
+同一主机的不同端口和协议同样受保护。浏览器当前来源不可核实时停止操作；
+API Hub 在变量展开后和每次 HTTP 重定向前检查目标，MCP 桥接须使用 MCP 自身
+的授权和确认入口。用户直接使用接口代理的既有功能保持原有权限规则。
+
 ## Python 脚本流水线执行网关（可选）
 
 Python 脚本流水线（`definition.engine=python`）由 Jupyter Kernel Gateway

@@ -13,13 +13,15 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import requests
 
 from . import config, db, mcp_bridge, tls
-from .outbound_security import OutboundTargetError, request_with_safe_redirects
+from .outbound_security import (
+    OutboundTargetError, request_with_safe_redirects, validate_outbound_url,
+)
 from .personal_ref import PERSONAL_REF_RE
 
 _MAX_BODY_CHARS = 1_000_000
@@ -71,6 +73,7 @@ class RequestOverrides:
     # 仅 JWT 路径（接口管理调试 / 已存接口调用）传入；公开代理与 n8n
     # 内部代理无用户上下文，留空即不解析占位符。
     actor: Any = None
+    target_url_guard: Callable[[str], bool] | None = None
 
 
 def _parse_form(text: str) -> list[tuple[str, str]]:
@@ -430,6 +433,11 @@ def run_interface(
         # mcp-bridge:// 接口不走出站 HTTP：进程内分发为服务端 MCP 调用，
         # 与直连接口共享并发闸门和调用审计。
         if mcp_bridge.is_bridge_url(url):
+            if overrides.target_url_guard and overrides.target_url_guard(url):
+                result["error"] = "当前调用通道不允许该接口目标"
+                result["error_type"] = "configuration"
+                _save_run(iface, result, overrides, None)
+                return result
             result, snapshot = mcp_bridge.run_bridge_interface(
                 iface, overrides, include_response_content=include_response_content,
             )
@@ -453,8 +461,16 @@ def run_interface(
         trusted_hosts = config.OUTBOUND_TRUSTED_HOSTS
         start = time.perf_counter()
         try:
+            guarded_kwargs = {}
+            if overrides.target_url_guard is not None:
+                def validate_target(target: str) -> str:
+                    if overrides.target_url_guard(target):
+                        raise OutboundTargetError("当前调用通道不允许该接口目标")
+                    return validate_outbound_url(target, trusted_hosts=trusted_hosts)
+                guarded_kwargs["validator"] = validate_target
             resp = request_with_safe_redirects(
-                session, method, request_url, trusted_hosts=trusted_hosts, **kwargs
+                session, method, request_url, trusted_hosts=trusted_hosts,
+                **guarded_kwargs, **kwargs
             )
             result["status_code"] = resp.status_code
             result["elapsed_ms"] = int((time.perf_counter() - start) * 1000)

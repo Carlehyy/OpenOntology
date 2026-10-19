@@ -131,7 +131,13 @@ export function toolStatusLabel(status: string) {
   if (status === 'running') return '进行中'
   if (status === 'awaiting_confirmation') return '待确认'
   if (status === 'success' || status === 'complete') return '完成'
+  if (status === 'unknown') return '结果待核实'
+  if (status === 'compensation_required') return '需人工处理'
+  if (status === 'pending_approval') return '等待审批'
   if (status === 'cancelled' || status === 'denied' || status === 'expired') return '已取消'
+  if (status === 'failed_not_executed') return '未执行'
+  if (status === 'approval_rejected') return '审批被拒绝'
+  if (status === 'prepared') return '待确认'
   if (status === 'error' || status === 'failed') return '失败'
   return status
 }
@@ -155,11 +161,18 @@ export function groupConsecutiveSteps(steps: ToolStep[]): ToolStepGroup[] {
   return groups
 }
 
-/** 组内聚合状态：待确认 > 进行中 > 失败 > 已取消 > 完成 */
+/** 组内聚合状态：待确认 > 进行中 > 需人工处理 > 待核实 > 失败 > 已取消 > 完成。
+ *  unknown/compensation_required 是保守终态，聚合时必须浮出（不能落进「完成」） */
 export function toolGroupStatus(steps: ToolStep[]) {
   const statuses = steps.map(step => step.status)
   if (statuses.includes('awaiting_confirmation')) return 'awaiting_confirmation'
   if (statuses.includes('running')) return 'running'
+  if (statuses.includes('compensation_required')) return 'compensation_required'
+  if (statuses.includes('unknown')) return 'unknown'
+  if (statuses.includes('pending_approval')) return 'pending_approval'
+  if (statuses.includes('failed_not_executed')) return 'failed_not_executed'
+  if (statuses.includes('approval_rejected')) return 'approval_rejected'
+  if (statuses.includes('prepared')) return 'prepared'
   if (statuses.some(status => status === 'error' || status === 'failed')) return 'error'
   if (statuses.some(status => status === 'cancelled' || status === 'denied' || status === 'expired')) return 'cancelled'
   return 'success'

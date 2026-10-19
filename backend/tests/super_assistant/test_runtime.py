@@ -23,6 +23,7 @@ from app.super_assistant.models import (
     SuperAssistantToolRun,
     SuperAssistantToolSetting,
 )
+from app.super_assistant.kernel.models import CapabilityRevision
 from app.super_assistant.skill_store import build_manifest, create_skill_folder, render_skill_markdown, skill_directory
 
 # 流式改造后 runtime 每轮调 provider.chat_stream；测试统一经此伪造响应
@@ -36,6 +37,7 @@ _RUNTIME_TABLES = [
     SuperAssistantMulticaConfig.__table__,
     SuperAssistantMemoryProfile.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
+    CapabilityRevision.__table__,  # 审批后 MCP 实时复核读授权位
 ]
 
 
@@ -350,7 +352,7 @@ def test_runtime_executes_builtin_api_hub_mcp_without_http_client(tmp_path, monk
 
     calls = []
 
-    def fake_execute(db, *, user, name, arguments, conversation_id=None):
+    def fake_execute(db, *, user, name, arguments, conversation_id=None, target_url_guard=None):
         calls.append((user.id, name, arguments, conversation_id))
         return json.dumps({
             "notice": "该结果含个人变量明文。不要写入记忆。",
@@ -512,3 +514,544 @@ def test_runtime_continues_when_model_announces_a_tool_but_does_not_call_it(tmp_
         assert "我先看看当前浏览器状态" in saved.content
         assert "页面还停在首页" in saved.content
         assert db.query(SuperAssistantToolRun).one().status == "success"
+
+
+def _prepare_ontology_execute_runtime(tmp_path, monkeypatch, responses, db_name):
+    """ontology_execute_action 确认卡路径的最小运行时夹具（与 minio 用例同构）。"""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / db_name}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(runtime, "SessionLocal", TestingSession)
+    with TestingSession() as db:
+        db.add(User(
+            id="user-onto", username="onto-owner", email="onto@example.com",
+            password_hash="unused", role="editor",
+        ))
+        db.add(ModelConfig(
+            id="model-onto", name="Fake", config_type="llm", provider="openai",
+            models=["fake-model"], options={}, enabled=True, is_default=True,
+            created_by="user-onto",
+        ))
+        db.add(SuperAssistantConversation(
+            id="conversation-onto", owner_id="user-onto", title="onto",
+            model_config_id="model-onto",
+        ))
+        db.add_all([
+            SuperAssistantMessage(
+                id="user-message-onto", conversation_id="conversation-onto",
+                role="user", content="把订单标记为已支付", status="complete",
+            ),
+            SuperAssistantMessage(
+                id="assistant-message-onto", conversation_id="conversation-onto",
+                role="assistant", content="", status="streaming",
+            ),
+        ])
+        db.commit()
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+    return TestingSession
+
+
+def test_ontology_execute_confirmation_card_carries_server_display(tmp_path, monkeypatch):
+    """direct 确认卡必须携带服务端持久确认的完整 display，而非只有 ID。"""
+    from app.super_assistant import ontology_tools
+
+    confirmation = {
+        "confirmationId": "conf-1",
+        "state": "prepared",
+        "payloadHash": "hash-1",
+        "display": {
+            "ontology": {"id": "ont-1", "name": "订单本体"},
+            "action": {"id": "act-1", "name": "标记已支付"},
+            "target": {"id": "inst-1", "label": "SO-001"},
+            "parameters": [{"name": "note", "value": "user asked", "source": "request"}],
+            "release": {"id": "rel-1", "version": 3},
+            "requiresApproval": True,
+        },
+        "expiresAt": "2099-01-01T00:00:00+00:00",
+        "requiresApproval": True,
+        "replayed": False,
+        "operationId": None,
+        "executionLogId": None,
+        "approvalLogId": None,
+        "failureCode": None,
+        "blockReason": None,
+        "decidedAt": None,
+        "createdAt": "2026-10-19T00:00:00+00:00",
+    }
+    monkeypatch.setattr(
+        ontology_tools, "confirmation_display_for_run",
+        lambda db, *, owner_id, conversation_id, tool_run: dict(confirmation),
+    )
+    # 卡片等待即刻返回 denied，聚焦断言 SSE 载荷本身
+    monkeypatch.setattr(
+        runtime, "_wait_for_confirmation",
+        lambda db, tool_run, assistant_message: "denied",
+    )
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{
+                "id": "call-onto-1", "name": "ontology_execute_action",
+                "arguments": {"confirmationId": "conf-1"},
+            }],
+            "usage": {"inputTokens": 12, "outputTokens": 4},
+        },
+        {"content": "用户拒绝了执行。", "tool_calls": [],
+         "usage": {"inputTokens": 20, "outputTokens": 8}},
+    ])
+    session_factory = _prepare_ontology_execute_runtime(
+        tmp_path, monkeypatch, responses, "onto-card.db")
+
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-onto",
+        owner_id="user-onto",
+        assistant_message_id="assistant-message-onto",
+        requested_model_id="model-onto",
+    ))
+    assert "event: tool_confirmation_required" in events
+    card = json.loads(events.split("event: tool_confirmation_required\ndata: ")[1].split("\n\n")[0])
+    # 既有字段兼容保留 + 完整服务端确认载荷
+    assert card["toolName"] == "ontology_execute_action"
+    assert card["serverName"] == "multica"
+    assert card["arguments"] == {"confirmationId": "conf-1"}
+    assert card["ontologyConfirmation"] == confirmation
+    display = card["ontologyConfirmation"]["display"]
+    assert display["ontology"]["name"] == "订单本体"
+    assert display["release"] == {"id": "rel-1", "version": 3}
+    with session_factory() as db:
+        run = db.query(SuperAssistantToolRun).one()
+        assert run.status == "denied"
+
+
+def test_ontology_execute_unverifiable_confirmation_never_yields_approvable_card(tmp_path, monkeypatch):
+    """确认不可验证（不存在/跨会话/已过期）时不出可批准裸 ID 卡，直接拒绝。"""
+    from app.super_assistant import ontology_tools
+
+    monkeypatch.setattr(
+        ontology_tools, "confirmation_display_for_run",
+        lambda db, *, owner_id, conversation_id, tool_run: None,
+    )
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{
+                "id": "call-onto-2", "name": "ontology_execute_action",
+                "arguments": {"confirmationId": "fabricated-or-expired"},
+            }],
+            "usage": {"inputTokens": 12, "outputTokens": 4},
+        },
+        {"content": "确认已失效，请重新准备。", "tool_calls": [],
+         "usage": {"inputTokens": 20, "outputTokens": 8}},
+    ])
+    session_factory = _prepare_ontology_execute_runtime(
+        tmp_path, monkeypatch, responses, "onto-unverifiable.db")
+
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-onto",
+        owner_id="user-onto",
+        assistant_message_id="assistant-message-onto",
+        requested_model_id="model-onto",
+    ))
+    assert "tool_confirmation_required" not in events
+    assert "confirmation_not_verifiable" in events
+    with session_factory() as db:
+        run = db.query(SuperAssistantToolRun).one()
+        assert run.status == "denied"
+        assert "本体确认不可验证" in run.result
+
+
+def _prepare_mcp_approval_runtime(tmp_path, monkeypatch, responses, mutate_during_wait, db_name):
+    """带受确认 MCP server 的运行时夹具；审批等待窗口内用独立会话改 server。"""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / db_name}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(runtime, "SessionLocal", TestingSession)
+    with TestingSession() as db:
+        db.add(User(
+            id="user-mcp", username="mcp-owner", email="mcp@example.com",
+            password_hash="unused", role="editor",
+        ))
+        db.add(ModelConfig(
+            id="model-mcp", name="Fake", config_type="llm", provider="openai",
+            models=["fake-model"], options={}, enabled=True, is_default=True,
+            created_by="user-mcp",
+        ))
+        db.add(SuperAssistantConversation(
+            id="conversation-mcp", owner_id="user-mcp", title="mcp",
+            model_config_id="model-mcp",
+        ))
+        db.add(SuperAssistantMcpServer(
+            id="server-ext", owner_id="user-mcp", name="ext",
+            builtin_key=None, constrained=True,
+            transport="streamable_http", url="https://mcp.example.test/sse",
+            header_names=[], args=[], env_names=[], enabled=True,
+            require_confirmation=True,
+            manifest_revision=2,
+            tool_manifest=[{
+                "name": "lookup", "description": "lookup",
+                "input_schema": {"type": "object", "properties": {}},
+            }],
+        ))
+        db.add_all([
+            SuperAssistantMessage(
+                id="user-message-mcp", conversation_id="conversation-mcp",
+                role="user", content="查一下", status="complete",
+            ),
+            SuperAssistantMessage(
+                id="assistant-message-mcp", conversation_id="conversation-mcp",
+                role="assistant", content="", status="streaming",
+            ),
+        ])
+        db.commit()
+
+    def _wait(db, tool_run, assistant_message):
+        with TestingSession() as other:
+            mutate_during_wait(other)
+            other.commit()
+        return "approved"
+
+    monkeypatch.setattr(runtime, "_wait_for_confirmation", _wait)
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+    return TestingSession
+
+
+_MCP_CALL = {
+    "content": None,
+    "tool_calls": [{
+        "id": "call-mcp-1", "name": "mcp__ext__lookup", "arguments": {},
+    }],
+    "usage": {"inputTokens": 10, "outputTokens": 2},
+}
+_MCP_SUMMARY = {
+    "content": "已处理。", "tool_calls": [],
+    "usage": {"inputTokens": 20, "outputTokens": 6},
+}
+
+
+def test_mcp_approval_recheck_denies_when_server_disabled_during_wait(tmp_path, monkeypatch):
+    def disable(db):
+        server = db.get(SuperAssistantMcpServer, "server-ext")
+        server.enabled = False
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), disable, "mcp-disabled.db")
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "MCP server 已停用或删除" in events
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "denied"
+
+
+def test_mcp_approval_recheck_denies_when_constrained_revoked_during_wait(tmp_path, monkeypatch):
+    def revoke(db):
+        server = db.get(SuperAssistantMcpServer, "server-ext")
+        server.constrained = False
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), revoke, "mcp-revoked.db")
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "受约束登记已撤销" in events
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "denied"
+
+
+def test_mcp_approval_recheck_denies_when_manifest_revision_bumped_during_wait(tmp_path, monkeypatch):
+    def bump(db):
+        server = db.get(SuperAssistantMcpServer, "server-ext")
+        server.manifest_revision = 3
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), bump, "mcp-revision.db")
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "mcp_manifest_changed" in events
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "denied"
+
+
+def test_mcp_approval_recheck_allows_unchanged_server_to_execute(tmp_path, monkeypatch):
+    calls = []
+
+    async def fake_call_tool(**kwargs):
+        calls.append(kwargs)
+        return '{"ok":true}'
+    monkeypatch.setattr(runtime, "call_tool", fake_call_tool)
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), lambda db: None, "mcp-unchanged.db")
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "mcp_manifest_changed" not in events
+    assert "已停用或删除" not in events
+    assert calls and calls[0]["url"] == "https://mcp.example.test/sse"
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "success"
+
+
+def test_mcp_approval_recheck_denies_when_capability_revision_revoked(tmp_path, monkeypatch):
+    from app.super_assistant.kernel.models import CapabilityRevision
+
+    def revoke(db):
+        db.add(CapabilityRevision(
+            key="mcp__ext__lookup", revision=2, enabled=False,
+            source="mcp", manifest_hash="hash", trust_level="user_untrusted",
+            side_effect_class="unknown"))
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), revoke, "mcp-capability.db")
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "capability_revision_revoked" in events
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "denied"
+
+
+_JOIN_ARGS = {
+    "leftOntologyId": "ont-a", "leftObjectTypeId": "ot-order",
+    "leftProperty": "order_no", "rightOntologyId": "ont-b",
+    "rightObjectTypeId": "ot-shipment", "rightProperty": "ref_no",
+    "keyType": "string", "businessMeaning": "订单号与运单参考号一致",
+}
+
+
+def _prepare_join_runtime(tmp_path, monkeypatch, responses, db_name, *, approved):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / db_name}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(runtime, "SessionLocal", TestingSession)
+    with TestingSession() as db:
+        db.add(User(
+            id="user-join", username="join-owner", email="join@example.com",
+            password_hash="unused", role="editor",
+        ))
+        db.add(ModelConfig(
+            id="model-join", name="Fake", config_type="llm", provider="openai",
+            models=["fake-model"], options={}, enabled=True, is_default=True,
+            created_by="user-join",
+        ))
+        db.add(SuperAssistantConversation(
+            id="conversation-join", owner_id="user-join", title="join",
+            model_config_id="model-join",
+        ))
+        db.add_all([
+            SuperAssistantMessage(
+                id="user-message-join", conversation_id="conversation-join",
+                role="user", content="这两个订单和运单是一个业务键", status="complete",
+            ),
+            SuperAssistantMessage(
+                id="assistant-message-join", conversation_id="conversation-join",
+                role="assistant", content="", status="streaming",
+            ),
+        ])
+        db.commit()
+
+    def _wait(db, tool_run, assistant_message):
+        if approved:
+            tool_run.status = "approved"
+            db.commit()
+        return "approved" if approved else "denied"
+
+    monkeypatch.setattr(runtime, "_wait_for_confirmation", _wait)
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+    return TestingSession
+
+
+def test_join_assertion_card_and_registration_flow(tmp_path, monkeypatch):
+    from app.super_assistant import ontology_tools
+
+    registered = {}
+
+    def fake_register(db, user, body):
+        registered.update(body)
+        return {"id": "assert-1", "evidenceRef": "assertion:assert-1"}
+    monkeypatch.setattr(ontology_tools, "register_join_assertion", fake_register)
+    responses = iter([
+        {"content": None, "tool_calls": [{
+            "id": "call-join-1", "name": "ontology_register_join_assertion",
+            "arguments": dict(_JOIN_ARGS)}],
+         "usage": {"inputTokens": 10, "outputTokens": 2}},
+        {"content": "声明已登记。", "tool_calls": [],
+         "usage": {"inputTokens": 20, "outputTokens": 6}},
+    ])
+    session_factory = _prepare_join_runtime(
+        tmp_path, monkeypatch, responses, "join-approved.db", approved=True)
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-join", owner_id="user-join",
+        assistant_message_id="assistant-message-join", requested_model_id="model-join"))
+    # 确认卡携带服务端构造的两端/键型/业务含义展示
+    assert "event: tool_confirmation_required" in events
+    card = json.loads(events.split("event: tool_confirmation_required\ndata: ")[1].split("\n\n")[0])
+    assert card["joinAssertion"] == _JOIN_ARGS
+    # 批准后按冻结参数登记（不读可伪造的工具入参）
+    assert registered == {
+        "left_ontology_id": "ont-a", "left_object_type_id": "ot-order",
+        "left_property": "order_no", "right_ontology_id": "ont-b",
+        "right_object_type_id": "ot-shipment", "right_property": "ref_no",
+        "key_type": "string", "business_meaning": "订单号与运单参考号一致",
+    }
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "success"
+
+
+def test_join_assertion_denied_decision_never_registers(tmp_path, monkeypatch):
+    from app.super_assistant import ontology_tools
+
+    def fake_register(db, user, body):
+        raise AssertionError("用户拒绝时不得登记")
+    monkeypatch.setattr(ontology_tools, "register_join_assertion", fake_register)
+    responses = iter([
+        {"content": None, "tool_calls": [{
+            "id": "call-join-2", "name": "ontology_register_join_assertion",
+            "arguments": dict(_JOIN_ARGS)}],
+         "usage": {"inputTokens": 10, "outputTokens": 2}},
+        {"content": "好的，不登记。", "tool_calls": [],
+         "usage": {"inputTokens": 20, "outputTokens": 6}},
+    ])
+    session_factory = _prepare_join_runtime(
+        tmp_path, monkeypatch, responses, "join-denied.db", approved=False)
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-join", owner_id="user-join",
+        assistant_message_id="assistant-message-join", requested_model_id="model-join"))
+    assert "event: tool_confirmation_required" in events
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "denied"
+
+
+def test_join_assertion_executor_rejects_unapproved_tool_run(tmp_path, monkeypatch):
+    from app.super_assistant import ontology_tools
+
+    monkeypatch.setattr(
+        ontology_tools, "register_join_assertion",
+        lambda db, user, body: (_ for _ in ()).throw(
+            AssertionError("未批准不得登记")))
+    engine = create_engine(f"sqlite:///{tmp_path / 'join-direct.db'}")
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    Session = sessionmaker(bind=engine, autoflush=False)
+    with Session() as db:
+        db.add(User(id="user-join", username="join-owner", email="j@example.com",
+                    password_hash="x", role="editor"))
+        db.add(SuperAssistantConversation(
+            id="conversation-join", owner_id="user-join", title="t",
+            model_config_id=None))
+        db.commit()
+        for status, tool_run in (
+                ("awaiting_confirmation", None),
+                ("awaiting_confirmation", SuperAssistantToolRun(
+                    id="r-await", conversation_id="conversation-join",
+                    assistant_message_id="m", call_id="c",
+                    tool_name="ontology_register_join_assertion",
+                    arguments=dict(_JOIN_ARGS),
+                    status="awaiting_confirmation", requires_confirmation=True)),
+        ):
+            result = json.loads(ontology_tools.execute_ontology_tool(
+                db, owner_id="user-join", conversation_id="conversation-join",
+                name="ontology_register_join_assertion", arguments=dict(_JOIN_ARGS),
+                tool_run=tool_run))
+            assert result["error"] in (
+                "join_assertion_requires_user_approval",
+                "join_assertion_not_approved"), status
+
+
+def test_ontology_execute_result_state_maps_tool_run_status_honestly(tmp_path, monkeypatch):
+    """确认协议返回 pending_approval/unknown 等不得把步骤标成成功。"""
+    cases = {
+        "pending_approval": "pending_approval",
+        "unknown": "unknown",
+        "compensation_required": "compensation_required",
+        "failed_not_executed": "failed_not_executed",
+        "executing": "running",
+        "succeeded": "success",
+    }
+    from app.super_assistant import ontology_tools
+
+    for state, expected_status in cases.items():
+        confirmation = {"confirmationId": "c", "state": "prepared",
+                        "payloadHash": "h", "display": {}}
+        monkeypatch.setattr(
+            ontology_tools, "confirmation_display_for_run",
+            lambda db, *, owner_id, conversation_id, tool_run,
+            _c=confirmation: dict(_c))
+        monkeypatch.setattr(
+            ontology_tools, "confirmation_owner_lookup",
+            lambda db, user, cid: "ont-1")
+
+        def _wait(db, tool_run, assistant_message):
+            tool_run.status = "approved"
+            db.commit()
+            return "approved"
+        monkeypatch.setattr(runtime, "_wait_for_confirmation", _wait)
+        # 执行器返回确认协议真实状态
+        monkeypatch.setattr(
+            ontology_tools, "execute_confirmation",
+            lambda db, user, oid, cid, **kw: {"state": state})
+        responses = iter([
+            {"content": None, "tool_calls": [{
+                "id": "call-st", "name": "ontology_execute_action",
+                "arguments": {"confirmationId": "c"}}],
+             "usage": {"inputTokens": 1, "outputTokens": 1}},
+            {"content": "done", "tool_calls": [],
+             "usage": {"inputTokens": 1, "outputTokens": 1}},
+        ])
+        session_factory = _prepare_ontology_execute_runtime(
+            tmp_path, monkeypatch, responses, f"state-{state}.db")
+        events = "".join(runtime.stream_chat(
+            conversation_id="conversation-onto", owner_id="user-onto",
+            assistant_message_id="assistant-message-onto",
+            requested_model_id="model-onto"))
+        with session_factory() as db:
+            run = db.query(SuperAssistantToolRun).one()
+            assert run.status == expected_status, (state, run.status)
+
+
+def test_api_hub_super_assistant_channel_blocks_platform_targets(tmp_path, monkeypatch):
+    """超级助手通道内 API Hub 接口指向平台来源/未受约束桥接即拒绝。"""
+    engine = create_engine(f"sqlite:///{tmp_path / 'hub-guard.db'}")
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    Session = sessionmaker(bind=engine, autoflush=False)
+    with Session() as db:
+        # 平台公开来源派生
+        assert runtime._api_hub_target_denied(
+            db, "https://platform.example.com/api/v2/ontologies") is False  # 需配置派生
+        from app.config import settings as _settings
+        monkeypatch.setattr(_settings, "super_assistant_public_api_base_url",
+                            "https://platform.example.com", raising=False)
+        assert runtime._api_hub_target_denied(
+            db, "https://platform.example.com/api/v2/ontologies") is True
+        assert runtime._api_hub_target_denied(
+            db, "http://localhost:8000/api/v2/formal/ontologies") is True
+        # 桥接调用必须回到 MCP 本身的授权和确认通道。
+        unconstrained = SuperAssistantMcpServer(
+            id="srv-ext", owner_id="u1", name="ext", builtin_key=None,
+            transport="streamable_http", url="https://127.0.0.1:9/sse",
+            header_names=[], args=[], env_names=[], enabled=True,
+            require_confirmation=True, tool_manifest=[])
+        builtin = SuperAssistantMcpServer(
+            id="srv-minio", owner_id="u1", name="platform_minio",
+            builtin_key="minio", transport="streamable_http",
+            url="builtin://minio", header_names=[], args=[], env_names=[],
+            enabled=True, require_confirmation=True, tool_manifest=[])
+        db.add_all([unconstrained, builtin])
+        db.commit()
+        assert runtime._api_hub_target_denied(
+            db, "mcp-bridge://srv-ext/minio_upload_text") is True
+        assert runtime._api_hub_target_denied(
+            db, "mcp-bridge://srv-minio/minio_status") is True
+        assert runtime._api_hub_target_denied(
+            db, "mcp-bridge://missing/tool") is True
+        assert runtime._api_hub_target_denied(
+            db, "https://partner.example.com/api") is False

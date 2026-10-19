@@ -16,11 +16,11 @@
 from __future__ import annotations
 
 import base64
-import logging
 import hashlib
 import hmac
 import json
 import math
+import re
 import uuid as uuid_lib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -33,7 +33,9 @@ from app.models.ontology import OntologyProject
 from app.models.ontology_formal import LinkInstance, ObjectInstance
 from app.ontologies.agent_query import schemas as QS
 from app.ontologies.agent_query.models import AgentQueryRow, AgentQuerySnapshot
-from app.ontologies.agent_runtime.boundary import ToolError, build_scope
+from app.ontologies.agent_runtime.boundary import (
+    ToolError, build_scope, get_or_create_profile,
+)
 from app.ontologies.agent_runtime.models import AgentProfile
 from app.ontologies.release_context import current_release_context
 
@@ -56,8 +58,6 @@ _BOOLEAN_TYPES = {"boolean", "bool"}
 _STRING_TYPES = {"string", "text", "date", "datetime", "uuid", "enum"}
 
 _COUNTS_SCOPE = "complete_snapshot"
-
-logger = logging.getLogger(__name__)
 
 
 class QueryError(Exception):
@@ -85,19 +85,39 @@ def _sha256(payload: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _ontology_write_access(user, project) -> bool:
-    """与 access.require_ontology_access(write=True) 同口径的真实裁决。"""
-    role = str(getattr(user, "role", "") or "")
-    if role == "admin":
-        return True
-    if role == "editor":
-        return str(getattr(project, "created_by", "") or "") == str(
-            getattr(user, "id", ""))
-    return False
-
-
 def _declared_type(prop_def: dict) -> str:
     return str(prop_def.get("type") or "string").lower()
+
+
+def _is_computed_prop(prop_def: dict) -> bool:
+    """派生属性声明（与 evolution_service/function_engine 同一判据）。"""
+    return prop_def.get("source") == "computed" or bool(prop_def.get("computed"))
+
+
+_MEMORY_UNIT_KB = {
+    "b": 1 / 1024, "k": 1, "kb": 1,
+    "m": 1024, "mb": 1024, "g": 1024 * 1024, "gb": 1024 * 1024,
+    "t": 1024 * 1024 * 1024, "tb": 1024 * 1024 * 1024,
+}
+
+
+def _parse_memory_limit_kb(raw: str) -> Optional[int]:
+    """解析 PG 内存参数显示值（'-1'、'32768kB'、'32MB'、'1GB'…）为 kB。
+
+    PG 的 current_setting 按最大人类单位归一显示，裸数字按该 GUC 的基础
+    单位 kB 解释；无法解析或非正值（含 -1 unlimited）返回 None。
+    """
+    text = str(raw or "").strip().lower()
+    match = re.fullmatch(r"(-?\d+)\s*(b|k|kb|m|mb|g|gb|t|tb)?", text)
+    if match is None:
+        return None
+    number = int(match.group(1))
+    if number < 0:
+        return None
+    unit = match.group(2) or "kb"
+    value = number * _MEMORY_UNIT_KB[unit]
+    kb = int(value)
+    return kb if value == kb else kb + 1
 
 
 def _is_number_type(decl: str) -> bool:
@@ -197,6 +217,8 @@ class UnifiedQueryService:
 
     def execute(self) -> dict:
         self._validate_shape()
+        self._ensure_profiles(
+            {s.ontology_id for s in self.req.sources})
         self._pin_transaction()
         self._resolve_sources()
         page_size = self._resolve_page_size()
@@ -310,6 +332,21 @@ class UnifiedQueryService:
 
     # ------------------------------------------------- release/auth pinning
 
+    def _ensure_profiles(self, ontology_ids) -> None:
+        """pin 前确保 profile 行已存在。
+
+        ``get_or_create_profile`` 创建缺失 profile 时会 ``commit``；若发生在
+        pinned 事务内部，REPEATABLE READ 快照与 SET LOCAL 预算会被提前终结。
+        这里只在确实存在的本体上预建（占位/未知 id 跳过）。
+        """
+        oids = {str(oid) for oid in ontology_ids if oid}
+        if not oids:
+            return
+        existing = {row[0] for row in self.db.query(OntologyProject.id)
+                    .filter(OntologyProject.id.in_(sorted(oids))).all()}
+        for oid in sorted(existing):
+            get_or_create_profile(self.db, oid)
+
     def _pin_transaction(self):
         if not self._pg:
             return
@@ -318,53 +355,69 @@ class UnifiedQueryService:
             # 认证依赖可能已开启 READ COMMITTED 事务；查询核必须以
             # REPEATABLE READ 作为事务首语句，丢弃只读残余是安全的。
             self.db.rollback()
-        # 契约 §3.3（P2-A 整改）：隔离级必须是查询事务的首语句 — 源计数、
-        # typed-key 校验、join 计数、实体计数与快照物化的全部语句取同一
-        # REPEATABLE READ 快照，执行期间并发实例写入不会跨语句渗入。
-        # SET TRANSACTION 与后续 SET LOCAL 预算兼容。
-        budgets = (
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
-            # P2-4：已冻结的查询资源/事务预算（契约 §3.4 表）。SET LOCAL
-            # 仅影响本事务；权限不足时 fail closed。
-            "SET LOCAL statement_timeout = "
-            f"'{settings.agent_query_statement_timeout_ms}ms'",
-            "SET LOCAL lock_timeout = "
-            f"'{settings.agent_query_lock_timeout_ms}ms'",
-            "SET LOCAL idle_in_transaction_session_timeout = '5000ms'",
-            # R-1：PostgreSQL 内存参数合法单位为 B/kB/MB/GB（kB=1024B，
-            # MB=2^20B），不接受 IEC 记法 MiB。PG 的 '4MB' 与原 '4MiB'
-            # 字节数一致，预算语义不变。
-            "SET LOCAL work_mem = "
-            f"'{settings.agent_query_work_mem_mb}MB'",
-            "SET LOCAL temp_file_limit = "
-            f"'{settings.agent_query_temp_file_limit_mb}MB'",
-        )
+        # P2-4：已冻结的查询资源/事务预算（契约 §3.4 表）。SET LOCAL 仅影响
+        # 本事务；可设参数设置失败或预算校验不通过时查询 fail closed。
         try:
+            # 隔离级别必须是事务首语句：解析/授权/计数/物化共享同一个
+            # 一致性快照，执行中途的并发提交不会渗入本次结果或计数。
+            self.db.execute(
+                text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+            is_superuser, temp_limit = self.db.execute(text(
+                "SELECT current_setting('is_superuser'), "
+                "current_setting('temp_file_limit')")).one()
+            super_role = str(is_superuser).strip().lower() == "on"
+            budgets = [
+                "SET LOCAL statement_timeout = "
+                f"'{settings.agent_query_statement_timeout_ms}ms'",
+                "SET LOCAL lock_timeout = "
+                f"'{settings.agent_query_lock_timeout_ms}ms'",
+                "SET LOCAL idle_in_transaction_session_timeout = '5000ms'",
+                # PG 内存单位是 B/kB/MB/GB（二进制倍数），不接受 MiB 拼写。
+                "SET LOCAL work_mem = "
+                f"'{settings.agent_query_work_mem_mib}MB'",
+            ]
+            if super_role:
+                # temp_file_limit 是 SUSET 参数：只有超级角色能逐事务 SET LOCAL。
+                budgets.append(
+                    "SET LOCAL temp_file_limit = "
+                    f"'{settings.agent_query_temp_file_limit_mib}MB'")
             for statement in budgets:
                 self.db.execute(text(statement))
-        except Exception as exc:  # noqa: BLE001 - fail closed
-            # R-2：错误分类入服务端日志（SQLSTATE/错误类别可审计），客户端
-            # 只收到稳定 code + 分类，不回灌 str(exc)/SQL/参数细节。
+            if not super_role:
+                # 普通角色无法逐事务收紧 SUSET 参数：生效值必须由运维以
+                # ALTER ROLE 持久设置（改后需重建连接池）。未设置/宽于帽
+                # 都 fail closed —— 预算不允许无声失效。
+                self._verify_temp_file_budget(str(temp_limit))
+        except QueryError:
             self.db.rollback()
-            orig = getattr(exc, "orig", None)
-            sqlstate = getattr(orig, "pgcode", None) or getattr(
-                exc, "pgcode", None)
-            classify = {
-                "42501": "insufficient_privilege",
-                "0A000": "feature_not_supported",
-                "22023": "invalid_parameter_value",
-            }.get(str(sqlstate or ""), "budget_set_failed")
-            if sqlstate:
-                logger.warning(
-                    "agent query budget set failed sqlstate=%s class=%s",
-                    sqlstate, classify)
-            else:
-                logger.warning(
-                    "agent query budget set failed class=%s", classify)
+            raise
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            self.db.rollback()
             raise QueryError(
                 503, "query_budget_unavailable",
-                "查询资源/隔离级参数设置失败，查询已 fail closed",
-                errorClass=classify, retryable=False) from exc
+                "查询事务隔离级别/资源预算参数设置失败，查询 fail closed",
+                retryable=False) from exc
+        self._lock_pinned_rows()
+
+    def _verify_temp_file_budget(self, raw_limit: str) -> None:
+        """普通角色的 temp_file_limit 硬校验（SUSET 无法 SET LOCAL）。"""
+        cap_kb = settings.agent_query_temp_file_limit_mib * 1024
+        kb = _parse_memory_limit_kb(str(raw_limit or ""))
+        if kb is None or kb <= 0 or kb > cap_kb:
+            raise QueryError(
+                503, "query_budget_unavailable",
+                "temp_file_limit 是超级用户参数，当前应用角色无法逐事务"
+                "设置，且生效值未设置(-1)或宽于配置帽 "
+                f"{settings.agent_query_temp_file_limit_mib}MiB，"
+                "查询 fail closed。请运维执行 "
+                "ALTER ROLE <应用角色> SET temp_file_limit = "
+                f"'{settings.agent_query_temp_file_limit_mib}MB'，"
+                "并重建应用连接池后重试。",
+                retryable=False,
+                effectiveTempFileLimit=str(raw_limit or "") or None,
+                budgetKb=cap_kb)
+
+    def _lock_pinned_rows(self) -> None:
         oids = sorted({s.ontology_id for s in self.req.sources})
         (self.db.query(OntologyProject)
              .filter(OntologyProject.id.in_(oids))
@@ -463,9 +516,20 @@ class UnifiedQueryService:
 
     # ------------------------------------------------------------ SQL 构造
 
+    def _value_column(self, meta: _SourceMeta, prop: str):
+        """按发布声明选择取值列：业务值在 properties，派生值在 computed。
+
+        structure/skill card 把 computed 属性同样列为可查询字段；查询核若
+        只读 properties，派生字段会静默变成全 NULL。声明与取值列的一致性
+        以发布快照为准（写侧按同一声明拆分两列）。
+        """
+        if _is_computed_prop(meta.props[prop]):
+            return ObjectInstance.computed[prop]
+        return ObjectInstance.properties[prop]
+
     def _typed_expr(self, meta: _SourceMeta, prop: str):
         decl = _declared_type(meta.props[prop])
-        column = ObjectInstance.properties[prop]
+        column = self._value_column(meta, prop)
         if _is_number_type(decl):
             return column.as_float()
         if _is_boolean_type(decl):
@@ -555,7 +619,7 @@ class UnifiedQueryService:
                 if prop in self._join_key_props().get(alias, set()):
                     # P2-3：join 键原始 JSON 值 — typed-key 校验在 SQL 内完成
                     columns.append(
-                        ObjectInstance.properties[prop].as_json().label(
+                        self._value_column(meta, prop).as_json().label(
                             _raw_label(alias, prop)))
             stmt = select(*columns).where(
                 ObjectInstance.ontology_id == meta.req.ontology_id,
@@ -729,7 +793,10 @@ class UnifiedQueryService:
         typed = meta.subquery.c[_prop_label(meta.alias, prop)]
         dialect = self.db.get_bind().dialect.name
         if dialect == "postgresql":
-            typeof_expr = func.jsonb_typeof(raw)
+            # properties/computed 列是 json（非 jsonb）：jsonb_typeof(json)
+            # 函数不存在会直接 500。json_typeof 原生可用，类型名集合与
+            # jsonb_typeof 一致（number/string/boolean/object/array/null）。
+            typeof_expr = func.json_typeof(raw)
             allowed = {"number"} if key_type == "number" else {"string"}
         else:
             typeof_expr = func.json_type(raw)
@@ -995,10 +1062,6 @@ class UnifiedQueryService:
                 "allowedAction": profile.allowed_action_ids,
                 "allowedProperties": getattr(profile, "allowed_properties", None),
                 "maxRows": int(profile.max_rows_per_query or 0),
-                # 裁决 1：真实 RBAC 写权限（admin/editor-owner），与
-                # _recompute_auth_hash 共享同一材料。
-                "writeAccess": _ontology_write_access(
-                    self.user, meta.scope.ontology),
             }
         return material
 
@@ -1153,6 +1216,11 @@ class UnifiedQueryService:
 
     def fetch_page(self, token: str) -> dict:
         payload = self._verify_cursor(token)
+        # 快照本体集在签名 cursor 载荷内：据此预建 profile，避免 pinned
+        # 事务内部因 profile 缺失被 get_or_create_profile 的 commit 打断。
+        self._ensure_profiles(
+            {info.get("ontologyId")
+             for info in (payload.get("releases") or {}).values()})
         self._pin_transaction()
         snapshot = (
             self.db.query(AgentQuerySnapshot)
@@ -1195,7 +1263,7 @@ class UnifiedQueryService:
                     "role": str(getattr(self.user, "role", ""))}
         for alias, release_info in sorted(
                 (snapshot.releases or {}).items()):
-            _, profile, scope = build_scope(
+            _, profile, _ = build_scope(
                 self.db, release_info["ontologyId"],
                 release_id=release_info["releaseId"])
             material[alias] = {
@@ -1207,8 +1275,6 @@ class UnifiedQueryService:
                 "allowedAction": profile.allowed_action_ids,
                 "allowedProperties": getattr(profile, "allowed_properties", None),
                 "maxRows": int(profile.max_rows_per_query or 0),
-                "writeAccess": _ontology_write_access(
-                    self.user, scope.ontology),
             }
         return _sha256(_canonical_json(material))
 
@@ -1244,11 +1310,15 @@ def verify_join_evidence(db: Session, user, join, left: _SourceMeta,
 
     - ``structure:{ontologyId}:{releaseId}:{objectTypeId}:{propertyId}``
       必须命中本查询某一侧的发布结构（release/type/property 三者一致）；
+      structure 引用只是字段存在的佐证，永不构成充分依据 —— 即使两端
+      之间存在 declared link，也不证明任意两个属性可按键相等关联
+      （链接语义应走 declared_relation join + link 实例）；
     - ``assertion:{id}`` 必须是本人登记的关联含义声明，且两端
-      ontology/type/property 与 keyType 完全匹配 → 标 ``user_asserted``；
-    - ``fixture:{label}`` → 标 ``fixture``（隔离 fixture 语义，非治理认证）；
-    - 其余/无法核验 → 422 ``join_semantics_unverified``。
-    模型填写的 businessMeaning 只是展示文案，不构成证据。
+      ontology/type/property 与 keyType 完全匹配 → 标 ``user_asserted``
+      （用户经认证入口登记的显式依据；模型自填 businessMeaning 不算），
+      是 explicit_key 唯一的充分证据类别；
+    - 仅 structure 引用（单侧/双侧）、``fixture:`` 及未知引用 → 422
+      ``join_semantics_unverified``。
     """
     categories: list[str] = []
     verified_refs: list[str] = []
@@ -1301,16 +1371,17 @@ def verify_join_evidence(db: Session, user, join, left: _SourceMeta,
                     f"evidenceRef「{ref}」声明的两端/键型与本次 join 不匹配")
             categories.append("user_asserted")
             verified_refs.append(str(ref))
-        elif kind == "fixture":
-            if not str(ref).startswith("fixture:"):
-                raise QueryError(422, "join_semantics_unverified",
-                                 f"evidenceRef「{ref}」类别未知")
-            categories.append("fixture")
-            verified_refs.append(str(ref))
         else:
             raise QueryError(422, "join_semantics_unverified",
                              f"evidenceRef「{ref}」类别未知或无法核验")
     if not verified_refs:
         raise QueryError(422, "join_semantics_unverified",
                          "跨本体 join 缺少可核验的业务键证据")
+    if "user_asserted" not in categories:
+        raise QueryError(
+            422, "join_semantics_unverified",
+            "structure 引用只证明字段存在（两端存在 declared link 也不证明"
+            "任意属性可按键相等），explicit_key join 需要用户登记的关联含义"
+            "声明：请先经 join-assertions 登记两端与键型一致的声明"
+            "（assertion 证据），或改用 declared_relation join")
     return {"refs": verified_refs, "categories": categories}

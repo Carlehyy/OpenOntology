@@ -159,6 +159,27 @@ jobs:
           uv run alembic upgrade head
         working-directory: backend
 
+      - name: Ontology assistant PostgreSQL acceptance
+        if: matrix.shard == 1
+        env:
+          ENVIRONMENT: test
+          DATABASE_URL: postgresql://openontology_ci:openontology_ci@127.0.0.1:5432/openontology_ci
+          OPENONTOLOGY_ONTOLOGY_ASSISTANT_E2E: "1"
+        run: |
+          mkdir -p ../.artifacts/ontology-assistant
+          uv run python scripts/ontology_assistant_postgres_e2e.py --report ../.artifacts/ontology-assistant/query-postgres.json
+          uv run python scripts/ontology_action_confirmation_postgres_e2e.py --report ../.artifacts/ontology-assistant/action-postgres.json
+        working-directory: backend
+
+      - name: Upload ontology assistant acceptance evidence
+        if: ${{ always() && matrix.shard == 1 }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ontology-assistant-postgres-${{ github.run_id }}
+          path: .artifacts/ontology-assistant/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Persisted ciphertext secret-split E2E
         if: matrix.shard == 1
         env:

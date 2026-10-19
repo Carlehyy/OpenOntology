@@ -19,7 +19,7 @@ from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
 from app.settings.object_storage.service import execute_minio_tool
 from app.shared.config import settings
 from app.shared.database import SessionLocal
-from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, palace_service, provider, reflection_service, web_tools
+from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, provider, reflection_service, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -156,6 +156,8 @@ _CONFIRMATION_REQUIRED_BUILTIN_TOOLS = frozenset({
     "multica_create_task",
     # 本体业务动作执行：唯一的用户二次确认闸门（prepare 不设闸门）
     "ontology_execute_action",
+    # 跨本体业务键关联声明：登记本身必须经用户确认（explicit_key 证据）
+    ontology_tools.ONTOLOGY_REGISTER_JOIN_TOOL,
 })
 
 # 条件进入目录的联网工具声明：settings 未启用时也要在工具目录 API 中
@@ -233,7 +235,8 @@ def _system_prompt(
 6. 使用标准 Markdown 组织回答；不要用 markdown / md 代码围栏包裹整段答复。只有真实代码才使用代码围栏。
 7. 你可以用 memory_search / palace_recall 主动回忆跨会话记忆，用 memory_save 保存重要事实（低风险事实会自动记住，其余需用户审批后生效）。
 8. 当系统提示包含 Memory Palace 时，用 palace_zones / palace_read_zone / palace_recall 导航记忆分区。
-9. 记忆宫殿还包含用户上传文档沉淀的知识图谱（跨会话长期知识）：系统提示可能已注入相关图谱片段，需要更多时用 palace_graph_search 检索、palace_graph_files 查看文件库；回答图谱相关问题时引用来源文件。
+9. 记忆宫殿还包含用户上传文档与平台本体发布文档沉淀的知识图谱（跨会话长期知识）：系统提示可能已注入相关图谱片段，需要更多时用 palace_graph_search 检索、palace_graph_files 查看文件库；回答图谱相关问题时引用来源文件。
+10. 本体能力（用不改）：知识图谱里的本体内容只是发现线索（advisory），不是完整 schema。涉及本体数据时，先用 ontology_structure 读取当前发布 release 的准确结构（字段/类型/关系/动作都以 structure 返回为准），再用 ontology_query 查询；跨本体关联必须有明确业务键依据，不能凭名称相似猜测，确有关联依据时先调 ontology_register_join_assertion 向用户申请登记（批准后才能用于查询）。执行本体业务动作走 ontology_prepare_action 准备 → 用户在界面二次确认 → ontology_execute_action 唤醒（确认前不产生业务效果，是否需要确认以确认卡为准）；执行返回非 succeeded 状态（如 pending_approval/unknown）时如实转述当前状态，不得声称业务已完成。你只能“用”本体（发现/结构/查询/准备/确认执行），没有任何修改本体定义的途径，也不要建议绕过。
 
 可用 Skill 目录：
 {catalog}
@@ -245,7 +248,7 @@ def _system_prompt(
         prompt = f"{prompt}\n{always_active_section}\n"
     if multica_enabled:
         prompt = (
-            f"{prompt}\n10. 已配置 multica 外部集成：可用 multica_list_agents / "
+            f"{prompt}\n11. 已配置 multica 外部集成：可用 multica_list_agents / "
             "multica_list_tasks 查询智能体与任务，multica_create_task 创建并指派任务"
             "（写操作，平台会要求用户确认后执行）；用户消息以 /multica: 命令开头时，"
             "系统会强制指定对应工具，请照做。\n"
@@ -381,7 +384,7 @@ def _builtin_tools(agent_mode: bool = False) -> list[dict[str, Any]]:
         },
         {
             "name": "palace_graph_search",
-            "description": "检索记忆宫殿知识图谱（用户上传文档沉淀的跨会话知识）：按关键词找实体及其一跳关系，返回实体、关系和来源文件。",
+            "description": "检索记忆宫殿知识图谱（用户上传文档与平台本体发布文档沉淀的跨会话知识，本体内容仅作发现线索）：按关键词找实体及其一跳关系，返回实体、关系和来源文件。",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "检索词（人物/组织/概念等）"}},
@@ -391,7 +394,7 @@ def _builtin_tools(agent_mode: bool = False) -> list[dict[str, Any]]:
         },
         {
             "name": "palace_graph_files",
-            "description": "列出记忆宫殿文件库（用户上传的全部文档）及各文件的图谱构建状态；无权限读取其它会话的附件。",
+            "description": "列出记忆宫殿文件库（用户上传文档与平台共享的本体发布文档）及各文件的图谱构建状态；无权限读取其它会话的附件。",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     ]
@@ -470,6 +473,78 @@ def _disabled_builtin_tools(db, owner_id: str) -> set[str]:
     if not isinstance(raw, list):
         return set()
     return {item for item in raw if isinstance(item, str)}
+
+
+# 平台内置进程内通道的构造性受约束依据（不依赖登记位或可空配置）：
+# 工具目录是平台编码的固定清单，执行不经用户配置的传输/URL/凭据——
+# minio 固定平台工作区桶（桶/endpoint 覆盖参数被拒绝）；api_hub 逐工具
+# 以当前用户菜单权限 + 服务层行级作用域执行，出网复用 api_hub 私网/
+# 回环/重定向 SSRF 守卫。
+_CONSTRUCTIVELY_CONSTRAINED_BUILTINS = frozenset({"minio", "api_hub"})
+
+
+def mcp_server_constrained(server: SuperAssistantMcpServer) -> bool:
+    """调用期 fail-closed 信任判定：内置进程内通道构造性受约束；外部
+    transport 与自研 developed 只有 admin 登记的 constrained 位可放行。"""
+    if server.builtin_key in _CONSTRUCTIVELY_CONSTRAINED_BUILTINS:
+        return True
+    return bool(getattr(server, "constrained", False))
+
+
+def _api_hub_target_denied(db, url: str) -> bool:
+    """超级助手通道内 API Hub 接口目标闸：平台自身管理来源或未受约束的
+    MCP 桥接一律拒绝（用户直接使用接口代理不受影响）。"""
+    from app.api_hub.mcp_bridge import is_bridge_url
+
+    # MCP 必须走自身的清单、授权与确认通道，不能通过接口代理递归调用。
+    return is_bridge_url(url) or browser_tools._protected_origin_denied(url)
+
+
+def _revalidate_mcp_after_approval(db, item: dict[str, Any]) -> str | None:
+    """审批等待后的实时复核：通过返回 None，否则返回拒绝 JSON。
+
+    等待窗口内 server 可能被停用/删除、撤销受约束登记、发布新工具清单
+    revision 或变更连接——不得沿用目录期快照继续执行。
+    """
+    from app.super_assistant.kernel.models import CapabilityRevision
+
+    catalog_server, original_name = item["server"]
+    fresh = db.query(SuperAssistantMcpServer).filter(
+        SuperAssistantMcpServer.id == catalog_server.id,
+        SuperAssistantMcpServer.owner_id == catalog_server.owner_id,
+    ).populate_existing().first()
+    if fresh is None or not fresh.enabled:
+        return json.dumps(
+            {"error": "MCP server 已停用或删除", "decision": "denied"},
+            ensure_ascii=False)
+    if not mcp_server_constrained(fresh):
+        return json.dumps({
+            "error": "capability_boundary_unenforced",
+            "message": "MCP server 受约束登记已撤销，已拒绝执行",
+            "decision": "denied",
+        }, ensure_ascii=False)
+    snapshot = item["mcp_snapshot"]
+    current = (fresh.transport, fresh.url, fresh.command,
+               int(fresh.manifest_revision or 1))
+    if current != snapshot:
+        return json.dumps({
+            "error": "mcp_manifest_changed",
+            "message": "MCP server 连接或工具清单已更新，请重新发起调用",
+            "decision": "denied",
+        }, ensure_ascii=False)
+    key = namespaced_tool_name(fresh.name, original_name)
+    revisions = db.query(CapabilityRevision).filter(
+        CapabilityRevision.key == key).all()
+    if revisions:
+        active = [row for row in revisions if row.revision == snapshot[3]]
+        if not active or not all(row.enabled for row in active):
+            return json.dumps({
+                "error": "capability_revision_revoked",
+                "message": "MCP 工具的 CapabilityRevision 授权位已撤销",
+                "decision": "denied",
+            }, ensure_ascii=False)
+    item["server"] = (fresh, original_name)
+    return None
 
 
 def builtin_tool_catalog(db, owner_id: str) -> list[dict[str, Any]]:
@@ -653,6 +728,7 @@ def _execute_builtin_tool(
     arguments: dict[str, Any],
     todo_state: dict[str, list[str]] | None = None,
     disabled_tools: set[str] | None = None,
+    tool_run: Any = None,
 ) -> str:
     """全部内置工具的统一分派（含记忆/宫殿/web/子代理）。
 
@@ -870,12 +946,13 @@ def _execute_builtin_tool(
             name=name, arguments=arguments,
         )
     if name in {"ontology_structure", "ontology_query",
-                "ontology_prepare_action", "ontology_execute_action"}:
+                "ontology_prepare_action", "ontology_execute_action",
+                "ontology_register_join_assertion"}:
         from app.super_assistant import ontology_tools as _ontology_tools
 
         return _ontology_tools.execute_ontology_tool(
             db, owner_id=owner_id, conversation_id=conversation_id,
-            name=name, arguments=arguments,
+            name=name, arguments=arguments, tool_run=tool_run,
         )
     return json.dumps({"error": f"未知工具 {name}"}, ensure_ascii=False)
 
@@ -1339,6 +1416,13 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     "arguments": arguments,
                     "server": server_tuple,
                     "run": tool_run,
+                    # 目录期 server 快照：审批等待后据此复核连接/清单未变
+                    "mcp_snapshot": (
+                        (server_tuple[0].transport, server_tuple[0].url,
+                         server_tuple[0].command,
+                         int(server_tuple[0].manifest_revision or 1))
+                        if server_tuple else None
+                    ),
                 })
 
             # 2) 即时结果（截断/权限拒绝）与执行分组：只读并行、其余串行
@@ -1359,23 +1443,17 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         "denied",
                         None,
                     )
-                elif item["server"] is None and item["name"] in disabled_builtin_tools:
-                    # 目录级过滤的兜底（P3 整改恢复）：模型幻觉调用已禁用的
-                    # 内置工具时服务端拒绝，不依赖目录注入约束。
+                elif item["name"] in disabled_builtin_tools:
+                    # 目录级过滤的兜底：模型幻觉调用已禁用工具时拒绝并回灌
                     executed[item["id"]] = (
                         json.dumps({"error": "工具已被用户禁用", "decision": "denied"}, ensure_ascii=False),
                         "denied",
                         None,
                     )
                 elif item["name"].startswith("mcp__") and item["server"] is not None:
-                    # YIYA-36 P2-5：未声明「受约束 descriptor」的 MCP server 在
-                    # 超级助手调用中 fail-closed（不能证明凭据/出网隔离）。
-                    # 平台内置 MCP（builtin_key：minio/api_hub 等）由平台
-                    # 预置受控执行面，视为已受约束；用户自建 server 须登记。
-                    mcp_server = item["server"][0]
-                    builtin = bool(getattr(mcp_server, "builtin_key", None))
-                    if not builtin and not getattr(mcp_server, "constrained",
-                                                   False):
+                    # YIYA-36 P2-5：内置进程内通道构造性受约束；外部 transport/
+                    # 自研 developed 未获 admin 登记即 fail-closed。
+                    if not mcp_server_constrained(item["server"][0]):
                         executed[item["id"]] = (
                             json.dumps({
                                 "error": "capability_boundary_unenforced",
@@ -1443,12 +1521,68 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 if tool_run.requires_confirmation:
                     # MCP 工具按 server 名展示来源；multica 等需确认的内置
                     # 工具无 server 归属，统一以 multica 作为来源标签
-                    yield sse("tool_confirmation_required", {
+                    confirmation_payload: dict[str, Any] | None = None
+                    if (
+                        server_tuple is None
+                        and tool_run.tool_name == ontology_tools.ONTOLOGY_EXECUTE_TOOL
+                    ):
+                        # direct 本体确认卡必须携带服务端持久确认的完整展示
+                        # 载荷（ontology/action/target/release/最终参数），前端
+                        # 不得渲染模型可编造的裸 confirmationId 卡。
+                        confirmation_payload = ontology_tools.confirmation_display_for_run(
+                            db,
+                            owner_id=owner_id,
+                            conversation_id=conversation_id,
+                            tool_run=tool_run,
+                        )
+                        if (
+                            confirmation_payload is None
+                            or confirmation_payload.get("state") != "prepared"
+                        ):
+                            # 确认不可验证（不存在/跨主体/跨会话/已过期/状态
+                            # 已推进）：不出可批准卡，直接拒绝并如实回灌
+                            executed[item["id"]] = (
+                                json.dumps({
+                                    "error": "confirmation_not_verifiable",
+                                    "message": "本体确认不可验证（不存在/跨会话/"
+                                               "已过期），已拒绝执行；请重新准备"
+                                               "确认后再试",
+                                    "confirmationState": (
+                                        confirmation_payload or {}
+                                    ).get("state") or "unavailable",
+                                }, ensure_ascii=False),
+                                "denied",
+                                None,
+                            )
+                            continue
+                    confirmation_card = {
                         "toolRunId": tool_run.id,
                         "toolName": server_tuple[1] if server_tuple else tool_run.tool_name,
                         "serverName": server_tuple[0].name if server_tuple else "multica",
                         "arguments": item["arguments"],
-                    })
+                    }
+                    if confirmation_payload is not None:
+                        confirmation_card["ontologyConfirmation"] = confirmation_payload
+                    if (
+                        server_tuple is None
+                        and tool_run.tool_name == ontology_tools.ONTOLOGY_REGISTER_JOIN_TOOL
+                    ):
+                        # 关联声明卡：展示冻结参数的两端/键型/业务含义；
+                        # 参数不完整不出可确认卡（登记侧也会拒绝）
+                        join_display = ontology_tools.join_assertion_display(tool_run)
+                        if join_display is None:
+                            executed[item["id"]] = (
+                                json.dumps({
+                                    "error": "join_assertion_invalid_payload",
+                                    "message": "关联声明参数不完整（两端本体/类型/属性、"
+                                               "键型、业务含义），未提交用户确认",
+                                }, ensure_ascii=False),
+                                "denied",
+                                None,
+                            )
+                            continue
+                        confirmation_card["joinAssertion"] = join_display
+                    yield sse("tool_confirmation_required", confirmation_card)
                     decision = _wait_for_confirmation(db, tool_run, assistant_message)
                     if decision == "cancelled":
                         _cancel_tool_placeholders(messages, order, executed)
@@ -1467,6 +1601,14 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         output = json.dumps({"error": "工具已被用户禁用", "decision": "denied"}, ensure_ascii=False)
                         executed[item["id"]] = (output, "denied", None)
                         continue
+                    if server_tuple is not None:
+                        # 同一窗口内 MCP server 也可能被停用/撤销信任/更新
+                        # 清单或连接：实时复核通过后才以新读取的行执行
+                        denial = _revalidate_mcp_after_approval(db, item)
+                        if denial is not None:
+                            executed[item["id"]] = (denial, "denied", None)
+                            continue
+                        server_tuple = item["server"]
 
                 started = time.monotonic()
                 try:
@@ -1492,6 +1634,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                                 name=original_name,
                                 arguments=item["arguments"],
                                 conversation_id=conversation_id,
+                                target_url_guard=lambda url: _api_hub_target_denied(db, url),
                             )
                         elif server.transport == "developed":
                             # 自研 MCP：进程内执行发布绑定的冻结脚本
@@ -1523,6 +1666,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     else:
                         output = _execute_builtin_tool(
                             db, name=item["name"], arguments=item["arguments"],
+                            tool_run=tool_run,
                             **builtin_context,
                         )
                     if len(output) > settings.super_assistant_tool_result_chars:
@@ -1543,6 +1687,11 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 tool_run.result = output
                 if status == "success":
                     tool_run.status = "success"
+                    if (
+                        item["server"] is None
+                        and tool_run.tool_name == ontology_tools.ONTOLOGY_EXECUTE_TOOL
+                    ):
+                        tool_run.status = ontology_tools.execution_result_status(output)
                 elif status == "denied" and error is None and item["run"].requires_confirmation:
                     tool_run.status = "denied"
                 elif status in {"denied", "expired"}:
@@ -1557,6 +1706,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 db.commit()
                 preview = _tool_result_preview(item["name"], output)
                 steps.append({
+                    "toolRunId": tool_run.id,
                     "toolName": item["name"],
                     "status": tool_run.status,
                     "arguments": item["arguments"],

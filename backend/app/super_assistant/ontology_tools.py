@@ -19,6 +19,7 @@ from app.ontologies.agent_runtime.assistant_facade import (
     current_release_map, decide_confirmation, execute_confirmation,
     prepare_action, query, query_page, structure,
     confirmation_owner_lookup, reconcile_confirmation,
+    register_join_assertion,
 )
 from app.super_assistant.models import (
     SuperAssistantConversation, SuperAssistantMessage, SuperAssistantToolRun,
@@ -32,12 +33,14 @@ ONTOLOGY_STRUCTURE_TOOL = "ontology_structure"
 ONTOLOGY_QUERY_TOOL = "ontology_query"
 ONTOLOGY_PREPARE_TOOL = "ontology_prepare_action"
 ONTOLOGY_EXECUTE_TOOL = "ontology_execute_action"
+ONTOLOGY_REGISTER_JOIN_TOOL = "ontology_register_join_assertion"
 
 ONTOLOGY_TOOL_NAMES = {
     ONTOLOGY_STRUCTURE_TOOL,
     ONTOLOGY_QUERY_TOOL,
     ONTOLOGY_PREPARE_TOOL,
     ONTOLOGY_EXECUTE_TOOL,
+    ONTOLOGY_REGISTER_JOIN_TOOL,
 }
 
 _MAX_QUERY_SOURCES = 4
@@ -88,12 +91,12 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
         "anyOf": [
             filter_leaf,
             {"type": "object", "properties": {
-                "and": {"type": "array", "items": {"$ref": "#"}}},
+                "and": {"type": "array", "items": {"$ref": "#/$defs/filterNode"}}},
              "required": ["and"], "additionalProperties": False},
             {"type": "object", "properties": {
-                "or": {"type": "array", "items": {"$ref": "#"}}},
+                "or": {"type": "array", "items": {"$ref": "#/$defs/filterNode"}}},
              "required": ["or"], "additionalProperties": False},
-            {"type": "object", "properties": {"not": {"$ref": "#"}},
+            {"type": "object", "properties": {"not": {"$ref": "#/$defs/filterNode"}},
              "required": ["not"], "additionalProperties": False},
         ],
     }
@@ -185,7 +188,7 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
             },
             "where": {"type": "array", "items": filter_node},
             "select": {
-                "type": "array", "minItems": 1, "maxItems": 32,
+                "type": "array", "maxItems": 32,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -241,7 +244,7 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
             },
             "pageSize": {"type": "integer", "minimum": 1, "maximum": 200},
         },
-        "required": ["sources", "select"],
+        "required": ["sources"],
         "additionalProperties": False,
     }
     return [
@@ -273,7 +276,19 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "统一关联查询：同一本体内多对象类型、或有明确业务键依据的跨本体"
                 "关联；服务端完成过滤/投影/聚合/排序与稳定分页。翻页只传 cursor。"
                 "字段/类型/基数依据必须来自 ontology_structure 的当前发布结构。"),
-            "parameters": query_request,
+            "parameters": {
+                "type": "object",
+                "$defs": {"filterNode": filter_node},
+                "properties": {
+                    **query_request["properties"],
+                    "cursor": {"type": "string", "minLength": 16},
+                },
+                "oneOf": [
+                    {"required": ["sources"], "not": {"required": ["cursor"]}},
+                    {"required": ["cursor"], "not": {"required": ["sources"]}},
+                ],
+                "additionalProperties": False,
+            },
         },
         {
             "name": ONTOLOGY_PREPARE_TOOL,
@@ -309,13 +324,45 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
         },
+        {
+            "name": ONTOLOGY_REGISTER_JOIN_TOOL,
+            "description": (
+                "登记一条跨本体业务键关联声明（explicit_key join 的 assertion "
+                "证据）。这是用户显式确认的写操作：平台会向用户展示两端本体/"
+                "类型/属性、键型与业务含义，批准后才保存，拒绝则不登记。"
+                "跨本体 explicit_key 查询前必须已有本人声明（或使用本体声明的 "
+                "declared_relation）；不得把用户话里的模糊提及当作授权。"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leftOntologyId": {"type": "string"},
+                    "leftObjectTypeId": {"type": "string"},
+                    "leftProperty": {"type": "string"},
+                    "rightOntologyId": {"type": "string"},
+                    "rightObjectTypeId": {"type": "string"},
+                    "rightProperty": {"type": "string"},
+                    "keyType": {
+                        "type": "string", "enum": ["string", "number", "uuid"]},
+                    "businessMeaning": {
+                        "type": "string",
+                        "description": "一两句话说明这个键关联的业务含义"},
+                },
+                "required": [
+                    "leftOntologyId", "leftObjectTypeId", "leftProperty",
+                    "rightOntologyId", "rightObjectTypeId", "rightProperty",
+                    "keyType", "businessMeaning",
+                ],
+                "additionalProperties": False,
+            },
+        },
     ]
 
 
 # ------------------------------------------------------------- executor
 
 def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
-                          name: str, arguments: dict[str, Any]) -> str:
+                          name: str, arguments: dict[str, Any],
+                          tool_run=None) -> str:
     """内置工具分派入口 — 会话/意图/来源在此派生，不经模型。"""
     user = _load_user(db, owner_id)
     if user is None:
@@ -323,6 +370,9 @@ def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
     if _require_conversation(db, owner_id, conversation_id) is None:
         return json.dumps({"error": "会话不存在"}, ensure_ascii=False)
     try:
+        if name == ONTOLOGY_REGISTER_JOIN_TOOL:
+            return _register_join_assertion_from_tool_run(
+                db, user, conversation_id=conversation_id, tool_run=tool_run)
         if name == ONTOLOGY_STRUCTURE_TOOL:
             data = structure(
                 db, user,
@@ -333,10 +383,15 @@ def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
                 action_ids=arguments.get("actionIds") or None)
             return json.dumps(data, ensure_ascii=False, default=str)
         if name == ONTOLOGY_QUERY_TOOL:
-            request = build_query_request(arguments)
-            data = query(db, user, request,
-                                session_kind=SESSION_KIND,
-                                session_id=conversation_id)
+            if arguments.get("cursor"):
+                data = query_page(db, user, str(arguments["cursor"]),
+                                  session_kind=SESSION_KIND,
+                                  session_id=conversation_id)
+            else:
+                request = build_query_request(arguments)
+                data = query(db, user, request,
+                             session_kind=SESSION_KIND,
+                             session_id=conversation_id)
             return json.dumps(data, ensure_ascii=False, default=str)
         if name == ONTOLOGY_PREPARE_TOOL:
             root_intent_id = _root_intent_id(db, conversation_id)
@@ -377,6 +432,134 @@ def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
     return json.dumps({"error": f"未知工具 {name}"}, ensure_ascii=False)
 
 
+_JOIN_ASSERTION_FIELDS = (
+    "leftOntologyId", "leftObjectTypeId", "leftProperty",
+    "rightOntologyId", "rightObjectTypeId", "rightProperty",
+    "keyType", "businessMeaning",
+)
+
+
+def execution_result_status(output: str) -> str:
+    try:
+        payload = json.loads(output)
+        state = payload.get("state") if isinstance(payload, dict) else None
+    except (TypeError, ValueError):
+        state = None
+    if state == "succeeded":
+        return "success"
+    if state in {"confirmed", "dispatch_queued", "executing", "recovering"}:
+        return "running"
+    if state in {"unknown", "compensation_required", "pending_approval",
+                 "denied", "cancelled", "expired", "approval_rejected",
+                 "failed_not_executed", "prepared"}:
+        return state
+    return "error"
+
+
+def refresh_action_steps(db: Session, owner_id: str, conversation_id: str,
+                         messages: list[SuperAssistantMessage]) -> None:
+    """历史步骤读取持久业务状态；状态读取不会重新派发动作。"""
+    if not any(step.get("toolName") == ONTOLOGY_EXECUTE_TOOL
+               for message in messages for step in message.steps or []):
+        return
+    runs = {run.id: run for run in db.query(SuperAssistantToolRun).filter(
+        SuperAssistantToolRun.conversation_id == conversation_id,
+        SuperAssistantToolRun.tool_name == ONTOLOGY_EXECUTE_TOOL,
+        SuperAssistantToolRun.status != "awaiting_confirmation",
+    ).all()}
+    changed = False
+    for message in messages:
+        steps = []
+        for step in message.steps or []:
+            run = runs.get(step.get("toolRunId"))
+            if run is not None:
+                confirmation = confirmation_display_for_run(
+                    db, owner_id=owner_id, conversation_id=conversation_id,
+                    tool_run=run)
+                status = (execution_result_status(json.dumps(confirmation))
+                          if confirmation is not None else "unknown")
+                preview = json.dumps({
+                    "confirmationId": (run.arguments or {}).get("confirmationId"),
+                    "state": confirmation.get("state") if confirmation else "unknown",
+                    "failureCode": confirmation.get("failureCode")
+                    if confirmation else "confirmation_state_unavailable",
+                }, ensure_ascii=False)
+                step = {**step, "status": status, "preview": preview}
+            steps.append(step)
+        if steps != (message.steps or []):
+            message.steps = steps
+            changed = True
+    if changed:
+        db.commit()
+
+
+def join_assertion_display(tool_run) -> dict | None:
+    """确认卡展示载荷：只从冻结的 tool_run 参数构造，两端/键型/含义齐备。"""
+    arguments = tool_run.arguments or {}
+    display = {key: arguments.get(key) for key in _JOIN_ASSERTION_FIELDS}
+    if any(not str(display[key] or "").strip() for key in _JOIN_ASSERTION_FIELDS):
+        return None
+    if display.get("keyType") not in ("string", "number", "uuid"):
+        return None
+    return display
+
+
+def _register_join_assertion_from_tool_run(db: Session, user,
+                                           *, conversation_id: str,
+                                           tool_run) -> str:
+    """登记跨本体关联声明 — 只认服务端 approved 的 tool_run，拒绝可伪造输入。
+
+    绑定校验：tool_run 必须是本会话内 requires_confirmation 的本次调用且
+    状态为 approved（用户在界面批准）；登记参数只取 tool_run 冻结行，不从
+    工具入参读取——模型无法凭话术或自授字段触发登记。
+    """
+    if tool_run is None or not tool_run.requires_confirmation:
+        return json.dumps({
+            "error": "join_assertion_requires_user_approval",
+            "message": "跨本体关联声明必须经用户在界面二次确认后才会保存",
+        }, ensure_ascii=False)
+    if tool_run.conversation_id != conversation_id:
+        return json.dumps({"error": "会话不一致，拒绝登记"}, ensure_ascii=False)
+    if tool_run.status != "approved":
+        return json.dumps({
+            "error": "join_assertion_not_approved",
+            "message": f"声明尚未获用户批准（当前状态 {tool_run.status}），不登记",
+        }, ensure_ascii=False)
+    display = join_assertion_display(tool_run)
+    if display is None:
+        return json.dumps({
+            "error": "join_assertion_invalid_payload",
+            "message": "声明参数不完整（两端本体/类型/属性、键型、业务含义）",
+        }, ensure_ascii=False)
+    try:
+        data = register_join_assertion(db, user, {
+            "left_ontology_id": str(display["leftOntologyId"]),
+            "left_object_type_id": str(display["leftObjectTypeId"]),
+            "left_property": str(display["leftProperty"]),
+            "right_ontology_id": str(display["rightOntologyId"]),
+            "right_object_type_id": str(display["rightObjectTypeId"]),
+            "right_property": str(display["rightProperty"]),
+            "key_type": str(display["keyType"]),
+            "business_meaning": str(display["businessMeaning"]),
+        })
+        data = dict(data)
+        data["next"] = (
+            "声明已保存；现在可以用该 explicit_key 关联发起 ontology_query。")
+        return json.dumps(data, ensure_ascii=False, default=str)
+    except FacadeError as exc:
+        return json.dumps({"error": exc.message, "code": exc.code,
+                           **exc.extra}, ensure_ascii=False, default=str)
+    except ImportError as exc:
+        logger.error("facade register_join_assertion 不可用", exc_info=True)
+        return json.dumps({
+            "error": "join_assertion_capability_unavailable",
+            "message": "声明登记能力暂不可用，请稍后重试",
+        }, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001 - 工具错误不冒泡为对话失败
+        logger.warning("join assertion 登记失败", exc_info=True)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
 def decide_from_tool_run(db: Session, current_user, tool_run, decision: str):
     """tool-run approve/deny → 同一确认协议的一次用户二次确认。"""
     arguments = tool_run.arguments or {}
@@ -398,6 +581,33 @@ def decide_from_tool_run(db: Session, current_user, tool_run, decision: str):
         from fastapi import HTTPException
 
         raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+
+
+def confirmation_display_for_run(db: Session, *, owner_id: str,
+                                 conversation_id: str, tool_run) -> dict | None:
+    """direct 确认卡的服务端持久展示载荷（SSE 与历史恢复共用）。
+
+    经白名单门面按 ``session_kind=super_assistant`` + 会话 + 归属用户读取
+    真实确认记录，返回 ``confirmation_out`` 原样载荷（含
+    ontology/action/target/release/最终参数/requiresApproval 等完整 display）；
+    记录不存在、跨主体/跨会话一律 None——模型与前端都不能凭 confirmationId
+    编造确认内容，也不得回退为可批准的裸 ID 卡。
+    """
+    cid = str((tool_run.arguments or {}).get("confirmationId") or "")
+    if not cid:
+        return None
+    user = _load_user(db, owner_id)
+    if user is None:
+        return None
+    ontology_id = confirmation_owner_lookup(db, user, cid)
+    if not ontology_id:
+        return None
+    try:
+        return confirmation_status(
+            db, user, ontology_id, cid,
+            session_kind=SESSION_KIND, session_id=conversation_id)
+    except FacadeError:
+        return None
 
 
 # ------------------------------------------------- kernel gated 写映射（P2-5）

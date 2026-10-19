@@ -36,6 +36,8 @@ def test_upgrade_repairs_missing_super_assistant_mcp_table(tmp_path, monkeypatch
         "builtin_key", "transport", "url", "dev_project_id",
         "headers_encrypted", "header_names", "command", "args",
         "env_encrypted", "env_names", "enabled", "require_confirmation",
+        # YIYA-36 P2-5 受约束登记位：内置行回填 true，其余默认 false
+        "constrained",
         "tool_manifest", "manifest_revision", "manifest_hash", "last_test_status", "last_test_message",
         "last_tested_at", "created_at", "updated_at",
         # 基线 main 的 0108_super_assistant_mcp_dev 给该表补的 dev 项目

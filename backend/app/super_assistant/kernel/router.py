@@ -40,6 +40,88 @@ def _require_matching_idempotency(body_key: str, header_key: str | None) -> None
         raise HTTPException(status_code=422, detail="Idempotency-Key must match body.idempotency_key")
 
 
+def _confirmation_projection(db: Session, owner_id, input_ref) -> dict | None:
+    """本体确认 Call 的确认协议投影（RunView/SSE 共用，只读不推进）。
+
+    复用 confirmation_out 的 display（动作/目标/参数/来源/release），让
+    审批与等待外部结果的展示不依赖裸 confirmationId。确认不可读时返回
+    None，视图保持兼容不含该键。"""
+    from app.super_assistant import ontology_tools
+
+    request = ontology_tools.parse_ontology_execute_request(input_ref)
+    if request is None:
+        return None
+    from app.models.user import User
+
+    user = db.scalar(select(User).where(User.id == owner_id))
+    if user is None:
+        return None
+    confirmation = ontology_tools.kernel_confirmation_status(db, user, request)
+    if confirmation is None:
+        return None
+    return {
+        "confirmationId": confirmation.get("confirmationId"),
+        "state": confirmation.get("state"),
+        "payloadHash": confirmation.get("payloadHash"),
+        "requiresApproval": confirmation.get("requiresApproval"),
+        "display": confirmation.get("display") or {},
+        "failureCode": confirmation.get("failureCode"),
+        "blockReason": confirmation.get("blockReason"),
+        "operationId": confirmation.get("operationId"),
+    }
+
+
+def _call_view(db: Session, run_id: str, owner_id, call: ExecutionCall) -> dict:
+    view = {
+        "call_id": call.id, "status": call.status, "outcome": call.outcome,
+        "capability_key": call.capability_key,
+        "manual_attention": bool(call.manual_attention),
+        "remote_observed_state_ref": call.remote_observed_state_ref,
+        "remote_task_ref": call.remote_task_ref,
+    }
+    from app.super_assistant.ontology_tools import ONTOLOGY_EXECUTE_CAPABILITY
+
+    if call.capability_key == ONTOLOGY_EXECUTE_CAPABILITY:
+        projection = _confirmation_projection(db, owner_id,
+                                              call.input_snapshot_ref)
+        if projection is not None:
+            view["confirmation"] = projection
+    return view
+
+
+def _inbox_view(db: Session, run_id: str, owner_id, item: InboxItem) -> dict:
+    view = {
+        "inbox_id": item.id, "kind": item.kind,
+        "question_id": item.question_id, "approval_id": item.approval_id,
+        "expires_at": item.expires_at,
+    }
+    if item.kind != "approval_decision" or not item.approval_id:
+        return view
+    approval = db.scalar(select(Approval).where(
+        Approval.id == item.approval_id, Approval.run_id == run_id))
+    if approval is None:
+        return view
+    view["approval"] = {
+        "approval_id": approval.id, "status": approval.status,
+        "call_id": approval.call_id,
+        "target_summary": approval.target_summary,
+        "parameter_summary": approval.parameter_summary,
+        "scope_summary": approval.scope_summary,
+        "expires_at": approval.expires_at,
+        "decided_at": approval.decided_at,
+        "decided_by": approval.decided_by,
+    }
+    if approval.call_id:
+        call = db.scalar(select(ExecutionCall).where(
+            ExecutionCall.id == approval.call_id, ExecutionCall.run_id == run_id))
+        if call is not None:
+            projection = _confirmation_projection(db, owner_id,
+                                                  call.input_snapshot_ref)
+            if projection is not None:
+                view["approval"]["confirmation"] = projection
+    return view
+
+
 @router.post(
     "/conversations/{conversation_id}/runs",
     response_model=RunAccepted,
@@ -93,8 +175,8 @@ def get_kernel_run(run_id: str, db: Session = Depends(get_db), user=Depends(get_
         run_id=run.id, conversation_id=run.conversation_id, status=run.status,
         wait_reason=run.wait_reason, version=run.version, execution_version=run.execution_version,
         goal=run.goal, deadline=run.deadline, binding_snapshot=binding,
-        current_inbox=[{"inbox_id": item.id, "kind": item.kind, "question_id": item.question_id, "approval_id": item.approval_id, "expires_at": item.expires_at} for item in inbox],
-        calls=[{"call_id": c.id, "status": c.status, "outcome": c.outcome, "capability_key": c.capability_key} for c in calls],
+        current_inbox=[_inbox_view(db, run.id, user.id, item) for item in inbox],
+        calls=[_call_view(db, run.id, user.id, c) for c in calls],
         artifacts=[{"artifact_id": a.id, "kind": a.kind, "mime_type": a.mime_type, "size": a.size, "checksum": a.checksum, "status": a.status, "business_status": a.business_status} for a in artifacts],
     )
 
@@ -445,8 +527,8 @@ def stream_kernel_events(
                     "version": current_run.version, "execution_version": current_run.execution_version,
                     "goal": current_run.goal, "deadline": current_run.deadline,
                     "binding_snapshot": binding,
-                    "current_inbox": [{"inbox_id": i.id, "kind": i.kind, "question_id": i.question_id, "approval_id": i.approval_id, "expires_at": i.expires_at} for i in inbox],
-                    "calls": [{"call_id": c.id, "status": c.status, "outcome": c.outcome, "capability_key": c.capability_key} for c in calls],
+                    "current_inbox": [_inbox_view(session, current_run.id, user.id, i) for i in inbox],
+                    "calls": [_call_view(session, current_run.id, user.id, c) for c in calls],
                     "artifacts": [{"artifact_id": a.id, "kind": a.kind, "mime_type": a.mime_type, "size": a.size, "checksum": a.checksum, "status": a.status, "business_status": a.business_status} for a in artifacts],
                 }}
             return snapshot, events

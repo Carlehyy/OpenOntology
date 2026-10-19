@@ -1,15 +1,13 @@
 // 悬浮 AI 助手的纯逻辑：会话挑选、SSE 流事件归约、思考链视图模型、错误文案提取。
 // 本模块被单元测试在 Node --experimental-strip-types 下直接执行，
-// 只允许类型级 import（运行时装载前会被擦除），禁止引入任何运行时依赖。
+// 运行时 import 只允许同为纯逻辑的兄弟模块（相对路径，@ 别名不可解析），
+// 禁止引入任何运行时依赖。
 
+import { parsePendingConfirmation } from '../ontologyConfirmationModel.ts'
+import type { PendingToolConfirmation } from '../ontologyConfirmationModel'
 import type { StreamEvent, SuperMessage, ToolStep } from '../../api/superAssistant'
 
-export interface PendingConfirmation {
-  toolRunId: string
-  toolName: string
-  serverName: string
-  arguments: Record<string, unknown>
-}
+export type PendingConfirmation = PendingToolConfirmation
 
 /**
  * 会话初始选中：优先 URL/调用方指定的会话（须存在于列表中），否则取最新一条。
@@ -75,12 +73,7 @@ export function reduceStreamEvent(message: SuperMessage, event: StreamEvent): St
     ))
     return {
       message: { ...message, steps },
-      pendingConfirmation: {
-        toolRunId: String(data.toolRunId ?? ''),
-        toolName: String(data.toolName ?? ''),
-        serverName: String(data.serverName ?? ''),
-        arguments: (data.arguments as Record<string, unknown>) || {},
-      },
+      pendingConfirmation: parsePendingConfirmation(data),
     }
   }
   if (name === 'tool_result') {

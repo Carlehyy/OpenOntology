@@ -223,6 +223,8 @@ class McpServerOut(ORMModel):
     env_names: list[str]
     enabled: bool
     require_confirmation: bool
+    # admin 受约束登记位（内置进程内通道恒 True，见 mcp_server_service）
+    constrained: bool
     tool_manifest: list[dict[str, Any]]
     last_test_status: str | None
     last_test_message: str | None

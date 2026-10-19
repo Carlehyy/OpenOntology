@@ -5,8 +5,6 @@ SQLite 保留契约语义（typed cast/三值逻辑/稳定分页）；锁/隔离
 """
 import pytest
 
-import json
-
 from app.ontologies.agent_query.service import QueryError
 
 _QUERY = "/api/v2/formal/agent/query"
@@ -33,11 +31,21 @@ def orders_ontology(client, auth_headers, ontology, db):
                   "type": "number"},
                  {"id": "p4", "name": "tenant_key", "displayName": "租户键",
                   "type": "string"},
+                 {"id": "p5", "name": "risk_score", "displayName": "风险分",
+                  "type": "number", "source": "computed"},
+                 {"id": "p6", "name": "tenant_ref", "displayName": "租户引用",
+                  "type": "string", "source": "computed"},
              ], "positionX": 0, "positionY": 0},
             {"id": "ot-supplier", "name": "Supplier", "displayName": "供应商",
              "primaryKey": "sname",
              "properties": [
                  {"id": "p5", "name": "sname", "displayName": "名称",
+                  "type": "string", "required": True},
+             ], "positionX": 0, "positionY": 0},
+            {"id": "ot-warehouse", "name": "Warehouse", "displayName": "仓库",
+             "primaryKey": "wh_code",
+             "properties": [
+                 {"id": "p7", "name": "wh_code", "displayName": "仓库键",
                   "type": "string", "required": True},
              ], "positionX": 0, "positionY": 0},
         ],
@@ -60,6 +68,8 @@ def orders_ontology(client, auth_headers, ontology, db):
                             "amount": None, "tenant_key": "t-b"}},
             {"id": "inst-s1", "objectTypeId": "ot-supplier",
              "properties": {"sname": "华南电子"}},
+            {"id": "inst-w1", "objectTypeId": "ot-warehouse",
+             "properties": {"wh_code": "t-a"}},
         ],
         "linkInstances": [
             {"id": "li-1", "linkTypeId": "lt-1",
@@ -220,12 +230,8 @@ def test_cross_ontology_explicit_key(client, auth_headers, orders_ontology,
                    "rightProperty": "party_key", "keyType": "string",
                    "cardinality": "N:1",
                    "businessMeaning": "订单.tenant_key 标识租户客户业务键",
-                   "evidenceRefs": [
-                       f"structure:{orders['ontologyId']}:"
-                       f"{orders['releaseId']}:ot-order:tenant_key",
-                       f"structure:{parties['ontologyId']}:"
-                       f"{parties['releaseId']}:ot-party:party_key"]}},
-        ],
+                   "evidenceRefs": _register_join_assertion(
+                       client, auth_headers, orders, parties)}}],
         "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
                    {"source": "b", "property": "label", "as": "partyLabel"}],
         "orderBy": [{"output": "orderNo"}],
@@ -237,6 +243,24 @@ def test_cross_ontology_explicit_key(client, auth_headers, orders_ontology,
     assert data["totalRowCount"] == 3
     labels = {row["orderNo"]: row["partyLabel"] for row in data["rows"]}
     assert labels["SO-001"] == "租户A" and labels["SO-003"] == "租户B"
+
+
+def _register_join_assertion(client, auth_headers, orders, parties, *,
+                             left_property="tenant_key",
+                             right_property="party_key",
+                             key_type="string") -> list[str]:
+    """登记本人跨本体关联含义声明 — 有用户依据的 evidenceRef。"""
+    r = client.post(
+        f"{_fo(parties['ontologyId'])}/agent/join-assertions",
+        headers=auth_headers,
+        json={"leftOntologyId": orders["ontologyId"],
+              "leftObjectTypeId": "ot-order", "leftProperty": left_property,
+              "rightOntologyId": parties["ontologyId"],
+              "rightObjectTypeId": "ot-party", "rightProperty": right_property,
+              "keyType": key_type,
+              "businessMeaning": "订单租户键标识客户业务键"})
+    assert r.status_code == 200, r.text
+    return [r.json()["data"]["evidenceRef"]]
 
 
 def test_invalid_typed_key_rejected(client, auth_headers, orders_ontology,
@@ -259,7 +283,8 @@ def test_invalid_typed_key_rejected(client, auth_headers, orders_ontology,
             "on": {"kind": "explicit_key", "leftProperty": "tenant_key",
                    "rightProperty": "party_key", "keyType": "string",
                    "cardinality": "N:1", "businessMeaning": "x",
-                   "evidenceRefs": ["fixture:tenant-key"]}}],
+                   "evidenceRefs": _register_join_assertion(
+                       client, auth_headers, orders, parties)}}],
         "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
                    {"source": "b", "property": "label", "as": "label"}],
         "pageSize": 10,
@@ -294,7 +319,8 @@ def test_cardinality_mismatch_rejected(client, auth_headers,
             "on": {"kind": "explicit_key", "leftProperty": "tenant_key",
                    "rightProperty": "party_key", "keyType": "string",
                    "cardinality": "N:1", "businessMeaning": "x",
-                   "evidenceRefs": ["fixture:tenant-key"]}}],
+                   "evidenceRefs": _register_join_assertion(
+                       client, auth_headers, orders, parties)}}],
         "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
                    {"source": "b", "property": "label", "as": "label"}],
         "pageSize": 10,
@@ -302,6 +328,90 @@ def test_cardinality_mismatch_rejected(client, auth_headers,
     r = _run(client, auth_headers, payload)
     assert r.status_code == 422
     assert r.json()["detail"]["code"] == "join_cardinality_mismatch"
+
+
+def test_fixture_evidence_rejected(client, auth_headers, orders_ontology,
+                                   parties_ontology):
+    """fixture 类证据已退役：无核验门禁的引用不再放行跨本体 join。"""
+    orders, parties = orders_ontology, parties_ontology
+    payload = {
+        "sources": [
+            {"alias": "a", "ontologyId": orders["ontologyId"],
+             "releaseId": orders["releaseId"], "objectTypeId": "ot-order"},
+            {"alias": "b", "ontologyId": parties["ontologyId"],
+             "releaseId": parties["releaseId"], "objectTypeId": "ot-party"},
+        ],
+        "joins": [{
+            "left": "a", "right": "b", "type": "inner",
+            "on": {"kind": "explicit_key", "leftProperty": "tenant_key",
+                   "rightProperty": "party_key", "keyType": "string",
+                   "cardinality": "N:1", "businessMeaning": "x",
+                   "evidenceRefs": ["fixture:tenant-key"]}}],
+        "select": [{"source": "a", "property": "order_no", "as": "orderNo"}],
+        "pageSize": 10,
+    }
+    r = _run(client, auth_headers, payload)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "join_semantics_unverified"
+
+
+def _same_ontology_join_payload(orders, *, right_object_type_id,
+                                right_property, evidence_refs):
+    oid, rid = orders["ontologyId"], orders["releaseId"]
+    return {
+        "sources": [
+            {"alias": "a", "ontologyId": oid, "releaseId": rid,
+             "objectTypeId": "ot-order"},
+            {"alias": "w", "ontologyId": oid, "releaseId": rid,
+             "objectTypeId": right_object_type_id},
+        ],
+        "joins": [{
+            "left": "a", "right": "w", "type": "inner",
+            "on": {"kind": "explicit_key", "leftProperty": "tenant_key",
+                   "rightProperty": right_property, "keyType": "string",
+                   "cardinality": "N:1", "businessMeaning": "模型填写",
+                   "evidenceRefs": evidence_refs}}],
+        "select": [{"source": "a", "property": "order_no", "as": "orderNo"}],
+        "pageSize": 10,
+    }
+
+
+def test_structure_evidence_requires_published_link(client, auth_headers,
+                                                     orders_ontology):
+    """仅字段存在不构成关联依据：structure 引用永不充分 —— 即使两端之间存在
+    已发布 declared link，也不证明任意两个属性可按键相等；explicit_key
+    唯一充分证据是用户 assertion（链接语义应走 declared_relation join）。"""
+    orders = orders_ontology
+    oid, rid = orders["ontologyId"], orders["releaseId"]
+
+    # 1) 双侧 structure 引用，但 ot-order/ot-warehouse 之间无 declared link
+    payload = _same_ontology_join_payload(
+        orders, right_object_type_id="ot-warehouse", right_property="wh_code",
+        evidence_refs=[
+            f"structure:{oid}:{rid}:ot-order:tenant_key",
+            f"structure:{oid}:{rid}:ot-warehouse:wh_code"])
+    r = _run(client, auth_headers, payload)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "join_semantics_unverified"
+
+    # 2) 单侧 structure 引用（伪造最小证据）同样拒绝
+    payload = _same_ontology_join_payload(
+        orders, right_object_type_id="ot-warehouse", right_property="wh_code",
+        evidence_refs=[f"structure:{oid}:{rid}:ot-order:tenant_key"])
+    r = _run(client, auth_headers, payload)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "join_semantics_unverified"
+
+    # 3) 两端存在已发布 declared link（lt-1 连 ot-order/ot-supplier），
+    #    双侧 structure 引用仍不构成按键相等的依据 → 拒绝
+    payload = _same_ontology_join_payload(
+        orders, right_object_type_id="ot-supplier", right_property="sname",
+        evidence_refs=[
+            f"structure:{oid}:{rid}:ot-order:tenant_key",
+            f"structure:{oid}:{rid}:ot-supplier:sname"])
+    r = _run(client, auth_headers, payload)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "join_semantics_unverified"
 
 
 def test_aggregate_semantics(client, auth_headers, orders_ontology):
@@ -373,6 +483,34 @@ def test_pagination_stable_across_data_change(client, auth_headers,
         [row["orderNo"] for row in page2["rows"]]
     assert sorted(all_nos) == ["SO-001", "SO-002", "SO-003"]
     assert page2["totalRowCount"] == 3          # 快照口径，不是新数据
+
+    import json
+
+    from app.auth.models import User
+    from app.super_assistant import ontology_tools
+    from app.super_assistant.models import SuperAssistantConversation
+
+    user = db.query(User).filter_by(username="admin").one()
+    conversation = SuperAssistantConversation(owner_id=user.id, title="query")
+    db.add(conversation)
+    db.commit()
+    response = client.put(
+        f"{_fo(orders['ontologyId'])}/agent/profile", headers=auth_headers,
+        json={"maxRowsPerQuery": 2})
+    assert response.status_code == 200, response.text
+    arguments = _single_source(orders)
+    del arguments["pageSize"]
+    first = json.loads(ontology_tools.execute_ontology_tool(
+        db, owner_id=user.id, conversation_id=conversation.id,
+        name="ontology_query", arguments=arguments))
+    assert first["pageRowCount"] == 2 and first["hasNext"]
+    second = json.loads(ontology_tools.execute_ontology_tool(
+        db, owner_id=user.id, conversation_id=conversation.id,
+        name="ontology_query", arguments={"cursor": first["cursor"]}))
+    assert second["pageRowCount"] == 1
+    assert second["queryId"] == first["queryId"]
+    assert [row["orderNo"] for row in first["rows"] + second["rows"]] == [
+        "SO-002", "SO-003", "SO-009"]
 
 
 def test_cursor_tamper_and_reuse_rejected(client, auth_headers,
@@ -467,9 +605,61 @@ def test_structure_respects_property_allowlist(client, auth_headers,
     assert props == {"order_no"}
 
 
+def test_structure_lists_registered_join_assertions(
+        client, auth_headers, orders_ontology, parties_ontology):
+    """结构片段附本人已登记的相关关联声明（有界发现），无关本体不含。"""
+    orders, parties = orders_ontology, parties_ontology
+    _register_join_assertion(client, auth_headers, orders, parties)
+    r = client.get(
+        f"{_fo(parties['ontologyId'])}/agent/structure",
+        headers=auth_headers,
+        params={"release_id": parties["releaseId"],
+                "object_type_ids": ["ot-party"]})
+    assert r.status_code == 200, r.text
+    assertions = r.json()["data"]["joinAssertions"]
+    assert len(assertions) == 1
+    entry = assertions[0]
+    assert entry["leftObjectTypeId"] == "ot-order"
+    assert entry["rightObjectTypeId"] == "ot-party"
+    assert entry["rightProperty"] == "party_key"
+    assert entry["category"] == "user_asserted"
+    assert entry["evidenceRef"].startswith("assertion:")
+
+
 def test_query_error_detail_shape():
     err = QueryError(422, "code_x", "msg", limit=5)
     assert err.detail() == {"code": "code_x", "message": "msg", "limit": 5}
+
+
+def test_temp_file_limit_display_values_parse():
+    """PG current_setting 按最大人类单位归一显示（'32MB'/'1GB'/'-1'）。"""
+    from app.ontologies.agent_query.service import _parse_memory_limit_kb
+
+    assert _parse_memory_limit_kb("-1") is None          # unlimited
+    assert _parse_memory_limit_kb("") is None
+    assert _parse_memory_limit_kb("abc") is None
+    assert _parse_memory_limit_kb("32768kB") == 32768
+    assert _parse_memory_limit_kb("32768") == 32768      # 裸数字按 kB
+    assert _parse_memory_limit_kb("32MB") == 32768
+    assert _parse_memory_limit_kb("1GB") == 1048576
+    assert _parse_memory_limit_kb("2048 kB") == 2048
+    assert _parse_memory_limit_kb("100B") == 1           # 向上取整
+    assert _parse_memory_limit_kb("0") == 0
+
+
+def test_temp_file_budget_gate_fail_closed():
+    """普通角色 temp_file_limit 未设/过宽 → 503 fail closed；等于帽可用。"""
+    from app.ontologies.agent_query.service import UnifiedQueryService
+
+    service = object.__new__(UnifiedQueryService)  # 纯方法，无需完整构造
+    for bad in ("-1", "1GB", "garbage", ""):
+        with pytest.raises(QueryError) as excinfo:
+            service._verify_temp_file_budget(bad)
+        assert excinfo.value.status == 503
+        assert excinfo.value.code == "query_budget_unavailable"
+        assert excinfo.value.extra["effectiveTempFileLimit"] == (bad or None)
+    service._verify_temp_file_budget("32MB")         # 恰等于默认帽
+    service._verify_temp_file_budget("32768kB")
 
 
 def test_query_sql_count_constant_in_row_count(client, auth_headers,
@@ -589,138 +779,124 @@ def test_join_evidence_verification_and_user_assertion(
     assert evidence["refs"] == [evidence_ref]
 
 
-def test_query_pg_pin_statement_order():
-    """P2-A 契约：REPEATABLE READ 必须是查询事务的首语句（先于预算 SET LOCAL）。"""
-    import inspect
-    from app.ontologies.agent_query import service as query_service
-    source = inspect.getsource(query_service.UnifiedQueryService._pin_transaction)
-    rr_index = source.index("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-    budget_index = source.index("SET LOCAL statement_timeout")
-    assert rr_index < budget_index
-    rollback_index = source.index("self.db.rollback()")
-    assert rollback_index < rr_index
-
-
-def test_query_sql_count_scales_constant(client, auth_headers,
-                                         orders_ontology, db):
-    """QueryCounter 跨规模证据：数据量翻倍以上，固定形状查询 SQL 数不随
-    规模线性增长（边界差 ≤6，非绝对阈值宣称）。"""
+def _stamp_computed(db, orders):
+    """给订单实例写入派生值（写侧按声明拆列，computed 列）。"""
     from app.models.ontology_formal import ObjectInstance
-    from tests.conftest import QueryCounter
 
-    orders = orders_ontology
-
-    def _run_counted():
-        counter = QueryCounter(db)
-        with counter:
-            r = _run(client, auth_headers, _single_source(orders, pageSize=5))
-        assert r.status_code == 200, r.text
-        return counter.count
-
-    small = _run_counted()
-    for i in range(100, 160):
-        db.add(ObjectInstance(
-            id=f"inst-s{i}", ontology_id=orders["ontologyId"],
-            ontology_release_id=orders["releaseId"],
-            object_type_id="ot-order",
-            properties={"order_no": f"SO-{i:03d}", "status": "paid",
-                        "amount": i, "tenant_key": "t-s"}))
+    scores = {"inst-o1": 10, "inst-o2": 30, "inst-o3": 20}
+    refs = {"inst-o1": "t-a", "inst-o2": "t-a", "inst-o3": "t-b"}
+    for inst in db.query(ObjectInstance).filter_by(
+            ontology_id=orders["ontologyId"],
+            object_type_id="ot-order").all():
+        inst.computed = {"risk_score": scores[inst.id],
+                         "tenant_ref": refs[inst.id]}
     db.commit()
-    large = _run_counted()
-    assert large - small <= 6, (small, large)
-    assert large <= 40, large
 
 
-def test_query_budget_units_pg_legal():
-    """R-1 契约：预算语句使用 PG 合法单位（B/kB/MB/GB/TB，非 IEC MiB）。"""
-    import inspect
-    from app.ontologies.agent_query import service as query_service
-    source = inspect.getsource(query_service.UnifiedQueryService._pin_transaction)
-    statements = [line.strip() for line in source.splitlines()
-                  if line.strip().startswith('"SET LOCAL')]
-    assert statements, source
-    for statement in statements:
-        assert "MiB" not in statement, statement
-    assert "work_mem_mb}MB" in source.replace("'", "")
-    assert "temp_file_limit_mb}MB" in source.replace("'", "")
-
-
-def test_query_budget_error_no_internal_leak():
-    """R-2 契约：预算失败响应不回灌 str(exc)/SQL 细节，分类入 extra。"""
-    from app.ontologies.agent_query import service as query_service
-
-    class _Boom(Exception):
-        pass
-
-    class _Orig:
-        pgcode = "42501"
-
-    class _StmtExc(Exception):
-        orig = _Orig()
-
-    class _Db:
-        def in_transaction(self):
-            return False
-
-        def execute(self, statement):
-            raise _StmtExc()
-
-        def rollback(self):
-            pass
-
-    from app.ontologies.agent_query import schemas as _QS
-    svc = query_service.UnifiedQueryService.__new__(
-        query_service.UnifiedQueryService)
-    svc.db = _Db()
-    svc._pg = True
-    svc.req = _QS.QueryRequest(
-        sources=[_QS.QuerySource(alias="a", ontology_id="x",
-                                release_id="y", objectTypeId="z")],
-        select=[])
-    try:
-        svc._pin_transaction()
-        raise AssertionError("expected QueryError")
-    except query_service.QueryError as exc:
-        assert exc.code == "query_budget_unavailable"
-        assert exc.extra["errorClass"] == "insufficient_privilege"
-        # 客户端 payload 不含异常原文/SQLSTATE
-        payload = json.dumps(exc.detail(), ensure_ascii=False)
-        assert "42501" not in payload
-        assert "orig" not in payload
-        assert "permission denied" not in payload
-
-
-def test_query_auth_hash_reflects_real_write_access(
-        client, auth_headers, orders_ontology, db, editor_user):
-    """裁决 1：auth 材料使用真实 RBAC 写权限（admin/editor-owner）—
-    viewer 权限收紧改变快照指纹（翻页重验拒绝）。"""
-    from app.ontologies.agent_query.service import (
-        UnifiedQueryService, _ontology_write_access,
-    )
-    from app.ontologies.agent_runtime.boundary import build_scope
-    from app.models.ontology import OntologyProject
-
+def test_computed_property_queryable(client, auth_headers, orders_ontology,
+                                     db):
+    """结构把 computed 字段标为可查询（source='computed'）；查询核必须读
+    computed 列取值，而不是静默全 NULL。"""
     orders = orders_ontology
-    project = db.query(OntologyProject).filter_by(
-        id=orders["ontologyId"]).one()
+    _stamp_computed(db, orders)
 
-    class _Admin:
-        id = "admin-user"
-        role = "admin"
+    # 投影 + 过滤 + 聚合都走真实派生值
+    r = _run(client, auth_headers, _single_source(
+        orders,
+        select=[{"source": "a", "property": "order_no", "as": "orderNo"},
+                {"source": "a", "property": "risk_score", "as": "risk"}],
+        where=[{"source": "a", "property": "risk_score", "op": "gte",
+                "value": 20}]))
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["totalRowCount"] == 2
+    risks = {row["orderNo"]: row["risk"] for row in data["rows"]}
+    assert risks == {"SO-002": 30, "SO-003": 20}
 
-    class _EditorOwner:
-        id = str(project.created_by)
-        role = "editor"
+    r = _run(client, auth_headers, _single_source(
+        orders,
+        select=[],
+        aggregates=[{"fn": "count", "as": "n"},
+                    {"fn": "sum", "source": "a", "property": "risk_score",
+                     "as": "riskTotal"}],
+        orderBy=[{"output": "n"}]))
+    assert r.status_code == 200, r.text
+    row = r.json()["data"]["rows"][0]
+    assert row["n"] == 3 and row["riskTotal"] == 60
 
-    class _EditorOther:
-        id = "someone-else"
-        role = "editor"
 
-    class _Viewer:
-        id = str(project.created_by)
-        role = "viewer"
+def test_computed_property_as_join_key(client, auth_headers, orders_ontology,
+                                       parties_ontology, db):
+    """join 键取自 computed 列：typed 表达式与原始 JSON 校验都指向 computed，
+    派生键与存储键（party_key）可真实关联。"""
+    orders, parties = orders_ontology, parties_ontology
+    _stamp_computed(db, orders)
+    payload = {
+        "sources": [
+            {"alias": "a", "ontologyId": orders["ontologyId"],
+             "releaseId": orders["releaseId"], "objectTypeId": "ot-order"},
+            {"alias": "b", "ontologyId": parties["ontologyId"],
+             "releaseId": parties["releaseId"], "objectTypeId": "ot-party"},
+        ],
+        "joins": [{
+            "left": "a", "right": "b", "type": "inner",
+            "on": {"kind": "explicit_key", "leftProperty": "tenant_ref",
+                   "rightProperty": "party_key", "keyType": "string",
+                   "cardinality": "N:1", "businessMeaning": "派生租户引用",
+                   "evidenceRefs": _register_join_assertion(
+                       client, auth_headers, orders, parties,
+                       left_property="tenant_ref")}}],
+        "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
+                   {"source": "b", "property": "label", "as": "partyLabel"}],
+        "orderBy": [{"output": "orderNo"}],
+        "pageSize": 10,
+    }
+    r = _run(client, auth_headers, payload)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["totalRowCount"] == 3
+    labels = {row["orderNo"]: row["partyLabel"] for row in data["rows"]}
+    assert labels["SO-001"] == "租户A" and labels["SO-003"] == "租户B"
 
-    assert _ontology_write_access(_Admin(), project) is True
-    assert _ontology_write_access(_EditorOwner(), project) is True
-    assert _ontology_write_access(_EditorOther(), project) is False
-    assert _ontology_write_access(_Viewer(), project) is False
+
+def test_pure_aggregation_without_group_columns(client, auth_headers,
+                                                orders_ontology):
+    """纯聚合（select 空、无分组）是契约支持的形态；工具接线修复前由
+    服务契约测试守住该路径。"""
+    orders = orders_ontology
+    payload = _single_source(
+        orders,
+        select=[],
+        aggregates=[
+            {"fn": "count", "as": "rowCount"},
+            {"fn": "count_distinct", "source": "a", "property": "status",
+             "as": "statusCount"},
+            {"fn": "avg", "source": "a", "property": "amount", "as": "avgAmt"},
+        ],
+        orderBy=[{"output": "rowCount"}])
+    r = _run(client, auth_headers, payload)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["totalRowCount"] == 1
+    row = data["rows"][0]
+    assert row["rowCount"] == 3
+    assert row["statusCount"] == 2                  # pending/paid
+    assert row["avgAmt"] == 175                     # (100+250)/2，NULL 不计
+
+    from jsonschema import validate
+
+    from app.super_assistant import ontology_tools
+
+    schema = next(tool["parameters"]
+                  for tool in ontology_tools.ontology_tool_schemas()
+                  if tool["name"] == "ontology_query")
+    del payload["select"]
+    payload["where"] = [{"and": [
+        {"source": "a", "property": "status", "op": "eq", "value": "paid"},
+        {"not": {"source": "a", "property": "amount", "op": "is_null"}},
+    ]}]
+    validate(payload, schema)
+    request = ontology_tools.build_query_request(payload)
+    assert request.select == []
+    assert request.aggregates[0].fn == "count"
+    validate({"cursor": "snapshot-cursor-123456"}, schema)

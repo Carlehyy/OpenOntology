@@ -188,6 +188,8 @@ def test_chat_turn_persists_canvas(client, auth_headers, session, db, admin_user
                 "usage": {"inputTokens": 5, "outputTokens": 5}}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -221,6 +223,8 @@ def test_chat_retries_one_empty_model_response(client, auth_headers, session,
         return {"content": "已恢复并继续处理。", "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     response = client.post(
@@ -253,6 +257,8 @@ def test_chat_fabricated_write_claims_trigger_corrective_retry(
                 "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -279,6 +285,8 @@ def test_chat_persistent_fabrication_gets_server_fact_banner(
                 "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -308,6 +316,8 @@ def test_chat_truthful_previous_turn_recap_not_flagged(
                 "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -329,6 +339,8 @@ def test_chat_planning_language_not_flagged(
                 "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -360,6 +372,8 @@ def test_chat_history_tool_checkpoint_injected(
         return {"content": "收到。", "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -551,6 +565,8 @@ def test_chat_invalid_elements_rejected(client, auth_headers, session, db, admin
         return {"content": "收到，我会补全 name。", "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -1094,6 +1110,8 @@ def test_chat_with_skill_catalog_and_use_skill(client, auth_headers, session, db
         return {"content": "```mermaid\nerDiagram\n```", "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
@@ -1119,6 +1137,8 @@ def test_use_skill_unknown_name(client, auth_headers, session, db, admin_user, m
         return {"content": "抱歉。", "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,
                     json={"message": "画图", "stream": False})
@@ -1724,6 +1744,8 @@ def test_small_context_budgets_every_provider_call_and_final_summary(
         }
 
     monkeypatch.setattr(ExplorationToolRunner, "run", huge_tool_result)
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     response = client.post(
@@ -1781,6 +1803,8 @@ def test_chat_show_diagram_and_questions(client, auth_headers, session, db,
         return {"content": "请核对 ER 图；另外退货窗口是几天？", "tool_calls": [], "usage": None}
 
     from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
 
     r = client.post(f"{BASE}/sessions/{session['id']}/chat", headers=auth_headers,

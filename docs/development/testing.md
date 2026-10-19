@@ -12,7 +12,34 @@ uv run pytest -q --disable-warnings --ignore tests/v2/perf
 uv run pytest -q --disable-warnings tests/v2/perf
 ```
 
-性能测试当前是信息性门禁；涉及性能路径时必须解释阈值和结果。
+性能测试当前是信息性门禁；涉及性能路径时必须解释阈值和结果。新增或删除测试
+后，需要全量执行一次 `uv run pytest -q --disable-warnings --ignore tests/v2/perf
+--store-durations --clean-durations`，提交更新后的 `.test_durations`，保证 CI
+分片时长表覆盖全部收集项。
+
+### 本体查询与动作的 PostgreSQL 验收
+
+SQLite 合同测试不能证明 PostgreSQL 的 JSON 表达式、事务快照、锁与并发唯一
+约束可用。以下脚本只在显式开启的隔离数据库上运行，各自创建随机命名的临时
+schema，并在退出时清理自己的数据；不得指向生产数据库：
+
+```bash
+cd backend
+export ENVIRONMENT=test
+export OPENONTOLOGY_ONTOLOGY_ASSISTANT_E2E=1
+export DATABASE_URL=postgresql://ontoprompt:ontoprompt@127.0.0.1:25432/ontoprompt
+uv run python scripts/ontology_assistant_postgres_e2e.py \
+  --report ../.artifacts/ontology-assistant/query-postgres.json
+uv run python scripts/ontology_action_confirmation_postgres_e2e.py \
+  --report ../.artifacts/ontology-assistant/action-postgres.json
+```
+
+查询验收覆盖发布结构、同本体和跨本体关联、派生字段、稳定分页、实际事务隔离
+与普通数据库角色的资源预算，并记录 SQL 数、结果大小与耗时。动作验收覆盖
+并发确认、单次领取和外部结果不确定时的持久保护。PR 和自动部署 CI 都执行
+这两项，并将脱敏报告上传到 `ontology-assistant-postgres-<run_id>` artifact。
+数据库迁移、前端真实后端旅程和外部连接器验收仍需分别执行，不能用这些脚本
+替代完整门禁。
 
 ## 本地配置中心
 
@@ -29,7 +56,10 @@ cd frontend
 npm ci
 npm run test:unit
 npm run check:feature-boundaries
+npm run check:component-convergence
+npm run check:color-tokens
 npm run test:e2e:classification
+npm run check:e2e-assertions
 npm run lint
 npm run build
 npm run test:e2e:mocked
@@ -71,8 +101,9 @@ worktree 时，才显式设置 `PLAYWRIGHT_REUSE_SERVER=1`。
 `stack` 套件的本地执行方式：`docker-compose.e2e.yml` 提供五个错端口的基础
 服务（db/redis/nats/neo4j/minio，端口避开本机常用的 5432/6379/9000），
 后端在宿主机以 `dev_server` 起在 8000，前端由 Playwright 的 webServer 自行
-拉起并经 Vite 代理指向 8000。开发环境的 n8n 探针是提示性的，
-`N8N_API_URL` 指向不可达地址不影响 API 启动：
+拉起并经 Vite 代理指向 8000。以下五服务栈不包含 n8n 与 Chromium CDP；开发
+环境允许 n8n 暂不可达时启动 API，但 `/health/ready` 仍会返回失败。完整就绪
+验收必须另外配置隔离的真实 n8n 和 CDP，不能把进程存活当成依赖就绪：
 
 ```bash
 docker compose -f docker-compose.e2e.yml up -d --wait

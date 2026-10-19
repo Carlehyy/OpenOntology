@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { Loader2, Pause, Play, Send, Square } from 'lucide-react'
+import { AlertTriangle, ChevronRight, Loader2, Pause, Play, Send, ShieldCheck, Square } from 'lucide-react'
 
 import { superAssistantApi, type KernelRunEvent, type KernelRunStatus, type KernelRunView } from '@/api/superAssistant'
+import OntologyConfirmationSummary from '@/components/OntologyConfirmationSummary'
+import { confirmationStateText } from '@/components/ontologyConfirmationModel'
 import { projectionFromSnapshot, reduceKernelRunEvent, type KernelRunProjection } from './kernelRunReducer'
+import { approvalSummaryView, callStatusView, callSubtitle, callTitle, type CallStatusTone } from './kernelRunPresentation'
 
 const terminalStatuses = new Set<KernelRunStatus>(['cancelled', 'expired', 'completed', 'failed'])
 
@@ -11,6 +14,15 @@ const statusLabel: Record<string, string> = {
   waiting_external: '等待外部助手', waiting_retry: '等待重试', paused: '已暂停',
   cancel_requested: '正在取消', cancelling: '正在取消', cancelled: '已取消', expired: '已过期',
   completed: '已完成', failed: '失败',
+}
+
+/** call 状态徽章的语义配色（浅底 + 深字，DESIGN.md §2.3） */
+const callToneClass: Record<CallStatusTone, string> = {
+  success: 'bg-[var(--color-success-bg)] text-[var(--color-success)]',
+  warning: 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
+  danger: 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
+  info: 'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]',
+  muted: 'bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)]',
 }
 
 async function verifyArtifactBlob(blob: Blob, expectedSize: number, expectedChecksum: string): Promise<Blob> {
@@ -222,10 +234,80 @@ export default function KernelRunTaskCard({ runId, onClose, onRetry }: { runId: 
       {run?.wait_reason && <p className="mt-1 text-muted-foreground">{run.wait_reason}</p>}
       {error && <p role="alert" className="mt-1 text-red-600">{error}</p>}
       {run && run.current_inbox.length > 0 && (
-        <div className="mt-2 space-y-2 rounded bg-muted/40 p-2">
+        <div data-testid="kernel-run-inbox" className="mt-2 space-y-2 rounded bg-muted/40 p-2">
           {run.current_inbox.map(item => item.kind === 'approval_decision' && item.approval_id ? (
-            <div key={item.inbox_id} className="flex items-center gap-2"><span>需要审批</span><button type="button" disabled={busy} onClick={() => void decideApproval(item.approval_id!, 'approved')} className="rounded border px-2 py-1">批准</button><button type="button" disabled={busy} onClick={() => void decideApproval(item.approval_id!, 'denied')} className="rounded border px-2 py-1">拒绝</button></div>
+            <div key={item.inbox_id} data-testid="kernel-run-approval" className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-2">
+              <p className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--color-warning)]">
+                <ShieldCheck size={12} aria-hidden="true" /> 需要审批 · 请核对目标与参数后决定
+              </p>
+              {(() => {
+                const summary = approvalSummaryView(item.approval)
+                if (!summary.hasDetail) {
+                  return (
+                    <p role="alert" className="mt-1 text-[11px] font-medium text-[var(--color-danger)]">
+                      该审批的服务端摘要缺失，无法核对内容；已禁用批准，可拒绝或刷新后重试
+                    </p>
+                  )
+                }
+                return (
+                  <div className="mt-1 min-w-0 space-y-1">
+                    {summary.lines.map(line => (
+                      <p key={line.label} className="text-[11px] leading-5 text-[var(--color-text-secondary)]">
+                        <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">{line.label}</span>
+                        <span className="break-all">{line.text}</span>
+                      </p>
+                    ))}
+                    {summary.parameterText && (
+                      <pre className="max-h-32 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-1.5 text-[11px] leading-5 text-[var(--color-text-secondary)] whitespace-pre-wrap break-all">
+                        {summary.parameterText}
+                      </pre>
+                    )}
+                  </div>
+                )
+              })()}
+              <div className="mt-1.5 flex gap-1.5">
+                <button type="button" disabled={busy} onClick={() => void decideApproval(item.approval_id!, 'denied')} className="rounded border px-2 py-1 disabled:opacity-50">拒绝</button>
+                {/* 无服务端摘要的旧负载不可核对：禁批不冒险放行（拒绝仍可用） */}
+                <button type="button" disabled={busy || !item.approval} onClick={() => void decideApproval(item.approval_id!, 'approved')} className="rounded border px-2 py-1 disabled:opacity-50">批准</button>
+              </div>
+            </div>
           ) : <span key={item.inbox_id}>等待输入</span>)}
+        </div>
+      )}
+      {run && run.calls.length > 0 && (
+        <div data-testid="kernel-run-calls" className="mt-2 space-y-1 border-t border-border pt-2">
+          {run.calls.map(call => {
+            const view = callStatusView(call)
+            const subtitle = callSubtitle(call)
+            const confirmation = call.confirmation
+            const needsAttention = view.tone === 'warning' || view.tone === 'danger'
+            return (
+              <div key={call.call_id} data-testid="kernel-run-call" className="rounded bg-muted/40 p-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 truncate font-medium" title={callTitle(call)}>{callTitle(call)}</span>
+                  <span className={`ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${callToneClass[view.tone]}`}>
+                    {needsAttention && <AlertTriangle size={10} aria-hidden="true" />}
+                    {view.label}
+                  </span>
+                </div>
+                {subtitle && <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{subtitle}</p>}
+                {confirmation && (
+                  <details className="group mt-1">
+                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                      <ChevronRight size={11} className="transition-transform group-open:rotate-90" />
+                      确认详情（{confirmationStateText(confirmation.state)}）
+                    </summary>
+                    <div className="mt-1 rounded border border-border bg-[var(--color-bg-elevated)] p-2">
+                      <OntologyConfirmationSummary display={confirmation.display} compact />
+                      {confirmation.failureCode && (
+                        <p className="mt-1 font-mono text-[10px] text-[var(--color-text-tertiary)]">failure: {confirmation.failureCode}</p>
+                      )}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
       {run && run.status === 'waiting_input' && (

@@ -38,6 +38,8 @@ def test_apply_draft_tool_mounted_only_for_bound_sessions(db, monkeypatch):
         return {"content": "好", "tool_calls": [], "usage": None}
 
     monkeypatch.setattr(OR.llm_bridge, "chat", fake_chat)
+    monkeypatch.setattr(OR.llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
 
     unbound = _tool_session(db, canvas=C.empty_canvas())
     list(OR.run_exploration_turn(db, unbound.id, user=object(), message="你好"))

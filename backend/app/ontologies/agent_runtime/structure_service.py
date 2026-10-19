@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.ontologies.agent_runtime.boundary import build_scope
@@ -14,6 +15,7 @@ from app.ontologies.agent_runtime.boundary import build_scope
 MAX_OBJECT_TYPES = 20
 MAX_LINK_TYPES = 30
 MAX_ACTIONS = 10
+MAX_JOIN_ASSERTIONS = 20
 MAX_PAYLOAD_BYTES = 64 * 1024
 
 
@@ -120,6 +122,45 @@ def build_structure(db: Session, user, ontology_id: str, *,
             })
         return result
 
+    def _join_assertions() -> list[dict]:
+        """与片段相关的本人已登记关联声明（有界，供模型发现 evidenceRef）。
+
+        只是使用侧发现，不是治理认证；explicit_key join 的充分证据仍是
+        这些 assertion 本身（query 核会按归属/两端/键型重验）。
+        """
+        from app.ontologies.agent_query.models import AgentJoinAssertion
+
+        fragment_types = {t.id for t in types}
+        rows = (
+            db.query(AgentJoinAssertion)
+            .filter(
+                AgentJoinAssertion.created_by == str(user.id),
+                or_(
+                    (AgentJoinAssertion.left_ontology_id == ontology_id)
+                    & AgentJoinAssertion.left_object_type_id.in_(
+                        fragment_types),
+                    (AgentJoinAssertion.right_ontology_id == ontology_id)
+                    & AgentJoinAssertion.right_object_type_id.in_(
+                        fragment_types),
+                ))
+            .order_by(AgentJoinAssertion.created_at.desc())
+            .limit(MAX_JOIN_ASSERTIONS).all())
+        return [
+            {
+                "evidenceRef": f"assertion:{row.id}",
+                "category": "user_asserted",
+                "leftOntologyId": row.left_ontology_id,
+                "leftObjectTypeId": row.left_object_type_id,
+                "leftProperty": row.left_property,
+                "rightOntologyId": row.right_ontology_id,
+                "rightObjectTypeId": row.right_object_type_id,
+                "rightProperty": row.right_property,
+                "keyType": row.key_type,
+                "businessMeaning": row.business_meaning,
+            }
+            for row in rows
+        ]
+
     import json as _json
 
     payload = {
@@ -139,6 +180,7 @@ def build_structure(db: Session, user, ontology_id: str, *,
             }
             for t in types
         ],
+        "joinAssertions": _join_assertions(),
         "linkTypes": [
             {
                 "id": lt.id, "name": lt.name, "displayName": lt.display_name,

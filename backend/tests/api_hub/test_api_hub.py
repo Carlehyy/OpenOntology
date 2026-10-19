@@ -828,6 +828,42 @@ def test_outbound_redirect_target_is_revalidated(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("redirect", [False, True])
+def test_restricted_channel_checks_resolved_and_redirected_targets(
+    hub_client, monkeypatch, redirect,
+):
+    monkeypatch.setattr(config, "OUTBOUND_BLOCK_PRIVATE_NETWORKS", False)
+    calls = []
+
+    def fake_request(_session, _method, url, **_kwargs):
+        calls.append(url)
+        response = requests.Response()
+        response.status_code = 307
+        response.headers["Location"] = "https://platform.example/admin"
+        response._content = b""
+        return response
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    if not redirect:
+        original_build = executor._build_kwargs
+
+        def resolve_target(iface, overrides):
+            kwargs, snapshot, _url = original_build(iface, overrides)
+            return kwargs, snapshot, "https://platform.example/admin"
+
+        monkeypatch.setattr(executor, "_build_kwargs", resolve_target)
+    result = executor.run_interface(
+        _interface(url="https://partner.example/start", id=None),
+        executor.RequestOverrides(
+            source="super_assistant",
+            target_url_guard=lambda url: url.startswith("https://platform.example/"),
+        ),
+    )
+    assert result["ok"] is False
+    assert result["error_type"] == "configuration"
+    assert calls == (["https://partner.example/start"] if redirect else [])
+
+
 def test_cross_origin_redirect_drops_configured_credentials(monkeypatch):
     monkeypatch.setattr(config, "OUTBOUND_BLOCK_PRIVATE_NETWORKS", True)
 
