@@ -23,9 +23,6 @@ _ACTIVE_GUARD_WHERE = (
     "state IN ('confirmed','dispatch_queued','executing','recovering',"
     "'pending_approval','unknown','compensation_required')"
 )
-from sqlalchemy.orm import Mapped, mapped_column
-
-from app.database import Base
 
 
 def _uuid() -> str:
@@ -128,6 +125,18 @@ class ActionOperation(Base):
             "uq_action_operation_guard_active", "guard_hash", unique=True,
             sqlite_where=text(_ACTIVE_GUARD_WHERE),
             postgresql_where=text(_ACTIVE_GUARD_WHERE),
+        ),
+        # P3 对照项：有值时唯一（NULL 不参与 — 部分唯一索引）
+        Index(
+            "uq_action_operation_approval_log", "approval_log_id", unique=True,
+            sqlite_where=text("approval_log_id IS NOT NULL"),
+            postgresql_where=text("approval_log_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_action_operation_technical_key", "technical_engine_key",
+            unique=True,
+            sqlite_where=text("technical_engine_key IS NOT NULL"),
+            postgresql_where=text("technical_engine_key IS NOT NULL"),
         ),
         Index("ix_fo_action_operations_state_claimed",
               "state", "claimed_at"),

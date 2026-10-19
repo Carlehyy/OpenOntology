@@ -585,3 +585,45 @@ def test_join_evidence_verification_and_user_assertion(
     evidence = data["joinEvidence"][0]
     assert evidence["categories"] == ["user_asserted"]
     assert evidence["refs"] == [evidence_ref]
+
+
+def test_query_pg_pin_statement_order():
+    """P2-A 契约：REPEATABLE READ 必须是查询事务的首语句（先于预算 SET LOCAL）。"""
+    import inspect
+    from app.ontologies.agent_query import service as query_service
+    source = inspect.getsource(query_service.UnifiedQueryService._pin_transaction)
+    rr_index = source.index("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+    budget_index = source.index("SET LOCAL statement_timeout")
+    assert rr_index < budget_index
+    rollback_index = source.index("self.db.rollback()")
+    assert rollback_index < rr_index
+
+
+def test_query_sql_count_scales_constant(client, auth_headers,
+                                         orders_ontology, db):
+    """QueryCounter 跨规模证据：数据量翻倍以上，固定形状查询 SQL 数不随
+    规模线性增长（边界差 ≤6，非绝对阈值宣称）。"""
+    from app.models.ontology_formal import ObjectInstance
+    from tests.conftest import QueryCounter
+
+    orders = orders_ontology
+
+    def _run_counted():
+        counter = QueryCounter(db)
+        with counter:
+            r = _run(client, auth_headers, _single_source(orders, pageSize=5))
+        assert r.status_code == 200, r.text
+        return counter.count
+
+    small = _run_counted()
+    for i in range(100, 160):
+        db.add(ObjectInstance(
+            id=f"inst-s{i}", ontology_id=orders["ontologyId"],
+            ontology_release_id=orders["releaseId"],
+            object_type_id="ot-order",
+            properties={"order_no": f"SO-{i:03d}", "status": "paid",
+                        "amount": i, "tenant_key": "t-s"}))
+    db.commit()
+    large = _run_counted()
+    assert large - small <= 6, (small, large)
+    assert large <= 40, large

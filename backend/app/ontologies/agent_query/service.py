@@ -304,9 +304,14 @@ class UnifiedQueryService:
             # 认证依赖可能已开启 READ COMMITTED 事务；查询核必须以
             # REPEATABLE READ 作为事务首语句，丢弃只读残余是安全的。
             self.db.rollback()
-        # P2-4：已冻结的查询资源/事务预算（契约 §3.4 表）。SET LOCAL 仅影响
-        # 本事务；权限不足（如 temp_file_limit 需 SUSET）时查询 fail closed。
+        # 契约 §3.3（P2-A 整改）：隔离级必须是查询事务的首语句 — 源计数、
+        # typed-key 校验、join 计数、实体计数与快照物化的全部语句取同一
+        # REPEATABLE READ 快照，执行期间并发实例写入不会跨语句渗入。
+        # SET TRANSACTION 与后续 SET LOCAL 预算兼容。
         budgets = (
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+            # P2-4：已冻结的查询资源/事务预算（契约 §3.4 表）。SET LOCAL
+            # 仅影响本事务；权限不足时 fail closed。
             "SET LOCAL statement_timeout = "
             f"'{settings.agent_query_statement_timeout_ms}ms'",
             "SET LOCAL lock_timeout = "
@@ -324,7 +329,7 @@ class UnifiedQueryService:
             self.db.rollback()
             raise QueryError(
                 503, "query_budget_unavailable",
-                "查询资源预算参数设置失败（数据库角色权限不足），"
+                "查询资源/隔离级参数设置失败（数据库角色权限不足），"
                 "查询 fail closed", retryable=False) from exc
         oids = sorted({s.ontology_id for s in self.req.sources})
         (self.db.query(OntologyProject)

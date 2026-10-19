@@ -1569,6 +1569,8 @@ def _ontology_file_sources(db: Session) -> dict[str, dict]:
             "versionNumber": doc.version_number,
             "documentId": doc.id,
             "fingerprint": doc.fingerprint,
+            # 抽取/构建身份：镜像行 + 指纹短锚（同文档重发布→新 buildId）
+            "buildId": f"{doc.id}:{str(doc.fingerprint or '')[:12]}",
             "sourceStatus": status,
         }
         if doc.artifact_id:
@@ -1625,6 +1627,7 @@ def list_files_for_tool(db: Session, owner_id: str) -> list[dict]:
             "versionNumber": doc.version_number,
             "documentId": doc.id,
             "fingerprint": doc.fingerprint,
+            "buildId": f"{doc.id}:{str(doc.fingerprint or '')[:12]}",
             "sourceStatus": "stale",
         }
         rows.append({

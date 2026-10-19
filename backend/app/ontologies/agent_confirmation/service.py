@@ -67,6 +67,12 @@ def _sha256(payload: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _ontology_write_access(user) -> bool:
+    """角色派生的本体写权限位（与 access.py 裁决同口径）。"""
+    role = str(getattr(user, "role", "") or "")
+    return role == "admin"
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -389,6 +395,10 @@ def decide(db: Session, user, ontology_id: str, cid: str, decision: str,
             raise ConfirmationError(409, "prepare_payload_conflict",
                                     "载荷指纹不一致，拒绝替代确认")
     elif confirmation.decision_event_id == decision_id:
+        # 同 decisionId 重放必须仍是同一载荷：异 payload 是冲突不是重放
+        if not hmac.compare_digest(confirmation.payload_hash, payload_hash):
+            raise ConfirmationError(409, "decision_conflict",
+                                    "同 decisionId 携带不同载荷指纹")
         if decision in ("approve",) and confirmation.state in (
                 "confirmed", "dispatch_queued", "executing",
                 "pending_approval", "succeeded", "unknown", "recovering",
@@ -731,6 +741,10 @@ def _apply_engine_result(operation_id: str, result,
         elif pending or status == "pending":
             operation.state = "pending_approval"
             operation.approval_log_id = result.get("id")
+            # 生命周期赋值：技术执行键在审批日志产生时确定（P3 对照项）
+            if not operation.technical_engine_key:
+                operation.technical_engine_key = (
+                    f"approval-execution:{result.get('id')}")
             confirmation.state = "pending_approval"
             _stamp_log_lineage(db, operation, result.get("id"))
             # 引擎在进入效果阶段前返回审批闸门：预登记的 attempt 实际未发送
@@ -914,6 +928,29 @@ def reconcile_operation(operation_id: str, db: Session | None = None) -> None:
             db.close()
 
 
+def _reopen_attempts_for_technical_execution(db, operation) -> None:
+    """P3-2：管理员批准后的技术执行窗口重开 attempt 证据。
+
+    引擎返回 pending 时预登记的 attempt 被标 ``proven_not_applied``（该次
+    调用确实未进入效果阶段）。管理员批准触发 ``approval-execution:{log}``
+    技术执行 — 该执行会真实发送 webhook：进入 executing/approved 即把
+    ``proven_not_applied`` 的 attempt 重开为 ``started``（绑定技术阶段与
+    technical key），崩溃窗口恢复按未结案证据裁决，不误报 success/释放
+    guard。
+    """
+    attempts = db.query(M.ActionExternalAttempt).filter(
+        M.ActionExternalAttempt.operation_id == operation.id,
+        M.ActionExternalAttempt.state == "proven_not_applied").all()
+    for attempt in attempts:
+        attempt.state = "started"
+        attempt.finished_at = None
+        attempt.evidence_ref = (
+            f"technical-execution:{operation.approval_log_id}")
+    if attempts and not operation.technical_engine_key:
+        operation.technical_engine_key = (
+            f"approval-execution:{operation.approval_log_id}")
+
+
 def _reconcile_pending_approval(db, operation, confirmation) -> None:
     from app.ontologies.formal_modeling.models import ActionExecutionLog
 
@@ -922,9 +959,14 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
     if log is None:
         return
     status = str(log.status or "").lower()
-    if status in ("pending", "executing"):
+    if status == "executing":
+        # 技术执行进行中：重开 attempt 证据，保持 pending_approval
+        _reopen_attempts_for_technical_execution(db, operation)
+        return
+    if status == "pending":
         return
     if status == "approved":
+        _reopen_attempts_for_technical_execution(db, operation)
         related = db.query(ActionExecutionLog).filter(
             ActionExecutionLog.id == log.related_log_id).first() \
             if log.related_log_id else None
@@ -962,11 +1004,27 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
                         attempt.state = "acknowledged"
                         attempt.finished_at = _now()
             else:
-                operation.state = "failed_not_executed"
-                operation.execution_log_id = related.id
-                operation.last_error = related.error_message
-                confirmation.state = "failed_not_executed"
-                confirmation.failure_code = "approval_execution_failed"
+                if unresolved:
+                    # 技术执行已进入效果阶段后失败：外部结果未结案 → unknown
+                    # 保留 guard（不误报 failed_not_executed）
+                    operation.state = "unknown"
+                    operation.execution_log_id = related.id
+                    operation.last_error = related.error_message
+                    operation.reconcile_evidence = {
+                        "reason":
+                            "approval_execution_failed_with_open_attempts",
+                        "localFailureLogId": related.id,
+                        "attemptStates": {
+                            a.effect_ordinal: a.state for a in attempts},
+                    }
+                    confirmation.state = "unknown"
+                    confirmation.failure_code = "execution_result_unknown"
+                else:
+                    operation.state = "failed_not_executed"
+                    operation.execution_log_id = related.id
+                    operation.last_error = related.error_message
+                    confirmation.state = "failed_not_executed"
+                    confirmation.failure_code = "approval_execution_failed"
         else:
             confirmation.state = "pending_approval"
         return
@@ -975,6 +1033,25 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
         confirmation.state = "approval_rejected"
         return
     if status == "failed":
+        # 技术执行已进入效果阶段后引擎失败：先重开 attempt 证据；
+        # 未结案外部 attempt 存在 → unknown 保留 guard（不误报未执行）。
+        _reopen_attempts_for_technical_execution(db, operation)
+        attempts = db.query(M.ActionExternalAttempt).filter(
+            M.ActionExternalAttempt.operation_id == operation.id).all()
+        unresolved = [a for a in attempts
+                      if a.state in ("started", "unknown")]
+        if unresolved:
+            operation.state = "unknown"
+            operation.last_error = log.error_message
+            operation.reconcile_evidence = {
+                "reason": "technical_execution_failed_open_attempts",
+                "approvalLogId": log.id,
+                "attemptStates": {
+                    a.effect_ordinal: a.state for a in attempts},
+            }
+            confirmation.state = "unknown"
+            confirmation.failure_code = "execution_result_unknown"
+            return
         operation.state = "failed_not_executed"
         operation.last_error = log.error_message
         confirmation.state = "failed_not_executed"

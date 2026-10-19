@@ -130,30 +130,109 @@ BROWSER_TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 BROWSER_TOOL_NAMES = frozenset(schema["name"] for schema in BROWSER_TOOL_SCHEMAS)
 
+# YIYA-36 P3：改变页面/会话状态的浏览器工具（与只读观测相对）
+_BROWSER_WRITE_TOOLS = frozenset({
+    "browser_open", "browser_navigate", "browser_click_text",
+    "browser_click_element", "browser_scroll", "browser_save_resource",
+    "browser_type", "download_captured_file",
+})
 
 
 
-def _protected_origin_denied(url: str) -> bool:
-    """YIYA-36 P2-5：超级助手浏览器通道不得访问平台自身管理面。
 
-    受保护来源 = settings.assistant_browser_protected_origins（逗号分隔，
-    部署时配置平台对外地址/反代别名）。未配置时不放行猜测——对空配置
-    返回 False 仅因无法识别平台来源；部署必须显式登记（fail-closed 责任
-    在配置，运行时一经命中即拒绝）。
-    """
+def _protected_origins() -> list:
+    """解析为 (hostname, explicit_port|None)；未写端口的 origin 保护全端口。"""
     from app.config import settings
     from urllib.parse import urlparse
 
     raw = str(settings.assistant_browser_protected_origins or "").strip()
-    if not raw or not url:
+    if not raw:
+        return []
+    parsed = []
+    for origin in raw.split(","):
+        origin = origin.strip()
+        if not origin:
+            continue
+        explicit_port = None
+        head = origin.split("/", 1)[0]
+        if head.count(":") == 1 and not origin.startswith("http"):
+            host_part, _, port_part = head.rpartition(":")
+            if port_part.isdigit():
+                explicit_port = int(port_part)
+        url = urlparse(origin if "//" in origin else f"https://{origin}")
+        if url.hostname:
+            parsed.append((url.hostname, explicit_port))
+    return parsed
+
+
+def _protected_origin_denied(url: str) -> bool:
+    """YIYA-36 P2-5/P3：超级助手浏览器通道不得访问平台自身管理面。
+
+    受保护来源 = settings.assistant_browser_protected_origins（逗号分隔，
+    部署时配置平台对外地址/反代别名）。空配置在生产环境对写工具
+    fail-closed（_guard_browser_write_tool）；非生产保持可用便于本地开发。
+    """
+    from urllib.parse import urlparse
+
+    if not url:
         return False
     target = urlparse(str(url))
-    for origin in [o.strip() for o in raw.split(",") if o.strip()]:
-        protected = urlparse(origin if "//" in origin else f"https://{origin}")
-        if target.hostname and target.hostname == protected.hostname and (
-                not protected.port or target.port == protected.port):
+    if not target.hostname:
+        return False
+    for hostname, explicit_port in _protected_origins():
+        if target.hostname != hostname:
+            continue
+        if explicit_port is None or target.port == explicit_port:
             return True
     return False
+
+
+def _boundary_denied(message: str) -> dict:
+    return {"error": "capability_boundary_unenforced", "message": message}
+
+
+def _guard_browser_write_tool(cid: str, name: str, url: str | None) -> dict | None:
+    """P3：浏览器写工具的服务端防护门（逐跳）。
+
+    1. 生产环境空受保护来源配置 → 写工具 fail-closed（不能证明受约束，
+       不放行管理面接触面）；非生产显式放行便于开发。
+    2. 显式 URL（open/navigate）命中受保护来源即拒绝。
+    3. 无 URL 的写工具（点击/输入/保存/下载）先读当前页 URL — 覆盖跳转/
+       重定向后落在管理页的场景；无会话或读不到时拒绝写操作（保守）。
+    """
+    from app.config import settings
+    from app.shared.config import normalized_environment
+
+    if name not in _BROWSER_WRITE_TOOLS:
+        return None
+    origins = _protected_origins()
+    if not origins:
+        if normalized_environment(settings.environment) in {
+                "production", "prod"}:
+            return _boundary_denied(
+                "浏览器受保护来源未配置（assistant_browser_protected_origins）："
+                "无法证明超级助手浏览器会话与平台管理面隔离，写工具已拒绝；"
+                "请由部署配置平台对外地址/反代别名后启用")
+        return None
+    if url is not None:
+        if _protected_origin_denied(str(url or "")):
+            return _boundary_denied(
+                "超级助手浏览器通道不得访问平台自身管理来源；"
+                "用户直连管理请使用普通页面登录")
+        return None
+    # 逐跳：当前页 URL 复查（跳转/重定向后的第二层）
+    try:
+        current = browser_manager.state(cid, actor="agent")
+        current_url = str((current or {}).get("url") or "")
+    except Exception:  # noqa: BLE001 - 无会话/状态不可得 → 保守拒绝写
+        return _boundary_denied(
+            "浏览器会话状态不可得，无法核对当前页面来源；写操作已保守拒绝，"
+            "请先 browser_state 建立可核对的会话")
+    if _protected_origin_denied(current_url):
+        return _boundary_denied(
+            f"当前页面位于平台受保护来源（{current_url[:120]}）；"
+            "超级助手浏览器通道不得在此页面执行操作")
+    return None
 
 
 def _dispatch(
@@ -164,13 +243,11 @@ def _dispatch(
     arguments: dict[str, Any],
 ) -> Any:
     cid = conversation.id
-    if name in ("browser_open", "browser_navigate"):
-        if _protected_origin_denied(str(arguments.get("url") or "")):
-            return {
-                "error": "capability_boundary_unenforced",
-                "message": "超级助手浏览器通道不得访问平台自身管理来源；"
-                           "用户直连管理请使用普通页面登录",
-            }
+    guard = _guard_browser_write_tool(
+        cid, name,
+        str(arguments.get("url")) if arguments.get("url") is not None else None)
+    if guard is not None:
+        return guard
     if name == "browser_open":
         target = browser_sources.resolve_target(
             db, conversation.browser_source_id, conversation.owner_id,

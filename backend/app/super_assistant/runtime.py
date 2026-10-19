@@ -1359,6 +1359,14 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         "denied",
                         None,
                     )
+                elif item["server"] is None and item["name"] in disabled_builtin_tools:
+                    # 目录级过滤的兜底（P3 整改恢复）：模型幻觉调用已禁用的
+                    # 内置工具时服务端拒绝，不依赖目录注入约束。
+                    executed[item["id"]] = (
+                        json.dumps({"error": "工具已被用户禁用", "decision": "denied"}, ensure_ascii=False),
+                        "denied",
+                        None,
+                    )
                 elif item["name"].startswith("mcp__") and item["server"] is not None:
                     # YIYA-36 P2-5：未声明「受约束 descriptor」的 MCP server 在
                     # 超级助手调用中 fail-closed（不能证明凭据/出网隔离）。

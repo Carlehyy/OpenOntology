@@ -26,6 +26,16 @@ def modeled(client, auth_headers, ontology, db):
         ],
         "linkTypes": [],
         "actions": [
+            {"id": "act-4", "name": "audit_notify", "displayName": "审计通知",
+             "objectTypeId": "ot-order", "requiresApproval": True,
+             "parameters": [],
+             "rules": [{
+                 "id": "hook4", "type": "webhook", "name": "audit hook",
+                 "enabled": True, "order": 0,
+                 "config": {"url": "http://127.0.0.1:9/audit",
+                            "method": "POST",
+                            "bodyTemplate": "{}"},
+             }]},
             {"id": "act-1", "name": "mark_paid", "displayName": "标记已支付",
              "objectTypeId": "ot-order", "requiresApproval": False,
              "parameters": [
@@ -66,7 +76,7 @@ def modeled(client, auth_headers, ontology, db):
     r = client.put(f"{_fo(oid)}/full", headers=auth_headers, json=body)
     assert r.status_code == 200, r.text
     pr = client.put(f"{_fo(oid)}/agent/profile", headers=auth_headers,
-                    json={"allowedActionIds": ["act-1", "act-2", "act-3"]})
+                    json={"allowedActionIds": ["act-1", "act-2", "act-3", "act-4"]})
     assert pr.status_code == 200, pr.text
     from app.models.ontology import OntologyProject
     from app.models.ontology_formal import ObjectInstance
@@ -129,7 +139,7 @@ def conversation(db, modeled, auth_headers):
              "requiresApproval": False, "status": "success",
              "validationErrors": [], "effects": []},
             {"kind": "action", "proposalId": "prop-k5",
-             "actionId": "act-2", "actionName": "取消订单",
+             "actionId": "act-4", "actionName": "审计通知",
              "parameters": {}, "targetInstanceId": "inst-o1",
              "releaseId": modeled["releaseId"],
              "requiresApproval": True, "status": "success",
@@ -1047,3 +1057,72 @@ def test_kernel_ontology_gate_converges_pending_to_succeeded(
     call = db.query(KernelCall).filter_by(id=call.id).one()
     assert call.status == "closed"
     assert call.outcome == "completed"
+
+
+def test_decision_replay_with_different_payload_conflicts(
+        client, auth_headers, modeled, conversation, db):
+    cid = _prepare(client, auth_headers, modeled,
+                   conversation).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    r = _decide(client, auth_headers, modeled, conversation, cid,
+                payload_hash, "deny")
+    assert r.status_code == 200
+    # 同 decisionId + 伪造 payload_hash → 冲突，不是重放
+    r = _decide(client, auth_headers, modeled, conversation, cid,
+                "0" * 64, "deny")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "decision_conflict"
+    # 同 decisionId + 正确 payload_hash → 重放 200
+    r = _decide(client, auth_headers, modeled, conversation, cid,
+                payload_hash, "deny")
+    assert r.status_code == 200
+
+
+def test_technical_execution_reopens_attempts(
+        client, auth_headers, modeled, conversation, db):
+    """P3-2：HITL 技术执行窗口重开 attempt 证据（proven_not_applied 不沿用到
+    技术执行；technical key 生命周期赋值）。"""
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-k5", actionId="act-4",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["state"] == "pending_approval"
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    assert operation.technical_engine_key == (
+        f"approval-execution:{operation.approval_log_id}")
+    attempts = db.query(CM.ActionExternalAttempt).filter_by(
+        operation_id=operation.id).all()
+    assert attempts and all(
+        a.state == "proven_not_applied" for a in attempts)
+
+    # 管理员批准 → 对账重开 attempt 为 started（技术执行真实发送 webhook）
+    r = client.post(
+        f"{_fo(modeled['oid'])}/action-logs/{operation.approval_log_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "reason": "ok",
+              "releaseId": modeled["releaseId"]})
+    assert r.status_code == 200, r.text
+    confirmation_svc.reconcile_operation(operation.id, db)
+    db.expire_all()
+    attempts = db.query(CM.ActionExternalAttempt).filter_by(
+        operation_id=operation.id).all()
+    # 本 fixture 的 webhook 端点不可达：技术执行进入效果阶段后失败，
+    # attempt 已重开为未结案证据（不再是 proven_not_applied），整体
+    # unknown 保留 guard — 不误报 failed_not_executed/成功。
+    assert all(a.state in ("started", "unknown") for a in attempts), \
+        [a.state for a in attempts]
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "unknown"
+    assert confirmation.failure_code == "execution_result_unknown"
+    # guard 保留：另一会话同载荷确认被拒
+    _, r2 = _second_session_same_payload(
+        client, auth_headers, modeled, db, "act-4", {})
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["code"] == "operation_unresolved"

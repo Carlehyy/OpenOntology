@@ -41,6 +41,11 @@ def test_upgrade_repairs_missing_super_assistant_mcp_table(tmp_path, monkeypatch
         # 基线 main 的 0108_super_assistant_mcp_dev 给该表补的 dev 项目
         # 外键列：合并后随迁移链必然存在（本分支代码不消费它）。
         "dev_project_id",
+        # YIYA-36 0133_mcp_constrained_flag 给该表补的受约束 descriptor
+        # 登记列：消费者语义 = 修复路径（drop 后重建 + 后续链）必须与正常
+        # 升级路径得到同一列集合 — constrained 缺失会使运行时 fail-closed
+        # 门（runtime MCP 拒绝）在修复库上退化为永久拒绝全部 MCP。
+        "constrained",
     } == {column["name"] for column in inspector.get_columns("super_assistant_mcp_servers")}
     assert {
         "ix_super_assistant_mcp_servers_owner_id", "ix_sa_mcp_owner_updated",
