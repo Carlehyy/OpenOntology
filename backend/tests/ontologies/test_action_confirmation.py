@@ -107,13 +107,34 @@ def conversation(db, modeled, auth_headers):
     assistant_msg = AgentMessage(
         id=f"msg-a-{uuid.uuid4().hex[:8]}", conversation_id=conv.id,
         role="assistant", content="已准备提案",
-        proposals=[{"kind": "action", "proposalId": "prop-1",
-                    "actionId": "act-1", "actionName": "标记已支付",
-                    "parameters": {"note": "user asked", "level": 2},
-                    "targetInstanceId": "inst-o1",
-                    "releaseId": modeled["releaseId"],
-                    "requiresApproval": False, "status": "success",
-                    "validationErrors": [], "effects": []}])
+        proposals=[
+            {"kind": "action", "proposalId": "prop-1",
+             "actionId": "act-1", "actionName": "标记已支付",
+             "parameters": {"note": "user asked", "level": 2},
+             "targetInstanceId": "inst-o1",
+             "releaseId": modeled["releaseId"],
+             "requiresApproval": False, "status": "success",
+             "validationErrors": [], "effects": []},
+            {"kind": "action", "proposalId": "prop-k1",
+             "actionId": "act-1", "actionName": "标记已支付",
+             "parameters": {"note": "k", "level": 1},
+             "targetInstanceId": "inst-o1",
+             "releaseId": modeled["releaseId"],
+             "requiresApproval": False, "status": "success",
+             "validationErrors": [], "effects": []},
+            {"kind": "action", "proposalId": "prop-k2",
+             "actionId": "act-3", "actionName": "通知外部系统",
+             "parameters": {}, "targetInstanceId": "inst-o1",
+             "releaseId": modeled["releaseId"],
+             "requiresApproval": False, "status": "success",
+             "validationErrors": [], "effects": []},
+            {"kind": "action", "proposalId": "prop-k5",
+             "actionId": "act-2", "actionName": "取消订单",
+             "parameters": {}, "targetInstanceId": "inst-o1",
+             "releaseId": modeled["releaseId"],
+             "requiresApproval": True, "status": "success",
+             "validationErrors": [], "effects": []},
+        ])
     db.add(assistant_msg)
     db.commit()
     return {"conv": conv, "userMsg": user_msg, "assistantMsg": assistant_msg}
@@ -754,3 +775,275 @@ def test_kill_switch_blocks_approve_and_worker_claim(
 
     # worker claim 也被总闸拦住
     assert confirmation_svc._claim("nonexistent", db) is None
+
+
+
+# ------------------------------------- P2-5 kernel gated 写映射（契约测试）
+
+import asyncio as _asyncio
+import uuid as _uuid
+from datetime import timedelta as _timedelta
+
+from app.models.user import User
+from app.super_assistant.models import SuperAssistantConversation as _SAConv
+from app.super_assistant.kernel import runtime as kernel_runtime
+from app.super_assistant.kernel.models import (
+    Approval as KernelApproval, ExecutionCall as KernelCall,
+)
+from app.super_assistant.kernel.store import (
+    acquire_lease as _acquire_lease, create_run as _create_run,
+)
+from app.super_assistant import ontology_tools
+
+
+class _NoCloseSession:
+    """测试替身：kernel 消费者结束时会 close 会话；测试会话由 fixture 管理。"""
+
+    def __init__(self, session):
+        self._session = session
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    def close(self):
+        return None
+
+
+def _kernel_seed(db):
+    owner = db.query(User).first()
+    conversation = _SAConv(owner_id=owner.id, title="k")
+    db.add(conversation)
+    db.flush()
+    run, _ = _create_run(db, owner_id=owner.id,
+                         conversation_id=conversation.id, goal="goal",
+                         idempotency_key=f"run-{_uuid.uuid4().hex[:8]}")
+    db.commit()
+    return owner, conversation, run
+
+
+def _kernel_request_gated_call(db, run, conversation_id, confirmation_id,
+                               ontology_id, payload_hash):
+    token = _acquire_lease(db, run_id=run.id, worker_id="worker-test",
+                           ttl=_timedelta(minutes=5))
+    turn = kernel_runtime._open_turn(db, run, trigger_ref="test", lease=token)
+    from app.super_assistant.kernel.models import ExecutionStep
+    step = ExecutionStep(turn_id=turn.id, step_no=0, status="open")
+    db.add(step)
+    db.flush()
+    kernel_runtime._persist_waiting_state(
+        db, run, turn, step,
+        {"kind": "external_event", "reason": "ontology_execute",
+         "target_ref": ontology_tools.ONTOLOGY_EXECUTE_CAPABILITY,
+         "_detail": {
+             "capability": ontology_tools.ONTOLOGY_EXECUTE_CAPABILITY,
+             "confirmationId": confirmation_id,
+             "sessionId": conversation_id,
+             "ontologyId": ontology_id,
+             "payloadHash": payload_hash,
+         }},
+        token)
+    db.commit()
+    call = db.query(KernelCall).filter(
+        KernelCall.run_id == run.id,
+        KernelCall.capability_key
+        == ontology_tools.ONTOLOGY_EXECUTE_CAPABILITY).one()
+    approval = db.query(KernelApproval).filter(
+        KernelApproval.call_id == call.id).one()
+    return call, approval
+
+
+def _kernel_prepare(client, auth_headers, modeled, conversation, submission,
+                    action_id, parameters):
+    r = client.post(
+        f"/api/v2/formal/ontologies/{modeled['oid']}/agent/proposals",
+        headers=auth_headers,
+        json={"sessionKind": "super_assistant",
+              "sessionId": conversation["conv"].id,
+              "clientSubmissionId": submission, "actionId": action_id,
+              "releaseId": modeled["releaseId"],
+              "targetInstanceId": "inst-o1", "parameters": parameters})
+    assert r.status_code == 201, r.text
+    return r.json()["data"]
+
+
+def _kernel_decide(client, auth_headers, run, approval, decision, key):
+    return client.post(
+        f"/api/v2/super-assistant/runs/{run.id}/approvals/{approval.id}/decision",
+        headers={**auth_headers, "If-Match": str(run.version),
+                 "Idempotency-Key": key},
+        json={"decision": decision, "idempotency_key": key})
+
+
+def test_kernel_ontology_gate_full_journey(client, auth_headers, modeled,
+                                           conversation, db, monkeypatch):
+    """approve → 确认协议派发 → outbox 消费 → Call 收敛 succeeded。"""
+    monkeypatch.setattr(kernel_runtime, "SessionLocal",
+                        lambda: _NoCloseSession(db))
+    prepared = _kernel_prepare(client, auth_headers, modeled, conversation,
+                               "prop-k1", "act-1", {"note": "k", "level": 1})
+    cid = prepared["confirmationId"]
+    owner, sa_conv, run = _kernel_seed(db)
+    call, approval = _kernel_request_gated_call(
+        db, run, conversation["conv"].id, cid,
+        modeled["oid"], prepared["payloadHash"])
+    assert call.side_effect_class == "non_idempotent_write"
+    assert call.status == "offered" and call.outcome == "not_sent"
+    assert approval.status == "pending"
+    assert approval.parameter_hash == kernel_runtime._checksum(
+        call.input_snapshot_ref)
+    assert run.status == "waiting_approval"
+
+    r = _kernel_decide(client, auth_headers, run, approval, "approved",
+                       "dec-k1")
+    assert r.status_code == 202, r.text
+    confirmation = _confirmation(db, cid)
+    db.refresh(confirmation)
+    assert confirmation.state == "dispatch_queued"
+    db.refresh(run)
+    assert run.status == "waiting_external"
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+    assert db.query(ExecutionDispatchOutbox).filter_by(
+        command_id=f"external-dispatch:{call.id}").count() == 1
+
+    db.refresh(call)
+    applied = _asyncio.run(kernel_runtime.process_external_call_message(
+        {"run_id": run.id, "call_id": call.id}))
+    assert applied is True
+    db.expire_all()
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "succeeded"
+    call = db.query(KernelCall).filter_by(id=call.id).one()
+    assert call.status == "closed"
+    assert call.outcome == "completed"
+    assert call.remote_observed_state_ref == "confirmation:succeeded"
+    from app.models.ontology_formal import ObjectInstance
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "paid"
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+    logs = db.query(ActionExecutionLog).filter(
+        ActionExecutionLog.ontology_id == modeled["oid"],
+        ActionExecutionLog.idempotency_key == f"proposal:{cid}").all()
+    assert len(logs) == 1
+    applied = _asyncio.run(kernel_runtime.process_external_call_message(
+        {"run_id": run.id, "call_id": call.id}))
+    assert applied is True
+    assert db.query(ActionExecutionLog).filter(
+        ActionExecutionLog.ontology_id == modeled["oid"],
+        ActionExecutionLog.idempotency_key == f"proposal:{cid}").count() == 1
+
+
+def test_kernel_ontology_gate_deny_has_no_business_effect(
+        client, auth_headers, modeled, conversation, db):
+    from app.models.ontology_formal import ObjectInstance
+
+    prepared = _kernel_prepare(client, auth_headers, modeled, conversation,
+                               "prop-k1", "act-1", {"note": "k", "level": 1})
+    owner, sa_conv, run = _kernel_seed(db)
+    call, approval = _kernel_request_gated_call(
+        db, run, conversation["conv"].id, prepared["confirmationId"],
+        modeled["oid"], prepared["payloadHash"])
+    r = _kernel_decide(client, auth_headers, run, approval, "denied",
+                       "dec-k2")
+    assert r.status_code == 202, r.text
+    confirmation = _confirmation(db, prepared["confirmationId"])
+    db.refresh(confirmation)
+    assert confirmation.state == "denied"
+    db.refresh(call)
+    assert call.status == "closed" and call.outcome == "not_sent"
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"
+
+
+def test_kernel_ontology_gate_unknown_keeps_manual_attention(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    from app.ontologies.formal_modeling import action_engine as engine_mod
+
+    monkeypatch.setattr(kernel_runtime, "SessionLocal",
+                        lambda: _NoCloseSession(db))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("crash mid-effects")
+
+    monkeypatch.setattr(engine_mod, "execute_action", _boom)
+    prepared = _kernel_prepare(client, auth_headers, modeled, conversation,
+                               "prop-k2", "act-3", {})
+    owner, sa_conv, run = _kernel_seed(db)
+    call, approval = _kernel_request_gated_call(
+        db, run, conversation["conv"].id, prepared["confirmationId"],
+        modeled["oid"], prepared["payloadHash"])
+    r = _kernel_decide(client, auth_headers, run, approval, "approved",
+                       "dec-k3")
+    assert r.status_code == 202, r.text
+    applied = _asyncio.run(kernel_runtime.process_external_call_message(
+        {"run_id": run.id, "call_id": call.id}))
+    assert applied is True
+    db.expire_all()
+    confirmation = _confirmation(db, prepared["confirmationId"])
+    assert confirmation.state == "unknown"
+    call = db.query(KernelCall).filter_by(id=call.id).one()
+    assert call.outcome == "outcome_unknown"
+    assert call.manual_attention is True
+    assert call.status == "reconciling"
+
+
+def test_kernel_ontology_gate_kill_switch_consistent(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    from app.config import settings
+
+    prepared = _kernel_prepare(client, auth_headers, modeled, conversation,
+                               "prop-k1", "act-1", {"note": "k", "level": 1})
+    owner, sa_conv, run = _kernel_seed(db)
+    call, approval = _kernel_request_gated_call(
+        db, run, conversation["conv"].id, prepared["confirmationId"],
+        modeled["oid"], prepared["payloadHash"])
+    monkeypatch.setattr(settings, "assistant_action_execution_enabled",
+                        False, raising=False)
+    r = _kernel_decide(client, auth_headers, run, approval, "approved",
+                       "dec-k4")
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "assistant_writes_disabled"
+
+
+def test_kernel_ontology_gate_converges_pending_to_succeeded(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    monkeypatch.setattr(kernel_runtime, "SessionLocal",
+                        lambda: _NoCloseSession(db))
+    prepared = _kernel_prepare(client, auth_headers, modeled, conversation,
+                               "prop-k5", "act-2", {})
+    owner, sa_conv, run = _kernel_seed(db)
+    call, approval = _kernel_request_gated_call(
+        db, run, conversation["conv"].id, prepared["confirmationId"],
+        modeled["oid"], prepared["payloadHash"])
+    r = _kernel_decide(client, auth_headers, run, approval, "approved",
+                       "dec-k5")
+    assert r.status_code == 202, r.text
+    applied = _asyncio.run(kernel_runtime.process_external_call_message(
+        {"run_id": run.id, "call_id": call.id}))
+    assert applied is True
+    db.expire_all()
+    call = db.query(KernelCall).filter_by(id=call.id).one()
+    assert call.status == "waiting_external"
+    assert call.remote_observed_state_ref == "confirmation:pending_approval"
+
+    confirmation = _confirmation(db, prepared["confirmationId"])
+    db.refresh(confirmation)
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=confirmation.id).one()
+    r = client.post(
+        f"/api/v2/formal/ontologies/{modeled['oid']}/action-logs/"
+        f"{operation.approval_log_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "reason": "ok",
+              "releaseId": modeled["releaseId"]})
+    assert r.status_code == 200, r.text
+
+    converged = kernel_runtime.converge_ontology_execute_calls(db)
+    assert converged >= 1
+    db.expire_all()
+    confirmation = _confirmation(db, prepared["confirmationId"])
+    assert confirmation.state == "succeeded"
+    call = db.query(KernelCall).filter_by(id=call.id).one()
+    assert call.status == "closed"
+    assert call.outcome == "completed"

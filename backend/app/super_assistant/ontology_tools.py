@@ -18,7 +18,7 @@ from app.ontologies.agent_runtime.assistant_facade import (
     FacadeError, build_query_request, confirmation_status,
     current_release_map, decide_confirmation, execute_confirmation,
     prepare_action, query, query_page, structure,
-    confirmation_owner_lookup,
+    confirmation_owner_lookup, reconcile_confirmation,
 )
 from app.super_assistant.models import (
     SuperAssistantConversation, SuperAssistantMessage, SuperAssistantToolRun,
@@ -398,3 +398,93 @@ def decide_from_tool_run(db: Session, current_user, tool_run, decision: str):
         from fastapi import HTTPException
 
         raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+
+
+# ------------------------------------------------- kernel gated 写映射（P2-5）
+
+ONTOLOGY_EXECUTE_CAPABILITY = "ontology:confirmed_execute"
+ONTOLOGY_READ_CAPABILITIES = (
+    "ontology.discover", "ontology.structure", "ontology.query",
+)
+
+_KERNEL_SESSION_KIND = "super_assistant"
+
+
+def build_ontology_execute_request(*, confirmation_id: str, session_id: str,
+                                   ontology_id: str, payload_hash: str) -> str:
+    """kernel 侧 gated Call 的输入快照（JSON，Approval.parameter_hash 锚）。"""
+    return json.dumps({
+        "capability": ONTOLOGY_EXECUTE_CAPABILITY,
+        "confirmationId": str(confirmation_id),
+        "sessionKind": _KERNEL_SESSION_KIND,
+        "sessionId": str(session_id),
+        "ontologyId": str(ontology_id),
+        "payloadHash": str(payload_hash),
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def parse_ontology_execute_request(input_ref) -> dict | None:
+    """解析 gated Call 输入；非法/非本体请求返回 None。"""
+    try:
+        payload = json.loads(str(input_ref or ""))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("capability") != ONTOLOGY_EXECUTE_CAPABILITY:
+        return None
+    required = ("confirmationId", "sessionId", "ontologyId", "payloadHash")
+    if any(not str(payload.get(key) or "").strip() for key in required):
+        return None
+    return payload
+
+
+def kernel_decide_confirmation(db: Session, user, request: dict,
+                               decision: str, decision_id: str) -> dict:
+    """kernel Approval decision → 确认协议的一次用户二次确认（approve/deny）。
+
+    decision_id 绑定 kernel 审批 id：重复命令经确认协议重放，不产生第二份
+    确认决策。payloadHash 来自 Approval.parameter_hash 锚定的输入快照。
+    """
+    return decide_confirmation(
+        db, user, str(request["ontologyId"]),
+        str(request["confirmationId"]),
+        "approve" if decision == "approved" else "deny",
+        session_kind=str(request.get("sessionKind") or _KERNEL_SESSION_KIND),
+        session_id=str(request["sessionId"]),
+        decision_id=decision_id,
+        payload_hash=str(request["payloadHash"]))
+
+
+def kernel_execute_confirmation(db: Session, user, request: dict) -> dict:
+    """outbox 消费侧：唤醒已批准确认（只派发，绝不代 approve）。"""
+    return execute_confirmation(
+        db, user, str(request["ontologyId"]),
+        str(request["confirmationId"]),
+        session_kind=str(request.get("sessionKind") or _KERNEL_SESSION_KIND),
+        session_id=str(request["sessionId"]))
+
+
+def kernel_confirmation_status(db: Session, user, request: dict) -> dict | None:
+    """收敛扫描用：读取确认真实状态（unknown 不随读执行）。"""
+    try:
+        return confirmation_status(
+            db, user, str(request["ontologyId"]),
+            str(request["confirmationId"]),
+            session_kind=str(request.get("sessionKind") or _KERNEL_SESSION_KIND),
+            session_id=str(request["sessionId"]))
+    except FacadeError:
+        return None
+
+
+def kernel_reconcile_confirmation(db: Session, user, request: dict) -> dict | None:
+    """kernel 收敛扫描用：先推进确认对账再取真实状态。"""
+    try:
+        return reconcile_confirmation(
+            db, user, str(request["ontologyId"]),
+            str(request["confirmationId"]),
+            session_kind=str(request.get("sessionKind")
+                             or _KERNEL_SESSION_KIND),
+            session_id=str(request["sessionId"]))
+    except FacadeError:
+        return None

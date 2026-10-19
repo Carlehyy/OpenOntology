@@ -819,6 +819,182 @@ def _persist_connector_capability(db, connector, *, source: str) -> None:
         raise ValueError("connector capability is disabled")
 
 
+def _map_confirmation_state_to_call(state: str) -> tuple[str, str, bool]:
+    """确认状态 → (CallStatus, CallOutcome, manual_attention)。"""
+    if state == "succeeded":
+        return CallStatus.CLOSED.value, CallOutcome.COMPLETED.value, False
+    if state in ("failed_not_executed", "approval_rejected", "denied",
+                 "cancelled", "expired"):
+        return CallStatus.CLOSED.value, CallOutcome.FAILED.value, False
+    if state in ("unknown", "compensation_required"):
+        return (CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value,
+                True)
+    # dispatch_queued / executing / pending_approval / prepared
+    return (CallStatus.WAITING_EXTERNAL.value, CallOutcome.REMOTE_RUNNING.value,
+            False)
+
+
+def _apply_confirmation_state_to_call(db, run, call, confirmation: dict,
+                                      actor: str = "connector") -> None:
+    state = str(confirmation.get("state") or "")
+    status, outcome, manual = _map_confirmation_state_to_call(state)
+    call.status, call.outcome = status, outcome
+    call.manual_attention = bool(manual)
+    call.remote_observed_state_ref = f"confirmation:{state}"
+    if confirmation.get("operationId"):
+        call.remote_task_ref = f"confirmation:{confirmation['operationId']}"
+    append_event(db, run, event_type="call.outcome_changed", payload={
+        "call_id": call.id, "status": call.status, "outcome": call.outcome,
+        "evidence_ref": call.remote_observed_state_ref,
+        "connector_id": call.target_ref,
+        "provider_event_id": confirmation.get("confirmationId"),
+        "confirmationState": state,
+    }, actor={"kind": actor}, command_id=f"call:{call.id}:ontology",
+        idempotency_key=f"call-ontology:{call.id}:{state}",
+        connector_id=call.target_ref)
+    if status == CallStatus.CLOSED.value:
+        stale = db.scalar(select(InboxItem).where(
+            InboxItem.run_id == run.id, InboxItem.kind == "external_event",
+            InboxItem.call_id == call.id, InboxItem.status == "pending"))
+        if stale is not None:
+            stale.status, stale.consumed_at = "consumed", _now()
+        if run.status == RunStatus.WAITING_EXTERNAL.value:
+            run.status, run.wait_reason = RunStatus.ACTIVE.value, None
+            from .store import _add_outbox
+            _add_outbox(db, run, command_id=f"ontology-result:{call.id}",
+                        message_ref=f"call://{call.id}")
+
+
+async def _dispatch_ontology_execute_call(db, run, call) -> bool:
+    """outbox 消费：唤醒已批准确认并按确认状态机收敛 Call（P2-5 kernel 映射）。
+
+    幂等：确认协议的 proposal:{cid} 引擎键 + Call 状态门（offered/
+    waiting_external 才派发）共同保证不重复副作用；unknown 语义与确认
+    状态机一致（不伪装成功/失败）。写总闸关闭时确认保持 dispatch_queued，
+    Call 停留 waiting_external 可后继收敛。
+    """
+    from app.super_assistant import ontology_tools
+    from app.models.user import User
+
+    request = ontology_tools.parse_ontology_execute_request(
+        call.input_snapshot_ref)
+    user = db.scalar(select(User).where(User.id == run.owner_id)) \
+        if request else None
+    if request is None or user is None:
+        call.status, call.outcome, call.manual_attention = (
+            CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value,
+            True)
+        call.remote_observed_state_ref = "ontology_request_invalid"
+        append_event(db, run, event_type="call.outcome_changed", payload={
+            "call_id": call.id, "status": call.status,
+            "outcome": call.outcome, "evidence_ref": None,
+            "connector_id": call.target_ref, "provider_event_id": None,
+        }, actor={"kind": "system"}, command_id=f"call:{call.id}:invalid",
+            idempotency_key=f"call-ontology-invalid:{call.id}",
+            connector_id=call.target_ref)
+        db.commit()
+        return True
+    attempt_no = (db.scalar(select(ExecutionAttempt.attempt_no).where(
+        ExecutionAttempt.call_id == call.id).order_by(
+            ExecutionAttempt.attempt_no.desc())) or 0) + 1
+    attempt = ExecutionAttempt(call_id=call.id, attempt_no=attempt_no,
+                               provider_status="started",
+                               transport_request_ref=call.input_snapshot_ref)
+    db.add(attempt)
+    call.status, call.outcome = (CallStatus.RUNNING.value,
+                                 CallOutcome.ACCEPTED.value)
+    db.flush()
+    append_event(db, run, event_type="attempt.started", payload={
+        "attempt_id": attempt.id, "provider_status": "started",
+        "request_ref": call.input_snapshot_ref or f"call:{call.id}",
+        "started_at": attempt.started_at.isoformat()},
+        actor={"kind": "connector"}, command_id=f"external:{attempt.id}:start",
+        idempotency_key=f"external-attempt-start:{attempt.id}",
+        connector_id=call.target_ref)
+    db.commit()
+    try:
+        confirmation = ontology_tools.kernel_execute_confirmation(
+            db, user, request)
+    except Exception as exc:  # noqa: BLE001 - 异常 → outcome_unknown 对账
+        db.rollback()
+        call = db.scalar(select(ExecutionCall).where(
+            ExecutionCall.id == call.id).with_for_update())
+        run = db.scalar(select(ExecutionRun).where(
+            ExecutionRun.id == run.id).with_for_update())
+        if call is None or run is None:
+            return True
+        call.status, call.outcome, call.manual_attention = (
+            CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value,
+            True)
+        call.remote_observed_state_ref = f"ontology_bridge_error:{exc}"[:200]
+        append_event(db, run, event_type="call.outcome_changed", payload={
+            "call_id": call.id, "status": call.status,
+            "outcome": call.outcome, "evidence_ref": None,
+            "connector_id": call.target_ref, "provider_event_id": None,
+        }, actor={"kind": "connector"}, command_id=f"call:{call.id}:error",
+            idempotency_key=f"call-ontology-error:{call.id}",
+            connector_id=call.target_ref)
+        db.commit()
+        return True
+    db.rollback()
+    call = db.scalar(select(ExecutionCall).where(
+        ExecutionCall.id == call.id).with_for_update())
+    run = db.scalar(select(ExecutionRun).where(
+        ExecutionRun.id == run.id).with_for_update())
+    if call is None or run is None:
+        return True
+    _apply_confirmation_state_to_call(db, run, call, confirmation)
+    db.commit()
+    return True
+
+
+def converge_ontology_execute_calls(db, batch_size: int = 50) -> int:
+    """收敛扫描：waiting_external 的本体执行 Call 按确认真实状态推进。
+
+    覆盖 pending_approval → HITL 批准后、写总闸开启后的延迟收敛；
+    unknown/compensation 保持 manual_attention，不伪装成功。
+    """
+    from app.super_assistant import ontology_tools
+    from app.super_assistant.ontology_tools import (
+        ONTOLOGY_EXECUTE_CAPABILITY,
+    )
+    from app.models.user import User
+
+    rows = db.execute(select(ExecutionCall, ExecutionRun).join(
+        ExecutionRun, ExecutionRun.id == ExecutionCall.run_id).where(
+            ExecutionCall.capability_key == ONTOLOGY_EXECUTE_CAPABILITY,
+            ExecutionCall.status == CallStatus.WAITING_EXTERNAL.value,
+    ).limit(batch_size)).all()
+    converged = 0
+    for call, run in rows:
+        request = ontology_tools.parse_ontology_execute_request(
+            call.input_snapshot_ref)
+        if request is None:
+            continue
+        user = db.scalar(select(User).where(User.id == run.owner_id))
+        if user is None:
+            continue
+        confirmation = ontology_tools.kernel_reconcile_confirmation(
+            db, user, request)
+        if confirmation is None:
+            continue
+        state = str(confirmation.get("state") or "")
+        if call.remote_observed_state_ref == f"confirmation:{state}":
+            continue
+        locked_call = db.scalar(select(ExecutionCall).where(
+            ExecutionCall.id == call.id).with_for_update())
+        locked_run = db.scalar(select(ExecutionRun).where(
+            ExecutionRun.id == run.id).with_for_update())
+        if locked_call is None or locked_run is None:
+            continue
+        _apply_confirmation_state_to_call(db, locked_run, locked_call,
+                                          confirmation, actor="system")
+        converged += 1
+    if converged:
+        db.commit()
+    return converged
+
+
 async def process_external_call_message(payload: dict) -> bool:
     """Dispatch one durable external Call through ConnectorRegistry.
 
@@ -869,6 +1045,11 @@ async def process_external_call_message(payload: dict) -> bool:
             append_event(db, run, event_type="call.outcome_changed", payload={"call_id": call.id, "status": call.status, "outcome": call.outcome, "evidence_ref": None, "connector_id": call.target_ref, "provider_event_id": None}, actor={"kind": "system"}, command_id=f"call:{call.id}:cancel-preempted", idempotency_key=f"call-cancel-preempted:{call.id}", connector_id=call.target_ref)
             db.commit()
             return True
+        from app.super_assistant.ontology_tools import (
+            ONTOLOGY_EXECUTE_CAPABILITY,
+        )
+        if call.capability_key == ONTOLOGY_EXECUTE_CAPABILITY:
+            return await _dispatch_ontology_execute_call(db, run, call)
         connector = _resolve_external_connector(db, run, call)
         if connector is None:
             call.status, call.outcome, call.manual_attention = CallStatus.RECONCILING.value, CallOutcome.OUTCOME_UNKNOWN.value, True
@@ -1446,14 +1627,16 @@ def _wait_request(result: dict, tool_calls: list[dict]) -> dict | None:
     value = result.get("wait_for_external") or result.get("external_call")
     if value:
         detail = value if isinstance(value, dict) else {"target_ref": str(value)}
-        return {
+        wait = {
             "kind": "external_event",
             "reason": detail.get("reason") or "external_call",
             "target_ref": detail.get("target_ref") or detail.get("target") or "external",
+            "_detail": detail,
             "message": detail.get("message") or detail.get("prompt"),
             "session_ref": detail.get("session_ref"),
             "input_ref": detail.get("input_ref"),
         }
+        return wait
     return None
 
 
@@ -1569,11 +1752,14 @@ def _reject_ontology_write_capability(capability_key: str | None) -> None:
     不得移除。
     """
     key = str(capability_key or "")
-    read_only = {
-        "ontology.discover", "ontology.structure", "ontology.query",
+    from app.super_assistant.ontology_tools import (
+        ONTOLOGY_EXECUTE_CAPABILITY, ONTOLOGY_READ_CAPABILITIES,
+    )
+    allowed = set(ONTOLOGY_READ_CAPABILITIES) | {
         "ontology:discover", "ontology:structure", "ontology:query",
+        ONTOLOGY_EXECUTE_CAPABILITY,
     }
-    if key.startswith(("ontology:", "ontology.")) and key not in read_only:
+    if key.startswith(("ontology:", "ontology.")) and key not in allowed:
         from .contracts import ContractError
         raise ContractError(
             "ontology write capability is not dispatched via kernel; "
@@ -1591,17 +1777,54 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
     elif kind in {"question_answer", "external_event"}:
         if kind == "external_event" and call is not None:
             _reject_ontology_write_capability(call.capability_key)
+        ontology_request = None
+        if kind == "external_event":
+            from app.super_assistant.ontology_tools import (
+                ONTOLOGY_EXECUTE_CAPABILITY, build_ontology_execute_request,
+                parse_ontology_execute_request,
+            )
+            detail = wait.get("_detail") or {}
+            if (str(target_ref or "") == ONTOLOGY_EXECUTE_CAPABILITY
+                    or str(detail.get("capability") or "")
+                    == ONTOLOGY_EXECUTE_CAPABILITY):
+                ontology_request = parse_ontology_execute_request(
+                    build_ontology_execute_request(
+                        confirmation_id=str(detail.get("confirmationId") or ""),
+                        session_id=str(detail.get("sessionId")
+                                        or run.conversation_id or ""),
+                        ontology_id=str(detail.get("ontologyId") or ""),
+                        payload_hash=str(detail.get("payloadHash") or "")))
+                if ontology_request is None:
+                    from .contracts import ContractError
+                    raise ContractError(
+                        "ontology execute request is missing required fields")
             # The model decision is closed above; the requested remote work is
             # a separate long-lived Call so reconciliation can advance it
             # without reopening the model Call.
-            input_ref = wait.get("input_ref") or json.dumps(
-                {"message": str(wait.get("message") or run.goal), "session_ref": wait.get("session_ref")},
-                ensure_ascii=False,
-            )
-            capability_revision = _capability_revision_for_target(db, run.owner_id, target_ref)
-            snapshot = _capability_snapshot(db, str(target_ref or "agent"), int(capability_revision)) if target_ref else None
-            side_effect_class = getattr(snapshot, "side_effect_class", None) or SideEffectClass.EXTERNAL_ASYNC.value
-            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=f"external:{target_ref or 'agent'}", capability_revision=capability_revision, target_ref=target_ref, input_snapshot_ref=input_ref, side_effect_class=side_effect_class, authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=f"external:{run.id}:{run.version}:{target_ref or 'agent'}", status="offered", outcome="not_sent", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at)
+            if ontology_request is not None:
+                from app.super_assistant.ontology_tools import (
+                    ONTOLOGY_EXECUTE_CAPABILITY,
+                )
+                input_ref = json.dumps(ontology_request, ensure_ascii=False,
+                                       sort_keys=True)
+                capability_revision = 1
+                side_effect_class = SideEffectClass.NON_IDEMPOTENT_WRITE.value
+                call_capability = ONTOLOGY_EXECUTE_CAPABILITY
+                call_target = f"ontology:{ontology_request['ontologyId']}"
+                call_idem = (f"ontology-execute:{run.id}:"
+                             f"{ontology_request['confirmationId']}")
+            else:
+                input_ref = wait.get("input_ref") or json.dumps(
+                    {"message": str(wait.get("message") or run.goal), "session_ref": wait.get("session_ref")},
+                    ensure_ascii=False,
+                )
+                capability_revision = _capability_revision_for_target(db, run.owner_id, target_ref)
+                snapshot = _capability_snapshot(db, str(target_ref or "agent"), int(capability_revision)) if target_ref else None
+                side_effect_class = getattr(snapshot, "side_effect_class", None) or SideEffectClass.EXTERNAL_ASYNC.value
+                call_capability = f"external:{target_ref or 'agent'}"
+                call_target = target_ref
+                call_idem = f"external:{run.id}:{run.version}:{target_ref or 'agent'}"
+            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=call_capability, capability_revision=capability_revision, target_ref=call_target, input_snapshot_ref=input_ref, side_effect_class=side_effect_class, authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=call_idem, status="offered", outcome="not_sent", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at)
             db.add(external_call); db.flush()
             append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": capability_revision, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": side_effect_class, "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
             append_event(db, run, event_type="call.outcome_changed", payload={"call_id": external_call.id, "status": "offered", "outcome": "not_sent", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)

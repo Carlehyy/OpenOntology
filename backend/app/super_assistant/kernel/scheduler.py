@@ -272,6 +272,7 @@ def _poll_external_calls_once() -> None:
 def _drain() -> None:
     from .outbox import publish_due_once, recover_expired_claims
     from .recovery import expire_due_runs_once, expire_inbox_once, join_ready_parents_once, recover_stuck_runs_once
+    from .runtime import converge_ontology_execute_calls
 
     db = SessionLocal()
     try:
@@ -280,6 +281,9 @@ def _drain() -> None:
         expire_inbox_once(db)
         recover_stuck_runs_once(db)
         join_ready_parents_once(db)
+        # YIYA-36 P2-5：kernel 本体执行 Call 按确认状态机收敛
+        # （pending_approval/写总闸延迟开启等），每 5 秒有界一批。
+        converge_ontology_execute_calls(db, batch_size=20)
         publish_due_once(db, batch_size=20)
     except Exception:
         logger.exception("kernel execution outbox drain failed")

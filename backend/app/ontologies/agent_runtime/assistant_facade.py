@@ -264,3 +264,19 @@ def current_release_map(db: Session, ontology_ids: list[str]) -> dict[str, Any]:
     rows = db.query(OntologyProject).filter(
         OntologyProject.id.in_(ontology_ids)).all()
     return {row.id: row.current_release_id for row in rows}
+
+
+def reconcile_confirmation(db: Session, user, ontology_id: str, cid: str, *,
+                           session_kind: str, session_id: str) -> dict:
+    """推进确认对账（审批后技术执行/租约过期恢复）并返回真实状态。"""
+    try:
+        confirmation = confirmation_service.get_status(
+            db, user, ontology_id, cid, session_kind, session_id)
+        if confirmation.operation_id:
+            confirmation_service.reconcile_operation(
+                confirmation.operation_id, db)
+        refreshed = confirmation_service.get_status(
+            db, user, ontology_id, cid, session_kind, session_id)
+        return confirmation_service.confirmation_out(db, refreshed)
+    except Exception as exc:  # noqa: BLE001
+        raise _wrap(exc) from exc

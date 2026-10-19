@@ -326,6 +326,25 @@ def decide_kernel_approval(run_id: str, approval_id: str, body: ApprovalDecision
         gated_call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == approval.call_id, ExecutionCall.run_id == run.id)) if approval.call_id else None
         if gated_call is not None and gated_call.status in {"offered", "waiting_external"} and not gated_call.remote_task_ref:
             from .store import _add_outbox
+            from app.super_assistant import ontology_tools as _ontology_tools
+            if gated_call.capability_key == _ontology_tools.ONTOLOGY_EXECUTE_CAPABILITY:
+                # YIYA-36 P2-5 kernel gated 写映射：审批决策原子映射到同一
+                # 确认协议（唯一用户确认；decision_id 绑定本审批）。
+                _request = _ontology_tools.parse_ontology_execute_request(
+                    gated_call.input_snapshot_ref)
+                if _request is None:
+                    db.rollback()
+                    raise HTTPException(status_code=409, detail={
+                        "code": "ontology_request_invalid",
+                        "message": "本体执行 Call 的输入快照非法"})
+                try:
+                    _ontology_tools.kernel_decide_confirmation(
+                        db, user, _request, body.decision,
+                        decision_id=f"kernel-approval:{approval.id}")
+                except _ontology_tools.FacadeError as exc:
+                    db.rollback()
+                    raise HTTPException(status_code=exc.status,
+                                        detail=exc.detail()) from exc
 
             if body.decision == "approved":
                 # 批准后只解锁派发：Run 回到 waiting_external，等外部结果的
