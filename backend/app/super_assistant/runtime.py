@@ -1359,13 +1359,23 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         "denied",
                         None,
                     )
-                elif item["name"] in disabled_builtin_tools:
-                    # 目录级过滤的兜底：模型幻觉调用已禁用工具时拒绝并回灌
-                    executed[item["id"]] = (
-                        json.dumps({"error": "工具已被用户禁用", "decision": "denied"}, ensure_ascii=False),
-                        "denied",
-                        None,
-                    )
+                elif item["name"].startswith("mcp__") and item["server"] is not None:
+                    # YIYA-36 P2-5：未声明「受约束 descriptor」的 MCP server 在
+                    # 超级助手调用中 fail-closed（不能证明凭据/出网隔离）。
+                    mcp_server = item["server"][0]
+                    if not getattr(mcp_server, "constrained", False):
+                        executed[item["id"]] = (
+                            json.dumps({
+                                "error": "capability_boundary_unenforced",
+                                "message": "MCP server 未登记受约束 descriptor"
+                                           "（凭据隔离/出网策略不可证），已在"
+                                           "超级助手调用中拒绝",
+                            }, ensure_ascii=False),
+                            "denied",
+                            None,
+                        )
+                    else:
+                        serial_items.append(item)
                 elif item["server"] is None and item["name"] in _READ_ONLY_BUILTIN_TOOLS:
                     parallel_items.append(item)
                 else:

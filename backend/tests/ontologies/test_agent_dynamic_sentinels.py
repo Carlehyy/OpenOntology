@@ -759,18 +759,35 @@ def test_action_entry_points_execute_the_exact_release_after_live_rule_drift(
         "status": "pending",
     }
     db.commit()
-    confirmed = client.post(
-        f"{_fo(runtime['ontology_id'])}/agent/execute-proposal",
+    # YIYA-36 确认协议：用户确认执行经持久 confirmationId 完成
+    conv = _confirmation_conversation(db, runtime, auth_headers)
+    prepared = client.post(
+        f"{_fo(runtime['ontology_id'])}/agent/proposals",
         headers=auth_headers,
         json={
+            "sessionKind": "ontology_agent", "sessionId": conv.id,
+            "clientSubmissionId": "prop-confirm-1",
             "releaseId": runtime["release_id"],
             "actionId": "act-mark-paid",
             "targetInstanceId": "inst-order-1",
             "parameters": {},
-        },
-    )
+        })
+    assert prepared.status_code == 201, prepared.text
+    cid = prepared.json()["data"]["confirmationId"]
+    decided = client.post(
+        f"{_fo(runtime['ontology_id'])}/agent/proposals/{cid}/decision",
+        headers=auth_headers,
+        json={"decision": "approve", "sessionKind": "ontology_agent",
+              "sessionId": conv.id, "decisionId": "d1",
+              "payloadHash": prepared.json()["data"]["payloadHash"]})
+    assert decided.status_code == 200, decided.text
+    confirmed = client.post(
+        f"{_fo(runtime['ontology_id'])}/agent/execute-proposal",
+        headers=auth_headers,
+        json={"confirmationId": cid, "sessionKind": "ontology_agent",
+              "sessionId": conv.id})
     assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["data"]["status"] == "success"
+    assert confirmed.json()["data"]["state"] == "succeeded"
     db.expire_all()
     assert db.query(ObjectInstance).filter_by(
         id="inst-order-1").one().properties["status"] == "paid"
@@ -789,18 +806,52 @@ def test_confirmed_assistant_action_cannot_target_another_release(
     ))
     db.commit()
 
+    # YIYA-36 确认协议：跨 release 目标在 prepare 即被拒（422），不变更业务数据
+    conv = _confirmation_conversation(db, runtime, auth_headers)
     response = client.post(
-        f"{_fo(runtime['ontology_id'])}/agent/execute-proposal",
+        f"{_fo(runtime['ontology_id'])}/agent/proposals",
         headers=auth_headers,
         json={
+            "sessionKind": "ontology_agent", "sessionId": conv.id,
+            "clientSubmissionId": "prop-stale-1",
             "releaseId": runtime["release_id"],
             "actionId": "act-mark-paid",
             "targetInstanceId": "inst-stale-release",
             "parameters": {},
-        },
-    )
-    assert response.status_code == 403
+        })
+    assert response.status_code == 422
     assert "不属于当前发布版本" in response.text
     db.expire_all()
     assert db.query(ObjectInstance).filter_by(
         id="inst-stale-release").one().properties["status"] == "pending"
+
+
+def _confirmation_conversation(db, runtime, auth_headers):
+    """为确认协议测试建立带提案消息的本人会话。"""
+    import uuid
+
+    from app.models.user import User
+    from app.ontologies.agent_runtime.models import (
+        AgentConversation, AgentMessage,
+    )
+
+    user = db.query(User).filter_by(role="admin").first()
+    conv = AgentConversation(id=f"conv-{uuid.uuid4().hex[:8]}",
+                             ontology_id=runtime["ontology_id"],
+                             user_id=user.id, title="t")
+    db.add(conv)
+    db.flush()
+    db.add(AgentMessage(id=f"mu-{uuid.uuid4().hex[:6]}",
+                        conversation_id=conv.id, role="user", content="go"))
+    for submission in ("prop-confirm-1", "prop-stale-1"):
+        db.add(AgentMessage(
+            id=f"ma-{uuid.uuid4().hex[:6]}", conversation_id=conv.id,
+            role="assistant", content="prepared",
+            proposals=[{"kind": "action", "proposalId": submission,
+                        "actionId": "act-mark-paid", "parameters": {},
+                        "targetInstanceId": "inst-order-1",
+                        "releaseId": runtime["release_id"],
+                        "status": "success", "validationErrors": [],
+                        "effects": []}]))
+    db.commit()
+    return conv

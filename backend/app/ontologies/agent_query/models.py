@@ -73,3 +73,29 @@ class AgentQueryRow(Base):
     )
     ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
     row: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class AgentJoinAssertion(Base):
+    """受认证用户显式声明的跨本体关联含义（契约 §3.2 evidenceRefs 之一）。
+
+    用户声明不是治理认证：查询响应将其标为 ``user_asserted``；
+    服务端核验断言归属、两端类型/属性与 keyType 匹配。
+    """
+    __tablename__ = "fo_agent_join_assertions"
+    __table_args__ = (
+        Index("ix_fo_agent_join_assertions_owner",
+              "created_by", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    left_ontology_id: Mapped[str] = mapped_column(String, nullable=False)
+    left_object_type_id: Mapped[str] = mapped_column(String, nullable=False)
+    left_property: Mapped[str] = mapped_column(String, nullable=False)
+    right_ontology_id: Mapped[str] = mapped_column(String, nullable=False)
+    right_object_type_id: Mapped[str] = mapped_column(String, nullable=False)
+    right_property: Mapped[str] = mapped_column(String, nullable=False)
+    key_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    business_meaning: Mapped[str] = mapped_column(String(2000),
+                                                  nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

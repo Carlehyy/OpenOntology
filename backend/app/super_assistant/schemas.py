@@ -180,6 +180,9 @@ class McpServerUpdate(BaseModel):
     env: dict[str, str] | None = None
     enabled: bool | None = None
     require_confirmation: bool | None = None
+    # YIYA-36 P2-5：受约束 descriptor 登记（服务端验证的凭据隔离/出网
+    # 策略）。这是信任声明，仅 admin 审核后设置。
+    constrained: bool | None = None
 
     @field_validator("display_name", "description", mode="before")
     @classmethod

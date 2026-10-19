@@ -453,7 +453,8 @@ def test_agent_runtime_modules_stay_bounded():
         # 130: stream_events 桥接执行线程与 SSE 推送（MYW-71 断开不中断回合）
         "chat_service.py": 130,
         # YIYA-36 确认协议端点（prepare/decision/execute/structure）
-        "proposals_router.py": 180,
+        # P2 整改追加 join-assertions（P2-1）后 206 行
+        "proposals_router.py": 240,
         "report_service.py": 350,
         "conversation_service.py": 240,
     }
@@ -490,14 +491,15 @@ def test_agent_runtime_openapi_contract_is_stable():
         separators=(",", ":"),
     )
     # YIYA-36：+structure/+proposals/+decision/+proposals/{cid}/+formal/agent/query
-    assert len(paths) == 33
+    # P2 整改：+join-assertions（POST/GET）
+    assert len(paths) == 34
     assert sum(
         method in {"get", "post", "put", "patch", "delete"}
         for operations in paths.values()
         for method in operations
-    ) == 41
+    ) == 43
     assert hashlib.sha256(payload.encode()).hexdigest() == (
-        "f3efc465d7d470a3c795e33865635b7bd0c1616b50c192779d0546fc8e841418"
+        "b1c52f1fcfdab34903ce03f554fe0bf27bdabe7ff14e9584d80c926be93ddba0"
     )
     normalized_payload = json.dumps(
         normalize(paths),
@@ -506,5 +508,5 @@ def test_agent_runtime_openapi_contract_is_stable():
         separators=(",", ":"),
     )
     assert hashlib.sha256(normalized_payload.encode()).hexdigest() == (
-        "9fb8f7f3f0d3c552823b200fe95ef314d756faffbbf49bfe51619dab9e8ca486"
+        "86e4a3ed33e128be1e8caf4be008a357aa640bddb72ab12dafb27df20947b45b"
     )

@@ -147,6 +147,10 @@ def _prop_label(alias: str, prop: str) -> str:
     return f"__p__{alias}__{prop}"
 
 
+def _raw_label(alias: str, prop: str) -> str:
+    return f"__r__{alias}__{prop}"
+
+
 class _SourceMeta:
     __slots__ = ("alias", "req", "scope", "ot", "props", "allowed", "subquery")
 
@@ -183,9 +187,10 @@ class UnifiedQueryService:
         self._resolve_sources()
         page_size = self._resolve_page_size()
         tree, join_row_counts = self._build_join_tree()
-        self._validate_join_keys()
+        # P2-3：先预算后校验 — typed-key 核验只发生在受限且有界的输入上
         for meta in self.sources.values():
             self._check_source_budget(meta)
+        self._validate_join_keys()
         counts = self._compute_entity_counts(tree)
         final_sql = self._build_final_select(tree)
         rows = self._materialize(final_sql)
@@ -299,7 +304,28 @@ class UnifiedQueryService:
             # 认证依赖可能已开启 READ COMMITTED 事务；查询核必须以
             # REPEATABLE READ 作为事务首语句，丢弃只读残余是安全的。
             self.db.rollback()
-        self.db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+        # P2-4：已冻结的查询资源/事务预算（契约 §3.4 表）。SET LOCAL 仅影响
+        # 本事务；权限不足（如 temp_file_limit 需 SUSET）时查询 fail closed。
+        budgets = (
+            "SET LOCAL statement_timeout = "
+            f"'{settings.agent_query_statement_timeout_ms}ms'",
+            "SET LOCAL lock_timeout = "
+            f"'{settings.agent_query_lock_timeout_ms}ms'",
+            "SET LOCAL idle_in_transaction_session_timeout = '5000ms'",
+            "SET LOCAL work_mem = "
+            f"'{settings.agent_query_work_mem_mib}MiB'",
+            "SET LOCAL temp_file_limit = "
+            f"'{settings.agent_query_temp_file_limit_mib}MiB'",
+        )
+        try:
+            for statement in budgets:
+                self.db.execute(text(statement))
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            self.db.rollback()
+            raise QueryError(
+                503, "query_budget_unavailable",
+                "查询资源预算参数设置失败（数据库角色权限不足），"
+                "查询 fail closed", retryable=False) from exc
         oids = sorted({s.ontology_id for s in self.req.sources})
         (self.db.query(OntologyProject)
              .filter(OntologyProject.id.in_(oids))
@@ -358,7 +384,14 @@ class UnifiedQueryService:
                         "sourceFilter 的过滤叶子只能引用所属 source")
 
     def _resolve_property(self, meta: _SourceMeta, ref: str) -> tuple[str, dict]:
-        prop = meta.scope.resolve_property(meta.ot, ref)
+        try:
+            prop = meta.scope.resolve_property(meta.ot, ref)
+        except ToolError as exc:
+            if "授权范围内" in str(exc):
+                raise QueryError(403, "property_forbidden",
+                                 str(exc)) from exc
+            raise QueryError(422, "unknown_parameter",
+                             str(exc)) from exc
         definition = meta.props.get(prop)
         if definition is None:
             raise QueryError(422, "unknown_parameter",
@@ -381,6 +414,9 @@ class UnifiedQueryService:
 
     def _resolve_page_size(self) -> int:
         cap = self._page_size_cap()
+        if self.req.page_size is None:
+            # 契约 §3.4：默认页长 = min(50, 各源 profile 上限)
+            return min(50, cap)
         if self.req.page_size > cap:
             raise QueryError(422, "invalid_parameter",
                              f"pageSize 超出上限 {cap}")
@@ -477,6 +513,11 @@ class UnifiedQueryService:
             for prop in sorted(needed[alias]):
                 columns.append(
                     self._typed_expr(meta, prop).label(_prop_label(alias, prop)))
+                if prop in self._join_key_props().get(alias, set()):
+                    # P2-3：join 键原始 JSON 值 — typed-key 校验在 SQL 内完成
+                    columns.append(
+                        ObjectInstance.properties[prop].as_json().label(
+                            _raw_label(alias, prop)))
             stmt = select(*columns).where(
                 ObjectInstance.ontology_id == meta.req.ontology_id,
                 ObjectInstance.ontology_release_id == meta.req.release_id,
@@ -488,6 +529,16 @@ class UnifiedQueryService:
                         sf.filter,
                         lambda a, p: self._typed_expr(self.sources[a], p)))
             meta.subquery = stmt.subquery(f"sq_{alias}")
+
+    def _join_key_props(self) -> dict[str, set[str]]:
+        props: dict[str, set[str]] = {}
+        for join in self.req.joins:
+            if join.on.kind == "explicit_key":
+                props.setdefault(join.left, set()).add(join.on.left_property)
+                props.setdefault(join.right, set()).add(join.on.right_property)
+        return {alias: {self._resolve_property(self.sources[alias], p)[0]
+                        for p in ps}
+                for alias, ps in props.items()}
 
     def _sub_col(self, alias: str, prop: str):
         return self.sources[alias].subquery.c[_prop_label(alias, prop)]
@@ -552,9 +603,17 @@ class UnifiedQueryService:
                 else:
                     left_match = left_id == link_sq.c["tgt"]
                     right_match = link_sq.c["src"] == right_id
-                query = query.join(link_sq, left_match, isouter=isouter)
-                query = query.join(self.sources[new_alias].subquery,
-                                   right_match, isouter=isouter)
+                # ON 条件必须先锚定「已在树中」的一侧，再接入新 alias：
+                # 新侧在 left（连接源侧）时，link 先按已入树的 right 端
+                # 关联，再 join 新 left 子查询，避免引用未入 FROM 的表。
+                if new_alias == join.right:
+                    query = query.join(link_sq, left_match, isouter=isouter)
+                    query = query.join(self.sources[new_alias].subquery,
+                                       right_match, isouter=isouter)
+                else:
+                    query = query.join(link_sq, right_match, isouter=isouter)
+                    query = query.join(self.sources[new_alias].subquery,
+                                       left_match, isouter=isouter)
                 query = query.add_columns(link_sq.c[link_label])
             joined.add(new_alias)
             count = int(self.db.execute(
@@ -592,11 +651,17 @@ class UnifiedQueryService:
     # ------------------------------------------------------- typed keys
 
     def _validate_join_keys(self):
+        self.join_evidence: list[dict] = []
         for join in self.req.joins:
             if join.on.kind != "explicit_key":
                 continue
             left = self.sources[join.left]
             right = self.sources[join.right]
+            self.join_evidence.append({
+                "leftAlias": join.left, "rightAlias": join.right,
+                **verify_join_evidence(self.db, self.user, join, left,
+                                       right),
+            })
             lp, lp_def = self._resolve_property(left, join.on.left_property)
             rp, rp_def = self._resolve_property(right, join.on.right_property)
             key_type = join.on.key_type
@@ -611,24 +676,42 @@ class UnifiedQueryService:
                     raise QueryError(422, "invalid_typed_key",
                                      f"{key_type} join 键必须双方声明为字符串")
             check = _key_validator(key_type)
-            self._check_side_key(left, lp, check, join.on.left_property)
-            self._check_side_key(right, rp, check, join.on.right_property)
+            self._check_side_key(left, lp, check, join.on.left_property,
+                                 key_type)
+            self._check_side_key(right, rp, check, join.on.right_property,
+                                 key_type)
             self._check_cardinality(join, left, lp, right, rp)
 
-    def _check_side_key(self, meta: _SourceMeta, prop: str, check, label: str):
-        """类型检查覆盖过滤后可见输入全集；missing/JSON null 均按 NULL。"""
-        raw = ObjectInstance.properties[prop].as_json()
-        rows = self.db.execute(
-            select(raw).where(
-                ObjectInstance.ontology_id == meta.req.ontology_id,
-                ObjectInstance.ontology_release_id == meta.req.release_id,
-                ObjectInstance.object_type_id == meta.ot.id,
-                raw.is_not(None),
-            )).scalars().all()
-        bad = sum(1 for v in rows if v is not None and not check(v))
+    def _check_side_key(self, meta: _SourceMeta, prop: str, check, label: str,
+                        key_type: str) -> None:
+        """P2-3：类型族核验在 SQL 内完成（sourceFilters 后的受限子查询），
+        不再预算前无界加载行到 Python；uuid 形态做预算内有限核对。"""
+        raw = meta.subquery.c[_raw_label(meta.alias, prop)]
+        typed = meta.subquery.c[_prop_label(meta.alias, prop)]
+        dialect = self.db.get_bind().dialect.name
+        if dialect == "postgresql":
+            typeof_expr = func.jsonb_typeof(raw)
+            allowed = {"number"} if key_type == "number" else {"string"}
+        else:
+            typeof_expr = func.json_type(raw)
+            allowed = ({"integer", "real"} if key_type == "number"
+                       else {"text"})
+        bad = int(self.db.execute(
+            select(func.count()).select_from(meta.subquery).where(
+                typed.is_not(None),
+                typeof_expr.notin_(allowed),
+            )).scalar() or 0)
+        if key_type == "uuid":
+            # uuid 形态无法纯 SQL 解析：预算内有限取值核对
+            values = self.db.execute(
+                select(raw).where(
+                    typed.is_not(None)).limit(
+                        SOURCE_ROW_BUDGET + 1)).scalars().all()
+            bad += sum(1 for v in values if v is not None and not check(v))
         if bad:
             raise QueryError(422, "invalid_typed_key",
-                             f"join 键「{label}」存在 {bad} 个非空非法值",
+                             f"join 键「{label}」存在 {bad} 个非空非法值"
+                             "（类型检查覆盖 SQL 过滤后可见输入全集）",
                              errorCount=bad, field=label)
 
     def _check_cardinality(self, join, left, lp, right, rp):
@@ -919,6 +1002,7 @@ class UnifiedQueryService:
                 "distinctEntityCounts": counts,
                 "joinRowCounts": join_row_counts,
                 "inputCounts": self._input_counts(),
+                "joinEvidence": getattr(self, "join_evidence", []),
             },
             citations=[{
                 "alias": alias,
@@ -1010,6 +1094,7 @@ class UnifiedQueryService:
             "pageRowCount": len(rows),
             "totalRowCount": total,
             "distinctEntityCounts": counts.get("distinctEntityCounts", {}),
+            "joinEvidence": counts.get("joinEvidence", []),
             "inputCounts": counts.get("inputCounts", {}),
             "joinRowCounts": counts.get("joinRowCounts", []),
             "partial": False,
@@ -1104,3 +1189,83 @@ def fetch_unified_query_page(db: Session, user: Any, token: str, *,
                                   session_kind=session_kind,
                                   session_id=session_id)
     return service.fetch_page(token)
+
+
+# ------------------------------------------------- join evidence（P2-1）
+
+def verify_join_evidence(db: Session, user, join, left: _SourceMeta,
+                         right: _SourceMeta) -> dict:
+    """服务端核验 explicit_key join 的 evidenceRefs（契约 §3.2）。
+
+    - ``structure:{ontologyId}:{releaseId}:{objectTypeId}:{propertyId}``
+      必须命中本查询某一侧的发布结构（release/type/property 三者一致）；
+    - ``assertion:{id}`` 必须是本人登记的关联含义声明，且两端
+      ontology/type/property 与 keyType 完全匹配 → 标 ``user_asserted``；
+    - ``fixture:{label}`` → 标 ``fixture``（隔离 fixture 语义，非治理认证）；
+    - 其余/无法核验 → 422 ``join_semantics_unverified``。
+    模型填写的 businessMeaning 只是展示文案，不构成证据。
+    """
+    categories: list[str] = []
+    verified_refs: list[str] = []
+    for ref in join.on.evidence_refs:
+        parts = str(ref).split(":", 1)
+        kind = parts[0]
+        if kind == "structure":
+            fields = parts[1].split(":") if len(parts) > 1 else []
+            if len(fields) != 4:
+                raise QueryError(422, "join_semantics_unverified",
+                                 f"evidenceRef「{ref}」格式非法")
+            ontology_id, release_id, object_type_id, prop = fields
+            matched = (
+                (ontology_id == left.req.ontology_id
+                 and release_id == left.req.release_id
+                 and object_type_id == left.ot.id
+                 and prop == join.on.left_property)
+                or (ontology_id == right.req.ontology_id
+                    and release_id == right.req.release_id
+                    and object_type_id == right.ot.id
+                    and prop == join.on.right_property))
+            if not matched:
+                raise QueryError(
+                    422, "join_semantics_unverified",
+                    f"evidenceRef「{ref}」与本次查询的发布结构不一致")
+            categories.append("structure")
+            verified_refs.append(str(ref))
+        elif kind == "assertion":
+            from app.ontologies.agent_query.models import AgentJoinAssertion
+
+            assertion = db.query(AgentJoinAssertion).filter(
+                AgentJoinAssertion.id == (parts[1] if len(parts) > 1 else ""),
+                AgentJoinAssertion.created_by == str(user.id),
+            ).first()
+            if assertion is None:
+                raise QueryError(
+                    422, "join_semantics_unverified",
+                    f"evidenceRef「{ref}」不存在或不属于当前用户")
+            same = (
+                assertion.left_ontology_id == left.req.ontology_id
+                and assertion.left_object_type_id == left.ot.id
+                and assertion.left_property == join.on.left_property
+                and assertion.right_ontology_id == right.req.ontology_id
+                and assertion.right_object_type_id == right.ot.id
+                and assertion.right_property == join.on.right_property
+                and assertion.key_type == join.on.key_type)
+            if not same:
+                raise QueryError(
+                    422, "join_semantics_unverified",
+                    f"evidenceRef「{ref}」声明的两端/键型与本次 join 不匹配")
+            categories.append("user_asserted")
+            verified_refs.append(str(ref))
+        elif kind == "fixture":
+            if not str(ref).startswith("fixture:"):
+                raise QueryError(422, "join_semantics_unverified",
+                                 f"evidenceRef「{ref}」类别未知")
+            categories.append("fixture")
+            verified_refs.append(str(ref))
+        else:
+            raise QueryError(422, "join_semantics_unverified",
+                             f"evidenceRef「{ref}」类别未知或无法核验")
+    if not verified_refs:
+        raise QueryError(422, "join_semantics_unverified",
+                         "跨本体 join 缺少可核验的业务键证据")
+    return {"refs": verified_refs, "categories": categories}

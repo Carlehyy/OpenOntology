@@ -251,7 +251,7 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "按需读取本体当前发布的结构片段（对象类型/属性/关系/动作），"
                 "并携带准确 releaseId/version 来源证据；只读，不加载完整 schema。"
                 "需要先经 discovery 确定 ontologyId 与 releaseId。"),
-            "input_schema": {
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "ontologyId": {"type": "string"},
@@ -273,7 +273,7 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "统一关联查询：同一本体内多对象类型、或有明确业务键依据的跨本体"
                 "关联；服务端完成过滤/投影/聚合/排序与稳定分页。翻页只传 cursor。"
                 "字段/类型/基数依据必须来自 ontology_structure 的当前发布结构。"),
-            "input_schema": query_request,
+            "parameters": query_request,
         },
         {
             "name": ONTOLOGY_PREPARE_TOOL,
@@ -281,7 +281,7 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "持久准备一个业务动作确认请求（无业务效果）：展开默认值并校验"
                 "参数后返回 confirmationId 与确认卡载荷。执行必须经"
                 " ontology_execute_action 且需要用户二次确认。"),
-            "input_schema": {
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "ontologyId": {"type": "string"},
@@ -300,7 +300,7 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
             "description": (
                 "唤醒一个已获用户确认的本体动作（只传 confirmationId）。"
                 "该调用本身需要用户在界面上二次确认；确认前不产生任何业务效果。"),
-            "input_schema": {
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "confirmationId": {"type": "string"},

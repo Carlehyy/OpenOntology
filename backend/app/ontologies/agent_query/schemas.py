@@ -119,7 +119,7 @@ class QueryRequest(_Strict):
     aggregates: list[AggregateItem] = Field(default_factory=list, max_length=8)
     distinct: bool = False
     order_by: list[OrderByItem] = Field(default_factory=list, max_length=8)
-    page_size: int = Field(default=50, ge=1, le=200)
+    page_size: Optional[int] = Field(default=None, ge=1, le=200)
 
 
 class CursorRequest(_Strict):
@@ -149,3 +149,14 @@ class QueryResponse(_Envelope):
     cursor: Optional[str] = None
     expires_at: str
     citations: list[dict[str, Any]]
+
+
+class JoinAssertionCreate(_Strict):
+    left_ontology_id: str = Field(min_length=1, max_length=64)
+    left_object_type_id: str = Field(min_length=1, max_length=200)
+    left_property: str = Field(min_length=1, max_length=200)
+    right_ontology_id: str = Field(min_length=1, max_length=64)
+    right_object_type_id: str = Field(min_length=1, max_length=200)
+    right_property: str = Field(min_length=1, max_length=200)
+    key_type: Literal["string", "number", "uuid"]
+    business_meaning: str = Field(min_length=1, max_length=2000)

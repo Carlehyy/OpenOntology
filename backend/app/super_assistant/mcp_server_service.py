@@ -246,6 +246,15 @@ def update_mcp_server(
                     set_capability_revision_enabled(db, key, int(item.manifest_revision or 1), enabled=True)
         if body.require_confirmation is not None:
             item.require_confirmation = body.require_confirmation
+        if getattr(body, "constrained", None) is not None:
+            # YIYA-36 P2-5：受约束 descriptor 是信任声明，连接/凭据变更
+            # 使其失效（需重新审核登记）。
+            item.constrained = body.constrained
+            if body.constrained and (manifest_changed or connection_changed):
+                raise McpClientError(
+                    "连接/凭据变更与受约束登记不能同批提交：先变更并验证，"
+                    "再由管理员登记 constrained"
+                )
         db.commit()
         db.refresh(item)
         return item

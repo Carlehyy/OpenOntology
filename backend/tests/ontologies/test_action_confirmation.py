@@ -606,9 +606,11 @@ def test_crash_after_commit_recovers_from_same_key_log(
         raise RuntimeError("response lost after commit")
 
     monkeypatch.setattr(engine_mod, "execute_action", _commit_then_die)
+    # 无外部效果点的动作（act-1）：本地 success 日志即可证明恢复
     cid = _prepare(client, auth_headers, modeled, conversation,
-                   clientSubmissionId="prop-1", actionId="act-3",
-                   parameters={}).json()["data"]["confirmationId"]
+                   clientSubmissionId="prop-1", actionId="act-1",
+                   parameters={"note": "n", "level": 1}).json()[
+                       "data"]["confirmationId"]
     payload_hash = _confirmation(db, cid).payload_hash
     _decide(client, auth_headers, modeled, conversation, cid,
             payload_hash, "approve")
@@ -632,3 +634,123 @@ def _login(db, username, password):
                     json={"username": username, "password": password})
     assert r.status_code == 200, r.text
     return r.json()["data"]["access_token"]
+
+
+def test_crash_after_commit_with_attempts_stays_unknown(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    """缺陷-4 契约：引擎已提交 success 日志但外部 attempt 未结案 →
+    unknown、guard 保留；本地已提交效果记入对账证据，不宣称未发生。"""
+    from app.ontologies.formal_modeling import action_engine as engine_mod
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+
+    def _commit_then_die(db, ontology_id, body, **kwargs):
+        log = ActionExecutionLog(
+            id=f"log-{uuid.uuid4().hex[:6]}", ontology_id=ontology_id,
+            action_id=body.action_id, status="success",
+            parameters=body.parameters,
+            idempotency_key=body.idempotency_key)
+        db.add(log)
+        db.commit()
+        raise RuntimeError("response lost after commit")
+
+    monkeypatch.setattr(engine_mod, "execute_action", _commit_then_die)
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-1", actionId="act-3",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["state"] == "unknown"
+    assert data["failureCode"] == "execution_result_unknown"
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    assert operation.state == "unknown"
+    assert operation.reconcile_evidence["localSuccessLogId"]
+    # 本地 success 日志确实存在（已提交效果不否认），但只恰一条
+    logs = db.query(ActionExecutionLog).filter(
+        ActionExecutionLog.ontology_id == modeled["oid"],
+        ActionExecutionLog.idempotency_key == f"proposal:{cid}").all()
+    assert len(logs) == 1
+    # guard 保留：另一会话同载荷确认被拒
+    _, r2 = _second_session_same_payload(
+        client, auth_headers, modeled, db, "act-3", {})
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["code"] == "operation_unresolved"
+
+
+def test_worker_scan_survives_cleanup_and_advances(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    """缺陷-1 契约：TTL 清理不再使整轮扫描崩溃；dispatch/pending 推进。"""
+    from app.ontologies.agent_confirmation import worker as confirmation_worker
+    from app.ontologies.agent_query.models import AgentQuerySnapshot
+    from datetime import datetime, timedelta, timezone
+
+    # 过期快照（触发清理分支）+ 一个 dispatch_queued 操作（触发派发分支）
+    db.add(AgentQuerySnapshot(
+        id="snap-expired", owner_user_id="u1", session_kind="direct",
+        session_id="s1", query_hash="h", auth_hash="h", releases={},
+        schema_version=1, order_spec=[], columns=[], counts={}, citations=[],
+        page_size=10, total_row_count=0,
+        observed_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=10)))
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-1", actionId="act-1",
+                   parameters={"note": "n", "level": 1}).json()[
+                       "data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+
+    worker_open = confirmation_worker._fresh_session
+    service_open = confirmation_svc._fresh_session
+    monkeypatch.setattr(confirmation_worker, "_fresh_session", lambda: db)
+    monkeypatch.setattr(confirmation_svc, "_fresh_session", lambda: db)
+    try:
+        confirmation_worker._scan()  # 不得抛出
+    finally:
+        monkeypatch.setattr(confirmation_worker, "_fresh_session", worker_open)
+        monkeypatch.setattr(confirmation_svc, "_fresh_session", service_open)
+    db.expire_all()
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "succeeded", confirmation.state
+    assert db.query(AgentQuerySnapshot).filter_by(
+        id="snap-expired").count() == 0
+
+
+def test_kill_switch_blocks_approve_and_worker_claim(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    from app.config import settings
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+
+    cid = None
+    r = client.post(
+        f"/api/v2/formal/ontologies/{modeled['oid']}/agent/proposals",
+        headers=auth_headers,
+        json={"sessionKind": "ontology_agent",
+              "sessionId": conversation["conv"].id,
+              "clientSubmissionId": "prop-1", "actionId": "act-1",
+              "releaseId": modeled["releaseId"],
+              "targetInstanceId": "inst-o1",
+              "parameters": {"note": "n", "level": 1}})
+    assert r.status_code == 201, r.text
+    cid = r.json()["data"]["confirmationId"]
+    payload_hash = r.json()["data"]["payloadHash"]
+
+    monkeypatch.setattr(settings, "assistant_action_execution_enabled",
+                        False, raising=False)
+    r = client.post(
+        f"/api/v2/formal/ontologies/{modeled['oid']}/agent/proposals/{cid}/decision",
+        headers=auth_headers,
+        json={"decision": "approve", "sessionKind": "ontology_agent",
+              "sessionId": conversation["conv"].id, "decisionId": "d1",
+              "payloadHash": payload_hash})
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "assistant_writes_disabled"
+
+    # worker claim 也被总闸拦住
+    assert confirmation_svc._claim("nonexistent", db) is None

@@ -218,7 +218,11 @@ def test_cross_ontology_explicit_key(client, auth_headers, orders_ontology,
                    "rightProperty": "party_key", "keyType": "string",
                    "cardinality": "N:1",
                    "businessMeaning": "订单.tenant_key 标识租户客户业务键",
-                   "evidenceRefs": ["fixture-schema:tenant-party-key"]}},
+                   "evidenceRefs": [
+                       f"structure:{orders['ontologyId']}:"
+                       f"{orders['releaseId']}:ot-order:tenant_key",
+                       f"structure:{parties['ontologyId']}:"
+                       f"{parties['releaseId']}:ot-party:party_key"]}},
         ],
         "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
                    {"source": "b", "property": "label", "as": "partyLabel"}],
@@ -253,7 +257,7 @@ def test_invalid_typed_key_rejected(client, auth_headers, orders_ontology,
             "on": {"kind": "explicit_key", "leftProperty": "tenant_key",
                    "rightProperty": "party_key", "keyType": "string",
                    "cardinality": "N:1", "businessMeaning": "x",
-                   "evidenceRefs": ["fixture"]}}],
+                   "evidenceRefs": ["fixture:tenant-key"]}}],
         "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
                    {"source": "b", "property": "label", "as": "label"}],
         "pageSize": 10,
@@ -288,7 +292,7 @@ def test_cardinality_mismatch_rejected(client, auth_headers,
             "on": {"kind": "explicit_key", "leftProperty": "tenant_key",
                    "rightProperty": "party_key", "keyType": "string",
                    "cardinality": "N:1", "businessMeaning": "x",
-                   "evidenceRefs": ["fixture"]}}],
+                   "evidenceRefs": ["fixture:tenant-key"]}}],
         "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
                    {"source": "b", "property": "label", "as": "label"}],
         "pageSize": 10,
@@ -496,3 +500,88 @@ def test_query_sql_count_constant_in_row_count(client, auth_headers,
     assert r.json()["data"]["totalRowCount"] == expected_total
     # 固定形状：授权解析/计数/实体计数/物化/落行都是固定条数
     assert counter.count <= 30, counter.count
+
+
+def test_declared_relation_join_with_new_alias_on_left(client, auth_headers,
+                                                       orders_ontology):
+    """缺陷-2 契约：新 alias 在 join.left（连接源侧）+ source_to_target
+    组合不再缺 FROM（原 PG UndefinedTable / HTTP 500）。"""
+    orders = orders_ontology
+    payload = {
+        "sources": [
+            {"alias": "s", "ontologyId": orders["ontologyId"],
+             "releaseId": orders["releaseId"], "objectTypeId": "ot-supplier"},
+            {"alias": "a", "ontologyId": orders["ontologyId"],
+             "releaseId": orders["releaseId"], "objectTypeId": "ot-order"},
+        ],
+        "joins": [{
+            "left": "a", "right": "s", "type": "inner",
+            "on": {"kind": "declared_relation", "linkTypeId": "lt-1",
+                   "direction": "source_to_target"}}],
+        "select": [{"source": "a", "property": "order_no", "as": "orderNo"},
+                   {"source": "s", "property": "sname", "as": "supplier"}],
+        "orderBy": [{"output": "orderNo"}],
+        "pageSize": 10,
+    }
+    r = _run(client, auth_headers, payload)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["totalRowCount"] == 1
+    assert data["rows"][0]["supplier"] == "华南电子"
+
+
+def test_join_evidence_verification_and_user_assertion(
+        client, auth_headers, orders_ontology, parties_ontology):
+    """P2-1 契约：evidenceRefs 服务端核验 — 无效引用拒绝、user_asserted 分类。"""
+    orders, parties = orders_ontology, parties_ontology
+    # 登记本人关联含义声明
+    r = client.post(
+        f"{_fo(parties['ontologyId'])}/agent/join-assertions",
+        headers=auth_headers,
+        json={"leftOntologyId": orders["ontologyId"],
+              "leftObjectTypeId": "ot-order", "leftProperty": "tenant_key",
+              "rightOntologyId": parties["ontologyId"],
+              "rightObjectTypeId": "ot-party", "rightProperty": "party_key",
+              "keyType": "string",
+              "businessMeaning": "租户业务键"})
+    assert r.status_code == 200, r.text
+    evidence_ref = r.json()["data"]["evidenceRef"]
+
+    def _payload(evidence):
+        return {
+            "sources": [
+                {"alias": "a", "ontologyId": orders["ontologyId"],
+                 "releaseId": orders["releaseId"],
+                 "objectTypeId": "ot-order"},
+                {"alias": "b", "ontologyId": parties["ontologyId"],
+                 "releaseId": parties["releaseId"],
+                 "objectTypeId": "ot-party"}],
+            "joins": [{
+                "left": "a", "right": "b", "type": "inner",
+                "on": {"kind": "explicit_key",
+                       "leftProperty": "tenant_key",
+                       "rightProperty": "party_key", "keyType": "string",
+                       "cardinality": "N:1", "businessMeaning": "模型填写",
+                       "evidenceRefs": evidence}}],
+            "select": [{"source": "a", "property": "order_no",
+                        "as": "orderNo"}],
+            "pageSize": 10}
+
+    # 1) structure 引用 release 不匹配 → 拒绝
+    r = _run(client, auth_headers, _payload(
+        [f"structure:{orders['ontologyId']}:wrong-release:ot-order:"
+         "tenant_key"]))
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "join_semantics_unverified"
+
+    # 2) 他人/不存在 assertion → 拒绝
+    r = _run(client, auth_headers, _payload(["assertion:missing"]))
+    assert r.status_code == 422
+
+    # 3) 本人 assertion → 通过，且响应标 user_asserted
+    r = _run(client, auth_headers, _payload([evidence_ref]))
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    evidence = data["joinEvidence"][0]
+    assert evidence["categories"] == ["user_asserted"]
+    assert evidence["refs"] == [evidence_ref]

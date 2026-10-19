@@ -27,11 +27,20 @@ def _scan() -> None:
     try:
         from app.ontologies.agent_query.models import AgentQuerySnapshot
 
-        # 查询快照 TTL 物理清理（有界批次）
-        db.query(AgentQuerySnapshot).filter(
-            AgentQuerySnapshot.expires_at < _now()).limit(
-                500).delete(synchronize_session=False)
-        db.commit()
+        try:
+            # 查询快照 TTL 物理清理（有界批次）。Query.delete() 不支持
+            # limit，用子查询限定批次；清理失败不阻断派发/对账主路径。
+            expired_ids = [row.id for row in db.query(
+                AgentQuerySnapshot.id).filter(
+                AgentQuerySnapshot.expires_at < _now()).limit(500).all()]
+            if expired_ids:
+                db.query(AgentQuerySnapshot).filter(
+                    AgentQuerySnapshot.id.in_(expired_ids)).delete(
+                        synchronize_session=False)
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.exception("查询快照 TTL 清理失败（不阻断本轮派发）")
         queued = (db.query(M.ActionOperation.id)
                   .filter(M.ActionOperation.state == "dispatch_queued")
                   .order_by(M.ActionOperation.queued_at)

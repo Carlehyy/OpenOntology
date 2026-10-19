@@ -344,5 +344,9 @@ class ActionExecutionLog(Base):
         String(20), nullable=True, index=True)
     ontology_release_id: Mapped[str | None] = mapped_column(
         String, nullable=True, index=True)
+    # YIYA-36 确认协议血缘：该引擎日志所属的持久 operation（可空 — 既有
+    # 哨兵/直连调用无 operation）。恢复按 operation_id 与旧幂等键双向定位。
+    operation_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, index=True)
 
     executed_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

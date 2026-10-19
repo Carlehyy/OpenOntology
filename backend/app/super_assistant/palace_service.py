@@ -1812,6 +1812,7 @@ def run_ontology_document_build(db: Session, doc_id: str) -> SuperAssistantPalac
     # 曾完整建过图（重试/手动重建）先剥离旧贡献，首建与失败重试跳过
     was_built = row.entity_count > 0
     title = row.title
+    fingerprint_at_start = row.fingerprint
     row.status = "building"
     row.error = None
     db.commit()
@@ -1871,6 +1872,16 @@ def run_ontology_document_build(db: Session, doc_id: str) -> SuperAssistantPalac
         return row
 
     row = db.get(SuperAssistantPalaceOntologyDocument, doc_id) or row
+    # Contract §6 CAS: a build may not overwrite the current state with an
+    # outdated fingerprint mid-run (document republished). The mirror's built
+    # state at this point is owned by the new fingerprint's rebuild.
+    current = db.get(SuperAssistantPalaceOntologyDocument, doc_id)
+    if current is not None and current.fingerprint != fingerprint_at_start:
+        logger.warning(
+            " ontology document fingerprint changed during build (doc=%s); "
+            "stale result dropped", doc_id)
+        db.rollback()
+        return current
     row.status = "built"
     row.error = None
     row.entity_count = entity_count

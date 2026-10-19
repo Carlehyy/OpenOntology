@@ -131,6 +131,31 @@ BROWSER_TOOL_SCHEMAS: list[dict[str, Any]] = [
 BROWSER_TOOL_NAMES = frozenset(schema["name"] for schema in BROWSER_TOOL_SCHEMAS)
 
 
+
+
+def _protected_origin_denied(url: str) -> bool:
+    """YIYA-36 P2-5：超级助手浏览器通道不得访问平台自身管理面。
+
+    受保护来源 = settings.assistant_browser_protected_origins（逗号分隔，
+    部署时配置平台对外地址/反代别名）。未配置时不放行猜测——对空配置
+    返回 False 仅因无法识别平台来源；部署必须显式登记（fail-closed 责任
+    在配置，运行时一经命中即拒绝）。
+    """
+    from app.config import settings
+    from urllib.parse import urlparse
+
+    raw = str(settings.assistant_browser_protected_origins or "").strip()
+    if not raw or not url:
+        return False
+    target = urlparse(str(url))
+    for origin in [o.strip() for o in raw.split(",") if o.strip()]:
+        protected = urlparse(origin if "//" in origin else f"https://{origin}")
+        if target.hostname and target.hostname == protected.hostname and (
+                not protected.port or target.port == protected.port):
+            return True
+    return False
+
+
 def _dispatch(
     db: Session,
     *,
@@ -139,6 +164,13 @@ def _dispatch(
     arguments: dict[str, Any],
 ) -> Any:
     cid = conversation.id
+    if name in ("browser_open", "browser_navigate"):
+        if _protected_origin_denied(str(arguments.get("url") or "")):
+            return {
+                "error": "capability_boundary_unenforced",
+                "message": "超级助手浏览器通道不得访问平台自身管理来源；"
+                           "用户直连管理请使用普通页面登录",
+            }
     if name == "browser_open":
         target = browser_sources.resolve_target(
             db, conversation.browser_source_id, conversation.owner_id,

@@ -238,6 +238,10 @@ class SuperAssistantMcpServer(Base):
     display_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     description: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     builtin_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # YIYA-36 P2-5：受约束 descriptor 登记（服务端可验证的凭据隔离/出网
+    # 策略）。False=未证明 → 超级助手调用中 fail-closed 拒绝。
+    constrained: Mapped[bool] = mapped_column(Boolean, nullable=False,
+                                              default=False)
     transport: Mapped[str] = mapped_column(String(30), nullable=False, default="streamable_http")
     url: Mapped[str] = mapped_column(String(1000), nullable=False)
     headers_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -1559,6 +1559,27 @@ def _close_model_call(db, run, call, attempt, step, artifact, token):
     call.status, call.outcome = "closed", "completed"; attempt.provider_status, attempt.result_ref, attempt.finished_at = "completed", evidence_ref, _now()
 
 
+def _reject_ontology_write_capability(capability_key: str | None) -> None:
+    """YIYA-36 P2-5：kernel 侧本体写能力 fail-closed。
+
+    本体业务写的唯一入口是确认协议（cid 绑定 + 一次用户确认 + guard）；
+    kernel 当前没有按该协议派发的 builtin ontology capability。在 call
+    创建面显式拒绝 ``ontology:*`` 写能力键，防止未来 connector/plugin
+    以任意 capability key 绕过确认协议。启用完整 gated 派发前此守卫
+    不得移除。
+    """
+    key = str(capability_key or "")
+    read_only = {
+        "ontology.discover", "ontology.structure", "ontology.query",
+        "ontology:discover", "ontology:structure", "ontology:query",
+    }
+    if key.startswith(("ontology:", "ontology.")) and key not in read_only:
+        from .contracts import ContractError
+        raise ContractError(
+            "ontology write capability is not dispatched via kernel; "
+            "use the confirmation protocol (ontology_execute_action)")
+
+
 def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
     kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None; external_call = None; question_expires_at = None; expiry_policy = None; gated = False
     if kind == "approval_decision":
@@ -1569,6 +1590,7 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
         append_event(db, run, event_type="approval.requested", payload={"approval_id": approval.id, "run_id": run.id, "call_id": approval.call_id, "scope_snapshot_ref": run.permission_snapshot_ref or f"run://{run.id}/scope", "expires_at": approval.expires_at.isoformat()}, actor={"kind": "worker"}, command_id=f"approval:{approval.id}", idempotency_key=f"approval-request:{approval.id}", lease=token)
     elif kind in {"question_answer", "external_event"}:
         if kind == "external_event" and call is not None:
+            _reject_ontology_write_capability(call.capability_key)
             # The model decision is closed above; the requested remote work is
             # a separate long-lived Call so reconciliation can advance it
             # without reopening the model Call.

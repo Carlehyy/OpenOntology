@@ -130,11 +130,19 @@ class AgentScope:
         computed 的键名即 prop['name']），故一并覆盖，不会误伤合法的派生属性过滤。
         这是「越界硬失败」：LLM 拼错或臆造属性名时，返回可用清单让它自我修正，
         而不是让一个查不到的条件静默匹配为空、给出看似正确实则错误的答案。
+
+        属性级授权（YIYA-36 P2-2）在边界层统一强制：allowed_properties 收紧后，
+        既有搜索/遍历/聚合/图谱等全部引用路径与新查询入口同等受限。
         """
         ref = (ref or "").strip()
+        allowed = self.allowed_property_names(ot.id)
         for p in (ot.properties or []):
             if isinstance(p, dict) and ref in (p.get("name"), p.get("displayName"), p.get("display_name")):
-                return p.get("name")
+                name = p.get("name")
+                if allowed is not None and name not in allowed:
+                    raise ToolError(
+                        f"属性「{ref}」不在对象类型「{ot.display_name}」的授权范围内")
+                return name
         avail = "、".join(
             f"{p.get('displayName') or p.get('name')}({p.get('name')})"
             for p in (ot.properties or []) if isinstance(p, dict) and p.get("name")
@@ -221,8 +229,11 @@ class AgentScope:
             n = counts.get(t.id, 0)
             desc = f" — {t.description}" if t.description else ""
             lines.append(f"### {t.display_name} (name={t.name}, 实例数={n}){desc}")
+            allowed_props = self.allowed_property_names(t.id)
             for p in (t.properties or []):
                 if not isinstance(p, dict):
+                    continue
+                if allowed_props is not None and p.get("name") not in allowed_props:
                     continue
                 req = "必填" if p.get("required") else "可选"
                 pdesc = f" — {p['description']}" if p.get("description") else ""

@@ -84,6 +84,14 @@ export function ProposalCard({ oid, proposal, conversationId }: {
         </div>
       )
     }
+    if (result.state === 'compensation_required') {
+      return (
+        <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--color-danger-bg)] text-xs font-medium text-[var(--color-danger)]">
+          <XCircle size={13} /> 本地执行失败但外部效果可能已发生（{result.failureCode || 'external_applied_local_failed'}）—
+          请勿重试，需人工核对并补偿
+        </div>
+      )
+    }
     if (result.state === 'unknown') {
       return (
         <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--color-warning-bg)] text-xs font-medium text-[var(--color-warning)]">

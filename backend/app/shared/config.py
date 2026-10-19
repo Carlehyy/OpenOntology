@@ -1,7 +1,8 @@
 import ipaddress
+import os
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.shared.env_files import (
@@ -48,6 +49,14 @@ class Settings(BaseSettings):
     # app.* 应用日志级别（main.py 为 app.* 挂 stderr 兜底 handler 时使用）。
     # 生产可通过 APP_LOG_LEVEL=WARNING 关闭 INFO 审计输出（发布/调用记录）。
     app_log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _assistant_write_gate_default(self):
+        """YIYA-36 P2-5 总闸：未显式配置时生产默认关闭、其余环境开启。"""
+        if self.assistant_action_execution_enabled is None:
+            self.assistant_action_execution_enabled = (
+                self.environment != "production")
+        return self
 
     @field_validator("app_log_level", mode="before")
     @classmethod
@@ -147,6 +156,16 @@ class Settings(BaseSettings):
         default=5_000_000, ge=100_000, le=100_000_000
     )
     secret_key: str = "dev-secret-key"
+    # YIYA-36 统一查询的冻结资源预算（契约 §3.4）：独立查询事务的
+    # statement/lock 超时与内存/临时空间帽；权限不足时查询 fail closed。
+    agent_query_statement_timeout_ms: int = 3000
+    agent_query_lock_timeout_ms: int = 1000
+    agent_query_work_mem_mib: int = 4
+    agent_query_temp_file_limit_mib: int = 32
+    # YIYA-36 P2-5：assistant 业务写总闸（None=按环境派生：生产关闭）。
+    assistant_action_execution_enabled: bool | None = None
+    # YIYA-36 P2-5：浏览器通道受保护来源（逗号分隔 origin，部署配置）
+    assistant_browser_protected_origins: str = ""
     encryption_key: str = ""
     cors_allowed_origins: str = "*"
     first_admin_user: str = "admin"

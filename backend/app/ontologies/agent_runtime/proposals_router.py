@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_db, get_current_user
 from app.ontologies.access import require_ontology_access
+from app.ontologies.agent_query import schemas as QS
 from app.ontologies.agent_confirmation import schemas as CS
 from app.ontologies.agent_confirmation import service as _confirmation_service
 from app.ontologies.agent_runtime import schemas as S
@@ -126,3 +127,80 @@ def get_structure(ontology_id: str,
         raise HTTPException(status_code=exc.status,
                             detail=exc.detail()) from exc
     return _ok(data)
+
+
+@router.post("/{ontology_id}/agent/join-assertions")
+def create_join_assertion(ontology_id: str,
+                          body: QS.JoinAssertionCreate,
+                          db: Session = Depends(get_db),
+                          current_user=Depends(get_current_user)):
+    """登记本人显式声明的跨本体关联含义（evidenceRefs 的 user_asserted 源）。
+
+    两端结构必须存在于对应本体的当前发布且属性已声明；声明不是治理认证，
+    查询响应将其标为 user_asserted。
+    """
+    from app.ontologies.agent_query.models import AgentJoinAssertion
+    from app.ontologies.release_context import current_release_context
+    from app.ontologies.agent_runtime.boundary import ToolError, build_scope
+
+    for ontology_ref, object_type_ref, prop_ref in (
+            (body.left_ontology_id, body.left_object_type_id,
+             body.left_property),
+            (body.right_ontology_id, body.right_object_type_id,
+             body.right_property)):
+        context = current_release_context(db, ontology_ref)
+        _, _, scope = build_scope(db, ontology_ref,
+                                  release_id=context.release.id)
+        try:
+            ot = scope.require_object_type(object_type_ref)
+            scope.resolve_property(ot, prop_ref)
+        except ToolError as exc:
+            raise HTTPException(422, detail={
+                "code": "invalid_parameter", "message": str(exc)}) from exc
+    assertion = AgentJoinAssertion(
+        created_by=str(current_user.id),
+        left_ontology_id=body.left_ontology_id,
+        left_object_type_id=body.left_object_type_id,
+        left_property=body.left_property,
+        right_ontology_id=body.right_ontology_id,
+        right_object_type_id=body.right_object_type_id,
+        right_property=body.right_property,
+        key_type=body.key_type,
+        business_meaning=body.business_meaning)
+    db.add(assertion)
+    db.commit()
+    return _ok({
+        "id": assertion.id,
+        "evidenceRef": f"assertion:{assertion.id}",
+        "category": "user_asserted",
+        "keyType": assertion.key_type,
+        "businessMeaning": assertion.business_meaning,
+        "createdAt": assertion.created_at.isoformat()
+        if assertion.created_at else None,
+    })
+
+
+@router.get("/{ontology_id}/agent/join-assertions")
+def list_join_assertions(ontology_id: str,
+                         db: Session = Depends(get_db),
+                         current_user=Depends(get_current_user)):
+    from app.ontologies.agent_query.models import AgentJoinAssertion
+
+    rows = (db.query(AgentJoinAssertion)
+            .filter(AgentJoinAssertion.created_by == str(current_user.id))
+            .order_by(AgentJoinAssertion.created_at.desc())
+            .limit(100).all())
+    return _ok([{
+        "id": row.id,
+        "evidenceRef": f"assertion:{row.id}",
+        "category": "user_asserted",
+        "leftOntologyId": row.left_ontology_id,
+        "leftObjectTypeId": row.left_object_type_id,
+        "leftProperty": row.left_property,
+        "rightOntologyId": row.right_ontology_id,
+        "rightObjectTypeId": row.right_object_type_id,
+        "rightProperty": row.right_property,
+        "keyType": row.key_type,
+        "businessMeaning": row.business_meaning,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+    } for row in rows])

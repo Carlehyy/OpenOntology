@@ -1164,3 +1164,28 @@ def test_decision_simulation_tool_is_isolated_auditable_and_queryable(
         f"{_fo(oid)}/agent/decision-simulations/{run.id}", headers=auth_headers)
     assert detail.status_code == 200, detail.text
     assert detail.json()["data"]["recommendation"]["recommendedOption"] == "提前分流"
+
+
+def test_allowed_properties_enforced_on_legacy_paths(client, auth_headers,
+                                                     modeled_ontology):
+    """YIYA-36 P2-2：属性授权收紧后，既有能力概览/图谱路径不泄露禁用属性。"""
+    oid = modeled_ontology["id"]
+    r = client.put(f"{_fo(oid)}/agent/profile", headers=auth_headers,
+                   json={"allowedProperties": {"ot-order": ["order_no"]}})
+    assert r.status_code == 200
+
+    # 技能卡（capabilities）不再包含未授权属性
+    r = client.get(f"{_fo(oid)}/agent/capabilities", headers=auth_headers)
+    assert r.status_code == 200
+    skill_card = r.json()["data"]["skillCard"]
+    assert "amount" not in skill_card and "status" not in skill_card
+    assert "order_no" in skill_card
+
+    # 图谱实例详情（L3 属性节点/预览）不泄露未授权属性值
+    r = client.get(f"{_fo(oid)}/agent/graph/instances/inst-o1",
+                   headers=auth_headers,
+                   params={"level": "3"})
+    assert r.status_code == 200
+    payload = json.dumps(r.json()["data"], ensure_ascii=False)
+    assert "100" not in payload          # amount 值不出现
+    assert "SO-001" in payload           # 授权属性可见

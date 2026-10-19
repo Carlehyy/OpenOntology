@@ -95,9 +95,20 @@ def _display_value(value: Any, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _authorized_values(scope: AgentScope, object_type, instance) -> dict:
+    """属性级授权后的可见值集合（P2-2：图谱预览/属性节点不泄露禁用属性）。"""
+    values = {**(instance.properties or {}), **(instance.computed or {})}
+    if object_type is None:
+        return {}
+    allowed = scope.allowed_property_names(object_type.id)
+    if allowed is None:
+        return values
+    return {k: v for k, v in values.items() if k in allowed}
+
+
 def _instance_preview(scope: AgentScope, instance: ObjectInstance) -> list[dict]:
     object_type = scope.object_types.get(instance.object_type_id)
-    values = {**(instance.properties or {}), **(instance.computed or {})}
+    values = _authorized_values(scope, object_type, instance)
     definitions = {
         p.get("name"): p for p in (object_type.properties or [])
         if isinstance(p, dict) and p.get("name")
@@ -155,7 +166,7 @@ def _property_nodes(scope: AgentScope, instance: ObjectInstance) -> tuple[list[d
         p.get("name"): p for p in (object_type.properties or [])
         if isinstance(p, dict) and p.get("name")
     }
-    values = {**(instance.properties or {}), **(instance.computed or {})}
+    values = _authorized_values(scope, object_type, instance)
     nodes: list[dict] = []
     edges: list[dict] = []
     items = list(values.items())
@@ -336,6 +347,18 @@ def get_instance_detail(scope: AgentScope, instance_id: str) -> dict:
     instance = scope.visible_instance(
         scope.db.query(ObjectInstance).filter(ObjectInstance.id == instance_id).first())
     object_type = scope.object_types[instance.object_type_id]
+    # P2-2：属性级授权同样作用于详情读路径 — 定义与值都按 allowlist 收敛
+    allowed = scope.allowed_property_names(object_type.id)
+    visible_defs = [
+        p for p in (object_type.properties or [])
+        if allowed is None or not isinstance(p, dict)
+        or p.get("name") in allowed
+    ]
+    authorized = _authorized_values(scope, object_type, instance)
+    properties = {k: v for k, v in (instance.properties or {}).items()
+                  if k in authorized}
+    computed = {k: v for k, v in (instance.computed or {}).items()
+                if k in authorized}
     return {
         "id": instance.id,
         "label": instance_label(scope, instance),
@@ -344,10 +367,10 @@ def get_instance_detail(scope: AgentScope, instance_id: str) -> dict:
             "name": object_type.name,
             "displayName": object_type.display_name,
             "primaryKey": object_type.primary_key,
-            "properties": object_type.properties or [],
+            "properties": visible_defs,
         },
-        "properties": instance.properties or {},
-        "computed": instance.computed or {},
+        "properties": properties,
+        "computed": computed,
         "source": instance.source,
         "externalId": instance.external_id,
         "createdAt": instance.created_at.isoformat() if instance.created_at else None,
