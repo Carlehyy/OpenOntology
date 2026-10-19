@@ -1126,3 +1126,115 @@ def test_technical_execution_reopens_attempts(
         client, auth_headers, modeled, db, "act-4", {})
     assert r2.status_code == 409
     assert r2.json()["detail"]["code"] == "operation_unresolved"
+
+
+def test_root_intent_rejects_assistant_only_conversation(
+        client, auth_headers, modeled, db):
+    """裁决 3：提案之前没有用户消息 → 拒绝建立确认（无 assistant 兜底）。"""
+    from app.ontologies.agent_runtime.models import (
+        AgentConversation, AgentMessage,
+    )
+    from app.models.user import User
+
+    user = db.query(User).first()
+    conv = AgentConversation(id=f"conv-{uuid.uuid4().hex[:8]}",
+                             ontology_id=modeled["oid"], user_id=user.id)
+    db.add(conv)
+    db.flush()
+    db.add(AgentMessage(
+        id=f"ma-{uuid.uuid4().hex[:6]}", conversation_id=conv.id,
+        role="assistant", content="no user intent",
+        proposals=[{"kind": "action", "proposalId": "prop-no-user",
+                    "actionId": "act-1", "parameters": {"note": "x", "level": 1},
+                    "targetInstanceId": "inst-o1",
+                    "releaseId": modeled["releaseId"], "status": "success",
+                    "validationErrors": [], "effects": []}]))
+    db.commit()
+    r = client.post(
+        f"{_fo(modeled['oid'])}/agent/proposals", headers=auth_headers,
+        json={"sessionKind": "ontology_agent", "sessionId": conv.id,
+              "clientSubmissionId": "prop-no-user", "actionId": "act-1",
+              "releaseId": modeled["releaseId"],
+              "targetInstanceId": "inst-o1",
+              "parameters": {"note": "x", "level": 1}})
+    assert r.status_code == 422
+    assert "没有可信的用户意图" in r.json()["detail"]["message"]
+    # 提案存在但无前置用户事件：同样的拒绝口径
+
+
+def test_execute_wake_revoked_access_fails_not_executed(
+        client, auth_headers, modeled, conversation, db):
+    """裁决 1：入引擎前撤权 → failed_not_executed（不执行、不释放保护后
+    重放）；恢复权限后重新准备。"""
+    cid = _prepare(client, auth_headers, modeled,
+                   conversation).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    # 收紧 allowlist 移除动作（等效 profile 撤权）
+    client.put(f"{_fo(modeled['oid'])}/agent/profile", headers=auth_headers,
+               json={"allowedActionIds": []})
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["state"] == "failed_not_executed"
+    assert data["failureCode"] == "access_revoked_before_engine"
+    from app.models.ontology_formal import ObjectInstance
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"   # 零业务效果
+
+
+def test_technical_checkpoint_executing_and_unknown_convergence(
+        client, auth_headers, modeled, conversation, db):
+    """裁决 2：技术执行 checkpoint/lease — executing 态可见；lease 失效
+    且无结案证据 → unknown+blockReason+guard 保留（不重批/盲发）。"""
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+    from datetime import datetime, timezone
+
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-k5", actionId="act-4",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    _execute(client, auth_headers, modeled, conversation, cid)
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+
+    # 模拟管理员已批准、技术执行 executing（checkpoint 入口）
+    approval_log = db.query(ActionExecutionLog).filter_by(
+        id=operation.approval_log_id).one()
+    approval_log.status = "executing"
+    db.commit()
+    confirmation_svc.reconcile_operation(operation.id, db)
+    db.expire_all()
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    confirmation = _confirmation(db, cid)
+    assert operation.state == "executing"
+    assert confirmation.state == "executing"
+    assert operation.engine_entered_at is not None
+    assert operation.technical_engine_key == (
+        f"approval-execution:{operation.approval_log_id}")
+    # 双向绑定：审批日志行回填 operation_id
+    db.refresh(approval_log)
+    assert approval_log.operation_id == operation.id
+
+    # lease 失效且无结案证据（技术执行窗口崩溃）→ unknown + blockReason
+    operation.lease_expires_at = datetime.now(timezone.utc)
+    db.commit()
+    confirmation_svc.reconcile_operation(operation.id, db)
+    db.expire_all()
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    confirmation = _confirmation(db, cid)
+    assert operation.state == "unknown"
+    assert confirmation.state == "unknown"
+    assert confirmation.failure_code == "execution_result_unknown"
+    # guard 保留：另一会话同载荷确认被拒
+    _, r2 = _second_session_same_payload(
+        client, auth_headers, modeled, db, "act-4", {})
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["code"] == "operation_unresolved"

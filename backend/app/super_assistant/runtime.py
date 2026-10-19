@@ -1370,8 +1370,12 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 elif item["name"].startswith("mcp__") and item["server"] is not None:
                     # YIYA-36 P2-5：未声明「受约束 descriptor」的 MCP server 在
                     # 超级助手调用中 fail-closed（不能证明凭据/出网隔离）。
+                    # 平台内置 MCP（builtin_key：minio/api_hub 等）由平台
+                    # 预置受控执行面，视为已受约束；用户自建 server 须登记。
                     mcp_server = item["server"][0]
-                    if not getattr(mcp_server, "constrained", False):
+                    builtin = bool(getattr(mcp_server, "builtin_key", None))
+                    if not builtin and not getattr(mcp_server, "constrained",
+                                                   False):
                         executed[item["id"]] = (
                             json.dumps({
                                 "error": "capability_boundary_unenforced",

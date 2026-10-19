@@ -18,6 +18,22 @@ def test_browser_protected_origin_rejected(monkeypatch):
     assert browser_tools._protected_origin_denied("https://any.example") is False
 
 
+def test_browser_full_channel_fail_closed_by_default(monkeypatch):
+    """裁决 4：通道默认关闭 — 所有浏览器工具（含只读观测）先于
+    source/session/storage 访问被拒。"""
+    from app.config import settings
+    from app.super_assistant import browser_tools as bt
+
+    monkeypatch.setattr(settings, "assistant_browser_channel_enabled",
+                        False, raising=False)
+    result = bt._dispatch(None, conversation=None, name="browser_state",
+                          arguments={})
+    assert result["error"] == "capability_boundary_unenforced"
+    result = bt._dispatch(None, conversation=None, name="browser_open",
+                          arguments={"url": "https://x"})
+    assert result["error"] == "capability_boundary_unenforced"
+
+
 def test_browser_write_guard_fail_closed_on_empty_config_prod(monkeypatch):
     from app.config import settings
 

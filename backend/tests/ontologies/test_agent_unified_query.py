@@ -5,6 +5,8 @@ SQLite 保留契约语义（typed cast/三值逻辑/稳定分页）；锁/隔离
 """
 import pytest
 
+import json
+
 from app.ontologies.agent_query.service import QueryError
 
 _QUERY = "/api/v2/formal/agent/query"
@@ -627,3 +629,98 @@ def test_query_sql_count_scales_constant(client, auth_headers,
     large = _run_counted()
     assert large - small <= 6, (small, large)
     assert large <= 40, large
+
+
+def test_query_budget_units_pg_legal():
+    """R-1 契约：预算语句使用 PG 合法单位（B/kB/MB/GB/TB，非 IEC MiB）。"""
+    import inspect
+    from app.ontologies.agent_query import service as query_service
+    source = inspect.getsource(query_service.UnifiedQueryService._pin_transaction)
+    statements = [line.strip() for line in source.splitlines()
+                  if line.strip().startswith('"SET LOCAL')]
+    assert statements, source
+    for statement in statements:
+        assert "MiB" not in statement, statement
+    assert "work_mem_mb}MB" in source.replace("'", "")
+    assert "temp_file_limit_mb}MB" in source.replace("'", "")
+
+
+def test_query_budget_error_no_internal_leak():
+    """R-2 契约：预算失败响应不回灌 str(exc)/SQL 细节，分类入 extra。"""
+    from app.ontologies.agent_query import service as query_service
+
+    class _Boom(Exception):
+        pass
+
+    class _Orig:
+        pgcode = "42501"
+
+    class _StmtExc(Exception):
+        orig = _Orig()
+
+    class _Db:
+        def in_transaction(self):
+            return False
+
+        def execute(self, statement):
+            raise _StmtExc()
+
+        def rollback(self):
+            pass
+
+    from app.ontologies.agent_query import schemas as _QS
+    svc = query_service.UnifiedQueryService.__new__(
+        query_service.UnifiedQueryService)
+    svc.db = _Db()
+    svc._pg = True
+    svc.req = _QS.QueryRequest(
+        sources=[_QS.QuerySource(alias="a", ontology_id="x",
+                                release_id="y", objectTypeId="z")],
+        select=[])
+    try:
+        svc._pin_transaction()
+        raise AssertionError("expected QueryError")
+    except query_service.QueryError as exc:
+        assert exc.code == "query_budget_unavailable"
+        assert exc.extra["errorClass"] == "insufficient_privilege"
+        # 客户端 payload 不含异常原文/SQLSTATE
+        payload = json.dumps(exc.detail(), ensure_ascii=False)
+        assert "42501" not in payload
+        assert "orig" not in payload
+        assert "permission denied" not in payload
+
+
+def test_query_auth_hash_reflects_real_write_access(
+        client, auth_headers, orders_ontology, db, editor_user):
+    """裁决 1：auth 材料使用真实 RBAC 写权限（admin/editor-owner）—
+    viewer 权限收紧改变快照指纹（翻页重验拒绝）。"""
+    from app.ontologies.agent_query.service import (
+        UnifiedQueryService, _ontology_write_access,
+    )
+    from app.ontologies.agent_runtime.boundary import build_scope
+    from app.models.ontology import OntologyProject
+
+    orders = orders_ontology
+    project = db.query(OntologyProject).filter_by(
+        id=orders["ontologyId"]).one()
+
+    class _Admin:
+        id = "admin-user"
+        role = "admin"
+
+    class _EditorOwner:
+        id = str(project.created_by)
+        role = "editor"
+
+    class _EditorOther:
+        id = "someone-else"
+        role = "editor"
+
+    class _Viewer:
+        id = str(project.created_by)
+        role = "viewer"
+
+    assert _ontology_write_access(_Admin(), project) is True
+    assert _ontology_write_access(_EditorOwner(), project) is True
+    assert _ontology_write_access(_EditorOther(), project) is False
+    assert _ontology_write_access(_Viewer(), project) is False

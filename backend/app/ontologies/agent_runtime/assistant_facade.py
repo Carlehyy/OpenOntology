@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -24,6 +25,8 @@ from app.ontologies.agent_query.service import (
 from app.ontologies.agent_runtime.structure_service import (
     StructureError, build_structure,
 )
+
+logger = logging.getLogger(__name__)
 
 SUPER_ASSISTANT_ORIGIN = "super_assistant"
 
@@ -55,7 +58,10 @@ def _wrap(exc: Exception) -> FacadeError:
     if isinstance(exc, (QueryError, StructureError,
                         confirmation_service.ConfirmationError)):
         return FacadeError(exc.status, exc.code, exc.message, **exc.extra)
-    return FacadeError(500, "facade_error", str(exc))
+    # R-2：未知内部错误不向客户端回灌 str(exc)（SQL/参数/路径可能泄露）；
+    # 细节进服务端日志，客户端只收稳定 code。
+    logger.exception("assistant facade internal error")
+    return FacadeError(500, "facade_error", "内部错误，请稍后重试或联系管理员")
 
 
 def structure(db: Session, user, ontology_id: str, *, release_id: Optional[str],

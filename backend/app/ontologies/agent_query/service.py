@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import hashlib
 import hmac
 import json
@@ -56,6 +57,8 @@ _STRING_TYPES = {"string", "text", "date", "datetime", "uuid", "enum"}
 
 _COUNTS_SCOPE = "complete_snapshot"
 
+logger = logging.getLogger(__name__)
+
 
 class QueryError(Exception):
     """查询面可识别错误 — 携带 HTTP 状态与机器可读 code。"""
@@ -80,6 +83,17 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256(payload: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _ontology_write_access(user, project) -> bool:
+    """与 access.require_ontology_access(write=True) 同口径的真实裁决。"""
+    role = str(getattr(user, "role", "") or "")
+    if role == "admin":
+        return True
+    if role == "editor":
+        return str(getattr(project, "created_by", "") or "") == str(
+            getattr(user, "id", ""))
+    return False
 
 
 def _declared_type(prop_def: dict) -> str:
@@ -317,20 +331,40 @@ class UnifiedQueryService:
             "SET LOCAL lock_timeout = "
             f"'{settings.agent_query_lock_timeout_ms}ms'",
             "SET LOCAL idle_in_transaction_session_timeout = '5000ms'",
+            # R-1：PostgreSQL 内存参数合法单位为 B/kB/MB/GB（kB=1024B，
+            # MB=2^20B），不接受 IEC 记法 MiB。PG 的 '4MB' 与原 '4MiB'
+            # 字节数一致，预算语义不变。
             "SET LOCAL work_mem = "
-            f"'{settings.agent_query_work_mem_mib}MiB'",
+            f"'{settings.agent_query_work_mem_mb}MB'",
             "SET LOCAL temp_file_limit = "
-            f"'{settings.agent_query_temp_file_limit_mib}MiB'",
+            f"'{settings.agent_query_temp_file_limit_mb}MB'",
         )
         try:
             for statement in budgets:
                 self.db.execute(text(statement))
         except Exception as exc:  # noqa: BLE001 - fail closed
+            # R-2：错误分类入服务端日志（SQLSTATE/错误类别可审计），客户端
+            # 只收到稳定 code + 分类，不回灌 str(exc)/SQL/参数细节。
             self.db.rollback()
+            orig = getattr(exc, "orig", None)
+            sqlstate = getattr(orig, "pgcode", None) or getattr(
+                exc, "pgcode", None)
+            classify = {
+                "42501": "insufficient_privilege",
+                "0A000": "feature_not_supported",
+                "22023": "invalid_parameter_value",
+            }.get(str(sqlstate or ""), "budget_set_failed")
+            if sqlstate:
+                logger.warning(
+                    "agent query budget set failed sqlstate=%s class=%s",
+                    sqlstate, classify)
+            else:
+                logger.warning(
+                    "agent query budget set failed class=%s", classify)
             raise QueryError(
                 503, "query_budget_unavailable",
-                "查询资源/隔离级参数设置失败（数据库角色权限不足），"
-                "查询 fail closed", retryable=False) from exc
+                "查询资源/隔离级参数设置失败，查询已 fail closed",
+                errorClass=classify, retryable=False) from exc
         oids = sorted({s.ontology_id for s in self.req.sources})
         (self.db.query(OntologyProject)
              .filter(OntologyProject.id.in_(oids))
@@ -961,6 +995,10 @@ class UnifiedQueryService:
                 "allowedAction": profile.allowed_action_ids,
                 "allowedProperties": getattr(profile, "allowed_properties", None),
                 "maxRows": int(profile.max_rows_per_query or 0),
+                # 裁决 1：真实 RBAC 写权限（admin/editor-owner），与
+                # _recompute_auth_hash 共享同一材料。
+                "writeAccess": _ontology_write_access(
+                    self.user, meta.scope.ontology),
             }
         return material
 
@@ -1157,7 +1195,7 @@ class UnifiedQueryService:
                     "role": str(getattr(self.user, "role", ""))}
         for alias, release_info in sorted(
                 (snapshot.releases or {}).items()):
-            _, profile, _ = build_scope(
+            _, profile, scope = build_scope(
                 self.db, release_info["ontologyId"],
                 release_id=release_info["releaseId"])
             material[alias] = {
@@ -1169,6 +1207,8 @@ class UnifiedQueryService:
                 "allowedAction": profile.allowed_action_ids,
                 "allowedProperties": getattr(profile, "allowed_properties", None),
                 "maxRows": int(profile.max_rows_per_query or 0),
+                "writeAccess": _ontology_write_access(
+                    self.user, scope.ontology),
             }
         return _sha256(_canonical_json(material))
 

@@ -10,6 +10,14 @@ from __future__ import annotations
 import json
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _enable_assistant_browser_channel(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "assistant_browser_channel_enabled",
+                        True, raising=False)
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine

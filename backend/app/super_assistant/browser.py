@@ -161,6 +161,19 @@ def download_browser_companion(_=Depends(get_current_user)):
 
 # ── 会话级浏览器操作 ────────────────────────────────────────────────
 
+def _assistant_browser_channel_closed() -> None:
+    """裁决 4：assistant 浏览器通道 fail-closed（HTTP 入口同口径）。"""
+    from app.config import settings
+    from fastapi import HTTPException
+
+    if not getattr(settings, "assistant_browser_channel_enabled", False):
+        raise HTTPException(status_code=403, detail={
+            "code": "capability_boundary_unenforced",
+            "message": "超级助手浏览器通道暂未开放：等待隔离/凭据/网络策略"
+                       "证据与独立验证后由部署显式启用",
+        })
+
+
 @router.put("/conversations/{conversation_id}/browser/source")
 def bind_conversation_browser_source(
     conversation_id: str,
@@ -168,6 +181,7 @@ def bind_conversation_browser_source(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return bind_browser_source(conversation_id, body, db, current_user)
 
 
@@ -178,6 +192,7 @@ def start_conversation_browser(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return start_browser(conversation_id, body, db, current_user)
 
 
