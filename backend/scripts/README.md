@@ -14,7 +14,7 @@ API key、连接串、临时数据库或报告提交到 Git。任何新增、移
 必须同步更新本页。
 
 表中临时 SQLite 只服务于隔离脚本或 API Hub，不是平台运行时降级。正常平台
-验收仍要求 PostgreSQL、Redis/Celery worker、Neo4j、MinIO、n8n 和 Chromium
+验收仍要求 PostgreSQL、Redis、NATS executor、Neo4j、MinIO、n8n 和 Chromium
 CDP 全部就绪。LLM 在平台启动后按脚本需要配置；ChromaDB 不再是任何脚本的
 运行依赖。
 
@@ -25,6 +25,9 @@ CDP 全部就绪。LLM 在平台启动后按脚本需要配置；ChromaDB 不再
 | `api_hub_http_proxy_live_e2e.py` | `uv run python scripts/api_hub_http_proxy_live_e2e.py`；需要访问公开 AI HOT API | 使用临时 API Hub SQLite 和本机随机端口，只读取外部公开 API；临时目录自动删除 |
 | `exploration_live_e2e.py` | 受保护环境提供 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 后运行 `uv run python scripts/exploration_live_e2e.py` | 调用真实 LLM、会产生费用；使用临时 SQLite/上传目录并在退出前扫描密钥落盘，目录自动删除 |
 | `runtime_secret_split_postgres_e2e.py` | `OPENONTOLOGY_RUNTIME_SECRET_E2E=1 ENVIRONMENT=test DATABASE_URL=<loopback-*_ci-or-*_e2e-url> uv run python scripts/runtime_secret_split_postgres_e2e.py --report ../.artifacts/runtime-secret-migration/report.json`；CI 在真实 PostgreSQL migration 后执行 | 只写 synthetic 密文；显式 E2E 哨兵、test 环境、无 query/fragment 的 loopback URL 与 `_ci`/`_e2e` 库名四重约束；PostgreSQL fixture 始终事务回滚，API Hub SQLite 与临时部署目录自动删除；0600 报告只含固定状态和计数，不含连接串、密钥、密文或哈希 |
+| `ontology_assistant_postgres_e2e.py` | `OPENONTOLOGY_ONTOLOGY_ASSISTANT_E2E=1 ENVIRONMENT=test DATABASE_URL=<隔离 PostgreSQL-url> uv run python scripts/ontology_assistant_postgres_e2e.py --report ../.artifacts/ontology-assistant/query-postgres.json`；CI 在真实 PostgreSQL service 上执行 | 验证统一关联查询核（投影/过滤/聚合、computed 派生字段、跨本体 typed join 与证据门禁、稳定分页、REPEATABLE READ 一致性、SET LOCAL 预算与普通角色三段式 temp_file_limit 硬帽）；全部 fixture 落在脚本自建的 UUID 私有 schema + 一次性普通 LOGIN 角色，`finally` 级联删除，绝不触碰 public/他人 schema；0600 报告只含固定字段、计数、布尔与耗时 |
+| `ontology_action_confirmation_postgres_e2e.py` | `OPENONTOLOGY_ONTOLOGY_ASSISTANT_E2E=1 ENVIRONMENT=test DATABASE_URL=<隔离 PostgreSQL-url> uv run python scripts/ontology_action_confirmation_postgres_e2e.py` | 私有 UUID schema 内验证并发准备/决策/领取、执行保护、过期租约恢复与写入总闸；报告写 `.artifacts/ontology-assistant/`，退出删除 schema |
+| `ontology_assistant_real_stack_e2e.sh` | `bash scripts/ontology_assistant_real_stack_e2e.sh stack-up`、`migrate-verify`、`backend-up` | 独立 Compose 项目与回环偏移端口，使用脱敏夹具；结束依次运行 `backend-down`、`stack-down`，报告与进程记录写 `.artifacts/real-stack-e2e/` |
 | `steward_companion_e2e.py` | `uv run python scripts/steward_companion_e2e.py`；需要 Node.js | 仅启动 loopback CDP/WebSocket fixture 与真实 companion 进程，不访问外部站点、不写业务库 |
 | `steward_context_live_e2e.py` | `uv run python scripts/steward_context_live_e2e.py`；API key 由 TTY `getpass` 读取，可通过参数选择 DeepSeek model/token 预算 | 调用真实 DeepSeek、会产生费用；使用临时 SQLite/目录，退出前验证密钥未落盘并自动删除 |
 | `steward_live_e2e.py` | `uv run python scripts/steward_live_e2e.py --n8n-api-url <url> --llm-api-base <url>`；`N8N_API_KEY`、`LLM_API_KEY` 从环境或 TTY 读取 | 调用真实 n8n、LLM 和数据源，创建唯一远程 workflow；`finally` 删除 workflow 和本地临时目录。仅排障时使用 `--keep-temp`，之后人工清理 |

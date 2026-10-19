@@ -513,6 +513,7 @@ def publish_project(
         SuperAssistantMcpServer.owner_id == owner_id,
         SuperAssistantMcpServer.dev_project_id == project.id,
     ).first()
+    existing_server = server
     if server is None:
         clash = db.query(SuperAssistantMcpServer).filter(
             SuperAssistantMcpServer.owner_id == owner_id,
@@ -543,6 +544,9 @@ def publish_project(
     server.display_name = project.display_name or project.name
     server.description = project.description
     server.tool_manifest = manifest
+    if existing_server is not None and server.constrained:
+        # 重发布 = 新代码版本：admin 对旧脚本的受约束登记失效，需重新审核
+        server.constrained = False
     server.last_test_status = "success"
     server.last_test_message = f"发布校验通过：{len(manifest)} 个工具全部执行成功"
     server.last_tested_at = datetime.now(timezone.utc)

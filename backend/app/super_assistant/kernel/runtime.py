@@ -834,6 +834,20 @@ def _map_confirmation_state_to_call(state: str) -> tuple[str, str, bool]:
             False)
 
 
+def _confirmation_event_projection(confirmation: dict) -> dict:
+    """SSE/RunView 同构的确认投影 — 前端 reducer 用同一结构渲染确认卡。"""
+    return {
+        "confirmationId": confirmation.get("confirmationId"),
+        "state": confirmation.get("state"),
+        "payloadHash": confirmation.get("payloadHash"),
+        "requiresApproval": confirmation.get("requiresApproval"),
+        "display": confirmation.get("display") or {},
+        "failureCode": confirmation.get("failureCode"),
+        "blockReason": confirmation.get("blockReason"),
+        "operationId": confirmation.get("operationId"),
+    }
+
+
 def _apply_confirmation_state_to_call(db, run, call, confirmation: dict,
                                       actor: str = "connector") -> None:
     state = str(confirmation.get("state") or "")
@@ -849,6 +863,8 @@ def _apply_confirmation_state_to_call(db, run, call, confirmation: dict,
         "connector_id": call.target_ref,
         "provider_event_id": confirmation.get("confirmationId"),
         "confirmationState": state,
+        "manual_attention": call.manual_attention,
+        "confirmation": _confirmation_event_projection(confirmation),
     }, actor={"kind": actor}, command_id=f"call:{call.id}:ontology",
         idempotency_key=f"call-ontology:{call.id}:{state}",
         connector_id=call.target_ref)
@@ -889,6 +905,7 @@ async def _dispatch_ontology_execute_call(db, run, call) -> bool:
             "call_id": call.id, "status": call.status,
             "outcome": call.outcome, "evidence_ref": None,
             "connector_id": call.target_ref, "provider_event_id": None,
+            "manual_attention": call.manual_attention,
         }, actor={"kind": "system"}, command_id=f"call:{call.id}:invalid",
             idempotency_key=f"call-ontology-invalid:{call.id}",
             connector_id=call.target_ref)
@@ -931,6 +948,7 @@ async def _dispatch_ontology_execute_call(db, run, call) -> bool:
             "call_id": call.id, "status": call.status,
             "outcome": call.outcome, "evidence_ref": None,
             "connector_id": call.target_ref, "provider_event_id": None,
+            "manual_attention": call.manual_attention,
         }, actor={"kind": "connector"}, command_id=f"call:{call.id}:error",
             idempotency_key=f"call-ontology-error:{call.id}",
             connector_id=call.target_ref)
@@ -1766,6 +1784,44 @@ def _reject_ontology_write_capability(capability_key: str | None) -> None:
             "use the confirmation protocol (ontology_execute_action)")
 
 
+def _ontology_approval_summaries(db, run, ontology_request: dict):
+    """从确认协议 display 生成审批卡三段人类可读摘要。
+
+    审批必须让用户看清本体动作、目标与最终参数（含参数来源），不能只给
+    confirmationId。display 缺失/确认不可读时返回 None，调用方退回原始
+    摘要，不阻断审批门落地。"""
+    from app.models.user import User
+    from app.super_assistant import ontology_tools
+
+    user = db.scalar(select(User).where(User.id == run.owner_id))
+    if user is None:
+        return None
+    confirmation = ontology_tools.kernel_confirmation_status(
+        db, user, ontology_request)
+    display = (confirmation or {}).get("display") or {}
+    if not display:
+        return None
+    action = display.get("action") or {}
+    ontology = display.get("ontology") or {}
+    target = display.get("target") or {}
+    release = display.get("release") or {}
+    action_label = str(action.get("name") or action.get("id")
+                       or ontology_request.get("confirmationId"))
+    target_label = str(target.get("label") or target.get("id") or "")
+    target_summary = (f"{action_label} @ {target_label}" if target_label
+                      else action_label)
+    parameters = [p for p in (display.get("parameters") or [])
+                  if isinstance(p, dict)]
+    parameter_summary = "; ".join(
+        f"{p.get('name')}={p.get('value')!r} (source: {p.get('source')})"
+        for p in parameters) or "(no parameters)"
+    scope_summary = (
+        f"ontology {ontology.get('name') or ontology.get('id')}"
+        f" release {release.get('version') or release.get('id')}"
+        f"; requiresApproval={bool(display.get('requiresApproval'))}")
+    return target_summary, parameter_summary[:2000], scope_summary, display
+
+
 def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
     kind = wait.get("kind") or "resume"; run.wait_reason = wait.get("reason") or kind; target_ref = wait.get("target_ref"); inbox = None; external_call = None; question_expires_at = None; expiry_policy = None; gated = False
     if kind == "approval_decision":
@@ -1838,20 +1894,56 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                 deadline = run.deadline
                 if deadline is not None and deadline.tzinfo is None:
                     deadline = deadline.replace(tzinfo=timezone.utc)
+                summaries = (_ontology_approval_summaries(db, run,
+                                                           ontology_request)
+                             if ontology_request is not None else None)
+                if ontology_request is not None and summaries is None:
+                    # 本体审批卡没有可读的确认 display（确认丢失/不可读）时
+                    # fail-closed：不允许只有 confirmationId 的裸审批。
+                    from .contracts import ContractError
+                    raise ContractError(
+                        "ontology approval requires a readable confirmation "
+                        "display (action/target/parameters)")
                 approval = Approval(
                     owner_id=run.owner_id, run_id=run.id, call_id=external_call.id,
-                    target_summary=str(target_ref or "external"),
-                    parameter_summary=str(input_ref or "")[:2000],
-                    scope_summary=str(run.permission_snapshot_ref or f"run://{run.id}/scope"),
+                    target_summary=(summaries[0] if summaries
+                                    else str(target_ref or "external")),
+                    parameter_summary=(summaries[1] if summaries
+                                       else str(input_ref or "")[:2000]),
+                    scope_summary=(summaries[2] if summaries
+                                   else str(run.permission_snapshot_ref or f"run://{run.id}/scope")),
                     capability_revision=int(capability_revision),
                     parameter_hash=_checksum(str(input_ref or "")),
                     status="pending",
                     expires_at=approval_expires_at(now=_now(), requested_ttl=timedelta(hours=1), run_deadline=deadline or _now() + timedelta(hours=24)),
                 )
                 db.add(approval); db.flush()
-                approval_inbox = InboxItem(run_id=run.id, kind="approval_decision", priority=10, status="pending", approval_id=approval.id, call_id=external_call.id, target_ref=external_call.id, payload={"approval_id": approval.id, "call_id": external_call.id}, source="system", expires_at=approval.expires_at, expiry_policy="fail_run", idempotency_key=f"approval:{approval.id}")
+                approval_payload = {"approval_id": approval.id,
+                                    "call_id": external_call.id}
+                if ontology_request is not None:
+                    approval_payload["confirmation_id"] = str(
+                        ontology_request.get("confirmationId") or "")
+                approval_inbox = InboxItem(run_id=run.id, kind="approval_decision", priority=10, status="pending", approval_id=approval.id, call_id=external_call.id, target_ref=external_call.id, payload=approval_payload, source="system", expires_at=approval.expires_at, expiry_policy="fail_run", idempotency_key=f"approval:{approval.id}")
                 db.add(approval_inbox); db.flush()
-                append_event(db, run, event_type="approval.requested", payload={"approval_id": approval.id, "run_id": run.id, "call_id": external_call.id, "scope_snapshot_ref": run.permission_snapshot_ref or f"run://{run.id}/scope", "expires_at": approval.expires_at.isoformat()}, actor={"kind": "worker"}, command_id=f"approval:{approval.id}", idempotency_key=f"approval-request:{approval.id}", lease=token)
+                approval_event_payload = {
+                    "approval_id": approval.id, "run_id": run.id,
+                    "call_id": external_call.id,
+                    "scope_snapshot_ref": run.permission_snapshot_ref or f"run://{run.id}/scope",
+                    "expires_at": approval.expires_at.isoformat(),
+                    "target_summary": approval.target_summary,
+                    "parameter_summary": approval.parameter_summary,
+                    "scope_summary": approval.scope_summary,
+                    "confirmation_id": approval_payload.get("confirmation_id"),
+                }
+                if summaries is not None:
+                    # 与 RunView/confirmation_out 同构的 display 投影 — SSE
+                    # reducer 不必回查 GET 也能渲染审批卡。
+                    approval_event_payload["confirmation"] = {
+                        "confirmationId": ontology_request.get("confirmationId"),
+                        "payloadHash": ontology_request.get("payloadHash"),
+                        "display": summaries[3],
+                    }
+                append_event(db, run, event_type="approval.requested", payload=approval_event_payload, actor={"kind": "worker"}, command_id=f"approval:{approval.id}", idempotency_key=f"approval-request:{approval.id}", lease=token)
             else:
                 _add_outbox(
                     db,

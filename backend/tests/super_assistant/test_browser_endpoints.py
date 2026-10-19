@@ -514,7 +514,8 @@ def test_execute_browser_tool_maps_ownership_and_runtime_errors(tmp_path, monkey
             db, owner_id="user-1", conversation_id="11111111-1111-1111-1111-111111111111",
             name="browser_state", arguments={},
         ))
-    assert failed == {"error": "无法连接平台浏览器"}
+    assert failed["error"] == "capability_boundary_unverifiable"
+    assert "无法核实当前页面来源" in failed["message"]
 
 
 def test_system_prompt_includes_browser_collaboration_rules():

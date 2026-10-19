@@ -174,16 +174,27 @@ def update_mcp_server(
     *,
     include_builtins: bool,
 ) -> SuperAssistantMcpServer:
-    item = get_mcp_server(
-        db,
-        owner_id,
-        server_id,
-        include_builtins=include_builtins,
-    )
+    actor = db.get(User, owner_id)
+    is_admin = actor is not None and actor.role == "admin"
+    try:
+        item = get_mcp_server(
+            db, owner_id, server_id, include_builtins=include_builtins)
+    except McpServerNotFoundError:
+        # 跨用户审核只开放 constrained 字段。
+        if not is_admin:
+            raise
+        item = db.query(SuperAssistantMcpServer).filter(
+            SuperAssistantMcpServer.id == server_id,
+        ).first()
+        if item is None:
+            raise
+        if body.model_fields_set - {"constrained"}:
+            raise McpServerValidationError("管理员跨用户只允许登记或撤销 constrained")
     try:
         if item.builtin_key and body.model_fields_set - {
             "enabled",
             "require_confirmation",
+            "constrained",
         }:
             raise McpClientError(
                 "平台内置 MCP 仅允许修改启用和执行确认设置"
@@ -191,9 +202,11 @@ def update_mcp_server(
         if item.dev_project_id and body.model_fields_set - {
             "enabled",
             "require_confirmation",
+            "constrained",
         }:
             raise McpClientError(
-                "自研 MCP 的连接与工具由开发页管理：这里仅允许修改启用和执行确认设置"
+                "自研 MCP 的连接与工具由开发页管理：这里仅允许修改启用、"
+                "执行确认与管理员受约束登记"
             )
 
         connection_changed = any(
@@ -207,13 +220,11 @@ def update_mcp_server(
                 revision=int(item.manifest_revision or 1),
             )
         if manifest_changed:
-            # The persisted connection fields are mutable, while a Capability
-            # revision is immutable. Do not leave the old tool manifest exposed
-            # against the new endpoint/credentials; a successful probe will
-            # publish the next revision atomically.
+            # 清单只能绑定已验证的连接与凭据，探测成功后发布新 revision。
             item.tool_manifest = []
             item.last_test_status = None
             item.last_test_message = None
+            item.constrained = False
         if connection_changed:
             transport, url, command, args = normalize_connection(
                 transport=body.transport or item.transport,
@@ -225,16 +236,10 @@ def update_mcp_server(
             item.url = url
             item.command = command
             item.args = args
-            item.last_test_status = None
-            item.last_test_message = None
         if body.headers is not None:
             item.headers_encrypted, item.header_names = encrypt_headers(body.headers)
-            item.last_test_status = None
-            item.last_test_message = None
         if body.env is not None:
             item.env_encrypted, item.env_names = encrypt_env(body.env)
-            item.last_test_status = None
-            item.last_test_message = None
         if body.display_name is not None:
             item.display_name = body.display_name
         if body.description is not None:
@@ -246,15 +251,14 @@ def update_mcp_server(
                     set_capability_revision_enabled(db, key, int(item.manifest_revision or 1), enabled=True)
         if body.require_confirmation is not None:
             item.require_confirmation = body.require_confirmation
-        if getattr(body, "constrained", None) is not None:
-            # YIYA-36 P2-5：受约束 descriptor 是信任声明，连接/凭据变更
-            # 使其失效（需重新审核登记）。
+        if "constrained" in body.model_fields_set and body.constrained is not None:
+            if not is_admin:
+                raise McpClientError("MCP 受约束登记仅平台管理员可修改")
+            if item.builtin_key:
+                raise McpClientError("平台内置 MCP 由平台构造性保证受约束，不可手工修改")
+            if body.constrained and manifest_changed:
+                raise McpClientError("连接/凭据变更与受约束登记不能同批提交")
             item.constrained = body.constrained
-            if body.constrained and (manifest_changed or connection_changed):
-                raise McpClientError(
-                    "连接/凭据变更与受约束登记不能同批提交：先变更并验证，"
-                    "再由管理员登记 constrained"
-                )
         db.commit()
         db.refresh(item)
         return item
@@ -335,6 +339,7 @@ async def test_mcp_server(
         revision = int(item.manifest_revision or 1)
         if item.manifest_hash and item.manifest_hash != digest:
             revision += 1
+            item.constrained = False
         _freeze_manifest(db, item, tools, revision, enabled=True)
         item.manifest_revision = revision
         item.manifest_hash = digest
@@ -382,6 +387,7 @@ def _install_builtin_mcp(
             display_name=display_name,
             description=description,
             builtin_key=builtin_key,
+            constrained=True,
             transport="streamable_http",
             url=url,
             headers_encrypted=None,

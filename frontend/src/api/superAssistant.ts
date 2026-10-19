@@ -7,6 +7,10 @@ import {
   type BrowserLiveFrame,
   type BrowserSource,
 } from '@/api/browserCollaboration'
+import type {
+  OntologyConfirmationState,
+  PendingToolConfirmation,
+} from '@/types/ontologyConfirmation'
 
 export interface SuperConversation {
   id: string
@@ -335,6 +339,22 @@ export interface KernelRunCallSummary {
   status: string
   outcome: string | null
   capability_key: string
+  /** 本体动作确认的精简同源对象（confirmation_out display）；非动作类 call 无 */
+  confirmation?: OntologyConfirmationState | null
+  /** 服务端标记：结果待核实/需人工处理的保守态 */
+  manual_attention?: boolean
+}
+
+/** kernel 审批的服务端持久摘要（Approval 表出参，供 run 视图与 SSE 同步） */
+export interface KernelApprovalSummary {
+  approval_id: string
+  status: string
+  call_id: string | null
+  target_summary: string
+  parameter_summary: string
+  scope_summary: string
+  expires_at: string | null
+  decided_at: string | null
 }
 
 export interface KernelRunArtifactSummary {
@@ -353,6 +373,8 @@ export interface KernelRunInboxItem {
   question_id: string | null
   approval_id?: string | null
   expires_at: string | null
+  /** kind=approval_decision 时的服务端摘要（无则为旧负载，仅显示占位） */
+  approval?: KernelApprovalSummary | null
 }
 
 export interface KernelRunView {
@@ -869,6 +891,11 @@ export const superAssistantApi = {
   cancel: (id: string) => apiClientV2.post(`/super-assistant/conversations/${id}/cancel`),
   decideToolRun: (id: string, decision: 'approve' | 'deny') =>
     apiClientV2.post(`/super-assistant/tool-runs/${id}/decision`, { decision }),
+  /** reload 后恢复 direct 待确认卡：与 tool_confirmation_required 事件同形，无待确认为 null */
+  pendingConfirmation: (conversationId: string) =>
+    apiClientV2.get<PendingToolConfirmation | null>(
+      `/super-assistant/conversations/${encodeURIComponent(conversationId)}/pending-confirmation`,
+    ),
 
   skills: () => apiClientV2.get<SuperSkill[]>('/super-assistant/skills'),
   createSkill: (body: {

@@ -1,4 +1,9 @@
-"""YIYA-36 P2-5: MCP server 受约束 descriptor 登记位（fail-closed 默认 False）。"""
+"""YIYA-36 P2-5: MCP server 受约束 descriptor 登记位（fail-closed 默认 False）。
+
+内置进程内通道（minio/api_hub）按构造受约束：新列对存量内置行回填 True。
+外部 transport 与自研 developed 默认 False，需平台 admin 审核登记后才在
+超级助手调用中放行（见 runtime.mcp_server_constrained）。
+"""
 import sqlalchemy as sa
 
 from alembic import op
@@ -29,6 +34,11 @@ def upgrade() -> None:
             "super_assistant_mcp_servers",
             sa.Column("constrained", sa.Boolean(), nullable=False,
                       server_default=sa.false()))
+        # 内置进程内通道构造性受约束：存量行回填（幂等，仅新建列时执行）
+        op.execute(
+            "UPDATE super_assistant_mcp_servers SET constrained = true "
+            "WHERE builtin_key IN ('minio', 'api_hub')"
+        )
 
 
 def downgrade() -> None:

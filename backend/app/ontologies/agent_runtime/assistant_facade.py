@@ -92,6 +92,56 @@ def query_page(db: Session, user, cursor: str, *,
         raise _wrap(exc) from exc
 
 
+def register_join_assertion(db: Session, user, body: dict) -> dict:
+    """登记当前用户显式声明的跨本体关联含义（evidenceRefs 的 user_asserted 源）。
+
+    校验语义与 direct HTTP 入口（proposals_router）一致：两端结构必须存在
+    于对应本体的当前发布且属性已声明。businessMeaning 是用户确认过的关联
+    含义 —— 调用方（工具层）必须先经用户确认（tool-run approve）再调用；
+    本门面不做确认，模型不能自授。声明只是使用依据，不是治理认证。
+    """
+    from app.ontologies.agent_runtime.boundary import ToolError, build_scope
+    from app.ontologies.release_context import current_release_context
+
+    payload = QS.JoinAssertionCreate.model_validate(body)
+    for ontology_ref, object_type_ref, prop_ref in (
+            (payload.left_ontology_id, payload.left_object_type_id,
+             payload.left_property),
+            (payload.right_ontology_id, payload.right_object_type_id,
+             payload.right_property)):
+        context = current_release_context(db, ontology_ref)
+        _, _, scope = build_scope(db, ontology_ref,
+                                  release_id=context.release.id)
+        try:
+            ot = scope.require_object_type(object_type_ref)
+            scope.resolve_property(ot, prop_ref)
+        except ToolError as exc:
+            raise FacadeError(422, "invalid_parameter", str(exc)) from exc
+    from app.ontologies.agent_query.models import AgentJoinAssertion
+
+    assertion = AgentJoinAssertion(
+        created_by=str(user.id),
+        left_ontology_id=payload.left_ontology_id,
+        left_object_type_id=payload.left_object_type_id,
+        left_property=payload.left_property,
+        right_ontology_id=payload.right_ontology_id,
+        right_object_type_id=payload.right_object_type_id,
+        right_property=payload.right_property,
+        key_type=payload.key_type,
+        business_meaning=payload.business_meaning)
+    db.add(assertion)
+    db.commit()
+    return {
+        "id": assertion.id,
+        "evidenceRef": f"assertion:{assertion.id}",
+        "category": "user_asserted",
+        "keyType": assertion.key_type,
+        "businessMeaning": assertion.business_meaning,
+        "createdAt": assertion.created_at.isoformat()
+        if assertion.created_at else None,
+    }
+
+
 def prepare_action(db: Session, user, ontology_id: str, *,
                    session_kind: str, session_id: str,
                    root_intent_id: str, source_call_id: str,
@@ -217,7 +267,7 @@ def build_query_request(arguments: dict):
             direction=str(o.get("direction") or "asc"),
             nulls=str(o.get("nulls") or "last"))
             for o in arguments.get("orderBy") or []],
-        page_size=int(arguments.get("pageSize") or 50),
+        page_size=arguments.get("pageSize"),
     )
 
 

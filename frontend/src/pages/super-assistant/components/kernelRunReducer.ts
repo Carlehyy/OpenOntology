@@ -1,4 +1,5 @@
 import type {
+  KernelApprovalSummary,
   KernelRunArtifactSummary,
   KernelRunCallSummary,
   KernelRunEvent,
@@ -6,6 +7,7 @@ import type {
   KernelRunStatus,
   KernelRunView,
 } from '@/api/superAssistant'
+import { parseOntologyConfirmation } from '../../../components/ontologyConfirmationModel.ts'
 
 export interface KernelRunProjection {
   run: KernelRunView | null
@@ -29,6 +31,25 @@ function replaceById<T, K extends keyof T>(items: T[], value: T, key: K): T[] {
 
 function asString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** 审批摘要（kernel Approval 出参）：缺 approval_id 视为旧负载，返回 null */
+function parseApprovalSummary(value: unknown): KernelApprovalSummary | null {
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+  const approvalId = asString(record?.approval_id)
+  if (!record || !approvalId) return null
+  return {
+    approval_id: approvalId,
+    status: asString(record.status) ?? 'pending',
+    call_id: asString(record.call_id),
+    target_summary: asString(record.target_summary) ?? '',
+    parameter_summary: asString(record.parameter_summary) ?? '',
+    scope_summary: asString(record.scope_summary) ?? '',
+    expires_at: asString(record.expires_at),
+    decided_at: asString(record.decided_at),
+  }
 }
 
 /**
@@ -76,6 +97,8 @@ export function reduceKernelRunEvent(
           status: asString(data.status) ?? 'pending',
           outcome: asString(data.outcome),
           capability_key: asString(data.capability_key) ?? 'unknown',
+          confirmation: parseOntologyConfirmation(data.confirmation),
+          manual_attention: data.manual_attention === true,
         }
         next = { ...run, calls: replaceById(run.calls, call, 'call_id') }
       }
@@ -85,7 +108,12 @@ export function reduceKernelRunEvent(
       const callId = asString(data.call_id)
       if (callId) {
         const current = run.calls.find(item => item.call_id === callId)
-        if (current) next = { ...run, calls: replaceById(run.calls, { ...current, status: asString(data.status) ?? current.status }, 'call_id') }
+        if (current) next = { ...run, calls: replaceById(run.calls, {
+          ...current,
+          status: asString(data.status) ?? current.status,
+          confirmation: parseOntologyConfirmation(data.confirmation) ?? current.confirmation ?? null,
+          manual_attention: typeof data.manual_attention === 'boolean' ? data.manual_attention : current.manual_attention,
+        }, 'call_id') }
       }
       break
     }
@@ -94,8 +122,21 @@ export function reduceKernelRunEvent(
       if (callId) {
         const current = run.calls.find(item => item.call_id === callId)
         const value: KernelRunCallSummary = current
-          ? { ...current, status: asString(data.status) ?? current.status, outcome: asString(data.outcome) }
-          : { call_id: callId, status: asString(data.status) ?? 'unknown', outcome: asString(data.outcome), capability_key: asString(data.capability_key) ?? 'unknown' }
+          ? {
+            ...current,
+            status: asString(data.status) ?? current.status,
+            outcome: asString(data.outcome) ?? current.outcome,
+            confirmation: parseOntologyConfirmation(data.confirmation) ?? current.confirmation ?? null,
+            manual_attention: typeof data.manual_attention === 'boolean' ? data.manual_attention : current.manual_attention,
+          }
+          : {
+            call_id: callId,
+            status: asString(data.status) ?? 'unknown',
+            outcome: asString(data.outcome),
+            capability_key: asString(data.capability_key) ?? 'unknown',
+            confirmation: parseOntologyConfirmation(data.confirmation),
+            manual_attention: data.manual_attention === true,
+          }
         next = { ...run, calls: replaceById(run.calls, value, 'call_id') }
       }
       break
@@ -109,6 +150,7 @@ export function reduceKernelRunEvent(
           question_id: asString(data.question_id),
           approval_id: asString(data.approval_id),
           expires_at: asString(data.expires_at),
+          approval: parseApprovalSummary(data.approval),
         }
         next = { ...run, current_inbox: replaceById(run.current_inbox, item, 'inbox_id') }
       }
@@ -123,6 +165,7 @@ export function reduceKernelRunEvent(
           question_id: null,
           approval_id: approvalId,
           expires_at: asString(data.expires_at),
+          approval: parseApprovalSummary(data.approval),
         }
         next = { ...run, current_inbox: replaceById(run.current_inbox, item, 'approval_id') }
       }

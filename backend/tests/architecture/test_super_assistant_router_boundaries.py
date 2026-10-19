@@ -798,11 +798,6 @@ def test_super_assistant_router_and_services_stay_bounded():
         # 会话审计导出 export_conversation（完整审计 JSON，不截断消息）→ 437
         "conversation_service.py": 460,
         "skill_service.py": 380,
-        # MCP lifecycle/revision fencing and probe diagnostics now live in
-        # this domain service; keep the guard above the current bounded size.
-        # 商用线合并：删除 server 时撤销 CapabilityRevision 授权位 +
-        # 级联清理自研 MCP 开发项目（两条清理路径叠加）→ 390 → 400
-        # 平台内置 API Hub MCP 与 MinIO 共用 _install_builtin_mcp
         "mcp_server_service.py": 480,
     }
     for filename, maximum in limits.items():
@@ -892,8 +887,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 输入框快捷内容（quick_inputs.py 子路由）新增 /quick-inputs 的
     # list/create、/quick-inputs/{entry_id} 的 patch/delete、
     # /quick-inputs/reorder 的 put 共 5 个操作（3 条路径）。
-    assert len(paths) == 111
-    assert sum(len(item) for item in paths.values()) == 144
+    # YIYA-36 direct 确认卡恢复新增 /conversations/{id}/pending-confirmation
+    # 的 GET 共 1 个操作（1 条路径，tools.py 子路由）。
+    assert len(paths) == 112
+    assert sum(len(item) for item in paths.values()) == 145
     assert hashlib.sha256(payload).hexdigest() == (
-        "328d138b0ea097e35e16746de0d068b12c61f457d84288953be56b8b328ec695"
+        "e4859b6f84a52e7d3b361607e6f55f5eec56b5813a81a24d0a787694baf2399c"
     )

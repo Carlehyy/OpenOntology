@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/select'
 import { toast } from 'sonner'
 import { pickInitialConversationId } from '@/components/assistant-widget/logic'
+import { parsePendingConfirmation } from '@/components/ontologyConfirmationModel'
 import { hasMenuAccess } from '@/config/navigation'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
@@ -142,6 +143,8 @@ export default function SuperAssistantPage() {
   const [streamingIds, setStreamingIds] = useState<ReadonlySet<string>>(new Set())
   const [stopping, setStopping] = useState(false)
   const [pendingByConv, setPendingByConv] = useState<Record<string, PendingConfirmation>>({})
+  // 本端已提交决定的 toolRun：防止恢复 GET 的迟到响应把用户刚拒绝/批准的卡复活
+  const decidedToolRunsRef = useRef(new Set<string>())
   // 审批请求进行中的动作：仅被点击的按钮转圈，两个按钮在请求期间都禁用防重复提交
   const [pendingDecision, setPendingDecision] = useState<'approve' | 'deny' | null>(null)
   const [queuedByConv, setQueuedByConv] = useState<Record<string, string[]>>({})
@@ -312,6 +315,47 @@ export default function SuperAssistantPage() {
     return () => { alive = false }
   }, [selectedId])
 
+  /** direct 待确认卡的服务端对齐：reload 恢复 + 挂卡期间随轮询同步（跨端决定/TTL 结案）。
+   *  服务端返回是权威：null/已决定过的 run → 撤卡；否则以同形载荷（含 ontologyConfirmation）刷新。 */
+  const syncPendingConfirmation = useCallback(async (conversationId: string) => {
+    const pending = await superAssistantApi.pendingConfirmation(conversationId)
+    if (selectedIdRef.current !== conversationId) return
+    const serverPending = pending && pending.toolRunId && !decidedToolRunsRef.current.has(pending.toolRunId)
+      ? parsePendingConfirmation(pending)
+      : null
+    setPendingByConv(current => {
+      const existing = current[conversationId]
+      if (!serverPending) {
+        if (!existing) return current
+        const next = { ...current }
+        delete next[conversationId]
+        return next
+      }
+      if (existing && existing.toolRunId === serverPending.toolRunId
+        && (existing.ontologyConfirmation?.state ?? null) === (serverPending.ontologyConfirmation?.state ?? null)) return current
+      return { ...current, [conversationId]: serverPending }
+    })
+  }, [])
+
+  // 切换/进入会话即恢复服务端待确认卡：刷新或跨端进入时确认卡不丢
+  useEffect(() => {
+    const conversationId = selectedId
+    if (!conversationId) return
+    let alive = true
+    superAssistantApi.pendingConfirmation(conversationId)
+      .then(pending => {
+        if (!alive || !pending?.toolRunId || decidedToolRunsRef.current.has(pending.toolRunId)) return
+        if (selectedIdRef.current !== conversationId) return
+        setPendingByConv(current => ({
+          ...current,
+          // 本地流式事件已给出同会话待确认时以服务端权威对象为准（含持久 display）
+          [conversationId]: parsePendingConfirmation(pending),
+        }))
+      })
+      .catch(() => { /* 恢复失败静默：流式事件与轮询会再给机会 */ })
+    return () => { alive = false }
+  }, [selectedId])
+
   // 多端完成级同步：周期轮询会话列表与选中会话的消息。对端新建会话、改标题、
   // 发送的消息、生成中的 streaming 占位与完成后的全文都经此对齐到本端；
   // 本页隐藏时暂停，回到前台立即补一次。会话列表同步还承担深链解析职责：
@@ -335,10 +379,14 @@ export default function SuperAssistantPage() {
       if (!merged) return
       if (merged.boundMessageId && buffer) buffer.messageId = merged.boundMessageId
       setMessages(current => sameMessageList(current, merged.messages) ? current : merged.messages)
+      // 对端新建的待确认卡也需恢复；对端已决定或过期时撤卡。
+      if (conversationId) {
+        try { await syncPendingConfirmation(conversationId) } catch { /* 静默：下个周期自愈 */ }
+      }
     } catch { /* 静默：网络抖动由下个周期自愈 */ } finally {
       syncingRef.current = false
     }
-  }, [])
+  }, [syncPendingConfirmation])
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void syncTick()
@@ -785,16 +833,12 @@ export default function SuperAssistantPage() {
         } else if (event === 'tool_confirmation_required') {
           setPendingByConv(current => ({
             ...current,
-            [conversationId]: {
-              toolRunId: data.toolRunId,
-              toolName: data.toolName,
-              serverName: data.serverName,
-              arguments: data.arguments || {},
-            },
+            [conversationId]: parsePendingConfirmation(data),
           }))
           buffer.steps = patchToolStep(buffer.steps, { toolRunId: data.toolRunId, status: 'awaiting_confirmation' })
           applyBuffer()
         } else if (event === 'tool_result') {
+          if (data.toolRunId && typeof data.toolRunId === 'string') decidedToolRunsRef.current.add(data.toolRunId)
           setPendingByConv(current => {
             if (current[conversationId]?.toolRunId !== data.toolRunId) return current
             const next = { ...current }
@@ -911,6 +955,8 @@ export default function SuperAssistantPage() {
     setPendingDecision(decision)
     try {
       await superAssistantApi.decideToolRun(pending.toolRunId, decision)
+      // 决定已提交：登记 run，撤卡后不再被恢复 GET/轮询的迟到响应复活
+      decidedToolRunsRef.current.add(pending.toolRunId)
       setPendingByConv(current => {
         if (current[selectedId]?.toolRunId !== pending.toolRunId) return current
         const next = { ...current }

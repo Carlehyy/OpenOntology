@@ -234,9 +234,11 @@ def list_messages(
     )
     # 读取兜底：进程死亡遗留的死流行在此回收，前端不再渲染永久"正在思考"
     _reap_stale_streaming(db, item.id)
-    return db.query(SuperAssistantMessage).filter(
-        SuperAssistantMessage.conversation_id == item.id,
-    ).order_by(SuperAssistantMessage.created_at.asc()).all()
+    from app.super_assistant.ontology_tools import refresh_action_steps
+    messages = db.query(SuperAssistantMessage).filter_by(
+        conversation_id=item.id).order_by(SuperAssistantMessage.created_at.asc()).all()
+    refresh_action_steps(db, current_user.id, item.id, messages)
+    return messages
 
 
 def export_conversation(

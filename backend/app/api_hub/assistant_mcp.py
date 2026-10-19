@@ -10,7 +10,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode
 
 from fastapi import HTTPException
@@ -345,17 +345,32 @@ def execute_tool(
     name: str,
     arguments: dict[str, Any] | None,
     conversation_id: str | None = None,
+    target_url_guard: Callable[[str], bool] | None = None,
 ) -> str:
+    """执行一个接口代理 MCP 工具。
+
+    ``target_url_guard`` 是受限调用方（超级助手通道）传入的目标来源闸：
+    命中返回 True 的接口 URL（指向平台自身管理来源、或桥接到未受约束
+    MCP server）拒绝调用/保存。用户直接使用接口代理时不传，行为不变。
+    """
     if not user_has_menu_access(db_session, user, MENU_KEY):
         raise ApiHubMcpError("当前用户没有「接口代理 → 接口管理」权限")
     args = dict(arguments or {})
+
+    def _guard(url: str) -> None:
+        if target_url_guard is not None and target_url_guard(str(url or "")):
+            raise ApiHubMcpError(
+                "该接口目标属于平台受限来源（平台管理面或未受约束的 MCP "
+                "桥接），当前通道不允许调用或保存")
+
     handlers = {
         "list_interfaces": lambda: _list_interfaces(user, args),
         "get_interface": lambda: _get_interface(user, args),
-        "create_interface": lambda: _create_interface(user, args),
-        "update_interface": lambda: _update_interface(user, args),
+        "create_interface": lambda: _create_interface(user, args, _guard),
+        "update_interface": lambda: _update_interface(user, args, _guard),
         "delete_interface": lambda: _delete_interface(user, args),
-        "call_interface": lambda: _call_interface(user, args, conversation_id),
+        "call_interface": lambda: _call_interface(
+            user, args, conversation_id, _guard, target_url_guard),
         "list_groups": lambda: _list_groups(user),
         "rename_group": lambda: _rename_group(user, args),
         "delete_group": lambda: _delete_group(user, args),
@@ -594,7 +609,9 @@ def _get_interface(user: User, args: dict[str, Any]) -> dict:
     return {"interface": _view(_load_owned(_int_arg(args, "interface_id"), user), detail=True)}
 
 
-def _create_interface(user: User, args: dict[str, Any]) -> dict:
+def _create_interface(user: User, args: dict[str, Any], guard=None) -> dict:
+    if guard is not None:
+        guard(str(args.get("url") or ""))
     body = InterfaceIn(
         name=str(args.get("name") or ""),
         url=str(args.get("url") or ""),
@@ -618,7 +635,10 @@ def _create_interface(user: User, args: dict[str, Any]) -> dict:
     }
 
 
-def _update_interface(user: User, args: dict[str, Any]) -> dict:
+def _update_interface(user: User, args: dict[str, Any], guard=None) -> dict:
+    changes = args.get("changes")
+    if guard is not None and isinstance(changes, dict) and changes.get("url") is not None:
+        guard(str(changes.get("url") or ""))
     iid = _int_arg(args, "interface_id")
     expected = _int_arg(args, "expected_revision")
     changes = args.get("changes")
@@ -692,15 +712,19 @@ def _call_body_kwargs(interface: dict, body: Any) -> dict[str, Any]:
     return {"body": str(body)}
 
 
-def _call_interface(user: User, args: dict[str, Any], conversation_id: str | None) -> dict:
+def _call_interface(user: User, args: dict[str, Any], conversation_id: str | None,
+                    guard=None, target_url_guard=None) -> dict:
     iid = _int_arg(args, "interface_id")
     interface = _load_owned(iid, user)
+    if guard is not None:
+        guard(str(interface.get("url") or ""))
     path_pairs = _pairs(args.get("path"), field="path")
     query_pairs = _pairs(args.get("query"), field="query")
     header_pairs = _pairs(args.get("headers"), field="headers")
     kwargs: dict[str, Any] = {
         "source": "super_assistant",
         "actor": user,
+        "target_url_guard": target_url_guard,
         "path_params": [(item["key"], item["value"]) for item in path_pairs] or None,
         "query_params": [(item["key"], item["value"]) for item in query_pairs] or None,
         "headers": [(item["key"], item["value"]) for item in header_pairs] or None,

@@ -380,6 +380,22 @@ def decide(db: Session, user, ontology_id: str, cid: str, decision: str,
            session_id: str) -> M.ActionConfirmation:
     confirmation = get_status(db, user, ontology_id, cid, session_kind,
                               session_id)
+    # 并发决策串行化（PG 真并发缺陷）：approve 与 deny 不得同时基于同一
+    # prepared 快照提交 — 否则 deny 可覆盖已批准的 dispatch_queued 而在途
+    # operation 仍然存在。get_status 是普通读；这里对确认行取 FOR UPDATE
+    # 并重读最新已提交状态（populate_existing 绕过会话缓存），同
+    # decision_id 的重放因此看到一致结果。SQLite 单写者语义下为 no-op。
+    confirmation = (db.query(M.ActionConfirmation)
+                    .filter(M.ActionConfirmation.id == cid)
+                    .with_for_update()
+                    .populate_existing()
+                    .first())
+    if (confirmation is None
+            or confirmation.actor_user_id != str(user.id)
+            or confirmation.session_kind != session_kind
+            or confirmation.session_id != session_id):
+        raise ConfirmationError(404, "confirmation_not_found",
+                                "确认请求不存在")
     if confirmation.state == "expired":
         raise ConfirmationError(410, "confirmation_expired",
                                 "确认请求已过期，需重新准备并再次确认",
@@ -775,6 +791,61 @@ def _engine_log_by_key(db: Session, confirmation):
     ).first()
 
 
+def _adjudicate_attempts(db: Session, operation, attempts) -> dict:
+    """外部 attempt 未结案集合（started/unknown）— 失败/恢复裁决的输入。"""
+    return {a.effect_ordinal: a.state for a in attempts}
+
+
+def _close_from_key_log(db: Session, operation, confirmation, key_log,
+                        attempts=None, error_message: str = "engine_failed") -> bool:
+    """同 key 引擎日志的保守结案（本地日志 ≠ 外部结果证据）。
+
+    success：存在未结案（started/unknown）attempt → unknown（guard 保留，
+    本地已提交效果记入对账证据，不宣称未发生也不重发）；否则 succeeded。
+    pending/executing：进入 pending_approval，预登记 attempt 因引擎在效果
+    阶段前返回而可证明未发送 → proven_not_applied。
+    failed：不在此结案（返回 False），由调用方按外部证据走失败裁决。
+    """
+    if key_log is None:
+        return False
+    if attempts is None:
+        attempts = db.query(M.ActionExternalAttempt).filter(
+            M.ActionExternalAttempt.operation_id == operation.id).all()
+    unresolved = [a for a in attempts if a.state in ("started", "unknown")]
+    key_status = str(key_log.status or "").lower()
+    if key_status == "success":
+        if unresolved:
+            operation.state = "unknown"
+            operation.execution_log_id = key_log.id
+            operation.last_error = "external_attempts_unresolved"
+            operation.reconcile_evidence = {
+                "reason": "local_success_with_unresolved_external_attempt",
+                "localSuccessLogId": key_log.id,
+                "attemptStates": _adjudicate_attempts(db, operation, attempts),
+            }
+            confirmation.state = "unknown"
+            confirmation.failure_code = "execution_result_unknown"
+        else:
+            operation.state = "succeeded"
+            operation.execution_log_id = key_log.id
+            confirmation.state = "succeeded"
+            _stamp_log_lineage(db, operation, key_log.id)
+        return True
+    if key_status in ("pending", "executing"):
+        operation.state = "pending_approval"
+        operation.approval_log_id = key_log.id
+        confirmation.state = "pending_approval"
+        _stamp_log_lineage(db, operation, key_log.id)
+        for attempt in attempts:
+            if attempt.state == "started":
+                attempt.state = "proven_not_applied"
+                attempt.finished_at = _now()
+                attempt.evidence_ref = (
+                    "engine_returned_pending_before_effects")
+        return True
+    return False
+
+
 def _apply_failure_with_external_evidence(db, operation, confirmation,
                                            result, status: str,
                                            attempts=None) -> None:
@@ -805,43 +876,10 @@ def _apply_failure_with_external_evidence(db, operation, confirmation,
 
     # 崩溃窗口恢复：引擎可能在响应丢失前已提交 success/pending 日志；
     # 但本地日志不是外部结果的证据 — 未结案 attempt 仍然优先。
-    key_log = _engine_log_by_key(db, confirmation)
-    if key_log is not None:
-        key_status = str(key_log.status or "").lower()
-        if key_status == "success":
-            if unresolved:
-                operation.state = "unknown"
-                operation.execution_log_id = key_log.id
-                operation.last_error = "external_attempts_unresolved"
-                operation.reconcile_evidence = {
-                    "reason":
-                        "local_success_with_unresolved_external_attempt",
-                    "localSuccessLogId": key_log.id,
-                    "attemptStates": {
-                        a.effect_ordinal: a.state for a in attempts},
-                }
-                confirmation.state = "unknown"
-                confirmation.failure_code = "execution_result_unknown"
-            else:
-                operation.state = "succeeded"
-                operation.execution_log_id = key_log.id
-                confirmation.state = "succeeded"
-                _stamp_log_lineage(db, operation, key_log.id)
-            return
-        if key_status in ("pending", "executing"):
-            operation.state = "pending_approval"
-            operation.approval_log_id = key_log.id
-            confirmation.state = "pending_approval"
-            _stamp_log_lineage(db, operation, key_log.id)
-            for attempt in attempts:
-                if attempt.state == "started":
-                    attempt.state = "proven_not_applied"
-                    attempt.finished_at = _now()
-                    attempt.evidence_ref = (
-                        "engine_returned_pending_before_effects")
-            return
-
-    entered = operation.engine_entered_at is not None
+    if _close_from_key_log(db, operation, confirmation,
+                           _engine_log_by_key(db, confirmation),
+                           attempts, error_message):
+        return
 
     if uncertain or (entered and unresolved):
         # 外部效果不可证未发送/未生效：unknown，guard 不释放
@@ -849,7 +887,7 @@ def _apply_failure_with_external_evidence(db, operation, confirmation,
         operation.last_error = error_message
         operation.reconcile_evidence = {
             "reason": "unresolved_external_attempt_or_uncertain_delivery",
-            "attemptStates": {a.effect_ordinal: a.state for a in attempts},
+            "attemptStates": _adjudicate_attempts(db, operation, attempts),
         }
         confirmation.state = "unknown"
         confirmation.failure_code = "execution_result_unknown"
@@ -962,6 +1000,19 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
                         attempt.state = "acknowledged"
                         attempt.finished_at = _now()
             else:
+                # 审批技术执行失败：其外部效果若存在 delivery_uncertain，
+                # 同样不能证明未执行 — unknown，guard 保留（与执行路径一致）。
+                if uncertain:
+                    operation.state = "unknown"
+                    operation.execution_log_id = related.id
+                    operation.last_error = related.error_message
+                    operation.reconcile_evidence = {
+                        "reason": "approval_execution_uncertain_delivery",
+                        "localFailureLogId": related.id,
+                    }
+                    confirmation.state = "unknown"
+                    confirmation.failure_code = "execution_result_unknown"
+                    return
                 operation.state = "failed_not_executed"
                 operation.execution_log_id = related.id
                 operation.last_error = related.error_message
@@ -982,33 +1033,35 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
 
 
 def _reconcile_executing(db, operation, confirmation) -> None:
+    """lease 过期恢复：本地引擎日志不是外部结果证据，结案必须经外部
+    attempt 裁决 — 与执行路径（_apply_engine_result / 失败裁决器）同一
+    语义，防止 worker 崩溃/失锁后的 success/failed 日志被直接采信而
+    误报已执行/未执行并释放 guard。"""
     from app.ontologies.formal_modeling.models import ActionExecutionLog
 
     lease = _as_utc(operation.lease_expires_at)
     if lease is not None and lease >= _now():
         return
     key = initial_engine_key(confirmation.id)
-    log = db.query(ActionExecutionLog).filter(
+    key_log = db.query(ActionExecutionLog).filter(
         ActionExecutionLog.ontology_id == confirmation.ontology_id,
         ActionExecutionLog.idempotency_key == key).first()
-    if log is not None:
-        status = str(log.status or "").lower()
-        if status == "success":
-            operation.state = "succeeded"
-            operation.execution_log_id = log.id
-            confirmation.state = "succeeded"
-            return
-        if status == "pending":
-            operation.state = "pending_approval"
-            operation.approval_log_id = log.id
-            confirmation.state = "pending_approval"
-            return
-        if status == "failed":
-            operation.state = "failed_not_executed"
-            operation.last_error = log.error_message
-            confirmation.state = "failed_not_executed"
-            confirmation.failure_code = "engine_failed"
-            return
+    attempts = db.query(M.ActionExternalAttempt).filter(
+        M.ActionExternalAttempt.operation_id == operation.id).all()
+    # success/pending 日志：与执行路径相同的保守裁决（未结案 attempt
+    # 存在 → unknown，guard 保留；pending 才允许 proven_not_applied）。
+    if _close_from_key_log(db, operation, confirmation, key_log, attempts):
+        return
+    if key_log is not None and str(key_log.status or "").lower() == "failed":
+        # 本地 failed 日志同样不能单独证明未执行：交由失败分支的外部
+        # 证据裁决（uncertain/unresolved → unknown；acknowledged →
+        # compensation_required；无可证外部效果才 failed_not_executed）。
+        _apply_failure_with_external_evidence(
+            db, operation, confirmation,
+            {"errorMessage": key_log.error_message,
+             "effects": key_log.effects or []},
+            "failed", attempts)
+        return
     if operation.engine_entered_at is None:
         # durable engine_entered 为空且 lease 已过：可安全重新派发同一 operation
         operation.state = "dispatch_queued"
@@ -1020,6 +1073,7 @@ def _reconcile_executing(db, operation, confirmation) -> None:
     operation.reconcile_evidence = {
         "reason": "engine_entered_without_terminal_evidence",
         "checkedLogKey": key,
+        "attemptStates": _adjudicate_attempts(db, operation, attempts),
     }
     confirmation.state = "unknown"
     confirmation.failure_code = "execution_result_unknown"
