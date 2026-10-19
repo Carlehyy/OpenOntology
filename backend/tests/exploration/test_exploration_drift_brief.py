@@ -69,6 +69,8 @@ def _chat_once(client, auth_headers, session_id: str, monkeypatch) -> str:
         captured["system"] = messages[0]["content"]
         return {"content": "收到，继续澄清。", "tool_calls": [], "usage": None}
 
+    monkeypatch.setattr(llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(llm_bridge, "chat", fake_chat)
     r = client.post(f"{BASE}/sessions/{session_id}/chat", headers=auth_headers,
                     json={"message": "继续澄清口径", "stream": False})

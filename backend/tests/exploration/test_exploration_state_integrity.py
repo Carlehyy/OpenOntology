@@ -515,6 +515,8 @@ def test_next_llm_step_sees_latest_version_readiness_and_canonical_element(db, m
         return {"content": "已记录。", "tool_calls": [], "usage": None}
 
     monkeypatch.setattr(OR.llm_bridge, "chat", fake_chat)
+    monkeypatch.setattr(OR.llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     events = list(OR.run_exploration_turn(
         db, session.id, user=object(), message="建立订单对象"))
     assert calls["count"] == 2

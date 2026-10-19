@@ -163,6 +163,7 @@ def test_download_cancel(
         client = _make_client(role="admin")
         assert client.post(f"{_PREFIX}/voice/model/download").status_code == 202
         assert client.post(f"{_PREFIX}/voice/model/download/cancel").json()["cancelled"] is True
+        block_event.set()
         thread = voice_model_download._runtime.thread
         assert thread is not None
         thread.join(timeout=5)

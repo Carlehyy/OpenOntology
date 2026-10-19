@@ -139,6 +139,8 @@ def _mounted_tool_names(db, monkeypatch, session_row):
         seen.append([tool["name"] for tool in tools])
         return {"content": "好", "tool_calls": [], "usage": None}
 
+    monkeypatch.setattr(OR.llm_bridge, "chat_stream",
+                        lambda *_a, **_kw: iter([{"unsupported_stream": True}]))
     monkeypatch.setattr(OR.llm_bridge, "chat", fake_chat)
     list(OR.run_exploration_turn(db, session_row.id, user=object(), message="你好"))
     return seen[-1]
