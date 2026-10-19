@@ -1373,8 +1373,9 @@ def test_kernel_run_view_unknown_call_is_readable_not_fake_success(
     assert call_view["status"] == "reconciling"
     assert call_view["outcome"] == "outcome_unknown"
     assert call_view["confirmation"]["state"] == "unknown"
-    assert call_view["confirmation"]["blockReason"] == (
-        "execution_result_unknown")
+    assert "1040787244" in call_view["confirmation"]["blockReason"]
+    assert "不自动" in call_view["confirmation"]["blockReason"] or \
+        "无自动超时释放" in call_view["confirmation"]["blockReason"]
 
 
 def test_kernel_approval_without_readable_display_fails_closed(

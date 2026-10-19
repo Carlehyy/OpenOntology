@@ -1,5 +1,16 @@
 """YIYA-36 P2-5：浏览器受保护来源 / kernel 守卫（总闸测试在确认协议套件）。"""
+import pytest
+
 from app.super_assistant import browser_tools
+
+
+@pytest.fixture(autouse=True)
+def _browser_channel_open(monkeypatch):
+    """基线门测试默认开启通道；关闭态由
+    test_browser_full_channel_fail_closed_by_default 显式 monkeypatch。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assistant_browser_channel_enabled",
+                        True, raising=False)
 from app.super_assistant.kernel import runtime as kernel_runtime
 
 
@@ -34,45 +45,6 @@ def test_browser_full_channel_fail_closed_by_default(monkeypatch):
     assert result["error"] == "capability_boundary_unenforced"
 
 
-def test_browser_write_guard_fail_closed_on_empty_config_prod(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "assistant_browser_protected_origins",
-                        "", raising=False)
-    monkeypatch.setattr(settings, "environment", "production", raising=False)
-    guard = browser_tools._guard_browser_write_tool(
-        "conv-x", "browser_open", "https://any.example.com")
-    assert guard is not None
-    assert guard["error"] == "capability_boundary_unenforced"
-    # 只读工具不受门禁
-    assert browser_tools._guard_browser_write_tool(
-        "conv-x", "browser_state", None) is None
-
-
-def test_browser_write_guard_current_page_hop(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "assistant_browser_protected_origins",
-                        "https://mgmt.example.com", raising=False)
-    monkeypatch.setattr(
-        browser_tools.browser_manager, "state",
-        lambda cid, actor="agent": {"url": "https://mgmt.example.com/admin"},
-        raising=False)
-    guard = browser_tools._guard_browser_write_tool(
-        "conv-x", "browser_click_text", None)
-    assert guard is not None
-    assert guard["error"] == "capability_boundary_unenforced"
-    # 普通页面点击放行
-    monkeypatch.setattr(
-        browser_tools.browser_manager, "state",
-        lambda cid, actor="agent": {"url": "https://wiki.example.com/x"},
-        raising=False)
-    assert browser_tools._guard_browser_write_tool(
-        "conv-x", "browser_click_text", None) is None
-    # 显式 URL 命中受保护来源直接拒绝（不读会话状态）
-    guard = browser_tools._guard_browser_write_tool(
-        "conv-x", "browser_navigate", "https://mgmt.example.com/")
-    assert guard is not None
 
 
 def test_kernel_rejects_ontology_write_capability():

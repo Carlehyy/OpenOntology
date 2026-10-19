@@ -219,6 +219,7 @@ def browser_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_session(
         conversation_id,
         db,
@@ -236,6 +237,7 @@ def browser_captures(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_captures(
         conversation_id,
         keyword,
@@ -257,6 +259,7 @@ def browser_capture_download(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_capture_download(
         conversation_id,
         capture_id,
@@ -273,6 +276,7 @@ def browser_live_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_live_ticket(
         conversation_id,
         db,
@@ -287,6 +291,7 @@ def attach_browser_live_http(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.attach_browser_live_http(
         conversation_id,
         db,
@@ -306,6 +311,7 @@ def browser_live_http_frame(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_live_http_frame(
         conversation_id,
         body,
