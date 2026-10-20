@@ -1713,3 +1713,105 @@ def test_actor_user_row_missing_blocks_engine_entry(
         operation_id=operation_view.id).all()
     assert attempts
     assert all(a.state in ("started", "unknown") for a in attempts)
+
+
+def test_sse_reprepare_same_session_payload_replays_single_confirmation(
+        client, auth_headers, modeled, conversation, db):
+    """R3：同会话同动作/目标/载荷的再次 prepare（不同回合、不同最新
+    用户消息）重放唯一确认 — 不派生第二张 prepared 卡。
+
+    血脉复现 YIYA-41 journey 观察：回合1 prepare（root=用户消息1）→
+    批准执行 succeeded；回合2 新用户消息后模型重发同载荷 prepare
+    （root=用户消息2）→ 应命中稳定意图身份重放原 cid。
+    """
+    from app.ontologies.agent_runtime.models import AgentMessage
+    from app.models.ontology_formal import ObjectInstance
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+
+    # 回合 1：super_assistant 来源 prepare（root=消息1）— 与 SSE 路径同
+    # session_kind，稳定意图作用域才会命中
+    from app.ontologies.agent_confirmation.schemas import (
+        PrepareProposalRequest as _PPR,
+    )
+    _conf1, _replayed1 = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        _PPR(session_kind="super_assistant",
+             sessionId=conversation["conv"].id,
+             clientSubmissionId="prop-k1", actionId="act-1",
+             releaseId=modeled["releaseId"],
+             targetInstanceId="inst-o1",
+             parameters={"note": "k", "level": 1}),
+        origin="super_assistant", source_call_id="prop-k1",
+        root_intent_id="msg-u1")
+    cid1 = _conf1.id
+    payload1 = _conf1.payload_hash
+    confirmation_svc.decide(db, _current_user(db), modeled["oid"], cid1,
+                            "approve", "d-r3", payload1,
+                            "super_assistant", conversation["conv"].id)
+    executed = confirmation_svc.execute(
+        db, _current_user(db), modeled["oid"], cid1, "super_assistant",
+        conversation["conv"].id)
+    assert executed.state == "succeeded"
+
+    # 回合 2：新用户消息（root intent 改变），模型重发同载荷 prepare
+    db.add(AgentMessage(id="msg-u2", conversation_id=conversation["conv"].id,
+                        role="user", content="继续执行确认的操作"))
+    db.commit()
+    prepared2, _replayed = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        __import__("app.ontologies.agent_confirmation.schemas",
+                   fromlist=["PrepareProposalRequest"]).PrepareProposalRequest(
+            session_kind="super_assistant",
+            sessionId=conversation["conv"].id,
+            clientSubmissionId="round2-call",
+            actionId="act-1", releaseId=modeled["releaseId"],
+            targetInstanceId="inst-o1",
+            parameters={"note": "k", "level": 1}),
+        origin="super_assistant", source_call_id="round2-call",
+        root_intent_id="msg-u2")
+    db.expire_all()
+    assert prepared2.id == cid1          # 重放唯一确认
+    assert prepared2.state == "succeeded"  # 终态如实，不新建 prepared
+    # 会话内无第二张 prepared 卡（dup==0）
+    dup = db.query(CM.ActionConfirmation).filter(
+        CM.ActionConfirmation.ontology_id == modeled["oid"],
+        CM.ActionConfirmation.state == "prepared").count()
+    assert dup == 0
+    # 引擎日志仍恰一条（无第二次副作用）
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+    logs = db.query(ActionExecutionLog).filter(
+        ActionExecutionLog.ontology_id == modeled["oid"],
+        ActionExecutionLog.idempotency_key == f"proposal:{cid1}").all()
+    assert len(logs) == 1
+
+
+def test_sse_reprepare_different_payload_creates_new_confirmation(
+        client, auth_headers, modeled, conversation, db):
+    """R3 边界：不同载荷（新参数）→ 新确认合法建立（非全局合并）。"""
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+    from app.ontologies.agent_confirmation.schemas import (
+        PrepareProposalRequest,
+    )
+
+    cid1 = _prepare(client, auth_headers, modeled, conversation,
+                    clientSubmissionId="prop-k1", actionId="act-1",
+                    parameters={"note": "k", "level": 1}).json()[
+                        "data"]["confirmationId"]
+    prepared2, replayed = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        PrepareProposalRequest(
+            session_kind="super_assistant",
+            sessionId=conversation["conv"].id,
+            clientSubmissionId="round2-call",
+            actionId="act-1", releaseId=modeled["releaseId"],
+            targetInstanceId="inst-o1",
+            parameters={"note": "k", "level": 2}),          # 不同载荷
+        origin="super_assistant", source_call_id="round2-call",
+        root_intent_id="msg-u2")
+    assert prepared2.id != cid1
+    assert replayed is False
+
+
+def _current_user(db):
+    from app.models.user import User
+    return db.query(User).first()

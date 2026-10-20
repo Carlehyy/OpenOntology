@@ -255,6 +255,18 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
         "parameters": final_params,
         "requiresApproval": bool(action.requires_approval),
     }
+    # R3 稳定意图身份（会话作用域，仅 assistant 执行器路径）：模型在后续
+    # 回合对同会话同动作/目标/载荷重发 prepare 时，沿用引入该动作请求的
+    # 原意图（root_intent + action_request_slot）——重复 prepare 重放唯一
+    # 确认，不派生第二张 prepared 卡。比较用意图无关身份（action/release/
+    # target/最终参数/审批标志），非全局载荷合并；不同载荷/会话照常新建。
+    if origin == "super_assistant":
+        stable = _stable_session_intent(
+            db, user, body, action.id, context.release.id, final_params,
+            bool(action.requires_approval))
+        if stable is not None:
+            root_intent_id, action_request_slot = stable
+            payload["rootIntentId"] = root_intent_id
     payload_hash = _sha256(_canonical_json(payload))
     if len(_canonical_json(payload).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise ConfirmationError(422, "invalid_parameter",
@@ -560,7 +572,40 @@ def _guard_hash(confirmation: M.ActionConfirmation) -> str:
     }))
 
 
-# --------------------------------------------------------------- execute
+def _stable_session_intent(db: Session, user, body, action_id: str,
+                           release_id: str, final_params: dict,
+                           requires_approval: bool):
+    """同会话内同动作/目标/载荷的既有确认 → (root_intent, slot)。
+
+    比较身份是意图无关的（action/release/target/最终参数/审批标志），
+    因此后续回合（root_intent 已换）的同载荷重发也能命中。None = 无稳定
+    命中（照常按当前意图新建）。命中时调用方沿用原意图身份，使既有
+    UNIQUE(owner, session, root_intent, slot) 约束重放同一 cid。
+    """
+    rows = db.query(M.ActionConfirmation).filter(
+        M.ActionConfirmation.actor_user_id == str(user.id),
+        M.ActionConfirmation.session_kind == body.session_kind,
+        M.ActionConfirmation.session_id == body.session_id,
+        M.ActionConfirmation.action_id == action_id,
+        M.ActionConfirmation.target_instance_id == body.target_instance_id,
+    ).order_by(M.ActionConfirmation.created_at.desc()).limit(20).all()
+    identity = _sha256(_canonical_json({
+        "action": action_id, "release": release_id,
+        "target": body.target_instance_id,
+        "parameters": final_params,
+        "requiresApproval": requires_approval,
+    }))
+    for row in rows:
+        row_identity = _sha256(_canonical_json({
+            "action": row.action_id, "release": row.release_id,
+            "target": row.target_instance_id,
+            "parameters": row.final_parameters,
+            "requiresApproval": bool(row.requires_approval),
+        }))
+        if hmac.compare_digest(row_identity, identity):
+            return row.root_intent_id, row.action_request_slot
+    return None
+
 
 def _revalidate_confirmation_access(db: Session, user,
                                     confirmation: M.ActionConfirmation,
