@@ -190,21 +190,22 @@ backend 和 pipeline_executor 同时读取：
 |---|---:|---|
 | `AGENT_QUERY_STATEMENT_TIMEOUT_MS` | 3000 | 单条 SQL 的执行时限 |
 | `AGENT_QUERY_LOCK_TIMEOUT_MS` | 1000 | 等待数据库锁的时限 |
-| `AGENT_QUERY_WORK_MEM_MIB` | 4 | 单个排序或哈希操作的内存预算 |
-| `AGENT_QUERY_TEMP_FILE_LIMIT_MIB` | 32 | 查询临时文件上限 |
+| `AGENT_QUERY_WORK_MEM_MB` | 4 | 单个排序或哈希操作的内存预算 |
+| `AGENT_QUERY_TEMP_FILE_LIMIT_MB` | 32 | 查询临时文件上限 |
 
 超时和内存预算使用 `SET LOCAL`，事务结束后不污染连接池。`temp_file_limit`
 是 PostgreSQL 管理员参数：应用以普通数据库角色运行时，数据库管理员须先执行
 `ALTER ROLE <app_role> SET temp_file_limit = '32MB'`，然后重建应用连接池。
-自定义上限时应与 `AGENT_QUERY_TEMP_FILE_LIMIT_MIB` 一致或更严格。应用会检查
+自定义上限时应与 `AGENT_QUERY_TEMP_FILE_LIMIT_MB` 一致或更严格。应用会检查
 当前连接的有效上限；未配置、无限制或宽于所需预算时，查询返回
 `503 query_budget_unavailable`，不会为可用性取消预算，也不需要给应用超级用户
 权限。源行数、关联行数和结果大小上限仍由查询服务独立强制执行。
 
 `ASSISTANT_ACTION_EXECUTION_ENABLED` 是助手业务动作写入总闸。直接启动生产
-应用且未配置时默认关闭；生产 Compose 显式默认开启，以交付确认后的业务
-动作执行能力。部署方可在服务器 `.env` 设置为 `false`，重建 backend 和
-pipeline_executor 后停止新的批准和 worker 领取。已批准但未领取的动作保留在
+应用且未配置时默认关闭；生产 Compose 亦默认关闭（`false`），仅在部署健康
+检查通过且获得批准后由部署方在服务器 `.env` 显式设置为 `true`，重建
+backend 和 pipeline_executor 后开启。设置为 `false` 或保持默认即停止新的
+批准和 worker 领取。已批准但未领取的动作保留在
 `dispatch_queued`，重新开启后可继续领取；已经进入执行的外部请求不能通过
 关闭开关撤回。用户二次确认与动作自身的 `requiresApproval` 组织审批始终保留，
 开启总闸不会跳过它们。

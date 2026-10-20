@@ -912,7 +912,7 @@ def _run(report_path: Path) -> None:
             # ALTER ROLE 设帽 + 新连接 → 可用（SUSET 帽由角色级设置生效）。
             from app.config import settings as app_settings
 
-            cap_mib = app_settings.agent_query_temp_file_limit_mib
+            cap_mb = app_settings.agent_query_temp_file_limit_mb
             low_priv_role = f"oq_e2e_r{uuid.uuid4().hex[:8]}"
             low_priv_password = secrets.token_urlsafe(24)
             sensitive_values.add(low_priv_password)
@@ -966,7 +966,7 @@ def _run(report_path: Path) -> None:
             with engine.begin() as conn:
                 conn.execute(text(
                     f'ALTER ROLE "{low_priv_role}" SET temp_file_limit = '
-                    f"'{cap_mib * 32}MB'"))
+                    f"'{cap_mb * 32}MB'"))
             wide_engine = _role_engine()
             _expect_budget_unavailable(wide_engine,
                                        "low_privilege_wide_rejected")
@@ -975,7 +975,7 @@ def _run(report_path: Path) -> None:
             with engine.begin() as conn:
                 conn.execute(text(
                     f'ALTER ROLE "{low_priv_role}" SET temp_file_limit = '
-                    f"'{cap_mib}MB'"))
+                    f"'{cap_mb}MB'"))
             from sqlalchemy.orm import sessionmaker as role_sm
 
             ok_engine = _role_engine()
@@ -1005,6 +1005,14 @@ def _run(report_path: Path) -> None:
             report["low_privilege_role_verified"] = True
             report["cases"]["low_privilege_query"] = True
         report["durations_ms"]["budgets"] = round(
+            (time.perf_counter() - started) * 1000, 1)
+
+        # Z3：发布锁竞争（FOR SHARE vs FOR UPDATE）实跑
+        stage = "lock_contention"
+        report["stage"] = stage
+        started = time.perf_counter()
+        _verify_lock_contention(engine, schema, report)
+        report["durations_ms"]["lock_contention"] = round(
             (time.perf_counter() - started) * 1000, 1)
 
         # -------------------------------------------------------- metrics
@@ -1126,3 +1134,54 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _verify_lock_contention(engine, schema: str, report: dict) -> None:
+    """Z3：发布锁竞争 — 查询的项目 FOR SHARE 与外部 FOR UPDATE 冲突。
+
+    外部连接先取 project 行 FOR UPDATE（模拟 promote/rollback 写锁），
+    查询事务按 lock_timeout=1s 等待失败 → 可识别错误（不静默换版本）；
+    释放后查询可用。
+    """
+    import time as _time
+    from sqlalchemy import create_engine, text as _text
+
+    database_url = str(engine.url)
+    released = False
+    lock_conn = create_engine(database_url).connect()
+    try:
+        lock_conn.execute(_text("BEGIN"))
+        lock_conn.execute(_text(
+            f'SELECT id FROM "{schema}".ontology_projects '
+            "WHERE id = (SELECT min(id) FROM "
+            f'"{schema}".ontology_projects) FOR UPDATE'))
+        started = _time.perf_counter()
+        try:
+            probe = create_engine(database_url).connect()
+            try:
+                probe.execute(_text("BEGIN"))
+                probe.execute(_text(
+                    "SET LOCAL lock_timeout = '300ms'"))
+                probe.execute(_text(
+                    f'SELECT id FROM "{schema}".ontology_projects '
+                    "WHERE id = (SELECT min(id) FROM "
+                    f'"{schema}".ontology_projects) FOR SHARE'))
+                probe.execute(_text("ROLLBACK"))
+            finally:
+                probe.close()
+            report["cases"]["lock_contention"] = "unexpected_success"
+        except Exception as exc:  # noqa: BLE001 - 期望锁等待失败
+            report["cases"]["lock_contention"] = (
+                f"blocked:{type(exc).__name__}")
+            report["durations_ms"]["lock_wait"] = round(
+                (_time.perf_counter() - started) * 1000, 1)
+        finally:
+            lock_conn.execute(_text("ROLLBACK"))
+            released = True
+    finally:
+        if not released:
+            try:
+                lock_conn.execute(_text("ROLLBACK"))
+            except Exception:  # noqa: BLE001
+                pass
+        lock_conn.close()

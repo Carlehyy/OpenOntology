@@ -53,9 +53,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _assistant_write_gate_default(self):
         """YIYA-36 P2-5 总闸：未显式配置时生产默认关闭、其余环境开启。"""
+        # P2-C（产品裁决）：写总闸默认关闭 —— 非生产也不隐式开启，
+        # 仅显式 ASSISTANT_ACTION_EXECUTION_ENABLED=true（部署健康+批准后）
+        # 或测试内 monkeypatch 开启。
         if self.assistant_action_execution_enabled is None:
-            self.assistant_action_execution_enabled = (
-                self.environment != "production")
+            self.assistant_action_execution_enabled = False
         return self
 
     @field_validator("app_log_level", mode="before")

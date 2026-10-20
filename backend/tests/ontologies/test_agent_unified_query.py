@@ -3,6 +3,8 @@
 SQLite 保留契约语义（typed cast/三值逻辑/稳定分页）；锁/隔离/PG JSON cast
 由真实栈验收（YIYA-41）覆盖。
 """
+import json
+
 import pytest
 
 from app.ontologies.agent_query.service import QueryError
@@ -900,3 +902,90 @@ def test_pure_aggregation_without_group_columns(client, auth_headers,
     assert request.select == []
     assert request.aggregates[0].fn == "count"
     validate({"cursor": "snapshot-cursor-123456"}, schema)
+
+
+# ------------------------------------- Z1：合并冲突丢失的行为测试恢复
+
+
+def test_query_budget_units_pg_legal():
+    """R-1/Z1：预算语句使用 PG 合法单位（B/kB/MB/GB/TB，非 IEC MiB）。"""
+    import inspect
+    from app.ontologies.agent_query import service as query_service
+    source = inspect.getsource(
+        query_service.UnifiedQueryService._pin_transaction)
+    assert "MiB" not in source.replace("不接受 MiB 拼写", "")
+    assert "MB'" in source or 'MB"' in source
+
+
+def test_query_budget_error_no_internal_leak():
+    """R-2/Z1：预算失败响应不回灌 str(exc)/SQL 细节，分类入 extra。"""
+    from app.ontologies.agent_query import service as query_service
+
+    class _Orig:
+        pgcode = "42501"
+
+    class _StmtExc(Exception):
+        orig = _Orig()
+
+    class _Db:
+        def in_transaction(self):
+            return False
+
+        def execute(self, statement):
+            raise _StmtExc()
+
+        def rollback(self):
+            pass
+
+    svc = query_service.UnifiedQueryService.__new__(
+        query_service.UnifiedQueryService)
+    svc.db = _Db()
+    svc._pg = True
+    from app.ontologies.agent_query import schemas as _QS
+    svc.req = _QS.QueryRequest(
+        sources=[_QS.QuerySource(alias="a", ontology_id="x",
+                                 release_id="y", objectTypeId="z")],
+        select=[])
+    try:
+        svc._pin_transaction()
+        raise AssertionError("expected QueryError")
+    except query_service.QueryError as exc:
+        assert exc.code == "query_budget_unavailable"
+        assert exc.extra.get("errorClass") == "insufficient_privilege"
+        payload = json.dumps(exc.detail(), ensure_ascii=False)
+        assert "42501" not in payload
+        assert "permission denied" not in payload
+        assert "orig" not in payload
+
+
+def test_query_auth_hash_reflects_real_write_access(
+        client, auth_headers, orders_ontology, db, editor_user):
+    """裁决 1/Z1：auth 材料使用真实 RBAC 写权限（admin/editor-owner/
+    其他 editor/viewer 区分）— 权限收紧改变快照指纹。"""
+    from app.ontologies.agent_query.service import _ontology_write_access
+    from app.models.ontology import OntologyProject
+
+    orders = orders_ontology
+    project = db.query(OntologyProject).filter_by(
+        id=orders["ontologyId"]).one()
+
+    class _Admin:
+        id = "admin-user"
+        role = "admin"
+
+    class _EditorOwner:
+        id = str(project.created_by)
+        role = "editor"
+
+    class _EditorOther:
+        id = "someone-else"
+        role = "editor"
+
+    class _Viewer:
+        id = str(project.created_by)
+        role = "viewer"
+
+    assert _ontology_write_access(_Admin(), project) is True
+    assert _ontology_write_access(_EditorOwner(), project) is True
+    assert _ontology_write_access(_EditorOther(), project) is False
+    assert _ontology_write_access(_Viewer(), project) is False

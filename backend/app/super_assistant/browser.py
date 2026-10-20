@@ -203,6 +203,9 @@ def navigate_browser(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：assistant 浏览器通道闸（navigate/input/control 同口径）
+    _assistant_browser_channel_closed()
+
     return _browser_session_service.navigate_browser(
         conversation_id,
         body,
@@ -332,6 +335,9 @@ def browser_live_http_input(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：assistant 浏览器通道闸（navigate/input/control 同口径）
+    _assistant_browser_channel_closed()
+
     return _browser_session_service.browser_live_http_input(
         conversation_id,
         body,
@@ -351,6 +357,9 @@ def browser_live_http_control(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：assistant 浏览器通道闸（navigate/input/control 同口径）
+    _assistant_browser_channel_closed()
+
     return _browser_session_service.browser_live_http_control(
         conversation_id,
         body,
@@ -370,6 +379,18 @@ def release_browser_live_http(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：release 是唯一清场例外 —— 仅允许断开/释放（不导航、不输入、
+    # 不读凭据/页面状态）。通道关闭时存量会话/租约不得继续驱动。
+    from app.config import settings as _settings
+
+    if not getattr(_settings, "assistant_browser_channel_enabled", False):
+        return _browser_session_service.release_browser_live_http(
+            conversation_id, body, db, current_user,
+            require_conversation_fn=_require_conversation,
+            browser_error_fn=_browser_error,
+            teardown_only=True,
+        )
+
     return _browser_session_service.release_browser_live_http(
         conversation_id,
         body,

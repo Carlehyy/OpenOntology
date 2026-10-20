@@ -668,6 +668,8 @@ def run_operation_inline(operation_id: str, db: Session | None = None) -> None:
             return
         _mark_engine_entered(op.id, session)
         result = _invoke_engine(op.id, session)
+        if result is None:
+            return  # 撤权路径已就地终态化；无引擎结果不作失败裁决
         _apply_engine_result(op.id, result, session)
     finally:
         if owned:
@@ -715,6 +717,27 @@ def _invoke_engine(operation_id: str, db: Session):
         M.ActionConfirmation.id == operation.confirmation_id).first()
     if confirmation is None:
         return None
+    # P2-C：worker/approve 后队列领取时共用 canonical 撤权重验 ——
+    # approve 到入引擎之间撤权（含 HITL 批准后的技术执行领取）不执行；
+    # 已入引擎/unknown 的外部证据裁决不因此翻案。
+    from app.models.user import User as _User
+
+    actor = db.query(_User).filter(
+        _User.id == confirmation.actor_user_id).first()
+    if actor is not None:
+        try:
+            _revalidate_confirmation_access(db, actor, confirmation,
+                                            for_engine=True)
+        except ConfirmationError as exc:
+            if exc.code in ("access_revoked", "profile_disabled",
+                            "action_forbidden"):
+                operation.state = "failed_not_executed"
+                operation.last_error = "access_revoked_before_engine"
+                confirmation.state = "failed_not_executed"
+                confirmation.failure_code = "access_revoked_before_engine"
+                db.commit()
+                return None
+            db.rollback()
     _record_external_attempts_started(db, operation, confirmation)
     from app.ontologies.formal_modeling.schemas import RunActionRequest
     from app.ontologies.formal_modeling.action_engine import execute_action
@@ -901,6 +924,14 @@ def _close_from_key_log(db: Session, operation, confirmation, key_log,
             _stamp_log_lineage(db, operation, key_log.id)
         return True
     if key_status in ("pending", "executing"):
+        if (key_status == "executing"
+                and operation.engine_entered_at is not None):
+            # 裁决 2：技术 checkpoint 已激活 — 管理员批准后的技术执行进行
+            # 中，不降回 pending_approval；由 terminal 日志收敛。lease 失效
+            # 由 _reconcile_executing 的无结案证据路径裁决（不在此返回
+            # True，让调用方落到 unknown+guard）。
+            return operation.lease_expires_at is not None and _as_utc(
+                operation.lease_expires_at) >= _now()
         operation.state = "pending_approval"
         operation.approval_log_id = key_log.id
         confirmation.state = "pending_approval"
