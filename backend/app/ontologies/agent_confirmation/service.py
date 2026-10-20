@@ -38,6 +38,11 @@ OPERATION_LEASE_SECONDS = 60
 MAX_PARAMETERS = 64
 MAX_PAYLOAD_BYTES = 64 * 1024
 
+_OPEN_CONFIRMATION_STATES = (
+    "prepared", "confirmed", "dispatch_queued", "executing",
+    "pending_approval", "unknown", "recovering", "compensation_required",
+)
+
 TERMINAL_STATES = {
     "succeeded", "failed_not_executed", "approval_rejected", "denied",
     "cancelled", "expired",
@@ -225,6 +230,8 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
                                                 parameters)
     final_params, validation_errors = prepare_action_parameters(
         action, parameters)
+    # R3：数值形态规范化（1 vs 1.0）在源头统一 —— 载荷/哈希/身份一致
+    final_params = _normalize_json_numbers(final_params)
     if validation_errors:
         raise ConfirmationError(422, "invalid_parameter",
                                 "参数校验失败", validationErrors=validation_errors)
@@ -572,15 +579,40 @@ def _guard_hash(confirmation: M.ActionConfirmation) -> str:
     }))
 
 
+def _normalize_json_numbers(value):
+    """R3：数值形态规范化 —— 1 与 1.0 是同一 JSON 业务值。
+
+    递归把整数值 float 规范为 int，使 1/1.0 的形态差异不会偶然产生
+    「未命中 → 新建确认」或反向误合并。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer()             and abs(value) < 2 ** 53:
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _normalize_json_numbers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_json_numbers(v) for v in value]
+    return value
+
+
 def _stable_session_intent(db: Session, user, body, action_id: str,
                            release_id: str, final_params: dict,
                            requires_approval: bool):
-    """同会话内同动作/目标/载荷的既有确认 → (root_intent, slot)。
+    """同会话内同动作/目标/载荷的**开放**确认 → (root_intent, slot)。
 
-    比较身份是意图无关的（action/release/target/最终参数/审批标志），
-    因此后续回合（root_intent 已换）的同载荷重发也能命中。None = 无稳定
-    命中（照常按当前意图新建）。命中时调用方沿用原意图身份，使既有
-    UNIQUE(owner, session, root_intent, slot) 约束重放同一 cid。
+    意图边界（产品裁决）：只命中非终态（prepared/confirmed/dispatch_
+    queued/executing/pending_approval/unknown/recovering/compensation_
+    required）的既有确认 —— 开放动作请求尚未了结时，模型冗余重发
+    prepare 属同一请求的重放，沿用原意图身份经 UNIQUE(owner, session,
+    root_intent, slot) 重放同一 cid。终态（succeeded/denied/cancelled/
+    expired/failed_not_executed/approval_rejected）后 slot 已释放：
+    新的人类消息按当前意图正常新建确认 —— 独立新意图可经正常二次确认
+    再次执行相同动作，不被会话载荷永久合并。
+
+    比较身份意图无关且数值规范化（action/release/target/最终参数/
+    审批标志）；无检索窗口（按 owner+session+action+target 全量精确
+    过滤）。None = 无开放命中。
     """
     rows = db.query(M.ActionConfirmation).filter(
         M.ActionConfirmation.actor_user_id == str(user.id),
@@ -588,20 +620,21 @@ def _stable_session_intent(db: Session, user, body, action_id: str,
         M.ActionConfirmation.session_id == body.session_id,
         M.ActionConfirmation.action_id == action_id,
         M.ActionConfirmation.target_instance_id == body.target_instance_id,
-    ).order_by(M.ActionConfirmation.created_at.desc()).limit(20).all()
-    identity = _sha256(_canonical_json({
+        M.ActionConfirmation.state.in_(_OPEN_CONFIRMATION_STATES),
+    ).all()
+    identity = _sha256(_canonical_json(_normalize_json_numbers({
         "action": action_id, "release": release_id,
         "target": body.target_instance_id,
         "parameters": final_params,
         "requiresApproval": requires_approval,
-    }))
+    })))
     for row in rows:
-        row_identity = _sha256(_canonical_json({
+        row_identity = _sha256(_canonical_json(_normalize_json_numbers({
             "action": row.action_id, "release": row.release_id,
             "target": row.target_instance_id,
             "parameters": row.final_parameters,
             "requiresApproval": bool(row.requires_approval),
-        }))
+        })))
         if hmac.compare_digest(row_identity, identity):
             return row.root_intent_id, row.action_request_slot
     return None
@@ -1100,6 +1133,10 @@ def reconcile_operation(operation_id: str, db: Session | None = None) -> None:
             _reconcile_pending_approval(db, operation, confirmation)
         elif operation.state == "executing":
             _reconcile_executing(db, operation, confirmation)
+        elif operation.state == "unknown" and operation.approval_log_id:
+            # R4/裁决 2：晚到权威证据收敛 —— unknown 不是永久终态；对账
+            # 重新按审批日志/技术执行收据裁决（仍是证据优先，不盲翻案）。
+            _reconcile_pending_approval(db, operation, confirmation)
         db.commit()
     finally:
         if owned:
@@ -1154,29 +1191,27 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
     if status == "pending":
         return
     if status == "approved":
-        _reopen_attempts_for_technical_execution(db, operation)
+        # R4：预登记 attempt 存在≠批准前已外呼 —— 以技术执行日志的
+        # effects（真实外呼时序的权威收据）裁决，不预重开 attempt。
         related = db.query(ActionExecutionLog).filter(
             ActionExecutionLog.id == log.related_log_id).first() \
             if log.related_log_id else None
         if related is not None:
             attempts = db.query(M.ActionExternalAttempt).filter(
                 M.ActionExternalAttempt.operation_id == operation.id).all()
-            unresolved = [a for a in attempts
-                          if a.state in ("started", "unknown")]
-            # 裁决 2：成功路径 attempt 已在重开后由引擎结果收敛
             related_effects = related.effects or []
             uncertain = any(
                 isinstance(e, dict) and e.get("deliveryUncertain")
                 for e in related_effects)
             if str(related.status or "").lower() == "success":
-                if unresolved or uncertain:
-                    # 审批技术执行的外部结果未结案：不因本地 success 结案
+                if uncertain:
+                    # 收据未知：不凭本地 success 结案/释放 guard
                     operation.state = "unknown"
                     operation.execution_log_id = related.id
-                    operation.last_error = "external_attempts_unresolved"
+                    operation.last_error = "external_receipt_uncertain"
                     operation.reconcile_evidence = {
                         "reason":
-                            "approval_execution_with_unresolved_external",
+                            "approval_execution_with_uncertain_receipt",
                         "localSuccessLogId": related.id,
                         "attemptStates": {
                             a.effect_ordinal: a.state for a in attempts},
@@ -1184,24 +1219,31 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
                     confirmation.state = "unknown"
                     confirmation.failure_code = "execution_result_unknown"
                     return
+                # 正常批准成功：权威收尾 —— attempts 按收据结案
                 operation.state = "succeeded"
                 operation.execution_log_id = related.id
                 confirmation.state = "succeeded"
                 _stamp_log_lineage(db, operation, related.id, log.id)
                 for attempt in attempts:
-                    if attempt.state == "started":
-                        attempt.state = "acknowledged"
-                        attempt.finished_at = _now()
+                    attempt.state = "acknowledged"
+                    attempt.finished_at = _now()
             else:
-                # 审批技术执行失败：其外部效果若存在 delivery_uncertain，
-                # 同样不能证明未执行 — unknown，guard 保留（与执行路径一致）。
-                if uncertain:
+                # 审批技术执行失败：真实外呼时序裁决 —— 收据未知
+                # （delivery_uncertain）或存在已真实发送未结案的 attempt →
+                # unknown 保留 guard；attempt 全部 proven_not_applied
+                # （引擎在效果前返回/未发送）才 failed_not_executed。
+                sent = [a for a in attempts
+                        if a.state in ("started", "unknown", "acknowledged")]
+                if uncertain or sent:
                     operation.state = "unknown"
                     operation.execution_log_id = related.id
                     operation.last_error = related.error_message
                     operation.reconcile_evidence = {
-                        "reason": "approval_execution_uncertain_delivery",
+                        "reason":
+                            "approval_execution_uncertain_or_sent",
                         "localFailureLogId": related.id,
+                        "attemptStates": {
+                            a.effect_ordinal: a.state for a in attempts},
                     }
                     confirmation.state = "unknown"
                     confirmation.failure_code = "execution_result_unknown"
@@ -1211,6 +1253,9 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
                 operation.last_error = related.error_message
                 confirmation.state = "failed_not_executed"
                 confirmation.failure_code = "approval_execution_failed"
+                for attempt in attempts:
+                    if attempt.state == "proven_not_applied":
+                        attempt.finished_at = _now()
         else:
             confirmation.state = "pending_approval"
         return
