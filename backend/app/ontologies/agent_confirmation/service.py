@@ -724,6 +724,8 @@ def _invoke_engine(operation_id: str, db: Session):
 
     actor = db.query(_User).filter(
         _User.id == confirmation.actor_user_id).first()
+    # P3-1：actor 用户行缺失/已删除时禁止 fail-open 跳过 canonical 重验 —
+    # 与撤权同语义（未入引擎且无外部 attempt → failed_not_executed）。
     if actor is not None:
         try:
             _revalidate_confirmation_access(db, actor, confirmation,
@@ -738,6 +740,13 @@ def _invoke_engine(operation_id: str, db: Session):
                 db.commit()
                 return None
             db.rollback()
+    else:
+        operation.state = "failed_not_executed"
+        operation.last_error = "actor_user_missing"
+        confirmation.state = "failed_not_executed"
+        confirmation.failure_code = "actor_user_missing"
+        db.commit()
+        return None
     _record_external_attempts_started(db, operation, confirmation)
     from app.ontologies.formal_modeling.schemas import RunActionRequest
     from app.ontologies.formal_modeling.action_engine import execute_action

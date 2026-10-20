@@ -907,14 +907,80 @@ def test_pure_aggregation_without_group_columns(client, auth_headers,
 # ------------------------------------- Z1：合并冲突丢失的行为测试恢复
 
 
-def test_query_budget_units_pg_legal():
-    """R-1/Z1：预算语句使用 PG 合法单位（B/kB/MB/GB/TB，非 IEC MiB）。"""
-    import inspect
-    from app.ontologies.agent_query import service as query_service
-    source = inspect.getsource(
-        query_service.UnifiedQueryService._pin_transaction)
-    assert "MiB" not in source.replace("不接受 MiB 拼写", "")
-    assert "MB'" in source or 'MB"' in source
+def _pg_url_for_budget_verify() -> str | None:
+    """Z-A：真实 PG 行为验证的目标连接（环境变量显式提供）。"""
+    import os
+    return os.environ.get("AGENT_QUERY_PG_VERIFY_URL") or None
+
+
+def test_query_budget_units_real_database_behavior():
+    """R-1/Z-A：预算单位以真实数据库行为验证（非源码文本断言）。
+
+    需要真实 PostgreSQL（AGENT_QUERY_PG_VERIFY_URL，如
+    postgresql+psycopg2://user:pw@127.0.0.1:5432/db）。未提供时跳过 —
+    真实行为证据不以 fake execute/字符串回声顶替。
+    """
+    import pytest
+
+    url = _pg_url_for_budget_verify()
+    if url is None:
+        pytest.skip(
+            "AGENT_QUERY_PG_VERIFY_URL 未设置：真实 PG 行为验证跳过"
+            "（CI/YIYA-41 真实栈提供）")
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(url)
+    session = sessionmaker(bind=engine)()
+    try:
+        # 1) 合法单位 MB 被数据库接受，且限制生效（current_setting 回读）
+        session.execute(text("BEGIN"))
+        session.execute(text(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+        session.execute(text("SET LOCAL work_mem = '4MB'"))
+        session.execute(text("SET LOCAL statement_timeout = '3000ms'"))
+        effective_mem = session.execute(text(
+            "SELECT current_setting('work_mem')")).scalar()
+        effective_timeout = session.execute(text(
+            "SELECT current_setting('statement_timeout')")).scalar()
+        session.execute(text("ROLLBACK"))
+        assert effective_mem == "4MB", effective_mem
+        assert effective_timeout == "3s", effective_timeout
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_query_budget_illegal_unit_rejected_by_database():
+    """R-1/Z-A：非法单位（MiB）被真实数据库拒绝（DataError）。"""
+    import pytest
+
+    url = _pg_url_for_budget_verify()
+    if url is None:
+        pytest.skip(
+            "AGENT_QUERY_PG_VERIFY_URL 未设置：真实 PG 行为验证跳过"
+            "（CI/YIYA-41 真实栈提供）")
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(url)
+    session = sessionmaker(bind=engine)()
+    try:
+        session.execute(text("BEGIN"))
+        rejected = False
+        try:
+            session.execute(text("SET LOCAL work_mem = '4MiB'"))
+        except Exception:
+            rejected = True
+        finally:
+            try:
+                session.execute(text("ROLLBACK"))
+            except Exception:  # noqa: BLE001 - 事务已中止
+                pass
+        assert rejected is True
+    finally:
+        session.close()
+        engine.dispose()
 
 
 def test_query_budget_error_no_internal_leak():

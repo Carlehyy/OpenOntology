@@ -1613,3 +1613,103 @@ def test_technical_checkpoint_executing_and_unknown_convergence(
         client, auth_headers, modeled, db, "act-2", {})
     assert r2.status_code == 409
     assert r2.json()["detail"]["code"] == "operation_unresolved"
+
+
+def test_actor_user_row_missing_blocks_engine_entry(
+        client, auth_headers, modeled, conversation, db):
+    """P3-1：actor 用户行删除后，worker/direct 入引擎路径拒绝执行。
+
+    覆盖：用户删除后零业务效果；未入引擎且无外部 attempt →
+    failed_not_executed；已入引擎（unknown）不因 actor 缺失释放 guard。
+    """
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+    from app.models.ontology_formal import ObjectInstance
+    from app.models.user import User
+
+    # --- 路径 1：worker 入引擎（approve 后领取）---
+    cid = _prepare(client, auth_headers, modeled,
+                   conversation).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    actor = db.query(User).first()
+    actor_id = actor.id
+    db.query(User).filter_by(id=actor_id).delete()
+    db.commit()
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    confirmation_svc.run_operation_inline(operation.id, db)
+    db.expire_all()
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "failed_not_executed"
+    assert confirmation.failure_code == "actor_user_missing"
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"   # 零业务效果
+
+    # --- 路径 2：direct 唤醒入口同样拒绝（经服务层直接调用 —
+    # 用户行删除后 HTTP 认证自然 401，唤醒路径的服务层行为单独验证）---
+    db.add(User(id=actor_id, username="restored",
+                email="r@t.io", password_hash="x", role="admin",
+                is_active=True, token_version=0))
+    db.commit()
+    cid2 = _prepare(client, auth_headers, modeled, conversation,
+                    clientSubmissionId="prop-1").json()["data"][
+                        "confirmationId"]
+    payload2 = _confirmation(db, cid2).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid2,
+            payload2, "approve")
+    db.query(User).filter_by(id=actor_id).delete()
+    db.commit()
+    class _DeletedUser:
+        id = actor_id
+        role = "admin"
+
+    confirmation2 = _confirmation(db, cid2)
+    confirmation_svc.execute(db, _DeletedUser(), modeled["oid"], cid2,
+                             "ontology_agent", conversation["conv"].id)
+    db.expire_all()
+    confirmation2 = _confirmation(db, cid2)
+    assert confirmation2.state == "failed_not_executed"
+    assert confirmation2.failure_code == "actor_user_missing"
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"
+
+    # --- 路径 3：已入引擎（unknown + 未结案外部 attempt）不释放 guard ---
+    db.add(User(id=actor_id, username="restored2",
+                email="r2@t.io", password_hash="x", role="admin",
+                is_active=True, token_version=0))
+    db.commit()
+    cid3 = _prepare(client, auth_headers, modeled, conversation,
+                    clientSubmissionId="prop-k2",
+                    actionId="act-3", parameters={}).json()["data"][
+                        "confirmationId"]
+    payload3 = _confirmation(db, cid3).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid3,
+            payload3, "approve")
+    # 恢复 actor 使引擎可进入，先执行到 unknown（webhook 不可达）
+    r = _execute(client, auth_headers, modeled, conversation, cid3)
+    assert r.status_code == 200, r.text
+    confirmation = _confirmation(db, cid3)
+    db.refresh(confirmation)
+    assert confirmation.state == "unknown"
+    # actor 删除后 worker 对账/重验不释放 guard（不进引擎不翻案）
+    db.query(User).filter_by(id=actor_id).delete()
+    db.commit()
+    operation3 = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid3).one()
+    confirmation_svc.run_operation_inline(operation3.id, db)
+    db.expire_all()
+    confirmation = _confirmation(db, cid3)
+    assert confirmation.state == "unknown"   # 不变：guard 保留不盲翻案
+    # guard 保留证据：直接查活跃 operation（actor 已删，HTTP 会话建立不可行）
+    operation_view = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid3).one()
+    db.refresh(operation_view)
+    assert operation_view.state in ("unknown", "reconciling")
+    # 已有 external attempt 未结案（unknown 证据保留，不因 actor 缺失清账）
+    attempts = db.query(CM.ActionExternalAttempt).filter_by(
+        operation_id=operation_view.id).all()
+    assert attempts
+    assert all(a.state in ("started", "unknown") for a in attempts)
