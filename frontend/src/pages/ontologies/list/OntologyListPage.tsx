@@ -17,7 +17,7 @@ import {
 } from './cardOrder'
 import {
   AlertCircle,
-  Eye,
+  GitBranch,
   MessageCircle,
   Network,
   Pencil,
@@ -267,6 +267,7 @@ function CreateOntologyCard({
 function OntologyCard({
   item,
   onEdit,
+  onModeling,
   onDetail,
   onChat,
   onDelete,
@@ -281,6 +282,7 @@ function OntologyCard({
 }: {
   item: OntologyListItem
   onEdit: () => void
+  onModeling: () => void
   onDetail: () => void
   onChat: () => void
   onDelete: () => void
@@ -396,18 +398,18 @@ function OntologyCard({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={onDetail}
-            aria-label={`查看本体 ${item.name} 详情`}
-            className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg bg-muted px-1.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-brand-soft hover:text-brand-ink"
-          >
-            <Eye size={12} /> 查看
-          </button>
-          <button
-            type="button"
             onClick={onEdit}
             className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg bg-muted px-1.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-brand-soft hover:text-brand-ink"
           >
             <Pencil size={12} /> 编辑
+          </button>
+          <button
+            type="button"
+            onClick={onModeling}
+            aria-label={`进入本体 ${item.name} 版本建模`}
+            className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg bg-muted px-1.5 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-brand-soft hover:text-brand-ink"
+          >
+            <GitBranch size={12} /> 建模
           </button>
           <span title={chatAvailable ? undefined : '本体发布后可进入助手对话'} className="inline-flex shrink-0">
             <button
@@ -689,6 +691,7 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
               key={item.id}
               item={item}
               onEdit={() => setEditTarget(item)}
+              onModeling={() => navigate(`/ontologies/${item.id}?tab=versions`)}
               onDetail={() => navigate(`/ontologies/${item.id}`)}
               onChat={() => navigate(`/agent?ontology_id=${encodeURIComponent(item.id)}`)}
               onDelete={() => setDeleteTarget(item)}

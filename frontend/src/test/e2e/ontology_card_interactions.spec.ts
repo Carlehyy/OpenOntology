@@ -2,7 +2,8 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 
 /**
  * 本体管理卡片交互（MYW-77）：
- * ①「查看」按钮与本体描述跳转本体详情；②右下角时间带「更新于/创建于」前缀；
+ * ①「建模」按钮进入本体详情并打开「本体版本演进」弹窗；本体描述跳转本体详情；
+ * ②右下角时间带「更新于/创建于」前缀；
  * ③拖拽卡片改变相对位置并经 localStorage 持久化，筛选态禁用拖拽。
  */
 const ok = (route: Route, data: unknown) => route.fulfill({
@@ -36,6 +37,48 @@ const ITEMS = [
   ontology('ont-gamma', '伽马本体', '2026-08-03T08:00:00Z', '2026-08-04T08:00:00Z'),
 ]
 
+const VERSION_TREE = {
+  current_release_id: 'rel-alpha-1',
+  current_release_number: 'v1',
+  current_release_version: 'v1',
+  versions: [{
+    id: 'ver-alpha-1',
+    version_number: 'v1',
+    node_kind: 'release',
+    lifecycle_status: 'released',
+    revision: 1,
+    created_at: '2026-08-05T08:00:00Z',
+    published_at: '2026-08-05T08:00:00Z',
+  }],
+}
+
+const FORMAL_OVERVIEW = {
+  release: { id: 'rel-alpha-1', version: 'v1', publishedAt: '2026-08-05T08:00:00Z' },
+  model: {
+    objectTypes: 1,
+    linkTypes: 0,
+    actions: 1,
+    actionsRequiringApproval: 0,
+    functions: 0,
+    sentinels: { total: 0, enabled: 0, muted: 0 },
+  },
+  data: {
+    instances: 0,
+    instancesBySource: {},
+    linkInstances: 0,
+    mappings: { total: 0, bound: 0, nameMatch: 0, autoCreate: 0, autoApply: 0 },
+    topTypes: [],
+  },
+  runtime: {
+    pendingApprovals: 0,
+    decisions: { total: 0, approved: 0, rejected: 0, recentApprovalRate: null },
+    firings7d: { total: 0, fired: 0, error: 0 },
+    actionRuns7d: { total: 0, success: 0, failed: 0 },
+    daily7d: [],
+  },
+  facts: { total: 0, byKind: {} },
+}
+
 async function mockListPage(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'card-interactions-token')
@@ -52,6 +95,11 @@ async function mockListPage(page: Page) {
     if (path === '/api/v1/ontologies') return ok(route, { items: ITEMS, total: ITEMS.length, page: 1, page_size: 1000 })
     if (path === '/api/v1/domains') return ok(route, [{ id: 'domain-1', name: '供应链', description: '' }])
     if (path === '/api/v1/ontologies/ont-alpha') return ok(route, ITEMS[0])
+    if (path === '/api/v2/ontologies/ont-alpha/version-tree') return ok(route, VERSION_TREE)
+    // 详情页总览面板依赖 formal overview 的对象形状，catch-all 的 [] 会使其
+    // 渲染崩溃白屏，进而连带卸载已打开的版本演进弹窗，必须按形状下发。
+    if (path === '/api/v2/formal/ontologies/ont-alpha/overview') return ok(route, FORMAL_OVERVIEW)
+    if (path === '/api/v2/formal/ontologies/ont-alpha/facts/recent') return ok(route, [])
     if (path === '/api/v2/inbox/summary') {
       return ok(route, { openAlertCount: 0, actionableCount: 0, unreadCount: 0, resolvedCount: 0 })
     }
@@ -64,14 +112,16 @@ async function cardNames(page: Page): Promise<string[]> {
     .evaluateAll(cards => cards.map(card => card.getAttribute('data-ontology-id') || ''))
 }
 
-test('卡片「查看」按钮跳转本体详情页', async ({ page }) => {
+test('卡片「建模」按钮进入详情页并打开本体版本演进弹窗', async ({ page }) => {
   await mockListPage(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/#/ontologies', { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('button', { name: '阿尔法本体', exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: '查看本体 阿尔法本体 详情' }).click()
-  await expect(page).toHaveURL(/#\/ontologies\/ont-alpha$/)
+  await page.getByRole('button', { name: '进入本体 阿尔法本体 版本建模' }).click()
+  await expect(page).toHaveURL(/#\/ontologies\/ont-alpha\?tab=versions$/)
+  await expect(page.getByRole('dialog', { name: '本体版本演进' })).toBeVisible()
+  await expect(page.getByTestId('version-tree')).toBeVisible()
 })
 
 test('点击卡片本体描述跳转本体详情页', async ({ page }) => {
