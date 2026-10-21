@@ -255,5 +255,5 @@ test('开发 MCP：发布闸门失败时提示明确原因，不写入清单', a
   // 关闭发布对话框（失败路径保持打开），再返回清单页：没有写入任何 MCP
   await page.getByRole('button', { name: '取消' }).click()
   await page.getByRole('button', { name: '返回插件社区' }).click()
-  await expect(page.getByText('从第一个 MCP Server 开始')).toBeVisible()
+  await expect(page.getByRole('list', { name: '插件社区使用流程指引' })).toBeVisible()
 })

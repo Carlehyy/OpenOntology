@@ -398,8 +398,8 @@ function McpDevCreateDialog({ onClose }: { onClose: () => void }) {
   )
 }
 
-/** 零数据空态：三步引导替代一句话提示，对齐世界模型页的 beUI 空态模式 */
-function EmptyGuide({ onAdd }: { onAdd: () => void }) {
+/** 零数据空态：仅保留三步引导卡，新增入口收敛到顶部操作栏 */
+function EmptyGuide() {
   const steps = [
     { icon: <Plus size={16} />, title: '登记 MCP', desc: '粘贴客户端 JSON 或手动配置 stdio / SSE / Streamable HTTP' },
     { icon: <Wrench size={16} />, title: '连接测试', desc: '验证连通性并发现工具，清单与参数结构自动可见' },
@@ -407,10 +407,6 @@ function EmptyGuide({ onAdd }: { onAdd: () => void }) {
   ]
   return (
     <div className="flex min-h-64 flex-1 flex-col items-center justify-center gap-6 rounded-2xl border border-border bg-card px-6 py-8 text-center">
-      <div>
-        <p className="text-sm font-semibold text-muted-foreground">从第一个 MCP Server 开始</p>
-        <p className="mt-1 text-xs text-muted-foreground">登记插件配置，测试通过后即可查看工具清单并转为 HTTP 接口</p>
-      </div>
       <ol className="grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-3" aria-label="插件社区使用流程指引">
         {steps.map((step, index) => (
           <li key={step.title} className="relative flex flex-col items-center gap-2 rounded-xl border border-border bg-muted px-4 pb-4 pt-5 text-center">
@@ -423,13 +419,6 @@ function EmptyGuide({ onAdd }: { onAdd: () => void }) {
           </li>
         ))}
       </ol>
-      <button
-        type="button"
-        onClick={onAdd}
-        className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-brand px-5 text-sm font-medium text-[var(--color-text-inverse)] shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:bg-brand-deep active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-      >
-        <Plus size={15} /> 添加第一个 MCP
-      </button>
     </div>
   )
 }
@@ -699,7 +688,7 @@ export default function PluginCommunityPage() {
             </button>
           </div>
         ) : (
-          <EmptyGuide onAdd={() => setEditing('new')} />
+          <EmptyGuide />
         )
       ) : (
         <>
