@@ -406,15 +406,40 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     finally { setSaving(false) }
   }
 
-  const duplicateDraft = () => {
-    setSelectedId(null)
-    setBaseline(emptyHubInterface())
-    setValidationArmed(false)
-    setDraft({ ...structuredClone(draft), id: null, name: duplicateInterfaceName(draft.name), mcp_enabled: false, open_enabled: false, http_enabled: false, proxy_slug: '', proxy_query_keys: [], proxy_header_keys: [], proxy_body_enabled: false, proxy_body_keys: [] })
-    setResult(null)
-    setRunContext(null)
-    setResultFingerprint('')
-    setSelectedFiles([])
+  // 复制即落库：副本直接创建为新接口并出现在清单中；仅当创建失败
+  //（如上游校验拒绝）才退回未入库草稿，由用户修正后手动保存。
+  const duplicateDraft = async () => {
+    const copy: HubInterface = { ...structuredClone(draft), id: null, name: duplicateInterfaceName(draft.name), mcp_enabled: false, open_enabled: false, http_enabled: false, proxy_slug: '', proxy_query_keys: [], proxy_header_keys: [], proxy_body_enabled: false, proxy_body_keys: [] }
+    setSaving(true)
+    const resetRunState = () => {
+      setResult(null)
+      setRunContext(null)
+      setResultFingerprint('')
+      setSelectedFiles([])
+      setValidationArmed(false)
+    }
+    try {
+      const saved = await apiHub.createInterface({ ...copy, method: copy.method.toUpperCase() })
+      setSelectedId(saved.id)
+      setDraft(structuredClone(saved))
+      setBaseline(structuredClone(saved))
+      resetRunState()
+      toast.success('已复制为新接口', { description: saved.name })
+      try {
+        await reload()
+        setListRefreshFailed(false)
+      } catch {
+        setListRefreshFailed(true)
+      }
+    } catch (error) {
+      onError(apiError(error))
+      setSelectedId(null)
+      setBaseline(emptyHubInterface())
+      setDraft(copy)
+      resetRunState()
+    } finally {
+      setSaving(false)
+    }
   }
 
   const showCallExample = async () => {
@@ -600,8 +625,8 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           )}
           <Button size="sm" className="shrink-0" onClick={create}><CirclePlus size={13} />新建接口</Button>
         </div>
-        {/* 未入库草稿（新建/复制）不在清单中：独立成行就地说明，避免「点没上」的
-            疑惑。不放进头部行——窄视口下会把「新建接口」按钮挤出可视区。 */}
+        {/* 未入库草稿（新建接口，或复制落库失败的回退）不在清单中：独立成行就地说明，
+            避免「点没上」的疑惑。不放进头部行——窄视口下会把「新建接口」按钮挤出可视区。 */}
         {!draft.id && interfaces.length > 0 && (
           <div className="shrink-0 px-3 pt-2">
             <p className="text-xs text-[var(--color-warning)]">未保存，保存后才会出现在清单</p>

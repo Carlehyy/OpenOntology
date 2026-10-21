@@ -8,7 +8,7 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
  * - A08 个人变量复制：剪贴板不可用时如实显示「复制失败」并给手动兜底
  * - A13 调用密钥弹窗在小视口（800×600）下标题与关闭按钮不被遮挡
  * - A14 列表搜索计数「显示 x / y 个接口」，且搜索匹配请求方法
- * - B01 未入库草稿（新建/复制）不在清单中：清单标题下就地提示，保存后消失
+ * - B01 未入库草稿（新建）不在清单中：就地提示；复制为新接口直接落库入清单
  * - B02 空 URL/空名称/超 200 字名称：保存与调用时错误内联留在字段上并聚焦，不再只弹 toast
  */
 
@@ -292,8 +292,15 @@ test('A14 搜索按名称与方法过滤清单，头部不再展示计数文案'
   await expect(rows).toHaveCount(2)
 })
 
-test('B01 未入库草稿在清单标题下就地提示，切回已保存接口后消失', async ({ page }) => {
-  await mockApp(page, { listInterfaces: () => ({ body: [ORDER_QUERY] }) })
+test('B01 未入库草稿（新建）就地提示，复制为新接口直接落库入清单', async ({ page }) => {
+  let created: Record<string, unknown> | null = null
+  await mockApp(page, {
+    listInterfaces: () => ({ body: created ? [ORDER_QUERY, created] : [ORDER_QUERY] }),
+    onCreateInterface: body => {
+      created = { ...body, id: 77, config_revision: 1, updated_at: '2026-10-21T08:00:00.000Z' }
+      return created
+    },
+  })
   await gotoInterfaces(page)
 
   const draftHint = page.getByText('未保存，保存后才会出现在清单')
@@ -308,11 +315,13 @@ test('B01 未入库草稿在清单标题下就地提示，切回已保存接口�
   await page.getByRole('button', { name: 'GET 订单详情' }).click()
   await expect(draftHint).toHaveCount(0)
 
-  // 入口二：复制为新接口（同样是无 id 的未入库草稿）
+  // 入口二：复制为新接口直接落库：副本立即出现在清单中，不再触发未入库提示
   await page.getByRole('button', { name: '接口更多操作' }).click()
   await page.getByRole('menuitem', { name: '复制为新接口' }).click()
-  await expect(draftHint).toBeVisible()
   await expect(page.getByLabel('接口名称')).toHaveValue('订单详情 副本')
+  await expect(draftHint).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'GET 订单详情 副本' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '保存配置' })).toBeVisible()
 })
 
 test('B01 保存草稿成功后提示消失，清单行与保存按钮同步更新', async ({ page }) => {
