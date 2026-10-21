@@ -668,20 +668,19 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
       )}
 
       <section ref={treeScrollRef} className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-xl border border-border bg-muted p-4" aria-label="本体版本树">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1">
             <p className="text-sm font-semibold text-foreground">版本树</p>
-            <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">共 {nodes.length} 个版本 · 发布版在左侧主干，分支缩进挂在所属版本下</p>
+            <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[11px] text-muted-foreground" aria-label="版本状态图例">
+              <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-brand" />当前发布</span>
+              <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-border-hover)]" />历史发布</span>
+              <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-info)]" />草稿态</span>
+              <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-warning)]" />试跑态</span>
+            </div>
           </div>
           <span className="rounded-md bg-brand-soft px-2.5 py-1 font-mono text-xs font-semibold text-brand-ink">
             当前 {treeQuery.data?.current_release_version}
           </span>
-        </div>
-        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground" aria-label="版本状态图例">
-          <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-brand" />当前发布</span>
-          <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-border-hover)]" />历史发布</span>
-          <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-info)]" />草稿态</span>
-          <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-warning)]" />试跑态</span>
         </div>
         {roots.rootNodes.length > 0 ? (
           <div role="tree" className="ml-2 space-y-2.5 border-l border-border pl-6" data-testid="version-tree">
