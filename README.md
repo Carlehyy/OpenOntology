@@ -34,9 +34,14 @@ docker compose -f docker-compose.local.yml up --build
 本地开发）。后端存活检查位于 `http://localhost:8000/health/live`；完整平台
 可用性还必须通过 `/health/ready` 检查。
 
-`docker-compose.prod.yml` 是生产编排入口，按
-[部署说明](./docs/operations/deployment.md) 与 GitHub Actions 工作流执行；
-不要用本地编排推断生产依赖已经验证。
+三个编排文件分工如下：`docker-compose.local.yml` 是单机一键完整栈（即上文
+流程，`up --build` 会自动执行 Alembic 迁移并按 `.env` 播种首个管理员）；
+`docker-compose.e2e.yml` 仅为真实后端 E2E 提供端口错开的基础设施，不含应用
+服务；`docker-compose.prod.yml` 是生产编排入口，按
+[部署说明](./docs/operations/deployment.md) 与 GitHub Actions 工作流执行，
+须由 `deploy/deploy-prod.sh` 完成迁移、`.env` 密钥与镜像门禁——裸
+`docker compose up` 无法启动，且生产模式会拒绝 `admin123` 这类弱初始密码
+（首次部署密码由 bootstrap 随机生成）。不要用本地编排推断生产依赖已经验证。
 
 ### 源码开发
 
@@ -183,7 +188,9 @@ npm --prefix frontend run test:e2e:mocked
 [部署说明](./docs/operations/deployment.md) 和
 [回滚](./docs/operations/rollback.md)。
 
-当前部署事实源是仓库中已跟踪的 `deploy/production.dependencies.env`（含真实生产
-凭据，属受控临时例外）：日常开发不得修改、复制或回显其中的值。后续迁移到
-GitHub Environment Secrets/Variables 必须作为独立运维变更执行；仅删除当前
-文件不等于清理 Git 历史。凭据与卫生红线见 [AGENTS.md](./AGENTS.md) 第 6 节。
+生产第三方依赖清单 `deploy/production.dependencies.env` 不进入 Git：每次部署
+由 GitHub Actions 在 runner 上从 Repository secrets/variables（`PROD_*`）经
+`scripts/ci/materialize-production-dependencies.sh` 物化生成，再合并进服务器
+`.env` 随 `deploy/deploy-prod.sh` 消费，任何人不得修改、复制或回显其中的真实
+值。凭据与卫生红线见 [AGENTS.md](./AGENTS.md) 第 6 节，配置分区与密钥边界见
+[配置与秘密管理](./docs/operations/configuration.md)。
