@@ -373,7 +373,11 @@ export default function QuickInputsDialog({
             >
               {/* 列表列头：计数 + 新增入口；h-10 与右侧详情头同高——两列分割线落在同一水平线 */}
               <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3">
-                <p className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-tertiary)]">
+                {/* pl-[18px] 让「共」字与下方行内拖拽圆点（GripVertical 左列点）
+                    垂直对齐：列表区 p-2(8) + 行 px-2.5(10) + 手柄 w-7 内 14px 图标
+                    居中(7) + 图标内圆点内边距(14×8/24≈4.7) ≈ 29.7px，扣除表头
+                    既有 px-3(12px) 后补 18px */}
+                <p className="min-w-0 flex-1 truncate pl-[18px] text-xs text-[var(--color-text-tertiary)]">
                   共 {items.length} 条
                 </p>
                 {/* 空列表自动进新增态时藏起入口：当前已是新增表单，按钮无目标 */}
