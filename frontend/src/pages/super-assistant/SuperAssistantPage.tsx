@@ -62,6 +62,7 @@ import {
 import { TurnRail } from './components/TurnRail'
 import { deriveTurnRailItems, type TurnRailItem } from './components/turnRailModel'
 import { readCachedConversations, writeCachedConversations } from './conversationCache'
+import { readCachedDrafts, writeCachedDrafts } from './draftCache'
 import { buildConversationExportFilename } from './exportFilename'
 import type { ModelConfig } from '@/types/ontology'
 import TicketFormModal from '@/components/tickets/TicketFormModal'
@@ -73,6 +74,12 @@ const ATTACH_ACCEPT = '.csv,.xlsx,.xls,.json,.xml,.pdf,.docx,.doc,.pptx,.ppt,.md
 /** 多端完成级同步的轮询周期：同一会话在其它浏览器/设备打开时，
  *  生成占位与新消息最晚在该周期内对齐到本端 */
 const SYNC_POLL_INTERVAL_MS = 2000
+
+/** 输入草稿防抖落盘周期：输入停顿该时长后写 localStorage，避免每击键写盘 */
+const DRAFT_PERSIST_DEBOUNCE_MS = 500
+
+/** 未落地新会话视图（selectedId 为 null）的草稿槽键 */
+const NEW_DRAFT_KEY = '__new__'
 
 /** 模型下拉底部「管理模型」项的哨兵值：不落库、不切换会话模型，仅触发跳转 */
 const MANAGE_MODELS_VALUE = '__manage_models__'
@@ -138,7 +145,13 @@ export default function SuperAssistantPage() {
   const [servers, setServers] = useState<SuperMcpServer[]>([])
   const [tools, setTools] = useState<AssistantTool[]>([])
   const [multicaConfig, setMulticaConfig] = useState<MulticaConfig | null>(null)
-  const [input, setInput] = useState('')
+  // 输入草稿按会话缓存并跨刷新持久化：首渲染同步水合 localStorage 中本用户的
+  // 草稿槽（useState 惰性初始化仅执行一次）；未落地新会话视图的 '__new__'
+  // 草稿直接作为初始输入，刷新后停在空会话视图时也能恢复（选中具体会话的
+  // 恢复由下方切换 effect 承担）。详见 draftCache.ts。
+  const [persistedDrafts] = useState(() => readCachedDrafts(user?.id))
+  const draftsRef = useRef(persistedDrafts)
+  const [input, setInput] = useState(() => persistedDrafts.get(NEW_DRAFT_KEY) ?? '')
   // 流式生成按会话隔离：只有「当前选中会话正在生成」时，输入区才表现为发送中
   const [streamingIds, setStreamingIds] = useState<ReadonlySet<string>>(new Set())
   const [stopping, setStopping] = useState(false)
@@ -203,9 +216,7 @@ export default function SuperAssistantPage() {
   // 轮询在飞守卫：上一次同步未返回时不并发发起下一次
   const syncingRef = useRef(false)
   // 输入草稿按会话缓存：多会话来回切换时未发送的内容不丢失；
-  // '__new__' 是「尚未落地的新会话」视图（selectedId 为 null）的草稿槽
-  const NEW_DRAFT_KEY = '__new__'
-  const draftsRef = useRef(new Map<string, string>())
+  // draftsRef 随上方持久化水合创建，内存槽语义见切换 effect
   const inputRef = useRef(input)
   inputRef.current = input
   const draftPrevIdRef = useRef<string | null>(null)
@@ -445,15 +456,49 @@ export default function SuperAssistantPage() {
     }
   }, [requestedConversationId, conversations])
 
+  // 草稿槽整体落盘：切换/发送/删除等内存槽变更点之后调用，刷新后可恢复
+  const persistDrafts = useCallback(() => {
+    writeCachedDrafts(user?.id, draftsRef.current)
+  }, [user?.id])
+
   // 选中会话切换时：把当前输入存进上一会话的草稿槽，再恢复目标会话的草稿。
-  // 经 inputRef 读取最新输入，避免闭包拿到过期值。
+  // 经 inputRef 读取最新输入，避免闭包拿到过期值；切换即落盘。
   useEffect(() => {
     const previousId = draftPrevIdRef.current
     if (previousId === selectedId) return
     draftsRef.current.set(previousId ?? NEW_DRAFT_KEY, inputRef.current)
+    persistDrafts()
     draftPrevIdRef.current = selectedId
     setInput(draftsRef.current.get(selectedId ?? NEW_DRAFT_KEY) ?? '')
-  }, [selectedId])
+  }, [selectedId, persistDrafts])
+
+  // 当前会话输入防抖落盘：输入停顿即持久化（不等切换/刷新），
+  // 移动端后台被系统回收等 pagehide 不触发的场景下最多丢一个防抖窗口的尾段
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const slot = selectedId ?? NEW_DRAFT_KEY
+      if ((draftsRef.current.get(slot) ?? '') === input) return
+      draftsRef.current.set(slot, input)
+      persistDrafts()
+    }, DRAFT_PERSIST_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [input, selectedId, persistDrafts])
+
+  // 兜底冲刷：pagehide 覆盖防抖窗口内的刷新/关标签，卸载覆盖 SPA 路由离开。
+  // 经 inputRef/selectedIdRef 读最新值，避免闭包过期
+  useEffect(() => {
+    const flushCurrentDraft = () => {
+      const slot = selectedIdRef.current ?? NEW_DRAFT_KEY
+      if ((draftsRef.current.get(slot) ?? '') === inputRef.current) return
+      draftsRef.current.set(slot, inputRef.current)
+      persistDrafts()
+    }
+    window.addEventListener('pagehide', flushCurrentDraft)
+    return () => {
+      window.removeEventListener('pagehide', flushCurrentDraft)
+      flushCurrentDraft()
+    }
+  }, [persistDrafts])
 
   const selectedConversation = conversations.find(item => item.id === selectedId) || null
   const selectedModelId = selectedConversation?.model_config_id || models.find(model => model.is_default)?.id || models[0]?.id || ''
@@ -602,7 +647,14 @@ export default function SuperAssistantPage() {
       await superAssistantApi.deleteConversation(conversation.id)
       const next = conversations.filter(item => item.id !== conversation.id)
       setConversations(next)
-      if (selectedId === conversation.id) { setSelectedId(next[0]?.id || null); setMessages([]) }
+      if (selectedId === conversation.id) {
+        // 删除的是当前会话：先清输入，避免下方切换 effect 把草稿回存进已删除会话的槽
+        setInput('')
+        inputRef.current = ''
+        setSelectedId(next[0]?.id || null)
+        setMessages([])
+      }
+      if (draftsRef.current.delete(conversation.id)) persistDrafts()
       setDeletingConversation(null)
       toast.success('会话已删除')
     } catch (error) { toast.error('删除失败', { description: errorText(error) }) }
@@ -912,6 +964,7 @@ export default function SuperAssistantPage() {
       setInput('')
       inputRef.current = ''
       draftsRef.current.set(selectedId, '')
+      persistDrafts()
       return
     }
     let conversation = selectedConversation
@@ -922,6 +975,7 @@ export default function SuperAssistantPage() {
     inputRef.current = ''
     draftsRef.current.set(conversationId, '')
     draftsRef.current.set(NEW_DRAFT_KEY, '')
+    persistDrafts()
     await dispatchMessage(message, conversationId, conversation.model_config_id || selectedModelId || null)
   }
 

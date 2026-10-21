@@ -8,6 +8,7 @@ import { expectSameBoundingBox } from './support/geometry'
 // 会话附件上传/移除/位于输入框上方与跨会话隔离、流式生成跨会话隔离、ReUI 模型选择器、
 // 删除确认弹窗、新建会话不落库（点击仅清空聊天区、发送首条消息才建会话）、
 // 空态品牌文案与占位符、配置面板白底、
+// 输入草稿按会话缓存及刷新后从 localStorage 恢复（发送后清空落盘）、
 // 重命名 blur 取消、知识图谱页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
 // 知识图谱过滤/节点详情/邻域检索高亮）、外部集成（multica 配置弹窗 + /multica:
 // 命令提示的配置门控）、消息通知弹窗（未读徽章、tab 筛选、Markdown 详情与附件、
@@ -2833,6 +2834,42 @@ test('输入草稿按会话缓存：切换会话不丢内容，发送后清空',
   await expect(textbox).toHaveValue('B 会话的草稿')
   await page.locator('[data-workbench-conversation="c-today"] button').first().click()
   await expect(textbox).toHaveValue('')
+})
+
+test('输入草稿刷新后保留：localStorage 持久化多会话未发送内容', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  const textbox = page.getByRole('textbox', { name: '向超级助手发送消息' })
+  await textbox.fill('A 会话的待发送草稿')
+  await page.locator('[data-workbench-conversation="c-yesterday"] button').first().click()
+  await textbox.fill('B 会话的待发送草稿')
+
+  // 防抖落盘窗口过后整页刷新：两个会话的草稿都从 localStorage 恢复
+  await page.waitForTimeout(700)
+  await page.reload()
+  await expect(page.locator('[data-workbench-conversation="c-yesterday"]')).toHaveClass(/bg-brand-soft/)
+  await expect(textbox).toHaveValue('B 会话的待发送草稿')
+  await page.locator('[data-workbench-conversation="c-today"] button').first().click()
+  await expect(textbox).toHaveValue('A 会话的待发送草稿')
+
+  // localStorage 中的持久化载荷：仅含非空草稿，键按登录用户隔离
+  const stored = await page.evaluate(() => localStorage.getItem('ob:super-assistant-draft:v1:u-1'))
+  expect(JSON.parse(stored ?? '{}')).toEqual({
+    'c-today': 'A 会话的待发送草稿',
+    'c-yesterday': 'B 会话的待发送草稿',
+  })
+
+  // 发送后草稿清空并落盘：再次刷新不再恢复，localStorage 中空槽被移除
+  await page.getByRole('button', { name: '发送消息' }).click()
+  await expect.poll(mocks.isChatDone).toBe(true)
+  await expect(textbox).toHaveValue('')
+  await page.reload()
+  await expect(page.locator('[data-workbench-conversation="c-today"]')).toHaveClass(/bg-brand-soft/)
+  await expect(textbox).toHaveValue('')
+  const storedAfterSend = await page.evaluate(() => localStorage.getItem('ob:super-assistant-draft:v1:u-1'))
+  expect(JSON.parse(storedAfterSend ?? '{}')).toEqual({ 'c-yesterday': 'B 会话的待发送草稿' })
 })
 
 test('知识图谱：弹窗全屏切换与图谱缩放控制', async ({ page }) => {
