@@ -22,10 +22,11 @@ const DRAG_MIME = 'application/x-openontology-quick-input'
  * 快捷内容设置弹窗：左列表 + 右详情双栏，布局语言对齐 NotificationsDialog 的
  * 「全部消息列表 / 查看指定消息」。列表整行点选 → 右侧查看/编辑/删除；
  * 列表顺序即快捷内容的展示顺序（上者优先），拖拽手柄调整顺序；
- * 重排乐观更新、失败回滚由 useQuickInputs 数据源负责，这里只 toast。
- * 窄屏（<md）由选中态驱动「列表 ↔ 详情」单栏切换（详情态顶部返回条）；
- * Esc 分层：新增/编辑表单先退（丢弃未保存修改），窄屏详情查看态先回列表，
- * 其余交 Radix 关弹窗；点遮罩空白与右上关闭按钮同样整窗关闭（草稿一并丢弃）。
+ * 重排乐观更新、失败回滚由 useQuickInputs 数据源负责，这里只 toast。窄屏（<md）
+ * 由选中态驱动「列表 ↔ 详情」单栏切换，返回条由 JS 媒体查询驱动仅窄屏渲染，
+ * 桌面端不进 DOM 以保证左右两栏表头分割线对齐；Esc 分层：新增/编辑表单先退
+ * （丢弃未保存修改），窄屏详情查看态先回列表，其余交 Radix 关弹窗；点遮罩
+ * 空白与右上关闭按钮同样整窗关闭（草稿一并丢弃）。
  */
 export default function QuickInputsDialog({
   open,
@@ -72,6 +73,20 @@ export default function QuickInputsDialog({
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   const [reorderPending, setReorderPending] = useState(false)
+
+  // 窄屏判定驱动返回条的渲染（而非 md:hidden 隐藏）：桌面端返回条不进 DOM，
+  // 详情头恒为右栏首个子元素，与左栏列表头的水平分割线结构对齐——不依赖
+  // 客户端 CSS 媒体查询生效（曾出现陈旧样式下返回条在桌面渲染、右栏表头
+  // 被顶低约 12px 的错位）。与列切换 CSS 的 md 断点同界（<768px 为窄屏）。
+  const [isNarrowViewport, setIsNarrowViewport] = useState(
+    () => window.matchMedia('(max-width: 767px)').matches,
+  )
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)')
+    const onChange = (event: MediaQueryListEvent) => setIsNarrowViewport(event.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
 
   const [prevOpen, setPrevOpen] = useState(false)
   useEffect(() => {
@@ -292,7 +307,7 @@ export default function QuickInputsDialog({
       exitEdit()
       return
     }
-    if (selected && window.matchMedia('(max-width: 767px)').matches) {
+    if (selected && isNarrowViewport) {
       event.preventDefault()
       setSelectedId(null)
     }
@@ -437,9 +452,11 @@ export default function QuickInputsDialog({
               className={`${detailActive ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col`}
               data-testid="quick-input-detail"
             >
-              {/* 窄屏单栏：详情态统一返回条（查看/编辑/新增都可回列表） */}
-              {detailActive && (
-                <div className="flex shrink-0 border-b border-[var(--color-border)] md:hidden">
+              {/* 窄屏单栏：详情态统一返回条（查看/编辑/新增都可回列表）。
+                  仅窄屏渲染（isNarrowViewport），桌面端不进 DOM——保证右栏
+                  详情头是首行、与左栏列表头分割线对齐（见 isNarrowViewport 注释） */}
+              {detailActive && isNarrowViewport && (
+                <div className="flex shrink-0 border-b border-[var(--color-border)]">
                   <button
                     type="button"
                     onClick={backToList}

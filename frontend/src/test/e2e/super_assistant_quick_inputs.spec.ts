@@ -319,6 +319,8 @@ test.describe('超级助手快捷输入', () => {
     const meta = dialog(page).getByTestId('quick-input-detail-meta')
     await expect(meta).toBeVisible()
     await expect(meta).toContainText('更新于')
+    // 桌面端返回条不进 DOM：右栏详情头恒为首行，与左栏列表头分割线对齐
+    await expect(dialog(page).getByTestId('quick-input-back-list')).toHaveCount(0)
 
     // 再选另一行：详情头部与正文跟随切换
     await rows.nth(1).getByText('追问模板').click()
