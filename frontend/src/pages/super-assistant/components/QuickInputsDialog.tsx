@@ -23,10 +23,10 @@ const DRAG_MIME = 'application/x-openontology-quick-input'
  * 「全部消息列表 / 查看指定消息」。列表整行点选 → 右侧查看/编辑/删除；
  * 列表顺序即快捷内容的展示顺序（上者优先），拖拽手柄调整顺序；
  * 重排乐观更新、失败回滚由 useQuickInputs 数据源负责，这里只 toast。窄屏（<md）
- * 由选中态驱动「列表 ↔ 详情」单栏切换，返回条由 JS 媒体查询驱动仅窄屏渲染，
- * 桌面端不进 DOM 以保证左右两栏表头分割线对齐；Esc 分层：新增/编辑表单先退
- * （丢弃未保存修改），窄屏详情查看态先回列表，其余交 Radix 关弹窗；点遮罩
- * 空白与右上关闭按钮同样整窗关闭（草稿一并丢弃）。
+ * 由选中态驱动「列表 ↔ 详情」单栏切换，返回条由 JS 媒体查询驱动仅窄屏渲染并
+ * 叠加 md:hidden 双保险，桌面端不占位以保证左右两栏表头分割线对齐；Esc 分层：
+ * 新增/编辑表单先退（丢弃未保存修改），窄屏详情查看态先回列表，其余交 Radix
+ * 关弹窗；点遮罩空白与右上关闭按钮同样整窗关闭（草稿一并丢弃）。
  */
 export default function QuickInputsDialog({
   open,
@@ -74,10 +74,13 @@ export default function QuickInputsDialog({
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   const [reorderPending, setReorderPending] = useState(false)
 
-  // 窄屏判定驱动返回条的渲染（而非 md:hidden 隐藏）：桌面端返回条不进 DOM，
+  // 窄屏判定驱动返回条的渲染（而非仅 md:hidden 隐藏）：桌面端返回条不进 DOM，
   // 详情头恒为右栏首个子元素，与左栏列表头的水平分割线结构对齐——不依赖
   // 客户端 CSS 媒体查询生效（曾出现陈旧样式下返回条在桌面渲染、右栏表头
   // 被顶低约 12px 的错位）。与列切换 CSS 的 md 断点同界（<768px 为窄屏）。
+  // 部分内嵌 webview 的合成视口变化不派发 change 事件，初始值可能卡在
+  // 挂载瞬间的窄宽——弹窗打开/详情态切换时重读兜底；返回条仍保留
+  // md:hidden，CSS 与 JS 任一生效桌面端即不占位（双保险）。
   const [isNarrowViewport, setIsNarrowViewport] = useState(
     () => window.matchMedia('(max-width: 767px)').matches,
   )
@@ -87,6 +90,9 @@ export default function QuickInputsDialog({
     mq.addEventListener('change', onChange)
     return () => mq.removeEventListener('change', onChange)
   }, [])
+  useEffect(() => {
+    if (open) setIsNarrowViewport(window.matchMedia('(max-width: 767px)').matches)
+  }, [open, selectedId, createOpen, editingId])
 
   const [prevOpen, setPrevOpen] = useState(false)
   useEffect(() => {
@@ -453,10 +459,11 @@ export default function QuickInputsDialog({
               data-testid="quick-input-detail"
             >
               {/* 窄屏单栏：详情态统一返回条（查看/编辑/新增都可回列表）。
-                  仅窄屏渲染（isNarrowViewport），桌面端不进 DOM——保证右栏
-                  详情头是首行、与左栏列表头分割线对齐（见 isNarrowViewport 注释） */}
+                  JS 仅窄屏渲染 + md:hidden 双保险：桌面端不进 DOM 且即便进
+                  DOM 也被 CSS 隐藏，右栏详情头恒为首行、与左栏列表头分割线
+                  对齐（见 isNarrowViewport 注释） */}
               {detailActive && isNarrowViewport && (
-                <div className="flex shrink-0 border-b border-[var(--color-border)]">
+                <div className="flex shrink-0 border-b border-[var(--color-border)] md:hidden">
                   <button
                     type="button"
                     onClick={backToList}
