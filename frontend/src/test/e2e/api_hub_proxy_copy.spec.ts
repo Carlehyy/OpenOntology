@@ -160,7 +160,8 @@ test('已转发接口可一键复制完整且不泄露平台敏感配置的调�
 
   await page.goto('/#/api-hub/interfaces')
   await expect(page.getByText('创建订单').first()).toBeVisible()
-  await page.getByRole('button', { name: 'HTTP 发布', exact: true }).click()
+  await page.getByRole('button', { name: '接口更多操作' }).click()
+  await page.getByRole('menuitem', { name: 'HTTP 发布', exact: true }).click()
 
   const dialog = page.getByRole('dialog', { name: /HTTP 发布/ })
   await dialog.getByRole('button', { name: '保存并生成调用包' }).click()

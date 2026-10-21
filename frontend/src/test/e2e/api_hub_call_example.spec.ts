@@ -98,10 +98,10 @@ test('非法 URL 不会白屏，并把 FastAPI 校验数组显示为可读提示
   const url = page.getByPlaceholder('https://example.com/api/resource')
   await url.fill('www.baidu.com')
   await expect(page.getByText(/请求 URL 必须是无账号信息的 http:\/\/ 或 https:\/\//)).toBeVisible()
-  await expect(page.getByText('接口清单')).toBeVisible()
+  await expect(page.getByRole('button', { name: '新建接口' })).toBeVisible()
 
   await url.fill('https://www.baidu.com')
   await page.getByRole('button', { name: '保存接口' }).click()
   await expect(page.getByRole('alert').filter({ hasText: '请求 URL：Value error' })).toBeVisible()
-  await expect(page.getByText('接口清单')).toBeVisible()
+  await expect(page.getByRole('button', { name: '新建接口' })).toBeVisible()
 })

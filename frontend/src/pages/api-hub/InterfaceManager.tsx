@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  ArrowDown, ArrowUp, Braces, Check, ChevronRight, CirclePlus, Copy, Download, Eye, EyeOff,
+  ArrowDown, ArrowUp, Braces, Check, ChevronDown, ChevronRight, CirclePlus, Copy, Download, Eye, EyeOff,
   FileCode2, FileUp, Folder, FolderInput, GripVertical, KeyRound, LoaderCircle, MoreHorizontal,
   Play, Plus, Search, Send, Share2, ShieldCheck, Trash2, X, Database,
 } from 'lucide-react'
@@ -554,6 +554,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     if (draft.http_enabled) {
       headerMenuItems.push({ key: 'copy-example', label: '复制 HTTP 示例', icon: <Copy size={13} />, onSelect: () => void copyPublishedExample() })
     }
+    headerMenuItems.push({ key: 'publish', label: draft.http_enabled ? '管理 HTTP 发布' : 'HTTP 发布', icon: <Share2 size={13} />, onSelect: openPublication })
   }
   // 桥接接口由平台进程内分发，外部 cURL 无法触达，不提供调试示例
   if (!isMcpBridge) {
@@ -574,13 +575,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
     <div ref={containerRef} className="grid h-full min-h-0 overflow-x-auto overflow-y-hidden p-1" style={{ gridTemplateColumns: `minmax(220px, ${sizes[0]}fr) 4px minmax(520px, ${sizes[1]}fr)` }}>
       <div aria-live="polite" className="sr-only">{moveAnnouncement}</div>
       <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-card shadow-sm">
-        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3 py-3">
-          <div className="shrink-0">
-            <h2 className="text-sm font-semibold">接口清单</h2>
-            <p className="text-xs text-[var(--color-text-tertiary)]">
-              {listSearch.trim() ? `显示 ${visibleInterfaces.length} / ${interfaces.length} 个接口` : `${interfaces.length} 个接口`}
-            </p>
-          </div>
+        <div className="flex min-h-16 shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3 py-3">
           {interfaces.length > 0 && (
             <label className="relative min-w-0 flex-1">
               <span className="sr-only">搜索接口</span>
@@ -605,8 +600,8 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           )}
           <Button size="sm" className="shrink-0" onClick={create}><CirclePlus size={13} />新建接口</Button>
         </div>
-        {/* 未入库草稿（新建/复制）不在清单中：独立成行就地说明，避免「点没点上」的
-            疑惑。不放标题块内——shrink-0 会把整行撑宽，窄视口下裁掉「新建接口」按钮。 */}
+        {/* 未入库草稿（新建/复制）不在清单中：独立成行就地说明，避免「点没上」的
+            疑惑。不放进头部行——窄视口下会把「新建接口」按钮挤出可视区。 */}
         {!draft.id && interfaces.length > 0 && (
           <div className="shrink-0 px-3 pt-2">
             <p className="text-xs text-[var(--color-warning)]">未保存，保存后才会出现在清单</p>
@@ -698,8 +693,21 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           ))}
         </div>
         <div className="grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--color-border)] bg-card px-3 py-[1.125rem]">
-          <Button variant="outline" size="sm" title="管理对外已发布 HTTP 接口的调用凭证" onClick={() => setProxyKeys(true)}><KeyRound size={13} />调用密钥</Button>
-          <Button variant="outline" size="sm" onClick={() => setSystemData(true)}><Database size={13} />系统数据</Button>
+          <button
+            type="button"
+            title="管理对外已发布 HTTP 接口的调用凭证"
+            onClick={() => setProxyKeys(true)}
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <KeyRound size={14} /> 调用密钥
+          </button>
+          <button
+            type="button"
+            onClick={() => setSystemData(true)}
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-dashed border-brand bg-brand-soft/70 px-3 text-xs font-medium text-brand-ink transition-all hover:border-brand-deep hover:bg-brand-mist active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Database size={14} /> 系统数据
+          </button>
         </div>
       </aside>
 
@@ -747,14 +755,9 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
             </div>
             {nameError && <p id="api-hub-name-error" role="alert" className="text-xs text-[var(--color-danger)]">{nameError}</p>}
           </div>
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-            {draft.id && (
-              <Button size="sm" onClick={openPublication}>
-                <Share2 size={14} />{draft.http_enabled ? '管理 HTTP 发布' : 'HTTP 发布'}
-              </Button>
-            )}
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2 pr-1">
             {headerMenuItems.length > 0 && (
-              <ActionMenu ariaLabel="接口更多操作" title="更多操作" items={headerMenuItems} />
+              <ActionMenu ariaLabel="接口更多操作" title="更多操作" label="更多操作" items={headerMenuItems} />
             )}
           </div>
         </div>
@@ -920,7 +923,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
   )
 }
 
-function ActionMenu({ ariaLabel, title, items }: { ariaLabel: string; title?: string; items: ActionMenuItem[] }) {
+function ActionMenu({ ariaLabel, title, items, label }: { ariaLabel: string; title?: string; items: ActionMenuItem[]; label?: string }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -967,9 +970,11 @@ function ActionMenu({ ariaLabel, title, items }: { ariaLabel: string; title?: st
             setOpen(true)
           }
         }}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className={label
+          ? 'inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+          : 'flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'}
       >
-        <MoreHorizontal size={14} />
+        {label ? <>{label}<ChevronDown size={13} /></> : <MoreHorizontal size={14} />}
       </button>
       {open && (
         <>

@@ -204,7 +204,8 @@ test('A02 有未保存修改时发布需先确认，确认后先保存再打开�
 
   await expect(page.getByLabel('接口名称')).toHaveValue('订单详情')
   await page.getByLabel('接口名称').fill('订单详情（华东）')
-  await page.getByRole('button', { name: 'HTTP 发布' }).click()
+  await page.getByRole('button', { name: '接口更多操作' }).click()
+  await page.getByRole('menuitem', { name: 'HTTP 发布', exact: true }).click()
 
   const confirm = page.getByRole('dialog', { name: '当前接口有未保存修改' })
   await expect(confirm).toBeVisible()
@@ -269,23 +270,26 @@ test('A13 调用密钥弹窗在 800×600 视口下标题与关闭按钮不被遮
   await expectTopmost(dialog.getByLabel('关闭', { exact: true }))
 })
 
-test('A14 搜索时显示「显示 x / y 个接口」且匹配请求方法', async ({ page }) => {
+test('A14 搜索按名称与方法过滤清单，头部不再展示计数文案', async ({ page }) => {
   await mockApp(page, { listInterfaces: () => ({ body: [ORDER_QUERY, ORDER_DELETE] }) })
   await gotoInterfaces(page)
 
-  await expect(page.getByText('2 个接口')).toBeVisible()
+  const rows = page.getByRole('button', { name: /^(GET|DELETE|POST|PUT|PATCH) / })
+  await expect(rows).toHaveCount(2)
+  await expect(page.getByText(/个接口/)).toHaveCount(0)
+
   const search = page.getByPlaceholder('搜索名称、URL、分组或方法')
 
   await search.fill('删除')
-  await expect(page.getByText('显示 1 / 2 个接口')).toBeVisible()
+  await expect(rows).toHaveCount(1)
 
   await search.fill('delete')
-  await expect(page.getByText('显示 1 / 2 个接口')).toBeVisible()
+  await expect(rows).toHaveCount(1)
 
   await search.fill('不存在的接口')
-  await expect(page.getByText('显示 0 / 2 个接口')).toBeVisible()
+  await expect(rows).toHaveCount(0)
   await page.getByLabel('清除搜索').click()
-  await expect(page.getByText('2 个接口')).toBeVisible()
+  await expect(rows).toHaveCount(2)
 })
 
 test('B01 未入库草稿在清单标题下就地提示，切回已保存接口后消失', async ({ page }) => {
@@ -311,7 +315,7 @@ test('B01 未入库草稿在清单标题下就地提示，切回已保存接口�
   await expect(page.getByLabel('接口名称')).toHaveValue('订单详情 副本')
 })
 
-test('B01 保存草稿成功后提示消失，清单计数与保存按钮同步更新', async ({ page }) => {
+test('B01 保存草稿成功后提示消失，清单行与保存按钮同步更新', async ({ page }) => {
   let created: Record<string, unknown> | null = null
   await mockApp(page, {
     listInterfaces: () => ({ body: created ? [ORDER_QUERY, created] : [ORDER_QUERY] }),
@@ -328,7 +332,7 @@ test('B01 保存草稿成功后提示消失，清单计数与保存按钮同步�
   await page.getByRole('button', { name: '保存接口' }).click()
 
   await expect(page.getByText('未保存，保存后才会出现在清单')).toHaveCount(0)
-  await expect(page.getByText('2 个接口')).toBeVisible()
+  await expect(page.getByRole('button', { name: /^(GET|DELETE|POST|PUT|PATCH) / })).toHaveCount(2)
   await expect(page.getByRole('button', { name: '保存配置' })).toBeVisible()
 })
 
