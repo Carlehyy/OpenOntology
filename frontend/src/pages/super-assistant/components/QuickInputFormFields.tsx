@@ -5,7 +5,8 @@ import { cn } from '@/lib/utils'
 /**
  * 快捷内容「新增/编辑」两个表单共用的字段区：标题 + 详情两字段 + 内联错误行。
  * 此前两处各自手写一份且输入框底色分叉（新增 elevated、编辑 base），
- * 抽出为单一实现并统一 elevated 底；按钮行（收起/添加、取消/保存）差异留给调用方。
+ * 抽出为单一实现并统一 elevated 底；提交按钮行由调用方收进表单头行。
+ * 字段区整体纵向填充父容器（flex-1 链路），内容详情 textarea 撑满剩余高度；
  * 校验态按 DESIGN.md §4.4：只改边框色，焦点环仍为 ring-ring；错误随输入清除
  * 由调用方的 onChange 处理（error/errorField 同步清空）。
  */
@@ -37,8 +38,8 @@ export function QuickInputFormFields({
   contentRef,
 }: QuickInputFormFieldsProps) {
   return (
-    <>
-      <div className="space-y-1.5">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="shrink-0 space-y-1.5">
         <label htmlFor={`${idPrefix}-title`} className="text-xs font-medium text-[var(--color-text-primary)]">
           内容标题（最长 100 字）
         </label>
@@ -58,8 +59,8 @@ export function QuickInputFormFields({
           )}
         />
       </div>
-      <div className="mt-3 space-y-1.5">
-        <label htmlFor={`${idPrefix}-content`} className="text-xs font-medium text-[var(--color-text-primary)]">
+      <div className="mt-3 flex min-h-0 flex-1 flex-col space-y-1.5">
+        <label htmlFor={`${idPrefix}-content`} className="shrink-0 text-xs font-medium text-[var(--color-text-primary)]">
           内容详情（最长 2000 字）
         </label>
         <textarea
@@ -67,19 +68,18 @@ export function QuickInputFormFields({
           id={`${idPrefix}-content`}
           value={content}
           onChange={event => onContentChange(event.target.value)}
-          rows={4}
           placeholder="要插入的完整内容，支持多行。"
           maxLength={2000}
           aria-invalid={errorField === 'content' || undefined}
           aria-describedby={error && errorField === 'content' ? `${idPrefix}-error` : undefined}
           data-testid={`${idPrefix}-content`}
           className={cn(
-            'w-full rounded-md border bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring',
+            'min-h-24 w-full flex-1 resize-none rounded-md border bg-[var(--color-bg-elevated)] px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring',
             errorField === 'content' ? 'border-[var(--color-danger)]' : 'border-[var(--color-border)]',
           )}
         />
       </div>
-      {error && <p id={`${idPrefix}-error`} className="mt-2 text-xs text-[var(--color-danger)]">{error}</p>}
-    </>
+      {error && <p id={`${idPrefix}-error`} className="mt-2 shrink-0 text-xs text-[var(--color-danger)]">{error}</p>}
+    </div>
   )
 }

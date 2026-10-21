@@ -5,8 +5,8 @@ import {
   contentPreview, isAboveMidline, moveItem, validateQuickInput,
 } from '../../pages/super-assistant/components/quickInputLogic.ts'
 
-describe('moveItem（拖拽/上移下移共用的重排原语）', () => {
-  it('上移与下移：把目标行移到新位置，其余顺序保持', () => {
+describe('moveItem（拖拽重排原语）', () => {
+  it('跨位置移动：把目标行移到新位置，其余顺序保持', () => {
     assert.deepEqual(moveItem(['a', 'b', 'c'], 2, 0), ['c', 'a', 'b'])
     assert.deepEqual(moveItem(['a', 'b', 'c'], 0, 2), ['b', 'c', 'a'])
     assert.deepEqual(moveItem(['a', 'b', 'c', 'd'], 1, 2), ['a', 'c', 'b', 'd'])

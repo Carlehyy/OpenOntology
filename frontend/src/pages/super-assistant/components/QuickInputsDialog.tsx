@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowLeft, ChevronDown, ChevronUp, GripVertical, Pencil, Plus, Trash2, Zap,
+  ArrowLeft, GripVertical, Pencil, Plus, Trash2, Zap,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -21,11 +21,11 @@ const DRAG_MIME = 'application/x-openontology-quick-input'
 /**
  * 快捷内容设置弹窗：左列表 + 右详情双栏，布局语言对齐 NotificationsDialog 的
  * 「全部消息列表 / 查看指定消息」。列表整行点选 → 右侧查看/编辑/删除；
- * 列表顺序即快捷内容的展示顺序（上者优先），拖拽手柄与↑↓按钮是同一重排
- * 通道的两个入口（键盘等价路径）；重排乐观更新、失败回滚由 useQuickInputs
- * 数据源负责，这里只 toast。窄屏（<md）由选中态驱动「列表 ↔ 详情」单栏切换
- * （详情态顶部返回条）；Esc 分层：新增/编辑表单先退（丢弃未保存修改），
- * 窄屏详情查看态先回列表，其余交 Radix 关弹窗。
+ * 列表顺序即快捷内容的展示顺序（上者优先），拖拽手柄调整顺序；
+ * 重排乐观更新、失败回滚由 useQuickInputs 数据源负责，这里只 toast。
+ * 窄屏（<md）由选中态驱动「列表 ↔ 详情」单栏切换（详情态顶部返回条）；
+ * Esc 分层：新增/编辑表单先退（丢弃未保存修改），窄屏详情查看态先回列表，
+ * 其余交 Radix 关弹窗；点遮罩空白与右上关闭按钮同样整窗关闭（草稿一并丢弃）。
  */
 export default function QuickInputsDialog({
   open,
@@ -306,13 +306,6 @@ export default function QuickInputsDialog({
       .finally(() => setReorderPending(false))
   }
 
-  const moveBy = (index: number, delta: -1 | 1) => {
-    const next = moveItem(items, index, index + delta)
-    if (next.length !== items.length || next.some((item, i) => item.id !== items[i].id)) {
-      commitReorder(next.map(item => item.id))
-    }
-  }
-
   const dragFrom = dragId ? items.findIndex(item => item.id === dragId) : -1
   const effectiveTo = dropIndex === null ? -1 : (dropIndex > dragFrom ? dropIndex - 1 : dropIndex)
   const dragging = dragId !== null && effectiveTo !== dragFrom
@@ -343,21 +336,19 @@ export default function QuickInputsDialog({
         <DialogShell
           size="large"
           title="快捷内容设置"
-          description="在输入框点击 ⚡ 即可将所选内容插入光标处；列表顺序即展示顺序，可拖拽或用箭头按钮调整。"
+          description="在输入框点击 ⚡ 即可将所选内容插入光标处；列表顺序即展示顺序，可拖拽调整。"
           onClose={closeDialog}
           icon={<Zap size={18} />}
           onEscapeKeyDown={handleDialogEscape}
-          // 误触遮罩不应关弹窗：新增/编辑草稿会随关闭一并丢失；只挡遮罩——
-          // Esc 分层回退与右上关闭按钮保持可用（工作台型弹窗惯例）
-          onInteractOutside={event => event.preventDefault()}
           contentClassName="h-[min(85dvh,42rem)]"
         >
           <div className="flex min-h-0 flex-1" data-testid="quick-inputs-dialog">
             <p className="sr-only" aria-live="polite">{dragId ? '正在拖拽调整顺序，松开完成' : ''}</p>
 
-            {/* —— 左：列表列（宽屏固定 20rem；窄屏列表态全宽） —— */}
+            {/* —— 左：列表列（宽屏固定 16rem，右栏占其余空间，两栏约 1:2 对齐
+                NotificationsDialog 列表/阅读栏比例；窄屏列表态全宽） —— */}
             <div
-              className={`${detailActive ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-[var(--color-border)] md:w-[20rem]`}
+              className={`${detailActive ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-[var(--color-border)] md:w-[16rem]`}
             >
               {/* 列表列头：计数 + 新增入口；h-10 与右侧详情头同高——两列分割线落在同一水平线 */}
               <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-3">
@@ -391,7 +382,7 @@ export default function QuickInputsDialog({
                     <p className="text-xs leading-5 text-[var(--color-text-secondary)]">还没有快捷内容，添加一条常用内容试试。</p>
                   </div>
                 ) : (
-                  <div className="space-y-1" role="list" aria-label="快捷内容列表，拖拽或使用上移下移调整展示优先级">
+                  <div className="space-y-1" role="list" aria-label="快捷内容列表，拖拽调整展示优先级">
                     {items.map((item, index) => (
                       <div key={item.id}>
                         {dragging && dropIndex === index && <div className={lineClass} />}
@@ -416,14 +407,13 @@ export default function QuickInputsDialog({
                               setDragId(item.id)
                             }}
                             onDragEnd={() => { setDragId(null); setDropIndex(null) }}
-                            aria-label={`拖拽调整 ${item.title} 的展示顺序（键盘用户请使用上移/下移按钮）`}
+                            aria-label={`拖拽调整 ${item.title} 的展示顺序`}
                             title="拖拽调整展示顺序"
                             className="flex h-8 w-7 shrink-0 cursor-grab items-center justify-center rounded text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] active:cursor-grabbing"
                           >
                             <GripVertical size={14} />
                           </span>
-                          <span className="w-6 shrink-0 text-center font-mono text-xs text-[var(--color-text-tertiary)]">#{index + 1}</span>
-                          {/* 选中区是独立 button（不可与上移/下移按钮嵌套）；全文在详情区展示，行上不再挂 title 悬浮提示 */}
+                          {/* 选中区独立 button：整行点选进详情；全文在详情区展示，行上不再挂 title 悬浮提示 */}
                           <button
                             type="button"
                             onClick={() => selectItem(item)}
@@ -433,28 +423,6 @@ export default function QuickInputsDialog({
                             <span className="block truncate text-xs font-medium text-[var(--color-text-primary)]">{item.title}</span>
                             <span className="block truncate text-xs text-[var(--color-text-tertiary)]">{contentPreview(item.content)}</span>
                           </button>
-                          <div className="flex shrink-0 items-center gap-0.5">
-                            <button
-                              type="button"
-                              onClick={() => moveBy(index, -1)}
-                              disabled={index === 0 || reorderPending}
-                              aria-label={`上移 ${item.title}`}
-                              data-testid="quick-input-move-up"
-                              className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30"
-                            >
-                              <ChevronUp size={13} />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => moveBy(index, 1)}
-                              disabled={index === items.length - 1 || reorderPending}
-                              aria-label={`下移 ${item.title}`}
-                              data-testid="quick-input-move-down"
-                              className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30"
-                            >
-                              <ChevronDown size={13} />
-                            </button>
-                          </div>
                         </div>
                         {index === items.length - 1 && dragging && dropIndex === items.length && <div className={lineClass} />}
                       </div>
@@ -490,25 +458,25 @@ export default function QuickInputsDialog({
                   className="flex min-h-0 flex-1 flex-col"
                   data-testid="quick-input-create-form"
                 >
-                  <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-4">
-                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">新增快捷内容</h3>
-                    <div className="mt-3">
-                      <QuickInputFormFields
-                        idPrefix="quick-input-create"
-                        title={createTitle}
-                        content={createContent}
-                        error={createError}
-                        errorField={createErrorField}
-                        onTitleChange={changeCreateTitle}
-                        onContentChange={changeCreateContent}
-                        titleRef={createTitleRef}
-                        contentRef={createContentRef}
-                      />
-                    </div>
+                  {/* 表单头行与查看态详情头同构（h-10 + 分割线）：标题居左、
+                      取消/添加收进行尾，正文区得以整体纵向填充 */}
+                  <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4">
+                    <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-text-primary)]">新增快捷内容</h3>
+                    <Button type="button" size="sm" variant="outline" className="text-sm" onClick={cancelCreate}>取消</Button>
+                    <Button type="submit" size="sm" className="text-sm" loading={creating} data-testid="quick-input-create-submit">添加</Button>
                   </div>
-                  <div className="flex shrink-0 justify-end gap-2 border-t border-[var(--color-border)] px-4 py-3">
-                    <Button type="button" variant="outline" onClick={cancelCreate}>取消</Button>
-                    <Button type="submit" loading={creating} data-testid="quick-input-create-submit">添加</Button>
+                  <div className="scrollbar-none flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+                    <QuickInputFormFields
+                      idPrefix="quick-input-create"
+                      title={createTitle}
+                      content={createContent}
+                      error={createError}
+                      errorField={createErrorField}
+                      onTitleChange={changeCreateTitle}
+                      onContentChange={changeCreateContent}
+                      titleRef={createTitleRef}
+                      contentRef={createContentRef}
+                    />
                   </div>
                 </form>
               ) : editingId ? (
@@ -517,25 +485,23 @@ export default function QuickInputsDialog({
                   className="flex min-h-0 flex-1 flex-col"
                   data-testid="quick-input-edit-form"
                 >
-                  <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto p-4">
-                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">编辑快捷内容</h3>
-                    <div className="mt-3">
-                      <QuickInputFormFields
-                        idPrefix="quick-input-edit"
-                        title={editTitle}
-                        content={editContent}
-                        error={editError}
-                        errorField={editErrorField}
-                        onTitleChange={changeEditTitle}
-                        onContentChange={changeEditContent}
-                        titleRef={editTitleRef}
-                        contentRef={editContentRef}
-                      />
-                    </div>
+                  <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4">
+                    <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-text-primary)]">编辑快捷内容</h3>
+                    <Button type="button" size="sm" variant="outline" className="text-sm" onClick={exitEdit}>取消</Button>
+                    <Button type="submit" size="sm" className="text-sm" loading={savingEdit} data-testid="quick-input-edit-submit">保存</Button>
                   </div>
-                  <div className="flex shrink-0 justify-end gap-2 border-t border-[var(--color-border)] px-4 py-3">
-                    <Button type="button" variant="outline" onClick={exitEdit}>取消</Button>
-                    <Button type="submit" loading={savingEdit} data-testid="quick-input-edit-submit">保存</Button>
+                  <div className="scrollbar-none flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+                    <QuickInputFormFields
+                      idPrefix="quick-input-edit"
+                      title={editTitle}
+                      content={editContent}
+                      error={editError}
+                      errorField={editErrorField}
+                      onTitleChange={changeEditTitle}
+                      onContentChange={changeEditContent}
+                      titleRef={editTitleRef}
+                      contentRef={editContentRef}
+                    />
                   </div>
                 </form>
               ) : selected ? (

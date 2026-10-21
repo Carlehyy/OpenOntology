@@ -1,11 +1,12 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 // 超级助手快捷输入（mocked）：小卡片展示与插入语义（光标锚点插入 / 未交互
-// 拼接末尾）、设置弹窗全链路（列表+详情双栏：新增/编辑/删除/键盘上移下移的
-// reorder 契约、点选与切换、Esc 分层回退、窄屏列表⇄详情单栏切换）、空态与
-// 加载失败重试。按 AGENTS.md 副作用交互规范，插入效果断言最终落在
-// textarea 实际值上（含插入位置），不以提示出现代替；真实拖拽排序在
-// 真实环境人工验收（HTML5 DnD 在无头下的合成事件不可靠）。
+// 拼接末尾）、设置弹窗全链路（列表+详情双栏：新增/编辑/删除、点选与切换、
+// Esc 分层回退、点遮罩空白关闭、窄屏列表⇄详情单栏切换）、空态与加载失败重试。
+// 按 AGENTS.md 副作用交互规范，插入效果断言最终落在 textarea 实际值上（含
+// 插入位置），不以提示出现代替；列表行去序号与上移/下移按钮后，重排仅剩
+// 拖拽通道，其契约由 moveItem 单测覆盖，真实拖拽排序在真实环境人工验收
+// （HTML5 DnD 在无头下的合成事件不可靠）。
 
 const json = (route: Route, data: unknown, status = 200) => route.fulfill({
   status,
@@ -228,7 +229,7 @@ test.describe('超级助手快捷输入', () => {
     await expect(menu(page).getByText('自我介绍')).toBeVisible()
   })
 
-  test('设置弹窗全链路：新增→编辑→上移重排→删除', async ({ page }) => {
+  test('设置弹窗全链路：新增→编辑→删除', async ({ page }) => {
     await seedAuth(page)
     const mocks = await mockApis(page)
     await openWorkbench(page)
@@ -279,15 +280,8 @@ test.describe('超级助手快捷输入', () => {
     await expect(detail).toContainText('自我介绍（新版）')
     expect(mocks.updateBodies).toEqual([{ title: '自我介绍（新版）', content: INTRO }])
 
-    // 键盘等价排序：第 2 行上移 → PUT reorder 携带全量新顺序，列表即时重排
-    await rows.nth(1).getByTestId('quick-input-move-up').click()
-    await expect(rows.nth(0)).toContainText('追问模板')
-    await expect(rows.nth(1)).toContainText('自我介绍（新版）')
-    // 全量顺序契约：ids 覆盖该用户全部条目（含本次新建的周报模板）
-    expect(mocks.reorderBodies).toEqual([['qi-2', 'qi-1', 'qi-created-1']])
-
     // 删除：点选行 → 详情头部删除 → 确认框 → 行消失、选中清空回占位
-    await rows.nth(0).getByText('追问模板').click()
+    await rows.nth(1).getByText('追问模板').click()
     await dialog(page).getByTestId('quick-input-delete').click()
     await page.getByRole('button', { name: '删除', exact: true }).click()
     await expect(rows).toHaveCount(2)
@@ -358,6 +352,24 @@ test.describe('超级助手快捷输入', () => {
     // 第二层：桌面视口无选中回退层，Esc 交 Radix 关弹窗
     await page.keyboard.press('Escape')
     await expect(dialog(page)).toBeHidden()
+  })
+
+  test('点遮罩空白关闭弹窗：未保存的新增草稿随关闭一并丢弃', async ({ page }) => {
+    await seedAuth(page)
+    const mocks = await mockApis(page)
+    await openWorkbench(page)
+
+    await quickButton(page).click()
+    await menu(page).getByTestId('super-assistant-quick-input-settings').click()
+    await expect(dialog(page)).toBeVisible()
+
+    // 展开新增表单并留草稿：点弹窗外的遮罩空白 → 整窗关闭，草稿不落库
+    await dialog(page).getByTestId('quick-input-create-toggle').click()
+    await dialog(page).getByTestId('quick-input-create-title').fill('不应落库的草稿')
+    await dialog(page).getByTestId('quick-input-create-content').fill('遮罩关闭丢弃的内容')
+    await page.mouse.click(8, 8)
+    await expect(dialog(page)).toBeHidden()
+    expect(mocks.createBodies).toHaveLength(0)
   })
 
   test('窄屏单栏：选中后列表隐藏、返回条可见，点返回回列表', async ({ page }) => {
