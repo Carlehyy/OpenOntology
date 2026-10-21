@@ -320,6 +320,13 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await page.getByRole('button', { name: '查看历史版本' }).click()
   await expect(page.getByText('每次新建版本都会复制一份完整快照')).toBeVisible()
   await expect(page.getByTestId('version-tree')).toBeVisible()
+  // 状态图例只保留四种：当前发布 / 历史发布 / 草稿态 / 试跑态，不再单列「已发布的分支」
+  const legend = page.getByLabel('版本状态图例')
+  await expect(legend).toContainText('当前发布')
+  await expect(legend).toContainText('历史发布')
+  await expect(legend).toContainText('草稿态')
+  await expect(legend).toContainText('试跑态')
+  await expect(legend).not.toContainText('已发布的分支')
   await expect(page.getByTestId('version-node-v0')).toContainText('当前发布')
   const draftRow = page.getByTestId('version-node-v0.1')
   await expect(draftRow).toContainText('草稿态')
@@ -593,6 +600,8 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await page.getByRole('button', { name: '确认发布' }).click()
   await expect(page.getByTestId('version-node-v1')).toContainText('当前发布', { timeout: 20_000 })
   await expect(draftRow).toContainText('已发布为 v1')
+  // 已晋升分支不再单列状态，与主干历史版本统一呈现「历史发布」徽章
+  await expect(draftRow).toContainText('历史发布')
   const evolvedVersionOrder = await page.getByTestId('version-tree')
     .locator('article[data-testid^="version-node-"]')
     .evaluateAll(rows => rows.map(row => row.getAttribute('data-testid')?.replace('version-node-', '')))

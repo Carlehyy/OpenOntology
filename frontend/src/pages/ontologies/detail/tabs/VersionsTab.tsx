@@ -25,7 +25,7 @@ import {
   type OntologyVersionNode as VersionNode,
 } from '@/api/v2/ontology-versions'
 
-type VersionStage = 'current' | 'release' | 'draft' | 'trial' | 'archived'
+type VersionStage = 'current' | 'release' | 'draft' | 'trial'
 
 function errorText(error: any) {
   const detail = error?.response?.data?.detail ?? error?.detail
@@ -47,8 +47,9 @@ function errorIssues(error: any): Array<{ message: string; kind?: string; field?
 
 function stageOf(node: VersionNode, currentReleaseId?: string): VersionStage {
   if (node.id === currentReleaseId) return 'current'
-  if (node.node_kind === 'release') return 'release'
-  if (node.lifecycle_status === 'superseded') return 'archived'
+  // 已晋升的分支（superseded 草稿）与主干历史版本统一视作「历史发布」，
+  // 状态只保留四种；具体晋升去向由徽章悬浮提示补充。
+  if (node.node_kind === 'release' || node.lifecycle_status === 'superseded') return 'release'
   if (node.lifecycle_status === 'trial_ready' && node.latest_trial?.status === 'passed') return 'trial'
   return 'draft'
 }
@@ -60,8 +61,8 @@ const STAGE_META: Record<VersionStage, { label: string; badge: 'success' | 'warn
     bar: 'border-l-brand',
   },
   release: {
-    label: '历史发布', badge: 'default', dot: 'bg-accent ring-[var(--color-border-hover)]',
-    card: 'border-border bg-card hover:border-border',
+    label: '历史发布', badge: 'default', dot: 'bg-[var(--color-border-hover)] ring-[var(--color-border-hover)]',
+    card: 'border-border bg-muted hover:border-border',
     bar: 'border-l-border',
   },
   draft: {
@@ -73,11 +74,6 @@ const STAGE_META: Record<VersionStage, { label: string; badge: 'success' | 'warn
     label: '试跑态', badge: 'warning', dot: 'bg-[var(--color-warning)] ring-[var(--color-warning)]',
     card: 'border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] hover:border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)]',
     bar: 'border-l-[var(--color-warning)]',
-  },
-  archived: {
-    label: '已发布的分支', badge: 'default', dot: 'bg-viz-violet ring-viz-violet',
-    card: 'border-viz-violet-soft bg-viz-violet-soft hover:border-viz-violet-soft',
-    bar: 'border-l-viz-violet',
   },
 }
 
@@ -428,10 +424,11 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
     const deletableStage = editing || trial
     const isLeaf = children.length === 0
     const promotedToVersion = promotedTarget.get(node.id) || null
-    // 徽章文案与顶部图例统一为「已发布的分支」，具体晋升成哪个发布版收进悬浮提示，
-    // 避免版本号后出现第二种“发布”措辞；sr-only 文本保留无障碍语义。
+    // 已晋升分支与主干历史版本统一展示为「历史发布」徽章，具体晋升成哪个发布版
+    // 收进悬浮提示；sr-only 文本保留无障碍语义。
     const stageText = meta.label
-    const promotedTooltip = stage === 'archived' && promotedToVersion
+    const promotedBranch = stage === 'release' && node.node_kind !== 'release'
+    const promotedTooltip = promotedBranch && promotedToVersion
       ? `该分支已完成隔离试跑并晋升为正式发布 ${promotedToVersion}`
       : null
     const parentNode = node.parent_version_id
@@ -443,7 +440,9 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
       && node.base_release_id
       && node.base_release_id !== parentNode.id
     ) ? parentNode.version_number : null
-    const historicalRelease = stage === 'release'
+    // 「创建恢复草稿」只属于主干历史发布；已晋升分支虽同呈历史发布样式，
+    // 但仍是分支节点，沿用「创建新版本」入口与分支创建弹窗语义。
+    const historicalRelease = node.node_kind === 'release' && stage === 'release'
     const menuItemClass = 'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:hover:bg-transparent'
 
     return (
@@ -463,7 +462,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
               <div className="flex min-w-0 items-center gap-2">
                 {node.node_kind === 'release'
                   ? <GitCommitHorizontal size={16} className={`shrink-0 ${stage === 'current' ? 'text-brand-ink' : 'text-muted-foreground'}`} />
-                  : <GitBranch size={16} className={`shrink-0 ${trial ? 'text-[var(--color-warning)]' : 'text-[var(--color-info)]'}`} />}
+                  : <GitBranch size={16} className={`shrink-0 ${trial ? 'text-[var(--color-warning)]' : promotedBranch ? 'text-muted-foreground' : 'text-[var(--color-info)]'}`} />}
                 <span className="shrink-0 font-mono text-base font-semibold tabular-nums text-foreground">{node.version_number}</span>
                 <span className="shrink-0" title={promotedTooltip || undefined}>
                   <StageBadge stage={stage} label={stageText} />
@@ -680,10 +679,9 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         </div>
         <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground" aria-label="版本状态图例">
           <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-brand" />当前发布</span>
-          <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-accent" />历史发布</span>
+          <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-border-hover)]" />历史发布</span>
           <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-info)]" />草稿态</span>
           <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-[var(--color-warning)]" />试跑态</span>
-          <span className="inline-flex items-center gap-1.5"><i aria-hidden="true" className="h-2 w-2 rounded-full bg-viz-violet" />已发布的分支</span>
         </div>
         {roots.rootNodes.length > 0 ? (
           <div role="tree" className="ml-2 space-y-2.5 border-l border-border pl-6" data-testid="version-tree">
@@ -1023,7 +1021,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         onClose={() => setDeleteTarget(null)}
         onConfirm={() => deleteTarget && deleteVersion.mutate(deleteTarget)}
         title={`删除叶子分支 ${deleteTarget?.version_number || ''}`}
-        description="该草稿或试跑快照及其隔离试跑数据将被永久删除，版本编号不会复用。发布版、已发布的分支以及仍含下级分支的节点始终不可删除。"
+        description="该草稿或试跑快照及其隔离试跑数据将被永久删除，版本编号不会复用。发布版、已晋升为发布的分支以及仍含下级分支的节点始终不可删除。"
         confirmText="删除此分支"
         variant="danger"
         loading={deleteVersion.isPending}
