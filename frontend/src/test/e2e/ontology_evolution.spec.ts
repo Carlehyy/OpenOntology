@@ -320,8 +320,9 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await page.getByRole('button', { name: '查看历史版本' }).click()
   await expect(page.getByText('每次新建版本都会复制一份完整快照')).toBeVisible()
   await expect(page.getByTestId('version-tree')).toBeVisible()
-  // 状态图例只保留四种：当前发布 / 历史发布 / 草稿态 / 试跑态，不再单列「已发布的分支」
-  const legend = page.getByLabel('版本状态图例')
+  // 状态图例只保留四种：当前发布 / 历史发布 / 草稿态 / 试跑态，不再单列「已发布的分支」。
+  // 总览画布卡片也带同名 aria-label，必须把定位收敛到弹窗内避免 strict-mode 冲突。
+  const legend = page.getByRole('dialog', { name: '本体版本演进' }).getByLabel('版本状态图例')
   await expect(legend).toContainText('当前发布')
   await expect(legend).toContainText('历史发布')
   await expect(legend).toContainText('草稿态')
