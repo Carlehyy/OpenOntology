@@ -700,7 +700,6 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
         <div className="grid shrink-0 grid-cols-2 gap-2 border-t border-[var(--color-border)] bg-card px-3 py-[1.125rem]">
           <Button variant="outline" size="sm" title="管理对外已发布 HTTP 接口的调用凭证" onClick={() => setProxyKeys(true)}><KeyRound size={13} />调用密钥</Button>
           <Button variant="outline" size="sm" onClick={() => setSystemData(true)}><Database size={13} />系统数据</Button>
-          <p className="col-span-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">调用密钥：给第三方调用已发布接口用的鉴权凭证</p>
         </div>
       </aside>
 
@@ -803,7 +802,7 @@ export default function InterfaceManager({ interfaces, reload, onError }: Props)
           role="tabpanel"
           id={`api-hub-editor-panel-${editorTab}`}
           aria-labelledby={`api-hub-editor-tab-${editorTab}`}
-          className="min-h-[150px] shrink-0 overflow-y-auto border-b border-[var(--color-border)] p-4"
+          className="max-h-[45%] shrink-0 overflow-y-auto border-b border-[var(--color-border)] p-4"
         >
           {editorTab === 'params' && <KVEditor value={draft.query_params} onChange={value => patchDraft('query_params', value)} keyPlaceholder="参数名" valuePlaceholder="参数值" />}
           {editorTab === 'headers' && <KVEditor value={draft.headers} onChange={value => patchDraft('headers', value)} keyPlaceholder="Header" valuePlaceholder="值" />}
