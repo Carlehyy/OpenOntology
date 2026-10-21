@@ -99,7 +99,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    volumes: [./backend:/app]
+    # ./backend 源码 bind mount 会盖掉镜像内安装依赖的 /app/.venv，必须像
+    # frontend 的 /app/node_modules 一样用匿名卷保留镜像 venv，否则全新
+    # 机器上 alembic/uvicorn 根本不在 PATH 里（镜像 venv 是 linux 二进制，
+    # 宿主 macOS venv 也无法在容器内执行）。
+    volumes: [./backend:/app, /app/.venv]
     command: alembic upgrade head
     restart: "no"
 
@@ -142,7 +146,8 @@ services:
       # operator can still inspect diagnostics when Chromium is unhealthy.
       browser:
         condition: service_started
-    volumes: [./backend:/app, ./uploads:/uploads]
+    # /app/.venv 匿名卷保留镜像 venv，原因同 migrate 服务。
+    volumes: [./backend:/app, /app/.venv, ./uploads:/uploads]
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 
@@ -170,7 +175,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    volumes: [./backend:/app, ./uploads:/uploads]
+    # /app/.venv 匿名卷保留镜像 venv，原因同 migrate 服务。
+    volumes: [./backend:/app, /app/.venv, ./uploads:/uploads]
     command: python -m app.data_channel.pipeline_tasks.nats_executor
     healthcheck:
       # executor 没有进程内 ping 接口；主循环每 5 秒刷新心跳文件 mtime。
@@ -204,6 +210,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./backend:/app
+      - /app/.venv
       - ./uploads:/uploads
       - /var/run/docker.sock:/var/run/docker.sock
     command: python -m app.data_channel.pipeline_tasks.nats_executor
