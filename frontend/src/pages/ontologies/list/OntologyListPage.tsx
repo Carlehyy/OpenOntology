@@ -665,11 +665,11 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
         />
 
         {isLoading ? (
-          <div className="flex min-h-[300px] items-center justify-center rounded-2xl border border-border bg-card sm:col-span-1 lg:col-span-2 xl:col-span-3">
+          <div className="flex min-h-[300px] items-center justify-center rounded-2xl border border-border bg-card sm:col-span-2 lg:col-span-3 xl:col-span-4">
             <LoadingState message="加载本体列表..." />
           </div>
         ) : isError ? (
-          <div className="flex min-h-[300px] flex-col items-center justify-center gap-3 rounded-2xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-6 text-center sm:col-span-1 lg:col-span-2 xl:col-span-3" role="alert">
+          <div className="flex min-h-[300px] flex-col items-center justify-center gap-3 rounded-2xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-6 text-center sm:col-span-2 lg:col-span-3 xl:col-span-4" role="alert">
             <p className="text-sm text-[var(--color-danger)]">本体列表加载失败，请检查网络连接后重试。</p>
             <button
               type="button"
@@ -680,7 +680,7 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
             </button>
           </div>
         ) : filteredItems.length === 0 ? (
-          <div className="flex min-h-[300px] flex-col items-center justify-center rounded-2xl border border-border bg-card px-6 text-center sm:col-span-1 lg:col-span-2 xl:col-span-3">
+          <div className="flex min-h-[300px] flex-col items-center justify-center rounded-2xl border border-border bg-card px-6 text-center sm:col-span-2 lg:col-span-3 xl:col-span-4">
             <Network size={28} className="text-[var(--color-text-tertiary)]" />
             <p className="mt-3 text-sm font-medium text-muted-foreground">{nameFilter || domainFilter ? '没有符合条件的本体' : '还没有创建本体'}</p>
             <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">{nameFilter || domainFilter ? '请调整名称或领域筛选条件' : '点击左侧卡片创建第一个本体'}</p>

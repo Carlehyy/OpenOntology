@@ -95,3 +95,37 @@ test('本体领域筛选只使用系统设置领域，不合并本体孤儿值',
   await expect(page.getByRole('button', { name: '配置领域本体', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '孤儿领域本体', exact: true })).toHaveCount(0)
 })
+
+test('领域筛选结果为 0 条时新建本体卡保持原有尺寸', async ({ page }) => {
+  await mockOntologyDomains(page)
+  // 后注册的 route 优先：领域列表追加一个没有任何本体命中的「空领域」
+  await page.route('**/api/v1/domains*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      data: [
+        { id: 'domain-configured', name: '配置领域', description: '系统设置中的权威领域' },
+        { id: 'domain-empty', name: '空领域', description: '没有任何本体命中的领域' },
+      ],
+    }),
+  }))
+
+  await page.goto('/#/ontologies', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByRole('button', { name: '配置领域本体', exact: true })).toBeVisible()
+
+  const createCard = page.getByRole('article').filter({ hasText: '新建本体' })
+  const before = await createCard.boundingBox()
+
+  const filter = page.getByLabel('按所属领域筛选', { exact: true })
+  await filter.click()
+  await page.getByRole('listbox').getByRole('option', { name: '空领域', exact: true }).click()
+  await expect(page.getByText('没有符合条件的本体')).toBeVisible()
+  await expect(page.getByRole('button', { name: '配置领域本体', exact: true })).toHaveCount(0)
+
+  // 回归：0 结果空态曾与「新建本体」卡同处一个网格行，Grid stretch 把卡片
+  // 从 256px 拉高到 300px；空态独占整行后不得再被撑大。阈值 8px 只吸收
+  // 正常态下相邻结果卡内容高度的同行等高拉伸（实测 ~0.5px），远小于回归幅度
+  const after = await createCard.boundingBox()
+  const heightDelta = Math.abs((after?.height ?? 0) - (before?.height ?? 0))
+  expect(heightDelta, '领域筛选 0 条时新建本体卡不得被空态撑大').toBeLessThan(8)
+})
