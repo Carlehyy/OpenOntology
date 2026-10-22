@@ -817,3 +817,31 @@ test('无 world_model 菜单权限的用户不可见且直达被拒', async ({ p
   await page.goto('/#/world-model/models')
   await expect(page.getByText('当前页面无法访问')).toBeVisible()
 })
+
+test('推演模型无数据空态仅保留三步引导，首模型引导文案与按钮已移除', async ({ page }) => {
+  await seedAuth(page)
+  await mockPlatformShell(page)
+  // 项目列表返回空且不带任何筛选，命中「无数据」空态分支（带筛选走另一个分支）
+  await page.route('**/api/v2/world-model/**', route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v2/world-model/projects' && route.request().method() === 'GET') {
+      return json(route, { items: [], total: 0 })
+    }
+    return json(route, [])
+  })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/world-model/models', { waitUntil: 'domcontentloaded' })
+
+  // 回归：空态两行引导文案与「立即创建第一个模型」按钮已按要求移除
+  await expect(page.getByText('从第一个推演模型开始')).toHaveCount(0)
+  await expect(page.getByText('以代码承载演化规律，三步即可对外提供在线推演服务')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '立即创建第一个模型' })).toHaveCount(0)
+
+  // 三步引导与两处既有创建入口保留，创建链路不受影响
+  await expect(page.getByLabel('创建流程指引')).toBeVisible()
+  await expect(page.getByText('创建模型', { exact: true })).toBeVisible()
+  await expect(page.getByText('开发调试', { exact: true })).toBeVisible()
+  await expect(page.getByText('保存发布', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '立即创建', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '新建推演模型' })).toBeVisible()
+})

@@ -439,11 +439,7 @@ export default function WorldModelModelsPage() {
             </div>
           ) : (
             /* 无数据的空态：用三步引导替代一句话提示，消除大段空白 */
-            <div className="flex min-h-[300px] flex-col items-center justify-center gap-7 rounded-2xl border border-border bg-card px-8 py-10 sm:col-span-1 lg:col-span-2 xl:col-span-3">
-              <div className="text-center">
-                <p className="text-sm font-semibold text-muted-foreground">从第一个推演模型开始</p>
-                <p className="mt-1 text-xs text-muted-foreground">以代码承载演化规律，三步即可对外提供在线推演服务</p>
-              </div>
+            <div className="flex min-h-[300px] flex-col items-center justify-center rounded-2xl border border-border bg-card px-8 py-10 sm:col-span-1 lg:col-span-2 xl:col-span-3">
               <ol className="grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-3" aria-label="创建流程指引">
                 {[
                   { icon: <Plus size={16} />, title: '创建模型', desc: '选择引擎类型，定义推演的业务对象与时域' },
@@ -462,13 +458,6 @@ export default function WorldModelModelsPage() {
                   </li>
                 ))}
               </ol>
-              <button
-                type="button"
-                onClick={() => setCreateOpen(true)}
-                className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-brand px-5 text-sm font-medium text-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:bg-brand-deep active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              >
-                <Plus size={15} /> 立即创建第一个模型
-              </button>
             </div>
           )
         ) : (
