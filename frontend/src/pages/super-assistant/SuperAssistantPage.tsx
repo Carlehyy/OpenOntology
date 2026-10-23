@@ -139,6 +139,9 @@ export default function SuperAssistantPage() {
     () => readCachedConversations(user?.id) ?? [],
   )
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // 未落地新会话视图（selectedId 为 null）待生效的模型选择：会话尚未落库，
+  // 无 PATCH 可发，暂存到懒建/首发时刻随请求携带；切回已落地会话即失效
+  const [pendingModelId, setPendingModelId] = useState<string | null>(null)
   const [messages, setMessages] = useState<SuperMessage[]>([])
   const [models, setModels] = useState<ModelConfig[]>([])
   const [skills, setSkills] = useState<SuperSkill[]>([])
@@ -501,7 +504,11 @@ export default function SuperAssistantPage() {
   }, [persistDrafts])
 
   const selectedConversation = conversations.find(item => item.id === selectedId) || null
-  const selectedModelId = selectedConversation?.model_config_id || models.find(model => model.is_default)?.id || models[0]?.id || ''
+  const selectedModelId = selectedConversation?.model_config_id
+    || (selectedId === null ? pendingModelId : null)
+    || models.find(model => model.is_default)?.id
+    || models[0]?.id
+    || ''
   const selectedModel = models.find(model => model.id === selectedModelId)
   // 展示层回落：存量会话可能保存着已被 usage_tags 过滤的后台配置（如记忆宫殿抽取），
   // 显式 SelectValue children 在「值非空但无匹配项」时会渲染空白——此时按未选择处理，
@@ -637,6 +644,8 @@ export default function SuperAssistantPage() {
     // 实时浏览器面板跟随会话挂载：进入未落地视图时显式收起，
     // 避免残留的 modal/pip 状态在下次选中任意会话时突然重现
     setBrowserDisplay('closed')
+    // 新会话从默认模型开始：丢弃上一轮未落地视图遗留的待生效模型
+    setPendingModelId(null)
     setSelectedId(null)
   }
 
@@ -673,7 +682,8 @@ export default function SuperAssistantPage() {
   }
 
   const changeModel = async (modelId: string) => {
-    if (!selectedId) return
+    // 未落地新会话视图：会话尚不存在，无 PATCH 可发，暂存待懒建时携带
+    if (!selectedId) { setPendingModelId(modelId || null); return }
     try {
       const updated = await superAssistantApi.updateConversation(selectedId, { model_config_id: modelId || null })
       setConversations(current => current.map(item => item.id === updated.id ? updated : item))
@@ -1546,7 +1556,9 @@ export default function SuperAssistantPage() {
               if (value === MANAGE_MODELS_VALUE) { navigate('/models'); return }
               void changeModel(value)
             }}
-            disabled={!selectedId || runningHere}
+            // 未落地新会话视图（selectedId 为 null）同样可选模型：选择暂存为
+            // 待生效状态，随懒建/首发携带；仅会话流式生成期间锁定
+            disabled={runningHere}
           >
             {/* 与左侧「上下文」框同一语言：1px 绿色细边框、浅绿底、无阴影。
                 背景直连胶囊同款 token：brand.soft 是纯 var 映射无 alpha 通道，

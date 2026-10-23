@@ -193,6 +193,7 @@ interface MockOptions {
 
 async function mockApis(page: Page, options: MockOptions = {}) {
   const patchBodies: string[] = []
+  const chatBodies: string[] = []
   const deleteCalls: string[] = []
   const createCalls: string[] = []
   const fileUploads: string[] = []
@@ -597,6 +598,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     const chatMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/chat$/)
     if (chatMatch && request.method() === 'POST') {
       chatCalls.push(chatMatch[1])
+      chatBodies.push(request.postData() || '')
       const convId = chatMatch[1]
       const chatBody = JSON.parse(request.postData() || '{}')
       const reply = '你好，我是超级助手'
@@ -850,8 +852,11 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     if (path === '/api/v2/super-assistant/conversations') {
       if (request.method() === 'POST') {
         createCalls.push(request.postData() || '')
+        // 与真实后端一致：create 持久化并回显请求携带的 model_config_id
+        //（未落地新会话视图选定的待生效模型由此生效）
         const row = {
-          id: `c-new-${createCalls.length}`, title: '新会话', model_config_id: 'model-1',
+          id: `c-new-${createCalls.length}`, title: '新会话',
+          model_config_id: JSON.parse(request.postData() || '{}').model_config_id ?? 'model-1',
           status: 'active', created_at: at(0, 12), updated_at: at(0, 12),
         }
         createdConvs.unshift(row)
@@ -1101,6 +1106,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   })
   return {
     patchBodies,
+    chatBodies,
     deleteCalls,
     createCalls,
     fileUploads,
@@ -2333,6 +2339,36 @@ test('模型下拉底部「管理模型」为跳转入口：进入模型配置�
   await page.waitForURL('**/#/models')
   // 哨兵项只做跳转：不发起会话模型切换 PATCH
   expect(mocks.patchBodies).toHaveLength(0)
+})
+
+test('未落地新会话视图模型选择器可用：选择暂存不发 PATCH，懒建与首发携带所选模型', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+
+  // 有消息会话中点击新建会话：切到未落地视图，模型选择器仍可用并显示默认模型
+  await page.getByRole('button', { name: '新建会话' }).click()
+  await page.waitForTimeout(300)
+  const trigger = page.getByRole('combobox', { name: '会话模型' })
+  await expect(trigger).toBeEnabled()
+  await expect(trigger).toContainText('DeepSeek')
+
+  // 会话尚未落库：切换模型只暂存待生效值，不发 PATCH、也不提前建会话
+  await trigger.click()
+  await page.getByRole('option', { name: /Qwen/ }).click()
+  await expect(trigger).toContainText('Qwen')
+  await page.waitForTimeout(300)
+  expect(mocks.patchBodies).toHaveLength(0)
+  expect(mocks.createCalls).toHaveLength(0)
+
+  // 发送首条消息触发懒建：create 与首轮 chat 均携带所选 model-2
+  await page.getByRole('textbox', { name: '向超级助手发送消息' }).fill('第一条消息')
+  await page.getByRole('button', { name: '发送消息' }).click()
+  await expect.poll(() => mocks.createCalls.length).toBe(1)
+  expect(JSON.parse(mocks.createCalls[0])).toMatchObject({ model_config_id: 'model-2' })
+  await expect.poll(() => mocks.chatBodies.length).toBe(1)
+  expect(JSON.parse(mocks.chatBodies[0])).toMatchObject({ model_config_id: 'model-2' })
+  await expect(page.getByText('你好，我是超级助手')).toBeVisible()
 })
 
 test('删除会话走 ReUI 确认弹窗（非 window.confirm）', async ({ page }) => {
