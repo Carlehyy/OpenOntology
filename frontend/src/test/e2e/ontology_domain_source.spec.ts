@@ -122,10 +122,43 @@ test('领域筛选结果为 0 条时新建本体卡保持原有尺寸', async ({
   await expect(page.getByText('没有符合条件的本体')).toBeVisible()
   await expect(page.getByRole('button', { name: '配置领域本体', exact: true })).toHaveCount(0)
 
-  // 回归：0 结果空态曾与「新建本体」卡同处一个网格行，Grid stretch 把卡片
-  // 从 256px 拉高到 300px；空态独占整行后不得再被撑大。阈值 8px 只吸收
-  // 正常态下相邻结果卡内容高度的同行等高拉伸（实测 ~0.5px），远小于回归幅度
+  // 回归：0 结果空态与「新建本体」卡同处一个网格行，空态块最小高度须与
+  // 卡片一致（256px），否则 Grid stretch 会把卡片从 256px 拉高到 300px。
+  // 阈值 8px 只吸收常态下相邻结果卡内容高度的同行等高拉伸（实测 ~0.5px），
+  // 远小于回归幅度
   const after = await createCard.boundingBox()
   const heightDelta = Math.abs((after?.height ?? 0) - (before?.height ?? 0))
   expect(heightDelta, '领域筛选 0 条时新建本体卡不得被空态撑大').toBeLessThan(8)
+})
+
+test('空库与筛选 0 结果的空态块都与新建本体卡同行且位于其右侧', async ({ page }) => {
+  await mockOntologyDomains(page)
+  // 后注册的 route 优先：本体列表置空，构造「一个本体也没有」的空库态
+  await page.route('**/api/v1/ontologies*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { items: [], total: 0, page: 1, page_size: 1000 } }),
+  }))
+
+  await page.goto('/#/ontologies', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByText('还没有创建本体')).toBeVisible()
+  await expect(page.getByText('点击左侧卡片创建第一个本体')).toBeVisible()
+
+  const createCard = page.getByRole('article').filter({ hasText: '新建本体' })
+  const emptyBlock = page.getByTestId('ontology-list-empty')
+  const card = await createCard.boundingBox()
+  const empty = await emptyBlock.boundingBox()
+
+  // 介绍块须与卡片同处一行（顶边对齐），且起点在卡片右边缘之外——
+  // 独占下一整行的旧布局会顶边低于卡片且与卡片左对齐
+  expect(Math.abs((empty?.y ?? 0) - (card?.y ?? 0)), '空态块须与新建本体卡同行').toBeLessThan(8)
+  expect((empty?.x ?? 0), '空态块须位于新建本体卡右侧').toBeGreaterThanOrEqual((card?.x ?? 0) + (card?.width ?? 0))
+
+  // 名称筛选 0 结果的空态分支与空库共用同一块 DOM，同样须同行靠右
+  await page.getByLabel('按本体名称或描述筛选', { exact: true }).fill('不存在的本体xyz')
+  await expect(page.getByText('没有符合条件的本体')).toBeVisible()
+  const cardFiltered = await createCard.boundingBox()
+  const emptyFiltered = await emptyBlock.boundingBox()
+  expect(Math.abs((emptyFiltered?.y ?? 0) - (cardFiltered?.y ?? 0)), '筛选 0 结果空态块须与新建本体卡同行').toBeLessThan(8)
+  expect((emptyFiltered?.x ?? 0), '筛选 0 结果空态块须位于新建本体卡右侧').toBeGreaterThanOrEqual((cardFiltered?.x ?? 0) + (cardFiltered?.width ?? 0))
 })

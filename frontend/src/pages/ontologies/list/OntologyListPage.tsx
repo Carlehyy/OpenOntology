@@ -680,7 +680,7 @@ export default function OntologyListPage({ defaultCreateOpen = false }: { defaul
             </button>
           </div>
         ) : filteredItems.length === 0 ? (
-          <div className="flex min-h-[300px] flex-col items-center justify-center rounded-2xl border border-border bg-card px-6 text-center sm:col-span-2 lg:col-span-3 xl:col-span-4">
+          <div data-testid="ontology-list-empty" className="flex min-h-[256px] flex-col items-center justify-center rounded-2xl border border-border bg-card px-6 text-center sm:col-span-1 lg:col-span-2 xl:col-span-3">
             <Network size={28} className="text-[var(--color-text-tertiary)]" />
             <p className="mt-3 text-sm font-medium text-muted-foreground">{nameFilter || domainFilter ? '没有符合条件的本体' : '还没有创建本体'}</p>
             <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">{nameFilter || domainFilter ? '请调整名称或领域筛选条件' : '点击左侧卡片创建第一个本体'}</p>
