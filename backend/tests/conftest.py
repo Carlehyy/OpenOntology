@@ -31,6 +31,9 @@ os.environ["PLATFORM_STATS_CACHE_ENABLED"] = "false"
 # 版本事件 drain 默认内联执行（历史语义）；异步派发路径由
 # test_version_automation_events.py 用 patch 单独验证。
 os.environ["DATASET_EVENT_DISPATCH_MODE"] = "sync"
+# YIYA-36 P2-C：写总闸生产默认 false；测试套件显式开启（业务动作
+# 确认协议/引擎路径需要真实执行）。
+os.environ["ASSISTANT_ACTION_EXECUTION_ENABLED"] = "true"
 
 # 应用的 SessionLocal/engine 在 import 时按 DATABASE_URL 绑定。默认的固定路径
 # /tmp/ontoprompt.db 会被 xdist 多 worker 共享，并发 lifespan seeding 的

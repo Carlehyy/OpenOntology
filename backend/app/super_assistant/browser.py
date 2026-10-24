@@ -161,6 +161,19 @@ def download_browser_companion(_=Depends(get_current_user)):
 
 # ── 会话级浏览器操作 ────────────────────────────────────────────────
 
+def _assistant_browser_channel_closed() -> None:
+    """裁决 4：assistant 浏览器通道 fail-closed（HTTP 入口同口径）。"""
+    from app.config import settings
+    from fastapi import HTTPException
+
+    if not getattr(settings, "assistant_browser_channel_enabled", False):
+        raise HTTPException(status_code=403, detail={
+            "code": "capability_boundary_unenforced",
+            "message": "超级助手浏览器通道暂未开放：等待隔离/凭据/网络策略"
+                       "证据与独立验证后由部署显式启用",
+        })
+
+
 @router.put("/conversations/{conversation_id}/browser/source")
 def bind_conversation_browser_source(
     conversation_id: str,
@@ -168,6 +181,7 @@ def bind_conversation_browser_source(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return bind_browser_source(conversation_id, body, db, current_user)
 
 
@@ -178,6 +192,7 @@ def start_conversation_browser(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return start_browser(conversation_id, body, db, current_user)
 
 
@@ -188,6 +203,9 @@ def navigate_browser(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：assistant 浏览器通道闸（navigate/input/control 同口径）
+    _assistant_browser_channel_closed()
+
     return _browser_session_service.navigate_browser(
         conversation_id,
         body,
@@ -204,6 +222,7 @@ def browser_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_session(
         conversation_id,
         db,
@@ -221,6 +240,7 @@ def browser_captures(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_captures(
         conversation_id,
         keyword,
@@ -242,6 +262,7 @@ def browser_capture_download(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_capture_download(
         conversation_id,
         capture_id,
@@ -258,6 +279,7 @@ def browser_live_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_live_ticket(
         conversation_id,
         db,
@@ -272,6 +294,7 @@ def attach_browser_live_http(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.attach_browser_live_http(
         conversation_id,
         db,
@@ -291,6 +314,7 @@ def browser_live_http_frame(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _assistant_browser_channel_closed()
     return _browser_session_service.browser_live_http_frame(
         conversation_id,
         body,
@@ -311,6 +335,9 @@ def browser_live_http_input(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：assistant 浏览器通道闸（navigate/input/control 同口径）
+    _assistant_browser_channel_closed()
+
     return _browser_session_service.browser_live_http_input(
         conversation_id,
         body,
@@ -330,6 +357,9 @@ def browser_live_http_control(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：assistant 浏览器通道闸（navigate/input/control 同口径）
+    _assistant_browser_channel_closed()
+
     return _browser_session_service.browser_live_http_control(
         conversation_id,
         body,
@@ -349,6 +379,18 @@ def release_browser_live_http(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Z4：release 是唯一清场例外 —— 仅允许断开/释放（不导航、不输入、
+    # 不读凭据/页面状态）。通道关闭时存量会话/租约不得继续驱动。
+    from app.config import settings as _settings
+
+    if not getattr(_settings, "assistant_browser_channel_enabled", False):
+        return _browser_session_service.release_browser_live_http(
+            conversation_id, body, db, current_user,
+            require_conversation_fn=_require_conversation,
+            browser_error_fn=_browser_error,
+            teardown_only=True,
+        )
+
     return _browser_session_service.release_browser_live_http(
         conversation_id,
         body,

@@ -239,6 +239,18 @@ def _dispatch(
     name: str,
     arguments: dict[str, Any],
 ) -> Any:
+    # 裁决 4（v2 安全回退）：assistant 浏览器通道 fail-closed — 所有工具
+    # （含只读观测/网络捕获）在访问 browser source/session/storage 之前
+    # 拒绝；正常用户浏览器与共享 steward 功能不经此路径，不受影响。
+    from app.config import settings
+
+    if not getattr(settings, "assistant_browser_channel_enabled", False):
+        return {
+            "error": "capability_boundary_unenforced",
+            "message": "超级助手浏览器通道暂未开放：等待隔离上下文/凭据/"
+                       "网络策略证据与独立验证后由部署显式启用"
+                       "（assistant_browser_channel_enabled）",
+        }
     cid = conversation.id
     if name in ("browser_open", "browser_navigate") and _protected_origin_denied(
             str(arguments.get("url") or "")):

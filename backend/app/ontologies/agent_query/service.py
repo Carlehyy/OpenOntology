@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import hashlib
 import hmac
 import json
@@ -59,6 +60,8 @@ _STRING_TYPES = {"string", "text", "date", "datetime", "uuid", "enum"}
 
 _COUNTS_SCOPE = "complete_snapshot"
 
+logger = logging.getLogger(__name__)
+
 
 class QueryError(Exception):
     """查询面可识别错误 — 携带 HTTP 状态与机器可读 code。"""
@@ -83,6 +86,17 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256(payload: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _ontology_write_access(user, project) -> bool:
+    """与 access.require_ontology_access(write=True) 同口径的真实裁决。"""
+    role = str(getattr(user, "role", "") or "")
+    if role == "admin":
+        return True
+    if role == "editor":
+        return str(getattr(project, "created_by", "") or "") == str(
+            getattr(user, "id", ""))
+    return False
 
 
 def _declared_type(prop_def: dict) -> str:
@@ -374,13 +388,13 @@ class UnifiedQueryService:
                 "SET LOCAL idle_in_transaction_session_timeout = '5000ms'",
                 # PG 内存单位是 B/kB/MB/GB（二进制倍数），不接受 MiB 拼写。
                 "SET LOCAL work_mem = "
-                f"'{settings.agent_query_work_mem_mib}MB'",
+                f"'{settings.agent_query_work_mem_mb}MB'",
             ]
             if super_role:
                 # temp_file_limit 是 SUSET 参数：只有超级角色能逐事务 SET LOCAL。
                 budgets.append(
                     "SET LOCAL temp_file_limit = "
-                    f"'{settings.agent_query_temp_file_limit_mib}MB'")
+                    f"'{settings.agent_query_temp_file_limit_mb}MB'")
             for statement in budgets:
                 self.db.execute(text(statement))
             if not super_role:
@@ -392,26 +406,39 @@ class UnifiedQueryService:
             self.db.rollback()
             raise
         except Exception as exc:  # noqa: BLE001 - fail closed
+            # R-2：SQLSTATE 分类入服务端日志与 extra；客户端不回灌
+            # str(exc)/SQL/参数细节。
             self.db.rollback()
+            orig = getattr(exc, "orig", None)
+            sqlstate = getattr(orig, "pgcode", None) or getattr(
+                exc, "pgcode", None)
+            classify = {
+                "42501": "insufficient_privilege",
+                "0A000": "feature_not_supported",
+                "22023": "invalid_parameter_value",
+            }.get(str(sqlstate or ""), "budget_set_failed")
+            logger.warning(
+                "agent query budget set failed sqlstate=%s class=%s",
+                sqlstate, classify)
             raise QueryError(
                 503, "query_budget_unavailable",
                 "查询事务隔离级别/资源预算参数设置失败，查询 fail closed",
-                retryable=False) from exc
+                errorClass=classify, retryable=False) from exc
         self._lock_pinned_rows()
 
     def _verify_temp_file_budget(self, raw_limit: str) -> None:
         """普通角色的 temp_file_limit 硬校验（SUSET 无法 SET LOCAL）。"""
-        cap_kb = settings.agent_query_temp_file_limit_mib * 1024
+        cap_kb = settings.agent_query_temp_file_limit_mb * 1024
         kb = _parse_memory_limit_kb(str(raw_limit or ""))
         if kb is None or kb <= 0 or kb > cap_kb:
             raise QueryError(
                 503, "query_budget_unavailable",
                 "temp_file_limit 是超级用户参数，当前应用角色无法逐事务"
                 "设置，且生效值未设置(-1)或宽于配置帽 "
-                f"{settings.agent_query_temp_file_limit_mib}MiB，"
+                f"{settings.agent_query_temp_file_limit_mb}MiB，"
                 "查询 fail closed。请运维执行 "
                 "ALTER ROLE <应用角色> SET temp_file_limit = "
-                f"'{settings.agent_query_temp_file_limit_mib}MB'，"
+                f"'{settings.agent_query_temp_file_limit_mb}MB'，"
                 "并重建应用连接池后重试。",
                 retryable=False,
                 effectiveTempFileLimit=str(raw_limit or "") or None,
@@ -1062,6 +1089,10 @@ class UnifiedQueryService:
                 "allowedAction": profile.allowed_action_ids,
                 "allowedProperties": getattr(profile, "allowed_properties", None),
                 "maxRows": int(profile.max_rows_per_query or 0),
+                # 裁决 1：真实 RBAC 写权限（admin/editor-owner），与
+                # _recompute_auth_hash 共享同一材料。
+                "writeAccess": _ontology_write_access(
+                    self.user, meta.scope.ontology),
             }
         return material
 
@@ -1263,7 +1294,7 @@ class UnifiedQueryService:
                     "role": str(getattr(self.user, "role", ""))}
         for alias, release_info in sorted(
                 (snapshot.releases or {}).items()):
-            _, profile, _ = build_scope(
+            _, profile, scope = build_scope(
                 self.db, release_info["ontologyId"],
                 release_id=release_info["releaseId"])
             material[alias] = {
@@ -1275,6 +1306,8 @@ class UnifiedQueryService:
                 "allowedAction": profile.allowed_action_ids,
                 "allowedProperties": getattr(profile, "allowed_properties", None),
                 "maxRows": int(profile.max_rows_per_query or 0),
+                "writeAccess": _ontology_write_access(
+                    self.user, scope.ontology),
             }
         return _sha256(_canonical_json(material))
 

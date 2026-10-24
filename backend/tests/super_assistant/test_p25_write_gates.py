@@ -1,5 +1,16 @@
 """YIYA-36 P2-5：浏览器受保护来源 / kernel 守卫（总闸测试在确认协议套件）。"""
+import pytest
+
 from app.super_assistant import browser_tools
+
+
+@pytest.fixture(autouse=True)
+def _browser_channel_open(monkeypatch):
+    """基线门测试默认开启通道；关闭态由
+    test_browser_full_channel_fail_closed_by_default 显式 monkeypatch。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assistant_browser_channel_enabled",
+                        True, raising=False)
 from app.super_assistant.kernel import runtime as kernel_runtime
 
 
@@ -12,6 +23,28 @@ def test_browser_protected_origin_rejected(monkeypatch):
         result = browser_tools._protected_origin_denied(url)
         assert result is True, url
     assert browser_tools._protected_origin_denied("https://other.example") is False
+    # 空配置：来源识别不猜测（生产写工具由 _guard_browser_write_tool 兜底）
+    monkeypatch.setattr(settings, "assistant_browser_protected_origins",
+                        "", raising=False)
+    assert browser_tools._protected_origin_denied("https://any.example") is False
+
+
+def test_browser_full_channel_fail_closed_by_default(monkeypatch):
+    """裁决 4：通道默认关闭 — 所有浏览器工具（含只读观测）先于
+    source/session/storage 访问被拒。"""
+    from app.config import settings
+    from app.super_assistant import browser_tools as bt
+
+    monkeypatch.setattr(settings, "assistant_browser_channel_enabled",
+                        False, raising=False)
+    result = bt._dispatch(None, conversation=None, name="browser_state",
+                          arguments={})
+    assert result["error"] == "capability_boundary_unenforced"
+    result = bt._dispatch(None, conversation=None, name="browser_open",
+                          arguments={"url": "https://x"})
+    assert result["error"] == "capability_boundary_unenforced"
+
+
 
 
 def test_kernel_rejects_ontology_write_capability():
@@ -233,3 +266,48 @@ def test_browser_capture_replay_blocked_on_protected_capture(monkeypatch, tmp_pa
             db=db, owner_id="user-b", conversation_id="conv-b",
             name="download_captured_file", arguments={"capture_id": "cap-evil"})
     assert "capability_boundary_unenforced" in output
+
+
+def test_browser_channel_gates_navigate_input_control_and_teardown_release(
+        client, auth_headers, monkeypatch):
+    """Z4：navigate/input/control 走通道闸；release 仅清场例外（不驱动）。"""
+    from app.config import settings
+    from app.super_assistant import browser as browser_router
+    from app.data_channel.steward import browser_session_service as bss
+
+    monkeypatch.setattr(settings, "assistant_browser_channel_enabled",
+                        False, raising=False)
+    calls = []
+    monkeypatch.setattr(
+        bss, "navigate_browser",
+        lambda *a, **k: calls.append("navigate") or {"data": {}})
+    monkeypatch.setattr(
+        bss, "browser_live_http_input",
+        lambda *a, **k: calls.append("input") or {"data": {}})
+    monkeypatch.setattr(
+        bss, "browser_live_http_control",
+        lambda *a, **k: calls.append("control") or {"data": {}})
+    releases = []
+    monkeypatch.setattr(
+        bss, "release_browser_live_http",
+        lambda *a, **k: releases.append(k.get("teardown_only")) or
+        {"data": {"released": True}})
+
+    for path, payload in (
+            ("/conversations/c1/browser/navigate", {"url": "https://x"}),
+            ("/conversations/c1/browser/live-http/input",
+             {"leaseId": "L1", "message": {}}),
+            ("/conversations/c1/browser/live-http/control",
+             {"leaseId": "L1", "action": "pause"})):
+        r = client.post(f"/api/v2/super-assistant{path}",
+                        headers=auth_headers, json=payload)
+        assert r.status_code == 403, (path, r.status_code)
+        assert r.json()["detail"]["code"] == "capability_boundary_unenforced"
+    assert calls == []          # 通道关闭：不驱动任何浏览器行为
+
+    # release：清场例外 —— 放行且 teardown_only=True（仅断开租约）
+    r = client.post(
+        "/api/v2/super-assistant/conversations/c1/browser/live-http/release",
+        headers=auth_headers, json={"leaseId": "L1"})
+    assert r.status_code == 200, r.text
+    assert releases == [True]

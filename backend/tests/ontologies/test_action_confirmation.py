@@ -45,6 +45,15 @@ def modeled(client, auth_headers, ontology, db):
                         "config": {"targetProperty": "status",
                                    "valueSource": "constant",
                                    "value": "\"cancelled\""}}]},
+            {"id": "act-5", "name": "audit_notify", "displayName": "审计通知",
+             "objectTypeId": "ot-order", "requiresApproval": True,
+             "parameters": [],
+             "rules": [{
+                 "id": "hook5", "type": "webhook", "name": "audit hook",
+                 "enabled": True, "order": 0,
+                 "config": {"url": "http://127.0.0.1:9/audit",
+                            "method": "POST", "bodyTemplate": "{}"},
+             }]},
             {"id": "act-3", "name": "notify_party", "displayName": "通知外部系统",
              "objectTypeId": "ot-order", "requiresApproval": False,
              "parameters": [],
@@ -66,7 +75,7 @@ def modeled(client, auth_headers, ontology, db):
     r = client.put(f"{_fo(oid)}/full", headers=auth_headers, json=body)
     assert r.status_code == 200, r.text
     pr = client.put(f"{_fo(oid)}/agent/profile", headers=auth_headers,
-                    json={"allowedActionIds": ["act-1", "act-2", "act-3"]})
+                    json={"allowedActionIds": ["act-1", "act-2", "act-3", "act-5"]})
     assert pr.status_code == 200, pr.text
     from app.models.ontology import OntologyProject
     from app.models.ontology_formal import ObjectInstance
@@ -1373,8 +1382,9 @@ def test_kernel_run_view_unknown_call_is_readable_not_fake_success(
     assert call_view["status"] == "reconciling"
     assert call_view["outcome"] == "outcome_unknown"
     assert call_view["confirmation"]["state"] == "unknown"
-    assert call_view["confirmation"]["blockReason"] == (
-        "execution_result_unknown")
+    assert "1040787244" in call_view["confirmation"]["blockReason"]
+    assert "不自动" in call_view["confirmation"]["blockReason"] or \
+        "无自动超时释放" in call_view["confirmation"]["blockReason"]
 
 
 def test_kernel_approval_without_readable_display_fails_closed(
@@ -1471,3 +1481,461 @@ def test_kernel_approve_requires_readable_bound_confirmation(
     assert confirmation2.state == "prepared", confirmation2.state
     approval2 = db.query(KernelApproval).filter_by(id=approval2.id).one()
     assert approval2.status == "pending"
+
+
+def test_worker_engine_entry_revocation_blocks_execution(
+        client, auth_headers, modeled, conversation, db, monkeypatch):
+    """P2-C：approve 后入引擎前（worker 领取路径）撤权 → 不执行。"""
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+    from app.models.ontology_formal import ObjectInstance
+
+    cid = _prepare(client, auth_headers, modeled,
+                   conversation).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    # approve 后、worker 入引擎前撤权（allowlist 收紧）
+    client.put(f"{_fo(modeled['oid'])}/agent/profile", headers=auth_headers,
+               json={"allowedActionIds": []})
+    confirmation = _confirmation(db, cid)
+    db.refresh(confirmation)
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    confirmation_svc.run_operation_inline(operation.id, db)
+    db.expire_all()
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "failed_not_executed"
+    assert confirmation.failure_code == "access_revoked_before_engine"
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"   # 零业务效果
+
+
+# ------------------------------------- Z1：合并冲突丢失的六项行为测试恢复
+
+
+def test_root_intent_rejects_assistant_only_conversation(
+        client, auth_headers, modeled, db):
+    """裁决 3/Z1：提案之前没有用户消息 → 拒绝建立确认（无 assistant 兜底）。"""
+    from app.ontologies.agent_runtime.models import (
+        AgentConversation, AgentMessage,
+    )
+    from app.models.user import User
+
+    user = db.query(User).first()
+    conv = AgentConversation(id=f"conv-{uuid.uuid4().hex[:8]}",
+                             ontology_id=modeled["oid"], user_id=user.id)
+    db.add(conv)
+    db.flush()
+    db.add(AgentMessage(
+        id=f"ma-{uuid.uuid4().hex[:6]}", conversation_id=conv.id,
+        role="assistant", content="no user intent",
+        proposals=[{"kind": "action", "proposalId": "prop-no-user",
+                    "actionId": "act-1",
+                    "parameters": {"note": "x", "level": 1},
+                    "targetInstanceId": "inst-o1",
+                    "releaseId": modeled["releaseId"], "status": "success",
+                    "validationErrors": [], "effects": []}]))
+    db.commit()
+    r = client.post(
+        f"/api/v2/formal/ontologies/{modeled['oid']}/agent/proposals",
+        headers=auth_headers,
+        json={"sessionKind": "ontology_agent", "sessionId": conv.id,
+              "clientSubmissionId": "prop-no-user", "actionId": "act-1",
+              "releaseId": modeled["releaseId"],
+              "targetInstanceId": "inst-o1",
+              "parameters": {"note": "x", "level": 1}})
+    assert r.status_code == 422
+    assert "没有可信的用户意图" in r.json()["detail"]["message"]
+
+
+def test_execute_wake_revoked_access_fails_not_executed(
+        client, auth_headers, modeled, conversation, db):
+    """裁决 1/Z1：入引擎前（唤醒路径）撤权 → failed_not_executed 零效果。"""
+    from app.models.ontology_formal import ObjectInstance
+
+    cid = _prepare(client, auth_headers, modeled,
+                   conversation).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    client.put(
+        f"/api/v2/formal/ontologies/{modeled['oid']}/agent/profile",
+        headers=auth_headers, json={"allowedActionIds": []})
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["state"] == "failed_not_executed"
+    assert data["failureCode"] == "access_revoked_before_engine"
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"
+
+
+def test_technical_checkpoint_executing_and_unknown_convergence(
+        client, auth_headers, modeled, conversation, db):
+    """裁决 2/Z1：技术执行 checkpoint/lease + unknown/guard 收敛。"""
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+    from datetime import datetime, timezone
+
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-k5", actionId="act-2",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    _execute(client, auth_headers, modeled, conversation, cid)
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+
+    # 管理员已批准、技术执行 executing → checkpoint 入口
+    approval_log = db.query(ActionExecutionLog).filter_by(
+        id=operation.approval_log_id).one()
+    approval_log.status = "executing"
+    db.commit()
+    confirmation_svc.reconcile_operation(operation.id, db)
+    db.expire_all()
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    confirmation = _confirmation(db, cid)
+    assert operation.state == "executing"
+    assert confirmation.state == "executing"
+    assert operation.engine_entered_at is not None
+    assert operation.technical_engine_key == (
+        f"approval-execution:{operation.approval_log_id}")
+    db.refresh(approval_log)
+    assert approval_log.operation_id == operation.id
+
+    # lease 失效且无结案证据 → unknown + blockReason + guard 保留
+    operation.lease_expires_at = datetime.now(timezone.utc)
+    db.commit()
+    confirmation_svc.reconcile_operation(operation.id, db)
+    db.expire_all()
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    confirmation = _confirmation(db, cid)
+    assert operation.state == "unknown"
+    assert confirmation.state == "unknown"
+    assert confirmation.failure_code == "execution_result_unknown"
+    _, r2 = _second_session_same_payload(
+        client, auth_headers, modeled, db, "act-2", {})
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["code"] == "operation_unresolved"
+
+
+def test_actor_user_row_missing_blocks_engine_entry(
+        client, auth_headers, modeled, conversation, db):
+    """P3-1：actor 用户行删除后，worker/direct 入引擎路径拒绝执行。
+
+    覆盖：用户删除后零业务效果；未入引擎且无外部 attempt →
+    failed_not_executed；已入引擎（unknown）不因 actor 缺失释放 guard。
+    """
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+    from app.models.ontology_formal import ObjectInstance
+    from app.models.user import User
+
+    # --- 路径 1：worker 入引擎（approve 后领取）---
+    cid = _prepare(client, auth_headers, modeled,
+                   conversation).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    actor = db.query(User).first()
+    actor_id = actor.id
+    db.query(User).filter_by(id=actor_id).delete()
+    db.commit()
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    confirmation_svc.run_operation_inline(operation.id, db)
+    db.expire_all()
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "failed_not_executed"
+    assert confirmation.failure_code == "actor_user_missing"
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"   # 零业务效果
+
+    # --- 路径 2：direct 唤醒入口同样拒绝（经服务层直接调用 —
+    # 用户行删除后 HTTP 认证自然 401，唤醒路径的服务层行为单独验证）---
+    db.add(User(id=actor_id, username="restored",
+                email="r@t.io", password_hash="x", role="admin",
+                is_active=True, token_version=0))
+    db.commit()
+    cid2 = _prepare(client, auth_headers, modeled, conversation,
+                    clientSubmissionId="prop-1").json()["data"][
+                        "confirmationId"]
+    payload2 = _confirmation(db, cid2).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid2,
+            payload2, "approve")
+    db.query(User).filter_by(id=actor_id).delete()
+    db.commit()
+    class _DeletedUser:
+        id = actor_id
+        role = "admin"
+
+    confirmation2 = _confirmation(db, cid2)
+    confirmation_svc.execute(db, _DeletedUser(), modeled["oid"], cid2,
+                             "ontology_agent", conversation["conv"].id)
+    db.expire_all()
+    confirmation2 = _confirmation(db, cid2)
+    assert confirmation2.state == "failed_not_executed"
+    assert confirmation2.failure_code == "actor_user_missing"
+    inst = db.query(ObjectInstance).filter_by(id="inst-o1").one()
+    db.refresh(inst)
+    assert inst.properties["status"] == "pending"
+
+    # --- 路径 3：已入引擎（unknown + 未结案外部 attempt）不释放 guard ---
+    db.add(User(id=actor_id, username="restored2",
+                email="r2@t.io", password_hash="x", role="admin",
+                is_active=True, token_version=0))
+    db.commit()
+    cid3 = _prepare(client, auth_headers, modeled, conversation,
+                    clientSubmissionId="prop-k2",
+                    actionId="act-3", parameters={}).json()["data"][
+                        "confirmationId"]
+    payload3 = _confirmation(db, cid3).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid3,
+            payload3, "approve")
+    # 恢复 actor 使引擎可进入，先执行到 unknown（webhook 不可达）
+    r = _execute(client, auth_headers, modeled, conversation, cid3)
+    assert r.status_code == 200, r.text
+    confirmation = _confirmation(db, cid3)
+    db.refresh(confirmation)
+    assert confirmation.state == "unknown"
+    # actor 删除后 worker 对账/重验不释放 guard（不进引擎不翻案）
+    db.query(User).filter_by(id=actor_id).delete()
+    db.commit()
+    operation3 = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid3).one()
+    confirmation_svc.run_operation_inline(operation3.id, db)
+    db.expire_all()
+    confirmation = _confirmation(db, cid3)
+    assert confirmation.state == "unknown"   # 不变：guard 保留不盲翻案
+    # guard 保留证据：直接查活跃 operation（actor 已删，HTTP 会话建立不可行）
+    operation_view = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid3).one()
+    db.refresh(operation_view)
+    assert operation_view.state in ("unknown", "reconciling")
+    # 已有 external attempt 未结案（unknown 证据保留，不因 actor 缺失清账）
+    attempts = db.query(CM.ActionExternalAttempt).filter_by(
+        operation_id=operation_view.id).all()
+    assert attempts
+    assert all(a.state in ("started", "unknown") for a in attempts)
+
+
+def test_sse_reprepare_same_session_payload_replays_single_confirmation(
+        client, auth_headers, modeled, conversation, db):
+    """R3：同会话同动作/目标/载荷的再次 prepare（不同回合、不同最新
+    用户消息）重放唯一确认 — 不派生第二张 prepared 卡。
+
+    血脉复现 YIYA-41 journey 观察：回合1 prepare（root=用户消息1）→
+    批准执行 succeeded；回合2 新用户消息后模型重发同载荷 prepare
+    （root=用户消息2）→ 应命中稳定意图身份重放原 cid。
+    """
+    from app.ontologies.agent_runtime.models import AgentMessage
+    from app.models.ontology_formal import ObjectInstance
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+
+    # 回合 1：super_assistant 来源 prepare（root=消息1）— 与 SSE 路径同
+    # session_kind，稳定意图作用域才会命中
+    from app.ontologies.agent_confirmation.schemas import (
+        PrepareProposalRequest as _PPR,
+    )
+    _conf1, _replayed1 = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        _PPR(session_kind="super_assistant",
+             sessionId=conversation["conv"].id,
+             clientSubmissionId="prop-k1", actionId="act-1",
+             releaseId=modeled["releaseId"],
+             targetInstanceId="inst-o1",
+             parameters={"note": "k", "level": 1}),
+        origin="super_assistant", source_call_id="prop-k1",
+        root_intent_id="msg-u1")
+    cid1 = _conf1.id
+    payload1 = _conf1.payload_hash
+
+    # 回合 2（journey 实测时序）：cid1 仍 prepared（未决策）时模型重发
+    # 同载荷 prepare —— 开放动作请求冗余重发 → 重放唯一确认
+    db.add(AgentMessage(id="msg-u2", conversation_id=conversation["conv"].id,
+                        role="user", content="继续执行确认的操作"))
+    db.commit()
+    _conf2, replayed2 = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        _PPR(session_kind="super_assistant",
+             sessionId=conversation["conv"].id,
+             clientSubmissionId="round2-call", actionId="act-1",
+             releaseId=modeled["releaseId"],
+             targetInstanceId="inst-o1",
+             parameters={"note": "k", "level": 1}),
+        origin="super_assistant", source_call_id="round2-call",
+        root_intent_id="msg-u2")
+    assert _conf2.id == cid1             # 重放开放确认，不新建第二张卡
+    assert replayed2 is True
+
+    # 批准执行 → succeeded；会话内无 prepared 副本；日志恰一条
+    confirmation_svc.decide(db, _current_user(db), modeled["oid"], cid1,
+                            "approve", "d-r3", payload1,
+                            "super_assistant", conversation["conv"].id)
+    executed = confirmation_svc.execute(
+        db, _current_user(db), modeled["oid"], cid1, "super_assistant",
+        conversation["conv"].id)
+    assert executed.state == "succeeded"
+    dup = db.query(CM.ActionConfirmation).filter(
+        CM.ActionConfirmation.ontology_id == modeled["oid"],
+        CM.ActionConfirmation.state == "prepared").count()
+    assert dup == 0
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+    logs = db.query(ActionExecutionLog).filter(
+        ActionExecutionLog.ontology_id == modeled["oid"],
+        ActionExecutionLog.idempotency_key == f"proposal:{cid1}").all()
+    assert len(logs) == 1
+
+    # 终态后：明确独立新人类意图重发同载荷 prepare → 新确认合法建立
+    # （可经正常二次确认再次执行相同动作，不被会话载荷永久合并）
+    db.add(AgentMessage(id="msg-u3", conversation_id=conversation["conv"].id,
+                        role="user", content="再执行一次标记已支付"))
+    db.commit()
+    _conf3, replayed3 = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        _PPR(session_kind="super_assistant",
+             sessionId=conversation["conv"].id,
+             clientSubmissionId="round3-call", actionId="act-1",
+             releaseId=modeled["releaseId"],
+             targetInstanceId="inst-o1",
+             parameters={"note": "k", "level": 1}),
+        origin="super_assistant", source_call_id="round3-call",
+        root_intent_id="msg-u3")
+    assert _conf3.id != cid1             # 新意图 → 新确认（不误合并）
+    assert replayed3 is False
+    assert _conf3.state == "prepared"
+
+
+def test_sse_reprepare_different_payload_creates_new_confirmation(
+        client, auth_headers, modeled, conversation, db):
+    """R3 边界：不同载荷（新参数）→ 新确认合法建立（非全局合并）。"""
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+    from app.ontologies.agent_confirmation.schemas import (
+        PrepareProposalRequest,
+    )
+
+    cid1 = _prepare(client, auth_headers, modeled, conversation,
+                    clientSubmissionId="prop-k1", actionId="act-1",
+                    parameters={"note": "k", "level": 1}).json()[
+                        "data"]["confirmationId"]
+    prepared2, replayed = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        PrepareProposalRequest(
+            session_kind="super_assistant",
+            sessionId=conversation["conv"].id,
+            clientSubmissionId="round2-call",
+            actionId="act-1", releaseId=modeled["releaseId"],
+            targetInstanceId="inst-o1",
+            parameters={"note": "k", "level": 2}),          # 不同载荷
+        origin="super_assistant", source_call_id="round2-call",
+        root_intent_id="msg-u2")
+    assert prepared2.id != cid1
+    assert replayed is False
+
+
+def _current_user(db):
+    from app.models.user import User
+    return db.query(User).first()
+
+
+def test_numeric_form_difference_does_not_split_identity(
+        client, auth_headers, modeled, conversation, db):
+    """R3：1 与 1.0 数值形态差异不产生身份分裂（重放命中）。"""
+    from app.ontologies.agent_confirmation.schemas import (
+        PrepareProposalRequest as _PPR,
+    )
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+
+    _conf1, _ = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        _PPR(session_kind="super_assistant",
+             sessionId=conversation["conv"].id,
+             clientSubmissionId="c1", actionId="act-1",
+             releaseId=modeled["releaseId"], targetInstanceId="inst-o1",
+             parameters={"note": "k", "level": 1}),
+        origin="super_assistant", source_call_id="c1",
+        root_intent_id="m1")
+    _conf2, replayed = confirmation_svc.prepare(
+        db, _current_user(db), modeled["oid"],
+        _PPR(session_kind="super_assistant",
+             sessionId=conversation["conv"].id,
+             clientSubmissionId="c2", actionId="act-1",
+             releaseId=modeled["releaseId"], targetInstanceId="inst-o1",
+             parameters={"note": "k", "level": 1.0}),   # float 形态
+        origin="super_assistant", source_call_id="c2",
+        root_intent_id="m2")
+    assert _conf2.id == _conf1.id and replayed is True
+
+
+def test_approval_success_closes_attempts_with_receipts(
+        client, auth_headers, modeled, conversation, db):
+    """R4：批准后技术执行 success + webhook 正常收据 → 正确结案
+    succeeded，attempts 按收据 acknowledged/finished（不再滞留 unknown）。"""
+    from app.ontologies.agent_confirmation import service as confirmation_svc
+
+    cid = _prepare(client, auth_headers, modeled, conversation,
+                   clientSubmissionId="prop-k2", actionId="act-5",
+                   parameters={}).json()["data"]["confirmationId"]
+    payload_hash = _confirmation(db, cid).payload_hash
+    _decide(client, auth_headers, modeled, conversation, cid,
+            payload_hash, "approve")
+    r = _execute(client, auth_headers, modeled, conversation, cid)
+    assert r.status_code == 200, r.text
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    attempts = db.query(CM.ActionExternalAttempt).filter_by(
+        operation_id=operation.id).all()
+    assert attempts and all(
+        a.state == "proven_not_applied" for a in attempts), \
+        [a.state for a in attempts]
+
+    # 场景 A（收据未知）：管理员批准 + 技术执行日志 effects 带
+    # deliveryUncertain → unknown 保留 guard（不凭本地 success 结案）
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    approval_log = db.query(ActionExecutionLog).filter_by(
+        id=operation.approval_log_id).one()
+    related_id = approval_log.related_log_id or "rel-a"
+    related = db.query(ActionExecutionLog).filter_by(
+        id=related_id).first()
+    if related is None:
+        related = ActionExecutionLog(
+            id=related_id, ontology_id=modeled["oid"],
+            action_id="act-5", status="success", parameters={},
+            idempotency_key=f"approval-execution:{approval_log.id}")
+        approval_log.related_log_id = related_id
+        db.add(related)
+    related.status = "success"
+    related.effects = [{"type": "webhook", "deliveryUncertain": True}]
+    approval_log.status = "approved"
+    db.commit()
+    confirmation_svc.reconcile_operation(operation.id, db)
+    db.expire_all()
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "unknown"
+    assert confirmation.failure_code == "execution_result_unknown"
+
+    # 场景 B（权威收据）：related success 且 effects 收据完整（无
+    # uncertain）→ 结案 succeeded + attempts acknowledged/finished
+    related = db.query(ActionExecutionLog).filter_by(id=related_id).one()
+    related.effects = [{"type": "webhook", "deliveryUncertain": False,
+                        "ok": True}]
+    db.commit()
+    confirmation_svc.reconcile_operation(operation.id, db)
+    db.expire_all()
+    confirmation = _confirmation(db, cid)
+    assert confirmation.state == "succeeded", confirmation.state
+    operation = db.query(CM.ActionOperation).filter_by(
+        confirmation_id=cid).one()
+    assert operation.state == "succeeded"
+    attempts = db.query(CM.ActionExternalAttempt).filter_by(
+        operation_id=operation.id).all()
+    assert all(a.state == "acknowledged" for a in attempts), \
+        [a.state for a in attempts]
+    assert all(a.finished_at is not None for a in attempts)

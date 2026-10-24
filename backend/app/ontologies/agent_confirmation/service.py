@@ -38,6 +38,11 @@ OPERATION_LEASE_SECONDS = 60
 MAX_PARAMETERS = 64
 MAX_PAYLOAD_BYTES = 64 * 1024
 
+_OPEN_CONFIRMATION_STATES = (
+    "prepared", "confirmed", "dispatch_queued", "executing",
+    "pending_approval", "unknown", "recovering", "compensation_required",
+)
+
 TERMINAL_STATES = {
     "succeeded", "failed_not_executed", "approval_rejected", "denied",
     "cancelled", "expired",
@@ -104,19 +109,33 @@ def _resolve_http_root_intent(db: Session, user, body: PrepareProposalRequest):
                .order_by(AgentMessage.created_at.desc())
                .limit(200).all())
     for msg in message:
+        # 查询按 role=assistant 过滤；root intent = 该提案之前的最近用户
+        # 消息。裁决 3：拒绝缺失/assistant-only — 无可信人类事件不建立
+        # 确认意图（无 assistant-ID/随机/空值兜底）。
         for proposal in (msg.proposals or []):
             if isinstance(proposal, dict) and proposal.get("proposalId") == \
                     body.client_submission_id:
-
-                return msg.id if msg.role == "user" else _last_user_intent(
-                    db, conversation.id, before=msg.created_at)
+                root = _last_user_intent(db, conversation.id,
+                                         before=msg.created_at)
+                if root is None:
+                    raise ConfirmationError(
+                        422, "invalid_parameter",
+                        "会话内该提案之前没有可信的用户意图事件，"
+                        "无法建立确认请求")
+                return root
     # 允许直接以消息 id 提交（前端回放场景）
     direct = db.query(AgentMessage).filter(
         AgentMessage.id == body.client_submission_id,
         AgentMessage.conversation_id == conversation.id).first()
     if direct is not None:
-        return _last_user_intent(db, conversation.id,
-                                 before=direct.created_at) or direct.id
+        root = _last_user_intent(db, conversation.id,
+                                 before=direct.created_at)
+        if root is None:
+            raise ConfirmationError(
+                422, "invalid_parameter",
+                "会话内该消息之前没有可信的用户意图事件，"
+                "无法建立确认请求")
+        return root
     raise ConfirmationError(
         422, "invalid_parameter",
         "clientSubmissionId 未映射到本人会话内的既有提案消息")
@@ -211,6 +230,8 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
                                                 parameters)
     final_params, validation_errors = prepare_action_parameters(
         action, parameters)
+    # R3：数值形态规范化（1 vs 1.0）在源头统一 —— 载荷/哈希/身份一致
+    final_params = _normalize_json_numbers(final_params)
     if validation_errors:
         raise ConfirmationError(422, "invalid_parameter",
                                 "参数校验失败", validationErrors=validation_errors)
@@ -219,6 +240,10 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
 
     if root_intent_id is None:
         root_intent_id = _resolve_http_root_intent(db, user, body)
+    if not root_intent_id:
+        raise ConfirmationError(
+            422, "invalid_parameter",
+            "会话内没有可信的用户意图事件，无法建立确认请求")
     if action_request_slot is None:
         action_request_slot = _sha256(
             f"{root_intent_id}|{action.id}|{body.target_instance_id or ''}")
@@ -237,6 +262,18 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
         "parameters": final_params,
         "requiresApproval": bool(action.requires_approval),
     }
+    # R3 稳定意图身份（会话作用域，仅 assistant 执行器路径）：模型在后续
+    # 回合对同会话同动作/目标/载荷重发 prepare 时，沿用引入该动作请求的
+    # 原意图（root_intent + action_request_slot）——重复 prepare 重放唯一
+    # 确认，不派生第二张 prepared 卡。比较用意图无关身份（action/release/
+    # target/最终参数/审批标志），非全局载荷合并；不同载荷/会话照常新建。
+    if origin == "super_assistant":
+        stable = _stable_session_intent(
+            db, user, body, action.id, context.release.id, final_params,
+            bool(action.requires_approval))
+        if stable is not None:
+            root_intent_id, action_request_slot = stable
+            payload["rootIntentId"] = root_intent_id
     payload_hash = _sha256(_canonical_json(payload))
     if len(_canonical_json(payload).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise ConfirmationError(422, "invalid_parameter",
@@ -542,7 +579,102 @@ def _guard_hash(confirmation: M.ActionConfirmation) -> str:
     }))
 
 
-# --------------------------------------------------------------- execute
+def _normalize_json_numbers(value):
+    """R3：数值形态规范化 —— 1 与 1.0 是同一 JSON 业务值。
+
+    递归把整数值 float 规范为 int，使 1/1.0 的形态差异不会偶然产生
+    「未命中 → 新建确认」或反向误合并。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer()             and abs(value) < 2 ** 53:
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _normalize_json_numbers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_json_numbers(v) for v in value]
+    return value
+
+
+def _stable_session_intent(db: Session, user, body, action_id: str,
+                           release_id: str, final_params: dict,
+                           requires_approval: bool):
+    """同会话内同动作/目标/载荷的**开放**确认 → (root_intent, slot)。
+
+    意图边界（产品裁决）：只命中非终态（prepared/confirmed/dispatch_
+    queued/executing/pending_approval/unknown/recovering/compensation_
+    required）的既有确认 —— 开放动作请求尚未了结时，模型冗余重发
+    prepare 属同一请求的重放，沿用原意图身份经 UNIQUE(owner, session,
+    root_intent, slot) 重放同一 cid。终态（succeeded/denied/cancelled/
+    expired/failed_not_executed/approval_rejected）后 slot 已释放：
+    新的人类消息按当前意图正常新建确认 —— 独立新意图可经正常二次确认
+    再次执行相同动作，不被会话载荷永久合并。
+
+    比较身份意图无关且数值规范化（action/release/target/最终参数/
+    审批标志）；无检索窗口（按 owner+session+action+target 全量精确
+    过滤）。None = 无开放命中。
+    """
+    rows = db.query(M.ActionConfirmation).filter(
+        M.ActionConfirmation.actor_user_id == str(user.id),
+        M.ActionConfirmation.session_kind == body.session_kind,
+        M.ActionConfirmation.session_id == body.session_id,
+        M.ActionConfirmation.action_id == action_id,
+        M.ActionConfirmation.target_instance_id == body.target_instance_id,
+        M.ActionConfirmation.state.in_(_OPEN_CONFIRMATION_STATES),
+    ).all()
+    identity = _sha256(_canonical_json(_normalize_json_numbers({
+        "action": action_id, "release": release_id,
+        "target": body.target_instance_id,
+        "parameters": final_params,
+        "requiresApproval": requires_approval,
+    })))
+    for row in rows:
+        row_identity = _sha256(_canonical_json(_normalize_json_numbers({
+            "action": row.action_id, "release": row.release_id,
+            "target": row.target_instance_id,
+            "parameters": row.final_parameters,
+            "requiresApproval": bool(row.requires_approval),
+        })))
+        if hmac.compare_digest(row_identity, identity):
+            return row.root_intent_id, row.action_request_slot
+    return None
+
+
+def _revalidate_confirmation_access(db: Session, user,
+                                    confirmation: M.ActionConfirmation,
+                                    *, for_engine: bool) -> None:
+    """裁决 1：统一权限重验（与 HTTP 入口共享 access.py 口径）。
+
+    角色→本体写权限（admin 或 editor-owner）、release、profile.enabled/
+    动作 allowlist。入引擎前明确撤权 → 调用方判 failed_not_executed；
+    已入引擎/unknown 不释放 guard（由外部证据优先裁决）。
+    """
+    from app.ontologies.access import require_ontology_access
+    from app.ontologies.agent_runtime.boundary import ToolError, build_scope
+
+    try:
+        require_ontology_access(db, confirmation.ontology_id, user,
+                                write=True)
+    except Exception as exc:  # noqa: BLE001 - HTTPException 透传
+        status = getattr(exc, "status_code", 403)
+        raise ConfirmationError(
+            status, "access_revoked",
+            "权限已变化（角色/本体写权限被撤销）",
+            currentState=confirmation.state if not for_engine else None,
+            engineEntryBlocked=for_engine) from exc
+    context = current_release_context(
+        db, confirmation.ontology_id,
+        expected_release_id=confirmation.release_id)
+    _, profile, scope = build_scope(db, confirmation.ontology_id,
+                                    release_id=context.release.id)
+    if not profile.enabled or not profile.allow_action_proposals:
+        raise ConfirmationError(403, "profile_disabled",
+                                "该本体的智能体已停用或禁止提案")
+    try:
+        scope.require_action(confirmation.action_id)
+    except ToolError as exc:
+        raise ConfirmationError(403, "action_forbidden", str(exc)) from exc
+
 
 def execute(db: Session, user, ontology_id: str, cid: str, session_kind: str,
             session_id: str) -> M.ActionConfirmation:
@@ -555,6 +687,21 @@ def execute(db: Session, user, ontology_id: str, cid: str, session_kind: str,
             "确认请求尚未获得用户批准", currentState=confirmation.state)
     if confirmation.state in ("denied", "cancelled", "expired"):
         return confirmation
+    if confirmation.state == "dispatch_queued":
+        # 裁决 1：入引擎前统一重验；撤权/收紧 → 判未执行失败（有证据
+        # 未入引擎），零业务效果。
+        try:
+            _revalidate_confirmation_access(db, user, confirmation,
+                                            for_engine=True)
+        except ConfirmationError as exc:
+            if exc.code in ("access_revoked", "profile_disabled",
+                            "action_forbidden"):
+                confirmation.state = "failed_not_executed"
+                confirmation.failure_code = "access_revoked_before_engine"
+                db.commit()
+                db.refresh(confirmation)
+                return confirmation
+            raise
     operation = _operation_of(db, confirmation)
     if operation is None:
         return confirmation
@@ -599,6 +746,8 @@ def run_operation_inline(operation_id: str, db: Session | None = None) -> None:
             return
         _mark_engine_entered(op.id, session)
         result = _invoke_engine(op.id, session)
+        if result is None:
+            return  # 撤权路径已就地终态化；无引擎结果不作失败裁决
         _apply_engine_result(op.id, result, session)
     finally:
         if owned:
@@ -645,6 +794,36 @@ def _invoke_engine(operation_id: str, db: Session):
     confirmation = db.query(M.ActionConfirmation).filter(
         M.ActionConfirmation.id == operation.confirmation_id).first()
     if confirmation is None:
+        return None
+    # P2-C：worker/approve 后队列领取时共用 canonical 撤权重验 ——
+    # approve 到入引擎之间撤权（含 HITL 批准后的技术执行领取）不执行；
+    # 已入引擎/unknown 的外部证据裁决不因此翻案。
+    from app.models.user import User as _User
+
+    actor = db.query(_User).filter(
+        _User.id == confirmation.actor_user_id).first()
+    # P3-1：actor 用户行缺失/已删除时禁止 fail-open 跳过 canonical 重验 —
+    # 与撤权同语义（未入引擎且无外部 attempt → failed_not_executed）。
+    if actor is not None:
+        try:
+            _revalidate_confirmation_access(db, actor, confirmation,
+                                            for_engine=True)
+        except ConfirmationError as exc:
+            if exc.code in ("access_revoked", "profile_disabled",
+                            "action_forbidden"):
+                operation.state = "failed_not_executed"
+                operation.last_error = "access_revoked_before_engine"
+                confirmation.state = "failed_not_executed"
+                confirmation.failure_code = "access_revoked_before_engine"
+                db.commit()
+                return None
+            db.rollback()
+    else:
+        operation.state = "failed_not_executed"
+        operation.last_error = "actor_user_missing"
+        confirmation.state = "failed_not_executed"
+        confirmation.failure_code = "actor_user_missing"
+        db.commit()
         return None
     _record_external_attempts_started(db, operation, confirmation)
     from app.ontologies.formal_modeling.schemas import RunActionRequest
@@ -832,6 +1011,14 @@ def _close_from_key_log(db: Session, operation, confirmation, key_log,
             _stamp_log_lineage(db, operation, key_log.id)
         return True
     if key_status in ("pending", "executing"):
+        if (key_status == "executing"
+                and operation.engine_entered_at is not None):
+            # 裁决 2：技术 checkpoint 已激活 — 管理员批准后的技术执行进行
+            # 中，不降回 pending_approval；由 terminal 日志收敛。lease 失效
+            # 由 _reconcile_executing 的无结案证据路径裁决（不在此返回
+            # True，让调用方落到 unknown+guard）。
+            return operation.lease_expires_at is not None and _as_utc(
+                operation.lease_expires_at) >= _now()
         operation.state = "pending_approval"
         operation.approval_log_id = key_log.id
         confirmation.state = "pending_approval"
@@ -946,10 +1133,36 @@ def reconcile_operation(operation_id: str, db: Session | None = None) -> None:
             _reconcile_pending_approval(db, operation, confirmation)
         elif operation.state == "executing":
             _reconcile_executing(db, operation, confirmation)
+        elif operation.state == "unknown" and operation.approval_log_id:
+            # R4/裁决 2：晚到权威证据收敛 —— unknown 不是永久终态；对账
+            # 重新按审批日志/技术执行收据裁决（仍是证据优先，不盲翻案）。
+            _reconcile_pending_approval(db, operation, confirmation)
         db.commit()
     finally:
         if owned:
             db.close()
+
+
+def _reopen_attempts_for_technical_execution(db, operation) -> None:
+    """裁决 2：管理员批准后的技术执行窗口重开 attempt 证据。
+
+    引擎返回 pending 时预登记的 attempt 被标 ``proven_not_applied``（该次
+    调用确实未进入效果阶段）。管理员批准触发 ``approval-execution:{log}``
+    技术执行 — 该执行会真实发送 webhook：进入 executing/approved 即把
+    ``proven_not_applied`` 的 attempt 重开为 ``started``（绑定技术阶段与
+    technical key），崩溃窗口恢复按未结案证据裁决。
+    """
+    attempts = db.query(M.ActionExternalAttempt).filter(
+        M.ActionExternalAttempt.operation_id == operation.id,
+        M.ActionExternalAttempt.state == "proven_not_applied").all()
+    for attempt in attempts:
+        attempt.state = "started"
+        attempt.finished_at = None
+        attempt.evidence_ref = (
+            f"technical-execution:{operation.approval_log_id}")
+    if attempts and not operation.technical_engine_key:
+        operation.technical_engine_key = (
+            f"approval-execution:{operation.approval_log_id}")
 
 
 def _reconcile_pending_approval(db, operation, confirmation) -> None:
@@ -960,30 +1173,45 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
     if log is None:
         return
     status = str(log.status or "").lower()
-    if status in ("pending", "executing"):
+    if status == "executing":
+        # 裁决 2：技术执行 checkpoint/lease — 活跃执行显示 executing；
+        # attempt 重开为证据；`approval-execution:{log}`↔operation 双向
+        # 绑定回填（日志行 operation_id + operation technical key）。
+        _reopen_attempts_for_technical_execution(db, operation)
+        _stamp_log_lineage(db, operation, log.id)
+        operation.state = "executing"
+        confirmation.state = "executing"
+        if not operation.engine_entered_at:
+            operation.engine_entered_at = _now()
+        operation.lease_expires_at = _now() + timedelta(
+            seconds=OPERATION_LEASE_SECONDS)
+        operation.technical_engine_key = (
+            f"approval-execution:{log.id}")
+        return
+    if status == "pending":
         return
     if status == "approved":
+        # R4：预登记 attempt 存在≠批准前已外呼 —— 以技术执行日志的
+        # effects（真实外呼时序的权威收据）裁决，不预重开 attempt。
         related = db.query(ActionExecutionLog).filter(
             ActionExecutionLog.id == log.related_log_id).first() \
             if log.related_log_id else None
         if related is not None:
             attempts = db.query(M.ActionExternalAttempt).filter(
                 M.ActionExternalAttempt.operation_id == operation.id).all()
-            unresolved = [a for a in attempts
-                          if a.state in ("started", "unknown")]
             related_effects = related.effects or []
             uncertain = any(
                 isinstance(e, dict) and e.get("deliveryUncertain")
                 for e in related_effects)
             if str(related.status or "").lower() == "success":
-                if unresolved or uncertain:
-                    # 审批技术执行的外部结果未结案：不因本地 success 结案
+                if uncertain:
+                    # 收据未知：不凭本地 success 结案/释放 guard
                     operation.state = "unknown"
                     operation.execution_log_id = related.id
-                    operation.last_error = "external_attempts_unresolved"
+                    operation.last_error = "external_receipt_uncertain"
                     operation.reconcile_evidence = {
                         "reason":
-                            "approval_execution_with_unresolved_external",
+                            "approval_execution_with_uncertain_receipt",
                         "localSuccessLogId": related.id,
                         "attemptStates": {
                             a.effect_ordinal: a.state for a in attempts},
@@ -991,24 +1219,31 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
                     confirmation.state = "unknown"
                     confirmation.failure_code = "execution_result_unknown"
                     return
+                # 正常批准成功：权威收尾 —— attempts 按收据结案
                 operation.state = "succeeded"
                 operation.execution_log_id = related.id
                 confirmation.state = "succeeded"
                 _stamp_log_lineage(db, operation, related.id, log.id)
                 for attempt in attempts:
-                    if attempt.state == "started":
-                        attempt.state = "acknowledged"
-                        attempt.finished_at = _now()
+                    attempt.state = "acknowledged"
+                    attempt.finished_at = _now()
             else:
-                # 审批技术执行失败：其外部效果若存在 delivery_uncertain，
-                # 同样不能证明未执行 — unknown，guard 保留（与执行路径一致）。
-                if uncertain:
+                # 审批技术执行失败：真实外呼时序裁决 —— 收据未知
+                # （delivery_uncertain）或存在已真实发送未结案的 attempt →
+                # unknown 保留 guard；attempt 全部 proven_not_applied
+                # （引擎在效果前返回/未发送）才 failed_not_executed。
+                sent = [a for a in attempts
+                        if a.state in ("started", "unknown", "acknowledged")]
+                if uncertain or sent:
                     operation.state = "unknown"
                     operation.execution_log_id = related.id
                     operation.last_error = related.error_message
                     operation.reconcile_evidence = {
-                        "reason": "approval_execution_uncertain_delivery",
+                        "reason":
+                            "approval_execution_uncertain_or_sent",
                         "localFailureLogId": related.id,
+                        "attemptStates": {
+                            a.effect_ordinal: a.state for a in attempts},
                     }
                     confirmation.state = "unknown"
                     confirmation.failure_code = "execution_result_unknown"
@@ -1018,6 +1253,9 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
                 operation.last_error = related.error_message
                 confirmation.state = "failed_not_executed"
                 confirmation.failure_code = "approval_execution_failed"
+                for attempt in attempts:
+                    if attempt.state == "proven_not_applied":
+                        attempt.finished_at = _now()
         else:
             confirmation.state = "pending_approval"
         return
@@ -1042,10 +1280,17 @@ def _reconcile_executing(db, operation, confirmation) -> None:
     lease = _as_utc(operation.lease_expires_at)
     if lease is not None and lease >= _now():
         return
-    key = initial_engine_key(confirmation.id)
-    key_log = db.query(ActionExecutionLog).filter(
-        ActionExecutionLog.ontology_id == confirmation.ontology_id,
-        ActionExecutionLog.idempotency_key == key).first()
+    keys = [initial_engine_key(confirmation.id)]
+    if operation.technical_engine_key:
+        # 裁决 2：技术执行键（approval-execution:{log}）双向核对
+        keys.append(operation.technical_engine_key)
+    key_log = None
+    for key in keys:
+        key_log = db.query(ActionExecutionLog).filter(
+            ActionExecutionLog.ontology_id == confirmation.ontology_id,
+            ActionExecutionLog.idempotency_key == key).first()
+        if key_log is not None:
+            break
     attempts = db.query(M.ActionExternalAttempt).filter(
         M.ActionExternalAttempt.operation_id == operation.id).all()
     # success/pending 日志：与执行路径相同的保守裁决（未结案 attempt
@@ -1069,11 +1314,15 @@ def _reconcile_executing(db, operation, confirmation) -> None:
         operation.lease_expires_at = None
         return
     # 引擎已进入但无结案证据：不能推定失败/未执行
+    # 裁决 2：unknown + blockReason + 历史入口，保留 guard；不重批/盲发/
+    # 自动超时释放。组织授权者凭权威外部结果解除（外部对账接收人
+    # 1040787244）。
     operation.state = "unknown"
     operation.reconcile_evidence = {
         "reason": "engine_entered_without_terminal_evidence",
-        "checkedLogKey": key,
+        "checkedLogKeys": keys,
         "attemptStates": _adjudicate_attempts(db, operation, attempts),
+        "recoveryOwner": "external-reconcile:1040787244",
     }
     confirmation.state = "unknown"
     confirmation.failure_code = "execution_result_unknown"
@@ -1091,7 +1340,9 @@ def confirmation_out(db: Session, confirmation: M.ActionConfirmation, *,
             execution_log_id = operation.execution_log_id
             approval_log_id = operation.approval_log_id
     if confirmation.state == "unknown":
-        block_reason = "execution_result_unknown"
+        block_reason = (
+            "执行结果未知且保留保护：无自动超时释放；由外部对账接收人"
+            "（1040787244）确认权威外部结果后解除，或经有界对账收敛")
     return {
         "confirmationId": confirmation.id,
         "state": confirmation.state,

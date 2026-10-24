@@ -53,9 +53,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _assistant_write_gate_default(self):
         """YIYA-36 P2-5 总闸：未显式配置时生产默认关闭、其余环境开启。"""
+        # P2-C（产品裁决）：写总闸默认关闭 —— 非生产也不隐式开启，
+        # 仅显式 ASSISTANT_ACTION_EXECUTION_ENABLED=true（部署健康+批准后）
+        # 或测试内 monkeypatch 开启。
         if self.assistant_action_execution_enabled is None:
-            self.assistant_action_execution_enabled = (
-                self.environment != "production")
+            self.assistant_action_execution_enabled = False
         return self
 
     @field_validator("app_log_level", mode="before")
@@ -160,12 +162,18 @@ class Settings(BaseSettings):
     # statement/lock 超时与内存/临时空间帽；权限不足时查询 fail closed。
     agent_query_statement_timeout_ms: int = 3000
     agent_query_lock_timeout_ms: int = 1000
-    agent_query_work_mem_mib: int = 4
-    agent_query_temp_file_limit_mib: int = 32
+    agent_query_work_mem_mb: int = 4
+    agent_query_temp_file_limit_mb: int = 32
     # YIYA-36 P2-5：assistant 业务写总闸（None=按环境派生：生产关闭）。
     assistant_action_execution_enabled: bool | None = None
     # YIYA-36 P2-5：浏览器通道受保护来源（逗号分隔 origin，部署配置）
     assistant_browser_protected_origins: str = ""
+    # 裁决 4（v2 安全回退）：assistant 浏览器通道总开关。默认关闭 —
+    # 在证明隔离 context/storage、受限凭据、管理写拒绝、origin/逐跳/
+    # 网络策略证据并独立验证前，所有 assistant 浏览器工具（含只读观测/
+    # 网络捕获）在访问 source/session/storage 之前拒绝。正常用户与共享
+    # steward 其他功能不受影响。重新开放需部署证据 + 测试独立验证。
+    assistant_browser_channel_enabled: bool = False
     encryption_key: str = ""
     cors_allowed_origins: str = "*"
     first_admin_user: str = "admin"

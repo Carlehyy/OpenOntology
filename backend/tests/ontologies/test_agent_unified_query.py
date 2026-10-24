@@ -3,6 +3,8 @@
 SQLite 保留契约语义（typed cast/三值逻辑/稳定分页）；锁/隔离/PG JSON cast
 由真实栈验收（YIYA-41）覆盖。
 """
+import json
+
 import pytest
 
 from app.ontologies.agent_query.service import QueryError
@@ -900,3 +902,156 @@ def test_pure_aggregation_without_group_columns(client, auth_headers,
     assert request.select == []
     assert request.aggregates[0].fn == "count"
     validate({"cursor": "snapshot-cursor-123456"}, schema)
+
+
+# ------------------------------------- Z1：合并冲突丢失的行为测试恢复
+
+
+def _pg_url_for_budget_verify() -> str | None:
+    """Z-A：真实 PG 行为验证的目标连接（环境变量显式提供）。"""
+    import os
+    return os.environ.get("AGENT_QUERY_PG_VERIFY_URL") or None
+
+
+def test_query_budget_units_real_database_behavior():
+    """R-1/Z-A：预算单位以真实数据库行为验证（非源码文本断言）。
+
+    需要真实 PostgreSQL（AGENT_QUERY_PG_VERIFY_URL，如
+    postgresql+psycopg2://user:pw@127.0.0.1:5432/db）。未提供时跳过 —
+    真实行为证据不以 fake execute/字符串回声顶替。
+    """
+    import pytest
+
+    url = _pg_url_for_budget_verify()
+    if url is None:
+        pytest.skip(
+            "AGENT_QUERY_PG_VERIFY_URL 未设置：真实 PG 行为验证跳过"
+            "（CI/YIYA-41 真实栈提供）")
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(url)
+    session = sessionmaker(bind=engine)()
+    try:
+        # 1) 合法单位 MB 被数据库接受，且限制生效（current_setting 回读）
+        session.execute(text("BEGIN"))
+        session.execute(text(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+        session.execute(text("SET LOCAL work_mem = '4MB'"))
+        session.execute(text("SET LOCAL statement_timeout = '3000ms'"))
+        effective_mem = session.execute(text(
+            "SELECT current_setting('work_mem')")).scalar()
+        effective_timeout = session.execute(text(
+            "SELECT current_setting('statement_timeout')")).scalar()
+        session.execute(text("ROLLBACK"))
+        assert effective_mem == "4MB", effective_mem
+        assert effective_timeout == "3s", effective_timeout
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_query_budget_illegal_unit_rejected_by_database():
+    """R-1/Z-A：非法单位（MiB）被真实数据库拒绝（DataError）。"""
+    import pytest
+
+    url = _pg_url_for_budget_verify()
+    if url is None:
+        pytest.skip(
+            "AGENT_QUERY_PG_VERIFY_URL 未设置：真实 PG 行为验证跳过"
+            "（CI/YIYA-41 真实栈提供）")
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(url)
+    session = sessionmaker(bind=engine)()
+    try:
+        session.execute(text("BEGIN"))
+        rejected = False
+        try:
+            session.execute(text("SET LOCAL work_mem = '4MiB'"))
+        except Exception:
+            rejected = True
+        finally:
+            try:
+                session.execute(text("ROLLBACK"))
+            except Exception:  # noqa: BLE001 - 事务已中止
+                pass
+        assert rejected is True
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_query_budget_error_no_internal_leak():
+    """R-2/Z1：预算失败响应不回灌 str(exc)/SQL 细节，分类入 extra。"""
+    from app.ontologies.agent_query import service as query_service
+
+    class _Orig:
+        pgcode = "42501"
+
+    class _StmtExc(Exception):
+        orig = _Orig()
+
+    class _Db:
+        def in_transaction(self):
+            return False
+
+        def execute(self, statement):
+            raise _StmtExc()
+
+        def rollback(self):
+            pass
+
+    svc = query_service.UnifiedQueryService.__new__(
+        query_service.UnifiedQueryService)
+    svc.db = _Db()
+    svc._pg = True
+    from app.ontologies.agent_query import schemas as _QS
+    svc.req = _QS.QueryRequest(
+        sources=[_QS.QuerySource(alias="a", ontology_id="x",
+                                 release_id="y", objectTypeId="z")],
+        select=[])
+    try:
+        svc._pin_transaction()
+        raise AssertionError("expected QueryError")
+    except query_service.QueryError as exc:
+        assert exc.code == "query_budget_unavailable"
+        assert exc.extra.get("errorClass") == "insufficient_privilege"
+        payload = json.dumps(exc.detail(), ensure_ascii=False)
+        assert "42501" not in payload
+        assert "permission denied" not in payload
+        assert "orig" not in payload
+
+
+def test_query_auth_hash_reflects_real_write_access(
+        client, auth_headers, orders_ontology, db, editor_user):
+    """裁决 1/Z1：auth 材料使用真实 RBAC 写权限（admin/editor-owner/
+    其他 editor/viewer 区分）— 权限收紧改变快照指纹。"""
+    from app.ontologies.agent_query.service import _ontology_write_access
+    from app.models.ontology import OntologyProject
+
+    orders = orders_ontology
+    project = db.query(OntologyProject).filter_by(
+        id=orders["ontologyId"]).one()
+
+    class _Admin:
+        id = "admin-user"
+        role = "admin"
+
+    class _EditorOwner:
+        id = str(project.created_by)
+        role = "editor"
+
+    class _EditorOther:
+        id = "someone-else"
+        role = "editor"
+
+    class _Viewer:
+        id = str(project.created_by)
+        role = "viewer"
+
+    assert _ontology_write_access(_Admin(), project) is True
+    assert _ontology_write_access(_EditorOwner(), project) is True
+    assert _ontology_write_access(_EditorOther(), project) is False
+    assert _ontology_write_access(_Viewer(), project) is False

@@ -344,12 +344,22 @@ def release_browser_live_http(
     *,
     require_conversation_fn=_require_conversation,
     browser_error_fn=_browser_error,
+    teardown_only: bool = False,
 ):
+    """释放 live-http 租约（清场）。
+
+    ``teardown_only=True``（assistant 通道闸关闭时的 Z4 例外）：只调用
+    release 断开租约，不导航、不输入、不读凭据/页面状态 — 供存量会话
+    安全退出，不驱动任何浏览器行为。
+    """
     require_conversation_fn(db, conversation_id, current_user)
     try:
         browser_manager.release_http_live(
             conversation_id, body.leaseId
         )
-        return _ok({"released": True})
+        payload = {"released": True}
+        if teardown_only:
+            payload["teardownOnly"] = True
+        return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         raise browser_error_fn(exc)
