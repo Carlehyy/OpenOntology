@@ -268,6 +268,7 @@ class Neo4jService:
         MERGE (n:{label} {{{key_field}: e.key}})
         {property_assignment}
         SET n.updated_at = coalesce(e.props.updated_at, datetime())
+        RETURN count(n) AS written
         """
         count = 0
         chunk_size = 1000
@@ -281,8 +282,50 @@ class Neo4jService:
                         "key": encoded.get(key_field),
                         "props": encoded,
                     })
-                session.run(query, batch=batch)
-                count += len(chunk)
+                record = session.run(query, batch=batch).single()
+                count += int(record["written"] if record else 0)
+        return count
+
+    def batch_upsert_relations(
+        self, src_label: str, tgt_label: str, rel_type: str,
+        relations: list[dict], key_field: str = "id",
+    ) -> int:
+        """UNWIND bounded relationship batches and report actual matched writes.
+
+        Stable relationship IDs preserve parallel links; a missing endpoint
+        reduces the write count so the projection caller can fail closed.
+        """
+        if not self._available or not relations:
+            return 0
+        from app.ontologies.graph.cypher_builder import validate_label
+
+        src_label = validate_label(src_label)
+        tgt_label = validate_label(tgt_label)
+        rel_type = validate_label(rel_type)
+        key_field = validate_label(key_field)
+        query = f"""
+        UNWIND $batch AS e
+        MATCH (s:{src_label} {{{key_field}: e.src_key}})
+        MATCH (t:{tgt_label} {{{key_field}: e.tgt_key}})
+        MERGE (s)-[r:{rel_type} {{id: e.props.id}}]->(t)
+        SET r += e.props,
+            r.updated_at = coalesce(e.props.updated_at, datetime())
+        RETURN count(r) AS written
+        """
+        count = 0
+        with self._driver.session() as session:
+            for offset in range(0, len(relations), 1000):
+                batch = []
+                for relation in relations[offset:offset + 1000]:
+                    props = _encode_properties(relation["props"])
+                    if props.get("id") is None:
+                        raise ValueError("Batch relationships require a stable id")
+                    batch.append({
+                        "src_key": relation["src_key"],
+                        "tgt_key": relation["tgt_key"], "props": props,
+                    })
+                record = session.run(query, batch=batch).single()
+                count += int(record["written"] if record else 0)
         return count
 
     def batch_delete_entities(self, ontology_id: str, entity_ids: list[str]) -> int:
@@ -403,15 +446,33 @@ class Neo4jService:
         return {"nodes": list(nodes_map.values()), "edges": edges}
 
     def delete_by_ontology(self, ontology_id: str) -> int:
-        """删除 ontology_id 关联的所有节点/关系"""
+        """Delete in bounded transactions, including high-degree relationships."""
         if not self._available:
             return 0
-        query = """
+        # Delete edges separately so a single high-degree node cannot make one
+        # DETACH DELETE transaction retain millions of relationship deletions.
+        edge_query = """
+        MATCH (n {ontology_id: $ontology_id})-[r]-()
+        WITH DISTINCT r LIMIT $batch_size
+        DELETE r
+        RETURN count(r) AS deleted
+        """
+        node_query = """
         MATCH (n {ontology_id: $ontology_id})
-        DETACH DELETE n
+        WITH n LIMIT $batch_size
+        DELETE n
         RETURN count(n) AS deleted
         """
+        count = 0
         with self._driver.session() as session:
-            result = session.run(query, ontology_id=ontology_id)
-            record = result.single()
-            return record["deleted"] if record else 0
+            for query in (edge_query, node_query):
+                while True:
+                    record = session.run(
+                        query, ontology_id=ontology_id, batch_size=1000,
+                    ).single()
+                    deleted = int(record["deleted"] if record else 0)
+                    if query == node_query:
+                        count += deleted
+                    if deleted == 0:
+                        break
+        return count

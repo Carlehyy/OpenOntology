@@ -48,6 +48,9 @@ run_with_retry() {
     sleep "$SLEEP_SECONDS"
   done
 }
+INTEGRATED_DBX_INTERNAL=0
+INTEGRATED_DBX_COMMIT_PIN="0137e0cbc8b663da5a17ec424c6d47e4e5570ead"
+
 compose_environment() {
   # Docker Compose gives exported shell variables precedence over the project
   # .env file. The manifest has already been validated and persisted into
@@ -74,6 +77,10 @@ compose_environment() {
     -u N8N_API_URL \
     -u N8N_API_KEY \
     -u N8N_TIMEOUT_SECONDS \
+    -u INTEGRATED_DBX_URL \
+    -u INTEGRATED_DBX_PASSWORD \
+    -u INTEGRATED_DBX_COMMIT \
+    -u INTEGRATED_DBX_INTERNAL \
     -u PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \
     -u SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE \
     -u ASSISTANT_ACTION_EXECUTION_ENABLED \
@@ -117,14 +124,18 @@ compose() {
   # COMPOSE_FILE 支持冒号分隔的多个 compose 文件（与 docker compose 的 COMPOSE_FILE
   # 环境变量语义一致），逐个展开为 -f 参数。
   local compose_args=() file
+  local -a profile_args=()
   local IFS=':'
   for file in $COMPOSE_FILE; do
     compose_args+=(-f "$file")
   done
+  if [ "$INTEGRATED_DBX_INTERNAL" = "1" ] && [ "${1:-}" != "version" ]; then
+    profile_args=(--profile integrated-dbx)
+  fi
   if compose_environment docker compose version >/dev/null 2>&1; then
-    compose_environment docker compose "${compose_args[@]}" "$@"
+    compose_environment docker compose "${profile_args[@]}" "${compose_args[@]}" "$@"
   elif command -v docker-compose >/dev/null 2>&1; then
-    compose_environment docker-compose "${compose_args[@]}" "$@"
+    compose_environment docker-compose "${profile_args[@]}" "${compose_args[@]}" "$@"
   else
     log "Docker Compose is not installed"
     return 1
@@ -237,6 +248,7 @@ check_pipeline_executor() {
   [ "$health" = "healthy" ]
 }
 start_required_dependency_services() {
+  start_integrated_dbx_if_needed
   # CDP must be configured and is checked by deep readiness, but an unhealthy
   # browser must not prevent the API process from starting for diagnostics.
   # python_kernel_gateway executes user scripts for Python pipelines; it is
@@ -474,6 +486,66 @@ preflight_runtime_secret_authority() {
 # complete persistent file byte-for-byte untouched for operator recovery.
 preflight_runtime_secret_authority
 
+integrated_dbx_origin_is_valid() {
+  local raw="$1" port
+  [[ "$raw" =~ ^https?://(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?/?$ ]] || return 1
+  port="${BASH_REMATCH[3]:-}"
+  [ -z "$port" ] || [ "$port" -le 65535 ]
+}
+
+configure_integrated_dbx() {
+  # Server-side .env authority only; no GitHub secret or manifest key is added.
+  local url password commit generated=0
+  url="$(env_value INTEGRATED_DBX_URL)"
+  password="$(env_value INTEGRATED_DBX_PASSWORD)"
+  commit="$(env_value INTEGRATED_DBX_COMMIT)"
+  if [ -z "$url" ] && [ -z "$password" ]; then
+    url="http://dbx:4224"
+    password="$(random_hex 32)"
+    generated=1
+    INTEGRATED_DBX_INTERNAL=1
+  elif [ -n "$url" ] && [ -n "$password" ]; then
+    if [ "$url" = "http://dbx:4224" ]; then
+      INTEGRATED_DBX_INTERNAL=1
+    else
+      INTEGRATED_DBX_INTERNAL=0
+    fi
+  else
+    log "INTEGRATED_DBX_URL and INTEGRATED_DBX_PASSWORD must be both set or both empty; refusing a partial external configuration"
+    exit 1
+  fi
+  if [ -z "$commit" ]; then
+    commit="$INTEGRATED_DBX_COMMIT_PIN"
+  fi
+  if [ "$commit" != "$INTEGRATED_DBX_COMMIT_PIN" ]; then
+    log "INTEGRATED_DBX_COMMIT must equal the pinned dbx release commit"
+    exit 1
+  fi
+  if ! integrated_dbx_origin_is_valid "$url"; then
+    log "INTEGRATED_DBX_URL must be an absolute HTTP(S) origin without credentials, path, query, or fragment"
+    exit 1
+  fi
+  if [ "$generated" = "1" ]; then
+    set_env_value INTEGRATED_DBX_URL "$url"
+    set_env_value INTEGRATED_DBX_PASSWORD "$password"
+    set_env_value INTEGRATED_DBX_COMMIT "$commit"
+    log "configured internal dbx metadata service with a generated server-side password"
+  else
+    set_env_value INTEGRATED_DBX_COMMIT "$commit"
+    log "preserved explicit dbx metadata configuration (internal=${INTEGRATED_DBX_INTERNAL})"
+  fi
+}
+
+start_integrated_dbx_if_needed() {
+  if [ "$INTEGRATED_DBX_INTERNAL" = "1" ]; then
+    compose up -d dbx
+  else
+    # Stop a prior internal service without deleting dbx_data. An explicit
+    # external endpoint remains authoritative and is never replaced.
+    compose --profile integrated-dbx stop dbx >/dev/null 2>&1 || true
+  fi
+}
+
 dependency_key_allowed() {
   case "$1" in
     ENVIRONMENT|PUBLIC_PORT|\
@@ -561,6 +633,7 @@ apply_production_dependency_config() {
 }
 apply_production_dependency_config
 chmod 600 .env
+configure_integrated_dbx
 # Chromium is bundled with the production Compose stack. Pin the internal CDP
 # URL so existing server-side .env files receive the newly required setting.
 set_env_value STEWARD_BROWSER_CDP_URL http://browser:9222
@@ -945,7 +1018,7 @@ redact_compose_logs() {
     SECRET_KEY ENCRYPTION_KEY FIRST_ADMIN_PASSWORD POSTGRES_PASSWORD \
     DATABASE_URL REDIS_PASSWORD REDIS_URL NEO4J_PASSWORD NEO4J_AUTH \
     MINIO_ACCESS_KEY MINIO_SECRET_KEY API_HUB_SYSTEM_MCP_TOKEN \
-    N8N_API_KEY; do
+    N8N_API_KEY INTEGRATED_DBX_PASSWORD; do
     value="$(env_value "$key")"
     [ -z "$value" ] || sensitive_values+=("$value")
   done
@@ -1290,7 +1363,7 @@ for i in $(seq 1 60); do
 done
 log "deployment health check failed"
 compose ps || true
-redact_compose_logs backend browser frontend pipeline_executor || true
+redact_compose_logs backend dbx browser frontend pipeline_executor || true
 stop_new_runtime_after_failed_deploy
 log "migration reached head; restore the pre-deploy backup before rolling back the application"
 exit 1

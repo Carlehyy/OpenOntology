@@ -9,6 +9,7 @@ from app.ontologies.formal_modeling.action_execution_errors import (
 from app.ontologies.formal_modeling.action_runtime_values import (
     _preview_instance_values,
     _preview_link_values,
+    _preview_reader,
     _render_template,
     _resolve_recipient,
 )
@@ -41,6 +42,7 @@ def _execute_internal_notification(
             rule_name,
             f"外部通知通道「{channel}」尚未配置可靠投递器，已拒绝伪造 delivered",
         )
+    reader = _preview_reader(preview_context)
     try:
         recipient = _resolve_recipient(
             config,
@@ -58,6 +60,7 @@ def _execute_internal_notification(
                             _preview_instance_values(preview_context)
                             if preview_context is not None
                             and preview_context.get("isolated", False)
+                            and reader is None
                             else []
                         ),
                         *dry_run_created_objects,
@@ -73,8 +76,10 @@ def _execute_internal_notification(
                 _preview_link_values(preview_context)
                 if preview_context is not None
                 and preview_context.get("isolated", False)
+                and reader is None
                 else None
             ),
+            isolated_reader=reader,
         )
     except SafeEvalError as exc:
         raise RuleExecutionError(

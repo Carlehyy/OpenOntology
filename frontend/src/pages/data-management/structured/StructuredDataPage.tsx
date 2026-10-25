@@ -17,6 +17,7 @@ import { pipelineTasksApi, type PipelineTask } from '@/api/v2/pipeline-tasks'
 import datasetsApi from '@/api/v2/datasets'
 import CuratedDetailPanel from './CuratedDetailPanel'
 import RawDatasetsView from './RawDatasetsView'
+import IntegratedDatasetsView from './IntegratedDatasetsView'
 import MigrationTasksModal from './MigrationTasksModal'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
@@ -54,11 +55,12 @@ const STATUS_STYLE: Record<string, string> = {
   rejected:       'bg-[var(--color-danger-bg)] text-[var(--color-danger)] border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)]',
 }
 
-type LakeTab = 'curated' | 'raw'
+type LakeTab = 'curated' | 'raw' | 'integrated'
 
 const LAKE_TABS: [LakeTab, string][] = [
   ['curated', '成品数据集'],
   ['raw', '人工数据集'],
+  ['integrated', '集成数据集'],
 ]
 
 const isPendingReview = (status: string) => status === 'pending_review' || status === 'pending' || status === 'in_review'
@@ -240,14 +242,14 @@ export default function StructuredDataPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedTab = searchParams.get('tab')
-  const activeTab: LakeTab = requestedTab === 'raw' ? 'raw' : 'curated'
+  const activeTab: LakeTab = requestedTab === 'integrated' ? 'integrated' : requestedTab === 'raw' ? 'raw' : 'curated'
   const [insightSelected, setInsightSelected] = useState(true)
   const tabsRef = useRef<HTMLDivElement>(null)
   const [indicatorPos, setIndicatorPos] = useState({ left: 0, width: 0 })
   const focusDatasetId = searchParams.get('dataset')
 
   useEffect(() => {
-    if (!requestedTab || requestedTab === 'curated' || requestedTab === 'raw') return
+    if (!requestedTab || requestedTab === 'curated' || requestedTab === 'raw' || requestedTab === 'integrated') return
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
       next.set('tab', 'curated')
@@ -346,7 +348,9 @@ export default function StructuredDataPage() {
         <div key={activeTab} className="h-full animate-lake-tab-in">
           {activeTab === 'curated'
             ? <CuratedView focusDatasetId={focusDatasetId} />
-            : <RawDatasetsView focusDatasetId={focusDatasetId} source="manual" />}
+            : activeTab === 'integrated'
+              ? <IntegratedDatasetsView focusDatasetId={focusDatasetId} />
+              : <RawDatasetsView focusDatasetId={focusDatasetId} source="manual" />}
         </div>
       </div>
     </div>

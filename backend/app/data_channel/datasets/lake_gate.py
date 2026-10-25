@@ -827,3 +827,167 @@ def persist_contract(curated_ds, *, pk: str, pk_source: str,
                 "previous_pk": prev,
             }
     return schema
+
+
+class IntegratedSnapshotGate:
+    """Strict, bounded gate for a declared native relational snapshot.
+
+    Unlike curated inference, integrated source metadata is authoritative.  No
+    sample inference, row-key set, float conversion of decimals, NULL-to-empty
+    conversion, or implicit column evolution is permitted.  Duplicate identities
+    are enforced by the private version relation's database constraint.
+    """
+
+    MAX_BATCH_SIZE = 1000
+    TYPES = {"string", "integer", "float", "decimal", "boolean", "timestamp",
+             "date", "time", "json", "binary"}
+
+    def __init__(self, descriptor: dict):
+        import hashlib
+
+        self.schema = descriptor.get("schema")
+        self.primary_key = descriptor.get("primary_key")
+        if not isinstance(self.schema, list) or not self.schema:
+            raise LakeGateError("Integrated snapshot requires a nonempty declared schema")
+        if not isinstance(self.primary_key, list):
+            raise LakeGateError("Integrated snapshot requires an ordered primary-key declaration")
+        self.columns = []
+        for spec in self.schema:
+            if (not isinstance(spec, dict) or not isinstance(spec.get("name"), str)
+                    or not spec["name"] or "\x00" in spec["name"]
+                    or spec.get("type") not in self.TYPES
+                    or not isinstance(spec.get("nullable"), bool)
+                    or not isinstance(spec.get("source_type"), str)):
+                raise LakeGateError("Integrated source has an invalid or unsupported column contract")
+            self.columns.append(spec["name"])
+        if len(set(self.columns)) != len(self.columns):
+            raise LakeGateError("Integrated source schema contains duplicate column names")
+        if (len(set(self.primary_key)) != len(self.primary_key)
+                or any(key not in self.columns for key in self.primary_key)):
+            raise LakeGateError("Integrated source primary key does not match its columns")
+        raw = json.dumps({"columns": self.schema, "primary_key": self.primary_key},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        self.fingerprint = hashlib.sha256(raw.encode()).hexdigest()
+        if descriptor.get("schema_fingerprint") != self.fingerprint:
+            raise LakeGateError("Integrated source schema fingerprint does not match its declared schema")
+        self._column_set = set(self.columns)
+        self.total = 0
+
+    def accept_batch(self, rows: list[dict]) -> list[dict]:
+        if not isinstance(rows, list) or len(rows) > self.MAX_BATCH_SIZE:
+            raise LakeGateError("Integrated source batches must contain at most 1000 rows")
+        result = []
+        for index, row in enumerate(rows, self.total + 1):
+            if not isinstance(row, dict) or set(row) != self._column_set:
+                raise LakeGateError(f"Integrated row {index} does not match the frozen column contract")
+            converted = {}
+            for spec in self.schema:
+                name = spec["name"]
+                value = row[name]
+                if value is None:
+                    if not spec["nullable"] or name in self.primary_key:
+                        raise LakeGateError(f"Integrated row {index}, column {name}: NULL is not allowed")
+                    converted[name] = None
+                    continue
+                try:
+                    converted[name] = self._encode(value, spec)
+                except (ValueError, TypeError, OverflowError):
+                    # Never include actual source data in diagnostics/logs.
+                    raise LakeGateError(
+                        f"Integrated row {index}, column {name}: value violates declared {spec['type']} type"
+                    ) from None
+            result.append(converted)
+        self.total += len(rows)
+        return result
+
+    @staticmethod
+    def _encode(value, spec: dict) -> str:
+        import base64
+        import math
+        import uuid
+        from datetime import date, time
+        from decimal import Decimal
+
+        kind = spec["type"]
+        if kind == "string":
+            if not isinstance(value, str):
+                if isinstance(value, uuid.UUID) and "uuid" in spec["source_type"].lower():
+                    return str(value)
+                raise TypeError
+            if "\x00" in value or (spec.get("length") is not None and len(value) > spec["length"]):
+                raise ValueError
+            return value
+        if kind == "integer":
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError
+            source = spec["source_type"].lower()
+            bits = next((bits for token, bits in (("bigint", 64), ("tinyint", 8), ("mediumint", 24),
+                                                  ("smallint", 16), ("integer", 32), ("int", 32))
+                         if token in source), None)
+            unsigned = bool(spec.get("unsigned"))
+            if unsigned and value < 0:
+                raise ValueError
+            if bits is not None and not (0 if unsigned else -(2 ** (bits - 1))) <= value <= (
+                    2 ** bits - 1 if unsigned else 2 ** (bits - 1) - 1):
+                raise ValueError
+            return str(value)
+        if kind == "decimal":
+            if not isinstance(value, (Decimal, int)) or isinstance(value, bool):
+                raise TypeError  # in particular, never round an incoming float
+            number = Decimal(value)
+            if not number.is_finite() or (spec.get("unsigned") and number < 0):
+                raise ValueError
+            precision, scale = spec.get("precision"), spec.get("scale")
+            # Inspect the exact Decimal tuple instead of quantize/context math:
+            # no default decimal precision, float round trip or implicit scale
+            # rounding may affect native numeric(p,s), including negative scales.
+            digits = list(number.as_tuple().digits)
+            exponent = number.as_tuple().exponent
+            while len(digits) > 1 and digits[-1] == 0:
+                digits.pop()
+                exponent += 1
+            if number and scale is not None and exponent < -scale:
+                raise ValueError
+            if number and precision is not None and scale is not None:
+                if len(digits) + exponent > precision - scale:
+                    raise ValueError
+            return str(number)
+        if kind == "float":
+            if not isinstance(value, (float, int)) or isinstance(value, bool) or not math.isfinite(value):
+                raise TypeError
+            return repr(value)
+        if kind == "boolean":
+            # MySQL BOOLEAN can arrive as a native 0/1 from some drivers.
+            if isinstance(value, bool) or type(value) is int and value in (0, 1):
+                return "true" if value else "false"
+            raise TypeError
+        if kind == "timestamp":
+            if not isinstance(value, datetime):
+                raise TypeError
+            if bool(spec.get("timezone")) != (value.utcoffset() is not None):
+                raise ValueError
+            return value.isoformat()
+        if kind == "date":
+            if not isinstance(value, date) or isinstance(value, datetime):
+                raise TypeError
+            return value.isoformat()
+        if kind == "time":
+            if not isinstance(value, time):
+                raise TypeError
+            if bool(spec.get("timezone")) != (value.utcoffset() is not None):
+                raise ValueError
+            return value.isoformat()
+        if kind == "json":
+            from app.data_channel.integrated.contracts import JsonText
+            if isinstance(value, JsonText):
+                # Reflected JSON is source-validated text: retain numeric precision,
+                # scalar null, member order and whitespace without re-encoding.
+                return str(value)
+            # A scalar JSON string must remain a JSON string, not be reparsed.
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                              sort_keys=True, allow_nan=False)
+        if kind == "binary":
+            if not isinstance(value, (bytes, bytearray, memoryview)):
+                raise TypeError
+            return base64.b64encode(bytes(value)).decode("ascii")
+        raise TypeError

@@ -27,6 +27,8 @@ from app.routers import sentinel as sentinel_router
 from app.routers import collectors as collectors_router
 from app.data_channel.connections import router as connections_v2
 from app.data_channel.datasets import router as datasets_v2
+from app.data_channel.integrated import router as integrated_datasets_v2
+from app.data_channel.query import router as unified_query_v2
 from app.data_channel.pipelines import router as pipelines_v2
 from app.ontologies.graph import v2_router as graph_v2
 from app.data_channel.datasets import search_router as search_v2
@@ -202,6 +204,21 @@ app.include_router(api_hub_http_proxy.public_router)
 asset_lake_guard = [Depends(asset_lake_access_guard), *data_guard]
 app.include_router(connections_v2.router, prefix="/api/v2/connections", tags=["v2-connections"], dependencies=asset_lake_guard)
 app.include_router(datasets_v2.router, prefix="/api/v2/datasets", tags=["v2-datasets"], dependencies=asset_lake_guard)
+app.include_router(integrated_datasets_v2.router, prefix="/api/v2/integrated-datasets", tags=["v2-integrated-datasets"], dependencies=asset_lake_guard)
+# POST is a read transport here: viewer/custom read access must not pass through
+# the asset mutation guard. Every binding additionally reauthorizes its resource.
+app.include_router(unified_query_v2.router, prefix="/api/v2", tags=["v2-query"], dependencies=data_guard)
+
+# Assemble the ontology-owned read port without a reverse domain dependency.
+from functools import partial
+from app.data_channel.query.contracts import ColumnSpec, Relation, register_provider
+from app.ontologies.agent_query.read_port import resolve_ontology_relation
+
+register_provider("ontology", partial(
+    resolve_ontology_relation,
+    column_spec_factory=ColumnSpec,
+    relation_factory=Relation,
+))
 app.include_router(manual_sharing_router, prefix="/api/v2/manual-dataset-sharing", tags=["manual-dataset-sharing"], dependencies=asset_lake_guard)
 app.include_router(public_manual_sharing_router, prefix="/api/public/manual-datasets", tags=["public-manual-datasets"])
 app.include_router(auth_public_query_router, prefix="/api/public", tags=["public-var-query"])

@@ -22,11 +22,18 @@ def make_mapping_obj(field_mapping=None):
     return m
 
 
-def make_db(mapping_obj):
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = mapping_obj
-    db.commit = MagicMock()
-    return db
+def make_db(db, admin_user):
+    """Use a real finite relation: keyset queries cannot run on truthy mocks."""
+    from app.ontologies.projects.models import OntologyProject
+    from app.data_channel.datasets.models import Dataset
+    db.add(OntologyProject(id="ont-1", name="Apply fixture", domain="test", created_by=admin_user.id))
+    db.add(Dataset(id="ds-1", name="Apply source", kind="curated",
+                   schema_json={"primary_key": "order_id"}))
+    db.flush()
+    mapping = make_mapping_obj()
+    db.add(mapping)
+    db.commit()
+    return mapping
 
 
 DATA = [
@@ -35,8 +42,8 @@ DATA = [
 ]
 
 
-def test_apply_mapping_returns_summary():
-    db = make_db(make_mapping_obj())
+def test_apply_mapping_returns_summary(db, admin_user):
+    make_db(db, admin_user)
     svc = MappingService(db)
     with patch("app.services.v2.graph.neo4j_service.GraphDatabase") as mock_neo4j:
         mock_neo4j.driver.side_effect = Exception("offline")
@@ -46,15 +53,14 @@ def test_apply_mapping_returns_summary():
     assert result["mapping_id"] == "map-1"
 
 
-def test_apply_mapping_updates_status():
-    m = make_mapping_obj()
-    db = make_db(m)
+def test_apply_mapping_updates_status(db, admin_user):
+    m = make_db(db, admin_user)
     svc = MappingService(db)
     with patch("app.services.v2.graph.neo4j_service.GraphDatabase") as mock_neo4j:
         mock_neo4j.driver.side_effect = Exception("offline")
         svc.apply_mapping("map-1", DATA)
     assert m.status == "applied"
-    db.commit.assert_called()
+    assert db.get(OntologyMapping, m.id).status == "applied"
 
 
 def test_apply_mapping_not_found_raises():
@@ -65,8 +71,8 @@ def test_apply_mapping_not_found_raises():
         svc.apply_mapping("nonexistent", DATA)
 
 
-def test_apply_mapping_empty_data():
-    db = make_db(make_mapping_obj())
+def test_apply_mapping_empty_data(db, admin_user):
+    make_db(db, admin_user)
     svc = MappingService(db)
     with patch("app.services.v2.graph.neo4j_service.GraphDatabase") as mock_neo4j:
         mock_neo4j.driver.side_effect = Exception("offline")
@@ -165,9 +171,10 @@ def test_display_name_uses_supplier_code_before_name_only():
     assert svc._display_name(mapping, row, "供应商ID", 0) == "SUP001 / 天钢原材料有限公司"
 
 
-def test_normalize_mapping_adds_property_metadata():
-    mapping = make_mapping_obj({"order_id": "order_id"})
-    svc = MappingService(make_db(mapping))
+def test_normalize_mapping_adds_property_metadata(db, admin_user):
+    mapping = make_db(db, admin_user)
+    mapping.field_mapping = {"order_id": "order_id"}
+    svc = MappingService(db)
 
     svc._normalize_mapping(mapping, [
         {"order_id": "O-1", "amount": "12.5", "created_at": "2026-01-01", "markdown_text": "raw"},

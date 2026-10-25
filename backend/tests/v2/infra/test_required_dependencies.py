@@ -81,6 +81,9 @@ def _required_settings(**updates) -> Settings:
         "minio_secret_key": "strong-minio-password",
         "steward_browser_cdp_url": "http://browser:9222",
         "steward_browser_allow_private_networks": False,
+        "integrated_dbx_url": "http://dbx:4224",
+        "integrated_dbx_password": "strong-dbx-password",
+        "integrated_dbx_commit": "0137e0cbc8b663da5a17ec424c6d47e4e5570ead",
         "n8n_api_url": "https://n8n.example.com/api/v1",
         "n8n_api_key": "strong-n8n-api-key",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
@@ -440,3 +443,50 @@ def test_environment_minio_is_always_authoritative(monkeypatch):
     )
 
     assert storage.get_storage_service() is sentinel
+
+
+def test_dependency_probe_checks_dbx_only_in_production(monkeypatch, capsys):
+    from app.shared import dependency_probe
+
+    calls = []
+    monkeypatch.setattr(dependency_probe, "PROBES", ())
+    monkeypatch.setattr(
+        dependency_probe, "probe_dbx", lambda: calls.append("dbx"))
+    monkeypatch.setattr(dependency_probe.settings, "environment", "production")
+
+    assert dependency_probe.main() == 0
+    assert calls == ["dbx"]
+    assert "dbx: ok" in capsys.readouterr().out
+
+
+def test_dependency_probe_dbx_failure_fails_closed_without_secret(
+    monkeypatch, capsys,
+):
+    from app.shared import dependency_probe
+
+    def reject_dbx():
+        raise RuntimeError("DBX_AUTH_FAILED should never be rendered as a value")
+
+    monkeypatch.setattr(dependency_probe, "PROBES", ())
+    monkeypatch.setattr(dependency_probe, "probe_dbx", reject_dbx)
+    monkeypatch.setattr(dependency_probe.settings, "environment", "production")
+
+    assert dependency_probe.main() == 1
+    captured = capsys.readouterr()
+    assert "dbx: unavailable (RuntimeError)" in captured.err
+    assert "DBX_AUTH_FAILED should never be rendered" not in captured.err
+
+
+def test_dependency_probe_does_not_include_dbx_outside_production(
+    monkeypatch, capsys,
+):
+    from app.shared import dependency_probe
+
+    calls = []
+    monkeypatch.setattr(dependency_probe, "PROBES", ())
+    monkeypatch.setattr(
+        dependency_probe, "probe_dbx", lambda: calls.append("dbx"))
+    monkeypatch.setattr(dependency_probe.settings, "environment", "development")
+
+    assert dependency_probe.main() == 0
+    assert calls == []

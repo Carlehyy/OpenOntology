@@ -515,10 +515,8 @@ def _prepare_action_execution_request(
     target_instance = None
     if body.target_instance_id:
         if preview_context is not None:
-            target_instance = next((
-                item for item in _preview_instance_values(preview_context)
-                if str(item.id) == str(body.target_instance_id)
-            ), None)
+            target_instance = _preview_find(
+                preview_context, "objects", body.target_instance_id)
         else:
             target_query = db.query(ObjectInstance).filter(
                 ObjectInstance.id == body.target_instance_id,

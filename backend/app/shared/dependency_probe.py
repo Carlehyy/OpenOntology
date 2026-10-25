@@ -105,6 +105,17 @@ def probe_browser() -> None:
         raise RuntimeError("Chromium CDP is unavailable")
 
 
+def probe_dbx() -> None:
+    """Authenticate and verify the pinned dbx release without leaking config."""
+    from app.data_channel.integrated.dbx_adapter import DbxMetadataAdapter
+
+    status = DbxMetadataAdapter().status()
+    if status.get("configured") is not True:
+        raise RuntimeError("DBX_NOT_CONFIGURED")
+    if status.get("available") is not True:
+        raise RuntimeError(str(status.get("reason") or "DBX_UNAVAILABLE"))
+
+
 PROBES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("PostgreSQL", probe_postgresql),
     ("Redis", probe_redis),
@@ -152,7 +163,12 @@ def probe_startup_dependencies() -> None:
 
 def main() -> int:
     failed: list[str] = []
-    for name, probe in PROBES:
+    probes = list(PROBES)
+    if settings.environment == "production":
+        # dbx is production-only. Test/development startup keeps its native
+        # PostgreSQL fixtures and never needs an external dbx service.
+        probes.append(("dbx", probe_dbx))
+    for name, probe in probes:
         try:
             probe()
         except Exception as exc:

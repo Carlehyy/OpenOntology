@@ -269,9 +269,9 @@ def test_dispatch_subject_and_handler_registration(monkeypatch):
     from app.super_assistant import scheduled_tasks
 
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT == "super_assistant.scheduled.run"
-    # 流扩容只能追加：任务实例控制面为当前尾项，ontology-rebuild/scheduled.run
-    # 让出尾位但必须仍在流内（旧 subject 与旧 durable 不变是消费兼容的硬约束）
-    assert PIPELINE_STREAM_SUBJECTS[-1] == "task_instances.control"
+    # 流扩容只能追加：集成同步为当前尾项，task_instances.control 及旧
+    # ontology-rebuild/scheduled.run 必须保留原位（旧 durable 不变）。
+    assert PIPELINE_STREAM_SUBJECTS[-2:] == ("task_instances.control", "integrated.sync")
     assert "super_assistant.palace.ontology-rebuild" in PIPELINE_STREAM_SUBJECTS
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
     registry = {

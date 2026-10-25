@@ -66,6 +66,9 @@ def test_clean_checkout_production_uses_process_environment(
             "postgresql://ontology:strong-password@postgres.example.test:5432/"
             "ontology"
         ),
+        "INTEGRATED_DBX_URL": "http://dbx.example.test:4224",
+        "INTEGRATED_DBX_PASSWORD": "test-integrated-dbx-password",
+        "INTEGRATED_DBX_COMMIT": "0137e0cbc8b663da5a17ec424c6d47e4e5570ead",
         "REDIS_URL": (
             "rediss://:strong-password@redis.example.test:6380/0"
         ),

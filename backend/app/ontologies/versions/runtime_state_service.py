@@ -371,10 +371,13 @@ def _release_ancestor_context(
     return result, explicit_trial_activation, reset_boundary_reached
 
 
-def _runtime_state_conflicts(
+def _runtime_state_conflicts_batch(
     db: Session, *, ontology_id: str, current_release_id: str,
     trial_objects: list[OntologyTrialObject],
     trial_links: list[OntologyTrialLink],
+    current_objects: list[FoObjectInstance],
+    current_link_rows: list[FoLinkInstance],
+    ancestor_context: tuple[list[str], bool, bool],
 ) -> dict:
     """Find trial values that would erase newer non-lake runtime facts.
 
@@ -389,14 +392,7 @@ def _runtime_state_conflicts(
         ancestor_release_ids,
         explicit_trial_activation,
         reset_boundary_reached,
-    ) = (
-        _release_ancestor_context(
-        db, ontology_id, current_release_id)
-    )
-    current_objects = db.query(FoObjectInstance).filter(
-        FoObjectInstance.ontology_id == ontology_id,
-        FoObjectInstance.ontology_release_id == current_release_id,
-    ).all()
+    ) = ancestor_context
     current_object_by_id = {
         str(item.id): item for item in current_objects
     }
@@ -700,11 +696,7 @@ def _runtime_state_conflicts(
         })
 
     current_links = {
-        str(item.id): item
-        for item in db.query(FoLinkInstance).filter(
-            FoLinkInstance.ontology_id == ontology_id,
-            FoLinkInstance.ontology_release_id == current_release_id,
-        ).all()
+        str(item.id): item for item in current_link_rows
     }
     candidate_links = {
         str(item.link_id): item for item in trial_links
@@ -862,6 +854,111 @@ def _runtime_state_conflicts(
     }
 
 
+def _runtime_state_conflicts(
+    db: Session, *, ontology_id: str, current_release_id: str,
+    trial_objects, trial_links,
+) -> dict:
+    """Compare every candidate in bounded SQL-aligned batches.
+
+    Query inputs stay queries throughout the release path. Existing callers may
+    also supply bounded in-memory candidates; they use the same comparison and
+    provenance rules. Counts are exact even when only the first 50 are exposed.
+    """
+    from app.ontologies.versions.batching import RELEASE_BATCH_SIZE
+    from sqlalchemy.orm import Query
+
+    result = _empty_runtime_state_conflicts()
+    ancestor_context = _release_ancestor_context(
+        db, ontology_id, current_release_id,
+    )
+
+    def key(item):
+        return (
+            str(item.get("resourceKind") or ""),
+            str(item.get("objectId") or item.get("linkId") or ""),
+            str(item.get("property") or ""),
+        )
+
+    def merge(batch):
+        for field in (
+            "totalCount", "propertyConflictCount", "objectConflictCount",
+            "linkConflictCount",
+        ):
+            result[field] += batch[field]
+        result["items"] = sorted(
+            result["items"] + batch["items"], key=key,
+        )[:_RUNTIME_STATE_CONFLICT_LIMIT]
+
+    def compare(candidates, current_rows, live_model):
+        merge(_runtime_state_conflicts_batch(
+            db, ontology_id=ontology_id,
+            current_release_id=current_release_id,
+            trial_objects=candidates if live_model is FoObjectInstance else [],
+            trial_links=candidates if live_model is FoLinkInstance else [],
+            current_objects=current_rows if live_model is FoObjectInstance else [],
+            current_link_rows=current_rows if live_model is FoLinkInstance else [],
+            ancestor_context=ancestor_context,
+        ))
+
+    for candidate_rows, candidate_key, live_model in (
+        (trial_objects, OntologyTrialObject.object_id, FoObjectInstance),
+        (trial_links, OntologyTrialLink.link_id, FoLinkInstance),
+    ):
+        live = db.query(live_model).filter(
+            live_model.ontology_id == ontology_id,
+            live_model.ontology_release_id == current_release_id,
+        )
+        is_query = isinstance(candidate_rows, Query)
+        if is_query:
+            # Merge only two indexed key pages. A global UNION/DISTINCT inside
+            # each page would repeatedly sort millions of candidate keys.
+            after = None
+            while True:
+                live_ids = live.with_entities(live_model.id)
+                trial_ids = candidate_rows.with_entities(candidate_key)
+                if after is not None:
+                    live_ids = live_ids.filter(live_model.id > after)
+                    trial_ids = trial_ids.filter(candidate_key > after)
+                live_page = live_ids.order_by(live_model.id).limit(RELEASE_BATCH_SIZE).all()
+                trial_page = trial_ids.order_by(candidate_key).limit(RELEASE_BATCH_SIZE).all()
+                batch_ids = sorted({row[0] for row in live_page + trial_page})[:RELEASE_BATCH_SIZE]
+                if not batch_ids:
+                    break
+                after = batch_ids[-1]
+                candidates = candidate_rows.filter(
+                    candidate_key.in_(batch_ids),
+                ).all()
+                current_rows = live.filter(live_model.id.in_(batch_ids)).all()
+                compare(candidates, current_rows, live_model)
+        else:
+            candidate_by_id = {
+                str(getattr(item, candidate_key.key)): item
+                for item in candidate_rows
+            }
+            after = None
+            pending = set(candidate_by_id)
+            while True:
+                current_query = live
+                if after is not None:
+                    current_query = current_query.filter(live_model.id > after)
+                current_rows = current_query.order_by(live_model.id).limit(
+                    RELEASE_BATCH_SIZE,
+                ).all()
+                if not current_rows:
+                    break
+                after = current_rows[-1].id
+                batch_ids = [str(item.id) for item in current_rows]
+                candidates = [candidate_by_id[i] for i in batch_ids if i in candidate_by_id]
+                pending.difference_update(batch_ids)
+                compare(candidates, current_rows, live_model)
+            ordered = sorted(pending)
+            for offset in range(0, len(ordered), RELEASE_BATCH_SIZE):
+                candidates = [candidate_by_id[i] for i in ordered[offset:offset + RELEASE_BATCH_SIZE]]
+                compare(candidates, [], live_model)
+    result["truncated"] = result["totalCount"] > _RUNTIME_STATE_CONFLICT_LIMIT
+    return result
+
+
 def _release_readiness(
         db: Session, *, draft: OntologyVersion,
         current: OntologyVersion, report: dict,
@@ -946,10 +1043,10 @@ def _release_readiness(
                 current_release_id=current.id,
                 trial_objects=db.query(OntologyTrialObject).filter(
                     OntologyTrialObject.trial_run_id == run.id,
-                ).all(),
+                ),
                 trial_links=db.query(OntologyTrialLink).filter(
                     OntologyTrialLink.trial_run_id == run.id,
-                ).all(),
+                ),
             )
             if runtime_conflicts["totalCount"]:
                 issue = _gate_error(

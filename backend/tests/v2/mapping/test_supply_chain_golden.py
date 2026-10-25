@@ -10,6 +10,7 @@ from app.models.v2.dataset import Dataset, DatasetVersion
 from app.models.v2.logic import OntologyLogicRule
 from app.models.v2.mapping import OntologyLinkMapping, OntologyMapping
 from app.services.v2.mapping.mapping_service import MappingService
+from .minio_fixture import store_rows
 
 
 def _add_curated(db, name: str) -> Dataset:
@@ -45,7 +46,9 @@ def _add_mapping(db, ontology_id: str, dataset_id: str, entity_class: str, pk: s
     return mapping
 
 
-def test_supply_chain_mapping_golden_prd_242_semantics(db, admin_user):
+def test_supply_chain_mapping_golden_prd_242_semantics(
+    db, admin_user, mapping_storage,
+):
     ontology = OntologyProject(
         name="供应链 Golden",
         domain="供应链",
@@ -111,9 +114,11 @@ def test_supply_chain_mapping_golden_prd_242_semantics(db, admin_user):
     for entity_class, ds in curated.items():
         _add_mapping(db, ontology.id, ds.id, entity_class, pk_by_entity[entity_class])
 
+    for ds in curated.values():
+        store_rows(db, mapping_storage, ds, rows_by_dataset[ds.id])
+
     service = MappingService(db)
-    with patch("app.services.v2.dataset_service.DatasetService.load_all_rows", side_effect=lambda dataset_id, *_args, **_kwargs: rows_by_dataset[dataset_id]), \
-         patch.object(MappingService, "_rebuild_neo4j_projection", return_value=True):
+    with patch.object(MappingService, "_rebuild_neo4j_projection", return_value=True):
         result = service.build_all(ontology.id)
 
     assert result["total_entities"] == sum(len(rows) for rows in rows_by_dataset.values())

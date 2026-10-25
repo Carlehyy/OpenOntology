@@ -340,7 +340,7 @@ def _rollback_version_locked(
             db.rollback()
             raise HTTPException(409, detail={
                 "code": "rollback_validation_failed",
-                "message": f"回滚快照与当前运行实例不兼容（{len(errors)} 个错误）",
+                "message": f"回滚快照与当前运行实例不兼容（{getattr(errors, 'total_count', len(errors))} 个错误）",
                 "errors": errors,
             })
 
@@ -421,7 +421,7 @@ def _rollback_version_locked(
                 "code": "rollback_validation_failed",
                 "message": (
                     "回滚快照重算派生投影后不满足发布契约"
-                    f"（{len(post_activation_errors)} 个错误）"),
+                    f"（{getattr(post_activation_errors, 'total_count', len(post_activation_errors))} 个错误）"),
                 "errors": post_activation_errors,
             })
 

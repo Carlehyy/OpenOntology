@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.ontologies.mappings import formal_projection as facade
 from app.ontologies.mappings import formal_projection_contract as contract
+from app.ontologies.mappings import formal_projection_values as values
 from app.services.v2.mapping import formal_projection as legacy
 
 
@@ -14,6 +15,9 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 MAPPING_DIR = BACKEND_DIR / "app" / "ontologies" / "mappings"
 FACADE_PATH = MAPPING_DIR / "formal_projection.py"
 CONTRACT_PATH = MAPPING_DIR / "formal_projection_contract.py"
+VALUES_PATH = MAPPING_DIR / "formal_projection_values.py"
+MATERIALIZATION_PATH = MAPPING_DIR / "formal_projection_materialization.py"
+EXTRACTED_VALUE_FUNCTIONS = {"_coerce_props_to_type", "_display_value"}
 
 EXTRACTED_CONTRACT_FUNCTIONS = {
     "projection_property_mappings",
@@ -110,11 +114,15 @@ def test_materializer_keeps_only_the_database_projection_entrypoint():
         if isinstance(node, ast.FunctionDef)
     }
     assert direct_functions == {"project_to_formal_ontology"}
-    assert contract_functions == EXTRACTED_CONTRACT_FUNCTIONS
+    assert contract_functions == EXTRACTED_CONTRACT_FUNCTIONS - EXTRACTED_VALUE_FUNCTIONS
+    assert {node.name for node in _tree(VALUES_PATH).body if isinstance(node, ast.FunctionDef)} == EXTRACTED_VALUE_FUNCTIONS
+    assert {node.name for node in _tree(MATERIALIZATION_PATH).body if isinstance(node, ast.FunctionDef)} == {"materialize_formal_projection"}
+    for name in EXTRACTED_VALUE_FUNCTIONS:
+        assert getattr(contract, name) is getattr(values, name)
 
 
 def test_projection_contract_remains_pure_and_dependency_light():
-    imports = _absolute_imports(CONTRACT_PATH)
+    imports = _absolute_imports(CONTRACT_PATH) | _absolute_imports(VALUES_PATH)
     forbidden_prefixes = (
         "app.models",
         "app.services",
@@ -137,6 +145,8 @@ def test_formal_projection_modules_stay_bounded():
     limits = {
         FACADE_PATH: 900,
         CONTRACT_PATH: 400,
+        VALUES_PATH: 180,
+        MATERIALIZATION_PATH: 900,
     }
     for path, maximum in limits.items():
         line_count = len(path.read_text(encoding="utf-8").splitlines())

@@ -9,9 +9,14 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.ontologies.formal_modeling.facts import property_fact_batch, record_link_property_facts
+from app.ontologies.versions.batching import query_batches
+
 from app.ontologies.formal_modeling.models import (
     LinkInstance as FoLinkInstance,
     ObjectInstance as FoObjectInstance,
+    ObjectType as FoObjectType,
+    PropertyFact,
 )
 from app.ontologies.inference.models import AuditLog
 from app.ontologies.mappings.models import OntologyLinkMapping, OntologyMapping
@@ -23,6 +28,28 @@ from app.ontologies.versions.models import (
     OntologyTrialRun,
     OntologyVersion,
 )
+
+
+def _link_fact_version(item, endpoint_datasets, mappings_by_type, pinned):
+    """Resolve lineage only from the frozen mapping and this trial's pins."""
+    if not item.source_relation_id:
+        return None  # A manual link has no pipeline mapping provenance.
+    source_dataset = endpoint_datasets.get(item.source_object_id)
+    target_dataset = endpoint_datasets.get(item.target_object_id)
+    versions = {
+        (pinned.get(str(mapping.get("edgeDatasetId") or mapping.get("srcDatasetId"))) or {}).get("versionId")
+        for mapping in mappings_by_type.get(item.link_type_id, [])
+        if source_dataset and target_dataset
+        and str(mapping.get("srcDatasetId") or "") == source_dataset
+        and str(mapping.get("tgtDatasetId") or "") == target_dataset
+    }
+    if len(versions) > 1:
+        raise HTTPException(409, detail={
+            "code": "link_lineage_ambiguous",
+            "message": f"链接 {item.link_id} 的冻结映射数据版本血缘不唯一，拒绝猜测来源版本",
+            "linkId": item.link_id,
+        })
+    return next(iter(versions), None)
 
 
 def promote_draft(
@@ -168,11 +195,12 @@ def _promote_draft_locked(
     )
 
     trial_objects = db.query(OntologyTrialObject).filter(
-        OntologyTrialObject.trial_run_id == run.id).all()
+        OntologyTrialObject.trial_run_id == run.id)
     trial_links = db.query(OntologyTrialLink).filter(
-        OntologyTrialLink.trial_run_id == run.id).all()
+        OntologyTrialLink.trial_run_id == run.id)
     expected = (run.result_json or {}).get("counts") or {}
-    if len(trial_objects) != int(expected.get("objects") or 0) or len(trial_links) != int(expected.get("links") or 0):
+    if (trial_objects.count() != int(expected.get("objects") or 0)
+            or trial_links.count() != int(expected.get("links") or 0)):
         raise HTTPException(409, detail={
             "code": "trial_materialization_incomplete",
             "message": "试跑隔离投影不完整；请从该版本创建新草稿后重新试跑",
@@ -229,18 +257,18 @@ def _promote_draft_locked(
             raise HTTPException(404, "Ontology not found")
 
         old_objects = db.query(FoObjectInstance).filter(
-            FoObjectInstance.ontology_id == ontology_id).all()
+            FoObjectInstance.ontology_id == ontology_id)
         old_links = db.query(FoLinkInstance).filter(
-            FoLinkInstance.ontology_id == ontology_id).all()
-        old_object_by_id = {item.id: item for item in old_objects}
-        candidate_ids = {item.object_id for item in trial_objects}
-        candidate_link_ids = {item.link_id for item in trial_links}
+            FoLinkInstance.ontology_id == ontology_id)
         release_id = str(uuid.uuid4())
         release_number = _next_release_activation_number(db, ontology_id)
         source = f"ontology-release://{release_id}"
 
         _restore_formal_snapshot(db, ontology_id, snap)
         pinned = {str(item.get("datasetId")): item for item in (run.dataset_versions or [])}
+        link_mappings_by_type = {}
+        for mapping in snap["linkMappings"]:
+            link_mappings_by_type.setdefault(str(mapping.get("linkTypeId") or ""), []).append(mapping)
         for mapping in db.query(OntologyMapping).filter(
                 OntologyMapping.ontology_id == ontology_id).all():
             mapping.status = "applied"
@@ -266,102 +294,163 @@ def _promote_draft_locked(
                 Sentinel.origin == "release_builtin").all():
             sentinel.status = "published"
 
-        for item in old_links:
-            if item.id not in candidate_link_ids:
-                record_link_fact(
-                    db, ontology_id=ontology_id, link_instance_id=item.id,
-                    link_type_id=item.link_type_id, exists=False,
-                    source=source, actor_id=current_user.id, caused_by=run.id,
-                    ontology_version=release_number,
-                    ontology_release_id=release_id)
-        for item in old_objects:
-            if item.id not in candidate_ids:
-                record_object_tombstone(
-                    db, ontology_id=ontology_id, instance_id=item.id,
-                    object_type_id=item.object_type_id, source=source,
-                    actor_id=current_user.id, caused_by=run.id,
-                    ontology_version=release_number,
-                    ontology_release_id=release_id)
+        # SQL anti-joins find removals without holding all old/candidate IDs.
+        missing_links = old_links.filter(~trial_links.filter(
+            OntologyTrialLink.link_id == FoLinkInstance.id,
+        ).exists())
+        for batch in query_batches(missing_links, FoLinkInstance.id):
+            with property_fact_batch(db, ontology_id=ontology_id,
+                                     instance_ids=(item.id for item in batch)):
+                for item in batch:
+                    record_link_fact(
+                        db, ontology_id=ontology_id, link_instance_id=item.id,
+                        link_type_id=item.link_type_id, exists=False,
+                        source=source, actor_id=current_user.id, caused_by=run.id,
+                        ontology_version=release_number,
+                        ontology_release_id=release_id)
+            for item in batch:
+                db.delete(item)
+            db.flush()
+        missing_objects = old_objects.filter(~trial_objects.filter(
+            OntologyTrialObject.object_id == FoObjectInstance.id,
+        ).exists())
+        for batch in query_batches(missing_objects, FoObjectInstance.id):
+            with property_fact_batch(db, ontology_id=ontology_id,
+                                     instance_ids=(item.id for item in batch)):
+                for item in batch:
+                    record_object_tombstone(
+                        db, ontology_id=ontology_id, instance_id=item.id,
+                        object_type_id=item.object_type_id, source=source,
+                        actor_id=current_user.id, caused_by=run.id,
+                        ontology_version=release_number,
+                        ontology_release_id=release_id)
+            for item in batch:
+                db.delete(item)
+            db.flush()
 
-        db.query(FoLinkInstance).filter(
-            FoLinkInstance.ontology_id == ontology_id).delete(synchronize_session=False)
-        db.query(FoObjectInstance).filter(
-            FoObjectInstance.ontology_id == ontology_id).delete(synchronize_session=False)
-        # bulk delete 不会同步 Session identity map。后续用相同稳定 ID 写入
-        # 新投影前先移除旧 ORM 身份，避免 v1→v2 时出现对象冲突或脏缓存。
-        for old_item in [*old_links, *old_objects]:
-            db.expunge(old_item)
-        promoted_instances: list[
-            tuple[FoObjectInstance, list, OntologyTrialObject]
-        ] = []
-        for item in trial_objects:
-            old = old_object_by_id.get(item.object_id)
-            old_props = dict(old.properties or {}) if old else None
-            new_props = dict(item.properties or {})
-            if old is None:
-                # Only a genuine creation/revival starts a new existence edge.
-                # Backfilling exists=True for a legacy already-present object
-                # would make as-of queries incorrectly report it absent before
-                # this release.  Existence precedes properties so no cutoff can
-                # observe properties before the object itself exists.
-                record_object_presence(
-                    db, ontology_id=ontology_id, instance_id=item.object_id,
-                    object_type_id=item.object_type_id, source=source,
-                    actor_id=current_user.id, caused_by=run.id,
-                    ontology_version=release_number,
+        for batch in query_batches(trial_objects, OntologyTrialObject.object_id):
+            ids = [item.object_id for item in batch]
+            old_by_id = {item.id: item for item in old_objects.filter(
+                FoObjectInstance.id.in_(ids),
+            ).all()}
+            with property_fact_batch(db, ontology_id=ontology_id, instance_ids=ids):
+                for item in batch:
+                    old = old_by_id.get(item.object_id)
+                    old_props = dict(old.properties or {}) if old is not None else None
+                    if old is None:
+                        # Do not fabricate an existence edge for legacy objects
+                        # already present before this release.
+                        record_object_presence(
+                            db, ontology_id=ontology_id, instance_id=item.object_id,
+                            object_type_id=item.object_type_id, source=source,
+                            actor_id=current_user.id, caused_by=run.id,
+                            ontology_version=release_number,
+                            ontology_release_id=release_id,
+                            source_dataset_version_id=item.source_dataset_version_id,
+                        )
+                    record_property_facts(
+                        db, ontology_id=ontology_id, instance_id=item.object_id,
+                        object_type_id=item.object_type_id, old_props=old_props,
+                        new_props=dict(item.properties or {}), source=source,
+                        actor_id=current_user.id, caused_by=run.id, confidence=1.0,
+                        ontology_version=release_number,
+                        ontology_release_id=release_id,
+                        source_dataset_version_id=item.source_dataset_version_id,
+                    )
+            # Replace only this page. No giant delete/identity-map mirror is
+            # needed, while retaining the original creation timestamp semantics.
+            for old in old_by_id.values():
+                db.delete(old)
+            db.flush()
+            db.add_all([
+                FoObjectInstance(
+                    id=item.object_id, ontology_id=ontology_id,
                     ontology_release_id=release_id,
-                )
-            new_facts = record_property_facts(
-                db, ontology_id=ontology_id, instance_id=item.object_id,
-                object_type_id=item.object_type_id, old_props=old_props,
-                new_props=new_props, source=source, actor_id=current_user.id,
-                caused_by=run.id, confidence=1.0,
-                ontology_version=release_number,
-                ontology_release_id=release_id)
-            promoted_instance = FoObjectInstance(
-                id=item.object_id, ontology_id=ontology_id,
-                ontology_release_id=release_id,
-                object_type_id=item.object_type_id,
-                properties=dict(item.properties or {}),
-                computed=dict(item.computed or {}),
-                source="pipeline", external_id=item.external_id,
+                    object_type_id=item.object_type_id,
+                    properties=dict(item.properties or {}),
+                    computed=dict(item.computed or {}), source="pipeline",
+                    external_id=item.external_id,
+                ) for item in batch
+            ])
+            db.flush()
+
+        for batch in query_batches(trial_links, OntologyTrialLink.link_id):
+            ids = [item.link_id for item in batch]
+            old_props_by_id = {item.id: dict(item.properties or {}) for item in old_links.filter(
+                FoLinkInstance.id.in_(ids),
+            ).all()}
+            endpoint_ids = {endpoint for item in batch for endpoint in (
+                item.source_object_id, item.target_object_id)}
+            endpoint_datasets = dict(trial_objects.with_entities(
+                OntologyTrialObject.object_id, OntologyTrialObject.source_dataset_id,
+            ).filter(OntologyTrialObject.object_id.in_(endpoint_ids)).all())
+            old_links.filter(FoLinkInstance.id.in_(ids)).delete(
+                synchronize_session="fetch",
             )
-            db.add(promoted_instance)
-            promoted_instances.append((promoted_instance, new_facts, item))
-        # Collection-scope derived functions must observe the complete promoted
-        # object universe, not a prefix determined by insertion order.
-        db.flush()
-        for item in trial_links:
-            db.add(FoLinkInstance(
-                id=item.link_id, ontology_id=ontology_id,
-                ontology_release_id=release_id,
-                link_type_id=item.link_type_id,
-                source_object_id=item.source_object_id,
-                target_object_id=item.target_object_id,
-                properties=dict(item.properties or {}),
-                source_relation_id=item.source_relation_id,
-            ))
-            record_link_fact(
-                db, ontology_id=ontology_id, link_instance_id=item.link_id,
-                link_type_id=item.link_type_id, exists=True,
-                source=source, actor_id=current_user.id, caused_by=run.id,
-                ontology_version=release_number,
-                ontology_release_id=release_id)
-        db.flush()
-        for promoted_instance, new_facts, trial_item in promoted_instances:
-            recompute_instance_derived(
-                db,
-                ontology_id=ontology_id,
-                instance=promoted_instance,
-                trigger_facts=new_facts,
-                caused_by=run.id,
-            )
-            if dict(promoted_instance.computed or {}) != dict(
-                    trial_item.computed or {}):
-                raise RuntimeError(
-                    "试跑冻结的派生值与发布激活时重算结果不一致: "
-                    f"{trial_item.object_id}")
-        db.flush()
+            db.add_all([
+                FoLinkInstance(
+                    id=item.link_id, ontology_id=ontology_id,
+                    ontology_release_id=release_id, link_type_id=item.link_type_id,
+                    source_object_id=item.source_object_id,
+                    target_object_id=item.target_object_id,
+                    properties=dict(item.properties or {}),
+                    source_relation_id=item.source_relation_id,
+                ) for item in batch
+            ])
+            with property_fact_batch(db, ontology_id=ontology_id, instance_ids=ids):
+                for item in batch:
+                    source_version = _link_fact_version(
+                        item, endpoint_datasets, link_mappings_by_type, pinned)
+                    record_link_fact(
+                        db, ontology_id=ontology_id, link_instance_id=item.link_id,
+                        link_type_id=item.link_type_id, exists=True, source=source,
+                        actor_id=current_user.id, caused_by=run.id,
+                        ontology_version=release_number,
+                        ontology_release_id=release_id,
+                        source_dataset_version_id=source_version)
+                    record_link_property_facts(
+                        db, ontology_id=ontology_id, instance_id=item.link_id,
+                        link_type_id=item.link_type_id,
+                        old_props=old_props_by_id.get(item.link_id),
+                        new_props=dict(item.properties or {}), source=source,
+                        actor_id=current_user.id, caused_by=run.id,
+                        ontology_version=release_number,
+                        ontology_release_id=release_id,
+                        source_dataset_version_id=source_version)
+
+        # Only now may collection functions run: they must observe the complete
+        # promoted universe, not the current insertion page. Trigger facts are
+        # reloaded per page from this activation, never retained for all rows.
+        object_types = {item.id: item for item in db.query(FoObjectType).filter(
+            FoObjectType.ontology_id == ontology_id,
+        ).all()}
+        for batch in query_batches(trial_objects, OntologyTrialObject.object_id):
+            ids = [item.object_id for item in batch]
+            live_by_id = {item.id: item for item in old_objects.filter(
+                FoObjectInstance.id.in_(ids),
+            ).all()}
+            facts_by_id: dict[str, list] = {}
+            for fact in db.query(PropertyFact).filter(
+                PropertyFact.ontology_id == ontology_id,
+                PropertyFact.ontology_release_id == release_id,
+                PropertyFact.kind == "property",
+                PropertyFact.instance_id.in_(ids),
+            ).all():
+                facts_by_id.setdefault(fact.instance_id, []).append(fact)
+            with property_fact_batch(db, ontology_id=ontology_id, instance_ids=ids):
+                for trial_item in batch:
+                    promoted_instance = live_by_id[trial_item.object_id]
+                    recompute_instance_derived(
+                        db, ontology_id=ontology_id, instance=promoted_instance,
+                        object_type=object_types.get(trial_item.object_type_id),
+                        trigger_facts=facts_by_id.get(trial_item.object_id, []),
+                        caused_by=run.id,
+                    )
+                    if dict(promoted_instance.computed or {}) != dict(
+                            trial_item.computed or {}):
+                        raise RuntimeError(
+                            "试跑冻结的派生值与发布激活时重算结果不一致: "
+                            f"{trial_item.object_id}")
         _raise_publish_errors(_release_errors(db, ontology_id))
 
         # The release snapshot is the activated, self-contained definition

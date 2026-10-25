@@ -89,7 +89,9 @@ from app.data_channel.datasets.models import (
     DatasetVersion,
     DatasetVersionEvent,
 )
-from app.data_channel.datasets.snapshot_text import snapshot_cell_text
+from app.data_channel.datasets.snapshot_text import (
+    MAX_STREAM_BATCH_BYTES, canonical_row_bytes, snapshot_cell_text,
+)
 from app.data_channel.pipeline_tasks.write_modes import (
     SOFT_DELETE_TRUTHY,
     _apply_soft_delete,
@@ -752,6 +754,11 @@ def _upsert_run_once(db, dataset, rows, mode: str,
                      staged_input: tuple | None = None,
                      producer_run_id: str | None = None,
                      ) -> tuple[DatasetVersion, DatasetChangeset]:
+    # Lock BEFORE inspecting/mutating the base, not only at _publish_run. Pinned
+    # readers hold FOR SHARE on the same row across patch discovery and the full
+    # physical cursor, so READ COMMITTED cannot mix changesets from v1 with v2 rows.
+    dataset = (db.query(Dataset).filter(Dataset.id == dataset.id)
+               .with_for_update(of=Dataset).populate_existing().one())
     conn = _connection(db)
     schema = dict(dataset.schema_json or {})
 
@@ -1250,6 +1257,8 @@ def rows_at_version(db, dataset, version_no: int) -> list[dict]:
     （data_blob/storage_uri 非空）时抛 LakeStoreLegacyVersionError，由调用方
     走 DatasetService 遗留解析路径。
     """
+    dataset = (db.query(Dataset).filter(Dataset.id == dataset.id)
+               .with_for_update(read=True, of=Dataset).populate_existing().one())
     found = _readable_table(db, dataset)
     version = db.query(DatasetVersion).filter(
         DatasetVersion.dataset_id == dataset.id,
@@ -1306,6 +1315,116 @@ def rows_at_version(db, dataset, version_no: int) -> list[dict]:
     return out
 
 
+def iter_rows_at_version(db, dataset, version_no: int, *, batch_size: int = 1000):
+    """Exact-version read reconstructed in a transaction-local SQL relation.
+
+    SQL selects the earliest later mutation per row key; only one change row is
+    decoded at a time. Neither all history nor the current table is collected in
+    Python. A shared Dataset lock fences writers for the full reader transaction.
+    Output is capped by both row count and canonical UTF-8 bytes (16 MiB).
+    """
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise LakeStoreError("Lake batch_size must be a positive integer")
+    # PostgreSQL READ COMMITTED gives each SELECT a new snapshot. Coordinate
+    # with upsert_run's early FOR UPDATE before reading *any* version/patch/base
+    # evidence. The shared lock lasts until the caller ends its transaction,
+    # including pauses between yielded batches; this reader never commits it.
+    dataset = (db.query(Dataset).filter(Dataset.id == dataset.id)
+               .with_for_update(read=True, of=Dataset).populate_existing().one())
+    version = db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset.id,
+        DatasetVersion.version_no == version_no).first()
+    if version is None:
+        raise LakeStoreError(f"数据集 {dataset.id} 不存在版本 v{version_no}")
+    if not version_uses_lake(dataset, version):
+        raise LakeStoreLegacyVersionError("Version is not a physical curated lake version")
+    changes = DatasetChangesetRow.__table__
+    changesets = DatasetChangeset.__table__
+    versions = DatasetVersion.__table__
+    ranked = sa.select(
+        changes.c.row_pk, changes.c.change_type, changes.c.old_row,
+        sa.func.row_number().over(partition_by=changes.c.row_pk,
+                                  order_by=[versions.c.version_no, changes.c.id]).label("rank"),
+    ).select_from(changes.join(changesets, changes.c.changeset_id == changesets.c.id)
+                  .join(versions, changesets.c.version_id == versions.c.id)).where(
+        changesets.c.dataset_id == dataset.id, changesets.c.change_type == "run",
+        versions.c.version_no > version_no).subquery()
+    patch_stmt = sa.select(ranked.c.row_pk, ranked.c.change_type, ranked.c.old_row).where(ranked.c.rank == 1)
+    found = _readable_table(db, dataset)
+    conn = _connection(db)
+    if found is None:
+        if version.rowcount or conn.execute(patch_stmt.limit(1)).first() is not None:
+            raise LakeStoreError("Lake physical relation is missing for a published version")
+        return
+    table, mapping, pk_cols = found
+    payload_col = "restored_" + uuid.uuid4().hex
+    target = sa.Table("lake_read_" + uuid.uuid4().hex, sa.MetaData(),
+                      *(sa.Column(p, sa.Text) for p in mapping.values()),
+                      sa.Column(payload_col, sa.JSON), prefixes=["TEMPORARY"])
+    if pk_cols:
+        sa.Index("ix_" + target.name, *(target.c[mapping[c]] for c in pk_cols))
+    target.create(conn)
+    records = None
+    try:
+        conn.execute(target.insert().from_select(list(mapping.values()), sa.select(*[table.c[p] for p in mapping.values()])))
+        # Each key's oldest subsequent old_row is exactly its value at target.
+        # SQL windowing may spill to DB temp storage; Python sees one JSON row.
+        patches = conn.execute(patch_stmt.execution_options(
+            stream_results=True, yield_per=1, max_row_buffer=1)).mappings()
+        try:
+            while (patch := patches.fetchone()) is not None:
+                if pk_cols:
+                    keys = decode_lake_row_pk(patch["row_pk"], pk_cols)
+                    match = sa.and_(*[target.c[mapping[key]] == value for key, value in zip(pk_cols, keys)])
+                else:
+                    # Existing no-PK history identifies all equal rows by signature.
+                    logical_key = json.loads(patch["row_pk"])
+                    match = sa.and_(*[target.c[physical] == logical_key.get(logical, "")
+                                      for logical, physical in mapping.items()])
+                conn.execute(target.delete().where(match))
+                if patch["change_type"] != "added":
+                    old = patch["old_row"]
+                    if not isinstance(old, dict):
+                        raise LakeStoreError("Lake history row lacks its required old_row evidence")
+                    conn.execute(target.insert().values({
+                        **{physical: old.get(logical, "") for logical, physical in mapping.items()},
+                        payload_col: old,
+                    }))
+        finally:
+            patches.close()
+        stmt = sa.select(target)
+        if pk_cols:
+            stmt = stmt.order_by(*[target.c[mapping[c]] for c in pk_cols])
+        records = conn.execute(stmt.execution_options(
+            stream_results=True, yield_per=1, max_row_buffer=1)).mappings()
+        out, out_bytes, count = [], 0, 0
+        while (record := records.fetchone()) is not None:
+            row = record[payload_col]
+            if row is None:
+                row = _logical_row(record, mapping)
+            try:
+                row_bytes = canonical_row_bytes(row, limit=MAX_STREAM_BATCH_BYTES)
+            except ValueError:
+                raise LakeStoreError("Lake row exceeds the 16 MiB stream byte budget") from None
+            if out and out_bytes + row_bytes > MAX_STREAM_BATCH_BYTES:
+                yield out
+                out, out_bytes = [], 0
+            out.append(row)
+            out_bytes += row_bytes
+            count += 1
+            if len(out) == batch_size:
+                yield out
+                out, out_bytes = [], 0
+        if version.rowcount is not None and count != version.rowcount:
+            raise LakeStoreError("Lake version row count differs from published evidence")
+        if out:
+            yield out
+    finally:
+        if records is not None:
+            records.close()
+        target.drop(conn)
+
+
 def _version_reverse_patch(db, dataset, version_no: int,
                            later: list) -> dict[str, dict | None]:
     """目标版本之后全部 run 变更集的逆向补丁（row_pk → 旧行 | None）。
@@ -1341,6 +1460,8 @@ def page_rows_at_version(db, dataset, version_no: int, offset: int = 0,
     返回 (窗口行, 目标版本总行数)。总行数按「物理表计数 − 后续新增现存行
     + 后续消失恢复行」精确计算，不依赖发布时的 rowcount 快照。
     """
+    dataset = (db.query(Dataset).filter(Dataset.id == dataset.id)
+               .with_for_update(read=True, of=Dataset).populate_existing().one())
     found = _readable_table(db, dataset)
     version = db.query(DatasetVersion).filter(
         DatasetVersion.dataset_id == dataset.id,

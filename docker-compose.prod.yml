@@ -96,6 +96,29 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Integrated-dataset metadata transport. The image is the already verified
+  # official v0.6.53 release digest and is intentionally profile-gated: the
+  # automatic deployment starts it only when no explicit external DBX endpoint
+  # is configured. It has no published ports and is reachable only by backend
+  # on the internal dbx_bridge network.
+  dbx:
+    image: docker.cnb.cool/dbxio.com/dbx@sha256:b661f7e35deed06d9611dcda79c44ffcc8e4fd0f44308028ea77f7f18b36638c
+    pull_policy: missing
+    profiles: [integrated-dbx]
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DBX_PASSWORD: ${INTEGRATED_DBX_PASSWORD:?integrated dbx password is required}
+      DBX_BIND_ADDR: 0.0.0.0
+      DBX_DATA_DIR: /app/data
+    volumes:
+      - dbx_data:/app/data
+    networks:
+      - dbx_bridge
+
   # Python 脚本流水线的执行网关（Jupyter Kernel Gateway）。用户脚本在其内核
   # 中执行，因此刻意不挂 env_file、不注入任何平台凭据环境变量，也不暴露
   # 宿主机端口——仅 backend 经 compose 内网访问。
@@ -209,6 +232,9 @@ services:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
       - voice_models:/voice-models
+    networks:
+      - default
+      - dbx_bridge
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     # Container hardening is defense in depth; user plugins still require the
     # dedicated rootless runner described in the commercial release gate.
@@ -419,3 +445,11 @@ volumes:
   nats_data:
   uploads:
   api_hub_data:
+  dbx_data:
+
+networks:
+  # A normal bridge is required: dbx metadata must reach external MySQL/
+  # PostgreSQL source databases. Exposure is limited by not publishing ports;
+  # backend reaches dbx by service name on this dedicated network.
+  dbx_bridge:
+    driver: bridge

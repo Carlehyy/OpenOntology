@@ -9,6 +9,7 @@ from sqlalchemy import desc
 from app.deps import get_db, get_current_user, require_admin
 from app.config import settings
 from app.exploration.semantic_gate import (
+    canvas_fingerprint,
     semantic_consistency_issues,
     semantic_overview,
 )
@@ -30,6 +31,7 @@ from app.ontologies.versions import (
     release_gate_service,
     release_service,
     rollback_service,
+    semantic_service,
     trial_service,
     workspace_service,
 )
@@ -341,6 +343,23 @@ def get_version_semantic(
         ontology_id,
         version_id,
         semantic_overview_fn=semantic_overview,
+        semantic_consistency_fn=semantic_consistency_issues,
+    )
+
+
+@router.put("/{ontology_id}/versions/{version_id}/semantic")
+def save_version_semantic(
+    ontology_id: str, version_id: str, body: dict,
+    db: Session = Depends(get_db), current_user=Depends(get_current_user),
+):
+    """保存 editing draft 的业务 canvas/document（服务端指纹 + revision CAS）。"""
+    return semantic_service.save_version_semantic(
+        db,
+        ontology_id,
+        version_id,
+        body,
+        current_user,
+        canvas_fingerprint_fn=canvas_fingerprint,
         semantic_consistency_fn=semantic_consistency_issues,
     )
 

@@ -83,8 +83,9 @@ def test_alt_key_relation_via_document_mentions(db, admin_user):
     db.commit()
 
     svc = MappingService(db)
-    with patch("app.services.v2.dataset_service.DatasetService.load_all_rows",
-               side_effect=lambda dataset_id, *a, **k: rows_by_ds[dataset_id]), \
+    with patch("app.ontologies.mappings.mapping_service.load_mapping_source_rows",
+               side_effect=lambda _db, mapping, **kwargs: (rows_by_ds[mapping.curated_dataset_id],
+                   _db.query(DatasetVersion).filter(DatasetVersion.dataset_id == mapping.curated_dataset_id).first())), \
          patch.object(
              MappingService,
              "_rebuild_neo4j_projection",
@@ -134,8 +135,9 @@ def test_exploded_rows_use_composite_lake_identity_for_relation_pairs(db, admin_
     db.commit()
 
     svc = MappingService(db)
-    with patch("app.services.v2.dataset_service.DatasetService.load_all_rows",
-               side_effect=lambda dataset_id, *a, **k: rows_by_ds[dataset_id]), \
+    with patch("app.ontologies.mappings.mapping_service.load_mapping_source_rows",
+               side_effect=lambda _db, mapping, **kwargs: (rows_by_ds[mapping.curated_dataset_id],
+                   _db.query(DatasetVersion).filter(DatasetVersion.dataset_id == mapping.curated_dataset_id).first())), \
          patch.object(
              MappingService,
              "_rebuild_neo4j_projection",

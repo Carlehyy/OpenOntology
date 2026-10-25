@@ -25,6 +25,7 @@ class _FakeMsg:
         self.data = payload
         self.acked = 0
         self.naked = 0
+        self.nak_delays = []
         self.in_progress_calls = 0
 
     async def ack(self):
@@ -32,6 +33,7 @@ class _FakeMsg:
 
     async def nak(self, delay=None):
         self.naked += 1
+        self.nak_delays.append(delay)
 
     async def in_progress(self):
         self.in_progress_calls += 1
@@ -120,6 +122,37 @@ async def test_thread_exception_escape_is_naked(executor, monkeypatch):
 
     assert msg.naked == 1
     assert msg.acked == 0
+
+
+@pytest.mark.asyncio
+async def test_handler_retry_after_controls_nak_delay(executor):
+    """A live integrated-sync owner must re-arm the delivery, not be ACKed."""
+    class LeaseBusy(RuntimeError):
+        retry_after = 42.0
+
+    async def busy(_payload):
+        raise LeaseBusy("owner lease still live")
+
+    msg = _msg()
+    await executor._process_message(msg, busy, "integrated.sync")
+
+    assert msg.acked == 0
+    assert msg.naked == 1 and msg.nak_delays == [42.0]
+
+
+@pytest.mark.asyncio
+async def test_handler_invalid_retry_after_falls_back_to_bounded_nak(executor):
+    class BrokenDelay(RuntimeError):
+        retry_after = "not-a-number"
+
+    async def explode(_payload):
+        raise BrokenDelay("bad delay")
+
+    msg = _msg()
+    await executor._process_message(msg, explode, "integrated.sync")
+
+    assert msg.acked == 0
+    assert msg.nak_delays == [5]
 
 
 @pytest.mark.asyncio
@@ -360,6 +393,7 @@ def test_handler_registry_covers_all_stream_subjects():
         "connection-sync-executor",
         "dataset-event-executor",
         "dataset-migrate-executor",
+        "integrated-sync-executor",
         "assistant-eval-autopilot",
         "super-assistant-reflect-micro",
         "super-assistant-reflect-full",
@@ -537,7 +571,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
 
     run_task = asyncio.ensure_future(executor.run())
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and len(subscriptions) < 20:
+    while time.monotonic() < deadline and len(subscriptions) < 22:
         await asyncio.sleep(0.02)
     executor.request_shutdown()
     await asyncio.wait_for(run_task, timeout=5)
@@ -560,14 +594,15 @@ async def test_run_subscribes_each_subject_with_own_durable(
         ("super_assistant.scheduled.run", "super-assistant-scheduled-run"),
         ("super_assistant.palace.ontology-rebuild", "super-assistant-palace-ontology-rebuild"),
         ("task_instances.control", "task-instances-control"),
+        ("integrated.sync", "integrated-sync-executor"),
         ("sa.execution.run.*", "sa-kernel-v1"),
         ("sa.execution.call.*", "sa-call-v1"),
         ("sa.execution.reconcile", "sa-reconciler-v1"),
         ("sa.plugin.reply.*", "sa-plugin-reply-v1"),
         ]
-    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:17])
-    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[17:20])
-    assert subscriptions[20][2] == "SA_PLUGIN_RUNNER_V1"
+    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:18])
+    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[18:21])
+    assert subscriptions[21][2] == "SA_PLUGIN_RUNNER_V1"
     # ack_wait=60s 与 20s 续约间隔配套；max_deliver 不设上限（-1）——
     # 丢一条 kernel 派发消息等于 Run 挂死到 deadline，瞬时故障靠 nak
     # delay=5s 退避而不是丢弃兜底。

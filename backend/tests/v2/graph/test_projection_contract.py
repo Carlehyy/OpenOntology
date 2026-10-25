@@ -64,6 +64,16 @@ class RecordingNeo4j:
         })
         return self.relation_result
 
+    def batch_upsert_relations(
+        self, src_label, tgt_label, rel_type, rows, key_field="id",
+    ) -> int:
+        for row in rows:
+            self.upsert_relation(
+                src_label, row["src_key"], tgt_label, row["tgt_key"],
+                rel_type, props=row["props"], key_field=key_field,
+            )
+        return len(rows) if self.relation_result else 0
+
     def close(self) -> None:
         self.closed = True
 

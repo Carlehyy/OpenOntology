@@ -1,36 +1,28 @@
-"""
-确定性结论校验 (Answer Verifier) — 借鉴 DataFoundry 的 ``result-verifier.ts``。
+"""确定性结论校验：数值须由完整工具证据背书；失败先纠正，仍失败则显式标注。
 
-把「先查证后回答」从 prompt 道德约束变成代码强制：回合终答前，
-把回答文本中的数值断言与回合内工具结果的数值集合做程序化比对；
-无法对应到任何工具结果的数字视为「未验证」，先给模型一次修正机会，
-仍不通过则在答案中显式标注，而不是静默放行。
-
-原则（fail-open 但显式标注）：
-- 校验失败不摧毁回答（与治理一致：标注未验证，而非拦截）；
-- 无工具步骤或无数字的回答直接通过；
-- 结果集合自动加入 x*100 / x/100 变体，兼容「35% ↔ 0.35」等表达；
-- 年份与用户自己给出的数字不参与校验（来自用户/上下文，无需工具背书）。
+保留历史年份豁免及百分比变体；Decimal 内部比较不会混淆相邻 bigint。
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Iterable
 
 # 数字抽取：覆盖 整数 / 小数 / 千分位 / 负号。年份先整体剥离（否则 "2026"
 # 会被切成 202+6），版本号等含 4 位数字的字符串也会被剥离年份部分——可接受的
 # 误伤，宁可少校验也不把年份当数据断言。
-_NUMBER_RE = re.compile(r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+\.\d+")
+_NUMBER_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?")
 _YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+JS_SAFE_INTEGER = 2**53 - 1
 
 
 @dataclass
 class VerificationResult:
     """一次校验的结构化结果（可序列化进 answer 事件与审计）。"""
-    answer_numbers: list[float] = field(default_factory=list)
-    unverified: list[float] = field(default_factory=list)
-    matched: list[float] = field(default_factory=list)
+    answer_numbers: list[Decimal] = field(default_factory=list)
+    unverified: list[Decimal] = field(default_factory=list)
+    matched: list[Decimal] = field(default_factory=list)
     retried: bool = False
 
     @property
@@ -41,80 +33,114 @@ class VerificationResult:
         return {
             "passed": self.passed,
             "answerNumberCount": len(self.answer_numbers),
-            "unverified": self.unverified,
+            "unverified": [_json_number(value) for value in self.unverified],
             "retried": self.retried,
         }
 
 
-def _numbers_in_text(text: str) -> list[float]:
-    """抽取文本中的数值（千分位去掉逗号）；年份整体剥离后不再参与。"""
+def _json_number(value) -> int | float | str:
+    if not isinstance(value, Decimal):
+        try:
+            value = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return str(value)
+    if value == value.to_integral_value() and abs(value) <= JS_SAFE_INTEGER:
+        return int(value)
+    # Preserve the old numeric summary when it round-trips exactly; otherwise
+    # use a lossless decimal string, never a rounded proof of a different claim.
+    if abs(value) > JS_SAFE_INTEGER or not value.is_finite():
+        return str(value)
+    number = float(value)
+    return number if Decimal(str(number)) == value else str(value)
+
+
+def _public_number(value: Decimal):
+    """Use historical float aliases only when their decimal spelling is exact."""
+    if abs(value) <= JS_SAFE_INTEGER:
+        number = float(value)
+        if Decimal(str(number)) == value:
+            return number
+    return value
+
+
+def _numbers_in_text_decimal(text: str) -> list[Decimal]:
     cleaned = _YEAR_RE.sub(" ", text or "")
-    out: list[float] = []
-    for raw in _NUMBER_RE.findall(cleaned):
-        out.append(float(raw.replace(",", "")))
-    return out
+    return [Decimal(raw.replace(",", ""))
+            for raw in _NUMBER_RE.findall(cleaned)]
 
 
-def _numbers_in_value(value: object) -> list[float]:
+def _numbers_in_value(value: object) -> list[Decimal]:
     if isinstance(value, bool):
         return []
-    if isinstance(value, (int, float)):
-        return [float(value)]
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            number = Decimal(str(value))
+            return [number] if number.is_finite() else []
+        except InvalidOperation:
+            return []
     if isinstance(value, str):
-        return _numbers_in_text(value)
-    if isinstance(value, dict):
-        numbers: list[float] = []
-        for child in value.values():
-            numbers.extend(_numbers_in_value(child))
-        return numbers
-    if isinstance(value, (list, tuple)):
-        numbers: list[float] = []
-        for child in value:
-            numbers.extend(_numbers_in_value(child))
-        return numbers
+        return _numbers_in_text_decimal(value)
+    if isinstance(value, (dict, list, tuple)):
+        children = value.values() if isinstance(value, dict) else value
+        return [number for child in children for number in _numbers_in_value(child)]
     return []
 
 
-def _with_ratio_variants(numbers: Iterable[float]) -> set[float]:
-    allowed: set[float] = set()
+def _with_ratio_variants(numbers: Iterable[Decimal]) -> set[Decimal]:
+    allowed: set[Decimal] = set()
     for number in numbers:
         allowed.add(number)
-        allowed.add(round(number * 100, 2))
-        if number != 0:
-            allowed.add(round(number / 100, 4))
+        # Ratio variants are a display convenience for ordinary magnitudes,
+        # never a reason to round a bigint or allocate unbounded exponent work.
+        if abs(number) > JS_SAFE_INTEGER or abs(number.adjusted()) > 100:
+            continue
+        with localcontext() as context:
+            context.prec = max(28, len(number.as_tuple().digits) + 108)
+            allowed.add(round(number * 100, 2))
+            if number != 0:
+                allowed.add(round(number / 100, 4))
     return allowed
 
 
-def result_number_universe(steps: Iterable[dict]) -> set[float]:
-    """回合内所有工具结果产出的数值集合（含百分比变体）。"""
-    numbers: list[float] = []
+def result_number_universe(steps: Iterable[dict]) -> set:
+    """完整工具结果的 Decimal 数值集合及无损历史 float 别名（含百分比变体）。"""
+    numbers: list[Decimal] = []
     for step in steps:
         result = step.get("result")
         if not isinstance(result, dict):
             continue
-        if result.get("error") or result.get("_truncated"):
-            # 出错/截断的结果不能作为数值背书来源
+        if (result.get("error") or result.get("_truncated") or result.get("partial")
+                or result.get("exact") is False
+                or result.get("completeness", "complete") != "complete"):
+            # 出错/不完整的输入不能作为精确数值背书；输出分页本身不等于输入不完整。
             continue
         numbers.extend(_numbers_in_value(result))
-    return _with_ratio_variants(numbers)
+    allowed = _with_ratio_variants(numbers)
+    # Preserve compatibility for exact, safe values returned by this helper;
+    # verification itself uses Decimal values below and remains lossless.
+    for value in tuple(allowed):
+        public = _public_number(value)
+        if isinstance(public, float):
+            allowed.add(public)
+    return allowed
 
 
-def answer_numbers(answer: str) -> list[float]:
+def answer_numbers(answer: str) -> list:
     """回答文本中的数值断言（保留出现顺序与重复）。"""
-    return _numbers_in_text(answer)
+    return [_public_number(value) for value in _numbers_in_text_decimal(answer)]
 
 
 def verify_answer(answer: str, steps: Iterable[dict]) -> VerificationResult:
     universe = result_number_universe(steps)
-    numbers = answer_numbers(answer)
+    numbers = _numbers_in_text_decimal(answer)
     result = VerificationResult(answer_numbers=numbers)
     for number in numbers:
         (result.matched if number in universe else result.unverified).append(number)
     return result
 
 
-def correction_prompt(unverified: Iterable[float]) -> str:
-    values = "、".join(f"{value:g}" for value in unverified)
+def correction_prompt(unverified: Iterable[Decimal]) -> str:
+    values = "、".join(str(_json_number(value)) for value in unverified)
     return (
         f"# 结论校验失败\n"
         f"你刚才回答中的以下数字未能对应到任何工具返回结果，"
@@ -124,8 +150,8 @@ def correction_prompt(unverified: Iterable[float]) -> str:
     )
 
 
-def unverified_notice(unverified: Iterable[float]) -> str:
-    values = "、".join(f"{value:g}" for value in unverified)
+def unverified_notice(unverified: Iterable[Decimal]) -> str:
+    values = "、".join(str(_json_number(value)) for value in unverified)
     return (
         f"\n\n> ⚠️ 结论校验：以下数字未能与工具返回结果对应，请自行核对后再使用：{values}。"
     )

@@ -49,6 +49,11 @@ def readiness_response(
         "data_scheduler": "unknown",
         "ontology_projection": "unknown",
     }
+    is_production = settings.environment == "production"
+    if is_production:
+        # dbx metadata is a production-only availability boundary; local and
+        # test profiles keep their native-PostgreSQL fixtures without dbx.
+        checks["dbx"] = "unknown"
 
     # PostgreSQL check
     try:
@@ -135,6 +140,24 @@ def readiness_response(
         checks["n8n"] = "ok"
     except Exception:
         checks["n8n"] = "unavailable"
+
+    if is_production:
+        # Reuse the pinned adapter's bounded status probe. It authenticates and
+        # verifies the pinned version without exposing URL/password/error text.
+        try:
+            from app.data_channel.integrated.dbx_adapter import DbxMetadataAdapter
+
+            dbx_status = DbxMetadataAdapter().status()
+            if dbx_status.get("configured") is True and dbx_status.get("available") is True:
+                checks["dbx"] = "ok"
+            else:
+                checks["dbx"] = "unavailable"
+                checks["dbx_reason"] = str(
+                    dbx_status.get("reason") or "DBX_UNAVAILABLE"
+                )
+        except Exception:
+            checks["dbx"] = "unavailable"
+            checks["dbx_reason"] = "DBX_UNAVAILABLE"
 
     try:
         from app.ontologies.sentinels.scan_worker import scan_worker_status
@@ -226,6 +249,7 @@ def readiness_response(
         "minio",
         "browser",
         "n8n",
+        *(("dbx",) if is_production else ()),
         "sentinel_scheduler",
         "data_scheduler",
         "sentinel_cdc",

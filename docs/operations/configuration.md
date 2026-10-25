@@ -82,6 +82,19 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 | MinIO | 新文件与对象的权威对象存储 | 写入失败；不切本地对象目录 |
 | n8n | 数据管家工作流执行 | 启动/readiness 失败，不按可选增强跳过 |
 | Chromium CDP | 浏览器接管与数据管家浏览器会话 | `STEWARD_BROWSER_CDP_URL` 只接受 HTTP(S) 服务根地址；启动配置必需，不可达不杀死 API liveness，但 readiness 失败，不用 mock 冒充就绪 |
+| 集成数据集 dbx | 集成源登记、schema 发现与刷新；生产 metadata 只走固定版本 dbx，不回退 native | 生产部署自动启动仅内网可达的官方 digest dbx，或使用显式外部端点；缺失/不可达/认证失败/版本不符使部署 preflight 与生产 readiness fail closed，非生产不要求 dbx |
+
+### 集成数据集 dbx（生产）
+
+集成数据集的源登记与 schema 发现只使用固定版本 dbx；native PostgreSQL
+能力只用于已登记资产的快照/读写，不能替代 metadata 发现。生产 Compose 提供
+profile `integrated-dbx` 的官方镜像服务，镜像 digest 固定、无宿主发布端口，
+只通过专用 bridge 网络供 backend 访问，并允许 dbx 出站连接 MySQL/PostgreSQL
+源库。自动部署在服务器 `.env` 中无显式配置时生成独立 32-byte 密码、设置
+`INTEGRATED_DBX_URL=http://dbx:4224` 和固定 `INTEGRATED_DBX_COMMIT`；显式外部
+URL+password 原样保留，单缺任一或 commit 不符则 fail closed，不会回退内部服务。
+生产启动前 preflight 及 `/api/health`/`/health/ready` 会认证并校验 dbx 版本；
+非 production 不要求 dbx。不要将 dbx 密码写入 Git、日志或工单。
 
 外部依赖必须在本地配置中心或生产只读校验中提供完整配置，并以真实服务探针
 验证；API 与 pipeline executor 启动后还必须通过 `/health/ready`。

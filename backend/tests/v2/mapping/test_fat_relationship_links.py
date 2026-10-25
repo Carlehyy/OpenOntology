@@ -13,6 +13,7 @@ from app.models.v2.curated import CuratedReview
 from app.models.v2.mapping import OntologyMapping, OntologyLinkMapping
 from app.ontologies.formal_modeling.models import LinkInstance, LinkType
 from app.services.v2.mapping.mapping_service import MappingService
+from .minio_fixture import store_rows
 
 
 def _add_curated(db, name: str) -> Dataset:
@@ -38,18 +39,16 @@ def _add_curated(db, name: str) -> Dataset:
 def _build_twice(db, onto_id, rows_by_ds):
     """跑两遍 build_all，顺带验证幂等（重跑不重复建边）。"""
     svc = MappingService(db)
-    with patch("app.services.v2.dataset_service.DatasetService.load_all_rows",
-               side_effect=lambda dataset_id, *a, **k: rows_by_ds[dataset_id]), \
-         patch.object(
-             MappingService,
-             "_rebuild_neo4j_projection",
-             return_value=True,
-         ):
+    with patch.object(
+        MappingService,
+        "_rebuild_neo4j_projection",
+        return_value=True,
+    ):
         svc.build_all(onto_id)
         svc.build_all(onto_id)  # 幂等：确定性 id 去重，重跑不应翻倍
 
 
-def test_fat_relationship_via_junction_table(db, admin_user):
+def test_fat_relationship_via_junction_table(db, admin_user, mapping_storage):
     """订单-[含明细]->商品：连接表 order_items 带 quantity/unit_price 边属性。
 
     同一订单 O1 两次购买同一商品 P1（连接表两行，数量不同）→ 必须是两条独立的边，
@@ -82,6 +81,11 @@ def test_fat_relationship_via_junction_table(db, admin_user):
             {"line_id": "L4", "order_id": "O2", "sku": "P2", "qty": "2", "price": "20"},
         ],
     }
+
+    # 连接表不需要对象映射，但 canonical version reader 仍要求声明其身份列。
+    ds_edge.schema_json = {**(ds_edge.schema_json or {}), "primary_key": "line_id"}
+    for ds in (ds_order, ds_product, ds_edge):
+        store_rows(db, mapping_storage, ds, rows_by_ds[ds.id])
 
     # 只给两个端点建对象映射；连接表不是对象，仅作关系数据源
     for ds, cls, pk in [(ds_order, "Order", "order_id"), (ds_product, "Product", "sku")]:
@@ -130,7 +134,7 @@ def test_fat_relationship_via_junction_table(db, admin_user):
     assert quantities == {"3", "5"}, f"两条重复边应保留各自数量 3/5，实得 {quantities}"
 
 
-def test_thin_fk_link_still_works(db, admin_user):
+def test_thin_fk_link_still_works(db, admin_user, mapping_storage):
     """回归：不带 edge_dataset_id 的直连外键瘦关系行为不变（走原路径）。"""
     onto = OntologyProject(name="瘦关系回归", domain="供应链",
                            build_mode="pipeline_mapping", created_by=admin_user.id)
@@ -156,6 +160,7 @@ def test_thin_fk_link_still_works(db, admin_user):
         db.add(OntologyMapping(ontology_id=onto.id, curated_dataset_id=ds.id,
                                entity_class=cls, field_mapping={"__primary_key__": pk},
                                status="draft", confidence=0.9))
+        store_rows(db, mapping_storage, ds, rows_by_ds[ds.id])
     # 瘦关系：源表 supplier_id == 目标表 supplier_id，无连接表、无边属性
     db.add(OntologyLinkMapping(
         ontology_id=onto.id,

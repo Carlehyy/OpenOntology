@@ -17,6 +17,7 @@ from app.ontologies.formal_modeling.action_execution_errors import (
 from app.ontologies.formal_modeling.action_runtime_values import (
     _preview_instance_values,
     _preview_link_values,
+    _preview_reader,
     _preview_values,
 )
 from app.ontologies.formal_modeling.validation import (
@@ -82,6 +83,13 @@ def _validate_object_candidate(
         *, extra_candidates: Optional[list] = None,
         preview_context: Optional[dict] = None) -> None:
     """Dry-run equivalent of ``_validate_object_write``."""
+    reader = _preview_reader(preview_context)
+    if reader is not None:
+        errors = reader.validate_object_candidate(candidate, extra_candidates or [])
+        if errors:
+            raise RuleExecutionError(
+                rule_name, f"对象实例契约校验失败: {_contract_messages(errors)}")
+        return
     if (
         preview_context is not None
         and preview_context.get("isolated", False)
@@ -146,6 +154,15 @@ def _validate_link_candidate(
         excluded_link_ids: Optional[set[str]] = None,
         preview_context: Optional[dict] = None) -> None:
     """Dry-run equivalent of ``_validate_link_write``."""
+    reader = _preview_reader(preview_context)
+    if reader is not None:
+        errors = reader.validate_link_candidate(
+            candidate, extra_instances or [], existing_candidates or [],
+            excluded_link_ids or set())
+        if errors:
+            raise RuleExecutionError(
+                rule_name, f"链接实例契约校验失败: {_contract_messages(errors)}")
+        return
     if (
         preview_context is not None
         and preview_context.get("isolated", False)

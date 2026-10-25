@@ -124,8 +124,8 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
     assert config.name == PIPELINE_STREAM == "PIPELINE_TASKS"
     # 流已扩容：旧 subject 保持不变，新增 UI 手动运行、数据集导入、
     # 超级助手三种反思任务、成品→人工迁移任务、记忆宫殿图谱抽取与
-    # 定期聚类合并、本体发布文档事件、本体文档手动重建（扩容只能追加，
-    # subject 顺序须与 PIPELINE_STREAM_SUBJECTS 一致）
+    # 定期聚类合并、本体发布文档事件、本体文档手动重建及集成资产完整同步
+    # （扩容只能追加，subject 顺序须与 PIPELINE_STREAM_SUBJECTS 一致）
     assert config.subjects == [
         "pipeline.task.execute",
         "task.pipeline.run",
@@ -144,6 +144,7 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
         "super_assistant.scheduled.run",
         "super_assistant.palace.ontology-rebuild",
         "task_instances.control",
+        "integrated.sync",
     ]
     assert config.subjects == list(PIPELINE_STREAM_SUBJECTS)
     assert config.retention == RetentionPolicy.WORK_QUEUE

@@ -228,6 +228,31 @@ if ! grep -Fq 'BROWSER_IMAGE:-chromedp/headless-shell@sha256:' "$PROD_COMPOSE" \
   exit 1
 fi
 
+# Integrated dbx is a fixed official image with no host port, reachable only
+# by backend on a dedicated outbound-capable bridge (it must reach source DBs).
+dbx_block="$(awk -v service=dbx '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+if ! grep -Fq     'docker.cnb.cool/dbxio.com/dbx@sha256:b661f7e35deed06d9611dcda79c44ffcc8e4fd0f44308028ea77f7f18b36638c'     <<<"$dbx_block"     || ! grep -Fq 'profiles: [integrated-dbx]' <<<"$dbx_block"     || ! grep -Fq 'DBX_PASSWORD: ${INTEGRATED_DBX_PASSWORD:?integrated dbx password is required}'       <<<"$dbx_block"     || grep -Eq '^[[:space:]]+ports:' <<<"$dbx_block"     || ! grep -Fq '      - dbx_bridge' <<<"$dbx_block"     || ! grep -Fq '  dbx_bridge:' "$PROD_COMPOSE"     || ! grep -Fq '    driver: bridge' "$PROD_COMPOSE"     || grep -Fq 'internal: true' "$PROD_COMPOSE"; then
+  printf 'production dbx must be pinned, profile-gated, host-port-free, and on a normal outbound bridge\n' >&2
+  exit 1
+fi
+backend_block="$(awk -v service=backend '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+if ! grep -Fq '      - dbx_bridge' <<<"$backend_block"; then
+  printf 'backend must join the dedicated dbx bridge\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'configure_integrated_dbx' "$DEPLOY_SCRIPT"     || ! grep -Fq 'INTEGRATED_DBX_COMMIT_PIN="0137e0cbc8b663da5a17ec424c6d47e4e5570ead"'       "$DEPLOY_SCRIPT"     || ! grep -Fq 'start_integrated_dbx_if_needed' "$DEPLOY_SCRIPT"     || ! grep -Fq 'INTEGRATED_DBX_PASSWORD' "$DEPLOY_SCRIPT"; then
+  printf 'deploy must configure/pin/preflight dbx and redact its password\n' >&2
+  exit 1
+fi
+
 test_dir="$(mktemp -d /tmp/openontology-deploy-guards.XXXXXX)"
 archive_source="$(mktemp -d /tmp/openontology-archive-source.XXXXXX)"
 # Keep the XXXXXX suffix at the end: BSD mktemp otherwise treats a trailing
@@ -732,16 +757,16 @@ if grep -Fq 'compose environment leaked authority key:' "$fake_docker_log"; then
   exit 1
 fi
 probe_line="$(grep -nF \
-  'compose -f docker-compose.prod.yml run --rm --no-deps backend python -m app.shared.dependency_probe' \
+  'run --rm --no-deps backend python -m app.shared.dependency_probe' \
   "$fake_docker_log" | head -n1 | cut -d: -f1)"
 stop_line="$(grep -nF \
-  'compose -f docker-compose.prod.yml stop -t 30 backend pipeline_executor' \
+  'stop -t 30 backend pipeline_executor' \
   "$fake_docker_log" | head -n1 | cut -d: -f1)"
 heads_line="$(grep -nF \
-  'compose -f docker-compose.prod.yml run --rm --no-deps backend alembic heads' \
+  'run --rm --no-deps backend alembic heads' \
   "$fake_docker_log" | head -n1 | cut -d: -f1)"
 upgrade_line="$(grep -nF \
-  'compose -f docker-compose.prod.yml run --rm --no-deps backend alembic upgrade head' \
+  'run --rm --no-deps backend alembic upgrade head' \
   "$fake_docker_log" | head -n1 | cut -d: -f1)"
 if [ -z "$probe_line" ] || [ -z "$stop_line" ] || [ -z "$heads_line" ] \
     || [ -z "$upgrade_line" ] \

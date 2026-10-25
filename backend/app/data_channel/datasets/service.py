@@ -13,6 +13,14 @@ from sqlalchemy.orm import Session
 from app.data_channel.datasets.models import (
     Dataset, DatasetVersion, DatasetVersionEvent, StorageDeletionOutbox,
 )
+from app.data_channel.datasets.integrated_store import (  # noqa: F401 — public version ports
+    TypedVersionRelation,
+    decode_version_row,
+    describe_version as _describe_integrated_version,
+    get_version_relation as _get_integrated_version_relation,
+    iter_version_rows as _iter_integrated_version_rows,
+    lookup_version_rows as _lookup_integrated_version_rows,
+)
 from app.data_channel.datasets.snapshot_text import (  # noqa: F401 — 再导出
     snapshot_cell_text,
 )
@@ -55,6 +63,158 @@ def version_has_content(version: DatasetVersion | None) -> bool:
     if version.data_size is not None or bool(version.storage_uri):
         return True
     return version.rowcount is not None and bool(version.checksum)
+
+
+def _exact_version(db, dataset_id: str, version_id: str):
+    dataset = db.get(Dataset, dataset_id)
+    version = db.get(DatasetVersion, version_id)
+    if dataset is None or version is None or version.dataset_id != dataset_id:
+        raise DatasetReadError("Dataset version does not exist for this dataset")
+    return dataset, version
+
+
+def _version_batch_size(batch_size):
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 1000:
+        raise DatasetReadError("Version batch_size must be between 1 and 1000")
+    return batch_size
+
+
+def describe_version(db, dataset_id: str, version_id: str) -> dict:
+    """Describe one exact published version through its authoritative storage.
+
+    Integrated versions require a sealed immutable manifest. Existing blob and
+    curated changeset versions retain their native checksum/governance contract;
+    they are not reinterpreted as integrated snapshots.
+    """
+    dataset, version = _exact_version(db, dataset_id, version_id)
+    if dataset.kind == "integrated":
+        return _describe_integrated_version(db, dataset_id, version_id)
+    from app.data_channel.datasets import lake_store
+    if lake_store.version_uses_lake(dataset, version):
+        # Curated lake structure is immutable; values are reverse-replayed below.
+        names = list((dataset.schema_json or {}).get("lake_columns") or {})
+    else:
+        raw = DatasetService(db).load_version_bytes(dataset_id, version.version_no)
+        if raw is None:
+            raise DatasetReadError("Dataset version has no authoritative payload")
+        names = stored_columns(raw)
+    count = sum(len(batch) for batch in iter_version_rows(db, dataset_id, version_id))
+    if version.rowcount is not None and count != version.rowcount:
+        raise DatasetReadError("Dataset version row count differs from its published evidence")
+    from app.data_channel.datasets.lake_gate import split_pk
+    schema = dict(dataset.schema_json or {})
+    # Native DatasetVersion has no frozen schema column. Preserve the dataset's
+    # declared identity contract, never infer a PK from headers or row values.
+    # Integrated versions returned above use their own frozen manifest instead.
+    primary_key_columns = schema.get("primary_key_columns")
+    if primary_key_columns is None:
+        primary_key_columns = split_pk(schema.get("primary_key"))
+    if (not isinstance(primary_key_columns, list)
+            or any(not isinstance(name, str) or name not in names for name in primary_key_columns)
+            or len(set(primary_key_columns)) != len(primary_key_columns)):
+        raise DatasetReadError("Dataset declared primary key does not match this version's columns")
+    metadata = {
+        **schema, "columns": names, "primary_key_columns": list(primary_key_columns), "dataset_id": dataset_id,
+        "version_id": version.id, "dataset_version_id": version.id,
+        "version_no": version.version_no, "row_count": count,
+        "checksum": version.checksum, "complete": True, "status": "published",
+        "as_of": version.created_at.isoformat(),
+    }
+    if dataset.kind == "curated":
+        from app.data_channel.curated.review_row_identity import version_review
+        review = version_review(db, dataset_id, version)
+        metadata.update(review_status=review.status if review else None,
+                        review_id=review.id if review else None)
+    return metadata
+
+
+def get_version_relation(db, dataset_id: str, version_id: str) -> TypedVersionRelation:
+    """SQL relations are available only for immutable integrated snapshots.
+
+    The mutable curated lake must never be advertised as a pinned SQL relation.
+    Native blob/curated versions use the exact-version batch port below.
+    """
+    from app.data_channel.datasets.integrated_store import IntegratedVersionError
+    dataset, _ = _exact_version(db, dataset_id, version_id)
+    if dataset.kind != "integrated":
+        raise IntegratedVersionError("This version has no immutable SQL relation; use iter_version_rows")
+    return _get_integrated_version_relation(db, dataset_id, version_id)
+
+
+def iter_version_rows(db, dataset_id: str, version_id: str, *, batch_size=1000,
+                      columns: list[str] | None = None, after_row_key: int | None = None):
+    """Yield bounded row batches of an exact native version.
+
+    Only integrated storage promises keyset-only scans and bounded ingestion/read
+    memory. Existing whole-payload storage still loads its verified native bytes;
+    its parser produces bounded windows, without converting storage formats.
+    Non-integrated cursors are exclusive logical row ordinals, starting at zero.
+    """
+    size = _version_batch_size(batch_size)
+    dataset, version = _exact_version(db, dataset_id, version_id)
+    if dataset.kind == "integrated":
+        yield from _iter_integrated_version_rows(
+            db, dataset_id, version_id, batch_size=size,
+            columns=columns, after_row_key=after_row_key)
+        return
+    after = 0 if after_row_key is None else after_row_key
+    if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+        raise DatasetReadError("Version cursor must be a nonnegative row ordinal")
+    if columns is not None and (not isinstance(columns, list)
+                                or len(set(columns)) != len(columns)):
+        raise DatasetReadError("Version projection must contain unique column names")
+    from app.data_channel.datasets import lake_store
+    if lake_store.version_uses_lake(dataset, version):
+        iterator = lake_store.iter_rows_at_version(db, dataset, version.version_no, batch_size=size)
+    else:
+        raw = DatasetService(db).load_version_bytes(dataset_id, version.version_no)
+        if raw is None:
+            raise DatasetReadError("Dataset version has no authoritative payload")
+        def payload_batches():
+            offset = 0
+            while True:
+                batch = _parse_stored_rows(raw, limit=size, offset=offset)
+                if not batch:
+                    return
+                yield batch
+                offset += len(batch)
+        iterator = payload_batches()
+    skipped = 0
+    for batch in iterator:
+        if skipped < after:
+            trim = min(after - skipped, len(batch))
+            skipped += trim
+            batch = batch[trim:]
+        if columns is not None:
+            if any(any(name not in row for name in columns) for row in batch):
+                raise DatasetReadError("Version projection requested an unknown column")
+            batch = [{name: row[name] for name in columns} for row in batch]
+        if batch:
+            yield batch
+
+
+def lookup_version_rows(db, dataset_id: str, version_id: str, *, column: str,
+                        keys: list, batch_size=1000):
+    size = _version_batch_size(batch_size)
+    if not isinstance(keys, list) or len(keys) > 1000:
+        raise DatasetReadError("Version lookup accepts at most 1000 keys")
+    dataset, _ = _exact_version(db, dataset_id, version_id)
+    if dataset.kind == "integrated":
+        yield from _lookup_integrated_version_rows(
+            db, dataset_id, version_id, column=column, keys=keys, batch_size=size)
+        return
+    matches = []
+    for batch in iter_version_rows(db, dataset_id, version_id, batch_size=size):
+        for row in batch:
+            if column not in row:
+                raise DatasetReadError("Version lookup requested an unknown column")
+            if row[column] in keys:
+                matches.append(row)
+                if len(matches) == size:
+                    yield matches
+                    matches = []
+    if matches:
+        yield matches
 
 
 def detach_run_version_lineage(db, version_ids: list[str]) -> int:
@@ -715,6 +875,8 @@ class DatasetService:
               .first())
         if not ds:
             raise ValueError(f"Dataset {dataset_id} not found")
+        if ds.kind == "integrated":
+            raise ValueError("Integrated versions must be published by complete snapshot sync, not whole-blob writes")
 
         # 新版本存完整 SHA-256；load_all_rows 同时兼容历史 16 位校验和。
         checksum = hashlib.sha256(data).hexdigest()
@@ -1006,6 +1168,9 @@ class DatasetService:
         if not version_has_content(ver):
             return []
         ds = self.get_dataset(dataset_id)
+        if ds is not None and ds.kind == "integrated":
+            raise DatasetReadError(
+                "Integrated snapshots require iter_version_rows with an exact version ID; whole-version lists are disabled")
         if ds is not None:
             from app.data_channel.datasets import lake_store
             if lake_store.version_uses_lake(ds, ver):
@@ -1045,6 +1210,16 @@ class DatasetService:
         if not version_has_content(ver):
             return []
         ds = self.get_dataset(dataset_id)
+        if ds is not None and ds.kind == "integrated":
+            # Ordinals are contiguous in a verified sealed snapshot. A legacy
+            # preview offset maps to seek, never an OFFSET/full-version list.
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+                raise DatasetReadError("Integrated preview limit must be between 1 and 1000")
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise DatasetReadError("Integrated preview cursor must be an integer row ordinal")
+            return next(iter_version_rows(
+                self._db, dataset_id, ver.id, batch_size=limit,
+                after_row_key=max(0, offset)), [])
         if ds is not None:
             from app.data_channel.datasets import lake_store
             if lake_store.version_uses_lake(ds, ver):

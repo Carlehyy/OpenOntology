@@ -16,236 +16,8 @@ class RelationProcessingMixin:
 
     def _infer_and_write_relations(self, ontology_id: str, mappings: list[OntologyMapping],
                                    mapping_meta: dict) -> list[dict]:
-        from app.models.entity import Entity
-        from app.models.relation import Relation
-        from app.ontologies.mappings.models import OntologyLinkMapping
-        import re
-
-        results = []
-        m_list = [m for m in mappings if m.id in mapping_meta]
-
-        # 重建前清除旧的 FK 推断关系，避免改名/数据变化后产生重复边
-        stale = self._db.query(Relation).filter(Relation.ontology_id == ontology_id).all()
-        for rel in stale:
-            if (rel.properties or {}).get("source") == "fk_inference":
-                self._db.delete(rel)
-        self._db.flush()
-
-        for i, src_m in enumerate(m_list):
-            src_meta = mapping_meta[src_m.id]
-            src_cols = src_meta["columns"]
-
-            for tgt_m in m_list:
-                if tgt_m.id == src_m.id:
-                    continue
-                tgt_meta = mapping_meta[tgt_m.id]
-                tgt_class = tgt_meta["entity_class"]
-                tgt_pk_col = tgt_meta["pk_col"]
-                tgt_id_map = tgt_meta["entity_id_map"]
-
-                tgt_pk_values = {
-                    str(row.get(tgt_pk_col, "")).strip()
-                    for row in tgt_meta.get("rows", [])
-                    if row.get(tgt_pk_col) not in (None, "")
-                }
-                # 归一化索引: 容错 ID 格式差异 (如 SUP-001 vs SUP001)
-                tgt_norm_index = {
-                    self._normalize_fk_value(v): v for v in tgt_pk_values
-                }
-                fk_candidates = self._detect_fk_columns(
-                    src_cols, tgt_class, tgt_m.entity_class,
-                    src_sample_rows=src_meta.get("rows", []),
-                    tgt_pk_values=tgt_pk_values,
-                )
-
-                fk_cols_linked: set[str] = set()
-                for fk_col, rel_type in fk_candidates:
-                    written = 0
-                    src_values: list[str] = []
-                    tgt_values: list[str] = []
-                    seen_pairs: set[tuple[str, str]] = set()
-                    for row in src_meta["rows"]:
-                        fk_val = str(row.get(fk_col, ""))
-                        if not fk_val:
-                            continue
-                        src_pk_col = src_meta["pk_col"]
-                        src_pk_val = self._row_identity_value(row, src_pk_col)
-                        src_eid = src_meta["entity_id_map"].get(src_pk_val)
-                        tgt_eid = tgt_id_map.get(self._lookup_identity_value(tgt_pk_col, fk_val))
-                        if not tgt_eid:
-                            # 归一化匹配: 容错 SUP-001 vs SUP001 等格式差异
-                            raw = tgt_norm_index.get(self._normalize_fk_value(fk_val))
-                            if raw is not None:
-                                tgt_eid = tgt_id_map.get(self._lookup_identity_value(tgt_pk_col, raw))
-                        if not src_eid or not tgt_eid:
-                            continue
-                        # 多行映射同一实体对时去重 (如订单按 items 展开的多行)
-                        if (src_eid, tgt_eid) in seen_pairs:
-                            continue
-                        seen_pairs.add((src_eid, tgt_eid))
-                        src_exists = self._db.query(Entity).filter(Entity.id == src_eid).first()
-                        tgt_exists = self._db.query(Entity).filter(Entity.id == tgt_eid).first()
-                        if not src_exists or not tgt_exists:
-                            continue
-                        rel = Relation(
-                            id=self._stable_relation_id(ontology_id, src_eid, tgt_eid, rel_type, "fk_inference"),
-                            ontology_id=ontology_id,
-                            source_entity=src_eid, target_entity=tgt_eid,
-                            type=rel_type, properties={"fk_column": fk_col, "source": "fk_inference"},
-                            confidence=0.85,
-                        )
-                        self._db.merge(rel)
-                        src_values.append(src_eid)
-                        tgt_values.append(tgt_eid)
-                        written += 1
-                    if written:
-                        fk_cols_linked.add(fk_col)
-                        cardinality = self._infer_cardinality(src_values, tgt_values)
-                        inferred_link = self._upsert_inferred_link_mapping(
-                            ontology_id=ontology_id,
-                            src_dataset_id=src_m.curated_dataset_id,
-                            tgt_dataset_id=tgt_m.curated_dataset_id,
-                            relation_type=rel_type,
-                            src_key=fk_col,
-                            tgt_key=tgt_pk_col,
-                            model=OntologyLinkMapping,
-                        )
-                        for rel in self._db.query(Relation).filter(
-                            Relation.ontology_id == ontology_id,
-                            Relation.type == rel_type,
-                        ).all():
-                            props = dict(rel.properties or {})
-                            if props.get("source") == "fk_inference" and props.get("fk_column") == fk_col:
-                                props["cardinality"] = cardinality
-                                rel.properties = props
-                                # JSON 列原地替换 dict 时显式标记 dirty，确保持久化
-                                flag_modified(rel, "properties")
-                        self._db.flush()
-                        results.append({"src": src_meta["entity_class"], "tgt": tgt_class,
-                                        "rel_type": rel_type, "fk_col": fk_col, "count": written,
-                                        "cardinality": cardinality,
-                                        "link_mapping_id": inferred_link.id if inferred_link else None,
-                                        "link_mapping_status": inferred_link.status if inferred_link else None})
-
-                # ── 策略 5: 跨表同名引用列匹配 ───────────────────────────────────
-                # 当两张表有完全同名的列（如中文的"患者ID"、"订单号"），且该列看起来像
-                # 引用列时，直接用该列做值关联（不依赖 PK 列名一致）。
-                _ref_keywords = {"id", "编号", "编码", "号", "单号", "订单"}
-                _meta_extraction_cols = {"record_id", "row_type", "rule_index", "rule_count",
-                    "section_index", "section_title", "section_text", "table_index",
-                    "table_row_index", "thresholds", "doc_summary", "sections",
-                    "condition", "action", "name", "qualifier", "definition",
-                    "extraction_method", "extraction_strategy", "extraction_error"}
-                _same_name_candidates = []
-                for col in src_cols:
-                    if col in fk_cols_linked or col == src_meta.get("pk_col"):
-                        continue
-                    if col not in tgt_meta["columns"]:
-                        continue
-                    if col.lower() in _meta_extraction_cols:
-                        continue
-                    col_lower = col.lower()
-                    # 列名包含引用关键词 或 列值匹配 ID 模式
-                    is_ref_name = any(k in col_lower for k in _ref_keywords)
-                    if not is_ref_name:
-                        src_vals = {str(r.get(col, "")).strip() for r in src_meta.get("rows", []) if r.get(col)}
-                        src_vals.discard("")
-                        if len(src_vals) >= 2 and all(
-                            re.match(r'^[A-Za-z]+[\d_\-]+\d+$', v) for v in src_vals if len(v) > 1
-                        ):
-                            is_ref_name = True
-                    if is_ref_name:
-                        _same_name_candidates.append(col)
-
-                if _same_name_candidates:
-                    tgt_rows = tgt_meta.get("rows", [])
-                    tgt_id_map = tgt_meta["entity_id_map"]
-                    tgt_pk_col_for_lookup = tgt_meta["pk_col"]
-                    for col in _same_name_candidates:
-                        # 用该列自身做 linkage（值来源列而非PK列）
-                        tgt_val_to_eid: dict[str, str] = {}
-                        for tgt_row in tgt_rows:
-                            v = str(tgt_row.get(col, "")).strip()
-                            if not v:
-                                continue
-                            norm_v = self._normalize_fk_value(v)
-                            tgt_pk_val = self._row_identity_value(tgt_row, tgt_pk_col_for_lookup)
-                            eid = tgt_id_map.get(tgt_pk_val)
-                            if eid and norm_v:
-                                tgt_val_to_eid[norm_v] = eid
-
-                        if len(tgt_val_to_eid) < 2:
-                            continue
-
-                        _GENERIC_REL_NAMES = {"ID", "CODE", "NO", "NUM", "NUMBER", "NAME", "KEY", "REF", "TYPE"}
-                        rel_name = re.sub(r'[^A-Za-z0-9_]', '', col.replace(" ", "_")).upper() or "REF"
-                        if not rel_name or rel_name in _GENERIC_REL_NAMES:
-                            # Column name was Chinese-only or too generic after stripping; derive from target entity class
-                            _ec = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', tgt_class).upper()
-                            rel_name = re.sub(r'[^A-Z0-9_]', '', _ec) or "REF"
-                        rel_type = f"HAS_{rel_name}"
-                        written = 0
-                        src_values: list[str] = []
-                        tgt_values: list[str] = []
-                        seen_pairs: set[tuple[str, str]] = set()
-
-                        for src_row in src_meta.get("rows", []):
-                            v = str(src_row.get(col, "")).strip()
-                            if not v:
-                                continue
-                            src_pk_val = self._row_identity_value(src_row, src_meta["pk_col"])
-                            src_eid = src_meta["entity_id_map"].get(src_pk_val)
-                            if not src_eid:
-                                continue
-                            tgt_eid = tgt_val_to_eid.get(self._normalize_fk_value(v))
-                            if not tgt_eid:
-                                continue
-                            if (src_eid, tgt_eid) in seen_pairs:
-                                continue
-                            seen_pairs.add((src_eid, tgt_eid))
-                            if not self._db.query(Entity).filter(Entity.id == src_eid).first():
-                                continue
-                            if not self._db.query(Entity).filter(Entity.id == tgt_eid).first():
-                                continue
-                            rel = Relation(
-                                id=self._stable_relation_id(ontology_id, src_eid, tgt_eid, rel_type, "same_name_fk"),
-                                ontology_id=ontology_id,
-                                source_entity=src_eid, target_entity=tgt_eid,
-                                type=rel_type,
-                                properties={"fk_column": col, "source": "same_name_fk"},
-                                confidence=0.8,
-                            )
-                            self._db.merge(rel)
-                            src_values.append(src_eid)
-                            tgt_values.append(tgt_eid)
-                            written += 1
-
-                        if written:
-                            fk_cols_linked.add(col)
-                            cardinality = self._infer_cardinality(src_values, tgt_values)
-                            # 把基数回写进 Relation.properties，供正规本体投影使用
-                            for rel in self._db.query(Relation).filter(
-                                Relation.ontology_id == ontology_id,
-                                Relation.type == rel_type,
-                            ).all():
-                                props = dict(rel.properties or {})
-                                if props.get("source") == "same_name_fk" and props.get("fk_column") == col:
-                                    props["cardinality"] = cardinality
-                                    rel.properties = props
-                                    flag_modified(rel, "properties")
-                            self._db.flush()
-                            results.append({"src": src_meta["entity_class"], "tgt": tgt_class,
-                                            "rel_type": rel_type, "fk_col": col,
-                                            "via": "same_name_fk", "count": written,
-                                            "cardinality": cardinality})
-
-                # 跨数据集备用键推断 (PRD §2.4 ③): 只跳过 FK 已实际产出链接的列,
-                # 列名疑似 FK 但值匹配不上主键的列仍可走备用键(如 mentioned_supplier 存公司名)
-                results.extend(self._infer_alt_key_relations(
-                    ontology_id, src_m, src_meta, tgt_m, tgt_meta,
-                    skip_src_cols=fk_cols_linked, link_model=OntologyLinkMapping,
-                ))
-        return results
+        from app.ontologies.mappings.sql_fk_inference import infer_relations
+        return infer_relations(self, ontology_id, mappings, mapping_meta)
 
     def _detect_alt_key_columns(self, rows: list[dict], pk_col: str | None) -> list[str]:
         """检测备用键: 近唯一(≥90%)、非纯数字、值长度足够的非主键列 (如 供应商名称)"""
@@ -594,6 +366,9 @@ class RelationProcessingMixin:
     def _process_direct_fk_link(self, ontology_id: str, link, src_meta: dict, tgt_meta: dict) -> dict:
         """直连外键瘦关系：源表某列 == 目标表某列 → 建边（无自有属性）。原行为保持不变。"""
         from app.models.relation import Relation
+        if src_meta.get("stage") is not None and tgt_meta.get("stage") is not None:
+            from app.ontologies.mappings.sql_link_materialization import process_direct_link
+            return process_direct_link(self, ontology_id, link, src_meta, tgt_meta)
 
         # 行→实体 id 必须按行自身的主键标识反查，不能 zip(rows, dict.items())——
         # entity_id_map 按 pk 去重后条目数可能少于行数，zip 会截断且错位连边
@@ -661,6 +436,9 @@ class RelationProcessingMixin:
 
         同一对实体之间可有多条边（各连接表行独立成边），稳定 id 纳入连接表行主键防去重合并。
         """
+        if src_meta.get("stage") is not None and tgt_meta.get("stage") is not None:
+            from app.ontologies.mappings.sql_link_materialization import process_edge_link
+            return process_edge_link(self, ontology_id, link, src_meta, tgt_meta)
         from app.models.relation import Relation
         from app.data_channel.curated.approved_version_reader import (
             latest_dataset_version)

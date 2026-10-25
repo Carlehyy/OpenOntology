@@ -26,9 +26,19 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
+from decimal import Decimal
 from typing import Any, Optional
 
+from sqlalchemy import Text, cast, false, func, or_, select, true
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.ontologies.agent_runtime.read_queries import (
+    NUMBER_TYPES, decimal_add, decimal_number, encode_scalar, filter_expression,
+    invalid_typed_property, property_definitions, temp_limit_kb, typed_property,
+)
 
 from app.models.ontology_formal import (
     ObjectInstance, LinkInstance, PropertyFact,
@@ -208,7 +218,7 @@ TOOL_DEFS: list[dict] = [
                 "instance_id": {"type": "string", "description": "起点对象实例 id"},
                 "path": {
                     "type": "array",
-                    "description": f"有序的跳序列，每一跳指定一个链接类型和方向；最多 {runtime_limit("max_hops")} 跳",
+                    "description": f"有序的跳序列，每一跳指定一个链接类型和方向；最多 {runtime_limit('max_hops')} 跳",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -445,13 +455,8 @@ TOOL_DEFS: list[dict] = [
 
 # ---------------------------------------------------------------- 过滤与格式化
 
-def _num(v: Any) -> Optional[float]:
-    try:
-        if isinstance(v, bool):
-            return None
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+def _num(v: Any) -> Optional[Decimal]:
+    return decimal_number(v)
 
 
 def _match(props: dict, f: dict) -> bool:
@@ -489,18 +494,42 @@ def _trunc(v: Any) -> Any:
     return v
 
 
-def _row(inst: ObjectInstance) -> dict:
+def _visible_values(scope: AgentScope, inst: ObjectInstance, *, computed=False) -> dict:
+    ot = scope.object_types.get(inst.object_type_id)
+    definitions = property_definitions(ot) if ot else {}
+    allowed = scope.allowed_property_names(inst.object_type_id)
+    values = inst.computed if computed else inst.properties
+    return {name: value for name, value in (values or {}).items()
+            if name in definitions and (allowed is None or name in allowed)
+            and bool(definitions[name].get("source") == "computed"
+                     or definitions[name].get("computed")) == computed}
+
+
+def _row(scope: AgentScope, inst: ObjectInstance) -> dict:
+    ot = scope.object_types.get(inst.object_type_id)
+    definitions = property_definitions(ot) if ot else {}
+
+    def encode_field(name, value):
+        encoded = encode_scalar(value)
+        # Text previews may truncate, but declared numeric strings are exact
+        # values, including legacy NUMERIC values stored as JSON text.
+        if str(definitions[name].get("type") or "string").lower() in NUMBER_TYPES:
+            return encoded
+        return _trunc(encoded)
+
     return {
         "id": inst.id,
-        "properties": {k: _trunc(v) for k, v in (inst.properties or {}).items()},
-        "computed": {k: _trunc(v) for k, v in (inst.computed or {}).items()},
+        "properties": {k: encode_field(k, v)
+                       for k, v in _visible_values(scope, inst).items()},
+        "computed": {k: encode_field(k, v)
+                     for k, v in _visible_values(scope, inst, computed=True).items()},
     }
 
 
 def _label(scope: AgentScope, inst: ObjectInstance) -> str:
     """实例的人类可读标签：主键值 > name/title 属性 > id 前缀。"""
     ot = scope.object_types.get(inst.object_type_id)
-    props = inst.properties or {}
+    props = _visible_values(scope, inst)
     if ot and ot.primary_key:
         pk_prop = next((p for p in (ot.properties or []) if isinstance(p, dict)
                         and (p.get("id") == ot.primary_key or p.get("name") == ot.primary_key)), None)
@@ -562,7 +591,7 @@ def _snippet(scope: AgentScope, inst: ObjectInstance, max_fields: int = runtime_
                  if isinstance(p, dict)} if ot else {}
     label = _label(scope, inst)
     parts: list[str] = []
-    for k, v in (inst.properties or {}).items():
+    for k, v in _visible_values(scope, inst).items():
         if len(parts) >= max_fields:
             break
         if v in (None, "") or isinstance(v, (list, dict)):
@@ -656,14 +685,15 @@ class ToolRunner:
         for f in filters:
             if not isinstance(f, dict):
                 continue
-            out.append({**f, "property": self.scope.resolve_property(ot, f.get("property", ""))})
+            out.append({**f, "property": self.scope.resolve_visible_property(ot, f.get("property", ""))})
         return out
 
     def _apply_filters(self, rows: list[ObjectInstance], filters, keyword) -> list[ObjectInstance]:
         out = []
         kw = (keyword or "").strip().lower()
         for inst in rows:
-            props = {**(inst.properties or {}), **(inst.computed or {})}
+            props = {**_visible_values(self.scope, inst),
+                     **_visible_values(self.scope, inst, computed=True)}
             if filters and not all(_match(props, f) for f in filters):
                 continue
             if kw:
@@ -681,22 +711,131 @@ class ToolRunner:
             n = cap
         return max(1, min(n, cap))
 
+    @contextmanager
+    def _sql_read_budget(self):
+        """Bound exact SQL work, never commit the caller's transaction.
+
+        A savepoint contains a timeout/resource failure so the orchestrator can
+        still persist the explicit tool rejection rather than lose its audit.
+        """
+        try:
+            with self.db.begin_nested():
+                self.db.execute(select(func.set_config(
+                    "statement_timeout", str(settings.agent_query_statement_timeout_ms), True)))
+                self.db.execute(select(func.set_config(
+                    "lock_timeout", str(settings.agent_query_lock_timeout_ms), True)))
+                self.db.execute(select(func.set_config(
+                    "work_mem", f"{settings.agent_query_work_mem_mib}MB", True)))
+                superuser, effective_limit = self.db.execute(select(
+                    func.current_setting("is_superuser"),
+                    func.current_setting("temp_file_limit"))).one()
+                limit_kb = temp_limit_kb(effective_limit)
+                needs_temp_cap = (limit_kb is None
+                                  or limit_kb > settings.agent_query_temp_file_limit_mib * 1024)
+                if str(superuser).strip().lower() == "on" and needs_temp_cap:
+                    self.db.execute(select(func.set_config("temp_file_limit",
+                        f"{settings.agent_query_temp_file_limit_mib}MB", True)))
+                elif needs_temp_cap:
+                    raise ToolError("query_budget_unavailable: 当前数据库角色的temp_file_limit"
+                                    "未收紧到精确查询预算；未执行无界统计")
+                yield
+        except DBAPIError as exc:
+            if str(getattr(exc.orig, "pgcode", "") or "").startswith("22"):
+                raise ToolError("invalid_typed_value: 发布范围含非法类型值，未返回部分统计") from exc
+            raise ToolError(
+                "query_execution_rejected: 精确查询未完成（超时或数据库资源拒绝），"
+                "没有返回部分统计，请缩小条件后重试") from exc
+
+    def _sql_invalid_typed_value(self, ot):
+        """Full visible-type validation embedded in the result SQL snapshot."""
+        allowed = self.scope.allowed_property_names(ot.id)
+        conditions = []
+        for name, definition in property_definitions(ot).items():
+            if allowed is not None and name not in allowed:
+                continue
+            invalid = invalid_typed_property(definition, name)
+            if invalid is not None:
+                conditions.append(invalid)
+        if not conditions:
+            return false()
+        invalid_rows = self._instance_query().filter(
+            ObjectInstance.object_type_id == ot.id, or_(*conditions))
+        # The outer result also selects ObjectInstance; never correlate this
+        # release-wide gate to the current output row or filtered page.
+        return invalid_rows.statement.correlate(None).exists()
+
+    def _sql_filtered_query(self, ot, filters, keyword=None):
+        query = self._instance_query().filter(ObjectInstance.object_type_id == ot.id)
+        definitions = property_definitions(ot)
+        for item in filters or []:
+            query = query.filter(filter_expression(definitions, item))
+        kw = str(keyword or "").strip().lower()
+        if kw:
+            # Search only visible declared fields; do not let hidden values act
+            # as a keyword side channel. IDs remain visible technical fields.
+            allowed = self.scope.allowed_property_names(ot.id)
+            haystacks = [ObjectInstance.id, ObjectInstance.external_id]
+            haystacks += [cast(typed_property(p, name), Text)
+                         for name, p in definitions.items()
+                         if allowed is None or name in allowed]
+            query = query.filter(or_(*[
+                func.lower(expr).contains(kw, autoescape=True) for expr in haystacks]))
+        return query
+
     def _tool_search_objects(self, args: dict) -> dict:
         ot = self.scope.require_object_type(args.get("object_type", ""))
         filters = self._validated_filters(ot, args.get("filters"))
-        rows = self._instances_of(ot.id)
-        matched = self._apply_filters(rows, filters, args.get("keyword"))
         limit = self._limit(args.get("limit"))
-        page = matched[:limit]
+        if self.db.get_bind().dialect.name == "postgresql":
+            with self._sql_read_budget():
+                query = self._sql_filtered_query(ot, filters, args.get("keyword"))
+                matched_page = (query.with_entities(
+                    ObjectInstance.id.label("instance_id"),
+                    ObjectInstance.created_at.label("created_at"),
+                    func.count().over().label("matched"))
+                    .order_by(ObjectInstance.created_at.desc(), ObjectInstance.id.asc())
+                    .limit(limit).subquery())
+                # A single outer row survives an empty search so invalid input
+                # cannot disappear with the page. Validation and rows share SQL
+                # MVCC state even when the caller uses READ COMMITTED.
+                totals = select(self._sql_invalid_typed_value(ot).label("invalid")).subquery()
+                result = self.db.execute(select(
+                    ObjectInstance, matched_page.c.matched, totals.c.invalid)
+                    .select_from(totals.outerjoin(matched_page, true()).outerjoin(
+                        ObjectInstance, ObjectInstance.id == matched_page.c.instance_id))
+                    .order_by(matched_page.c.created_at.desc(),
+                              matched_page.c.instance_id.asc())).all()
+                if result[0][2]:
+                    raise ToolError("invalid_typed_value: 发布范围含非法类型值，未返回部分统计")
+                total = result[0][1] or 0
+                page = [row[0] for row in result if row[0] is not None]
+            partial = False
+        else:
+            # Non-PG compatibility path may only answer exact bounded inputs.
+            # Never filter a prefix and present its length as the true total.
+            rows = (self._instance_query().filter(ObjectInstance.object_type_id == ot.id)
+                    .order_by(ObjectInstance.created_at.desc(), ObjectInstance.id.asc())
+                    .limit(runtime_limit("search_scan_cap") + 1).all())
+            if len(rows) > runtime_limit("search_scan_cap"):
+                raise ToolError("search_budget_exceeded: 当前数据库不能精确执行此规模检索；"
+                                "请使用PostgreSQL完整查询或缩小输入，未返回采样结果")
+            matched = self._apply_filters(rows, filters, args.get("keyword"))
+            total, page, partial = len(matched), matched[:limit], False
         for inst in page:
             self._cite(inst)
+        allowed = self.scope.allowed_property_names(ot.id)
+        items = []
+        for inst in page:
+            row = _row(self.scope, inst)
+            if allowed is not None:
+                row["properties"] = {k: v for k, v in row["properties"].items() if k in allowed}
+                row["computed"] = {k: v for k, v in row["computed"].items() if k in allowed}
+            items.append(row)
         return {
-            "objectType": ot.display_name,
-            "total": len(matched),
-            "returned": len(page),
-            "truncated": len(matched) > len(page),
-            "scannedCap": len(rows) >= runtime_limit("search_scan_cap"),
-            "items": [_row(i) for i in page],
+            "objectType": ot.display_name, "total": encode_scalar(total),
+            "returned": len(page), "truncated": total > len(page),
+            "scannedCap": False, "partial": partial, "exact": True,
+            "completeness": "complete", "items": items,
         }
 
     def _tool_get_object(self, args: dict) -> dict:
@@ -728,7 +867,7 @@ class ToolRunner:
                     "linkType": lt.display_name, "linkTypeName": lt.name,
                     "direction": direction, "count": len(links), "sample": sample,
                 })
-        return {"objectType": ot.display_name, **_row(inst), "links": neighbors}
+        return {"objectType": ot.display_name, **_row(self.scope, inst), "links": neighbors}
 
     def _tool_traverse_links(self, args: dict) -> dict:
         inst = self.scope.visible_instance(
@@ -751,7 +890,7 @@ class ToolRunner:
                 continue
             self._cite(other)
             ot = self.scope.object_types[other.object_type_id]
-            items.append({"objectType": ot.display_name, **_row(other),
+            items.append({"objectType": ot.display_name, **_row(self.scope, other),
                           "linkProperties": li.properties or {}})
         return {
             "from": _label(self.scope, inst), "linkType": lt.display_name,
@@ -767,7 +906,7 @@ class ToolRunner:
         if not isinstance(path, list) or not path:
             raise ToolError('path 不能为空：给出有序跳序列，如 [{"link_type":"下单","direction":"out"}]')
         if len(path) > runtime_limit("max_hops"):
-            raise ToolError(f"最多 {runtime_limit("max_hops")} 跳，当前 {len(path)} 跳。请缩短路径或分多次遍历")
+            raise ToolError(f"最多 {runtime_limit('max_hops')} 跳，当前 {len(path)} 跳。请缩短路径或分多次遍历")
 
         # 逐跳预解析链接类型（越界即失败：每一跳都受作用域约束，防经由链接泄露隐藏类型）
         hops = []
@@ -823,7 +962,7 @@ class ToolRunner:
                 continue  # 终点仍受作用域约束
             self._cite(inst)
             otx = self.scope.object_types[inst.object_type_id]
-            items.append({"objectType": otx.display_name, **_row(inst)})
+            items.append({"objectType": otx.display_name, **_row(self.scope, inst)})
         return {
             "from": _label(self.scope, start),
             "path": [{"linkType": lt.display_name, "direction": d} for lt, d in hops],
@@ -872,6 +1011,78 @@ class ToolRunner:
                 self._cite(instance)
         return result
 
+    def _sql_aggregate_objects(self, ot, metric, metric_prop, group_by, filters):
+        definitions = property_definitions(ot)
+        query = self._sql_filtered_query(ot, filters)
+        if metric != "count":
+            definition = definitions[metric_prop]
+            if str(definition.get("type") or "string").lower() not in NUMBER_TYPES:
+                raise ToolError("invalid_metric_property: 聚合需要已声明的数值属性")
+            value = typed_property(definition, metric_prop)
+            aggregate = {"sum": func.sum, "avg": func.avg,
+                         "min": func.min, "max": func.max}[metric](value)
+        else:
+            aggregate = func.count(ObjectInstance.id)
+        # Scalar input count and grouped values share ONE statement snapshot.
+        inputs = (select(func.count(ObjectInstance.id)).where(
+            ObjectInstance.ontology_id == self.scope.ontology.id,
+            ObjectInstance.object_type_id == ot.id))
+        if self.scope.release_id is not None:
+            inputs = inputs.where(ObjectInstance.ontology_release_id == self.scope.release_id)
+        scanned = inputs.correlate(None).scalar_subquery()
+        invalid = self._sql_invalid_typed_value(ot)
+        with self._sql_read_budget():
+            if not group_by:
+                row = query.with_entities(aggregate, func.count(ObjectInstance.id), scanned, invalid).one()
+                if row[3]:
+                    raise ToolError("invalid_typed_value: 发布范围含非法类型值，未返回部分统计")
+                return {"objectType": ot.display_name, "metric": metric,
+                        "metricProperty": metric_prop, "scanned": encode_scalar(row[2]),
+                        "matched": encode_scalar(row[1]), "value": encode_scalar(row[0]),
+                        "partial": False, "exact": True, "completeness": "complete",
+                        "valueType": "integer" if metric == "count" else "decimal",
+                        "valueEncoding": "number_or_lossless_string"}
+            group = typed_property(definitions[group_by], group_by)
+            # GROUP BY over the complete filtered relation; LIMIT applies ONLY
+            # to output groups, and window counts are evaluated before LIMIT.
+            grouped = (query.with_entities(
+                group.label("group_value"), aggregate.label("metric_value"),
+                func.count(ObjectInstance.id).label("group_count"),
+                func.sum(func.count(ObjectInstance.id)).over().label("matched"),
+                func.count().over().label("total_groups"))
+                .group_by(group).order_by(aggregate.desc().nulls_last(),
+                                          group.asc().nulls_last())
+                .limit(51).subquery())
+            totals = select(scanned.label("input_count"), invalid.label("invalid")).subquery()
+            # Keep the true input count even when the filter matches zero
+            # groups; an outer row and all counts share the same SQL snapshot.
+            result = self.db.execute(select(grouped, totals.c.input_count, totals.c.invalid).select_from(
+                totals.outerjoin(grouped, true())).order_by(
+                    grouped.c.metric_value.desc().nulls_last(),
+                    grouped.c.group_value.asc().nulls_last())).all()
+            if result[0][6]:
+                raise ToolError("invalid_typed_value: 发布范围含非法类型值，未返回部分统计")
+        input_count = result[0][5]
+        rows = result if result[0][4] is not None else []
+        matched = rows[0][3] if rows else 0
+        groups = [{"group": str(row[0]), "value": encode_scalar(row[1]),
+                   "count": encode_scalar(row[2])} for row in rows[:50]]
+        out = {"objectType": ot.display_name, "metric": metric,
+               "metricProperty": metric_prop, "scanned": encode_scalar(input_count),
+               "matched": encode_scalar(matched), "partial": False,
+               "exact": True, "completeness": "complete", "groupBy": group_by,
+               "groups": groups, "truncated": len(rows) > 50,
+               "totalGroups": encode_scalar(rows[0][4] if rows else 0),
+               "valueType": "integer" if metric == "count" else "decimal",
+               "valueEncoding": "number_or_lossless_string"}
+        # A chart is optional. Decimal strings must not be coerced to lossy JS
+        # numbers just to draw one; the exact values remain in the result.
+        if all(not isinstance(g["value"], str) for g in groups):
+            chart = _build_aggregate_chart(ot.display_name, metric, metric_prop, group_by, groups)
+            if chart:
+                out.update(chart=chart, chartRendered=True)
+        return out
+
     def _tool_aggregate_objects(self, args: dict) -> dict:
         ot = self.scope.require_object_type(args.get("object_type", ""))
         metric = args.get("metric") or "count"
@@ -882,22 +1093,25 @@ class ToolRunner:
             raise ToolError(f"metric={metric} 需要提供 metric_property（数值属性名）")
         # 属性护栏（越界硬失败）：拼错/臆造的属性名当场报错并给可用清单，不静默算错
         if metric_prop:
-            metric_prop = self.scope.resolve_property(ot, metric_prop)
+            metric_prop = self.scope.resolve_visible_property(ot, metric_prop)
         group_by = args.get("group_by")
         if group_by:
-            group_by = self.scope.resolve_property(ot, group_by)
+            group_by = self.scope.resolve_visible_property(ot, group_by)
         filters = self._validated_filters(ot, args.get("filters"))
 
-        # 流式累加（不materialize全表，内存安全）：修正原先 .limit(5000) 盲截断
-        # 导致的『大数据量下统计静默算错』；到安全阀才停并诚实标 partial。
+        if self.db.get_bind().dialect.name == "postgresql":
+            return self._sql_aggregate_objects(ot, metric, metric_prop, group_by, filters)
+
+        # Non-PG compatibility execution is exact only within its explicit
+        # input budget. Exceeding it rejects the query, never returns a sample.
         acc: dict[str, dict] = {}
         def bump(key: str, v):
             a = acc.get(key)
             if a is None:
-                a = acc[key] = {"count": 0, "sum": 0.0, "nnum": 0, "min": None, "max": None}
+                a = acc[key] = {"count": 0, "sum": Decimal(0), "nnum": 0, "min": None, "max": None}
             a["count"] += 1
             if v is not None:
-                a["sum"] += v
+                a["sum"] = decimal_add(a["sum"], v)
                 a["nnum"] += 1
                 a["min"] = v if a["min"] is None else min(a["min"], v)
                 a["max"] = v if a["max"] is None else max(a["max"], v)
@@ -906,10 +1120,11 @@ class ToolRunner:
         partial = False
         for inst in self._stream_instances(ot.id):
             if scanned >= runtime_limit("aggregate_scan_cap"):
-                partial = True
-                break
+                raise ToolError("aggregate_budget_exceeded: 当前数据库不能精确执行此规模聚合；"
+                                "请使用PostgreSQL完整查询，未返回采样统计")
             scanned += 1
-            merged = {**(inst.properties or {}), **(inst.computed or {})}
+            merged = {**_visible_values(self.scope, inst),
+                      **_visible_values(self.scope, inst, computed=True)}
             if filters and not all(_match(merged, f) for f in filters):
                 continue
             matched += 1
@@ -922,28 +1137,31 @@ class ToolRunner:
             if a["nnum"] == 0:
                 return None
             if metric == "sum":
-                return round(a["sum"], 6)
+                return a["sum"]
             if metric == "avg":
-                return round(a["sum"] / a["nnum"], 6)
+                return a["sum"] / a["nnum"]
             return a["min"] if metric == "min" else a["max"]
 
         base = {"objectType": ot.display_name, "metric": metric,
                 "metricProperty": metric_prop, "scanned": scanned,
-                "matched": matched, "partial": partial}
+                "matched": matched, "partial": partial, "exact": True,
+                "completeness": "complete",
+                "valueType": "integer" if metric == "count" else "decimal",
+                "valueEncoding": "number_or_lossless_string"}
         if not group_by:
-            empty = {"count": 0, "sum": 0.0, "nnum": 0, "min": None, "max": None}
-            return {**base, "value": finalize(acc.get("__all__") or empty)}
+            empty = {"count": 0, "sum": Decimal(0), "nnum": 0, "min": None, "max": None}
+            return {**base, "value": encode_scalar(finalize(acc.get("__all__") or empty))}
 
         result = [{"group": k, "value": finalize(a), "count": a["count"]} for k, a in acc.items()]
-        result.sort(key=lambda x: (x["value"] is None, -(x["value"] or 0)))
-        groups_out = result[:50]
+        result.sort(key=lambda x: (x["value"] is not None, x["value"] or 0), reverse=True)
+        groups_out = [{**g, "value": encode_scalar(g["value"])} for g in result[:50]]
         out = {**base, "groupBy": group_by, "groups": groups_out,
-               "truncated": len(result) > 50}
-        # 确定性图表：直接从真实分组值生成，前端渲染，无需 LLM 再吐 chart
-        chart = _build_aggregate_chart(ot.display_name, metric, metric_prop, group_by, groups_out)
-        if chart:
-            out["chart"] = chart
-            out["chartRendered"] = True
+               "truncated": len(result) > 50, "totalGroups": len(result)}
+        if all(not isinstance(g["value"], str) for g in groups_out):
+            chart = _build_aggregate_chart(ot.display_name, metric, metric_prop, group_by, groups_out)
+            if chart:
+                out["chart"] = chart
+                out["chartRendered"] = True
         return out
 
     def _tool_get_object_history(self, args: dict) -> dict:

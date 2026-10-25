@@ -111,6 +111,7 @@ def test_batch_upsert_property_assignment_is_explicit(
 ):
     with patch("app.services.v2.graph.neo4j_service.GraphDatabase") as mock_gdb:
         mock_driver, session = make_mock_driver()
+        session.run.return_value.single.return_value = {"written": 1}
         mock_gdb.driver.return_value = mock_driver
 
         from app.services.v2.graph.neo4j_service import Neo4jService

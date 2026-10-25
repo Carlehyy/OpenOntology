@@ -25,7 +25,8 @@ import uuid as uuid_lib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, func, not_, or_, select
+from sqlalchemy import Text, and_, cast, func, not_, or_, select
+from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -37,6 +38,7 @@ from app.ontologies.agent_runtime.boundary import (
     ToolError, build_scope, get_or_create_profile,
 )
 from app.ontologies.agent_runtime.models import AgentProfile
+from app.ontologies.agent_runtime.read_queries import encode_scalar, typed_property
 from app.ontologies.release_context import current_release_context
 
 SCHEMA_VERSION = 1
@@ -53,7 +55,7 @@ MAX_FILTER_DEPTH = 4
 MAX_FILTER_LEAVES = 32
 MAX_IN_LIST = 100
 
-_NUMBER_TYPES = {"number", "integer", "float", "double", "int", "decimal"}
+_NUMBER_TYPES = {"number", "integer", "float", "double", "int", "decimal", "numeric", "bigint"}
 _BOOLEAN_TYPES = {"boolean", "bool"}
 _STRING_TYPES = {"string", "text", "date", "datetime", "uuid", "enum"}
 
@@ -144,7 +146,7 @@ def _validate_filter_value(prop: str, decl: str, value: Any) -> Any:
         if not math.isfinite(value):
             raise QueryError(422, "invalid_typed_key",
                              f"属性「{prop}」的数值必须有限")
-        return float(value)
+        return Decimal(str(value))
     if _is_boolean_type(decl):
         if not isinstance(value, bool):
             raise QueryError(422, "invalid_typed_key",
@@ -223,9 +225,8 @@ class UnifiedQueryService:
         self._resolve_sources()
         page_size = self._resolve_page_size()
         tree, join_row_counts = self._build_join_tree()
-        # P2-3：先预算后校验 — typed-key 核验只发生在受限且有界的输入上
-        for meta in self.sources.values():
-            self._check_source_budget(meta)
+        # Complete-set SQL work is limited by transaction resource budgets,
+        # not by the old Python input row cap. Output/join budgets remain.
         self._validate_join_keys()
         counts = self._compute_entity_counts(tree)
         final_sql = self._build_final_select(tree)
@@ -376,7 +377,10 @@ class UnifiedQueryService:
                 "SET LOCAL work_mem = "
                 f"'{settings.agent_query_work_mem_mib}MB'",
             ]
-            if super_role:
+            effective_temp_kb = _parse_memory_limit_kb(str(temp_limit))
+            if super_role and (effective_temp_kb is None or effective_temp_kb >
+                               settings.agent_query_temp_file_limit_mib * 1024):
+                # Never loosen a stricter role limit (including zero/no temp).
                 # temp_file_limit 是 SUSET 参数：只有超级角色能逐事务 SET LOCAL。
                 budgets.append(
                     "SET LOCAL temp_file_limit = "
@@ -403,7 +407,7 @@ class UnifiedQueryService:
         """普通角色的 temp_file_limit 硬校验（SUSET 无法 SET LOCAL）。"""
         cap_kb = settings.agent_query_temp_file_limit_mib * 1024
         kb = _parse_memory_limit_kb(str(raw_limit or ""))
-        if kb is None or kb <= 0 or kb > cap_kb:
+        if kb is None or kb < 0 or kb > cap_kb:
             raise QueryError(
                 503, "query_budget_unavailable",
                 "temp_file_limit 是超级用户参数，当前应用角色无法逐事务"
@@ -528,13 +532,7 @@ class UnifiedQueryService:
         return ObjectInstance.properties[prop]
 
     def _typed_expr(self, meta: _SourceMeta, prop: str):
-        decl = _declared_type(meta.props[prop])
-        column = self._value_column(meta, prop)
-        if _is_number_type(decl):
-            return column.as_float()
-        if _is_boolean_type(decl):
-            return column.as_boolean()
-        return column.as_string()
+        return typed_property(meta.props[prop], prop, postgres=self._pg)
 
     def _needed_props(self) -> dict[str, set[str]]:
         needed = {a: set() for a in self.sources}
@@ -808,12 +806,23 @@ class UnifiedQueryService:
                 typeof_expr.notin_(allowed),
             )).scalar() or 0)
         if key_type == "uuid":
-            # uuid 形态无法纯 SQL 解析：预算内有限取值核对
-            values = self.db.execute(
-                select(raw).where(
-                    typed.is_not(None)).limit(
-                        SOURCE_ROW_BUDGET + 1)).scalars().all()
-            bad += sum(1 for v in values if v is not None and not check(v))
+            if self._pg:
+                # Exact shape validation over all visible inputs; never inspect
+                # only the first 5001 keys of a larger relation.
+                compact = func.replace(func.replace(func.replace(
+                    func.lower(cast(typed, Text)), "urn:uuid:", ""), "{", ""), "}", "")
+                compact = func.replace(compact, "-", "")
+                bad += int(self.db.execute(select(func.count()).select_from(
+                    meta.subquery).where(typed.is_not(None),
+                                         not_(compact.op("~")(r"^[0-9a-f]{32}$"))))
+                           .scalar() or 0)
+            else:
+                values = self.db.execute(select(raw).where(typed.is_not(None))
+                                         .limit(SOURCE_ROW_BUDGET + 1)).scalars().all()
+                if len(values) > SOURCE_ROW_BUDGET:
+                    raise QueryError(422, "typed_key_budget_exceeded",
+                                     "当前数据库不能精确校验此规模UUID输入；未返回采样结果")
+                bad += sum(1 for v in values if v is not None and not check(v))
         if bad:
             raise QueryError(422, "invalid_typed_key",
                              f"join 键「{label}」存在 {bad} 个非空非法值"
@@ -991,6 +1000,8 @@ class UnifiedQueryService:
             columns.append({
                 "name": item.as_,
                 "type": _declared_type(definition),
+                "encoding": ("number_or_lossless_string" if _is_number_type(
+                    _declared_type(definition)) else "json"),
                 "nullable": not definition.get("required"),
                 "sourceRefs": {
                     "alias": item.source,
@@ -1003,8 +1014,9 @@ class UnifiedQueryService:
         for agg in self.req.aggregates:
             columns.append({
                 "name": agg.as_,
-                "type": "number",
-                "nullable": True,
+                "type": "integer" if agg.fn in ("count", "count_distinct") else "number",
+                "encoding": "number_or_lossless_string",
+                "nullable": agg.fn not in ("count", "count_distinct"),
                 "sourceRefs": ({"alias": agg.source, "fn": agg.fn,
                                 "property": agg.property}
                                if agg.source else {"fn": agg.fn}),
@@ -1026,7 +1038,7 @@ class UnifiedQueryService:
             for idx, name in enumerate(keys):
                 if name not in output_names:
                     continue
-                value = row[idx]
+                value = encode_scalar(row[idx])
                 if value is None:
                     record[name] = None
                     continue
@@ -1205,6 +1217,8 @@ class UnifiedQueryService:
             "joinRowCounts": counts.get("joinRowCounts", []),
             "partial": False,
             "truncated": False,
+            "exact": True,
+            "completeness": "complete",
             "countsScope": _COUNTS_SCOPE,
             "hasNext": has_next,
             "cursor": cursor,

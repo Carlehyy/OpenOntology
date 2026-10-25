@@ -20,9 +20,6 @@ from app.ontologies.mappings.relation_processing import RelationProcessingMixin
 
 logger = logging.getLogger(__name__)
 
-_LOCAL_BUILD_LOCKS: dict[str, threading.RLock] = {}
-
-
 def _release_field_mapping(value: dict | None) -> dict:
     """Remove apply bookkeeping while retaining identity/projection semantics."""
     return {
@@ -38,7 +35,8 @@ def _release_field_mapping(value: dict | None) -> dict:
 def load_mapping_source_rows(
         db: Session, mapping: OntologyMapping, *,
         require_approved: bool = True,
-        allow_empty_version: bool = False) -> tuple[list[dict], object | None]:
+        allow_empty_version: bool = False,
+        batch_size: int | None = None):
     """严格全量读取映射绑定的数据版本，返回 ``(rows, DatasetVersion)``。
 
     正式映射不允许使用 UI preview 的容错/截断语义。对新 ``v2_datasets`` 使用
@@ -47,6 +45,12 @@ def load_mapping_source_rows(
     为空会明确失败；只有已发布映射显式传入 ``allow_empty_version`` 且存在
     一个真实、已治理的 v2 DatasetVersion 时，零行才表示权威的“全部删除”。
     """
+    if batch_size is not None:
+        from app.ontologies.mappings.source_batches import prepare_mapping_source
+        source = prepare_mapping_source(
+            db, mapping, require_approved=require_approved,
+            allow_empty_version=allow_empty_version, batch_size=batch_size)
+        return source, source.version
     dataset_id = mapping.curated_dataset_id
     if not dataset_id:
         raise MappingSourceError(f"Mapping {mapping.id} 未绑定数据集")
@@ -384,6 +388,8 @@ class MappingService(
             # columns and make the very next run fail the release-scope fence.
             if data and ontology_release_id is None:
                 self._normalize_mapping(mapping, data)
+            from app.ontologies.mappings.raw_json_guard import structured_json_columns, reject_raw_json_columns
+            reject_raw_json_columns(data, structured_json_columns(self._db, mapping))
             entities = self._rows_to_entities(mapping, data)
             self._adopt_legacy_projection_ownership(mapping)
             v1_count = self._write_v1_entities(mapping, entities)
@@ -613,6 +619,20 @@ class MappingService(
             self, ontology_id: str, mappings: list[OntologyMapping], *,
             require_approved: bool = False,
             ontology_release_id: str | None = None) -> dict:
+        stages = []
+        try:
+            return self._execute_build_all(
+                ontology_id, mappings, require_approved=require_approved,
+                ontology_release_id=ontology_release_id, stages=stages)
+        finally:
+            if self._db.is_active:
+                for stage in reversed(stages):
+                    stage.close()
+
+    def _execute_build_all(
+            self, ontology_id: str, mappings: list[OntologyMapping], *,
+            require_approved: bool, ontology_release_id: str | None,
+            stages: list) -> dict:
         if not mappings:
             return {"error": "no mappings configured", "ontology_id": ontology_id}
 
@@ -643,33 +663,13 @@ class MappingService(
         for m in mappings:
             if not m.curated_dataset_id:
                 continue
-            rows, source_version = load_mapping_source_rows(
+            source, source_version = load_mapping_source_rows(
                 self._db, m, require_approved=require_approved,
-                # A released lake snapshot with a real version and zero rows is
-                # an authoritative all-deleted state.  It must reach Formal
-                # reconciliation; otherwise the last materialized object lives
-                # forever.  Draft/trial and versionless legacy sources remain
-                # fail-closed.
-                allow_empty_version=ontology_release_id is not None)
-
-            # Keep released mapping definitions byte-for-byte stable.  Dataset
-            # metadata inference is a draft-time concern; production projection
-            # may only use fields captured in the immutable release snapshot.
-            if rows and ontology_release_id is None:
-                self._normalize_mapping(m, rows)
-
-            entities = self._rows_to_entities(m, rows)
-            self._adopt_legacy_projection_ownership(m)
-            v1_count = self._write_v1_entities(m, entities)
-            stale_ids = self._reconcile_mapping_entities(
-                m, {entity["id"] for entity in entities})
-
-            pk_col = (m.field_mapping or {}).get("__primary_key__") or self._choose_pk_col(rows)
-            entity_id_map = {
-                self._row_identity_value(row, pk_col): self._stable_row_id(
-                    m, row, pk_col if self._has_complete_pk(row, pk_col) else None)
-                for row in rows
-            }
+                allow_empty_version=ontology_release_id is not None, batch_size=500)
+            from app.ontologies.mappings.batched_materialization import materialize_mapping
+            meta, v1_count, stale_count = materialize_mapping(
+                self, m, source, source_version,
+                released=ontology_release_id is not None, stages=stages)
             dataset_name = None
             ds = self._db.query(Dataset).filter(Dataset.id == m.curated_dataset_id).first()
             if ds:
@@ -678,23 +678,12 @@ class MappingService(
                 cd = self._db.query(CuratedDataset).filter(CuratedDataset.id == m.curated_dataset_id).first()
                 if cd:
                     dataset_name = cd.name
-            mapping_meta[m.id] = {
-                "mapping_id": m.id,
-                "curated_dataset_id": m.curated_dataset_id,
-                "source_dataset_version_id": getattr(source_version, "id", None),
-                "dataset_name": dataset_name,
-                "entity_class": m.entity_class, "pk_col": pk_col,
-                "pk_source": (m.field_mapping or {}).get("__pk_source__"),
-                "target_object_type_id": m.target_object_type_id,
-                "rows": rows, "entity_id_map": entity_id_map,
-                "columns": list(rows[0].keys()) if rows else [],
-                "property_mappings": projection_property_mappings(
-                    m.field_mapping),
-            }
+            meta["dataset_name"] = dataset_name
+            mapping_meta[m.id] = meta
             m.status = "applying"
             entity_results.append({"mapping_id": m.id, "entity_class": m.entity_class,
                                    "v1_entities_written": v1_count,
-                                   "stale_entities_removed": len(stale_ids),
+                                   "stale_entities_removed": stale_count,
                                    "nodes_created": 0})
 
         self._db.flush()
@@ -707,11 +696,13 @@ class MappingService(
             relation_results = self._infer_and_write_relations(
                 ontology_id, mappings, mapping_meta)
         else:
-            from app.models.relation import Relation
-            for relation in self._db.query(Relation).filter(
-                    Relation.ontology_id == ontology_id).all():
-                if not (relation.properties or {}).get("__link_mapping_id__"):
-                    self._db.delete(relation)
+            from app.ontologies.relations.models import Relation
+            from app.ontologies.mappings.source_staging import keyset_pages
+            for page in keyset_pages(self._db.query(Relation).filter(
+                    Relation.ontology_id == ontology_id), Relation.id):
+                for relation in page:
+                    if not (relation.properties or {}).get("__link_mapping_id__"):
+                        self._db.delete(relation)
             self._db.flush()
             relation_results = []
 
@@ -761,6 +752,9 @@ class MappingService(
                 applied.field_mapping = fm
         from app.ontologies.projection_state import mark_projecting
         mark_projecting(self._db, ontology_id)
+        for stage in reversed(stages):
+            stage.close()
+        stages.clear()
         self._db.commit()
         neo4j_rebuilt = self._rebuild_neo4j_projection(ontology_id)
         from app.config import settings

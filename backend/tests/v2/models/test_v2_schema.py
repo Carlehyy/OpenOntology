@@ -104,6 +104,12 @@ def test_all_v2_tables_registered():
         "v2_mapping_suggestions",
         "v2_manual_dataset_shares",
         "v2_manual_dataset_changes",
+        "v2_integrated_assets",
+        "v2_integrated_mutations",
+        "v2_integrated_sync_runs",
+        "v2_integrated_sync_recoveries",
+        "v2_unified_query_rows",
+        "v2_unified_query_snapshots",
     }
 
 

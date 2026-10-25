@@ -27,6 +27,14 @@ class TestNumberExtraction:
     def test_no_numbers(self):
         assert answer_numbers("没有数字的回答。") == []
 
+    def test_large_plain_integer_and_thousands_are_not_split(self):
+        assert answer_numbers("规模 2300000，另有 2,300,000 条") == [2300000.0, 2300000.0]
+
+    def test_adjacent_unsafe_bigints_remain_distinct(self):
+        steps = [_step({"value": "9007199254740993"})]
+        assert verify_answer("总数 9007199254740992。", steps).passed is False
+        assert verify_answer("总数 9007199254740993。", steps).passed is True
+
 
 class TestNumberUniverse:
     def test_collects_from_nested_results(self):
@@ -43,6 +51,18 @@ class TestNumberUniverse:
     def test_ratio_variants(self):
         universe = result_number_universe([_step({"value": 0.35})])
         assert 0.35 in universe and 35.0 in universe  # 百分比表达兼容
+
+    def test_incomplete_or_inexact_input_never_backs_precise_claim(self):
+        for status in ({"partial": True}, {"exact": False}, {"completeness": "unknown"}):
+            assert result_number_universe([_step({"value": 2300000, **status})]) == set()
+        assert verify_answer("总量 2300000", [_step({"total": 2300000,
+            "truncated": True, "exact": True, "completeness": "complete"})]).passed
+
+    def test_decimal_claim_and_lossless_summary(self):
+        result = verify_answer("金额 9007199254740993.0123456789。",
+                               [_step({"value": "9007199254740993.0123456788"})])
+        assert result.passed is False
+        assert result.summary()["unverified"] == ["9007199254740993.0123456789"]
 
     def test_error_and_truncated_results_do_not_back_claims(self):
         universe = result_number_universe([

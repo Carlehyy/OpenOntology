@@ -21,74 +21,11 @@ def seed_database() -> None:
 
     db = SessionLocal()
     try:
-        # Import all models to ensure tables are created
-        from app.models import user, ontology, model_config, entity, logic as logic_model, action, relation, domain  # noqa: F401
-        from app.data_channel.datasets import models as v2_dataset  # noqa: F401
-        from app.data_channel.pipelines import models as v2_pipeline  # noqa: F401
-        from app.data_channel.connections import models as v2_connection  # noqa: F401
-        from app.ontologies.logic.v2_models import OntologyLogicRule, OntologyStateMachine  # noqa: F401
-        from app.ontologies.actions.v2_models import OntologyActionType, OntologyActionRun  # noqa: F401
-        from app.data_channel.curated.models import CuratedDataset, CuratedReview, CuratedRowEdit  # noqa: F401
-        from app.data_channel.sync_tasks.models import DataSyncTask, DataSyncHistory  # noqa: F401
-        from app.data_channel.pipeline_tasks.models import PipelineTask  # noqa: F401
-        from app.data_channel.datasets.sharing_models import (  # noqa: F401
-            ManualDatasetChange, ManualDatasetShare,
-        )
-        from app.ontologies.mappings.models import OntologyMapping, OntologyLinkMapping  # noqa: F401
-        from app.models.ontology_version import OntologyVersion, OntologyChangeLog  # noqa: F401
-        from app.models.attribute_schema import AttributeSchema, VocabularyEntry  # noqa: F401
-        from app.models.inference import ShadowRun, InferenceRun, InferenceResult, ActionFiring, AuditLog  # noqa: F401
-        # 正规本体模型 (Palantir 风格) — 平台核心
-        from app.models.ontology_formal import (  # noqa: F401
-            ObjectType, LinkType, ActionType, OntologyFunction,
-            ObjectInstance, LinkInstance, ActionExecutionLog,
-        )
-        # 哨兵引擎模型 (反应式运行时)
-        from app.models.sentinel import Sentinel, SentinelFiring, Notification, SentinelMatchState  # noqa: F401
-        # 本体智能体 (授权边界内的 agent 运行时)
-        from app.ontologies.agent_runtime.models import AgentProfile, AgentConversation, AgentMessage  # noqa: F401
-        from app.ontologies.decision_simulation.models import DecisionSimulationRun  # noqa: F401
-        # 业务探索 (对话式业务建模：画布/文档/本体草稿/会话附件)
-        from app.exploration.models import (  # noqa: F401
-            ExplorationSession, ExplorationMessage, ExplorationDocument, ExplorationDraft,
-            ExplorationAttachment,
-        )
-        from app.models.workflow_config import WorkflowConfig  # noqa: F401
-        from app.settings.object_storage.models import (  # noqa: F401
-            MinioOperationAudit,
-        )
-        # 数据管家 (对话式 n8n 数据流水线：治理记录 + 会话)
-        from app.data_channel.steward.models import (  # noqa: F401
-            N8nPipeline, StewardConversation, StewardMessage,
-        )
-        from app.data_channel.file_assets.models import PipelineFileAsset  # noqa: F401
-        # 事件登记 (智能助手↔数据通道之间的事件采集入口：主体/附件/审计/第三方密钥)
-        from app.events.models import (  # noqa: F401
-            RegisteredEvent, EventAttachment, EventAuditLog, EventIngestKey,
-        )
-        # 超级助手（独立会话、目录型 Skill、MCP 客户端配置）
-        from app.super_assistant.models import (  # noqa: F401
-            SuperAssistantConversation, SuperAssistantMessage,
-            SuperAssistantToolRun, SuperAssistantSkill, SuperAssistantMcpServer,
-        )
-        from app.inbox.models import (  # noqa: F401
-            InboxItem, InboxDelivery, InboxEventReceipt, InboxOutboxEvent,
-        )
-        # 消息通知（管理员消息总线：消息主体 / 每用户处置状态 / 附件）
-        from app.notifications.models import (  # noqa: F401
-            NotificationMessage, NotificationMessageState, NotificationAttachment,
-            NotificationIngestKey, NotificationChannel, NotificationDelivery,
-            NotificationSmtpSettings,
-        )
-        # 三维场景（白模场景管理：主体 / 版本冻结 / 运行日志）
-        from app.scenes.models import (  # noqa: F401
-            Scene, SceneVersion, SceneRuntimeLog,
-            SceneConversation, SceneMessage,
-        )
-        # 平台概览 · 运行健康度（API 性能监控）
-        from app.platform.observability.models import (  # noqa: F401
-            ApiPerfMinuteRollup, ApiPerfSlowRequest,
-        )
+        # Alembic, workers, test startup and fixtures share one canonical
+        # registry; route import order must not hide missing FK targets.
+        from app.model_registry import import_all_models
+
+        import_all_models()
         # Every real runtime schema is owned by Alembic. ``create_all`` would
         # disguise a missed migration and omit data backfills/constraints, so
         # it is reserved for isolated unit tests only.

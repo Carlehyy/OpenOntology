@@ -12,6 +12,7 @@
 - ``task.pipeline.run``：UI 手动运行整条流水线（不带 write_opts）；
 - ``task.dataset.import``：数据集导入的解析（inspect）/提交（commit）；
 - ``task.dataset.migrate``：成品数据集异步迁移为人工数据集；
+- ``integrated.sync``：持久化 queued run 的完整不可变源快照；
 - ``super_assistant.reflect.micro/full/focused``：超级助手三种自我进化
   反思任务（micro 每轮后 / full 手动 / focused 定向技能）；
 - ``super_assistant.palace.extract/consolidate``：记忆宫殿图谱抽取与
@@ -55,6 +56,7 @@ _MAPPING_APPLY_DURABLE = "mapping-apply-executor"
 _CONNECTION_SYNC_DURABLE = "connection-sync-executor"
 _DATASET_EVENT_DURABLE = "dataset-event-executor"
 _DATASET_MIGRATE_DURABLE = "dataset-migrate-executor"
+_INTEGRATED_SYNC_DURABLE = "integrated-sync-executor"
 _SUPER_ASSISTANT_REFLECT_MICRO_DURABLE = "super-assistant-reflect-micro"
 _ASSISTANT_EVAL_AUTOPILOT_DURABLE = "assistant-eval-autopilot"
 _SUPER_ASSISTANT_REFLECT_FULL_DURABLE = "super-assistant-reflect-full"
@@ -191,6 +193,30 @@ async def _run_dataset_event_message(payload: dict) -> None:
     logger.info("DatasetVersion 事件 %s 处理完成", payload["event_id"])
 
 
+async def _run_integrated_sync_message(payload: dict) -> None:
+    """Execute the exact precreated run; malformed wakeups cannot create work.
+
+    The task body acknowledges persisted terminal/duplicate outcomes and raises
+    only when a durable platform outcome could not be confirmed.
+    """
+    if not isinstance(payload, dict):
+        logger.error("Discarding malformed integrated sync wakeup")
+        return
+    identifiers = tuple(payload.get(name) for name in ("run_id", "asset_id", "actor_id"))
+    batch_size = payload.get("batch_size")
+    if (not all(isinstance(value, str) and value.strip() for value in identifiers)
+            or type(batch_size) is not int or not 1 <= batch_size <= 1000):
+        # A queue poison message cannot be repaired by unlimited redelivery.
+        # Do not echo payloads, source configuration or identifiers in logs.
+        logger.error("Discarding invalid integrated sync wakeup")
+        return
+    from app.tasks.v2.integrated_sync import integrated_sync_task
+
+    run_id, asset_id, actor_id = identifiers
+    await asyncio.to_thread(
+        integrated_sync_task, asset_id, actor_id, batch_size, run_id=run_id)
+
+
 def _handler_registry():
     """subject → (durable, handler)：每 subject 独立 durable pull consumer。"""
     from app.data_channel.pipeline_tasks.dispatch import (
@@ -199,6 +225,7 @@ def _handler_registry():
         DATASET_EVENT_SUBJECT,
         DATASET_IMPORT_SUBJECT,
         DATASET_MIGRATE_SUBJECT,
+        INTEGRATED_SYNC_SUBJECT,
         MAPPING_APPLY_SUBJECT,
         ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
         PIPELINE_EXECUTE_SUBJECT,
@@ -284,6 +311,8 @@ def _handler_registry():
             (TASK_INSTANCES_CONTROL_SUBJECT,
              _TASK_INSTANCES_CONTROL_DURABLE,
              task_instances_executor.run_control_message))
+    entries.append((INTEGRATED_SYNC_SUBJECT, _INTEGRATED_SYNC_DURABLE,
+                    _run_integrated_sync_message))
     return tuple(entries)
 
 
@@ -474,12 +503,18 @@ class PipelineExecutor:
                 logger.exception("%s 执行消息续约失败", description)
         try:
             execute.result()
-        except Exception:
+        except Exception as exc:
             # handler 内部消化所有业务异常；能逃到这里的是解析/线程级意外，
             # 交给 nak 重投。带延迟防止瞬时故障瞬间烧完投递——丢一条
             # kernel 派发消息意味着 Run 挂死到 deadline 兜底。
+            # A handler may carry an explicit retry delay (for example a live
+            # integrated-sync owner lease); never ACK an unresolved wakeup.
             logger.exception("%s 执行异常逃逸", description)
-            await msg.nak(delay=5)
+            try:
+                retry_after = float(getattr(exc, "retry_after", 5) or 5)
+            except (TypeError, ValueError):
+                retry_after = 5
+            await msg.nak(delay=retry_after if retry_after > 0 else 5)
             return
         await msg.ack()
 
