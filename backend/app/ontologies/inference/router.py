@@ -4,7 +4,7 @@
 from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from sqlalchemy import desc
 import uuid
 import time
@@ -21,6 +21,28 @@ from app.models.action import Action
 from app.models.user import User
 
 router = APIRouter(dependencies=[Depends(ontology_access_guard)])
+
+# 与 workspace_service.PUBLISHED_DOCUMENT_SAVED_SUBTYPE 同值契约：该子类型
+# 审计行的 before_state/after_state 保存业务文档全文（最大各约 700KB），
+# 列表默认投影不加载、不返回这两个大 JSON 列。
+_DOCUMENT_STATE_SUBTYPE = "published_document_saved"
+
+# 审计列表默认投影：除 before_state/after_state 外的全部标量列 + meta。
+_AUDIT_LISTING_LOADED = (
+    AuditLog.id,
+    AuditLog.ontology_id,
+    AuditLog.event_type,
+    AuditLog.event_subtype,
+    AuditLog.user_id,
+    AuditLog.user_name,
+    AuditLog.description,
+    AuditLog.object_type,
+    AuditLog.object_id,
+    AuditLog.meta,
+    AuditLog.ip_address,
+    AuditLog.user_agent,
+    AuditLog.created_at,
+)
 
 
 class ShadowRunCreate(BaseModel):
@@ -343,16 +365,60 @@ def list_action_firings(ontology_id: str, status: str = None, db: Session = Depe
 # ── 审计日志 ─────────────────────────────────────────────────────────
 
 @router.get("/{ontology_id}/audit-logs")
-def list_audit_logs(ontology_id: str, event_type: str = None, limit: int = 200, db: Session = Depends(get_db)):
+def list_audit_logs(
+    ontology_id: str,
+    event_type: str = None,
+    limit: int = 200,
+    include_document_state: bool = False,
+    db: Session = Depends(get_db),
+):
+    """审计日志列表。
+
+    ``published_document_saved`` 行的 before_state/after_state 是业务文档
+    全文（最大各约 700KB）：默认列表查询经 load_only 不取这两个 JSON 列、
+    响应也不返回全文，文档行只透出 meta 摘要（字符数/指纹/修订号）；非
+    文档行按 id 批量补齐两个 state 列，保持既有返回形状（避免 N+1）。
+    显式 ``include_document_state=true`` 才返回文档行全文状态；权限沿用
+    本端点的本体访问控制。
+    """
     q = db.query(AuditLog).filter(AuditLog.ontology_id == ontology_id)
     if event_type:
         q = q.filter(AuditLog.event_type == event_type)
-    items = q.order_by(desc(AuditLog.created_at)).limit(limit).all()
+    items = (
+        q.options(load_only(*_AUDIT_LISTING_LOADED))
+        .order_by(desc(AuditLog.created_at))
+        .limit(limit)
+        .all()
+    )
+    document_row_ids = {
+        log.id for log in items
+        if log.event_subtype == _DOCUMENT_STATE_SUBTYPE
+    }
+    # 默认只为非文档行批量取 state 列；显式参数时才取文档行全文。
+    state_ids = [
+        log.id for log in items
+        if include_document_state or log.id not in document_row_ids
+    ]
+    states: dict[str, tuple] = {}
+    if state_ids:
+        for log_id, before_state, after_state in db.query(
+            AuditLog.id, AuditLog.before_state, AuditLog.after_state,
+        ).filter(AuditLog.id.in_(state_ids)).all():
+            states[log_id] = (before_state, after_state)
+
+    def _state(log, index: int):
+        if log.id in document_row_ids and not include_document_state:
+            return None
+        entry = states.get(log.id)
+        return entry[index] if entry else None
+
     return {"data": [{
         "id": log.id, "event_type": log.event_type, "event_subtype": log.event_subtype,
         "user_name": log.user_name, "description": log.description,
         "object_type": log.object_type, "object_id": log.object_id,
-        "before_state": log.before_state, "after_state": log.after_state,
+        "before_state": _state(log, 0), "after_state": _state(log, 1),
+        "document_state_omitted": (
+            log.id in document_row_ids and not include_document_state),
         "meta": log.meta or {},
         "created_at": log.created_at.isoformat() if log.created_at else None,
     } for log in items]}

@@ -2,13 +2,17 @@
 
 「业务文档」不是独立文档表：它是当前发布版本 ``snapshot_semantic.documentMd``
 （Markdown，DB JSON 列），权威指针为 ``OntologyProject.current_release_id``。
-改变它的时机只有三个：promote（草稿晋级发布）、rollback（激活历史版本）、
-探索落地新建本体（冻结带语义层的 v0）——本模块在这些成功路径上派发自包含
-NATS 事件（内容随消息走，消费方 super_assistant 宫殿不得反向依赖本体域），
-消费侧按 (ontology_id, fingerprint) 幂等；每日对账扫描重放全部事件，兜底
-派发失败/漏埋点导致的漂移（指纹一致时消费端直接 no-op）。
+改变它的时机有四个：promote（草稿晋级发布）、rollback（激活历史版本）、
+探索落地新建本体（冻结带语义层的 v0）、当前发布版的受控正文修订
+（``PUT /versions/{vid}/semantic/document``，只改 documentMd 并推进
+semanticRevision）——本模块在这些成功路径上派发自包含 NATS 事件（内容随
+消息走，消费方 super_assistant 宫殿不得反向依赖本体域），消费侧按
+(ontology_id, fingerprint) 幂等；每日对账扫描重放全部事件，兜底派发失败/
+漏埋点导致的漂移（指纹一致时消费端直接 no-op）。事件消费与宫殿镜像重建
+是异步的：多 executor/并发下旧事件可能短暂后到，由下一次事件或对账自愈，
+保存成功不等于镜像已同步。
 
-广播是尽力而为：任何失败只记日志，绝不影响发布/回滚主链路的可用性。
+广播是尽力而为：任何失败只记日志，绝不影响发布/回滚/修订主链路的可用性。
 """
 from __future__ import annotations
 

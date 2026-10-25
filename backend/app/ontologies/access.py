@@ -25,6 +25,19 @@ def require_ontology_create_access(user) -> None:
         raise HTTPException(403, "Viewer role is read-only")
 
 
+def can_write_ontology(project: OntologyProject, user) -> bool:
+    """True when the user may mutate this ontology (admin or owner editor).
+
+    Single source of truth shared by the write guard and read endpoints that
+    need to expose an editability flag (e.g. published-document editing).
+    """
+    role = str(getattr(user, "role", "") or "")
+    user_id = str(getattr(user, "id", "") or "")
+    if role == "admin":
+        return True
+    return role == "editor" and bool(user_id) and project.created_by == user_id
+
+
 def require_ontology_access(
     db: Session,
     ontology_id: str,
@@ -38,12 +51,9 @@ def require_ontology_access(
     if not write:
         return project
 
+    if can_write_ontology(project, user):
+        return project
     role = str(getattr(user, "role", "") or "")
-    user_id = str(getattr(user, "id", "") or "")
-    if role == "admin":
-        return project
-    if role == "editor" and user_id and project.created_by == user_id:
-        return project
     if role in {"viewer", "custom"}:
         raise HTTPException(403, "This role is read-only")
     raise HTTPException(403, "Only the ontology owner or an administrator may modify this ontology")

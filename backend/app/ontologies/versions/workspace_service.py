@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -16,6 +18,7 @@ from sqlalchemy.orm import Session, defer
 
 from app.config import settings
 from app.ontologies import cache as ontology_cache
+from app.ontologies.access import can_write_ontology
 from app.ontologies.inference.models import AuditLog
 from app.ontologies.projects.models import OntologyProject
 from app.ontologies.versions import release_service
@@ -43,6 +46,9 @@ from app.ontologies.versions.runtime_state_service import (
 )
 from app.ontologies.versions.world_model_consumers import (
     affected_services as world_model_affected_services,
+)
+from app.ontologies.published_documents import (
+    _MAX_DOCUMENT_MD_BYTES as _DOCUMENT_MD_MAX_BYTES,
 )
 
 
@@ -871,7 +877,7 @@ def save_canvas_layout(
     with _bounded_row_locks(db):
         locked_project = db.query(OntologyProject).filter(
             OntologyProject.id == ontology_id,
-        ).with_for_update().first()
+        ).populate_existing().with_for_update().first()
         if locked_project is None:
             raise HTTPException(404, "Ontology not found")
         if version_id:
@@ -1170,14 +1176,24 @@ def get_version_semantic(
     *,
     semantic_overview_fn,
     semantic_consistency_fn=None,
+    current_user: Any = None,
 ):
-    """读取任一版本的业务语义层快照与一致性总览（发布/草稿均可，只读）。"""
+    """读取任一版本的业务语义层快照与一致性总览（发布/草稿均可，只读）。
+
+    附带 additive 字段：``documentFingerprint``（正文 sha256；语义层缺失
+    指纹时现算，正文为空时为 null）与 ``canEdit``（写权限 × 当前发布指针
+    × released release × 正文非空的合取，前端编辑入口只信该字段）。
+    """
     version = db.query(OntologyVersion).filter(
         OntologyVersion.id == version_id,
         OntologyVersion.ontology_id == ontology_id,
     ).first()
     if version is None:
         raise HTTPException(404, "Version not found")
+    project = db.query(OntologyProject).filter(
+        OntologyProject.id == ontology_id).first()
+    if project is None:
+        raise HTTPException(404, "Ontology not found")
     semantic = (
         version.snapshot_semantic
         if isinstance(version.snapshot_semantic, dict) else None
@@ -1187,8 +1203,306 @@ def get_version_semantic(
     issues: list[dict] = []
     if semantic is not None and semantic_consistency_fn is not None:
         issues = semantic_consistency_fn(semantic, version.snapshot_formal)
+    document_md = (
+        str(semantic.get("documentMd") or "") if semantic is not None else "")
+    document_fingerprint = _document_fingerprint_of(semantic, document_md)
+    can_edit = bool(
+        current_user is not None
+        and can_write_ontology(project, current_user)
+        and project.current_release_id == version.id
+        and version.node_kind == "release"
+        and version.lifecycle_status == "released"
+        and document_md.strip()
+    )
     return {"data": {
         "semantic": semantic,
         "overview": semantic_overview_fn(semantic, version.snapshot_formal),
         "issues": issues,
+        "canEdit": can_edit,
+        "documentFingerprint": document_fingerprint,
     }}
+
+
+# ---------------------------------------------------------------------------
+# 当前发布版本业务文档的受控修订（snapshot_semantic.documentMd）
+# ---------------------------------------------------------------------------
+
+# 与 app.ontologies.published_documents._MAX_DOCUMENT_MD_BYTES 同源上限
+# （JetStream 单消息边界）；单一事实源，禁止两处各自漂移。
+
+# 审计行的文档修订子类型；inference 审计列表按该子类型判定大 JSON 投影。
+PUBLISHED_DOCUMENT_SAVED_SUBTYPE = "published_document_saved"
+
+
+def _document_md_sha256(document_md: str) -> str:
+    return hashlib.sha256(document_md.encode("utf-8")).hexdigest()
+
+
+def _semantic_revision_of(semantic: dict) -> int:
+    revision = semantic.get("semanticRevision")
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        return 0
+    return revision
+
+
+def _document_fingerprint_of(semantic: dict | None, document_md: str) -> str | None:
+    """语义层指纹优先；缺失时按正文现算；正文为空时为 null。"""
+    if not document_md.strip():
+        return None
+    raw = semantic.get("documentFingerprint") if isinstance(semantic, dict) else None
+    if isinstance(raw, str) and raw:
+        return raw
+    return _document_md_sha256(document_md)
+
+
+def _validated_document_body(body: dict) -> dict:
+    """读相位校验保存请求体；返回documentMd/baseSemanticRevision/
+    baseFingerprint/expectedCurrentReleaseId 四要素（模块级函数便于
+    锁纪律测试在读相位注入并发漂移）。"""
+    document_md = body.get("documentMd", body.get("document_md"))
+    if not isinstance(document_md, str):
+        raise HTTPException(422, detail={
+            "code": "invalid_document_body",
+            "message": "documentMd 必须是字符串",
+        })
+    if not document_md.strip():
+        raise HTTPException(422, detail={
+            "code": "document_empty",
+            "message": "业务文档正文不能为空",
+        })
+    if len(document_md.encode("utf-8")) > _DOCUMENT_MD_MAX_BYTES:
+        raise HTTPException(422, detail={
+            "code": "document_too_large",
+            "message": f"业务文档正文超过 {_DOCUMENT_MD_MAX_BYTES} 字节上限",
+            "maxBytes": _DOCUMENT_MD_MAX_BYTES,
+        })
+    base_revision = body.get(
+        "baseSemanticRevision", body.get("base_semantic_revision"))
+    base_fingerprint = body.get(
+        "baseFingerprint", body.get("base_fingerprint"))
+    expected_release_id = body.get(
+        "expectedCurrentReleaseId", body.get("expected_current_release_id"))
+    if (isinstance(base_revision, bool) or not isinstance(base_revision, int)
+            or not isinstance(base_fingerprint, str)
+            or not isinstance(expected_release_id, str)):
+        raise HTTPException(422, detail={
+            "code": "document_baseline_required",
+            "message": (
+                "保存业务文档必须携带 baseSemanticRevision、"
+                "baseFingerprint、expectedCurrentReleaseId 三项基线"
+            ),
+        })
+    return {
+        "documentMd": document_md,
+        "baseSemanticRevision": base_revision,
+        "baseFingerprint": base_fingerprint,
+        "expectedCurrentReleaseId": expected_release_id,
+    }
+
+
+def _document_save_payload(
+    semantic: dict,
+    snapshot_formal,
+    *,
+    semantic_overview_fn,
+    semantic_consistency_fn,
+    semantic_revision: int,
+    document_fingerprint: str,
+) -> dict:
+    issues: list[dict] = []
+    if semantic_consistency_fn is not None:
+        issues = semantic_consistency_fn(semantic, snapshot_formal)
+    return {
+        "semantic": semantic,
+        "overview": semantic_overview_fn(semantic, snapshot_formal),
+        "issues": issues,
+        "semanticRevision": semantic_revision,
+        "documentFingerprint": document_fingerprint,
+    }
+
+
+def save_release_document(
+    db: Session,
+    ontology_id: str,
+    version_id: str,
+    body: dict,
+    current_user: Any,
+    *,
+    semantic_overview_fn,
+    semantic_consistency_fn=None,
+):
+    """受控修订当前发布版本的业务文档正文（只改 snapshot_semantic）。
+
+    契约：仅 ``project.current_release_id`` 指向的 released release 节点可
+    修订；只替换 ``documentMd``/``documentFingerprint``/``semanticRevision``/
+    ``updatedAt``，其余语义层键与 snapshot_formal/snapshot_hash/结构
+    revision/版本指针一律不动。同正文幂等 200（不推进修订、不写审计、不
+    派发）；不同正文要求三基线在锁内复核，陈旧即 409 并回当前值；空白或
+    超 700_000 字节 422。锁顺序 project → version 与发布/回滚/布局保存
+    一致。成功写 before/after 全文审计；提交后失效版本树/发布文档缓存并
+    best-effort 复用 published-document 通知（异步镜像不承诺强一致）。
+    """
+    request = _validated_document_body(body)
+    document_md = request["documentMd"]
+    base_revision = request["baseSemanticRevision"]
+    base_fingerprint = request["baseFingerprint"]
+
+    project = db.query(OntologyProject).filter(
+        OntologyProject.id == ontology_id).first()
+    if project is None:
+        raise HTTPException(404, "Ontology not found")
+    version = db.query(OntologyVersion).filter(
+        OntologyVersion.id == version_id,
+        OntologyVersion.ontology_id == ontology_id,
+    ).first()
+    if version is None:
+        raise HTTPException(404, "Version not found")
+
+    with _bounded_row_locks(db):
+        # populate_existing 与 version 行锁同口径：project 行在读相位已被加载
+        # 进 identity map，不加它时 FOR UPDATE 后仍可能拿到读相位的旧指针值。
+        locked_project = db.query(OntologyProject).filter(
+            OntologyProject.id == ontology_id,
+        ).populate_existing().with_for_update().first()
+        if locked_project is None:
+            raise HTTPException(404, "Ontology not found")
+        locked = db.query(OntologyVersion).filter(
+            OntologyVersion.id == version_id,
+            OntologyVersion.ontology_id == ontology_id,
+        ).populate_existing().with_for_update().first()
+        if locked is None:
+            raise HTTPException(404, "Version not found")
+        expected_release_id = request["expectedCurrentReleaseId"]
+        # 目标资格门（与基线 CAS 分离，先于幂等）：URL 目标必须仍是锁内新鲜
+        # 发布指针、release/released、正文存在。目标已切换（并发 promote 等）
+        # 一律 409 release_context_changed 并附当前指针供安全重载。
+        if locked_project.current_release_id != version_id:
+            raise HTTPException(409, detail={
+                "code": "release_context_changed",
+                "message": "当前发布版本已变化，请刷新后重新编辑",
+                "expectedCurrentReleaseId": expected_release_id,
+                "currentReleaseId": locked_project.current_release_id,
+            })
+        if (locked.node_kind != "release"
+                or locked.lifecycle_status != "released"):
+            raise HTTPException(409, detail={
+                "code": "immutable_release",
+                "message": "只有当前发布版本的 released 节点可以受控修订业务文档",
+            })
+        semantic = (
+            locked.snapshot_semantic
+            if isinstance(locked.snapshot_semantic, dict) else None
+        )
+        current_md = str(semantic.get("documentMd") or "") if semantic else ""
+        if semantic is None or not current_md.strip():
+            raise HTTPException(409, detail={
+                "code": "document_not_editable",
+                "message": (
+                    "该发布版本没有可修订的业务文档正文；"
+                    "请先通过本体建模生成需求文档"
+                ),
+            })
+        current_revision = _semantic_revision_of(semantic)
+        current_fingerprint = (
+            str(semantic.get("documentFingerprint") or "")
+            or _document_md_sha256(current_md)
+        )
+        snapshot_formal = locked.snapshot_formal
+        if current_md == document_md:
+            # 幂等早退（资格门之后、基线 CAS 之前）：内容与当前完全一致时
+            # 直接确认，忽略提交的 expected/revision/fingerprint 三基线——
+            # 提交超时后的重试携带陈旧基线也应 200；不推进语义修订、不写
+            # 审计、不派发；显式结束事务释放行锁。
+            payload = _document_save_payload(
+                semantic,
+                snapshot_formal,
+                semantic_overview_fn=semantic_overview_fn,
+                semantic_consistency_fn=semantic_consistency_fn,
+                semantic_revision=current_revision,
+                document_fingerprint=current_fingerprint,
+            )
+            db.commit()
+            return {"data": payload}
+        # 基线 CAS（仅不同正文）：expectedCurrentReleaseId 与锁内新鲜指针
+        # 不符 → 409 release_context_changed（附 currentReleaseId）。
+        if expected_release_id != locked_project.current_release_id:
+            raise HTTPException(409, detail={
+                "code": "release_context_changed",
+                "message": "当前发布版本已变化，请刷新后重新编辑",
+                "expectedCurrentReleaseId": expected_release_id,
+                "currentReleaseId": locked_project.current_release_id,
+            })
+        # semanticRevision + documentFingerprint 双 CAS → 409 conflict 附当前值。
+        if (base_revision != current_revision
+                or base_fingerprint != current_fingerprint):
+            raise HTTPException(409, detail={
+                "code": "conflict",
+                "message": "业务文档已被其他会话修改，请重新加载后再保存",
+                "currentSemanticRevision": current_revision,
+                "currentFingerprint": current_fingerprint,
+            })
+        next_revision = current_revision + 1
+        next_fingerprint = _document_md_sha256(document_md)
+        # JSON 列不做原地变更追踪：整体赋新 dict，未涉及的键（画布/来源/
+        # 标题）原样保留。
+        next_semantic = {
+            **semantic,
+            "documentMd": document_md,
+            "documentFingerprint": next_fingerprint,
+            "semanticRevision": next_revision,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        document_title = str(semantic.get("documentTitle") or "")
+        locked.snapshot_semantic = next_semantic
+        db.add(AuditLog(
+            id=str(uuid.uuid4()), ontology_id=ontology_id,
+            event_type="edit",
+            event_subtype=PUBLISHED_DOCUMENT_SAVED_SUBTYPE,
+            user_id=current_user.id, user_name=current_user.username,
+            description=(
+                f"修订发布版 {locked.version_number} 业务文档"
+                f"（{len(current_md)}→{len(document_md)} 字符）"
+            ),
+            object_type="ontology_version", object_id=version_id,
+            before_state={
+                "documentMd": current_md,
+                "documentTitle": document_title,
+                "documentFingerprint": current_fingerprint,
+                "semanticRevision": current_revision,
+            },
+            after_state={
+                "documentMd": document_md,
+                "documentTitle": document_title,
+                "documentFingerprint": next_fingerprint,
+                "semanticRevision": next_revision,
+            },
+            meta={
+                "ontologyId": ontology_id,
+                "versionId": version_id,
+                "versionNumber": locked.version_number,
+                "documentCharsBefore": len(current_md),
+                "documentCharsAfter": len(document_md),
+                "semanticRevisionBefore": current_revision,
+                "semanticRevisionAfter": next_revision,
+                "documentFingerprintBefore": current_fingerprint,
+                "documentFingerprintAfter": next_fingerprint,
+            },
+        ))
+        # 响应载荷在 commit 前构建：expire_on_commit 后再取属性会触发整列刷新。
+        payload = _document_save_payload(
+            next_semantic,
+            snapshot_formal,
+            semantic_overview_fn=semantic_overview_fn,
+            semantic_consistency_fn=semantic_consistency_fn,
+            semantic_revision=next_revision,
+            document_fingerprint=next_fingerprint,
+        )
+        db.commit()
+
+    # 提交后尽力而为：缓存失效与 published-document 通知失败都不影响保存
+    # 结果（异步镜像由下一次事件或每日对账收敛，不承诺强一致）。
+    ontology_cache.invalidate_version_tree()
+    ontology_cache.invalidate_published_documents()
+    from app.ontologies.published_documents import notify_published_document
+    notify_published_document(locked_project, locked)
+    return {"data": payload}

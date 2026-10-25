@@ -334,12 +334,31 @@ def get_draft_impact(
 @router.get("/{ontology_id}/versions/{version_id}/semantic")
 def get_version_semantic(
     ontology_id: str, version_id: str, db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     """读取任一版本的业务语义层快照与一致性总览（读端点，不要求 draft）。"""
     return workspace_service.get_version_semantic(
         db,
         ontology_id,
         version_id,
+        semantic_overview_fn=semantic_overview,
+        semantic_consistency_fn=semantic_consistency_issues,
+        current_user=current_user,
+    )
+
+
+@router.put("/{ontology_id}/versions/{version_id}/semantic/document")
+def save_release_document(
+    ontology_id: str, version_id: str, body: dict,
+    db: Session = Depends(get_db), current_user=Depends(get_current_user),
+):
+    """受控修订当前发布版本业务文档正文（仅 documentMd，结构与指针不动）。"""
+    return workspace_service.save_release_document(
+        db,
+        ontology_id,
+        version_id,
+        body,
+        current_user,
         semantic_overview_fn=semantic_overview,
         semantic_consistency_fn=semantic_consistency_issues,
     )

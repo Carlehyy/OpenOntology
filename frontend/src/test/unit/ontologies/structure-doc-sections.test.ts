@@ -62,6 +62,59 @@ describe('splitMarkdownSections', () => {
     assert.ok(sections[0].markdown.includes('# 仍在围栏内'))
   })
 
+  it('围栏闭合长度感知：4 反引号外栏不被内层 3 反引号提前闭合', () => {
+    const md = [
+      '## A',
+      '````md',
+      '```',
+      '## 不应成为标题',
+      '```',
+      '````',
+      '## B',
+    ].join('\n')
+    const sections = splitMarkdownSections(md)
+    assert.deepEqual(sections.map(s => s.title), ['A', 'B'])
+    assert.ok(sections[0].markdown.includes('## 不应成为标题'))
+  })
+
+  it('更长的同种围栏可以闭合较短的开栏，反之不能', () => {
+    const closes = ['## A', '```', '代码', '`````', '## B'].join('\n')
+    assert.deepEqual(
+      splitMarkdownSections(closes).map(s => s.title), ['A', 'B'])
+    // 3 反引号不能闭合 5 反引号开栏：其后标题仍在栏内。
+    const notCloses = ['## A', '`````', '代码', '```', '## 栏内不算标题'].join('\n')
+    assert.deepEqual(
+      splitMarkdownSections(notCloses).map(s => s.title), ['A'])
+  })
+
+  it('闭栏行带 info 字符串时不闭合（CommonMark 口径）', () => {
+    const md = ['## A', '```', 'code', '``` tail', '## B'].join('\n')
+    const sections = splitMarkdownSections(md)
+    assert.deepEqual(sections.map(s => s.title), ['A'])
+    assert.ok(sections[0].markdown.includes('``` tail'))
+  })
+
+  it('未闭合围栏：其后所有标题行都在代码块内，不进目录', () => {
+    const md = ['## A', '```js', '## 栏内标题', '仍在栏内'].join('\n')
+    assert.deepEqual(splitMarkdownSections(md).map(s => s.title), ['A'])
+  })
+
+  it('重复标题各自成节并携带不同的起始行号', () => {
+    const md = ['## 同名', 'a', '', '## 同名', 'b'].join('\n')
+    const sections = splitMarkdownSections(md)
+    assert.deepEqual(sections.map(s => s.title), ['同名', '同名'])
+    assert.notEqual(sections[0].id, sections[1].id)
+    assert.deepEqual(sections.map(s => s.startLine), [0, 3])
+  })
+
+  it('导语小节与各标题小节记录 0 基起始行号（编辑器定位用）', () => {
+    const md = ['intro', '', '## 一', 'x', '', '## 二', 'y'].join('\n')
+    const sections = splitMarkdownSections(md)
+    assert.deepEqual(
+      sections.map(s => [s.title, s.startLine]),
+      [['', 0], ['一', 2], ['二', 5]])
+  })
+
   it('无标题文档整体作为单个导语节，目录为空', () => {
     const sections = splitMarkdownSections('只有一段文字。')
     assert.equal(sections.length, 1)

@@ -115,11 +115,32 @@ export interface OntologySemanticIssue {
 }
 
 /** GET .../versions/{vid}/semantic 的 data：语义层快照原文 + 一致性总览 + 明细。
- *  issues 为新增字段，旧后端缺省时前端按空数组处理。 */
+ *  issues 为新增字段，旧后端缺省时前端按空数组处理。
+ *  canEdit/documentFingerprint 为受控正文编辑的新增字段：canEdit 是服务端
+ *  「写权限 × 当前发布指针 × released release × 正文非空」合取，客户端只信
+ *  该字段；documentFingerprint 为正文 sha256（语义层缺失时服务端现算），
+ *  作为保存时的 CAS 基线。 */
 export interface OntologyVersionSemantic {
   semantic: Record<string, unknown> | null
   overview: OntologySemanticOverview
   issues?: OntologySemanticIssue[]
+  canEdit?: boolean
+  documentFingerprint?: string | null
+}
+
+/** PUT .../versions/{vid}/semantic/document 的请求体（三基线 CAS）。 */
+export interface SaveOntologyDocumentBody {
+  documentMd: string
+  baseSemanticRevision: number
+  baseFingerprint: string
+  expectedCurrentReleaseId: string
+}
+
+/** PUT .../versions/{vid}/semantic/document 的 data：与 GET semantic 同形，
+ *  另带保存后的 semanticRevision / documentFingerprint。 */
+export interface SaveOntologyDocumentResult extends OntologyVersionSemantic {
+  semanticRevision: number
+  documentFingerprint: string
 }
 
 /** POST .../versions/{vid}/trial-preflight 的单项检查（权威门禁，失败即阻断试跑）。 */
@@ -226,6 +247,9 @@ export const ontologyVersionApi = {
   versionSemantic: (ontologyId: string, versionId: string) =>
     apiClientV2.get<OntologyVersionSemantic>(
       `/ontologies/${ontologyId}/versions/${versionId}/semantic`),
+  saveDocument: (ontologyId: string, versionId: string, body: SaveOntologyDocumentBody) =>
+    apiClientV2.put<SaveOntologyDocumentResult>(
+      `/ontologies/${ontologyId}/versions/${versionId}/semantic/document`, body),
   promote: (ontologyId: string, versionId: string, body: {
     trialRunId: string
     impactHash: string

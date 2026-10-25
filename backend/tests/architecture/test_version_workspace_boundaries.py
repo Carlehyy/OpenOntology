@@ -41,6 +41,8 @@ _WORKSPACE_ENDPOINTS = (
     "get_draft_mappings",
     "save_draft_mappings",
     "get_draft_impact",
+    "get_version_semantic",
+    "save_release_document",
 )
 
 

@@ -109,10 +109,10 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     note: 'shadcn Sidebar 的展示子集（Group/Menu/MenuButton 等），不含应用壳折叠逻辑；首个消费方：超级助手工作台历史会话分组。',
   },
   {
-    scenario: '代码 / YAML / 脚本编辑器（行号、语法高亮、受控文本）',
+    scenario: '代码 / YAML / Markdown 长文本编辑器（行号、语法高亮、受控文本）',
     component: "CodeMirror（@uiw/react-codemirror + @codemirror/* 扩展）",
     status: 'vendored',
-    note: '存量消费方：世界模型开发页 / 数据流水线脚本页 / 插件社区开发页；语言包按需追加（lang-python 已入库，任务实例编排页引入 lang-yaml）。高亮配色沿用 GitHub light 风格常量，注释不用斜体（中文字形防糊）。',
+    note: '存量消费方：世界模型开发页 / 数据流水线脚本页 / 插件社区开发页；本体详情「本体结构 → 业务文档」弹窗的 Markdown 正文长文编辑也走本条目（受控 + 折行 + 轻量 Markdown 流式高亮，主题取 odg-scope 浅色语义变量）。语言包按需追加（lang-python 已入库，任务实例编排页引入 lang-yaml）；Markdown 不引入 lang-markdown，用 @codemirror/language 内置 StreamLanguage。高亮配色沿用 GitHub light 风格常量，注释不用斜体（中文字形防糊）。',
   },
   {
     scenario: '右键上下文菜单（对象行/画布元素的右键快捷操作）',
