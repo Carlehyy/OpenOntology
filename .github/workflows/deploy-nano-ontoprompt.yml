@@ -411,6 +411,9 @@ jobs:
           path: frontend/dist
 
       - name: Build Docker images
+        # Compose interpolation only; this public sentinel is never used at runtime.
+        env:
+          INTEGRATED_DBX_PASSWORD: ci-only-dbx-compose-interpolation
         run: docker compose -f docker-compose.prod.yml build
 
   deploy:
