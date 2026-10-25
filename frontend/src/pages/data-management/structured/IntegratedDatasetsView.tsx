@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Database, Plus, RefreshCw } from 'lucide-react'
 import { integratedDatasetsApi, type IntegratedAsset } from '@/api/v2/integrated-datasets'
 import { useAuthStore } from '@/stores/authStore'
@@ -18,6 +18,7 @@ function CapabilityBadge({ label, enabled }: { label: string; enabled: boolean }
 
 export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatasetId?: string | null }) {
   const [, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
   const role = useAuthStore(state => state.user?.role)
   const canManage = role === 'admin' || role === 'editor'
   const [assets, setAssets] = useState<IntegratedAsset[]>([])
@@ -108,6 +109,11 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
           <EmptyState
             title="尚未登记集成数据集"
             description="先选择已有 MySQL / PostgreSQL 连接，由 dbx 核验源表后再登记。未配置 dbx 时登记会明确失败，不会生成半套资产。"
+            action={canManage ? (
+              <Button type="button" size="sm" onClick={() => navigate('/data/pipelines/connections')}>
+                前往数据连接
+              </Button>
+            ) : undefined}
           />
         )}
 
