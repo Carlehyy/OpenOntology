@@ -1,0 +1,137 @@
+# Dedicated real integrated-dataset acceptance stack. Never merge with local/prod.
+# All credentials below are public, deterministic fixtures; no env_file is read.
+name: oo-integrated-20261024
+services:
+  db:
+    image: postgres:16-alpine
+    pull_policy: never
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      POSTGRES_DB: integrated_metadata
+      POSTGRES_USER: integrated_e2e
+      POSTGRES_PASSWORD: integrated_e2e_fixture
+    command: [postgres, -c, shared_buffers=96MB, -c, work_mem=8MB, -c, max_connections=40]
+    ports: ["127.0.0.1:45432:5432"]
+    volumes: [metadata_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U integrated_e2e -d integrated_metadata"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  source-pg:
+    image: postgres:16-alpine
+    pull_policy: never
+    mem_limit: 384m
+    cpus: 1.0
+    environment:
+      POSTGRES_DB: integrated_source
+      POSTGRES_USER: integrated_e2e
+      POSTGRES_PASSWORD: integrated_e2e_fixture
+    command: [postgres, -c, shared_buffers=64MB, -c, work_mem=8MB, -c, max_connections=20]
+    ports: ["127.0.0.1:45433:5432"]
+    volumes: [source_pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U integrated_e2e -d integrated_source"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  mysql:
+    image: mysql:8.4
+    pull_policy: never
+    profiles: [mysql]
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      MYSQL_DATABASE: integrated_source
+      MYSQL_USER: integrated_e2e
+      MYSQL_PASSWORD: integrated_e2e_fixture
+      MYSQL_ROOT_PASSWORD: integrated_e2e_root_fixture
+    command: ["--innodb-buffer-pool-size=128M", "--max-connections=20", "--local-infile=0"]
+    ports: ["127.0.0.1:43306:3306"]
+    volumes: [source_mysql_data:/var/lib/mysql]
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$${MYSQL_PASSWORD}" mysql -h 127.0.0.1 -u integrated_e2e -N -e "SELECT 1" integrated_source']
+      interval: 5s
+      timeout: 3s
+      retries: 40
+  dbx:
+    image: docker.cnb.cool/dbxio.com/dbx@sha256:b661f7e35deed06d9611dcda79c44ffcc8e4fd0f44308028ea77f7f18b36638c
+    pull_policy: never
+    profiles: [dbx]
+    restart: "no"
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      DBX_PASSWORD: ${DBX_PASSWORD:-}
+      DBX_BIND_ADDR: 0.0.0.0
+      DBX_DATA_DIR: /app/data
+    ports: ["127.0.0.1:45434:4224"]
+    volumes: [dbx_data:/app/data]
+  redis:
+    image: redis:7-alpine
+    pull_policy: never
+    mem_limit: 96m
+    cpus: 0.25
+    command: [redis-server, --requirepass, integrated_e2e_fixture, --maxmemory, 48mb, --maxmemory-policy, noeviction]
+    ports: ["127.0.0.1:46379:6379"]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH=integrated_e2e_fixture redis-cli ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  nats:
+    image: nats:alpine
+    pull_policy: never
+    mem_limit: 96m
+    cpus: 0.25
+    command: [-js, --store_dir, /data, -m, "8222"]
+    ports: ["127.0.0.1:44222:4222", "127.0.0.1:48222:8222"]
+    volumes: [nats_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:8222/healthz >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  neo4j:
+    image: neo4j:5.20-community
+    pull_policy: never
+    mem_limit: 1280m
+    cpus: 1.0
+    environment:
+      NEO4J_AUTH: neo4j/integrated_e2e_fixture
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    ports: ["127.0.0.1:47474:7474", "127.0.0.1:47687:7687"]
+    volumes: [neo4j_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:7474 >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+  minio:
+    image: minio/minio:latest
+    pull_policy: never
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      MINIO_ROOT_USER: integrated_e2e
+      MINIO_ROOT_PASSWORD: integrated_e2e_fixture
+    command: server /data --console-address ":9001"
+    ports: ["127.0.0.1:49000:9000", "127.0.0.1:49001:9001"]
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "curl -f http://127.0.0.1:9000/minio/health/live >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  metadata_data:
+  source_pg_data:
+  source_mysql_data:
+  dbx_data:
+  nats_data:
+  neo4j_data:
+  minio_data:
