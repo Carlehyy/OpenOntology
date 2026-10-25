@@ -271,6 +271,12 @@ def datasets_overview(
     )
 
 
+@router.get("/overview/summary")
+def overview_summary(db: Session = Depends(get_db)):
+    """资产湖总览五张洞察卡片的聚合口径：成品/人工/主键/质量分/待审核。"""
+    return query_service.overview_summary(db)
+
+
 @router.get("/{dataset_id}/consumers")
 def dataset_consumers(dataset_id: str, db: Session = Depends(get_db)):
     """查询哪些流水线使用该数据集作为数据源"""

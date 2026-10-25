@@ -294,3 +294,110 @@ def test_version_publish_invalidates_overview(db, monkeypatch, fake):
     second = datasets_overview(db, consumer_map_fn=dataset_consumer_map)
     assert second["items"][0]["latest_version_no"] == 1
     assert second["items"][0]["rowcount"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 总览摘要（五张洞察卡片）：键空间、缓存命中与写路径失效
+# ---------------------------------------------------------------------------
+
+def test_summary_cached_under_versioned_key_and_invalidates(db, fake):
+    """摘要键 = ob:lake:summary:v{总览版本}：未 bump 时命中旧值，bump 后换键回源。"""
+    from app.data_channel.datasets.query_service import overview_summary
+
+    db.add(_dataset(str(uuid.uuid4()), "摘要集"))
+    db.commit()
+
+    first = overview_summary(db)
+    assert first["total"] == 1
+    assert first["manual_total"] == 1
+    assert fake.store["ob:lake:summary:v0"], fake.store.keys()
+
+    # 短 TTL 语义：直写数据库（不 bump）后命中旧缓存，数字保持旧值
+    db.add(_dataset(str(uuid.uuid4()), "第二个摘要集"))
+    db.commit()
+    second = overview_summary(db)
+    assert second["total"] == 1
+
+    # 写路径 bump 总览版本：摘要键轮转到 v1，立即回源出新数字
+    lake_cache.invalidate_overview()
+    assert fake.store["ob:lake:overview:ver"] == "1"
+    third = overview_summary(db)
+    assert third["total"] == 2
+    assert fake.store["ob:lake:summary:v1"]
+    # 旧键不主动清扫，靠 TTL 自然过期
+    assert "ob:lake:summary:v0" in fake.store
+
+
+def test_summary_disabled_flag_bypasses_cache(db, monkeypatch, fake):
+    monkeypatch.setattr(settings, "dataset_cache_enabled", False)
+    from app.data_channel.datasets.query_service import overview_summary
+
+    db.add(_dataset(str(uuid.uuid4()), "关闭缓存集"))
+    db.commit()
+
+    first = overview_summary(db)
+    second = overview_summary(db)
+    assert first == second
+    assert first["total"] == 1
+    assert not fake.store  # 开关关闭时既不读也不写 Redis
+
+
+@pytest.mark.parametrize("failure", [{"get"}, {"set"}])
+def test_summary_redis_failure_never_affects_result(db, fake, failure):
+    fake.fail_on = failure
+    from app.data_channel.datasets.query_service import overview_summary
+
+    db.add(_dataset(str(uuid.uuid4()), "故障集"))
+    db.commit()
+
+    result = overview_summary(db)
+    assert result["total"] == 1
+    assert result["manual_total"] == 1
+
+
+def _curated_with_version(db, dataset_id: str) -> Dataset:
+    """最小成品资产：curated Dataset + 一个 blob-less 版本，供审核流使用。"""
+    dataset = Dataset(
+        id=dataset_id, name=f"成品-{dataset_id[:8]}", kind="curated",
+        schema_json={"primary_key": "id"})
+    db.add(dataset)
+    db.flush()
+    db.add(DatasetVersion(
+        id=str(uuid.uuid4()), dataset_id=dataset.id, version_no=1, rowcount=1))
+    db.commit()
+    return dataset
+
+
+def test_curated_write_paths_bump_overview_version(db, fake):
+    """start_review/approve/reject/delete_curated 提交后各 bump 一次版本键。"""
+    from fastapi import HTTPException
+    from app.data_channel.curated.review_service import ReviewService
+    from app.data_channel.curated.lifecycle_service import delete_curated
+
+    def version() -> int:
+        return int(fake.store.get("ob:lake:overview:ver", "0"))
+
+    ds_one = _curated_with_version(db, str(uuid.uuid4()))
+    ds_two = _curated_with_version(db, str(uuid.uuid4()))
+
+    reviews = ReviewService(db)
+    review = reviews.start_review(ds_one.id, reviewer_id="u-reviewer")
+    assert review.status == "pending"
+    assert version() == 1
+
+    reviews.approve(review.id, reviewer_id="u-approver")
+    assert version() == 2
+
+    # 失败的决定（审核已定）不 bump：版本键原地不动
+    with pytest.raises(HTTPException) as exc_info:
+        reviews.approve(review.id)
+    assert exc_info.value.status_code == 409
+    assert version() == 2
+
+    review_two = reviews.start_review(ds_two.id)
+    assert version() == 3
+    reviews.reject(review_two.id, notes="质量不达标")
+    assert version() == 4
+
+    delete_curated(db, ds_one.id, force=False, admin_id="u-admin")
+    assert version() == 5

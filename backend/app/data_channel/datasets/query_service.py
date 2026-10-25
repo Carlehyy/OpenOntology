@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -21,6 +22,15 @@ def _as_int(value, fallback: int) -> int:
     if isinstance(default, int) and not isinstance(default, bool):
         return default
     return fallback
+
+
+def _dataset_source(name: str, source_connection_id, schema_json) -> str:
+    """原始数据集来源口径；sync 优先于 manual：同步维护的数据集不允许被在线编辑语义覆盖。"""
+    if name.startswith("SYNC::") or bool(source_connection_id):
+        return "sync"
+    if (schema_json or {}).get("origin") == "manual":
+        return "manual"
+    return "upload"
 
 
 def datasets_overview(
@@ -122,16 +132,13 @@ def _datasets_overview_from_db(
     for ds in datasets:
         vers = versions_by_ds.get(ds.id, [])
         latest = vers[-1] if vers else None
-        is_sync = ds.name.startswith("SYNC::") or bool(ds.source_connection_id)
-        is_manual = (ds.schema_json or {}).get("origin") == "manual"
         items.append({
             "id": ds.id,
             "name": ds.name.removeprefix("SYNC::"),
             "raw_name": ds.name,
             "kind": ds.kind,
             "primary_key": str((ds.schema_json or {}).get("primary_key") or ""),
-            # sync 优先于 manual：同步维护的数据集不允许被在线编辑语义覆盖
-            "source": "sync" if is_sync else ("manual" if is_manual else "upload"),
+            "source": _dataset_source(ds.name, ds.source_connection_id, ds.schema_json),
             "connection_name": conn_names.get(ds.source_connection_id or "", ""),
             "version_count": len(vers),
             "latest_version_no": latest.version_no if latest else 0,
@@ -145,6 +152,75 @@ def _datasets_overview_from_db(
         "total": total,
         "page": page,
         "page_size": page_size,
+    }
+
+
+_PENDING_REVIEW_STATUSES = frozenset({"pending_review", "pending", "in_review"})
+
+
+def overview_summary(db: Session) -> dict:
+    """资产湖总览五张洞察卡片的聚合口径：成品/人工/主键/质量分/待审核。
+
+    卡片只需要几个计数，不必拉取两个全量列表再在浏览器里聚合；结果与
+    总览列表共用版本键，任何资产湖写路径 bump 版本即失效，短 TTL 兜底。
+    """
+    return lake_cache.cached_call(
+        lake_cache.summary_key(),
+        lake_cache.OVERVIEW_TTL_SECONDS,
+        lambda: _overview_summary_from_db(db),
+    )
+
+
+def _overview_summary_from_db(db: Session) -> dict:
+    # 成品状态绑定当前版本的审核记录，复用成品目录的口径而不是重写一遍。
+    from app.data_channel.curated.catalog_service import list_curated
+    from app.data_channel.datasets.models import Dataset
+
+    curated = list_curated(
+        db,
+        pipeline="",
+        task_id="",
+        status="",
+        page=1,
+        page_size=20,
+        paginated=False,
+    )
+    scores = [
+        float(item.quality_score)
+        for item in curated
+        if isinstance(item.quality_score, (int, float))
+        and not isinstance(item.quality_score, bool)
+        and math.isfinite(item.quality_score)
+    ]
+
+    raw_rows = (
+        db.query(Dataset.name, Dataset.source_connection_id, Dataset.schema_json)
+        .filter(Dataset.kind != "curated")
+        .all()
+    )
+    manual_total = 0
+    manual_with_primary_key = 0
+    sync_total = 0
+    for name, source_connection_id, schema_json in raw_rows:
+        if _dataset_source(name, source_connection_id, schema_json) == "sync":
+            sync_total += 1
+            continue
+        manual_total += 1
+        if (schema_json or {}).get("primary_key"):
+            manual_with_primary_key += 1
+
+    return {
+        "total": len(curated) + len(raw_rows),
+        "curated_total": len(curated),
+        "raw_total": len(raw_rows),
+        "manual_total": manual_total,
+        "manual_with_primary_key": manual_with_primary_key,
+        "sync_total": sync_total,
+        "scored_curated_total": len(scores),
+        "average_quality_score": (sum(scores) / len(scores)) if scores else None,
+        "pending_review_total": sum(
+            1 for item in curated if item.status in _PENDING_REVIEW_STATUSES
+        ),
     }
 
 
