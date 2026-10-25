@@ -253,6 +253,23 @@ if ! grep -Fq 'configure_integrated_dbx' "$DEPLOY_SCRIPT"     || ! grep -Fq 'INT
   exit 1
 fi
 
+# The Docker build job only needs a public value to satisfy Compose interpolation.
+# Keep it step-local: a job/top-level secret would leak into unrelated steps or
+# imply that the build actually needs a production credential.
+build_step="$(awk '
+  /^      - name: Build Docker images$/ { in_step = 1 }
+  in_step && /^  [A-Za-z0-9_-]+:/ && !/^      - name: Build Docker images$/ { exit }
+  in_step { print }
+' "$DEPLOY_WORKFLOW")"
+if [ -z "$build_step" ] \
+  || ! grep -Fq 'INTEGRATED_DBX_PASSWORD: ci-only-dbx-compose-interpolation' <<<"$build_step" \
+  || [ "$(grep -c 'INTEGRATED_DBX_PASSWORD' "$DEPLOY_WORKFLOW")" -ne 1 ] \
+  || ! grep -Fq 'run: docker compose -f docker-compose.prod.yml build' <<<"$build_step" \
+  || grep -Eq 'secrets\.|build-arg|docker compose.* up' <<<"$build_step"; then
+  printf 'Docker build must use one step-local public dbx interpolation value and no secret/build-arg/start\n' >&2
+  exit 1
+fi
+
 test_dir="$(mktemp -d /tmp/openontology-deploy-guards.XXXXXX)"
 archive_source="$(mktemp -d /tmp/openontology-archive-source.XXXXXX)"
 # Keep the XXXXXX suffix at the end: BSD mktemp otherwise treats a trailing
