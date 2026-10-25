@@ -6,10 +6,15 @@ release 归属与来源标记由调用方（cdc 的 ``_before_flush``）解析�
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import (
+    BigInteger, Column, MetaData, String, Table, bindparam, event,
+    func, select,
+)
+from sqlalchemy.schema import CreateTable
 from sqlalchemy.orm import Session
 
 from app.ontologies.sentinels.cep.contract import (
@@ -28,23 +33,78 @@ from app.ontologies.sentinels.models import SentinelEventLog
 
 logger = logging.getLogger(__name__)
 
-# 同一事务内多 flush 的合并锚点：instance_id -> {
-#     "rows": {key: SentinelEventLog 行对象},
-# }
+# Only unflushed rows may be held in Python. Persisted merge anchors live in a
+# connection-local TEMP table, never in Base.metadata or the persistent schema.
 _EVENT_PENDING_KEY = "sentinel_event_log_pending"
+_ANCHOR_BATCH_SIZE = 500
+_ANCHORS = Table(
+    "sentinel_event_log_tx_anchors", MetaData(),
+    Column("anchor_key", String(64), primary_key=True),
+    Column("event_id", BigInteger, nullable=False),
+    prefixes=["TEMPORARY"],
+)
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def discard_pending(session: Session) -> None:
-    """提交/回滚后丢弃合并锚点。
+def _connection(session: Session):
+    return session.connection(bind_arguments={"mapper": SentinelEventLog})
 
-    复用的 Session 在下一事务中不得继续合并上一事务的行对象——回滚后的
-    悬挂引用会把新值写进已回滚/已提交的行。
+
+def _anchor_key(instance_id, key) -> str:
+    # Length-prefixing makes the tuple unambiguous; hashing keeps MySQL TEMP
+    # primary keys bounded even for long instance identifiers/property names.
+    instance_id = str(instance_id)
+    return hashlib.sha256(
+        f"{len(instance_id)}:{instance_id}{key}".encode("utf-8")).hexdigest()
+
+
+def _pending(session: Session) -> dict:
+    transaction = session.get_transaction()
+    pending = session.info.get(_EVENT_PENDING_KEY)
+    if pending is None or pending["transaction"] is not transaction:
+        connection = _connection(session)
+        connection.execute(CreateTable(_ANCHORS, if_not_exists=True))
+        # TEMP tables survive pooled-connection reuse. Reset their DML at the
+        # first capture in each root transaction; never commit/rollback here.
+        connection.execute(_ANCHORS.delete())
+        pending = {"transaction": session.get_transaction(), "rows": {}}
+        session.info[_EVENT_PENDING_KEY] = pending
+    return pending
+
+
+def discard_pending(session: Session) -> None:
+    """Forget flush-local references after commit/rollback (safe to repeat).
+
+    TEMP anchor DML shares the business transaction. The next transaction resets
+    any anchors left by a commit before consulting them, including on a reused
+    pooled connection. No SQL is issued from CDC's after_commit callback.
     """
     session.info.pop(_EVENT_PENDING_KEY, None)
+
+
+def _anchor_flushed_rows(session: Session, _flush_context) -> None:
+    pending = session.info.get(_EVENT_PENDING_KEY)
+    if pending is None or not pending["rows"]:
+        return
+    connection = _connection(session)
+    batch = []
+    for key, row in pending["rows"].items():
+        batch.append({"anchor_key": key, "event_id": row.id})
+        if len(batch) == _ANCHOR_BATCH_SIZE:
+            connection.execute(_ANCHORS.insert(), batch)
+            batch.clear()
+    if batch:
+        connection.execute(_ANCHORS.insert(), batch)
+    # ORM inserted these rows normally, so every other flush listener can still
+    # observe them. Once anchored, neither session.info nor this module retains
+    # any persisted event objects or values until the business transaction ends.
+    pending["rows"].clear()
+
+
+event.listen(Session, "after_flush_postexec", _anchor_flushed_rows)
 
 
 def capture_instance_changes(
@@ -52,85 +112,85 @@ def capture_instance_changes(
         change_kind: str, changes: dict,
         source: str = EVENT_SOURCE_ORGANIC,
         cascade_depth: int = 0, chain_id: str | None = None) -> None:
-    """在业务事务内记录实例级变更事实（键级行）。
+    """Capture atomic key-level facts with flush-bounded Python retention.
 
-    由 cdc ``_before_flush`` 调用；``release_id`` 为 None 时（draft-only/
-    legacy 项目）与 outbox 同样直接丢弃——没有 runtime owner 的投影变更
-    不构成可评估的时间事实。同事务同实例多次 flush 会在
-    ``session.info`` 中合并：每个键保留最早 old、最新 new，``created``
-    优先于 ``updated``。
+    Keep earliest old/release/source metadata, latest new, and created priority
+    across all flushes. As before, the merge identity is (instance_id, key), not
+    release_id; activation retrospectively relabels this transaction's facts.
     """
     if release_id is None or not changes:
         return
-    pending = session.info.setdefault(_EVENT_PENDING_KEY, {})
-    entry = pending.get(instance.id)
-    if entry is None:
-        rows: dict[str, SentinelEventLog] = {}
-        for key in sorted(changes):
-            old, new = changes[key]
+    pending = _pending(session)
+    rows = pending["rows"]
+    changes_by_anchor = {
+        _anchor_key(instance.id, str(key)): (str(key), *changes[key])
+        for key in sorted(changes)
+    }
+    connection = _connection(session)
+    persisted = {}
+    for chunk in chunk_ids(changes_by_anchor):
+        persisted.update(connection.execute(select(
+            _ANCHORS.c.anchor_key, _ANCHORS.c.event_id,
+        ).where(_ANCHORS.c.anchor_key.in_(chunk))).all())
+    updates = []
+    for anchor, (key, old, new) in changes_by_anchor.items():
+        row = rows.get(anchor)
+        if row is not None:
+            row.new_value = new
+            if change_kind == EVENT_KIND_CREATED:
+                row.change_kind = EVENT_KIND_CREATED
+        elif anchor in persisted:
+            updates.append({"event_id": persisted[anchor], "latest_value": new})
+        else:
             row = SentinelEventLog(
                 ontology_id=str(instance.ontology_id),
                 ontology_release_id=release_id,
                 object_type_id=str(instance.object_type_id),
-                instance_id=str(instance.id),
-                change_kind=change_kind,
-                key=str(key),
-                old_value=old,
-                new_value=new,
-                source=source,
-                cascade_depth=int(cascade_depth),
-                chain_id=chain_id,
+                instance_id=str(instance.id), change_kind=change_kind, key=key,
+                old_value=old, new_value=new, source=source,
+                cascade_depth=int(cascade_depth), chain_id=chain_id,
                 occurred_at=_now(),
             )
-            rows[str(key)] = row
+            rows[anchor] = row
             session.add(row)
-        pending[instance.id] = {"rows": rows}
-        return
-    # 同事务第二次 flush：保留最早 old / 最早 change_kind(created 优先)，
-    # 覆盖最新 new。行对象已在上一轮 flush 中持久化，直接置脏。
-    rows = entry["rows"]
-    for key in sorted(changes):
-        old, new = changes[key]
-        row = rows.get(str(key))
-        if row is None:
-            row = SentinelEventLog(
-                ontology_id=str(instance.ontology_id),
-                ontology_release_id=release_id,
-                object_type_id=str(instance.object_type_id),
-                instance_id=str(instance.id),
-                change_kind=change_kind,
-                key=str(key),
-                old_value=old,
-                new_value=new,
-                source=source,
-                cascade_depth=int(cascade_depth),
-                chain_id=chain_id,
-                occurred_at=_now(),
-            )
-            rows[str(key)] = row
-            session.add(row)
-            continue
-        row.new_value = new
-        if (change_kind == EVENT_KIND_CREATED
-                and row.change_kind != EVENT_KIND_CREATED):
-            row.change_kind = EVENT_KIND_CREATED
+    if updates:
+        table = SentinelEventLog.__table__
+        statement = table.update().where(table.c.id == bindparam("event_id")).values(
+            new_value=bindparam("latest_value"),
+            change_kind=(
+                EVENT_KIND_CREATED if change_kind == EVENT_KIND_CREATED
+                else table.c.change_kind
+            ),
+        )
+        for offset in range(0, len(updates), _ANCHOR_BATCH_SIZE):
+            connection.execute(statement, updates[offset:offset + _ANCHOR_BATCH_SIZE])
+        # Core DML must not leave a previously queried ORM event stale in this
+        # Session. Look up only touched identities, without loading extra rows.
+        for item in updates:
+            row = session.identity_map.get(session.identity_key(
+                SentinelEventLog, item["event_id"]))
+            if row is not None:
+                session.expire(row, ["new_value", "change_kind"])
 
 
 def relabel_pending_as_activation(session: Session, ontology_id: str) -> None:
-    """发布切换事务内回溯改标本事务已捕获的实例事件为 release_activation。
-
-    晋级/回滚把新投影物化（实例重建的事件在早前 flush 已按 organic 落行）
-    之后才切换指针——捕获时刻无法得知自己属于激活窗口。本函数在指针切换
-    的 before_flush 里调用：行对象仍在 session 中，置脏后随当前 flush 一并
-    UPDATE，保证激活窗口的事件不参与时间算子/模式推进（核心不变量）。
-    """
+    """Relabel only this transaction's facts, including previously flushed pages."""
     pending = session.info.get(_EVENT_PENDING_KEY)
-    if not pending:
+    if pending is None:
         return
-    for entry in pending.values():
-        for row in entry.get("rows", {}).values():
-            if str(getattr(row, "ontology_id", "")) == str(ontology_id):
-                row.source = EVENT_SOURCE_RELEASE_ACTIVATION
+    for row in pending["rows"].values():
+        if str(row.ontology_id) == str(ontology_id):
+            row.source = EVENT_SOURCE_RELEASE_ACTIVATION
+    table = SentinelEventLog.__table__
+    _connection(session).execute(table.update().where(
+        table.c.ontology_id == str(ontology_id),
+        table.c.id.in_(select(_ANCHORS.c.event_id)),
+    ).values(source=EVENT_SOURCE_RELEASE_ACTIVATION))
+    # Invalidate only already-loaded event objects; do not fetch or retain the
+    # transaction's entire event universe merely to synchronize ORM state.
+    for row in session.identity_map.values():
+        if isinstance(row, SentinelEventLog):
+            session.expire(row, ["source"])
 
 
 def deleted_change_marker() -> tuple:

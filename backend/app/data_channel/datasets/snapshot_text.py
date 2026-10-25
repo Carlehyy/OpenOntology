@@ -9,6 +9,25 @@ from __future__ import annotations
 import json
 
 
+MAX_STREAM_BATCH_BYTES = 16 * 1024**2
+
+
+def canonical_row_bytes(row, *, limit: int = MAX_STREAM_BATCH_BYTES) -> int:
+    """Measure canonical TEXT payload in bounded chunks, not one wide copy."""
+    size = 0
+    for value in row.values():
+        if isinstance(value, str):
+            for offset in range(0, len(value), 16384):
+                size += len(value[offset:offset + 16384].encode("utf-8"))
+                if size > limit:
+                    raise ValueError("Row exceeds the stream byte budget")
+        elif value is not None:
+            size += 8  # immutable BIGINT ordinal; snapshot cells are TEXT
+    if size > limit:
+        raise ValueError("Row exceeds the stream byte budget")
+    return size
+
+
 def snapshot_cell_text(value) -> str:
     """Canonical text representation used by tabular lake snapshots."""
     if value is None:

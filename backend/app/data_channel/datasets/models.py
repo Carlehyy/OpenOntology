@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
     String, DateTime, JSON, Integer, BigInteger, ForeignKey, Text, Index,
-    LargeBinary, text,
+    LargeBinary, CheckConstraint, Boolean, UniqueConstraint, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
@@ -93,6 +93,79 @@ class DatasetVersion(Base):
         index=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class IntegratedSyncRun(Base):
+    """Frozen source snapshot manifest; only sealed runs expose a version.
+
+    A loading/failed run is not a DatasetVersion.  Rows are committed in bounded
+    batches to a private relation, then physical count + ordered checksum are
+    verified before the version/outbox/latest pointer become visible together.
+    Failed runs restart from a fresh source snapshot, never a guessed offset.
+    """
+    __tablename__ = "v2_integrated_sync_runs"
+    __table_args__ = (
+        Index("ix_integrated_sync_runs_dataset_status", "dataset_id", "status"),
+        Index("ix_integrated_sync_runs_asset_status", "asset_id", "status"),
+        CheckConstraint("expected_rows >= 0", name="ck_integrated_sync_expected_rows"),
+        CheckConstraint("row_count >= 0", name="ck_integrated_sync_row_count"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    dataset_id: Mapped[str] = mapped_column(
+        String, ForeignKey("v2_datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    asset_id: Mapped[str] = mapped_column(
+        String, ForeignKey("v2_integrated_assets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    base_version_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("v2_dataset_versions.id", ondelete="RESTRICT"), nullable=True)
+    version_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("v2_dataset_versions.id", ondelete="RESTRICT"), nullable=True, unique=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="loading")
+    physical_table: Mapped[str] = mapped_column(String(63), nullable=False, unique=True)
+    schema_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    expected_rows: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    row_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegratedSyncRecovery(Base):
+    """Immutable audit receipt for one recovered abandoned integrated run.
+
+    Written in the same transaction as the CAS to ``failed`` and the private
+    relation drop.  A unique ``run_id`` makes a repeated recovery idempotent;
+    resource cleanup and later retries never rewrite or delete this receipt.
+    Deliberately has no FK to the run/dataset: the audit must survive even an
+    administrative dataset deletion.
+    """
+    __tablename__ = "v2_integrated_sync_recoveries"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_integrated_sync_recovery_run"),
+        Index("ix_integrated_sync_recoveries_recovered_at", "recovered_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    asset_id: Mapped[str] = mapped_column(String, nullable=False)
+    dataset_id: Mapped[str] = mapped_column(String, nullable=False)
+    original_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    owner_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ownership_method: Mapped[str] = mapped_column(String(40), nullable=False)
+    ownership_proof: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    recovered_by: Mapped[str] = mapped_column(String(200), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    physical_table: Mapped[str] = mapped_column(String(63), nullable=False)
+    table_existed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    table_dropped: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    recovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc))
 
 
 class DatasetVersionEvent(Base):

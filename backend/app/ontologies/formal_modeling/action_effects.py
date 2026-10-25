@@ -43,6 +43,7 @@ from app.ontologies.formal_modeling.action_runtime_support import (
     _now,
     _preview_find,
     _preview_instance_values,
+    _preview_iter,
     _preview_link_values,
     _resolve_value,
     _rule_identity,
@@ -456,11 +457,8 @@ def _execute_action_effects(
                         preview_context is not None
                         and preview_context.get("isolated", False)
                     ):
-                        target_object = next((
-                            item for item in _preview_instance_values(
-                                preview_context)
-                            if str(item.id) == str(tgt)
-                        ), None)
+                        target_object = _preview_find(
+                            preview_context, "objects", tgt)
                     else:
                         target_object_query = db.query(ObjectInstance).filter(
                             ObjectInstance.id == str(tgt),
@@ -532,11 +530,11 @@ def _execute_action_effects(
                     preview_context is not None
                     and preview_context.get("isolated", False)
                 ):
-                    candidates = sorted([
-                        item for item in _preview_link_values(preview_context)
-                        if item.link_type_id == lt_id
-                        and item.source_object_id == target_instance.id
-                    ], key=lambda item: str(item.id))
+                    candidates = sorted(
+                        _preview_iter(
+                            preview_context, "links", link_type_id=lt_id,
+                            source_object_id=target_instance.id),
+                        key=lambda item: str(item.id))
                 else:
                     q = db.query(LinkInstance).filter(
                         LinkInstance.ontology_id == ontology_id,
@@ -574,11 +572,8 @@ def _execute_action_effects(
                             preview_context is not None
                             and preview_context.get("isolated", False)
                         ):
-                            related_target = next((
-                                item for item in _preview_instance_values(
-                                    preview_context)
-                                if item.id == li.target_object_id
-                            ), None)
+                            related_target = _preview_find(
+                                preview_context, "objects", li.target_object_id)
                         else:
                             target_query = db.query(ObjectInstance).filter(
                                 ObjectInstance.id == li.target_object_id,

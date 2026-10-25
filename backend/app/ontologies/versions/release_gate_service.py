@@ -48,7 +48,7 @@ def raise_publish_errors(
     if errors:
         raise HTTPException(422, detail={
             "code": "publish_validation_failed",
-            "message": f"{message}（{len(errors)} 个错误）",
+            "message": f"{message}（{getattr(errors, 'total_count', len(errors))} 个错误）",
             "errors": errors,
         })
 
@@ -81,8 +81,15 @@ def validate_production_mappings(
     *,
     gate_error: Callable[..., dict] = _gate_error,
 ) -> list[dict]:
+    from sqlalchemy.orm import Query
+    from app.ontologies.versions.batching import query_batches
+
     errors: list[dict] = []
-    if instances and not mappings:
+    instances_exist = (
+        instances.with_entities(FoObjectInstance.id).first() is not None
+        if isinstance(instances, Query) else bool(instances)
+    )
+    if instances_exist and not mappings:
         errors.append(gate_error(
             "production_mapping_required", "mapping",
             "生产本体已有实例，但没有任何 OntologyMapping；无法证明数据来源与审批版本"))
@@ -98,7 +105,14 @@ def validate_production_mappings(
                 object_type.display_name,
             }:
                 mapped_type_ids.add(object_type.id)
-    for instance in instances:
+    def iter_instances():
+        if isinstance(instances, Query):
+            for batch in query_batches(instances, FoObjectInstance.id):
+                yield from batch
+        else:
+            yield from instances
+
+    for instance in iter_instances():
         if instance.source != "pipeline" or not instance.external_id:
             errors.append(gate_error(
                 "instance_lake_lineage_missing", "objectInstance",
@@ -324,15 +338,14 @@ def release_errors(
     link_types = query(FoLinkType)
     actions = query(FoActionType)
     functions = query(FoFunction)
-    instances = query(FoObjectInstance)
-    link_instances = query(FoLinkInstance)
-    errors = model_validator(
-        object_types,
-        link_types,
-        actions,
-        functions,
-        instances,
-        link_instances,
+    from app.ontologies.versions.model_validator import validate_persisted_model
+
+    instances = db.query(FoObjectInstance).filter(
+        FoObjectInstance.ontology_id == ontology_id,
+    )
+    errors = validate_persisted_model(
+        db, ontology_id, object_types, link_types, actions, functions,
+        model_validator=model_validator,
     )
     errors.extend(expression_function_validator(
         functions,

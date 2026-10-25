@@ -660,7 +660,19 @@ def _resolve_tuples(db: Session, ontology_id: str, sentinel: Sentinel,
                 errors.extend(invalid_contracts[:5])
             return []
 
+    single_binding = len(bindings) == 1
+
     def append_candidate(bucket: list[dict], item: dict) -> bool:
+        # A single binding is a linear scan over one release-scoped object
+        # type, not a cross-object Cartesian product.  The 1000-tuple safety
+        # cap is intentionally a cross-binding cap; applying it here made a
+        # single binding silently stop at row 1000 and produced an incomplete
+        # trial/runtime observation.  The underlying query is keyset/yield_per
+        # batch-scanned; the final list is only the resolved candidate set
+        # needed for matching/action diffing.
+        if single_binding:
+            bucket.append(item)
+            return True
         bucket.append(item)
         if len(bucket) <= MAX_TUPLES:
             return True
@@ -722,6 +734,48 @@ def _resolve_tuples(db: Session, ontology_id: str, sentinel: Sentinel,
         if not tuples:
             break
     return tuples
+
+
+_SINGLE_BINDING_BATCH = 500
+
+
+def _single_binding_matched_tuples(
+        db: Session, ontology_id: str, sentinel: Sentinel,
+        condition: str | None, errors: list[str], *,
+        release_id: str | None, metadata: dict | None = None):
+    """Stream one binding in bounded batches and return only matched tuples.
+
+    A single binding has no cross-object product to cap.  The SQL query is
+    iterated with ``yield_per`` and the condition is evaluated per batch, so
+    the unbounded per-release candidate list is never materialized; only the
+    final matched set (required for edge diff/actions) is retained.
+    """
+    bindings = sentinel.bindings or []
+    if len(bindings) != 1 or sentinel.links:
+        raise ValueError("single-binding fast path requires exactly one binding and no links")
+    if metadata is not None:
+        metadata.setdefault("candidateCapReached", False)
+    binding = bindings[0]
+    alias = binding["alias"]
+    candidate_count = 0
+    matched: list[dict] = []
+    batch: list[dict] = []
+    for instance in _instance_query(
+            db, ontology_id, binding["objectTypeId"], release_id).yield_per(
+                _SINGLE_BINDING_BATCH):
+        if not _passes(binding.get("filter"), alias,
+                       _instance_values(instance), errors):
+            continue
+        candidate_count += 1
+        batch.append({alias: instance})
+        if len(batch) >= _SINGLE_BINDING_BATCH:
+            matched.extend(_match_tuples_with_temporal(
+                db, condition, batch, errors))
+            batch = []
+    if batch:
+        matched.extend(_match_tuples_with_temporal(
+            db, condition, batch, errors))
+    return matched, candidate_count
 
 
 def _holds(expr: str | None, tup: dict, errors: list[str] | None = None,
@@ -928,12 +982,18 @@ def preview_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
     started = time.time()
     errors: list[str] = []
     metadata: dict = {"candidateCapReached": False}
-    tuples = _resolve_tuples(
-        db, ontology_id, sentinel, errors,
-        release_id=release_id, metadata=metadata,
-    )
-    matched = _match_tuples_with_temporal(
-        db, sentinel.condition, tuples, errors)
+    if len(sentinel.bindings or []) == 1 and not sentinel.links:
+        matched, candidate_count = _single_binding_matched_tuples(
+            db, ontology_id, sentinel, sentinel.condition, errors,
+            release_id=release_id, metadata=metadata)
+    else:
+        tuples = _resolve_tuples(
+            db, ontology_id, sentinel, errors,
+            release_id=release_id, metadata=metadata,
+        )
+        matched = _match_tuples_with_temporal(
+            db, sentinel.condition, tuples, errors)
+        candidate_count = len(tuples)
     primary = sentinel.primary_alias or (
         sentinel.bindings[0].get("alias") if sentinel.bindings else None)
     try:
@@ -1086,7 +1146,7 @@ def preview_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
     return {
         "passed": not errors and not metadata["candidateCapReached"],
         "releaseId": release_id,
-        "candidateCount": len(tuples),
+        "candidateCount": candidate_count,
         "matchCount": len(matched),
         "plannedActionCount": total_actions,
         "plannedActions": planned_samples,
@@ -1953,12 +2013,19 @@ def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
     eval_errors: list[str] = []   # 表达式求值错误——fail-closed 但必须可见
     metadata: dict = {"candidateCapReached": False}
 
-    # 1) 当前命中集
-    tuples = _resolve_tuples(
-        db, ontology_id, sentinel, eval_errors, release_id=release_id,
-        metadata=metadata)
-    matched = _match_tuples_with_temporal(
-        db, sentinel.condition, tuples, eval_errors)
+    # 1) 当前命中集: single binding is streamed in bounded batches; no
+    # cross-binding product cap applies, and only the matched set is retained.
+    if len(sentinel.bindings or []) == 1 and not sentinel.links:
+        matched, candidate_count = _single_binding_matched_tuples(
+            db, ontology_id, sentinel, sentinel.condition, eval_errors,
+            release_id=release_id, metadata=metadata)
+    else:
+        tuples = _resolve_tuples(
+            db, ontology_id, sentinel, eval_errors, release_id=release_id,
+            metadata=metadata)
+        matched = _match_tuples_with_temporal(
+            db, sentinel.condition, tuples, eval_errors)
+        candidate_count = len(tuples)
     # 命中键 → 元组(同键去重,保留首个)
     current: dict[str, dict] = {}
     for t in matched:
@@ -2120,7 +2187,7 @@ def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
             )
             record_absence_fact(
                 db, ontology_id=ontology_id, subject_id=sentinel.id,
-                empty=(len(current) == 0), scanned=len(tuples),
+                empty=(len(current) == 0), scanned=candidate_count,
                 source=f"sentinel://{sentinel.name or sentinel.id}@{source}",
                 detail={"condition": sentinel.condition or "",
                         "sentinelName": sentinel.display_name},

@@ -46,6 +46,7 @@ export default defineConfig({
     '**/instance_data_interactions.spec.ts',
     '**/instance_data_overview.spec.ts',
     '**/instance_dataset_navigation.spec.ts',
+    '**/integrated_datasets.spec.ts',
     '**/mapping_layout_drag.spec.ts',
     '**/mapping_primary_key.spec.ts',
     '**/mapping_review_automation.spec.ts',

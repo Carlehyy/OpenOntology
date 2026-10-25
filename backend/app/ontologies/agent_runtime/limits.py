@@ -47,11 +47,11 @@ _LIMITS: tuple[AgentRuntimeLimit, ...] = (
     AgentRuntimeLimit(
         "search_scan_cap", 5000, 100, 1_000_000,
         "AGENT_SEARCH_SCAN_CAP",
-        "search_objects 单次翻页最多扫描的实例行数（找一页，非计数）"),
+        "非PostgreSQL检索输入预算；超出显式拒绝，PG由SQL资源预算控制"),
     AgentRuntimeLimit(
         "aggregate_scan_cap", 100_000, 1000, 10_000_000,
         "AGENT_AGGREGATE_SCAN_CAP",
-        "aggregate_objects 流式扫描的安全阀：到此停并标 partial"),
+        "非PostgreSQL聚合输入预算；超出显式拒绝，PG全量精确SQL聚合不受此行数帽限制"),
     AgentRuntimeLimit(
         "citation_cap", 20, 1, 200,
         "AGENT_CITATION_CAP",

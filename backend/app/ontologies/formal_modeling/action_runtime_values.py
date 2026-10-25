@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+from heapq import nsmallest
+from itertools import chain
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -31,17 +33,54 @@ from app.services.formal.function_engine import (
 )
 
 
+def _preview_reader(context: Optional[dict]):
+    """Return the optional isolated projection reader.
+
+    A reader is deliberately duck-typed so the action runtime does not import
+    trial staging models (and therefore cannot accidentally read live Formal
+    rows).  Legacy list-backed contexts remain supported for unit tests and
+    small previews.
+    """
+    if not context or not context.get("isolated", False):
+        return None
+    return context.get("reader") or context.get("projection_reader")
+
+
+def _preview_iter(context: Optional[dict], key: str, **filters):
+    reader = _preview_reader(context)
+    if reader is not None:
+        iterator = getattr(reader, "iter", None)
+        if iterator is not None:
+            return iterator(key, **filters)
+    values = (context or {}).get(key) or []
+    if not isinstance(values, (list, tuple)):
+        return iter(())
+    def matches(item):
+        return all(
+            str(getattr(item, field, "")) == str(value)
+            for field, value in filters.items() if value is not None
+        )
+    return (item for item in values if matches(item))
+
+
 def _preview_values(context: Optional[dict], key: str) -> list:
-    if not context:
-        return []
-    values = context.get(key) or []
-    return list(values) if isinstance(values, (list, tuple)) else []
+    """Legacy materializing view; contract validators need complete scope.
+
+    New action lookup/effect paths must use ``_preview_find``/``_preview_iter``
+    so an isolated SQL reader is not converted into a giant Python list.
+    """
+    return list(_preview_iter(context, key))
 
 
 def _preview_find(context: Optional[dict], key: str, item_id: Any):
     wanted = str(item_id or "")
+    reader = _preview_reader(context)
+    if reader is not None:
+        finder = getattr(reader, "find", None)
+        if finder is not None:
+            return finder(key, wanted)
     return next((
-        item for item in _preview_values(context, key)
+        item for item in _preview_iter(context, key)
         if _definition_id(item) == wanted
     ), None)
 
@@ -267,7 +306,8 @@ def _resolve_recipient(cfg: dict, params: dict, target_props: Optional[dict],
                        *, virtual_links: Optional[list] = None,
                        virtual_objects: Optional[dict[str, Any]] = None,
                        excluded_link_ids: Optional[set[str]] = None,
-                       isolated_links: Optional[list] = None,
+                       isolated_links=None,
+                       isolated_reader=None,
                        ) -> Optional[str]:
     """解析通知收件人。
 
@@ -290,13 +330,14 @@ def _resolve_recipient(cfg: dict, params: dict, target_props: Optional[dict],
         if not target_instance:
             raise SafeEvalError("沿链接解析通知收件人需要目标实例")
         excluded = excluded_link_ids or set()
-        if isolated_links is not None:
-            links = [
-                item for item in isolated_links
-                if item.link_type_id == cfg.get("linkTypeId")
-                and item.source_object_id == target_instance.id
-                and str(item.id) not in excluded
-            ]
+        if isolated_reader is not None:
+            base = isolated_reader.iter(
+                "links", link_type_id=cfg.get("linkTypeId"),
+                source_object_id=target_instance.id)
+        elif isolated_links is not None:
+            base = (item for item in isolated_links
+                    if item.link_type_id == cfg.get("linkTypeId")
+                    and item.source_object_id == target_instance.id)
         else:
             link_query = db.query(LinkInstance).filter(
                 LinkInstance.ontology_id == ontology_id,
@@ -307,17 +348,15 @@ def _resolve_recipient(cfg: dict, params: dict, target_props: Optional[dict],
                 link_query = link_query.filter(
                     LinkInstance.ontology_release_id
                     == target_instance.ontology_release_id)
-            links = [
-                item for item in link_query.order_by(
-                    LinkInstance.id.asc()).all()
-                if str(item.id) not in excluded
-            ]
-        links.extend([
-            item for item in (virtual_links or [])
-            if item.link_type_id == cfg.get("linkTypeId")
-            and item.source_object_id == target_instance.id
-        ])
-        links = sorted(links, key=lambda item: str(item.id))[:2]
+            base = link_query.order_by(LinkInstance.id.asc()).yield_per(200)
+        virtual = (item for item in (virtual_links or [])
+                   if item.link_type_id == cfg.get("linkTypeId")
+                   and item.source_object_id == target_instance.id)
+        # Ambiguity requires at most two identities, not a graph-sized list.
+        # Keep historical deterministic ID ordering including virtual links.
+        links = nsmallest(2, chain(
+            (item for item in base if str(item.id) not in excluded), virtual,
+        ), key=lambda item: str(item.id))
         if not links:
             raise SafeEvalError("通知收件人链接不存在")
         if len(links) > 1:
@@ -326,7 +365,9 @@ def _resolve_recipient(cfg: dict, params: dict, target_props: Optional[dict],
         link = links[0]
         related = (virtual_objects or {}).get(
             str(link.target_object_id))
-        if related is None and isolated_links is None:
+        if related is None and isolated_reader is not None:
+            related = isolated_reader.find("objects", str(link.target_object_id))
+        if related is None and isolated_links is None and isolated_reader is None:
             related_query = db.query(ObjectInstance).filter(
                 ObjectInstance.id == link.target_object_id,
                 ObjectInstance.ontology_id == ontology_id,

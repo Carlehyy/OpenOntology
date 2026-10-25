@@ -1666,11 +1666,44 @@ def test_snapshot_gate_compiles_expression_functions_without_data_rows():
 
 
 def test_builtin_sentinel_trial_fails_closed_at_candidate_cap():
+    """The cap applies to cross-binding combinations, not a single scan."""
     snapshot = {
         "objectTypes": [], "linkTypes": [], "actions": [], "functions": [],
         "mappings": [], "linkMappings": [],
         "sentinels": [{
             "id": "sentinel-cap", "name": "cap", "displayName": "容量保护",
+            "enabled": True, "muted": False,
+            "bindings": [
+                {"alias": "row", "objectTypeId": "type-row"},
+                {"alias": "other", "objectTypeId": "type-other"},
+            ],
+            "primaryAlias": "row", "links": [], "condition": "",
+            "actionIds": [], "actionParameters": {},
+        }],
+    }
+    objects = [{
+        "objectId": f"row-{index}", "objectTypeId": "type-row",
+        "properties": {"index": index},
+    } for index in range(1001)] + [{
+        "objectId": "other-0", "objectTypeId": "type-other",
+        "properties": {"index": 0},
+    }]
+
+    result = _simulate_sentinels(snapshot, objects, [])[0]
+
+    assert result["candidateCapReached"] is True
+    assert result["candidateCount"] == 1000
+    assert result["errors"] == [
+        "跨对象候选组合超过安全上限 1000，请收窄绑定过滤条件后重试",
+    ]
+
+
+def test_builtin_sentinel_trial_single_binding_scans_full_release():
+    base = {
+        "objectTypes": [], "linkTypes": [], "actions": [], "functions": [],
+        "mappings": [], "linkMappings": [],
+        "sentinels": [{
+            "id": "sentinel-full", "name": "full", "displayName": "全量扫描",
             "enabled": True, "muted": False,
             "bindings": [{"alias": "row", "objectTypeId": "type-row"}],
             "primaryAlias": "row", "links": [], "condition": "",
@@ -1680,15 +1713,32 @@ def test_builtin_sentinel_trial_fails_closed_at_candidate_cap():
     objects = [{
         "objectId": f"row-{index}", "objectTypeId": "type-row",
         "properties": {"index": index},
-    } for index in range(1001)]
+    } for index in range(2000)]
 
-    result = _simulate_sentinels(snapshot, objects, [])[0]
+    hit = copy.deepcopy(base)
+    hit["sentinels"][0]["condition"] = "row.index == 1999"
+    result = _simulate_sentinels(hit, objects, [])[0]
+    assert result["candidateCount"] == 2000
+    assert result["candidateCapReached"] is False
+    assert result["matched"] == 1
+    assert result["errors"] == []
 
-    assert result["candidateCapReached"] is True
-    assert result["candidateCount"] == 1000
-    assert result["errors"] == [
-        "跨对象候选组合超过安全上限 1000，请收窄绑定过滤条件后重试",
-    ]
+    zero = copy.deepcopy(base)
+    zero["sentinels"][0]["condition"] = "row.index < 0"
+    result = _simulate_sentinels(zero, objects, [])[0]
+    assert result["candidateCount"] == 2000
+    assert result["candidateCapReached"] is False
+    assert result["matched"] == 0
+    assert result["errors"] == []
+
+    tail_error = copy.deepcopy(base)
+    tail_error["sentinels"][0]["condition"] = (
+        "row.index == 1999 or row.missing == 1")
+    result = _simulate_sentinels(tail_error, objects, [])[0]
+    assert result["candidateCount"] == 2000
+    assert result["candidateCapReached"] is False
+    assert result["errors"]
+    assert any("不存在的属性" in error for error in result["errors"])
 
 
 def test_builtin_sentinel_trial_uses_expression_derived_properties():
@@ -3075,6 +3125,348 @@ def test_trial_uses_each_object_mapping_primary_key_for_order_supplier_fat_table
     )
     assert all(isinstance(item.properties["details"], dict)
                for item in runtime_links)
+
+
+@pytest.mark.parametrize("link_mode,join_values", [
+    ("edge", "exact"), ("edge", "trimmed"), ("edge", "null"), ("edge", "empty"), ("edge", "blank"),
+    ("direct", "exact"), ("direct", "trimmed"), ("direct", "null"), ("direct", "empty"), ("direct", "blank"),
+    ("direct", "nonunique"), ("direct", "nonunique-one-to-one"),
+])
+def test_sealed_composite_edge_identity_survives_trial_promote_and_replay(
+        client, auth_headers, ontology, db, admin_user, link_mode, join_values):
+    """Frozen edge identity and scalar joins agree before and after activation."""
+    import uuid
+    from app.data_channel.connections.models import Connection
+    from app.data_channel.datasets import integrated_store as store
+    from app.data_channel.integrated.contracts import digest
+    from app.data_channel.integrated.models import IntegratedAsset
+    from app.ontologies.mappings.formal_projection import (
+        stable_link_instance_id, stable_object_instance_id,
+        stable_pipeline_entity_id, stable_pipeline_relation_id,
+    )
+
+    oid = ontology["id"]
+    schema = [
+        {"name": name, "type": kind, "source_type": native,
+         "nullable": name in {"source_fk", "target_fk", "target_match"},
+         "precision": None, "scale": None, "timezone": None, "collation": None,
+         "length": None, "unsigned": False}
+        for name, kind, native in (
+            ("edge_number", "integer", "BIGINT"), ("tenant", "string", "TEXT"),
+            ("order_id", "string", "TEXT"), ("recipient_id", "string", "TEXT"),
+            ("weight", "integer", "BIGINT"), ("source_fk", "string", "TEXT"),
+            ("target_fk", "string", "TEXT"), ("target_match", "string", "TEXT"),
+        )
+    ]
+    primary_key = ["tenant", "edge_number"]
+    fingerprint = digest({"columns": schema, "primary_key": primary_key})
+    connection = Connection(name="sealed-edge-fixture", kind="postgres", config={})
+    db.add(connection)
+    db.flush()
+    dataset = Dataset(name="sealed edge fixture", kind="integrated",
+                      source_connection_id=connection.id, source_resource="public.edges",
+                      schema_json={"columns": schema, "primary_key": ",".join(primary_key)})
+    db.add(dataset)
+    db.flush()
+    asset = IntegratedAsset(
+        dataset_id=dataset.id, connection_id=connection.id, name="sealed edges",
+        schema_name="public", table_name="edges", schema_json=dataset.schema_json,
+        schema_fingerprint=fingerprint, writable=False, created_by=admin_user.id,
+    )
+    db.add(asset)
+    db.commit()
+    rows = [{"edge_number": number, "tenant": "T", "order_id": f"O-{number}",
+             "recipient_id": f"R-{number}", "weight": number,
+             "source_fk": f"O-{number}", "target_fk": f"R-{number}",
+             "target_match": f"O-{number}"}
+            for number in (20, 10)]
+    if join_values == "trimmed":
+        for row in rows:
+            row["source_fk"] = f" {row['source_fk']}\t"
+            row["target_fk"] = f"\t{row['target_fk']} "
+            row["target_match"] = f"\t{row['target_match']} "
+    elif join_values in {"null", "empty", "blank"}:
+        # A true NULL must never join the literal string "None". Empty and
+        # whitespace-only keys must never join each other either.
+        missing = {"null": None, "empty": "", "blank": " \t "}[join_values]
+        literal = "None" if join_values == "null" else "valid"
+        rows[0].update(source_fk=missing, target_fk=missing, target_match=missing)
+        rows[1].update(order_id=literal, recipient_id=literal, source_fk=literal,
+                       target_fk=literal, target_match=literal)
+    elif join_values.startswith("nonunique"):
+        # Distinct valid PKs sharing a non-PK target key are both in the
+        # relational join universe. Never silently choose the last endpoint.
+        rows[1]["target_match"] = rows[0]["target_match"]
+    sync, gate = store.begin_snapshot(db, {
+        "asset_id": asset.id, "dataset_id": dataset.id, "connection_id": connection.id,
+        "resource": "public.edges", "schema": schema, "primary_key": primary_key,
+        "schema_fingerprint": fingerprint, "expected_rows": len(rows),
+        "snapshot": {"id": str(uuid.uuid4()), "consistent": True, "kind": "repeatable_read",
+                     "started_at": "2026-10-24T08:00:00+00:00"},
+    })
+    hasher = store.snapshot_hasher(sync)
+    store.write_snapshot_batch(db, sync, gate, rows, hasher)
+    version = store.seal_snapshot(db, sync, {
+        "complete": True, "row_count": len(rows), "schema_fingerprint": fingerprint,
+        "snapshot_id": sync.snapshot_json["id"],
+    }, hasher.hexdigest())
+    # Current metadata can drift independently. The frozen version still owns
+    # edge_number's native type and tenant-before-number composite key order.
+    dataset.schema_json = {"columns": schema, "primary_key": "edge_number"}
+    db.commit()
+
+    draft = _draft(client, auth_headers, oid, _root(client, auth_headers, oid)["id"])
+    saved = client.put(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/workspace",
+        headers=auth_headers, json={
+            "baseRevision": f"{draft['revision']}:{draft['snapshot_hash']}",
+            "version": draft["version_number"],
+            "objectTypes": [
+                {"id": kind, "name": kind.title(), "displayName": kind,
+                 "primaryKey": f"pk-{kind}", "properties": [
+                     {"id": f"pk-{kind}", "name": column, "type": "string", "required": True}]}
+                for kind, column in (("order", "order_id"), ("recipient", "recipient_id"))
+            ] + [{"id": "receipt", "name": "Receipt", "displayName": "Receipt",
+                  "primaryKey": "receipt-number", "properties": [
+                      {"id": "receipt-tenant", "name": "tenant", "type": "string", "required": True},
+                      {"id": "receipt-number", "name": "edge_number", "type": "number", "required": True}]}],
+            "linkTypes": [{"id": "owner", "name": "owner", "displayName": "Owner",
+                           "sourceObjectTypeId": "order", "targetObjectTypeId": "recipient",
+                           "cardinality": ("one-to-one" if join_values == "nonunique-one-to-one" else
+                                           "one-to-many" if join_values == "nonunique" else "many-to-one"),
+                           "properties": [
+                               {"id": "weight", "name": "weight", "type": "number"}]
+                           if link_mode == "edge" else []}],
+            "actions": [], "functions": [], "instances": [], "linkInstances": [],
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    mapped = client.put(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/workspace/mappings",
+        headers=auth_headers, json={
+            "baseRevision": saved.json()["data"]["revision"],
+            "mappings": [{"id": f"map-{kind}", "curatedDatasetId": dataset.id,
+                          "entityClass": kind.title(), "targetObjectTypeId": kind,
+                          "fieldMapping": {column: column, "__primary_key__": column}}
+                         for kind, column in (("order", "order_id"), ("recipient", "recipient_id"))] + [
+                             {"id": "map-receipt", "curatedDatasetId": dataset.id,
+                              "entityClass": "Receipt", "targetObjectTypeId": "receipt",
+                              "fieldMapping": {"tenant": "tenant", "edge_number": "edge_number"}}],
+            "linkMappings": [{"id": "map-owner", "linkTypeId": "owner", "relationType": "owner",
+                              "srcDatasetId": dataset.id, "tgtDatasetId": dataset.id,
+                              "edgeDatasetId": dataset.id if link_mode == "edge" else None,
+                              "srcKey": "source_fk",
+                              "tgtKey": "target_fk" if link_mode == "edge" else "target_match",
+                              "fieldMapping": {"weight": "weight"} if link_mode == "edge" else {}}],
+            "sentinels": [],
+        },
+    )
+    assert mapped.status_code == 200, mapped.text
+    _attach_semantic_layer(db, draft["id"])
+    response = client.post(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/trial-runs",
+        headers=auth_headers, json={},
+    )
+    assert response.status_code == 201, response.text
+    trial = response.json()["data"]
+    assert {pin["versionId"] for pin in trial["dataset_versions"]} == {version.id}
+    if join_values == "nonunique-one-to-one":
+        assert trial["status"] == "failed", trial
+        assert trial["result"]["counts"]["links"] == 2
+        assert any(error["code"].startswith("cardinality") for error in trial["result"]["errors"])
+        assert db.query(OntologyTrialObject).filter_by(trial_run_id=trial["id"]).count() == 0
+        assert db.query(OntologyTrialLink).filter_by(trial_run_id=trial["id"]).count() == 0
+        assert db.query(ObjectInstance).filter_by(ontology_id=oid).count() == 0
+        assert db.query(LinkInstance).filter_by(ontology_id=oid).count() == 0
+        assert db.query(PropertyFact).filter_by(ontology_id=oid).count() == 0
+        return
+    assert trial["status"] == "passed", trial
+    expected_objects = {}
+    for row in rows:
+        composite_key = ('composite_pk:{"columns":["tenant","edge_number"],"values":["T","'
+                         + str(row["edge_number"]) + '"]}')
+        for kind, identity, properties in (
+            ("Order", f"order_id:{row['order_id']}", {"order_id": row["order_id"]}),
+            ("Recipient", f"recipient_id:{row['recipient_id']}", {"recipient_id": row["recipient_id"]}),
+            ("Receipt", composite_key, {"tenant": "T", "edge_number": row["edge_number"]}),
+        ):
+            entity_id = stable_pipeline_entity_id(oid, kind, identity)
+            expected_objects[stable_object_instance_id(oid, entity_id)] = (entity_id, properties)
+    assert {item.object_id: (item.external_id, item.properties)
+            for item in db.query(OntologyTrialObject).filter_by(trial_run_id=trial["id"])} == expected_objects
+    expected = {}
+    pairs = ([(rows[0], target) for target in rows] if join_values == "nonunique" else
+             [(row, row) for row in rows if row is not rows[0] or join_values not in {"null", "empty", "blank"}])
+    for row, target in pairs:
+        source_entity = stable_pipeline_entity_id(oid, "Order", f"order_id:{row['order_id']}")
+        target_entity = stable_pipeline_entity_id(oid, "Recipient", f"recipient_id:{target['recipient_id']}")
+        source_id, target_id = (stable_object_instance_id(oid, entity)
+                                for entity in (source_entity, target_entity))
+        edge_key = ('composite_pk:{"columns":["tenant","edge_number"],"values":["T","'
+                    + str(row["edge_number"]) + '"]}') if link_mode == "edge" else ""
+        link_id = stable_link_instance_id(oid, "owner", source_id, target_id, edge_key)
+        provenance = f"link_mapping:map-owner:{edge_key}" if edge_key else "link_mapping:map-owner"
+        relation_id = stable_pipeline_relation_id(
+            oid, source_entity, target_entity, "owner", provenance,
+        )
+        expected[link_id] = (relation_id, {"weight": row["weight"]} if link_mode == "edge" else {})
+    isolated = {item.link_id: (item.source_relation_id, item.properties)
+                for item in db.query(OntologyTrialLink).filter_by(trial_run_id=trial["id"])}
+    assert isolated == expected
+    impact = client.get(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/impact", headers=auth_headers,
+    ).json()["data"]
+    promoted = client.post(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/promote", headers=auth_headers,
+        json={"trialRunId": trial["id"], "impactHash": impact["impactHash"]},
+    )
+    assert promoted.status_code == 201, promoted.text
+    release_id = promoted.json()["data"]["id"]
+    promoted_fact_ids = None
+    for replay in (False, True):
+        if replay:
+            MappingService(db).build_all(oid, require_approved=True)
+        db.expire_all()
+        assert {item.id: (item.external_id, item.properties)
+                for item in db.query(ObjectInstance).filter_by(ontology_id=oid)} == expected_objects
+        assert {item.ontology_release_id for item in db.query(ObjectInstance).filter_by(
+            ontology_id=oid)} == {release_id}
+        assert {item.id: (item.source_relation_id, item.properties)
+                for item in db.query(LinkInstance).filter_by(ontology_id=oid)} == expected
+        assert {item.ontology_release_id for item in db.query(LinkInstance).filter_by(
+            ontology_id=oid)} == {release_id}
+        assert {item.source_dataset_version_id for item in db.query(PropertyFact).filter_by(
+            ontology_id=oid, kind="property")} == {version.id}
+        link_facts = db.query(PropertyFact).filter_by(ontology_id=oid, kind="link").all()
+        expected_facts = {(link_id, "exists"): True for link_id in expected}
+        expected_facts.update({(link_id, key): value for link_id, (_, properties) in expected.items()
+                               for key, value in properties.items()})
+        assert {(item.instance_id, item.property_name): item.value["v"]
+                for item in link_facts} == expected_facts
+        assert len(link_facts) == len(expected_facts)
+        assert {item.source_dataset_version_id for item in link_facts} == {version.id}
+        assert {item.ontology_release_id for item in link_facts} == {release_id}
+        assert {item.caused_by for item in link_facts} == {trial["id"]}
+        if promoted_fact_ids is None:
+            promoted_fact_ids = {item.id for item in link_facts}
+        else:
+            assert {item.id for item in link_facts} == promoted_fact_ids
+
+
+@pytest.mark.parametrize("link_property_name,rejected", [("exists", True), ("Exists", False), (" exists", False)])
+def test_link_definition_reserves_only_exact_existence_fact_property(link_property_name, rejected):
+    from app.ontologies.versions.evolution_service import snapshot_models
+    from app.ontologies.formal_modeling.validation import validate_model
+
+    snapshot = complete_snapshot({
+        "objectTypes": [{"id": "object", "name": "Object", "displayName": "Object",
+                         "properties": [{"id": "object-exists", "name": "exists", "type": "boolean"}]}],
+        "linkTypes": [{"id": "link", "name": "link", "displayName": "link",
+                       "sourceObjectTypeId": "object", "targetObjectTypeId": "object",
+                       "cardinality": "many-to-many",
+                       "properties": [{"id": "link-exists", "name": link_property_name, "type": "boolean"}]}],
+    })
+    model = snapshot_models(snapshot)
+    for errors in (validate_snapshot(snapshot), validate_model(
+            model["objectTypes"], model["linkTypes"], [], [], [], [])):
+        reserved = [error for error in errors if error["code"] == "reserved_link_property"]
+        assert bool(reserved) is rejected
+        assert all(error["kind"] == "linkType" and error["id"] == "link" and error["field"] == "exists"
+                   for error in reserved)
+        assert not any(error["kind"] == "objectType" for error in errors)
+
+
+def test_reserved_link_existence_property_rejects_trial_and_legacy_promote_without_pollution(
+        client, auth_headers, ontology, db, monkeypatch, admin_user):
+    from app.ontologies.versions.evolution_service import materialize_trial
+
+    oid = ontology["id"]
+    root = _root(client, auth_headers, oid)
+    _dataset(db, monkeypatch)
+    baseline = _promote_configured_lake_release(client, auth_headers, oid, root["id"], db)
+    draft = _draft(client, auth_headers, oid, baseline["id"])
+    draft_row = db.query(OntologyVersion).filter_by(id=draft["id"]).one()
+    snapshot = complete_snapshot(copy.deepcopy(draft_row.snapshot_formal))
+    snapshot["linkTypes"] = [{
+        "id": "reserved-link", "name": "reserved", "displayName": "reserved",
+        "sourceObjectTypeId": "ot-order", "targetObjectTypeId": "ot-order",
+        "cardinality": "many-to-many",
+        "properties": [{"id": "reserved-exists", "name": "exists", "type": "boolean"}],
+    }]
+    snapshot["linkMappings"] = [{
+        "id": "reserved-link-map", "linkTypeId": "reserved-link", "relationType": "reserved",
+        "srcDatasetId": "dataset-orders", "tgtDatasetId": "dataset-orders",
+        "srcKey": "id", "tgtKey": "id", "fieldMapping": {"exists": "id"},
+    }]
+    # Model a draft saved by an earlier deployment that accepted this name.
+    draft_row.snapshot_formal = snapshot
+    draft_row.snapshot_hash = snapshot_hash(snapshot)
+    db.commit()
+    _attach_semantic_layer(db, draft["id"])
+
+    def live_state():
+        return {
+            "objects": [(row.id, row.object_type_id, copy.deepcopy(row.properties),
+                         copy.deepcopy(row.computed), row.external_id, row.ontology_release_id)
+                        for row in db.query(ObjectInstance).filter_by(ontology_id=oid).order_by(ObjectInstance.id)],
+            "links": [(row.id, row.link_type_id, copy.deepcopy(row.properties), row.ontology_release_id)
+                      for row in db.query(LinkInstance).filter_by(ontology_id=oid).order_by(LinkInstance.id)],
+            "facts": [(row.id, row.kind, row.property_name, copy.deepcopy(row.value), row.seq,
+                       row.supersedes_id, row.ontology_release_id, row.source_dataset_version_id)
+                      for row in db.query(PropertyFact).filter_by(ontology_id=oid).order_by(PropertyFact.id)],
+            "releases": [row.id for row in db.query(OntologyVersion).filter_by(
+                ontology_id=oid, node_kind="release").order_by(OntologyVersion.id)],
+        }
+
+    before = live_state()
+    trial = client.post(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/trial-runs", headers=auth_headers, json={})
+    assert trial.status_code == 422, trial.text
+    assert "reserved_link_property" in {error["code"] for error in trial.json()["detail"]["errors"]}
+    assert db.query(OntologyTrialRun).filter_by(version_id=draft["id"]).count() == 0
+
+    # Even a direct worker invocation validates definitions and clears all
+    # otherwise valid candidate objects and links before returning failure.
+    baseline_snapshot = db.query(OntologyVersion).filter_by(id=baseline["id"]).one().snapshot_formal
+    impact = impact_report(baseline_snapshot, snapshot)
+    run = OntologyTrialRun(
+        ontology_id=oid, version_id=draft["id"], revision=draft_row.revision,
+        snapshot_hash=draft_row.snapshot_hash, base_release_id=baseline["id"],
+        impact_hash=impact["impactHash"], created_by=admin_user.id, status="running")
+    db.add(run)
+    db.flush()
+    result = materialize_trial(db, run, snapshot)
+    db.commit()
+    assert run.status == "failed"
+    assert {key: result["counts"][key] for key in ("objects", "links")} == {"objects": 2, "links": 2}
+    assert "reserved_link_property" in {error["code"] for error in result["errors"]}
+    assert db.query(OntologyTrialObject).filter_by(trial_run_id=run.id).count() == 0
+    assert db.query(OntologyTrialLink).filter_by(trial_run_id=run.id).count() == 0
+    assert live_state() == before
+
+    # A stale/legacy passed candidate cannot bypass the canonical publish gate
+    # and commit business exists=False over the system existence head.
+    for item in db.query(ObjectInstance).filter_by(ontology_id=oid).all():
+        db.add(OntologyTrialObject(
+            trial_run_id=run.id, object_id=item.id, object_type_id=item.object_type_id,
+            properties=copy.deepcopy(item.properties), computed=copy.deepcopy(item.computed),
+            source_dataset_id="dataset-orders", source_dataset_version_id=run.dataset_versions[0]["versionId"],
+            external_id=item.external_id))
+        db.add(OntologyTrialLink(
+            trial_run_id=run.id, link_id=f"legacy-link-{item.id}", link_type_id="reserved-link",
+            source_object_id=item.id, target_object_id=item.id, properties={"exists": False}))
+    run.status = "passed"
+    draft_row.lifecycle_status = "trial_ready"
+    db.commit()
+    promoted = client.post(
+        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/promote", headers=auth_headers,
+        json={"trialRunId": run.id, "impactHash": impact["impactHash"]})
+    assert promoted.status_code == 422, promoted.text
+    assert promoted.json()["detail"]["code"] == "publish_validation_failed"
+    assert "reserved_link_property" in {error["code"] for error in promoted.json()["detail"]["errors"]}
+    db.expire_all()
+    assert db.query(OntologyProject).filter_by(id=oid).one().current_release_id == baseline["id"]
+    assert live_state() == before
 
 
 def test_passed_trial_is_frozen_and_can_only_continue_in_a_new_branch(

@@ -154,7 +154,7 @@ def iter_rows_with_edits(
 ):
     """分批产出叠加了已批准审核编辑的行（生成器）。
 
-    curated 湖表版本经 lake_store.stream_rows 分批流式 + 批内叠加；历史
+    curated 湖表版本经 lake_store.iter_rows_at_version 精确回放 + 批内叠加；历史
     blob 版本保持「全量读取 + 全量叠加（含未命中校验）」后分批产出。
     存储读取、校验或解析失败均抛错。
     """
@@ -173,7 +173,8 @@ def iter_rows_with_edits(
 
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if dataset is not None and lake_store.version_uses_lake(dataset, version):
-        for batch in lake_store.stream_rows(db, dataset, batch_size=batch_size):
+        for batch in lake_store.iter_rows_at_version(
+                db, dataset, version.version_no, batch_size=batch_size):
             yield apply_row_edits_to_batch(
                 db, dataset_id, batch, dataset_version_id=version.id)
         return

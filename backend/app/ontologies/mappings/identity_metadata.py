@@ -12,7 +12,7 @@ from app.ontologies.mappings.errors import MappingSourceError
 class IdentityMetadataMixin:
     """Cohesive identity and metadata behavior exposed through MappingService."""
 
-    def _normalize_mapping(self, mapping: OntologyMapping, rows: list[dict]) -> None:
+    def _normalize_mapping(self, mapping: OntologyMapping, rows: list[dict], *, source_metadata: dict | None = None) -> None:
         if not rows:
             return
         sample = rows[0]
@@ -70,8 +70,19 @@ class IdentityMetadataMixin:
                 candidate = f"source_{re.sub(r'[^A-Za-z0-9_]', '_', str(col))}_value"
             field_map[col] = candidate
             occupied.add(candidate)
-        canonical_dataset, declared = self._dataset_primary_key(
-            mapping.curated_dataset_id)
+        if source_metadata is not None:
+            # Execution is pinned to an immutable version, not mutable Dataset
+            # schema. Explicit mapping overrides are a separate identity contract.
+            declared = ",".join(source_metadata.get("primary_key_columns") or []) or None
+            canonical_dataset = False
+            if not field_map.get("__primary_key__"):
+                if not declared:
+                    raise MappingSourceError("映射不可变版本缺少显式主键契约")
+                field_map["__primary_key__"] = declared
+                field_map["__pk_source__"] = "lake"
+        else:
+            canonical_dataset, declared = self._dataset_primary_key(
+                mapping.curated_dataset_id)
         if canonical_dataset:
             if not declared:
                 raise MappingSourceError(
@@ -98,7 +109,8 @@ class IdentityMetadataMixin:
             and all(self._has_complete_pk(row, pk_col) for row in rows)
         )
         if (
-            not canonical_dataset
+            source_metadata is None
+            and not canonical_dataset
             and (
             not pk_col
             or (
@@ -471,9 +483,9 @@ class IdentityMetadataMixin:
             "name_en": str(en)[:200],
         }
 
-    def _rows_to_entities(self, mapping: OntologyMapping, rows: list[dict]) -> list[dict]:
+    def _rows_to_entities(self, mapping: OntologyMapping, rows: list[dict], *, pk_col: str | None = None) -> list[dict]:
         field_map = mapping.field_mapping or {}
-        pk_col = field_map.get("__primary_key__") or self._choose_pk_col(rows)
+        pk_col = pk_col or field_map.get("__primary_key__") or self._choose_pk_col(rows)
         property_meta = self._property_metadata_by_column(field_map)
         runtime_keys = {
             "id", "ontology_id", "source_id", "object_type", "source_row_count",

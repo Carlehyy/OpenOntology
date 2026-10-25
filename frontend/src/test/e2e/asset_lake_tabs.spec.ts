@@ -271,7 +271,7 @@ async function mockAssetLake(page: Page, fixtures?: {
   })
 }
 
-test('资产湖仅保留两个数据集入口，并复用滑动选中动画', async ({ page }) => {
+test('资产湖保留原有入口并新增集成数据集，复用滑动选中动画', async ({ page }) => {
   await mockAssetLake(page)
   await page.goto('/#/data/structured?tab=sync', { waitUntil: 'domcontentloaded' })
 
@@ -283,6 +283,7 @@ test('资产湖仅保留两个数据集入口，并复用滑动选中动画', as
   await expect(curatedTab).toHaveAttribute('aria-pressed', 'true')
   await expect(manualTab).toHaveAttribute('aria-pressed', 'false')
   await expect(page.getByRole('button', { name: '连接同步数据集' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '集成数据集', exact: true })).toHaveAttribute('aria-pressed', 'false')
   await expect(indicator).toHaveCSS('transition-duration', '0.3s')
 
   const initialLeft = Number.parseFloat(await indicator.evaluate(element => (element as HTMLElement).style.left))

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.models.ontology import OntologyProject
+from app.models.ontology_version import OntologyVersion
 from app.models.ontology_formal import (
     ActionType,
     LinkInstance,
@@ -305,23 +306,32 @@ def test_absence_fact_flush_failure_does_not_poison_evaluator_session(
 
 
 def test_tuple_cap_is_an_error_and_does_not_consume_edges(db, monkeypatch):
+    """The 1000 cap remains a cross-binding guard, not a single-row cap."""
     ontology_id = "sentinel-cap"
     _project(db, ontology_id)
-    object_type = _object_type(db, ontology_id, "cap-object")
+    type_a = _object_type(db, ontology_id, "cap-a")
+    type_b = _object_type(db, ontology_id, "cap-b")
     db.add_all([
         ObjectInstance(
-            id=f"cap-{index}",
-            ontology_id=ontology_id,
-            object_type_id=object_type.id,
-            properties={"active": True},
+            id=f"cap-a-{index}", ontology_id=ontology_id,
+            object_type_id=type_a.id, properties={"active": True},
         )
-        for index in range(3)
+        for index in range(2)
+    ] + [
+        ObjectInstance(
+            id=f"cap-b-{index}", ontology_id=ontology_id,
+            object_type_id=type_b.id, properties={"active": True},
+        )
+        for index in range(2)
     ])
     sentinel = _sentinel(
         ontology_id,
         "cap-sentinel",
-        [{"alias": "a", "objectTypeId": object_type.id}],
-        condition="a.active == True",
+        [
+            {"alias": "a", "objectTypeId": type_a.id},
+            {"alias": "b", "objectTypeId": type_b.id},
+        ],
+        condition="a.active == True and b.active == True",
     )
     db.add(sentinel)
     db.commit()
@@ -336,6 +346,116 @@ def test_tuple_cap_is_an_error_and_does_not_consume_edges(db, monkeypatch):
     assert firing.left == []
     assert db.query(SentinelMatchState).filter_by(
         sentinel_id=sentinel.id).count() == 0
+
+
+def test_single_binding_runtime_scans_full_release_and_hits_last_row(
+        db, monkeypatch):
+    ontology_id = "sentinel-single-binding-full"
+    _project(db, ontology_id)
+    object_type = _object_type(db, ontology_id, "single-full")
+    db.add_all([
+        ObjectInstance(
+            id=f"single-full-{index}", ontology_id=ontology_id,
+            object_type_id=object_type.id,
+            properties={"index": index, "active": True},
+        )
+        for index in range(2000)
+    ])
+    sentinel = _sentinel(
+        ontology_id,
+        "single-full-sentinel",
+        [{"alias": "row", "objectTypeId": object_type.id}],
+        condition="row.index == 1999",
+    )
+    db.add(sentinel)
+    db.commit()
+    scanned: list[int] = []
+
+    def capture_absence(*_args, **kwargs):
+        scanned.append(int(kwargs.get("scanned") or 0))
+
+    monkeypatch.setattr(
+        "app.ontologies.formal_modeling.facts.record_absence_fact",
+        capture_absence,
+    )
+    firing = evaluator.evaluate_sentinel(db, ontology_id, sentinel, "manual")
+    assert firing.error is None, firing.error
+    assert firing.match_count == 1
+    assert firing.matches == [{"row": "single-full-1999"}]
+    assert scanned == [2000]
+
+    sentinel.condition = "row.index < 0"
+    db.commit()
+    zero = evaluator.evaluate_sentinel(db, ontology_id, sentinel, "manual")
+    assert zero.error is None, zero.error
+    assert zero.match_count == 0
+    assert scanned[-1] == 2000
+
+    sentinel.condition = "row.index == 1999 or row.missing == 1"
+    db.commit()
+    tail_error = evaluator.evaluate_sentinel(db, ontology_id, sentinel, "manual")
+    assert tail_error.status == "error"
+    assert tail_error.entered == []
+    assert tail_error.left == []
+    assert "不存在的属性" in (tail_error.error or "")
+
+
+def test_single_binding_preview_scans_full_release_and_hits_last_row(db):
+    ontology_id = "sentinel-single-preview-full"
+    _project(db, ontology_id)
+    object_type = _object_type(db, ontology_id, "preview-full")
+    release = OntologyVersion(
+        id="release-preview-full", ontology_id=ontology_id,
+        version_number="v1.0.0", version_label="preview full",
+        node_kind="release", lifecycle_status="released",
+        revision=0, snapshot_formal={"objectTypes": [], "linkTypes": [],
+                                     "actions": [], "functions": [],
+                                     "sentinels": []},
+        snapshot_hash="0" * 64, created_by="tests",
+    )
+    db.add(release)
+    db.add_all([
+        ObjectInstance(
+            id=f"preview-full-{index}", ontology_id=ontology_id,
+            ontology_release_id=release.id,
+            object_type_id=object_type.id,
+            properties={"index": index, "active": True},
+        )
+        for index in range(2000)
+    ])
+    sentinel = _sentinel(
+        ontology_id,
+        "preview-full-sentinel",
+        [{"alias": "row", "objectTypeId": object_type.id}],
+        condition="row.index == 1999",
+    )
+    db.add(sentinel)
+    db.commit()
+
+    report = evaluator.preview_sentinel(
+        db, ontology_id, sentinel, release.id)
+    assert report["errors"] == []
+    assert report["candidateCount"] == 2000
+    assert report["candidateCapReached"] is False
+    assert report["matchCount"] == 1
+
+    sentinel.condition = "row.index < 0"
+    db.commit()
+    zero = evaluator.preview_sentinel(
+        db, ontology_id, sentinel, release.id)
+    assert zero["errors"] == []
+    assert zero["candidateCount"] == 2000
+    assert zero["candidateCapReached"] is False
+    assert zero["matchCount"] == 0
+
+    sentinel.condition = "row.index == 1999 or row.missing == 1"
+    db.commit()
+    tail_error = evaluator.preview_sentinel(
+        db, ontology_id, sentinel, release.id)
+    assert tail_error["candidateCount"] == 2000
+    assert tail_error["candidateCapReached"] is False
+    assert tail_error["errors"]
+    assert tail_error["matchCount"] == 0
 
 
 def test_leave_snapshot_restores_unicode_properties_and_event_bindings(db):

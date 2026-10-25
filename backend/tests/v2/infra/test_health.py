@@ -186,3 +186,52 @@ def test_http_probe_closes_every_response(monkeypatch):
     assert all(response.timeout == 3.0 for response in responses)
     assert all(response.request.get_header("Connection") == "close"
                for response in responses)
+
+
+def test_non_production_readiness_does_not_require_dbx(monkeypatch):
+    from app.bootstrap import health
+
+    monkeypatch.setattr(health.settings, "environment", "test")
+    response = client.get("/health/ready")
+    assert "dbx" not in response.json()
+
+
+def test_production_readiness_requires_dbx(monkeypatch):
+    from app.bootstrap import health
+
+    class FakeDbx:
+        @staticmethod
+        def status():
+            return {
+                "configured": True,
+                "available": False,
+                "reason": "DBX_AUTH_FAILED",
+            }
+
+    monkeypatch.setattr(health.settings, "environment", "production")
+    monkeypatch.setattr(
+        "app.data_channel.integrated.dbx_adapter.DbxMetadataAdapter",
+        lambda: FakeDbx(),
+    )
+    response = client.get("/health/ready")
+    data = response.json()
+    assert data["dbx"] == "unavailable"
+    assert data["dbx_reason"] == "DBX_AUTH_FAILED"
+    assert "dbx" in data["unavailable"]
+
+
+def test_production_readiness_reports_dbx_ok(monkeypatch):
+    from app.bootstrap import health
+
+    class FakeDbx:
+        @staticmethod
+        def status():
+            return {"configured": True, "available": True, "reason": None}
+
+    monkeypatch.setattr(health.settings, "environment", "production")
+    monkeypatch.setattr(
+        "app.data_channel.integrated.dbx_adapter.DbxMetadataAdapter",
+        lambda: FakeDbx(),
+    )
+    response = client.get("/health/ready")
+    assert response.json()["dbx"] == "ok"

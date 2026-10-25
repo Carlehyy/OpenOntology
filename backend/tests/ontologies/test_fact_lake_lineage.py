@@ -231,3 +231,37 @@ def test_projection_link_facts_carry_source_version(
     assert fact is not None
     assert fact.source_dataset_version_id == "dv-9"
     assert fact.kind == "link"
+
+
+def test_promoted_link_lineage_uses_only_unambiguous_frozen_mapping_pins():
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from app.ontologies.versions.promotion_service import _link_fact_version
+
+    link = SimpleNamespace(link_id="link", link_type_id="owns", source_relation_id="relation",
+                           source_object_id="source", target_object_id="target")
+    endpoints = {"source": "source-dataset", "target": "target-dataset"}
+    direct = {"srcDatasetId": "source-dataset", "tgtDatasetId": "target-dataset"}
+    edge = {**direct, "edgeDatasetId": "edge-dataset"}
+    pins = {"source-dataset": {"versionId": "source-pin"},
+            "target-dataset": {"versionId": "target-pin"},
+            "edge-dataset": {"versionId": "edge-pin"}}
+    assert _link_fact_version(link, endpoints, {"owns": [direct]}, pins) == "source-pin"
+    assert _link_fact_version(link, endpoints, {"owns": [edge]}, pins) == "edge-pin"
+    assert _link_fact_version(link, endpoints, {"owns": [edge, dict(edge)]}, pins) == "edge-pin"
+    assert _link_fact_version(link, {}, {"owns": [edge]}, pins) is None
+    assert _link_fact_version(link, endpoints, {}, pins) is None
+    assert _link_fact_version(link, endpoints, {"owns": [edge]}, {}) is None
+    import copy
+    pins["other-edge-dataset"] = {"versionId": "other-edge-pin"}
+    before = copy.deepcopy((vars(link), endpoints, pins))
+    for compatible in ([direct, edge], [edge, {**direct, "edgeDatasetId": "other-edge-dataset"}]):
+        with pytest.raises(HTTPException) as ambiguous:
+            _link_fact_version(link, endpoints, {"owns": compatible}, pins)
+        assert ambiguous.value.status_code == 409
+        assert ambiguous.value.detail["code"] == "link_lineage_ambiguous"
+        assert ambiguous.value.detail["linkId"] == "link"
+        assert "血缘不唯一" in ambiguous.value.detail["message"]
+        assert (vars(link), endpoints, pins) == before
+    link.source_relation_id = None
+    assert _link_fact_version(link, endpoints, {"owns": [direct, edge]}, pins) is None

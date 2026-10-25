@@ -359,6 +359,24 @@ class Settings(BaseSettings):
     #            Celery 派发失败时降级为内联执行（fail-open，自动化不中断）；
     #   sync  —— 沿用 drain 线程内联执行（降级开关；测试环境默认）。
     dataset_event_dispatch_mode: str = "async"
+    # dbx is an explicitly configured, commit-pinned metadata lane. Native
+    # repeatable-read snapshots/DML do not substitute for missing dbx metadata.
+    integrated_dbx_url: str = ""
+    integrated_dbx_commit: str = "0137e0cbc8b663da5a17ec424c6d47e4e5570ead"
+    integrated_dbx_password: str = Field(default="", repr=False)
+    # Unified asset queries separate full input execution from paged output.
+    # PostgreSQL enforces execution/spill budgets; source row counts are not a
+    # sampling cap. Cross-source reads retain separate source snapshot times.
+    unified_query_statement_timeout_ms: int = Field(default=300_000, ge=1)
+    unified_query_lock_timeout_ms: int = Field(default=5_000, ge=1)
+    unified_query_work_mem_mib: int = Field(default=32, ge=1)
+    unified_query_temp_file_limit_mib: int = Field(default=16_384, ge=1)
+    unified_query_staging_bytes_limit: int = Field(default=17_179_869_184, ge=1)
+    unified_query_result_bytes_limit: int = Field(default=1_073_741_824, ge=1)
+    unified_query_snapshot_ttl_seconds: int = Field(default=300, ge=1)
+    unified_query_max_active_per_user: int = Field(default=10, ge=1)
+    unified_query_batch_size: int = Field(default=2_000, ge=1, le=10_000)
+    unified_query_max_page_size: int = Field(default=1_000, ge=1, le=10_000)
     # Trial materialization runs synchronously but persists its running claim
     # first.  Expired claims are terminalized and can no longer block retry or
     # deletion; late completion is fenced by the per-run claim token.
@@ -544,6 +562,53 @@ def required_dependency_config_errors(current: Settings) -> list[str]:
     return errors
 
 
+def _integrated_dbx_config_errors(current: Settings) -> list[str]:
+    """Validate the production-only pinned dbx metadata transport.
+
+    Non-production deployments intentionally do not require dbx: local/test
+    fixtures still use native PostgreSQL capabilities. Production fail-closed
+    state is owned by deploy-prod.sh (internal service/default or explicit
+    external endpoint); this ingress validation catches bypasses.
+    """
+    errors: list[str] = []
+    raw_url = str(current.integrated_dbx_url or "").strip()
+    password = str(current.integrated_dbx_password or "")
+    commit = str(current.integrated_dbx_commit or "").strip()
+    if not raw_url or not password:
+        errors.append(
+            "INTEGRATED_DBX_URL / INTEGRATED_DBX_PASSWORD must configure "
+            "the pinned dbx metadata lane in production"
+        )
+    if commit != "0137e0cbc8b663da5a17ec424c6d47e4e5570ead":
+        errors.append(
+            "INTEGRATED_DBX_COMMIT must equal the pinned dbx release commit"
+        )
+    if raw_url:
+        try:
+            parsed = urlsplit(raw_url)
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError:
+            parsed = None
+            hostname = None
+        if (
+            parsed is None
+            or parsed.scheme not in {"http", "https"}
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or any(character.isspace() for character in raw_url)
+        ):
+            errors.append(
+                "INTEGRATED_DBX_URL must be an absolute http(s) origin "
+                "without credentials, path, query, or fragment"
+            )
+    return errors
+
+
 def production_config_errors(current: Settings) -> list[str]:
     """Return fail-closed production configuration errors.
 
@@ -600,6 +665,7 @@ def production_config_errors(current: Settings) -> list[str]:
     # fixtures and on-device integrations.
     if current.steward_browser_allow_private_networks:
         _insecure.append("STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS must be false")
+    _insecure.extend(_integrated_dbx_config_errors(current))
     _insecure.extend(required_dependency_config_errors(current))
     for key, value in (
         ("PIPELINE_FILE_PUBLIC_APP_BASE_URL",

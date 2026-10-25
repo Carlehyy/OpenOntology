@@ -18,6 +18,7 @@ export default defineConfig({
     '**/export.spec.ts',
     '**/graph_interaction.spec.ts',
     '**/i18n.spec.ts',
+    '**/integrated_datasets_real.spec.ts',
     '**/all_domains_full_test.spec.ts',
     '**/minio_platform.spec.ts',
     '**/ontology_detail.spec.ts',

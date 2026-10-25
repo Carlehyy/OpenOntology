@@ -727,17 +727,6 @@ def _pk_columns(value: Any) -> list[str]:
     return [part.strip() for part in str(value or "").split(",") if part.strip()]
 
 
-def _row_identity(row: dict, pk: str) -> str | None:
-    columns = _pk_columns(pk)
-    if not columns or any(row.get(column) in (None, "") for column in columns):
-        return None
-    if len(columns) == 1:
-        return f"{columns[0]}:{row.get(columns[0])}"
-    return "composite_pk:" + json.dumps({
-        "columns": columns, "values": [row.get(column) for column in columns],
-    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-
-
 def _latest_version(db: Session, dataset_id: str) -> tuple[Dataset, DatasetVersion]:
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if dataset is None:
@@ -1062,7 +1051,13 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
     return errors
 
 
-def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) -> list[dict]:
+def _simulate_sentinels(snapshot: dict, objects, links, *, reader=None) -> list[dict]:
+    from contextlib import ExitStack
+    with ExitStack() as staging:
+        return _simulate_sentinels_projection(snapshot, objects, links, reader=reader, staging=staging)
+
+
+def _simulate_sentinels_projection(snapshot, objects, links, *, reader, staging) -> list[dict]:
     """Evaluate isolated trial data with the production sentinel contracts.
 
     Every planned action runs through Action Engine's explicit preview-only
@@ -1070,13 +1065,17 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
     object/link planning semantics with production while suppressing every
     ActionLog/Fact/Notification/network side effect.
     """
+    if not snapshot.get("sentinels"):
+        return []
     by_type: dict[str, list[dict]] = {}
-    for item in objects:
-        by_type.setdefault(item["objectTypeId"], []).append(item)
-    link_keys = {
-        (item["linkTypeId"], item["sourceObjectId"], item["targetObjectId"])
-        for item in links
-    }
+    link_keys = set()
+    if reader is None:
+        for item in objects:
+            by_type.setdefault(item["objectTypeId"], []).append(item)
+        link_keys = {
+            (item["linkTypeId"], item["sourceObjectId"], item["targetObjectId"])
+            for item in links
+        }
     try:
         models = snapshot_models(snapshot)
         action_models = {
@@ -1119,7 +1118,7 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
             ontology_release_id=None,
         )
 
-    isolated_objects = [object_model(item) for item in objects]
+    isolated_objects = [object_model(item) for item in objects] if reader is None else []
     isolated_links = [
         SimpleNamespace(
             id=item["linkId"],
@@ -1129,9 +1128,18 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
             properties=dict(item.get("properties") or {}),
         )
         for item in links
-    ]
+    ] if reader is None else []
 
     def derive_candidate(candidate, _object_type, extras: list) -> dict:
+        # Valid computed bindings are object-only by the immutable definition
+        # gate. No unrelated trial objects are needed to recompute one preview.
+        if reader is not None:
+            values = [{"objectId": candidate.id, "objectTypeId": candidate.object_type_id,
+                       "properties": candidate.properties, "computed": candidate.computed or {}}]
+            derived_errors = _compute_trial_derived(snapshot, values)
+            if derived_errors:
+                raise DerivedComputationError("；".join(str(item.get("message") or item) for item in derived_errors[:8]))
+            return values[0].get("computed") or {}
         candidates = [
             item for item in [*isolated_objects, *extras]
             if str(item.id) != str(candidate.id)
@@ -1167,6 +1175,7 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
         "objects": isolated_objects,
         "links": isolated_links,
         "derive": derive_candidate,
+        "reader": reader,
     }
 
     results = []
@@ -1194,24 +1203,23 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
             })
             continue
 
-        filtered_by_alias: dict[str, list[SimpleNamespace]] = {}
+        filtered_by_alias = {}
         for binding in bindings:
             alias = str(binding.get("alias") or "")
-            filtered: list[SimpleNamespace] = []
-            for obj in by_type.get(str(binding.get("objectTypeId")), []):
-                model = object_model(obj)
-                values = {
-                    **dict(model.properties or {}),
-                    **dict(model.computed or {}),
-                }
-                evaluation_errors: list[str] = []
-                if _passes(
-                        binding.get("filter"), alias, values,
-                        evaluation_errors):
-                    filtered.append(model)
+            def predicate(model, binding=binding, alias=alias):
+                values = {**dict(model.properties or {}), **dict(model.computed or {})}
+                evaluation_errors = []
+                passed = _passes(binding.get("filter"), alias, values, evaluation_errors)
                 for error in evaluation_errors:
                     add_error(errors, error)
-            filtered_by_alias[alias] = filtered
+                return passed
+            if reader is not None:
+                filtered_by_alias[alias] = staging.enter_context(reader.filtered_objects(
+                    str(binding.get("objectTypeId") or ""), predicate))
+            else:
+                filtered = [object_model(obj) for obj in by_type.get(str(binding.get("objectTypeId")), [])
+                            if predicate(object_model(obj))]
+                filtered_by_alias[alias] = lambda filtered=filtered: iter(filtered)
 
         sentinel_links = sentinel.get("links") or []
 
@@ -1221,11 +1229,8 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
                 to_alias = str(link.get("to") or "")
                 if from_alias not in tup or to_alias not in tup:
                     continue
-                if (
-                    str(link.get("linkTypeId") or ""),
-                    tup[from_alias].id,
-                    tup[to_alias].id,
-                ) not in link_keys:
+                key = (str(link.get("linkTypeId") or ""), tup[from_alias].id, tup[to_alias].id)
+                if not (reader.has_link(*key) if reader is not None else key in link_keys):
                     return False
             return True
 
@@ -1233,45 +1238,68 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
         # constrain candidates and validates every link whose endpoints have
         # become bound.  The trial mirrors that semantic rather than validating
         # a differently ordered full Cartesian product.
+        #
+        # The 1000 safety cap applies to cross-binding combinations, not to a
+        # single linear release scan.  A single binding must see every
+        # release-scoped row (including the last) so Trial cannot report a
+        # false cap or a partial matched/oracle set.  ``filtered_objects``
+        # stages/iterates in bounded batches; only the resolved candidate list
+        # is retained for condition/action evaluation.
         first_alias = str(bindings[0].get("alias") or "")
-        tuples: list[dict[str, SimpleNamespace]] = [
-            {first_alias: item}
-            for item in filtered_by_alias.get(first_alias, [])
-        ]
-        cap_reached = len(tuples) > MAX_SENTINEL_TUPLES
-        if cap_reached:
-            tuples = tuples[:MAX_SENTINEL_TUPLES]
-        for binding in bindings[1:]:
+        from itertools import islice
+        first_source = filtered_by_alias.get(first_alias, lambda: iter(()))()
+        single_binding = len(bindings) == 1 and not sentinel_links
+        matched_tuples: list[dict[str, SimpleNamespace]] = []
+        if single_binding:
+            # Stream the single release-scoped binding; never materialize the
+            # full candidate list.  Only final matches are retained for the
+            # action preview, and candidateCount is the actual filtered count.
+            candidate_count = 0
+            for item in first_source:
+                candidate_count += 1
+                tup = {first_alias: item}
+                evaluation_errors = []
+                if _holds(sentinel.get("condition"), tup, evaluation_errors):
+                    matched_tuples.append(tup)
+                for error in evaluation_errors:
+                    add_error(errors, error)
+            cap_reached = False
+        else:
+            tuples = [{first_alias: item} for item in islice(
+                first_source, MAX_SENTINEL_TUPLES + 1)]
+            cap_reached = len(tuples) > MAX_SENTINEL_TUPLES
             if cap_reached:
-                break
-            alias = str(binding.get("alias") or "")
-            expanded: list[dict[str, SimpleNamespace]] = []
-            for tup in tuples:
-                for candidate in filtered_by_alias.get(alias, []):
-                    joined = {**tup, alias: candidate}
-                    if not joined_links_hold(joined):
-                        continue
-                    expanded.append(joined)
-                    if len(expanded) > MAX_SENTINEL_TUPLES:
-                        cap_reached = True
-                        break
+                tuples = tuples[:MAX_SENTINEL_TUPLES]
+            for binding in bindings[1:]:
                 if cap_reached:
                     break
-            tuples = expanded[:MAX_SENTINEL_TUPLES]
-        if cap_reached:
-            add_error(
-                errors,
-                f"跨对象候选组合超过安全上限 {MAX_SENTINEL_TUPLES}，"
-                "请收窄绑定过滤条件后重试",
-            )
-
-        matched_tuples: list[dict[str, SimpleNamespace]] = []
-        for tup in tuples:
-            evaluation_errors = []
-            if _holds(sentinel.get("condition"), tup, evaluation_errors):
-                matched_tuples.append(tup)
-            for error in evaluation_errors:
-                add_error(errors, error)
+                alias = str(binding.get("alias") or "")
+                expanded: list[dict[str, SimpleNamespace]] = []
+                for tup in tuples:
+                    for candidate in filtered_by_alias.get(alias, lambda: iter(()))():
+                        joined = {**tup, alias: candidate}
+                        if not joined_links_hold(joined):
+                            continue
+                        expanded.append(joined)
+                        if len(expanded) > MAX_SENTINEL_TUPLES:
+                            cap_reached = True
+                            break
+                    if cap_reached:
+                        break
+                tuples = expanded[:MAX_SENTINEL_TUPLES]
+            if cap_reached:
+                add_error(
+                    errors,
+                    f"跨对象候选组合超过安全上限 {MAX_SENTINEL_TUPLES}，"
+                    "请收窄绑定过滤条件后重试",
+                )
+            for tup in tuples:
+                evaluation_errors = []
+                if _holds(sentinel.get("condition"), tup, evaluation_errors):
+                    matched_tuples.append(tup)
+                for error in evaluation_errors:
+                    add_error(errors, error)
+            candidate_count = len(tuples)
 
         primary = str(sentinel.get("primaryAlias") or "") or first_alias
         sentinel_model = SimpleNamespace(
@@ -1412,7 +1440,7 @@ def _simulate_sentinels(snapshot: dict, objects: list[dict], links: list[dict]) 
             "name": sentinel.get("displayName") or sentinel.get("name"),
             "activation": activation,
             "matched": matched,
-            "candidateCount": len(tuples),
+            "candidateCount": candidate_count,
             "candidateCapReached": cap_reached,
             "parameterErrorCount": parameter_error_count,
             "errors": errors,
@@ -1576,337 +1604,70 @@ def _compute_trial_derived(snapshot: dict, objects: list[dict]) -> list[dict]:
 
 
 def materialize_trial(db: Session, run: OntologyTrialRun, snapshot: dict) -> dict:
-    """固定 latest 湖版本并构建隔离对象/关系；任何错误都 fail-closed。"""
+    """Pin full governed versions in an isolated, database-backed projection."""
+    import sys
+    from app.ontologies.versions.batching import query_batches
+    from app.ontologies.versions.model_validator import ValidationErrors, validate_persisted_model
+    from app.ontologies.versions.trial_projection import persist_trial_projection
+
     snap = complete_snapshot(snapshot)
-    errors = validate_snapshot(snap)
-    warnings: list[dict] = []
-    object_types = {str(item.get("id")): item for item in snap["objectTypes"]}
-    mapped_types: set[str] = set()
-    objects: list[dict] = []
-    links: list[dict] = []
-    pinned: dict[str, dict] = {}
-    # 一个资产可以同时映射到多个对象类型。端点行必须按
-    # (dataset, object type) 精确索引，不能让后出现的映射覆盖前者。
-    mapping_rows: dict[tuple[str, str], dict[str, Any]] = {}
-    object_ids: set[str] = set()
-    object_entity_ids: dict[str, str] = {}
-
-    for raw_mapping in snap["mappings"]:
-        mapping_id = str(raw_mapping.get("id") or "")
-        dataset_id = str(raw_mapping.get("curatedDatasetId") or "")
-        target = _object_type_for_mapping(raw_mapping, object_types)
-        if target is None:
-            errors.append({
-                "code": "mapping_object_type_not_found", "kind": "mapping",
-                "id": mapping_id, "name": raw_mapping.get("entityClass") or "",
-                "message": "Mapping 绑定的 ObjectType 不存在",
-            })
-            continue
-        if not dataset_id:
-            errors.append({
-                "code": "mapping_dataset_missing", "kind": "mapping",
-                "id": mapping_id, "name": raw_mapping.get("entityClass") or "",
-                "message": "Mapping 未绑定数据集",
-            })
-            continue
-        try:
-            dataset, version = _latest_version(db, dataset_id)
-            mapping = OntologyMapping(
-                id=mapping_id or str(uuid.uuid4()), ontology_id=run.ontology_id,
-                curated_dataset_id=dataset_id,
-                entity_class=str(raw_mapping.get("entityClass") or target.get("name") or ""),
-                target_object_type_id=str(target.get("id")),
-                field_mapping=json_safe(raw_mapping.get("fieldMapping") or {}),
-                status=str(raw_mapping.get("status") or "draft"),
-                confidence=raw_mapping.get("confidence"),
-            )
-            rows, loaded_version = load_mapping_source_rows(db, mapping, require_approved=True)
-            if loaded_version is None or loaded_version.id != version.id:
-                raise MappingSourceError("读取的数据版本与 latest 指针不一致")
-        except Exception as exc:
-            errors.append({
-                "code": "mapping_source_unavailable", "kind": "mapping",
-                "id": mapping_id, "name": raw_mapping.get("entityClass") or "",
-                "message": str(exc),
-            })
-            continue
-
-        pinned[dataset_id] = {
-            "datasetId": dataset_id, "datasetName": dataset.name,
-            "versionId": version.id, "versionNo": version.version_no,
-            "checksum": version.checksum, "rowCount": len(rows),
-        }
-        field_map = raw_mapping.get("fieldMapping") or {}
-        pk = field_map.get("__primary_key__") or (dataset.schema_json or {}).get("primary_key")
-        if not _pk_columns(pk):
-            errors.append({
-                "code": "mapping_primary_key_missing", "kind": "mapping",
-                "id": mapping_id, "name": raw_mapping.get("entityClass") or "",
-                "message": "数据集没有稳定主键，无法证明对象身份",
-            })
-            continue
-        mapped_types.add(str(target.get("id")))
-        rows_with_ids: list[tuple[dict, str]] = []
-        for index, row in enumerate(rows):
-            identity = _row_identity(row, str(pk))
-            if identity is None:
-                errors.append({
-                    "code": "mapping_primary_key_value_missing", "kind": "objectInstance",
-                    "id": f"{mapping_id}:{index}", "name": raw_mapping.get("entityClass") or "",
-                    "message": "数据行主键为空，无法生成稳定对象身份",
-                })
-                continue
-            entity_class = str(
-                raw_mapping.get("entityClass") or target.get("name") or "")
-            entity_id = stable_pipeline_entity_id(
-                run.ontology_id, entity_class, identity)
-            object_id = stable_object_instance_id(run.ontology_id, entity_id)
-            if object_id in object_ids:
-                errors.append({
-                    "code": "duplicate_primary_key", "kind": "objectInstance",
-                    "id": object_id, "name": raw_mapping.get("entityClass") or "",
-                    "message": "数据集主键重复，多个数据行会覆盖同一对象",
-                })
-                continue
-            object_ids.add(object_id)
-            properties = {
-                str(target_name): row.get(source_name)
-                for source_name, target_name in field_map.items()
-                if not str(source_name).startswith("__") and source_name in row
-            }
-            # Formal projection performs the same coercion after MappingService
-            # writes its intermediate Entity rows.  Trial data must therefore
-            # validate and feed sentinels with those production values rather
-            # than raw CSV strings.
-            try:
-                properties = _coerce_props_to_type(
-                    properties, list(target.get("properties") or []))
-            except ValueError as exc:
-                errors.append({
-                    "code": "mapping_property_coercion_failed",
-                    "kind": "objectInstance", "id": object_id,
-                    "name": raw_mapping.get("entityClass") or "",
-                    "message": str(exc),
-                })
-            item = {
-                "objectId": object_id, "objectTypeId": str(target.get("id")),
-                "properties": properties, "sourceDatasetId": dataset_id,
-                "sourceDatasetVersionId": version.id, "externalId": entity_id,
-            }
-            objects.append(item)
-            object_entity_ids[object_id] = entity_id
-            rows_with_ids.append((row, object_id))
-        mapping_rows[(dataset_id, str(target.get("id")))] = {
-            "rows": rows_with_ids,
-            "primaryKey": pk,
-        }
-
-    for object_type in snap["objectTypes"]:
-        if str(object_type.get("id")) not in mapped_types:
-            warnings.append({
-                "code": "object_type_unmapped", "kind": "objectType",
-                "id": object_type.get("id"),
-                "message": "该对象类型没有数据映射，试跑中不会产生实例",
-            })
-
-    link_types = {str(item.get("id")): item for item in snap["linkTypes"]}
-    for link_mapping in snap["linkMappings"]:
-        link_type_id = str(link_mapping.get("linkTypeId") or "")
-        if link_type_id not in link_types:
-            errors.append({
-                "code": "link_mapping_type_not_found", "kind": "linkMapping",
-                "id": link_mapping.get("id") or "", "name": link_mapping.get("relationType") or "",
-                "message": "LinkMapping 绑定的 LinkType 不存在",
-            })
-            continue
-        link_type = link_types[link_type_id]
-        src_dataset = str(link_mapping.get("srcDatasetId") or "")
-        tgt_dataset = str(link_mapping.get("tgtDatasetId") or "")
-        src_type_id = str(link_type.get("sourceObjectTypeId") or "")
-        tgt_type_id = str(link_type.get("targetObjectTypeId") or "")
-        src_materialization = mapping_rows.get((src_dataset, src_type_id))
-        tgt_materialization = mapping_rows.get((tgt_dataset, tgt_type_id))
-        if src_materialization is None or tgt_materialization is None:
-            errors.append({
-                "code": "link_mapping_endpoint_mapping_missing",
-                "kind": "linkMapping", "id": link_mapping.get("id") or "",
-                "name": link_mapping.get("relationType") or "",
-                "message": "关系两端必须分别存在与对象类型匹配的数据映射",
-            })
-            continue
-        src_rows = src_materialization["rows"]
-        tgt_rows = tgt_materialization["rows"]
-        src_key = str(link_mapping.get("srcKey") or "")
-        tgt_key = str(link_mapping.get("tgtKey") or "")
-        pairs: list[tuple[str, str, dict, str]] = []
-        edge_dataset = link_mapping.get("edgeDatasetId")
-        if edge_dataset:
-            try:
-                dataset, version = _latest_version(db, str(edge_dataset))
-                transient = OntologyMapping(
-                    id=f"edge:{link_mapping.get('id')}", ontology_id=run.ontology_id,
-                    curated_dataset_id=str(edge_dataset), entity_class="__edge__",
-                    field_mapping={}, status="draft",
-                )
-                edge_rows, loaded = load_mapping_source_rows(
-                    db, transient, require_approved=True)
-                if loaded is None or loaded.id != version.id:
-                    raise MappingSourceError("关系数据版本与 latest 指针不一致")
-                pinned[str(edge_dataset)] = {
-                    "datasetId": str(edge_dataset), "datasetName": dataset.name,
-                    "versionId": version.id, "versionNo": version.version_no,
-                    "checksum": version.checksum, "rowCount": len(edge_rows),
-                }
-                # srcKey/tgtKey 是连接表的外键列；端点侧必须按各自对象映射
-                # 的主键建立索引，不能错误地把连接表列名套到端点数据集。
-                src_index = {
-                    str(row.get(_pk_columns(src_materialization["primaryKey"])[0])): oid
-                    for row, oid in src_rows
-                    if len(_pk_columns(src_materialization["primaryKey"])) == 1
-                }
-                tgt_index = {
-                    str(row.get(_pk_columns(tgt_materialization["primaryKey"])[0])): oid
-                    for row, oid in tgt_rows
-                    if len(_pk_columns(tgt_materialization["primaryKey"])) == 1
-                }
-                if not src_index and src_rows:
-                    raise MappingSourceError("连接表暂不支持复合主键源端点")
-                if not tgt_index and tgt_rows:
-                    raise MappingSourceError("连接表暂不支持复合主键目标端点")
-                fmap = link_mapping.get("fieldMapping") or {}
-                mapping_identity = MappingService(db)
-                edge_pk = mapping_identity._choose_pk_col(edge_rows)
-                for row in edge_rows:
-                    source_id = src_index.get(str(row.get(src_key)))
-                    target_id = tgt_index.get(str(row.get(tgt_key)))
-                    if source_id and target_id:
-                        props = {str(prop): row.get(column) for prop, column in fmap.items()
-                                 if not str(prop).startswith("__") and column in row}
-                        edge_key = mapping_identity._row_identity_value(
-                            row, edge_pk)
-                        pairs.append((source_id, target_id, props, edge_key))
-            except Exception as exc:
-                errors.append({
-                    "code": "link_mapping_source_unavailable", "kind": "linkMapping",
-                    "id": link_mapping.get("id") or "", "name": link_mapping.get("relationType") or "",
-                    "message": str(exc),
-                })
-        else:
-            target_index: dict[str, list[str]] = {}
-            for row, oid in tgt_rows:
-                target_index.setdefault(str(row.get(tgt_key)), []).append(oid)
-            for row, source_id in src_rows:
-                for target_id in target_index.get(str(row.get(src_key)), []):
-                    pairs.append((source_id, target_id, {}, ""))
-        relation_type = str(
-            link_mapping.get("relationType") or link_type.get("name") or "")
-        link_mapping_id = str(link_mapping.get("id") or "")
-        for source_id, target_id, properties, edge_key in pairs:
-            source_entity_id = object_entity_ids[source_id]
-            target_entity_id = object_entity_ids[target_id]
-            relation_source = (
-                f"link_mapping:{link_mapping_id}:{edge_key}"
-                if edge_key else f"link_mapping:{link_mapping_id}"
-            )
-            source_relation_id = stable_pipeline_relation_id(
-                run.ontology_id,
-                source_entity_id,
-                target_entity_id,
-                relation_type,
-                relation_source,
-            )
-            link_id = stable_link_instance_id(
-                run.ontology_id, link_type_id, source_id, target_id, edge_key)
-            try:
-                properties = _coerce_props_to_type(
-                    properties, list(link_type.get("properties") or []))
-            except ValueError as exc:
-                errors.append({
-                    "code": "link_mapping_property_coercion_failed",
-                    "kind": "linkInstance", "id": link_id,
-                    "name": relation_type,
-                    "message": str(exc),
-                })
-                continue
-            links.append({
-                "linkId": link_id, "linkTypeId": link_type_id,
-                "sourceObjectId": source_id, "targetObjectId": target_id,
-                "properties": properties,
-                "sourceRelationId": source_relation_id,
-            })
-
-    errors.extend(_compute_trial_derived(snap, objects))
+    errors = ValidationErrors(validate_snapshot(snap))
+    warnings = []
+    projection = persist_trial_projection(
+        db, run, snap, errors, warnings, service=sys.modules[__name__],
+    )
+    objects, links = projection["objects"], projection["links"]
+    # Valid computed-property contracts only consume their own stored object.
+    # The canonical definition gate rejects object_set/DAG computed bindings;
+    # direct helper callers retain their existing complete-scope semantics.
+    if not errors:
+        for page in query_batches(objects, OntologyTrialObject.object_id):
+            values = [{"objectId": item.object_id, "objectTypeId": item.object_type_id,
+                       "properties": item.properties, "computed": item.computed}
+                      for item in page]
+            errors.extend(_compute_trial_derived(snap, values))
+            for item, value in zip(page, values):
+                item.computed = value.get("computed") or {}
+            db.flush()
+        samples = {item["objectId"]: item for item in projection["samples"]["objects"]}
+        if samples:
+            for item in objects.filter(OntologyTrialObject.object_id.in_(samples)).all():
+                samples[item.object_id]["computed"] = item.computed or {}
 
     try:
         models = snapshot_models(snap)
-        instance_models = [SimpleNamespace(
-            id=item["objectId"], object_type_id=item["objectTypeId"],
-            properties=item["properties"], computed=item.get("computed") or {},
-        ) for item in objects]
-        link_models = [SimpleNamespace(
-            id=item["linkId"], link_type_id=item["linkTypeId"],
-            source_object_id=item["sourceObjectId"],
-            target_object_id=item["targetObjectId"], properties=item["properties"],
-        ) for item in links]
-        errors.extend(validate_model(
-            models["objectTypes"], models["linkTypes"], models["actions"],
-            models["functions"], instance_models, link_models,
+        errors.extend(validate_persisted_model(
+            db, run.ontology_id, models["objectTypes"], models["linkTypes"],
+            models["actions"], models["functions"], model_validator=validate_model,
+            object_rows=objects, link_rows=links,
         ))
     except Exception as exc:
-        errors.append({
-            "code": "trial_contract_validation_failed", "kind": "ontology",
-            "id": "", "name": "", "message": str(exc),
-        })
+        errors.append(dict(code="trial_contract_validation_failed", kind="ontology",
+                           id="", name="", message=str(exc)))
 
-    sentinel_results = _simulate_sentinels(snap, objects, links)
+    # The sentinel adapter is shared with direct simulation calls. It reads the
+    # same isolated candidate, never the live Formal universe.
+    from app.ontologies.versions.trial_projection import TrialProjectionReader
+    sentinel_results = _simulate_sentinels(
+        snap, objects, links, reader=TrialProjectionReader(db, objects, links, snapshot_models(snap)))
     for item in sentinel_results:
-        for error in item.get("errors") or []:
-            errors.append({
-                "code": "sentinel_trial_error", "kind": "sentinel",
-                "id": item.get("id") or "", "name": item.get("name") or "",
-                "message": error,
-            })
-
-    run.dataset_versions = list(pinned.values())
+        errors.extend(dict(code="sentinel_trial_error", kind="sentinel", id=item.get("id") or "",
+                           name=item.get("name") or "", message=error)
+                      for error in item.get("errors") or [])
+    run.dataset_versions = list(projection["pinned"].values())
     if settings.environment == "production":
-        errors.extend(validate_manual_mapping_trial_contract(
-            db, snap, run.dataset_versions,
-        ))
-
-    # 仅通过的试跑保留可晋级的完整投影；失败试跑保留摘要和样例，避免把大量
-    # 无效数据误认为可发布候选。
-    if not errors:
-        for item in objects:
-            db.add(OntologyTrialObject(
-                trial_run_id=run.id, object_id=item["objectId"],
-                object_type_id=item["objectTypeId"],
-                properties=item["properties"],
-                computed=item.get("computed") or {},
-                source_dataset_id=item["sourceDatasetId"],
-                source_dataset_version_id=item["sourceDatasetVersionId"],
-                external_id=item["externalId"],
-            ))
-        for item in links:
-            db.add(OntologyTrialLink(
-                trial_run_id=run.id, link_id=item["linkId"],
-                link_type_id=item["linkTypeId"],
-                source_object_id=item["sourceObjectId"],
-                target_object_id=item["targetObjectId"],
-                properties=item["properties"],
-                source_relation_id=item["sourceRelationId"],
-            ))
-
+        errors.extend(validate_manual_mapping_trial_contract(db, snap, run.dataset_versions))
+    if errors:
+        # Invalid rows are never publishable. SQL deletion does not collect the
+        # failed candidate in Python; the counts/sample summary remains audit.
+        links.delete(synchronize_session=False)
+        objects.delete(synchronize_session=False)
     result = {
-        "counts": {
-            "objects": len(objects), "links": len(links),
-            "facts": sum(len(item["properties"]) for item in objects),
-            "datasets": len(pinned),
-        },
-        "errors": errors, "warnings": warnings,
-        "sentinels": sentinel_results,
-        "samples": {"objects": objects[:10], "links": links[:10]},
-        "actionsExecuted": 0,
-        "sideEffects": "blocked",
+        "counts": {**projection["counts"], "datasets": len(projection["pinned"])},
+        "errors": errors, "errorCount": errors.total_count,
+        "errorCounts": dict(errors.code_counts), "errorsTruncated": errors.total_count > len(errors),
+        "warnings": warnings, "sentinels": sentinel_results,
+        "samples": projection["samples"], "actionsExecuted": 0, "sideEffects": "blocked",
     }
     run.result_json = json_safe(result)
     run.status = "passed" if not errors else "failed"

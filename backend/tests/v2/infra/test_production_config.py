@@ -48,6 +48,9 @@ def _production_settings(**updates):
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
         "steward_browser_allow_private_networks": False,
+        "integrated_dbx_url": "http://dbx:4224",
+        "integrated_dbx_password": "strong-dbx-password",
+        "integrated_dbx_commit": "0137e0cbc8b663da5a17ec424c6d47e4e5570ead",
     }
     values.update(updates)
     return Settings(**values)
@@ -55,6 +58,33 @@ def _production_settings(**updates):
 
 def test_existing_production_can_keep_secret_key_derived_encryption():
     assert production_config_errors(_production_settings()) == []
+
+
+def test_production_requires_pinned_dbx_metadata_configuration():
+    missing = production_config_errors(_production_settings(
+        integrated_dbx_url="",
+        integrated_dbx_password="",
+    ))
+    wrong_commit = production_config_errors(_production_settings(
+        integrated_dbx_commit="deadbeef",
+    ))
+    bad_url = production_config_errors(_production_settings(
+        integrated_dbx_url="https://user:pass@dbx.example.com/v1?x=1",
+    ))
+
+    assert any("INTEGRATED_DBX_URL / INTEGRATED_DBX_PASSWORD" in error
+               for error in missing)
+    assert any("INTEGRATED_DBX_COMMIT" in error for error in wrong_commit)
+    assert any("INTEGRATED_DBX_URL must be an absolute" in error
+               for error in bad_url)
+
+
+def test_production_accepts_external_dbx_metadata_configuration():
+    assert production_config_errors(_production_settings(
+        integrated_dbx_url="https://dbx.example.com",
+        integrated_dbx_password="external-password",
+        integrated_dbx_commit="0137e0cbc8b663da5a17ec424c6d47e4e5570ead",
+    )) == []
 
 
 def test_production_rejects_private_browser_network_access():
@@ -180,6 +210,19 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert backend["environment"]["N8N_TIMEOUT_SECONDS"] == (
         "${N8N_TIMEOUT_SECONDS:-30}"
     )
+    dbx = compose["services"]["dbx"]
+    assert dbx["image"].endswith(
+        "@sha256:b661f7e35deed06d9611dcda79c44ffcc8e4fd0f44308028ea77f7f18b36638c"
+    )
+    assert dbx["profiles"] == ["integrated-dbx"]
+    assert "ports" not in dbx
+    assert dbx["networks"] == ["dbx_bridge"]
+    assert "depends_on" not in dbx
+    assert compose["networks"]["dbx_bridge"] == {"driver": "bridge"}
+    assert "internal" not in compose["networks"]["dbx_bridge"]
+    assert backend["networks"] == ["default", "dbx_bridge"]
+    assert "dbx_data:/app/data" in dbx["volumes"]
+    assert "dbx_data" in compose["volumes"]
     assert "--requirepass" in compose["services"]["redis"]["command"][-1]
     assert "PIPELINE_FILE_PUBLIC_APP_BASE_URL" in backend["environment"]
     assert "PIPELINE_FILE_PUBLIC_API_BASE_URL" in backend["environment"]
@@ -1408,6 +1451,74 @@ def test_deploy_backfills_n8n_timeout_for_existing_env_and_old_manifest(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert _read_env(tmp_path / ".env")["N8N_TIMEOUT_SECONDS"] == "30"
+
+
+def test_deploy_generates_internal_dbx_defaults_without_printing_secret(tmp_path):
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
+    _write_valid_dependency_manifest(
+        tmp_path / "deploy" / "production.dependencies.env")
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["INTEGRATED_DBX_URL"] == "http://dbx:4224"
+    assert len(generated["INTEGRATED_DBX_PASSWORD"]) == 64
+    assert generated["INTEGRATED_DBX_COMMIT"] == (
+        "0137e0cbc8b663da5a17ec424c6d47e4e5570ead")
+    assert generated["INTEGRATED_DBX_PASSWORD"] not in result.stdout
+
+
+def test_deploy_preserves_explicit_external_dbx_configuration(tmp_path):
+    content = (ROOT / ".env.example").read_text().replace(
+        "INTEGRATED_DBX_URL=\n",
+        "INTEGRATED_DBX_URL=https://dbx.example.com\n",
+    ).replace(
+        "INTEGRATED_DBX_PASSWORD=\n",
+        "INTEGRATED_DBX_PASSWORD=external-dbx-password\n",
+    )
+    (tmp_path / ".env.example").write_text(content)
+    _write_valid_dependency_manifest(
+        tmp_path / "deploy" / "production.dependencies.env")
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["INTEGRATED_DBX_URL"] == "https://dbx.example.com"
+    assert generated["INTEGRATED_DBX_PASSWORD"] == "external-dbx-password"
+    assert generated["INTEGRATED_DBX_PASSWORD"] not in result.stdout
+
+
+def test_deploy_rejects_partial_or_wrong_pin_dbx_configuration(tmp_path):
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
+    content = (tmp_path / ".env.example").read_text().replace(
+        "INTEGRATED_DBX_URL=\n",
+        "INTEGRATED_DBX_URL=https://dbx.example.com\n",
+    )
+    (tmp_path / ".env.example").write_text(content)
+    _write_valid_dependency_manifest(
+        tmp_path / "deploy" / "production.dependencies.env")
+
+    partial = _run_deploy_validation(tmp_path)
+    assert partial.returncode != 0
+    assert "both set or both empty" in partial.stdout
+
+    content = (ROOT / ".env.example").read_text().replace(
+        "INTEGRATED_DBX_URL=\n",
+        "INTEGRATED_DBX_URL=https://dbx.example.com\n",
+    ).replace(
+        "INTEGRATED_DBX_PASSWORD=\n",
+        "INTEGRATED_DBX_PASSWORD=external-dbx-password\n",
+    ).replace(
+        "INTEGRATED_DBX_COMMIT=0137e0cbc8b663da5a17ec424c6d47e4e5570ead",
+        "INTEGRATED_DBX_COMMIT=deadbeef",
+    )
+    (tmp_path / ".env.example").write_text(content)
+    (tmp_path / ".env").unlink(missing_ok=True)
+    wrong_pin = _run_deploy_validation(tmp_path)
+    assert wrong_pin.returncode != 0
+    assert "pinned dbx release commit" in wrong_pin.stdout
 
 
 def test_deploy_derives_pipeline_file_gateway_from_external_health_url(tmp_path):

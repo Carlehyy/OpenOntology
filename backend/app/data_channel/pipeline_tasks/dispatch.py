@@ -26,6 +26,7 @@ CONNECTION_SYNC_SUBJECT = "task.connection.sync"
 DATASET_EVENT_SUBJECT = "task.dataset.event"
 DATASET_IMPORT_SUBJECT = "task.dataset.import"
 DATASET_MIGRATE_SUBJECT = "task.dataset.migrate"
+INTEGRATED_SYNC_SUBJECT = "integrated.sync"
 SUPER_ASSISTANT_REFLECT_MICRO_SUBJECT = "super_assistant.reflect.micro"
 SUPER_ASSISTANT_REFLECT_FULL_SUBJECT = "super_assistant.reflect.full"
 SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT = "super_assistant.reflect.focused"
@@ -68,6 +69,8 @@ PIPELINE_STREAM_SUBJECTS = (
     SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
     # 只能追加：任务实例运行时控制（节点派发/插话；M1 由假执行器承接）
     TASK_INSTANCES_CONTROL_SUBJECT,
+    # Append-only: full integrated snapshots execute outside the HTTP worker.
+    INTEGRATED_SYNC_SUBJECT,
 )
 
 # 进程内缓存：每个进程只在首次派发时确保一次 Stream
@@ -231,6 +234,21 @@ def dispatch_task(subject: str, payload: dict) -> None:
     """
     params = ":".join(f"{key}={payload[key]}" for key in sorted(payload))
     _dispatch_sync(subject, payload, f"{subject}:{params}:{time.time_ns()}")
+
+
+def dispatch_integrated_sync(run_id: str, asset_id: str, actor_id: str,
+                             batch_size: int = 1000) -> None:
+    """Wake a durable queued snapshot; delivery never reports sync success."""
+    if not all(isinstance(value, str) and value.strip() for value in (run_id, asset_id, actor_id)):
+        raise ValueError("Integrated sync requires run/asset/actor identifiers")
+    if type(batch_size) is not int or not 1 <= batch_size <= 1000:
+        raise ValueError("Integrated snapshot batches must be between 1 and 1000")
+    _dispatch_sync(
+        INTEGRATED_SYNC_SUBJECT,
+        {"run_id": run_id, "asset_id": asset_id, "actor_id": actor_id,
+         "batch_size": batch_size},
+        f"{INTEGRATED_SYNC_SUBJECT}:{run_id}",
+    )
 
 
 def dispatch_execution(subject: str, payload: dict, *, command_id: str) -> None:

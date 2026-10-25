@@ -232,6 +232,123 @@ def test_batch_overlay_matches_full_overlay(db):
     assert streamed[1]["name"] == "甲" and streamed[9]["name"] == "乙"
 
 
+def test_pinned_overlay_replays_overwrite_upsert_and_version_bound_edits(db):
+    from app.data_channel.datasets.service import describe_version, iter_version_rows, lookup_version_rows
+
+    ds, (v1,) = _make_lake_dataset(db, [
+        ("overwrite", [{"id": "1", "name": "a"}, {"id": "2", "name": "b"}]),
+    ])
+    reviews = ReviewService(db)
+    first_review = reviews.start_review(ds.id)
+    reviews.batch_edit_rows(first_review.id, [{
+        "row_pk": "1", "field_name": "name", "old_value": "a", "new_value": "approved-v1",
+    }])
+    reviews.approve(first_review.id)
+    v2, _ = lake_store.upsert_run(db, ds, [
+        {"id": "1", "name": "overwritten"}, {"id": "3", "name": "c"},
+    ], "overwrite", ["id"])
+    v3, _ = lake_store.upsert_run(db, ds, [
+        {"id": "1", "name": "latest"}, {"id": "4", "name": "d"},
+    ], "upsert", ["id"])
+    latest_review = reviews.start_review(ds.id)
+    reviews.batch_edit_rows(latest_review.id, [{
+        "row_pk": "1", "field_name": "name", "old_value": "latest", "new_value": "approved-v3",
+    }])
+    reviews.approve(latest_review.id)
+
+    pinned_batches = list(iter_rows_with_edits(
+        db, ds.id, version=v1, require_approved=True, batch_size=1))
+    assert all(len(batch) <= 1 for batch in pinned_batches)
+    assert sorted([row for batch in pinned_batches for row in batch], key=lambda row: row["id"]) == [
+        {"id": "1", "name": "approved-v1"}, {"id": "2", "name": "b"},
+    ]
+    assert [row for batch in iter_rows_with_edits(
+        db, ds.id, version=v3, require_approved=True, batch_size=1) for row in batch] == [
+            {"id": "1", "name": "approved-v3"}, {"id": "3", "name": "c"}, {"id": "4", "name": "d"},
+        ]
+    assert describe_version(db, ds.id, v1.id)["review_id"] == first_review.id
+    assert describe_version(db, ds.id, v3.id)["review_id"] == latest_review.id
+    assert [row for batch in iter_version_rows(db, ds.id, v2.id, batch_size=1) for row in batch] == [
+        {"id": "1", "name": "overwritten"}, {"id": "3", "name": "c"},
+    ]
+    assert list(lookup_version_rows(db, ds.id, v1.id, column="id", keys=["2"], batch_size=1)) == [
+        [{"id": "2", "name": "b"}],
+    ]
+
+
+def test_public_native_version_ports_do_not_read_latest_or_mask_corruption(db):
+    from app.data_channel.datasets.service import (
+        DatasetReadError, describe_version, get_version_relation, iter_version_rows, lookup_version_rows,
+    )
+    from app.data_channel.datasets.integrated_store import IntegratedVersionError
+
+    svc = DatasetService(db)
+    ds = svc.create_dataset("immutable raw", "structured", schema_json={
+        "columns": ["id", "name"], "primary_key": "id",
+    })
+    v1 = svc.create_version(ds.id, rows_to_csv_bytes([
+        {"id": "1", "name": "old"}, {"id": "2", "name": "old"},
+    ], ["id", "name"]), rowcount=2)
+    svc.create_version(ds.id, rows_to_csv_bytes([{"id": "9", "name": "new"}], ["id", "name"]), rowcount=1)
+    metadata = describe_version(db, ds.id, v1.id)
+    assert metadata["row_count"] == 2
+    assert metadata["primary_key_columns"] == ["id"]
+    assert list(iter_version_rows(db, ds.id, v1.id, batch_size=1, after_row_key=1, columns=["id"])) == [
+        [{"id": "2"}],
+    ]
+    assert list(lookup_version_rows(db, ds.id, v1.id, column="name", keys=["old"], batch_size=1)) == [
+        [{"id": "1", "name": "old"}], [{"id": "2", "name": "old"}],
+    ]
+    with pytest.raises(IntegratedVersionError, match="no immutable SQL relation"):
+        get_version_relation(db, ds.id, v1.id)
+    v1.data_blob = b"broken"
+    db.commit()
+    with pytest.raises(DatasetReadError, match="校验和"):
+        describe_version(db, ds.id, v1.id)
+    with pytest.raises(DatasetReadError, match="校验和"):
+        list(iter_version_rows(db, ds.id, v1.id, batch_size=1))
+
+
+@pytest.mark.parametrize("schema,expected", [
+    ({"primary_key": "order_id"}, ["order_id"]),
+    ({"primary_key": "order_id,name"}, ["order_id", "name"]),
+    ({"primary_key": "name", "primary_key_columns": ["order_id"]}, ["order_id"]),
+    ({"primary_key": "order_id", "primary_key_columns": []}, []),
+    ({}, []),
+])
+def test_native_describe_normalizes_only_declared_primary_keys(db, schema, expected):
+    from app.data_channel.datasets.service import describe_version
+
+    svc = DatasetService(db)
+    ds = svc.create_dataset("explicit identity", "structured", schema_json={
+        "columns": ["order_id", "name"], **schema,
+    })
+    version = svc.create_version(ds.id, rows_to_csv_bytes([
+        {"order_id": "A1", "name": "frozen header"},
+    ], ["order_id", "name"]), rowcount=1)
+    metadata = describe_version(db, ds.id, version.id)
+    assert metadata["columns"] == ["order_id", "name"]
+    assert metadata["primary_key_columns"] == expected
+
+
+def test_public_lake_history_reconstruction_uses_sql_not_python_patch_map(db, monkeypatch):
+    from app.data_channel.datasets.service import iter_version_rows
+
+    old = [{"id": str(index), "name": "宽" * 12} for index in range(40)]
+    ds, (v1, _v2, _v3) = _make_lake_dataset(db, [
+        ("overwrite", old),
+        ("upsert", [{"id": str(index), "name": "middle"} for index in range(40)]),
+        ("overwrite", [{"id": str(index), "name": "latest"} for index in range(20, 60)]),
+    ])
+    monkeypatch.setattr(lake_store, "MAX_STREAM_BATCH_BYTES", 100)
+    monkeypatch.setattr(lake_store, "_version_reverse_patch", lambda *_args: pytest.fail("unbounded Python history map"))
+    batches = list(iter_version_rows(db, ds.id, v1.id, batch_size=1000))
+    assert sorted((row for batch in batches for row in batch), key=lambda row: int(row["id"])) == old
+    assert len(batches) > 1
+    assert all(sum(lake_store.canonical_row_bytes(row) for row in batch) <= 100 for batch in batches)
+    assert not any(name.startswith("lake_read_") for name in sa.inspect(db.connection()).get_temp_table_names())
+
+
 # ── prune：回放链感知保留 ────────────────────────────────────
 def _run_n_versions(db, ds, n: int, start: int = 0):
     versions = []

@@ -26,6 +26,7 @@ from app.exploration import converter as CV
 from app.exploration.canvas import norm_name
 from app.exploration.document import canvas_fingerprint
 from app.ontologies.versions.gate_contract import gate_error
+from pydantic import ValidationError
 from app.ontologies.versions.snapshot_contract import complete_snapshot
 
 # 参与校验的五类集合；kind 与发布闸门 gate_error 的 kind 口径对齐。
@@ -36,6 +37,121 @@ _LABEL = {"objectTypes": "对象", "linkTypes": "链接", "actions": "动作",
           "functions": "函数", "sentinels": "哨兵"}
 _CANVAS_LABEL = {"objectTypes": "对象/主体", "linkTypes": "关系", "actions": "行为",
                  "functions": "规则", "sentinels": "事件"}
+_CANVAS_SCHEMA_KEYS = set(C.KIND_KEYS.values())
+_CANVAS_MAX_ELEMENTS = 5000
+_CANVAS_NESTED_MAX_ITEMS = 500
+
+
+def _model_allowed_keys(model) -> set[str]:
+    keys = set(model.model_fields)
+    for field in model.model_fields.values():
+        if isinstance(field.alias, str) and field.alias:
+            keys.add(field.alias)
+    return keys
+
+
+def _model_issue(kind: str, path: str, message: str,
+                 item: dict | None = None) -> dict:
+    return gate_error(
+        "semantic_canvas_invalid", "canvas", message,
+        item_id=str((item or {}).get("id") or ""),
+        name=str((item or {}).get("name") or path))
+
+
+def _validate_element_schema(kind: str, index: int, item: Any,
+                             issues: list[dict]) -> None:
+    path = f"{C.KIND_KEYS[kind]}[{index}]"
+    if not isinstance(item, dict):
+        issues.append(_model_issue(kind, path,
+                                   f"{path} 必须是对象，收到 {type(item).__name__}"))
+        return
+    model = C.KIND_MODELS[kind]
+    unknown = sorted(set(item) - _model_allowed_keys(model))
+    if unknown:
+        issues.append(_model_issue(
+            kind, path,
+            f"{path} 含有 canonical 模型不接受的字段: {', '.join(unknown)}",
+            item))
+    nested_models = C._NESTED_MODELS.get(kind, {})
+    for nested, child_model in nested_models.items():
+        if nested not in item:
+            continue
+        children = item.get(nested)
+        if not isinstance(children, list):
+            issues.append(_model_issue(
+                kind, path, f"{path}.{nested} 必须是数组"))
+            continue
+        if len(children) > _CANVAS_NESTED_MAX_ITEMS:
+            issues.append(_model_issue(
+                kind, path,
+                f"{path}.{nested} 超过 {_CANVAS_NESTED_MAX_ITEMS} 项上限"))
+        allowed_child = _model_allowed_keys(child_model)
+        for child_index, child in enumerate(children):
+            child_path = f"{path}.{nested}[{child_index}]"
+            if not isinstance(child, dict):
+                issues.append(_model_issue(
+                    kind, child_path,
+                    f"{child_path} 必须是对象，收到 {type(child).__name__}"))
+                continue
+            child_unknown = sorted(set(child) - allowed_child)
+            if child_unknown:
+                issues.append(_model_issue(
+                    kind, child_path,
+                    f"{child_path} 含有不接受的字段: {', '.join(child_unknown)}"))
+            try:
+                child_model.model_validate(child)
+            except ValidationError as exc:
+                issues.append(_model_issue(
+                    kind, child_path,
+                    f"{child_path} 不符合 canonical schema: "
+                    f"{'; '.join(str(e.get('msg')) for e in exc.errors()[:3])}"))
+    try:
+        model.model_validate(item)
+    except ValidationError as exc:
+        issues.append(_model_issue(
+            kind, path,
+            f"{path} 不符合 canonical schema: "
+            f"{'; '.join(str(e.get('msg')) for e in exc.errors()[:3])}",
+            item))
+
+
+def canvas_schema_issues(canvas: Any) -> list[dict]:
+    """Strict canonical canvas validation for the semantic write/release copy.
+
+    ``_ensure_canvas`` intentionally tolerates unknown keys; the write path must
+    not: a release copies snapshot_semantic verbatim.  Unknown top-level keys,
+    unknown element/nested fields, canonical model validation, and element /
+    nested-list bounds are rejected here before any replay/fingerprint comparison.
+    """
+    issues: list[dict] = []
+    if not isinstance(canvas, dict):
+        return [_model_issue("canvas", "canvas",
+                             "canvas 必须是 JSON 对象")]
+    unknown = sorted(set(canvas) - _CANVAS_SCHEMA_KEYS)
+    if unknown:
+        issues.append(_model_issue(
+            "canvas", "canvas",
+            f"canvas 含有 unknown top-level keys: {', '.join(unknown)}"))
+    total = 0
+    for kind, key in C.KIND_KEYS.items():
+        values = canvas.get(key)
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            issues.append(_model_issue(kind, key, f"canvas.{key} 必须是数组"))
+            continue
+        if len(values) > _CANVAS_MAX_ELEMENTS:
+            issues.append(_model_issue(
+                kind, key,
+                f"canvas.{key} 超过 {_CANVAS_MAX_ELEMENTS} 项上限"))
+        total += len(values)
+        for index, item in enumerate(values):
+            _validate_element_schema(kind, index, item, issues)
+    if total > _CANVAS_MAX_ELEMENTS:
+        issues.append(_model_issue(
+            "canvas", "canvas",
+            f"canvas 超过 {_CANVAS_MAX_ELEMENTS} 项总上限"))
+    return issues
 
 
 def _text(value: Any) -> str:
@@ -191,7 +307,14 @@ def semantic_consistency_issues(snapshot_semantic: dict | None,
     semantic_overview 的 hasSemanticLayer 决定是否展示）。
     """
     sem = snapshot_semantic if isinstance(snapshot_semantic, dict) else {}
-    canvas = C._ensure_canvas(sem.get("canvas"))
+    raw_canvas = sem.get("canvas")
+    if raw_canvas is None:
+        canvas = C.empty_canvas()
+    else:
+        schema_issues = canvas_schema_issues(raw_canvas)
+        if schema_issues:
+            return schema_issues
+        canvas = C._ensure_canvas(raw_canvas)
     formal = complete_snapshot(snapshot_formal)
 
     warnings: list[str] = []  # 重放只取五类集合，warning/semanticIssues 不进闸门

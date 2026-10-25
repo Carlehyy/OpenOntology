@@ -110,9 +110,11 @@ def _cleanup_test_db():
 
 @pytest.fixture(autouse=True)
 def setup_db():
-    # Import all models
-    from app.models import user, ontology, model_config, entity
-    from app.models import logic, action, relation
+    # Use the same complete registry as Alembic and background workers. A
+    # route's incidental imports must not decide whether an FK target exists.
+    from app.model_registry import import_all_models
+
+    import_all_models()
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)

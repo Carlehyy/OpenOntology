@@ -579,6 +579,11 @@ def validate_model(object_types: list, link_types: list, actions: list,
             pname = p.get("name")
             if pname:
                 link_prop_names[str(pname)] = link_prop_names.get(str(pname), 0) + 1
+            if pname == "exists":
+                errors.append(_err(
+                    "reserved_link_property", "linkType",
+                    f"关系「{label}」的属性名 \"exists\" 为系统链接存在性事实保留，不能声明为业务属性",
+                    name=label, item_id=lid, field="exists"))
             if _normal_property_type(p.get("type")) not in VALID_PROPERTY_TYPES:
                 errors.append(_err(
                     "invalid_property_type_definition", "linkType",

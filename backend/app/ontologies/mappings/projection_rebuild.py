@@ -1,10 +1,12 @@
-"""Authoritative SQL-to-Neo4j full projection rebuild."""
+"""Authoritative SQL-to-Neo4j rebuild with bounded, keyset-paged writes."""
 from __future__ import annotations
 
 import hashlib
 import logging
 import re
+from collections import defaultdict
 
+from sqlalchemy import and_, case, exists, func, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.ontologies.mappings.neo4j_projection_contract import (
@@ -13,6 +15,8 @@ from app.ontologies.mappings.neo4j_projection_contract import (
 
 
 logger = logging.getLogger(__name__)
+# A write batch, not a truncation limit: every authoritative row is projected.
+PROJECTION_BATCH_SIZE = 500
 
 
 def _relationship_type(value: str | None) -> str:
@@ -49,284 +53,260 @@ def projection_node_id(
     return str(formal_instance_id)
 
 
-def rebuild_neo4j_projection(db: Session, ontology_id: str) -> bool:
-    """Rebuild and validate the complete derived graph from SQL truth.
+def _columns(table, prefix):
+    return [column.label(prefix + column.key) for column in table.c]
 
-    Both the legacy relational projection and Formal-only instances are
-    included. Nodes expose stable SQL/Formal identifiers; Neo4j
-    ``elementId`` is never part of the public identity contract.
-    """
-    from app.models.entity import Entity
-    from app.models.relation import Relation
-    from app.models.ontology_formal import (
-        LinkInstance,
-        LinkType,
-        ObjectInstance,
-        ObjectType,
+
+def _part(row, prefix):
+    return {key[len(prefix):]: value for key, value in row.items()
+            if key.startswith(prefix)}
+
+
+def _batches(db, statement, key):
+    """Page scalar SQL rows without retaining ORM objects or an open cursor."""
+    after = None
+    while True:
+        page = statement
+        if after is not None:
+            page = page.where(key > after)
+        rows = db.execute(
+            page.order_by(key).limit(PROJECTION_BATCH_SIZE)
+        ).mappings().all()
+        if not rows:
+            return
+        yield rows
+        after = rows[-1][key]
+
+
+def _legacy_node(entity, ontology_id):
+    stable_id = str(entity["id"])
+    business = neo4j_entity_properties(
+        entity["properties"], entity_id=stable_id,
+        ontology_id=ontology_id, updated_at=entity["updated_at"],
+        encode_values=False,
     )
+    return {
+        **business,
+        "id": stable_id,
+        "projection_key": _projection_key(ontology_id, stable_id),
+        "source_entity_id": stable_id,
+        "ontology_id": ontology_id,
+        "name_cn": entity["name_cn"] or "",
+        "name": entity["name_cn"] or "",
+        "name_en": entity["name_en"] or "",
+        "type": entity["type"] or "Object",
+        "description": entity["description"] or "",
+        "confidence": entity["confidence"],
+        "version": entity["version"] or "v0.1",
+    }
 
+
+def _formal_node(instance, object_type, stable_id, ontology_id, existing):
+    business = {**dict(instance["properties"] or {}),
+                **dict(instance["computed"] or {})}
+    envelope = {
+        "id": stable_id,
+        "projection_key": _projection_key(ontology_id, stable_id),
+        "formal_instance_id": str(instance["id"]),
+        "object_type_id": str(instance["object_type_id"]),
+        "ontology_id": ontology_id,
+        "type": (object_type["name"] if object_type["id"] is not None
+                 else existing.get("type") or "Object"),
+        "type_display_name": (object_type["display_name"]
+                              if object_type["id"] is not None else ""),
+        "name": (business.get("name") or business.get("name_cn")
+                 or existing.get("name") or stable_id),
+        "name_cn": (business.get("name_cn") or business.get("name")
+                    or existing.get("name_cn") or stable_id),
+        "updated_at": instance["updated_at"],
+    }
+    return {**existing, **neo4j_projection_properties(business, envelope)}
+
+
+def _write_relations(neo, rows, ontology_id):
+    # Group only this bounded batch; never collect all rows by relationship type.
+    grouped = defaultdict(list)
+    for source, target, semantic_type, properties in rows:
+        grouped[_relationship_type(semantic_type)].append({
+            "src_key": _projection_key(ontology_id, source),
+            "tgt_key": _projection_key(ontology_id, target),
+            "props": properties,
+        })
+    for relationship_type, batch in grouped.items():
+        written = neo.batch_upsert_relations(
+            "OntologyEntity", "OntologyEntity", relationship_type,
+            batch, key_field="projection_key",
+        )
+        if written != len(batch):
+            raise RuntimeError(
+                f"Neo4j relationship projection incomplete: "
+                f"expected={len(batch)} actual={written} ontology={ontology_id}")
+
+
+def rebuild_neo4j_projection(db: Session, ontology_id: str) -> bool:
+    """Project every SQL row using bounded memory under the caller's fence.
+
+    SQL joins resolve the frozen legacy namespace and validate collisions before
+    destructive graph work. No instance/endpoint/relationship ID set grows with
+    ontology size. Stable IDs and reserved business-property encoding are shared
+    with repair and incremental projection.
+    """
+    from app.ontologies.entities.models import Entity
+    from app.ontologies.relations.models import Relation
+    from app.ontologies.formal_modeling.models import (
+        LinkInstance, LinkType, ObjectInstance, ObjectType,
+    )
+    from app.ontologies.graph.neo4j_service import Neo4jService
+
+    entity = Entity.__table__
+    instance = ObjectInstance.__table__
+    object_type = ObjectType.__table__
+    relation = Relation.__table__
+    link = LinkInstance.__table__
+    link_type = LinkType.__table__
+    mirror = and_(entity.c.id == instance.c.external_id,
+                  entity.c.ontology_id == instance.c.ontology_id)
+    stable = select(
+        instance.c.id.label("formal_id"),
+        instance.c.external_id,
+        case((entity.c.id.is_not(None), entity.c.id),
+             else_=instance.c.id).label("stable_id"),
+    ).select_from(instance.outerjoin(entity, mirror)).where(
+        instance.c.ontology_id == ontology_id).subquery("stable_nodes")
     neo = None
     try:
-        from app.ontologies.graph.neo4j_service import Neo4jService
-
         neo = Neo4jService()
         if not neo.available:
             return False
+        # Detect ownership collisions in SQL, including ones spanning batches.
+        duplicate = select(stable.c.stable_id).group_by(
+            stable.c.stable_id).having(func.count() > 1)
+        collision = select(stable.c.formal_id).select_from(stable.join(
+            entity, and_(entity.c.id == stable.c.stable_id,
+                         entity.c.ontology_id == ontology_id),
+        )).where(or_(stable.c.external_id.is_(None),
+                     stable.c.external_id != stable.c.stable_id))
+        link_collision = select(link.c.id).select_from(link.join(
+            relation, and_(relation.c.id == link.c.id,
+                           relation.c.ontology_id == ontology_id),
+        )).where(link.c.ontology_id == ontology_id).where(or_(
+            link.c.source_relation_id.is_(None),
+            link.c.source_relation_id != link.c.id,
+        ))
+        nodes = union_all(
+            select(entity.c.id.label("id")).where(
+                entity.c.ontology_id == ontology_id),
+            select(stable.c.stable_id.label("id")),
+        ).subquery("node_ids")
+        represented = exists(select(link.c.id).where(
+            link.c.ontology_id == ontology_id,
+            link.c.source_relation_id == relation.c.id,
+        ))
+        legacy_relations = select(*_columns(relation, "r_")).where(
+            relation.c.ontology_id == ontology_id, ~represented,
+        )
+        missing_legacy = select(relation.c.id).where(
+            relation.c.ontology_id == ontology_id, ~represented,
+            or_(
+                ~exists(select(nodes.c.id).where(
+                    nodes.c.id == relation.c.source_entity)),
+                ~exists(select(nodes.c.id).where(
+                    nodes.c.id == relation.c.target_entity)),
+            ),
+        )
+        source = stable.alias("source_node")
+        target = stable.alias("target_node")
+        link_endpoints = link.outerjoin(
+            source, source.c.formal_id == link.c.source_object_id,
+        ).outerjoin(target, target.c.formal_id == link.c.target_object_id)
+        missing_formal = select(link.c.id).select_from(link_endpoints).where(
+            link.c.ontology_id == ontology_id,
+            or_(source.c.formal_id.is_(None), target.c.formal_id.is_(None)),
+        )
+        for check in (duplicate, collision, link_collision,
+                      missing_legacy, missing_formal):
+            if db.execute(check.limit(1)).first() is not None:
+                raise RuntimeError(
+                    f"Projection identity collision or missing endpoint: {ontology_id}")
+
         neo.delete_by_ontology(ontology_id)
 
-        entities = db.query(Entity).filter(
-            Entity.ontology_id == ontology_id,
-        ).all()
-        nodes: dict[str, dict] = {}
-        for entity in entities:
-            # Preserve explicitly mapped business id/name values under stable
-            # aliases instead of letting the graph identity envelope erase
-            # them. Neo4jService performs the final reversible value encoding.
-            legacy_properties = neo4j_entity_properties(
-                entity.properties,
-                entity_id=entity.id,
-                ontology_id=ontology_id,
-                updated_at=entity.updated_at,
-                encode_values=False,
-            )
-            nodes[str(entity.id)] = {
-                **legacy_properties,
-                "id": str(entity.id),
-                "projection_key": _projection_key(
-                    ontology_id,
-                    str(entity.id),
-                ),
-                "source_entity_id": str(entity.id),
-                "ontology_id": ontology_id,
-                "name_cn": entity.name_cn or "",
-                "name": entity.name_cn or "",
-                "name_en": entity.name_en or "",
-                "type": entity.type or "Object",
-                "description": entity.description or "",
-                "confidence": entity.confidence,
-                "version": entity.version or "v0.1",
-            }
+        legacy_nodes = select(
+            *_columns(entity, "e_"), *_columns(instance, "f_"),
+            *_columns(object_type, "t_"), entity.c.id,
+        ).select_from(entity.outerjoin(instance, mirror).outerjoin(
+            object_type, and_(object_type.c.id == instance.c.object_type_id,
+                              object_type.c.ontology_id == ontology_id),
+        )).where(entity.c.ontology_id == ontology_id)
+        formal_nodes = select(
+            *_columns(instance, "f_"), *_columns(object_type, "t_"),
+            instance.c.id,
+        ).select_from(instance.outerjoin(object_type, and_(
+            object_type.c.id == instance.c.object_type_id,
+            object_type.c.ontology_id == ontology_id,
+        ))).where(
+            instance.c.ontology_id == ontology_id,
+            ~exists(select(entity.c.id).where(mirror)),
+        )
+        for statement, key, legacy in (
+            (legacy_nodes, entity.c.id, True),
+            (formal_nodes, instance.c.id, False),
+        ):
+            for batch in _batches(db, statement, key):
+                rows = []
+                for row in batch:
+                    formal = _part(row, "f_")
+                    node = _legacy_node(_part(row, "e_"), ontology_id) if legacy else {}
+                    stable_id = str(row["id"])
+                    if formal["id"] is not None:
+                        node = _formal_node(formal, _part(row, "t_"),
+                                            stable_id, ontology_id, node)
+                    rows.append(node)
+                written = neo.batch_upsert_entities(
+                    "OntologyEntity", rows, key_field="projection_key")
+                if written != len(rows):
+                    raise RuntimeError(
+                        f"Neo4j node projection incomplete: "
+                        f"expected={len(rows)} actual={written} ontology={ontology_id}")
 
-        object_types = {
-            item.id: item
-            for item in db.query(ObjectType).filter(
-                ObjectType.ontology_id == ontology_id,
-            ).all()
-        }
-        formal_instances = db.query(ObjectInstance).filter(
-            ObjectInstance.ontology_id == ontology_id,
-        ).all()
-        # Freeze the legacy namespace: rebuilding a growing set is quadratic
-        # and can misclassify a later Formal external_id as a legacy mirror.
-        legacy_entity_ids = set(nodes)
-        formal_stable_ids: dict[str, str] = {}
-        formal_stable_owners: dict[str, str] = {}
-        for instance in formal_instances:
-            # Only merge a Formal row with the legacy row it explicitly
-            # mirrors. Arbitrary external IDs are not globally unique.
-            stable_id = projection_node_id(
-                instance.id,
-                instance.external_id,
-                legacy_entity_ids,
-            )
-            explicit_legacy_id = (
-                str(instance.external_id)
-                if instance.external_id is not None
-                else None
-            )
-            if (
-                stable_id in legacy_entity_ids
-                and explicit_legacy_id != stable_id
-            ):
-                logger.error(
-                    "Formal instance conflicts with an unrelated legacy "
-                    "entity identity: instance=%s entity=%s ontology=%s",
-                    instance.id,
-                    stable_id,
-                    ontology_id,
-                )
-                return False
-            previous_owner = formal_stable_owners.get(stable_id)
-            if (
-                previous_owner is not None
-                and previous_owner != str(instance.id)
-            ):
-                logger.error(
-                    "Formal instances collide on graph identity: "
-                    "%s/%s ontology=%s",
-                    previous_owner,
-                    instance.id,
-                    ontology_id,
-                )
-                return False
-            formal_stable_owners[stable_id] = str(instance.id)
-            formal_stable_ids[str(instance.id)] = stable_id
-            object_type = object_types.get(instance.object_type_id)
-            business = {
-                **dict(instance.properties or {}),
-                **dict(instance.computed or {}),
-            }
-            existing = nodes.get(stable_id, {})
-            envelope = {
-                "id": stable_id,
-                "projection_key": _projection_key(
-                    ontology_id,
-                    stable_id,
-                ),
-                "formal_instance_id": str(instance.id),
-                "object_type_id": str(instance.object_type_id),
-                "ontology_id": ontology_id,
-                "type": (
-                    object_type.name
-                    if object_type is not None
-                    else existing.get("type") or "Object"
-                ),
-                "type_display_name": (
-                    object_type.display_name
-                    if object_type is not None
-                    else ""
-                ),
-                "name": business.get("name")
-                or business.get("name_cn")
-                or existing.get("name")
-                or stable_id,
-                "name_cn": business.get("name_cn")
-                or business.get("name")
-                or existing.get("name_cn")
-                or stable_id,
-                "updated_at": instance.updated_at,
-            }
-            formal_properties = neo4j_projection_properties(
-                business, envelope)
-            nodes[stable_id] = {**existing, **formal_properties}
+        for batch in _batches(db, legacy_relations.add_columns(relation.c.id),
+                              relation.c.id):
+            rows = []
+            for row in batch:
+                item = _part(row, "r_")
+                semantic_type = str(item["type"] or "RELATED")
+                rows.append((str(item["source_entity"]), str(item["target_entity"]),
+                             semantic_type, neo4j_projection_properties(
+                                 item["properties"], {
+                                     "id": str(item["id"]), "ontology_id": ontology_id,
+                                     "confidence": item["confidence"],
+                                     "semantic_type": semantic_type,
+                                 })))
+            _write_relations(neo, rows, ontology_id)
 
-        rows = list(nodes.values())
-        if rows:
-            written = neo.batch_upsert_entities(
-                "OntologyEntity",
-                rows,
-                key_field="projection_key",
-            )
-            if written != len(rows):
-                logger.error(
-                    "Neo4j node projection incomplete: expected=%s "
-                    "actual=%s ontology=%s",
-                    len(rows),
-                    written,
-                    ontology_id,
-                )
-                return False
-
-        formal_links = db.query(LinkInstance).filter(
-            LinkInstance.ontology_id == ontology_id,
-        ).all()
-        link_types = {
-            item.id: item
-            for item in db.query(LinkType).filter(
-                LinkType.ontology_id == ontology_id,
-            ).all()
-        }
-        legacy_relations = db.query(Relation).filter(
-            Relation.ontology_id == ontology_id,
-        ).all()
-        legacy_relation_ids = {str(item.id) for item in legacy_relations}
-        represented_relation_ids = {
-            str(item.source_relation_id)
-            for item in formal_links
-            if item.source_relation_id
-        }
-        projected_relations: list[tuple[str, str, str, dict]] = []
-        for relation in legacy_relations:
-            if str(relation.id) in represented_relation_ids:
-                continue
-            src = str(relation.source_entity)
-            tgt = str(relation.target_entity)
-            if src not in nodes or tgt not in nodes:
-                logger.error(
-                    "Neo4j relation has missing endpoint: relation=%s "
-                    "ontology=%s",
-                    relation.id,
-                    ontology_id,
-                )
-                return False
-            projected_relations.append((
-                src,
-                tgt,
-                str(relation.type or "RELATED"),
-                neo4j_projection_properties(relation.properties, {
-                        "id": str(relation.id),
-                        "ontology_id": ontology_id,
-                        "confidence": relation.confidence,
-                        "semantic_type": str(relation.type or "RELATED"),
-                    },
-                ),
-            ))
-
-        for link in formal_links:
-            link_id = str(link.id)
-            source_relation_id = (
-                str(link.source_relation_id)
-                if link.source_relation_id is not None
-                else None
-            )
-            if (
-                link_id in legacy_relation_ids
-                and source_relation_id != link_id
-            ):
-                logger.error(
-                    "Formal link conflicts with an unrelated legacy relation "
-                    "identity: link=%s relation=%s ontology=%s",
-                    link.id,
-                    link_id,
-                    ontology_id,
-                )
-                return False
-            src = formal_stable_ids.get(str(link.source_object_id))
-            tgt = formal_stable_ids.get(str(link.target_object_id))
-            if not src or not tgt or src not in nodes or tgt not in nodes:
-                logger.error(
-                    "Neo4j formal link has missing endpoint: link=%s "
-                    "ontology=%s",
-                    link.id,
-                    ontology_id,
-                )
-                return False
-            link_type = link_types.get(link.link_type_id)
-            semantic_type = (
-                link_type.name if link_type is not None else "RELATED"
-            )
-            projected_relations.append((
-                src,
-                tgt,
-                semantic_type,
-                neo4j_projection_properties(link.properties, {
-                        "id": link_id,
-                        "formal_link_instance_id": link_id,
-                        "link_type_id": str(link.link_type_id),
-                        "ontology_id": ontology_id,
-                        "source_relation_id": link.source_relation_id,
-                        "semantic_type": semantic_type,
-                    },
-                ),
-            ))
-
-        for src, tgt, semantic_type, props in projected_relations:
-            if not neo.upsert_relation(
-                "OntologyEntity",
-                _projection_key(ontology_id, src),
-                "OntologyEntity",
-                _projection_key(ontology_id, tgt),
-                _relationship_type(semantic_type),
-                props=props,
-                key_field="projection_key",
-            ):
-                logger.error(
-                    "Neo4j relationship projection incomplete: id=%s "
-                    "ontology=%s",
-                    props.get("id"),
-                    ontology_id,
-                )
-                return False
+        formal_links = select(
+            *_columns(link, "l_"), source.c.stable_id.label("source_id"),
+            target.c.stable_id.label("target_id"),
+            link_type.c.name.label("semantic_type"), link.c.id,
+        ).select_from(link_endpoints.outerjoin(link_type, and_(
+            link_type.c.id == link.c.link_type_id,
+            link_type.c.ontology_id == ontology_id,
+        ))).where(link.c.ontology_id == ontology_id)
+        for batch in _batches(db, formal_links, link.c.id):
+            rows = []
+            for row in batch:
+                item = _part(row, "l_")
+                semantic_type = row["semantic_type"] or "RELATED"
+                rows.append((row["source_id"], row["target_id"], semantic_type,
+                             neo4j_projection_properties(item["properties"], {
+                                 "id": str(item["id"]),
+                                 "formal_link_instance_id": str(item["id"]),
+                                 "link_type_id": str(item["link_type_id"]),
+                                 "ontology_id": ontology_id,
+                                 "source_relation_id": item["source_relation_id"],
+                                 "semantic_type": semantic_type,
+                             })))
+            _write_relations(neo, rows, ontology_id)
         return True
     except Exception as exc:
         logger.warning("Neo4j projection rebuild failed: %s", exc)
