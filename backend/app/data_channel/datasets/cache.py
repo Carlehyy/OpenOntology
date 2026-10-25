@@ -6,8 +6,9 @@
 - **版本数据不可变**：预览/契约/统计的缓存键携带 version id，上传、在线
   编辑、流水线发布产生新版本自动换新键，旧键靠 TTL 自然回收，无需主动
   失效，也绝无脏读；
-- **总览是聚合视图**：键携带总览版本号，写路径（版本发布/删除/契约声明）
-  自增版本键整体失效，旧键依赖 10s 短 TTL 自然过期；
+- **总览是聚合视图**：键携带总览版本号，写路径（版本发布/删除/契约声明/
+  成品评审与删除）自增版本键整体失效，旧键依赖 10s 短 TTL 自然过期；
+  总览摘要（五张洞察卡片的聚合口径）与总览列表共用同一版本号；
 - **体积上限**：超过上限的载荷只回源不回填，避免大分页预览撑爆内存。
 """
 from __future__ import annotations
@@ -42,6 +43,11 @@ def overview_key(params: dict) -> str:
     canonical = json.dumps(params, sort_keys=True, ensure_ascii=False)
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
     return f"ob:lake:overview:v{_version(_OVERVIEW_VERSION_KEY)}:{digest}"
+
+
+def summary_key() -> str:
+    """总览摘要键：无查询参数，只携带总览版本号，与总览列表同步失效。"""
+    return f"ob:lake:summary:v{_version(_OVERVIEW_VERSION_KEY)}"
 
 
 def cached_call(

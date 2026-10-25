@@ -39,6 +39,7 @@ ENDPOINT_NAMES = (
     "declare_contract",
     "edit_rows",
     "datasets_overview",
+    "overview_summary",
     "dataset_consumers",
     "delete_dataset",
     "list_datasets",

@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
+import type { AssetLakeOverviewSummary } from '@/api/v2/datasets'
+
 async function mockAssetLake(page: Page, fixtures?: {
   curated?: Array<Record<string, unknown>>
   pipelines?: Array<Record<string, unknown>>
@@ -10,11 +12,14 @@ async function mockAssetLake(page: Page, fixtures?: {
     version_no?: number
     total_rows?: number
   }>
+  /** 覆盖服务端聚合结果；status >= 400 时按错误响应返回，便于失败/重试路径 */
+  summary?: { status?: number } & Partial<AssetLakeOverviewSummary>
 }) {
   const curated = fixtures?.curated ?? []
   const pipelines = fixtures?.pipelines ?? []
   const manual = fixtures?.manual ?? []
   const manualPreviews = fixtures?.manualPreviews ?? {}
+  const summaryOverride: { status?: number } & Partial<AssetLakeOverviewSummary> = fixtures?.summary ?? {}
   const wideCuratedColumns = Array.from({ length: 12 }, (_, index) => `field_${index + 1}`)
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
@@ -256,6 +261,42 @@ async function mockAssetLake(page: Page, fixtures?: {
           is_primary_key: index === 0,
           sample_values: preview.rows.map(row => row[name]).slice(0, 3),
         })),
+      })
+    }
+    // 总览五卡片的聚合接口：按后端口径从 curated/manual fixture 计算，
+    // 与列表接口（overview / curated）分开，避免测试内重复客户端聚合逻辑。
+    if (url.pathname === '/api/v2/datasets/overview/summary') {
+      // 每次请求时读取覆盖对象，允许测试中途切换错误/成功响应
+      const summaryStatus = summaryOverride.status
+      if (typeof summaryStatus === 'number' && summaryStatus >= 400) {
+        return route.fulfill({
+          status: summaryStatus,
+          contentType: 'application/json',
+          body: '{}',
+        })
+      }
+      const summaryPatch = Object.fromEntries(
+        Object.entries(summaryOverride).filter(([key]) => key !== 'status'),
+      )
+      const manualItems = manual.filter(item => item.source !== 'sync')
+      const scores = curated
+        .map(item => item.quality_score)
+        .filter((score): score is number => typeof score === 'number' && Number.isFinite(score))
+      return ok({
+        total: curated.length + manual.length,
+        curated_total: curated.length,
+        raw_total: manual.length,
+        manual_total: manualItems.length,
+        manual_with_primary_key: manualItems.filter(item => Boolean(item.primary_key)).length,
+        sync_total: manual.length - manualItems.length,
+        scored_curated_total: scores.length,
+        average_quality_score: scores.length
+          ? scores.reduce((sum, score) => sum + score, 0) / scores.length
+          : null,
+        pending_review_total: curated.filter(item => (
+          item.status === 'pending_review' || item.status === 'pending' || item.status === 'in_review'
+        )).length,
+        ...summaryPatch,
       })
     }
     if (url.pathname === '/api/v2/datasets/overview') {
@@ -884,4 +925,130 @@ test('窄视口下操作列贴右固定：横向滚动后删除按钮不被裁�
   await page.waitForTimeout(200)
   await expect(inViewport()).resolves.toBe(true)
   await expect(deleteButton).toBeVisible()
+})
+
+test('总览五张卡片由聚合接口驱动，不再拉取全量列表', async ({ page }) => {
+  // 从 goto 前开始记录全部 /api 请求：五卡片只能走聚合接口，
+  // 不允许再以未分页方式拉取 curated / overview 全量列表
+  const apiRequests: string[] = []
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (url.pathname.startsWith('/api/')) apiRequests.push(url.pathname + url.search)
+  })
+
+  await mockAssetLake(page, {
+    curated: [
+      {
+        id: 'ds-summary-pending', name: '总览待审核成品', status: 'pending_review',
+        row_count: 3, quality_score: 0.9, primary_key: 'order_id',
+        producer_pipeline_id: null, output_key: null, has_review_evidence: false,
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+      {
+        id: 'ds-summary-approved', name: '总览已审核成品', status: 'approved',
+        row_count: 8, quality_score: 0.7, primary_key: 'order_id',
+        producer_pipeline_id: null, output_key: null, has_review_evidence: false,
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+    ],
+    manual: [
+      {
+        id: 'raw-upload', name: '上传人工数据', raw_name: '上传人工数据', kind: 'table',
+        primary_key: 'id', source: 'upload', connection_name: '', version_count: 1,
+        latest_version_no: 1, rowcount: 4, consumers: [],
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+      {
+        id: 'raw-online', name: '在线维护数据', raw_name: '在线维护数据', kind: 'table',
+        primary_key: '', source: 'manual', connection_name: '', version_count: 1,
+        latest_version_no: 1, rowcount: 2, consumers: [],
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+      {
+        id: 'raw-sync', name: '历史同步数据', raw_name: '历史同步数据', kind: 'table',
+        primary_key: 'id', source: 'sync', connection_name: 'PostgreSQL 测试源', version_count: 1,
+        latest_version_no: 1, rowcount: 6, consumers: [],
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+    ],
+  })
+  await page.goto('/#/data/structured?tab=curated', { waitUntil: 'domcontentloaded' })
+
+  // 成品表数据就位后再核对请求轨迹，避免把加载中的漏网请求当作合规
+  await expect(page.getByRole('cell', { name: '总览待审核成品' })).toBeVisible()
+
+  // 每张卡片用页面内唯一的文本（标签或脚注）定位到卡片容器，
+  // 避免与名为「人工数据集」的 Tab 按钮及表格中的「待审核」状态列撞车
+  const overviewCard = (anchor: string) => page.getByText(anchor, { exact: true }).locator('xpath=..')
+
+  const totalCard = overviewCard('数据集总数')
+  await expect(totalCard.getByText('5', { exact: true })).toBeVisible()
+  await expect(totalCard.getByText('成品 2 · 人工 2', { exact: true })).toBeVisible()
+
+  const manualCard = overviewCard('文件上传或在线维护')
+  await expect(manualCard.getByText('人工数据集', { exact: true })).toBeVisible()
+  await expect(manualCard.getByText('2', { exact: true })).toBeVisible()
+
+  const primaryKeyCard = overviewCard('已声明主键')
+  await expect(primaryKeyCard.getByText('1', { exact: true })).toBeVisible()
+  await expect(primaryKeyCard.getByText('具备主键契约的人工数据集')).toBeVisible()
+
+  const qualityCard = overviewCard('基于 2 个已评分成品')
+  await expect(qualityCard.getByText('平均质量分')).toBeVisible()
+  await expect(qualityCard.getByText('80%', { exact: true })).toBeVisible()
+
+  const pendingCard = overviewCard('需要人工确认的成品数据集')
+  await expect(pendingCard.getByText('待审核', { exact: true })).toBeVisible()
+  await expect(pendingCard.getByText('1', { exact: true })).toBeVisible()
+
+  // 历史同步计数可跳转，不是死数字
+  const syncEntry = totalCard.getByRole('button', { name: '历史同步 1 →' })
+  await expect(syncEntry).toBeVisible()
+
+  // 请求轨迹：卡片只依赖聚合接口；dev 服务器的 React StrictMode 会对挂载
+  // effect 做 setup→cleanup→setup，同一逻辑请求最多发出两次（生产构建为一次）
+  const summaryCalls = apiRequests.filter(entry => entry.split('?')[0] === '/api/v2/datasets/overview/summary')
+  expect(summaryCalls.length).toBeGreaterThanOrEqual(1)
+  expect(summaryCalls.length).toBeLessThanOrEqual(2)
+  const listPulls = apiRequests.filter(entry => {
+    const path = entry.split('?')[0]
+    return path === '/api/v2/curated' || path === '/api/v2/datasets/overview'
+  })
+  expect(listPulls.length).toBeGreaterThan(0)
+  expect(listPulls.every(entry => entry.includes('paginated=true'))).toBe(true)
+
+  await syncEntry.click()
+  await expect(page).toHaveURL(/\/data\/pipelines\/datasets/)
+})
+
+test('总览聚合接口失败给出明确错误，重试后恢复五张卡片', async ({ page }) => {
+  // 可变 mock 状态：先 500，点重试前切回 200，避免叠加注册多个 route
+  const summaryControl = { status: 500 }
+  await mockAssetLake(page, {
+    summary: summaryControl,
+    curated: [{
+      id: 'ds-retry', name: '重试成品', status: 'approved',
+      row_count: 1, quality_score: 0.8, primary_key: 'id',
+      producer_pipeline_id: null, output_key: null, has_review_evidence: false,
+      created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+    }],
+    manual: [{
+      id: 'raw-retry', name: '重试人工数据', raw_name: '重试人工数据', kind: 'table',
+      primary_key: 'id', source: 'upload', connection_name: '', version_count: 1,
+      latest_version_no: 1, rowcount: 1, consumers: [],
+      created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+    }],
+  })
+  await page.goto('/#/data/structured?tab=curated', { waitUntil: 'domcontentloaded' })
+
+  await expect(page.getByText('总览数据加载失败')).toBeVisible()
+  const retryButton = page.getByRole('button', { name: '重试' })
+  await expect(retryButton).toBeVisible()
+
+  summaryControl.status = 200
+  await retryButton.click()
+
+  const totalCard = page.getByText('数据集总数', { exact: true }).locator('xpath=..')
+  await expect(totalCard.getByText('2', { exact: true })).toBeVisible()
+  await expect(page.getByText('总览数据加载失败')).toHaveCount(0)
 })

@@ -7,6 +7,7 @@ import logging
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.data_channel.datasets import cache as lake_cache
 from app.data_channel.datasets.consumers import dataset_consumers
 from app.data_channel.datasets.service import (
     drain_storage_deletion_outbox,
@@ -139,4 +140,5 @@ def delete_curated(
         dataset_id, len(review_ids), len(version_ids), admin_id or "unknown",
     )
     db.commit()
+    lake_cache.invalidate_overview()
     drain_storage_deletion_outbox(db)

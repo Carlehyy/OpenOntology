@@ -32,6 +32,22 @@ export interface DatasetOverviewPage {
   page_size: number
 }
 
+/** 资产湖总览五张洞察卡片的服务端聚合口径（成品 + 原始数据集）。 */
+export interface AssetLakeOverviewSummary {
+  /** 成品 + 全部原始数据集（含历史同步） */
+  total: number
+  curated_total: number
+  raw_total: number
+  /** 文件上传或在线维护（排除历史同步） */
+  manual_total: number
+  manual_with_primary_key: number
+  sync_total: number
+  scored_curated_total: number
+  /** 已评分成品的平均分（0-1）；无已评分成品时为 null */
+  average_quality_score: number | null
+  pending_review_total: number
+}
+
 export interface RowEditOp {
   key?: Record<string, string>
   values?: Record<string, unknown>
@@ -163,6 +179,10 @@ const datasetsApi = {
     paginated?: boolean
   }): Promise<DatasetOverviewPage> =>
     apiClientV2.get('/datasets/overview', { params }),
+
+  /** 总览洞察卡片聚合口径：服务端聚合 + 短缓存，不再拉取两个全量列表 */
+  overviewSummary: (): Promise<AssetLakeOverviewSummary> =>
+    apiClientV2.get('/datasets/overview/summary'),
 
   /** 在线新建空表格：定义列名/类型/主键，不上传文件，之后在「维护数据」中逐行录入 */
   createTable: (payload: { name: string; columns: CreateTableColumn[]; primary_key?: string }): Promise<CreateTableResult> =>

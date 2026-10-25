@@ -29,6 +29,7 @@ from app.data_channel.curated.approved_version_reader import (
     version_review,
 )
 from app.data_channel.curated.models import CuratedDataset, CuratedReview, CuratedRowEdit
+from app.data_channel.datasets import cache as lake_cache
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ class ReviewService:
         self._db.add(review)
         self._set_dataset_status(curated_dataset_id, "in_review")
         self._db.commit()
+        lake_cache.invalidate_overview()
         self._db.refresh(review)
         return review
 
@@ -225,6 +227,7 @@ class ReviewService:
                 dataset_version_id=review.dataset_version_id,
             )
         self._db.commit()
+        lake_cache.invalidate_overview()
         self._db.refresh(review)
         # 数据库列是「谁批的」权威审计记录；info 日志是排障附属（日志会
         # 轮转，不能作为审计依据）。
@@ -247,6 +250,7 @@ class ReviewService:
             review.reviewer_id = reviewer_id
         self._set_dataset_status(review.curated_dataset_id, "rejected")
         self._db.commit()
+        lake_cache.invalidate_overview()
         self._db.refresh(review)
         logger.info(
             "curated review rejected: review=%s dataset=%s reviewer=%s",

@@ -151,36 +151,34 @@ function AssetInsightStrip() {
 
   useEffect(() => {
     let alive = true
-    Promise.all([curatedApi.list(), datasetsApi.overview()])
-      .then(([curatedResult, rawResult]) => {
+    // 卡片只需要几个聚合数字：走服务端聚合 + 短缓存接口，
+    // 不再为五张卡片拉取两个全量数据集列表。
+    datasetsApi.overviewSummary()
+      .then(summary => {
         if (!alive) return
-        const curatedItems = Array.isArray(curatedResult) ? curatedResult : []
-        const rawItems = Array.isArray(rawResult?.items) ? rawResult.items : []
-        const manualItems = rawItems.filter(item => item.source === 'upload' || item.source === 'manual')
-        const legacySyncCount = rawItems.filter(item => item.source === 'sync').length
-        const scored = curatedItems
-          .map(item => item.quality_score)
-          .filter((score): score is number => typeof score === 'number' && Number.isFinite(score))
-        const avgQuality = scored.length
-          ? `${Math.round((scored.reduce((sum, score) => sum + score, 0) / scored.length) * 100)}%`
+        if (!summary || typeof summary.total !== 'number') {
+          throw new Error('总览数据格式异常')
+        }
+        const avgQuality = summary.scored_curated_total && typeof summary.average_quality_score === 'number'
+          ? `${Math.round(summary.average_quality_score * 100)}%`
           : '—'
         setMetrics([
           {
-            label: '数据集总数', value: String(curatedItems.length + rawItems.length),
-            note: `成品 ${curatedItems.length} · 人工 ${manualItems.length}`,
+            label: '数据集总数', value: String(summary.total),
+            note: `成品 ${summary.curated_total} · 人工 ${summary.manual_total}`,
             // 连接同步数据集按导航设计（21dc9e08）不在资产湖列表展示，
             // 其正式入口是「数据流水线 → 数据集」；计数必须可跳转，不能是死数字
-            ...(legacySyncCount ? {
+            ...(summary.sync_total ? {
               action: {
-                text: `历史同步 ${legacySyncCount} →`,
+                text: `历史同步 ${summary.sync_total} →`,
                 onClick: () => navigate('/data/pipelines/datasets'),
               },
             } : {}),
           },
-          { label: '人工数据集', value: String(manualItems.length), note: '文件上传或在线维护' },
-          { label: '已声明主键', value: String(manualItems.filter(item => Boolean(item.primary_key)).length), note: '具备主键契约的人工数据集' },
-          { label: '平均质量分', value: avgQuality, note: scored.length ? `基于 ${scored.length} 个已评分成品` : '暂无已评分成品' },
-          { label: '待审核', value: String(curatedItems.filter(item => isPendingReview(item.status)).length), note: '需要人工确认的成品数据集' },
+          { label: '人工数据集', value: String(summary.manual_total), note: '文件上传或在线维护' },
+          { label: '已声明主键', value: String(summary.manual_with_primary_key), note: '具备主键契约的人工数据集' },
+          { label: '平均质量分', value: avgQuality, note: summary.scored_curated_total ? `基于 ${summary.scored_curated_total} 个已评分成品` : '暂无已评分成品' },
+          { label: '待审核', value: String(summary.pending_review_total), note: '需要人工确认的成品数据集' },
         ])
       })
       .catch(error => {
