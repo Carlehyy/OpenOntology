@@ -52,7 +52,26 @@ async function runQuery(page: Page, query: string, bindings: Record<string, unkn
   return result
 }
 
+/** The register dialog only offers connections that passed a connectivity test;
+ * activate the stack fixture connection via the real API before selecting it. */
+async function ensureConnectionActive(page: Page, source: 'postgres' | 'mysql') {
+  const token = await page.evaluate(() => localStorage.getItem('token'))
+  const headers = { Authorization: `Bearer ${token}` }
+  const listResponse = await page.request.get(new URL('/api/v2/connections', page.url()).toString(), { headers })
+  expect(listResponse.ok()).toBeTruthy()
+  const connections = unwrap<Array<{ id: string; name: string; kind: string; status: string }>>(await listResponse.json())
+  const connection = connections.find(item => item.name === connectionNames[source] && item.kind === source)
+  if (!connection) throw new Error(`stack connection ${connectionNames[source]} (${source}) must exist before registration`)
+  if (connection.status === 'active') return
+  const testResponse = await page.request.post(new URL(`/api/v2/connections/${connection.id}/test`, page.url()).toString(), { headers })
+  expect(testResponse.ok(), 'connection connectivity test must succeed before the dialog lists it').toBeTruthy()
+  const result = unwrap<{ success: boolean; status: string }>(await testResponse.json())
+  expect(result.success).toBe(true)
+  expect(result.status).toBe('active')
+}
+
 async function register(page: Page, source: 'postgres' | 'mysql', suffix: string): Promise<string> {
+  await ensureConnectionActive(page, source)
   await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('资产名称').fill(`integrated-${source}-${suffix}`)

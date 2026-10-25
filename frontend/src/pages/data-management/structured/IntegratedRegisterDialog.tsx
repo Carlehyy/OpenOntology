@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Database, Loader2 } from 'lucide-react'
 import { integratedDatasetsApi, type DiscoveredResource, type IntegratedAsset, type SourceConnection } from '@/api/v2/integrated-datasets'
 import { Alert } from '@/components/ui/Alert'
@@ -13,6 +14,7 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
   onClose: () => void
   onRegistered: (asset: IntegratedAsset) => void
 }) {
+  const navigate = useNavigate()
   const [connections, setConnections] = useState<SourceConnection[]>([])
   const [name, setName] = useState('')
   const [connection, setConnection] = useState('')
@@ -34,6 +36,11 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [])
+
+  const activeConnections = connections.filter(item => item.status === 'active')
+  const emptyConnectionHint = connections.length === 0
+    ? '没有可用的 MySQL / PostgreSQL 连接，请先在数据连接中配置。'
+    : `已有 ${connections.length} 个 MySQL / PostgreSQL 连接，但均未通过连通测试，请先在数据连接中测试连通。`
 
   const discover = async () => {
     if (!connection || discovering) return
@@ -95,15 +102,26 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
           <div>
             <label className="mb-1 block text-xs font-medium" id="integrated-connection-label">数据连接</label>
             <Select value={connection} onValueChange={value => { setConnection(value); setResources([]); setDiscovered(false); setSchema(''); setTable('') }}>
-              <SelectTrigger aria-labelledby="integrated-connection-label" disabled={loading}>
-                <SelectValue placeholder={loading ? '加载连接中…' : '选择 MySQL / PostgreSQL 连接'} />
+              <SelectTrigger aria-labelledby="integrated-connection-label" disabled={loading || activeConnections.length === 0}>
+                <SelectValue placeholder={loading ? '加载连接中…' : activeConnections.length === 0 ? '暂无可用连接' : '选择 MySQL / PostgreSQL 连接'} />
               </SelectTrigger>
               <SelectContent>
-                {connections.map(item => <SelectItem key={item.id} value={item.id}>{item.name} · {item.kind}</SelectItem>)}
+                {activeConnections.map(item => <SelectItem key={item.id} value={item.id}>{item.name} · {item.kind}</SelectItem>)}
               </SelectContent>
             </Select>
-            {!loading && connections.length === 0 && (
-              <p className="mt-1 text-xs text-muted-foreground">没有可用的 MySQL / PostgreSQL 连接，请先在数据连接中配置。</p>
+            {!loading && !error && activeConnections.length === 0 && (
+              <p className="mt-1 text-xs text-muted-foreground" data-testid="integrated-connection-empty-hint">
+                {emptyConnectionHint}
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  className="ml-1 h-auto px-1 py-0"
+                  onClick={() => navigate('/data/pipelines/connections')}
+                >
+                  前往数据连接
+                </Button>
+              </p>
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">

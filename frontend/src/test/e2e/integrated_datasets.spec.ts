@@ -15,6 +15,11 @@ const assetFixture = {
   dbx: { configured: true, available: true, commit: '0137e0cbc8b663da5a17ec424c6d47e4e5570ead', version: '0.6.53' },
   latest_version_id: null, status: 'registered', created_at: instant,
 }
+const defaultConnections = [
+  { id: 'pg-source', name: 'PostgreSQL 测试源', kind: 'postgres', status: 'active' },
+  { id: 'mysql-source', name: 'MySQL 测试源', kind: 'mysql', status: 'active' },
+  { id: 'mongo-source', name: 'MongoDB 隐藏源', kind: 'mongo', status: 'active' },
+]
 const sourceRow = { values: { id: { $integer: '9007199254740993' }, amount: { $decimal: '123.456789012345678901' }, note: null }, row_token: 'original-row-token' }
 const queryFixture = {
   queryId: 'query-snapshot-1', schemaVersion: 1,
@@ -41,6 +46,14 @@ type MockOptions = {
   dbxUnavailable?: boolean
   /** Owner/admin write capability for the fixture asset (editors may be read-only). */
   assetWrite?: boolean
+  /** Connection list served to the register dialog; defaults to active SQL fixtures. */
+  connections?: Array<{ id: string; name: string; kind: string; status: string }>
+  /** Fail GET /api/v2/connections to exercise the connection error path. */
+  connectionsError?: boolean
+  /** Serve an empty asset list so the page-level empty state renders. */
+  noAssets?: boolean
+  /** Menu keys granted to the mock user (defaults to data.structured only). */
+  menuKeys?: string[]
 }
 async function mockIntegrated(page: Page, options: MockOptions = {}) {
   const captured: Array<{ method: string; path: string; body: any }> = []
@@ -49,7 +62,7 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
   const dbx = options.dbxUnavailable
     ? { configured: false, available: false, commit: '0137e0cbc8b663da5a17ec424c6d47e4e5570ead', version: '0.6.53', reason: 'Pinned dbx metadata transport is not configured or verified' }
     : assetFixture.dbx
-  const assets = [{
+  const assets = options.noAssets ? [] : [{
     ...assetFixture,
     writable: options.writable ?? true,
     capabilities: { ...assetFixture.capabilities, write: assetWrite, dbx_metadata: !options.dbxUnavailable },
@@ -60,10 +73,10 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
   let run: Record<string, unknown> | null = options.restoreRun ? { run_id: 'sync-run-1', asset_id: 'asset-orders', dataset_id: 'dataset-orders', status: 'starting', complete: false, row_count: 0, expected_rows: 0, version_id: null, error: null, created_at: instant, updated_at: instant, completed_at: null } : null
   let polls = 0
   let historyRecovered = false
-  await page.addInitScript(({ role }) => {
+  await page.addInitScript(({ role, menuKeys }) => {
     localStorage.setItem('token', 'mock-integrated-token')
-    localStorage.setItem('auth-store', JSON.stringify({ state: { token: 'mock-integrated-token', user: { id: 'mock-user', username: 'mock-user', role, menu_permissions: ['data.structured'] } }, version: 0 }))
-  }, { role })
+    localStorage.setItem('auth-store', JSON.stringify({ state: { token: 'mock-integrated-token', user: { id: 'mock-user', username: 'mock-user', role, menu_permissions: menuKeys } }, version: 0 }))
+  }, { role, menuKeys: options.menuKeys ?? ['data.structured'] })
   await page.route(url => url.pathname.startsWith('/api/'), async (route: Route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname
@@ -76,7 +89,10 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       if (method === 'POST') { const created = { ...assets[0], ...body, id: 'asset-registered' }; assets.push(created); return respond(created, 201) }
       return respond({ items: assets, total: assets.length })
     }
-    if (path === '/api/v2/connections') return respond([{ id: 'pg-source', name: 'PostgreSQL 测试源', kind: 'postgres', status: 'unknown' }, { id: 'mysql-source', name: 'MySQL 测试源', kind: 'mysql', status: 'unknown' }, { id: 'mongo-source', name: 'MongoDB 隐藏源', kind: 'mongo', status: 'unknown' }])
+    if (path === '/api/v2/connections') {
+      if (options.connectionsError) return fail(503, { code: 'CONNECTIONS_UNAVAILABLE', message: 'Connections list is unavailable' })
+      return respond(options.connections ?? defaultConnections)
+    }
     if (/\/integrated-datasets\/connections\/[^/]+\/resources$/.test(path)) return options.discoveryError ? fail(503, { code: 'DBX_UNAVAILABLE', message: 'Metadata discovery is unavailable' }) : respond({ items: [{ schema_name: 'public', table_name: 'new_orders' }] })
     if (/\/integrated-datasets\/[^/]+\/schema$/.test(path) || path.endsWith('/refresh-schema')) return respond({ columns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     if (/\/integrated-datasets\/[^/]+\/versions$/.test(path)) return respond({ items: run?.status === 'sealed' || options.unverifiedVersion ? [{ id: 'sealed-version-1', version_no: 1, row_count: 10000, checksum: 'version-checksum', run_id: options.unverifiedVersion ? null : 'sync-run-1', status: options.unverifiedVersion ? 'unverified' : 'sealed', complete: !options.unverifiedVersion, created_at: instant }] : [] })
@@ -265,6 +281,57 @@ for (const kind of ['PostgreSQL', 'MySQL']) {
     expect(registration?.body).toEqual({ name: `${kind} 新订单`, connection_id: kind === 'MySQL' ? 'mysql-source' : 'pg-source', schema_name: 'public', table_name: 'new_orders', writable: false })
   })
 }
+
+test('empty connection list guides managers to the connections page', async ({ page }) => {
+  await mockIntegrated(page, { connections: [], menuKeys: ['data.structured', 'data.pipelines'] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('没有可用的 MySQL / PostgreSQL 连接')
+  await dialog.getByRole('button', { name: '前往数据连接', exact: true }).click()
+  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
+  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+})
+
+test('untested connections stay out of the selector and the hint points to connectivity testing', async ({ page }) => {
+  await mockIntegrated(page, { connections: [
+    { id: 'pg-source', name: 'PostgreSQL 测试源', kind: 'postgres', status: 'inactive' },
+    { id: 'mysql-source', name: 'MySQL 测试源', kind: 'mysql', status: 'error' },
+    { id: 'mongo-source', name: 'MongoDB 隐藏源', kind: 'mongo', status: 'active' },
+  ] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('已有 2 个 MySQL / PostgreSQL 连接，但均未通过连通测试')
+  // 无可选连接时选择器保持禁用：打开空下拉会让焦点逃逸并意外关闭整个弹窗。
+  await expect(dialog.getByRole('combobox', { name: '数据连接' })).toBeDisabled()
+  await expect(dialog.getByRole('combobox', { name: '数据连接' })).toContainText('暂无可用连接')
+  await expect(dialog.getByRole('button', { name: '前往数据连接', exact: true })).toBeVisible()
+})
+
+test('connection load failure reports the error without the configure hint', async ({ page }) => {
+  await mockIntegrated(page, { connectionsError: true })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('alert')).toContainText('加载数据连接失败')
+  await expect(dialog.getByTestId('integrated-connection-empty-hint')).toHaveCount(0)
+  await expect(dialog).not.toContainText('请先在数据连接中配置')
+})
+
+test('empty integrated tab links managers to the connections page', async ({ page }) => {
+  await mockIntegrated(page, { noAssets: true, menuKeys: ['data.structured', 'data.pipelines'] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '前往数据连接', exact: true }).click()
+  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
+  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+})
+
+test('viewer gets no connections shortcut on the empty integrated tab', async ({ page }) => {
+  await mockIntegrated(page, { role: 'viewer', noAssets: true })
+  await page.goto('/#/data/structured?tab=integrated')
+  await expect(page.getByRole('button', { name: '前往数据连接', exact: true })).toHaveCount(0)
+})
 
 test('asynchronous sync reports real queued state and refresh restores the persisted run', async ({ page }) => {
   const requests = await mockIntegrated(page)
