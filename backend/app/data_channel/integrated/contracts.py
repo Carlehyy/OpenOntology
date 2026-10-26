@@ -11,7 +11,8 @@ import uuid
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Literal
 
 # Official release pin: annotated tag v0.6.53 -> commit 0137e0c.
 # The requested historical pin c6fb06c is that commit plus one
@@ -29,13 +30,86 @@ def serialize_source_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+class FieldConfigEntry(BaseModel):
+    """One logical field: a physical source column addressed by its alias.
+
+    Only the logical name and display name are configurable; type, nullability
+    and primary-key membership are always physical truth.
+    """
+    model_config = ConfigDict(extra="forbid")
+    source_key: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=63, pattern=r"^[a-z][a-z0-9_]*$")
+    display_name: str | None = Field(default=None, max_length=200)
+
+
+class SourceConnectionConfig(BaseModel):
+    """Field-based MySQL/PostgreSQL source configuration (never echoed back)."""
+    model_config = ConfigDict(extra="forbid")
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    database: str = Field(default="", max_length=128)
+    user: str = Field(min_length=1, max_length=128)
+    password: str = Field(default="", max_length=512)
+    dbx_host: str | None = Field(default=None, max_length=253)
+    dbx_port: int | None = Field(default=None, ge=1, le=65535)
+
+
+class SourceConnection(BaseModel):
+    """An inline (not yet persisted) MySQL/PostgreSQL source definition."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["mysql", "postgres"]
+    config: SourceConnectionConfig
+
+    @model_validator(mode="after")
+    def _kind_rules(self):
+        # PostgreSQL has no single default database for discovery: both the
+        # native lane and dbx require an explicit database to reflect against.
+        if self.kind == "postgres" and not self.config.database.strip():
+            raise ValueError("PostgreSQL sources require an explicit database")
+        has_host, has_port = self.config.dbx_host is not None, self.config.dbx_port is not None
+        if has_host != has_port:
+            raise ValueError("dbx_host and dbx_port must be supplied together")
+        return self
+
+
+class SourceReference(BaseModel):
+    """Exactly one reference: an existing connection or an inline definition."""
+    model_config = ConfigDict(extra="forbid")
+    connection_id: str | None = Field(default=None, min_length=1, max_length=64)
+    source_connection: SourceConnection | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self):
+        if (self.connection_id is None) == (self.source_connection is None):
+            raise ValueError("Provide exactly one of connection_id or source_connection")
+        return self
+
+
+class SourceSchemaRequest(SourceReference):
+    """Physical schema discovery for one table of a referenced source."""
+    model_config = ConfigDict(extra="forbid")
+    schema_name: str = Field(min_length=1, max_length=128)
+    table_name: str = Field(min_length=1, max_length=128)
+
+
 class RegisterAsset(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
-    connection_id: str
+    # Exactly one of an existing connection or an inline source definition.
+    connection_id: str | None = Field(default=None, min_length=1, max_length=64)
+    source_connection: SourceConnection | None = None
     schema_name: str = Field(min_length=1, max_length=128)
     table_name: str = Field(min_length=1, max_length=128)
     writable: bool = False
+    # Absent field_config keeps the original full-schema identity.
+    field_config: list[FieldConfigEntry] | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self):
+        if (self.connection_id is None) == (self.source_connection is None):
+            raise ValueError("Provide exactly one of connection_id or source_connection")
+        return self
 
 
 class RowMutation(BaseModel):

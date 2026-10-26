@@ -164,3 +164,70 @@ def test_downgrade_drops_only_exact_manifest_owned_physical_relation():
                 assert sa.inspect(connection).has_table(unrelated)
     finally:
         engine.dispose()
+
+
+def test_field_config_migration_replays_upgrades_and_downgrades():
+    """0137 creates the one-to-one projection table after the integrated base."""
+    assets = _migration("2026_10_24_0134_integrated_assets.py")
+    config = _migration("2026_10_25_0137_integrated_field_config.py")
+    engine = sa.create_engine("sqlite://")
+    try:
+        with engine.begin() as connection:
+            _parents(connection)
+            with Operations.context(MigrationContext.configure(connection)):
+                assets.upgrade()
+                config.upgrade()
+                # Replay is allowed only when the frozen shape check passes.
+                config.upgrade()
+                tables = sa.inspect(connection).get_table_names()
+                assert "v2_integrated_asset_field_configs" in tables
+                config.downgrade()
+                assert "v2_integrated_asset_field_configs" not in sa.inspect(connection).get_table_names()
+                config.upgrade()
+                assert "v2_integrated_asset_field_configs" in sa.inspect(connection).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_field_config_migration_accepts_the_model_created_schema_without_drift():
+    """A fresh DB reaches 0137 after create_all built the exact model table.
+
+    Migration 0003 materializes every registered model (including this table)
+    before 0137 runs on a fresh chain, so 0137 must verify — never re-create —
+    that exact shape.
+    """
+    from app.data_channel.integrated.models import IntegratedAssetFieldConfig
+
+    assets = _migration("2026_10_24_0134_integrated_assets.py")
+    config = _migration("2026_10_25_0137_integrated_field_config.py")
+    engine = sa.create_engine("sqlite://")
+    try:
+        with engine.begin() as connection:
+            _parents(connection)
+            with Operations.context(MigrationContext.configure(connection)):
+                assets.upgrade()
+            # The model registry (as 0003 create_all would build it) already
+            # materialized the table with the head model shape.
+            IntegratedAssetFieldConfig.__table__.create(connection)
+            with Operations.context(MigrationContext.configure(connection)):
+                # Idempotent: the frozen migration only verifies the model shape.
+                config.upgrade()
+            assert "v2_integrated_asset_field_configs" in sa.inspect(connection).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_field_config_migration_rejects_incompatible_existing_table():
+    config = _migration("2026_10_25_0137_integrated_field_config.py")
+    engine = sa.create_engine("sqlite://")
+    try:
+        with engine.begin() as connection:
+            _parents(connection)
+            sa.Table("v2_integrated_asset_field_configs", sa.MetaData(),
+                     sa.Column("asset_id", sa.String, primary_key=True),
+                     sa.Column("field_config", sa.JSON, nullable=True)).create(connection)
+            with Operations.context(MigrationContext.configure(connection)):
+                with pytest.raises(RuntimeError, match="incompatible"):
+                    config.upgrade()
+    finally:
+        engine.dispose()

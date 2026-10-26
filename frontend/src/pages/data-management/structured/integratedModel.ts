@@ -10,6 +10,15 @@ export function integratedCell(value: unknown): string {
   return typeof value === 'object' ? JSON.stringify(value) : String(value)
 }
 
+/**
+ * Header label for a logical column: show the configured display name with the
+ * alias in parentheses when they differ; unconfigured columns show the name as-is.
+ */
+export function integratedColumnLabel(column: { name: string; display_name?: string }): string {
+  const display = column.display_name?.trim()
+  return display && display !== column.name ? `${display}（${column.name}）` : column.name
+}
+
 /** Persistent inline errors only; never used to claim a write/sync succeeded. */
 export function integratedError(error: unknown): string {
   if (!error || typeof error !== 'object') return '请求失败，请重试'

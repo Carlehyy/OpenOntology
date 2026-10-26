@@ -4,7 +4,9 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
 from app.data_channel.integrated import service
-from app.data_channel.integrated.contracts import RegisterAsset, RowMutation, fail
+from app.data_channel.integrated.contracts import (
+    RegisterAsset, RowMutation, SourceReference, SourceSchemaRequest, fail,
+)
 from app.data_channel.integrated.models import IntegratedMutation
 from app.data_channel.integrated.native import authorize, get_asset
 
@@ -19,6 +21,23 @@ def list_assets(db: Session = Depends(get_db), user=Depends(get_current_user)):
 @router.post("", status_code=201)
 def register_asset(body: RegisterAsset, db: Session = Depends(get_db), user=Depends(get_current_user)):
     return service.register_asset(db, user, body)
+
+
+# Inline source lifecycle: probe, discovery and physical schema inspection all
+# stay inside the integrated module.  Probes never persist anything.
+@router.post("/sources/test")
+def test_source(body: SourceReference, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return service.test_source(db, user, body)
+
+
+@router.post("/sources/resources")
+def source_resources(body: SourceReference, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return service.list_source_resources(db, user, body)
+
+
+@router.post("/sources/schema")
+def source_schema(body: SourceSchemaRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return service.describe_source_schema(db, user, body)
 
 
 # Declare the static connection path before the generic asset path.
@@ -37,7 +56,17 @@ def asset(asset_id: str, db: Session = Depends(get_db), user=Depends(get_current
 @router.get("/{asset_id}/schema")
 def schema(asset_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     record = get_asset(db, user, asset_id)
-    return {"asset_id": record.id, **record.schema_json, "schema_fingerprint": record.schema_fingerprint}
+    payload = {"asset_id": record.id, **record.schema_json,
+               "schema_fingerprint": record.schema_fingerprint}
+    # Logical presentation for configured assets; schema_fingerprint stays the
+    # physical identity and never covers the projection.
+    projection = service.asset_projection(record)
+    if projection is not None:
+        payload["columns"] = projection["columns"]
+        payload["primary_key"] = projection["primary_key"]
+        payload["field_config"] = projection["field_config"]
+        payload["logical_fingerprint"] = projection["fingerprint"]
+    return payload
 
 
 @router.post("/{asset_id}/refresh-schema")

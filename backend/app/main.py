@@ -94,6 +94,53 @@ app = FastAPI(
     openapi_url=None if _disable_docs else "/openapi.json",
 )
 
+
+# Pydantic/FastAPI validation errors echo the offending input verbatim.  For
+# credential-bearing integrated source payloads (inline connection configs,
+# connection strings) that echo would leak secrets into responses and logs.
+# Scope: only integrated-dataset requests get redaction; every other route
+# keeps the stock FastAPI validation handler and response shape unchanged.
+from fastapi import Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import JSONResponse
+
+_REDACTED_INPUT_KEYS = frozenset({"password", "_encrypted", "connection_string"})
+# Credential-bearing containers: their echoed input is redacted wholesale,
+# including malformed values (e.g. a connection URI passed where an object is
+# expected), because any spelling of these fields may embed secrets.
+_REDACTED_CONTAINER_KEYS = frozenset({"source_connection", "config"})
+_REDACTION_PATH_PREFIX = "/api/v2/integrated-datasets"
+
+
+def _redact_validation_value(value):
+    if isinstance(value, dict):
+        return {key: ("[redacted]" if key in _REDACTED_INPUT_KEYS | _REDACTED_CONTAINER_KEYS
+                      else _redact_validation_value(item))
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_validation_value(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def _redact_validation_input(request: Request, exc: RequestValidationError):
+    if not request.url.path.startswith(_REDACTION_PATH_PREFIX):
+        return await request_validation_exception_handler(request, exc)
+    # jsonable_encoder first (same encoder as the stock handler): ctx may hold
+    # ValueError objects that a plain json.dumps could never serialize.
+    errors = jsonable_encoder(exc.errors())
+    for error in errors:
+        loc = tuple(str(part) for part in error.get("loc", ()))
+        if "input" in error:
+            if any(part in _REDACTED_INPUT_KEYS | _REDACTED_CONTAINER_KEYS for part in loc):
+                error["input"] = "[redacted]"
+            else:
+                error["input"] = _redact_validation_value(error["input"])
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
 @app.get("/health/live", tags=["health"])
 def liveness():
     """Process liveness only; dependency readiness is exposed separately."""

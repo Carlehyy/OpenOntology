@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 import math
 import json
 import re
+from types import SimpleNamespace
 import uuid
 
 from fastapi import HTTPException
@@ -16,13 +17,18 @@ from sqlalchemy.dialects import mysql
 
 from app.data_channel.connections.models import Connection
 from app.data_channel.datasets.models import Dataset, DatasetVersion, IntegratedSyncRun
-from app.data_channel.integrated.contracts import (DBX_COMMIT, DBX_VERSION, JsonText, digest, fail,
-                                                  row_token, wire_value)
-from app.data_channel.integrated.models import IntegratedAsset, IntegratedMutation
+from app.data_channel.integrated import fields
+from app.data_channel.integrated.contracts import (
+    DBX_COMMIT, DBX_VERSION, JsonText, RegisterAsset, RowMutation, SourceReference,
+    SourceSchemaRequest, digest, fail, row_token, wire_value,
+)
+from app.data_channel.integrated.fields import FieldConfigError
+from app.data_channel.integrated.models import IntegratedAsset, IntegratedAssetFieldConfig, IntegratedMutation
 from app.data_channel.integrated.native import (
     authorize, check_transactional_table, get_asset, open_read_scope, open_snapshot,
     normalize_row, reflect, resolve_metadata, source_engine,
 )
+from app.shared.encryption import encrypt
 
 
 def dbx():
@@ -140,28 +146,61 @@ def verify_dbx_metadata(evidence, schema) -> None:
             _metadata_mismatch(f"dbx collation disagrees for column {name}")
 
 
-def asset_dto(db, user, asset, *, dbx_status=None):
+_UNSET = object()
+
+
+def raw_config_of(asset):
+    """Raw stored field config of an asset (relationship read), or None."""
+    row = asset.field_config_row
+    return row.field_config if row is not None else None
+
+
+def asset_projection(asset, raw_config=_UNSET):
+    """Validated logical projection of an asset, or None; fails closed."""
+    if raw_config is _UNSET:
+        raw_config = raw_config_of(asset)
+    try:
+        return fields.projection_of(asset.schema_json, raw_config)
+    except FieldConfigError:
+        fail(409, "ASSET_FIELD_CONFIG_INVALID",
+             "The stored field configuration is inconsistent with the source schema")
+
+
+def asset_dto(db, user, asset, *, dbx_status=None, raw_config=_UNSET):
     dataset = db.get(Dataset, asset.dataset_id)
     write = asset.writable and user.role in {"admin", "editor"} and (user.role == "admin" or user.id == asset.created_by)
     status = dbx_status if dbx_status is not None else dbx().status()
-    return {"id": asset.id, "dataset_id": asset.dataset_id, "name": asset.name,
-            "connection_id": asset.connection_id, "schema_name": asset.schema_name,
-            "table_name": asset.table_name, "columns": asset.schema_json["columns"],
-            "primary_key": asset.schema_json["primary_key"],
-            "schema_fingerprint": asset.schema_fingerprint, "writable": asset.writable,
-            "capabilities": {"read": True, "write": write, "sync": user.role in {"admin", "editor"},
+    # Columns and the primary key are addressed through logical names when the
+    # asset is configured; the schema_fingerprint stays the physical identity.
+    projection = asset_projection(asset, raw_config)
+    result = {"id": asset.id, "dataset_id": asset.dataset_id, "name": asset.name,
+              "connection_id": asset.connection_id, "schema_name": asset.schema_name,
+              "table_name": asset.table_name,
+              "columns": projection["columns"] if projection else asset.schema_json["columns"],
+              "primary_key": projection["primary_key"] if projection else asset.schema_json["primary_key"],
+              "schema_fingerprint": asset.schema_fingerprint, "writable": asset.writable,
+              "capabilities": {"read": True, "write": write, "sync": user.role in {"admin", "editor"},
                              "dbx_metadata": status.get("available") is True},
-            "backends": {"snapshot": "native", "mutation": "native", "metadata": "dbx"},
-            "dbx": status, "status": "registered",
-            "latest_version_id": dataset.latest_version_id if dataset else None,
-            "created_at": asset.created_at, "updated_at": asset.updated_at}
+              "backends": {"snapshot": "native", "mutation": "native", "metadata": "dbx"},
+              "dbx": status, "status": "registered",
+              "latest_version_id": dataset.latest_version_id if dataset else None,
+              "created_at": asset.created_at, "updated_at": asset.updated_at}
+    if projection is not None:
+        result["field_config"] = projection["field_config"]
+        result["logical_fingerprint"] = projection["fingerprint"]
+    return result
 
 
 def list_assets(db, user):
     authorize(db, user)
     assets = db.scalars(sa.select(IntegratedAsset).order_by(IntegratedAsset.created_at.desc())).all()
     status = dbx().status()
-    return {"items": [asset_dto(db, user, a, dbx_status=status) for a in assets], "total": len(assets)}
+    # One batched read keeps the listing free of per-asset config lookups.
+    configs = {row.asset_id: row.field_config for row in db.scalars(
+        sa.select(IntegratedAssetFieldConfig).where(
+            IntegratedAssetFieldConfig.asset_id.in_([a.id for a in assets])))} if assets else {}
+    return {"items": [asset_dto(db, user, a, dbx_status=status, raw_config=configs.get(a.id))
+                      for a in assets], "total": len(assets)}
 
 
 def _connection(db, connection_id):
@@ -173,9 +212,141 @@ def _connection(db, connection_id):
     return connection
 
 
+def _transient_source(body: SourceReference):
+    """Inline source handle with the shared connection shape; never persisted."""
+    source = body.source_connection
+    config = {"host": source.config.host, "port": source.config.port,
+              "database": source.config.database, "user": source.config.user,
+              "password": source.config.password}
+    if source.config.dbx_host is not None:
+        config["dbx_host"] = source.config.dbx_host
+        config["dbx_port"] = source.config.dbx_port
+    return SimpleNamespace(id="inline-" + uuid.uuid4().hex,
+                           name=source.name.strip() or "integrated source",
+                           kind=source.kind, config=config)
+
+
+def resolve_source_reference(db, user, body: SourceReference):
+    """Resolve a SourceReference to a persisted or transient source handle.
+
+    Probes accept arbitrary external credentials and network destinations, so
+    they are guarded exactly like registration: admin/editor with data.structured
+    access.  Read-only roles never reach an external source through this port.
+    """
+    authorize(db, user, write=True)
+    if body.connection_id is not None:
+        return _connection(db, body.connection_id)
+    return _transient_source(body)
+
+
+def _probe_failure(exc: SQLAlchemyError) -> tuple[str, str]:
+    """Classify a driver failure into a safe code/message pair.
+
+    Classification inspects driver error codes and well-known keywords only;
+    the original exception text, host, user and credentials never enter the
+    response or logs.
+    """
+    original = getattr(exc, "orig", None) or exc
+    name = type(original).__name__.lower()
+    pgcode = str(getattr(original, "pgcode", "") or "")
+    errno = next((value for value in (getattr(original, "args", ()) or ())
+                  if isinstance(value, int)), None)
+    try:
+        text = str(original).lower()
+    except Exception:
+        text = ""
+    if (pgcode in {"28P01", "28000"} or errno in {1044, 1045, 1698, 2062}
+            or "invalidpassword" in name
+            or "password authentication failed" in text or "access denied" in text):
+        return ("AUTHENTICATION_FAILED", "The source rejected the supplied credentials")
+    if (errno in {2002, 2003, 2005, 2006, 1042, 1130} or "gaierror" in name
+            or "timeout" in name or "timed out" in text or "connection refused" in text
+            or "could not connect" in text or "connection timed out" in text):
+        return ("CONNECT_TIMEOUT", "The source endpoint is unreachable or did not answer in time")
+    return ("SOURCE_UNAVAILABLE", "The source could not be reached with the supplied configuration")
+
+
+def test_source(db, user, body: SourceReference):
+    """Connectivity probe through the native lane; no persistence, no echo."""
+    connection = resolve_source_reference(db, user, body)
+    engine = None
+    try:
+        engine = source_engine(connection)
+        with engine.connect() as conn:
+            conn.execute(sa.text("SELECT 1"))
+        return {"success": True}
+    except SQLAlchemyError as exc:
+        # Structured, diagnosable failure without driver text or credentials.
+        code, message = _probe_failure(exc)
+        return {"success": False, "code": code, "message": message}
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
+
+
+def list_source_resources(db, user, body: SourceReference):
+    """dbx-owned table discovery for a referenced source."""
+    connection = resolve_source_reference(db, user, body)
+    return {"items": dbx().list_resources(connection)}
+
+
+def describe_source_schema(db, user, body: SourceSchemaRequest):
+    """Physical schema discovery with the exact register authority; no persistence."""
+    if any("." in n or "\x00" in n for n in (body.schema_name, body.table_name)):
+        fail(422, "INVALID_RESOURCE", "Schema/table names must be separate identifiers without dots")
+    connection = resolve_source_reference(db, user, body)
+    schema, fingerprint = _verified_source_schema(connection, body.schema_name, body.table_name)
+    return {"columns": schema["columns"], "primary_key": schema["primary_key"],
+            "schema_fingerprint": fingerprint}
+
+
+def _verified_source_schema(connection, schema_name, table_name):
+    """dbx-owned discovery cross-verified by native reflection (register authority)."""
+    evidence = dbx().describe_table(connection, schema_name, table_name)
+    probe = SimpleNamespace(schema_name=schema_name, table_name=table_name)
+    engine = source_engine(connection)
+    try:
+        with engine.connect() as conn:
+            _, schema, fingerprint = reflect(conn, probe)
+            check_transactional_table(conn, probe)
+    except SQLAlchemyError:
+        fail(503, "SOURCE_UNAVAILABLE", "Source metadata is unavailable")
+    finally:
+        engine.dispose()
+    verify_dbx_metadata(evidence, schema)
+    return schema, fingerprint
+
+
+def _field_config_or_fail(raw_entries, schema):
+    try:
+        return fields.normalize_field_config(raw_entries, schema)
+    except FieldConfigError as exc:
+        fail(422, exc.code, exc.message)
+
+
 def register_asset(db, user, body):
     authorize(db, user, write=True)
-    connection = _connection(db, body.connection_id)
+    if body.connection_id is not None:
+        connection = _connection(db, body.connection_id)
+        new_connection = None
+    else:
+        source = body.source_connection
+        name = source.name.strip()
+        if not name:
+            fail(422, "EMPTY_SOURCE_NAME", "Source connection name cannot be blank")
+        # Duplicate connection names make name-keyed datasets/tasks ambiguous
+        # (commercial review D-005); the shared Connection model owns naming.
+        if db.scalar(sa.select(Connection.id).where(Connection.name == name)):
+            fail(409, "CONNECTION_NAME_CONFLICT", "A connection with this name already exists")
+        config = _transient_source(body).config
+        new_connection = Connection(
+            id=str(uuid.uuid4()), name=name, kind=source.kind,
+            config={"_encrypted": encrypt(json.dumps(config, ensure_ascii=False))},
+            status="inactive", created_by=user.id)
+        connection = new_connection
     # A two-part physical resource has unambiguous stable identity. Quoted SQL
     # identifiers remain safe, but dots in either part would make identity ambiguous.
     if any("." in n or "\x00" in n for n in (body.schema_name, body.table_name)):
@@ -184,28 +355,30 @@ def register_asset(db, user, body):
     if db.scalar(sa.select(Dataset.id).where(Dataset.source_connection_id == connection.id, Dataset.source_resource == resource)):
         fail(409, "RESOURCE_ALREADY_REGISTERED", "A dataset already owns this connection/resource; it cannot be silently adopted")
     # Discovery is genuinely dbx-owned, not silently routed to the native lane.
-    evidence = dbx().describe_table(connection, body.schema_name, body.table_name)
-    engine = source_engine(connection)
-    try:
-        with engine.connect() as conn:
-            table, schema, fingerprint = reflect(conn, body)
-            check_transactional_table(conn, body)
-    except SQLAlchemyError:
-        fail(503, "SOURCE_UNAVAILABLE", "Source metadata is unavailable")
-    finally:
-        engine.dispose()
-    verify_dbx_metadata(evidence, schema)
-    dataset = Dataset(id=str(uuid.uuid4()), name=body.name.strip(), kind="integrated",
-                      source_connection_id=connection.id, source_resource=resource, schema_json=schema)
-    if not dataset.name:
+    # The inline connection is verified against the real source before any row
+    # is persisted: a failed probe leaves nothing behind.
+    schema, fingerprint = _verified_source_schema(connection, body.schema_name, body.table_name)
+    config = (_field_config_or_fail([entry.model_dump() for entry in body.field_config], schema)
+              if body.field_config is not None else None)
+    name = body.name.strip()
+    if not name:
         fail(422, "EMPTY_ASSET_NAME", "Asset name cannot be blank")
+    dataset = Dataset(id=str(uuid.uuid4()), name=name, kind="integrated",
+                      source_connection_id=connection.id, source_resource=resource, schema_json=schema)
     asset = IntegratedAsset(id=str(uuid.uuid4()), dataset_id=dataset.id,
-                            connection_id=connection.id, name=dataset.name,
+                            connection_id=connection.id, name=name,
                             schema_name=body.schema_name, table_name=body.table_name,
                             schema_json=schema, schema_fingerprint=fingerprint,
                             writable=body.writable, created_by=user.id)
+    if config is not None:
+        asset.field_config_row = IntegratedAssetFieldConfig(
+            asset_id=asset.id, field_config=config)
+    if new_connection is not None:
+        db.add(new_connection)
     db.add(dataset)
     try:
+        # Connection encryption, dataset, asset and its optional field config
+        # commit atomically; no partial registration can survive a failure.
         db.flush()
         db.add(asset)
         db.commit()
@@ -221,18 +394,22 @@ def refresh_schema(db, user, asset_id):
     if user.role != "admin" and asset.created_by != user.id:
         fail(403, "ASSET_OWNER_REQUIRED", "Only the owner or admin may refresh schema")
     connection = _connection(db, asset.connection_id)
-    evidence = dbx().describe_table(connection, asset.schema_name, asset.table_name)
-    engine = source_engine(connection)
-    try:
-        with engine.connect() as conn:
-            _, schema, fingerprint = reflect(conn, asset)
-            check_transactional_table(conn, asset)
-    except SQLAlchemyError:
-        fail(503, "SOURCE_UNAVAILABLE", "Source metadata is unavailable")
-    finally:
-        engine.dispose()
-    verify_dbx_metadata(evidence, schema)
+    schema, fingerprint = _verified_source_schema(connection, asset.schema_name, asset.table_name)
+    raw_config = raw_config_of(asset)
+    normalized = None
+    if raw_config is not None:
+        try:
+            normalized = fields.normalize_field_config(raw_config, schema)
+        except FieldConfigError as exc:
+            # A mapped source column disappeared: refuse to refresh rather
+            # than silently dropping or widening the logical projection.
+            code = ("FIELD_CONFIG_SOURCE_MISSING"
+                    if exc.code == "FIELD_CONFIG_UNKNOWN_SOURCE" else exc.code)
+            fail(409, code, f"Refresh rejected: {exc.message}")
     asset.schema_json, asset.schema_fingerprint = schema, fingerprint
+    # The one-to-one config row is preserved across refreshes by construction.
+    if normalized is not None:
+        asset.field_config_row.field_config = normalized
     dataset = db.get(Dataset, asset.dataset_id)
     if dataset is None:
         db.rollback()
@@ -253,10 +430,23 @@ def preview_rows(db, user, asset_id, limit=100):
         if table.primary_key.columns:
             statement = statement.order_by(*table.primary_key.columns)
         statement = statement.limit(limit)
+        meta = scope.meta[asset_id]
+        projection = meta.get("projection")
         rows = []
         for batch in scope.iter_batches(statement):
-            rows.extend({"values": wire_value(row), "row_token": row_token(row, scope.meta[asset_id]["schema_fingerprint"])} for row in batch)
-        return {"rows": rows, "columns": scope.meta[asset_id]["columns"],
+            for row in batch:
+                # Tokens bind to the FULL physical row under the physical
+                # fingerprint, so a later locked re-read recomputes the
+                # identical token even when the response is projected.
+                token = row_token(row, meta["schema_fingerprint"])
+                if projection is None:
+                    values = row
+                else:
+                    values = {column["name"]: row[column["source_key"]]
+                              for column in projection["columns"]}
+                rows.append({"values": wire_value(values), "row_token": token})
+        return {"rows": rows,
+                "columns": projection["columns"] if projection else meta["columns"],
                 "source_state": {**scope.provenance, **scope.completion},
                 "preview": True, "limit": limit}
 
@@ -482,11 +672,23 @@ def mutate_row(db, user, asset_id, operation, body):
     if operation not in {"insert", "update", "delete"}:
         fail(422, "INVALID_MUTATION_OPERATION", "Only a single-row insert, update or delete is supported")
     asset = get_asset(db, user, asset_id, write=True)
-    pk = asset.schema_json.get("primary_key", [])
+    # Keys and values are addressed through logical names when the asset is
+    # configured; the physical primary key never changes.
+    projection = asset_projection(asset)
+    if projection is not None:
+        pk = projection["primary_key"]
+        addressable = set(projection["logical_to_physical"])
+    else:
+        pk = asset.schema_json.get("primary_key", [])
+        addressable = None
     if not pk or set(body.key) != set(pk) or any(v is None for v in body.key.values()):
         fail(422, "COMPLETE_PRIMARY_KEY_REQUIRED", "Supply every explicit primary-key column and no other key")
     if set(body.values) & set(pk):
         fail(422, "PRIMARY_KEY_CHANGE_DENIED", "Primary-key values belong only in key and cannot be changed")
+    if addressable is not None and set(body.values) - addressable:
+        # Unmapped physical columns are not part of the asset's addressing
+        # namespace and must never be written through the logical projection.
+        fail(422, "UNKNOWN_COLUMN", "Mutation contains an unknown column")
     if operation in {"update", "delete"} and not body.expected_row_token:
         fail(422, "EXPECTED_ROW_TOKEN_REQUIRED", "Updates/deletes require the row token from a source read")
     if operation == "update" and not body.values:
@@ -537,10 +739,15 @@ def mutate_row(db, user, asset_id, operation, body):
         table, _, fingerprint = reflect(conn, asset)
         if fingerprint != asset.schema_fingerprint:
             fail(409, "SOURCE_SCHEMA_DRIFT", "Source schema changed; refresh before writing")
-        if set(body.values) - set(table.c.keys()):
+        to_physical = projection["logical_to_physical"] if projection is not None else {}
+        physical_names = {to_physical.get(name, name) for name in body.key}
+        physical_names |= {to_physical.get(name, name) for name in body.values}
+        if physical_names - set(table.c.keys()):
             fail(422, "UNKNOWN_COLUMN", "Mutation contains an unknown column")
-        key = {name: _decode(table.c[name], value) for name, value in body.key.items()}
-        values = {name: _decode(table.c[name], value) for name, value in body.values.items()}
+        key = {to_physical.get(name, name): _decode(table.c[to_physical.get(name, name)], value)
+               for name, value in body.key.items()}
+        values = {to_physical.get(name, name): _decode(table.c[to_physical.get(name, name)], value)
+                  for name, value in body.values.items()}
         condition = sa.and_(*(table.c[name] == value for name, value in key.items()))
         existing = conn.execute(sa.select(table).where(condition).with_for_update()).mappings().first()
         if operation == "insert":
