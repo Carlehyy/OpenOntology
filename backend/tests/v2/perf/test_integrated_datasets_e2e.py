@@ -52,6 +52,46 @@ def test_fixture_preserves_all_47_columns_and_bigint_key(stack):
     assert stack.FINAL_SCALES == (2_300_000, 10_000_000)
 
 
+def test_mysql_cli_declares_utf8_for_seed_and_oracle(stack, monkeypatch):
+    import io
+
+    commands = []
+    monkeypatch.setattr(stack, "require_owned", lambda service: "owned-mysql-fixture")
+
+    def run(args, *, text=None):
+        commands.append(args)
+        assert "--default-character-set=utf8mb4" in args
+        if "COUNT(DISTINCT id)" in text:
+            return "1|1|1|1|1|1|1\n"
+        if "information_schema.columns" in text:
+            return "47\n"
+        if "SELECT COUNT(*) FROM scale_rows WHERE" in text:
+            return "0\n"
+        assert text == "SELECT '合成-0000000001';"
+        return "合成-0000000001\n"
+
+    class Stream:
+        def __init__(self, args, **kwargs):
+            commands.append(args)
+            assert "--default-character-set=utf8mb4" in args
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO("合成-0000000001\n".encode("utf-8"))
+            self.stderr = io.BytesIO()
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(stack, "run", run)
+    monkeypatch.setattr(stack.subprocess, "Popen", Stream)
+    assert stack.sql("mysql", "SELECT '合成-0000000001';") == "合成-0000000001\n"
+    report = stack.oracle("mysql", 1)
+    assert report["sha256_canonical_ordered"] == hashlib.sha256("合成-0000000001\n".encode("utf-8")).hexdigest()
+    assert len(commands) == 5
+
+
 def test_snapshot_includes_test_contracts_and_public_templates_without_secrets(stack, monkeypatch):
     allowed = [
         "backend/app/fixture.py", "backend/tests/test_fixture.py", "scripts/e2e/probe.py",

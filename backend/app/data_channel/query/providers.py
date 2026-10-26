@@ -42,6 +42,18 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
             table = scope.tables[binding.asset_id].alias(alias)
             expected_auth = meta["auth_fingerprint"]
             expected_schema = meta["schema_fingerprint"]
+            # Configured assets expose only their logical view: expressions
+            # bind logical names to the authorized physical source columns, so
+            # unmapped columns stay invisible to the compiler.  The pinned
+            # fingerprints above remain physical in both cases.
+            projection = meta.get("projection")
+            if projection is not None:
+                columns = {c["name"]: column_spec(c) for c in projection["columns"]}
+                expressions = {name: table.c[physical] for name, physical
+                               in projection["logical_to_physical"].items()}
+            else:
+                columns = {c["name"]: column_spec(c) for c in meta["columns"]}
+                expressions = {}
 
             def recheck(asset_id=binding.asset_id, auth=expected_auth, schema=expected_schema):
                 current = resolve_metadata(db, user, [asset_id])[asset_id]
@@ -49,14 +61,14 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
                     raise QueryError(409, "query_context_changed", "Source authorization/schema changed")
 
             result[alias] = Relation(
-                alias=alias, table=table, columns={c["name"]: column_spec(c) for c in meta["columns"]},
+                alias=alias, table=table, columns=columns,
                 state={"alias": alias, "kind": "integrated", "id": binding.asset_id,
                        "versionId": None, "asOf": scope.provenance["started_at"],
                        "consistency": "repeatable_read", "completeness": "complete",
                        "dialect": meta["dialect"], "snapshotId": scope.provenance["id"]},
                 auth_fingerprint=expected_auth, schema_fingerprint=expected_schema,
                 connection_key="source:" + connection_id, batches=batches, recheck=recheck,
-                source_group=scope)
+                source_group=scope, expressions=expressions)
     return result
 
 

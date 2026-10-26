@@ -1,11 +1,11 @@
-"""Stable virtual assets and durable single-source mutation receipts."""
+"""Stable virtual assets, optional logical projections, mutation receipts."""
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -32,6 +32,28 @@ class IntegratedAsset(Base):
     schema_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     writable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    # Optional one-to-one logical projection; physical schema_json stays the
+    # pristine identity and never carries presentation config.
+    field_config_row: Mapped["IntegratedAssetFieldConfig"] = relationship(
+        uselist=False, cascade="all, delete-orphan", passive_deletes=True)
+
+
+class IntegratedAssetFieldConfig(Base):
+    """One-to-one logical field projection of a registered integrated asset.
+
+    ``field_config`` holds the validated normalized entries
+    (``[{source_key, name, display_name}]``).  Types, nullability and primary
+    key membership are always physical truth on the asset; this row only
+    carries addressing/display metadata so schema refreshes can replace
+    ``schema_json`` wholesale without ever risking config loss.
+    """
+    __tablename__ = "v2_integrated_asset_field_configs"
+
+    asset_id: Mapped[str] = mapped_column(
+        String, ForeignKey("v2_integrated_assets.id", ondelete="RESTRICT"), primary_key=True)
+    field_config: Mapped[list] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 

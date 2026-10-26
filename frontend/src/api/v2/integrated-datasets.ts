@@ -7,6 +7,12 @@ export interface IntegratedColumn {
   primary_key?: boolean
   /** JSON cells are raw JSON text strings; only SQL NULL is represented as null. */
   encoding?: 'json_text'
+  /** Physical source column name; present only when a field_config layer is configured. */
+  source_key?: string
+  /** Human-facing label from field_config; present only when configured. */
+  display_name?: string
+  /** Physical source type from dbx; present only when it differs from the logical type. */
+  source_type?: string
 }
 
 export interface IntegratedDbxStatus {
@@ -118,12 +124,50 @@ export interface IntegratedSyncRun {
 export interface SourceConnection { id: string; name: string; kind: string; status: string }
 export interface DiscoveredResource { schema_name: string; table_name: string }
 
+export type IntegratedSourceKind = 'mysql' | 'postgres'
+
+/** Physical source parameters for an inline (dialog-scoped) source reference. */
+export interface SourceConnectionConfig {
+  host: string
+  port: number
+  database: string
+  user: string
+  password: string
+  dbx_host?: string
+  dbx_port?: number
+}
+
+export interface NewSourceConnection {
+  name: string
+  kind: IntegratedSourceKind
+  config: SourceConnectionConfig
+}
+
+/**
+ * Source reference for the /sources/* endpoints: exactly one of
+ * `connection_id` (reuse a managed connection) or `source_connection`
+ * (inline parameters, not persisted by test/resources/schema calls).
+ */
+export type SourceReference =
+  | { connection_id: string }
+  | { source_connection: NewSourceConnection }
+
+export interface FieldConfigEntry {
+  source_key: string
+  name: string
+  display_name: string
+}
+
 export interface RegisterAssetRequest {
   name: string
-  connection_id: string
   schema_name: string
   table_name: string
   writable: boolean
+  /** Mutually exclusive with source_connection; one is required. */
+  connection_id?: string
+  source_connection?: NewSourceConnection
+  /** Logical field layer; the register dialog always sends the user's selection. */
+  field_config?: FieldConfigEntry[]
 }
 
 const root = '/integrated-datasets'
@@ -133,7 +177,27 @@ export const integratedDatasetsApi = {
   get: (id: string): Promise<IntegratedAsset> => apiClientV2.get(assetPath(id)),
   register: (payload: RegisterAssetRequest): Promise<IntegratedAsset> => apiClientV2.post(root, payload),
   connections: (): Promise<SourceConnection[]> => apiClientV2.get('/connections'),
-  resources: (connectionId: string): Promise<{ items: DiscoveredResource[] }> => apiClientV2.get(`${root}/connections/${encodeURIComponent(connectionId)}/resources`),
+  /**
+   * Stateless source test for a SourceReference (inline or managed); never
+   * persists credentials. Failures carry a server-classified safe code/message
+   * pair — never raw driver text.
+   */
+  testSource: (source: SourceReference, signal?: AbortSignal): Promise<{ success: boolean; code?: string; message?: string }> =>
+    apiClientV2.post(`${root}/sources/test`, source, { signal }),
+  /** dbx-only table discovery for a SourceReference; a 503 is authoritative, no fallback. */
+  sourceResources: (source: SourceReference, signal?: AbortSignal): Promise<{ items: DiscoveredResource[] }> =>
+    apiClientV2.post(`${root}/sources/resources`, source, { signal }),
+  /** Verified physical schema (columns/primary_key/fingerprint) for one table of a source. */
+  sourceSchema: (
+    source: SourceReference,
+    resource: Pick<DiscoveredResource, 'schema_name' | 'table_name'>,
+    signal?: AbortSignal,
+  ): Promise<IntegratedSchema> =>
+    apiClientV2.post(`${root}/sources/schema`, {
+      ...source,
+      schema_name: resource.schema_name,
+      table_name: resource.table_name,
+    }, { signal }),
   schema: (id: string): Promise<IntegratedSchema> => apiClientV2.get(`${assetPath(id)}/schema`),
   /** Server returns the refreshed asset DTO, not a bare schema object. */
   refreshSchema: (id: string): Promise<IntegratedAsset> => apiClientV2.post(`${assetPath(id)}/refresh-schema`, {}),

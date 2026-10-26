@@ -1,10 +1,20 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
 const instant = '2026-10-24T08:00:00Z'
 const columns = [
   { name: 'id', type: 'integer', nullable: false, primary_key: true },
   { name: 'amount', type: 'decimal', nullable: true, primary_key: false },
   { name: 'note', type: 'string', nullable: true, primary_key: false },
+]
+/** Physical source columns served by POST /sources/schema for the field editor. */
+const physicalColumns = [
+  { name: 'id', type: 'integer', nullable: false, primary_key: true, source_type: 'int4' },
+  { name: 'amount', type: 'decimal', nullable: true, primary_key: false, source_type: 'numeric' },
+  { name: 'note', type: 'string', nullable: true, primary_key: false, source_type: 'text' },
+]
+const discoveredResources = [
+  { schema_name: 'public', table_name: 'new_orders' },
+  { schema_name: 'integrated_source', table_name: 'new_orders' },
 ]
 const assetFixture = {
   id: 'asset-orders', dataset_id: 'dataset-orders', name: '订单源', connection_id: 'pg-source',
@@ -46,10 +56,14 @@ type MockOptions = {
   dbxUnavailable?: boolean
   /** Owner/admin write capability for the fixture asset (editors may be read-only). */
   assetWrite?: boolean
-  /** Connection list served to the register dialog; defaults to active SQL fixtures. */
+  /** Connection list served in reuse mode; SQL entries of any status are listed with inline retest. */
   connections?: Array<{ id: string; name: string; kind: string; status: string }>
-  /** Fail GET /api/v2/connections to exercise the connection error path. */
+  /** Fail GET /api/v2/connections to exercise the reuse-mode error path. */
   connectionsError?: boolean
+  /** Fail POST /sources/test so the inline connectivity error path renders. */
+  sourceTestError?: boolean
+  /** Fail the first POST /sources/schema so the re-verify path is exercised. */
+  schemaErrorOnce?: boolean
   /** Serve an empty asset list so the page-level empty state renders. */
   noAssets?: boolean
   /** Menu keys granted to the mock user (defaults to data.structured only). */
@@ -69,6 +83,9 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
     dbx,
     ...(options.unverifiedVersion ? { latest_version_id: 'sealed-version-1' } : {}),
   }]
+  let connectionList = structuredClone(options.connections ?? defaultConnections)
+  let sourceTestFailing = !!options.sourceTestError
+  let schemaFailedOnce = false
   let rows = [structuredClone(sourceRow)]
   let run: Record<string, unknown> | null = options.restoreRun ? { run_id: 'sync-run-1', asset_id: 'asset-orders', dataset_id: 'dataset-orders', status: 'starting', complete: false, row_count: 0, expected_rows: 0, version_id: null, error: null, created_at: instant, updated_at: instant, completed_at: null } : null
   let polls = 0
@@ -86,14 +103,51 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
     const respond = (data: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ data }) })
     const fail = (status: number, detail: unknown) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ detail }) })
     if (path === '/api/v2/integrated-datasets') {
-      if (method === 'POST') { const created = { ...assets[0], ...body, id: 'asset-registered' }; assets.push(created); return respond(created, 201) }
+      if (method === 'POST') {
+        const { field_config: fieldConfig, ...registration } = body ?? {}
+        // Result logical columns carry source_key/display_name alongside the alias.
+        const created = {
+          ...assets[0], ...registration, id: 'asset-registered',
+          ...(Array.isArray(fieldConfig) ? {
+            columns: fieldConfig.map((field: { source_key: string; name: string; display_name?: string }) => ({
+              ...(physicalColumns.find(column => column.name === field.source_key) ?? {}),
+              name: field.name, source_key: field.source_key,
+              ...(field.display_name ? { display_name: field.display_name } : {}),
+            })),
+          } : {}),
+        }
+        assets.push(created)
+        return respond(created, 201)
+      }
       return respond({ items: assets, total: assets.length })
+    }
+    if (path === '/api/v2/integrated-datasets/sources/test') {
+      // Unified connectivity test for both modes: the body is the SourceReference
+      // itself (inline source_connection or an existing connection_id). Retesting
+      // an existing connection re-activates it without ever touching
+      // data.pipelines connection management endpoints.
+      if (sourceTestFailing) return fail(503, { code: 'SOURCE_CONNECT_FAILED', message: 'Cannot reach the source database' })
+      if (typeof body?.connection_id === 'string') connectionList = connectionList.map(item => item.id === body.connection_id ? { ...item, status: 'active' } : item)
+      return respond({ success: true })
+    }
+    if (path === '/api/__test__/source-test-recovered') {
+      sourceTestFailing = false
+      return respond({ ok: true })
+    }
+    if (path === '/api/v2/integrated-datasets/sources/resources') {
+      return options.discoveryError ? fail(503, { code: 'DBX_UNAVAILABLE', message: 'Metadata discovery is unavailable' }) : respond({ items: discoveredResources })
+    }
+    if (path === '/api/v2/integrated-datasets/sources/schema') {
+      if (options.schemaErrorOnce && !schemaFailedOnce) {
+        schemaFailedOnce = true
+        return fail(503, { code: 'DBX_SCHEMA_UNAVAILABLE', message: 'Schema verification is unavailable' })
+      }
+      return respond({ columns: physicalColumns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     }
     if (path === '/api/v2/connections') {
       if (options.connectionsError) return fail(503, { code: 'CONNECTIONS_UNAVAILABLE', message: 'Connections list is unavailable' })
-      return respond(options.connections ?? defaultConnections)
+      return respond(connectionList)
     }
-    if (/\/integrated-datasets\/connections\/[^/]+\/resources$/.test(path)) return options.discoveryError ? fail(503, { code: 'DBX_UNAVAILABLE', message: 'Metadata discovery is unavailable' }) : respond({ items: [{ schema_name: 'public', table_name: 'new_orders' }] })
     if (/\/integrated-datasets\/[^/]+\/schema$/.test(path) || path.endsWith('/refresh-schema')) return respond({ columns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     if (/\/integrated-datasets\/[^/]+\/versions$/.test(path)) return respond({ items: run?.status === 'sealed' || options.unverifiedVersion ? [{ id: 'sealed-version-1', version_no: 1, row_count: 10000, checksum: 'version-checksum', run_id: options.unverifiedVersion ? null : 'sync-run-1', status: options.unverifiedVersion ? 'unverified' : 'sealed', complete: !options.unverifiedVersion, created_at: instant }] : [] })
     if (path === '/api/__test__/history-recovered') {
@@ -263,38 +317,248 @@ for (const role of ['viewer', 'custom'] as const) {
   })
 }
 
-for (const kind of ['PostgreSQL', 'MySQL']) {
-  test(`registers ${kind} with the existing connection and exact registration contract`, async ({ page }) => {
-    const requests = await mockIntegrated(page)
+/** Deterministic inline source fixture; never a real host or credential. */
+const inlineSource = (kind: 'postgres' | 'mysql') => ({
+  label: kind === 'postgres' ? 'PostgreSQL' : 'MySQL',
+  name: kind === 'postgres' ? '内联订单源' : '内联订单源 My',
+  kind,
+  host: kind === 'postgres' ? 'pg-inline.fixture.invalid' : 'mysql-inline.fixture.invalid',
+  port: kind === 'postgres' ? 5432 : 3306,
+  database: 'integrated_source',
+  user: 'inline_fixture_user',
+  password: 'inline-fixture-password',
+})
+const inlineReference = (source: ReturnType<typeof inlineSource>) => ({
+  source_connection: {
+    name: source.name,
+    kind: source.kind,
+    config: { host: source.host, port: source.port, database: source.database, user: source.user, password: source.password },
+  },
+})
+
+async function fillInlineSource(page: Page, dialog: Locator, source: ReturnType<typeof inlineSource>) {
+  await dialog.getByLabel('源名称', { exact: true }).fill(source.name)
+  await dialog.getByRole('combobox', { name: '数据库类型' }).click()
+  await page.getByRole('option', { name: new RegExp(source.label), exact: false }).click()
+  await dialog.getByLabel('主机地址', { exact: true }).fill(source.host)
+  await expect(dialog.getByLabel('端口', { exact: true })).toHaveValue(String(source.port))
+  await dialog.getByLabel('数据库名', { exact: true }).fill(source.database)
+  await dialog.getByLabel('用户名', { exact: true }).fill(source.user)
+  await dialog.getByLabel('密码', { exact: true }).fill(source.password)
+}
+
+/** Drive the default new-source mode up to the verified field editor. */
+async function openFieldEditor(page: Page, kind: 'postgres' | 'mysql', assetName = '订单内联登记') {
+  const dialog = page.getByRole('dialog')
+  const source = inlineSource(kind)
+  await dialog.getByLabel('资产名称', { exact: true }).fill(assetName)
+  await fillInlineSource(page, dialog, source)
+  await dialog.getByTestId('integrated-test-source').click()
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('连通测试通过')
+  await dialog.getByTestId('integrated-discover-resources').click()
+  const schema = kind === 'postgres' ? 'public' : 'integrated_source'
+  await dialog.getByRole('button', { name: `${schema}.new_orders`, exact: true }).click()
+  await expect(dialog.getByTestId('integrated-selected-resource')).toContainText(`${schema}.new_orders`)
+  await dialog.getByTestId('integrated-load-schema').click()
+  await expect(dialog.getByTestId('integrated-field-config')).toBeVisible()
+  return { dialog, fields: dialog.getByTestId('integrated-field-config'), source, schema }
+}
+
+for (const kind of ['postgres', 'mysql'] as const) {
+  test(`registers ${kind === 'postgres' ? 'PostgreSQL' : 'MySQL'} inline from zero connections with one atomic POST`, async ({ page }) => {
+    const source = inlineSource(kind)
+    const schema = kind === 'postgres' ? 'public' : 'integrated_source'
+    const requests = await mockIntegrated(page, { role: 'editor', connections: [] })
     await page.goto('/#/data/structured?tab=integrated')
     await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
-    await page.getByLabel('资产名称', { exact: true }).fill(`${kind} 新订单`)
-    await page.getByRole('combobox', { name: '数据连接' }).click()
-    await expect(page.getByRole('option', { name: /MongoDB/ })).toHaveCount(0)
-    await page.getByRole('option', { name: new RegExp(`${kind} 测试源`) }).click()
-    await page.getByRole('button', { name: '发现源表', exact: true }).click()
-    await page.getByRole('button', { name: 'public.new_orders', exact: true }).click()
-    await page.getByRole('button', { name: '确认登记', exact: true }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByRole('button', { name: '新建数据源' })).toHaveAttribute('aria-pressed', 'true')
+    const editor = await openFieldEditor(page, kind)
+    // All columns are prefilled as included; edit alias/display on one column
+    // and drop another from the logical layer entirely.
+    await editor.fields.getByLabel('amount 字段标识').fill('amount_alias')
+    await editor.fields.getByLabel('amount 显示名').fill('金额')
+    await editor.fields.getByLabel('纳入字段 note').uncheck()
+    await dialog.getByTestId('integrated-register-submit').click()
     await expect(page.getByRole('dialog')).toHaveCount(0)
     await expect(page).toHaveURL(/dataset=asset-registered/)
+    await expect(page).not.toHaveURL(/pipelines/)
     const registration = requests.find(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')
-    expect(registration?.body).toEqual({ name: `${kind} 新订单`, connection_id: kind === 'MySQL' ? 'mysql-source' : 'pg-source', schema_name: 'public', table_name: 'new_orders', writable: false })
+    expect(registration?.body).toEqual({
+      name: '订单内联登记',
+      schema_name: schema,
+      table_name: 'new_orders',
+      writable: false,
+      ...inlineReference(source),
+      field_config: [
+        { source_key: 'id', name: 'id', display_name: 'id' },
+        { source_key: 'amount', name: 'amount_alias', display_name: '金额' },
+      ],
+    })
+    // The inline path must stay atomic: exactly one registration POST and no
+    // connection management writes anywhere in the flow.
+    expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
+    expect(requests.filter(request => request.path === '/api/v2/connections' && request.method === 'POST')).toHaveLength(0)
+    expect(requests.filter(request => /\/connections\/[^/]+\/test$/.test(request.path))).toHaveLength(0)
+    const testRequest = requests.find(request => request.path === '/api/v2/integrated-datasets/sources/test')
+    expect(testRequest?.method).toBe('POST')
+    expect(testRequest?.body).toEqual(inlineReference(source))
+    const schemaRequest = requests.find(request => request.path === '/api/v2/integrated-datasets/sources/schema')
+    expect(schemaRequest?.body).toMatchObject({ schema_name: schema, table_name: 'new_orders', ...inlineReference(source) })
   })
 }
 
-test('empty connection list guides managers to the connections page', async ({ page }) => {
-  await mockIntegrated(page, { connections: [], menuKeys: ['data.structured', 'data.pipelines'] })
+test('failed inline connectivity test is explicit and blocks discovery and registration', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [], sourceTestError: true })
   await page.goto('/#/data/structured?tab=integrated')
   await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('没有可用的 MySQL / PostgreSQL 连接')
-  await dialog.getByRole('button', { name: '前往数据连接', exact: true }).click()
-  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
-  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+  const source = inlineSource('postgres')
+  await dialog.getByLabel('资产名称', { exact: true }).fill('失败订单')
+  await fillInlineSource(page, dialog, source)
+  await dialog.getByTestId('integrated-test-source').click()
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('连通测试失败')
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('SOURCE_CONNECT_FAILED')
+  await expect(dialog.getByTestId('integrated-discover-resources')).toBeDisabled()
+  await expect(dialog.getByTestId('integrated-register-submit')).toBeDisabled()
+  expect(requests.filter(request => request.path.endsWith('/sources/resources'))).toHaveLength(0)
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(0)
 })
 
-test('untested connections stay out of the selector and the hint points to connectivity testing', async ({ page }) => {
-  await mockIntegrated(page, { connections: [
+test('duplicate field aliases are rejected locally without posting registration', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const editor = await openFieldEditor(page, 'postgres')
+  await editor.fields.getByLabel('amount 字段标识').fill('id')
+  await expect(editor.fields.getByRole('alert').first()).toContainText('字段标识重复')
+  await expect(editor.dialog.getByTestId('integrated-register-submit')).toBeDisabled()
+  await editor.fields.getByLabel('amount 字段标识').fill('amount_alias')
+  await expect(editor.dialog.getByTestId('integrated-register-submit')).toBeEnabled()
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(0)
+})
+
+test('primary key inclusion stays mandatory in the field editor', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const editor = await openFieldEditor(page, 'postgres')
+  await expect(editor.fields.getByLabel('id 主键')).toBeChecked()
+  await expect(editor.fields.getByLabel('id 主键')).toBeDisabled()
+  await expect(editor.fields.getByLabel('纳入字段 id')).toBeChecked()
+  await expect(editor.fields.getByLabel('纳入字段 id')).toBeDisabled()
+  // Non-PK fields can be dropped while others stay included by default; the
+  // PK itself cannot be dropped.
+  await editor.fields.getByLabel('纳入字段 note').uncheck()
+  await editor.dialog.getByTestId('integrated-register-submit').click()
+  await expect(page).toHaveURL(/dataset=asset-registered/)
+  const registration = requests.find(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')
+  expect(registration?.body.field_config.map((field: { source_key: string }) => field.source_key)).toEqual(['id', 'amount'])
+})
+
+test('editing the inline source invalidates discovered tables and verified fields until re-run', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const editor = await openFieldEditor(page, 'postgres')
+  await editor.dialog.getByLabel('端口', { exact: true }).fill('6543')
+  await expect(editor.dialog.getByTestId('integrated-test-source-result')).toHaveCount(0)
+  await expect(editor.dialog.getByTestId('integrated-discovered-resources')).toHaveCount(0)
+  await expect(editor.dialog.getByTestId('integrated-selected-resource')).toHaveCount(0)
+  await expect(editor.dialog.getByTestId('integrated-field-config')).toHaveCount(0)
+  await expect(editor.dialog.getByTestId('integrated-discover-resources')).toBeDisabled()
+  await expect(editor.dialog.getByTestId('integrated-register-submit')).toBeDisabled()
+  // Re-running the whole chain on the changed source registers the new port.
+  await editor.dialog.getByTestId('integrated-test-source').click()
+  await expect(editor.dialog.getByTestId('integrated-test-source-result')).toContainText('连通测试通过')
+  await editor.dialog.getByTestId('integrated-discover-resources').click()
+  await editor.dialog.getByRole('button', { name: 'public.new_orders', exact: true }).click()
+  await editor.dialog.getByTestId('integrated-load-schema').click()
+  await expect(editor.dialog.getByTestId('integrated-field-config')).toBeVisible()
+  await editor.dialog.getByTestId('integrated-register-submit').click()
+  await expect(page).toHaveURL(/dataset=asset-registered/)
+  const registration = requests.find(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')
+  expect(registration?.body.source_connection.config).toMatchObject({ host: editor.source.host, port: 6543 })
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
+})
+
+test('failed connectivity test recovers and every stage button stays reusable', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [], sourceTestError: true })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  const source = inlineSource('postgres')
+  await dialog.getByLabel('资产名称', { exact: true }).fill('重测恢复订单')
+  await fillInlineSource(page, dialog, source)
+  await dialog.getByTestId('integrated-test-source').click()
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('SOURCE_CONNECT_FAILED')
+  // A finished (failed) test must hand the button back for another attempt.
+  await expect(dialog.getByTestId('integrated-test-source')).toBeEnabled()
+  await expect(dialog.getByTestId('integrated-discover-resources')).toBeDisabled()
+  // Test-only control: let the next connectivity attempt succeed.
+  await page.evaluate(() => fetch('/api/__test__/source-test-recovered'))
+  await dialog.getByTestId('integrated-test-source').click()
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('连通测试通过')
+  await expect(dialog.getByTestId('integrated-test-source')).toBeEnabled()
+  await dialog.getByTestId('integrated-discover-resources').click()
+  await dialog.getByRole('button', { name: 'public.new_orders', exact: true }).click()
+  await dialog.getByTestId('integrated-load-schema').click()
+  await expect(dialog.getByTestId('integrated-field-config')).toBeVisible()
+  await dialog.getByTestId('integrated-register-submit').click()
+  await expect(page).toHaveURL(/dataset=asset-registered/)
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
+})
+
+test('rediscovering tables after a selection keeps the flow usable', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const editor = await openFieldEditor(page, 'postgres')
+  // Re-run discovery after a table is already selected and verified.
+  await editor.dialog.getByTestId('integrated-discover-resources').click()
+  await expect(editor.dialog.getByTestId('integrated-discovered-resources')).toContainText('public.new_orders')
+  await expect(editor.dialog.getByTestId('integrated-discover-resources')).toBeEnabled()
+  // Re-discovery may keep or clear the prior selection; either way the dialog
+  // must reach a submittable state again without reopening anything.
+  if (await editor.dialog.getByTestId('integrated-field-config').count() === 0) {
+    await editor.dialog.getByRole('button', { name: 'public.new_orders', exact: true }).click()
+    await editor.dialog.getByTestId('integrated-load-schema').click()
+    await expect(editor.dialog.getByTestId('integrated-field-config')).toBeVisible()
+  }
+  await expect(editor.dialog.getByTestId('integrated-register-submit')).toBeEnabled()
+  await editor.dialog.getByTestId('integrated-register-submit').click()
+  await expect(page).toHaveURL(/dataset=asset-registered/)
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
+})
+
+test('schema verification failure blocks submission and recovers on retry', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [], schemaErrorOnce: true })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  const source = inlineSource('postgres')
+  await dialog.getByLabel('资产名称', { exact: true }).fill('结构核验重试订单')
+  await fillInlineSource(page, dialog, source)
+  await dialog.getByTestId('integrated-test-source').click()
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('连通测试通过')
+  await dialog.getByTestId('integrated-discover-resources').click()
+  await dialog.getByRole('button', { name: 'public.new_orders', exact: true }).click()
+  await dialog.getByTestId('integrated-load-schema').click()
+  await expect(dialog.getByRole('alert')).toContainText('DBX_SCHEMA_UNAVAILABLE')
+  await expect(dialog.getByTestId('integrated-field-config')).toHaveCount(0)
+  await expect(dialog.getByTestId('integrated-register-submit')).toBeDisabled()
+  // A finished (failed) verification hands the button back for a retry.
+  await expect(dialog.getByTestId('integrated-load-schema')).toBeEnabled()
+  await dialog.getByTestId('integrated-load-schema').click()
+  await expect(dialog.getByTestId('integrated-field-config')).toBeVisible()
+  await expect(dialog.getByTestId('integrated-register-submit')).toBeEnabled()
+  await dialog.getByTestId('integrated-register-submit').click()
+  await expect(page).toHaveURL(/dataset=asset-registered/)
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
+})
+
+test('reuse mode lists untested connections and registers after an inline retest', async ({ page }) => {
+  const requests = await mockIntegrated(page, { connections: [
     { id: 'pg-source', name: 'PostgreSQL 测试源', kind: 'postgres', status: 'inactive' },
     { id: 'mysql-source', name: 'MySQL 测试源', kind: 'mysql', status: 'error' },
     { id: 'mongo-source', name: 'MongoDB 隐藏源', kind: 'mongo', status: 'active' },
@@ -302,35 +566,85 @@ test('untested connections stay out of the selector and the hint points to conne
   await page.goto('/#/data/structured?tab=integrated')
   await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('已有 2 个 MySQL / PostgreSQL 连接，但均未通过连通测试')
-  // 无可选连接时选择器保持禁用：打开空下拉会让焦点逃逸并意外关闭整个弹窗。
-  await expect(dialog.getByRole('combobox', { name: '数据连接' })).toBeDisabled()
-  await expect(dialog.getByRole('combobox', { name: '数据连接' })).toContainText('暂无可用连接')
-  await expect(dialog.getByRole('button', { name: '前往数据连接', exact: true })).toBeVisible()
+  await dialog.getByLabel('资产名称', { exact: true }).fill('订单内联登记')
+  await dialog.getByRole('button', { name: '使用已有连接' }).click()
+  await expect(dialog.getByRole('button', { name: '使用已有连接' })).toHaveAttribute('aria-pressed', 'true')
+  // Untested connections stay selectable: their status is shown inline and the
+  // unified 测试连通（重测） re-runs it through /sources/test without leaving
+  // the dialog or entering data.pipelines.
+  await dialog.getByRole('combobox', { name: '已有连接' }).click()
+  await expect(page.getByRole('option', { name: /MongoDB/ })).toHaveCount(0)
+  await expect(page.getByRole('option', { name: /PostgreSQL 测试源/ })).toBeVisible()
+  await page.getByRole('option', { name: /MySQL 测试源/ }).click()
+  await expect(dialog.getByTestId('integrated-connection-status')).toContainText('错误')
+  await dialog.getByTestId('integrated-test-source').click()
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('连通测试通过')
+  await dialog.getByTestId('integrated-discover-resources').click()
+  await dialog.getByRole('button', { name: 'integrated_source.new_orders', exact: true }).click()
+  await dialog.getByTestId('integrated-load-schema').click()
+  await expect(dialog.getByTestId('integrated-field-config')).toBeVisible()
+  await dialog.getByTestId('integrated-register-submit').click()
+  await expect(page).toHaveURL(/dataset=asset-registered/)
+  const registration = requests.find(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')
+  expect(registration?.body).toMatchObject({
+    name: '订单内联登记',
+    schema_name: 'integrated_source',
+    table_name: 'new_orders',
+    writable: false,
+    connection_id: 'mysql-source',
+  })
+  expect(registration?.body).not.toHaveProperty('source_connection')
+  // All columns are prefilled included; no field edits were made in this flow.
+  expect(registration?.body.field_config).toEqual(columns.map(column => ({ source_key: column.name, name: column.name, display_name: column.name })))
+  const retests = requests.filter(request => request.path === '/api/v2/integrated-datasets/sources/test')
+  expect(retests.map(request => request.body)).toEqual([{ connection_id: 'mysql-source' }])
+  expect(requests.filter(request => request.path === '/api/v2/connections' && request.method === 'POST')).toHaveLength(0)
+  expect(requests.filter(request => /\/connections\/[^/]+\/test$/.test(request.path))).toHaveLength(0)
 })
 
-test('connection load failure reports the error without the configure hint', async ({ page }) => {
-  await mockIntegrated(page, { connectionsError: true })
+test('reuse mode with zero connections points back to the inline source form', async ({ page }) => {
+  await mockIntegrated(page, { role: 'editor', connections: [] })
   await page.goto('/#/data/structured?tab=integrated')
   await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByRole('alert')).toContainText('加载数据连接失败')
-  await expect(dialog.getByTestId('integrated-connection-empty-hint')).toHaveCount(0)
-  await expect(dialog).not.toContainText('请先在数据连接中配置')
+  await dialog.getByRole('button', { name: '使用已有连接' }).click()
+  await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('没有可复用的 MySQL / PostgreSQL 连接')
+  await expect(dialog.getByRole('combobox', { name: '已有连接' })).toBeDisabled()
+  await expect(dialog).not.toContainText('前往数据连接')
+  await dialog.getByRole('button', { name: '新建数据源' }).click()
+  await expect(dialog.getByLabel('源名称', { exact: true })).toBeVisible()
 })
 
-test('empty integrated tab links managers to the connections page', async ({ page }) => {
-  await mockIntegrated(page, { noAssets: true, menuKeys: ['data.structured', 'data.pipelines'] })
+test('connection list failure never blocks inline registration', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connectionsError: true })
   await page.goto('/#/data/structured?tab=integrated')
-  await page.getByRole('button', { name: '前往数据连接', exact: true }).click()
-  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
-  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: '使用已有连接' }).click()
+  await expect(dialog.getByTestId('integrated-connections-error')).toContainText('加载已有连接失败')
+  await expect(dialog).not.toContainText('请先在数据连接中配置')
+  await dialog.getByRole('button', { name: '新建数据源' }).click()
+  const editor = await openFieldEditor(page, 'postgres')
+  await editor.dialog.getByTestId('integrated-register-submit').click()
+  await expect(page).toHaveURL(/dataset=asset-registered/)
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
 })
 
-test('viewer gets no connections shortcut on the empty integrated tab', async ({ page }) => {
+test('empty integrated tab registers inline without leaving the module', async ({ page }) => {
+  await mockIntegrated(page, { noAssets: true })
+  await page.goto('/#/data/structured?tab=integrated')
+  await expect(page.getByRole('button', { name: '前往数据连接', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).first().click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await expect(page).toHaveURL(/#\/data\/structured\?tab=integrated/)
+  await expect(page).not.toHaveURL(/pipelines/)
+})
+
+test('viewer gets no register entry on the empty integrated tab', async ({ page }) => {
   await mockIntegrated(page, { role: 'viewer', noAssets: true })
   await page.goto('/#/data/structured?tab=integrated')
   await expect(page.getByRole('button', { name: '前往数据连接', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toBeDisabled()
 })
 
 test('asynchronous sync reports real queued state and refresh restores the persisted run', async ({ page }) => {
@@ -406,14 +720,19 @@ for (const status of [400, 410]) {
 }
 
 test('DBX 503 is an explicit discovery error rather than invented source success', async ({ page }) => {
-  await mockIntegrated(page, { discoveryError: true })
+  await mockIntegrated(page, { role: 'editor', connections: [], discoveryError: true })
   await page.goto('/#/data/structured?tab=integrated')
   await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
-  await page.getByRole('combobox', { name: '数据连接' }).click()
-  await page.getByRole('option', { name: /PostgreSQL 测试源/ }).click()
-  await page.getByRole('button', { name: '发现源表', exact: true }).click()
-  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('DBX_UNAVAILABLE')
+  const dialog = page.getByRole('dialog')
+  const source = inlineSource('postgres')
+  await dialog.getByLabel('资产名称', { exact: true }).fill('发现失败订单')
+  await fillInlineSource(page, dialog, source)
+  await dialog.getByTestId('integrated-test-source').click()
+  await expect(dialog.getByTestId('integrated-test-source-result')).toContainText('连通测试通过')
+  await dialog.getByTestId('integrated-discover-resources').click()
+  await expect(dialog.getByRole('alert')).toContainText('DBX_UNAVAILABLE')
   await expect(page.getByRole('button', { name: 'public.new_orders', exact: true })).toHaveCount(0)
+  await expect(dialog.getByTestId('integrated-field-config')).toHaveCount(0)
 })
 
 test('DBX unavailability is explicit on the page instead of a configured success', async ({ page }) => {
@@ -440,22 +759,6 @@ test('non-owner editor is read-only for this asset while sync and SPL remain ava
   await expect(detail.getByRole('button', { name: '删除源记录 1', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: '运行查询', exact: true })).toBeEnabled()
   await expect(detail).toContainText('写入未启用或当前角色无该资产写权限')
-})
-
-test('schema and table remain separate identifiers and invalid input never posts registration', async ({ page }) => {
-  const requests = await mockIntegrated(page)
-  await page.goto('/#/data/structured?tab=integrated')
-  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
-  const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('资产名称', { exact: true }).fill('非法资源')
-  await dialog.getByRole('combobox', { name: '数据连接' }).click()
-  await page.getByRole('option', { name: /PostgreSQL 测试源/ }).click()
-  await dialog.getByLabel('数据库 Schema', { exact: true }).fill('public.orders')
-  await dialog.getByLabel('源表名称', { exact: true }).fill('orders')
-  await dialog.getByRole('button', { name: '确认登记', exact: true }).click()
-  await expect(dialog.getByRole('alert')).toContainText('不能包含“.”')
-  await expect(dialog).toBeVisible()
-  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(0)
 })
 
 test('leaving the integrated tab clears the dataset deep link and the entry stays reachable', async ({ page }) => {

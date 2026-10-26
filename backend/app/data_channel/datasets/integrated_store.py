@@ -30,6 +30,7 @@ from app.data_channel.datasets.snapshot_text import MAX_STREAM_BATCH_BYTES, cano
 from app.data_channel.datasets.models import (
     Dataset, DatasetVersion, DatasetVersionEvent, IntegratedSyncRun,
 )
+from app.data_channel.integrated import fields
 
 MAX_BATCH_SIZE = 1000
 MAX_BATCH_BYTES = MAX_STREAM_BATCH_BYTES
@@ -435,10 +436,19 @@ def _table(run: IntegratedSyncRun) -> sa.Table:
     return sa.Table(run.physical_table, sa.MetaData(), *fields, *constraints)
 
 
+# The physical checksum covers exactly the physical manifest: the frozen
+# logical projection is deliberately excluded so adding, removing or editing
+# a field config never changes a version's physical identity.  Manifests
+# without those keys hash byte-identically to the pre-projection format.
+_CHECKSUM_EXCLUDED_KEYS = ("field_config", "logical_fingerprint")
+
+
 def _hasher(run: IntegratedSyncRun):
+    manifest = {key: value for key, value in run.schema_json.items()
+                if key not in _CHECKSUM_EXCLUDED_KEYS}
     digest = hashlib.sha256()
     digest.update(b"integrated-v1\x00")
-    raw = json.dumps(run.schema_json, sort_keys=True, separators=(",", ":"),
+    raw = json.dumps(manifest, sort_keys=True, separators=(",", ":"),
                      ensure_ascii=False, allow_nan=False).encode()
     digest.update(len(raw).to_bytes(8, "big"))
     digest.update(raw)
@@ -501,7 +511,7 @@ def begin_snapshot(db, descriptor: dict, *, run_id: str | None = None,
             or not snapshot.get("id") or not snapshot.get("started_at")):
         raise IntegratedVersionError("Integrated snapshot lacks consistent count/snapshot evidence")
     # The registered asset is the authority, not caller-supplied dataset names.
-    from app.data_channel.integrated.models import IntegratedAsset
+    from app.data_channel.integrated.models import IntegratedAsset, IntegratedAssetFieldConfig
     asset = db.get(IntegratedAsset, descriptor.get("asset_id"))
     if (asset is None or asset.dataset_id != dataset.id
             or asset.schema_fingerprint != gate.fingerprint):
@@ -511,6 +521,19 @@ def begin_snapshot(db, descriptor: dict, *, run_id: str | None = None,
         if dataset.latest_version_id else None)
     if previous is not None and previous.schema_json["schema_fingerprint"] != gate.fingerprint:
         raise IntegratedVersionError("Integrated version schema/type changed; explicit schema migration is required")
+    # Freeze the asset's logical projection into this run's manifest: sealed
+    # versions keep the mapping they were published with, and the frozen
+    # config must still match the physical schema being snapshotted.
+    frozen_config = None
+    config_row = db.get(IntegratedAssetFieldConfig, asset.id)
+    if config_row is not None:
+        try:
+            frozen_config = fields.normalize_field_config(
+                config_row.field_config,
+                {"columns": gate.schema, "primary_key": gate.primary_key})
+        except fields.FieldConfigError:
+            raise IntegratedVersionError(
+                "Integrated asset field configuration does not match its physical schema") from None
     taken = {ROW_ORDINAL}
     mapping = {name: sanitize_lake_column(name, taken) for name in gate.columns}
     schema = {
@@ -525,6 +548,11 @@ def begin_snapshot(db, descriptor: dict, *, run_id: str | None = None,
         "value_encoding": "nullable-text-v1;binary=base64;decimal=exact;temporal=iso8601",
         "checksum_format": _CHECKSUM_FORMAT,
     }
+    if frozen_config is not None:
+        view = fields.logical_view(
+            {"columns": gate.schema, "primary_key": gate.primary_key}, frozen_config)
+        schema["field_config"] = frozen_config
+        schema["logical_fingerprint"] = fields.logical_fingerprint(view)
     if run_id is None:
         run_id = str(uuid.uuid4())
         stored_snapshot = copy.deepcopy(snapshot)
@@ -887,6 +915,16 @@ def _manifest(db, dataset_id: str, version_id: str):
     IntegratedSnapshotGate({"schema": run.schema_json["source_schema"],
                             "primary_key": run.schema_json["primary_key_columns"],
                             "schema_fingerprint": run.schema_json["schema_fingerprint"]})
+    # A frozen logical projection must still match the frozen physical schema.
+    frozen_config = run.schema_json.get("field_config")
+    if frozen_config is not None:
+        try:
+            fields.normalize_field_config(frozen_config, {
+                "columns": run.schema_json["source_schema"],
+                "primary_key": run.schema_json["primary_key_columns"]})
+        except fields.FieldConfigError:
+            raise IntegratedVersionError(
+                "Integrated version field configuration is invalid") from None
     completion = run.snapshot_json["completion"]
     if (completion.get("row_count") != run.row_count
             or completion.get("schema_fingerprint") != run.schema_json["schema_fingerprint"]
@@ -896,8 +934,9 @@ def _manifest(db, dataset_id: str, version_id: str):
 
 
 def _description(run, version) -> dict:
-    return {
-        **copy.deepcopy(run.schema_json), "dataset_id": run.dataset_id,
+    base = copy.deepcopy(run.schema_json)
+    description = {
+        **base, "dataset_id": run.dataset_id,
         "version_id": version.id, "dataset_version_id": version.id,
         "version_no": version.version_no, "row_count": run.row_count,
         "checksum": run.checksum, "complete": True, "status": "sealed",
@@ -905,6 +944,30 @@ def _description(run, version) -> dict:
         "as_of": run.snapshot_json["started_at"], "snapshot": copy.deepcopy(run.snapshot_json),
         "cursor_semantics": "exclusive __row_seq integer in this immutable version, starting at 0",
     }
+    # Configured versions present their frozen logical view through the same
+    # keys consumers already read; the pristine physical metadata stays
+    # available under physical_* keys and the fingerprint stays physical.
+    frozen_config = base.get("field_config")
+    if frozen_config is not None:
+        view = fields.logical_view(
+            {"columns": base["source_schema"], "primary_key": base["primary_key_columns"]},
+            frozen_config)
+        description.update({
+            "columns": [c["name"] for c in view["columns"]],
+            "columns_typed": [{"name": c["name"], "type": c["type"]} for c in view["columns"]],
+            "source_schema": view["columns"],
+            "primary_key": ",".join(view["primary_key"]),
+            "primary_key_columns": view["primary_key"],
+            "column_map": fields.projected_column_map(
+                base["source_schema"], base["column_map"], frozen_config),
+            "physical_columns": base["columns"],
+            "physical_columns_typed": base["columns_typed"],
+            "physical_source_schema": base["source_schema"],
+            "physical_primary_key": base["primary_key"],
+            "physical_primary_key_columns": base["primary_key_columns"],
+            "physical_column_map": base["column_map"],
+        })
+    return description
 
 
 def describe_version(db, dataset_id: str, version_id: str) -> dict:
@@ -919,11 +982,17 @@ def get_version_relation(db, dataset_id: str, version_id: str) -> TypedVersionRe
     Scalar columns are nullable TEXT; source_schema is the mandatory exact type
     contract. Query planning must cast before numeric/temporal comparison/join,
     never assume TEXT identity has native source collation/type semantics.
+    For configured versions the column_map is the frozen logical mapping, so
+    callers address columns by their logical names.
     """
     run, version = _manifest(db, dataset_id, version_id)
     table, _, _ = _physical_evidence(db, run)
-    return TypedVersionRelation(table, dict(run.schema_json["column_map"]),
-                                table.c[ROW_ORDINAL], _description(run, version))
+    mapping = dict(run.schema_json["column_map"])
+    frozen_config = run.schema_json.get("field_config")
+    if frozen_config is not None:
+        mapping = fields.projected_column_map(
+            run.schema_json["source_schema"], run.schema_json["column_map"], frozen_config)
+    return TypedVersionRelation(table, mapping, table.c[ROW_ORDINAL], _description(run, version))
 
 
 def iter_version_rows(db, dataset_id: str, version_id: str, *, batch_size=MAX_BATCH_SIZE,
