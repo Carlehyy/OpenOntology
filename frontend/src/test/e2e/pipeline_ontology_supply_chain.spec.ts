@@ -417,7 +417,7 @@ test.describe('Supply chain pipeline to ontology mapping', () => {
     await shot(page, outDir, '06-ontology-entities')
 
     await page.getByRole('button', { name: '本体总览', exact: true }).click()
-    await page.getByRole('button', { name: '查看当前发布图谱', exact: true }).click()
+    await page.getByRole('button', { name: '查看本体图谱', exact: true }).click()
     await expect(page.getByTestId('graph-workspace-stage')).toContainText('当前发布 v1')
     await expect(page.locator('.react-flow')).toBeVisible()
     await shot(page, outDir, '09-ontology-graph')

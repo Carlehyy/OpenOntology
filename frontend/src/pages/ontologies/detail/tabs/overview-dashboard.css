@@ -503,18 +503,7 @@
   .runtime-empty-note { min-width: min(260px, calc(100% - 16px)); }
 }
 
-/* 面板入场：依序轻微上浮淡入，让页面有层次感而不喧闹。 */
-@keyframes overview-panel-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: none; }
-}
-.overview-health,
-.overview-hero-grid > .overview-panel { animation: overview-panel-in .48s cubic-bezier(.2, .7, .3, 1) both; }
-.overview-hero-grid > .kpi-rail { animation-delay: .05s; }
-.overview-hero-grid > .runtime-summary { animation-delay: .1s; }
-
 @media (prefers-reduced-motion: reduce) {
-  .overview-health, .overview-hero-grid > .overview-panel { animation: none; }
   .kpi-cell, .evolution-viewport, .evolution-edge, .evolution-node, .evolution-progress i { transition: none; }
   .spin, .evolution-node.is-current .evolution-node-halo, .evolution-skeleton-line, .evolution-skeleton-canvas { animation: none; }
 }

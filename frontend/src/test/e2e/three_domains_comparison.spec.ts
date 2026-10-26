@@ -366,7 +366,7 @@ async function runPipelineMapping(
   await page.waitForTimeout(1500)
   await shot(page, outDir, `${domain}_pm_02_ontology`)
 
-  await page.getByRole('button', { name: '查看当前发布图谱', exact: true }).click()
+  await page.getByRole('button', { name: '查看本体图谱', exact: true }).click()
   await expect(page.getByTestId('graph-workspace-stage')).toContainText('当前发布 v1')
   await shot(page, outDir, `${domain}_pm_03_graph`)
 

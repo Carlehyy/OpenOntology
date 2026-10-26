@@ -1,14 +1,12 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { motion, useReducedMotion } from 'motion/react'
 import {
   Activity, CheckCircle2, ChevronRight, CircleAlert, Database,
   GitBranch, Layers, Loader2, Sparkles, Workflow, Zap,
 } from 'lucide-react'
 import { apiClientV2 } from '@/api/client'
 import { AnimatedNumber } from '@/components/motion-ui/animated-number'
-import { SPRING_LAYOUT } from '@/components/motion-ui/ease'
 import {
   CHART_AMBER, CHART_BLUE, CHART_INDIGO, CHART_SERIES_PALETTE, CHART_TEAL, CHART_VIOLET,
 } from '@/lib/echartsTheme'
@@ -79,25 +77,14 @@ const formatDateTime = (iso?: string | null, compact = false) => {
     : { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-/* KPI 数字滚动与卡片入场交给 beUI 动效体系（AnimatedNumber + SPRING_LAYOUT），
-   两者的 prefers-reduced-motion 行为均由组件内部尊重。 */
-function KpiCell({ index, reduce, onClick, children }: {
-  index: number
-  reduce: boolean
+function KpiCell({ onClick, children }: {
   onClick: () => void
   children: React.ReactNode
 }) {
   return (
-    <motion.button
-      type="button"
-      className="kpi-cell"
-      onClick={onClick}
-      initial={reduce ? false : { opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ ...SPRING_LAYOUT, delay: Math.min(index * 0.05, 0.2) }}
-    >
+    <button type="button" className="kpi-cell" onClick={onClick}>
       {children}
-    </motion.button>
+    </button>
   )
 }
 
@@ -276,8 +263,6 @@ export default function OverviewDashboard({ ontologyId, ontology, onGoGroup }: {
     refetchInterval: 30000,
   })
 
-  const reduce = useReducedMotion() ?? false
-
   if (!overviewQuery.data) {
     if (overviewQuery.isError) {
       return (
@@ -385,7 +370,7 @@ export default function OverviewDashboard({ ontologyId, ontology, onGoGroup }: {
         </section>
 
         <section className="overview-panel kpi-rail" aria-label="关键指标">
-          <KpiCell index={0} reduce={reduce} onClick={() => onGoGroup('design')}>
+          <KpiCell onClick={() => onGoGroup('design')}>
             <span className="kpi-label">当前发布结构</span>
             <ChevronRight size={13} className="kpi-go" aria-hidden="true" />
             <strong><AnimatedNumber value={ov.model.objectTypes} duration={0.9} /><small>对象实体</small></strong>
@@ -398,7 +383,7 @@ export default function OverviewDashboard({ ontologyId, ontology, onGoGroup }: {
             )}
             <em className="kpi-status is-neutral"><Layers size={15} />结构冻结于版本，演进可对照</em>
           </KpiCell>
-          <KpiCell index={1} reduce={reduce} onClick={() => onGoGroup('data')}>
+          <KpiCell onClick={() => onGoGroup('data')}>
             <span className="kpi-label">当前实例投影</span>
             <ChevronRight size={13} className="kpi-go" aria-hidden="true" />
             <DonutStat
@@ -413,7 +398,7 @@ export default function OverviewDashboard({ ontologyId, ontology, onGoGroup }: {
             )}
             <em className="kpi-status is-neutral"><Database size={15} />实例与当前结构对账，来源可追</em>
           </KpiCell>
-          <KpiCell index={2} reduce={reduce} onClick={() => onGoGroup('data-mapping')}>
+          <KpiCell onClick={() => onGoGroup('data-mapping')}>
             <span className="kpi-label">数据映射</span>
             <ChevronRight size={13} className="kpi-go" aria-hidden="true" />
             <strong><AnimatedNumber value={ov.data.mappings.bound} duration={0.9} /><small>/ {ov.data.mappings.total} 已显式绑定</small></strong>
@@ -433,7 +418,7 @@ export default function OverviewDashboard({ ontologyId, ontology, onGoGroup }: {
                 : <><CircleAlert size={15} />{ov.data.mappings.total - ov.data.mappings.bound} 条映射待确认</>}
             </em>
           </KpiCell>
-          <KpiCell index={3} reduce={reduce} onClick={() => onGoGroup('governance')}>
+          <KpiCell onClick={() => onGoGroup('governance')}>
             <span className="kpi-label">当前版本事实流</span>
             <ChevronRight size={13} className="kpi-go" aria-hidden="true" />
             <strong><AnimatedNumber value={ov.facts.total} duration={0.9} /><small>条</small></strong>

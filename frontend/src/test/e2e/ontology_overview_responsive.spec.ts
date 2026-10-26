@@ -117,9 +117,7 @@ async function mockOverview(page: Page, options?: { singleVersion?: boolean; wit
 
 test('矮屏（1280x720）下 KPI 栏不被压碎，内容单页呈现无滚轮', async ({ page }) => {
   await mockOverview(page)
-  // 面板入场动画播放中会把面板 translateY，瞬时扩大滚动区；以 reduced-motion
-  // 关闭动画后断言稳态布局（产品样式已适配该偏好）。
-  await page.emulateMedia({ reducedMotion: 'reduce' })
+  // 总览面板直接呈现，不通过入场位移动画改变瞬时布局。
   await page.setViewportSize({ width: 1280, height: 720 })
   await page.goto(`/#/ontologies/${ontologyId}`, { waitUntil: 'domcontentloaded' })
 
@@ -130,6 +128,14 @@ test('矮屏（1280x720）下 KPI 栏不被压碎，内容单页呈现无滚轮'
   expect(kpiBox).not.toBeNull()
   expect(kpiBox!.height).toBeGreaterThan(120)
   await expect(page.locator('.kpi-cell').first().locator('strong')).toBeVisible()
+  for (const panel of await page.locator('.overview-panel, .overview-health').all()) {
+    await expect(panel).toHaveCSS('animation-name', 'none')
+    await expect(panel).toHaveCSS('transform', 'none')
+  }
+  for (const cell of await page.locator('.kpi-cell').all()) {
+    await expect(cell).toHaveCSS('transform', 'none')
+    await expect(cell).toHaveCSS('opacity', '1')
+  }
   // MYW-77：面板高度随视口弹性压缩，矮屏下内容收敛在一页内——外壳保留
   // overflow:auto 作为极矮视口的兜底，但正常矮屏不得出现实际滚动。
   await expect(shell).toHaveCSS('overflow-y', 'auto')
