@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageSizeSelect } from '@/components/PageSizeSelect'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle, AlertTriangle, Clock,
   X, Loader2, Trash2, Table2, RefreshCw,
@@ -134,63 +135,29 @@ function FlowNode({
 /** 洞察只使用接口返回的真实数据；任何接口失败时都明确提示，不补造指标。 */
 function AssetInsightStrip() {
   const navigate = useNavigate()
-  const [retryToken, setRetryToken] = useState(0)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [metrics, setMetrics] = useState<Array<{ label: string; value: string; note: string; action?: { text: string; onClick: () => void } }> | null>(null)
+  const queryClient = useQueryClient()
+  // 进入资产湖页面拉一次最新聚合；30s 内隐藏/重显总览直接复用缓存渲染，
+  // 超时后先显示缓存再后台刷新；数据变更事件即时失效（全局 staleTime 30s）。
+  const { data: summary, isLoading, isFetching, isError, error, refetch } = useQuery({
+    queryKey: ['asset-lake', 'overview-summary'],
+    queryFn: async () => {
+      const data = await datasetsApi.overviewSummary()
+      if (!data || typeof data.total !== 'number') {
+        throw new Error('总览数据格式异常')
+      }
+      return data
+    },
+  })
 
   useEffect(() => {
     const refresh = () => {
-      setLoading(true)
-      setError('')
-      setRetryToken(token => token + 1)
+      void queryClient.invalidateQueries({ queryKey: ['asset-lake'] })
     }
     window.addEventListener(ASSET_CHANGED_EVENT, refresh)
     return () => window.removeEventListener(ASSET_CHANGED_EVENT, refresh)
-  }, [])
+  }, [queryClient])
 
-  useEffect(() => {
-    let alive = true
-    // 卡片只需要几个聚合数字：走服务端聚合 + 短缓存接口，
-    // 不再为五张卡片拉取两个全量数据集列表。
-    datasetsApi.overviewSummary()
-      .then(summary => {
-        if (!alive) return
-        if (!summary || typeof summary.total !== 'number') {
-          throw new Error('总览数据格式异常')
-        }
-        const avgQuality = summary.scored_curated_total && typeof summary.average_quality_score === 'number'
-          ? `${Math.round(summary.average_quality_score * 100)}%`
-          : '—'
-        setMetrics([
-          {
-            label: '数据集总数', value: String(summary.total),
-            note: `成品 ${summary.curated_total} · 人工 ${summary.manual_total}`,
-            // 连接同步数据集按导航设计（21dc9e08）不在资产湖列表展示，
-            // 其正式入口是「数据流水线 → 数据集」；计数必须可跳转，不能是死数字
-            ...(summary.sync_total ? {
-              action: {
-                text: `历史同步 ${summary.sync_total} →`,
-                onClick: () => navigate('/data/pipelines/datasets'),
-              },
-            } : {}),
-          },
-          { label: '人工数据集', value: String(summary.manual_total), note: '文件上传或在线维护' },
-          { label: '已声明主键', value: String(summary.manual_with_primary_key), note: '具备主键契约的人工数据集' },
-          { label: '平均质量分', value: avgQuality, note: summary.scored_curated_total ? `基于 ${summary.scored_curated_total} 个已评分成品` : '暂无已评分成品' },
-          { label: '待审核', value: String(summary.pending_review_total), note: '需要人工确认的成品数据集' },
-        ])
-      })
-      .catch(error => {
-        if (!alive) return
-        setMetrics(null)
-        setError(errorText(error, '总览数据加载失败'))
-      })
-      .finally(() => { if (alive) setLoading(false) })
-    return () => { alive = false }
-  }, [retryToken])
-
-  if (loading) {
+  if (isLoading || (isFetching && !summary)) {
     return (
       <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5" aria-label="总览加载中">
         {Array.from({ length: 5 }).map((_, index) => <div key={index} className="h-[92px] animate-pulse rounded-xl border border-border bg-muted" />)}
@@ -198,19 +165,41 @@ function AssetInsightStrip() {
     )
   }
 
-  if (error || !metrics) {
+  if (isError || !summary) {
     return (
       <div className="flex shrink-0 items-center gap-2 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]">
         <AlertTriangle size={15} className="shrink-0" />
-        <span className="flex-1">{error || '总览数据不可用'}</span>
+        <span className="flex-1">{errorText(error, '总览数据加载失败')}</span>
         <button
           type="button"
-          onClick={() => { setLoading(true); setError(''); setRetryToken(token => token + 1) }}
+          onClick={() => { void refetch() }}
           className="rounded-md border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-card px-2.5 py-1 text-xs hover:bg-[var(--color-danger-bg)]"
         >重试</button>
       </div>
     )
   }
+
+  const avgQuality = summary.scored_curated_total && typeof summary.average_quality_score === 'number'
+    ? `${Math.round(summary.average_quality_score * 100)}%`
+    : '—'
+  const metrics: Array<{ label: string; value: string; note: string; action?: { text: string; onClick: () => void } }> = [
+    {
+      label: '数据集总数', value: String(summary.total),
+      note: `成品 ${summary.curated_total} · 人工 ${summary.manual_total}`,
+      // 连接同步数据集按导航设计（21dc9e08）不在资产湖列表展示，
+      // 其正式入口是「数据流水线 → 数据集」；计数必须可跳转，不能是死数字
+      ...(summary.sync_total ? {
+        action: {
+          text: `历史同步 ${summary.sync_total} →`,
+          onClick: () => navigate('/data/pipelines/datasets'),
+        },
+      } : {}),
+    },
+    { label: '人工数据集', value: String(summary.manual_total), note: '文件上传或在线维护' },
+    { label: '已声明主键', value: String(summary.manual_with_primary_key), note: '具备主键契约的人工数据集' },
+    { label: '平均质量分', value: avgQuality, note: summary.scored_curated_total ? `基于 ${summary.scored_curated_total} 个已评分成品` : '暂无已评分成品' },
+    { label: '待审核', value: String(summary.pending_review_total), note: '需要人工确认的成品数据集' },
+  ]
 
   return (
     <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">

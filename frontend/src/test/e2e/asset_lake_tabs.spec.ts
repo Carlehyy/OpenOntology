@@ -1005,11 +1005,10 @@ test('总览五张卡片由聚合接口驱动，不再拉取全量列表', async
   const syncEntry = totalCard.getByRole('button', { name: '历史同步 1 →' })
   await expect(syncEntry).toBeVisible()
 
-  // 请求轨迹：卡片只依赖聚合接口；dev 服务器的 React StrictMode 会对挂载
-  // effect 做 setup→cleanup→setup，同一逻辑请求最多发出两次（生产构建为一次）
+  // 请求轨迹：卡片只依赖聚合接口；react-query 对 StrictMode 双挂载去重，
+  // 首次进入只发一次聚合请求（全局 staleTime 30s 内隐藏/重显也不重复请求）
   const summaryCalls = apiRequests.filter(entry => entry.split('?')[0] === '/api/v2/datasets/overview/summary')
-  expect(summaryCalls.length).toBeGreaterThanOrEqual(1)
-  expect(summaryCalls.length).toBeLessThanOrEqual(2)
+  expect(summaryCalls.length).toBe(1)
   const listPulls = apiRequests.filter(entry => {
     const path = entry.split('?')[0]
     return path === '/api/v2/curated' || path === '/api/v2/datasets/overview'
@@ -1021,9 +1020,105 @@ test('总览五张卡片由聚合接口驱动，不再拉取全量列表', async
   await expect(page).toHaveURL(/\/data\/pipelines\/datasets/)
 })
 
+test('总览隐藏后重显直接复用缓存，30 秒内不再重复请求', async ({ page }) => {
+  // react-query 全局 staleTime 30s：隐藏总览即卸载组件，重显是重新挂载；
+  // 缓存未过期时必须同步复用数据渲染，不得发出新的聚合请求
+  const summaryRequests: string[] = []
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (url.pathname === '/api/v2/datasets/overview/summary') summaryRequests.push(url.pathname)
+  })
+
+  await mockAssetLake(page, {
+    curated: [
+      {
+        id: 'ds-cache-pending', name: '缓存待审核成品', status: 'pending_review',
+        row_count: 3, quality_score: 0.9, primary_key: 'order_id',
+        producer_pipeline_id: null, output_key: null, has_review_evidence: false,
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+      {
+        id: 'ds-cache-approved', name: '缓存已审核成品', status: 'approved',
+        row_count: 8, quality_score: 0.7, primary_key: 'order_id',
+        producer_pipeline_id: null, output_key: null, has_review_evidence: false,
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+    ],
+    manual: [
+      {
+        id: 'raw-cache-upload', name: '缓存上传人工数据', raw_name: '缓存上传人工数据', kind: 'table',
+        primary_key: 'id', source: 'upload', connection_name: '', version_count: 1,
+        latest_version_no: 1, rowcount: 4, consumers: [],
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+      {
+        id: 'raw-cache-online', name: '缓存在线维护数据', raw_name: '缓存在线维护数据', kind: 'table',
+        primary_key: '', source: 'manual', connection_name: '', version_count: 1,
+        latest_version_no: 1, rowcount: 2, consumers: [],
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+      {
+        id: 'raw-cache-sync', name: '缓存历史同步数据', raw_name: '缓存历史同步数据', kind: 'table',
+        primary_key: 'id', source: 'sync', connection_name: 'PostgreSQL 测试源', version_count: 1,
+        latest_version_no: 1, rowcount: 6, consumers: [],
+        created_at: '2026-10-20T08:00:00Z', updated_at: '2026-10-20T08:00:00Z',
+      },
+    ],
+  })
+  await page.goto('/#/data/structured?tab=curated', { waitUntil: 'domcontentloaded' })
+
+  const overviewCard = (anchor: string) => page.getByText(anchor, { exact: true }).locator('xpath=..')
+  const totalCard = overviewCard('数据集总数')
+  await expect(totalCard.getByText('成品 2 · 人工 2', { exact: true })).toBeVisible()
+
+  // 首次加载的请求基线；StrictMode 双挂载由 react-query 去重
+  const initialCalls = summaryRequests.length
+  expect(initialCalls).toBeGreaterThanOrEqual(1)
+
+  const toggle = page.getByRole('button', { name: '总览', exact: true })
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  // 隐藏即卸载：卡片标签随组件一起消失
+  await expect(page.getByText('数据集总数', { exact: true })).toHaveCount(0)
+
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  // 重显由缓存同步渲染：不出现加载骨架（点击后立即断言，卡片回归后再短轮询兜底）
+  const skeleton = page.locator('[aria-label="总览加载中"]')
+  await expect(skeleton).toHaveCount(0)
+  await expect(totalCard.getByText('成品 2 · 人工 2', { exact: true })).toBeVisible()
+  await page.waitForTimeout(300)
+  await expect(skeleton).toHaveCount(0)
+
+  // 五张卡片以与隐藏前相同的数值回归（沿用卡片内唯一锚文本定位，避免与
+  // 表格状态列、Tab 名撞车）
+  await expect(totalCard.getByText('5', { exact: true })).toBeVisible()
+  const manualCard = overviewCard('文件上传或在线维护')
+  await expect(manualCard.getByText('人工数据集', { exact: true })).toBeVisible()
+  await expect(manualCard.getByText('2', { exact: true })).toBeVisible()
+  const primaryKeyCard = overviewCard('已声明主键')
+  await expect(primaryKeyCard.getByText('1', { exact: true })).toBeVisible()
+  await expect(primaryKeyCard.getByText('具备主键契约的人工数据集')).toBeVisible()
+  const qualityCard = overviewCard('基于 2 个已评分成品')
+  await expect(qualityCard.getByText('平均质量分')).toBeVisible()
+  await expect(qualityCard.getByText('80%', { exact: true })).toBeVisible()
+  const pendingCard = overviewCard('需要人工确认的成品数据集')
+  await expect(pendingCard.getByText('待审核', { exact: true })).toBeVisible()
+  await expect(pendingCard.getByText('1', { exact: true })).toBeVisible()
+
+  // 全程处于 30s staleTime 内：隐藏/重显零新增聚合请求
+  expect(summaryRequests.length).toBe(initialCalls)
+})
+
 test('总览聚合接口失败给出明确错误，重试后恢复五张卡片', async ({ page }) => {
   // 可变 mock 状态：先 500，点重试前切回 200，避免叠加注册多个 route
   const summaryControl = { status: 500 }
+  const summaryRequests: string[] = []
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (url.pathname === '/api/v2/datasets/overview/summary') summaryRequests.push(url.pathname)
+  })
   await mockAssetLake(page, {
     summary: summaryControl,
     curated: [{
@@ -1044,6 +1139,8 @@ test('总览聚合接口失败给出明确错误，重试后恢复五张卡片',
   await expect(page.getByText('总览数据加载失败')).toBeVisible()
   const retryButton = page.getByRole('button', { name: '重试' })
   await expect(retryButton).toBeVisible()
+  // 全局 retry:1：错误框出现前 mock 恰被命中两次（初次请求 + 一次自动重试）
+  expect(summaryRequests.length).toBe(2)
 
   summaryControl.status = 200
   await retryButton.click()
@@ -1051,4 +1148,6 @@ test('总览聚合接口失败给出明确错误，重试后恢复五张卡片',
   const totalCard = page.getByText('数据集总数', { exact: true }).locator('xpath=..')
   await expect(totalCard.getByText('2', { exact: true })).toBeVisible()
   await expect(page.getByText('总览数据加载失败')).toHaveCount(0)
+  // 点重试后仅再发一次请求即成功
+  expect(summaryRequests.length).toBe(3)
 })
