@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { Database, KeyRound, Loader2 } from 'lucide-react'
 import {
   integratedDatasetsApi,
@@ -15,6 +14,7 @@ import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { integratedError } from './integratedModel'
+import ConnectionManagementDialog from '@/components/data-channel/ConnectionManagementDialog'
 import {
   DISPLAY_NAME_MAX,
   FIELD_NAME_MAX,
@@ -66,8 +66,11 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
   onClose: () => void
   onRegistered: (asset: IntegratedAsset) => void
 }) {
-  const navigate = useNavigate()
   const [connections, setConnections] = useState<SourceConnection[]>([])
+  const [connectionManagementOpen, setConnectionManagementOpen] = useState(false)
+  const connectionSelectRef = useRef<HTMLButtonElement | null>(null)
+  const existingModeRef = useRef<HTMLButtonElement | null>(null)
+  const restoreConnectionFocusRef = useRef(false)
   const [connectionsLoading, setConnectionsLoading] = useState(true)
   const [connectionsError, setConnectionsError] = useState('')
 
@@ -143,6 +146,19 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
   }, [])
 
   useEffect(() => { loadConnections() }, [loadConnections])
+
+  useEffect(() => {
+    if (!restoreConnectionFocusRef.current || connectionsLoading) return
+    restoreConnectionFocusRef.current = false
+    requestAnimationFrame(() => {
+      const select = connectionSelectRef.current
+      if (select && !select.disabled) {
+        select.focus()
+      } else {
+        existingModeRef.current?.focus()
+      }
+    })
+  }, [connections, connectionsLoading])
 
   const formError = mode === 'new' ? validateNewSourceForm(form) : ''
   const sourceCandidate: SourceReference | null = useMemo(() => {
@@ -283,7 +299,12 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
 
   return (
     <Dialog open onOpenChange={open => { if (!open && !saving) onClose() }}>
-      <DialogContent dismissible={!saving} className="flex max-h-[88vh] w-[min(96vw,1080px)] flex-col p-0">
+      <DialogContent
+        dismissible={!saving}
+        onEscapeKeyDown={event => { if (saving || connectionManagementOpen) event.preventDefault() }}
+        onInteractOutside={event => { if (saving || connectionManagementOpen) event.preventDefault() }}
+        className="flex max-h-[88vh] w-[min(96vw,1080px)] flex-col p-0"
+      >
         <DialogHeader className="mb-0 shrink-0 border-b border-border px-5 pb-3 pt-4" icon={<Database size={18} />}>
           <DialogTitle>登记集成数据集</DialogTitle>
           <DialogDescription>
@@ -334,7 +355,7 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
                 <button type="button" aria-pressed={mode === 'new'} className={modeButtonClass(mode === 'new')} onClick={() => setMode('new')}>
                   新建数据源
                 </button>
-                <button type="button" aria-pressed={mode === 'existing'} className={modeButtonClass(mode === 'existing')} onClick={() => setMode('existing')} disabled={connectionsLoading}>
+                <button ref={existingModeRef} type="button" aria-pressed={mode === 'existing'} className={modeButtonClass(mode === 'existing')} onClick={() => setMode('existing')} disabled={connectionsLoading}>
                   使用已有连接
                 </button>
               </div>
@@ -411,7 +432,7 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
                       onValueChange={setConnectionId}
                       disabled={connectionsLoading || connections.length === 0 || saving}
                     >
-                      <SelectTrigger className="mt-1" aria-labelledby="integrated-connection-label">
+                      <SelectTrigger ref={connectionSelectRef} className="mt-1" aria-labelledby="integrated-connection-label">
                         <SelectValue placeholder={connectionsLoading ? '加载连接中…' : connections.length === 0 ? '暂无 MySQL / PostgreSQL 连接' : '选择 MySQL / PostgreSQL 连接'} />
                       </SelectTrigger>
                       <SelectContent>
@@ -446,10 +467,7 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
                       variant="link"
                       size="sm"
                       className="h-auto px-1 py-0"
-                      onClick={() => {
-                        onClose()
-                        navigate('/data/pipelines/connections')
-                      }}
+                      onClick={() => setConnectionManagementOpen(true)}
                     >
                       管理数据连接
                     </Button>
@@ -666,6 +684,15 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
           </div>
         </footer>
       </DialogContent>
+      <ConnectionManagementDialog
+        open={connectionManagementOpen}
+        onClose={() => {
+          setConnectionManagementOpen(false)
+          restoreConnectionFocusRef.current = true
+          loadConnections()
+        }}
+        onChanged={loadConnections}
+      />
     </Dialog>
   )
 }

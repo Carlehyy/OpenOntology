@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { formatDateTime } from '@/utils/datetime'
 import { AlertTriangle, CheckCircle, Database, Eye, Loader2, Plus, RefreshCw, Table2 } from 'lucide-react'
 import { integratedDatasetsApi, type IntegratedAsset } from '@/api/v2/integrated-datasets'
@@ -24,7 +24,6 @@ function formatUpdatedAt(iso: string | null | undefined): string {
 
 export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatasetId?: string | null }) {
   const [, setSearchParams] = useSearchParams()
-  const navigate = useNavigate()
   const role = useAuthStore(state => state.user?.role)
   const canManage = role === 'admin' || role === 'editor'
   const [assets, setAssets] = useState<IntegratedAsset[]>([])
@@ -133,19 +132,6 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
           <div className="m-5 border-2 border-dashed rounded-xl p-12 text-center text-[var(--color-text-tertiary)] space-y-2">
             <Table2 size={32} className="mx-auto opacity-30" />
             <p className="text-sm font-medium">尚未登记集成数据集</p>
-            <p className="text-xs">
-              点击「登记集成数据集」，即可在弹窗内新建或复用 MySQL / PostgreSQL 源并完成登记，无需离开本页；未配置 dbx 时登记会明确失败，不会生成半套资产。
-            </p>
-            {canManage && (
-              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
-                <Button type="button" variant="outline" size="sm" onClick={() => navigate('/data/pipelines/connections')}>
-                  管理数据连接
-                </Button>
-                <Button type="button" size="sm" onClick={() => setRegistering(true)}>
-                  <Plus size={13} />登记集成数据集
-                </Button>
-              </div>
-            )}
           </div>
         )}
 

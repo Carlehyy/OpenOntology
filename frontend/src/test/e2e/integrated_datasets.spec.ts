@@ -140,6 +140,16 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       return respond({ columns: physicalColumns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     }
     if (path === '/api/v2/connections') {
+      if (method === 'POST') {
+        const created = {
+          id: 'managed-created',
+          name: body?.name ?? '新建连接',
+          kind: body?.kind ?? 'mysql',
+          status: 'active',
+        }
+        connectionList.push(created)
+        return respond(created, 201)
+      }
       if (options.connectionsError) return fail(503, { code: 'CONNECTIONS_UNAVAILABLE', message: 'Connections list is unavailable' })
       return respond(connectionList)
     }
@@ -663,7 +673,7 @@ test('reuse mode with zero connections points back to the inline source form', a
   await mockIntegrated(page, { role: 'editor', connections: [] })
   await page.goto('/#/data/structured?tab=integrated')
   await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
-  const dialog = page.getByRole('dialog')
+  const dialog = page.getByRole('dialog').first()
   await dialog.getByRole('button', { name: '使用已有连接' }).click()
   await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('没有可复用的 MySQL / PostgreSQL 连接')
   await expect(dialog.getByRole('combobox', { name: '已有连接' })).toBeDisabled()
@@ -672,15 +682,37 @@ test('reuse mode with zero connections points back to the inline source form', a
   await expect(dialog.getByLabel('源名称', { exact: true })).toBeVisible()
 })
 
-test('empty connection list guides managers to the connection management page', async ({ page }) => {
-  await mockIntegrated(page, { role: 'editor', connections: [], menuKeys: ['data.structured', 'data.pipelines'] })
+test('connection management stays in the registration flow and refreshes reusable connections', async ({ page }) => {
+  await mockIntegrated(page, { role: 'editor', connections: [] })
   await page.goto('/#/data/structured?tab=integrated')
   await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
-  const dialog = page.getByRole('dialog')
-  await dialog.getByRole('button', { name: '使用已有连接', exact: true }).click()
-  await dialog.getByRole('button', { name: '管理数据连接', exact: true }).click()
-  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
-  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+  const registrationDialog = page.getByRole('dialog').first()
+  await registrationDialog.getByLabel('资产名称', { exact: true }).fill('保留的资产名称')
+  await registrationDialog.getByRole('button', { name: '使用已有连接', exact: true }).click()
+  await registrationDialog.getByRole('button', { name: '管理数据连接', exact: true }).click()
+
+  const managerDialog = page.getByTestId('connection-management-dialog')
+  await expect(managerDialog).toBeVisible()
+  await expect(page).toHaveURL(/#\/data\/structured\?tab=integrated/)
+  const newConnectionButton = managerDialog.getByRole('button', { name: '新建连接', exact: true })
+  await expect(newConnectionButton).toBeVisible()
+  expect(await newConnectionButton.evaluate(element => {
+    const rect = element.getBoundingClientRect()
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+    return hit === element || hit?.closest('button') === element
+  })).toBe(true)
+  await newConnectionButton.click()
+  await managerDialog.getByPlaceholder('例：ERP 订单数据库').fill('登记流程新连接')
+  await managerDialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(managerDialog.getByText('登记流程新连接', { exact: true })).toBeVisible()
+
+  await managerDialog.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(managerDialog).toHaveCount(0)
+  await expect(registrationDialog.getByRole('combobox', { name: '已有连接' })).toBeFocused()
+  await expect(registrationDialog.getByLabel('资产名称', { exact: true })).toHaveValue('保留的资产名称')
+  await expect(registrationDialog.getByRole('combobox', { name: '已有连接' })).toBeEnabled()
+  await registrationDialog.getByRole('combobox', { name: '已有连接' }).click()
+  await expect(page.getByRole('option', { name: /登记流程新连接/ })).toBeVisible()
 })
 
 test('connection list failure never blocks inline registration', async ({ page }) => {
@@ -698,18 +730,22 @@ test('connection list failure never blocks inline registration', async ({ page }
   expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
 })
 
-test('empty integrated tab offers inline registration and connection management', async ({ page }) => {
-  await mockIntegrated(page, { role: 'editor', noAssets: true, menuKeys: ['data.structured', 'data.pipelines'] })
+test('empty integrated tab keeps one toolbar registration entry', async ({ page }) => {
+  await mockIntegrated(page, { role: 'editor', noAssets: true })
   await page.goto('/#/data/structured?tab=integrated')
-  await page.getByRole('button', { name: '管理数据连接', exact: true }).click()
-  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
-  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+  await expect(page.getByText('尚未登记集成数据集', { exact: true })).toBeVisible()
+  await expect(page.getByText('即可在弹窗内新建或复用', { exact: false })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '管理数据连接', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toBeEnabled()
 })
 
-test('viewer gets no register or connection-management entry on the empty integrated tab', async ({ page }) => {
+test('viewer gets no connection-management entry and a disabled toolbar registration entry', async ({ page }) => {
   await mockIntegrated(page, { role: 'viewer', noAssets: true })
   await page.goto('/#/data/structured?tab=integrated')
+  await expect(page.getByText('尚未登记集成数据集', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '管理数据连接', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toHaveCount(1)
   await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toBeDisabled()
 })
 

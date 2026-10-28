@@ -14,14 +14,23 @@ const Dialog = DialogPrimitive.Root
 const DialogTrigger = DialogPrimitive.Trigger
 const DialogClose = DialogPrimitive.Close
 
+export type DialogLayer = 'base' | 'nested' | 'top'
+
+const DIALOG_LAYER_CLASS: Record<DialogLayer, string> = {
+  base: 'z-[var(--z-modal)]',
+  nested: 'z-[calc(var(--z-modal)+10)]',
+  top: 'z-[calc(var(--z-modal)+20)]',
+}
+
 function DialogOverlay({
   className,
+  layer = 'base',
   ...props
-}: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>) {
+}: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay> & { layer?: DialogLayer }) {
   return (
     <DialogPrimitive.Overlay
       className={cn(
-        'fixed inset-0 z-[var(--z-modal)] animate-fade-in bg-[var(--color-bg-overlay)] backdrop-blur-[2px]',
+        `fixed inset-0 ${DIALOG_LAYER_CLASS[layer]} animate-fade-in bg-[var(--color-bg-overlay)] backdrop-blur-[2px]`,
         className,
       )}
       {...props}
@@ -33,16 +42,25 @@ function DialogContent({
   className,
   children,
   dismissible = true,
+  layer = 'base',
+  onEscapeKeyDown,
+  onInteractOutside,
   ...props
-}: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { dismissible?: boolean }) {
+}: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { dismissible?: boolean; layer?: DialogLayer }) {
   return (
     <DialogPrimitive.Portal>
-      <DialogOverlay />
+      <DialogOverlay layer={layer} />
       <DialogPrimitive.Content
-        onEscapeKeyDown={event => { if (!dismissible) event.preventDefault() }}
-        onInteractOutside={event => { if (!dismissible) event.preventDefault() }}
+        onEscapeKeyDown={event => {
+          if (!dismissible) event.preventDefault()
+          onEscapeKeyDown?.(event)
+        }}
+        onInteractOutside={event => {
+          if (!dismissible) event.preventDefault()
+          onInteractOutside?.(event)
+        }}
         className={cn(
-          'fixed left-1/2 top-1/2 z-[var(--z-modal)] w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2',
+          `fixed left-1/2 top-1/2 ${DIALOG_LAYER_CLASS[layer]} w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2`,
           'animate-dialog-in rounded-2xl border border-border bg-popover p-5 text-foreground shadow-[var(--shadow-lg)]',
           'focus:outline-none',
           className,

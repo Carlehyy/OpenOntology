@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { Button } from './Button'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  type DialogLayer,
 } from './dialog'
 
 export interface ConfirmDialogProps {
@@ -20,6 +21,7 @@ export interface ConfirmDialogProps {
   cancelText?: string
   variant?: 'danger' | 'warning' | 'default'
   loading?: boolean
+  layer?: DialogLayer
 }
 
 export function ConfirmDialog({
@@ -32,12 +34,13 @@ export function ConfirmDialog({
   cancelText = '取消',
   variant = 'default',
   loading,
+  layer = 'base',
 }: ConfirmDialogProps) {
   const danger = variant === 'danger'
   const warning = variant === 'warning'
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
-      <DialogContent className="w-[min(92vw,26rem)]">
+      <DialogContent layer={layer} className="w-[min(92vw,26rem)]">
         <DialogHeader
           icon={danger || warning ? <AlertTriangle size={18} /> : <Info size={18} />}
           iconClassName={cn(
