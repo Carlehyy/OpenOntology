@@ -3,7 +3,7 @@
  *
  * 左卡片：ECharts 全局画布（各本体子图分区排布、按本体着色、同名类型虚线桥接），
  * 默认展示结构层（L1：对象类型 + 类型间关系），实例层可切换（L2）；
- * 右卡片：操作区（数据范围 / 层级与预算 / 搜索 / 路径与影响分析 / 节点详情）
+ * 右卡片：功能区域（数据范围 / 层级与预算 / 搜索 / 路径与影响分析 / 节点详情）
  * 布局复用本体建模页的可拖拽左右分栏；数据基座是 PG fo_* 表 / 发布快照，
  * 不依赖 Neo4j 投影就绪。本页不提供任何增删改，编辑仍在本体建模/详情页完成。
  */
@@ -317,12 +317,9 @@ export default function OntologyNetworkPage() {
   }
 
   const stats = useMemo(() => ({
-    ontologies: overview.length,
     selected: graph.ontologies.length,
-    types: graph.ontologies.reduce((sum, item) => sum + item.typeCount, 0),
-    instances: graph.meta.totalInstances,
     bridges: graph.bridges.groups.length,
-  }), [graph, overview.length])
+  }), [graph])
 
   const legend = useMemo(() => legendItems(graph.ontologies), [graph.ontologies])
 
@@ -564,13 +561,13 @@ export default function OntologyNetworkPage() {
           </div>
         </section>
 
-        <SplitHandle onPointerDown={startResize} label="调整图谱画布与操作区宽度" />
+        <SplitHandle onPointerDown={startResize} label="调整图谱画布与功能区域宽度" />
 
-        {/* 右卡片：操作区 */}
+        {/* 右卡片：功能区域 */}
         <aside className={`${panelClass} workspace-topology-surface flex flex-col`} data-testid="network-ops-card">
           <header className="flex h-14 shrink-0 items-center border-b border-[var(--color-border)] bg-card px-4">
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">操作区</h3>
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">功能区域</h3>
               <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">数据范围 · 展示 · 分析（只读）</p>
             </div>
           </header>
@@ -692,7 +689,7 @@ export default function OntologyNetworkPage() {
                 ] as const).map(item => (
                   <button key={item.id} type="button" onClick={() => setMode(item.id)} aria-pressed={mode === item.id}
                     className={['inline-flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition-colors',
-                      mode === item.id ? 'bg-accent text-[var(--color-text-inverse)] shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground'].join(' ')}>
+                      mode === item.id ? 'bg-viz-violet-soft text-viz-violet' : 'text-muted-foreground hover:bg-muted hover:text-foreground'].join(' ')}>
                     <item.icon size={13} />{item.label}
                   </button>
                 ))}
@@ -816,23 +813,6 @@ export default function OntologyNetworkPage() {
                   </div>
                 )}
               </div>
-            </section>
-
-            {/* 统计小卡 */}
-            <section className="grid grid-cols-2 gap-2" data-testid="network-stats">
-              {[
-                { label: '平台本体', value: String(stats.ontologies) },
-                { label: '本次加载', value: `${stats.selected} 个` },
-                { label: '对象类型', value: String(stats.types) },
-                { label: '实例总量', value: String(stats.instances) },
-                { label: '桥接组', value: String(stats.bridges) },
-                { label: '已加载节点', value: String(graph.meta.nodeCount) },
-              ].map(item => (
-                <div key={item.label} className="rounded-lg border border-[var(--color-border)] bg-card px-2.5 py-2">
-                  <p className="text-[10px] text-[var(--color-text-tertiary)]">{item.label}</p>
-                  <p className="text-sm font-semibold text-foreground">{item.value}</p>
-                </div>
-              ))}
             </section>
           </div>
         </aside>
