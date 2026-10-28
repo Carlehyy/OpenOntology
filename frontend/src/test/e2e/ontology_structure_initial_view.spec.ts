@@ -840,3 +840,36 @@ test('拖拽后在 3 秒防抖倒计时内刷新：pagehide 以 keepalive 兜底
   expect(saved.x).toBeCloseTo(dragged.x, 1)
   expect(saved.y).toBeCloseTo(dragged.y, 1)
 })
+
+test('保存后切数据映射再回来：缓存写回最新布局，30s 缓存窗口内不回退', async ({ page }) => {
+  await mockOntologyStructure(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/ontologies/' + ontologyId, { waitUntil: 'domcontentloaded' })
+  await page.getByRole('button', { name: '本体结构', exact: true }).click()
+  const node = page.getByTestId('structure-node-object')
+  await expect(node).toBeVisible()
+  await page.waitForTimeout(750)
+
+  const before = await readFlowPosition(node)
+  const box = await node.boundingBox()
+  expect(box).toBeTruthy()
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box!.x + box!.width / 2 + 90, box!.y + box!.height / 2 + 60, { steps: 8 })
+  await page.mouse.up()
+  const dragged = await readFlowPosition(node)
+  expect(Math.abs(dragged.x - before.x)).toBeGreaterThan(10)
+  await expect(page.getByTestId('structure-save-status')).toContainText('布局已保存', { timeout: 8000 })
+
+  // 回归点：详情页切 Tab 会卸载结构组件，组件内状态（含 overlay）随卸载丢弃；
+  // 重挂时 30s staleTime 内的查询缓存仍是拖拽前的布局。保存成功必须把服务端
+  // 合并布局写回缓存，否则回来看到的是旧布局（节点位置由缓存首帧决定）。
+  await page.getByRole('button', { name: '数据映射', exact: true }).click()
+  await expect(page.getByTestId('ontology-structure-graph')).toHaveCount(0)
+  await page.getByRole('button', { name: '本体结构', exact: true }).click()
+  await expect(node).toBeVisible()
+  await page.waitForTimeout(750)
+  const restored = await readFlowPosition(node)
+  expect(restored.x).toBeCloseTo(dragged.x, 1)
+  expect(restored.y).toBeCloseTo(dragged.y, 1)
+})

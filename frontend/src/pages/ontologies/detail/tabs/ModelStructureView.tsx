@@ -594,6 +594,16 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
       // 响应即后端合并后的全量画布布局：overlay 始终等于最后一次保存时的
       // 服务端真实状态，不做本地增量合并。
       setLayoutOverlay({ versionId: workspace.versionId, positions: saved.positions })
+      // 同步写回工作区查询缓存：切 Tab 卸载组件时保存照常落地，但组件内
+      // 状态（含 overlay）随卸载丢弃；全局 30s staleTime 内重挂会直接用
+      // 旧缓存渲染。把服务端合并结果写进缓存，回来时立即是最新布局。
+      // 版本守卫与 overlay 同口径：缓存已被刷新到新版本时不回写旧版坐标。
+      queryClient.setQueryData<PublishedWorkspace>(
+        ['current-release-workspace', ontologyId],
+        old => old && old.versionId === workspace.versionId
+          ? { ...old, canvasLayout: saved.positions }
+          : old,
+      )
       pendingResyncKeys.current = new Set(Object.keys(batch))
       setSaveState('saved')
       // 成功提示短暂停留后回到空闲文案，避免「布局已保存」永久驻留造成状态残留。
