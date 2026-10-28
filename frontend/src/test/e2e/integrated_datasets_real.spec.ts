@@ -9,6 +9,9 @@
  * asserted in request bodies. The dialog itself never issues an extra
  * POST /api/v2/connections — the final registration atomically persists an
  * encrypted shared Connection alongside the asset.
+ * The SPL workbench UI was retired from the integrated tab (登记/查看 only);
+ * governed SPL verification now drives POST /api/v2/query directly with the
+ * same memory-storage contract the workbench used.
  */
 import { expect, test, type Page } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
@@ -53,18 +56,17 @@ function unwrap<T>(body: T | { data: T }): T {
   return body && typeof body === 'object' && 'data' in body ? (body as { data: T }).data : body as T
 }
 
+/** Governed SPL verification straight against POST /api/v2/query (the page UI
+ * entry was retired; the wire contract is unchanged): memory result storage,
+ * per-user snapshot quota honored with one TTL wait + retry, exact metadata
+ * asserted on every call. */
 async function runQuery(page: Page, query: string, bindings: Record<string, unknown>, params: Record<string, unknown> = {}): Promise<Result> {
-  const panel = page.getByTestId('integrated-query-panel')
-  await panel.getByLabel('数据源绑定 JSON').fill(JSON.stringify(bindings))
-  await panel.getByLabel('查询参数 JSON').fill(JSON.stringify(params))
-  const editor = panel.getByTestId('integrated-spl-editor').locator('.cm-content')
-  await editor.fill(query)
-  const submit = async () => {
-    const pending = page.waitForResponse(response => response.url().endsWith('/api/v2/query') && response.request().method() === 'POST')
-    await panel.getByRole('button', { name: '运行查询', exact: true }).click()
-    return pending
-  }
-  let response = await submit()
+  const token = await page.evaluate(() => localStorage.getItem('token'))
+  const send = () => page.request.post(new URL('/api/v2/query', page.url()).toString(), {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { language: 'spl', query, bindings, params, pageSize: 100, resultStorage: 'memory' },
+  })
+  let response = await send()
   if (response.status() === 429) {
     // Per-user query snapshot quota (10 per 300s) shared with the API
     // acceptance harness: wait out the normal TTL once and retry, exactly
@@ -72,7 +74,7 @@ async function runQuery(page: Page, query: string, bindings: Record<string, unkn
     // other user's snapshots are touched.
     const retryAfterSeconds = Number(response.headers()['retry-after'] ?? '') || 300
     await page.waitForTimeout(Math.max((retryAfterSeconds + 5) * 1000, 305_000))
-    response = await submit()
+    response = await send()
   }
   expect(response.ok(), `SPL query failed: ${response.status()} ${await response.text()}`).toBeTruthy()
   const result = unwrap<Result>(await response.json())
@@ -81,8 +83,6 @@ async function runQuery(page: Page, query: string, bindings: Record<string, unkn
   expect(result.resultLimited).toBe(false)
   expect(result.sourceStates.length).toBeGreaterThan(0)
   expect(result.sourceStates.every(state => state.completeness === 'complete')).toBe(true)
-  await expect(panel.getByTestId('query-total-rows')).toHaveText(String(result.totalRows))
-  await expect(panel.getByTestId('integrated-query-result')).toContainText(result.queryId)
   return result
 }
 

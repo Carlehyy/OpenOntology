@@ -1,19 +1,25 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Database, Plus, RefreshCw } from 'lucide-react'
+import { formatDateTime } from '@/utils/datetime'
+import { AlertTriangle, CheckCircle, Database, Eye, Loader2, Plus, RefreshCw, Table2 } from 'lucide-react'
 import { integratedDatasetsApi, type IntegratedAsset } from '@/api/v2/integrated-datasets'
 import { useAuthStore } from '@/stores/authStore'
 import { Alert } from '@/components/ui/Alert'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
-import { EmptyState, LoadingState } from '@/components/ui/LoadingState'
 import IntegratedRegisterDialog from './IntegratedRegisterDialog'
 import IntegratedAssetDetail from './IntegratedAssetDetail'
-import IntegratedQueryPanel from './IntegratedQueryPanel'
 import { backendsLabel, dbxState, dbxStateDetail, dbxStateLabel, integratedError } from './integratedModel'
 
 function CapabilityBadge({ label, enabled }: { label: string; enabled: boolean }) {
   return <Badge variant={enabled ? 'success' : 'secondary'}>{label} {enabled ? '允许' : '未启用'}</Badge>
+}
+
+function formatUpdatedAt(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return formatDateTime(date)
 }
 
 export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatasetId?: string | null }) {
@@ -73,18 +79,19 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
 
   return (
     <div data-testid="integrated-datasets-view" className="h-full space-y-4 overflow-y-auto pb-5">
-      <section className="rounded-xl border border-border bg-card p-4">
-        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h1 className="flex items-center gap-2 text-base font-semibold"><Database size={17} />集成数据集</h1>
+      {/* 资产列表卡片 —— 表格语言与成品数据集页签一致（同一张卡、同一套表头/操作列规范） */}
+      <section className="flex flex-col rounded-xl border border-border bg-card shadow-sm/50">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-5 pt-4 pb-3">
+          <div className="min-w-0">
+            <h1 className="flex items-center gap-2 text-sm font-semibold"><Database size={15} />集成数据集</h1>
             <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
               登记 MySQL / PostgreSQL 源表，直读、完整版本同步与受控源表写入。登记与结构刷新必须由真实 dbx 元数据服务核验；
               源数据读取与写入走 native 能力，二者不可互相冒充。
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="ml-auto flex shrink-0 items-center gap-2">
             <Button type="button" variant="outline" size="sm" onClick={refresh} disabled={loading}>
-              <RefreshCw size={13} />刷新资产
+              <RefreshCw size={13} className={loading ? 'animate-spin' : undefined} />刷新资产
             </Button>
             <Button
               type="button"
@@ -99,25 +106,38 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
         </div>
 
         {dbxUnavailable && (
-          <Alert variant="warning" role="status" data-testid="integrated-dbx-unavailable" className="mb-3">
-            DBX 元数据服务{dbxStateLabel(assets[0])}：真实源表发现、登记与结构刷新会失败（503），本页不会用 native 反射冒充发现结果。
-            <span className="mt-1 block text-xs opacity-80">{dbxStateDetail(assets[0])}</span>
-          </Alert>
+          <div className="px-5 pt-3">
+            <Alert variant="warning" role="status" data-testid="integrated-dbx-unavailable">
+              DBX 元数据服务{dbxStateLabel(assets[0])}：真实源表发现、登记与结构刷新会失败（503），本页不会用 native 反射冒充发现结果。
+              <span className="mt-1 block text-xs opacity-80">{dbxStateDetail(assets[0])}</span>
+            </Alert>
+          </div>
         )}
 
-        {loading && <div role="status"><LoadingState message="加载集成资产中…" /></div>}
         {listError && (
-          <Alert variant="danger" role="alert" className="mb-3">
-            {listError}
-            <Button type="button" variant="link" size="sm" onClick={refresh} className="ml-2 h-auto px-1">重试</Button>
-          </Alert>
+          <div className="px-5 pt-3">
+            <Alert variant="danger" role="alert">
+              {listError}
+              <Button type="button" variant="link" size="sm" onClick={refresh} className="ml-2 h-auto px-1">重试</Button>
+            </Alert>
+          </div>
         )}
+
+        {loading && (
+          <div role="status" className="flex items-center justify-center gap-2 p-12 text-sm text-[var(--color-text-tertiary)]">
+            <Loader2 size={16} className="animate-spin" /> 加载集成资产中…
+          </div>
+        )}
+
         {!loading && !listError && assets.length === 0 && (
-          <EmptyState
-            title="尚未登记集成数据集"
-            description="点击右上角「登记集成数据集」，即可在弹窗内新建或复用 MySQL / PostgreSQL 源并完成登记，无需离开本页；未配置 dbx 时登记会明确失败，不会生成半套资产。"
-            action={canManage ? (
-              <div className="flex flex-wrap gap-2">
+          <div className="m-5 border-2 border-dashed rounded-xl p-12 text-center text-[var(--color-text-tertiary)] space-y-2">
+            <Table2 size={32} className="mx-auto opacity-30" />
+            <p className="text-sm font-medium">尚未登记集成数据集</p>
+            <p className="text-xs">
+              点击「登记集成数据集」，即可在弹窗内新建或复用 MySQL / PostgreSQL 源并完成登记，无需离开本页；未配置 dbx 时登记会明确失败，不会生成半套资产。
+            </p>
+            {canManage && (
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
                 <Button type="button" variant="outline" size="sm" onClick={() => navigate('/data/pipelines/connections')}>
                   管理数据连接
                 </Button>
@@ -125,57 +145,85 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
                   <Plus size={13} />登记集成数据集
                 </Button>
               </div>
-            ) : undefined}
-          />
+            )}
+          </div>
         )}
 
         {assets.length > 0 && (
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="border-b border-border text-muted-foreground">
+            {/* border-separate：sticky 列在 collapsed 边框模型下横滚时边框不随单元格移动（同目录先例 CuratedView） */}
+            <table className="w-full min-w-[1020px] border-separate border-spacing-0 text-sm">
+              <thead className="bg-card">
                 <tr>
-                  <th className="px-3 py-2 font-medium">资产名称</th>
-                  <th className="px-3 py-2 font-medium">源资源</th>
-                  <th className="px-3 py-2 font-medium">主键</th>
-                  <th className="px-3 py-2 font-medium">访问能力</th>
-                  <th className="px-3 py-2 font-medium">DBX 元数据 / 执行后端</th>
-                  <th className="px-3 py-2 font-medium">数据版本</th>
-                  <th className="px-3 py-2 font-medium">操作</th>
+                  <th className="border-b border-border px-4 py-2.5 text-left font-medium text-muted-foreground text-xs">资产名称</th>
+                  <th className="border-b border-border px-4 py-2.5 text-left font-medium text-muted-foreground text-xs">源资源</th>
+                  <th className="border-b border-border px-4 py-2.5 text-left font-medium text-muted-foreground text-xs">主键</th>
+                  <th className="border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">访问能力</th>
+                  <th className="border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">DBX 元数据 / 执行后端</th>
+                  <th className="border-b border-border px-4 py-2.5 text-left font-medium text-muted-foreground text-xs">数据版本</th>
+                  <th className="whitespace-nowrap border-b border-border px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">最近更新时间</th>
+                  <th className="sticky right-0 z-10 border-b border-l border-border bg-card px-4 py-2.5 text-center font-medium text-muted-foreground text-xs">操作</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border">
-                {assets.map(asset => (
-                  <tr key={asset.id} className={selected?.id === asset.id ? 'bg-brand-soft' : 'hover:bg-muted'}>
-                    <td className="px-3 py-3 font-medium">
-                      {asset.name}
-                      <span className="mt-1 block break-all font-mono text-[10px] text-muted-foreground">{asset.id}</span>
-                    </td>
-                    <td className="px-3 py-3">
-                      {asset.schema_name}.{asset.table_name}
-                      <span className="mt-1 block text-[10px] text-muted-foreground">连接 {asset.connection_id}</span>
-                    </td>
-                    <td className="px-3 py-3">{asset.primary_key.join(', ') || '未声明（禁止更新/删除）'}</td>
-                    <td className="px-3 py-3">
-                      <div className="flex flex-wrap gap-1">
-                        <CapabilityBadge label="读取" enabled={asset.capabilities.read} />
-                        <CapabilityBadge label="写入" enabled={canManage && asset.writable && asset.capabilities.write} />
-                        <CapabilityBadge label="同步" enabled={canManage && asset.capabilities.sync} />
-                      </div>
-                    </td>
-                    <td className="px-3 py-3">
-                      <Badge variant={dbxState(asset).configured && dbxState(asset).available ? 'success' : 'warning'}>{dbxStateLabel(asset)}</Badge>
-                      <span className="mt-1 block text-[10px] text-muted-foreground">{backendsLabel(asset)}</span>
-                    </td>
-                    <td className="px-3 py-3">
-                      {asset.latest_version_id
-                        ? <span className="font-mono text-[11px]">最新版本 {asset.latest_version_id}（封存状态未核验）</span>
-                        : '尚无完整版本'}
-                    </td>
-                    <td className="px-3 py-3">
-                      <Button type="button" variant="outline" size="sm" aria-label={`查看 ${asset.name}`} onClick={() => select(asset.id)}>查看</Button>
-                    </td>
-                  </tr>
-                ))}
+              {/* 分离边框模型下行（tr）边框不渲染，行间分隔改挂在单元格上（等价 divide-y） */}
+              <tbody className="[&>tr:not(:last-child)>td]:border-b [&>tr:not(:last-child)>td]:border-border">
+                {assets.map(asset => {
+                  const assetDbx = dbxState(asset)
+                  const dbxOk = assetDbx.configured && assetDbx.available
+                  return (
+                    <tr key={asset.id} className={`group transition-colors hover:bg-muted ${selected?.id === asset.id ? 'bg-brand-soft' : ''}`}>
+                      <td className="max-w-[240px] px-4 py-3 text-left font-medium text-foreground">
+                        <span className="block truncate" title={asset.name}>{asset.name}</span>
+                        <span className="mt-0.5 block break-all font-mono text-[10px] text-muted-foreground">{asset.id}</span>
+                      </td>
+                      <td className="max-w-[200px] px-4 py-3 text-left text-xs">
+                        <span className="block truncate font-mono" title={`${asset.schema_name}.${asset.table_name}`}>{asset.schema_name}.{asset.table_name}</span>
+                        <span className="mt-0.5 block truncate text-[10px] text-muted-foreground" title={asset.connection_id}>连接 {asset.connection_id}</span>
+                      </td>
+                      <td className="max-w-[160px] px-4 py-3 text-left text-xs text-muted-foreground">
+                        <span className="block truncate" title={asset.primary_key.join(', ')}>
+                          {asset.primary_key.join(', ') || '未声明（禁止更新/删除）'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center justify-center gap-1">
+                          <CapabilityBadge label="读取" enabled={asset.capabilities.read} />
+                          <CapabilityBadge label="写入" enabled={canManage && asset.writable && asset.capabilities.write} />
+                          <CapabilityBadge label="同步" enabled={canManage && asset.capabilities.sync} />
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded border px-1.5 py-0.5 text-xs ${
+                          dbxOk
+                            ? 'bg-[var(--color-success-bg)] text-[var(--color-success)] border-[color-mix(in_srgb,var(--color-success)_35%,transparent)]'
+                            : 'bg-[var(--color-warning-bg)] text-[var(--color-warning)] border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)]'
+                        }`}>
+                          {dbxOk ? <CheckCircle size={12} /> : <AlertTriangle size={12} />}
+                          {dbxStateLabel(asset)}
+                        </span>
+                        <span className="mt-1 block text-[10px] text-muted-foreground">{backendsLabel(asset)}</span>
+                      </td>
+                      <td className="max-w-[200px] px-4 py-3 text-left text-xs text-muted-foreground">
+                        {asset.latest_version_id
+                          ? <span className="block truncate font-mono text-[11px]" title={asset.latest_version_id}>最新版本 {asset.latest_version_id}（封存状态未核验）</span>
+                          : '尚无完整版本'}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-center text-xs tabular-nums text-muted-foreground" title={asset.updated_at ?? asset.created_at}>
+                        {formatUpdatedAt(asset.updated_at ?? asset.created_at)}
+                      </td>
+                      <td className="sticky right-0 z-10 border-l border-border bg-card px-4 py-3 text-center transition-colors group-hover:bg-muted">
+                        <button
+                          type="button"
+                          aria-label={`查看 ${asset.name}`}
+                          onClick={() => select(asset.id)}
+                          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Eye size={12} /> 查看
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -195,7 +243,6 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
           }}
         />
       )}
-      <IntegratedQueryPanel key={`query-${selected?.id || 'unselected'}`} assets={assets} selectedId={selected?.id} />
       {registering && (
         <IntegratedRegisterDialog
           onClose={() => setRegistering(false)}

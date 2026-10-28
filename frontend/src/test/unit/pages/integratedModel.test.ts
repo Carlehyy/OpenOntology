@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { IntegratedAsset, IntegratedRows, IntegratedVersion } from '../../../api/v2/integrated-datasets.ts'
-import type { QueryBinding } from '../../../api/v2/query.ts'
 import {
-  backendsLabel, completenessLabel, consistencyLabel, dbxState, dbxStateDetail, dbxStateLabel,
-  integratedCell, integratedError, integratedQueryRequest, latestVersionStateLabel, parseBindings, parseObject, primaryKeyOf,
-  querySourceConsistencyLabel, receiptNeedsReconciliation, receiptStatusLabel, sourceMutationPayload,
+  backendsLabel, dbxState, dbxStateDetail, dbxStateLabel,
+  integratedCell, integratedError, latestVersionStateLabel, parseObject, primaryKeyOf,
+  receiptNeedsReconciliation, receiptStatusLabel, sourceMutationPayload,
   sourceReadDetail, sourceReadLabel, syncIsActive, syncIsSealed, syncStatusLabel, validateResourceName,
   versionStateLabel,
 } from '../../../pages/data-management/structured/integratedModel.ts'
@@ -62,17 +61,9 @@ describe('integrated source/query presentation contracts', () => {
     assert.match(integratedError({ status: 403 }), /权限/)
     assert.equal(integratedError({ status: 422, detail: [{ loc: ['body', 'name'], msg: 'String should have at least 1 character' }] }), 'body.name: String should have at least 1 character')
   })
-  it('only accepts exact approved binding kinds and ASCII aliases', () => {
-    assert.deepEqual(parseBindings('{"orders":{"kind":"integrated","assetId":"asset-1"},"frozen":{"kind":"dataset","datasetId":"ds","versionId":"v1"}}'), { orders: { kind: 'integrated', assetId: 'asset-1' }, frozen: { kind: 'dataset', datasetId: 'ds', versionId: 'v1' } })
-    for (const input of ['{}', '[]', 'null', '{"源":{"kind":"integrated","assetId":"a"}}', '{"v":{"kind":"dataset","datasetId":"d"}}', '{"v":{"kind":"ontology","ontologyId":"o"}}']) assert.throws(() => parseBindings(input))
+  it('requires a JSON object for record values and params', () => {
+    for (const input of ['[]', 'null', '"text"', '123']) assert.throws(() => parseObject(input, '记录值'), /JSON 对象/)
     assert.throws(() => parseObject('[1]', '参数'), /JSON 对象/)
-  })
-  it('pins memory result storage so a federated SPL read never persists remote source detail', () => {
-    const bindings: Record<string, QueryBinding> = { source: { kind: 'integrated', assetId: 'asset-1' } }
-    const params = { min_amount: 100 }
-    assert.deepEqual(integratedQueryRequest('from source as s | limit 100', bindings, params), {
-      language: 'spl', query: 'from source as s | limit 100', bindings, params, pageSize: 100, resultStorage: 'memory',
-    })
   })
   it('uses exact composite original PK, not displayed row index', () => {
     assert.deepEqual(primaryKeyOf(['租户', 'id'], { id: { $integer: '9007199254740993' }, '租户': '北', extra: false }), { '租户': '北', id: { $integer: '9007199254740993' } })
@@ -125,7 +116,7 @@ describe('integrated source/query presentation contracts', () => {
     assert.match(backendsLabel(configured), /快照 native · 写入 native · 元数据 dbx/)
     assert.match(backendsLabel({ ...configured, backends: undefined }), /可用性见 DBX 状态/)
   })
-  it('labels source reads, query consistency and completeness without inventing success', () => {
+  it('labels source reads and receipts without inventing success', () => {
     const rows: IntegratedRows = {
       rows: [], columns: [],
       source_state: { kind: 'repeatable_read', started_at: '2026-10-24T08:00:00Z', complete: false, limit: 100 } as IntegratedRows['source_state'],
@@ -135,12 +126,6 @@ describe('integrated source/query presentation contracts', () => {
     assert.equal(sourceReadLabel(rows), '最近源读取已核验')
     assert.match(sourceReadDetail(null), /登记不等于当前连通/)
     assert.match(sourceReadDetail(rows), /读取完整性 未完整（预览为有界读取） · 预览最多 100 行，不是总行数/)
-    assert.equal(completenessLabel('complete'), '完整')
-    assert.equal(completenessLabel(undefined), '未核验')
-    assert.equal(consistencyLabel('cross_source_non_atomic'), '跨源非原子快照（各源时点独立）')
-    assert.equal(consistencyLabel('future-value'), 'future-value')
-    assert.equal(querySourceConsistencyLabel({ consistency: 'repeatable_read' }), '源快照（REPEATABLE READ）')
-    assert.equal(querySourceConsistencyLabel({ consistency: 'immutable_version' }), '不可变版本快照')
     assert.equal(receiptNeedsReconciliation({ status: 'unknown' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'pending' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'conflict' }), false)

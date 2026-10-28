@@ -31,22 +31,12 @@ const defaultConnections = [
   { id: 'mongo-source', name: 'MongoDB 隐藏源', kind: 'mongo', status: 'active' },
 ]
 const sourceRow = { values: { id: { $integer: '9007199254740993' }, amount: { $decimal: '123.456789012345678901' }, note: null }, row_token: 'original-row-token' }
-const queryFixture = {
-  queryId: 'query-snapshot-1', schemaVersion: 1,
-  columns: [{ name: 'id', type: 'integer', encoding: 'integer_string', nullable: false }, { name: 'amount', type: 'decimal', encoding: 'decimal_string', nullable: true }, { name: 'note', type: 'string', encoding: 'json', nullable: true }],
-  rows: [{ id: '9007199254740993', amount: '123.456789012345678901', note: null }],
-  sourceStates: [{ alias: 'source', kind: 'integrated', id: 'asset-orders', versionId: null, asOf: instant, consistency: 'repeatable_read', completeness: 'complete' }, { alias: 'frozen', kind: 'dataset', id: 'dataset-frozen', versionId: 'version-frozen', asOf: '2026-10-23T08:00:00Z', consistency: 'immutable_version', completeness: 'complete' }],
-  consistency: 'cross_source_non_atomic', exactness: 'exact_within_scope', countsScope: 'authorized_query_scope_at_source_snapshots',
-  totalRows: 2, resultLimited: false, page: { pageSize: 100, hasMore: true, cursor: 'opaque-next-cursor' },
-  expiresAt: '2026-10-24T08:30:00Z', plan: { strategy: 'bounded_materialization', operators: [], sourceRows: {} },
-}
 
 type MockOptions = {
   role?: 'admin' | 'editor' | 'viewer' | 'custom'
   writable?: boolean
   conflict?: boolean
   unknownMutation?: boolean
-  queryError?: number
   discoveryError?: boolean
   restoreRun?: boolean
   historyError?: boolean
@@ -210,10 +200,6 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       return respond({ id: `mutation-${method}`, status: 'applied', affected_rows: 1, replayed: false })
     }
     if (/\/integrated-datasets\/[^/]+$/.test(path)) return respond(assets.find(asset => asset.id === path.split('/').at(-1)) ?? assets[0])
-    if (path === '/api/v2/query') {
-      if (options.queryError) return fail(options.queryError, { code: options.queryError === 410 ? 'CURSOR_EXPIRED' : 'SPL_PARSE_ERROR', message: options.queryError === 410 ? 'Query snapshot expired' : 'Unexpected token', position: { line: 2, column: 7 } })
-      return respond(body.cursor ? { ...queryFixture, rows: [{ id: '9007199254740994', amount: '0.000000000000000001', note: 'second page' }], page: { pageSize: 100, hasMore: false, cursor: null } } : queryFixture)
-    }
     if (path === '/api/v2/datasets/overview') return respond({ items: [], total: 0 })
     if (path.endsWith('/unread-count')) return respond({ count: 0 })
     return respond([])
@@ -223,8 +209,8 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
 
 const deepLink = '/#/data/structured?tab=integrated&dataset=asset-orders'
 
-test('integrated deep link preserves schema, exact SPL metadata and lossless cursor results', async ({ page }) => {
-  const requests = await mockIntegrated(page)
+test('integrated deep link opens the asset detail and survives reload', async ({ page }) => {
+  await mockIntegrated(page)
   await page.goto(deepLink)
   const detail = page.getByTestId('integrated-asset-detail')
   await expect(detail).toContainText('订单源')
@@ -234,24 +220,27 @@ test('integrated deep link preserves schema, exact SPL metadata and lossless cur
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('v0.6.53 · commit 0137e0cbc8b663da5a17ec424c6d47e4e5570ead')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('快照 native · 写入 native · 元数据 dbx')
   await expect(detail).toContainText('尚无完整版本')
-  await page.getByLabel('数据源绑定 JSON').fill(JSON.stringify({ source: { kind: 'integrated', assetId: 'asset-orders' }, frozen: { kind: 'dataset', datasetId: 'dataset-frozen', versionId: 'version-frozen' } }))
-  await page.getByRole('button', { name: '运行查询', exact: true }).click()
-  await expect(page.getByTestId('query-total-rows')).toHaveText('2')
-  const result = page.getByTestId('integrated-query-result')
-  await expect(result).toContainText('9007199254740993')
-  await expect(result).toContainText('123.456789012345678901')
-  await expect(result).toContainText('NULL')
-  await expect(result).toContainText('跨源非原子快照（各源时点独立）')
-  await expect(result).toContainText('2026-10-23T08:00:00Z')
-  await page.getByRole('button', { name: '下一页结果' }).click()
-  await expect(result).toContainText('9007199254740994')
-  await expect(result).toContainText('当前页 2–2')
-  const queries = requests.filter(request => request.path === '/api/v2/query')
-  expect(queries[0].body).toMatchObject({ language: 'spl', params: {}, pageSize: 100, resultStorage: 'memory', bindings: { source: { kind: 'integrated', assetId: 'asset-orders' }, frozen: { kind: 'dataset', datasetId: 'dataset-frozen', versionId: 'version-frozen' } } })
-  expect(queries[1].body).toEqual({ cursor: 'opaque-next-cursor' })
   await page.reload()
   await expect(page.getByTestId('integrated-asset-detail')).toContainText('订单源')
   await expect(page).toHaveURL(/tab=integrated&dataset=asset-orders/)
+})
+
+test('integrated tab lists registered assets in the lake table without the SPL workbench', async ({ page }) => {
+  await mockIntegrated(page)
+  await page.goto('/#/data/structured?tab=integrated')
+  await expect(page.getByTestId('integrated-datasets-view')).toBeVisible()
+  await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toBeEnabled()
+  // SPL 查询工作台已从本页下线：登记与查看是本页仅有的两个动作。
+  await expect(page.getByTestId('integrated-query-panel')).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'SPL 查询工作台' })).toHaveCount(0)
+  const row = page.getByRole('row').filter({ hasText: '订单源' })
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('public.orders')
+  await expect(row).toContainText('连接 pg-source')
+  await expect(row).toContainText('尚无完整版本')
+  await row.getByRole('button', { name: '查看 订单源' }).click()
+  await expect(page.getByTestId('integrated-asset-detail')).toContainText('订单源')
+  await expect(page).toHaveURL(/dataset=asset-orders/)
 })
 
 test('controlled source CRUD uses original PK, row token and distinct secure idempotency keys', async ({ page }) => {
@@ -381,7 +370,7 @@ for (const role of ['viewer', 'custom'] as const) {
     await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: '加载源数据', exact: true }).click()
     await expect(page.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeDisabled()
-    await expect(page.getByRole('button', { name: '运行查询', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: '查看 订单源' })).toBeEnabled()
   })
 }
 
@@ -807,18 +796,6 @@ test('persisted starting state is active and continues polling to sealed', async
   expect(requests.filter(request => request.path.endsWith('/sync') && request.method === 'POST')).toHaveLength(0)
 })
 
-for (const status of [400, 410]) {
-  test(`structured query ${status} remains visible with source position and rerun guidance`, async ({ page }) => {
-    await mockIntegrated(page, { queryError: status })
-    await page.goto(deepLink)
-    await page.getByRole('button', { name: '运行查询', exact: true }).click()
-    await expect(page.getByTestId('integrated-query-error')).toContainText(status === 410 ? 'CURSOR_EXPIRED' : 'SPL_PARSE_ERROR')
-    await expect(page.getByTestId('integrated-query-error')).toContainText('第 2 行，第 7 列')
-    await expect(page.getByTestId('integrated-query-error')).toContainText('重新运行查询')
-    await expect(page.getByTestId('integrated-query-result')).toHaveCount(0)
-  })
-}
-
 test('DBX 503 is an explicit discovery error rather than invented source success', async ({ page }) => {
   await mockIntegrated(page, { role: 'editor', connections: [], discoveryError: true })
   await page.goto('/#/data/structured?tab=integrated')
@@ -847,7 +824,7 @@ test('DBX unavailability is explicit on the page instead of a configured success
   await expect(banner).toContainText('不会用 native 反射冒充发现结果')
 })
 
-test('non-owner editor is read-only for this asset while sync and SPL remain available', async ({ page }) => {
+test('non-owner editor is read-only for this asset while sync remains available', async ({ page }) => {
   await mockIntegrated(page, { role: 'editor', assetWrite: false })
   await page.goto(deepLink)
   const detail = page.getByTestId('integrated-asset-detail')
@@ -857,7 +834,6 @@ test('non-owner editor is read-only for this asset while sync and SPL remain ava
   await detail.getByRole('button', { name: '加载源数据', exact: true }).click()
   await expect(detail.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeDisabled()
   await expect(detail.getByRole('button', { name: '删除源记录 1', exact: true })).toBeDisabled()
-  await expect(page.getByRole('button', { name: '运行查询', exact: true })).toBeEnabled()
   await expect(detail).toContainText('写入未启用或当前角色无该资产写权限')
 })
 

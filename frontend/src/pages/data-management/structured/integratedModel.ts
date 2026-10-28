@@ -1,5 +1,4 @@
 import type { IntegratedAsset, IntegratedRows, IntegratedSyncRun, IntegratedVersion } from '@/api/v2/integrated-datasets'
-import type { QueryBinding, QueryRequest, QuerySourceState } from '@/api/v2/query'
 
 /** SQL NULL is null; json_text cells are opaque strings, including the JSON literal 'null'. */
 export function integratedCell(value: unknown): string {
@@ -50,27 +49,6 @@ export function parseObject(text: string, label: string): Record<string, unknown
   return parsed as Record<string, unknown>
 }
 
-export function parseBindings(text: string): Record<string, QueryBinding> {
-  const object = parseObject(text, '绑定')
-  if (Object.keys(object).length === 0) throw new Error('请至少绑定一个数据源')
-  for (const [alias, value] of Object.entries(object)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new Error(`别名 ${alias} 只能包含 ASCII 字母、数字和下划线，且不能以数字开头`)
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`绑定 ${alias} 必须是对象`)
-    const v = value as Record<string, unknown>
-    if (v.kind === 'integrated' && typeof v.assetId === 'string' && v.assetId.trim()) continue
-    if (v.kind === 'dataset' && typeof v.datasetId === 'string' && v.datasetId.trim() && typeof v.versionId === 'string' && v.versionId.trim()) continue
-    throw new Error(`绑定 ${alias} 需要 integrated + assetId，或 dataset + datasetId + versionId`)
-  }
-  return object as Record<string, QueryBinding>
-}
-
-/** One SPL workbench run request, extracted pure so its wire contract stays unit-testable.
- * Storage is pinned to memory: the backend otherwise defaults to persisted and would copy
- * remote source detail into platform UnifiedQueryRow tables as a query side effect. */
-export function integratedQueryRequest(query: string, bindings: Record<string, QueryBinding>, params: Record<string, unknown>): QueryRequest {
-  return { language: 'spl', query, bindings, params, pageSize: 100, resultStorage: 'memory' }
-}
-
 /** The backend rejects dots/NUL in either physical identifier; check before requesting. */
 export function validateResourceName(schema: string, table: string): string {
   if (!schema.trim() || !table.trim()) return '请填写数据库 Schema 和源表名称'
@@ -95,12 +73,6 @@ export function sourceMutationPayload(primaryKey: string[], current: Record<stri
   if (original && primaryKey.some(name => JSON.stringify(current[name]) !== JSON.stringify(original[name]))) throw new Error('不能修改源记录主键')
   const values = Object.fromEntries(Object.entries(current).filter(([name]) => !primaryKey.includes(name)))
   return { key, values }
-}
-
-export const CONSISTENCY_LABELS: Record<string, string> = {
-  single_source_snapshot: '单源一致快照',
-  cross_source_non_atomic: '跨源非原子快照（各源时点独立）',
-  immutable_versions: '不可变版本快照',
 }
 
 export const SYNC_STATUS_LABELS: Record<string, string> = {
@@ -136,19 +108,6 @@ export function latestVersionStateLabel(asset: Pick<IntegratedAsset, 'latest_ver
   const version = versions.find(item => item.id === asset.latest_version_id)
   if (!version) return `最新版本 ${asset.latest_version_id}（封存状态未核验）`
   return `最新版本 ${version.id} · ${versionStateLabel(version)}`
-}
-
-export function consistencyLabel(value: string | null | undefined): string {
-  return value ? CONSISTENCY_LABELS[value] ?? value : '未核验'
-}
-
-export function completenessLabel(value: string | null | undefined): string {
-  if (value === 'complete') return '完整'
-  return value || '未核验'
-}
-
-export function querySourceConsistencyLabel(state: Pick<QuerySourceState, 'consistency'>): string {
-  return state.consistency === 'immutable_version' ? '不可变版本快照' : state.consistency === 'repeatable_read' ? '源快照（REPEATABLE READ）' : consistencyLabel(state.consistency)
 }
 
 /** A successful preview proves the source was readable at that instant, not total row count. */

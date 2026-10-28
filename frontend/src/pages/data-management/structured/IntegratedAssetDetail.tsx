@@ -421,7 +421,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
 
       {!canWrite && (
         <p className="text-xs text-muted-foreground">
-          写入未启用或当前角色无该资产写权限；只读查询仍可用。仅资产 owner 或管理员可写入，viewer 只读。
+          写入未启用或当前角色无该资产写权限；源数据直读与同步仍可用。仅资产 owner 或管理员可写入，viewer 只读。
         </p>
       )}
       {error && <Alert variant="danger" role="alert">{error}</Alert>}
@@ -480,7 +480,6 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
         <div className="space-y-2" data-testid="integrated-source-rows">
           <p className="text-xs text-muted-foreground">
             源直读预览：最多 {rows.limit ?? 100} 行，不是总行数。读取时点 {rows.source_state.started_at} · 快照模式 {rows.source_state.kind}。
-            全范围精确统计请用 SPL 查询。
           </p>
           <Table<IntegratedRow>
             size="small"
