@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { agentApi, type DynamicSentinel } from '@/api/agent'
 import { apiClientV2 } from '@/api/client'
-import { saveCanvasLayout } from '@/palantir-graph/api/formalApi'
+import { saveCanvasLayout, saveCanvasLayoutKeepAlive } from '@/palantir-graph/api/formalApi'
 import { useAuthStore } from '@/stores/authStore'
 import BusinessModelDialog from './BusinessModelDialog'
 import SentinelDetailPanel from './SentinelDetailPanel'
@@ -673,6 +673,23 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
       void flushLayout()
     }
   }, [flushLayout])
+
+  // 卸载兜底：刷新/关闭页面时 React 不执行卸载清理，visibilitychange 的
+  // 异步 flush 也会随文档销毁被浏览器中止——3 秒防抖窗口内（含在途批次）
+  // 的坐标必须经 keepalive 请求才能送达服务端，否则用户看到「自动保存」
+  // 提示后刷新，最后一批拖拽位置会静默丢失。与超级助手草稿的 pagehide
+  // 兜底同型（那边落 localStorage 无需 keepalive，这里目标是服务端）。
+  useEffect(() => {
+    const onPageHide = () => {
+      if (saveTimer.current !== null) window.clearTimeout(saveTimer.current)
+      const batch = { ...inFlightPositions.current, ...pendingPositions.current }
+      if (Object.keys(batch).length === 0) return
+      pendingPositions.current = {}
+      saveCanvasLayoutKeepAlive(ontologyId, batch, workspace.versionId)
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [ontologyId, workspace.versionId])
 
   // Esc 关闭画布内浮动面板（节点/关系/哨兵）；焦点在输入框或存在弹层/候选框时，
   // 先让位给它们自身的 Esc 语义（如搜索框收起候选、选择器关闭）。函数高亮是

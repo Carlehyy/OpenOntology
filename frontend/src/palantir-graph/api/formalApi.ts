@@ -199,6 +199,33 @@ export async function saveCanvasLayout(
   });
 }
 
+/**
+ * 页面卸载兜底：与 saveCanvasLayout 同契约，但走 fetch keepalive。
+ * pagehide 时页面上的普通异步请求（axios/未标记 keepalive 的 fetch）会被
+ * 浏览器直接中止，防抖窗口内待保存的布局坐标因此丢失；keepalive 请求
+ * 在文档销毁后仍保证送达（坐标批次远低于 64KB 上限）。仅用于卸载兜底：
+ * 响应无人消费，失败静默——正常保存路径仍走 saveCanvasLayout。
+ */
+export function saveCanvasLayoutKeepAlive(
+  id: string,
+  positions: Record<string, { x: number; y: number }>,
+  versionId?: string | null,
+): void {
+  const injected = typeof window !== 'undefined'
+    ? (window as Window & { __API_BASE_URL__?: string }).__API_BASE_URL__ || ''
+    : ''
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null
+  void fetch(`${injected}/api/v2/ontologies/${id}/layout`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ ...(versionId ? { versionId } : {}), positions }),
+    keepalive: true,
+  }).catch(() => { /* 页面已（正在）卸载，响应与重试都无处安放 */ })
+}
+
 // ============ 增量保存 (delta PATCH) ============
 export type DeltaKind = 'objectTypes' | 'linkTypes' | 'actions' | 'functions' | 'instances' | 'linkInstances';
 

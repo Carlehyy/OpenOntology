@@ -788,3 +788,55 @@ test('viewer 只读：节点不可拖拽、不发起保存，状态条如实提�
   expect(after.y).toBeCloseTo(before.y, 1)
   await expect(status).toContainText('只读模式，不可调整布局')
 })
+
+test('拖拽后在 3 秒防抖倒计时内刷新：pagehide 以 keepalive 兜底发出待保存坐标', async ({ page }) => {
+  // 卸载期间的 keepalive fetch 由浏览器网络服务直接发出，Playwright 路由
+  // （CDP Fetch）观测不到；页面侧 fetch 侦听器把调用记录写进 localStorage，
+  // 跨刷新读取断言。真实送达由部署后的真实环境 E2E 验证。
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window)
+    window.fetch = ((input, init) => {
+      const url = typeof input === 'string' ? input : String((input as URL).toString())
+      if (init?.keepalive === true && url.includes('/layout')) {
+        const previous = JSON.parse(localStorage.getItem('keepalive-layout-probe') || '[]')
+        previous.push({ url, body: JSON.parse(String(init.body)) })
+        localStorage.setItem('keepalive-layout-probe', JSON.stringify(previous))
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof window.fetch
+  })
+  const { layoutCalls } = await mockOntologyStructure(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/ontologies/' + ontologyId, { waitUntil: 'domcontentloaded' })
+  await page.getByRole('button', { name: '本体结构', exact: true }).click()
+  const node = page.getByTestId('structure-node-object')
+  await expect(node).toBeVisible()
+  await page.waitForTimeout(750)
+
+  const before = await readFlowPosition(node)
+  const box = await node.boundingBox()
+  expect(box).toBeTruthy()
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box!.x + box!.width / 2 + 90, box!.y + box!.height / 2 + 60, { steps: 8 })
+  await page.mouse.up()
+  const dragged = await readFlowPosition(node)
+  expect(Math.abs(dragged.x - before.x)).toBeGreaterThan(10)
+  // 回归点：倒计时仍在进行，防抖 PUT 尚未发出
+  expect(layoutCalls.length).toBe(0)
+
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  const probes = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('keepalive-layout-probe') || '[]') as Array<{
+      url: string
+      body: { versionId?: string; positions: Record<string, { x: number; y: number }> }
+    }>)
+  expect(probes.length).toBeGreaterThanOrEqual(1)
+  const probe = probes[probes.length - 1]
+  expect(probe.url).toContain(`/api/v2/ontologies/${ontologyId}/layout`)
+  expect(probe.body.versionId).toBe('release-1')
+  const saved = probe.body.positions['l1:object-order']
+  expect(saved).toBeTruthy()
+  expect(saved.x).toBeCloseTo(dragged.x, 1)
+  expect(saved.y).toBeCloseTo(dragged.y, 1)
+})
