@@ -678,9 +678,20 @@ test('reuse mode with zero connections points back to the inline source form', a
   await dialog.getByRole('button', { name: '使用已有连接' }).click()
   await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('没有可复用的 MySQL / PostgreSQL 连接')
   await expect(dialog.getByRole('combobox', { name: '已有连接' })).toBeDisabled()
-  await expect(dialog).not.toContainText('前往数据连接')
+  await expect(dialog.getByRole('button', { name: '管理数据连接', exact: true })).toBeVisible()
   await dialog.getByRole('button', { name: '新建数据源' }).click()
   await expect(dialog.getByLabel('源名称', { exact: true })).toBeVisible()
+})
+
+test('empty connection list guides managers to the connection management page', async ({ page }) => {
+  await mockIntegrated(page, { role: 'editor', connections: [], menuKeys: ['data.structured', 'data.pipelines'] })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: '使用已有连接', exact: true }).click()
+  await dialog.getByRole('button', { name: '管理数据连接', exact: true }).click()
+  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
+  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
 })
 
 test('connection list failure never blocks inline registration', async ({ page }) => {
@@ -698,20 +709,18 @@ test('connection list failure never blocks inline registration', async ({ page }
   expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(1)
 })
 
-test('empty integrated tab registers inline without leaving the module', async ({ page }) => {
-  await mockIntegrated(page, { noAssets: true })
+test('empty integrated tab offers inline registration and connection management', async ({ page }) => {
+  await mockIntegrated(page, { role: 'editor', noAssets: true, menuKeys: ['data.structured', 'data.pipelines'] })
   await page.goto('/#/data/structured?tab=integrated')
-  await expect(page.getByRole('button', { name: '前往数据连接', exact: true })).toHaveCount(0)
-  await page.getByRole('button', { name: '登记集成数据集', exact: true }).first().click()
-  await expect(page.getByRole('dialog')).toBeVisible()
-  await expect(page).toHaveURL(/#\/data\/structured\?tab=integrated/)
-  await expect(page).not.toHaveURL(/pipelines/)
+  await page.getByRole('button', { name: '管理数据连接', exact: true }).click()
+  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
+  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
 })
 
-test('viewer gets no register entry on the empty integrated tab', async ({ page }) => {
+test('viewer gets no register or connection-management entry on the empty integrated tab', async ({ page }) => {
   await mockIntegrated(page, { role: 'viewer', noAssets: true })
   await page.goto('/#/data/structured?tab=integrated')
-  await expect(page.getByRole('button', { name: '前往数据连接', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '管理数据连接', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toBeDisabled()
 })
 

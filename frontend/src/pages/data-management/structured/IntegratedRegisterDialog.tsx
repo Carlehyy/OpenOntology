@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Database, KeyRound, Loader2 } from 'lucide-react'
 import {
   integratedDatasetsApi,
@@ -65,6 +66,7 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
   onClose: () => void
   onRegistered: (asset: IntegratedAsset) => void
 }) {
+  const navigate = useNavigate()
   const [connections, setConnections] = useState<SourceConnection[]>([])
   const [connectionsLoading, setConnectionsLoading] = useState(true)
   const [connectionsError, setConnectionsError] = useState('')
@@ -437,9 +439,21 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
                   </Alert>
                 )}
                 {!connectionsLoading && !connectionsError && connections.length === 0 && (
-                  <p className="text-xs text-muted-foreground" data-testid="integrated-connection-empty-hint">
-                    没有可复用的 MySQL / PostgreSQL 连接；请切回「新建数据源」在下方直接填写源参数。
-                  </p>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="integrated-connection-empty-hint">
+                    <span>没有可复用的 MySQL / PostgreSQL 连接；请切回「新建数据源」在下方直接填写源参数。</span>
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto px-1 py-0"
+                      onClick={() => {
+                        onClose()
+                        navigate('/data/pipelines/connections')
+                      }}
+                    >
+                      管理数据连接
+                    </Button>
+                  </div>
                 )}
               </div>
             )}
