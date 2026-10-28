@@ -92,7 +92,7 @@ def normalize_menu_keys(menu_keys: list[str] | tuple[str, ...]) -> list[str]:
 def get_role_menu_keys(db: Session, role: str) -> list[str]:
     if role == "admin":
         return list(ALL_MENU_KEYS)
-    record = db.query(RoleMenuPermission).filter(
+    record = db.query(RoleMenuPermission).populate_existing().filter(
         RoleMenuPermission.role == role,
     ).first()
     if record is None:

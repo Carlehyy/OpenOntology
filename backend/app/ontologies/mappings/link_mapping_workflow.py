@@ -39,23 +39,29 @@ def create_link_mapping(
     body: Any,
     *,
     rules: LinkMappingRules,
+    user: Any = None,
 ) -> dict:
     from app.data_channel.datasets.lake_gate import split_pk
     from app.models.ontology_formal import LinkType
     from app.ontologies.mappings.models import OntologyLinkMapping, OntologyMapping
     from app.data_channel.datasets.service import DatasetService
+    from app.ontologies.mappings.remote_binding import (
+        create_remote_link_definition,
+        normalize_binding_mode,
+        reject_local_link_on_remote_dataset,
+    )
 
     rules.require_draft_ontology(db, ontology_id)
     rules.reject_reserved_mapping_keys(body.field_mapping, "field_mapping")
+    if normalize_binding_mode(getattr(body, "binding_mode", None)) == "remote":
+        # 远程关系定义：仅验证冻结契约（两端远程绑定 + 端点键），不物化。
+        return create_remote_link_definition(db, ontology_id, body)
+    dataset_ids = {
+        body.src_dataset_id, body.tgt_dataset_id, body.edge_dataset_id,
+    }
+    reject_local_link_on_remote_dataset(db, ontology_id, dataset_ids)
     if body.auto_apply_on_version:
-        rules.validate_link_version_automation_policy(
-            db,
-            {
-                body.src_dataset_id,
-                body.tgt_dataset_id,
-                body.edge_dataset_id,
-            },
-        )
+        rules.validate_link_version_automation_policy(db, dataset_ids)
     link_type = None
 
     src_pk = split_pk(
@@ -404,6 +410,18 @@ def update_link_mapping_automation(
     )
     if mapping is None:
         raise HTTPException(404, "Link mapping not found")
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        link_mapping_binding_mode,
+    )
+    if link_mapping_binding_mode(mapping.field_mapping) == BINDING_MODE_REMOTE:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "remote_auto_apply_forbidden",
+                "message": "远程绑定不参与本地自动灌入，不能开启自动触发订阅",
+            },
+        )
     if body.auto_apply_on_version:
         rules.validate_link_version_automation_policy(
             db,

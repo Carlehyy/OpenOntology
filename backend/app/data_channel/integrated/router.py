@@ -24,7 +24,9 @@ def register_asset(body: RegisterAsset, db: Session = Depends(get_db), user=Depe
 # Declare the static connection path before the generic asset path.
 @router.get("/connections/{connection_id}/resources")
 def resources(connection_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    authorize(db, user)
+    # Topology discovery can expose every schema/table name and therefore is a
+    # management operation, unlike reading already-registered asset rows.
+    authorize(db, user, write=True)
     connection = service._connection(db, connection_id)
     return {"items": service.dbx().list_resources(connection)}
 
@@ -43,6 +45,13 @@ def schema(asset_id: str, db: Session = Depends(get_db), user=Depends(get_curren
 @router.post("/{asset_id}/refresh-schema")
 def refresh_schema(asset_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     return service.refresh_schema(db, user, asset_id)
+
+
+# 受控注销：零历史 / 零映射消费引用 / 零任务才允许，否则结构化 409；
+# 历史与审计记录（版本/同步运行/写入回执，任何状态）一律不删。
+@router.delete("/{asset_id}", status_code=204)
+def decommission_asset(asset_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    service.decommission_asset(db, user, asset_id)
 
 
 @router.get("/{asset_id}/rows")

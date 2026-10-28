@@ -374,6 +374,137 @@ class TrialProjectionReader:
         return errors
 
 
+def _verify_remote_object_mappings(
+        db, run, snap, errors, warnings, object_types, *,
+        sample_limit: int) -> tuple[dict, dict, dict]:
+    """Remote branch of the isolated trial: verify metadata, never materialize.
+
+    Returns ``(remote_endpoint, remote_checks, remote_datasets)`` where
+    ``remote_endpoint`` maps ``(datasetId, objectTypeId)`` to the frozen
+    descriptor.  Sample row values are consumed in-memory only; the durable
+    check record carries counts/fingerprints, never values.
+    """
+    from datetime import datetime, timezone
+
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        RemoteBindingError,
+        REMOTE_SAMPLE_ROW_LIMIT,
+        remote_field_mapping_errors,
+        snapshot_entry_binding,
+        verify_remote_binding,
+    )
+    from app.ontologies.mappings.formal_projection import _coerce_props_to_type
+
+    user = None
+    from app.auth.models import User
+    user = db.query(User).filter(User.id == run.created_by).first()
+
+    remote_endpoint: dict[tuple[str, str], dict] = {}
+    remote_checks: dict[str, dict] = {}
+    remote_datasets: set[str] = set()
+
+    for raw in snap["mappings"]:
+        if not isinstance(raw, dict):
+            continue
+        mapping_id = str(raw.get("id") or "")
+        entity_class = str(raw.get("entityClass") or "")
+        try:
+            mode, descriptor = snapshot_entry_binding(raw)
+        except RemoteBindingError as exc:
+            errors.append(dict(code=exc.code, kind="mapping", id=mapping_id,
+                               name=entity_class,
+                               message=f"远程绑定描述符非法：{exc.message}",
+                               **exc.context))
+            continue
+        if mode != BINDING_MODE_REMOTE or descriptor is None:
+            continue
+        target = None
+        for candidate in object_types.values():
+            if (str(raw.get("targetObjectTypeId") or "") == str(candidate.get("id"))
+                    or entity_class in (str(candidate.get("name") or ""),
+                                        str(candidate.get("displayName") or ""))):
+                target = candidate
+                break
+        if target is None:
+            errors.append(dict(code="mapping_object_type_not_found", kind="mapping",
+                               id=mapping_id, name=entity_class,
+                               message="远程 Mapping 绑定的 ObjectType 不存在"))
+            continue
+        dataset_id = str(raw.get("curatedDatasetId") or "")
+        field_map = raw.get("fieldMapping") or {}
+        field_map = field_map if isinstance(field_map, dict) else {}
+        pk = str(field_map.get("__primary_key__") or "")
+        structural = remote_field_mapping_errors(
+            field_map, descriptor, kind="mapping",
+            item_id=mapping_id, name=entity_class)
+        errors.extend(structural)
+        if user is None:
+            errors.append(dict(code="remote_user_missing", kind="mapping",
+                               id=mapping_id, name=entity_class,
+                               message="远程绑定验证需要试跑发起人账号存在"))
+            continue
+        try:
+            verification = verify_remote_binding(
+                db, user, descriptor,
+                sample=True,
+                sample_limit=min(sample_limit, REMOTE_SAMPLE_ROW_LIMIT) or
+                REMOTE_SAMPLE_ROW_LIMIT)
+        except RemoteBindingError as exc:
+            errors.append(dict(code=exc.code, kind="mapping", id=mapping_id,
+                               name=entity_class,
+                               message=f"远程绑定验证失败：{exc.message}",
+                               **exc.context))
+            continue
+        # 受控读仅在内存中验证类型兼容；失败只记属性名，绝不落样本值。
+        sample_type_errors: list[str] = []
+        for row in verification["sampleRows"]:
+            props = {
+                str(name): row[column]
+                for column, name in field_map.items()
+                if not str(column).startswith("__") and column in row
+            }
+            if pk and not all(row.get(column) not in (None, "")
+                              for column in pk.split(",") if column):
+                sample_type_errors.append("__primary_key__")
+                break
+            try:
+                _coerce_props_to_type(props, list(target.get("properties") or []))
+            except ValueError:
+                sample_type_errors.extend(sorted(props))
+                break
+        if sample_type_errors:
+            errors.append(dict(
+                code="remote_sample_type_mismatch", kind="mapping",
+                id=mapping_id, name=entity_class,
+                message="远程受控读样本无法按声明的属性类型/主键契约解读"
+                        "（仅记录属性名，不落样本值）",
+                fields=sorted(set(sample_type_errors))))
+            continue
+        if dataset_id:
+            remote_datasets.add(dataset_id)
+            remote_endpoint[(dataset_id, str(target.get("id")))] = descriptor
+        remote_checks[mapping_id] = {
+            "kind": "mapping",
+            "status": "verified",
+            "materialized": False,
+            "datasetId": dataset_id,
+            "assetId": descriptor.get("assetId"),
+            "schemaFingerprint": descriptor.get("schemaFingerprint"),
+            "sampleRowCount": verification["sampleRowCount"],
+            "verifiedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        # 显式声明“未物化、非全量质量”：远程验证不冒充本地试跑口径。
+        warnings.append(dict(
+            code="remote_binding_not_materialized", kind="mapping",
+            id=mapping_id, name=entity_class,
+            message=(
+                f"Mapping「{entity_class}」为远程绑定：试跑仅完成远程元数据与"
+                f"受控读验证（{verification['sampleRowCount']} 行样本，未落值），"
+                "未做本地物化，不计入对象/关系计数，不等价于全量数据质量验证")))
+    return remote_endpoint, remote_checks, remote_datasets
+
+
 def persist_trial_projection(db, run, snap, errors, warnings, *, service):
     """Read every governed source row into authoritative isolated SQL tables."""
     from app.ontologies.mappings.source_batches import prepare_mapping_source
@@ -384,6 +515,12 @@ def persist_trial_projection(db, run, snap, errors, warnings, *, service):
     )
     from app.ontologies.versions.models import OntologyTrialObject, OntologyTrialLink
     from app.ontologies.mappings.mapping_service import MappingService, MappingSourceError
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        RemoteBindingError,
+        snapshot_entry_binding,
+        snapshot_link_binding_mode,
+    )
 
     object_types = {str(item.get("id")): item for item in snap["objectTypes"]}
     link_types = {str(item.get("id")): item for item in snap["linkTypes"]}
@@ -393,6 +530,11 @@ def persist_trial_projection(db, run, snap, errors, warnings, *, service):
     object_samples, link_samples = [], []
     objects = db.query(OntologyTrialObject).filter_by(trial_run_id=run.id)
     links = db.query(OntologyTrialLink).filter_by(trial_run_id=run.id)
+
+    remote_endpoint, remote_checks, remote_datasets = (
+        _verify_remote_object_mappings(
+            db, run, snap, errors, warnings, object_types,
+            sample_limit=20))
 
     def pin(dataset_id, dataset, source):
         version = source.version
@@ -427,6 +569,22 @@ def persist_trial_projection(db, run, snap, errors, warnings, *, service):
         for raw in snap["mappings"]:
             mapping_id = str(raw.get("id") or "")
             dataset_id = str(raw.get("curatedDatasetId") or "")
+            try:
+                entry_mode, _ = snapshot_entry_binding(raw)
+            except RemoteBindingError as exc:
+                errors.append(dict(code=exc.code, kind="mapping", id=mapping_id,
+                                   name=raw.get("entityClass") or "",
+                                   message=f"远程绑定描述符非法：{exc.message}",
+                                   **exc.context))
+                continue
+            if entry_mode == BINDING_MODE_REMOTE:
+                # 远程绑定已在 _verify_remote_object_mappings 验证，
+                # 不读取本地数据版本、不产生隔离实例。
+                remote_target = service._object_type_for_mapping(
+                    raw, object_types)
+                if remote_target is not None:
+                    mapped_types.add(str(remote_target.get("id")))
+                continue
             target = service._object_type_for_mapping(raw, object_types)
             if target is None:
                 errors.append(dict(code="mapping_object_type_not_found", kind="mapping", id=mapping_id,
@@ -526,6 +684,84 @@ def persist_trial_projection(db, run, snap, errors, warnings, *, service):
             link_type = link_types.get(link_type_id)
             relation_type = str(raw.get("relationType") or (link_type or {}).get("name") or "")
             mapping_id = str(raw.get("id") or "")
+            try:
+                link_mode = snapshot_link_binding_mode(raw)
+            except RemoteBindingError as exc:
+                errors.append(dict(code=exc.code, kind="linkMapping",
+                                   id=mapping_id, name=relation_type,
+                                   message=f"远程关系绑定模式非法：{exc.message}",
+                                   **exc.context))
+                continue
+            if link_mode == BINDING_MODE_REMOTE:
+                if link_type is None:
+                    errors.append(dict(code="link_mapping_type_not_found",
+                                       kind="linkMapping", id=mapping_id,
+                                       name=relation_type,
+                                       message="远程 LinkMapping 绑定的 LinkType 不存在"))
+                    continue
+                if raw.get("edgeDatasetId"):
+                    errors.append(dict(code="remote_link_edge_forbidden",
+                                       kind="linkMapping", id=mapping_id,
+                                       name=relation_type,
+                                       message="远程关系定义暂不支持连接表（胖边）"))
+                    continue
+                endpoint_ok = True
+                for role, dataset_field, key_field, type_field in (
+                        ("source", "srcDatasetId", "srcKey", "sourceObjectTypeId"),
+                        ("target", "tgtDatasetId", "tgtKey", "targetObjectTypeId")):
+                    endpoint = remote_endpoint.get(
+                        (str(raw.get(dataset_field) or ""),
+                         str(link_type.get(type_field) or "")))
+                    if endpoint is None:
+                        errors.append(dict(
+                            code="remote_link_endpoint_mapping_required",
+                            kind="linkMapping", id=mapping_id, name=relation_type,
+                            message=f"远程关系 {role} 数据集未被匹配类型的远程对象映射绑定"))
+                        endpoint_ok = False
+                        continue
+                    columns = {
+                        str(column.get("name"))
+                        for column in endpoint.get("columns") or []
+                        if isinstance(column, dict)
+                    }
+                    key = str(raw.get(key_field) or "")
+                    if not key or key not in columns:
+                        errors.append(dict(
+                            code="remote_link_key_missing", kind="linkMapping",
+                            id=mapping_id, name=relation_type,
+                            message=f"远程关系 {role} 端键不在冻结列清单中"))
+                        endpoint_ok = False
+                if endpoint_ok:
+                    remote_checks[mapping_id] = {
+                        "kind": "linkMapping",
+                        "status": "verified",
+                        "materialized": False,
+                        "srcDatasetId": str(raw.get("srcDatasetId") or ""),
+                        "tgtDatasetId": str(raw.get("tgtDatasetId") or ""),
+                        "srcKey": str(raw.get("srcKey") or ""),
+                        "tgtKey": str(raw.get("tgtKey") or ""),
+                    }
+                    warnings.append(dict(
+                        code="remote_binding_not_materialized", kind="linkMapping",
+                        id=mapping_id, name=relation_type,
+                        message=(
+                            f"LinkMapping「{relation_type}」为远程关系定义："
+                            "试跑仅验证冻结端点契约，未物化边实例，"
+                            "不计入关系计数")))
+                continue
+            remote_refs = [
+                field for field in ("srcDatasetId", "tgtDatasetId", "edgeDatasetId")
+                if str(raw.get(field) or "") in remote_datasets
+            ]
+            if remote_refs:
+                errors.append(dict(
+                    code="link_dataset_remote_bound", kind="linkMapping",
+                    id=mapping_id, name=relation_type,
+                    message=(
+                        f"LinkMapping「{relation_type}」引用远程绑定数据集"
+                        f"（{remote_refs}），本地关系物化不可用；"
+                        "请改为远程关系定义")))
+                continue
             if link_type is None:
                 errors.append(dict(code="link_mapping_type_not_found", kind="linkMapping", id=mapping_id,
                                    name=relation_type, message="LinkMapping 绑定的 LinkType 不存在"))
@@ -607,4 +843,5 @@ def persist_trial_projection(db, run, snap, errors, warnings, *, service):
                 errors.append(dict(code="link_mapping_source_unavailable", kind="linkMapping", id=mapping_id,
                                    name=relation_type, message=str(exc)))
     return dict(objects=objects, links=links, counts=counts, pinned=pinned,
-                samples=dict(objects=object_samples, links=link_samples))
+                samples=dict(objects=object_samples, links=link_samples),
+                remote=remote_checks)

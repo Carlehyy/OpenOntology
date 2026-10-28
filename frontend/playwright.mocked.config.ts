@@ -8,8 +8,31 @@ process.env.VITE_API_PROXY_TARGET = 'http://127.0.0.1:9'
 process.env.PLAYWRIGHT_API_URL = 'http://127.0.0.1:9'
 process.env.E2E_API_BASE = 'http://127.0.0.1:9'
 
+// palantir-graph.css @imports Google Fonts / Fontshare. Real CDN round trips
+// hang intermittently and stall the page load event. Keep this suite hermetic
+// by resolving those hosts to localhost: the browser fails fast, app CSS just
+// falls back to local fonts. No spec, product CSS or timeout is touched.
+// Note: one MAP rule per host — comma-joined host lists are silently ignored
+// by the bundled Chromium.
+const fontCdnHostRules = [
+  'fonts.googleapis.com',
+  'fonts.gstatic.com',
+  'api.fontshare.com',
+  'cdn.fontshare.com',
+].map(host => `MAP ${host} 127.0.0.1`)
+
 export default defineConfig({
   ...baseConfig,
+  use: {
+    ...baseConfig.use,
+    launchOptions: {
+      ...baseConfig.use.launchOptions,
+      args: [
+        ...(baseConfig.use.launchOptions?.args ?? []),
+        `--host-resolver-rules=${fontCdnHostRules.join(',')}`,
+      ],
+    },
+  },
   testMatch: [
     '**/agent_chat_resume.spec.ts',
     '**/agent_composer_enter.spec.ts',
@@ -71,6 +94,7 @@ export default defineConfig({
     '**/pipeline_list_page.spec.ts',
     '**/profile_modal.spec.ts',
     '**/python_script_page.spec.ts',
+    '**/remote_binding_workspace.spec.ts',
     '**/scenes.spec.ts',
     '**/sentinel_firing_delta.spec.ts',
     '**/sentinel_panel_loading.spec.ts',

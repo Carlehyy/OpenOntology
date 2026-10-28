@@ -305,16 +305,49 @@ class RelationProcessingMixin:
         except Exception:
             return []
 
-    def _process_link_mappings(self, ontology_id: str, mapping_meta: dict) -> list[dict]:
+    def _process_link_mappings(self, ontology_id: str, mapping_meta: dict,
+                               remote_datasets: set[str] | None = None) -> list[dict]:
         from app.ontologies.mappings.models import OntologyLinkMapping, OntologyMapping as OM
         from app.models.ontology_formal import LinkType
+        from app.ontologies.mappings.remote_binding import (
+            BINDING_MODE_REMOTE, link_mapping_binding_mode,
+        )
 
+        remote_datasets = remote_datasets or set()
         links = self._db.query(OntologyLinkMapping).filter(
             OntologyLinkMapping.ontology_id == ontology_id,
             OntologyLinkMapping.status == "active",
         ).all()
         results = []
         for link in links:
+            if link_mapping_binding_mode(
+                    getattr(link, "field_mapping", None)) == BINDING_MODE_REMOTE:
+                # 远程关系定义：本地不物化、不造假边实例；查询期由主协调
+                # 按 src/tgtKey 做参数化 eq JOIN。显式登记，绝不静默跳过。
+                results.append({
+                    "link_mapping_id": link.id,
+                    "relation_type": link.relation_type,
+                    "count": 0,
+                    "skipped": "remote_binding_not_materialized",
+                })
+                continue
+            remote_roles = [
+                role for role, dataset_id in (
+                    ("source", link.src_dataset_id),
+                    ("target", link.tgt_dataset_id),
+                    ("edge", link.edge_dataset_id),
+                ) if dataset_id and dataset_id in remote_datasets
+            ]
+            if remote_roles:
+                # 本地关系物化不能消费远程绑定数据集的过期同步副本。
+                results.append({
+                    "link_mapping_id": link.id,
+                    "relation_type": link.relation_type,
+                    "count": 0,
+                    "skipped": "link_dataset_remote_bound",
+                    "remote_roles": remote_roles,
+                })
+                continue
             src_meta = tgt_meta = None
             link_type = self._db.query(LinkType).filter(
                 LinkType.id == link.link_type_id,

@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
+
+from app.auth.models import User
 
 from app.auth.permissions import user_has_menu_access
 from app.ontologies.access import require_ontology_access
@@ -71,6 +74,12 @@ def resolve_ontology_relation(db, user, alias, binding, limits, *,
     except ToolError as exc:
         raise HTTPException(403, detail={"code": "object_type_forbidden",
                                        "message": str(exc)}) from exc
+    from app.ontologies.mappings.remote_binding import get_remote_binding
+    if get_remote_binding(context.snapshot, object_type.id) is not None:
+        raise HTTPException(422, detail={
+            "code": "remote_ontology_semantic_query_required",
+            "message": "该对象使用远程绑定，请使用本体统一查询入口；不读取空的本地事实或隐式物化",
+        })
     definitions = property_definitions(object_type)
     allowed = scope.allowed_property_names(object_type.id)
     postgres = db.get_bind().dialect.name == "postgresql"
@@ -124,21 +133,26 @@ def resolve_ontology_relation(db, user, alias, binding, limits, *,
                                 if allowed is None or name in allowed})
 
     def recheck():
-        if not user_has_menu_access(db, user, "agent"):
-            raise HTTPException(403, detail={"code": "MENU_ACCESS_DENIED",
-                "message": "当前角色无权访问此功能", "menu_key": "agent"})
-        require_ontology_access(db, ontology_id, user, write=False)
-        current_release_context(db, ontology_id, expected_release_id=release_id)
-        fresh = db.execute(select(AgentProfile).where(
-            AgentProfile.ontology_id == ontology_id).execution_options(
-                populate_existing=True)).scalar_one_or_none()
-        if fresh is None:
-            raise HTTPException(403, detail={"code": "query_authorization_changed"})
-        current = {"userId": str(user.id), "role": str(getattr(user, "role", "")),
-                   "enabled": fresh.enabled, "objects": fresh.allowed_object_type_ids,
-                   "properties": fresh.allowed_properties, "maxRows": fresh.max_rows_per_query}
-        if _fingerprint(current) != auth_hash:
-            raise HTTPException(403, detail={"code": "query_authorization_changed"})
+        # The fact rows remain pinned; revocation must use a new metadata view,
+        # not the fact transaction's older REPEATABLE READ snapshot.
+        with Session(bind=db.get_bind(), autoflush=False) as fresh_db:
+            fresh_user = fresh_db.get(User, user.id)
+            if fresh_user is None or not fresh_user.is_active:
+                raise HTTPException(403, detail={"code": "query_authorization_changed"})
+            if not user_has_menu_access(fresh_db, fresh_user, "agent"):
+                raise HTTPException(403, detail={"code": "MENU_ACCESS_DENIED",
+                    "message": "当前角色无权访问此功能", "menu_key": "agent"})
+            require_ontology_access(fresh_db, ontology_id, fresh_user, write=False)
+            current_release_context(fresh_db, ontology_id, expected_release_id=release_id)
+            fresh = fresh_db.execute(select(AgentProfile).where(
+                AgentProfile.ontology_id == ontology_id)).scalar_one_or_none()
+            if fresh is None:
+                raise HTTPException(403, detail={"code": "query_authorization_changed"})
+            current = {"userId": str(fresh_user.id), "role": fresh_user.role,
+                       "enabled": fresh.enabled, "objects": fresh.allowed_object_type_ids,
+                       "properties": fresh.allowed_properties, "maxRows": fresh.max_rows_per_query}
+            if _fingerprint(current) != auth_hash:
+                raise HTTPException(403, detail={"code": "query_authorization_changed"})
 
     return relation_factory(
         alias=alias, table=statement.subquery(), columns=columns,

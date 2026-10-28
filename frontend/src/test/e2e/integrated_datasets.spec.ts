@@ -50,10 +50,16 @@ type MockOptions = {
   connections?: Array<{ id: string; name: string; kind: string; status: string }>
   /** Fail GET /api/v2/connections to exercise the connection error path. */
   connectionsError?: boolean
+  /** How many in-dialog connectivity tests fail before the next rotation succeeds. */
+  inlineTestFailures?: number
   /** Serve an empty asset list so the page-level empty state renders. */
   noAssets?: boolean
   /** Menu keys granted to the mock user (defaults to data.structured only). */
   menuKeys?: string[]
+  /** PATCH settles as an explicit failed receipt once; later writes apply. */
+  failedMutation?: boolean
+  /** Asset decommission (DELETE /integrated-datasets/{id}) is blocked by history. */
+  decommissionBlocked?: boolean
 }
 async function mockIntegrated(page: Page, options: MockOptions = {}) {
   const captured: Array<{ method: string; path: string; body: any }> = []
@@ -73,6 +79,9 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
   let run: Record<string, unknown> | null = options.restoreRun ? { run_id: 'sync-run-1', asset_id: 'asset-orders', dataset_id: 'dataset-orders', status: 'starting', complete: false, row_count: 0, expected_rows: 0, version_id: null, error: null, created_at: instant, updated_at: instant, completed_at: null } : null
   let polls = 0
   let historyRecovered = false
+  let inlineTestFailures = options.inlineTestFailures ?? 0
+  let inlineConnection: Record<string, string> | null = null
+  let failedMutations = options.failedMutation ? 1 : 0
   await page.addInitScript(({ role, menuKeys }) => {
     localStorage.setItem('token', 'mock-integrated-token')
     localStorage.setItem('auth-store', JSON.stringify({ state: { token: 'mock-integrated-token', user: { id: 'mock-user', username: 'mock-user', role, menu_permissions: menuKeys } }, version: 0 }))
@@ -89,11 +98,47 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       if (method === 'POST') { const created = { ...assets[0], ...body, id: 'asset-registered' }; assets.push(created); return respond(created, 201) }
       return respond({ items: assets, total: assets.length })
     }
+    if (path === '/api/v2/connections' && method === 'POST') {
+      // 页内新建连接：与数据连接页共用同一端点；返回体永不包含 config
+      inlineConnection = { id: 'conn-inline', name: body.name, kind: body.kind, status: 'inactive' }
+      return respond(inlineConnection, 201)
+    }
     if (path === '/api/v2/connections') {
       if (options.connectionsError) return fail(503, { code: 'CONNECTIONS_UNAVAILABLE', message: 'Connections list is unavailable' })
       return respond(options.connections ?? defaultConnections)
     }
+    if (/\/connections\/conn-inline\/test$/.test(path) && method === 'POST') {
+      if (inlineTestFailures > 0) {
+        inlineTestFailures -= 1
+        return respond({ success: false, status: 'error', detail: 'Access denied for user' })
+      }
+      if (inlineConnection) inlineConnection.status = 'active'
+      return respond({ success: true, status: 'active' })
+    }
+    if (/\/connections\/conn-inline\/config$/.test(path) && method === 'PATCH') {
+      // 凭据轮换：部分键合并，响应不含 config
+      return respond({ id: 'conn-inline', name: inlineConnection?.name ?? '内联连接', kind: inlineConnection?.kind ?? 'mysql', status: 'inactive' })
+    }
+    if (/\/api\/v2\/connections\/[^/]+$/.test(path) && method === 'DELETE') {
+      inlineConnection = null
+      return route.fulfill({ status: 204 })
+    }
     if (/\/integrated-datasets\/connections\/[^/]+\/resources$/.test(path)) return options.discoveryError ? fail(503, { code: 'DBX_UNAVAILABLE', message: 'Metadata discovery is unavailable' }) : respond({ items: [{ schema_name: 'public', table_name: 'new_orders' }] })
+    if (/\/integrated-datasets\/[^/]+$/.test(path) && method === 'DELETE') {
+      if (options.decommissionBlocked) {
+        return fail(409, {
+          code: 'ASSET_DECOMMISSION_BLOCKED',
+          message: '集成资产仍有 1 条数据历史（版本 0 / 同步运行 1 / 写入回执 0），不能注销；历史与审计记录不会被删除，请先解除以上依赖。',
+          history: { dataset_versions: 0, sync_runs: 1, mutations: 0 },
+          mapping_references: [], mapping_references_total: 0,
+          pipelines: [], pipelines_total: 0,
+          tasks: [], tasks_total: 0,
+        })
+      }
+      const index = assets.findIndex(asset => asset.id === path.split('/').at(-1))
+      if (index >= 0) assets.splice(index, 1)
+      return route.fulfill({ status: 204 })
+    }
     if (/\/integrated-datasets\/[^/]+\/schema$/.test(path) || path.endsWith('/refresh-schema')) return respond({ columns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     if (/\/integrated-datasets\/[^/]+\/versions$/.test(path)) return respond({ items: run?.status === 'sealed' || options.unverifiedVersion ? [{ id: 'sealed-version-1', version_no: 1, row_count: 10000, checksum: 'version-checksum', run_id: options.unverifiedVersion ? null : 'sync-run-1', status: options.unverifiedVersion ? 'unverified' : 'sealed', complete: !options.unverifiedVersion, created_at: instant }] : [] })
     if (path === '/api/__test__/history-recovered') {
@@ -125,6 +170,11 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       if (method === 'GET') return respond({ columns, rows, source_state: { started_at: instant, kind: 'postgres', consistency: 'repeatable_read' }, preview: true, limit: 100 })
       if (method === 'PATCH' && options.conflict) return fail(409, { code: 'ROW_CONFLICT', message: 'The source row changed since it was read', mutation: { id: 'mutation-conflict', status: 'conflict', affected_rows: 0, replayed: false } })
       if (method === 'PATCH' && options.unknownMutation) return fail(409, { code: 'UNKNOWN_REQUIRES_RECONCILIATION', mutation: { id: 'mutation-unknown', status: 'unknown', affected_rows: 0, replayed: false } })
+      // 明确失败回执：HTTP 200 + status=failed，源表未变更，该幂等键已结算。
+      if (method === 'PATCH' && failedMutations > 0) {
+        failedMutations -= 1
+        return respond({ id: 'mutation-failed-1', status: 'failed', error_code: 'SOURCE_WRITE_REJECTED', affected_rows: 0, replayed: false })
+      }
       if (method === 'POST') rows.push({ values: { ...body.key, ...body.values }, row_token: 'inserted-row-token' })
       if (method === 'PATCH') rows = rows.map(row => JSON.stringify({ id: row.values.id }) === JSON.stringify(body.key) ? { values: { ...row.values, ...body.values }, row_token: 'updated-row-token' } : row)
       if (method === 'DELETE') rows = rows.filter(row => JSON.stringify({ id: row.values.id }) !== JSON.stringify(body.key))
@@ -168,7 +218,7 @@ test('integrated deep link preserves schema, exact SPL metadata and lossless cur
   await expect(result).toContainText('9007199254740994')
   await expect(result).toContainText('当前页 2–2')
   const queries = requests.filter(request => request.path === '/api/v2/query')
-  expect(queries[0].body).toMatchObject({ language: 'spl', params: {}, pageSize: 100, bindings: { source: { kind: 'integrated', assetId: 'asset-orders' }, frozen: { kind: 'dataset', datasetId: 'dataset-frozen', versionId: 'version-frozen' } } })
+  expect(queries[0].body).toMatchObject({ language: 'spl', params: {}, pageSize: 100, resultStorage: 'memory', bindings: { source: { kind: 'integrated', assetId: 'asset-orders' }, frozen: { kind: 'dataset', datasetId: 'dataset-frozen', versionId: 'version-frozen' } } })
   expect(queries[1].body).toEqual({ cursor: 'opaque-next-cursor' })
   await page.reload()
   await expect(page.getByTestId('integrated-asset-detail')).toContainText('订单源')
@@ -201,7 +251,7 @@ test('controlled source CRUD uses original PK, row token and distinct secure ide
   for (const key of keys) expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
 })
 
-test('409 conflict keeps original row and edited values, with no optimistic successful overwrite', async ({ page }) => {
+test('409 conflict settles the idempotency key: no replay PATCH, cancel reloads the source', async ({ page }) => {
   const requests = await mockIntegrated(page, { conflict: true })
   await page.goto(deepLink)
   await page.getByRole('button', { name: '加载源数据', exact: true }).click()
@@ -209,13 +259,56 @@ test('409 conflict keeps original row and edited values, with no optimistic succ
   const changes = JSON.stringify({ ...sourceRow.values, note: 'not-applied' })
   await page.getByLabel('源记录值 JSON').fill(changes)
   await page.getByRole('button', { name: '确认写入源表' }).click()
-  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('ROW_CONFLICT')
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('alert')).toContainText('ROW_CONFLICT')
+  await expect(dialog.getByRole('alert')).toContainText('源记录已变化；请取消并重新加载源数据，不能重放当前幂等键')
   await expect(page.getByLabel('源记录值 JSON')).toHaveValue(changes)
   await expect(page.getByTestId('integrated-source-rows')).not.toContainText('not-applied')
+  // 冲突回执结算当前幂等键：确认按钮禁用，同一键不能再次 PATCH。
+  await expect(dialog.getByRole('button', { name: '确认写入源表' })).toBeDisabled()
+  // 弹窗内提供取消并重新加载：关闭弹窗、重读源数据刷新行令牌、恢复编辑入口。
+  await dialog.getByRole('button', { name: '取消并重新加载源数据', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '新增源记录', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeEnabled()
+  await expect(page.getByTestId('integrated-source-rows')).not.toContainText('not-applied')
+  expect(requests.filter(request => request.method === 'PATCH')).toHaveLength(1)
+  expect(requests.filter(request => request.path.endsWith('/rows') && request.method === 'GET')).toHaveLength(2)
+})
+
+test('failed receipt settles its key and retry uses a fresh key with the edited JSON preserved', async ({ page }) => {
+  const requests = await mockIntegrated(page, { failedMutation: true })
+  await page.goto(deepLink)
+  await page.getByRole('button', { name: '加载源数据', exact: true }).click()
+  await page.getByRole('button', { name: '编辑源记录 1', exact: true }).click()
+  const changes = JSON.stringify({ ...sourceRow.values, note: 'retried' })
+  await page.getByLabel('源记录值 JSON').fill(changes)
   await page.getByRole('button', { name: '确认写入源表' }).click()
-  await expect.poll(() => requests.filter(request => request.method === 'PATCH').length).toBe(2)
+  const dialog = page.getByRole('dialog')
+  // 明确失败是终态回执：不是成功也不是未知结果；已结算的键不能原样重放。
+  await expect(dialog.getByRole('alert')).toContainText('写入已明确失败；当前幂等键已结算，请使用新幂等键重试。')
+  await expect(dialog).toContainText('写入回执 mutation-failed-1 · 失败 · 影响 0 行')
+  await expect(dialog).toContainText('SOURCE_WRITE_REJECTED')
+  await expect(dialog.getByRole('button', { name: '确认写入源表' })).toBeDisabled()
+  await expect(page.getByTestId('integrated-source-rows')).not.toContainText('retried')
+  // 失败后编辑内容仍可保留并继续修改，重试换新幂等键。
+  await expect(page.getByLabel('源记录值 JSON')).toBeEnabled()
+  await expect(page.getByLabel('源记录值 JSON')).toHaveValue(changes)
+  const keyLine = dialog.getByText(/^幂等键：/)
+  const settledKey = await keyLine.textContent()
+  await dialog.getByRole('button', { name: '使用新幂等键重试', exact: true }).click()
+  await expect(keyLine).not.toHaveText(settledKey ?? '')
+  await expect(page.getByLabel('源记录值 JSON')).toHaveValue(changes)
+  await page.getByRole('button', { name: '确认写入源表' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByTestId('integrated-source-rows')).toContainText('retried')
   const writes = requests.filter(request => request.method === 'PATCH')
-  expect(writes[1].body).toEqual(writes[0].body)
+  expect(writes).toHaveLength(2)
+  const { idempotency_key: settled, ...firstPayload } = writes[0].body
+  const { idempotency_key: retried, ...retryPayload } = writes[1].body
+  expect(retried).not.toBe(settled)
+  for (const key of [settled, retried]) expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  expect(retryPayload).toEqual(firstPayload)
 })
 
 test('immutable PK is rejected locally before submitting and correction remains editable', async ({ page }) => {
@@ -282,18 +375,66 @@ for (const kind of ['PostgreSQL', 'MySQL']) {
   })
 }
 
-test('empty connection list guides managers to the connections page', async ({ page }) => {
-  await mockIntegrated(page, { connections: [], menuKeys: ['data.structured', 'data.pipelines'] })
+test('data.structured-only manager creates, tests and registers a connection in-page', async ({ page }) => {
+  // 只有 data.structured 菜单权限（无 data.pipelines）也必须能完成全部接入：
+  // 创建连接 → 连通测试 → dbx 发现 → 登记，全程不离开集成页。
+  const requests = await mockIntegrated(page, { connections: [], noAssets: true })
   await page.goto('/#/data/structured?tab=integrated')
-  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).first().click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByTestId('integrated-connection-empty-hint')).toContainText('没有可用的 MySQL / PostgreSQL 连接')
-  await dialog.getByRole('button', { name: '前往数据连接', exact: true }).click()
-  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
-  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+  await dialog.getByRole('button', { name: '新建连接', exact: true }).click()
+  await dialog.getByLabel('连接名称').fill('内联 ERP 库')
+  await dialog.getByLabel('主机').fill('db.internal')
+  await dialog.getByLabel('端口').fill('3306')
+  await dialog.getByLabel('数据库名').fill('erp')
+  await dialog.getByLabel('用户名').fill('svc')
+  await dialog.getByLabel('密码').fill('secret-inline')
+  await dialog.getByLabel('资产名称', { exact: true }).fill('内联登记订单')
+  await dialog.getByRole('button', { name: '创建并测试', exact: true }).click()
+  // 测试通过后连接自动进入选择器；凭据不回显
+  await expect(dialog.getByRole('combobox', { name: '数据连接' })).toContainText('内联 ERP 库')
+  const created = requests.find(request => request.path === '/api/v2/connections' && request.method === 'POST')
+  expect(created?.body).toMatchObject({
+    name: '内联 ERP 库', kind: 'mysql',
+    config: { host: 'db.internal', port: '3306', database: 'erp', user: 'svc', password: 'secret-inline' },
+  })
+  const tested = requests.filter(request => request.path === '/api/v2/connections/conn-inline/test')
+  expect(tested).toHaveLength(1)
+  await dialog.getByRole('button', { name: '发现源表', exact: true }).click()
+  await dialog.getByRole('button', { name: 'public.new_orders', exact: true }).click()
+  await dialog.getByRole('button', { name: '确认登记', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  const registration = requests.find(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')
+  expect(registration?.body).toMatchObject({
+    name: '内联登记订单', connection_id: 'conn-inline',
+    schema_name: 'public', table_name: 'new_orders', writable: false,
+  })
 })
 
-test('untested connections stay out of the selector and the hint points to connectivity testing', async ({ page }) => {
+test('failed inline connection test is fixed by partial rotation without backfill', async ({ page }) => {
+  // 创建后连通失败：凭据修正只提交填写了的键（留空=保留服务端现值），不回填明文/密文
+  const requests = await mockIntegrated(page, { connections: [], noAssets: true, inlineTestFailures: 1 })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).first().click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: '新建连接', exact: true }).click()
+  await dialog.getByLabel('连接名称').fill('内联 ERP 库')
+  await dialog.getByLabel('主机').fill('db.internal')
+  await dialog.getByLabel('用户名').fill('svc')
+  await dialog.getByLabel('密码').fill('wrong-secret')
+  await dialog.getByRole('button', { name: '创建并测试', exact: true }).click()
+  await expect(dialog.getByRole('status')).toContainText('连通测试失败')
+  // 表单不回填旧凭据：修正输入使用独立 aria-label，密码留空=保留原值的提示存在
+  await expect(dialog.getByLabel('连接名称')).toBeDisabled()
+  await dialog.getByLabel('修正 密码').fill('corrected-secret')
+  await dialog.getByRole('button', { name: '更新配置并重测', exact: true }).click()
+  await expect(dialog.getByRole('combobox', { name: '数据连接' })).toContainText('内联 ERP 库')
+  const rotation = requests.find(request => request.path === '/api/v2/connections/conn-inline/config' && request.method === 'PATCH')
+  expect(rotation?.body).toEqual({ config: { password: 'corrected-secret' } })
+})
+
+test('untested connections stay out of the selector and the hint offers in-page creation', async ({ page }) => {
   await mockIntegrated(page, { connections: [
     { id: 'pg-source', name: 'PostgreSQL 测试源', kind: 'postgres', status: 'inactive' },
     { id: 'mysql-source', name: 'MySQL 测试源', kind: 'mysql', status: 'error' },
@@ -306,6 +447,7 @@ test('untested connections stay out of the selector and the hint points to conne
   // 无可选连接时选择器保持禁用：打开空下拉会让焦点逃逸并意外关闭整个弹窗。
   await expect(dialog.getByRole('combobox', { name: '数据连接' })).toBeDisabled()
   await expect(dialog.getByRole('combobox', { name: '数据连接' })).toContainText('暂无可用连接')
+  await expect(dialog.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
   await expect(dialog.getByRole('button', { name: '前往数据连接', exact: true })).toBeVisible()
 })
 
@@ -319,18 +461,43 @@ test('connection load failure reports the error without the configure hint', asy
   await expect(dialog).not.toContainText('请先在数据连接中配置')
 })
 
-test('empty integrated tab links managers to the connections page', async ({ page }) => {
-  await mockIntegrated(page, { noAssets: true, menuKeys: ['data.structured', 'data.pipelines'] })
+test('empty integrated tab opens in-page registration for managers', async ({ page }) => {
+  await mockIntegrated(page, { noAssets: true, menuKeys: ['data.structured'] })
   await page.goto('/#/data/structured?tab=integrated')
-  await page.getByRole('button', { name: '前往数据连接', exact: true }).click()
-  await expect(page).toHaveURL(/#\/data\/pipelines\/connections/)
-  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).first().click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '新建连接', exact: true })).toBeVisible()
 })
 
-test('viewer gets no connections shortcut on the empty integrated tab', async ({ page }) => {
+test('viewer gets no registration shortcut on the empty integrated tab', async ({ page }) => {
   await mockIntegrated(page, { role: 'viewer', noAssets: true })
   await page.goto('/#/data/structured?tab=integrated')
-  await expect(page.getByRole('button', { name: '前往数据连接', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: '新建连接', exact: true })).toHaveCount(0)
+})
+
+test('asset decommission blocked by history shows structured detail and keeps the asset', async ({ page }) => {
+  const requests = await mockIntegrated(page, { decommissionBlocked: true })
+  await page.goto(deepLink)
+  await page.getByRole('button', { name: '注销资产', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toContainText('受控注销要求零历史')
+  await dialog.getByRole('button', { name: '确认注销', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toContainText('ASSET_DECOMMISSION_BLOCKED')
+  await expect(dialog.getByRole('alert')).toContainText('历史与审计记录不会被删除')
+  await expect(page.getByTestId('integrated-asset-detail')).toBeVisible()
+  expect(requests.filter(request => /\/integrated-datasets\/[^/]+$/.test(request.path) && request.method === 'DELETE')).toHaveLength(1)
+})
+
+test('zero-dependency asset decommission removes the detail and clears the deep link', async ({ page }) => {
+  const requests = await mockIntegrated(page, {})
+  await page.goto(deepLink)
+  await page.getByRole('button', { name: '注销资产', exact: true }).click()
+  await page.getByRole('button', { name: '确认注销', exact: true }).click()
+  await expect(page.getByTestId('integrated-asset-detail')).toHaveCount(0)
+  await expect(page).not.toHaveURL(/dataset=/)
+  expect(requests.filter(request => /\/integrated-datasets\/[^/]+$/.test(request.path) && request.method === 'DELETE')).toHaveLength(1)
 })
 
 test('asynchronous sync reports real queued state and refresh restores the persisted run', async ({ page }) => {

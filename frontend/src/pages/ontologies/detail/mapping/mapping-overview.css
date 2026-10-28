@@ -213,6 +213,8 @@
 .dmo-status[data-status="no-data"] { color: var(--dmo-nodata-ink); background: var(--dmo-nodata-bg); }
 .dmo-status[data-status="incomplete"], .dmo-status[data-status="type-risk"] { color: var(--dmo-todo-ink); background: var(--dmo-todo-bg); }
 .dmo-status[data-status="unmapped"] { color: var(--dmo-unmapped-ink); background: var(--dmo-unmapped-bg); }
+/* 远程只读绑定：与映射工作台同源的 viz-violet 类型编码色（token 取值，零新增 hex） */
+.dmo-status[data-status="remote-bound"] { color: var(--color-viz-violet); background: var(--color-viz-violet-soft); }
 .dmo-status[data-status="missing-source"] { color: var(--dmo-danger-ink); background: var(--dmo-danger-bg); }
 .dmo-row-arrow { color: var(--dmo-faint); transition: color .16s ease, transform .16s ease; }
 .dmo-map-row:hover .dmo-row-arrow, .dmo-map-row[data-selected="true"] .dmo-row-arrow { color: var(--dmo-teal-ink); transform: translateX(2px); }
@@ -231,6 +233,7 @@
 .dmo-lineage-body h3 { margin: 0 0 8px; display: flex; align-items: center; gap: 6px; color: var(--dmo-muted); font-size: 12px; font-weight: 700; }
 .dmo-status-note { margin-top: 13px; padding: 10px 11px; border-left: 3px solid var(--dmo-note-warn-line); display: flex; align-items: flex-start; gap: 8px; color: var(--dmo-note-warn-ink); background: var(--dmo-note-warn-bg); }
 .dmo-status-note[data-status="ready"] { border-left-color: var(--dmo-ready-ink); color: var(--dmo-ready-ink); background: var(--dmo-ready-bg); }
+.dmo-status-note[data-status="remote-bound"] { border-left-color: var(--color-viz-violet); color: var(--color-viz-violet); background: var(--color-viz-violet-soft); }
 .dmo-status-note > svg { flex: none; margin-top: 1px; }
 .dmo-status-note > div { min-width: 0; display: flex; flex-direction: column; }
 .dmo-status-note b { color: currentColor; font-size: 12px; }
@@ -247,6 +250,7 @@
 .dmo-source-item:first-of-type .dmo-source-row { border-top: 0; }
 .dmo-source-icon { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; color: var(--dmo-icon-teal); background: var(--dmo-icon-teal-bg); }
 .dmo-source-icon--manual { color: #6a58b0; background: #efebfb; }
+.dmo-source-icon--remote { color: var(--color-viz-violet); background: var(--color-viz-violet-soft); }
 .dmo-source-row > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; }
 .dmo-source-name { min-width: 0; display: flex; align-items: center; font-style: normal; }
 .dmo-source-name b { flex: 1; min-width: 0; }
@@ -270,6 +274,11 @@
 .dmo-reconcile > button:disabled { cursor: not-allowed; opacity: .62; }
 .dmo-reconcile-note { grid-column: 1/-1; margin: 0; padding: 7px 8px; display: flex; align-items: flex-start; gap: 6px; color: var(--dmo-ready-ink); background: var(--dmo-ready-bg); font-size: 11px; line-height: 1.45; }
 .dmo-reconcile-note[data-tone="error"] { color: var(--dmo-danger-ink); background: var(--dmo-danger-bg); }
+/* 远程只读绑定的禁用说明：信息性（非错误），viz-violet 与远程标识同源 */
+.dmo-reconcile-note[data-tone="info"] { color: var(--color-viz-violet); background: var(--color-viz-violet-soft); }
+.dmo-reconcile[data-remote] { border-color: var(--color-viz-violet); background: var(--color-viz-violet-soft); }
+.dmo-reconcile[data-remote] > div b { color: var(--color-viz-violet); }
+.dmo-reconcile[data-remote] > button { border-color: var(--color-viz-violet); color: var(--color-viz-violet); }
 .dmo-reconcile-note svg { margin-top: 1px; flex: none; }
 .dmo-reconcile-confirm-text { margin: 0; color: var(--dmo-text); font-size: 13px; line-height: 1.65; }
 .dmo-fields > h3 { justify-content: space-between; }

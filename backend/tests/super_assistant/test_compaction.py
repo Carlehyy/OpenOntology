@@ -204,3 +204,71 @@ def test_maybe_compact_returns_original_messages_when_summary_is_empty(
     )
     assert result is messages
     assert conversation.summary is None
+
+
+def test_maybe_compact_redacts_ephemeral_detail_tool_content(
+    db_session, conversation, monkeypatch,
+):
+    """ephemeral 明细红线：命中 redactions 的 tool 内容整体替换为壳，
+    不走头尾截断（头 400 字符足以携带多行源明细）。"""
+    _tight_settings(monkeypatch, keep_recent=2, headroom=0.5)
+    detail_content = json.dumps({
+        "rows": [{"orderId": "SO-1001", "secret": "机密" * 100}],
+        "totalRowCount": 1,
+    }, ensure_ascii=False)
+    shell_text = json.dumps({
+        "queryId": "qs-1", "totalRowCount": 1, "ephemeralDetail": True,
+    }, ensure_ascii=False)
+    messages = [
+        {"role": "system", "content": "系统提示"},
+        {"role": "tool", "tool_call_id": "c1", "name": "ontology_query",
+         "content": detail_content},
+        {"role": "user", "content": "追问一" * 30},
+        {"role": "assistant", "content": "回答一" * 30},
+        {"role": "user", "content": "最近一"},
+        {"role": "assistant", "content": "最近二"},
+    ]
+    captured: dict = {}
+
+    def fake_chat(_call_kwargs, chat_messages, _tools):
+        captured["prompt"] = chat_messages[0]["content"]
+        return {"content": "摘要", "tool_calls": [], "usage": {}}
+
+    monkeypatch.setattr(compaction.provider, "chat", fake_chat)
+    compaction.maybe_compact(
+        db_session, conversation, {"max_context_tokens": 10}, messages,
+        redactions={"c1": shell_text},
+    )
+    prompt = captured["prompt"]
+    assert "qs-1" in prompt and "ephemeralDetail" in prompt
+    assert "SO-1001" not in prompt and "机密" not in prompt
+
+
+def test_summary_prompt_unredacted_tool_content_keeps_head_tail_behavior(
+    db_session, conversation, monkeypatch,
+):
+    """未命中 redactions 的 tool 内容保持原头尾截断行为（旧行为不变）。"""
+    _tight_settings(monkeypatch, keep_recent=2, headroom=0.5)
+    long_tool_content = "A" * 400 + "中" * 300 + "B" * 200
+    messages = [
+        {"role": "system", "content": "系统提示"},
+        {"role": "tool", "tool_call_id": "c-other", "name": "web_fetch",
+         "content": long_tool_content},
+        {"role": "user", "content": "历史一"},
+        {"role": "assistant", "content": "历史二"},
+        {"role": "user", "content": "最近一"},
+        {"role": "assistant", "content": "最近二"},
+    ]
+    captured: dict = {}
+
+    def fake_chat(_call_kwargs, chat_messages, _tools):
+        captured["prompt"] = chat_messages[0]["content"]
+        return {"content": "摘要", "tool_calls": [], "usage": {}}
+
+    monkeypatch.setattr(compaction.provider, "chat", fake_chat)
+    compaction.maybe_compact(
+        db_session, conversation, {"max_context_tokens": 10}, messages,
+        redactions={"c-unrelated": "{}"},
+    )
+    prompt = captured["prompt"]
+    assert "A" * 400 in prompt and "中" * 300 not in prompt

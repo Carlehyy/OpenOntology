@@ -55,7 +55,43 @@ def _wrap(exc: Exception) -> FacadeError:
     if isinstance(exc, (QueryError, StructureError,
                         confirmation_service.ConfirmationError)):
         return FacadeError(exc.status, exc.code, exc.message, **exc.extra)
+    from fastapi import HTTPException
+
+    if isinstance(exc, HTTPException):
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        return FacadeError(exc.status_code, detail.get("code", "ontology_request_rejected"),
+                           detail.get("message", "本体请求已拒绝"),
+                           **{key: value for key, value in detail.items()
+                              if key not in {"code", "message"}})
     return FacadeError(500, "facade_error", str(exc))
+
+
+def catalog_search(db: Session, user, *, query=None, cursor=None) -> dict:
+    from app.ontologies.agent_runtime.catalog import catalog_search as search
+    try:
+        return search(db, user, query=query, cursor=cursor)
+    except Exception as exc:
+        raise _wrap(exc) from exc
+
+
+def catalog_object_types(db: Session, user, *, ontology_id, release_id=None,
+                         cursor=None) -> dict:
+    from app.ontologies.agent_runtime.catalog import catalog_object_types as object_types
+    try:
+        return object_types(db, user, ontology_id=ontology_id,
+                            release_id=release_id, cursor=cursor)
+    except Exception as exc:
+        raise _wrap(exc) from exc
+
+
+def catalog_get_document(db: Session, user, *, ontology_id, release_id=None,
+                         cursor=None) -> dict:
+    from app.ontologies.agent_runtime.catalog import catalog_get_document as get_document
+    try:
+        return get_document(db, user, ontology_id=ontology_id,
+                            release_id=release_id, cursor=cursor)
+    except Exception as exc:
+        raise _wrap(exc) from exc
 
 
 def structure(db: Session, user, ontology_id: str, *, release_id: Optional[str],
@@ -217,13 +253,19 @@ def execute_confirmation(db: Session, user, ontology_id: str, cid: str, *,
 
 def build_query_request(arguments: dict):
     """把工具参数（camelCase dict）解析为统一查询请求对象。"""
+    # Some compatible tool endpoints mistake a JSON-schema $defs name for an
+    # outer argument envelope. Unwrap only a sole, repository-owned definition
+    # name; the inner payload still goes through the strict request models.
+    if len(arguments) == 1:
+        for envelope in ("queryRequestMid", "queryRequestInner"):
+            inner = arguments.get(envelope)
+            if isinstance(inner, dict):
+                arguments = inner
+                break
     if arguments.get("cursor"):
         return QS.CursorRequest(cursor=str(arguments["cursor"]))
-    sources = [QS.QuerySource(
-        alias=str(s["alias"]), ontology_id=str(s["ontologyId"]),
-        release_id=str(s["releaseId"]),
-        object_type_id=str(s["objectTypeId"]))
-        for s in arguments.get("sources") or []]
+    sources = [QS.QuerySource.model_validate(source)
+               for source in arguments.get("sources") or []]
     joins = []
     for j in arguments.get("joins") or []:
         on = dict(j.get("on") or {})

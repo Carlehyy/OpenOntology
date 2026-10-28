@@ -146,6 +146,24 @@ def validate_production_mappings(
                 f"Mapping「{label}」绑定的数据集不存在: {dataset_id or ''}",
                 item_id=mid, name=label, field="curatedDatasetId"))
             continue
+        from app.ontologies.mappings.remote_binding import (
+            BINDING_MODE_REMOTE,
+            RemoteBindingError,
+            mapping_binding_mode,
+            remote_descriptor,
+        )
+        if mapping_binding_mode(mapping.field_mapping) == BINDING_MODE_REMOTE:
+            # 远程绑定不消费本地 DatasetVersion：版本/审批/自动灌入订阅与
+            # applied 版本戳契约不适用；发布正门的远程重验（授权 + schema
+            # drift）在 promotion 主流程执行，这里只确认冻结定义在位。
+            try:
+                remote_descriptor(mapping.field_mapping)
+            except RemoteBindingError as exc:
+                errors.append(gate_error(
+                    exc.code, "mapping",
+                    f"Mapping「{label}」远程绑定描述符非法：{exc.message}",
+                    item_id=mid, name=label, field="remote"))
+            continue
         latest = db.query(DatasetVersion).filter(
             DatasetVersion.dataset_id == dataset.id,
         ).order_by(DatasetVersion.version_no.desc()).first()
@@ -221,6 +239,14 @@ def validate_production_mappings(
                 "link_mapping_not_active", "linkMapping",
                 f"LinkMapping「{label}」状态必须为 active/inferred，当前为 {link.status}",
                 item_id=lid, name=label, field="status"))
+        from app.ontologies.mappings.remote_binding import (
+            BINDING_MODE_REMOTE,
+            link_mapping_binding_mode,
+        )
+        if link_mapping_binding_mode(link.field_mapping) == BINDING_MODE_REMOTE:
+            # 远程关系定义不消费本地 DatasetVersion：端点资产由发布正门的
+            # 远程重验覆盖，这里不做本地版本/审批/订阅检查。
+            continue
         for role, dataset_id in (
             ("source", link.src_dataset_id),
             ("target", link.tgt_dataset_id),

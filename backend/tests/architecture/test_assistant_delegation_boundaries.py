@@ -85,6 +85,16 @@ def test_super_assistant_does_not_import_ontology_or_exploration():
     )
 
 
+def test_ontology_facade_has_only_the_privacy_enforcing_tool_consumer():
+    allowed = APP_DIR / "super_assistant" / "ontology_tools.py"
+    violations = _forbidden_imports(
+        [path for path in APP_DIR.rglob("*.py") if path != allowed],
+        ("app.ontologies.agent_runtime.assistant_facade",))
+    assert not violations, (
+        "The ontology facade must enter through the ephemeral persistence boundary:\n"
+        + "\n".join(violations))
+
+
 # 规则 3：adapter 只许 import 白名单符号——防腐化成对各助手域内部的
 # 任意调用面；新增依赖 = 显式修改本白名单并经域 owner review。
 _ADAPTER_IMPORT_WHITELIST: dict[str, set[str]] = {

@@ -48,10 +48,20 @@ def create_mapping(
     body: Any,
     *,
     rules: EntityMappingRules,
+    user: Any = None,
 ) -> dict:
     from app.ontologies.mappings.models import OntologyMapping
     from app.ontologies.mappings.mapping_service import MappingService
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        apply_remote_definition_keys,
+        normalize_binding_mode,
+        prepare_remote_mapping_definition,
+        reject_mixed_binding_for_type,
+        reject_remote_auto_apply_flags,
+    )
 
+    mode = normalize_binding_mode(getattr(body, "binding_mode", None))
     rules.require_draft_ontology(db, ontology_id)
     target_type = rules.validate_target_type(
         db,
@@ -59,30 +69,51 @@ def create_mapping(
         body.target_object_type_id,
     )
     rules.reject_reserved_mapping_keys(body.field_mapping, "field_mapping")
+    # 同一 ObjectType 不允许本地与远程绑定混用（查询数据面会分裂）；
+    # 先于数据集契约检查，给出最明确的冲突信号。
+    reject_mixed_binding_for_type(
+        db, ontology_id, target_type, remote=mode == BINDING_MODE_REMOTE)
 
-    declared_pk = rules.canonical_primary_key(
-        db,
-        body.curated_dataset_id,
-    )
-    rules.assert_client_primary_key_matches(
-        body.primary_key_column,
-        declared_pk,
-        body.curated_dataset_id,
-    )
-    rules.validate_user_field_mapping(
-        body.field_mapping or {},
-        body.ignored_fields,
-    )
-    rules.assert_ignored_fields_do_not_hide_identity(
-        body.ignored_fields,
-        declared_pk,
-    )
-    rules.assert_mapping_types_compatible(
-        db,
-        body.curated_dataset_id,
-        target_type,
-        body.field_mapping or {},
-    )
+    if mode == BINDING_MODE_REMOTE:
+        reject_remote_auto_apply_flags(
+            body.auto_apply_on_review, body.auto_apply_on_version)
+        rules.validate_user_field_mapping(
+            body.field_mapping or {},
+            body.ignored_fields,
+        )
+        # 服务端冻结描述符 + 身份/类型/结构契约 + 混绑/关系消费围栏。
+        descriptor, declared_pk = prepare_remote_mapping_definition(
+            db, user,
+            dataset_id=body.curated_dataset_id, target_type=target_type,
+            field_mapping=body.field_mapping or {},
+            ignored_fields=body.ignored_fields,
+            primary_key_column=body.primary_key_column,
+            rebind=True, switching_to_remote=True,
+            name=str(body.entity_class or ""), ontology_id=ontology_id)
+    else:
+        declared_pk = rules.canonical_primary_key(
+            db,
+            body.curated_dataset_id,
+        )
+        rules.assert_client_primary_key_matches(
+            body.primary_key_column,
+            declared_pk,
+            body.curated_dataset_id,
+        )
+        rules.validate_user_field_mapping(
+            body.field_mapping or {},
+            body.ignored_fields,
+        )
+        rules.assert_ignored_fields_do_not_hide_identity(
+            body.ignored_fields,
+            declared_pk,
+        )
+        rules.assert_mapping_types_compatible(
+            db,
+            body.curated_dataset_id,
+            target_type,
+            body.field_mapping or {},
+        )
 
     service = MappingService(db)
     field_mapping = dict(body.field_mapping or {})
@@ -92,14 +123,18 @@ def create_mapping(
         )
     if body.property_mappings:
         field_mapping["__properties__"] = body.property_mappings
-    if body.auto_apply_on_review:
-        field_mapping["__auto_apply_on_review__"] = True
-    if body.auto_apply_on_version:
-        rules.validate_version_automation_policy(
-            db,
-            body.curated_dataset_id,
-        )
-        field_mapping["__auto_apply_on_version__"] = True
+    if mode == BINDING_MODE_REMOTE:
+        field_mapping = apply_remote_definition_keys(
+            field_mapping, descriptor, declared_pk)
+    else:
+        if body.auto_apply_on_review:
+            field_mapping["__auto_apply_on_review__"] = True
+        if body.auto_apply_on_version:
+            rules.validate_version_automation_policy(
+                db,
+                body.curated_dataset_id,
+            )
+            field_mapping["__auto_apply_on_version__"] = True
     client_definition = {
         "entity_class": body.entity_class,
         "field_mapping": dict(body.field_mapping or {}),
@@ -107,6 +142,7 @@ def create_mapping(
         "auto_apply_on_review": bool(body.auto_apply_on_review),
         "auto_apply_on_version": bool(body.auto_apply_on_version),
         "target_object_type_id": body.target_object_type_id,
+        "binding_mode": mode,
     }
     field_mapping["__client_definition__"] = client_definition
 
@@ -188,9 +224,19 @@ def update_mapping(
     body: Any,
     *,
     rules: EntityMappingRules,
+    user: Any = None,
 ) -> dict:
     """映射维护：结构和版本化自动触发策略均通过 draft 发布。"""
     from app.ontologies.mappings.models import OntologyMapping
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        apply_remote_definition_keys,
+        mapping_binding_mode,
+        normalize_binding_mode,
+        prepare_remote_mapping_definition,
+        reject_remote_auto_apply_flags,
+        strip_remote_definition_keys,
+    )
 
     provided = body.model_fields_set
     structural_fields = {
@@ -199,6 +245,7 @@ def update_mapping(
         "ignored_fields",
         "primary_key_column",
         "target_object_type_id",
+        "binding_mode",
     }
     locked_project = None
     if provided & structural_fields:
@@ -267,15 +314,18 @@ def update_mapping(
             "idempotent_replay": True,
         }
 
-    declared_pk = rules.canonical_primary_key(
-        db,
-        mapping.curated_dataset_id,
+    current_mode = mapping_binding_mode(mapping.field_mapping)
+    requested_mode = (
+        normalize_binding_mode(body.binding_mode)
+        if body.binding_mode is not None else None
     )
-    rules.assert_client_primary_key_matches(
-        body.primary_key_column,
-        declared_pk,
-        mapping.curated_dataset_id,
+    target_mode = requested_mode or current_mode
+    rebind_remote = (
+        target_mode == BINDING_MODE_REMOTE
+        and (requested_mode is not None
+             or current_mode != BINDING_MODE_REMOTE)
     )
+
     candidate_target_type_id = (
         body.target_object_type_id
         if "target_object_type_id" in provided
@@ -322,16 +372,50 @@ def update_mapping(
         effective_user_mapping,
         effective_ignored,
     )
-    rules.assert_ignored_fields_do_not_hide_identity(
-        effective_ignored,
-        declared_pk,
-    )
-    rules.assert_mapping_types_compatible(
-        db,
-        mapping.curated_dataset_id,
-        target_type,
-        effective_user_mapping,
-    )
+
+    descriptor = None
+    if target_mode == BINDING_MODE_REMOTE:
+        # 远程绑定：不参与本地自动灌入；冻结描述符只能由服务端写入。
+        reject_remote_auto_apply_flags(
+            (field_mapping or {}).get("__auto_apply_on_review__"),
+            (field_mapping or {}).get("__auto_apply_on_version__"),
+            body.auto_apply_on_review is True,
+            body.auto_apply_on_version is True)
+        # 服务端冻结/复用描述符 + 身份/类型/结构契约 + 混绑/关系消费围栏。
+        descriptor, declared_pk = prepare_remote_mapping_definition(
+            db, user,
+            dataset_id=mapping.curated_dataset_id, target_type=target_type,
+            field_mapping=field_mapping,
+            ignored_fields=effective_ignored,
+            primary_key_column=body.primary_key_column,
+            rebind=rebind_remote,
+            switching_to_remote=(
+                rebind_remote and current_mode != BINDING_MODE_REMOTE),
+            check_mixed_binding=(
+                rebind_remote or "target_object_type_id" in provided),
+            item_id=mapping.id,
+            name=str(mapping.entity_class or ""), ontology_id=ontology_id)
+    else:
+        # 本地绑定：权威主键契约始终来自资产湖（含 remote → local 切回）。
+        declared_pk = rules.canonical_primary_key(
+            db,
+            mapping.curated_dataset_id,
+        )
+        rules.assert_client_primary_key_matches(
+            body.primary_key_column,
+            declared_pk,
+            mapping.curated_dataset_id,
+        )
+        rules.assert_ignored_fields_do_not_hide_identity(
+            effective_ignored,
+            declared_pk,
+        )
+        rules.assert_mapping_types_compatible(
+            db,
+            mapping.curated_dataset_id,
+            target_type,
+            effective_user_mapping,
+        )
     mapping.target_object_type_id = candidate_target_type_id
     if body.entity_class is not None:
         mapping.entity_class = body.entity_class
@@ -343,16 +427,24 @@ def update_mapping(
         else:
             field_mapping.pop("__ignored_fields__", None)
 
-    # Always repair/read the canonical lake contract. ``primary_key_column`` is
-    # retained in the request schema only for old clients and acts as an assert.
-    field_mapping["__primary_key__"] = declared_pk
-    field_mapping["__pk_source__"] = "lake"
-    if body.auto_apply_on_review is not None:
+    if target_mode == BINDING_MODE_REMOTE:
+        field_mapping = apply_remote_definition_keys(
+            field_mapping, descriptor, declared_pk)
+    else:
+        # Always repair/read the canonical lake contract. ``primary_key_column`` is
+        # retained in the request schema only for old clients and acts as an assert.
+        field_mapping["__primary_key__"] = declared_pk
+        field_mapping["__pk_source__"] = "lake"
+        if current_mode == BINDING_MODE_REMOTE:
+            field_mapping = strip_remote_definition_keys(field_mapping)
+    if (body.auto_apply_on_review is not None
+            and target_mode != BINDING_MODE_REMOTE):
         if body.auto_apply_on_review:
             field_mapping["__auto_apply_on_review__"] = True
         else:
             field_mapping.pop("__auto_apply_on_review__", None)
-    if body.auto_apply_on_version is not None:
+    if (body.auto_apply_on_version is not None
+            and target_mode != BINDING_MODE_REMOTE):
         if body.auto_apply_on_version:
             rules.validate_version_automation_policy(
                 db,
@@ -366,6 +458,7 @@ def update_mapping(
         "field_mapping",
         "ignored_fields",
         "target_object_type_id",
+        "binding_mode",
         "auto_apply_on_review",
         "auto_apply_on_version",
     } & provided:
@@ -386,6 +479,7 @@ def update_mapping(
                 field_mapping.get("__auto_apply_on_version__")
             ),
             "target_object_type_id": mapping.target_object_type_id,
+            "binding_mode": target_mode,
         }
     projection_changed = bool(
         {
@@ -394,9 +488,10 @@ def update_mapping(
             "ignored_fields",
             "primary_key_column",
             "target_object_type_id",
+            "binding_mode",
         }
         & provided
-    ) or previous_pk != declared_pk
+    ) or previous_pk != declared_pk or current_mode != target_mode
     if projection_changed:
         # Any definition change invalidates the previous apply attestation. The
         # old marker must never be reused by the release gate for new semantics.
@@ -411,6 +506,7 @@ def update_mapping(
         "mapping_id": mapping.id,
         "status": mapping.status,
         "target_object_type_id": mapping.target_object_type_id,
+        "binding_mode": target_mode,
         "auto_apply_on_review": bool(
             field_mapping.get("__auto_apply_on_review__")
         ),
@@ -474,124 +570,3 @@ def delete_mapping(
             ),
             "ontology_id": ontology_id,
         }) from exc
-
-
-def reject_raw_apply(
-    db: Session,
-    ontology_id: str,
-    mapping_id: str,
-    data: list[dict],
-) -> None:
-    """Reject data that bypasses the versioned dataset source contract."""
-    from app.ontologies.mappings.models import OntologyMapping
-
-    # Keep the request parameter in the workflow contract even though the
-    # bypass is intentionally rejected after ownership validation.
-    del data
-    mapping = (
-        db.query(OntologyMapping)
-        .filter(
-            OntologyMapping.id == mapping_id,
-            OntologyMapping.ontology_id == ontology_id,
-        )
-        .first()
-    )
-    if not mapping:
-        raise HTTPException(404, "Mapping not found in this ontology")
-    raise HTTPException(
-        409,
-        "禁止直接提交原始数据执行映射；请使用 apply-from-dataset，"
-        "由服务端读取已绑定且通过校验的数据版本",
-    )
-
-
-def apply_mapping_from_dataset(
-    db: Session,
-    ontology_id: str,
-    mapping_id: str,
-) -> dict:
-    from app.ontologies.mappings.models import OntologyMapping
-    from app.ontologies.mappings.mapping_service import (
-        MappingApplyError,
-        MappingReleaseScopeError,
-        MappingService,
-        MappingSourceError,
-    )
-
-    mapping = (
-        db.query(OntologyMapping)
-        .filter(
-            OntologyMapping.id == mapping_id,
-            OntologyMapping.ontology_id == ontology_id,
-        )
-        .first()
-    )
-    if not mapping:
-        raise HTTPException(404, "Mapping not found")
-    if not mapping.curated_dataset_id:
-        raise HTTPException(400, "Mapping has no curated_dataset_id")
-
-    service = MappingService(db)
-    try:
-        result = service.build_all(ontology_id, require_approved=True)
-        result["trigger_mapping_id"] = mapping_id
-        return result
-    except MappingSourceError as exc:
-        raise HTTPException(422, str(exc))
-    except MappingReleaseScopeError as exc:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "mapping_not_in_current_release",
-                "message": str(exc),
-            },
-        )
-    except MappingApplyError as exc:
-        raise HTTPException(500, str(exc))
-
-
-def build_all_mappings(db: Session, ontology_id: str) -> dict:
-    from app.ontologies.mappings.models import OntologyLinkMapping
-    from app.ontologies.mappings.mapping_service import (
-        MappingApplyError,
-        MappingReleaseScopeError,
-        MappingService,
-        MappingSourceError,
-    )
-
-    service = MappingService(db)
-    try:
-        result = service.build_all(ontology_id, require_approved=True)
-        active_links = (
-            db.query(OntologyLinkMapping)
-            .filter(
-                OntologyLinkMapping.ontology_id == ontology_id,
-                OntologyLinkMapping.status == "active",
-            )
-            .count()
-        )
-        inferred_links = (
-            db.query(OntologyLinkMapping)
-            .filter(
-                OntologyLinkMapping.ontology_id == ontology_id,
-                OntologyLinkMapping.status == "inferred",
-            )
-            .count()
-        )
-        result["link_mappings_configured"] = active_links
-        result["link_mappings_inferred"] = inferred_links
-        return result
-    except MappingSourceError as exc:
-        raise HTTPException(422, detail=str(exc))
-    except MappingReleaseScopeError as exc:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "mapping_not_in_current_release",
-                "message": str(exc),
-            },
-        )
-    except MappingApplyError as exc:
-        raise HTTPException(500, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(500, detail=str(exc))

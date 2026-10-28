@@ -11,6 +11,7 @@ import {
 import { Alert } from '@/components/ui/Alert'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
   backendsLabel, dbxStateDetail, dbxStateLabel, integratedCell, integratedError,
@@ -26,12 +27,19 @@ type FailurePayload = {
   message?: string
 }
 
+function terminalReceiptGuidance(status: MutationReceipt['status']): string {
+  if (status === 'failed') return '写入已明确失败；当前幂等键已结算，请使用新幂等键重试。'
+  if (status === 'conflict') return '源记录已发生冲突；当前幂等键已结算，请取消并重新加载源数据。'
+  return '写入未确认成功，请先核查回执，不要重复提交。'
+}
+
 const DEFAULT_SCHEMA: IntegratedSchema = { columns: [], primary_key: [], schema_fingerprint: '' }
 
-export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
+export default function IntegratedAssetDetail({ asset, canManage, onChanged, onDecommissioned }: {
   asset: IntegratedAsset
   canManage: boolean
   onChanged: () => void
+  onDecommissioned?: () => void
 }) {
   const [schema, setSchema] = useState<IntegratedSchema>(DEFAULT_SCHEMA)
   const [versions, setVersions] = useState<IntegratedVersion[]>([])
@@ -54,6 +62,10 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
   const [receipt, setReceipt] = useState<MutationReceipt | null>(null)
   const [outcomeUnconfirmed, setOutcomeUnconfirmed] = useState(false)
   const [refreshingSchema, setRefreshingSchema] = useState(false)
+  // 受控注销：确认弹窗 + 结构化 409 明细（历史/映射/流水线/任务）
+  const [decommissioning, setDecommissioning] = useState(false)
+  const [decommissionOpen, setDecommissionOpen] = useState(false)
+  const [decommissionError, setDecommissionError] = useState('')
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
 
@@ -190,8 +202,35 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
     setOutcomeUnconfirmed(false)
   }
 
+  const retryFailed = () => {
+    if (!intent || saving || receipt?.status !== 'failed') return
+    setIntent({ ...intent, idempotencyKey: uuid() })
+    setReceipt(null)
+    setMutationError('')
+    setAttempted(false)
+    setOutcomeUnconfirmed(false)
+  }
+
+  const reloadAfterConflict = async () => {
+    if (saving) return
+    setIntent(null)
+    setReceipt(null)
+    setMutationError('')
+    setAttempted(false)
+    setOutcomeUnconfirmed(false)
+    await loadRows()
+  }
+
+  // A settled conflict key cannot be replayed, so closing the editor after a
+  // conflict must take the cancel-and-reload path; otherwise the stale row
+  // token stays and every write button remains locked with no way out.
+  const closeEditor = () => {
+    if (receipt?.status === 'conflict') { void reloadAfterConflict(); return }
+    if (!saving) setIntent(null)
+  }
+
   const write = async () => {
-    if (!intent || saving || outcomeUnconfirmed) return
+    if (!intent || saving || outcomeUnconfirmed || attempted || receipt?.status === 'conflict') return
     setSaving(true)
     setMutationError('')
     setReceipt(null)
@@ -222,11 +261,19 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
         onChanged()
         return
       }
-      // conflict/failed/unknown/pending receipts are never success: keep the
-      // modal open, keep the original idempotency key, and pause replay when
-      // the source outcome cannot be confirmed.
-      setOutcomeUnconfirmed(receiptNeedsReconciliation(response))
-      setMutationError(`写入未确认成功：回执状态 ${receiptStatusLabel(response.status)}`)
+      if (response.status === 'failed') {
+        // A failed receipt is terminal for this key, but the user's edit can
+        // be retried safely with a fresh key after the source rejected it.
+        setAttempted(true)
+        setOutcomeUnconfirmed(false)
+        setMutationError(terminalReceiptGuidance(response.status))
+      } else {
+        // Conflicts and unknown/pending outcomes must not be replayed with the
+        // same key. Conflicts require a fresh source read; unknown/pending
+        // outcomes require receipt reconciliation.
+        setOutcomeUnconfirmed(true)
+        setMutationError(terminalReceiptGuidance(response.status))
+      }
     } catch (failure) {
       if (!alive.current) return
       const payload = failure as FailurePayload
@@ -235,9 +282,11 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
       if (mutation) setReceipt(mutation)
       const unconfirmed = submitted && (
         receiptNeedsReconciliation(mutation ?? null)
+        || mutation?.status === 'conflict'
         || payload.detail?.code === 'UNKNOWN_REQUIRES_RECONCILIATION'
         || (!mutation && (!payload.status || payload.status >= 500))
       )
+      setAttempted(!!mutation || unconfirmed)
       setOutcomeUnconfirmed(unconfirmed)
     } finally {
       if (alive.current) setSaving(false)
@@ -258,12 +307,31 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
         await loadRows()
         onChanged()
       } else {
-        setMutationError(`写入回执仍为 ${receiptStatusLabel(next.status)}；未确认成功，不能换新幂等键重放。`)
+        setOutcomeUnconfirmed(next.status !== 'failed')
+        setMutationError(terminalReceiptGuidance(next.status))
       }
     } catch (failure) {
       if (alive.current) setMutationError(integratedError(failure))
     } finally {
       if (alive.current) setSaving(false)
+    }
+  }
+
+  const decommission = async () => {
+    setDecommissioning(true)
+    setDecommissionError('')
+    try {
+      await integratedDatasetsApi.decommission(asset.id)
+      if (!alive.current) return
+      setDecommissionOpen(false)
+      onDecommissioned?.()
+      onChanged()
+    } catch (failure) {
+      // 结构化 409：历史/映射绑定/流水线/任务明细在 message 中汇总；
+      // 历史与审计记录不会被删除，这里只如实展示服务端拒绝原因。
+      if (alive.current) setDecommissionError(integratedError(failure))
+    } finally {
+      if (alive.current) setDecommissioning(false)
     }
   }
 
@@ -336,6 +404,18 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
           onClick={() => beginEdit('insert')}
         >
           <Plus size={13} />新增源记录
+        </Button>
+        <Button
+          type="button" variant="outline" size="sm"
+          disabled={!canManage || activeSync}
+          title={!canManage
+            ? '只有管理员和编辑者可注销资产'
+            : activeSync
+              ? '同步进行中不能注销；请等待运行结束'
+              : '受控注销：零历史/零映射绑定/零任务才允许，服务端仍要求资产 owner 或管理员'}
+          onClick={() => { setDecommissionOpen(true); setDecommissionError('') }}
+        >
+          <Trash2 size={13} />注销资产
         </Button>
       </div>
 
@@ -453,7 +533,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
         )}
       </div>
 
-      {outcomeUnconfirmed && (
+      {outcomeUnconfirmed && receipt?.status !== 'conflict' && (
         <Alert variant="warning" role="alert">
           写入结果未知，已暂停新的源表写入，不能换新幂等键重放。请核查回执，或请管理员按幂等键 {intent?.idempotencyKey ?? receipt?.id ?? '（见回执）'} 与源记录核对。
         </Alert>
@@ -467,7 +547,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
         </p>
       )}
 
-      <Dialog open={!!intent} onOpenChange={open => { if (!open && !saving) setIntent(null) }}>
+      <Dialog open={!!intent} onOpenChange={open => { if (!open) closeEditor() }}>
         <DialogContent dismissible={!saving} className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{intent?.mode === 'delete' ? '删除源记录' : intent?.mode === 'insert' ? '新增源记录' : '编辑源记录'}</DialogTitle>
@@ -482,7 +562,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
               源记录值（JSON）
               <textarea
                 aria-label="源记录值 JSON"
-                disabled={saving || attempted}
+                disabled={saving || (attempted && receipt?.status !== 'failed')}
                 value={values}
                 onChange={event => setValues(event.target.value)}
                 rows={10}
@@ -497,8 +577,23 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
             <Alert variant="danger" role="alert" className="mt-3">
               {mutationError}
               <p className="mt-1 text-xs">
-                冲突或未确认结果都不是成功；结果未知时不要重复提交或换新幂等键，请先核查回执。
+                {receipt?.status === 'failed'
+                  ? '写入失败不是未知结果；请使用新幂等键重试，当前编辑内容会保留。'
+                  : receipt?.status === 'conflict'
+                    ? '源记录已变化；请取消并重新加载源数据，不能重放当前幂等键。'
+                    : '冲突或未确认结果都不是成功；结果未知时不要重复提交或换新幂等键，请先核查回执。'}
               </p>
+              {/* 结算后的恢复动作必须放在弹窗内：模态层会挡住页面上的任何按钮。 */}
+              {receipt?.status === 'failed' && (
+                <Button type="button" variant="link" size="sm" className="ml-2 h-auto px-1" disabled={saving} onClick={retryFailed}>
+                  <RefreshCw size={13} />使用新幂等键重试
+                </Button>
+              )}
+              {receipt?.status === 'conflict' && (
+                <Button type="button" variant="link" size="sm" className="ml-2 h-auto px-1" disabled={saving} onClick={() => void reloadAfterConflict()}>
+                  <RefreshCw size={13} />取消并重新加载源数据
+                </Button>
+              )}
             </Alert>
           )}
           <p className="mt-2 break-all font-mono text-xs text-muted-foreground">幂等键：{intent?.idempotencyKey}</p>
@@ -511,18 +606,41 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged }: {
             </p>
           )}
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={saving} onClick={() => setIntent(null)}>取消</Button>
+            <Button type="button" variant="outline" disabled={saving} onClick={closeEditor}>取消</Button>
             <Button
               type="button"
               variant={intent?.mode === 'delete' ? 'danger' : 'default'}
               onClick={write}
-              disabled={saving || outcomeUnconfirmed}
+              disabled={saving || outcomeUnconfirmed || attempted || receipt?.status === 'conflict'}
             >
               {saving && <Loader2 size={14} className="animate-spin" />}确认写入源表
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={decommissionOpen}
+        title="注销集成资产"
+        description={
+          <>
+            <p>
+              确认注销「{asset.name}」（{asset.schema_name}.{asset.table_name}）？
+              受控注销要求零历史（数据集版本 / 同步运行 / 写入回执，任何状态）、零本体映射绑定、零流水线与数据任务；
+              存在任一依赖时服务端会以 409 拒绝并列出明细。
+            </p>
+            <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
+              历史与审计记录不会被删除；源表本身不受影响，只是解除本平台的登记引用。
+            </p>
+            {decommissionError && <p className="mt-2 font-medium" role="alert">{decommissionError}</p>}
+          </>
+        }
+        confirmText={decommissioning ? '注销中...' : '确认注销'}
+        variant="danger"
+        loading={decommissioning}
+        onConfirm={decommission}
+        onClose={() => { if (!decommissioning) setDecommissionOpen(false) }}
+      />
     </section>
   )
 }

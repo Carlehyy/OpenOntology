@@ -1295,6 +1295,16 @@ class UnifiedQueryService:
 
 def execute_unified_query(db: Session, user: Any, request: QS.QueryRequest, *,
                           session_kind: str, session_id: str) -> dict:
+    from .remote_query import execute_remote_query, uses_remote_sources
+
+    try:
+        remote = uses_remote_sources(db, request)
+    except Exception as exc:
+        from .remote_query import _port_error
+        raise _port_error(exc) from exc
+    if remote:
+        return execute_remote_query(db, user, request, session_kind=session_kind,
+                                    session_id=session_id)
     service = UnifiedQueryService(db, user, request,
                                   session_kind=session_kind,
                                   session_id=session_id)
@@ -1306,6 +1316,10 @@ def execute_unified_query(db: Session, user: Any, request: QS.QueryRequest, *,
 
 def fetch_unified_query_page(db: Session, user: Any, token: str, *,
                              session_kind: str, session_id: str) -> dict:
+    if token.startswith("mem."):
+        from .remote_query import fetch_remote_page
+        return fetch_remote_page(db, user, token, session_kind=session_kind,
+                                  session_id=session_id)
     placeholder = QS.QueryRequest(
         sources=[QS.QuerySource(alias="a", ontology_id="0",
                                 release_id="0", object_type_id="0")],

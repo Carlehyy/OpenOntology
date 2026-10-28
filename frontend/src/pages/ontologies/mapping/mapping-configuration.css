@@ -235,6 +235,18 @@
 .dmc-asset-columns i { width: 8px; }
 .dmc-asset-columns b { overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 10px; }
 .dmc-asset-columns em { padding: 2px 4px; border-radius: 4px; color: #75828c; background: #edf2f3; font-size: 9px; font-style: normal; }
+/* 远程只读绑定（数据资产湖第三组：登记的 integrated 资产；仅冻结定义，
+   数据查询时从源读取。取色一律 viz 语义 token，色板棘轮禁新增 hex。） */
+.dmc-remote-group { margin-top: 2px; padding: 10px 6px 2px; border-top: 1px dashed var(--dmc-line); }
+.dmc-remote-group__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px; }
+.dmc-remote-group__head b { color: var(--color-viz-violet); font-size: 10px; }
+.dmc-remote-group__head em { padding: 1px 7px; border-radius: 99px; color: var(--color-viz-violet); background: var(--color-viz-violet-soft); font-size: 9px; font-style: normal; }
+.dmc-remote-group__hint { margin: 6px 4px 8px; color: var(--dmc-muted); font-size: 9px; line-height: 1.5; }
+/* 登记表读取失败：诚实可见的受控错误信息 + 重试入口，不静默降级成"没有资产" */
+.dmc-remote-group--error .dmc-remote-group__hint { color: var(--color-danger); }
+.dmc-remote-group--error .dmc-remote-group__hint > button { margin-left: 6px; padding: 1px 7px; border: 1px solid var(--color-danger); border-radius: 6px; color: var(--color-danger); background: transparent; font-size: 9px; }
+.dmc-remote-group--error .dmc-remote-group__hint > button:hover { background: var(--color-danger-bg); }
+.dmc-asset-icon--remote { color: var(--color-viz-violet); background: var(--color-viz-violet-soft); }
 .dmc-sidebar-foot { min-height: 39px; padding: 0 12px; border-top: 1px solid var(--dmc-line-soft); display: flex; align-items: center; gap: 14px; color: #87939d; background: #fbfcfc; font-size: 10px; }
 .dmc-sidebar-foot span { display: flex; align-items: center; gap: 4px; }
 
@@ -330,6 +342,8 @@
 .dmc-node__stripe { height: 3px; border-radius: 10px 10px 0 0; background: #19a294; }
 .dmc-node--object .dmc-node__stripe { background: #6876c9; }
 .dmc-node--relation .dmc-node__stripe { background: #d99b3d; }
+.dmc-node--remote .dmc-node__stripe { background: var(--color-viz-violet); }
+.dmc-node--remote header > span { color: var(--color-viz-violet); background: var(--color-viz-violet-soft); }
 .dmc-node header { min-height: 50px; padding: 8px 10px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #e6ecee; background: linear-gradient(135deg,#fff,#f7faf9); }
 .dmc-node header > span { width: 29px; height: 29px; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #168f83; background: #e7f5f2; }
 .dmc-node--object header > span { color: #6572c5; background: #eef0fb; }

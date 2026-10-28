@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { Database, Plus, RefreshCw } from 'lucide-react'
 import { integratedDatasetsApi, type IntegratedAsset } from '@/api/v2/integrated-datasets'
 import { useAuthStore } from '@/stores/authStore'
@@ -18,7 +18,6 @@ function CapabilityBadge({ label, enabled }: { label: string; enabled: boolean }
 
 export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatasetId?: string | null }) {
   const [, setSearchParams] = useSearchParams()
-  const navigate = useNavigate()
   const role = useAuthStore(state => state.user?.role)
   const canManage = role === 'admin' || role === 'editor'
   const [assets, setAssets] = useState<IntegratedAsset[]>([])
@@ -58,6 +57,13 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
     const next = new URLSearchParams(previous)
     next.set('tab', 'integrated')
     next.set('dataset', id)
+    return next
+  }, { replace: true })
+
+  const clearSelection = () => setSearchParams(previous => {
+    const next = new URLSearchParams(previous)
+    next.set('tab', 'integrated')
+    next.delete('dataset')
     return next
   }, { replace: true })
 
@@ -108,10 +114,10 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
         {!loading && !listError && assets.length === 0 && (
           <EmptyState
             title="尚未登记集成数据集"
-            description="先选择已有 MySQL / PostgreSQL 连接，由 dbx 核验源表后再登记。未配置 dbx 时登记会明确失败，不会生成半套资产。"
+            description="在登记弹窗内可直接创建并测试 MySQL / PostgreSQL 连接，再由 dbx 核验源表后登记；未配置 dbx 时登记会明确失败，不会生成半套资产。"
             action={canManage ? (
-              <Button type="button" size="sm" onClick={() => navigate('/data/pipelines/connections')}>
-                前往数据连接
+              <Button type="button" size="sm" onClick={() => setRegistering(true)}>
+                <Plus size={13} />登记集成数据集
               </Button>
             ) : undefined}
           />
@@ -177,6 +183,10 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
           asset={selected}
           canManage={canManage}
           onChanged={refresh}
+          onDecommissioned={() => {
+            clearSelection()
+            window.dispatchEvent(new Event('ontoprompt:data-assets-changed'))
+          }}
         />
       )}
       <IntegratedQueryPanel key={`query-${selected?.id || 'unselected'}`} assets={assets} selectedId={selected?.id} />

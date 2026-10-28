@@ -91,8 +91,110 @@ def _typed_value(spec: ColumnSpec, raw: Any) -> Any:
                      f"Value for {spec.name!r} must have declared type {spec.type}")
 
 
+def _comparable(expr, spec, dialect):
+    if spec.type == "string":
+        if dialect == "mysql": return sa.cast(expr, mysql.BINARY())
+        return sa.cast(expr, sa.Text()).collate("C" if dialect == "postgresql" else "BINARY")
+    return expr
+
+
+class _PredicateBuilder:
+    """Typed predicate compilation shared by compile_query and compile_predicate."""
+
+    def __init__(self, expressions, specs, params, dialect, prefix):
+        self.expressions, self.specs = expressions, specs
+        self.params, self.dialect, self.prefix = params, dialect, prefix
+        self.used_params: set[str] = set()
+        self.bound_params: dict[str, Any] = {}
+        self._binds = 0
+
+    def comparable(self, expr, spec):
+        return _comparable(expr, spec, self.dialect)
+
+    def lookup(self, ref: Ref):
+        if ref not in self.expressions:
+            raise QueryError(422, "unknown_field", f"Field {ref.alias}.{ref.name} is not visible here")
+        return self.expressions[ref], self.specs[ref]
+
+    def value_for(self, value: Value, spec: ColumnSpec):
+        raw = value.value
+        if value.parameter:
+            if raw not in self.params:
+                raise QueryError(422, "missing_parameter", f"Missing parameter :{raw}")
+            self.used_params.add(raw)
+            raw = self.params[raw]
+        return self.bind_value(_typed_value(spec, raw), spec)
+
+    def bind_value(self, parsed: Any, spec: ColumnSpec):
+        name = f"{self.prefix}_{self._binds}"
+        self._binds += 1
+        self.bound_params[name] = parsed
+        return sa.bindparam(name, value=parsed, type_=spec.sql_type())
+
+    @staticmethod
+    def _escape_like(text: str) -> str:
+        # Escape to a literal substring pattern; "/" is the escape character.
+        return (text.replace("/", "//").replace("%", "/%").replace("_", "/_"))
+
+    def predicate(self, expr: Expr):
+        if expr.op in {"and", "or"}:
+            children = [self.predicate(child) for child in expr.args]
+            return (sa.and_ if expr.op == "and" else sa.or_)(*children)
+        if expr.op == "not": return sa.not_(self.predicate(expr.args[0]))
+        ref = expr.args[0]
+        col, spec = self.lookup(ref)
+        if expr.op == "is_null": return col.is_(None)
+        if expr.op == "is_not_null": return col.is_not(None)
+        if spec.type in {"json", "binary"}:
+            raise QueryError(422, "unsupported_comparison", "JSON/binary support only NULL predicates")
+        if expr.op == "contains":
+            if spec.type != "string":
+                raise QueryError(422, "unsupported_comparison", "contains requires a string field")
+            raw = expr.args[1].value
+            if expr.args[1].parameter:
+                if raw not in self.params:
+                    raise QueryError(422, "missing_parameter", f"Missing parameter :{raw}")
+                self.used_params.add(raw)
+                raw = self.params[raw]
+            needle = _typed_value(spec, raw)
+            # Bind an escaped pattern so the value stays a literal substring
+            # for every dialect (parameterized LIKE with an escape character).
+            pattern = self.bind_value("%" + self._escape_like(needle) + "%", spec)
+            return self.comparable(col, spec).like(pattern, escape="/")
+        col = self.comparable(col, spec)
+        if expr.op == "in":
+            if len(expr.args) > 1001:
+                raise QueryError(422, "query_too_complex", "IN supports at most 1000 values")
+            return col.in_([self.value_for(v, spec) for v in expr.args[1:]])
+        val = self.value_for(expr.args[1], spec)
+        if expr.op in {">", ">=", "<", "<="} and spec.type not in _ORDERABLE:
+            raise QueryError(422, "unsupported_comparison", f"Cannot order {spec.type}")
+        return {"=": lambda: col == val, "!=": lambda: col != val,
+                "<>": lambda: col != val, ">": lambda: col > val,
+                ">=": lambda: col >= val, "<": lambda: col < val,
+                "<=": lambda: col <= val}[expr.op]()
+
+
+def compile_predicate(expr, relations, params, *, dialect: str = "postgresql",
+                      bind_prefix: str = "qv"):
+    """Build one typed WHERE predicate over relations; construct-only, never executes."""
+    expressions: dict[Ref, Any] = {}
+    specs: dict[Ref, ColumnSpec] = {}
+    for alias, relation in relations.items():
+        for name, spec in relation.columns.items():
+            ref = Ref(alias, name)
+            specs[ref] = spec
+            expressions[ref] = (relation.expressions[name] if name in relation.expressions
+                                else relation.table.c[name])
+    if not isinstance(expr, Expr):
+        raise QueryError(422, "invalid_predicate", "A typed Expr is required")
+    builder = _PredicateBuilder(expressions, specs, params or {}, dialect, bind_prefix)
+    return builder.predicate(expr), builder.bound_params
+
+
 def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
-                  params: dict[str, Any], *, dialect: str = "postgresql") -> Compiled:
+                  params: dict[str, Any], *, dialect: str = "postgresql",
+                  bind_prefix: str = "qv") -> Compiled:
     expressions: dict[Ref, Any] = {}
     specs: dict[Ref, ColumnSpec] = {}
     for alias, relation in relations.items():
@@ -110,58 +212,8 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
             raise QueryError(422, "unknown_field", f"Unknown field {ref.alias}.{ref.name}")
     # Stable labels use indexes, not user identifiers or concatenations.
     labels = {ref: f"qf_{i}" for i, ref in enumerate(specs) if ref in required}
-    used_params: set[str] = set()
-    bound_params: dict[str, Any] = {}
-    binds = 0
-
-    def comparable(expr, spec):
-        if spec.type == "string":
-            if dialect == "mysql": return sa.cast(expr, mysql.BINARY())
-            return sa.cast(expr, sa.Text()).collate("C" if dialect == "postgresql" else "BINARY")
-        return expr
-
-    def lookup(ref: Ref):
-        if ref not in expressions:
-            raise QueryError(422, "unknown_field", f"Field {ref.alias}.{ref.name} is not visible here")
-        return expressions[ref], specs[ref]
-
-    def value_for(value: Value, spec: ColumnSpec):
-        nonlocal binds
-        raw = value.value
-        if value.parameter:
-            if raw not in params:
-                raise QueryError(422, "missing_parameter", f"Missing parameter :{raw}")
-            used_params.add(raw)
-            raw = params[raw]
-        parsed = _typed_value(spec, raw)
-        name = f"qv_{binds}"
-        binds += 1
-        bound_params[name] = parsed
-        return sa.bindparam(name, value=parsed, type_=spec.sql_type())
-
-    def predicate(expr: Expr):
-        if expr.op in {"and", "or"}:
-            children = [predicate(child) for child in expr.args]
-            return (sa.and_ if expr.op == "and" else sa.or_)(*children)
-        if expr.op == "not": return sa.not_(predicate(expr.args[0]))
-        ref = expr.args[0]
-        col, spec = lookup(ref)
-        if expr.op == "is_null": return col.is_(None)
-        if expr.op == "is_not_null": return col.is_not(None)
-        if spec.type in {"json", "binary"}:
-            raise QueryError(422, "unsupported_comparison", "JSON/binary support only NULL predicates")
-        col = comparable(col, spec)
-        if expr.op == "in":
-            if len(expr.args) > 1001:
-                raise QueryError(422, "query_too_complex", "IN supports at most 1000 values")
-            return col.in_([value_for(v, spec) for v in expr.args[1:]])
-        val = value_for(expr.args[1], spec)
-        if expr.op in {">", ">=", "<", "<="} and spec.type not in _ORDERABLE:
-            raise QueryError(422, "unsupported_comparison", f"Cannot order {spec.type}")
-        return {"=": lambda: col == val, "!=": lambda: col != val,
-                "<>": lambda: col != val, ">": lambda: col > val,
-                ">=": lambda: col >= val, "<": lambda: col < val,
-                "<=": lambda: col <= val}[expr.op]()
+    builder = _PredicateBuilder(expressions, specs, params, dialect, bind_prefix)
+    comparable, predicate = builder.comparable, builder.predicate
 
     visible_aliases = {pipeline.alias}
     initial = relations[pipeline.alias]
@@ -175,6 +227,7 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
     finalized = False
     sorted_ = False
     limited = False
+    distinct_ = False
     output_columns: list[ColumnSpec] = []
     outputs: dict[str, Any] = {}
     projected_refs: dict[Ref, str] = {}
@@ -184,6 +237,7 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
         nonlocal stmt, expressions
         sub = stmt.subquery()
         expressions = {ref: sub.c[labels[ref]] for ref in expressions}
+        builder.expressions = expressions
         stmt = sa.select(*(col.label(labels[ref]) for ref, col in expressions.items())).select_from(sub)
         if not expressions:
             stmt = sa.select(sa.literal(1).label("q_dummy")).select_from(sub)
@@ -247,19 +301,23 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
             chosen = []
             if op == "fields":
                 for ref, name in args:
-                    col, spec = lookup(ref)
+                    col, spec = builder.lookup(ref)
                     chosen.append(col.label(name))
                     projected_refs[ref] = name
                     output_columns.append(replace(spec, name=name))
             else:
                 groups = next((arg[1] for arg in args if arg[0] == "group"), ())
-                for ref in groups:
-                    col, spec = lookup(ref)
+                group_refs = []
+                for item in groups:
+                    # Typed callers may attach an output alias: (Ref, name).
+                    ref, out_name = item if isinstance(item, tuple) else (item, item.name)
+                    group_refs.append(ref)
+                    col, spec = builder.lookup(ref)
                     if spec.type in {"json", "binary"}:
                         raise QueryError(422, "unsupported_group_type", "Cannot group JSON/binary")
-                    chosen.append(comparable(col, spec).label(ref.name))
-                    projected_refs[ref] = ref.name
-                    output_columns.append(replace(spec, name=ref.name))
+                    chosen.append(comparable(col, spec).label(out_name))
+                    projected_refs[ref] = out_name
+                    output_columns.append(replace(spec, name=out_name))
                 for item in args:
                     if item[0] == "group": continue
                     fn, ref, name = item
@@ -269,7 +327,7 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
                     else:
                         if ref is None:
                             raise QueryError(422, "invalid_aggregate", f"{fn} requires a field")
-                        col, source_spec = lookup(ref)
+                        col, source_spec = builder.lookup(ref)
                         if fn in {"sum", "avg"} and source_spec.type not in _NUMERIC:
                             raise QueryError(422, "invalid_aggregate_type", f"{fn} requires a numeric field")
                         if fn in {"min", "max"} and source_spec.type not in _ORDERABLE:
@@ -298,10 +356,16 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
             if any(not name or len(name.encode("utf-8")) > 63 or "\x00" in name for name in names):
                 raise QueryError(422, "invalid_output_name", "Output names must occupy 1..63 UTF-8 bytes; alias long physical names")
             stmt = sa.select(*chosen).select_from(sub)
-            if op == "stats" and groups:
-                stmt = stmt.group_by(*(comparable(lookup(ref)[0], specs[ref]) for ref in groups))
+            if op == "stats" and group_refs:
+                stmt = stmt.group_by(*(comparable(builder.lookup(ref)[0], specs[ref]) for ref in group_refs))
             outputs = dict(zip(names, chosen))
             finalized = True
+        elif op == "distinct":
+            # Typed-only operator: deduplicate the finalized projection.
+            if not finalized or distinct_ or sorted_:
+                raise QueryError(422, "invalid_operator_order", "DISTINCT must follow FIELDS/STATS and precede SORT/LIMIT")
+            stmt = stmt.distinct()
+            distinct_ = True
         elif op == "sort":
             if sorted_:
                 raise QueryError(422, "invalid_operator_order", "Only one SORT is supported")
@@ -333,7 +397,7 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
             stmt = stmt.limit(args[0]).offset(args[1] if len(args) > 1 else 0)
             limited = True
     if not finalized: finalize_default()
-    unused = set(params) - used_params
+    unused = set(params) - builder.used_params
     if unused:
         raise QueryError(422, "unused_parameter", f"Unused parameter(s): {', '.join(sorted(unused))}")
     # DBAPI JSON decoders commonly collapse SQL NULL and JSON literal null.
@@ -345,4 +409,4 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
             sa.cast(column, sa.Text()).label(spec.name) if spec.type == "json" else column
             for column, spec in zip(stmt.selected_columns, output_columns)
         ), maintain_column_froms=True)
-    return Compiled(stmt, output_columns, before_limit, bound_params)
+    return Compiled(stmt, output_columns, before_limit, builder.bound_params)

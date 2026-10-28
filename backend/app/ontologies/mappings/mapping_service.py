@@ -28,6 +28,33 @@ def _release_field_mapping(value: dict | None) -> dict:
     }
 
 
+def _release_binding_view(field_mapping: dict | None) -> dict:
+    """Canonical binding view for the release-scope fence.
+
+    Derived from the field_mapping definition (the single definition store);
+    snapshot top-level ``bindingMode``/``remote`` keys are mirrors of it.
+    """
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        RemoteBindingError,
+        mapping_binding_mode,
+    )
+    try:
+        mode = mapping_binding_mode(field_mapping)
+    except RemoteBindingError as exc:
+        raise MappingReleaseScopeError(
+            f"映射绑定模式非法，已拒绝写入正式实例：{exc.message}") from exc
+    view = {"bindingMode": mode, "remote": None}
+    if mode == BINDING_MODE_REMOTE:
+        from app.ontologies.mappings.remote_binding import remote_descriptor
+        try:
+            view["remote"] = remote_descriptor(field_mapping)
+        except RemoteBindingError as exc:
+            raise MappingReleaseScopeError(
+                f"远程映射描述符非法，已拒绝写入正式实例：{exc.message}") from exc
+    return view
+
+
 
 
 
@@ -45,6 +72,16 @@ def load_mapping_source_rows(
     为空会明确失败；只有已发布映射显式传入 ``allow_empty_version`` 且存在
     一个真实、已治理的 v2 DatasetVersion 时，零行才表示权威的“全部删除”。
     """
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        mapping_binding_mode,
+    )
+    if mapping_binding_mode(
+            getattr(mapping, "field_mapping", None)) == BINDING_MODE_REMOTE:
+        raise MappingSourceError(
+            f"Mapping {mapping.id} 是远程绑定（binding_mode=remote），"
+            "不存在本地数据版本；本地物化路径已隔离，"
+            "查询期由主协调解析远程数据")
     if batch_size is not None:
         from app.ontologies.mappings.source_batches import prepare_mapping_source
         source = prepare_mapping_source(
@@ -191,6 +228,7 @@ class MappingService(
                 "fieldMapping": _release_field_mapping(item.field_mapping),
                 "targetObjectTypeId": item.target_object_type_id,
                 "confidence": item.confidence,
+                **_release_binding_view(item.field_mapping),
             }
             for item in mappings
         }
@@ -202,6 +240,7 @@ class MappingService(
                 "fieldMapping": _release_field_mapping(item.get("fieldMapping")),
                 "targetObjectTypeId": item.get("targetObjectTypeId"),
                 "confidence": item.get("confidence"),
+                **_release_binding_view(item.get("fieldMapping")),
             }
             for item in snapshot["mappings"] if item.get("id")
         }
@@ -220,6 +259,7 @@ class MappingService(
                 "linkTypeId": item.link_type_id,
                 "edgeDatasetId": item.edge_dataset_id,
                 "fieldMapping": _release_field_mapping(item.field_mapping),
+                **_release_binding_view(item.field_mapping),
             }
             for item in live_link_rows
         }
@@ -234,6 +274,7 @@ class MappingService(
                 "linkTypeId": item.get("linkTypeId"),
                 "edgeDatasetId": item.get("edgeDatasetId"),
                 "fieldMapping": _release_field_mapping(item.get("fieldMapping")),
+                **_release_binding_view(item.get("fieldMapping")),
             }
             for item in snapshot["linkMappings"] if item.get("id")
         }
@@ -364,6 +405,16 @@ class MappingService(
         if not mapping:
             suffix = f" in ontology {ontology_id}" if ontology_id else ""
             raise ValueError(f"Mapping {mapping_id} not found{suffix}")
+
+        from app.ontologies.mappings.remote_binding import (
+            BINDING_MODE_REMOTE,
+            mapping_binding_mode,
+        )
+        if mapping_binding_mode(mapping.field_mapping) == BINDING_MODE_REMOTE:
+            raise MappingApplyError(
+                f"Mapping {mapping_id} 是远程绑定（binding_mode=remote），"
+                "不走本地物化；查询期由主协调解析远程数据，"
+                "发布验证请走试跑/发布正门")
 
         project = self._db.query(OntologyProject).filter(
             OntologyProject.id == mapping.ontology_id,
@@ -636,6 +687,28 @@ class MappingService(
         if not mappings:
             return {"error": "no mappings configured", "ontology_id": ontology_id}
 
+        # 远程绑定与本地物化隔离：远程映射不读取本地数据版本、不产生实体/关系
+        # 投影，只在结果中显式登记为“未物化”，绝不静默跳过。
+        from app.ontologies.mappings.remote_binding import (
+            BINDING_MODE_REMOTE,
+            mapping_binding_mode,
+        )
+        remote_mappings = [
+            item for item in mappings
+            if item.curated_dataset_id
+            and mapping_binding_mode(item.field_mapping) == BINDING_MODE_REMOTE
+        ]
+        remote_binding_results = [
+            {
+                "mapping_id": item.id,
+                "entity_class": item.entity_class,
+                "materialized": False,
+                "reason": "remote_binding_not_materialized",
+            }
+            for item in remote_mappings
+        ]
+        remote_datasets = {item.curated_dataset_id for item in remote_mappings}
+
         # Formal Object/Link writes would otherwise trigger CDC immediately at
         # the first commit while mappings are deliberately fenced as
         # ``projecting``.  Capture the exact delta and release it only after all
@@ -662,6 +735,9 @@ class MappingService(
 
         for m in mappings:
             if not m.curated_dataset_id:
+                continue
+            if mapping_binding_mode(m.field_mapping) == BINDING_MODE_REMOTE:
+                # 远程绑定：物化路径隔离（见 remote_binding_results）。
                 continue
             source, source_version = load_mapping_source_rows(
                 self._db, m, require_approved=require_approved,
@@ -707,7 +783,8 @@ class MappingService(
             relation_results = []
 
         # Phase 2b: Link Mapping 处理（手动配置的跨表关系）
-        link_results = self._process_link_mappings(ontology_id, mapping_meta)
+        link_results = self._process_link_mappings(
+            ontology_id, mapping_meta, remote_datasets=remote_datasets)
         relation_results.extend(link_results)
 
         # Phase 3 is likewise draft-only.  Runtime projection must never mutate
@@ -801,6 +878,7 @@ class MappingService(
             "formal_projection": formal_projection,
             "neo4j_projection_rebuilt": neo4j_rebuilt,
             "projection_warnings": projection_errors,
+            "remote_bindings": remote_binding_results,
             "sentinel_dispatch": sentinel_dispatch,
             "total_entities": sum(r.get("v1_entities_written", 0) for r in entity_results),
             "total_relations": sum(r.get("count", 0) for r in relation_results),

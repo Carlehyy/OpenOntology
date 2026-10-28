@@ -11,6 +11,7 @@ from fastapi.params import Depends
 
 from app.ontologies.mappings import entity_mapping_workflow
 from app.ontologies.mappings import link_mapping_workflow
+from app.ontologies.mappings import materialization_workflow
 from app.ontologies.mappings import query_service
 from app.ontologies.mappings import request_validation
 from app.ontologies.mappings import router as mapping_router
@@ -21,14 +22,17 @@ MAPPING_DIR = BACKEND_DIR / "app" / "ontologies" / "mappings"
 
 ROUTE_PARAMETERS = {
     "suggest_mapping": ("ontology_id", "body", "db"),
-    "create_mapping": ("ontology_id", "body", "db"),
-    "update_mapping": ("ontology_id", "mapping_id", "body", "db"),
+    # 远程绑定（binding_mode=remote）需要认证用户执行服务端冻结/授权验证，
+    # 三个定义入口因此带 current_user（HTTP 路径/请求体不变，仅新增鉴权依赖）。
+    "create_mapping": ("ontology_id", "body", "db", "current_user"),
+    "update_mapping": (
+        "ontology_id", "mapping_id", "body", "db", "current_user"),
     "delete_mapping": ("ontology_id", "mapping_id", "db"),
     "list_mappings": ("ontology_id", "db"),
     "apply_mapping": ("ontology_id", "mapping_id", "data", "db"),
     "apply_mapping_from_dataset": ("ontology_id", "mapping_id", "db"),
     "build_all_mappings": ("ontology_id", "db"),
-    "create_link_mapping": ("ontology_id", "body", "db"),
+    "create_link_mapping": ("ontology_id", "body", "db", "current_user"),
     "list_link_mappings": ("ontology_id", "db"),
     "update_link_mapping_automation": (
         "ontology_id",
@@ -45,12 +49,12 @@ DELEGATES = {
     "update_mapping": ("_entity_workflow", "update_mapping"),
     "delete_mapping": ("_entity_workflow", "delete_mapping"),
     "list_mappings": ("_query_service", "list_mappings"),
-    "apply_mapping": ("_entity_workflow", "reject_raw_apply"),
+    "apply_mapping": ("_materialization_workflow", "reject_raw_apply"),
     "apply_mapping_from_dataset": (
-        "_entity_workflow",
+        "_materialization_workflow",
         "apply_mapping_from_dataset",
     ),
-    "build_all_mappings": ("_entity_workflow", "build_all_mappings"),
+    "build_all_mappings": ("_materialization_workflow", "build_all_mappings"),
     "create_link_mapping": ("_link_workflow", "create_link_mapping"),
     "list_link_mappings": ("_query_service", "list_link_mappings"),
     "update_link_mapping_automation": (
@@ -155,6 +159,7 @@ def test_mapping_application_modules_do_not_depend_on_http_router():
     modules = (
         entity_mapping_workflow,
         link_mapping_workflow,
+        materialization_workflow,
         query_service,
         request_validation,
     )
@@ -171,6 +176,7 @@ def test_mapping_router_and_application_modules_stay_bounded():
         "request_validation.py": 600,
         "query_service.py": 220,
         "entity_mapping_workflow.py": 620,
+        "materialization_workflow.py": 150,
         "link_mapping_workflow.py": 500,
     }
     for filename, maximum in limits.items():

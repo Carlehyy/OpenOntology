@@ -3,11 +3,11 @@
  * 零依赖纯函数层：不 import API/client，保持 node:test 可直接运行。
  */
 
-/** curated 数据集走审核流；manual（人工数据集）无审核约束，返回 'na'。 */
+/** curated 数据集走审核流；manual（人工数据集）与 remote（远程只读绑定）无审核约束，返回 'na'。 */
 export type DatasetReviewState = 'approved' | 'pending_review' | 'rejected' | 'na'
 
 export interface ReviewStatusSource {
-  source: 'curated' | 'manual'
+  source: 'curated' | 'manual' | 'remote'
   reviewStatus: string | null
 }
 

@@ -25,6 +25,7 @@ from app.data_channel.connections.models import Connection
 from app.data_channel.integrated.contracts import JsonText, digest, fail, normalize_source_value, serialize_source_json, wire_value
 from app.data_channel.integrated.models import IntegratedAsset
 from app.shared.encryption import decrypt
+from app.shared.query_control import current_query_control, interruptible_connection
 
 
 def authorize(db, user, *, write=False):
@@ -36,7 +37,9 @@ def authorize(db, user, *, write=False):
 
 def get_asset(db, user, asset_id, *, write=False):
     authorize(db, user, write=write)
-    asset = db.get(IntegratedAsset, asset_id)
+    asset = db.execute(sa.select(IntegratedAsset).where(
+        IntegratedAsset.id == asset_id).execution_options(
+            populate_existing=True)).scalar_one_or_none()
     if asset is None:
         fail(404, "ASSET_NOT_FOUND", "Integrated dataset not found")
     if write and (not asset.writable or (user.role != "admin" and asset.created_by != user.id)):
@@ -56,7 +59,8 @@ def connection_config(connection):
     return config
 
 
-def source_engine(connection):
+def _source_url(connection):
+    """Driver-normalized source URL shared by read engines and liveness probes."""
     config = connection_config(connection)
     try:
         if config.get("connection_string"):
@@ -67,14 +71,24 @@ def source_engine(connection):
                 url = url.set(drivername="mysql+pymysql")
             else:
                 fail(422, "SOURCE_DRIVER_MISMATCH", "Connection driver does not match source kind")
-        else:
-            url = URL.create(
-                "postgresql+psycopg2" if connection.kind == "postgres" else "mysql+pymysql",
-                username=config.get("user", config.get("username")), password=config.get("password"),
-                host=config.get("host", "127.0.0.1"),
-                port=int(config.get("port", 5432 if connection.kind == "postgres" else 3306)),
-                database=config.get("database"),
-            )
+            return url
+        return URL.create(
+            "postgresql+psycopg2" if connection.kind == "postgres" else "mysql+pymysql",
+            username=config.get("user", config.get("username")), password=config.get("password"),
+            host=config.get("host", "127.0.0.1"),
+            port=int(config.get("port", 5432 if connection.kind == "postgres" else 3306)),
+            database=config.get("database"),
+        )
+    except (ValueError, TypeError, sa.exc.ArgumentError):
+        # make_url raises ArgumentError for unparseable connection strings; a
+        # malformed stored config is a configuration defect, never evidence
+        # about physical availability.
+        fail(422, "INVALID_SOURCE_CONFIG", "Invalid relational source configuration")
+
+
+def source_engine(connection):
+    try:
+        url = _source_url(connection)
         connect_args = {"connect_timeout": 10}
         if connection.kind == "mysql":
             connect_args.update(read_timeout=300, write_timeout=30)
@@ -84,6 +98,80 @@ def source_engine(connection):
         )
     except (ValueError, TypeError):
         fail(422, "INVALID_SOURCE_CONFIG", "Invalid relational source configuration")
+
+
+# Bounded liveness probe budget: short enough to fail a cursor page closed
+# quickly, long enough to survive a cold TCP handshake on a healthy source.
+PROBE_TIMEOUT_SECONDS = 2
+
+
+def _mysql_canceller(source):
+    if source.kind != "mysql":
+        return None
+    url = _source_url(source)
+
+    def cancel(thread_id):
+        engine = sa.create_engine(
+            url, poolclass=NullPool, hide_parameters=True,
+            connect_args={"connect_timeout": PROBE_TIMEOUT_SECONDS,
+                          "read_timeout": PROBE_TIMEOUT_SECONDS,
+                          "write_timeout": PROBE_TIMEOUT_SECONDS},
+        )
+        try:
+            with engine.connect() as conn:
+                # The id comes from the live driver, never from a request.
+                conn.exec_driver_sql(f"KILL QUERY {int(thread_id)}")
+        finally:
+            engine.dispose()
+
+    return cancel
+
+
+def probe_source(connection, *, timeout_seconds: int = PROBE_TIMEOUT_SECONDS):
+    """One bounded SELECT 1 on a dedicated short-timeout engine.
+
+    Physical availability only: never reflects schema, never reads source
+    rows, never opens a transaction. The connection is intentionally fresh
+    per probe (a cached or pooled liveness conclusion would be exactly the
+    staleness this probe exists to detect); NullPool keeps the cost one
+    connection per attempt, and the request query-control interrupt can
+    cancel the socket when the client disconnects.
+
+    Budget coverage per attempt: connect_timeout bounds connection
+    establishment on both drivers, and MySQL read/write timeouts bound the
+    socket client-side. psycopg2 exposes no client read deadline, so the
+    PostgreSQL session additionally carries a libpq ``options``
+    statement_timeout of the same budget, bounding *server-side* execution
+    of the single SELECT 1. This is still not a wall-clock guarantee on the
+    whole probe: a server that pauses before running the statement, or a
+    blackholed read on an already established socket, is bounded only by
+    query-control interruption — the one transport limit that remains.
+    """
+    try:
+        url = _source_url(connection)
+        connect_args = {"connect_timeout": timeout_seconds}
+        if connection.kind == "mysql":
+            connect_args.update(read_timeout=timeout_seconds, write_timeout=timeout_seconds)
+        else:
+            # postgresql+psycopg2 (connection_config rejects every other kind):
+            # no per-query socket deadline exists driver-side, so make the
+            # server cancel the probe statement itself once the budget is spent.
+            connect_args["options"] = f"-c statement_timeout={timeout_seconds * 1000}"
+        engine = sa.create_engine(url, poolclass=NullPool, connect_args=connect_args,
+                                  hide_parameters=True)
+        try:
+            with engine.connect() as conn:
+                with interruptible_connection(conn, mysql_cancel=_mysql_canceller(connection)):
+                    conn.exec_driver_sql("SELECT 1")
+        finally:
+            engine.dispose()
+    except sa.exc.DBAPIError:
+        control = current_query_control()
+        if control is not None and control.cancelled():
+            fail(409, "query_cancelled", "Source availability probe was cancelled")
+        fail(503, "SOURCE_UNAVAILABLE", "Source is not physically reachable; availability fails closed")
+    except sa.exc.SQLAlchemyError:
+        fail(503, "SOURCE_UNAVAILABLE", "Source is not physically reachable; availability fails closed")
 
 
 def column_metadata(column, dialect):
@@ -216,17 +304,37 @@ def resolve_metadata(db, user, asset_ids):
     result = {}
     for asset_id in dict.fromkeys(asset_ids):
         asset = get_asset(db, user, asset_id)
-        connection = db.get(Connection, asset.connection_id)
+        # Refresh past the session identity map: a credential rotation committed
+        # by another session must never serve stale credentials or a stale
+        # auth fingerprint from this session's cached Connection row.
+        connection = db.execute(
+            sa.select(Connection)
+            .where(Connection.id == asset.connection_id)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
         if connection is None:
             fail(404, "CONNECTION_NOT_FOUND", "Source connection not found")
         result[asset_id] = {
             "asset_id": asset.id, "dataset_id": asset.dataset_id,
             "connection_id": asset.connection_id,
+            # "inactive" is the creation/config-rotation default (untested),
+            # "active" a passed test, "error" a failed test.
+            "connection_status": connection.status,
             "dialect": "postgresql" if connection.kind == "postgres" else "mysql",
             "columns": asset.schema_json["columns"],
             "primary_key": asset.schema_json["primary_key"],
             "schema_fingerprint": asset.schema_fingerprint,
-            "auth_fingerprint": digest({"user": user.id, "role": user.role, "asset": asset.id}),
+            "auth_fingerprint": digest({
+                "user": user.id, "role": user.role, "asset": asset.id,
+                # Source identity revision: rotating the connection config or
+                # changing its lifecycle state must invalidate in-flight query
+                # cursors and result handles bound to the previous context.
+                # Only a one-way digest participates; raw config values
+                # (plaintext or ciphertext) never leave here and are never
+                # logged.
+                "source_config_revision": digest(connection.config or {}),
+                "source_lifecycle_status": connection.status,
+            }),
         }
     return result
 
@@ -265,6 +373,9 @@ class NativeSourceSession:
                 fail(403, "UNRESOLVED_SOURCE_TABLE", "SELECT references an unauthorized table")
 
     def _remaining(self, *, configure=False):
+        control = current_query_control()
+        if control is not None and control.cancelled():
+            fail(409, "query_cancelled", "Source query was cancelled")
         if self._deadline is None:
             return
         remaining = int((self._deadline - time.monotonic()) * 1000)
@@ -371,7 +482,9 @@ def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
     source = db.get(Connection, assets[0].connection_id)
     engine = source_engine(source)
     try:
-        with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn:
+        with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, interruptible_connection(
+            conn, mysql_cancel=_mysql_canceller(source),
+        ):
             with conn.begin():
                 if conn.dialect.name == "postgresql":
                     conn.exec_driver_sql("SET TRANSACTION READ ONLY")
@@ -393,6 +506,9 @@ def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
                 scope = NativeSourceSession(conn, assets, meta, snapshot, deadline=deadline)
                 yield scope
     except sa.exc.DBAPIError as exc:
+        control = current_query_control()
+        if control is not None and control.cancelled():
+            fail(409, "query_cancelled", "Source query was cancelled")
         original = exc.orig
         code = getattr(original, "pgcode", None)
         mysql_code = original.args[0] if getattr(original, "args", ()) else None

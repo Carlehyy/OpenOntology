@@ -164,13 +164,32 @@ def list_assets(db, user):
     return {"items": [asset_dto(db, user, a, dbx_status=status) for a in assets], "total": len(assets)}
 
 
-def _connection(db, connection_id):
-    connection = db.get(Connection, connection_id)
+def _connection(db, connection_id, *, lock=False):
+    # lock=True 供写路径在插入引用前持连接行锁，与连接受控注销（DELETE
+    # /connections/{id} 同锁）串行，避免"注销检查通过后新增引用"的竞态。
+    # populate_existing 越过会话身份映射：凭据轮换在另一会话提交后，本会话
+    # 不能继续用缓存的旧密文连接源。
+    statement = sa.select(Connection).where(Connection.id == connection_id).execution_options(
+        populate_existing=True)
+    if lock:
+        statement = statement.with_for_update()
+    connection = db.scalars(statement).first()
     if connection is None:
         fail(404, "CONNECTION_NOT_FOUND", "Source connection not found")
     if connection.kind not in {"mysql", "postgres"}:
         fail(422, "UNSUPPORTED_SOURCE", "Only MySQL/PostgreSQL integrated sources are supported")
     return connection
+
+
+def _lock_asset(db, asset):
+    """持资产行锁复核存在性；与受控注销（同锁）串行。
+
+    返回加锁后的资产行；资产在加锁前被并发注销时返回 None（调用方按
+    ASSET_NOT_FOUND 处理），绝不带着已删除的资产继续写运行/回执。
+    """
+    return db.scalars(
+        sa.select(IntegratedAsset).where(IntegratedAsset.id == asset.id).with_for_update()
+    ).first()
 
 
 def register_asset(db, user, body):
@@ -195,6 +214,9 @@ def register_asset(db, user, body):
     finally:
         engine.dispose()
     verify_dbx_metadata(evidence, schema)
+    # 创建引用前持连接行锁复核存在性：连接受控注销持同一行锁做零引用
+    # 检查，双方在数据库层串行，杜绝检查后竞态。
+    connection = _connection(db, connection.id, lock=True)
     dataset = Dataset(id=str(uuid.uuid4()), name=body.name.strip(), kind="integrated",
                       source_connection_id=connection.id, source_resource=resource, schema_json=schema)
     if not dataset.name:
@@ -242,6 +264,87 @@ def refresh_schema(db, user, asset_id):
         dataset.schema_json = schema
     db.commit()
     return asset_dto(db, user, asset)
+
+
+def decommission_asset(db, user, asset_id):
+    """受控注销集成资产：零历史 / 零映射消费引用 / 零任务才允许删除。
+
+    历史与审计（数据集版本、同步运行、写入回执——含 queued/loading/failed
+    等任何状态）一律不计为可清障项，也绝不随注销删除；任一依赖存在即返回
+    结构化 409。持资产行锁执行检查与删除，与 request_sync / mutate_row 的
+    同锁路径串行，杜绝"检查后新增历史"的竞态。
+    """
+    authorize(db, user, write=True)
+    asset = get_asset(db, user, asset_id)
+    if user.role != "admin" and asset.created_by != user.id:
+        fail(403, "ASSET_OWNER_REQUIRED", "Only the owner or admin may decommission an asset")
+    asset = _lock_asset(db, asset)
+    if asset is None:
+        fail(404, "ASSET_NOT_FOUND", "Integrated dataset not found")
+    dataset = db.get(Dataset, asset.dataset_id)
+    if dataset is None:
+        fail(409, "ASSET_DATASET_MISSING", "Integrated dataset metadata is inconsistent")
+
+    from sqlalchemy import func
+
+    from app.data_channel.datasets.consumers import dataset_consumers
+    from app.data_channel.pipeline_tasks.models import PipelineTask
+    from app.ontologies.mappings.consumers import dataset_mapping_bindings
+
+    version_count = (
+        db.query(func.count(DatasetVersion.id))
+        .filter(DatasetVersion.dataset_id == dataset.id).scalar() or 0
+    )
+    run_count = (
+        db.query(func.count(IntegratedSyncRun.id))
+        .filter(IntegratedSyncRun.dataset_id == dataset.id).scalar() or 0
+    )
+    # 任何状态的回执（含 pending/failed/unknown）都算历史，审计不可删除。
+    mutation_count = (
+        db.query(func.count(IntegratedMutation.id))
+        .filter(IntegratedMutation.asset_id == asset.id).scalar() or 0
+    )
+    mapping_references = dataset_mapping_bindings(db, dataset.id)
+    pipelines = dataset_consumers(db, dataset.id)
+    pipeline_ids = [item["id"] for item in pipelines]
+    tasks = (
+        db.query(PipelineTask).filter(PipelineTask.pipeline_id.in_(pipeline_ids)).all()
+        if pipeline_ids else []
+    )
+    if version_count or run_count or mutation_count or mapping_references or pipelines or tasks:
+        parts = []
+        history_total = version_count + run_count + mutation_count
+        if history_total:
+            parts.append(
+                f"{history_total} 条数据历史（版本 {version_count} / 同步运行 {run_count} / 写入回执 {mutation_count}）")
+        if mapping_references:
+            parts.append(f"{len(mapping_references)} 个本体映射绑定")
+        if pipelines:
+            parts.append(f"{len(pipelines)} 条流水线")
+        if tasks:
+            parts.append(f"{len(tasks)} 个数据任务")
+        raise HTTPException(409, {
+            "code": "ASSET_DECOMMISSION_BLOCKED",
+            "message": (
+                "集成资产仍有" + "、".join(parts)
+                + "，不能注销；历史与审计记录不会被删除，请先解除以上依赖。"
+            ),
+            "history": {"dataset_versions": version_count,
+                        "sync_runs": run_count, "mutations": mutation_count},
+            "mapping_references": mapping_references[:5],
+            "mapping_references_total": len(mapping_references),
+            "pipelines": pipelines[:5],
+            "pipelines_total": len(pipelines),
+            "tasks": [{"id": task.id, "name": task.name, "pipeline_id": task.pipeline_id}
+                      for task in tasks[:5]],
+            "tasks_total": len(tasks),
+        })
+    # 零依赖：先删资产（dataset FK RESTRICT），再删其专属 integrated 数据集。
+    # 不触碰连接本体；连接注销由 DELETE /connections/{id} 的守卫独立裁决。
+    db.delete(asset)
+    db.delete(dataset)
+    db.commit()
+    return {"status": "decommissioned", "asset_id": asset_id, "dataset_id": dataset.id}
 
 
 def preview_rows(db, user, asset_id, limit=100):
@@ -296,6 +399,10 @@ def request_sync(db, user, asset_id, batch_size=1000):
     dataset = db.get(Dataset, asset.dataset_id)
     if dataset is None:
         fail(409, "ASSET_DATASET_MISSING", "Integrated dataset metadata is inconsistent")
+    # 创建运行前持资产行锁：受控注销以同锁做零运行历史检查，双方串行，
+    # 杜绝"注销检查通过后新增 queued 运行"的竞态。
+    if _lock_asset(db, asset) is None:
+        fail(404, "ASSET_NOT_FOUND", "Integrated dataset not found")
     run_id = str(uuid.uuid4())
     run = IntegratedSyncRun(
         id=run_id, dataset_id=asset.dataset_id, asset_id=asset.id,
@@ -482,6 +589,10 @@ def mutate_row(db, user, asset_id, operation, body):
     if operation not in {"insert", "update", "delete"}:
         fail(422, "INVALID_MUTATION_OPERATION", "Only a single-row insert, update or delete is supported")
     asset = get_asset(db, user, asset_id, write=True)
+    # 落回执前持资产行锁：受控注销以同锁统计零写入回执，双方串行，避免
+    # "注销检查通过后新增回执"的竞态（SQLite 测试库忽略行锁，语义不变）。
+    if _lock_asset(db, asset) is None:
+        fail(404, "ASSET_NOT_FOUND", "Integrated dataset not found")
     pk = asset.schema_json.get("primary_key", [])
     if not pk or set(body.key) != set(pk) or any(v is None for v in body.key.values()):
         fail(422, "COMPLETE_PRIMARY_KEY_REQUIRED", "Supply every explicit primary-key column and no other key")

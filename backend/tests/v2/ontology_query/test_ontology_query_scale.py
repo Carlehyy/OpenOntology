@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Session
 
 from app.auth.models import RoleMenuPermission
 from app.ontologies.agent_query import schemas as QS
@@ -239,8 +240,10 @@ def test_read_port_release_permission_and_no_transaction_commit(db, admin_user, 
     assert relation.state["maxPageSize"] == 2
     assert db.execute(select(relation.table)).one()._mapping["bucket"] == "0"
     relation.recheck()
-    profile.allowed_properties = {"scale-order": []}
-    db.flush()
+    with Session(bind=db.get_bind()) as external:
+        external_profile = external.get(AgentProfile, profile.id)
+        external_profile.allowed_properties = {"scale-order": []}
+        external.commit()
     with pytest.raises(Exception) as excinfo:
         relation.recheck()
     assert excinfo.value.detail["code"] == "query_authorization_changed"
@@ -269,19 +272,24 @@ def test_read_port_requires_agent_menu_before_scope_and_on_recheck(db, admin_use
     assert excinfo.value.detail["code"] == "MENU_ACCESS_DENIED"
     assert excinfo.value.detail["menu_key"] == "agent"
     profile.enabled = True
+    db.commit()
     for role in ("viewer", "custom"):
+        admin_user.role = role
+        db.commit()
         permissions = db.get(RoleMenuPermission, role)
         if permissions is None:
             permissions = RoleMenuPermission(role=role)
             db.add(permissions)
         permissions.menu_keys = ["data.structured", "agent"]
-        db.flush()
+        db.commit()
         user = SimpleNamespace(id=admin_user.id, role=role)
         relation = resolve_ontology_relation(db, user, "a", binding, None,
             column_spec_factory=Column, relation_factory=lambda **kwargs: SimpleNamespace(**kwargs))
         relation.recheck()
-        permissions.menu_keys = ["data.structured"]
-        db.flush()
+        with Session(bind=db.get_bind()) as external:
+            external_permissions = external.get(RoleMenuPermission, role)
+            external_permissions.menu_keys = ["data.structured"]
+            external.commit()
         with pytest.raises(HTTPException) as excinfo:
             relation.recheck()
         assert excinfo.value.status_code == 403

@@ -198,7 +198,7 @@ test('点击侧边卡片仅聚焦，点击聚焦卡片才选中并计数', async
 
   await sideCard.click()
   await expect(page).toHaveURL(/\/#\/agent\?ontology_id=ontology-2$/)
-  expect(clickCalls).toEqual(['ontology-2'])
+  await expect.poll(() => clickCalls).toEqual(['ontology-2'])
   await expect(page.getByTestId('agent-ontology-panel')).toContainText('当前本体暂无可视化对象')
   await expect(page.getByTestId('ontology-card-carousel')).toHaveCount(0)
 })

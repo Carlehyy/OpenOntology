@@ -417,7 +417,7 @@ def test_cursor_fetch_dbapi_error_maps_and_closes_partial_page(sqlstate, status,
                          rollback=lambda: cleanup.append("rollback"))
     service = QueryService(db, SimpleNamespace(id="user"), secret="unit-secret")
     service._pin = lambda: None
-    service._resolve = lambda *args: None
+    service._resolve = lambda *args, **kwargs: None
     service._fingerprints = lambda: ("a", "s")
     service.stack.callback(lambda: cleanup.append("stack"))
     cursor = service._sign({"v": 1, "id": "snapshot", "owner": "user", "q": "q",
@@ -428,6 +428,17 @@ def test_cursor_fetch_dbapi_error_maps_and_closes_partial_page(sqlstate, status,
     assert exc.value.__cause__ is error
     assert "sensitive" not in str(exc.value.detail())
     assert result.fetched == 2 and cleanup == ["result", "rollback", "stack"]
+    if sqlstate is None:
+        from app.data_channel.query.service import _query_dbapi_error
+        for mysql_code in (3024, 1969):
+            source_error = DBAPIError("SELECT remote", {},
+                                     Exception(mysql_code, "sensitive driver detail"), False)
+            mapped = _query_dbapi_error(source_error)
+            assert (mapped.status, mapped.code) == (422, "query_budget_exceeded")
+            assert mapped.extra == {"budget": "statement_timeout_ms"}
+            assert "sensitive" not in str(mapped.detail())
+        unavailable = DBAPIError("SELECT remote", {}, Exception(2013, "lost connection"), False)
+        assert _query_dbapi_error(unavailable).status == 503
 
 
 @pytest.mark.parametrize("page_failure", ["success", "dbapi", "query_error"])
@@ -462,7 +473,7 @@ def test_cursor_fetch_cleanup_failure_closes_sources_and_preserves_primary(page_
         db = SimpleNamespace(get=lambda *args: snapshot, rollback=rollback)
         service = QueryService(db, SimpleNamespace(id="user"), secret="unit-secret")
         service._pin = lambda: None
-        service._resolve = lambda *args: None
+        service._resolve = lambda *args, **kwargs: None
         service._fingerprints = lambda: ("a", "s")
         service._page = page
         service.stack.callback(close_source)

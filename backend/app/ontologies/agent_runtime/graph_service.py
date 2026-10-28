@@ -21,7 +21,9 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import String, Text, cast, or_
 
 from app.models.ontology_formal import LinkInstance, ObjectInstance
-from app.ontologies.agent_runtime.boundary import AgentScope, ToolError
+from app.ontologies.agent_runtime.boundary import (
+    AgentScope, ToolError, remote_object_type_ids, require_materialized_object_type,
+)
 
 
 _MAX_DEPTH = 6
@@ -235,6 +237,13 @@ def _contains_edge(type_id: str, instance_id: str) -> dict:
     }
 
 
+def _require_materialized_instance(scope: AgentScope, instance: ObjectInstance) -> None:
+    """实例所属类型为远程绑定时拒绝：本地图谱只承载本地物化数据面。"""
+    object_type = scope.object_types.get(instance.object_type_id)
+    if object_type is not None:
+        require_materialized_object_type(scope, object_type)
+
+
 def build_workspace_graph(
     scope: AgentScope,
     *,
@@ -247,15 +256,42 @@ def build_workspace_graph(
     depth = _clamp(depth, 1, 3, 2)
     profile_limit = max(1, int(scope.profile.max_rows_per_query or 50))
     per_type = _clamp(limit_per_type, 1, min(50, profile_limit), 20)
+    remote_ids = remote_object_type_ids(scope)
     counts = scope.instance_counts()
-    object_types = list(scope.object_types.values())
+    materialized_counts = {
+        type_id: count for type_id, count in counts.items()
+        if type_id not in remote_ids
+    }
+    remote_types = [
+        object_type for object_type in scope.object_types.values()
+        if object_type.id in remote_ids
+    ]
+    object_types = [
+        object_type for object_type in scope.object_types.values()
+        if object_type.id not in remote_ids
+    ]
     selected_type_id: Optional[str] = None
     if object_type_ref:
-        selected_type_id = scope.require_object_type(object_type_ref).id
+        selected = scope.require_object_type(object_type_ref)
+        require_materialized_object_type(scope, selected)
+        selected_type_id = selected.id
 
     nodes = [_type_node(scope, object_type, counts.get(object_type.id, 0))
              for object_type in object_types]
-    edges = [_schema_edge(link_type) for link_type in scope.link_types.values()]
+    # 远程端点的链接类型不出现在本地图谱：schema 边若渲染，会以"零实例/零边"
+    # 冒充完整关系图景；远程部分在 meta.remoteObjectTypes/remoteLinkTypes 诚实标注。
+    visible_link_types = [
+        link_type for link_type in scope.link_types.values()
+        if link_type.source_object_type_id not in remote_ids
+        and link_type.target_object_type_id not in remote_ids
+    ]
+    remote_link_types = [
+        {"id": link_type.id, "name": link_type.name,
+         "displayName": link_type.display_name}
+        for link_type in scope.link_types.values()
+        if link_type not in visible_link_types
+    ]
+    edges = [_schema_edge(link_type) for link_type in visible_link_types]
     loaded_instances: list[ObjectInstance] = []
     total_matches = 0
     truncated = False
@@ -331,14 +367,26 @@ def build_workspace_graph(
             "query": keyword or None,
             "objectTypeId": selected_type_id,
             "focusInstanceId": focus_instance_id,
-            "instanceCounts": counts,
+            "instanceCounts": materialized_counts,
             "loadedInstances": len(loaded_instances),
-            "matchedInstances": total_matches if depth >= 2 else sum(counts.values()),
+            "matchedInstances": (total_matches if depth >= 2
+                                 else sum(materialized_counts.values())),
             "limitPerType": per_type,
             "truncated": truncated or property_truncated,
             "propertyTruncated": property_truncated,
             "nodeBudget": _MAX_VISIBLE_NODES,
             "edgeBudget": _MAX_VISIBLE_EDGES,
+            # 混类型诚实化：远程绑定部分不进图、不计数，也不冒充全量。
+            # coverage 告知本图只覆盖本地物化数据面；远程部分显式列出，
+            # 消费方（前端/LLM）不得把图当作完整业务图景。
+            "coverage": ("materialized_only" if remote_ids
+                         else "authorized_scope"),
+            "remoteObjectTypes": [
+                {"id": object_type.id, "name": object_type.name,
+                 "displayName": object_type.display_name}
+                for object_type in remote_types
+            ],
+            "remoteLinkTypes": remote_link_types,
         },
     }
 
@@ -515,6 +563,8 @@ def find_paths(
 ) -> dict:
     source = _visible_instance(scope, source_instance_id)
     target = _visible_instance(scope, target_instance_id)
+    _require_materialized_instance(scope, source)
+    _require_materialized_instance(scope, target)
     depth_limit = _clamp(max_depth, 1, _MAX_DEPTH, 5)
     path_limit = _clamp(max_paths, 1, _MAX_PATHS, 3)
 
@@ -614,6 +664,7 @@ def analyze_change_impact(
     max_depth: int = 3,
 ) -> dict:
     source = _visible_instance(scope, instance_id)
+    _require_materialized_instance(scope, source)
     object_type = scope.object_types[source.object_type_id]
     property_name = scope.resolve_property(object_type, property_ref)
     depth_limit = _clamp(max_depth, 1, 4, 3)

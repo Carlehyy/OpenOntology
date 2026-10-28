@@ -377,6 +377,17 @@ class Settings(BaseSettings):
     unified_query_max_active_per_user: int = Field(default=10, ge=1)
     unified_query_batch_size: int = Field(default=2_000, ge=1, le=10_000)
     unified_query_max_page_size: int = Field(default=1_000, ge=1, le=10_000)
+    # Remote results and cross-source intermediates never spill to platform disk.
+    unified_query_memory_handle_ttl_seconds: int = Field(default=300, ge=1)
+    unified_query_memory_result_bytes_limit: int = Field(default=67_108_864, ge=1)
+    unified_query_memory_total_bytes_limit: int = Field(default=536_870_912, ge=1)
+    unified_query_memory_per_user_bytes_limit: int = Field(default=134_217_728, ge=1)
+    unified_query_memory_max_handles_per_user: int = Field(default=10, ge=1)
+    unified_query_federated_side_rows_limit: int = Field(default=1_000_000, ge=1)
+    unified_query_federated_side_bytes_limit: int = Field(default=268_435_456, ge=1)
+    unified_query_federated_pushdown_keys_limit: int = Field(default=8_192, ge=1)
+    unified_query_federated_key_chunk_size: int = Field(default=1_000, ge=1, le=1_000)
+    unified_query_federated_join_rows_limit: int = Field(default=2_000_000, ge=1)
     # Trial materialization runs synchronously but persists its running claim
     # first.  Expired claims are terminalized and can no longer block retry or
     # deletion; late completion is fenced by the per-run claim token.

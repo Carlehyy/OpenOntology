@@ -19,7 +19,8 @@ from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
 from app.settings.object_storage.service import execute_minio_tool
 from app.shared.config import settings
 from app.shared.database import SessionLocal
-from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, provider, reflection_service, web_tools
+from app.shared.query_control import QueryControl, query_control_scope
+from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, persistence, provider, reflection_service, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -146,7 +147,8 @@ _READ_ONLY_BUILTIN_TOOLS = frozenset({
     "browser_state",
     "browser_page_resources",
     "browser_network_requests",
-    # 本体只读能力（经白名单门面）：结构与统一关联查询
+    # 本体只读能力（经白名单门面）：目录发现、结构与统一关联查询
+    "ontology_catalog",
     "ontology_structure",
     "ontology_query",
 })
@@ -236,7 +238,7 @@ def _system_prompt(
 7. 你可以用 memory_search / palace_recall 主动回忆跨会话记忆，用 memory_save 保存重要事实（低风险事实会自动记住，其余需用户审批后生效）。
 8. 当系统提示包含 Memory Palace 时，用 palace_zones / palace_read_zone / palace_recall 导航记忆分区。
 9. 记忆宫殿还包含用户上传文档与平台本体发布文档沉淀的知识图谱（跨会话长期知识）：系统提示可能已注入相关图谱片段，需要更多时用 palace_graph_search 检索、palace_graph_files 查看文件库；回答图谱相关问题时引用来源文件。
-10. 本体能力（用不改）：知识图谱里的本体内容只是发现线索（advisory），不是完整 schema。涉及本体数据时，先用 ontology_structure 读取当前发布 release 的准确结构（字段/类型/关系/动作都以 structure 返回为准），再用 ontology_query 查询；跨本体关联必须有明确业务键依据，不能凭名称相似猜测，确有关联依据时先调 ontology_register_join_assertion 向用户申请登记（批准后才能用于查询）。执行本体业务动作走 ontology_prepare_action 准备 → 用户在界面二次确认 → ontology_execute_action 唤醒（确认前不产生业务效果，是否需要确认以确认卡为准）；执行返回非 succeeded 状态（如 pending_approval/unknown）时如实转述当前状态，不得声称业务已完成。你只能“用”本体（发现/结构/查询/准备/确认执行），没有任何修改本体定义的途径，也不要建议绕过。
+10. 本体能力（用不改）：知识图谱里的本体内容只是发现线索（advisory），不是完整 schema，发现入口用 ontology_catalog（权威 published 目录与发布文档，图谱异步构建可能缺项）。涉及本体数据时，先用 ontology_structure 读取当前发布 release 的准确结构（字段/类型/关系/动作都以 structure 返回为准），再用 ontology_query 查询；objectTypes 的 dataAccess=remote 分组是联邦远程数据，必须走受治理查询（subquery 同源聚合防 fanout），不得在文本里推算远程结果。查询返回标 ephemeral 的明细只在本轮临时可见（平台不落库），答复优先给聚合结论与续读 cursor，不要整段复述明细行。跨本体关联必须有明确业务键依据，不能凭名称相似猜测，确有关联依据时先调 ontology_register_join_assertion 向用户申请登记（批准后才能用于查询）。执行本体业务动作走 ontology_prepare_action 准备 → 用户在界面二次确认 → ontology_execute_action 唤醒（确认前不产生业务效果，是否需要确认以确认卡为准）；执行返回非 succeeded 状态（如 pending_approval/unknown）时如实转述当前状态，不得声称业务已完成。你只能“用”本体（发现/结构/查询/准备/确认执行），没有任何修改本体定义的途径，也不要建议绕过。
 
 可用 Skill 目录：
 {catalog}
@@ -728,14 +730,22 @@ def _execute_builtin_tool(
     arguments: dict[str, Any],
     todo_state: dict[str, list[str]] | None = None,
     disabled_tools: set[str] | None = None,
+    ephemeral_turn_state: persistence.EphemeralTurnState | None = None,
     tool_run: Any = None,
 ) -> str:
     """全部内置工具的统一分派（含记忆/宫殿/web/子代理）。
 
     记忆类写操作遵循平台审批门：memory_save 仅在 auto-accept 开启且通过
     冲突检测时直写，否则落待审批候选；技能只能经 propose_skill → 反思管线
-    产出候选，agent 不得直接写 Skill 文件。
+    产出候选，agent 不得直接写 Skill 文件。本轮已见过未落库的远程联邦
+    明细时，memory_save fail-closed 拒绝——记忆候选是持久面，模型复述的
+    明细同样不得进入（不能只靠 prompt 约束）。
     """
+    if (ephemeral_turn_state is not None and ephemeral_turn_state.detail_seen
+            and name not in persistence.DETAIL_SAFE_TOOLS):
+        return json.dumps({"error": "ephemeral_detail_active",
+                           "message": "远程明细上下文中仅允许本体只读查询，其他工具不接收源明细"},
+                          ensure_ascii=False)
     if name in {"use_skill", "read_skill_file"}:
         result = _execute_builtin(db, owner_id, name, arguments)
         # 使用统计挂在统一分派点：串行/并行两条执行路径都经过这里，
@@ -752,6 +762,14 @@ def _execute_builtin_tool(
         db.commit()
         return json.dumps(_memory_hit_payload(hits), ensure_ascii=False)
     if name == "memory_save":
+        if ephemeral_turn_state is not None and ephemeral_turn_state.detail_seen:
+            return json.dumps({
+                "error": "ephemeral_detail_active",
+                "message": (
+                    "本轮包含未落库的远程联邦明细，不能把记忆写入长期存储；"
+                    "请只保存服务端聚合结论，或在新一轮（历史只剩元信息壳）后再保存"
+                ),
+            }, ensure_ascii=False)
         content = str(arguments.get("content") or "").strip()
         if not content:
             return json.dumps({"error": "content 不能为空"}, ensure_ascii=False)
@@ -915,6 +933,13 @@ def _execute_builtin_tool(
             "note": "图谱写入仅由记忆宫殿上传/重建端点执行，此处只读。",
         }, ensure_ascii=False)
     if name == "think":
+        if ephemeral_turn_state is not None and ephemeral_turn_state.detail_seen:
+            # think 的回显会原样落入 ToolRun.result/steps.preview：本轮
+            # 存在未落库明细时不再回写模型复述内容（思考仍在模型自身
+            # 上下文中进行，不落库）
+            return json.dumps(
+                {"note": "ephemeral_detail_active：本轮思考内容不落库"},
+                ensure_ascii=False)
         return "已记录：" + str(arguments.get("thought") or "")
     if name == "todo_write":
         if todo_state is None:
@@ -945,9 +970,7 @@ def _execute_builtin_tool(
             db, owner_id=owner_id, conversation_id=conversation_id,
             name=name, arguments=arguments,
         )
-    if name in {"ontology_structure", "ontology_query",
-                "ontology_prepare_action", "ontology_execute_action",
-                "ontology_register_join_assertion"}:
+    if name in ontology_tools.ONTOLOGY_TOOL_NAMES:
         from app.super_assistant import ontology_tools as _ontology_tools
 
         return _ontology_tools.execute_ontology_tool(
@@ -1139,7 +1162,8 @@ def _run_multica_direct_tool(
         status = "error"
         error = str(exc)
     if len(output) > settings.super_assistant_tool_result_chars:
-        output = output[: settings.super_assistant_tool_result_chars] + "\n…[结果已截断]"
+        output = persistence.truncate_tool_output(
+            output, settings.super_assistant_tool_result_chars)
     tool_run.result = output
     tool_run.status = status
     tool_run.error = error
@@ -1167,6 +1191,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
     db = SessionLocal()
     assistant_message: SuperAssistantMessage | None = None
     client_disconnected = False
+    ephemeral_state = persistence.EphemeralTurnState()
     try:
         conversation = db.query(SuperAssistantConversation).filter(
             SuperAssistantConversation.id == conversation_id,
@@ -1335,7 +1360,10 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 yield sse("cancelled", {"message": "已停止生成"})
                 return
             yield sse("thinking", {"round": round_index + 1})
-            messages = maybe_compact(db, conversation, call_kwargs, messages)
+            messages = maybe_compact(
+                db, conversation, call_kwargs, messages,
+                redactions=ephemeral_state.redactions,
+            )
             round_tools = tools
             if forced_tool is not None and round_index == 0 and tools:
                 round_tools = [
@@ -1398,7 +1426,8 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     call_id=call_id,
                     tool_name=tool_name,
                     server_id=server_tuple[0].id if server_tuple else None,
-                    arguments=arguments,
+                    arguments=(dict(persistence.REDACTED_ARGUMENTS)
+                               if ephemeral_state.detail_seen else arguments),
                     status="awaiting_confirmation" if requires_confirmation else "running",
                     requires_confirmation=requires_confirmation,
                 )
@@ -1431,7 +1460,11 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             parallel_items: list[dict[str, Any]] = []
             serial_items: list[dict[str, Any]] = []
             for item in order:
-                if item["arguments"].get("_truncated"):
+                if (ephemeral_state.detail_seen
+                        and item["name"] not in persistence.DETAIL_SAFE_TOOLS):
+                    executed[item["id"]] = (
+                        json.dumps({"error": "ephemeral_detail_active"}), "denied", None)
+                elif item["arguments"].get("_truncated"):
                     executed[item["id"]] = (
                         json.dumps({"error": "工具调用被 max_tokens 截断"}, ensure_ascii=False),
                         "error",
@@ -1478,6 +1511,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 "call_kwargs": call_kwargs,
                 "todo_state": todo_state,
                 "disabled_tools": disabled_builtin_tools,
+                "ephemeral_turn_state": ephemeral_state,
             }
 
             if parallel_items:
@@ -1486,7 +1520,8 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     try:
                         output = _execute_read_only_tool(item["name"], item["arguments"], builtin_context)
                         if len(output) > settings.super_assistant_tool_result_chars:
-                            output = output[:settings.super_assistant_tool_result_chars] + "\n…[结果已截断]"
+                            output = persistence.truncate_tool_output(
+                                output, settings.super_assistant_tool_result_chars)
                         executed[item["id"]] = (output, "success", None)
                     except Exception as exc:  # 工具失败回灌模型自我恢复
                         executed[item["id"]] = (
@@ -1496,8 +1531,26 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         )
                     durations[item["id"]] = int((time.monotonic() - started) * 1000)
 
+                controls = {item["id"]: QueryControl() for item in parallel_items}
+
+                def _controlled_work(item):
+                    with query_control_scope(controls[item["id"]]):
+                        _work(item)
+
                 with ThreadPoolExecutor(max_workers=4, thread_name_prefix="sa-tools") as pool:
-                    list(pool.map(_work, parallel_items))
+                    futures = [pool.submit(_controlled_work, item) for item in parallel_items]
+                    try:
+                        while not all(future.done() for future in futures):
+                            if _run_cancelled(db, assistant_message):
+                                for control in controls.values():
+                                    control.cancel()
+                            yield ": tool heartbeat\n\n"
+                            time.sleep(0.1)
+                        for future in futures:
+                            future.result()
+                    finally:
+                        for control in controls.values():
+                            control.cancel()
 
             for item in serial_items:
                 tool_run = item["run"]
@@ -1670,7 +1723,8 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                             **builtin_context,
                         )
                     if len(output) > settings.super_assistant_tool_result_chars:
-                        output = output[:settings.super_assistant_tool_result_chars] + "\n…[结果已截断]"
+                        output = persistence.truncate_tool_output(
+                            output, settings.super_assistant_tool_result_chars)
                     executed[item["id"]] = (output, "success", None)
                 except Exception as exc:  # tools fail into the model context so it can recover
                     executed[item["id"]] = (
@@ -1684,14 +1738,30 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             for item in order:
                 output, status, error = executed[item["id"]]
                 tool_run = item["run"]
-                tool_run.result = output
+                # 可信联邦工具的 persistence 标记在此统一裁决：模型上下文
+                # 与 SSE 继续用原文（临时可见），所有持久面（ToolRun.result/
+                # steps.preview/压缩摘要红线）只允许 register 返回的持久
+                # 视图——detail 一律元信息壳，aggregate 保持原文。
+                persisted_output = ephemeral_state.register(
+                    item["name"], item["id"], output,
+                    cap=settings.super_assistant_tool_result_chars,
+                )
+                persisted_error = error
+                if (
+                    error is not None
+                    and item["name"] in persistence.HONORED_MARKER_TOOLS
+                    and ephemeral_state.remote_seen
+                ):
+                    # 远程上下文中的异常文本有界化，杜绝异常消息夹带明细落库
+                    persisted_error = persistence.bounded_error_text(error)
+                tool_run.result = persisted_output
                 if status == "success":
                     tool_run.status = "success"
                     if (
                         item["server"] is None
                         and tool_run.tool_name == ontology_tools.ONTOLOGY_EXECUTE_TOOL
                     ):
-                        tool_run.status = ontology_tools.execution_result_status(output)
+                        tool_run.status = ontology_tools.execution_result_status(persisted_output)
                 elif status == "denied" and error is None and item["run"].requires_confirmation:
                     tool_run.status = "denied"
                 elif status in {"denied", "expired"}:
@@ -1700,23 +1770,22 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         tool_run.decision = tool_run.decision or "denied"
                 else:
                     tool_run.status = "error"
-                    tool_run.error = error
+                    tool_run.error = persisted_error
                 tool_run.duration_ms = durations.get(item["id"])
                 tool_run.completed_at = datetime.now(timezone.utc)
                 db.commit()
-                preview = _tool_result_preview(item["name"], output)
                 steps.append({
                     "toolRunId": tool_run.id,
                     "toolName": item["name"],
                     "status": tool_run.status,
-                    "arguments": item["arguments"],
-                    "preview": preview,
+                    "arguments": tool_run.arguments,
+                    "preview": _tool_result_preview(item["name"], persisted_output),
                 })
                 messages.append({"role": "tool", "tool_call_id": item["id"], "name": item["name"], "content": output})
                 yield sse("tool_result", {
                     "toolRunId": tool_run.id,
                     "status": tool_run.status,
-                    "preview": preview,
+                    "preview": _tool_result_preview(item["name"], output),
                 })
         else:
             # Final synthesis without tools prevents an infinite tool loop.
@@ -1753,7 +1822,15 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             )
         if agent_mode:
             final_content = _strip_goal_markers(final_content) or "模型没有返回可显示的内容。"
-        assistant_message.content = final_content
+        # 本轮出现过未落库的远程联邦明细：assistant 复述的明细同样会随
+        # 消息落库，不能只靠 prompt 约束——落库内容替换为元信息/受控引用
+        # 壳（含服务端聚合元数据）；SSE 实时流仍给全文（临时可见）。
+        persisted_content = (
+            persistence.assistant_answer_shell(ephemeral_state)
+            if ephemeral_state.detail_seen
+            else final_content
+        )
+        assistant_message.content = persisted_content
         assistant_message.steps = steps
         usage_snapshot = {
             **total_usage,
@@ -1799,7 +1876,9 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 assistant_message = db.get(SuperAssistantMessage, assistant_message.id)
                 if assistant_message and assistant_message.status != "cancelled":
                     assistant_message.status = "error"
-                    assistant_message.content = str(exc)
+                    assistant_message.content = (
+                        "远程查询轮次执行失败；异常载荷未持久化"
+                        if ephemeral_state.detail_seen else str(exc))
                     db.commit()
             except Exception:
                 db.rollback()

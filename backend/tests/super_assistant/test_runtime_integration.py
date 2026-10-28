@@ -337,7 +337,7 @@ def test_compaction_invoked_each_round(tmp_path, monkeypatch):
     calls: list = []
     original = runtime.maybe_compact
 
-    def _spy(db, conversation, call_kwargs, messages):
+    def _spy(db, conversation, call_kwargs, messages, redactions=None):
         calls.append(len(messages))
         return original.__wrapped__(db, conversation, call_kwargs, messages) if hasattr(original, "__wrapped__") else messages
 

@@ -455,6 +455,33 @@ def validate_manual_mapping_trial_contract(
     }
     errors: list[dict] = []
 
+    # 远程绑定不消费本地 DatasetVersion：精确 pin/自动灌入订阅契约不适用，
+    # 改由试跑的远程元数据/受控读验证承担（不冒充本地全量质量）。
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        RemoteBindingError,
+        snapshot_entry_binding,
+        snapshot_link_binding_mode,
+    )
+
+    def _is_remote_entry(entry: dict) -> bool:
+        try:
+            return snapshot_entry_binding(entry)[0] == BINDING_MODE_REMOTE
+        except RemoteBindingError:
+            return True
+
+    def _is_remote_link(entry: dict) -> bool:
+        try:
+            return snapshot_link_binding_mode(entry) == BINDING_MODE_REMOTE
+        except RemoteBindingError:
+            return True
+
+    remote_dataset_ids = {
+        str(item.get("curatedDatasetId") or "").strip()
+        for item in snap["mappings"]
+        if isinstance(item, dict) and _is_remote_entry(item)
+    }
+
     def add_error(
             *, code: str, kind: str, item_id: str, name: str,
             dataset_id: str, role: str, field: str, message: str) -> None:
@@ -555,6 +582,8 @@ def validate_manual_mapping_trial_contract(
         dataset = datasets.get(dataset_id)
         if dataset is None or dataset.kind == "curated":
             continue
+        if _is_remote_entry(mapping):
+            continue
         mapping_id = str(mapping.get("id") or "")
         label = str(mapping.get("entityClass") or mapping_id)
         field_mapping = mapping.get("fieldMapping")
@@ -584,6 +613,8 @@ def validate_manual_mapping_trial_contract(
             continue
         mapping_id = str(mapping.get("id") or "")
         label = str(mapping.get("relationType") or mapping_id)
+        if _is_remote_link(mapping):
+            continue
         field_mapping = mapping.get("fieldMapping")
         subscribed = (
             isinstance(field_mapping, dict)
@@ -595,6 +626,8 @@ def validate_manual_mapping_trial_contract(
             ("edge", "edgeDatasetId"),
         ):
             dataset_id = str(mapping.get(field) or "").strip()
+            if dataset_id in remote_dataset_ids:
+                continue
             dataset = datasets.get(dataset_id)
             if dataset is None or dataset.kind == "curated":
                 continue
@@ -712,9 +745,55 @@ def impact_report(base: dict | None, candidate: dict | None) -> dict:
         name: sum(len(resources[key][name]) for key in SNAPSHOT_KEYS)
         for name in ("added", "modified", "deleted")
     }
+    # 远程绑定变更显式入报告（含指纹），供发布审核直读；远程验证不冒充
+    # 本地全量质量，只呈现冻结元数据层面的变化。
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        RemoteBindingError,
+        snapshot_entry_binding,
+        snapshot_link_binding_mode,
+    )
+
+    remote_binding_changes: list[dict] = []
+    for key in ("mappings", "linkMappings"):
+        before_items = {str(item.get("id")): item for item in before[key]}
+        after_items = {str(item.get("id")): item for item in after[key]}
+
+        def _entry_is_remote(entry: dict) -> bool:
+            try:
+                if key == "mappings":
+                    return snapshot_entry_binding(entry)[0] == BINDING_MODE_REMOTE
+                return snapshot_link_binding_mode(entry) == BINDING_MODE_REMOTE
+            except RemoteBindingError:
+                return True
+
+        for change, ids in (
+            ("added", resources[key]["added"]),
+            ("modified", resources[key]["modified"]),
+            ("deleted", resources[key]["deleted"]),
+        ):
+            source = after_items if change != "deleted" else before_items
+            for item_id in sorted(ids):
+                entry = source.get(item_id)
+                if entry is None or not _entry_is_remote(entry):
+                    continue
+                record = {
+                    "resource": key, "id": item_id, "change": change,
+                }
+                if key == "mappings":
+                    try:
+                        descriptor = snapshot_entry_binding(entry)[1]
+                    except RemoteBindingError:
+                        descriptor = None
+                    if descriptor is not None:
+                        record["assetId"] = descriptor.get("assetId")
+                        record["schemaFingerprint"] = (
+                            descriptor.get("schemaFingerprint"))
+                remote_binding_changes.append(record)
     report = {
         "resources": resources, "total": totals,
         "breaking": breaking, "breakingCount": len(breaking),
+        "remoteBindings": remote_binding_changes,
     }
     report["impactHash"] = hashlib.sha256(json.dumps(
         report, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -849,8 +928,20 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
 
     Every object/link type needs a mapping and every persisted property must be
     covered. Computed properties are deliberately excluded because their value
-    comes from ontology logic rather than a lake column.
+    comes from ontology logic rather than a lake column.  Remote (federated)
+    bindings keep the same coverage duty but swap the local version contract
+    for the frozen asset descriptor: they are validated, never materialized,
+    and never satisfy local automation/pin gates.
     """
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_LOCAL,
+        BINDING_MODE_REMOTE,
+        RemoteBindingError,
+        remote_field_mapping_errors,
+        snapshot_entry_binding,
+        snapshot_link_binding_mode,
+    )
+
     snap = complete_snapshot(snapshot)
     errors: list[dict] = []
     object_types = {
@@ -859,9 +950,25 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
         if item.get("id")
     }
     mappings_by_type: dict[str, list[dict]] = {}
+    remote_endpoint: dict[tuple[str, str], dict] = {}
+    remote_datasets: set[str] = set()
 
     def label(item: dict) -> str:
         return str(item.get("displayName") or item.get("name") or item.get("id") or "")
+
+    def binding_of(entry: dict) -> tuple[str, dict | None]:
+        try:
+            return snapshot_entry_binding(entry)
+        except RemoteBindingError as exc:
+            errors.append({
+                "code": exc.code, "kind": "mapping",
+                "id": str(entry.get("id") or ""),
+                "name": str(entry.get("entityClass") or ""),
+                "message": f"远程绑定描述符非法：{exc.message}",
+                "field": "remote",
+                **exc.context,
+            })
+            return BINDING_MODE_REMOTE, None
 
     def stored_properties(item: dict) -> list[dict]:
         return [
@@ -896,6 +1003,32 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
                 "message": f"Mapping「{mapping_name}」未绑定数据集",
                 "field": "curatedDatasetId",
             })
+        binding_mode, descriptor = binding_of(mapping)
+        if binding_mode == BINDING_MODE_REMOTE:
+            dataset_id = str(mapping.get("curatedDatasetId") or "")
+            if descriptor is not None and dataset_id:
+                remote_datasets.add(dataset_id)
+                remote_endpoint[(dataset_id, target_id)] = descriptor
+                remote_field_map = mapping.get("fieldMapping")
+                remote_field_map = (
+                    remote_field_map
+                    if isinstance(remote_field_map, dict) else {})
+                for key in ("__auto_apply_on_review__",
+                            "__auto_apply_on_version__"):
+                    if remote_field_map.get(key):
+                        errors.append({
+                            "code": "remote_auto_apply_forbidden",
+                            "kind": "mapping", "id": mapping_id,
+                            "name": mapping_name,
+                            "field": f"fieldMapping.{key}",
+                            "message": (
+                                f"Mapping「{mapping_name}」为远程绑定，"
+                                "不能开启本地自动灌入订阅"
+                            ),
+                        })
+                errors.extend(remote_field_mapping_errors(
+                    remote_field_map, descriptor,
+                    kind="mapping", item_id=mapping_id, name=mapping_name))
 
         field_mapping = mapping.get("fieldMapping")
         if not isinstance(field_mapping, dict):
@@ -952,6 +1085,27 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
                 "message": f"ObjectType「{label(object_type)}」未设置主键，不能转为发布态",
                 "field": "primaryKey",
             })
+        # 同一 ObjectType 的绑定模式必须统一：本地物化与远程联邦数据面
+        # 混用会让查询期同一类型出现两个真相来源。
+        type_modes = {
+            binding_of(item)[0]
+            for item in mappings_by_type.get(object_type_id, [])
+        }
+        if len(type_modes) > 1:
+            errors.append({
+                "code": "object_type_binding_mode_conflict",
+                "kind": "objectType", "id": object_type_id,
+                "name": label(object_type),
+                "message": (
+                    f"ObjectType「{label(object_type)}」同时存在本地与远程绑定，"
+                    "不能转为发布态；请统一绑定模式"
+                ),
+                "field": "bindingMode",
+                "mappingIds": [
+                    str(item.get("id") or "")
+                    for item in mappings_by_type.get(object_type_id, [])
+                ],
+            })
 
     link_types = {
         str(item.get("id") or ""): item
@@ -964,6 +1118,100 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
         mapping_name = str(mapping.get("relationType") or mapping_id)
         link_type_id = str(mapping.get("linkTypeId") or "")
         link_type = link_types.get(link_type_id)
+        try:
+            link_mode = snapshot_link_binding_mode(mapping)
+        except RemoteBindingError as exc:
+            errors.append({
+                "code": exc.code, "kind": "linkMapping",
+                "id": mapping_id, "name": mapping_name,
+                "message": f"远程关系绑定模式非法：{exc.message}",
+                "field": "bindingMode",
+            })
+            link_mode = BINDING_MODE_LOCAL
+        if link_mode == BINDING_MODE_REMOTE:
+            mapped_link_type_ids.add(link_type_id)
+            if link_type is None:
+                errors.append({
+                    "code": "link_mapping_type_not_found", "kind": "linkMapping",
+                    "id": mapping_id, "name": mapping_name,
+                    "message": f"LinkMapping「{mapping_name}」未绑定有效的 LinkType",
+                    "field": "linkTypeId",
+                })
+                continue
+            if mapping.get("edgeDatasetId"):
+                errors.append({
+                    "code": "remote_link_edge_forbidden", "kind": "linkMapping",
+                    "id": mapping_id, "name": mapping_name,
+                    "field": "edgeDatasetId",
+                    "message": "远程关系定义暂不支持连接表（胖边）",
+                })
+                continue
+            link_field_mapping = mapping.get("fieldMapping")
+            link_field_mapping = (
+                link_field_mapping
+                if isinstance(link_field_mapping, dict) else {})
+            if any(not str(key).startswith("__")
+                   for key in link_field_mapping):
+                errors.append({
+                    "code": "remote_link_properties_forbidden",
+                    "kind": "linkMapping", "id": mapping_id,
+                    "name": mapping_name, "field": "fieldMapping",
+                    "message": "远程关系定义不带边属性（无连接表）",
+                })
+            if link_field_mapping.get("__auto_apply_on_version__"):
+                errors.append({
+                    "code": "remote_auto_apply_forbidden", "kind": "linkMapping",
+                    "id": mapping_id, "name": mapping_name,
+                    "field": "fieldMapping.__auto_apply_on_version__",
+                    "message": "远程关系绑定不参与本地自动灌入订阅",
+                })
+            for role, dataset_field, key_field, type_field in (
+                    ("source", "srcDatasetId", "srcKey", "sourceObjectTypeId"),
+                    ("target", "tgtDatasetId", "tgtKey", "targetObjectTypeId")):
+                dataset_id = str(mapping.get(dataset_field) or "")
+                endpoint = remote_endpoint.get(
+                    (dataset_id, str((link_type or {}).get(type_field) or "")))
+                if endpoint is None:
+                    errors.append({
+                        "code": "remote_link_endpoint_mapping_required",
+                        "kind": "linkMapping", "id": mapping_id,
+                        "name": mapping_name, "field": dataset_field,
+                        "message": (
+                            f"远程关系「{mapping_name}」的 {role} 数据集未被匹配 "
+                            f"LinkType {role} 类型的远程对象映射绑定"
+                        ),
+                    })
+                    continue
+                columns = {
+                    str(column.get("name"))
+                    for column in endpoint.get("columns") or []
+                    if isinstance(column, dict)
+                }
+                key = str(mapping.get(key_field) or "")
+                if not key or key not in columns:
+                    errors.append({
+                        "code": "remote_link_key_missing", "kind": "linkMapping",
+                        "id": mapping_id, "name": mapping_name,
+                        "field": key_field,
+                        "message": (
+                            f"远程关系「{mapping_name}」的 {role} 端键"
+                            f"「{key or '（空）'}」不在冻结列清单中"
+                        ),
+                    })
+            continue
+        for role, field in (("source", "srcDatasetId"),
+                            ("target", "tgtDatasetId"),
+                            ("edge", "edgeDatasetId")):
+            if (str(mapping.get(field) or "") and
+                    str(mapping.get(field)) in remote_datasets):
+                errors.append({
+                    "code": "link_dataset_remote_bound", "kind": "linkMapping",
+                    "id": mapping_id, "name": mapping_name, "field": field,
+                    "message": (
+                        f"LinkMapping「{mapping_name}」的 {role} 数据集已被"
+                        "远程绑定，本地关系物化不可用；请改为远程关系定义"
+                    ),
+                })
         if link_type is None:
             errors.append({
                 "code": "link_mapping_type_not_found", "kind": "linkMapping",
@@ -1667,6 +1915,9 @@ def materialize_trial(db: Session, run: OntologyTrialRun, snapshot: dict) -> dic
         "errors": errors, "errorCount": errors.total_count,
         "errorCounts": dict(errors.code_counts), "errorsTruncated": errors.total_count > len(errors),
         "warnings": warnings, "sentinels": sentinel_results,
+        # 远程绑定检查结果：仅元数据/受控读计数，永不包含样本值；
+        # 明确区分「已验证未物化」，不冒充本地全量质量。
+        "remoteBindings": projection.get("remote") or {},
         "samples": projection["samples"], "actionsExecuted": 0, "sideEffects": "blocked",
     }
     run.result_json = json_safe(result)

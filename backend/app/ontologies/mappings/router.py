@@ -14,6 +14,7 @@ from app.ontologies.mappings import (
     entity_mapping_workflow as _entity_workflow,
 )
 from app.ontologies.mappings import link_mapping_workflow as _link_workflow
+from app.ontologies.mappings import materialization_workflow as _materialization_workflow
 from app.ontologies.mappings import query_service as _query_service
 from app.ontologies.mappings.request_validation import (
     _assert_client_primary_key_matches,
@@ -66,6 +67,9 @@ class CreateMappingRequest(BaseModel):
     auto_apply_on_review: bool = False
     # 人工数据集发布通过契约校验的新版本后自动做本体全量对账。
     auto_apply_on_version: bool = False
+    # local（缺省，本地湖版本物化）| remote（远程联邦绑定，仅元数据冻结，
+    # 查询期由主协调解析；不可开启自动灌入订阅）。
+    binding_mode: str = "local"
 
 
 class UpdateMappingRequest(BaseModel):
@@ -76,6 +80,8 @@ class UpdateMappingRequest(BaseModel):
     target_object_type_id: Optional[str] = None
     auto_apply_on_review: Optional[bool] = None
     auto_apply_on_version: Optional[bool] = None
+    # null=不变；切换 local/remote 属结构变更（需草稿态）。
+    binding_mode: Optional[str] = None
 
 
 class LinkMappingCreate(BaseModel):
@@ -86,7 +92,7 @@ class LinkMappingCreate(BaseModel):
     tgt_key: str
     # —— 胖关系（连接表 + 边属性）——
     # link_type_id: 绑定手绘 LinkType，令边属性名对齐其 properties schema
-    # （为空则按 relation_type 名匹配/自建）
+    # （空则按 relation_type 名匹配/自建）
     link_type_id: str | None = None
     # edge_dataset_id: 连接表/关系数据集。有值 → 胖关系
     # （src_key/tgt_key/field_mapping 列均在连接表内）
@@ -94,6 +100,9 @@ class LinkMappingCreate(BaseModel):
     # field_mapping: {边属性名: 连接表列名}
     field_mapping: dict = {}
     auto_apply_on_version: bool = False
+    # local（缺省）| remote（远程关系定义：两端均远程绑定，仅验证不物化，
+    # 查询期做参数化 eq JOIN；不支持连接表/边属性/自动灌入）。
+    binding_mode: str = "local"
 
 
 class LinkMappingPolicyUpdate(BaseModel):
@@ -150,12 +159,14 @@ def create_mapping(
     ontology_id: str,
     body: CreateMappingRequest,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     return _entity_workflow.create_mapping(
         db,
         ontology_id,
         body,
         rules=_entity_mapping_rules(),
+        user=current_user,
     )
 
 
@@ -165,6 +176,7 @@ def update_mapping(
     mapping_id: str,
     body: UpdateMappingRequest,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     """映射维护：结构和版本化自动触发策略均通过 draft 发布。"""
     return _entity_workflow.update_mapping(
@@ -173,6 +185,7 @@ def update_mapping(
         mapping_id,
         body,
         rules=_entity_mapping_rules(),
+        user=current_user,
     )
 
 
@@ -211,7 +224,7 @@ def apply_mapping(
     正式 Apply 必须从映射绑定的、可追溯的 DatasetVersion 读取；否则请求方可
     用任意 JSON 冒充资产湖数据，审批、checksum 与版本血缘全部失效。
     """
-    return _entity_workflow.reject_raw_apply(
+    return _materialization_workflow.reject_raw_apply(
         db,
         ontology_id,
         mapping_id,
@@ -225,7 +238,7 @@ def apply_mapping_from_dataset(
     mapping_id: str,
     db: Session = Depends(get_db),
 ):
-    return _entity_workflow.apply_mapping_from_dataset(
+    return _materialization_workflow.apply_mapping_from_dataset(
         db,
         ontology_id,
         mapping_id,
@@ -237,7 +250,7 @@ def build_all_mappings(
     ontology_id: str,
     db: Session = Depends(get_db),
 ):
-    return _entity_workflow.build_all_mappings(db, ontology_id)
+    return _materialization_workflow.build_all_mappings(db, ontology_id)
 
 
 @router.post("/{ontology_id}/link-mappings")
@@ -245,12 +258,14 @@ def create_link_mapping(
     ontology_id: str,
     body: LinkMappingCreate,
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     return _link_workflow.create_link_mapping(
         db,
         ontology_id,
         body,
         rules=_link_mapping_rules(),
+        user=current_user,
     )
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.ontologies.formal_modeling.schemas import CamelModel
 
@@ -21,9 +21,20 @@ class _Strict(CamelModel):
 class QuerySource(_Strict):
     alias: str = Field(min_length=1, max_length=32,
                        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    ontology_id: str = Field(min_length=1, max_length=64)
-    release_id: str = Field(min_length=1, max_length=64)
-    object_type_id: str = Field(min_length=1, max_length=200)
+    ontology_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    release_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    object_type_id: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    subquery: Optional["QueryRequest"] = None
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        identity = (self.ontology_id, self.release_id, self.object_type_id)
+        if self.subquery is None:
+            if not all(identity):
+                raise ValueError("ontologyId/releaseId/objectTypeId are required for an object source")
+        elif any(value is not None for value in identity):
+            raise ValueError("A derived source cannot also specify an object source")
+        return self
 
 
 class ExplicitKeyOn(_Strict):
@@ -120,6 +131,28 @@ class QueryRequest(_Strict):
     distinct: bool = False
     order_by: list[OrderByItem] = Field(default_factory=list, max_length=8)
     page_size: Optional[int] = Field(default=None, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def validate_plan_budget(self):
+        leaves = 0
+
+        def visit(plan, depth):
+            nonlocal leaves
+            if depth > 2:
+                raise ValueError("Derived query depth exceeds 2")
+            for source in plan.sources:
+                if source.subquery is None:
+                    leaves += 1
+                    if leaves > 16:
+                        raise ValueError("Query exceeds 16 object sources")
+                else:
+                    visit(source.subquery, depth + 1)
+
+        visit(self, 0)
+        return self
+
+
+QuerySource.model_rebuild()
 
 
 class CursorRequest(_Strict):

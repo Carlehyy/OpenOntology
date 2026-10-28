@@ -92,7 +92,12 @@ def snapshot_sentinel_models(
 
 
 def _snapshot_mapping(item: OntologyMapping) -> dict:
-    return json_safe({
+    from app.ontologies.mappings.remote_binding import (
+        mapping_binding_mode,
+        remote_descriptor,
+    )
+    binding_mode = mapping_binding_mode(item.field_mapping)
+    payload = json_safe({
         "id": item.id,
         "curatedDatasetId": item.curated_dataset_id,
         "entityClass": item.entity_class,
@@ -101,10 +106,17 @@ def _snapshot_mapping(item: OntologyMapping) -> dict:
         "status": item.status,
         "confidence": item.confidence,
     })
+    payload["bindingMode"] = binding_mode
+    if binding_mode == "remote":
+        payload["remote"] = remote_descriptor(item.field_mapping)
+    return payload
 
 
 def _snapshot_link_mapping(item: OntologyLinkMapping) -> dict:
-    return json_safe({
+    from app.ontologies.mappings.remote_binding import (
+        link_mapping_binding_mode,
+    )
+    payload = json_safe({
         "id": item.id,
         "srcDatasetId": item.src_dataset_id,
         "tgtDatasetId": item.tgt_dataset_id,
@@ -116,6 +128,8 @@ def _snapshot_link_mapping(item: OntologyLinkMapping) -> dict:
         "edgeDatasetId": item.edge_dataset_id,
         "fieldMapping": item.field_mapping or {},
     })
+    payload["bindingMode"] = link_mapping_binding_mode(item.field_mapping)
+    return payload
 
 
 def collect_publishable_snapshot(db: Session, ontology_id: str) -> dict:

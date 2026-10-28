@@ -39,6 +39,16 @@ def prepare_mapping_source(
     if not dataset_id:
         raise MappingSourceError(f"Mapping {mapping.id} 未绑定数据集")
 
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        mapping_binding_mode,
+    )
+    if mapping_binding_mode(
+            getattr(mapping, "field_mapping", None)) == BINDING_MODE_REMOTE:
+        raise MappingSourceError(
+            f"Mapping {mapping.id} 是远程绑定（binding_mode=remote），"
+            "不存在本地数据版本可读取；本地物化路径已隔离")
+
     from app.data_channel.datasets.models import Dataset, DatasetVersion
     from app.data_channel.curated.approved_version_reader import (
         ReviewApprovalError, iter_rows_with_edits, latest_dataset_version,

@@ -10,10 +10,11 @@ import {
 import '@xyflow/react/dist/style.css'
 import {
   AlertCircle, ArrowLeft, ArrowRight, BookOpen, Boxes, Check, CheckCircle2,
-  ChevronDown, ChevronRight, Database, Eye, GitBranch, KeyRound, LayoutGrid,
+  ChevronDown, ChevronRight, Cloud, Database, Eye, GitBranch, KeyRound, LayoutGrid,
   Link2, Loader2, Plus, Save, Search, Sparkles, Table2, Trash2, X,
 } from 'lucide-react'
 import { apiClientV2 } from '@/api/client'
+import { integratedDatasetsApi } from '@/api/v2/integrated-datasets'
 import { saveCanvasLayout } from '@/palantir-graph/api/formalApi'
 import {
   confirmMappingSuggestion,
@@ -37,6 +38,15 @@ import {
   pendingAgentSuggestionCount,
 } from './persistent-suggestions'
 import { computeHandleSides, type HandleSide } from './handle-sides'
+import {
+  integratedRowsToPreview,
+  isRemoteMappingDataset,
+  mergeRemoteDatasets,
+  REMOTE_BINDING_DISCLOSURE,
+  remoteDatasetFromAsset,
+  remoteDatasetFromDescriptor,
+  remoteRelationBindingIssue,
+} from './remote-binding'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import MappingSuggestionPanel from './MappingSuggestionPanel'
 import './mapping-configuration.css'
@@ -91,17 +101,24 @@ function DatasetCanvasNode({ data }: NodeProps<Node<DatasetNodeData>>) {
   const dataset = data.dataset
   // 拖拽跨侧时整节点锚点换侧；key 强制重挂载让 React Flow 重新量取锚点坐标
   const handleSide = data.__handleSide ?? 'right'
+  const isRemote = dataset.source === 'remote'
+  const remoteTableLabel = dataset.remoteTable
+    ? `${dataset.remoteTable.schemaName}.${dataset.remoteTable.tableName}`
+    : '查询时读取'
   return (
-    <div className="dmc-node dmc-node--dataset">
+    <div
+      className={`dmc-node dmc-node--dataset${isRemote ? ' dmc-node--remote' : ''}`}
+      title={isRemote ? `远程只读绑定：${REMOTE_BINDING_DISCLOSURE}` : undefined}
+    >
       <div className="dmc-node__stripe" />
-      <header><span><Table2 size={15} /></span><div><b>{dataset.name}</b><small>{dataset.sourceLabel} · {dataset.rows ?? 0} 行</small></div><button className="nodrag" onClick={() => data.onPreview(dataset.id)} title="预览数据"><Eye size={13} /></button></header>
+      <header><span>{isRemote ? <Cloud size={15} /> : <Table2 size={15} />}</span><div><b>{dataset.name}</b><small>{isRemote ? `远程只读 · ${remoteTableLabel}` : `${dataset.sourceLabel} · ${dataset.rows ?? 0} 行`}</small></div><button className="nodrag" onClick={() => data.onPreview(dataset.id)} title="预览数据"><Eye size={13} /></button></header>
       <div className="dmc-node__fields">
         {dataset.columns.map(column => <div key={column.name} className="dmc-node-field">
           {dataset.primaryKeyColumns.includes(column.name) ? <KeyRound size={11} className="is-key" /> : <span className="dmc-field-spacer" />}
           <span title={datasetColumnLabel(column)}>{datasetColumnLabel(column)}</span><em>{typeLabel(column.type)}</em>
           <Handle key={handleSide} type="source" position={handleSide === 'left' ? Position.Left : Position.Right} id={column.name} className={`dmc-handle dmc-handle--source${handleSide === 'left' ? ' dmc-handle--flip' : ''}`} />
         </div>)}
-        {dataset.columns.length === 0 && <div className="dmc-node-empty">暂未识别到字段</div>}
+        {dataset.columns.length === 0 && <div className="dmc-node-empty">{isRemote ? '冻结快照未含列规格' : '暂未识别到字段'}</div>}
       </div>
     </div>
   )
@@ -161,6 +178,8 @@ interface DesiredLinkMapping {
   srcKey: string
   tgtKey: string
   fieldMapping: Record<string, string>
+  /** 远程只读绑定的瘦边关系：src/tgt 均为远程数据集，无 edge dataset。 */
+  isRemote: boolean
 }
 
 function errorMessage(error: unknown) {
@@ -247,14 +266,54 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
     setSelectedDatasetId(current => current === datasetId ? null : datasetId)
   }, [])
 
-  const previewQuery = useQuery<PreviewResponse>({
-    queryKey: ['mapping-config-preview', selectedDatasetId],
-    enabled: Boolean(selectedDatasetId),
-    queryFn: () => apiClientV2.get(`/datasets/${selectedDatasetId}/preview?limit=8`),
-  })
-
   const objectById = useMemo(() => new Map(data.objectTypes.map(item => [item.id, item])), [data.objectTypes])
-  const datasetById = useMemo(() => new Map(data.datasets.map(item => [item.id, item])), [data.datasets])
+
+  // 远程只读绑定来源：登记的 integrated 资产（左侧可选 + 预览走 rows API）。
+  // 拉取失败（无权限/未登记）静默降级：远程组为空，只读画布仍可用快照冻结
+  // 描述符重建，页面不因此报错。
+  const integratedAssetsQuery = useQuery({
+    queryKey: ['integrated-assets-registry'],
+    queryFn: () => integratedDatasetsApi.list(),
+    retry: false,
+    staleTime: 60_000,
+  })
+  const remoteAssetDatasets = useMemo(
+    () => (integratedAssetsQuery.data?.items || []).map(remoteDatasetFromAsset),
+    [integratedAssetsQuery.data],
+  )
+  // 快照冻结的远程绑定描述符：登记资产下线后，画布/只读快照仍按冻结定义呈现。
+  const remoteDescriptorDatasets = useMemo(
+    () => data.mappings
+      .filter(mapping => mapping.binding_mode === 'remote' && mapping.remote)
+      .map(mapping => remoteDatasetFromDescriptor(mapping.remote!)),
+    [data.mappings],
+  )
+  // 画布数据集索引 = 本地（curated/manual）+ 远程（登记资产优先于冻结描述符）。
+  const datasetById = useMemo(
+    () => mergeRemoteDatasets(data.datasets, remoteAssetDatasets, remoteDescriptorDatasets),
+    [data.datasets, remoteAssetDatasets, remoteDescriptorDatasets],
+  )
+  const selectedDataset = selectedDatasetId ? datasetById.get(selectedDatasetId) : undefined
+  const selectedDatasetIsRemote = isRemoteMappingDataset(selectedDataset)
+
+  const previewQuery = useQuery<PreviewResponse>({
+    // 远程绑定经 integrated rows API（assetId 定位），本地数据集走既有 preview。
+    queryKey: [
+      'mapping-config-preview',
+      selectedDatasetId,
+      selectedDatasetIsRemote ? selectedDataset?.assetId ?? 'missing-asset' : null,
+    ],
+    enabled: Boolean(selectedDatasetId),
+    queryFn: async (): Promise<PreviewResponse> => {
+      if (selectedDatasetIsRemote) {
+        if (!selectedDataset?.assetId) {
+          throw new Error('该远程数据资产缺少资产定位信息，无法预览。')
+        }
+        return integratedRowsToPreview(await integratedDatasetsApi.rows(selectedDataset.assetId, 8))
+      }
+      return apiClientV2.get(`/datasets/${selectedDatasetId}/preview?limit=8`)
+    },
+  })
 
   // 与后端 _canvas_node_ids 的合法性保持一致：只有已被版本映射引用的元素
   // 位置才可持久化；草稿里尚未保存连线的新节点不写入（刷新后本就不再出现）。
@@ -334,7 +393,10 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
   }, [ontologyId, setEdges, setNodes, versionId])
 
   useEffect(() => {
-    if (initialized.current || data.isLoading || data.isLoadingSchemas) return
+    // 远程数据集（登记资产 + 快照冻结描述符）需在首帧画布重建前就绪：
+    // 该 effect 是一次性的，先等 integrated 资产登记表 settle（失败也算
+    // settle，走冻结描述符降级），避免远程映射被静默跳过。
+    if (initialized.current || data.isLoading || data.isLoadingSchemas || integratedAssetsQuery.isPending) return
     initialized.current = true
     const nextNodes: MappingNode[] = []
     const nextEdges: Edge[] = []
@@ -478,7 +540,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
         text: `检测到 ${primaryKeyMigrationCount} 个历史对象映射可补齐稳定身份列，请保存一次完成兼容升级。`,
       })
     }
-  }, [data, datasetById, focusParam, objectById, ontologyId, setEdges, setNodes, toggleDatasetPreview])
+  }, [data, datasetById, focusParam, integratedAssetsQuery.isPending, objectById, ontologyId, setEdges, setNodes, toggleDatasetPreview])
 
   useEffect(() => {
     if (!editable || !dirty) return
@@ -643,6 +705,65 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       }
       const sourceWireDatasetId = sourceEdge.source.slice('dataset:'.length)
       const targetWireDatasetId = targetEdge.source.slice('dataset:'.length)
+      const relationWireDatasetIds = [...new Set(relationEdges.map(edge => edge.source.slice('dataset:'.length)))]
+      // 远程只读绑定的瘦边约束：任一连线来自远程数据资产时，全部连线必须
+      // 来自远程，且源/目标外键分属两个不同远程资产（无 edge dataset 胖边）。
+      const remoteIssue = remoteRelationBindingIssue({
+        wireDatasetIds: relationWireDatasetIds,
+        sourceDatasetId: sourceWireDatasetId,
+        targetDatasetId: targetWireDatasetId,
+        isRemoteDatasetId: datasetId => isRemoteMappingDataset(datasetById.get(datasetId)),
+      })
+      if (remoteIssue) {
+        issues.push({
+          title: relation.displayName || relation.name,
+          detail: remoteIssue === 'mixed'
+            ? '远程绑定的实体关系暂不支持远程与本地数据混用：关系两端及关系字段需全部来自远程数据资产。'
+            : '远程绑定暂不支持同一远程数据资产承担关系两端（胖边）；请为源/目标外键分别连接不同的远程数据资产。',
+        })
+        continue
+      }
+      const isRemoteRelation = isRemoteMappingDataset(datasetById.get(sourceWireDatasetId))
+      const fieldMapping: Record<string, string> = {}
+      for (const edge of relationEdges) if (edge.targetHandle && edge.sourceHandle && ![REL_SOURCE, REL_TARGET].includes(edge.targetHandle)) fieldMapping[edge.targetHandle] = edge.sourceHandle
+      if (isRemoteRelation) {
+        // 与服务端 remote_binding 契约一致：远程关系是无连接表的键定义，
+        // 不带边属性；源/目标数据集由两端对象的远程对象绑定决定。
+        if (Object.keys(fieldMapping).length) {
+          issues.push({
+            title: relation.displayName || relation.name,
+            detail: '远程关系定义不带边属性（无连接表）；请删除关系属性连线，仅保留源/目标外键。',
+          })
+          continue
+        }
+        const remoteEndpointDataset = (objectId: string) => desiredObjectMappings.find(
+          item => item.object.id === objectId && isRemoteMappingDataset(datasetById.get(item.datasetId)),
+        )?.datasetId
+          || (data.mappings.find(item => mappingTargetId(item) === objectId && item.binding_mode === 'remote')?.curated_dataset_id ?? null)
+        const expectedSrcDatasetId = remoteEndpointDataset(relation.sourceObjectTypeId)
+        const expectedTgtDatasetId = remoteEndpointDataset(relation.targetObjectTypeId)
+        if (!expectedSrcDatasetId || !expectedTgtDatasetId) {
+          issues.push({
+            title: relation.displayName || relation.name,
+            detail: '请先为关系两端的对象实体配置远程对象映射：远程关系的源/目标数据集由两端对象的远程绑定决定。',
+          })
+          continue
+        }
+        if (sourceWireDatasetId !== expectedSrcDatasetId || targetWireDatasetId !== expectedTgtDatasetId) {
+          issues.push({
+            title: relation.displayName || relation.name,
+            detail: `远程关系的源/目标外键必须分别来自两端对象远程绑定的数据资产（源：${datasetById.get(expectedSrcDatasetId)?.name || expectedSrcDatasetId}，目标：${datasetById.get(expectedTgtDatasetId)?.name || expectedTgtDatasetId}）。`,
+          })
+          continue
+        }
+        desired.push({
+          relation,
+          srcDatasetId: sourceWireDatasetId, tgtDatasetId: targetWireDatasetId,
+          edgeDatasetId: null, srcKey: sourceEdge.sourceHandle, tgtKey: targetEdge.sourceHandle,
+          fieldMapping, isRemote: true,
+        })
+        continue
+      }
       const isFat = sourceWireDatasetId === targetWireDatasetId
       const endpointDataset = (objectId: string) => desiredObjectMappings.find(item => item.object.id === objectId)?.datasetId
         || data.mappings.find(item => mappingTargetId(item) === objectId)?.curated_dataset_id || null
@@ -651,12 +772,10 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       if (!srcDatasetId || !tgtDatasetId) {
         issues.push({ title: relation.displayName || relation.name, detail: '请先为关系两端的对象实体配置数据映射。' }); continue
       }
-      const fieldMapping: Record<string, string> = {}
-      for (const edge of relationEdges) if (edge.targetHandle && edge.sourceHandle && ![REL_SOURCE, REL_TARGET].includes(edge.targetHandle)) fieldMapping[edge.targetHandle] = edge.sourceHandle
-      desired.push({ relation, srcDatasetId, tgtDatasetId, edgeDatasetId: isFat ? sourceWireDatasetId : null, srcKey: sourceEdge.sourceHandle, tgtKey: targetEdge.sourceHandle, fieldMapping })
+      desired.push({ relation, srcDatasetId, tgtDatasetId, edgeDatasetId: isFat ? sourceWireDatasetId : null, srcKey: sourceEdge.sourceHandle, tgtKey: targetEdge.sourceHandle, fieldMapping, isRemote: false })
     }
     return { desired, issues }
-  }, [data.mappings, desiredObjectMappings, edges, nodes])
+  }, [data.mappings, datasetById, desiredObjectMappings, edges, nodes])
 
   const saveAll = async () => {
     if (!versionId || data.workspaceEditable !== true) {
@@ -666,9 +785,29 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
     const issues: SaveIssue[] = [...desiredLinkMappings.issues]
     const objectMappingPrimaryKeys = new Map<DesiredObjectMapping, string>()
     if (invalidEdges.length) issues.push({ title: '字段类型不兼容', detail: `存在 ${invalidEdges.length} 条历史或草稿连线类型不一致，请删除后重新连接。` })
+    const objectBindingModes = new Map<string, Set<'local' | 'remote'>>()
     for (const desired of desiredObjectMappings) {
       const dataset = datasetById.get(desired.datasetId)
-      if (!dataset?.primaryKeyColumns.length) issues.push({ title: desired.object.displayName || desired.object.name, detail: `数据集「${dataset?.name || desired.datasetId}」尚未声明资产主键，不能保存对象映射。` })
+      const isRemote = isRemoteMappingDataset(dataset)
+      objectBindingModes.set(
+        desired.object.id,
+        (objectBindingModes.get(desired.object.id) || new Set()).add(isRemote ? 'remote' : 'local'),
+      )
+      if (!dataset?.primaryKeyColumns.length) issues.push({
+        title: desired.object.displayName || desired.object.name,
+        detail: isRemote
+          ? `远程数据资产「${dataset?.name || desired.datasetId}」的源表未声明主键，不能保存远程只读绑定。`
+          : `数据集「${dataset?.name || desired.datasetId}」尚未声明资产主键，不能保存对象映射。`,
+      })
+      else if (isRemote) {
+        // 与服务端 remote_pk_not_mapped 契约一致：远程对象身份覆盖源表全部
+        // 主键列，每个主键列都必须显式映射到本体属性。
+        const unmappedPkColumns = dataset.primaryKeyColumns.filter(column => !(column in desired.fieldMapping))
+        if (unmappedPkColumns.length) issues.push({
+          title: desired.object.displayName || desired.object.name,
+          detail: `请把远程主键列 ${unmappedPkColumns.map(column => `「${column}」`).join('、')} 连接到本体属性：远程对象身份需覆盖源表全部主键列。`,
+        })
+      }
       const existing = data.mappings.find(item => (
         item.curated_dataset_id === desired.datasetId
         && mappingTargetId(item) === desired.object.id
@@ -698,6 +837,16 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
         })
       }
     }
+    // 与服务端 object_type_binding_mode_conflict 契约一致：同一对象实体不能
+    // 同时绑定本地数据面与远程数据面（查询数据面会分裂）。
+    for (const [objectId, modes] of objectBindingModes) {
+      if (modes.size < 2) continue
+      const object = objectById.get(objectId)
+      issues.push({
+        title: object?.displayName || object?.name || objectId,
+        detail: '同一对象实体不能同时绑定本地数据集与远程只读资产，请统一绑定模式后重试。',
+      })
+    }
     if (issues.length) { setSaveIssues(issues); setNotice({ tone: 'bad', text: '当前草稿还有需要处理的问题，尚未写入数据库。' }); return }
 
     setSaving(true); setSaveIssues([]); setNotice(null)
@@ -705,13 +854,15 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       const mappings = desiredObjectMappings.map(desired => {
         const existing = data.mappings.find(item => item.curated_dataset_id === desired.datasetId && mappingTargetId(item) === desired.object.id)
         const dataset = datasetById.get(desired.datasetId)
+        const isRemote = isRemoteMappingDataset(dataset)
         const fieldMapping: Record<string, string | boolean> = {
           ...desired.fieldMapping,
           __primary_key__: objectMappingPrimaryKeys.get(desired)!,
         }
-        if (dataset?.source === 'curated' && curatedAutoApplyDatasetIds.has(dataset.id)) {
+        // 远程只读绑定不参与自动灌入订阅（无物化对账），auto_apply 策略仅对本地数据集生效。
+        if (!isRemote && dataset?.source === 'curated' && curatedAutoApplyDatasetIds.has(dataset.id)) {
           fieldMapping.__auto_apply_on_review__ = true
-        } else if (dataset?.source === 'manual' && manualAutoApplyDatasetIds.has(dataset.id)) {
+        } else if (!isRemote && dataset?.source === 'manual' && manualAutoApplyDatasetIds.has(dataset.id)) {
           fieldMapping.__auto_apply_on_version__ = true
         }
         return {
@@ -719,6 +870,9 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
           curatedDatasetId: desired.datasetId,
           entityClass: desired.object.name,
           targetObjectTypeId: desired.object.id,
+          // 远程只读绑定只提交 dataset id + 顶层 bindingMode；描述符由服务端
+          // 按登记资产验证冻结，客户端不携带也不回显源元信息。
+          ...(isRemote ? { bindingMode: 'remote' as const } : {}),
           fieldMapping,
           status: 'draft', confidence: 1,
         }
@@ -753,6 +907,9 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
           edgeDatasetId: desired.edgeDatasetId,
           relationType: desired.relation.name, linkTypeId: desired.relation.id,
           srcKey: desired.srcKey, tgtKey: desired.tgtKey,
+          // 远程瘦边：src/tgt 直接是两个远程数据集，无 edge dataset；
+          // 同本地映射一样只提交 id 与键列，描述符由服务端冻结。
+          ...(desired.isRemote ? { bindingMode: 'remote' as const } : {}),
           fieldMapping, status: 'draft',
         }
       })
@@ -762,7 +919,13 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       )
       await queryClient.invalidateQueries({ queryKey: ['mapping-snapshot', ontologyId, versionId] })
       setDirty(false)
-      setNotice({ tone: 'good', text: `草稿映射已保存：${mappings.length} 个对象映射、${linkMappings.length} 个关系映射。` })
+      const remoteBindingCount = mappings.filter(mapping => mapping.bindingMode === 'remote').length
+        + linkMappings.filter(mapping => mapping.bindingMode === 'remote').length
+      setNotice({
+        tone: 'good',
+        text: `草稿映射已保存：${mappings.length} 个对象映射、${linkMappings.length} 个关系映射。`
+          + (remoteBindingCount > 0 ? ` 其中 ${remoteBindingCount} 条为远程只读绑定（${REMOTE_BINDING_DISCLOSURE}）` : ''),
+      })
     } catch (error) {
       setNotice({ tone: 'bad', text: errorMessage(error) })
     } finally { setSaving(false) }
@@ -828,11 +991,16 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       .map(node => node.data.dataset.id),
     [nodes],
   )
+  // 智能建议只面向本地（curated/manual）数据集；远程只读绑定不参与建议生成。
+  const suggestibleDatasetIds = useMemo(
+    () => canvasDatasetIds.filter(datasetId => !isRemoteMappingDataset(datasetById.get(datasetId))),
+    [canvasDatasetIds, datasetById],
+  )
 
   const openSuggestions = async () => {
     if (!versionId || !editable || suggestionLoading) return
-    if (!canvasDatasetIds.length) {
-      // 画布上没有数据集时仍打开队列：可能有待确认的 Agent 持久建议
+    if (!suggestibleDatasetIds.length) {
+      // 画布上没有可建议的本地数据集时仍打开队列：可能有待确认的 Agent 持久建议
       if (agentPendingCount > 0) {
         setSuggestionResult(null)
         setSuggestionOpen(true)
@@ -843,7 +1011,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
     setSuggestionLoading(true)
     setSuggestionResult(null)
     try {
-      const result = await fetchMappingSuggestions(ontologyId, versionId, canvasDatasetIds)
+      const result = await fetchMappingSuggestions(ontologyId, versionId, suggestibleDatasetIds)
       setSuggestionResult(result)
     } catch (error) {
       setSuggestionOpen(false)
@@ -974,7 +1142,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
   }
   const closeTutorial = () => { localStorage.setItem(`mapping-tutorial:${ontologyId}`, 'seen'); setTutorialStep(null) }
   const tutorial = [
-    { icon: Database, title: '从左侧选择数据资产', text: '这里仅展示数据资产湖中已启用的成品数据集与人工数据集。点击“+”把需要配置的数据集放到画布。' },
+    { icon: Database, title: '从左侧选择数据资产', text: '这里展示数据资产湖中已启用的成品数据集、人工数据集，以及已登记的远程数据资产（只读绑定，查询时读取）。点击“+”把需要配置的数据集放到画布。' },
     { icon: Boxes, title: '从右侧选择本体元素', text: '对象实体与实体关系会分别标识配置进度。把需要维护的元素加入画布即可查看全部属性。' },
     { icon: Link2, title: '拖动端点建立字段连线', text: '从数据字段右侧圆点拖到本体属性左侧圆点。点击节点可聚焦相关映射，悬停或点击连线可查看字段去向。' },
     { icon: Eye, title: '预览数据，最后统一保存', text: '点击数据集的眼睛可在底部核对实例。所有操作先保存在当前前端草稿，只有右上角“保存配置”才会写入数据库。' },
@@ -984,6 +1152,10 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
   if (data.isError) return <div className="dmc-page-loading dmc-page-loading--error"><AlertCircle />映射工作台加载失败，请返回后重试。</div>
 
   const filteredDatasets = data.datasets.filter(item => item.name.toLowerCase().includes(leftSearch.toLowerCase()))
+  const filteredRemoteDatasets = remoteAssetDatasets.filter(item => {
+    const remoteTableLabel = item.remoteTable ? `${item.remoteTable.schemaName}.${item.remoteTable.tableName}` : ''
+    return `${item.name} ${remoteTableLabel}`.toLowerCase().includes(leftSearch.toLowerCase())
+  })
   const filteredTargets = (rightKind === 'object' ? data.objectTypes : data.linkTypes).filter(item => `${item.displayName} ${item.name}`.toLowerCase().includes(rightSearch.toLowerCase()))
   const mappedTargetHandles = new Set(edges.map(edge => `${edge.target}:${edge.targetHandle}`))
 
@@ -992,7 +1164,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
       <header className="dmc-header">
         <div className="dmc-brand">{!hideChromeNavigation && <button onClick={returnToPreviousPage} aria-label="返回上一页" title="返回上一页"><ArrowLeft size={16} /></button>}<span><Link2 size={18} /></span><div><b>数据映射</b><small>{editable ? '草稿可编辑 · 对象实体、实体关系与数据资产字段映射' : `${data.workspaceMode === 'trial' ? '试跑快照' : data.workspaceMode === 'archived' ? '归档快照' : '发布快照'} · 只读查看`}</small></div></div>
         <label className="dmc-global-search focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Search size={14} /><input placeholder="搜索画布节点、数据集或本体属性…" onChange={event => { setLeftSearch(event.target.value); setRightSearch(event.target.value) }} /></label>
-        <div className="dmc-header-actions">{!hideChromeNavigation && <button className="dmc-model-switch" onClick={leaveWorkspace} title="返回模型结构"><Boxes size={15} /><span>模型结构</span></button>}<button onClick={() => setTutorialStep(0)} title="新手教程"><BookOpen size={15} /></button><button onClick={autoLayout} title="自动布局"><LayoutGrid size={15} /></button>{editable && <button onClick={clearCanvas} title="清空画布"><Trash2 size={15} /></button>}{editable && <button className="dmc-suggest-open" data-testid="mapping-suggest-open" disabled={(!canvasDatasetIds.length && !agentPendingCount) || suggestionLoading} onClick={openSuggestions} title={canvasDatasetIds.length ? '基于历史映射知识、名称规则与大模型概念化生成字段映射建议' : agentPendingCount ? '查看待确认的 Agent 映射建议' : '先把左侧数据集加入画布，再生成智能建议'}>{suggestionLoading ? <Loader2 className="animate-spin" size={15} /> : <Sparkles size={15} />}<span>智能建议</span>{agentPendingCount > 0 && <em data-testid="suggest-agent-count">{agentPendingCount}</em>}</button>}<span className="dmc-divider" />{editable ? <button className="dmc-save" disabled={!dirty || saving} onClick={saveAll}>{saving ? <Loader2 className="animate-spin" size={15} /> : <Save size={15} />}{saving ? '正在保存…' : dirty ? '保存配置' : '已保存'}</button> : <span className="dmc-readonly-badge"><Eye size={14} />只读快照</span>}</div>
+        <div className="dmc-header-actions">{!hideChromeNavigation && <button className="dmc-model-switch" onClick={leaveWorkspace} title="返回模型结构"><Boxes size={15} /><span>模型结构</span></button>}<button onClick={() => setTutorialStep(0)} title="新手教程"><BookOpen size={15} /></button><button onClick={autoLayout} title="自动布局"><LayoutGrid size={15} /></button>{editable && <button onClick={clearCanvas} title="清空画布"><Trash2 size={15} /></button>}{editable && <button className="dmc-suggest-open" data-testid="mapping-suggest-open" disabled={(!suggestibleDatasetIds.length && !agentPendingCount) || suggestionLoading} onClick={openSuggestions} title={suggestibleDatasetIds.length ? '基于历史映射知识、名称规则与大模型概念化生成字段映射建议' : agentPendingCount ? '查看待确认的 Agent 映射建议' : canvasDatasetIds.length ? '远程数据资产不参与智能建议；请先把本地数据集加入画布' : '先把左侧数据集加入画布，再生成智能建议'}>{suggestionLoading ? <Loader2 className="animate-spin" size={15} /> : <Sparkles size={15} />}<span>智能建议</span>{agentPendingCount > 0 && <em data-testid="suggest-agent-count">{agentPendingCount}</em>}</button>}<span className="dmc-divider" />{editable ? <button className="dmc-save" disabled={!dirty || saving} onClick={saveAll}>{saving ? <Loader2 className="animate-spin" size={15} /> : <Save size={15} />}{saving ? '正在保存…' : dirty ? '保存配置' : '已保存'}</button> : <span className="dmc-readonly-badge"><Eye size={14} />只读快照</span>}</div>
       </header>
 
       {notice && <div className={`dmc-notice dmc-notice--${notice.tone}`}>{notice.tone === 'good' ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}<span>{notice.text}</span><button onClick={() => setNotice(null)}><X size={13} /></button></div>}
@@ -1061,8 +1233,41 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
                 </div>
               )
             })}
+            {integratedAssetsQuery.isError ? (
+              // 资源登记表读取失败不允许静默降级成"没有远程资产"：失败可见、
+              // 可重试；已保存的远程绑定仍按快照冻结描述符只读呈现。
+              <div className="dmc-remote-group dmc-remote-group--error" data-testid="mapping-remote-error" role="note">
+                <div className="dmc-remote-group__head"><b>远程数据资产 · 只读绑定</b></div>
+                <p className="dmc-remote-group__hint">
+                  远程数据资产登记表读取失败（可能无权限或服务暂不可用），暂时无法选择新的远程资产；已保存的远程绑定仍按快照冻结定义呈现。
+                  <button type="button" onClick={() => { void integratedAssetsQuery.refetch() }}>重试</button>
+                </p>
+              </div>
+            ) : remoteAssetDatasets.length > 0 && (
+              <div className="dmc-remote-group" data-testid="mapping-remote-assets">
+                <div className="dmc-remote-group__head"><b>远程数据资产 · 只读绑定</b><em>{remoteAssetDatasets.length}</em></div>
+                <p className="dmc-remote-group__hint">{REMOTE_BINDING_DISCLOSURE}</p>
+                {filteredRemoteDatasets.map(dataset => {
+                  const expanded = expandedAssets.has(dataset.id)
+                  const added = nodes.some(node => node.id === `dataset:${dataset.id}`)
+                  const tableLabel = dataset.remoteTable ? `${dataset.remoteTable.schemaName}.${dataset.remoteTable.tableName}` : ''
+                  return (
+                    <div className="dmc-asset dmc-asset--remote" key={dataset.id}>
+                      <div className="dmc-asset-main">
+                        <button onClick={() => setExpandedAssets(current => { const next = new Set(current); if (expanded) next.delete(dataset.id); else next.add(dataset.id); return next })} title={expanded ? '收起字段' : '展开字段'}>{expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</button>
+                        <span className="dmc-asset-icon dmc-asset-icon--remote"><Cloud size={13} /></span>
+                        <span><b>{dataset.name}</b><small>{tableLabel ? `${tableLabel} · ` : ''}只读 · {dataset.columns.length} 字段</small></span>
+                        <button className="dmc-eye" data-active={selectedDatasetId === dataset.id} aria-pressed={selectedDatasetId === dataset.id} onClick={() => toggleDatasetPreview(dataset.id)} title={selectedDatasetId === dataset.id ? '收起预览' : '预览远程数据（查询时从源读取）'}><Eye size={12} /></button>
+                        <button className="dmc-add" disabled={!editable || added} onClick={() => addDatasetNode(dataset)} title={!editable ? '只读快照不可添加节点' : '加入画布建立远程只读绑定'}>{added ? <Check size={12} /> : <Plus size={12} />}</button>
+                      </div>
+                      {expanded && <div className="dmc-asset-columns">{dataset.columns.map(column => <span key={column.name}>{dataset.primaryKeyColumns.includes(column.name) ? <KeyRound size={9} /> : <i />}<b title={column.name}>{column.name}</b><em>{typeLabel(column.type)}</em></span>)}</div>}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
-          <div className="dmc-sidebar-foot"><span><Database size={11} />成品 {data.datasets.filter(item => item.source === 'curated').length}</span><span><Table2 size={11} />人工 {data.datasets.filter(item => item.source === 'manual').length}</span></div>
+          <div className="dmc-sidebar-foot"><span><Database size={11} />成品 {data.datasets.filter(item => item.source === 'curated').length}</span><span><Table2 size={11} />人工 {data.datasets.filter(item => item.source === 'manual').length}</span><span><Cloud size={11} />远程 {remoteAssetDatasets.length}</span></div>
         </aside>
 
         <main className="dmc-canvas-wrap">
@@ -1104,7 +1309,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
             <div className="dmc-canvas-stats">节点 <b>{nodes.length}</b><span />字段映射 <b>{edges.length}</b><span />{dirty ? <em>有未保存更改</em> : <i>已与数据库同步</i>}</div>
           </ReactFlow>
 
-          {selectedDatasetId && <section className="dmc-preview-panel" data-testid="mapping-dataset-preview"><header><div><Eye size={14} /><span><b>{datasetById.get(selectedDatasetId)?.name}</b><small>实例数据预览 · 仅用于映射核对</small></span></div><button onClick={() => setSelectedDatasetId(null)} aria-label="关闭数据预览"><X size={14} /></button></header>{previewQuery.isLoading ? <div className="dmc-preview-loading"><Loader2 className="animate-spin" />正在读取数据…</div> : previewQuery.data?.columns?.length ? <div className="dmc-preview-table"><table><thead><tr>{previewQuery.data.columns.map(column => <th key={column} title={column}>{datasetColumnLabelByName(datasetById.get(selectedDatasetId), column)}</th>)}</tr></thead><tbody>{previewQuery.data.rows.map((row, index) => <tr key={index}>{previewQuery.data!.columns.map(column => <td key={column} title={String(row[column] ?? '')}>{row[column] == null || row[column] === '' ? '—' : typeof row[column] === 'object' ? JSON.stringify(row[column]) : String(row[column])}</td>)}</tr>)}</tbody></table><p>显示 {previewQuery.data.rows.length} 行 · 共 {previewQuery.data.total_rows?.toLocaleString() || 0} 行</p></div> : <div className="dmc-preview-loading"><AlertCircle />当前数据集暂无可预览数据</div>}</section>}
+          {selectedDatasetId && <section className="dmc-preview-panel" data-testid="mapping-dataset-preview"><header><div><Eye size={14} /><span><b>{selectedDataset?.name}</b><small>{selectedDatasetIsRemote ? '远程数据预览 · 查询时从源读取 · 仅用于映射核对' : '实例数据预览 · 仅用于映射核对'}</small></span></div><button onClick={() => setSelectedDatasetId(null)} aria-label="关闭数据预览"><X size={14} /></button></header>{previewQuery.isLoading ? <div className="dmc-preview-loading"><Loader2 className="animate-spin" />正在读取数据…</div> : previewQuery.isError ? <div className="dmc-preview-loading"><AlertCircle />{selectedDatasetIsRemote ? '远程数据读取失败，请检查资产登记与源连接状态。' : '数据读取失败，请稍后重试。'}</div> : previewQuery.data?.columns?.length ? <div className="dmc-preview-table"><table><thead><tr>{previewQuery.data.columns.map(column => <th key={column} title={column}>{datasetColumnLabelByName(selectedDataset, column)}</th>)}</tr></thead><tbody>{previewQuery.data.rows.map((row, index) => <tr key={index}>{previewQuery.data!.columns.map(column => <td key={column} title={String(row[column] ?? '')}>{row[column] == null || row[column] === '' ? '—' : typeof row[column] === 'object' ? JSON.stringify(row[column]) : String(row[column])}</td>)}</tr>)}</tbody></table><p>{selectedDatasetIsRemote ? `显示 ${previewQuery.data.rows.length} 行 · 远程只读实时读取，非全量` : `显示 ${previewQuery.data.rows.length} 行 · 共 ${previewQuery.data.total_rows?.toLocaleString() || 0} 行`}</p></div> : <div className="dmc-preview-loading"><AlertCircle />当前数据集暂无可预览数据</div>}</section>}
         </main>
 
         <aside className="dmc-sidebar dmc-sidebar--right">

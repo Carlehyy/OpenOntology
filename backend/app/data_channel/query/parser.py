@@ -2,10 +2,14 @@
 
 Pipelines retain order: WHERE before a LEFT JOIN is not a post-join WHERE.
 Identifiers are metadata names, never SQL fragments; :parameters are separate.
+The Pipeline dataclasses are also the typed construction surface for
+server-side callers (bridge adapters): such callers must run validate_pipeline.
+DISTINCT and contains are typed-only operators with no text grammar yet.
 """
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -13,7 +17,7 @@ from typing import Any
 from lark import Lark, Transformer, UnexpectedInput
 from lark.exceptions import VisitError
 
-from .contracts import QueryError
+from .contracts import QueryError, stable_hash
 
 _GRAMMAR = r"""
 start: "from"i ident "as"i ident ("|" command)*
@@ -144,6 +148,22 @@ class _Build(Transformer):
 _PARSER = Lark(_GRAMMAR, parser="lalr", maybe_placeholders=False)
 
 
+def validate_pipeline(pipeline: Pipeline) -> Pipeline:
+    """Shared checks for parsed text and typed-constructed pipelines."""
+    if not isinstance(pipeline, Pipeline):
+        raise QueryError(422, "invalid_pipeline", "A typed Pipeline object is required")
+    if len(pipeline.commands) > 64 or len(pipeline.sources) > 16:
+        raise QueryError(422, "query_too_complex", "Too many pipeline operators or sources")
+    aliases = [alias for _, alias in pipeline.sources]
+    identifiers = aliases + [source for source, _ in pipeline.sources]
+    if any(len(identifier) > 63 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier)
+           for identifier in identifiers):
+        raise QueryError(422, "invalid_identifier", "Source binding names and aliases must be ASCII identifiers")
+    if len(aliases) != len(set(aliases)):
+        raise QueryError(422, "duplicate_alias", "Source aliases must be unique")
+    return pipeline
+
+
 def parse(text: str) -> Pipeline:
     if not isinstance(text, str) or not text.strip() or len(text) > 32768:
         raise QueryError(422, "invalid_query", "Query must contain 1..32768 characters")
@@ -158,13 +178,97 @@ def parse(text: str) -> Pipeline:
                                    "offset": exc.pos_in_stream}) from exc
     except (VisitError, RecursionError, ValueError) as exc:
         raise QueryError(422, "invalid_query", "Invalid query value or excessive nesting") from exc
-    if len(result.commands) > 64 or len(result.sources) > 16:
-        raise QueryError(422, "query_too_complex", "Too many pipeline operators or sources")
-    aliases = [alias for _, alias in result.sources]
-    import re
-    identifiers = aliases + [source for source, _ in result.sources]
-    if any(len(identifier) > 63 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier) for identifier in identifiers):
-        raise QueryError(422, "invalid_identifier", "Source binding names and aliases must be ASCII identifiers")
-    if len(aliases) != len(set(aliases)):
-        raise QueryError(422, "duplicate_alias", "Source aliases must be unique")
-    return result
+    return validate_pipeline(result)
+
+
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return {"$decimal": str(value)}
+    if isinstance(value, Ref):
+        return {"$ref": [value.alias, value.name]}
+    if isinstance(value, Value):
+        payload = {"isParam": value.parameter}
+        payload["param" if value.parameter else "raw"] = (
+            value.value if not isinstance(value.value, Decimal) else {"$decimal": str(value.value)})
+        return {"$value": payload}
+    if isinstance(value, Expr):
+        return {"$expr": [value.op, [_to_jsonable(a) for a in value.args]]}
+    if isinstance(value, Command):
+        return {"$cmd": [value.op, [_to_jsonable(a) for a in value.args]]}
+    if isinstance(value, tuple):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise QueryError(422, "invalid_pipeline", f"Pipeline holds unserializable {type(value).__name__}")
+
+
+def _from_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        if "$decimal" in value: return Decimal(value["$decimal"])
+        if "$ref" in value: return Ref(*value["$ref"])
+        if "$value" in value:
+            payload = value["$value"]
+            if payload.get("isParam"):
+                return Value(payload.get("param"), True)
+            return Value(_from_jsonable_literal(payload.get("raw")), False)
+        if "$expr" in value:
+            return Expr(value["$expr"][0], tuple(_from_jsonable(a) for a in value["$expr"][1]))
+        if "$cmd" in value:
+            return Command(value["$cmd"][0], tuple(_from_jsonable(a) for a in value["$cmd"][1]))
+        raise QueryError(422, "invalid_pipeline", "Unknown serialized node")
+    if isinstance(value, list):
+        return tuple(_from_jsonable(item) for item in value)
+    return value
+
+
+def _from_jsonable_literal(value: Any) -> Any:
+    if isinstance(value, dict) and "$decimal" in value:
+        return Decimal(value["$decimal"])
+    return value
+
+
+def pipeline_to_dict(pipeline: Pipeline) -> dict:
+    return {"source": pipeline.source, "alias": pipeline.alias,
+            "commands": [_to_jsonable(command) for command in pipeline.commands]}
+
+
+def pipeline_from_dict(data: dict) -> Pipeline:
+    try:
+        pipeline = Pipeline(data["source"], data["alias"],
+                            tuple(_from_jsonable(command) for command in data["commands"]))
+    except (KeyError, TypeError, ArithmeticError) as exc:
+        raise QueryError(422, "invalid_pipeline", "Serialized pipeline is malformed") from exc
+    return validate_pipeline(pipeline)
+
+
+def params_in(commands) -> set[str]:
+    """Parameter names referenced by commands (for per-source param scoping)."""
+    names = set()
+    for arg in refs_in_values(commands):
+        if isinstance(arg, Value) and arg.parameter:
+            names.add(str(arg.value))
+    return names
+
+
+def refs_in_values(value: Any):
+    for item in _iter_nodes(value):
+        yield item
+
+
+def _iter_nodes(value: Any):
+    if isinstance(value, (Ref, Value, Expr)):
+        yield value
+    if isinstance(value, (Expr, Command)):
+        for arg in value.args:
+            yield from _iter_nodes(arg)
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            yield from _iter_nodes(item)
+
+
+def plan_fingerprint(pipeline: Pipeline, params: dict[str, Any], origin: Any = None) -> str:
+    """Canonical identity of a typed plan; covers derived definitions via origin."""
+    return stable_hash({"pipeline": pipeline_to_dict(pipeline), "params": params,
+                        "origin": origin})

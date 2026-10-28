@@ -106,6 +106,10 @@ def _version_eligibility(db: Session, dataset_id: str) -> tuple[bool, str]:
 def automation_overview(db: Session, ontology_id: str) -> dict:
     """未订阅/已订阅映射一览：发布前据此补订阅，保证数据更新自动流入本体。"""
     from app.ontologies.mappings.models import OntologyMapping
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        mapping_binding_mode,
+    )
 
     mappings = (
         db.query(OntologyMapping)
@@ -118,16 +122,20 @@ def automation_overview(db: Session, ontology_id: str) -> dict:
     for mapping in mappings:
         field_mapping = mapping.field_mapping or {}
         dataset = _dataset_view(db, mapping.curated_dataset_id)
+        binding_mode = mapping_binding_mode(field_mapping)
+        remote_binding = binding_mode == BINDING_MODE_REMOTE
         eligible_version = False
         eligibility_reason: str | None = None
-        if dataset is not None and dataset["dataset_kind"] != "curated":
+        if (dataset is not None and dataset["dataset_kind"] != "curated"
+                and not remote_binding):
             eligible_version, eligibility_reason = _version_eligibility(
                 db, mapping.curated_dataset_id)
         subscribed_version = bool(field_mapping.get("__auto_apply_on_version__"))
         subscribed_review = bool(field_mapping.get("__auto_apply_on_review__"))
         # curated 数据集：审批后自动灌入由 __auto_apply_on_review__ 控制；
-        # 人工数据集：版本发布后自动灌入由 __auto_apply_on_version__ 控制。
-        needs_subscription = bool(dataset) and not (
+        # 人工数据集：版本发布后自动灌入由 __auto_apply_on_version__ 控制；
+        # 远程绑定：显式排除——不参与本地自动灌入，也无需订阅。
+        needs_subscription = bool(dataset) and not remote_binding and not (
             subscribed_version or subscribed_review)
         if needs_subscription:
             unsubscribed += 1
@@ -136,10 +144,13 @@ def automation_overview(db: Session, ontology_id: str) -> dict:
             "entity_class": mapping.entity_class,
             "status": mapping.status,
             "dataset": dataset,
+            "binding_mode": binding_mode,
             "subscribed_version": subscribed_version,
             "subscribed_review": subscribed_review,
             "version_eligible": eligible_version,
-            "version_eligibility_reason": eligibility_reason,
+            "version_eligibility_reason": (
+                "remote_binding_not_automatable"
+                if remote_binding else eligibility_reason),
             "needs_subscription": needs_subscription,
         })
     return {
@@ -162,8 +173,13 @@ def subscribe_automation(
     逐条执行资格校验：人工数据集开启版本自动灌入必须先满足治理契约
     （主键 + 可校验不可变版本）；curated 数据集由审批触发（on_review）。
     不满足资格的映射跳过并在 skipped 中返回原因——发布门仍会 fail-closed。
+    远程绑定显式排除：不参与本地自动灌入。
     """
     from app.ontologies.mappings.models import OntologyMapping
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        mapping_binding_mode,
+    )
 
     mappings = (
         db.query(OntologyMapping)
@@ -178,6 +194,13 @@ def subscribe_automation(
                 "mapping_id": mapping.id,
                 "entity_class": mapping.entity_class,
                 "reason": "no_dataset_bound",
+            })
+            continue
+        if mapping_binding_mode(mapping.field_mapping) == BINDING_MODE_REMOTE:
+            skipped.append({
+                "mapping_id": mapping.id,
+                "entity_class": mapping.entity_class,
+                "reason": "remote_binding_not_automatable",
             })
             continue
         field_mapping = dict(mapping.field_mapping or {})

@@ -1077,6 +1077,12 @@ def save_draft_mappings(
             if not isinstance(body[key], list):
                 raise HTTPException(422, f"{key} must be an array")
             snap[key] = _json_safe(body[key])
+    # 远程绑定定义必须服务端冻结：客户端提供的 remote/__remote__ 元数据
+    # 一律丢弃，由注入的 integrated validator 按数据集重新冻结。
+    from app.ontologies.mappings.remote_binding import (
+        normalize_workspace_remote_entries,
+    )
+    normalize_workspace_remote_entries(db, current_user, snap)
     sentinel_errors = validate_builtin_sentinel_contract(snap["sentinels"])
     sentinel_errors.extend(_dynamic_sentinel_id_conflict_errors(
         db, ontology_id, snap["sentinels"],

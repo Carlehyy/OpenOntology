@@ -144,6 +144,11 @@ export const integratedDatasetsApi = {
   receipt: (id: string, mutationId: string): Promise<MutationReceipt> => apiClientV2.get(`${assetPath(id)}/mutations/${encodeURIComponent(mutationId)}`),
   /** Manual full sync; the server owns the 1000-row batch default. */
   sync: (id: string): Promise<IntegratedSyncRun> => apiClientV2.post(`${assetPath(id)}/sync`, {}),
+  /**
+   * 受控注销：零历史（版本/同步运行/写入回执，任何状态）/ 零本体映射绑定 /
+   * 零流水线与任务才允许；否则 409 携带结构化依赖明细，历史与审计不会被删除。
+   */
+  decommission: (id: string): Promise<void> => apiClientV2.delete(assetPath(id)),
   syncRuns: (id: string): Promise<{ items: IntegratedSyncRun[] }> => apiClientV2.get(`${assetPath(id)}/sync-runs`),
   syncRun: (id: string, runId: string): Promise<IntegratedSyncRun> => apiClientV2.get(`${assetPath(id)}/sync-runs/${encodeURIComponent(runId)}`),
   versions: (id: string): Promise<{ items: IntegratedVersion[] }> => apiClientV2.get(`${assetPath(id)}/versions`),

@@ -52,6 +52,89 @@ def _link_fact_version(item, endpoint_datasets, mappings_by_type, pinned):
     return next(iter(versions), None)
 
 
+def _remote_release_gate_errors(db, snap, run, current_user) -> list[dict]:
+    """Remote-binding branch of the promotion gate.
+
+    Local pins/counts keep their exact semantics elsewhere in the promotion
+    flow.  Remote bindings cannot masquerade as local full-quality
+    materialization, so they pass only when (a) the frozen isolated trial
+    recorded a verified remote check for every remote definition in the
+    snapshot and (b) the live remote metadata still matches the frozen
+    descriptor at publication time (authorization + schema drift re-check).
+    """
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE,
+        RemoteBindingError,
+        snapshot_entry_binding,
+        snapshot_link_binding_mode,
+        verify_remote_binding,
+    )
+
+    trial_checks = ((run.result_json or {}).get("remoteBindings") or {})
+    errors: list[dict] = []
+
+    def gate_error(code, kind, item_id, name, message, **context):
+        payload = {"code": code, "kind": kind, "id": item_id, "name": name,
+                   "message": message}
+        payload.update({key: value for key, value in context.items()
+                        if value is not None})
+        errors.append(payload)
+
+    for entry in snap["mappings"]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            mode, descriptor = snapshot_entry_binding(entry)
+        except RemoteBindingError as exc:
+            gate_error(exc.code, "mapping", str(entry.get("id") or ""),
+                       str(entry.get("entityClass") or ""),
+                       f"远程绑定描述符非法：{exc.message}", **exc.context)
+            continue
+        if mode != BINDING_MODE_REMOTE or descriptor is None:
+            continue
+        mapping_id = str(entry.get("id") or "")
+        label = str(entry.get("entityClass") or mapping_id)
+        check = trial_checks.get(mapping_id)
+        if not isinstance(check, dict) or check.get("status") != "verified":
+            gate_error(
+                "remote_trial_check_missing", "mapping", mapping_id, label,
+                "远程绑定缺少已冻结的试跑验证记录；请重新试跑后再发布")
+            continue
+        if str(check.get("schemaFingerprint") or "") != str(
+                descriptor.get("schemaFingerprint") or ""):
+            gate_error(
+                "remote_trial_check_stale", "mapping", mapping_id, label,
+                "试跑冻结的远程指纹与当前快照不一致；请重新试跑后再发布")
+            continue
+        try:
+            verify_remote_binding(db, current_user, descriptor, sample=False)
+        except RemoteBindingError as exc:
+            gate_error(
+                exc.code, "mapping", mapping_id, label,
+                f"发布时远程绑定重验失败：{exc.message}", **exc.context)
+
+    for entry in snap["linkMappings"]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            mode = snapshot_link_binding_mode(entry)
+        except RemoteBindingError as exc:
+            gate_error(exc.code, "linkMapping", str(entry.get("id") or ""),
+                       str(entry.get("relationType") or ""),
+                       f"远程关系绑定模式非法：{exc.message}", **exc.context)
+            continue
+        if mode != BINDING_MODE_REMOTE:
+            continue
+        mapping_id = str(entry.get("id") or "")
+        label = str(entry.get("relationType") or mapping_id)
+        check = trial_checks.get(mapping_id)
+        if not isinstance(check, dict) or check.get("status") != "verified":
+            gate_error(
+                "remote_trial_check_missing", "linkMapping", mapping_id, label,
+                "远程关系定义缺少已冻结的试跑验证记录；请重新试跑后再发布")
+    return errors
+
+
 def promote_draft(
     ontology_id: str,
     version_id: str,
@@ -192,6 +275,14 @@ def _promote_draft_locked(
     _raise_publish_errors(
         trial_pin_errors,
         "试跑数据版本或人工数据自动灌入契约已变化",
+    )
+
+    # 远程绑定发布正门分支：本地 pins/counts 的完整性口径保持不变（下方
+    # 逐项校验），远程绑定必须持有一致的冻结试跑验证记录，且发布时对冻结
+    # 元数据做授权与 schema drift 重验；验证器未装配时 fail-closed。
+    _raise_publish_errors(
+        _remote_release_gate_errors(db, snap, run, current_user),
+        "远程绑定发布校验未通过",
     )
 
     trial_objects = db.query(OntologyTrialObject).filter(

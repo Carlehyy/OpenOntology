@@ -46,22 +46,28 @@ def run(args: list[str], *, text: str | None = None) -> str:
     return process.stdout
 
 
-def compose(*args: str) -> str:
+def compose(*args: str, project: str | None = None, compose_file: Path | None = None,
+            profiles: tuple[str, ...] = ("mysql",)) -> str:
     # No .env discovery, interpolation, implicit pull, or inherited profile.
-    return run(["docker", "compose", "--env-file", os.devnull, "-p", PROJECT,
-                "-f", str(COMPOSE), "--profile", "mysql", *args])
+    profile_flags: list[str] = []
+    for profile in profiles:
+        profile_flags += ["--profile", profile]
+    return run(["docker", "compose", "--env-file", os.devnull, "-p", project or PROJECT,
+                "-f", str(compose_file or COMPOSE), *profile_flags, *args])
 
 
-def write_report(name: str, report: Any) -> None:
-    ART.mkdir(parents=True, exist_ok=True)
-    path = ART / name
-    if path.resolve().parent != ART.resolve():
+def write_report(name: str, report: Any, directory: Path | None = None) -> None:
+    target = ART if directory is None else directory
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / name
+    if path.resolve().parent != target.resolve():
         raise ValueError("report must be inside the owned artifact directory")
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def owned_containers() -> list[dict[str, Any]]:
-    ids = run(["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={PROJECT}"]).split()
+def owned_containers(project: str | None = None) -> list[dict[str, Any]]:
+    owner = project or PROJECT
+    ids = run(["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={owner}"]).split()
     if not ids:
         return []
     # Inspect only our own label-selected resources; never inspect env values.
@@ -76,7 +82,7 @@ def owned_containers() -> list[dict[str, Any]]:
             fields.append(value)
             remaining = remaining.lstrip()[offset:]
         cid, name, labels, state, bindings, memory = fields
-        if labels.get("com.docker.compose.project") != PROJECT:
+        if labels.get("com.docker.compose.project") != owner:
             raise RuntimeError("container project label mismatch")
         for mappings in (bindings or {}).values():
             if any(item.get("HostIp") != "127.0.0.1" for item in mappings or []):
@@ -87,24 +93,28 @@ def owned_containers() -> list[dict[str, Any]]:
     return records
 
 
-def update_state() -> dict[str, Any]:
-    state = {"project": PROJECT, "observed_at_unix": time.time(), "containers": owned_containers(),
+def update_state(project: str | None = None, directory: Path | None = None) -> dict[str, Any]:
+    owner = project or PROJECT
+    state = {"project": owner, "observed_at_unix": time.time(), "containers": owned_containers(owner),
              "jobs": [], "pids": [], "note": "No host process is started by this script."}
-    write_report("resources.json", state)
+    write_report("resources.json", state, directory)
     return state
 
 
-def require_owned(service: str) -> str:
-    matches = [item for item in owned_containers() if item["service"] == service and item["running"]]
+def require_owned(service: str, project: str | None = None) -> str:
+    matches = [item for item in owned_containers(project) if item["service"] == service and item["running"]]
     if len(matches) != 1:
         raise RuntimeError(f"exactly one running owned {service} container is required")
     return matches[0]["id"]
 
 
-def preflight(services: list[str]) -> dict[str, Any]:
+def preflight(services: list[str], *, project: str | None = None, ports: dict[str, list[int]] | None = None,
+              images: dict[str, str] | None = None, directory: Path | None = None) -> dict[str, Any]:
+    port_map = ports or PORTS
+    image_map = images or IMAGES
     bound = []
     for service in services:
-        for port in PORTS[service]:
+        for port in port_map[service]:
             sock = socket.socket()
             try:
                 sock.bind(("127.0.0.1", port))
@@ -114,30 +124,35 @@ def preflight(services: list[str]) -> dict[str, Any]:
                 sock.close()
     available = {}
     for service in services:
-        result = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", IMAGES[service]],
+        result = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", image_map[service]],
                                 capture_output=True, text=True, env=SAFE_ENV)
-        available[service] = {"image": IMAGES[service], "available": result.returncode == 0,
+        available[service] = {"image": image_map[service], "available": result.returncode == 0,
                               "id": result.stdout.strip() if result.returncode == 0 else None}
-    report = {"project": PROJECT, "result": "pass" if not bound and all(v["available"] for v in available.values()) else "blocked",
+    report = {"project": project or PROJECT, "result": "pass" if not bound and all(v["available"] for v in available.values()) else "blocked",
               "occupied_ports": bound, "images": available, "host_free_bytes": shutil.disk_usage(ROOT).free,
               "docker": json.loads(run(["docker", "info", "--format", '{"memory_bytes":{{.MemTotal}},"cpus":{{.NCPU}}}'])),
               "services": services, "network_required": False,
               "dotenv_contents_read": False, "backend_venv_exists": (ROOT / "backend/.venv/bin/python").exists(),
               "frontend_dependencies_exist": (ROOT / "frontend/node_modules/.bin/playwright").exists()}
-    write_report("preflight.json", report)
+    write_report("preflight.json", report, directory)
     return report
 
 
-def stack_up(services: list[str]) -> dict[str, Any]:
-    existing = owned_containers()
-    if existing and not STATE.exists():
+def stack_up(services: list[str], *, project: str | None = None, ports: dict[str, list[int]] | None = None,
+             images: dict[str, str] | None = None, compose_file: Path | None = None,
+             profiles: tuple[str, ...] = ("mysql",), state_path: Path | None = None,
+             directory: Path | None = None) -> dict[str, Any]:
+    owner = project or PROJECT
+    ledger_path = state_path or STATE
+    existing = owned_containers(owner)
+    if existing and not ledger_path.exists():
         raise RuntimeError("project resources already exist without this run's ledger; refuse adoption")
-    if STATE.exists():
-        ledger = json.loads(STATE.read_text(encoding="utf-8"))
+    if ledger_path.exists():
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
         known = {item["id"] for item in ledger.get("containers", [])}
-        if ledger.get("project") != PROJECT or any(item["id"] not in known for item in existing):
+        if ledger.get("project") != owner or any(item["id"] not in known for item in existing):
             raise RuntimeError("untracked project resources appeared; refuse adoption")
-    check = preflight(services)
+    check = preflight(services, project=owner, ports=ports, images=images, directory=directory)
     # Already-running owned services may hold their own ports, but starting an
     # existing service is never used to recreate/adopt an untracked container.
     if check["result"] != "pass":
@@ -145,33 +160,37 @@ def stack_up(services: list[str]) -> dict[str, Any]:
     if shutil.disk_usage(ROOT).free < 20 * 2**30:
         raise RuntimeError("less than 20GiB host disk headroom; refuse even smoke")
     try:
-        output = compose("up", "-d", "--pull", "never", "--no-build", "--wait", "--wait-timeout", "180", *services)
+        output = compose("up", "-d", "--pull", "never", "--no-build", "--wait", "--wait-timeout", "180", *services,
+                         project=owner, compose_file=compose_file, profiles=profiles)
     finally:
         # Preserve partial startup ownership for exact cleanup even if health fails.
-        state = update_state()
+        state = update_state(owner, directory)
     return {"output": output, **state}
 
 
-def stack_down(destroy_data: bool) -> dict[str, Any]:
-    if not STATE.exists():
+def stack_down(destroy_data: bool, *, project: str | None = None, state_path: Path | None = None,
+               directory: Path | None = None, profiles: tuple[str, ...] = ("mysql",)) -> dict[str, Any]:
+    owner = project or PROJECT
+    ledger_path = state_path or STATE
+    if not ledger_path.exists():
         raise RuntimeError("no resource ledger; refusing cleanup")
-    ledger = json.loads(STATE.read_text(encoding="utf-8"))
-    if ledger.get("project") != PROJECT:
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    if ledger.get("project") != owner:
         raise RuntimeError("resource ledger project mismatch")
-    current = owned_containers()
+    current = owned_containers(owner)
     known = {item["id"] for item in ledger["containers"]}
     if any(item["id"] not in known for item in current):
         raise RuntimeError("untracked project container appeared; refusing cleanup")
     args = ["down", "--timeout", "20"]
     if destroy_data:
         args.append("--volumes")
-    output = compose(*args)
-    return {"output": output, "destroyed_data": destroy_data, **update_state()}
+    output = compose(*args, project=owner, profiles=profiles)
+    return {"output": output, "destroyed_data": destroy_data, **update_state(owner, directory)}
 
 
-def sql(source: str, statement: str) -> str:
+def sql(source: str, statement: str, project: str | None = None) -> str:
     service = "source-pg" if source == "postgres" else "mysql"
-    cid = require_owned(service)
+    cid = require_owned(service, project)
     if source == "postgres":
         return run(["docker", "exec", "-i", cid, "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
                     "-U", "integrated_e2e", "-d", "integrated_source"], text=statement)

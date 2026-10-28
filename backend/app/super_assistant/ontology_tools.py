@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from typing import Any
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_KIND = "super_assistant"
 
+ONTOLOGY_CATALOG_TOOL = "ontology_catalog"
 ONTOLOGY_STRUCTURE_TOOL = "ontology_structure"
 ONTOLOGY_QUERY_TOOL = "ontology_query"
 ONTOLOGY_PREPARE_TOOL = "ontology_prepare_action"
@@ -36,6 +38,7 @@ ONTOLOGY_EXECUTE_TOOL = "ontology_execute_action"
 ONTOLOGY_REGISTER_JOIN_TOOL = "ontology_register_join_assertion"
 
 ONTOLOGY_TOOL_NAMES = {
+    ONTOLOGY_CATALOG_TOOL,
     ONTOLOGY_STRUCTURE_TOOL,
     ONTOLOGY_QUERY_TOOL,
     ONTOLOGY_PREPARE_TOOL,
@@ -73,187 +76,297 @@ def _require_conversation(db: Session, owner_id: str, conversation_id: str):
 
 # ------------------------------------------------------------- schemas
 
-def ontology_tool_schemas() -> list[dict[str, Any]]:
-    filter_leaf = {
+filter_leaf = {
+    "type": "object",
+    "properties": {
+        "source": {"type": "string"},
+        "property": {"type": "string"},
+        "op": {"type": "string", "enum": [
+            "eq", "neq", "gt", "gte", "lt", "lte",
+            "contains", "in", "is_null", "is_not_null"]},
+        "value": {},
+    },
+    "required": ["source", "property", "op"],
+    "additionalProperties": False,
+}
+filter_node = {
+    "anyOf": [
+        filter_leaf,
+        {"type": "object", "properties": {
+            "and": {"type": "array", "items": {"$ref": "#/$defs/filterNode"}}},
+         "required": ["and"], "additionalProperties": False},
+        {"type": "object", "properties": {
+            "or": {"type": "array", "items": {"$ref": "#/$defs/filterNode"}}},
+         "required": ["or"], "additionalProperties": False},
+        {"type": "object", "properties": {"not": {"$ref": "#/$defs/filterNode"}},
+         "required": ["not"], "additionalProperties": False},
+    ],
+}
+
+
+def _query_request_properties(sources_items: dict[str, Any]) -> dict[str, Any]:
+    """统一关联查询的公共属性；sources 项按层深注入（叶子或派生源）。
+
+    派生源（subquery）与 QS.QuerySource 对齐：subquery 存在时禁止
+    ontologyId/releaseId/objectTypeId 三元组；嵌套最多两层（外层 →
+    mid → inner，inner 仅叶子），全部叶子对象源 ≤16 与 lineage 校验由
+    服务端负责——schema 只表达形状，不重复执行预算判定。
+    """
+    return {
+        "sources": {
+            "type": "array", "minItems": 1, "maxItems": _MAX_QUERY_SOURCES,
+            "items": sources_items,
+        },
+        "joins": {
+            "type": "array", "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "left": {"type": "string"},
+                    "right": {"type": "string"},
+                    "type": {"type": "string", "enum": ["inner", "left"]},
+                    "on": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "explicit_key"},
+                                    "leftProperty": {"type": "string"},
+                                    "rightProperty": {"type": "string"},
+                                    "keyType": {"type": "string",
+                                                "enum": ["string", "number",
+                                                         "uuid"]},
+                                    "cardinality": {
+                                        "type": "string",
+                                        "enum": ["1:1", "1:N", "N:1",
+                                                 "N:M"]},
+                                    "businessMeaning": {"type": "string"},
+                                    "evidenceRefs": {
+                                        "type": "array",
+                                        "items": {"type": "string"}},
+                                },
+                                "required": ["kind", "leftProperty",
+                                             "rightProperty", "keyType",
+                                             "cardinality",
+                                             "businessMeaning",
+                                             "evidenceRefs"],
+                                "additionalProperties": False,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "declared_relation"},
+                                    "linkTypeId": {"type": "string"},
+                                    "direction": {
+                                        "type": "string",
+                                        "enum": ["source_to_target",
+                                                 "target_to_source"]},
+                                },
+                                "required": ["kind", "linkTypeId",
+                                             "direction"],
+                                "additionalProperties": False,
+                            },
+                        ],
+                    },
+                },
+                "required": ["left", "right", "type", "on"],
+                "additionalProperties": False,
+            },
+        },
+        "sourceFilters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "filter": filter_node,
+                },
+                "required": ["source", "filter"],
+                "additionalProperties": False,
+            },
+        },
+        "where": {"type": "array", "items": filter_node},
+        "select": {
+            "type": "array", "maxItems": 32,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "property": {"type": "string"},
+                    "as": {"type": "string"},
+                },
+                "required": ["source", "property", "as"],
+                "additionalProperties": False,
+            },
+        },
+        "groupBy": {
+            "type": "array", "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {"source": {"type": "string"},
+                               "property": {"type": "string"}},
+                "required": ["source", "property"],
+                "additionalProperties": False,
+            },
+        },
+        "aggregates": {
+            "type": "array", "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "fn": {"type": "string", "enum": [
+                        "count", "count_distinct", "sum", "avg", "min",
+                        "max"]},
+                    "source": {"type": "string"},
+                    "property": {"type": "string"},
+                    "as": {"type": "string"},
+                },
+                "required": ["fn", "as"],
+                "additionalProperties": False,
+            },
+        },
+        "distinct": {"type": "boolean"},
+        "orderBy": {
+            "type": "array", "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "output": {"type": "string"},
+                    "direction": {"type": "string",
+                                  "enum": ["asc", "desc"]},
+                    "nulls": {"type": "string",
+                              "enum": ["first", "last"]},
+                },
+                "required": ["output"],
+                "additionalProperties": False,
+            },
+        },
+        "pageSize": {"type": "integer", "minimum": 1, "maximum": 200},
+    }
+
+
+_object_source_schema = {
+    "type": "object",
+    "properties": {
+        "alias": {"type": "string"},
+        "ontologyId": {"type": "string"},
+        "releaseId": {"type": "string"},
+        "objectTypeId": {"type": "string"},
+    },
+    "required": ["alias", "ontologyId", "releaseId", "objectTypeId"],
+    "additionalProperties": False,
+}
+
+
+def _derived_source_schema(def_name: str) -> dict[str, Any]:
+    """派生源：同源先聚合防 fanout；subquery 内不可再带对象三元组。"""
+    return {
         "type": "object",
         "properties": {
-            "source": {"type": "string"},
-            "property": {"type": "string"},
-            "op": {"type": "string", "enum": [
-                "eq", "neq", "gt", "gte", "lt", "lte",
-                "contains", "in", "is_null", "is_not_null"]},
-            "value": {},
+            "alias": {"type": "string"},
+            "subquery": {"$ref": f"#/$defs/{def_name}"},
         },
-        "required": ["source", "property", "op"],
+        "required": ["alias", "subquery"],
         "additionalProperties": False,
     }
-    filter_node = {
+
+
+_inner_request_def = {
+    "type": "object",
+    "properties": _query_request_properties({
+        "type": "object",
+        "properties": dict(_object_source_schema["properties"]),
+        "required": list(_object_source_schema["required"]),
+        "additionalProperties": False,
+    }),
+    "required": ["sources"],
+    "additionalProperties": False,
+}
+
+_mid_request_def = {
+    "type": "object",
+    "properties": _query_request_properties({
         "anyOf": [
-            filter_leaf,
-            {"type": "object", "properties": {
-                "and": {"type": "array", "items": {"$ref": "#/$defs/filterNode"}}},
-             "required": ["and"], "additionalProperties": False},
-            {"type": "object", "properties": {
-                "or": {"type": "array", "items": {"$ref": "#/$defs/filterNode"}}},
-             "required": ["or"], "additionalProperties": False},
-            {"type": "object", "properties": {"not": {"$ref": "#/$defs/filterNode"}},
-             "required": ["not"], "additionalProperties": False},
+            _object_source_schema,
+            _derived_source_schema("queryRequestInner"),
         ],
-    }
-    query_request = {
-        "type": "object",
-        "properties": {
-            "sources": {
-                "type": "array", "minItems": 1, "maxItems": _MAX_QUERY_SOURCES,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "alias": {"type": "string"},
-                        "ontologyId": {"type": "string"},
-                        "releaseId": {"type": "string"},
-                        "objectTypeId": {"type": "string"},
-                    },
-                    "required": ["alias", "ontologyId", "releaseId",
-                                 "objectTypeId"],
-                    "additionalProperties": False,
-                },
-            },
-            "joins": {
-                "type": "array", "maxItems": 3,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "left": {"type": "string"},
-                        "right": {"type": "string"},
-                        "type": {"type": "string", "enum": ["inner", "left"]},
-                        "on": {
-                            "anyOf": [
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "kind": {"const": "explicit_key"},
-                                        "leftProperty": {"type": "string"},
-                                        "rightProperty": {"type": "string"},
-                                        "keyType": {"type": "string",
-                                                    "enum": ["string", "number",
-                                                             "uuid"]},
-                                        "cardinality": {
-                                            "type": "string",
-                                            "enum": ["1:1", "1:N", "N:1",
-                                                     "N:M"]},
-                                        "businessMeaning": {"type": "string"},
-                                        "evidenceRefs": {
-                                            "type": "array",
-                                            "items": {"type": "string"}},
-                                    },
-                                    "required": ["kind", "leftProperty",
-                                                 "rightProperty", "keyType",
-                                                 "cardinality",
-                                                 "businessMeaning",
-                                                 "evidenceRefs"],
-                                    "additionalProperties": False,
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "kind": {"const": "declared_relation"},
-                                        "linkTypeId": {"type": "string"},
-                                        "direction": {
-                                            "type": "string",
-                                            "enum": ["source_to_target",
-                                                     "target_to_source"]},
-                                    },
-                                    "required": ["kind", "linkTypeId",
-                                                 "direction"],
-                                    "additionalProperties": False,
-                                },
-                            ],
-                        },
-                    },
-                    "required": ["left", "right", "type", "on"],
-                    "additionalProperties": False,
-                },
-            },
-            "sourceFilters": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source": {"type": "string"},
-                        "filter": filter_node,
-                    },
-                    "required": ["source", "filter"],
-                    "additionalProperties": False,
-                },
-            },
-            "where": {"type": "array", "items": filter_node},
-            "select": {
-                "type": "array", "maxItems": 32,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source": {"type": "string"},
-                        "property": {"type": "string"},
-                        "as": {"type": "string"},
-                    },
-                    "required": ["source", "property", "as"],
-                    "additionalProperties": False,
-                },
-            },
-            "groupBy": {
-                "type": "array", "maxItems": 8,
-                "items": {
-                    "type": "object",
-                    "properties": {"source": {"type": "string"},
-                                   "property": {"type": "string"}},
-                    "required": ["source", "property"],
-                    "additionalProperties": False,
-                },
-            },
-            "aggregates": {
-                "type": "array", "maxItems": 8,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "fn": {"type": "string", "enum": [
-                            "count", "count_distinct", "sum", "avg", "min",
-                            "max"]},
-                        "source": {"type": "string"},
-                        "property": {"type": "string"},
-                        "as": {"type": "string"},
-                    },
-                    "required": ["fn", "as"],
-                    "additionalProperties": False,
-                },
-            },
-            "distinct": {"type": "boolean"},
-            "orderBy": {
-                "type": "array", "maxItems": 8,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "output": {"type": "string"},
-                        "direction": {"type": "string",
-                                      "enum": ["asc", "desc"]},
-                        "nulls": {"type": "string",
-                                  "enum": ["first", "last"]},
-                    },
-                    "required": ["output"],
-                    "additionalProperties": False,
-                },
-            },
-            "pageSize": {"type": "integer", "minimum": 1, "maximum": 200},
-        },
-        "required": ["sources"],
-        "additionalProperties": False,
-    }
+    }),
+    "required": ["sources"],
+    "additionalProperties": False,
+}
+
+query_request = {
+    "type": "object",
+    "properties": _query_request_properties({
+        "anyOf": [
+            _object_source_schema,
+            _derived_source_schema("queryRequestMid"),
+        ],
+    }),
+    "required": ["sources"],
+    "additionalProperties": False,
+}
+
+_QUERY_REQUEST_DEFS = {
+    "filterNode": filter_node,
+    "queryRequestMid": _mid_request_def,
+    "queryRequestInner": _inner_request_def,
+}
+
+
+def ontology_tool_schemas() -> list[dict[str, Any]]:
     return [
+        {
+            "name": ONTOLOGY_CATALOG_TOOL,
+            "description": (
+                "权威 published 本体目录：按当前用户权限列出本体及其当前 "
+                "release（含是否有发布文档与可用对象类型概要），或分片读取"
+                "某本体发布文档正文（每片约 8000 字符，正文较大时返回 "
+                "documentCursor，带同一 ontologyId 续读，不要靠截断硬读）。"
+                "大本体类型发现：operation='object_types' 分页列出该本体"
+                "全部可用对象类型（每页 20，按 id 排序，cursor 翻页）——"
+                "structure 只认已知 typeId，目录概要只给前 10 个，超出时"
+                "必须先经此入口补齐类型索引。发现链路：search 确定本体 →"
+                "（类型多时）object_types 分页 → structure 读结构 → "
+                "ontology_query 查数据；目录为权威源，不要依赖记忆宫殿"
+                "图谱做本体发现（图谱异步构建可能缺项）。目录翻页只传 "
+                "cursor。"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string", "enum": ["object_types"],
+                        "description": "对象类型索引分页模式；缺省=目录检索"
+                                       "或（带 ontologyId）读发布文档"},
+                    "query": {
+                        "type": "string",
+                        "description": "标题关键词过滤；翻页/取文档时不传"},
+                    "cursor": {
+                        "type": "string", "minLength": 16,
+                        "description": "目录翻页游标；或正文/类型索引续读游标"
+                                       "（须同时携带 ontologyId）"},
+                    "ontologyId": {"type": "string"},
+                    "releaseId": {"type": "string"},
+                },
+                "oneOf": [
+                    {"required": ["ontologyId"]},
+                    {"required": ["cursor"], "not": {"required": ["ontologyId"]}},
+                    {"not": {"anyOf": [{"required": ["ontologyId"]},
+                                       {"required": ["cursor"]}]}},
+                ],
+                "additionalProperties": False,
+            },
+        },
         {
             "name": ONTOLOGY_STRUCTURE_TOOL,
             "description": (
                 "按需读取本体当前发布的结构片段（对象类型/属性/关系/动作），"
                 "并携带准确 releaseId/version 来源证据；只读，不加载完整 schema。"
-                "需要先经 discovery 确定 ontologyId 与 releaseId。"),
+                "需要先经 discovery 确定 ontologyId 与 releaseId。"
+                "objectTypes 的 dataAccess 标注访问模式（remote=联邦远程、"
+                "materialized=平台物化）：remote 分组的数据必须经 "
+                "ontology_query 的受治理查询（含 subquery 同源聚合）取数，"
+                "禁止凭结构或样例在文本里推算远程结果。"),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -275,12 +388,17 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
             "description": (
                 "统一关联查询：同一本体内多对象类型、或有明确业务键依据的跨本体"
                 "关联；服务端完成过滤/投影/聚合/排序与稳定分页。翻页只传 cursor。"
-                "字段/类型/基数依据必须来自 ontology_structure 的当前发布结构。"),
+                "字段/类型/基数依据必须来自 ontology_structure 的当前发布结构。"
+                "sources 可用派生源（subquery）先在同源内聚合防 fanout：派生源"
+                "只给 alias+subquery（禁止再带对象三元组），嵌套最多两层，全部"
+                "叶子对象源 ≤16；引用派生输出名的 lineage 依据由服务端校验。"),
             "parameters": {
                 "type": "object",
-                "$defs": {"filterNode": filter_node},
+                # 模块级共享常量按请求深拷贝入目录：禁止跨请求原地修改泄漏
+                # （先例见 runtime._WEB_FETCH_TOOL_SCHEMA 的拷贝约定）
+                "$defs": copy.deepcopy(_QUERY_REQUEST_DEFS),
                 "properties": {
-                    **query_request["properties"],
+                    **copy.deepcopy(query_request["properties"]),
                     "cursor": {"type": "string", "minLength": 16},
                 },
                 "oneOf": [
@@ -373,6 +491,8 @@ def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
         if name == ONTOLOGY_REGISTER_JOIN_TOOL:
             return _register_join_assertion_from_tool_run(
                 db, user, conversation_id=conversation_id, tool_run=tool_run)
+        if name == ONTOLOGY_CATALOG_TOOL:
+            return _execute_catalog_tool(db, user, arguments)
         if name == ONTOLOGY_STRUCTURE_TOOL:
             data = structure(
                 db, user,
@@ -427,8 +547,8 @@ def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
         return json.dumps({"error": exc.message, "code": exc.code,
                            **exc.extra}, ensure_ascii=False, default=str)
     except Exception as exc:  # noqa: BLE001 - 工具错误不冒泡为对话失败
-        logger.warning("ontology tool %s 执行失败", name, exc_info=True)
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        logger.warning("ontology tool %s failed (%s)", name, type(exc).__name__)
+        return json.dumps({"error": "ontology_tool_failed"}, ensure_ascii=False)
     return json.dumps({"error": f"未知工具 {name}"}, ensure_ascii=False)
 
 
@@ -437,6 +557,51 @@ _JOIN_ASSERTION_FIELDS = (
     "rightOntologyId", "rightObjectTypeId", "rightProperty",
     "keyType", "businessMeaning",
 )
+
+
+def _execute_catalog_tool(db: Session, user, arguments: dict[str, Any]) -> str:
+    """权威 published 本体目录/文档读取（经门面）。
+
+    目录与文档端口由 ontologies 域的 agent_runtime/catalog 提供并按
+    profile + agent 权限过滤；本域只做白名单分派。能力未启用（门面未
+    导出）时明确报不可用，不 fallback 到宫殿图谱等非权威源。
+    """
+    try:
+        from app.ontologies.agent_runtime.assistant_facade import (
+            catalog_get_document, catalog_object_types, catalog_search,
+        )
+    except ImportError:
+        logger.warning("facade catalog 能力不可用", exc_info=True)
+        return json.dumps({
+            "error": "ontology_catalog_unavailable",
+            "message": "本体目录能力暂不可用，请稍后重试",
+        }, ensure_ascii=False)
+    try:
+        cursor = str(arguments["cursor"]) if arguments.get("cursor") else None
+        if arguments.get("operation") == "object_types":
+            data = catalog_object_types(
+                db, user,
+                ontology_id=str(arguments["ontologyId"]),
+                release_id=str(arguments.get("releaseId") or "") or None,
+                cursor=cursor)
+        elif arguments.get("ontologyId"):
+            data = catalog_get_document(
+                db, user,
+                ontology_id=str(arguments["ontologyId"]),
+                release_id=str(arguments.get("releaseId") or "") or None,
+                cursor=cursor)
+        else:
+            data = catalog_search(
+                db, user,
+                query=str(arguments.get("query") or "") or None,
+                cursor=cursor)
+        return json.dumps(data, ensure_ascii=False, default=str)
+    except FacadeError as exc:
+        return json.dumps({"error": exc.message, "code": exc.code,
+                           **exc.extra}, ensure_ascii=False, default=str)
+    except Exception as exc:  # noqa: BLE001 - 工具错误不冒泡为对话失败
+        logger.warning("ontology catalog 执行失败", exc_info=True)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
 def execution_result_status(output: str) -> str:

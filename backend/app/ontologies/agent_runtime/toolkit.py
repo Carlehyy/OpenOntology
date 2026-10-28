@@ -43,7 +43,9 @@ from app.ontologies.agent_runtime.read_queries import (
 from app.models.ontology_formal import (
     ObjectInstance, LinkInstance, PropertyFact,
 )
-from app.ontologies.agent_runtime.boundary import AgentScope, ToolError
+from app.ontologies.agent_runtime.boundary import (
+    AgentScope, ToolError, require_materialized_object_type,
+)
 from app.ontologies.agent_runtime.limits import limit as runtime_limit
 from app.ontologies.formal_modeling.facts import fact_order_clause
 from app.ontologies.versions.models import OntologyVersion
@@ -645,6 +647,21 @@ class ToolRunner:
             raise ToolError(f"未知工具: {name}")
         return handler(args or {})
 
+    def _require_local_type(self, ot) -> None:
+        require_materialized_object_type(self.scope, ot)
+
+    def _require_local_link(self, link_type) -> None:
+        """链接任一端为远程绑定类型时，本地链接事实不完整，遍历整体拒绝。
+
+        只遍历到 0 个邻居不能当作"确实没有关联"——远程侧数据面不参与
+        本地投影，安静返回空会冒充完整图景。
+        """
+        for type_id in (link_type.source_object_type_id,
+                        link_type.target_object_type_id):
+            ot = self.scope.object_types.get(type_id)
+            if ot is not None:
+                require_materialized_object_type(self.scope, ot)
+
     # ------------------------------------------------------------ 各工具实现
 
     def _instance_query(self):
@@ -784,6 +801,7 @@ class ToolRunner:
 
     def _tool_search_objects(self, args: dict) -> dict:
         ot = self.scope.require_object_type(args.get("object_type", ""))
+        self._require_local_type(ot)
         filters = self._validated_filters(ot, args.get("filters"))
         limit = self._limit(args.get("limit"))
         if self.db.get_bind().dialect.name == "postgresql":
@@ -874,6 +892,7 @@ class ToolRunner:
             self.db.query(ObjectInstance).filter(
                 ObjectInstance.id == args.get("instance_id", "")).first())
         lt = self.scope.require_link_type(args.get("link_type", ""))
+        self._require_local_link(lt)
         direction = args.get("direction") or "out"
         self_col = LinkInstance.source_object_id if direction == "out" else LinkInstance.target_object_id
         limit = self._limit(args.get("limit"))
@@ -914,6 +933,7 @@ class ToolRunner:
             if not isinstance(h, dict):
                 raise ToolError('path 每一跳必须是对象，如 {"link_type":"下单","direction":"out"}')
             lt = self.scope.require_link_type(h.get("link_type", ""))
+            self._require_local_link(lt)
             direction = h.get("direction") or "out"
             if direction not in ("out", "in"):
                 raise ToolError("direction 只能是 out 或 in")
@@ -1085,6 +1105,7 @@ class ToolRunner:
 
     def _tool_aggregate_objects(self, args: dict) -> dict:
         ot = self.scope.require_object_type(args.get("object_type", ""))
+        self._require_local_type(ot)
         metric = args.get("metric") or "count"
         if metric not in ("count", "sum", "avg", "min", "max"):
             raise ToolError(f"不支持的 metric: {metric}")
@@ -1169,6 +1190,11 @@ class ToolRunner:
             self.db.query(ObjectInstance).filter(
                 ObjectInstance.id == args.get("instance_id", "")).first())
         self._cite(inst)
+        # 防御同 release 内残留的远程类型实例（切换绑定前的旧物化行）：
+        # 历史事实流只覆盖本地数据面，不得对远程类型冒充完整溯源。
+        history_type = self.scope.object_types.get(inst.object_type_id)
+        if history_type is not None:
+            self._require_local_type(history_type)
         limit = min(self._limit(args.get("limit")), 50)
         base_query = self.db.query(PropertyFact).filter(
             PropertyFact.ontology_id == self.scope.ontology.id,
@@ -1420,6 +1446,9 @@ class ToolRunner:
             self.db.query(ObjectInstance).filter(
                 ObjectInstance.id == args.get("instance_id", "")).first())
         self._cite(inst)
+        causal_type = self.scope.object_types.get(inst.object_type_id)
+        if causal_type is not None:
+            self._require_local_type(causal_type)
         property_name = args.get("property_name")
         if property_name:
             object_type = self.scope.object_types.get(inst.object_type_id)

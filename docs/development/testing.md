@@ -350,6 +350,155 @@ HTTP 409 `link_lineage_ambiguous` 安全拒绝，不能任意选版本或宣称�
 快照跑完整门禁，协调者必须核对 manifest 与最终 diff、回收 `.test_durations`
 等要求的产物，并标明实际执行目录与配置隔离方式。
 
+### 四表联邦分析 fixture：独立 oracle 与证据采集
+
+面向"按客户展示合同 + 90 天订单金额 + 未发运单数"的分析目标，
+[compose](../../docker-compose.federated-e2e.yml) 与
+[环境脚本](../../scripts/e2e/federated_fixture.py) 使用独立项目
+`oo-fedanalysis-20261026`，不复用、不查询、不接管 `oo-integrated-20261024`
+或其他任何项目的容器、卷、ledger 或数据库。镜像仅本地存在性检查，缺失即
+失败，不隐式拉取；发布端口仅绑 `127.0.0.1`：
+
+| 服务 | 端口 | 预算分类 | mem 上限 |
+|---|---|---|---|
+| 元数据库 PostgreSQL | 52432 | 平台基线 | 512MiB |
+| 源 PostgreSQL | 52433 | 源装置 | 384MiB |
+| 源 MySQL | 51306 | 源装置 | 512MiB |
+| dbx | 52434 | 平台基线（平台元数据组件） | 768MiB |
+| Redis / NATS | 53379 / 51222、55222 | 平台基线 | 各 96MiB |
+| Neo4j HTTP / Bolt | 52474 / 52687 | 平台基线 | 1280MiB |
+| MinIO API / Console | 53000 / 53001 | 平台基线 | 256MiB |
+
+API/Web 预留 52004/51173，n8n/CDP 预留 55678/59222；API、executor、browser、
+n8n 是必需基线成员但不在此 Compose 内，其 PID/job 由协调 runner 记账，缺失
+即 `cannot_claim_pass`。启动任何容器前必须先获资源槽位；`up/preflight`
+仅针对自有项目标签，`down` 不带 `--destroy-data` 时保留卷与历史。
+
+四表结构：PG `fed_customers`（重点客户 `is_key`、tier、DECIMAL 信用额度、
+NULL 备注模式）与 `fed_contracts`（`valid_from/valid_to` 生效期、DECIMAL 签约
+额、NULL 条款模式）；MySQL `fed_orders`（跨源主关联 `customer_ref`→PG
+`customer_id`、`contract_ref`、bigint `gross_cents`、DECIMAL(18,4) `net_amount`、
+状态、`created_at` 固定落在 2026-07-01..2026-09-28 的 90 天窗口、NULL 备注）与
+`fed_shipments`（一订单可有多条**有效**发运明细，`o%17=0` 的 PENDING 订单真实
+无发运行；同订单所有发运行共享运单号形成重复运单）。canonical 语义固定为
+先 `GROUP BY order_id` 预聚合再 join（或 EXISTS），证明金额不重计；禁止用
+`is_current` 之类过滤把多运单折叠成 1:1 逃避场景。tier/status 分组只是扩展，
+不得替代客户视图主目标。行级公式全部按行号封闭，`--extend` 扩规模不改写
+已有行；`orders` 必须是 10 的倍数。
+
+```bash
+python3 scripts/e2e/federated_fixture.py preflight db source-pg mysql
+python3 scripts/e2e/federated_fixture.py up db source-pg mysql   # 获批槽位后
+python3 scripts/e2e/federated_fixture.py seed --orders 500 --batch-size 500
+python3 scripts/e2e/federated_fixture.py oracle --orders 500 --sample 10
+python3 scripts/e2e/federated_fixture.py seed --orders 10000 --extend
+python3 scripts/e2e/federated_fixture.py oracle --orders 10000 --customers 1,7,17
+python3 scripts/e2e/federated_fixture.py canary --orders 10000
+python3 scripts/e2e/federated_fixture.py evidence begin --phase <name>
+python3 scripts/e2e/federated_fixture.py evidence end --phase <name> --orders 10000
+python3 scripts/e2e/federated_fixture.py down                    # 保留卷与数据
+```
+
+独立 oracle 的期望值全部由纯 Python/Decimal 按行号公式计算，不经 SQL 引擎；
+随后才用两个源库核对：每表聚合、全行全列公式比对、每表按主键有序的流式
+SHA256，以及抽样客户的跨源视图（订单侧 MySQL `GROUP BY customer_ref` 对照
+PG 合同侧）。500/10000 仅 smoke/校准；正式规模为 1M/2.3M/10M（`FED_SCALES`），
+须待核心链路就绪并另行获批资源后执行。报告固定 `full_e2e_pass=false`；
+seed/oracle 通过只证明源数据正确，不证明页面、映射或 dbx 链路。
+
+证据采集落在 `.artifacts/integrated-e2e/federated/`：每自有容器的
+Mem/CPU/NetIO/BlockIO 差分（传输证据）；PG `pg_stat_database` temp_files/
+temp_bytes 与 MySQL `Created_tmp*` 差分按平台/源分列，且明确这些计数器
+**不能**证明零明细落盘（TEMP 表写、WAL/redo 不计入），须叠加 canary 行值
+复核与容器日志关键字扫描作为信号而非证明；源装置 temp 允许发生但单列。
+预算分账：平台基线（含 dbx）与源装置分开汇总，共享 VM 中存在他人容器时
+`platform_budget_verifiable=false` 如实记录，不得以此冒充 8G 全平台验收。
+MySQL 源装置使用 64MiB InnoDB buffer pool，并显式限制 TempTable RAM 为 16MiB、
+禁用 TempTable mmap；默认 1GiB TempTable RAM 会超过 512MiB 源容器配额。
+源侧聚合转入磁盘临时表允许发生，必须在 source spill 中记录，不能计为平台
+明细落盘。该限制不提高容器或平台查询预算。
+共享验收 fixture 必须走版本正门（draft → trial/impact → promote）创建本体
+发布，不得直改 release snapshots 充当真实验收；alias typed plan 等平台机制
+保持通用，不为 fixture 增加专用分支。
+
+### 联邦 API 纵向验收驱动
+
+[驱动脚本](../../scripts/e2e/federated_acceptance.py) 复用上述 fixture 的
+oracle，经真实 HTTP 正门执行纵向验收；它不启动任何容器/LLM/规模，仅向已
+获槽位、已在运行的 API 实例发请求（`--api-base` 或环境变量
+`FEDERATED_ACCEPTANCE_API_BASE`，仅限 loopback 预留端口如 52004——端口预留
+不等于服务已存在）。阶段：`plan`（完全离线，产出 canonical 期望）、
+`front-door`、`query`、`guards`、`report`；run 状态只记录 API 实际返回的
+id，不伪造快照/current_release。
+
+front-door 链路与契约（脚本内 CONTRACT 逐条标注代码出处）：
+`POST /api/v1/ontologies {name,domain}` 创建双本体并冻结空 v0，经
+`GET /api/v2/ontologies/{id}/versions` 的 `current_release_id` 取源版本建
+draft；`PUT .../workspace` 写对象类型（属性使用 `type`，DECIMAL 声明
+`number`、DATE 声明 `date`；远程查询核保留物理精度并用字符串编码金额，
+不经过旧本地事实的浮点转换）；`PUT .../workspace/mappings` 只提交 `bindingMode: remote` +
+`curatedDatasetId`，服务端从活跃资产冻结 `__remote__` 描述符，客户端
+`remote/__remote__` 一律丢弃；`POST /api/v2/integrated-datasets`（snake_case
+RegisterAsset：name/connection_id/schema_name/table_name）逐表注册资产，
+**不做 asset sync、不轮询 sealed DatasetVersion**——remote 绑定读活源、不
+复制源明细（dbx 仅承担发现元数据证据）；先执行 trial → impact → promote（admin），确认试跑 `status=passed`，
+发布请求携带该试跑的 `trialRunId` 和一致的 `impactHash`。保存结构后通过
+`GET .../workspace` 读取服务端生成的对象类型 ID；类型发布后才能经
+`POST /api/v2/formal/ontologies/{id}/agent/join-assertions` 分别登记客户—合同、
+客户—订单、订单—发运三个显式关联，返回的 `assertion:{id}` 才能作为对应
+explicit_key join 的 evidenceRefs。代码引用和离线测试不代表真实 HTTP 验收已通过。
+
+canonical 查询形态（QS 仅 projection/group/stats，无 CASE/COALESCE/算术）：
+外层≤4 source —— CRM 重点客户 inner 有效合同聚合为锚，两个 ERP 子查询分支
+（90 天订单按 customer_ref 聚合；未发运 = orders LEFT 按 order_id 预聚合的
+shipments 后 `IS NULL` 再计数，shipment 分支内再嵌一层 group）以 LEFT 挂
+接；derived 深度≤2、≤16 叶、≤3 join、page_size≤200。金额一律先聚合再进
+外层，禁止 4 表 flat JOIN；LEFT 无匹配保持 NULL 诚实呈现，oracle 规范比
+较，不补零、不让模型做算数，COALESCE 需另行契约确认。合同必须在固定验收
+日有效，两个订单分支均限制在同一个 90 天窗口。远程响应使用
+`schemaVersion=2` 的 camelCase 信封：按 `hasNext`/`cursor` 翻页，要求
+`pageRowCount` 与实际行数一致，`queryId`、`totalRowCount`、`expiresAt` 跨页
+不变，`persistence.mode=ephemeral`，且 `partial=false`、`truncated=false`。
+续页必须使用 `mem.` 游标，末页必须无游标，累计行数必须等于总行数。
+每次续页从平台元数据重验授权、结构和连接生命周期指纹，并对每个物理源做一次
+短超时 `SELECT 1` 可用性探测，不重新反射源 schema 或读取源表。源不可达返回
+`503 SOURCE_UNAVAILABLE` 并注销该句柄，源恢复后须重跑查询；源连接新建时默认的
+`inactive` 表示尚未测试，保留原有读取行为，显式测试失败的 `error` 状态拒绝读取。
+连接状态在分页期间变化同样使上下文失效。PostgreSQL 探测用连接启动参数设置
+服务端 `statement_timeout`；该值约束服务端语句执行，不保证已建立连接在服务暂停
+或网络黑洞下的读取具有相同的墙钟上限，客户端断连取消仍须独立验收。
+内存执行收到 MySQL 3024/1969，或在 DBAPI 错误返回时总执行时限已到，返回
+`422 query_budget_exceeded` 与 `budget=statement_timeout_ms`；时限内普通连接错误
+保留 503，取消优先返回 409，均不发布部分句柄。
+
+guards 分开验证无 agent 菜单的 viewer 被拒、已具有查询权限的另一用户不能
+使用 admin 游标，以及无效游标、真实等待 TTL 后的 410、stale release。
+直接 HTTP 的 owner 隔离不等于助手会话隔离；后者仍须独立验收。跨用户检查
+先以 `order_id=1` 的点查证明另一用户确有查询权限；仅设置 `pageSize=1` 不能
+限制执行期物化量。缺少 viewer 或另一授权用户凭据、权限点查失败、没有续页、
+TTL 超过允许等待时间时，记录未执行且阶段不能通过。canonical 查询被预算或
+可用性拒绝时保留实际状态与预算字段，继续执行不依赖结果游标的守卫，owner/TTL
+检查记录为未执行，禁止借用其他查询的游标冒充该规模通过。驱动不把管理员密码或
+bearer token 写入 run 状态；每次执行需重新提供隔离环境的合成凭据。
+
+查询报告保留服务端 `plan`/`sourceStates`、分页次数及 HTTP JSON 请求/响应字节数，
+不保存结果行。HTTP 字节数不包含头部或 TCP/TLS 开销；源库网络差分单独由
+fixture 的 evidence 阶段记录。`FEDERATED_ACCEPTANCE_API_TIMEOUT` 只调整客户端
+等待时间，不改变服务端执行预算。`report` 保留查询失败证据中的状态码和预算字段，
+必须找到通过的 front-door、query、guards 证据才返回零退出码与
+`functional_acceptance_pass=true`，完整验收仍由
+协调矩阵签收。元数据库 canary 可通过 `FEDERATED_ACCEPTANCE_METADATA_DB` 指定
+自有隔离数据库，默认 `integrated_metadata`；切换数据库须使用新的 run name。
+
+查询阶段 canary 对自有 ledger 元数据库做只读行数指纹：包括旧查询快照和
+查询行表在内的所有监控表均须零增量，缺表不能当零。DatasetVersion/
+changesets、fo_property_facts、对象/关系实例、trial objects/links、messages/
+toolruns/reflection/change logs 同样不得增长；驱动自身合法登记的
+join-assertions/assets 表不计入。行数不变只是一项信号，不能证明已有行值、
+日志、对象存储、TEMP 或 WAL 中没有明细，报告始终保留
+`no_detail_persistence_proven=false`。查询和 guards 任一失败或未执行，命令
+退出码非零；即使阶段通过，仍保留 `full_e2e_pass=false`，不代替完整验收矩阵。
+
 ## 文档与仓库结构
 
 ```bash

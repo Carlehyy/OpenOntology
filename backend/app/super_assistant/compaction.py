@@ -49,11 +49,16 @@ def estimate_messages(messages: list[dict[str, Any]]) -> int:
 
 
 def maybe_compact(db: Any, conversation: Any, call_kwargs: dict[str, Any],
-                  messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                  messages: list[dict[str, Any]],
+                  redactions: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """超过阈值时压缩 messages；未触发或摘要失败时原样返回入参列表。
 
     ``call_kwargs["max_context_tokens"]`` 由 runtime 保证存在。压缩成功时
     持久化 conversation.summary 并累计 summary_message_count。
+
+    ``redactions`` 是 ephemeral 明细红线（tool_call_id → 持久文本）：
+    未落库的远程联邦明细绝不能经摘要 prompt 进入 conversation.summary，
+    摘要只能看到 register 裁决后的持久视图。
     """
     context_limit = int(call_kwargs["max_context_tokens"])
     threshold = context_limit * (1 - settings.super_assistant_context_headroom)
@@ -71,7 +76,8 @@ def maybe_compact(db: Any, conversation: Any, call_kwargs: dict[str, Any],
     try:
         result = provider.chat(
             summary_kwargs,
-            [{"role": "user", "content": _summary_prompt(old_messages, conversation.summary)}],
+            [{"role": "user", "content": _summary_prompt(
+                old_messages, conversation.summary, redactions)}],
             [],
         )
         summary = str(result.get("content") or "").strip()
@@ -91,8 +97,13 @@ def maybe_compact(db: Any, conversation: Any, call_kwargs: dict[str, Any],
     )
 
 
-def _summary_prompt(old_messages: list[dict[str, Any]], previous_summary: str | None) -> str:
-    """组装摘要 prompt；tool 长结果只保留头 400 + 尾 200 字符。"""
+def _summary_prompt(old_messages: list[dict[str, Any]], previous_summary: str | None,
+                    redactions: dict[str, str] | None = None) -> str:
+    """组装摘要 prompt；tool 长结果只保留头 400 + 尾 200 字符。
+
+    命中 ``redactions`` 的 tool 消息整体替换为红线持久文本（元信息壳），
+    不走头尾截断——头 400 字符足以携带多行源明细。
+    """
     lines = [
         "请把以下对话历史压缩成一段中文摘要，保留关键事实、已做出的决定和"
         "未完成的待办；丢弃寒暄、客套与重复内容。",
@@ -106,7 +117,15 @@ def _summary_prompt(old_messages: list[dict[str, Any]], previous_summary: str | 
     for message in old_messages:
         role = str(message.get("role") or "unknown")
         content = str(message.get("content") or "")
-        if role == "tool" and len(content) > _TOOL_CONTENT_HEAD + _TOOL_CONTENT_TAIL:
+        if redactions and role == "assistant":
+            content = "[远程明细轮次：模型复述未进入持久摘要]"
+        override = None
+        if role == "tool":
+            override = (redactions or {}).get(
+                str(message.get("tool_call_id") or ""))
+        if override is not None:
+            content = override
+        elif role == "tool" and len(content) > _TOOL_CONTENT_HEAD + _TOOL_CONTENT_TAIL:
             content = (
                 content[:_TOOL_CONTENT_HEAD]
                 + "\n…[中间内容省略]…\n"
@@ -116,7 +135,8 @@ def _summary_prompt(old_messages: list[dict[str, Any]], previous_summary: str | 
         for call in message.get("tool_calls") or []:
             lines.append(
                 f"{role} 调用工具 {call.get('name')}: "
-                + json.dumps(call.get("arguments") or {}, ensure_ascii=False)
+                + ("[远程明细上下文参数已隐藏]" if redactions
+                   else json.dumps(call.get("arguments") or {}, ensure_ascii=False))
             )
     lines.append("请直接输出摘要正文，不要输出额外说明。")
     return "\n".join(lines)

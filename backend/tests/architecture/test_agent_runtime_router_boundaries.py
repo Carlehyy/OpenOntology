@@ -499,7 +499,7 @@ def test_agent_runtime_openapi_contract_is_stable():
         for method in operations
     ) == 43
     assert hashlib.sha256(payload.encode()).hexdigest() == (
-        "b1c52f1fcfdab34903ce03f554fe0bf27bdabe7ff14e9584d80c926be93ddba0"
+        "adc85db63725d19ab8a2ac5135466d7cc93dcbe353f0edac3555a33c24fee270"
     )
     normalized_payload = json.dumps(
         normalize(paths),
@@ -508,5 +508,5 @@ def test_agent_runtime_openapi_contract_is_stable():
         separators=(",", ":"),
     )
     assert hashlib.sha256(normalized_payload.encode()).hexdigest() == (
-        "86e4a3ed33e128be1e8caf4be008a357aa640bddb72ab12dafb27df20947b45b"
+        "975a571be736820c811767b70d0d31836e553ee8f9b114b2cdc34b4e33c2fb74"
     )

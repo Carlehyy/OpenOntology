@@ -1,5 +1,5 @@
 import type { IntegratedAsset, IntegratedRows, IntegratedSyncRun, IntegratedVersion } from '@/api/v2/integrated-datasets'
-import type { QueryBinding, QuerySourceState } from '@/api/v2/query'
+import type { QueryBinding, QueryRequest, QuerySourceState } from '@/api/v2/query'
 
 /** SQL NULL is null; json_text cells are opaque strings, including the JSON literal 'null'. */
 export function integratedCell(value: unknown): string {
@@ -53,6 +53,13 @@ export function parseBindings(text: string): Record<string, QueryBinding> {
     throw new Error(`绑定 ${alias} 需要 integrated + assetId，或 dataset + datasetId + versionId`)
   }
   return object as Record<string, QueryBinding>
+}
+
+/** One SPL workbench run request, extracted pure so its wire contract stays unit-testable.
+ * Storage is pinned to memory: the backend otherwise defaults to persisted and would copy
+ * remote source detail into platform UnifiedQueryRow tables as a query side effect. */
+export function integratedQueryRequest(query: string, bindings: Record<string, QueryBinding>, params: Record<string, unknown>): QueryRequest {
+  return { language: 'spl', query, bindings, params, pageSize: 100, resultStorage: 'memory' }
 }
 
 /** The backend rejects dots/NUL in either physical identifier; check before requesting. */

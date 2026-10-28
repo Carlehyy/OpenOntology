@@ -519,6 +519,55 @@ def test_dispatch_ack_loss_does_not_fail_already_claimed_run(db, admin_user, mon
     assert result["completed_at"] is None and result["error"] is None
 
 
+def test_resource_discovery_is_management_only_but_registered_assets_remain_readable(
+    db, admin_user, editor_user, monkeypatch,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.data_channel.integrated.router import router
+    from app.deps import get_current_user, get_db
+
+    asset = _asset(db, admin_user)
+    viewer = SimpleNamespace(id="viewer", role="viewer", is_active=True)
+    calls = []
+
+    class FakeDbx:
+        def status(self):
+            return {"configured": True, "available": True, "commit": DBX_COMMIT,
+                    "version": DBX_VERSION, "reason": None}
+
+        def list_resources(self, connection):
+            calls.append(connection.id)
+            return [{"schema_name": "public", "table_name": "rows"}]
+
+    monkeypatch.setattr(service, "dbx", lambda: FakeDbx())
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v2/integrated-datasets")
+    app.dependency_overrides[get_db] = lambda: db
+    current = {"user": viewer}
+    app.dependency_overrides[get_current_user] = lambda: current["user"]
+
+    with TestClient(app) as client:
+        resources = "/api/v2/integrated-datasets/connections/source/resources"
+        listing = "/api/v2/integrated-datasets"
+
+        assert client.get(resources).status_code == 403
+        assert calls == []
+        assert client.get(listing).status_code == 200
+
+        current["user"] = editor_user
+        editor_response = client.get(resources)
+        assert editor_response.status_code == 200
+        assert editor_response.json() == {
+            "items": [{"schema_name": "public", "table_name": "rows"}],
+        }
+
+        current["user"] = admin_user
+        assert client.get(resources).status_code == 200
+
+    assert calls == ["source", "source"]
+
+
 def test_non_owner_editor_and_viewer_cannot_write(db, admin_user, editor_user):
     asset = _asset(db, admin_user)
     with pytest.raises(HTTPException) as exc:

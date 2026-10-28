@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, get_current_user
+from app.shared.query_control import request_query_control
 from app.ontologies.agent_query import schemas as QS
 from app.ontologies.agent_query.service import (
     QueryError, execute_unified_query, fetch_unified_query_page,
@@ -21,11 +22,11 @@ def _query_error(exc: QueryError) -> HTTPException:
     return HTTPException(status_code=exc.status, detail=exc.detail())
 
 
-@router.post("/agent/query")
+@router.post("/agent/query", dependencies=[Depends(request_query_control)])
 def run_query(body: QS.QueryRequest | QS.CursorRequest,
               db: Session = Depends(get_db),
               current_user=Depends(get_current_user)):
-    """统一关联查询：首请求物化有界快照，翻页只传 cursor。"""
+    """统一关联查询：远程结果仅在内存存活；翻页只传 cursor。"""
     if isinstance(body, QS.CursorRequest):
         try:
             data = fetch_unified_query_page(

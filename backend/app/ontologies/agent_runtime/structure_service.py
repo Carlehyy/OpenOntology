@@ -162,6 +162,18 @@ def build_structure(db: Session, user, ontology_id: str, *,
         ]
 
     import json as _json
+    from app.ontologies.mappings.remote_binding import get_remote_binding
+
+    def _data_access(object_type_id):
+        binding = get_remote_binding(context.snapshot, object_type_id)
+        if binding is None:
+            return {"mode": "materialized", "queryTool": "ontology_query"}
+        allowed = scope.allowed_property_names(object_type_id)
+        return {"mode": "remote", "queryTool": "ontology_query",
+                "definitionReleaseId": context.release.id,
+                "dataSnapshot": "query_time", "sourceRecordsPersisted": False,
+                "mappedProperties": sorted({prop for prop in binding["fieldMap"].values()
+                                            if allowed is None or prop in allowed})}
 
     payload = {
         "ontology": {"id": project.id, "name": project.name},
@@ -172,6 +184,7 @@ def build_structure(db: Session, user, ontology_id: str, *,
                 "id": t.id, "name": t.name, "displayName": t.display_name,
                 "primaryKey": t.primary_key,
                 "properties": _props(t),
+                "dataAccess": _data_access(t.id),
                 "sourceRefs": {
                     "ontologyId": project.id,
                     "releaseId": context.release.id,

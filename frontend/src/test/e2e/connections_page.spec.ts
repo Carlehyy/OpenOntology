@@ -3,6 +3,8 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 /**
  * 连接管理页回归（商业化审查 D-006 / D-005 / D-004）：
  * - 删除被同步数据集引用的连接：409 依赖明细展示在确认弹窗内，弹窗不关闭、卡片仍在
+ * - 受控注销 409：数据集/集成资产/历史/映射/任务的完整阻断明细展示
+ * - 凭据轮换：只提交填写字段（不回填旧值），成功后自动重测
  * - 同名连接：前端拦截并提示（后端另有 409 兜底）
  * - 同步成功后提供「查看数据集」入口，跳转数据流水线数据集页签
  */
@@ -14,7 +16,9 @@ const CONNECTIONS = [
 async function mockConnections(page: Page, options?: {
   deleteStatus?: number
   deleteBody?: unknown
+  rotateBody?: Array<Record<string, string>>
 }) {
+  const rotateBodies = options?.rotateBody ?? []
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
@@ -41,6 +45,16 @@ async function mockConnections(page: Page, options?: {
         contentType: 'application/json',
         body: JSON.stringify({ detail: '已存在同名连接「ERP 订单库」，请更换连接名称' }),
       })
+    }
+    // 凭据轮换：部分键合并，响应永不包含 config
+    if (/\/api\/v2\/connections\/[^/]+\/config$/.test(url.pathname)
+        && route.request().method() === 'PATCH') {
+      rotateBodies.push(route.request().postDataJSON().config)
+      return ok({ id: url.pathname.split('/').at(-2), name: 'ERP 订单库', kind: 'mysql', status: 'inactive' })
+    }
+    if (/\/api\/v2\/connections\/[^/]+\/test$/.test(url.pathname)
+        && route.request().method() === 'POST') {
+      return ok({ success: true, status: 'active' })
     }
     if (url.pathname === '/api/v2/connections/conn-1' && route.request().method() === 'DELETE') {
       const status = options?.deleteStatus ?? 409
@@ -70,6 +84,7 @@ async function mockConnections(page: Page, options?: {
     }
     return ok({})
   })
+  return rotateBodies
 }
 
 test('删除被同步数据集引用的连接：弹窗内展示 409 依赖明细且卡片保留', async ({ page }) => {
@@ -119,4 +134,48 @@ test('同步成功后提供查看数据集入口并跳转数据集页签', async
 
   await page.getByRole('button', { name: '查看数据集' }).click()
   await expect(page).toHaveURL(/#\/data\/pipelines\/datasets/)
+})
+
+test('凭据轮换只提交填写字段并自动重测，表单不回填旧值', async ({ page }) => {
+  const rotateBodies: Array<Record<string, string>> = []
+  await mockConnections(page, { rotateBody: rotateBodies })
+  await page.goto('/#/data/pipelines/connections', { waitUntil: 'domcontentloaded' })
+
+  await page.getByRole('button', { name: '轮换凭据' }).click()
+  const panel = page.getByTestId('connection-rotate-panel')
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('既有配置不会回显到表单')
+  // 只填新密码：其余字段留空 = 保留服务端现值
+  await page.getByLabel('轮换 ERP 订单库 密码').fill('rotated-secret-456')
+  await panel.getByRole('button', { name: '保存并测试' }).click()
+  await expect(panel.getByText(/已更新配置并通过连通测试/)).toBeVisible()
+  // 请求只包含填写的键，且不携带任何旧凭据
+  expect(rotateBodies).toEqual([{ password: 'rotated-secret-456' }])
+})
+
+test('受控注销 409 展示数据集/集成资产/历史/映射/任务的完整阻断明细', async ({ page }) => {
+  await mockConnections(page, { deleteBody: { detail: {
+    message: '连接仍有依赖，不能注销：1 个同步数据集（请先在「数据资产」中删除）、1 个集成数据集资产（请先在资产页注销零历史资产）、4 条数据历史（版本 2 / 同步运行 1 / 写入回执 1）、1 个本体映射绑定、1 个数据任务。受控注销不会删除任何历史或审计记录，请先解除以上依赖。',
+    datasets: [{ id: 'ds-1', name: '同步数据集-订单', kind: 'structured' }],
+    datasets_total: 1,
+    integrated_assets: [{ id: 'asset-1', name: '集成资产-订单', schema_name: 'public', table_name: 'orders' }],
+    integrated_assets_total: 1,
+    history: { dataset_versions: 2, sync_runs: 1, mutations: 1 },
+    mapping_references: [{ mapping_id: 'm-1', ontology_id: 'ont-1', kind: 'object', name: 'User', dataset_name: '同步数据集-订单' }],
+    mapping_references_total: 1,
+    tasks: [{ id: 'task-1', name: '消费任务', pipeline_id: 'p-1' }],
+    tasks_total: 1,
+    total: 1,
+  } } })
+  await page.goto('/#/data/pipelines/connections', { waitUntil: 'domcontentloaded' })
+
+  await page.getByRole('button', { name: '删除' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toContainText('受控注销要求：零数据集引用、零集成资产、零历史、零本体映射绑定、零数据任务')
+  await dialog.getByRole('button', { name: '确认删除' }).click()
+  await expect(dialog.getByText(/连接仍有依赖，不能注销/)).toBeVisible()
+  await expect(dialog.getByText(/版本 2 \/ 同步运行 1 \/ 写入回执 1/)).toBeVisible()
+  await expect(dialog.getByText(/同步数据集-订单、集成资产-订单、消费任务/)).toBeVisible()
+  // 拒绝后卡片保留
+  await expect(page.getByText('ERP 订单库', { exact: true })).toBeVisible()
 })

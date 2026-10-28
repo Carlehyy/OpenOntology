@@ -7,7 +7,7 @@ import { queryApi, type QueryResult } from '@/api/v2/query'
 import type { IntegratedAsset } from '@/api/v2/integrated-datasets'
 import { Alert } from '@/components/ui/Alert'
 import { Button } from '@/components/ui/Button'
-import { completenessLabel, consistencyLabel, integratedCell, integratedError, parseBindings, parseObject, querySourceConsistencyLabel } from './integratedModel'
+import { completenessLabel, consistencyLabel, integratedCell, integratedError, integratedQueryRequest, parseBindings, parseObject, querySourceConsistencyLabel } from './integratedModel'
 
 const editorTheme = EditorView.theme({
   '&': { backgroundColor: 'var(--card)', color: 'var(--color-text-primary)' },
@@ -39,7 +39,7 @@ export default function IntegratedQueryPanel({ assets, selectedId }: { assets: I
     try {
       const response = cursor
         ? await queryApi.next(cursor)
-        : await queryApi.run({ language: 'spl', query, bindings: parseBindings(bindings), params: parseObject(params, '参数'), pageSize: 100 })
+        : await queryApi.run(integratedQueryRequest(query, parseBindings(bindings), parseObject(params, '参数')))
       if (current !== generation.current) return
       if (cursor) setOffset(value => value + (result?.rows.length ?? 0))
       setResult(response)

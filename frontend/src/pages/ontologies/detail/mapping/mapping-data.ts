@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { apiClientV2 } from '@/api/client'
 import type { CuratedDataset } from '@/api/v2/curated'
 import type { DatasetOverviewItem, DatasetSchemaColumn } from '@/api/v2/datasets'
+import type { IntegratedColumn } from '@/api/v2/integrated-datasets'
 import type { DatasetVersionSummary } from './mapping-review'
 
 export * from './mapping-review'
@@ -35,6 +36,23 @@ export interface MappingLinkType {
   properties?: MappingProperty[]
 }
 
+/**
+ * 远程只读绑定描述符：服务端按登记的 integrated asset 冻结进快照（camel 形状）。
+ * 客户端提交远程绑定时只带 dataset id 与 bindingMode，不携带也不回显
+ * 凭据/连接串等源信息；读取侧以本形状展示冻结定义。
+ */
+export interface RemoteBindingDescriptor {
+  assetId: string
+  datasetId: string
+  connectionId: string
+  schemaName: string
+  tableName: string
+  /** 冻结时的完整列规格（原生类型）。 */
+  columns: IntegratedColumn[]
+  primaryKey: string[]
+  schemaFingerprint: string
+}
+
 export interface ObjectMappingRecord {
   id: string
   curated_dataset_id: string | null
@@ -45,7 +63,9 @@ export interface ObjectMappingRecord {
   status: string
   confidence: number | null
   target_object_type_id: string | null
-  binding_mode: 'bound' | 'name_match' | 'auto_create'
+  binding_mode: 'bound' | 'name_match' | 'auto_create' | 'remote'
+  /** binding_mode === 'remote' 时服务端冻结的远程只读绑定描述符。 */
+  remote: RemoteBindingDescriptor | null
   resolved_object_type: { id: string; name: string; display_name: string } | null
   auto_apply_on_review: boolean
   auto_apply_on_version: boolean
@@ -64,6 +84,8 @@ export interface LinkMappingRecord {
   field_mapping: Record<string, string | boolean | unknown>
   link_type_id?: string | null
   status?: string
+  /** 远程只读绑定的瘦边关系（src/tgt 均为远程数据集，无 edge dataset）。 */
+  binding_mode: 'remote' | null
   is_fat: boolean
   auto_apply_on_review: boolean
   auto_apply_on_version: boolean
@@ -89,11 +111,20 @@ export interface MappingDataset {
   rows: number | null
   quality: number | null
   primaryKeyColumns: string[]
-  source: 'curated' | 'manual'
+  source: 'curated' | 'manual' | 'remote'
   sourceLabel: string
   /** curated 数据集的审核状态（approved/pending_review/rejected）；人工数据集无审核流，恒为 null。 */
   reviewStatus: string | null
   columns: DatasetSchemaColumn[]
+  /** source === 'remote'：预览走 integrated rows API 所需的资产 ID。 */
+  assetId?: string
+  /** source === 'remote'：源表定位与结构指纹（仅展示/提示，映射引用的是 dataset id）。 */
+  remoteTable?: {
+    schemaName: string
+    tableName: string
+    connectionId: string
+    schemaFingerprint: string
+  }
 }
 
 export interface ObjectInstanceSummary {
@@ -127,6 +158,35 @@ function recordValue(value: unknown): Record<string, unknown> {
     : {}
 }
 
+/** 快照冻结的远程只读绑定描述符（camel 形状；畸形数据降级为 null，不阻断快照读取）。 */
+function normalizeRemoteDescriptor(value: unknown): RemoteBindingDescriptor | null {
+  const raw = recordValue(value)
+  if (!raw.assetId || !raw.datasetId) return null
+  // 列规格按服务端冻结原样保留（含精度/长度等物理属性），仅补齐必填形状。
+  const columns: Array<IntegratedColumn & Record<string, unknown>> = (
+    Array.isArray(raw.columns) ? raw.columns : []
+  ).map(column => {
+    const col = recordValue(column)
+    return {
+      ...col,
+      name: String(col.name ?? ''),
+      type: String(col.type ?? 'string'),
+      nullable: Boolean(col.nullable),
+      primary_key: Boolean(col.primary_key),
+    }
+  })
+  return {
+    assetId: String(raw.assetId),
+    datasetId: String(raw.datasetId),
+    connectionId: String(raw.connectionId ?? ''),
+    schemaName: String(raw.schemaName ?? ''),
+    tableName: String(raw.tableName ?? ''),
+    columns,
+    primaryKey: Array.isArray(raw.primaryKey) ? raw.primaryKey.map(String).filter(Boolean) : [],
+    schemaFingerprint: String(raw.schemaFingerprint ?? ''),
+  }
+}
+
 /** Normalize both immutable snapshot DTOs (camelCase) and legacy runtime DTOs. */
 export function normalizeObjectMapping(value: unknown): ObjectMappingRecord {
   const raw = recordValue(value)
@@ -139,9 +199,13 @@ export function normalizeObjectMapping(value: unknown): ObjectMappingRecord {
     display_name: String(resolved.display_name ?? resolved.displayName ?? ''),
   } : null
   const rawBindingMode = raw.binding_mode
-  const bindingMode: ObjectMappingRecord['binding_mode'] = rawBindingMode === 'name_match' || rawBindingMode === 'auto_create'
-    ? rawBindingMode
-    : targetObjectTypeId ? 'bound' : 'auto_create'
+  // 远程只读绑定只在快照工作区出现，按 camel 规范读取，不做 snake 回退。
+  const isRemote = raw.bindingMode === 'remote'
+  const bindingMode: ObjectMappingRecord['binding_mode'] = isRemote
+    ? 'remote'
+    : rawBindingMode === 'name_match' || rawBindingMode === 'auto_create'
+      ? rawBindingMode
+      : targetObjectTypeId ? 'bound' : 'auto_create'
   const curatedDatasetId = String(raw.curated_dataset_id ?? raw.curatedDatasetId ?? '') || null
   return {
     id: String(raw.id ?? ''),
@@ -154,6 +218,7 @@ export function normalizeObjectMapping(value: unknown): ObjectMappingRecord {
     confidence: raw.confidence == null ? null : Number(raw.confidence),
     target_object_type_id: targetObjectTypeId,
     binding_mode: bindingMode,
+    remote: isRemote ? normalizeRemoteDescriptor(raw.remote) : null,
     resolved_object_type: resolvedObjectType,
     auto_apply_on_review: Boolean(raw.auto_apply_on_review ?? fieldMapping.__auto_apply_on_review__),
     auto_apply_on_version: Boolean(raw.auto_apply_on_version ?? fieldMapping.__auto_apply_on_version__),
@@ -178,6 +243,8 @@ export function normalizeLinkMapping(value: unknown): LinkMappingRecord {
     field_mapping: fieldMapping,
     link_type_id: String(raw.link_type_id ?? raw.linkTypeId ?? '') || null,
     status: raw.status == null ? undefined : String(raw.status),
+    // 远程只读绑定的瘦边关系；本地映射恒为 null（camel 读取，不做 snake 回退）。
+    binding_mode: raw.bindingMode === 'remote' ? 'remote' : null,
     is_fat: Boolean(raw.is_fat ?? edgeDatasetId),
     auto_apply_on_review: Boolean(raw.auto_apply_on_review ?? fieldMapping.__auto_apply_on_review__),
     auto_apply_on_version: Boolean(raw.auto_apply_on_version ?? fieldMapping.__auto_apply_on_version__),
@@ -186,6 +253,22 @@ export function normalizeLinkMapping(value: unknown): LinkMappingRecord {
 
 export function mappingTargetId(mapping: ObjectMappingRecord): string | null {
   return mapping.target_object_type_id || mapping.resolved_object_type?.id || null
+}
+
+/** 远程绑定按 entityClass 唯一挂接工作区类型：显式/已解析身份优先，仅精确唯一命中，不做首猜。 */
+export function resolveRemoteMappingTarget(
+  mapping: ObjectMappingRecord,
+  objectTypes: MappingObjectType[],
+): string | null {
+  if (mapping.binding_mode !== 'remote') return null
+  if (mapping.target_object_type_id || mapping.resolved_object_type?.id) return null
+  const entityClass = mapping.entity_class
+  if (!entityClass) return null
+  const byName = objectTypes.filter(item => item.name === entityClass)
+  if (byName.length === 1) return byName[0].id
+  if (byName.length > 1) return null
+  const byDisplayName = objectTypes.filter(item => item.displayName === entityClass)
+  return byDisplayName.length === 1 ? byDisplayName[0].id : null
 }
 
 export function linkMappingForType(type: MappingLinkType, mappings: LinkMappingRecord[]) {
@@ -217,8 +300,13 @@ export function useMappingData(
   const linkTypes = useMemo(
     () => workspaceQuery.data?.linkTypes || [], [workspaceQuery.data?.linkTypes])
   const mappings = useMemo(
-    () => (workspaceQuery.data?.mappings || []).map(normalizeObjectMapping),
-    [workspaceQuery.data?.mappings],
+    () => (workspaceQuery.data?.mappings || []).map(raw => {
+      const mapping = normalizeObjectMapping(raw)
+      // 只在读取侧补齐缺失的远程绑定类型挂接；持久化映射条目本身不改写。
+      const targetId = resolveRemoteMappingTarget(mapping, objectTypes)
+      return targetId ? { ...mapping, target_object_type_id: targetId } : mapping
+    }),
+    [workspaceQuery.data?.mappings, objectTypes],
   )
   const linkMappings = useMemo(
     () => (workspaceQuery.data?.linkMappings || []).map(normalizeLinkMapping),

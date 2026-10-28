@@ -181,7 +181,7 @@ def test_snapshot_without_tests_omits_tests_and_scripts(stack, monkeypatch):
 
 def test_cleanup_refuses_untracked_project_container(stack, monkeypatch):
     stack.write_report("resources.json", {"project": stack.PROJECT, "containers": [{"id": "known"}]})
-    monkeypatch.setattr(stack, "owned_containers", lambda: [{"id": "unknown"}])
+    monkeypatch.setattr(stack, "owned_containers", lambda *args, **kwargs: [{"id": "unknown"}])
     monkeypatch.setattr(stack, "compose", lambda *_: pytest.fail("cleanup must fail before compose"))
     with pytest.raises(RuntimeError, match="untracked project container"):
         stack.stack_down(False)

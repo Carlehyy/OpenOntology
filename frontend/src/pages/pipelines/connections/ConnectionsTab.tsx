@@ -1,22 +1,25 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Database, FileUp, Globe, X, Loader2, RefreshCw, Table2 } from 'lucide-react'
-import { apiClientV2 } from '@/api/client'
+import { Plus, Database, FileUp, Globe, X, Loader2, RefreshCw, Table2, KeyRound } from 'lucide-react'
+import {
+  connectionsApi,
+  connectionErrorDetail,
+  CONNECTION_CONFIG_FIELDS,
+  CONNECTION_KIND_LABELS,
+  CREATABLE_CONNECTION_KINDS,
+  decommissionBlockerSummary,
+  rotationConfigFromInput,
+  type Connection,
+  type ConnectionDecommissionBlockers,
+} from '@/api/v2/connections'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
-interface Connection {
-  id: string
-  name: string
-  kind: string
-  status: string
-}
-
-const KIND_META: Record<string, { icon: React.ReactNode; label: string }> = {
-  file:     { icon: <FileUp size={14} />,   label: '文件上传' },
-  mysql:    { icon: <Database size={14} />, label: 'MySQL' },
-  postgres: { icon: <Database size={14} />, label: 'PostgreSQL' },
-  mongo:    { icon: <Database size={14} />, label: 'MongoDB' },
-  rest:     { icon: <Globe size={14} />,    label: 'REST API' },
+const KIND_ICONS: Record<string, React.ReactNode> = {
+  file: <FileUp size={14} />,
+  mysql: <Database size={14} />,
+  postgres: <Database size={14} />,
+  mongo: <Database size={14} />,
+  rest: <Globe size={14} />,
 }
 
 const STATUS_STYLE: Record<string, string> = {
@@ -27,44 +30,6 @@ const STATUS_STYLE: Record<string, string> = {
 
 const STATUS_LABEL: Record<string, string> = {
   active: '活跃', inactive: '未激活', error: '错误',
-}
-
-// 新建连接仅支持外部系统；文件类数据统一在「数据资产湖 → 原始数据集」上传与维护
-const CREATABLE_KINDS = ['mysql', 'postgres', 'mongo', 'rest'] as const
-
-const KIND_CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder: string; type?: string }[]> = {
-  mysql:    [
-    { key: 'host', label: '主机', placeholder: 'localhost' },
-    { key: 'port', label: '端口', placeholder: '3306' },
-    { key: 'database', label: '数据库名', placeholder: 'mydb' },
-    { key: 'user', label: '用户名', placeholder: 'root' },
-    { key: 'password', label: '密码', placeholder: '••••••', type: 'password' },
-  ],
-  postgres: [
-    { key: 'host', label: '主机', placeholder: 'localhost' },
-    { key: 'port', label: '端口', placeholder: '5432' },
-    { key: 'database', label: '数据库名', placeholder: 'mydb' },
-    { key: 'user', label: '用户名', placeholder: 'postgres' },
-    { key: 'password', label: '密码', placeholder: '••••••', type: 'password' },
-  ],
-  mongo:    [
-    { key: 'uri', label: '连接字符串', placeholder: 'mongodb://localhost:27017/mydb' },
-  ],
-  rest:     [
-    { key: 'url', label: 'API URL', placeholder: 'https://api.example.com/data' },
-    { key: 'headers', label: '请求头 (JSON)', placeholder: '{"Authorization": "Bearer token"}' },
-  ],
-  file: [],
-}
-
-// 拦截器 reject 的是已解包的响应体；HTTPException 的 detail 可能是字符串，
-// 也可能是结构化对象（如连接删除 409 的 {message, datasets}）
-function errorDetail(e: unknown, fallback: string): string {
-  const err = e as { detail?: string | { message?: string }; message?: string }
-  const payload = err?.detail
-  if (typeof payload === 'string' && payload) return payload
-  const message = typeof payload === 'object' && payload ? payload.message : ''
-  return message || err?.message || fallback
 }
 
 export default function ConnectionsTab() {
@@ -82,6 +47,12 @@ export default function ConnectionsTab() {
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; detail?: string } | null>(null)
   const [testing, setTesting] = useState<string | null>(null)
 
+  // 凭据轮换：只针对单个连接展开，字段全部留空 = 保留服务端现值
+  const [rotatingId, setRotatingId] = useState<string | null>(null)
+  const [rotateValues, setRotateValues] = useState<Record<string, string>>({})
+  const [rotating, setRotating] = useState(false)
+  const [rotateResult, setRotateResult] = useState<{ id: string; ok: boolean; detail: string } | null>(null)
+
   const [formName, setFormName] = useState('')
   const [formKind, setFormKind] = useState('mysql')
   const [formConfig, setFormConfig] = useState<Record<string, string>>({})
@@ -89,8 +60,8 @@ export default function ConnectionsTab() {
 
   const loadConnections = () => {
     setLoading(true)
-    apiClientV2.get('/connections')
-      .then((res: unknown) => setConnections(Array.isArray(res) ? res : ((res as { data?: Connection[] })?.data ?? [])))
+    connectionsApi.list()
+      .then(res => setConnections(Array.isArray(res) ? res : []))
       .catch(() => setConnections([]))
       .finally(() => setLoading(false))
   }
@@ -127,7 +98,7 @@ export default function ConnectionsTab() {
     setSaving(true)
     setFormError('')
     try {
-      await apiClientV2.post('/connections', {
+      await connectionsApi.create({
         name: formName, kind: formKind,
         config: { ...formConfig, sync_mode: formSyncMode },
       })
@@ -135,7 +106,7 @@ export default function ConnectionsTab() {
       resetForm()
       loadConnections()
     } catch (e: unknown) {
-      setFormError(errorDetail(e, '保存失败'))
+      setFormError(connectionErrorDetail(e, '保存失败'))
     } finally {
       setSaving(false)
     }
@@ -145,14 +116,40 @@ export default function ConnectionsTab() {
     setTesting(id)
     setTestResult(null)
     try {
-      const res = await apiClientV2.post<{ success: boolean; detail?: string }>(`/connections/${id}/test`, {})
+      const res = await connectionsApi.test(id)
       setTestResult({ id, ok: !!res.success, detail: res.detail })
       loadConnections()
     } catch (e: unknown) {
-      const err = e as { detail?: string }
-      setTestResult({ id, ok: false, detail: err?.detail || '测试失败' })
+      setTestResult({ id, ok: false, detail: connectionErrorDetail(e, '测试失败') })
     } finally {
       setTesting(null)
+    }
+  }
+
+  // 凭据轮换：只提交填写了的键；成功后自动重测，让状态真实回到 active/error
+  const handleRotate = async (connection: Connection) => {
+    const config = rotationConfigFromInput(rotateValues)
+    if (Object.keys(config).length === 0) {
+      setRotateResult({ id: connection.id, ok: false, detail: '请至少填写一个要更新的配置项；留空字段保持原值' })
+      return
+    }
+    setRotating(true)
+    setRotateResult(null)
+    try {
+      await connectionsApi.rotateConfig(connection.id, config)
+      const tested = await connectionsApi.test(connection.id)
+      setRotateResult({
+        id: connection.id,
+        ok: !!tested.success,
+        detail: tested.success
+          ? '已更新配置并通过连通测试'
+          : `配置已更新，但连通测试失败${tested.detail ? `：${tested.detail}` : ''}`,
+      })
+      loadConnections()
+    } catch (e: unknown) {
+      setRotateResult({ id: connection.id, ok: false, detail: connectionErrorDetail(e, '配置更新失败') })
+    } finally {
+      setRotating(false)
     }
   }
 
@@ -160,10 +157,7 @@ export default function ConnectionsTab() {
     setSyncing(id)
     setSyncResult(null)
     try {
-      const result = await apiClientV2.post<{ status?: string; rows?: number }>(
-        `/connections/${id}/sync`,
-        {},
-      )
+      const result = await connectionsApi.triggerSync(id)
       setSyncResult({
         id,
         ok: true,
@@ -173,7 +167,7 @@ export default function ConnectionsTab() {
       })
       loadConnections()
     } catch (e: unknown) {
-      setSyncResult({ id, ok: false, detail: errorDetail(e, '同步失败') })
+      setSyncResult({ id, ok: false, detail: connectionErrorDetail(e, '同步失败') })
     } finally {
       setSyncing(null)
     }
@@ -184,17 +178,18 @@ export default function ConnectionsTab() {
     setDeleting(true)
     setDeleteError('')
     try {
-      await apiClientV2.delete(`/connections/${deleteTarget.id}`)
+      await connectionsApi.remove(deleteTarget.id)
       setDeleteTarget(null)
       loadConnections()
     } catch (e: unknown) {
-      const err = e as { detail?: string | { message?: string; datasets?: { name?: string }[] } }
+      const err = e as { detail?: string | ConnectionDecommissionBlockers }
       const payload = err?.detail
-      const names = (typeof payload === 'object' ? payload?.datasets : [])
-        ?.map(d => d?.name).filter(Boolean) ?? []
-      const message = errorDetail(e, '删除失败，请稍后重试')
-      setDeleteError(
-        names.length ? `${message}（${names.join('、')}）` : message)
+      if (payload && typeof payload === 'object') {
+        // 受控注销 409：结构化依赖明细（数据集/集成资产/历史/映射/任务）
+        setDeleteError(decommissionBlockerSummary(payload))
+      } else {
+        setDeleteError(connectionErrorDetail(e, '删除失败，请稍后重试'))
+      }
     } finally {
       setDeleting(false)
     }
@@ -248,27 +243,24 @@ export default function ConnectionsTab() {
           </div>
 
           <div>
-            <label className="text-xs text-muted-foreground mb-2 block">连接类型</label>
+            <label className="text-xs text-muted-foreground mb-2">连接类型</label>
             <div className="flex gap-2 flex-wrap">
-              {CREATABLE_KINDS.map(k => {
-                const m = KIND_META[k]
-                return (
-                  <button
-                    key={k}
-                    type="button"
-                    onClick={() => { setFormKind(k); setFormConfig({}) }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-colors
-                      ${formKind === k ? 'bg-[var(--color-bg-overlay)] text-[var(--color-text-inverse)] border-border' : 'border-border text-muted-foreground hover:bg-muted'}`}
-                  >
-                    {m.icon} {m.label}
-                  </button>
-                )
-              })}
+              {CREATABLE_CONNECTION_KINDS.map(k => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => { setFormKind(k); setFormConfig({}) }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-colors
+                    ${formKind === k ? 'bg-[var(--color-bg-overlay)] text-[var(--color-text-inverse)] border-border' : 'border-border text-muted-foreground hover:bg-muted'}`}
+                >
+                  {KIND_ICONS[k]} {CONNECTION_KIND_LABELS[k] ?? k}
+                </button>
+              ))}
             </div>
           </div>
 
           <div className="space-y-3">
-            {KIND_CONFIG_FIELDS[formKind]?.map(f => (
+            {CONNECTION_CONFIG_FIELDS[formKind]?.map(f => (
               <div key={f.key}>
                 <label className="text-xs text-muted-foreground mb-1 block">{f.label}</label>
                 <input
@@ -283,7 +275,7 @@ export default function ConnectionsTab() {
           </div>
 
           <div>
-            <label className="text-xs text-muted-foreground mb-2 block">同步模式</label>
+            <label className="text-xs text-muted-foreground mb-2">同步模式</label>
             <div className="flex gap-4">
               {(['snapshot', 'append'] as const).map(m => (
                 <label key={m} className="flex items-center gap-2 text-sm cursor-pointer">
@@ -328,18 +320,21 @@ export default function ConnectionsTab() {
       ) : (
         <div className="border rounded-xl divide-y overflow-hidden">
           {connections.map(c => {
-            const meta = KIND_META[c.kind] ?? KIND_META.file
+            const icon = KIND_ICONS[c.kind] ?? KIND_ICONS.file
             const statusStyle = STATUS_STYLE[c.status] ?? STATUS_STYLE.inactive
             const statusLabel = STATUS_LABEL[c.status] ?? c.status
+            const kindLabel = CONNECTION_KIND_LABELS[c.kind] ?? c.kind
+            const rotateFields = CONNECTION_CONFIG_FIELDS[c.kind] ?? []
+            const rotatingThis = rotatingId === c.id
             return (
               <div key={c.id} className="p-4">
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 bg-muted rounded-lg flex items-center justify-center text-muted-foreground">
-                    {meta.icon}
+                    {icon}
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="font-medium text-sm truncate">{c.name}</p>
-                    <p className="text-xs text-[var(--color-text-tertiary)]">{meta.label}</p>
+                    <p className="text-xs text-[var(--color-text-tertiary)]">{kindLabel}</p>
                   </div>
                   <span className={`text-xs font-medium px-2 py-0.5 rounded border ${statusStyle}`}>
                     {statusLabel}
@@ -362,6 +357,20 @@ export default function ConnectionsTab() {
                     <RefreshCw size={11} className={syncing === c.id ? 'animate-spin' : ''} />
                     同步
                   </button>
+                  {rotateFields.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setRotatingId(rotatingThis ? null : c.id)
+                        setRotateValues({})
+                        setRotateResult(null)
+                      }}
+                      className="flex items-center gap-1 text-xs px-2.5 py-1.5 border rounded-lg hover:bg-muted transition-colors"
+                      title="轮换凭据 / 更新连接配置；配置不会被回显"
+                    >
+                      <KeyRound size={11} />
+                      轮换凭据
+                    </button>
+                  )}
                   <button
                     onClick={() => { setDeleteTarget(c); setDeleteError('') }}
                     className="text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)] text-xs px-1 transition-colors"
@@ -369,6 +378,53 @@ export default function ConnectionsTab() {
                     删除
                   </button>
                 </div>
+
+                {/* 凭据轮换面板：全部留空 = 保留现值；服务端不回填任何配置 */}
+                {rotatingThis && (
+                  <div className="mt-3 ml-11 rounded-lg border border-border bg-muted/50 p-3 space-y-2" data-testid="connection-rotate-panel">
+                    <p className="text-xs text-muted-foreground">
+                      轮换「{c.name}」的凭据/配置：只提交填写的字段，留空保持原值；保存后会立即重新测试连通。既有配置不会回显到表单。
+                    </p>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {rotateFields.map(f => (
+                        <label key={f.key} className="block text-xs">
+                          {f.label}
+                          <input
+                            type={f.type || 'text'}
+                            aria-label={`轮换 ${c.name} ${f.label}`}
+                            value={rotateValues[f.key] || ''}
+                            onChange={e => setRotateValues(prev => ({ ...prev, [f.key]: e.target.value }))}
+                            placeholder={f.key === 'password' ? '输入新密码' : f.placeholder}
+                            autoComplete="new-password"
+                            className="mt-1 w-full border rounded-lg px-3 py-2 text-sm bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleRotate(c)}
+                        disabled={rotating}
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--color-bg-overlay)] text-[var(--color-text-inverse)] rounded-lg disabled:opacity-50"
+                      >
+                        {rotating && <Loader2 size={11} className="animate-spin" />}
+                        保存并测试
+                      </button>
+                      <button
+                        onClick={() => { setRotatingId(null); setRotateValues({}); setRotateResult(null) }}
+                        className="px-3 py-1.5 text-xs border rounded-lg hover:bg-muted"
+                      >
+                        取消
+                      </button>
+                    </div>
+                    {rotateResult?.id === c.id && (
+                      <p className={`text-xs ${rotateResult.ok ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]'}`}>
+                        {rotateResult.ok ? '✓ ' : '✗ '}{rotateResult.detail}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {testResult?.id === c.id && (
                   <p className={`text-xs mt-2 ml-11 ${testResult.ok ? 'text-[var(--color-success)]' : 'text-[var(--color-danger)]'}`}>
                     {testResult.ok ? '✓ 连接可用' : `✗ 连接失败${testResult.detail ? `：${testResult.detail}` : ''}`}
@@ -400,6 +456,9 @@ export default function ConnectionsTab() {
         description={
           <>
             <p>确认删除连接「{deleteTarget?.name}」？依赖该连接的同步任务将无法执行。</p>
+            <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
+              受控注销要求：零数据集引用、零集成资产、零历史、零本体映射绑定、零数据任务；历史与审计记录不会被删除。
+            </p>
             {deleteError && (
               <p className="mt-2 font-medium" role="alert">{deleteError}</p>
             )}

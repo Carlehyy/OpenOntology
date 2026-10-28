@@ -10,6 +10,8 @@ export interface QueryRequest {
   bindings: Record<string, QueryBinding>
   params: Record<string, unknown>
   pageSize: number
+  /** Mirrors TextQueryRequest.result_storage; the server default is 'persisted'. */
+  resultStorage?: 'persisted' | 'memory'
 }
 
 export interface QueryColumn {

@@ -900,3 +900,22 @@ def test_pure_aggregation_without_group_columns(client, auth_headers,
     assert request.select == []
     assert request.aggregates[0].fn == "count"
     validate({"cursor": "snapshot-cursor-123456"}, schema)
+
+
+def test_build_query_request_unwraps_compatible_schema_envelopes():
+    from app.super_assistant import ontology_tools
+
+    inner = {
+        "sources": [{
+            "alias": "orders",
+            "ontologyId": "ontology-1",
+            "releaseId": "release-1",
+            "objectTypeId": "order",
+        }],
+        "select": [],
+        "aggregates": [{"fn": "count", "as": "orderCount"}],
+    }
+    for envelope in ("queryRequestMid", "queryRequestInner"):
+        request = ontology_tools.build_query_request({envelope: inner})
+        assert [source.alias for source in request.sources] == ["orders"]
+        assert request.aggregates[0].as_ == "orderCount"

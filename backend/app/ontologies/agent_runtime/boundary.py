@@ -33,6 +33,22 @@ class ToolError(Exception):
     """工具层可恢复错误 — 返回给 LLM 让其自我修正，不打断对话。"""
 
 
+def remote_object_type_ids(scope: AgentScope) -> set[str]:
+    if scope.release is None:
+        return set()
+    from app.ontologies.mappings.remote_binding import remote_bindings_by_type
+    return set(remote_bindings_by_type(scope.release.snapshot))
+
+
+def require_materialized_object_type(scope: AgentScope, object_type) -> None:
+    if object_type.id in remote_object_type_ids(scope):
+        raise ToolError(
+            "remote_ontology_semantic_query_required: "
+            f"对象类型「{object_type.display_name}」为远程绑定，本地无物化事实，"
+            "不返回空结果或 0 统计冒充完整；请经超级助手 ontology_query "
+            "或统一查询 API 获取远程数据")
+
+
 def get_or_create_profile(db: Session, ontology_id: str) -> AgentProfile:
     profile = db.query(AgentProfile).filter(
         AgentProfile.ontology_id == ontology_id).first()

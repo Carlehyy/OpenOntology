@@ -5,12 +5,13 @@ import { useQuery } from '@tanstack/react-query'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   AlertCircle, AlertTriangle, ArrowRight, Boxes, CheckCircle2, ChevronLeft,
-  ChevronRight, Database, Eye, ExternalLink, GitBranch, Link2, List, Loader2,
+  ChevronRight, Cloud, Database, Eye, ExternalLink, GitBranch, Link2, List, Loader2,
   RefreshCw, Search, Table2, Waypoints, Workflow, X,
 } from 'lucide-react'
 import { apiClientV2 } from '@/api/client'
 import curatedApi from '@/api/v2/curated'
 import datasetsApi from '@/api/v2/datasets'
+import { integratedDatasetsApi } from '@/api/v2/integrated-datasets'
 import { AnimatedNumber } from '@/components/motion-ui/animated-number'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/Button'
@@ -20,6 +21,11 @@ import {
   mappingTargetId, matchAppliedVersion, typesCompatible, userFieldMapping,
   useMappingData, type DatasetReviewState, type MappingDataset,
 } from './mapping-data'
+import {
+  integratedRowsToPreview,
+  REMOTE_BINDING_DISCLOSURE,
+  remoteDatasetFromDescriptor,
+} from '../../mapping/remote-binding'
 import type { ChainFlowRow } from './MappingChainPanorama'
 import './mapping-overview.css'
 
@@ -29,7 +35,7 @@ type TargetSelection = { kind: 'object'; id: string } | { kind: 'relation'; id: 
 type MappingViewMode = 'list' | 'panorama'
 const PREVIEW_PAGE_SIZES = [10, 20, 50]
 
-type MappingRowStatus = 'ready' | 'no-data' | 'incomplete' | 'type-risk' | 'unmapped' | 'missing-source'
+type MappingRowStatus = 'ready' | 'no-data' | 'incomplete' | 'type-risk' | 'unmapped' | 'missing-source' | 'remote-bound'
 type MappingFilter = 'all' | 'issue' | 'object' | 'relation'
 
 /** URL element 参数解析：与图谱页 focus 参数同 kind:id 约定；仅作新增可选参数，不改既有深链行为。 */
@@ -104,6 +110,7 @@ const STATUS_COPY: Record<MappingRowStatus, { label: string; detail: string }> =
   'type-risk': { label: '字段类型风险', detail: '部分来源字段与本体字段类型不一致' },
   unmapped: { label: '未配置', detail: '本体元素尚未连接任何真实数据' },
   'missing-source': { label: '数据源不可见', detail: '发布映射引用的数据资产当前不可用' },
+  'remote-bound': { label: '远程只读', detail: `远程只读绑定已冻结：${REMOTE_BINDING_DISCLOSURE}` },
 }
 
 /** 审核异常徽标文案与禁用原因（approved / na 不展示徽标——正常态不打扰）。 */
@@ -173,9 +180,21 @@ function DatasetPreviewDialog({ dataset, onClose }: { dataset: MappingDataset; o
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const offset = (page - 1) * pageSize
+  const isRemote = dataset.source === 'remote'
   const previewQuery = useQuery({
     queryKey: ['mapping-dataset-preview', dataset.source, dataset.id, page, pageSize],
     queryFn: async () => {
+      if (dataset.source === 'remote') {
+        // 远程绑定按查询时受控读取：只有第一页有界读取（rows API 无 offset
+        // 分页），翻页入口对远程禁用，不宣称全量行数。
+        if (!dataset.assetId) throw new Error('该远程数据资产缺少资产定位信息，无法预览。')
+        const result = integratedRowsToPreview(await integratedDatasetsApi.rows(dataset.assetId, pageSize))
+        return {
+          columns: result.columns.length ? result.columns : dataset.columns.map(column => column.name),
+          rows: result.rows,
+          totalRows: result.total_rows,
+        }
+      }
       if (dataset.source === 'curated') {
         const result = await curatedApi.preview(dataset.id, pageSize, offset)
         return {
@@ -224,10 +243,10 @@ function DatasetPreviewDialog({ dataset, onClose }: { dataset: MappingDataset; o
     <div className="dmo-preview-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
       <section className="dmo-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="dmo-preview-title">
         <header className="dmo-preview-header">
-          <span className={`dmo-preview-dataset-icon dmo-source-icon--${dataset.source}`}><Table2 size={16} /></span>
+          <span className={`dmo-preview-dataset-icon dmo-source-icon--${dataset.source}`}>{isRemote ? <Cloud size={16} /> : <Table2 size={16} />}</span>
           <div className="dmo-preview-heading">
-            <div><h3 id="dmo-preview-title">{dataset.name}</h3><em>{totalRows.toLocaleString()} 行</em><ReviewBadge state={reviewState} /></div>
-            <p>{dataset.sourceLabel} · 分页数据预览</p>
+            <div><h3 id="dmo-preview-title">{dataset.name}</h3><em>{isRemote ? '远程只读' : `${totalRows.toLocaleString()} 行`}</em><ReviewBadge state={reviewState} /></div>
+            <p>{isRemote ? '远程只读绑定 · 查询时从源读取 · 受控有界读取，非全量' : `${dataset.sourceLabel} · 分页数据预览`}</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭数据预览" className="dmo-preview-close"><X size={17} /></button>
         </header>
@@ -272,7 +291,9 @@ function DatasetPreviewDialog({ dataset, onClose }: { dataset: MappingDataset; o
               </SelectContent>
             </Select>行
           </label>
-          <span className="dmo-preview-range">{rangeStart === 0 ? `0 / ${totalRows.toLocaleString()}` : `${rangeStart}–${rangeEnd} / ${totalRows.toLocaleString()}`} 行</span>
+          <span className="dmo-preview-range">{isRemote
+            ? `显示 ${rows.length} 行 · 远程实时读取，非全量`
+            : `${rangeStart === 0 ? `0 / ${totalRows.toLocaleString()}` : `${rangeStart}–${rangeEnd} / ${totalRows.toLocaleString()}`} 行`}</span>
           <div className="dmo-preview-pagination">
             <button type="button" onClick={() => setPage(current => Math.max(1, current - 1))} disabled={page <= 1 || previewQuery.isFetching} aria-label="上一页"><ChevronLeft size={14} /></button>
             <span>第 {page} / {totalPages} 页</span>
@@ -341,6 +362,7 @@ function LineageDetailDialog({
     incomplete: '仍有字段未连接数据列。可先查看字段级映射定位缺口；补齐需在草稿版本中进行。',
     'type-risk': '部分来源字段与本体字段类型不一致，灌入后可能产生异常值。可查看字段级映射核对；修改需在草稿版本中进行。',
     'missing-source': '映射引用的数据资产当前不可见，可能被删除或已失效。需在草稿版本中重新绑定数据资产。',
+    'remote-bound': `该元素通过远程只读绑定连接登记资产：${REMOTE_BINDING_DISCLOSURE}字段调整需在草稿版本中进行。`,
   }
 
   return createPortal(
@@ -358,7 +380,7 @@ function LineageDetailDialog({
 
         <div className="dmo-lineage-body">
           <section className="dmo-status-note" data-status={row.status}>
-            {row.status === 'ready' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+            {row.status === 'ready' ? <CheckCircle2 size={15} /> : row.status === 'remote-bound' ? <Cloud size={15} /> : <AlertCircle size={15} />}
             <div>
               <b>{STATUS_COPY[row.status].detail}</b>
               <small>
@@ -383,7 +405,7 @@ function LineageDetailDialog({
             <div className="dmo-lineage-route">
               <span className="dmo-route-sources">
                 {row.datasets.length > 0
-                  ? row.datasets.map(dataset => <i key={dataset.id}><Database size={12} />{dataset.name}</i>)
+                  ? row.datasets.map(dataset => <i key={dataset.id}>{dataset.source === 'remote' ? <Cloud size={12} /> : <Database size={12} />}{dataset.name}</i>)
                   : <i data-empty="true"><Database size={12} />未连接数据资产</i>}
               </span>
               <ArrowRight size={15} />
@@ -403,14 +425,18 @@ function LineageDetailDialog({
                 )
                 const appliedAt = applied ? formatShortDateTime(applied.processedAt) : ''
                 const previewBlocked = isReviewIssue(review)
+                const isRemoteSource = dataset.source === 'remote'
+                const remoteTableLabel = dataset.remoteTable ? `${dataset.remoteTable.schemaName}.${dataset.remoteTable.tableName}` : ''
                 return (
                   <div className="dmo-source-item" key={dataset.id}>
                     <div className="dmo-source-row">
-                      <span className={`dmo-source-icon dmo-source-icon--${dataset.source}`}><Table2 size={14} /></span>
+                      <span className={`dmo-source-icon dmo-source-icon--${dataset.source}`}>{isRemoteSource ? <Cloud size={14} /> : <Table2 size={14} />}</span>
                       <span>
                         <i className="dmo-source-name"><b title={dataset.name}>{dataset.name}</b><ReviewBadge state={review} /></i>
-                        <small title={applied ? `已灌入版本 v${applied.versionNo}，产出于 ${formatFullDateTime(applied.processedAt)}` : undefined}>
-                          {dataset.sourceLabel} · {dataset.rows == null ? '暂无行数' : `${dataset.rows.toLocaleString()} 行`}{quality == null ? '' : ` · 质量 ${quality}%`}{applied ? ` · 已灌入 v${applied.versionNo}${appliedAt ? ` · ${appliedAt}` : ''}` : ''}
+                        <small title={isRemoteSource ? `远程只读绑定：${REMOTE_BINDING_DISCLOSURE}` : applied ? `已灌入版本 v${applied.versionNo}，产出于 ${formatFullDateTime(applied.processedAt)}` : undefined}>
+                          {isRemoteSource
+                            ? `远程只读绑定${remoteTableLabel ? ` · 冻结表 ${remoteTableLabel}` : ''} · 未物化 · 查询时读取`
+                            : `${dataset.sourceLabel} · ${dataset.rows == null ? '暂无行数' : `${dataset.rows.toLocaleString()} 行`}${quality == null ? '' : ` · 质量 ${quality}%`}${applied ? ` · 已灌入 v${applied.versionNo}${appliedAt ? ` · ${appliedAt}` : ''}` : ''}`}
                         </small>
                       </span>
                       <button
@@ -418,14 +444,17 @@ function LineageDetailDialog({
                         onClick={() => onPreviewDataset(dataset)}
                         aria-label={`预览数据源 ${dataset.name}`}
                         disabled={previewBlocked}
-                        title={isReviewIssue(review) ? REVIEW_BADGE_COPY[review].reason : `预览数据源 ${dataset.name}`}
+                        title={isReviewIssue(review) ? REVIEW_BADGE_COPY[review].reason : `预览数据源 ${dataset.name}${isRemoteSource ? '（查询时从源读取）' : ''}`}
                       ><Eye size={14} />预览</button>
-                      <a
-                        className="dmo-source-open"
-                        href={`#/data/structured?dataset=${dataset.id}`}
-                        title={`在数据管理中查看 ${dataset.name}`}
-                        aria-label={`在数据管理中查看 ${dataset.name}`}
-                      ><ExternalLink size={13} /></a>
+                      {/* 远程绑定不提供本地数据管理入口：数据留在源侧，仅有查询时受控读取。 */}
+                      {!isRemoteSource && (
+                        <a
+                          className="dmo-source-open"
+                          href={`#/data/structured?dataset=${dataset.id}`}
+                          title={`在数据管理中查看 ${dataset.name}`}
+                          aria-label={`在数据管理中查看 ${dataset.name}`}
+                        ><ExternalLink size={13} /></a>
+                      )}
                     </div>
                     {review === 'rejected' && (
                       <p className="dmo-source-warning" role="note">当前版本已被拒绝，仅保留审计追溯；不可预览与重新灌入。</p>
@@ -440,18 +469,24 @@ function LineageDetailDialog({
           {row.kind === 'object' && row.mappingId && (() => {
             const boundReview = worstReviewState(row.datasets)
             const reviewBlocked = isReviewIssue(boundReview)
+            // 远程只读绑定不参与本地物化：灌入入口对远程行禁用并显式说明。
+            const remoteBound = row.datasets.some(dataset => dataset.source === 'remote')
             const busy = reconcilingMappingId === row.mappingId
             return (
-              <section className="dmo-reconcile">
+              <section className="dmo-reconcile" data-remote={remoteBound || undefined}>
                 <div>
                   <b>重新灌入已批准数据</b>
-                  <small>只读取当前映射绑定的最新已批准版本，按当前发布结构重写对象与关系实例，并触发一次哨兵评估。</small>
+                  <small>{remoteBound
+                    ? '远程只读绑定仅冻结定义，数据在查询时从源读取，不物化，因此不支持本地灌入。'
+                    : '只读取当前映射绑定的最新已批准版本，按当前发布结构重写对象与关系实例，并触发一次哨兵评估。'}</small>
                 </div>
                 <button
                   type="button"
-                  disabled={reconcilingMappingId !== null || reviewBlocked}
+                  disabled={reconcilingMappingId !== null || reviewBlocked || remoteBound}
                   aria-busy={busy}
-                  title={reviewBlocked ? '来源数据集已拒绝/待审核，不能灌入' : undefined}
+                  title={remoteBound
+                    ? '远程只读绑定不参与本地物化灌入'
+                    : reviewBlocked ? '来源数据集已拒绝/待审核，不能灌入' : undefined}
                   onClick={() => onReconcile(row)}
                 >
                   {busy
@@ -459,12 +494,17 @@ function LineageDetailDialog({
                     : <RefreshCw size={13} />}
                   {busy ? '正在灌入…' : '立即灌入'}
                 </button>
-                {reviewBlocked && (
+                {remoteBound && (
+                  <p className="dmo-reconcile-note" data-tone="info" role="note">
+                    <Cloud size={13} /><span>远程只读绑定不物化：无本地实例可灌入，也不触发自动灌入订阅；数据始终按查询时从源读取。</span>
+                  </p>
+                )}
+                {!remoteBound && reviewBlocked && (
                   <p className="dmo-reconcile-note" data-tone="error" role="note">
                     <AlertCircle size={13} /><span>来源数据集{isReviewIssue(boundReview) ? REVIEW_BADGE_COPY[boundReview].label : ''}，不能灌入；请先完成数据审核。</span>
                   </p>
                 )}
-                {!reviewBlocked && reconcileFeedback?.mappingId === row.mappingId && (
+                {!remoteBound && !reviewBlocked && reconcileFeedback?.mappingId === row.mappingId && (
                   <p
                     className="dmo-reconcile-note"
                     role={reconcileFeedback.tone === 'error' ? 'alert' : 'status'}
@@ -571,12 +611,32 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
   // 行模型按查询数据缓存：hover/弹窗等纯交互态变化不再重建行数组，
   // 避免供给全景（依赖 rows 身份）随之整图重算——画布连线的反复卸载/重挂
   // 会不断打断悬停命中测试，正是「悬停卡片一直在闪」的根源之一。
+  // 远程绑定行的数据源来自快照冻结描述符（发布总览只陈述冻结事实，不拉
+  // 实时登记表）；描述符缺失时保留「数据源不可见」的诚实降级。
+  const remoteDatasetById = useMemo(() => {
+    const map = new Map<string, MappingDataset>()
+    for (const mapping of data.mappings) {
+      if (mapping.binding_mode !== 'remote' || !mapping.remote || !mapping.curated_dataset_id) continue
+      if (!map.has(mapping.curated_dataset_id)) {
+        map.set(mapping.curated_dataset_id, remoteDatasetFromDescriptor(mapping.remote))
+      }
+    }
+    return map
+  }, [data.mappings])
+  const resolveRowDataset = (datasetId: string): MappingDataset | undefined =>
+    data.datasets.find(dataset => dataset.id === datasetId) || remoteDatasetById.get(datasetId)
+  const remoteRowStatus = (mapping: { binding_mode?: string | null } | undefined | null, base: MappingRowStatus): MappingRowStatus => (
+    mapping?.binding_mode === 'remote' && (base === 'ready' || base === 'no-data') ? 'remote-bound' : base
+  )
+
   const objectRows: MappingRow[] = useMemo(() => data.objectTypes.map(item => {
     const mapping = data.mappings.find(candidate => mappingTargetId(candidate) === item.id)
     const fieldMapping = userFieldMapping(mapping)
     const targetFields = item.properties.filter(property => property.source !== 'computed' && !property.computed)
     const datasetIds = mapping?.curated_dataset_id ? [mapping.curated_dataset_id] : []
-    const datasets = data.datasets.filter(dataset => datasetIds.includes(dataset.id))
+    const datasets = datasetIds
+      .map(datasetId => resolveRowDataset(datasetId))
+      .filter((dataset): dataset is MappingDataset => Boolean(dataset))
     const fieldPairs = Object.entries(fieldMapping).map(([source, target]): FieldPair => {
       const sourceField = datasets.flatMap(dataset => dataset.columns).find(column => column.name === source)
       const targetField = targetFields.find(property => property.id === target || property.name === target)
@@ -612,11 +672,11 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
       mappedFields: fieldPairs.length,
       totalFields: targetFields.length,
       instanceCount,
-      status: resolveRowStatus(mappingExists, datasetIds, datasets, fieldPairs.length, targetFields.length, instanceCount, fieldPairs),
+      status: remoteRowStatus(mapping, resolveRowStatus(mappingExists, datasetIds, datasets, fieldPairs.length, targetFields.length, instanceCount, fieldPairs)),
       fieldPairs,
       missingFields,
     }
-  }), [data.objectTypes, data.mappings, data.datasets, objectInstanceCounts])
+  }), [data.objectTypes, data.mappings, data.datasets, remoteDatasetById, objectInstanceCounts])
 
   const relationRows: MappingRow[] = useMemo(() => data.linkTypes.map(item => {
     const mapping = linkMappingForType(item, data.linkMappings)
@@ -626,7 +686,9 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
       mapping?.src_dataset_id,
       mapping?.tgt_dataset_id,
     ].filter((id): id is string => Boolean(id)))]
-    const datasets = data.datasets.filter(dataset => datasetIds.includes(dataset.id))
+    const datasets = datasetIds
+      .map(datasetId => resolveRowDataset(datasetId))
+      .filter((dataset): dataset is MappingDataset => Boolean(dataset))
     const fieldPairs: FieldPair[] = []
     if (mapping?.src_key) fieldPairs.push({ source: mapping.src_key, target: '源对象关联键' })
     if (mapping?.tgt_key) fieldPairs.push({ source: mapping.tgt_key, target: '目标对象关联键' })
@@ -678,21 +740,22 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
       mappedFields: fieldPairs.length,
       totalFields,
       instanceCount,
-      status: resolveRowStatus(mappingExists, datasetIds, datasets, fieldPairs.length, totalFields, instanceCount, fieldPairs),
+      status: remoteRowStatus(mapping, resolveRowStatus(mappingExists, datasetIds, datasets, fieldPairs.length, totalFields, instanceCount, fieldPairs)),
       fieldPairs,
       missingFields,
     }
-  }), [data.linkTypes, data.linkMappings, data.datasets, linkInstanceCounts])
+  }), [data.linkTypes, data.linkMappings, data.datasets, remoteDatasetById, linkInstanceCounts])
 
   const mappingRows = useMemo(() => [...objectRows, ...relationRows], [objectRows, relationRows])
-  const issueRows = mappingRows.filter(row => row.status !== 'ready')
+  // 远程只读是已建立的可用链路（查询时读取），不算待处理问题。
+  const issueRows = mappingRows.filter(row => row.status !== 'ready' && row.status !== 'remote-bound')
   // 血缘详情改为弹窗：仅显式选中（含 URL element 参数深链）才打开，不再默认回退首行
   const dialogRow = (selected
     ? mappingRows.find(row => row.kind === selected.kind && row.selection.id === selected.id)
     : null) ?? null
   const normalizedSearch = mappingSearch.trim().toLowerCase()
   const filteredRows = mappingRows.filter(row => {
-    if (mappingFilter === 'issue' && row.status === 'ready') return false
+    if (mappingFilter === 'issue' && (row.status === 'ready' || row.status === 'remote-bound')) return false
     if (mappingFilter === 'object' && row.kind !== 'object') return false
     if (mappingFilter === 'relation' && row.kind !== 'relation') return false
     if (!normalizedSearch) return true
@@ -702,13 +765,14 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
   const totalTargetFields = mappingRows.reduce((sum, row) => sum + row.totalFields, 0)
   const mappedFields = mappingRows.reduce((sum, row) => sum + row.mappedFields, 0)
   const fieldCoverage = totalTargetFields ? Math.min(100, Math.round(mappedFields / totalTargetFields * 100)) : 0
-  const readyCount = mappingRows.filter(row => row.status === 'ready').length
+  const readyCount = mappingRows.filter(row => row.status === 'ready' || row.status === 'remote-bound').length
   const totalInstances = mappingRows.reduce((sum, row) => sum + row.instanceCount, 0)
   const usedDatasetIds = new Set(mappingRows.flatMap(row => row.datasets.map(dataset => dataset.id)))
   const usedDatasets = mappingRows.flatMap(row => row.datasets)
     .filter((dataset, index, list) => list.findIndex(candidate => candidate.id === dataset.id) === index)
   const usedCuratedCount = usedDatasets.filter(dataset => dataset.source === 'curated').length
-  const usedManualCount = usedDatasets.length - usedCuratedCount
+  const usedManualCount = usedDatasets.filter(dataset => dataset.source === 'manual').length
+  const usedRemoteCount = usedDatasets.filter(dataset => dataset.source === 'remote').length
   const reviewIssueCount = usedDatasets.filter(dataset => isReviewIssue(datasetReviewState(dataset))).length
   const issueSummary = (['unmapped', 'missing-source', 'type-risk', 'incomplete', 'no-data'] as const)
     .map(status => ({ status, label: STATUS_COPY[status].label, count: mappingRows.filter(row => row.status === status).length }))
@@ -842,7 +906,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
             <span>实例已产出</span><b><AnimatedNumber value={totalInstances} duration={0.9} /></b><small>对象与关系实例</small>
           </div>
           <div>
-            <span>来源数据资产</span><b><AnimatedNumber value={usedDatasetIds.size} duration={0.9} /></b><small>{usedDatasetIds.size > 0 ? `成品 ${usedCuratedCount} · 人工 ${usedManualCount}` : '尚未连接数据资产'}</small>
+            <span>来源数据资产</span><b><AnimatedNumber value={usedDatasetIds.size} duration={0.9} /></b><small>{usedDatasetIds.size > 0 ? `成品 ${usedCuratedCount} · 人工 ${usedManualCount}${usedRemoteCount > 0 ? ` · 远程 ${usedRemoteCount}` : ''}` : '尚未连接数据资产'}</small>
           </div>
         </div>
         <div className="dmo-summary-actions">
@@ -881,7 +945,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
                   selectedKey={dialogRow?.key ?? null}
                   onSelectElement={selectFromChart}
                   onPreviewDataset={(datasetId) => {
-                    const dataset = data.datasets.find(item => item.id === datasetId)
+                    const dataset = resolveRowDataset(datasetId)
                     if (dataset) setPreviewDataset(dataset)
                   }}
                   ontologyId={ontologyId}
@@ -942,7 +1006,7 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
                   </span>
                   <span className="dmo-dataset-cell">
                     {row.datasets.length > 0
-                      ? <><b title={row.datasets[0].name}>{row.datasets[0].name}</b><small>{row.datasets.length > 1 ? `另有 ${row.datasets.length - 1} 个数据集` : row.datasets[0].sourceLabel}<ReviewBadge state={rowReview} /></small></>
+                      ? <><b title={row.datasets[0].name}>{row.datasets[0].name}</b><small>{row.datasets.length > 1 ? `另有 ${row.datasets.length - 1} 个数据集` : row.datasets[0].source === 'remote' ? `${row.datasets[0].sourceLabel} · 不物化` : row.datasets[0].sourceLabel}<ReviewBadge state={rowReview} /></small></>
                       : <><b>—</b><small>{row.mappingExists ? '引用资产不可见' : '尚未选择数据集'}</small></>}
                   </span>
                   <span className="dmo-field-cell">
@@ -950,7 +1014,9 @@ export default function DataMappingOverview({ ontologyId }: { ontologyId: string
                     <i><em style={{ width: `${row.totalFields ? Math.min(100, row.mappedFields / row.totalFields * 100) : 100}%` }} /></i>
                   </span>
                   <span className="dmo-instance-cell">
-                    {row.mappingExists && row.instanceCount > 0 ? (
+                    {row.status === 'remote-bound' ? (
+                      <><b>—</b><small>查询时读取</small></>
+                    ) : row.mappingExists && row.instanceCount > 0 ? (
                       <a
                         className="dmo-instance-link"
                         href={`#/ontologies/${ontologyId}?tab=data&type=${row.kind === 'object' ? 'object' : 'link'}:${row.selection.id}`}

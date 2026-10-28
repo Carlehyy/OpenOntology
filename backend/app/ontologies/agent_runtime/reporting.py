@@ -201,7 +201,16 @@ def _first_groupable_property(object_type) -> Optional[str]:
 
 
 def _fallback_spec(scope, brief: str) -> dict[str, Any]:
-    object_types = list(scope.object_types.values())
+    # 远程绑定类型不进 fallback 自动选题：本地报告查询面没有它的数据，
+    # 自动选上只会产出整章 remote_ontology_semantic_query_required 错误。
+    from app.ontologies.agent_runtime.boundary import remote_object_type_ids
+    remote_ids = remote_object_type_ids(scope)
+    object_types = [object_type for object_type in scope.object_types.values()
+                    if object_type.id not in remote_ids]
+    if not object_types and scope.object_types:
+        raise ValueError(
+            "当前授权范围内的对象类型均为远程绑定，本地无物化事实；"
+            "报告查询请经统一查询入口（ontology_query）获取远程数据")
     sections: list[dict[str, Any]] = []
     for index, object_type in enumerate(object_types[:3]):
         sections.append({

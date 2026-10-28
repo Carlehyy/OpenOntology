@@ -99,6 +99,23 @@ def list_mappings(db: Session, ontology_id: str) -> list[dict]:
             if version:
                 row_count = version.rowcount
 
+        # 远程联邦绑定（数据面绑定模式）：冻结资产描述符仅元信息。
+        from app.ontologies.mappings.remote_binding import (
+            BINDING_MODE_REMOTE,
+            RemoteBindingError,
+            mapping_binding_mode,
+        )
+        data_binding_mode = mapping_binding_mode(mapping.field_mapping)
+        remote_binding = None
+        if data_binding_mode == BINDING_MODE_REMOTE:
+            try:
+                from app.ontologies.mappings.remote_binding import (
+                    remote_descriptor,
+                )
+                remote_binding = remote_descriptor(mapping.field_mapping)
+            except RemoteBindingError as exc:
+                remote_binding = {"error": exc.detail()}
+
         # 解析该映射会灌到哪个对象实体（显式绑定 → 按名匹配 → 数据新建）
         bound_object_type = (
             object_types_by_id.get(mapping.target_object_type_id)
@@ -136,6 +153,8 @@ def list_mappings(db: Session, ontology_id: str) -> list[dict]:
                 ),
                 "target_object_type_id": mapping.target_object_type_id,
                 "binding_mode": binding_mode,
+                "data_binding_mode": data_binding_mode,
+                "remote": remote_binding,
                 "resolved_object_type": (
                     {
                         "id": matched_object_type.id,
@@ -164,6 +183,9 @@ def list_mappings(db: Session, ontology_id: str) -> list[dict]:
 
 def list_link_mappings(db: Session, ontology_id: str) -> list[dict]:
     from app.ontologies.mappings.models import OntologyLinkMapping
+    from app.ontologies.mappings.remote_binding import (
+        link_mapping_binding_mode,
+    )
 
     links = (
         db.query(OntologyLinkMapping)
@@ -181,6 +203,7 @@ def list_link_mappings(db: Session, ontology_id: str) -> list[dict]:
             "status": link.status,
             "link_type_id": link.link_type_id,
             "edge_dataset_id": link.edge_dataset_id,
+            "data_binding_mode": link_mapping_binding_mode(link.field_mapping),
             "field_mapping": {
                 key: value
                 for key, value in (link.field_mapping or {}).items()

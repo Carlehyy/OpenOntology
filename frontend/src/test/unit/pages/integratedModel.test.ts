@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { IntegratedAsset, IntegratedRows, IntegratedVersion } from '../../../api/v2/integrated-datasets.ts'
+import type { QueryBinding } from '../../../api/v2/query.ts'
 import {
   backendsLabel, completenessLabel, consistencyLabel, dbxState, dbxStateDetail, dbxStateLabel,
-  integratedCell, integratedError, latestVersionStateLabel, parseBindings, parseObject, primaryKeyOf,
+  integratedCell, integratedError, integratedQueryRequest, latestVersionStateLabel, parseBindings, parseObject, primaryKeyOf,
   querySourceConsistencyLabel, receiptNeedsReconciliation, receiptStatusLabel, sourceMutationPayload,
   sourceReadDetail, sourceReadLabel, syncIsActive, syncIsSealed, syncStatusLabel, validateResourceName,
   versionStateLabel,
@@ -65,6 +66,13 @@ describe('integrated source/query presentation contracts', () => {
     assert.deepEqual(parseBindings('{"orders":{"kind":"integrated","assetId":"asset-1"},"frozen":{"kind":"dataset","datasetId":"ds","versionId":"v1"}}'), { orders: { kind: 'integrated', assetId: 'asset-1' }, frozen: { kind: 'dataset', datasetId: 'ds', versionId: 'v1' } })
     for (const input of ['{}', '[]', 'null', '{"源":{"kind":"integrated","assetId":"a"}}', '{"v":{"kind":"dataset","datasetId":"d"}}', '{"v":{"kind":"ontology","ontologyId":"o"}}']) assert.throws(() => parseBindings(input))
     assert.throws(() => parseObject('[1]', '参数'), /JSON 对象/)
+  })
+  it('pins memory result storage so a federated SPL read never persists remote source detail', () => {
+    const bindings: Record<string, QueryBinding> = { source: { kind: 'integrated', assetId: 'asset-1' } }
+    const params = { min_amount: 100 }
+    assert.deepEqual(integratedQueryRequest('from source as s | limit 100', bindings, params), {
+      language: 'spl', query: 'from source as s | limit 100', bindings, params, pageSize: 100, resultStorage: 'memory',
+    })
   })
   it('uses exact composite original PK, not displayed row index', () => {
     assert.deepEqual(primaryKeyOf(['租户', 'id'], { id: { $integer: '9007199254740993' }, '租户': '北', extra: false }), { '租户': '北', id: { $integer: '9007199254740993' } })
@@ -136,7 +144,10 @@ describe('integrated source/query presentation contracts', () => {
     assert.equal(receiptNeedsReconciliation({ status: 'unknown' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'pending' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'conflict' }), false)
+    assert.equal(receiptNeedsReconciliation({ status: 'failed' }), false)
     assert.equal(receiptStatusLabel('applied'), '已应用')
     assert.equal(receiptStatusLabel('conflict'), '冲突')
+    assert.equal(receiptStatusLabel('failed'), '失败')
+    assert.equal(receiptStatusLabel('unknown'), '结果未知')
   })
 })

@@ -1,12 +1,25 @@
 """Public DTOs and leaf ports. No ontology/source implementation imports."""
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Literal
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
+
+ResultStorage = Literal["persisted", "memory"]
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
+
+
+def stable_hash(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
 class QueryError(Exception):
@@ -44,10 +57,79 @@ class TextQueryRequest(StrictDTO):
     bindings: dict[str, Binding] = Field(min_length=1, max_length=16)
     params: dict[str, Any] = Field(default_factory=dict, max_length=128)
     page_size: StrictInt = Field(default=100, ge=1, le=1000)
+    result_storage: ResultStorage = "persisted"
 
 
 class TextQueryCursorRequest(StrictDTO):
     cursor: str = Field(min_length=16, max_length=8192)
+
+
+class MemoryCancelRequest(StrictDTO):
+    query_id: str = Field(min_length=8, max_length=64)
+
+
+@dataclass(frozen=True)
+class DerivedSourceSpec:
+    """A same-physical-source derived relation, compiled (never fetched) by core.
+
+    ``source`` is the first pipeline source name; every source named by
+    ``pipeline`` must be a leaf binding or an earlier derived alias resolving
+    to the same physical connection. A pipeline of exactly one FIELDS command
+    is a projection wrapper and does not count toward the derived depth.
+    """
+
+    alias: str
+    source: str
+    pipeline: Any  # parser.Pipeline, typed (server-built; never client SQL text)
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+Cardinality = Literal["1:1", "1:N", "N:1", "N:M"]
+JoinKeyType = Literal["uuid", "integer", "string", "decimal", "number"]
+
+_KEY_TYPE_DECLARED = {"uuid": {"string"}, "integer": {"integer"},
+                      "string": {"string"}, "decimal": {"decimal"},
+                      "number": {"integer", "decimal"}}
+
+
+@dataclass(frozen=True)
+class JoinConstraint:
+    """Expected multiplicity of a join, keyed by the joined (right) alias.
+
+    ``cardinality`` reads left:right. The core enforces source-side key
+    uniqueness for the "1" side(s) with COUNT/COUNT(DISTINCT) checks over the
+    alias relation itself (a derived relation's own filtered subquery); N:M
+    gets no uniqueness check (memory budgets still bound fanout). ``key_type``
+    is optional: when given it must match the declared join key type (JSON
+    "number" covers integer and decimal); when None only physical type
+    compatibility (already enforced by the compiler) applies.
+    """
+
+    cardinality: Cardinality
+    key_type: JoinKeyType | None = None
+
+    def declared_types(self) -> frozenset[str] | None:
+        if self.key_type is None:
+            return None
+        return frozenset(_KEY_TYPE_DECLARED[self.key_type])
+
+
+@dataclass(frozen=True)
+class TypedQueryRequest:
+    """Server-side typed execution request: pipeline objects, never SQL text."""
+
+    pipeline: Any  # parser.Pipeline
+    bindings: dict[str, Binding]
+    derived: dict[str, DerivedSourceSpec] = field(default_factory=dict)
+    join_constraints: dict[str, JoinConstraint] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
+    page_size: int = 100
+    result_storage: ResultStorage = "persisted"
+    origin: dict[str, Any] | None = None
+    request_fingerprint: str | None = None
+    session_kind: str | None = None
+    session_id: str | None = None
+
 
 
 @dataclass(frozen=True)
@@ -62,6 +144,16 @@ class QueryLimits:
     max_active_per_user: int = 10
     batch_size: int = 2000
     max_page_size: int = 1000
+    memory_handle_ttl_seconds: int = 300
+    memory_result_bytes_limit: int = 67108864
+    memory_total_bytes_limit: int = 536870912
+    memory_per_user_bytes_limit: int = 134217728
+    memory_max_handles_per_user: int = 10
+    federated_side_rows_limit: int = 1000000
+    federated_side_bytes_limit: int = 268435456
+    federated_pushdown_keys_limit: int = 8192
+    federated_key_chunk_size: int = 1000
+    federated_join_rows_limit: int = 2000000
 
     def __post_init__(self):
         for name, value in vars(self).items():
@@ -132,6 +224,9 @@ class Relation:
     expressions: dict[str, Any] = field(default_factory=dict)
     close: Callable[[], None] | None = None
     source_group: Any = None
+    # Bound parameter values embedded in this relation's table (a compiled
+    # derived subquery); merged into any statement executing over it.
+    bind_params: dict[str, Any] | None = None
 
 
 # The composition root installs adapters; this leaf package never imports the

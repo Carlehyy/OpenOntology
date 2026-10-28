@@ -4,6 +4,7 @@ POST   /api/v2/connections
 GET    /api/v2/connections
 GET    /api/v2/connections/{id}
 POST   /api/v2/connections/{id}/test
+PATCH  /api/v2/connections/{id}/config
 DELETE /api/v2/connections/{id}
 """
 from __future__ import annotations
@@ -114,6 +115,60 @@ def test_connection_config(body: TestConfigBody):
         return {"success": False, "detail": str(e)}
 
 
+def _decrypt_connection_config(conn: Connection) -> dict:
+    """解出连接的明文配置；解不开时 fail-closed，绝不静默覆盖成新配置。"""
+    raw = (conn.config or {}).get("_encrypted", "")
+    if not raw:
+        return dict(conn.config or {})
+    from app.services import encryption_service
+    try:
+        return json.loads(encryption_service.decrypt(raw))
+    except Exception as exc:
+        raise HTTPException(
+            503, "既有连接配置无法解密，凭据轮换未执行；请重建连接",
+        ) from exc
+
+
+class ConnectionConfigUpdate(BaseModel):
+    # 部分键合并语义：仅替换请求中出现的键，未出现的键保留服务端现值。
+    # 响应永不回填 config（明文/密文都不回显），凭据只进不出。
+    config: dict
+
+
+@router.patch("/{connection_id}/config", response_model=ConnectionResponse)
+def rotate_connection_config(connection_id: str, body: ConnectionConfigUpdate,
+                             db: Session = Depends(get_db)):
+    """连接维护/凭据轮换：部分更新加密配置并把连通状态重置为未激活。
+
+    响应只有 id/name/kind/status，不会以任何形式回显配置内容。
+    """
+    conn = db.query(Connection).filter(Connection.id == connection_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if not body.config:
+        raise HTTPException(400, "请至少填写一个要更新的配置项")
+    merged = {**_decrypt_connection_config(conn), **body.config}
+    if conn.kind == "rest":
+        # 与创建路径同一道服务端归一化拦截，防止直连 API 写入坏 config。
+        from app.data_channel.connections.rest_connector import RestConnector
+        try:
+            RestConnector._normalize_config(merged)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    from app.services import encryption_service
+    conn.config = {"_encrypted": encryption_service.encrypt(json.dumps(merged))}
+    # 配置已变，既有连通结论作废，必须重新测试才可能回到 active。
+    conn.status = "inactive"
+    db.commit()
+    db.refresh(conn)
+    # 数据源元数据/样例缓存按连接版本键失效：轮换可能指向不同库/账号，
+    # 旧缓存不能冒充新配置的发现结果（best-effort，失败靠 TTL 兜底）。
+    from app.data_channel.sync_tasks import cache as _sync_cache
+
+    _sync_cache.invalidate_source(connection_id)
+    return conn
+
+
 @router.post("/{connection_id}/test")
 def test_connection(connection_id: str, db: Session = Depends(get_db)):
     """连接测试。尝试真实连接并返回结果。"""
@@ -142,45 +197,126 @@ def test_connection(connection_id: str, db: Session = Depends(get_db)):
 
 @router.delete("/{connection_id}", status_code=204)
 def delete_connection(connection_id: str, db: Session = Depends(get_db)):
-    conn = db.query(Connection).filter(Connection.id == connection_id).first()
+    # 受控注销：持连接行锁再做依赖检查，与集成资产登记（register_asset 同样
+    # 持该行锁）在数据库层串行，避免"检查后新增引用"的竞态。
+    conn = (
+        db.query(Connection)
+        .filter(Connection.id == connection_id)
+        .with_for_update()
+        .first()
+    )
     if not conn:
         raise HTTPException(status_code=404, detail="Connection not found")
-    # 同步产出的数据集以 source_connection_id 引用连接（外键无级联），直接删除
-    # 会触发数据库外键错误（生产 500，商业化审查 D-006）；对齐 delete_dataset /
-    # delete_pipeline 的先例：被依赖时明确 409 并列出依赖明细。
-    from sqlalchemy import func
-
-    from app.data_channel.datasets.models import Dataset
-    dependent_count = (
-        db.query(func.count(Dataset.id))
-        .filter(Dataset.source_connection_id == connection_id)
-        .scalar() or 0
-    )
-    if dependent_count:
-        preview = [
-            {"id": ds.id, "name": ds.name, "kind": ds.kind}
-            for ds in (
-                db.query(Dataset)
-                .filter(Dataset.source_connection_id == connection_id)
-                .order_by(Dataset.created_at.desc())
-                .limit(5)
-                .all()
-            )
-        ]
-        raise HTTPException(409, detail={
-            "message": (
-                f"连接被 {dependent_count} 个同步数据集引用，删除前请先在"
-                "「数据资产」中删除这些数据集"
-            ),
-            "datasets": preview,
-            "total": dependent_count,
-        })
+    blockers = _connection_decommission_blockers(db, conn)
+    if blockers is not None:
+        raise HTTPException(status_code=409, detail=blockers)
     db.delete(conn)
     db.commit()
     # 数据源元数据/样例缓存随连接删除失效（best-effort，旧键靠 TTL 兜底）
     from app.data_channel.sync_tasks import cache as _sync_cache
 
     _sync_cache.invalidate_source(connection_id)
+
+
+def _connection_decommission_blockers(db: Session, conn: Connection) -> dict | None:
+    """受控注销前置检查：零数据集 / 零集成资产 / 零历史 / 零映射消费引用 / 零任务。
+
+    任一非零即返回结构化 409 明细（调用方负责抛出）；注销路径绝不删除任何
+    历史或审计记录来"清障"。映射消费与流水线消费沿用 datasets 域既有端口
+    （ontologies.mappings.consumers / datasets.consumers），不新增跨域 import。
+    """
+    from sqlalchemy import func
+
+    from app.data_channel.datasets.models import Dataset, DatasetVersion, IntegratedSyncRun
+    from app.data_channel.integrated.models import IntegratedAsset, IntegratedMutation
+    from app.data_channel.pipeline_tasks.models import PipelineTask
+    from app.data_channel.pipelines.models import Pipeline
+    from app.ontologies.mappings.consumers import dataset_mapping_bindings
+
+    datasets = (
+        db.query(Dataset)
+        .filter(Dataset.source_connection_id == conn.id)
+        .order_by(Dataset.created_at.desc())
+        .all()
+    )
+    assets = db.query(IntegratedAsset).filter(IntegratedAsset.connection_id == conn.id).all()
+    dataset_ids = [item.id for item in datasets]
+    if dataset_ids:
+        version_count = (
+            db.query(func.count(DatasetVersion.id))
+            .filter(DatasetVersion.dataset_id.in_(dataset_ids))
+            .scalar() or 0
+        )
+        run_count = (
+            db.query(func.count(IntegratedSyncRun.id))
+            .filter(IntegratedSyncRun.dataset_id.in_(dataset_ids))
+            .scalar() or 0
+        )
+    else:
+        version_count = run_count = 0
+    # 任何状态的写入回执（含 failed/unknown）都算历史，审计不可清障删除。
+    mutation_count = (
+        db.query(func.count(IntegratedMutation.id))
+        .join(IntegratedAsset, IntegratedMutation.asset_id == IntegratedAsset.id)
+        .filter(IntegratedAsset.connection_id == conn.id)
+        .scalar() or 0
+    )
+    mapping_references = []
+    for dataset in datasets:
+        for binding in dataset_mapping_bindings(db, dataset.id):
+            mapping_references.append(
+                {**binding, "dataset_id": dataset.id, "dataset_name": dataset.name})
+    tasks = (
+        db.query(PipelineTask)
+        .join(Pipeline, PipelineTask.pipeline_id == Pipeline.id)
+        .filter(Pipeline.source_dataset_id.in_(dataset_ids))
+        .all()
+        if dataset_ids else []
+    )
+    if not (datasets or assets or version_count or run_count or mutation_count
+            or mapping_references or tasks):
+        return None
+
+    def preview(rows, mapper):
+        return [mapper(row) for row in rows[:5]]
+
+    parts = []
+    if datasets:
+        parts.append(f"{len(datasets)} 个同步数据集（请先在「数据资产」中删除）")
+    if assets:
+        parts.append(f"{len(assets)} 个集成数据集资产（请先在资产页注销零历史资产）")
+    history_total = version_count + run_count + mutation_count
+    if history_total:
+        parts.append(
+            f"{history_total} 条数据历史（版本 {version_count} / 同步运行 {run_count} / 写入回执 {mutation_count}）")
+    if mapping_references:
+        parts.append(f"{len(mapping_references)} 个本体映射绑定")
+    if tasks:
+        parts.append(f"{len(tasks)} 个数据任务")
+    return {
+        "message": (
+            "连接仍有依赖，不能注销：" + "、".join(parts)
+            + "。受控注销不会删除任何历史或审计记录，请先解除以上依赖。"
+        ),
+        "datasets": preview(datasets, lambda ds: {"id": ds.id, "name": ds.name, "kind": ds.kind}),
+        "datasets_total": len(datasets),
+        "integrated_assets": preview(
+            assets, lambda a: {"id": a.id, "name": a.name,
+                               "schema_name": a.schema_name, "table_name": a.table_name}),
+        "integrated_assets_total": len(assets),
+        "history": {"dataset_versions": version_count,
+                    "sync_runs": run_count, "mutations": mutation_count},
+        "mapping_references": preview(
+            mapping_references,
+            lambda ref: {key: ref.get(key) for key in
+                         ("mapping_id", "ontology_id", "kind", "name", "dataset_name")}),
+        "mapping_references_total": len(mapping_references),
+        "tasks": preview(tasks, lambda task: {"id": task.id, "name": task.name,
+                                              "pipeline_id": task.pipeline_id}),
+        "tasks_total": len(tasks),
+        # 兼容 D-006 既有消费者：total 保持“同步数据集数”的原语义。
+        "total": len(datasets),
+    }
 
 
 @router.post("/{connection_id}/schedule")
