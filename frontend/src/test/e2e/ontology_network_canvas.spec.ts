@@ -5,8 +5,8 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 /**
  * 本体网络画布（ECharts graph 内核，MYW-58 起为确定性分区布局）mocked E2E。
  *
- * 覆盖：图数据渲染（svg 文本级断言）、默认结构层（L1）、头部统计、图例、
- * 节点点击打开详情、工具条缩放按钮、搜索触发的新图请求。全部请求本地 mock，
+ * 覆盖：图数据渲染（svg 文本级断言）、固定结构层（L1）、头部统计、图例、
+ * 节点点击打开详情、工具条缩放按钮。全部请求本地 mock，
  * 不依赖后端。布局确定性后无力导向收敛期，节点标签位置稳定可点击。
  */
 
@@ -191,15 +191,17 @@ async function mockNetworkApi(
   return { graphQueries, overviewQueries }
 }
 
-test('本体网络画布渲染全局图：默认结构层、统计、图例与节点标签可见', async ({ page }) => {
+test('本体网络画布渲染全局图：固定结构层、统计、图例与节点标签可见', async ({ page }) => {
   const { graphQueries } = await mockNetworkApi(page)
   await page.goto('/#/ontology-model/network', { waitUntil: 'domcontentloaded' })
 
   const card = page.getByTestId('network-canvas-card')
   const opsCard = page.getByTestId('network-ops-card')
   await expect(card).toBeVisible()
-  // MYW-58：默认进入结构层（L1），首个图请求应携带 level=1
-  await expect(opsCard.getByRole('button', { name: 'L1' })).toHaveAttribute('aria-pressed', 'true')
+  // 展示控制区已下线：功能区域仅保留数据范围与分析，层级/搜索控件不再出现
+  await expect(opsCard.getByText('展示', { exact: true })).toHaveCount(0)
+  await expect(opsCard.getByLabel('搜索实例')).toHaveCount(0)
+  // MYW-58：结构层（L1）为固定形态（展示控制区已下线），首个图请求应携带 level=1
   await expect.poll(() => graphQueries.some(query => query.includes('level=1'))).toBe(true)
   await expect(card.getByText('2 个本体 · 7 节点 / 4 边')).toBeVisible()
 
@@ -261,8 +263,8 @@ test('点击实例节点打开详情抽屉，可关闭', async ({ page }) => {
   await expect(inspector).toHaveCount(0)
 })
 
-test('工具条缩放/适应可用，搜索触发带 query 的图请求', async ({ page }) => {
-  const { graphQueries } = await mockNetworkApi(page)
+test('工具条缩放/适应可用', async ({ page }) => {
+  await mockNetworkApi(page)
   await page.goto('/#/ontology-model/network', { waitUntil: 'domcontentloaded' })
 
   const card = page.getByTestId('network-canvas-card')
@@ -273,10 +275,6 @@ test('工具条缩放/适应可用，搜索触发带 query 的图请求', async 
   await card.getByRole('button', { name: '适应画布' }).click()
   // 未截断时不出现预算提示
   await expect(card.getByText(/已按预算截断/)).toHaveCount(0)
-
-  await page.getByLabel('搜索实例').fill('华南')
-  await page.getByLabel('搜索实例').press('Enter')
-  await expect.poll(() => graphQueries.some(query => query.includes('query='))).toBe(true)
 })
 
 

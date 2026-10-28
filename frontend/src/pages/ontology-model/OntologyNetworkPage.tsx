@@ -2,8 +2,8 @@
  * 本体网络 — 跨本体全局网络可视化（只读）
  *
  * 左卡片：ECharts 全局画布（各本体子图分区排布、按本体着色、同名类型虚线桥接），
- * 默认展示结构层（L1：对象类型 + 类型间关系），实例层可切换（L2）；
- * 右卡片：功能区域（数据范围 / 层级与预算 / 搜索 / 路径与影响分析 / 节点详情）
+ * 固定展示结构层（L1：对象类型 + 类型间关系）；
+ * 右卡片：功能区域（数据范围 / 分析）
  * 布局复用本体建模页的可拖拽左右分栏；数据基座是 PG fo_* 表 / 发布快照，
  * 不依赖 Neo4j 投影就绪。本页不提供任何增删改，编辑仍在本体建模/详情页完成。
  */
@@ -12,7 +12,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   AlertTriangle, ArrowRight, BadgeInfo, Boxes, CircleDotDashed, Focus, Layers3,
-  Loader2, LocateFixed, Network, RefreshCw, Route, Search, Share2,
+  Loader2, LocateFixed, Network, RefreshCw, Route, Share2,
   ShieldCheck, SlidersHorizontal, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import {
@@ -106,23 +106,17 @@ export default function OntologyNetworkPage() {
     setSelectedIds(overview.slice(0, DEFAULT_SELECTED_MAX).map(item => item.id))
   }, [overview])
 
-  // -- 展示控制 --
-  // 默认结构层（L1：对象类型 + 类型间关系）：本体网络的核心语义是"看结构"，
-  // 实例层（L2）按需切换，避免首屏被实例淹没（MYW-58）。
-  const [level, setLevel] = useState<1 | 2>(1)
-  const [limitPerType, setLimitPerType] = useState(10)
-  const [bridgeEnabled, setBridgeEnabled] = useState(true)
-  const [queryInput, setQueryInput] = useState('')
-  const [query, setQuery] = useState('')
+  // 展示控制区（层级/每类限量/桥接/搜索）已下线：图谱固定结构层（L1，
+  // 对象类型 + 类型间关系）+ 默认每类限量与同名桥接，右栏只保留数据范围与分析。
 
   const graphKey = selectedIds.length > 0
-    ? ['ontology-network-graph', [...selectedIds].sort().join(','), level, query, limitPerType, bridgeEnabled, refreshToken]
+    ? ['ontology-network-graph', [...selectedIds].sort().join(','), refreshToken]
     : null
   const { data: graph = EMPTY_GRAPH, isFetching: graphFetching, error: graphError } = useQuery({
     queryKey: graphKey ?? ['ontology-network-graph', 'idle'],
     queryFn: () => ontologyNetworkApi.graph({
-      ontologyIds: selectedIds, level, query: query || undefined,
-      limitPerType, bridgeSameName: bridgeEnabled,
+      ontologyIds: selectedIds, level: 1,
+      limitPerType: 10, bridgeSameName: true,
       fresh: Date.now() < freshUntilRef.current,
     }),
     enabled: graphKey !== null,
@@ -229,13 +223,6 @@ export default function OntologyNetworkPage() {
     setSelectedIds(previous => previous.includes(id)
       ? previous.filter(item => item !== id)
       : [...previous, id])
-  }
-
-  const submitSearch = (event: React.FormEvent) => {
-    event.preventDefault()
-    setQuery(queryInput.trim())
-    setPathResult(null)
-    setImpactResult(null)
   }
 
   const runPath = async () => {
@@ -393,7 +380,7 @@ export default function OntologyNetworkPage() {
                   <Network size={22} className="mx-auto mb-2 text-[var(--color-text-tertiary)]" />
                   <p className="text-sm font-medium text-foreground">没有可展示的图数据</p>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    选中的本体还没有对象类型，或搜索条件没有匹配到实例；可在右侧调整数据范围。
+                    选中的本体还没有对象类型；可在右侧调整数据范围。
                   </p>
                 </div>
               </div>
@@ -568,7 +555,7 @@ export default function OntologyNetworkPage() {
           <header className="flex h-14 shrink-0 items-center border-b border-[var(--color-border)] bg-card px-4">
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">功能区域</h3>
-              <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">数据范围 · 展示 · 分析（只读）</p>
+              <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">数据范围 · 分析（只读）</p>
             </div>
           </header>
 
@@ -631,52 +618,6 @@ export default function OntologyNetworkPage() {
                   )
                 })}
               </div>
-            </section>
-
-            {/* 展示控制 */}
-            <section className="space-y-2.5 rounded-lg border border-[var(--color-border)] bg-card px-3 py-2.5">
-              <p className="text-xs font-semibold text-foreground">展示</p>
-              <div className="flex items-center gap-2">
-                <div className="flex rounded-md border border-[var(--color-border)] bg-card p-0.5" aria-label="图谱展开层级">
-                  {([1, 2] as const).map(value => (
-                    <button key={value} type="button" onClick={() => setLevel(value)} aria-pressed={level === value}
-                      title={value === 1 ? '仅对象类型与关系' : '对象类型与实例'}
-                      className={['flex h-7 min-w-8 items-center justify-center rounded px-2 text-[11px] font-semibold transition-colors',
-                        level === value ? 'bg-viz-violet-soft text-viz-violet' : 'text-[var(--color-text-tertiary)] hover:bg-muted'].join(' ')}>
-                      L{value}
-                    </button>
-                  ))}
-                </div>
-                <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                  每类限量
-                  <Select value={String(limitPerType)} onValueChange={value => setLimitPerType(Number(value))}>
-                    <SelectTrigger className="h-7 w-16 rounded-md bg-card px-1.5 text-[11px]" aria-label="每类限量">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {[5, 10, 20].map(value => <SelectItem key={value} value={String(value)}>{value}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </label>
-              </div>
-              <label className="flex items-center justify-between gap-2 text-[11.5px] text-muted-foreground">
-                <span>
-                  同名类型桥接
-                  <span className="mt-0.5 block text-[10px] leading-snug text-[var(--color-text-tertiary)]">跨本体同名对象类型以虚线相连（名称启发式，非治理过的语义对齐）</span>
-                </span>
-                <input type="checkbox" checked={bridgeEnabled} onChange={event => setBridgeEnabled(event.target.checked)}
-                  className="h-4 w-4 shrink-0 accent-viz-violet" aria-label="启用同名类型桥接" />
-              </label>
-              <form onSubmit={submitSearch} className="flex items-center rounded-md border border-[var(--color-border)] bg-card focus-within:ring-2 focus-within:ring-ring">
-                <Search size={13} className="ml-2.5 shrink-0 text-[var(--color-text-tertiary)]" />
-                <input value={queryInput} onChange={event => setQueryInput(event.target.value)}
-                  placeholder="搜索实例、主键或字段值" aria-label="搜索实例"
-                  className="h-8 min-w-0 flex-1 bg-transparent px-2 text-xs text-foreground outline-none placeholder:text-[var(--color-text-tertiary)]" />
-                {queryInput && (
-                  <button type="button" onClick={() => { setQueryInput(''); setQuery('') }} aria-label="清空搜索"
-                    className="flex h-8 w-8 items-center justify-center text-[var(--color-text-tertiary)] hover:text-foreground"><X size={13} /></button>
-                )}
-              </form>
             </section>
 
             {/* 分析 */}
