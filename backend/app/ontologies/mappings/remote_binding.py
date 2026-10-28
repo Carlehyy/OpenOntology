@@ -577,6 +577,19 @@ def verify_remote_binding(
             expectedFingerprint=str(frozen.get("schemaFingerprint") or ""),
             actualFingerprint=str(live.get("schemaFingerprint") or ""),
         )
+    # The logical field projection is part of the frozen contract for
+    # configured assets: presence and value must both match exactly, so any
+    # projection change (or a binding frozen before the projection existed)
+    # fails closed under the shared schema-drift code and forces a re-freeze.
+    if (("logicalFingerprint" in frozen) != ("logicalFingerprint" in live)
+            or frozen.get("logicalFingerprint") != live.get("logicalFingerprint")):
+        raise RemoteBindingError(
+            "remote_binding_schema_drift",
+            "远程资产逻辑字段投影与冻结描述符不一致（projection drift），"
+            "已拒绝放行；请重新冻结远程绑定",
+            expectedLogicalFingerprint=frozen.get("logicalFingerprint"),
+            actualLogicalFingerprint=live.get("logicalFingerprint"),
+        )
     result: dict[str, Any] = {
         "descriptor": frozen,
         "live": live,

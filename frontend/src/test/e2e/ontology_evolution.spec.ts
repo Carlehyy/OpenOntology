@@ -312,7 +312,7 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(page.getByTestId('current-release-version')).toHaveText('v0')
   await expect(page.getByRole('button', { name: '本体总览' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByText('这里始终展示当前发布投影。')).toHaveCount(0)
-  await page.getByRole('button', { name: '查看当前发布图谱' }).click()
+  await page.getByRole('button', { name: '查看本体图谱' }).click()
   await expect(page).toHaveURL(new RegExp(`/ontologies/${ontology.id}/graph$`))
 
   await page.goto(`/#/ontologies/${ontology.id}`)
@@ -714,7 +714,7 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(page.getByLabel('搜索本体结构')).toHaveAttribute('placeholder', '搜索对象实体或实体关系')
   await expect(page.getByTestId('published-structure-readonly')).toHaveText('发布快照 · 结构只读')
   await expect(page.getByRole('button', { name: '打开图谱编辑器修改模型' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: '查看当前发布图谱' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '查看本体图谱' })).toBeVisible()
   // 「业务文档」弹窗：读取当前发布版本语义层的需求文档。该本体由 API 直接
   // 建模产生、未经需求文档生成，语义层为空 —— 查不到文档是允许的空态。
   await expect(page.getByRole('button', { name: '业务文档' })).toBeVisible()

@@ -195,7 +195,7 @@ def sql(source: str, statement: str, project: str | None = None) -> str:
         return run(["docker", "exec", "-i", cid, "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
                     "-U", "integrated_e2e", "-d", "integrated_source"], text=statement)
     return run(["docker", "exec", "-i", "-e", "MYSQL_PWD=integrated_e2e_fixture", cid,
-                "mysql", "--batch", "--raw", "--skip-column-names", "-u", "integrated_e2e", "integrated_source"], text=statement)
+                "mysql", "--default-character-set=utf8mb4", "--batch", "--raw", "--skip-column-names", "-u", "integrated_e2e", "integrated_source"], text=statement)
 
 
 def expressions(source: str, n: str = "n") -> list[str]:
@@ -273,7 +273,7 @@ def oracle(source: str, rows: int) -> dict[str, Any]:
     if source == "postgres":
         command = ["docker", "exec", "-i", cid, "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-U", "integrated_e2e", "-d", "integrated_source"]
     else:
-        command = ["docker", "exec", "-i", "-e", "MYSQL_PWD=integrated_e2e_fixture", cid, "mysql", "--batch", "--raw", "--skip-column-names", "--quick", "-u", "integrated_e2e", "integrated_source"]
+        command = ["docker", "exec", "-i", "-e", "MYSQL_PWD=integrated_e2e_fixture", cid, "mysql", "--default-character-set=utf8mb4", "--batch", "--raw", "--skip-column-names", "--quick", "-u", "integrated_e2e", "integrated_source"]
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=SAFE_ENV)
     assert process.stdin and process.stdout and process.stderr
     process.stdin.write(statement.encode()); process.stdin.close()

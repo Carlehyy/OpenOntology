@@ -135,13 +135,25 @@ class ConnectionConfigUpdate(BaseModel):
     config: dict
 
 
+def _authorize_config_rotation(db: Session, user) -> None:
+    """Require asset-lake write access before revealing connection existence."""
+    from app.auth.permissions import user_has_menu_access
+
+    if not user or not user.is_active or not user_has_menu_access(db, user, "data.structured"):
+        raise HTTPException(403, "没有数据资产湖访问权限，不能轮换连接凭据")
+    if user.role not in {"admin", "editor"}:
+        raise HTTPException(403, "只有管理员和编辑者可轮换连接凭据")
+
+
 @router.patch("/{connection_id}/config", response_model=ConnectionResponse)
 def rotate_connection_config(connection_id: str, body: ConnectionConfigUpdate,
-                             db: Session = Depends(get_db)):
+                             db: Session = Depends(get_db),
+                             user=Depends(get_current_user)):
     """连接维护/凭据轮换：部分更新加密配置并把连通状态重置为未激活。
 
     响应只有 id/name/kind/status，不会以任何形式回显配置内容。
     """
+    _authorize_config_rotation(db, user)
     conn = db.query(Connection).filter(Connection.id == connection_id).first()
     if not conn:
         raise HTTPException(status_code=404, detail="Connection not found")

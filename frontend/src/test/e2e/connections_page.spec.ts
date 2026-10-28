@@ -17,6 +17,8 @@ async function mockConnections(page: Page, options?: {
   deleteStatus?: number
   deleteBody?: unknown
   rotateBody?: Array<Record<string, string>>
+  /** PATCH 后自动 /test 的响应在网络上丢失（服务端实际已执行并置为 active）。 */
+  testAbort?: boolean
 }) {
   const rotateBodies = options?.rotateBody ?? []
   await page.addInitScript(() => {
@@ -50,10 +52,21 @@ async function mockConnections(page: Page, options?: {
     if (/\/api\/v2\/connections\/[^/]+\/config$/.test(url.pathname)
         && route.request().method() === 'PATCH') {
       rotateBodies.push(route.request().postDataJSON().config)
+      if (options?.testAbort) {
+        // 服务端真实语义：轮换成功即重置为未激活，待重测翻转为 active
+        const rotated = live.get('conn-1')
+        if (rotated) live.set('conn-1', { ...rotated, status: 'inactive' })
+      }
       return ok({ id: url.pathname.split('/').at(-2), name: 'ERP 订单库', kind: 'mysql', status: 'inactive' })
     }
     if (/\/api\/v2\/connections\/[^/]+\/test$/.test(url.pathname)
         && route.request().method() === 'POST') {
+      if (options?.testAbort) {
+        // 响应丢失：服务端实际已执行测试并置为 active，随后 GET 返回真实状态
+        const tested = live.get('conn-1')
+        if (tested) live.set('conn-1', { ...tested, status: 'active' })
+        return route.abort()
+      }
       return ok({ success: true, status: 'active' })
     }
     if (url.pathname === '/api/v2/connections/conn-1' && route.request().method() === 'DELETE') {
@@ -178,4 +191,25 @@ test('受控注销 409 展示数据集/集成资产/历史/映射/任务的完�
   await expect(dialog.getByText(/同步数据集-订单、集成资产-订单、消费任务/)).toBeVisible()
   // 拒绝后卡片保留
   await expect(page.getByText('ERP 订单库', { exact: true })).toBeVisible()
+})
+
+test('轮换成功但连通测试响应丢失：不误报更新失败，状态按服务端实际值刷新', async ({ page }) => {
+  const rotateBodies: Array<Record<string, string>> = []
+  await mockConnections(page, { rotateBody: rotateBodies, testAbort: true })
+  await page.goto('/#/data/pipelines/connections', { waitUntil: 'domcontentloaded' })
+
+  await page.getByRole('button', { name: '轮换凭据' }).click()
+  const panel = page.getByTestId('connection-rotate-panel')
+  await page.getByLabel('轮换 ERP 订单库 密码').fill('rotated-secret-789')
+  await panel.getByRole('button', { name: '保存并测试' }).click()
+
+  // PATCH 已成功、自动 /test 响应丢失：如实提示“配置已更新但未取得测试结果”
+  await expect(panel.getByText(/配置已更新，但未能取得连通测试结果/)).toBeVisible()
+  await expect(panel.getByText(/请刷新连接状态后重新测试连通/)).toBeVisible()
+  // 不得把响应丢失误报为配置更新本身失败
+  await expect(panel.getByText(/配置更新失败/)).toHaveCount(0)
+  expect(rotateBodies).toEqual([{ password: 'rotated-secret-789' }])
+  // 丢失响应的 /test 服务端实际已生效：随后的 GET 按真实状态渲染（活跃），
+  // 而不是停留在轮换后的“未激活”本地状态
+  await expect(page.getByText('活跃', { exact: true })).toBeVisible()
 })

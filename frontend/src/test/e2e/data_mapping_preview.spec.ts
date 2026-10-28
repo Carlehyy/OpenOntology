@@ -560,15 +560,28 @@ test('详情页头部操作区：映射入口跳转、悬停即时提示、导�
 
   // 版本徽章与三个图标按钮等高（h-10 = 40px），不再是偏小的 h-9
   const versionBadge = page.getByTestId('current-release-version')
-  const graphButton = page.getByRole('button', { name: '查看当前发布图谱', exact: true })
+  const graphButton = page.getByRole('button', { name: '查看本体图谱', exact: true })
+  const mappingEntry = page.getByRole('button', { name: '查看数据映射', exact: true })
+  const historyButton = page.getByRole('button', { name: '查看历史版本', exact: true })
   const exportButton = page.getByRole('button', { name: '导出本体结构', exact: true })
   await expect(versionBadge).toHaveCSS('height', '40px')
   await expect(graphButton).toHaveCSS('height', '40px')
   await expect(exportButton).toHaveCSS('height', '40px')
 
   // 新增的数据映射工作台入口位于图谱编辑器右侧：点击后带 view=mapping 跳转
-  const mappingEntry = page.getByTestId('open-mapping-workspace')
   await expect(mappingEntry).toHaveCSS('height', '40px')
+
+  // 三个导航图标操作的悬停提示与可访问名称一致。
+  for (const [button, label] of [
+    [graphButton, '查看本体图谱'],
+    [mappingEntry, '查看数据映射'],
+    [historyButton, '查看历史版本'],
+  ] as const) {
+    await button.hover()
+    const tip = button.locator('..').getByRole('tooltip')
+    await expect(tip).toHaveText(label)
+    await expect(tip).toHaveCSS('opacity', '1')
+  }
 
   // 下载按钮与其他图标按钮共用样式：悬停不再上下位移
   await expect(exportButton).toHaveCSS('transform', 'none')

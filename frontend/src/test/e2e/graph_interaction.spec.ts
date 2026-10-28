@@ -38,7 +38,7 @@ async function createOntology(request: APIRequestContext, token: string): Promis
 
 async function openCurrentReleaseGraph(page: Page, ontologyId: string) {
   await page.goto(`/#/ontologies/${ontologyId}`)
-  await page.getByRole('button', { name: '查看当前发布图谱', exact: true }).click()
+  await page.getByRole('button', { name: '查看本体图谱', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`/ontologies/${ontologyId}/graph$`))
   await expect(page.getByTestId('graph-workspace-stage')).toContainText('当前发布 v0')
 }

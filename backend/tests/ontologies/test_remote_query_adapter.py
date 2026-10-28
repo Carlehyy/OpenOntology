@@ -1,5 +1,6 @@
 """Semantic plans must share typed execution and retain safe operator ordering."""
 import pytest
+import sqlalchemy as sa
 
 from app.data_channel.query.contracts import QueryError
 from app.data_channel.query.ontology_adapter import (
@@ -180,3 +181,138 @@ def test_page_invalidates_handle_after_context_check_fails(monkeypatch, db, admi
     assert getattr(error.value, "status_code", getattr(error.value, "status", None)) == expected
     assert service.cancelled == ["handle"]
     assert not db.in_transaction()
+
+
+# ── 已配置逻辑投影的集成资产：语义计划以逻辑命名空间编译执行 ────────
+
+
+def _configured_plan():
+    return {"sources": [{"alias": "orders",
+                         "binding": {"kind": "integrated", "assetId": "asset-1"},
+                         "propertyMap": {"code": "order_code",
+                                         "total": "amount_total"},
+                         "schemaFingerprint": "f" * 64,
+                         "declaredTypes": {"code": "string", "total": "number"}}],
+            "sourceFilters": [], "where": [], "joins": [],
+            "select": [{"source": "orders", "property": "code", "as": "code"},
+                       {"source": "orders", "property": "total", "as": "total"}],
+            "groupBy": [], "aggregates": [], "distinct": False, "orderBy": [],
+            "outputs": ["code", "total"], "pageSize": 10}
+
+
+def _projected_source(monkeypatch):
+    """物理源（oc/amt/internal_note）+ 真实 projection 的 native 桩。"""
+    from contextlib import contextmanager
+    from decimal import Decimal
+
+    from app.data_channel.integrated import fields as integrated_fields
+    from app.data_channel.integrated import native
+
+    metadata = sa.MetaData()
+    physical = sa.Table("rows", metadata, sa.Column("oc", sa.Text),
+                        sa.Column("amt", sa.Numeric(18, 4)),
+                        sa.Column("internal_note", sa.Text))
+    engine = sa.create_engine("sqlite://")
+    metadata.create_all(engine)
+    conn = engine.connect()
+    conn.execute(physical.insert(), [
+        {"oc": "A1", "amt": Decimal("1.5"), "internal_note": "hidden-1"},
+        {"oc": "A2", "amt": Decimal("2.5"), "internal_note": "hidden-2"},
+    ])
+    conn.commit()
+    schema = {"columns": [
+        {"name": "oc", "type": "string", "nullable": False},
+        {"name": "amt", "type": "decimal", "nullable": True,
+         "precision": 18, "scale": 4},
+        {"name": "internal_note", "type": "string", "nullable": True},
+    ], "primary_key": ["oc"]}
+    projection = integrated_fields.projection_of(schema, [
+        {"source_key": "oc", "name": "order_code", "display_name": None},
+        {"source_key": "amt", "name": "amount_total", "display_name": None}])
+    asset_meta = {"asset_id": "asset-1", "dataset_id": "dataset",
+                  "connection_id": "conn-1", "connection_status": "inactive",
+                  "dialect": "sqlite", "columns": schema["columns"],
+                  "primary_key": ["oc"], "schema_fingerprint": "f" * 64,
+                  "auth_fingerprint": "auth-1", "projection": projection}
+
+    class _Scope:
+        meta = {"asset-1": asset_meta}
+        tables = {"asset-1": physical}
+        provenance = {"started_at": "2026-10-26T00:00:00Z", "id": "snap"}
+        completion = {"complete": True}
+
+        def iter_batches(self, statement, params, batch_size):
+            result = conn.execute(statement, params).mappings()
+            rows = [dict(row) for row in result]
+            result.close()
+            yield rows
+
+    @contextmanager
+    def _open(db, user, asset_ids, *, statement_timeout_ms=300000):
+        yield _Scope()
+
+    monkeypatch.setattr(native, "resolve_metadata",
+                        lambda db, user, asset_ids: {
+                            asset_id: dict(asset_meta) for asset_id in asset_ids})
+    monkeypatch.setattr(native, "open_read_scope", _open)
+    return conn, engine, projection
+
+
+def test_configured_binding_compiles_and_executes_in_logical_namespace(monkeypatch):
+    from contextlib import ExitStack
+    from decimal import Decimal
+
+    from app.data_channel.query.compiler import compile_query
+    from app.data_channel.query.contracts import QueryLimits
+    from app.data_channel.query.derived import resolve_derived
+    from app.data_channel.query.providers import resolve_integrated
+
+    conn, engine, projection = _projected_source(monkeypatch)
+    try:
+        typed = build_typed_request(_configured_plan(), request={},
+                                    session_kind="direct", session_id="user")
+        leaf = next(iter(typed.bindings))
+        with ExitStack() as stack:
+            relations = resolve_integrated(
+                None, None, [(leaf, typed.bindings[leaf])], QueryLimits(), stack)
+        resolved = resolve_derived({leaf: relations[leaf]}, typed.derived)
+        execution = {alias: resolved[name]
+                     for name, alias in typed.pipeline.sources}
+        compiled = compile_query(typed.pipeline, execution, {}, dialect="sqlite")
+        params = dict(compiled.params)
+        for relation in execution.values():
+            if relation.bind_params:
+                params.update(relation.bind_params)
+        rows = {row["code"]: row["total"] for row in
+                conn.execute(compiled.statement, params).mappings()}
+        assert rows == {"A1": Decimal("1.5"), "A2": Decimal("2.5")}
+    finally:
+        conn.close()
+        engine.dispose()
+
+
+def test_configured_binding_rejects_physical_names(monkeypatch):
+    from contextlib import ExitStack
+
+    from app.data_channel.query.contracts import QueryLimits
+    from app.data_channel.query.derived import resolve_derived
+    from app.data_channel.query.providers import resolve_integrated
+
+    conn, engine, projection = _projected_source(monkeypatch)
+    try:
+        plan = _configured_plan()
+        plan["sources"][0]["propertyMap"] = {"code": "oc", "total": "amt"}
+        typed = build_typed_request(plan, request={},
+                                    session_kind="direct", session_id="user")
+        leaf = next(iter(typed.bindings))
+        with ExitStack() as stack:
+            relations = resolve_integrated(
+                None, None, [(leaf, typed.bindings[leaf])], QueryLimits(), stack)
+        # 冻结描述符以逻辑命名空间为准：物理列名不再是可寻址字段——
+        # 派生投影在编译期即拒绝，轮不到外层执行。
+        with pytest.raises(QueryError) as error:
+            resolve_derived({leaf: relations[leaf]}, typed.derived)
+        assert error.value.code == "unknown_field"
+    finally:
+        conn.close()
+        engine.dispose()

@@ -126,7 +126,7 @@ export default function ConnectionsTab() {
     }
   }
 
-  // 凭据轮换：只提交填写了的键；成功后自动重测，让状态真实回到 active/error
+  // 空字段不提交，保留服务端现值。
   const handleRotate = async (connection: Connection) => {
     const config = rotationConfigFromInput(rotateValues)
     if (Object.keys(config).length === 0) {
@@ -136,18 +136,31 @@ export default function ConnectionsTab() {
     setRotating(true)
     setRotateResult(null)
     try {
-      await connectionsApi.rotateConfig(connection.id, config)
-      const tested = await connectionsApi.test(connection.id)
-      setRotateResult({
-        id: connection.id,
-        ok: !!tested.success,
-        detail: tested.success
-          ? '已更新配置并通过连通测试'
-          : `配置已更新，但连通测试失败${tested.detail ? `：${tested.detail}` : ''}`,
-      })
+      try {
+        await connectionsApi.rotateConfig(connection.id, config)
+      } catch (e: unknown) {
+        setRotateResult({ id: connection.id, ok: false, detail: `配置更新失败：${connectionErrorDetail(e, '请稍后重试')}` })
+        return
+      }
       loadConnections()
-    } catch (e: unknown) {
-      setRotateResult({ id: connection.id, ok: false, detail: connectionErrorDetail(e, '配置更新失败') })
+      try {
+        const tested = await connectionsApi.test(connection.id)
+        setRotateResult({
+          id: connection.id,
+          ok: !!tested.success,
+          detail: tested.success
+            ? '已更新配置并通过连通测试'
+            : `配置已更新，但连通测试失败${tested.detail ? `：${tested.detail}` : ''}`,
+        })
+        loadConnections()
+      } catch (e: unknown) {
+        setRotateResult({
+          id: connection.id,
+          ok: false,
+          detail: `配置已更新，但未能取得连通测试结果（${connectionErrorDetail(e, '网络错误')}）；请刷新连接状态后重新测试连通。`,
+        })
+        loadConnections()
+      }
     } finally {
       setRotating(false)
     }

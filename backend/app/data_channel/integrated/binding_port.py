@@ -32,12 +32,24 @@ class IntegratedRemoteBindingValidator:
         # registered fingerprint, without reading a source record.
         with open_read_scope(db, user, [asset.id], statement_timeout_ms=10000) as scope:
             meta = scope.meta[asset.id]
-            return {"assetId": asset.id, "datasetId": asset.dataset_id,
-                    "connectionId": asset.connection_id,
-                    "schemaName": asset.schema_name, "tableName": asset.table_name,
-                    "columns": meta["columns"],
-                    "primaryKey": asset.schema_json["primary_key"],
-                    "schemaFingerprint": meta["schema_fingerprint"]}
+            payload = {"assetId": asset.id, "datasetId": asset.dataset_id,
+                       "connectionId": asset.connection_id,
+                       "schemaName": asset.schema_name, "tableName": asset.table_name,
+                       "columns": meta["columns"],
+                       "primaryKey": asset.schema_json["primary_key"],
+                       "schemaFingerprint": meta["schema_fingerprint"]}
+            projection = meta.get("projection")
+            if projection is not None:
+                # Configured assets are addressed through their logical view:
+                # freeze the logical columns/primaryKey so the binding's field
+                # mapping and the query provider's projection branch share one
+                # namespace.  The physical schema fingerprint keeps its
+                # original meaning; the projection carries its own fingerprint
+                # so later projection changes fail re-verification.
+                payload["columns"] = projection["columns"]
+                payload["primaryKey"] = projection["primary_key"]
+                payload["logicalFingerprint"] = projection["fingerprint"]
+            return payload
 
     def sample(self, db, user, descriptor: dict, *, limit: int) -> list[dict]:
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -46,7 +58,20 @@ class IntegratedRemoteBindingValidator:
         rows = []
         with open_read_scope(db, user, [asset.id], statement_timeout_ms=10000) as scope:
             table = scope.tables[asset.id]
-            statement = sa.select(table).limit(limit)
+            projection = scope.meta[asset.id].get("projection")
+            if projection is not None:
+                # Read exactly the configured logical view, labeled by logical
+                # names: hidden physical columns are never selected.  Ordering
+                # by the projected primary key keeps the probe deterministic.
+                statement = sa.select(*(
+                    table.c[column["source_key"]].label(column["name"])
+                    for column in projection["columns"]
+                )).order_by(*(
+                    table.c[projection["logical_to_physical"][name]]
+                    for name in projection["primary_key"]
+                )).limit(limit)
+            else:
+                statement = sa.select(table).limit(limit)
             for batch in scope.iter_batches(statement, batch_size=min(limit, 100)):
                 rows.extend(batch)
         return rows

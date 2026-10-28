@@ -22,8 +22,10 @@ from sqlalchemy.sql.selectable import TableClause
 
 from app.auth.permissions import user_has_menu_access
 from app.data_channel.connections.models import Connection
+from app.data_channel.integrated import fields
 from app.data_channel.integrated.contracts import JsonText, digest, fail, normalize_source_value, serialize_source_json, wire_value
-from app.data_channel.integrated.models import IntegratedAsset
+from app.data_channel.integrated.fields import FieldConfigError
+from app.data_channel.integrated.models import IntegratedAsset, IntegratedAssetFieldConfig
 from app.shared.encryption import decrypt
 from app.shared.query_control import current_query_control, interruptible_connection
 
@@ -314,6 +316,17 @@ def resolve_metadata(db, user, asset_ids):
         ).scalar_one_or_none()
         if connection is None:
             fail(404, "CONNECTION_NOT_FOUND", "Source connection not found")
+        config_row = db.execute(
+            sa.select(IntegratedAssetFieldConfig)
+            .where(IntegratedAssetFieldConfig.asset_id == asset.id)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        try:
+            projection = fields.projection_of(
+                asset.schema_json, config_row.field_config if config_row is not None else None)
+        except FieldConfigError:
+            fail(409, "ASSET_FIELD_CONFIG_INVALID",
+                 "The stored field configuration is inconsistent with the source schema")
         result[asset_id] = {
             "asset_id": asset.id, "dataset_id": asset.dataset_id,
             "connection_id": asset.connection_id,
@@ -324,6 +337,7 @@ def resolve_metadata(db, user, asset_ids):
             "columns": asset.schema_json["columns"],
             "primary_key": asset.schema_json["primary_key"],
             "schema_fingerprint": asset.schema_fingerprint,
+            "projection": projection,
             "auth_fingerprint": digest({
                 "user": user.id, "role": user.role, "asset": asset.id,
                 # Source identity revision: rotating the connection config or
@@ -334,6 +348,7 @@ def resolve_metadata(db, user, asset_ids):
                 # logged.
                 "source_config_revision": digest(connection.config or {}),
                 "source_lifecycle_status": connection.status,
+                "logical_projection_revision": projection["fingerprint"] if projection else None,
             }),
         }
     return result

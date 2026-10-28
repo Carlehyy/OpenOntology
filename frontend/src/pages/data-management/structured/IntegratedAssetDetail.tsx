@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
-  backendsLabel, dbxStateDetail, dbxStateLabel, integratedCell, integratedError,
+  backendsLabel, dbxStateDetail, dbxStateLabel, integratedCell, integratedColumnLabel, integratedError,
   latestVersionStateLabel, parseObject, primaryKeyOf, receiptNeedsReconciliation, receiptStatusLabel,
   sourceMutationPayload, sourceReadDetail, sourceReadLabel, syncIsActive, syncIsSealed, syncStatusLabel,
   versionStateLabel,
@@ -460,7 +460,15 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
           scroll={{ x: 'max-content', y: 250 }}
           columns={[
             { title: '字段名', dataIndex: 'name' },
-            { title: '类型', dataIndex: 'type' },
+            // A configured field_config layer adds the logical display name and
+            // the physical source key; unconfigured assets show only the name.
+            ...(columns.some(column => column.source_key || column.display_name)
+              ? [
+                { title: '显示名', key: 'display_name', render: (_v: unknown, column: (typeof columns)[number]) => column.display_name || '—' },
+                { title: '源字段', key: 'source_key', render: (_v: unknown, column: (typeof columns)[number]) => <span className="font-mono">{column.source_key ?? column.name}</span> },
+              ]
+              : []),
+            { title: '类型', key: 'type', render: (_v: unknown, column: (typeof columns)[number]) => column.source_type && column.source_type !== column.type ? `${column.type}（源 ${column.source_type}）` : column.type },
             { title: '可为空', dataIndex: 'nullable', render: value => value ? '是' : '否' },
             { title: '主键', key: 'pk', render: (_value, column) => pk.includes(column.name) ? '主键' : '—' },
           ]}
@@ -482,7 +490,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
             scroll={{ x: 'max-content', y: 350 }}
             columns={[
               ...rows.columns.map(column => ({
-                title: column.name,
+                title: integratedColumnLabel(column),
                 key: column.name,
                 render: (_value: unknown, row: IntegratedRow) => <span className="font-mono text-xs">{integratedCell(row.values[column.name])}</span>,
               })),

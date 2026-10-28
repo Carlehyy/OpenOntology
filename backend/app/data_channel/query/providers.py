@@ -83,6 +83,18 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
                 snapshot_id = None
             expected_auth = meta["auth_fingerprint"]
             expected_schema = meta["schema_fingerprint"]
+            # Configured assets expose only their logical view: expressions
+            # bind logical names to the authorized physical source columns, so
+            # unmapped columns stay invisible to the compiler.  The pinned
+            # fingerprints above remain physical in both cases.
+            projection = meta.get("projection")
+            if projection is not None:
+                columns = {c["name"]: column_spec(c) for c in projection["columns"]}
+                expressions = {name: table.c[physical] for name, physical
+                               in projection["logical_to_physical"].items()}
+            else:
+                columns = {c["name"]: column_spec(c) for c in meta["columns"]}
+                expressions = {}
 
             if scope is not None:
                 def recheck(asset_id=binding.asset_id, auth=expected_auth, schema=expected_schema):
@@ -120,7 +132,7 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
                 auth_fingerprint=expected_auth, schema_fingerprint=expected_schema,
                 connection_key="source:" + connection_id,
                 batches=batches if scope is not None else None, recheck=recheck,
-                source_group=scope)
+                source_group=scope, expressions=expressions)
     return result
 
 

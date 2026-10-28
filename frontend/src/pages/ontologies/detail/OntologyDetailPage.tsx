@@ -252,22 +252,22 @@ export default function OntologyDetailPage() {
               {ontology.current_release_version || ontology.version || 'v0'}
             </span>
           </TippedAction>
-          <TippedAction tip="查看当前发布图谱">
+          <TippedAction tip="查看本体图谱">
             <button
               type="button"
               onClick={() => navigate(`/ontologies/${id}/graph`)}
               className={HEADER_ICON_BUTTON_CLASS}
-              aria-label="查看当前发布图谱"
+              aria-label="查看本体图谱"
             >
               <Network size={18} />
             </button>
           </TippedAction>
-          <TippedAction tip="打开数据映射工作台">
+          <TippedAction tip="查看数据映射">
             <button
               type="button"
               onClick={() => navigate(`/ontologies/${id}/graph?view=mapping`)}
               className={HEADER_ICON_BUTTON_CLASS}
-              aria-label="打开数据映射工作台"
+              aria-label="查看数据映射"
               data-testid="open-mapping-workspace"
             >
               <Workflow size={18} />

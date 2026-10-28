@@ -114,7 +114,7 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
         {!loading && !listError && assets.length === 0 && (
           <EmptyState
             title="尚未登记集成数据集"
-            description="在登记弹窗内可直接创建并测试 MySQL / PostgreSQL 连接，再由 dbx 核验源表后登记；未配置 dbx 时登记会明确失败，不会生成半套资产。"
+            description="点击右上角「登记集成数据集」，即可在弹窗内新建或复用 MySQL / PostgreSQL 源并完成登记，无需离开本页；未配置 dbx 时登记会明确失败，不会生成半套资产。"
             action={canManage ? (
               <Button type="button" size="sm" onClick={() => setRegistering(true)}>
                 <Plus size={13} />登记集成数据集

@@ -38,7 +38,9 @@ diff、未知路径、rename 源路径，以及改到分类器或本工作流时
    E2E 环境不受影响；直调 HTTP API 的机器客户端不经过 SPA，行为不变；
 6. 并行验证生产镜像可构建；前端镜像为预构建形态（`Dockerfile.prod` 直接
    打包上一步的 `dist`），服务器端不再执行 npm/vite 构建——本地手动构建
-   前端镜像前需先在 `frontend/` 下执行 `npm ci && npm run build`；
+   前端镜像前需先在 `frontend/` 下执行 `npm ci && npm run build`。前端
+   Nginx 以 `frontend/nginx/gzip.conf` 在 http 级启用响应压缩（JSON 接口
+   与大静态资源 gzip 直传，SSE 与二进制下载不压缩）；
 7. 将本次作业扫描到的 SSH host key 写入 `known_hosts` 并强制
    校验，同时在任何远端命令前校验部署目录；
 8. 在 runner 上从 `PROD_*` Repository secrets/variables 物化

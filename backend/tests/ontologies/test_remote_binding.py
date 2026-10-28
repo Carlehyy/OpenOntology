@@ -5,14 +5,20 @@
 本文件覆盖：描述符归一化、发布读取端口、validator 端口注册与冻结/重验、
 workspace 服务端冻结、live CRUD 门禁（auto-apply 拒绝、混绑拒绝、
 本地 link 引用远程数据集拒绝）、以及 apply/build_all 的显式隔离。
+已配置逻辑投影（field config）的资产走逻辑命名空间冻结/受控读，
+projection drift fail-closed；未配置资产保持物理身份不变。
 """
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import pytest
+import sqlalchemy as sa
 from fastapi import HTTPException
 
+from app.data_channel.integrated import fields as integrated_fields
 from app.models.ontology import OntologyProject
 from app.models.ontology_formal import ObjectType, LinkType
 from app.models.v2.dataset import Dataset
@@ -768,3 +774,235 @@ def test_automation_subscription_excludes_remote(
         item["mapping_id"] == remote["mapping_id"]
         and item["reason"] == "remote_binding_not_automatable"
         for item in result["skipped"])
+
+
+# ── 逻辑投影资产：真实 native 端口的冻结/受控读/重验 ────────────────
+
+
+PHYSICAL_SCHEMA = {
+    "columns": [
+        {"name": "oc", "type": "string", "nullable": False},
+        {"name": "amt", "type": "decimal", "nullable": True,
+         "precision": 18, "scale": 4},
+        {"name": "internal_note", "type": "string", "nullable": True},
+    ],
+    "primary_key": ["oc"],
+}
+
+FIELD_CONFIG = [
+    {"source_key": "oc", "name": "order_code", "display_name": None},
+    {"source_key": "amt", "name": "amount_total", "display_name": None},
+]
+
+SAMPLE_ROWS = [
+    {"oc": "A1", "amt": "1.5", "internal_note": "hidden-1"},
+    {"oc": "A2", "amt": "2.5", "internal_note": "hidden-2"},
+    {"oc": "A3", "amt": "3.5", "internal_note": "hidden-3"},
+]
+
+
+class StubNativeScope:
+    """open_read_scope 桩：物理表落在 SQLite，meta 走真实 projection_of。"""
+
+    def __init__(self, asset_id, schema, config, rows):
+        self.meta = {asset_id: {
+            "asset_id": asset_id, "dataset_id": "dataset",
+            "connection_id": "source", "connection_status": "inactive",
+            "dialect": "sqlite", "columns": schema["columns"],
+            "primary_key": schema["primary_key"],
+            "schema_fingerprint": "schema", "auth_fingerprint": "auth",
+            "projection": (integrated_fields.projection_of(schema, config)
+                           if config is not None else None),
+        }}
+        metadata = sa.MetaData()
+        self.table = sa.Table(
+            "rows", metadata,
+            *[sa.Column(column["name"], sa.Text) for column in schema["columns"]])
+        self.engine = sa.create_engine("sqlite://")
+        metadata.create_all(self.engine)
+        with self.engine.begin() as conn:
+            conn.execute(self.table.insert(), rows)
+        self.tables = {asset_id: self.table}
+        self.provenance = {"started_at": datetime.now(timezone.utc).isoformat(),
+                           "id": "snap-1"}
+        self.completion = {"complete": True}
+        # 语句级留痕：断言投影语句本身不引用隐藏列，防止只清洗结果。
+        self.statements: list = []
+
+    def iter_batches(self, statement, *params, batch_size=1000):
+        self.statements.append(statement)
+        with self.engine.connect() as conn:
+            result = conn.execute(statement, params[0] if params else None).mappings()
+            rows = [dict(row) for row in result]
+            result.close()
+        yield rows
+
+    def close(self):
+        self.engine.dispose()
+
+
+def _binding_asset(db, user):
+    from app.data_channel.connections.models import Connection
+    from app.data_channel.integrated.models import IntegratedAsset
+
+    source = Connection(id="source", name="source", kind="postgres", config={})
+    dataset = Dataset(id="dataset", name="source", kind="integrated",
+                      source_connection_id="source", source_resource="public.rows")
+    db.add(source)
+    db.flush()
+    db.add(dataset)
+    db.flush()
+    asset = IntegratedAsset(id="asset-1", dataset_id="dataset",
+                            connection_id="source", name="source",
+                            schema_name="public", table_name="rows",
+                            schema_json=PHYSICAL_SCHEMA,
+                            schema_fingerprint="schema", writable=False,
+                            created_by=user.id)
+    db.add(asset)
+    db.commit()
+    return asset
+
+
+def _stub_native(monkeypatch, scope):
+    @contextmanager
+    def fake_open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
+        yield scope
+
+    monkeypatch.setattr(
+        "app.data_channel.integrated.binding_port.open_read_scope",
+        fake_open_read_scope)
+
+
+def test_binding_port_freezes_logical_view_for_configured_asset(
+        db, admin_user, monkeypatch):
+    from app.data_channel.integrated.binding_port import (
+        IntegratedRemoteBindingValidator,
+    )
+
+    asset = _binding_asset(db, admin_user)
+    scope = StubNativeScope(asset.id, PHYSICAL_SCHEMA, FIELD_CONFIG, SAMPLE_ROWS)
+    _stub_native(monkeypatch, scope)
+    set_remote_binding_validator(IntegratedRemoteBindingValidator())
+    try:
+        frozen = freeze_remote_descriptor(db, admin_user, "dataset")
+    finally:
+        clear_remote_binding_validator()
+        scope.close()
+    assert [column["name"] for column in frozen["columns"]] == [
+        "order_code", "amount_total"]
+    assert "internal_note" not in {column["name"]
+                                   for column in frozen["columns"]}
+    assert frozen["primaryKey"] == ["order_code"]
+    # 物理指纹保持原义；逻辑投影有自己的指纹并被冻结。
+    assert frozen["schemaFingerprint"] == "schema"
+    assert frozen["logicalFingerprint"] == (
+        integrated_fields.projection_of(PHYSICAL_SCHEMA, FIELD_CONFIG)["fingerprint"])
+
+
+def test_binding_port_sample_never_reads_hidden_columns(
+        db, admin_user, monkeypatch):
+    from app.data_channel.integrated.binding_port import (
+        IntegratedRemoteBindingValidator,
+    )
+
+    asset = _binding_asset(db, admin_user)
+    scope = StubNativeScope(asset.id, PHYSICAL_SCHEMA, FIELD_CONFIG, SAMPLE_ROWS)
+    _stub_native(monkeypatch, scope)
+    validator = IntegratedRemoteBindingValidator()
+    try:
+        rows = validator.sample(db, admin_user, {"assetId": asset.id}, limit=2)
+    finally:
+        scope.close()
+    # 只读配置的逻辑视图：隐藏物理列绝不出现，键是逻辑名，按投影主键排序。
+    assert rows == [{"order_code": "A1", "amount_total": "1.5"},
+                    {"order_code": "A2", "amount_total": "2.5"}]
+    assert all("internal_note" not in row and "oc" not in row and "amt" not in row
+               for row in rows)
+    # 语句级断言：受控读语句只投影逻辑列，不是事后清洗结果。
+    assert scope.statements, "sample must execute a projection statement"
+    selected = {column.name for statement in scope.statements
+                for column in statement.selected_columns}
+    assert selected == {"order_code", "amount_total"}
+    assert "internal_note" not in selected
+
+
+def test_binding_port_unconfigured_asset_keeps_physical_identity(
+        db, admin_user, monkeypatch):
+    from app.data_channel.integrated.binding_port import (
+        IntegratedRemoteBindingValidator,
+    )
+
+    asset = _binding_asset(db, admin_user)
+    scope = StubNativeScope(asset.id, PHYSICAL_SCHEMA, None, SAMPLE_ROWS)
+    _stub_native(monkeypatch, scope)
+    set_remote_binding_validator(IntegratedRemoteBindingValidator())
+    try:
+        frozen = freeze_remote_descriptor(db, admin_user, "dataset")
+        rows = IntegratedRemoteBindingValidator().sample(
+            db, admin_user, {"assetId": asset.id}, limit=3)
+    finally:
+        clear_remote_binding_validator()
+        scope.close()
+    assert [column["name"] for column in frozen["columns"]] == [
+        "oc", "amt", "internal_note"]
+    assert frozen["primaryKey"] == ["oc"]
+    assert "logicalFingerprint" not in frozen
+    assert all(set(row) == {"oc", "amt", "internal_note"} for row in rows)
+
+
+def test_verify_remote_binding_fails_closed_on_projection_drift(
+        db, admin_user, monkeypatch):
+    from app.data_channel.integrated.binding_port import (
+        IntegratedRemoteBindingValidator,
+    )
+
+    asset = _binding_asset(db, admin_user)
+    scope = StubNativeScope(asset.id, PHYSICAL_SCHEMA, FIELD_CONFIG, SAMPLE_ROWS)
+    _stub_native(monkeypatch, scope)
+    set_remote_binding_validator(IntegratedRemoteBindingValidator())
+    try:
+        frozen = freeze_remote_descriptor(db, admin_user, "dataset")
+        result = verify_remote_binding(
+            db, admin_user, frozen, sample=True, sample_limit=5)
+        assert result["sampleRows"][0].keys() == {"order_code", "amount_total"}
+
+        # 投影变更（隐藏列被纳入）→ 指纹不一致，fail-closed 重冻结。
+        scope.meta[asset.id]["projection"] = integrated_fields.projection_of(
+            PHYSICAL_SCHEMA,
+            FIELD_CONFIG + [{"source_key": "internal_note", "name": "note",
+                             "display_name": None}])
+        with pytest.raises(RemoteBindingError) as drift:
+            verify_remote_binding(db, admin_user, frozen, sample=False)
+        assert drift.value.code == "remote_binding_schema_drift"
+
+        # 修复前冻结的物理描述符（无 logicalFingerprint）遇到已配置 live
+        # → 同样 fail-closed，不允许带着旧命名空间继续放行。
+        legacy = {key: value for key, value in frozen.items()
+                  if key != "logicalFingerprint"}
+        legacy["columns"] = PHYSICAL_SCHEMA["columns"]
+        legacy["primaryKey"] = ["oc"]
+        with pytest.raises(RemoteBindingError) as legacy_drift:
+            verify_remote_binding(db, admin_user, legacy, sample=False)
+        assert legacy_drift.value.code == "remote_binding_schema_drift"
+    finally:
+        clear_remote_binding_validator()
+        scope.close()
+
+
+def test_verify_remote_binding_accepts_matching_logical_fingerprint(stub_port):
+    configured = dict(DESCRIPTOR)
+    configured["columns"] = [
+        {"name": "order_code", "type": "string", "nullable": False}]
+    configured["primaryKey"] = ["order_code"]
+    configured["logicalFingerprint"] = "logical-1"
+    stub_port.descriptor = configured
+    result = verify_remote_binding(
+        db=None, user=None, descriptor=configured, sample=False)
+    assert result["live"]["logicalFingerprint"] == "logical-1"
+
+    # 指纹不一致（投影变更）→ fail-closed。
+    stub_port.descriptor = {**configured, "logicalFingerprint": "logical-2"}
+    with pytest.raises(RemoteBindingError) as drift:
+        verify_remote_binding(db=None, user=None, descriptor=configured,
+                              sample=False)
+    assert drift.value.code == "remote_binding_schema_drift"

@@ -312,6 +312,93 @@ def test_connection_rotation_rest_config_validated_and_unchanged_on_reject(
         app.dependency_overrides.pop(connections_router.get_db, None)
 
 
+def test_connection_config_rotation_denied_without_editor_role_or_menu_access(
+        client, db, auth_headers, admin_user):
+    """Rejected rotations preserve both encrypted config and connection status."""
+    from app.auth.models import RoleMenuPermission
+
+    def _row(connection_id):
+        db.expire_all()
+        return db.query(Connection).filter(Connection.id == connection_id).one()
+
+    _route_db_to(db)
+    try:
+        body = _create(client, auth_headers)
+        connection_id = body["id"]
+        row = _row(connection_id)
+        row.status = "active"
+        db.commit()
+        original_encrypted = _row(connection_id).config["_encrypted"]
+
+        # viewer：默认菜单包含 data.structured，但挂载层 asset_lake_guard
+        # 已拦非 admin/editor 的写方法 → 403，且不得触达任何变更
+        admin_user.role = "viewer"
+        db.commit()
+        denied = client.patch(
+            f"/api/v2/connections/{connection_id}/config",
+            headers=auth_headers, json={"config": {"password": "nope"}},
+        )
+        assert denied.status_code == 403, denied.text
+        assert "read-only" in denied.json()["detail"]
+        row = _row(connection_id)
+        assert row.config["_encrypted"] == original_encrypted
+        assert json.loads(encryption_service.decrypt(row.config["_encrypted"])) == CONFIG
+        assert row.status == "active"
+
+        # custom：角色非 admin/editor，同样在挂载层被拒（默认菜单也仅 overview）
+        admin_user.role = "custom"
+        db.commit()
+        denied = client.patch(
+            f"/api/v2/connections/{connection_id}/config",
+            headers=auth_headers, json={"config": {"password": "nope"}},
+        )
+        assert denied.status_code == 403, denied.text
+        assert "read-only" in denied.json()["detail"]
+        row = _row(connection_id)
+        assert row.config["_encrypted"] == original_encrypted
+        assert row.status == "active"
+
+        # editor 角色合规但菜单被剥离 data.structured：挂载层放行，
+        # 端点门必须补上菜单权限 → 403
+        admin_user.role = "editor"
+        db.add(RoleMenuPermission(role="editor", menu_keys=["data.pipelines"]))
+        db.commit()
+        denied = client.patch(
+            f"/api/v2/connections/{connection_id}/config",
+            headers=auth_headers, json={"config": {"password": "nope"}},
+        )
+        assert denied.status_code == 403, denied.text
+        assert "没有数据资产湖访问权限" in denied.json()["detail"]
+        row = _row(connection_id)
+        assert row.config["_encrypted"] == original_encrypted
+        assert row.status == "active"
+
+        # 未命中连接同样先吃 403：鉴权先于存在性检查，未授权方无法探测 id
+        assert client.patch(
+            "/api/v2/connections/no-such-connection/config",
+            headers=auth_headers, json={"config": {"password": "x"}},
+        ).status_code == 403
+
+        # 恢复 admin（清掉角色菜单覆盖）后轮换正常：权限门不误伤合法维护
+        db.query(RoleMenuPermission).filter(
+            RoleMenuPermission.role == "editor").delete()
+        admin_user.role = "admin"
+        db.commit()
+        rotated = client.patch(
+            f"/api/v2/connections/{connection_id}/config",
+            headers=auth_headers, json={"config": {"password": "rotated-ok"}},
+        )
+        assert rotated.status_code == 200, rotated.text
+        row = _row(connection_id)
+        assert row.status == "inactive"
+        assert json.loads(encryption_service.decrypt(row.config["_encrypted"])) == {
+            **CONFIG, "password": "rotated-ok"}
+    finally:
+        admin_user.role = "admin"
+        db.commit()
+        app.dependency_overrides.pop(connections_router.get_db, None)
+
+
 # ── 受控注销：结构化 409 明细 ────────────────────────────────────────
 
 def _admin_id(db):
