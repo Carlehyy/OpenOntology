@@ -295,7 +295,7 @@ export default function PipelineListPage() {
           <input
             value={search}
             onChange={e => { setSearch(e.target.value); setPage(1) }}
-            placeholder="搜索名称 / ID..."
+            placeholder="搜索流水线名称"
             className="w-full rounded-xl border border-border py-2 pl-8 pr-3 text-sm outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
           />
           {search && (
@@ -445,7 +445,7 @@ export default function PipelineListPage() {
                 return (
                   <tr
                     key={pl.id}
-                    className={`group/row align-middle transition-colors hover:bg-muted ${enabled ? '' : 'bg-muted'}`}
+                    className="group/row align-middle transition-colors hover:bg-muted"
                   >
                     <td className="px-4 py-3 align-middle">
                       <p className="font-medium text-foreground truncate" title={pl.name}>{pl.name}</p>
@@ -544,7 +544,7 @@ export default function PipelineListPage() {
                     </td>
                     {/* 操作列吸右：窄视口横向滚动时编辑/试运行/归档始终可达 */}
                     <td
-                      className={`sticky right-0 z-10 border-l border-border px-2 py-3 text-center align-middle whitespace-nowrap ${enabled ? 'bg-card group-hover/row:bg-muted' : 'bg-muted'}`}
+                      className="sticky right-0 z-10 border-l border-border px-2 py-3 text-center align-middle whitespace-nowrap bg-card group-hover/row:bg-muted"
                       onClick={e => e.stopPropagation()}
                     >
                       <div className="flex gap-0.5 justify-center">
@@ -606,7 +606,7 @@ export default function PipelineListPage() {
                         <button
                           type="button"
                           onClick={() => setDeleteTarget(pl)}
-                          className="flex w-[34px] flex-col items-center gap-0.5 rounded py-1 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="flex w-[34px] flex-col items-center gap-0.5 rounded py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           title="归档流水线"
                           aria-label="归档流水线"
                         >

@@ -607,7 +607,7 @@ test('被拒绝的成品版本以审计语义展示且没有普通生产导出',
 
   await page.getByRole('button', { name: /客户订单清洗流水线/ }).click()
   await expect(page).toHaveURL(/data\/pipelines\?search=pipeline-reviewed/)
-  await expect(page.getByPlaceholder('搜索名称 / ID...')).toHaveValue('pipeline-reviewed')
+  await expect(page.getByPlaceholder('搜索流水线名称')).toHaveValue('pipeline-reviewed')
 })
 
 test('待审核详情按真实主键保存行级修正，并保留三视角与无主键边界', async ({ page }) => {
