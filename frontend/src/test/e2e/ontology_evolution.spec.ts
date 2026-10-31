@@ -341,6 +341,9 @@ test('complete branch → real-data trial → reviewed release works in the brow
   const releaseRow = page.getByTestId('version-node-v0')
   await releaseRow.getByRole('button', { name: 'v0 更多操作' }).click()
   await expect(releaseRow.getByRole('button', { name: '创建新版本' })).toBeVisible()
+  // 任意状态的版本行都提供图谱编辑器与数据映射两个独立页面的直达入口。
+  await expect(releaseRow.getByRole('button', { name: '查看本体图谱' })).toBeVisible()
+  await expect(releaseRow.getByRole('button', { name: '查看数据映射' })).toBeVisible()
   await draftRow.getByRole('button', { name: 'v0.1 更多操作' }).click()
   await expect(releaseRow.getByRole('button', { name: '创建新版本' })).toHaveCount(0)
   await expect(draftRow.getByRole('button', { name: '创建新版本' })).toBeVisible()

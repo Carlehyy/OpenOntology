@@ -156,3 +156,71 @@ test('历史发布只提供安全恢复草稿，并绑定用户看到的当前�
     expectedCurrentReleaseId: 'release-v2',
   })
 })
+
+test('版本树更多操作菜单对任意状态版本提供图谱与数据映射独立页直达', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'e2e-token')
+    localStorage.setItem('auth-store', JSON.stringify({
+      state: {
+        token: 'e2e-token',
+        user: { id: 'tester', username: 'tester', role: 'admin' },
+      },
+      version: 0,
+    }))
+  })
+
+  const ok = (route: Route, data: unknown, status = 200) => route.fulfill({
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify({ data }),
+  })
+
+  await page.route(/^https?:\/\/[^/]+\/api\/v[12]\//, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === `/api/v1/ontologies/${ontologyId}`) return ok(route, ontology)
+    if (path === `/api/v2/ontologies/${ontologyId}/version-tree`) {
+      return ok(route, {
+        current_release_id: releaseV2.id,
+        current_release_number: releaseV2.version_number,
+        current_release_version: releaseV2.version_number,
+        versions: [releaseV1, releaseV2, recoveredDraft],
+      })
+    }
+    if (path === `/api/v2/formal/ontologies/${ontologyId}/overview`) return ok(route, overview)
+    if (path === `/api/v2/formal/ontologies/${ontologyId}/facts/recent`) return ok(route, [])
+    return ok(route, [])
+  })
+
+  // Playwright 的纯 hash 变更 goto 不会触发 HashRouter 重新进入路由（应用停留在
+  // 上一页），先经 about:blank 强制整页加载，对应用户从深链打开页面的真实路径。
+  const openRowMenu = async (versionNumber: string) => {
+    await page.goto('about:blank')
+    await page.goto(`/#/ontologies/${ontologyId}?tab=versions`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByTestId('version-tree')).toBeVisible()
+    await page.getByRole('button', { name: `${versionNumber} 更多操作` }).click()
+  }
+
+  // 草稿态：两个入口都携带该草稿 versionId，进入各自独立工作台页面。
+  await openRowMenu(recoveredDraft.version_number)
+  const draftRow = page.getByTestId(`version-node-${recoveredDraft.version_number}`)
+  await expect(draftRow.getByRole('button', { name: '查看本体图谱' })).toBeVisible()
+  await draftRow.getByRole('button', { name: '查看本体图谱' }).click()
+  await expect(page).toHaveURL(new RegExp(`/ontologies/${ontologyId}/graph\\?versionId=${recoveredDraft.id}$`))
+
+  await openRowMenu(recoveredDraft.version_number)
+  await page.getByTestId(`version-node-${recoveredDraft.version_number}`)
+    .getByRole('button', { name: '查看数据映射' }).click()
+  await expect(page).toHaveURL(new RegExp(`/ontologies/${ontologyId}/graph\\?versionId=${recoveredDraft.id}&view=mapping$`))
+
+  // 历史发布态：直达该历史快照的结构与映射（页内只读，不可编辑）。
+  await openRowMenu(releaseV1.version_number)
+  await page.getByTestId(`version-node-${releaseV1.version_number}`)
+    .getByRole('button', { name: '查看本体图谱' }).click()
+  await expect(page).toHaveURL(new RegExp(`/ontologies/${ontologyId}/graph\\?versionId=${releaseV1.id}$`))
+
+  // 当前发布态：图谱入口不带 versionId，进入承载正式运行数据的运行态视图。
+  await openRowMenu(releaseV2.version_number)
+  await page.getByTestId(`version-node-${releaseV2.version_number}`)
+    .getByRole('button', { name: '查看本体图谱' }).click()
+  await expect(page).toHaveURL(new RegExp(`/ontologies/${ontologyId}/graph$`))
+})

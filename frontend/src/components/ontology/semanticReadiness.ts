@@ -1,7 +1,7 @@
-/* 版本业务语义层的纯逻辑：数据归一、计数行、文档新鲜度、三面一致性判定与
-   一致性明细分组/回译消息拼装。与展示组件解耦（无 React 依赖），便于 node:test 单测。
-   供 pages/ontologies（发布前检查）与 pages/explore（一致性面板）共用。 */
-import type { OntologySemanticIssue, OntologySemanticOverview } from '@/api/v2/ontology-versions'
+/* 版本业务语义层的纯逻辑：数据归一、计数行、文档新鲜度与三面一致性判定。
+   与展示组件解耦（无 React 依赖），便于 node:test 单测。
+   供 pages/ontologies（发布前检查）与 pages/explore（本体模型漂移角标）共用。 */
+import type { OntologySemanticOverview } from '@/api/v2/ontology-versions'
 
 export interface SemanticCountRow {
   key: string
@@ -135,72 +135,4 @@ export function documentStateView(overview: OntologySemanticOverview): DocumentS
   if (overview.documentStale) return { tone: 'stale', text: `${title} · 已过期` }
   if (!overview.documentTitle) return { tone: 'none', text: '尚未生成需求文档' }
   return { tone: 'ok', text: `${title} · 最新` }
-}
-
-
-/** 结构元素 kind → 人读标签（回译消息与一致性明细共用）。 */
-const ISSUE_KIND_LABELS: Record<string, string> = {
-  objectType: '对象类型',
-  linkType: '关系类型',
-  action: '动作',
-  function: '函数',
-  sentinel: '哨兵',
-  document: '需求文档',
-}
-
-export function semanticIssueKindLabel(kind: string): string {
-  return ISSUE_KIND_LABELS[kind] || kind
-}
-
-export interface SemanticIssueGroup {
-  code: string
-  label: string
-  issues: OntologySemanticIssue[]
-}
-
-/**
- * 一致性明细按 code 分组：已知 code 按 ISSUE_CODE_LABELS 声明顺序展示，
- * 未知 code 排在最后按字典序兜底，保证展示稳定。
- */
-export function groupSemanticIssues(issues: OntologySemanticIssue[]): SemanticIssueGroup[] {
-  const byCode = new Map<string, OntologySemanticIssue[]>()
-  for (const issue of issues) {
-    const bucket = byCode.get(issue.code) || []
-    bucket.push(issue)
-    byCode.set(issue.code, bucket)
-  }
-  const knownOrder = Object.keys(ISSUE_CODE_LABELS)
-  const codes = [...byCode.keys()].sort((a, b) => {
-    const ai = knownOrder.indexOf(a)
-    const bi = knownOrder.indexOf(b)
-    if (ai !== -1 || bi !== -1) {
-      return (ai === -1 ? knownOrder.length : ai) - (bi === -1 ? knownOrder.length : bi)
-    }
-    return a.localeCompare(b)
-  })
-  return codes.map(code => ({
-    code,
-    label: semanticIssueCodeLabel(code),
-    issues: byCode.get(code)!,
-  }))
-}
-
-/** 需要回译到业务画布的漂移及逐项动作提示（均为人工改结构所致）。 */
-const BACK_TRANSLATE_ACTIONS: Record<string, string> = {
-  semantic_business_missing: '结构有、画布无，请补全对应业务语义',
-  semantic_signature_mismatch: '同名但签名不一致，请核对差异并对齐画布',
-}
-
-/**
- * 拼装「回译到业务语义」的对话消息：逐项列出受影响元素与期望动作，
- * 要求助手先复述理解再更新画布。无可回译条目时返回 null，调用方据此隐藏入口。
- */
-export function composeBackTranslateMessage(issues: OntologySemanticIssue[]): string | null {
-  const targets = issues.filter(issue => issue.code in BACK_TRANSLATE_ACTIONS)
-  if (targets.length === 0) return null
-  const lines = targets.map(issue =>
-    `- ${semanticIssueKindLabel(issue.kind)}「${issue.name || issue.id}」：${BACK_TRANSLATE_ACTIONS[issue.code]}`)
-  return '我在本体模型视图中人工修改了本体结构，请把以下改动逐项回译到业务场景画布：\n'
-    + lines.join('\n')
-    + '\n请先用业务语言复述你对每项改动的理解，确认无误后再用 upsert_elements 更新画布。'
 }

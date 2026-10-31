@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle, ArrowRight, Bookmark, Check, ChevronDown, CircleAlert, Compass, Database,
-  GitBranch, GitCommitHorizontal, History, LockKeyhole, MoreHorizontal, Plus, Rocket,
+  GitBranch, GitCommitHorizontal, History, LockKeyhole, MoreHorizontal, Network, Plus, Rocket,
   ShieldCheck, Trash2, Wrench,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/Badge'
@@ -542,6 +542,18 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
                     id={`version-actions-${node.id}`}
                     className="absolute right-0 top-9 z-30 min-w-36 rounded-lg border border-border bg-card p-1 shadow-lg"
                   >
+                    <button type="button" className={menuItemClass} onClick={() => {
+                      setOpenMenuId(null)
+                      openVersion(node)
+                    }}>
+                      <Network size={13} /> 查看本体图谱
+                    </button>
+                    <button type="button" className={menuItemClass} onClick={() => {
+                      setOpenMenuId(null)
+                      openMapping(node)
+                    }}>
+                      <Database size={13} /> 查看数据映射
+                    </button>
                     <button type="button" className={menuItemClass} onClick={() => {
                       setOpenMenuId(null)
                       setSource(node)
