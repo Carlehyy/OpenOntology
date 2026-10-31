@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { CircleCheck, CircleX, Loader2 } from 'lucide-react'
+import { CircleCheck, CircleX, Loader2, AlertTriangle } from 'lucide-react'
 import type { Readiness } from '@/api/exploration'
 import { ontologyVersionApi, type OntologyTrialRun } from '@/api/v2/ontology-versions'
 import TrialActionPlanReview, { redactTrialText } from '@/components/ontology/TrialActionPlanReview'
@@ -152,8 +152,14 @@ export default function TrialPreflightDialog({ open, ontologyId, versionId, read
                     <div className="flex items-center gap-2 text-xs">
                       {check.status === 'pass'
                         ? <CircleCheck size={13} className="shrink-0 text-brand-ink" />
-                        : <CircleX size={13} className="shrink-0 text-[var(--color-danger)]" />}
-                      <span className={check.status === 'pass' ? 'text-muted-foreground' : 'font-medium text-[var(--color-danger)]'}>
+                        : check.status === 'warn'
+                          ? <AlertTriangle size={13} className="shrink-0 text-[var(--color-warning)]" />
+                          : <CircleX size={13} className="shrink-0 text-[var(--color-danger)]" />}
+                      <span className={check.status === 'pass'
+                        ? 'text-muted-foreground'
+                        : check.status === 'warn'
+                          ? 'font-medium text-[var(--color-warning)]'
+                          : 'font-medium text-[var(--color-danger)]'}>
                         {check.label}
                       </span>
                     </div>
@@ -161,6 +167,13 @@ export default function TrialPreflightDialog({ open, ontologyId, versionId, read
                       <ul className="ml-5 mt-0.5 space-y-0.5">
                         {(check.errors || []).map((item, index) => (
                           <li key={index} className="text-[11px] leading-5 text-[var(--color-danger)]">• {item.message}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {(check.warnings || []).length > 0 && (
+                      <ul className="ml-5 mt-0.5 space-y-0.5" data-testid={`trial-preflight-warnings-${check.id}`}>
+                        {(check.warnings || []).map((item, index) => (
+                          <li key={index} className="text-[11px] leading-5 text-[var(--color-warning)]">• {item.message}</li>
                         ))}
                       </ul>
                     )}

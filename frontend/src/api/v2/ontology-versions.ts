@@ -143,12 +143,15 @@ export interface SaveOntologyDocumentResult extends OntologyVersionSemantic {
   documentFingerprint: string
 }
 
-/** POST .../versions/{vid}/trial-preflight 的单项检查（权威门禁，失败即阻断试跑）。 */
+/** POST .../versions/{vid}/trial-preflight 的单项检查（权威门禁，失败即阻断试跑；
+ * warn 表示映射覆盖类风险——不阻断试跑，仅随检查返回风险清单）。 */
 export interface OntologyTrialPreflightCheck {
   id: 'editable_draft' | 'single_flight' | 'base_up_to_date' | 'structure' | 'mapping_contract' | 'semantic_consistency' | string
   label: string
-  status: 'pass' | 'fail'
+  status: 'pass' | 'fail' | 'warn'
   errors: OntologyReleaseGateIssue[]
+  /** 旧后端无此字段；warn 状态下非空。 */
+  warnings?: OntologyReleaseGateIssue[]
 }
 
 /** POST .../versions/{vid}/trial-preflight 的 data。 */
@@ -178,6 +181,8 @@ export interface OntologyImpactReport {
     ready: boolean
     blockingCount: number
     errors: OntologyReleaseGateIssue[]
+    /** 映射覆盖类风险（类型未映射/属性未全覆盖）：不阻断发布，发布前检查弹窗按风险提示渲染。 */
+    warnings?: OntologyReleaseGateIssue[]
     trialRunId?: string | null
     runtimeStateConflicts?: OntologyRuntimeStateConflictReport
     repairStrategy?: 'create_draft' | 'rebase' | null

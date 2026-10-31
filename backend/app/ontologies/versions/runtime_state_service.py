@@ -27,6 +27,7 @@ from app.ontologies.versions.snapshot_contract import (
     snapshot_hash,
 )
 from app.ontologies.versions.evolution_service import (
+    split_mapping_coverage_errors,
     validate_builtin_sentinel_contract,
     validate_manual_mapping_trial_contract,
     validate_release_mapping_contract,
@@ -989,7 +990,11 @@ def _release_readiness(
     errors.extend(_dynamic_sentinel_id_conflict_errors(
         db, draft.ontology_id, snap["sentinels"],
     ))
-    errors.extend(release_mapping_validator(snap))
+    # 映射覆盖类问题（类型未映射/属性未全覆盖）只进 warnings：发布前检查
+    # 弹窗按风险提示渲染，不再置 ready=false；绑定完整性问题仍阻断。
+    mapping_errors, mapping_coverage_warnings = split_mapping_coverage_errors(
+        release_mapping_validator(snap))
+    errors.extend(mapping_errors)
 
     run = db.query(OntologyTrialRun).filter(
         OntologyTrialRun.ontology_id == draft.ontology_id,
@@ -1066,6 +1071,7 @@ def _release_readiness(
         "ready": ready,
         "blockingCount": len(errors),
         "errors": errors,
+        "warnings": mapping_coverage_warnings,
         "trialRunId": run.id if run else None,
         "runtimeStateConflicts": runtime_conflicts,
         "repairStrategy": (

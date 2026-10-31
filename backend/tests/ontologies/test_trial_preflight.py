@@ -403,16 +403,22 @@ def test_trial_preflight_reports_mapping_contract_violation(
 
     payload = _preflight(client, auth_headers, oid, draft["id"])
 
-    assert payload["ok"] is False
+    # 映射覆盖类问题不再阻断试跑：检查为 warn、整体 ok，风险进 warnings。
+    assert payload["ok"] is True
     statuses = _status_by_id(payload)
-    assert statuses["mapping_contract"] == "fail"
+    assert statuses["mapping_contract"] == "warn"
     assert all(
         status == "pass"
         for check_id, status in statuses.items()
         if check_id != "mapping_contract"
     )
-    errors = _check(payload, "mapping_contract")["errors"]
-    assert {item["code"] for item in errors} == {"trial_object_mapping_required"}
+    check = _check(payload, "mapping_contract")
+    assert check["errors"] == []
+    warnings = check["warnings"]
+    assert {item["code"] for item in warnings} == {
+        "trial_object_mapping_required",
+    }
+    assert "不会灌入实例数据" in warnings[0]["message"]
 
 
 def test_trial_preflight_reports_semantic_drift(

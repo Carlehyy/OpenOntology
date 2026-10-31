@@ -22,6 +22,7 @@ from app.ontologies.versions.snapshot_contract import (
 )
 from app.ontologies.versions.evolution_service import (
     impact_report,
+    split_mapping_coverage_errors,
     validate_snapshot,
     validate_trial_mapping_contract,
 )
@@ -399,12 +400,15 @@ def trial_preflight(
 
     checks: list[dict] = []
 
-    def record(check_id: str, label: str, errors: list[dict]) -> None:
+    def record(check_id: str, label: str, errors: list[dict],
+               warnings: list[dict] | None = None) -> None:
+        warnings = warnings or []
         checks.append({
             "id": check_id,
             "label": label,
-            "status": "fail" if errors else "pass",
+            "status": "fail" if errors else ("warn" if warnings else "pass"),
             "errors": errors,
+            "warnings": warnings,
         })
 
     editable_errors: list[dict] = []
@@ -458,7 +462,12 @@ def trial_preflight(
             "sentinel_validation_failed", "sentinel", str(exc)))
     record("structure", "结构校验", structure_errors)
 
-    record("mapping_contract", "试跑映射契约", validate_trial_mapping_contract(snap))
+    # 映射覆盖类问题（未映射/未完整映射）降级为 warn：不阻断试跑，只提示
+    # 发布后将没有实例数据的风险；绑定完整性问题仍 fail。
+    mapping_errors, mapping_coverage = split_mapping_coverage_errors(
+        validate_trial_mapping_contract(snap))
+    record("mapping_contract", "试跑映射契约", mapping_errors,
+           warnings=mapping_coverage)
 
     # 业务语义层一致性：结构元素必须在业务画布中有对应语义，反之亦然。
     semantic_errors: list[dict] = []
@@ -467,7 +476,7 @@ def trial_preflight(
     record("semantic_consistency", "业务语义一致性", semantic_errors)
 
     return {"data": {
-        "ok": all(check["status"] == "pass" for check in checks),
+        "ok": all(check["status"] in ("pass", "warn") for check in checks),
         "versionId": draft.id,
         "revision": f"{draft.revision or 0}:{draft.snapshot_hash or snapshot_hash(snap)}",
         "checks": checks,
@@ -530,7 +539,10 @@ def create_trial_run(
     structural_errors.extend(_dynamic_sentinel_id_conflict_errors(
         db, ontology_id, snap["sentinels"],
     ))
-    structural_errors.extend(validate_trial_mapping_contract(snap))
+    # 映射覆盖类问题不阻断试跑：物料化结果会携带风险警告；绑定完整性
+    # 问题（如 entityClass 歧义路由）仍并入结构性错误阻断。
+    structural_errors.extend(split_mapping_coverage_errors(
+        validate_trial_mapping_contract(snap))[0])
     try:
         models = snapshot_models(snap)
         structural_errors.extend(_validate_sentinels(

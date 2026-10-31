@@ -772,6 +772,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
           const readiness = promotion.impact.releaseReadiness
           const blocked = promotion.impact.baseOutdated || readiness?.ready === false
           const issues = readiness?.errors || []
+          const mappingWarnings = readiness?.warnings || []
           const runtimeConflicts = readiness?.runtimeStateConflicts
           const hasRuntimeConflicts = Boolean(runtimeConflicts?.totalCount)
           const groups = groupReleaseIssues(
@@ -821,8 +822,37 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
                 ) : (
                   <div data-testid="release-readiness-ready" role="status" className="flex items-start gap-3 rounded-xl border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] p-4 text-[var(--color-success)]">
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-success-bg)] text-[var(--color-success)]"><Check size={17} /></span>
-                    <div><h3 className="font-semibold">发布条件已满足</h3><p className="mt-1 text-xs leading-5 text-[var(--color-success)]">精确试跑、数据版本和映射完整性均已通过检查，可以确认发布。</p></div>
+                    <div><h3 className="font-semibold">发布条件已满足</h3><p className="mt-1 text-xs leading-5 text-[var(--color-success)]">{mappingWarnings.length > 0
+                      ? '精确试跑与数据版本检查已通过；数据映射覆盖问题仅作风险提示，不阻断发布。'
+                      : '精确试跑、数据版本和映射完整性均已通过检查，可以确认发布。'}</p></div>
                   </div>
+                )}
+
+                {!blocked && mappingWarnings.length > 0 && (
+                  <section
+                    aria-labelledby="release-mapping-warnings-heading"
+                    data-testid="release-readiness-warnings"
+                    className="rounded-xl border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] p-4"
+                  >
+                    <div className="mb-2 flex items-start justify-between gap-3">
+                      <div>
+                        <h3 id="release-mapping-warnings-heading" className="flex items-center gap-1.5 font-semibold text-[var(--color-warning)]">
+                          <AlertTriangle size={15} className="shrink-0" /> 数据映射风险提示（不阻断发布）
+                        </h3>
+                        <p className="mt-1 text-xs leading-5 text-[var(--color-warning)]">
+                          以下类型或属性尚未完成数据映射，发布后它们不会有数据湖实例数据；可先发布再补齐映射并发起下一个版本。
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-full bg-[var(--color-warning-bg)] px-2.5 py-1 text-xs font-semibold text-[var(--color-warning)]">
+                        {mappingWarnings.length} 项
+                      </span>
+                    </div>
+                    <div className="scrollbar-thin max-h-44 space-y-1 overflow-y-auto pr-1">
+                      {mappingWarnings.map((warning, index) => (
+                        <p key={`${warning.code}-${index}`} className="text-xs leading-5 text-foreground">• {warning.message}</p>
+                      ))}
+                    </div>
+                  </section>
                 )}
 
                 {hasRuntimeConflicts && (

@@ -347,13 +347,15 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(draftRow.getByRole('button', { name: '配置映射' })).toHaveCount(0)
   await draftRow.getByRole('button', { name: 'v0.1 更多操作' }).click()
 
-  // 草稿 → 试跑是后端硬门禁：至少需要一个完成数据映射的对象实体，
-  // 并在弹窗内给出可执行的修复入口，不能只靠按钮状态假装受控。
+  // 草稿 → 试跑不再强制要求数据映射：未映射草稿可以直接进入试跑态，
+  // 隔离物料化为空，风险（不会灌入实例数据）以试跑结果警告告知。
   const incompleteRow = page.getByTestId('version-node-v0.2')
   await incompleteRow.getByRole('button', { name: '转为试跑态' }).click()
-  await expect(page.getByRole('alert')).toContainText('草稿尚未满足转为试跑态的硬性条件')
-  await expect(page.getByRole('alert')).toContainText('至少需要一个已绑定数据集并完成全部存储属性映射的对象实体')
-  await expect(incompleteRow).toContainText('草稿态')
+  const trialResultDialog = page.getByRole('dialog', { name: '隔离试跑结果' })
+  await expect(trialResultDialog).toBeVisible()
+  await expect(trialResultDialog).toContainText('不会灌入实例数据')
+  await trialResultDialog.getByRole('button', { name: '关闭' }).click()
+  await expect(incompleteRow).toContainText('试跑态')
 
   // 未发布叶子分支可以安全删除；确认弹窗必须说明连同隔离数据删除且编号不复用。
   await incompleteRow.getByRole('button', { name: 'v0.2 更多操作' }).click()

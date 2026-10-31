@@ -22,6 +22,9 @@ from app.ontologies.inference.models import AuditLog
 from app.ontologies.mappings.models import OntologyLinkMapping, OntologyMapping
 from app.ontologies.projects.models import OntologyProject
 from app.ontologies.sentinels.models import Sentinel
+from app.ontologies.versions.evolution_service import (
+    split_mapping_coverage_errors,
+)
 from app.ontologies.versions.models import (
     OntologyTrialLink,
     OntologyTrialObject,
@@ -255,9 +258,13 @@ def _promote_draft_locked(
         sentinel_errors,
         "发布前建模内置哨兵字段校验未通过",
     )
+    # 映射「覆盖类」问题（类型未映射/属性未全覆盖）不再阻断发布，作为风险
+    # 提示随响应返回；已存在绑定自身的完整性问题仍 fail-closed。
+    mapping_errors, mapping_coverage_warnings = split_mapping_coverage_errors(
+        validate_release_mapping_contract(snap))
     _raise_publish_errors(
-        validate_release_mapping_contract(snap),
-        "发布前数据映射完整性校验未通过",
+        mapping_errors,
+        "发布前数据映射契约校验未通过",
     )
     report = impact_report(current.snapshot_formal, snap)
     acknowledged = body.get("impact_hash", body.get("impactHash"))
@@ -642,4 +649,5 @@ def _promote_draft_locked(
         **_version_payload(release),
         "trial_run_id": run.id, "impact_hash": report["impactHash"],
         "query_projection": projection_check,
+        "mapping_warnings": mapping_coverage_warnings,
     }}

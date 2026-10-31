@@ -2171,7 +2171,7 @@ def test_trial_derived_rejects_result_outside_computed_property_type():
     assert "期望 number，实际为 str" in errors[0]["message"]
 
 
-def test_structure_only_draft_cannot_enter_trial(
+def test_structure_only_draft_can_enter_trial_with_mapping_warning(
         client, auth_headers, ontology, db):
     oid = ontology["id"]
     root = _root(client, auth_headers, oid)
@@ -2183,16 +2183,21 @@ def test_structure_only_draft_cannot_enter_trial(
     assert saved.status_code == 200, saved.text
     _attach_semantic_layer(db, draft["id"])
 
+    # 映射覆盖类问题不再阻断试跑：结构完整的纯结构草稿可以进入试跑态，
+    # 隔离物料化为空（0 对象/0 关系），覆盖风险以警告随试跑结果返回。
     trial = client.post(
         f"/api/v2/ontologies/{oid}/versions/{draft['id']}/trial-runs",
         headers=auth_headers, json={},
     )
-    assert trial.status_code == 422, trial.text
-    detail = trial.json()["detail"]
-    assert detail["code"] == "publish_validation_failed"
-    assert {item["code"] for item in detail["errors"]} == {
-        "trial_object_mapping_required",
-    }
+    assert trial.status_code == 201, trial.text
+    run = trial.json()["data"]
+    assert run["status"] == "passed"
+    assert run["result"]["counts"]["objects"] == 0
+    assert run["result"]["counts"]["links"] == 0
+    warning_codes = {item["code"] for item in run["result"]["warnings"]}
+    assert "trial_object_mapping_required" in warning_codes
+    # 物料化对每个跳过的未映射类型给出独立警告。
+    assert "object_type_unmapped" in warning_codes
 
 
 def _finish_stub_trial(candidate: SimpleNamespace) -> None:
@@ -3651,6 +3656,7 @@ def test_promotion_switches_exact_trial_projection_and_keeps_fact_history(
         "ready": True,
         "blockingCount": 0,
         "errors": [],
+        "warnings": [],
         "trialRunId": run["id"],
         "runtimeStateConflicts": {
             "totalCount": 0,
@@ -5794,11 +5800,12 @@ def test_rollback_creates_new_activation_and_preserves_historical_runtime_lineag
 
 def test_release_readiness_groups_legacy_missing_property_mappings(
         client, auth_headers, ontology, db, monkeypatch):
-    """Legacy passed trials still receive a friendly, fail-closed preflight.
+    """Legacy passed trials with partial mappings now publish with warnings.
 
     Older deployments could freeze a trial while one or more persisted fields
-    were not mapped. The impact endpoint exposes structured target/field
-    metadata so the UI can group blockers instead of dumping messages.
+    were not mapped. Mapping coverage no longer blocks publication: the impact
+    endpoint surfaces the same structured target/field metadata as risk
+    warnings for the pre-publish dialog, while ``ready`` stays true.
     """
     oid = ontology["id"]
     _dataset(db, monkeypatch)
@@ -5833,12 +5840,12 @@ def test_release_readiness_groups_legacy_missing_property_mappings(
     )
     assert response.status_code == 200, response.text
     readiness = response.json()["data"]["releaseReadiness"]
-    assert readiness["ready"] is False
-    assert readiness["blockingCount"] == 1
+    assert readiness["ready"] is True
+    assert readiness["blockingCount"] == 0
     assert readiness["trialRunId"] == run_payload["id"]
-    assert readiness["repairStrategy"] == "create_draft"
-    assert readiness["repairSourceVersionId"] == draft["id"]
-    assert readiness["errors"] == [{
+    assert readiness["repairStrategy"] is None
+    assert readiness["errors"] == []
+    assert readiness["warnings"] == [{
         "code": "mapping_property_missing",
         "kind": "mapping",
         "id": "mapping-order",

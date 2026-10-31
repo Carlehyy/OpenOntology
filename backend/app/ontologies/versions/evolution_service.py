@@ -867,6 +867,32 @@ def _mapping_entity_class_target_errors(
       if len(target_ids) > 1]
 
 
+# 数据映射「覆盖类」问题：类型未映射、数据集未绑定、存储属性未全覆盖等。
+# 发布/试跑不再强制阻断这些问题——只作为风险提示返回（未映射的类型发布后
+# 没有实例数据），由调用方渲染为警告；已存在绑定自身的完整性问题（主键、
+# 绑定模式冲突、目标类型缺失、字段映射形状、远程绑定契约等）仍 fail-closed。
+MAPPING_COVERAGE_CODES = frozenset({
+    "trial_object_mapping_required",
+    "object_type_mapping_required",
+    "link_type_mapping_required",
+    "mapping_dataset_missing",
+    "mapping_property_missing",
+    "link_mapping_property_missing",
+    "link_mapping_endpoint_missing",
+    "link_mapping_source_object_mapping_missing",
+    "link_mapping_target_object_mapping_missing",
+})
+
+
+def split_mapping_coverage_errors(errors: list[dict]) -> tuple[list[dict], list[dict]]:
+    """把映射契约问题拆成 (阻断错误, 覆盖类风险警告)。"""
+    blocking = [item for item in errors
+                if item.get("code") not in MAPPING_COVERAGE_CODES]
+    warnings = [item for item in errors
+                if item.get("code") in MAPPING_COVERAGE_CODES]
+    return blocking, warnings
+
+
 def validate_trial_mapping_contract(snapshot: dict | None) -> list[dict]:
     """Allow a draft to enter trial once one object has an effective mapping.
 
@@ -918,7 +944,8 @@ def validate_trial_mapping_contract(snapshot: dict | None) -> list[dict]:
     return [{
         "code": "trial_object_mapping_required", "kind": "mapping",
         "id": "", "name": "",
-        "message": "草稿至少需要一个已绑定数据集并完成全部存储属性映射的对象实体，才能进入试跑态",
+        "message": "草稿没有任何已绑定数据集并完成全部存储属性映射的对象实体，"
+                   "试跑与发布都不会灌入实例数据",
         "field": "mapping",
     }]
 
@@ -1074,7 +1101,7 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
                 "id": object_type_id, "name": label(object_type),
                 "message": (
                     f"ObjectType「{label(object_type)}」尚未与数据资产湖建立映射，"
-                    "不能转为发布态"
+                    "发布后该类型将没有实例数据"
                 ),
                 "field": "mapping",
             })
@@ -1291,7 +1318,7 @@ def validate_release_mapping_contract(snapshot: dict | None) -> list[dict]:
                 "id": link_type_id, "name": label(link_type),
                 "message": (
                     f"LinkType「{label(link_type)}」尚未与数据资产湖建立映射，"
-                    "不能转为发布态"
+                    "发布后该关系将没有实例数据"
                 ),
                 "field": "mapping",
             })
@@ -1861,6 +1888,11 @@ def materialize_trial(db: Session, run: OntologyTrialRun, snapshot: dict) -> dic
     snap = complete_snapshot(snapshot)
     errors = ValidationErrors(validate_snapshot(snap))
     warnings = []
+    # 映射覆盖类问题（未映射/未完整映射）不阻断试跑，作为风险警告随试跑
+    # 结果返回；已存在绑定自身的完整性问题仍走 errors 保持 fail-closed。
+    _, coverage_warnings = split_mapping_coverage_errors(
+        validate_trial_mapping_contract(snap))
+    warnings.extend(coverage_warnings)
     projection = persist_trial_projection(
         db, run, snap, errors, warnings, service=sys.modules[__name__],
     )
