@@ -288,3 +288,59 @@ test('版本行只保留状态推进按钮，其余入口收进菜单且点击�
   await draftRow.getByRole('button', { name: `${recoveredDraft.version_number} 更多操作` }).click()
   await expect(draftRow.getByRole('button', { name: '进行本体建模' })).toBeVisible()
 })
+
+test('版本信息区不再承载跳转，引导文案跟随三段式说明更新', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'e2e-token')
+    localStorage.setItem('auth-store', JSON.stringify({
+      state: {
+        token: 'e2e-token',
+        user: { id: 'tester', username: 'tester', role: 'admin' },
+      },
+      version: 0,
+    }))
+  })
+
+  const ok = (route: Route, data: unknown, status = 200) => route.fulfill({
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify({ data }),
+  })
+
+  await page.route(/^https?:\/\/[^/]+\/api\/v[12]\//, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === `/api/v1/ontologies/${ontologyId}`) return ok(route, ontology)
+    if (path === `/api/v2/ontologies/${ontologyId}/version-tree`) {
+      return ok(route, {
+        current_release_id: releaseV2.id,
+        current_release_number: releaseV2.version_number,
+        current_release_version: releaseV2.version_number,
+        versions: [releaseV1, releaseV2, recoveredDraft],
+      })
+    }
+    if (path === `/api/v2/formal/ontologies/${ontologyId}/overview`) return ok(route, overview)
+    if (path === `/api/v2/formal/ontologies/${ontologyId}/facts/recent`) return ok(route, [])
+    return ok(route, [])
+  })
+
+  await page.goto(`/#/ontologies/${ontologyId}?tab=versions`, { waitUntil: 'domcontentloaded' })
+  await expect(page.getByTestId('version-tree')).toBeVisible()
+
+  // 三段式说明：试跑卡片不再出现「全部通过后才允许发布」；发布卡片改用启动流程措辞。
+  const guide = page.getByRole('dialog', { name: '本体版本演进' }).getByLabel('版本状态递进关系')
+  await expect(guide).toContainText('用真实数据在隔离环境验证，不影响正式运行。')
+  await expect(guide).not.toContainText('全部通过后才允许发布')
+  await expect(guide).toContainText('验证通过后发布，即可正式启动此本体流程。')
+
+  // 点击版本号信息区不再跳转：弹窗保持打开、URL 不变。
+  const before = page.url()
+  await page.getByTestId(`version-node-${recoveredDraft.version_number}`)
+    .getByText(recoveredDraft.version_number, { exact: true }).click()
+  await expect(page.getByTestId('version-tree')).toBeVisible()
+  const rowArea = page.getByTestId(`version-node-${recoveredDraft.version_number}`)
+  await expect(rowArea.getByText(recoveredDraft.version_number, { exact: true })).toBeVisible()
+  expect(page.url()).toBe(before)
+
+  // 行内也不再渲染「打开 vX」跳转按钮语义。
+  await expect(page.getByRole('button', { name: new RegExp(`打开 ${recoveredDraft.version_number}`) })).toHaveCount(0)
+})

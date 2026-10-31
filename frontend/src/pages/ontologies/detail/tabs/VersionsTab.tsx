@@ -331,7 +331,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         tone: 'good',
         text: recovery
           ? `${node.version_number} 已创建为恢复草稿；正式环境未改变，请先完成隔离试跑。`
-          : `${node.version_number} 已从完整快照创建，可直接点击节点进入编辑。`,
+          : `${node.version_number} 已从完整快照创建，可从「更多操作」进入本体建模或查看图谱。`,
       })
     },
   })
@@ -464,12 +464,8 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
         >
           <span className={`absolute -left-[1.72rem] top-5 h-3 w-3 rounded-full ring-4 ${meta.dot}`} aria-hidden="true" />
           <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => openVersion(node)}
-              className="min-w-0 flex-1 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              aria-label={`打开 ${node.version_number} ${stageText}`}
-            >
+            {/* 版本信息区仅展示，不承载跳转；进入图谱/映射/建模统一走行内按钮与 ⋯ 菜单。 */}
+            <div className="min-w-0 flex-1 rounded-lg text-left">
               <div className="flex min-w-0 items-center gap-2">
                 {node.node_kind === 'release'
                   ? <GitCommitHorizontal size={16} className={`shrink-0 ${stage === 'current' ? 'text-brand-ink' : 'text-muted-foreground'}`} />
@@ -498,7 +494,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
                   </span>
                 )}
               </div>
-            </button>
+            </div>
 
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
               {editing && (
@@ -624,12 +620,12 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
             <div className="flex w-9 items-center justify-center text-[var(--color-text-tertiary)]"><ArrowRight size={18} /></div>
             <div className="rounded-xl border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] p-3">
               <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-warning)]"><span className="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--color-warning)] text-[11px] text-[var(--color-text-inverse)]">2</span>试跑态</div>
-              <p className="mt-1.5 text-xs leading-5 text-[var(--color-warning)]">用真实数据在隔离环境验证，不影响正式运行；全部通过后才允许发布。</p>
+              <p className="mt-1.5 text-xs leading-5 text-[var(--color-warning)]">用真实数据在隔离环境验证，不影响正式运行。</p>
             </div>
             <div className="flex w-9 items-center justify-center text-[var(--color-text-tertiary)]"><ArrowRight size={18} /></div>
             <div className="rounded-xl border border-brand-line bg-brand-soft p-3">
               <div className="flex items-center gap-2 text-sm font-semibold text-brand-ink"><span className="flex h-5 w-5 items-center justify-center rounded-full bg-brand text-[11px] text-[var(--color-text-inverse)]"><Check size={12} /></span>发布态</div>
-              <p className="mt-1.5 text-xs leading-5 text-brand-ink">验证通过后发布。全平台只按最新发布运行，发布后内容只读。</p>
+              <p className="mt-1.5 text-xs leading-5 text-brand-ink">验证通过后发布，即可正式启动此本体流程。</p>
             </div>
           </div>
         )}
