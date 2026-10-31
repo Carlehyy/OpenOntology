@@ -992,7 +992,9 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
     : saveStatusLabel(saveState, saveCountdown)
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-muted" data-testid="ontology-structure-graph">
+    // data-published-version：状态条上的发布版徽章已下线，保留机器可读锚点
+    // 供 e2e 断言结构视图绑定的发布版本（含版本切换后的重挂载同步）。
+    <div className="flex h-full min-h-0 flex-col bg-muted" data-testid="ontology-structure-graph" data-published-version={workspace.version}>
       <div className="z-40 flex shrink-0 items-stretch border-b border-border bg-card">
         <div className="relative flex min-w-0 flex-1">
           <div
@@ -1112,16 +1114,6 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
               {saveLabel}
             </span>
           )}
-          <span className="h-3 w-px bg-[var(--color-bg-active)]" />
-          <span>发布版 <span className="font-mono font-semibold text-brand-ink" data-testid="published-structure-version">{workspace.version}</span></span>
-          <span className="h-3 w-px bg-[var(--color-bg-active)]" />
-          <span
-            data-testid="published-structure-readonly"
-            title="当前页面只允许调整并保存画布布局，不允许修改本体模型结构"
-            className="pointer-events-auto inline-flex shrink-0 items-center gap-1 font-medium text-muted-foreground"
-          >
-            <ShieldCheck size={13} className="text-brand-ink" />发布快照 · 结构只读
-          </span>
         </div>
 
         {hasDependency && (
@@ -1129,14 +1121,6 @@ function StructureGraph({ ontologyId, ontologyName, workspace }: {
             <div className="flex items-center gap-2 text-xs text-foreground"><Sparkles size={14} className={sentinelId ? 'text-viz-fuchsia' : 'text-viz-violet'} /><span className="font-medium">{dependencyHighlight.summary || '没有找到直接使用节点'}</span><button type="button" onClick={() => { setFunctionId(''); setSentinelId('') }} className="ml-1 rounded p-1 text-[var(--color-text-tertiary)] hover:bg-muted"><X size={12} /></button></div>
           </div>
         )}
-
-        <div
-          data-testid="structure-canvas-hint"
-          aria-hidden="true"
-          className="pointer-events-none absolute bottom-[7.5rem] left-3 z-10 rounded-lg bg-card px-2.5 py-1 text-[10px] text-[var(--color-text-tertiary)] shadow-sm backdrop-blur"
-        >
-          左键拖节点 · 拖空白平移 · 滚轮缩放
-        </div>
 
         <DetailPanel workspace={workspace} selection={detail} onClose={() => setDetail(null)} />
 

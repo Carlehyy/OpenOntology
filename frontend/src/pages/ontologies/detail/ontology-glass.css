@@ -43,9 +43,9 @@
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
-  /* 与总览 overview-panel 的实线边框同口径（语义令牌），替代半透明白玻璃边 */
+  /* 边框与圆角均与总览 overview-panel 同口径（语义令牌），替代半透明白玻璃边 */
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 14px;
   box-shadow: var(--glass-shadow);
   transition: transform 220ms cubic-bezier(.2,.8,.2,1), box-shadow 220ms ease, border-color 220ms ease;
 }

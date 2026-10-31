@@ -705,7 +705,8 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(detailHeader).toHaveCSS('box-shadow', 'none')
   await expect(detailContent).toHaveCSS('box-shadow', 'none')
   await expect(page.getByTestId('current-release-version')).toHaveText('v1')
-  await expect(page.getByTestId('published-structure-version')).toHaveText('v1')
+  // 发布版徽章已下线，发布版本经根容器 data-published-version 锚点断言
+  await expect(page.getByTestId('ontology-structure-graph')).toHaveAttribute('data-published-version', 'v1')
   await expect(page.getByTestId('ontology-structure-graph')).toBeVisible()
   const miniMap = page.getByTestId('rf__minimap')
   const miniMapSvg = miniMap.locator('svg.react-flow__minimap-svg')
@@ -719,7 +720,6 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(page.getByTestId('structure-node-action')).toHaveCount(0)
   await expect(page.getByTestId('structure-edge-relation')).toHaveCount(1)
   await expect(page.getByLabel('搜索本体结构')).toHaveAttribute('placeholder', '搜索对象实体或实体关系')
-  await expect(page.getByTestId('published-structure-readonly')).toHaveText('发布快照 · 结构只读')
   await expect(page.getByRole('button', { name: '打开图谱编辑器修改模型' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '查看本体图谱' })).toBeVisible()
   // 「业务文档」弹窗：读取当前发布版本语义层的需求文档。该本体由 API 直接

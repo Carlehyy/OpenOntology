@@ -296,8 +296,8 @@ test('点击本体结构后画布内容首次可见时已经居中且不再横�
   const node = page.getByTestId('structure-node-object')
   await expect(graph).toBeVisible()
   await expect(node).toBeVisible()
-  // 画布常驻操作提示
-  await expect(page.getByTestId('structure-canvas-hint')).toContainText('左键拖节点 · 拖空白平移 · 滚轮缩放')
+  // 画布常驻操作提示条已按需求下线，画布内不应再出现该元素
+  await expect(page.getByTestId('structure-canvas-hint')).toHaveCount(0)
   await page.waitForTimeout(750)
 
   const frames = await page.evaluate(() => {

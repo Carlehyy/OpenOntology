@@ -803,7 +803,7 @@ test('F3：编辑态下发布指针切换（同rev/fingerprint新节点）退出
   // 哨兵重取整体重挂载，业务文档弹窗随之销毁——编辑会话终止且草稿不残留。
   await expect(page.getByLabel('关闭业务文档')).toHaveCount(0)
   await expect(page.getByTestId('structure-doc-editor')).toHaveCount(0)
-  await expect(page.getByTestId('published-structure-version')).toHaveText('v2')
+  await expect(page.getByTestId('ontology-structure-graph')).toHaveAttribute('data-published-version', 'v2')
 
   // 旧草稿没有任何新 PUT；唯一的 PUT 目标仍是旧节点 URL，基线也是旧节点
   expect(putBodies.length).toBe(1)
@@ -955,7 +955,7 @@ async function deferredStaleResponseAfterSwitchFlow(
   expect(mock.deferred.puts[0].target).toBe(`/api/v2/ontologies/${ontologyId}/versions/release-1/semantic/document`)
   mock.deferred.workspace[0]()
 
-  await expect(page.getByTestId('published-structure-version')).toHaveText('v2')
+  await expect(page.getByTestId('ontology-structure-graph')).toHaveAttribute('data-published-version', 'v2')
   await page.getByRole('button', { name: '业务文档' }).click()
   await expect(page.getByTestId('structure-doc-content')).toContainText('v2 发布正文')
   await page.getByTestId('structure-doc-edit').click()
@@ -1030,7 +1030,7 @@ async function deferredDualMutationFlow(
   await expect(page.getByTestId('structure-doc-edit-save')).toContainText('正在保存')
   // 显式释放 workspace：指针切换 v2，A 弹窗销毁（A 的 deferred 请求继续挂着）
   mock.deferred.workspace[0]()
-  await expect(page.getByTestId('published-structure-version')).toHaveText('v2')
+  await expect(page.getByTestId('ontology-structure-graph')).toHaveAttribute('data-published-version', 'v2')
 
   // B：重开、开始编辑、脏草稿、打开 ConfirmDialog、继续编辑、发起自身 PUT
   await page.getByRole('button', { name: '业务文档' }).click()
@@ -1370,7 +1370,7 @@ test('F3：在途保存响应不得写入切换后的新上下文缓存（deferr
   await page.getByTestId('structure-doc-edit-save').click()
   await expect.poll(() => mock.deferred.puts.length).toBe(1)
   mock.deferred.workspace[0]()
-  await expect(page.getByTestId('published-structure-version')).toHaveText('v2')
+  await expect(page.getByTestId('ontology-structure-graph')).toHaveAttribute('data-published-version', 'v2')
   await expect(page.getByLabel('关闭业务文档')).toHaveCount(0)
 
   // 旧响应到达：上下文已切换 → 完全静默

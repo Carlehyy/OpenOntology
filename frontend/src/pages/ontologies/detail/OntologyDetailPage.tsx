@@ -179,16 +179,16 @@ export default function OntologyDetailPage() {
           : ''
       }`}>
         <div className="flex min-w-0 items-center gap-3">
-          {/* 本体名常驻页头:治理者多本体切换时先确认"在治理谁",点击回到总览 */}
+          {/* 本体名常驻页头:治理者多本体切换时先确认"在治理谁",点击回到本体管理列表 */}
           <button
             type="button"
             data-testid="ontology-detail-name"
-            onClick={() => selectGroup('overview')}
+            onClick={() => navigate('/ontologies')}
             className="flex min-w-0 shrink-[2] flex-col items-start rounded-lg px-1 py-0.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title={`${ontology.name} · 点击返回本体总览`}
+            title={`${ontology.name} · 点击返回本体管理`}
           >
             <span className="max-w-[220px] truncate text-[15px] font-semibold leading-5 text-foreground">{ontology.name}</span>
-            <span className="text-[11px] leading-4 text-[var(--color-text-tertiary)]">本体详情 · 点击返回总览</span>
+            <span className="text-[11px] leading-4 text-[var(--color-text-tertiary)]">本体详情 · 点击返回本体管理</span>
           </button>
           <span aria-hidden="true" className="hidden h-6 w-px shrink-0 bg-[var(--color-bg-active)] sm:block" />
           <div className="relative min-w-0">
