@@ -78,8 +78,6 @@ const STAGE_META: Record<VersionStage, { label: string; badge: 'success' | 'warn
 }
 
 const VERSION_ACTION_BUTTON = {
-  editor: 'border-viz-violet-soft bg-viz-violet-soft text-viz-violet shadow-sm hover:border-viz-violet-soft hover:bg-viz-violet-soft focus-visible:ring-2 focus-visible:ring-ring',
-  mapping: 'border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] shadow-sm hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] focus-visible:ring-2 focus-visible:ring-ring',
   trial: 'border-[var(--color-warning)] bg-[var(--color-warning)] text-[var(--color-text-inverse)] shadow-sm hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:ring-2 focus-visible:ring-ring',
   release: 'border-brand bg-brand-deep text-[var(--color-text-inverse)] shadow-sm hover:border-brand hover:bg-brand-deep focus-visible:ring-2 focus-visible:ring-ring',
 } as const
@@ -187,6 +185,19 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
   const [notice, setNotice] = useState<{ tone: 'good' | 'bad'; text: string } | null>(null)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
 
+  // 菜单打开期间点击任意空白处立即收起；触发按钮与菜单本体同属
+  // [data-version-actions-menu] 容器，容器内点击交给各自的 onClick 处理。
+  useEffect(() => {
+    if (!openMenuId) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null
+      if (target?.closest?.('[data-version-actions-menu]')) return
+      setOpenMenuId(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [openMenuId])
+
   const treeQuery = useQuery({
     queryKey: ['version-tree', ontologyId],
     queryFn: () => ontologyVersionApi.tree(ontologyId),
@@ -286,7 +297,7 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
     navigate(`/ontologies/${ontologyId}/graph?versionId=${node.id}&view=mapping`)
   }
 
-  // 草稿版本的统一配置入口：业务澄清页（在线配置工作台）
+  // 草稿版本的建模入口：业务澄清页（在线配置工作台），从 ⋯ 菜单「进行本体建模」进入
   const openOnlineConfig = (node: VersionNode) => {
     onClose?.()
     navigate(`/explore?ontologyId=${ontologyId}&versionId=${node.id}`)
@@ -490,41 +501,20 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
             </button>
 
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
-              {editing ? (
-                <>
-                  <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.trial} loading={runTrial.isPending} onClick={() => runTrial.mutate(node)}>
-                    转为试跑态
-                  </Button>
-                  <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.editor} data-testid="online-config-button" onClick={() => openOnlineConfig(node)}>
-                    <Compass size={14} /> 在线配置
-                  </Button>
-                </>
-              ) : trial ? (
-                <>
-                  <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.release} onClick={() => {
-                    promote.reset()
-                    createRepairDraft.reset()
-                    inspectImpact.mutate(node)
-                  }}>转为发布态</Button>
-                  <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.editor} onClick={() => openVersion(node)}>
-                    打开编辑器
-                  </Button>
-                  <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.mapping} onClick={() => openMapping(node)}>
-                    <Database size={14} /> 数据映射
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.editor} onClick={() => openVersion(node)}>
-                    打开编辑器
-                  </Button>
-                  <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.mapping} onClick={() => openMapping(node)}>
-                    <Database size={14} /> 数据映射
-                  </Button>
-                </>
+              {editing && (
+                <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.trial} loading={runTrial.isPending} onClick={() => runTrial.mutate(node)}>
+                  转为试跑态
+                </Button>
+              )}
+              {trial && (
+                <Button variant="outline" size="sm" className={VERSION_ACTION_BUTTON.release} onClick={() => {
+                  promote.reset()
+                  createRepairDraft.reset()
+                  inspectImpact.mutate(node)
+                }}>转为发布态</Button>
               )}
 
-              <div className="relative">
+              <div className="relative" data-version-actions-menu>
                 <button
                   type="button"
                   className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -554,6 +544,14 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
                     }}>
                       <Database size={13} /> 查看数据映射
                     </button>
+                    {editing && (
+                      <button type="button" className={menuItemClass} onClick={() => {
+                        setOpenMenuId(null)
+                        openOnlineConfig(node)
+                      }}>
+                        <Compass size={13} /> 进行本体建模
+                      </button>
+                    )}
                     <button type="button" className={menuItemClass} onClick={() => {
                       setOpenMenuId(null)
                       setSource(node)

@@ -119,7 +119,7 @@ test('顶栏多标签页：打开、切换、域内路径恢复、关闭与刷�
   await expect(agentTab).toHaveAttribute('aria-selected', 'false')
   await expect(ontologiesTab).toHaveAttribute('aria-selected', 'true')
 
-  // 业务澄清已从导航隐藏（仅经本体详情页「在线配置」进入）：经深链打开标签，再收起该入口标签，聚焦本体助手与本体管理的双标签流转
+  // 业务澄清已从导航隐藏（仅经本体详情页「进行本体建模」进入）：经深链打开标签，再收起该入口标签，聚焦本体助手与本体管理的双标签流转
   await page.goto('/#/explore')
   await expect(page).toHaveURL(/\/#\/explore$/)
   await tabList.getByRole('tab', { name: '本体模型 · 业务澄清' })

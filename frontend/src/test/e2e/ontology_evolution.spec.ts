@@ -332,7 +332,9 @@ test('complete branch → real-data trial → reviewed release works in the brow
   const draftRow = page.getByTestId('version-node-v0.1')
   await expect(draftRow).toContainText('草稿态')
   await expect(draftRow).not.toContainText('真实湖数据隔离试跑')
-  await expect(draftRow.getByRole('button', { name: '在线配置' })).toBeVisible()
+  // 行内只保留状态推进按钮（草稿→试跑、试跑→发布），其余入口全部收进 ⋯ 菜单。
+  await expect(draftRow.getByRole('button', { name: '转为试跑态' })).toBeVisible()
+  await expect(draftRow.getByRole('button', { name: '在线配置' })).toHaveCount(0)
   await expect(draftRow.getByRole('button', { name: '打开编辑器' })).toHaveCount(0)
   await expect(draftRow.getByRole('button', { name: '数据映射' })).toHaveCount(0)
   await expect(draftRow.getByRole('button', { name: 'v0.1 更多操作' })).toBeVisible()
@@ -341,12 +343,15 @@ test('complete branch → real-data trial → reviewed release works in the brow
   const releaseRow = page.getByTestId('version-node-v0')
   await releaseRow.getByRole('button', { name: 'v0 更多操作' }).click()
   await expect(releaseRow.getByRole('button', { name: '创建新版本' })).toBeVisible()
-  // 任意状态的版本行都提供图谱编辑器与数据映射两个独立页面的直达入口。
+  // 任意状态的版本行都提供图谱编辑器与数据映射两个独立页面的直达入口；
+  // 建模入口（原「在线配置」）只属于草稿行，发布行不出现。
   await expect(releaseRow.getByRole('button', { name: '查看本体图谱' })).toBeVisible()
   await expect(releaseRow.getByRole('button', { name: '查看数据映射' })).toBeVisible()
+  await expect(releaseRow.getByRole('button', { name: '进行本体建模' })).toHaveCount(0)
   await draftRow.getByRole('button', { name: 'v0.1 更多操作' }).click()
   await expect(releaseRow.getByRole('button', { name: '创建新版本' })).toHaveCount(0)
   await expect(draftRow.getByRole('button', { name: '创建新版本' })).toBeVisible()
+  await expect(draftRow.getByRole('button', { name: '进行本体建模' })).toBeVisible()
   await expect(draftRow.getByRole('button', { name: '配置映射' })).toHaveCount(0)
   await draftRow.getByRole('button', { name: 'v0.1 更多操作' }).click()
 
@@ -368,8 +373,9 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await deleteDialog.getByRole('button', { name: '删除此分支' }).click()
   await expect(page.getByTestId('version-node-v0.2')).toHaveCount(0)
 
-  // 草稿的「在线配置」统一进入业务澄清工作台；数据映射在「数据映射」视图中完成。
-  await draftRow.getByRole('button', { name: '在线配置' }).click()
+  // 草稿经 ⋯ 菜单「进行本体建模」进入业务澄清工作台；数据映射在「数据映射」视图中完成。
+  await draftRow.getByRole('button', { name: 'v0.1 更多操作' }).click()
+  await draftRow.getByRole('button', { name: '进行本体建模' }).click()
   await expect(page).toHaveURL(new RegExp(`/explore\\?ontologyId=${ontology.id}&versionId=${draft.id}`))
   await page.getByTestId('explore-view-mapping').click()
   await expect(page).toHaveURL(new RegExp(`/explore\\?ontologyId=${ontology.id}&versionId=${draft.id}&view=mapping`))
@@ -665,7 +671,8 @@ test('complete branch → real-data trial → reviewed release works in the brow
   expect(dynamicSentinel).toMatchObject({ origin: 'assistant_dynamic', enabled: false, trialCurrent: false })
 
   // 只有版本演进里可以打开历史快照，且历史发布版严格只读。
-  await page.getByTestId('version-node-v0').getByRole('button', { name: '打开编辑器' }).click()
+  await page.getByTestId('version-node-v0').getByRole('button', { name: 'v0 更多操作' }).click()
+  await page.getByTestId('version-node-v0').getByRole('button', { name: '查看本体图谱' }).click()
   await expect(page).toHaveURL(new RegExp(`/ontologies/${ontology.id}/graph\\?versionId=`))
   await expect(page.getByText(/历史发布 v0 · 可查看定义并保存画布布局/)).toBeVisible({ timeout: 20_000 })
 

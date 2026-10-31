@@ -224,3 +224,67 @@ test('版本树更多操作菜单对任意状态版本提供图谱与数据映�
     .getByRole('button', { name: '查看本体图谱' }).click()
   await expect(page).toHaveURL(new RegExp(`/ontologies/${ontologyId}/graph$`))
 })
+
+test('版本行只保留状态推进按钮，其余入口收进菜单且点击空白立即收起', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'e2e-token')
+    localStorage.setItem('auth-store', JSON.stringify({
+      state: {
+        token: 'e2e-token',
+        user: { id: 'tester', username: 'tester', role: 'admin' },
+      },
+      version: 0,
+    }))
+  })
+
+  const ok = (route: Route, data: unknown, status = 200) => route.fulfill({
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify({ data }),
+  })
+
+  await page.route(/^https?:\/\/[^/]+\/api\/v[12]\//, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === `/api/v1/ontologies/${ontologyId}`) return ok(route, ontology)
+    if (path === `/api/v2/ontologies/${ontologyId}/version-tree`) {
+      return ok(route, {
+        current_release_id: releaseV2.id,
+        current_release_number: releaseV2.version_number,
+        current_release_version: releaseV2.version_number,
+        versions: [releaseV1, releaseV2, recoveredDraft],
+      })
+    }
+    if (path === `/api/v2/formal/ontologies/${ontologyId}/overview`) return ok(route, overview)
+    if (path === `/api/v2/formal/ontologies/${ontologyId}/facts/recent`) return ok(route, [])
+    return ok(route, [])
+  })
+
+  await page.goto(`/#/ontologies/${ontologyId}?tab=versions`, { waitUntil: 'domcontentloaded' })
+  await expect(page.getByTestId('version-tree')).toBeVisible()
+
+  // 草稿行：只保留「转为试跑态」，原「在线配置」更名「进行本体建模」收进 ⋯ 菜单。
+  const draftRow = page.getByTestId(`version-node-${recoveredDraft.version_number}`)
+  await expect(draftRow.getByRole('button', { name: '转为试跑态' })).toBeVisible()
+  await expect(draftRow.getByRole('button', { name: '在线配置' })).toHaveCount(0)
+  await expect(draftRow.getByRole('button', { name: '打开编辑器' })).toHaveCount(0)
+  await expect(draftRow.getByRole('button', { name: '数据映射' })).toHaveCount(0)
+
+  // 发布行：行内不再有任何操作按钮，只剩 ⋯ 菜单；菜单内也没有建模入口。
+  const releaseRow = page.getByTestId(`version-node-${releaseV1.version_number}`)
+  await expect(releaseRow.getByRole('button', { name: '转为试跑态' })).toHaveCount(0)
+  await expect(releaseRow.getByRole('button', { name: '转为发布态' })).toHaveCount(0)
+  await expect(releaseRow.getByRole('button', { name: '打开编辑器' })).toHaveCount(0)
+  await expect(releaseRow.getByRole('button', { name: '数据映射' })).toHaveCount(0)
+
+  await draftRow.getByRole('button', { name: `${recoveredDraft.version_number} 更多操作` }).click()
+  await expect(draftRow.getByRole('button', { name: '进行本体建模' })).toBeVisible()
+
+  // 菜单打开后点击弹窗空白处（版本树标题区域）必须立即收起。
+  await page.getByText('版本树', { exact: true }).click()
+  await expect(draftRow.getByRole('button', { name: '进行本体建模' })).toHaveCount(0)
+  await expect(draftRow.getByRole('button', { name: '查看本体图谱' })).toHaveCount(0)
+
+  // 收起后再点击 ⋯ 仍可正常重新打开（点击空白不会破坏开关状态）。
+  await draftRow.getByRole('button', { name: `${recoveredDraft.version_number} 更多操作` }).click()
+  await expect(draftRow.getByRole('button', { name: '进行本体建模' })).toBeVisible()
+})

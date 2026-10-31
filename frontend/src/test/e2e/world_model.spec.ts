@@ -245,7 +245,7 @@ test('世界模型与本体模型为一级导航分组，本体管理为本体�
   await ontologyModelGroup.click()
   await expect(page).toHaveURL(/#\/ontologies$/)
   await expect(sidebar.getByRole('link', { name: '本体管理', exact: true })).toBeVisible()
-  // 业务澄清已改为详情页「在线配置」直达入口，不再出现在导航中
+  // 业务澄清已改为详情页「进行本体建模」直达入口，不再出现在导航中
   await expect(sidebar.getByRole('link', { name: '业务澄清', exact: true })).toHaveCount(0)
   const ontologyLink = sidebar.getByRole('link', { name: '本体管理', exact: true })
   const networkLink = sidebar.getByRole('link', { name: '本体网络', exact: true })

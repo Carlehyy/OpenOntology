@@ -254,7 +254,7 @@ function BindRequiredHint() {
       </span>
       <p className="text-sm font-medium text-[var(--color-text-secondary)]">此视图需要绑定草稿态本体版本</p>
       <p className="max-w-sm text-xs leading-5 text-[var(--color-text-tertiary)]">
-        从本体详情页「版本演进」选择草稿版本，点击「在线配置」进入工作台。
+        从本体详情页「版本演进」选择草稿版本，点击「更多操作 → 进行本体建模」进入工作台。
       </p>
     </div>
   )
