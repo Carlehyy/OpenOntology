@@ -32,9 +32,33 @@ interface HeaderProps {
   onOpenMapping?: () => void;
 }
 
-export default function Header({ readOnly = false, stageLabel, onToggleActions, onToggleFunctions, showActions, showFunctions, onToggleLinks, showLinks, onToggleObjects, showObjects, onOpenMapping }: HeaderProps) {
-  const { ontology, syncStatus, isDirty, syncError, saveToBackend, discardAndReload, lastSentinelSummary } = useOntologyStore();
+interface DefinitionStatBadgesProps {
+  showObjects?: boolean;
+  showLinks?: boolean;
+  showActions?: boolean;
+  showFunctions?: boolean;
+  onToggleObjects?: () => void;
+  onToggleLinks?: () => void;
+  onToggleActions?: () => void;
+  onToggleFunctions?: () => void;
+  /** 宿主布局类（全屏 Header 网格中部 / 嵌入工作台顶部浮动条） */
+  className?: string;
+}
 
+/** 四类定义统计徽章（对象实体/实体关系/执行动作/激活函数）：计数读自 store，
+ *  点击切换对应列表面板。全屏编辑器 Header 中部与嵌入工作台顶部共用。 */
+export function DefinitionStatBadges({
+  showObjects,
+  showLinks,
+  showActions,
+  showFunctions,
+  onToggleObjects,
+  onToggleLinks,
+  onToggleActions,
+  onToggleFunctions,
+  className = '',
+}: DefinitionStatBadgesProps) {
+  const ontology = useOntologyStore((s) => s.ontology);
   if (!ontology) return null;
 
   const stats = {
@@ -43,6 +67,29 @@ export default function Header({ readOnly = false, stageLabel, onToggleActions, 
     actions: ontology.actions.length,
     functions: ontology.functions?.length || 0,
   };
+
+  return (
+    <div className={`flex items-center gap-2 ${className}`}>
+      <button onClick={onToggleObjects} className="flex" aria-label={`查看对象实体，共 ${stats.objects} 个`}>
+        <StatBadge icon={CubeIcon} label="对象实体" value={stats.objects} color="indigo" active={showObjects} />
+      </button>
+      <button onClick={onToggleLinks} className="flex" aria-label={`查看实体关系，共 ${stats.links} 个`}>
+        <StatBadge icon={LinkIcon} label="实体关系" value={stats.links} color="cyan" active={showLinks} />
+      </button>
+      <button onClick={onToggleActions} className="flex" aria-label={`查看执行动作，共 ${stats.actions} 个`}>
+        <StatBadge icon={BoltIcon} label="执行动作" value={stats.actions} color="yellow" active={showActions} />
+      </button>
+      <button onClick={onToggleFunctions} className="flex" aria-label={`查看激活函数，共 ${stats.functions} 个`}>
+        <StatBadge icon={CodeBracketIcon} label="激活函数" value={stats.functions} color="cyan" active={showFunctions} />
+      </button>
+    </div>
+  );
+}
+
+export default function Header({ readOnly = false, stageLabel, onToggleActions, onToggleFunctions, showActions, showFunctions, onToggleLinks, showLinks, onToggleObjects, showObjects, onOpenMapping }: HeaderProps) {
+  const { ontology, syncStatus, isDirty, syncError, saveToBackend, discardAndReload, lastSentinelSummary } = useOntologyStore();
+
+  if (!ontology) return null;
 
   return (
     <header className="fixed top-0 left-0 right-0 z-40 glass border-b border-surface-700">
@@ -61,38 +108,17 @@ export default function Header({ readOnly = false, stageLabel, onToggleActions, 
           </div>
         </div>
 
-        <div className="order-3 flex w-full items-center justify-center gap-2 overflow-x-auto pb-1 md:order-none md:w-auto md:flex-none md:overflow-visible md:pb-0 md:justify-self-center">
-          <button onClick={onToggleObjects} className="flex" aria-label={`查看对象实体，共 ${stats.objects} 个`}>
-            <StatBadge icon={CubeIcon} label="对象实体" value={stats.objects} color="indigo" active={showObjects} />
-          </button>
-          <button onClick={onToggleLinks} className="flex" aria-label={`查看实体关系，共 ${stats.links} 个`}>
-            <StatBadge
-              icon={LinkIcon}
-              label="实体关系"
-              value={stats.links}
-              color="cyan"
-              active={showLinks}
-            />
-          </button>
-          <button onClick={onToggleActions} className="flex" aria-label={`查看执行动作，共 ${stats.actions} 个`}>
-            <StatBadge
-              icon={BoltIcon}
-              label="执行动作"
-              value={stats.actions}
-              color="yellow"
-              active={showActions}
-            />
-          </button>
-          <button onClick={onToggleFunctions} className="flex" aria-label={`查看激活函数，共 ${stats.functions} 个`}>
-            <StatBadge
-              icon={CodeBracketIcon}
-              label="激活函数"
-              value={stats.functions}
-              color="cyan"
-              active={showFunctions}
-            />
-          </button>
-        </div>
+        <DefinitionStatBadges
+          showObjects={showObjects}
+          showLinks={showLinks}
+          showActions={showActions}
+          showFunctions={showFunctions}
+          onToggleObjects={onToggleObjects}
+          onToggleLinks={onToggleLinks}
+          onToggleActions={onToggleActions}
+          onToggleFunctions={onToggleFunctions}
+          className="order-3 w-full justify-center overflow-x-auto pb-1 md:order-none md:w-auto md:flex-none md:overflow-visible md:pb-0 md:justify-self-center"
+        />
 
         <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2 text-sm text-surface-500 md:ml-0 md:justify-self-end">
           {onOpenMapping && (

@@ -143,22 +143,6 @@ export interface SaveOntologyDocumentResult extends OntologyVersionSemantic {
   documentFingerprint: string
 }
 
-/** POST .../versions/{vid}/trial-preflight 的单项检查（权威门禁，失败即阻断试跑）。 */
-export interface OntologyTrialPreflightCheck {
-  id: 'editable_draft' | 'single_flight' | 'base_up_to_date' | 'structure' | 'mapping_contract' | 'semantic_consistency' | string
-  label: string
-  status: 'pass' | 'fail'
-  errors: OntologyReleaseGateIssue[]
-}
-
-/** POST .../versions/{vid}/trial-preflight 的 data。 */
-export interface OntologyTrialPreflight {
-  ok: boolean
-  versionId: string
-  revision: string
-  checks: OntologyTrialPreflightCheck[]
-}
-
 export interface OntologyImpactReport {
   impactHash: string
   baseOutdated: boolean
@@ -238,9 +222,6 @@ export const ontologyVersionApi = {
   runTrial: (ontologyId: string, versionId: string) =>
     apiClientV2.post<OntologyTrialRun>(
       `/ontologies/${ontologyId}/versions/${versionId}/trial-runs`, {}),
-  trialPreflight: (ontologyId: string, versionId: string) =>
-    apiClientV2.post<OntologyTrialPreflight>(
-      `/ontologies/${ontologyId}/versions/${versionId}/trial-preflight`, {}),
   impact: (ontologyId: string, versionId: string) =>
     apiClientV2.get<OntologyImpactReport>(
       `/ontologies/${ontologyId}/versions/${versionId}/impact`),

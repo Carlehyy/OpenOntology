@@ -6,7 +6,7 @@ import { ontologyVersionApi } from '@/api/v2/ontology-versions';
 import './palantir-graph.css';
 
 import Canvas from './components/Canvas';
-import Header, { LintBadge, SaveButton } from './components/Header';
+import Header, { DefinitionStatBadges, LintBadge, SaveButton } from './components/Header';
 import { useOntologyStore, attachAutoSave, attachHistory } from './store/ontologyStore';
 import Toolbar from './components/Toolbar';
 import Panel from './components/Panel';
@@ -347,21 +347,35 @@ export default function GraphWorkspace({
             onOpenMapping={onOpenMapping}
           />
         ) : (
-          /* 无 Header 时（嵌入浅色工作台）：保存/校验入口浮动在画布右上 */
+          /* 无 Header 时（嵌入浅色工作台）：保存/校验入口浮动在画布右上，
+             四类定义统计徽章浮动在画布顶部中间（与全屏编辑器 Header 中部同源） */
           ontology && (
-            <div className="fixed right-4 top-3 z-40 flex items-center gap-2">
-              <LintBadge readOnly={schemaReadOnly} />
-              {!schemaReadOnly && (
-                <SaveButton
-                  syncStatus={syncStatus}
-                  isDirty={isDirty}
-                  syncError={syncError}
-                  onSave={() => void useOntologyStore.getState().saveToBackend()}
-                  onForceSave={() => void useOntologyStore.getState().saveToBackend({ force: true })}
-                  onReload={() => void useOntologyStore.getState().discardAndReload()}
-                />
-              )}
-            </div>
+            <>
+              <DefinitionStatBadges
+                className="fixed left-1/2 top-3 z-40 max-w-[calc(100%-2rem)] -translate-x-1/2 overflow-x-auto"
+                showObjects={showObjectPanel}
+                showLinks={showLinkPanel}
+                showActions={showActionPanel}
+                showFunctions={showFunctionPanel}
+                onToggleObjects={() => setShowObjectPanel(v => !v)}
+                onToggleLinks={() => setShowLinkPanel(v => !v)}
+                onToggleActions={() => setShowActionPanel(v => !v)}
+                onToggleFunctions={() => setShowFunctionPanel(v => !v)}
+              />
+              <div className="fixed right-4 top-3 z-40 flex items-center gap-2">
+                <LintBadge readOnly={schemaReadOnly} />
+                {!schemaReadOnly && (
+                  <SaveButton
+                    syncStatus={syncStatus}
+                    isDirty={isDirty}
+                    syncError={syncError}
+                    onSave={() => void useOntologyStore.getState().saveToBackend()}
+                    onForceSave={() => void useOntologyStore.getState().saveToBackend({ force: true })}
+                    onReload={() => void useOntologyStore.getState().discardAndReload()}
+                  />
+                )}
+              </div>
+            </>
           )
         )}
         <main className={showHeader ? 'h-full pt-16' : 'h-full'}>

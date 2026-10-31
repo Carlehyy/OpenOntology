@@ -56,7 +56,7 @@ export default defineConfig({
     '**/explore_binding_retry.spec.ts',
     '**/explore_diagram_interaction.spec.ts',
     '**/explore_document_risk.spec.ts',
-    '**/explore_model_consistency.spec.ts',
+    '**/explore_model_view.spec.ts',
     '**/explore_pending_new_session.spec.ts',
     '**/explore_process_panel.spec.ts',
     '**/explore_stream_idle_recovery.spec.ts',

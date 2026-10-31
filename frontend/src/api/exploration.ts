@@ -389,36 +389,6 @@ export interface BxWorkspacePreview {
   truncated: boolean
 }
 
-// ---------- 本体预览投影（只读） ----------
-
-/** add=将新增 / exists=已存在将跳过 / conflict=同名冲突不进默认选择集 */
-export type OntologyPreviewDisposition = 'add' | 'exists' | 'conflict'
-
-export interface OntologyPreviewItem {
-  key: string
-  name: string
-  displayName: string
-  disposition: OntologyPreviewDisposition
-}
-
-export interface OntologyPreview {
-  canvasFingerprint: string
-  canvasVersion: number
-  /** 是否绑定本体版本；绑定时与基线快照比对，未绑定全部按「将新增」。 */
-  bound: boolean
-  ontologyId?: string | null
-  ontologyVersionId?: string | null
-  readiness: Pick<Readiness, 'ready' | 'gatesPassed' | 'gatesTotal' | 'blockingCount' | 'advisoryCount'>
-  projected: {
-    objectTypes: OntologyPreviewItem[]
-    linkTypes: OntologyPreviewItem[]
-    actions: OntologyPreviewItem[]
-    functions: OntologyPreviewItem[]
-    sentinels: OntologyPreviewItem[]
-  }
-  semanticIssues: DraftSemanticIssue[]
-}
-
 // ---------- REST ----------
 
 export const explorationApi = {
@@ -437,8 +407,6 @@ export const explorationApi = {
       `/exploration/sessions/${sid}/canvas`),
   readiness: (sid: string) =>
     apiClientV2.get<Readiness>(`/exploration/sessions/${sid}/readiness`),
-  ontologyPreview: (sid: string) =>
-    apiClientV2.get<OntologyPreview>(`/exploration/sessions/${sid}/ontology-preview`),
 
   generateDocument: (sid: string, modelId?: string | null) =>
     apiClientV2.post<BxDocument>(`/exploration/sessions/${sid}/documents`,

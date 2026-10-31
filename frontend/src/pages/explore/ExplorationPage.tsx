@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Bot, Boxes, Check, CircleHelp, Compass, Copy, Download, ExternalLink, Files, FileText, FlaskConical, GitBranch, Globe2, History, Layers, Link2, List, ListTodo,
+  Bot, Boxes, Check, CircleHelp, Compass, Copy, Download, ExternalLink, Files, FileText, GitBranch, Globe2, History, Layers, Link2, List, ListTodo,
   Loader2, Paperclip, Plus, Send, Trash2, User, Wrench, X,
 } from 'lucide-react'
 import {
@@ -27,14 +27,11 @@ import { toast } from 'sonner'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import Md from './Md'
 import CanvasPanel from './CanvasPanel'
-import ConsistencyPanel from './ConsistencyPanel'
 import { derivePlanFromSteps, foldStep, foldTextDelta, isLivenessStep, runningStepLabel } from './messageViews'
 import DocumentsView from './DocumentsView'
 import DraftReviewDrawer from './DraftReviewDrawer'
 import FileWorkspaceDrawer from './FileWorkspaceDrawer'
-import OntologyPreviewPanel from './OntologyPreviewPanel'
 import { PipelinePositionHint } from './PipelinePositionHint'
-import TrialPreflightDialog from './TrialPreflightDialog'
 import { EXPLORE_VIEWS, parseExploreView, parsePendingNewSession, parseSessionBinding, resolveBoundSession, sessionBindingKey, shouldAutoSelectLatestSession, bindingFailureBannerText, type ExploreView } from './sessionBinding'
 import { SplitHandle, useSplitLayout } from '@/hooks/useSplitLayout'
 import { LazyGraphWorkspace, LazyMappingWorkspace } from '@/components/explore/ExploreWorkbenchViews'
@@ -311,7 +308,6 @@ export default function ExplorationPage() {
   // -- 对话 + 画布 --
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [canvas, setCanvas] = useState<BusinessCanvas | null>(null)
-  const [canvasVersion, setCanvasVersion] = useState(0)
   const [completeness, setCompleteness] = useState<Completeness | null>(null)
   const [readiness, setReadiness] = useState<Readiness | null>(null)
   const [input, setInput] = useState('')
@@ -448,7 +444,6 @@ export default function ExplorationPage() {
     setUploads([])
     setMessages([])
     setCanvas(null)
-    setCanvasVersion(0)
     setCompleteness(null)
     setReadiness(null)
     try {
@@ -463,7 +458,6 @@ export default function ExplorationPage() {
         plan: m.role === 'assistant' ? derivePlanFromSteps(m.steps || []) : null,
       })))
       setCanvas(detail.canvas)
-      setCanvasVersion(detail.canvasVersion || 0)
       setCompleteness(detail.completeness)
       setReadiness(detail.readiness)
       setAttachments(sessionAttachments)
@@ -497,7 +491,6 @@ export default function ExplorationPage() {
         selectSession('')
         setMessages([])
         setCanvas(null)
-        setCanvasVersion(0)
         setCompleteness(null)
         setReadiness(null)
         setAttachments([])
@@ -614,15 +607,9 @@ export default function ExplorationPage() {
     enabled: view === 'model' && Boolean(sid),
   })
 
-  // 绑定版本生命周期（版本树口径）：仅 editing 草稿提供「转为试跑态」入口；
-  // 试跑成功后 lifecycle 变化会同步进 GraphWorkspace 的 key，强制重挂以按试跑态只读重读。
+  // 绑定版本生命周期（版本树口径）：lifecycle 变化会同步进 GraphWorkspace 的
+  // key，强制重挂以按对应状态（如试跑态只读）重读。
   const workbenchVersionNode = boundVersionTree?.versions.find(v => v.id === workbenchVersionId) || null
-  const canEnterTrial = Boolean(
-    workbenchOntologyId && workbenchVersionId
-    && workbenchVersionNode?.node_kind === 'draft'
-    && workbenchVersionNode.lifecycle_status === 'editing',
-  )
-  const [preflightOpen, setPreflightOpen] = useState(false)
 
   const pickFiles = () => fileInputRef.current?.click()
 
@@ -765,7 +752,6 @@ export default function ExplorationPage() {
             patchAssistant(m => ({ ...m, plan: e.items }))
           } else if (e.type === 'canvas') {
             setCanvas(e.canvas)
-            setCanvasVersion(e.version)
             setCompleteness(e.completeness)
             setReadiness(e.readiness)
           } else if (e.type === 'answer') {
@@ -873,65 +859,35 @@ export default function ExplorationPage() {
           )}
           {view === 'model' && (
             <div className="flex h-full min-h-0 flex-col">
-              {sid && (
-                <div className="shrink-0 border-b border-[var(--color-border)] bg-card px-3 py-2">
-                  <OntologyPreviewPanel sessionId={sid} canvasVersion={canvasVersion} />
-                </div>
-              )}
               {workbenchOntologyId ? (
-              <div className="flex min-h-0 flex-1 flex-col">
-                {workbenchVersionId && (
-                  <div className="shrink-0 border-b border-[var(--color-border)] bg-card px-3 py-2">
-                    <div className="flex items-start gap-2">
-                      <div className="min-w-0 flex-1">
-                        <ConsistencyPanel
-                          ontologyId={workbenchOntologyId}
-                          versionId={workbenchVersionId}
-                          onBackTranslate={busy ? undefined : askInChat}
-                          onGotoDocs={() => updateParams({ view: 'docs' })}
-                        />
-                      </div>
-                      {canEnterTrial && (
-                        <button
-                          type="button"
-                          data-testid="explore-trial-entry"
-                          onClick={() => setPreflightOpen(true)}
-                          title="权威预检通过后把草稿转为试跑态（快照冻结，真实数据仅写入隔离空间）"
-                          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-warning)] bg-[var(--color-warning)] px-3 text-xs font-medium text-[var(--color-text-inverse)] transition-colors hover:border-[var(--color-warning)] hover:bg-[var(--color-warning)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          <FlaskConical size={13} /> 转为试跑态
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {structureTotal === 0 && (
-                  <PipelinePositionHint
-                    readiness={readiness}
-                    hasDocument={modelViewDocs.length > 0}
-                    documentVersion={modelViewDocs[0]?.version ?? null}
-                  />
-                )}
-                <div className="min-h-0 flex-1 overflow-hidden">
-                  <Suspense fallback={viewLoadingFallback}>
-                    <LazyGraphWorkspace
-                      key={`${workbenchVersionId || 'runtime'}:${workbenchVersionNode?.lifecycle_status || 'unknown'}`}
-                      ontologyId={workbenchOntologyId}
-                      versionId={workbenchVersionId}
-                      theme="light"
-                      layout="embedded"
-                      showHeader={false}
-                      onBackToVersions={() => navigate(`/ontologies/${workbenchOntologyId}?tab=versions`)}
-                      onDraftCreated={newVersionId => updateParams({ versionId: newVersionId })}
-                      onSaved={() => {
-                        void queryClient.invalidateQueries({
-                          queryKey: ['ontology-structure-doc', workbenchOntologyId, workbenchVersionId],
-                        })
-                      }}
+                <div className="flex min-h-0 flex-1 flex-col">
+                  {structureTotal === 0 && (
+                    <PipelinePositionHint
+                      readiness={readiness}
+                      hasDocument={modelViewDocs.length > 0}
+                      documentVersion={modelViewDocs[0]?.version ?? null}
                     />
-                  </Suspense>
+                  )}
+                  <div className="min-h-0 flex-1 overflow-hidden">
+                    <Suspense fallback={viewLoadingFallback}>
+                      <LazyGraphWorkspace
+                        key={`${workbenchVersionId || 'runtime'}:${workbenchVersionNode?.lifecycle_status || 'unknown'}`}
+                        ontologyId={workbenchOntologyId}
+                        versionId={workbenchVersionId}
+                        theme="light"
+                        layout="embedded"
+                        showHeader={false}
+                        onBackToVersions={() => navigate(`/ontologies/${workbenchOntologyId}?tab=versions`)}
+                        onDraftCreated={newVersionId => updateParams({ versionId: newVersionId })}
+                        onSaved={() => {
+                          void queryClient.invalidateQueries({
+                            queryKey: ['ontology-structure-doc', workbenchOntologyId, workbenchVersionId],
+                          })
+                        }}
+                      />
+                    </Suspense>
+                  </div>
                 </div>
-              </div>
               ) : (
                 <div className="min-h-0 flex-1">
                   <BindRequiredHint />
@@ -1428,18 +1384,6 @@ export default function ExplorationPage() {
           draft={reviewDraft}
           onClose={() => setReviewDraft(null)}
           onOpenModelView={() => { setReviewDraft(null); updateParams({ view: 'model' }) }}
-        />
-      )}
-      {preflightOpen && workbenchOntologyId && workbenchVersionId && (
-        <TrialPreflightDialog
-          open
-          ontologyId={workbenchOntologyId}
-          versionId={workbenchVersionId}
-          readiness={readiness}
-          onClose={() => setPreflightOpen(false)}
-          onTrialStarted={() => {
-            void queryClient.invalidateQueries({ queryKey: ['version-tree', workbenchOntologyId] })
-          }}
         />
       )}
       <ConfirmModal
