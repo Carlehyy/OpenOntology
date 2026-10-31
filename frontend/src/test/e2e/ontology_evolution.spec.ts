@@ -453,7 +453,9 @@ test('complete branch → real-data trial → reviewed release works in the brow
 
   await page.getByTestId('explore-view-model').click()
   await expect(page).toHaveURL(new RegExp(`/explore\\?ontologyId=${ontology.id}&versionId=${draft.id}&view=model`))
-  await expect(page.getByTestId('graph-workspace-stage')).toContainText('草稿', { timeout: 20_000 })
+  // 嵌入画布已无版本状态条，以顶部四类定义徽章出现为装载完成信号
+  await expect(page.getByRole('button', { name: /^查看对象实体，共 \d+ 个/ })).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByTestId('explore-back-to-versions')).toBeVisible()
   await page.goto(`/#/ontologies/${ontology.id}`)
   await page.getByRole('button', { name: '查看历史版本' }).click()
   await expect(page.getByTestId('version-tree')).toBeVisible()

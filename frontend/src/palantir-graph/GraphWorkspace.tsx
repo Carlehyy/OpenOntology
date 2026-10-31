@@ -6,7 +6,7 @@ import { ontologyVersionApi } from '@/api/v2/ontology-versions';
 import './palantir-graph.css';
 
 import Canvas from './components/Canvas';
-import Header, { DefinitionStatBadges, LintBadge, SaveButton } from './components/Header';
+import Header, { DefinitionStatBadges } from './components/Header';
 import { useOntologyStore, attachAutoSave, attachHistory } from './store/ontologyStore';
 import Toolbar from './components/Toolbar';
 import Panel from './components/Panel';
@@ -46,11 +46,12 @@ export interface GraphWorkspaceProps {
   theme?: 'dark' | 'light';
   /** fullpage=fixed 整页接管；embedded=填满父容器（fixed 面板经 transform 收编进容器） */
   layout?: 'fullpage' | 'embedded';
-  /** 是否渲染编辑器自带 Header（嵌入浅色工作台时关闭，保存/校验入口转为浮动簇） */
+  /** 是否渲染编辑器自带 Header（嵌入浅色工作台时关闭，四类定义统计徽章转为
+   *  画布顶部浮动条；保存/校验入口与版本状态条只在全屏编辑器提供） */
   showHeader?: boolean;
   /** Header「数据映射」入口；不传则隐藏该按钮 */
   onOpenMapping?: () => void;
-  /** stage 徽章「返回版本演进」；不传则该按钮不渲染 */
+  /** 全屏版本状态条的「返回版本演进」；嵌入工作台不渲染状态条，返回入口由宿主页承载 */
   onBackToVersions?: () => void;
   /** runtime 态「基于此版本开始修改」创建草稿成功后的回调；缺省跳转全屏编辑器路由 */
   onDraftCreated?: (versionId: string) => void;
@@ -101,7 +102,6 @@ export default function GraphWorkspace({
   const loadFromBackend = useOntologyStore((s) => s.loadFromBackend);
   const syncStatus = useOntologyStore((s) => s.syncStatus);
   const isDirty = useOntologyStore((s) => s.isDirty);
-  const syncError = useOntologyStore((s) => s.syncError);
   const workspaceMode = useOntologyStore((s) => s.workspaceMode);
   const ontology = useOntologyStore((s) => s.ontology);
   const capabilities = useMemo(() => getGraphWorkspaceCapabilities(workspaceMode), [workspaceMode]);
@@ -298,25 +298,28 @@ export default function GraphWorkspace({
             : 'fixed inset-0 z-[9999] h-screen w-screen overflow-hidden bg-surface-950'
         }
       >
-        <div
-          data-testid="graph-workspace-stage"
-          className={`fixed bottom-6 left-1/2 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-lg backdrop-blur ${stageClass}`}
-        >
-          <span className="truncate">{stage.text}</span>
-          {workspaceMode === 'runtime' ? (
-            <button
-              className="shrink-0 font-medium underline disabled:cursor-wait disabled:opacity-60"
-              disabled={creatingDraft}
-              onClick={() => void beginCurrentReleaseEdit()}
-            >
-              {creatingDraft ? '正在创建草稿' : '基于此版本开始修改'}
-            </button>
-          ) : (
-            onBackToVersions && (
-              <button className="shrink-0 font-medium underline" onClick={onBackToVersions}>返回版本演进</button>
-            )
-          )}
-        </div>
+        {/* 版本状态条：全屏编辑器专属。嵌入工作台不放（返回入口由宿主页承载） */}
+        {!embedded && (
+          <div
+            data-testid="graph-workspace-stage"
+            className={`fixed bottom-6 left-1/2 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-lg backdrop-blur ${stageClass}`}
+          >
+            <span className="truncate">{stage.text}</span>
+            {workspaceMode === 'runtime' ? (
+              <button
+                className="shrink-0 font-medium underline disabled:cursor-wait disabled:opacity-60"
+                disabled={creatingDraft}
+                onClick={() => void beginCurrentReleaseEdit()}
+              >
+                {creatingDraft ? '正在创建草稿' : '基于此版本开始修改'}
+              </button>
+            ) : (
+              onBackToVersions && (
+                <button className="shrink-0 font-medium underline" onClick={onBackToVersions}>返回版本演进</button>
+              )
+            )}
+          </div>
+        )}
         {draftError && (
           <div role="alert" className="fixed left-1/2 top-[6.8rem] z-50 -translate-x-1/2 rounded-lg border border-red-500/40 bg-red-950/95 px-3 py-2 text-xs text-red-200 shadow-lg">
             {draftError}
@@ -347,35 +350,21 @@ export default function GraphWorkspace({
             onOpenMapping={onOpenMapping}
           />
         ) : (
-          /* 无 Header 时（嵌入浅色工作台）：保存/校验入口浮动在画布右上，
-             四类定义统计徽章浮动在画布顶部中间（与全屏编辑器 Header 中部同源） */
+          /* 无 Header 时（嵌入浅色工作台）：四类定义统计徽章浮动在画布顶部中间
+             （与全屏编辑器 Header 中部同源）。保存/校验入口不进嵌入画布：
+             草稿自动保存，人工保存与冲突处置走全屏编辑器。 */
           ontology && (
-            <>
-              <DefinitionStatBadges
-                className="fixed left-1/2 top-3 z-40 max-w-[calc(100%-2rem)] -translate-x-1/2 overflow-x-auto"
-                showObjects={showObjectPanel}
-                showLinks={showLinkPanel}
-                showActions={showActionPanel}
-                showFunctions={showFunctionPanel}
-                onToggleObjects={() => setShowObjectPanel(v => !v)}
-                onToggleLinks={() => setShowLinkPanel(v => !v)}
-                onToggleActions={() => setShowActionPanel(v => !v)}
-                onToggleFunctions={() => setShowFunctionPanel(v => !v)}
-              />
-              <div className="fixed right-4 top-3 z-40 flex items-center gap-2">
-                <LintBadge readOnly={schemaReadOnly} />
-                {!schemaReadOnly && (
-                  <SaveButton
-                    syncStatus={syncStatus}
-                    isDirty={isDirty}
-                    syncError={syncError}
-                    onSave={() => void useOntologyStore.getState().saveToBackend()}
-                    onForceSave={() => void useOntologyStore.getState().saveToBackend({ force: true })}
-                    onReload={() => void useOntologyStore.getState().discardAndReload()}
-                  />
-                )}
-              </div>
-            </>
+            <DefinitionStatBadges
+              className="fixed left-1/2 top-3 z-40 max-w-[calc(100%-2rem)] -translate-x-1/2 overflow-x-auto"
+              showObjects={showObjectPanel}
+              showLinks={showLinkPanel}
+              showActions={showActionPanel}
+              showFunctions={showFunctionPanel}
+              onToggleObjects={() => setShowObjectPanel(v => !v)}
+              onToggleLinks={() => setShowLinkPanel(v => !v)}
+              onToggleActions={() => setShowActionPanel(v => !v)}
+              onToggleFunctions={() => setShowFunctionPanel(v => !v)}
+            />
           )
         )}
         <main className={showHeader ? 'h-full pt-16' : 'h-full'}>

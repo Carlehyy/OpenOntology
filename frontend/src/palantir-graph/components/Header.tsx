@@ -71,16 +71,16 @@ export function DefinitionStatBadges({
   return (
     <div className={`flex items-center gap-2 ${className}`}>
       <button onClick={onToggleObjects} className="flex" aria-label={`查看对象实体，共 ${stats.objects} 个`}>
-        <StatBadge icon={CubeIcon} label="对象实体" value={stats.objects} color="indigo" active={showObjects} />
+        <StatBadge icon={CubeIcon} label="对象实体" value={stats.objects} tone="object" active={showObjects} />
       </button>
       <button onClick={onToggleLinks} className="flex" aria-label={`查看实体关系，共 ${stats.links} 个`}>
-        <StatBadge icon={LinkIcon} label="实体关系" value={stats.links} color="cyan" active={showLinks} />
+        <StatBadge icon={LinkIcon} label="实体关系" value={stats.links} tone="link" active={showLinks} />
       </button>
       <button onClick={onToggleActions} className="flex" aria-label={`查看执行动作，共 ${stats.actions} 个`}>
-        <StatBadge icon={BoltIcon} label="执行动作" value={stats.actions} color="yellow" active={showActions} />
+        <StatBadge icon={BoltIcon} label="执行动作" value={stats.actions} tone="action" active={showActions} />
       </button>
       <button onClick={onToggleFunctions} className="flex" aria-label={`查看激活函数，共 ${stats.functions} 个`}>
-        <StatBadge icon={CodeBracketIcon} label="激活函数" value={stats.functions} color="cyan" active={showFunctions} />
+        <StatBadge icon={CodeBracketIcon} label="激活函数" value={stats.functions} tone="link" active={showFunctions} />
       </button>
     </div>
   );
@@ -353,44 +353,49 @@ function formatVersion(version?: string) {
   return version.trim().toLowerCase().startsWith('v') ? version : `v${version}`;
 }
 
+/** 徽章色调：前景文字走主题化 accent 变量（浅色工作台自动压深保证白底对比），
+ *  底色/边框保持 Tailwind 色相 tint。激活函数沿用既有青色口径。 */
+type StatBadgeTone = 'object' | 'link' | 'action'
+
+const TONE_STYLE: Record<StatBadgeTone, { base: string; count: string; active: string }> = {
+  object: {
+    base: 'bg-indigo-500/10 border-indigo-500/20 text-[var(--color-accent-object)]',
+    count: 'bg-indigo-500/20 text-[var(--color-accent-object)]',
+    active: 'bg-indigo-500/20 border-indigo-500/30 text-[var(--color-accent-object)]',
+  },
+  link: {
+    base: 'bg-cyan-500/10 border-cyan-500/20 text-[var(--color-accent-link)]',
+    count: 'bg-cyan-500/20 text-[var(--color-accent-link)]',
+    active: 'bg-cyan-500/20 border-cyan-500/30 text-[var(--color-accent-link)]',
+  },
+  action: {
+    base: 'bg-yellow-500/10 border-yellow-500/20 text-[var(--color-accent-action)]',
+    count: 'bg-yellow-500/20 text-[var(--color-accent-action)]',
+    active: 'bg-yellow-500/20 border-yellow-500/30 text-[var(--color-accent-action)]',
+  },
+}
+
 function StatBadge({
   icon: Icon,
   label,
   value,
-  color,
+  tone,
   active,
 }: {
   icon: React.ElementType;
   label: string;
   value: number;
-  color: 'indigo' | 'cyan' | 'purple' | 'yellow' | 'violet';
+  tone: StatBadgeTone;
   active?: boolean;
 }) {
-  const base = {
-    indigo: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20',
-    cyan: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
-    purple: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
-    yellow: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
-    violet: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
-  };
-  const countBg = {
-    indigo: 'bg-indigo-500/20 text-indigo-300',
-    cyan: 'bg-cyan-500/20 text-cyan-300',
-    purple: 'bg-purple-500/20 text-purple-300',
-    yellow: 'bg-yellow-500/20 text-yellow-300',
-    violet: 'bg-violet-500/20 text-violet-300',
-  };
-  const activeBase: Partial<Record<typeof color, string>> = {
-    yellow: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30',
-    cyan: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
-  };
-  const cls = active && activeBase[color] ? activeBase[color] : base[color];
+  const style = TONE_STYLE[tone];
+  const cls = active ? style.active : style.base;
 
   return (
     <div className={`px-3 py-1.5 rounded-lg border ${cls} flex shrink-0 items-center gap-2 transition-colors`}>
       <Icon className="w-4 h-4 shrink-0" />
       <span className="text-xs text-surface-200">{label}</span>
-      <span className={`px-1.5 py-0.5 text-xs rounded font-mono font-semibold ${countBg[color]}`}>{value}</span>
+      <span className={`px-1.5 py-0.5 text-xs rounded font-mono font-semibold ${style.count}`}>{value}</span>
     </div>
   );
 }

@@ -123,9 +123,9 @@ const ObjectTypeNode = memo(({ data, selected }: ObjectTypeNodeProps) => {
           </div>
           <div className="flex flex-wrap gap-1">
             {relatedActions.map((action) => (
-              <span 
+              <span
                 key={action.id}
-                className="px-2 py-0.5 text-xs bg-yellow-500/20 text-yellow-400 rounded-full"
+                className="px-2 py-0.5 text-xs bg-yellow-500/20 text-[var(--color-accent-action)] rounded-full"
               >
                 {action.displayName}
               </span>

@@ -12,7 +12,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Bot, Boxes, Check, CircleHelp, Compass, Copy, Download, ExternalLink, Files, FileText, GitBranch, Globe2, History, Layers, Link2, List, ListTodo,
-  Loader2, Paperclip, Plus, Send, Trash2, User, Wrench, X,
+  Loader2, Paperclip, Plus, Send, Trash2, User, Wrench, X, ArrowLeft,
 } from 'lucide-react'
 import {
   explorationApi, streamExplorationChat,
@@ -846,6 +846,17 @@ export default function ExplorationPage() {
               </button>
             )
           })}
+          {workbenchOntologyId && (
+            <button
+              type="button"
+              data-testid="explore-back-to-versions"
+              onClick={() => navigate(`/ontologies/${workbenchOntologyId}?tab=versions`)}
+              title="返回该本体的版本演进视图"
+              className="ml-auto inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-transparent px-2.5 text-xs font-medium text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ArrowLeft size={13} /> 返回版本演进
+            </button>
+          )}
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
           {view === 'canvas' && (
@@ -877,8 +888,6 @@ export default function ExplorationPage() {
                         theme="light"
                         layout="embedded"
                         showHeader={false}
-                        onBackToVersions={() => navigate(`/ontologies/${workbenchOntologyId}?tab=versions`)}
-                        onDraftCreated={newVersionId => updateParams({ versionId: newVersionId })}
                         onSaved={() => {
                           void queryClient.invalidateQueries({
                             queryKey: ['ontology-structure-doc', workbenchOntologyId, workbenchVersionId],

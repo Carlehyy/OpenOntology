@@ -225,6 +225,10 @@ async function mockExploreModel(page: Page, options: { noSemanticLayer?: boolean
 }
 
 test.describe('业务澄清 · 本体模型视图', () => {
+  /** 工作区加载完成信号：四类定义徽章随 ontology 装载渲染（取代已下线的版本状态条） */
+  const workspaceLoaded = (page: Page) =>
+    expect(page.getByRole('button', { name: '查看对象实体，共 2 个' })).toBeVisible({ timeout: 20_000 })
+
   test('模型视图不再渲染预览投影/一致性面板，画布顶部呈现四类定义徽章', async ({ page }) => {
     await mockExploreModel(page)
 
@@ -240,8 +244,13 @@ test.describe('业务澄清 · 本体模型视图', () => {
     await expect(page.getByTestId('explore-trial-entry')).toHaveCount(0)
     await expect(page.getByRole('button', { name: '转为试跑态' })).toHaveCount(0)
 
-    // 结构画布直接呈现，顶部中间四类定义徽章与工作区计数一致
-    await expect(page.getByTestId('graph-workspace-stage')).toContainText('草稿', { timeout: 20_000 })
+    // 嵌入画布不再渲染版本状态条与保存/校验簇（仅保留顶部四徽章）
+    await workspaceLoaded(page)
+    await expect(page.getByTestId('graph-workspace-stage')).toHaveCount(0)
+    await expect(page.getByText('已保存到数据库')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '保存全部更改' })).toHaveCount(0)
+
+    // 顶部中间四类定义徽章与工作区计数一致
     const badges = page.getByRole('button', { name: /^查看(对象实体|实体关系|执行动作|激活函数)，共/ })
     await expect(badges).toHaveCount(4)
     await expect(page.getByRole('button', { name: '查看对象实体，共 2 个' })).toBeVisible()
@@ -250,10 +259,31 @@ test.describe('业务澄清 · 本体模型视图', () => {
     await expect(page.getByRole('button', { name: '查看激活函数，共 1 个' })).toBeVisible()
   })
 
+  test('浅色工作台强调色压深：徽章图标走 accent 变量而非 -400 原色', async ({ page }) => {
+    await mockExploreModel(page)
+    await page.getByTestId('explore-view-model').click()
+    await workspaceLoaded(page)
+
+    // pg-light 下 --color-accent-object 压深为 indigo-600（rgb 79 70 229），
+    // 深色主题保持 -400 原值（rgb 129 140 248），两主题断言各锚定一档
+    const objectBadge = page.getByRole('button', { name: '查看对象实体，共 2 个' })
+    const iconColor = await objectBadge.locator('svg').first().evaluate(el => getComputedStyle(el).color)
+    expect(['rgb(79, 70, 229)', 'rgb(129, 140, 248)']).toContain(iconColor)
+  })
+
+  test('视图标签行右侧「返回版本演进」直达本体详情版本 Tab', async ({ page }) => {
+    await mockExploreModel(page)
+
+    const back = page.getByTestId('explore-back-to-versions')
+    await expect(back).toBeVisible()
+    await back.click()
+    await expect(page).toHaveURL(new RegExp(`/ontologies/${ontologyId}\\?tab=versions`))
+  })
+
   test('四类定义徽章点击切换对应列表面板，抽屉关闭后恢复', async ({ page }) => {
     await mockExploreModel(page)
     await page.getByTestId('explore-view-model').click()
-    await expect(page.getByTestId('graph-workspace-stage')).toContainText('草稿', { timeout: 20_000 })
+    await workspaceLoaded(page)
 
     // 列表抽屉打开期间背板遮挡徽章（与全屏编辑器同契约），经抽屉关闭按钮收起
     await page.getByRole('button', { name: '查看对象实体，共 2 个' }).click()
@@ -272,7 +302,6 @@ test.describe('业务澄清 · 本体模型视图', () => {
 
     await expect(page.getByTestId('explore-model-drift-badge')).toHaveCount(0)
     await page.getByTestId('explore-view-model').click()
-    await expect(page.getByTestId('graph-workspace-stage')).toContainText('草稿', { timeout: 20_000 })
-    await expect(page.getByRole('button', { name: '查看对象实体，共 2 个' })).toBeVisible()
+    await workspaceLoaded(page)
   })
 })
