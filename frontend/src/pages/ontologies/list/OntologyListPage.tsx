@@ -423,10 +423,10 @@ function OntologyCard({
             </button>
           </span>
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+        <div className="ml-auto flex min-w-0 items-center gap-0.5">
           <span
             data-testid="ontology-card-time"
-            className="hidden shrink-0 whitespace-nowrap text-[11px] tabular-nums text-[var(--color-text-tertiary)] min-[1400px]:inline"
+            className="hidden min-w-0 truncate text-[11px] tabular-nums text-[var(--color-text-tertiary)] min-[1400px]:inline"
             title={timeTitle}
           >
             {timeText}
