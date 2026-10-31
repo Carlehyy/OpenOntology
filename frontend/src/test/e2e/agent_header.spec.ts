@@ -410,6 +410,8 @@ test('授权边界弹窗高度跟随内容且附加指令后无大块留白', as
   const extra = page.getByTestId('agent-boundary-extra')
   const footer = page.getByTestId('agent-boundary-footer')
   await expect(dialog).toBeVisible()
+  // 弹层遮罩走 --color-bg-overlay（DESIGN.md §3），浅色主题为半透明黑，不再是近白的 bg-accent
+  await expect(page.getByTestId('agent-boundary-overlay')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0.45)')
 
   const dialogBox = await dialog.boundingBox()
   const extraBox = await extra.boundingBox()
@@ -430,6 +432,8 @@ test('动态哨兵抽屉只展示后天规则且试跑通过后才能启用', as
   await page.getByTestId('dynamic-sentinel-button').click()
   const dialog = page.getByRole('dialog', { name: '动态哨兵管理' })
   await expect(dialog).toBeVisible()
+  // 抽屉遮罩即 role=dialog 容器本身，走 --color-bg-overlay，浅色主题不再近白
+  await expect(dialog).toHaveCSS('background-color', 'rgba(0, 0, 0, 0.45)')
   await expect(dialog).toContainText('公共哨兵不在此处')
   await expect(dialog).toContainText('待处理订单提醒')
   await expect(dialog.getByRole('heading', { name: '公共哨兵' })).toHaveCount(0)
@@ -442,6 +446,28 @@ test('动态哨兵抽屉只展示后天规则且试跑通过后才能启用', as
   await expect(dialog).toContainText('已启用')
 })
 
+
+test('工具栏图标悬停提示用 popover 底深字，浅色主题下可读', async ({ page }) => {
+  await mockAgentHeader(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+
+  // 悬浮提示与 ui/tooltip 标准件同配色：--popover 白底 + --popover-foreground 深字
+  const sentinelButton = page.getByTestId('dynamic-sentinel-button')
+  const sentinelTip = sentinelButton.locator('span')
+  await sentinelButton.hover()
+  await expect(sentinelTip).toHaveCSS('opacity', '1')
+  await expect(sentinelTip).toHaveCSS('background-color', 'rgb(255, 255, 255)')
+  await expect(sentinelTip).toHaveCSS('color', 'rgb(26, 26, 46)')
+
+  const boundaryButton = page.getByRole('button', { name: '授权边界配置' })
+  const boundaryTip = boundaryButton.locator('span')
+  await boundaryButton.hover()
+  await expect(boundaryTip).toHaveCSS('opacity', '1')
+  await expect(boundaryTip).toHaveCSS('background-color', 'rgb(255, 255, 255)')
+  await expect(boundaryTip).toHaveCSS('color', 'rgb(26, 26, 46)')
+})
 
 test('输入栏白色背景、聊天区滚动条隐藏、侧边栏底栏已按需求移除', async ({ page }) => {
   await mockAgentHeader(page)

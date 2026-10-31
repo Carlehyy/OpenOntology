@@ -144,7 +144,7 @@ export function BoundaryDrawer({ oid, open, onClose }: {
   }))
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-accent px-4 pt-[7vh] backdrop-blur-[1px]" onMouseDown={onClose}>
+    <div data-testid="agent-boundary-overlay" className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--color-bg-overlay)] px-4 pt-[7vh] backdrop-blur-[1px]" onMouseDown={onClose}>
       <section
         role="dialog"
         aria-modal="true"

@@ -746,13 +746,13 @@ export default function AgentWorkbenchPage() {
                   className="group/tip relative flex h-8 w-8 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:cursor-not-allowed disabled:opacity-30"
                 >
                   <BellRing size={14} />
-                  <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-accent px-2 py-0.5 text-[11px] text-[var(--color-text-inverse)] opacity-0 transition-opacity group-hover/tip:opacity-100">动态哨兵</span>
+                  <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">动态哨兵</span>
                 </button>
                 {isAdmin && (
                   <button onClick={() => setDrawerOpen(true)} disabled={!oid} aria-label="授权边界配置"
                     className="group/tip relative flex h-8 w-8 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:opacity-30 disabled:cursor-not-allowed">
                     <Shield size={14} />
-                    <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-accent px-2 py-0.5 text-[11px] text-[var(--color-text-inverse)] opacity-0 transition-opacity group-hover/tip:opacity-100">授权边界配置</span>
+                    <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">授权边界配置</span>
                   </button>
                 )}
                 <button
@@ -766,7 +766,7 @@ export default function AgentWorkbenchPage() {
                   title={oid ? '基于当前本体和会话生成可编辑分析报告模板' : '打开分析报告工作台'}
                 >
                   <FileText size={14} />
-                  <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-accent px-2 py-0.5 text-[11px] text-[var(--color-text-inverse)] opacity-0 transition-opacity group-hover/tip:opacity-100">{oid ? '生成分析报告' : '分析报告'}</span>
+                  <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">{oid ? '生成分析报告' : '分析报告'}</span>
                 </button>
                 <div className="relative">
                   <button
@@ -781,7 +781,7 @@ export default function AgentWorkbenchPage() {
                       : 'border-brand-line bg-brand-soft text-brand-ink hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink'}`}
                   >
                     <History size={14} />
-                    <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-accent px-2 py-0.5 text-[11px] text-[var(--color-text-inverse)] opacity-0 transition-opacity group-hover/tip:opacity-100">查看历史会话</span>
+                    <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">查看历史会话</span>
                   </button>
                   <SessionHistoryPopover
                     open={showHistory}

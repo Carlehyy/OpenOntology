@@ -656,7 +656,7 @@ export function OntologyNetworkView({
                       className="group/tip relative flex h-8 w-8 items-center justify-center rounded-md border border-border text-[var(--color-text-tertiary)] transition-colors hover:border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)] disabled:opacity-30 disabled:cursor-not-allowed"
                     >
                       <Download size={14} />
-                      <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-accent px-2 py-0.5 text-[11px] text-[var(--color-text-inverse)] opacity-0 transition-opacity group-hover/tip:opacity-100">导出 Excel</span>
+                      <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">导出 Excel</span>
                     </button>
                   </div>
 

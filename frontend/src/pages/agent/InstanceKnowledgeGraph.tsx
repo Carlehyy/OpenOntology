@@ -644,7 +644,7 @@ export default function InstanceKnowledgeGraph({ oid, releaseId, assistantSignal
                 aria-pressed={mode === item.id}
                 className={[
                   'inline-flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                  mode === item.id ? 'bg-accent text-[var(--color-text-inverse)] shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                  mode === item.id ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                 ].join(' ')}
               >
                 <item.icon size={13} />{item.label}

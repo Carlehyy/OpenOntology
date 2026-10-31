@@ -153,7 +153,7 @@ export function DynamicSentinelDrawer({
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-[80] flex justify-end bg-accent backdrop-blur-[1px]" role="dialog" aria-label="动态哨兵管理">
+    <div className="fixed inset-0 z-[80] flex justify-end bg-[var(--color-bg-overlay)] backdrop-blur-[1px]" role="dialog" aria-label="动态哨兵管理">
       <button type="button" className="flex-1 cursor-default" onClick={onClose} aria-label="关闭动态哨兵管理" />
       <aside className="flex h-full w-[min(560px,96vw)] flex-col border-l border-border bg-card shadow-2xl">
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-5">
