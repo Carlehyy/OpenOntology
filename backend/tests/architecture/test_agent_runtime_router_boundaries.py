@@ -492,14 +492,16 @@ def test_agent_runtime_openapi_contract_is_stable():
     )
     # YIYA-36：+structure/+proposals/+decision/+proposals/{cid}/+formal/agent/query
     # P2 整改：+join-assertions（POST/GET）
-    assert len(paths) == 34
+    # D1/B' 人工裁决：+proposals/{cid}/adjudicate-not-executed（POST, admin-only
+    # via require_admin——unknown 态 not_executed 正门裁决，不重放不源写）
+    assert len(paths) == 35
     assert sum(
         method in {"get", "post", "put", "patch", "delete"}
         for operations in paths.values()
         for method in operations
-    ) == 43
+    ) == 44
     assert hashlib.sha256(payload.encode()).hexdigest() == (
-        "adc85db63725d19ab8a2ac5135466d7cc93dcbe353f0edac3555a33c24fee270"
+        "087a94922030878312fc8621ac0ad18c57bcaede807c2735260fd98e87be5a60"
     )
     normalized_payload = json.dumps(
         normalize(paths),
@@ -508,5 +510,5 @@ def test_agent_runtime_openapi_contract_is_stable():
         separators=(",", ":"),
     )
     assert hashlib.sha256(normalized_payload.encode()).hexdigest() == (
-        "975a571be736820c811767b70d0d31836e553ee8f9b114b2cdc34b4e33c2fb74"
+        "364076fd80647fde42f016346381fac3be55f601d14dd5c0ae1399d3133ef794"
     )

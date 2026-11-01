@@ -669,6 +669,7 @@ def _stage_dedup(conn, stage: sa.Table, seq_col: str,
 def _publish_run(db, dataset, *, rowcount: int, entries: list[dict],
                  added: int, updated: int, deleted: int,
                  producer_run_id: str | None = None,
+                 _defer_commit: bool = False,
                  ) -> tuple[DatasetVersion, DatasetChangeset]:
     """版本发布终局，对齐 DatasetService._create_version_locked。
 
@@ -725,6 +726,11 @@ def _publish_run(db, dataset, *, rowcount: int, entries: list[dict],
         dataset_version_id=version.id,
         event_type="version_published",
     ))
+    if _defer_commit:
+        # 延迟提交：版本/变更集/指针/发布事件只落 session，由调用方在写完
+        # 自己的审批字段后同一次 commit 收口（候选审批单一事务契约）。
+        db.flush()
+        return version, changeset
     db.commit()
     db.refresh(version)
     db.refresh(changeset)
@@ -753,6 +759,7 @@ def _upsert_run_once(db, dataset, rows, mode: str,
                      rows_before: int | None = None,
                      staged_input: tuple | None = None,
                      producer_run_id: str | None = None,
+                     _defer_commit: bool = False,
                      ) -> tuple[DatasetVersion, DatasetChangeset]:
     # Lock BEFORE inspecting/mutating the base, not only at _publish_run. Pinned
     # readers hold FOR SHARE on the same row across patch discovery and the full
@@ -813,7 +820,8 @@ def _upsert_run_once(db, dataset, rows, mode: str,
             payload_stage = None
             return _publish_run(db, dataset, rowcount=0, entries=[],
                                 added=0, updated=0, deleted=0,
-                                producer_run_id=producer_run_id)
+                                producer_run_id=producer_run_id,
+                                _defer_commit=_defer_commit)
 
         mapping, rebuilt = _reconcile_structure(
             db, conn, dataset, schema, mode, pk_cols, columns_union)
@@ -1122,6 +1130,7 @@ def _upsert_run_once(db, dataset, rows, mode: str,
     else:
         rowcount = rows_before + len(insert_rows)
     return _publish_run(db, dataset, rowcount=rowcount, entries=entries,
+                        _defer_commit=_defer_commit,
                         added=len(added_keys), updated=len(updated_keys),
                         deleted=len(deleted_keys),
                         producer_run_id=producer_run_id)
@@ -1132,6 +1141,7 @@ def upsert_run(db, dataset, rows, write_mode: str,
                rows_before: int | None = None,
                staged_input: tuple | None = None,
                producer_run_id: str | None = None,
+               _defer_commit: bool = False,
                ) -> tuple[DatasetVersion, DatasetChangeset]:
     """按入库方式把来数合并进物理湖表，发布新版本并记录行级变更集。
 
@@ -1160,7 +1170,8 @@ def upsert_run(db, dataset, rows, write_mode: str,
         try:
             return _upsert_run_once(db, dataset, rows, mode, normalized_pk,
                                     soft_delete_column, rows_before,
-                                    staged_input, producer_run_id)
+                                    staged_input, producer_run_id,
+                                    _defer_commit)
         except IntegrityError:
             db.rollback()
             # 回滚会销毁 TEMP 暂存表：非 list 形态（迭代器/预灌暂存）无法
@@ -1246,6 +1257,45 @@ def rows_by_pks(db, dataset, pks: list[str]) -> dict[str, dict]:
             logical = _logical_row(dict(record), mapping)
             out[lake_row_pk(logical, pk_cols)] = logical
     return out
+
+
+def apply_logical_row_updates(db, dataset, rows: list[dict],
+                               pk_cols: list[str]) -> int:
+    """按逻辑列名把整行更新物理应用到湖表（候选审批前移专用）。
+
+    调用方必须已持有 ``dataset_write_lock`` 与 Dataset 行锁（与
+    ``upsert_run`` 相同的临界区纪律）。行按声明主键定位，仅 UPDATE 已
+    存在的行；行不存在抛 :class:`LakeStoreError`（候选审批前的 base CAS
+    已保证基线未漂移，行缺失属于数据不一致，fail-closed）。
+    返回受影响行数。
+    """
+    found = _readable_table(db, dataset)
+    if found is None:
+        raise LakeStoreError(
+            f"数据集 {dataset.id} 没有可写的物理湖表，无法应用候选行更新")
+    table, mapping, table_pk = found
+    normalized_pk = [str(c).strip() for c in (pk_cols or []) if str(c).strip()]
+    if not normalized_pk or set(normalized_pk) != set(table_pk):
+        raise LakeStoreError(
+            f"数据集 {dataset.id} 的定位主键 {normalized_pk} 与湖表主键 "
+            f"{table_pk} 不一致，拒绝应用候选行更新")
+    pk_physical = [mapping[c] for c in normalized_pk]
+    applied = 0
+    for row in rows:
+        values = {
+            mapping[col]: row[col] for col in row if col in mapping
+            and col not in normalized_pk}
+        condition = _key_match(
+            table, pk_physical,
+            [tuple(str(row[c]) for c in normalized_pk)])
+        result = _connection(db).execute(
+            sa.update(table).where(condition).values(**values))
+        if not result.supports_sane_rowcount() or result.rowcount != 1:
+            raise LakeStoreError(
+                f"数据集 {dataset.id} 候选行更新未命中唯一行（主键 "
+                f"{ {c: row.get(c) for c in normalized_pk} }），拒绝前移")
+        applied += 1
+    return applied
 
 
 def rows_at_version(db, dataset, version_no: int) -> list[dict]:

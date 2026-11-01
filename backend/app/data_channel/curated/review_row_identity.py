@@ -22,12 +22,12 @@ class ReviewApprovalError(ValueError):
 
 
 def latest_dataset_version(db: Session, dataset_id: str):
-    """返回统一资产表的最新不可变版本。"""
-    from app.data_channel.datasets.models import DatasetVersion
+    """curated 域的当前版本入口（委托 datasets 权威指针解析，语义同源）。"""
+    from app.data_channel.datasets.version_pointer import (
+        resolve_current_version,
+    )
 
-    return (db.query(DatasetVersion)
-            .filter(DatasetVersion.dataset_id == dataset_id)
-            .order_by(DatasetVersion.version_no.desc()).first())
+    return resolve_current_version(db, dataset_id)
 
 
 def _as_aware(value):
@@ -46,6 +46,11 @@ def review_matches_version(review: CuratedReview, version) -> bool:
         return review.dataset_version_id is None
     if review.dataset_version_id:
         return review.dataset_version_id == version.id
+    # 受控动作未绑定候选（pending，dataset_version_id 为空）：精确匹配其
+    # base 版本 — 行编辑 overlay 既有通道可为 base 提供 preview；批准回填
+    # dataset_version_id 后回到精确匹配，为新版本提供审批背书。
+    if review.base_version_id is not None:
+        return review.base_version_id == version.id
     review_at = _as_aware(review.created_at)
     version_at = _as_aware(version.created_at)
     return bool(review_at and version_at and review_at >= version_at)
@@ -73,6 +78,11 @@ def version_review(
                .filter(CuratedReview.curated_dataset_id == dataset_id)
                .order_by(CuratedReview.created_at.desc()).all())
     for review in reviews:
+        # 未绑定的受控动作候选不遮挡当前版本治理（pending 不得顶掉
+        # backing approved；批准后已精确绑定，正常参与）。
+        if (review.dataset_version_id is None
+                and review.base_version_id is not None):
+            continue
         if not review_matches_version(review, version):
             continue
         # ``status`` 是对最新治理记录的断言，不是允许跳过新决定、向历史

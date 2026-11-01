@@ -268,11 +268,14 @@ register_provider("ontology", partial(
 ))
 from app.data_channel.integrated.binding_port import IntegratedRemoteBindingValidator
 from app.data_channel.query.ontology_adapter import OntologyQueryAdapter
+from app.data_channel.action_write_port import AssetWritePortAdapter
 from app.ontologies.agent_query.remote_query import set_remote_query_port
+from app.ontologies.agent_confirmation.write_port import set_action_write_port
 from app.ontologies.mappings.remote_binding import set_remote_binding_validator
 
 set_remote_binding_validator(IntegratedRemoteBindingValidator())
 set_remote_query_port(OntologyQueryAdapter())
+set_action_write_port(AssetWritePortAdapter())
 app.include_router(manual_sharing_router, prefix="/api/v2/manual-dataset-sharing", tags=["manual-dataset-sharing"], dependencies=asset_lake_guard)
 app.include_router(public_manual_sharing_router, prefix="/api/public/manual-datasets", tags=["public-manual-datasets"])
 app.include_router(auth_public_query_router, prefix="/api/public", tags=["public-var-query"])

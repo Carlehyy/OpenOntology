@@ -659,6 +659,15 @@ def _execute_action_effects(
                 deferred_webhooks.append(
                     (rule_ordinal, rule, rname, cfg))
 
+            elif rtype == "delete_row":
+                # 资产路由专用规则：本地引擎没有对象删除语义。未绑定资产的
+                # delete_row 在确认 prepare 阶段已拒绝；直接引擎调用在此
+                # fail-closed，绝不静默降级为本地伪删除。
+                raise RuleExecutionError(
+                    rname,
+                    "delete_row 仅支持经资产映射路由的受控动作"
+                    "（确认协议单行源写）；本地引擎不支持对象删除")
+
             else:
                 raise RuleExecutionError(rname or "unknown", f"不支持的动作规则类型: {rtype}")
 

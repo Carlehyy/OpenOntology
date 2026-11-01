@@ -20,7 +20,7 @@ _MISSING = object()
 
 _SUPPORTED_RULE_TYPES = {
     "validation", "create_object", "update_property", "create_link",
-    "delete_link", "notification", "webhook",
+    "delete_link", "notification", "webhook", "delete_row",
 }
 
 

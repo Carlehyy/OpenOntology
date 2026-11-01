@@ -22,6 +22,17 @@ class ParameterRef(_Strict):
     column: str = Field(min_length=1, max_length=64)
 
 
+class TargetRef(_Strict):
+    """资产行定位（远程/联邦对象无本地实例）：类型 + 属性空间主键值。
+
+    资产身份（datasetId/assetId）绝不由此提供 — 服务端按 release 快照映射
+    派生并验证；主键值本身经服务端读源核对后冻结 CAS token。
+    """
+
+    object_type_id: str = Field(min_length=1, max_length=64)
+    key: dict[str, Any] = Field(default_factory=dict)
+
+
 class PrepareProposalRequest(_Strict):
     session_kind: str = Field(min_length=1, max_length=32)
     session_id: str = Field(min_length=1, max_length=64)
@@ -29,6 +40,7 @@ class PrepareProposalRequest(_Strict):
     action_id: str = Field(min_length=1, max_length=200)
     release_id: str = Field(min_length=1, max_length=64)
     target_instance_id: Optional[str] = Field(default=None, max_length=64)
+    target_ref: Optional[TargetRef] = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     parameter_refs: dict[str, ParameterRef] = Field(default_factory=dict)
 
@@ -39,6 +51,21 @@ class ConfirmationDecisionRequest(_Strict):
     session_id: str = Field(min_length=1, max_length=64)
     decision_id: str = Field(min_length=1, max_length=128)
     payload_hash: str = Field(min_length=1, max_length=64)
+
+
+class AdjudicationRequest(_Strict):
+    """unknown 操作的管理员人工 not_executed 裁决（正门，绝不重放）。
+
+    操作归属经 (operation_id, confirmation_id) 强绑定核验，不设装饰性
+    session 字段。
+    """
+
+    operation_id: str = Field(min_length=1, max_length=64)
+    rationale: str = Field(min_length=1, max_length=2000)
+    evidence_refs: list[str] = Field(min_length=1, max_length=16)
+    expected_fence_token: int = Field(ge=0)
+    expected_guard_hash: str = Field(min_length=64, max_length=64)
+    expected_payload_hash: str = Field(min_length=64, max_length=64)
 
 
 class ExecuteConfirmationRequest(_Strict):
@@ -62,5 +89,6 @@ class ConfirmationOut(BaseModel):
     approval_log_id: Optional[str] = None
     failure_code: Optional[str] = None
     block_reason: Optional[str] = None
+    outcome: Optional[dict[str, Any]] = None
     decided_at: Optional[str] = None
     created_at: Optional[str] = None

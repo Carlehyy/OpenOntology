@@ -198,11 +198,26 @@ class ReviewService:
         self._db.commit()
         return results
 
+    def apply_proposal_edits(self, curated_dataset_id: str, *,
+                             expected_version_id: str, edits: list[dict],
+                             reviewer_id: str | None = None) -> CuratedReview:
+        """见 :mod:`app.data_channel.curated.proposal_edits`（零副作用回滚）。"""
+        from app.data_channel.curated.proposal_edits import (
+            apply_proposal_edits as _apply)
+        return _apply(self, self._db, curated_dataset_id,
+                      expected_version_id=expected_version_id,
+                      edits=edits, reviewer_id=reviewer_id)
+
     def approve(self, review_id: str, notes: str = "",
                 reviewer_id: str | None = None) -> CuratedReview:
         """批准当前版本审核，并原子写入下游自动化 outbox。"""
         review = self._get_review_for_mutation_or_raise(review_id)
         self._ensure_pending(review)
+        if review.base_version_id is not None:
+            from app.data_channel.curated.proposal_lifecycle import (
+                approve_candidate_review)
+            return approve_candidate_review(
+                self._db, review, notes=notes, reviewer_id=reviewer_id)
         self._assert_review_version_current(review, bind_legacy=True)
         review.status = "approved"
         review.notes = notes
@@ -242,6 +257,11 @@ class ReviewService:
         """拒绝当前版本审核。"""
         review = self._get_review_for_mutation_or_raise(review_id)
         self._ensure_pending(review)
+        if review.base_version_id is not None:
+            from app.data_channel.curated.proposal_lifecycle import (
+                reject_candidate_review)
+            return reject_candidate_review(
+                self._db, review, notes=notes, reviewer_id=reviewer_id)
         self._assert_review_version_current(review, bind_legacy=True)
         review.status = "rejected"
         review.notes = notes

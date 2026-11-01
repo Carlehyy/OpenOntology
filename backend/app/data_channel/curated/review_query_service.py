@@ -142,7 +142,13 @@ def build_review_diff(
             .first()
         )
 
-    latest_version = versions[-1]
+    from app.data_channel.datasets.version_pointer import (
+        resolve_current_version,
+    )
+
+    # 「最新」按权威指针解析：pending 候选以更高 version_no 入库但不前移
+    # 指针，不得被审核 diff 元数据当作当前版本。
+    latest_version = resolve_current_version(db, dataset_id) or versions[-1]
     current_version = latest_version
     if selected_review and selected_review.dataset_version_id:
         current_version = next(

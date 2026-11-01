@@ -391,6 +391,11 @@ def decide_pending_action_locked(
         )
         db.commit()
         db.refresh(log)
+        if log.operation_id:
+            # 资产写确认的审批闸门：拒绝即结案 operation（源写从未派发）。
+            from app.ontologies.agent_confirmation import service as _cs
+
+            _cs.mark_asset_operation_rejected(db, log.operation_id)
         if state_id:
             from app.ontologies.sentinels.evaluator import (
                 reject_sentinel_match_claim,
@@ -452,19 +457,55 @@ def decide_pending_action_locked(
     )
     execution_db = execution_session_factory()
     try:
-        result = execute_action_fn(
-            execution_db,
-            ontology_id,
-            exec_body,
-            actor_id=decision_actor_id,
-            caused_by_fact=fact_id,
-            skip_approval=True,
-            expected_release_id=execution_release_id,
-        )
+        from app.ontologies.agent_confirmation import service as _cs
+
+        if log.operation_id and _cs.operation_has_asset_plan(
+                execution_db, log.operation_id):
+            # 资产写确认的批准执行：不进本地引擎（本地 fo 写会造成孤儿
+            # 副本），按冻结计划经确认协议派发单行源写。本地 HITL 确认的
+            # operation（无冻结计划）保留下方原引擎执行路径不变。
+            result = _cs.dispatch_approved_asset_write(
+                execution_db, log.operation_id)
+        else:
+            result = execute_action_fn(
+                execution_db,
+                ontology_id,
+                exec_body,
+                actor_id=decision_actor_id,
+                caused_by_fact=fact_id,
+                skip_approval=True,
+                expected_release_id=execution_release_id,
+            )
     finally:
         execution_db.close()
         if sentinel_token is not None:
             in_sentinel_run.reset(sentinel_token)
+
+    # 资产写派发结果未知：审批日志不得宣称明确失败 — 保持 executing
+    # （可恢复）并如实标注未知；真实状态以确认协议 unknown + 人工裁决
+    # 正门为准。重复批准经 resuming_approved 幂等只读恢复。
+    if result.get("assetUnknown"):
+        db.expire_all()
+        log = (
+            db.query(ActionExecutionLog)
+            .filter(
+                ActionExecutionLog.id == log_id,
+                ActionExecutionLog.ontology_id == ontology_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if log is not None:
+            log.status = "executing"
+            log.error_message = (
+                "执行结果未知（资产写源端结果未确认），不宣称成功或失败；"
+                "按确认协议对账")
+            db.commit()
+            db.refresh(log)
+        return _ok(
+            S.ActionLogOut.model_validate(log).model_dump(by_alias=True)
+            if log is not None else {},
+        )
 
     # Finalization is a third transaction. Both successful and failed
     # technical attempts are linked to the already durable human decision.

@@ -6,80 +6,53 @@
  * 展示真实业务状态 — requires_approval 的动作确认后进入 HITL 审批队列。
  *
  * 状态恢复：confirmationId 按用户/本体/会话/提案四元组本地留痕（终态不清除），
- * mount 时经 getProposal 拉服务端权威状态；非终态按退避轮询直至结案。
- * unknown / compensation_required 只如实展示「结果待核实 / 需人工处理」，
- * 绝不自动重执行；恢复失败显示「状态暂不可验证」并禁止重新确认。
+ * mount/切换时经 getProposal 拉取服务端权威状态，未验证前禁止确认；非终态按
+ * 退避轮询。unknown / compensation_required / pending_review 只如实展示，
+ * 绝不自动重执行。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  Play, ShieldCheck, CheckCircle2, XCircle, Clock3, Loader2, FlaskConical,
+  Play, ShieldCheck, CheckCircle2, XCircle, Clock3, Loader2, FlaskConical, Hourglass,
 } from 'lucide-react'
 import {
   agentApi, type AgentActionProposal, type AgentConfirmationState,
 } from '@/api/agent'
-import { confirmationStateText } from '@/components/ontologyConfirmationModel'
 import { useAuthStore } from '@/stores/authStore'
 import {
   loadProposalConfirmationRecord,
   nextProposalPollDelayMs,
   proposalConfirmationKey,
+  proposalEffectsSectionTitle,
+  resultBannerView,
   saveProposalConfirmationRecord,
   shouldContinueProposalPolling,
+  type ProposalBannerTone,
 } from './proposalConfirmation'
 
-type BannerTone = 'success' | 'warning' | 'danger' | 'muted'
-
-const bannerClass: Record<BannerTone, string> = {
+const bannerClass: Record<ProposalBannerTone, string> = {
   success: 'bg-[var(--color-success-bg)] text-[var(--color-success)]',
   warning: 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
   danger: 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
   muted: 'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]',
 }
 
-/** 状态横幅视图：文案统一走 confirmationStateText，保证与超级助手/kernel 同一事实源 */
-function resultBannerView(result: AgentConfirmationState): { tone: BannerTone; text: string } {
-  switch (result.state) {
-    case 'pending_approval':
-      return { tone: 'warning', text: '已确认并提交审批，等待管理员批准 — 批准后才会真正落库' }
-    case 'succeeded':
-      return { tone: 'success', text: '已执行成功，变更已写入事实流（可在实例历史中溯源）' }
-    case 'compensation_required':
-      return {
-        tone: 'danger',
-        text: `本地执行失败但外部效果可能已发生（${result.failureCode || 'external_applied_local_failed'}）— 请勿重试，需人工核对并补偿`,
-      }
-    case 'unknown':
-      return { tone: 'warning', text: `执行结果待核实（${result.blockReason || 'execution_result_unknown'}）` }
-    case 'executing':
-    case 'dispatch_queued':
-    case 'confirmed':
-    case 'recovering':
-      return { tone: 'warning', text: '已确认，正在执行…' }
-    case 'denied':
-      return { tone: 'muted', text: '已拒绝' }
-    case 'cancelled':
-      return { tone: 'muted', text: '已取消' }
-    case 'expired':
-      return { tone: 'warning', text: '确认已过期（版本或权限变化），请重新确认' }
-    case 'approval_rejected':
-      return { tone: 'muted', text: '审批被拒绝，未产生业务变更' }
-    case 'failed_not_executed':
-      return { tone: 'danger', text: '未执行（可重新确认后重试）' }
-    default:
-      return { tone: 'danger', text: `未执行（${result.failureCode || confirmationStateText(result.state)}）` }
-  }
-}
+const RECOVERY_SYNC_MESSAGE = '确认请求已建立，正在同步服务端权威状态…'
+
 
 export function ProposalCard({ oid, proposal, conversationId }: {
   oid: string
   proposal: AgentActionProposal
   conversationId: string | null
 }) {
-  const [executing, setExecuting] = useState(false)
+  /** 执行态绑定 key + 代次 + runId：跨切换/旧 finally 不得干扰新执行 */
+  const [executingToken, setExecutingToken] = useState<{ key: string; generation: number; runId: number } | null>(null)
   const [result, setResult] = useState<AgentConfirmationState | null>(null)
-  const [error, setError] = useState('')
-  /** 恢复通道状态：record 存在但权威状态拉不到时，绝不能退回可重新确认的初始态 */
-  const [recoveryFailed, setRecoveryFailed] = useState(false)
+  const [errorState, setErrorState] = useState<{ key: string; message: string } | null>(null)
+  const [recoveryFailureKey, setRecoveryFailureKey] = useState<string | null>(null)
+  /** 结果绑定完整 key：异键派生为 null */
+  const [stateKey, setStateKey] = useState<string | null>(null)
+  const keyGenerationRef = useRef(0)
+  const executeRunRef = useRef(0)
   const userId = useAuthStore(state => state.user?.id) ?? ''
   const recoveryKey = proposalConfirmationKey({
     userId,
@@ -87,30 +60,88 @@ export function ProposalCard({ oid, proposal, conversationId }: {
     conversationId: conversationId ?? '',
     proposalId: proposal.proposalId,
   })
-  // 轮询循环读取最新权威状态的通道：状态对象每次都是新引用，
-  // 用 ref 传递避免「以整个 result 为依赖」导致循环反复重启/双发
+  const executing = executingToken != null
+    && executingToken.key === recoveryKey
+    && executingToken.generation === keyGenerationRef.current
+  const recoveryFailed = recoveryFailureKey === recoveryKey
+  const error = errorState && errorState.key === recoveryKey ? errorState.message : ''
+  const stateIsCurrent = stateKey === recoveryKey
+  const freshResult = stateIsCurrent ? result : null
   const resultRef = useRef<AgentConfirmationState | null>(null)
-  resultRef.current = result
-
-  // 恢复：mount 时按本地留痕拉服务端权威状态（poll/reload 后 banner 不丢）
+  resultRef.current = freshResult
+  const recoveryKeyRef = useRef(recoveryKey)
+  recoveryKeyRef.current = recoveryKey
+  const mountedRef = useRef(true)
   useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  // key 代次递增：切换后旧异步链失效，切回也必须重新验证
+  useLayoutEffect(() => {
+    keyGenerationRef.current += 1
+    setResult(null)
+    setStateKey(null)
+    setExecutingToken(null)
+  }, [recoveryKey])
+  /** localStorage 写失败时的内存兜底（只存 confirmationId） */
+  const pendingConfirmationIdsRef = useRef(new Map<string, string>())
+
+  // 首帧同步读留痕或内存兜底：权威结果未落位即恢复中；executing 属本次生命周期
+  const pendingConfirmationId = pendingConfirmationIdsRef.current.get(recoveryKey) ?? null
+  const hasRecoveryRecord = pendingConfirmationId != null
+    || loadProposalConfirmationRecord(window.localStorage, recoveryKey) != null
+  const recovering = !executing && !recoveryFailed && hasRecoveryRecord
+    && !(stateIsCurrent && result != null)
+
+  /** GET 权威状态；apply 守卫卸载、key 与代次竞态 */
+  const recoverAuthoritative = (
+    key: string, confirmationId: string,
+    shouldApply?: () => boolean,
+  ): Promise<void> => {
+    const generationAtRequest = keyGenerationRef.current
+    const apply = shouldApply ?? (() => mountedRef.current
+      && recoveryKeyRef.current === key
+      && keyGenerationRef.current === generationAtRequest)
+    const clearSyncMessage = () => setErrorState(prev => (
+      prev?.key === key && prev.message === RECOVERY_SYNC_MESSAGE ? null : prev))
+    return agentApi.getProposal(oid, confirmationId, 'ontology_agent', conversationId ?? '')
+      .then(state => {
+        if (!apply()) return
+        setResult(state)
+        setStateKey(key)
+        setRecoveryFailureKey(null)
+        clearSyncMessage()
+      })
+      .catch(() => {
+        if (!apply()) return
+        setRecoveryFailureKey(key)
+        clearSyncMessage()
+      })
+  }
+
+  // mount/key 变化时按留痕或内存兜底恢复；无留痕先清旧 key 的恢复失败
+  useEffect(() => {
+    setRecoveryFailureKey(null)
     if (!conversationId) return
     const record = loadProposalConfirmationRecord(window.localStorage, recoveryKey)
-    if (!record) return
+    const confirmationId = record?.confirmationId
+      ?? pendingConfirmationIdsRef.current.get(recoveryKey)
+    if (!confirmationId) return
+    const generationAtEffect = keyGenerationRef.current
     let alive = true
-    setRecoveryFailed(false)
-    agentApi.getProposal(oid, record.confirmationId, 'ontology_agent', conversationId)
-      .then(state => { if (alive) { setResult(state); setRecoveryFailed(false) } })
-      .catch(() => { if (alive) setRecoveryFailed(true) })
+    void recoverAuthoritative(recoveryKey, confirmationId, () => alive
+      && recoveryKeyRef.current === recoveryKey
+      && keyGenerationRef.current === generationAtEffect)
     return () => { alive = false }
   }, [recoveryKey, oid, conversationId])
 
-  // 权威状态轮询：单一调度器。effect 只在「换了 confirmationId / 会话 / 本体」时
-  // 重建；循环内经 resultRef 读最新状态——终态即停（不清除本地凭证），
-  // unknown/compensation_required 可被 reconcile 结案故继续；页面隐藏挂起。
+  // 权威状态轮询：confirmationId/key 变化即重建；await/catch 后按 key+代次
+  // 丢弃迟到响应；终态停止（pending_review 例外），轮询永不触发执行
   useEffect(() => {
-    const confirmationId = result?.confirmationId
+    const confirmationId = freshResult?.confirmationId
     if (!confirmationId || !conversationId) return
+    const keyAtEffect = recoveryKey
+    const generationAtEffect = keyGenerationRef.current
     let alive = true
     let timer: number | undefined
     let attempt = 0
@@ -118,22 +149,25 @@ export function ProposalCard({ oid, proposal, conversationId }: {
       if (!alive) return
       const current = resultRef.current
       if (!current || current.confirmationId !== confirmationId) return
-      if (!shouldContinueProposalPolling(current.state)) return
+      if (!shouldContinueProposalPolling(current.state, current.outcome)) return
       if (document.visibilityState !== 'visible') {
         timer = window.setTimeout(run, 1000)
         return
       }
       try {
         const next = await agentApi.getProposal(oid, confirmationId, 'ontology_agent', conversationId)
-        if (!alive) return
+        if (!alive || recoveryKeyRef.current !== keyAtEffect
+          || keyGenerationRef.current !== generationAtEffect) return
         attempt += 1
         resultRef.current = next
         setResult(next)
-        if (shouldContinueProposalPolling(next.state)) {
+        setStateKey(keyAtEffect)
+        if (shouldContinueProposalPolling(next.state, next.outcome)) {
           timer = window.setTimeout(run, nextProposalPollDelayMs(attempt))
         }
       } catch {
-        if (!alive) return
+        if (!alive || recoveryKeyRef.current !== keyAtEffect
+          || keyGenerationRef.current !== generationAtEffect) return
         attempt += 1
         timer = window.setTimeout(run, nextProposalPollDelayMs(attempt))
       }
@@ -143,24 +177,37 @@ export function ProposalCard({ oid, proposal, conversationId }: {
       alive = false
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [result?.confirmationId, conversationId, oid])
+  }, [freshResult?.confirmationId, conversationId, oid, recoveryKey])
 
   const dryRunOk = proposal.status === 'success'
   const params = Object.entries(proposal.parameters || {})
-  // prepared 是唯一可（重新）发起确认的状态：幂等 prepare 会回放同一确认请求。
-  // 恢复失败（权威状态不可验证）时禁止重新确认，防止对已确认载荷二次决定。
-  const canConfirm = (!result || result.state === 'prepared') && !recoveryFailed
+  // prepared 是唯一可（重新）确认态；恢复中/失败/unknown/compensation 不可确认
+  const canConfirm = !recovering && !recoveryFailed
+    && (!stateIsCurrent || !freshResult || freshResult.state === 'prepared')
 
   const execute = async () => {
-    if (!conversationId) {
-      setError('缺少会话上下文，无法建立确认请求')
+    if (executing || recovering || recoveryFailed
+      || (stateIsCurrent && freshResult != null && freshResult.state !== 'prepared')) {
       return
     }
-    setExecuting(true)
-    setError('')
+    if (!conversationId) {
+      setErrorState({ key: recoveryKey, message: '缺少会话上下文，无法建立确认请求' })
+      return
+    }
+    // 绑定发起时的 key/代次/runId：跨切换旧链只保留 prepare 记录
+    const keyAtStart = recoveryKey
+    const generationAtStart = keyGenerationRef.current
+    executeRunRef.current += 1
+    const runId = executeRunRef.current
+    const isStale = () => !mountedRef.current
+      || recoveryKeyRef.current !== keyAtStart
+      || keyGenerationRef.current !== generationAtStart
+    let prepared: AgentConfirmationState | null = null
+    setExecutingToken({ key: keyAtStart, generation: generationAtStart, runId })
+    setErrorState(null)
     try {
       // 1) 持久准备（不可变载荷；重复提交回放同一确认请求）
-      const prepared = await agentApi.prepareProposal(oid, {
+      prepared = await agentApi.prepareProposal(oid, {
         sessionKind: 'ontology_agent',
         sessionId: conversationId,
         clientSubmissionId: proposal.proposalId,
@@ -170,7 +217,17 @@ export function ProposalCard({ oid, proposal, conversationId }: {
         parameters: proposal.parameters || {},
       })
       // 留痕 confirmationId（best-effort）：写失败不影响后续决定/执行
-      saveProposalConfirmationRecord(window.localStorage, recoveryKey, { confirmationId: prepared.confirmationId })
+      pendingConfirmationIdsRef.current.set(keyAtStart, prepared.confirmationId)
+      saveProposalConfirmationRecord(window.localStorage, keyAtStart, { confirmationId: prepared.confirmationId })
+      if (isStale()) return
+      // prepare 幂等回放可能带回既有权威状态（已执行/待审/unknown 等）：
+      // 直接展示，绝不再次 decide/execute
+      if (prepared.state !== 'prepared') {
+        setRecoveryFailureKey(null)
+        setResult(prepared)
+        setStateKey(keyAtStart)
+        return
+      }
       // 2) 用户二次确认（approve = 同意提交/执行，非成功保证）
       const decisionId = `ui:${prepared.confirmationId}`
       const decided = await agentApi.decideProposal(oid, prepared.confirmationId, {
@@ -180,33 +237,59 @@ export function ProposalCard({ oid, proposal, conversationId }: {
         decisionId,
         payloadHash: prepared.payloadHash,
       })
+      if (isStale()) return
       // 3) 唤醒执行并读取真实状态
       const executed = await agentApi.executeProposal(oid, {
         confirmationId: prepared.confirmationId,
         sessionKind: 'ontology_agent',
         sessionId: conversationId,
       })
-      setRecoveryFailed(false)
+      if (isStale()) return
+      setRecoveryFailureKey(null)
       setResult(executed.state ? executed : decided)
+      setStateKey(keyAtStart)
     } catch (e: unknown) {
+      if (isStale()) return
+      if (prepared) {
+        // 确认已建立但结果未知：转真实 GET，保持 fail-closed
+        setErrorState({ key: keyAtStart, message: RECOVERY_SYNC_MESSAGE })
+        void recoverAuthoritative(keyAtStart, prepared.confirmationId)
+        return
+      }
       const detail = (e as { detail?: { message?: string } } | null)?.detail
       const message = (e as { message?: string } | null)?.message
-      setError(detail?.message || message || '执行失败')
+      setErrorState({ key: keyAtStart, message: detail?.message || message || '执行失败' })
     } finally {
-      setExecuting(false)
+      // 只清本次 runId：旧 finally 不得清掉新执行态
+      if (mountedRef.current) {
+        setExecutingToken(prev => (prev?.runId === runId ? null : prev))
+      }
     }
   }
 
   const resultBanner = () => {
-    if (recoveryFailed && !result) {
+    if (recovering) {
       return (
-        <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-danger-bg)] text-[var(--color-danger)]">
+        <div
+          data-testid="proposal-recovery-banner"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
+        >
+          <Hourglass size={13} /> 正在恢复确认状态…（恢复完成前不可确认）
+        </div>
+      )
+    }
+    if (recoveryFailed && !freshResult) {
+      return (
+        <div
+          data-testid="proposal-recovery-failed-banner"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-danger-bg)] text-[var(--color-danger)]"
+        >
           <XCircle size={13} /> 该提案已发起过确认，但当前状态暂不可验证（恢复失败）；请刷新重试，不能重新确认
         </div>
       )
     }
-    if (!result || result.state === 'prepared') return null
-    const view = resultBannerView(result)
+    if (!freshResult || freshResult.state === 'prepared') return null
+    const view = resultBannerView(freshResult)
     const Icon = view.tone === 'success' ? CheckCircle2 : view.tone === 'danger' ? XCircle : view.tone === 'muted' ? XCircle : Clock3
     return (
       <div className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium ${bannerClass[view.tone]}`}>
@@ -261,8 +344,12 @@ export function ProposalCard({ oid, proposal, conversationId }: {
 
         {proposal.effects.length > 0 && (
           <div>
-            <p className="text-[10px] font-medium text-[var(--color-text-tertiary)] uppercase tracking-wide mb-1.5">
-              预演效果 · 尚未落库
+            <p
+              data-testid="proposal-effects-title"
+              className="text-[10px] font-medium text-[var(--color-text-tertiary)] uppercase tracking-wide mb-1.5"
+            >
+              {proposalEffectsSectionTitle(
+                freshResult?.state ?? null, recovering || recoveryFailed || executing)}
             </p>
             <div className="space-y-1">
               {proposal.effects.map((e, i) => (

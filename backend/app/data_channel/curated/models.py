@@ -4,6 +4,12 @@ from sqlalchemy import String, DateTime, JSON, Text, Float, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
+class PostCommitVerificationError(RuntimeError):
+    """受控动作候选/编辑事务已提交但回执读回失败：按 unknown 人工对账。"""
+
+    pass
+
+
 class CuratedDataset(Base):
     __tablename__ = "v2_curated_datasets"
 
@@ -29,6 +35,12 @@ class CuratedReview(Base):
         String, ForeignKey("v2_dataset_versions.id", ondelete="RESTRICT"),
         nullable=True, index=True)
     reviewer_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True)
+    # 受控动作候选：base_version_id=已批准不可变基线（approve 时 CAS：
+    # 当前指针必须仍指向 base）；proposal_key=proposal-write:{confirmation_id}
+    # 持久唯一关联（幂等与只读恢复锚点）。流水线审核两列恒 NULL。
+    base_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    proposal_key: Mapped[str | None] = mapped_column(String(255), nullable=True,
+                                                     index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|approved|rejected|partial
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

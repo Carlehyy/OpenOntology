@@ -5,6 +5,7 @@
  * 只允许类型级 import（运行时装载前会被擦除），禁止引入任何运行时依赖。
  */
 import type {
+  OntologyActionOutcome,
   OntologyConfirmationDisplay,
   OntologyConfirmationState,
   PendingToolConfirmation,
@@ -44,9 +45,12 @@ export function parseOntologyConfirmation(value: unknown): OntologyConfirmationS
   const action = asRecord(display.action)
   const release = asRecord(display.release)
   const target = asRecord(display.target)
+  // 目标资产公开摘要在 target 下（服务端 display.target.asset），不在顶层
+  const targetAsset = target ? asRecord(target.asset) : null
   return {
     confirmationId,
     state,
+    outcome: parseActionOutcome(record.outcome),
     display: {
       ontology: {
         id: asString(ontology?.id),
@@ -56,8 +60,24 @@ export function parseOntologyConfirmation(value: unknown): OntologyConfirmationS
         id: asString(action?.id),
         name: asString(action?.name),
       },
-      target: target && (asString(target.id) || asString(target.label))
-        ? { id: asString(target.id), label: asString(target.label) }
+      target: target && (asString(target.id) || asString(target.label) || targetAsset)
+        ? {
+          id: asString(target.id),
+          label: asString(target.label),
+          // 资产路由动作的公开摘要：身份/操作/定位键/字段名，不含 CAS 私有材料
+          asset: targetAsset && (asString(targetAsset.name) || asString(targetAsset.datasetId))
+            ? {
+              datasetId: asString(targetAsset.datasetId),
+              name: asString(targetAsset.name),
+              kind: asString(targetAsset.kind),
+              operation: asString(targetAsset.operation),
+              key: asRecord(targetAsset.key) ?? null,
+              fields: Array.isArray(targetAsset.fields)
+                ? targetAsset.fields.map(field => asString(field)).filter(field => field.length > 0)
+                : [],
+            }
+            : null,
+        }
         : null,
       parameters: Array.isArray(display.parameters)
         ? display.parameters
@@ -82,6 +102,32 @@ export function parseOntologyConfirmation(value: unknown): OntologyConfirmationS
     operationId: asString(record.operationId) || null,
     failureCode: asString(record.failureCode) || null,
     blockReason: asString(record.blockReason) || null,
+  }
+}
+
+/**
+ * 保守解析执行结果：assetKind/status 任一缺失即视为无 outcome（旧负载或
+ * 本地动作），绝不把 undefined 渲染成产品详情。
+ */
+export function parseActionOutcome(value: unknown): OntologyActionOutcome | null {
+  const record = asRecord(value)
+  if (!record) return null
+  const assetKind = asString(record.assetKind)
+  const status = asString(record.status)
+  if (!assetKind || !status) return null
+  const affectedRows = record.affectedRows
+  return {
+    assetKind,
+    status,
+    operation: asString(record.operation),
+    affectedRows: typeof affectedRows === 'number' && Number.isFinite(affectedRows)
+      ? affectedRows
+      : -1,
+    datasetId: asString(record.datasetId),
+    versionId: asString(record.versionId) || null,
+    reviewId: asString(record.reviewId) || null,
+    receiptId: asString(record.receiptId) || null,
+    errorCode: asString(record.errorCode) || null,
   }
 }
 
@@ -125,9 +171,25 @@ export function parameterSourceLabel(source: string): string {
 
 /** 确认摘要行：确认卡与 kernel call 共用的关键信息派生（不渲染内部 ID） */
 export interface ConfirmationSummaryRow {
-  key: 'ontology' | 'release' | 'action' | 'target'
+  key: 'ontology' | 'release' | 'action' | 'target' | 'asset'
   label: string
   text: string
+}
+
+/** 资产类别 → 用户可读标签（未知类别保守原文） */
+export function assetKindLabel(assetKind: string): string {
+  if (assetKind === 'manual') return '人工资产'
+  if (assetKind === 'curated') return '审核资产'
+  if (assetKind === 'integrated') return '外部活源'
+  return assetKind
+}
+
+/** 操作 → 用户可读文案 */
+export function outcomeOperationLabel(operation: string): string {
+  if (operation === 'insert') return '新增'
+  if (operation === 'update') return '更新'
+  if (operation === 'delete') return '删除'
+  return operation
 }
 
 /** 摘要行只取用户可读名称/版本；名称缺失的行不返回（不把内部 ID 当详情） */
@@ -137,7 +199,108 @@ export function confirmationSummaryRows(display: OntologyConfirmationDisplay): C
   if (display.release?.version) rows.push({ key: 'release', label: '发布版本', text: display.release.version })
   if (display.action?.name) rows.push({ key: 'action', label: '动作', text: display.action.name })
   if (display.target?.label) rows.push({ key: 'target', label: '目标', text: display.target.label })
+  const asset = display.target?.asset
+  if (asset?.name) {
+    const suffix = asset.operation
+      ? ` · ${outcomeOperationLabel(asset.operation)}`
+      : ''
+    rows.push({ key: 'asset', label: '目标资产', text: `${asset.name}${suffix}` })
+  }
   return rows
+}
+
+/** 定位键展示串：业务主键 k=v 对（用户确认的就是这一行）；空键返回空串 */
+export function targetAssetKeyText(asset: { key?: Record<string, unknown> | null } | null | undefined): string {
+  const key = asset?.key
+  if (!key) return ''
+  return Object.entries(key).map(([name, value]) => `${name}=${parameterValueText(value)}`).join(' · ')
+}
+
+/** 执行结果视图：色调 + 主文案 + 标识明细（reviewId/receiptId 等仅文本，不伪造深链） */
+export interface ConfirmationOutcomeView {
+  tone: 'success' | 'warning' | 'danger' | 'muted'
+  text: string
+  detail: string
+}
+
+function outcomeIdentifierText(outcome: OntologyActionOutcome): string {
+  return [
+    outcome.versionId ? `版本 ${outcome.versionId}` : '',
+    outcome.reviewId ? `审核记录 ${outcome.reviewId}` : '',
+    outcome.receiptId ? `回执 ${outcome.receiptId}` : '',
+    outcome.errorCode ? `错误码 ${outcome.errorCode}` : '',
+  ].filter(Boolean).join(' · ')
+}
+
+/**
+ * 执行结果的保守展示派生：
+ * - state=succeeded + outcome=pending_review → 「提交成功，数据未生效」，
+ *   操作层成功不冒充数据生效，绝不渲染成绿色「全部完成」；
+ * - curated 的 applied 表示审核已批准生效（服务端只读复核后的真实状态），
+ *   按成功展示并携带审核记录标识；未知资产类别 + applied 才走保守警示；
+ * - unknown → 待核实且不得重试；failed → 未生效；
+ * - 未知枚举保守原文透出，不发明 partial success。
+ */
+export function confirmationOutcomeView(
+  outcome: OntologyActionOutcome | null | undefined,
+): ConfirmationOutcomeView | null {
+  if (!outcome) return null
+  const identifiers = outcomeIdentifierText(outcome)
+  switch (outcome.status) {
+    case 'pending_review':
+      return {
+        tone: 'warning',
+        text: '变更已提交，待审核 — 数据尚未生效，查询不可见',
+        detail: identifiers || (outcome.assetKind === 'curated' ? '批准并生效前请勿视为已更新' : ''),
+      }
+    case 'applied':
+      if (outcome.assetKind === 'manual') {
+        return {
+          tone: 'success',
+          text: '已生效：数据已写入新版本',
+          detail: identifiers || '可在数据版本中核对内容与查询一致性',
+        }
+      }
+      if (outcome.assetKind === 'integrated') {
+        const rowsText = outcome.affectedRows >= 0
+          ? `影响 ${outcome.affectedRows} 行`
+          : '影响行数未知，请按回执核对'
+        const verb = outcomeOperationLabel(outcome.operation)
+        return {
+          tone: 'success',
+          text: `已生效：源数据${verb}完成（${rowsText}）`,
+          detail: identifiers || '最终结果以新查询读源为准',
+        }
+      }
+      // curated 的 applied 经服务端只读复核（approved→applied），是合法生效态
+      if (outcome.assetKind === 'curated') {
+        return {
+          tone: 'success',
+          text: '已生效：审核已批准，变更已生效',
+          detail: identifiers || '查询结果应与本次变更一致',
+        }
+      }
+      // 未知资产类别 + applied：不冒充成功，保守警示
+      return {
+        tone: 'warning',
+        text: `结果状态需人工核对（${assetKindLabel(outcome.assetKind)} + applied）`,
+        detail: identifiers,
+      }
+    case 'unknown':
+      return {
+        tone: 'warning',
+        text: '执行结果待核实 — 不得视为已生效，请勿重试',
+        detail: identifiers || '请管理员按幂等键与源记录核对后再裁决',
+      }
+    case 'failed':
+      return {
+        tone: 'danger',
+        text: '写入未生效（明确失败）',
+        detail: identifiers,
+      }
+    default:
+      return { tone: 'muted', text: `结果状态：${outcome.status}`, detail: identifiers }
+  }
 }
 
 /**

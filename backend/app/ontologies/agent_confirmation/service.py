@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import uuid as uuid_lib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -28,10 +29,13 @@ from app.ontologies.agent_confirmation import models as M
 from app.ontologies.agent_confirmation.schemas import (
     PrepareProposalRequest, ParameterRef,
 )
+from app.ontologies.agent_confirmation import write_port as WP
 from app.ontologies.agent_query.models import (
     AgentQueryRow, AgentQuerySnapshot,
 )
 from app.ontologies.release_context import current_release_context
+
+logger = logging.getLogger(__name__)
 
 CONFIRMATION_TTL_SECONDS = 24 * 3600
 OPERATION_LEASE_SECONDS = 60
@@ -195,18 +199,28 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
     except ToolError as exc:
         raise ConfirmationError(403, "action_forbidden", str(exc)) from exc
     target_snapshot_label = None
+    target_instance = None
     if body.target_instance_id:
         from app.models.ontology_formal import ObjectInstance
 
-        target = db.query(ObjectInstance).filter(
+        target_instance = db.query(ObjectInstance).filter(
             ObjectInstance.id == body.target_instance_id).first()
         try:
-            scope.visible_instance(target)
+            scope.visible_instance(target_instance)
         except ToolError as exc:
             raise ConfirmationError(422, "invalid_target", str(exc)) from exc
-        target_snapshot_label = getattr(target, "external_id", None) or target.id
+        target_snapshot_label = (
+            getattr(target_instance, "external_id", None) or target_instance.id)
+    elif body.target_ref is not None:
+        try:
+            scope.require_object_type(body.target_ref.object_type_id)
+        except ToolError as exc:
+            raise ConfirmationError(422, "invalid_target", str(exc)) from exc
 
     parameters = dict(body.parameters)
+    if WP.WRITE_PLAN_RESERVED_KEY in parameters:
+        raise ConfirmationError(
+            422, "invalid_parameter", "该参数名为服务端保留键，不可作为业务参数")
     parameter_sources = _resolve_parameter_refs(db, user, body.parameter_refs,
                                                 parameters)
     final_params, validation_errors = prepare_action_parameters(
@@ -216,6 +230,11 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
                                 "参数校验失败", validationErrors=validation_errors)
     for key in parameters:
         parameter_sources.setdefault(key, {"kind": "user_input"})
+
+    # —— 资产写路由（goal §6）：按 release 快照映射决定本地/三源路由 ——
+    write_plan = _resolve_asset_write_plan(
+        db, user, ontology_id, context, action, scope, final_params,
+        body, target_instance)
 
     if root_intent_id is None:
         root_intent_id = _resolve_http_root_intent(db, user, body)
@@ -237,6 +256,11 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
         "parameters": final_params,
         "requiresApproval": bool(action.requires_approval),
     }
+    if write_plan is not None:
+        # 冻结计划进入不可变载荷哈希：approve 回显的 payloadHash 覆盖资产
+        # 写语义，任何事后改动都会被 decide 的指纹比对拒绝。
+        payload["writePlan"] = write_plan
+        parameter_sources[WP.WRITE_PLAN_RESERVED_KEY] = write_plan
     payload_hash = _sha256(_canonical_json(payload))
     if len(_canonical_json(payload).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise ConfirmationError(422, "invalid_parameter",
@@ -277,6 +301,11 @@ def prepare(db: Session, user, ontology_id: str, body: PrepareProposalRequest,
 
     display = _display_payload(project, context, action, final_params,
                                parameter_sources, body, target_snapshot_label)
+    if write_plan is not None:
+        # 公开摘要（不含 CAS 私有材料）：expected token / before 行只存
+        # parameter_sources 保留键，绝不进入 display 或任何公开响应。
+        display["target"] = display.get("target") or {}
+        display["target"]["asset"] = WP.public_plan_summary(write_plan)
     confirmation = M.ActionConfirmation(
         actor_user_id=str(user.id),
         session_kind=body.session_kind,
@@ -336,6 +365,248 @@ def _display_payload(project, context, action, final_params, parameter_sources,
                     "version": context.release.version_number},
         "requiresApproval": bool(action.requires_approval),
     }
+
+
+# ------------------------------------------------- asset write routing
+
+def _resolve_asset_write_plan(db: Session, user, ontology_id: str, context,
+                              action, scope, final_params: dict,
+                              body: PrepareProposalRequest, target_instance):
+    """prepare 阶段解析资产写计划；None = 保持本地动作语义。
+
+    顺序：纯规则派生（描述性，不拒绝组合）→ 类型绑定判定（release 快照
+    原文，fail-closed）→ 绑定后才执行组合守卫与端口解析（映射/schema/
+    权限/源读 token 在适配器内完成并冻结）。任何拒绝都发生在零业务写阶段。
+    """
+    from app.ontologies.formal_modeling.action_runtime_values import (
+        _resolve_value,
+    )
+    from app.ontologies.formal_modeling.safe_eval import SafeEvalError
+
+    target_props = None
+    if target_instance is not None:
+        target_props = {
+            **dict(target_instance.properties or {}),
+            **dict(target_instance.computed or {}),
+        }
+    target_ref = None
+    if body.target_ref is not None:
+        target_ref = WP.TargetRef(
+            object_type_id=str(body.target_ref.object_type_id),
+            key=dict(body.target_ref.key or {}))
+
+    def _resolve(mapping, params, props):
+        return _resolve_value(mapping, params, props, db, ontology_id,
+                              ontology_release_id=context.release.id)
+
+    try:
+        request = WP.build_write_request(
+            action, final_params,
+            target_props=target_props,
+            target_instance_id=body.target_instance_id,
+            target_ref=target_ref,
+            resolve_value=_resolve)
+    except WP.WritePortError as exc:
+        raise ConfirmationError(exc.status, exc.code, exc.message,
+                                **exc.extra) from exc
+    except SafeEvalError as exc:
+        raise ConfirmationError(422, "invalid_parameter",
+                                f"写值解析失败：{exc}") from exc
+
+    # targetRef 类型必须与动作绑定类型一致（防跨类型定位）。
+    if (target_ref is not None and action.object_type_id
+            and str(target_ref.object_type_id) != str(action.object_type_id)):
+        raise ConfirmationError(
+            422, "invalid_target",
+            "targetRef.objectTypeId 与动作绑定的对象类型不一致",
+            expected=str(action.object_type_id),
+            provided=str(target_ref.object_type_id))
+
+    touched = request.touched_type_ids()
+    if request.link_type_ids:
+        touched |= _link_endpoint_types(context, request.link_type_ids)
+    if not touched:
+        return None
+    bound_types = _mapping_bound_object_types(context)
+    if not (touched & bound_types):
+        if request.operation == WP.OPERATION_DELETE:
+            raise ConfirmationError(
+                422, "delete_row_requires_asset",
+                "delete_row 仅支持经资产映射路由的动作；目标类型未绑定数据"
+                "资产，本地引擎没有对象删除语义")
+        return None
+
+    # 绑定命中：组合守卫先于端口解析，拒绝时源侧零变更。
+    try:
+        WP.enforce_asset_write_guards(request)
+    except WP.WritePortError as exc:
+        raise ConfirmationError(exc.status, exc.code, exc.message,
+                                **exc.extra) from exc
+
+    # 属性级授权（profile allowed_properties）：写入属性与定位键属性都必须
+    # 在边界解析范围内（targetRef.key 同样不可越权）。
+    from app.ontologies.agent_runtime.boundary import ToolError
+
+    try:
+        write_type = scope.require_object_type(request.object_type_id)
+        for prop in [*request.property_values, *request.key_values,
+                     *request.read_properties]:
+            scope.resolve_property(write_type, prop)
+    except ToolError as exc:
+        raise ConfirmationError(403, "property_write_forbidden",
+                                str(exc)) from exc
+
+    try:
+        plan = WP.action_write_port().resolve_write(
+            db, user, ontology_id=ontology_id,
+            release_id=context.release.id, request=request)
+    except WP.WritePortError as exc:
+        raise ConfirmationError(exc.status, exc.code, exc.message,
+                                **exc.extra) from exc
+    if plan is None:
+        return None
+    try:
+        plan = WP.validate_frozen_plan(plan)
+    except WP.WritePortError as exc:
+        raise ConfirmationError(
+            exc.status, exc.code,
+            f"适配器返回的冻结计划不合法：{exc.message}") from exc
+
+    # targetRef 场景的延迟取值：读取有界目标快照（plan.targetSnapshot）后
+    # 按规则顺序求值，经 valueMap 合并进计划列值 — 求值失败即 prepare
+    # 拒绝（零源变更），不用空 target_props 算错值。
+    if request.pending_value_mappings:
+        snapshot_props = plan.get("targetSnapshot")
+        if not isinstance(snapshot_props, dict):
+            snapshot_props = {}
+        merged_values = dict(plan.get("values") or {})
+        for prop in sorted(request.pending_value_mappings):
+            mapping = request.pending_value_mappings[prop]
+            try:
+                value = _resolve(mapping, final_params, dict(snapshot_props))
+            except SafeEvalError as exc:
+                raise ConfirmationError(
+                    422, "invalid_parameter",
+                    f"写值解析失败（属性 {prop}）：{exc}") from exc
+            column = (plan.get("valueMap") or {}).get(prop)
+            if column is None:
+                raise ConfirmationError(
+                    422, "unknown_write_column",
+                    f"属性「{prop}」未映射到资产列，拒绝写")
+            merged_values[column] = value
+        plan["values"] = merged_values
+
+    # 资产路由绕过本地引擎，动作自身的校验规则必须在此真实执行（任何
+    # 源写之前）：validation 表达式/函数按冻结目标快照求值，失败即 prepare
+    # 拒绝、零源变更。目标快照优先取计划内源读单行（targetRef/curated），
+    # 本地实例路径回落实例属性。
+    validation_props = plan.get("targetSnapshot")
+    if not isinstance(validation_props, dict):
+        validation_props = target_props or {}
+    from app.ontologies.formal_modeling.action_runtime_values import _validate
+    from app.ontologies.formal_modeling.action_validation import (
+        _prepare_action_rules,
+    )
+
+    rules, rule_errors = _prepare_action_rules(action)
+    if rule_errors:
+        raise ConfirmationError(422, "action_rules_invalid",
+                                "动作规则定义无效", errors=rule_errors)
+    errors = _validate(
+        action, final_params, validation_props or None, db, ontology_id,
+        rules, ontology_release_id=context.release.id)
+    if errors:
+        raise ConfirmationError(422, "invalid_parameter",
+                                "动作校验未通过", validationErrors=errors)
+    return plan
+
+
+def _release_snapshot_dict(context) -> dict:
+    snapshot = context.release.snapshot_formal
+    if not isinstance(snapshot, dict):
+        raise ConfirmationError(
+            409, "mapping_contract_invalid", "发布快照损坏，无法判定资产绑定")
+    return snapshot
+
+
+def _mapping_bound_object_types(context) -> set[str]:
+    """release 快照映射覆盖的对象类型 id 集合（远程 + 本地数据集绑定）。
+
+    直接解析权威快照原文；任何解析异常 fail-closed（错误路由到 local 会
+    产生孤儿本地写）。仅当快照证明 mappings 为空/无绑定类型时才返回空集。
+    """
+    snapshot = _release_snapshot_dict(context)
+    try:
+        by_name: dict[str, str] = {}
+        for ot in snapshot.get("objectTypes") or []:
+            if isinstance(ot, dict) and ot.get("id"):
+                for key in ("name", "displayName"):
+                    if ot.get(key):
+                        by_name[str(ot[key])] = str(ot["id"])
+        bound: set[str] = set()
+        for entry in snapshot.get("mappings") or []:
+            if not isinstance(entry, dict):
+                continue
+            target = entry.get("targetObjectTypeId")
+            if target:
+                bound.add(str(target))
+                continue
+            entity = str(entry.get("entityClass") or "")
+            if entity and entity in by_name:
+                bound.add(by_name[entity])
+        return bound
+    except ConfirmationError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail-closed，绝不回退 local
+        raise ConfirmationError(
+            409, "mapping_contract_invalid",
+            f"发布快照映射解析失败：{exc}") from exc
+
+
+def _link_endpoint_types(context, link_type_ids) -> set[str]:
+    """快照 linkTypes 中这些链接类型的两端对象类型 id（fail-closed）。
+
+    快照键为 camelCase（snapshot 序列化别名）；缺失链接定义或缺失端点键
+    都是错误，不得静默当成未绑定（否则绑定守卫整体失效）。
+    """
+    snapshot = _release_snapshot_dict(context)
+    wanted = {str(item) for item in link_type_ids}
+    endpoints: set[str] = set()
+    matched: set[str] = set()
+    try:
+        for link_type in snapshot.get("linkTypes") or []:
+            if not isinstance(link_type, dict):
+                continue
+            if str(link_type.get("id") or "") not in wanted:
+                continue
+            matched.add(str(link_type.get("id")))
+            source = link_type.get("sourceObjectTypeId")
+            target = link_type.get("targetObjectTypeId")
+            if not source or not target:
+                raise ConfirmationError(
+                    422, "invalid_parameter",
+                    f"链接类型 {link_type.get('id')} 快照缺少两端对象类型定义")
+            endpoints.add(str(source))
+            endpoints.add(str(target))
+    except ConfirmationError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail-closed
+        raise ConfirmationError(
+            409, "mapping_contract_invalid",
+            f"发布快照链接类型解析失败：{exc}") from exc
+    unresolved = wanted - matched
+    if unresolved:
+        raise ConfirmationError(
+            422, "invalid_parameter",
+            f"链接规则引用的链接类型不在发布快照中：{sorted(unresolved)}")
+    return endpoints
+
+
+def _frozen_plan(confirmation: M.ActionConfirmation) -> Optional[dict]:
+    raw = (confirmation.parameter_sources or {}).get(WP.WRITE_PLAN_RESERVED_KEY)
+    if not raw:
+        return None
+    return WP.validate_frozen_plan(raw)
 
 
 # --------------------------------------------------------------- lookup
@@ -404,6 +675,7 @@ def decide(db: Session, user, ontology_id: str, cid: str, decision: str,
         if not hmac.compare_digest(confirmation.payload_hash, payload_hash):
             raise ConfirmationError(409, "prepare_payload_conflict",
                                     "载荷指纹不一致，拒绝替代确认")
+        _verify_frozen_payload_integrity(confirmation)
     elif confirmation.decision_event_id == decision_id:
         if decision in ("approve",) and confirmation.state in (
                 "confirmed", "dispatch_queued", "executing",
@@ -498,6 +770,11 @@ def decide(db: Session, user, ontology_id: str, cid: str, decision: str,
                                 currentState="expired",
                                 reprepareRequired=True)
 
+    # 属性级授权（allowed_properties）在 decide 时按执行时态重验：冻结计划
+    # 的 keyProperties/properties 必须仍在当前 profile 边界内（A21/A23：
+    # prepare 后撤字段权限 → confirm 也拒绝，不只靠 execute 兜底）。
+    _frozen_plan_field_guard(db, confirmation, scope)
+
     guard_hash = _guard_hash(confirmation)
     conflicting = db.query(M.ActionOperation).filter(
         M.ActionOperation.guard_hash == guard_hash,
@@ -528,18 +805,141 @@ def decide(db: Session, user, ontology_id: str, cid: str, decision: str,
         db.rollback()
         raise ConfirmationError(409, "operation_unresolved",
                                 "并发确认冲突；相同载荷的操作已在途") from exc
+    plan = _frozen_plan(confirmation)
+    if plan is not None and confirmation.requires_approval:
+        # 资产写 + 引擎级审批：用户确认后先落 HITL 待审日志与治理收件箱，
+        # 源写派发由管理员批准（decide_pending_action →
+        # dispatch_approved_asset_write）触发，拒绝则结 approval_rejected。
+        # 与本地引擎 HITL 同一审批队列/血缘，不另起审批通道。
+        _enter_asset_approval_gate(db, confirmation, plan)
+        db.refresh(confirmation)
+        return confirmation
     db.refresh(confirmation)
     return confirmation
 
 
+def _enter_asset_approval_gate(db: Session, confirmation,
+                               plan: dict) -> None:
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+
+    log = ActionExecutionLog(
+        ontology_id=confirmation.ontology_id,
+        action_id=confirmation.action_id,
+        action_name=None,
+        object_type_id=None,
+        object_instance_id=confirmation.target_instance_id,
+        parameters=confirmation.final_parameters,
+        status="pending",
+        idempotency_key=f"proposal-approval:{confirmation.id}",
+        ontology_version=confirmation.release_version,
+        ontology_release_id=confirmation.release_id,
+        operation_id=confirmation.operation_id,
+        dry_run=False, actor_id=confirmation.actor_user_id,
+    )
+    db.add(log)
+    try:
+        db.flush()
+        from app.inbox.service import enqueue_ontology_approval_request
+
+        enqueue_ontology_approval_request(
+            db,
+            log_id=log.id,
+            ontology_id=confirmation.ontology_id,
+            action_name=confirmation.action_id,
+            ontology_version=confirmation.release_version,
+            ontology_release_id=confirmation.release_id,
+            occurred_at=_now(),
+        )
+        db.query(M.ActionOperation).filter(
+            M.ActionOperation.id == confirmation.operation_id
+        ).update({
+            M.ActionOperation.state: "pending_approval",
+            M.ActionOperation.approval_log_id: log.id,
+        }, synchronize_session=False)
+        confirmation.state = "pending_approval"
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _frozen_plan_field_guard(db, confirmation, scope) -> None:
+    """资产路由确认的 decide 时字段级重验（allowed_properties 收紧）。
+
+    冻结计划携带 keyProperties（定位键属性）与 properties（写入属性）；
+    两者都必须在当前 profile 的 allowed_properties 边界内。非资产确认
+    （无冻结计划）不在此门——本地动作的属性由引擎在效果阶段检查。
+    """
+    plan = _frozen_plan(confirmation)
+    if plan is None:
+        return
+    from app.ontologies.agent_runtime.boundary import ToolError
+
+    props = [str(p) for p in [*(plan.get("keyProperties") or []),
+                              *(plan.get("properties") or [])] if p]
+    if not props:
+        return
+    try:
+        write_type = scope.require_object_type(
+            str(plan.get("objectTypeId") or ""))
+        for prop in props:
+            scope.resolve_property(write_type, prop)
+    except ToolError as exc:
+        confirmation.state = "expired"
+        confirmation.failure_code = "property_write_forbidden"
+        db.commit()
+        raise ConfirmationError(
+            403, "property_write_forbidden",
+            f"属性级权限已收紧：{exc}",
+            currentState="expired", reprepareRequired=True) from exc
+
+
+def _verify_frozen_payload_integrity(confirmation: M.ActionConfirmation) -> None:
+    """计划承载确认的载荷完整性自检（decide 时重算，防服务端材料被改）。
+
+    仅对冻结计划存在的确认生效；无计划的本地确认保持既有语义（用户回显
+    hash 与存储 hash 比对已足够，不改变旧确认行为）。重算用的 payload 与
+    prepare 完全同构 — 含冻结计划本体，任何事后改动都会被拒绝。
+    """
+    plan = _frozen_plan(confirmation)
+    if plan is None:
+        return
+    payload = {
+        "actor": confirmation.actor_user_id,
+        "sessionKind": confirmation.session_kind,
+        "sessionId": confirmation.session_id,
+        "rootIntentId": confirmation.root_intent_id,
+        "origin": confirmation.origin,
+        "ontology": confirmation.ontology_id,
+        "release": confirmation.release_id,
+        "action": confirmation.action_id,
+        "target": confirmation.target_instance_id,
+        "parameters": confirmation.final_parameters,
+        "requiresApproval": bool(confirmation.requires_approval),
+        "writePlan": plan,
+    }
+    recomputed = _sha256(_canonical_json(payload))
+    if not hmac.compare_digest(recomputed, confirmation.payload_hash):
+        raise ConfirmationError(
+            409, "prepare_payload_conflict",
+            "确认载荷完整性校验失败：冻结材料与载荷指纹不一致，拒绝确认")
+
+
 def _guard_hash(confirmation: M.ActionConfirmation) -> str:
-    return _sha256(_canonical_json({
+    guard_input = {
         "actor": confirmation.actor_user_id,
         "ontology": confirmation.ontology_id,
         "action": confirmation.action_id,
         "target": confirmation.target_instance_id,
         "parameters": confirmation.final_parameters,
-    }))
+    }
+    plan = _frozen_plan(confirmation)
+    if plan is not None:
+        # 旧确认（无计划）保持原 guard 语义；有计划时加入业务恒等投影 —
+        # CAS 材料（expectedToken/before/fingerprint）剔除，避免同业务意图
+        # 的不同准备失去互斥（并发双写）。
+        guard_input["writePlan"] = WP.logical_guard_plan(plan)
+    return _sha256(_canonical_json(guard_input))
 
 
 # --------------------------------------------------------------- execute
@@ -589,7 +989,8 @@ def run_operation_inline(operation_id: str, db: Session | None = None) -> None:
     """claim → engine_entered 标记 → 引擎执行 → 状态映射（跨会话窗口持久化）。
 
     ``db`` 为空时（worker）各阶段用独立短会话，崩溃窗口各自持久化；
-    HTTP 内联执行传入请求会话，同一事务边界内完成。
+    HTTP 内联执行传入请求会话，同一事务边界内完成。资产路由确认走
+    :func:`_invoke_asset_write`（外部 attempt 先行落账，再派发单行源写）。
     """
     owned = db is None
     session = db if db is not None else _fresh_session()
@@ -598,8 +999,14 @@ def run_operation_inline(operation_id: str, db: Session | None = None) -> None:
         if op is None:
             return
         _mark_engine_entered(op.id, session)
-        result = _invoke_engine(op.id, session)
-        _apply_engine_result(op.id, result, session)
+        confirmation = session.query(M.ActionConfirmation).filter(
+            M.ActionConfirmation.id == op.confirmation_id).first()
+        plan = _frozen_plan(confirmation) if confirmation is not None else None
+        if plan is not None:
+            _invoke_asset_write(session, op, confirmation, plan)
+        else:
+            result = _invoke_engine(op.id, session)
+            _apply_engine_result(op.id, result, session)
     finally:
         if owned:
             session.close()
@@ -926,7 +1333,479 @@ def _record_external_attempts_finished(db: Session, operation,
         attempt.finished_at = _now()
 
 
-# ------------------------------------------------------------- reconcile
+# ------------------------------------------------------------- asset write
+
+ASSET_WRITE_EFFECT_ORDINAL = 0
+
+
+def _record_asset_write_attempt(
+        db: Session, operation) -> tuple[M.ActionExternalAttempt, bool]:
+    """源写派发前持久化外部 attempt（started）并提交 — 崩溃窗口的对账锚点。
+
+    返回 (attempt, created)。``created=False`` 表示存在历史 attempt：
+    acknowledged=此前源写已回执（只读恢复，禁止再写）；started/unknown=
+    崩溃窗口未结案（必须 unknown，禁止自动重放）。
+    """
+    attempt = db.query(M.ActionExternalAttempt).filter(
+        M.ActionExternalAttempt.operation_id == operation.id,
+        M.ActionExternalAttempt.effect_ordinal
+        == ASSET_WRITE_EFFECT_ORDINAL).first()
+    if attempt is not None:
+        return attempt, False
+    attempt = M.ActionExternalAttempt(
+        operation_id=operation.id,
+        effect_ordinal=ASSET_WRITE_EFFECT_ORDINAL,
+        stable_delivery_key=(
+            f"proposal-write:{operation.confirmation_id}"),
+        state="started",
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    return attempt, True
+
+
+def _recover_attempt_outcome(
+        plan: dict, attempt: M.ActionExternalAttempt
+) -> Optional[WP.AssetWriteOutcome]:
+    """既有 attempt 的只读恢复 — 绝不重新派发源写；无证据按 unknown。"""
+    try:
+        evidence = json.loads(attempt.evidence_ref or "")
+    except (TypeError, ValueError):
+        evidence = None
+    evidence = evidence if isinstance(evidence, dict) else None
+    if not evidence:
+        # 无证据不拼装回执：仅携带计划身份的 unknown（不虚构任何结果字段）。
+        return WP.AssetWriteOutcome(
+            asset_kind=str(plan.get("assetKind") or "unknown"),
+            status=WP.OUTCOME_UNKNOWN,
+            operation=str(plan.get("operation") or "update"),
+            affected_rows=0,
+            dataset_id=str(plan.get("datasetId") or ""),
+            error_code="execution_result_unknown",
+            message="attempt 无可读回执证据，保持 unknown 人工对账",
+        )
+    return WP.AssetWriteOutcome(
+        asset_kind=str(evidence.get("assetKind") or "unknown"),
+        status=str(evidence.get("status") or WP.OUTCOME_UNKNOWN),
+        operation=str(evidence.get("operation") or "update"),
+        affected_rows=int(evidence.get("affectedRows") or 0),
+        dataset_id=str(evidence.get("datasetId") or ""),
+        version_id=evidence.get("versionId"),
+        review_id=evidence.get("reviewId"),
+        receipt_id=evidence.get("receiptId"),
+        error_code=str(evidence.get("errorCode")
+                       or "execution_result_unknown"),
+        message=str(evidence.get("message") or "历史回执只读恢复"),
+    )
+
+
+def _asset_failure_outcome(plan: dict, operation: str, code: str,
+                           message: str) -> WP.AssetWriteOutcome:
+    return WP.AssetWriteOutcome(
+        asset_kind=str(plan.get("assetKind") or "unknown"),
+        status=WP.OUTCOME_FAILED,
+        operation=str(plan.get("operation") or operation or "update"),
+        affected_rows=0,
+        dataset_id=str(plan.get("datasetId") or ""),
+        error_code=code,
+        message=message,
+    )
+
+
+def _invoke_asset_write(db: Session, operation, confirmation, plan: dict) -> None:
+    """资产路由确认的执行：release 栅栏 → attempt 落账 → 端口单行写 → 结案。
+
+    顺序保证：attempt(started) 提交必须先于适配器内部业务 commit；确定性
+    拒绝（WritePortError，源侧零变更可证明）结 failed_not_executed；适配器
+    意外异常按 unknown 处理 — 源写可能已发出，不自动重放，guard 保留人工对账。
+    结案携带 fence（engine_entered 递增值）：过期的并发 worker 不能覆盖
+    更新一次派发的裁决。
+    """
+    # 派发前完整性重验：私有冻结材料与载荷指纹必须仍一致（批准后任何
+    # 服务端篡改都不能凭旧 hash 执行）。
+    try:
+        _verify_frozen_payload_integrity(confirmation)
+    except ConfirmationError as exc:
+        operation = db.query(M.ActionOperation).filter(
+            M.ActionOperation.id == operation.id).first()
+        if operation is not None:
+            _apply_asset_write_result(
+                operation.id,
+                _asset_failure_outcome(
+                    plan, plan.get("operation"), exc.code,
+                    "冻结载荷完整性校验失败，源写未执行"),
+                db, expected_fence=operation.fence_token)
+        return
+    # 重载 operation 取当前 fence（_mark_engine_entered 已提交递增）。
+    operation = db.query(M.ActionOperation).filter(
+        M.ActionOperation.id == operation.id).first()
+    if operation is None:
+        return
+    fence = operation.fence_token
+    # release 栅栏：冻结计划跨发布即拒绝（源写零变更可证明）。
+    try:
+        current_release_context(db, confirmation.ontology_id,
+                                expected_release_id=confirmation.release_id)
+    except Exception as exc:  # noqa: BLE001
+        detail = getattr(exc, "detail", None)
+        code = detail.get("code", "release_context_changed") if isinstance(
+            detail, dict) else "release_context_changed"
+        _apply_asset_write_result(
+            operation.id,
+            _asset_failure_outcome(plan, plan.get("operation"),
+                                   code, "当前发布版本已变化，源写未执行"),
+            db, expected_fence=fence)
+        return
+
+    attempt, attempt_created = _record_asset_write_attempt(db, operation)
+    if not attempt_created:
+        # A11：历史 attempt 存在 → 一次派发已发生过。acknowledged=已有
+        # 完整回执，只读恢复终态；started/unknown=崩溃窗口，只读结 unknown。
+        # 两种情况都绝不再次 apply_write（不自动重放）。
+        if attempt.state == "acknowledged":
+            outcome = _recover_attempt_outcome(plan, attempt)
+        else:
+            outcome = WP.AssetWriteOutcome(
+                asset_kind=str(plan.get("assetKind") or "unknown"),
+                status=WP.OUTCOME_UNKNOWN,
+                operation=str(plan.get("operation") or "update"),
+                affected_rows=0,
+                dataset_id=str(plan.get("datasetId") or ""),
+                error_code="execution_result_unknown",
+                message="检测到未结案的历史源写 attempt：保持 unknown，"
+                        "禁止自动重放，等待人工对账",
+            )
+        _apply_asset_write_result(operation.id, outcome, db,
+                                  expected_fence=fence)
+        return
+    try:
+        port = WP.action_write_port()
+    except WP.WritePortError as exc:
+        _apply_asset_write_result(
+            operation.id,
+            _asset_failure_outcome(plan, plan.get("operation"),
+                                   exc.code, exc.message),
+            db, expected_fence=fence)
+        return
+
+    from app.auth.models import User
+
+    user = db.query(User).filter(
+        User.id == confirmation.actor_user_id).first()
+    if user is None or not getattr(user, "is_active", True):
+        _apply_asset_write_result(
+            operation.id,
+            _asset_failure_outcome(plan, plan.get("operation"),
+                                   "actor_invalid", "确认发起人不存在或已停用"),
+            db, expected_fence=fence)
+        return
+    # 执行前完整重授权（A23）：本体写权限 + profile + 动作/类型/属性范围
+    # 全部按执行时态重验；任何拒绝都发生在源写之前（零源变更可证明）。
+    gate_error = _asset_execution_authorization_error(
+        db, user, confirmation, plan)
+    if gate_error is not None:
+        _apply_asset_write_result(
+            operation.id,
+            _asset_failure_outcome(plan, plan.get("operation"),
+                                   gate_error[0], gate_error[1]),
+            db, expected_fence=fence)
+        return
+    try:
+        outcome = port.apply_write(
+            db, user, plan,
+            confirmation_id=confirmation.id,
+            actor_id=confirmation.actor_user_id)
+    except WP.WritePortError as exc:
+        if exc.extra.get("businessArtifactCreated"):
+            # 失败路径已留下业务痕迹（如空 pending review 壳）：不能宣称
+            # 零写/未执行 — unknown，guard 保留人工对账。
+            outcome = WP.AssetWriteOutcome(
+                asset_kind=str(plan.get("assetKind") or "unknown"),
+                status=WP.OUTCOME_UNKNOWN,
+                operation=str(plan.get("operation") or "update"),
+                affected_rows=0,
+                dataset_id=str(plan.get("datasetId") or ""),
+                review_id=exc.extra.get("reviewId"),
+                receipt_id=exc.extra.get("receiptId"),
+                error_code=exc.code,
+                message=f"资产写失败且已留下待对账业务痕迹：{exc.message}",
+            )
+        else:
+            outcome = WP.AssetWriteOutcome(
+                asset_kind=str(plan.get("assetKind") or "unknown"),
+                status=WP.OUTCOME_FAILED,
+                operation=str(plan.get("operation") or "update"),
+                affected_rows=0,
+                dataset_id=str(plan.get("datasetId") or ""),
+                review_id=exc.extra.get("reviewId"),
+                receipt_id=exc.extra.get("receiptId"),
+                error_code=exc.code,
+                message=exc.message,
+            )
+    except Exception as exc:  # noqa: BLE001 - 源写可能已发出：unknown 不重放
+        db.rollback()
+        logger.exception("资产写适配器异常 op=%s", operation.id)
+        outcome = WP.AssetWriteOutcome(
+            asset_kind=str(plan.get("assetKind") or "unknown"),
+            status=WP.OUTCOME_UNKNOWN,
+            operation=str(plan.get("operation") or "update"),
+            affected_rows=0,
+            dataset_id=str(plan.get("datasetId") or ""),
+            error_code="execution_result_unknown",
+            message="资产写执行结果未知（适配器异常），保持 unknown 不自动重放",
+        )
+    _apply_asset_write_result(operation.id, outcome, db, expected_fence=fence)
+
+
+def _asset_execution_authorization_error(db, user, confirmation,
+                                         plan: dict) -> Optional[tuple]:
+    """执行时态的完整重授权：返回 (code, message) 或 None 放行。
+
+    复用既有守卫（require_ontology_access / build_scope / resolve_property），
+    覆盖：本体写权限（含 owner/admin 口径）、profile 启用与提案开关、动作/
+    类型/属性（含 allowed_properties 收紧）授权。批准后撤权在此拦截。
+    """
+    from fastapi import HTTPException
+
+    from app.ontologies.access import require_ontology_access
+    from app.ontologies.agent_runtime.boundary import ToolError, build_scope
+
+    from app.auth.permissions import user_has_menu_access
+
+    if not user_has_menu_access(db, user, "data"):
+        return ("source_write_denied",
+                "确认发起人的角色已无资产湖（data）菜单权限，拒绝源写")
+    try:
+        require_ontology_access(db, confirmation.ontology_id, user,
+                                write=True)
+    except HTTPException as exc:
+        return ("source_write_denied",
+                f"确认发起人已无该本体的写权限：{exc.detail}")
+    try:
+        _, profile, scope = build_scope(
+            db, confirmation.ontology_id, release_id=confirmation.release_id)
+    except ToolError as exc:
+        return ("release_context_changed", str(exc))
+    if not profile.enabled or not profile.allow_action_proposals:
+        return ("profile_disabled", "该本体的智能体已停用或禁止提案")
+    try:
+        scope.require_action(confirmation.action_id)
+        write_type = scope.require_object_type(str(plan.get("objectTypeId")))
+        for prop in [*(plan.get("keyProperties") or []),
+                     *(plan.get("properties") or [])]:
+            scope.resolve_property(write_type, str(prop))
+    except ToolError as exc:
+        return ("action_forbidden", str(exc))
+    return None
+
+
+def _apply_asset_write_result(operation_id: str, outcome: WP.AssetWriteOutcome,
+                              db: Session | None = None,
+                              *, expected_fence: int | None = None) -> None:
+    """资产写结果的持久结案（与引擎结果映射同一状态词汇表）。
+
+    applied/pending_review → succeeded（curated 的 pending_review 表示变更
+    已记录待审核：affectedRows=0、数据未生效；后续按 review 真实状态在
+    读取时刷新 outcome，不重新执行）。unknown → guard 保留。failed →
+    failed_not_executed（源侧零变更可证明的确定性拒绝）。
+    ``expected_fence`` 不匹配即跳过：过期 worker 不能覆盖新一次派发的裁决。
+    """
+    owned = db is None
+    db = db if db is not None else _fresh_session()
+    try:
+        operation = (db.query(M.ActionOperation)
+                     .filter(M.ActionOperation.id == operation_id)
+                     .with_for_update().first())
+        if operation is None:
+            return
+        if (expected_fence is not None
+                and operation.fence_token != expected_fence):
+            db.rollback()
+            return
+        if operation.state in ("succeeded", "unknown", "failed_not_executed",
+                               "approval_rejected"):
+            # 已由更新一次派发结案：不重复覆盖。
+            db.rollback()
+            return
+        confirmation = db.query(M.ActionConfirmation).filter(
+            M.ActionConfirmation.id == operation.confirmation_id).first()
+        if confirmation is None:
+            return
+        attempt = db.query(M.ActionExternalAttempt).filter(
+            M.ActionExternalAttempt.operation_id == operation.id,
+            M.ActionExternalAttempt.effect_ordinal
+            == ASSET_WRITE_EFFECT_ORDINAL).first()
+        evidence = outcome.to_evidence_dict()
+        if outcome.status in (WP.OUTCOME_APPLIED, WP.OUTCOME_PENDING_REVIEW):
+            operation.state = "succeeded"
+            confirmation.state = "succeeded"
+            confirmation.failure_code = None
+            if attempt is not None:
+                attempt.state = "acknowledged"
+        elif outcome.status == WP.OUTCOME_UNKNOWN:
+            operation.state = "unknown"
+            operation.last_error = "asset_write_commit_unknown"
+            operation.reconcile_evidence = {
+                "reason": "asset_write_commit_unknown", **evidence}
+            confirmation.state = "unknown"
+            confirmation.failure_code = "execution_result_unknown"
+            if attempt is not None:
+                attempt.state = "unknown"
+        else:
+            operation.state = "failed_not_executed"
+            operation.last_error = outcome.error_code or "asset_write_failed"
+            confirmation.state = "failed_not_executed"
+            confirmation.failure_code = (
+                outcome.error_code or "asset_write_failed")
+            if attempt is not None:
+                attempt.state = "proven_not_applied"
+        if attempt is not None:
+            attempt.receipt_hash = _sha256(_canonical_json(evidence))
+            attempt.evidence_ref = _canonical_json(evidence)
+            attempt.finished_at = _now()
+        operation.lease_expires_at = None
+        db.commit()
+    finally:
+        if owned:
+            db.close()
+
+
+def operation_has_asset_plan(db: Session, operation_id: str) -> bool:
+    """该 operation 是否承载冻结资产写计划（workflow 审批派发路由依据）。
+
+    本地 HITL 确认的 operation 没有 frozen plan，必须保留原引擎执行路径。
+    """
+    operation = db.query(M.ActionOperation).filter(
+        M.ActionOperation.id == operation_id).first()
+    if operation is None:
+        return False
+    confirmation = db.query(M.ActionConfirmation).filter(
+        M.ActionConfirmation.id == operation.confirmation_id).first()
+    if confirmation is None:
+        return False
+    return _frozen_plan(confirmation) is not None
+
+
+def dispatch_approved_asset_write(db: Session, operation_id: str) -> dict:
+    """HITL 批准后的资产写派发（action_workflow 决策执行分支调用）。
+
+    与 run_operation_inline 同一顺序语义：claim（pending_approval →
+    executing）→ engine_entered → attempt → 单行源写 → 结案。已在途/
+    已结案的 operation 幂等返回当前状态，不重复派发；unknown 保守保留。
+    返回引擎结果同形 dict（status success/failed、id=None）供审批日志
+    finalize 关联。
+    """
+    operation = (db.query(M.ActionOperation)
+                 .filter(M.ActionOperation.id == operation_id)
+                 .with_for_update().first())
+    if operation is None:
+        return {"status": "failed", "id": None,
+                "errorMessage": "资产写 operation 不存在"}
+    confirmation = db.query(M.ActionConfirmation).filter(
+        M.ActionConfirmation.id == operation.confirmation_id).first()
+    plan = _frozen_plan(confirmation) if confirmation is not None else None
+    if plan is None:
+        return {"status": "failed", "id": None,
+                "errorMessage": "资产写 operation 缺少冻结计划"}
+    try:
+        _verify_frozen_payload_integrity(confirmation)
+    except ConfirmationError as exc:
+        return {"status": "failed", "id": None,
+                "errorMessage": f"冻结载荷完整性校验失败：{exc.message}"}
+    if operation.state == "pending_approval":
+        operation.state = "executing"
+        operation.claimed_at = _now()
+        operation.lease_expires_at = _now() + timedelta(
+            seconds=OPERATION_LEASE_SECONDS)
+        operation.worker_ref = f"approval:{uuid_lib.uuid4().hex[:12]}"
+        operation.version += 1
+        db.commit()
+    elif operation.state == "executing":
+        lease = _as_utc(operation.lease_expires_at)
+        if lease is not None and lease >= _now():
+            db.rollback()
+            return {"status": "failed", "id": None,
+                    "errorMessage": "资产写派发已在途（lease 有效），稍后对账"}
+        operation.claimed_at = _now()
+        operation.lease_expires_at = _now() + timedelta(
+            seconds=OPERATION_LEASE_SECONDS)
+        operation.version += 1
+        db.commit()
+    else:
+        # 终态（崩溃后重复批准恢复）：返回已结案状态，不重复派发。
+        db.rollback()
+        status = "success" if operation.state == "succeeded" else "failed"
+        return {"status": status, "id": None,
+                "errorMessage": operation.last_error}
+    _mark_engine_entered(operation.id, db)
+    db.refresh(operation)
+    db.refresh(confirmation)
+    _invoke_asset_write(db, operation, confirmation, plan)
+    db.expire_all()
+    operation = db.query(M.ActionOperation).filter(
+        M.ActionOperation.id == operation_id).first()
+    if operation is not None and operation.state == "succeeded":
+        return {"status": "success", "id": None}
+    last_error = (operation.last_error if operation is not None else None) \
+        or (confirmation.failure_code if confirmation is not None else None)
+    if operation is not None and operation.state == "unknown":
+        # unknown 不宣称明确失败：审批日志保持可恢复态，真实状态以确认
+        # 协议（unknown + 人工裁决正门）为准。
+        return {"status": "unknown", "id": None,
+                "errorMessage": last_error or "execution_result_unknown",
+                "assetUnknown": True}
+    return {"status": "failed", "id": None,
+            "errorMessage": last_error or "asset_write_failed"}
+
+
+def mark_asset_operation_rejected(db: Session, operation_id: str) -> None:
+    """HITL 拒绝后的资产 operation 结案：源写从未派发，可证明零源变更。"""
+    operation = (db.query(M.ActionOperation)
+                 .filter(M.ActionOperation.id == operation_id)
+                 .with_for_update().first())
+    if operation is None or operation.state != "pending_approval":
+        if operation is not None:
+            db.rollback()
+        return
+    confirmation = db.query(M.ActionConfirmation).filter(
+        M.ActionConfirmation.id == operation.confirmation_id).first()
+    plan = _frozen_plan(confirmation) if confirmation is not None else None
+    operation.state = "approval_rejected"
+    if confirmation is not None:
+        confirmation.state = "approval_rejected"
+        confirmation.failure_code = "approval_rejected"
+    # 审批拒绝时 attempt 可能尚不存在（源写从未派发）：创建一条
+    # proven_not_applied 证据行，outcome 真实可见（不宣称源端有过派发）。
+    attempt = db.query(M.ActionExternalAttempt).filter(
+        M.ActionExternalAttempt.operation_id == operation.id,
+        M.ActionExternalAttempt.effect_ordinal
+        == ASSET_WRITE_EFFECT_ORDINAL).first()
+    evidence = _canonical_json(
+        WP.AssetWriteOutcome(
+            asset_kind=str((plan or {}).get("assetKind") or "unknown"),
+            status=WP.OUTCOME_FAILED,
+            operation=str((plan or {}).get("operation") or "update"),
+            affected_rows=0,
+            dataset_id=str((plan or {}).get("datasetId") or ""),
+            error_code="approval_rejected",
+            message="动作审批被拒绝，源写从未派发",
+        ).to_evidence_dict())
+    if attempt is None:
+        attempt = M.ActionExternalAttempt(
+            operation_id=operation.id,
+            effect_ordinal=ASSET_WRITE_EFFECT_ORDINAL,
+            stable_delivery_key=(
+                f"proposal-write:{operation.confirmation_id}"),
+            state="proven_not_applied",
+            started_at=_now(),
+        )
+        db.add(attempt)
+    attempt.state = "proven_not_applied"
+    attempt.finished_at = _now()
+    attempt.evidence_ref = evidence
+    operation.lease_expires_at = None
+    db.commit()
 
 def reconcile_operation(operation_id: str, db: Session | None = None) -> None:
     """恢复/对账：审批日志与引擎幂等键是事实源；缺证据 → unknown 不释放 guard。"""
@@ -960,6 +1839,23 @@ def _reconcile_pending_approval(db, operation, confirmation) -> None:
     if log is None:
         return
     status = str(log.status or "").lower()
+    if _frozen_plan(confirmation) is not None:
+        # 资产写审批闸门：rejected → approval_rejected（零源变更）；
+        # approved 但 operation 仍 pending（决策与派发间崩溃）→ 重新入队由
+        # worker 派发；approved 且 operation 已结案 → 状态已由派发路径落定。
+        if status == "rejected":
+            operation.state = "approval_rejected"
+            confirmation.state = "approval_rejected"
+            confirmation.failure_code = "approval_rejected"
+            return
+        if status in ("pending", "executing"):
+            return
+        if status == "approved" and operation.state == "pending_approval":
+            operation.state = "dispatch_queued"
+            operation.claimed_at = None
+            operation.lease_expires_at = None
+            return
+        return
     if status in ("pending", "executing"):
         return
     if status == "approved":
@@ -1079,6 +1975,158 @@ def _reconcile_executing(db, operation, confirmation) -> None:
     confirmation.failure_code = "execution_result_unknown"
 
 
+def adjudicate_unknown_not_executed(
+        db: Session, admin_user, ontology_id: str, cid: str, *,
+        operation_id: str, rationale: str,
+        evidence_refs: list[str], expected_fence_token: int,
+        expected_guard_hash: str, expected_payload_hash: str
+) -> M.ActionConfirmation:
+    """管理员对 unknown 资产操作的人工 not_executed 裁决（正门）。
+
+    仅接受 unknown 态、operation/confirmation 归属与载荷完整性全部匹配的
+    操作；裁决追加写入 reconcile_evidence（不可覆写既有证据），原 attempt
+    的 unknown 证据原样保留；不执行任何源写/派发/重放，guard 随
+    failed_not_executed 终态按既有逻辑自然释放。
+    """
+    # 固定双锁顺序：confirmation FOR UPDATE（populate_existing 绕过会话
+    # 缓存）→ operation FOR UPDATE。管理员裁决绑定被审快照三项（fence/
+    # guard/payload hash），任何失配即 409 且原证据/状态零变化。
+    confirmation = (db.query(M.ActionConfirmation)
+                    .filter(M.ActionConfirmation.id == cid,
+                            M.ActionConfirmation.ontology_id == ontology_id)
+                    .with_for_update().populate_existing().first())
+    if confirmation is None:
+        db.rollback()
+        raise ConfirmationError(404, "confirmation_not_found",
+                                "确认请求不存在")
+    operation = (db.query(M.ActionOperation)
+                 .filter(M.ActionOperation.id == operation_id)
+                 .with_for_update().populate_existing().first())
+    if operation is None or operation.confirmation_id != cid:
+        db.rollback()
+        raise ConfirmationError(409, "operation_mismatch",
+                                "operation 与确认请求不匹配")
+    if operation.state != "unknown":
+        db.rollback()
+        raise ConfirmationError(
+            409, "operation_not_unknown",
+            f"仅 unknown 态可人工裁决（当前 {operation.state}）")
+    if operation.fence_token != expected_fence_token:
+        db.rollback()
+        raise ConfirmationError(
+            409, "adjudication_fence_mismatch",
+            "expectedFenceToken 与被审 operation 不一致，拒绝裁决")
+    if not hmac.compare_digest(operation.guard_hash, expected_guard_hash):
+        db.rollback()
+        raise ConfirmationError(
+            409, "adjudication_guard_mismatch",
+            "expectedGuardHash 与被审 operation 不一致，拒绝裁决")
+    if not hmac.compare_digest(confirmation.payload_hash,
+                               expected_payload_hash):
+        db.rollback()
+        raise ConfirmationError(
+            409, "adjudication_payload_mismatch",
+            "expectedPayloadHash 与被审确认不一致，拒绝裁决")
+    try:
+        _verify_frozen_payload_integrity(confirmation)
+    except ConfirmationError:
+        db.rollback()
+        raise
+    lease = _as_utc(operation.lease_expires_at)
+    if lease is not None and lease >= _now():
+        db.rollback()
+        raise ConfirmationError(
+            409, "operation_lease_active",
+            "operation 仍有有效执行租约（可能仍在途），先等租约失效或对账")
+    adjudication = {
+        "adminUserId": str(admin_user.id),
+        "decidedAt": _now().isoformat(),
+        "rationale": rationale,
+        "evidenceRefs": [str(ref) for ref in evidence_refs],
+        "previousState": operation.state,
+        "adjudicatedFenceToken": operation.fence_token,
+        "adjudicatedGuardHash": operation.guard_hash,
+        "adjudicatedPayloadHash": confirmation.payload_hash,
+    }
+    evidence = dict(operation.reconcile_evidence or {})
+    history = list(evidence.get("manualAdjudications") or [])
+    history.append(adjudication)
+    evidence["manualAdjudications"] = history
+    operation.reconcile_evidence = evidence
+    operation.state = "failed_not_executed"
+    operation.last_error = "manual_adjudicated_not_executed"
+    operation.lease_expires_at = None
+    confirmation.state = "failed_not_executed"
+    confirmation.failure_code = "manual_adjudicated_not_executed"
+    db.commit()
+    db.refresh(confirmation)
+    return confirmation
+
+
+def _asset_outcome_payload(db: Session,
+                           confirmation: M.ActionConfirmation) -> Optional[dict]:
+    """资产路由确认的公开 outcome（未派发/在途不出现）。
+
+    结案证据来自 attempt 账本（evidence_ref，不含行值/秘密）；curated 的
+    pending_review 按审核真实状态只读刷新（approved→applied、rejected→
+    failed），刷新绝不重新执行动作。
+    """
+    if not confirmation.operation_id:
+        return None
+    if confirmation.state not in (
+            "succeeded", "unknown", "failed_not_executed",
+            "compensation_required", "approval_rejected"):
+        return None
+    plan = _frozen_plan(confirmation)
+    if plan is None:
+        return None
+    attempt = db.query(M.ActionExternalAttempt).filter(
+        M.ActionExternalAttempt.operation_id == confirmation.operation_id,
+        M.ActionExternalAttempt.effect_ordinal
+        == ASSET_WRITE_EFFECT_ORDINAL).first()
+    if attempt is None or not attempt.evidence_ref:
+        return None
+    try:
+        evidence = json.loads(attempt.evidence_ref)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(evidence, dict):
+        evidence = {}
+    if confirmation.failure_code == "manual_adjudicated_not_executed":
+        base = {
+            "assetKind": str(plan.get("assetKind") or evidence.get(
+                "assetKind") or "unknown"),
+            "status": WP.OUTCOME_FAILED,
+            "operation": str(plan.get("operation")
+                             or evidence.get("operation") or "update"),
+            "affectedRows": 0,
+            "datasetId": str(plan.get("datasetId") or ""),
+            "errorCode": "manual_adjudicated_not_executed",
+        }
+        if evidence.get("reviewId"):
+            base["reviewId"] = evidence.get("reviewId")
+        if evidence.get("receiptId"):
+            base["receiptId"] = evidence.get("receiptId")
+        return base
+    if (str(plan.get("assetKind") or "") == WP.ASSET_KIND_CURATED
+            and confirmation.state == "succeeded"
+            and evidence.get("status") == WP.OUTCOME_PENDING_REVIEW
+            and WP.write_port_ready()):
+        try:
+            refreshed = WP.action_write_port().inspect_write(
+                db, None, plan, evidence=evidence)
+        except WP.WritePortError:
+            refreshed = None
+        if refreshed is not None:
+            return refreshed.to_public_dict()
+    return {
+        key: evidence[key] for key in (
+            "assetKind", "status", "operation", "affectedRows", "datasetId",
+            "versionId", "reviewId", "receiptId", "errorCode",
+        ) if key in evidence
+    }
+
+
 def confirmation_out(db: Session, confirmation: M.ActionConfirmation, *,
                      replayed: bool = False) -> dict:
     block_reason = None
@@ -1105,6 +2153,7 @@ def confirmation_out(db: Session, confirmation: M.ActionConfirmation, *,
         "approvalLogId": approval_log_id,
         "failureCode": confirmation.failure_code,
         "blockReason": block_reason,
+        "outcome": _asset_outcome_payload(db, confirmation),
         "decidedAt": _as_utc(confirmation.decided_at).isoformat()
         if confirmation.decided_at else None,
         "createdAt": _as_utc(confirmation.created_at).isoformat()

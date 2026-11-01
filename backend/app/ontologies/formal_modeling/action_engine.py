@@ -442,6 +442,41 @@ def _prepare_action_execution_request(
 
     params, parameter_errors = prepare_action_parameters(action, body.parameters)
     rules, rule_definition_errors = _prepare_action_rules(action)
+
+    # 影子写守卫：绑定数据资产的类型经直连引擎（router/Sentinel/审批恢复）
+    # 真实执行时，本地 fo 写会造成与源分离的孤儿副本假成功 — 统一拒绝并
+    # 指向受控确认链；dry_run/preview 只读规划不受影响；未绑定类型保持
+    # 完整本地语义。
+    if not body.dry_run and not preview_only:
+        from app.ontologies.agent_confirmation import write_port as _wp
+
+        _operation, _types, _links = _wp.structural_write_targets(action)
+        _touched = set(_types)
+        if _links:
+            _touched |= _wp.snapshot_link_endpoint_type_ids(
+                db, ontology_id, ontology_release_id, _links)
+        if _touched:
+            try:
+                _bound = _wp.bound_object_type_ids(
+                    db, ontology_id, ontology_release_id)
+            except _wp.WritePortError as exc:
+                parameter_errors.append(
+                    f"asset_route_guard: {exc.message}")
+            else:
+                if _touched & _bound:
+                    return _fail_log(
+                        db, ontology_id, action, body, start,
+                        "该动作的写目标绑定数据资产：源写必须经确认协议的"
+                        "资产路由（prepare → 确认 → execute），直连入口拒绝"
+                        "本地影子写",
+                        validation_errors=["asset_route_required"],
+                        actor_id=actor_id, parameters=params,
+                        ontology_version=ontology_version,
+                        ontology_release_id=ontology_release_id,
+                        target_snapshot=target_snapshot,
+                        suppress_log=preview_only,
+                    )
+
     has_effect_rule = any(
         rule.get("type") != "validation" for rule in rules)
     approval_proposal_only = (

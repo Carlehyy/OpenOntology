@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user
+from app.deps import get_current_user, get_db, require_admin
 from app.ontologies.access import require_ontology_access
 from app.ontologies.agent_query import schemas as QS
 from app.ontologies.agent_confirmation import schemas as CS
@@ -75,6 +75,32 @@ def decide_proposal(ontology_id: str, confirmation_id: str,
             db, current_user, ontology_id, confirmation_id, body.decision,
             body.decision_id, body.payload_hash, body.session_kind,
             body.session_id)
+    except _confirmation_service.ConfirmationError as exc:
+        raise _confirmation_error(exc) from exc
+    return _ok(_confirmation_service.confirmation_out(db, confirmation))
+
+
+@router.post("/{ontology_id}/agent/proposals/{confirmation_id}"
+             "/adjudicate-not-executed")
+def adjudicate_proposal_not_executed(
+        ontology_id: str, confirmation_id: str,
+        body: CS.AdjudicationRequest,
+        db: Session = Depends(get_db),
+        _admin=Depends(require_admin)):
+    """unknown 资产操作的管理员人工 not_executed 裁决（正门，不重放）。
+
+    仅 unknown 态、归属与冻结载荷完整性匹配时结 failed_not_executed；
+    裁决追加审计、原 attempt 证据保留、不执行任何源写/派发。
+    """
+    try:
+        confirmation = _confirmation_service.adjudicate_unknown_not_executed(
+            db, _admin, ontology_id, confirmation_id,
+            operation_id=body.operation_id,
+            rationale=body.rationale,
+            evidence_refs=body.evidence_refs,
+            expected_fence_token=body.expected_fence_token,
+            expected_guard_hash=body.expected_guard_hash,
+            expected_payload_hash=body.expected_payload_hash)
     except _confirmation_service.ConfirmationError as exc:
         raise _confirmation_error(exc) from exc
     return _ok(_confirmation_service.confirmation_out(db, confirmation))

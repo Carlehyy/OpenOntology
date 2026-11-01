@@ -284,6 +284,8 @@ export interface AgentConfirmationState {
   display: Record<string, unknown>
   expiresAt: string
   requiresApproval: boolean
+  /** 资产级执行结果（confirmation_out.outcome，可选；缺省=本地动作/未派发） */
+  outcome?: Record<string, unknown> | null
   replayed?: boolean
   operationId?: string | null
   executionLogId?: string | null
