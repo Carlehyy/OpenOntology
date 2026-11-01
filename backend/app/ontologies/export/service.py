@@ -33,11 +33,17 @@ from app.ontologies.export.schemas import (
     PortableObjectType,
     PortableOntologyMetadata,
     PortableOntologyStructure,
+    PortableSentinel,
 )
 from app.ontologies.formal_modeling import schemas as formal_schemas
 from app.ontologies.formal_modeling.validation import validate_model
-from app.ontologies.versions.release_service import resolve_current_release
+from app.ontologies.sentinels.models import Sentinel
+from app.ontologies.versions.release_service import (
+    resolve_current_release,
+    snapshot_release_sentinel,
+)
 from app.ontologies.versions.snapshot_contract import (
+    complete_snapshot,
     snapshot_hash,
 )
 from app.ontologies.versions.workspace_service import _canvas_node_ids
@@ -99,6 +105,84 @@ def _portable_function(item: OntologyFunction) -> PortableFunction:
     })
 
 
+def _portable_sentinel(raw: dict[str, Any]) -> PortableSentinel:
+    """Project one frozen Sentinel definition onto the portable contract.
+
+    Definition fields come from the release snapshot (the runtime authority for
+    built-in Sentinels); publish status, release binding and runtime telemetry
+    stay behind. ``enabled``/``muted`` travel as the operational defaults of the
+    imported baseline.
+    """
+    identifier = str(raw.get("id") or "")
+    return PortableSentinel.model_validate({
+        "id": identifier,
+        "name": str(raw.get("name") or raw.get("displayName") or identifier),
+        "display_name": str(
+            raw.get("displayName") or raw.get("name") or identifier),
+        "description": raw.get("description"),
+        "bindings": raw.get("bindings") or [],
+        "links": raw.get("links") or [],
+        "condition": raw.get("condition"),
+        "pattern": (
+            raw.get("pattern") if isinstance(raw.get("pattern"), dict) else None),
+        "condition_rows": raw.get("conditionRows") or [],
+        "condition_logic": raw.get("conditionLogic") or "and",
+        "primary_alias": raw.get("primaryAlias"),
+        "action_ids": raw.get("actionIds") or [],
+        "action_parameters": raw.get("actionParameters") or {},
+        "on_change": raw.get("onChange", True),
+        "on_schedule": raw.get("onSchedule", False),
+        "scan_interval_seconds": int(raw.get("scanIntervalSeconds") or 300),
+        "trigger_mode": raw.get("triggerMode") or "on_enter",
+        "muted": raw.get("muted", False),
+        "enabled": raw.get("enabled", True),
+    })
+
+
+def _portable_sentinels(snapshot: dict[str, Any]) -> list[PortableSentinel]:
+    return [
+        _portable_sentinel(raw)
+        for raw in complete_snapshot(snapshot)["sentinels"]
+        if isinstance(raw, dict) and raw.get("id")
+    ]
+
+
+def _portable_from_snapshot_item(portable_schema, raw: dict[str, Any]):
+    """Project a version-snapshot definition item onto the portable contract."""
+    data = _without_external_lineage({
+        key: value for key, value in raw.items()
+        if key not in {
+            "createdAt", "created_at", "updatedAt", "updated_at", "source",
+        }
+    })
+    return portable_schema.model_validate(data)
+
+
+def _portable_structure_from_snapshot(
+    snapshot: dict[str, Any],
+) -> PortableOntologyStructure:
+    complete = complete_snapshot(snapshot)
+    return PortableOntologyStructure(
+        object_types=[
+            _portable_from_snapshot_item(PortableObjectType, raw)
+            for raw in complete["objectTypes"]
+        ],
+        link_types=[
+            _portable_from_snapshot_item(PortableLinkType, raw)
+            for raw in complete["linkTypes"]
+        ],
+        actions=[
+            _portable_from_snapshot_item(PortableActionType, raw)
+            for raw in complete["actions"]
+        ],
+        functions=[
+            _portable_from_snapshot_item(PortableFunction, raw)
+            for raw in complete["functions"]
+        ],
+        sentinels=_portable_sentinels(complete),
+    )
+
+
 # 画布坐标系以像素计；超出该幅度的坐标必然来自损坏或恶意数据，
 # 落库后会让前端 fitView 视口计算失效（整图被缩到不可见）。
 _CANVAS_POSITION_MAX = 10_000_000.0
@@ -124,14 +208,12 @@ def _finite_position(value: Any) -> dict[str, float] | None:
     return {"x": x_value, "y": y_value}
 
 
-def _exportable_canvas_layout(db: Session, project: OntologyProject) -> dict[str, dict[str, float]] | None:
-    """导出当前发布版本的画布布局。
+def _portable_canvas_layout(layout: Any) -> dict[str, dict[str, float]] | None:
+    """导出画布布局。
 
     数据映射画布的 key（object:/relation:/dataset: 前缀）依赖 mappings，
     而结构导出包有意不含 mappings，这些位置在新本体中没有落点，不导出。
     """
-    release = resolve_current_release(db, project)
-    layout = getattr(release, "canvas_layout", None)
     if not isinstance(layout, dict):
         return None
     portable: dict[str, dict[str, float]] = {}
@@ -201,12 +283,61 @@ def _remap_canvas_layout(
     return remapped
 
 
-def build_export_package(db: Session, project: OntologyProject) -> OntologyStructurePackage:
-    """Build a stable structure-only package from the current formal model."""
+def _resolve_export_version(
+    db: Session, project: OntologyProject, version_id: str,
+) -> OntologyVersion:
+    """Resolve the immutable version snapshot a pinned export must read."""
+    version = db.query(OntologyVersion).filter(
+        OntologyVersion.id == version_id,
+        OntologyVersion.ontology_id == project.id,
+    ).first()
+    if version is None:
+        raise HTTPException(404, detail={
+            "code": "export_version_not_found",
+            "message": "指定的导出快照不存在于该本体",
+        })
+    return version
+
+
+def build_export_package(
+    db: Session,
+    project: OntologyProject,
+    *,
+    version_id: str | None = None,
+) -> OntologyStructurePackage:
+    """Build a stable structure-only package from the current formal model.
+
+    ``version_id`` pins the package to one immutable version snapshot — the
+    graph editor exports the exact workspace the user is looking at (draft,
+    trial, archived or historic release). Without it the exported structure is
+    the published projection, matching the ontology detail page button.
+
+    Sentinels always come from the consumed snapshot (the runtime authority for
+    built-in definitions), never from runtime tables.
+    """
+    if version_id:
+        version = _resolve_export_version(db, project, version_id)
+        snapshot = complete_snapshot(version.snapshot_formal)
+        return OntologyStructurePackage(
+            exported_at=datetime.now(timezone.utc),
+            ontology=PortableOntologyMetadata(
+                id=project.id,
+                name=project.name,
+                domain=project.domain,
+                description=project.description,
+                icon=project.icon or "network",
+                source_version=version.version_number,
+                source_status=version.lifecycle_status,
+            ),
+            structure=_portable_structure_from_snapshot(snapshot),
+            canvas_layout=_portable_canvas_layout(version.canvas_layout),
+        )
 
     def items(model):
         return db.query(model).filter(model.ontology_id == project.id).all()
 
+    release = resolve_current_release(db, project)
+    release_snapshot = complete_snapshot(release.snapshot_formal)
     return OntologyStructurePackage(
         exported_at=datetime.now(timezone.utc),
         ontology=PortableOntologyMetadata(
@@ -223,13 +354,19 @@ def build_export_package(db: Session, project: OntologyProject) -> OntologyStruc
             link_types=[_portable_link_type(item) for item in items(LinkType)],
             actions=[_portable_action(item) for item in items(ActionType)],
             functions=[_portable_function(item) for item in items(OntologyFunction)],
+            sentinels=_portable_sentinels(release_snapshot),
         ),
-        canvas_layout=_exportable_canvas_layout(db, project),
+        canvas_layout=_portable_canvas_layout(release.canvas_layout),
     )
 
 
-def export_json(db: Session, project: OntologyProject) -> str:
-    package = build_export_package(db, project)
+def export_json(
+    db: Session,
+    project: OntologyProject,
+    *,
+    version_id: str | None = None,
+) -> str:
+    package = build_export_package(db, project, version_id=version_id)
     return json.dumps(package.model_dump(mode="json", by_alias=True), ensure_ascii=False, indent=2)
 
 
@@ -336,6 +473,44 @@ def _validate_nested_references(
             )
 
 
+def _validate_portable_sentinels(
+    structure: PortableOntologyStructure,
+) -> list[dict]:
+    """Fail-closed Sentinel gate for imported structure packages.
+
+    The import path publishes a v0 baseline immediately, so Sentinel definitions
+    must clear the same shared release gate a promotion would run: envelope
+    fields (strict booleans/intervals) plus bindings/links/pattern/action
+    reference validation. Runtime firing surfaces stay untouched.
+    """
+    from app.ontologies.sentinels.validation import validate_sentinels
+    from app.ontologies.versions.evolution_service import (
+        validate_builtin_sentinel_contract,
+    )
+    from app.ontologies.versions.release_service import snapshot_sentinel_models
+
+    definitions = [
+        item.model_dump(mode="json", by_alias=True)
+        for item in structure.sentinels
+    ]
+    errors = validate_builtin_sentinel_contract(definitions)
+    try:
+        errors.extend(validate_sentinels(
+            snapshot_sentinel_models({"sentinels": definitions}),
+            structure.object_types,
+            structure.link_types,
+            structure.actions,
+        ))
+    except Exception as exc:  # noqa: BLE001 - governance gate must fail closed
+        errors.append({
+            "code": "sentinel_validation_failed",
+            "kind": "sentinel",
+            "id": "",
+            "message": f"哨兵定义校验执行失败: {exc}",
+        })
+    return errors
+
+
 def _validate_import_package(package: OntologyStructurePackage) -> None:
     structure = package.structure
     errors = validate_model(
@@ -392,6 +567,8 @@ def _validate_import_package(package: OntologyStructurePackage) -> None:
                 function_ids=function_ids,
                 errors=errors,
             )
+
+    errors.extend(_validate_portable_sentinels(structure))
 
     if errors:
         raise HTTPException(status_code=422, detail={
@@ -473,6 +650,46 @@ def _remap_nested(
     return value
 
 
+def _remap_sentinel_definition(
+    item: PortableSentinel,
+    *,
+    object_ids: dict[str, str],
+    link_ids: dict[str, str],
+    action_ids: dict[str, str],
+    function_ids: dict[str, str],
+) -> dict[str, Any]:
+    """把包内哨兵定义投影为 ORM 字段（snake_case）并重映射结构引用。
+
+    ``actionIds`` 是裸字符串数组、``actionParameters`` 的键是 action id，两者
+    都不在 ``_remap_nested`` 的白名单内，必须显式改写；bindings/links/pattern
+    里的 objectTypeId/linkTypeId 走通用递归重映射。包校验已先行拒绝悬挂
+    引用，因此映射表查找不会落空。
+    """
+    raw = item.model_dump(exclude={"id"}, by_alias=False)
+    remapped = _remap_nested(
+        raw,
+        object_ids=object_ids,
+        link_ids=link_ids,
+        action_ids=action_ids,
+        function_ids=function_ids,
+    )
+    remapped["action_ids"] = [
+        action_ids.get(action_id, action_id)
+        for action_id in item.action_ids
+    ]
+    remapped["action_parameters"] = {
+        action_ids.get(action_id, action_id): _remap_nested(
+            parameters,
+            object_ids=object_ids,
+            link_ids=link_ids,
+            action_ids=action_ids,
+            function_ids=function_ids,
+        )
+        for action_id, parameters in item.action_parameters.items()
+    }
+    return remapped
+
+
 def _snapshot_formal(db: Session, ontology_id: str) -> dict:
     def items(model):
         return db.query(model).filter(model.ontology_id == ontology_id).all()
@@ -494,7 +711,13 @@ def _snapshot_formal(db: Session, ontology_id: str) -> dict:
             formal_schemas.FunctionOut.model_validate(item).model_dump(mode="json", by_alias=True)
             for item in items(OntologyFunction)
         ],
-        "sentinels": [],
+        "sentinels": [
+            snapshot_release_sentinel(item)
+            for item in db.query(Sentinel).filter(
+                Sentinel.ontology_id == ontology_id,
+                Sentinel.origin == "release_builtin",
+            ).all()
+        ],
         "mappings": [],
         "linkMappings": [],
     }
@@ -529,6 +752,7 @@ def import_structure_package(
     link_ids = {item.id: _new_id() for item in structure.link_types}
     action_ids = {item.id: _new_id() for item in structure.actions}
     function_ids = {item.id: _new_id() for item in structure.functions}
+    sentinel_ids = {item.id: _new_id() for item in structure.sentinels}
 
     def remapped_data(item: Any) -> dict:
         raw = item.model_dump(exclude={"id"}, exclude_none=False)
@@ -583,6 +807,24 @@ def import_structure_package(
                 source=lineage,
                 **remapped_data(item),
             ))
+        # 五类模型都进 v0 快照。哨兵结构定义冻结在快照里（运行时只认快照），
+        # 同时建 live 行作为启停/静默等运营态载体；导入即发布，故行状态为
+        # published，否则运营态接口与定时扫描都会拒绝服务。
+        for item in structure.sentinels:
+            db.add(Sentinel(
+                id=sentinel_ids[item.id],
+                ontology_id=ontology_id,
+                origin="release_builtin",
+                status="published",
+                source=lineage,
+                **_remap_sentinel_definition(
+                    item,
+                    object_ids=object_ids,
+                    link_ids=link_ids,
+                    action_ids=action_ids,
+                    function_ids=function_ids,
+                ),
+            ))
         db.flush()
 
         formal_snapshot = _snapshot_formal(db, ontology_id)
@@ -602,6 +844,7 @@ def import_structure_package(
             "linkTypes": len(structure.link_types),
             "actions": len(structure.actions),
             "functions": len(structure.functions),
+            "sentinels": len(structure.sentinels),
         }
         total = sum(counts.values())
         formal_diff = {
@@ -609,7 +852,6 @@ def import_structure_package(
             for key, value in counts.items()
         }
         formal_diff.update({
-            "sentinels": {"added": 0, "modified": 0, "deleted": 0},
             "mappings": {"added": 0, "modified": 0, "deleted": 0},
             "linkMappings": {"added": 0, "modified": 0, "deleted": 0},
             "total": {"added": total, "modified": 0, "deleted": 0},

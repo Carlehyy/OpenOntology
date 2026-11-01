@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import {
   CubeIcon,
   LinkIcon,
@@ -15,9 +16,26 @@ import {
   ArrowUturnRightIcon,
   MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline';
+import { ontologyApi } from '@/api/ontologies';
 import { useOntologyStore } from '../store/ontologyStore';
 import { LAYOUT_ALGORITHMS, LAYOUT_DIRECTIONS, type LayoutAlgorithm, type LayoutDirection } from '../utils/layoutAlgorithms';
 import type { GraphWorkspaceCapabilities } from '../workspaceCapabilities';
+
+/** 后端错误体（{detail}/{message} 或嵌套 detail.message）转可读文案。 */
+function exportErrorMessage(error: unknown): string {
+  const candidate = typeof error === 'object' && error !== null
+    ? error as { detail?: unknown; message?: unknown }
+    : null;
+  const detail = candidate?.detail;
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object' && 'message' in detail && typeof detail.message === 'string') {
+    return detail.message;
+  }
+  return typeof candidate?.message === 'string' ? candidate.message : '导出失败，请稍后重试';
+}
+
+const STRUCTURE_PACKAGE_GUIDE = '该文件是本体的可移植结构包（含对象实体/实体关系/执行动作/激活函数/哨兵引擎），'
+  + '请到「本体管理」页使用「本地导入」创建新本体；图谱编辑器的导入仅支持画布本地备份 JSON。';
 
 interface ToolbarProps {
   capabilities: GraphWorkspaceCapabilities;
@@ -32,11 +50,13 @@ export default function Toolbar({ capabilities, onOpenSearch, onBack, showBack =
   const navigate = useNavigate();
   const {
     ontology, openPanel, exportOntology, importOntology, reset, autoLayout,
-    backendId, isDirty, discardAndReload,
+    backendId, workspaceVersionId, isDirty, discardAndReload,
     canUndo, canRedo, undo, redo,
   } = useOntologyStore();
   const [showImportModal, setShowImportModal] = useState(false);
   const [importData, setImportData] = useState('');
+  const [importError, setImportError] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
   const [selectedAlgorithm, setSelectedAlgorithm] = useState<LayoutAlgorithm>('dagre');
   const [selectedDirection, setSelectedDirection] = useState<LayoutDirection>('TB');
@@ -47,23 +67,61 @@ export default function Toolbar({ capabilities, onOpenSearch, onBack, showBack =
     setShowLayoutMenu(false);
   };
 
-  const handleExport = () => {
-    const data = exportOntology();
-    const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${ontology?.name || 'ontology'}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+  // 后端绑定模式：与详情页「导出本体结构」调用同一端点，下载完整可移植结构包
+  // （草稿/归档工作区带 version_id 精确导出该快照）。纯本地演示模式保留原有
+  // 画布备份下载，不伪装成结构包。
+  const handleExport = async () => {
+    if (isExporting) return;
+    if (!backendId) {
+      const data = exportOntology();
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${ontology?.name || 'ontology'}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    setIsExporting(true);
+    try {
+      await ontologyApi.exportOntology(
+        backendId,
+        ontology?.name || 'ontology',
+        ontology?.version || 'v0',
+        workspaceVersionId,
+      );
+      toast.success('本体结构 JSON 已下载');
+    } catch (error: unknown) {
+      toast.error('本体结构导出失败', { description: exportErrorMessage(error) });
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const closeImportModal = () => {
+    setShowImportModal(false);
+    setImportError('');
   };
 
   const handleImport = () => {
-    if (importData.trim()) {
-      importOntology(importData);
-      setImportData('');
-      setShowImportModal(false);
+    if (!importData.trim()) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(importData);
+    } catch {
+      setImportError('JSON 解析失败：请检查粘贴内容是否为完整的 JSON。');
+      return;
     }
+    // 结构包不是画布备份：直接导入会把现有画布清空，先拦截并指引到正确的入口。
+    if (parsed && typeof parsed === 'object' && (parsed as { format?: unknown }).format === 'ontology-structure') {
+      setImportError(STRUCTURE_PACKAGE_GUIDE);
+      return;
+    }
+    importOntology(importData);
+    setImportData('');
+    setImportError('');
+    setShowImportModal(false);
   };
 
   // 后端绑定模式下："重置"= 放弃本地改动、从数据库重新加载（绝不载入演示数据，
@@ -289,18 +347,24 @@ export default function Toolbar({ capabilities, onOpenSearch, onBack, showBack =
 
           {/* Actions */}
           <button
-            onClick={handleExport}
-            className="w-11 h-11 flex items-center justify-center rounded-xl bg-surface-800/50 hover:bg-surface-700 text-surface-400 hover:text-surface-200 transition-all duration-200 group relative"
-            title="导出"
+            onClick={() => void handleExport()}
+            disabled={isExporting}
+            aria-busy={isExporting}
+            className="w-11 h-11 flex items-center justify-center rounded-xl bg-surface-800/50 hover:bg-surface-700 text-surface-400 hover:text-surface-200 disabled:cursor-wait disabled:opacity-60 transition-all duration-200 group relative"
+            title={isExporting ? '正在导出' : '导出'}
+            aria-label={isExporting ? '正在导出' : '导出'}
           >
             <ArrowDownTrayIcon className="w-5 h-5" />
             <span className="absolute left-full ml-3 px-2 py-1 bg-surface-800 text-surface-200 text-sm rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-              导出
+              {isExporting ? '正在导出' : '导出'}
             </span>
           </button>
 
           <button
-            onClick={() => setShowImportModal(true)}
+            onClick={() => {
+              setImportError('');
+              setShowImportModal(true);
+            }}
             disabled={!capabilities.canImport}
             className="w-11 h-11 flex items-center justify-center rounded-xl bg-surface-800/50 hover:bg-surface-700 text-surface-400 hover:text-surface-200 disabled:cursor-not-allowed disabled:opacity-35 transition-all duration-200 group relative"
             title={capabilities.canImport ? '导入' : `导入：${schemaDisabledReason}`}
@@ -345,17 +409,33 @@ export default function Toolbar({ capabilities, onOpenSearch, onBack, showBack =
       {/* Import Modal */}
       {showImportModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-surface-800 border border-surface-600 rounded-2xl p-6 w-full max-w-lg mx-4 animate-fade-in">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="导入本体"
+            className="bg-surface-800 border border-surface-600 rounded-2xl p-6 w-full max-w-lg mx-4 animate-fade-in"
+          >
             <h3 className="text-lg font-display font-semibold text-surface-100 mb-4">导入本体</h3>
             <textarea
               value={importData}
-              onChange={(e) => setImportData(e.target.value)}
+              onChange={(e) => {
+                setImportData(e.target.value);
+                setImportError('');
+              }}
               className="input-field h-64 font-mono text-sm resize-none"
-              placeholder="粘贴 JSON 数据..."
+              placeholder="粘贴画布本地备份 JSON..."
             />
+            {importError && (
+              <p
+                role="alert"
+                className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-300"
+              >
+                {importError}
+              </p>
+            )}
             <div className="flex justify-end gap-3 mt-4">
               <button
-                onClick={() => setShowImportModal(false)}
+                onClick={closeImportModal}
                 className="btn-secondary"
               >
                 取消

@@ -160,4 +160,43 @@ test.describe('Ontology structure export and import', () => {
       [`l1:${newObjectTypeId}`]: { x: 264, y: 96 },
     })
   })
+
+  // 用户真实路径回归：图谱编辑器工具栏导出 → 本体管理页「本地导入」。
+  // 旧 bug：图谱编辑器下载的是本地格式 {ontology, nodes, edges}，导入时报
+  // body.exportedAt Field required；现在两端必须共用同一可移植结构包端点。
+  test('graph editor export produces a package importable from the management page', async ({ page }, testInfo) => {
+    const { name, ontologyId } = await createOntology(page)
+
+    await page.goto(`/#/ontologies/${ontologyId}/graph`, { waitUntil: 'domcontentloaded' })
+    // 加载完成信号：Header 已展示后端本体名称，此时工具栏导出绑定真实本体
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByTestId('graph-workspace-stage')).toContainText('当前发布')
+
+    const downloadPromise = page.waitForEvent('download')
+    await page.getByTitle('导出').click()
+    const download = await downloadPromise
+    expect(download.suggestedFilename()).toBe(`${name}_v0.json`)
+
+    const packagePath = testInfo.outputPath('graph-editor-export.json')
+    await download.saveAs(packagePath)
+    const exported = JSON.parse(readFileSync(packagePath, 'utf8'))
+    expect(exported.format).toBe('ontology-structure')
+    expect(exported.formatVersion).toBe(1)
+    expect(exported.structure.objectTypes.length).toBeGreaterThanOrEqual(1)
+    expect(
+      exported.structure.objectTypes.map((item: { displayName?: string }) => item.displayName),
+    ).toContain('订单')
+
+    await page.goto('/#/ontologies')
+    await expect(page.getByRole('button', { name: '本地导入' })).toBeVisible()
+    const importResponsePromise = page.waitForResponse(response => (
+      response.url().includes('/api/v1/ontologies/import') && response.request().method() === 'POST'
+    ))
+    await page.getByLabel('选择本体结构 JSON 文件').setInputFiles(packagePath)
+    const importResponse = await importResponsePromise
+    const imported = (await importResponse.json()).data
+    expect(importResponse.status()).toBe(201)
+    await page.waitForURL(new RegExp(`/#/ontologies/${imported.ontology.id}$`))
+    expect(imported.counts.objectTypes).toBeGreaterThanOrEqual(1)
+  })
 })

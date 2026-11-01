@@ -13,6 +13,7 @@ export interface OntologyImportResult {
     linkTypes: number
     actions: number
     functions: number
+    sentinels: number
   }
 }
 
@@ -76,9 +77,12 @@ export const ontologyApi = {
   deleteAction: (oid: string, aid: string) => apiClient.delete(`/ontologies/${oid}/actions/${aid}`),
 
   // Export (must use authenticated request — plain links omit Bearer token)
-  exportOntology: async (oid: string, name: string, version: string) => {
+  // versionId 非空时导出该版本快照（draft/archived/release 均可），
+  // 缺省仍导出当前发布投影，与旧调用方保持兼容。
+  exportOntology: async (oid: string, name: string, version: string, versionId?: string | null) => {
     const blob = (await apiClient.get(`/ontologies/${oid}/export`, {
       responseType: 'blob',
+      params: versionId ? { version_id: versionId } : undefined,
     })) as unknown as Blob
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')

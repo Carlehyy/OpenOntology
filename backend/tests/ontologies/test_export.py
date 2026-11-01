@@ -1,6 +1,9 @@
 import copy
 
 from app.models.ontology_version import OntologyVersion
+from app.ontologies.sentinels.models import Sentinel
+from app.ontologies.versions.release_service import collect_publishable_snapshot
+from app.ontologies.versions.snapshot_contract import snapshot_hash
 
 
 def _formal_url(ontology_id: str) -> str:
@@ -183,6 +186,80 @@ def _export(client, auth_headers, ontology_id: str) -> tuple[dict, object]:
     return response.json(), response
 
 
+def _builtin_sentinel(**overrides) -> dict:
+    """规范发布快照哨兵条目（手工种子用）。"""
+    payload = {
+        "id": "sentinel-high-risk",
+        "name": "high_risk_order",
+        "displayName": "高风险订单监控",
+        "description": "风险评分达到阈值时触发",
+        "bindings": [{"alias": "o", "objectTypeId": "ot-order", "filter": None}],
+        "links": [],
+        "condition": None,
+        "pattern": None,
+        "conditionRows": [],
+        "conditionLogic": "and",
+        "primaryAlias": "o",
+        "actionIds": ["act-review"],
+        "actionParameters": {},
+        "onChange": True,
+        "onSchedule": False,
+        "scanIntervalSeconds": 300,
+        "triggerMode": "on_enter",
+        "muted": False,
+        "enabled": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _seed_release_sentinels(
+    client, auth_headers, db, ontology_id: str, definitions: list[dict],
+) -> list[str]:
+    """落 live 哨兵行并按发布口径冻结进当前发布快照。
+
+    运行时只认快照定义，live 行承载运营态；这里与真实发布路径保持同一口径，
+    这样导出端（读快照）与运营态接口（读 live 行）都能被覆盖。
+    """
+    project = client.get(
+        f"/api/v1/ontologies/{ontology_id}", headers=auth_headers,
+    ).json()["data"]
+    release = db.query(OntologyVersion).filter_by(
+        id=project["current_release_id"],
+    ).one()
+    for raw in definitions:
+        db.add(Sentinel(
+            id=raw["id"],
+            ontology_id=ontology_id,
+            name=raw["name"],
+            display_name=raw["displayName"],
+            description=raw.get("description"),
+            bindings=raw.get("bindings") or [],
+            links=raw.get("links") or [],
+            condition=raw.get("condition"),
+            pattern=raw.get("pattern"),
+            condition_rows=raw.get("conditionRows") or [],
+            condition_logic=raw.get("conditionLogic") or "and",
+            primary_alias=raw.get("primaryAlias"),
+            action_ids=raw.get("actionIds") or [],
+            action_parameters=raw.get("actionParameters") or {},
+            on_change=raw.get("onChange", True),
+            on_schedule=raw.get("onSchedule", False),
+            scan_interval_seconds=raw.get("scanIntervalSeconds", 300),
+            trigger_mode=raw.get("triggerMode") or "on_enter",
+            muted=raw.get("muted", False),
+            enabled=raw.get("enabled", True),
+            status="published",
+            origin="release_builtin",
+        ))
+    db.flush()
+    snapshot = collect_publishable_snapshot(db, ontology_id)
+    release.snapshot_formal = snapshot
+    release.snapshot_hash = snapshot_hash(snapshot)
+    db.commit()
+    return [raw["id"] for raw in definitions]
+
+
 def test_export_json_contains_current_formal_structure_only(client, auth_headers, ontology):
     ontology_id = ontology["id"]
     _seed_portable_structure(client, auth_headers, ontology_id)
@@ -199,6 +276,7 @@ def test_export_json_contains_current_formal_structure_only(client, auth_headers
     assert len(package["structure"]["linkTypes"]) == 1
     assert len(package["structure"]["actions"]) == 1
     assert len(package["structure"]["functions"]) == 2
+    assert package["structure"]["sentinels"] == []
     exported_order = next(
         item for item in package["structure"]["objectTypes"] if item["name"] == "Order"
     )
@@ -249,6 +327,7 @@ def test_export_import_round_trip_remaps_references_and_publishes_v0(
         "linkTypes": 1,
         "actions": 1,
         "functions": 2,
+        "sentinels": 0,
     }
 
     full = client.get(
@@ -561,3 +640,302 @@ def test_import_prunes_stale_or_foreign_layout_entries(
     assert workspace["canvasLayout"] == {
         "l1:{}".format(objects["Order"]): {"x": 1.0, "y": 2.0},
     }
+
+
+# ============ 哨兵引擎（第五类模型）随包迁移 ============
+
+_SENTINEL_LINKED = _builtin_sentinel(
+    id="sentinel-linked",
+    name="linked_order",
+    displayName="关联供应商校验",
+    bindings=[
+        {"alias": "o", "objectTypeId": "ot-order", "filter": None},
+        {"alias": "s", "objectTypeId": "ot-supplier", "filter": None},
+    ],
+    links=[{"from": "o", "linkTypeId": "lt-supplied-by", "to": "s"}],
+)
+
+
+def test_export_includes_current_release_sentinels(
+    client, auth_headers, ontology, db,
+):
+    ontology_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, ontology_id)
+    _seed_release_sentinels(
+        client, auth_headers, db, ontology_id,
+        [_builtin_sentinel(), _SENTINEL_LINKED],
+    )
+
+    package, _ = _export(client, auth_headers, ontology_id)
+
+    sentinels = {
+        item["id"]: item for item in package["structure"]["sentinels"]
+    }
+    assert set(sentinels) == {"sentinel-high-risk", "sentinel-linked"}
+    high_risk = sentinels["sentinel-high-risk"]
+    # 只导出结构语义；发布态/运行态字段一律不随包走
+    assert set(high_risk) == {
+        "id", "name", "displayName", "description", "bindings", "links",
+        "condition", "pattern", "conditionRows", "conditionLogic",
+        "primaryAlias", "actionIds", "actionParameters", "onChange",
+        "onSchedule", "scanIntervalSeconds", "triggerMode", "muted", "enabled",
+    }
+    assert high_risk["actionIds"] == ["act-review"]
+    assert high_risk["bindings"][0]["objectTypeId"] == "ot-order"
+    assert sentinels["sentinel-linked"]["links"] == [
+        {"from": "o", "linkTypeId": "lt-supplied-by", "to": "s"},
+    ]
+
+
+def test_export_version_id_pins_to_that_version_snapshot(
+    client, auth_headers, ontology, db,
+):
+    ontology_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, ontology_id)
+    _, _ = _seed_release_layout(client, auth_headers, db, ontology_id)
+    _seed_release_sentinels(
+        client, auth_headers, db, ontology_id, [_builtin_sentinel()],
+    )
+    release_id = client.get(
+        f"/api/v1/ontologies/{ontology_id}", headers=auth_headers,
+    ).json()["data"]["current_release_id"]
+
+    default_package, _ = _export(client, auth_headers, ontology_id)
+    response = client.get(
+        f"/api/v1/ontologies/{ontology_id}/export?version_id={release_id}",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    pinned = response.json()
+
+    # 发布快照由同一正式投影收集而来，五类模型与画布布局应逐字段一致
+    for key in (
+        "objectTypes", "linkTypes", "actions", "functions", "sentinels",
+    ):
+        assert pinned["structure"][key] == default_package["structure"][key], key
+    assert pinned["canvasLayout"] == default_package["canvasLayout"]
+    assert pinned["ontology"]["sourceVersion"] == "v0"
+    assert len(pinned["structure"]["sentinels"]) == 1
+
+
+def test_export_version_id_rejects_foreign_version(
+    client, auth_headers, ontology,
+):
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    other = client.post(
+        "/api/v1/ontologies",
+        json={"name": "另一个本体", "domain": "供应链"},
+        headers=auth_headers,
+    ).json()["data"]
+
+    response = client.get(
+        f"/api/v1/ontologies/{source_id}/export"
+        f"?version_id={other['current_release_id']}",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "export_version_not_found"
+
+
+def test_import_round_trip_carries_sentinels_and_remaps_references(
+    client, auth_headers, ontology, db,
+):
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    _seed_release_sentinels(
+        client, auth_headers, db, source_id,
+        [_builtin_sentinel(), _SENTINEL_LINKED],
+    )
+    package, _ = _export(client, auth_headers, source_id)
+
+    response = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    imported = response.json()["data"]
+    imported_id = imported["ontology"]["id"]
+    assert imported["counts"] == {
+        "objectTypes": 2,
+        "linkTypes": 1,
+        "actions": 1,
+        "functions": 2,
+        "sentinels": 2,
+    }
+
+    workspace = _workspace(client, auth_headers, imported_id)
+    objects = {item["name"]: item["id"] for item in workspace["objectTypes"]}
+    action_id = workspace["actions"][0]["id"]
+    link_id = workspace["linkTypes"][0]["id"]
+    sentinels = {item["name"]: item for item in workspace["sentinels"]}
+    assert set(sentinels) == {"high_risk_order", "linked_order"}
+
+    high_risk = sentinels["high_risk_order"]
+    assert high_risk["id"] != "sentinel-high-risk"
+    assert high_risk["bindings"][0]["objectTypeId"] == objects["Order"]
+    assert high_risk["actionIds"] == [action_id]
+    assert high_risk["status"] == "published"
+    linked = sentinels["linked_order"]
+    assert [item["objectTypeId"] for item in linked["bindings"]] == [
+        objects["Order"], objects["Supplier"],
+    ]
+    assert linked["links"][0]["linkTypeId"] == link_id
+
+    # v0 快照（含哨兵五类模型）与 live 运营行同时就绪：运营态接口可用
+    detail = client.get(
+        f"/api/v2/ontologies/{imported_id}/versions/"
+        f"{imported['version']['id']}",
+        headers=auth_headers,
+    ).json()["data"]
+    snapshot_sentinels = detail["snapshot"]["formal"]["sentinels"]
+    assert len(snapshot_sentinels) == 2
+    assert all(item["status"] == "published" for item in snapshot_sentinels)
+
+    toggle = client.patch(
+        f"/api/v1/ontologies/{imported_id}/sentinels/{high_risk['id']}"
+        f"/operational-state",
+        json={
+            "enabled": False,
+            "expectedReleaseId": imported["version"]["id"],
+            "expectedGeneration": 0,
+        },
+        headers=auth_headers,
+    )
+    assert toggle.status_code == 200, toggle.text
+
+    # 同一包重复导入：哨兵 ID 重新分配，不与首次导入冲突
+    second = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+    assert second.status_code == 201, second.text
+    second_workspace = _workspace(
+        client, auth_headers, second.json()["data"]["ontology"]["id"],
+    )
+    assert second_workspace["sentinels"][0]["id"] != high_risk["id"]
+
+
+def test_import_rejects_dangling_sentinel_action_reference(
+    client, auth_headers, ontology, db,
+):
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    _seed_release_sentinels(
+        client, auth_headers, db, source_id, [_builtin_sentinel()],
+    )
+    package, _ = _export(client, auth_headers, source_id)
+    package["structure"]["sentinels"][0]["actionIds"] = ["missing-action"]
+
+    before = client.get(
+        "/api/v1/ontologies?page_size=1000", headers=auth_headers,
+    ).json()["data"]["total"]
+    response = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+    after = client.get(
+        "/api/v1/ontologies?page_size=1000", headers=auth_headers,
+    ).json()["data"]["total"]
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "ontology_import_validation_failed"
+    assert any(
+        error.get("code") == "sentinel_action_not_found"
+        for error in detail["errors"]
+    )
+    assert after == before
+
+
+def test_import_rejects_non_boolean_sentinel_flag(
+    client, auth_headers, ontology, db,
+):
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    _seed_release_sentinels(
+        client, auth_headers, db, source_id, [_builtin_sentinel()],
+    )
+    package, _ = _export(client, auth_headers, source_id)
+    package["structure"]["sentinels"][0]["onChange"] = "false"
+
+    response = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+
+    assert response.status_code == 422
+    locations = [error.get("loc") for error in response.json()["detail"]]
+    assert ["body", "structure", "sentinels", 0, "onChange"] in locations
+
+
+def test_import_accepts_package_without_sentinels_field(
+    client, auth_headers, ontology,
+):
+    source_id = ontology["id"]
+    _seed_portable_structure(client, auth_headers, source_id)
+    package, _ = _export(client, auth_headers, source_id)
+    package["structure"].pop("sentinels")
+
+    response = client.post(
+        "/api/v1/ontologies/import", json=package, headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    imported = response.json()["data"]
+    assert imported["counts"]["sentinels"] == 0
+    workspace = _workspace(
+        client, auth_headers, imported["ontology"]["id"],
+    )
+    assert workspace["sentinels"] == []
+
+
+def test_remap_sentinel_definition_rewrites_references_and_parameter_keys():
+    from app.ontologies.export.schemas import PortableSentinel
+    from app.ontologies.export.service import _remap_sentinel_definition
+
+    sentinel = PortableSentinel.model_validate({
+        "id": "sentinel-pattern",
+        "name": "cep_rule",
+        "displayName": "CEP 模式哨兵",
+        "bindings": [
+            {"alias": "a", "objectTypeId": "ot-order", "filter": None},
+            {"alias": "b", "objectTypeId": "ot-order", "filter": None},
+        ],
+        "links": [],
+        "condition": None,
+        "pattern": {
+            "stages": [
+                {"alias": "a", "objectTypeId": "ot-order",
+                 "filter": "a.order_no != ''"},
+                {"alias": "b", "objectTypeId": "ot-order",
+                 "filter": "b.order_no != ''"},
+            ],
+            "within": 3600,
+            "absence": {"enabled": False},
+        },
+        "conditionRows": [],
+        "conditionLogic": "and",
+        "primaryAlias": "a",
+        "actionIds": ["act-review"],
+        "actionParameters": {
+            "act-review": {"note": {"source": "constant", "value": "x"}},
+        },
+        "onChange": True,
+        "onSchedule": True,
+        "scanIntervalSeconds": 300,
+        "triggerMode": "on_pattern",
+        "muted": False,
+        "enabled": True,
+    })
+
+    remapped = _remap_sentinel_definition(
+        sentinel,
+        object_ids={"ot-order": "new-object"},
+        link_ids={"lt-supplied-by": "new-link"},
+        action_ids={"act-review": "new-action"},
+        function_ids={},
+    )
+
+    assert remapped["bindings"][0]["objectTypeId"] == "new-object"
+    assert remapped["pattern"]["stages"][1]["objectTypeId"] == "new-object"
+    assert remapped["action_ids"] == ["new-action"]
+    assert list(remapped["action_parameters"]) == ["new-action"]
+    assert remapped["trigger_mode"] == "on_pattern"
