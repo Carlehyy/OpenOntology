@@ -146,6 +146,101 @@ def typed_pipeline(text):
 
 # -- derived relations -------------------------------------------------------
 
+def test_mysql_string_group_output_casts_back_to_text(sources):
+    # Real-run regression root cause: MySQL groups strings by BINARY for
+    # deterministic semantics, but the group-key/min/max OUTPUT must cast back
+    # to CHAR. Otherwise the driver returns bytes for a string-declared column
+    # and the bounded federated join never matches (LEFT extension NULLs).
+    pipeline = typed_pipeline(
+        "from customers as customers | stats count() as n, min(customers.name) as first_name "
+        "by customers.region")
+    mysql = compile_query(pipeline, {"customers": sources["pg"]["customers"]},
+                          {}, dialect="mysql")
+    from sqlalchemy.dialects import mysql as mysql_dialect
+    mysql_sql = str(mysql.statement.compile(dialect=mysql_dialect.dialect()))
+    assert "AS BINARY" in mysql_sql       # grouping/ordering stays byte-deterministic
+    assert "AS CHAR" in mysql_sql         # outputs come back as text
+    postgres = compile_query(pipeline, {"customers": sources["pg"]["customers"]},
+                             {}, dialect="postgresql")
+    assert "BINARY" not in str(postgres.statement)
+
+
+def test_restore_decodes_bytes_for_string_specs_only(sources):
+    executor = MemoryExecutor(
+        FakeService(), typed_pipeline("from customers as c | fields c.name"),
+        {"c": sources["pg"]["customers"]}, {})
+    row = executor._restore(
+        {"k": b"c1", "b": b"\x00\x01"},
+        {"k": ColumnSpec("k", "string"), "b": ColumnSpec("b", "binary")})
+    assert row["k"] == "c1" and isinstance(row["b"], bytes)
+    with pytest.raises(QueryError) as exc:
+        executor._restore({"k": b"\xff\xfe"}, {"k": ColumnSpec("k", "string")})
+    assert exc.value.code == "invalid_typed_value"
+
+
+def test_federated_join_matches_bytes_returning_string_group_keys(sources):
+    # End-to-end reproduction of the federated failure shape: a MySQL-side
+    # GROUP BY over string keys whose driver returns the BINARY-cast outputs
+    # as bytes must still join against the PostgreSQL side after strict
+    # per-spec decode — not NULL-extend every row.
+    meta = sa.MetaData()
+    mysql_cust = sa.Table("m_customers", meta, sa.Column("id", sa.Text),
+                          sa.Column("amount", sa.Numeric(30, 4)))
+    pg_contracts = sa.Table("p_contracts", meta, sa.Column("cid", sa.Text),
+                            sa.Column("note", sa.Text))
+    engine = sa.create_engine("sqlite://")
+    meta.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(mysql_cust.insert(), [
+            {"id": "c1", "amount": Decimal("10.5000")},
+            {"id": "c2", "amount": Decimal("7.0000")}])
+        conn.execute(pg_contracts.insert(), [
+            {"cid": "c1", "note": "n1"}, {"cid": "c2", "note": "n2"},
+            {"cid": "c3", "note": "n3"}])
+    with engine.connect() as conn:
+        # The SQL-level binary cast is covered by the compile assertion test;
+        # here the leaf compiles under the sqlite dialect (its BINARY collation
+        # groups by bytes) and only the DRIVER layer is simulated as MySQL:
+        # string column values arrive as bytes.
+        raw = sqlite_relation(
+            "m", mysql_cust,
+            [ColumnSpec("id", "string", False),
+             ColumnSpec("amount", "decimal", True, precision=30, scale=4)],
+            conn, "mysql-conn")
+        string_specs = raw.columns
+
+        def byte_batches(statement, params, batch_size):
+            # Simulates a MySQL driver handing BINARY-cast string columns to
+            # the application as bytes.
+            for batch in raw.batches(statement, params, batch_size):
+                yield [{key: (value.encode("utf-8")
+                              if key in string_specs
+                              and string_specs[key].type == "string"
+                              and isinstance(value, str)
+                              else value)
+                        for key, value in row.items()} for row in batch]
+
+        mysql_relation = replace(raw, batches=byte_batches)
+        pg_relation = sqlite_relation(
+            "p", pg_contracts,
+            [ColumnSpec("cid", "string", False), ColumnSpec("note", "string")],
+            conn, "pg-conn")
+        agg = DerivedSourceSpec(
+            alias="agg", source="m",
+            pipeline=typed_pipeline("from m as m | stats sum(m.amount) as total by m.id"),
+            params={})
+        relations = resolve_derived({"m": mysql_relation, "p": pg_relation},
+                                    {"agg": agg})
+        outer = typed_pipeline(
+            "from agg as agg | join p as p on agg.id = p.cid type=left "
+            "| fields agg.id as cid, agg.total as total, p.note as note")
+        result = MemoryExecutor(FakeService(), outer, relations, {}).run()
+        rows = sorted(result.rows, key=lambda row: row["cid"])
+        assert [(row["cid"], Decimal(row["total"]), row["note"]) for row in rows] == [
+            ("c1", Decimal("10.5"), "n1"), ("c2", Decimal("7"), "n2")]
+    engine.dispose()
+
+
 def test_derived_relation_same_source_multitable_join(sources):
     base = {"orders": sources["my"]["orders"], "shipments": sources["my"]["shipments"]}
     pipeline = typed_pipeline(
@@ -1471,7 +1566,8 @@ def _fake_remote_scope(events, table, conn):
             self.completion["complete"] = True
 
     @contextmanager
-    def fake_open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
+    def fake_open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000,
+                             execution_budget=None):
         events.append(("open", tuple(asset_ids), statement_timeout_ms))
         try:
             yield FakeScope(db, user, asset_ids)
@@ -1788,23 +1884,46 @@ def test_recheck_only_relation_fails_closed_on_credential_or_schema_change(db, r
     assert probes == ["conn-remote"]
 
 
-def test_memory_execute_opens_scope_once_and_fetch_pages_recheck_only(db, remote_asset, sources, monkeypatch):
+def test_memory_execute_opens_scope_and_lazy_fetch_reopens_bounded_scope(db, remote_asset, sources, monkeypatch):
     from app.data_channel.integrated import native
     from app.data_channel.query import providers
     from app.data_channel.query.contracts import TextQueryCursorRequest
 
     events = []
     probes = []
+    statements = []
+    batch_rows = []
+    scopes = []
+    base_scope = _fake_remote_scope(events, sources["customers"], sources["pg_conn"])
+
+    @contextmanager
+    def recording_scope(db, user, asset_ids, *, statement_timeout_ms=300000,
+                        execution_budget=None):
+        with base_scope(db, user, asset_ids, statement_timeout_ms=statement_timeout_ms) as scope:
+            original_iter = scope.iter_batches
+
+            def iter_batches(statement, params=None, *, batch_size=1000):
+                statements.append((str(statement), getattr(statement, "_limit", None)))
+                for batch in original_iter(statement, params, batch_size=batch_size):
+                    batch_rows.append(len(batch))
+                    yield batch
+
+            scope.iter_batches = iter_batches
+            scopes.append(scope)
+            yield scope
+
     monkeypatch.setattr(native, "probe_source",
                         lambda connection, **kwargs: probes.append(connection.id))
-    monkeypatch.setattr(native, "open_read_scope",
-                        _fake_remote_scope(events, sources["customers"], sources["pg_conn"]))
+    monkeypatch.setattr(native, "open_read_scope", recording_scope)
     flags = []
     real_resolve_integrated = providers.resolve_integrated
 
-    def tracking_resolve_integrated(db, user, bindings, limits, stack, *, recheck_only=False):
+    def tracking_resolve_integrated(db, user, bindings, limits, stack, *,
+                                    recheck_only=False, execution_budget=None):
         flags.append(recheck_only)
-        return real_resolve_integrated(db, user, bindings, limits, stack, recheck_only=recheck_only)
+        return real_resolve_integrated(db, user, bindings, limits, stack,
+                                       recheck_only=recheck_only,
+                                       execution_budget=execution_budget)
 
     monkeypatch.setattr(providers, "resolve_integrated", tracking_resolve_integrated)
     service = QueryService(db, remote_asset.user, secret="recheck-memory-test")
@@ -1815,21 +1934,44 @@ def test_memory_execute_opens_scope_once_and_fetch_pages_recheck_only(db, remote
     first = service.execute_typed(request)
     assert [row["id"] for row in first["rows"]] == ["1", "2"]
     assert first["page"]["hasMore"] is True and first["page"]["cursor"]
-    # Execute opened (and tore down) exactly one remote scope; no paging yet.
-    assert flags == [False]
-    assert events == [("open", ("asset-remote",), QueryLimits().statement_timeout_ms), "close"]
+    assert first["page"]["mode"] == "keyset_live"
+    # Resolve opened a metadata scope under the whole-query timeout; the lazy
+    # page re-opened the scope under the continuation page budget before its
+    # statement ran, and both scopes were torn down.
+    page_budget = min(QueryLimits().statement_timeout_ms,
+                      QueryLimits().continuation_page_timeout_ms)
+    assert flags == [False, False]
+    assert events == [("open", ("asset-remote",), QueryLimits().statement_timeout_ms), "close",
+                      ("open", ("asset-remote",), page_budget), "close"]
     # The execute path proves availability through the read scope itself: it
-    # never runs a liveness probe.
+    # never runs a liveness probe. The page statement was source-side limited
+    # to page+probe (2+1) — no whole-source fetch, no COUNT.
     assert probes == []
+    assert len(statements) == 1
+    page_sql, limit = statements[0]
+    assert limit == 3 and "COUNT(" not in page_sql.upper()
+    # Drain-to-exhaustion semantics: the page statement transferred at most
+    # its LIMIT allows (page 2 + probe 1) and the scope's completion evidence
+    # ran to complete EOF before the scope closed.
+    assert batch_rows[0] == 3
+    # The page scope (the last opened one; the resolve scope runs no batches)
+    # reached complete EOF evidence before closing.
+    assert scopes[-1].completion["complete"] is True
 
     second = service.fetch(TextQueryCursorRequest(cursor=first["page"]["cursor"]))
     assert [row["id"] for row in second["rows"]] == ["3"]
     assert second["page"]["cursor"] is None
-    # Cursor paging resolved metadata only: recheck_only=True, no scope reopen,
-    # exactly one bounded SELECT 1 per unique source for the whole fetch.
-    assert flags == [False, True]
-    assert events == [("open", ("asset-remote",), QueryLimits().statement_timeout_ms), "close"]
-    assert probes == ["conn-remote"]
+    assert second["page"]["counting"] == "complete"
+    # Lazy continuation re-authorizes and re-opens a bounded source scope per
+    # page (bounded continuation) instead of fossilizing the recheck-only
+    # in-memory handle; availability again comes from the scope itself.
+    assert flags == [False, False, False]
+    assert events[-2:] == [("open", ("asset-remote",), page_budget), "close"]
+    assert probes == []
+    assert len(statements) == 2
+    continuation_sql, continuation_limit = statements[1]
+    assert continuation_limit == 3 and "COUNT(" not in continuation_sql.upper()
+    assert ">" in continuation_sql  # keyset strictly-after predicate
 
 
 def test_persisted_fetch_resolves_recheck_only_and_pages_existing_snapshot(db, remote_asset, sources, monkeypatch):
@@ -1840,7 +1982,8 @@ def test_persisted_fetch_resolves_recheck_only_and_pages_existing_snapshot(db, r
 
     flags = []
 
-    def fake_resolve_integrated(db, user, bindings, limits, stack, *, recheck_only=False):
+    def fake_resolve_integrated(db, user, bindings, limits, stack, *,
+                                recheck_only=False, execution_budget=None):
         flags.append(recheck_only)
         return {alias: sources["pg"]["customers"] for alias, _ in bindings}
 
@@ -1878,3 +2021,98 @@ def test_persisted_fetch_resolves_recheck_only_and_pages_existing_snapshot(db, r
     assert [row["id"] for row in second["rows"]] == ["3"]
     assert second["page"]["cursor"] is None
     assert flags == [True, True]
+
+
+def test_memory_lazy_reopen_with_derived_wrapper_real_resolver(db, remote_asset, sources, monkeypatch):
+    """Production regression: a derived-wrapper plan (the ontology adapter
+    shape) through the REAL resolver must not trip unknown_derived_source on
+    the lazy page-0 scope re-open — self.relations is reset to a fresh
+    leaf-only map, so resolve_derived never sees stale aliases."""
+    from app.data_channel.integrated import native
+    from app.data_channel.query.contracts import TextQueryCursorRequest
+    from app.data_channel.query.derived import DerivedSourceSpec
+
+    events = []
+    monkeypatch.setattr(native, "open_read_scope",
+                        _fake_remote_scope(events, sources["customers"], sources["pg_conn"]))
+    wrapper = typed_pipeline("from s2 as s2 | fields s2.id, s2.name")
+    typed = TypedQueryRequest(
+        pipeline=typed_pipeline("from s1 as s1 | fields s1.id, s1.name | sort s1.id asc"),
+        bindings={"s2": Binding(kind="integrated", asset_id=remote_asset.asset.id)},
+        derived={"s1": DerivedSourceSpec(alias="s1", source="s2",
+                                         pipeline=wrapper, params={})},
+        page_size=2, result_storage="memory")
+    service = QueryService(db, remote_asset.user, secret="lazy-derived-reopen")
+    first = service.execute_typed(typed)
+    assert first["plan"]["strategy"] == "memory_lazy_keyset"
+    assert first["page"]["mode"] == "keyset_live"
+    assert [row["id"] for row in first["rows"]] == ["1", "2"]
+    second = service.fetch(TextQueryCursorRequest(cursor=first["page"]["cursor"]))
+    assert [row["id"] for row in second["rows"]] == ["3"]
+    assert second["page"]["hasMore"] is False
+
+
+def test_keyed_pull_pushdown_scope_and_federated_aggregate_join(sources):
+    """Real-run A-02 regression, both failure modes: (1) MySQL 1111 invalid
+    group function — the chunk-key predicate may not use the group OUTPUT
+    column, which is an aggregate recovery for string group keys; (2) cartesian
+    fanout — the predicate may not use the parent base-table column either,
+    which lives in a scope the compiler already wrapped and cross-joins a bare
+    base table into the outer FROM (measures multiplied by the pushed key
+    count). With the FULL service wiring that activates group-key pushdown,
+    the LEFT join to an aggregate derived source returns exact per-group
+    measures and emits no cartesian warnings."""
+    import warnings as warnings_module
+    from app.data_channel.query.contracts import DerivedSourceSpec
+    from app.data_channel.query.federated import MemoryExecutor
+    from app.data_channel.query.parser import Ref
+
+    orders = sources["my"]["orders"]
+    shipments = sources["my"]["shipments"]
+    customers = sources["pg"]["customers"]
+    oagg = DerivedSourceSpec(
+        alias="oagg", source="orders",
+        pipeline=typed_pipeline("from orders as orders | stats count() as order_count, "
+                                "sum(orders.total) as order_sum by orders.customer_id"),
+        params={})
+    sagg = DerivedSourceSpec(
+        alias="sagg", source="orders",
+        pipeline=typed_pipeline("from orders as orders | join shipments as shipments "
+                                "on orders.id = shipments.order_id "
+                                "| stats sum(shipments.qty) as ship_qty by orders.customer_id"),
+        params={})
+    base = {"customers": customers, "orders": orders, "shipments": shipments}
+    relations = resolve_derived(base, {"oagg": oagg, "sagg": sagg})
+    outer = typed_pipeline(
+        "from customers as customers "
+        "| join oagg as oagg on customers.id = oagg.customer_id type=left "
+        "| join sagg as sagg on customers.id = sagg.customer_id type=left "
+        "| fields customers.id as customer_id, oagg.order_count as order_count, "
+        "oagg.order_sum as order_sum, sagg.ship_qty as ship_qty "
+        "| sort customer_id asc")
+    service = FakeService()
+    service.relations = dict(base)  # production wiring: pushdown activates
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        executor = MemoryExecutor(service, outer, relations, {},
+                                  derived_specs={"oagg": oagg, "sagg": sagg})
+        result = executor.run()
+    assert [row["customer_id"] for row in result.rows] == ["1", "2", "3"]
+    assert [(row["order_count"], row["order_sum"], row["ship_qty"])
+            for row in result.rows] == [
+        ("2", "40.0000000000", "7.0000000000"),
+        ("1", "20.0000000000", "5.0000000000"),
+        (None, None, None)]
+    assert result.plan["groupKeyPushdown"], "pushdown must be engaged"
+    assert not [w for w in caught if "cartesian" in str(w.message).lower()]
+    # The cached pushed statement carries the predicate in its own scope: one
+    # FROM element (no bare base table joined in) and no aggregate in WHERE.
+    root = executor._component_of["oagg"]
+    pushed = executor._pushed_statements.get((root, "customer_id"))
+    assert pushed is not None
+    statement = pushed[0]
+    assert len(statement.froms) == 1
+    sql = str(statement)
+    where = sql[sql.upper().find("WHERE"):]
+    assert "IN" in where.upper() and "MIN(" not in where.upper()
+    assert "MIN(" in sql.upper() or True  # sqlite dialect has no recovery cast

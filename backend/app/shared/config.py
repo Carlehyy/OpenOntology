@@ -388,6 +388,24 @@ class Settings(BaseSettings):
     unified_query_federated_pushdown_keys_limit: int = Field(default=8_192, ge=1)
     unified_query_federated_key_chunk_size: int = Field(default=1_000, ge=1, le=1_000)
     unified_query_federated_join_rows_limit: int = Field(default=2_000_000, ge=1)
+    # Lazy detail continuation: source-side keyset paging for single-source
+    # detail queries. Caps accumulate across the pages of one handle, never
+    # reset, and every dimension rejects explicitly (layer=continuation).
+    # No value means "unlimited"; ge=1 keeps all four bounded.
+    unified_query_continuation_page_timeout_ms: int = Field(default=30_000, ge=1)
+    unified_query_continuation_total_timeout_ms: int = Field(default=300_000, ge=1)
+    unified_query_continuation_rows_limit: int = Field(default=100_000, ge=1)
+    unified_query_continuation_bytes_limit: int = Field(default=67_108_864, ge=1)
+    unified_query_continuation_max_pages: int = Field(default=1_000, ge=1)
+    # Whole-logical-query cumulative ledger (QueryExecutionBudget): accumulates
+    # across every executor stage — materializations, keyed pulls, count checks,
+    # derived-constraint executors, lazy continuation pages — and never resets.
+    # Per-side/per-stage limits stay independent; these three enforce the total.
+    # Statements bound repeated source scans (count checks disclosed as
+    # statements, never fabricated wire bytes).
+    unified_query_execution_total_rows_limit: int = Field(default=4_000_000, ge=1)
+    unified_query_execution_total_bytes_limit: int = Field(default=536_870_912, ge=1)
+    unified_query_execution_source_statements_limit: int = Field(default=4_096, ge=1)
     # Trial materialization runs synchronously but persists its running claim
     # first.  Expired claims are terminalized and can no longer block retry or
     # deletion; late completion is fenced by the per-run claim token.

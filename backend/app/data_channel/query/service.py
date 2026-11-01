@@ -48,13 +48,20 @@ from .contracts import (Binding, ColumnSpec, DerivedSourceSpec, JoinConstraint,
 from .derived import resolve_derived
 from .encoding import _copy_cell, _copy_line, _copy_parts, _json_parts, encode_value, encoded_size
 from .federated import MemoryExecutor
-from .handles import INSTANCE_ID, REGISTRY, MemoryHandle, handle_expiry, new_handle_id
+from .handles import (INSTANCE_ID, REGISTRY, ContinuationState, MemoryHandle,
+                      handle_expiry, new_handle_id)
 from .models import UnifiedQueryRow, UnifiedQuerySnapshot
-from .memory_budget import MemoryBudget, resident_size
-from .parser import Pipeline, parse, pipeline_from_dict, pipeline_to_dict, validate_pipeline
+from .memory_budget import MemoryBudget, QueryExecutionBudget, resident_size
+from .parser import (Command, Expr, Pipeline, Ref, Value, parse,
+                     pipeline_from_dict, pipeline_to_dict, validate_pipeline)
 
 _json = canonical_json
 _hash = stable_hash
+
+# Lazy detail continuation: ordering keys must compare exactly (never a lossy
+# float or an unordered boolean/JSON/binary cell) so the strictly-after keyset
+# predicate is portable and exact across PostgreSQL/MySQL sources.
+_KEYSET_TYPES = {"integer", "decimal", "string", "date", "timestamp", "time"}
 
 
 def _utc(value: datetime) -> datetime:
@@ -122,6 +129,16 @@ class QueryService:
         self.source_rows: dict[str, int] = {}
         self.staging_tables: list[sa.Table] = []
         self.stage_bytes = 0
+        # Whole-logical-query ledger (per-layer rows/bytes/statements + totals).
+        # Created with the first execution budget; lazy continuation pages on a
+        # REUSED service instance keep the same ledger (never reset).
+        self.execution_budget: QueryExecutionBudget | None = None
+
+    def _executor(self, pipeline, relations, params, **kwargs):
+        """Construct the bounded executor, sharing the logical-query ledger."""
+        if self.execution_budget is not None:
+            kwargs.setdefault("execution_budget", self.execution_budget)
+        return MemoryExecutor(self, pipeline, relations, params, **kwargs)
 
     def _deadline(self):
         control = current_query_control()
@@ -351,7 +368,10 @@ class QueryService:
                           if plan.bindings[n].kind == "integrated"]
             integrated_relations = resolve_integrated(
                 self.db, self.user, integrated, self.limits, self.stack,
-                recheck_only=True) if integrated else {}
+                # The ledger rides the recheck path too so the liveness probe
+                # is preemptively bounded and disclosed on the same account.
+                recheck_only=True,
+                execution_budget=self.execution_budget) if integrated else {}
             for name, binding in plan.bindings.items():
                 alias = leaf_aliases[name]
                 if binding.kind == "integrated":
@@ -377,13 +397,17 @@ class QueryService:
             alias = leaf_aliases[name]
             if binding.kind == "integrated":
                 # Resolve all aliases together so same-connection joins share a
-                # single source transaction and a single RR snapshot.
+                # single source transaction and a single RR snapshot. The
+                # whole-logical-query ledger travels with the resolve so the
+                # native scope discloses its EOF COUNT plus SET/reflect
+                # control round trips on the same account.
                 if not hasattr(self, "_integrated_relations"):
                     from .providers import resolve_integrated
                     integrated = [(leaf_aliases[n], plan.bindings[n]) for n in plan.bindings
                                   if plan.bindings[n].kind == "integrated"]
                     self._integrated_relations = resolve_integrated(
-                        self.db, self.user, integrated, self.limits, self.stack)
+                        self.db, self.user, integrated, self.limits, self.stack,
+                        execution_budget=self.execution_budget)
                 relation = self._integrated_relations[alias]
             elif binding.kind == "dataset":
                 from .providers import resolve_dataset
@@ -449,7 +473,7 @@ class QueryService:
             if not relevant:
                 continue
             local = self._execution_relations(pipeline)
-            MemoryExecutor(self, pipeline, local, spec.params,
+            self._executor(pipeline, local, spec.params,
                            memory_budget=memory_budget,
                            cancel_check=cancel_check).check_join_constraints(relevant)
 
@@ -795,6 +819,563 @@ class QueryService:
                 # leave partially staged or unpublished rows in the Session.
                 if self.db.in_transaction(): self.db.rollback()
 
+    # -- lazy detail continuation (source-side keyset paging) ------------------
+
+    @dataclass
+    class _LazyPage:
+        user_rows: list
+        user_columns: list
+        fetched: int
+        row_bytes: int
+        served: int
+        total_served: int
+        has_more: bool
+        done: bool
+        result_limited: bool
+        last_key: list | None
+        order_keys: list | None = None
+
+    def _lazy_execute_handle(self, plan, shape, handle_id, budget, cancel_check):
+        # The total wallclock anchors at query arrival (self.started), so
+        # metadata resolution and page 0 both count against the continuation
+        # total. The resolve-time source scope carries the whole-query timeout,
+        # so it is closed and re-opened under the page statement budget before
+        # any page statement runs; the resolve itself is metadata-only.
+        remaining_total_ms = (self.limits.continuation_total_timeout_ms
+                              - (time.monotonic() - self.started) * 1000)
+        if remaining_total_ms <= 0:
+            raise QueryError(422, "query_budget_exceeded",
+                             "Continuation budget exceeded before the first page",
+                             layer="continuation", budget="continuation_total_timeout_ms")
+        page_statement_ms = min(self.limits.statement_timeout_ms,
+                                self.limits.continuation_page_timeout_ms,
+                                max(1, int(remaining_total_ms)))
+        original_limits = self.limits
+        self.stack.close()
+        # Re-open from a FRESH resolution state: _resolve appends leaf
+        # relations into self.relations, and resolve_derived refuses an alias
+        # that is already present, so stale derived aliases from the first
+        # pass would surface as a bogus unknown_derived_source cycle.
+        self.relations = {}
+        self.__dict__.pop("_integrated_relations", None)
+        self.limits = replace(original_limits, statement_timeout_ms=page_statement_ms)
+        page_started = time.monotonic()
+        try:
+            if self._plan_needs_pin(plan):
+                self._pin_memory()
+                self.stack.enter_context(interruptible_connection(self.db.connection()))
+            self._resolve(plan)
+            # The re-opened scope may see newer metadata than the first pass:
+            # frozen binding expectations and eligibility are re-checked so a
+            # schema change cannot execute against a stale semantic mapping.
+            self._check_expectations(plan.origin, self.relations)
+            execution_relations = self._execution_relations(plan.pipeline)
+            resolved_shape = _lazy_keyset_shape(plan.pipeline, execution_relations)
+            if (resolved_shape is None
+                    or tuple((o.column, o.output, o.direction, o.nulls)
+                             for o in resolved_shape.order)
+                    != tuple((o.column, o.output, o.direction, o.nulls)
+                             for o in shape.order)):
+                raise QueryError(409, "query_context_changed",
+                                 "Continuation eligibility changed during execute")
+            page = self._run_lazy_page(plan, resolved_shape, last_key=None, served=0,
+                                       offset=shape.user_offset, budget=budget,
+                                       cancel_check=cancel_check, page_size=plan.page_size)
+        finally:
+            self.limits = original_limits
+        page_elapsed_ms = (time.monotonic() - page_started) * 1000
+        for relation in execution_relations.values():
+            if relation.recheck: relation.recheck()
+        # Source teardown (page-0 scope) is part of successful EOF; the release
+        # mark is recorded only after the close actually happened.
+        self.stack.close()
+        if self.execution_budget is not None:
+            self.execution_budget.mark_released("page0_source_scopes")
+        cont = ContinuationState(
+            order=tuple((o.column, o.output, o.direction, o.nulls) for o in shape.order),
+            last_key=page.last_key, served=page.total_served,
+            user_limit=shape.user_limit, user_offset=shape.user_offset,
+            started_monotonic=self.started, done=page.done,
+            pages=1, rows_read=page.fetched, bytes_read=page.row_bytes)
+        source_states = _relation_states(execution_relations)
+        # Every page re-reads the source under a fresh scope: the paged result
+        # is never one cross-page snapshot, whatever a single leaf's session
+        # consistency is, so the label states the paging semantics honestly.
+        consistency = "live_keyset_paged"
+        handle = MemoryHandle(
+            id=handle_id, owner_user_id=str(self.user.id), instance_id=INSTANCE_ID,
+            columns=[spec.output() for spec in page.user_columns], rows=page.user_rows,
+            total_rows=page.total_served, result_limited=page.result_limited,
+            page_size=plan.page_size, created_at=datetime.now(timezone.utc),
+            expires_at=handle_expiry(self.limits.memory_handle_ttl_seconds),
+            auth_fingerprints={a: r.auth_fingerprint for a, r in execution_relations.items()},
+            schema_fingerprints={a: r.schema_fingerprint for a, r in execution_relations.items()},
+            query_hash=plan.query_hash, request_fingerprint=plan.request_fingerprint,
+            request_kind=plan.request_kind, stored_request=plan.stored_request,
+            source_states=source_states, consistency=consistency,
+            plan={"strategy": "memory_lazy_keyset",
+                  "operators": [c.op for c in plan.pipeline.commands],
+                  "sourceRows": {shape.alias: page.fetched},
+                  "continuation": {"pages": cont.pages, "rowsRead": cont.rows_read,
+                                   "bytesRead": cont.bytes_read}},
+            classification="detail", avg_semantics=None, bytes=0,
+            session_kind=plan.session_kind, session_id=plan.session_id, origin=plan.origin,
+            continuation=cont)
+        handle.execution_budget = self.execution_budget
+        # The plan (including the executionBudget snapshot the response
+        # carries) must be FINAL before packing: the packer measures the real
+        # envelope, and any post-pack growth would defeat the exact check.
+        if self.execution_budget is not None:
+            handle.plan["executionBudget"] = _publish_budget_snapshot(self.execution_budget)
+        self._pack_lazy_page(handle, page,
+                             min(16 * 1024 ** 2, self.limits.result_bytes_limit))
+        handle.rows = page.user_rows
+        handle.total_rows = page.total_served
+        handle.result_limited = page.result_limited
+        cont.served = page.total_served
+        cont.last_key = page.last_key
+        cont.done = page.done
+        metadata = {key: value for key, value in vars(handle).items()
+                    if key not in {"rows", "execution_budget"}}
+        if self.execution_budget is not None:
+            metadata["executionBudgetCounters"] = self.execution_budget.layer_totals()
+        budget.check_temporary(metadata)
+        handle.bytes = resident_size(page.user_rows) + resident_size(metadata)
+        return handle, page, page_elapsed_ms
+
+    def _run_lazy_page(self, plan, shape, *, last_key, served, offset, budget,
+                       cancel_check, page_size):
+        predicate, ks_params, exhausted = _keyset_predicate(
+            shape.alias, shape.order, last_key, plan.params)
+        if exhausted:
+            # The cursor sits on trailing NULLs of every ordering key: no row
+            # can sort after it (the unique tiebreaker excludes equal tails).
+            return self._LazyPage([], [], 0, 0, 0, served,
+                                  False, True, shape.user_offset > 0 and served > 0,
+                                  last_key)
+        remaining = None if shape.user_limit is None else shape.user_limit - served
+        if remaining is not None and remaining <= 0:
+            raise QueryError(500, "query_provider_invalid",
+                             "Continuation continued past its limit window")
+        serve_target = page_size if remaining is None else min(page_size, remaining)
+        merged = dict(plan.params)
+        merged.update(ks_params)
+        pipeline = _lazy_page_pipeline(shape, predicate, serve_target + 1, offset)
+        relations = {shape.alias: shape.relation}
+        dialect = ("postgresql" if shape.relation.platform
+                   else shape.relation.state.get("dialect", "postgresql"))
+        compiled = compile_query(pipeline, relations, merged, dialect=dialect)
+        exec_params = dict(compiled.params)
+        if shape.relation.bind_params:
+            exec_params.update(shape.relation.bind_params)
+        executor = self._executor(pipeline, relations, merged,
+                                  cancel_check=cancel_check, memory_budget=budget)
+        label_specs = {spec.name: spec for spec in compiled.columns}
+        user_outputs = dict.fromkeys(shape.user_outputs)
+        fetched, row_bytes, served_bytes = 0, 0, 0
+        served_rows: list[dict] = []
+        stop_serving = False
+        probe = False
+        stream = executor._execute_statement(
+            shape.relation, compiled.statement, exec_params, label_specs)
+        try:
+            # The statement is source-side limited to page+1 rows, so the
+            # stream is drained to exhaustion instead of closed early: the
+            # provider's tail EOF/completion evidence runs, and rows_read
+            # counts every row actually transferred (probe and byte-boundary
+            # rows included), never only the served prefix.
+            for raw in stream:
+                fetched += 1
+                data = {spec.name: encode_value(raw[spec.name], spec)
+                        for spec in compiled.columns}
+                size = encoded_size(data)
+                row_bytes += size
+                if row_bytes > self.limits.memory_result_bytes_limit:
+                    raise QueryError(422, "query_budget_exceeded",
+                                     "In-memory page exceeds the per-result byte budget",
+                                     budget="memory_result_bytes_limit", layer="continuation")
+                if not stop_serving and len(served_rows) >= serve_target:
+                    stop_serving = True  # row beyond the page proves more exist
+                if stop_serving:
+                    probe = True
+                    budget.check_temporary(data)  # drained, never retained
+                    continue
+                budget.charge(data)
+                served_rows.append(data)
+                served_bytes += size
+        finally:
+            stream.close()
+        served_now = len(served_rows)
+        total_served = served + served_now
+        if shape.user_limit is None:
+            done, has_more = not probe, probe
+            result_limited = False
+        else:
+            # OFFSET skipped before the window inside the page-0 statement;
+            # total_served counts window rows only.
+            window_done = (shape.user_limit - total_served) <= 0
+            done = window_done or not probe
+            has_more = not done
+            result_limited = done and (probe or (shape.user_offset > 0 and total_served > 0))
+        order_keys = [[row[o.output] for o in shape.order] for row in served_rows]
+        last = last_key
+        if served_now:
+            last = order_keys[-1]
+        user_rows = [{name: row[name] for name in user_outputs}
+                     for row in served_rows]
+        user_columns = [spec for spec in compiled.columns if spec.name in user_outputs]
+        return self._LazyPage(user_rows, user_columns, fetched, row_bytes, served_now,
+                              total_served, has_more, done, result_limited, last,
+                              order_keys)
+
+    def _pack_lazy_page(self, handle, page, limit):
+        """Greedily pack served rows into the transport budget against the
+        REAL response metadata (no synthetic estimates). Trailing rows stay
+        unserved and the keyset cursor advances only across packed rows, so
+        packing never skips data; the exact whole-envelope check after final
+        assembly remains the verifier.
+        """
+        def size_of(value):
+            return sum(len(part.encode("utf-8")) for part in _json_parts(value))
+
+        skeleton = {"queryId": handle.id, "schemaVersion": 1, "columns": handle.columns,
+                    "rows": [], "sourceStates": handle.source_states,
+                    "consistency": handle.consistency,
+                    "exactness": "exact_within_scope",
+                    "countsScope": "authorized_query_scope_at_source_snapshots",
+                    "totalRows": handle.total_rows, "resultLimited": False,
+                    "persistence": {"mode": "ephemeral",
+                                    "classification": handle.classification},
+                    "page": {"pageSize": handle.page_size, "hasMore": True,
+                             "cursor": "0" * 640, "byteLimit": limit,
+                             "mode": "keyset_live", "counting": "page_probe"},
+                    "expiresAt": _utc(handle.expires_at).isoformat(),
+                    "plan": handle.plan}
+        base = size_of({"data": skeleton})
+        packed, used = [], base
+        for row in page.user_rows:
+            size = size_of(row) + 1
+            if packed and used + size > limit:
+                break
+            if not packed and base + size > limit:
+                raise QueryError(422, "query_budget_exceeded",
+                                 "The response metadata leaves no transport budget "
+                                 "for a single result row",
+                                 budget="page_bytes", limitBytes=limit,
+                                 layer="continuation")
+            packed.append(row)
+            used += size
+        dropped = len(page.user_rows) - len(packed)
+        page.user_rows = packed
+        if dropped:
+            page.served = len(packed)
+            page.total_served -= dropped
+            page.has_more = True
+            page.done = False
+            page.result_limited = False
+            if page.served and page.order_keys:
+                page.last_key = page.order_keys[page.served - 1]
+
+    def _continuation_cap_exceeded(self, cont, *, page_elapsed_ms):
+        checks = (
+            ("continuation_max_pages", cont.pages > self.limits.continuation_max_pages),
+            ("continuation_rows_limit", cont.rows_read > self.limits.continuation_rows_limit),
+            ("continuation_bytes_limit", cont.bytes_read > self.limits.continuation_bytes_limit),
+            ("continuation_total_timeout_ms",
+             (time.monotonic() - cont.started_monotonic) * 1000
+             > self.limits.continuation_total_timeout_ms),
+            ("continuation_page_timeout_ms",
+             page_elapsed_ms > self.limits.continuation_page_timeout_ms),
+        )
+        for budget_dim, exceeded in checks:
+            if exceeded:
+                return budget_dim
+        return None
+
+    def _continuation_reject(self, handle, budget_dim, **extra):
+        # Release facts stay truthful: deregistering the handle is the
+        # synchronous fact performed here; source scopes and the page ticket
+        # are closed by the request cleanup path and are recorded on the
+        # ledger only once those closes actually happen.
+        REGISTRY.cancel(handle.id, str(self.user.id))
+        if self.execution_budget is not None:
+            self.execution_budget.mark_released("continuation_handle")
+        raise QueryError(422, "query_budget_exceeded",
+                         "Continuation budget exceeded: the query is incomplete with no "
+                         "full result; the result handle was released and the page's "
+                         "source scopes close with this request",
+                         layer="continuation", budget=budget_dim,
+                         released=["result_handle"], **extra)
+
+    def _lazy_page_response(self, handle, page):
+        limit = min(16 * 1024 ** 2, self.limits.result_bytes_limit)
+        cont = handle.continuation
+
+        def cursor_at(ordinal):
+            return self._sign({"v": 1, "mode": "memory", "inst": INSTANCE_ID, "id": handle.id,
+                               "owner": handle.owner_user_id, "q": handle.query_hash,
+                               "a": _hash(handle.auth_fingerprints), "s": _hash(handle.schema_fingerprints),
+                               "next": ordinal, "size": handle.page_size,
+                               "exp": _utc(handle.expires_at).timestamp()}, memory=True)
+
+        def check_size(value):
+            size = 0
+            for part in _json_parts(value):
+                size += len(part.encode("utf-8"))
+                if size > limit:
+                    raise QueryError(422, "query_budget_exceeded",
+                                     "A result row or metadata exceeds the page byte budget",
+                                     budget="page_bytes", limitBytes=limit)
+            return size
+
+        # Each row must fit alone; the assembled envelope is then checked as a
+        # whole so metadata + rows together can never exceed the page budget.
+        rows = []
+        for row in page.user_rows:
+            check_size(row)
+            rows.append(row)
+        response = {"queryId": handle.id, "schemaVersion": 1, "columns": handle.columns,
+                    "rows": rows, "sourceStates": handle.source_states,
+                    "consistency": handle.consistency,
+                    "exactness": "exact_within_scope",
+                    "countsScope": "authorized_query_scope_at_source_snapshots",
+                    "totalRows": handle.total_rows if cont.done else None,
+                    "resultLimited": bool(handle.result_limited) if cont.done else False,
+                    "persistence": {"mode": "ephemeral", "classification": handle.classification},
+                    "page": {"pageSize": handle.page_size, "hasMore": page.has_more,
+                             "cursor": cursor_at(cont.served) if page.has_more else None,
+                             "byteLimit": limit, "mode": "keyset_live",
+                             "counting": "complete" if cont.done else "page_probe"},
+                    "expiresAt": _utc(handle.expires_at).isoformat(), "plan": handle.plan}
+        check_size({"data": response})
+        return response
+
+    def _fetch_continuation(self, payload, handle):
+        cont = handle.continuation
+        plan = self._plan_from_stored(handle.stored_request)
+        control = current_query_control()
+        # Page fetches execute real source IO, so they take part in the same
+        # global/per-user reservation math as first execution via a page
+        # ticket; a concurrent cancel of the handle or ticket is honored
+        # mid-page and never answered as success.
+        # Restore the whole-logical-query ledger from the handle: a new
+        # service instance per HTTP fetch must continue the same totals.
+        if self.execution_budget is None and handle.execution_budget is not None:
+            self.execution_budget = handle.execution_budget
+        ticket = REGISTRY.open_page_ticket(handle.id, str(self.user.id), self.limits,
+                                          interrupt=(control.cancel if control is not None
+                                                     else None))
+        budget = MemoryBudget(ticket.reservation_bytes)
+        if self.execution_budget is not None:
+            self.execution_budget.memory_budget = budget
+        cancel_check = lambda: ((control is not None and control.cancelled())
+                                or handle.cancelled
+                                or REGISTRY.ticket_cancelled(ticket.id))
+        try:
+            with cont.lock:
+                if cont.done:
+                    raise QueryError(400, "invalid_cursor",
+                                     "The result set is complete; rerun the query to page again")
+                if payload.get("next") != cont.served:
+                    raise QueryError(400, "invalid_cursor",
+                                     "Keyset continuation accepts only the latest sequential cursor")
+                self._deadline()
+                # Cumulative caps constrain the next read, not only the post-mortem:
+                # once a dimension is exhausted the page fetch refuses to read.
+                if cont.pages + 1 > self.limits.continuation_max_pages:
+                    self._continuation_reject(handle, "continuation_max_pages")
+                if cont.rows_read >= self.limits.continuation_rows_limit:
+                    self._continuation_reject(handle, "continuation_rows_limit")
+                if cont.bytes_read >= self.limits.continuation_bytes_limit:
+                    self._continuation_reject(handle, "continuation_bytes_limit")
+                remaining_total_ms = (self.limits.continuation_total_timeout_ms
+                                      - (time.monotonic() - cont.started_monotonic) * 1000)
+                if remaining_total_ms <= 0:
+                    self._continuation_reject(handle, "continuation_total_timeout_ms")
+                # The ORIGINAL logical query's statement budget anchors at the
+                # first execution (ledger.started + ledger.timeout_ms) and is
+                # never widened by later pages arriving on fresh services: a
+                # page must fit the remaining logical wallclock, the remaining
+                # continuation budget, the page budget and the configured
+                # statement budget all at once.
+                logical_remaining_ms = None
+                if self.execution_budget is not None:
+                    logical_remaining_ms = (self.execution_budget.timeout_ms
+                                            - (time.monotonic() - self.execution_budget.started) * 1000)
+                    if logical_remaining_ms <= 0:
+                        REGISTRY.cancel(handle.id, str(self.user.id))
+                        self.execution_budget.mark_released("continuation_handle")
+                        raise QueryError(
+                            422, "query_budget_exceeded",
+                            "Whole-logical-query statement budget exhausted before this "
+                            "page: the query is incomplete with no full result; the result "
+                            "handle was released and the page's source scopes close with "
+                            "this request",
+                            layer="logical_query", budget="statement_timeout_ms",
+                            wholeLogicalTimeoutMs=self.execution_budget.timeout_ms,
+                            released=["result_handle"])
+                budget_candidates = [self.limits.statement_timeout_ms,
+                                     self.limits.continuation_page_timeout_ms,
+                                     max(1, int(remaining_total_ms))]
+                if logical_remaining_ms is not None:
+                    budget_candidates.append(max(1, int(logical_remaining_ms)))
+                page_statement_ms = min(budget_candidates)
+                if self.execution_budget is not None:
+                    # Refuse BEFORE reopening any source scope: an exhausted
+                    # whole-query statement budget must not pay scope-open
+                    # SETs/reflection (or any liveness probe) just to learn it
+                    # is over — the page is rejected with zero further source
+                    # statements, and the stored handle is observably released
+                    # (next fetch answers 410, ticket closes in the outer
+                    # finally, page scopes never opened).
+                    try:
+                        self.execution_budget.ensure_statement_room("continuation_scope_reopen")
+                    except QueryError as exc:
+                        REGISTRY.cancel(handle.id, str(self.user.id))
+                        self.execution_budget.mark_released("continuation_handle")
+                        raise QueryError(
+                            exc.status, exc.code,
+                            "Whole-logical-query statement budget exhausted before this "
+                            "page: the query is incomplete with no full result; the result "
+                            "handle was released and the page's source scopes close with "
+                            "this request",
+                            layer="logical_query",
+                            budget="execution_source_statements_limit",
+                            stage="continuation_scope_reopen",
+                            released=["result_handle"]) from exc
+                original_limits = self.limits
+                self.limits = replace(original_limits, statement_timeout_ms=page_statement_ms)
+                page = None
+                page_started = None
+                try:
+                    pinned = self._plan_needs_pin(plan)
+                    if pinned:
+                        self._pin_memory()
+                        self.stack.enter_context(interruptible_connection(self.db.connection()))
+                    # Full resolve re-opens bounded source scopes after the
+                    # per-page authorization recheck; scopes close in the outer
+                    # finally of fetch. The tightened statement budget covers both
+                    # the resolve and the page statement (platform leaves included).
+                    self.relations = {}
+                    self.__dict__.pop("_integrated_relations", None)
+                    self._resolve(plan)
+                    if not pinned and self.db.in_transaction():
+                        self.db.rollback()
+                    execution_relations = self._execution_relations(plan.pipeline)
+                    self._check_expectations(handle.origin, self.relations)
+                    if ({a: r.auth_fingerprint for a, r in execution_relations.items()}
+                            != handle.auth_fingerprints
+                            or {a: r.schema_fingerprint for a, r in execution_relations.items()}
+                            != handle.schema_fingerprints):
+                        raise QueryError(409, "query_context_changed",
+                                         "Authorization or source schema changed; rerun query")
+                    shape = _lazy_keyset_shape(plan.pipeline, execution_relations)
+                    if (shape is None
+                            or tuple((o.column, o.output, o.direction, o.nulls) for o in shape.order)
+                            != cont.order):
+                        raise QueryError(409, "query_context_changed",
+                                         "Continuation eligibility or ordering changed; rerun query")
+                    self._page_scope(handle.page_size)
+                    for relation in execution_relations.values():
+                        if relation.recheck: relation.recheck()
+                    page_started = time.monotonic()
+                    try:
+                        page = self._run_lazy_page(plan, shape, last_key=cont.last_key,
+                                                   served=cont.served, offset=0, budget=budget,
+                                                   cancel_check=cancel_check,
+                                                   page_size=handle.page_size)
+                    except QueryError as exc:
+                        if exc.code == "query_budget_exceeded":
+                            if exc.extra.get("layer") == "logical_query":
+                                # Whole-logical-query rejection: keep its richer
+                                # context (layer, byLayer, stage) and only append
+                                # the synchronous release fact.
+                                REGISTRY.cancel(handle.id, str(self.user.id))
+                                if self.execution_budget is not None:
+                                    self.execution_budget.mark_released("continuation_handle")
+                                exc.extra["released"] = ["result_handle"]
+                                raise
+                            self._continuation_reject(handle, exc.extra.get("budget", "continuation"))
+                        raise
+                    # A concurrent cancel during the page must not publish.
+                    if REGISTRY.get(handle.id) is not handle or handle.cancelled:
+                        raise QueryError(410, "result_handle_expired",
+                                         "Result handle was cancelled during the page; "
+                                         "no page was published")
+                    handle.source_states = _relation_states(execution_relations)
+                    # Finalize the plan counters this page will publish before
+                    # packing, so the measured envelope matches the assembled
+                    # response exactly.
+                    handle.plan["sourceRows"] = {shape.alias: page.fetched}
+                    handle.plan["continuation"] = {
+                        "pages": cont.pages + 1,
+                        "rowsRead": cont.rows_read + page.fetched,
+                        "bytesRead": cont.bytes_read + page.row_bytes}
+                    if self.execution_budget is not None:
+                        handle.plan["executionBudget"] = _publish_budget_snapshot(self.execution_budget)
+                    self._pack_lazy_page(handle, page,
+                                         min(16 * 1024 ** 2, self.limits.result_bytes_limit))
+                finally:
+                    self.limits = original_limits
+                cont.served = page.total_served
+                cont.last_key = page.last_key
+                cont.done = page.done
+                cont.pages += 1
+                cont.rows_read += page.fetched
+                cont.bytes_read += page.row_bytes
+                handle.rows = page.user_rows
+                handle.total_rows = page.total_served
+                handle.result_limited = page.result_limited
+                metadata = {key: value for key, value in vars(handle).items()
+                            if key not in {"rows", "execution_budget"}}
+                if self.execution_budget is not None:
+                    metadata["executionBudgetCounters"] = self.execution_budget.layer_totals()
+                handle.bytes = resident_size(page.user_rows) + resident_size(metadata)
+                # Counters were finalized pre-pack; refresh only if packing
+                # dropped nothing (values identical) — kept explicit for the
+                # committed state to stay in sync with what was published.
+                handle.plan["continuation"] = {"pages": cont.pages, "rowsRead": cont.rows_read,
+                                               "bytesRead": cont.bytes_read}
+                try:
+                    REGISTRY.refresh(handle, self.limits, exclude_ticket=ticket.id)
+                except QueryError as exc:
+                    REGISTRY.cancel(handle.id, handle.owner_user_id)
+                    if self.execution_budget is not None:
+                        self.execution_budget.mark_released("continuation_handle")
+                    raise QueryError(exc.status, exc.code,
+                                     "Continuation page refused by the stored-result quota; "
+                                     "the query is incomplete with no full result and the "
+                                     "handle was released",
+                                     layer="continuation", quota=exc.extra.get("quota"),
+                                     limitBytes=exc.extra.get("limitBytes"),
+                                     released=["result_handle"]) from exc
+                exceeded = self._continuation_cap_exceeded(
+                    cont, page_elapsed_ms=(time.monotonic() - page_started) * 1000)
+                if exceeded is not None:
+                    self._continuation_reject(handle, exceeded,
+                                              servedRows=cont.served, pages=cont.pages)
+                # Page scope teardown precedes publication. A response-envelope
+                # failure after the state advanced releases the handle: its latest
+                # cursor was never delivered and must not dangle half-served.
+                self.stack.close()
+                if self.execution_budget is not None:
+                    self.execution_budget.mark_released("continuation_source_scopes")
+                self._deadline()
+                try:
+                    return self._lazy_page_response(handle, page)
+                except QueryError as exc:
+                    REGISTRY.cancel(handle.id, handle.owner_user_id)
+                    if self.execution_budget is not None:
+                        self.execution_budget.mark_released("continuation_handle")
+                    raise QueryError(exc.status, exc.code, exc.message,
+                                     layer="continuation", released=["result_handle"],
+                                     **{key: value for key, value in exc.extra.items()
+                                        if key not in {"layer", "released"}}) from exc
+        finally:
+            REGISTRY.close_ticket(ticket.id)
+            if self.execution_budget is not None:
+                self.execution_budget.mark_released("continuation_page_ticket")
+
     # -- memory execution -----------------------------------------------------
 
     def _execute_memory(self, plan: _Plan) -> dict[str, Any]:
@@ -810,6 +1391,9 @@ class QueryService:
             ticket = REGISTRY.open_ticket(handle_id, str(self.user.id), self.limits,
                                           interrupt=control.cancel)
             budget = MemoryBudget(ticket.reservation_bytes)
+            if self.execution_budget is None:
+                self.execution_budget = QueryExecutionBudget(
+                    self.limits, memory_budget=budget, started=self.started)
             # Platform-local leaves (dataset versions, ontology read port)
             # require the fresh RR read transaction BEFORE resolution, so all
             # metadata resolution and execution share one snapshot; external
@@ -828,7 +1412,21 @@ class QueryService:
                                               cancel_check=cancel_check)
             execution_relations = self._execution_relations(plan.pipeline)
             self._page_scope(plan.page_size)
-            executor = MemoryExecutor(self, plan.pipeline, execution_relations, plan.params,
+            lazy_shape = _lazy_keyset_shape(plan.pipeline, execution_relations)
+            if lazy_shape is not None:
+                handle, page, page_elapsed_ms = self._lazy_execute_handle(
+                    plan, lazy_shape, handle_id, budget, cancel_check)
+                exceeded = self._continuation_cap_exceeded(
+                    handle.continuation, page_elapsed_ms=page_elapsed_ms)
+                if exceeded is not None:
+                    self._continuation_reject(handle, exceeded)
+                REGISTRY.register(handle, self.limits)
+                try:
+                    return self._lazy_page_response(handle, page)
+                except BaseException:
+                    REGISTRY.cancel(handle_id, str(self.user.id))
+                    raise
+            executor = self._executor(plan.pipeline, execution_relations, plan.params,
                                       cancel_check=cancel_check, memory_budget=budget,
                                       derived_specs=plan.derived)
             outer_joins = {cmd.args[1] for cmd in plan.pipeline.commands if cmd.op == "join"}
@@ -851,7 +1449,11 @@ class QueryService:
                 plan=result.plan, classification=result.classification,
                 avg_semantics=result.avg_semantics, bytes=0,
                 session_kind=plan.session_kind, session_id=plan.session_id, origin=plan.origin)
-            metadata = {key: value for key, value in vars(handle).items() if key != "rows"}
+            handle.execution_budget = self.execution_budget
+            metadata = {key: value for key, value in vars(handle).items()
+                        if key not in {"rows", "execution_budget"}}
+            if self.execution_budget is not None:
+                metadata["executionBudgetCounters"] = self.execution_budget.layer_totals()
             budget.check_temporary(metadata)
             handle.bytes = resident_size(result.rows) + resident_size(metadata)
             # Source teardown is part of successful EOF, before publication.
@@ -1011,6 +1613,8 @@ class QueryService:
                 raise QueryError(400, "invalid_cursor", "Invalid cursor ordinal")
             if payload.get("size") != handle.page_size:
                 raise QueryError(400, "invalid_cursor", "Cursor does not match its result handle")
+            if handle.continuation is not None:
+                return self._fetch_continuation(payload, handle)
             plan = self._plan_from_stored(handle.stored_request)
             pinned = self._plan_needs_pin(plan)
             if pinned:
@@ -1138,6 +1742,208 @@ class QueryService:
         more = start + len(rows) < handle.total_rows
         response["page"].update(hasMore=more, cursor=cursor_at(start + len(rows)) if more else None)
         return response
+
+
+def _publish_budget_snapshot(ledger):
+    """Bounded published form of the whole-query ledger snapshot.
+
+    The release log keeps its tail and layer counters their head: a long
+    pagination must not grow its own response metadata until later pages can
+    no longer fit the transport budget. The unbounded ledger stays in
+    process memory on the handle.
+    """
+    snapshot = ledger.snapshot()
+    snapshot["released"] = snapshot["released"][-8:]
+    if len(snapshot["byLayer"]) > 48:
+        snapshot["byLayer"] = dict(list(snapshot["byLayer"].items())[:48])
+    return snapshot
+
+
+def _relation_states(relations) -> list[dict]:
+    """Response sourceStates payload for execution relations (counters only)."""
+    states = []
+    for alias, relation in relations.items():
+        state = dict(relation.state)
+        if relation.source_group is not None:
+            state["completion"] = dict(relation.source_group.completion)
+            state["snapshot"] = dict(relation.source_group.provenance)
+        state["alias"] = alias
+        states.append(state)
+    return states
+
+
+# -- lazy detail continuation helpers (module level) --------------------------
+
+@dataclass(frozen=True)
+class _LazyOrder:
+    column: str    # base relation column
+    output: str    # projection label the page SORT uses
+    direction: str  # "asc" | "desc"
+    nulls: str      # "first" | "last"
+
+
+@dataclass(frozen=True)
+class _LazyShape:
+    source: str
+    alias: str
+    relation: Relation
+    order: tuple[_LazyOrder, ...]
+    wheres: tuple
+    fields_cmd: object | None
+    added: tuple[tuple[str, str], ...]  # (column, output) order-only projections
+    user_outputs: tuple[str, ...]
+    user_limit: int | None
+    user_offset: int
+
+
+def _lazy_keyset_shape(pipeline, execution_relations) -> _LazyShape | None:
+    """Eligibility for source-side keyset paging of a detail query.
+
+    Supported boundary (anything else pages from the bounded materialized
+    result instead): memory-mode, single-source outer pipeline without
+    JOIN/STATS/DISTINCT, a structurally unique key declared by the leaf
+    relation (``state["uniqueKey"]``; composite keys allowed), and every
+    ordering column typed in ``_KEYSET_TYPES``. Continuation is strictly
+    sequential: without a declared unique key there is no deterministic total
+    order, and page-serving that re-queries without one is refused rather
+    than served approximately.
+    """
+    if len(pipeline.sources) != 1:
+        return None
+    if any(c.op in {"join", "stats", "distinct"} for c in pipeline.commands):
+        return None
+    alias = pipeline.alias
+    relation = execution_relations.get(alias)
+    if relation is None or (relation.batches is None and not relation.platform):
+        return None
+    unique = relation.state.get("uniqueKey")
+    if (not isinstance(unique, list) or not unique
+            or not all(isinstance(column, str) and column for column in unique)
+            or len(set(unique)) != len(unique)):
+        return None
+    if any(relation.columns.get(column) is None
+           or relation.columns[column].type not in _KEYSET_TYPES for column in unique):
+        return None
+    fields_cmd = next((c for c in pipeline.commands if c.op == "fields"), None)
+    sort_cmd = next((c for c in pipeline.commands if c.op == "sort"), None)
+    limit_cmd = next((c for c in pipeline.commands if c.op == "limit"), None)
+    out_of_col: dict[str, str] = {}
+    if fields_cmd is not None:
+        for ref, name in fields_cmd.args:
+            if ref.alias != alias:
+                return None
+            out_of_col.setdefault(ref.name, name)
+    else:
+        for name in relation.columns:
+            out_of_col[name] = f"{alias}.{name}"
+    col_of_out = {out: col for col, out in out_of_col.items()}
+    order: list[_LazyOrder] = []
+    if sort_cmd is not None:
+        for ref_or_name, direction, nulls in sort_cmd.args:
+            if isinstance(ref_or_name, Ref):
+                if ref_or_name.alias != alias:
+                    return None
+                column = ref_or_name.name
+                if column not in out_of_col:
+                    return None
+                output = out_of_col[column]
+            else:
+                output = ref_or_name
+                column = col_of_out.get(output)
+                if column is None:
+                    return None
+            if direction not in {"asc", "desc"} or nulls not in {"first", "last"}:
+                return None
+            if relation.columns[column].type not in _KEYSET_TYPES:
+                return None
+            order.append(_LazyOrder(column, output, direction, nulls))
+    added: list[tuple[str, str]] = []
+    taken = set(col_of_out)
+    for column in unique:
+        if column in {item.column for item in order}:
+            continue
+        output = out_of_col.get(column)
+        if output is None:
+            output = f"__ord{len(added)}_{column}"
+            while output in taken:
+                output = "_" + output
+            taken.add(output)
+            added.append((column, output))
+        order.append(_LazyOrder(column, output, "asc", "last"))
+    user_limit = limit_cmd.args[0] if limit_cmd is not None else None
+    user_offset = limit_cmd.args[1] if limit_cmd is not None and len(limit_cmd.args) > 1 else 0
+    wheres = tuple(c for c in pipeline.commands if c.op == "where")
+    user_outputs = tuple(out_of_col.values()) if fields_cmd is not None else tuple(
+        f"{alias}.{name}" for name in relation.columns)
+    return _LazyShape(pipeline.source, alias, relation, tuple(order), wheres,
+                      fields_cmd, tuple(added), user_outputs, user_limit, user_offset)
+
+
+def _keyset_predicate(alias: str, order, last_key, plan_params):
+    """Strictly-after lexicographic predicate over the ordering keys.
+
+    NULL handling mirrors the compiler's CASE ordering (nulls first/last per
+    direction); values bind as typed parameters via the column spec. Returns
+    (expr, params, exhausted) where exhausted marks a cursor that no row can
+    sort after.
+    """
+    if last_key is None:
+        return None, {}, False
+    params: dict[str, Any] = {}
+
+    def bind(value):
+        name = f"__ks{len(params)}"
+        while name in plan_params or name in params:
+            name = "_" + name
+        params[name] = value
+        return Value(name, True)
+
+    def equal(index):
+        target = Ref(alias, order[index].column)
+        value = last_key[index]
+        if value is None:
+            return Expr("is_null", (target,))
+        return Expr("=", (target, bind(value)))
+
+    def after(index):
+        item = order[index]
+        target = Ref(alias, item.column)
+        value = last_key[index]
+        compare = ">" if item.direction == "asc" else "<"
+        if value is None:
+            if item.nulls == "last":
+                return None  # nothing sorts after a trailing NULL here
+            return Expr("is_not_null", (target,))
+        if item.nulls == "last":
+            return Expr("or", (Expr(compare, (target, bind(value))),
+                               Expr("is_null", (target,))))
+        return Expr(compare, (target, bind(value)))
+
+    branches = []
+    for index in range(len(order)):
+        tail = after(index)
+        if tail is None:
+            continue
+        prefix = [equal(j) for j in range(index)]
+        branches.append(Expr("and", tuple((*prefix, tail))) if prefix else tail)
+    if not branches:
+        return None, {}, True
+    return Expr("or", tuple(branches)), params, False
+
+
+def _lazy_page_pipeline(shape: _LazyShape, predicate, fetch_limit: int, offset: int) -> Pipeline:
+    commands = []
+    if predicate is not None:
+        commands.append(Command("where", (predicate,)))
+    commands.extend(shape.wheres)
+    if shape.fields_cmd is not None:
+        args = shape.fields_cmd.args + tuple(
+            (Ref(shape.alias, column), output) for column, output in shape.added)
+        commands.append(Command("fields", args))
+    commands.append(Command("sort", tuple(
+        (item.output, item.direction, item.nulls) for item in shape.order)))
+    commands.append(Command("limit", (fetch_limit, offset)))
+    return Pipeline(shape.source, shape.alias, tuple(commands))
 
 
 def _memory_bytes(raw: str) -> int | None:

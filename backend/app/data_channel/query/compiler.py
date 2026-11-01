@@ -315,7 +315,17 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
                     col, spec = builder.lookup(ref)
                     if spec.type in {"json", "binary"}:
                         raise QueryError(422, "unsupported_group_type", "Cannot group JSON/binary")
-                    chosen.append(comparable(col, spec).label(out_name))
+                    group_expr = comparable(col, spec)
+                    if dialect == "mysql" and spec.type == "string":
+                        # MySQL groups strings by BINARY for deterministic
+                        # semantics, but the OUTPUT must return text again:
+                        # every group member is byte-equal, so MIN of the
+                        # binary expression cast back to CHAR is the exact
+                        # value — otherwise the driver returns bytes for a
+                        # string-declared column and cross-source joins in the
+                        # bounded federated executor never match.
+                        group_expr = sa.cast(sa.func.min(group_expr), sa.Text)
+                    chosen.append(group_expr.label(out_name))
                     projected_refs[ref] = out_name
                     output_columns.append(replace(spec, name=out_name))
                 for item in args:
@@ -336,8 +346,16 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
                             if source_spec.type in {"json", "binary"}:
                                 raise QueryError(422, "invalid_aggregate_type", "COUNT DISTINCT requires a scalar field")
                             aggregate = sa.func.count(sa.distinct(comparable(col, source_spec)))
+                        elif fn in {"min", "max"}:
+                            aggregate = getattr(sa.func, fn)(comparable(col, source_spec))
+                            if dialect == "mysql" and source_spec.type == "string":
+                                # Same bytes-vs-text contract as group keys: the
+                                # comparable expression orders by BINARY on
+                                # MySQL, and its scalar output must come back
+                                # as text for a string-declared column.
+                                aggregate = sa.cast(aggregate, sa.Text)
                         else:
-                            aggregate = getattr(sa.func, fn)(comparable(col, source_spec) if fn in {"min", "max"} else col)
+                            aggregate = getattr(sa.func, fn)(col)
                         if fn.startswith("count"):
                             spec = ColumnSpec(name, "integer", False)
                         elif fn in {"sum", "avg"} and source_spec.type in {"integer", "decimal"}:

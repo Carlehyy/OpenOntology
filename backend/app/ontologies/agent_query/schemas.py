@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.ontologies.formal_modeling.schemas import CamelModel
 
@@ -44,7 +44,21 @@ class ExplicitKeyOn(_Strict):
     key_type: Literal["string", "number", "uuid"]
     cardinality: Literal["1:1", "1:N", "N:1", "N:M"]
     business_meaning: str = Field(min_length=1, max_length=2000)
-    evidence_refs: list[str] = Field(min_length=1, max_length=8)
+    # 空证据以带治理指引的错误拒绝（仍是 422，不放松校验）：结构性
+    # min_length 报文不含可操作指引，跨本体 explicit_key 必须引导先登记
+    # 受治理的业务键声明再重试。
+    evidence_refs: list[str] = Field(max_length=8)
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def evidence_refs_require_governance(cls, value: list[str]) -> list[str]:
+        if not value or not any(str(item).strip() for item in value):
+            raise ValueError(
+                "explicit_key 关联需要已发布关系或受治理的业务键证据："
+                "请先经 ontology_register_join_assertion 工具或 "
+                "/api/v2/formal/ontologies/{id}/agent/join-assertions 登记"
+                "两端对象与键型一致的声明，再携带 assertion 证据重试")
+        return value
 
 
 class DeclaredRelationOn(_Strict):
@@ -120,8 +134,16 @@ class OrderByItem(_Strict):
     nulls: Literal["first", "last"] = "last"
 
 
+class SemanticBinding(_Strict):
+    """SPL 文本查询的语义叶子绑定：仅发布三元组，拒绝其他身份字段。"""
+    ontology_id: str = Field(min_length=1, max_length=64)
+    release_id: str = Field(min_length=1, max_length=64)
+    object_type_id: str = Field(min_length=1, max_length=200)
+
+
 class QueryRequest(_Strict):
-    sources: list[QuerySource] = Field(min_length=1, max_length=4)
+    sources: list[QuerySource] = Field(default_factory=list, min_length=0,
+                                       max_length=4)
     joins: list[QueryJoin] = Field(default_factory=list, max_length=3)
     source_filters: list[SourceFilter] = Field(default_factory=list, max_length=8)
     where: list[FilterNode] = Field(default_factory=list, max_length=16)
@@ -131,9 +153,37 @@ class QueryRequest(_Strict):
     distinct: bool = False
     order_by: list[OrderByItem] = Field(default_factory=list, max_length=8)
     page_size: Optional[int] = Field(default=None, ge=1, le=200)
+    # SPL 文本面：spl 存在时结构树必须为空（两种形态互斥，翻译在
+    # remote_query.prepare_spl_plan 中进行，授权/证据核验全部复用结构树路径）。
+    spl: Optional[str] = Field(default=None, min_length=1, max_length=32768)
+    semantic_bindings: Optional[dict[str, SemanticBinding]] = None
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_request_shape(self):
+        tree_fields = (self.sources, self.joins, self.source_filters,
+                       self.where, self.select, self.group_by,
+                       self.aggregates, self.order_by)
+        tree_used = any(tree_fields) or self.distinct
+        if self.spl is not None:
+            if tree_used:
+                raise ValueError(
+                    "spl 文本请求不能同时携带结构树字段（sources/joins/...），两种形态互斥")
+            if not self.semantic_bindings:
+                raise ValueError("spl 文本请求必须提供 semanticBindings 叶子绑定")
+        else:
+            if self.semantic_bindings is not None:
+                raise ValueError("semanticBindings 仅在 spl 文本请求中有效")
+            if self.params:
+                raise ValueError("params 仅在 spl 文本请求中有效")
+            if not self.sources:
+                raise ValueError("sources 至少需要一个对象源")
+        return self
 
     @model_validator(mode="after")
     def validate_plan_budget(self):
+        if self.spl is not None:
+            return self  # 结构预算在翻译后的结构树上执行
         leaves = 0
 
         def visit(plan, depth):
@@ -171,7 +221,11 @@ class QueryResponse(_Envelope):
     columns: list[dict[str, Any]]
     rows: list[dict[str, Any]]
     page_row_count: int
-    total_row_count: int
+    # Lazy keyset paging knows the total only when the page probe reports the
+    # end of the ordering; while paging it reports null instead of counting
+    # the whole source. row_counting states which of the two holds.
+    total_row_count: Optional[int] = None
+    row_counting: Literal["complete", "page_probe"] = "complete"
     distinct_entity_counts: dict[str, int]
     input_counts: dict[str, int]
     join_row_counts: list[int]

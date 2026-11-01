@@ -120,8 +120,10 @@ class RowMutation(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
-def fail(status: int, code: str, message: str) -> None:
-    raise HTTPException(status, {"code": code, "message": message})
+def fail(status: int, code: str, message: str, **extra: Any) -> None:
+    # extra keys (e.g. the budget dimension on a timeout refusal) merge into
+    # the machine-readable detail; existing callers are unchanged.
+    raise HTTPException(status, {"code": code, "message": message, **extra})
 
 
 def normalize_source_value(value: Any) -> Any:

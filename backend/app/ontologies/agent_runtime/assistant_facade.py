@@ -183,8 +183,14 @@ def prepare_action(db: Session, user, ontology_id: str, *,
                    root_intent_id: str, source_call_id: str,
                    action_id: str, release_id: str,
                    target_instance_id: Optional[str] = None,
+                   target_ref: Optional[dict] = None,
                    parameters: Optional[dict] = None,
                    parameter_refs: Optional[dict] = None) -> dict:
+    from app.ontologies.agent_confirmation.schemas import TargetRef
+
+    target_ref_model = None
+    if target_ref is not None:
+        target_ref_model = TargetRef.model_validate(target_ref)
     body = PrepareProposalRequest(
         session_kind=session_kind,
         session_id=session_id,
@@ -192,6 +198,7 @@ def prepare_action(db: Session, user, ontology_id: str, *,
         action_id=action_id,
         release_id=release_id,
         target_instance_id=target_instance_id,
+        target_ref=target_ref_model,
         parameters=parameters or {},
         parameter_refs=parameter_refs or {},
     )
@@ -202,7 +209,8 @@ def prepare_action(db: Session, user, ontology_id: str, *,
             source_call_id=source_call_id,
             root_intent_id=root_intent_id,
             action_request_slot=_assistant_action_slot(
-                root_intent_id, action_id, target_instance_id))
+                root_intent_id, action_id, target_instance_id,
+                target_ref=target_ref_model))
         return confirmation_service.confirmation_out(db, confirmation,
                                                     replayed=replayed)
     except Exception as exc:  # noqa: BLE001
@@ -210,11 +218,19 @@ def prepare_action(db: Session, user, ontology_id: str, *,
 
 
 def _assistant_action_slot(root_intent_id: str, action_id: str,
-                           target_instance_id: Optional[str]) -> str:
+                           target_instance_id: Optional[str],
+                           *, target_ref=None) -> str:
     import hashlib
 
+    if target_instance_id is None and target_ref is not None:
+        key_token = "|".join(
+            f"{name}={target_ref.key.get(name)}"
+            for name in sorted(target_ref.key or {}))
+        target_token = f"ref:{target_ref.object_type_id}:{key_token}"
+    else:
+        target_token = target_instance_id or ""
     return hashlib.sha256(
-        f"{root_intent_id}|{action_id}|{target_instance_id or ''}".encode(
+        f"{root_intent_id}|{action_id}|{target_token}".encode(
             "utf-8")).hexdigest()
 
 
@@ -263,7 +279,31 @@ def build_query_request(arguments: dict):
                 arguments = inner
                 break
     if arguments.get("cursor"):
+        if arguments.get("spl"):
+            raise FacadeError(422, "invalid_request_shape",
+                              "cursor 与 spl 不能同时出现：续查只传 cursor，"
+                              "新 SPL 查询只传 spl+semanticBindings")
         return QS.CursorRequest(cursor=str(arguments["cursor"]))
+    if arguments.get("spl"):
+        # SPL 文本形态：spl + semanticBindings 三元组 + params/pageSize。
+        # 与结构树字段互斥——静默丢弃任何一半都会绕过请求模型自身的
+        # 互斥校验，这里显式拒绝混形。
+        tree_keys = ("sources", "joins", "sourceFilters", "where", "select",
+                     "groupBy", "aggregates", "orderBy", "distinct", "cursor")
+        conflicting = sorted(key for key in tree_keys
+                             if arguments.get(key) not in (None, [], {}, False))
+        if conflicting:
+            raise FacadeError(422, "invalid_request_shape",
+                              f"spl 文本请求不能同时携带结构树字段："
+                              f"{', '.join(conflicting)}；两种形态互斥")
+        payload = {"spl": str(arguments["spl"])}
+        if arguments.get("semanticBindings"):
+            payload["semanticBindings"] = dict(arguments["semanticBindings"])
+        if arguments.get("params"):
+            payload["params"] = dict(arguments["params"])
+        if arguments.get("pageSize"):
+            payload["pageSize"] = arguments["pageSize"]
+        return QS.QueryRequest.model_validate(payload)
     sources = [QS.QuerySource.model_validate(source)
                for source in arguments.get("sources") or []]
     joins = []

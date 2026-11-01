@@ -12,13 +12,37 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .contracts import QueryError
 
 INSTANCE_ID = uuid.uuid4().hex
+
+
+@dataclass
+class ContinuationState:
+    """Source-side keyset continuation for a lazy detail handle.
+
+    Holds only the last ordering-key tuple (encoded values) plus cumulative
+    caps; the current page lives in MemoryHandle.rows. Caps never reset across
+    pages; started_monotonic anchors the total wallclock budget.
+    """
+
+    # (column, output label, direction, nulls) per ordering key; the
+    # structurally unique key is appended as the final tiebreakers.
+    order: tuple[tuple[str, str, str, str], ...]
+    last_key: list[Any] | None
+    served: int
+    user_limit: int | None
+    user_offset: int
+    started_monotonic: float
+    done: bool = False
+    pages: int = 0
+    rows_read: int = 0
+    bytes_read: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 @dataclass
@@ -49,6 +73,12 @@ class MemoryHandle:
     session_id: str | None = None
     origin: Any = None  # bridge semantic request; process-memory only, never echoed
     cancelled: bool = False
+    # Lazy detail handles: non-None switches fetch to bounded keyset pages.
+    continuation: "ContinuationState | None" = None
+    # Whole-logical-query ledger shared by first execution and every later
+    # fetch (a new service instance restores it from the handle so totals
+    # never reset across HTTP requests). Not serialized into responses.
+    execution_budget: Any = None
 
 
 @dataclass
@@ -134,6 +164,54 @@ class MemoryResultRegistry:
             self._tickets.pop(handle_id, None)
             self._cancelled_tickets.discard(handle_id)
 
+    def open_page_ticket(self, handle_id: str, owner_user_id: str, limits,
+                         *, interrupt: Callable[[], None] | None = None) -> _Ticket:
+        """Reservation for one continuation page fetch of a stored handle.
+
+        Pages execute real source IO, so they take part in the same global and
+        per-user reservation math as first execution instead of bypassing it;
+        the ticket id is distinct from the stored handle's, so both coexist.
+        Concurrent page fetches per user are capped by the same handle quota
+        (active tickets plus stored handles), and cancelling the handle marks
+        and interrupts its page tickets.
+        """
+        self.sweep()
+        with self._lock:
+            handle = self.handles.get(handle_id)
+            if handle is None or handle.cancelled or handle.owner_user_id != owner_user_id:
+                raise QueryError(410, "result_handle_expired",
+                                 "Result handle expired or was cancelled; rerun the query")
+            # Concurrency slots count ACTIVE EXECUTIONS (first-execution and
+            # page tickets), not stored results: paging one's own stored
+            # handle is the same logical query and must never be double
+            # counted against the same quota.
+            active = sum(1 for ticket in self._tickets.values()
+                         if ticket.owner_user_id == owner_user_id)
+            if active >= limits.memory_max_handles_per_user:
+                raise QueryError(429, "memory_quota_exceeded",
+                                 "Too many concurrent in-memory query executions for this user",
+                                 quota="max_handles_per_user")
+            stored, user_bytes, _counts = self._stored_bytes()
+            reserved_by_user: dict[str, int] = {}
+            reserved = self._reserved_bytes(per_user=reserved_by_user)
+            allowance = limits.memory_per_user_bytes_limit - (
+                user_bytes.get(owner_user_id, 0) + reserved_by_user.get(owner_user_id, 0))
+            worst_case = limits.memory_result_bytes_limit
+            minimum = min(worst_case, limits.memory_per_user_bytes_limit, 1024 ** 2)
+            if allowance < minimum:
+                raise QueryError(429, "memory_reservation_exceeded",
+                                 "Per-user in-memory query budget cannot reserve a continuation page",
+                                 quota="memory_per_user_bytes_limit")
+            reservation = min(worst_case, allowance)
+            if stored + reserved + reservation > limits.memory_total_bytes_limit:
+                raise QueryError(429, "memory_reservation_exceeded",
+                                 "Global in-memory query budget is reserved by running queries",
+                                 quota="memory_total_bytes_limit")
+            ticket = _Ticket(f"{handle_id}:page:{uuid.uuid4().hex[:12]}",
+                             owner_user_id, reservation, interrupt=interrupt)
+            self._tickets[ticket.id] = ticket
+            return ticket
+
     def ticket_cancelled(self, handle_id: str) -> bool:
         with self._lock:
             if handle_id in self._cancelled_tickets:
@@ -169,6 +247,45 @@ class MemoryResultRegistry:
             self.handles[handle.id] = handle
             self._tickets.pop(handle.id, None)
 
+    def refresh(self, handle: MemoryHandle, limits, *, exclude_ticket: str | None = None) -> None:
+        """Re-run the stored+reserved quotas after a continuation page.
+
+        The caller mutates the registered handle in place (one current page)
+        and then calls this so lazy paging cannot bypass the per-user and
+        global budgets ``register`` enforces once. The coherent invariant is
+        reserved + stored under ONE accounting: the page ticket's own
+        reservation is excluded (its page replaces the stored rows in place,
+        so counting both the reservation and the replaced bytes would double
+        count). A quota failure raises like ``register``; the caller cancels
+        the handle so the refusal is observable.
+        """
+        self.sweep()
+        with self._lock:
+            # The handle must still be the registered, uncancelled object:
+            # a concurrent cancel must not let a replaced page publish.
+            registered = self.handles.get(handle.id)
+            if registered is not handle or handle.cancelled:
+                raise QueryError(410, "result_handle_expired",
+                                 "Result handle expired or was cancelled; rerun the query")
+            if handle.id in self._cancelled_tickets:
+                raise QueryError(409, "query_cancelled", "Query execution was cancelled")
+            stored, user_bytes, _counts = self._stored_bytes()
+            reserved_by_user: dict[str, int] = {}
+            reserved = self._reserved_bytes(exclude=exclude_ticket,
+                                            per_user=reserved_by_user)
+            user_total = (user_bytes.get(handle.owner_user_id, 0)
+                          + reserved_by_user.get(handle.owner_user_id, 0))
+            if user_total > limits.memory_per_user_bytes_limit:
+                raise QueryError(429, "memory_quota_exceeded",
+                                 "Per-user in-memory result byte budget exceeded",
+                                 quota="memory_per_user_bytes_limit",
+                                 limitBytes=limits.memory_per_user_bytes_limit)
+            if stored + reserved > limits.memory_total_bytes_limit:
+                raise QueryError(429, "memory_quota_exceeded",
+                                 "Global in-memory result byte budget exceeded",
+                                 quota="memory_total_bytes_limit",
+                                 limitBytes=limits.memory_total_bytes_limit)
+
     def get(self, handle_id: str) -> MemoryHandle | None:
         self.sweep()
         with self._lock:
@@ -179,7 +296,7 @@ class MemoryResultRegistry:
         return handle
 
     def cancel(self, handle_id: str, owner_user_id: str) -> bool:
-        interrupt = None
+        interrupts: list[Callable[[], None]] = []
         with self._lock:
             ticket = self._tickets.get(handle_id)
             if ticket is not None:
@@ -187,14 +304,25 @@ class MemoryResultRegistry:
                     return False
                 ticket.cancelled = True
                 self._cancelled_tickets.add(handle_id)
-                interrupt = ticket.interrupt
+                if ticket.interrupt is not None:
+                    interrupts.append(ticket.interrupt)
             else:
                 handle = self.handles.get(handle_id)
                 if handle is None or handle.owner_user_id != owner_user_id:
                     return False
                 handle.cancelled = True
                 del self.handles[handle_id]
-        if interrupt is not None:
+            # Cancelling a handle also cancels its in-flight continuation
+            # page tickets, so a long source statement is interrupted (or at
+            # least its result can never publish) instead of running blind.
+            prefix = f"{handle_id}:page:"
+            for page_id, page_ticket in self._tickets.items():
+                if page_id.startswith(prefix) and page_ticket.owner_user_id == owner_user_id:
+                    page_ticket.cancelled = True
+                    self._cancelled_tickets.add(page_id)
+                    if page_ticket.interrupt is not None:
+                        interrupts.append(page_ticket.interrupt)
+        for interrupt in interrupts:
             interrupt()
         return True
 

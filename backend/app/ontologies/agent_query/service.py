@@ -292,9 +292,11 @@ class UnifiedQueryService:
                     "分组列必须出现在 select 中（只允许分组列和聚合输出）")
         for agg in self.req.aggregates:
             if agg.fn == "count":
-                if agg.source is not None or agg.property is not None:
+                # count(*) 与 count(field)（非 NULL 计数）均为内核语义；
+                # 只给一半定位字段仍拒绝。
+                if (agg.source is None) != (agg.property is None):
                     raise QueryError(422, "invalid_parameter",
-                                     "count(*) 不能指定 source/property")
+                                     "count 需同时省略或同时指定 source 与 property")
             elif not agg.source or not agg.property:
                 raise QueryError(422, "invalid_parameter",
                                  f"聚合 {agg.fn} 必须指定 source 与 property")

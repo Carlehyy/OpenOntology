@@ -18,6 +18,40 @@ MAX_DERIVED_NODES = 96
 MAX_DERIVED_PATH_DEPTH = 8
 
 
+def _propagated_unique_key(pipeline, primary) -> list[str] | None:
+    """Carry the parent unique key through row-preserving derived pipelines.
+
+    Only a single-source pipeline of filters and renames (no JOIN, STATS,
+    DISTINCT, LIMIT — nothing that aggregates, multiplies or drops rows) keeps
+    one-output-per-parent-row, so only that shape may propagate the key,
+    translated to the derived output names. A dropped or unmapped key column
+    loses the key entirely: lazy keyset paging stays ineligible rather than
+    ordering on a guessed key, and hidden/unmapped primary keys are never
+    pulled into projections here.
+    """
+    unique = primary.state.get("uniqueKey")
+    if not isinstance(unique, list) or not unique:
+        return None
+    if any(command.op in {"join", "stats", "distinct", "limit"}
+           for command in pipeline.commands):
+        return None
+    if len(pipeline.sources) != 1:
+        return None
+    fields_cmd = next((c for c in pipeline.commands if c.op == "fields"), None)
+    if fields_cmd is None:
+        mapping = {name: name for name in primary.columns}
+    else:
+        mapping = {}
+        for ref, out in fields_cmd.args:
+            mapping.setdefault(ref.name, out)
+    if not all(column in mapping for column in unique):
+        return None
+    propagated = [mapping[column] for column in unique]
+    if len(set(propagated)) != len(propagated):
+        return None
+    return propagated
+
+
 def derived_relation(alias: str, parents: dict[str, Relation], spec: DerivedSourceSpec,
                      *, bind_prefix: str) -> Relation:
     """Compile a derived spec over name-keyed parent relations.
@@ -48,6 +82,9 @@ def derived_relation(alias: str, parents: dict[str, Relation], spec: DerivedSour
              "consistency": primary.state.get("consistency"),
              "completeness": primary.state.get("completeness", "complete"),
              "definitionHash": stable_hash(pipeline_to_dict(spec.pipeline))}
+    propagated_unique = _propagated_unique_key(spec.pipeline, primary)
+    if propagated_unique is not None:
+        state["uniqueKey"] = propagated_unique
     for key in ("asOf", "snapshotId", "maxPageSize", "dialect"):
         if key in primary.state:
             state[key] = primary.state[key]

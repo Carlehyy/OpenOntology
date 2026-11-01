@@ -146,6 +146,7 @@ def _response(result, plan):
             "observedAt": min((state.get("asOf", "") for state in result["sourceStates"]), default=""),
             "releases": plan["releases"], "columns": result["columns"], "rows": rows,
             "pageRowCount": len(rows), "totalRowCount": result["totalRows"],
+            "rowCounting": page.get("counting", "complete"),
             "distinctEntityCounts": {}, "inputCounts": {}, "joinRowCounts": [],
             "partial": False, "truncated": False,
             "countsScope": result["countsScope"], "hasNext": page["hasMore"],

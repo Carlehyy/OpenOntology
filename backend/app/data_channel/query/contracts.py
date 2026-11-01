@@ -154,6 +154,26 @@ class QueryLimits:
     federated_pushdown_keys_limit: int = 8192
     federated_key_chunk_size: int = 1000
     federated_join_rows_limit: int = 2000000
+    # Lazy detail continuation (source-side keyset paging). Cumulative caps are
+    # charged across every page of one handle and never reset mid-query; each
+    # dimension rejects explicitly with the continuation layer named. A page's
+    # source statement runs under min(page timeout, remaining total wallclock).
+    continuation_page_timeout_ms: int = 30000
+    continuation_total_timeout_ms: int = 300000
+    continuation_rows_limit: int = 100000
+    continuation_bytes_limit: int = 67108864
+    continuation_max_pages: int = 1000
+    # Whole-logical-query cumulative ledger dimensions. One QueryExecutionBudget
+    # accumulates across every executor stage (materializations, keyed pulls,
+    # count checks, derived-constraint executors, lazy continuation pages) and
+    # never resets; per-side/per-stage limits above stay independent, so a query
+    # where each layer is under its own budget can still exceed the total.
+    # execution_source_statements_limit bounds repeated source scans: count
+    # checks and chunked pulls are disclosed as statements, never as fabricated
+    # wire bytes.
+    execution_total_rows_limit: int = 4000000
+    execution_total_bytes_limit: int = 536870912
+    execution_source_statements_limit: int = 4096
 
     def __post_init__(self):
         for name, value in vars(self).items():

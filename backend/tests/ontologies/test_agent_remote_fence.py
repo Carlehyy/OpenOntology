@@ -3,7 +3,8 @@
 旧 search/aggregate/traverse/graph/path/history/报告 fallback 对 remote 绑定
 类型一律报 remote_ontology_semantic_query_required，不得返回 0/空/exact
 complete 冒充完整；本地物化类型不受影响；混类型图谱诚实标注远程部分而非
-冒充全量。判定只依赖发布快照（get_remote_binding），不查 live mapping。
+冒充全量。钉定 release 的视图只认发布快照；默认对话的工作区实时视图按
+当前 live 映射判定远程绑定（A14：否则 release-less 会话以 0 行冒充）。
 """
 import json
 
@@ -197,3 +198,88 @@ def test_system_prompt_guides_remote_types_to_unified_query(
     prompt = _system_prompt(scope)
     assert _ERROR_CODE in prompt
     assert "ontology_query" in prompt
+
+
+# ---------------------------- A14 回归：默认对话入口（未显式传 releaseId）
+
+
+def test_releaseless_chat_scope_still_refers_remote(modeled_ontology, db):
+    """A14 正例：默认对话入口（工作区实时视图）远程转介必须仍然生效。
+
+    根因：release-less scope 的 remote_object_type_ids 此前恒返回空集，
+    search_objects 会以本地 0 行冒充完整结果（真实 run02 a14_probe：
+    reply 声称"实例数=0、search_objects total=0"且无转介标记）。
+    工作区视图按当前 live 映射判定远程绑定；钉定 release 的视图仍只
+    认快照（本文件既有 pinned 用例不受影响）。
+    """
+    from app.ontologies.mappings.models import OntologyMapping
+
+    oid = modeled_ontology["id"]
+    db.add(OntologyMapping(
+        id="map-live-remote", ontology_id=oid, entity_class="Supplier",
+        target_object_type_id="ot-supplier", status="applied",
+        field_mapping={
+            "__binding_mode__": "remote",
+            "__remote__": {
+                "assetId": "asset-live-1", "datasetId": "ds-live-1",
+                "connectionId": "conn-live-1", "schemaName": "public",
+                "tableName": "suppliers", "schemaFingerprint": "f" * 64,
+                "columns": [{"name": "sname", "type": "string"}],
+                "primaryKey": ["sname"],
+            },
+        }))
+    db.commit()
+
+    _, _, scope = build_scope(db, oid)  # 默认对话：不传 releaseId
+    assert scope.release is None
+    runner = ToolRunner(db, scope)
+    with pytest.raises(ToolError, match=_ERROR_CODE):
+        runner.run("search_objects", {"object_type": "Supplier"})
+    with pytest.raises(ToolError, match=_ERROR_CODE):
+        runner.run("aggregate_objects",
+                   {"object_type": "Supplier", "metric": "count"})
+    # 本地物化类型不受影响。
+    found = runner.run("search_objects", {"object_type": "Order", "limit": 5})
+    assert found["total"] == 2
+
+
+def test_skill_card_declares_remote_referral_not_zero(modeled_ontology, db):
+    """A14：技能卡不得向模型声明远程类型"实例数=0"（假事实源）。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_remote_supplier(db, oid)
+    _, _, scope = build_scope(db, oid, release_id=release_id)
+    card = scope.skill_card()
+    blocks = card.split("###")
+    supplier_block = next(b for b in blocks if "name=Supplier" in b)
+    assert "实例数=0" not in supplier_block
+    assert "远程绑定" in supplier_block
+    # 本地类型仍带真实本地计数（合法 local 契约不变）。
+    assert "实例数=2" in card  # Order 本地物化 2 条
+
+
+def test_summary_marks_remote_types_unknown(modeled_ontology, db):
+    """A14：能力概览远程类型 instanceCount=null + remote=true。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_remote_supplier(db, oid)
+    _, _, scope = build_scope(db, oid, release_id=release_id)
+    summary = scope.summary()
+    types = {item["name"]: item for item in summary["objectTypes"]}
+    assert types["Supplier"]["remote"] is True
+    assert types["Supplier"]["instanceCount"] is None
+    assert types["Order"]["remote"] is False
+    assert types["Order"]["instanceCount"] == 2
+
+
+def test_unpublished_scope_stays_workspace_live(modeled_ontology, db):
+    """反例契约锁定：无发布指针的本体仍走工作区实时数据（不造 release）。"""
+    from app.models.ontology import OntologyProject
+
+    oid = modeled_ontology["id"]
+    project = db.query(OntologyProject).filter_by(id=oid).one()
+    project.current_release_id = None
+    db.commit()
+    _, _, scope = build_scope(db, oid)
+    assert scope.release is None
+    runner = ToolRunner(db, scope)
+    found = runner.run("search_objects", {"object_type": "Order", "limit": 5})
+    assert found["total"] == 2  # 工作区实时路径不受默认解析影响

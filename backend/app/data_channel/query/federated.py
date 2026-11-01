@@ -28,16 +28,20 @@ import sqlalchemy as sa
 
 from app.data_channel.integrated.contracts import JsonText
 
-from .compiler import _comparable, _typed_value, compile_query
+from .compiler import _comparable, _typed_value, compile_query, refs_in
 from .contracts import (ColumnSpec, DerivedSourceSpec, JoinConstraint, QueryError,
                         Relation)
 from .encoding import _copy_line, encode_value, encoded_size
-from .memory_budget import MemoryBudget, resident_size
+from .memory_budget import MemoryBudget, QueryExecutionBudget, resident_size
 from .parser import Command, Expr, Pipeline, Ref, params_in, validate_pipeline
 
 _ORDERABLE = {"integer", "decimal", "float", "string", "date", "timestamp", "time"}
 _AGGREGATE_ONLY = {"count", "count_distinct", "sum", "avg"}
 AVG_SEMANTICS = "decimal_28_significant_digits_half_even"
+# Ledger byte measurement only (a value no encoded row can reach): enforcement
+# stays with the ledger totals and the existing per-side checks, so the central
+# measurement never adds a new single-row rejection reason.
+_LEDGER_MEASURE_CAP = 1 << 62
 
 
 @dataclass
@@ -152,13 +156,57 @@ def _uses_avg(tail) -> bool:
                for item in cmd.args if item[0] != "group")
 
 
+def _wrapped_group_key_expr(compiled, compile_relations, pipeline, group_ref,
+                            key_spec, dialect):
+    """The GROUP BY clause's group-key expression in the compiled statement's
+    own scope: the wrapped pre-aggregation subquery column (``qf_N``).
+
+    Neither alternative is usable for the pushed WHERE predicate: the group
+    OUTPUT column may itself be an aggregate recovery (MySQL string keys:
+    CAST(MIN(CAST(k AS BINARY)) AS CHAR) — invalid in WHERE), and the parent
+    relation's base column belongs to a scope the compiler already wrapped,
+    where appending it cross-joins a bare base table into the outer FROM (a
+    cartesian product). The label reconstruction below mirrors compile_query's
+    stable ``qf_{i}`` naming exactly.
+    """
+    specs: list = []
+    for alias, relation in compile_relations.items():
+        for name in relation.columns:
+            specs.append(Ref(alias, name))
+    required = {ref for ref in refs_in(pipeline.commands)}
+    if not any(c.op in {"fields", "stats"} for c in pipeline.commands):
+        required.update(specs)
+    labels = {ref: f"qf_{i}" for i, ref in enumerate(specs) if ref in required}
+    label = labels.get(group_ref)
+    if label is None:
+        return None
+    froms = compiled.statement.get_final_froms()
+    if not froms or label not in froms[0].c:
+        return None
+    return _comparable(froms[0].c[label], key_spec, dialect)
+
+
 class MemoryExecutor:
     def __init__(self, service, pipeline: Pipeline, relations: dict[str, Relation],
                  params: dict[str, Any], *, cancel_check: Callable[[], bool] | None = None,
-                 memory_budget=None, derived_specs: dict[str, Any] | None = None):
+                 memory_budget=None, derived_specs: dict[str, Any] | None = None,
+                 execution_budget=None):
         self.memory_budget = memory_budget or MemoryBudget(min(
             service.limits.memory_per_user_bytes_limit,
             service.limits.federated_side_bytes_limit + service.limits.memory_result_bytes_limit))
+        # The cumulative ledger belongs to the whole logical query, never to
+        # one executor: an explicit argument wins, then the service-owned
+        # instance at service.execution_budget (so the main run, derived-
+        # constraint executors and lazy continuation pages all share one
+        # account without param threading). The self-contained fallback serves
+        # standalone callers only and must never be mistaken for service
+        # wiring.
+        service_ledger = getattr(service, "execution_budget", None)
+        self.execution_budget = (
+            execution_budget if execution_budget is not None
+            else service_ledger if service_ledger is not None
+            else QueryExecutionBudget(service.limits, memory_budget=self.memory_budget,
+                                      started=getattr(service, "started", None)))
         self.service = service
         self.limits = service.limits
         self.pipeline = validate_pipeline(pipeline)
@@ -232,16 +280,60 @@ class MemoryExecutor:
 
     # -- statement execution ------------------------------------------------
 
+    def _measure_transfer(self, row, labels: list[str], specs: list[ColumnSpec]) -> int:
+        """COPY-encoded per-spec size of one transferred row (measurement only)."""
+        if not labels:
+            return 0
+        _text, size = _copy_line([row[label] for label in labels], specs,
+                                 _LEDGER_MEASURE_CAP, size_only=True)
+        return size
+
+    def _charge_transfer_batch(self, layer: str, batch, labels: list[str],
+                               specs: list[ColumnSpec]) -> None:
+        """Ledger charge for one arrived batch, at the transfer boundary.
+
+        A provider materializes a whole batch before yielding it, so the rows
+        have already crossed into platform memory when the batch arrives.
+        Charging the full batch here — rows plus per-row measured bytes —
+        keeps the ledger equal to what was actually transferred and makes the
+        total-row rejection fire at the boundary (a mid-batch refusal never
+        reports fewer rows than the source already sent). Rows are then
+        yielded without a second charge; per-side checks keep their own
+        purpose, so no fake wire bytes are invented and nothing is charged
+        twice.
+        """
+        self.execution_budget.charge_rows(layer, len(batch))
+        for row in batch:
+            size = self._measure_transfer(row, labels, specs)
+            if size:
+                self.execution_budget.charge_bytes(layer, size)
+
     def _execute_statement(self, anchor: Relation, statement, exec_params,
                            label_specs: dict[str, ColumnSpec]):
-        """Yield mapping rows; JSON text cells become exact JsonText values."""
+        """Yield mapping rows; JSON text cells become exact JsonText values.
+
+        Ledger boundary of every source read: one statement charge per
+        executed source statement under the anchor alias as the layer, plus
+        rows/bytes charged at the moment data arrives — per batch for provider
+        streams (the batch is the transfer unit), per row for the platform's
+        single-row stream. Count-style probes pass empty label_specs, so their
+        single returned aggregate row is charged as a row while no byte
+        measurement is fabricated for the source-side scan (that cost is
+        disclosed as a count check and bounded by the deadline).
+        """
         self._check()
+        layer = anchor.alias
+        self.execution_budget.charge_statement(layer)
+        labels = list(label_specs)
+        specs = [label_specs[label] for label in labels]
         if anchor.batches is not None:
             for batch in anchor.batches(statement, exec_params, min(self.limits.batch_size, 1000)):
                 self._check()
                 self.memory_budget.check_temporary(batch)
                 for row in batch:
                     self.memory_budget.check_temporary(row)
+                self._charge_transfer_batch(layer, batch, labels, specs)
+                for row in batch:
                     yield self._restore(row if isinstance(row, dict) else dict(row), label_specs)
         elif anchor.platform:
             self.service._platform_budget()
@@ -250,6 +342,10 @@ class MemoryExecutor:
             try:
                 while (row := result.fetchone()) is not None:
                     self._check()
+                    self.execution_budget.charge_rows(layer)
+                    size = self._measure_transfer(row, labels, specs)
+                    if size:
+                        self.execution_budget.charge_bytes(layer, size)
                     yield self._restore(dict(row), label_specs)
             finally:
                 result.close()
@@ -261,11 +357,28 @@ class MemoryExecutor:
             value = row.get(label)
             if spec.type == "json" and isinstance(value, str):
                 row[label] = JsonText(value)
+            elif (spec.type == "string"
+                    and isinstance(value, (bytes, bytearray, memoryview))):
+                # A driver may return raw bytes for binary-cast expressions
+                # (MySQL BINARY grouping/comparison). A string-declared column
+                # decodes strictly to UTF-8 or fails closed: it must never
+                # reach Python-side joins as bytes, and genuinely binary cells
+                # (spec.type == "binary") stay untouched.
+                try:
+                    row[label] = bytes(value).decode("utf-8", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise QueryError(422, "invalid_typed_value",
+                                     "A string-declared column returned non-UTF-8 bytes") from exc
         return row
 
     def _execute_relation_one(self, relation: Relation, statement, exec_params) -> dict:
         rows = self._execute_statement(relation, statement, exec_params, {})
         try:
+            # Disclose this aggregate completion as a count check: the statement
+            # and its single returned row are charged at the central boundary;
+            # the source-side scan the probe triggers is bounded by the deadline
+            # clock and never claimed as transferred rows or wire bytes.
+            self.execution_budget.charge_count_check(relation.alias)
             first = next(rows, None)
             if first is None or next(rows, None) is not None:
                 raise QueryError(409, "source_incomplete", "Invalid source aggregate completion")
@@ -522,23 +635,33 @@ class MemoryExecutor:
         if count > self.limits.federated_side_rows_limit:
             raise QueryError(422, "query_budget_exceeded",
                              "Materialized federated side exceeds the row budget; pre-aggregate or filter first",
-                             budget="federated_side_rows_limit", alias=self._component_members[root][0])
+                             budget="federated_side_rows_limit", alias=self._component_members[root][0],
+                             layer=self._component_members[root][0])
         keys = [f"{alias}.{name}" for _l, alias, name in mapping]
         specs = [self.column_specs[(alias, name)] for _l, alias, name in mapping]
         rows, total_bytes = [], 0
-        for raw in self._execute_statement(self._anchor(root), statement, exec_params, label_specs):
-            row = {f"{alias}.{name}": raw[label] for label, alias, name in mapping}
-            total_bytes += self._measure(row, keys, specs)
-            if total_bytes > self.limits.federated_side_bytes_limit:
-                raise QueryError(422, "query_budget_exceeded",
-                                 "Materialized federated side exceeds the byte budget; pre-aggregate or filter first",
-                                 budget="federated_side_bytes_limit", alias=self._component_members[root][0])
-            self._charge_row(row)
-            rows.append(row)
-            if len(rows) > self.limits.federated_join_rows_limit:
-                raise QueryError(422, "query_budget_exceeded",
-                                 "Materialized federated side exceeds the bounded join row budget",
-                                 budget="federated_join_rows_limit")
+        stream = self._execute_statement(self._anchor(root), statement, exec_params, label_specs)
+        try:
+            for raw in stream:
+                row = {f"{alias}.{name}": raw[label] for label, alias, name in mapping}
+                total_bytes += self._measure(row, keys, specs)
+                if total_bytes > self.limits.federated_side_bytes_limit:
+                    raise QueryError(422, "query_budget_exceeded",
+                                     "Materialized federated side exceeds the byte budget; pre-aggregate or filter first",
+                                     budget="federated_side_bytes_limit", alias=self._component_members[root][0],
+                                     layer=self._component_members[root][0])
+                self._charge_row(row)
+                rows.append(row)
+                if len(rows) > self.limits.federated_join_rows_limit:
+                    raise QueryError(422, "query_budget_exceeded",
+                                     "Materialized federated side exceeds the bounded join row budget",
+                                     budget="federated_join_rows_limit",
+                                     layer=self._component_members[root][0])
+        finally:
+            # Source stream teardown is part of both success and every refusal:
+            # a mid-stream budget rejection must observably close the stream
+            # instead of waiting for garbage collection.
+            stream.close()
         self._pulled[root] = rows
         self.source_rows[self._component_members[root][0]] = len(rows)
         return rows
@@ -646,8 +769,15 @@ class MemoryExecutor:
         inner_key = inner_compiled.statement.selected_columns.get(inner_out)
         if inner_key is None:
             return inputs, False
-        inner_expr = getattr(inner_key, "element", inner_key)
-        restricted = inner_compiled.statement.where(inner_expr.in_(reachable)).subquery(joined_alias)
+        # Same rule as the keyed pull: restrict BELOW the inner GROUP BY using
+        # the GROUP BY expression in the compiled statement's own scope.
+        restricted_key = _wrapped_group_key_expr(
+            inner_compiled, inner_relations, inner.pipeline,
+            inner_ref, key_in_underlying, dialect)
+        if restricted_key is None:
+            return inputs, False
+        restricted = inner_compiled.statement.where(
+            restricted_key.in_(reachable)).subquery(joined_alias)
         return {**inputs, joined_alias: replace(inputs[joined_alias], table=restricted,
                                                 bind_params=dict(inner_compiled.params)
                                                 if inner_compiled.params else None)}, True
@@ -704,8 +834,15 @@ class MemoryExecutor:
         group_column = compiled.statement.selected_columns.get(out)
         if group_column is None:
             return None
-        group_expr = getattr(group_column, "element", group_column)
-        pushed = compiled.statement.where(group_expr.in_(
+        # The pushed predicate sits BELOW the GROUP BY (a WHERE over the
+        # wrapped subquery's rows) per the group-key lemma, built from the
+        # GROUP BY expression itself — see _wrapped_group_key_expr for why
+        # neither the output column nor the parent base column is usable.
+        key_expr = _wrapped_group_key_expr(compiled, inputs, spec.pipeline,
+                                           group_ref, key_spec, dialect)
+        if key_expr is None:
+            return None
+        pushed = compiled.statement.where(key_expr.in_(
             sa.bindparam("push_keys", expanding=True, type_=key_spec.sql_type())))
         # The pushed table replaces the derived relation itself: its columns,
         # batches, state and fingerprints stay the derived relation's; only the
@@ -740,18 +877,24 @@ class MemoryExecutor:
             exec_chunk = {**exec_params, "push_keys": batch_keys}
             if "semi_keys" in extra_params:
                 exec_chunk["semi_keys"] = batch_keys
-            for raw in self._execute_statement(self._anchor(root), filtered,
-                                               exec_chunk, self._statement_specs[root]):
-                row = {f"{alias}.{name}": raw[label] for label, alias, name in mapping}
-                total_bytes += self._measure(row, keys_list, specs)
-                if (total_bytes > self.limits.federated_side_bytes_limit or
-                        len(rows) >= min(self.limits.federated_side_rows_limit,
-                                         self.limits.federated_join_rows_limit)):
-                    raise QueryError(422, "query_budget_exceeded",
-                                     "Key-filtered federated side exceeds the memory budget",
-                                     budget="federated_side_bytes_limit", alias=ref.alias)
-                self._charge_row(row)
-                rows.append(row)
+            stream = self._execute_statement(self._anchor(root), filtered,
+                                             exec_chunk, self._statement_specs[root])
+            try:
+                for raw in stream:
+                    row = {f"{alias}.{name}": raw[label] for label, alias, name in mapping}
+                    total_bytes += self._measure(row, keys_list, specs)
+                    if (total_bytes > self.limits.federated_side_bytes_limit or
+                            len(rows) >= min(self.limits.federated_side_rows_limit,
+                                             self.limits.federated_join_rows_limit)):
+                        raise QueryError(422, "query_budget_exceeded",
+                                         "Key-filtered federated side exceeds the memory budget",
+                                         budget="federated_side_bytes_limit", alias=ref.alias,
+                                         layer=self._component_members[root][0])
+                    self._charge_row(row)
+                    rows.append(row)
+            finally:
+                # Mid-pull refusal closes this chunk's source stream explicitly.
+                stream.close()
         # Metrics only, mirroring the materialized path's sourceRows keying:
         # counts and bytes of this keyed pull, never key values or row data.
         # encodedRowBytes is the COPY-encoded row measurement, not driver wire bytes.
@@ -867,26 +1010,36 @@ class MemoryExecutor:
         rows: list[dict] = []
         row_bytes = 0
         streamed = 0
-        for raw in self._execute_statement(first, statement, exec_params, label_specs):
-            streamed += 1
-            if streamed > self.limits.federated_join_rows_limit:
-                raise QueryError(422, "query_budget_exceeded",
-                                 "Materialized result rows exceed the bounded row budget",
-                                 budget="federated_join_rows_limit")
-            data = {spec.name: encode_value(raw[spec.name], spec) for spec in compiled.columns}
-            row_bytes += encoded_size(data)
-            if row_bytes > self.limits.memory_result_bytes_limit:
-                raise QueryError(422, "query_budget_exceeded",
-                                 "In-memory result exceeds the per-result byte budget",
-                                 budget="memory_result_bytes_limit",
-                                 limitBytes=self.limits.memory_result_bytes_limit)
-            self.memory_budget.charge(data)
-            rows.append(data)
+        stream = self._execute_statement(first, statement, exec_params, label_specs)
+        try:
+            for raw in stream:
+                streamed += 1
+                if streamed > self.limits.federated_join_rows_limit:
+                    raise QueryError(422, "query_budget_exceeded",
+                                     "Materialized result rows exceed the bounded row budget",
+                                     budget="federated_join_rows_limit", layer=self.pipeline.alias)
+                data = {spec.name: encode_value(raw[spec.name], spec) for spec in compiled.columns}
+                row_bytes += encoded_size(data)
+                if row_bytes > self.limits.memory_result_bytes_limit:
+                    raise QueryError(422, "query_budget_exceeded",
+                                     "In-memory result exceeds the per-result byte budget",
+                                     budget="memory_result_bytes_limit", layer="result",
+                                     limitBytes=self.limits.memory_result_bytes_limit)
+                self.memory_budget.charge(data)
+                rows.append(data)
+        finally:
+            # A mid-stream refusal closes the source stream observably.
+            stream.close()
         if total is None:
             total = streamed
         plan = {"strategy": "memory_source_pushdown",
                 "operators": [c.op for c in self.pipeline.commands],
-                "sourceRows": {self.pipeline.alias: streamed}}
+                "sourceRows": {self.pipeline.alias: streamed},
+                # Same conservative application-memory snapshot the federated
+                # plan reports; charged is not process RSS.
+                "memoryBudget": {"usedBytes": self.memory_budget.charged,
+                                 "limitBytes": self.memory_budget.limit},
+                "executionBudget": self.execution_budget.snapshot()}
         return self._result(compiled.columns, rows, row_bytes, limit_cmd, total, plan,
                             avg_semantics=None)
 
@@ -921,7 +1074,7 @@ class MemoryExecutor:
             if accumulated is not None and len(accumulated) > self.limits.federated_join_rows_limit:
                 raise QueryError(422, "query_budget_exceeded",
                                  "Cross-source intermediate rows exceed the bounded join row budget",
-                                 budget="federated_join_rows_limit", alias=alias)
+                                 budget="federated_join_rows_limit", alias=alias, layer="join")
 
         hoisted = {alias for alias, kind in self._entry_kind.items() if kind == "hoisted"}
         for cmd in self.pipeline.commands:
@@ -982,7 +1135,8 @@ class MemoryExecutor:
                 if self._count_component(root) > self.limits.federated_side_rows_limit:
                     raise QueryError(422, "query_budget_exceeded",
                                      "Federated join side exceeds the row budget; pre-aggregate or filter first",
-                                     budget="federated_side_rows_limit", alias=alias)
+                                     budget="federated_side_rows_limit", alias=alias,
+                                     layer=self._component_members[root][0])
                 partner_rows = self._materialize_component(root)
             probe: dict[Any, list[dict]] = {}
             for row in partner_rows:
@@ -1004,7 +1158,7 @@ class MemoryExecutor:
                         or merged_bytes > self.limits.federated_side_bytes_limit):
                     raise QueryError(422, "query_budget_exceeded",
                                      "Cross-source join result exceeds the bounded memory budget",
-                                     budget="federated_join_rows_limit", alias=alias)
+                                     budget="federated_join_rows_limit", alias=alias, layer="join")
                 self._charge_row(row)
                 merged.append(row)
 
@@ -1046,6 +1200,9 @@ class MemoryExecutor:
                 # application-side accounting, not process RSS.
                 "memoryBudget": {"usedBytes": self.memory_budget.charged,
                                  "limitBytes": self.memory_budget.limit},
+                # Cumulative per-layer + whole-query ledger of this logical
+                # query (counts only); shared instance, never reset per stage.
+                "executionBudget": self.execution_budget.snapshot(),
                 "pushdown": {root: [c.op for c in cmds]
                              for root, cmds in self._component_commands.items()}}
         return self._result(columns, rows, row_bytes, limit_cmd, total, plan,
@@ -1224,7 +1381,7 @@ class MemoryExecutor:
             if row_bytes > self.limits.memory_result_bytes_limit:
                 raise QueryError(422, "query_budget_exceeded",
                                  "In-memory result exceeds the per-result byte budget",
-                                 budget="memory_result_bytes_limit",
+                                 budget="memory_result_bytes_limit", layer="result",
                                  limitBytes=self.limits.memory_result_bytes_limit)
             self.memory_budget.charge(data)
             rows.append(data)

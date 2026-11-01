@@ -22,7 +22,7 @@ def column_spec(column: dict) -> ColumnSpec:
 
 
 def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, stack: ExitStack,
-                       *, recheck_only: bool = False):
+                       *, recheck_only: bool = False, execution_budget=None):
     # Accessed through the module so deferred recheck closures stay late-bound
     # to the current native surface (the same seam tests patch).
     from app.data_channel.integrated import native
@@ -49,9 +49,16 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
     # reflects schema and never reads source rows.
     probed: dict[str, bool] = {}
     for connection_id, members in grouped.items():
+        # The whole-logical-query ledger is forwarded only when one exists
+        # (None is the target's default), so the native scope discloses its
+        # internal EOF-proof COUNT plus SET/reflect control round trips on
+        # that account; without a ledger the call shape is unchanged.
+        scope_kwargs = {"statement_timeout_ms": limits.statement_timeout_ms}
+        if execution_budget is not None:
+            scope_kwargs["execution_budget"] = execution_budget
         scope = None if recheck_only else stack.enter_context(
             native.open_read_scope(db, user, [b.asset_id for _, b in members],
-                                   statement_timeout_ms=limits.statement_timeout_ms))
+                                   **scope_kwargs))
 
         def batches(statement, params, batch_size, scope=scope):
             if scope is None:
@@ -95,6 +102,16 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
             else:
                 columns = {c["name"]: column_spec(c) for c in meta["columns"]}
                 expressions = {}
+            # Complete structural primary key for deterministic keyset paging.
+            # Logical names under a configured projection, physical names
+            # otherwise. Column visibility is never widened: a key outside the
+            # authorized columns stays unset and lazy continuation is
+            # ineligible for that relation (bounded materialization instead).
+            if projection is not None:
+                unique = [str(name) for name in projection.get("primary_key") or []]
+            else:
+                unique = [str(name) for name in meta.get("primary_key") or []]
+            unique = unique if unique and all(name in columns for name in unique) else None
 
             if scope is not None:
                 def recheck(asset_id=binding.asset_id, auth=expected_auth, schema=expected_schema):
@@ -120,15 +137,32 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
                         if source_row is None:
                             raise QueryError(404, "source_connection_missing",
                                              "Source connection row disappeared; cursor delivery fails closed")
+                        control_layer = f"native:{source_id}:control"
+                        if execution_budget is not None:
+                            # Refuse BEFORE the probe: an exhausted whole-query
+                            # statement budget must never pay one more SELECT 1
+                            # just to learn it is over (the page is refused
+                            # with no further source work).
+                            execution_budget.ensure_statement_room(control_layer)
                         native.probe_source(source_row)
                         probe_cell[source_id] = True
+                        if execution_budget is not None:
+                            # The liveness probe is a real source round trip
+                            # (one bounded SELECT 1 per unique source per
+                            # fetch); disclose it as one control statement on
+                            # the whole-logical-query ledger. It returns one
+                            # row to the driver; that control overhead is
+                            # disclosed as a statement only — no rows and no
+                            # bytes are ever invented for it.
+                            execution_budget.charge_statement(control_layer)
 
             result[alias] = Relation(
                 alias=alias, table=table, columns=columns,
                 state={"alias": alias, "kind": "integrated", "id": binding.asset_id,
                        "versionId": None, "asOf": as_of,
                        "consistency": "repeatable_read", "completeness": "complete",
-                       "dialect": meta["dialect"], "snapshotId": snapshot_id},
+                       "dialect": meta["dialect"], "snapshotId": snapshot_id,
+                       "uniqueKey": unique},
                 auth_fingerprint=expected_auth, schema_fingerprint=expected_schema,
                 connection_key="source:" + connection_id,
                 batches=batches if scope is not None else None, recheck=recheck,
@@ -177,6 +211,11 @@ def resolve_dataset(db, user, alias, binding, limits):
             expressions[name] = source
     auth = _hash({"user": str(user.id), "role": user.role, "dataset": binding.dataset_id})
     fingerprint = metadata.get("schema_fingerprint") or _hash(raw_columns)
+    # Immutable sealed versions carry their complete primary key in the
+    # manifest; keyset paging over an immutable version is deterministic.
+    unique = [str(name) for name in metadata.get("primary_key_columns") or []
+              if isinstance(name, str)]
+    unique = unique if unique and all(name in columns for name in unique) else None
 
     def recheck():
         with Session(bind=db.get_bind(), autoflush=False) as fresh_db:
@@ -202,6 +241,7 @@ def resolve_dataset(db, user, alias, binding, limits):
                     {"alias": alias, "kind": "dataset", "id": binding.dataset_id,
                      "versionId": binding.version_id,
                      "asOf": metadata.get("as_of") or metadata.get("created_at") or datetime.now(timezone.utc).isoformat(),
-                     "consistency": "immutable_version", "completeness": "complete"},
+                     "consistency": "immutable_version", "completeness": "complete",
+                     "uniqueKey": unique},
                     auth, fingerprint, "platform", recheck=recheck,
                     platform=True, expressions=expressions)

@@ -34,10 +34,37 @@ class ToolError(Exception):
 
 
 def remote_object_type_ids(scope: AgentScope) -> set[str]:
-    if scope.release is None:
-        return set()
-    from app.ontologies.mappings.remote_binding import remote_bindings_by_type
-    return set(remote_bindings_by_type(scope.release.snapshot))
+    if scope.release is not None:
+        from app.ontologies.mappings.remote_binding import remote_bindings_by_type
+        return set(remote_bindings_by_type(scope.release.snapshot))
+    # 无 release 的会话（默认 /agent/chat 入口）是工作区实时视图：远程
+    # 绑定按当前工作区映射判定。此前恒返回空集会让 search/aggregate 以
+    # "本地 0 行"冒充完整结果，remote_ontology_semantic_query_required
+    # 转介随之失效（A14 真实缺陷）。钉定 release 的视图仍只认快照，
+    # draft 评审语义不变。
+    from app.ontologies.mappings.models import OntologyMapping
+    from app.ontologies.mappings.remote_binding import (
+        BINDING_MODE_REMOTE, mapping_binding_mode,
+    )
+
+    remote_ids: set[str] = set()
+    rows = scope.db.query(OntologyMapping).filter(
+        OntologyMapping.ontology_id == scope.ontology.id).all()
+    for mapping in rows:
+        try:
+            if mapping_binding_mode(mapping.field_mapping) != BINDING_MODE_REMOTE:
+                continue
+        except Exception:  # noqa: BLE001 - 单条坏映射不拖垮整个判定
+            continue
+        if mapping.target_object_type_id:
+            remote_ids.add(str(mapping.target_object_type_id))
+            continue
+        entity_class = str(mapping.entity_class or "")
+        for object_type in scope.object_types.values():
+            if entity_class in (object_type.name, object_type.display_name):
+                remote_ids.add(object_type.id)
+                break
+    return remote_ids
 
 
 def require_materialized_object_type(scope: AgentScope, object_type) -> None:
@@ -231,8 +258,13 @@ class AgentScope:
             key, ontology_cache.INSTANCE_COUNTS_TTL_SECONDS, build)
 
     def skill_card(self) -> str:
-        """从受限视图生成紧凑的 schema 说明 — agent 对世界的全部认知。"""
+        """从受限视图生成紧凑的 schema 说明 — agent 对世界的全部认知。
+
+        远程绑定类型不声明"实例数=0"（本地物化 0 行不是业务事实），
+        改为显式转介：数据在联邦远程，须经受治理查询取数。
+        """
         counts = self.instance_counts()
+        remote_ids = remote_object_type_ids(self)
         lines: list[str] = []
         lines.append(f"# 本体「{self.ontology.name}」")
         if self.ontology.description:
@@ -242,9 +274,18 @@ class AgentScope:
         if not self.object_types:
             lines.append("（无授权的对象类型）")
         for t in self.object_types.values():
-            n = counts.get(t.id, 0)
             desc = f" — {t.description}" if t.description else ""
-            lines.append(f"### {t.display_name} (name={t.name}, 实例数={n}){desc}")
+            if t.id in remote_ids:
+                lines.append(
+                    f"### {t.display_name} (name={t.name}, 远程绑定·本地无物化事实)"
+                    f"{desc}")
+                lines.append(
+                    "- 数据在联邦远程源：本地实例数为 0 不代表业务无数据；"
+                    "必须经受治理查询（超级助手 ontology_query / 统一查询 API）"
+                    "取数，不得凭本地 0 或结构样例推断")
+            else:
+                n = counts.get(t.id, 0)
+                lines.append(f"### {t.display_name} (name={t.name}, 实例数={n}){desc}")
             allowed_props = self.allowed_property_names(t.id)
             for p in (t.properties or []):
                 if not isinstance(p, dict):
@@ -287,13 +328,20 @@ class AgentScope:
         return "\n".join(lines)
 
     def summary(self) -> dict:
-        """给前端的能力概览（边界可视化）。"""
+        """给前端的能力概览（边界可视化）。
+
+        远程绑定类型不展示本地实例数 0（会误读为业务无数据），
+        以 remote 标注 + instanceCount=null 呈现"未知，联邦取数"。
+        """
         counts = self.instance_counts()
+        remote_ids = remote_object_type_ids(self)
         return {
             "enabled": self.profile.enabled,
             "objectTypes": [
                 {"id": t.id, "name": t.name, "displayName": t.display_name,
-                 "instanceCount": counts.get(t.id, 0)}
+                 "instanceCount": (
+                     None if t.id in remote_ids else counts.get(t.id, 0)),
+                 "remote": t.id in remote_ids}
                 for t in self.object_types.values()
             ],
             "linkTypes": [

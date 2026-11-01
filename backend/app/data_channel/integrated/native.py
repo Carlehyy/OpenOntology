@@ -355,7 +355,8 @@ def resolve_metadata(db, user, asset_ids):
 
 
 class NativeSourceSession:
-    def __init__(self, conn, assets, metadata, snapshot, *, deadline=None):
+    def __init__(self, conn, assets, metadata, snapshot, *, deadline=None,
+                 execution_budget=None):
         self.connection = conn
         self._deadline = deadline
         self.assets = assets
@@ -367,15 +368,54 @@ class NativeSourceSession:
         self._counted_statement = None
         self._counted_params = None
         self._counted_rows = None
+        # Optional whole-logical-query ledger (unified query execution only).
+        # The scope attributes its own statements by physical connection, not
+        # by query alias: one scope serves every alias of one connection and a
+        # statement may span several of its tables. ``native:<connection_id>``
+        # holds EOF-proof COUNT probes; ``native:<connection_id>:control``
+        # itemizes SET/reflect control round trips. Control statements transfer
+        # no data rows and are never charged rows or bytes; reflection round
+        # trips are counted from real driver events, never guessed.
+        self.execution_budget = execution_budget
+        self.ledger_layer = (f"native:{next(iter(metadata.values()))['connection_id']}"
+                             if execution_budget is not None else None)
         for asset in assets:
             self._remaining(configure=True)
             check_transactional_table(conn, asset)
-            table, _, fingerprint = reflect(conn, asset)
+            table, _, fingerprint = self._reflect(asset)
             self._remaining()
             if fingerprint != asset.schema_fingerprint:
                 fail(409, "SOURCE_SCHEMA_DRIFT", "Source schema changed; explicitly refresh the asset schema")
             self.tables[asset.id] = table
             self.meta[asset.id].update(as_of=snapshot["started_at"], consistency="per_source_repeatable_read")
+
+    def _ledger_control(self, times: int = 1) -> None:
+        if self.execution_budget is not None and times > 0:
+            self.execution_budget.charge_statement(f"{self.ledger_layer}:control", times=times)
+
+    def _reflect(self, asset):
+        """Schema reflection, disclosing its real driver round trips.
+
+        With a ledger attached the actual ``before_cursor_execute`` events the
+        autoload issues are counted and charged as control statements; without
+        one this is the plain module function. Reflection returns schema
+        metadata, no data rows, so it is never charged rows or bytes and the
+        count is measured, never estimated.
+        """
+        if self.execution_budget is None:
+            return reflect(self.connection, asset)
+        executed = 0
+
+        def _count(*_args, **_kwargs):
+            nonlocal executed
+            executed += 1
+
+        sa.event.listen(self.connection, "before_cursor_execute", _count)
+        try:
+            return reflect(self.connection, asset)
+        finally:
+            sa.event.remove(self.connection, "before_cursor_execute", _count)
+            self._ledger_control(executed)
 
     def _validate_select(self, statement):
         if not isinstance(statement, Select):
@@ -395,14 +435,17 @@ class NativeSourceSession:
             return
         remaining = int((self._deadline - time.monotonic()) * 1000)
         if remaining < 1:
-            fail(422, "QUERY_BUDGET_EXCEEDED", "Source read exceeded the total query time budget")
+            fail(422, "QUERY_BUDGET_EXCEEDED", "Source read exceeded the total query time budget",
+                 budget="statement_timeout_ms")
         if configure:
             if self.connection.dialect.name == "postgresql":
                 self.connection.execute(sa.text("SELECT set_config('statement_timeout', :timeout, true)"),
                                         {"timeout": str(remaining)})
+                self._ledger_control()
             elif self.connection.dialect.name == "mysql":
                 self.connection.execute(sa.text("SET SESSION MAX_EXECUTION_TIME = :timeout"),
                                         {"timeout": remaining})
+                self._ledger_control()
 
     def expected_rows(self, statement, params=None):
         if self._busy:
@@ -412,6 +455,17 @@ class NativeSourceSession:
         # Count the compiled result (including GROUP/LIMIT), not the base table.
         result = int(self.connection.execute(
             sa.select(sa.func.count()).select_from(statement.order_by(None).subquery()), params or {}).scalar_one())
+        if self.execution_budget is not None:
+            # The EOF-proof COUNT is a real source statement that returns
+            # exactly one aggregate row: disclose it as a count check and
+            # charge that returned datum's actual text bytes. The source-side
+            # scan the probe triggers is bounded by the deadline clock and is
+            # never claimed as transferred rows or wire bytes.
+            self.execution_budget.charge_statement(self.ledger_layer)
+            self.execution_budget.charge_count_check(self.ledger_layer)
+            self.execution_budget.charge_rows(self.ledger_layer)
+            self.execution_budget.charge_bytes(self.ledger_layer,
+                                               len(str(result).encode("utf-8")))
         self._remaining()
         self._counted_statement, self._counted_params, self._counted_rows = statement, dict(params or {}), result
         return result
@@ -469,7 +523,7 @@ class NativeSourceSession:
             self._remaining(configure=True)
             # No DDL drift may be silently blessed at the completeness boundary.
             for asset in self.assets:
-                _, _, fingerprint = reflect(self.connection, asset)
+                _, _, fingerprint = self._reflect(asset)
                 if fingerprint != asset.schema_fingerprint:
                     fail(409, "SOURCE_SCHEMA_DRIFT", "Source schema changed while reading")
             if self.completion["row_count"] != expected:
@@ -484,7 +538,8 @@ class NativeSourceSession:
 
 
 @contextmanager
-def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
+def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000,
+                    execution_budget=None):
     if isinstance(statement_timeout_ms, bool) or not isinstance(statement_timeout_ms, int) or not 1 <= statement_timeout_ms <= 2**31 - 1:
         fail(422, "INVALID_SOURCE_TIMEOUT", "Source statement timeout must be a positive signed 32-bit millisecond value")
     deadline = time.monotonic() + statement_timeout_ms / 1000
@@ -508,6 +563,11 @@ def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
                                  {"timeout": str(statement_timeout_ms)})
                     conn.execute(sa.text("SELECT set_config('lock_timeout', :timeout, true)"),
                                  {"timeout": str(min(statement_timeout_ms, 10000))})
+                    if execution_budget is not None:
+                        # Scope-open control round trips, itemized honestly:
+                        # exactly the four statements issued above; they move
+                        # no data rows and are never charged rows or bytes.
+                        execution_budget.charge_statement(f"native:{source.id}:control", times=4)
                 elif conn.dialect.name == "mysql":
                     # SET TRANSACTION must be issued before the transaction's
                     # first read; InnoDB is independently verified below.
@@ -515,10 +575,14 @@ def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
                     conn.exec_driver_sql("SET SESSION time_zone = '+00:00'")
                     conn.execute(sa.text("SET SESSION MAX_EXECUTION_TIME = :timeout"),
                                  {"timeout": statement_timeout_ms})
+                    if execution_budget is not None:
+                        # The three MySQL scope-open control statements above.
+                        execution_budget.charge_statement(f"native:{source.id}:control", times=3)
                 snapshot = {"id": str(uuid.uuid4()), "kind": "repeatable_read",
                             "consistent": True, "started_at": datetime.now(timezone.utc).isoformat(),
                             "connection_id": source.id, "execution_backend": "native"}
-                scope = NativeSourceSession(conn, assets, meta, snapshot, deadline=deadline)
+                scope = NativeSourceSession(conn, assets, meta, snapshot, deadline=deadline,
+                                            execution_budget=execution_budget)
                 yield scope
     except sa.exc.DBAPIError as exc:
         control = current_query_control()
@@ -528,7 +592,8 @@ def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000):
         code = getattr(original, "pgcode", None)
         mysql_code = original.args[0] if getattr(original, "args", ()) else None
         if code == "57014" or mysql_code in {3024, 1969} or time.monotonic() >= deadline:
-            fail(422, "QUERY_BUDGET_EXCEEDED", "Source read exceeded the total query time budget")
+            fail(422, "QUERY_BUDGET_EXCEEDED", "Source read exceeded the total query time budget",
+                 budget="statement_timeout_ms")
         fail(503, "SOURCE_UNAVAILABLE", "Source read was unavailable or interrupted")
     finally:
         engine.dispose()

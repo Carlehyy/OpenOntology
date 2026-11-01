@@ -5,6 +5,13 @@ Identifiers are metadata names, never SQL fragments; :parameters are separate.
 The Pipeline dataclasses are also the typed construction surface for
 server-side callers (bridge adapters): such callers must run validate_pipeline.
 DISTINCT and contains are typed-only operators with no text grammar yet.
+
+Multi-stage text (`parse_spl_plan`) prefixes named stages before the main
+pipeline: ``with name = from src as a | cmd; ... from stage as x | cmd``.
+Every stage body is the same Pipeline grammar terminated by ``;``; stage
+references resolve in text order (earlier stages only — no forward refs, no
+cycles). Leaf resolution (which binding a source name denotes) stays with the
+callers; this module only knows syntax.
 """
 from __future__ import annotations
 
@@ -20,7 +27,9 @@ from lark.exceptions import VisitError
 from .contracts import QueryError, stable_hash
 
 _GRAMMAR = r"""
-start: "from"i ident "as"i ident ("|" command)*
+start: with_def* pipeline
+with_def: "with"i ident "=" pipeline ";"
+pipeline: "from"i ident "as"i ident ("|" command)*
 ?command: where | fields | join | stats | sort | limit
 where: "where"i expr
 fields: "fields"i projection ("," projection)*
@@ -105,6 +114,35 @@ class Pipeline:
             (cmd.args[0], cmd.args[1]) for cmd in self.commands if cmd.op == "join"]
 
 
+@dataclass(frozen=True)
+class WithDef:
+    """One named stage: ``with name = from src as alias | ...``"""
+
+    name: str
+    pipeline: Pipeline
+
+
+@dataclass(frozen=True)
+class SplPlan:
+    """Ordered stage definitions plus the main pipeline.
+
+    ``stages`` keep text order; a stage may reference only leaf sources or
+    earlier stages. Structural validation (references, budgets) lives in
+    spl_plan.validate_plan_graph, which knows the leaf bindings.
+    """
+
+    stages: tuple[WithDef, ...]
+    pipeline: Pipeline
+
+    @property
+    def stage_names(self) -> tuple[str, ...]:
+        return tuple(stage.name for stage in self.stages)
+
+    @property
+    def pipelines(self) -> tuple[Pipeline, ...]:
+        return tuple(stage.pipeline for stage in self.stages) + (self.pipeline,)
+
+
 class _Build(Transformer):
     def identifier(self, args): return str(args[0])
     def quoted_identifier(self, args): return str(args[0])[1:-1].replace("``", "`")
@@ -142,7 +180,12 @@ class _Build(Transformer):
         return (args[0], direction, nulls)
     def sort(self, args): return Command("sort", tuple(args))
     def limit(self, args): return Command("limit", tuple(int(v) for v in args))
-    def start(self, args): return Pipeline(args[0], args[1], tuple(args[2:]))
+    def pipeline(self, args): return Pipeline(args[0], args[1], tuple(args[2:]))
+    def with_def(self, args): return WithDef(args[0], args[1])
+    def start(self, args):
+        stages = tuple(a for a in args if isinstance(a, WithDef))
+        pipeline = next(a for a in args if isinstance(a, Pipeline))
+        return SplPlan(stages, pipeline)
 
 
 _PARSER = Lark(_GRAMMAR, parser="lalr", maybe_placeholders=False)
@@ -164,21 +207,57 @@ def validate_pipeline(pipeline: Pipeline) -> Pipeline:
     return pipeline
 
 
-def parse(text: str) -> Pipeline:
+def _parse_text(text: Any) -> SplPlan:
+    """Shared parse mechanics: budgets, LALR parse, transformer."""
     if not isinstance(text, str) or not text.strip() or len(text) > 32768:
         raise QueryError(422, "invalid_query", "Query must contain 1..32768 characters")
     try:
         tree = _PARSER.parse(text)
         if sum(1 for _ in tree.iter_subtrees()) > 2048:
             raise QueryError(422, "query_too_complex", "Query expression exceeds parser budget")
-        result = _Build().transform(tree)
+        return _Build().transform(tree)
     except UnexpectedInput as exc:
         raise QueryError(422, "invalid_syntax", "Unsupported or invalid SPL syntax",
                          position={"line": exc.line, "column": exc.column,
                                    "offset": exc.pos_in_stream}) from exc
     except (VisitError, RecursionError, ValueError) as exc:
         raise QueryError(422, "invalid_query", "Invalid query value or excessive nesting") from exc
-    return validate_pipeline(result)
+
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _check_stage_names(stages: tuple[WithDef, ...]) -> None:
+    """Stage names follow the same identifier contract as source aliases."""
+    seen: set[str] = set()
+    for stage in stages:
+        if len(stage.name) > 63 or not _IDENTIFIER_RE.fullmatch(stage.name):
+            raise QueryError(422, "invalid_identifier",
+                             "Stage names must be ASCII identifiers of at most 63 characters")
+        if stage.name in seen:
+            raise QueryError(422, "duplicate_stage", f"Stage「{stage.name}」is defined more than once")
+        seen.add(stage.name)
+
+
+def parse_spl_plan(text: str) -> SplPlan:
+    """Parse multi-stage SPL text into an ordered, syntax-valid SplPlan.
+
+    Structural checks that need leaf bindings (unbound/forward refs, dead
+    stages, whole-plan budgets) are the caller's job (spl_plan module).
+    """
+    plan = _parse_text(text)
+    _check_stage_names(plan.stages)
+    for stage_pipeline in plan.pipelines:
+        validate_pipeline(stage_pipeline)
+    return plan
+
+
+def parse(text: str) -> Pipeline:
+    plan = _parse_text(text)
+    if plan.stages:
+        raise QueryError(422, "multi_stage_unsupported",
+                         "Multi-stage SPL must go through the plan entry, not the single-pipeline parse")
+    return validate_pipeline(plan.pipeline)
 
 
 def _to_jsonable(value: Any) -> Any:

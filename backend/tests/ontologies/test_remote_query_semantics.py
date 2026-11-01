@@ -188,3 +188,21 @@ def test_current_release_change_is_a_query_error_at_http_entry(client, auth_head
         "select": [{"source": "a", "property": "key", "as": "key"}]})
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "release_context_changed"
+
+
+def test_remote_plan_accepts_count_field_semantics(db, admin_user):
+    identity, profile = _release(db, admin_user, asset="notes")
+    profile.allowed_properties = {identity["objectTypeId"]: ["key", "note"]}
+    db.commit()
+    request = _request(identity, select=[], aggregates=[
+        {"fn": "count", "as": "rows"},
+        {"fn": "count", "source": "a", "property": "note", "as": "noted"}])
+    plan = remote_query.prepare_remote_plan(db, admin_user, request)
+    assert plan["aggregates"] == [
+        {"fn": "count", "source": None, "property": None, "as": "rows"},
+        {"fn": "count", "source": "a", "property": "note", "as": "noted"}]
+    # Half-specified count stays rejected.
+    with pytest.raises(Exception) as exc:
+        remote_query.prepare_remote_plan(db, admin_user, _request(
+            identity, aggregates=[{"fn": "count", "source": "a", "as": "x"}]))
+    assert "count" in str(exc.value)

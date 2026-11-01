@@ -54,6 +54,8 @@ def object_sources(request: QS.QueryRequest):
 
 
 def uses_remote_sources(db, request: QS.QueryRequest) -> bool:
+    if request.spl is not None:
+        return True  # SPL 语义绑定恒走远程联邦路径（翻译后结构树判定）
     if any(source.subquery is not None for source in request.sources):
         return True
     from app.ontologies.mappings.remote_binding import get_remote_binding
@@ -74,6 +76,12 @@ class _PreparedSource:
 
 def prepare_remote_plan(db, user, request: QS.QueryRequest | dict, *, serialized=False):
     parsed = QS.QueryRequest.model_validate(request) if serialized else request
+    if parsed.spl is not None:
+        # SPL 文本面：先翻译成结构树，再走完全相同的授权/证据/编译路径。
+        parsed = prepare_spl_plan(db, user, parsed.spl,
+                                  parsed.semantic_bindings or {},
+                                  params=parsed.params,
+                                  page_size=parsed.page_size)
     try:
         from sqlalchemy import select
         from app.auth.models import User
@@ -284,8 +292,11 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
         aggregates = []
         for item in query.aggregates:
             if item.fn == "count":
-                if item.source is not None or item.property is not None:
-                    raise _error(422, "invalid_parameter", "count(*) 不可指定 source/property")
+                # count(*) 与 count(field) 都是真实内核语义：COUNT(field)
+                # 计非 NULL 值，COUNT(*) 计行；二者不可只给一半定位字段。
+                if (item.source is None) != (item.property is None):
+                    raise _error(422, "invalid_parameter",
+                                 "count 需同时省略或同时指定 source 与 property")
             elif not item.source or not item.property:
                 raise _error(422, "invalid_parameter", "聚合缺少字段")
             aggregates.append({"fn": item.fn, "source": item.source,
@@ -317,6 +328,325 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
         raise _error(422, "invalid_parameter", f"pageSize 超出授权上限 {cap}")
     plan.update(pageSize=page_size, releases=releases, citations=citations)
     return plan
+
+
+# ------------------------------------------------------------- SPL 文本面
+#
+# 语义 SPL：模型提交一条文本计划 + 叶子绑定三元组（ontologyId/releaseId/
+# objectTypeId）+ params/pageSize。翻译层把纯核（parse_spl_plan /
+# validate_plan_graph）的 SplPlan 降成 QS.QueryRequest 结构树，然后走与
+# 结构树完全相同的 prepare_remote_plan：release/profile/属性授权、
+# verify_join_evidence、count(field)/count(*) 语义、cursor 重验与 memory
+# ledger 全部复用，翻译层不另起执行/授权路径，也不自动创造关联证据。
+
+
+_OP_MAP = {"=": "eq", "!=": "neq", "<>": "neq", ">": "gt", ">=": "gte",
+           "<": "lt", "<=": "lte", "in": "in", "is_null": "is_null",
+           "is_not_null": "is_not_null"}
+
+
+def _param_value(name: str, params: dict):
+    if name not in params:
+        raise _error(422, "missing_parameter", f"SPL 参数 :{name} 未提供值")
+    return params[name]
+
+
+def _literal(value, params: dict):
+    from decimal import Decimal as _Decimal
+
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, _Decimal):
+        return int(value) if value == value.to_integral_value() else str(value)
+    return value
+
+
+def _filter_node(expr, aliases: set[str], params: dict):
+    from app.data_channel.query.parser import Expr, Ref, Value
+
+    def leaf(op, ref: Ref, raw):
+        if ref.alias not in aliases:
+            raise _error(422, "invalid_parameter",
+                         f"过滤引用未知别名「{ref.alias}」")
+        return QS.FilterLeaf(source=ref.alias, property=ref.name,
+                             op=_OP_MAP[op], value=raw)
+
+    if not isinstance(expr, Expr):
+        raise _error(422, "invalid_parameter", "过滤表达式形状非法")
+    if expr.op == "and":
+        return QS.FilterAnd(and_=[_filter_node(item, aliases, params)
+                                  for item in expr.args])
+    if expr.op == "or":
+        return QS.FilterOr(or_=[_filter_node(item, aliases, params)
+                                for item in expr.args])
+    if expr.op == "not":
+        return QS.FilterNot(not_=_filter_node(expr.args[0], aliases, params))
+    # 一元谓词（is null / is not null）只有 ref，没有值参
+    if expr.op in {"is_null", "is_not_null"}:
+        ref = expr.args[0]
+        return leaf(expr.op, ref, None)
+    ref, value = expr.args[0], expr.args[1]
+    if not isinstance(value, Value):
+        raise _error(422, "invalid_parameter", "过滤值形状非法")
+    raw = (_param_value(str(value.value), params) if value.parameter
+           else _literal(value.value, params))
+    if expr.op == "in":
+        items = raw if isinstance(raw, list) else (
+            value.value if isinstance(value.value, list) else None)
+        if not isinstance(items, list) or not 1 <= len(items) <= 100:
+            raise _error(422, "invalid_parameter", "IN 需要 1..100 个值")
+        return leaf("in", ref, [_literal(item, {}) for item in items])
+    return leaf(expr.op, ref, raw)
+
+
+def _lookup_join_assertion(db, user, left_origin, right_origin):
+    """exact 方向查本人登记的关联声明；缺证即拒，绝不自动补证据。"""
+    from app.ontologies.agent_query.models import AgentJoinAssertion
+
+    (left_ontology, left_type, left_prop) = left_origin
+    (right_ontology, right_type, right_prop) = right_origin
+    assertion = db.query(AgentJoinAssertion).filter(
+        AgentJoinAssertion.created_by == str(user.id),
+        AgentJoinAssertion.left_ontology_id == left_ontology,
+        AgentJoinAssertion.left_object_type_id == left_type,
+        AgentJoinAssertion.left_property == left_prop,
+        AgentJoinAssertion.right_ontology_id == right_ontology,
+        AgentJoinAssertion.right_object_type_id == right_type,
+        AgentJoinAssertion.right_property == right_prop,
+    ).first()
+    if assertion is None:
+        raise _error(
+            422, "join_semantics_unverified",
+            f"SPL join {left_prop}={right_prop} 没有本人登记的关联声明："
+            "explicit_key 关联需要已发布关系或受治理的业务键证据，请先经 "
+            "ontology_register_join_assertion 工具或 "
+            "/api/v2/formal/ontologies/{id}/agent/join-assertions 登记两端"
+            "对象与键型一致的 assertion 证据")
+    # 声明不带基数：按最保守 N:M 放行（列裁剪/分页由内核预算约束）。
+    return {"keyType": assertion.key_type,
+            "businessMeaning": assertion.business_meaning,
+            "evidenceRefs": [f"assertion:{assertion.id}"],
+            "cardinality": "N:M"}
+
+
+def prepare_spl_plan(db, user, text: str, semantic_bindings: dict, *,
+                     params: dict | None = None, page_size: int | None = None):
+    """把 SPL 文本 + 语义绑定三元组降成结构树 QueryRequest（不执行）。
+
+    结构校验复用纯核 validate_plan_graph（前向引用/环/死阶段/整体
+    预算）；叶子身份只认三元组；join 证据必须命中本人 assertion。
+    """
+    from app.data_channel.query.parser import parse_spl_plan
+    from app.data_channel.query.spl_plan import validate_plan_graph
+
+    try:
+        plan = parse_spl_plan(text)
+        # validate_plan_graph 只消费绑定键集合；结构拒绝（未知源/前向引用/
+        # 死阶段/整表预算）在翻译前发生，并归一为本域 QueryError 口径。
+        validate_plan_graph(plan, semantic_bindings or {})
+    except Exception as exc:  # noqa: BLE001 - 纯核 contracts.QueryError 归一
+        if all(hasattr(exc, key) for key in ("status", "code", "message")):
+            raise _error(exc.status, exc.code, exc.message,
+                         **getattr(exc, "extra", {})) from exc
+        raise
+    bindings = {name: QS.SemanticBinding.model_validate(binding)
+                for name, binding in (semantic_bindings or {}).items()}
+    return _translate_spl_plan(plan, bindings, params or {}, page_size,
+                               lambda left, right: _lookup_join_assertion(
+                                   db, user, left, right))
+
+
+def _translate_spl_plan(plan, bindings: dict, params: dict,
+                        page_size: int | None, resolve_evidence):
+    stages: dict[str, tuple] = {}
+
+    def origin_of(kind_info, prop: str, lineage: dict):
+        """join 键溯源：叶子直连；阶段输出必须可追溯到源字段（聚合值无
+        线索，按 join_semantics_unverified 拒绝，与结构树路径同口径）。"""
+        alias_kind, name = kind_info
+        if alias_kind == "leaf":
+            binding = bindings[name]
+            return binding.ontology_id, binding.object_type_id, prop
+        traced = lineage.get(prop)
+        if traced is None:
+            raise _error(422, "join_semantics_unverified",
+                         f"join 键「{prop}」是阶段聚合输出，无法追溯到发布属性")
+        binding_name, origin_prop = traced
+        binding = bindings[binding_name]
+        return binding.ontology_id, binding.object_type_id, origin_prop
+
+    def translate(pipeline, *, is_stage: bool, page_size: int | None = None):
+        from app.data_channel.query.parser import Command, Ref
+
+        alias_kinds: dict[str, tuple] = {}
+        sources: list[QS.QuerySource] = []
+
+        def add_source(name: str, alias: str) -> None:
+            if alias in alias_kinds:
+                raise _error(422, "duplicate_alias", f"别名「{alias}」重复")
+            if name in bindings:
+                binding = bindings[name]
+                sources.append(QS.QuerySource(
+                    alias=alias, ontology_id=binding.ontology_id,
+                    release_id=binding.release_id,
+                    object_type_id=binding.object_type_id))
+                alias_kinds[alias] = ("leaf", name)
+            elif name in stages:
+                stage_request, stage_lineage = stages[name]
+                sources.append(QS.QuerySource(
+                    alias=alias, subquery=stage_request.model_copy(deep=True)))
+                alias_kinds[alias] = ("stage", name, stage_lineage)
+            else:
+                raise _error(422, "unknown_source", f"未知源「{name}」")
+
+        add_source(pipeline.source, pipeline.alias)
+        joins: list[QS.QueryJoin] = []
+        source_filters: list[QS.SourceFilter] = []
+        where: list = []
+        select: list[QS.SelectItem] = []
+        group_by: list[QS.GroupByItem] = []
+        aggregates: list[QS.AggregateItem] = []
+        order_by: list[QS.OrderByItem] = []
+        join_seen = False
+        projection: str | None = None
+
+        def lineage_of_select():
+            """输出名 → 溯源（绑定叶子名, 源属性）。多级传递：阶段上再
+            投影分组键/直通字段时，继承该阶段自身的 lineage；聚合输出无
+            lineage（join 键引用即拒，与结构树口径一致）。"""
+            out = {}
+            for item in select:
+                kind_info = alias_kinds[item.source]
+                if kind_info[0] == "leaf":
+                    out[item.as_] = (kind_info[1], item.property)
+                else:  # ("stage", name, stage_lineage)
+                    stage_lineage = kind_info[2]
+                    traced = stage_lineage.get(item.property)
+                    if traced is not None:
+                        out[item.as_] = traced
+            return out
+
+        for command in pipeline.commands:
+            if command.op == "join":
+                name, alias = command.args[0], command.args[1]
+                left_ref, right_ref = command.args[2], command.args[3]
+                join_type = command.args[4] if len(command.args) > 4 else "inner"
+                if right_ref.alias != alias or left_ref.alias == alias:
+                    raise _error(422, "invalid_parameter",
+                                 "join on 左侧必须是已存在的别名，右侧是新源别名")
+                if left_ref.alias not in alias_kinds:
+                    raise _error(422, "invalid_parameter",
+                                 f"join 左侧别名「{left_ref.alias}」未知")
+                add_source(name, alias)
+                left_info = alias_kinds[left_ref.alias]
+                right_info = alias_kinds[alias]
+                left_lineage = left_info[2] if left_info[0] == "stage" else {}
+                right_lineage = right_info[2] if right_info[0] == "stage" else {}
+                left_origin = origin_of((left_info[0], left_info[1]),
+                                        left_ref.name, left_lineage)
+                right_origin = origin_of((right_info[0], right_info[1]),
+                                         right_ref.name, right_lineage)
+                evidence = resolve_evidence(left_origin, right_origin)
+                joins.append(QS.QueryJoin(
+                    left=left_ref.alias, right=alias, type=join_type,
+                    on=QS.ExplicitKeyOn(
+                        kind="explicit_key",
+                        left_property=left_ref.name,
+                        right_property=right_ref.name,
+                        key_type=evidence["keyType"],
+                        cardinality=evidence["cardinality"],
+                        business_meaning=evidence["businessMeaning"],
+                        evidence_refs=evidence["evidenceRefs"])))
+                join_seen = True
+            elif command.op == "where":
+                node = _filter_node(command.args[0], set(alias_kinds), params)
+                if join_seen:
+                    where.append(node)
+                else:
+                    # join 前的 where 只可能引用首个源（其余源尚不存在）
+                    leaves = _filter_leaves(node)
+                    if any(leaf.source != pipeline.alias for leaf in leaves):
+                        raise _error(422, "invalid_parameter",
+                                     "join 前的 where 只能引用首个源；跨源过滤"
+                                     "应放在 join 之后")
+                    source_filters.append(QS.SourceFilter(
+                        source=pipeline.alias, filter=node))
+            elif command.op == "fields":
+                if projection is not None:
+                    raise _error(422, "invalid_parameter",
+                                 "fields/stats 投影只能出现一次且必须是最后一条命令")
+                projection = "fields"
+                for ref, out in command.args:
+                    if ref.alias not in alias_kinds:
+                        raise _error(422, "invalid_parameter",
+                                     f"投影引用未知别名「{ref.alias}」")
+                    select.append(QS.SelectItem(source=ref.alias,
+                                                property=ref.name, as_=out))
+            elif command.op == "stats":
+                if projection is not None:
+                    raise _error(422, "invalid_parameter",
+                                 "fields/stats 投影只能出现一次且必须是最后一条命令")
+                projection = "stats"
+                for arg in command.args:
+                    if isinstance(arg, tuple) and arg and arg[0] == "group":
+                        for ref in arg[1]:
+                            if ref.alias not in alias_kinds:
+                                raise _error(422, "invalid_parameter",
+                                             f"分组引用未知别名「{ref.alias}」")
+                            group_by.append(QS.GroupByItem(source=ref.alias,
+                                                           property=ref.name))
+                            select.append(QS.SelectItem(source=ref.alias,
+                                                        property=ref.name,
+                                                        as_=ref.name))
+                    else:
+                        fn, ref, out = arg
+                        aggregates.append(QS.AggregateItem(
+                            fn=fn, source=ref.alias if ref else None,
+                            property=ref.name if ref else None, as_=out))
+            elif command.op == "sort":
+                for out, direction, nulls in command.args:
+                    if isinstance(out, Ref):
+                        out = out.name
+                    order_by.append(QS.OrderByItem(output=str(out),
+                                                   direction=direction,
+                                                   nulls=nulls))
+            elif command.op == "limit":
+                raise _error(422, "spl_limit_unsupported",
+                             "语义 SPL 面不支持 limit/offset；用 pageSize 分页")
+            else:
+                raise _error(422, "invalid_parameter",
+                             f"不支持的 SPL 命令「{command.op}」")
+        if projection is None:
+            raise _error(422, "stage_requires_projection",
+                         "SPL 管道必须以 fields 或 stats 投影收尾")
+        if projection == "stats" and not aggregates and not group_by:
+            raise _error(422, "invalid_parameter", "stats 至少需要一个聚合或分组")
+        request = QS.QueryRequest(
+            sources=sources, joins=joins, source_filters=source_filters,
+            where=where, select=select, group_by=group_by,
+            aggregates=aggregates, order_by=order_by,
+            page_size=page_size)
+        lineage = lineage_of_select()
+        # stats 聚合输出无线索：只保留分组键（分组键已在 select 内）
+        return request, lineage
+
+    for stage in plan.stages:
+        stages[stage.name] = translate(stage.pipeline, is_stage=True)
+    main_request, _ = translate(plan.pipeline, is_stage=False,
+                                page_size=page_size)
+    return main_request
+
+
+def _filter_leaves(node):
+    if isinstance(node, QS.FilterLeaf):
+        return [node]
+    if isinstance(node, QS.FilterAnd):
+        return [leaf for item in node.and_ for leaf in _filter_leaves(item)]
+    if isinstance(node, QS.FilterOr):
+        return [leaf for item in node.or_ for leaf in _filter_leaves(item)]
+    if isinstance(node, QS.FilterNot):
+        return _filter_leaves(node.not_)
+    return []
 
 
 def _declared_keys(db, join, left, right, left_descriptor, right_descriptor):
