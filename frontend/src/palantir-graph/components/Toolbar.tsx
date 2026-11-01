@@ -80,8 +80,9 @@ export default function Toolbar({ capabilities, onOpenSearch, onBack, showBack =
     }
   };
 
+  // 离开语义统一由宿主（GraphWorkspace）收口：未保存结构拦截弹窗在画布内渲染，
+  // 左上角本体图标与本按钮共用同一个 requestLeave，保证两边点击效果一致。
   const handleBack = () => {
-    if (isDirty && !confirm('有未保存的改动，离开将丢失。确定返回？')) return;
     if (onBack) {
       onBack();
       return;
@@ -327,6 +328,8 @@ export default function Toolbar({ capabilities, onOpenSearch, onBack, showBack =
           {showBack && (
             <button
               onClick={handleBack}
+              data-testid="graph-workspace-back"
+              aria-label="返回"
               className="w-11 h-11 flex items-center justify-center rounded-xl bg-surface-700/50 hover:bg-surface-600/50 text-surface-400 hover:text-surface-200 transition-all duration-200 group relative"
               title="返回"
             >
