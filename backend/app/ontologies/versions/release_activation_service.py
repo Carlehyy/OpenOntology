@@ -7,6 +7,7 @@ report readiness without changing HTTP behavior.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from sqlalchemy.orm import Session
@@ -17,23 +18,64 @@ from app.ontologies.versions.snapshot_contract import (
 )
 from app.ontologies.versions.models import OntologyVersion
 
+logger = logging.getLogger(__name__)
+
 
 def rebuild_required_query_projections(
     db: Session,
     ontology_id: str,
     *,
     mapping_service_factory=None,
+    structure_commit: bool = False,
 ) -> dict:
-    """Reconcile non-transactional query stores from committed SQL truth."""
+    """Reconcile non-transactional query stores from committed SQL truth.
+
+    实例投影失败主导 ready；结构投影是可重建探索视图：构建失败耐久置
+    failed 如实上报，SQL 权威层拒绝（无当前发布/本体不存在）返回
+    ``rejected`` 且 fence 不变。
+
+    事务契约：``structure_commit=False``（precommit 调用方默认）fence
+    随调用方事务提交；``structure_commit=True``（commit 之后调用的
+    分支）钩子自持事务收口，返回时会话无遗留 fence 写。
+    """
     if mapping_service_factory is None:
         from app.ontologies.mappings.mapping_service import MappingService
         mapping_service_factory = MappingService
     service = mapping_service_factory(db)
     neo4j_ok = service._rebuild_neo4j_projection(ontology_id)
+    structure = _rebuild_structure_projection(
+        db, ontology_id, commit=structure_commit)
     return {
         "ready": bool(neo4j_ok),
         "neo4j": "ok" if neo4j_ok else "error",
+        "structure": structure,
     }
+
+
+def _rebuild_structure_projection(
+    db: Session, ontology_id: str, *, commit: bool = False,
+) -> dict:
+    """结构投影重建：failed=耐久构建失败；rejected=SQL 权威层拒绝。"""
+    from app.ontologies.graph.structure_projection import (
+        StructureProjectionError,
+        StructureProjectionRejected,
+        rebuild_structure_projection,
+    )
+
+    try:
+        return rebuild_structure_projection(db, ontology_id, commit=commit)
+    except StructureProjectionRejected as exc:
+        logger.warning(
+            "structure projection rejected for %s: %s", ontology_id, exc)
+        return {"status": "rejected", "error": str(exc)[:500]}
+    except StructureProjectionError as exc:
+        logger.warning(
+            "structure projection rebuild failed for %s: %s", ontology_id, exc)
+        return {"status": "failed", "error": str(exc)[:500]}
+    except Exception as exc:  # noqa: BLE001 - 结构失败不阻断发布主流程
+        logger.warning(
+            "structure projection rebuild crashed for %s: %s", ontology_id, exc)
+        return {"status": "failed", "error": str(exc)[:500]}
 
 
 def next_release_activation_number(

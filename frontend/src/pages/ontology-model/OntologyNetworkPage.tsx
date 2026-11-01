@@ -3,9 +3,11 @@
  *
  * 左卡片：ECharts 全局画布（各本体子图分区排布、按本体着色、同名类型虚线桥接），
  * 固定展示结构层（L1：对象类型 + 类型间关系）；
- * 右卡片：功能区域（数据范围 / 分析）
+ * 右卡片：功能区域（数据范围 / 结构投影 / 分析）
  * 布局复用本体建模页的可拖拽左右分栏；数据基座是 PG fo_* 表 / 发布快照，
- * 不依赖 Neo4j 投影就绪。本页不提供任何增删改，编辑仍在本体建模/详情页完成。
+ * 不依赖 Neo4j 投影就绪。本页不提供业务数据增删改，编辑仍在本体建模/详情页
+ * 完成；唯一维护操作是结构投影重建（admin + 源本体写权限，服务端裁决），
+ * 失败/漂移状态如实展示、不宣称成功。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -25,9 +27,12 @@ import {
 } from '@/api/ontologyNetwork'
 import { SplitHandle, useSplitLayout } from '@/hooks/useSplitLayout'
 import NetworkCanvas, { type NetworkCanvasController } from './network/NetworkCanvas'
+import StructureProjectionSection from './network/StructureProjectionSection'
 import {
+  instanceCountView,
   legendItems,
   mergeOverlay,
+  nodeInstanceText,
   toGraphNodeId,
 } from './network/networkModel'
 
@@ -310,6 +315,12 @@ export default function OntologyNetworkPage() {
 
   const legend = useMemo(() => legendItems(graph.ontologies), [graph.ontologies])
 
+  /** 结构投影面板：按当前勾选顺序展示（overview 顺序，勾选变化即时增减行） */
+  const selectedOntologies = useMemo(
+    () => overview.filter(item => selectedIds.includes(item.id)),
+    [overview, selectedIds],
+  )
+
   return (
     <div className="relative flex h-full min-h-[560px] overflow-hidden bg-[var(--color-bg-base)]">
       <div
@@ -329,6 +340,7 @@ export default function OntologyNetworkPage() {
                 <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">
                   跨本体全局图 · {stats.selected} 个本体 · {graph.meta.nodeCount} 节点 / {graph.meta.edgeCount} 边
                   {graph.bridges.enabled && stats.bridges > 0 ? ` · ${stats.bridges} 组同名桥接` : ''}
+                  {(graph.meta.totalUnknownRemoteTypes ?? 0) > 0 ? ` · ${graph.meta.totalUnknownRemoteTypes} 个远程类型实例数未知` : ''}
                 </p>
               </div>
             </div>
@@ -417,6 +429,9 @@ export default function OntologyNetworkPage() {
                     <i className="h-0 w-4 shrink-0 border-t-2 border-dashed border-viz-violet" />同名类型桥接（启发式）
                   </span>
                 )}
+                {graph.edges.some(edge => edge.kind === 'schema_relation' && edge.publishedStructureOnly) && (
+                  <span className="block pt-0.5">结构关系线 = 发布结构，不构成业务 join 证据</span>
+                )}
               </div>
             </div>
 
@@ -484,7 +499,7 @@ export default function OntologyNetworkPage() {
                   {selectedNode.kind === 'object_type' && (
                     <div className="space-y-2 text-xs">
                       <div className="rounded-md bg-muted p-2.5">
-                        <p className="font-medium text-foreground">{selectedNode.count || 0} 个实例</p>
+                        <p className="font-medium text-foreground">{nodeInstanceText(selectedNode)}</p>
                         <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{selectedNode.description || '该对象类型暂无说明'}</p>
                       </div>
                       {selectedNode.technicalName && (
@@ -555,7 +570,7 @@ export default function OntologyNetworkPage() {
           <header className="flex h-14 shrink-0 items-center border-b border-[var(--color-border)] bg-card px-4">
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">功能区域</h3>
-              <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">数据范围 · 分析（只读）</p>
+              <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">数据范围 · 结构投影 · 分析</p>
             </div>
           </header>
 
@@ -610,7 +625,10 @@ export default function OntologyNetworkPage() {
                             : <span className="shrink-0 rounded bg-muted px-1 text-[9px] font-medium text-muted-foreground">未发布·实时</span>}
                         </span>
                         <span className="mt-0.5 block truncate text-[10px] text-[var(--color-text-tertiary)]">
-                          {item.domain} · 类型 {section?.typeCount ?? item.typeCount} · 实例 {section?.instanceCount ?? item.instanceCount}
+                          {item.domain} · 类型 {section?.typeCount ?? item.typeCount} · 本地实例 {instanceCountView(section ?? item).local}
+                          {instanceCountView(section ?? item).remoteUnknownTypes > 0
+                            ? ` · 远程 ${instanceCountView(section ?? item).remoteUnknownTypes} 类型实例数未知`
+                            : ''}
                           {error ? ` · ${error}` : ''}
                         </span>
                       </span>
@@ -619,6 +637,9 @@ export default function OntologyNetworkPage() {
                 })}
               </div>
             </section>
+
+            {/* 结构投影状态与重建入口（独立于实例投影状态） */}
+            <StructureProjectionSection ontologies={selectedOntologies} />
 
             {/* 分析 */}
             <section className="rounded-lg border border-[var(--color-border)] bg-card">

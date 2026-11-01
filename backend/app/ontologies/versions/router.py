@@ -173,10 +173,13 @@ def _release_errors(db: Session, ontology_id: str) -> list[dict]:
     )
 
 
-def _rebuild_required_query_projections(db: Session, ontology_id: str) -> dict:
+def _rebuild_required_query_projections(
+    db: Session, ontology_id: str, *, structure_commit: bool = False,
+) -> dict:
     return release_activation_service.rebuild_required_query_projections(
         db,
         ontology_id,
+        structure_commit=structure_commit,
     )
 
 

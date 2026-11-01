@@ -8,6 +8,7 @@ import type {
   NetworkGraphData,
   NetworkGraphEdge,
   NetworkGraphNode,
+  NetworkOntologySection,
 } from '../../../api/ontologyNetwork'
 import { CHART_SERIES_PALETTE } from '../../../lib/echartsTheme.ts'
 
@@ -707,6 +708,31 @@ export interface NetworkLegendItem {
 }
 
 /** 右侧面板/图例共用的本体条目（含发布徽标所需信息）。 */
+export interface InstanceCountView {
+  /** 本地物化实例数（远程类型不计入） */
+  local: number
+  /** 实例数本地不可知的远程对象类型数 */
+  remoteUnknownTypes: number
+}
+
+/** 数据范围行的实例计数视图：本地计数如旧，远程未知绝不折算成 0。 */
+export function instanceCountView(section: NetworkOntologySection): InstanceCountView {
+  const raw = section.unknownRemoteTypeCount ?? 0
+  return {
+    local: section.instanceCount,
+    remoteUnknownTypes: Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 0,
+  }
+}
+
+/** 节点详情的实例行文案：远程类型 count=null 表示未知，不得显示为 0。 */
+export function nodeInstanceText(node: Pick<NetworkGraphNode, 'kind' | 'remote' | 'count'>): string {
+  if (node.kind !== 'object_type') return ''
+  if (node.remote || node.count === null || node.count === undefined) {
+    return '远程类型 · 实例数未知'
+  }
+  return `${node.count} 个实例`
+}
+
 export function legendItems(
   sections: NetworkGraphData['ontologies'],
 ): NetworkLegendItem[] {

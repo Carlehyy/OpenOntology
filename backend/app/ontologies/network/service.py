@@ -6,7 +6,9 @@
 * ``build_network_graph``：逐本体复用 agent_runtime 的 ``build_workspace_graph``
   构建 L1/L2 图，合并为跨本体全局图；同名对象类型之间生成展示层桥接边；
 * 路径 / 影响分析沿用单本体语义，直接委托 agent_runtime 的既有服务函数，
-  仅补齐"未显式给 release 时默认取当前发布版"的口径。
+  仅补齐"未显式给 release 时默认取当前发布版"的口径；
+* 结构投影读（文末）：SQL release 快照为权威，Neo4j ``OntologyStructureNode``
+  只是可重建探索图；读侧实时 AgentProfile 授权过滤，绝不假空图/假成功。
 """
 from __future__ import annotations
 
@@ -89,6 +91,13 @@ def _section_from_scope(
     version = None
     if release_id and scope.release is not None:
         version = getattr(scope.release, "version_number", None)
+    from app.ontologies.agent_runtime.boundary import remote_object_type_ids
+
+    remote_count = len(remote_object_type_ids(scope) & set(scope.object_types))
+    local_instances = int(sum(counts.values()))
+    # instanceCount 契约保持"本地物化实例数"（远程不经本地统计，绝不为
+    # 远程冒充 0 行数）：全远程本体 instanceCount=0 需结合
+    # unknownRemoteTypeCount>=1 读作"本地 0 + 远程未知"，而非"无数据"。
     return {
         "id": project.id,
         "name": project.name,
@@ -98,7 +107,9 @@ def _section_from_scope(
         "version": version,
         "typeCount": len(scope.object_types),
         "linkTypeCount": len(scope.link_types),
-        "instanceCount": int(sum(counts.values())),
+        "instanceCount": local_instances,
+        "knownLocalInstanceCount": local_instances,
+        "unknownRemoteTypeCount": remote_count,
     }
 
 
@@ -139,6 +150,8 @@ def _list_overview(db: Session, *, fresh: bool) -> list[dict]:
                 "typeCount": 0,
                 "linkTypeCount": 0,
                 "instanceCount": 0,
+                "knownLocalInstanceCount": 0,
+                "unknownRemoteTypeCount": 0,
                 "error": str(error),
             })
     return items
@@ -317,6 +330,66 @@ def build_network_graph(
         raise
 
 
+def _augment_remote_structure(scope: AgentScope, graph: dict) -> dict:
+    """网络层补齐远程绑定类型的结构可见性。
+
+    agent 本地图谱（``build_workspace_graph``）按既有契约只承载本地物化
+    数据面，远程类型被显式排除——本体类型全部远程绑定时画布 0 节点并
+    误导为"无类型"。网络画布是结构视图：远程类型以 ``remote: true``、
+    实例数 ``null``（unknown，绝不以 0 冒充真实行数）出现；已发布关系
+    的 schema 边允许展示（发布关系是治理事实），业务 join 仍由断言
+    证据守卫，不因本展示放宽。类型/关系全部来自当前 release + profile
+    授权 scope，不引入无过滤 fallback。
+    """
+    from app.ontologies.agent_runtime.boundary import remote_object_type_ids
+
+    remote_ids = remote_object_type_ids(scope)
+    if not remote_ids:
+        return graph
+    nodes = list(graph.get("nodes") or [])
+    edges = list(graph.get("edges") or [])
+    existing_node_ids = {node.get("id") for node in nodes}
+    existing_edge_ids = {edge.get("id") for edge in edges}
+    for object_type in scope.object_types.values():
+        if object_type.id not in remote_ids:
+            continue
+        node_id = f"type:{object_type.id}"
+        if node_id in existing_node_ids:
+            continue
+        nodes.append({
+            "id": node_id,
+            "entityId": object_type.id,
+            "kind": "object_type",
+            "remote": True,
+            "label": object_type.display_name,
+            "technicalName": object_type.name,
+            "objectTypeId": object_type.id,
+            "count": None,
+            "color": object_type.color,
+            "description": object_type.description,
+            "propertiesCount": len(object_type.properties or []),
+        })
+    for link_type in scope.link_types.values():
+        if not ({link_type.source_object_type_id,
+                 link_type.target_object_type_id} & remote_ids):
+            continue
+        edge_id = f"schema:{link_type.id}"
+        if edge_id in existing_edge_ids:
+            continue
+        edges.append({
+            "id": edge_id,
+            "entityId": link_type.id,
+            "kind": "schema_relation",
+            "source": f"type:{link_type.source_object_type_id}",
+            "target": f"type:{link_type.target_object_type_id}",
+            "label": link_type.display_name,
+            "linkTypeId": link_type.id,
+            "cardinality": link_type.cardinality,
+            "publishedStructureOnly": True,
+        })
+    return {**graph, "nodes": nodes, "edges": edges}
+
+
 def _build_network_graph(
     db: Session,
     *,
@@ -359,6 +432,7 @@ def _build_network_graph(
                 query=keyword,
                 limit_per_type=per_type,
             )
+            graph = _augment_remote_structure(scope, graph)
         except ToolError as error:
             errors.append({"ontologyId": ontology_id, "message": str(error)})
             continue
@@ -372,6 +446,8 @@ def _build_network_graph(
 
     kept_nodes, kept_edges, meta = _truncate_merged(nodes, all_edges)
     total_instances = sum(section["instanceCount"] for section in sections)
+    # totalInstances 契约为本地物化合计；远程类型数单独给出，页面汇总
+    # 不得把"本地 0 + 远程未知"展示成"总实例 0"。
     return {
         "level": depth,
         "query": keyword,
@@ -385,6 +461,8 @@ def _build_network_graph(
             **meta,
             "selectedOntologies": len(sections),
             "totalInstances": total_instances,
+            "totalUnknownRemoteTypes": sum(
+                section["unknownRemoteTypeCount"] for section in sections),
         },
     }
 
@@ -456,3 +534,348 @@ def _network_analyze_impact(
         direction=body.direction,
         max_depth=body.max_depth,
     )
+
+
+# ------------------------------------------------ 结构投影读（探索视图）
+
+from app.ontologies.graph.structure_projection import (  # noqa: E402
+    KIND_ACTION,
+    KIND_FUNCTION,
+    KIND_LINK_MAPPING,
+    KIND_LINK_TYPE,
+    KIND_MAPPING,
+    KIND_OBJECT_TYPE,
+    KIND_PROPERTY,
+    STRUCTURE_LABEL,
+    structure_projection_status,
+)
+
+
+class StructureGraphError(ToolError):
+    """结构图不可读：未就绪/漂移/图不一致/Neo4j 不可用。绝不假空图。"""
+
+    def __init__(self, message: str, *, payload: dict | None = None,
+                 http_status: int = 503):
+        super().__init__(message)
+        self.payload = payload or {}
+        self.http_status = http_status
+
+
+def _read_structure_subgraph(
+    ontology_id: str, release_id: str, expected_hash: str,
+) -> tuple[list, list]:
+    """读当前 release 结构子图，并按 meta 节点做一致性核验。
+
+    meta 缺失、哈希不符或实际节点/边数与 meta 计数不一致（如被并发删除
+    或残留半成品）即抛错，不以空图冒充成功。
+    """
+    from app.ontologies.graph.neo4j_service import (
+        Neo4jService, _decode_properties,
+    )
+
+    neo = Neo4jService()
+    if not neo.available:
+        raise StructureGraphError("Neo4j 不可用，结构图暂不能读取")
+    try:
+        params = {"oid": ontology_id, "rid": release_id}
+        base = (
+            f"MATCH (n:{STRUCTURE_LABEL}) WHERE n.structure_ontology_id "
+            f"= $oid AND n.structure_release_id = $rid"
+        )
+        node_rows = neo.run_cypher(
+            f"{base} AND n.kind <> 'release_meta' RETURN n", params)
+        nodes = [
+            _decode_properties(dict(row["n"])) for row in node_rows if row.get("n")
+        ]
+        edge_rows = neo.run_cypher(
+            f"MATCH (a:{STRUCTURE_LABEL})-[r]->(b:{STRUCTURE_LABEL}) "
+            "WHERE a.structure_ontology_id = $oid AND a.structure_release_id = $rid "
+            "AND b.structure_ontology_id = $oid AND b.structure_release_id = $rid "
+            "RETURN a.structure_key AS source, b.structure_key AS target, "
+            "type(r) AS rel_type, r AS props",
+            params,
+        )
+        edges = [
+            {
+                "id": _decode_properties(dict(row["props"])).get("id"),
+                "type": row["rel_type"],
+                "source": row["source"],
+                "target": row["target"],
+            }
+            for row in edge_rows
+        ]
+        meta_rows = neo.run_cypher(
+            f"MATCH (n:{STRUCTURE_LABEL} {{structure_key: $meta_key}}) RETURN n",
+            {"meta_key": f"{release_id}::release_meta"},
+        )
+        meta = (
+            _decode_properties(dict(meta_rows[0]["n"]))
+            if meta_rows and meta_rows[0].get("n") else None
+        )
+        # 计数严格非负整数：合法 0（空 release）不得被 or -1 误判；
+        # malformed meta（字符串/None/布尔/浮点）判不一致。
+        def _strict(value) -> int | None:
+            if (isinstance(value, bool) or not isinstance(value, int)
+                    or value < 0):
+                return None
+            return value
+
+        meta_nodes = _strict(meta.get("node_count")) if meta else None
+        meta_edges = _strict(meta.get("edge_count")) if meta else None
+        consistent = (
+            meta is not None
+            and str(meta.get("snapshot_hash") or "") == str(expected_hash)
+            and meta_nodes is not None and meta_nodes == len(nodes)
+            and meta_edges is not None and meta_edges == len(edges)
+        )
+        if not consistent:
+            raise StructureGraphError(
+                "结构图与 release meta 不一致（可能被并发删除或存在半成品），"
+                "请重新触发重建",
+                payload={"code": "structure_projection_inconsistent"},
+            )
+        return nodes, edges
+    finally:
+        neo.close()
+
+
+def _filter_structure_by_scope(scope, nodes: list, edges: list) -> tuple[list, list]:
+    """实时 AgentProfile 过滤：静态图不作授权依据，fail-closed。
+
+    口径说明：``AgentProfile`` 是本体级配置（``build_scope`` 无用户参数），
+    本过滤对所有请求方一致；用户差异只体现在路由的 require_ontology_access
+    与 join overlay 的双端校验。规则与 boundary 一致：不可见对象类型
+    整体剔除（含其属性/链接/动作/映射引用）；链接类型直接以
+    ``scope.link_types`` allowlist 判定（已同时编码两端类型可见性）；
+    函数同时有类型与动作引用时两者都须授权；属性按父类型 allowlist 用
+    纯属性名判定；无归属目标或引用缺失的节点一律隐藏；边两端必须可见。
+    """
+    visible_types = set(scope.object_types)
+    visible_links = set(scope.link_types)
+    visible_actions = set(scope.actions)
+
+    # 属性节点的父类型经 STRUCTURE_TYPE_PROPERTY 边推导（key 末段即 local_id）。
+    property_parent: dict[str, str] = {}
+    for edge in edges:
+        if edge["type"] == "STRUCTURE_TYPE_PROPERTY":
+            property_parent[edge["target"]] = edge["source"].rsplit("::", 1)[-1]
+
+    def _link_type_visible(link_id: object) -> bool:
+        # scope.link_types 已编码 allowlist + 两端类型可见；缺失即隐藏。
+        return bool(link_id) and str(link_id) in visible_links
+
+    kept: list[dict] = []
+    kept_keys: set[str] = set()
+    for node in nodes:
+        kind = node.get("kind")
+        local_id = str(node.get("local_id") or "")
+        attributes = node.get("attributes") or {}
+        if kind == KIND_OBJECT_TYPE:
+            visible = local_id in visible_types
+        elif kind == KIND_PROPERTY:
+            parent = property_parent.get(node.get("structure_key") or "")
+            visible = False
+            if parent is not None and parent in visible_types:
+                allowed = scope.allowed_property_names(parent)
+                # 纯属性名（node.name）判定，local_id 带类型前缀不可比。
+                visible = allowed is None or str(
+                    node.get("name") or "") in allowed
+        elif kind == KIND_LINK_TYPE:
+            visible = local_id in visible_links
+        elif kind == KIND_ACTION:
+            # scope.actions 已同时编码动作 allowlist 与绑定类型可见性。
+            visible = local_id in visible_actions
+            if visible:
+                target_type = attributes.get("objectTypeId")
+                if target_type is not None:
+                    allowed = scope.allowed_property_names(target_type)
+                    if (allowed is not None
+                            and isinstance(attributes.get("parameters"), list)):
+                        attributes = dict(attributes)
+                        attributes["parameters"] = [
+                            p for p in attributes["parameters"]
+                            if isinstance(p, dict) and p.get("name") in allowed
+                        ]
+        elif kind == KIND_FUNCTION:
+            target_type = attributes.get("targetObjectTypeId")
+            target_action = attributes.get("targetActionId")
+            if target_type is not None:
+                # 类型可见且（若有动作引用）动作也须授权，防借函数泄隐藏动作。
+                visible = target_type in visible_types and (
+                    target_action is None
+                    or str(target_action) in visible_actions)
+            elif target_action is not None:
+                visible = str(target_action) in visible_actions
+            else:
+                visible = False  # 无归属目标的可执行定义不外泄
+        elif kind == KIND_MAPPING:
+            # 映射必须挂接可见类型；无目标类型的映射定义不默认放行。
+            visible = attributes.get("targetObjectTypeId") in visible_types
+        elif kind == KIND_LINK_MAPPING:
+            visible = _link_type_visible(attributes.get("linkTypeId"))
+        else:
+            visible = False
+        if visible:
+            node = dict(node)
+            if kind == KIND_ACTION:
+                node["attributes"] = attributes
+            kept.append(node)
+            kept_keys.add(str(node.get("structure_key") or ""))
+
+    kept_edges = [
+        edge for edge in edges
+        if edge["source"] in kept_keys and edge["target"] in kept_keys
+    ]
+    return kept, kept_edges
+
+
+def _assertion_side_visible(
+    db: Session, user, ontology_id: str, object_type_id: str, prop: str,
+) -> bool:
+    """断言一侧当前是否可见（本体读权限 + 当前 release + 类型/属性授权）。
+
+    属性必须存在于当前 release 的类型结构中（release 已删除的属性算
+    失效证据），且在属性 allowlist 内；任一环节失败（无权限、无当前
+    发布、类型/属性不在当前 release、profile 停用）都判不可见。
+    """
+    from app.ontologies.access import require_ontology_access
+    from app.ontologies.release_context import current_release_context
+
+    try:
+        require_ontology_access(db, ontology_id, user, write=False)
+        context = current_release_context(db, ontology_id)
+        _project, profile, scope = build_scope(
+            db, ontology_id, release_id=context.release.id)
+        if not profile.enabled:
+            return False
+        object_type = scope.object_types.get(object_type_id)
+        if object_type is None:
+            return False
+        declared = {
+            p.get("name")
+            for p in (getattr(object_type, "properties", None) or [])
+            if isinstance(p, dict) and p.get("name")
+        }
+        if prop not in declared:
+            return False  # 属性不在当前 release 结构：失效证据不外显
+        allowed = scope.allowed_property_names(object_type_id)
+        return allowed is None or prop in allowed
+    except Exception:  # noqa: BLE001 - 授权链任何失败都判不可见
+        return False
+
+
+def _join_assertion_overlays(db: Session, user, ontology_id: str) -> list[dict]:
+    """本人跨本体关联声明实时 overlay（SQL 权威，永不入图、跨用户不可见）。
+
+    只有两侧当前都对该用户可见（读权限 + 当前 release + 类型/属性授权）
+    的声明才返回，避免借 overlay 泄露另一本体的类型/属性元数据。
+    """
+    from sqlalchemy import or_
+    from app.ontologies.agent_query.models import AgentJoinAssertion
+
+    rows = (
+        db.query(AgentJoinAssertion)
+        .filter(
+            AgentJoinAssertion.created_by == str(user.id),
+            or_(
+                AgentJoinAssertion.left_ontology_id == ontology_id,
+                AgentJoinAssertion.right_ontology_id == ontology_id,
+            ),
+        )
+        .order_by(AgentJoinAssertion.created_at.desc())
+        .limit(20).all()
+    )
+    overlays = []
+    for row in rows:
+        if not (_assertion_side_visible(
+                    db, user, row.left_ontology_id,
+                    row.left_object_type_id, row.left_property)
+                and _assertion_side_visible(
+                    db, user, row.right_ontology_id,
+                    row.right_object_type_id, row.right_property)):
+            continue
+        overlays.append({
+            "assertionId": row.id,
+            "category": "user_asserted",
+            "leftOntologyId": row.left_ontology_id,
+            "leftObjectTypeId": row.left_object_type_id,
+            "leftProperty": row.left_property,
+            "rightOntologyId": row.right_ontology_id,
+            "rightObjectTypeId": row.right_object_type_id,
+            "rightProperty": row.right_property,
+            "keyType": row.key_type,
+            "businessMeaning": row.business_meaning,
+        })
+    return overlays
+
+
+def get_structure_graph(db: Session, ontology_id: str, user) -> dict:
+    """当前 release 结构图（实时授权过滤 + 双端可见的 join 声明 overlay）。
+
+    只在 fence ready 且无 drift、图与 meta 一致时服务；AgentProfile 停用
+    时拒绝（403）；旧 release 子图绝不混读。
+    """
+    project = db.query(OntologyProject).filter(OntologyProject.id == ontology_id).first()
+    if not project:
+        raise ToolError("本体不存在")
+
+    status = structure_projection_status(db, ontology_id)
+    if status["status"] != "ready" or status["drift"]:
+        raise StructureGraphError(
+            "结构投影未就绪或已漂移，请先重建（状态对账以当前发布为准）",
+            payload={
+                "code": "ontology_structure_projection_not_ready",
+                "projection_status": status["status"],
+                "drift": status["drift"],
+                "error": status["error"],
+            },
+        )
+
+    raw_nodes, raw_edges = _read_structure_subgraph(
+        ontology_id, str(status["releaseId"]), str(status["snapshotHash"]))
+    _project, profile, scope = build_scope(
+        db, ontology_id, release_id=str(status["releaseId"]))
+    if not profile.enabled:
+        raise StructureGraphError(
+            "该本体的智能体已停用，结构探索视图不可用",
+            payload={"code": "profile_disabled"}, http_status=403,
+        )
+    nodes, edges = _filter_structure_by_scope(scope, raw_nodes, raw_edges)
+
+    api_nodes = [
+        {
+            "id": node.get("structure_key"),
+            "kind": node.get("kind"),
+            "localId": node.get("local_id"),
+            "name": node.get("name"),
+            "displayName": node.get("display_name"),
+            "description": node.get("description"),
+            "attributes": node.get("attributes") or {},
+        }
+        for node in nodes
+    ]
+    api_edges = [
+        {
+            "id": edge["id"] or f"{edge['type']}:{edge['source']}->{edge['target']}",
+            "type": edge["type"],
+            "source": edge["source"],
+            "target": edge["target"],
+        }
+        for edge in edges
+    ]
+    kept_nodes, kept_edges, meta = _truncate_merged(api_nodes, api_edges)
+    return {
+        "release": {
+            "releaseId": status["releaseId"],
+            "version": scope.release.version if scope.release is not None
+            else status.get("version"),
+            "snapshotHash": status["snapshotHash"],
+        },
+        "status": "ready",
+        "nodes": kept_nodes,
+        "edges": kept_edges,
+        "overlays": {
+            "joinAssertions": _join_assertion_overlays(db, user, ontology_id),
+        },
+        "meta": meta,
+    }

@@ -5,9 +5,14 @@
   GET  /{ontology_id}/instances/{id}    实例详情（右侧面板字段列表）
   POST /{ontology_id}/paths             单本体最短路径（复用 agent_runtime 服务）
   POST /{ontology_id}/impact            单本体只读影响推演（dry-run）
+  GET  /{ontology_id}/structure-projection        结构投影状态（SQL fence 对账）
+  POST /{ontology_id}/structure-projection/rebuild 结构投影重建（仅 admin）
+  GET  /{ontology_id}/structure-graph             当前 release 结构图（实时授权过滤）
 
-全部端点只读。路由层不做业务判断，应用逻辑在 service.py；权限由挂载点的
-``menu_guard("ontology_model.network")`` 统一守卫，与页面菜单键一致。
+既有五个端点只读不变；结构投影三端点中仅 rebuild 是写（Neo4j 探索图，
+SQL release 快照仍是权威）。路由层不做业务判断，应用逻辑在 service.py；
+权限由挂载点的 ``menu_guard("ontology_model.network")`` 统一守卫，与页面
+菜单键一致；单本体端点再叠加 require_ontology_access。
 """
 from __future__ import annotations
 
@@ -17,8 +22,15 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.deps import get_db, get_current_user
+from app.ontologies.access import require_ontology_access
 from app.ontologies.agent_runtime import schemas as S
 from app.ontologies.agent_runtime.boundary import ToolError
+from app.ontologies.graph.structure_projection import (
+    StructureProjectionError,
+    StructureProjectionRejected,
+    rebuild_structure_projection,
+    structure_projection_status,
+)
 from app.ontologies.network import cache as network_cache
 from app.ontologies.network import service
 
@@ -143,3 +155,77 @@ def query_network_impact(
     except ToolError as error:
         raise HTTPException(422, str(error)) from error
     return _ok(data)
+
+
+@router.get("/{ontology_id}/structure-projection")
+def get_structure_projection_status(
+    ontology_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """结构投影 fence 状态：与当前发布指针/哈希实时对账，drift 不掩饰。
+
+    具 network 菜单读权限即可查看（viewer 可看状态）；计数来自图 meta
+    节点，漂移时如实归零。
+    """
+    require_ontology_access(db, ontology_id, user, write=False)
+    try:
+        return _ok(structure_projection_status(db, ontology_id))
+    except StructureProjectionError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@router.post("/{ontology_id}/structure-projection/rebuild")
+def rebuild_structure_projection_endpoint(
+    ontology_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """从当前 release 快照重建结构探索图（仅管理员）。
+
+    并发语义：rebuild 持 build lock 串行执行；重复触发排队后幂等重建；
+    持锁接管遗留 building fence（前持有者已消失），不存在不可恢复的
+    永久 building。
+    """
+    if str(getattr(user, "role", "") or "") != "admin":
+        raise HTTPException(403, "Only administrators may rebuild the structure projection")
+    require_ontology_access(db, ontology_id, user, write=True)
+    from app.ontologies.runtime_fence import _ontology_build_lock
+
+    try:
+        with _ontology_build_lock(db, ontology_id):
+            rebuild_structure_projection(db, ontology_id)
+    except StructureProjectionRejected as error:
+        raise HTTPException(409, detail={
+            "code": "structure_projection_rejected",
+            "message": str(error),
+        }) from error
+    except StructureProjectionError as error:
+        raise HTTPException(503, detail={
+            "code": "structure_projection_failed",
+            "message": str(error),
+        }) from error
+    return _ok(structure_projection_status(db, ontology_id))
+
+
+@router.get("/{ontology_id}/structure-graph")
+def get_structure_graph(
+    ontology_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """当前 release 结构图（实时 user/profile 过滤 + 本人 join 声明 overlay）。
+
+    权限过滤在读侧实时执行，静态图不作授权依据；未就绪/漂移返回 503，
+    绝不以空图或旧 release 子图冒充成功。
+    """
+    require_ontology_access(db, ontology_id, user, write=False)
+    try:
+        return _ok(service.get_structure_graph(db, ontology_id, user))
+    except service.StructureGraphError as error:
+        raise HTTPException(error.http_status, detail={
+            "message": str(error),
+            **error.payload,
+        }) from error
+    except ToolError as error:
+        raise HTTPException(404, str(error)) from error

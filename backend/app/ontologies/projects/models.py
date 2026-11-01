@@ -23,6 +23,19 @@ class OntologyProject(Base):
         String(20), default="ready", server_default="ready", nullable=False,
     )
     projection_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 结构投影（OntologyStructureNode 探索图）独立 fence：SQL release 快照
+    # 是权威，本图可重建。状态 empty/building/ready/failed 落库；stale 为
+    # 读侧对当前发布指针/哈希的派生态。失败耐久可见，绝不假 ready。
+    structure_projection_status: Mapped[str] = mapped_column(
+        String(20), default="empty", server_default="empty", nullable=False,
+    )
+    structure_projection_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    structure_projection_release_id: Mapped[str | None] = mapped_column(
+        String, nullable=True,
+    )
+    structure_projection_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+    )
     # 运行时唯一读取指针。不要再通过“最大的版本号”推断当前发布版。
     current_release_id: Mapped[str | None] = mapped_column(
         String,

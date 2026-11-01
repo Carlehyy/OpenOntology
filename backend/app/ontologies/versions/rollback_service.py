@@ -553,8 +553,11 @@ def _rollback_version_locked(
 
     if settings.environment == "test":
         try:
+            # 本分支在主事务 commit 之后执行：钩子必须自持事务收口
+            # （structure_commit=True），不得把未提交 fence 写遗留在共享
+            # 会话。生产 precommit 分支走默认 commit=False。
             projection_check = _rebuild_required_query_projections(
-                db, ontology_id)
+                db, ontology_id, structure_commit=True)
         except Exception as projection_exc:  # noqa: BLE001
             # Unit tests do not require a live query store. Surface its mocked
             # state without weakening any real runtime environment.

@@ -13,6 +13,8 @@ import {
   relaxForClearance,
   nodeSize,
   ontologyColorMap,
+  instanceCountView,
+  nodeInstanceText,
   ONTOLOGY_PALETTE,
   toGraphNodeId,
 } from '../../../pages/ontology-model/network/networkModel.ts'
@@ -347,5 +349,27 @@ describe('nodeSize（graphify 度数映射）', () => {
     // 直径上限受控：防止枢纽节点过大导致相邻节点挤压重叠（MYW-28 验收意见）
     assert.ok(nodeSize({ kind: 'object_type' }, 4, 4) <= 50)
     assert.ok(nodeSize({ kind: 'instance' }, 4, 4) <= 24)
+  })
+})
+
+describe('remote instance honesty (null counts never become zero)', () => {
+  it('instanceCountView keeps local semantics and normalizes remote unknown', () => {
+    assert.deepEqual(instanceCountView({ instanceCount: 12, unknownRemoteTypeCount: 3 } as never),
+      { local: 12, remoteUnknownTypes: 3 })
+    assert.deepEqual(instanceCountView({ instanceCount: 0, unknownRemoteTypeCount: 2 } as never),
+      { local: 0, remoteUnknownTypes: 2 })
+    // 缺字段/负数/非有限值一律按无远程未知处理，不发明计数
+    assert.deepEqual(instanceCountView({ instanceCount: 5 } as never),
+      { local: 5, remoteUnknownTypes: 0 })
+    assert.deepEqual(instanceCountView({ instanceCount: 5, unknownRemoteTypeCount: -1 } as never),
+      { local: 5, remoteUnknownTypes: 0 })
+  })
+
+  it('nodeInstanceText renders remote types as unknown, never as 0 instances', () => {
+    assert.equal(nodeInstanceText({ kind: 'object_type', remote: true, count: null }), '远程类型 · 实例数未知')
+    assert.equal(nodeInstanceText({ kind: 'object_type', remote: false, count: null }), '远程类型 · 实例数未知')
+    assert.equal(nodeInstanceText({ kind: 'object_type', remote: false, count: 7 }), '7 个实例')
+    assert.equal(nodeInstanceText({ kind: 'object_type', remote: false, count: 0 }), '0 个实例')
+    assert.equal(nodeInstanceText({ kind: 'instance', remote: false, count: undefined }), '')
   })
 })

@@ -418,3 +418,39 @@ test('同一行的对象类型色块是正圆，而不是被拉高的椭圆', as
   })
   await expect.poll(async () => (await readSymbols()).round, { timeout: 5000 }).toBeGreaterThanOrEqual(3)
 })
+
+test('远程类型诚实展示：实例数未知不转 0，结构线声明非业务 join 证据', async ({ page }) => {
+  const remoteOverview = [
+    { ...overview[0], unknownRemoteTypeCount: 1, knownLocalInstanceCount: overview[0].instanceCount },
+    { ...overview[1], unknownRemoteTypeCount: 0, knownLocalInstanceCount: overview[1].instanceCount },
+  ]
+  const remoteGraph = {
+    ...graphResponse,
+    // 页面数据范围行读 graph.ontologies（非 overview 端点）：远程字段必须同步。
+    ontologies: remoteOverview.map(item => ({ ...item, error: undefined })),
+    meta: { ...graphResponse.meta, totalUnknownRemoteTypes: 1 },
+    nodes: [...graphNodes, {
+      id: 'type:t-remote', entityId: 't-remote', kind: 'object_type', remote: true,
+      label: '远程台账', technicalName: 'remote_ledger', objectTypeId: 't-remote',
+      ontologyId: 'o-supply', ontologyName: '供应链', count: null,
+    }],
+    edges: [...graphEdges, {
+      id: 'schema:s-remote', kind: 'schema_relation', source: 'type:t-remote',
+      target: 'type:t-order', label: '关联', ontologyId: 'o-supply',
+      publishedStructureOnly: true,
+    }],
+  }
+  // 远程节点的 count:null 比既有 fixture 的 number 字面量推断更宽，显式放宽
+  await mockNetworkApi(page, { overview: remoteOverview, graph: remoteGraph as unknown as typeof graphResponse })
+  await page.goto('/#/ontology-model/network', { waitUntil: 'domcontentloaded' })
+  // 头部与数据范围行：本地实例计数保留，远程未知明示，绝不折算为 0
+  await expect(page.getByTestId('network-canvas-card')).toContainText('1 个远程类型实例数未知')
+  const row = page.getByTestId('network-ontology-list').getByText('供应链', { exact: true })
+  await expect(page.getByTestId('network-ontology-list')).toContainText('远程 1 类型实例数未知')
+  await expect(page.getByTestId('network-ontology-list')).toContainText('本地实例')
+  // 图例：结构关系线明确非业务 join 证据
+  await expect(page.getByTestId('network-canvas-card')).toContainText('发布结构，不构成业务 join 证据')
+  // 远程类型节点出现在画布（svg 文本级断言，与既有模式一致）
+  await expect(page.getByTestId('network-chart-host')).toContainText('远程台账')
+  void row
+})

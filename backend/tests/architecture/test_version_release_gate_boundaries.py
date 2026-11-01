@@ -31,7 +31,7 @@ _COMPATIBILITY_SIGNATURES = {
         "object_types",
     ],
     "_release_errors": ["db", "ontology_id"],
-    "_rebuild_required_query_projections": ["db", "ontology_id"],
+    "_rebuild_required_query_projections": ["db", "ontology_id", "structure_commit"],
     "_snapshot_sentinel": ["item"],
     "_next_release_activation_number": ["db", "ontology_id"],
     "_snapshot_sentinel_models": ["snapshot"],
@@ -344,10 +344,13 @@ def test_projection_rebuild_reports_neo4j_readiness():
         mapping_service_factory=FakeMappingService,
     )
 
-    assert result == {
-        "ready": True,
-        "neo4j": "ok",
-    }
+    # 实例 ready 语义不变；结构投影是探索视图：假 db 连上下文都无法
+    # 解析属 SQL 权威层拒绝（rejected，fence 不动），不是构建失败；
+    # 两种形态都不阻断发布主流程。
+    assert result["ready"] is True
+    assert result["neo4j"] == "ok"
+    assert result["structure"]["status"] == "rejected"
+    assert result["structure"]["error"]
     assert events == [
         ("init", db_marker),
         ("neo4j", "ontology-id"),
