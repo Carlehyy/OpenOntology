@@ -225,8 +225,12 @@ jobs:
     # 2026-09-25 套件增至 386 例后 25 分钟再度失守：快 runner 套件 14m26s
     # （run 36118066551），慢 runner 22m39s 未完、连续两次撞顶取消
     # （run 36153713911 首次与 rerun --failed 均如此，E2E 全绿但部署未推进）。
-    # 对齐 verify-backend 的 40 分钟：覆盖实测最坏分布，仍能掐断真卡死。
-    timeout-minutes: 40
+    # 2026-11-02 套件增至 553 例后 40 分钟再度失守：E2E 单步实测 37.1m，
+    # 加依赖安装/构建/证据上传后连续两次仅差 15-20 秒被 cancelled
+    # （run 41319674624 两次 rerun 均 552 passed 后撞顶，部署被跳过）。
+    # 提到 55 分钟覆盖实测最坏分布（37.1m + 步骤开销 + runner 方差），
+    # 仍能掐断真正卡死的任务。
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
