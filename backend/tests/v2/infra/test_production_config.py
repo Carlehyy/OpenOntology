@@ -347,9 +347,10 @@ def test_workflow_keeps_persistent_env_in_place_during_source_replacement(
         ["tar", "-czf", str(archive), "-C", str(archive_source), "."],
         check=True,
     )
+    archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
 
     result = subprocess.run(
-        ["bash", "-s", "--", str(app_dir), str(archive)],
+        ["bash", "-s", "--", str(app_dir), str(archive), archive_hash],
         input=remote_script,
         capture_output=True,
         text=True,
@@ -397,9 +398,10 @@ def test_source_swap_keeps_prebuilt_frontend_assets_readable(tmp_path):
         ["tar", "-czf", str(archive), "-C", str(archive_source), "."],
         check=True,
     )
+    archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
 
     result = subprocess.run(
-        ["bash", "-s", "--", str(app_dir), str(archive)],
+        ["bash", "-s", "--", str(app_dir), str(archive), archive_hash],
         input=remote_script,
         capture_output=True,
         text=True,
@@ -411,6 +413,55 @@ def test_source_swap_keeps_prebuilt_frontend_assets_readable(tmp_path):
     assert stat.S_IMODE(extracted.stat().st_mode) & 0o044
     manifest = app_dir / "deploy" / "production.dependencies.env"
     assert stat.S_IMODE(manifest.stat().st_mode) == 0o600
+
+
+def test_source_swap_rejects_digest_mismatch_before_extraction(tmp_path):
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy-nano-ontoprompt.yml").read_text()
+    )
+    upload_step = next(
+        step for step in workflow["jobs"]["deploy"]["steps"]
+        if step.get("name") == "Upload source to server"
+    )
+    lines = upload_step["run"].splitlines()
+    remote_start = next(
+        index for index, line in enumerate(lines)
+        if line.endswith("<<'REMOTE_SOURCE_SWAP'")
+    ) + 1
+    remote_end = lines.index("REMOTE_SOURCE_SWAP", remote_start)
+    remote_script = "\n".join(lines[remote_start:remote_end]) + "\n"
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    env_file = app_dir / ".env"
+    env_file.write_text("SECRET=must-survive\n", encoding="utf-8")
+    sentinel = app_dir / "sentinel.txt"
+    sentinel.write_text("must-not-change\n", encoding="utf-8")
+    archive_source = tmp_path / "archive-source"
+    (archive_source / "frontend" / "dist").mkdir(parents=True)
+    (archive_source / "frontend" / "dist" / "index.html").write_text(
+        "<html>replacement</html>\n", encoding="utf-8")
+    archive = tmp_path / "source.tar.gz"
+    subprocess.run(
+        ["tar", "-czf", str(archive), "-C", str(archive_source), "."],
+        check=True,
+    )
+    wrong_hash = "0" * 64
+
+    result = subprocess.run(
+        ["bash", "-s", "--", str(app_dir), str(archive), wrong_hash],
+        input=remote_script,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "sha256 mismatch" in (result.stdout + result.stderr)
+    assert env_file.read_text(encoding="utf-8") == "SECRET=must-survive\n"
+    assert sentinel.read_text(encoding="utf-8") == "must-not-change\n"
+    assert not (app_dir / "frontend").exists()
+    assert not archive.exists()
 
 
 def test_workflow_requires_manual_fresh_install_confirmation():

@@ -11,3 +11,5 @@ scripts
 voice-models
 README.md
 requirements.txt
+.env
+.artifacts

@@ -508,18 +508,28 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq sshpass
           bash scripts/ci/create-deployment-archive.sh /tmp/openontology.tar.gz
+          ARCHIVE_SHA256="$(sha256sum /tmp/openontology.tar.gz | awk '{print $1}')"
+          printf '%s' "${ARCHIVE_SHA256}" | grep -Eq '^[0-9a-f]{64}$' || { echo "deployment archive sha256 malformed"; exit 1; }
+          echo "deployment package sha256: ${ARCHIVE_SHA256} (commit ${GITHUB_SHA})"
           REMOTE_ARCHIVE="/tmp/openontology.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.tar.gz"
           sshpass -p "${DEPLOY_PASSWORD}" scp -o StrictHostKeyChecking=yes -o ConnectTimeout=20 /tmp/openontology.tar.gz "${DEPLOY_USER}@${DEPLOY_HOST}:${REMOTE_ARCHIVE}"
           # Keep the persistent .env in place throughout source replacement.
           # An interrupted upload can remove code, but can never strand or
           # restore a stale copy of the encryption authority from /tmp.
-          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "${DEPLOY_USER}@${DEPLOY_HOST}" "bash -s -- '${APP_DIR}' '${REMOTE_ARCHIVE}'" <<'REMOTE_SOURCE_SWAP'
+          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "${DEPLOY_USER}@${DEPLOY_HOST}" "bash -s -- '${APP_DIR}' '${REMOTE_ARCHIVE}' '${ARCHIVE_SHA256}'" <<'REMOTE_SOURCE_SWAP'
           set -Eeuo pipefail
           APP_DIR="$1"
           REMOTE_ARCHIVE="$2"
+          EXPECTED_SHA256="$3"
           umask 077
           trap 'rm -f "$REMOTE_ARCHIVE"' EXIT
           chmod 600 "$REMOTE_ARCHIVE"
+          ACTUAL_SHA256="$(sha256sum "${REMOTE_ARCHIVE}" | awk '{print $1}')"
+          if [ "${ACTUAL_SHA256}" != "${EXPECTED_SHA256}" ]; then
+            echo "deployment archive sha256 mismatch (expected ${EXPECTED_SHA256}, got ${ACTUAL_SHA256}); refusing to extract"
+            exit 1
+          fi
+          echo "deployment archive sha256 verified: ${ACTUAL_SHA256}"
           tar -tzf "$REMOTE_ARCHIVE" >/dev/null
           if [ -L "$APP_DIR" ]; then
             echo "DEPLOY_APP_DIR must be a real directory, not a symlink"
