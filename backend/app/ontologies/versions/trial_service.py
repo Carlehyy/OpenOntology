@@ -179,6 +179,43 @@ def _trial_materialization_candidate(run: OntologyTrialRun) -> SimpleNamespace:
     )
 
 
+def _append_trial_warnings(
+        candidate: SimpleNamespace, warnings: list[dict]) -> None:
+    """把非阻断风险提示并入物料化结果载体，随试跑结果持久化并透出。
+
+    只在载体已有 warnings 列表（正常物料化结果或终态错误结构）时追加，
+    不改变试跑的 passed/failed 判定，也不覆盖执行器写入的其他字段。
+    """
+    if not warnings or not isinstance(candidate.result_json, dict):
+        return
+    existing = candidate.result_json.get("warnings")
+    if not isinstance(existing, list):
+        return
+    candidate.result_json = {
+        **candidate.result_json,
+        "warnings": [*existing, *warnings],
+    }
+
+
+def _advisory_semantic_warnings(
+        semantic_consistency_fn, snapshot_semantic, snapshot_formal,
+) -> list[dict]:
+    """业务语义一致性只提示不阻断：校验器缺失或异常都不得阻断试跑。
+
+    与 semantic_service 写语义层时的 fail-closed 不同，试跑门禁里的该检查
+    是 advisory：校验器抛错时降级为一条 warning，绝不能让试跑 500。
+    """
+    if semantic_consistency_fn is None:
+        return []
+    try:
+        return semantic_consistency_fn(snapshot_semantic, snapshot_formal)
+    except Exception as exc:  # 只提示不阻断：任何校验器异常都降级为警告
+        return [_gate_error(
+            "semantic_consistency_check_failed", "semantic",
+            f"业务语义一致性检查失败（{type(exc).__name__}），已按仅提示处理",
+        )]
+
+
 def _trial_claim_lost_error(run_id: str) -> HTTPException:
     return HTTPException(409, detail={
         "code": "trial_claim_lost",
@@ -469,11 +506,12 @@ def trial_preflight(
     record("mapping_contract", "试跑映射契约", mapping_errors,
            warnings=mapping_coverage)
 
-    # 业务语义层一致性：结构元素必须在业务画布中有对应语义，反之亦然。
-    semantic_errors: list[dict] = []
-    if semantic_consistency_fn is not None:
-        semantic_errors = semantic_consistency_fn(draft.snapshot_semantic, snap)
-    record("semantic_consistency", "业务语义一致性", semantic_errors)
+    # 业务语义层一致性只提示不阻断：业务画布/需求文档与结构的漂移不影响隔离
+    # 物料化，作为 advisory 警告透出，预检整体仍可放行。
+    semantic_warnings = _advisory_semantic_warnings(
+        semantic_consistency_fn, draft.snapshot_semantic, snap)
+    record("semantic_consistency", "业务语义一致性", [],
+           warnings=semantic_warnings)
 
     return {"data": {
         "ok": all(check["status"] in ("pass", "warn") for check in checks),
@@ -552,10 +590,10 @@ def create_trial_run(
     except Exception as exc:
         structural_errors.append(_gate_error(
             "sentinel_validation_failed", "sentinel", str(exc)))
-    # 业务语义层一致性：结构元素必须在业务画布中有对应语义，反之亦然。
-    if semantic_consistency_fn is not None:
-        structural_errors.extend(semantic_consistency_fn(
-            draft.snapshot_semantic, snap))
+    # 业务语义层一致性只提示不阻断：业务画布/需求文档与结构的漂移不影响隔离
+    # 物料化，作为风险警告随试跑结果返回；结构性错误仍 fail-closed。
+    semantic_warnings = _advisory_semantic_warnings(
+        semantic_consistency_fn, draft.snapshot_semantic, snap)
     _raise_publish_errors(structural_errors, "试跑前发布就绪校验未通过")
 
     report = impact_report(current.snapshot_formal, snap)
@@ -601,6 +639,10 @@ def create_trial_run(
             "trial_internal_error",
             f"试跑事务已回滚: {exc}",
         )
+
+    # 业务语义一致性仅提示不阻断：并入试跑结果的 risk warnings，不参与
+    # passed/failed 判定；前端试跑结果弹窗按警告渲染。
+    _append_trial_warnings(candidate, semantic_warnings)
 
     try:
         run = _finalize_trial_candidate(

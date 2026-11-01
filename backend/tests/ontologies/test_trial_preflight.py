@@ -434,17 +434,44 @@ def test_trial_preflight_reports_semantic_drift(
 
     payload = _preflight(client, auth_headers, oid, draft["id"])
 
-    assert payload["ok"] is False
+    # 业务语义一致性只提示不阻断：检查为 warn、整体 ok，漂移进 warnings。
+    assert payload["ok"] is True
     statuses = _status_by_id(payload)
-    assert statuses["semantic_consistency"] == "fail"
+    assert statuses["semantic_consistency"] == "warn"
     assert all(
         status == "pass"
         for check_id, status in statuses.items()
         if check_id != "semantic_consistency"
     )
-    errors = _check(payload, "semantic_consistency")["errors"]
-    assert {item["code"] for item in errors} == {"semantic_business_missing"}
-    assert errors[0]["id"] == "Customer"
+    check = _check(payload, "semantic_consistency")
+    assert check["errors"] == []
+    warnings = check["warnings"]
+    assert {item["code"] for item in warnings} == {"semantic_business_missing"}
+    assert warnings[0]["id"] == "Customer"
+    assert db.query(OntologyTrialRun).filter_by(
+        version_id=draft["id"]).count() == 0
+
+
+def test_trial_preflight_degrades_semantic_checker_error_to_warning(
+        client, auth_headers, ontology, db, monkeypatch):
+    """业务语义一致性是 advisory：校验器异常也必须降级为 warning，不能 500。"""
+    from app.ontologies.versions import router as version_router
+
+    oid = ontology["id"]
+    draft = _clean_draft(client, auth_headers, oid, db)
+
+    def explode(_semantic, _formal):
+        raise RuntimeError("semantic checker exploded")
+
+    monkeypatch.setattr(version_router, "semantic_consistency_issues", explode)
+    payload = _preflight(client, auth_headers, oid, draft["id"])
+
+    assert payload["ok"] is True
+    check = _check(payload, "semantic_consistency")
+    assert check["status"] == "warn"
+    assert check["errors"] == []
+    assert [item["code"] for item in check["warnings"]] == [
+        "semantic_consistency_check_failed"]
     assert db.query(OntologyTrialRun).filter_by(
         version_id=draft["id"]).count() == 0
 

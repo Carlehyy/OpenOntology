@@ -357,8 +357,13 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
       setGateIssues([])
       setGateVersionId(null)
       setTrialDetail(run)
+      // 业务语义一致性门禁只提示不阻断：试跑放行后仍有风险提示时如实透出，
+      // 不让用户误以为三面（画布/文档/结构）已完全一致。
+      const riskCount = run.result?.warnings?.length || 0
       setNotice(run.status === 'passed'
-        ? { tone: 'good', text: '草稿已进入试跑态：快照冻结，真实数据仅写入隔离空间。' }
+        ? { tone: 'good', text: riskCount > 0
+          ? `草稿已进入试跑态：快照冻结，真实数据仅写入隔离空间。另有 ${riskCount} 项风险提示（仅提示，不阻断试跑），可在试跑结果中查看。`
+          : '草稿已进入试跑态：快照冻结，真实数据仅写入隔离空间。' }
         : { tone: 'bad', text: '试跑未通过，请根据错误修正结构或映射。' })
     },
     onError: (error, node) => {
@@ -756,9 +761,17 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
             {(trialDetail.result?.errors || []).length > 0 && <div className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] p-3 text-[var(--color-danger)]">
               {(trialDetail.result?.errors || []).map((item, index) => <p key={index}>• {redactTrialText(item.message)}</p>)}
             </div>}
-            {(trialDetail.result?.warnings || []).length > 0 && <div className="rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] p-3 text-[var(--color-warning)]">
-              {(trialDetail.result?.warnings || []).map((item, index) => <p key={index}>• {redactTrialText(item.message)}</p>)}
-            </div>}
+            {(trialDetail.result?.warnings || []).length > 0 && (
+              <div
+                data-testid="trial-result-warnings"
+                className="rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] p-3 text-[var(--color-warning)]"
+              >
+                <p className="font-semibold">风险提示（仅提示，不阻断试跑）· {(trialDetail.result?.warnings || []).length} 项</p>
+                <div className="mt-1 space-y-1">
+                  {(trialDetail.result?.warnings || []).map((item, index) => <p key={index}>• {redactTrialText(item.message)}</p>)}
+                </div>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setTrialDetail(null)}>关闭</Button>
