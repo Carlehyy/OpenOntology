@@ -104,9 +104,11 @@ def _dataset(db: Session, dataset_id: str) -> Dataset:
 
 
 def _latest_no(db: Session, dataset_id: str) -> int:
-    latest = db.query(DatasetVersion).filter(
-        DatasetVersion.dataset_id == dataset_id,
-    ).order_by(DatasetVersion.version_no.desc()).first()
+    from app.data_channel.datasets.version_pointer import (
+        resolve_current_version,
+    )
+
+    latest = resolve_current_version(db, dataset_id)
     return latest.version_no if latest else 0
 
 
@@ -341,9 +343,11 @@ def public_dataset(token: str, limit: int = 50, offset: int = 0,
     offset = max(0, offset)
     svc = DatasetService(db)
     schema = dict(dataset.schema_json or {})
-    latest_version = db.query(DatasetVersion).filter(
-        DatasetVersion.dataset_id == dataset.id,
-    ).order_by(DatasetVersion.version_no.desc()).first()
+    from app.data_channel.datasets.version_pointer import (
+        resolve_current_version,
+    )
+
+    latest_version = resolve_current_version(db, dataset.id)
     version_no = int(latest_version.version_no) if latest_version else 0
 
     # UI paging should only materialize the requested window. The public

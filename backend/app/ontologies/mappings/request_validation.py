@@ -340,12 +340,11 @@ def _validate_version_automation_policy(db: Session, dataset_id: str) -> None:
     from app.data_channel.datasets.models import Dataset, DatasetVersion
 
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    version = (
-        db.query(DatasetVersion)
-        .filter(DatasetVersion.dataset_id == dataset_id)
-        .order_by(DatasetVersion.version_no.desc())
-        .first()
+    from app.data_channel.datasets.version_pointer import (
+        resolve_current_version,
     )
+
+    version = resolve_current_version(db, dataset_id)
     if dataset is None:
         raise HTTPException(404, "Mapping dataset not found")
     eligible, reason = manual_dataset_automation_eligibility(dataset, version)

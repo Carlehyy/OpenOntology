@@ -40,6 +40,7 @@ class DatasetReadError(RuntimeError):
     """
 
 
+
 def dataset_kind_uses_database(kind: str | None) -> bool:
     """Whether a dataset version belongs in the platform database.
 
@@ -1119,9 +1120,32 @@ class DatasetService:
         ).order_by(DatasetVersion.version_no).all()
 
     def _resolve_version(self, dataset_id: str, version_no: int | None) -> DatasetVersion | None:
+        """解析版本；缺省「当前」= Dataset.latest_version_id 权威指针优先。
+
+        候选版本（受控动作待审变更）以更高 version_no 入库但不前移指针：
+        指针非空时精确命中指针（失配抛完整性错误），指针为空才按 MAX
+        兜底（迁移前历史约定）。
+        """
         q = self._db.query(DatasetVersion).filter(
             DatasetVersion.dataset_id == dataset_id)
         if version_no is None:
+            from app.data_channel.datasets.models import Dataset as _Dataset
+
+            dataset = self._db.query(_Dataset).filter(
+                _Dataset.id == dataset_id).first()
+            if dataset is not None and dataset.latest_version_id:
+                current = q.filter(
+                    DatasetVersion.id == dataset.latest_version_id).first()
+                if current is None:
+                    from fastapi import HTTPException
+
+                    raise HTTPException(500, detail={
+                        "code": "dataset_pointer_broken",
+                        "message": (
+                            f"数据集 {dataset_id} 的当前版本指针指向不存在"
+                            f"的版本 {dataset.latest_version_id}"),
+                    })
+                return current
             return q.order_by(DatasetVersion.version_no.desc()).first()
         return q.filter(DatasetVersion.version_no == version_no).first()
 

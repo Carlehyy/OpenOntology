@@ -90,12 +90,11 @@ def _version_eligibility(db: Session, dataset_id: str) -> tuple[bool, str]:
     from app.data_channel.datasets.models import Dataset, DatasetVersion
 
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    version = (
-        db.query(DatasetVersion)
-        .filter(DatasetVersion.dataset_id == dataset_id)
-        .order_by(DatasetVersion.version_no.desc())
-        .first()
+    from app.data_channel.datasets.version_pointer import (
+        resolve_current_version,
     )
+
+    version = resolve_current_version(db, dataset_id)
     if dataset is None:
         return False, "dataset_not_found"
     if dataset.kind == "curated":
