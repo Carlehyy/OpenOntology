@@ -66,6 +66,9 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   const [decommissioning, setDecommissioning] = useState(false)
   const [decommissionOpen, setDecommissionOpen] = useState(false)
   const [decommissionError, setDecommissionError] = useState('')
+  // 离线快照折叠区默认收起（整表同步退出常规路径）；进行中的同步运行必须可见，
+  // 因此 activeSync 时自动展开——用户仍可手动收起（不强行抢回）。
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
 
@@ -343,6 +346,9 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   const canRefresh = canManage
   const canSync = canManage && asset.capabilities.sync
   const activeSync = syncIsActive(sync)
+  useEffect(() => {
+    if (activeSync) setAdvancedOpen(true)
+  }, [activeSync])
 
   return (
     <section data-testid="integrated-asset-detail" className="flex h-full min-h-0 flex-col">
@@ -369,12 +375,12 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
           <p className="mt-1 text-muted-foreground">{backendsLabel(asset)}</p>
         </div>
         <div className="rounded-lg bg-muted p-3">
-          数据版本：<strong>{latestVersionStateLabel(asset, versions)}</strong>
-          <p className="mt-1 text-muted-foreground">只有完整封存版本才能用于精确离线查询与映射。</p>
+          快照版本：<strong>{latestVersionStateLabel(asset, versions)}</strong>
+          <p className="mt-1 text-muted-foreground">「完整同步到版本」会把整张源表封存成快照，仅用于精确离线查询；活映射仍实时读取源当前数据，不以快照为前提。</p>
         </div>
         <div className="rounded-lg bg-muted p-3">
-          本体映射 / Sentinel：<strong>未核验</strong>
-          <p className="mt-1 text-muted-foreground">本页没有映射、Trial/Promote 或 Sentinel 运行证据，不标记完成；请在对应本体版本中核验。</p>
+          本体映射 / Sentinel：<strong>未跟踪</strong>
+          <p className="mt-1 text-muted-foreground">本页不跟踪该数据集被本体映射或哨兵使用的情况；这不影响源表的读取、写入与同步。</p>
         </div>
       </div>
 
@@ -389,13 +395,6 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
           onClick={refreshSchema}
         >
           {refreshingSchema && <Loader2 size={13} className="animate-spin" />}刷新源结构
-        </Button>
-        <Button
-          type="button" variant="outline" size="sm"
-          onClick={startSync}
-          disabled={loadingSync || syncing || activeSync || !!syncError || !canSync || !asset.capabilities.sync}
-        >
-          {syncing && <Loader2 size={13} className="animate-spin" />}完整同步到版本
         </Button>
         <Button type="button" variant="outline" size="sm" onClick={loadVersions} disabled={loadingVersions}>
           {loadingVersions && <Loader2 size={13} className="animate-spin" />}刷新版本状态
@@ -423,33 +422,11 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
 
       {!canWrite && (
         <p className="text-xs text-muted-foreground">
-          写入未启用或当前角色无该资产写权限；源数据直读与同步仍可用。仅资产 owner 或管理员可写入，viewer 只读。
+          写入未启用或当前角色无该资产写权限；源数据直读仍可用，完整同步在下方「离线快照与高级操作」折叠区。
+          写权限由服务端按资产 owner/管理员与资产配置逐动作裁决。
         </p>
       )}
       {error && <Alert variant="danger" role="alert">{error}</Alert>}
-      {syncing && <p role="status" className="text-xs text-muted-foreground">正在同步，尚未确认完整版本。请勿重复提交。</p>}
-
-      {sync && (
-        <div role="status" data-testid="integrated-sync-state" className="space-y-1 rounded-lg bg-muted p-3 text-xs">
-          <p>
-            同步状态：{syncStatusLabel(sync.status)} · 任务 {sync.run_id} · 已读取 {sync.row_count} / {sync.expected_rows || '待源核验'}
-          </p>
-          <p className="text-muted-foreground">
-            排队 {sync.created_at} · 最近进度 {sync.updated_at}{sync.completed_at ? ` · 结束 ${sync.completed_at}` : ''}
-          </p>
-          {sync.version_id && (
-            <p>版本 {sync.version_id} · {syncIsSealed(sync) ? '完整封存已核验' : '完整性未确认'}</p>
-          )}
-          {sync.status === 'failed' && <p className="text-muted-foreground">失败任务已持久化；重试会产生新的 run 与快照，不续传旧任务。</p>}
-          {sync.error && <p role="alert" className="text-destructive">{sync.error}</p>}
-        </div>
-      )}
-      {syncError && (
-        <Alert variant="danger" role="alert">
-          {syncError}
-          <Button type="button" variant="link" size="sm" className="ml-2 h-auto px-1" disabled={loadingSync} onClick={recoverSync}>重试同步状态</Button>
-        </Alert>
-      )}
 
       <details open>
         <summary className="cursor-pointer text-sm font-medium">源字段与主键</summary>
@@ -525,22 +502,69 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
         </div>
       )}
 
-      <div>
-        <h3 className="text-sm font-medium">同步版本</h3>
-        {versionsError && <Alert variant="danger" role="alert" className="mt-2">{versionsError}</Alert>}
-        {!versionsError && versions.length === 0 && <p className="mt-2 text-xs text-muted-foreground">尚无已核验的完整版本</p>}
-        {versions.length > 0 && (
-          <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-            {versions.map(version => (
-              <li key={version.id}>
-                {version.id} · {versionStateLabel(version)} · 行数 {version.row_count}
-                {version.run_id ? ` · run ${version.run_id}` : ''}
-                {version.checksum ? ` · checksum ${version.checksum}` : ''}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {/* 整表同步已退出日常路径：完整快照作为受控离线能力折叠保留，
+          历史（同步运行/封存版本）与 API 全部兼容保留；进行中运行会自动展开。 */}
+      <details
+        open={advancedOpen}
+        onToggle={event => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
+        data-testid="integrated-advanced-operations"
+      >
+        <summary className="cursor-pointer text-sm font-medium">离线快照与高级操作</summary>
+        <div className="mt-2 space-y-3">
+          <p className="text-xs text-muted-foreground">
+            完整同步把源表整体快照为封存版本，只用于精确离线查询；活映射不依赖它，日常查询直接读源当前数据。
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button" variant="outline" size="sm"
+              onClick={startSync}
+              disabled={loadingSync || syncing || activeSync || !!syncError || !canSync || !asset.capabilities.sync}
+              title={!canSync ? '服务端按资产配置与 RBAC 裁决同步权限' : undefined}
+            >
+              {syncing && <Loader2 size={13} className="animate-spin" />}完整同步到版本
+            </Button>
+          </div>
+          {syncing && <p role="status" className="text-xs text-muted-foreground">正在同步，尚未确认完整版本。请勿重复提交。</p>}
+          {sync && (
+            <div role="status" data-testid="integrated-sync-state" className="space-y-1 rounded-lg bg-muted p-3 text-xs">
+              <p>
+                同步状态：{syncStatusLabel(sync.status)} · 任务 {sync.run_id} · 已读取 {sync.row_count} / {sync.expected_rows || '待源核验'}
+              </p>
+              <p className="text-muted-foreground">
+                排队 {sync.created_at} · 最近进度 {sync.updated_at}{sync.completed_at ? ` · 结束 ${sync.completed_at}` : ''}
+              </p>
+              {sync.version_id && (
+                <p>版本 {sync.version_id} · {syncIsSealed(sync) ? '完整封存已核验' : '完整性未确认'}</p>
+              )}
+              {sync.status === 'failed' && <p className="text-muted-foreground">失败任务已持久化；重试会产生新的 run 与快照，不续传旧任务。</p>}
+              {sync.error && <p role="alert" className="text-destructive">{sync.error}</p>}
+            </div>
+          )}
+          {syncError && (
+            <Alert variant="danger" role="alert">
+              {syncError}
+              <Button type="button" variant="link" size="sm" className="ml-2 h-auto px-1" disabled={loadingSync} onClick={recoverSync}>重试同步状态</Button>
+            </Alert>
+          )}
+
+          <div>
+            <h3 className="text-sm font-medium">同步版本</h3>
+            {versionsError && <Alert variant="danger" role="alert" className="mt-2">{versionsError}</Alert>}
+            {!versionsError && versions.length === 0 && <p className="mt-2 text-xs text-muted-foreground">尚无已核验的完整版本</p>}
+            {versions.length > 0 && (
+              <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                {versions.map(version => (
+                  <li key={version.id}>
+                    {version.id} · {versionStateLabel(version)} · 行数 {version.row_count}
+                    {version.run_id ? ` · run ${version.run_id}` : ''}
+                    {version.checksum ? ` · checksum ${version.checksum}` : ''}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </details>
 
       {outcomeUnconfirmed && receipt?.status !== 'conflict' && (
         <Alert variant="warning" role="alert">

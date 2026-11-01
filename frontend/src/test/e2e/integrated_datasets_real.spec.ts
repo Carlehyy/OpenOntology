@@ -305,6 +305,8 @@ test.describe('real integrated-dataset isolated stack', () => {
       const firstSourceRow = detail.getByTestId('integrated-source-rows').getByRole('row').filter({ has: page.getByRole('button', { name: '编辑源记录 1', exact: true }) })
       await expect(firstSourceRow).toContainText('9007199254740993')
       const syncPending = page.waitForResponse(response => response.url().endsWith(`/${id}/sync`) && response.request().method() === 'POST')
+      // 完整同步在「离线快照与高级操作」折叠区：先展开再点击。
+      await detail.getByTestId('integrated-advanced-operations').locator('summary').click()
       await detail.getByRole('button', { name: '完整同步到版本', exact: true }).click()
       const syncResponse = await syncPending
       expect(syncResponse.status()).toBe(202)

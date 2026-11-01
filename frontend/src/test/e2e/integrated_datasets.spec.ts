@@ -219,6 +219,13 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
 
 const deepLink = '/#/data/structured?tab=integrated&dataset=asset-orders'
 
+/** 整表同步入口已移出日常路径：默认折叠，用例需展开后再断言同步按钮。 */
+async function openAdvancedOperations(page: Page) {
+  const advanced = page.getByTestId('integrated-advanced-operations')
+  await advanced.locator('summary').click()
+  return advanced
+}
+
 test('integrated deep link opens the asset detail and survives reload', async ({ page }) => {
   await mockIntegrated(page)
   await page.goto(deepLink)
@@ -227,7 +234,9 @@ test('integrated deep link opens the asset detail and survives reload', async ({
   const detailDialog = page.getByRole('dialog', { name: '订单源' })
   const detail = detailDialog.getByTestId('integrated-asset-detail')
   await expect(detail).toContainText('订单源')
-  await expect(detail).toContainText('本体映射 / Sentinel：未核验')
+  await expect(detail).toContainText('快照版本')
+  await expect(detail).toContainText('本体映射 / Sentinel：未跟踪')
+  await expect(detail).toContainText('活映射仍实时读取源当前数据')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('DBX 元数据：已配置')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('v0.6.53 · commit 0137e0cbc8b663da5a17ec424c6d47e4e5570ead')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('快照 native · 写入 native · 元数据 dbx')
@@ -388,6 +397,9 @@ for (const role of ['viewer', 'custom'] as const) {
     await page.goto(deepLink)
     // 模态弹窗打开时背景列表被 aria-hidden：弹窗内先核验只读，再关弹窗核验列表入口。
     await expect(page.getByRole('button', { name: '新增源记录', exact: true })).toBeDisabled()
+    // 整表同步已移出日常路径：默认折叠不可见；展开后仍按能力禁用
+    await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeHidden()
+    await openAdvancedOperations(page)
     await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: '加载源数据', exact: true }).click()
     await expect(page.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeDisabled()
@@ -790,10 +802,13 @@ test('zero-dependency asset decommission removes the detail and clears the deep 
 test('asynchronous sync reports real queued state and refresh restores the persisted run', async ({ page }) => {
   const requests = await mockIntegrated(page)
   await page.goto(deepLink)
+  await openAdvancedOperations(page)
   await page.getByRole('button', { name: '完整同步到版本', exact: true }).click()
   await expect(page.getByTestId('integrated-sync-state')).toContainText('等待执行')
   await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeDisabled()
   await page.reload()
+  // 封存后运行不再活跃，折叠区回到默认收起：展开后核对持久化历史
+  await openAdvancedOperations(page)
   await expect(page.getByTestId('integrated-sync-state')).toContainText('sync-run-1')
   await expect(page.getByTestId('integrated-sync-state')).toContainText('完整封存已核验', { timeout: 10000 })
   await expect(page.getByTestId('integrated-sync-state')).toContainText('10000 / 10000')
@@ -804,6 +819,7 @@ test('asynchronous sync reports real queued state and refresh restores the persi
 test('sync history errors can be retried without issuing a new sync', async ({ page }) => {
   const requests = await mockIntegrated(page, { restoreRun: true, historyError: true })
   await page.goto(deepLink)
+  await openAdvancedOperations(page)
   await expect(page.getByRole('alert')).toContainText('SYNC_HISTORY_UNAVAILABLE')
   await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeDisabled()
   // Test-only control: let the explicit retry read succeed after the alert.
@@ -818,11 +834,13 @@ for (const failure of ['dispatch', 'worker'] as const) {
   test(`${failure} sync failure is persisted and never presented as a complete version`, async ({ page }) => {
     const requests = await mockIntegrated(page, { syncFailure: failure })
     await page.goto(deepLink)
+    await openAdvancedOperations(page)
     await page.getByRole('button', { name: '完整同步到版本', exact: true }).click()
     await expect(page.getByTestId('integrated-sync-state')).toContainText('同步状态：失败', { timeout: 10000 })
     await expect(page.getByTestId('integrated-sync-state')).not.toContainText('完整封存已核验')
     if (failure === 'dispatch') await expect(page.getByTestId('integrated-asset-detail').getByRole('alert').first()).toContainText('INTEGRATED_DISPATCH_UNCONFIRMED')
     await page.reload()
+    await openAdvancedOperations(page)
     await expect(page.getByTestId('integrated-sync-state')).toContainText('同步状态：失败')
     expect(requests.filter(request => request.path.endsWith('/sync') && request.method === 'POST')).toHaveLength(1)
   })
@@ -841,10 +859,30 @@ test('existing version ID without sealed manifest evidence remains unverified', 
 test('persisted starting state is active and continues polling to sealed', async ({ page }) => {
   const requests = await mockIntegrated(page, { restoreRun: true })
   await page.goto(deepLink)
+  // 进行中的同步必须可见：折叠区因 active 运行自动展开，不允许静默隐藏
+  await expect(page.getByTestId('integrated-advanced-operations')).toContainText('完整同步到版本')
   await expect(page.getByTestId('integrated-sync-state')).toContainText('启动中')
   await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeDisabled()
   await expect(page.getByTestId('integrated-sync-state')).toContainText('完整封存已核验', { timeout: 10000 })
   expect(requests.filter(request => request.path.endsWith('/sync') && request.method === 'POST')).toHaveLength(0)
+})
+
+test('整表同步入口默认折叠在离线快照区，日常路径只保留活读预览', async ({ page }) => {
+  await mockIntegrated(page)
+  await page.goto(deepLink)
+  const detail = page.getByTestId('integrated-asset-detail')
+  // 日常路径：活读预览入口可用；整表同步按钮在折叠区默认不可见
+  await expect(detail.getByRole('button', { name: '加载源数据', exact: true })).toBeEnabled()
+  await expect(detail.getByRole('button', { name: '完整同步到版本', exact: true })).toBeHidden()
+  await expect(detail.getByTestId('integrated-advanced-operations')).toContainText('离线快照与高级操作')
+  // 文案口径：活映射实时读源；快照仅离线使用，不是查询前提
+  await expect(detail).toContainText('活映射仍实时读取源当前数据')
+  await expect(detail).toContainText('不以快照为前提')
+  await expect(detail).not.toContainText('只有完整封存版本才能用于')
+  // 展开：受控同步入口与封存历史保留（sync/sync-runs API 兼容不变）
+  await openAdvancedOperations(page)
+  await expect(detail.getByRole('button', { name: '完整同步到版本', exact: true })).toBeEnabled()
+  await expect(detail.getByTestId('integrated-advanced-operations')).toContainText('同步版本')
 })
 
 test('DBX 503 is an explicit discovery error rather than invented source success', async ({ page }) => {
@@ -879,6 +917,7 @@ test('non-owner editor is read-only for this asset while sync remains available'
   await mockIntegrated(page, { role: 'editor', assetWrite: false })
   await page.goto(deepLink)
   const detail = page.getByTestId('integrated-asset-detail')
+  await openAdvancedOperations(page)
   await expect(detail.getByRole('button', { name: '完整同步到版本', exact: true })).toBeEnabled()
   await expect(detail.getByRole('button', { name: '新增源记录', exact: true })).toBeDisabled()
   await detail.getByRole('button', { name: '加载源数据', exact: true }).click()
