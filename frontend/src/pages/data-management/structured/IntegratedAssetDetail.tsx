@@ -345,17 +345,19 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   const activeSync = syncIsActive(sync)
 
   return (
-    <section data-testid="integrated-asset-detail" className="space-y-4 rounded-xl border border-border bg-card p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold">{asset.name}</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
+    <section data-testid="integrated-asset-detail" className="flex h-full min-h-0 flex-col">
+      {/* 弹窗头：DialogTitle 供 Radix Content 关联可达名；pr-14 给右上角关闭按钮让位 */}
+      <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4 pr-14">
+        <div className="min-w-0">
+          <DialogTitle className="text-base font-semibold">{asset.name}</DialogTitle>
+          <p className="mt-1 break-all text-xs text-muted-foreground">
             {asset.schema_name}.{asset.table_name} · 连接 {asset.connection_id} · 资产 {asset.id}
           </p>
         </div>
         <Badge variant={canWrite ? 'success' : 'secondary'}>{canWrite ? '受控可写' : '只读'}</Badge>
       </div>
 
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
       <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-lg bg-muted p-3">
           连接状态：<strong>{sourceReadLabel(rows)}</strong>
@@ -554,8 +556,11 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
         </p>
       )}
 
+      </div>
+
+      {/* 嵌套弹窗必须升层：外层详情弹窗占据 base 层 */}
       <Dialog open={!!intent} onOpenChange={open => { if (!open) closeEditor() }}>
-        <DialogContent dismissible={!saving} className="max-h-[85vh] overflow-y-auto">
+        <DialogContent dismissible={!saving} layer="nested" className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{intent?.mode === 'delete' ? '删除源记录' : intent?.mode === 'insert' ? '新增源记录' : '编辑源记录'}</DialogTitle>
             <DialogDescription>
@@ -645,6 +650,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
         confirmText={decommissioning ? '注销中...' : '确认注销'}
         variant="danger"
         loading={decommissioning}
+        layer="nested"
         onConfirm={decommission}
         onClose={() => { if (!decommissioning) setDecommissionOpen(false) }}
       />

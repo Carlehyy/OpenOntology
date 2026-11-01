@@ -7,6 +7,7 @@ import { useAuthStore } from '@/stores/authStore'
 import { Alert } from '@/components/ui/Alert'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { Dialog, DialogContent } from '@/components/ui/dialog'
 import IntegratedRegisterDialog from './IntegratedRegisterDialog'
 import IntegratedAssetDetail from './IntegratedAssetDetail'
 import { backendsLabel, dbxState, dbxStateDetail, dbxStateLabel, integratedError } from './integratedModel'
@@ -217,17 +218,22 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
       </section>
 
       {focusError && <Alert variant="danger" role="alert">{focusError}</Alert>}
+      {/* 详情以弹窗承载，open 由 ?dataset= 深链驱动；关闭即清除深链回到列表 */}
       {selected && (
-        <IntegratedAssetDetail
-          key={`detail-${selected.id}`}
-          asset={selected}
-          canManage={canManage}
-          onChanged={refresh}
-          onDecommissioned={() => {
-            clearSelection()
-            window.dispatchEvent(new Event('ontoprompt:data-assets-changed'))
-          }}
-        />
+        <Dialog open onOpenChange={open => { if (!open) clearSelection() }}>
+          <DialogContent className="flex h-[85vh] w-[min(96vw,1440px)] flex-col overflow-hidden p-0">
+            <IntegratedAssetDetail
+              key={`detail-${selected.id}`}
+              asset={selected}
+              canManage={canManage}
+              onChanged={refresh}
+              onDecommissioned={() => {
+                clearSelection()
+                window.dispatchEvent(new Event('ontoprompt:data-assets-changed'))
+              }}
+            />
+          </DialogContent>
+        </Dialog>
       )}
       {registering && (
         <IntegratedRegisterDialog
