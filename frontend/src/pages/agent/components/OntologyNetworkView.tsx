@@ -327,10 +327,6 @@ export function OntologyNetworkView({
         </button>
       </div>
 
-      <div className="pointer-events-none absolute bottom-6 left-4 z-10 hidden items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[10px] font-medium text-muted-foreground shadow-sm backdrop-blur lg:flex">
-        滚轮缩放 · 按住拖拽 · 双击复位
-      </div>
-
       <svg
         ref={svgRef}
         className="relative z-0 h-full w-full touch-none cursor-grab select-none active:cursor-grabbing"
