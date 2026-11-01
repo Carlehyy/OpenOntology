@@ -88,7 +88,8 @@ def test_upgrade_skips_when_indexes_already_exist(tmp_path, monkeypatch):
     cfg = _alembic_config(backend, db_path)
     command.stamp(cfg, "0102_super_assistant_palace_sync_token")
     # 索引已存在（如模型 create_all 先行建过）：升级必须幂等跳过而非报错。
-    command.upgrade(cfg, "head")
+    # 锚定被测迁移自身（最小合成库无后续迁移依赖的真实基线表）。
+    command.upgrade(cfg, "0103_ontology_readpath_perf_indexes")
 
     assert _index_columns(
         db_path, "ontology_versions", "ix_ontology_versions_ontology_created"
@@ -111,4 +112,5 @@ def test_upgrade_refuses_same_name_different_columns(tmp_path, monkeypatch):
     command.stamp(cfg, "0102_super_assistant_palace_sync_token")
 
     with pytest.raises(RuntimeError, match="ix_ontology_versions_ontology_created"):
-        command.upgrade(cfg, "head")
+        # 锚定被测迁移自身（最小合成库无后续迁移依赖的真实基线表）。
+        command.upgrade(cfg, "0103_ontology_readpath_perf_indexes")

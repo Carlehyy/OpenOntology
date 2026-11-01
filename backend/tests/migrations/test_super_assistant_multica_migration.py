@@ -43,8 +43,9 @@ def test_upgrade_creates_multica_config_table(tmp_path, monkeypatch):
     cfg = _alembic_config(backend, db_path)
     _create_users_table(db_path)
     command.stamp(cfg, "0092_user_token_version")
-
-    command.upgrade(cfg, "head")
+    # 锚定被测迁移自身：最小合成库不具备后续迁移所依赖的真实基线表，
+    # 语义验证不因无关 head 演进而漂移。
+    command.upgrade(cfg, "0093_super_assistant_multica")
 
     assert _table_exists(db_path, "super_assistant_multica_configs")
     engine = create_engine(f"sqlite:///{db_path}")
@@ -85,8 +86,9 @@ def test_upgrade_is_idempotent_when_table_exists(tmp_path, monkeypatch):
         ))
     engine.dispose()
     command.stamp(cfg, "0092_user_token_version")
-
-    command.upgrade(cfg, "head")  # guard 应跳而不是重复建表
+    # 锚定被测迁移自身：最小合成库不具备后续迁移所依赖的真实基线表，
+    # 语义验证不因无关 head 演进而漂移。
+    command.upgrade(cfg, "0093_super_assistant_multica")  # guard 应跳而不是重复建表
     assert _table_exists(db_path, "super_assistant_multica_configs")
 
 
@@ -97,8 +99,9 @@ def test_downgrade_drops_multica_config_table(tmp_path, monkeypatch):
     cfg = _alembic_config(backend, db_path)
     _create_users_table(db_path)
     command.stamp(cfg, "0092_user_token_version")
-
-    command.upgrade(cfg, "head")
+    # 锚定被测迁移自身：最小合成库不具备后续迁移所依赖的真实基线表，
+    # 语义验证不因无关 head 演进而漂移。
+    command.upgrade(cfg, "0093_super_assistant_multica")
     assert _table_exists(db_path, "super_assistant_multica_configs")
     command.downgrade(cfg, "0092_user_token_version")
     assert not _table_exists(db_path, "super_assistant_multica_configs")
@@ -110,4 +113,4 @@ def test_head_is_single_and_follows_token_version(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     heads = ScriptDirectory.from_config(cfg).get_heads()
     # 0094 palace folders 在本迁移之后线性追加，head 随之演进
-    assert heads == ["0137_integrated_field_config"]
+    assert heads == ["0139_curated_candidate_provenance"]

@@ -41,12 +41,14 @@ def test_single_head_and_kernel_chain_numbered_after_baseline(monkeypatch):
     assert kernel.down_revision == "0110_sa_browser_source"
 
 
-def test_baseline_stamped_existing_database_upgrades_to_head(tmp_path, monkeypatch):
+def test_baseline_stamped_existing_database_upgrades_to_kernel_chain_head(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _cfg(tmp_path)
     # 模拟已升级到基线 main head 的存量业务库。
     command.stamp(cfg, "0109_user_query_keys")
-    command.upgrade(cfg, "head")
+    # 锚定 kernel 链自身 head：最小合成库未经历真实基线，后续无关迁移
+    # （如 0138 结构投影 fence 列所依赖的基线表）不在本测试语义范围。
+    command.upgrade(cfg, "0111_super_assistant_kernel")
 
 
 def test_full_chain_upgrades_downgrades_and_replays(tmp_path, monkeypatch):

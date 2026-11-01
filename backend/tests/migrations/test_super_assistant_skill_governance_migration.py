@@ -33,7 +33,7 @@ def test_revision_graph_head_is_single_head(tmp_path, monkeypatch):
 
     # 单头门禁：新迁移必须线性追加（当前 head 见 alembic heads 输出）。
     assert len(heads) == 1
-    assert heads == ["0137_integrated_field_config"]
+    assert heads == ["0139_curated_candidate_provenance"]
 
 def _create_0067_shape_skills_table(db_path: Path) -> None:
     """手工建 0067 形态的 super_assistant_skills（不含治理列）。
@@ -76,7 +76,8 @@ def test_upgrade_adds_governance_columns_with_defaults(tmp_path, monkeypatch):
     _create_0067_shape_skills_table(db_path)
     command.stamp(cfg, "0067_super_assistant_evolution")
 
-    command.upgrade(cfg, "head")
+    # 锚定被测迁移自身：语义验证不随无关 head 演进而漂移。
+    command.upgrade(cfg, "0068_super_assistant_skill_governance")
 
     assert {"always_active", "use_count", "last_used_at"} <= _skill_columns(db_path)
     # 存量行按 server_default 回填：always_active=False、use_count=0、last_used_at=NULL
@@ -113,7 +114,8 @@ def test_upgrade_is_idempotent_when_columns_already_exist(tmp_path, monkeypatch)
     engine.dispose()
     command.stamp(cfg, "0067_super_assistant_evolution")
 
-    command.upgrade(cfg, "head")
+    # 锚定被测迁移自身：语义验证不随无关 head 演进而漂移。
+    command.upgrade(cfg, "0068_super_assistant_skill_governance")
     assert {"always_active", "use_count", "last_used_at"} <= _skill_columns(db_path)
 
 

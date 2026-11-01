@@ -53,7 +53,8 @@ def test_upgrade_adds_workspace_name_with_default(tmp_path, monkeypatch):
     _create_0093_shape_table(db_path)
     command.stamp(cfg, "0094_palace_folders")
 
-    command.upgrade(cfg, "head")
+    # 锚定被测迁移自身（最小合成库无后续迁移依赖的真实基线表）。
+    command.upgrade(cfg, "0095_super_assistant_multica_workspace_name")
 
     columns = _columns(db_path)
     assert "workspace_name" in columns
@@ -87,7 +88,8 @@ def test_upgrade_is_idempotent_when_column_exists(tmp_path, monkeypatch):
     engine.dispose()
     command.stamp(cfg, "0094_palace_folders")
 
-    command.upgrade(cfg, "head")  # guard 应跳过而不是重复加列
+    # 锚定被测迁移自身（最小合成库无后续迁移依赖的真实基线表）。
+    command.upgrade(cfg, "0095_super_assistant_multica_workspace_name")  # guard 应跳过而不是重复加列
     assert "workspace_name" in _columns(db_path)
 
 
@@ -99,7 +101,8 @@ def test_downgrade_drops_workspace_name(tmp_path, monkeypatch):
     _create_0093_shape_table(db_path)
     command.stamp(cfg, "0094_palace_folders")
 
-    command.upgrade(cfg, "head")
+    # 锚定被测迁移自身（最小合成库无后续迁移依赖的真实基线表）。
+    command.upgrade(cfg, "0095_super_assistant_multica_workspace_name")
     assert "workspace_name" in _columns(db_path)
     command.downgrade(cfg, "0094_palace_folders")
     assert "workspace_name" not in _columns(db_path)
@@ -111,4 +114,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0137_integrated_field_config"]
+    assert heads == ["0139_curated_candidate_provenance"]
