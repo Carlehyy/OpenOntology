@@ -369,12 +369,12 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
           <p className="mt-1 text-muted-foreground">{backendsLabel(asset)}</p>
         </div>
         <div className="rounded-lg bg-muted p-3">
-          数据版本：<strong>{latestVersionStateLabel(asset, versions)}</strong>
-          <p className="mt-1 text-muted-foreground">只有完整封存版本才能用于精确离线查询与映射。</p>
+          快照版本：<strong>{latestVersionStateLabel(asset, versions)}</strong>
+          <p className="mt-1 text-muted-foreground">「完整同步到版本」会把整张源表封存成快照；平台查询与本体映射只用快照，不直连源库。</p>
         </div>
         <div className="rounded-lg bg-muted p-3">
-          本体映射 / Sentinel：<strong>未核验</strong>
-          <p className="mt-1 text-muted-foreground">本页没有映射、Trial/Promote 或 Sentinel 运行证据，不标记完成；请在对应本体版本中核验。</p>
+          本体映射 / Sentinel：<strong>未跟踪</strong>
+          <p className="mt-1 text-muted-foreground">本页不跟踪该数据集被本体映射或哨兵使用的情况；这不影响源表的读取、写入与同步。</p>
         </div>
       </div>
 

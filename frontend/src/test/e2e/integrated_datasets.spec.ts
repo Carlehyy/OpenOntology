@@ -227,7 +227,7 @@ test('integrated deep link opens the asset detail and survives reload', async ({
   const detailDialog = page.getByRole('dialog', { name: '订单源' })
   const detail = detailDialog.getByTestId('integrated-asset-detail')
   await expect(detail).toContainText('订单源')
-  await expect(detail).toContainText('本体映射 / Sentinel：未核验')
+  await expect(detail).toContainText('本体映射 / Sentinel：未跟踪')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('DBX 元数据：已配置')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('v0.6.53 · commit 0137e0cbc8b663da5a17ec424c6d47e4e5570ead')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('快照 native · 写入 native · 元数据 dbx')
