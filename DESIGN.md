@@ -74,8 +74,9 @@ success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引�
 面板（浅冷灰底 + 深字；2026-10-16 由创始人拍板，替代此前「明暗两态近同
 的近黑底」条款），深色模式保持近黑面板——两态各自保证前景可读；仍替代
 页域私设的 `bg-slate-950` 类色板。聊天/文档正文 markdown 内的代码块属
-浅色阅读面，用 `--color-bg-elevated` 底 + `--color-text-primary` 字
-（超级助手聊天与消息通知正文），阅读画布不被打断。
+浅色阅读面，用 `--color-bg-elevated` 底 + `--color-text-primary` 字、
+行内代码用 `--color-bg-hover` 底（超级助手、本体助手聊天与消息通知
+正文），阅读画布不被打断。
 类型编码色（图例、类型徽章、结构图节点等分类数据可视化）使用
 `viz-*` 分类色组（violet/fuchsia/rose/orange/indigo/cyan 及各自 -soft
 浅底），取值与 §5 图表序列同源、`:root`/`.dark` 成对维护；禁止在页面
