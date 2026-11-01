@@ -5965,9 +5965,9 @@ def test_semantic_layer_summary_and_branch_inheritance(
     assert child_row.snapshot_semantic == parent_row.snapshot_semantic
 
 
-def test_trial_gate_requires_semantic_layer_for_non_empty_structure(
+def test_trial_gate_downgrades_semantic_drift_to_warning(
         client, auth_headers, ontology, db, monkeypatch):
-    """结构非空但无语义层的草稿被试跑门禁拦下；补上自洽语义层后放行。"""
+    """结构非空但无语义层的草稿也可进入试跑态；语义漂移只作为风险警告返回。"""
     oid = ontology["id"]
     _dataset(db, monkeypatch)
     root = _root(client, auth_headers, oid)
@@ -5994,30 +5994,29 @@ def test_trial_gate_requires_semantic_layer_for_non_empty_structure(
     )
     assert mapped.status_code == 200, mapped.text
 
-    blocked = client.post(
-        f"/api/v2/ontologies/{oid}/versions/{draft['id']}/trial-runs",
-        headers=auth_headers, json={},
-    )
-    assert blocked.status_code == 422, blocked.text
-    detail = blocked.json()["detail"]
-    assert detail["code"] == "publish_validation_failed"
-    assert {item["code"] for item in detail["errors"]} == {
-        "semantic_business_missing",
-    }
-    error = detail["errors"][0]
-    assert error["kind"] == "objectType"
-    assert error["id"] == "Order"
-    assert "在业务画布中没有对应" in error["message"]
-    assert db.query(OntologyTrialRun).filter_by(
-        version_id=draft["id"]).count() == 0
-
-    _attach_semantic_layer(db, draft["id"])
+    # 业务语义一致性只提示不阻断：试跑放行，语义漂移进入试跑结果 warnings。
     trial = client.post(
         f"/api/v2/ontologies/{oid}/versions/{draft['id']}/trial-runs",
         headers=auth_headers, json={},
     )
     assert trial.status_code == 201, trial.text
-    assert trial.json()["data"]["status"] == "passed"
+    run = trial.json()["data"]
+    assert run["status"] == "passed"
+    warnings = [
+        item for item in run["result"]["warnings"]
+        if str(item.get("code") or "").startswith("semantic_")
+    ]
+    assert {item["code"] for item in warnings} == {"semantic_business_missing"}
+    warning = warnings[0]
+    assert warning["kind"] == "objectType"
+    assert warning["id"] == "Order"
+    assert "在业务画布中没有对应" in warning["message"]
+    # 试跑记录已产生，版本进入试跑态：语义漂移不再是硬门禁。
+    db.expire_all()
+    row = db.query(OntologyVersion).filter_by(id=draft["id"]).one()
+    assert row.lifecycle_status == "trial_ready"
+    assert db.query(OntologyTrialRun).filter_by(
+        version_id=draft["id"]).count() == 1
 
 
 def test_promotion_carries_semantic_layer_to_release(

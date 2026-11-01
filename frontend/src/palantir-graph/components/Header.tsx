@@ -30,6 +30,8 @@ interface HeaderProps {
   onToggleObjects?: () => void;
   showObjects?: boolean;
   onOpenMapping?: () => void;
+  /** 左上角本体图标点击 = 画布左列「返回」：由宿主统一收口离开语义（含未保存结构拦截） */
+  onBack?: () => void;
 }
 
 interface DefinitionStatBadgesProps {
@@ -86,7 +88,7 @@ export function DefinitionStatBadges({
   );
 }
 
-export default function Header({ readOnly = false, stageLabel, onToggleActions, onToggleFunctions, showActions, showFunctions, onToggleLinks, showLinks, onToggleObjects, showObjects, onOpenMapping }: HeaderProps) {
+export default function Header({ readOnly = false, stageLabel, onToggleActions, onToggleFunctions, showActions, showFunctions, onToggleLinks, showLinks, onToggleObjects, showObjects, onOpenMapping, onBack }: HeaderProps) {
   const { ontology, syncStatus, isDirty, syncError, saveToBackend, discardAndReload, lastSentinelSummary } = useOntologyStore();
 
   if (!ontology) return null;
@@ -96,9 +98,22 @@ export default function Header({ readOnly = false, stageLabel, onToggleActions, 
       <div className="flex flex-wrap items-center gap-3 px-4 py-3 md:px-6 md:grid md:grid-cols-[1fr_auto_1fr]">
         <div className="flex min-w-0 items-center gap-4 md:justify-self-start">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-onto-500 to-purple-600 flex items-center justify-center">
-              <DocumentTextIcon className="w-5 h-5 text-white" />
-            </div>
+            {onBack ? (
+              <button
+                type="button"
+                onClick={onBack}
+                title="返回"
+                aria-label="返回"
+                data-testid="graph-header-back"
+                className="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-onto-500 to-purple-600 flex items-center justify-center transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-onto-400"
+              >
+                <DocumentTextIcon className="w-5 h-5 text-white" />
+              </button>
+            ) : (
+              <div className="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-onto-500 to-purple-600 flex items-center justify-center">
+                <DocumentTextIcon className="w-5 h-5 text-white" />
+              </div>
+            )}
             <div className="min-w-0">
               <h1 className="max-w-[13rem] truncate font-display text-lg font-bold text-surface-100 sm:max-w-[18rem] xl:max-w-none">
                 {ontology.name}

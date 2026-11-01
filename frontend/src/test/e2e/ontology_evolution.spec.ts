@@ -498,7 +498,8 @@ test('complete branch → real-data trial → reviewed release works in the brow
   await expect(page.getByTestId('graph-runtime-tool-instances')).toBeEnabled()
   await expect(page.getByTestId('graph-runtime-tool-runaction')).toBeEnabled()
   await expect(page.getByTestId('graph-runtime-tool-graphdb')).toBeEnabled()
-  await expect(page.getByTestId('graph-runtime-tool-help')).toBeEnabled()
+  // 底部菜单已下线「本体助手」入口；其余运行工具保持可见
+  await expect(page.getByTestId('graph-runtime-tool-help')).toHaveCount(0)
 
   // 功能区不因状态而消失：试跑实例来自隔离表，内容可见但写操作禁用。
   await page.getByTestId('graph-runtime-tool-instances').click()

@@ -136,7 +136,6 @@ export const LEGACY_PALETTE_LIMITS = {
   'palantir-graph/components/panels/FunctionList.tsx':              10,
   'palantir-graph/components/panels/FunctionTester.tsx':            17,
   'palantir-graph/components/panels/GraphDatabaseView.tsx':         24,
-  'palantir-graph/components/panels/HelpGuide.tsx':                 33,
   'palantir-graph/components/panels/InstanceBrowser.tsx':           9,
   'palantir-graph/components/panels/InstanceFactsDrawer.tsx':       6,
   'palantir-graph/components/panels/LinkList.tsx':                  4,

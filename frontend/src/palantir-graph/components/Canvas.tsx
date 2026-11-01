@@ -21,7 +21,7 @@ import {
 } from '@heroicons/react/24/outline';
 
 import { useOntologyStore } from '../store/ontologyStore';
-import { saveCanvasLayout } from '../api/formalApi';
+import { saveCanvasLayout, saveCanvasLayoutKeepAlive } from '../api/formalApi';
 import { routeEdgeHandles } from '../utils/routeEdgeHandles';
 import ObjectTypeNode from './nodes/ObjectTypeNode';
 import MultiConnectionEdge from './edges/MultiConnectionEdge';
@@ -159,6 +159,21 @@ export default function Canvas({ onBrowseInstances, schemaReadOnly = false, layo
   const latestLayout = useRef('');
   const currentLayoutScope = useRef(layoutScope);
 
+  /** 已排期但尚未确认落库的最新布局批次：离开画布（卸载/页面隐藏/切版本）时补发，
+   *  避免 650ms 防抖窗口内返回/刷新丢掉最后一次拖拽的节点位置。 */
+  const pendingLayoutSave = useRef<{
+    backendId: string;
+    versionId: string | null;
+    positions: Record<string, { x: number; y: number }>;
+  } | null>(null);
+
+  const flushPendingLayoutSave = useCallback(() => {
+    const pending = pendingLayoutSave.current;
+    if (!pending) return;
+    pendingLayoutSave.current = null;
+    saveCanvasLayoutKeepAlive(pending.backendId, pending.positions, pending.versionId);
+  }, []);
+
   const renderNodes = useMemo(
     () => schemaReadOnly
       ? nodes.map((node) => ({
@@ -197,18 +212,31 @@ export default function Canvas({ onBrowseInstances, schemaReadOnly = false, layo
   }, [fitView, schemaReadOnly, storeNodes.length, topologyKey]);
 
   useEffect(() => {
+    // 切版本会重建基线：先把上一 scope 的待提交布局补发出去，避免防抖窗口内切版丢位置
+    flushPendingLayoutSave();
     currentLayoutScope.current = layoutScope;
     setLayoutSaveError('');
     setLayoutSaveStatus('idle');
     initializedLayoutScope.current = null;
     if (layoutSaveTimer.current !== null) window.clearTimeout(layoutSaveTimer.current);
     if (layoutSavedResetTimer.current !== null) window.clearTimeout(layoutSavedResetTimer.current);
-  }, [layoutScope]);
+  }, [flushPendingLayoutSave, layoutScope]);
 
   useEffect(() => () => {
     if (layoutSaveTimer.current !== null) window.clearTimeout(layoutSaveTimer.current);
     if (layoutSavedResetTimer.current !== null) window.clearTimeout(layoutSavedResetTimer.current);
   }, []);
+
+  // 布局保存兜底：路由卸载 / 页面隐藏时把待提交批次用 keepalive 立即送达。
+  // 普通 fetch 在文档卸载后会被浏览器中止，keepalive 保证防抖窗口内拖拽的坐标不丢。
+  useEffect(() => {
+    const onPageHide = () => flushPendingLayoutSave();
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      flushPendingLayoutSave();
+    };
+  }, [flushPendingLayoutSave]);
 
   // 后端加载完成后建立已持久化节点基线；新建但尚未保存的对象类型不提前写布局接口。
   useEffect(() => {
@@ -223,6 +251,8 @@ export default function Canvas({ onBrowseInstances, schemaReadOnly = false, layo
     const signature = JSON.stringify(positions);
     lastPersistedLayout.current = signature;
     latestLayout.current = signature;
+    // 结构保存会连同节点坐标一起落库，未确认的布局批次已被覆盖
+    pendingLayoutSave.current = null;
   }, [ontology?.objectTypes, storeNodes, syncStatus]);
 
   // 所有状态共用独立布局自动保存：停止变化 650ms 后提交，串行排队避免旧请求覆盖新位置。
@@ -245,6 +275,7 @@ export default function Canvas({ onBrowseInstances, schemaReadOnly = false, layo
       const signature = JSON.stringify(baseline);
       lastPersistedLayout.current = signature;
       latestLayout.current = signature;
+      pendingLayoutSave.current = null;
       return;
     }
 
@@ -255,10 +286,15 @@ export default function Canvas({ onBrowseInstances, schemaReadOnly = false, layo
     const positions = Object.fromEntries(entries);
     const signature = JSON.stringify(entries.map(([id, position]) => [id, position.x, position.y]));
     latestLayout.current = signature;
-    if (!entries.length || signature === lastPersistedLayout.current) return;
+    if (!entries.length || signature === lastPersistedLayout.current) {
+      // 已与落库基线一致（例如拖回原位）：撤销待补发批次，避免卸载时用旧坐标覆盖
+      pendingLayoutSave.current = null;
+      return;
+    }
 
     if (layoutSaveTimer.current !== null) window.clearTimeout(layoutSaveTimer.current);
     setLayoutSaveError('');
+    pendingLayoutSave.current = { backendId, versionId: workspaceVersionId, positions };
     layoutSaveTimer.current = window.setTimeout(() => {
       const requestedScope = layoutScope;
       const requestedSignature = signature;
@@ -271,6 +307,7 @@ export default function Canvas({ onBrowseInstances, schemaReadOnly = false, layo
             lastPersistedLayout.current = requestedSignature;
             if (currentLayoutScope.current !== requestedScope) return;
             if (latestLayout.current === requestedSignature) {
+              pendingLayoutSave.current = null;
               setLayoutSaveStatus('saved');
               if (layoutSavedResetTimer.current !== null) window.clearTimeout(layoutSavedResetTimer.current);
               layoutSavedResetTimer.current = window.setTimeout(() => setLayoutSaveStatus('idle'), 1800);

@@ -146,12 +146,13 @@ export function Md({ text }: { text: string }) {
           ul: p => <ul className="list-disc pl-5 mb-2 space-y-1" {...p} />,
           ol: p => <ol className="list-decimal pl-5 mb-2 space-y-1" {...p} />,
           li: p => <li className="text-sm leading-relaxed" {...p} />,
-          code: p => <code className="px-1 py-0.5 rounded bg-[var(--color-bg-overlay)] text-[12px] font-mono" {...p} />,
+          // 聊天正文属浅色阅读面（DESIGN.md §2.3）：行内代码用浅灰嵌入底，不得用弹窗遮罩色 overlay
+          code: p => <code className="px-1 py-0.5 rounded bg-[var(--color-bg-hover)] text-[12px] font-mono text-[var(--color-text-primary)]" {...p} />,
           pre: (p: any) => {
             const child = Array.isArray(p.children) ? p.children[0] : p.children
             const lang = /language-(\w+)/.exec(child?.props?.className || '')?.[1]
             if (lang === 'chart') return <ChartBlock source={codeText(child?.props?.children)} />
-            return <pre className="p-3 my-2 rounded-lg bg-[var(--color-bg-overlay)] text-[12px] font-mono overflow-x-auto" {...p} />
+            return <pre className="p-3 my-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] text-[12px] font-mono text-[var(--color-text-primary)] overflow-x-auto" {...p} />
           },
           table: p => (
             <div className="overflow-x-auto my-2 rounded-lg border border-[var(--color-border)]">

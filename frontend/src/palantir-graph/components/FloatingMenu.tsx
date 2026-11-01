@@ -2,7 +2,6 @@ import { useState } from 'react';
 import {
   Bars3Icon,
   XMarkIcon,
-  QuestionMarkCircleIcon,
   PlayIcon,
   CommandLineIcon,
   ShieldExclamationIcon,
@@ -24,7 +23,6 @@ interface MenuItem {
 }
 
 interface FloatingMenuProps {
-  onOpenHelp: () => void;
   onOpenFunctionTest: () => void;
   onOpenActionRun: () => void;
   onOpenSentinel: () => void;
@@ -36,7 +34,6 @@ interface FloatingMenuProps {
 }
 
 export const FloatingMenu = ({
-  onOpenHelp,
   onOpenFunctionTest,
   onOpenActionRun,
   onOpenSentinel,
@@ -108,17 +105,6 @@ export const FloatingMenu = ({
         setIsOpen(false);
       },
       disabledReason: capabilities.canManageSentinels ? undefined : runtimeDisabledReason,
-    },
-    {
-      id: 'help',
-      label: '本体助手',
-      icon: QuestionMarkCircleIcon,
-      color: 'text-purple-400',
-      bgColor: 'bg-purple-500/20 hover:bg-purple-500/30',
-      onClick: () => {
-        onOpenHelp();
-        setIsOpen(false);
-      },
     },
     {
       id: 'runaction',

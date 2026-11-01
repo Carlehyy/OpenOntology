@@ -1,4 +1,4 @@
-import { useState, lazy, Suspense, useEffect, useMemo, useRef } from 'react';
+import { useState, lazy, Suspense, useCallback, useEffect, useMemo, useRef } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { useNavigate } from 'react-router-dom';
 import { ontologyVersionApi } from '@/api/v2/ontology-versions';
@@ -18,9 +18,10 @@ import LinkList from './components/panels/LinkList';
 import ObjectList from './components/panels/ObjectList';
 import SentinelPanel from './components/panels/SentinelPanel';
 import { FloatingMenu } from './components/FloatingMenu';
+import UnsavedChangesDialog from './components/UnsavedChangesDialog';
+import { useStructureLeaveGuard } from './useStructureLeaveGuard';
 import { getGraphWorkspaceCapabilities } from './workspaceCapabilities';
 
-const HelpGuide = lazy(() => import('./components/panels/HelpGuide'));
 const GraphDatabaseView = lazy(() => import('./components/panels/GraphDatabaseView'));
 const FunctionTester = lazy(() => import('./components/panels/FunctionTester'));
 const ActionRunner = lazy(() => import('./components/panels/ActionRunner'));
@@ -80,7 +81,6 @@ export default function GraphWorkspace({
   const navigate = useNavigate();
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const [showHelp, setShowHelp] = useState(false);
   const [showGraphDB, setShowGraphDB] = useState(false);
   const [showFunctionTester, setShowFunctionTester] = useState(false);
   const [testFunctionId, setTestFunctionId] = useState<string>('');
@@ -108,6 +108,19 @@ export default function GraphWorkspace({
   const schemaReadOnly = !capabilities.canEditSchema;
   const [creatingDraft, setCreatingDraft] = useState(false);
   const [draftError, setDraftError] = useState('');
+
+  // 结构未保存离开守卫：画布左列返回、左上角本体图标、浏览器前进/后退共用同一
+  // 弹窗。嵌入模式下宿主拥有导航与返回入口，不接管；只读快照没有结构改动，
+  // 天然不拦。节点位置由画布布局接口自动保存，不计入结构脏状态。
+  const { requestLeave, pendingLeave, confirmLeave, cancelLeave } = useStructureLeaveGuard(
+    !embedded && !schemaReadOnly,
+    isDirty,
+  );
+
+  // 左上角本体图标与画布左列返回按钮共用此动作，保证两边点击效果一致
+  const handleBack = useCallback(() => {
+    requestLeave(() => navigate(-1));
+  }, [navigate, requestLeave]);
 
   // 有未保存改动时，拦截关闭/刷新页面（浏览器原生确认框）
   useEffect(() => {
@@ -315,7 +328,7 @@ export default function GraphWorkspace({
               </button>
             ) : (
               onBackToVersions && (
-                <button className="shrink-0 font-medium underline" onClick={onBackToVersions}>返回版本演进</button>
+                <button className="shrink-0 font-medium underline" onClick={() => requestLeave(onBackToVersions)}>返回版本演进</button>
               )
             )}
           </div>
@@ -348,6 +361,7 @@ export default function GraphWorkspace({
             onToggleObjects={() => setShowObjectPanel(v => !v)}
             showObjects={showObjectPanel}
             onOpenMapping={onOpenMapping}
+            onBack={handleBack}
           />
         ) : (
           /* 无 Header 时（嵌入浅色工作台）：四类定义统计徽章浮动在画布顶部中间
@@ -377,7 +391,7 @@ export default function GraphWorkspace({
             }}
           />
         </main>
-        <Toolbar capabilities={capabilities} onOpenSearch={() => setShowSearch(true)} showBack={!embedded} />
+        <Toolbar capabilities={capabilities} onOpenSearch={() => setShowSearch(true)} onBack={handleBack} showBack={!embedded} />
         <Panel readOnly={schemaReadOnly} />
         <ActionList
           readOnly={schemaReadOnly}
@@ -402,7 +416,6 @@ export default function GraphWorkspace({
 
         <FloatingMenu
           capabilities={capabilities}
-          onOpenHelp={() => setShowHelp(true)}
           onOpenFunctionTest={() => openFunctionTest()}
           onOpenActionRun={() => openActionRun()}
           onOpenSentinel={() => setShowSentinel(true)}
@@ -416,7 +429,6 @@ export default function GraphWorkspace({
         />
 
         <Suspense fallback={<PanelLoader />}>
-          {showHelp && <HelpGuide isOpen={showHelp} onClose={() => setShowHelp(false)} />}
           {showGraphDB && <GraphDatabaseView isOpen={showGraphDB} onClose={() => setShowGraphDB(false)} />}
           {showFunctionTester && (
             <FunctionTester
@@ -444,6 +456,9 @@ export default function GraphWorkspace({
           {showRunHistory && <RunHistoryPanel isOpen={showRunHistory} onClose={() => setShowRunHistory(false)} />}
           {showAutonomy && <AutonomyPanel isOpen={showAutonomy} onClose={() => setShowAutonomy(false)} />}
         </Suspense>
+
+        {/* 结构未保存离开确认：画布返回 / 左上角图标 / 浏览器前进后退共用 */}
+        {pendingLeave && <UnsavedChangesDialog onStay={cancelLeave} onLeave={confirmLeave} />}
       </div>
     </ReactFlowProvider>
   );

@@ -398,7 +398,7 @@ export function ChartBlock({ source }: { source: string }) {
   if (!spec) {
     return (
       <div className="my-2">
-        <pre className="overflow-x-auto rounded-lg bg-[var(--color-bg-overlay)] p-3 text-[12px] font-mono">{source}</pre>
+        <pre className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 text-[12px] font-mono text-[var(--color-text-primary)]">{source}</pre>
         <p className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">（图表数据未能解析，已按原文显示）</p>
       </div>
     )

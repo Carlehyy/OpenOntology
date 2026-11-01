@@ -31,6 +31,18 @@ const message = (id: string, role: 'user' | 'assistant', content: string) => ({
   createdAt: now,
 })
 
+/**
+ * 落库回答带行内代码与围栏代码块：聊天正文属浅色阅读面（DESIGN.md §2.3），
+ * 断言颜色可防止弹窗遮罩色（overlay）回归成 AI 响应里的暗底块。
+ */
+const assistantAnswer = [
+  '当前共有 **18** 个订单实例，主键为 `order_no`。',
+  '',
+  '```json',
+  '{"order_no":"SO-1","status":"paid"}',
+  '```',
+].join('\n')
+
 async function mockPlatform(page: Page, states: {
   runStatus: () => 'running' | 'succeeded'
   answered: () => boolean
@@ -144,7 +156,7 @@ async function mockPlatform(page: Page, states: {
         ontologyId: 'ontology-1',
         userId: 'admin',
         messages: states.answered()
-          ? [message('message-1', 'user', '查询订单数量'), message('message-2', 'assistant', '当前共有 18 个订单实例。')]
+          ? [message('message-1', 'user', '查询订单数量'), message('message-2', 'assistant', assistantAnswer)]
           : [message('message-1', 'user', '查询订单数量')],
       })
     }
@@ -190,9 +202,21 @@ test('后台回合恢复：横幅 → 正在处理 → 自动装载落库回答'
   states.runStatus = () => 'succeeded'
   states.answered = () => true
 
-  await expect(page.getByText('当前共有 18 个订单实例。')).toBeVisible()
+  await expect(page.getByText('当前共有 18 个订单实例，主键为')).toBeVisible()
   await expect(page.getByTestId('agent-resume-pending')).toHaveCount(0)
   await expect(page.getByTestId('agent-resume-banner')).toHaveCount(0)
+
+  // AI 响应正文的 Markdown 阅读面保持浅色（DESIGN.md §2.3）：
+  // 行内代码 bg-hover #f1f3f5，围栏块 bg-elevated #f5f7fa，文字 text-primary #1a1a2e
+  const chatRegion = page.getByTestId('agent-chat-region')
+  const inlineCode = chatRegion.locator('p code').filter({ hasText: 'order_no' })
+  await expect(inlineCode).toHaveCSS('background-color', 'rgb(241, 243, 245)')
+  await expect(inlineCode).toHaveCSS('color', 'rgb(26, 26, 46)')
+  const codeBlock = chatRegion.locator('pre')
+  await expect(codeBlock).toContainText('SO-1')
+  await expect(codeBlock).toHaveCSS('background-color', 'rgb(245, 247, 250)')
+  await expect(codeBlock).toHaveCSS('color', 'rgb(26, 26, 46)')
+
   const stored = await page.evaluate(() => sessionStorage.getItem('ontoagent:active-chat-run:v1'))
   expect(stored).toBeNull()
 })

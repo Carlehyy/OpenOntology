@@ -121,7 +121,11 @@ const ok = (route: Route, data: unknown, status = 200) => route.fulfill({
   body: JSON.stringify({ data }),
 })
 
-async function mockSemanticGate(page: Page, state: { createPayload: Record<string, unknown> | null }) {
+async function mockSemanticGate(
+  page: Page,
+  state: { createPayload: Record<string, unknown> | null; trialReady?: boolean },
+  mode: 'blocked' | 'advisory' = 'blocked',
+) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
@@ -141,13 +145,51 @@ async function mockSemanticGate(page: Page, state: { createPayload: Record<strin
         current_release_id: releaseV1.id,
         current_release_number: releaseV1.version_number,
         current_release_version: releaseV1.version_number,
-        versions: [releaseV1, draftV11],
+        versions: [
+          releaseV1,
+          mode === 'advisory' && state.trialReady
+            ? {
+              ...draftV11,
+              lifecycle_status: 'trial_ready',
+              latest_trial: { id: 'trial-advisory-1', status: 'passed' },
+            }
+            : draftV11,
+        ],
       })
     }
     if (
       path === `/api/v2/ontologies/${ontologyId}/versions/${draftVersionId}/trial-runs`
       && request.method() === 'POST'
     ) {
+      if (mode === 'advisory') {
+        // 业务语义一致性降级为 warnings：试跑放行并返回风险提示。
+        state.trialReady = true
+        return ok(route, {
+          id: 'trial-advisory-1',
+          status: 'passed',
+          impact_hash: 'impact-advisory-1',
+          created_at: '2026-08-23T01:00:00Z',
+          result: {
+            counts: { objects: 1, links: 0, facts: 0, datasets: 1 },
+            errors: [],
+            // 真实试跑结果会同时携带映射覆盖等既有风险警告，用于校验文案
+            // 不会把「全部 warnings」误称为业务语义一致性提示。
+            warnings: [
+              ...semanticGateDetail.errors,
+              {
+                code: 'trial_object_mapping_required',
+                kind: 'mapping',
+                id: '',
+                name: '',
+                message: '草稿没有任何已绑定数据集并完成全部存储属性映射的对象实体，试跑与发布都不会灌入实例数据',
+              },
+            ],
+            sentinels: [],
+            actionsExecuted: 0,
+            sideEffects: 'blocked',
+          },
+        }, 201)
+      }
       return route.fulfill({
         status: 422,
         contentType: 'application/json',
@@ -215,4 +257,33 @@ test('试跑门禁出现 semantic_* 问题时提供「去业务澄清补齐」�
   await expect(badge).toBeVisible()
   await expect(badge).toContainText('供应链语义门禁本体')
   await expect(badge).toContainText('v1.1')
+})
+
+test('试跑门禁语义漂移降级为风险提示：草稿放行进试跑态且提示可见', async ({ page }) => {
+  const state: { createPayload: Record<string, unknown> | null; trialReady?: boolean } = {
+    createPayload: null,
+    trialReady: false,
+  }
+  await mockSemanticGate(page, state, 'advisory')
+
+  await page.goto(`/#/ontologies/${ontologyId}?tab=versions`, { waitUntil: 'domcontentloaded' })
+  await expect(page.getByTestId('version-tree')).toBeVisible()
+
+  await page.getByRole('button', { name: '转为试跑态' }).click()
+
+  // 试跑结果弹窗：语义漂移以「仅提示，不阻断试跑」的风险提示呈现。
+  const dialog = page.getByRole('dialog', { name: '隔离试跑结果' })
+  await expect(dialog).toBeVisible()
+  const warnings = dialog.getByTestId('trial-result-warnings')
+  await expect(warnings).toContainText('风险提示（仅提示，不阻断试跑）· 3 项')
+  await expect(warnings).toContainText('结构中的对象「订单」在业务画布中没有对应对象/主体')
+  await expect(warnings).toContainText('业务画布已有模型内容，但语义层缺少需求文档')
+  await expect(warnings).toContainText('试跑与发布都不会灌入实例数据')
+
+  // 不再出现硬阻断横幅；通知如实提示风险项数量。
+  await expect(page.getByText(/暂时不能进入试跑态/)).toHaveCount(0)
+  await expect(page.getByText(/另有 3 项风险提示（仅提示，不阻断试跑）/)).toBeVisible()
+
+  // 版本树刷新后草稿确实进入试跑态。
+  await expect(page.getByTestId('version-node-v1.1')).toContainText('试跑态')
 })

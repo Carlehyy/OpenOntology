@@ -66,6 +66,8 @@ export default defineConfig({
     '**/governance_reject_modal.spec.ts',
     '**/governance_story_narrative.spec.ts',
     '**/graph_edge_anchor_routing.spec.ts',
+    '**/graph_editor_unsaved_guard.spec.ts',
+    '**/graph_structure_export.spec.ts',
     '**/instance_browser_readonly.spec.ts',
     '**/instance_data_interactions.spec.ts',
     '**/instance_data_overview.spec.ts',
