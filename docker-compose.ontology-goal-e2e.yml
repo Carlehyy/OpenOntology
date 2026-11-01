@@ -1,0 +1,204 @@
+# Ontology-network goal acceptance stack (docs/development/ontology-network-goal.md).
+# Independent project oo-ontology-goal-20261101: never adopts oo-integrated-20261024,
+# oo-fedanalysis-20261026 or any other project's containers, volumes or ledgers.
+# All credentials below are public, deterministic fixtures; no env_file is read.
+# n8n and Chromium CDP are intentionally absent: without them /health/ready stays
+# failed and that gap must be recorded honestly instead of faking readiness.
+name: oo-ontology-goal-20261101
+services:
+  db:
+    image: postgres:16-alpine
+    pull_policy: never
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      POSTGRES_DB: integrated_metadata
+      POSTGRES_USER: integrated_e2e
+      POSTGRES_PASSWORD: integrated_e2e_fixture
+    command: [postgres, -c, shared_buffers=96MB, -c, work_mem=8MB, -c, max_connections=40]
+    ports: ["127.0.0.1:56432:5432"]
+    volumes: [goalnet_metadata_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U integrated_e2e -d integrated_metadata"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  source-pg:
+    image: postgres:16-alpine
+    pull_policy: never
+    mem_limit: 384m
+    cpus: 1.0
+    environment:
+      POSTGRES_DB: integrated_source
+      POSTGRES_USER: integrated_e2e
+      POSTGRES_PASSWORD: integrated_e2e_fixture
+    command: [postgres, -c, shared_buffers=64MB, -c, work_mem=8MB, -c, max_connections=20]
+    ports: ["127.0.0.1:56433:5432"]
+    volumes: [goalnet_source_pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U integrated_e2e -d integrated_source"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  mysql:
+    image: mysql:8.4
+    pull_policy: never
+    profiles: [mysql]
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      MYSQL_DATABASE: integrated_source
+      MYSQL_USER: integrated_e2e
+      MYSQL_PASSWORD: integrated_e2e_fixture
+      MYSQL_ROOT_PASSWORD: integrated_e2e_root_fixture
+    command: ["--innodb-buffer-pool-size=64M", "--max-connections=8", "--table-open-cache=256", "--table-definition-cache=256", "--tmp-table-size=4M", "--max-heap-table-size=4M", "--temptable-max-ram=16M", "--temptable-max-mmap=0", "--local-infile=0"]
+    ports: ["127.0.0.1:56306:3306"]
+    volumes: [goalnet_source_mysql_data:/var/lib/mysql]
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$${MYSQL_PASSWORD}" mysql -h 127.0.0.1 -u integrated_e2e -N -e "SELECT 1" integrated_source']
+      interval: 5s
+      timeout: 3s
+      retries: 40
+  # dbx is a platform metadata component (not an external source appliance).
+  dbx:
+    image: docker.cnb.cool/dbxio.com/dbx@sha256:b661f7e35deed06d9611dcda79c44ffcc8e4fd0f44308028ea77f7f18b36638c
+    pull_policy: never
+    profiles: [dbx]
+    restart: "no"
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      DBX_PASSWORD: goalnet_dbx_fixture
+      DBX_BIND_ADDR: 0.0.0.0
+      DBX_DATA_DIR: /app/data
+    ports: ["127.0.0.1:56434:4224"]
+    volumes: [goalnet_dbx_data:/app/data]
+  redis:
+    image: redis:7-alpine
+    pull_policy: never
+    mem_limit: 96m
+    cpus: 0.25
+    command: [redis-server, --requirepass, integrated_e2e_fixture, --maxmemory, 48mb, --maxmemory-policy, noeviction]
+    ports: ["127.0.0.1:56379:6379"]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH=integrated_e2e_fixture redis-cli ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  nats:
+    image: nats:alpine
+    pull_policy: never
+    mem_limit: 96m
+    cpus: 0.25
+    command: [-js, --store_dir, /data, -m, "8222"]
+    ports: ["127.0.0.1:56222:4222", "127.0.0.1:56822:8222"]
+    volumes: [goalnet_nats_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:8222/healthz >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  neo4j:
+    image: neo4j:5.20-community
+    pull_policy: never
+    mem_limit: 1280m
+    cpus: 1.0
+    environment:
+      NEO4J_AUTH: neo4j/integrated_e2e_fixture
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    ports: ["127.0.0.1:56474:7474", "127.0.0.1:56687:7687"]
+    volumes: [goalnet_neo4j_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:7474 >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+  minio:
+    image: minio/minio:latest
+    pull_policy: never
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      MINIO_ROOT_USER: integrated_e2e
+      MINIO_ROOT_PASSWORD: integrated_e2e_fixture
+    command: server /data --console-address ":9001"
+    ports: ["127.0.0.1:56000:9000", "127.0.0.1:56001:9001"]
+    volumes: [goalnet_minio_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "curl -f http://127.0.0.1:9000/minio/health/live >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  # Real n8n instance on the pinned local image with public fixture
+  # credentials; API-key provisioning happens through its own front door
+  # during the API phase, never by pretending a stub is ready. State is
+  # container-local by design: the fixture instance re-initializes through
+  # the same front door after any recreate instead of keeping a data volume.
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.30.5
+    pull_policy: never
+    profiles: [n8n]
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      N8N_ENCRYPTION_KEY: goalnet_n8n_fixture_key
+      NODE_OPTIONS: "--max-old-space-size=384"
+      N8N_LISTEN_ADDRESS: 0.0.0.0
+      N8N_PORT: "5678"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+    ports: ["127.0.0.1:56678:5678"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+  # Real Chromium CDP endpoint on the repo browser image (same binary family
+  # as the local/prod stacks); no fake readiness endpoint.
+  browser:
+    image: openontology-browser:local
+    pull_policy: never
+    profiles: [cdp]
+    command: ["--no-sandbox", "--disable-dev-shm-usage"]
+    mem_limit: 768m
+    cpus: 1.0
+    shm_size: 2gb
+    security_opt: ["no-new-privileges:true"]
+    ports: ["127.0.0.1:56223:9222"]
+    healthcheck:
+      # The browser image intentionally has no curl/wget. Bash's TCP socket
+      # support verifies the real CDP endpoint without adding another package.
+      test: ["CMD", "/usr/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222 && printf 'GET /json/version HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'webSocketDebuggerUrl' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  # Real Jupyter kernel gateway on the repo image (same command family as the
+  # local stack) for python-engine curated pipelines; public fixture token.
+  kernel-gateway:
+    image: openontology-python_kernel_gateway:latest
+    pull_policy: never
+    profiles: [kernel]
+    mem_limit: 512m
+    cpus: 1.0
+    command: jupyter kernelgateway --KernelGatewayApp.ip=0.0.0.0 --KernelGatewayApp.port=8088 --KernelGatewayApp.auth_token=goalnet_kernel_fixture_token
+    ports: ["127.0.0.1:56440:8088"]
+    healthcheck:
+      # Image ships python3 but no wget/curl: probe the HTTP port via socket.
+      test: ["CMD", "python3", "-c",
+             "import socket;s=socket.create_connection(('127.0.0.1',8088),timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+volumes:
+  goalnet_metadata_data:
+  goalnet_source_pg_data:
+  goalnet_source_mysql_data:
+  goalnet_dbx_data:
+  goalnet_nats_data:
+  goalnet_neo4j_data:
+  goalnet_minio_data:

@@ -421,6 +421,47 @@ MySQL 源装置使用 64MiB InnoDB buffer pool，并显式限制 TempTable RAM �
 发布，不得直改 release snapshots 充当真实验收；alias typed plan 等平台机制
 保持通用，不为 fixture 增加专用分支。
 
+### 本体网络 Goal 微 fixture（三本体四表）
+
+面向 [本体网络端到端 Goal](ontology-network-goal.md) 的最小验收源：
+[compose](../../docker-compose.ontology-goal-e2e.yml) 与
+[环境脚本](../../scripts/e2e/ontology_network_goal.py) 使用独立项目
+`oo-ontology-goal-20261101`，复用 `integrated_stack.py` 的参数化 helper
+（本地镜像、显式禁用 dotenv、仅 loopback 端口、按标签核对所有权），不接管
+任何其他项目的容器、卷或 ledger。固定微例 ≤500 行（当前 12 行）：本体 A =
+PG `goal_customers`/`goal_contracts`，本体 B = MySQL `goal_orders`，本体 C =
+MySQL `goal_shipments`；期望值来自 Goal 文档第 8 节手算 oracle（金额字符串
+精确比较、NULL 区分 count(\*)/count(field)、bigint 越过 2^53、先聚合后 join
+不得倍增、全 NULL 区域合计保持 NULL），纯 Python 独立计算后经两个源库核对。
+seed 为逐源单事务批量插入并做行数核验，拒绝二次 seed；恢复只能销毁本项目
+自有数据卷。容量矩阵不在本 fixture 范围（`capacity_not_verified`）。
+
+| 服务 | 端口 | API/Web 预留 |
+|---|---|---|
+| 元数据库 PostgreSQL | 56432 | API 56004 |
+| 源 PostgreSQL / 源 MySQL | 56433 / 56306 | Web 55173 |
+| dbx | 56434 | |
+| Redis / NATS | 56379 / 56222、56822 | |
+| Neo4j HTTP / Bolt | 56474 / 56687 | |
+| MinIO API / Console | 56000 / 56001 | |
+
+n8n 与 Chromium CDP 不在 compose 内：缺它们时 `/health/ready` 必须如实记为
+未就绪，不得以进程存活或桩服务冒充。启动前 `preflight` 记录端口归属与本地
+镜像存在性；报告写入 `.artifacts/ontology-goal-e2e/`，不提交 Git。
+
+```bash
+python3 scripts/e2e/ontology_network_goal.py preflight db source-pg mysql dbx
+python3 scripts/e2e/ontology_network_goal.py up db source-pg mysql dbx   # 获批槽位后
+python3 scripts/e2e/ontology_network_goal.py seed
+python3 scripts/e2e/ontology_network_goal.py oracle
+python3 scripts/e2e/ontology_network_goal.py status
+# 只清理本项目 ledger 内的自有资源；销毁数据需显式开关。
+python3 scripts/e2e/ontology_network_goal.py down --destroy-data
+```
+
+纯离线契约（端口隔离、compose 安全、oracle 期望值、wrapper 参数穿透）见
+[单测](../../backend/tests/e2e_drivers/test_ontology_network_goal_fixture_unit.py)。
+
 ### 联邦 API 纵向验收驱动
 
 [驱动脚本](../../scripts/e2e/federated_acceptance.py) 复用上述 fixture 的

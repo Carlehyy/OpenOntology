@@ -169,7 +169,8 @@ def stack_up(services: list[str], *, project: str | None = None, ports: dict[str
 
 
 def stack_down(destroy_data: bool, *, project: str | None = None, state_path: Path | None = None,
-               directory: Path | None = None, profiles: tuple[str, ...] = ("mysql",)) -> dict[str, Any]:
+               directory: Path | None = None, profiles: tuple[str, ...] = ("mysql",),
+               compose_file: Path | None = None) -> dict[str, Any]:
     owner = project or PROJECT
     ledger_path = state_path or STATE
     if not ledger_path.exists():
@@ -184,7 +185,7 @@ def stack_down(destroy_data: bool, *, project: str | None = None, state_path: Pa
     args = ["down", "--timeout", "20"]
     if destroy_data:
         args.append("--volumes")
-    output = compose(*args, project=owner, profiles=profiles)
+    output = compose(*args, project=owner, profiles=profiles, compose_file=compose_file)
     return {"output": output, "destroyed_data": destroy_data, **update_state(owner, directory)}
 
 

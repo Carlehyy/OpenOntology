@@ -4,7 +4,9 @@
 scripts/
 ├── README.md
 ├── ci/              CI 与仓库契约检查
-└── data/            数据导入、fixture 和真实链路脚本
+├── data/            数据导入、fixture 和真实链路脚本
+└── e2e/             隔离验收环境脚本（compose 编排、fixture seed 与 oracle，
+                    只按容器标签操作自有项目，见 docs/development/testing.md）
 ```
 
 服务器生产部署入口与生产依赖清单位于 [`deploy/`](../deploy/README.md)。

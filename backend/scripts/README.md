@@ -22,6 +22,7 @@ CDP 全部就绪。LLM 在平台启动后按脚本需要配置；ChromaDB 不再
 
 | 入口 | 运行方式与依赖 | 数据/外部影响与清理 |
 |---|---|---|
+| `ontology_network_goal_e2e.py` | `uv run python scripts/ontology_network_goal_e2e.py <plan/frontdoor/...> --name <run>`；`frontdoor` 及以后需隔离 API（默认 `http://127.0.0.1:56004`，`ONTOLOGY_GOAL_API_BASE` 可覆盖，仅限 loopback）与专用栈 `scripts/e2e/ontology_network_goal.py` | 只向隔离正门发请求，run 状态仅记录 API 实际返回 id，不落任何凭据；证据写 `.artifacts/ontology-goal-e2e/acceptance/`；未执行阶段如实 not_run/not_implemented，不伪造发布状态 |
 | `api_hub_http_proxy_live_e2e.py` | `uv run python scripts/api_hub_http_proxy_live_e2e.py`；需要访问公开 AI HOT API | 使用临时 API Hub SQLite 和本机随机端口，只读取外部公开 API；临时目录自动删除 |
 | `exploration_live_e2e.py` | 受保护环境提供 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 后运行 `uv run python scripts/exploration_live_e2e.py` | 调用真实 LLM、会产生费用；使用临时 SQLite/上传目录并在退出前扫描密钥落盘，目录自动删除 |
 | `runtime_secret_split_postgres_e2e.py` | `OPENONTOLOGY_RUNTIME_SECRET_E2E=1 ENVIRONMENT=test DATABASE_URL=<loopback-*_ci-or-*_e2e-url> uv run python scripts/runtime_secret_split_postgres_e2e.py --report ../.artifacts/runtime-secret-migration/report.json`；CI 在真实 PostgreSQL migration 后执行 | 只写 synthetic 密文；显式 E2E 哨兵、test 环境、无 query/fragment 的 loopback URL 与 `_ci`/`_e2e` 库名四重约束；PostgreSQL fixture 始终事务回滚，API Hub SQLite 与临时部署目录自动删除；0600 报告只含固定状态和计数，不含连接串、密钥、密文或哈希 |

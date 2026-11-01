@@ -17,7 +17,7 @@ import pytest
 
 @pytest.fixture(scope="module")
 def fed():
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[3]
     spec = importlib.util.spec_from_file_location("federated_fixture_unit", root / "scripts/e2e/federated_fixture.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
