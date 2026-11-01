@@ -387,11 +387,16 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
             "name": ONTOLOGY_QUERY_TOOL,
             "description": (
                 "统一关联查询：同一本体内多对象类型、或有明确业务键依据的跨本体"
-                "关联；服务端完成过滤/投影/聚合/排序与稳定分页。翻页只传 cursor。"
-                "字段/类型/基数依据必须来自 ontology_structure 的当前发布结构。"
-                "sources 可用派生源（subquery）先在同源内聚合防 fanout：派生源"
-                "只给 alias+subquery（禁止再带对象三元组），嵌套最多两层，全部"
-                "叶子对象源 ≤16；引用派生输出名的 lineage 依据由服务端校验。"),
+                "关联；服务端完成过滤/投影/聚合/排序与稳定分页。两种等价形态："
+                "结构树（sources/joins/...）或 SPL 文本（spl + semanticBindings："
+                "绑定名→ontologyId/releaseId/objectTypeId 三元组；with 命名阶段"
+                "先同源聚合，最终 from 做联邦 join；join 键必须有本人 "
+                "join-assertions 登记的声明证据，否则 422；不支持 limit，分页用 "
+                "pageSize）。字段/类型/基数依据必须来自 ontology_structure 的"
+                "当前发布结构。翻页只传 cursor。结构树形态可用派生源（subquery）"
+                "先在同源内聚合防 fanout：派生源只给 alias+subquery（禁止再带"
+                "对象三元组），嵌套最多两层，全部叶子对象源 ≤16；引用派生输出名"
+                "的 lineage 依据由服务端校验。"),
             "parameters": {
                 "type": "object",
                 # 模块级共享常量按请求深拷贝入目录：禁止跨请求原地修改泄漏
@@ -400,10 +405,49 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "properties": {
                     **copy.deepcopy(query_request["properties"]),
                     "cursor": {"type": "string", "minLength": 16},
+                    "spl": {
+                        "type": "string", "minLength": 8, "maxLength": 32768,
+                        "description": (
+                            "SPL 文本计划：`with 名 = from 源 as 别名 | 命令; "
+                            "... from 源 as 别名 | 命令`。每条管道以 fields 或 "
+                            "stats 投影收尾（阶段内排序需放在投影之前）；阶段"
+                            "只能引用更早阶段或绑定叶子；join 写作 "
+                            "`join 源 as 别名 on 左.键 = 右.键 type=left|inner`，"
+                            "键必须可追溯到发布属性（聚合输出不可作 join 键）；"
+                            "count() 计行、count(字段) 只计非 NULL 值；过滤参数"
+                            "用 :名 并在 params 给值"),
+                    },
+                    "semanticBindings": {
+                        "type": "object",
+                        "minProperties": 1, "maxProperties": 16,
+                        "description": "SPL 源名 → 发布三元组绑定（仅 spl 形态）",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "ontologyId": {"type": "string"},
+                                "releaseId": {"type": "string"},
+                                "objectTypeId": {"type": "string"},
+                            },
+                            "required": ["ontologyId", "releaseId",
+                                         "objectTypeId"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "SPL `:参数` 名 → 值（仅 spl 形态）",
+                    },
                 },
                 "oneOf": [
-                    {"required": ["sources"], "not": {"required": ["cursor"]}},
-                    {"required": ["cursor"], "not": {"required": ["sources"]}},
+                    {"required": ["sources"],
+                     "not": {"anyOf": [{"required": ["cursor"]},
+                                       {"required": ["spl"]}]}},
+                    {"required": ["cursor"],
+                     "not": {"anyOf": [{"required": ["sources"]},
+                                       {"required": ["spl"]}]}},
+                    {"required": ["spl", "semanticBindings"],
+                     "not": {"anyOf": [{"required": ["sources"]},
+                                       {"required": ["cursor"]}]}},
                 ],
                 "additionalProperties": False,
             },
@@ -421,6 +465,22 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                     "releaseId": {"type": "string"},
                     "actionId": {"type": "string"},
                     "targetInstanceId": {"type": "string"},
+                    "targetRef": {
+                        "type": "object",
+                        "description": (
+                            "资产/远程对象行定位（无本地实例时必用，与 "
+                            "targetInstanceId 互斥）：objectTypeId + 属性名到"
+                            "主键值的 key；资产身份由服务端按发布映射派生"),
+                        "properties": {
+                            "objectTypeId": {"type": "string"},
+                            "key": {
+                                "type": "object",
+                                "description": "主键属性名 → 值（须完整）",
+                            },
+                        },
+                        "required": ["objectTypeId", "key"],
+                        "additionalProperties": False,
+                    },
                     "parameters": {"type": "object"},
                     "parameterRefs": {"type": "object"},
                 },
@@ -530,6 +590,7 @@ def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
                 action_id=str(arguments.get("actionId") or ""),
                 release_id=str(arguments.get("releaseId") or ""),
                 target_instance_id=arguments.get("targetInstanceId"),
+                target_ref=arguments.get("targetRef") or None,
                 parameters=arguments.get("parameters") or {},
                 parameter_refs=arguments.get("parameterRefs") or None)
             data = dict(data)
@@ -648,6 +709,9 @@ def refresh_action_steps(db: Session, owner_id: str, conversation_id: str,
                     "state": confirmation.get("state") if confirmation else "unknown",
                     "failureCode": confirmation.get("failureCode")
                     if confirmation else "confirmation_state_unavailable",
+                    # 资产写真实结果（curated pending_review 等）；本地动作为
+                    # None — UI 按 state+outcome 区分"已提交待审"与"已生效"。
+                    "outcome": confirmation.get("outcome") if confirmation else None,
                 }, ensure_ascii=False)
                 step = {**step, "status": status, "preview": preview}
             steps.append(step)
