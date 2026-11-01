@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 import ast
+import decimal
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional
 
 from sqlalchemy.orm import Session
@@ -210,6 +212,30 @@ def function_uses_object_collection(fn: Any) -> bool:
     ).strip().lower() in ("object_set", "action_validation")
 
 
+def _expression_number(value: Any) -> Any:
+    """Map exact ``Decimal`` back to the expression sandbox's numeric domain.
+
+    Integral Decimals become Python ints (exact bigint semantics, no float64
+    rounding); true fractional Decimals become floats, matching the original
+    int-then-float coercion contract. ``Decimal * float`` must not leak into
+    expression evaluation, while the stored property token stays exact.
+    """
+    if isinstance(value, Decimal):
+        try:
+            if (value.is_finite()
+                    and value == value.to_integral_value()
+                    and abs(value) <= Decimal("1e308")):
+                return int(value)
+            return float(value)
+        except decimal.DecimalException:
+            return float(value)
+    if isinstance(value, dict):
+        return {key: _expression_number(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_expression_number(item) for item in value]
+    return value
+
+
 def build_function_scope(
     fn: Any,
     *,
@@ -226,12 +252,12 @@ def build_function_scope(
     objects: list[dict] = []
     if function_uses_object_collection(fn) and object_loader is not None:
         objects = [
-            dict(item or {})
+            _expression_number(dict(item or {}))
             for item in object_loader()
         ]
     scope: dict[str, Any] = {
-        "object": obj_props or {},
-        "params": params or {},
+        "object": _expression_number(obj_props or {}),
+        "params": _expression_number(params or {}),
         "objects": objects,
     }
     return scope

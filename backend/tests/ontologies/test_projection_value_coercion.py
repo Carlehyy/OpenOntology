@@ -1,12 +1,15 @@
 """投影值 coercion 的类型保真测试（PR-C）。
 
-钉住三件事：
-1. number 整数优先——bigint 主键/编号不经 float64，2^53 之上不静默变值；
+钉住四件事：
+1. number 精确解析——bigint 主键/编号不经 float64；小数保精确 Decimal
+   （源字面与 scale 逐字保留，goal §8 严格金额）；
 2. date/datetime 分支——空格分隔/Z 后缀等入库形态归一为实例契约可接受的
    ISO 输出（修复"保存放行、投影后校验整批回滚"）；
-3. 输出与 formal_modeling.validation 的 fromisoformat 口径一致。
+3. 输出与 formal_modeling.validation 的 fromisoformat 口径一致；
+4. 精确 Decimal 可直接通过实例契约的 number 校验（数值域统一）。
 """
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 
@@ -24,25 +27,31 @@ def _typed(**name_type: str) -> list[dict]:
     [
         # 大整数必须精确：雪花 ID 常见量级，曾因 float64 中转静默变值
         ("9007199254740993", 9007199254740993),
-        # numeric(38,2) 列经归一化产出的带小数尾缀整值文本（复核发现的
-        # 残余缺口：int() 解析不了而 float64 会变值，整值判定走 Decimal）
-        ("9007199254740993.00", 9007199254740993),
+        # numeric(38,2) 列经归一化产出的带小数尾缀整值文本：精度+scale
+        # 都逐字保留（Decimal 与 int 比较原生相等）
+        ("9007199254740993.00", Decimal("9007199254740993.00")),
         ("9,007,199,254,740,993", 9007199254740993),
         ("9223372036854775807", 9223372036854775807),
         ("-9007199254740993", -9007199254740993),
-        ("123.45", 123.45),
-        ("3.0", 3),
+        ("123.45", Decimal("123.45")),
+        ("3.0", Decimal("3.0")),
         ("1,234", 1234),
-        ("1e3", 1000),
+        ("1e3", Decimal("1E+3")),
         # Python 数值文本下划线语义：int()/float() 本就接受，钉住防"收紧"
         ("1_0", 10),
+        # goal §8 严格金额：scale-4 字面逐字保留，绝不折成 100.5/7
+        ("100.5000", Decimal("100.5000")),
+        ("50.2500", Decimal("50.2500")),
+        ("7.0000", Decimal("7.0000")),
     ],
 )
-def test_number_coercion_integer_first(raw, expected):
+def test_number_coercion_exact(raw, expected):
     props = _coerce_props_to_type(
         {"amount": raw}, _typed(amount="number"))
     assert props["amount"] == expected
-    assert isinstance(props["amount"], type(expected))
+    assert type(props["amount"]) is type(expected)
+    if isinstance(expected, Decimal):
+        assert str(props["amount"]) == str(expected)
 
 
 def test_number_coercion_rejects_garbage():

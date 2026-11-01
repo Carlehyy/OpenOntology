@@ -26,6 +26,7 @@ from app.ontologies.release_context import (
     runtime_release_identity,
     runtime_release_version,
 )
+from app.shared.numeric_utils import values_equal
 
 
 def _wrap(v: Any, *, present: Optional[bool] = None) -> dict:
@@ -180,7 +181,8 @@ def record_property_facts(
         changed = [
             (key, value, True)
             for key, value in new_snapshot.items()
-            if key not in old_snapshot or old_snapshot.get(key) != value
+            # 与投影变更检测同一口径：旧 float 与新 Decimal 等值即不变更。
+            if key not in old_snapshot or not values_equal(old_snapshot.get(key), value)
         ]
         changed.extend(
             (key, None, False)

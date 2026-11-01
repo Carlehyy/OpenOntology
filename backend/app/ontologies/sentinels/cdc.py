@@ -32,6 +32,7 @@ from app.models.sentinel import Sentinel, SentinelCdcOutbox, SentinelMatchState
 from app.ontologies.sentinels.cep import contract as cep_contract
 from app.ontologies.sentinels.cep import event_store
 from app.ontologies.sentinels.evaluator import in_sentinel_run
+from app.shared.numeric_utils import values_equal
 
 logger = logging.getLogger(__name__)
 
@@ -571,7 +572,9 @@ def _before_flush(session: Session, flush_context, instances) -> None:
                 for key in set(previous) | set(current):
                     old_value = (previous or {}).get(key)
                     new_value = (current or {}).get(key)
-                    if old_value == new_value:
+                    # 旧 float 与新 Decimal（物化 coercion 产物）等值不算变更，
+                    # 否则重跑会对同一业务值追加伪事件。
+                    if values_equal(old_value, new_value):
                         continue
                     changed.add(str(key))
                     key_changes[str(key)] = (old_value, new_value)

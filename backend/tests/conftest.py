@@ -49,6 +49,7 @@ from app.main import app
 from app.database import Base
 from app.deps import get_db
 from app.services.auth_service import hash_password
+from app.shared.exact_json import dumps_exact
 from app.models.user import User
 import uuid
 
@@ -70,7 +71,10 @@ _db_fd, _db_path = tempfile.mkstemp(prefix="ontoprompt_test_", suffix=".db")
 os.close(_db_fd)
 
 TEST_DB = f"sqlite:///{_db_path}"
-engine = create_engine(TEST_DB, connect_args={"check_same_thread": False})
+# 与生产 app.shared.database 使用同一个 JSON serializer：JSON 原生值逐字节
+# 不变，Decimal 落精确 token；测试因此覆盖真实存储边界而不是默认 json.dumps。
+engine = create_engine(TEST_DB, connect_args={"check_same_thread": False},
+                       json_serializer=dumps_exact)
 TestSession = sessionmaker(bind=engine)
 
 

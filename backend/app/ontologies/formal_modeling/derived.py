@@ -24,6 +24,7 @@ from .function_engine import (
 )
 from .facts import fact_order_clause, record_property_facts
 from .validation import LEGACY_SYSTEM_PROPERTIES, property_value_type_issue
+from app.shared.numeric_utils import values_equal
 
 
 class DerivedComputationError(RuntimeError):
@@ -195,7 +196,7 @@ def recompute_instance_derived(
         object_type=object_type,
     )
     changed = 0
-    projection_dirty = old_computed != new_computed
+    projection_dirty = not values_equal(old_computed, new_computed)
 
     for prop in computed_props:
         name = prop.get("name")
@@ -227,7 +228,7 @@ def recompute_instance_derived(
                 .first())
         last_val = (last.value or {}).get("v") if last is not None else None
 
-        if last is not None and last_val == new_val:
+        if last is not None and values_equal(last_val, new_val):
             continue  # 值没变，不追加重复事实
 
         record_property_facts(

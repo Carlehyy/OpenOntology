@@ -7,10 +7,13 @@ from typing import Any
 import uuid
 
 from fastapi import HTTPException
+from sqlalchemy import Text, cast, select
 from sqlalchemy.orm import Session
 
 from app.ontologies.formal_modeling.facts import property_fact_batch, record_link_property_facts
 from app.ontologies.versions.batching import query_batches
+from app.shared.exact_json import loads_exact
+from app.shared.numeric_utils import values_equal
 
 from app.ontologies.formal_modeling.models import (
     LinkInstance as FoLinkInstance,
@@ -31,6 +34,60 @@ from app.ontologies.versions.models import (
     OntologyTrialRun,
     OntologyVersion,
 )
+
+
+def _trial_json_object(raw: str | None, *, field: str) -> dict:
+    """Decode one frozen trial JSON object without the ORM float round-trip."""
+    decoded = loads_exact(raw)
+    if decoded is None:
+        return {}
+    if not isinstance(decoded, dict):
+        raise RuntimeError(f"试跑对象的 {field} 必须是 JSON 对象，拒绝激活")
+    return decoded
+
+
+def _trial_object_payloads(db: Session, trial_run_id: str, ids: list[str]):
+    """Read stored trial JSON as text, preserving fractional source scale.
+
+    The ORM JSON type decodes ``100.5000`` to float before promotion can copy
+    it, which silently drops the token scale. ``cast(..., Text)`` is supported
+    by both PostgreSQL and SQLite and returns the stored JSON token text.
+    """
+    rows = db.execute(
+        select(
+            OntologyTrialObject.object_id,
+            cast(OntologyTrialObject.properties, Text).label("properties_text"),
+            cast(OntologyTrialObject.computed, Text).label("computed_text"),
+        ).where(
+            OntologyTrialObject.trial_run_id == trial_run_id,
+            OntologyTrialObject.object_id.in_(ids),
+        )
+    ).all()
+    payloads = {row[0]: (row[1], row[2]) for row in rows}
+    missing = [item_id for item_id in ids if item_id not in payloads]
+    if missing:
+        raise RuntimeError(
+            "试跑对象的 JSON 投影不完整，拒绝发布: " + ", ".join(missing[:5]))
+    return payloads
+
+
+def _trial_link_payloads(db: Session, trial_run_id: str, ids: list[str]):
+    """Read trial link JSON as text; same precision boundary as objects."""
+    rows = db.execute(
+        select(
+            OntologyTrialLink.link_id,
+            cast(OntologyTrialLink.properties, Text).label("properties_text"),
+        ).where(
+            OntologyTrialLink.trial_run_id == trial_run_id,
+            OntologyTrialLink.link_id.in_(ids),
+        )
+    ).all()
+    payloads = {row[0]: row[1] for row in rows}
+    missing = [item_id for item_id in ids if item_id not in payloads]
+    if missing:
+        raise RuntimeError(
+            "试跑关系的 JSON 投影不完整，拒绝发布: " + ", ".join(missing[:5]))
+    return payloads
 
 
 def _link_fact_version(item, endpoint_datasets, mappings_by_type, pinned):
@@ -428,6 +485,14 @@ def _promote_draft_locked(
 
         for batch in query_batches(trial_objects, OntologyTrialObject.object_id):
             ids = [item.object_id for item in batch]
+            payloads = _trial_object_payloads(db, run.id, ids)
+            prepared: dict[str, tuple[dict, dict]] = {}
+            for item in batch:
+                raw_properties, raw_computed = payloads[item.object_id]
+                prepared[item.object_id] = (
+                    _trial_json_object(raw_properties, field="properties"),
+                    _trial_json_object(raw_computed, field="computed"),
+                )
             old_by_id = {item.id: item for item in old_objects.filter(
                 FoObjectInstance.id.in_(ids),
             ).all()}
@@ -435,6 +500,7 @@ def _promote_draft_locked(
                 for item in batch:
                     old = old_by_id.get(item.object_id)
                     old_props = dict(old.properties or {}) if old is not None else None
+                    props, _computed = prepared[item.object_id]
                     if old is None:
                         # Do not fabricate an existence edge for legacy objects
                         # already present before this release.
@@ -449,7 +515,7 @@ def _promote_draft_locked(
                     record_property_facts(
                         db, ontology_id=ontology_id, instance_id=item.object_id,
                         object_type_id=item.object_type_id, old_props=old_props,
-                        new_props=dict(item.properties or {}), source=source,
+                        new_props=props, source=source,
                         actor_id=current_user.id, caused_by=run.id, confidence=1.0,
                         ontology_version=release_number,
                         ontology_release_id=release_id,
@@ -465,8 +531,8 @@ def _promote_draft_locked(
                     id=item.object_id, ontology_id=ontology_id,
                     ontology_release_id=release_id,
                     object_type_id=item.object_type_id,
-                    properties=dict(item.properties or {}),
-                    computed=dict(item.computed or {}), source="pipeline",
+                    properties=prepared[item.object_id][0],
+                    computed=prepared[item.object_id][1], source="pipeline",
                     external_id=item.external_id,
                 ) for item in batch
             ])
@@ -474,6 +540,11 @@ def _promote_draft_locked(
 
         for batch in query_batches(trial_links, OntologyTrialLink.link_id):
             ids = [item.link_id for item in batch]
+            raw_link_payloads = _trial_link_payloads(db, run.id, ids)
+            link_props_by_id = {
+                item_id: _trial_json_object(raw, field="properties")
+                for item_id, raw in raw_link_payloads.items()
+            }
             old_props_by_id = {item.id: dict(item.properties or {}) for item in old_links.filter(
                 FoLinkInstance.id.in_(ids),
             ).all()}
@@ -491,7 +562,7 @@ def _promote_draft_locked(
                     ontology_release_id=release_id, link_type_id=item.link_type_id,
                     source_object_id=item.source_object_id,
                     target_object_id=item.target_object_id,
-                    properties=dict(item.properties or {}),
+                    properties=link_props_by_id[item.link_id],
                     source_relation_id=item.source_relation_id,
                 ) for item in batch
             ])
@@ -510,7 +581,7 @@ def _promote_draft_locked(
                         db, ontology_id=ontology_id, instance_id=item.link_id,
                         link_type_id=item.link_type_id,
                         old_props=old_props_by_id.get(item.link_id),
-                        new_props=dict(item.properties or {}), source=source,
+                        new_props=link_props_by_id[item.link_id], source=source,
                         actor_id=current_user.id, caused_by=run.id,
                         ontology_version=release_number,
                         ontology_release_id=release_id,
@@ -524,6 +595,7 @@ def _promote_draft_locked(
         ).all()}
         for batch in query_batches(trial_objects, OntologyTrialObject.object_id):
             ids = [item.object_id for item in batch]
+            payloads = _trial_object_payloads(db, run.id, ids)
             live_by_id = {item.id: item for item in old_objects.filter(
                 FoObjectInstance.id.in_(ids),
             ).all()}
@@ -538,14 +610,16 @@ def _promote_draft_locked(
             with property_fact_batch(db, ontology_id=ontology_id, instance_ids=ids):
                 for trial_item in batch:
                     promoted_instance = live_by_id[trial_item.object_id]
+                    trial_computed = _trial_json_object(
+                        payloads[trial_item.object_id][1], field="computed")
                     recompute_instance_derived(
                         db, ontology_id=ontology_id, instance=promoted_instance,
                         object_type=object_types.get(trial_item.object_type_id),
                         trigger_facts=facts_by_id.get(trial_item.object_id, []),
                         caused_by=run.id,
                     )
-                    if dict(promoted_instance.computed or {}) != dict(
-                            trial_item.computed or {}):
+                    if not values_equal(
+                            promoted_instance.computed or {}, trial_computed):
                         raise RuntimeError(
                             "试跑冻结的派生值与发布激活时重算结果不一致: "
                             f"{trial_item.object_id}")

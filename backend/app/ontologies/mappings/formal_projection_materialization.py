@@ -43,6 +43,8 @@ from app.ontologies.mappings.formal_projection_contract import (
     stable_pipeline_entity_id,
     stable_pipeline_relation_id,
 )
+from app.shared.numeric_utils import values_equal
+from app.shared.exact_json import loads_exact
 
 
 logger = logging.getLogger(__name__)
@@ -58,7 +60,7 @@ _INTERNAL_LINK_PROP_KEYS = frozenset({
 
 
 def materialize_formal_projection(db, ontology_id, mapping_meta, *, ontology_release_id, lineage):
-    from sqlalchemy import select, func, exists
+    from sqlalchemy import Text, cast, select, func, exists
     from app.ontologies.mappings.source_staging import keyset_pages, MAPPING_BATCH_SIZE
     from app.ontologies.mappings.formal_projection_staging import (
         InstanceLookupStage, LinkLookupStage, validate_projection,
@@ -309,12 +311,27 @@ def materialize_formal_projection(db, ontology_id, mapping_meta, *, ontology_rel
         lookup = InstanceLookupStage(db, ontology_id, ot_id, class_to_pk_field.get(ec))
         try:
             for entity_page in keyset_pages(class_entities, Entity.id):
+                page_ids = [ent.id for ent in entity_page]
+                raw_rows = db.execute(
+                    select(Entity.id, cast(Entity.properties, Text))
+                    .where(Entity.id.in_(page_ids))
+                ).all()
+                raw_properties_by_id = {row[0]: row[1] for row in raw_rows}
                 prepared = []
                 for ent in entity_page:
+                    if ent.id not in raw_properties_by_id:
+                        raise ValueError(
+                            f"实体 {ent.id} 的 JSON 属性读取不完整，拒绝投影")
+                    decoded = loads_exact(raw_properties_by_id[ent.id])
+                    if decoded is None:
+                        decoded = {}
+                    if not isinstance(decoded, dict):
+                        raise ValueError(
+                            f"实体 {ent.id} 的 properties 不是 JSON 对象，拒绝投影")
                     canonical_inst_id = stable_object_instance_id(ontology_id, ent.id)
-                    props = {k: v for k, v in (ent.properties or {}).items()
+                    props = {k: v for k, v in decoded.items()
                              if k not in ("ontology_id", "__mapping_ids__", "__business_properties__")}
-                    business = (ent.properties or {}).get("__business_properties__")
+                    business = decoded.get("__business_properties__")
                     if isinstance(business, dict):
                         props.update(business)
                     props = _coerce_props_to_type(props, final_props)
@@ -355,7 +372,10 @@ def materialize_formal_projection(db, ontology_id, mapping_meta, *, ontology_rel
                         if existing_inst:
                             inst_id = existing_inst.id
                             old_props = dict(existing_inst.properties or {})
-                            changed = (old_props != props
+                            # 旧值从 JSON 读回是 int/float，新值经 coercion 可能
+                            # 是等值 Decimal（0.1 这类非二进制精确小数原生
+                            # != 0.1），按数值语义判变更，重跑不得产生伪更新。
+                            changed = (not values_equal(old_props, props)
                                        or existing_inst.object_type_id != ot_id
                                        or existing_inst.external_id != ent.id
                                        or existing_inst.ontology_release_id != ontology_release_id)
@@ -558,6 +578,12 @@ def materialize_formal_projection(db, ontology_id, mapping_meta, *, ontology_rel
             if not relation_page:
                 break
             after_relation = relation_page[-1][0].id
+            relation_ids = [row[0].id for row in relation_page]
+            raw_relation_rows = db.execute(
+                select(Relation.id, cast(Relation.properties, Text))
+                .where(Relation.id.in_(relation_ids))
+            ).all()
+            raw_relation_properties = {row[0]: row[1] for row in raw_relation_rows}
             prepared_links = []
             for rel, src_inst, tgt_inst, src_class, tgt_class in relation_page:
                 from app.ontologies.formal_modeling.facts import (
@@ -638,7 +664,16 @@ def materialize_formal_projection(db, ontology_id, mapping_meta, *, ontology_rel
 
                 # LinkInstance：确定性 id 去重；新建链接进入事实流（Link 也是 Fact）
                 # 连接表胖关系：同一对实体可有多条属性不同的边 → id 纳入 __edge_key__，防被去重合并成一条。
-                raw_props = rel.properties or {}
+                if rel.id not in raw_relation_properties:
+                    raise ValueError(
+                        f"关系 {rel.id} 的 JSON 属性读取不完整，拒绝投影")
+                decoded_rel = loads_exact(raw_relation_properties[rel.id])
+                if decoded_rel is None:
+                    decoded_rel = {}
+                if not isinstance(decoded_rel, dict):
+                    raise ValueError(
+                        f"关系 {rel.id} 的 properties 不是 JSON 对象，拒绝投影")
+                raw_props = decoded_rel
                 edge_key = raw_props.get("__edge_key__") or ""
                 canonical_li_id = stable_link_instance_id(
                     ontology_id, lt_id, src_inst, tgt_inst, edge_key)
@@ -689,7 +724,7 @@ def materialize_formal_projection(db, ontology_id, mapping_meta, *, ontology_rel
                       if (existing_li.link_type_id != lt_id
                               or existing_li.source_object_id != src_inst
                               or existing_li.target_object_id != tgt_inst
-                              or old_li_props != li_props
+                              or not values_equal(old_li_props, li_props)
                               or existing_li.source_relation_id != rel.id
                               or existing_li.ontology_release_id != ontology_release_id):
                           existing_li.link_type_id = lt_id

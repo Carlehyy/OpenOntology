@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Iterable, Optional
 
 from .function_engine import derived_function_contract_issues
@@ -78,11 +79,12 @@ def _is_value_of_type(value: Any, property_type: str) -> bool:
     if property_type == "string":
         return isinstance(value, str)
     if property_type == "number":
-        if not (isinstance(value, (int, float)) and not isinstance(value, bool)):
+        # int/float 原生；Decimal 是投影 coercion 的精确小数形态（源字面
+        # 与 scale 逐字保留，见 formal_projection_values）。三者同属数值域，
+        # 跨类型的 ==/</> 原生兼容；巨型值与巨型 int 同按"数值超域"拒绝。
+        if not (isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)):
             return False
         try:
-            # 超过 float64 量级的巨型 int 会 OverflowError——按"数值超域"拒绝，
-            # 不能让单个畸形值以未分类异常击穿整批投影校验
             return math.isfinite(float(value))
         except OverflowError:
             return False

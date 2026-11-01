@@ -174,6 +174,9 @@ class ObjectInstance(Base):
     object_type_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
 
     # properties: Record<string, unknown>
+    # number 值以源字面 token 落库（Decimal → 100.5000，见 shared.exact_json
+    # 引擎级 serializer），typed 读端 ->> + NUMERIC 才能保 scale；读回
+    # Python 消费者仍是 int/float。
     properties: Mapped[dict] = mapped_column(JSON, default=dict)
     # 派生属性计算结果
     computed: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -251,7 +254,7 @@ class PropertyFact(Base):
     instance_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     object_type_id: Mapped[str] = mapped_column(String, nullable=True, index=True)
     property_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    value: Mapped[dict] = mapped_column(JSON, nullable=True)          # {"v": <any>} 包一层，兼容标量
+    value: Mapped[dict] = mapped_column(JSON, nullable=True)   # {"v": <any>} 包一层，兼容标量
 
     # property = 存储属性 | derived = 派生重算 | link = 链接存在性 |
     # object = 实例存在性(墓碑) | decision = 人的审批决策 |

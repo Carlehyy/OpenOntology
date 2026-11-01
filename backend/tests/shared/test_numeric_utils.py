@@ -1,7 +1,9 @@
 """shared.numeric_utils.parse_numeric_text 单元测试。
 
-钉住三级整值判定：int → Decimal（带 ".00" 尾缀的大整数不经 float64）→
-float（真小数/极端值按 float() 语义交给契约校验）。
+钉住两级精确判定：int（纯整数字面）→ 精确 Decimal（一切带小数/科学计数
+字面，不经 float64、不折叠尾零——"7.0000" 的 scale-4 token 是统一 SUM
+保 scale 的一部分）→ float（超量级/nan/inf/garbage 按 float() 语义交给
+契约校验）。
 """
 import pytest
 
@@ -12,23 +14,35 @@ from app.shared.numeric_utils import parse_numeric_text
     ("raw", "expected"),
     [
         ("9007199254740993", 9007199254740993),
-        ("9007199254740993.00", 9007199254740993),  # numeric 列归一化形态
+        # numeric 列归一化形态：精度与 scale 都逐字保留（不再折叠成 int）
+        ("9007199254740993.00", "9007199254740993.00"),
         ("9,007,199,254,740,993", 9007199254740993),
-        ("9223372036854775807.000", 9223372036854775807),
-        ("-9007199254740993.00", -9007199254740993),
-        ("123.45", 123.45),
-        ("0.1", 0.1),
-        ("3.0", 3),
-        ("1e3", 1000),
+        ("9223372036854775807.000", "9223372036854775807.000"),
+        ("-9007199254740993.00", "-9007199254740993.00"),
+        ("123.45", "123.45"),
+        ("0.1", "0.1"),
+        ("3.0", "3.0"),
+        ("1e3", "1E+3"),
         ("12_000", 12000),  # Python 数值下划线语义，float() 路径本就接受
         ("+7", 7),
         (" 42 ", 42),
+        # goal §8 严格金额：源 scale 字面逐字保留，绝不 100.5000→100.5
+        ("100.5000", "100.5000"),
+        ("50.2500", "50.2500"),
+        ("7.0000", "7.0000"),
     ],
 )
-def test_parse_numeric_text_integral_precision(raw, expected):
-    assert parse_numeric_text(raw) == expected
+def test_parse_numeric_text_exact_precision(raw, expected):
+    parsed = parse_numeric_text(raw)
     if isinstance(expected, int):
-        assert isinstance(parse_numeric_text(raw), int)
+        assert parsed == expected
+        assert isinstance(parsed, int)
+    else:
+        from decimal import Decimal
+        assert parsed == Decimal(expected)
+        assert isinstance(parsed, Decimal)
+        # 字面与 scale 逐字相等（exponent 即 scale 的负数形态）
+        assert str(parsed) == expected
 
 
 def test_parse_numeric_text_keeps_float_semantics_for_extremes():
@@ -38,6 +52,15 @@ def test_parse_numeric_text_keeps_float_semantics_for_extremes():
     assert math.isinf(parse_numeric_text("1e400"))
     assert math.isnan(parse_numeric_text("nan"))
     assert parse_numeric_text("-inf") == float("-inf")
+
+
+def test_parse_numeric_text_decimal_compares_natively_with_int_float():
+    """Decimal 与 int/float 的比较运算原生兼容（哨兵/动作数值条件语义不变）。"""
+    parsed = parse_numeric_text("100.5000")
+    assert parsed == 100.5
+    assert parsed > 100
+    assert parsed < 101
+    assert parse_numeric_text("3.0") == 3
 
 
 def test_parse_numeric_text_rejects_garbage():
@@ -52,8 +75,8 @@ def test_parse_numeric_text_strips_thousand_separators():
 
 
 def test_parse_numeric_text_giant_digits_do_not_breach_contract():
-    """对抗回归：数百位数字串不得以巨型 int 击穿实例契约的 float() 转换
-    （OverflowError 未捕获会让投影以未分类异常崩溃），照旧转 inf 拒绝。"""
+    """对抗回归：数百位数字串不得以巨型 int/Decimal 击穿实例契约的 float()
+    转换（OverflowError 未捕获会让投影以未分类异常崩溃），照旧转 inf 拒绝。"""
     import math
 
     for length in (400, 4300, 5000):

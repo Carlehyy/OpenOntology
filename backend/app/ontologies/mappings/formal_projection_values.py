@@ -24,10 +24,13 @@ def _coerce_props_to_type(props: dict, type_props: list[dict]) -> dict:
     原生容器或严格 JSON 文本。必填约束仍由实例契约校验拦截；string 属性
     保留原值。
 
-    number 先走 int、整值 Decimal 再走 float：数据库 numeric 列归一化后
-    产出 "9007199254740993.00" 这类带小数尾缀的整值文本，int() 解析不了
-    而 float64 会静默变值，所以整值判定用 Decimal（任意精度）。超出
-    float64 量级（1e308）的极端值不在此路，照旧落 float 由实例契约拦截。
+    number 先走纯整数字面、再走精确 Decimal，绝不经 float64 中转：纯整数
+    字面（"42"）落 int；带小数/指数/尾零的字面（含 numeric 列归一化产出的
+    "9007199254740993.00"）落精确 Decimal——scale 与精度逐字保留
+    （"100.5000" ≠ 100.5），由引擎级 exact JSON serializer 原样落成数值
+    token。Decimal 与 int/float 的相等/大小比较原生兼容，但算术不能与
+    float 混用（表达式作用域另行归一回 int/float）；超 float64 量级
+    （1e308）的极端值照旧落 float，由实例契约拦截。
     date 按"值自带偏移的墙面日期"截断（不折 UTC，跨时区混源的同一 date
     属性可能差一天——业务日语义下正确）；datetime 统一 ISO "T" 分隔，
     输出保证能通过实例契约的 fromisoformat 校验。"""
