@@ -17,6 +17,7 @@ import {
   splitProcessAndAnswer,
   toolGroupStatus,
   toolStatusLabel,
+  toolStepStatusLabel,
 } from '../../../pages/super-assistant/components/chatTranscript.ts'
 import type { SuperMessage } from '../../../api/superAssistant.ts'
 
@@ -232,5 +233,51 @@ describe('BUILTIN_TOOL_FRIENDLY_NAMES', () => {
     // MCP 工具与未知名一律不翻译（直出原名）
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_api_hub__create_interface'], undefined)
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.unknown_tool, undefined)
+  })
+})
+
+describe('asset outcome in tool steps (no fake 完成)', () => {
+  const step = (status: string, preview?: string) => ({
+    toolName: 'ontology_execute_action', status, preview, toolRunId: 'r1',
+  })
+  const outcomePreview = (assetKind: string, status: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      confirmationId: 'c1', state: 'succeeded', failureCode: null,
+      outcome: { assetKind, status, operation: 'update', affectedRows: 1, datasetId: 'ds-1', ...extra },
+    })
+
+  it('success step with curated pending_review outcome shows 待审核未生效 instead of 完成', () => {
+    const label = toolStepStatusLabel(step('success', outcomePreview('curated', 'pending_review', { affectedRows: 0, reviewId: 'rev-1' })))
+    assert.match(label, /待审核/)
+    assert.match(label, /尚未生效/)
+    assert.ok(!label.includes('完成'))
+  })
+
+  it('success step without outcome keeps 完成', () => {
+    assert.equal(toolStepStatusLabel(step('success', JSON.stringify({ confirmationId: 'c1', state: 'succeeded' }))), '完成')
+    assert.equal(toolStepStatusLabel(step('success')), '完成')
+  })
+
+  it('success step with integrated applied outcome reports affected rows, not bare 完成', () => {
+    const label = toolStepStatusLabel(step('success', outcomePreview('integrated', 'applied', { receiptId: 'rc-1' })))
+    assert.match(label, /影响 1 行/)
+    assert.ok(!/^完成$/.test(label))
+  })
+
+  it('non-success statuses keep their own labels', () => {
+    assert.equal(toolStepStatusLabel(step('unknown')), '结果待核实')
+    assert.equal(toolStepStatusLabel(step('failed')), '失败')
+  })
+
+  it('group with a pending_review outcome step does not aggregate into success', () => {
+    const steps = [step('success', outcomePreview('curated', 'pending_review', { affectedRows: 0 }))]
+    assert.equal(toolGroupStatus(steps), 'pending_review')
+    assert.equal(toolStatusLabel('pending_review'), '待审核（数据未生效）')
+  })
+
+  it('group with unknown/failed outcome bubbles conservatively', () => {
+    assert.equal(toolGroupStatus([step('success', outcomePreview('integrated', 'unknown'))]), 'unknown')
+    assert.equal(toolGroupStatus([step('success', outcomePreview('manual', 'failed', { errorCode: 'X' }))]), 'error')
+    assert.equal(toolGroupStatus([step('success')]), 'success')
   })
 })

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import type { OntologyActionOutcome } from '../../../types/ontologyConfirmation.ts'
 import type { KernelRunCallSummary } from '../../../api/superAssistant.ts'
 import {
   approvalSummaryView,
@@ -110,5 +111,61 @@ describe('kernel approval summary view', () => {
     })
     assert.equal(view.parameterText, '')
     assert.deepEqual(view.lines, [{ label: '目标', text: '目标' }])
+  })
+})
+
+describe('kernel call status with asset outcome', () => {
+  const withOutcome = (state: string, outcome: OntologyActionOutcome | null) => ({
+    ...confirmation(state),
+    outcome,
+  })
+
+  it('succeeded + curated pending_review shows 待审核, never 已执行成功', () => {
+    const view = callStatusView({
+      call_id: 'c10', status: 'closed', outcome: 'completed',
+      capability_key: 'ontology.action',
+      confirmation: withOutcome('succeeded', {
+        assetKind: 'curated', status: 'pending_review', operation: 'update',
+        affectedRows: 0, datasetId: 'ds-1', reviewId: 'rev-1',
+      }),
+    })
+    assert.equal(view.tone, 'warning')
+    assert.match(view.label, /待审核/)
+    assert.ok(!view.label.includes('已执行成功'))
+  })
+
+  it('succeeded + curated applied is a legitimate approved-effective success', () => {
+    const view = callStatusView({
+      call_id: 'c11', status: 'closed', outcome: 'completed',
+      capability_key: 'ontology.action',
+      confirmation: withOutcome('succeeded', {
+        assetKind: 'curated', status: 'applied', operation: 'update',
+        affectedRows: 1, datasetId: 'ds-1', reviewId: 'rev-2',
+      }),
+    })
+    assert.equal(view.tone, 'success')
+    assert.match(view.label, /审核已批准/)
+  })
+
+  it('succeeded + manual applied surfaces the new data version', () => {
+    const view = callStatusView({
+      call_id: 'c12', status: 'closed', outcome: 'completed',
+      capability_key: 'ontology.action',
+      confirmation: withOutcome('succeeded', {
+        assetKind: 'manual', status: 'applied', operation: 'insert',
+        affectedRows: 1, datasetId: 'ds-1', versionId: 'v-3',
+      }),
+    })
+    assert.equal(view.tone, 'success')
+    assert.match(view.label, /新版本/)
+  })
+
+  it('succeeded without outcome keeps 已执行成功 (non-asset actions)', () => {
+    const view = callStatusView({
+      call_id: 'c13', status: 'closed', outcome: 'completed',
+      capability_key: 'ontology.action', confirmation: confirmation('succeeded'),
+    })
+    assert.equal(view.label, '已执行成功')
+    assert.equal(view.tone, 'success')
   })
 })

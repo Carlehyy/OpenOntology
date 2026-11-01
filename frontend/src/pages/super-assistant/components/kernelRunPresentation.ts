@@ -7,7 +7,11 @@
  * 被 Node --experimental-strip-types 单测直接执行（相对路径 import）。
  */
 import type { KernelApprovalSummary, KernelRunCallSummary } from '@/api/superAssistant'
-import { confirmationStateText } from '../../../components/ontologyConfirmationModel.ts'
+import {
+  confirmationOutcomeView,
+  confirmationStateText,
+  parseActionOutcome,
+} from '../../../components/ontologyConfirmationModel.ts'
 
 export type CallStatusTone = 'success' | 'warning' | 'danger' | 'info' | 'muted'
 
@@ -25,7 +29,13 @@ export function callStatusView(call: KernelRunCallSummary): CallStatusView {
   const state = call.confirmation?.state || null
   if (state === 'compensation_required') return { label: confirmationStateText(state), tone: 'danger' }
   if (state === 'unknown' || state === 'recovering') return { label: confirmationStateText(state), tone: 'warning' }
-  if (state === 'succeeded') return { label: '已执行成功', tone: 'success' }
+  if (state === 'succeeded') {
+    // 资产级结果优先：操作层成功不等于数据生效——curated 待审核不得被
+    // 「已执行成功」覆盖，applied 按资产类别如实呈现生效事实
+    const outcomeView = confirmationOutcomeView(parseActionOutcome(call.confirmation?.outcome))
+    if (outcomeView) return { label: outcomeView.text, tone: outcomeView.tone }
+    return { label: '已执行成功', tone: 'success' }
+  }
   if (state === 'pending_approval') return { label: '等待审批', tone: 'info' }
   if (state && settledFailureStates.has(state)) return { label: confirmationStateText(state), tone: 'muted' }
   if (state === 'prepared' || state === 'confirmed' || state === 'dispatch_queued' || state === 'executing') {

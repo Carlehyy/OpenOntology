@@ -22,14 +22,22 @@ import { writeTextToClipboard } from '@/utils/clipboard'
 import { formatSessionTime } from '@/utils/datetime'
 import {
   BUILTIN_TOOL_FRIENDLY_NAMES, groupConsecutiveSteps, normalizeAssistantMarkdown, processSummary,
-  splitProcessAndAnswer, toolGroupStatus, toolStatusLabel,
+  splitProcessAndAnswer, toolGroupStatus, toolStatusLabel, toolStepStatusView,
+  type ToolStepStatusTone,
 } from './chatTranscript'
 
 function isMermaidEl(child: unknown) {
   return isValidElement(child) && String((child.props as { className?: string })?.className || '').includes('language-mermaid')
 }
 
-function StepStatusIcon({ status }: { status: string }) {
+function StepStatusIcon({ status, tone }: { status: string; tone?: ToolStepStatusTone | null }) {
+  if (tone) {
+    if (tone === 'success') return <Check size={12} className="shrink-0 text-success" />
+    const toneClass = tone === 'danger'
+      ? 'text-[var(--color-danger)]'
+      : tone === 'muted' ? 'text-[var(--color-text-tertiary)]' : 'text-[var(--color-warning)]'
+    return <CircleAlert size={12} className={`shrink-0 ${toneClass}`} />
+  }
   if (status === 'running' || status === 'awaiting_confirmation') {
     return <Loader2 size={12} className="shrink-0 animate-spin text-brand-ink" />
   }
@@ -124,23 +132,33 @@ function TurnProcess({ steps, status, hasContent, processText, thinkingRound }: 
                     )
                     : (
                       <ul className="mt-1 space-y-1">
-                        {group.steps.map((step, index) => (
-                          <li key={`${step.toolRunId || 'step'}-${index}`} className="min-w-0">
-                            <div className="flex items-center gap-2 py-0.5 text-xs text-[var(--color-text-secondary)]">
-                              <StepStatusIcon status={step.status} />
-                              <span className="font-mono text-[10px] tabular-nums text-[var(--color-text-tertiary)]">#{index + 1}</span>
-                              <span className="ml-auto flex items-center text-xs text-[var(--color-text-tertiary)]">
-                                <span className="sr-only">，状态：</span>
-                                <span>{toolStatusLabel(step.status)}</span>
-                              </span>
-                            </div>
-                            {(step.preview || step.arguments) && (
-                              <pre className="mt-0.5 max-h-40 overflow-auto pb-1 text-[11px] leading-5 text-[var(--color-text-secondary)] whitespace-pre-wrap break-all">
-                                {step.preview || JSON.stringify(step.arguments || {}, null, 2)}
-                              </pre>
-                            )}
-                          </li>
-                        ))}
+                        {group.steps.map((step, index) => {
+                          const stepView = toolStepStatusView(step)
+                          return (
+                            <li key={`${step.toolRunId || 'step'}-${index}`} className="min-w-0">
+                              <div className="flex items-center gap-2 py-0.5 text-xs text-[var(--color-text-secondary)]">
+                                <span
+                                  data-testid="tool-step-status-icon"
+                                  data-tool-run-id={step.toolRunId || ''}
+                                  data-tone={stepView.tone ?? step.status}
+                                  className="inline-flex shrink-0"
+                                >
+                                  <StepStatusIcon status={step.status} tone={stepView.tone} />
+                                </span>
+                                <span className="font-mono text-[10px] tabular-nums text-[var(--color-text-tertiary)]">#{index + 1}</span>
+                                <span className="ml-auto flex items-center text-xs text-[var(--color-text-tertiary)]">
+                                  <span className="sr-only">，状态：</span>
+                                  <span>{stepView.label}</span>
+                                </span>
+                              </div>
+                              {(step.preview || step.arguments) && (
+                                <pre className="mt-0.5 max-h-40 overflow-auto pb-1 text-[11px] leading-5 text-[var(--color-text-secondary)] whitespace-pre-wrap break-all">
+                                  {step.preview || JSON.stringify(step.arguments || {}, null, 2)}
+                                </pre>
+                              )}
+                            </li>
+                          )
+                        })}
                       </ul>
                     )}
                 </details>
@@ -513,7 +531,7 @@ export function ConfirmationCard({ pending, busyDecision, onDecision }: {
                 助手请求对本体执行写操作，请核对以下服务端记录的最终内容后确认
               </p>
               <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">
-                {ontologyConfirmation && <OntologyConfirmationSummary display={ontologyConfirmation.display} />}
+                {ontologyConfirmation && <OntologyConfirmationSummary display={ontologyConfirmation.display} outcome={ontologyConfirmation.outcome} />}
               </div>
               {!verifiable && (
                 <p role="alert" className="mt-2 rounded-lg border border-[var(--color-danger)] bg-[var(--color-danger-bg)] px-3 py-2 text-xs font-medium text-[var(--color-danger)]">

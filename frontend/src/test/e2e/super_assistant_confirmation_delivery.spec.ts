@@ -287,4 +287,57 @@ test.describe('direct 二次确认（YIYA-36 持久 display）', () => {
     // 全程无决定请求：未确认不产生写副作用
     expect(decisions).toHaveLength(0)
   })
+
+  test('success 步骤携带待审核 outcome 时，单步图标不得显示完成绿勾', async ({ page }) => {
+    await seedAuth(page)
+    const pendingReviewPreview = JSON.stringify({
+      confirmationId: 'conf-pending-review',
+      state: 'succeeded',
+      outcome: {
+        assetKind: 'curated', status: 'pending_review', operation: 'update',
+        affectedRows: 0, datasetId: 'ds-1', reviewId: 'rev-pending',
+      },
+    })
+    await mockWorkbench(page, {
+      messages: () => [
+        {
+          id: 'm-user-pr', conversation_id: 'c-1', role: 'user', content: '调整审核数据',
+          status: 'complete', steps: [], token_usage: {}, created_at: now,
+        },
+        {
+          id: 'm-assistant-pr', conversation_id: 'c-1', role: 'assistant', content: '已提交审核，数据尚未生效',
+          status: 'complete',
+          steps: [
+            {
+              toolRunId: 'tr-complete',
+              toolName: 'ontology_execute_action',
+              status: 'success',
+              preview: JSON.stringify({ confirmationId: 'conf-complete', state: 'succeeded' }),
+            },
+            {
+              toolRunId: 'tr-pending-review', toolName: 'ontology_execute_action',
+              status: 'success', preview: pendingReviewPreview,
+            },
+          ],
+          token_usage: {}, created_at: now,
+        },
+      ],
+    })
+
+    await page.goto('/#/super-assistant')
+    const process = page.getByTestId('super-assistant-turn-process')
+    await process.getByRole('button').click()
+    // 多步骤同组：展开组详情后才能看到逐步骤状态
+    await process.locator('summary').filter({ hasText: 'ontology_execute_action' }).click()
+    await expect(process.getByText('变更已提交，待审核')).toBeVisible()
+    // 组件级断言：单步状态图标必须跟随 outcome tone，而不是原始 success 绿勾
+    const pendingIcon = process.locator('[data-tool-run-id="tr-pending-review"]')
+    await expect(pendingIcon).toHaveAttribute('data-tone', 'warning')
+    await expect(pendingIcon.locator('svg.lucide-check')).toHaveCount(0)
+    await expect(pendingIcon.locator('svg.lucide-circle-alert')).toBeVisible()
+    // 同组无 outcome 的 success 步骤仍是完成图标
+    const completeIcon = process.locator('[data-tool-run-id="tr-complete"]')
+    await expect(completeIcon).toHaveAttribute('data-tone', 'success')
+    await expect(completeIcon.locator('svg.lucide-check')).toBeVisible()
+  })
 })

@@ -1,4 +1,8 @@
 import type { SuperMessage, ToolStep } from '@/api/superAssistant'
+import {
+  confirmationOutcomeView,
+  parseActionOutcome,
+} from '../../../components/ontologyConfirmationModel.ts'
 
 /**
  * 部分模型会把整段答复包进 ```markdown 围栏。
@@ -134,6 +138,7 @@ export function toolStatusLabel(status: string) {
   if (status === 'unknown') return '结果待核实'
   if (status === 'compensation_required') return '需人工处理'
   if (status === 'pending_approval') return '等待审批'
+  if (status === 'pending_review') return '待审核（数据未生效）'
   if (status === 'cancelled' || status === 'denied' || status === 'expired') return '已取消'
   if (status === 'failed_not_executed') return '未执行'
   if (status === 'approval_rejected') return '审批被拒绝'
@@ -175,7 +180,52 @@ export function toolGroupStatus(steps: ToolStep[]) {
   if (statuses.includes('prepared')) return 'prepared'
   if (statuses.some(status => status === 'error' || status === 'failed')) return 'error'
   if (statuses.some(status => status === 'cancelled' || status === 'denied' || status === 'expired')) return 'cancelled'
+  // 资产级结果浮出：步骤状态 success 但 outcome 待审核/待核实/失败的，
+  // 组聚合不得落进「完成」——操作层成功不等于数据生效
+  const outcomeStatuses = steps
+    .map(step => parseActionOutcome(stepOutcome(step)?.outcome)?.status)
+    .filter((status): status is string => Boolean(status))
+  if (outcomeStatuses.includes('pending_review')) return 'pending_review'
+  if (outcomeStatuses.includes('unknown')) return 'unknown'
+  if (outcomeStatuses.includes('failed')) return 'error'
   return 'success'
+}
+
+/** 宽容读取步骤 preview JSON（无 preview / 非对象 / 非法 JSON 一律返回 null） */
+function stepOutcome(step: ToolStep): Record<string, unknown> | null {
+  if (!step.preview) return null
+  try {
+    const payload: unknown = JSON.parse(step.preview)
+    return payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+export type ToolStepStatusTone = 'success' | 'warning' | 'danger' | 'muted'
+
+export interface ToolStepStatusView {
+  label: string
+  tone: ToolStepStatusTone | null
+}
+
+/**
+ * 步骤状态视图：ontology_execute 步骤状态 success 但 preview 携带资产级
+ * outcome 时，以 outcome 文案与色调覆盖「完成」——curated 待审核不得显示
+ * 完成，也不能继续使用绿色完成图标。
+ */
+export function toolStepStatusView(step: ToolStep): ToolStepStatusView {
+  if (step.status === 'success' || step.status === 'complete') {
+    const view = confirmationOutcomeView(parseActionOutcome(stepOutcome(step)?.outcome))
+    if (view) return { label: view.text, tone: view.tone }
+  }
+  return { label: toolStatusLabel(step.status), tone: null }
+}
+
+export function toolStepStatusLabel(step: ToolStep): string {
+  return toolStepStatusView(step).label
 }
 
 /**
