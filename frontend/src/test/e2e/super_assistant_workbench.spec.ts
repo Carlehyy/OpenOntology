@@ -1139,7 +1139,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         summarySettingPuts.push(body)
         summarySettingsState = { model_config_id: body.model_config_id ?? null, updated_at: at(0, 10) }
       }
-      return json(route, summarySettingsState)
+      return json(route, summarySettingsState ?? { model_config_id: null, updated_at: null })
     }
     if (path === '/api/v2/inbox/summary') {
       return json(route, { openAlertCount: 0, actionableCount: 0, unreadCount: 0, resolvedCount: 0 })

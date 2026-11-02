@@ -40,16 +40,17 @@ export default function ConversationSummaryDialog({ open, onClose, conversationI
     if (!open) return
     let cancelled = false
     setLoading(true)
-    Promise.all([
-      conversationId ? superAssistantApi.conversationSummary(conversationId) : Promise.resolve(null),
-      superAssistantApi.summarySettings().catch(() => null),
-    ])
+    // 两个请求独立容错：任一失败不影响另一个（设置读取失败只影响下拉回显）
+    const loadSummary = conversationId
+      ? superAssistantApi.conversationSummary(conversationId).catch(() => null)
+      : Promise.resolve(null)
+    const loadSettings = superAssistantApi.summarySettings().catch(() => null)
+    Promise.all([loadSummary, loadSettings])
       .then(([summaryRow, settingsRow]) => {
         if (cancelled) return
         setSummary(summaryRow ?? null)
         setSettings(settingsRow ?? null)
       })
-      .catch(() => { if (!cancelled) setSummary(null) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [open, conversationId, refreshKey])

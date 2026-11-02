@@ -308,12 +308,17 @@ def create_conversation_summary(
     return generate_summary(db, current_user.id, conversation_id)
 
 
-@router.get("/summary/settings", response_model=SummarySettingsOut | None)
+@router.get("/summary/settings", response_model=SummarySettingsOut)
 def read_summary_settings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> SuperAssistantSummarySetting | None:
-    return get_summary_settings(db, current_user.id)
+) -> SummarySettingsOut:
+    # 未配置（无行）返回全空字段的默认对象而非裸 null：共享 axios 拦截器
+    # 对 null 响应体做空安全处理前的既有契约是对象响应（widget-config 同例）
+    setting = get_summary_settings(db, current_user.id)
+    if setting is None:
+        return SummarySettingsOut(model_config_id=None, updated_at=None)
+    return setting
 
 
 @router.put("/summary/settings", response_model=SummarySettingsOut)

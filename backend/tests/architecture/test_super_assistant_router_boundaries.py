@@ -895,5 +895,5 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     assert len(paths) == 115
     assert sum(len(item) for item in paths.values()) == 149
     assert hashlib.sha256(payload).hexdigest() == (
-        "bc0f48d3a2cff5c3f990d449919ca99a6afe7dd724a6b5d43f6f79d0812f31bf"
+        "6cb6448c082c089ddc2d8be531a2cb5900fec44d1a249f1f633c8417b25b90fb"
     )

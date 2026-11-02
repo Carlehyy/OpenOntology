@@ -80,7 +80,9 @@ function createApiClient(version: string): ApiClient {
   const client = axios.create({ baseURL: getBaseURL(version) })
   attachAuthInterceptor(client)
   client.interceptors.response.use(
-    res => res.data.data !== undefined ? res.data.data : res.data,
+    // 空安全：后端部分接口（如会话纪要）无数据时返回裸 null 响应体，
+    // res.data 为 null 时直接解包会抛 TypeError
+    res => (res.data && res.data.data !== undefined) ? res.data.data : res.data,
     handleApiError,
   )
   return {

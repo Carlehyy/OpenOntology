@@ -1011,7 +1011,8 @@ export const superAssistantApi = {
     apiClientV2.get<ConversationSummary | null>(`/super-assistant/conversations/${conversationId}/summary`),
   generateConversationSummary: (conversationId: string) =>
     apiClientV2.post<ConversationSummary>(`/super-assistant/conversations/${conversationId}/summary/generate`, {}),
-  summarySettings: () => apiClientV2.get<SummarySettings | null>('/super-assistant/summary/settings'),
+  /** 未配置时后端返回全空字段对象（model_config_id=null 表示跟随会话模型） */
+  summarySettings: () => apiClientV2.get<SummarySettings>('/super-assistant/summary/settings'),
   updateSummarySettings: (body: { model_config_id: string | null }) =>
     apiClientV2.put<SummarySettings>('/super-assistant/summary/settings', body),
 

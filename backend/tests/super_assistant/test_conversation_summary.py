@@ -296,8 +296,10 @@ def test_get_summary_returns_null_before_generation(tmp_path, monkeypatch):
 
 def test_settings_default_upsert_reset_and_validation(tmp_path, monkeypatch):
     client, _ = _make_client(tmp_path, monkeypatch)
-    # 未配置：跟随会话模型
-    assert client.get("/api/v2/super-assistant/summary/settings").json() is None
+    # 未配置：返回全空字段对象（跟随会话模型），不返回裸 null 响应体
+    default = client.get("/api/v2/super-assistant/summary/settings")
+    assert default.status_code == 200
+    assert default.json() == {"model_config_id": None, "updated_at": None}
     # 保存全局模型
     saved = client.put("/api/v2/super-assistant/summary/settings", json={"model_config_id": "model-2"})
     assert saved.status_code == 200, saved.text
