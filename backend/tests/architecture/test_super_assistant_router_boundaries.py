@@ -889,8 +889,11 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # /quick-inputs/reorder 的 put 共 5 个操作（3 条路径）。
     # YIYA-36 direct 确认卡恢复新增 /conversations/{id}/pending-confirmation
     # 的 GET 共 1 个操作（1 条路径，tools.py 子路由）。
-    assert len(paths) == 112
-    assert sum(len(item) for item in paths.values()) == 145
+    # 会话纪要（conversation_summary.py 子路由）新增 /conversations/{id}/summary
+    # 的 GET、/conversations/{id}/summary/generate 的 POST、/summary/settings 的
+    # GET/PUT 共 4 个操作（3 条路径）。
+    assert len(paths) == 115
+    assert sum(len(item) for item in paths.values()) == 149
     assert hashlib.sha256(payload).hexdigest() == (
-        "e4859b6f84a52e7d3b361607e6f55f5eec56b5813a81a24d0a787694baf2399c"
+        "bc0f48d3a2cff5c3f990d449919ca99a6afe7dd724a6b5d43f6f79d0812f31bf"
     )

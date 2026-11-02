@@ -904,3 +904,27 @@ class VoiceStatusOut(BaseModel):
     max_duration_seconds: int
     max_body_bytes: int
     download: VoiceModelDownloadOut
+
+
+class ConversationSummaryOut(ORMModel):
+    """会话纪要（每会话最新一份）：structured 为五维卡片字段，markdown 为
+    LLM 原文（字段缺失时的展示兜底）。generated_at 是最近一次生成时间。"""
+
+    conversation_id: str
+    structured: dict
+    markdown: str | None
+    model_config_id: str | None
+    message_count: int
+    generated_at: datetime
+
+
+class SummarySettingsOut(ORMModel):
+    """用户级纪要生成模型配置：model_config_id 为 None 表示未配置，
+    生成时跟随各会话当前使用的模型。"""
+
+    model_config_id: str | None
+    updated_at: datetime | None
+
+
+class SummarySettingsUpdate(BaseModel):
+    model_config_id: str | None = Field(default=None, max_length=100)

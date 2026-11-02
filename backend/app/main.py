@@ -467,6 +467,14 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# 会话纪要（每会话结构化纪要 + 用户级生成模型配置）：同前缀同守卫的独立子路由
+from app.super_assistant import conversation_summary as super_assistant_conversation_summary
+app.include_router(
+    super_assistant_conversation_summary.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 浏览器实时画面 WebSocket 复用 steward 的 ticket 鉴权处理器（理由同上方
 # steward WS 挂载处注释）：live 处理器与会话模型完全无关，二次挂载仅新增
 # 超助前缀；companion/connect 顺带双前缀可用，脚本仍回连 steward 路径。

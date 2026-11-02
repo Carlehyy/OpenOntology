@@ -1889,6 +1889,9 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         }
         assistant_message.token_usage = usage_snapshot
         assistant_message.status = "complete"
+        # 会话纪要的「回复时间」以落定时刻为准（created_at 是占位行创建时间，
+        # 与用户消息同时刻）；仅 complete 路径写入，中断/失败不进入纪要
+        assistant_message.completed_at = datetime.now(timezone.utc)
         conversation.updated_at = datetime.now(timezone.utc)
         db.commit()
         yield sse("message_end", {

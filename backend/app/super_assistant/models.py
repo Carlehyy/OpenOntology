@@ -55,6 +55,9 @@ class SuperAssistantMessage(Base):
     steps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     token_usage: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    # 回复落定时间：assistant 消息 status 置为 complete 时写入（会话纪要的
+    # 「回复时间」以此为准）；user 消息发送即完成，与 created_at 同义保持 NULL
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SuperAssistantToolRun(Base):
@@ -644,6 +647,46 @@ class SuperAssistantQuickInput(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantConversationSummary(Base):
+    """会话纪要（每会话仅保留最新一份，每次生成整体覆盖）。
+
+    structured 存五维微卡片字段（title/status/tags/goal/actions/pitfalls/
+    outcome/todos），markdown 存 LLM 原文——解析失败或字段缺失时前端回退
+    展示原文。model_config_id 记录本次生成实际使用的模型配置（含选择器
+    回落后的结果）；message_count 是本次纳入纪要的 complete 消息条数。
+    """
+
+    __tablename__ = "super_assistant_conversation_summaries"
+
+    conversation_id: Mapped[str] = mapped_column(
+        String, ForeignKey("super_assistant_conversations.id", ondelete="CASCADE"), primary_key=True,
+    )
+    structured: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_config_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True,
+    )
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantSummarySetting(Base):
+    """用户级会话纪要生成模型配置（每用户一行，对所有会话生效）。
+
+    model_config_id 为空表示未配置：每次生成跟随该会话当前使用的模型；
+    指向的模型配置被删除时 FK 置空，行为回退到跟随会话模型。
+    """
+
+    __tablename__ = "super_assistant_summary_settings"
+
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    model_config_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
