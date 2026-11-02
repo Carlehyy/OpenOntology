@@ -45,15 +45,21 @@ diff、未知路径、rename 源路径，以及改到分类器或本工作流时
    校验，同时在任何远端命令前校验部署目录；
 8. 在 runner 上从 `PROD_*` Repository secrets/variables 物化
    `deploy/production.dependencies.env` 作为受控部署输入；
-9. 通过受测试的运行时白名单生成部署包（含 CI 构建的 `frontend/dist`）并
-   先上传；远端替换源码时始终原地保留
-   服务器 `.env`，不把秘密复制到固定 `/tmp` 文件；
-10. 服务器部署入口再次校验目录；旧安装如仍使用示例运行密钥，先执行不改密文
-   的密钥解耦，再完成依赖探测、停止旧 backend、数据库迁移和
-   Compose 启动；
-11. 检查 API 深度 readiness、pipeline executor、PostgreSQL、
-   Redis、Neo4j、MinIO、n8n、Chromium CDP 和前端静态资源；
-12. 无论成功失败，清理 runner 上的上传压缩包与物化清单。
+9. 从精确 `GITHUB_SHA` 生成 `backend/app` 生产源文件 manifest，并与
+   verifier 一起打入现有部署包；`EXPECTED_RUNTIME_COMMIT` 独立传入远端，
+   不由 manifest 自证；
+10. 通过受测试的运行时白名单生成部署包（含 manifest、CI 构建的
+    `frontend/dist`）并先上传；远端替换源码时始终原地保留
+    服务器 `.env`，不把秘密复制到固定 `/tmp` 文件；
+11. 服务器部署入口再次校验目录；旧安装如仍使用示例运行密钥，先执行不改密文
+    的密钥解耦，再完成依赖探测、停止旧 backend、数据库迁移和
+    Compose 启动；
+12. 检查 API 深度 readiness、pipeline executor、PostgreSQL、
+    Redis、Neo4j、MinIO、n8n、Chromium CDP 和前端静态资源；readiness 通过后
+    只读比对 active backend 容器 `/app/app` 文件字节、image ID 和
+    `StartedAt`，manifest 缺失、路径额外/缺失、字节不同、commit 不符或
+    verifier 失败都会使部署非零并沿用既有 stop helper 停止新 runtime；
+13. 无论成功失败，清理 runner 上的上传压缩包、物化清单和本次 manifest。
 
 PR 到 `nano-ontoprompt` 时，独立的 `.github/workflows/ci.yml` 会并行执行
 文档/仓库卫生、后端、配置中心和前端门禁，但不会执行部署；PR 工作流目前
@@ -129,18 +135,37 @@ PostgreSQL、API Hub `api_hub_data`、Neo4j、MinIO、uploads 和其他平台持
 也不会把 secret mount 替换成普通文件；外部秘密管理器需要先以受控、原子方式
 物化完整的 `0600` 文件。直接运行 `deploy/deploy-prod.sh` 的 Git 模式也只会接管
 不存在或空目录，并在任何 fetch/checkout/reset 前拒绝 `.env` 软链接；遇到没有
-`.git` 的非空目录会保留全部内容并失败，不再递归删除。
+`.git` 的非空目录会保留全部内容并失败，不再递归删除。该模式还会用
+`python3` 从 clean checked-out HEAD 生成 runtime source manifest；缺少
+`python3` 时明确失败，不会隐式跳过核验。
 部署目录自身也不能是软链接，远端源码替换和脚本都会在清理任何文件前拒绝。
 
 部署包由 `scripts/ci/create-deployment-archive.sh` 构建，只包含生产 Compose、
 前后端构建/运行输入、CI 构建的 `frontend/dist` 静态产物、Alembic、容器
-初始化资源、部署入口和受控维护脚本。
+初始化资源、部署入口、runtime verifier、exact-HEAD manifest 和受控维护脚本。
 `docs/`、测试、fixture、前端 E2E 源码及过程产物不会上传；白名单由
 `scripts/ci/test-deploy-guards.sh` 在 PR 和部署验证阶段共同锁定。部署包含有受控
 依赖清单，因此 runner/远端临时归档及远端解包后的清单均限制为 `0600`；一旦
 远端替换脚本启动，Bash trap 会在校验、清理或解包失败时删除该次唯一命名的
 临时包。若任务恰好在上传完成后、远端脚本启动前被外部强制终止，受限为 `0600`
 的唯一命名包可能暂留 `/tmp`，应按 run id 核对后清理。
+
+手工 archive 流程必须在构造部署包前显式生成 manifest，并在远端独立传入同一
+commit；不得复用任意工作区字节：
+
+```bash
+runtime_commit="$(git rev-parse HEAD)"
+python3 deploy/runtime_source_attestation.py generate \
+  --repo . --commit "$runtime_commit" \
+  --output deploy/runtime-source-manifest.json
+bash scripts/ci/create-deployment-archive.sh /tmp/openontology.tar.gz
+# 远端解包后：
+EXPECTED_RUNTIME_COMMIT="$runtime_commit" bash deploy/deploy-prod.sh
+```
+
+该核验只声明 active backend 运行容器的 `/app/app` 文件字节与 image identity
+绑定（manifest 路径白名单为 `backend/app`），不声称已加载 Python 内存字节；
+不新增公开 version 接口，也不改变 Compose 启动/重启顺序。
 
 首次登录只能在受控的服务器交互终端读取该值。先确认文件权限，再读取所需的
 两项；若自定义了 `DEPLOY_APP_DIR`，请替换下列路径。不要把输出复制到聊天、

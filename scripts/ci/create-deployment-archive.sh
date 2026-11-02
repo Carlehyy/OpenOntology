@@ -38,12 +38,25 @@ required_paths=(
   "frontend/vite.config.ts"
   "docker/browser"
   "deploy/deploy-prod.sh"
+  "deploy/runtime_source_attestation.py"
+  "deploy/runtime-source-manifest.json"
   "scripts/ci/validate-deploy-app-dir.sh"
 )
 
 for required_path in "${required_paths[@]}"; do
   if [[ ! -e "$REPOSITORY_ROOT/$required_path" ]]; then
     printf 'deployment archive input is missing: %s\n' "$required_path" >&2
+    exit 1
+  fi
+done
+
+for runtime_path in \
+  "deploy/runtime_source_attestation.py" \
+  "deploy/runtime-source-manifest.json"; do
+  if [[ ! -s "$REPOSITORY_ROOT/$runtime_path" ]] \
+      || [[ -L "$REPOSITORY_ROOT/$runtime_path" ]]; then
+    printf 'runtime source attestation input must be a non-empty regular file: %s\n' \
+      "$runtime_path" >&2
     exit 1
   fi
 done

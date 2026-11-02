@@ -19,8 +19,11 @@ DEPENDENCY_CONFIG_FILE="${DEPENDENCY_CONFIG_FILE:-deploy/production.dependencies
 # PUBLIC_PORT from that manifest drives the endpoint Compose will expose.
 HEALTH_URL="${HEALTH_URL:-}"
 READINESS_URL="${READINESS_URL:-}"
+EXPECTED_RUNTIME_COMMIT="${EXPECTED_RUNTIME_COMMIT:-}"
 RETRIES="${DEPLOY_RETRIES:-3}"
 SLEEP_SECONDS="${DEPLOY_RETRY_SLEEP:-10}"
+RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS="${RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS:-120}"
+built_backend_image_id=""
 previous_runtime_services=()
 runtime_stopped_for_migration=0
 migration_completed=0
@@ -124,7 +127,11 @@ compose() {
   # COMPOSE_FILE 支持冒号分隔的多个 compose 文件（与 docker compose 的 COMPOSE_FILE
   # 环境变量语义一致），逐个展开为 -f 参数。
   local compose_args=() file
+  local call_timeout="${COMPOSE_CALL_TIMEOUT:-0}"
   local -a profile_args=()
+  case "$call_timeout" in
+    ""|*[!0-9]*) call_timeout=0 ;;
+  esac
   local IFS=':'
   for file in $COMPOSE_FILE; do
     compose_args+=(-f "$file")
@@ -132,7 +139,16 @@ compose() {
   if [ "$INTEGRATED_DBX_INTERNAL" = "1" ] && [ "${1:-}" != "version" ]; then
     profile_args=(--profile integrated-dbx)
   fi
-  if compose_environment docker compose version >/dev/null 2>&1; then
+  if [ "$call_timeout" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
+    if compose_environment docker compose version >/dev/null 2>&1; then
+      compose_environment timeout "$call_timeout" docker compose "${profile_args[@]}" "${compose_args[@]}" "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then
+      compose_environment timeout "$call_timeout" docker-compose "${profile_args[@]}" "${compose_args[@]}" "$@"
+    else
+      log "Docker Compose is not installed"
+      return 1
+    fi
+  elif compose_environment docker compose version >/dev/null 2>&1; then
     compose_environment docker compose "${profile_args[@]}" "${compose_args[@]}" "$@"
   elif command -v docker-compose >/dev/null 2>&1; then
     compose_environment docker-compose "${profile_args[@]}" "${compose_args[@]}" "$@"
@@ -243,9 +259,137 @@ check_pipeline_executor() {
   local container_id health
   container_id="$(compose ps -q pipeline_executor 2>/dev/null || true)"
   [ -n "$container_id" ] || return 1
-  health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+  health="$(compose_environment docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
     "$container_id" 2>/dev/null || true)"
   [ "$health" = "healthy" ]
+}
+backend_app_source_is_unmounted() {
+  local container_id="$1" destinations destination
+  if ! destinations="$(compose_environment docker inspect --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' \
+      "$container_id" 2>/dev/null)"; then
+    log "could not inspect backend container mounts"
+    return 1
+  fi
+  while IFS= read -r destination; do
+    [ -n "$destination" ] || continue
+    destination="${destination%/}"
+    [ -n "$destination" ] || destination="/"
+    case "$destination" in
+      /|/app|/app/app|/app/app/*)
+        log "backend source path is covered by a container mount: $destination"
+        return 1
+        ;;
+    esac
+  done <<<"$destinations"
+  return 0
+}
+verify_runtime_source_attestation() {
+  local manifest="$SCRIPT_DIR/runtime-source-manifest.json"
+  local verifier="$SCRIPT_DIR/runtime_source_attestation.py"
+  local expected_commit="$EXPECTED_RUNTIME_COMMIT"
+  local backend_cids backend_cid_count backend_cid
+  local running_image_id started_at
+  local verifier_source attestation_output attestation_status line
+  case "$RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS" in
+    ""|*[!0-9]*) log "RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS must be a positive integer"; return 1 ;;
+  esac
+  if [ "$RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS" -lt 1 ] \
+      || [ "$RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS" -gt 900 ]; then
+    log "RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS must be between 1 and 900"
+    return 1
+  fi
+  if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+    log "runtime source manifest is missing or is not a regular file"
+    return 1
+  fi
+  if [ ! -f "$verifier" ] || [ -L "$verifier" ]; then
+    log "runtime source verifier is missing or is not a regular file"
+    return 1
+  fi
+  if [[ ! "$expected_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    log "EXPECTED_RUNTIME_COMMIT must be a full lowercase commit"
+    return 1
+  fi
+  if [[ ! "$built_backend_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    log "the backend image built by this deploy has no recorded image ID"
+    return 1
+  fi
+
+  backend_cids="$(compose ps -q backend 2>/dev/null || true)"
+  backend_cid_count="$(printf '%s\n' "$backend_cids" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [ "$backend_cid_count" -ne 1 ]; then
+    log "expected exactly one running backend container, found ${backend_cid_count}"
+    return 1
+  fi
+  backend_cid="$(printf '%s\n' "$backend_cids" | sed '/^$/d' | head -n1)"
+  case "$backend_cid" in
+    *[!0-9a-f]*) log "active backend container id is malformed"; return 1 ;;
+  esac
+  if [ "${#backend_cid}" -lt 12 ] || [ "${#backend_cid}" -gt 64 ]; then
+    log "active backend container id has an unexpected length"
+    return 1
+  fi
+
+  running_image_id="$(compose_environment docker inspect --format '{{.Image}}' "$backend_cid" 2>/dev/null || true)"
+  started_at="$(compose_environment docker inspect --format '{{.State.StartedAt}}' "$backend_cid" 2>/dev/null || true)"
+  if [[ ! "$running_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    log "active backend image id is malformed"
+    return 1
+  fi
+  if [[ ! "$started_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$ ]]; then
+    log "active backend StartedAt is malformed"
+    return 1
+  fi
+  if [ "$running_image_id" != "$built_backend_image_id" ]; then
+    log "active backend image ${running_image_id} does not match the image built by this deploy ${built_backend_image_id}"
+    return 1
+  fi
+  if ! backend_app_source_is_unmounted "$backend_cid"; then
+    return 1
+  fi
+
+  verifier_source="$(cat "$verifier")"
+  if [ -z "$verifier_source" ]; then
+    log "runtime source verifier could not be read"
+    return 1
+  fi
+  if attestation_output="$(
+    COMPOSE_CALL_TIMEOUT="$RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS" \
+      compose exec -T backend python -c "$verifier_source" verify \
+        --manifest-stdin \
+        --source-root /app/app \
+        --expected-commit "$expected_commit" \
+        --container-id "$backend_cid" \
+        --image-id "$running_image_id" \
+        --started-at "$started_at" \
+        --timeout-seconds "$RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS" \
+        < "$manifest" 2>&1
+  )"; then
+    attestation_status=0
+  else
+    attestation_status=$?
+  fi
+  if [ "$attestation_status" -ne 0 ]; then
+    if [ "$attestation_status" -eq 124 ]; then
+      log "runtime source attestation timed out after ${RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS}s"
+    fi
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      log "runtime source attestation: ${line}"
+    done <<<"$attestation_output"
+    return 1
+  fi
+  if ! grep -Fq 'status=ok scope=running_container_files_not_loaded_memory' \
+      <<<"$attestation_output"; then
+    log "runtime source verifier returned no success record"
+    return 1
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    log "runtime source attestation: ${line}"
+  done <<<"$attestation_output"
+  log "runtime source attestation mount_check=app_source_not_mounted image_matches_build=true"
+  return 0
 }
 start_required_dependency_services() {
   start_integrated_dbx_if_needed
@@ -1287,9 +1431,67 @@ if [ "${DEPLOY_VALIDATE_ONLY:-0}" = "1" ]; then
   log "production environment validation succeeded"
   exit 0
 fi
+if [ "${SKIP_GIT:-0}" != "1" ]; then
+  # Direct Git deployment has no archive-supplied manifest. Generate it from
+  # the clean checked-out HEAD with the same helper and algorithm; if the host
+  # lacks python3, fail explicitly instead of silently skipping attestation.
+  command -v python3 >/dev/null 2>&1 || {
+    log "direct Git deployment requires python3 to generate the runtime source manifest; use the deployment archive flow or install python3"
+    exit 1
+  }
+  direct_runtime_commit="$(git -C "$APP_DIR" rev-parse HEAD)"
+  if [ -n "$EXPECTED_RUNTIME_COMMIT" ] \
+      && [ "$EXPECTED_RUNTIME_COMMIT" != "$direct_runtime_commit" ]; then
+    log "EXPECTED_RUNTIME_COMMIT ${EXPECTED_RUNTIME_COMMIT} does not match checked-out HEAD ${direct_runtime_commit}"
+    exit 1
+  fi
+  EXPECTED_RUNTIME_COMMIT="$direct_runtime_commit"
+  if ! python3 "$SCRIPT_DIR/runtime_source_attestation.py" generate \
+      --repo "$APP_DIR" \
+      --commit "$EXPECTED_RUNTIME_COMMIT" \
+      --output "$SCRIPT_DIR/runtime-source-manifest.json"; then
+    log "failed to generate the runtime source manifest for direct Git deployment"
+    exit 1
+  fi
+fi
 command -v docker >/dev/null 2>&1 || { log "docker is not installed"; exit 1; }
 log "building images"
 run_with_retry compose build --pull
+# Resolve the exact image tag Compose will use for the backend service from the
+# structured build-print output (target.backend.tags). Do not guess an image
+# name and do not pick among label/created-time candidates: the tag emitted for
+# this build is the only reference inspected below. The full build-print output
+# is parsed only in the pipeline and is never written to disk or logs.
+backend_build_tag="$(
+  compose build --print backend 2>/dev/null | awk '
+    /"backend": \{/ { in_backend=1; next }
+    in_backend && /"tags": \[/ { in_tags=1; next }
+    in_tags && match($0, /"[^"]+"/) {
+      print substr($0, RSTART + 1, RLENGTH - 2)
+      exit
+    }
+  '
+)"
+if [ -z "$backend_build_tag" ]; then
+  log "could not resolve the backend image tag from Compose build --print backend"
+  exit 1
+fi
+case "$backend_build_tag" in
+  *[!A-Za-z0-9._:/@-]*)
+    log "backend image tag from Compose build --print is malformed"
+    exit 1
+    ;;
+esac
+built_backend_image_id="$(
+  compose_environment docker image inspect --format '{{.Id}}' \
+    "$backend_build_tag" 2>/dev/null || true
+)"
+if [[ ! "$built_backend_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  log "could not inspect the backend image ID for the exact Compose build tag"
+  exit 1
+fi
+log "backend build tag: ${backend_build_tag}"
+log "backend image built: ${built_backend_image_id}"
 log "starting required dependency services"
 run_with_retry start_required_dependency_services
 log "verifying required production dependency connectivity"
@@ -1354,6 +1556,12 @@ for i in $(seq 1 60); do
   if curl -fsS --connect-timeout 5 --max-time 10 "$READINESS_URL" >/dev/null \
       && check_pipeline_executor \
       && check_frontend_assets; then
+    if ! verify_runtime_source_attestation; then
+      log "runtime source attestation failed; refusing to report deployment success"
+      stop_new_runtime_after_failed_deploy
+      log "migration reached head; restore the pre-deploy backup before rolling back the application"
+      exit 1
+    fi
     log "deployment succeeded"
     compose ps
     exit 0

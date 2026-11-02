@@ -496,6 +496,24 @@ jobs:
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env
 
+      - name: Generate backend runtime source manifest
+        # The manifest is generated from Git objects at the exact workflow SHA,
+        # never from an arbitrary dirty worktree. It is packaged into the
+        # deployment archive below so the existing archive digest binds it.
+        run: |
+          : "${GITHUB_SHA:?GITHUB_SHA is required}"
+          printf '%s' "${GITHUB_SHA}" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "GITHUB_SHA must be a full lowercase commit"; exit 1; }
+          HEAD_SHA="$(git rev-parse HEAD)"
+          test "${HEAD_SHA}" = "${GITHUB_SHA}" \
+            || { echo "checkout HEAD ${HEAD_SHA} does not match GITHUB_SHA ${GITHUB_SHA}"; exit 1; }
+          python3 deploy/runtime_source_attestation.py generate \
+            --repo "${GITHUB_WORKSPACE}" \
+            --commit "${GITHUB_SHA}" \
+            --output deploy/runtime-source-manifest.json
+          test -s deploy/runtime-source-manifest.json
+          echo "runtime source manifest sha256: $(sha256sum deploy/runtime-source-manifest.json | awk '{print $1}') (commit ${GITHUB_SHA})"
+
       - name: Upload source to server
         timeout-minutes: 10
         env:
@@ -613,11 +631,13 @@ jobs:
             echo "DEPLOY_HEALTH_URL must not contain quotes or whitespace"
             exit 1
           fi
-          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "${DEPLOY_USER}@${DEPLOY_HOST}" "cd '${APP_DIR}' && APP_DIR='${APP_DIR}' SKIP_GIT=1 BOOTSTRAP_PRODUCTION_ENV='${BOOTSTRAP_PRODUCTION_ENV}' HEALTH_URL='${HEALTH_URL}' bash deploy/deploy-prod.sh"
+          printf '%s' "${GITHUB_SHA}" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "GITHUB_SHA must be a full lowercase commit"; exit 1; }
+          sshpass -p "${DEPLOY_PASSWORD}" ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "${DEPLOY_USER}@${DEPLOY_HOST}" "cd '${APP_DIR}' && APP_DIR='${APP_DIR}' SKIP_GIT=1 EXPECTED_RUNTIME_COMMIT='${GITHUB_SHA}' BOOTSTRAP_PRODUCTION_ENV='${BOOTSTRAP_PRODUCTION_ENV}' HEALTH_URL='${HEALTH_URL}' bash deploy/deploy-prod.sh"
 
       - name: Remove runner deployment archive
         if: ${{ always() }}
-        run: rm -f /tmp/openontology.tar.gz deploy/production.dependencies.env
+        run: rm -f /tmp/openontology.tar.gz deploy/production.dependencies.env deploy/runtime-source-manifest.json
 
   durations-refresh:
     # 时长表自愈：合并 verify-backend 各分片的实测时长，仅当测试集键集发生

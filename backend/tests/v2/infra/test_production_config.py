@@ -1619,6 +1619,9 @@ def _deploy_workflow_script() -> str:
     return deploy_step["run"]
 
 
+SYNTHETIC_GITHUB_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
 def _run_deploy_workflow_step(
     tmp_path: Path,
     *,
@@ -1642,6 +1645,7 @@ def _run_deploy_workflow_step(
     env.update({
         "PATH": f"{fake_bin}:{env['PATH']}",
         "GITHUB_WORKSPACE": str(ROOT),
+        "GITHUB_SHA": SYNTHETIC_GITHUB_SHA,
         "DEPLOY_HOST": "203.0.113.8",
         "DEPLOY_USER": "deploy-user",
         "DEPLOY_PASSWORD": "test-password",
@@ -1676,6 +1680,10 @@ def test_deploy_workflow_defaults_health_url_to_manifest_public_port(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"HEALTH_URL='{expected_url}'" in result.stdout
+    assert (
+        f"EXPECTED_RUNTIME_COMMIT='{SYNTHETIC_GITHUB_SHA}'"
+        in result.stdout
+    )
 
 
 def test_deploy_workflow_preserves_explicit_health_url(tmp_path):
@@ -1688,6 +1696,10 @@ def test_deploy_workflow_preserves_explicit_health_url(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
         "HEALTH_URL='https://platform.example.com/health-root/'"
+        in result.stdout
+    )
+    assert (
+        f"EXPECTED_RUNTIME_COMMIT='{SYNTHETIC_GITHUB_SHA}'"
         in result.stdout
     )
 

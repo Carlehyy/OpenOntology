@@ -133,6 +133,72 @@ if grep -Eq '^[[:space:]]+environment:[[:space:]]+production[[:space:]]*$' \
   printf 'deployment workflow must not hardcode a production environment block\n' >&2
   exit 1
 fi
+if ! grep -Fq 'python3 deploy/runtime_source_attestation.py generate' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq -- '--commit "${GITHUB_SHA}"' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'deploy/runtime-source-manifest.json' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq "EXPECTED_RUNTIME_COMMIT='\${GITHUB_SHA}'" "$DEPLOY_WORKFLOW"; then
+  printf 'deployment workflow must generate the exact-SHA runtime source manifest and pass the expected commit independently\n' >&2
+  exit 1
+fi
+runtime_manifest_generate_line="$(grep -nF 'python3 deploy/runtime_source_attestation.py generate' "$DEPLOY_WORKFLOW" | head -n1 | cut -d: -f1)"
+runtime_archive_line="$(grep -nF 'bash scripts/ci/create-deployment-archive.sh /tmp/openontology.tar.gz' "$DEPLOY_WORKFLOW" | head -n1 | cut -d: -f1)"
+if [ -z "$runtime_manifest_generate_line" ] || [ -z "$runtime_archive_line" ] \
+    || [ "$runtime_manifest_generate_line" -ge "$runtime_archive_line" ]; then
+  printf 'runtime source manifest must be generated before the deployment archive is built\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'git rev-parse HEAD' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'HEAD_SHA' "$DEPLOY_WORKFLOW"; then
+  printf 'runtime source manifest generation must bind to the exact checkout HEAD\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'deploy/runtime_source_attestation.py' "$ARCHIVE_SCRIPT" \
+    || ! grep -Fq 'deploy/runtime-source-manifest.json' "$ARCHIVE_SCRIPT"; then
+  printf 'deployment archive builder must include the runtime source verifier and manifest\n' >&2
+  exit 1
+fi
+attestation_call_line="$(grep -nF 'if ! verify_runtime_source_attestation; then' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
+readiness_line="$(grep -nF 'log "waiting for backend, pipeline executor and frontend readiness' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
+deployment_succeeded_line="$(grep -nF 'log "deployment succeeded"' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
+if [ -z "$attestation_call_line" ] || [ -z "$readiness_line" ] \
+    || [ -z "$deployment_succeeded_line" ] \
+    || [ "$attestation_call_line" -le "$readiness_line" ] \
+    || [ "$attestation_call_line" -ge "$deployment_succeeded_line" ]; then
+  printf 'runtime source attestation must run after readiness and before deployment success\n' >&2
+  exit 1
+fi
+if grep -nE 'docker inspect' "$DEPLOY_SCRIPT" | grep -v -- '--format' >/dev/null; then
+  printf 'deployment must use docker inspect --format only; full inspect JSON is forbidden\n' >&2
+  exit 1
+fi
+if grep -Fq '{{json' "$DEPLOY_SCRIPT" \
+    || grep -Fq '{{.Config.Env' "$DEPLOY_SCRIPT" \
+    || grep -Fq '{{json .Mounts}}' "$DEPLOY_SCRIPT"; then
+  printf 'deployment must not dump full inspect, Env, or Mounts JSON\n' >&2
+  exit 1
+fi
+if grep -Fq 'force-recreate' "$DEPLOY_SCRIPT" \
+    || grep -Fq 'wait_for_backend_readiness' "$DEPLOY_SCRIPT"; then
+  printf 'runtime source attestation must be read-only and must not add a new restart/readiness lifecycle\n' >&2
+  exit 1
+fi
+if grep -Fq 'docker image ls' "$DEPLOY_SCRIPT" \
+    || grep -Fq 'config --format json' "$DEPLOY_SCRIPT" \
+    || grep -Fq 'config --images' "$DEPLOY_SCRIPT" \
+    || grep -Fq -- '-backend$' "$DEPLOY_SCRIPT"; then
+  printf 'backend image resolution must not use label/created-time candidates or guessed image names\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'compose build --print backend' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'backend_build_tag' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq "docker image inspect --format '{{.Id}}'" "$DEPLOY_SCRIPT"; then
+  printf 'backend image resolution must inspect the exact tag from Compose build --print backend\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'python3 "$SCRIPT_DIR/runtime_source_attestation.py" generate' "$DEPLOY_SCRIPT"; then
+  printf 'direct Git deployment must explicitly generate the runtime source manifest\n' >&2
+  exit 1
+fi
 
 stop_line="$(grep -nF \
   'compose stop --timeout 30 frontend pipeline_executor backend' \
@@ -162,11 +228,11 @@ fi
 post_migration_stop_count="$(
   grep -cF 'stop_new_runtime_after_failed_deploy' "$DEPLOY_SCRIPT"
 )"
-if [ "$post_migration_stop_count" -ne 3 ] \
+if [ "$post_migration_stop_count" -ne 4 ] \
     || ! grep -Fq \
       'if ! compose stop --timeout 30 frontend pipeline_executor backend; then' \
       "$DEPLOY_SCRIPT"; then
-  printf 'post-migration startup/readiness failures must stop the new runtime\n' >&2
+  printf 'post-migration startup, readiness, or attestation failures must stop the new runtime\n' >&2
   exit 1
 fi
 
@@ -308,14 +374,35 @@ archive_fixture_paths=(
   "frontend/vite.config.ts"
   "docker/browser/Dockerfile"
   "deploy/deploy-prod.sh"
+  "deploy/runtime_source_attestation.py"
+  "deploy/runtime-source-manifest.json"
   "scripts/ci/validate-deploy-app-dir.sh"
   "docs/should-not-deploy.md"
   ".artifacts/should-not-deploy.json"
 )
 for archive_path in "${archive_fixture_paths[@]}"; do
+  case "$archive_path" in
+    deploy/runtime_source_attestation.py|deploy/runtime-source-manifest.json)
+      continue
+      ;;
+  esac
   mkdir -p "$archive_source/$(dirname "$archive_path")"
   : > "$archive_source/$archive_path"
 done
+mkdir -p "$archive_source/deploy"
+cp "$REPO_ROOT/deploy/runtime_source_attestation.py" \
+  "$archive_source/deploy/runtime_source_attestation.py"
+git -C "$archive_source" init -q
+git -C "$archive_source" config user.email "deploy-guards@example.invalid"
+git -C "$archive_source" config user.name "Deploy Guards"
+git -C "$archive_source" config commit.gpgsign false
+git -C "$archive_source" add backend/app
+git -C "$archive_source" commit -qm "archive fixture"
+archive_fixture_commit="$(git -C "$archive_source" rev-parse HEAD)"
+python3 "$REPO_ROOT/deploy/runtime_source_attestation.py" generate \
+  --repo "$archive_source" \
+  --commit "$archive_fixture_commit" \
+  --output "$archive_source/deploy/runtime-source-manifest.json" >/dev/null
 DEPLOY_SOURCE_ROOT="$archive_source" \
   bash "$ARCHIVE_SCRIPT" "$archive_output" >/dev/null
 archive_listing="$(tar -tzf "$archive_output")"
@@ -339,6 +426,8 @@ for required_member in \
   "frontend/dist/index.html" \
   "frontend/src/main.tsx" \
   "docker/browser/Dockerfile" \
+  "deploy/runtime_source_attestation.py" \
+  "deploy/runtime-source-manifest.json" \
   "deploy/production.dependencies.env"; do
   if ! grep -Fxq "$required_member" <<<"$archive_listing"; then
     printf 'deployment archive is missing required member: %s\n' \
@@ -346,6 +435,11 @@ for required_member in \
     exit 1
   fi
 done
+if ! tar -xOf "$archive_output" deploy/runtime-source-manifest.json \
+    | grep -Fq '"backend/app/main.py"'; then
+  printf 'deployment archive runtime source manifest is not the generated exact-HEAD manifest\n' >&2
+  exit 1
+fi
 for forbidden_member in \
   ".env" \
   "frontend/src/test/e2e/should-not-deploy.spec.ts" \
@@ -357,6 +451,36 @@ for forbidden_member in \
     exit 1
   fi
 done
+archive_sha_before="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$archive_output")"
+printf 'changed runtime manifest\n' >"$archive_source/deploy/runtime-source-manifest.json"
+archive_output_changed="$test_dir/archive-changed.tar.gz"
+DEPLOY_SOURCE_ROOT="$archive_source" \
+  bash "$ARCHIVE_SCRIPT" "$archive_output_changed" >/dev/null
+archive_sha_after="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$archive_output_changed")"
+if [ "$archive_sha_before" = "$archive_sha_after" ]; then
+  printf 'deployment archive SHA must change when the runtime source manifest changes\n' >&2
+  exit 1
+fi
+if ! tar -xOf "$archive_output_changed" deploy/runtime-source-manifest.json \
+    | grep -Fxq 'changed runtime manifest'; then
+  printf 'deployment archive extraction must preserve the runtime source manifest\n' >&2
+  exit 1
+fi
+cp "$archive_source/deploy/runtime-source-manifest.json" \
+  "$test_dir/runtime-source-manifest.saved"
+: >"$archive_source/deploy/runtime-source-manifest.json"
+archive_empty_manifest_output="$test_dir/archive-empty-manifest.tar.gz"
+if DEPLOY_SOURCE_ROOT="$archive_source" \
+    bash "$ARCHIVE_SCRIPT" "$archive_empty_manifest_output" \
+    >"$test_dir/archive-empty-manifest.log" 2>&1; then
+  printf 'deployment archive builder must reject an empty runtime source manifest\n' >&2
+  exit 1
+fi
+grep -Fq 'must be a non-empty regular file' \
+  "$test_dir/archive-empty-manifest.log"
+mv "$test_dir/runtime-source-manifest.saved" \
+  "$archive_source/deploy/runtime-source-manifest.json"
+printf 'ok deployment-archive-runtime-manifest-bind\n'
 
 cp "$REPO_ROOT/.env.example" "$test_dir/.env"
 
@@ -687,7 +811,29 @@ printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
 if [ "${1-}" = compose ] && [ "${2-}" = version ]; then
   exit 0
 fi
+if [ "${1-}" = image ] && [ "${2-}" = ls ]; then
+  printf '%s\n' "$(printf 'a%.0s' {1..64})"
+  exit 0
+fi
+if [ "${1-}" = image ] && [ "${2-}" = inspect ]; then
+  case "$*" in
+    *'{{.Created}}'*) printf '2026-11-02T03:00:00Z sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
+    *) printf 'sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
+  esac
+  exit 0
+fi
 case "$*" in
+  *' build --print backend')
+    printf '%s\n' '{'
+    printf '%s\n' '  "target": {'
+    printf '%s\n' '    "backend": {'
+    printf '%s\n' '      "tags": ['
+    printf '%s\n' '        "fixture-tag"'
+    printf '%s\n' '      ]'
+    printf '%s\n' '    }'
+    printf '%s\n' '  }'
+    printf '%s\n' '}'
+    ;;
   *' up --help')
     printf '%s\n' '      --wait'
     ;;
@@ -793,5 +939,635 @@ if [ -z "$probe_line" ] || [ -z "$stop_line" ] || [ -z "$heads_line" ] \
   printf 'backend and Celery worker must stop before Alembic validation/upgrade\n' >&2
   exit 1
 fi
+
+# Runtime source attestation: generate from one exact clean Git HEAD, then
+# verify the same allowlisted bytes on a source-root fixture. These tests use
+# no Docker daemon, no production endpoint, and no real dependency values.
+attestation_helper="$REPO_ROOT/deploy/runtime_source_attestation.py"
+attestation_root="$test_dir/runtime-source-attestation"
+attestation_repo="$attestation_root/repo"
+attestation_manifest="$attestation_root/manifest.json"
+attestation_source="$attestation_root/source"
+mkdir -p "$attestation_repo/backend/app/subdir" "$attestation_root"
+git -C "$attestation_repo" init -q
+git -C "$attestation_repo" config user.email "deploy-guards@example.invalid"
+git -C "$attestation_repo" config user.name "Deploy Guards"
+git -C "$attestation_repo" config commit.gpgsign false
+printf 'print("fixture")\n' >"$attestation_repo/backend/app/main.py"
+printf '{"fixture": true}\n' >"$attestation_repo/backend/app/subdir/data.json"
+printf '# fixture readme\n' >"$attestation_repo/backend/app/README.md"
+printf 'SECRET_SENTINEL=must-not-enter-manifest\n' >"$attestation_repo/.env"
+mkdir -p "$attestation_repo/.artifacts"
+printf 'must-not-enter-manifest\n' >"$attestation_repo/.artifacts/secret.txt"
+git -C "$attestation_repo" add backend/app
+git -C "$attestation_repo" commit -qm "runtime source fixture"
+attestation_commit="$(git -C "$attestation_repo" rev-parse HEAD)"
+
+python3 "$attestation_helper" generate \
+  --repo "$attestation_repo" \
+  --commit "$attestation_commit" \
+  --output "$attestation_manifest" >"$attestation_root/generate.log" 2>&1
+generated_manifest_sha="$(
+  sed -n 's/.*manifest_sha256=\([0-9a-f]\{64\}\).*/\1/p' \
+    "$attestation_root/generate.log" | tail -n1
+)"
+if [ "${#generated_manifest_sha}" -ne 64 ]; then
+  printf 'runtime source manifest generator did not emit its digest\n' >&2
+  exit 1
+fi
+
+python3 - "$attestation_manifest" "$attestation_commit" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+assert manifest["schema"] == "openontology-runtime-source-manifest/v1"
+assert manifest["algorithm"] == "sha256"
+assert manifest["source_prefix"] == "backend/app"
+assert manifest["commit"] == sys.argv[2]
+assert len(manifest["tree"]) == 40
+assert manifest["file_count"] == len(manifest["files"]) == 3
+assert set(manifest["files"]) == {
+    "backend/app/main.py",
+    "backend/app/subdir/data.json",
+    "backend/app/README.md",
+}
+assert all("SECRET_SENTINEL" not in value for value in manifest["files"])
+assert all(not value.startswith("/") for value in manifest["files"])
+assert all("/../" not in value for value in manifest["files"])
+assert all(".artifacts" not in value for value in manifest["files"])
+assert "deploy/runtime-source-manifest.json" not in manifest["files"]
+PY
+
+attestation_manifest_two="$attestation_root/manifest-two.json"
+python3 "$attestation_helper" generate \
+  --repo "$attestation_repo" \
+  --commit "$attestation_commit" \
+  --output "$attestation_manifest_two" >/dev/null
+manifest_sha_one="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$attestation_manifest")"
+manifest_sha_two="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$attestation_manifest_two")"
+if [ "$manifest_sha_one" != "$manifest_sha_two" ] \
+    || [ "$manifest_sha_one" != "$generated_manifest_sha" ]; then
+  printf 'runtime source manifest generation must be deterministic\n' >&2
+  exit 1
+fi
+
+printf 'dirty\n' >>"$attestation_repo/backend/app/main.py"
+if python3 "$attestation_helper" generate \
+    --repo "$attestation_repo" \
+    --commit "$attestation_commit" \
+    --output "$attestation_root/dirty.json" >"$attestation_root/dirty.log" 2>&1; then
+  printf 'runtime source manifest generation must reject a dirty allowlisted worktree\n' >&2
+  exit 1
+fi
+grep -Fq 'worktree changes exist under backend/app' "$attestation_root/dirty.log"
+git -C "$attestation_repo" checkout -- backend/app/main.py
+
+if python3 "$attestation_helper" generate \
+    --repo "$attestation_repo" \
+    --commit 0000000000000000000000000000000000000000 \
+    --output "$attestation_root/wrong-commit.json" >"$attestation_root/wrong-commit.log" 2>&1; then
+  printf 'runtime source manifest generation must reject a non-HEAD commit\n' >&2
+  exit 1
+fi
+grep -Fq 'checked-out HEAD' "$attestation_root/wrong-commit.log"
+printf 'ok runtime-source-manifest-exact-head\n'
+
+cp -R "$attestation_repo/backend/app" "$attestation_source"
+attestation_container_id="$(printf 'c%.0s' {1..64})"
+attestation_image_id="sha256:$(printf 'd%.0s' {1..64})"
+attestation_started_at="2026-11-02T03:00:00.123456789Z"
+file_set_sha="$(
+  python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["file_set_sha256"])' \
+    "$attestation_manifest"
+)"
+run_attestation_verify() {
+  local manifest="$1" source="$2" expected="$3" output="$4"
+  python3 "$attestation_helper" verify \
+    --manifest "$manifest" \
+    --source-root "$source" \
+    --expected-commit "$expected" \
+    --container-id "$attestation_container_id" \
+    --image-id "$attestation_image_id" \
+    --started-at "$attestation_started_at" >"$output" 2>&1
+}
+
+run_attestation_verify \
+  "$attestation_manifest" "$attestation_source" "$attestation_commit" \
+  "$attestation_root/match.log"
+grep -Fq 'status=ok scope=running_container_files_not_loaded_memory' \
+  "$attestation_root/match.log"
+grep -Fq "commit=${attestation_commit}" "$attestation_root/match.log"
+grep -Fq "manifest_sha256=${generated_manifest_sha}" "$attestation_root/match.log"
+grep -Fq "file_set_sha256=${file_set_sha}" "$attestation_root/match.log"
+grep -Fq "container_id=${attestation_container_id}" "$attestation_root/match.log"
+grep -Fq "image_id=${attestation_image_id}" "$attestation_root/match.log"
+grep -Fq "started_at=${attestation_started_at}" "$attestation_root/match.log"
+if grep -Fq 'SECRET_SENTINEL' "$attestation_root/match.log"; then
+  printf 'runtime source attestation leaked the synthetic secret sentinel\n' >&2
+  exit 1
+fi
+
+manifest_b64="$(base64 <"$attestation_manifest" | tr -d '\r\n')"
+python3 "$attestation_helper" verify \
+  --manifest-b64 "$manifest_b64" \
+  --source-root "$attestation_source" \
+  --expected-commit "$attestation_commit" \
+  --container-id "$attestation_container_id" \
+  --image-id "$attestation_image_id" \
+  --started-at "$attestation_started_at" >"$attestation_root/match-b64.log" 2>&1
+grep -Fq 'status=ok scope=running_container_files_not_loaded_memory' \
+  "$attestation_root/match-b64.log"
+
+mkdir -p "$attestation_source/__pycache__" "$attestation_source/subdir/__pycache__"
+printf 'cache\n' >"$attestation_source/__pycache__/main.cpython-312.pyc"
+printf 'cache\n' >"$attestation_source/subdir/__pycache__/data.cpython-312.pyc"
+printf 'cache\n' >"$attestation_source/subdir/legacy.pyc"
+run_attestation_verify \
+  "$attestation_manifest" "$attestation_source" "$attestation_commit" \
+  "$attestation_root/cache-ignore.log"
+grep -Fq 'status=ok scope=running_container_files_not_loaded_memory' \
+  "$attestation_root/cache-ignore.log"
+rm -rf "$attestation_source/__pycache__" "$attestation_source/subdir/__pycache__"
+rm -f "$attestation_source/subdir/legacy.pyc"
+printf 'ok runtime-source-verifier-match-and-cache\n'
+
+cp -R "$attestation_repo/backend/app" "$attestation_root/tampered"
+printf 'tampered\n' >>"$attestation_root/tampered/main.py"
+if run_attestation_verify \
+    "$attestation_manifest" "$attestation_root/tampered" "$attestation_commit" \
+    "$attestation_root/tampered.log"; then
+  printf 'runtime source attestation must reject changed file bytes\n' >&2
+  exit 1
+fi
+grep -Fq 'status=mismatch' "$attestation_root/tampered.log"
+grep -Fq 'changed_path=backend/app/main.py' "$attestation_root/tampered.log"
+if grep -Fq 'status=ok' "$attestation_root/tampered.log"; then
+  printf 'runtime source mismatch must not emit a success record\n' >&2
+  exit 1
+fi
+
+cp -R "$attestation_repo/backend/app" "$attestation_root/missing"
+rm -f "$attestation_root/missing/main.py"
+if run_attestation_verify \
+    "$attestation_manifest" "$attestation_root/missing" "$attestation_commit" \
+    "$attestation_root/missing.log"; then
+  printf 'runtime source attestation must reject missing files\n' >&2
+  exit 1
+fi
+grep -Fq 'missing_path=backend/app/main.py' "$attestation_root/missing.log"
+
+cp -R "$attestation_repo/backend/app" "$attestation_root/extra"
+printf 'extra\n' >"$attestation_root/extra/extra.py"
+if run_attestation_verify \
+    "$attestation_manifest" "$attestation_root/extra" "$attestation_commit" \
+    "$attestation_root/extra.log"; then
+  printf 'runtime source attestation must reject extra files\n' >&2
+  exit 1
+fi
+grep -Fq 'extra_path=backend/app/extra.py' "$attestation_root/extra.log"
+
+cp -R "$attestation_repo/backend/app" "$attestation_root/symlink"
+ln -s main.py "$attestation_root/symlink/link.py"
+if run_attestation_verify \
+    "$attestation_manifest" "$attestation_root/symlink" "$attestation_commit" \
+    "$attestation_root/symlink.log"; then
+  printf 'runtime source attestation must reject symlinks\n' >&2
+  exit 1
+fi
+grep -Fq 'symlink' "$attestation_root/symlink.log"
+
+cp -R "$attestation_repo/backend/app" "$attestation_root/fifo"
+mkfifo "$attestation_root/fifo/pipe.py"
+if run_attestation_verify \
+    "$attestation_manifest" "$attestation_root/fifo" "$attestation_commit" \
+    "$attestation_root/fifo.log"; then
+  printf 'runtime source attestation must reject non-regular files\n' >&2
+  exit 1
+fi
+grep -Fq 'non-regular' "$attestation_root/fifo.log"
+
+if run_attestation_verify \
+    "$attestation_manifest" "$attestation_source" \
+    0000000000000000000000000000000000000000 \
+    "$attestation_root/wrong-expected.log"; then
+  printf 'runtime source attestation must reject a mismatched expected commit\n' >&2
+  exit 1
+fi
+grep -Fq 'does not match expected commit' "$attestation_root/wrong-expected.log"
+
+if python3 "$attestation_helper" verify \
+    --manifest "$attestation_root/does-not-exist.json" \
+    --source-root "$attestation_source" \
+    --expected-commit "$attestation_commit" \
+    --container-id "$attestation_container_id" \
+    --image-id "$attestation_image_id" \
+    --started-at "$attestation_started_at" >"$attestation_root/missing-manifest.log" 2>&1; then
+  printf 'runtime source attestation must reject a missing manifest\n' >&2
+  exit 1
+fi
+grep -Fq 'manifest is missing' "$attestation_root/missing-manifest.log"
+
+python3 - "$attestation_root/oversized.json" <<'PY'
+import sys
+with open(sys.argv[1], "wb") as handle:
+    handle.write(b"x" * (16 * 1024 * 1024 + 1))
+PY
+if run_attestation_verify \
+    "$attestation_root/oversized.json" "$attestation_source" "$attestation_commit" \
+    "$attestation_root/oversized.log"; then
+  printf 'runtime source attestation must reject an oversized manifest\n' >&2
+  exit 1
+fi
+grep -Fq 'exceeds the size limit' "$attestation_root/oversized.log"
+
+cp "$attestation_manifest" "$attestation_root/unreadable-manifest.json"
+chmod 000 "$attestation_root/unreadable-manifest.json"
+if run_attestation_verify \
+    "$attestation_root/unreadable-manifest.json" "$attestation_source" "$attestation_commit" \
+    "$attestation_root/unreadable-manifest.log"; then
+  printf 'runtime source attestation must reject an unreadable manifest\n' >&2
+  exit 1
+fi
+chmod 644 "$attestation_root/unreadable-manifest.json"
+grep -Fq 'unreadable' "$attestation_root/unreadable-manifest.log"
+
+cp -R "$attestation_repo/backend/app" "$attestation_root/unreadable-source"
+chmod 000 "$attestation_root/unreadable-source/main.py"
+if run_attestation_verify \
+    "$attestation_manifest" "$attestation_root/unreadable-source" "$attestation_commit" \
+    "$attestation_root/unreadable-source.log"; then
+  printf 'runtime source attestation must reject unreadable source files\n' >&2
+  exit 1
+fi
+chmod 644 "$attestation_root/unreadable-source/main.py"
+grep -Fq 'source file is unreadable' "$attestation_root/unreadable-source.log"
+
+python3 - "$attestation_manifest" "$attestation_root/duplicate.json" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+marker = '"files": {'
+duplicate = '    "backend/app/main.py": "' + ("0" * 64) + '",\n'
+text = text.replace(marker, marker + "\n" + duplicate, 1)
+open(sys.argv[2], "w", encoding="utf-8").write(text)
+PY
+if run_attestation_verify \
+    "$attestation_root/duplicate.json" "$attestation_source" "$attestation_commit" \
+    "$attestation_root/duplicate.log"; then
+  printf 'runtime source attestation must reject duplicate manifest paths\n' >&2
+  exit 1
+fi
+grep -Fq 'duplicate key' "$attestation_root/duplicate.log"
+
+python3 - "$attestation_manifest" "$attestation_root/traversal.json" <<'PY'
+import json
+import sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+manifest["files"]["backend/app/../escape.py"] = "0" * 64
+manifest["file_count"] = len(manifest["files"])
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, ensure_ascii=True, indent=2, sort_keys=True)
+PY
+if run_attestation_verify \
+    "$attestation_root/traversal.json" "$attestation_source" "$attestation_commit" \
+    "$attestation_root/traversal.log"; then
+  printf 'runtime source attestation must reject traversal paths\n' >&2
+  exit 1
+fi
+grep -Fq 'traversal' "$attestation_root/traversal.log"
+
+python3 - "$attestation_manifest" "$attestation_root/absolute.json" <<'PY'
+import json
+import sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+manifest["files"]["/etc/passwd"] = "0" * 64
+manifest["file_count"] = len(manifest["files"])
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, ensure_ascii=True, indent=2, sort_keys=True)
+PY
+if run_attestation_verify \
+    "$attestation_root/absolute.json" "$attestation_source" "$attestation_commit" \
+    "$attestation_root/absolute.log"; then
+  printf 'runtime source attestation must reject absolute manifest paths\n' >&2
+  exit 1
+fi
+grep -Fq 'not relative POSIX' "$attestation_root/absolute.log"
+printf 'ok runtime-source-verifier-fail-closed\n'
+
+# Control-plane regression through the real deploy script: a strict fake
+# Docker/Compose/curl exercises compose ps/inspect, the bounded stdin verifier
+# exec, and the failure stop path without a daemon, production endpoint, or
+# real dependency values.
+attestation_deploy_dir="$test_dir/deploy"
+attestation_fake_bin="$test_dir/attestation-fake-bin"
+mkdir -p "$attestation_deploy_dir" "$test_dir/scripts/ci" "$attestation_fake_bin"
+cp "$DEPLOY_SCRIPT" "$attestation_deploy_dir/deploy-prod.sh"
+cp "$attestation_helper" "$attestation_deploy_dir/runtime_source_attestation.py"
+cp "$attestation_manifest" "$attestation_deploy_dir/runtime-source-manifest.json"
+cp "$REPO_ROOT/scripts/ci/validate-deploy-app-dir.sh" "$test_dir/scripts/ci/validate-deploy-app-dir.sh"
+
+cat >"$attestation_fake_bin/curl" <<'FAKE_CURL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+url=""
+output=""
+headers=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    -o) output="${args[$((i + 1))]}" ;;
+    -D) headers="${args[$((i + 1))]}" ;;
+    http://*|https://*) url="${args[$i]}" ;;
+  esac
+done
+[ -n "$url" ] || { echo "fake curl received no URL" >&2; exit 9; }
+if [ -n "$headers" ]; then
+  case "$url" in
+    *.js) printf 'HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n' >"$headers" ;;
+    *.css) printf 'HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n' >"$headers" ;;
+    *) printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers" ;;
+  esac
+fi
+if [ -n "$output" ]; then
+  case "$url" in
+    */) printf '<script src="/assets/main.js"></script><link href="/assets/main.css">\n' >"$output" ;;
+    *.js) printf 'const asset = "assets/chunk.js";\n' >"$output" ;;
+    *.css) printf 'body{}\n' >"$output" ;;
+    *) printf 'ok\n' >"$output" ;;
+  esac
+fi
+exit 0
+FAKE_CURL
+
+cat >"$attestation_fake_bin/docker" <<'FAKE_DOCKER_SUCCESS'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+for key in \
+  ENVIRONMENT PUBLIC_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD \
+  DATABASE_URL REDIS_PASSWORD REDIS_URL NEO4J_URI NEO4J_USER \
+  NEO4J_PASSWORD NEO4J_AUTH MINIO_ENDPOINT MINIO_ACCESS_KEY \
+  MINIO_SECRET_KEY MINIO_USE_SSL N8N_API_URL N8N_API_KEY \
+  N8N_TIMEOUT_SECONDS STEWARD_BROWSER_CDP_URL CORS_ALLOWED_ORIGINS \
+  UPLOADS_DIR PIPELINE_FILE_GATEWAY_BASE_URL \
+  PIPELINE_FILE_PUBLIC_APP_BASE_URL PIPELINE_FILE_PUBLIC_API_BASE_URL \
+  STEWARD_INTERNAL_PROXY_BASE_URL STEWARD_BROWSER_HTTP_LEASE_SECONDS \
+  STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS STEWARD_BROWSER_MAX_SESSIONS \
+  STEWARD_BROWSER_MAX_SESSIONS_PER_USER STEWARD_BROWSER_IDLE_TIMEOUT_SECONDS \
+  STEWARD_BROWSER_REAPER_INTERVAL_SECONDS POSTGRES_IMAGE REDIS_IMAGE \
+  NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE PYTHON_BASE_IMAGE NODE_BASE_IMAGE \
+  NGINX_BASE_IMAGE STRICT_IMAGE_DIGESTS SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE \
+  ASSISTANT_ACTION_EXECUTION_ENABLED ASSISTANT_BROWSER_PROTECTED_ORIGINS \
+  AGENT_QUERY_STATEMENT_TIMEOUT_MS AGENT_QUERY_LOCK_TIMEOUT_MS \
+  AGENT_QUERY_WORK_MEM_MIB AGENT_QUERY_TEMP_FILE_LIMIT_MIB COMPOSE_DISABLE_ENV_FILE \
+  COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR COMPOSE_PROFILES \
+  COMPOSE_PROJECT_NAME; do
+  if [ "${!key+x}" = "x" ]; then
+    printf 'compose environment leaked authority key: %s\n' "$key" \
+      >>"$FAKE_DOCKER_LOG"
+    exit 88
+  fi
+done
+
+if printf '%s\n' "$*" | grep -q -- ' exec -T backend '; then
+  args=("$@")
+  script=""
+  rest=()
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "-c" ]; then
+      script="${args[$((i + 1))]}"
+      rest=("${args[@]:$((i + 2))}")
+      break
+    fi
+  done
+  [ -n "$script" ] || { echo "fake exec missing verifier script" >&2; exit 9; }
+  printf 'compose exec -T backend python -c <verifier> %s\n' "${rest[*]}" >>"$FAKE_DOCKER_LOG"
+  if [ "${FAKE_ATTESTATION_EXEC_FAIL:-0}" = "1" ]; then
+    exit 7
+  fi
+  if [ "${FAKE_ATTESTATION_EXEC_SLEEP:-0}" != "0" ]; then
+    sleep "$FAKE_ATTESTATION_EXEC_SLEEP"
+  fi
+  stdin_file="$FAKE_DOCKER_LOG.stdin"
+  cat >"$stdin_file"
+  printf 'exec-stdin-bytes=%s\n' "$(wc -c <"$stdin_file" | tr -d ' ')" \
+    >>"$FAKE_DOCKER_LOG"
+  rewritten=()
+  index=0
+  while [ "$index" -lt "${#rest[@]}" ]; do
+    if [ "${rest[$index]}" = "--source-root" ]; then
+      rewritten+=("--source-root" "$FAKE_ATTESTATION_SOURCE")
+      index=$((index + 2))
+    else
+      rewritten+=("${rest[$index]}")
+      index=$((index + 1))
+    fi
+  done
+  python3 -c "$script" "${rewritten[@]}" <"$stdin_file"
+  exit $?
+fi
+
+printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
+if [ "${1-}" = compose ] && [ "${2-}" = version ]; then
+  exit 0
+fi
+if [ "${1-}" = image ] && [ "${2-}" = ls ]; then
+  printf '%s\n' "$(printf 'a%.0s' {1..64})"
+  exit 0
+fi
+if [ "${1-}" = image ] && [ "${2-}" = inspect ]; then
+  case "$*" in
+    *'{{.Created}}'*) printf '2026-11-02T03:00:00Z sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
+    *) printf 'sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
+  esac
+  exit 0
+fi
+if [ "${1-}" = inspect ]; then
+  case "$*" in
+    *'{{if .State.Health}}'*) printf 'healthy\n' ;;
+    *'{{.Image}}'*) printf '%s\n' "${FAKE_ATTESTATION_RUNNING_IMAGE_ID:-sha256:$(printf 'a%.0s' {1..64})}" ;;
+    *'{{.State.StartedAt}}'*) date -u '+%Y-%m-%dT%H:%M:%SZ' ;;
+    *'{{range .Mounts}}'*)
+      if [ "${FAKE_ATTESTATION_MOUNT_INSPECT_FAIL:-0}" = "1" ]; then
+        exit 9
+      fi
+      if [ -n "${FAKE_ATTESTATION_MOUNT_DESTINATION:-}" ]; then
+        printf '%s\n' "$FAKE_ATTESTATION_MOUNT_DESTINATION"
+      fi
+      ;;
+    *) echo "fake docker inspect received an unexpected format" >&2; exit 9 ;;
+  esac
+  exit 0
+fi
+case "$*" in
+  *' build --print backend')
+    printf '%s\n' '{'
+    printf '%s\n' '  "target": {'
+    printf '%s\n' '    "backend": {'
+    printf '%s\n' '      "tags": ['
+    printf '%s\n' '        "fixture-tag"'
+    printf '%s\n' '      ]'
+    printf '%s\n' '    }'
+    printf '%s\n' '  }'
+    printf '%s\n' '}'
+    ;;
+  *' up --help') printf '%s\n' '      --wait' ;;
+  *' alembic heads') printf '%s\n' '0055_projection_readiness (head)' ;;
+  *' ps -q pipeline_executor') printf '%s\n' "$(printf 'p%.0s' {1..64})" ;;
+  *' ps -q backend') printf '%s\n' "$(printf 'c%.0s' {1..64})" ;;
+  *' ps --services --filter status=running') : ;;
+  *) : ;;
+esac
+exit 0
+FAKE_DOCKER_SUCCESS
+cat >"$attestation_fake_bin/timeout" <<'FAKE_TIMEOUT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+seconds="$1"
+shift
+if [ "${FAKE_TIMEOUT_TRIGGER:-0}" = "1" ]; then
+  sleep "$seconds"
+  exit 124
+fi
+exec "$@"
+FAKE_TIMEOUT
+chmod +x "$attestation_fake_bin/curl" "$attestation_fake_bin/docker" "$attestation_fake_bin/timeout"
+
+run_attestation_deploy() {
+  local log="$1" source="$2" timeout="$3"
+  shift 3
+  (
+    cd "$test_dir"
+    env \
+      PATH="$attestation_fake_bin:$PATH" \
+      FAKE_DOCKER_LOG="$log.docker" \
+      FAKE_ATTESTATION_SOURCE="$source" \
+      APP_DIR="$test_dir" \
+      SKIP_GIT=1 \
+      EXPECTED_RUNTIME_COMMIT="$attestation_commit" \
+      HEALTH_URL="http://127.0.0.1:65535/" \
+      RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS="$timeout" \
+      DEPLOY_RETRIES=1 \
+      DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+      "$@" \
+      bash "$attestation_deploy_dir/deploy-prod.sh"
+  ) >"$log" 2>&1
+}
+
+success_log="$attestation_root/deploy-success.log"
+if ! run_attestation_deploy "$success_log" "$attestation_source" 5; then
+  printf 'mock deployment with matching runtime source must succeed; log follows\n' >&2
+  cat "$success_log" >&2
+  if [ -f "$success_log.docker" ]; then
+    printf 'mock docker log follows\n' >&2
+    cat "$success_log.docker" >&2
+  fi
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$success_log"
+grep -Fq 'runtime source attestation: status=ok scope=running_container_files_not_loaded_memory' "$success_log"
+grep -Fq "container_id=$(printf 'c%.0s' {1..64})" "$success_log"
+grep -Fq "image_id=sha256:$(printf 'a%.0s' {1..64})" "$success_log"
+grep -Fq 'runtime source attestation mount_check=app_source_not_mounted image_matches_build=true' "$success_log"
+grep -Fq 'compose exec -T backend python -c <verifier>' "$success_log.docker"
+grep -Eq 'exec-stdin-bytes=[1-9][0-9]*' "$success_log.docker"
+if grep -Fq 'synthetic-admin-password' "$success_log"; then
+  printf 'deployment source attestation leaked the synthetic secret sentinel\n' >&2
+  exit 1
+fi
+printf 'ok deploy-runtime-source-match\n'
+
+tampered_source="$attestation_root/deploy-tampered-source"
+cp -R "$attestation_repo/backend/app" "$tampered_source"
+printf 'tampered\n' >>"$tampered_source/main.py"
+mismatch_log="$attestation_root/deploy-mismatch.log"
+if run_attestation_deploy "$mismatch_log" "$tampered_source" 5; then
+  printf 'deployment must fail when runtime source attestation detects a mismatch\n' >&2
+  exit 1
+fi
+grep -Fq 'runtime source attestation: status=mismatch' "$mismatch_log"
+grep -Fq 'changed_path=backend/app/main.py' "$mismatch_log"
+grep -Fq 'runtime source attestation failed; refusing to report deployment success' "$mismatch_log"
+grep -Fq 'stopping the partially started new runtime after a post-migration failure' "$mismatch_log"
+if grep -Fq 'deployment succeeded' "$mismatch_log"; then
+  printf 'deployment must not log success after a runtime source mismatch\n' >&2
+  exit 1
+fi
+grep -Fq 'stop --timeout 30 frontend pipeline_executor backend' "$mismatch_log.docker"
+
+image_mismatch_log="$attestation_root/deploy-image-mismatch.log"
+if run_attestation_deploy "$image_mismatch_log" "$attestation_source" 5 \
+    FAKE_ATTESTATION_RUNNING_IMAGE_ID="sha256:$(printf 'b%.0s' {1..64})"; then
+  printf 'deployment must fail when the active container image differs from the built image\n' >&2
+  exit 1
+fi
+grep -Fq 'does not match the image built by this deploy' "$image_mismatch_log"
+if grep -Fq 'deployment succeeded' "$image_mismatch_log"; then
+  printf 'deployment must not log success after an active-container image mismatch\n' >&2
+  exit 1
+fi
+
+wrong_commit_log="$attestation_root/deploy-wrong-commit.log"
+if run_attestation_deploy "$wrong_commit_log" "$attestation_source" 5 \
+    EXPECTED_RUNTIME_COMMIT=0000000000000000000000000000000000000000; then
+  printf 'deployment must fail when the independent expected commit does not match the manifest\n' >&2
+  exit 1
+fi
+grep -Fq 'does not match expected commit' "$wrong_commit_log"
+if grep -Fq 'deployment succeeded' "$wrong_commit_log"; then
+  printf 'deployment must not log success after an expected-commit mismatch\n' >&2
+  exit 1
+fi
+printf 'ok deploy-runtime-source-mismatch-fail\n'
+
+mount_log="$attestation_root/deploy-mount.log"
+if run_attestation_deploy "$mount_log" "$attestation_source" 5 \
+    FAKE_ATTESTATION_MOUNT_DESTINATION=/; then
+  printf 'deployment must fail when a mount covers the backend source path\n' >&2
+  exit 1
+fi
+grep -Fq 'backend source path is covered by a container mount: /' "$mount_log"
+if grep -Fq 'deployment succeeded' "$mount_log"; then
+  printf 'deployment must not log success when the backend source path is mounted\n' >&2
+  exit 1
+fi
+
+mount_inspect_log="$attestation_root/deploy-mount-inspect-failure.log"
+if run_attestation_deploy "$mount_inspect_log" "$attestation_source" 5 \
+    FAKE_ATTESTATION_MOUNT_INSPECT_FAIL=1; then
+  printf 'deployment must fail when backend mount inspection fails\n' >&2
+  exit 1
+fi
+grep -Fq 'could not inspect backend container mounts' "$mount_inspect_log"
+if grep -Fq 'deployment succeeded' "$mount_inspect_log"; then
+  printf 'deployment must not log success after mount inspection failure\n' >&2
+  exit 1
+fi
+printf 'ok deploy-runtime-source-mount-fail\n'
+
+exec_failure_log="$attestation_root/deploy-exec-failure.log"
+if run_attestation_deploy "$exec_failure_log" "$attestation_source" 5 \
+    FAKE_ATTESTATION_EXEC_FAIL=1; then
+  printf 'deployment must fail when the in-container verifier exec fails\n' >&2
+  exit 1
+fi
+grep -Fq 'runtime source attestation failed; refusing to report deployment success' "$exec_failure_log"
+if grep -Fq 'deployment succeeded' "$exec_failure_log"; then
+  printf 'deployment must not log success after a verifier exec failure\n' >&2
+  exit 1
+fi
+printf 'ok deploy-runtime-source-exec-fail\n'
+
+timeout_log="$attestation_root/deploy-timeout.log"
+if run_attestation_deploy "$timeout_log" "$attestation_source" 1 \
+    FAKE_TIMEOUT_TRIGGER=1; then
+  printf 'deployment must fail when runtime source attestation times out\n' >&2
+  exit 1
+fi
+grep -Fq 'runtime source attestation timed out after 1s' "$timeout_log"
+if grep -Fq 'deployment succeeded' "$timeout_log"; then
+  printf 'deployment must not log success after an attestation timeout\n' >&2
+  exit 1
+fi
+printf 'ok deploy-runtime-source-timeout-fail\n'
 
 printf 'deployment guard self-tests passed\n'
