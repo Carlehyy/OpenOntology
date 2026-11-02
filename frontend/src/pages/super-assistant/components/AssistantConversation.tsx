@@ -282,7 +282,8 @@ export const assistantMarkdownComponents: Components = {
   hr: ({ className, ...props }) => <hr className={`my-6 border-0 border-t border-[var(--color-border)] ${className || ''}`} {...props} />,
 }
 
-function AssistantMarkdown({ content }: { content: string }) {
+/** 助手回复的 Markdown 渲染（会话纪要弹窗等同域复用） */
+export function AssistantMarkdown({ content }: { content: string }) {
   const normalized = useMemo(() => normalizeAssistantMarkdown(content), [content])
   return (
     <div className="min-w-0 break-words [overflow-wrap:anywhere]">

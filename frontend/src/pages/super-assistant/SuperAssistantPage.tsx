@@ -4,7 +4,7 @@ import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
   ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Paperclip, Pencil,
-  Send, Settings2, Square, X,
+  ScrollText, Send, Settings2, Square, X,
 } from 'lucide-react'
 
 import { modelApi } from '@/api/ontologies'
@@ -29,6 +29,8 @@ import { useQuickInputs } from './useQuickInputs'
 import VoiceRecordingBar from './components/VoiceRecordingBar'
 import QuickInputMenu from './components/QuickInputMenu'
 import QuickInputsDialog from './components/QuickInputsDialog'
+import ConversationSummaryDialog from './components/ConversationSummaryDialog'
+import { createSummaryScheduler } from './summaryScheduler'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
 import CapabilityMapDialog from './components/CapabilityMapDialog'
@@ -169,6 +171,9 @@ export default function SuperAssistantPage() {
   // 快捷输入：小卡片（Popover）与设置弹窗互斥打开——从卡片跳设置时先收卡片
   const [quickInputOpen, setQuickInputOpen] = useState(false)
   const [quickInputsSettingsOpen, setQuickInputsSettingsOpen] = useState(false)
+  // 会话纪要：头部按钮弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
+  const [summaryOpen, setSummaryOpen] = useState(false)
+  const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
   const [searchOpen, setSearchOpen] = useState(false)
   // 窄屏顶栏溢出菜单：实时浏览器/助手配置收进「⋯」，避免与标题、模型选择器挤出视口
   const [headerOverflowOpen, setHeaderOverflowOpen] = useState(false)
@@ -502,6 +507,22 @@ export default function SuperAssistantPage() {
       flushCurrentDraft()
     }
   }, [persistDrafts])
+
+  // 会话纪要自动生成调度器：触点在 dispatchMessage（发送后 / 完全响应结束后），
+  // 延迟 1s 单飞生成（详见 summaryScheduler.ts）；卸载时停表，进行中的生成由
+  // 服务端幂等覆盖收尾
+  const summarySchedulerRef = useRef<ReturnType<typeof createSummaryScheduler> | null>(null)
+  useEffect(() => {
+    const scheduler = createSummaryScheduler({
+      generate: conversationId => superAssistantApi.generateConversationSummary(conversationId),
+      onSettled: () => setSummaryRefreshKey(key => key + 1),
+    })
+    summarySchedulerRef.current = scheduler
+    return () => {
+      scheduler.dispose()
+      summarySchedulerRef.current = null
+    }
+  }, [])
 
   const selectedConversation = conversations.find(item => item.id === selectedId) || null
   const selectedModelId = selectedConversation?.model_config_id
@@ -877,6 +898,8 @@ export default function SuperAssistantPage() {
         { id: tempAssistantId, conversation_id: conversationId, role: 'assistant', content: '', status: 'streaming', steps: [], token_usage: {}, created_at: now },
       ])
     }
+    // 触点一：用户消息实际发出（约 1s 后生成纪要，此时消息已落库）
+    summarySchedulerRef.current?.notify(conversationId)
     try {
       await superAssistantApi.streamChat(conversationId, { message, model_config_id: modelConfigId, agent_mode: true }, ({ event, data }) => {
         if (event === 'thinking') {
@@ -946,6 +969,8 @@ export default function SuperAssistantPage() {
       })
       setStopping(false)
       clearPending()
+      // 触点二：完全响应结束（仅成功轮次）后约 1s 生成纪要；取消/失败轮次不触发
+      if (buffer.status === 'complete') summarySchedulerRef.current?.notify(conversationId)
     }
     const queued = shiftQueue(queuedByConvRef.current[conversationId] || [])
     const updatedQueue = { ...queuedByConvRef.current, [conversationId]: queued.rest }
@@ -1463,6 +1488,13 @@ export default function SuperAssistantPage() {
         onDelete={quickInputs.remove}
         onReorder={quickInputs.reorder}
       />
+      <ConversationSummaryDialog
+        open={summaryOpen}
+        onClose={() => setSummaryOpen(false)}
+        conversationId={selectedId}
+        models={models}
+        refreshKey={summaryRefreshKey}
+      />
       {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
           面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}
       <section
@@ -1529,6 +1561,16 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
+          {/* 会话纪要入口：窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
+          <button
+            type="button"
+            onClick={() => setSummaryOpen(true)}
+            aria-label="查看会话纪要"
+            title="会话纪要"
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+          >
+            <ScrollText size={16} aria-hidden="true" />
+          </button>
           <Dialog>
             <DialogTrigger asChild>
               <button
@@ -1625,6 +1667,14 @@ export default function SuperAssistantPage() {
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" side="bottom" sideOffset={8} className="w-44 p-1">
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); setSummaryOpen(true) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ScrollText size={15} className="shrink-0 text-brand-ink" />
+                会话纪要
+              </button>
               <button
                 type="button"
                 onClick={() => { setHeaderOverflowOpen(false); void openBrowser() }}

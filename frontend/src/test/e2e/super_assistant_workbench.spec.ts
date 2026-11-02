@@ -38,6 +38,24 @@ const sseBody = (text: string) => [
   '',
 ].join('\n\n')
 
+/** 会话纪要夹具：与后端 ConversationSummaryOut 同构（structured 五维微卡片） */
+const summaryFixture = {
+  structured: {
+    title: '查询平台Skill列表',
+    status: '已完成',
+    tags: ['Skill', '查询'],
+    goal: '确认平台当前可用的 Skill 清单',
+    actions: '① 查询技能目录 ② 过滤启用项 ③ 汇总回复',
+    pitfalls: '首次查询超时 → 重试一次成功',
+    outcome: '确认 web-access 等技能可用',
+    todos: '无',
+  },
+  markdown: null,
+  model_config_id: 'model-1',
+  message_count: 4,
+  generated_at: at(0, 9),
+}
+
 /** 远程助手邀请函夹具：与后端 build_invite_prompt 同构的截断版 */
 const remoteInvitePromptFixture = [
   '你是即将接入 OpenOntology 平台「超级助手」的外部 AI 助手。请阅读本函并自行完成接入。',
@@ -225,6 +243,14 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifChannelUpdates: string[] = []
   const notifChannelTests: string[] = []
   const notifChannelDeletes: string[] = []
+  // 会话纪要：generate 调用按会话记录；summaryState 模拟每会话最新一份
+  // （c-today 预置夹具，generate 后覆盖）；settings 为用户级全局配置（默认 null）
+  const summaryGenerateCalls: string[] = []
+  const summarySettingPuts: Array<{ model_config_id: string | null }> = []
+  let summarySettingsState: { model_config_id: string | null; updated_at: string } | null = null
+  const summaryState: Record<string, Record<string, unknown>> = {
+    'c-today': { ...summaryFixture, conversation_id: 'c-today' },
+  }
   // 会话夹具 per-test 克隆：PATCH 写回只落在本次 mock 的副本上（归档/改名
   // 持久化、2s 轮询不洗回，与真实后端一致）；模块级常量保持原样，用例间
   // 零污染——同 worker 顺序执行下直接改 conversationsFixture 会把改名/
@@ -1093,6 +1119,28 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       }
       return json(route, row)
     }
+    // 会话纪要：GET 每会话最新一份；generate 记录调用并写入 summaryState；
+    // settings 用户级全局配置（PUT 保存后 GET 回读）
+    const summaryMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/summary$/)
+    if (summaryMatch && request.method() === 'GET') {
+      return json(route, summaryState[summaryMatch[1]] ?? null)
+    }
+    const summaryGenerateMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/summary\/generate$/)
+    if (summaryGenerateMatch && request.method() === 'POST') {
+      const conversationId = summaryGenerateMatch[1]
+      summaryGenerateCalls.push(conversationId)
+      const row = { ...summaryFixture, conversation_id: conversationId, generated_at: at(0, 10) }
+      summaryState[conversationId] = row
+      return json(route, row)
+    }
+    if (path === '/api/v2/super-assistant/summary/settings') {
+      if (request.method() === 'PUT') {
+        const body = request.postDataJSON() as { model_config_id: string | null }
+        summarySettingPuts.push(body)
+        summarySettingsState = { model_config_id: body.model_config_id ?? null, updated_at: at(0, 10) }
+      }
+      return json(route, summarySettingsState)
+    }
     if (path === '/api/v2/inbox/summary') {
       return json(route, { openAlertCount: 0, actionableCount: 0, unreadCount: 0, resolvedCount: 0 })
     }
@@ -1113,6 +1161,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     fileDeletes,
     chatCalls,
     exportCalls,
+    summaryGenerateCalls,
+    summarySettingPuts,
     ticketCreates,
     searchQueries,
     multicaPuts,
@@ -4551,3 +4601,99 @@ test('能力地图：暗色令牌、无导航授权账号可读说明且不增�
   })).toBe(true)
 })
 
+
+// 会话纪要是旁路能力：展示每会话最新一份结构化纪要与生成时间，模型配置为
+// 用户级全局设置（对所有会话生效），自动生成不打扰对话主流程。
+test('会话纪要：能力地图左侧入口、结构化卡片、生成时间与全局模型配置', async ({ page }) => {
+  await seedAuth(page)
+  const api = await mockApis(page)
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  // 位置契约：纪要入口在能力地图左侧
+  const summaryEntry = page.getByRole('button', { name: '查看会话纪要' })
+  const capabilityEntry = page.getByRole('button', { name: '查看能力地图' })
+  await expect(summaryEntry).toBeVisible()
+  const summaryBox = await summaryEntry.boundingBox()
+  const capabilityBox = await capabilityEntry.boundingBox()
+  expect(summaryBox).not.toBeNull()
+  expect(capabilityBox).not.toBeNull()
+  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(capabilityBox!.x)
+
+  const failures: string[] = []
+  page.on('pageerror', error => failures.push(error.message))
+  await summaryEntry.click()
+  const dialog = page.getByRole('dialog', { name: '会话纪要' })
+  await expect(dialog).toBeVisible()
+  // 结构化五维卡片（MD 拼接渲染）
+  await expect(dialog.getByRole('heading', { name: '查询平台Skill列表' })).toBeVisible()
+  await expect(dialog).toContainText('确认平台当前可用的 Skill 清单')
+  await expect(dialog).toContainText('① 查询技能目录 ② 过滤启用项 ③ 汇总回复')
+  await expect(dialog).toContainText('首次查询超时 → 重试一次成功')
+  // 元信息：生成时间（秒级）与实际使用的生成模型
+  await expect(dialog.getByText(/^生成时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)).toBeVisible()
+  await expect(dialog.getByText('生成模型：DeepSeek')).toBeVisible()
+  // 全局模型配置：默认跟随会话模型
+  const modelSelect = page.getByRole('combobox', { name: '纪要生成模型' })
+  await expect(modelSelect).toBeVisible()
+  await expect(modelSelect).toContainText('跟随会话模型（默认）')
+
+  // 切换选项 → PUT 全局保存
+  await modelSelect.click()
+  await page.getByRole('option', { name: 'Qwen', exact: true }).click()
+  await expect(modelSelect).toContainText('Qwen')
+  expect(api.summarySettingPuts).toEqual([{ model_config_id: 'model-2' }])
+  // 恢复默认 → PUT null
+  await modelSelect.click()
+  await page.getByRole('option', { name: '跟随会话模型（默认）' }).click()
+  await expect(modelSelect).toContainText('跟随会话模型（默认）')
+  expect(api.summarySettingPuts).toEqual([{ model_config_id: 'model-2' }, { model_config_id: null }])
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  // 纯展示弹层：不触发聊天/懒建会话
+  expect(api.chatCalls).toHaveLength(0)
+  expect(api.createCalls).toHaveLength(0)
+  expect(failures).toEqual([])
+})
+
+test('会话纪要：发送消息与回复结束后自动触发生成', async ({ page }) => {
+  await seedAuth(page)
+  const api = await mockApis(page)
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  expect(api.summaryGenerateCalls).toHaveLength(0)
+  const input = page.getByRole('textbox', { name: '向超级助手发送消息' })
+  await input.fill('帮我查询有哪些Skill')
+  await input.press('Enter')
+  await expect(page.getByText('你好，我是超级助手', { exact: true })).toBeVisible()
+  // 触发延迟 ~1s（发送后与回复结束后的触发合并）；轮询等待生成调用到达
+  await expect.poll(() => api.summaryGenerateCalls.length, { timeout: 6000 }).toBeGreaterThanOrEqual(1)
+  expect(api.summaryGenerateCalls[0]).toBe('c-today')
+
+  // 生成落定后弹窗可看到最新纪要
+  await page.getByRole('button', { name: '查看会话纪要' }).click()
+  const dialog = page.getByRole('dialog', { name: '会话纪要' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('heading', { name: '查询平台Skill列表' })).toBeVisible()
+})
+
+test('会话纪要：无纪要会话展示空态引导；窄屏入口收进更多操作', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  // c-yesterday 无纪要夹具：GET 返回 null → 空态引导
+  await page.goto('/#/super-assistant?conversation=c-yesterday')
+  await page.getByRole('button', { name: '查看会话纪要' }).click()
+  const dialog = page.getByRole('dialog', { name: '会话纪要' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('暂无会话纪要')
+  await expect(dialog).toContainText('发送消息后约 1 秒、以及超级助手回复结束后约 1 秒')
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+
+  // 窄屏：头部入口让位标题/模型选择器，收进「更多操作」溢出菜单
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.getByRole('button', { name: '查看会话纪要' })).toBeHidden()
+  await page.getByRole('button', { name: '更多操作' }).click()
+  await page.getByRole('button', { name: '会话纪要', exact: true }).click()
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('暂无会话纪要')
+})

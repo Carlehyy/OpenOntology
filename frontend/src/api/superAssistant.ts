@@ -714,6 +714,34 @@ export interface ReflectionSettings {
   pending_count: number
 }
 
+/** 会话纪要五维微卡片（后端解析 LLM 模板输出的结构化字段；宽容解析，缺失为空串/空数组） */
+export interface ConversationSummaryFields {
+  title: string
+  status: string
+  tags: string[]
+  goal: string
+  actions: string
+  pitfalls: string
+  outcome: string
+  todos: string
+}
+
+/** 会话纪要（每会话仅最新一份）：markdown 是 LLM 原文，结构化字段缺失时的展示兜底 */
+export interface ConversationSummary {
+  conversation_id: string
+  structured: ConversationSummaryFields
+  markdown: string | null
+  model_config_id: string | null
+  message_count: number
+  generated_at: string
+}
+
+/** 用户级纪要生成模型配置（对所有会话生效）：model_config_id 为 null 表示跟随各会话当前模型 */
+export interface SummarySettings {
+  model_config_id: string | null
+  updated_at: string | null
+}
+
 /** 悬浮 AI 助手的页面可见范围（平台级配置）：隐藏名单语义，空名单 = 全部页面可见 */
 export interface AssistantWidgetConfig {
   hidden_menu_keys: string[]
@@ -976,6 +1004,16 @@ export const superAssistantApi = {
   reflectionSettings: () => apiClientV2.get<ReflectionSettings>('/super-assistant/reflection/settings'),
   updateReflectionSettings: (body: { auto_accept_enabled: boolean }) =>
     apiClientV2.put<ReflectionSettings>('/super-assistant/reflection/settings', body),
+
+  // 会话纪要：读取每会话最新一份；generate 由页面在「发送后 ~1s」与
+  // 「完全响应结束后 ~1s」触发（失败静默，不打扰对话主流程）
+  conversationSummary: (conversationId: string) =>
+    apiClientV2.get<ConversationSummary | null>(`/super-assistant/conversations/${conversationId}/summary`),
+  generateConversationSummary: (conversationId: string) =>
+    apiClientV2.post<ConversationSummary>(`/super-assistant/conversations/${conversationId}/summary/generate`, {}),
+  summarySettings: () => apiClientV2.get<SummarySettings | null>('/super-assistant/summary/settings'),
+  updateSummarySettings: (body: { model_config_id: string | null }) =>
+    apiClientV2.put<SummarySettings>('/super-assistant/summary/settings', body),
 
   widgetConfig: () => apiClientV2.get<AssistantWidgetConfig>('/super-assistant/widget-config'),
   updateWidgetConfig: (hiddenMenuKeys: string[]) =>
