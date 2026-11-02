@@ -59,3 +59,16 @@ def test_catalog_tool_schema_present_and_read_only():
         "object_types"]
     assert "ontology_catalog" in runtime._READ_ONLY_BUILTIN_TOOLS
     assert "ontology_catalog" in ontology_tools.ONTOLOGY_TOOL_NAMES
+
+
+def test_assistant_query_and_structure_tools_advertise_query_limits():
+    """助手工具文案指向 queryLimits/pageSize 与终页释放，且续查只传 cursor。"""
+    schemas = {schema["name"]: schema
+               for schema in ontology_tools.ontology_tool_schemas()}
+    structure_description = schemas["ontology_structure"]["description"]
+    query_description = schemas["ontology_query"]["description"]
+    assert "queryLimits" in structure_description
+    assert "queryLimits" in query_description
+    assert "pageSize" in query_description
+    assert "cursor" in query_description
+    assert "释放" in query_description

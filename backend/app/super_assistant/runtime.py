@@ -19,8 +19,10 @@ from app.model_configs.selector import llm_call_kwargs, select_llm_model_config
 from app.settings.object_storage.service import execute_minio_tool
 from app.shared.config import settings
 from app.shared.database import SessionLocal
-from app.shared.query_control import QueryControl, query_control_scope
-from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, persistence, provider, reflection_service, result_guard, web_tools
+from app.shared.query_control import (
+    QueryControl, current_query_control, query_control_scope,
+)
+from app.super_assistant import browser_tools, context_refs, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, persistence, provider, query_execution, query_recovery, reflection_service, result_guard, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -91,6 +93,85 @@ def _tool_result_preview(tool_name: str, output: str) -> str:
     except ValueError:
         return text[:800]
     return json.dumps(_redact_api_hub_preview(payload), ensure_ascii=False)[:800]
+
+
+def _query_control_cancelled() -> bool:
+    """当前工具线程的取消信号（既有 QueryControl，不新增等待配置）。"""
+    control = current_query_control()
+    return bool(control is not None and control.cancelled())
+
+
+def _bounded_tool_output(output: str, failure_code: str | None) -> str:
+    """按截断前判定结果收敛工具输出。
+
+    * 无受控失败（含成功大 JSON）：保持既有 JSON 感知截断，成功不会因
+      截断变成不可解析而被误判。
+    * 已有受控失败但输出超过上下文上限：错误信封被 legacy 字符截断会
+      破坏 JSON；改用最小受控信封保留 code，避免持久/SSE 丢失失败语义。
+    """
+    limit = settings.super_assistant_tool_result_chars
+    if len(output) <= limit:
+        return output
+    if failure_code is not None:
+        return json.dumps(
+            {"error": "tool_execution_failed", "code": failure_code},
+            ensure_ascii=False)
+    return persistence.truncate_tool_output(output, limit)
+
+
+def _context_refs_section(owner_id: str, conversation_id: str) -> str:
+    """本会话最近结构引用的只读投影（独立短会话，失败不影响聊天）。
+
+    仅读取当前 owner + 会话的最近 ``context_refs.MAX_TOOL_RUNS`` 条本体
+    工具记录，经门面按当前 user 重新校验访问（发布比较只标注 stale，
+    不替代授权），再渲染为系统提示可选段；不写任何持久面。
+    """
+    ref_db = SessionLocal()
+    try:
+        runs = (
+            ref_db.query(SuperAssistantToolRun)
+            .join(
+                SuperAssistantConversation,
+                SuperAssistantConversation.id == SuperAssistantToolRun.conversation_id,
+            )
+            .filter(
+                SuperAssistantToolRun.conversation_id == conversation_id,
+                SuperAssistantConversation.owner_id == owner_id,
+                SuperAssistantToolRun.tool_name.in_(
+                    sorted(ontology_tools.ONTOLOGY_TOOL_NAMES)),
+                SuperAssistantToolRun.result.isnot(None),
+            )
+            .order_by(
+                SuperAssistantToolRun.created_at.desc(),
+                SuperAssistantToolRun.id.desc(),
+            )
+            .limit(context_refs.MAX_TOOL_RUNS)
+            .all()
+        )
+        if not runs:
+            return ""
+        records = [
+            {
+                "toolName": run.tool_name,
+                "result": run.result,
+                "toolRunId": run.id,
+                "createdAt": run.created_at,
+            }
+            for run in runs
+        ]
+        refs = context_refs.project_tool_runs(records)
+        if not refs:
+            return ""
+        authorized = ontology_tools.authorize_structure_refs(
+            ref_db, owner_id=owner_id, conversation_id=conversation_id,
+            refs=refs,
+        )
+        return context_refs.render_structure_refs(authorized)
+    except Exception:  # noqa: BLE001 - 投影失败只跳过注入，不阻断聊天
+        logger.warning("跨轮结构引用投影失败，跳过注入", exc_info=True)
+        return ""
+    finally:
+        ref_db.close()
 
 
 _DEFAULT_CONTEXT_TOKENS = 64_000
@@ -221,6 +302,7 @@ def _system_prompt(
     palace_section: str = "",
     multica_enabled: bool = False,
     delegation_enabled: bool = False,
+    context_refs_section: str = "",
 ) -> str:
     catalog = "\n".join(
         f"- {skill.name}: {skill.description}"
@@ -264,6 +346,9 @@ def _system_prompt(
         prompt = f"{prompt}\n{file_section}\n"
     if palace_section:
         prompt = f"{prompt}\n{palace_section}\n"
+    if context_refs_section:
+        # 同会话历史结构引用：只读投影、非权威、非授权，使用前须重新发现。
+        prompt = f"{prompt}\n{context_refs_section}\n"
     return prompt
 
 
@@ -981,7 +1066,12 @@ def _execute_builtin_tool(
 
 
 def _execute_read_only_tool(name: str, arguments: dict[str, Any], context: dict[str, Any]) -> str:
-    """只读工具的线程安全执行入口：并行批量调用时各用独立会话。"""
+    """只读工具的线程安全执行入口：并行批量调用时各用独立会话。
+
+    ``ontology_query`` 的 owner 单飞临界区由 ``_execute_read_only_with_recovery``
+    统一持有（执行 + 恢复状态登记同一临界区）；本函数保持纯执行语义，
+    其他只读工具仍走原并行路径。
+    """
     db = SessionLocal()
     try:
         return _execute_builtin_tool(db, name=name, arguments=arguments, **context)
@@ -1302,12 +1392,14 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         except Exception:  # 记忆宫殿图谱故障不得阻断聊天
             logger.warning("记忆宫殿图谱上下文加载失败: %s", owner_id, exc_info=True)
             palace_section = ""
+        context_refs_section = _context_refs_section(owner_id, conversation_id)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _system_prompt(
                 skills, memory_section, agent_mode,
                 file_section=file_section, palace_section=palace_section,
                 multica_enabled=multica_config is not None,
                 delegation_enabled=delegation_enabled,
+                context_refs_section=context_refs_section,
             )}
         ]
         # 虚构委派的下一轮定向提醒（代码层兜底）：上条声称子助手结果而会话
@@ -1322,6 +1414,8 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         messages.extend({"role": item.role, "content": item.content} for item in stored_messages if item.role in {"user", "assistant"})
         permission_checker = ToolPermissionChecker.from_settings()
         steps: list[dict[str, Any]] = []
+        # 本回合的查询恢复状态：签名/阈值/资源阻塞/无进展计数（不落库）。
+        recovery_state = query_recovery.QueryRecoveryState()
         total_usage = {"inputTokens": 0, "outputTokens": 0}
         last_input_tokens = 0
         all_text: list[str] = []
@@ -1484,6 +1578,8 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
 
             # 2) 即时结果（截断/权限拒绝）与执行分组：只读并行、其余串行
             executed: dict[str, tuple[str, str, str | None]] = {}
+            # 内置 ontology_query 的受控 failure_code（截断前原始判定）
+            failure_codes: dict[str, str] = {}
             durations: dict[str, int] = {}
             parallel_items: list[dict[str, Any]] = []
             serial_items: list[dict[str, Any]] = []
@@ -1527,6 +1623,19 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         )
                     else:
                         serial_items.append(item)
+                elif (
+                    item["server"] is None
+                    and item["name"] == ontology_tools.ONTOLOGY_QUERY_TOOL
+                    and (query_block := recovery_state.block_reason(
+                        item["arguments"])) is not None
+                ):
+                    # 回合级受控拒绝：同签名达上限或资源未恢复时不重复执行；
+                    # 输出只含受控 code/建议，模型可据此改参/续读/重新发现。
+                    executed[item["id"]] = (
+                        json.dumps(query_block, ensure_ascii=False),
+                        "error",
+                        str(query_block.get("code") or "query_retry_suppressed"),
+                    )
                 elif item["server"] is None and item["name"] in _READ_ONLY_BUILTIN_TOOLS:
                     parallel_items.append(item)
                 else:
@@ -1542,15 +1651,67 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 "ephemeral_turn_state": ephemeral_state,
             }
 
+            def _execute_read_only_with_recovery(
+                item: dict[str, Any],
+            ) -> tuple[str, str | None]:
+                """只读执行；ontology_query 的预检/执行/登记在同一 owner 临界区。
+
+                返回 ``(output, failure_code)``：failure_code 在**截断前**由
+                原始 output 的受控 JSON error 判定，供 _work/序列路径、状态
+                诚实化、SSE/steps、持久壳与无进展判定共同使用。R2 短退避在
+                临界区外等待（不长时间占用单飞锁），恢复状态的生效顺序等于
+                真实执行顺序。
+                """
+                if item["name"] != ontology_tools.ONTOLOGY_QUERY_TOOL:
+                    return _execute_read_only_tool(
+                        item["name"], item["arguments"], builtin_context), None
+                retries_used = 0
+                while True:
+                    with query_execution.owner_query_single_flight(
+                        str(builtin_context.get("owner_id") or ""),
+                        cancelled=_query_control_cancelled,
+                    ):
+                        # 预检也在临界区内：派发后到达的释放/阻塞事件按真实
+                        # 执行顺序裁决，不重复新建被阻塞的新查询。
+                        blocked = recovery_state.block_reason(item["arguments"])
+                        if blocked is not None:
+                            return (
+                                json.dumps(blocked, ensure_ascii=False),
+                                str(blocked.get("code")
+                                    or "query_retry_suppressed"),
+                            )
+                        output = _execute_read_only_tool(
+                            item["name"], item["arguments"], builtin_context)
+                        payload = query_execution.parse_payload(output)
+                        if payload is None or "error" not in payload:
+                            # 有效成功（含 0 值结果）清除对应请求失败计数。
+                            recovery_state.record_success(
+                                item["arguments"], payload)
+                            return output, None
+                        info = recovery_state.record_failure(
+                            payload, item["arguments"])
+                        failure_code = query_execution.query_failure_code(
+                            tool_name=item["name"], is_builtin=True,
+                            output=output,
+                        ) or "ontology_tool_failed"
+                    if not recovery_state.allows_short_retry(
+                            info, item["arguments"], retries_used=retries_used):
+                        return output, failure_code
+                    delay = query_recovery.R2_RETRY_DELAYS[retries_used]
+                    if not query_recovery.sleep_cancellable(
+                            delay, cancelled=_query_control_cancelled):
+                        return output, failure_code
+                    retries_used += 1
+
             if parallel_items:
                 def _work(item: dict[str, Any]) -> None:
                     started = time.monotonic()
                     try:
-                        output = _execute_read_only_tool(item["name"], item["arguments"], builtin_context)
-                        if len(output) > settings.super_assistant_tool_result_chars:
-                            output = persistence.truncate_tool_output(
-                                output, settings.super_assistant_tool_result_chars)
+                        output, failure_code = _execute_read_only_with_recovery(item)
+                        output = _bounded_tool_output(output, failure_code)
                         executed[item["id"]] = (output, "success", None)
+                        if failure_code is not None:
+                            failure_codes[item["id"]] = failure_code
                     except Exception as exc:  # 工具失败回灌模型自我恢复
                         executed[item["id"]] = (
                             json.dumps({"error": str(exc)}, ensure_ascii=False),
@@ -1750,10 +1911,15 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                             tool_run=tool_run,
                             **builtin_context,
                         )
-                    if len(output) > settings.super_assistant_tool_result_chars:
-                        output = persistence.truncate_tool_output(
-                            output, settings.super_assistant_tool_result_chars)
+                    raw_failure_code = query_execution.query_failure_code(
+                        tool_name=item["name"],
+                        is_builtin=server_tuple is None,
+                        output=output,
+                    )
+                    output = _bounded_tool_output(output, raw_failure_code)
                     executed[item["id"]] = (output, "success", None)
+                    if raw_failure_code is not None:
+                        failure_codes[item["id"]] = raw_failure_code
                 except Exception as exc:  # tools fail into the model context so it can recover
                     executed[item["id"]] = (
                         json.dumps({"error": str(exc)}, ensure_ascii=False),
@@ -1784,12 +1950,20 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     persisted_error = persistence.bounded_error_text(error)
                 tool_run.result = persisted_output
                 if status == "success":
-                    tool_run.status = "success"
-                    if (
-                        item["server"] is None
-                        and tool_run.tool_name == ontology_tools.ONTOLOGY_EXECUTE_TOOL
-                    ):
-                        tool_run.status = ontology_tools.execution_result_status(persisted_output)
+                    # 状态诚实化：使用**截断前原始 output**判定的受控
+                    # failure_code（不解析已截断/已壳化文本）；MCP/动作/
+                    # 其他工具与成功大结果截断均不改变既有状态语义。
+                    payload_failure_code = failure_codes.get(item["id"])
+                    if payload_failure_code is not None:
+                        tool_run.status = "error"
+                        tool_run.error = payload_failure_code
+                    else:
+                        tool_run.status = "success"
+                        if (
+                            item["server"] is None
+                            and tool_run.tool_name == ontology_tools.ONTOLOGY_EXECUTE_TOOL
+                        ):
+                            tool_run.status = ontology_tools.execution_result_status(persisted_output)
                 elif status == "denied" and error is None and item["run"].requires_confirmation:
                     tool_run.status = "denied"
                 elif status in {"denied", "expired"}:
@@ -1815,6 +1989,25 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                     "status": tool_run.status,
                     "preview": _tool_result_preview(item["name"], output),
                 })
+
+            # 无进展判定：只统计“派发了 ontology_query 且没有任何 query 有效
+            # 成功”的轮次；无关工具（think/todo/web 等）的成功既不算查询进展、
+            # 也不得清零失败轮次，但纯无关工具轮次（如 agent 模式的 todo/think
+            # 规划）本身不算查询失败轮次。连续 8 轮查询无进展则停止并如实说明。
+            had_query_attempt = any(
+                item["name"] == ontology_tools.ONTOLOGY_QUERY_TOOL
+                for item in order
+            )
+            had_valid_success = any(
+                item["name"] == ontology_tools.ONTOLOGY_QUERY_TOOL
+                and executed[item["id"]][1] == "success"
+                and failure_codes.get(item["id"]) is None
+                for item in order
+            )
+            if recovery_state.note_round(
+                    had_attempts=had_query_attempt,
+                    had_valid_success=had_valid_success):
+                break
         else:
             # Final synthesis without tools prevents an infinite tool loop.
             messages.append({"role": "user", "content": "请停止调用工具，根据已有结果给出最终答复。"})
@@ -1838,6 +2031,10 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             if not all_text:
                 all_text.append("已达到工具调用轮次上限。")
 
+        if recovery_state.stopped:
+            # 无进展停止：以受控事实（最后 code/尝试次数/建议）替换模型复述，
+            # 不发布任何未经工具验证的查询结论。
+            all_text = [recovery_state.honest_failure_text()]
         final_content = "".join(all_text) or "模型没有返回可显示的内容。"
         if delegation_schemas and not any(
             step.get("toolName") == delegation.DELEGATION_TOOL_NAME

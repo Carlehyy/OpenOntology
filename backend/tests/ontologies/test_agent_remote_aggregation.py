@@ -301,6 +301,56 @@ def test_group_result_shape_and_pagination_honesty(
     assert out["totalGroups"] == 2
 
 
+# ------------------------------------------------ 5b. pageSize 受控上限
+
+
+def _set_remote_supplier_page_cap(db, ontology_id: str, cap: int) -> None:
+    from app.ontologies.agent_runtime.boundary import get_or_create_profile
+
+    profile = get_or_create_profile(db, ontology_id)
+    profile.max_rows_per_query = cap
+    db.commit()
+
+
+def _supplier_page_request(oid: str, release_id: str, page_size: int):
+    from app.ontologies.agent_query.schemas import QueryRequest
+
+    return QueryRequest.model_validate({
+        "sources": [{"alias": "objects", "ontologyId": oid,
+                     "releaseId": release_id, "objectTypeId": "ot-supplier"}],
+        "select": [{"source": "objects", "property": "sname", "as": "sname"}],
+        "pageSize": page_size,
+    })
+
+
+def test_remote_plan_page_size_over_profile_cap_reports_control_fields(
+        modeled_ontology, db, admin_user):
+    """profile cap=50 时请求 51 → 422 带 field/requested/max/default。"""
+    from app.ontologies.agent_query import remote_query
+    from app.ontologies.agent_query.service import QueryError
+
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+
+    with pytest.raises(QueryError) as error:
+        remote_query.prepare_remote_plan(
+            db, admin_user,
+            _supplier_page_request(oid, release_id, 51))
+    assert (error.value.status, error.value.code) == (
+        422, "invalid_parameter")
+    assert error.value.extra["field"] == "pageSize"
+    assert error.value.extra["requestedPageSize"] == 51
+    assert error.value.extra["maxPageSize"] == 50
+    assert error.value.extra["defaultPageSize"] == 50
+
+    # profile cap=200 时 200 可请求、实际计划页长一致。
+    _set_remote_supplier_page_cap(db, oid, 200)
+    plan = remote_query.prepare_remote_plan(
+        db, admin_user, _supplier_page_request(oid, release_id, 200))
+    assert plan["pageSize"] == 200
+
+
 # ------------------------------------------------ 6. 数值精确
 
 

@@ -10,22 +10,39 @@
 """
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.ontologies.agent_confirmation import models as CM
 from app.ontologies.agent_confirmation import service as confirmation_service
 from app.ontologies.agent_confirmation.schemas import PrepareProposalRequest
 from app.ontologies.agent_query import schemas as QS
+from app.ontologies.agent_query.remote_query import cancel_remote_query
 from app.ontologies.agent_query.service import (
     QueryError, execute_unified_query, fetch_unified_query_page,
+    release_query_snapshot,
 )
 from app.ontologies.agent_runtime.structure_service import (
     StructureError, build_structure,
 )
 
+logger = logging.getLogger(__name__)
+
 SUPER_ASSISTANT_ORIGIN = "super_assistant"
+
+_DEFAULT_PAGE_SIZE = 50
+_MAX_PAGE_SIZE = 200
+_QUERY_TREE_ARGUMENT_KEYS = (
+    "sources", "joins", "sourceFilters", "where", "select", "groupBy",
+    "aggregates", "orderBy", "distinct",
+)
+_CURSOR_INCOMPATIBLE_ARGUMENT_KEYS = (
+    "pageSize", "params", "semanticBindings", "queryId",
+)
 
 # 受限 principal 的固定能力集合（任何子委派只能做交集，不能扩大）
 PERMITTED_OPERATIONS = (
@@ -94,16 +111,94 @@ def catalog_get_document(db: Session, user, *, ontology_id, release_id=None,
         raise _wrap(exc) from exc
 
 
+def query_limits(db: Session, ontology_id: str, *,
+                 release_id: Optional[str] = None) -> dict:
+    """助手专属查询限制元数据（公共直查 structure 响应不包含）。
+
+    声明上限仍是 200；有效 ``maxPageSize`` 取 profile 上限与 200 的最小值，
+    ``defaultPageSize`` 为 min(50, maxPageSize)。``enabled=False`` 只表示
+    profile 停用或上限失效（此时查询仍按既有 403 profile_query_disabled
+    拒绝）；``maxRowsPerQuery`` 的负值与本体的执行语义一致归一为 0，不返回
+    负 cap，也不改变 profile 持久值。本函数不改变任何授权/发布校验。
+    """
+    from app.ontologies.agent_runtime.boundary import build_scope
+    from app.ontologies.release_context import current_release_context
+
+    context = current_release_context(
+        db, ontology_id, expected_release_id=release_id)
+    _, profile, _ = build_scope(db, ontology_id,
+                                release_id=context.release.id)
+    raw_page_size = int(profile.max_rows_per_query or 0)
+    max_page_size = max(0, min(raw_page_size, _MAX_PAGE_SIZE))
+    return {
+        "enabled": bool(profile.enabled and max_page_size > 0),
+        "maxPageSize": max_page_size,
+        "defaultPageSize": min(_DEFAULT_PAGE_SIZE, max_page_size),
+    }
+
+
+def _release_terminal_page(db: Session, user, data: dict, *,
+                           session_kind: str, session_id: str) -> dict:
+    """终页资源回收 — 只在助手门面、仅严格 ``hasNext is False`` 触发。
+
+    - 本地快照按 owner + 会话显式删除；远程 memory handle 复用既有
+      ``cancel_remote_query``（``cancelled=false`` 视为已不存在，不抛错）。
+    - 中间页 ``hasNext=true``、缺失 ``hasNext`` 与直查 HTTP 路径一律不释放。
+    - best-effort：释放失败只记 warning 并标 ``released=false``，原
+      ``expiresAt`` 不变，成功查询结果绝不因回收失败而失败。
+    """
+    if not isinstance(data, dict) or data.get("hasNext") is not False:
+        return data
+    query_id = data.get("queryId")
+    if not query_id:
+        return data
+    query_id = str(query_id)
+    released = False
+    try:
+        if isinstance(data.get("persistence"), dict):
+            # 远程联邦响应带 ephemeral 标记：handle 在内存注册表里。
+            cancel_remote_query(db, user, query_id)
+            released = True
+        else:
+            released = release_query_snapshot(
+                db, user, query_id,
+                session_kind=session_kind, session_id=session_id)
+            if not released:
+                # 非本地快照 → 远程 memory handle（替代端口可能不带标记）。
+                cancel_remote_query(db, user, query_id)
+                released = True
+    except Exception as exc:  # noqa: BLE001 - 释放不得破坏成功查询
+        logger.warning("assistant facade terminal release failed (%s)",
+                       type(exc).__name__)
+        released = False
+    data["released"] = released
+    if not released:
+        return data
+    released_at = datetime.now(timezone.utc).isoformat()
+    data["releasedAt"] = released_at
+    data["expiresAt"] = released_at
+    persistence = data.get("persistence")
+    if isinstance(persistence, dict):
+        reference = persistence.get("reference")
+        if isinstance(reference, dict) and "expiresAt" in reference:
+            # 只同步已有值，不新增 reference 键。
+            reference["expiresAt"] = released_at
+    return data
+
+
 def structure(db: Session, user, ontology_id: str, *, release_id: Optional[str],
               object_type_ids: Optional[list[str]] = None,
               link_type_ids: Optional[list[str]] = None,
               action_ids: Optional[list[str]] = None) -> dict:
     try:
-        return build_structure(db, user, ontology_id,
+        data = build_structure(db, user, ontology_id,
                                expected_release_id=release_id,
                                object_type_ids=object_type_ids,
                                link_type_ids=link_type_ids,
                                action_ids=action_ids)
+        data["queryLimits"] = query_limits(db, ontology_id,
+                                           release_id=release_id)
+        return data
     except Exception as exc:  # noqa: BLE001
         raise _wrap(exc) from exc
 
@@ -111,9 +206,13 @@ def structure(db: Session, user, ontology_id: str, *, release_id: Optional[str],
 def query(db: Session, user, request: QS.QueryRequest, *,
           session_kind: str, session_id: str) -> dict:
     try:
-        return execute_unified_query(db, user, request,
+        data = execute_unified_query(db, user, request,
                                      session_kind=session_kind,
-                                     session_id=session_id)
+                                     session_id=session_id,
+                                     include_page_size=True)
+        return _release_terminal_page(db, user, data,
+                                      session_kind=session_kind,
+                                      session_id=session_id)
     except Exception as exc:  # noqa: BLE001
         raise _wrap(exc) from exc
 
@@ -121,9 +220,13 @@ def query(db: Session, user, request: QS.QueryRequest, *,
 def query_page(db: Session, user, cursor: str, *,
                session_kind: str, session_id: str) -> dict:
     try:
-        return fetch_unified_query_page(db, user, cursor,
+        data = fetch_unified_query_page(db, user, cursor,
                                         session_kind=session_kind,
-                                        session_id=session_id)
+                                        session_id=session_id,
+                                        include_page_size=True)
+        return _release_terminal_page(db, user, data,
+                                      session_kind=session_kind,
+                                      session_id=session_id)
     except Exception as exc:  # noqa: BLE001
         raise _wrap(exc) from exc
 
@@ -267,8 +370,62 @@ def execute_confirmation(db: Session, user, ontology_id: str, cid: str, *,
     except Exception as exc:  # noqa: BLE001
         raise _wrap(exc) from exc
 
+
+def _argument_present(arguments: dict, key: str) -> bool:
+    return key in arguments and arguments[key] is not None
+
+
+def _invalid_parameter(message: str, *, field: Optional[str] = None,
+                       **extra) -> FacadeError:
+    if field:
+        extra["field"] = field
+    return FacadeError(422, "invalid_parameter", message, **extra)
+
+
+def _validate_page_size_argument(arguments: dict) -> None:
+    """schema 级 pageSize 校验：0/201/非整数显式拒绝，不静默夹值。
+
+    声明上限仍是 200；profile 有效 cap 的更小越界由查询核/远程 plan 给出
+    ``requestedPageSize/maxPageSize/defaultPageSize``。错误不回显输入原值。
+    """
+    if not _argument_present(arguments, "pageSize"):
+        return
+    value = arguments["pageSize"]
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not 1 <= value <= _MAX_PAGE_SIZE):
+        raise _invalid_parameter(
+            f"pageSize 必须是 1 到 {_MAX_PAGE_SIZE} 的整数",
+            field="pageSize", maxPageSize=_MAX_PAGE_SIZE)
+
+
+def _wrap_validation_error(exc: Exception) -> FacadeError:
+    """把请求模型/手工解析异常归一为可纠正 422，不回显 Pydantic input。"""
+    field = None
+    if isinstance(exc, ValidationError):
+        try:
+            errors = exc.errors()
+        except Exception:  # noqa: BLE001
+            errors = []
+        if errors:
+            loc = [str(part) for part in (errors[0].get("loc") or ())
+                   if part != "__root__"]
+            field = ".".join(loc) or None
+    extra = {}
+    if field and field.split(".")[0] == "pageSize":
+        extra["maxPageSize"] = _MAX_PAGE_SIZE
+    if isinstance(exc, KeyError):
+        missing = exc.args[0] if exc.args else None
+        if isinstance(missing, str):
+            field = field or missing
+    return _invalid_parameter(
+        "查询参数不合法：字段类型或取值不符合查询契约",
+        field=field, **extra)
+
+
 def build_query_request(arguments: dict):
     """把工具参数（camelCase dict）解析为统一查询请求对象。"""
+    if not isinstance(arguments, dict):
+        raise _invalid_parameter("查询参数必须是对象")
     # Some compatible tool endpoints mistake a JSON-schema $defs name for an
     # outer argument envelope. Unwrap only a sole, repository-owned definition
     # name; the inner payload still goes through the strict request models.
@@ -278,79 +435,119 @@ def build_query_request(arguments: dict):
             if isinstance(inner, dict):
                 arguments = inner
                 break
-    if arguments.get("cursor"):
+    cursor_value = arguments.get("cursor")
+    if "cursor" in arguments and cursor_value is not None:
         if arguments.get("spl"):
             raise FacadeError(422, "invalid_request_shape",
                               "cursor 与 spl 不能同时出现：续查只传 cursor，"
                               "新 SPL 查询只传 spl+semanticBindings")
-        return QS.CursorRequest(cursor=str(arguments["cursor"]))
-    if arguments.get("spl"):
-        # SPL 文本形态：spl + semanticBindings 三元组 + params/pageSize。
-        # 与结构树字段互斥——静默丢弃任何一半都会绕过请求模型自身的
-        # 互斥校验，这里显式拒绝混形。
-        tree_keys = ("sources", "joins", "sourceFilters", "where", "select",
-                     "groupBy", "aggregates", "orderBy", "distinct", "cursor")
-        conflicting = sorted(key for key in tree_keys
-                             if arguments.get(key) not in (None, [], {}, False))
-        if conflicting:
+        tree_conflicts = sorted(
+            key for key in _QUERY_TREE_ARGUMENT_KEYS
+            if _argument_present(arguments, key)
+            and arguments[key] not in (None, [], {}, False))
+        if tree_conflicts:
             raise FacadeError(422, "invalid_request_shape",
-                              f"spl 文本请求不能同时携带结构树字段："
-                              f"{', '.join(conflicting)}；两种形态互斥")
-        payload = {"spl": str(arguments["spl"])}
-        if arguments.get("semanticBindings"):
-            payload["semanticBindings"] = dict(arguments["semanticBindings"])
-        if arguments.get("params"):
-            payload["params"] = dict(arguments["params"])
-        if arguments.get("pageSize"):
-            payload["pageSize"] = arguments["pageSize"]
-        return QS.QueryRequest.model_validate(payload)
-    sources = [QS.QuerySource.model_validate(source)
-               for source in arguments.get("sources") or []]
-    joins = []
-    for j in arguments.get("joins") or []:
-        on = dict(j.get("on") or {})
-        if on.get("kind") == "explicit_key":
-            on_obj = QS.ExplicitKeyOn(
-                kind="explicit_key",
-                left_property=str(on["leftProperty"]),
-                right_property=str(on["rightProperty"]),
-                key_type=str(on["keyType"]),
-                cardinality=str(on["cardinality"]),
-                business_meaning=str(on["businessMeaning"]),
-                evidence_refs=[str(e) for e in on.get("evidenceRefs") or []])
-        else:
-            on_obj = QS.DeclaredRelationOn(
-                kind="declared_relation",
-                link_type_id=str(on["linkTypeId"]),
-                direction=str(on.get("direction") or "source_to_target"))
-        joins.append(QS.QueryJoin(left=str(j["left"]), right=str(j["right"]),
-                                  type=str(j.get("type") or "inner"),
-                                  on=on_obj))
-    return QS.QueryRequest(
-        sources=sources,
-        joins=joins,
-        source_filters=_parse_source_filters(arguments.get("sourceFilters")),
-        where=[_parse_filter_node(node)
-               for node in arguments.get("where") or []],
-        select=[QS.SelectItem(source=str(s["source"]),
-                              property=str(s["property"]),
-                              **{"as": str(s["as"])})
-                for s in arguments.get("select") or []],
-        group_by=[QS.GroupByItem(source=str(g["source"]),
-                                 property=str(g["property"]))
-                  for g in arguments.get("groupBy") or []],
-        aggregates=[QS.AggregateItem(
-            fn=str(a["fn"]), source=a.get("source"),
-            property=a.get("property"), **{"as": str(a["as"])})
-            for a in arguments.get("aggregates") or []],
-        distinct=bool(arguments.get("distinct")),
-        order_by=[QS.OrderByItem(
-            output=str(o["output"]),
-            direction=str(o.get("direction") or "asc"),
-            nulls=str(o.get("nulls") or "last"))
-            for o in arguments.get("orderBy") or []],
-        page_size=arguments.get("pageSize"),
-    )
+                              "cursor 续查不能同时携带结构树字段："
+                              f"{', '.join(tree_conflicts)}；续查只传 cursor")
+        cursor_conflicts = [
+            key for key in _CURSOR_INCOMPATIBLE_ARGUMENT_KEYS
+            if _argument_present(arguments, key)]
+        if cursor_conflicts:
+            # 只回显参数名（不含值），并给出唯一可纠正动作。
+            raise _invalid_parameter(
+                "cursor 续查不能同时携带其他查询参数："
+                f"{', '.join(cursor_conflicts)}；续查只传 cursor",
+                field=cursor_conflicts[0])
+        # 续查 cursor 必须是已签发的字符串 token；短/超长/非字符串等模型
+        # 校验失败统一受控为 invalid_cursor（不回显 token、长度或原值），
+        # 不让裸 ValidationError 落到工具入口的 ontology_tool_failed。
+        if not isinstance(cursor_value, str):
+            raise FacadeError(400, "invalid_cursor", "cursor 格式非法")
+        try:
+            return QS.CursorRequest(cursor=cursor_value)
+        except ValidationError as exc:
+            raise FacadeError(400, "invalid_cursor",
+                              "cursor 格式非法") from exc
+    _validate_page_size_argument(arguments)
+    try:
+        if arguments.get("spl"):
+            # SPL 文本形态：spl + semanticBindings 三元组 + params/pageSize。
+            # 与结构树字段互斥——静默丢弃任何一半都会绕过请求模型自身的
+            # 互斥校验，这里显式拒绝混形。
+            tree_keys = ("sources", "joins", "sourceFilters", "where",
+                         "select", "groupBy", "aggregates", "orderBy",
+                         "distinct", "cursor")
+            conflicting = sorted(
+                key for key in tree_keys
+                if arguments.get(key) not in (None, [], {}, False))
+            if conflicting:
+                raise FacadeError(
+                    422, "invalid_request_shape",
+                    "spl 文本请求不能同时携带结构树字段："
+                    f"{', '.join(conflicting)}；两种形态互斥")
+            payload = {"spl": str(arguments["spl"])}
+            if arguments.get("semanticBindings"):
+                payload["semanticBindings"] = dict(
+                    arguments["semanticBindings"])
+            if arguments.get("params"):
+                payload["params"] = dict(arguments["params"])
+            if _argument_present(arguments, "pageSize"):
+                payload["pageSize"] = arguments["pageSize"]
+            return QS.QueryRequest.model_validate(payload)
+        sources = [QS.QuerySource.model_validate(source)
+                   for source in arguments.get("sources") or []]
+        joins = []
+        for j in arguments.get("joins") or []:
+            on = dict(j.get("on") or {})
+            if on.get("kind") == "explicit_key":
+                on_obj = QS.ExplicitKeyOn(
+                    kind="explicit_key",
+                    left_property=str(on["leftProperty"]),
+                    right_property=str(on["rightProperty"]),
+                    key_type=str(on["keyType"]),
+                    cardinality=str(on["cardinality"]),
+                    business_meaning=str(on["businessMeaning"]),
+                    evidence_refs=[str(e)
+                                   for e in on.get("evidenceRefs") or []])
+            else:
+                on_obj = QS.DeclaredRelationOn(
+                    kind="declared_relation",
+                    link_type_id=str(on["linkTypeId"]),
+                    direction=str(on.get("direction") or "source_to_target"))
+            joins.append(QS.QueryJoin(
+                left=str(j["left"]), right=str(j["right"]),
+                type=str(j.get("type") or "inner"), on=on_obj))
+        return QS.QueryRequest(
+            sources=sources,
+            joins=joins,
+            source_filters=_parse_source_filters(
+                arguments.get("sourceFilters")),
+            where=[_parse_filter_node(node)
+                   for node in arguments.get("where") or []],
+            select=[QS.SelectItem(source=str(s["source"]),
+                                  property=str(s["property"]),
+                                  **{"as": str(s["as"])})
+                    for s in arguments.get("select") or []],
+            group_by=[QS.GroupByItem(source=str(g["source"]),
+                                     property=str(g["property"]))
+                      for g in arguments.get("groupBy") or []],
+            aggregates=[QS.AggregateItem(
+                fn=str(a["fn"]), source=a.get("source"),
+                property=a.get("property"), **{"as": str(a["as"])})
+                for a in arguments.get("aggregates") or []],
+            distinct=bool(arguments.get("distinct")),
+            order_by=[QS.OrderByItem(
+                output=str(o["output"]),
+                direction=str(o.get("direction") or "asc"),
+                nulls=str(o.get("nulls") or "last"))
+                for o in arguments.get("orderBy") or []],
+            page_size=arguments.get("pageSize"),
+        )
+    except FacadeError:
+        raise
+    except (ValidationError, KeyError, TypeError, ValueError,
+            AttributeError) as exc:
+        raise _wrap_validation_error(exc) from exc
 
 
 def _parse_filter_node(raw):
@@ -390,7 +587,12 @@ def confirmation_owner_lookup(db: Session, user, cid: str) -> str:
 
 
 def current_release_map(db: Session, ontology_ids: list[str]) -> dict[str, Any]:
-    """KG 来源状态核对用：ontology → 当前 release（只读元数据）。"""
+    """当前发布比较入口（只读元数据）：ontology → 当前 release id。
+
+    仅供跨轮结构引用判断“是否已过期/漂移”；**不构成授权**：不校验也不
+    授予本体访问权，不替代 structure/query 的发布与授权校验。调用方必须
+    先经门面完成访问校验，历史引用不能作为授权或查询构造依据。
+    """
     from app.models.ontology import OntologyProject
 
     rows = db.query(OntologyProject).filter(

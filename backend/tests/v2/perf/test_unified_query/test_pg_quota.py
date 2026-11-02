@@ -39,12 +39,21 @@ def test_real_pg_existing_nine_plus_two_concurrent_requests_never_exceed_ten():
             # advisory lock can be acquired; exercises the stale-RR race.
             barrier.wait(timeout=20)
 
-        def _resolve(self, request, pipeline):
+        def _resolve(self, plan, *, recheck_only=False):
+            # Fixture-only leaf: the quota/advisory-lock race under test does
+            # not need a real source; expose one pinned platform relation for
+            # every declared pipeline source name (current service resolves by
+            # binding name, not pipeline alias).
             table = sa.select(sa.literal(1).label("id")).subquery()
-            self.relations["p"] = Relation("p", table, {"id": ColumnSpec("id", "integer", False)},
-                {"alias": "p", "kind": "dataset", "id": "fixture", "versionId": "fixture",
-                 "asOf": now.isoformat(), "consistency": "immutable_version", "completeness": "complete"},
-                "auth", "schema", "platform", platform=True)
+            for name, alias in plan.pipeline.sources:
+                relation = Relation(
+                    alias, table, {"id": ColumnSpec("id", "integer", False)},
+                    {"alias": alias, "kind": "dataset", "id": "fixture",
+                     "versionId": "fixture", "asOf": now.isoformat(),
+                     "consistency": "immutable_version",
+                     "completeness": "complete"},
+                    "auth", "schema", "platform", platform=True)
+                self.relations[name] = relation
 
     body = TextQueryRequest(language="spl", query="from fixture as p | stats count() as n",
                         bindings={"fixture": {"kind": "dataset", "datasetId": "fixture", "versionId": "fixture"}})

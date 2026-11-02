@@ -559,7 +559,54 @@ def test_page_size_cap(client, auth_headers, orders_ontology):
     assert r.status_code == 200
     r = _run(client, auth_headers, _single_source(orders, pageSize=10))
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "invalid_parameter"
+    detail = r.json()["detail"]
+    # 公共直查错误响应零增量：助手恢复链路私有的 field/requestedPageSize/
+    # maxPageSize/defaultPageSize 只经助手门面提供，不得进入直查 detail。
+    assert set(detail) == {"code", "message"}
+    assert detail["code"] == "invalid_parameter"
+    assert "requestedPageSize" not in detail and "maxPageSize" not in detail
+    assert "10" not in str(detail["message"])  # 不回显请求原值
+
+
+def test_page_size_200_allowed_and_out_of_schema_rejected(
+        client, auth_headers, orders_ontology):
+    """声明上限 200 保持：profile cap=200 可请求 200；201/0 仍由 schema 拒绝。"""
+    orders = orders_ontology
+    oid = orders["ontologyId"]
+    r = client.put(f"{_fo(oid)}/agent/profile", headers=auth_headers,
+                   json={"maxRowsPerQuery": 200})
+    assert r.status_code == 200
+    r = _run(client, auth_headers, _single_source(orders, pageSize=200))
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["pageRowCount"] == 3
+    for page_size in (201, 0):
+        r = _run(client, auth_headers, _single_source(orders,
+                                                      pageSize=page_size))
+        assert r.status_code == 422              # Pydantic/FastAPI schema 拒绝
+
+
+def test_count_positive_and_zero_are_valid_results(client, auth_headers,
+                                                   orders_ontology):
+    """零计数在口径/字段已确认时是有效答案，不得当失败或触发重试。"""
+    orders = orders_ontology
+
+    def count_for(value):
+        payload = _single_source(
+            orders,
+            select=[],
+            aggregates=[{"fn": "count", "as": "n"}],
+            where=[{"source": "a", "property": "status", "op": "eq",
+                    "value": value}],
+            orderBy=[{"output": "n"}])
+        r = _run(client, auth_headers, payload)
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        assert data["hasNext"] is False
+        assert data["truncated"] is False and data["partial"] is False
+        return data["rows"][0]["n"]
+
+    assert count_for("paid") == 2
+    assert count_for("no-such-value") == 0
 
 
 def test_unknown_parameter_rejected(client, auth_headers, orders_ontology):
@@ -580,6 +627,8 @@ def test_structure_slices_and_sources(client, auth_headers, orders_ontology):
     assert r.status_code == 200, r.text
     data = r.json()["data"]
     assert data["release"]["id"] == orders["releaseId"]
+    # 直查 structure 响应键集不含助手专属 queryLimits（仅门面包一层）。
+    assert "queryLimits" not in data
     types = {t["id"]: t for t in data["objectTypes"]}
     assert set(types) == {"ot-order", "ot-supplier"}   # 链接端点自动补入
     props = {p["name"] for p in types["ot-order"]["properties"]}

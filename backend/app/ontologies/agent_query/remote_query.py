@@ -323,9 +323,18 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
         return plan, lineage
 
     plan, _ = compile_level(request, "")
-    page_size = request.page_size or min(50, cap)
+    default_page_size = min(50, cap)
+    page_size = (request.page_size if request.page_size is not None
+                 else default_page_size)
     if page_size > cap:
-        raise _error(422, "invalid_parameter", f"pageSize 超出授权上限 {cap}")
+        # 有效 cap = min(全部叶子 source profile, 200)；受控字段只供助手
+        # 恢复链路使用（直查 HTTP detail 不含），不把请求原值写进 message。
+        raise _error(422, "invalid_parameter", f"pageSize 超出授权上限 {cap}",
+                     assistant_private_keys=(
+                         "field", "requestedPageSize", "maxPageSize",
+                         "defaultPageSize"),
+                     field="pageSize", requestedPageSize=page_size,
+                     maxPageSize=cap, defaultPageSize=default_page_size)
     plan.update(pageSize=page_size, releases=releases, citations=citations)
     return plan
 
@@ -706,7 +715,8 @@ def _port_error(exc):
     raise exc
 
 
-def execute_remote_query(db, user, request, *, session_kind, session_id):
+def execute_remote_query(db, user, request, *, session_kind, session_id,
+                         include_page_size: bool = False):
     result = None
     try:
         plan = prepare_remote_plan(db, user, request)
@@ -716,6 +726,9 @@ def execute_remote_query(db, user, request, *, session_kind, session_id):
         current = prepare_remote_plan(db, user, request)
         if _sha256(_canonical_json(current)) != _sha256(_canonical_json(plan)):
             raise _error(409, "query_context_changed", "查询期间发布范围或授权配置发生变化")
+        if include_page_size and isinstance(result, dict):
+            # 助手门面私有回显：plan 中冻结的实际执行页长。
+            result["pageSize"] = plan["pageSize"]
         return result
     except Exception as exc:
         if result is not None:
@@ -736,10 +749,28 @@ def cancel_remote_query(db, user, query_id):
         raise _port_error(exc) from exc
 
 
-def fetch_remote_page(db, user, token, *, session_kind, session_id):
+def fetch_remote_page(db, user, token, *, session_kind, session_id,
+                      include_page_size: bool = False):
+    captured: dict = {}
+
+    def prepare(*args, **kwargs):
+        # 端口在取页前会用同一 canonical 校验重新编制 plan；捕获其中冻结的
+        # 页长，仅用于助手门面响应回显（不参与授权/分页决策）。
+        result = prepare_remote_plan(*args, **kwargs)
+        if kwargs.get("serialized") and isinstance(result, tuple):
+            plan = result[1]
+        else:
+            plan = result
+        if isinstance(plan, dict) and isinstance(plan.get("pageSize"), int):
+            captured["pageSize"] = plan["pageSize"]
+        return result
+
     try:
-        return _installed().fetch(db, user, token, session_kind=session_kind,
-                                  session_id=session_id, prepare=prepare_remote_plan)
+        data = _installed().fetch(db, user, token, session_kind=session_kind,
+                                  session_id=session_id, prepare=prepare)
+        if include_page_size and "pageSize" in captured:
+            data["pageSize"] = captured["pageSize"]
+        return data
     except Exception as exc:
         from .service import QueryError
         if isinstance(exc, QueryError):

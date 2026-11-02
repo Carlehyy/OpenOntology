@@ -153,6 +153,31 @@ def test_facade_rejects_spl_mixed_shapes():
         assert excinfo.value.code == "invalid_request_shape"
 
 
+def test_facade_rejects_spl_page_size_outside_schema_without_echo():
+    """SPL 形态的 0/201/非法类型不得静默回落默认值，也不回显输入原值。"""
+    import json
+
+    from app.ontologies.agent_runtime.assistant_facade import (
+        FacadeError, build_query_request,
+    )
+
+    base = {"spl": CANONICAL_SPL, "semanticBindings": BINDINGS}
+    for bad in (0, 201, -1, "7", "abc", True, 1.5):
+        with pytest.raises(FacadeError) as excinfo:
+            build_query_request({**base, "pageSize": bad})
+        assert (excinfo.value.status, excinfo.value.code) == (
+            422, "invalid_parameter")
+        assert excinfo.value.extra["field"] == "pageSize"
+        assert excinfo.value.extra["maxPageSize"] == 200
+        # schema 级错误不携带输入值（受控键只有 field/maxPageSize）。
+        assert set(excinfo.value.extra) == {"field", "maxPageSize"}
+        rendered = json.dumps(excinfo.value.detail(), ensure_ascii=False)
+        if isinstance(bad, str):
+            assert bad not in rendered
+    # 边界值 200 仍按 schema 接受（上限不因受控化而收紧）。
+    assert build_query_request({**base, "pageSize": 200}).page_size == 200
+
+
 def _oneof_branch_matches(branch: dict, keys: set) -> bool:
     """按目录 oneOf 实际使用的关键字（required / not / anyOf）求值。"""
     if not set(branch.get("required", ())) <= keys:

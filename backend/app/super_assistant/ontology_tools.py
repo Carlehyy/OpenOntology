@@ -16,9 +16,9 @@ from sqlalchemy.orm import Session
 
 from app.models.user import User
 from app.ontologies.agent_runtime.assistant_facade import (
-    FacadeError, build_query_request, confirmation_status,
-    current_release_map, decide_confirmation, execute_confirmation,
-    prepare_action, query, query_page, structure,
+    FacadeError, build_query_request, catalog_object_types,
+    confirmation_status, current_release_map, decide_confirmation,
+    execute_confirmation, prepare_action, query, query_page, structure,
     confirmation_owner_lookup, reconcile_confirmation,
     register_join_assertion,
 )
@@ -47,6 +47,9 @@ ONTOLOGY_TOOL_NAMES = {
 }
 
 _MAX_QUERY_SOURCES = 4
+_MAX_REF_ONTOLOGIES = 20
+# 对象类型目录页大小 20；翻页上界只防病态分页，正常按目标类型早停。
+_MAX_REF_CATALOG_PAGES = 64
 
 
 def _load_user(db: Session, owner_id: str):
@@ -366,7 +369,10 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "objectTypes 的 dataAccess 标注访问模式（remote=联邦远程、"
                 "materialized=平台物化）：remote 分组的数据必须经 "
                 "ontology_query 的受治理查询（含 subquery 同源聚合）取数，"
-                "禁止凭结构或样例在文本里推算远程结果。"),
+                "禁止凭结构或样例在文本里推算远程结果。"
+                "响应中的 queryLimits 给出本本体有效的分页上限"
+                "（maxPageSize/defaultPageSize，受 profile 与 200 的共同约束），"
+                "ontology_query 的新查询分页应据此设置 pageSize。"),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -393,7 +399,14 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
                 "先同源聚合，最终 from 做联邦 join；join 键必须有本人 "
                 "join-assertions 登记的声明证据，否则 422；不支持 limit，分页用 "
                 "pageSize）。字段/类型/基数依据必须来自 ontology_structure 的"
-                "当前发布结构。翻页只传 cursor。结构树形态可用派生源（subquery）"
+                "当前发布结构。新查询可用 pageSize（有效上限见 "
+                "ontology_structure 的 queryLimits.maxPageSize，缺省取 "
+                "queryLimits.defaultPageSize）；翻页只传 cursor，不要同时携带 "
+                "pageSize/params/semanticBindings/queryId。统计类问题优先用 "
+                "where 过滤 + aggregates 一次取聚合结论，不要逐页取明细再自行"
+                "加总。成功响应回显实际生效的 pageSize；终页（hasNext=false）会"
+                "自动释放查询句柄并返回 released/releasedAt，之后不要再沿用旧 "
+                "cursor。结构树形态可用派生源（subquery）"
                 "先在同源内聚合防 fanout：派生源只给 alias+subquery（禁止再带"
                 "对象三元组），嵌套最多两层，全部叶子对象源 ≤16；引用派生输出名"
                 "的 lineage 依据由服务端校验。"),
@@ -536,6 +549,122 @@ def ontology_tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
+# --------------------------------------------- 跨轮结构引用授权校验
+
+
+def _probe_object_type_scope(
+    db: Session, user, ontology_id: str, wanted_types: set[str],
+) -> tuple[str | None, set[str]] | None:
+    """经门面 catalog_object_types 收集当前允许的对象类型（有界翻页）。
+
+    返回 ``(current_release_id, allowed_object_type_ids)``；无法证明
+    （权限/目录异常、分页游标缺失或超出上界）返回 ``None``，调用方
+    fail-closed 丢弃该本体的引用。目录 items 已按当前 profile
+    ``allowed_object_type_ids`` 过滤，因此这里就是“当前可访问类型”。
+    """
+    allowed: set[str] = set()
+    release_id: str | None = None
+    cursor: str | None = None
+    for _page in range(_MAX_REF_CATALOG_PAGES):
+        try:
+            probe = catalog_object_types(
+                db, user, ontology_id=ontology_id, cursor=cursor)
+        except FacadeError:
+            return None
+        except Exception:  # noqa: BLE001 - 能力异常按不可授权处理
+            logger.warning("跨轮结构引用对象类型校验失败", exc_info=True)
+            return None
+        if release_id is None:
+            release_id = str(probe.get("releaseId") or "") or None
+        items = probe.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                type_id = item.get("id")
+                if isinstance(type_id, str) and type_id:
+                    allowed.add(type_id)
+        if not wanted_types or wanted_types <= allowed:
+            # 无类型引用只需本体/发布授权；目标类型已全部找到则无需继续翻页。
+            return release_id, allowed
+        if not probe.get("hasNext"):
+            return release_id, allowed
+        next_cursor = probe.get("cursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            return None
+        cursor = next_cursor
+    return None
+
+
+def authorize_structure_refs(db: Session, *, owner_id: str,
+                             conversation_id: str,
+                             refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """跨轮结构引用的当前访问校验（只读、有界、不授予任何权限）。
+
+    ``current_release_map`` 只做发布比较、**不是授权**；这里先按当前 user
+    经门面 ``catalog_object_types`` 真正校验访问（活跃用户 + 本体助手菜单
+    + 本体可读 + profile 启用 + 当前允许对象类型），未授权本体整组丢弃、
+    ``objectTypeId`` 不在当前允许集的历史引用也丢弃（无 objectTypeId 的
+    ontology/release 引用保留）；再用发布比较标注 ``stale``（仅比较，不
+    替代授权）。任何异常/无法证明的分页按“不可注入”处理。
+    """
+    user = _load_user(db, owner_id)
+    if user is None:
+        return []
+    if _require_conversation(db, owner_id, conversation_id) is None:
+        return []
+    ontology_ids: list[str] = []
+    wanted_types: dict[str, set[str]] = {}
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        ontology_id = ref.get("ontologyId")
+        if not isinstance(ontology_id, str) or not ontology_id:
+            continue
+        if ontology_id not in wanted_types:
+            if len(ontology_ids) >= _MAX_REF_ONTOLOGIES:
+                continue
+            ontology_ids.append(ontology_id)
+            wanted_types[ontology_id] = set()
+        object_type_id = ref.get("objectTypeId")
+        if isinstance(object_type_id, str) and object_type_id:
+            wanted_types[ontology_id].add(object_type_id)
+    if not ontology_ids:
+        return []
+    try:
+        current_releases = current_release_map(db, ontology_ids)
+    except Exception:  # noqa: BLE001 - 比较失败按不可注入处理
+        logger.warning("跨轮结构引用发布比较失败", exc_info=True)
+        return []
+    scopes: dict[str, tuple[str | None, set[str]]] = {}
+    for ontology_id in ontology_ids:
+        scope = _probe_object_type_scope(
+            db, user, ontology_id, wanted_types.get(ontology_id, set()))
+        if scope is not None:
+            scopes[ontology_id] = scope
+    result: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        ontology_id = ref.get("ontologyId")
+        scope = scopes.get(ontology_id)
+        if scope is None:
+            continue
+        probed_release, allowed_types = scope
+        object_type_id = ref.get("objectTypeId")
+        if object_type_id is not None:
+            if (not isinstance(object_type_id, str)
+                    or object_type_id not in allowed_types):
+                # 同一 release 下撤掉对象类型授权：不注入该历史引用。
+                continue
+        current_release = current_releases.get(ontology_id) or probed_release
+        entry = dict(ref)
+        entry["stale"] = bool(
+            current_release and entry.get("releaseId") != current_release)
+        result.append(entry)
+    return result
+
+
 # ------------------------------------------------------------- executor
 
 def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
@@ -563,12 +692,17 @@ def execute_ontology_tool(db: Session, *, owner_id: str, conversation_id: str,
                 action_ids=arguments.get("actionIds") or None)
             return json.dumps(data, ensure_ascii=False, default=str)
         if name == ONTOLOGY_QUERY_TOOL:
-            if arguments.get("cursor"):
-                data = query_page(db, user, str(arguments["cursor"]),
+            # 统一先经门面请求模型校验：cursor 混用 pageSize/params/
+            # semanticBindings/queryId/spl/sources 与 0/201/非法类型
+            # pageSize 必须在分派前返回可纠正 422，而不是按 cursor 静默
+            # 丢参；合法续查只按校验后的 CursorRequest 取页。
+            request = build_query_request(arguments)
+            cursor = getattr(request, "cursor", None)
+            if cursor is not None:
+                data = query_page(db, user, str(cursor),
                                   session_kind=SESSION_KIND,
                                   session_id=conversation_id)
             else:
-                request = build_query_request(arguments)
                 data = query(db, user, request,
                              session_kind=SESSION_KIND,
                              session_id=conversation_id)

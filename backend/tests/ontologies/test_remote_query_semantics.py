@@ -190,6 +190,56 @@ def test_current_release_change_is_a_query_error_at_http_entry(client, auth_head
     assert response.json()["detail"]["code"] == "release_context_changed"
 
 
+def test_remote_page_size_over_cap_reports_controlled_fields(db, admin_user):
+    """远程有效 cap=min(叶子 profile, 200)；越界错误带受控上限字段。"""
+    identity, profile = _release(db, admin_user)
+    profile.max_rows_per_query = 50
+    db.commit()
+    with pytest.raises(QueryError) as error:
+        remote_query.prepare_remote_plan(
+            db, admin_user, _request(identity, pageSize=51))
+    assert (error.value.status, error.value.code) == (
+        422, "invalid_parameter")
+    assert error.value.extra["field"] == "pageSize"
+    assert error.value.extra["requestedPageSize"] == 51
+    assert error.value.extra["maxPageSize"] == 50
+    assert error.value.extra["defaultPageSize"] == 50
+    assert not db.in_transaction()
+
+
+def test_remote_cap_takes_minimum_of_all_nested_leaf_profiles(db, admin_user):
+    payload, _ = _cross_query(db, admin_user)
+    left_ontology = payload["sources"][0]["ontologyId"]
+    # 右侧是派生源：其叶子 profile 也必须计入有效 cap。
+    right_ontology = payload["sources"][1]["subquery"]["sources"][0][
+        "ontologyId"]
+    for ontology_id, cap in ((left_ontology, 200), (right_ontology, 30)):
+        profile = db.query(AgentProfile).filter_by(
+            ontology_id=ontology_id).one()
+        profile.max_rows_per_query = cap
+    db.commit()
+
+    # 默认页长 = min(50, 所有叶子 min cap) = min(50, 30) = 30。
+    default_plan = remote_query.prepare_remote_plan(
+        db, admin_user, QueryRequest.model_validate(payload))
+    assert default_plan["pageSize"] == 30
+
+    payload["pageSize"] = 31
+    with pytest.raises(QueryError) as error:
+        remote_query.prepare_remote_plan(
+            db, admin_user, QueryRequest.model_validate(payload))
+    assert (error.value.status, error.value.code) == (
+        422, "invalid_parameter")
+    assert error.value.extra["maxPageSize"] == 30
+    assert error.value.extra["defaultPageSize"] == 30
+    assert error.value.extra["requestedPageSize"] == 31
+
+    payload["pageSize"] = 30
+    plan = remote_query.prepare_remote_plan(
+        db, admin_user, QueryRequest.model_validate(payload))
+    assert plan["pageSize"] == 30
+
+
 def test_remote_plan_accepts_count_field_semantics(db, admin_user):
     identity, profile = _release(db, admin_user, asset="notes")
     profile.allowed_properties = {identity["objectTypeId"]: ["key", "note"]}

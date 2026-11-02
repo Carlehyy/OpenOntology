@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -61,7 +62,15 @@ _SHELL_METADATA_KEYS = (
     "pageRowCount", "totalRowCount", "distinctEntityCounts", "inputCounts",
     "joinRowCounts", "countsScope", "hasNext", "cursor", "expiresAt",
     "partial", "truncated", "exact", "completeness",
+    # 助手门面私有增量（pageSize/终页释放审计）；直查公共响应不变。
+    "pageSize", "released", "releasedAt",
 )
+
+# 错误壳受控字段 allow-list：只保留可分类、可审计的短标识符/受控数值；
+# message、limitBytes、异常原文、业务取值与输入原值一律不落。
+_CODE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
+_MAX_RETRYABLE_AFTER = 86_400
+_MAX_PAGE_SIZE = 200
 
 # 异常/不可验证输出在远程上下文里可保留的错误信息上界（字符）。
 _ERROR_MESSAGE_KEEP_CHARS = 120
@@ -144,8 +153,43 @@ def detail_shell(payload: dict[str, Any],
         "persisted": "metadata_only",
     }
     shell["ephemeralDetail"] = True
-    shell["note"] = "源明细按 ephemeral 处理未落库；可用 cursor 经 ontology_query 续读。"
+    if payload.get("released") is True:
+        # 终页且已确认释放：不再提示带 cursor 续读。
+        shell["note"] = "源明细按 ephemeral 处理未落库；本页为最后一页，查询句柄已释放。"
+    elif payload.get("hasNext") is False:
+        # 终页但释放失败/未确认：如实说明，不谎称已释放，也不提示续读。
+        shell["note"] = "源明细按 ephemeral 处理未落库；本页为最后一页，句柄释放未确认。"
+    else:
+        shell["note"] = "源明细按 ephemeral 处理未落库；可用 cursor 经 ontology_query 续读。"
     return shell
+
+
+def _bounded_number(value: Any, *, maximum: float) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or value > maximum:
+        return None
+    return value
+
+
+def _controlled_error_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """错误壳受控字段：存在且类型/范围合法才带；不猜、不回显输入原值。"""
+    fields: dict[str, Any] = {}
+    quota = payload.get("quota")
+    if isinstance(quota, str) and _CODE_PATTERN.fullmatch(quota):
+        fields["quota"] = quota
+    retryable_after = _bounded_number(
+        payload.get("retryableAfter"), maximum=_MAX_RETRYABLE_AFTER)
+    if retryable_after is not None:
+        fields["retryableAfter"] = retryable_after
+    for key in ("maxPageSize", "defaultPageSize"):
+        value = _bounded_number(payload.get(key), maximum=_MAX_PAGE_SIZE)
+        if isinstance(value, int):
+            fields[key] = value
+    field = payload.get("field")
+    if isinstance(field, str) and _CODE_PATTERN.fullmatch(field):
+        fields["field"] = field
+    return fields
 
 
 def _minimal_detail_shell(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -237,16 +281,17 @@ class EphemeralTurnState:
     def _register_fail_closed(self, call_id: str, payload: dict[str, Any] | None,
                               cap: int | None) -> str:
         if isinstance(payload, dict) and "error" in payload:
-            # 执行异常回灌：保留有界错误码/消息供排查，载荷不落。
-            error = payload.get("error")
-            code = payload.get("code")
+            # 执行异常回灌：只保留受控 code/数值字段供分类与排查；
+            # message/异常原文/业务值/输入原值不落持久面。
             shell = {
-                "error": bounded_error_text(error),
+                "error": bounded_error_text(payload.get("error")),
                 "ephemeralDetail": True,
                 "note": "远程上下文中执行异常，错误载荷按未落库处理。",
             }
-            if code is not None:
+            code = payload.get("code")
+            if isinstance(code, str) and _CODE_PATTERN.fullmatch(code):
                 shell["code"] = code
+            shell.update(_controlled_error_fields(payload))
         else:
             shell = _minimal_detail_shell(payload)
             self.detail_seen = True

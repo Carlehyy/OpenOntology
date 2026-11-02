@@ -63,18 +63,29 @@ _COUNTS_SCOPE = "complete_snapshot"
 
 
 class QueryError(Exception):
-    """查询面可识别错误 — 携带 HTTP 状态与机器可读 code。"""
+    """查询面可识别错误 — 携带 HTTP 状态与机器可读 code。
 
-    def __init__(self, status: int, code: str, message: str, **extra):
+    ``extra`` 会进入助手门面（FacadeError/tool JSON）与内部调用；其中
+    ``assistant_private_keys`` 标记的键是助手恢复链路的受控元数据：只经
+    助手门面提供，不进入公共直查 HTTP ``detail``（直查保持既有
+    ``{code, message}`` + 既有公共 extra 的形状）。
+    """
+
+    def __init__(self, status: int, code: str, message: str, *,
+                 assistant_private_keys: tuple[str, ...] = (), **extra):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
         self.extra = extra
+        self.assistant_private_keys = tuple(assistant_private_keys)
 
     def detail(self) -> dict:
         payload: dict[str, Any] = {"code": self.code, "message": self.message}
-        payload.update(self.extra)
+        private = set(self.assistant_private_keys)
+        payload.update(
+            {key: value for key, value in self.extra.items()
+             if key not in private})
         return payload
 
 
@@ -224,6 +235,8 @@ class UnifiedQueryService:
         self._pin_transaction()
         self._resolve_sources()
         page_size = self._resolve_page_size()
+        # 助手门面私有回显（直查响应不读该属性）：本页实际生效页长。
+        self.resolved_page_size = page_size
         tree, join_row_counts = self._build_join_tree()
         # Complete-set SQL work is limited by transaction resource budgets,
         # not by the old Python input row cap. Output/join budgets remain.
@@ -512,12 +525,22 @@ class UnifiedQueryService:
 
     def _resolve_page_size(self) -> int:
         cap = self._page_size_cap()
+        default_page_size = min(50, cap)
         if self.req.page_size is None:
             # 契约 §3.4：默认页长 = min(50, 各源 profile 上限)
-            return min(50, cap)
+            return default_page_size
         if self.req.page_size > cap:
-            raise QueryError(422, "invalid_parameter",
-                             f"pageSize 超出上限 {cap}")
+            # 受控字段只供助手恢复链路分类/提示（直查 HTTP detail 不含）；
+            # 不把请求原值写进 message。
+            raise QueryError(
+                422, "invalid_parameter", f"pageSize 超出上限 {cap}",
+                assistant_private_keys=(
+                    "field", "requestedPageSize", "maxPageSize",
+                    "defaultPageSize"),
+                field="pageSize",
+                requestedPageSize=self.req.page_size,
+                maxPageSize=cap,
+                defaultPageSize=default_page_size)
         return self.req.page_size
 
     # ------------------------------------------------------------ SQL 构造
@@ -1247,6 +1270,8 @@ class UnifiedQueryService:
             .first())
         if snapshot is None:
             raise QueryError(404, "snapshot_not_found", "快照不存在")
+        # 续页页长冻结在快照上；仅助手门面读取该属性回显。
+        self.resolved_page_size = snapshot.page_size
         if self._as_utc(snapshot.expires_at) < datetime.now(timezone.utc):
             raise QueryError(410, "query_snapshot_expired",
                              "查询快照已过期，请重新查询", reprepareRequired=True)
@@ -1296,7 +1321,13 @@ class UnifiedQueryService:
 
 
 def execute_unified_query(db: Session, user: Any, request: QS.QueryRequest, *,
-                          session_kind: str, session_id: str) -> dict:
+                          session_kind: str, session_id: str,
+                          include_page_size: bool = False) -> dict:
+    """执行统一查询。
+
+    ``include_page_size`` 只供助手门面读取响应元数据（本页实际生效页长）；
+    直查 HTTP 保持默认 ``False``，公共响应零增量。
+    """
     from .remote_query import execute_remote_query, uses_remote_sources
 
     try:
@@ -1305,23 +1336,29 @@ def execute_unified_query(db: Session, user: Any, request: QS.QueryRequest, *,
         from .remote_query import _port_error
         raise _port_error(exc) from exc
     if remote:
-        return execute_remote_query(db, user, request, session_kind=session_kind,
-                                    session_id=session_id)
+        return execute_remote_query(
+            db, user, request, session_kind=session_kind,
+            session_id=session_id, include_page_size=include_page_size)
     service = UnifiedQueryService(db, user, request,
                                   session_kind=session_kind,
                                   session_id=session_id)
     try:
-        return service.execute()
+        data = service.execute()
     except ToolError as exc:
         raise QueryError(403, "capability_forbidden", str(exc)) from exc
+    if include_page_size:
+        data["pageSize"] = service.resolved_page_size
+    return data
 
 
 def fetch_unified_query_page(db: Session, user: Any, token: str, *,
-                             session_kind: str, session_id: str) -> dict:
+                             session_kind: str, session_id: str,
+                             include_page_size: bool = False) -> dict:
     if token.startswith("mem."):
         from .remote_query import fetch_remote_page
         return fetch_remote_page(db, user, token, session_kind=session_kind,
-                                  session_id=session_id)
+                                 session_id=session_id,
+                                 include_page_size=include_page_size)
     placeholder = QS.QueryRequest(
         sources=[QS.QuerySource(alias="a", ontology_id="0",
                                 release_id="0", object_type_id="0")],
@@ -1329,7 +1366,45 @@ def fetch_unified_query_page(db: Session, user: Any, token: str, *,
     service = UnifiedQueryService(db, user, placeholder,
                                   session_kind=session_kind,
                                   session_id=session_id)
-    return service.fetch_page(token)
+    data = service.fetch_page(token)
+    if include_page_size:
+        data["pageSize"] = service.resolved_page_size
+    return data
+
+
+def release_query_snapshot(db: Session, user: Any, snapshot_id: str, *,
+                           session_kind: Optional[str] = None,
+                           session_id: Optional[str] = None) -> bool:
+    """显式释放一次本地物化查询快照（助手门面终页专用，直查 API 不调用）。
+
+    作用域：快照 owner 必须是当前用户；调用方传入的会话（kind/id）必须在
+    快照上完全匹配。先删 ``AgentQueryRow`` 再删 ``AgentQuerySnapshot`` 并
+    commit；不存在/已释放返回 ``False``（幂等，不抛错）。释放异常回滚后
+    上抛，由门面按 best-effort 处理。
+    """
+    snapshot = (
+        db.query(AgentQuerySnapshot)
+        .filter(AgentQuerySnapshot.id == snapshot_id,
+                AgentQuerySnapshot.owner_user_id == str(user.id)))
+    if session_kind is not None:
+        snapshot = snapshot.filter(
+            AgentQuerySnapshot.session_kind == session_kind)
+    if session_id is not None:
+        snapshot = snapshot.filter(
+            AgentQuerySnapshot.session_id == session_id)
+    snapshot = snapshot.first()
+    if snapshot is None:
+        return False
+    try:
+        db.query(AgentQueryRow).filter(
+            AgentQueryRow.snapshot_id == snapshot.id,
+        ).delete(synchronize_session=False)
+        db.delete(snapshot)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return True
 
 
 # ------------------------------------------------- join evidence（P2-1）
