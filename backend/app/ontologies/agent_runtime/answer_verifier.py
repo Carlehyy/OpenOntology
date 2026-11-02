@@ -1,6 +1,6 @@
 """确定性结论校验：数值须由完整工具证据背书；失败先纠正，仍失败则显式标注。
 
-保留历史年份豁免及百分比变体；Decimal 内部比较不会混淆相邻 bigint。
+保留历史年份豁免、日期整体屏蔽与百分比变体；Decimal 比较不混淆相邻 bigint。
 """
 from __future__ import annotations
 
@@ -9,10 +9,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Iterable
 
-# 数字抽取：覆盖 整数 / 小数 / 千分位 / 负号。年份先整体剥离（否则 "2026"
-# 会被切成 202+6），版本号等含 4 位数字的字符串也会被剥离年份部分——可接受的
-# 误伤，宁可少校验也不把年份当数据断言。
+# 日期须先整体屏蔽，避免年份剥离后残留月份充当计数或证据。
+# 不将小数点视为日期分隔符；数量与「5个月」等时长仍须核对。
 _NUMBER_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?")
+_DATE_RE = re.compile(
+    r"(?<!\d)(?:(?:19|20)\d{2}(?:\s*[-/]\s*\d{1,2}){1,2}"
+    r"|(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*[日号])?)?"
+    r"|\d{1,2}\s*月份?(?:\s*\d{1,2}\s*[日号])?)(?!\d)")
 _YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 JS_SAFE_INTEGER = 2**53 - 1
 
@@ -64,7 +67,7 @@ def _public_number(value: Decimal):
 
 
 def _numbers_in_text_decimal(text: str) -> list[Decimal]:
-    cleaned = _YEAR_RE.sub(" ", text or "")
+    cleaned = _YEAR_RE.sub(" ", _DATE_RE.sub(" ", text or ""))
     return [Decimal(raw.replace(",", ""))
             for raw in _NUMBER_RE.findall(cleaned)]
 
@@ -116,12 +119,8 @@ def result_number_universe(steps: Iterable[dict]) -> set:
             continue
         numbers.extend(_numbers_in_value(result))
     allowed = _with_ratio_variants(numbers)
-    # Preserve compatibility for exact, safe values returned by this helper;
-    # verification itself uses Decimal values below and remains lossless.
-    for value in tuple(allowed):
-        public = _public_number(value)
-        if isinstance(public, float):
-            allowed.add(public)
+    # Historical float aliases stay for exact, safe values; verification keeps Decimal.
+    allowed.update(p for p in map(_public_number, tuple(allowed)) if isinstance(p, float))
     return allowed
 
 

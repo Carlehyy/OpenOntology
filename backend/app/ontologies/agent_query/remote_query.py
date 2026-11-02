@@ -729,6 +729,13 @@ def execute_remote_query(db, user, request, *, session_kind, session_id):
             db.rollback()
 
 
+def cancel_remote_query(db, user, query_id):
+    try:
+        return _installed().cancel(db, user, query_id)
+    except Exception as exc:
+        raise _port_error(exc) from exc
+
+
 def fetch_remote_page(db, user, token, *, session_kind, session_id):
     try:
         return _installed().fetch(db, user, token, session_kind=session_kind,

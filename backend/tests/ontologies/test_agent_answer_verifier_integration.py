@@ -99,6 +99,94 @@ def test_answer_verification_warns_when_model_wont_fix(
     assert calls["n"] == 3  # 首轮工具调用 + 终答 + 一次修正回环
 
 
+def test_answer_verification_skips_date_restatement_when_tool_fails(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """工具失败 + 终答只重述日期（2026年5月）→ 日期已屏蔽：不重试、不告警。"""
+    oid = modeled_ontology["id"]
+
+    from app.models.model_config import ModelConfig
+    db.add(ModelConfig(id=str(uuid.uuid4()), name="verify-date", provider="openai",
+                       config_type="llm", models=["verify-date-model"],
+                       created_by=admin_user.id))
+    db.commit()
+
+    calls = {"n": 0}
+
+    def fake_chat(call_kwargs, messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert any(t["name"] == "search_objects" for t in tools)
+            # 不存在的对象类型 → 工具失败，step 带 error，数值宇宙为空
+            return {"content": None,
+                    "usage": {"inputTokens": 10, "outputTokens": 5},
+                    "tool_calls": [{"id": "tc1", "name": "search_objects",
+                                    "arguments": {"object_type": "NoSuchType"}}]}
+        # 工具失败后终答只重述查询日期，不编造任何数量
+        return {"content": "2026年5月的待支付订单数据暂时无法获取。",
+                "tool_calls": [], "usage": {"inputTokens": 20, "outputTokens": 8}}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "2026年5月有多少待支付订单？", "stream": False})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["error"] is None
+    assert "结论校验" not in data["content"]
+    verification = data["verification"]
+    assert verification["passed"] is True
+    assert verification["retried"] is False
+    assert calls["n"] == 2  # 首轮工具调用 + 终答，无修正回环
+
+
+def test_answer_verification_still_retries_when_tool_fails_and_date_hides_count(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """工具失败 + 终答编造 999 → 仍重试并警告；修正回环拿日期里的 5 冒充计数也无证据。"""
+    oid = modeled_ontology["id"]
+
+    from app.models.model_config import ModelConfig
+    db.add(ModelConfig(id=str(uuid.uuid4()), name="verify-date-count", provider="openai",
+                       config_type="llm", models=["verify-date-count-model"],
+                       created_by=admin_user.id))
+    db.commit()
+
+    calls = {"n": 0}
+
+    def fake_chat(call_kwargs, messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"content": None,
+                    "usage": {"inputTokens": 10, "outputTokens": 5},
+                    "tool_calls": [{"id": "tc1", "name": "search_objects",
+                                    "arguments": {"object_type": "NoSuchType"}}]}
+        if calls["n"] == 2:
+            # 工具已失败，终答仍编造数量（日期本身被屏蔽，999 无任何证据）
+            return {"content": "2026年5月待支付订单共 999 个。",
+                    "tool_calls": [], "usage": {"inputTokens": 20, "outputTokens": 8}}
+        assert tools == []
+        assert "999" in messages[-1]["content"] and "结论校验失败" in messages[-1]["content"]
+        # 修正回环偷换概念：拿日期标签里的 5 冒充计数，依旧没有工具证据
+        return {"content": "2026年5月待支付订单共 5 个。",
+                "tool_calls": [], "usage": {"inputTokens": 15, "outputTokens": 6}}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "2026年5月有多少待支付订单？", "stream": False})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["error"] is None
+    assert "999" not in data["content"]
+    assert "结论校验" in data["content"]
+    verification = data["verification"]
+    assert verification["passed"] is False
+    assert verification["unverified"] == [5]
+    assert verification["retried"] is True
+    assert calls["n"] == 3  # 首轮工具调用 + 终答 + 一次修正回环
+
+
 import pytest
 
 

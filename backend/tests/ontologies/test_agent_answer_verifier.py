@@ -1,4 +1,6 @@
 """确定性结论校验器（answer_verifier.py）的纯函数单元测试。"""
+from decimal import Decimal
+
 import pytest
 
 from app.ontologies.agent_runtime.answer_verifier import (
@@ -34,6 +36,39 @@ class TestNumberExtraction:
         steps = [_step({"value": "9007199254740993"})]
         assert verify_answer("总数 9007199254740992。", steps).passed is False
         assert verify_answer("总数 9007199254740993。", steps).passed is True
+
+
+class TestDateMasking:
+    def test_date_syntaxes_are_masked(self):
+        for date in ("2026年5月", "2026年5月1日", "2026-05", "2026-05-01",
+                     "2026/05/01", "5月", "5月份", "5月1日", "2026 年 5 月 1 日",
+                     "2026 / 05 / 01", "5 月"):
+            assert answer_numbers(f"{date}新增 3 条记录") == [3.0], date
+
+    def test_durations_and_counts_stay_verifiable(self):
+        assert answer_numbers("项目持续 5 个月") == [5.0]
+        assert answer_numbers("共5个里程碑") == [5.0]
+
+    def test_amount_with_dot_is_not_masked_as_date(self):
+        # "." 不是日期分隔符：金额不走日期屏蔽，抽取结果与历史行为一致
+        # （"2026" 头仍被年份豁免剥离，".5" 中的 5 照旧单独提取）。
+        assert answer_numbers("金额 2026.5万元，共 3 笔") == [5.0, 3.0]
+
+    def test_date_strings_in_results_do_not_leak_numbers(self):
+        assert result_number_universe([_step({"window": "2026-05"})]) == set()
+        assert result_number_universe([_step({"label": "5月1日"})]) == set()
+
+    def test_date_label_cannot_back_count_claim(self):
+        steps = [_step({"window": "2026年5月", "total": 1})]
+        result = verify_answer("2026年5月共 5 个。", steps)
+        assert result.passed is False
+        assert result.unverified == [Decimal("5")]
+
+    def test_failed_tool_with_date_restatement_only_passes(self):
+        steps = [{"tool": "search_objects", "result": {"error": "对象类型不存在"}}]
+        result = verify_answer("2026年5月的待支付订单数据暂时无法获取。", steps)
+        assert result.passed is True
+        assert result.unverified == []
 
 
 class TestNumberUniverse:

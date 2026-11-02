@@ -2,7 +2,7 @@
 受限工具集 (Bounded Toolkit) — agent 与本体交互的全部动词
 
 每个工具都以 AgentScope 为唯一世界观：越界引用 → ToolError（返回给 LLM 自我
-修正）。工具永远不接触数据集 / SQL / Neo4j —— 只读 fo_* 投影表与事实流，
+修正）。本地工具只读 fo_* 投影表与事实流，远程统计复用统一查询授权与执行链，
 "写"只能以 propose_action(dry_run) 的形式提出，真实执行在 router 层由用户
 确认后经 action_engine 完成（requires_approval 的动作仍会进 HITL 审批队列）。
 
@@ -267,7 +267,7 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "name": "aggregate_objects",
-        "description": "对某对象类型的实例做聚合统计：count/sum/avg/min/max，可按属性分组。回答'总共/平均/最多'类问题用这个，不要逐条列举。",
+        "description": "对某对象类型做聚合统计：count/sum/avg/min/max，可按属性分组。已发布的远程绑定对象自动通过统一查询在真实源上统计。日期范围用 gte 起始日期、lt 下一期起始日期；远程统计不支持 contains，请用明确等值或范围。回答'总共/平均/最多'类问题用这个，不要逐条列举。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -614,9 +614,12 @@ class ToolRunner:
 
     def __init__(self, db: Session, scope: AgentScope, *,
                  decision_context: Optional[dict] = None,
-                 world_model_context: Optional[dict] = None):
+                 world_model_context: Optional[dict] = None,
+                 user=None, query_session_id: str = ""):
         self.db = db
         self.scope = scope
+        self.user = user
+        self.query_session_id = query_session_id
         self.decision_context = decision_context or {}
         # 世界模型推演上下文：{"user": <User>} —— 菜单权限门控 + 调用记录审计人
         self.world_model_context = world_model_context or {}
@@ -1105,7 +1108,6 @@ class ToolRunner:
 
     def _tool_aggregate_objects(self, args: dict) -> dict:
         ot = self.scope.require_object_type(args.get("object_type", ""))
-        self._require_local_type(ot)
         metric = args.get("metric") or "count"
         if metric not in ("count", "sum", "avg", "min", "max"):
             raise ToolError(f"不支持的 metric: {metric}")
@@ -1120,6 +1122,28 @@ class ToolRunner:
             group_by = self.scope.resolve_visible_property(ot, group_by)
         filters = self._validated_filters(ot, args.get("filters"))
 
+        if self.scope.release is not None:
+            from app.ontologies.mappings.remote_binding import (
+                RemoteBindingError, get_remote_binding,
+            )
+            try:
+                remote = get_remote_binding(self.scope.release.snapshot, ot.id)
+            except RemoteBindingError as exc:
+                raise ToolError(f"{exc.code}: {exc.message}") from exc
+            if remote is not None:
+                from app.ontologies.agent_runtime.remote_aggregation import aggregate_remote
+                result = aggregate_remote(
+                    self.db, self.scope, self.user, self.query_session_id,
+                    ot, metric, metric_prop, group_by, filters,
+                )
+                groups = result.get("groups")
+                if groups and all(not isinstance(g["value"], str) for g in groups):
+                    chart = _build_aggregate_chart(
+                        ot.display_name, metric, metric_prop, group_by, groups)
+                    if chart:
+                        result.update(chart=chart, chartRendered=True)
+                return result
+        self._require_local_type(ot)
         if self.db.get_bind().dialect.name == "postgresql":
             return self._sql_aggregate_objects(ot, metric, metric_prop, group_by, filters)
 

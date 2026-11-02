@@ -1,10 +1,15 @@
 """D8 回归：远程绑定对象类型在本地工具面必须显式拒绝。
 
-旧 search/aggregate/traverse/graph/path/history/报告 fallback 对 remote 绑定
-类型一律报 remote_ontology_semantic_query_required，不得返回 0/空/exact
-complete 冒充完整；本地物化类型不受影响；混类型图谱诚实标注远程部分而非
-冒充全量。钉定 release 的视图只认发布快照；默认对话的工作区实时视图按
-当前 live 映射判定远程绑定（A14：否则 release-less 会话以 0 行冒充）。
+旧 search/traverse/graph/path/history/报告 fallback 对 remote 绑定类型一律报
+remote_ontology_semantic_query_required，不得返回 0/空/exact complete 冒充
+完整；本地物化类型不受影响；混类型图谱诚实标注远程部分而非冒充全量。
+钉定 release 的视图只认发布快照；默认对话的工作区实时视图按当前 live
+映射判定远程绑定（A14：否则 release-less 会话以 0 行冒充）。
+
+远程聚合是唯一例外（细化契约见 test_agent_remote_aggregation.py）：钉定
+release 的 aggregate_objects 对远程绑定类型自动转统一查询执行，无认证
+用户的 runner 报 remote_query_user_required；无 release 的会话没有发布
+绑定语义，聚合维持本文件的旧围栏。search/遍历/历史围栏不变。
 """
 import json
 
@@ -68,7 +73,7 @@ def _fo(ontology_id: str) -> str:
     return f"/api/v2/formal/ontologies/{ontology_id}"
 
 
-def test_search_and_aggregate_refuse_remote_type(
+def test_search_refuses_remote_type_and_pinned_aggregate_needs_user(
         modeled_ontology, db):
     oid = modeled_ontology["id"]
     release_id = _freeze_with_remote_supplier(db, oid)
@@ -76,7 +81,9 @@ def test_search_and_aggregate_refuse_remote_type(
 
     with pytest.raises(ToolError, match=_ERROR_CODE):
         runner.run("search_objects", {"object_type": "Supplier"})
-    with pytest.raises(ToolError, match=_ERROR_CODE):
+    # 钉定 release 的远程聚合自动转统一查询（不再走旧围栏转介）；
+    # 本地直连 runner 没有认证用户，必须显式报缺用户而不是统计 0。
+    with pytest.raises(ToolError, match="remote_query_user_required"):
         runner.run("aggregate_objects",
                    {"object_type": "Supplier", "metric": "count"})
 
@@ -235,6 +242,8 @@ def test_releaseless_chat_scope_still_refers_remote(modeled_ontology, db):
     runner = ToolRunner(db, scope)
     with pytest.raises(ToolError, match=_ERROR_CODE):
         runner.run("search_objects", {"object_type": "Supplier"})
+    # release-less 会话没有发布快照的远程绑定语义：聚合不自动转统一查询，
+    # 维持旧围栏（不得以本地 0 行冒充完整统计）。
     with pytest.raises(ToolError, match=_ERROR_CODE):
         runner.run("aggregate_objects",
                    {"object_type": "Supplier", "metric": "count"})
