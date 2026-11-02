@@ -85,9 +85,21 @@ describe('closeTab', () => {
       { key: 'agent', lastUsedAt: 1000 },
       { key: 'ontologies', lastUsedAt: 2000 },
     ], 'ontologies')
-    const result = closeTab(state, 'agent')
+    const result = closeTab(state, 'agent', 'ontologies')
     assert.equal(result.closedActive, false)
     assert.equal(result.nextPath, null)
+    assert.deepEqual(result.state.tabs.map(t => t.key), ['ontologies'])
+    assert.equal(result.state.activeKey, 'ontologies')
+  })
+
+  it('treats the actual current route as active when activeKey is stale', () => {
+    const state = stateWith([
+      { key: 'agent', path: '/agent?ontology_id=1', lastUsedAt: 3000 },
+      { key: 'ontologies', lastUsedAt: 2000 },
+    ], 'ontologies')
+    const result = closeTab(state, 'agent', 'agent')
+    assert.equal(result.closedActive, true)
+    assert.equal(result.nextPath, '/ontologies')
     assert.deepEqual(result.state.tabs.map(t => t.key), ['ontologies'])
     assert.equal(result.state.activeKey, 'ontologies')
   })
@@ -98,7 +110,7 @@ describe('closeTab', () => {
       { key: 'ontologies', lastUsedAt: 2000 },
       { key: 'models', lastUsedAt: 1000 },
     ], 'ontologies')
-    const result = closeTab(state, 'ontologies')
+    const result = closeTab(state, 'ontologies', 'ontologies')
     assert.equal(result.closedActive, true)
     assert.equal(result.state.activeKey, 'agent')
     assert.equal(result.nextPath, '/agent')
@@ -107,7 +119,7 @@ describe('closeTab', () => {
 
   it('returns null nextPath when the last tab is closed', () => {
     const state = stateWith([{ key: 'agent', lastUsedAt: 1000 }], 'agent')
-    const result = closeTab(state, 'agent')
+    const result = closeTab(state, 'agent', 'agent')
     assert.equal(result.closedActive, true)
     assert.equal(result.nextPath, null)
     assert.equal(result.state.activeKey, null)
@@ -116,7 +128,7 @@ describe('closeTab', () => {
 
   it('is a no-op for an unknown key', () => {
     const state = stateWith([{ key: 'agent', lastUsedAt: 1000 }], 'agent')
-    const result = closeTab(state, 'missing')
+    const result = closeTab(state, 'missing', 'agent')
     assert.equal(result.closedActive, false)
     assert.equal(result.state, state)
   })

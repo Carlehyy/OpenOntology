@@ -14,7 +14,7 @@ export const NAV_TABS_STORAGE_KEY = 'nav-tabs'
 
 interface NavTabStore extends NavTabListState {
   recordVisit: (username: string, tab: { key: string; title: string; path: string }) => void
-  close: (key: string) => CloseTabResult
+  close: (key: string, currentKey: string | null) => CloseTabResult
   /** 当前页面无标签可记录（无菜单映射/越权页）时清除激活态，避免旧标签残留高亮。 */
   clearActiveKey: () => void
 }
@@ -30,8 +30,8 @@ export const useTabStore = create<NavTabStore>()(
       recordVisit: (username, tab) => {
         set(state => recordVisitLogic(state, username, tab, Date.now()))
       },
-      close: (key) => {
-        const result = closeTabLogic(get(), key)
+      close: (key, currentKey) => {
+        const result = closeTabLogic(get(), key, currentKey)
         set(result.state)
         return result
       },

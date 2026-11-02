@@ -1,10 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { parsePath, useLocation, useNavigate } from 'react-router-dom'
 import { MoreHorizontal, X } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import { useTabStore } from '@/stores/tabStore'
 import { canAccessPath, defaultLandingPath, navTabForPath } from '@/config/navigation'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+
+/**
+ * 地址栏 hash 是当前路由的即时事实；React location 可能仍在并发 transition 中。
+ * 用 react-router 的 parsePath 解析，忽略内层 fragment，并按 HashRouter 的规则
+ * 补全缺省 leading slash；标签 path 仍沿用 pathname + search 契约。
+ */
+function currentHashLocation(): { pathname: string; search: string } {
+  const hash = window.location.hash
+  const parsed = parsePath(hash.startsWith('#') ? hash.slice(1) : hash)
+  const pathname = parsed.pathname || '/'
+  return {
+    pathname: pathname.startsWith('/') || pathname.startsWith('.') ? pathname : `/${pathname}`,
+    search: parsed.search || '',
+  }
+}
 
 /**
  * 顶栏多标签页（tags-view）：按叶子菜单项粒度记录访问过的页面，
@@ -30,9 +45,14 @@ export default function NavTabs() {
 
   // 把当前授权页面记录为标签；越权页（AccessDenied）与无菜单映射页不产生标签。
   // 依赖整个 location：同路径再次导航（如关闭最后一个标签后跳回落地页）也会重记。
+  // 仅当地址栏 hash 与 React location 一致时记录：HashRouter 的 location 提交是
+  // transition，旧的 pending effect 不得在关闭/离开后复活已经关闭的当前路由标签。
   // 当前页面无标签可记录时清除激活态，避免上一个标签残留高亮（误导当前所在位置）。
   useEffect(() => {
     if (!user) return
+    const hashLocation = currentHashLocation()
+    const path = `${location.pathname}${location.search}`
+    if (`${hashLocation.pathname}${hashLocation.search}` !== path) return
     if (!canAccessPath(user, location.pathname)) {
       clearActiveKey()
       return
@@ -45,7 +65,7 @@ export default function NavTabs() {
     recordVisit(user.username, {
       key: info.key,
       title: info.title,
-      path: `${location.pathname}${location.search}`,
+      path,
     })
   }, [user, location, recordVisit, clearActiveKey])
 
@@ -75,7 +95,10 @@ export default function NavTabs() {
   }, [activeKey, tabs.length])
 
   const handleClose = (key: string) => {
-    const result = close(key)
+    // 地址栏已指向该标签时，即使 store.activeKey 尚未追平，也必须按当前标签
+    // 关闭并离开；否则 pending location effect 会把标签重新记录回来。
+    const currentKey = navTabForPath(currentHashLocation().pathname)?.key ?? null
+    const result = close(key, currentKey)
     if (result.closedActive) {
       navigate(result.nextPath ?? defaultLandingPath(user))
     }

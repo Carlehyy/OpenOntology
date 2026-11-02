@@ -160,6 +160,50 @@ test('顶栏多标签页：打开、切换、域内路径恢复、关闭与刷�
   await expect(tabList.getByRole('tab', { name: '本体模型 · 本体助手' })).toHaveAttribute('aria-selected', 'true')
 })
 
+test('顶栏多标签页：关闭实际当前路由标签优先于滞后的 activeKey，且不被 pending effect 复活', async ({ page }) => {
+  await mockNavTabs(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+
+  const tabList = page.getByRole('tablist', { name: '页面标签' })
+  const agentTab = tabList.getByRole('tab', { name: '本体模型 · 本体助手' })
+  const ontologiesTab = tabList.getByRole('tab', { name: '本体模型 · 本体管理' })
+
+  await expect(agentTab).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('navigation').getByRole('link', { name: '本体管理' }).click()
+  await expect(ontologiesTab).toHaveAttribute('aria-selected', 'true')
+  await expect(agentTab).toHaveAttribute('aria-selected', 'false')
+
+  // 同一 JS task 内先改真实 hash 再点关闭：React location/activeKey 仍可能是
+  // ontologies，复现关闭“实际当前路由标签”的时序窗口。
+  await page.evaluate(() => {
+    window.location.hash = '#/agent'
+    const activeTab = document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]')
+    if (activeTab?.getAttribute('title') !== '本体模型 · 本体管理') {
+      throw new Error(`expected stale ontologies active tab, got ${activeTab?.getAttribute('title')}`)
+    }
+    const closeButton = document.querySelector<HTMLButtonElement>(
+      '[role="tablist"] [role="tab"] button[aria-label="关闭 本体模型 · 本体助手"]',
+    )
+    if (!closeButton) throw new Error('agent close button not found')
+    closeButton.click()
+  })
+
+  await expect(page).toHaveURL(/\/#\/ontologies$/)
+  await expect(tabList.getByRole('tab', { name: '本体模型 · 本体助手' })).toHaveCount(0)
+  await expect(ontologiesTab).toHaveAttribute('aria-selected', 'true')
+})
+
+test('顶栏多标签页：内层 fragment 不阻断当前标签记录', async ({ page }) => {
+  await mockNavTabs(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent#section')
+
+  const tabList = page.getByRole('tablist', { name: '页面标签' })
+  await expect(tabList.getByRole('tab', { name: '本体模型 · 本体助手' })).toHaveAttribute('aria-selected', 'true')
+  await expect(page).toHaveURL(/\/#\/agent#section$/)
+})
+
 test('顶栏多标签页：按最近访问从左往右排序，最多保留 10 个', async ({ page }) => {
   await mockNavTabs(page)
   await page.setViewportSize({ width: 1440, height: 900 })

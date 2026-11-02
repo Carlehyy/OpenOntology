@@ -57,12 +57,20 @@ export interface CloseTabResult {
 /**
  * 关闭标签：关闭非激活标签只移除；关闭激活标签回退到剩余标签中最近使用的
  * 一个；没有剩余标签时 activeKey 置空、nextPath 为 null（调用方跳默认落地页）。
+ *
+ * currentKey 由调用方从真实浏览器路由解析：React location/activeKey 可能因
+ * 并发更新暂时落后于地址栏，此时当前路由标签仍必须按激活标签关闭。传入
+ * null 表示当前路由没有对应标签。
  */
-export function closeTab(state: NavTabListState, key: string): CloseTabResult {
+export function closeTab(
+  state: NavTabListState,
+  key: string,
+  currentKey: string | null,
+): CloseTabResult {
   const index = state.tabs.findIndex(t => t.key === key)
   if (index === -1) return { state, closedActive: false, nextPath: null }
   const tabs = state.tabs.filter(t => t.key !== key)
-  const closedActive = state.activeKey === key
+  const closedActive = currentKey === key
   if (!closedActive) {
     return { state: { ...state, tabs }, closedActive, nextPath: null }
   }
