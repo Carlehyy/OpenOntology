@@ -20,7 +20,7 @@ from app.settings.object_storage.service import execute_minio_tool
 from app.shared.config import settings
 from app.shared.database import SessionLocal
 from app.shared.query_control import QueryControl, query_control_scope
-from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, persistence, provider, reflection_service, web_tools
+from app.super_assistant import browser_tools, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, persistence, provider, reflection_service, result_guard, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -1016,11 +1016,15 @@ def _chat_round(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     should_cancel,
+    *,
+    stream_text: bool = True,
 ) -> Iterator[Any]:
     """执行一轮真流式 LLM 调用，文本增量经 text_delta 实时产出。
 
     返回 (result, streamed_text, cancelled)。LLM 调用跑在守护线程里，本生成器
     轮询队列：取消时停止产出并返回（线程随 provider 超时自然结束，结果丢弃）。
+    ``stream_text=False`` 仅供有本体动作上下文的最终合成使用：调用方先让
+    权威结果守卫检查，再决定发布内容，避免假成功先经 text_delta 泄露。
     """
     deltas: queue.Queue[tuple[str, Any]] = queue.Queue()
 
@@ -1049,7 +1053,8 @@ def _chat_round(
             continue
         if kind == "delta":
             text_parts.append(payload)
-            yield sse("text_delta", {"delta": payload})
+            if stream_text:
+                yield sse("text_delta", {"delta": payload})
         elif kind == "result":
             return payload, "".join(text_parts), False
         else:
@@ -1267,6 +1272,14 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             SuperAssistantMessage.status == "complete",
         ).order_by(SuperAssistantMessage.created_at.desc()).first()
         user_query = latest_user.content if latest_user else ""
+        # 明确的本轮动作作用域才整轮缓冲：动作/审批意图，或短确认 + 存在
+        # 待执行确认；本轮出现 prepare/execute ToolRun 后追加缓冲。普通
+        # 查询即使会话里有旧 pending 也保持原有流式契约。
+        pending_action = result_guard.conversation_has_pending_action(
+            db, owner_id=owner_id, conversation_id=conversation_id)
+        action_turn = result_guard.user_requests_action(user_query) or (
+            pending_action and result_guard.is_action_affirmation(user_query))
+        buffer_action_text = action_turn
         multica_slash = multica_service.parse_slash_command(
             user_query, configured=multica_config is not None,
         )
@@ -1349,7 +1362,10 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         item["content"] = f"{item.get('content') or ''}{directive}"
                         break
         if direct_reply is not None:
-            yield sse("text_delta", {"delta": direct_reply})
+            # 确定性直答也必须尊重动作作用域：动作/待确认轮不先发 delta，
+            # 由最终守卫与 message_end 统一发布。
+            if not buffer_action_text:
+                yield sse("text_delta", {"delta": direct_reply})
             all_text.append(direct_reply)
 
         preamble_nudges = 0
@@ -1372,6 +1388,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             result, round_text, cancelled = yield from _chat_round(
                 call_kwargs, messages, round_tools,
                 lambda: _run_cancelled(db, assistant_message),
+                stream_text=not buffer_action_text,
             )
             if cancelled:
                 yield sse("cancelled", {"message": "已停止生成"})
@@ -1406,6 +1423,17 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                 break
 
             messages.append({"role": "assistant", "content": round_text or None, "tool_calls": calls})
+            if any(
+                str(call.get("name") or "") in (
+                    ontology_tools.ONTOLOGY_PREPARE_TOOL,
+                    ontology_tools.ONTOLOGY_EXECUTE_TOOL,
+                )
+                for call in calls
+            ):
+                # 本轮才出现的本体动作上下文：从下一轮（尤其最终合成）
+                # 起整轮缓冲，等权威结果守卫裁决后再发布。
+                action_turn = True
+                buffer_action_text = True
 
             # 1) 按原始顺序建 ToolRun 行并发出 tool_start
             order: list[dict[str, Any]] = []
@@ -1793,6 +1821,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             result, round_text, cancelled = yield from _chat_round(
                 call_kwargs, messages, [],
                 lambda: _run_cancelled(db, assistant_message),
+                stream_text=not buffer_action_text,
             )
             if cancelled:
                 yield sse("cancelled", {"message": "已停止生成"})
@@ -1822,12 +1851,33 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             )
         if agent_mode:
             final_content = _strip_goal_markers(final_content) or "模型没有返回可显示的内容。"
+        # 模型可写出完整“成功/回执”而不调用 execute；此处只以持久确认与
+        # 真实 ToolRun 为权威，被否定时整段替换为如实状态，且持久化与最终
+        # SSE 使用同一份内容。
+        guard_result = result_guard.guard_ontology_action_result(
+            db,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            assistant_message_id=assistant_message.id,
+            content=final_content,
+            action_turn=action_turn,
+        )
+        if guard_result.blocked:
+            logger.warning(
+                "本体动作答复经权威结果守卫改写 conversation=%s message=%s "
+                "reason=%s authority_state=%s",
+                conversation_id, assistant_message.id, guard_result.reason,
+                (guard_result.authority or {}).get("state"),
+            )
+            final_content = guard_result.content
         # 本轮出现过未落库的远程联邦明细：assistant 复述的明细同样会随
         # 消息落库，不能只靠 prompt 约束——落库内容替换为元信息/受控引用
         # 壳（含服务端聚合元数据）；SSE 实时流仍给全文（临时可见）。
+        # 守卫拦截的假成功是例外：corrected 内容同时作为落库与最终 SSE，
+        # 不能被 ephemeral 壳覆盖。
         persisted_content = (
             persistence.assistant_answer_shell(ephemeral_state)
-            if ephemeral_state.detail_seen
+            if ephemeral_state.detail_seen and not guard_result.blocked
             else final_content
         )
         assistant_message.content = persisted_content
