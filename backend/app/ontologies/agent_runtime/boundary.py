@@ -70,14 +70,15 @@ def remote_object_type_ids(scope: AgentScope) -> set[str]:
 def require_materialized_object_type(scope: AgentScope, object_type) -> None:
     if object_type.id in remote_object_type_ids(scope):
         guidance = ("统计与名称/取值存在性校验可用 aggregate_objects（远程绑定自动转"
-                    "统一查询：group_by 可枚举取值，0 结果会附 dataCoverage 原因）；"
+                    "统一查询：group_by 支持日/周/月/季/年时间分桶与多维分组，"
+                    "0 结果会附 dataCoverage 原因）；数据时间范围用 get_data_time_range；"
                     if scope.release is not None else
                     "当前会话未固定发布版本，请从已发布本体重新进入助手后统计；")
         raise ToolError(
             "remote_ontology_semantic_query_required: "
             f"对象类型「{object_type.display_name}」为远程绑定，本地无物化事实，"
             "不返回空结果或 0 统计冒充完整；" + guidance
-            + "明细等查询请经超级助手 ontology_query 或统一查询 API")
+            + "明细/按 ID/排序/分页/关联统计请用 query_objects")
 
 
 def get_or_create_profile(db: Session, ontology_id: str) -> AgentProfile:
@@ -284,9 +285,10 @@ class AgentScope:
                     f"### {t.display_name} (name={t.name}, 远程绑定·本地无物化事实)"
                     f"{desc}")
                 lines.append(
-                    "- 数据在联邦远程源：当前发布版本的统计使用 aggregate_objects 自动转统一查询；"
-                    "明细等查询经超级助手 ontology_query / 统一查询 API 取数；"
-                    "不得凭本地 0 或结构样例推断")
+                    "- 数据在联邦远程源：统计用 aggregate_objects（group_by 支持 "
+                    "day/week/month/quarter/year 时间分桶与多维分组，趋势一次取全期间）；"
+                    "数据时间范围用 get_data_time_range；明细/按 ID/排序/分页/关联统计"
+                    "用 query_objects；不得凭本地 0 或结构样例推断")
             else:
                 n = counts.get(t.id, 0)
                 lines.append(f"### {t.display_name} (name={t.name}, 实例数={n}){desc}")

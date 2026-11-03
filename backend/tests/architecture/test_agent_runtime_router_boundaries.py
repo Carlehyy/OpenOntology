@@ -29,7 +29,8 @@ AGENT_DIR = Path(agent_router.__file__).resolve().parent
 
 ROUTE_PARAMETERS = {
     "get_profile": ("ontology_id", "db", "_"),
-    "update_profile": ("ontology_id", "body", "db", "_"),
+    # ⑨ 配置变更审计：admin 依赖命名参数以传入 actor（HTTP 契约不变）
+    "update_profile": ("ontology_id", "body", "db", "user"),
     "get_capabilities": ("ontology_id", "release_id", "db", "_"),
     "list_dynamic_sentinels": (
         "ontology_id", "release_id", "db", "current_user",
@@ -132,7 +133,7 @@ def test_agent_runtime_route_signatures_remain_stable():
             getattr(agent_router, name), eval_str=True
         ).parameters
         assert tuple(parameters) == expected
-        for dependency_name in ("db", "current_user", "_"):
+        for dependency_name in ("db", "current_user", "_", "user"):
             if dependency_name in parameters:
                 assert isinstance(parameters[dependency_name].default, Depends)
         if name in BODY_TYPES:
@@ -200,7 +201,8 @@ def test_router_patch_seams_are_resolved_at_request_time(monkeypatch):
     monkeypatch.setattr(agent_router, "_profile_out", lambda row: row)
 
     def update(db, ontology_id, body, *, get_profile_fn,
-               profile_fields, resettable_fields):
+               profile_fields, resettable_fields, actor=None,
+               source="admin_api"):
         seen["profile"] = (
             db, ontology_id, body, get_profile_fn,
             profile_fields, resettable_fields,
@@ -444,8 +446,9 @@ def test_agent_runtime_modules_stay_bounded():
     maximum_lines = {
         "router.py": 620,
         "limits.py": 160,
-        # 175: 引用编号/UUID/时间戳屏蔽 + 标识符键排除（答案校验误报修复）
-        "answer_verifier.py": 185,
+        # 217: 引用/UUID/时间戳屏蔽 + 标识符键排除 + 答案侧排版屏蔽
+        # （序号/时钟/编号/区间——答案校验列表序号误报修复）
+        "answer_verifier.py": 230,
         "chat_cancel.py": 80,
         "application_errors.py": 60,
         "profile_service.py": 100,

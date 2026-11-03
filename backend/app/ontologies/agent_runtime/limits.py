@@ -77,6 +77,14 @@ _LIMITS: tuple[AgentRuntimeLimit, ...] = (
         "AGENT_CHART_POINT_CAP",
         "聚合图表最多展示的数据点（按值降序取前 N）"),
     AgentRuntimeLimit(
+        "max_group_page", 200, 10, 200,
+        "AGENT_MAX_GROUP_PAGE",
+        "分组/取值枚举单页上限（聚合摘要行；≤ 引擎统一查询页上限 200）"),
+    AgentRuntimeLimit(
+        "parallel_tool_workers", 3, 1, 8,
+        "AGENT_PARALLEL_TOOL_WORKERS",
+        "同一回合多个只读工具调用的并行执行线程数（1=串行）"),
+    AgentRuntimeLimit(
         "max_hops", 5, 1, 20,
         "AGENT_MAX_HOPS",
         "单次多跳遍历最多跳数"),

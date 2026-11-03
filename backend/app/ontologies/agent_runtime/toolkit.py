@@ -12,7 +12,9 @@
   traverse_links     沿链接类型遍历邻居
   find_paths         两个具体实例之间的最短关系路径
   analyze_change_impact 字段拟议变更的关系可达范围（只读预演）
-  aggregate_objects  分组计数 / 求和 / 均值 / 最值
+  aggregate_objects  分组计数 / 求和 / 均值 / 最值（支持日/周/月/季/年时间分桶与多维分组）
+  query_objects      统一查询：明细/按 ID/排序/分页/多维分组/多指标/关联统计（本地+远程）
+  get_data_time_range 远程绑定对象的数据时间范围（源端 min/max 一次聚合）
   get_object_history 实例的事实流（谁、何时、为何改的 — 溯源问答）
   trace_causal_chain 跨对象因果链追溯（决策 → 动作 → 事实 → 后续覆盖）
   explain_sentinel_firing 哨兵触发解释（条件求值 + 命中证据 + 状态语义）
@@ -267,14 +269,37 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "name": "aggregate_objects",
-        "description": "对某对象类型做聚合统计：count/sum/avg/min/max，可按属性分组。已发布的远程绑定对象自动通过统一查询在真实源上统计。日期范围用 gte 起始日期、lt 下一期起始日期；contains 会先在源端枚举取值做不区分大小写匹配（取值过多无法解析时会提示改用 in/eq）。远程结果为 0 时附 dataCoverage 说明原因（范围内无数据/取值无匹配/源无数据），回答时须如实转述，不得说成整期已完整统计。回答'总共/平均/最多'类问题用这个，不要逐条列举。",
+        "description": "对某对象类型做聚合统计：count/sum/avg/min/max，可按属性分组（支持多维）。已发布的远程绑定对象自动通过统一查询在真实源上统计。趋势/按日周月季年统计：group_by 用 {\"property\": 时间属性, \"bucket\": \"day|week|month|quarter|year\"}，一次取全期间，禁止逐月逐日多次查询；月度趋势等按时间排序用 order_by={\"output\":\"group\",\"direction\":\"asc\"}。日期范围过滤用 gte 起始日期、lt 下一期起始日期。contains 会先在源端模糊枚举取值解析为 in（取值过多无法解析时会提示改用 in/eq）。远程结果为 0 时附 dataCoverage 说明原因，回答时须如实转述。回答统计结论时须注明数据时间范围与截止日期（用 get_data_time_range 获取）。明细列表、按 ID 查单条、排序分页请用 query_objects。completeness 只代表查询执行完成，不代表数据时间覆盖完整。",
         "parameters": {
             "type": "object",
             "properties": {
                 "object_type": {"type": "string"},
                 "metric": {"type": "string", "enum": ["count", "sum", "avg", "min", "max"]},
-                "metric_property": {"type": "string", "description": "metric 非 count 时必填：参与计算的数值属性 name"},
-                "group_by": {"type": "string", "description": "可选：按此属性分组"},
+                "metric_property": {"type": "string", "description": "metric 非 count 时必填：参与计算的属性 name（min/max 也可用 date/datetime 属性）"},
+                "group_by": {
+                    "description": "可选：分组维度。字符串=按属性分组；数组=多维分组，每项为属性名或 {property, bucket}（bucket: day/week/month/quarter/year 时间分桶，仅远程绑定对象支持）",
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "object", "properties": {
+                                    "property": {"type": "string"},
+                                    "bucket": {"type": "string", "enum": ["day", "week", "month", "quarter", "year"]}},
+                                    "required": ["property"]},
+                            ],
+                        }},
+                    ],
+                },
+                "order_by": {
+                    "type": "object",
+                    "description": "可选：分组结果排序，默认按值降序（TopN）；趋势类建议 {\"output\": \"group\", \"direction\": \"asc\"} 按时间升序",
+                    "properties": {
+                        "output": {"type": "string", "enum": ["value", "group"]},
+                        "direction": {"type": "string", "enum": ["asc", "desc"]},
+                    },
+                    "required": ["output"],
+                },
                 "filters": {
                     "type": "array",
                     "items": {
@@ -289,6 +314,115 @@ TOOL_DEFS: list[dict] = [
                 },
             },
             "required": ["object_type", "metric"],
+        },
+    },
+    {
+        "name": "query_objects",
+        "description": "统一查询工具：明细列表、按 ID 查单条、排序、分页、多维分组、多指标与沿已发布关系的关联统计。远程绑定对象直接在真实源执行（支持 group_by 时间分桶 bucket=day/week/month/quarter/year），本地物化对象走本地快照。按 ID 查单条：filters 用主键属性 eq（对象类型的主键在技能卡中标注 [主键]）。关联统计：joins 给出沿关系链的对象类型与链接类型序列（如 事件→模块→产品族），服务端解析为已发布关系 join。分页：返回 hasNext/cursor 时用 cursor 续页。回答统计结论时须注明数据时间范围与截止日期（用 get_data_time_range 获取）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "object_type": {"type": "string", "description": "主对象类型 name 或显示名"},
+                "joins": {
+                    "type": "array",
+                    "description": "可选：沿关系链依次引入的关联对象",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "object_type": {"type": "string", "description": "关联对象类型"},
+                            "link_type": {"type": "string", "description": "连接上一对象的链接类型 name 或显示名"},
+                            "type": {"type": "string", "enum": ["inner", "left"], "description": "默认 inner"},
+                        },
+                        "required": ["object_type", "link_type"],
+                    },
+                },
+                "filters": {
+                    "type": "array",
+                    "description": "可选：过滤条件（AND）；object_type 缺省为主对象",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "object_type": {"type": "string"},
+                            "property": {"type": "string"},
+                            "op": {"type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "contains", "in", "is_null", "is_not_null"]},
+                            "value": {"description": "op=in 时为数组；is_null/is_not_null 时省略"},
+                        },
+                        "required": ["property", "op"],
+                    },
+                },
+                "select": {
+                    "type": "array",
+                    "description": "可选：输出属性（property 或 {object_type, property}）；缺省为主对象全部授权属性",
+                    "items": {},
+                },
+                "group_by": {
+                    "type": "array",
+                    "description": "可选：分组维度（多维），每项为 {object_type?, property, bucket?}",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "object_type": {"type": "string"},
+                            "property": {"type": "string"},
+                            "bucket": {"type": "string", "enum": ["day", "week", "month", "quarter", "year"]},
+                        },
+                        "required": ["property"],
+                    },
+                },
+                "aggregates": {
+                    "type": "array",
+                    "description": "可选：聚合指标（可多个），每项 {fn, object_type?, property?, as?}",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "fn": {"type": "string", "enum": ["count", "count_distinct", "sum", "avg", "min", "max"]},
+                            "object_type": {"type": "string"},
+                            "property": {"type": "string"},
+                            "as": {"type": "string", "description": "输出名，缺省为 fn 或 fn_property"},
+                        },
+                        "required": ["fn"],
+                    },
+                },
+                "order_by": {
+                    "type": "array",
+                    "description": "可选：排序（输出属性名或聚合 as 名），如 [{output: \"created_at\", direction: \"desc\"}]",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "output": {"type": "string"},
+                            "direction": {"type": "string", "enum": ["asc", "desc"]},
+                        },
+                        "required": ["output"],
+                    },
+                },
+                "page_size": {"type": "integer", "description": "单页行数（受授权配额约束，≤200）"},
+                "cursor": {"type": "string", "description": "续页游标（上次返回的 cursor）"},
+            },
+            "required": ["object_type"],
+        },
+    },
+    {
+        "name": "get_data_time_range",
+        "description": "查询远程绑定对象的数据时间范围（源端一次 min/max 聚合）：返回数据实际覆盖的起止日期。回答趋势/统计结论前先调用本工具，并在回答中注明数据时间范围与截止日期（例如「数据截至 10 月 4 日」），避免把同步截止误当成真实下降。time_property 缺省取第一个时间类型属性；filters 可选（不支持 contains）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "object_type": {"type": "string"},
+                "time_property": {"type": "string", "description": "可选：时间属性 name；缺省自动选择第一个 date/datetime 属性"},
+                "filters": {
+                    "type": "array",
+                    "description": "可选：先过滤再取范围（AND）",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "property": {"type": "string"},
+                            "op": {"type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "in"]},
+                            "value": {},
+                        },
+                        "required": ["property", "op", "value"],
+                    },
+                },
+            },
+            "required": ["object_type"],
         },
     },
     {
@@ -1117,10 +1251,12 @@ class ToolRunner:
         # 属性护栏（越界硬失败）：拼错/臆造的属性名当场报错并给可用清单，不静默算错
         if metric_prop:
             metric_prop = self.scope.resolve_visible_property(ot, metric_prop)
-        group_by = args.get("group_by")
-        if group_by:
-            group_by = self.scope.resolve_visible_property(ot, group_by)
+        from app.ontologies.agent_runtime.remote_aggregation import normalize_group_by
+        group_items = normalize_group_by(args.get("group_by"))
+        group_items = [(self.scope.resolve_visible_property(ot, prop), bucket)
+                       for prop, bucket in group_items]
         filters = self._validated_filters(ot, args.get("filters"))
+        order_by = args.get("order_by") if isinstance(args.get("order_by"), dict) else None
 
         if self.scope.release is not None:
             from app.ontologies.mappings.remote_binding import (
@@ -1134,16 +1270,23 @@ class ToolRunner:
                 from app.ontologies.agent_runtime.remote_aggregation import aggregate_remote
                 result = aggregate_remote(
                     self.db, self.scope, self.user, self.query_session_id,
-                    ot, metric, metric_prop, group_by, filters,
+                    ot, metric, metric_prop, group_items, filters,
+                    order_by=order_by,
                 )
                 groups = result.get("groups")
                 if groups and all(not isinstance(g["value"], str) for g in groups):
                     chart = _build_aggregate_chart(
-                        ot.display_name, metric, metric_prop, group_by, groups)
+                        ot.display_name, metric, metric_prop,
+                        result.get("groupBy") or "", groups)
                     if chart:
                         result.update(chart=chart, chartRendered=True)
                 return result
         self._require_local_type(ot)
+        if len(group_items) > 1 or any(bucket for _prop, bucket in group_items):
+            raise ToolError("local_aggregate_group_unsupported: 本地物化对象当前只支持"
+                            "单维原始字段分组；时间分桶与多维分组请对远程绑定对象使用，"
+                            "或用多个查询分别统计")
+        group_by = group_items[0][0] if group_items else None
         if self.db.get_bind().dialect.name == "postgresql":
             return self._sql_aggregate_objects(ot, metric, metric_prop, group_by, filters)
 
@@ -1208,6 +1351,21 @@ class ToolRunner:
                 out["chart"] = chart
                 out["chartRendered"] = True
         return out
+
+    def _tool_query_objects(self, args: dict) -> dict:
+        from app.ontologies.agent_runtime.unified_query_tools import query_objects
+        return query_objects(self.db, self.scope, self.user,
+                             self.query_session_id, args or {})
+
+    def _tool_get_data_time_range(self, args: dict) -> dict:
+        from app.ontologies.agent_runtime.unified_query_tools import (
+            get_data_time_range,
+        )
+        ot = self.scope.require_object_type(args.get("object_type", ""))
+        filters = self._validated_filters(ot, args.get("filters"))
+        return get_data_time_range(
+            self.db, self.scope, self.user, self.query_session_id, ot,
+            time_property=args.get("time_property"), filters=filters)
 
     def _tool_get_object_history(self, args: dict) -> dict:
         inst = self.scope.visible_instance(

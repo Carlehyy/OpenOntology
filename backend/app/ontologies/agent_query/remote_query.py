@@ -110,7 +110,9 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
     flat_sources = [source.model_copy(update={"alias": f"leaf_{index}"})
                     for index, source in enumerate(leaves)]
     metadata_request = QS.QueryRequest(
-        sources=flat_sources[:4],
+        # 全部叶子（含派生源嵌套叶子）都在同一元数据事务里锁定；上限与
+        # QueryRequest.sources 的 8 源契约一致。
+        sources=flat_sources[:8],
         select=[QS.SelectItem(source=flat_sources[0].alias,
                               property="_metadata", as_="_metadata")])
     resolver = UnifiedQueryService(db, user, metadata_request,
@@ -287,8 +289,17 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
             select.append({"source": item.source, "property": prop, "as": item.as_})
             if prop in sources[item.source].lineage:
                 lineage[item.as_] = sources[item.source].lineage[prop]
-        groups = [{"source": item.source, "property": field(item.source, item.property)}
-                  for item in query.group_by]
+        _TEMPORAL_DECLARED = {"date", "datetime", "timestamp"}
+        groups = []
+        for item in query.group_by:
+            prop = field(item.source, item.property)
+            if item.bucket is not None:
+                declared = sources[item.source].descriptor.get("declaredTypes", {})
+                if prop in declared and declared[prop] not in _TEMPORAL_DECLARED:
+                    raise _error(422, "invalid_parameter",
+                                 f"时间分桶属性「{item.property}」必须是 date/datetime/timestamp 类型")
+            groups.append({"source": item.source, "property": prop,
+                           **({"bucket": item.bucket} if item.bucket else {})})
         aggregates = []
         for item in query.aggregates:
             if item.fn == "count":
@@ -326,15 +337,30 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
     default_page_size = min(50, cap)
     page_size = (request.page_size if request.page_size is not None
                  else default_page_size)
-    if page_size > cap:
+    # 有界分组统计的分组摘要行按注册表上限放开（明细行仍受 profile 帽约束）。
+    stats_cap = cap
+    if request.bounded_stats:
+        from app.ontologies.agent_runtime.limits import limit as runtime_limit
+        stats_cap = min(200, max(cap, runtime_limit("max_group_page")))
+    effective_cap = stats_cap if request.bounded_stats else cap
+    if page_size > effective_cap:
         # 有效 cap = min(全部叶子 source profile, 200)；受控字段只供助手
         # 恢复链路使用（直查 HTTP detail 不含），不把请求原值写进 message。
-        raise _error(422, "invalid_parameter", f"pageSize 超出授权上限 {cap}",
+        raise _error(422, "invalid_parameter", f"pageSize 超出授权上限 {effective_cap}",
                      assistant_private_keys=(
                          "field", "requestedPageSize", "maxPageSize",
                          "defaultPageSize"),
                      field="pageSize", requestedPageSize=page_size,
-                     maxPageSize=cap, defaultPageSize=default_page_size)
+                     maxPageSize=effective_cap, defaultPageSize=default_page_size)
+    if request.bounded_stats:
+        if not plan["groupBy"] or not plan["aggregates"]:
+            raise _error(422, "invalid_parameter",
+                         "boundedStats 仅支持分组聚合（groupBy + aggregates）")
+        if not plan["orderBy"]:
+            raise _error(422, "invalid_parameter",
+                         "boundedStats 需要显式 orderBy 保证 top-N 截断的确定性")
+        # 源端按页长截断分组结果：分组值与总组数精确，超截断分组不可翻页。
+        plan["statsLimit"] = page_size
     plan.update(pageSize=page_size, releases=releases, citations=citations)
     return plan
 
@@ -715,6 +741,31 @@ def _port_error(exc):
     raise exc
 
 
+def _plan_drift_scopes(old: dict, new: dict) -> list[str]:
+    """两次 plan 的差异范围（不含敏感值），用于 409 日志与错误附注。"""
+    scopes: set[str] = set()
+    if old.get("pageSize") != new.get("pageSize"):
+        scopes.add("profile.maxRows")
+    if old.get("releases") != new.get("releases"):
+        scopes.add("release.scope")
+    if old.get("citations") != new.get("citations"):
+        scopes.add("release.citations")
+    old_sources = {item.get("alias"): item for item in old.get("sources", [])}
+    new_sources = {item.get("alias"): item for item in new.get("sources", [])}
+    for alias in sorted(set(old_sources) | set(new_sources)):
+        before, after = old_sources.get(alias), new_sources.get(alias)
+        if before is None or after is None:
+            scopes.add(f"source.{alias}.presence")
+            continue
+        for key in ("propertyMap", "declaredTypes", "schemaFingerprint",
+                    "profileFingerprint", "binding"):
+            if before.get(key) != after.get(key):
+                scopes.add(f"source.{alias}.{key}")
+    if not scopes:
+        scopes.add("unknown")
+    return sorted(scopes)
+
+
 def execute_remote_query(db, user, request, *, session_kind, session_id,
                          include_page_size: bool = False):
     result = None
@@ -725,7 +776,19 @@ def execute_remote_query(db, user, request, *, session_kind, session_id,
         from .service import _canonical_json, _sha256
         current = prepare_remote_plan(db, user, request)
         if _sha256(_canonical_json(current)) != _sha256(_canonical_json(plan)):
-            raise _error(409, "query_context_changed", "查询期间发布范围或授权配置发生变化")
+            # fail closed。漂移几乎总来自窗口内的 profile 写入（管理员保存/
+            # 评估回退恢复全量字段）：审计 agent_profile_updated 可直接查证；
+            # 这里额外把差异范围写进日志与错误附注，不含敏感值。
+            import logging
+            logging.getLogger(__name__).warning(
+                "remote plan drift: ontologyIds=%s session=%s/%s changed=%s",
+                sorted({str(source.get("ontology", {}).get("ontologyId"))
+                        for source in plan.get("sources", [])
+                        if source.get("ontology")}),
+                session_kind, session_id, _plan_drift_scopes(plan, current))
+            raise _error(409, "query_context_changed", "查询期间发布范围或授权配置发生变化",
+                         reprepareRequired=True,
+                         changedScopes=_plan_drift_scopes(plan, current))
         if include_page_size and isinstance(result, dict):
             # 助手门面私有回显：plan 中冻结的实际执行页长。
             result["pageSize"] = plan["pageSize"]
