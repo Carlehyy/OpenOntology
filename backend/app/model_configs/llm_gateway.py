@@ -324,68 +324,79 @@ def _stream_openai(call_kwargs: dict, messages: list[dict], tools: list[dict]):
                           "parameters": t["parameters"]}}
             for t in tools
         ]
+    stream = None
     try:
-        stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
-    except Exception as exc:
-        if isinstance(exc, _transient_error_types()):
-            raise
-        create_kwargs.pop("stream_options", None)  # 部分兼容端点不支持 stream_options
-        stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
-
-    raw_parts: list[str] = []
-    tool_acc: dict[int, dict] = {}
-    usage = None
-    think_state: dict = {}
-    for chunk in stream:
-        if getattr(chunk, "usage", None):
-            usage = chunk.usage
-        if not getattr(chunk, "choices", None):
-            continue
-        choice = chunk.choices[0]
-        delta = getattr(choice, "delta", None)
-        if delta is None:
-            continue
-        piece = getattr(delta, "content", None)
-        if piece:
-            raw_parts.append(piece)
-            for safe in _filter_think_deltas(piece, think_state):
-                if safe:
-                    yield {"delta": safe}
-        for tc in (getattr(delta, "tool_calls", None) or []):
-            index = getattr(tc, "index", 0) or 0
-            slot = tool_acc.setdefault(
-                index, {"id": "", "name": "", "arguments": ""})
-            if getattr(tc, "id", None):
-                slot["id"] = tc.id
-            fn = getattr(tc, "function", None)
-            if fn is not None:
-                if getattr(fn, "name", None):
-                    slot["name"] += fn.name
-                if getattr(fn, "arguments", None):
-                    slot["arguments"] += fn.arguments
-
-    for safe in _filter_think_deltas("", think_state, flush=True):
-        if safe:
-            yield {"delta": safe}
-
-    tool_calls = []
-    for index in sorted(tool_acc):
-        slot = tool_acc[index]
-        if not slot["name"]:
-            continue
         try:
-            args = json.loads(slot["arguments"] or "{}")
-        except json.JSONDecodeError:
-            args = {"_raw": slot["arguments"]}
-        tool_calls.append({"id": slot["id"] or f"call_{index}",
-                           "name": slot["name"], "arguments": args})
-    yield {"final": _strip_think({
-        "content": "".join(raw_parts) or None,
-        "tool_calls": tool_calls,
-        "usage": {"inputTokens": getattr(usage, "prompt_tokens", None),
-                  "outputTokens": getattr(usage, "completion_tokens", None)}
-        if usage else None,
-    })}
+            stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+        except Exception as exc:
+            if isinstance(exc, _transient_error_types()):
+                raise
+            create_kwargs.pop("stream_options", None)  # 部分兼容端点不支持 stream_options
+            stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+
+        raw_parts: list[str] = []
+        tool_acc: dict[int, dict] = {}
+        usage = None
+        think_state: dict = {}
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            if not getattr(chunk, "choices", None):
+                continue
+            choice = chunk.choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            piece = getattr(delta, "content", None)
+            if piece:
+                raw_parts.append(piece)
+                for safe in _filter_think_deltas(piece, think_state):
+                    if safe:
+                        yield {"delta": safe}
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                index = getattr(tc, "index", 0) or 0
+                slot = tool_acc.setdefault(
+                    index, {"id": "", "name": "", "arguments": ""})
+                if getattr(tc, "id", None):
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["name"] += fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["arguments"] += fn.arguments
+
+        for safe in _filter_think_deltas("", think_state, flush=True):
+            if safe:
+                yield {"delta": safe}
+
+        tool_calls = []
+        for index in sorted(tool_acc):
+            slot = tool_acc[index]
+            if not slot["name"]:
+                continue
+            try:
+                args = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": slot["arguments"]}
+            tool_calls.append({"id": slot["id"] or f"call_{index}",
+                               "name": slot["name"], "arguments": args})
+        yield {"final": _strip_think({
+            "content": "".join(raw_parts) or None,
+            "tool_calls": tool_calls,
+            "usage": {"inputTokens": getattr(usage, "prompt_tokens", None),
+                      "outputTokens": getattr(usage, "completion_tokens", None)}
+            if usage else None,
+        })}
+    finally:
+        try:
+            close_stream = getattr(stream, "close", None)
+            if close_stream is not None:
+                close_stream()
+        finally:
+            close_client = getattr(client, "close", None)
+            if close_client is not None:
+                close_client()
 
 
 def _stream_anthropic(call_kwargs: dict, messages: list[dict], tools: list[dict]):
@@ -398,13 +409,14 @@ def _stream_anthropic(call_kwargs: dict, messages: list[dict], tools: list[dict]
     import anthropic
 
     client = anthropic.Anthropic(**_anthropic_client_kwargs(call_kwargs))
-    manager = client.messages.stream(
-        **_anthropic_create_kwargs(call_kwargs, messages, tools))
-    stream = _with_retry(manager.__enter__)
+    stream = None
     text_blocks: dict[int, list[str]] = {}
     tool_acc: dict[int, dict] = {}
     think_state: dict = {}
     try:
+        manager = client.messages.stream(
+            **_anthropic_create_kwargs(call_kwargs, messages, tools))
+        stream = _with_retry(manager.__enter__)
         for event in stream:
             event_type = getattr(event, "type", "")
             index = getattr(event, "index", None)
@@ -433,7 +445,13 @@ def _stream_anthropic(call_kwargs: dict, messages: list[dict], tools: list[dict]
                     tool_acc[index]["arguments"] += delta.partial_json
         final_message = stream.get_final_message()
     finally:
-        manager.__exit__(None, None, None)
+        try:
+            if stream is not None:
+                manager.__exit__(None, None, None)
+        finally:
+            close_client = getattr(client, "close", None)
+            if close_client is not None:
+                close_client()
 
     for safe in _filter_think_deltas("", think_state, flush=True):
         if safe:

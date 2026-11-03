@@ -5,6 +5,8 @@ import sys
 import types
 from types import SimpleNamespace as NS
 
+import pytest
+
 from app.model_configs import llm_gateway as gw
 
 
@@ -266,3 +268,86 @@ def test_filter_think_deltas_holds_partial_tags():
     # 场景 3：无 think 的普通文本原样通过
     state3: dict = {}
     assert gw._filter_think_deltas("普通文本。", state3) == ["普通文本。"]
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_stream_connection_failure_closes_client(monkeypatch, provider):
+    closed = []
+
+    def fail(**_kwargs):
+        raise RuntimeError("connection refused")
+
+    client = NS(close=lambda: closed.append(True))
+    if provider == "openai":
+        client.chat = NS(completions=NS(create=fail))
+        module = types.ModuleType("openai")
+        module.OpenAI = lambda **_kwargs: client
+    else:
+        client.messages = NS(stream=fail)
+        module = types.ModuleType("anthropic")
+        module.Anthropic = lambda **_kwargs: client
+    monkeypatch.setitem(sys.modules, provider, module)
+    monkeypatch.setattr(gw, "_with_retry", lambda call: call())
+    monkeypatch.setattr(gw, "_transient_error_types", lambda: ())
+
+    with pytest.raises(gw.LLMError, match="connection refused"):
+        list(gw.chat_stream({**_STREAM_KWARGS, "provider": provider},
+                            [{"role": "user", "content": "hi"}], []))
+
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_stream_disconnect_closes_transport_and_client(
+        monkeypatch, provider, cleanup_fails):
+    closed = []
+    consumed = []
+
+    def transport_close(*_args):
+        closed.append("transport")
+        if cleanup_fails:
+            raise RuntimeError("transport cleanup failed")
+
+    class Stream:
+        def __iter__(self):
+            consumed.append("first")
+            if provider == "openai":
+                yield _chunk(content="visible answer begins here")
+            else:
+                yield _block_delta(0, NS(type="text_delta",
+                                         text="visible answer begins here"))
+            consumed.append("second")
+            raise AssertionError("a disconnected consumer must stop reading")
+
+        close = staticmethod(transport_close)
+
+    stream = Stream()
+    client = NS(close=lambda: closed.append("client"))
+    if provider == "openai":
+        client.chat = NS(completions=NS(create=lambda **_kwargs: stream))
+        module = types.ModuleType("openai")
+        module.OpenAI = lambda **_kwargs: client
+    else:
+        class Manager:
+            def __enter__(self):
+                return stream
+
+            __exit__ = staticmethod(transport_close)
+
+        client.messages = NS(stream=lambda **_kwargs: Manager())
+        module = types.ModuleType("anthropic")
+        module.Anthropic = lambda **_kwargs: client
+    monkeypatch.setitem(sys.modules, provider, module)
+
+    events = gw.chat_stream({**_STREAM_KWARGS, "provider": provider},
+                            [{"role": "user", "content": "hi"}], [])
+    assert next(events)["delta"] == "visible answer begins here"
+    if cleanup_fails:
+        with pytest.raises(gw.LLMError, match="transport cleanup failed"):
+            events.close()
+    else:
+        events.close()
+
+    assert consumed == ["first"]
+    assert closed == ["transport", "client"]
