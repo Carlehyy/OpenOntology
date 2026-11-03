@@ -157,6 +157,53 @@ class TestCitationAndIdentifierMasking:
         assert result.unverified == [Decimal("43")]
 
 
+class TestAnswerSideTypoMasking:
+    """答案侧排版/标识符屏蔽：序号、时钟、编号、区间不是数值断言。"""
+
+    def test_ordered_list_ordinals_are_masked(self):
+        assert answer_numbers("1. 华东销量 100\n2. 华南 200\n3. 华北 300") == [100.0, 200.0, 300.0]
+        assert answer_numbers("步骤（1）先筛（2）再聚合（3）输出，合计 42") == [42.0]
+        assert answer_numbers("1、2、3 未验证，但 7 天里有 21 条") == [7.0, 21.0]
+        assert answer_numbers("共 3、4 两个值，总量 9") == [9.0]
+
+    def test_decimal_after_ordinal_dot_is_preserved(self):
+        # "1.5 万" 中的 1.5 是数值断言，不能被行首序号规则误伤。
+        assert answer_numbers("1.5 万订单") == [1.5]
+
+    def test_clock_and_space_datetime_are_masked(self):
+        assert answer_numbers("时间 2026-11-03 10:20:30，命中 13 条") == [13.0]
+        assert answer_numbers("2026年11月3日 13:05 更新了 5 条") == [5.0]
+
+    def test_codes_versions_and_labeled_ids_are_masked(self):
+        assert answer_numbers("订单号 SO-001，客户 ID 10086，版本 v1.2.3，总量 500") == [500.0]
+        assert answer_numbers("epoch 1730692830 对应毫秒 1730692830123，实际新增 5 条") == [5.0]
+        assert answer_numbers("工号 10086 在岗，组内 12 人") == [12.0]
+
+    def test_numeric_ranges_are_masked_whole(self):
+        assert answer_numbers("区间 1-2 个，第1名得分 88") == [88.0]
+        assert answer_numbers("电话 010-12345678，成功率 92%") == [92.0]
+        assert answer_numbers("覆盖 2026-2027 年，共 25 期") == [25.0]
+
+    def test_ordinal_answers_do_not_trigger_warning(self):
+        steps = [_step({"groups": [
+            {"group": "华东", "value": 100}, {"group": "华南", "value": 200}]})]
+        answer = "销量排名：\n1. 华东 100\n2. 华南 200"
+        result = verify_answer(answer, steps)
+        assert result.passed is True
+        assert result.unverified == []
+
+    def test_result_side_identifiers_extended_keys_do_not_seed(self):
+        steps = [_step({
+            "created_at": "2026-11-03 10:20:30",
+            "ids": [1, 2, 3],
+            "epoch": 1730692830,
+            "value": 42,
+        })]
+        universe = result_number_universe(steps)
+        assert 42.0 in universe
+        assert not any(v in universe for v in (1.0, 2.0, 3.0, 1730692830.0))
+
+
 class TestVerifyAnswer:
     def test_pass_when_all_numbers_backed(self):
         steps = [_step({"total": 42, "returned": 2})]

@@ -138,11 +138,12 @@ def get_profile(ontology_id: str, db: Session = Depends(get_db),
 
 @router.put("/{ontology_id}/agent/profile")
 def update_profile(ontology_id: str, body: S.AgentProfileUpdate,
-                   db: Session = Depends(get_db), _=Depends(require_admin)):
+                   db: Session = Depends(get_db), user=Depends(require_admin)):
     _require_ontology(db, ontology_id)
     profile = _profile_service.update_profile(
         db, ontology_id, body, get_profile_fn=get_or_create_profile,
         profile_fields=_PROFILE_FIELDS, resettable_fields=_RESETTABLE,
+        actor=user, source="admin_api",
     )
     return _ok(_profile_out(profile))
 

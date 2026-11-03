@@ -118,6 +118,9 @@ class SelectItem(_Strict):
 class GroupByItem(_Strict):
     source: str = Field(min_length=1, max_length=32)
     property: str = Field(min_length=1, max_length=200)
+    # 时间分桶：仅 date/datetime/timestamp 属性可用；分组值归一为桶起点
+    # （周为周一），趋势类问题一次下推取全期间，替代逐期串行查询。
+    bucket: Optional[Literal["day", "week", "month", "quarter", "year"]] = None
 
 
 class AggregateItem(_Strict):
@@ -143,8 +146,8 @@ class SemanticBinding(_Strict):
 
 class QueryRequest(_Strict):
     sources: list[QuerySource] = Field(default_factory=list, min_length=0,
-                                       max_length=4)
-    joins: list[QueryJoin] = Field(default_factory=list, max_length=3)
+                                       max_length=8)
+    joins: list[QueryJoin] = Field(default_factory=list, max_length=7)
     source_filters: list[SourceFilter] = Field(default_factory=list, max_length=8)
     where: list[FilterNode] = Field(default_factory=list, max_length=16)
     select: list[SelectItem] = Field(default_factory=list, max_length=32)
@@ -153,6 +156,10 @@ class QueryRequest(_Strict):
     distinct: bool = False
     order_by: list[OrderByItem] = Field(default_factory=list, max_length=8)
     page_size: Optional[int] = Field(default=None, ge=1, le=200)
+    # 有界分组统计：分组聚合在源端按 pageSize 截断（需显式 orderBy 保证
+    # top-N 确定性），返回的分组值精确、总组数精确，但超过截断的分组不可
+    # 继续翻页 —— 供助手聚合工具防止高基数分组全量回流内存。
+    bounded_stats: bool = False
     # SPL 文本面：spl 存在时结构树必须为空（两种形态互斥，翻译在
     # remote_query.prepare_spl_plan 中进行，授权/证据核验全部复用结构树路径）。
     spl: Optional[str] = Field(default=None, min_length=1, max_length=32768)

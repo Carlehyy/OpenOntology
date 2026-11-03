@@ -91,7 +91,8 @@ def _patch_execute_unified(monkeypatch, result=None, error=None) -> list:
 
     calls = []
 
-    def fake_execute(db, user, request, *, session_kind, session_id):
+    def fake_execute(db, user, request, *, session_kind, session_id,
+                      include_page_size=False):
         calls.append({"user": user, "request": request,
                       "session_kind": session_kind, "session_id": session_id})
         if error is not None:
@@ -110,7 +111,8 @@ def _patch_execute_sequence(monkeypatch, results: list) -> list:
 
     calls = []
 
-    def fake_execute(db, user, request, *, session_kind, session_id):
+    def fake_execute(db, user, request, *, session_kind, session_id,
+                      include_page_size=False):
         calls.append({"user": user, "request": request,
                       "session_kind": session_kind, "session_id": session_id})
         index = min(len(calls) - 1, len(results) - 1)
@@ -262,77 +264,101 @@ def test_null_valued_contains_and_range_filters_are_rejected_before_query(
 
 def test_contains_is_resolved_via_remote_enumeration_into_in(
         modeled_ontology, db, admin_user, monkeypatch):
-    """contains 经源端 group_by 枚举，按本地不区分大小写语义改写为 in。"""
+    """contains 先下推源端 LIKE 枚举；源端零命中回退全枚举做大小写不敏感匹配。"""
     oid = modeled_ontology["id"]
     release_id = _freeze_with_rich_remote_supplier(db, oid)
     runner = _remote_runner(db, oid, release_id, user=admin_user)
-    enum_rows = [{"group": "华南", "value": 4}, {"group": "North", "value": 3},
-                 {"group": "西南", "value": 1}]
-    calls = _patch_execute_sequence(monkeypatch, [
-        _unified_result(enum_rows, total_row_count=3),  # 枚举：小写 north 命中 North
-        _unified_result([{"value": 3}]),
-    ])
 
+    # 场景 1：源端 LIKE 已命中（MySQL ci / PG 精确大小写）→ 直接改写为 in。
+    enum_rows = [{"group": "华南", "value": 4}, {"group": "North", "value": 3}]
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result(enum_rows, total_row_count=2),
+        _unified_result([{"value": 7}]),
+    ])
     out = runner.run("aggregate_objects", {
         "object_type": "Supplier", "metric": "count",
-        "filters": [{"property": "region", "op": "contains", "value": "north"}]})
-
-    assert out["value"] == 3
+        "filters": [{"property": "region", "op": "contains", "value": "北"}]})
+    assert out["value"] == 7
     assert len(calls) == 2
     enum_request = calls[0]["request"]
     assert [item.property for item in enum_request.group_by] == ["region"]
-    assert enum_request.where == []  # 枚举不再携带 contains 本身
-    assert enum_request.page_size == 50
+    # LIKE 条件下推到源端枚举查询
+    dumped = [node.model_dump(by_alias=True) for node in enum_request.where]
+    assert dumped == [{"source": "objects", "property": "region",
+                       "op": "contains", "value": "北"}]
+    assert enum_request.page_size >= 50  # 分组/枚举页由注册表上限约束
     main_request = calls[1]["request"]
     dumped = [node.model_dump(by_alias=True) for node in main_request.where]
+    assert dumped == [{"source": "objects", "property": "region",
+                       "op": "in", "value": ["华南", "North"]}]
+
+    # 场景 2：源端 LIKE（PG 大小写敏感）零命中 → 回退全枚举 + 本地 ci 匹配。
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([], total_row_count=0),          # 源端 LIKE 无命中
+        _unified_result([{"group": "华南", "value": 4},   # 全枚举
+                         {"group": "North", "value": 3}], total_row_count=2),
+        _unified_result([{"value": 3}]),
+    ])
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "filters": [{"property": "region", "op": "contains", "value": "north"}]})
+    assert out["value"] == 3
+    assert len(calls) == 3
+    dumped = [node.model_dump(by_alias=True) for node in calls[2]["request"].where]
     assert dumped == [{"source": "objects", "property": "region",
                        "op": "in", "value": ["North"]}]
 
 
 def test_contains_enumeration_without_match_returns_provable_zero(
         modeled_ontology, db, admin_user, monkeypatch):
-    """完整枚举无命中：0 是被证明的空集，不再执行主查询，附 dataCoverage。"""
+    """源端 LIKE 与完整枚举均无命中：0 是被证明的空集，不再执行主查询。"""
     oid = modeled_ontology["id"]
     release_id = _freeze_with_rich_remote_supplier(db, oid)
     runner = _remote_runner(db, oid, release_id, user=admin_user)
-    enum_rows = [{"group": "华南", "value": 4}, {"group": "华北", "value": 3}]
+
     calls = _patch_execute_sequence(monkeypatch, [
-        _unified_result(enum_rows, total_row_count=2)])
+        _unified_result([], total_row_count=0),
+        _unified_result([], total_row_count=0),
+    ])
 
     out = runner.run("aggregate_objects", {
         "object_type": "Supplier", "metric": "count",
         "filters": [{"property": "region", "op": "contains", "value": "不存在"}]})
 
-    assert len(calls) == 1  # 主查询被短路
+    assert len(calls) == 2  # LIKE 下推 + 全枚举兜底；主查询被短路
     assert out["value"] == 0 and out["matched"] == 0
     assert out["dataCoverage"]["reason"] == "filter_no_match"
     assert "无任何取值命中" in out["dataCoverage"]["note"]
 
     # 分组形态同样短路：可证明空分组。
     calls = _patch_execute_sequence(monkeypatch, [
-        _unified_result(enum_rows, total_row_count=2)])
+        _unified_result([], total_row_count=0),
+        _unified_result([], total_row_count=0),
+    ])
     grouped = runner.run("aggregate_objects", {
         "object_type": "Supplier", "metric": "count", "group_by": "region",
         "filters": [{"property": "region", "op": "contains", "value": "不存在"}]})
     assert grouped["groups"] == [] and grouped["totalGroups"] == 0
     assert grouped["dataCoverage"]["reason"] == "filter_no_match"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_contains_enumeration_truncated_without_match_is_unresolved(
         modeled_ontology, db, admin_user, monkeypatch):
-    """取值超过一页且无一命中：无法证明空集，引导改用 in/eq 明确取值。"""
+    """兜底枚举超过一页且无一命中：无法证明空集，引导改用 in/eq 明确取值。"""
     oid = modeled_ontology["id"]
     release_id = _freeze_with_rich_remote_supplier(db, oid)
     runner = _remote_runner(db, oid, release_id, user=admin_user)
     calls = _patch_execute_sequence(monkeypatch, [
-        _unified_result([{"group": "华南", "value": 4}], total_row_count=80)])
+        _unified_result([], total_row_count=0),               # 源端 LIKE 无命中
+        _unified_result([{"group": "华南", "value": 4}], total_row_count=80),
+    ])
 
     with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved"):
         runner.run("aggregate_objects", {
             "object_type": "Supplier", "metric": "count",
             "filters": [{"property": "region", "op": "contains", "value": "不存在"}]})
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 # ------------------------------------------------ 3c. 0 结果覆盖探查
@@ -370,13 +396,12 @@ def test_zero_with_range_filter_reports_no_data_in_range(
 
 def test_zero_without_range_reports_filter_no_match(
         modeled_ontology, db, admin_user, monkeypatch):
-    """0 + 仅等值：全无过滤仍有数据 → 取值/名称无匹配。"""
+    """0 + 仅等值：不再为区分成因额外跑全表计数（0 结果不应更贵）。"""
     oid = modeled_ontology["id"]
     release_id = _freeze_with_rich_remote_supplier(db, oid)
     runner = _remote_runner(db, oid, release_id, user=admin_user)
     calls = _patch_execute_sequence(monkeypatch, [
         _unified_result([{"value": 0}]),
-        _unified_result([{"value": 9}]),
     ])
 
     out = runner.run("aggregate_objects", {
@@ -384,8 +409,9 @@ def test_zero_without_range_reports_filter_no_match(
         "filters": [{"property": "region", "op": "eq", "value": "不存在的区域"}]})
 
     assert out["dataCoverage"]["reason"] == "filter_no_match"
-    assert out["dataCoverage"]["unfilteredCount"] == 9
-    assert calls[1]["request"].where == []
+    assert out["dataCoverage"]["unfilteredCount"] is None
+    assert "全表计数" in out["dataCoverage"]["note"]
+    assert len(calls) == 1  # 等值无匹配不再触发额外全表计数
 
 
 def test_zero_reports_source_no_data(
@@ -399,7 +425,7 @@ def test_zero_reports_source_no_data(
     out = runner.run("aggregate_objects",
                      {"object_type": "Supplier", "metric": "count"})
     assert out["dataCoverage"]["reason"] == "source_no_data"
-    assert out["dataCoverage"]["unfilteredCount"] == 0
+    assert out["dataCoverage"]["unfilteredCount"] is None
     assert len(calls) == 1  # 主查询即无过滤，无需探查
 
     calls = _patch_execute_sequence(monkeypatch, [
@@ -421,7 +447,6 @@ def test_zero_group_result_reports_coverage(
     runner = _remote_runner(db, oid, release_id, user=admin_user)
     calls = _patch_execute_sequence(monkeypatch, [
         _unified_result([], total_row_count=0),
-        _unified_result([{"value": 7}]),
     ])
 
     out = runner.run("aggregate_objects", {
@@ -431,8 +456,8 @@ def test_zero_group_result_reports_coverage(
     assert out["groups"] == [] and out["totalGroups"] == 0
     assert out["matched"] == 0
     assert out["dataCoverage"]["reason"] == "filter_no_match"
-    assert out["dataCoverage"]["unfilteredCount"] == 7
-    assert len(calls) == 2
+    assert out["dataCoverage"]["unfilteredCount"] is None
+    assert len(calls) == 1  # 等值 0 组不再额外全表计数
 
 
 # ------------------------------------------------ 4. 标量完整性
@@ -468,19 +493,21 @@ def test_group_result_shape_and_pagination_honesty(
     release_id = _freeze_with_rich_remote_supplier(db, oid)
     runner = _remote_runner(db, oid, release_id, user=admin_user)
 
-    rows = [{"group": "华南", "value": 4}, {"group": "华东", "value": 3}]
+    rows = [{"group0": "华南", "value": 4}, {"group0": "华东", "value": 3}]
     calls = _patch_execute_unified(monkeypatch, result=_unified_result(
         rows, total_row_count=10))
     out = runner.run("aggregate_objects", {
         "object_type": "Supplier", "metric": "count", "group_by": "region"})
 
     request = calls[0]["request"]
-    assert request.page_size == 50  # min(50, profile 额度)
+    # 分组摘要页走注册表上限（默认 200，> profile 50），并有界统计防高基数分组回流
+    assert request.page_size > 50
+    assert request.bounded_stats is True
     assert [item.source for item in request.group_by] == ["objects"]
     assert [item.property for item in request.group_by] == ["region"]
-    assert [item.as_ for item in request.select] == ["group"]
+    assert [item.as_ for item in request.select] == ["group0"]
     assert [(item.output, item.direction) for item in request.order_by] == [
-        ("value", "desc"), ("group", "asc")]
+        ("value", "desc"), ("group0", "asc")]
 
     assert out["groupBy"] == "region"
     assert [(g["group"], g["value"], g["count"]) for g in out["groups"]] == [
@@ -773,3 +800,75 @@ def test_chat_remote_aggregate_passes_user_and_conversation_to_port(
     assert port.executed[0]["session_kind"] == "ontology_agent"
     assert port.executed[0]["session_id"] == data["conversationId"]
     assert port.executed[0]["plan"]["releases"]["objects"]["releaseId"] == release_id
+
+
+# ------------------------------------------------ 6. 时间分桶 / 多维分组
+
+
+def test_bucket_group_by_month_pushes_down_and_orders_asc(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """趋势问题一次取全期间：bucket 下推源端，默认按时间桶升序。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([{"group0": "2026-09-01", "value": 5},
+                         {"group0": "2026-10-01", "value": 2}], total_row_count=2),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "group_by": [{"property": "since_day", "bucket": "month"}]})
+
+    request = calls[0]["request"]
+    assert request.group_by[0].property == "since_day"
+    assert request.group_by[0].bucket == "month"
+    assert request.bounded_stats is True
+    assert [(item.output, item.direction) for item in request.order_by] == [
+        ("group0", "asc"), ("value", "desc")]
+    assert out["groupBy"] == "since_day(月)"
+    assert [(g["group"], g["value"]) for g in out["groups"]] == [
+        ("2026-09-01", 5), ("2026-10-01", 2)]
+    assert out["truncated"] is False and out["matched"] == 7
+
+
+def test_multi_dimension_group_by_builds_group_columns(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """多维分组一次返回：组键输出 group0/group1，行附 values 列表。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([{"group0": "华南", "group1": "2026-09-01", "value": 5},
+                         {"group0": "华东", "group1": "2026-10-01", "value": 2}],
+                        total_row_count=2),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "group_by": ["region", {"property": "since_day", "bucket": "month"}]})
+
+    request = calls[0]["request"]
+    assert [item.property for item in request.group_by] == ["region", "since_day"]
+    assert [item.bucket for item in request.group_by] == [None, "month"]
+    assert [item.as_ for item in request.select] == ["group0", "group1"]
+    assert out["groupBy"] == "region|since_day(月)"
+    assert [g["values"] for g in out["groups"]] == [
+        ["华南", "2026-09-01"], ["华东", "2026-10-01"]]
+
+
+def test_explicit_order_by_overrides_default(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """显式 order_by 优先于默认（TopN 按值降序 / 趋势按桶升序）。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([], total_row_count=0),
+    ])
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count", "group_by": "region",
+        "order_by": {"output": "group", "direction": "asc"}})
+    assert out["groups"] == []
+    assert [(item.output, item.direction) for item in
+            calls[0]["request"].order_by] == [("group0", "asc")]

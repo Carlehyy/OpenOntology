@@ -163,6 +163,9 @@ def test_remote_execute_discards_handle_when_final_scope_changed(db, admin_user,
         remote_query.execute_remote_query(db, admin_user, request,
                                           session_kind="direct", session_id=admin_user.id)
     assert error.value.code == "query_context_changed"
+    # 漂移差异范围随错误附注返回（配置变更日志可直接查证成因）
+    assert error.value.extra.get("changedScopes")
+    assert error.value.extra.get("reprepareRequired") is True
     assert cancelled == ["memory-result"]
     assert not db.in_transaction()
 
@@ -256,3 +259,63 @@ def test_remote_plan_accepts_count_field_semantics(db, admin_user):
         remote_query.prepare_remote_plan(db, admin_user, _request(
             identity, aggregates=[{"fn": "count", "source": "a", "as": "x"}]))
     assert "count" in str(exc.value)
+
+
+# ------------------------------------------------------------- 时间分桶/有界统计
+
+def _add_date_property(db, identity):
+    import copy
+
+    project = db.query(OntologyProject).filter_by(id=identity["ontologyId"]).one()
+    release = db.query(OntologyVersion).filter_by(id=project.current_release_id).one()
+    snapshot = copy.deepcopy(release.snapshot_formal)
+    snapshot["objectTypes"][0]["properties"].append(
+        {"id": "p-day", "name": "day", "type": "date"})
+    mapping = snapshot["mappings"][0]
+    mapping["remote"]["columns"].append({"name": "physical_day", "type": "date"})
+    mapping["fieldMapping"]["physical_day"] = "day"
+    release.snapshot_formal = snapshot
+    release.snapshot_hash = snapshot_hash(snapshot)
+    db.commit()
+
+
+def test_remote_plan_bucket_group_carries_bucket_and_validates_type(db, admin_user):
+    identity, _profile = _release(db, admin_user)
+    _add_date_property(db, identity)
+    plan = remote_query.prepare_remote_plan(db, admin_user, _request(
+        identity,
+        select=[{"source": "a", "property": "day", "as": "day"}],
+        group_by=[{"source": "a", "property": "day", "bucket": "month"}],
+        aggregates=[{"fn": "count", "as": "count"}],
+        order_by=[{"output": "day", "direction": "asc"}]))
+    assert plan["groupBy"][0]["bucket"] == "month"
+
+    with pytest.raises(QueryError) as error:
+        remote_query.prepare_remote_plan(db, admin_user, _request(
+            identity,
+            select=[{"source": "a", "property": "note", "as": "note"}],
+            group_by=[{"source": "a", "property": "note", "bucket": "month"}],
+            aggregates=[{"fn": "count", "as": "count"}],
+            order_by=[{"output": "note", "direction": "asc"}]))
+    assert error.value.code == "invalid_parameter"
+    assert "date/datetime/timestamp" in error.value.message
+
+
+def test_remote_plan_bounded_stats_requires_group_order_and_sets_limit(db, admin_user):
+    identity, _profile = _release(db, admin_user)
+    grouped = dict(
+        select=[{"source": "a", "property": "note", "as": "note"}],
+        group_by=[{"source": "a", "property": "note"}],
+        aggregates=[{"fn": "count", "as": "count"}],
+        order_by=[{"output": "count", "direction": "desc"}])
+    plan = remote_query.prepare_remote_plan(
+        db, admin_user, _request(identity, bounded_stats=True, **grouped))
+    assert plan["statsLimit"] == plan["pageSize"] == 10
+
+    with pytest.raises(QueryError) as error:
+        remote_query.prepare_remote_plan(db, admin_user, _request(
+            identity, bounded_stats=True,
+            select=[{"source": "a", "property": "note", "as": "note"}],
+            group_by=[{"source": "a", "property": "note"}],
+            aggregates=[{"fn": "count", "as": "count"}]))
+    assert "orderBy" in error.value.message

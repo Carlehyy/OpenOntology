@@ -107,9 +107,11 @@ def build_typed_request(plan: dict, *, request: dict, session_kind: str,
                           for item in current["aggregates"]]
             output_names = {(item["source"], item["property"]): item["as"]
                             for item in current["select"]}
-            groups = tuple((Ref(aliases[item["source"]], item["property"]),
-                            output_names[(item["source"], item["property"])])
-                           for item in current["groupBy"])
+            groups = tuple(
+                (Ref(aliases[item["source"]], item["property"]),
+                 output_names[(item["source"], item["property"])],
+                 item.get("bucket"))
+                for item in current["groupBy"])
             if groups:
                 aggregates.append(("group", groups))
             commands.append(Command("stats", tuple(aggregates)))
@@ -123,6 +125,9 @@ def build_typed_request(plan: dict, *, request: dict, session_kind: str,
             commands.append(Command("sort", tuple(
                 (item["output"], item["direction"], item["nulls"])
                 for item in current["orderBy"])))
+        if current.get("statsLimit"):
+            # 有界分组统计：源端 LIMIT 截断分组回流（须在 sort 之后）。
+            commands.append(Command("limit", (int(current["statsLimit"]), 0)))
         return Pipeline(first, first, tuple(commands))
 
     pipeline = level(plan)
@@ -144,15 +149,21 @@ def _response(result, plan):
     rows = result["rows"]
     # Honesty markers come from the typed core: a budget-limited computation is
     # not exact, and callers (agent tools, persistence) must not fabricate them.
+    # Deliberately bounded stats (plan.statsLimit) are the exception: the
+    # returned groups and the total group count are exact, only the untruncated
+    # remainder is unreachable — surfaced via truncated/resultBounded instead
+    # of downgrading exactness.
+    bounded = bool(plan.get("statsLimit")) and bool(result.get("resultLimited"))
     exact = (result.get("exactness", "exact_within_scope") == "exact_within_scope"
-             and not result.get("resultLimited"))
+             and (bounded or not result.get("resultLimited")))
+    truncated = bool(result.get("resultLimited")) if plan.get("statsLimit") else False
     return {"queryId": result["queryId"], "schemaVersion": 2,
             "observedAt": min((state.get("asOf", "") for state in result["sourceStates"]), default=""),
             "releases": plan["releases"], "columns": result["columns"], "rows": rows,
             "pageRowCount": len(rows), "totalRowCount": result["totalRows"],
             "rowCounting": page.get("counting", "complete"),
             "distinctEntityCounts": {}, "inputCounts": {}, "joinRowCounts": [],
-            "partial": False, "truncated": False,
+            "partial": False, "truncated": truncated, "resultBounded": bounded,
             "exact": exact, "completeness": "complete" if exact else "partial",
             "countsScope": result["countsScope"], "hasNext": page["hasMore"],
             "cursor": page.get("cursor") if page["hasMore"] else None,

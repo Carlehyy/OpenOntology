@@ -204,7 +204,10 @@ def test_system_prompt_guides_remote_types_to_unified_query(
     _, _, scope = build_scope(db, oid)
     prompt = _system_prompt(scope)
     assert _ERROR_CODE in prompt
-    assert "ontology_query" in prompt
+    # 明细/统计引导已收敛到本体助手自己的统一查询工具
+    assert "query_objects" in prompt
+    assert "get_data_time_range" in prompt
+    assert "bucket" in prompt
 
 
 # ---------------------------- A14 回归：默认对话入口（未显式传 releaseId）

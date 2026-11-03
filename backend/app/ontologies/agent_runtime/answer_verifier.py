@@ -2,6 +2,8 @@
 
 保留历史年份豁免、日期整体屏蔽与百分比变体；Decimal 比较不混淆相邻 bigint。
 引用编号与标识符（UUID/时间戳/Id 类键）既不算数值断言，也不充当证据。
+答案侧额外屏蔽排版序号（1./1、/（1）/第N）、时钟、空格分隔日期时间、
+编号/版本号（SO-001、v1.2.3）与数字区间 —— 它们不是数值断言。
 """
 from __future__ import annotations
 
@@ -26,6 +28,35 @@ _UUID_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
 _STAMP_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
                        r"(?:Z|[+-]\d{2}:?\d{2})?(?!\d)")
 JS_SAFE_INTEGER = 2**53 - 1
+
+# 答案侧排版/标识符屏蔽（仅用于答案文本；工具证据集合保持原清洗语义）：
+# 有序列号（1. / 1、/（1）/第N）、时钟、空格分隔日期时间、带标签或含字母的
+# 编号/版本（SO-001、v1.2.3、IPv6）与数字区间（1-2、010-12345678）是排版
+# 或标识信息，不构成数值断言 —— 引用编号/UUID/ISO 时间戳屏蔽的延伸。
+_ANSWER_MASKS: tuple[tuple[re.Pattern, str], ...] = (
+    (_UUID_RE, " "),
+    (_STAMP_RE, " "),
+    # 空格分隔的日期时间整体屏蔽（先于日期与时钟，避免拆出 10:20:30）。
+    (re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?!\d)"), " "),
+    (_DATE_RE, " "),
+    (_YEAR_RE, " "),
+    (re.compile(r"(?<!\d)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?!\d)"), " "),
+    (_CITE_RE, " "),
+    # 带标签的编号/账号：标签后的字母数字串整体是标识符，不是数值断言。
+    (re.compile(r"(?<![0-9A-Za-z])(?:[Ii][Dd]|编号|单号|订单号|工单号|工号|流水号"
+                r"|手机号|电话|时间戳|epoch|毫秒)\s*[:：of]*\s*[0-9A-Za-z][0-9A-Za-z_.\-]*"), " "),
+    # 含字母又含数字的代号/版本号（SO-001、v1.2.3、IPv6、GPT4）整体是标识符。
+    (re.compile(r"(?<![0-9A-Za-z])[0-9A-Za-z_.\-]*[A-Za-z][0-9A-Za-z_.\-]*\d"
+                r"[0-9A-Za-z_.\-]*(?![0-9A-Za-z])"), " "),
+    # 数字区间（1-2 个、010-12345678、2026-2027）表达范围，不拆成两个断言。
+    (re.compile(r"(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[-–—~～至到]\s*"
+                r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d)"), " "),
+    # 有序列号：行首 1./1、/1) 与任意位置的（1）。
+    (re.compile(r"(?m)^[ \t>*(–—-]*\d{1,3}[.、)）](?!\d)"), " "),
+    (re.compile(r"(?<!\d)[（(]\d{1,3}[)）](?!\d)"), " "),
+    (re.compile(r"(?<!\d)(?:\d{1,3}、)+(?:\d{1,3}(?!\d))?"), " "),
+    (re.compile(r"第\s*\d{1,4}(?!\d)"), " "),
+)
 
 
 @dataclass
@@ -81,10 +112,21 @@ def _numbers_in_text_decimal(text: str) -> list[Decimal]:
             for raw in _NUMBER_RE.findall(cleaned)]
 
 
+def _numbers_in_answer_decimal(text: str) -> list[Decimal]:
+    """答案文本中的数值断言：先经答案侧排版/标识符屏蔽再抽取。"""
+    cleaned = text or ""
+    for pattern, replacement in _ANSWER_MASKS:
+        cleaned = pattern.sub(replacement, cleaned)
+    return [Decimal(raw.replace(",", ""))
+            for raw in _NUMBER_RE.findall(cleaned)]
+
+
 def _identifier_key(key: object) -> bool:
-    """queryId/instanceId/observedAt 等运行时元数据键：其值是标识符或时间戳，
-    数字片段（UUID、时刻）不得充当数值证据。"""
-    return isinstance(key, str) and (key == "id" or key.endswith(("Id", "_id", "At")))
+    """queryId/instanceId/observedAt/created_at/ids 等运行时元数据键：其值是
+    标识符或时间戳，数字片段（UUID、时刻）不得充当数值证据。"""
+    return isinstance(key, str) and (
+        key == "id" or key.lower() in {"ids", "uuid", "timestamp", "epoch"}
+        or key.endswith(("Id", "_id", "At", "_at", "_utc")))
 
 
 def _numbers_in_value(value: object) -> list[Decimal]:
@@ -145,12 +187,12 @@ def result_number_universe(steps: Iterable[dict]) -> set:
 
 def answer_numbers(answer: str) -> list:
     """回答文本中的数值断言（保留出现顺序与重复）。"""
-    return [_public_number(value) for value in _numbers_in_text_decimal(answer)]
+    return [_public_number(value) for value in _numbers_in_answer_decimal(answer)]
 
 
 def verify_answer(answer: str, steps: Iterable[dict]) -> VerificationResult:
     universe = result_number_universe(steps)
-    numbers = _numbers_in_text_decimal(answer)
+    numbers = _numbers_in_answer_decimal(answer)
     result = VerificationResult(answer_numbers=numbers)
     for number in numbers:
         (result.matched if number in universe else result.unverified).append(number)

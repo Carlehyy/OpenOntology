@@ -20,7 +20,9 @@ silently truncating or pulling whole tables.
 from __future__ import annotations
 
 import functools
+import re
 from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any, Callable, Iterator
 
@@ -42,6 +44,44 @@ AVG_SEMANTICS = "decimal_28_significant_digits_half_even"
 # stays with the ledger totals and the existing per-side checks, so the central
 # measurement never adds a new single-row rejection reason.
 _LEDGER_MEASURE_CAP = 1 << 62
+
+
+def _group_item_parts(item):
+    """(Ref, out, bucket|None) — group items may be Ref, (Ref, out) or bucketed."""
+    if isinstance(item, tuple):
+        return item[0], item[1], (item[2] if len(item) > 2 else None)
+    return item, item.name, None
+
+
+def _bucket_start(value, bucket: str):
+    """Python-side bucket normalization for cross-source aggregation.
+
+    Mirrors the compiler's SQL bucket expressions: ISO date semantics with
+    Monday-based weeks; driver values may be date/datetime or ISO strings.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        head = re.split(r"[T ]", value.strip())[0]
+        try:
+            value = date.fromisoformat(head)
+        except ValueError as exc:
+            raise QueryError(422, "unsupported_group_bucket",
+                             "Time bucket value is not an ISO date/datetime") from exc
+    elif isinstance(value, datetime):
+        value = value.date()
+    if not isinstance(value, date):
+        raise QueryError(422, "unsupported_group_bucket",
+                         "Time bucketing requires date/datetime values")
+    if bucket == "week":
+        return value - timedelta(days=value.weekday())
+    if bucket == "month":
+        return value.replace(day=1)
+    if bucket == "quarter":
+        return value.replace(day=1, month=(value.month - 1) // 3 * 3 + 1)
+    if bucket == "year":
+        return value.replace(day=1, month=1)
+    return value
 
 
 @dataclass
@@ -696,6 +736,9 @@ class MemoryExecutor:
         groups = next((arg[1] for arg in stats_cmd.args if arg[0] == "group"), ())
         if not groups:
             return None
+        # Time-bucketed keys have no source-side column to key-pull against.
+        if any(_group_item_parts(item)[2] for item in groups):
+            return None
         return stats_cmd, groups
 
     def _group_projection(self, name: str):
@@ -711,8 +754,9 @@ class MemoryExecutor:
         groups = next((arg[1] for arg in commands[0].args if arg[0] == "group"), ())
         if len(groups) != 1:
             return None
-        item = groups[0]
-        ref, out = item if isinstance(item, tuple) else (item, item.name)
+        ref, out, bucket = _group_item_parts(groups[0])
+        if bucket is not None:
+            return None
         if len(inner.pipeline.sources) != 1:
             return None
         return inner, ref, out
@@ -1266,14 +1310,19 @@ class MemoryExecutor:
 
     def _aggregate(self, rows, stats_cmd):
         groups = next((arg[1] for arg in stats_cmd.args if arg[0] == "group"), ())
-        group_items: list[tuple[Ref, str]] = []
+        group_items: list[tuple[Ref, str, str | None]] = []
         columns: list[ColumnSpec] = []
         for item in groups:
-            ref, out = item if isinstance(item, tuple) else (item, item.name)
+            ref, out, bucket = _group_item_parts(item)
             spec = self._spec(ref)
             if spec.type in {"json", "binary"}:
                 raise QueryError(422, "unsupported_group_type", "Cannot group JSON/binary")
-            group_items.append((ref, out))
+            if bucket is not None:
+                if spec.type not in {"date", "timestamp"}:
+                    raise QueryError(422, "unsupported_group_bucket",
+                                     "Time bucketing requires a date/timestamp field")
+                spec = replace(spec, type="date", nullable=True)
+            group_items.append((ref, out, bucket))
             columns.append(replace(spec, name=out))
         aggregates: list[tuple[str, Ref | None, str]] = []
         for item in stats_cmd.args:
@@ -1304,7 +1353,10 @@ class MemoryExecutor:
         order: list[tuple] = []
         for row in rows:
             self._check()
-            key = tuple(_hashable(row[f"{ref.alias}.{ref.name}"]) for ref, _out in group_items)
+            key = tuple(
+                _hashable(_bucket_start(row[f"{ref.alias}.{ref.name}"], bucket)
+                          if bucket else row[f"{ref.alias}.{ref.name}"])
+                for ref, _out, bucket in group_items)
             state = states.get(key)
             if state is None:
                 state = [_init_state() for _ in aggregates]
@@ -1329,12 +1381,12 @@ class MemoryExecutor:
                             for fn, ref, name in aggregates})
         for key in order:
             row = {out: _state_from_key(key, position)
-                   for position, (_ref, out) in enumerate(group_items)}
+                   for position, (_ref, out, _bucket) in enumerate(group_items)}
             for index, (fn, ref, name) in enumerate(aggregates):
                 row[name] = _final_state(states[key][index], fn, ref is None)
             self.memory_budget.charge(row)
             outputs.append(row)
-        projected = {ref: out for ref, out in group_items}
+        projected = {ref: out for ref, out, _bucket in group_items}
         return columns, outputs, projected
 
     def _sort(self, outputs, cmd, columns, projected):
