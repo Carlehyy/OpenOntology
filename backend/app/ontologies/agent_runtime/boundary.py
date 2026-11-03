@@ -69,7 +69,8 @@ def remote_object_type_ids(scope: AgentScope) -> set[str]:
 
 def require_materialized_object_type(scope: AgentScope, object_type) -> None:
     if object_type.id in remote_object_type_ids(scope):
-        guidance = ("统计可使用 aggregate_objects 自动转统一查询；"
+        guidance = ("统计与名称/取值存在性校验可用 aggregate_objects（远程绑定自动转"
+                    "统一查询：group_by 可枚举取值，0 结果会附 dataCoverage 原因）；"
                     if scope.release is not None else
                     "当前会话未固定发布版本，请从已发布本体重新进入助手后统计；")
         raise ToolError(

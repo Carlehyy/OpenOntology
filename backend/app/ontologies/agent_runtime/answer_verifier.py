@@ -1,6 +1,7 @@
 """确定性结论校验：数值须由完整工具证据背书；失败先纠正，仍失败则显式标注。
 
 保留历史年份豁免、日期整体屏蔽与百分比变体；Decimal 比较不混淆相邻 bigint。
+引用编号与标识符（UUID/时间戳/Id 类键）既不算数值断言，也不充当证据。
 """
 from __future__ import annotations
 
@@ -17,6 +18,13 @@ _DATE_RE = re.compile(
     r"|(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*[日号])?)?"
     r"|\d{1,2}\s*月份?(?:\s*\d{1,2}\s*[日号])?)(?!\d)")
 _YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+# 引用编号（[1]、[2,3]、「4」）是排版标记，不是数值断言。
+_CITE_RE = re.compile(r"\[\d+(?:\s*[,，、]\s*\d+)*\]|[「『]\d+[」』]")
+# UUID 与 ISO 时间戳是标识符：其数字片段不得进入允许集合，也不触发告警。
+_UUID_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                      r"[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])")
+_STAMP_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
+                       r"(?:Z|[+-]\d{2}:?\d{2})?(?!\d)")
 JS_SAFE_INTEGER = 2**53 - 1
 
 
@@ -67,9 +75,16 @@ def _public_number(value: Decimal):
 
 
 def _numbers_in_text_decimal(text: str) -> list[Decimal]:
-    cleaned = _YEAR_RE.sub(" ", _DATE_RE.sub(" ", text or ""))
+    cleaned = _CITE_RE.sub(" ", _UUID_RE.sub(" ", _STAMP_RE.sub(" ", text or "")))
+    cleaned = _YEAR_RE.sub(" ", _DATE_RE.sub(" ", cleaned))
     return [Decimal(raw.replace(",", ""))
             for raw in _NUMBER_RE.findall(cleaned)]
+
+
+def _identifier_key(key: object) -> bool:
+    """queryId/instanceId/observedAt 等运行时元数据键：其值是标识符或时间戳，
+    数字片段（UUID、时刻）不得充当数值证据。"""
+    return isinstance(key, str) and (key == "id" or key.endswith(("Id", "_id", "At")))
 
 
 def _numbers_in_value(value: object) -> list[Decimal]:
@@ -84,7 +99,11 @@ def _numbers_in_value(value: object) -> list[Decimal]:
     if isinstance(value, str):
         return _numbers_in_text_decimal(value)
     if isinstance(value, (dict, list, tuple)):
-        children = value.values() if isinstance(value, dict) else value
+        if isinstance(value, dict):
+            children = [item for key, item in value.items()
+                        if not _identifier_key(key)]
+        else:
+            children = list(value)
         return [number for child in children for number in _numbers_in_value(child)]
     return []
 

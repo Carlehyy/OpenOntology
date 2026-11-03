@@ -267,7 +267,7 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "name": "aggregate_objects",
-        "description": "对某对象类型做聚合统计：count/sum/avg/min/max，可按属性分组。已发布的远程绑定对象自动通过统一查询在真实源上统计。日期范围用 gte 起始日期、lt 下一期起始日期；远程统计不支持 contains，请用明确等值或范围。回答'总共/平均/最多'类问题用这个，不要逐条列举。",
+        "description": "对某对象类型做聚合统计：count/sum/avg/min/max，可按属性分组。已发布的远程绑定对象自动通过统一查询在真实源上统计。日期范围用 gte 起始日期、lt 下一期起始日期；contains 会先在源端枚举取值做不区分大小写匹配（取值过多无法解析时会提示改用 in/eq）。远程结果为 0 时附 dataCoverage 说明原因（范围内无数据/取值无匹配/源无数据），回答时须如实转述，不得说成整期已完整统计。回答'总共/平均/最多'类问题用这个，不要逐条列举。",
         "parameters": {
             "type": "object",
             "properties": {

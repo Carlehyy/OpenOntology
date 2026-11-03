@@ -142,6 +142,10 @@ def build_typed_request(plan: dict, *, request: dict, session_kind: str,
 def _response(result, plan):
     page = result["page"]
     rows = result["rows"]
+    # Honesty markers come from the typed core: a budget-limited computation is
+    # not exact, and callers (agent tools, persistence) must not fabricate them.
+    exact = (result.get("exactness", "exact_within_scope") == "exact_within_scope"
+             and not result.get("resultLimited"))
     return {"queryId": result["queryId"], "schemaVersion": 2,
             "observedAt": min((state.get("asOf", "") for state in result["sourceStates"]), default=""),
             "releases": plan["releases"], "columns": result["columns"], "rows": rows,
@@ -149,6 +153,7 @@ def _response(result, plan):
             "rowCounting": page.get("counting", "complete"),
             "distinctEntityCounts": {}, "inputCounts": {}, "joinRowCounts": [],
             "partial": False, "truncated": False,
+            "exact": exact, "completeness": "complete" if exact else "partial",
             "countsScope": result["countsScope"], "hasNext": page["hasMore"],
             "cursor": page.get("cursor") if page["hasMore"] else None,
             "expiresAt": result["expiresAt"], "citations": plan["citations"],

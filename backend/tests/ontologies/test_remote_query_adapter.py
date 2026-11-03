@@ -130,6 +130,20 @@ def test_response_preserves_only_trusted_core_aggregate_classification(classific
         "aggregate" if classification == "aggregate" else "detail")
 
 
+def test_response_derives_exact_and_completeness_from_typed_core():
+    """exact/completeness 必须来自执行核断言，预算受限的结果不得冒充精确完整。"""
+    plan = dict(_plan(), releases={}, citations=[])
+
+    payload = _response(dict(_result()), plan)
+    assert payload["exact"] is True and payload["completeness"] == "complete"
+
+    limited = _response(dict(_result(), resultLimited=True), plan)
+    assert limited["exact"] is False and limited["completeness"] == "partial"
+
+    inexact = _response(dict(_result(), exactness="approximate"), plan)
+    assert inexact["exact"] is False and inexact["completeness"] == "partial"
+
+
 def test_page_keeps_handle_for_transient_metadata_failure(monkeypatch, db, admin_user):
     plan = dict(_plan(), releases={}, citations=[])
     adapter, service = _page_adapter(monkeypatch, plan)

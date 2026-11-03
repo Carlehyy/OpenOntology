@@ -107,6 +107,56 @@ class TestNumberUniverse:
         assert universe == set()
 
 
+class TestCitationAndIdentifierMasking:
+    def test_bracket_citations_are_not_numeric_claims(self):
+        assert answer_numbers("结论[1]成立，另见 [2,3] 与「4」、『5』。") == []
+        assert answer_numbers("编号「12」的引用") == []
+
+    def test_citation_numbers_do_not_trigger_warning(self):
+        steps = [_step({"value": 42})]
+        result = verify_answer("共 42 个对象[1]，详见「2」。", steps)
+        assert result.passed is True
+        assert result.unverified == []
+
+    def test_plain_numbers_next_to_brackets_stay_verifiable(self):
+        # 方括号外的数字仍是数值断言：3 须有证据，42 已有证据。
+        steps = [_step({"value": 42})]
+        result = verify_answer("共 42 个（见[1]），另约 3 个。", steps)
+        assert result.passed is False
+        assert result.unverified == [Decimal("3")]
+
+    def test_identifier_keys_do_not_seed_universe(self):
+        steps = [_step({
+            "queryId": "6f1e2a3c-4b5d-6789-abcd-ef0123456789",
+            "releaseId": "rel-1",
+            "instanceId": "inst-88",
+            "observedAt": "2026-11-03T10:20:30+00:00",
+            "value": 42,
+        })]
+        universe = result_number_universe(steps)
+        assert 42.0 in universe
+        assert 6789.0 not in universe and 88.0 not in universe
+        assert 10.0 not in universe and 20.0 not in universe and 30.0 not in universe
+
+    def test_uuid_and_stamp_values_do_not_seed_universe(self):
+        steps = [_step({
+            "token": "6f1e2a3c-4b5d-6789-abcd-ef0123456789",
+            "stamp": "2026-11-03T10:20:30.123+00:00",
+            "cursor": "2026-11-03T09:08:07Z",
+        })]
+        assert result_number_universe(steps) == set()
+
+    def test_fabricated_number_not_rescued_by_identifiers(self):
+        steps = [_step({
+            "queryId": "1f0e2a3c-4b5d-6789-abcd-ef0123456789",
+            "observedAt": "2026-11-03T10:20:30+00:00",
+            "value": 42,
+        })]
+        result = verify_answer("共 43 个。", steps)
+        assert result.passed is False
+        assert result.unverified == [Decimal("43")]
+
+
 class TestVerifyAnswer:
     def test_pass_when_all_numbers_backed(self):
         steps = [_step({"total": 42, "returned": 2})]
