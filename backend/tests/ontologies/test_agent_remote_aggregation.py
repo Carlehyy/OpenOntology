@@ -749,7 +749,6 @@ def test_chat_remote_aggregate_passes_user_and_conversation_to_port(
     """生产接线：chat（假 LLM）→ ToolRunner(user, conversation) → 统一查询端口。"""
     from app.models.model_config import ModelConfig
     from app.ontologies.agent_query import remote_query
-
     oid = modeled_ontology["id"]
     release_id = _freeze_with_rich_remote_supplier(db, oid)
     db.add(ModelConfig(id=str(uuid.uuid4()), name="fake", provider="openai",
@@ -774,8 +773,8 @@ def test_chat_remote_aggregate_passes_user_and_conversation_to_port(
                                                      "op": "eq", "value": "华南"}]}}]}
         tool_payload = messages[-1]["content"]
         assert messages[-1]["role"] == "tool"
-        assert '"dataMode": "remote"' in tool_payload
-        assert '"value": 4' in tool_payload
+        assert '"dataMode":"remote"' in tool_payload
+        assert '"value":4' in tool_payload
         return {"content": "华南区域的供应商共 4 家。", "tool_calls": [],
                 "usage": {"inputTokens": 20, "outputTokens": 8}}
 

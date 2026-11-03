@@ -36,10 +36,7 @@ def test_cancel_endpoint_for_unknown_run(client, auth_headers, modeled_ontology)
     r = client.post(
         f"{_fo(oid)}/agent/chat/cancel", headers=auth_headers,
         json={"runId": "run-that-does-not-exist"})
-    assert r.status_code == 200, r.text
-    data = r.json()["data"]
-    assert data["cancelled"] is False
-    assert data["runId"] == "run-that-does-not-exist"
+    assert r.status_code == 404, r.text
 
 
 def test_cancel_endpoint_rejects_empty_run_id(client, auth_headers, modeled_ontology):

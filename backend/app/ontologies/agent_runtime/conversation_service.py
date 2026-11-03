@@ -10,6 +10,12 @@ from app.models.ontology import OntologyProject
 from app.ontologies.agent_runtime import schemas as S
 from app.ontologies.agent_runtime.application_errors import forbidden, not_found
 from app.ontologies.agent_runtime.models import AgentConversation, AgentMessage
+from app.ontologies.agent_runtime.run_conversations import (
+    conversation_activity_order,
+    detail_with_runs,
+    list_with_runs,
+)
+from app.ontologies.agent_runtime.run_submission import delete_conversation_runs
 
 
 def conversation_out(conversation: AgentConversation) -> dict:
@@ -30,6 +36,9 @@ def require_conversation(
         AgentConversation.ontology_id == ontology_id,
     ).first()
     if not conversation:
+        raise not_found("会话不存在")
+    if conversation.is_sandbox:
+        # 评估沙箱回放会话对用户侧完全不可见，连按 id 直取也不暴露。
         raise not_found("会话不存在")
     if (
         conversation.user_id
@@ -74,11 +83,11 @@ def list_conversations(
             AgentConversation.ontology_release_id == release_id,
         )
     rows = (
-        query.order_by(AgentConversation.updated_at.desc())
+        query.order_by(conversation_activity_order().desc())
         .limit(50)
         .all()
     )
-    return [conversation_out(row) for row in rows]
+    return list_with_runs(db, rows, serialize=conversation_out)
 
 
 def get_conversation(
@@ -94,13 +103,14 @@ def get_conversation(
         .limit(200)
         .all()
     )
-    return {
+    data = {
         **conversation_out(conversation),
         "messages": [
             message_out_fn(message, display_only=True)
             for message in messages
         ],
     }
+    return detail_with_runs(db, conversation, data)
 
 
 def export_conversation(
@@ -215,6 +225,8 @@ def delete_conversation(
 ) -> None:
     """Delete conversation-owned records in the established transaction order."""
     from app.ontologies.decision_simulation.models import DecisionSimulationRun
+
+    delete_conversation_runs(db, conversation.id)
 
     db.query(DecisionSimulationRun).filter(
         DecisionSimulationRun.conversation_id == conversation.id,

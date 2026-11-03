@@ -31,7 +31,6 @@ export const LEGACY_COLOR_LIMITS = {
   'lib/scene3d/adapter.ts':                                          2,
   'lib/scene3d/engine.ts':                                           48,
   'pages/agent/AgentChart.tsx':                                      9,
-  'pages/agent/BoundaryDrawer.tsx':                                  1,
   'pages/agent/InstanceKnowledgeGraph.tsx':                          36,
   'pages/agent/ReportStudioPage.tsx':                                27,
   'pages/agent/components/AgentWorkbenchPresentation.tsx':           4,

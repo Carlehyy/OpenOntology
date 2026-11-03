@@ -1,56 +1,27 @@
 /**
  * 智能助手 — 在本体授权边界内检索、推理与行动
  *
- * 参考 Palantir AIP 的 agent×ontology 机制：
- *   - agent 的世界 = 边界配置授权的对象 / 链接 / 事实 / 动作（技能卡注入）
- *   - 每一步工具调用实时展示（可审计的推理轨迹）
- *   - 回答带对象引用；改数据只出「提案卡」，用户确认 + HITL 审批才真执行
+ * 页面只负责布局与视图选择；会话/run/队列状态在 useAgentConversationState，
+ * 目录数据在 useAgentCatalog。每个会话的 run 独立订阅，切换会话不会中断
+ * 原会话的后台执行；刷新/新 tab 从 conversation.activeRun 恢复。
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  AlertTriangle, ArrowLeftRight, BadgeCheck, BellRing, Bot, CircleOff, FileSearch,
-  FileText, Highlighter, History, List, Loader2, Network, PenLine, Scale, Send, Shield,
-  Sparkles, Square, User, Workflow, X,
+  AlertTriangle, ArrowLeftRight, BellRing, Bot, FileText, History, List, Loader2,
+  Network, Scale, Send, Shield, Square, Workflow, X,
 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { LoadingState } from '@/components/ui/LoadingState'
 import { toast } from 'sonner'
 import SessionHistoryPopover from '@/components/SessionHistoryPopover'
-import { ontologyApi, modelApi } from '@/api/ontologies'
 import { useAuthStore } from '@/stores/authStore'
-import {
-  agentApi, streamAgentChat,
-  type AgentCapabilities, type AgentChatRun, type AgentStep,
-} from '@/api/agent'
-import { ProposalCard } from './ProposalCard'
-import { SentinelProposalCard } from './SentinelProposalCard'
-import { BoundaryDrawer } from './BoundaryDrawer'
+import { agentApi } from '@/api/agent'
 import { DynamicSentinelDrawer } from './DynamicSentinelDrawer'
-import { AgentChart } from './AgentChart'
-import {
-  enqueuePrompt,
-  loadQueuedPrompts,
-  mergeQueuedPrompts,
-  persistQueuedPrompts,
-  queuedPromptsKey,
-  type QueuedPrompt,
-} from './components/queuedPrompts'
-import {
-  loadActiveChatRun,
-  patchActiveChatRunConversationId,
-  persistActiveChatRun,
-  RESUME_POLL_INTERVAL_MS,
-  RESUME_POLL_TIMEOUT_MS,
-  type ActiveChatRun,
-} from './components/activeChatRun'
+import { BoundaryDrawer } from './BoundaryDrawer'
+import { AgentChatTranscript } from './components/AgentChatTranscript'
 import {
   AgentCallChainView,
-  Md,
-  ProvenanceBar,
   SplitHandle,
-  StepTrace,
-  collectCharts,
   downloadJson,
   safeExportFilename,
   useAssistantLayout,
@@ -58,167 +29,48 @@ import {
 } from './components/AgentWorkbenchPresentation'
 import { OntologyNetworkView } from './components/OntologyNetworkView'
 import { OntologyCardCarousel } from './components/OntologyCardCarousel'
-import type { GraphAssistantSignal } from './InstanceKnowledgeGraph'
-import { useOntologyStore } from '../../palantir-graph/store/ontologyStore'
+import { useAgentCatalog } from './hooks/useAgentCatalog'
+import { useAgentConversationState } from './hooks/useAgentConversationState'
 
 const InstanceKnowledgeGraph = lazy(() => import('./InstanceKnowledgeGraph'))
 const DecisionSimulationView = lazy(() => import('./DecisionSimulationView'))
 
-let _mid = 0
-const nextId = () => `m-${Date.now()}-${_mid++}`
-
 const selectArrow = "url(\"data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")"
 
-// ---------- 页面 ----------
+type WorkspaceView = 'ontology' | 'data' | 'decision' | 'trace'
 
 export default function AgentWorkbenchPage() {
-  const isAdmin = useAuthStore(s => s.user?.role === 'admin')
+  const isAdmin = useAuthStore(state => state.user?.role === 'admin')
   const navigate = useNavigate()
-  const [searchParams, setSearchParams] = useSearchParams()
   const { containerRef, sizes, startResize } = useAssistantLayout()
-
-  // -- 本体 / 模型选择 --
-  const { data: ontologies = [], isLoading: ontologiesLoading } = useQuery({
-    queryKey: ['ontologies'], queryFn: () => ontologyApi.list({ page_size: 1000 }) as any,
-  })
-  const ontologyList = useMemo(
-    () => (ontologies as any)?.items || ontologies || [], [ontologies])
-  // A project may have editable drafts while its immutable current release
-  // remains queryable.  project.status is only a legacy compatibility field;
-  // the release pointer is the authoritative assistant scope (including v0).
-  const releasedOntologyList = useMemo(
-    () => ontologyList.filter((item: any) => !!item.current_release_id), [ontologyList])
-  const requestedOntologyId = searchParams.get('ontology_id')?.trim() || ''
-  const oid = releasedOntologyList.some((item: any) => item.id === requestedOntologyId)
-    ? requestedOntologyId
-    : ''
-  const [workspaceView, setWorkspaceView] = useState<'ontology' | 'data' | 'decision' | 'trace'>('ontology')
-
-  const selectOntology = useCallback((nextOntologyId: string) => {
-    setSearchParams(previous => {
-      const next = new URLSearchParams(previous)
-      if (nextOntologyId) next.set('ontology_id', nextOntologyId)
-      else next.delete('ontology_id')
-      return next
-    }, { replace: true })
-  }, [setSearchParams])
-
-  const selectedOntology = releasedOntologyList.find((item: any) => item.id === oid)
-  const releaseId = selectedOntology?.current_release_id || ''
-
-  const queryClient = useQueryClient()
-  // 卡片确认选中：先写入 URL 触发加载，再 fire-and-forget 记录全局选用次数。
-  // 计数失败不影响选中流程；成功后刷新列表缓存，下次进入轮播按最新热度排序。
-  const selectOntologyFromCard = useCallback((item: any) => {
-    selectOntology(item.id)
-    ontologyApi.recordAssistantCardClick(item.id)
-      .then(() => queryClient.invalidateQueries({ queryKey: ['ontologies'] }))
-      .catch(() => {})
-  }, [selectOntology, queryClient])
-
-  const { data: models = [] } = useQuery({ queryKey: ['models'], queryFn: () => modelApi.list() as any })
-  const llmModels = Array.isArray(models) ? (models as any[]).filter((m: any) => m.config_type === 'llm' || !m.config_type) : []
-  const [modelId, setModelId] = useState('')
-  useEffect(() => {
-    if (!modelId && llmModels.length > 0) setModelId(llmModels[0].id)
-  }, [llmModels, modelId])
-
-  // -- 本体结构（复用本体模型数据源，只读展示） --
-  const loadFromBackend = useOntologyStore(s => s.loadFromBackend)
-  const graphOntology = useOntologyStore(s => s.ontology)
-  const backendId = useOntologyStore(s => s.backendId)
-  const syncStatus = useOntologyStore(s => s.syncStatus)
-  const syncError = useOntologyStore(s => s.syncError)
-
-  useEffect(() => {
-    if (!oid || !releaseId) return
-    void loadFromBackend(oid, releaseId)
-  }, [oid, releaseId, loadFromBackend])
-
-  const modelReady = !!oid && backendId === oid && syncStatus !== 'loading' && !!graphOntology
-  const modelOntology = modelReady ? graphOntology : null
-  const objectTypes = modelOntology?.objectTypes || []
-  const linkTypes = modelOntology?.linkTypes || []
-  const actions = modelOntology?.actions || []
-  const functions = modelOntology?.functions || []
-
-  // -- 能力边界 --
-  const { data: caps } = useQuery<AgentCapabilities>({
-    queryKey: ['agent-capabilities', oid, releaseId],
-    queryFn: () => agentApi.capabilities(oid, releaseId),
-    enabled: !!oid && !!releaseId,
-  })
-  // 实例计数以能力边界接口为准（后端按 ontology_id + release_id 对运行投影
-  // group-by，与助手技能卡同一数据源）。本体拓扑图加载的 versions workspace
-  // 载荷按设计只携带试跑隔离实例、不携带生产实例，直接用它计数恒为 0（MYW-61）。
-  const capsInstanceCounts = useMemo(() => {
-    const counts = new Map<string, number>()
-    ;(caps?.objectTypes || []).forEach(item => counts.set(item.id, item.instanceCount ?? 0))
-    return counts
-  }, [caps])
-  const instancesCount = useCallback(
-    (objectTypeId: string) => {
-      if (capsInstanceCounts.has(objectTypeId)) return capsInstanceCounts.get(objectTypeId)!
-      return (modelOntology?.instances || []).filter(i => i.objectTypeId === objectTypeId).length
-    },
-    [capsInstanceCounts, modelOntology],
-  )
-
-  const dynamicObjectTypes = useMemo(() => {
-    if (!caps) return []
-    const allowed = new Set(caps.objectTypes.map(item => item.id))
-    return objectTypes.filter(item => allowed.has(item.id))
-  }, [caps, objectTypes])
-  const dynamicLinkTypes = useMemo(() => {
-    if (!caps) return []
-    const allowed = new Set(caps.linkTypes.map(item => item.id))
-    return linkTypes.filter(item => allowed.has(item.id))
-  }, [caps, linkTypes])
-  const dynamicActions = useMemo(() => {
-    if (!caps) return []
-    const allowed = new Set(caps.actions.map(item => item.id))
-    return actions.filter(item => allowed.has(item.id))
-  }, [actions, caps])
-
-  // -- 会话 --
-  const [conversationId, setConversationId] = useState<string | null>(null)
-  const [messages, setMessages] = useState<ChatMsg[]>([])
-  const [input, setInput] = useState('')
-  const [busy, setBusy] = useState(false)
-  // 推演桥接占位：仅「推演意图回合」为真，供决策推演面板显示「正在启动」；
-  // 普通聊天回合不得置位，否则面板会对任意提问谎报推演中。
-  const [decisionPending, setDecisionPending] = useState(false)
-  const abortRef = useRef<AbortController | null>(null)
-  const runIdRef = useRef<string | null>(null)
-  const stoppedRef = useRef(false)
-  // 状态镜像：后台回合恢复流程跨 await 检查「是否仍停留在原会话/本体」用
-  const conversationIdRef = useRef<string | null>(null)
-  const oidRef = useRef('')
-  useEffect(() => { oidRef.current = oid }, [oid])
-  // 同一时刻只允许一个活动回合（send 或后台恢复），避免 busy 与 runId 互相踩踏
-  const turnOwnerRef = useRef<'send' | 'resume' | null>(null)
-  const resumeSeqRef = useRef(0)
-  const resumeRef = useRef<((entry: ActiveChatRun) => Promise<void>) | null>(null)
-  // 返回页面时的后台回合登记：刷新/跳转后仍可恢复「正在处理」的展示（MYW-71）
-  const [backgroundRun, setBackgroundRun] = useState<ActiveChatRun | null>(null)
-  useEffect(() => { setBackgroundRun(loadActiveChatRun()) }, [])
-  // 组件卸载（SPA 跳转）后终止仍在运行的恢复轮询；回合本身由后端继续执行落库
-  useEffect(() => () => { resumeSeqRef.current++ }, [])
-  // 追问队列：运行中提交的问题排队，回合终态后自动派发下一条
-  const queuedRef = useRef<QueuedPrompt[]>([])
-  const [queuedCount, setQueuedCount] = useState(0)
+  const catalog = useAgentCatalog()
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('ontology')
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [sentinelDrawerOpen, setSentinelDrawerOpen] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
-  const [exportingConversationId, setExportingConversationId] = useState<string | null>(null)
   const [showJump, setShowJump] = useState(false)
-  const [graphSignal, setGraphSignal] = useState<GraphAssistantSignal | null>(null)
-  const [decisionRunId, setDecisionRunId] = useState<string | null>(null)
+  const [input, setInput] = useState('')
+  const [exportingConversationId, setExportingConversationId] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  const conversation = useAgentConversationState({
+    oid: catalog.oid,
+    releaseId: catalog.releaseId,
+    modelId: catalog.modelId,
+    onDecisionIntent: () => setWorkspaceView('decision'),
+    onOpenDecision: () => setWorkspaceView('decision'),
+    onOpenData: () => setWorkspaceView('data'),
+    onRestoreView: view => setWorkspaceView(view),
+  })
+  const {
+    messages, busy, queueCount, backgroundRuns, attentionRuns, graphSignal, decisionRunId,
+    decisionPending, conversationId, send, stopRun, retryRun, reconnectRun,
+  } = conversation
+  const { setGraphSignal } = conversation
+
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  // 我发送过的消息（用于「跳转到我的提问」）
-  const myMessages = useMemo(() => messages.filter(m => m.role === 'user'), [messages])
+  const myMessages = useMemo(() => messages.filter(message => message.role === 'user'), [messages])
   const jumpToMessage = useCallback((id: string) => {
     setShowJump(false)
     requestAnimationFrame(() => {
@@ -226,108 +78,12 @@ export default function AgentWorkbenchPage() {
     })
   }, [])
 
-  const { data: conversations = [], refetch: refetchConversations } = useQuery({
-    queryKey: ['agent-conversations', oid, releaseId],
-    queryFn: () => agentApi.conversations(oid, releaseId),
-    enabled: !!oid && !!releaseId,
-  })
-
-  const resetChat = useCallback(() => {
-    conversationIdRef.current = null
-    setConversationId(null)
-    setMessages([])
-    setShowHistory(false)
-    setShowJump(false)
-    setGraphSignal(null)
-    setDecisionRunId(null)
-  }, [])
-  useEffect(() => { resetChat() }, [oid, releaseId, resetChat])
-
-  // 会话切换时装载该会话的追问队列；新会话创建时把 'pending' 占位桶的排队项并入
-  useEffect(() => {
-    const key = queuedPromptsKey(conversationId)
-    const current = loadQueuedPrompts(key)
-    const pending = loadQueuedPrompts(queuedPromptsKey(null))
-    const merged = mergeQueuedPrompts(current, pending)
-    queuedRef.current = merged
-    setQueuedCount(merged.length)
-    persistQueuedPrompts(key, merged)
-    if (pending.length > 0) persistQueuedPrompts(queuedPromptsKey(null), [])
-  }, [conversationId])
-
-  const updateQueue = useCallback((next: QueuedPrompt[]) => {
-    queuedRef.current = next
-    setQueuedCount(next.length)
-    persistQueuedPrompts(queuedPromptsKey(conversationId), next)
-  }, [conversationId])
-
-  const queuePrompt = useCallback((text: string) => {
-    updateQueue(enqueuePrompt(queuedRef.current, text))
-  }, [updateQueue])
-
-  const clearQueue = useCallback(() => {
-    updateQueue([])
-  }, [updateQueue])
-
-  const stopCurrentTurn = useCallback(() => {
-    stoppedRef.current = true
-    if (runIdRef.current) agentApi.cancelChat(oid, runIdRef.current).catch(() => {})
-    abortRef.current?.abort()
-  }, [oid])
-
-  const loadConversation = async (cid: string) => {
-    const conv = await agentApi.conversation(oid, cid)
-    const restoredMessages = (conv.messages || []).map(m => ({
-      id: m.id, role: m.role, content: m.content,
-      steps: m.steps || [], citations: m.citations || [], proposals: m.proposals || [],
-      // 后端落库时刻：调用链按轮次推导开始 / 结束时间与总耗时（MYW-66）
-      createdAt: m.createdAt || null,
-    }))
-    setConversationId(cid)
-    conversationIdRef.current = cid
-    setMessages(restoredMessages)
-    setDecisionRunId(null)
-    setGraphSignal(null)
-    const lastVisual = [...restoredMessages].reverse().find(message =>
-      message.role === 'assistant' && (message.citations.length > 0 || message.steps.some(step => {
-        const kind = (step.result as any)?.kind
-        return kind === 'path' || kind === 'impact' || kind === 'decision_simulation'
-      })))
-    if (lastVisual) {
-      const lastDecision = [...lastVisual.steps].reverse().find(step =>
-        (step.result as any)?.kind === 'decision_simulation')
-      if (lastDecision) {
-        setDecisionRunId(String((lastDecision.result as any)?.runId || '') || null)
-        setWorkspaceView('decision')
-      } else {
-        // MYW-65：恢复历史会话只还原 path/impact 可视化（restore 语义），不自动高亮引用；
-        // 引用节点是否高亮由用户在引用行主动触发。
-        setWorkspaceView('data')
-        setGraphSignal({ sequence: Date.now(), steps: lastVisual.steps, citations: [], intent: 'restore' })
-      }
-    }
-    setShowHistory(false)
-    // 打开的会话恰有登记中的后台回合且当前空闲 → 自动恢复「正在处理」展示（MYW-71）。
-    // 由 send / 恢复流程自身触发的装载（turnOwner 非空）不重复挂接。
-    const activeEntry = loadActiveChatRun()
-    if (!turnOwnerRef.current && activeEntry
-      && activeEntry.ontologyId === oid && activeEntry.conversationId === cid) {
-      void resumeRef.current?.(activeEntry)
-    }
-  }
-
-  const removeConversation = async (cid: string) => {
-    await agentApi.deleteConversation(oid, cid)
-    if (cid === conversationId) resetChat()
-    refetchConversations()
-  }
-
-  const exportConversation = async (cid: string) => {
-    if (!oid || exportingConversationId) return
-    setExportingConversationId(cid)
+  const exportConversation = useCallback(async (conversationIdToExport: string) => {
+    if (!catalog.oid || exportingConversationId) return
+    setExportingConversationId(conversationIdToExport)
     try {
-      const data = await agentApi.exportConversation(oid, cid)
-      downloadJson(data, safeExportFilename(data.conversation.title, cid))
+      const data = await agentApi.exportConversation(catalog.oid, conversationIdToExport)
+      downloadJson(data, safeExportFilename(data.conversation.title, conversationIdToExport))
       const legacyCount = data.summary.contentCompleteness.legacyTruncatedToolResultCount
       const notifyExport = legacyCount > 0 ? toast.warning : toast.success
       notifyExport('会话记录已导出', {
@@ -340,232 +96,49 @@ export default function AgentWorkbenchPage() {
     } finally {
       setExportingConversationId(null)
     }
-  }
+  }, [catalog.oid, exportingConversationId])
 
-  const send = useCallback(async (text?: string) => {
-    const question = (text ?? input).trim()
-    if (!question || !oid) return
-    // 运行中：追问进入会话级队列，回合终态后自动派发
-    if (busy) {
-      queuePrompt(question)
-      setInput('')
-      return
-    }
-    setInput('')
-    setBusy(true)
-    turnOwnerRef.current = 'send'
-    stoppedRef.current = false
-    runIdRef.current = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    // 登记后台回合：离开页面（刷新/跳转）后凭 run_id 恢复「正在处理」展示（MYW-71）
-    const runEntry: ActiveChatRun = {
-      runId: runIdRef.current,
-      ontologyId: oid,
-      conversationId: conversationIdRef.current,
-      question,
-      startedAt: new Date().toISOString(),
-    }
-    persistActiveChatRun(runEntry)
-    setBackgroundRun(null)
-    abortRef.current = new AbortController()
-    if (/(决策推演|推演.{0,24}(方案|策略|未来|决策)|(?:方案|策略).{0,24}(比较|推演))/.test(question)) {
-      setWorkspaceView('decision')
-      setDecisionPending(true)
-    }
+  const openBackgroundRun = useCallback((cid: string) => {
+    void conversation.loadConversation(cid)
+  }, [conversation])
 
-    setMessages(prev => [...prev, {
-      id: nextId(), role: 'user', content: question, steps: [], citations: [], proposals: [],
-      createdAt: new Date().toISOString(),
-    }])
-    const aid = nextId()
-    setMessages(prev => [...prev, {
-      id: aid, role: 'assistant', content: '', steps: [], citations: [], proposals: [], loading: true,
-    }])
-    const patch = (p: Partial<ChatMsg> | ((m: ChatMsg) => Partial<ChatMsg>)) =>
-      setMessages(prev => prev.map(m =>
-        m.id === aid ? { ...m, ...(typeof p === 'function' ? p(m) : p) } : m))
+  const highlightCitations = useCallback((message: ChatMsg, citations: ChatMsg['citations']) => {
+    setWorkspaceView('data')
+    setGraphSignal({
+      sequence: Date.now(),
+      steps: message.steps,
+      citations,
+      intent: 'highlight',
+    })
+  }, [setGraphSignal])
 
-    const turnSteps: AgentStep[] = []
-    let streamLost = false
-    try {
-      await streamAgentChat(oid, {
-        message: question, conversationId, modelId, releaseId, runId: runIdRef.current,
-      }, ev => {
-        if (ev.type === 'meta') {
-          setConversationId(ev.conversationId)
-          conversationIdRef.current = ev.conversationId
-          patchActiveChatRunConversationId(ev.conversationId)
-        } else if (ev.type === 'step') {
-          const { type: _t, ...step } = ev
-          const typedStep = step as AgentStep
-          turnSteps.push(typedStep)
-          patch(m => ({ steps: [...m.steps, typedStep] }))
-          const kind = (typedStep.result as any)?.kind
-          if (kind === 'decision_simulation') {
-            setDecisionRunId(String((typedStep.result as any)?.runId || '') || null)
-            // 真实推演 run 接管面板展示，桥接占位即刻结束
-            setDecisionPending(false)
-            setWorkspaceView('decision')
-          } else if (kind === 'path' || kind === 'impact') {
-            setWorkspaceView('data')
-            setGraphSignal({ sequence: Date.now(), steps: [...turnSteps], citations: [], intent: 'analyze' })
-          }
-        } else if (ev.type === 'answer') {
-          patch({ content: ev.content, citations: ev.citations || [], proposals: ev.proposals || [], loading: false })
-          // MYW-65：回答完成后不再自动高亮引用节点（原先会一直常亮）；
-          // 引用高亮改由用户点击引用行右侧的「高亮 / 取消高亮」按钮或引用角标触发。
-        } else if (ev.type === 'cancelled') {
-          patch({ content: '（已停止）', loading: false })
-        } else if (ev.type === 'error') {
-          patch({ error: ev.message, loading: false })
-        }
-      }, abortRef.current.signal)
-    } catch (e: any) {
-      if (stoppedRef.current || (e?.name === 'AbortError')) {
-        patch(m => m.loading ? { content: '（已停止）', loading: false } : {})
-      } else {
-        // 连接中断但回合已在后台继续：走恢复流程，而不是把消息标记为失败丢失
-        streamLost = true
-        patch({ error: e?.message || '连接中断，正在恢复后台处理…', loading: false })
-      }
-    } finally {
-      // 回合终态（答复 / 停止 / 异常）补写本地时钟，调用链据此展示每轮结束时间与总耗时（MYW-66）
-      setDecisionPending(false)
-      patch(m => (m.createdAt ? {} : { createdAt: new Date().toISOString() }))
-      abortRef.current = null
-      runIdRef.current = null
-      refetchConversations()
-      if (streamLost) {
-        // 后端回合与 SSE 解耦（MYW-71）：凭登记恢复「正在处理」展示，终态后由
-        // 恢复流程重新装载会话并派发追问队列。登记保留，busy 交给恢复流程接管。
-        turnOwnerRef.current = null
-        void resumeRef.current?.({
-          ...runEntry,
-          conversationId: conversationIdRef.current || runEntry.conversationId,
-        })
-      } else {
-        persistActiveChatRun(null)
-        turnOwnerRef.current = null
-        setBusy(false)
-        // 追问队列自动派发下一条
-        const remaining = queuedRef.current
-        if (remaining.length > 0) {
-          const [head, ...tail] = remaining
-          updateQueue(tail)
-          void send(head.text)
-        }
-      }
-    }
-  }, [busy, conversationId, input, modelId, oid, queuePrompt, releaseId, refetchConversations, updateQueue])
+  const clearHighlight = useCallback(() => {
+    setGraphSignal({
+      sequence: Date.now(),
+      steps: [],
+      citations: [],
+      intent: 'clear-highlight',
+    })
+  }, [setGraphSignal])
 
-  /**
-   * 恢复后台回合（MYW-71）：用户发送消息后离开页面（刷新/跳转），回合仍在
-   * 后端执行完毕并落库。回到页面后凭登记的 run_id 轮询回合状态：仍在处理则
-   * 装载会话并展示「正在处理」占位，到终态后重新装载、用落库的完整回答
-   * （含调用链）替换占位气泡。期间排队的追问照常在终态后派发。
-   */
-  const resumeBackgroundRun = async (entry: ActiveChatRun) => {
-    if (turnOwnerRef.current) return
-    turnOwnerRef.current = 'resume'
-    const seq = ++resumeSeqRef.current
-    const runOid = entry.ontologyId
-    // 仍停留在恢复目标（同会话、同本体、恢复流程未被接替）才允许继续写界面
-    const contextAlive = (convId: string) =>
-      resumeSeqRef.current === seq
-      && turnOwnerRef.current === 'resume'
-      && conversationIdRef.current === convId
-      && oidRef.current === runOid
-    setBusy(true)
-    stoppedRef.current = false
-    runIdRef.current = entry.runId
-    try {
-      // 1. 查询回合状态；瞬态网络错误重试一次
-      let snapshot: AgentChatRun | null = await agentApi.chatRun(runOid, entry.runId).catch(() => null)
-      if (!snapshot) {
-        await new Promise(resolve => setTimeout(resolve, RESUME_POLL_INTERVAL_MS))
-        snapshot = await agentApi.chatRun(runOid, entry.runId).catch(() => null)
-      }
-      if (!snapshot) throw new Error('回合状态不可用')
-      const convId = snapshot.conversationId || entry.conversationId
-      if (!convId || snapshot.status === 'unknown') {
-        // 回合已结束很久 / 后端重启 / 从未执行：清登记；能定位会话就装载最新内容
-        persistActiveChatRun(null)
-        setBackgroundRun(null)
-        if (convId) await loadConversation(convId).catch(() => {})
-        else {
-          toast.info('后台消息已结束', { description: '未找到处理中的会话，可在历史会话中查看结果。' })
-        }
-        return
-      }
-      // 2. 装载会话（提问已落库，回答随终态落库）
-      await loadConversation(convId)
-      if (snapshot.status === 'running') {
-        if (!contextAlive(convId)) return
-        setMessages(prev => [...prev, {
-          id: nextId(), role: 'assistant', content: '', steps: [], citations: [], proposals: [],
-          loading: true, resumed: true,
-        }])
-        const deadline = Date.now() + RESUME_POLL_TIMEOUT_MS
-        let terminal: AgentChatRun['status'] = 'unknown'
-        while (Date.now() < deadline) {
-          await new Promise(resolve => setTimeout(resolve, RESUME_POLL_INTERVAL_MS))
-          if (!contextAlive(convId)) return
-          const next = await agentApi.chatRun(runOid, entry.runId).catch(() => null)
-          if (!contextAlive(convId)) return
-          if (next && next.status !== 'running') {
-            terminal = next.status
-            break
-          }
-        }
-        if (!contextAlive(convId)) return
-        // 等待上限内未到终态（terminal 仍为 unknown）：如实提示，不在前端伪造终态
-        if (terminal === 'unknown') {
-          toast.info('后台消息仍在处理', { description: '已超出本次等待上限，稍后可在历史会话中查看结果。' })
-        }
-      }
-      // 3. 终态：重新装载会话，占位气泡被落库的完整回答替换
-      await loadConversation(convId)
-      persistActiveChatRun(null)
-      setBackgroundRun(null)
-      refetchConversations()
-      // 4. 恢复期间排队的追问照常派发
-      if (contextAlive(convId)) {
-        const remaining = queuedRef.current
-        if (remaining.length > 0) {
-          const [head, ...tail] = remaining
-          updateQueue(tail)
-          void send(head.text)
-        }
-      }
-    } catch {
-      toast.error('恢复后台消息失败', { description: '请稍后在历史会话中查看结果。' })
-    } finally {
-      runIdRef.current = null
-      if (turnOwnerRef.current === 'resume') {
-        turnOwnerRef.current = null
-        setBusy(false)
-      }
-    }
-  }
-  // send（useCallback）在流断开时要调用到最新一帧的恢复逻辑，用 ref 中转
-  resumeRef.current = resumeBackgroundRun
+  const handleResetChat = useCallback(() => {
+    conversation.resetChat()
+    setShowHistory(false)
+    setShowJump(false)
+  }, [conversation])
 
-  const suggested = useMemo<string[]>(() => {
-    const first = caps?.objectTypes?.[0]?.displayName
-    return first ? [
-      '“' + first + '”有哪些实例？',
-      '帮我寻找两个具体实例之间的关系路径',
-      '分析一个字段拟议变化的直接和间接关联范围',
-      '推演一项未来决策，比较可选方案、关键风险和早期信号',
-    ] : []
-  }, [caps])
+  const handleOpenConversation = useCallback((cid: string) => {
+    setShowHistory(false)
+    void conversation.loadConversation(cid)
+  }, [conversation])
 
-  if (ontologiesLoading) return <LoadingState message="加载配置..." />
+  if (catalog.ontologiesLoading) return <LoadingState message="加载配置..." />
 
   const panelClass = 'workspace-topology-surface min-h-0 min-w-0 overflow-hidden rounded-lg border border-[var(--color-border)] shadow-sm'
-  const graphLoading = workspaceView === 'ontology' && !!oid && backendId === oid && syncStatus === 'loading'
-  const graphError = workspaceView === 'ontology' && !!oid && backendId === oid && syncStatus === 'error' && !graphOntology
+  const graphLoading = workspaceView === 'ontology' && !!catalog.oid
+    && catalog.backendId === catalog.oid && catalog.syncStatus === 'loading'
+  const graphError = workspaceView === 'ontology' && !!catalog.oid
+    && catalog.backendId === catalog.oid && catalog.syncStatus === 'error' && !catalog.graphOntology
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--color-bg-base)]">
@@ -586,32 +159,32 @@ export default function AgentWorkbenchPage() {
                   <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
                     {workspaceView === 'ontology' ? '本体拓扑图' : workspaceView === 'data' ? '数据推演图谱' : workspaceView === 'decision' ? '决策推演' : 'Agent调用链'}
                   </h3>
-                  <p className={`truncate text-[11px] ${workspaceView === 'ontology' && syncStatus === 'error' ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-tertiary)]'}`}>
-                    {workspaceView === 'ontology' && syncStatus === 'error'
-                      ? (syncError || '网络图加载失败。')
+                  <p className={`truncate text-[11px] ${workspaceView === 'ontology' && catalog.syncStatus === 'error' ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-tertiary)]'}`}>
+                    {workspaceView === 'ontology' && catalog.syncStatus === 'error'
+                      ? (catalog.syncError || '网络图加载失败。')
                       : workspaceView === 'ontology'
-                        ? `${selectedOntology?.name || '未选择本体'} · 只读展示对象类型与关系`
+                        ? `${catalog.selectedOntology?.name || '未选择本体'} · 只读展示对象类型与关系`
                         : workspaceView === 'data'
-                          ? `${selectedOntology?.name || '未选择本体'} · 实例、路径与拟议变更联动`
+                          ? `${catalog.selectedOntology?.name || '未选择本体'} · 实例、路径与拟议变更联动`
                           : workspaceView === 'decision'
-                            ? `${selectedOntology?.name || '未选择本体'} · 隔离快照、多视角与方案比较`
-                          : `${selectedOntology?.name || '未选择本体'} · 当前会话工具调用可审计、可复盘`}
+                            ? `${catalog.selectedOntology?.name || '未选择本体'} · 隔离快照、多视角与方案比较`
+                            : `${catalog.selectedOntology?.name || '未选择本体'} · 当前会话工具调用可审计、可复盘`}
                   </p>
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <select
-                  value={oid}
-                  onChange={e => selectOntology(e.target.value)}
+                  value={catalog.oid}
+                  onChange={event => catalog.selectOntology(event.target.value)}
                   aria-label="选择本体"
                   className="h-8 min-w-[180px] cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-3 pr-8 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
                   style={{ backgroundImage: selectArrow, backgroundPosition: 'right 10px center' }}
                 >
-                  {releasedOntologyList.length === 0 && <option value="">无已发布本体</option>}
-                  {releasedOntologyList.length > 0 && <option value="">请选择已发布本体</option>}
-                  {releasedOntologyList.map((o: any) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name} · {o.current_release_version || o.version}
+                  {catalog.releasedOntologyList.length === 0 && <option value="">无已发布本体</option>}
+                  {catalog.releasedOntologyList.length > 0 && <option value="">请选择已发布本体</option>}
+                  {catalog.releasedOntologyList.map((ontology: any) => (
+                    <option key={ontology.id} value={ontology.id}>
+                      {ontology.name} · {ontology.current_release_version || ontology.version}
                     </option>
                   ))}
                 </select>
@@ -626,7 +199,7 @@ export default function AgentWorkbenchPage() {
                       key={item.id}
                       type="button"
                       onClick={() => setWorkspaceView(item.id)}
-                      disabled={!oid}
+                      disabled={!catalog.oid}
                       title={item.label}
                       aria-label={`切换到${item.label}`}
                       aria-pressed={workspaceView === item.id}
@@ -650,18 +223,15 @@ export default function AgentWorkbenchPage() {
                 </div>
               )}>
                 <DecisionSimulationView
-                  oid={oid}
-                  releaseId={releaseId}
+                  oid={catalog.oid}
+                  releaseId={catalog.releaseId}
                   conversationId={conversationId}
                   activeRunId={decisionRunId}
                   running={decisionPending}
                 />
               </Suspense>
             ) : workspaceView === 'trace' ? (
-              <AgentCallChainView
-                messages={messages}
-                running={busy}
-              />
+              <AgentCallChainView messages={messages} running={busy} />
             ) : workspaceView === 'data' ? (
               <Suspense fallback={(
                 <div className="flex h-full items-center justify-center gap-2 bg-muted text-xs text-muted-foreground">
@@ -669,8 +239,8 @@ export default function AgentWorkbenchPage() {
                 </div>
               )}>
                 <InstanceKnowledgeGraph
-                  oid={oid}
-                  releaseId={releaseId}
+                  oid={catalog.oid}
+                  releaseId={catalog.releaseId}
                   assistantSignal={graphSignal}
                   onAskAssistant={question => void send(question)}
                 />
@@ -684,23 +254,23 @@ export default function AgentWorkbenchPage() {
               <div className="flex h-full items-center justify-center p-6">
                 <div className="max-w-sm rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-4 py-3 text-sm text-[var(--color-danger)]">
                   <div className="mb-1 flex items-center gap-2 font-medium"><AlertTriangle size={15} />图谱加载失败</div>
-                  <p className="text-xs leading-relaxed text-[var(--color-danger)]">{syncError || '请稍后刷新模型结构。'}</p>
+                  <p className="text-xs leading-relaxed text-[var(--color-danger)]">{catalog.syncError || '请稍后刷新模型结构。'}</p>
                 </div>
               </div>
-            ) : !oid ? (
+            ) : !catalog.oid ? (
               <OntologyCardCarousel
-                items={releasedOntologyList}
-                onSelect={selectOntologyFromCard}
+                items={catalog.releasedOntologyList}
+                onSelect={catalog.selectOntologyFromCard}
               />
             ) : (
               <OntologyNetworkView
-                objectTypes={objectTypes}
-                linkTypes={linkTypes}
-                actions={actions}
-                functions={functions}
-                instancesCount={instancesCount}
-                releaseId={releaseId}
-                oid={oid}
+                objectTypes={catalog.objectTypes}
+                linkTypes={catalog.linkTypes}
+                actions={catalog.actions}
+                functions={catalog.functions}
+                instancesCount={catalog.instancesCount}
+                releaseId={catalog.releaseId}
+                oid={catalog.oid}
               />
             )}
           </div>
@@ -720,7 +290,7 @@ export default function AgentWorkbenchPage() {
                   <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">智能对话</h3>
                   <p className="truncate text-[11px] text-[var(--color-text-tertiary)]">基于授权范围回答，并可生成行动提案</p>
                 </div>
-                {caps && !caps.enabled && (
+                {catalog.caps && !catalog.caps.enabled && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-danger-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-danger)]">
                     <AlertTriangle size={11} />智能体已停用
                   </span>
@@ -728,19 +298,19 @@ export default function AgentWorkbenchPage() {
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <select
-                  value={modelId}
-                  onChange={e => setModelId(e.target.value)}
+                  value={catalog.modelId}
+                  onChange={event => catalog.setModelId(event.target.value)}
                   aria-label="选择对话模型"
-                  disabled={!oid}
+                  disabled={!catalog.oid}
                   className="h-8 w-44 cursor-pointer appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg-base)] bg-no-repeat pl-2 pr-7 text-xs text-[var(--color-text-primary)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 disabled:cursor-not-allowed"
                   style={{ backgroundImage: selectArrow, backgroundPosition: 'right 6px center', backgroundSize: '10px' }}
                 >
-                  {llmModels.map((m: any) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  {catalog.llmModels.map((model: any) => <option key={model.id} value={model.id}>{model.name}</option>)}
                 </select>
                 <button
                   type="button"
                   onClick={() => setSentinelDrawerOpen(true)}
-                  disabled={!oid || !releaseId}
+                  disabled={!catalog.oid || !catalog.releaseId}
                   aria-label="管理动态哨兵"
                   data-testid="dynamic-sentinel-button"
                   className="group/tip relative flex h-8 w-8 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:cursor-not-allowed disabled:opacity-30"
@@ -749,7 +319,7 @@ export default function AgentWorkbenchPage() {
                   <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">动态哨兵</span>
                 </button>
                 {isAdmin && (
-                  <button onClick={() => setDrawerOpen(true)} disabled={!oid} aria-label="授权边界配置"
+                  <button onClick={() => setDrawerOpen(true)} disabled={!catalog.oid} aria-label="授权边界配置"
                     className="group/tip relative flex h-8 w-8 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:opacity-30 disabled:cursor-not-allowed">
                     <Shield size={14} />
                     <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">授权边界配置</span>
@@ -757,22 +327,22 @@ export default function AgentWorkbenchPage() {
                 )}
                 <button
                   type="button"
-                  onClick={() => navigate(oid
-                    ? `/agent/reports/new?ontologyId=${encodeURIComponent(oid)}${conversationId ? `&conversationId=${encodeURIComponent(conversationId)}` : ''}`
+                  onClick={() => navigate(catalog.oid
+                    ? `/agent/reports/new?ontologyId=${encodeURIComponent(catalog.oid)}${conversationId ? `&conversationId=${encodeURIComponent(conversationId)}` : ''}`
                     : '/agent/reports')}
-                  disabled={!oid}
-                  aria-label={oid ? '生成分析报告' : '分析报告'}
+                  disabled={!catalog.oid}
+                  aria-label={catalog.oid ? '生成分析报告' : '分析报告'}
                   className="group/tip relative flex h-8 w-8 items-center justify-center rounded-md border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] text-[var(--color-info)] transition-colors hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)] hover:text-[var(--color-info)] disabled:cursor-not-allowed disabled:opacity-30"
-                  title={oid ? '基于当前本体和会话生成可编辑分析报告模板' : '打开分析报告工作台'}
+                  title={catalog.oid ? '基于当前本体和会话生成可编辑分析报告模板' : '打开分析报告工作台'}
                 >
                   <FileText size={14} />
-                  <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">{oid ? '生成分析报告' : '分析报告'}</span>
+                  <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">{catalog.oid ? '生成分析报告' : '分析报告'}</span>
                 </button>
                 <div className="relative">
                   <button
                     type="button"
                     onClick={() => setShowHistory(value => !value)}
-                    disabled={!oid}
+                    disabled={!catalog.oid}
                     aria-label="查看历史会话"
                     aria-expanded={showHistory}
                     data-testid="agent-session-history-button"
@@ -782,16 +352,21 @@ export default function AgentWorkbenchPage() {
                   >
                     <History size={14} />
                     <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">查看历史会话</span>
+                    {backgroundRuns.length > 0 && (
+                      <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--color-info)] px-1 text-[9px] font-semibold text-[var(--color-text-inverse)]">
+                        {backgroundRuns.length}
+                      </span>
+                    )}
                   </button>
                   <SessionHistoryPopover
                     open={showHistory}
-                    items={conversations}
+                    items={conversation.conversations}
                     currentId={conversationId}
                     onClose={() => setShowHistory(false)}
-                    onCreate={resetChat}
-                    onSelect={loadConversation}
+                    onCreate={handleResetChat}
+                    onSelect={handleOpenConversation}
                     onExport={exportConversation}
-                    onDelete={removeConversation}
+                    onDelete={conversation.deleteConversation}
                     exportingId={exportingConversationId}
                     renderItemIcon={() => <Bot size={16} />}
                     emptyDescription="开始对话后，可随时回到之前的查询、分析与行动提案。"
@@ -802,154 +377,23 @@ export default function AgentWorkbenchPage() {
           </div>
 
           <div data-testid="agent-chat-region" className="workspace-topology-surface scrollbar-none flex-1 overflow-auto px-4 py-4">
-            {messages.length === 0 ? (
-              <div className="flex min-h-full flex-col justify-center py-8 text-center anim-scale-in">
-                {backgroundRun && backgroundRun.ontologyId === oid && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const entry = backgroundRun
-                      setBackgroundRun(null)
-                      void resumeBackgroundRun(entry)
-                    }}
-                    data-testid="agent-resume-banner"
-                    className="mx-auto mb-5 flex items-center gap-2 rounded-lg border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[var(--color-info-bg)] px-3 py-2 text-xs text-[var(--color-info)] transition-colors hover:border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] hover:bg-[var(--color-info-bg)]"
-                  >
-                    <Loader2 size={13} className="animate-spin" />
-                    <span className="max-w-[260px] truncate">「{backgroundRun.question}」仍在后台处理</span>
-                    <span className="shrink-0 font-medium">点击查看会话</span>
-                  </button>
-                )}
-                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-brand text-[var(--color-text-inverse)] shadow-sm">
-                  <Sparkles size={22} />
-                </div>
-                <h3 className="mb-1 text-base font-semibold text-[var(--color-text-primary)]">
-                   OntoAgent
-                </h3>
-                <p className="mx-auto mb-5 max-w-sm text-xs leading-relaxed text-[var(--color-text-tertiary)]">
-                  基于本体的智能Agent，支持业务查询、风险分析、决策仿真与操作执行
-                </p>
-
-                <div className="mb-5 mx-auto grid w-80 grid-cols-2 gap-2 text-left">
-                  {[
-                    { icon: Sparkles, title: '开始对话', desc: '输入问题，基于本体数据获取智能回答' },
-                    { icon: BadgeCheck, title: '有据可查', desc: '结论来自本体数据并附对象引用' },
-                    { icon: FileSearch, title: '全程可溯', desc: '每步工具调用可展开，查看输入与输出' },
-                    { icon: PenLine, title: '行动预演', desc: '真实修改前先预演提案与影响' },
-                  ].map(f => (
-                    <div key={f.title} className="rounded-md border border-[var(--color-border)] bg-card p-3">
-                      <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold text-[var(--color-text-primary)]">
-                        <f.icon size={14} className="text-brand-ink shrink-0" />{f.title}
-                      </div>
-                      <p className="text-[11px] leading-relaxed text-[var(--color-text-tertiary)]">{f.desc}</p>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="flex flex-wrap justify-center gap-2">
-                  {suggested.map(q => (
-                    <button key={q} onClick={() => send(q)}
-                      className="rounded-full border border-[var(--color-border)] bg-card px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-all hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink">
-                      {q}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-5">
-                {messages.map(msg => msg.role === 'user' ? (
-                  <div key={msg.id} id={`agent-msg-${msg.id}`} className="flex scroll-mt-4 justify-end gap-3">
-                    <div className="max-w-[88%] rounded-lg rounded-br-sm bg-brand-deep px-3.5 py-2.5 text-[var(--color-text-inverse)] shadow-sm">
-                      <p className="whitespace-pre-line text-sm leading-relaxed">{msg.content}</p>
-                    </div>
-                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink shadow-sm">
-                      <User size={14} />
-                    </div>
-                  </div>
-                ) : (
-                  <div key={msg.id} className="flex gap-3">
-                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-brand text-[var(--color-text-inverse)] shadow-sm">
-                      <Bot size={14} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <StepTrace steps={msg.steps} running={msg.loading} />
-                      {msg.loading && msg.resumed && (
-                        <p className="mt-1 flex items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]" data-testid="agent-resume-pending">
-                          <Loader2 size={11} className="animate-spin text-[var(--color-info)]" />
-                          您离开页面期间，这条消息仍在后台处理，完成后自动展示结果。
-                        </p>
-                      )}
-                      {msg.error ? (
-                        <div className="rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-4 py-3">
-                          <p className="flex items-start gap-2 text-sm text-[var(--color-danger)]">
-                            <AlertTriangle size={14} className="mt-0.5 shrink-0" />{msg.error}
-                          </p>
-                        </div>
-                      ) : msg.content ? (
-                        <div className="text-[var(--color-text-primary)]">
-                          <Md text={msg.content} />
-                        </div>
-                      ) : null}
-                      {/* 确定性图表：数字来自工具真实结果，前端渲染，非 LLM 手写 */}
-                      {collectCharts(msg.steps).map((c, i) => <AgentChart key={i} spec={c} />)}
-                      {msg.citations.length > 0 && (
-                        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                          <span className="text-[10px] text-[var(--color-text-tertiary)]">引用</span>
-                          {msg.citations.map(c => (
-                            <button key={c.instanceId}
-                              type="button"
-                              onClick={() => {
-                                setWorkspaceView('data')
-                                setGraphSignal({ sequence: Date.now(), steps: msg.steps, citations: [c], intent: 'highlight' })
-                              }}
-                              title={c.snippet
-                                ? `${c.sourceLabel || `${c.objectType} · ${c.label}`} — ${c.snippet}`
-                                : (c.sourceLabel || c.instanceId)}
-                              className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-card px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:border-viz-cyan-soft hover:bg-viz-cyan-soft">
-                              <span className="text-[var(--color-text-tertiary)]">{c.objectType}</span>
-                              <span className="font-medium text-[var(--color-text-primary)]">{c.label}</span>
-                            </button>
-                          ))}
-                          {/* MYW-65：引用行最右侧的高亮控制 —— 手动高亮当前引用节点 / 取消高亮 */}
-                          <span className="ml-auto flex shrink-0 items-center gap-1 pl-1" data-testid="citation-actions">
-                            <button
-                              type="button"
-                              disabled={msg.loading}
-                              onClick={() => {
-                                setWorkspaceView('data')
-                                setGraphSignal({ sequence: Date.now(), steps: msg.steps, citations: msg.citations, intent: 'highlight' })
-                              }}
-                              aria-label="高亮引用节点"
-                              title="在数据推演图谱中高亮本条回答引用的节点"
-                              data-testid="citation-highlight-button"
-                              className="flex h-6 w-6 items-center justify-center rounded-md border border-[var(--color-border)] bg-card text-[var(--color-text-tertiary)] transition-colors hover:border-viz-cyan-soft hover:bg-viz-cyan-soft hover:text-viz-cyan disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                              <Highlighter size={12} />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setGraphSignal({ sequence: Date.now(), steps: [], citations: [], intent: 'clear-highlight' })}
-                              aria-label="取消引用高亮"
-                              title="取消数据推演图谱中的引用节点高亮"
-                              data-testid="citation-clear-button"
-                              className="flex h-6 w-6 items-center justify-center rounded-md border border-[var(--color-border)] bg-card text-[var(--color-text-tertiary)] transition-colors hover:border-border hover:bg-muted hover:text-foreground"
-                            >
-                              <CircleOff size={12} />
-                            </button>
-                          </span>
-                        </div>
-                      )}
-                      {msg.proposals.map(p => p.kind === 'sentinel'
-                        ? <SentinelProposalCard key={p.proposalId} oid={oid} proposal={p} />
-                        : <ProposalCard key={p.proposalId} oid={oid} proposal={p}
-                          conversationId={conversationId} />)}
-                      {!msg.loading && !msg.error && <ProvenanceBar steps={msg.steps} cited={msg.citations.length} />}
-                    </div>
-                  </div>
-                ))}
-                <div ref={bottomRef} />
-              </div>
-            )}
+            <AgentChatTranscript
+              oid={catalog.oid}
+              conversationId={conversationId}
+              messages={messages}
+              busy={busy}
+              loadingMessages={conversation.loadingMessages}
+              backgroundRuns={backgroundRuns}
+              attentionRuns={attentionRuns}
+              suggestions={catalog.suggested}
+              onSend={send}
+              onOpenBackgroundRun={openBackgroundRun}
+              onRetryRun={retryRun}
+              onReconnectRun={reconnectRun}
+              onHighlightCitations={highlightCitations}
+              onClearHighlight={clearHighlight}
+            />
+            <div ref={bottomRef} />
           </div>
 
           {/* pt/pb 取 2.5 使输入栏高度精确为 67px：顶部分割线距视口底部 72px
@@ -957,17 +401,20 @@ export default function AgentWorkbenchPage() {
           <div data-testid="agent-input-bar" className="border-t border-[var(--color-border)] bg-card px-4 pb-2.5 pt-2.5">
             <div className="relative flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5 transition-all focus-within:ring-2 focus-within:ring-ring">
               <input
-                placeholder={oid ? (busy ? '可继续输入，回车进入追问队列…' : '问业务问题，或让它帮你预演一个操作…') : '请先选择一个本体'}
+                placeholder={catalog.oid ? (busy ? '可继续输入，回车进入追问队列…' : '问业务问题，或让它帮你预演一个操作…') : '请先选择一个本体'}
                 value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => {
+                onChange={event => setInput(event.target.value)}
+                onKeyDown={event => {
                   // 平台标准提交语义（同超级助手）：输入法组合期/带修饰键的 Enter 不发送
-                  if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey
-                    || e.nativeEvent.isComposing) return
-                  e.preventDefault()
-                  if (input.trim() && oid) void send()
+                  if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey
+                    || event.nativeEvent.isComposing) return
+                  event.preventDefault()
+                  if (input.trim() && catalog.oid) {
+                    void send(input)
+                    setInput('')
+                  }
                 }}
-                disabled={!oid}
+                disabled={!catalog.oid}
                 aria-label="本体助手消息"
                 data-testid="agent-composer"
                 className="min-w-0 flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50"
@@ -975,7 +422,7 @@ export default function AgentWorkbenchPage() {
               {busy ? (
                 <button
                   type="button"
-                  onClick={stopCurrentTurn}
+                  onClick={() => stopRun()}
                   aria-label="停止生成"
                   data-testid="agent-stop-button"
                   className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-viz-rose text-[var(--color-text-inverse)] transition-all duration-200 hover:bg-viz-rose"
@@ -983,29 +430,29 @@ export default function AgentWorkbenchPage() {
                   <Square size={13} fill="currentColor" />
                 </button>
               ) : (
-                <button onClick={() => send()} disabled={!input.trim() || !oid}
+                <button onClick={() => { void send(input); setInput('') }} disabled={!input.trim() || !catalog.oid}
                   aria-label="发送消息"
                   data-testid="agent-send-button"
                   className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-brand-deep text-[var(--color-text-inverse)] transition-all duration-200 hover:bg-brand disabled:cursor-not-allowed disabled:opacity-25">
                   <Send size={14} />
                 </button>
               )}
-              {queuedCount > 0 && (
+              {queueCount > 0 && (
                 <button
                   type="button"
-                  onClick={clearQueue}
-                  title={`追问队列中有 ${queuedCount} 条，点击清空`}
+                  onClick={conversation.clearQueue}
+                  title={`追问队列中有 ${queueCount} 条，点击清空`}
                   aria-label="清空追问队列"
                   data-testid="agent-queue-clear"
                   className="flex h-6 shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] bg-[var(--color-warning-bg)] px-2 text-[11px] font-medium text-[var(--color-warning)] transition-colors hover:border-[color-mix(in_srgb,var(--color-warning)_35%,transparent)] hover:bg-[var(--color-warning-bg)]"
                 >
-                  排队 {queuedCount}
+                  排队 {queueCount}
                   <X size={11} />
                 </button>
               )}
               <button
                 type="button"
-                onClick={() => setShowJump(v => !v)}
+                onClick={() => setShowJump(value => !value)}
                 disabled={myMessages.length === 0}
                 title="我发送的消息 · 快速跳转"
                 className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${showJump
@@ -1026,14 +473,14 @@ export default function AgentWorkbenchPage() {
                       {myMessages.length === 0 ? (
                         <div className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">当前会话暂无发送记录</div>
                       ) : (
-                        [...myMessages].reverse().map((m, i) => (
+                        [...myMessages].reverse().map((message, index) => (
                           <button
-                            key={m.id}
-                            onClick={() => jumpToMessage(m.id)}
+                            key={message.id}
+                            onClick={() => jumpToMessage(message.id)}
                             className="flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]"
                           >
-                            <span className="mt-0.5 shrink-0 font-mono text-[10px] text-[var(--color-text-tertiary)]">#{myMessages.length - i}</span>
-                            <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{m.content}</span>
+                            <span className="mt-0.5 shrink-0 font-mono text-[10px] text-[var(--color-text-tertiary)]">#{myMessages.length - index}</span>
+                            <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{message.content}</span>
                           </button>
                         ))
                       )}
@@ -1046,15 +493,15 @@ export default function AgentWorkbenchPage() {
         </section>
       </div>
 
-      <BoundaryDrawer oid={oid} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      <BoundaryDrawer oid={catalog.oid} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <DynamicSentinelDrawer
-        oid={oid}
-        releaseId={releaseId}
+        oid={catalog.oid}
+        releaseId={catalog.releaseId}
         open={sentinelDrawerOpen}
         onClose={() => setSentinelDrawerOpen(false)}
-        objectTypes={dynamicObjectTypes}
-        linkTypes={dynamicLinkTypes}
-        actions={dynamicActions}
+        objectTypes={catalog.dynamicObjectTypes}
+        linkTypes={catalog.dynamicLinkTypes}
+        actions={catalog.dynamicActions}
       />
     </div>
   )

@@ -66,6 +66,7 @@ async function mockPlatform(page: Page, options: {
 } = {}) {
   const decisionList = options.decisionList ?? []
   const decisionDetails = options.decisionDetails ?? {}
+  const questions = new Map<string, string>()
   await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
@@ -141,20 +142,63 @@ async function mockPlatform(page: Page, options: {
     if (path === '/api/v2/formal/ontologies/ontology-1/agent/conversations') {
       return json(route, [])
     }
-    if (path === '/api/v2/formal/ontologies/ontology-1/agent/chat') {
+    if (path === '/api/v2/formal/ontologies/ontology-1/agent/chat/runs'
+      && route.request().method() === 'POST') {
+      const body = route.request().postDataJSON() as { runId: string; message: string }
+      questions.set(body.runId, body.message)
       await new Promise(resolve => setTimeout(resolve, CHAT_DELAY_MS))
+      return json(route, {
+        runId: body.runId,
+        conversationId: 'conv-1',
+        status: 'queued',
+        question: body.message,
+        content: '',
+        steps: [],
+        citations: [],
+        proposals: [],
+        lastSeq: 0,
+        error: null,
+        startedAt: now,
+        finishedAt: null,
+        retryOf: null,
+      })
+    }
+    const runEvents = path.match(
+      /^\/api\/v2\/formal\/ontologies\/ontology-1\/agent\/chat\/runs\/([^/]+)\/events$/)
+    if (runEvents) {
+      const runId = runEvents[1]
       return route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
         body: [
-          'data: {"type":"meta","conversationId":"conv-1"}',
+          `data: {"type":"snapshot","seq":1,"snapshot":{"runId":"${runId}","conversationId":"conv-1","status":"running","question":${JSON.stringify(questions.get(runId) ?? '')},"content":"","steps":[],"citations":[],"proposals":[],"lastSeq":1,"error":null,"startedAt":"${now}","finishedAt":null,"retryOf":null}}`,
           '',
-          'data: {"type":"answer","content":"LIVE_AGENT_ANSWER"}',
+          'data: {"type":"answer","seq":2,"content":"LIVE_AGENT_ANSWER","citations":[],"proposals":[]}',
           '',
-          'data: {"type":"done"}',
+          'data: {"type":"done","seq":3,"status":"succeeded"}',
           '',
           '',
         ].join('\n'),
+      })
+    }
+    const runDetail = path.match(
+      /^\/api\/v2\/formal\/ontologies\/ontology-1\/agent\/chat\/runs\/([^/]+)$/)
+    if (runDetail) {
+      const runId = runDetail[1]
+      return json(route, {
+        runId,
+        conversationId: 'conv-1',
+        status: 'succeeded',
+        question: questions.get(runId) ?? '',
+        content: 'LIVE_AGENT_ANSWER',
+        steps: [],
+        citations: [],
+        proposals: [],
+        lastSeq: 3,
+        error: null,
+        startedAt: now,
+        finishedAt: now,
+        retryOf: null,
       })
     }
     const detailMatch = path.match(/^\/api\/v2\/formal\/ontologies\/ontology-1\/agent\/decision-simulations\/(.+)$/)

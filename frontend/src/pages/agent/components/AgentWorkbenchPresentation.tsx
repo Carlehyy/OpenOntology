@@ -31,11 +31,24 @@ import {
 import {
   type AgentCitation,
   type AgentProposal,
+  type AgentRunStatus,
   type AgentStep,
 } from '@/api/agent'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { ChartBlock, type ChartSpec } from '../AgentChart'
 import { formatTurnElapsed, formatTurnTimes } from './callChainTimes'
+import { isQueryResultStep } from './queryResult'
+
+export interface ChatRunMeta {
+  runId: string
+  status: AgentRunStatus
+  streamState: string
+  streamError: string | null
+  canRetry: boolean
+  retryOf: string | null
+  cancelRequested: boolean
+  restored: boolean
+}
 
 export interface ChatMsg {
   id: string
@@ -48,6 +61,8 @@ export interface ChatMsg {
   error?: string
   /** 后台回合恢复中的占位气泡：提示用户离开页面期间消息仍在处理（MYW-71） */
   resumed?: boolean
+  /** 服务端 run 投影（停止/重试/中断提示）；历史消息为 undefined。 */
+  run?: ChatRunMeta | null
   /**
    * 消息时刻（ISO 字符串）。历史会话来自后端 AgentMessage.created_at，
    * 实时会话由前端在发送 / 回合终态写入本地时钟；调用链按轮次用它
@@ -182,6 +197,10 @@ const TOOL_META: Record<string, { label: string; icon: React.ElementType }> = {
   find_paths: { label: '查找路径', icon: Network },
   analyze_change_impact: { label: '关联影响预演', icon: FlaskConical },
   aggregate_objects: { label: '聚合统计', icon: Sigma },
+  query_objects: { label: '明细查询', icon: Search },
+  describe_objects: { label: '对象结构', icon: ListChecks },
+  analyze_sequences: { label: '序列分析', icon: GitBranch },
+  get_data_time_range: { label: '数据时间范围', icon: ScrollText },
   get_object_history: { label: '事实溯源', icon: ScrollText },
   list_actions: { label: '查看动作', icon: ListChecks },
   list_dynamic_sentinels: { label: '查看动态哨兵', icon: BellRing },
@@ -228,38 +247,54 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
   )
 }
 
-function StepRow({ step }: { step: AgentStep }) {
+function StepRow({ step, onOpenResult }: {
+  step: AgentStep
+  onOpenResult?: (step: AgentStep) => void
+}) {
   const [open, setOpen] = useState(false)
   const meta = TOOL_META[step.tool] || { label: step.tool, icon: Zap }
   const Icon = meta.icon
   const hasResult = step.result !== undefined && step.result !== null && step.result !== ''
+  const hasQueryResult = isQueryResultStep(step)
 
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => setOpen(o => !o)}
-        className="group flex w-full cursor-pointer items-start gap-2.5 text-left"
-      >
-        <div className={`mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${step.error
-          ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'
-          : 'bg-[var(--color-info-bg)] text-[var(--color-info)]'}`}>
-          <Icon size={11} />
-        </div>
-        <div className="min-w-0 flex-1 text-xs leading-5">
-          <span className={`font-medium ${step.error ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-primary)]'}`}>
-            {meta.label}
-          </span>
-          <span className="text-[var(--color-text-tertiary)]"> · {step.summary}</span>
-          {typeof step.durationMs === 'number' && (
-            <span className="text-[var(--color-text-tertiary)]/70"> · {step.durationMs}ms</span>
-          )}
-        </div>
-        <ChevronRight
-          size={13}
-          className={`mt-0.5 shrink-0 text-[var(--color-text-tertiary)] transition-transform group-hover:text-[var(--color-text-secondary)] ${open ? 'rotate-90' : ''}`}
-        />
-      </button>
+      <div className="group flex w-full items-start gap-2.5">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 text-left"
+        >
+          <div className={`mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${step.error
+            ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'
+            : 'bg-[var(--color-info-bg)] text-[var(--color-info)]'}`}>
+            <Icon size={11} />
+          </div>
+          <div className="min-w-0 flex-1 text-xs leading-5">
+            <span className={`font-medium ${step.error ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-primary)]'}`}>
+              {meta.label}
+            </span>
+            <span className="text-[var(--color-text-tertiary)]"> · {step.summary}</span>
+            {typeof step.durationMs === 'number' && (
+              <span className="text-[var(--color-text-tertiary)]/70"> · {step.durationMs}ms</span>
+            )}
+          </div>
+          <ChevronRight
+            size={13}
+            className={`mt-0.5 shrink-0 text-[var(--color-text-tertiary)] transition-transform group-hover:text-[var(--color-text-secondary)] ${open ? 'rotate-90' : ''}`}
+          />
+        </button>
+        {hasQueryResult && onOpenResult && (
+          <button
+            type="button"
+            onClick={() => onOpenResult(step)}
+            data-testid="agent-step-open-result"
+            className="mt-px shrink-0 rounded-md border border-[var(--color-border)] bg-card px-2 py-0.5 text-[10px] font-medium text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft"
+          >
+            查看明细
+          </button>
+        )}
+      </div>
       {open && (
         <div className="ml-[30px] mt-2 space-y-2">
           {/* 输入、输出都可展开查看；输出缺失时给出占位说明而非隐藏 */}
@@ -280,11 +315,15 @@ function StepRow({ step }: { step: AgentStep }) {
   )
 }
 
-export function StepTrace({ steps, running }: { steps: AgentStep[]; running?: boolean }) {
+export function StepTrace({ steps, running, onOpenResult }: {
+  steps: AgentStep[]
+  running?: boolean
+  onOpenResult?: (step: AgentStep) => void
+}) {
   if (steps.length === 0 && !running) return null
   return (
     <div className="mb-3 space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2.5">
-      {steps.map((s, i) => <StepRow key={i} step={s} />)}
+      {steps.map((s, i) => <StepRow key={i} step={s} onOpenResult={onOpenResult} />)}
       {running && (
         <div className="flex items-center gap-2.5">
           <div className="w-5 h-5 rounded-md bg-[var(--color-info-bg)] flex items-center justify-center shrink-0">
@@ -338,9 +377,10 @@ export function ProvenanceBar({ steps, cited }: { steps: AgentStep[]; cited: num
   )
 }
 
-export function AgentCallChainView({ messages, running }: {
+export function AgentCallChainView({ messages, running, onOpenResult }: {
   messages: ChatMsg[]
   running: boolean
+  onOpenResult?: (step: AgentStep) => void
 }) {
   const turns = useMemo(() => {
     let question = ''
@@ -423,7 +463,7 @@ export function AgentCallChainView({ messages, running }: {
                     <div className="space-y-3">
                       {message.steps.map((step, stepIndex) => (
                         <div key={stepIndex} className="rounded-lg border border-border bg-muted px-3 py-2.5">
-                          <StepRow step={step} />
+                          <StepRow step={step} onOpenResult={onOpenResult} />
                         </div>
                       ))}
                     </div>

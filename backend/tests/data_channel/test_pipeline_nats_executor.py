@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -404,8 +405,87 @@ def test_handler_registry_covers_all_stream_subjects():
         "super-assistant-scheduled-run",
         "super-assistant-palace-ontology-rebuild",
         "task-instances-control",
+        "integrated-sync-executor",
+        "ontology-assistant-run-executor",
     }
     assert nats_executor._CONSUMER_DURABLE == "pipeline-executor"
+
+
+def test_ontology_assistant_consumer_is_single_and_dedicated(monkeypatch):
+    from app.data_channel.pipeline_tasks.dispatch import (
+        ONTOLOGY_ASSISTANT_RUN_SUBJECT,
+    )
+    from app.tasks import ontology_assistant_tasks
+
+    for executor_mode, exclude_control, expected in (
+        ("fake", "0", True),
+        ("fake", "1", True),
+        ("docker", "0", False),
+        ("docker", None, False),
+        ("docker", "1", True),
+    ):
+        monkeypatch.setenv("TASK_INSTANCES_EXECUTOR", executor_mode)
+        if exclude_control is None:
+            monkeypatch.delenv("TASK_INSTANCES_CONTROL_EXCLUDE", raising=False)
+        else:
+            monkeypatch.setenv("TASK_INSTANCES_CONTROL_EXCLUDE", exclude_control)
+        registry = nats_executor._handler_registry()
+        matches = [
+            entry for entry in registry
+            if entry[0] == ONTOLOGY_ASSISTANT_RUN_SUBJECT
+        ]
+        assert bool(matches) is expected
+        if expected:
+            assert matches == [(
+                ONTOLOGY_ASSISTANT_RUN_SUBJECT,
+                "ontology-assistant-run-executor",
+                ontology_assistant_tasks.run_ontology_assistant_run_message,
+            )]
+        assert len({subject for subject, _d, _h in registry}) == len(registry)
+        assert len({durable for _s, durable, _h in registry}) == len(registry)
+
+
+@pytest.mark.asyncio
+async def test_ontology_assistant_handler_calls_execute_run(executor, monkeypatch):
+    """handler 只把 run_id 交给 run_service，重复/终态语义由服务持有。"""
+    calls = []
+    fake_service = SimpleNamespace(
+        execute_run=lambda run_id: calls.append(run_id),
+    )
+    import app.ontologies.agent_runtime as agent_runtime_pkg
+
+    monkeypatch.setitem(
+        sys.modules,
+        "app.ontologies.agent_runtime.run_service",
+        fake_service,
+    )
+    monkeypatch.setattr(
+        agent_runtime_pkg, "run_service", fake_service, raising=False
+    )
+
+    msg = _FakeMsg(json.dumps({"run_id": "run-1"}).encode())
+    await executor._process_message(
+        msg,
+        nats_executor._handler_registry()[-1][2],
+        "ontology.assistant.run",
+    )
+
+    assert calls == ["run-1"]
+    assert msg.acked == 1 and msg.naked == 0
+
+
+@pytest.mark.asyncio
+async def test_ontology_assistant_handler_discards_malformed_payload(executor):
+    """坏消息不进入 run_service，也不触发无限重投。"""
+    msg = _FakeMsg(json.dumps({"run_id": "   "}).encode())
+
+    await executor._process_message(
+        msg,
+        nats_executor._handler_registry()[-1][2],
+        "ontology.assistant.run",
+    )
+
+    assert msg.acked == 1 and msg.naked == 0
 
 
 @pytest.mark.asyncio
@@ -521,6 +601,73 @@ async def test_fetch_loop_respects_concurrency_limit(executor, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_assistant_lane_is_independent_and_bounded(executor):
+    """助手回合独占 2 个槽位：可与流水线 2 个槽位同时执行，总并发有界。"""
+    active = {"pipeline": 0, "assistant": 0}
+    maxima = {"pipeline": 0, "assistant": 0, "total": 0}
+    started = 0
+    release = asyncio.Event()
+
+    async def lane_handler(lane: str):
+        nonlocal started
+        active[lane] += 1
+        maxima[lane] = max(maxima[lane], active[lane])
+        maxima["total"] = max(maxima["total"], sum(active.values()))
+        started += 1
+        if started >= 4:
+            release.set()
+        try:
+            await asyncio.wait_for(release.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            active[lane] -= 1
+
+    async def pipeline_handler(_payload):
+        await lane_handler("pipeline")
+
+    async def assistant_handler(_payload):
+        await lane_handler("assistant")
+
+    pipeline_messages = [
+        _FakeMsg(json.dumps({"task_id": f"task-{index}"}).encode())
+        for index in range(2)
+    ]
+    assistant_messages = [
+        _FakeMsg(json.dumps({"run_id": f"run-{index}"}).encode())
+        for index in range(2)
+    ]
+    pipeline_loop = asyncio.ensure_future(executor._fetch_loop(
+        _FakeSubscription([pipeline_messages]),
+        pipeline_handler,
+        _PIPELINE_TASK_DESC,
+        semaphore=executor._semaphore,
+        batch_size=executor._concurrency,
+    ))
+    assistant_loop = asyncio.ensure_future(executor._fetch_loop(
+        _FakeSubscription([assistant_messages]),
+        assistant_handler,
+        "ontology.assistant.run",
+        semaphore=executor._assistant_semaphore,
+        batch_size=executor._assistant_concurrency,
+    ))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not (
+        all(m.acked for m in pipeline_messages)
+        and all(m.acked for m in assistant_messages)
+    ):
+        await asyncio.sleep(0.02)
+    executor.request_shutdown()
+    await asyncio.wait_for(
+        asyncio.gather(pipeline_loop, assistant_loop), timeout=5
+    )
+
+    assert maxima == {"pipeline": 2, "assistant": 2, "total": 4}
+    assert executor._assistant_concurrency == 2
+    assert all(m.acked == 1 for m in pipeline_messages + assistant_messages)
+
+
+@pytest.mark.asyncio
 async def test_fetch_loop_naks_unstarted_messages_on_shutdown(executor):
     messages = [_msg("task-1"), _msg("task-2")]
     subscription = _FakeSubscription(
@@ -571,7 +718,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
 
     run_task = asyncio.ensure_future(executor.run())
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and len(subscriptions) < 22:
+    while time.monotonic() < deadline and len(subscriptions) < 23:
         await asyncio.sleep(0.02)
     executor.request_shutdown()
     await asyncio.wait_for(run_task, timeout=5)
@@ -595,14 +742,15 @@ async def test_run_subscribes_each_subject_with_own_durable(
         ("super_assistant.palace.ontology-rebuild", "super-assistant-palace-ontology-rebuild"),
         ("task_instances.control", "task-instances-control"),
         ("integrated.sync", "integrated-sync-executor"),
+        ("ontology.assistant.run", "ontology-assistant-run-executor"),
         ("sa.execution.run.*", "sa-kernel-v1"),
         ("sa.execution.call.*", "sa-call-v1"),
         ("sa.execution.reconcile", "sa-reconciler-v1"),
         ("sa.plugin.reply.*", "sa-plugin-reply-v1"),
         ]
-    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:18])
-    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[18:21])
-    assert subscriptions[21][2] == "SA_PLUGIN_RUNNER_V1"
+    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:19])
+    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[19:22])
+    assert subscriptions[22][2] == "SA_PLUGIN_RUNNER_V1"
     # ack_wait=60s 与 20s 续约间隔配套；max_deliver 不设上限（-1）——
     # 丢一条 kernel 派发消息等于 Run 挂死到 deadline，瞬时故障靠 nak
     # delay=5s 退避而不是丢弃兜底。

@@ -11,6 +11,8 @@
 # real backend from this checkout on 127.0.0.1:18036 with fixture credentials
 # only (env -i, no personal or production env files); readiness is reported
 # honestly - n8n / Chromium CDP absence keeps /health/ready at 503.
+# executor-up/executor-down run this checkout's NATS executor with the same
+# fixture env so ontology-assistant background runs are actually consumed.
 #
 # All generated state lives in <repo>/.artifacts/real-stack-e2e/ (gitignored).
 set -euo pipefail
@@ -25,6 +27,9 @@ OVERRIDE_FILE="$ART/docker-compose.override.yml"
 BACKEND_LOG="$ART/backend.log"
 BACKEND_PID="$ART/backend.pid"
 BACKEND_CMD="$ART/backend.cmd"
+EXECUTOR_LOG="$ART/nats_executor.log"
+EXECUTOR_PID="$ART/nats_executor.pid"
+EXECUTOR_CMD="$ART/nats_executor.cmd"
 REPORT="$ART/migrate-verify-report.json"
 BACKEND_PORT="${BACKEND_PORT:-18036}"
 
@@ -37,9 +42,9 @@ MINIO_API_PORT=29000
 MINIO_CONSOLE_PORT=29001
 
 BASELINE_REV="${BASELINE_REV:-0129_scheduled_task_target}"
-HEAD_REV_EXPECT="${HEAD_REV_EXPECT:-0133_mcp_constrained_flag}"
 
 PG_CONTAINER="${COMPOSE_PROJECT}-db-1"
+NATS_CONTAINER="${COMPOSE_PROJECT}-nats-1"
 PG_USER=ontoprompt
 PG_PASSWORD=ontoprompt  # fixture credential, identical to docker-compose.e2e.yml
 
@@ -59,23 +64,28 @@ name: ${COMPOSE_PROJECT}
 services:
   db:
     pull_policy: never
+    mem_limit: 512m
     ports: !override
       - "127.0.0.1:${PG_PORT}:5432"
   redis:
     pull_policy: never
+    mem_limit: 96m
     ports: !override
       - "127.0.0.1:${REDIS_PORT}:6379"
   nats:
     pull_policy: never
+    mem_limit: 96m
     ports: !override
       - "127.0.0.1:${NATS_PORT}:4222"
   neo4j:
     pull_policy: never
+    mem_limit: 1280m
     ports: !override
       - "127.0.0.1:${NEO4J_HTTP_PORT}:7474"
       - "127.0.0.1:${NEO4J_BOLT_PORT}:7687"
   minio:
     pull_policy: never
+    mem_limit: 256m
     ports: !override
       - "127.0.0.1:${MINIO_API_PORT}:9000"
       - "127.0.0.1:${MINIO_CONSOLE_PORT}:9001"
@@ -170,7 +180,7 @@ migrate_verify() {
   trap cleanup_dbs EXIT
   mkdir -p "$ART"
 
-  local fresh_db legacy_db run_id ts fail_count=0 heads current
+  local fresh_db legacy_db run_id ts fail_count=0 heads current head_rev
   run_id="$(uuidgen | tr 'A-Z' 'a-z' | cut -c1-8)"
   ts="$(date -u +%FT%TZ)"
   local checks_file="$ART/migrate-verify-checks.tsv"
@@ -180,14 +190,18 @@ migrate_verify() {
   printf '%s\n' "$heads"
   [ "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1 ] \
     || { echo '{"run_id":"'"$run_id"'","status":"failed","stage":"single-head"}' > "$REPORT"; die "expected exactly one alembic head"; }
-  printf '%s\n' "$heads" | grep -q "$HEAD_REV_EXPECT" \
-    || { echo '{"run_id":"'"$run_id"'","status":"failed","stage":"head-revision"}' > "$REPORT"; die "head is not $HEAD_REV_EXPECT"; }
+  # Head is derived from the checkout, never hardcoded: every new migration
+  # would otherwise make this migration check fail before testing anything.
+  head_rev=$(printf '%s\n' "$heads" | awk '/\(head\)/ {print $1; exit}')
+  [ -n "$head_rev" ] \
+    || { echo '{"run_id":"'"$run_id"'","status":"failed","stage":"head-revision"}' > "$REPORT"; die "could not resolve alembic head revision"; }
+  log "head revision: $head_rev"
 
   log "2/5 fresh database upgrade head"
   create_run_db fresh_db ontoprompt_fv
   run_alembic "$fresh_db" upgrade head >/dev/null
-  current=$(run_alembic "$fresh_db" current | grep -o "$HEAD_REV_EXPECT" | head -1)
-  [ "$current" = "$HEAD_REV_EXPECT" ] \
+  current=$(run_alembic "$fresh_db" current | grep -o "$head_rev" | head -1)
+  [ "$current" = "$head_rev" ] \
     || { echo '{"run_id":"'"$run_id"'","status":"failed","stage":"fresh-upgrade"}' > "$REPORT"; die "fresh upgrade did not reach head"; }
 
   log "3/5 legacy baseline $BASELINE_REV + deterministic seed"
@@ -205,6 +219,28 @@ DROP TABLE IF EXISTS fo_action_external_attempts CASCADE;
 DROP TABLE IF EXISTS fo_action_operations CASCADE;
 DROP TABLE IF EXISTS fo_action_confirmations CASCADE;
 DROP TABLE IF EXISTS fo_agent_join_assertions CASCADE;
+-- 0134-0141 post-baseline delta: 0003's create_all already materialized the
+-- current models above the 0129 baseline. Drop every object those migrations
+-- add (children before parents) so the upgrade exercises the real DDL.
+DROP TABLE IF EXISTS fo_agent_run_events;
+DROP TABLE IF EXISTS fo_agent_runs;
+DROP TABLE IF EXISTS super_assistant_conversation_summaries;
+DROP TABLE IF EXISTS super_assistant_summary_settings;
+ALTER TABLE super_assistant_messages DROP COLUMN IF EXISTS completed_at;
+DROP INDEX IF EXISTS uq_curated_reviews_proposal_key;
+ALTER TABLE v2_curated_reviews DROP COLUMN IF EXISTS proposal_key;
+ALTER TABLE v2_curated_reviews DROP COLUMN IF EXISTS base_version_id;
+ALTER TABLE ontology_projects DROP COLUMN IF EXISTS structure_projection_hash;
+ALTER TABLE ontology_projects DROP COLUMN IF EXISTS structure_projection_release_id;
+ALTER TABLE ontology_projects DROP COLUMN IF EXISTS structure_projection_error;
+ALTER TABLE ontology_projects DROP COLUMN IF EXISTS structure_projection_status;
+DROP TABLE IF EXISTS v2_integrated_asset_field_configs;
+DROP TABLE IF EXISTS v2_integrated_sync_recoveries;
+DROP TABLE IF EXISTS v2_unified_query_rows;
+DROP TABLE IF EXISTS v2_unified_query_snapshots;
+DROP TABLE IF EXISTS v2_integrated_sync_runs;
+DROP TABLE IF EXISTS v2_integrated_mutations;
+DROP TABLE IF EXISTS v2_integrated_assets;
 ALTER TABLE fo_agent_profiles DROP COLUMN IF EXISTS allowed_properties;
 DROP INDEX IF EXISTS ix_fo_action_logs_operation_id;
 ALTER TABLE fo_action_logs DROP COLUMN IF EXISTS operation_id;
@@ -222,13 +258,44 @@ VALUES ('mcp-seed','u-seed','seed-mcp','Seed MCP','seed server','http','http://1
 COMMIT;
 SQL
 
+  # Prove the simulated baseline no longer contains any post-0129 delta object;
+  # otherwise create_all leftovers would make "upgrade head" a no-op.
+  local baseline_delta
+  baseline_delta=$(psql_admin "$legacy_db" -qtA -c "
+SELECT concat_ws(',',
+  CASE WHEN to_regclass('fo_agent_runs') IS NOT NULL THEN 'fo_agent_runs' END,
+  CASE WHEN to_regclass('fo_agent_run_events') IS NOT NULL THEN 'fo_agent_run_events' END,
+  CASE WHEN to_regclass('v2_integrated_assets') IS NOT NULL THEN 'v2_integrated_assets' END,
+  CASE WHEN to_regclass('v2_integrated_sync_runs') IS NOT NULL THEN 'v2_integrated_sync_runs' END,
+  CASE WHEN to_regclass('v2_integrated_sync_recoveries') IS NOT NULL THEN 'v2_integrated_sync_recoveries' END,
+  CASE WHEN to_regclass('v2_integrated_asset_field_configs') IS NOT NULL THEN 'v2_integrated_asset_field_configs' END,
+  CASE WHEN to_regclass('v2_unified_query_snapshots') IS NOT NULL THEN 'v2_unified_query_snapshots' END,
+  CASE WHEN to_regclass('v2_unified_query_rows') IS NOT NULL THEN 'v2_unified_query_rows' END,
+  CASE WHEN to_regclass('super_assistant_conversation_summaries') IS NOT NULL THEN 'super_assistant_conversation_summaries' END,
+  CASE WHEN to_regclass('super_assistant_summary_settings') IS NOT NULL THEN 'super_assistant_summary_settings' END,
+  CASE WHEN (SELECT count(*) FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='ontology_projects'
+               AND column_name LIKE 'structure_projection_%') > 0
+       THEN 'ontology_projects.structure_projection_*' END,
+  CASE WHEN (SELECT count(*) FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='v2_curated_reviews'
+               AND column_name IN ('base_version_id','proposal_key')) > 0
+       THEN 'v2_curated_reviews.provenance' END,
+  CASE WHEN (SELECT count(*) FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='super_assistant_messages'
+               AND column_name='completed_at') > 0
+       THEN 'super_assistant_messages.completed_at' END
+)")
+  [ -z "$baseline_delta" ] \
+    || die "simulated 0129 baseline still contains post-baseline delta: $baseline_delta"
+
   log "4/5 upgrade seeded legacy database to head"
   run_alembic "$legacy_db" upgrade head >/dev/null
 
   log "5/5 post-upgrade assertions"
   : > "$checks_file"
   psql_admin "$legacy_db" -qtA >> "$checks_file" <<SQL
-SELECT 'alembic_version', version_num, '$HEAD_REV_EXPECT' FROM alembic_version
+SELECT 'alembic_version', version_num, '$head_rev' FROM alembic_version
 UNION ALL SELECT 'seed action log kept, operation_id NULL', (operation_id IS NULL)::text, 'true' FROM fo_action_logs WHERE id='al-seed'
 UNION ALL SELECT 'seed mcp kept, constrained=false default', constrained::text, 'false' FROM super_assistant_mcp_servers WHERE id='mcp-seed'
 UNION ALL SELECT 'seed profile kept, allowed_properties NULL', (allowed_properties IS NULL)::text, 'true' FROM fo_agent_profiles WHERE id='ap-seed'
@@ -241,6 +308,19 @@ UNION ALL SELECT 'query rows table present', (to_regclass('fo_agent_query_rows')
 UNION ALL SELECT 'join assertions table present', (to_regclass('fo_agent_join_assertions') IS NOT NULL)::text, 'true'
 UNION ALL SELECT 'action log operation index present', (to_regclass('public.ix_fo_action_logs_operation_id') IS NOT NULL)::text, 'true'
 UNION ALL SELECT 'guard partial unique index present', (to_regclass('public.uq_action_operation_guard_active') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'agent runs table present', (to_regclass('fo_agent_runs') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'agent run events table present', (to_regclass('fo_agent_run_events') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'run active conversation index present', (to_regclass('public.uq_fo_agent_runs_active_conversation') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'integrated assets table present', (to_regclass('v2_integrated_assets') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'integrated sync runs table present', (to_regclass('v2_integrated_sync_runs') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'integrated sync recoveries table present', (to_regclass('v2_integrated_sync_recoveries') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'integrated field configs table present', (to_regclass('v2_integrated_asset_field_configs') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'unified query snapshots table present', (to_regclass('v2_unified_query_snapshots') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'unified query rows table present', (to_regclass('v2_unified_query_rows') IS NOT NULL)::text, 'true'
+UNION ALL SELECT 'curated review provenance columns present', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name='v2_curated_reviews' AND column_name IN ('base_version_id','proposal_key')), '2'
+UNION ALL SELECT 'structure projection columns present', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name='ontology_projects' AND column_name IN ('structure_projection_status','structure_projection_error','structure_projection_release_id','structure_projection_hash')), '4'
+UNION ALL SELECT 'conversation summary tables present', (SELECT count(*)::text FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('super_assistant_conversation_summaries','super_assistant_summary_settings')), '2'
+UNION ALL SELECT 'message completed_at column present', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name='super_assistant_messages' AND column_name='completed_at'), '1'
 SQL
   local check actual expect pass_lines="" fail_lines=""
   while IFS='|' read -r check actual expect; do
@@ -278,7 +358,7 @@ SQL
 
   {
     printf '{"run_id":"%s","timestamp":"%s","head":"%s","baseline":"%s",\n' \
-      "$run_id" "$ts" "$HEAD_REV_EXPECT" "$BASELINE_REV"
+      "$run_id" "$ts" "$head_rev" "$BASELINE_REV"
     printf ' "fresh_db":"%s","legacy_db":"%s",\n' "$fresh_db" "$legacy_db"
     printf ' "passed_checks":[%s],\n' "${pass_lines%,}"
     printf ' "failed_checks":[%s],\n' "${fail_lines%,}"
@@ -298,6 +378,19 @@ build_backend_launch_env() {
   # backend boots with advisory n8n/CDP settings and /health/ready stays 503.
   local n8n_url=http://127.0.0.1:5678 n8n_key=e2e-dummy-n8n-key \
         cdp_url=http://localhost:9222 k v
+  # Forward only explicitly provided run-ledger overrides (for example
+  # AGENT_RUN_LEASE_SECONDS=30 in a restart/reconcile drill). Production
+  # defaults remain in backend/app/ontologies/agent_runtime/limits.py.
+  local run_env=()
+  for k in AGENT_RUN_USER_CAP AGENT_RUN_GLOBAL_CAP AGENT_RUN_LEASE_SECONDS \
+           AGENT_RUN_EVENT_POLL_MS AGENT_RUN_HEARTBEAT_SECONDS \
+           AGENT_RUN_DELTA_FLUSH_MS AGENT_RUN_DELTA_FLUSH_CHARS \
+           AGENT_RUN_QUEUE_CAP AGENT_RUN_EVENT_PAYLOAD_CAP \
+           AGENT_RUN_EVENT_RETENTION_HOURS AGENT_CONTEXT_CHARS_CAP; do
+    if [ -n "${!k-}" ]; then
+      run_env+=("$k=${!k}")
+    fi
+  done
   if [ -f "$ART/n8n.env" ]; then
     while IFS='=' read -r k v; do
       case "$k" in
@@ -323,6 +416,7 @@ build_backend_launch_env() {
     N8N_API_URL="$n8n_url" N8N_API_KEY="$n8n_key"
     STEWARD_BROWSER_CDP_URL="$cdp_url"
     LOCAL_BACKEND_HOST=127.0.0.1 LOCAL_BACKEND_PORT="$BACKEND_PORT"
+    ${run_env[@]+"${run_env[@]}"}
   )
 }
 
@@ -436,6 +530,88 @@ backend_status() {
   fi
 }
 
+executor_up() {
+  docker inspect "$NATS_CONTAINER" >/dev/null 2>&1 \
+    || die "stack not running; run '$0 stack-up' first"
+  [ -x "$BACKEND_DIR/.venv/bin/python" ] \
+    || die "backend .venv missing; run 'uv sync --frozen --group dev' in backend/"
+  if [ -f "$EXECUTOR_PID" ]; then
+    local running
+    running=$(cat "$EXECUTOR_PID")
+    if kill -0 "$running" 2>/dev/null; then
+      die "executor pid $running is already running; run '$0 executor-down' first"
+    fi
+    rm -f "$EXECUTOR_PID" "$EXECUTOR_CMD"
+  fi
+  mkdir -p "$ART"
+  build_backend_launch_env
+  ( cd "$BACKEND_DIR"
+    nohup env -i "${BACKEND_LAUNCH_ENV[@]}" \
+      "$BACKEND_DIR/.venv/bin/python" -m app.data_channel.pipeline_tasks.nats_executor \
+      > "$EXECUTOR_LOG" 2>&1 &
+    echo $! > "$EXECUTOR_PID"
+  )
+  local pid i
+  pid=$(cat "$EXECUTOR_PID")
+  log "NATS executor starting (pid $pid, log: $EXECUTOR_LOG)"
+  for i in $(seq 1 30); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      log "executor process exited early; last log lines:"
+      tail -30 "$EXECUTOR_LOG" || true
+      rm -f "$EXECUTOR_PID" "$EXECUTOR_CMD"
+      die "executor failed to start"
+    fi
+    if grep -q "executor 已启动" "$EXECUTOR_LOG" 2>/dev/null; then
+      ps -p "$pid" -o command= > "$EXECUTOR_CMD"
+      log "NATS executor LIVE (pid $pid)"
+      return 0
+    fi
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null || true
+  sleep 2
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$EXECUTOR_PID" "$EXECUTOR_CMD"
+  die "executor did not become ready within 30s; inspect $EXECUTOR_LOG"
+}
+
+executor_down() {
+  local pid cmd
+  if [ -f "$EXECUTOR_PID" ]; then
+    pid=$(cat "$EXECUTOR_PID")
+    if kill -0 "$pid" 2>/dev/null; then
+      cmd=$(ps -p "$pid" -o command=)
+      [ -f "$EXECUTOR_CMD" ] && [ "$cmd" = "$(cat "$EXECUTOR_CMD")" ] \
+        || die "pid $pid no longer matches the recorded executor; refusing to kill"
+      kill "$pid"
+      local _
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" || true
+      log "executor pid $pid stopped"
+    else
+      log "recorded executor pid $pid is not running"
+    fi
+    rm -f "$EXECUTOR_PID" "$EXECUTOR_CMD"
+  else
+    log "no executor pid recorded"
+  fi
+}
+
+executor_status() {
+  local pid
+  if [ -f "$EXECUTOR_PID" ]; then
+    pid=$(cat "$EXECUTOR_PID")
+    if kill -0 "$pid" 2>/dev/null; then
+      log "executor pid $pid running: $(ps -p "$pid" -o command=)"
+      return 0
+    fi
+    log "recorded executor pid $pid not running"
+    return 1
+  fi
+  log "no executor pid recorded"
+  return 1
+}
+
 case "${1:-help}" in
   stack-up) stack_up ;;
   stack-down) stack_down "${2:-}" ;;
@@ -444,6 +620,9 @@ case "${1:-help}" in
   backend-up) backend_up ;;
   backend-down) backend_down ;;
   backend-status) backend_status ;;
+  executor-up) executor_up ;;
+  executor-down) executor_down ;;
+  executor-status) executor_status ;;
   *)
     sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     ;;

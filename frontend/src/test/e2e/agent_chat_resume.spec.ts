@@ -1,13 +1,13 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 /**
- * 本体助手 · 后台回合恢复（MYW-71）：
- * 发送消息后离开页面，回合在后端继续执行并落库；回到页面后空会话态出现
- * 「仍在后台处理」横幅，点击恢复后先看到「正在处理」占位，终态后自动
- * 装载落库的完整回答。SSE 与后端执行解耦的前端恢复链路全程走 HTTP 轮询。
+ * 本体助手 · 服务端 activeRun 恢复（新 run 协议）：
+ * 刷新/新 tab 不依赖 sessionStorage，conversation.activeRun 是唯一发现源。
+ * 空会话态出现「仍在后台处理」横幅；打开会话后按 SSE/GET 快照继续投影，
+ * 终态自动装载落库回答并吸收本地执行气泡。
  */
 
-const now = '2026-07-19T08:00:00+00:00'
+const now = '2026-11-03T08:00:00+00:00'
 const runId = 'run-resume-e2e'
 const conversationId = '12345678-1234-4321-8765-123456789abc'
 
@@ -43,10 +43,34 @@ const assistantAnswer = [
   '```',
 ].join('\n')
 
-async function mockPlatform(page: Page, states: {
-  runStatus: () => 'running' | 'succeeded'
+interface ResumeStates {
+  status: () => 'running' | 'succeeded'
   answered: () => boolean
-}) {  await page.addInitScript(([rid, cid]) => {
+}
+
+function runSnapshot(status: 'running' | 'succeeded') {
+  return {
+    runId,
+    ontologyId: 'ontology-1',
+    releaseId: 'release-1',
+    conversationId,
+    status,
+    question: '查询订单数量',
+    content: status === 'succeeded' ? assistantAnswer : '',
+    steps: [],
+    citations: [],
+    proposals: [],
+    usage: null,
+    lastSeq: status === 'succeeded' ? 5 : 1,
+    error: null,
+    startedAt: now,
+    finishedAt: status === 'succeeded' ? now : null,
+    retryOf: null,
+  }
+}
+
+async function mockPlatform(page: Page, states: ResumeStates) {
+  await page.addInitScript(() => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
       state: {
@@ -55,15 +79,7 @@ async function mockPlatform(page: Page, states: {
       },
       version: 0,
     }))
-    // 模拟「发送后离开页面」留下的后台回合登记
-    sessionStorage.setItem('ontoagent:active-chat-run:v1', JSON.stringify({
-      runId: rid,
-      ontologyId: 'ontology-1',
-      conversationId: cid,
-      question: '查询订单数量',
-      startedAt: '2026-07-19T08:00:00+00:00',
-    }))
-  }, [runId, conversationId])
+  })
 
   const json = (route: Route, data: unknown) => route.fulfill({
     status: 200,
@@ -78,7 +94,7 @@ async function mockPlatform(page: Page, states: {
         id: 'ontology-1',
         name: '供应链本体',
         domain: '供应链',
-        description: '后台回合恢复验证',
+        description: '服务端 activeRun 恢复验证',
         status: 'draft',
         version: 'v1',
         current_release_id: 'release-1',
@@ -147,27 +163,49 @@ async function mockPlatform(page: Page, states: {
       updatedAt: now,
     })
     if (path === '/api/v2/formal/ontologies/ontology-1/agent/conversations') {
-      return json(route, [conversation])
+      return json(route, [{
+        ...conversation,
+        ontologyId: 'ontology-1',
+        userId: 'admin',
+        activeRun: states.status() === 'running' ? runSnapshot('running') : null,
+        latestRun: states.status() === 'succeeded' ? runSnapshot('succeeded') : null,
+      }])
     }
     if (path === `/api/v2/formal/ontologies/ontology-1/agent/conversations/${conversationId}`) {
-      // 恢复期间：只有用户提问；终态后：回答已落库
       return json(route, {
         ...conversation,
         ontologyId: 'ontology-1',
         userId: 'admin',
+        activeRun: states.status() === 'running' ? runSnapshot('running') : null,
+        latestRun: states.status() === 'succeeded' ? runSnapshot('succeeded') : null,
         messages: states.answered()
           ? [message('message-1', 'user', '查询订单数量'), message('message-2', 'assistant', assistantAnswer)]
           : [message('message-1', 'user', '查询订单数量')],
       })
     }
     if (path === `/api/v2/formal/ontologies/ontology-1/agent/chat/runs/${runId}`) {
-      const status = states.runStatus()
-      return json(route, {
-        runId,
-        conversationId,
-        status,
-        startedAt: now,
-        finishedAt: status === 'running' ? null : now,
+      return json(route, runSnapshot(states.status()))
+    }
+    if (path === `/api/v2/formal/ontologies/ontology-1/agent/chat/runs/${runId}/events`) {
+      const status = states.status()
+      const snapshot = JSON.stringify(runSnapshot(status))
+      const events = [
+        `data: {"type":"snapshot","seq":${status === 'succeeded' ? 5 : 1},"snapshot":${snapshot}}`,
+        '',
+      ]
+      if (status === 'succeeded') {
+        events.push(
+          `data: {"type":"answer","seq":6,"content":${JSON.stringify(assistantAnswer)},"citations":[],"proposals":[]}`,
+          '',
+          'data: {"type":"done","seq":7,"status":"succeeded"}',
+          '',
+        )
+      }
+      events.push('')
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: events.join('\n'),
       })
     }
     if (path === '/api/v2/formal/ontologies/ontology-1/agent/decision-simulations') {
@@ -177,37 +215,36 @@ async function mockPlatform(page: Page, states: {
   })
 }
 
-test('后台回合恢复：横幅 → 正在处理 → 自动装载落库回答', async ({ page }) => {
-  const states: { runStatus: () => 'running' | 'succeeded'; answered: () => boolean } = {
-    runStatus: () => 'running',
+test('服务端 activeRun 恢复：横幅 → 正在处理 → 自动装载落库回答', async ({ page }) => {
+  const states: ResumeStates = {
+    status: () => 'running',
     answered: () => false,
   }
   await mockPlatform(page, states)
 
   await page.goto('/#/agent?ontology_id=ontology-1')
 
-  // 空会话态出现恢复横幅（含原提问），且登记仍存在
+  // 空会话态从 conversations[].activeRun 发现后台回合（不读 sessionStorage）
   const banner = page.getByTestId('agent-resume-banner')
   await expect(banner).toBeVisible()
   await expect(banner).toContainText('查询订单数量')
   await expect(banner).toContainText('仍在后台处理')
 
-  // 点击恢复：会话装载（提问已落库），展示「正在处理」占位
+  // 打开会话：服务端 run 投影为「正在处理」占位
   await banner.click()
   await expect(page.getByTestId('agent-resume-pending')).toBeVisible()
   await expect(page.getByTestId('agent-resume-pending')).toContainText('仍在后台处理')
 
-  // 后端回合到达终态：占位被落库的完整回答替换，登记被清除
-  await page.waitForTimeout(2300) // 等一次轮询周期拿到 running
-  states.runStatus = () => 'succeeded'
+  // 后端回合到达终态：占位被落库的完整回答替换
+  await page.waitForTimeout(2300)
+  states.status = () => 'succeeded'
   states.answered = () => true
 
   await expect(page.getByText('当前共有 18 个订单实例，主键为')).toBeVisible()
   await expect(page.getByTestId('agent-resume-pending')).toHaveCount(0)
   await expect(page.getByTestId('agent-resume-banner')).toHaveCount(0)
 
-  // AI 响应正文的 Markdown 阅读面保持浅色（DESIGN.md §2.3）：
-  // 行内代码 bg-hover #f1f3f5，围栏块 bg-elevated #f5f7fa，文字 text-primary #1a1a2e
+  // AI 响应正文的 Markdown 阅读面保持浅色（DESIGN.md §2.3）
   const chatRegion = page.getByTestId('agent-chat-region')
   const inlineCode = chatRegion.locator('p code').filter({ hasText: 'order_no' })
   await expect(inlineCode).toHaveCSS('background-color', 'rgb(241, 243, 245)')
@@ -216,7 +253,4 @@ test('后台回合恢复：横幅 → 正在处理 → 自动装载落库回答'
   await expect(codeBlock).toContainText('SO-1')
   await expect(codeBlock).toHaveCSS('background-color', 'rgb(245, 247, 250)')
   await expect(codeBlock).toHaveCSS('color', 'rgb(26, 26, 46)')
-
-  const stored = await page.evaluate(() => sessionStorage.getItem('ontoagent:active-chat-run:v1'))
-  expect(stored).toBeNull()
 })

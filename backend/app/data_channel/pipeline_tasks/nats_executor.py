@@ -17,9 +17,12 @@
   反思任务（micro 每轮后 / full 手动 / focused 定向技能）；
 - ``super_assistant.palace.extract/consolidate``：记忆宫殿图谱抽取与
   定期聚类合并；
-- ``super_assistant.scheduled.run``：超级助手用户定时任务的无人值守执行。
+- ``super_assistant.scheduled.run``：超级助手用户定时任务的无人值守执行；
+- ``ontology.assistant.run``：本体助手聊天后台回合（独立并发闸，不与
+  流水线任务争抢默认 2 个槽位）。
 
-每个 subject 使用独立 durable pull consumer，共享进程级并发信号量。
+每个 subject 使用独立 durable pull consumer；流水线/助手各用独立进程级
+并发信号量（助手默认 2、总并发仍有界）。
 启动方式::
 
     python -m app.data_channel.pipeline_tasks.nats_executor
@@ -67,10 +70,16 @@ _SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE = "super-assistant-palace-ontol
 _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE = "super-assistant-scheduled-run"
 _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
 _TASK_INSTANCES_CONTROL_DURABLE = "task-instances-control"
+_ONTOLOGY_ASSISTANT_RUN_DURABLE = "ontology-assistant-run-executor"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
 _EXECUTION_CALL_DURABLE = "sa-call-v1"
 _EXECUTION_RECONCILER_DURABLE = "sa-reconciler-v1"
 _PLUGIN_RUNNER_REPLY_DURABLE = "sa-plugin-reply-v1"
+
+# 本体助手后台回合的独立并发闸：长 LLM 回合不能占满流水线 executor 的
+# 默认 2 个槽位，否则手动流水线/数据集导入会被聊天积压拖住；同时该闸
+# 仍然有界，避免聊天流量无限扩张 executor 的线程/数据库连接占用。
+ONTOLOGY_ASSISTANT_CONCURRENCY = 2
 
 # 消息处理器：解析后的 payload → 协程；业务异常必须在 handler 内消化，
 # 逃到 ``_process_message`` 的异常一律 nak 重投
@@ -228,6 +237,7 @@ def _handler_registry():
         INTEGRATED_SYNC_SUBJECT,
         MAPPING_APPLY_SUBJECT,
         ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
+        ONTOLOGY_ASSISTANT_RUN_SUBJECT,
         PIPELINE_EXECUTE_SUBJECT,
         PIPELINE_RUN_SUBJECT,
         SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
@@ -242,6 +252,7 @@ def _handler_registry():
     from app.assistant_evaluation import autopilot_tasks
     from app.super_assistant import palace_tasks, reflection_tasks, scheduled_tasks
     from app.task_instances import executor as task_instances_executor
+    from app.tasks import ontology_assistant_tasks
 
     entries = [
         (PIPELINE_EXECUTE_SUBJECT, _CONSUMER_DURABLE, _execute_pipeline_task_message),
@@ -313,6 +324,16 @@ def _handler_registry():
              task_instances_executor.run_control_message))
     entries.append((INTEGRATED_SYNC_SUBJECT, _INTEGRATED_SYNC_DURABLE,
                     _run_integrated_sync_message))
+    is_task_worker = (
+        _os.environ.get("TASK_INSTANCES_EXECUTOR") == "docker"
+        and _os.environ.get("TASK_INSTANCES_CONTROL_EXCLUDE") != "1"
+    )
+    if not is_task_worker:
+        entries.append((
+            ONTOLOGY_ASSISTANT_RUN_SUBJECT,
+            _ONTOLOGY_ASSISTANT_RUN_DURABLE,
+            ontology_assistant_tasks.run_ontology_assistant_run_message,
+        ))
     return tuple(entries)
 
 
@@ -461,6 +482,11 @@ class PipelineExecutor:
             1, int(settings.pipeline_executor_concurrency or 2)
         )
         self._semaphore = asyncio.Semaphore(self._concurrency)
+        # 独立 lane：助手回合不占用流水线槽位，且自身并发有界。
+        self._assistant_concurrency = max(1, int(ONTOLOGY_ASSISTANT_CONCURRENCY))
+        self._assistant_semaphore = asyncio.Semaphore(
+            self._assistant_concurrency
+        )
         self._shutdown = asyncio.Event()
         self._in_flight: set[asyncio.Task] = set()
 
@@ -523,6 +549,7 @@ class PipelineExecutor:
         msg,
         handler: MessageHandler,
         description: str,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> None:
         try:
             await self._process_message(msg, handler, description)
@@ -533,19 +560,28 @@ class PipelineExecutor:
             except Exception:
                 logger.exception("%s 消息 nak 失败", description)
         finally:
-            self._semaphore.release()
+            (semaphore or self._semaphore).release()
 
     async def _fetch_loop(
         self,
         subscription,
         handler: MessageHandler,
         description: str,
+        *,
+        semaphore: asyncio.Semaphore | None = None,
+        batch_size: int | None = None,
     ) -> None:
-        """批量拉取消息并限并发派发执行；关闭信号到来时退出循环。"""
+        """批量拉取消息并限并发派发执行；关闭信号到来时退出循环。
+
+        ``semaphore``/``batch_size`` 允许不同 subject 使用独立 lane（本体
+        助手回合不占流水线并发），未指定时沿用进程级流水线 lane。
+        """
+        lane = semaphore if semaphore is not None else self._semaphore
+        batch = batch_size if batch_size is not None else self._concurrency
         while not self._shutdown.is_set():
             try:
                 messages = await subscription.fetch(
-                    batch=self._concurrency, timeout=_FETCH_TIMEOUT_SECONDS
+                    batch=batch, timeout=_FETCH_TIMEOUT_SECONDS
                 )
             except asyncio.TimeoutError:
                 # nats.py 拉取超时即为空批次，继续等下一批/关闭信号
@@ -564,17 +600,17 @@ class PipelineExecutor:
                     except Exception:
                         logger.exception("关闭时退回未执行消息失败")
                     continue
-                await self._semaphore.acquire()
+                await lane.acquire()
                 if self._shutdown.is_set():
                     # 等待信号量期间收到关闭信号：同样不再启动新执行
-                    self._semaphore.release()
+                    lane.release()
                     try:
                         await msg.nak()
                     except Exception:
                         logger.exception("关闭时退回未执行消息失败")
                     continue
                 task = asyncio.ensure_future(
-                    self._run_message(msg, handler, description)
+                    self._run_message(msg, handler, description, lane)
                 )
                 self._in_flight.add(task)
                 task.add_done_callback(self._in_flight.discard)
@@ -590,6 +626,7 @@ class PipelineExecutor:
 
         from app.config import settings
         from app.data_channel.pipeline_tasks.dispatch import (
+            ONTOLOGY_ASSISTANT_RUN_SUBJECT,
             PIPELINE_STREAM,
             ensure_pipeline_stream,
             EXECUTION_STREAM,
@@ -618,9 +655,21 @@ class PipelineExecutor:
                     subject,
                     durable,
                 )
+                if subject == ONTOLOGY_ASSISTANT_RUN_SUBJECT:
+                    lane_semaphore = self._assistant_semaphore
+                    lane_batch = self._assistant_concurrency
+                else:
+                    lane_semaphore = self._semaphore
+                    lane_batch = self._concurrency
                 loops.append(
                     asyncio.ensure_future(
-                        self._fetch_loop(subscription, handler, subject)
+                        self._fetch_loop(
+                            subscription,
+                            handler,
+                            subject,
+                            semaphore=lane_semaphore,
+                            batch_size=lane_batch,
+                        )
                     )
                 )
             for subject, durable, handler in _execution_handler_registry():
@@ -649,8 +698,10 @@ class PipelineExecutor:
                 "plugin-runner-reply",
             )))
             logger.info(
-                "流水线 executor 已启动（并发上限 %d，%d 个 subject）",
+                "流水线 executor 已启动（流水线并发上限 %d，助手并发上限 %d，"
+                "%d 个 subject）",
                 self._concurrency,
+                self._assistant_concurrency,
                 len(loops),
             )
             await asyncio.gather(*loops)
@@ -708,6 +759,13 @@ def main() -> None:
     from app.model_registry import import_all_models
 
     import_all_models()
+
+    # 与 Web main 共用同一组成根：executor 不走 app.main 导入链，如果不
+    # 在这里安装 query provider / 本体读端口，worker 内助手查询会以
+    # query_provider_unavailable / remote_query_unavailable 失败。
+    from app.bootstrap.runtime_composition import install_runtime_ports
+
+    install_runtime_ports()
     raise SystemExit(asyncio.run(_async_main()))
 
 

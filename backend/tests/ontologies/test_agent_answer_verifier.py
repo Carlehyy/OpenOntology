@@ -203,6 +203,32 @@ class TestAnswerSideTypoMasking:
         assert 42.0 in universe
         assert not any(v in universe for v in (1.0, 2.0, 3.0, 1730692830.0))
 
+    def test_query_plan_and_page_size_do_not_seed_universe(self):
+        # querySpec/pageSize 是请求计划而不是观测结果：计划中的 50/999
+        # 不能为回答里的同值数字背书。
+        steps = [_step({
+            "rows": [{"event_id": "e1"}],
+            "returned": 1,
+            "totalRowCount": 1,
+            "pageSize": 50,
+            "hasNext": True,
+            "querySpec": {
+                "pageSize": 50,
+                "query": {"where": [{"property": "amount", "op": "gt",
+                                     "value": 999}]},
+            },
+        })]
+        universe = result_number_universe(steps)
+        assert 1.0 in universe
+        assert 50.0 not in universe and 999.0 not in universe
+        result = verify_answer("共 50 条，金额大于 999。", steps)
+        assert result.passed is False
+        assert result.unverified == [Decimal("50"), Decimal("999")]
+        # 只剔除结果顶层的请求元数据；业务行里恰好叫 pageSize 的字段仍是
+        # 观测值（不能因为排除计划参数而误伤业务属性）。
+        assert 7.0 in result_number_universe(
+            [_step({"rows": [{"pageSize": 7}]})])
+
 
 class TestVerifyAnswer:
     def test_pass_when_all_numbers_backed(self):

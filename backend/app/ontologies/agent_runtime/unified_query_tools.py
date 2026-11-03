@@ -1,82 +1,159 @@
 """本体助手的统一查询工具：明细/排序/分页/按 ID/多维分组/关联统计与数据时间范围。
 
-两个工具都经由 execute_unified_query 的正门：远程绑定对象转远程统一查询
+所有查询都经由 execute_unified_query 的正门：远程绑定对象转远程统一查询
 （源端 SQL），本地物化对象走本地快照路径 —— 授权、发布校验、join 证据、
-内存预算全部复用既有链路，本模块只做工具参数 → QueryRequest 的装配与
-响应的可读化映射。分页句柄遵循终页回收语义（hasNext=false 时释放）。
+内存预算全部复用既有链路。本模块只做工具参数 → QueryRequest 的装配、
+响应可读化、可重放 querySpec、以及分组下钻令牌。
+
+关键语义：
+- 服务端相对时间只在本次解析：``window={property, timezone, last}`` 被冻结为
+  绝对 [start, end) 写入 querySpec；后续 replay/下钻不再解释“最近 N 天”。
+- ``querySpec`` 是可交给 Web 的语义计划（固定 ontology/release + 绝对窗口 +
+  规范化 QueryRequest 或 SPL 绑定），不含底层连接信息或引擎 cursor。
+- 聚合分组返回结构化 ``groupValues`` 与签名 ``drilldown``；时间桶下钻用
+  日历边界 [bucketStart, bucketEnd)，绝不按展示串拆字符。
+- 分页句柄遵循终页回收语义（hasNext=false 时释放）；中间页保持引擎一致性。
 """
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import ValidationError
 
 from app.ontologies.agent_runtime.boundary import ToolError
-from app.ontologies.agent_runtime.read_queries import encode_scalar
+from app.ontologies.agent_runtime.chart_specs import _build_aggregate_chart
+from app.ontologies.agent_runtime.query_handles import (
+    _release_terminal_page,
+)
+from app.ontologies.agent_runtime.query_planning import (
+    _build_description, _definition_type, _definitions, _leaf,
+    _resolve_type_reference, _spec_from_request, _spl_bindings,
+    _visible_properties,
+)
+from app.ontologies.agent_runtime.query_response import (
+    _attach_drilldowns, _consistency, _data_mode, _group_items_from_spec,
+    cursor_page_result,
+)
+from app.ontologies.agent_runtime.query_spec import (
+    build_columns, build_query_spec, drilldown_conditions, make_drilldown,
+    map_rows, spec_hash,
+)
+from app.ontologies.agent_runtime.query_window import (
+    resolve_window, window_filters, window_for_result,
+)
+from app.ontologies.agent_runtime.read_queries import (
+    decimal_number, encode_scalar,
+)
 
-_TEMPORAL_TYPES = {"date", "datetime", "timestamp", "time"}
 _FILTER_OPS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "in",
                "is_null", "is_not_null"}
 _AGGREGATE_FNS = {"count", "count_distinct", "sum", "avg", "min", "max"}
+_BUCKETS = {"day", "week", "month", "quarter", "year"}
+_BUCKET_UNITS = {"day": "日", "week": "周", "month": "月",
+                 "quarter": "季", "year": "年"}
+_SPL_KEYS = {"spl", "semanticBindings", "semantic_bindings", "params",
+             "cursor", "page_size"}
 
 
-def _leaf(alias: str, prop: str, item: dict) -> dict:
-    op = item.get("op", "eq")
-    if op not in _FILTER_OPS:
-        raise ToolError(f"query_objects_invalid_filter: 不支持的过滤操作符 {op}；"
-                        f"可用 {'/'.join(sorted(_FILTER_OPS))}")
-    value = item.get("value")
-    if op in {"is_null", "is_not_null"}:
-        return {"source": alias, "property": prop, "op": op}
-    if op == "in" and not isinstance(value, list):
-        value = [value]
-    if op == "contains" and value is None:
-        raise ToolError("query_objects_invalid_filter: contains 需要非空取值")
-    return {"source": alias, "property": prop, "op": op, "value": value}
-
-
-def _remote_bound_properties(scope, ot) -> set[str] | None:
-    """远程绑定类型可查询属性 = 授权属性 ∩ 绑定列映射；本地类型返回 None。"""
-    if scope.release is None:
-        return None
-    from app.ontologies.mappings.remote_binding import (
-        RemoteBindingError, get_remote_binding,
-    )
-    try:
-        binding = get_remote_binding(scope.release.snapshot, ot.id)
-    except RemoteBindingError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
-    if binding is None:
-        return None
-    props = {prop for prop in binding.get("fieldMap", {}).values()
-             if prop != "__primary_key__"}
-    return props
-
-
-def _resolve_type_reference(scope, ref, default=None):
-    if ref in (None, ""):
-        return default
-    return scope.require_object_type(ref)
-
-
-def _visible_properties(scope, ot) -> list[str]:
-    allowed = scope.allowed_property_names(ot.id)
-    definitions = {p.get("name"): p for p in (ot.properties or [])
-                   if isinstance(p, dict) and p.get("name")}
-    names = [name for name in definitions
-             if allowed is None or name in allowed]
-    remote_bound = _remote_bound_properties(scope, ot)
-    if remote_bound is not None:
-        names = [name for name in names if name in remote_bound]
-    return names
-
-
-def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
-    """明细/排序/分页/多维分组/关联统计的统一查询工具。"""
+def _query_objects_spl(db, scope, user, session_id, args, cap,
+                       spec_cache=None) -> dict:
     from app.ontologies.agent_query import schemas as QS
     from app.ontologies.agent_query.service import (
         QueryError, execute_unified_query, fetch_unified_query_page,
-        release_query_snapshot,
     )
-    from app.ontologies.agent_query.remote_query import cancel_remote_query
+
+    text = str(args.get("spl") or "").strip()
+    if not text:
+        raise ToolError("query_objects_invalid_query: spl 不能为空")
+    cursor = args.get("cursor")
+    page_size = min(cap, max(1, int(args.get("page_size") or 50)))
+    spec = spec_cache.get(str(cursor)) if (cursor and spec_cache) else None
+    if cursor and spec is None:
+        raise ToolError(
+            "query_objects_cursor_context_missing: 无法从当前回合恢复该 cursor "
+            "对应的 SPL 查询计划；请在发起查询的同一回合内续页，或重新发起查询")
+    try:
+        if cursor:
+            data = fetch_unified_query_page(
+                db, user, str(cursor), session_kind="ontology_agent",
+                session_id=session_id or "", include_page_size=True)
+        else:
+            bindings = _spl_bindings(
+                scope, args.get("semanticBindings")
+                or args.get("semantic_bindings") or {})
+            params = args.get("params") or {}
+            if not isinstance(params, dict):
+                raise ToolError("query_objects_invalid_query: params 必须是对象")
+            request = QS.QueryRequest(
+                spl=text, semantic_bindings=bindings, params=params,
+                page_size=page_size)
+            spec = build_query_spec(
+                shape="spl",
+                ontology_id=scope.ontology.id,
+                release_id=str(scope.release_id),
+                spl=text,
+                semantic_bindings=bindings,
+                params=params,
+                resolved_window=None,
+                description={
+                    "semantics": "spl_multi_stage",
+                    "semanticBindings": bindings,
+                    "params": params,
+                    "note": "SPL 阶段通过既有语义翻译/授权/证据链执行",
+                },
+            )
+            data = execute_unified_query(
+                db, user, request, session_kind="ontology_agent",
+                session_id=session_id or "", include_page_size=True)
+    except ValidationError as exc:
+        raise ToolError(f"query_objects_invalid_query: {exc}") from exc
+    except QueryError as exc:
+        raise ToolError(f"{exc.code}: {exc.message}") from exc
+
+    _release_terminal_page(db, user, session_id, data)
+    labels = (spec or {}).get("labels") or {}
+    columns = build_columns(data.get("columns"), labels)
+    rows = map_rows(data.get("rows") or [], labels)
+    out = {
+        "shape": "spl",
+        "dataMode": _data_mode(data),
+        "columns": columns,
+        "rows": rows,
+        "returned": len(rows),
+        "totalRowCount": encode_scalar(data.get("totalRowCount"))
+        if data.get("totalRowCount") is not None else None,
+        "rowCounting": data.get("rowCounting"),
+        "hasNext": bool(data.get("hasNext")),
+        "cursor": data.get("cursor") if data.get("hasNext") else None,
+        "truncated": bool(data.get("hasNext")),
+        "exact": data.get("exact") is not False,
+        "partial": bool(data.get("partial")),
+        "completeness": data.get("completeness", "complete"),
+        "completenessScope": "query_execution",
+        "pageSize": data.get("pageSize", page_size),
+        "queryId": data.get("queryId"),
+        "observedAt": data.get("observedAt"),
+        "releaseId": scope.release_id,
+        "resolvedWindow": None,
+        "consistency": _consistency(data, page_fetch=False),
+    }
+    if spec is not None:
+        out["querySpec"] = spec
+        out["querySpecHash"] = spec_hash(spec)
+        if out["cursor"] and spec_cache is not None:
+            spec_cache[out["cursor"]] = spec
+    else:
+        out["querySpecUnavailable"] = "cursor_page_without_previous_spec"
+    return out
+
+
+def query_objects(db, scope, user, session_id: str, args: dict,
+                  spec_cache: dict | None = None) -> dict:
+    """明细/排序/分页/多维分组/关联统计/SPL 的统一查询工具。"""
+    from app.ontologies.agent_query import schemas as QS
+    from app.ontologies.agent_query.service import (
+        QueryError, execute_unified_query, fetch_unified_query_page,
+    )
 
     if user is None:
         raise ToolError("remote_query_user_required: 统一查询需要已认证用户")
@@ -86,6 +163,38 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
     cap = min(200, int(scope.profile.max_rows_per_query or 0))
     if cap <= 0:
         raise ToolError("profile_query_disabled: 当前本体助手未启用查询额度")
+    if args.get("spl"):
+        mixed = sorted(set(args) - _SPL_KEYS)
+        if mixed:
+            raise ToolError("query_objects_invalid_query: spl 形态不能同时携带结构树参数："
+                            + "、".join(mixed))
+        return _query_objects_spl(db, scope, user, session_id, args, cap,
+                                  spec_cache=spec_cache)
+
+    # cursor-first：续页只带 cursor 时从回合内 querySpec 缓存恢复源/标签/
+    # 分组/窗口，不再要求 object_type；缓存缺失则显式要求上下文，绝不把
+    # 空类型当错误对象或返回 c0/g0 技术列冒充正常结果。
+    cursor = args.get("cursor")
+    cached_spec = spec_cache.get(str(cursor)) if (
+        cursor and spec_cache) else None
+    if cursor and cached_spec is not None:
+        try:
+            data = fetch_unified_query_page(
+                db, user, str(cursor), session_kind="ontology_agent",
+                session_id=session_id or "", include_page_size=True)
+        except QueryError as exc:
+            raise ToolError(f"{exc.code}: {exc.message}") from exc
+        _release_terminal_page(db, user, session_id, data)
+        result = cursor_page_result(
+            data=data, spec=cached_spec, user=user,
+            session_id=session_id or "", page_fetch=True)
+        if result.get("cursor") and spec_cache is not None:
+            spec_cache[str(result["cursor"])] = cached_spec
+        return result
+    if cursor:
+        raise ToolError(
+            "query_objects_cursor_context_missing: 无法从当前回合恢复该 cursor "
+            "对应的查询计划；请在发起查询的同一回合内续页，或重新发起查询")
 
     base_ot = scope.require_object_type(args.get("object_type", ""))
 
@@ -148,8 +257,25 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
         prop = resolve_prop(ot, item["property"])
         where.append(_leaf(alias, prop, item))
 
+    # ---- 服务端相对时间窗口：一次解析为绝对 [start, end) ----
+    resolved_window = None
+    raw_window = args.get("window")
+    if raw_window is not None:
+        if not isinstance(raw_window, dict):
+            raise ToolError("query_objects_invalid_query: window 必须是对象")
+        wanted_type = raw_window.get("object_type")
+        alias, ot = alias_for(wanted_type)
+        prop = resolve_prop(ot, raw_window.get("property", ""))
+        window_input = {key: value for key, value in raw_window.items()
+                        if key != "object_type"}
+        window_input["property"] = prop
+        resolved_window = resolve_window(
+            window_input, property_name=prop,
+            property_type=_definition_type(ot, prop))
+        where.extend(window_filters(resolved_window, source=alias))
+
     # ---- 分组/聚合/投影装配 ----
-    group_items = []       # (alias, prop, bucket, readable)
+    group_items = []       # dict(alias, property, bucket, readable)
     for item in (args.get("group_by") or []):
         if isinstance(item, str):
             item = {"property": item}
@@ -158,10 +284,11 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
         alias, ot = alias_for(item.get("object_type"))
         prop = resolve_prop(ot, item["property"])
         bucket = item.get("bucket")
-        if bucket is not None and bucket not in {"day", "week", "month", "quarter", "year"}:
+        if bucket is not None and bucket not in _BUCKETS:
             raise ToolError(f"query_objects_invalid_query: 不支持的时间分桶 {bucket}")
-        group_items.append((alias, prop, bucket, str(item["property"])))
-    aggregate_items = []   # (fn, alias, prop, readable)
+        group_items.append({"source": alias, "property": prop,
+                            "bucket": bucket, "readable": str(item["property"])})
+    aggregate_items = []   # dict(fn, source, property, readable)
     for item in (args.get("aggregates") or []):
         if not isinstance(item, dict) or item.get("fn") not in _AGGREGATE_FNS:
             raise ToolError(f"query_objects_invalid_query: aggregates.fn 需为 "
@@ -174,30 +301,33 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
         if prop_ref:
             prop = resolve_prop(ot, prop_ref)
         readable = item.get("as") or (fn if prop is None else f"{fn}_{prop}")
-        aggregate_items.append((fn, alias, prop, readable))
+        aggregate_items.append({"fn": fn, "source": alias, "property": prop,
+                                "readable": str(readable)})
 
     stats_mode = bool(group_items or aggregate_items)
     readable_of: dict[str, str] = {}
     select, group_by, aggregates = [], [], []
+    select_entries: list[tuple[str, str, object]] = []
     if stats_mode:
-        for index, (alias, prop, bucket, readable) in enumerate(group_items):
+        for index, item in enumerate(group_items):
             out = f"g{index}"
-            select.append(QS.SelectItem(source=alias, property=prop, as_=out))
+            select.append(QS.SelectItem(source=item["source"],
+                                        property=item["property"], as_=out))
             group_by.append(QS.GroupByItem(
-                source=alias, property=prop,
-                **({"bucket": bucket} if bucket else {})))
-            readable_of[out] = readable
-        for index, (fn, alias, prop, readable) in enumerate(aggregate_items):
+                source=item["source"], property=item["property"],
+                **({"bucket": item["bucket"]} if item["bucket"] else {})))
+            readable_of[out] = item["readable"]
+        for index, item in enumerate(aggregate_items):
             out = f"a{index}"
             aggregates.append(QS.AggregateItem(
-                fn=fn, source=alias, property=prop, as_=out))
-            readable_of[out] = readable
+                fn=item["fn"], source=item["source"],
+                property=item["property"], as_=out))
+            readable_of[out] = item["readable"]
     else:
         select_args = args.get("select") or None
-        entries: list[tuple[str, str, object]] = []
         if select_args is None:
             for prop in _visible_properties(scope, base_ot):
-                entries.append(("s0", prop, base_ot))
+                select_entries.append(("s0", prop, base_ot))
         else:
             for item in select_args:
                 if isinstance(item, str):
@@ -205,11 +335,12 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
                 if not isinstance(item, dict) or not item.get("property"):
                     continue
                 alias, ot = alias_for(item.get("object_type"))
-                entries.append((alias, resolve_prop(ot, item["property"]), ot))
-        if not entries:
+                select_entries.append(
+                    (alias, resolve_prop(ot, item["property"]), ot))
+        if not select_entries:
             raise ToolError("query_objects_invalid_query: 没有可输出的授权属性")
-        names = [prop for _a, prop, _o in entries]
-        for index, (alias, prop, ot) in enumerate(entries):
+        names = [prop for _a, prop, _o in select_entries]
+        for index, (alias, prop, ot) in enumerate(select_entries):
             out = f"c{index}"
             # 多源出现同名属性时用「类型.属性」消歧，主对象保持裸属性名。
             readable = prop if names.count(prop) == 1 or alias == "s0" \
@@ -217,7 +348,7 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
             select.append(QS.SelectItem(source=alias, property=prop, as_=out))
             readable_of[out] = readable
 
-    order_by = []
+    order_items: list[dict] = []
     readable_outputs = dict(readable_of)
     for item in args.get("order_by") or []:
         if not isinstance(item, dict) or not item.get("output"):
@@ -228,8 +359,11 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
         if out is None:
             raise ToolError(f"query_objects_invalid_query: 排序引用未知输出「{name}」；"
                             f"可用：{'、'.join(sorted(set(readable_outputs.values())))}")
-        order_by.append(QS.OrderByItem(
-            output=out, direction=item.get("direction", "asc")))
+        direction = item.get("direction", "asc")
+        if direction not in {"asc", "desc"}:
+            raise ToolError("query_objects_invalid_query: 排序方向需为 asc/desc")
+        order_items.append({"output": out, "readable": readable_of[out],
+                            "direction": direction})
 
     try:
         requested = int(args.get("page_size") or 50)
@@ -237,17 +371,42 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
         requested = 50
     page_size = max(1, min(requested, cap))
 
-    cursor = args.get("cursor")
+    page_fetch = False
+    spec = None
+    detail_request = None
     try:
-        if cursor:
-            data = fetch_unified_query_page(
-                db, user, str(cursor), session_kind="ontology_agent",
-                session_id=session_id or "", include_page_size=True)
-        else:
+        if True:
             request = QS.QueryRequest(
                 sources=sources, joins=joins, where=where, select=select,
-                group_by=group_by, aggregates=aggregates, order_by=order_by,
+                group_by=group_by, aggregates=aggregates,
+                order_by=[QS.OrderByItem(output=item["output"],
+                                         direction=item["direction"])
+                          for item in order_items],
                 page_size=page_size)
+            if stats_mode:
+                detail_select = [
+                    QS.SelectItem(source="s0", property=prop, as_=f"c{index}")
+                    for index, prop in enumerate(_visible_properties(scope, base_ot))
+                ]
+                if not detail_select:
+                    detail_select = [QS.SelectItem(
+                        source=group_items[0]["source"],
+                        property=group_items[0]["property"], as_="c0")]
+                detail_request = QS.QueryRequest(
+                    sources=sources, joins=joins, where=where,
+                    select=detail_select)
+            description = _build_description(
+                base_ot=base_ot, stats_mode=stats_mode, where=where,
+                label_of=label_of,
+                joined_labels=[label_of[f"s{i}"] for i in range(1, len(sources))],
+                select_entries=select_entries, group_items=group_items,
+                aggregate_items=aggregate_items, order_by=order_items,
+                resolved_window=resolved_window, page_size=page_size)
+            spec = _spec_from_request(
+                request=request, scope=scope, base_ot=base_ot,
+                labels=readable_of, resolved_window=resolved_window,
+                description=description, stats_mode=stats_mode,
+                detail_request=detail_request)
             data = execute_unified_query(
                 db, user, request, session_kind="ontology_agent",
                 session_id=session_id or "", include_page_size=True)
@@ -256,32 +415,28 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
     except QueryError as exc:
         raise ToolError(f"{exc.code}: {exc.message}") from exc
 
-    # 终页回收：hasNext=false 时释放快照/句柄；失败不影响成功查询。
-    if data.get("hasNext") is False and data.get("queryId"):
-        try:
-            if isinstance(data.get("persistence"), dict):
-                cancel_remote_query(db, user, str(data["queryId"]))
-            else:
-                released = release_query_snapshot(
-                    db, user, str(data["queryId"]),
-                    session_kind="ontology_agent", session_id=session_id or "")
-                if not released:
-                    cancel_remote_query(db, user, str(data["queryId"]))
-        except Exception:  # noqa: BLE001 - 回收失败不破坏成功查询
-            pass
-
-    rows = []
-    for row in data.get("rows") or []:
-        rows.append({readable_of.get(key, key): value
-                     for key, value in row.items()})
-    data_modes = sorted({entry.get("dataMode")
-                         for entry in (data.get("releases") or {}).values()
-                         if entry.get("dataMode")})
+    _release_terminal_page(db, user, session_id, data)
+    labels = (spec or {}).get("labels") or {}
+    columns = build_columns(data.get("columns"), labels)
+    raw_rows = list(data.get("rows") or [])
+    if stats_mode:
+        if spec is not None:
+            _attach_drilldowns(
+                rows=raw_rows, group_items=group_items, spec=spec,
+                resolved_window=resolved_window, user=user,
+                session_id=session_id)
+        else:
+            for row in raw_rows:
+                row["drilldownUnavailable"] = (
+                    "cursor_page_without_previous_spec")
+    rows = map_rows(raw_rows, labels)
     joined_labels = [label_of[f"s{i}"] for i in range(1, len(sources))]
-    return {
+    out = {
+        "shape": "objects",
         "objectType": base_ot.display_name,
         "joinedObjectTypes": joined_labels,
-        "dataMode": "/".join(data_modes) if data_modes else "materialized",
+        "dataMode": _data_mode(data),
+        "columns": columns,
         "rows": rows,
         "returned": len(rows),
         "totalRowCount": encode_scalar(data.get("totalRowCount"))
@@ -298,98 +453,46 @@ def query_objects(db, scope, user, session_id: str, args: dict) -> dict:
         "queryId": data.get("queryId"),
         "observedAt": data.get("observedAt"),
         "releaseId": scope.release_id,
+        "resolvedWindow": window_for_result(resolved_window),
+        "consistency": _consistency(data, page_fetch=page_fetch),
     }
-
-
-def get_data_time_range(db, scope, user, session_id: str, ot,
-                        time_property=None, filters=None) -> dict:
-    """远程绑定对象的数据时间范围（min/max 一次双聚合下推源端）。"""
-    from app.ontologies.agent_query import schemas as QS
-    from app.ontologies.agent_query.service import QueryError, execute_unified_query
-    from app.ontologies.agent_query.remote_query import cancel_remote_query
-    from app.ontologies.agent_runtime.remote_aggregation import _filter
-
-    if user is None:
-        raise ToolError("remote_query_user_required: 远程统计需要已认证用户")
-    cap = int(scope.profile.max_rows_per_query or 0)
-    if cap <= 0:
-        raise ToolError("profile_query_disabled: 当前本体助手未启用查询额度")
-    if scope.release is None:
-        raise ToolError("data_time_range_release_required: 需要固定的发布版本")
-    from app.ontologies.mappings.remote_binding import (
-        RemoteBindingError, get_remote_binding,
-    )
-    try:
-        binding = get_remote_binding(scope.release.snapshot, ot.id)
-    except RemoteBindingError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
-    if binding is None:
-        raise ToolError("data_time_range_local_unsupported: 数据时间范围工具面向"
-                        "远程绑定对象；本地物化对象请用 aggregate_objects 按时间"
-                        "属性 min/max 统计")
-
-    definitions = {p.get("name"): p for p in (ot.properties or [])
-                   if isinstance(p, dict) and p.get("name")}
-    temporal = [name for name, p in definitions.items()
-                if str(p.get("type") or "").lower() in _TEMPORAL_TYPES]
-    remote_bound = {prop for prop in binding.get("fieldMap", {}).values()
-                    if prop != "__primary_key__"}
-    temporal = [name for name in temporal if name in remote_bound]
-    if not temporal:
-        raise ToolError(f"data_time_range_no_temporal: 对象「{ot.display_name}」没有"
-                        "可用的 date/datetime/timestamp 映射属性")
-    prop = time_property or temporal[0]
-    if prop not in definitions:
-        # 允许 displayName 引用
-        prop = scope.resolve_visible_property(ot, prop)
-    if prop not in temporal:
-        raise ToolError(f"data_time_range_not_temporal: 属性「{prop}」不是时间类型；"
-                        f"可用：{'、'.join(temporal)}")
-
-    resolved_filters = []
-    for item in (filters or []):
-        if isinstance(item, dict) and item.get("op") == "contains":
-            raise ToolError("data_time_range_invalid_filter: 时间范围查询不支持 "
-                            "contains；请使用明确的等值、范围或 in 条件")
-        resolved_filters.append(item)
-    payload = {
-        "sources": [{"alias": "objects", "ontologyId": scope.ontology.id,
-                     "releaseId": scope.release_id, "objectTypeId": ot.id}],
-        "where": [_filter(item) for item in resolved_filters],
-        "aggregates": [
-            {"fn": "min", "source": "objects", "property": prop, "as": "minValue"},
-            {"fn": "max", "source": "objects", "property": prop, "as": "maxValue"}],
-        "pageSize": 1,
-    }
-    try:
-        request = QS.QueryRequest.model_validate(payload)
-        result = execute_unified_query(db, user, request, session_kind="ontology_agent",
-                                       session_id=session_id or "")
-        cancel_remote_query(db, user, result["queryId"])
-    except ValidationError as exc:
-        raise ToolError(f"data_time_range_invalid_query: {exc}") from exc
-    except QueryError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
-    if (result.get("partial") or result.get("exact") is False
-            or result.get("completeness", "complete") != "complete"):
-        raise ToolError("data_time_range_incomplete: 远程查询未返回完整时间范围")
-    rows = result["rows"]
-    if len(rows) != 1:
-        raise ToolError("data_time_range_incomplete: 远程查询未返回完整时间范围")
-    row = rows[0]
-    empty = row.get("minValue") is None and row.get("maxValue") is None
-    return {
-        "objectType": ot.display_name,
-        "property": prop,
-        "min": row.get("minValue"),
-        "max": row.get("maxValue"),
-        "dataCoverage": {"zeroResult": empty,
-                         "reason": "source_no_data" if empty else "covered",
-                         "note": "授权范围内远程源没有数据" if empty else
-                         "源数据实际覆盖的最小/最大时间（按当前过滤条件）"},
-        "partial": False, "exact": True, "completeness": "complete",
-        "completenessScope": "query_execution",
-        "dataMode": "remote", "releaseId": scope.release_id,
-        "queryId": result["queryId"], "observedAt": result["observedAt"],
-        "countsScope": result["countsScope"], "citations": result["citations"],
-    }
+    if stats_mode:
+        out["groupBy"] = [
+            (f"{item['readable']}({_BUCKET_UNITS[item['bucket']]})"
+             if item.get("bucket") else item["readable"])
+            for item in group_items
+        ]
+        out["groupBuckets"] = [item.get("bucket") for item in group_items]
+        out["groupValues"] = [
+            [row.get(f"g{index}") for index in range(len(group_items))]
+            for row in (data.get("rows") or [])
+        ]
+    if stats_mode and len(group_items) == 1 and aggregate_items:
+        metric_item = aggregate_items[0]
+        metric_value = metric_item["fn"]
+        group_prop = group_items[0]["readable"]
+        group_label = (f"{group_prop}({_BUCKET_UNITS[group_items[0]['bucket']]})"
+                       if group_items[0].get("bucket") else group_prop)
+        value_label = metric_item["readable"]
+        points = [
+            {"group": row.get(group_prop), "value": row.get(value_label)}
+            for row in rows
+        ]
+        if all(isinstance(point["value"], (int, float))
+               and not isinstance(point["value"], bool)
+               for point in points):
+            try:
+                chart = _build_aggregate_chart(
+                    base_ot.display_name, metric_value,
+                    metric_item.get("property"), group_label, points)
+                if chart:
+                    out["chart"] = chart
+                    out["chartRendered"] = True
+            except Exception:  # noqa: BLE001 - 图表是可选的呈现层
+                pass
+    if spec is not None:
+        out["querySpec"] = spec
+        out["querySpecHash"] = spec_hash(spec)
+        if out["cursor"] and spec_cache is not None:
+            spec_cache[out["cursor"]] = spec
+    return out

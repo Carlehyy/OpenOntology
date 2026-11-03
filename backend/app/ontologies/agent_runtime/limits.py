@@ -116,6 +116,50 @@ _LIMITS: tuple[AgentRuntimeLimit, ...] = (
         "world_model_context_chars", 50_000, 1000, 200_000,
         "AGENT_WORLD_MODEL_CONTEXT_CHARS",
         "推演入参 context+actions 序列化后的字符上限（世界模型侧另有 100K 硬顶）"),
+    AgentRuntimeLimit(
+        "run_user_cap", 2, 1, 20,
+        "AGENT_RUN_USER_CAP",
+        "单个用户同时处于 queued/running 的回合上限"),
+    AgentRuntimeLimit(
+        "run_global_cap", 4, 1, 100,
+        "AGENT_RUN_GLOBAL_CAP",
+        "全平台同时处于 queued/running 的回合上限"),
+    AgentRuntimeLimit(
+        "run_lease_seconds", 600, 30, 86_400,
+        "AGENT_RUN_LEASE_SECONDS",
+        "回合执行租约时长；过期 running 会被对账标记为 interrupted，不自动重跑"),
+    AgentRuntimeLimit(
+        "run_event_poll_ms", 500, 25, 5000,
+        "AGENT_RUN_EVENT_POLL_MS",
+        "回合事件追读/轮询间隔（毫秒），供运行态恢复与流式读出使用"),
+    AgentRuntimeLimit(
+        "run_heartbeat_seconds", 15, 5, 60,
+        "AGENT_RUN_HEARTBEAT_SECONDS",
+        "running 回合的心跳/租约续约间隔（秒），须显著小于 run_lease_seconds"),
+    AgentRuntimeLimit(
+        "run_delta_flush_ms", 250, 50, 5000,
+        "AGENT_RUN_DELTA_FLUSH_MS",
+        "流式 delta 合并落库的时间阈值（毫秒）"),
+    AgentRuntimeLimit(
+        "run_delta_flush_chars", 1024, 64, 65_536,
+        "AGENT_RUN_DELTA_FLUSH_CHARS",
+        "流式 delta 合并落库的字符阈值"),
+    AgentRuntimeLimit(
+        "run_queue_cap", 16, 1, 1000,
+        "AGENT_RUN_QUEUE_CAP",
+        "单个用户排队中（queued）的回合上限，超出时拒绝入队"),
+    AgentRuntimeLimit(
+        "run_event_payload_cap", 64_000, 1024, 4_000_000,
+        "AGENT_RUN_EVENT_PAYLOAD_CAP",
+        "单条 run 事件（步骤/回答/错误）持久化载荷的 UTF-8 字节上限"),
+    AgentRuntimeLimit(
+        "run_event_retention_hours", 24, 1, 720,
+        "AGENT_RUN_EVENT_RETENTION_HOURS",
+        "流式 delta 事件的保留小时数；回答/步骤/终态事件保留用于审计与重放"),
+    AgentRuntimeLimit(
+        "context_chars_cap", 48_000, 1000, 1_000_000,
+        "AGENT_CONTEXT_CHARS_CAP",
+        "组装给 LLM 的对话/工具上下文总字符预算（后续上下文裁剪使用）"),
 )
 
 _LIMIT_BY_KEY: dict[str, AgentRuntimeLimit] = {item.key: item for item in _LIMITS}

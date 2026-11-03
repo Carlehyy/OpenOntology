@@ -43,13 +43,20 @@ function DialogContent({
   children,
   dismissible = true,
   layer = 'base',
+  overlayProps,
   onEscapeKeyDown,
   onInteractOutside,
   ...props
-}: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { dismissible?: boolean; layer?: DialogLayer }) {
+}: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
+  dismissible?: boolean
+  layer?: DialogLayer
+  /** 透传遮罩属性（现有调用方用 data-testid 锁定标准壳的遮罩契约）。 */
+  overlayProps?: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+    & { [key: `data-${string}`]: string | undefined }
+}) {
   return (
     <DialogPrimitive.Portal>
-      <DialogOverlay layer={layer} />
+      <DialogOverlay layer={layer} {...overlayProps} />
       <DialogPrimitive.Content
         onEscapeKeyDown={event => {
           if (!dismissible) event.preventDefault()

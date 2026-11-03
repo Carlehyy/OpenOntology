@@ -5,6 +5,42 @@
  * 其余走 apiClientV2。
  */
 import { apiClientV2 } from './client'
+import {
+  AgentProtocolError,
+  parseAgentQueryViewResult,
+  parseAgentRunSnapshot,
+  parseAgentRunStreamEvent,
+} from './agentProtocol'
+import type {
+  AgentCitation,
+  AgentProposal,
+  AgentQuerySpec,
+  AgentRunSnapshot,
+  AgentRunStreamEvent,
+  AgentSentinelProposal,
+  AgentStep,
+  AnswerVerification,
+  DynamicSentinelDefinition,
+} from './agentProtocol'
+
+export type {
+  AgentActionProposal,
+  AgentCitation,
+  AgentProposal,
+  AgentQueryColumn,
+  AgentQueryDrilldown,
+  AgentQuerySpec,
+  AgentQueryViewResult,
+  AgentRunSnapshot,
+  AgentRunStatus,
+  AgentRunStreamEvent,
+  AgentSentinelProposal,
+  AgentStep,
+  AnswerVerification,
+  DynamicSentinelDefinition,
+  DynamicSentinelPattern,
+  DynamicSentinelPatternStage,
+} from './agentProtocol'
 
 // ---------- 类型 ----------
 
@@ -15,6 +51,8 @@ export interface AgentProfile {
   allowedObjectTypeIds: string[] | null
   allowedLinkTypeIds: string[] | null
   allowedActionIds: string[] | null
+  /** 对象类型 → 允许属性名；null/缺省 = 全部属性 */
+  allowedProperties?: Record<string, string[] | null> | null
   allowActionProposals: boolean
   maxRowsPerQuery: number
   maxSteps: number
@@ -28,6 +66,7 @@ export interface AgentProfileUpdate {
   allowedObjectTypeIds?: string[] | null
   allowedLinkTypeIds?: string[] | null
   allowedActionIds?: string[] | null
+  allowedProperties?: Record<string, string[] | null> | null
   allowActionProposals?: boolean
   maxRowsPerQuery?: number
   maxSteps?: number
@@ -39,7 +78,14 @@ export interface AgentProfileUpdate {
 
 export interface AgentCapabilities {
   enabled: boolean
-  objectTypes: { id: string; name: string; displayName: string; instanceCount: number }[]
+  objectTypes: {
+    id: string
+    name: string
+    displayName: string
+    /** 远程绑定未知计数时为 null（不要回落成 0） */
+    instanceCount: number | null
+    remote?: boolean
+  }[]
   linkTypes: { id: string; name: string; displayName: string }[]
   actions: { id: string; name: string; displayName: string; requiresApproval: boolean }[]
   allowActionProposals: boolean
@@ -48,83 +94,6 @@ export interface AgentCapabilities {
   skillCard: string
   releaseId?: string | null
   releaseVersion?: string | null
-}
-
-export interface AgentStep {
-  tool: string
-  arguments: Record<string, unknown>
-  summary: string
-  durationMs: number
-  /** 工具原始输出（后端截断后下发），用于「展开查看工具输出」 */
-  result?: unknown
-  /** 完整审计结果存在时，对应的页面轻量展示值（仅导出文件包含） */
-  displayResult?: unknown
-  error?: string
-}
-
-export interface AgentCitation {
-  instanceId: string
-  objectType: string
-  label: string
-  /** 统一引用契约：展示就绪串（objectType · label） */
-  sourceLabel?: string
-  /** 属性摘要，引用卡片副文本 / 悬浮显示 */
-  snippet?: string
-}
-
-export interface AgentActionProposal {
-  kind?: 'action'
-  proposalId: string
-  releaseId?: string | null
-  actionId: string
-  actionName: string
-  parameters: Record<string, unknown>
-  targetInstanceId: string | null
-  requiresApproval: boolean
-  status: string
-  validationErrors: string[]
-  effects: { type: string; description?: string; [k: string]: unknown }[]
-}
-
-export interface DynamicSentinelPatternStage {
-  alias: string
-  objectTypeId: string
-  filter?: string | null
-  within?: number | null
-}
-
-export interface DynamicSentinelPattern {
-  stages: DynamicSentinelPatternStage[]
-  within?: number
-  absence?: { enabled: boolean }
-  aggregate?: {
-    property: string
-    function: 'count' | 'avg' | 'sum' | 'min' | 'max'
-    window: number
-    threshold: number
-    comparison?: 'gte' | 'gt' | 'lte' | 'lt'
-  }
-  condition?: string | null
-}
-
-export interface DynamicSentinelDefinition {
-  name: string
-  displayName: string
-  description?: string | null
-  bindings: { alias: string; objectTypeId: string; filter?: string | null }[]
-  links: { from: string; linkTypeId: string; to: string }[]
-  condition?: string | null
-  pattern?: DynamicSentinelPattern | null
-  conditionRows?: Record<string, unknown>[]
-  conditionLogic?: 'and' | 'or'
-  primaryAlias: string
-  actionIds: string[]
-  actionParameters: Record<string, unknown>
-  onChange: boolean
-  onSchedule: boolean
-  scanIntervalSeconds: number
-  triggerMode: 'on_enter' | 'on_enter_leave' | 'run_on_all' | 'on_pattern'
-  muted: boolean
 }
 
 export interface DynamicSentinelTrialReport {
@@ -169,22 +138,6 @@ export interface DynamicSentinel extends DynamicSentinelDefinition {
   updatedAt?: string | null
 }
 
-export interface AgentSentinelProposal {
-  kind: 'sentinel'
-  proposalId: string
-  operation: 'create' | 'update' | 'enable' | 'disable' | 'delete'
-  sentinelId: string | null
-  sentinelName: string
-  releaseId: string
-  expectedRevision: number | null
-  definition: DynamicSentinelDefinition | null
-  status: string
-  validationErrors: string[]
-  validationReport?: Record<string, unknown>
-}
-
-export type AgentProposal = AgentActionProposal | AgentSentinelProposal
-
 export interface AgentMessageDTO {
   id: string
   role: 'user' | 'assistant'
@@ -204,6 +157,10 @@ export interface AgentConversationDTO {
   createdAt: string
   updatedAt: string
   messages?: AgentMessageDTO[]
+  /** 服务端发现的事实源：该会话当前排队/执行中的回合（刷新/新 tab 恢复）。 */
+  activeRun?: AgentRunSnapshot | null
+  /** 最近一轮（含 interrupted 等终态）：用于服务重启后投影进度并重试。 */
+  latestRun?: AgentRunSnapshot | null
 }
 
 export interface AgentConversationExport {
@@ -241,13 +198,6 @@ export interface AgentConversationExport {
   }
 }
 
-export interface AnswerVerification {
-  passed: boolean
-  answerNumberCount?: number
-  unverified?: number[]
-  retried?: boolean
-}
-
 export type AgentEvent =
   | { type: 'meta'; conversationId: string; model: string; releaseId?: string | null }
   | ({ type: 'step' } & AgentStep)
@@ -256,13 +206,25 @@ export type AgentEvent =
   | { type: 'cancelled' }
   | { type: 'done' }
 
-/** 回合状态（GET /agent/chat/runs/{runId}）：unknown = 注册表不认识该 run */
-export interface AgentChatRun {
+// ---------- 服务端回合（run）协议 ----------
+
+export interface CreateChatRunBody {
+  message: string
+  conversationId?: string | null
+  modelId?: string | null
+  releaseId?: string | null
+  /** 客户端 uuid 幂等键：重复提交返回同一 run。 */
   runId: string
-  conversationId: string | null
-  status: 'running' | 'succeeded' | 'error' | 'cancelled' | 'unknown'
-  startedAt: string | null
-  finishedAt: string | null
+  stream?: boolean
+}
+
+export interface AgentQueryViewBody {
+  conversationId: string
+  querySpec?: AgentQuerySpec | null
+  cursor?: string | null
+  /** 服务端签名下钻令牌（字符串），与原始 querySpec 同时提交。 */
+  drilldown?: string | null
+  pageSize?: number | null
 }
 
 export interface ExecuteProposalResult {
@@ -437,7 +399,7 @@ export interface AgentGraphImpactResult {
 export type ReportVisualization = 'auto' | 'kpi' | 'bar' | 'line' | 'pie' | 'table' | 'none'
 
 export interface ReportQuery {
-  tool: 'aggregate_objects' | 'search_objects'
+  tool: 'aggregate_objects' | 'search_objects' | 'query_objects'
   arguments: Record<string, unknown>
 }
 
@@ -721,8 +683,25 @@ export const agentApi = {
   cancelChat: (oid: string, runId: string) =>
     apiClientV2.post<{ runId: string; cancelled: boolean; note: string }>(
       `${base(oid)}/chat/cancel`, { runId }),
+  /** 新建服务端回合：客户端 runId 作为幂等键；SSE 与执行解耦。 */
+  createChatRun: (oid: string, body: CreateChatRunBody) =>
+    apiClientV2.post<unknown>(`${base(oid)}/chat/runs`, {
+      ...body,
+      stream: false,
+    }).then(parseAgentRunSnapshot),
   chatRun: (oid: string, runId: string) =>
-    apiClientV2.get<AgentChatRun>(`${base(oid)}/chat/runs/${runId}`),
+    apiClientV2.get<unknown>(`${base(oid)}/chat/runs/${runId}`)
+      .then(parseAgentRunSnapshot),
+  retryChatRun: (oid: string, runId: string) =>
+    apiClientV2.post<unknown>(`${base(oid)}/chat/runs/${runId}/retry`, {})
+      .then(parseAgentRunSnapshot),
+  queryView: (oid: string, body: AgentQueryViewBody) =>
+    apiClientV2.post<unknown>(`${base(oid)}/query-view`, body)
+      .then(parseAgentQueryViewResult),
+  releaseQueryView: (oid: string, body: {
+    conversationId: string
+    cursor?: string | null
+  }) => apiClientV2.delete(`${base(oid)}/query-view`, { data: body }),
   dynamicSentinels: (oid: string, releaseId: string) =>
     apiClientV2.get<DynamicSentinel[]>(`${base(oid)}/dynamic-sentinels`, { params: { release_id: releaseId } }),
   createDynamicSentinel: (oid: string, releaseId: string, definition: DynamicSentinelDefinition) =>
@@ -844,5 +823,92 @@ export async function streamAgentChat(
         } catch { /* 忽略无法解析的行 */ }
       }
     }
+  }
+}
+
+/**
+ * 消费服务端回合 SSE（GET chat/runs/{runId}/events?after_seq=N）。
+ *
+ * 与旧 streamAgentChat 的区别：run 已由 POST chat/runs 创建，SSE 只负责
+ * 快照/增量推送；断线后调用方凭 last seq 重连，服务端不回放已消费事件。
+ * 事件形状由 parseAgentRunStreamEvent 按单一 camelCase 合同校验，非法
+ * 事件直接抛 AgentProtocolError，不做字段别名归一。
+ */
+export async function streamAgentRunEvents(
+  oid: string,
+  runId: string,
+  options: {
+    afterSeq?: number | null
+    lastEventId?: string | null
+    signal?: AbortSignal
+  },
+  onEvent: (event: AgentRunStreamEvent) => void,
+): Promise<void> {
+  const token = localStorage.getItem('token') || ''
+  const params = options.afterSeq === null || options.afterSeq === undefined
+    ? ''
+    : `?after_seq=${encodeURIComponent(String(options.afterSeq))}`
+  const resp = await fetch(
+    `${apiRoot()}${base(oid)}/chat/runs/${encodeURIComponent(runId)}/events${params}`,
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'text/event-stream',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.lastEventId ? { 'Last-Event-ID': options.lastEventId } : {}),
+      },
+      signal: options.signal,
+    },
+  )
+  if (!resp.ok || !resp.body) {
+    const text = await resp.text().catch(() => '')
+    const error = new Error(`回合事件流请求失败 (${resp.status}) ${text.slice(0, 200)}`) as Error & { status?: number }
+    error.status = resp.status
+    throw error
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let terminal = false
+  const dispatch = (block: string) => {
+    const dataLines: string[] = []
+    for (const line of block.split('\n')) {
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+    }
+    if (!dataLines.length) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(dataLines.join('\n'))
+    } catch {
+      throw new AgentProtocolError('回合事件流不是合法 JSON')
+    }
+    const event = parseAgentRunStreamEvent(parsed)
+    onEvent(event)
+    if (event.type === 'done' || event.type === 'error' || event.type === 'cancelled') {
+      terminal = true
+    }
+  }
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+      let split = buffer.indexOf('\n\n')
+      while (split >= 0) {
+        dispatch(buffer.slice(0, split))
+        buffer = buffer.slice(split + 2)
+        if (terminal) {
+          await reader.cancel().catch(() => {})
+          return
+        }
+        split = buffer.indexOf('\n\n')
+      }
+    }
+    buffer += decoder.decode()
+    if (buffer.trim()) dispatch(buffer)
+  } finally {
+    reader.releaseLock()
   }
 }

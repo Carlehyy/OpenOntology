@@ -133,6 +133,18 @@ Playwright；这不是跳过纯逻辑单元测试的理由。
 或直接修改持久数据的一次性脚本；正式浏览器场景统一新增到
 `frontend/src/test/e2e/`。
 
+本体助手后台回合的隔离真实栈迁移验收使用
+`backend/scripts/ontology_assistant_real_stack_e2e.sh`。`migrate-verify` 从
+当前检出执行 `alembic heads` 动态解析唯一 head，不再硬编码 revision；fresh
+数据库与 legacy baseline 都必须升级到该 head。启动容器前仍须按本文件资源
+槽位规则取得批准，使用脚本自有的独立 Compose 项目与回环偏移端口，不停止或
+接管其他项目的容器；启动 `backend-up` 后再用 `executor-up` 以同一套
+fixture 环境变量启动 NATS executor，后台回合才会真正被消费；结束后依次
+`executor-down`、`backend-down`、`stack-down`。脚本只透传显式提供的
+`AGENT_RUN_*` 覆盖（生产默认仍在 limits.py）；例如用
+`AGENT_RUN_LEASE_SECONDS=30`（registry 最小 30 秒）配合 kill executor 演练
+45 秒 reconcile，不改变生产默认 600 秒。
+
 ### 双源集成数据集：隔离环境与容量验收
 
 双源容量验收使用独立的 [Compose](../../docker-compose.integrated-e2e.yml) 与

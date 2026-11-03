@@ -7,6 +7,9 @@ from pydantic import ValidationError
 
 from app.ontologies.agent_runtime.boundary import ToolError
 from app.ontologies.agent_runtime.limits import limit as runtime_limit
+from app.ontologies.agent_runtime.query_spec import (
+    build_query_spec, drilldown_conditions, make_drilldown, spec_hash,
+)
 from app.ontologies.agent_runtime.read_queries import encode_scalar
 
 _RANGE_OPS = {"gt", "gte", "lt", "lte"}
@@ -164,6 +167,47 @@ def _default_order_by(group_items, order_by):
     return order
 
 
+
+def _visible_properties(scope, ot) -> list[str]:
+    allowed = scope.allowed_property_names(ot.id)
+    definitions = {p.get("name"): p for p in (ot.properties or [])
+                   if isinstance(p, dict) and p.get("name")}
+    names = [name for name in definitions
+             if allowed is None or name in allowed]
+    if scope.release is None:
+        return names
+    from app.ontologies.mappings.remote_binding import (
+        RemoteBindingError, get_remote_binding,
+    )
+    try:
+        binding = get_remote_binding(scope.release.snapshot, ot.id)
+    except RemoteBindingError as exc:
+        raise ToolError(f"{exc.code}: {exc.message}") from exc
+    if binding is None:
+        return names
+    remote_bound = {prop for prop in binding.get("fieldMap", {}).values()
+                    if prop != "__primary_key__"}
+    return [name for name in names if name in remote_bound]
+
+
+def _payload_spec(*, scope, ot, payload, labels, description,
+                  resolved_window=None, detail_payload=None) -> dict:
+    from app.ontologies.agent_query import schemas as QS
+    request = QS.QueryRequest.model_validate(payload)
+    spec = build_query_spec(
+        shape="objects", ontology_id=scope.ontology.id,
+        release_id=str(scope.release_id), request=request, labels=labels,
+        resolved_window=resolved_window, description=description,
+        object_type=ot.id,
+    )
+    if detail_payload is not None:
+        detail_request = QS.QueryRequest.model_validate(detail_payload)
+        spec["drilldownBase"] = detail_request.model_dump(by_alias=True)
+        spec["drilldownLabels"] = {
+            item.as_: item.property for item in detail_request.select
+        }
+    return spec
+
 def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
                      group_by, filters, order_by=None):
     if user is None:
@@ -292,6 +336,24 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
         matched_cell = rows[0]["value" if metric == "count" else "matched"]
         entry = {**out, "value": number(rows[0]["value"]),
                  "matched": number(matched_cell)}
+        try:
+            entry["querySpec"] = _payload_spec(
+                scope=scope, ot=ot, payload=payload,
+                labels={"value": metric,
+                        **({"matched": "matched"} if metric != "count" else {})},
+                description={
+                    "semantics": "aggregate_scalar",
+                    "objectType": ot.display_name,
+                    "metric": metric,
+                    "metricProperty": metric_prop,
+                    "filters": [
+                        {"property": item.get("property"), "op": item.get("op"),
+                         "value": item.get("value")} for item in resolved
+                    ],
+                })
+            entry["querySpecHash"] = spec_hash(entry["querySpec"])
+        except Exception:  # noqa: BLE001 - spec 是可重放附加信息，不破坏已成功统计
+            pass
         if Decimal(str(matched_cell)) == 0:
             entry["dataCoverage"] = _zero_coverage(
                 db, user, session_id, resolved, count_payload)
@@ -312,14 +374,77 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
     result = _execute(db, user, session_id, payload)
     out = base_out(result)
     rows = result["rows"]
+    labels = {f"group{index}": prop
+              for index, (prop, _bucket) in enumerate(group_items)}
+    labels["value"] = metric
+    if metric != "count":
+        labels["matched"] = "matched"
+    item_dicts = [{"source": "objects", "property": prop, "bucket": bucket,
+                   "readable": prop} for prop, bucket in group_items]
+    detail_select = [
+        {"source": "objects", "property": prop, "as": f"c{index}"}
+        for index, prop in enumerate(_visible_properties(scope, ot))
+    ]
+    if not detail_select:
+        detail_select = [{"source": "objects", "property": prop, "as": f"c{index}"}
+                         for index, (prop, _bucket) in enumerate(group_items)]
+    detail_payload = None
+    if detail_select:
+        detail_payload = {
+            "sources": [{"alias": "objects", "ontologyId": scope.ontology.id,
+                         "releaseId": scope.release_id, "objectTypeId": ot.id}],
+            "where": payload_where,
+            "select": detail_select,
+        }
+    spec = None
+    try:
+        spec = _payload_spec(
+            scope=scope, ot=ot, payload=payload, labels=labels,
+            description={
+                "semantics": "aggregate_grouped",
+                "objectType": ot.display_name,
+                "metric": metric,
+                "metricProperty": metric_prop,
+                "groupBy": [{"property": prop, "bucket": bucket}
+                            for prop, bucket in group_items],
+                "filters": [
+                    {"property": item.get("property"), "op": item.get("op"),
+                     "value": item.get("value")} for item in resolved
+                ],
+            },
+            detail_payload=detail_payload,
+        )
+    except Exception:  # noqa: BLE001 - spec 不破坏已成功统计
+        spec = None
     groups = []
     for row in rows:
         values = [row.get(f"group{index}") for index in range(len(group_items))]
+        parts = []
+        for value, (prop, bucket) in zip(values, group_items):
+            label = f"{prop}({_BUCKET_UNITS[bucket]})" if bucket else prop
+            parts.append(f"{label}={('（空）' if value is None else value)}")
         entry = {"group": "|".join("" if v is None else str(v) for v in values),
                  "value": number(row["value"]),
-                 "count": number(row["value" if metric == "count" else "matched"])}
+                 "count": number(row["value" if metric == "count" else "matched"]),
+                 "groupValues": values,
+                 "groupDisplay": " | ".join(parts)}
         if len(group_items) > 1:
             entry["values"] = values
+        if spec is not None and user is not None and session_id:
+            try:
+                conditions = drilldown_conditions(values, item_dicts)
+                entry["drilldown"] = make_drilldown(
+                    owner=str(getattr(user, "id", "")),
+                    ontology_id=scope.ontology.id,
+                    conversation_id=session_id,
+                    base_spec_hash=spec_hash(spec),
+                    conditions=conditions,
+                    group_values=values,
+                    group_by=[prop for prop, _bucket in group_items],
+                    resolved_window=None,
+                )
+            except ToolError as exc:
+                entry["drilldownUnavailable"] = str(exc)
         groups.append(entry)
     total = result.get("totalRowCount")
     truncated = bool(result.get("hasNext") or result.get("truncated") or result.get("resultBounded")
@@ -330,6 +455,9 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
              "truncated": truncated,
              "matched": None if truncated else encode_scalar(sum(
                  (Decimal(str(group["count"])) for group in groups), Decimal(0)))}
+    if spec is not None:
+        entry["querySpec"] = spec
+        entry["querySpecHash"] = spec_hash(spec)
     if not groups:
         entry["dataCoverage"] = _zero_coverage(
             db, user, session_id, resolved, count_payload)

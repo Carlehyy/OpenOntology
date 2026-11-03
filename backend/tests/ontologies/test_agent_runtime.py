@@ -746,6 +746,7 @@ def test_analysis_report_template_preview_publish_and_run(
         client, auth_headers, modeled_ontology, db, admin_user, editor_user, monkeypatch):
     """AI 草稿可编辑；真实数据试运行绑定 revision；质量门通过后才能发布并复跑。"""
     oid = modeled_ontology["id"]
+    _freeze_modeled_current_release(db, oid)
     from app.models.model_config import ModelConfig
     model = ModelConfig(id=str(uuid.uuid4()), name="report-fake", provider="openai",
                         config_type="llm", models=["report-fake-model"],
@@ -874,10 +875,149 @@ def test_analysis_report_template_preview_publish_and_run(
     assert [item["id"] for item in own_editor_history] == [editor_run.json()["data"]["id"]]
 
 
+def test_report_generation_and_execution_share_current_release_scope(
+        client, auth_headers, modeled_ontology, db, admin_user):
+    """冻结当前 release 后再改草稿：AI 起草目录与报告执行都只能看到 release。
+
+    草稿新增类型既不能进入 generation catalog，也不能在报告运行期查询；
+    同一模板中的已发布 Order 仍可正常取数，证明两边使用同一个 current release。
+    """
+    oid = modeled_ontology["id"]
+    _freeze_modeled_current_release(db, oid)
+
+    from app.models.ontology_formal import ObjectType
+    db.add(ObjectType(
+        id="ot-draft-only", ontology_id=oid, name="DraftOnly",
+        display_name="草稿专属", primary_key="draft_no",
+        properties=[{"id": "pd1", "name": "draft_no",
+                     "displayName": "草稿编号", "type": "string"}]))
+    db.commit()
+
+    from app.ontologies.agent_runtime.reporting import (
+        execute_report, generate_template_spec,
+    )
+    from app.ontologies.agent_runtime.models import AnalysisReportTemplate
+
+    # 无 LLM 配置 → 确定性 fallback，直接读取与报告相同的 scope catalog。
+    spec = generate_template_spec(db, oid, "生成订单规模和状态结构的管理层汇报")
+    serialized = json.dumps(spec, ensure_ascii=False)
+    assert "DraftOnly" not in serialized and "草稿专属" not in serialized
+    assert "Order" in serialized
+
+    template = AnalysisReportTemplate(
+        id="tpl-release-scope", ontology_id=oid, created_by=admin_user.id,
+        name="release scope", description="scope consistency", status="draft",
+        revision=1,
+        sections=[
+            {"id": "draft-only", "title": "草稿专属", "goal": "验证草稿类型不可执行。",
+             "visualization": "table",
+             "queryPlan": [{"tool": "aggregate_objects", "arguments": {
+                 "object_type": "DraftOnly", "metric": "count"}}]},
+            {"id": "release-order", "title": "发布订单", "goal": "验证 release 类型可执行。",
+             "visualization": "table",
+             "queryPlan": [{"tool": "aggregate_objects", "arguments": {
+                 "object_type": "Order", "metric": "count"}}]},
+        ],
+    )
+    db.add(template)
+    db.commit()
+    run = execute_report(db, template, admin_user, trigger_type="preview")
+    assert run.status == "succeeded", run.error_message
+    draft_query, order_query = run.section_results[0]["queries"][0], \
+        run.section_results[1]["queries"][0]
+    assert "DraftOnly" in draft_query["error"]
+    assert order_query["result"]["value"] == 2
+
+
+def test_report_generation_and_execution_require_current_release(
+        client, auth_headers, ontology, db, admin_user):
+    """无 current release 时显式失败，不自动回退草稿投影。"""
+    from app.models.ontology import OntologyProject
+    from app.ontologies.agent_runtime.boundary import ToolError
+    from app.ontologies.agent_runtime.models import (
+        AnalysisReportRun, AnalysisReportTemplate,
+    )
+    from app.ontologies.agent_runtime.reporting import (
+        execute_report, generate_template_spec,
+    )
+
+    oid = ontology["id"]
+    project = db.query(OntologyProject).filter_by(id=oid).one()
+    project.current_release_id = None
+    db.commit()
+
+    with pytest.raises(ToolError) as generation_error:
+        generate_template_spec(db, oid, "生成订单规模和状态结构的管理层汇报")
+    assert "report_release_required" in str(generation_error.value)
+
+    template = AnalysisReportTemplate(
+        id="tpl-no-release", ontology_id=oid, created_by=admin_user.id,
+        name="no release", description="no fallback", status="draft",
+        revision=1,
+        sections=[{"id": "order", "title": "订单", "goal": "验证无 release 拒绝执行。",
+                   "visualization": "table",
+                   "queryPlan": [{"tool": "aggregate_objects", "arguments": {
+                       "object_type": "Order", "metric": "count"}}]}],
+    )
+    db.add(template)
+    db.commit()
+    with pytest.raises(ToolError) as execution_error:
+        execute_report(db, template, admin_user, trigger_type="preview")
+    assert "report_release_required" in str(execution_error.value)
+    assert db.query(AnalysisReportRun).filter_by(
+        template_id=template.id).count() == 0
+
+
+def test_report_http_preview_and_run_map_missing_release_to_422(
+        client, auth_headers, ontology, db, admin_user):
+    """无 current release 的 preview/run 走应用边界，返回明确 422 而非 500。"""
+    from app.models.ontology import OntologyProject
+    from app.ontologies.agent_runtime.models import (
+        AnalysisReportRun, AnalysisReportTemplate,
+    )
+
+    oid = ontology["id"]
+    section = {"id": "order", "title": "订单", "goal": "验证无 release 的 HTTP 映射。",
+               "visualization": "table",
+               "queryPlan": [{"tool": "aggregate_objects", "arguments": {
+                   "object_type": "Order", "metric": "count"}}]}
+    draft = AnalysisReportTemplate(
+        id="tpl-http-no-release-preview", ontology_id=oid,
+        created_by=admin_user.id, name="no release preview",
+        description="", status="draft", revision=1, sections=[section],
+    )
+    published = AnalysisReportTemplate(
+        id="tpl-http-no-release-run", ontology_id=oid,
+        created_by=admin_user.id, name="no release run",
+        description="", status="published", revision=1, sections=[section],
+    )
+    db.add_all([draft, published])
+    db.commit()
+    project = db.query(OntologyProject).filter_by(id=oid).one()
+    project.current_release_id = None
+    db.commit()
+
+    preview = client.post(
+        f"{_fo(oid)}/agent/report-templates/{draft.id}/preview",
+        headers=auth_headers, json={})
+    assert preview.status_code == 422, preview.text
+    assert "report_release_required" in preview.json()["detail"]
+
+    run = client.post(
+        f"{_fo(oid)}/agent/report-templates/{published.id}/runs",
+        headers=auth_headers, json={})
+    assert run.status_code == 422, run.text
+    assert "report_release_required" in run.json()["detail"]
+    assert db.query(AnalysisReportRun).filter(
+        AnalysisReportRun.template_id.in_([draft.id, published.id]),
+    ).count() == 0
+
+
 def test_analysis_report_quality_gate_and_readonly_query_guard(
         client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
     """单章节低质量模板不能发布；报告查询计划不能混入写动作。"""
     oid = modeled_ontology["id"]
+    _freeze_modeled_current_release(db, oid)
     from app.models.model_config import ModelConfig
     model = ModelConfig(id=str(uuid.uuid4()), name="quality-fake", provider="openai",
                         config_type="llm", models=["quality-fake-model"],

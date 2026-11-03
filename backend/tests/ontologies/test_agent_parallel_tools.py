@@ -91,3 +91,64 @@ def test_unsafe_tool_mix_runs_serially(
     assert state["peak"] == 1
     assert [outcome[0].get("ok") for outcome in outcomes] == [
         "list_actions", "propose_action"]
+
+
+def test_parallel_query_preserves_plan_for_the_next_batch(
+        db, admin_user, orders_ontology):
+    runner = _runner(db, orders_ontology, admin_user)
+    outcomes = orchestrator._execute_tool_calls(runner, [
+        {"id": "q1", "name": "query_objects", "arguments": {
+            "object_type": "订单", "select": ["order_no"],
+            "order_by": [{"output": "order_no", "direction": "asc"}],
+            "page_size": 1,
+        }},
+        {"id": "a1", "name": "list_actions", "arguments": {}},
+    ])
+    first = outcomes[0][0]
+    assert "error" not in first, first
+    assert first["hasNext"]
+    assert first["cursor"] in runner._query_spec_cache
+
+    outcomes = orchestrator._execute_tool_calls(runner, [
+        {"id": "q2", "name": "query_objects", "arguments": {
+            "object_type": "订单", "cursor": first["cursor"],
+        }},
+        {"id": "a2", "name": "list_actions", "arguments": {}},
+    ])
+    second = outcomes[0][0]
+    assert "error" not in second, second
+    assert second["querySpec"] == first["querySpec"]
+    assert second["columns"] == first["columns"]
+    assert second["rows"] != first["rows"]
+    assert "querySpecUnavailable" not in second
+
+
+def test_parallel_tools_preserve_unpersisted_sandbox_profile(
+        db, admin_user, orders_ontology, monkeypatch):
+    from app.ontologies.agent_runtime.models import AgentProfile
+
+    runner = _runner(db, orders_ontology, admin_user)
+    published = runner.scope.profile
+    assert published.allowed_object_type_ids is None
+    draft = AgentProfile(**{
+        column.key: getattr(published, column.key)
+        for column in AgentProfile.__table__.columns
+    })
+    draft.allowed_object_type_ids = []
+    draft.allowed_properties = {}
+    runner.scope = runner.scope.with_profile(draft)
+
+    def read_scope(self, _name, _arguments):
+        return {"types": sorted(self.scope.object_types),
+                "properties": self.scope.profile.allowed_properties}
+
+    monkeypatch.setattr(ToolRunner, "run", read_scope)
+    outcomes = orchestrator._execute_tool_calls(runner, [
+        {"id": "a1", "name": "list_actions", "arguments": {}},
+        {"id": "s1", "name": "list_dynamic_sentinels", "arguments": {}},
+    ])
+    assert [outcome[0] for outcome in outcomes] == [
+        {"types": [], "properties": {}}, {"types": [], "properties": {}},
+    ]
+    db.refresh(published)
+    assert published.allowed_object_type_ids is None

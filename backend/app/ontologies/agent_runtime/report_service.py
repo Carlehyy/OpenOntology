@@ -238,13 +238,16 @@ def preview_template(
 ) -> AnalysisReportRun:
     if row.status == "published":
         raise conflict("已发布模板请使用正式运行入口")
-    return reporting_module.execute_report(
-        db,
-        row,
-        current_user,
-        "preview",
-        body.model_id,
-    )
+    try:
+        return reporting_module.execute_report(
+            db,
+            row,
+            current_user,
+            "preview",
+            body.model_id,
+        )
+    except ToolError as exc:
+        raise invalid(str(exc)) from exc
 
 
 def publish_template(
@@ -296,13 +299,16 @@ def run_published(
 ) -> AnalysisReportRun:
     if row.status != "published":
         raise conflict("模板尚未发布，只能先执行真实数据试运行")
-    return reporting_module.execute_report(
-        db,
-        row,
-        current_user,
-        "manual",
-        body.model_id,
-    )
+    try:
+        return reporting_module.execute_report(
+            db,
+            row,
+            current_user,
+            "manual",
+            body.model_id,
+        )
+    except ToolError as exc:
+        raise invalid(str(exc)) from exc
 
 
 def list_runs(

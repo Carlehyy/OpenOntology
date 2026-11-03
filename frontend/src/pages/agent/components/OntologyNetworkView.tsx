@@ -96,7 +96,7 @@ export function OntologyNetworkView({
   linkTypes: LinkType[]
   actions: Action[]
   functions: OntologyFunction[]
-  instancesCount: (objectTypeId: string) => number
+  instancesCount: (objectTypeId: string) => number | null
   /** 当前发布版 id：实例徽标弹层按它读取运行投影（versions workspace 不携带实例）。 */
   releaseId: string
   oid: string
@@ -469,8 +469,10 @@ export function OntologyNetworkView({
                         </div>
                         <button
                           onClick={(e) => { e.stopPropagation(); setInstanceModal({ open: true, objectTypeId: objectType.id, objectTypeLabel: itemLabel(objectType) }); setInstanceModalPage(0); setInstanceModalFilterCol(''); setInstanceModalFilterKw(''); setInstanceModalPageSize(20); setInstanceModalJump('') }}
-                          className="shrink-0 rounded-full bg-card px-2 py-0.5 text-[10px] font-semibold text-muted-foreground shadow-sm hover:bg-brand-soft hover:text-brand-ink transition-colors cursor-pointer">
-                          {instances} 实例
+                          disabled={instances === null}
+                          title={instances === null ? '远程绑定对象，实例计数未知' : `${instances} 个实例`}
+                          className="shrink-0 rounded-full bg-card px-2 py-0.5 text-[10px] font-semibold text-muted-foreground shadow-sm hover:bg-brand-soft hover:text-brand-ink transition-colors cursor-pointer disabled:cursor-default disabled:hover:bg-card disabled:hover:text-muted-foreground">
+                          {instances === null ? '远程 · 实例未知' : `${instances} 实例`}
                         </button>
                       </div>
                       {objectType.description && (

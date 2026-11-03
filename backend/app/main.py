@@ -257,25 +257,11 @@ app.include_router(integrated_datasets_v2.router, prefix="/api/v2/integrated-dat
 app.include_router(unified_query_v2.router, prefix="/api/v2", tags=["v2-query"], dependencies=data_guard)
 
 # Assemble the ontology-owned read port without a reverse domain dependency.
-from functools import partial
-from app.data_channel.query.contracts import ColumnSpec, Relation, register_provider
-from app.ontologies.agent_query.read_port import resolve_ontology_relation
+# The same composition is installed by the NATS executor bootstrap so worker
+# execution sees identical query/read/action ports.
+from app.bootstrap.runtime_composition import install_runtime_ports
 
-register_provider("ontology", partial(
-    resolve_ontology_relation,
-    column_spec_factory=ColumnSpec,
-    relation_factory=Relation,
-))
-from app.data_channel.integrated.binding_port import IntegratedRemoteBindingValidator
-from app.data_channel.query.ontology_adapter import OntologyQueryAdapter
-from app.data_channel.action_write_port import AssetWritePortAdapter
-from app.ontologies.agent_query.remote_query import set_remote_query_port
-from app.ontologies.agent_confirmation.write_port import set_action_write_port
-from app.ontologies.mappings.remote_binding import set_remote_binding_validator
-
-set_remote_binding_validator(IntegratedRemoteBindingValidator())
-set_remote_query_port(OntologyQueryAdapter())
-set_action_write_port(AssetWritePortAdapter())
+install_runtime_ports()
 app.include_router(manual_sharing_router, prefix="/api/v2/manual-dataset-sharing", tags=["manual-dataset-sharing"], dependencies=asset_lake_guard)
 app.include_router(public_manual_sharing_router, prefix="/api/public/manual-datasets", tags=["public-manual-datasets"])
 app.include_router(auth_public_query_router, prefix="/api/public", tags=["public-var-query"])
@@ -334,6 +320,12 @@ from app.ontologies.agent_runtime import router as agent_runtime_router
 app.include_router(agent_runtime_router.router, prefix="/api/v2/formal/ontologies", tags=["ontology-agent"], dependencies=agent_guard)
 from app.ontologies.agent_runtime import proposals_router as agent_proposals_router
 app.include_router(agent_proposals_router.router, prefix="/api/v2/formal/ontologies", tags=["ontology-agent"], dependencies=agent_guard)
+# 持久化后台回合账本（提交/事件流/取消/重试）— 与 legacy chat 路由同前缀同权限
+from app.ontologies.agent_runtime import run_router as agent_run_router
+app.include_router(agent_run_router.router, prefix="/api/v2/formal/ontologies", tags=["ontology-agent"], dependencies=agent_guard)
+# 查询页交互 API（Web-owned 查询句柄；worker 执行结果转可重放 querySpec）
+from app.ontologies.agent_runtime import query_view_router as agent_query_view_router
+app.include_router(agent_query_view_router.router, prefix="/api/v2/formal/ontologies", tags=["ontology-agent"], dependencies=agent_guard)
 # 统一关联查询 — 同本体多对象与跨本体同一执行核（受认证读保护）
 from app.ontologies.agent_query import router as agent_query_router
 app.include_router(agent_query_router.router, prefix="/api/v2/formal", tags=["ontology-agent-query"], dependencies=agent_guard)

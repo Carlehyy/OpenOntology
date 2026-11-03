@@ -24,12 +24,22 @@ from app.ontologies.agent_runtime.toolkit import ToolRunner
 
 logger = logging.getLogger(__name__)
 
-REPORT_READ_TOOLS = {"aggregate_objects", "search_objects"}
+REPORT_READ_TOOLS = {"aggregate_objects", "search_objects", "query_objects"}
 REPORT_VISUALIZATIONS = {"auto", "kpi", "bar", "line", "pie", "table", "none"}
 MAX_SECTIONS = 8
 MAX_QUERIES_PER_SECTION = 4
 MAX_QUERY_ARGUMENT_BYTES = 12_000
 FILTER_OPERATORS = {"eq", "neq", "contains", "in", "gt", "gte", "lt", "lte"}
+QUERY_FILTER_OPERATORS = FILTER_OPERATORS | {"is_null", "is_not_null"}
+QUERY_OBJECT_PARAMETERS = {
+    "object_type", "joins", "filters", "select", "group_by", "aggregates",
+    "order_by", "page_size", "window",
+}
+QUERY_BUCKETS = {"day", "week", "month", "quarter", "year"}
+# window.last 是“最近 N 个时间单位”的时长窗口，与 group_by 时间桶不是同一
+# 契约：时长还支持 second/minute/hour（query_window.resolve_window）。
+WINDOW_UNITS = {"second", "minute", "hour"} | QUERY_BUCKETS
+QUERY_AGGREGATES = {"count", "count_distinct", "sum", "avg", "min", "max"}
 
 DEFAULT_STYLE = {
     "theme": "editorial-light",
@@ -83,7 +93,180 @@ def _normalize_filters(value: Any, title: str) -> list[dict[str, Any]]:
     return filters
 
 
+def _normalize_query_filters(value: Any, title: str) -> list[dict[str, Any]]:
+    if value in (None, []):
+        return []
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValueError(f"章节「{title}」的 query_objects filters 必须是最多 20 项的数组")
+    filters = []
+    for item in value:
+        if not isinstance(item, dict) or not str(item.get("property") or "").strip():
+            raise ValueError(f"章节「{title}」的 query_objects 过滤条件必须包含 property")
+        op = str(item.get("op") or "eq")
+        if op not in QUERY_FILTER_OPERATORS:
+            raise ValueError(f"章节「{title}」包含不支持的过滤操作符：{op}")
+        entry = {"property": str(item["property"]).strip(), "op": op,
+                 "value": deepcopy(item.get("value"))}
+        if item.get("object_type"):
+            entry["object_type"] = str(item["object_type"]).strip()
+        filters.append(entry)
+    return filters
+
+
+def _normalize_query_objects(arguments: dict[str, Any], title: str) -> dict[str, Any]:
+    unknown = sorted(set(arguments) - QUERY_OBJECT_PARAMETERS)
+    if unknown:
+        raise ValueError(f"章节「{title}」的 query_objects 含未知参数：{', '.join(unknown)}")
+    object_type = str(arguments.get("object_type") or "").strip()
+    if not object_type:
+        raise ValueError(f"章节「{title}」的 query_objects 缺少 object_type")
+    normalized: dict[str, Any] = {"object_type": object_type}
+
+    joins = arguments.get("joins") or []
+    if joins:
+        if not isinstance(joins, list) or len(joins) > 6:
+            raise ValueError(f"章节「{title}」的 query_objects joins 最多 6 跳")
+        normalized_joins = []
+        for join in joins:
+            if not isinstance(join, dict):
+                raise ValueError(f"章节「{title}」的 joins 每项必须是对象")
+            unknown_join = sorted(set(join) - {"object_type", "link_type", "type"})
+            if unknown_join:
+                raise ValueError(f"章节「{title}」的 join 含未知字段：{', '.join(unknown_join)}")
+            if not str(join.get("object_type") or "").strip()                     or not str(join.get("link_type") or "").strip():
+                raise ValueError(f"章节「{title}」的 join 需要 object_type 与 link_type")
+            join_type = str(join.get("type") or "inner")
+            if join_type not in {"inner", "left"}:
+                raise ValueError(f"章节「{title}」的 join type 只能是 inner/left")
+            normalized_joins.append({
+                "object_type": str(join["object_type"]).strip(),
+                "link_type": str(join["link_type"]).strip(),
+                "type": join_type,
+            })
+        normalized["joins"] = normalized_joins
+
+    filters = _normalize_query_filters(arguments.get("filters"), title)
+    if filters:
+        normalized["filters"] = filters
+
+    select = arguments.get("select")
+    if select:
+        if not isinstance(select, list) or len(select) > 32:
+            raise ValueError(f"章节「{title}」的 query_objects select 最多 32 项")
+        normalized_select = []
+        for item in select:
+            if isinstance(item, str) and item.strip():
+                normalized_select.append(item.strip())
+                continue
+            if not isinstance(item, dict) or not str(item.get("property") or "").strip():
+                raise ValueError(f"章节「{title}」的 select 项必须是属性名或 {{property}}")
+            entry = {"property": str(item["property"]).strip()}
+            if item.get("object_type"):
+                entry["object_type"] = str(item["object_type"]).strip()
+            normalized_select.append(entry)
+        if normalized_select:
+            normalized["select"] = normalized_select
+
+    group_by = arguments.get("group_by")
+    if group_by:
+        if not isinstance(group_by, list) or len(group_by) > 8:
+            raise ValueError(f"章节「{title}」的 query_objects group_by 最多 8 项")
+        normalized_groups = []
+        for item in group_by:
+            if isinstance(item, str) and item.strip():
+                normalized_groups.append({"property": item.strip()})
+                continue
+            if not isinstance(item, dict) or not str(item.get("property") or "").strip():
+                raise ValueError(f"章节「{title}」的 group_by 项必须包含 property")
+            entry = {"property": str(item["property"]).strip()}
+            if item.get("object_type"):
+                entry["object_type"] = str(item["object_type"]).strip()
+            bucket = item.get("bucket")
+            if bucket is not None:
+                if bucket not in QUERY_BUCKETS:
+                    raise ValueError(f"章节「{title}」的时间分桶非法：{bucket}")
+                entry["bucket"] = bucket
+            normalized_groups.append(entry)
+        normalized["group_by"] = normalized_groups
+
+    aggregates = arguments.get("aggregates")
+    if aggregates:
+        if not isinstance(aggregates, list) or len(aggregates) > 8:
+            raise ValueError(f"章节「{title}」的 query_objects aggregates 最多 8 项")
+        normalized_aggregates = []
+        for item in aggregates:
+            if not isinstance(item, dict) or item.get("fn") not in QUERY_AGGREGATES:
+                raise ValueError(
+                    f"章节「{title}」的聚合 fn 需为 {'/'.join(sorted(QUERY_AGGREGATES))}")
+            entry = {"fn": item["fn"]}
+            if item["fn"] != "count" and not str(item.get("property") or "").strip():
+                raise ValueError(f"章节「{title}」的 {item['fn']} 聚合缺少 property")
+            if item.get("property"):
+                entry["property"] = str(item["property"]).strip()
+            if item.get("object_type"):
+                entry["object_type"] = str(item["object_type"]).strip()
+            if item.get("as"):
+                entry["as"] = _clean_text(item["as"], 64)
+            normalized_aggregates.append(entry)
+        normalized["aggregates"] = normalized_aggregates
+
+    order_by = arguments.get("order_by")
+    if order_by:
+        if not isinstance(order_by, list) or len(order_by) > 8:
+            raise ValueError(f"章节「{title}」的 query_objects order_by 最多 8 项")
+        normalized_order = []
+        for item in order_by:
+            if not isinstance(item, dict) or not str(item.get("output") or "").strip():
+                raise ValueError(f"章节「{title}」的 order_by 项需要 output")
+            direction = str(item.get("direction") or "asc")
+            if direction not in {"asc", "desc"}:
+                raise ValueError(f"章节「{title}」的排序方向只能是 asc/desc")
+            normalized_order.append({"output": str(item["output"]).strip(),
+                                     "direction": direction})
+        normalized["order_by"] = normalized_order
+
+    try:
+        page_size = int(arguments.get("page_size") or 12)
+    except (TypeError, ValueError):
+        page_size = 12
+    normalized["page_size"] = max(1, min(page_size, 20))
+
+    window = arguments.get("window")
+    if window is not None:
+        if not isinstance(window, dict):
+            raise ValueError(f"章节「{title}」的 window 必须是对象")
+        unknown_window = sorted(set(window) - {"property", "timezone", "last",
+                                               "start", "end"})
+        if unknown_window:
+            raise ValueError(f"章节「{title}」的 window 含未知字段："
+                             f"{', '.join(unknown_window)}")
+        if not str(window.get("property") or "").strip()                 or not str(window.get("timezone") or "").strip():
+            raise ValueError(f"章节「{title}」的 window 需要 property 与 timezone")
+        entry = {"property": str(window["property"]).strip(),
+                 "timezone": str(window["timezone"]).strip()}
+        if window.get("last") is not None:
+            last = window["last"]
+            if not isinstance(last, dict) or last.get("unit") not in WINDOW_UNITS:
+                raise ValueError(f"章节「{title}」的 window.last.unit 非法")
+            try:
+                count = int(last.get("count"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"章节「{title}」的 window.last.count 非法") from exc
+            if count < 1 or count > 1000:
+                raise ValueError(f"章节「{title}」的 window.last.count 超出范围")
+            entry["last"] = {"unit": last["unit"], "count": count}
+        elif window.get("start") is not None and window.get("end") is not None:
+            entry["start"] = str(window["start"])
+            entry["end"] = str(window["end"])
+        else:
+            raise ValueError(f"章节「{title}」的 window 需要 last 或 start/end")
+        normalized["window"] = entry
+    return normalized
+
+
 def _normalize_query_arguments(tool: str, arguments: dict[str, Any], title: str) -> dict[str, Any]:
+    if tool == "query_objects":
+        return _normalize_query_objects(arguments, title)
     if tool == "aggregate_objects":
         allowed = {"object_type", "metric", "metric_property", "group_by", "filters"}
     else:
@@ -280,7 +463,7 @@ def generate_template_spec(db: Session, ontology_id: str, brief: str,
                            model_id: Optional[str] = None,
                            conversation_context: str = "") -> dict[str, Any]:
     """AI 起草模板；失败时退到确定性模板，保证能力可用但显式标记来源。"""
-    _, profile, scope = build_scope(db, ontology_id)
+    _, profile, scope = _report_scope(db, ontology_id)
     if not profile.enabled:
         raise ToolError("该本体的智能体已停用")
     fallback = _fallback_spec(scope, brief)
@@ -311,7 +494,7 @@ def generate_template_spec(db: Session, ontology_id: str, brief: str,
       "title": "章节标题",
       "goal": "本章节要回答的业务问题和应提炼的结论",
       "visualization": "auto|kpi|bar|line|pie|table|none",
-      "queryPlan": [{{"tool": "aggregate_objects|search_objects", "arguments": {{}}}}]
+      "queryPlan": [{{"tool": "aggregate_objects|search_objects|query_objects", "arguments": {{}}}}]
     }}
   ]
 }}
@@ -319,13 +502,13 @@ def generate_template_spec(db: Session, ontology_id: str, brief: str,
 规则：
 1. 生成 3 到 5 个章节，形成“核心规模→结构/趋势→风险/明细→结论”的汇报逻辑。
 2. 数据查询必须引用技能卡里真实存在的对象类型和属性；禁止臆造字段。
-3. 自动报告只允许 aggregate_objects 和 search_objects，禁止动作、自由 SQL 和具体实例 ID。
+3. 自动报告只允许 aggregate_objects、search_objects 和结构化 query_objects（禁止 cursor/spl/动作/自由 SQL/具体实例 ID）。
 4. aggregate_objects 参数严格为：object_type、metric(count|sum|avg|min|max)、可选 metric_property、可选 group_by（单个字符串）、可选 filters。
    示例：{{"tool":"aggregate_objects","arguments":{{"object_type":"PurchaseOrder","metric":"sum","metric_property":"amount","group_by":"month"}}}}。
 5. search_objects 参数严格为：object_type、可选 filters、可选 keyword、limit；filters 每项严格为 property/op/value。
    示例：{{"tool":"search_objects","arguments":{{"object_type":"PurchaseOrder","filters":[{{"property":"status","op":"eq","value":"延期"}}],"limit":12}}}}。
 6. 一个 aggregate_objects 只能有一个 metric；需要总量和总金额时拆成两个查询。禁止使用 object、aggregations、field 或数组形式 group_by。
-7. 统计优先 aggregate_objects；明细核对才用 search_objects，limit 不超过 12。
+7. 统计优先 aggregate_objects；明细、排序、分页、多维分组用 query_objects（page_size 不超过 20，禁止 cursor）。相对时间用 query_objects 的 window={{"property":"时间属性","timezone":"Asia/Shanghai","last":{{"unit":"day","count":7}}}}，不要自己计算当前日期；时间桶 group_by 用 {{"property":"时间属性","bucket":"day|week|month|quarter|year"}}。
 8. line 只用于明确的时间属性且预计至少 4 个数据点；类别超过 6 项不要用 pie。
 9. 每个章节至少一个查询，最多两个查询。"""
     try:
@@ -386,6 +569,18 @@ def _result_summary(result: dict[str, Any]) -> str:
         metric = metric_names.get(result.get("metric"), result.get("metric") or "指标")
         prop = f"（{result.get('metricProperty')}）" if result.get("metricProperty") else ""
         return f"{result.get('objectType') or '对象'}的{metric}{prop}为 {_number(result.get('value'))}。"
+    if "rows" in result:
+        total = result.get("totalRowCount")
+        window = result.get("resolvedWindow") or {}
+        suffix = (f"；数据窗口 {window.get('start')} ~ {window.get('end')}"
+                  f"（{window.get('timezone')}，左闭右开）" if window else "")
+        if result.get("groupBy"):
+            return (f"{result.get('objectType') or '对象'}按"
+                    f"{'、'.join(str(item) for item in result.get('groupBy') or [])}"
+                    f"返回 {len(result.get('rows') or [])} 个分组"
+                    f"（共 {total if total is not None else '未知'} 组）{suffix}。")
+        return (f"本次真实数据查询返回 {len(result.get('rows') or [])} 行"
+                f"（共 {total if total is not None else '未知'} 行）{suffix}。")
     if "items" in result:
         return f"本次真实数据检索命中 {result.get('total', len(result.get('items') or []))} 条，展示 {len(result.get('items') or [])} 条样本。"
     return "本次真实数据查询已完成。"
@@ -519,6 +714,7 @@ def evaluate_quality(snapshot: dict[str, Any], sections: list[dict[str, Any]]) -
             ("value" in result and result.get("value") is not None)
             or bool(result.get("groups"))
             or bool(result.get("items"))
+            or bool(result.get("rows"))
         )]
         if errors or not real_results:
             blockers.append(f"章节「{title}」没有通过真实数据查询：{errors[0] if errors else '无有效结果'}")
@@ -572,9 +768,67 @@ def evaluate_quality(snapshot: dict[str, Any], sections: list[dict[str, Any]]) -
     }
 
 
+def _report_scope(db: Session, ontology_id: str):
+    """报告起草与执行统一固定到当前正式发布版本。
+
+    没有 current release 时显式拒绝，不自动回退草稿投影：草稿与报告执行
+    的 catalog/查询面必须一致，否则起草看到的结构可能无法在运行期取数。
+    """
+    from app.models.ontology import OntologyProject
+    project = db.query(OntologyProject).filter(
+        OntologyProject.id == ontology_id).first()
+    if project is None:
+        raise ToolError("本体不存在")
+    if not project.current_release_id:
+        raise ToolError(
+            "report_release_required: 本体尚未建立当前正式发布版本，"
+            "无法生成或执行报告；请先发布本体")
+    return build_scope(
+        db, ontology_id, release_id=str(project.current_release_id))
+
+
+def _release_report_query_handle(
+    db: Session, user, session_id: str, result: Any,
+) -> Optional[dict[str, Any]]:
+    """报告不续页：每次查询后立即释放引擎句柄，避免快照/远程句柄占配额。
+
+    ``released=False`` 表示句柄已不存在（工具终页已释放或已过期），属于
+    幂等成功；真正的释放异常不静默吞掉，写入 ``error`` 供运行记录诊断。
+    """
+    if not isinstance(result, dict) or not result.get("queryId"):
+        return None
+    query_id = str(result["queryId"])
+    # query_objects 的公开结果不带 persistence，只用 dataMode 表达远程来源；
+    # 两种形态都识别，避免把远程句柄误当本地快照而漏取消。
+    remote = (isinstance(result.get("persistence"), dict)
+              or "remote" in str(result.get("dataMode") or ""))
+    mode = "remote" if remote else "snapshot"
+    try:
+        if remote:
+            from app.ontologies.agent_query.remote_query import cancel_remote_query
+            outcome = cancel_remote_query(db, user, query_id)
+            released = bool(outcome["cancelled"])
+        else:
+            from app.ontologies.agent_query.service import release_query_snapshot
+            released = release_query_snapshot(
+                db, user, query_id, session_kind="ontology_agent",
+                session_id=session_id or "")
+        if released:
+            return {"mode": mode, "released": True}
+        # 工具终页已释放或句柄已过期：报告不依赖它，属幂等成功。
+        return {"mode": mode, "released": False, "note": "no_live_handle"}
+    except Exception as exc:  # noqa: BLE001 - 查询结果已取得，释放失败须可诊断
+        logger.warning(
+            "报告查询句柄释放失败 queryId=%s mode=%s: %s",
+            query_id, mode, exc, exc_info=True,
+        )
+        return {"mode": mode, "released": False,
+                "error": f"{type(exc).__name__}: {exc}"[:500]}
+
+
 def execute_report(db: Session, template: AnalysisReportTemplate, current_user,
                    trigger_type: str = "preview", model_id: Optional[str] = None) -> AnalysisReportRun:
-    ontology, profile, scope = build_scope(db, template.ontology_id)
+    ontology, profile, scope = _report_scope(db, template.ontology_id)
     snapshot = template_snapshot(template, ontology.name)
     run = AnalysisReportRun(
         template_id=template.id,
@@ -594,13 +848,24 @@ def execute_report(db: Session, template: AnalysisReportTemplate, current_user,
         sections = normalize_sections(template.sections or [])
         rendered_sections: list[dict[str, Any]] = []
         for section in sections:
-            runner = ToolRunner(db, scope)
+            # 报告查询同样经用户/授权正门：query_objects 需要已认证用户。
+            # 报告不是交互会话，不发放下钻令牌（session 为空时工具会标记）。
+            runner = ToolRunner(db, scope, user=current_user,
+                                query_session_id="")
             queries: list[dict[str, Any]] = []
             for query in section["queryPlan"]:
                 tool, arguments = query["tool"], query["arguments"]
                 try:
                     result = runner.run(tool, arguments)
-                    queries.append({"tool": tool, "arguments": deepcopy(arguments), "result": result})
+                    entry = {"tool": tool, "arguments": deepcopy(arguments),
+                             "result": result}
+                    # 报告没有“下一页”：中间页句柄也必须立即回收，否则 300s
+                    # TTL 内占用用户的本地快照/远程句柄配额（SNAPSHOT_QUOTA）。
+                    release = _release_report_query_handle(
+                        db, current_user, runner.query_session_id, result)
+                    if release is not None:
+                        entry["handleRelease"] = release
+                    queries.append(entry)
                 except (ToolError, ValueError) as exc:
                     queries.append({"tool": tool, "arguments": deepcopy(arguments), "error": str(exc)})
                 except Exception as exc:  # noqa: BLE001
@@ -792,6 +1057,23 @@ def _result_table(section: dict[str, Any]) -> str:
             scalar_rows.append(
                 f'<tr><td>{_e(result.get("objectType"))}</td><td>{_e(metric)}{_e(prop)}</td>'
                 f'<td class="num">{_number(result.get("value"))}</td></tr>')
+        rows = result.get("rows")
+        if rows:
+            columns = [str(column.get("name") or column.get("output") or "")
+                       for column in (result.get("columns") or [])
+                       if isinstance(column, dict)]
+            columns = [name for name in dict.fromkeys(columns) if name][:8]
+            if columns:
+                head = "".join(f"<th>{_e(key)}</th>" for key in columns)
+                body = "".join(
+                    "<tr>" + "".join(
+                        f'<td>{_e((row or {}).get(key))}</td>' for key in columns
+                    ) + "</tr>"
+                    for row in rows[:12] if isinstance(row, dict))
+                blocks.append(
+                    '<div class="data-table"><table><caption>真实数据明细 · 查询 '
+                    f'{query_index}（最多展示 12 行）</caption><thead><tr>{head}</tr>'
+                    f'</thead><tbody>{body}</tbody></table></div>')
         items = result.get("items")
         if items:
             keys: list[str] = []

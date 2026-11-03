@@ -143,6 +143,23 @@ API 进程内的对账器（默认每 5 分钟，
 记录收口为 failed。executor 并发度由 `PIPELINE_EXECUTOR_CONCURRENCY`
 （默认 2）控制。
 
+本体助手聊天回合也走同一 `PIPELINE_TASKS` JetStream 流，但使用独立
+durable `ontology-assistant-run-executor` 和独立并发上限（默认 2），
+不会占用流水线的 2 个默认槽位。该 subject 由 `pipeline_executor` 消费；
+`TASK_INSTANCES_EXECUTOR=docker` 且未排除任务控制面的专用 `task_worker`
+不订阅本体助手回合。聊天回合由 Web 请求先把 run 落库，再把
+`run_id` 派发到 `ontology.assistant.run`；NATS executor 消费后调用
+`run_service.execute_run`，DB 租约保证同一 run 最多一个执行者。Web 进程内的
+APScheduler 每 45 秒对账一次：重派 queued run，仅把租约已过期（默认
+`AGENT_RUN_LEASE_SECONDS=600`，心跳 `AGENT_RUN_HEARTBEAT_SECONDS=15`）的
+running run 标记为 interrupted；未过期租约属于其它存活 worker，启动/重启
+不会粗暴中断。派发失败时 run 保持 queued 等下一轮对账。Msg-Id 固定为
+`ontology.assistant.run:<run_id>`，JetStream 10 分钟去重窗内重复补发会被
+broker 合并；首条消息仍在工作队列时按未 ack 重投，queued 行本身是持久
+事实源，不会因去重丢失。新增的
+`AGENT_RUN_*` 限额登记在 `backend/app/ontologies/agent_runtime/limits.py`，
+可按环境变量覆盖。
+
 ### 数据任务池：源端增量游标（水位）
 
 数据任务可选声明「增量游标列」（`cursor_column`，必须是流水线发布契约

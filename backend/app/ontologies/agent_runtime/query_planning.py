@@ -1,0 +1,160 @@
+"""查询规划/装配 — 工具参数到 QueryRequest 与可重放 querySpec 的纯装配。
+
+本模块只做声明解析、别名展开、窗口冻结和可读描述；不执行查询、不读业务行。
+"""
+from __future__ import annotations
+
+from app.ontologies.agent_runtime.boundary import ToolError
+from app.ontologies.agent_runtime.query_spec import build_query_spec
+from app.ontologies.agent_runtime.query_window import window_for_result
+
+_FILTER_OPS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "in",
+               "is_null", "is_not_null"}
+
+
+def _leaf(alias: str, prop: str, item: dict) -> dict:
+    op = item.get("op", "eq")
+    if op not in _FILTER_OPS:
+        raise ToolError(f"query_objects_invalid_filter: 不支持的过滤操作符 {op}；"
+                        f"可用 {'/'.join(sorted(_FILTER_OPS))}")
+    value = item.get("value")
+    if op in {"is_null", "is_not_null"}:
+        return {"source": alias, "property": prop, "op": op}
+    if op == "in" and not isinstance(value, list):
+        value = [value]
+    if op == "contains" and value is None:
+        raise ToolError("query_objects_invalid_filter: contains 需要非空取值")
+    return {"source": alias, "property": prop, "op": op, "value": value}
+
+
+def _remote_bound_properties(scope, ot) -> set[str] | None:
+    """远程绑定类型可查询属性 = 授权属性 ∩ 绑定列映射；本地类型返回 None。"""
+    if scope.release is None:
+        return None
+    from app.ontologies.mappings.remote_binding import (
+        RemoteBindingError, get_remote_binding,
+    )
+    try:
+        binding = get_remote_binding(scope.release.snapshot, ot.id)
+    except RemoteBindingError as exc:
+        raise ToolError(f"{exc.code}: {exc.message}") from exc
+    if binding is None:
+        return None
+    props = {prop for prop in binding.get("fieldMap", {}).values()
+             if prop != "__primary_key__"}
+    return props
+
+
+def _resolve_type_reference(scope, ref, default=None):
+    if ref in (None, ""):
+        return default
+    return scope.require_object_type(ref)
+
+
+def _definitions(ot) -> dict[str, dict]:
+    return {p.get("name"): p for p in (ot.properties or [])
+            if isinstance(p, dict) and p.get("name")}
+
+
+def _visible_properties(scope, ot) -> list[str]:
+    allowed = scope.allowed_property_names(ot.id)
+    definitions = _definitions(ot)
+    names = [name for name in definitions
+             if allowed is None or name in allowed]
+    remote_bound = _remote_bound_properties(scope, ot)
+    if remote_bound is not None:
+        names = [name for name in names if name in remote_bound]
+    return names
+
+
+def _definition_type(ot, prop: str) -> str:
+    definition = _definitions(ot).get(prop) or {}
+    return str(definition.get("type") or "string").lower()
+
+
+
+
+def _where_description(where: list[dict], label_of: dict[str, str]) -> list[dict]:
+    out = []
+    for leaf in where or []:
+        if not isinstance(leaf, dict) or "source" not in leaf:
+            continue
+        out.append({
+            "objectType": label_of.get(leaf.get("source"), leaf.get("source")),
+            "property": leaf.get("property"),
+            "op": leaf.get("op"),
+            "value": leaf.get("value"),
+        })
+    return out
+
+
+def _build_description(*, base_ot, stats_mode: bool, where, label_of,
+                       joined_labels, select_entries, group_items,
+                       aggregate_items, order_by, resolved_window,
+                       page_size) -> dict:
+    return {
+        "objectType": base_ot.display_name,
+        "semantics": "grouped_aggregate" if stats_mode else "detail_rows",
+        "filters": _where_description(where, label_of),
+        "joinedObjectTypes": joined_labels,
+        "select": [entry[0] for entry in select_entries],
+        "groupBy": [
+            {"property": item["readable"],
+             **({"bucket": item["bucket"]} if item.get("bucket") else {})}
+            for item in group_items
+        ],
+        "aggregates": [
+            {"fn": item["fn"], "property": item["property"],
+             "as": item["readable"]}
+            for item in aggregate_items
+        ],
+        "orderBy": [{"output": item["readable"],
+                     "direction": item["direction"]}
+                    for item in order_by],
+        "pageSize": page_size,
+        "timeWindow": window_for_result(resolved_window),
+        "countSemantics": ("grouped_aggregate_rows" if stats_mode
+                           else "detail_rows"),
+    }
+
+
+def _spec_from_request(*, request, scope, base_ot, labels, resolved_window,
+                       description, stats_mode, detail_request=None) -> dict:
+    spec = build_query_spec(
+        shape="objects",
+        ontology_id=scope.ontology.id,
+        release_id=str(scope.release_id),
+        request=request,
+        labels=labels,
+        resolved_window=window_for_result(resolved_window),
+        description=description,
+        object_type=base_ot.id,
+    )
+    if stats_mode and detail_request is not None:
+        spec["drilldownBase"] = detail_request.model_dump(by_alias=True)
+        spec["drilldownLabels"] = {
+            item.as_: item.property for item in detail_request.select
+        }
+    return spec
+
+
+def _spl_bindings(scope, raw_bindings) -> dict[str, dict]:
+    if not isinstance(raw_bindings, dict) or not raw_bindings:
+        raise ToolError("query_objects_invalid_query: SPL 查询必须提供 semanticBindings")
+    fixed: dict[str, dict] = {}
+    for alias, raw in raw_bindings.items():
+        if not isinstance(raw, dict):
+            raise ToolError(
+                f"query_objects_invalid_query: semanticBindings.{alias} 必须是对象")
+        ref = (raw.get("objectType") or raw.get("object_type")
+               or raw.get("objectTypeId") or raw.get("object_type_id"))
+        if not ref:
+            raise ToolError(
+                f"query_objects_invalid_query: semanticBindings.{alias} 缺少对象类型")
+        ot = scope.require_object_type(str(ref))
+        fixed[str(alias)] = {
+            "ontologyId": scope.ontology.id,
+            "releaseId": str(scope.release_id),
+            "objectTypeId": ot.id,
+        }
+    return fixed

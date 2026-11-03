@@ -27,6 +27,9 @@ _UUID_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
                       r"[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])")
 _STAMP_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
                        r"(?:Z|[+-]\d{2}:?\d{2})?(?!\d)")
+# 工具结果顶层的可重放查询计划/页长是请求参数，不是观测证据；计划里的
+# pageSize、过滤值/params 不能为回答中的数字断言背书（业务行内同名字段不受影响）。
+_REQUEST_METADATA_KEYS = frozenset({"querySpec", "pageSize", "page_size"})
 JS_SAFE_INTEGER = 2**53 - 1
 
 # 答案侧排版/标识符屏蔽（仅用于答案文本；工具证据集合保持原清洗语义）：
@@ -124,9 +127,12 @@ def _numbers_in_answer_decimal(text: str) -> list[Decimal]:
 def _identifier_key(key: object) -> bool:
     """queryId/instanceId/observedAt/created_at/ids 等运行时元数据键：其值是
     标识符或时间戳，数字片段（UUID、时刻）不得充当数值证据。"""
+    lowered = key.lower() if isinstance(key, str) else ""
     return isinstance(key, str) and (
-        key == "id" or key.lower() in {"ids", "uuid", "timestamp", "epoch"}
-        or key.endswith(("Id", "_id", "At", "_at", "_utc")))
+        key == "id" or lowered in {"ids", "uuid", "timestamp", "epoch"}
+        or key.endswith(("Id", "_id", "At", "_at", "_utc"))
+        # 签名/哈希/游标是标识符，其十六进制片段不能进入数值证据集合。
+        or lowered.endswith(("hash", "digest", "token", "cursor")))
 
 
 def _numbers_in_value(value: object) -> list[Decimal]:
@@ -178,7 +184,9 @@ def result_number_universe(steps: Iterable[dict]) -> set:
                 or result.get("completeness", "complete") != "complete"):
             # 出错/不完整的输入不能作为精确数值背书；输出分页本身不等于输入不完整。
             continue
-        numbers.extend(_numbers_in_value(result))
+        evidence = {key: value for key, value in result.items()
+                    if key not in _REQUEST_METADATA_KEYS}
+        numbers.extend(_numbers_in_value(evidence))
     allowed = _with_ratio_variants(numbers)
     # Historical float aliases stay for exact, safe values; verification keeps Decimal.
     allowed.update(p for p in map(_public_number, tuple(allowed)) if isinstance(p, float))

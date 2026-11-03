@@ -28,7 +28,7 @@ from app.deps import get_db, get_current_user, require_admin
 from app.models.ontology import OntologyProject
 from app.ontologies.access import require_ontology_access
 from app.ontologies.agent_runtime import (
-    chat_runs,
+    run_service,
     chat_service as _chat_service,
     conversation_service as _conversation_service,
     dynamic_workflow as _dynamic_workflow,
@@ -501,12 +501,14 @@ def chat(ontology_id: str, body: S.ChatRequest,
     if not (body.message or "").strip():
         raise HTTPException(422, "message 不能为空")
     if not body.stream:
-        return _ok(_chat_service.run_sync(
-            db, ontology_id, current_user, body, run_turn_fn=run_agent_turn
+        return _ok(_application_call(
+            _chat_service.run_sync,
+            db, ontology_id, current_user, body, run_turn_fn=run_agent_turn,
         ))
     return StreamingResponse(
-        _chat_service.stream_events(
-            ontology_id, current_user, body, run_turn_fn=run_agent_turn
+        _application_call(
+            _chat_service.stream_events,
+            ontology_id, current_user, body, db=db, run_turn_fn=run_agent_turn,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -517,34 +519,24 @@ def chat(ontology_id: str, body: S.ChatRequest,
 def cancel_chat(ontology_id: str, body: S.ChatCancelRequest,
                 db: Session = Depends(get_db),
                 current_user=Depends(get_current_user)):
-    """取消本进程内正在流式执行的回合（协作式：步间/模型调用间生效）。"""
+    """持久化取消请求，执行者在检查点停止；离页不触发取消。"""
     require_ontology_access(db, ontology_id, current_user, write=False)
-    from app.ontologies.agent_runtime.chat_cancel import chat_cancel_registry
-
     if not (body.run_id or "").strip():
         raise HTTPException(422, "runId 不能为空")
-    cancelled = chat_cancel_registry.request_cancel(body.run_id)
-    return _ok({
-        "runId": body.run_id,
-        "cancelled": cancelled,
-        "note": (
-            "已发出取消请求，正在执行的回合将在下一个检查点停止。"
-            if cancelled
-            else "该回合不在本进程执行中（可能已结束或属于其他实例）。"),
-    })
+    return _ok(_application_call(
+        run_service.cancel_run, db, ontology_id, current_user, body.run_id,
+    ))
 
 
 @router.get("/{ontology_id}/agent/chat/runs/{run_id}")
 def get_chat_run(ontology_id: str, run_id: str,
                  db: Session = Depends(get_db),
                  current_user=Depends(get_current_user)):
-    """查询回合状态（run_id 由前端生成，随 chat 请求注册）。
-
-    SSE 推送与执行解耦后，前端在离开页面后凭 run_id 轮询此端点恢复
-    「正在处理」的展示（MYW-71）。
-    """
+    """读取当前用户可访问的持久回合及进度快照。"""
     require_ontology_access(db, ontology_id, current_user, write=False)
-    return _ok(chat_runs.run_status_payload(run_id, ontology_id))
+    return _ok(_application_call(
+        run_service.get_run, db, ontology_id, current_user, run_id,
+    ))
 
 
 @router.get("/{ontology_id}/agent/conversations")
@@ -592,4 +584,4 @@ def delete_conversation(ontology_id: str, conversation_id: str,
     conversation = _require_conversation(
         db, ontology_id, conversation_id, current_user
     )
-    return _conversation_service.delete_conversation(db, conversation)
+    return _application_call(_conversation_service.delete_conversation, db, conversation)

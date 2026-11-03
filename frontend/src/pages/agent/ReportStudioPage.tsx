@@ -1,5 +1,5 @@
 import { formatDateTime } from '@/utils/datetime'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ontologyApi, modelApi } from '@/api/ontologies'
@@ -8,13 +8,41 @@ import {
   type AnalysisReportRun,
   type AnalysisReportTemplate,
   type ReportQuality,
-  type ReportQuery,
   type ReportSection,
   type ReportVisualization,
 } from '@/api/agent'
+import { apiClientV2 } from '@/api/client'
 import { LoadingState } from '@/components/ui/LoadingState'
+import { declaredPropertyNames } from './components/boundaryProperties'
+import {
+  ReportQueryPlanEditor,
+  type ReportLinkTypeOption,
+  type ReportObjectTypeOption,
+} from './components/ReportQueryPlanEditor'
+import {
+  defaultEditorQuery,
+  normalizeEditorSections,
+  reportSectionsFromEditor,
+  validateEditorSections,
+} from './components/reportQueryPlan'
 
 type OntologyOption = { id: string; name: string }
+
+interface FullOntologyType {
+  id: string
+  name?: string
+  displayName?: string
+  properties?: unknown
+}
+
+interface FullOntologyShape {
+  objectTypes?: FullOntologyType[]
+  linkTypes?: Array<{ name?: string; displayName?: string }>
+}
+
+function normalizeReportTemplate(template: AnalysisReportTemplate): AnalysisReportTemplate {
+  return { ...template, sections: normalizeEditorSections(template.sections) }
+}
 
 const VISUALIZATIONS: { value: ReportVisualization; label: string }[] = [
   { value: 'auto', label: '智能选择' },
@@ -250,8 +278,7 @@ function ReportLibrary({ ontologies, initialOntologyId }: { ontologies: Ontology
 function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate; ontologyName: string }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [template, setTemplate] = useState(remote)
-  const [queryTexts, setQueryTexts] = useState<Record<string, string>>({})
+  const [template, setTemplate] = useState<AnalysisReportTemplate>(() => normalizeReportTemplate(remote))
   const [currentRun, setCurrentRun] = useState<AnalysisReportRun | null>(null)
   const [modelId, setModelId] = useState(remote.defaultModelId || '')
   const [saving, setSaving] = useState(false)
@@ -261,17 +288,51 @@ function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate
   const [error, setError] = useState('')
   const { data: models = [] } = useQuery({ queryKey: ['models'], queryFn: () => modelApi.list() as any })
   const llmModels = Array.isArray(models) ? (models as any[]).filter(item => item.config_type === 'llm' || !item.config_type) : []
+  const { data: capabilities } = useQuery({
+    queryKey: ['agent-capabilities', template.ontologyId],
+    queryFn: () => agentApi.capabilities(template.ontologyId),
+  })
+  const { data: fullOntology } = useQuery<FullOntologyShape>({
+    queryKey: ['agent-full-ontology', template.ontologyId],
+    queryFn: () => apiClientV2.get(`/formal/ontologies/${template.ontologyId}/full`),
+  })
   const { data: runs = [], refetch: refetchRuns } = useQuery({
     queryKey: ['analysis-report-runs', template.ontologyId, template.id],
     queryFn: () => agentApi.reportRuns(template.ontologyId, template.id),
   })
 
+  const objectTypeOptions = useMemo<ReportObjectTypeOption[]>(() => {
+    const schemaTypes = fullOntology?.objectTypes || []
+    const source = capabilities
+      ? capabilities.objectTypes.map(item => ({ id: item.id, name: item.name, displayName: item.displayName }))
+      : schemaTypes.map(item => ({
+        id: item.id,
+        name: item.name || item.displayName || item.id,
+        displayName: item.displayName || item.name || item.id,
+      }))
+    return source.map(item => {
+      const schema = schemaTypes.find(type => type.id === item.id)
+        || schemaTypes.find(type => type.name === item.name)
+      return {
+        name: item.name,
+        displayName: item.displayName,
+        properties: declaredPropertyNames(schema?.properties),
+      }
+    })
+  }, [capabilities, fullOntology])
+
+  const linkTypeOptions = useMemo<ReportLinkTypeOption[]>(() => (
+    (fullOntology?.linkTypes || []).flatMap(item => (
+      item.name ? [{ name: item.name, displayName: item.displayName || item.name }] : []
+    ))
+  ), [fullOntology])
+
   useEffect(() => {
-    setTemplate(remote)
+    setTemplate(normalizeReportTemplate(remote))
     setModelId(remote.defaultModelId || '')
-    setQueryTexts(Object.fromEntries(remote.sections.map(section => [section.id, JSON.stringify(section.queryPlan, null, 2)])))
     setDirty(false)
   }, [remote.id, remote.revision])
+
   useEffect(() => {
     if (currentRun || !runs[0]) return
     let cancelled = false
@@ -286,29 +347,23 @@ function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate
   const readonly = template.status === 'published'
   const previewCurrent = Boolean(!dirty && template.lastPreviewRunId && template.lastPreviewRevision === template.revision)
 
-  const parseSections = (): ReportSection[] => template.sections.map(section => {
-    const text = queryTexts[section.id]
-    if (!text) return section
-    let plan: unknown
-    try { plan = JSON.parse(text) } catch { throw new Error(`章节「${section.title}」的数据查询配置不是有效 JSON`) }
-    if (!Array.isArray(plan) || plan.length === 0) throw new Error(`章节「${section.title}」至少需要一个数据查询`)
-    return { ...section, queryPlan: plan as ReportQuery[] }
-  })
-
   const save = async (): Promise<AnalysisReportTemplate> => {
     if (readonly) return template
     setSaving(true); setError('')
     try {
+      const invalid = validateEditorSections(template.sections)
+      if (invalid) throw new Error(invalid)
       const saved = await agentApi.updateReportTemplate(template.ontologyId, template.id, {
         expectedRevision: template.revision,
-        name: template.name, description: template.description, sections: parseSections(),
+        name: template.name, description: template.description,
+        sections: reportSectionsFromEditor(template.sections),
         style: template.style, defaultModelId: modelId || null,
       })
-      setTemplate(saved)
-      setQueryTexts(Object.fromEntries(saved.sections.map(section => [section.id, JSON.stringify(section.queryPlan, null, 2)])))
+      const next = normalizeReportTemplate(saved)
+      setTemplate(next)
       setDirty(false)
       queryClient.setQueryData(['analysis-report-template', template.ontologyId, template.id], saved)
-      return saved
+      return next
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : errorText(cause, '模板保存失败')
       setError(message); throw cause
@@ -325,7 +380,7 @@ function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate
         : await agentApi.previewReportTemplate(target.ontologyId, target.id, modelId || null)
       setCurrentRun(run)
       const refreshed = await agentApi.reportTemplate(target.ontologyId, target.id)
-      setTemplate(refreshed)
+      setTemplate(normalizeReportTemplate(refreshed))
       setDirty(false)
       queryClient.setQueryData(['analysis-report-template', target.ontologyId, target.id], refreshed)
       await refetchRuns()
@@ -337,7 +392,7 @@ function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate
     setPublishing(true); setError('')
     try {
       const published = await agentApi.publishReportTemplate(template.ontologyId, template.id)
-      setTemplate(published)
+      setTemplate(normalizeReportTemplate(published))
       queryClient.setQueryData(['analysis-report-template', template.ontologyId, template.id], published)
     } catch (cause) { setError(errorText(cause, '发布失败，请先完成真实数据试运行并处理质量问题')) }
     finally { setPublishing(false) }
@@ -352,18 +407,19 @@ function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate
   const removeSection = (id: string) => {
     if (template.sections.length <= 1) { setError('报告至少需要一个章节'); return }
     setTemplate(prev => ({ ...prev, sections: prev.sections.filter(section => section.id !== id) }))
-    setQueryTexts(prev => { const next = { ...prev }; delete next[id]; return next })
     setDirty(true)
   }
   const addSection = () => {
-    const sourceQuery = template.sections[0]?.queryPlan?.[0] || { tool: 'aggregate_objects', arguments: {} }
+    const sourceQuery = template.sections[0]?.queryPlan?.[0]
+    const query: ReportSection['queryPlan'][number] = sourceQuery
+      ? JSON.parse(JSON.stringify(sourceQuery))
+      : defaultEditorQuery(objectTypeOptions[0]?.name || '')
     const id = `section-${Date.now()}`
     const section: ReportSection = {
       id, title: '新的分析章节', goal: '说明本章节要回答的业务问题、需要比较的指标和预期结论。',
-      visualization: 'auto', queryPlan: [sourceQuery],
+      visualization: 'auto', queryPlan: [query],
     }
     setTemplate(prev => ({ ...prev, sections: [...prev.sections, section] }))
-    setQueryTexts(prev => ({ ...prev, [id]: JSON.stringify(section.queryPlan, null, 2) }))
     setDirty(true)
   }
   const download = () => {
@@ -418,8 +474,14 @@ function ReportEditor({ remote, ontologyName }: { remote: AnalysisReportTemplate
                     <textarea value={section.goal} onChange={event => updateSection(section.id, { goal: event.target.value })} rows={3} className={`${inputClass} resize-none text-xs leading-5`} disabled={readonly} />
                     <label className="block"><span className="mb-1 block text-[10px] font-semibold text-muted-foreground">呈现方式</span><select value={section.visualization} onChange={event => updateSection(section.id, { visualization: event.target.value as ReportVisualization })} className={`${inputClass} py-2 text-xs`} disabled={readonly}>{VISUALIZATIONS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
                     <details className="rounded-xl bg-muted px-3 py-2" open={index === 0}><summary className="cursor-pointer text-[10px] font-semibold text-muted-foreground">数据查询配置</summary>
-                      <p className="mt-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">只允许 aggregate_objects 与 search_objects。字段修改后应立即重新试运行核对。</p>
-                      <textarea value={queryTexts[section.id] ?? JSON.stringify(section.queryPlan, null, 2)} onChange={event => { setQueryTexts(prev => ({ ...prev, [section.id]: event.target.value })); setDirty(true) }} rows={8} className={`${inputClass} mt-2 resize-y font-mono text-[11px] leading-5`} spellCheck={false} disabled={readonly} aria-label={`${section.title}数据查询配置`} />
+                      <p className="mt-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">只允许 aggregate_objects、search_objects 与 query_objects；相对时间与分组在试运行时由服务端解析，不提供 SQL 或任意 JSON 输入。</p>
+                      <ReportQueryPlanEditor
+                        queries={section.queryPlan}
+                        objectTypes={objectTypeOptions}
+                        linkTypes={linkTypeOptions}
+                        readonly={readonly}
+                        onChange={queries => updateSection(section.id, { queryPlan: queries })}
+                      />
                     </details></div>
                 </div>
               </section>

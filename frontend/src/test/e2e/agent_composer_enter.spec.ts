@@ -83,20 +83,81 @@ async function mockPlatform(page: Page, chatBodies: string[]) {
     if (path === '/api/v2/formal/ontologies/ontology-1/agent/conversations') {
       return json(route, [])
     }
-    if (path === '/api/v2/formal/ontologies/ontology-1/agent/chat') {
+    if (path === '/api/v2/formal/ontologies/ontology-1/agent/chat/runs'
+      && route.request().method() === 'POST') {
+      const body = route.request().postDataJSON() as { runId: string; message: string }
       chatBodies.push(route.request().postData() || '')
+      return json(route, {
+        runId: body.runId,
+        conversationId: 'conv-1',
+        status: 'queued',
+        question: body.message,
+        content: '',
+        steps: [],
+        citations: [],
+        proposals: [],
+        lastSeq: 0,
+        error: null,
+        startedAt: now,
+        finishedAt: null,
+        retryOf: null,
+      })
+    }
+    const runEvents = path.match(
+      /^\/api\/v2\/formal\/ontologies\/ontology-1\/agent\/chat\/runs\/([^/]+)\/events$/)
+    if (runEvents) {
       return route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
         body: [
-          'data: {"type":"meta","conversationId":"conv-1"}',
+          `data: {"type":"snapshot","seq":1,"snapshot":{"runId":"${runEvents[1]}","conversationId":"conv-1","status":"running","question":"当前有多少订单","content":"","steps":[],"citations":[],"proposals":[],"lastSeq":1,"error":null,"startedAt":"${now}","finishedAt":null,"retryOf":null}}`,
           '',
-          'data: {"type":"answer","content":"LIVE_AGENT_ANSWER"}',
+          'data: {"type":"answer","seq":2,"content":"LIVE_AGENT_ANSWER","citations":[],"proposals":[]}',
           '',
-          'data: {"type":"done"}',
+          'data: {"type":"done","seq":3,"status":"succeeded"}',
           '',
           '',
         ].join('\n'),
+      })
+    }
+    const runDetail = path.match(
+      /^\/api\/v2\/formal\/ontologies\/ontology-1\/agent\/chat\/runs\/([^/]+)$/)
+    if (runDetail) {
+      return json(route, {
+        runId: runDetail[1],
+        conversationId: 'conv-1',
+        status: 'succeeded',
+        question: '当前有多少订单',
+        content: 'LIVE_AGENT_ANSWER',
+        steps: [],
+        citations: [],
+        proposals: [],
+        lastSeq: 3,
+        error: null,
+        startedAt: now,
+        finishedAt: now,
+        retryOf: null,
+      })
+    }
+    if (path === '/api/v2/formal/ontologies/ontology-1/agent/conversations/conv-1') {
+      return json(route, {
+        id: 'conv-1',
+        title: '当前有多少订单',
+        ontologyReleaseId: 'release-1',
+        createdAt: now,
+        updatedAt: now,
+        activeRun: null,
+        latestRun: null,
+        messages: [
+          {
+            id: 'message-1', role: 'user', content: '当前有多少订单',
+            steps: [], citations: [], proposals: [], model: null, tokenUsage: null, createdAt: now,
+          },
+          {
+            id: 'message-2', role: 'assistant', content: 'LIVE_AGENT_ANSWER',
+            steps: [], citations: [], proposals: [], model: 'deepseek-flash', tokenUsage: null, createdAt: now,
+          },
+        ],
       })
     }
     if (path === '/api/v2/formal/ontologies/ontology-1/agent/decision-simulations') {

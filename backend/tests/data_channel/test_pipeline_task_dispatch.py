@@ -145,6 +145,7 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
         "super_assistant.palace.ontology-rebuild",
         "task_instances.control",
         "integrated.sync",
+        "ontology.assistant.run",
     ]
     assert config.subjects == list(PIPELINE_STREAM_SUBJECTS)
     assert config.retention == RetentionPolicy.WORK_QUEUE
@@ -219,6 +220,38 @@ def test_dispatch_ontology_document_published_keeps_msg_id_compact(fake_nats):
     assert len(msg_id) < 200
     assert "内容" not in msg_id
     assert re.fullmatch(r"ontology\.documents\.published:ont-1:fp-1:\d+", msg_id)
+
+
+def test_dispatch_ontology_assistant_run_uses_stable_msg_id(fake_nats):
+    """同一 run 的重复派发共享 Msg-Id，由 JetStream 去重窗合并。"""
+    from app.data_channel.pipeline_tasks.dispatch import (
+        ONTOLOGY_ASSISTANT_RUN_SUBJECT,
+        dispatch_ontology_assistant_run,
+    )
+
+    dispatch_ontology_assistant_run("run-1")
+    dispatch_ontology_assistant_run("run-1")
+
+    assert ONTOLOGY_ASSISTANT_RUN_SUBJECT == "ontology.assistant.run"
+    assert ONTOLOGY_ASSISTANT_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
+    assert PIPELINE_STREAM_SUBJECTS[-1] == ONTOLOGY_ASSISTANT_RUN_SUBJECT
+    first, second = fake_nats["published"]
+    for subject, payload, headers in (first, second):
+        assert subject == ONTOLOGY_ASSISTANT_RUN_SUBJECT
+        assert json.loads(payload.decode())["run_id"] == "run-1"
+        # 稳定 Msg-Id 不带时间戳：去重窗内重复派发是同一消息。
+        assert headers["Nats-Msg-Id"] == "ontology.assistant.run:run-1"
+    assert fake_nats["drained"] is True
+
+
+def test_dispatch_ontology_assistant_run_rejects_empty_run_id(fake_nats):
+    from app.data_channel.pipeline_tasks.dispatch import (
+        dispatch_ontology_assistant_run,
+    )
+
+    with pytest.raises(ValueError, match="run_id"):
+        dispatch_ontology_assistant_run("   ")
+    assert fake_nats["published"] == []
 
 
 def test_dispatch_super_assistant_palace_consolidate(fake_nats):

@@ -415,21 +415,33 @@ def test_conversation_delete_preserves_transaction_order():
     conversation = SimpleNamespace(id="conversation-1")
 
     class Query:
-        def __init__(self, label):
+        def __init__(self, label=None):
             self.label = label
 
         def filter(self, *_args):
             return self
 
+        def first(self):
+            return None
+
+        def all(self):
+            return []
+
         def delete(self):
-            order.append(self.label)
+            if self.label:
+                order.append(self.label)
 
     class Database:
-        calls = 0
-
-        def query(self, _model):
-            self.calls += 1
-            return Query("simulations" if self.calls == 1 else "messages")
+        def query(self, model):
+            class_ = getattr(model, "class_", None)
+            name = (
+                class_.__name__ if class_ is not None
+                else getattr(model, "__name__", "")
+            )
+            return Query({
+                "DecisionSimulationRun": "simulations",
+                "AgentMessage": "messages",
+            }.get(name))
 
         def delete(self, value):
             assert value is conversation
@@ -445,7 +457,7 @@ def test_conversation_delete_preserves_transaction_order():
 def test_agent_runtime_modules_stay_bounded():
     maximum_lines = {
         "router.py": 620,
-        "limits.py": 160,
+        "limits.py": 210,
         # 217: 引用/UUID/时间戳屏蔽 + 标识符键排除 + 答案侧排版屏蔽
         # （序号/时钟/编号/区间——答案校验列表序号误报修复）
         "answer_verifier.py": 230,
@@ -498,14 +510,15 @@ def test_agent_runtime_openapi_contract_is_stable():
     # P2 整改：+join-assertions（POST/GET）
     # D1/B' 人工裁决：+proposals/{cid}/adjudicate-not-executed（POST, admin-only
     # via require_admin——unknown 态 not_executed 正门裁决，不重放不源写）
-    assert len(paths) == 35
+    # Durable runs add submit/events/cancel/retry; query-view adds POST/DELETE.
+    assert len(paths) == 40
     assert sum(
         method in {"get", "post", "put", "patch", "delete"}
         for operations in paths.values()
         for method in operations
-    ) == 44
+    ) == 50
     assert hashlib.sha256(payload.encode()).hexdigest() == (
-        "087a94922030878312fc8621ac0ad18c57bcaede807c2735260fd98e87be5a60"
+        "64558821f2cb6ed7c573dfb05e1800e35943f2a64b0c9ed2df5d26906c36bd5d"
     )
     normalized_payload = json.dumps(
         normalize(paths),
@@ -514,5 +527,5 @@ def test_agent_runtime_openapi_contract_is_stable():
         separators=(",", ":"),
     )
     assert hashlib.sha256(normalized_payload.encode()).hexdigest() == (
-        "364076fd80647fde42f016346381fac3be55f601d14dd5c0ae1399d3133ef794"
+        "305376b75bde1cf13763a12031c12e0b409b06d4bde776fc417d74ac86d5453d"
     )

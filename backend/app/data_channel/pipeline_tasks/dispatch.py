@@ -35,6 +35,8 @@ SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT = "super_assistant.palace.consolidate
 SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT = "super_assistant.palace.ontology-rebuild"
 SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT = "super_assistant.scheduled.run"
 ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT = "ontology.documents.published"
+# 本体聊天后台回合：Web 只负责把已落库的 run_id 送达，执行在 executor 进程。
+ONTOLOGY_ASSISTANT_RUN_SUBJECT = "ontology.assistant.run"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
 TASK_INSTANCES_CONTROL_SUBJECT = "task_instances.control"
 EXECUTION_STREAM = "SA_EXECUTION_V1"
@@ -71,6 +73,8 @@ PIPELINE_STREAM_SUBJECTS = (
     TASK_INSTANCES_CONTROL_SUBJECT,
     # Append-only: full integrated snapshots execute outside the HTTP worker.
     INTEGRATED_SYNC_SUBJECT,
+    # 只能追加：本体助手聊天后台回合（run_id 已落库后再派发）
+    ONTOLOGY_ASSISTANT_RUN_SUBJECT,
 )
 
 # 进程内缓存：每个进程只在首次派发时确保一次 Stream
@@ -385,4 +389,25 @@ def dispatch_assistant_eval_autopilot(config_id: str) -> None:
     dispatch_task(
         ASSISTANT_EVAL_AUTOPILOT_SUBJECT,
         {"config_id": config_id},
+    )
+
+
+def dispatch_ontology_assistant_run(run_id: str) -> None:
+    """本体助手后台回合派发入口（Web 入队 / startup 与定时对账补发共用）。
+
+    payload 只携带已落库的 run_id，不复制消息正文或 LLM 配置。Msg-Id 固定为
+    ``ontology.assistant.run:<run_id>``（不带时间戳）：同一 run 在 JetStream
+    10 分钟去重窗内的重复派发被 broker 合并；这不会丢工作——首次发布若仍在
+    工作队列中会按未 ack 重投，若首条已被消费而 run 仍为 queued，则由
+    run_service 的 45 秒对账在去重窗结束后再次补发。queued 行本身是持久
+    事实源，不能为绕过去重窗改用时间戳 Msg-Id（会造成并发重复执行）。
+    执行侧仍以 run 状态/租约做最终幂等。
+    """
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("本体助手后台回合派发需要非空 run_id")
+    run_id = run_id.strip()
+    _dispatch_sync(
+        ONTOLOGY_ASSISTANT_RUN_SUBJECT,
+        {"run_id": run_id},
+        f"{ONTOLOGY_ASSISTANT_RUN_SUBJECT}:{run_id}",
     )

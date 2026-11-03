@@ -265,6 +265,16 @@ async def application_lifespan(
             except Exception as exc:
                 _main_logger.warning("任务实例对账定时器启动失败: %s", exc)
 
+        # 本体助手后台回合对账器（queued 补发 + 仅回收已过期 running 租约；
+        # APScheduler 进程内定时 + NATS 派发，旁路能力，失败不阻断启动）
+        if settings.environment != "test":
+            try:
+                from app.tasks import ontology_assistant_tasks
+
+                ontology_assistant_tasks.start()
+            except Exception as exc:
+                _main_logger.warning("本体助手回合对账器启动失败: %s", exc)
+
         from app.data_channel.file_assets.service import (
             file_asset_cleanup_loop,
         )
@@ -326,6 +336,12 @@ async def application_lifespan(
             confirmation_worker.shutdown()
         except Exception:  # noqa: BLE001
             _main_logger.exception("本体确认操作 worker cleanup failed")
+        try:
+            from app.tasks import ontology_assistant_tasks
+
+            ontology_assistant_tasks.shutdown()
+        except Exception:  # noqa: BLE001
+            _main_logger.exception("本体助手回合对账器 cleanup failed")
         if sentinel_attempted:
             try:
                 from app.services.sentinel import (
