@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -329,6 +330,35 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         "WEKNORA_EMBEDDING_API_KEY",
     ):
         assert key in bootstrap_environment
+
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy-nano-ontoprompt.yml").read_text()
+    )
+    build_job = workflow["jobs"]["verify-docker-build"]
+    build_step = next(
+        step for step in build_job["steps"]
+        if step.get("name") == "Build Docker images"
+    )
+    build_environment = build_step["env"]
+    required = set(re.findall(
+        r"\$\{(WEKNORA_[A-Z0-9_]+):\?",
+        (ROOT / "docker-compose.prod.yml").read_text(),
+    ))
+    assert required <= build_environment.keys()
+    assert all(
+        isinstance(build_environment[key], str)
+        and build_environment[key]
+        and "${{" not in build_environment[key]
+        for key in required
+    )
+    for key in weknora_bootstrap_only:
+        assert build_environment[key].startswith("ci-only-")
+    assert build_environment["WEKNORA_CHAT_BASE_URL"].endswith(".invalid/v1")
+    assert build_environment["WEKNORA_EMBEDDING_BASE_URL"].endswith(".invalid/v1")
+    assert build_environment["WEKNORA_WEB_URL"].endswith(".invalid")
+    assert "env" not in workflow
+    assert "env" not in build_job
+    assert build_step["run"] == "docker compose -f docker-compose.prod.yml build"
 
 
 def test_removed_graph_fallback_dependencies_are_not_packaged():

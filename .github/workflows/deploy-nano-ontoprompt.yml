@@ -431,9 +431,33 @@ jobs:
           path: frontend/dist
 
       - name: Build Docker images
-        # Compose interpolation only; this public sentinel is never used at runtime.
+        # Compose parses every service before build; these synthetic values never start services.
         env:
           INTEGRATED_DBX_PASSWORD: ci-only-dbx-compose-interpolation
+          WEKNORA_APP_IMAGE: wechatopenai/weknora-app:v0.9.0@sha256:25b20959b7456f7842ef55ed4feff3694dbd0c6f8af4117c1fb3c5dec6bdf14d
+          WEKNORA_UI_IMAGE: wechatopenai/weknora-ui:v0.9.0@sha256:df26705d866997db07f3da78dabedc4f594b383566a3996810c166a5c6bee393
+          WEKNORA_DOCREADER_IMAGE: wechatopenai/weknora-docreader:v0.9.0@sha256:8c71ec3cc2e291829c3938d2c7dc5f921c1d10551c8774bf844c83bc4aa3cb84
+          WEKNORA_POSTGRES_IMAGE: paradedb/paradedb:v0.25.11-pg17@sha256:78d65750f0f88a56548526201bcab9910f83b90fe929cdbf979890f3f80b0f95
+          WEKNORA_REDIS_IMAGE: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+          WEKNORA_NEO4J_IMAGE: neo4j:2025.10.1@sha256:155c8aad10d5c838bc3bbc476c0418779086547822acb214ec5e3d49ba336907
+          WEKNORA_DB_NAME: ci_weknora
+          WEKNORA_DB_USER: ci_weknora
+          WEKNORA_DB_PASSWORD: ci-only-weknora-db-password
+          WEKNORA_REDIS_PASSWORD: ci-only-weknora-redis-password
+          WEKNORA_NEO4J_PASSWORD: ci-only-weknora-neo4j-password
+          WEKNORA_JWT_SECRET: ci-only-weknora-jwt-secret-for-build
+          WEKNORA_SYSTEM_AES_KEY: ci-only-weknora-aes-key-32-bytes!!
+          WEKNORA_SYSTEM_SIGNING_KEY: ci-only-weknora-signing-key-for-build
+          WEKNORA_WEB_URL: https://weknora.ci.invalid
+          WEKNORA_ADMIN_USER: ci_admin
+          WEKNORA_ADMIN_PASSWORD: ci-only-WeKnora-Admin-2026!
+          WEKNORA_CHAT_BASE_URL: https://chat.ci.invalid/v1
+          WEKNORA_CHAT_API_KEY: ci-only-weknora-chat-api-key
+          WEKNORA_CHAT_MODEL: ci-chat-model
+          WEKNORA_EMBEDDING_BASE_URL: https://embedding.ci.invalid/v1
+          WEKNORA_EMBEDDING_API_KEY: ci-only-weknora-embedding-api-key
+          WEKNORA_EMBEDDING_MODEL: ci-embedding-model
+          WEKNORA_EMBEDDING_DIMENSIONS: "1024"
         run: docker compose -f docker-compose.prod.yml build
 
   deploy:
