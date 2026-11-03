@@ -203,7 +203,7 @@ def apply_proposal(db: Session, *, proposal_id: str, trigger: str,
     update_profile(
         db, proposal.ontology_id,
         agent_schemas.AgentProfileUpdate(**patch),
-        get_profile_fn=get_or_create_profile)
+        get_profile_fn=get_or_create_profile, source="assistant_evaluation_apply")
 
     # 版本链：前一 active 让位，新版本登记
     previous = active_version(db, proposal.ontology_id)
@@ -265,7 +265,7 @@ def rollback_version(db: Session, *, version_id: str, reason: str,
     update_profile(
         db, version.ontology_id,
         _restore_body(restore_fields),
-        get_profile_fn=get_or_create_profile)
+        get_profile_fn=get_or_create_profile, source="assistant_evaluation_rollback")
 
     version.status = "rolled_back"
     previous = (

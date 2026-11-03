@@ -330,3 +330,53 @@ def test_configured_binding_rejects_physical_names(monkeypatch):
     finally:
         conn.close()
         engine.dispose()
+
+
+# ------------------------------------------------------------- 时间分桶/有界统计
+
+def test_bucket_group_plan_and_typed_pipeline_carry_bucket():
+    plan = _plan()
+    plan["select"] = [{"source": "customers", "property": "customerId", "as": "g"}]
+    plan["groupBy"] = [{"source": "customers", "property": "customerId", "bucket": "month"}]
+    plan["outputs"] = ["g", "count"]
+    typed = build_typed_request(plan, request={}, session_kind="direct", session_id="user")
+    group = typed.pipeline.commands[0].args[-1]
+    assert group[0] == "group"
+    assert group[1][0][0].name == "customerId"
+    assert group[1][0][1] == "g"
+    assert group[1][0][2] == "month"
+
+
+def test_stats_limit_appends_limit_command_after_sort():
+    plan = _plan()
+    plan["select"] = [{"source": "customers", "property": "tier", "as": "g"}]
+    plan["groupBy"] = [{"source": "customers", "property": "tier"}]
+    plan["outputs"] = ["g", "count"]
+    plan["orderBy"] = [{"output": "count", "direction": "desc", "nulls": "last"}]
+    plan["statsLimit"] = 10
+    typed = build_typed_request(plan, request={}, session_kind="direct", session_id="user")
+    assert [command.op for command in typed.pipeline.commands] == ["stats", "sort", "limit"]
+    assert typed.pipeline.commands[-1].args[0] == 10
+
+
+def test_bounded_stats_response_keeps_exactness_and_marks_truncation():
+    plan = {**_plan(), "releases": {}, "citations": []}
+    plan["statsLimit"] = 10
+    result = _result()
+    result["resultLimited"] = True
+    payload = _response(result, plan)
+    assert payload["exact"] is True
+    assert payload["completeness"] == "complete"
+    assert payload["truncated"] is True
+    assert payload["resultBounded"] is True
+
+
+def test_unbounded_limited_result_stays_partial():
+    plan = {**_plan(), "releases": {}, "citations": []}
+    result = _result()
+    result["resultLimited"] = True
+    payload = _response(result, plan)
+    assert payload["exact"] is False
+    assert payload["completeness"] == "partial"
+    assert payload["truncated"] is False
+    assert payload["resultBounded"] is False

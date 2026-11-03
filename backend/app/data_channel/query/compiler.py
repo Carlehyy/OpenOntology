@@ -16,6 +16,54 @@ from .parser import Command, Expr, Pipeline, Ref, Value
 
 _NUMERIC = {"integer", "decimal", "float"}
 _ORDERABLE = _NUMERIC | {"string", "date", "timestamp", "time"}
+_BUCKETS = {"day", "week", "month", "quarter", "year"}
+
+
+def _bucket_expression(col, spec, bucket: str, dialect: str):
+    """Bucket-start expression for a temporal column (ISO date semantics).
+
+    Week buckets start on Monday. PostgreSQL uses date_trunc; MySQL uses
+    native date arithmetic; the default (SQLite in-process scopes) uses
+    strftime/date modifiers. Output normalizes to a date in every dialect.
+    """
+    if bucket not in _BUCKETS:
+        raise QueryError(422, "invalid_parameter", f"Unknown time bucket {bucket!r}")
+    if spec.type not in {"date", "timestamp"}:
+        raise QueryError(422, "unsupported_group_bucket",
+                         f"Time bucketing requires a date/timestamp field, not {spec.type}")
+    if dialect == "postgresql":
+        return sa.cast(sa.func.date_trunc(bucket, col), sa.Date)
+    if dialect == "mysql":
+        if bucket == "day":
+            return sa.func.date(col)
+        if bucket == "week":
+            # TO_DAYS − WEEKDAY: Monday-based day number of the week start.
+            return sa.func.from_days(sa.func.to_days(col) - sa.func.weekday(col))
+        if bucket == "month":
+            return sa.cast(sa.func.date_format(col, sa.literal("%Y-%m-01")), sa.Date)
+        if bucket == "quarter":
+            # PERIOD_ADD(YEAR_MONTH, -(month-1)%3) → quarter-start YYYYMM.
+            period = sa.func.period_add(
+                sa.extract("year_month", col),
+                -(((sa.extract("month", col) - 1) % 3)))
+            return sa.func.str_to_date(
+                sa.func.concat(sa.cast(period, sa.String), sa.literal("01")),
+                sa.literal("%Y%m%d"))
+        return sa.cast(sa.func.date_format(col, sa.literal("%Y-01-01")), sa.Date)
+    # sqlite（进程内/测试假源）
+    if bucket == "day":
+        return sa.func.strftime("%Y-%m-%d", col)
+    if bucket == "month":
+        return sa.func.strftime("%Y-%m-01", col)
+    if bucket == "year":
+        return sa.func.strftime("%Y-01-01", col)
+    if bucket == "week":
+        offset = (sa.cast(sa.func.strftime("%w", col), sa.Integer) + 6) % 7
+        modifier = sa.cast(-offset, sa.String).concat(sa.literal(" days"))
+        return sa.func.date(col, modifier)
+    month_index = sa.cast(sa.func.strftime("%m", col), sa.Integer) - 1
+    modifier = sa.cast(-(month_index % 3), sa.String).concat(sa.literal(" months"))
+    return sa.func.strftime("%Y-%m-01", col, modifier)
 
 
 @dataclass
@@ -308,23 +356,34 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
             else:
                 groups = next((arg[1] for arg in args if arg[0] == "group"), ())
                 group_refs = []
+                group_exprs = []
                 for item in groups:
-                    # Typed callers may attach an output alias: (Ref, name).
-                    ref, out_name = item if isinstance(item, tuple) else (item, item.name)
+                    # Typed callers may attach an output alias and a time
+                    # bucket: (Ref, name[, bucket]).
+                    if isinstance(item, tuple):
+                        ref, out_name = item[0], item[1]
+                        bucket = item[2] if len(item) > 2 else None
+                    else:
+                        ref, out_name, bucket = item, item.name, None
                     group_refs.append(ref)
                     col, spec = builder.lookup(ref)
                     if spec.type in {"json", "binary"}:
                         raise QueryError(422, "unsupported_group_type", "Cannot group JSON/binary")
-                    group_expr = comparable(col, spec)
-                    if dialect == "mysql" and spec.type == "string":
-                        # MySQL groups strings by BINARY for deterministic
-                        # semantics, but the OUTPUT must return text again:
-                        # every group member is byte-equal, so MIN of the
-                        # binary expression cast back to CHAR is the exact
-                        # value — otherwise the driver returns bytes for a
-                        # string-declared column and cross-source joins in the
-                        # bounded federated executor never match.
-                        group_expr = sa.cast(sa.func.min(group_expr), sa.Text)
+                    if bucket is not None:
+                        group_expr = _bucket_expression(col, spec, bucket, dialect)
+                        spec = replace(spec, type="date", nullable=True)
+                    else:
+                        group_expr = comparable(col, spec)
+                        if dialect == "mysql" and spec.type == "string":
+                            # MySQL groups strings by BINARY for deterministic
+                            # semantics, but the OUTPUT must return text again:
+                            # every group member is byte-equal, so MIN of the
+                            # binary expression cast back to CHAR is the exact
+                            # value — otherwise the driver returns bytes for a
+                            # string-declared column and cross-source joins in the
+                            # bounded federated executor never match.
+                            group_expr = sa.cast(sa.func.min(group_expr), sa.Text)
+                    group_exprs.append(group_expr)
                     chosen.append(group_expr.label(out_name))
                     projected_refs[ref] = out_name
                     output_columns.append(replace(spec, name=out_name))
@@ -375,7 +434,7 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
                 raise QueryError(422, "invalid_output_name", "Output names must occupy 1..63 UTF-8 bytes; alias long physical names")
             stmt = sa.select(*chosen).select_from(sub)
             if op == "stats" and group_refs:
-                stmt = stmt.group_by(*(comparable(builder.lookup(ref)[0], specs[ref]) for ref in group_refs))
+                stmt = stmt.group_by(*group_exprs)
             outputs = dict(zip(names, chosen))
             finalized = True
         elif op == "distinct":

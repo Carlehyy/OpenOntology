@@ -46,7 +46,8 @@ ONTOLOGY_TOOL_NAMES = {
     ONTOLOGY_REGISTER_JOIN_TOOL,
 }
 
-_MAX_QUERY_SOURCES = 4
+# 与本体统一查询契约一致：8 源 / 7 关联（覆盖 事件→模块→子产品→产品→产品族 全链）
+_MAX_QUERY_SOURCES = 8
 _MAX_REF_ONTOLOGIES = 20
 # 对象类型目录页大小 20；翻页上界只防病态分页，正常按目标类型早停。
 _MAX_REF_CATALOG_PAGES = 64
@@ -121,7 +122,7 @@ def _query_request_properties(sources_items: dict[str, Any]) -> dict[str, Any]:
             "items": sources_items,
         },
         "joins": {
-            "type": "array", "maxItems": 3,
+            "type": "array", "maxItems": 7,
             "items": {
                 "type": "object",
                 "properties": {
@@ -207,7 +208,10 @@ def _query_request_properties(sources_items: dict[str, Any]) -> dict[str, Any]:
             "items": {
                 "type": "object",
                 "properties": {"source": {"type": "string"},
-                               "property": {"type": "string"}},
+                               "property": {"type": "string"},
+                               "bucket": {"type": "string",
+                                          "enum": ["day", "week", "month",
+                                                   "quarter", "year"]}},
                 "required": ["source", "property"],
                 "additionalProperties": False,
             },

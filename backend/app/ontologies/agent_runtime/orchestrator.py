@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Iterator, Optional
@@ -46,6 +47,114 @@ from app.ontologies.agent_runtime.toolkit import TOOL_DEFS, ToolRunner
 logger = logging.getLogger(__name__)
 
 # 各限额的默认值见 agent_runtime/limits.py 统一注册表（环境变量可覆盖）。
+
+# 只读工具白名单：同一回合的多个调用可并行执行（每任务独立数据库会话）。
+# 涉及提案/推演/世界模型调用的工具保持串行（写状态或独占配额）。
+_PARALLEL_SAFE_TOOLS = frozenset({
+    "search_objects", "get_object", "traverse_links", "traverse_path", "find_paths",
+    "analyze_change_impact", "aggregate_objects", "query_objects",
+    "get_data_time_range", "get_object_history", "trace_causal_chain",
+    "explain_sentinel_firing", "list_actions", "list_dynamic_sentinels",
+    "list_world_model_services",
+})
+# 远程统一查询工具：统一查询内存预算按用户配额预留（首个查询会预留整个
+# per-user allowance），同一用户的并行远程查询会 429；按用户串行化，其余
+# 只读工具仍并行（与超级助手 owner single-flight 同口径）。
+_REMOTE_QUERY_TOOLS = frozenset({
+    "aggregate_objects", "query_objects", "get_data_time_range",
+})
+_USER_QUERY_LOCKS: dict[str, threading.Lock] = {}
+_USER_QUERY_LOCKS_GUARD = threading.Lock()
+
+
+def _user_query_lock(user_id) -> threading.Lock:
+    key = str(user_id or "")
+    with _USER_QUERY_LOCKS_GUARD:
+        lock = _USER_QUERY_LOCKS.get(key)
+        if lock is None:
+            lock = _USER_QUERY_LOCKS[key] = threading.Lock()
+        return lock
+
+
+def _run_tool_call(runner: ToolRunner, tc: dict) -> tuple[dict, int]:
+    started = time.time()
+    name = tc["name"]
+    lock = _user_query_lock(runner.user.id) if name in _REMOTE_QUERY_TOOLS else None
+    try:
+        if lock is not None:
+            with lock:
+                result = runner.run(name, tc.get("arguments") or {})
+        else:
+            result = runner.run(name, tc.get("arguments") or {})
+    except ToolError as e:
+        result = {"error": str(e)}
+    except Exception as e:  # noqa: BLE001 — 工具内部意外不摧毁回合
+        logger.exception("工具 %s 执行异常", name)
+        result = {"error": f"工具内部错误: {e}"}
+    return result, int((time.time() - started) * 1000)
+
+
+def _parallel_task_runner(runner: ToolRunner) -> ToolRunner:
+    """并行任务专用的 ToolRunner：独立数据库会话 + 本会话内的 ORM 实例。
+
+    共享的只有不可变快照 dict（只读）与调用参数；ORM 实例跨线程访问过期
+    属性会借用原会话，因此 project/release/profile 一律在新会话内重取。
+    会话绑定主会话的引擎（生产为应用引擎，测试为 fixture 引擎）。
+    """
+    from sqlalchemy.orm import sessionmaker
+    from app.ontologies.agent_runtime.boundary import AgentScope
+    from app.ontologies.release_context import CurrentReleaseContext
+    from app.ontologies.versions.models import OntologyVersion
+    from app.ontologies.projects.models import OntologyProject
+
+    session = sessionmaker(bind=runner.db.get_bind())()
+    try:
+        ontology = session.get(OntologyProject, runner.scope.ontology.id)
+        profile = session.get(AgentProfile, runner.scope.profile.id)
+        release = (session.get(OntologyVersion, runner.scope.release_id)
+                   if runner.scope.release_id else None)
+        context = (CurrentReleaseContext(project=ontology, release=release,
+                                         snapshot=runner.scope.release.snapshot)
+                   if release is not None else None)
+        scope = AgentScope(session, ontology, profile, context)
+        return ToolRunner(
+            session, scope,
+            decision_context=runner.decision_context,
+            world_model_context=runner.world_model_context,
+            user=runner.user, query_session_id=runner.query_session_id)
+    except Exception:
+        session.close()
+        raise
+
+
+def _execute_tool_calls(runner: ToolRunner, tool_calls: list[dict]) -> list[tuple[dict, list[dict], int]]:
+    """执行一批工具调用：可并行批次用有界线程池，结果按调用顺序返回。"""
+    workers = min(limit("parallel_tool_workers"), len(tool_calls))
+    parallel = (len(tool_calls) > 1 and workers > 1
+                and all(tc["name"] in _PARALLEL_SAFE_TOOLS for tc in tool_calls))
+    if not parallel:
+        outcomes = []
+        for tc in tool_calls:
+            result, duration = _run_tool_call(runner, tc)
+            outcomes.append((result, [], duration))
+        return outcomes
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def task(tc: dict):
+        task_runner = _parallel_task_runner(runner)
+        try:
+            result, duration = _run_tool_call(task_runner, tc)
+            return result, task_runner.citations, duration
+        finally:
+            task_runner.db.rollback()
+            task_runner.db.close()
+
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="agent-tools") as pool:
+        futures = [pool.submit(task, tc) for tc in tool_calls]
+        # 按提交顺序回收结果，事件顺序与模型发起顺序一致。
+        return [future.result() for future in futures]
 
 
 # 图表可视化能力（普通字符串，含 JSON 花括号，勿并入 f-string）
@@ -85,8 +194,8 @@ def _system_prompt(scope) -> str:
 # 行为准则
 1. 先查证后回答：任何涉及数据的结论都必须来自工具返回结果，禁止编造，也不要用本体之外的常识或训练记忆去补充业务事实。工具结果不足以回答时，明确说明还缺什么、需要用户补充或授权什么，而不是猜。多个结果相互矛盾时，指出差异并优先采信更具体、更有出处的来源。工具返回 partial=true 时，说明这是基于部分数据的估计。
 2. 用中文回答，简洁、结构化；提到具体对象时带上它的标签（如订单号、名称），便于用户核对。
-3. 统计类问题（总共/平均/最多/分布）优先用 aggregate_objects，不要拉列表自己数；已知关系序列的多跳问题用 traverse_path；明确询问两个具体实例之间有哪些路径时，用 find_paths，必要时先 search_objects 确认两端 id。
-3b. 远程绑定对象的统计直接使用 aggregate_objects：在当前发布版本中自动转统一查询，在真实源上执行 count/sum/avg/min/max 和分组。按月份统计时使用真实日期属性的 gte 月初、lt 下月初过滤。远程 search/遍历/图谱/历史仍会报 remote_ontology_semantic_query_required；统计问题改用 aggregate_objects，明细等问题引导超级助手 ontology_query 或统一查询 API。没有固定发布版本或查询失败时如实说明原因，绝不能把 0/空结果当作答案。
+3. 统计类问题（总共/平均/最多/分布）优先用 aggregate_objects，不要拉列表自己数；已知关系序列的多跳问题用 traverse_path；明确询问两个具体实例之间有哪些路径时，用 find_paths，必要时先 search_objects 确认两端 id。多个相互独立的查询可以在同一次回复里一起发起工具调用，平台会并行执行；有依赖关系的调用必须等前一个结果再发起。
+3b. 远程绑定对象：统计直接用 aggregate_objects（自动在真实源执行 count/sum/avg/min/max 与分组）；趋势/按日周月季年统计用 group_by 的 {{"property": 时间属性, "bucket": "day|week|month|quarter|year"}} 一次取全期间，禁止逐月逐日多次查询；月度趋势按时间排序传 order_by={{"output":"group","direction":"asc"}}。明细列表、按 ID 查单条、排序分页、多维分组、多指标、沿已发布关系的关联统计用 query_objects（本地物化对象同样可用）。回答趋势/统计结论前先用 get_data_time_range 获取数据时间范围，并在回答中注明数据覆盖的起止与截止日期（如「数据截至 10 月 4 日」），不得把同步截止误当成真实下降；completeness 只代表查询执行完成，不代表数据时间覆盖完整。远程 search/遍历/图谱/历史仍会报 remote_ontology_semantic_query_required。没有固定发布版本或查询失败时如实说明原因，绝不能把 0/空结果当作答案。
 4. 用户问「为什么是这个值 / 谁改的 / 什么时候变的」，用 get_object_history 给出带出处的回答。
 5. 用户问跨对象因果问题（「这个值为什么变了 / 哪个决策或动作导致的 / 谁批准的 / 后来又变成了什么 / 这个派生值怎么算出来的」），用 trace_causal_chain 沿事实流追溯：它给出 决策→动作→事实变更→后续覆盖 的因果链与出处，比 get_object_history 的单实例历史更进一步。链受深度与数量上限约束，返回 truncated=true 时必须说明这是部分链、可能还有未展示的上游或下游。
 6. 需要修改数据时：只能用 propose_action 做预演并生成提案，真实执行由用户在界面上确认。绝不能声称你已经完成了修改。
@@ -122,6 +231,13 @@ def _summarize(name: str, result: dict) -> str:
         if "groups" in result:
             return f"{result.get('objectType', '')} 按 {result.get('groupBy')} 分 {len(result['groups'])} 组"
         return f"{result.get('objectType', '')} {result.get('metric')} = {result.get('value')}"
+    if name == "query_objects":
+        suffix = "（有下一页）" if result.get("hasNext") else ""
+        return (f"{result.get('objectType', '')} 查询返回 "
+                f"{result.get('returned', 0)} 行{suffix}")
+    if name == "get_data_time_range":
+        return (f"{result.get('objectType', '')} 数据范围 "
+                f"{result.get('min')} ~ {result.get('max')}")
     if name == "get_object_history":
         return f"{result.get('instance', '')} 的 {len(result.get('facts', []))} 条事实"
     if name == "trace_causal_chain":
@@ -471,19 +587,19 @@ def _run(db: Session, ontology_id: str, user, question: str,
 
         messages.append({"role": "assistant", "content": resp.get("content"),
                          "tool_calls": resp["tool_calls"]})
-        for tc in resp["tool_calls"]:
+        # 一批只读工具调用并行执行（远程统一查询按用户串行），结果按序产出。
+        for tc, (result, task_citations, duration) in zip(
+                resp["tool_calls"], _execute_tool_calls(runner, resp["tool_calls"])):
             if chat_cancel_registry.is_cancelled(run_id):
                 yield from _finish_cancelled(db, conv, steps, runner, call_kwargs, usage_total)
                 return
-            started = time.time()
-            try:
-                result = runner.run(tc["name"], tc.get("arguments") or {})
-            except ToolError as e:
-                result = {"error": str(e)}
-            except Exception as e:  # noqa: BLE001 — 工具内部意外不摧毁回合
-                logger.exception("工具 %s 执行异常", tc["name"])
-                result = {"error": f"工具内部错误: {e}"}
-            duration = int((time.time() - started) * 1000)
+            # 并行任务的引用按调用顺序合并回主 runner（去重、受引用上限约束）。
+            for citation in task_citations:
+                instance_id = citation.get("instanceId")
+                if instance_id and instance_id not in runner._cited \
+                        and len(runner.citations) < limit("citation_cap"):
+                    runner._cited.add(instance_id)
+                    runner.citations.append(citation)
 
             display_result = _display_result(result)
             step = {"tool": tc["name"], "arguments": tc.get("arguments") or {},

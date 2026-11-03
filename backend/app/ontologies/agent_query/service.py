@@ -254,6 +254,13 @@ class UnifiedQueryService:
         aliases = [s.alias for s in self.req.sources]
         if len(set(aliases)) != len(aliases):
             raise QueryError(422, "invalid_parameter", "source alias 重复")
+        if self.req.bounded_stats or any(g.bucket for g in self.req.group_by):
+            # 本地物化分页路径没有源端截断/分桶算子：fail closed，不静默
+            # 按原始值分组或忽略截断语义。
+            raise QueryError(
+                422, "invalid_parameter",
+                "时间分桶（bucket）与 boundedStats 仅支持远程统一查询路径；"
+                "本地物化对象请按原始时间字段分组")
         known = set(aliases)
         joined = {aliases[0]}
         for join in self.req.joins:
