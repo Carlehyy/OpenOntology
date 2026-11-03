@@ -165,6 +165,32 @@ def test_mysql_string_group_output_casts_back_to_text(sources):
     assert "BINARY" not in str(postgres.statement)
 
 
+def test_mysql_string_group_by_key_is_not_the_min_output_expression(sources):
+    """MySQL string group keys must remain non-aggregate.
+
+    Regression found by the real MySQL 8.4 driver: the text-recovery
+    ``CAST(MIN(CAST(k AS BINARY)) AS CHAR)`` was reused verbatim in GROUP BY,
+    producing MySQL 1111 "Invalid use of group function". The SELECT may keep
+    the MIN recovery, but GROUP BY must use the bare BINARY key so byte-wise
+    case/whitespace semantics and index-friendly grouping stay intact.
+    """
+    pipeline = typed_pipeline(
+        "from customers as c | stats count() as n, count_distinct(c.id) as ids "
+        "by c.region, c.name | sort region asc, name asc")
+    mysql = compile_query(pipeline, {"c": sources["pg"]["customers"]},
+                          {}, dialect="mysql")
+    from sqlalchemy.dialects import mysql as mysql_dialect
+    sql = str(mysql.statement.compile(dialect=mysql_dialect.dialect()))
+    select_clause, grouped = sql.split("GROUP BY", 1)
+    group_clause = grouped.split("ORDER BY", 1)[0]
+    select_upper, group_upper = select_clause.upper(), group_clause.upper()
+    assert "CAST(MIN(" in select_upper
+    assert group_upper.count("AS BINARY") == 2
+    assert "MIN(" not in group_upper
+    # Text recovery stays for the driver-facing OUTPUT only.
+    assert "AS CHAR" in select_upper
+
+
 def test_restore_decodes_bytes_for_string_specs_only(sources):
     executor = MemoryExecutor(
         FakeService(), typed_pipeline("from customers as c | fields c.name"),

@@ -371,9 +371,13 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
                         raise QueryError(422, "unsupported_group_type", "Cannot group JSON/binary")
                     if bucket is not None:
                         group_expr = _bucket_expression(col, spec, bucket, dialect)
+                        # Bucket output and grouping key are the same scalar
+                        # expression in every dialect.
+                        group_key_expr = group_expr
                         spec = replace(spec, type="date", nullable=True)
                     else:
-                        group_expr = comparable(col, spec)
+                        group_key_expr = comparable(col, spec)
+                        group_expr = group_key_expr
                         if dialect == "mysql" and spec.type == "string":
                             # MySQL groups strings by BINARY for deterministic
                             # semantics, but the OUTPUT must return text again:
@@ -382,8 +386,15 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
                             # value — otherwise the driver returns bytes for a
                             # string-declared column and cross-source joins in the
                             # bounded federated executor never match.
-                            group_expr = sa.cast(sa.func.min(group_expr), sa.Text)
-                    group_exprs.append(group_expr)
+                            #
+                            # The MIN() recovery is an output expression only.
+                            # Putting it into GROUP BY is invalid SQL
+                            # (MySQL 1111 "Invalid use of group function");
+                            # the grouping key stays the non-aggregate BINARY
+                            # expression, preserving byte/case/whitespace
+                            # grouping semantics.
+                            group_expr = sa.cast(sa.func.min(group_key_expr), sa.Text)
+                    group_exprs.append(group_key_expr)
                     chosen.append(group_expr.label(out_name))
                     projected_refs[ref] = out_name
                     output_columns.append(replace(spec, name=out_name))
