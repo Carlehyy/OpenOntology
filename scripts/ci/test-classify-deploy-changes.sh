@@ -94,6 +94,10 @@ expect_flags "infra-compose" \
   "docker-compose.prod.yml" \
   true false true true true
 
+expect_flags "weknora-gateway-is-infra" \
+  "docker/weknora/gateway.conf" \
+  true false true true true
+
 expect_flags "env-example-runs-backend-and-deploy" \
   ".env.example" \
   true false true true true

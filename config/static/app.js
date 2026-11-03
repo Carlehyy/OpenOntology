@@ -9,6 +9,7 @@
     "minio",
     "browser",
     "n8n",
+    "weknora",
   ];
 
   const SERVICE_LABELS = {
@@ -19,6 +20,7 @@
     minio: "MinIO",
     browser: "Chromium CDP",
     n8n: "n8n",
+    weknora: "WeKnora",
   };
 
   const state = {
@@ -36,6 +38,7 @@
       "neo4j",
       "minio",
       "n8n",
+      "weknora",
     ],
     tests: Object.fromEntries(SERVICES.map((service) => [service, "idle"])),
     fingerprints: Object.fromEntries(SERVICES.map((service) => [service, ""])),
@@ -88,7 +91,7 @@
       title: "确认 Redis 密码和连接状态",
       intro:
         "Redis 新安装时可能没有密码，但完整功能配置要求设置密码。Docker Compose 中通常使用 requirepass 或 REDIS_PASSWORD。",
-      warning: "修改 Redis 密码后，要让 Redis、后端和 Celery 使用同一个值。",
+      warning: "修改 Redis 密码后，要让 Redis、后端和后台任务 executor 使用同一个值。",
       platforms: {
         Windows: [
           { command: "docker compose ps" },
@@ -1308,8 +1311,8 @@
   function commandLabel(key) {
     const labels = {
       backend: "后端",
-      celery: "Celery",
-      worker: "Celery",
+      executor: "后台任务 executor",
+      worker: "后台任务 executor",
       frontend: "前端",
       browser: "Chromium CDP",
       config: "配置中心",

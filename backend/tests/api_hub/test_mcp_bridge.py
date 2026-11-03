@@ -215,3 +215,22 @@ def test_parse_bridge_url_roundtrip_and_rejects_extra_segments():
         mcp_bridge.parse_bridge_url("mcp-bridge:///no-server/tool")
     with pytest.raises(mcp_bridge.McpBridgeError):
         mcp_bridge.parse_bridge_url(f"mcp-bridge://srv-1/a/b")
+
+
+@pytest.mark.parametrize("builtin_key", ["weknora", "minio", "api_hub"])
+def test_bridge_rejects_platform_builtin_mcp_servers(bridge_db, monkeypatch, builtin_key):
+    calls: list[dict] = []
+    _patch_backend(
+        monkeypatch,
+        server=_fake_server(builtin_key=builtin_key),
+        calls=calls,
+    )
+    iface = _create_bridge_interface(bridge_db)
+
+    result = executor.run_interface(iface)
+
+    assert result["ok"] is False
+    assert result["status_code"] == 400
+    assert result["error_type"] == "configuration"
+    assert "平台内置 MCP" in (result["error"] or "")
+    assert calls == []

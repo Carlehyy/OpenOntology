@@ -1,19 +1,19 @@
-import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 import { expectSameBoundingBox } from './support/geometry'
 
-// AI 原生工作台（前台）：登录默认落地、九项入口、近期会话单列表、归档流转、
+// AI 原生工作台（前台）：登录默认落地、功能入口、近期会话单列表、归档流转、
 // 本体治理跳后台并返回。全部接口本地 mock，不触真实后端。
 // 本 spec 另覆盖：分组限量展开、naive UTC 时区显示、行悬停不抖动、
 // 会话附件上传/移除/位于输入框上方与跨会话隔离、流式生成跨会话隔离、ReUI 模型选择器、
 // 删除确认弹窗、新建会话不落库（点击仅清空聊天区、发送首条消息才建会话）、
 // 空态品牌文案与占位符、配置面板白底、
 // 输入草稿按会话缓存及刷新后从 localStorage 恢复（发送后清空落盘）、
-// 重命名 blur 取消、知识图谱页签弹窗（文件库上传/删除/预览/在线编辑/ZIP 导入 +
-// 知识图谱过滤/节点详情/邻域检索高亮）、外部集成（multica 配置弹窗 + /multica:
-// 命令提示的配置门控）、消息通知弹窗（未读徽章、tab 筛选、Markdown 详情与附件、
-// 标记/归档/全部已读/发送消息）、⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、
-// 全局搜索 Command 面板检索与跳转、历史分组 shadcn Sidebar 原语、空态品牌字号、
+// 重命名 blur 取消、知识图谱头部入口（WeKnora 受信 URL、新标签 opener 隔离）、
+// 外部集成（multica 配置弹窗 + /multica: 命令提示的配置门控）、消息通知弹窗
+// （未读徽章、tab 筛选、Markdown 详情与附件、标记/归档/全部已读/发送消息）、
+// ⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、全局搜索 Command 面板检索与跳转、
+// 历史分组 shadcn Sidebar 原语、空态品牌字号、
 // 左下角头像个人资料弹窗（固定尺寸、分区 tab 与后台同一弹窗）。
 
 const json = (route: Route, data: unknown, status = 200) => route.fulfill({
@@ -108,39 +108,6 @@ const notificationDetailAttachments: Record<string, Array<Record<string, unknown
   'n-1': [{ id: 'na-1', filename: '错误日志.txt', fileSize: 2048, mimeType: 'text/plain', sha256: 'ab', createdAt: at(0, 9) }],
 }
 
-const palaceGraphFixture = {
-  available: true,
-  nodes: [
-    { id: 'e-1', name: '张三', type: '人物', aliases: [], source_files: ['个人知识库.md'], file_ids: ['pf-1'], mention_count: 5, match_count: 2 },
-    { id: 'e-2', name: 'ACME', type: '组织', aliases: [], source_files: ['个人知识库.md', '行业研究.pdf'], file_ids: ['pf-1', 'pf-2'], mention_count: 3, match_count: 1 },
-    { id: 'e-3', name: '知识图谱', type: '技术', aliases: [], source_files: ['行业研究.pdf'], file_ids: ['pf-2'], mention_count: 2, match_count: 0 },
-  ],
-  edges: [
-    { source: 'e-1', target: 'e-2', name: '任职', source_files: ['个人知识库.md'], file_ids: ['pf-1'] },
-    { source: 'e-2', target: 'e-3', name: '使用', source_files: ['行业研究.pdf'], file_ids: ['pf-2'] },
-  ],
-  totals: { entities: 3, relations: 2 },
-  truncated: false,
-  builtFiles: 2,
-  totalFiles: 3,
-  updatedAt: at(0, 6),
-}
-
-// 本体发布文档：宫殿镜像（已建图）+ 本体侧权威清单（多一个未同步的 v0 本体）
-const palaceOntologyDocsFixture = [
-  { id: 'pod-1', ontologyId: 'ont-1', ontologyName: '供应链本体', versionId: 'rel-2', versionNumber: 'v2',
-    title: '供应链业务文档', fingerprint: 'fp-1', status: 'built', error: null,
-    entityCount: 4, relationCount: 2, extractedChars: 520, size: 640, updatedAt: at(0, 6) },
-]
-const ontologyPublishedDocsFixture = {
-  items: [
-    { ontologyId: 'ont-1', ontologyName: '供应链本体', versionId: 'rel-2', versionNumber: 'v2',
-      title: '供应链业务文档', fingerprint: 'fp-1', documentChars: 520, publishedAt: at(0, 6) },
-    { ontologyId: 'ont-2', ontologyName: '合规本体', versionId: 'rel-9', versionNumber: 'v0',
-      title: '合规本体 业务文档', fingerprint: 'fp-9', documentChars: 100, publishedAt: at(0, 7) },
-  ],
-}
-
 const multicaCommandsFixture = [
   { command: 'list_agents', title: '查看智能体', description: '列出 multica 工作台的全部智能体及其运行时绑定状态。', usage: '/multica:list_agents', write: false },
   { command: 'list_tasks', title: '查看任务清单', description: '查看当前工作台的任务清单，可按状态或负责人过滤。', usage: '/multica:list_tasks [过滤条件]', write: false },
@@ -201,8 +168,6 @@ interface MockOptions {
   notificationsNone?: boolean
   /** GET /super-assistant/multica/config 的返回（默认未配置态） */
   multicaConfig?: Record<string, unknown>
-  /** 知识图谱「本体文档」目录：true 时提供发布文档镜像 + 权威清单桩 */
-  withOntologyDocs?: boolean
   /** 覆盖远程助手目录；传入空数组即空目录 */
   remoteAgents?: Array<Record<string, unknown>>
   /** GET /remote-agents 延迟，用于断言加载完成前不展示空态 CTA */
@@ -321,43 +286,12 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       extractedChars: 100, extractError: null, createdAt: at(0, 9),
     }],
   }
-  const palaceFiles: Array<Record<string, unknown>> = [
-    {
-      id: 'pf-1', filename: '个人知识库.md', path: '', mimeType: 'text/markdown', size: 2048,
-      sha256: 'pf-1-hash', extractedChars: 1800, status: 'built', error: null,
-      entityCount: 3, relationCount: 2, editable: true, isImage: false, createdAt: at(0, 8), updatedAt: at(0, 8),
-    },
-    {
-      id: 'pf-2', filename: '行业研究.pdf', path: '', mimeType: 'application/pdf', size: 40960,
-      sha256: 'pf-2-hash', extractedChars: 12000, status: 'building', error: null,
-      entityCount: 0, relationCount: 0, editable: false, isImage: false, createdAt: at(0, 9), updatedAt: at(0, 9),
-    },
-    {
-      id: 'pf-img', filename: '架构图.png', path: '设计图', mimeType: 'image/png', size: 8192,
-      sha256: 'pf-img-hash', extractedChars: 0, status: 'built', error: null,
-      entityCount: 0, relationCount: 0, editable: false, isImage: true, createdAt: at(0, 7), updatedAt: at(0, 7),
-    },
-  ]
-  const palaceUploads: string[] = []
-  const palaceDeletes: string[] = []
-  const palacePreviews: string[] = []
-  const palaceContentPuts: string[] = []
-  const palaceReplaces: string[] = []
-  const palaceBatchImports: string[] = []
-  const palaceGraphSearches: string[] = []
-  const palaceRaws: string[] = []
-  const palaceNotes: string[] = []
-  const palaceMoves: string[] = []
-  const palaceFolderCreates: string[] = []
-  const palaceFolderRenames: string[] = []
-  const palaceFolderDeletes: string[] = []
-  // 目录一等公民：设计图目录行与文件 path='设计图' 对应
-  const palaceFolders: Array<Record<string, unknown>> = [
-    { id: 'pfd-design', path: '设计图', createdAt: at(0, 7), updatedAt: at(0, 7) },
-  ]
-  // 本体文档共享镜像 + 本体侧权威清单（默认空：树中「本体文档」目录不出现）
-  const palaceOntologyDocs = options.withOntologyDocs ? palaceOntologyDocsFixture : []
-  const ontologyPublishedDocs = options.withOntologyDocs ? ontologyPublishedDocsFixture : { items: [] }
+  // 知识图谱（WeKnora）：页面加载读取受信入口配置；记录请求次数供断言
+  const weknoraCalls: string[] = []
+  const weknoraFixture = {
+    web_url: 'https://weknora.example.com:8443',
+    knowledge_base_name: 'OpenOntology 知识库',
+  }
   await page.route('**/api/**', route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
@@ -377,8 +311,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         models: ['qwen-max'], options: {}, created_by: 'admin',
         created_at: at(0, 8), updated_at: at(0, 8),
       }, {
-        // 后台管线配置（记忆宫殿抽取）：会话下拉不应出现
-        id: 'model-3', name: 'MiniMax-记忆宫殿抽取', config_type: 'llm', provider: 'minimax',
+        // 后台管线配置：会话下拉不应出现
+        id: 'model-3', name: 'MiniMax-后台抽取', config_type: 'llm', provider: 'minimax',
         api_base: 'https://api.minimax.io', has_api_key: true, enabled: true, is_default: false,
         last_test_status: 'success', last_tested_at: at(0, 8), last_test_message: 'ok',
         models: ['MiniMax-M3'], options: { usage_tags: ['super_assistant_palace'] }, created_by: 'admin',
@@ -413,212 +347,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         return route.fulfill({ status: 204 })
       }
     }
-    // 知识图谱：文件库 / 图谱 / 上传 / 删除 / 重建 / 目录 / 笔记 / 移动
-    if (path === '/api/v2/super-assistant/palace/files') {
-      if (request.method() === 'GET') return json(route, palaceFiles)
-      if (request.method() === 'POST') {
-        const body = request.postData() || ''
-        const filename = /filename="([^"]+)"/.exec(body)?.[1] || 'palace.bin'
-        const isImage = /\.(png|jpe?g|gif|webp)$/i.test(filename)
-        // folder_path 表单字段（上传归位到选中目录），归一化同后端口径
-        const rawFolder = /name="folder_path"\r?\n\r?\n([^\r\n]*)/.exec(body)?.[1] ?? ''
-        const folderPath = rawFolder.split('/').map(part => part.trim()).filter(Boolean).join('/')
-        palaceUploads.push(`${filename}@${folderPath}`)
-        palaceFiles.unshift({
-          id: `pf-new-${palaceUploads.length}`, filename, path: folderPath,
-          mimeType: isImage ? 'image/png' : 'text/markdown', size: 64,
-          sha256: 'new-hash', extractedChars: 10, status: isImage ? 'built' : 'pending', error: null,
-          entityCount: 0, relationCount: 0, editable: !isImage, isImage,
-          createdAt: at(0, 10), updatedAt: at(0, 10),
-        })
-        return json(route, palaceFiles[0], 201)
-      }
-    }
-    // 新建 md 笔记：draft 态，不触发抽取
-    if (path === '/api/v2/super-assistant/palace/files/notes' && request.method() === 'POST') {
-      const body = JSON.parse(request.postData() || '{}')
-      const row = {
-        id: `pf-note-${palaceNotes.length + 1}`, filename: body.filename, path: body.folderPath ?? '',
-        mimeType: 'text/markdown', size: 0, sha256: 'note-hash', extractedChars: 0,
-        status: 'draft', error: null, entityCount: 0, relationCount: 0, editable: true, isImage: false,
-        createdAt: at(0, 10), updatedAt: at(0, 10),
-      }
-      palaceFiles.unshift(row)
-      palaceNotes.push(`${body.filename}@${body.folderPath ?? ''}`)
-      return json(route, row, 201)
-    }
-    // 拖拽移动文件：PATCH folderPath（空串=根目录）
-    const palaceMoveMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/files\/([^/]+)$/)
-    if (palaceMoveMatch && request.method() === 'PATCH') {
-      const row = palaceFiles.find(item => item.id === palaceMoveMatch[1])
-      if (!row) return json(route, { detail: '文件不存在' }, 404)
-      const body = JSON.parse(request.postData() || '{}')
-      palaceMoves.push(`${palaceMoveMatch[1]}:${row.path}->${body.folderPath}`)
-      row.path = body.folderPath ?? ''
-      row.updatedAt = at(0, 10)
-      return json(route, row)
-    }
-    // 目录 CRUD：POST 支持 mkdir -p；PATCH 做前缀重写（子孙目录+文件）；DELETE 仅空目录
-    if (path === '/api/v2/super-assistant/palace/folders') {
-      if (request.method() === 'GET') return json(route, palaceFolders)
-      if (request.method() === 'POST') {
-        const raw = String(JSON.parse(request.postData() || '{}').path ?? '')
-        const norm = raw.split('/').map(part => part.trim()).filter(Boolean).join('/')
-        const parts = norm.split('/')
-        for (let depth = 1; depth < parts.length; depth += 1) {
-          const ancestor = parts.slice(0, depth).join('/')
-          if (!palaceFolders.some(folder => folder.path === ancestor)) {
-            palaceFolders.push({ id: `pfd-${palaceFolders.length + 1}-${ancestor}`, path: ancestor, createdAt: at(0, 10), updatedAt: at(0, 10) })
-          }
-        }
-        if (palaceFolders.some(folder => folder.path === norm)) {
-          return json(route, { detail: '同名目录已存在' }, 409)
-        }
-        const row = { id: `pfd-${palaceFolders.length + 1}`, path: norm, createdAt: at(0, 10), updatedAt: at(0, 10) }
-        palaceFolders.push(row)
-        palaceFolderCreates.push(norm)
-        return json(route, row, 201)
-      }
-    }
-    const palaceFolderMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/folders\/([^/]+)$/)
-    if (palaceFolderMatch && request.method() === 'PATCH') {
-      const row = palaceFolders.find(folder => folder.id === palaceFolderMatch[1])
-      if (!row) return json(route, { detail: '目录不存在' }, 404)
-      const body = JSON.parse(request.postData() || '{}')
-      const oldPath = String(row.path)
-      const newPath = String(body.path ?? '')
-      for (const folder of palaceFolders) {
-        if (folder.id !== row.id && String(folder.path).startsWith(`${oldPath}/`)) {
-          folder.path = newPath + String(folder.path).slice(oldPath.length)
-        }
-      }
-      row.path = newPath
-      for (const fileRow of palaceFiles) {
-        if (fileRow.path === oldPath) fileRow.path = newPath
-        else if (String(fileRow.path).startsWith(`${oldPath}/`)) {
-          fileRow.path = newPath + String(fileRow.path).slice(oldPath.length)
-        }
-      }
-      palaceFolderRenames.push(`${oldPath}->${newPath}`)
-      return json(route, row)
-    }
-    if (palaceFolderMatch && request.method() === 'DELETE') {
-      const index = palaceFolders.findIndex(folder => folder.id === palaceFolderMatch[1])
-      if (index < 0) return json(route, { detail: '目录不存在' }, 404)
-      const targetPath = String(palaceFolders[index].path)
-      const hasChild = palaceFolders.some((folder, position) =>
-        position !== index && String(folder.path).startsWith(`${targetPath}/`))
-        || palaceFiles.some(fileRow =>
-          fileRow.path === targetPath || String(fileRow.path).startsWith(`${targetPath}/`))
-      if (hasChild) return json(route, { detail: '目录非空：请先删除其中的文件与子目录' }, 409)
-      palaceFolders.splice(index, 1)
-      palaceFolderDeletes.push(targetPath)
-      return route.fulfill({ status: 204 })
-    }
-    const palaceDeleteMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/files\/([^/]+)$/)
-    if (palaceDeleteMatch && request.method() === 'DELETE') {
-      palaceDeletes.push(palaceDeleteMatch[1])
-      const index = palaceFiles.findIndex(row => row.id === palaceDeleteMatch[1])
-      if (index >= 0) palaceFiles.splice(index, 1)
-      return route.fulfill({ status: 204 })
-    }
-    const palaceRebuildMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/files\/([^/]+)\/rebuild$/)
-    if (palaceRebuildMatch && request.method() === 'POST') {
-      return json(route, { dispatched: true })
-    }
-    // ZIP 批量导入：created 1 个 + skipped 1 个（mock 不校验真实 zip 字节，只看 multipart 文件名）
-    if (path === '/api/v2/super-assistant/palace/files/batch' && request.method() === 'POST') {
-      const filename = /filename="([^"]+)"/.exec(request.postData() || '')?.[1] || 'import.zip'
-      palaceBatchImports.push(filename)
-      const root = filename.replace(/\.zip$/i, '')
-      const created = {
-        id: 'pf-zip-1', filename: '导入笔记.md', path: root, mimeType: 'text/markdown', size: 128,
-        sha256: 'pf-zip-1-hash', extractedChars: 0, status: 'pending', error: null,
-        entityCount: 0, relationCount: 0, editable: true, isImage: false, createdAt: at(0, 10), updatedAt: at(0, 10),
-      }
-      palaceFiles.unshift(created)
-      return json(route, {
-        created: [created],
-        skipped: [{ filename: '重复笔记.md', reason: '同名文件已存在' }],
-      }, 201)
-    }
-    const palaceRawMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/files\/([^/]+)\/raw$/)
-    if (palaceRawMatch && request.method() === 'GET') {
-      const row = palaceFiles.find(item => item.id === palaceRawMatch[1])
-      if (!row) return json(route, { detail: '文件不存在' }, 404)
-      palaceRaws.push(palaceRawMatch[1])
-      return route.fulfill({
-        status: 200,
-        headers: { 'content-type': String(row.mimeType) },
-        body: Buffer.from('89504e470d0a1a0a-png-fake-bytes'),
-      })
-    }
-    const palacePreviewMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/files\/([^/]+)\/preview$/)
-    if (palacePreviewMatch && request.method() === 'GET') {
-      palacePreviews.push(palacePreviewMatch[1])
-      const row = palaceFiles.find(item => item.id === palacePreviewMatch[1])
-      if (!row) return json(route, { detail: '文件不存在' }, 404)
-      const isText = row.mimeType === 'text/markdown' || String(row.filename).endsWith('.txt')
-      // 与后端口径一致：md/txt 即使内容为空（draft 笔记）也 previewable=true
-      const draft = row.status === 'draft'
-      return json(route, {
-        file: row,
-        content: draft ? '' : isText ? `# ${row.filename}\n\n张三 任职 ACME，正在研究知识图谱。` : '',
-        truncated: false,
-        previewable: isText,
-      })
-    }
-    const palaceContentMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/files\/([^/]+)\/content$/)
-    if (palaceContentMatch && request.method() === 'PUT') {
-      palaceContentPuts.push(request.postData() || '')
-      const row = palaceFiles.find(item => item.id === palaceContentMatch[1])
-      if (!row) return json(route, { detail: '文件不存在' }, 404)
-      row.status = 'pending'
-      row.updatedAt = at(0, 10)
-      return json(route, row)
-    }
-    const palaceReplaceMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/files\/([^/]+)\/replace$/)
-    if (palaceReplaceMatch && request.method() === 'POST') {
-      const filename = /filename="([^"]+)"/.exec(request.postData() || '')?.[1] || 'replace.bin'
-      palaceReplaces.push(`${palaceReplaceMatch[1]}:${filename}`)
-      const row = palaceFiles.find(item => item.id === palaceReplaceMatch[1])
-      if (!row) return json(route, { detail: '文件不存在' }, 404)
-      row.filename = filename
-      row.status = 'pending'
-      row.updatedAt = at(0, 10)
-      return json(route, row)
-    }
-    if (path === '/api/v2/super-assistant/palace/graph' && request.method() === 'GET') {
-      return json(route, palaceGraphFixture)
-    }
-    // 本体文档共享镜像（宫殿侧状态）与本体侧权威清单（发布文档摘要）
-    if (path === '/api/v2/super-assistant/palace/ontology-documents' && request.method() === 'GET') {
-      return json(route, palaceOntologyDocs)
-    }
-    if (path === '/api/v1/ontologies/published-documents' && request.method() === 'GET') {
-      return json(route, ontologyPublishedDocs)
-    }
-    const ontoPreviewMatch = path.match(/^\/api\/v2\/super-assistant\/palace\/ontology-documents\/([^/]+)\/preview$/)
-    if (ontoPreviewMatch && request.method() === 'GET') {
-      const row = palaceOntologyDocs.find(item => item.id === ontoPreviewMatch[1])
-      if (!row) return json(route, { detail: '本体文档不存在' }, 404)
-      return json(route, {
-        file: row,
-        content: '# 供应链业务文档\n\n张三 任职 ACME，ACME 位于上海。',
-        truncated: false,
-        previewable: true,
-      })
-    }
-    if (path === '/api/v2/super-assistant/palace/graph/search' && request.method() === 'GET') {
-      palaceGraphSearches.push(new URL(request.url()).searchParams.get('q') || '')
-      return json(route, {
-        available: true,
-        entities: [palaceGraphFixture.nodes[0], palaceGraphFixture.nodes[1]],
-        relations: [{
-          source: 'e-1', target: 'e-2', source_name: '张三', target_name: 'ACME',
-          name: '任职', source_files: ['个人知识库.md'], file_ids: ['pf-1'],
-        }],
-      })
+    // 知识图谱（WeKnora）：页面加载读受信入口配置，前端不接收 token/密码
+    if (path === '/api/v2/super-assistant/weknora' && request.method() === 'GET') {
+      weknoraCalls.push(request.url())
+      return json(route, weknoraFixture)
     }
     // 会话流式对话：可控延迟的 SSE
     const chatMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/chat$/)
@@ -1186,24 +918,12 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifChannelDeletes,
     multicaWorkspaceCalls,
     toolPatchCalls,
-    palaceUploads,
-    palaceDeletes,
-    palacePreviews,
-    palaceContentPuts,
-    palaceReplaces,
-    palaceBatchImports,
-    palaceGraphSearches,
-    palaceRaws,
-    palaceNotes,
-    palaceMoves,
-    palaceFolderCreates,
-    palaceFolderRenames,
-    palaceFolderDeletes,
+    weknoraCalls,
     isChatDone: () => chatDone,
   }
 }
 
-test('工作台骨架：九项入口齐备，近期会话单列表，归档折叠', async ({ page }) => {
+test('工作台骨架：功能入口齐备，近期会话单列表，归档折叠', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
@@ -1219,14 +939,16 @@ test('工作台骨架：九项入口齐备，近期会话单列表，归档折�
   const taskInstancesEntry = page.getByRole('button', { name: /任务实例/ })
   await expect(taskInstancesEntry).toBeVisible()
   await expect(taskInstancesEntry).toBeEnabled()
-  await expect(page.getByRole('button', { name: '知识图谱' })).toBeVisible()
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
   await expect(page.getByRole('button', { name: '外部集成' })).toBeVisible()
   await expect(page.getByRole('button', { name: /退出登录/ })).toBeVisible()
+  // 知识图谱已迁至聊天头部（打开 WeKnora），左侧工作台不再保留旧入口
+  await expect(page.getByRole('link', { name: '知识图谱' })).toBeVisible()
+  await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
-  // 功能项顺序契约：全局搜索 → 消息通知 → 定时任务 → 任务实例 → 知识图谱 → 外部集成 → 本体治理
+  // 功能项顺序契约：全局搜索 → 消息通知 → 定时任务 → 任务实例 → 外部集成 → 本体治理
   const navEntries = page.locator('nav[aria-label="工作台功能"] > *')
-  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '任务实例', '知识图谱', '外部集成', '本体治理']
+  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '任务实例', '外部集成', '本体治理']
   await expect(navEntries).toHaveCount(expectedOrder.length)
   for (let index = 0; index < expectedOrder.length; index += 1) {
     await expect(navEntries.nth(index)).toContainText(expectedOrder[index])
@@ -2587,54 +2309,56 @@ test('重命名会话：点击其它处自动取消，Enter 仍可保存', async
   expect(JSON.parse(mocks.patchBodies[0])).toMatchObject({ title: '新名称' })
 })
 
-test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除联动，外部集成打开 multica 配置弹窗', async ({ page }) => {
+test('知识图谱：头部会话纪要左侧入口，新标签打开受信 WeKnora 页面（新会话可用）', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  // 原生 WeKnora 页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
+  await page.context().route(/^https:\/\/weknora\.example\.com:8443(?:\/.*)?$/, route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><title>WeKnora</title><p>WeKnora 原生登录</p>',
+  }))
+  // 有消息会话上点击「新建会话」进入未落地视图（selectedId 为 null）：
+  // 既有空会话上点击只会聚焦输入框，不切换视图，不能用来制造新会话态。
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+  await expect(page.getByText('上周的答复')).toBeVisible()
+  await page.getByRole('button', { name: '新建会话' }).click()
+  await expect(page).not.toHaveURL(/conversation=/)
+  await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
+
+  // 左侧工作台不再提供旧知识图谱入口
+  const nav = page.locator('nav[aria-label="工作台功能"]')
+  await expect(nav.getByText('知识图谱')).toHaveCount(0)
+  await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
+
+  // 入口位于「会话纪要」左侧，URL/title 来自后端受信配置
+  const link = page.getByRole('link', { name: '知识图谱' })
+  await expect(link).toBeVisible()
+  await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
+  await expect(link).toHaveAttribute('target', '_blank')
+  await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  const summary = page.getByRole('button', { name: '查看会话纪要' })
+  const [linkBox, summaryBox] = await Promise.all([link.boundingBox(), summary.boundingBox()])
+  expect(linkBox!.x + linkBox!.width).toBeLessThanOrEqual(summaryBox!.x + 1)
+  await expect.poll(() => mocks.weknoraCalls.length).toBeGreaterThanOrEqual(1)
+  expect(mocks.weknoraCalls[0]).toContain('/api/v2/super-assistant/weknora')
+
+  // 新标签落到 WeKnora 原生页面（登录由 WeKnora 自己承接），window.opener 已被隔离
+  const popupPromise = page.waitForEvent('popup')
+  await link.click()
+  const popup = await popupPromise
+  await popup.waitForLoadState('domcontentloaded')
+  const popupUrl = new URL(popup.url())
+  expect(popupUrl.origin).toBe('https://weknora.example.com:8443')
+  expect(popupUrl.pathname).toBe('/')
+  expect(await popup.evaluate(() => window.opener)).toBeNull()
+  await popup.close()
+})
+
+test('外部集成：multica 测试连接、工作区下拉与保存', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  await expect(dialog).toBeVisible()
-  // level:2 消歧：弹窗标题 h2 与图谱面板 h3 同名「知识图谱」
-  await expect(dialog.getByRole('heading', { name: '知识图谱', level: 2 })).toBeVisible()
-
-  // 三栏同时可见：左树（含目录「设计图」）、中栏空态、右侧图谱画布
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-  const contentPane = dialog.locator('section[aria-label="文档内容"]')
-  const graphSection = dialog.getByTestId('super-assistant-palace-graph')
-  await expect(filesPane).toBeVisible()
-  await expect(filesPane.getByTestId('palace-file-tree')).toBeVisible()
-  await expect(filesPane.getByText('设计图')).toBeVisible()
-  await expect(filesPane.getByText('个人知识库.md')).toBeVisible()
-  await expect(filesPane.getByText('架构图.png')).toBeVisible()
-  await expect(contentPane.getByText(/在左侧选择一个文档/)).toBeVisible()
-  await expect(graphSection.locator('canvas').first()).toBeVisible()
-  const statsBar = graphSection.getByTestId('palace-graph-stats')
-  await expect(statsBar).toContainText('3 实体')
-  await expect(statsBar).toContainText('2 关系')
-  await expect(statsBar).toContainText('已建图文档 2/3')
-
-  // 上传：隐藏 input 接线到 palace 上传端点，树即时刷新并自动选中新文件
-  await dialog.getByTestId('palace-file-input').setInputFiles({
-    name: '新文档.md', mimeType: 'text/markdown', buffer: Buffer.from('# 新文档\n张三 任职 ACME'),
-  })
-  await expect.poll(() => mocks.palaceUploads.length).toBe(1)
-  expect(mocks.palaceUploads[0]).toBe('新文档.md@')
-  await expect(filesPane.getByText('新文档.md')).toBeVisible()
-  // 文件名同时出现在中栏标题与预览正文，取首个（标题）
-  await expect(contentPane.getByText('新文档.md').first()).toBeVisible()
-  await expect(contentPane.getByText('待抽取')).toBeVisible()
-
-  // 选中行业研究.pdf：中栏展示元信息（抽取中状态徽标），删除后从树中消失
-  await filesPane.locator('[data-palace-file="pf-2"]').click()
-  await expect(contentPane.getByText('行业研究.pdf')).toBeVisible()
-  await expect(contentPane.getByText('抽取中')).toBeVisible()
-  await contentPane.getByRole('button', { name: '删除 行业研究.pdf' }).click()
-  await expect.poll(() => mocks.palaceDeletes.length).toBe(1)
-  await expect(filesPane.getByText('行业研究.pdf')).toHaveCount(0)
-
-  await page.keyboard.press('Escape')
-  await expect(dialog).toHaveCount(0)
 
   // 外部集成已是真实功能：左侧集成类型 tabs（multica / 远程助手），
   // multica 默认选中并走通「测试连接 → 选工作区 → 保存」
@@ -2644,7 +2368,7 @@ test('知识图谱：三栏工作台（文件树|内容|图谱），上传删除
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
   await expect(multicaTab).toHaveAttribute('aria-selected', 'true')
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
-  // 文件夹同步已迁至知识图谱「远程同步」目录：左栏仅剩两个集成 tab
+  // 左栏仅两类集成，旧「文件夹同步」不再提供
   await expect(integrationsDialog.locator('[data-integrations-tab]')).toHaveCount(2)
   await expect(integrationsDialog.locator('[data-integrations-tab="folder-sync"]')).toHaveCount(0)
   // 等入场缩放动画结束再量尺寸，避免动画中的包围盒参与比较
@@ -2702,137 +2426,6 @@ test('multica 配置弹窗：已配置时打开即拉取全量工作区，无需
   await dialog.getByRole('combobox', { name: 'Multica 工作区' }).click()
   await expect(page.getByRole('option', { name: 'My Workspace' })).toBeVisible()
   await expect(page.getByRole('option', { name: 'E2E 工作区' })).toBeVisible()
-})
-
-test('知识图谱：选中即预览，md 在线编辑保存触发 PUT content，图片走原图预览', async ({ page }) => {
-  await seedAuth(page)
-  const mocks = await mockApis(page)
-  await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-  const contentPane = dialog.locator('section[aria-label="文档内容"]')
-
-  // 树中点击 md：中栏自动加载抽取文本预览
-  await filesPane.locator('[data-palace-file="pf-1"]').click()
-  await expect.poll(() => mocks.palacePreviews.length).toBe(1)
-  expect(mocks.palacePreviews[0]).toBe('pf-1')
-  const previewPanel = dialog.getByTestId('palace-file-preview')
-  await expect(previewPanel).toBeVisible()
-  await expect(previewPanel.getByText('张三 任职 ACME，正在研究知识图谱。')).toBeVisible()
-
-  // pdf：previewable=false 时如实提示；且非 editable 文件不渲染编辑按钮
-  await filesPane.locator('[data-palace-file="pf-2"]').click()
-  await expect.poll(() => mocks.palacePreviews.length).toBe(2)
-  await expect(dialog.getByTestId('palace-file-preview')).toContainText('该格式暂不支持文本预览')
-  await expect(contentPane.getByRole('button', { name: '编辑 行业研究.pdf' })).toHaveCount(0)
-
-  // 图片：经鉴权 raw 端点拉取 blob 并渲染 img（不参与图谱抽取）
-  await filesPane.locator('[data-palace-file="pf-img"]').click()
-  await expect.poll(() => mocks.palaceRaws.length).toBe(1)
-  expect(mocks.palaceRaws[0]).toBe('pf-img')
-  await expect(dialog.getByTestId('palace-file-image').locator('img')).toBeVisible()
-  await expect(contentPane.getByText('已建图')).toBeVisible()
-
-  // 编辑：md 经 preview 端点取初稿，改写后显式保存
-  await filesPane.locator('[data-palace-file="pf-1"]').click()
-  await contentPane.getByRole('button', { name: '编辑 个人知识库.md' }).click()
-  const editorPanel = dialog.getByTestId('palace-file-editor')
-  await expect(editorPanel).toBeVisible()
-  const textarea = editorPanel.locator('textarea')
-  await expect(textarea).toHaveValue(/张三 任职 ACME/)
-  await textarea.fill('# 更新后的知识库\n\n张三 任职 ACME。')
-  await editorPanel.getByRole('button', { name: '保存并重建图谱' }).click()
-  await expect.poll(() => mocks.palaceContentPuts.length).toBe(1)
-  expect(JSON.parse(mocks.palaceContentPuts[0])).toMatchObject({ content: '# 更新后的知识库\n\n张三 任职 ACME。' })
-  // toast 提示（渲染在弹窗外层的全局 Toaster（sonner））+ 编辑器关闭回到预览
-  await expect(page.getByText('已保存，图谱重建已排队')).toBeVisible()
-  await expect(editorPanel).toHaveCount(0)
-  await expect(dialog.getByTestId('palace-file-preview')).toBeVisible()
-})
-
-test('知识图谱：ZIP 导入按压缩包名建顶层目录并展示跳过原因', async ({ page }) => {
-  await seedAuth(page)
-  const mocks = await mockApis(page)
-  await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-
-  // mock 端点不校验真实 zip 字节：普通 buffer + .zip 文件名即可断言 batch 请求
-  await dialog.getByTestId('palace-zip-input').setInputFiles({
-    name: '知识库备份.zip', mimeType: 'application/zip', buffer: Buffer.from('placeholder-zip'),
-  })
-  await expect.poll(() => mocks.palaceBatchImports.length).toBe(1)
-  expect(mocks.palaceBatchImports[0]).toBe('知识库备份.zip')
-
-  const banner = dialog.getByTestId('palace-import-result')
-  await expect(banner).toBeVisible()
-  await expect(banner.getByText('导入 1 个，跳过 1 个')).toBeVisible()
-  await banner.getByRole('button', { name: '查看跳过原因' }).click()
-  await expect(banner.getByText('重复笔记.md：同名文件已存在')).toBeVisible()
-
-  // 新目录自动展开，导入的文件落在压缩包名目录下
-  await expect(filesPane.getByText('知识库备份')).toBeVisible()
-  await expect(filesPane.getByText('导入笔记.md')).toBeVisible()
-  const tree = filesPane.getByTestId('palace-file-tree')
-  await expect(tree.locator('[data-palace-file="pf-zip-1"]')).toBeVisible()
-})
-
-test('知识图谱：图谱过滤、节点详情、点节点定位来源文档与聚焦联动', async ({ page }) => {
-  await seedAuth(page)
-  const mocks = await mockApis(page)
-  await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-  const contentPane = dialog.locator('section[aria-label="文档内容"]')
-  const graphSection = dialog.getByTestId('super-assistant-palace-graph')
-  await expect(graphSection.locator('canvas').first()).toBeVisible()
-
-  // 过滤：300ms 防抖后只剩「张三」一个节点（计数文案，不做脆弱断言）
-  await graphSection.getByTestId('palace-graph-filter').fill('张三')
-  await expect(graphSection.getByTestId('palace-graph-filter-count')).toHaveText(/1 \/ 3 实体/)
-
-  // 单节点力导向收敛于布局中心（series top 28 / bottom 8）：轮询点击画布中心命中节点
-  const canvas = graphSection.locator('canvas').first()
-  const box = await canvas.boundingBox()
-  expect(box).not.toBeNull()
-  const detail = graphSection.getByTestId('palace-node-detail')
-  await expect.poll(async () => {
-    await canvas.click({ position: { x: box!.width / 2, y: box!.height / 2 + 10 } })
-    return detail.isVisible()
-  }).toBe(true)
-  await expect(detail.getByText('张三', { exact: true })).toBeVisible()
-  await expect(detail.getByText(/人物 · 提及 5 次 · 被引用 2 次/)).toBeVisible()
-  await expect(detail.getByText('ACME（任职）')).toBeVisible()
-
-  // 节点↔文档联动：张三唯一来源 pf-1，点节点直接在中栏定位该文档
-  await expect(contentPane.getByText('个人知识库.md').first()).toBeVisible()
-  await expect(contentPane.getByText(/解析 1800 字符/)).toBeVisible()
-  // 来源文档 chips 可再定位
-  await expect(detail.getByTestId('palace-node-source-file').getByText('个人知识库.md')).toBeVisible()
-
-  // 选中文件后图谱默认聚焦其贡献节点，可一键切回全图
-  const focusChip = graphSection.getByTestId('palace-graph-file-focus')
-  await expect(focusChip).toBeVisible()
-  await expect(focusChip).toHaveAttribute('aria-pressed', 'true')
-  await focusChip.click()
-  await expect(focusChip).toHaveAttribute('aria-pressed', 'false')
-
-  // 邻域检索：返回实体 id 集合成为高亮集，非命中节点静态降透明
-  await detail.getByRole('button', { name: '在图谱中检索邻域' }).click()
-  await expect.poll(() => mocks.palaceGraphSearches.length).toBe(1)
-  expect(mocks.palaceGraphSearches[0]).toBe('张三')
-  await expect(graphSection.getByTestId('palace-graph-highlight-count')).toContainText('2 个实体已高亮')
-
-  // 树侧再切换到 pdf：中栏联动，图谱聚焦文案随之更新
-  await filesPane.locator('[data-palace-file="pf-2"]').click()
-  await expect(contentPane.getByText('行业研究.pdf')).toBeVisible()
-  await expect(graphSection.getByTestId('palace-graph-file-focus')).toContainText('行业研究.pdf')
 })
 
 test('⌘K / Ctrl+K 唤起全局搜索面板', async ({ page }) => {
@@ -2958,206 +2551,6 @@ test('输入草稿刷新后保留：localStorage 持久化多会话未发送内�
   expect(JSON.parse(storedAfterSend ?? '{}')).toEqual({ 'c-yesterday': 'B 会话的待发送草稿' })
 })
 
-test('知识图谱：弹窗全屏切换与图谱缩放控制', async ({ page }) => {
-  await seedAuth(page)
-  await mockApis(page)
-  await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-  const contentPane = dialog.locator('section[aria-label="文档内容"]')
-  const graphSection = dialog.getByTestId('super-assistant-palace-graph')
-
-  // 选中一个文档作为联动基线
-  await filesPane.locator('[data-palace-file="pf-1"]').click()
-  await expect(dialog.getByTestId('palace-file-preview')).toBeVisible()
-
-  // 缩放控制簇：放大/缩小/复位可用
-  const zoomIn = graphSection.getByTestId('palace-zoom-in')
-  const zoomOut = graphSection.getByTestId('palace-zoom-out')
-  const zoomReset = graphSection.getByTestId('palace-zoom-reset')
-  await zoomIn.click()
-  await zoomIn.click()
-  await zoomOut.click()
-  await zoomReset.click()
-
-  // 全屏切换：aria-pressed 翻转，三栏与选中态在两种形态下都保持
-  const fullscreen = dialog.getByTestId('palace-fullscreen')
-  await fullscreen.click()
-  await expect(fullscreen).toHaveAttribute('aria-pressed', 'true')
-  await expect(filesPane.getByTestId('palace-file-tree')).toBeVisible()
-  await expect(graphSection.locator('canvas').first()).toBeVisible()
-  await expect(contentPane.getByText('个人知识库.md').first()).toBeVisible()
-
-  // 全屏下退出：状态复位
-  await fullscreen.click()
-  await expect(fullscreen).toHaveAttribute('aria-pressed', 'false')
-  await expect(contentPane.getByText('个人知识库.md').first()).toBeVisible()
-
-  // 图谱视图保持：放大后刷新（同一数据签名）不重置用户视角 —— 通过
-  // 缩放按钮放大后触发刷新按钮，画布不报错且聚焦 chip 仍在
-  await zoomIn.click()
-  await graphSection.getByRole('button', { name: '刷新知识图谱' }).click()
-  await expect(graphSection.locator('canvas').first()).toBeVisible()
-  const statsBar = graphSection.getByTestId('palace-graph-stats')
-  await expect(statsBar).toContainText('3 实体')
-  await expect(statsBar).toContainText('2 关系')
-  await expect(statsBar).toContainText('已建图文档 2/3')
-})
-
-test('知识图谱：目录一等公民——新建目录/笔记、重命名与空目录删除', async ({ page }) => {
-  await seedAuth(page)
-  const mocks = await mockApis(page)
-  await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-  const contentPane = dialog.locator('section[aria-label="文档内容"]')
-  const toolbar = dialog.getByTestId('palace-dir-toolbar')
-  await expect(toolbar).toContainText('当前目录：/')
-
-  // 新建子目录（根目录下）：内联输入行出现在树顶，Enter 提交 POST folders
-  await toolbar.getByTestId('palace-new-folder').click()
-  const inlineInput = filesPane.getByTestId('palace-inline-input')
-  await expect(inlineInput).toBeVisible()
-  await inlineInput.fill('项目资料')
-  await inlineInput.press('Enter')
-  await expect.poll(() => mocks.palaceFolderCreates.length).toBe(1)
-  expect(mocks.palaceFolderCreates[0]).toBe('项目资料')
-  await expect(filesPane.locator('[data-palace-dir="项目资料"]')).toBeVisible()
-
-  // 在新建目录下新建 md 笔记：POST notes（draft），自动进入编辑态。
-  // 只填笔记名不带后缀：前端归一化补 .md 后提交
-  await filesPane.locator('[data-palace-dir="项目资料"]').click()
-  await expect(toolbar).toContainText('当前目录：/项目资料')
-  await toolbar.getByTestId('palace-new-note').click()
-  const noteInput = filesPane.getByTestId('palace-inline-input')
-  await expect(noteInput).toHaveAttribute('placeholder', '笔记名（自动存为 .md）')
-  await noteInput.fill('会议纪要')
-  await noteInput.press('Enter')
-  await expect.poll(() => mocks.palaceNotes.length).toBe(1)
-  expect(mocks.palaceNotes[0]).toBe('会议纪要.md@项目资料')
-  const editorPanel = dialog.getByTestId('palace-file-editor')
-  await expect(editorPanel).toBeVisible()
-  // 空 draft 笔记内容为空也可编辑（previewable 不随空内容翻转）：编辑器给出空文本域
-  await expect(editorPanel.locator('textarea')).toHaveValue('')
-  await expect(filesPane.locator('[data-palace-file="pf-note-1"]')).toBeVisible()
-
-  // 草稿保存内容 → PUT content → pending（进入既有抽取链路）
-  await editorPanel.locator('textarea').fill('# 会议纪要\n张三 任职 ACME')
-  await editorPanel.getByRole('button', { name: '保存并重建图谱' }).click()
-  await expect.poll(() => mocks.palaceContentPuts.length).toBe(1)
-  await expect(contentPane.getByText('待抽取')).toBeVisible()
-
-  // 重命名目录（笔记选中后当前目录已是其归属目录）
-  await toolbar.getByTestId('palace-rename-folder').click()
-  const renameInput = filesPane.getByTestId('palace-inline-input')
-  await expect(renameInput).toHaveValue('项目资料')
-  await renameInput.fill('项目档案')
-  await renameInput.press('Enter')
-  await expect.poll(() => mocks.palaceFolderRenames.length).toBe(1)
-  expect(mocks.palaceFolderRenames[0]).toBe('项目资料->项目档案')
-
-  // 空目录删除：先删文件（清空目录），标准确认弹窗确认后 DELETE
-  await expect(toolbar).toContainText('当前目录：/项目档案')
-  await expect(filesPane.locator('[data-palace-dir="项目档案"]')).toBeVisible()
-  await filesPane.locator('[data-palace-file="pf-note-1"]').click()
-  const deleteNoteButton = contentPane.getByRole('button', { name: /删除 会议纪要/ })
-  await expect(deleteNoteButton).toBeEnabled()
-  await deleteNoteButton.click()
-  await expect.poll(() => mocks.palaceDeletes.length).toBe(1)
-  await filesPane.locator('[data-palace-dir="项目档案"]').click()
-  await toolbar.getByTestId('palace-delete-folder').click()
-  await page.getByRole('dialog', { name: /删除目录/ }).getByRole('button', { name: '删除', exact: true }).click()
-  await expect.poll(() => mocks.palaceFolderDeletes.length).toBe(1)
-  expect(mocks.palaceFolderDeletes[0]).toBe('项目档案')
-  await expect(filesPane.locator('[data-palace-dir="项目档案"]')).toHaveCount(0)
-})
-
-/** HTML5 拖拽事件序列（dragTo 的鼠标模拟不触发原生 dnd，headless-tree 用原生 dnd） */
-const dragByDnd = async (page: Page, source: Locator, target: Locator) => {
-  const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
-  await source.dispatchEvent('dragstart', { dataTransfer })
-  await target.dispatchEvent('dragover', { dataTransfer })
-  await target.dispatchEvent('drop', { dataTransfer })
-  await source.dispatchEvent('dragend', { dataTransfer })
-}
-
-test('知识图谱：拖拽文件至目录归位与画布下统计条', async ({ page }) => {
-  await seedAuth(page)
-  const mocks = await mockApis(page)
-  await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-  const graphSection = dialog.getByTestId('super-assistant-palace-graph')
-
-  // 统计条在画布下方：实体/关系/已建图文档/上次更新时间
-  const statsBar = graphSection.getByTestId('palace-graph-stats')
-  await expect(statsBar).toContainText('3 实体')
-  await expect(statsBar).toContainText('2 关系')
-  await expect(statsBar).toContainText('已建图文档 2/3')
-  await expect(statsBar).toContainText(/上次更新：\d{4}-\d{2}-\d{2}/)
-  // 标题行不再重复统计小字
-  await expect(graphSection.getByText(/3 实体 \/ 2 关系/)).toHaveCount(0)
-
-  // HTML5 拖拽（headless-tree 原生 dnd）：个人知识库.md → 目录「设计图」，
-  // PATCH 携带目标目录
-  const source = filesPane.locator('[data-palace-file="pf-1"]')
-  await dragByDnd(page, source, filesPane.locator('[data-palace-dir="设计图"]'))
-  await expect.poll(() => mocks.palaceMoves.length).toBe(1)
-  expect(mocks.palaceMoves[0]).toBe('pf-1:->设计图')
-
-  // 拖到树容器空白处 → 根目录 drop → folderPath 空串
-  await dragByDnd(page, source, filesPane.getByTestId('palace-file-tree'))
-  await expect.poll(() => mocks.palaceMoves.length).toBe(2)
-  expect(mocks.palaceMoves[1]).toBe('pf-1:设计图->')
-})
-
-test('知识图谱：本体文档目录——发布文档只读展示、目录计数徽章与待同步状态', async ({ page }) => {
-  await seedAuth(page)
-  await mockApis(page, { withOntologyDocs: true })
-  await page.goto('/#/super-assistant')
-
-  await page.getByRole('button', { name: '知识图谱' }).click()
-  const dialog = page.getByRole('dialog')
-  await expect(dialog).toBeVisible()
-  const filesPane = dialog.getByTestId('super-assistant-palace-files')
-  const contentPane = dialog.locator('section[aria-label="文档内容"]')
-
-  // 「本体文档」固定根级首位；目录行右侧直接子节点计数徽章（含子目录与文件）
-  const ontoDirRow = filesPane.locator('[data-palace-dir="__ontology_docs__"]')
-  await expect(ontoDirRow).toBeVisible()
-  await expect(ontoDirRow).toContainText('本体文档')
-  await expect(ontoDirRow.getByLabel('本体文档 下共 2 项')).toHaveText('2')
-  // 用户目录同样有计数徽章
-  await expect(filesPane.locator('[data-palace-dir="设计图"]').getByLabel('设计图 下共 1 项')).toHaveText('1')
-
-  // 点击已建图文档：中栏只读预览（无编辑/替换/删除动作）；渲染/源码切换可用
-  await filesPane.getByText('供应链业务文档').click()
-  await expect(contentPane.getByText('供应链业务文档').first()).toBeVisible()
-  await expect(contentPane.getByText(/只读，随本体发布自动更新/)).toBeVisible()
-  await expect(contentPane.getByTestId('palace-ontology-doc-preview')).toContainText('张三 任职 ACME')
-  await expect(contentPane.getByTestId('palace-ontology-doc-preview').getByRole('button', { name: /编辑|替换|删除/ })).toHaveCount(0)
-  await expect(contentPane.getByTestId('palace-ontology-preview-mode')).toBeVisible()
-
-  // 权威清单有而镜像未达（发布事件在途）：占位行标记「待同步」
-  await filesPane.getByText('合规本体 业务文档').click()
-  await expect(contentPane.getByText(/尚未同步到知识图谱/)).toBeVisible()
-
-  // 最后点目录行（单击会折叠目录）：工具栏切换为只读说明，上传/新建被禁用
-  await ontoDirRow.click()
-  await expect(filesPane.getByTestId('palace-dir-toolbar')).toContainText('本体文档（只读')
-  await expect(filesPane.getByRole('button', { name: '上传', exact: true })).toBeDisabled()
-  await expect(filesPane.getByTestId('palace-new-folder')).toBeDisabled()
-  await expect(filesPane.getByTestId('palace-new-note')).toBeDisabled()
-})
-
-
-
 test('远程助手：邀请函自助接入主路径，手动配置为高级路径，双模式展示', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
@@ -3245,8 +2638,8 @@ test('会话模型下拉过滤后台用途配置：usage_tags 标记不出现，
   // 无标记与仅 super_assistant 偏好标记的对话模型可选
   await expect(page.getByRole('option', { name: /Qwen/ })).toBeVisible()
   await expect(page.getByRole('option', { name: /GLM 对话专用/ })).toBeVisible()
-  // 记忆宫殿抽取等后台管线配置不出现在会话模型列表
-  await expect(page.getByRole('option', { name: /记忆宫殿抽取/ })).toHaveCount(0)
+  // 带后台用途标记的配置不出现在会话模型列表
+  await expect(page.getByRole('option', { name: /后台抽取/ })).toHaveCount(0)
 })
 
 test('长会话进入即贴底，上滚出现「回到最新」，点击回到底部', async ({ page }) => {
@@ -3297,7 +2690,7 @@ test('会话模型下拉空回退：全部配置带流水线标签时仍显示�
   await mockApis(page)
   // 后注册的路由优先：把全部 llm 配置都打上流水线专用标签（且都非默认）
   await page.route('**/api/v1/models', route => json(route, [{
-    id: 'model-p1', name: 'Palace-A', config_type: 'llm', provider: 'a',
+    id: 'model-p1', name: 'Pipeline-A', config_type: 'llm', provider: 'a',
     api_base: '', has_api_key: true, enabled: true, is_default: false,
     last_test_status: 'success', last_tested_at: at(0, 8), last_test_message: 'ok',
     models: ['a-1'], options: { usage_tags: ['super_assistant_palace'] }, created_by: 'admin',
@@ -3317,7 +2710,7 @@ test('会话模型下拉空回退：全部配置带流水线标签时仍显示�
 
   // 回退全集：不能因为 tagging 不全而变成「无可用模型」
   await trigger.click()
-  await expect(page.getByRole('option', { name: /Palace-A/ })).toBeVisible()
+  await expect(page.getByRole('option', { name: /Pipeline-A/ })).toBeVisible()
   await expect(page.getByRole('option', { name: /VLM-B/ })).toBeVisible()
 })
 
@@ -3476,6 +2869,25 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await menu.getByRole('button', { name: '打开助手配置' }).click()
     // 移动端配置面板为卡内覆盖抽屉：出现关闭入口即视为打开
     await expect(page.getByRole('button', { name: '关闭助手配置' })).toBeVisible()
+  })
+
+  test('知识图谱入口收进更多操作，窄屏仍指向受信 WeKnora 页面', async ({ page }) => {
+    await seedAuth(page)
+    await mockApis(page)
+    await page.goto('/#/super-assistant')
+
+    // 头部图标入口让位标题/模型选择器，但能力本身仍可从溢出菜单进入
+    await expect(page.getByRole('link', { name: '知识图谱' })).toBeHidden()
+    await page.getByRole('button', { name: '更多操作' }).click()
+    const menu = page.getByRole('dialog')
+    // 溢出菜单顺序：知识图谱在会话纪要之前
+    const menuItems = menu.locator('a, button')
+    await expect(menuItems.first()).toHaveAttribute('aria-label', '知识图谱')
+    const link = menu.getByRole('link', { name: '知识图谱' })
+    await expect(link).toBeVisible()
+    await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
+    await expect(link).toHaveAttribute('target', '_blank')
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
   })
 
   test('触屏无悬停：会话行归档/删除常显可达', async ({ page }) => {

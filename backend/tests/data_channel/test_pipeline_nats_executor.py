@@ -399,11 +399,7 @@ def test_handler_registry_covers_all_stream_subjects():
         "super-assistant-reflect-micro",
         "super-assistant-reflect-full",
         "super-assistant-reflect-focused",
-        "super-assistant-palace-extract",
-        "super-assistant-palace-consolidate",
-        "ontology-documents-published",
         "super-assistant-scheduled-run",
-        "super-assistant-palace-ontology-rebuild",
         "task-instances-control",
         "integrated-sync-executor",
         "ontology-assistant-run-executor",
@@ -718,7 +714,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
 
     run_task = asyncio.ensure_future(executor.run())
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and len(subscriptions) < 23:
+    while time.monotonic() < deadline and len(subscriptions) < 19:
         await asyncio.sleep(0.02)
     executor.request_shutdown()
     await asyncio.wait_for(run_task, timeout=5)
@@ -735,11 +731,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
         ("super_assistant.reflect.focused", "super-assistant-reflect-focused"),
         ("task.dataset.migrate", "dataset-migrate-executor"),
         ("assistant_evaluation.autopilot.cycle", "assistant-eval-autopilot"),
-        ("super_assistant.palace.extract", "super-assistant-palace-extract"),
-        ("super_assistant.palace.consolidate", "super-assistant-palace-consolidate"),
-        ("ontology.documents.published", "ontology-documents-published"),
         ("super_assistant.scheduled.run", "super-assistant-scheduled-run"),
-        ("super_assistant.palace.ontology-rebuild", "super-assistant-palace-ontology-rebuild"),
         ("task_instances.control", "task-instances-control"),
         ("integrated.sync", "integrated-sync-executor"),
         ("ontology.assistant.run", "ontology-assistant-run-executor"),
@@ -748,9 +740,9 @@ async def test_run_subscribes_each_subject_with_own_durable(
         ("sa.execution.reconcile", "sa-reconciler-v1"),
         ("sa.plugin.reply.*", "sa-plugin-reply-v1"),
         ]
-    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:19])
-    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[19:22])
-    assert subscriptions[22][2] == "SA_PLUGIN_RUNNER_V1"
+    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:15])
+    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[15:18])
+    assert subscriptions[18][2] == "SA_PLUGIN_RUNNER_V1"
     # ack_wait=60s 与 20s 续约间隔配套；max_deliver 不设上限（-1）——
     # 丢一条 kernel 派发消息等于 Run 挂死到 deadline，瞬时故障靠 nak
     # delay=5s 退避而不是丢弃兜底。

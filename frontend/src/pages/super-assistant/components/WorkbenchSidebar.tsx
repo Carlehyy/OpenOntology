@@ -27,7 +27,6 @@ import {
   groupConversations,
 } from '../conversationGroups'
 import IntegrationsDialog from './IntegrationsDialog'
-import MemoryPalaceDialog from './MemoryPalaceDialog'
 import type { AssistantConfigTab } from './AssistantConfiguration'
 
 interface WorkbenchSidebarProps {
@@ -203,7 +202,6 @@ export default function WorkbenchSidebar({
   const user = useAuthStore(state => state.user)
   const logout = useAuthStore(state => state.logout)
   const navigate = useNavigate()
-  const [palaceOpen, setPalaceOpen] = useState(false)
   const [integrationsOpen, setIntegrationsOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
@@ -336,9 +334,6 @@ export default function WorkbenchSidebar({
           data-workbench-task-instances
         >
           <ListChecks size={16} className="shrink-0" /> 任务实例
-        </button>
-        <button type="button" onClick={() => { setPalaceOpen(true); onCloseMobile() }} className={actionItemClass} data-workbench-palace>
-          <Brain size={16} className="shrink-0" /> 知识图谱
         </button>
         <button
           type="button"
@@ -486,7 +481,6 @@ export default function WorkbenchSidebar({
         {content}
       </aside>
 
-      <MemoryPalaceDialog open={palaceOpen} onOpenChange={setPalaceOpen} />
       {integrationsOpen && (
         <IntegrationsDialog
           onClose={() => setIntegrationsOpen(false)}

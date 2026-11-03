@@ -269,11 +269,11 @@ def test_dispatch_subject_and_handler_registration(monkeypatch):
     from app.super_assistant import scheduled_tasks
 
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT == "super_assistant.scheduled.run"
-    # 流扩容只能追加：既有 subject 顺序与 durable 不变。
+    # 流扩容只能追加：既有 subject 顺序与 durable 不变；本体助手后台回合为
+    # 当前尾项（WeKnora 已退役宫殿 subject）。
     assert PIPELINE_STREAM_SUBJECTS[-3:] == (
         "task_instances.control", "integrated.sync", "ontology.assistant.run",
     )
-    assert "super_assistant.palace.ontology-rebuild" in PIPELINE_STREAM_SUBJECTS
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
     registry = {
         subject: (durable, handler)

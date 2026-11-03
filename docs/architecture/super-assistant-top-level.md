@@ -23,7 +23,7 @@
 | 主循环 | [runtime.py](../../backend/app/super_assistant/runtime.py) 组装提示、工具、审批与 SSE | 业务能力通过契约接入，运行与浏览器连接分离 |
 | 平台委派 | [Assistant Hub](../../backend/app/assistant_hub/contract.py) 提供统一回合契约 | 保留域适配边界，补齐结构化前置条件、等待和结果证据 |
 | 外部 Agent | [remote_agent_service.py](../../backend/app/super_assistant/remote_agent_service.py) 提供 RAP v1 direct/pull | 保留真实兼容能力，按需增加协议适配器 |
-| 记忆与资料 | [memory_service.py](../../backend/app/super_assistant/memory_service.py)、[palace_service.py](../../backend/app/super_assistant/palace_service.py) | 存储分工保留，统一按需检索、来源与生命周期 |
+| 记忆与资料 | [memory_service.py](../../backend/app/super_assistant/memory_service.py)、[WeKnora service](../../backend/app/super_assistant/weknora/service.py)（共享知识库与 MCP 工具，bootstrap 元数据只读） | 存储分工保留，统一按需检索、来源与生命周期 |
 | 恢复 | [conversation_service.py](../../backend/app/super_assistant/conversation_service.py) 识别遗留生成中断 | 在调用结果、授权和外部状态明确时继续；未知副作用先核实 |
 
 源码是当前行为事实源，本文冻结目标行为；迁移阶段用 execution version 隔离新旧事实源。历史未合入的 Harness 实验仅作参考，未合入原因不能由分支状态推断；不直接合并或复用其迁移。

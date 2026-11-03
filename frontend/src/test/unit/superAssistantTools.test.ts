@@ -30,6 +30,37 @@ describe('groupAssistantTools', () => {
     )
   })
 
+  it('platform_weknora MCP 只读工具按命名空间归入知识图谱组', () => {
+    const groups = groupAssistantTools([
+      tool('mcp__platform_weknora__list_knowledge_bases'),
+      tool('mcp__platform_weknora__search_knowledge'),
+      tool('mcp__platform_weknora__ask'),
+      tool('mcp__platform_api_hub__list_env_vars'),
+    ])
+    const weknora = groups.find(group => group.key === 'weknora')!
+    assert.equal(weknora.label, '知识图谱（WeKnora）')
+    assert.deepEqual(weknora.tools.map(item => item.name), [
+      'mcp__platform_weknora__list_knowledge_bases',
+      'mcp__platform_weknora__search_knowledge',
+      'mcp__platform_weknora__ask',
+    ])
+    // 其他 MCP 工具不误入知识图谱组
+    assert.deepEqual(groups.find(group => group.key === 'other')!.tools.map(item => item.name), [
+      'mcp__platform_api_hub__list_env_vars',
+    ])
+  })
+
+  it('长期记忆 palace_* 工具仍归入记忆组，不落入「其他」', () => {
+    const groups = groupAssistantTools([
+      tool('memory_search'), tool('palace_zones'), tool('palace_read_zone'), tool('palace_recall'),
+    ])
+    const memory = groups.find(group => group.key === 'memory')!
+    assert.deepEqual(memory.tools.map(item => item.name), [
+      'memory_search', 'palace_zones', 'palace_read_zone', 'palace_recall',
+    ])
+    assert.equal(groups.some(group => group.key === 'other'), false)
+  })
+
   it('统计各组的禁用计数，供组头展示', () => {
     const groups = groupAssistantTools([
       tool('memory_search', false), tool('memory_save'), tool('memory_delete', false),

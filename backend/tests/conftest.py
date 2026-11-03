@@ -123,6 +123,20 @@ def setup_db():
     yield
     Base.metadata.drop_all(bind=engine)
 
+@pytest.fixture(autouse=True)
+def _stub_weknora_auto_registration(monkeypatch):
+    """测试专用：WeKnora state 由部署 bootstrap 物化，不在测试 DB 内。
+
+    生产在 WeKnora 未验证时 fail-closed；非 WeKnora 单测不应读取机器相关的
+    state 文件，也不应因默认接入而 503。验证注册语义的测试直接调用在模块
+    导入时捕获的真实函数（ensure_server 被本 fixture 替换前）。
+    """
+    from app.super_assistant.weknora import mcp_service as weknora_mcp_service
+
+    monkeypatch.setattr(
+        weknora_mcp_service, "ensure_server", lambda db, owner_id: None,
+    )
+
 @pytest.fixture
 def db():
     session = TestSession()

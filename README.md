@@ -34,6 +34,12 @@ docker compose -f docker-compose.local.yml up --build
 本地开发）。后端存活检查位于 `http://localhost:8000/health/live`；完整平台
 可用性还必须通过 `/health/ready` 检查。
 
+WeKnora 原生 Web 入口是 `http://localhost:8089`（HTTPS `https://localhost:8444`）。
+它使用独立数据库/图/缓存卷。本地 `up` 会自动运行一次性 bootstrap 与
+`--verify`，完成管理员/知识库/MCP 初始化并持久化关闭注册；bootstrap 成功前
+网关不发布端口。之后配置中心的 WeKnora 测试才能通过。细节见
+[WeKnora 本地初始化](./docs/development/setup.md#weknora-本地初始化)。
+
 三个编排文件分工如下：`docker-compose.local.yml` 是单机一键完整栈（即上文
 流程，`up --build` 会自动执行 Alembic 迁移并按 `.env` 播种首个管理员）；
 `docker-compose.e2e.yml` 仅为真实后端 E2E 提供端口错开的基础设施，不含应用
@@ -54,17 +60,19 @@ docker compose -f docker-compose.local.yml up --build
 ./config/start.sh
 ```
 
-Windows 使用 `config/start.bat`。配置通过后，分别启动：
+Windows 使用 `config/start.bat`。配置通过后，安装依赖，并在三个终端分别启动后端、后台任务 executor 和前端：
 
 ```bash
 uv sync --directory backend --frozen --group dev
-# app.dev_server 会先执行 alembic upgrade head，再启动热重载服务
+npm --prefix frontend ci
+
+# 终端 1：后端（dev_server 会先执行 alembic upgrade head）
 uv run --directory backend python -m app.dev_server
 
-# 流水线 executor：消费 NATS 派发的全部后台任务（Celery 已退役）
+# 终端 2：后台任务 executor，30 秒心跳供“启动后复检”使用
 uv run --directory backend python -m app.data_channel.pipeline_tasks.nats_executor
 
-npm --prefix frontend ci
+# 终端 3：前端
 npm --prefix frontend run dev
 ```
 
@@ -84,8 +92,8 @@ npm --prefix frontend run dev
 ```
 
 平台采用 fail-closed 依赖契约：PostgreSQL、Redis、NATS 与
-流水线 executor、Neo4j、MinIO 和 n8n 必须真实就绪，后端不会在依赖失败时静默切换到 SQLite、内存图或
-本地对象存储。语义搜索当前明确返回 `501 semantic_search_unsupported`，关键词
+流水线 executor、Neo4j、MinIO、n8n 和 WeKnora 共享知识库必须真实就绪，
+后端不会在依赖失败时静默切换到 SQLite、内存图或本地对象存储。语义搜索当前明确返回 `501 semantic_search_unsupported`，关键词
 搜索由 PostgreSQL 提供。事件登记是独立业务能力，当前没有可核验的
 RegisteredEvent → Formal/Sentinel 自动接线。状态门与发布契约的实现以
 `backend/app/data_channel/`、`backend/app/ontologies/` 及对应测试为准。
@@ -94,7 +102,8 @@ RegisteredEvent → Formal/Sentinel 自动接线。状态门与发布契约的�
 
 - 后端：FastAPI、Python 3.12、SQLAlchemy、Alembic、NATS 任务链；
 - 前端：React、TypeScript、Vite、Tailwind CSS；
-- 数据与中间件：PostgreSQL、Redis、Neo4j、MinIO；
+- 数据与中间件：PostgreSQL、Redis、Neo4j、MinIO；WeKnora 自带独立
+  ParadeDB/Redis/APOC Neo4j；
 - 工作流与浏览器：n8n、Chromium CDP；Python 脚本流水线执行：Jupyter Kernel Gateway（可选）；
 - 交付：Docker Compose、GitHub Actions。
 

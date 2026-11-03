@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit
 
 from dotenv import dotenv_values
@@ -21,6 +21,7 @@ from .models import (
     PlatformConfig,
     PostgresConfig,
     RedisConfig,
+    WeKnoraConfig,
     default_profile,
 )
 
@@ -36,6 +37,8 @@ SECRET_FIELDS: dict[str, tuple[str, str]] = {
     "minio.access_key": ("minio", "access_key"),
     "minio.secret_key": ("minio", "secret_key"),
     "n8n.api_key": ("n8n", "api_key"),
+    "weknora.chat_api_key": ("weknora", "chat_api_key"),
+    "weknora.embedding_api_key": ("weknora", "embedding_api_key"),
     "advanced.api_hub_system_mcp_token": (
         "advanced",
         "api_hub_system_mcp_token",
@@ -57,6 +60,8 @@ REQUIRED_SECRET_FIELDS = frozenset(
         "minio.access_key",
         "minio.secret_key",
         "n8n.api_key",
+        "weknora.chat_api_key",
+        "weknora.embedding_api_key",
         "advanced.api_hub_system_mcp_token",
         "advanced.api_hub_internal_proxy_token",
     }
@@ -70,9 +75,15 @@ class WriteResult:
 
 
 class LocalEnvStore:
-    def __init__(self, path: Path, defaults_path: Path | None = None):
+    def __init__(
+        self,
+        path: Path,
+        defaults_path: Path | None = None,
+        project_root: Path | None = None,
+    ):
         self.path = path
         self.defaults_path = defaults_path or path.with_name("defaults.env")
+        self.project_root = project_root
         self._fresh_defaults = default_profile()
 
     @property
@@ -218,6 +229,45 @@ class LocalEnvStore:
                     defaults.n8n.timeout_seconds,
                 ),
             ),
+            weknora=WeKnoraConfig(
+                base_url=values.get(
+                    "WEKNORA_BASE_URL", defaults.weknora.base_url
+                ),
+                state_origin=values.get(
+                    "WEKNORA_STATE_ORIGIN",
+                    defaults.weknora.state_origin,
+                ),
+                web_url=values.get(
+                    "WEKNORA_WEB_URL", defaults.weknora.web_url
+                ),
+                state_path=values.get(
+                    "WEKNORA_STATE_PATH", defaults.weknora.state_path
+                ),
+                knowledge_base_name=values.get(
+                    "WEKNORA_KNOWLEDGE_BASE_NAME",
+                    defaults.weknora.knowledge_base_name,
+                ),
+                timeout_seconds=_int_value(
+                    values,
+                    "WEKNORA_TIMEOUT_SECONDS",
+                    defaults.weknora.timeout_seconds,
+                ),
+                chat_base_url=values.get("WEKNORA_CHAT_BASE_URL", ""),
+                chat_api_key=values.get("WEKNORA_CHAT_API_KEY", ""),
+                chat_model=values.get("WEKNORA_CHAT_MODEL", ""),
+                embedding_base_url=values.get(
+                    "WEKNORA_EMBEDDING_BASE_URL", ""
+                ),
+                embedding_api_key=values.get(
+                    "WEKNORA_EMBEDDING_API_KEY", ""
+                ),
+                embedding_model=values.get("WEKNORA_EMBEDDING_MODEL", ""),
+                embedding_dimensions=_int_value(
+                    values,
+                    "WEKNORA_EMBEDDING_DIMENSIONS",
+                    defaults.weknora.embedding_dimensions,
+                ),
+            ),
             advanced=AdvancedConfig(
                 uploads_dir=values.get(
                     "UPLOADS_DIR", defaults.advanced.uploads_dir
@@ -335,7 +385,7 @@ class LocalEnvStore:
 
     def write(self, profile: ConfigProfile) -> WriteResult:
         resolved = self.resolve_secrets(profile)
-        content = render_env(resolved)
+        content = render_env(resolved, project_root=self.project_root)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         backup: Path | None = None
 
@@ -366,7 +416,7 @@ class LocalEnvStore:
         return WriteResult(path=self.path, backup_path=backup)
 
 
-def render_env(profile: ConfigProfile) -> str:
+def render_env(profile: ConfigProfile, project_root: Path | None = None) -> str:
     pg = profile.postgres
     redis = profile.redis
     backend_origin = (
@@ -396,6 +446,15 @@ def render_env(profile: ConfigProfile) -> str:
     nats = profile.nats
     nats_userinfo = f"{quote(nats.token, safe='')}@" if nats.token else ""
     nats_url = f"nats://{nats_userinfo}{_url_host(nats.host)}:{nats.port}"
+
+    weknora_state_path = profile.weknora.state_path
+    if project_root is not None and not PurePosixPath(
+        weknora_state_path.replace("\\", "/")
+    ).is_absolute():
+        relative = weknora_state_path.replace("\\", "/")
+        if relative.startswith("./"):
+            relative = relative[2:]
+        weknora_state_path = str((project_root / relative).resolve())
 
     sections: list[tuple[str, list[tuple[str, object]]]] = [
         (
@@ -434,7 +493,7 @@ def render_env(profile: ConfigProfile) -> str:
             [("DATABASE_URL", database_url)],
         ),
         (
-            "Redis 与 Celery。请另外启动 Celery worker",
+            "Redis 缓存。后端与后台任务 executor 共用同一实例",
             [
                 ("REDIS_PASSWORD", redis.password),
                 ("REDIS_URL", redis_url),
@@ -481,6 +540,40 @@ def render_env(profile: ConfigProfile) -> str:
                 ("N8N_API_URL", profile.n8n.api_url),
                 ("N8N_API_KEY", profile.n8n.api_key),
                 ("N8N_TIMEOUT_SECONDS", profile.n8n.timeout_seconds),
+            ],
+        ),
+        (
+            "WeKnora 共享知识库。Docker 部署会在网关对外前自动完成一次性初始化；"
+            "本地源码运行需先启动 compose 中的 WeKnora 并运行 bootstrap --verify",
+            [
+                ("WEKNORA_BASE_URL", profile.weknora.base_url),
+                ("WEKNORA_STATE_ORIGIN", profile.weknora.state_origin),
+                ("WEKNORA_WEB_URL", profile.weknora.web_url),
+                ("WEKNORA_STATE_PATH", weknora_state_path),
+                (
+                    "WEKNORA_KNOWLEDGE_BASE_NAME",
+                    profile.weknora.knowledge_base_name,
+                ),
+                ("WEKNORA_TIMEOUT_SECONDS", profile.weknora.timeout_seconds),
+                ("WEKNORA_CHAT_BASE_URL", profile.weknora.chat_base_url),
+                ("WEKNORA_CHAT_API_KEY", profile.weknora.chat_api_key),
+                ("WEKNORA_CHAT_MODEL", profile.weknora.chat_model),
+                (
+                    "WEKNORA_EMBEDDING_BASE_URL",
+                    profile.weknora.embedding_base_url,
+                ),
+                (
+                    "WEKNORA_EMBEDDING_API_KEY",
+                    profile.weknora.embedding_api_key,
+                ),
+                (
+                    "WEKNORA_EMBEDDING_MODEL",
+                    profile.weknora.embedding_model,
+                ),
+                (
+                    "WEKNORA_EMBEDDING_DIMENSIONS",
+                    profile.weknora.embedding_dimensions,
+                ),
             ],
         ),
         (

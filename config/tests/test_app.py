@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,13 @@ def _complete_payload(payload: dict) -> dict:
     payload["minio"]["access_key"] = "minio-test-access"
     payload["minio"]["secret_key"] = "minio-test-password"
     payload["n8n"]["api_key"] = "n8n-test-key"
+    payload["weknora"]["chat_base_url"] = "https://chat.example.com/v1"
+    payload["weknora"]["chat_api_key"] = "weknora-chat-test-key"
+    payload["weknora"]["chat_model"] = "chat-test-model"
+    payload["weknora"]["embedding_base_url"] = "https://embed.example.com/v1"
+    payload["weknora"]["embedding_api_key"] = "weknora-embedding-test-key"
+    payload["weknora"]["embedding_model"] = "embedding-test-model"
+    payload["weknora"]["embedding_dimensions"] = 1024
     return payload
 
 
@@ -388,3 +396,101 @@ def test_runtime_check_rejects_degraded_backend(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert "minio" in result["detail"]
+
+
+def test_startup_commands_use_existing_nats_executor_not_retired_celery() -> None:
+    commands = main_module.startup_commands()
+    assert set(commands) == {"windows", "unix"}
+
+    repo_root = Path(__file__).resolve().parents[2]
+    assert (
+        repo_root / "backend" / "app" / "data_channel" / "pipeline_tasks"
+        / "nats_executor.py"
+    ).is_file()
+    assert not (repo_root / "backend" / "app" / "tasks" / "celery_app.py").exists()
+
+    for platform_commands in commands.values():
+        assert len(platform_commands) == 3
+        rendered = "\n".join(item["command"] for item in platform_commands)
+        assert (
+            "python -m app.data_channel.pipeline_tasks.nats_executor"
+            in rendered
+        )
+        assert "celery" not in rendered.lower()
+
+
+def test_nats_executor_runtime_check_uses_official_heartbeat_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    assert main_module.NATS_EXECUTOR_HEARTBEAT_PATH == Path(
+        "/tmp/nats_executor.heartbeat"
+    )
+    assert main_module.NATS_EXECUTOR_HEARTBEAT_MAX_AGE_SECONDS == 30
+
+    now = 1_700_000_000.0
+    monkeypatch.setattr(main_module.time, "time", lambda: now)
+    heartbeat = tmp_path / "nats_executor.heartbeat"
+    monkeypatch.setattr(
+        main_module,
+        "NATS_EXECUTOR_HEARTBEAT_PATH",
+        heartbeat,
+    )
+
+    missing = main_module._check_nats_executor()
+    assert missing["id"] == "nats_executor"
+    assert missing["ok"] is False
+    assert "启动" in missing["detail"]
+
+    heartbeat.write_text("", encoding="utf-8")
+    os.utime(heartbeat, (now - 1, now - 1))
+    fresh = main_module._check_nats_executor()
+    assert fresh["id"] == "nats_executor"
+    assert fresh["ok"] is True
+
+    boundary_time = (
+        now - main_module.NATS_EXECUTOR_HEARTBEAT_MAX_AGE_SECONDS
+    )
+    os.utime(heartbeat, (boundary_time, boundary_time))
+    boundary = main_module._check_nats_executor()
+    assert boundary["ok"] is False
+    assert "过期" in boundary["detail"]
+
+
+def test_runtime_check_reports_executor_heartbeat_instead_of_celery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _ = _client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    profile = _complete_payload(bootstrap["profile"])
+    monkeypatch.setattr(
+        main_module,
+        "_check_backend_runtime",
+        lambda _url: {"id": "backend", "ok": True, "detail": "ok"},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_check_frontend_runtime",
+        lambda _url: {"id": "frontend", "ok": True, "detail": "ok"},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_check_nats_executor",
+        lambda: {"id": "nats_executor", "ok": True, "detail": "ok"},
+    )
+
+    response = client.post(
+        "/api/runtime-check",
+        json={"profile": profile},
+        headers={"x-csrf-token": bootstrap["csrf_token"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert [item["id"] for item in payload["results"]] == [
+        "backend",
+        "frontend",
+        "nats_executor",
+    ]

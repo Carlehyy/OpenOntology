@@ -79,6 +79,13 @@ def _parse_tool_call(body_text: str, tool_name: str) -> tuple[dict, object]:
     return arguments, request_id
 
 
+def _reject_builtin(server: SuperAssistantMcpServer) -> None:
+    if getattr(server, "builtin_key", None):
+        # 平台内置通道（minio/api_hub/weknora）只允许超级助手按固定清单、
+        # 内部端点与平台凭据执行，桥接导出会绕过只读白名单与凭据边界。
+        raise McpBridgeError("平台内置 MCP 不支持 mcp-bridge 分发")
+
+
 def _load_server(server_id: str) -> SuperAssistantMcpServer:
     from app.shared.database import SessionLocal
 
@@ -88,6 +95,7 @@ def _load_server(server_id: str) -> SuperAssistantMcpServer:
         ).first()
         if item is None:
             raise McpBridgeNotFoundError(f"MCP Server {server_id} 不存在或已删除")
+        _reject_builtin(item)
         return item
 
 
@@ -133,6 +141,7 @@ def run_bridge_interface(
         server_id, tool_name = parse_bridge_url(url)
         arguments, request_id = _parse_tool_call(_request_body(iface, overrides), tool_name)
         server = _load_server(server_id)
+        _reject_builtin(server)
     except McpBridgeNotFoundError as exc:
         result = _error_result(404, str(exc), "configuration", int((time.perf_counter() - start) * 1000))
         return result, snapshot

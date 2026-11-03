@@ -226,13 +226,30 @@ describe('chatTranscript', () => {
 })
 
 describe('BUILTIN_TOOL_FRIENDLY_NAMES', () => {
-  it('仅覆盖内置工具：已知名命中、MCP/未知名不命中', () => {
+  it('仅覆盖内置工具与 platform_weknora 的 8 个只读工具；其它 MCP/未知名直出原名', () => {
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.browser_navigate, '打开网页')
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.web_fetch, '抓取网页')
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.todo_write, '写入步骤清单')
-    // MCP 工具与未知名一律不翻译（直出原名）
+    // 与 WeKnora MCP 实际只读工具目录逐一对应
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__list_knowledge_bases'], '列出知识库')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__search_knowledge'], '检索知识库')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__grep_chunks'], '关键词检索知识片段')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__list_documents'], '列出知识文档')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__read_document'], '读取知识文档')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__ask'], undefined)
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__wiki_search'], '检索 Wiki')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__wiki_read_page'], '读取 Wiki 页面')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__wiki_index'], '读取 Wiki 索引')
+    // 旧的臆造名不提供映射（实际工具名是 search_knowledge）
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_weknora__search'], undefined)
+    // 其他 MCP 与未知名一律不翻译
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES['mcp__platform_api_hub__create_interface'], undefined)
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.unknown_tool, undefined)
+  })
+
+  it('旧记忆宫殿工具名仅为历史会话回放保留', () => {
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.palace_recall, '回忆记忆宫殿')
+    assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.palace_graph_search, '检索知识图谱（历史）')
   })
 })
 

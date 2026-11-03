@@ -16,12 +16,18 @@
 ## 配置边界
 
 生成配置前必须确认平台与端口、安全与目录，并通过 PostgreSQL、Redis、NATS、
-Neo4j、MinIO 和 n8n 的真实连通性测试。Chromium CDP 地址同样是必填启动配置，但其
+Neo4j、MinIO、n8n 与 WeKnora 的真实连通性测试。WeKnora 测试会读取原生
+Web 的 `/api/v1/auth/config` 与 bootstrap 写入的 `weknora_state` 元数据：
+state 缺失、`verified` 不是 true、`base_url` 与
+`WEKNORA_STATE_ORIGIN=http://weknora-app:8080` 不一致、MCP endpoint/token
+形状非法、工具缺少 name/description/input_schema 或注册仍为 `self_serve`
+时失败。源码 backend 用 `WEKNORA_BASE_URL=http://127.0.0.1:18080` 直连 app；
+公共 UI 网关不代理 MCP。Chromium CDP 地址同样是必填启动配置，但其
 生成前连通测试只用于提示：暂时不可达仍可生成配置并启动 API 诊断，深度
-readiness 会保持失败。生成后启动 API、Celery worker 和前端，再由“启动后
-复检”确认后端深度 readiness 及至少一个 worker 返回 PONG。任一必需依赖或
-worker 未就绪，平台都不算启动完成；配置中心不会提供 SQLite、API 线程任务、
-内存图或本地对象存储降级。
+readiness 会保持失败。生成后启动 API、后台任务 executor 和前端，再由“启动后
+复检”确认后端深度 readiness、前端可用及 executor 心跳（30 秒内）。任一必需
+依赖或 executor 未就绪，平台都不算启动完成；配置中心不会提供 SQLite、API
+线程任务、内存图或本地对象存储降级。
 
 CDP 地址只填写 HTTP(S) 服务根地址，例如 `http://127.0.0.1:9222`。配置中心和
 后端会自行请求 `/json/version`，因此不要把 discovery 路径、查询参数、fragment
@@ -37,6 +43,18 @@ LLM 不属于启动门禁：先启动完整平台，再由管理员在“模型�
 ```text
 config/generated/local/.env
 ```
+
+WeKnora 的 `WEKNORA_STATE_PATH` 默认在页面中保存为项目相对路径，但实际生成
+`.env` 时会解析为项目内绝对路径，供宿主机 backend 读取；`WEKNORA_BASE_URL`
+是 loopback app 通信地址（默认 `http://127.0.0.1:18080`），
+`WEKNORA_STATE_ORIGIN` 是 state 的部署身份（固定 `http://weknora-app:8080`），
+两者不可混用。
+
+配置中心的 WeKnora 探针检查 app 直连 HTTP 认证配置与 bootstrap verified
+state 元数据/工具白名单，不执行真实聊天、文档检索或图谱查询，也不声称深度
+RAG readiness；backend 启动时的严格 WeKnora probe 才是平台最终门禁。首次使用
+WeKnora 原生 Web 的邮箱/密码只从受控终端的 `.env` 读取，不要打印真实值或发送
+到页面/工单。
 
 该文件是本地唯一配置来源并被 Git 忽略。后端、API Hub、Alembic 和前端 Vite 会读取它；系统环境变量仍具有最高优先级，因此 Docker 和生产部署保持原有行为。
 
@@ -73,12 +91,11 @@ docker run -d --name nats -p 4222:4222 -v nats_data:/data nats:alpine -js --stor
 全部必需探针通过并生成配置后，请分别打开三个终端，按网页给出的顺序启动：
 
 1. 后端
-2. Celery worker
+2. 后台任务 executor
 3. 前端
 
 后端启动命令会读取配置的监听地址和端口。Vite 使用严格端口，如果端口被其他程序占用会明确失败，不会悄悄切换。
-Celery worker 是运行契约的一部分；入队失败不会回退到 API 进程内线程执行。
-流水线调度任务（定时触发与手动异步触发）由独立 executor 进程经 NATS 执行；本地源码运行时另开一个终端启动：
+后台任务 executor 经 NATS JetStream 消费定时/手动触发的流水线任务；未启动时“启动后复检”会因心跳缺失失败。
 
 ```bash
 cd backend && uv run python -m app.data_channel.pipeline_tasks.nats_executor

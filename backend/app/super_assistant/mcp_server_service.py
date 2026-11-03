@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
-import json
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -22,16 +20,19 @@ from app.super_assistant.mcp_client import (
     encrypt_env,
     encrypt_headers,
     normalize_connection,
-    namespaced_tool_name,
+)
+from app.super_assistant.mcp_manifest import (
+    freeze_manifest as _freeze_manifest,
+    manifest_hash as _manifest_hash,
+    manifest_keys as _manifest_keys,
 )
 from app.super_assistant.models import SuperAssistantMcpDevProject, SuperAssistantMcpServer
 from app.super_assistant.schemas import McpServerCreate, McpServerUpdate, McpTestOut
 from app.super_assistant.kernel.capability_service import (
-    persist_capability_revision,
     revoke_capability_revisions,
     set_capability_revision_enabled,
 )
-from app.super_assistant.kernel.connectors import AgentDescriptor, SessionPolicy, TrustLevel
+from app.super_assistant.weknora import mcp_service as weknora_mcp_service
 
 
 class McpServerServiceError(Exception):
@@ -52,41 +53,6 @@ class McpServerConflictError(McpServerServiceError):
 
 class McpServerUnavailableError(McpServerServiceError):
     pass
-
-
-def _manifest_keys(server: SuperAssistantMcpServer) -> list[str]:
-    return [
-        namespaced_tool_name(server.name, str(tool.get("name") or ""))
-        for tool in (server.tool_manifest or [])
-        if isinstance(tool, dict) and tool.get("name")
-    ]
-
-
-def _manifest_hash(server: SuperAssistantMcpServer, tools: list[dict]) -> str:
-    value = {
-        "transport": server.transport, "url": server.url, "command": server.command,
-        "args": server.args or [], "headers": server.headers_encrypted,
-        "env": server.env_encrypted, "tools": tools,
-    }
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
-
-
-def _freeze_manifest(db: Session, server: SuperAssistantMcpServer, tools: list[dict], revision: int, *, enabled: bool = True) -> None:
-    digest = _manifest_hash(server, tools)
-    for tool in tools:
-        name = str(tool.get("name") or "") if isinstance(tool, dict) else ""
-        if not name:
-            continue
-        key = namespaced_tool_name(server.name, name)
-        descriptor = AgentDescriptor(
-            agent_id=f"mcp:{server.id}:{name}", key=key, revision=revision,
-            transport="mcp", session_policy=SessionPolicy.STATELESS,
-        )
-        persist_capability_revision(
-            db, descriptor, source="mcp", trust_level=TrustLevel.USER_UNTRUSTED,
-            manifest_hash=digest,
-        )
-        set_capability_revision_enabled(db, key, revision, enabled=enabled)
 
 
 def get_mcp_server(
@@ -119,6 +85,9 @@ def list_mcp_servers(
     )
     if not include_builtins:
         query = query.filter(SuperAssistantMcpServer.builtin_key.is_(None))
+    else:
+        # 平台内置默认接入：目录读取即幂等补齐（只读本地 verified 快照，不联网）。
+        weknora_mcp_service.ensure_server(db, owner_id)
     return query.order_by(SuperAssistantMcpServer.updated_at.desc()).all()
 
 
@@ -314,6 +283,8 @@ async def test_mcp_server(
         if item.dev_project_id is not None:
             # 自研 MCP：测试 = 重跑发布闸门（逐工具样例真实执行）
             return mcp_dev_service.verify_published_server(db, owner_id, item)
+        if item.builtin_key == weknora_mcp_service.WEKNORA_BUILTIN_KEY:
+            return await weknora_mcp_service.test_server(db, item)
         if item.builtin_key == "minio":
             get_workspace_minio_service().status()
             tools = minio_tool_manifest()

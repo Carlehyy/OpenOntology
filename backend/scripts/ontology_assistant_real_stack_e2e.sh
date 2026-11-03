@@ -219,7 +219,7 @@ DROP TABLE IF EXISTS fo_action_external_attempts CASCADE;
 DROP TABLE IF EXISTS fo_action_operations CASCADE;
 DROP TABLE IF EXISTS fo_action_confirmations CASCADE;
 DROP TABLE IF EXISTS fo_agent_join_assertions CASCADE;
--- 0134-0141 post-baseline delta: 0003's create_all already materialized the
+-- 0134-0142 post-baseline delta: 0003's create_all already materialized the
 -- current models above the 0129 baseline. Drop every object those migrations
 -- add (children before parents) so the upgrade exercises the real DDL.
 DROP TABLE IF EXISTS fo_agent_run_events;

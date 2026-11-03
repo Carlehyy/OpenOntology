@@ -52,10 +52,13 @@ diff、未知路径、rename 源路径，以及改到分类器或本工作流时
     `frontend/dist`）并先上传；远端替换源码时始终原地保留
     服务器 `.env`，不把秘密复制到固定 `/tmp` 文件；
 11. 服务器部署入口再次校验目录；旧安装如仍使用示例运行密钥，先执行不改密文
-    的密钥解耦，再完成依赖探测、停止旧 backend、数据库迁移和
+    的密钥解耦，再启动 WeKnora 私网依赖与一次性 init app，完成 REST
+    bootstrap 后删除 init、启动关闭注册的正式 app 并执行
+    `bootstrap --verify`；之后才做平台依赖探测、停止旧 backend、数据库迁移和
     Compose 启动；
 12. 检查 API 深度 readiness、pipeline executor、PostgreSQL、
-    Redis、Neo4j、MinIO、n8n、Chromium CDP 和前端静态资源；readiness 通过后
+    Redis、Neo4j、MinIO、n8n、Chromium CDP、WeKnora 公网网关/注册关闭/
+    公开 `/mcp/` 404 和前端静态资源；readiness 通过后
     只读比对 active backend 容器 `/app/app` 文件字节、image ID 和
     `StartedAt`，manifest 缺失、路径额外/缺失、字节不同、commit 不符或
     verifier 失败都会使部署非零并沿用既有 stop helper 停止新 runtime；
@@ -74,6 +77,17 @@ PR 到 `nano-ontoprompt` 时，独立的 `.github/workflows/ci.yml` 会并行执
 端点）必须直接返回 404，不能落入 SPA 的 `index.html`。
 `scripts/ci/test-deploy-guards.sh` 固定这条生产路由边界。
 
+WeKnora v0.9.0 的公开入口与平台 Nginx 独立：它只暴露原生 Web 网关
+`WEKNORA_HTTP_PORT`/`WEKNORA_HTTPS_PORT`（默认 8089/8444），HTTPS 复用
+`frontend_ssl_certs`；正式 app、docreader、MCP、ParadeDB、Redis 和 APOC
+Neo4j 都没有宿主端口。部署脚本先以仅内网、profile 为
+`weknora-bootstrap` 的 `weknora-app-init` 完成首次注册/KB 初始化，删除后
+才启动 `DISABLE_REGISTRATION=true` 的正式 app；`bootstrap --verify` 会通过
+官方管理员设置 API 持久化 `invite_only`，因此数据库运行时设置不能覆盖环境
+关闭开关。公网精确 `/mcp` 与 `/mcp/` 都固定 404；平台通过内网 MCP 使用工具。全部
+`WEKNORA_*_IMAGE` 已有 `@sha256` 默认值；部署仍在 digest 校验处 fail closed，
+防止 tag 漂移。
+
 ## 数据库迁移停机边界
 
 生产迁移是一次有意的短暂停机。依赖连接预检通过后，`deploy/deploy-prod.sh`
@@ -86,6 +100,14 @@ worker 停止；这是保护数据一致性的预期行为。此时先保留日�
 部分执行并按回滚方案处理，不能直接重启不理解新 schema 的旧进程。任何人工或
 staging Alembic 升级也必须遵循同一顺序：先停止所有 API/worker 写入者，确认
 没有遗留任务执行，再校验 head 和升级，最后才启动与该 schema 兼容的版本。
+
+0141 迁移完成后、整套新服务启动前，部署会执行
+`backend/scripts/maintenance/retire_palace_storage.py --execute`，只清理旧
+记忆宫殿专属状态：`<uploads>/super-assistant-palace`、无 `OntologyEntity`
+标签的 `PalaceEntity` 节点/索引、`ob:palace:*` Redis 键和四个精确 NATS
+subject/durable；各自源缺失时 no-op。脚本不会猜测历史自定义 palace 根目录；
+若旧部署使用自定义根，必须由运维在停止旧写入后显式传入 `--palace-root` 与
+`--allow-custom-root`，不得把宽泛目录交给自动清理。
 
 ## 历史运行密钥的无损解耦
 

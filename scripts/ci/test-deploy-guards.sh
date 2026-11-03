@@ -11,6 +11,7 @@ ARCHIVE_SCRIPT="$SCRIPT_DIR/create-deployment-archive.sh"
 NGINX_CONFIG="$REPO_ROOT/frontend/nginx/locations.inc"
 NGINX_SERVER_CONFS="$REPO_ROOT/frontend/nginx/default.conf $REPO_ROOT/frontend/nginx/ssl-443.conf"
 PROD_COMPOSE="$REPO_ROOT/docker-compose.prod.yml"
+LOCAL_COMPOSE="$REPO_ROOT/docker-compose.local.yml"
 
 assert_accepted() {
   local value="$1"
@@ -228,7 +229,7 @@ fi
 post_migration_stop_count="$(
   grep -cF 'stop_new_runtime_after_failed_deploy' "$DEPLOY_SCRIPT"
 )"
-if [ "$post_migration_stop_count" -ne 4 ] \
+if [ "$post_migration_stop_count" -ne 5 ] \
     || ! grep -Fq \
       'if ! compose stop --timeout 30 frontend pipeline_executor backend; then' \
       "$DEPLOY_SCRIPT"; then
@@ -319,6 +320,91 @@ if ! grep -Fq 'configure_integrated_dbx' "$DEPLOY_SCRIPT"     || ! grep -Fq 'INT
   exit 1
 fi
 
+# WeKnora app/MCP must stay private; only the native UI gateway publishes
+# ports. The formal app is registration-closed, and the registration-open
+# initializer is profile-gated and removed before the gateway starts.
+weknora_app_block="$(awk -v service=weknora-app '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+weknora_init_block="$(awk -v service=weknora-app-init '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+weknora_bootstrap_block="$(awk -v service=weknora-bootstrap '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+weknora_gateway_block="$(awk -v service=weknora-gateway '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+if [ -z "$weknora_app_block" ] || [ -z "$weknora_init_block" ] \
+    || [ -z "$weknora_bootstrap_block" ] || [ -z "$weknora_gateway_block" ] \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$weknora_app_block" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$weknora_init_block" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$weknora_bootstrap_block" \
+    || ! grep -Fq 'DISABLE_REGISTRATION: "true"' <<<"$weknora_app_block" \
+    || ! grep -Fq 'profiles: [weknora-bootstrap]' <<<"$weknora_init_block" \
+    || ! grep -Fq 'DISABLE_REGISTRATION: "false"' <<<"$weknora_init_block" \
+    || ! grep -Fq 'profiles: [weknora-bootstrap]' <<<"$weknora_bootstrap_block" \
+    || ! grep -Fq 'WEKNORA_BOOTSTRAP_BASE_URL: http://weknora-app-init:8080' <<<"$weknora_bootstrap_block" \
+    || ! grep -Fq 'WEKNORA_BASE_URL: http://weknora-app:8080' <<<"$weknora_bootstrap_block" \
+    || ! grep -Fq 'weknora_state:/weknora-state' <<<"$weknora_bootstrap_block" \
+    || ! grep -Fq 'weknora_state:/weknora-state:ro' <<<"$backend_block" \
+    || ! grep -Fq 'WEKNORA_STATE_ORIGIN: http://weknora-app:8080' <<<"$backend_block" \
+    || ! grep -Fq 'weknora_internal' <<<"$backend_block" \
+    || ! grep -Fq '${WEKNORA_HTTP_PORT:-8089}:80' <<<"$weknora_gateway_block" \
+    || ! grep -Fq '${WEKNORA_HTTPS_PORT:-8444}:443' <<<"$weknora_gateway_block" \
+    || ! grep -Fq 'backend:' <<<"$weknora_gateway_block" \
+    || ! grep -Fq 'frontend_ssl_certs:/etc/nginx/certs:ro' <<<"$weknora_gateway_block" \
+    || ! grep -Fq 'location /mcp/' "$REPO_ROOT/docker/weknora/gateway.conf" \
+    || ! grep -Fq 'return 404;' "$REPO_ROOT/docker/weknora/gateway.conf" \
+    || ! grep -Fq 'run_weknora_bootstrap --verify' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'python -m app.super_assistant.weknora.bootstrap "$@"' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'compose --profile weknora-bootstrap build --pull weknora-bootstrap' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'check_weknora_public_entry' "$DEPLOY_SCRIPT"; then
+  printf 'WeKnora app/MCP must be private, formal registration closed, init profile-gated, and only the UI gateway published\n' >&2
+  exit 1
+fi
+
+local_compose_block() {
+  local service="$1"
+  awk -v service="$service" '
+    $0 == "  " service ":" { in_service = 1 }
+    in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+    in_service { print }
+  ' "$LOCAL_COMPOSE"
+}
+local_init_block="$(local_compose_block weknora-app-init)"
+local_bootstrap_block="$(local_compose_block weknora-bootstrap)"
+local_app_block="$(local_compose_block weknora-app)"
+local_verify_block="$(local_compose_block weknora-verify)"
+local_gateway_block="$(local_compose_block weknora-gateway)"
+if [ -z "$local_init_block" ] || [ -z "$local_bootstrap_block" ] \
+    || [ -z "$local_app_block" ] || [ -z "$local_verify_block" ] \
+    || [ -z "$local_gateway_block" ] \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$local_init_block" \
+    || ! grep -Fq 'DISABLE_REGISTRATION: "false"' <<<"$local_init_block" \
+    || grep -Eq '^[[:space:]]+profiles:' <<<"$local_bootstrap_block" \
+    || ! grep -Fq 'WEKNORA_BOOTSTRAP_BASE_URL: http://weknora-app-init:8080' <<<"$local_bootstrap_block" \
+    || ! grep -Fq 'DISABLE_REGISTRATION: "true"' <<<"$local_app_block" \
+    || ! grep -Fq 'weknora-bootstrap:' <<<"$local_app_block" \
+    || ! grep -Fq 'service_completed_successfully' <<<"$local_app_block" \
+    || grep -Eq '^[[:space:]]+profiles:' <<<"$local_verify_block" \
+    || ! grep -Fq -- '--verify' <<<"$local_verify_block" \
+    || ! grep -Fq 'weknora-bootstrap:' <<<"$local_verify_block" \
+    || ! grep -Fq 'weknora-verify:' <<<"$local_gateway_block" \
+    || ! grep -Fq 'backend:' <<<"$local_gateway_block" \
+    || ! grep -Fq 'service_completed_successfully' <<<"$local_gateway_block"; then
+  printf 'local WeKnora startup must auto-run init/bootstrap/verify and hide the gateway until success\n' >&2
+  exit 1
+fi
+
 # The Docker build job only needs a public value to satisfy Compose interpolation.
 # Keep it step-local: a job/top-level secret would leak into unrelated steps or
 # imply that the build actually needs a production credential.
@@ -373,6 +459,8 @@ archive_fixture_paths=(
   "frontend/tsconfig.node.json"
   "frontend/vite.config.ts"
   "docker/browser/Dockerfile"
+  "docker/weknora/gateway.conf"
+  "docker/weknora/weknora-proxy.inc"
   "deploy/deploy-prod.sh"
   "deploy/runtime_source_attestation.py"
   "deploy/runtime-source-manifest.json"
@@ -426,6 +514,8 @@ for required_member in \
   "frontend/dist/index.html" \
   "frontend/src/main.tsx" \
   "docker/browser/Dockerfile" \
+  "docker/weknora/gateway.conf" \
+  "docker/weknora/weknora-proxy.inc" \
   "deploy/runtime_source_attestation.py" \
   "deploy/runtime-source-manifest.json" \
   "deploy/production.dependencies.env"; do
@@ -504,7 +594,9 @@ set_test_env_value() {
 digest="example.invalid/openontology@sha256:$(printf 'a%.0s' {1..64})"
 for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
-  PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE; do
+  PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
+  WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE; do
   set_test_env_value "$image_key" "$digest"
 done
 set_test_env_value SECRET_KEY 0123456789abcdef0123456789abcdef
@@ -543,6 +635,13 @@ env \
   PROD_N8N_API_URL=https://n8n.example.com \
   PROD_N8N_API_KEY=synthetic-n8n-api-key \
   PROD_N8N_TIMEOUT_SECONDS=30 \
+  PROD_WEKNORA_CHAT_BASE_URL=https://chat.example.com/v1 \
+  PROD_WEKNORA_CHAT_API_KEY=synthetic-weknora-chat-key \
+  PROD_WEKNORA_CHAT_MODEL=synthetic-chat-model \
+  PROD_WEKNORA_EMBEDDING_BASE_URL=https://embed.example.com/v1 \
+  PROD_WEKNORA_EMBEDDING_API_KEY=synthetic-weknora-embedding-key \
+  PROD_WEKNORA_EMBEDDING_MODEL=synthetic-embedding-model \
+  PROD_WEKNORA_EMBEDDING_DIMENSIONS=1024 \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-production-dependencies.env" >/dev/null
 
@@ -719,7 +818,9 @@ grep -q 'production deployment requires STRICT_IMAGE_DIGESTS=true' "$test_dir/st
 set_test_env_value STRICT_IMAGE_DIGESTS true
 for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
-  PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE; do
+  PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
+  WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE; do
   set_test_env_value "$image_key" "$digest"
 done
 
@@ -799,7 +900,18 @@ for key in \
   AGENT_QUERY_STATEMENT_TIMEOUT_MS AGENT_QUERY_LOCK_TIMEOUT_MS \
   AGENT_QUERY_WORK_MEM_MIB AGENT_QUERY_TEMP_FILE_LIMIT_MIB COMPOSE_DISABLE_ENV_FILE \
   COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR COMPOSE_PROFILES \
-  COMPOSE_PROJECT_NAME; do
+  COMPOSE_PROJECT_NAME WEKNORA_BASE_URL WEKNORA_STATE_ORIGIN WEKNORA_WEB_URL WEKNORA_STATE_PATH \
+  WEKNORA_HTTP_PORT WEKNORA_HTTPS_PORT WEKNORA_ADMIN_USER WEKNORA_ADMIN_EMAIL \
+  WEKNORA_ADMIN_PASSWORD WEKNORA_CHAT_BASE_URL WEKNORA_CHAT_API_KEY \
+  WEKNORA_CHAT_MODEL WEKNORA_EMBEDDING_BASE_URL WEKNORA_EMBEDDING_API_KEY \
+  WEKNORA_EMBEDDING_MODEL WEKNORA_EMBEDDING_DIMENSIONS \
+  WEKNORA_KNOWLEDGE_BASE_NAME WEKNORA_TIMEOUT_SECONDS WEKNORA_DB_NAME \
+  WEKNORA_DB_USER WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
+  WEKNORA_NEO4J_PASSWORD WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY \
+  WEKNORA_SYSTEM_SIGNING_KEY WEKNORA_NEO4J_HEAP_MAX WEKNORA_APP_IMAGE \
+  WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
+  WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE WEKNORA_MAX_FILE_SIZE_MB \
+  WEKNORA_DEFAULT_LOCALE; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
@@ -883,6 +995,38 @@ if (
     STEWARD_BROWSER_MAX_SESSIONS_PER_USER=1 \
     STEWARD_BROWSER_IDLE_TIMEOUT_SECONDS=1 \
     STEWARD_BROWSER_REAPER_INTERVAL_SECONDS=1 \
+    WEKNORA_BASE_URL=https://shell-override.invalid \
+    WEKNORA_STATE_ORIGIN=https://shell-override.invalid \
+    WEKNORA_WEB_URL=https://shell-override.invalid \
+    WEKNORA_STATE_PATH=/tmp/shell-override-state.json \
+    WEKNORA_HTTP_PORT=1 \
+    WEKNORA_HTTPS_PORT=2 \
+    WEKNORA_ADMIN_USER=shell_override \
+    WEKNORA_ADMIN_EMAIL=shell-override@example.invalid \
+    WEKNORA_ADMIN_PASSWORD=shell-override-password \
+    WEKNORA_CHAT_BASE_URL=https://shell-override.invalid/v1 \
+    WEKNORA_CHAT_API_KEY=shell-override-key \
+    WEKNORA_CHAT_MODEL=shell-override-model \
+    WEKNORA_EMBEDDING_BASE_URL=https://shell-override.invalid/v1 \
+    WEKNORA_EMBEDDING_API_KEY=shell-override-key \
+    WEKNORA_EMBEDDING_MODEL=shell-override-model \
+    WEKNORA_EMBEDDING_DIMENSIONS=1024 \
+    WEKNORA_KNOWLEDGE_BASE_NAME=shell-override-kb \
+    WEKNORA_TIMEOUT_SECONDS=3 \
+    WEKNORA_DB_NAME=shell_override \
+    WEKNORA_DB_USER=shell_override \
+    WEKNORA_DB_PASSWORD=shell-override-password \
+    WEKNORA_REDIS_PASSWORD=shell-override-password \
+    WEKNORA_NEO4J_PASSWORD=shell-override-password \
+    WEKNORA_JWT_SECRET=shell-override-secret-0123456789abcdef \
+    WEKNORA_SYSTEM_AES_KEY=shell-override-secret-0123456789abcdef \
+    WEKNORA_SYSTEM_SIGNING_KEY=shell-override-secret-0123456789abcdef \
+    WEKNORA_APP_IMAGE=example.invalid/unvalidated:latest \
+    WEKNORA_UI_IMAGE=example.invalid/unvalidated:latest \
+    WEKNORA_DOCREADER_IMAGE=example.invalid/unvalidated:latest \
+    WEKNORA_POSTGRES_IMAGE=example.invalid/unvalidated:latest \
+    WEKNORA_REDIS_IMAGE=example.invalid/unvalidated:latest \
+    WEKNORA_NEO4J_IMAGE=example.invalid/unvalidated:latest \
     POSTGRES_IMAGE=example.invalid/unvalidated:latest \
     REDIS_IMAGE=example.invalid/unvalidated:latest \
     NEO4J_IMAGE=example.invalid/unvalidated:latest \
@@ -917,6 +1061,20 @@ fi
 
 if grep -Fq 'compose environment leaked authority key:' "$fake_docker_log"; then
   printf 'Compose inherited an exported shell authority\n' >&2
+  exit 1
+fi
+weknora_aes_key="$(awk -F= '$1 == "WEKNORA_SYSTEM_AES_KEY" {print substr($0, index($0,"=")+1)}' "$test_dir/.env" | tail -n1)"
+if [ "${#weknora_aes_key}" -ne 32 ]; then
+  printf 'generated WeKnora AES key must be exactly 32 ASCII bytes\n' >&2
+  exit 1
+fi
+weknora_admin_password="$(awk -F= '$1 == "WEKNORA_ADMIN_PASSWORD" {print substr($0, index($0,"=")+1)}' "$test_dir/.env" | tail -n1)"
+case "$weknora_admin_password" in
+  Aa1!*) ;;
+  *) printf 'generated WeKnora admin password must guarantee upper/lower/digit/special\n' >&2; exit 1 ;;
+esac
+if [ "${#weknora_admin_password}" -lt 8 ] || [ "${#weknora_admin_password}" -gt 32 ]; then
+  printf 'generated WeKnora admin password length out of range\n' >&2
   exit 1
 fi
 probe_line="$(grep -nF \
@@ -1272,29 +1430,43 @@ set -Eeuo pipefail
 url=""
 output=""
 headers=""
+write_out=""
+status="200"
+body="ok"
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   case "${args[$i]}" in
     -o) output="${args[$((i + 1))]}" ;;
     -D) headers="${args[$((i + 1))]}" ;;
+    -w) write_out="${args[$((i + 1))]}" ;;
     http://*|https://*) url="${args[$i]}" ;;
   esac
 done
 [ -n "$url" ] || { echo "fake curl received no URL" >&2; exit 9; }
+case "$url" in
+  *'/api/v1/auth/config') body='{"success":true,"registration_mode":"invite_only","complex_password_enabled":false}' ;;
+  *'/mcp'*) status="404"; body='not found' ;;
+  */healthz) body='ok' ;;
+esac
 if [ -n "$headers" ]; then
   case "$url" in
     *.js) printf 'HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n' >"$headers" ;;
     *.css) printf 'HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n' >"$headers" ;;
-    *) printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n' >"$headers" ;;
+    *) printf 'HTTP/1.1 %s OK\r\nContent-Type: text/html\r\n\r\n' "$status" >"$headers" ;;
   esac
 fi
-if [ -n "$output" ]; then
+if [ -n "$output" ] && [ "$output" != "/dev/null" ]; then
   case "$url" in
     */) printf '<script src="/assets/main.js"></script><link href="/assets/main.css">\n' >"$output" ;;
     *.js) printf 'const asset = "assets/chunk.js";\n' >"$output" ;;
     *.css) printf 'body{}\n' >"$output" ;;
-    *) printf 'ok\n' >"$output" ;;
+    *) printf '%s\n' "$body" >"$output" ;;
   esac
+fi
+if [ -n "$write_out" ]; then
+  printf '%s' "$write_out" | sed "s/%{http_code}/${status}/g"
+elif [ -z "$output" ]; then
+  printf '%s\n' "$body"
 fi
 exit 0
 FAKE_CURL
@@ -1320,7 +1492,18 @@ for key in \
   AGENT_QUERY_STATEMENT_TIMEOUT_MS AGENT_QUERY_LOCK_TIMEOUT_MS \
   AGENT_QUERY_WORK_MEM_MIB AGENT_QUERY_TEMP_FILE_LIMIT_MIB COMPOSE_DISABLE_ENV_FILE \
   COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR COMPOSE_PROFILES \
-  COMPOSE_PROJECT_NAME; do
+  COMPOSE_PROJECT_NAME WEKNORA_BASE_URL WEKNORA_STATE_ORIGIN WEKNORA_WEB_URL WEKNORA_STATE_PATH \
+  WEKNORA_HTTP_PORT WEKNORA_HTTPS_PORT WEKNORA_ADMIN_USER WEKNORA_ADMIN_EMAIL \
+  WEKNORA_ADMIN_PASSWORD WEKNORA_CHAT_BASE_URL WEKNORA_CHAT_API_KEY \
+  WEKNORA_CHAT_MODEL WEKNORA_EMBEDDING_BASE_URL WEKNORA_EMBEDDING_API_KEY \
+  WEKNORA_EMBEDDING_MODEL WEKNORA_EMBEDDING_DIMENSIONS \
+  WEKNORA_KNOWLEDGE_BASE_NAME WEKNORA_TIMEOUT_SECONDS WEKNORA_DB_NAME \
+  WEKNORA_DB_USER WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
+  WEKNORA_NEO4J_PASSWORD WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY \
+  WEKNORA_SYSTEM_SIGNING_KEY WEKNORA_NEO4J_HEAP_MAX WEKNORA_APP_IMAGE \
+  WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
+  WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE WEKNORA_MAX_FILE_SIZE_MB \
+  WEKNORA_DEFAULT_LOCALE; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"

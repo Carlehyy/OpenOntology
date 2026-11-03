@@ -188,8 +188,9 @@ def rollback_version(
     with _ontology_build_lock(db, ontology_id):
         result = _rollback_version_locked(
             ontology_id, version_id, db, current_user)
-    # 回滚生成新激活版本并移动发布指针：版本树整体换键（fail-open）。
+    # 回滚生成新激活版本并移动发布指针：版本树与发布文档聚合整体换键（fail-open）。
     ontology_cache.invalidate_version_tree()
+    ontology_cache.invalidate_published_documents()
     return result
 
 
@@ -475,11 +476,6 @@ def _rollback_version_locked(
         from app.ontologies.projection_state import mark_ready
         mark_ready(db, ontology_id)
         db.commit()
-        # 回滚激活成功（事务已提交）：激活版语义层可能 resurrect 另一份
-        # 业务文档，广播自包含事件供宫殿共享建图；无语义层时为 no-op。
-        from app.ontologies.published_documents import notify_published_document
-
-        notify_published_document(project, activation)
     except HTTPException as exc:
         db.rollback()
         detail = exc.detail if isinstance(exc.detail, dict) else {}

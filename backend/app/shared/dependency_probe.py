@@ -105,6 +105,14 @@ def probe_browser() -> None:
         raise RuntimeError("Chromium CDP is unavailable")
 
 
+def probe_weknora() -> None:
+    import asyncio
+
+    from app.super_assistant.weknora.service import probe
+
+    asyncio.run(probe())
+
+
 def probe_dbx() -> None:
     """Authenticate and verify the pinned dbx release without leaking config."""
     from app.data_channel.integrated.dbx_adapter import DbxMetadataAdapter
@@ -122,6 +130,7 @@ PROBES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("Neo4j", probe_neo4j),
     ("MinIO", probe_minio),
     ("n8n", probe_n8n),
+    ("WeKnora", probe_weknora),
     ("Chromium CDP", probe_browser),
 )
 NON_BLOCKING_PROBES = frozenset({"Chromium CDP"})

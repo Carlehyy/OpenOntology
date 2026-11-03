@@ -42,15 +42,15 @@
       <aside class="sidebar" aria-label="配置项目">
         <div class="sidebar-intro">
           <p class="sidebar-title">完整功能检查</p>
-          <p>六项阻塞依赖通过后即可生成；CDP 地址必填，连通性可稍后修复。</p>
+          <p>七项阻塞依赖通过后即可生成；CDP 地址必填，连通性可稍后修复。</p>
         </div>
 
         <div class="progress-summary" aria-labelledby="progress-label">
           <div class="progress-copy">
             <span id="progress-label">连通性进度</span>
-            <strong id="progress-count">0 / 6</strong>
+            <strong id="progress-count">0 / 7</strong>
           </div>
-          <progress id="test-progress" value="0" max="6">0 / 6</progress>
+          <progress id="test-progress" value="0" max="7">0 / 7</progress>
         </div>
 
         <nav class="section-nav">
@@ -63,7 +63,7 @@
             <span class="nav-status status-idle">待测试</span>
           </a>
           <a href="#redis-section" data-nav-section="redis">
-            <span>Redis 与 Celery</span>
+            <span>Redis</span>
             <span class="nav-status status-idle">待测试</span>
           </a>
           <a href="#nats-section" data-nav-section="nats">
@@ -84,6 +84,10 @@
           </a>
           <a href="#n8n-section" data-nav-section="n8n">
             <span>n8n</span>
+            <span class="nav-status status-idle">待测试</span>
+          </a>
+          <a href="#weknora-section" data-nav-section="weknora">
+            <span>WeKnora 知识库</span>
             <span class="nav-status status-idle">待测试</span>
           </a>
           <a href="#advanced-section" data-nav-section="advanced">
@@ -224,9 +228,9 @@
           <section id="redis-section" class="config-section" data-section="redis" aria-labelledby="redis-title">
             <div class="section-heading">
               <div>
-                <p class="section-purpose">处理缓存与后台任务队列</p>
-                <h2 id="redis-title">Redis 与 Celery</h2>
-                <p>Redis 保存短期状态，也负责把耗时任务交给 Celery。连通性测试会发送 PING 命令。</p>
+                <p class="section-purpose">处理缓存与短期状态</p>
+                <h2 id="redis-title">Redis</h2>
+                <p>Redis 保存短期状态与缓存。连通性测试会发送 PING 命令。</p>
               </div>
               <span class="section-state status-idle" data-section-status="redis">
                 <span class="status-indicator" aria-hidden="true"></span>
@@ -484,6 +488,115 @@
             <div class="test-message" data-test-message="n8n" aria-live="polite"></div>
           </section>
 
+          <section id="weknora-section" class="config-section" data-section="weknora" aria-labelledby="weknora-title">
+            <div class="section-heading">
+              <div>
+                <p class="section-purpose">连接共享知识库与 MCP 工具</p>
+                <h2 id="weknora-title">WeKnora 共享知识库</h2>
+                <p>WeKnora 是独立的原生 Web 知识库。测试会读取认证配置和 bootstrap 写入的只读元数据，不调用模型，也不会把 MCP token 回显到页面。</p>
+              </div>
+              <span class="section-state status-idle" data-section-status="weknora">
+                <span class="status-indicator" aria-hidden="true"></span>
+                <span>待测试</span>
+              </span>
+            </div>
+            <div class="notice notice-info">
+              <strong>初始化发生在公网网关开放之前</strong>
+              <span>Docker 部署会自动运行一次注册窗口仅限私网的 bootstrap，随后由正式系统管理员持久化关闭注册并执行 MCP/embedding 冒烟。本地源码运行不能跳过该步骤；状态文件缺失时本项测试会明确失败。</span>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label for="weknora-base-url">连接地址</label>
+                <input id="weknora-base-url" data-path="weknora.base_url" name="weknora.base_url" type="url" value="http://127.0.0.1:18080" required autocomplete="url">
+                <p class="field-help">源码 backend 直连正式 app 的 loopback 端口 18080；公网 8089/8444 只提供 UI 且 MCP 固定 404。容器内使用 http://weknora-app:8080。</p>
+                <p class="field-error" data-error-for="weknora.base_url"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-state-origin">state 身份地址</label>
+                <input id="weknora-state-origin" data-path="weknora.state_origin" name="weknora.state_origin" type="url" value="http://weknora-app:8080" required autocomplete="url">
+                <p class="field-help">bootstrap state 的部署身份；Docker 固定为 http://weknora-app:8080。源码后端通过 loopback 通信时仍严格按此值校验 state，不要改成 127.0.0.1。</p>
+                <p class="field-error" data-error-for="weknora.state_origin"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-web-url">公网 Web 地址</label>
+                <input id="weknora-web-url" data-path="weknora.web_url" name="weknora.web_url" type="url" value="http://127.0.0.1:8089" required autocomplete="url">
+                <p class="field-help">只填写浏览器可访问的 HTTP(S) origin，生产默认是 PUBLIC_TLS_IP:8444。</p>
+                <p class="field-error" data-error-for="weknora.web_url"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-state-path">集成状态文件</label>
+                <input id="weknora-state-path" data-path="weknora.state_path" name="weknora.state_path" type="text" value="./runtime/weknora/integration.json" required autocomplete="off">
+                <p class="field-help">bootstrap 写入的 version=1 元数据（MCP 与 KB）。后端只读；不要手工编辑。</p>
+                <p class="field-error" data-error-for="weknora.state_path"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-kb-name">共享知识库名称</label>
+                <input id="weknora-kb-name" data-path="weknora.knowledge_base_name" name="weknora.knowledge_base_name" type="text" value="共享知识库" required autocomplete="off">
+                <p class="field-help">bootstrap 首次创建；已存在时保持原名称。</p>
+                <p class="field-error" data-error-for="weknora.knowledge_base_name"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-timeout">连接超时，秒</label>
+                <input id="weknora-timeout" data-path="weknora.timeout_seconds" name="weknora.timeout_seconds" type="number" min="3" max="60" value="15" required inputmode="numeric">
+                <p class="field-help">默认 15 秒，后端允许 3-60 秒。</p>
+                <p class="field-error" data-error-for="weknora.timeout_seconds"></p>
+              </div>
+              <div class="field field-span-two">
+                <label for="weknora-chat-base-url">聊天模型地址</label>
+                <input id="weknora-chat-base-url" data-path="weknora.chat_base_url" name="weknora.chat_base_url" type="url" required autocomplete="url">
+                <p class="field-help">部署输入，例如 https://api.example.com/v1；不要填写假默认地址。</p>
+                <p class="field-error" data-error-for="weknora.chat_base_url"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-chat-api-key">聊天 API Key</label>
+                <div class="secret-control">
+                  <input id="weknora-chat-api-key" data-path="weknora.chat_api_key" data-secret="weknora.chat_api_key" name="weknora.chat_api_key" type="password" required autocomplete="new-password">
+                  <button class="text-button secret-toggle" type="button" data-toggle-secret="weknora-chat-api-key" aria-label="显示 WeKnora 聊天 API Key">显示</button>
+                </div>
+                <p class="field-help secret-help">只写入本机配置，不会回传到页面。</p>
+                <p class="field-error" data-error-for="weknora.chat_api_key"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-chat-model">聊天模型名称</label>
+                <input id="weknora-chat-model" data-path="weknora.chat_model" name="weknora.chat_model" type="text" required autocomplete="off">
+                <p class="field-help">bootstrap 用它配置 WeKnora 的聊天模型。</p>
+                <p class="field-error" data-error-for="weknora.chat_model"></p>
+              </div>
+              <div class="field field-span-two">
+                <label for="weknora-embedding-base-url">向量模型地址</label>
+                <input id="weknora-embedding-base-url" data-path="weknora.embedding_base_url" name="weknora.embedding_base_url" type="url" required autocomplete="url">
+                <p class="field-help">部署输入，必须与向量模型真实服务一致。</p>
+                <p class="field-error" data-error-for="weknora.embedding_base_url"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-embedding-api-key">向量 API Key</label>
+                <div class="secret-control">
+                  <input id="weknora-embedding-api-key" data-path="weknora.embedding_api_key" data-secret="weknora.embedding_api_key" name="weknora.embedding_api_key" type="password" required autocomplete="new-password">
+                  <button class="text-button secret-toggle" type="button" data-toggle-secret="weknora-embedding-api-key" aria-label="显示 WeKnora 向量 API Key">显示</button>
+                </div>
+                <p class="field-help secret-help">只写入本机配置，不会回传到页面。</p>
+                <p class="field-error" data-error-for="weknora.embedding_api_key"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-embedding-model">向量模型名称</label>
+                <input id="weknora-embedding-model" data-path="weknora.embedding_model" name="weknora.embedding_model" type="text" required autocomplete="off">
+                <p class="field-help">必须与所选 embedding 服务支持的模型名一致。</p>
+                <p class="field-error" data-error-for="weknora.embedding_model"></p>
+              </div>
+              <div class="field">
+                <label for="weknora-embedding-dimensions">向量维度</label>
+                <input id="weknora-embedding-dimensions" data-path="weknora.embedding_dimensions" name="weknora.embedding_dimensions" type="number" min="1" max="8192" value="1024" required inputmode="numeric">
+                <p class="field-help">必须与模型实际输出维度一致；无法确认时不要猜。</p>
+                <p class="field-error" data-error-for="weknora.embedding_dimensions"></p>
+              </div>
+            </div>
+            <div class="section-actions">
+              <button class="secondary-button help-button" type="button" data-guide="weknora">初始化说明</button>
+              <button class="primary-button test-button" type="button" data-test-service="weknora">测试 WeKnora</button>
+            </div>
+            <div class="test-message" data-test-message="weknora" aria-live="polite"></div>
+          </section>
+
           <section id="advanced-section" class="config-section" data-section="advanced" aria-labelledby="advanced-title">
             <div class="section-heading">
               <div>
@@ -594,7 +707,7 @@
               <div>
                 <p class="section-purpose">最后检查并写入本地文件</p>
                 <h2 id="finish-title">生成与启动</h2>
-                <p>生成前必须完成六项阻塞依赖测试，并填写 CDP 地址；CDP 连通性可稍后修复。大模型请在平台启动后通过“模型配置”页面按需添加。</p>
+                <p>生成前必须完成七项阻塞依赖测试，并填写 CDP 地址；CDP 连通性可稍后修复。大模型请在平台启动后通过“模型配置”页面按需添加。</p>
               </div>
               <span class="section-state status-idle" data-section-status="finish">
                 <span class="status-indicator" aria-hidden="true"></span>
@@ -610,13 +723,13 @@
               <button id="test-all" class="secondary-button large-button" type="button">测试全部必选依赖</button>
               <button id="generate-config" class="primary-button large-button" type="button" disabled>生成本地配置文件</button>
             </div>
-            <p id="generate-help" class="action-help">请先填写并通过六项阻塞依赖测试。</p>
+            <p id="generate-help" class="action-help">请先填写并通过七项阻塞依赖测试。</p>
 
             <div id="generated-result" class="generated-result" hidden>
               <div class="result-heading">
                 <div>
                   <h3>配置已经写入本地</h3>
-                  <p id="generated-path">现在可以按顺序启动后端、Celery 和前端。</p>
+                  <p id="generated-path">现在可以按顺序启动后端、后台任务 executor 和前端。</p>
                   <p>请从 OpenOntology 项目根目录分别打开三个终端执行下列命令。</p>
                 </div>
                 <span class="result-label">已生成</span>
@@ -625,7 +738,7 @@
               <div class="runtime-check">
                 <div>
                   <h3>启动后复检</h3>
-                  <p>三个终端都启动后，再检查平台核心服务和 Celery 是否就绪。</p>
+                  <p>三个终端都启动后，再检查平台核心服务、后台任务 executor（30 秒心跳）和前端是否就绪。</p>
                 </div>
                 <button id="runtime-check" class="secondary-button" type="button">执行启动后复检</button>
               </div>
@@ -639,7 +752,7 @@
     <div id="sticky-actions" class="sticky-actions" hidden>
       <div>
         <strong id="sticky-title">还未完成连通性测试</strong>
-        <span id="sticky-copy">0 / 6 项必选测试已通过</span>
+        <span id="sticky-copy">0 / 7 项必选测试已通过</span>
       </div>
       <button id="sticky-test-all" class="secondary-button" type="button">测试必选项</button>
       <button id="sticky-generate" class="primary-button" type="button" disabled>生成配置</button>

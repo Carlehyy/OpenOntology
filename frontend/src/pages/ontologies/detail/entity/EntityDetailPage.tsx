@@ -403,7 +403,6 @@ export default function EntityDetailPage() {
         <div className="flex items-center justify-between mb-4">
           <div>
             <h3 className="font-semibold">关联实体（图关系）</h3>
-            <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">编辑后同步至知识图谱</p>
           </div>
           <button onClick={() => setGraphEditing(v => !v)}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs border ${graphEditing ? 'bg-[var(--color-bg-overlay)] text-[var(--color-text-inverse)] border-border' : 'text-muted-foreground hover:bg-muted'}`}>

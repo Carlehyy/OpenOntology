@@ -79,12 +79,6 @@ export const COMPONENT_CATALOG: ComponentCatalogEntry[] = [
     note: '大型数据网格可评估 reUI DataGrid（available），引入前需在 PR 说明与 antd 的边界。',
   },
   {
-    scenario: '文件树（层级目录浏览/选择，如记忆宫殿文件库）',
-    component: 'Tree（@/components/ui/tree，ReUI Tree + @headless-tree）',
-    status: 'vendored',
-    note: 'vendor 自 reui.io/r/tree.json（copy-and-own，TW3 + 平台 token 适配，@base-ui 依赖已内联替换）；数据状态机来自 @headless-tree/core + react，WAI-ARIA tree 与键盘导航内置。重数据管理场景（可勾选/拖拽/异步加载的大树）仍选 antd Tree。',
-  },
-  {
     scenario: '日期/日程、看板、甘特、步骤条、文件上传等复合控件',
     component: 'reUI 自研件（Calendar / Kanban / Gantt / Stepper / File Upload）',
     status: 'available',

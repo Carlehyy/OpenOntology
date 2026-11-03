@@ -30,11 +30,7 @@ INTEGRATED_SYNC_SUBJECT = "integrated.sync"
 SUPER_ASSISTANT_REFLECT_MICRO_SUBJECT = "super_assistant.reflect.micro"
 SUPER_ASSISTANT_REFLECT_FULL_SUBJECT = "super_assistant.reflect.full"
 SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT = "super_assistant.reflect.focused"
-SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT = "super_assistant.palace.extract"
-SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT = "super_assistant.palace.consolidate"
-SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT = "super_assistant.palace.ontology-rebuild"
 SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT = "super_assistant.scheduled.run"
-ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT = "ontology.documents.published"
 # 本体聊天后台回合：Web 只负责把已落库的 run_id 送达，执行在 executor 进程。
 ONTOLOGY_ASSISTANT_RUN_SUBJECT = "ontology.assistant.run"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
@@ -59,16 +55,8 @@ PIPELINE_STREAM_SUBJECTS = (
     DATASET_MIGRATE_SUBJECT,
     # 只能追加：值守循环（助手评估数据飞轮 M3）
     ASSISTANT_EVAL_AUTOPILOT_SUBJECT,
-    # 只能追加：记忆宫殿图谱抽取（超级助手）
-    SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT,
-    # 只能追加：记忆宫殿图谱定期聚类合并（超级助手）
-    SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
-    # 只能追加：本体发布态业务文档就绪（本体域派发、宫殿消费）
-    ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
     # 只能追加：超级助手用户定时任务（无人值守执行）
     SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
-    # 只能追加：本体文档手动重建（失败重试离开 Web 进程，占抽取信号量）
-    SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
     # 只能追加：任务实例运行时控制（节点派发/插话；M1 由假执行器承接）
     TASK_INSTANCES_CONTROL_SUBJECT,
     # Append-only: full integrated snapshots execute outside the HTTP worker.
@@ -311,19 +299,6 @@ def dispatch_super_assistant_reflection(kind: str, payload: dict) -> None:
     dispatch_task(subject, payload)
 
 
-def dispatch_super_assistant_palace_extract(owner_id: str, file_id: str) -> None:
-    """记忆宫殿图谱抽取派发入口。
-
-    payload 约定：owner_id/file_id 必填。消费侧幂等由 palace build 记录
-    （同 (file_id, sha256) 成功即跳过）兜底；无 NATS_URL 时调用方降级为
-    守护线程内联（见 palace_service.request_build）。
-    """
-    dispatch_task(SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT, {
-        "owner_id": owner_id,
-        "file_id": file_id,
-    })
-
-
 def dispatch_super_assistant_scheduled_run(run_id: str) -> None:
     """超级助手定时任务执行派发入口。
 
@@ -331,52 +306,6 @@ def dispatch_super_assistant_scheduled_run(run_id: str) -> None:
     running 视为重复投递）。
     """
     dispatch_task(SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT, {"run_id": run_id})
-
-
-def dispatch_super_assistant_palace_consolidate(owner_id: str) -> None:
-    """记忆宫殿聚类合并派发入口（每日调度 / 手动触发共用）。
-
-    payload 约定：owner_id 必填。合并本身幂等（重复实体已收敛时候选
-    检测为空，直接空跑）；失败等下一调度周期重试，无需 Msg-Id 级防重。
-    """
-    dispatch_task(SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT, {
-        "owner_id": owner_id,
-    })
-
-
-def dispatch_super_assistant_palace_ontology_rebuild(doc_id: str) -> None:
-    """本体文档手动重建派发入口（Web 端重试按钮）。
-
-    payload 约定：doc_id 必填——内容已镜像在宫殿工作区，不需要事件
-    全文重放。消费侧按行内状态机幂等（pending/building 在途跳过），
-    且必须与抽取共用并发闸（分钟级 LLM 长任务）。无 NATS_URL 时调用
-    方降级为守护线程内联（见 palace_service.rebuild_ontology_document）。
-    """
-    dispatch_task(SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT, {
-        "doc_id": doc_id,
-    })
-
-
-def dispatch_ontology_document_published(payload: dict) -> None:
-    """本体发布态业务文档就绪事件派发入口（本体域发布/回滚/落地 + 每日对账）。
-
-    payload 约定：ontology_id/version_id/title/document_md/fingerprint 必填，
-    内容随消息自包含——消费方（super_assistant 宫殿）不得反向依赖本体域，
-    幂等由消费侧按 (ontology_id, fingerprint) 状态机兜底。事件语义是
-    「该本体当前发布态业务文档为 X」，重复投递无害。
-
-    不走 dispatch_task：其 Msg-Id 惯例按 payload 全量值拼接，document_md
-    会被复制进 NATS 消息头，大文档直接超 max_payload。这里沿用
-    dispatch_pipeline_task 的直调形式，Msg-Id 只携带本体标识 + 指纹。
-    """
-    _dispatch_sync(
-        ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
-        dict(payload),
-        (
-            f"{ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT}:"
-            f"{payload.get('ontology_id')}:{payload.get('fingerprint')}:{time.time_ns()}"
-        ),
-    )
 
 
 def dispatch_assistant_eval_autopilot(config_id: str) -> None:

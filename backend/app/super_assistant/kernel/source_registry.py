@@ -1,4 +1,4 @@
-"""Durable source lifecycle markers shared by memory, palace and kernel context."""
+"""Durable source lifecycle markers shared by memory and kernel context."""
 from __future__ import annotations
 
 from datetime import datetime, timezone

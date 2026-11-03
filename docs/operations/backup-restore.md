@@ -8,11 +8,23 @@
 - n8n workflow 定义及其受控凭据备份策略；
 - API Hub 独立数据目录；
 - 共享 uploads；
+- WeKnora 独立 `weknora_postgres_data`、`weknora_neo4j_data`、
+  `weknora_redis_data`、`weknora_data`、`weknora_docreader_tmp` 与
+  `weknora_state`（集成元数据，含 MCP 凭据，按秘密管理）；
 - 服务器 `.env` 与部署所需非秘密配置；
 - 当前镜像 digest/版本和 Compose 配置。
 
 Redis 队列是否需要持久恢复取决于任务幂等与业务 RPO，必须在具体运行手册中
-说明。
+说明。WeKnora 的数据库、Neo4j、文件卷、`weknora_state` 与 `.env` 中的
+`WEKNORA_SYSTEM_AES_KEY`/`WEKNORA_SYSTEM_SIGNING_KEY` 必须作为同一恢复点
+保存：
+
+- 仅丢失 `weknora_state` 时，可由授权的 bootstrap/verify 轮换 MCP token 并
+  重建 state；旧 token 随即作废，不能继续使用；
+- 丢失 `WEKNORA_SYSTEM_AES_KEY` 或 signing key 且没有同恢复点备份时，已加密
+  的模型/MCP 等凭据可能不可逆丢失。必须恢复同一恢复点的 key，或由授权管理员
+  手工重新配置凭据；不能承诺 bootstrap 能恢复这些密文。
+- `WEKNORA_JWT_SECRET` 丢失只影响登录会话，需要重新登录，不属于密文恢复。
 
 服务器 `.env` 与 PostgreSQL/API Hub 数据必须作为同一恢复点管理。
 `ENCRYPTION_KEY`（历史环境中可能由当时的 `SECRET_KEY` 派生）是模型、Connection、

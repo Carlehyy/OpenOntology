@@ -7,7 +7,6 @@ from app.super_assistant.models import (
     SuperAssistantDelegation,
     SuperAssistantMcpServer,
     SuperAssistantMemory,
-    SuperAssistantPalaceFile,
 )
 from app.super_assistant.kernel.migration_report import (
     backfill_legacy_data,
@@ -22,7 +21,7 @@ def test_legacy_report_is_explicitly_report_only(db):
     assert report["mutated"] is False
     assert report["schema_version"] == "kernel.v1.legacy-disposition.v1"
     assert {row["source"] for row in report["rows"]} == {
-        "delegation", "memory", "palace_file", "mcp_server", "skill", "remote_agent",
+        "delegation", "memory", "mcp_server", "skill", "remote_agent",
     }
     memory = next(row for row in report["rows"] if row["source"] == "memory")
     assert memory["readonly"] == memory["total"]
@@ -36,8 +35,7 @@ def _legacy_fixture(db):
     delegation = SuperAssistantDelegation(owner_id=owner.id, super_conversation_id=conv.id, assistant_key="ontology_agent", status="timeout", summary="old task", conversation_ref="legacy-session")
     mcp = SuperAssistantMcpServer(owner_id=owner.id, name="old-mcp", url="https://example.invalid", transport="streamable_http")
     memory = SuperAssistantMemory(owner_id=owner.id, content="private fact")
-    palace = SuperAssistantPalaceFile(owner_id=owner.id, filename="old.txt", artifact_id="artifact-1", sha256="a" * 64)
-    db.add_all([delegation, mcp, memory, palace]); db.flush()
+    db.add_all([delegation, mcp, memory]); db.flush()
     return owner, conv, delegation, mcp
 
 

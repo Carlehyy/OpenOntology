@@ -9,8 +9,8 @@ Durable background turns for the ontology assistant:
 - a partial unique index enforces one active (queued/running) run per
   conversation in both PostgreSQL and SQLite.
 
-Revision ID: 0141_agent_run_ledger
-Revises: 0140_super_assistant_conversation_summaries
+Revision ID: 0142_agent_run_ledger
+Revises: 0141_retire_super_assistant_palace
 Create Date: 2026-11-03
 """
 from __future__ import annotations
@@ -20,8 +20,8 @@ import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
 
-revision = "0141_agent_run_ledger"
-down_revision = "0140_super_assistant_conversation_summaries"
+revision = "0142_agent_run_ledger"
+down_revision = "0141_retire_super_assistant_palace"
 branch_labels = None
 depends_on = None
 

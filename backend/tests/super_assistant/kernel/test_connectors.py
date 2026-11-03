@@ -212,3 +212,134 @@ async def test_remote_direct_revalidates_endpoint_before_network_request(monkeyp
     )
     with pytest.raises(ContractError, match="endpoint rejected"):
         await connector.invoke(run_id="r1", call_id="c1", input_ref='{"message":"x"}', deadline=None)
+
+
+@pytest.mark.asyncio
+async def test_weknora_mcp_connector_routes_through_service_and_is_read_only(monkeypatch):
+    from app.super_assistant.kernel.connectors import McpToolConnector
+    from app.super_assistant.weknora import service as weknora_service
+
+    calls = []
+
+    async def fake_call_tool(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return '{"content":[{"type":"text","text":"ok"}]}'
+
+    monkeypatch.setattr(weknora_service, "call_tool", fake_call_tool)
+    connector = McpToolConnector(
+        server_id="server-weknora",
+        server_name="platform_weknora",
+        tool_name="search_knowledge",
+        transport="streamable_http",
+        url="http://weknora:8080/mcp/endpoint-1",
+        builtin_key="weknora",
+    )
+    assert connector.side_effect_class == "read_only"
+    result = await connector.invoke(
+        run_id="r1", call_id="c1",
+        input_ref='{"arguments":{"query":"本体"}}', deadline=None,
+    )
+    assert result["status"] == "answered"
+    assert calls == [("search_knowledge", {"query": "本体"})]
+
+    denied = McpToolConnector(
+        server_id="server-weknora",
+        server_name="platform_weknora",
+        tool_name="add_document",
+        transport="streamable_http",
+        url="http://weknora:8080/mcp/endpoint-1",
+        builtin_key="weknora",
+    )
+    with pytest.raises(ContractError, match="read-only allowlist"):
+        await denied.invoke(
+            run_id="r1", call_id="c2",
+            input_ref='{"arguments":{"content":"x"}}', deadline=None,
+        )
+    assert calls == [("search_knowledge", {"query": "本体"})]
+
+
+@pytest.mark.asyncio
+async def test_other_builtin_mcp_connector_refuses_http_dispatch(monkeypatch):
+    from app.super_assistant.kernel.connectors import McpToolConnector
+
+    async def unreachable(**kwargs):  # pragma: no cover - 分流在前
+        raise AssertionError(f"should not call MCP {kwargs}")
+
+    monkeypatch.setattr(
+        "app.super_assistant.mcp_client.call_tool", unreachable,
+    )
+    connector = McpToolConnector(
+        server_id="server-minio",
+        server_name="platform_minio",
+        tool_name="minio_status",
+        transport="streamable_http",
+        url="builtin://minio",
+        builtin_key="minio",
+    )
+    with pytest.raises(ContractError, match="in-process channel"):
+        await connector.invoke(
+            run_id="r1", call_id="c1",
+            input_ref='{"arguments":{}}', deadline=None,
+        )
+
+
+def test_weknora_capability_snapshot_is_frozen_as_read_only(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.shared.database import Base
+    from app.super_assistant.kernel import runtime as kernel_runtime
+    from app.super_assistant.kernel.connectors import McpToolConnector
+    from app.super_assistant.kernel.models import CapabilityRevision
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'weknora-capability.db'}")
+    Base.metadata.create_all(bind=engine, tables=[CapabilityRevision.__table__])
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    with Session() as db:
+        connector = McpToolConnector(
+            server_id="server-weknora",
+            server_name="platform_weknora",
+            tool_name="search_knowledge",
+            transport="streamable_http",
+            url="http://weknora:8080/mcp/endpoint-1",
+            builtin_key="weknora",
+            manifest_hash="digest-1",
+        )
+        kernel_runtime._persist_connector_capability(db, connector, source="mcp")
+        db.commit()
+        row = db.query(CapabilityRevision).one()
+        assert row.side_effect_class == "read_only"
+        assert row.source == "mcp"
+        assert row.enabled is True
+    engine.dispose()
+
+
+@pytest.mark.parametrize("denied_tool", ["ask", "add_document", "delete_document"])
+@pytest.mark.asyncio
+async def test_weknora_connector_rejects_non_allowlisted_tool_before_network(
+    monkeypatch, denied_tool,
+):
+    from app.super_assistant.kernel.connectors import McpToolConnector
+    from app.super_assistant.weknora import service as weknora_service
+
+    calls = []
+
+    async def fake_call_tool(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return "{}"
+
+    monkeypatch.setattr(weknora_service, "call_tool", fake_call_tool)
+    connector = McpToolConnector(
+        server_id="server-weknora",
+        server_name="platform_weknora",
+        tool_name=denied_tool,
+        transport="streamable_http",
+        url="http://weknora:8080/mcp/endpoint-1",
+        builtin_key="weknora",
+    )
+    with pytest.raises(ContractError, match="read-only allowlist"):
+        await connector.invoke(
+            run_id="r1", call_id="c1",
+            input_ref='{"arguments":{"query":"x"}}', deadline=None,
+        )
+    assert calls == []

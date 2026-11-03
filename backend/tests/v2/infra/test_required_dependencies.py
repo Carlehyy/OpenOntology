@@ -8,6 +8,7 @@ import stat
 import subprocess
 
 import pytest
+import yaml
 
 from app.shared.config import (
     Settings,
@@ -37,6 +38,22 @@ MATERIALIZED_KEYS = {
     "N8N_API_URL",
     "N8N_API_KEY",
     "N8N_TIMEOUT_SECONDS",
+    "WEKNORA_CHAT_BASE_URL",
+    "WEKNORA_CHAT_API_KEY",
+    "WEKNORA_CHAT_MODEL",
+    "WEKNORA_EMBEDDING_BASE_URL",
+    "WEKNORA_EMBEDDING_API_KEY",
+    "WEKNORA_EMBEDDING_MODEL",
+    "WEKNORA_EMBEDDING_DIMENSIONS",
+    "WEKNORA_WEB_URL",
+    "WEKNORA_ADMIN_USER",
+    "WEKNORA_ADMIN_EMAIL",
+    "WEKNORA_APP_IMAGE",
+    "WEKNORA_UI_IMAGE",
+    "WEKNORA_DOCREADER_IMAGE",
+    "WEKNORA_POSTGRES_IMAGE",
+    "WEKNORA_REDIS_IMAGE",
+    "WEKNORA_NEO4J_IMAGE",
 }
 MATERIALIZER_SOURCE_VALUES = {
     "PROD_PUBLIC_PORT": "8080",
@@ -60,6 +77,29 @@ MATERIALIZER_SOURCE_VALUES = {
     "PROD_MINIO_USE_SSL": "true",
     "PROD_N8N_API_URL": "https://n8n.example.com/api/v1",
     "PROD_N8N_API_KEY": "synthetic-n8n-api-key",
+    "PROD_WEKNORA_CHAT_BASE_URL": "https://chat.example.com/v1",
+    "PROD_WEKNORA_CHAT_API_KEY": "synthetic-weknora-chat-key",
+    "PROD_WEKNORA_CHAT_MODEL": "synthetic-chat-model",
+    "PROD_WEKNORA_EMBEDDING_BASE_URL": "https://embed.example.com/v1",
+    "PROD_WEKNORA_EMBEDDING_API_KEY": "synthetic-weknora-embedding-key",
+    "PROD_WEKNORA_EMBEDDING_MODEL": "synthetic-embedding-model",
+    "PROD_WEKNORA_EMBEDDING_DIMENSIONS": "1024",
+}
+
+MATERIALIZER_OPTIONAL_VALUES = {
+    "PROD_WEKNORA_WEB_URL": "https://weknora.example.com",
+    "PROD_WEKNORA_ADMIN_USER": "admin",
+    "PROD_WEKNORA_ADMIN_EMAIL": "admin@weknora.local",
+    "PROD_WEKNORA_APP_IMAGE": f"example.invalid/weknora-app@sha256:{'a' * 64}",
+    "PROD_WEKNORA_UI_IMAGE": f"example.invalid/weknora-ui@sha256:{'b' * 64}",
+    "PROD_WEKNORA_DOCREADER_IMAGE": (
+        f"example.invalid/weknora-docreader@sha256:{'c' * 64}"
+    ),
+    "PROD_WEKNORA_POSTGRES_IMAGE": (
+        f"example.invalid/weknora-postgres@sha256:{'d' * 64}"
+    ),
+    "PROD_WEKNORA_REDIS_IMAGE": f"example.invalid/weknora-redis@sha256:{'e' * 64}",
+    "PROD_WEKNORA_NEO4J_IMAGE": f"example.invalid/weknora-neo4j@sha256:{'f' * 64}",
 }
 
 
@@ -86,6 +126,7 @@ def _required_settings(**updates) -> Settings:
         "integrated_dbx_commit": "0137e0cbc8b663da5a17ec424c6d47e4e5570ead",
         "n8n_api_url": "https://n8n.example.com/api/v1",
         "n8n_api_key": "strong-n8n-api-key",
+        "weknora_web_url": "https://kb.example.com",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
@@ -109,6 +150,7 @@ def _run_materializer(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(MATERIALIZER_SOURCE_VALUES)
+    env.update(MATERIALIZER_OPTIONAL_VALUES)
     env["PROD_N8N_TIMEOUT_SECONDS"] = "30"
     for key, value in (overrides or {}).items():
         if value is None:
@@ -198,6 +240,8 @@ def test_committed_manifest_template_declares_contract_without_secrets():
         "MINIO_ACCESS_KEY",
         "MINIO_SECRET_KEY",
         "N8N_API_KEY",
+        "WEKNORA_CHAT_API_KEY",
+        "WEKNORA_EMBEDDING_API_KEY",
     }
     assert all(manifest[key] == "" for key in secret_keys)
     assert ".internal" not in template.read_text(encoding="utf-8")
@@ -281,11 +325,120 @@ def test_materializer_validates_typed_values(
     assert not target.exists()
 
 
+def _compose_services(path: Path) -> dict[str, dict]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def resolved(node):
+        if isinstance(node, list):
+            return [resolved(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        merged: dict = {}
+        for key, value in node.items():
+            if key == "<<":
+                inherited = resolved(value)
+                if isinstance(inherited, list):
+                    for item in inherited:
+                        merged.update(item)
+                else:
+                    merged.update(inherited)
+            else:
+                merged[key] = resolved(value)
+        return merged
+
+    return {
+        name: resolved(block)
+        for name, block in raw.get("services", {}).items()
+    }
+
+
+def _assert_weknora_compose_graph():
+    local = _compose_services(ROOT / "docker-compose.local.yml")
+    prod = _compose_services(ROOT / "docker-compose.prod.yml")
+
+    init = local["weknora-app-init"]
+    bootstrap = local["weknora-bootstrap"]
+    app = local["weknora-app"]
+    verify = local["weknora-verify"]
+    gateway = local["weknora-gateway"]
+
+    for services in (local, prod):
+        for name in ("weknora-app-init", "weknora-app"):
+            assert services[name]["environment"]["RETRIEVE_DRIVER"] == "postgres"
+    assert init["environment"]["DISABLE_REGISTRATION"] == "false"
+    assert "ports" not in init
+    assert bootstrap["depends_on"]["weknora-app-init"]["condition"] == (
+        "service_healthy"
+    )
+    assert bootstrap["environment"]["WEKNORA_BOOTSTRAP_BASE_URL"] == (
+        "http://weknora-app-init:8080"
+    )
+    assert app["environment"]["DISABLE_REGISTRATION"] == "true"
+    assert app["depends_on"]["weknora-bootstrap"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert verify["depends_on"]["weknora-app"]["condition"] == (
+        "service_healthy"
+    )
+    assert verify["depends_on"]["weknora-bootstrap"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert "--verify" in verify["command"]
+    assert gateway["depends_on"]["weknora-verify"]["condition"] == (
+        "service_completed_successfully"
+    )
+    assert gateway["depends_on"]["backend"]["condition"] == "service_healthy"
+    assert gateway["depends_on"]["weknora-app"]["condition"] == (
+        "service_healthy"
+    )
+
+    assert prod["weknora-app"]["environment"]["DISABLE_REGISTRATION"] == (
+        "true"
+    )
+    assert prod["weknora-app-init"]["environment"][
+        "DISABLE_REGISTRATION"
+    ] == "false"
+    assert prod["weknora-gateway"]["depends_on"]["backend"]["condition"] == (
+        "service_healthy"
+    )
+    assert prod["weknora-gateway"]["depends_on"]["weknora-app"][
+        "condition"
+    ] == "service_healthy"
+
+    # The dependency graph must be acyclic; a gateway->backend edge is safe
+    # only because backend never depends on the gateway.
+    graph = {
+        name: set((block.get("depends_on") or {}).keys())
+        for name, block in {**local, **prod}.items()
+    }
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in visiting:
+            raise AssertionError(f"WeKnora compose dependency cycle at {node}")
+        if node in visited:
+            return
+        visiting.add(node)
+        for dependency in graph.get(node, set()):
+            visit(dependency)
+        visiting.remove(node)
+        visited.add(node)
+
+    for service in graph:
+        visit(service)
+
+
 def test_deploy_merges_required_runtime_manifest(tmp_path):
+    # Fold the WeKnora compose graph ordering assertions into this existing
+    # test so the pytest-split duration table keeps the same test IDs.
+    _assert_weknora_compose_graph()
     shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
     image_keys = (
         "POSTGRES_IMAGE", "REDIS_IMAGE", "NEO4J_IMAGE", "MINIO_IMAGE",
         "BROWSER_IMAGE", "PYTHON_BASE_IMAGE", "NODE_BASE_IMAGE", "NGINX_BASE_IMAGE",
+        "WEKNORA_APP_IMAGE", "WEKNORA_UI_IMAGE", "WEKNORA_DOCREADER_IMAGE",
+        "WEKNORA_POSTGRES_IMAGE", "WEKNORA_REDIS_IMAGE", "WEKNORA_NEO4J_IMAGE",
     )
     example = (tmp_path / ".env.example").read_text(encoding="utf-8").splitlines()
     replacements = {key: f"test/{key.lower()}@sha256:{'a' * 64}" for key in image_keys}
@@ -315,7 +468,9 @@ def test_deploy_merges_required_runtime_manifest(tmp_path):
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        # Fresh WeKnora bootstrap adds several durable secret writes; keep
+        # headroom for slow macOS fsync while retaining a bounded check.
+        timeout=40,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

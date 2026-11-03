@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -1055,3 +1056,172 @@ def test_api_hub_super_assistant_channel_blocks_platform_targets(tmp_path, monke
             db, "mcp-bridge://missing/tool") is True
         assert runtime._api_hub_target_denied(
             db, "https://partner.example.com/api") is False
+
+
+def _weknora_runtime_session(tmp_path, monkeypatch, *, tool_name: str):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / f'weknora-{tool_name}.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine, tables=_RUNTIME_TABLES)
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(runtime, "SessionLocal", TestingSession)
+    with TestingSession() as db:
+        db.add(User(
+            id="user-weknora", username="weknora-owner",
+            email="weknora@example.com", password_hash="unused", role="editor",
+        ))
+        db.add(ModelConfig(
+            id="model-weknora", name="Fake", config_type="llm", provider="openai",
+            models=["fake-model"], options={}, enabled=True, is_default=True,
+            created_by="user-weknora",
+        ))
+        db.add(SuperAssistantConversation(
+            id="conversation-weknora", owner_id="user-weknora",
+            title="WeKnora", model_config_id="model-weknora",
+        ))
+        db.add_all([
+            SuperAssistantMessage(
+                id="user-message-weknora", conversation_id="conversation-weknora",
+                role="user", content="查知识库", status="complete",
+            ),
+            SuperAssistantMessage(
+                id="assistant-message-weknora",
+                conversation_id="conversation-weknora",
+                role="assistant", content="", status="streaming",
+            ),
+            SuperAssistantMcpServer(
+                id="server-weknora", owner_id="user-weknora",
+                name="platform_weknora", display_name="知识图谱(WeKnora)",
+                builtin_key="weknora", transport="streamable_http",
+                url="http://weknora:8080/mcp/endpoint-1",
+                header_names=[], args=[], env_names=[], enabled=True,
+                constrained=True, require_confirmation=False,
+                tool_manifest=[{
+                    "name": tool_name,
+                    "description": tool_name,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                }],
+            ),
+        ])
+        db.commit()
+    return TestingSession, engine
+
+
+def test_runtime_dispatches_platform_weknora_through_service(tmp_path, monkeypatch):
+    TestingSession, engine = _weknora_runtime_session(
+        tmp_path, monkeypatch, tool_name="search_knowledge",
+    )
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call_tool(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return json.dumps(
+            {"content": [{"type": "text", "text": "命中片段"}]},
+            ensure_ascii=False,
+        )
+
+    from app.super_assistant.weknora import service as weknora_service
+
+    monkeypatch.setattr(weknora_service, "call_tool", fake_call_tool)
+    monkeypatch.setattr(
+        runtime, "call_tool",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"unexpected HTTP MCP call {kwargs}")
+        ),
+    )
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{
+                "id": "call-weknora",
+                "name": "mcp__platform_weknora__search_knowledge",
+                "arguments": {"query": "本体"},
+            }],
+            "usage": {"inputTokens": 10, "outputTokens": 2},
+        },
+        {
+            "content": "检索到相关片段。",
+            "tool_calls": [],
+            "usage": {"inputTokens": 20, "outputTokens": 5},
+        },
+    ])
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-weknora",
+        owner_id="user-weknora",
+        assistant_message_id="assistant-message-weknora",
+        requested_model_id="model-weknora",
+    ))
+    assert "命中片段" in events
+    assert calls == [("search_knowledge", {"query": "本体"})]
+    with TestingSession() as db:
+        run = db.query(SuperAssistantToolRun).one()
+        assert run.server_id == "server-weknora"
+        assert run.status == "success"
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "denied_tool", ["ask", "add_document", "delete_document"],
+)
+def test_runtime_rejects_weknora_tool_outside_read_only_allowlist(
+    tmp_path, monkeypatch, denied_tool,
+):
+    TestingSession, engine = _weknora_runtime_session(
+        tmp_path, monkeypatch, tool_name=denied_tool,
+    )
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call_tool(tool_name, arguments):
+        calls.append((tool_name, arguments))
+        return "{}"
+
+    from app.super_assistant.weknora import service as weknora_service
+
+    monkeypatch.setattr(weknora_service, "call_tool", fake_call_tool)
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{
+                "id": f"call-weknora-{denied_tool}",
+                "name": f"mcp__platform_weknora__{denied_tool}",
+                "arguments": {"query": "x"},
+            }],
+            "usage": {"inputTokens": 10, "outputTokens": 2},
+        },
+        {
+            "content": "该工具不可用。",
+            "tool_calls": [],
+            "usage": {"inputTokens": 20, "outputTokens": 5},
+        },
+    ])
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-weknora",
+        owner_id="user-weknora",
+        assistant_message_id="assistant-message-weknora",
+        requested_model_id="model-weknora",
+    ))
+    assert "只读白名单" in events
+    assert calls == []
+    with TestingSession() as db:
+        run = db.query(SuperAssistantToolRun).one()
+        assert run.status == "error"
+        assert "只读白名单" in (run.error or "")
+    engine.dispose()
+
+
+def test_builtin_tool_catalog_no_longer_exposes_palace_graph_tools():
+    names = {tool["name"] for tool in runtime._builtin_tools(True)}
+    assert "palace_graph_search" not in names
+    assert "palace_graph_files" not in names
+    assert {"palace_zones", "palace_read_zone", "palace_recall"} <= names
+    prompt = runtime._system_prompt([])
+    assert "palace_graph_search" not in prompt
+    assert "palace_zones" in prompt
