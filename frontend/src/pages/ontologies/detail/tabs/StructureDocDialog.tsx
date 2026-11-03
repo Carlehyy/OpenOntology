@@ -334,7 +334,7 @@ export default function StructureDocDialog({ open, ontologyId, ontologyName, ver
       setConfirmDiscard(null)
       setMode('view')
       toast.success('业务文档已保存', {
-        description: '发布正文与版本树已更新；知识图谱镜像是异步同步，可能有短暂延迟。',
+        description: '发布正文与版本树已更新。',
       })
     },
     onError: (error, variables) => {

@@ -15,7 +15,11 @@ from cryptography.fernet import Fernet
 import jwt
 from pydantic import ValidationError
 
-from app.shared.config import Settings, production_config_errors
+from app.shared.config import (
+    Settings,
+    production_config_errors,
+    required_dependency_config_errors,
+)
 from app.settings.workflows.n8n_client import enforce_n8n_url_policy
 
 
@@ -44,6 +48,7 @@ def _production_settings(**updates):
         "steward_browser_cdp_url": "http://browser:9222",
         "n8n_api_url": "https://n8n.example.com/api/v1",
         "n8n_api_key": "strong-n8n-api-key",
+        "weknora_web_url": "https://kb.example.com",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
@@ -182,6 +187,55 @@ def test_production_rejects_non_public_or_malformed_file_link_origins():
                for error in with_path)
 
 
+def test_production_rejects_default_local_weknora_web_origin():
+    """The localhost default is a development value; production needs a real
+    browser-reachable WeKnora origin or the frontend would link nowhere."""
+    default = Settings.model_fields["weknora_web_url"].default
+
+    assert default == "http://localhost:8089"
+    errors = production_config_errors(
+        _production_settings(weknora_web_url=default))
+    assert (
+        "WEKNORA_WEB_URL must use a browser-reachable public host in production"
+        in errors
+    )
+
+
+@pytest.mark.parametrize(
+    "web_url",
+    [
+        "https://user:pass@kb.example.com",
+        "https://kb.example.com/wiki",
+        "https://kb.example.com/?workspace=1",
+        "http://127.0.0.1:8089",
+        "http://[::1]:8089",
+    ],
+    ids=["credentials", "path", "query", "loopback-ipv4", "loopback-ipv6"],
+)
+def test_production_rejects_non_origin_or_local_weknora_web_url(web_url):
+    errors = production_config_errors(
+        _production_settings(weknora_web_url=web_url))
+    assert any(error.startswith("WEKNORA_WEB_URL must") for error in errors)
+
+
+def test_production_accepts_public_weknora_web_origin():
+    assert production_config_errors(_production_settings(
+        weknora_web_url="https://203.0.113.8:8444/",
+    )) == []
+
+
+def test_weknora_internal_contract_rejects_malformed_values():
+    bad_origin = required_dependency_config_errors(_production_settings(
+        weknora_base_url="http://user:pass@weknora-app:8080",
+    ))
+    bad_state = required_dependency_config_errors(_production_settings(
+        weknora_state_path="relative/state.json",
+    ))
+
+    assert "WEKNORA_BASE_URL must be an absolute HTTP(S) origin" in bad_origin
+    assert "WEKNORA_STATE_PATH must be an absolute path" in bad_state
+
+
 def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     compose = yaml.safe_load((ROOT / "docker-compose.prod.yml").read_text())
     backend = compose["services"]["backend"]
@@ -220,13 +274,61 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert "depends_on" not in dbx
     assert compose["networks"]["dbx_bridge"] == {"driver": "bridge"}
     assert "internal" not in compose["networks"]["dbx_bridge"]
-    assert backend["networks"] == ["default", "dbx_bridge"]
+    # WeKnora is a separate product on a private network: only the backend
+    # joins it, and no internal WeKnora service publishes a host port.
+    assert compose["networks"]["weknora_internal"] == {"driver": "bridge"}
+    assert backend["networks"] == ["default", "dbx_bridge", "weknora_internal"]
+    assert backend["depends_on"]["weknora-app"]["condition"] == "service_healthy"
+    for service in (
+        "weknora-app",
+        "weknora-db",
+        "weknora-redis",
+        "weknora-neo4j",
+        "weknora-docreader",
+    ):
+        assert compose["services"][service]["networks"] == [
+            "weknora_internal"
+        ]
+        assert "ports" not in compose["services"][service]
     assert "dbx_data:/app/data" in dbx["volumes"]
     assert "dbx_data" in compose["volumes"]
     assert "--requirepass" in compose["services"]["redis"]["command"][-1]
     assert "PIPELINE_FILE_PUBLIC_APP_BASE_URL" in backend["environment"]
     assert "PIPELINE_FILE_PUBLIC_API_BASE_URL" in backend["environment"]
     assert "uploads:/uploads" in backend["volumes"]
+
+    # .env carries WeKnora bootstrap credentials. Compose merges `environment`
+    # over `env_file`, so every service that loads .env must mask them with an
+    # explicit empty value; only the bootstrap path may keep the real values.
+    weknora_bootstrap_only = (
+        "WEKNORA_ADMIN_PASSWORD",
+        "WEKNORA_CHAT_API_KEY",
+        "WEKNORA_EMBEDDING_API_KEY",
+        "WEKNORA_DB_PASSWORD",
+        "WEKNORA_REDIS_PASSWORD",
+        "WEKNORA_NEO4J_PASSWORD",
+        "WEKNORA_JWT_SECRET",
+        "WEKNORA_SYSTEM_AES_KEY",
+        "WEKNORA_SYSTEM_SIGNING_KEY",
+    )
+    env_file_services = [
+        name for name, service in compose["services"].items()
+        if service.get("env_file")
+    ]
+    assert env_file_services == ["backend", "pipeline_executor", "task_worker"]
+    for service in env_file_services:
+        environment = compose["services"][service]["environment"]
+        for key in weknora_bootstrap_only:
+            assert environment[key] == ""
+    bootstrap_environment = compose["services"]["weknora-bootstrap"][
+        "environment"
+    ]
+    for key in (
+        "WEKNORA_ADMIN_PASSWORD",
+        "WEKNORA_CHAT_API_KEY",
+        "WEKNORA_EMBEDDING_API_KEY",
+    ):
+        assert key in bootstrap_environment
 
 
 def test_removed_graph_fallback_dependencies_are_not_packaged():
@@ -268,6 +370,43 @@ def test_local_compose_requires_real_stack_without_chroma():
         "healthcheck"
     ]["test"][-1]
     assert "--requirepass" in compose["services"]["redis"]["command"][-1]
+
+    # Same WeKnora bootstrap-credential isolation as production: .env is shared
+    # with platform services, so every env_file consumer masks the secrets that
+    # only weknora-bootstrap/weknora-verify are meant to read.
+    weknora_bootstrap_only = (
+        "WEKNORA_ADMIN_PASSWORD",
+        "WEKNORA_CHAT_API_KEY",
+        "WEKNORA_EMBEDDING_API_KEY",
+        "WEKNORA_DB_PASSWORD",
+        "WEKNORA_REDIS_PASSWORD",
+        "WEKNORA_NEO4J_PASSWORD",
+        "WEKNORA_JWT_SECRET",
+        "WEKNORA_SYSTEM_AES_KEY",
+        "WEKNORA_SYSTEM_SIGNING_KEY",
+    )
+    env_file_services = [
+        name for name, service in compose["services"].items()
+        if service.get("env_file")
+    ]
+    assert env_file_services == [
+        "migrate",
+        "backend",
+        "pipeline_executor",
+        "task_worker",
+    ]
+    for service in env_file_services:
+        environment = compose["services"][service]["environment"]
+        for key in weknora_bootstrap_only:
+            assert environment[key] == ""
+    for service in ("weknora-bootstrap", "weknora-verify"):
+        environment = compose["services"][service]["environment"]
+        for key in (
+            "WEKNORA_ADMIN_PASSWORD",
+            "WEKNORA_CHAT_API_KEY",
+            "WEKNORA_EMBEDDING_API_KEY",
+        ):
+            assert key in environment
 
 
 def test_deploy_probes_dependencies_after_start_and_before_migrations():
@@ -649,7 +788,7 @@ def _run_deploy_validation(
         env.update(extra_env)
     return subprocess.run(
         ["bash", str(ROOT / "deploy" / "deploy-prod.sh")],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=20,
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=40,
     )
 
 
@@ -689,7 +828,19 @@ def _write_valid_dependency_manifest(
         "MINIO_USE_SSL=true\n"
         "N8N_API_URL=https://n8n.example.com/api/v1\n"
         "N8N_API_KEY=synthetic-n8n-api-key\n"
-        "N8N_TIMEOUT_SECONDS=30\n",
+        "N8N_TIMEOUT_SECONDS=30\n"
+        "WEKNORA_WEB_URL=https://kb.example.com\n"
+        "WEKNORA_CHAT_BASE_URL=https://chat.example.com/v1\n"
+        "WEKNORA_CHAT_API_KEY=synthetic-weknora-chat-key\n"
+        "WEKNORA_CHAT_MODEL=synthetic-chat-model\n"
+        "WEKNORA_EMBEDDING_BASE_URL=https://embed.example.com/v1\n"
+        "WEKNORA_EMBEDDING_API_KEY=synthetic-weknora-embedding-key\n"
+        "WEKNORA_EMBEDDING_MODEL=synthetic-embedding-model\n"
+        "WEKNORA_EMBEDDING_DIMENSIONS=1024\n"
+        "WEKNORA_KNOWLEDGE_BASE_NAME=共享知识库\n"
+        "WEKNORA_TIMEOUT_SECONDS=15\n"
+        "WEKNORA_ADMIN_USER=admin\n"
+        "WEKNORA_ADMIN_EMAIL=admin@weknora.local\n",
         encoding="utf-8",
     )
 
@@ -742,6 +893,9 @@ def test_deploy_bootstraps_server_env_without_more_github_secrets(tmp_path):
         generated["MINIO_ACCESS_KEY"],
         generated["MINIO_SECRET_KEY"],
         generated["API_HUB_SYSTEM_MCP_TOKEN"],
+        generated["WEKNORA_CHAT_API_KEY"],
+        generated["WEKNORA_EMBEDDING_API_KEY"],
+        generated["WEKNORA_DB_PASSWORD"],
     ):
         assert sensitive_value
         assert sensitive_value not in output

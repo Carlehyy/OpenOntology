@@ -274,33 +274,11 @@ class Settings(BaseSettings):
     # Super-assistant conversation attachments reuse the steward workspace
     # implementation. Empty root resolves to <uploads_dir>/super-assistant-sessions.
     super_assistant_workspace_root: str = ""
-    # Memory-palace user file library (cross-conversation long-term knowledge)
-    # reuses the same workspace implementation with its own root. Empty root
-    # resolves to <uploads_dir>/super-assistant-palace.
-    super_assistant_palace_workspace_root: str = ""
-    # 记忆宫殿配额与保护（均可经环境变量覆盖）：单用户文件数上限、总存储
-    # 上限（MB）、在途抽取数上限（owner 的 pending+building 文件数）、每小时
-    # 抽取次数上限（palace builds 表最近 1 小时行数）、单次 ZIP 批量导入的
-    # 文件数上限。超限统一在 palace_service._check_quotas 抛 429。
-    # 文件夹同步上线时上调文件数/存储/每小时三项默认值（原 500/2048/60），
-    # 首次整夹同步不再撞顶；在途与并发是 LLM 成本护栏，维持不变。
-    super_assistant_palace_max_files_per_user: int = 2000
-    super_assistant_palace_max_total_mb: int = 10240
-    super_assistant_palace_max_in_flight: int = 20
-    super_assistant_palace_max_builds_per_hour: int = 300
-    super_assistant_palace_batch_max_files: int = 100
-    # 图谱抽取并发（进程级，与 executor 全局信号量隔离，reflect 始终有保底名额）
-    super_assistant_palace_extract_concurrency: int = 1
-    # 每天 03:00 的实体聚类合并定时任务开关（手动触发端点不受此开关影响）
-    super_assistant_palace_consolidate_enabled: bool = True
-    # 记忆宫殿图谱视图缓存（fail-open 加速层，键落 db 1）：弹窗打开/轮询期间
-    # 的 GET /palace/graph 整体短 TTL 缓存；抽取完成、文件删除、聚类合并与
-    # 本体文档建图在写侧 bump 版本换键，executor 进程经共享 Redis 同样生效。
-    super_assistant_palace_graph_cache_enabled: bool = True
-    super_assistant_palace_graph_cache_ttl_seconds: int = Field(default=30, ge=2, le=300)
-    super_assistant_palace_graph_cache_max_bytes: int = Field(
-        default=2_000_000, ge=100_000, le=20_000_000
-    )
+    weknora_base_url: str = "http://weknora-app:8080"
+    weknora_state_origin: str = "http://weknora-app:8080"
+    weknora_web_url: str = "http://localhost:8089"
+    weknora_state_path: str = "/weknora-state/integration.json"
+    weknora_timeout_seconds: int = Field(default=15, ge=3, le=60)
     steward_browser_cdp_url: str = "http://localhost:9222"
     steward_browser_timeout_seconds: int = 30
     steward_browser_max_captures: int = 300
@@ -588,6 +566,26 @@ def required_dependency_config_errors(current: Settings) -> list[str]:
         or not str(current.n8n_api_key or "").strip()
     ):
         errors.append("N8N_API_URL/N8N_API_KEY must configure n8n")
+    for key, value in (
+        ("WEKNORA_BASE_URL", current.weknora_base_url),
+        ("WEKNORA_STATE_ORIGIN", current.weknora_state_origin),
+        ("WEKNORA_WEB_URL", current.weknora_web_url),
+    ):
+        try:
+            parsed = urlsplit(value)
+            parsed.port
+            valid = (
+                parsed.scheme in {"http", "https"} and parsed.hostname
+                and parsed.username is None and parsed.password is None
+                and parsed.path in {"", "/"} and not parsed.query
+                and not parsed.fragment and not any(char.isspace() for char in value)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            errors.append(f"{key} must be an absolute HTTP(S) origin")
+    if not os.path.isabs(str(current.weknora_state_path)):
+        errors.append("WEKNORA_STATE_PATH must be an absolute path")
     return errors
 
 
@@ -701,6 +699,7 @@ def production_config_errors(current: Settings) -> list[str]:
          current.pipeline_file_public_app_base_url),
         ("PIPELINE_FILE_PUBLIC_API_BASE_URL",
          current.pipeline_file_public_api_base_url),
+        ("WEKNORA_WEB_URL", current.weknora_web_url),
     ):
         raw = str(value or "").strip()
         try:

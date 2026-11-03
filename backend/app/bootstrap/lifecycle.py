@@ -36,15 +36,19 @@ async def application_lifespan(
         seed_database()
 
         if settings.environment != "test":
-            # Probe every configured integration before starting any owned
-            # background thread. Chromium CDP and (outside production) n8n
-            # are handled as advisory by this probe; PostgreSQL, Redis,
-            # Neo4j, MinIO and production n8n fail closed.
+            # Validate integrations and the default knowledge capability before
+            # any owned worker starts; partial startup must not leak workers.
             from app.shared.dependency_probe import (
                 probe_startup_dependencies,
             )
 
-            probe_startup_dependencies()
+            await asyncio.to_thread(probe_startup_dependencies)
+
+            from app.super_assistant.weknora.mcp_service import (
+                install_for_platform_admin,
+            )
+
+            await asyncio.to_thread(install_for_platform_admin)
 
         # 初始化 Neo4j 索引。除显式单元测试环境外，索引初始化是启动契约，
         # 不能让应用在缺少图约束/索引时继续对外服务。
@@ -188,29 +192,6 @@ async def application_lifespan(
             except Exception as exc:
                 _main_logger.warning("助手评估值守定时器启动失败: %s", exc)
 
-        # 记忆宫殿聚类合并定时器（每天 03:00 为有图谱的用户派发合并任务；
-        # APScheduler 进程内定时 + NATS JetStream，旁路能力，失败不阻断启动）
-        if settings.environment != "test":
-            try:
-                from app.super_assistant.palace_consolidate import (
-                    start as start_palace_consolidate,
-                )
-
-                start_palace_consolidate()
-            except Exception as exc:
-                _main_logger.warning("记忆宫殿聚类合并定时器启动失败: %s", exc)
-
-        # 本体发布文档对账定时器（每天 04:00 重放全部发布态业务文档事件，
-        # 宫殿消费侧按指纹幂等：漂移自愈、正常时 no-op；失败不阻断启动）
-        if settings.environment != "test":
-            try:
-                from app.ontologies.published_documents import (
-                    start as start_published_documents_reconcile,
-                )
-
-                start_published_documents_reconcile()
-            except Exception as exc:
-                _main_logger.warning("本体发布文档对账定时器启动失败: %s", exc)
         # 远程助手任务队列清理（每天 04:00 删除保留 7 天外的 done/expired/
         # 孤儿任务行；APScheduler 进程内定时，单语句轻量维护不走 NATS）
         if settings.environment != "test":
@@ -339,12 +320,6 @@ async def application_lifespan(
             except Exception:  # noqa: BLE001
                 _main_logger.exception("Sentinel cleanup failed")
         try:
-            from app.super_assistant import palace_consolidate
-
-            palace_consolidate.shutdown()
-        except Exception:  # noqa: BLE001
-            _main_logger.exception("Palace consolidate scheduler cleanup failed")
-        try:
             from app.super_assistant import scheduled_scheduler
 
             scheduled_scheduler.shutdown()
@@ -357,13 +332,6 @@ async def application_lifespan(
         except Exception:  # noqa: BLE001
             _main_logger.exception("Notifications delivery scheduler cleanup failed")
         try:
-            from app.ontologies import published_documents
-
-            published_documents.shutdown()
-        except Exception:  # noqa: BLE001
-            _main_logger.exception(
-                "Published documents reconcile scheduler cleanup failed"
-            )
             from app.super_assistant import remote_agent_task_gc
 
             remote_agent_task_gc.shutdown()

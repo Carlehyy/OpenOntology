@@ -123,9 +123,8 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
     (config,), = [fake_nats["add_stream"]]
     assert config.name == PIPELINE_STREAM == "PIPELINE_TASKS"
     # 流已扩容：旧 subject 保持不变，新增 UI 手动运行、数据集导入、
-    # 超级助手三种反思任务、成品→人工迁移任务、记忆宫殿图谱抽取与
-    # 定期聚类合并、本体发布文档事件、本体文档手动重建及集成资产完整同步
-    # （扩容只能追加，subject 顺序须与 PIPELINE_STREAM_SUBJECTS 一致）
+    # 超级助手三种反思任务、成品→人工迁移任务、用户定时任务与集成资产
+    # 完整同步（扩容只能追加，subject 顺序须与 PIPELINE_STREAM_SUBJECTS 一致）
     assert config.subjects == [
         "pipeline.task.execute",
         "task.pipeline.run",
@@ -138,11 +137,7 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
         "super_assistant.reflect.focused",
         "task.dataset.migrate",
         "assistant_evaluation.autopilot.cycle",
-        "super_assistant.palace.extract",
-        "super_assistant.palace.consolidate",
-        "ontology.documents.published",
         "super_assistant.scheduled.run",
-        "super_assistant.palace.ontology-rebuild",
         "task_instances.control",
         "integrated.sync",
     ]
@@ -188,82 +183,6 @@ def test_dispatch_task_dataset_import_subject(fake_nats):
         r"task\.dataset\.import:job_id=job-1:kind=inspect:\d+",
         headers["Nats-Msg-Id"],
     )
-
-
-def test_dispatch_ontology_document_published_keeps_msg_id_compact(fake_nats):
-    """本体文档事件自包含携带正文，但 Msg-Id 只含本体标识+指纹：
-    dispatch_task 的全量值拼接惯例会把 document_md 复制进 NATS 消息头，
-    大文档直接超 max_payload（对抗式审查回归）。"""
-    from app.data_channel.pipeline_tasks.dispatch import (
-        ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
-        dispatch_ontology_document_published,
-    )
-
-    document_md = "# 大文档\n" + "内容" * 50_000  # 约 300KB，远超 Msg-Id 合理长度
-    dispatch_ontology_document_published({
-        "ontology_id": "ont-1",
-        "ontology_name": "供应链本体",
-        "version_id": "rel-2",
-        "version_number": "v2",
-        "title": "供应链业务文档",
-        "document_md": document_md,
-        "fingerprint": "fp-1",
-        "published_at": None,
-    })
-
-    (subject, payload, headers), = fake_nats["published"]
-    assert subject == ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT == "ontology.documents.published"
-    body = json.loads(payload.decode())
-    assert body["document_md"] == document_md  # 正文只在消息体
-    msg_id = headers["Nats-Msg-Id"]
-    assert len(msg_id) < 200
-    assert "内容" not in msg_id
-    assert re.fullmatch(r"ontology\.documents\.published:ont-1:fp-1:\d+", msg_id)
-
-
-def test_dispatch_super_assistant_palace_consolidate(fake_nats):
-    from app.data_channel.pipeline_tasks.dispatch import (
-        SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
-        dispatch_super_assistant_palace_consolidate,
-    )
-
-    dispatch_super_assistant_palace_consolidate("user-1")
-
-    (subject, payload, headers), = fake_nats["published"]
-    assert subject == SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT
-    assert SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT == "super_assistant.palace.consolidate"
-    body = json.loads(payload.decode())
-    assert body["owner_id"] == "user-1"
-    assert datetime.fromisoformat(body["dispatched_at"])
-    assert re.fullmatch(
-        r"super_assistant\.palace\.consolidate:owner_id=user-1:\d+",
-        headers["Nats-Msg-Id"],
-    )
-    assert fake_nats["drained"] is True
-
-
-def test_dispatch_super_assistant_palace_ontology_rebuild(fake_nats):
-    """本体文档手动重建短消息契约：subject 字面量 + 精简 payload（只带 doc_id，
-    内容已镜像，不随消息重放全文）+ Msg-Id 可去重。"""
-    from app.data_channel.pipeline_tasks.dispatch import (
-        SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
-        dispatch_super_assistant_palace_ontology_rebuild,
-    )
-
-    dispatch_super_assistant_palace_ontology_rebuild("doc-1")
-
-    (subject, payload, headers), = fake_nats["published"]
-    assert subject == SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT
-    assert SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT == "super_assistant.palace.ontology-rebuild"
-    body = json.loads(payload.decode())
-    assert set(body) == {"doc_id", "dispatched_at"}
-    assert body["doc_id"] == "doc-1"
-    assert datetime.fromisoformat(body["dispatched_at"])
-    assert re.fullmatch(
-        r"super_assistant\.palace\.ontology-rebuild:doc_id=doc-1:\d+",
-        headers["Nats-Msg-Id"],
-    )
-    assert fake_nats["drained"] is True
 
 
 def test_dispatch_task_without_nats_url_fails_with_chinese_message(monkeypatch):

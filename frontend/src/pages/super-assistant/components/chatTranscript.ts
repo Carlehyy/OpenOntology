@@ -96,8 +96,9 @@ export function splitProcessAndAnswer(content: string) {
   return { process: '', answer: content }
 }
 
-/** 常用内置工具的中文友好名：仅覆盖平台自带工具（与后端注册名一一对应），
- *  MCP/外部工具一律直出原名；原名等宽保留在旁边，用户引用与审计对得上 */
+/** 常用内置工具的中文友好名：覆盖平台自带工具与内置 platform_weknora MCP
+ *  的只读检索/问答；其它 MCP/外部工具一律直出原名。palace_* 系列仅为历史会话
+ *  回放保留展示名——旧记忆宫殿已退役，不再注册、不提供执行。 */
 export const BUILTIN_TOOL_FRIENDLY_NAMES: Record<string, string> = {
   web_fetch: '抓取网页',
   web_search: '搜索互联网',
@@ -109,11 +110,21 @@ export const BUILTIN_TOOL_FRIENDLY_NAMES: Record<string, string> = {
   memory_save: '保存记忆',
   memory_delete: '删除记忆',
   memory_distill: '扫描近重复记忆',
+  // 历史会话回放展示名：旧记忆宫殿工具已退役，仅用于旧消息可读性
   palace_zones: '列出记忆分区',
   palace_read_zone: '读取记忆分区',
   palace_recall: '回忆记忆宫殿',
-  palace_graph_search: '检索知识图谱',
-  palace_graph_files: '列出文档库',
+  palace_graph_search: '检索知识图谱（历史）',
+  palace_graph_files: '列出文档库（历史）',
+  // WeKnora 当前接入 8 个只读工具；旧工具名保留用于历史消息回放。
+  'mcp__platform_weknora__list_knowledge_bases': '列出知识库',
+  'mcp__platform_weknora__search_knowledge': '检索知识库',
+  'mcp__platform_weknora__grep_chunks': '关键词检索知识片段',
+  'mcp__platform_weknora__list_documents': '列出知识文档',
+  'mcp__platform_weknora__read_document': '读取知识文档',
+  'mcp__platform_weknora__wiki_search': '检索 Wiki',
+  'mcp__platform_weknora__wiki_read_page': '读取 Wiki 页面',
+  'mcp__platform_weknora__wiki_index': '读取 Wiki 索引',
   use_skill: '读取 Skill 指令',
   read_skill_file: '读取 Skill 文件',
   propose_skill: '提炼 Skill 候选',

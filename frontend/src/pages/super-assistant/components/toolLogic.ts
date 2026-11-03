@@ -11,11 +11,18 @@ export interface AssistantToolGroup {
   disabledCount: number
 }
 
-const GROUP_DEFS: Array<{ key: string; label: string; names: string[] }> = [
+/** 知识图谱能力经内置 MCP（platform_weknora）提供：工具名由 `mcp__<server>__<tool>`
+ *  命名空间稳定表达，按前缀归组，避免把检索/ask 的具体工具名硬编码成事实源。 */
+const WEKNORA_TOOL_PREFIX = 'mcp__platform_weknora__'
+
+const GROUP_DEFS: Array<{ key: string; label: string; names: string[]; prefixes?: string[] }> = [
   { key: 'skill', label: 'Skill', names: ['use_skill', 'read_skill_file', 'propose_skill'] },
-  { key: 'memory', label: '记忆', names: ['memory_search', 'memory_save', 'memory_delete', 'memory_distill'] },
-  { key: 'palace', label: '记忆宫殿', names: ['palace_zones', 'palace_read_zone', 'palace_recall'] },
-  { key: 'graph', label: '知识图谱', names: ['palace_graph_search', 'palace_graph_files'] },
+  { key: 'memory', label: '记忆', names: [
+    'memory_search', 'memory_save', 'memory_delete', 'memory_distill',
+    // 长期记忆分区检索：旧记忆宫殿中与图谱无关的长期记忆能力继续保留
+    'palace_zones', 'palace_read_zone', 'palace_recall',
+  ] },
+  { key: 'weknora', label: '知识图谱（WeKnora）', names: [], prefixes: [WEKNORA_TOOL_PREFIX] },
   { key: 'reasoning', label: '思考与规划', names: ['think', 'subagent', 'todo_write', 'todo_read'] },
   { key: 'files', label: '会话附件', names: ['list_session_files', 'read_session_file'] },
   { key: 'web', label: '联网', names: ['web_fetch', 'web_search'] },
@@ -35,7 +42,9 @@ export function groupAssistantTools(tools: AssistantTool[]): AssistantToolGroup[
   )
   const others: AssistantTool[] = []
   for (const tool of tools) {
-    const def = GROUP_DEFS.find(item => item.names.includes(tool.name))
+    const def = GROUP_DEFS.find(item =>
+      item.names.includes(tool.name)
+      || item.prefixes?.some(prefix => tool.name.startsWith(prefix)))
     if (def) buckets.get(def.key)!.push(tool)
     else others.push(tool)
   }

@@ -560,7 +560,7 @@ test('保存提交三基线 PUT 并以服务端持久化为准（重开/下载�
     expectedCurrentReleaseId: 'release-1',
   })
 
-  // 成功提示（如实说明镜像异步），保存后回查看态并重新拉取语义层
+  // 成功提示：保存后回查看态并重新拉取语义层
   await expect(page.getByText('业务文档已保存')).toBeVisible()
   await expect(page.getByTestId('structure-doc-editor')).toHaveCount(0)
   await expect(page.getByTestId('structure-doc-download')).toBeVisible()

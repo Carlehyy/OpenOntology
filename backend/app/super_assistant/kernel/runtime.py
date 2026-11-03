@@ -713,6 +713,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                             args=tuple(str(value) for value in (server.args or [])),
                             env=decrypt_env(server.env_encrypted),
                             revision=int(call.capability_revision), manifest_hash=digest,
+                            builtin_key=server.builtin_key,
                         )
                         _persist_connector_capability(db, connector, source="mcp")
                         connector_registry.register(connector)
@@ -813,6 +814,7 @@ def _persist_connector_capability(db, connector, *, source: str) -> None:
         source=source,
         trust_level=TrustLevel.USER_UNTRUSTED,
         manifest_hash=digest,
+        side_effect_class=getattr(connector, "side_effect_class", "external_async"),
         **capability_scope,
     )
     if not row.enabled:
@@ -1249,6 +1251,11 @@ def _kernel_connector_tool_schemas(db, owner_id: str) -> list[dict]:
     """
     tools: list[dict] = []
     seen: set[str] = set()
+    from app.super_assistant.weknora import mcp_service as weknora_mcp_service
+
+    # 平台内置 WeKnora 默认接入：复用同一幂等 ensure（verified 快照，不联网）。
+    # fail-closed：未验证/注册失败必须让 Run 失败，不能静默无工具继续。
+    weknora_mcp_service.ensure_server(db, owner_id)
     try:
         from app.super_assistant.models import SuperAssistantMcpServer, SuperAssistantProcessPlugin, SuperAssistantRemoteAgent
         from app.super_assistant.mcp_client import namespaced_tool_name

@@ -16,7 +16,6 @@ from app.super_assistant import (
     mcp_server_service,
     memory_service,
     multica_service,
-    palace_service,
     reflection_service,
     router as assistant_router,
     runtime,
@@ -220,69 +219,6 @@ ROUTE_PARAMETERS = {
         "db",
         "current_user",
     ),
-    "list_palace_files": ("db", "current_user"),
-    "upload_palace_file": ("file", "db", "current_user", "folder_path"),
-    "delete_palace_file": (
-        "file_id",
-        "db",
-        "current_user",
-    ),
-    "rebuild_palace_file": (
-        "file_id",
-        "db",
-        "current_user",
-    ),
-    "palace_graph_view": ("db", "current_user"),
-    "batch_import_palace_files": ("archive", "db", "current_user"),
-    "update_palace_file_content": (
-        "file_id",
-        "body",
-        "db",
-        "current_user",
-    ),
-    "replace_palace_file": (
-        "file_id",
-        "file",
-        "db",
-        "current_user",
-    ),
-    "preview_palace_file": (
-        "file_id",
-        "max_chars",
-        "db",
-        "current_user",
-    ),
-    "search_palace_graph": ("q", "db", "current_user"),
-    "consolidate_palace_graph": ("db", "current_user"),
-    # 目录一等公民 + 新建笔记 + 拖拽移动（5 条路径 6 个端点）
-    "list_palace_folders": ("db", "current_user"),
-    "create_palace_folder": (
-        "body",
-        "db",
-        "current_user",
-    ),
-    "create_palace_note": (
-        "body",
-        "db",
-        "current_user",
-    ),
-    "move_palace_file": (
-        "file_id",
-        "body",
-        "db",
-        "current_user",
-    ),
-    "rename_palace_folder": (
-        "folder_id",
-        "body",
-        "db",
-        "current_user",
-    ),
-    "delete_palace_folder": (
-        "folder_id",
-        "db",
-        "current_user",
-    ),
 }
 
 DELEGATES = {
@@ -446,29 +382,6 @@ DELEGATES = {
         "reflection_service",
         "update_reflection_settings",
     ),
-    "list_palace_files": ("palace_service", "list_files"),
-    "upload_palace_file": ("palace_service", "upload_file"),
-    "delete_palace_file": (
-        "palace_service",
-        "delete_palace_file",
-    ),
-    "rebuild_palace_file": ("palace_service", "rebuild_file"),
-    "palace_graph_view": ("palace_service", "graph_overview"),
-    "batch_import_palace_files": (
-        "palace_service",
-        "batch_import_files",
-    ),
-    "update_palace_file_content": (
-        "palace_service",
-        "update_file_content",
-    ),
-    "replace_palace_file": ("palace_service", "replace_file"),
-    "preview_palace_file": ("palace_service", "preview_file"),
-    "search_palace_graph": ("palace_service", "search_graph"),
-    "consolidate_palace_graph": (
-        "palace_consolidate",
-        "run_consolidation",
-    ),
 }
 
 BODY_TYPES = {
@@ -490,11 +403,6 @@ BODY_TYPES = {
     "decide_reflection_candidate": schemas.ReflectionDecisionRequest,
     "request_full_reflection": schemas.ReflectionFullRequest,
     "update_reflection_settings": schemas.ReflectionSettingsUpdate,
-    "update_palace_file_content": palace_service.PalaceContentUpdate,
-    "create_palace_folder": palace_service.PalaceFolderCreate,
-    "create_palace_note": palace_service.PalaceNoteCreate,
-    "move_palace_file": palace_service.PalaceFileMove,
-    "rename_palace_folder": palace_service.PalaceFolderRename,
 }
 
 
@@ -770,7 +678,6 @@ def test_super_assistant_services_do_not_import_http_router():
         mcp_server_service,
         memory_service,
         multica_service,
-        palace_service,
         reflection_service,
         search_service,
         skill_service,
@@ -784,14 +691,9 @@ def test_super_assistant_services_do_not_import_http_router():
 
 def test_super_assistant_router_and_services_stay_bounded():
     limits = {
-        # 记忆宫殿新增 /palace/* 5 个端点（3 条路径），router.py 748 → 778；
-        # 第二批新增 batch/content/replace/preview/graph-search/consolidate
-        # 6 个端点 → 811；目录一等公民（folders CRUD/笔记/移动）6 个端点、
-        # multica 外部集成子路由接线 → 860；本体发布文档共享镜像新增
-        # ontology-documents list/preview/rebuild 3 个端点 → 885
         # process-plugin 持久化生命周期新增 list/install/enable/disable/uninstall
         # 五个端点；会话右键菜单配套的会话审计导出端点
-        # /conversations/{id}/export → 994；保持边界只允许随能力域增长的小幅预算。
+        # /conversations/{id}/export；保持边界只允许随能力域增长的小幅预算。
         "router.py": 1000,
         # 死流回收（_reap_stale_streaming 读取兜底）与启动恢复
         # （recover_interrupted_streams 跳过进行中的定时任务会话）落地：360 → 380
@@ -830,36 +732,18 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 0080 悬浮助手可见范围配置新增 /widget-config 的 GET/PUT；
     # 会话附件新增 /conversations/{id}/files 的 list/upload/download/preview/delete
     # 5 个端点（3 条路径）；全局搜索新增 /search/conversations（search.py 子路由）；
-    # 记忆宫殿（用户级文件库 + 知识图谱）新增 /palace/files 的 list/upload、
-    # /palace/files/{id} 的 delete、/palace/files/{id}/rebuild 与
-    # /palace/graph 的 GET 共 5 个操作（4 条路径）；第二批新增 ZIP 批量导入、
-    # 内容更新(PUT)/替换/预览、图谱检索与聚类合并 6 个操作（6 条路径）；
-    # 三栏重构新增 /palace/files/{id}/raw 原始字节内联读取（图片预览）；
     # multica 外部集成新增 /multica/config 的 GET/PUT 与 /multica/test 的
     # POST（multica.py 子路由）共 3 个操作（2 条路径）；
-    # 目录一等公民新增 /palace/folders、/palace/folders/{id}、
-    # /palace/files/notes 三条路径（PATCH /palace/files/{id} 复用旧路径），
-    # 共 6 个新操作：folders list/create、folders/{id} rename/delete、
-    # files/notes POST、files/{id} PATCH（拖拽移动）；
     # 远程助手声明式注册新增 /remote-agents 的 list/create、
     # /remote-agents/{id} 的 put/delete、/remote-agents/{id}/test 的 post
     # 共 5 个操作（3 条路径）；multica 配置弹窗打开即拉取工作区列表，
     # 新增 /multica/workspaces 的 GET 共 1 个操作（1 条路径）；
     # 内置工具目录与用户级启停新增 /tools 的 GET、/tools/{tool_name} 的
     # PATCH 共 2 个操作（2 条路径，tools.py 子路由）；
-    # 文件夹同步（palace_sync.py 子路由）新增 /palace/sync/files 的
-    # list/upload、/palace/sync/files/{id} 的 delete、/palace/sync/files/{id}
-    # 的 replace、/palace/sync/folders 的 list/create、/palace/sync/folders
-    # /{id} 的 delete 共 7 个操作（5 条路径，X-Palace-Sync-Token 令牌鉴权），
-    # 以及 /palace/sync/script 的 GET 与 /palace/sync/token 的 POST 共 2 个
-    # 操作（2 条路径，浏览器侧 JWT 鉴权）；
     # 邀请自助接入新增 /remote-agent-invites 的 list/create、
     # /remote-agent-invites/{id} 的 delete、/remote-agent-invites/{id}/prompt
     # 的 get 共 4 个操作（3 条路径；公开兑换/回连端点在 /api/public 前缀，
     # 不在本基线范围）；
-    # 本体发布文档共享镜像新增 /palace/ontology-documents 的 list、
-    # /palace/ontology-documents/{id} 的 preview/rebuild 共 3 个操作
-    # （3 条路径）；
     # 实时浏览器协作（browser.py 子路由）新增 /browser/sources 的
     # list/create、/browser/sources/{id} 的 patch/delete、
     # /browser/sources/{id}/rotate-token 与 /test 的 post、
@@ -892,8 +776,9 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 会话纪要（conversation_summary.py 子路由）新增 /conversations/{id}/summary
     # 的 GET、/conversations/{id}/summary/generate 的 POST、/summary/settings 的
     # GET/PUT 共 4 个操作（3 条路径）。
-    assert len(paths) == 115
-    assert sum(len(item) for item in paths.values()) == 149
+    # WeKnora 知识服务引导新增 /weknora 的 GET 共 1 个操作（1 条路径）。
+    assert len(paths) == 92
+    assert sum(len(item) for item in paths.values()) == 120
     assert hashlib.sha256(payload).hexdigest() == (
-        "6cb6448c082c089ddc2d8be531a2cb5900fec44d1a249f1f633c8417b25b90fb"
+        "8a42c211d59dc377f90432e16d631e7305ae48b42ede6f772295c8f1901a6388"
     )

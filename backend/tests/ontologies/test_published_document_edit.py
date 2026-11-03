@@ -159,11 +159,6 @@ def test_save_revises_current_release_document_only(
         "app.ontologies.cache.invalidate_published_documents",
         lambda: invalidated.append("published_documents"),
     )
-    notified: list[tuple] = []
-    monkeypatch.setattr(
-        published_documents, "notify_published_document",
-        lambda project, release: notified.append((project, release)),
-    )
 
     with _SqlRecorder(db) as recorder:
         saved = _save(client, auth_headers, oid, vid,
@@ -212,12 +207,8 @@ def test_save_revises_current_release_document_only(
     assert audit.meta["documentCharsAfter"] == len(_SECOND_MD)
     assert audit.meta["documentFingerprintAfter"] == _sha256(_SECOND_MD)
 
-    # 提交后：缓存失效 + best-effort 通知（携带新正文）
+    # 提交后：版本树与发布文档聚合缓存均失效
     assert invalidated == ["version_tree", "published_documents"]
-    assert len(notified) == 1
-    project_arg, release_arg = notified[0]
-    assert project_arg.id == oid
-    assert release_arg.snapshot_semantic["documentMd"] == _SECOND_MD
 
     # 锁顺序：写相位内 ontology_projects 先于 ontology_versions 加载。
     order = [
@@ -262,10 +253,6 @@ def test_save_is_idempotent_for_same_content_even_with_stale_baseline(
     _attach_document(db, vid)
     baseline = _baseline(client, auth_headers, oid, vid)
 
-    monkeypatch.setattr(
-        published_documents, "notify_published_document",
-        lambda project, release: pytest.fail("幂等保存不得派发事件"),
-    )
     stale = {**baseline, "revision": 0, "fingerprint": "stale-fp"}
     saved = _save(client, auth_headers, oid, vid,
                   _save_body(_BASE_MD, stale))

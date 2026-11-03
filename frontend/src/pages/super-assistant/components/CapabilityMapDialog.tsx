@@ -67,7 +67,7 @@ export default function CapabilityMapDialog() {
             <p className="mb-3 text-xs text-muted-foreground">理解业务发生了什么</p>
             <div className="space-y-2">
               <CapabilityCard icon={Bell} title="消息通知" status="独立可用">汇集站内与外部消息；自动交给助手解读的链路待打通。</CapabilityCard>
-              <CapabilityCard icon={BookOpen} title="知识图谱" status="已接入">检索文档中的实体与关系，为回答提供业务背景与来源。</CapabilityCard>
+              <CapabilityCard icon={BookOpen} title="知识图谱" status="已接入">对接腾讯 WeKnora 知识库，检索与阅读文档，为回答提供业务背景与来源；登录使用 WeKnora 原生账号。</CapabilityCard>
               <CapabilityCard icon={Network} title="本体治理" status="按配置接入">管理业务模型；助手可按授权委派本体助手查证、提出操作建议，修改需在本体界面确认。</CapabilityCard>
             </div>
           </section>
@@ -101,7 +101,7 @@ export default function CapabilityMapDialog() {
               消息接收与模板手动激活已可用。消息自动触发助手、再由助手生成任务实例，尚待接通。
             </Scenario>
             <Scenario title="从知识到业务操作" steps={['知识图谱 + 本体治理', '超级助手', '执行操作']}>
-              已支持知识检索与本体助手委派，操作建议需在本体界面确认；由知识驱动的自动操作闭环待打通。
+              已支持 WeKnora 知识检索与本体助手委派，操作建议需在本体界面确认；由知识驱动的自动操作闭环待打通。
             </Scenario>
             <Scenario title="从助手到外部协作" steps={['超级助手', '外部集成', '查询 / 委派 / 协作']} connected>
               已有外部协作链路，启用范围取决于集成配置、目标系统与当前账号授权。

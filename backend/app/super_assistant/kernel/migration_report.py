@@ -21,7 +21,6 @@ from app.super_assistant.models import (
     SuperAssistantDelegation,
     SuperAssistantMemory,
     SuperAssistantMcpServer,
-    SuperAssistantPalaceFile,
     SuperAssistantRemoteAgent,
     SuperAssistantSkill,
 )
@@ -102,7 +101,6 @@ def _source_ref(kind: str, source_id: str) -> dict[str, str]:
         "delegation": "super_assistant_delegations",
         "delegations": "super_assistant_delegations",
         "memory": "super_assistant_memories",
-        "palace_file": "super_assistant_palace_files",
         "mcp": "super_assistant_mcp_servers",
         "skill": "super_assistant_skills",
         "remote_agent": "super_assistant_remote_agents",
@@ -224,7 +222,6 @@ def build_legacy_migration_report(db: Session, *, owner_id: str | None = None) -
     delegation_total = _count(db, SuperAssistantDelegation, owner_id)
     delegation_mappable = len(_legacy_mappable_delegations(db, owner_id))
     memory_total = _count(db, SuperAssistantMemory, owner_id)
-    palace_total = _count(db, SuperAssistantPalaceFile, owner_id)
     mcp_total = _count(db, SuperAssistantMcpServer, owner_id)
     skill_total = _count(db, SuperAssistantSkill, owner_id)
     remote_agent_total = _count(db, SuperAssistantRemoteAgent, owner_id)
@@ -234,8 +231,6 @@ def build_legacy_migration_report(db: Session, *, owner_id: str | None = None) -
                           "回填 legacy Run/Call；不改变 assistant_key 或 conversation_ref；缺少会话引用的行只读"),
         LegacyDisposition("memory", memory_total, 0, memory_total,
                           "保留 legacy/source 与原文；标记 risk=unknown，不伪造 source_ref"),
-        LegacyDisposition("palace_file", palace_total, 0, palace_total,
-                          "保留 legacy 文件与 content_hash；无 kernel Run 归属的历史事实只读，不升级为 current"),
         LegacyDisposition("mcp_server", mcp_total, mcp_total, 0,
                           "通过 manifest 生成 immutable CapabilityRevision；不把旧配置提升为 trusted"),
         LegacyDisposition("skill", skill_total, skill_total, 0,
@@ -384,11 +379,15 @@ def backfill_legacy_data(
                 )
                 if created: created_capabilities.append(cap.key)
                 else: skipped.append({"source": kind, "id": row.id, "reason": "already_backfilled"})
-        # Memory and Palace are source/read models, not execution facts.  Do
-        # not manufacture a Run ownership or provenance link for them.
-        for model, kind, reason in ((SuperAssistantMemory, "memory", "legacy memory has no source_ref"), (SuperAssistantPalaceFile, "palace_file", "legacy palace fact has no execution Run provenance")):
-            for row in db.scalars(select(model).where(*_owner_filter(model, owner_id))).all():
-                readonly.append({"source": kind, "id": row.id, "reason": reason})
+        # Memory is a source/read model, not an execution fact.  Do not
+        # manufacture a Run ownership or provenance link for it.
+        for row in db.scalars(
+            select(SuperAssistantMemory).where(*_owner_filter(SuperAssistantMemory, owner_id))
+        ).all():
+            readonly.append({
+                "source": "memory", "id": row.id,
+                "reason": "legacy memory has no source_ref",
+            })
         db.commit()
     except Exception:
         db.rollback()

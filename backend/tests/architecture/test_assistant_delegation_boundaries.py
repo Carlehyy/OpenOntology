@@ -54,7 +54,6 @@ def _forbidden_imports(
 # 适配（连接/驱动），非本体业务逻辑；长期方向是下沉为平台原语或经端口注入，
 # 在那之前禁止追加任何新例外。
 _SUPER_ASSISTANT_IMPORT_EXCEPTIONS = {
-    ("app/super_assistant/palace_graph.py", "app.ontologies.graph.neo4j_service"),
     # YIYA-36：本体能力唯一白名单门面边 — 门面只暴露“用”能力，
     # 无定义管理入口；新增其他直连仍被拒绝。
     ("app/super_assistant/ontology_tools.py",

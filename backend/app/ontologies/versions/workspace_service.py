@@ -1505,10 +1505,7 @@ def save_release_document(
         )
         db.commit()
 
-    # 提交后尽力而为：缓存失效与 published-document 通知失败都不影响保存
-    # 结果（异步镜像由下一次事件或每日对账收敛，不承诺强一致）。
+    # 提交后尽力而为：缓存失效失败不影响保存结果。
     ontology_cache.invalidate_version_tree()
     ontology_cache.invalidate_published_documents()
-    from app.ontologies.published_documents import notify_published_document
-    notify_published_document(locked_project, locked)
     return {"data": payload}

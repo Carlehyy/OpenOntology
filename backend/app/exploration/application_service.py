@@ -407,13 +407,11 @@ def apply_draft(
         draft.applied_ontology_id = project.id
         draft.applied_version_id = applied_version_id
         db.commit()
-        # 落地即业务文档出生点（新建本体的 v0 自带语义层）：提交后广播
-        # 自包含事件供宫殿共享建图。必须在 commit 之后——提交前广播会在
-        # 事务失败时留下永不自愈的幻影镜像（重试落地会创建新的本体 id）。
+        # 新建本体的 v0 自带语义层：提交后失效发布文档聚合缓存。
         if created_project and release is not None:
-            from app.ontologies.published_documents import notify_published_document
+            from app.ontologies import cache as ontology_cache
 
-            notify_published_document(project, release)
+            ontology_cache.invalidate_published_documents()
         if created_project:
             _finish_projection(db, project.id)
         return ok_fn({

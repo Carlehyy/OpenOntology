@@ -1,4 +1,7 @@
 from contextlib import asynccontextmanager
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +15,8 @@ from app.super_assistant.mcp_client import (
     normalize_connection,
     validate_mcp_url,
 )
+
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.asyncio
@@ -85,6 +90,70 @@ def test_mcp_url_permits_local_development_targets(monkeypatch):
     assert validate_mcp_url("http://127.0.0.1:3000/mcp") == "http://127.0.0.1:3000/mcp"
 
 
+def test_internal_base_url_allows_fixed_docker_http_endpoint_in_production(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "production")
+    endpoint = "http://weknora:8080/mcp/endpoint-1"
+    assert validate_mcp_url(
+        endpoint, require_https=True, internal_base_url="http://weknora:8080",
+    ) == endpoint
+    # base 带路径前缀时，端点必须留在该前缀内。
+    assert validate_mcp_url(
+        "https://gateway.example.com/weknora/mcp/endpoint-1",
+        require_https=True,
+        internal_base_url="https://gateway.example.com/weknora",
+    ).endswith("/weknora/mcp/endpoint-1")
+
+
+@pytest.mark.parametrize(("url", "base", "match"), [
+    ("http://weknora:9090/mcp/endpoint-1", "http://weknora:8080", "不同源"),
+    ("https://weknora:8080/mcp/endpoint-1", "http://weknora:8080", "不同源"),
+    ("http://weknora:8080/admin", "http://weknora:8080/weknora", "路径越出"),
+    ("http://user:secret@weknora:8080/mcp/x", "http://weknora:8080", "不能内嵌"),
+    ("http://weknora:8080/mcp/x?token=1", "http://weknora:8080", "查询串"),
+    ("http://weknora:8080/mcp/x#frag", "http://weknora:8080", "查询串"),
+    ("http://169.254.169.254/mcp/x", "http://169.254.169.254", "链路本地"),
+    ("http://metadata.google.internal/mcp/x", "http://metadata.google.internal", "元数据"),
+])
+def test_internal_base_url_rejects_untrusted_endpoints(monkeypatch, url, base, match):
+    monkeypatch.setattr(settings, "environment", "production")
+    with pytest.raises(McpClientError, match=match):
+        validate_mcp_url(url, require_https=True, internal_base_url=base)
+
+
+def test_internal_base_url_does_not_weaken_default_external_rules(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "production")
+    with pytest.raises(McpClientError, match="必须使用 HTTPS"):
+        validate_mcp_url("http://weknora:8080/mcp/endpoint-1", require_https=True)
+    with pytest.raises(McpClientError, match="非公网地址"):
+        validate_mcp_url("http://127.0.0.1:8080/mcp/endpoint-1")
+
+
+@pytest.mark.asyncio
+async def test_internal_base_url_is_forwarded_to_the_client_session(monkeypatch):
+    seen: dict = {}
+
+    class FakeSession:
+        async def list_tools(self):
+            class Result:
+                tools = []
+
+            return Result()
+
+    @asynccontextmanager
+    async def fake_session(**kwargs):
+        seen.update(kwargs)
+        yield FakeSession()
+
+    monkeypatch.setattr(mcp_client, "_client_session", fake_session)
+    await mcp_client.discover_tools(
+        transport="streamable_http",
+        url="http://weknora:8080/mcp/endpoint-1",
+        headers={},
+        internal_base_url="http://weknora:8080",
+    )
+    assert seen["internal_base_url"] == "http://weknora:8080"
+
+
 def test_tool_namespace_is_stable_and_provider_safe():
     name = namespaced_tool_name("my server", "a.tool/with spaces")
     assert name == "mcp__my_server__a_tool_with_spaces"
@@ -138,3 +207,44 @@ async def test_call_tool_rejects_oversized_serialized_result(monkeypatch):
             transport="stdio", url="", headers={}, tool_name="large", arguments={},
             command="python", args=[], env={},
         )
+
+
+def test_bootstrap_mcp_client_imports_without_platform_configuration():
+    """The WeKnora init container has only bootstrap variables.
+
+    Importing ``bootstrap._default_mcp`` must not trigger the platform
+    settings/encryption modules; the internal endpoint validator must work
+    under ``env -i`` while external validation still requires platform config.
+    """
+    script = """
+import sys
+
+from app.super_assistant.weknora.bootstrap import _default_mcp
+
+client = _default_mcp()
+assert "app.shared.config" not in sys.modules
+assert "app.shared.encryption" not in sys.modules
+assert client.validate_mcp_url(
+    "http://weknora-app:8080/mcp/endpoint-1",
+    internal_base_url="http://weknora-app:8080",
+) == "http://weknora-app:8080/mcp/endpoint-1"
+
+try:
+    client.validate_mcp_url("https://example.com/mcp", require_https=True)
+except Exception:
+    pass
+else:
+    raise SystemExit("external validation unexpectedly succeeded without config")
+
+print("OK")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_BACKEND_DIR,
+        env={"PYTHONPATH": str(_BACKEND_DIR)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout

@@ -44,6 +44,7 @@ def readiness_response(
         "object_storage": "unknown",
         "browser": "unknown",
         "n8n": "unknown",
+        "weknora": "unknown",
         "sentinel_scheduler": "unknown",
         "sentinel_cdc": "unknown",
         "data_scheduler": "unknown",
@@ -140,6 +141,14 @@ def readiness_response(
         checks["n8n"] = "ok"
     except Exception:
         checks["n8n"] = "unavailable"
+
+    try:
+        from app.shared.dependency_probe import probe_weknora
+
+        probe_weknora()
+        checks["weknora"] = "ok"
+    except Exception:
+        checks["weknora"] = "unavailable"
 
     if is_production:
         # Reuse the pinned adapter's bounded status probe. It authenticates and
@@ -249,6 +258,7 @@ def readiness_response(
         "minio",
         "browser",
         "n8n",
+        "weknora",
         *(("dbx",) if is_production else ()),
         "sentinel_scheduler",
         "data_scheduler",

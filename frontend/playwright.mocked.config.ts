@@ -94,7 +94,6 @@ export default defineConfig({
     '**/ontology_safe_recovery.spec.ts',
     '**/ontology_semantic_gate.spec.ts',
     '**/overview.spec.ts',
-    '**/palace_remote_sync.spec.ts',
     '**/pipeline_list_page.spec.ts',
     '**/profile_modal.spec.ts',
     '**/python_script_page.spec.ts',

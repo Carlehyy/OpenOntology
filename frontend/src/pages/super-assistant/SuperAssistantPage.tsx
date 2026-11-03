@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Paperclip, Pencil,
+  ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil,
   ScrollText, Send, Settings2, Square, X,
 } from 'lucide-react'
 
@@ -19,6 +19,7 @@ import {
   type SuperMessage,
   type SuperSkill,
   type ToolStep,
+  type WeKnoraIntegration,
 } from '@/api/superAssistant'
 import { matchSlashCommands, slashCommandToken } from '@/lib/slashCommands'
 import { insertAtCursor, shouldHoldInsertion } from '@/lib/voice/insertion'
@@ -100,7 +101,7 @@ interface StreamBuffer {
 const SUPER_ASSISTANT_PREFERENCE_TAG = 'super_assistant'
 
 /** 会话模型下拉只保留面向用户的对话模型：带后台用途 usage_tags
- *  （记忆宫殿抽取 super_assistant_palace、VLM 提取等）的启用配置排除在外；
+ *  （如 VLM 提取等）的启用配置排除在外；
  *  默认模型豁免——被排除后一个不剩时调用处回退全集 */
 function isConversationSelectableModel(model: ModelConfig) {
   if (model.is_default) return true
@@ -174,6 +175,10 @@ export default function SuperAssistantPage() {
   // 会话纪要：头部按钮弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
   const [summaryOpen, setSummaryOpen] = useState(false)
   const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
+  // 知识图谱（腾讯 WeKnora）：页面加载即读后端受信配置，头部入口只负责新标签
+  // 打开原生 Web 页面；登录走 WeKnora 自己的账号体系，不向前端下发 token/密码。
+  const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
+  const [weknoraLoading, setWeknoraLoading] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
   // 窄屏顶栏溢出菜单：实时浏览器/助手配置收进「⋯」，避免与标题、模型选择器挤出视口
   const [headerOverflowOpen, setHeaderOverflowOpen] = useState(false)
@@ -245,6 +250,29 @@ export default function SuperAssistantPage() {
     } catch { /* 非关键配置，静默降级为无命令提示 */ }
   }, [])
   useEffect(() => { void refreshMulticaConfig() }, [refreshMulticaConfig])
+  /** 知识图谱入口配置：页面加载即取；失败时保留可重试入口，不在加载期打断工作台 */
+  const refreshWeknora = useCallback(async (notifyFailure = false) => {
+    setWeknoraLoading(true)
+    try {
+      setWeknora(await superAssistantApi.getWeKnoraIntegration())
+    } catch (error) {
+      if (notifyFailure) toast.error('知识图谱入口加载失败', { description: errorText(error) })
+    } finally {
+      setWeknoraLoading(false)
+    }
+  }, [])
+  useEffect(() => { void refreshWeknora() }, [refreshWeknora])
+  // 只接受 http(s) 公网地址：后端返回异常协议时不做跳转，避免把用户带到非 Web 目标
+  const weknoraUrl = useMemo(() => {
+    const raw = weknora?.web_url?.trim()
+    if (!raw) return null
+    try {
+      const target = new URL(raw)
+      return target.protocol === 'https:' || target.protocol === 'http:' ? raw : null
+    } catch {
+      return null
+    }
+  }, [weknora])
 
   useEffect(() => {
     let alive = true
@@ -531,7 +559,7 @@ export default function SuperAssistantPage() {
     || models[0]?.id
     || ''
   const selectedModel = models.find(model => model.id === selectedModelId)
-  // 展示层回落：存量会话可能保存着已被 usage_tags 过滤的后台配置（如记忆宫殿抽取），
+  // 展示层回落：存量会话可能保存着已被 usage_tags 过滤的后台配置（如流水线抽取），
   // 显式 SelectValue children 在「值非空但无匹配项」时会渲染空白——此时按未选择处理，
   // 让触发器回落占位符；发送仍使用会话已保存的 model_config_id，不因展示而切换
   const selectedModelIdForDisplay = models.some(model => model.id === selectedModelId) ? selectedModelId : ''
@@ -1561,6 +1589,33 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
+          {/* 知识图谱入口：位于会话纪要左侧；新标签打开后端受信 WeKnora 原生页面。
+              窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
+          {weknoraUrl ? (
+            <a
+              href={weknoraUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="知识图谱"
+              title="知识图谱"
+              data-workbench-weknora
+              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+            >
+              <Network size={16} aria-hidden="true" />
+            </a>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { void refreshWeknora(true) }}
+              disabled={weknoraLoading}
+              aria-label="知识图谱"
+              title="知识图谱"
+              data-workbench-weknora
+              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 md:flex"
+            >
+              <Network size={16} aria-hidden="true" />
+            </button>
+          )}
           {/* 会话纪要入口：窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
           <button
             type="button"
@@ -1667,6 +1722,34 @@ export default function SuperAssistantPage() {
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" side="bottom" sideOffset={8} className="w-44 p-1">
+              {weknoraUrl ? (
+                <a
+                  href={weknoraUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="知识图谱"
+                  title="知识图谱"
+                  data-workbench-weknora
+                  onClick={() => setHeaderOverflowOpen(false)}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <Network size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
+                  知识图谱
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => { setHeaderOverflowOpen(false); void refreshWeknora(true) }}
+                  disabled={weknoraLoading}
+                  aria-label="知识图谱"
+                  title="知识图谱"
+                  data-workbench-weknora
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                >
+                  <Network size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
+                  知识图谱
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => { setHeaderOverflowOpen(false); setSummaryOpen(true) }}

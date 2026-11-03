@@ -6,6 +6,8 @@ import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import psycopg2
@@ -86,7 +88,7 @@ def probe_redis(profile: ConfigProfile) -> tuple[str, str]:
             raise RuntimeError("Redis 没有返回 PONG")
     finally:
         client.close()
-    return "Redis 连接正常", "Celery 使用的消息通道已通过 PING 测试"
+    return "Redis 连接正常", "Redis 缓存连接已通过 PING 测试"
 
 
 def probe_nats(profile: ConfigProfile) -> tuple[str, str]:
@@ -212,6 +214,167 @@ def probe_n8n(profile: ConfigProfile) -> tuple[str, str]:
     return "n8n 连接正常", "API Key 可读取工作流列表"
 
 
+_WEKNORA_ALLOWED_TOOLS = frozenset({
+    "list_knowledge_bases",
+    "search_knowledge",
+    "grep_chunks",
+    "list_documents",
+    "read_document",
+    "wiki_search",
+    "wiki_read_page",
+    "wiki_index",
+})
+_WEKNORA_REQUIRED_TOOLS = frozenset({
+    "list_knowledge_bases",
+    "search_knowledge",
+    "read_document",
+})
+
+
+def _normalize_origin(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise RuntimeError("WeKnora origin 格式非法") from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query or parsed.fragment
+        or any(char.isspace() for char in value)
+    ):
+        raise RuntimeError("WeKnora origin 格式非法")
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    suffix = f":{port}" if port is not None else ""
+    return f"{parsed.scheme}://{host}{suffix}"
+
+
+def _validate_weknora_state(state: object, expected_origin: str) -> dict:
+    """Strict schema/origin/tool validation for the bootstrap-owned snapshot."""
+    if not isinstance(state, dict):
+        raise RuntimeError("WeKnora 集成状态文件格式无法识别")
+    if state.get("version") != 1:
+        raise RuntimeError("WeKnora 集成状态文件版本不是 1")
+    if state.get("verified") is not True:
+        raise RuntimeError(
+            "WeKnora 集成状态未通过 bootstrap --verify（verified 不是 true）"
+        )
+    stored_origin = state.get("base_url")
+    if (
+        not isinstance(stored_origin, str)
+        or _normalize_origin(stored_origin) != _normalize_origin(expected_origin)
+    ):
+        raise RuntimeError(
+            "WeKnora 集成状态 origin 与 WEKNORA_STATE_ORIGIN 不一致；"
+            "不要混用不同网络口径的 state"
+        )
+    endpoint = state.get("mcp_endpoint_id")
+    if not isinstance(endpoint, str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,128}", endpoint
+    ):
+        raise RuntimeError("WeKnora 集成状态 mcp_endpoint_id 格式非法")
+    token = state.get("mcp_token")
+    if not isinstance(token, str) or not re.fullmatch(
+        r"mcp_[A-Za-z0-9_-]{16,256}", token
+    ):
+        raise RuntimeError("WeKnora 集成状态 mcp_token 格式非法")
+    knowledge_base_id = state.get("knowledge_base_id")
+    if not isinstance(knowledge_base_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,128}", knowledge_base_id
+    ):
+        raise RuntimeError("WeKnora 集成状态 knowledge_base_id 格式非法")
+    knowledge_base_name = state.get("knowledge_base_name")
+    if not isinstance(knowledge_base_name, str) or not knowledge_base_name.strip():
+        raise RuntimeError("WeKnora 集成状态 knowledge_base_name 为空")
+    tools = state.get("tools")
+    if not isinstance(tools, list) or not tools:
+        raise RuntimeError(
+            "WeKnora 集成状态没有 MCP 工具清单；请运行 bootstrap --verify"
+        )
+    names: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise RuntimeError("WeKnora MCP 工具条目格式非法")
+        name = tool.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise RuntimeError("WeKnora MCP 工具缺少 name")
+        if name not in _WEKNORA_ALLOWED_TOOLS:
+            raise RuntimeError(f"WeKnora MCP 工具不在只读白名单: {name}")
+        if name in names:
+            raise RuntimeError(f"WeKnora MCP 工具重复: {name}")
+        names.add(name)
+        if not isinstance(tool.get("description"), str):
+            raise RuntimeError("WeKnora MCP 工具 description 格式非法")
+        input_schema = tool.get("input_schema")
+        if (
+            not isinstance(input_schema, dict)
+            or input_schema.get("type") != "object"
+        ):
+            raise RuntimeError(
+                "WeKnora MCP 工具 input_schema 必须是 type=object"
+            )
+    missing = sorted(_WEKNORA_REQUIRED_TOOLS - names)
+    if missing:
+        raise RuntimeError(
+            "WeKnora 集成状态缺少必需只读工具: " + ", ".join(missing)
+        )
+    return state
+
+
+def probe_weknora(profile: ConfigProfile) -> tuple[str, str]:
+    config = profile.weknora
+    url = f"{config.base_url.rstrip('/')}/api/v1/auth/config"
+    with httpx.Client(
+        timeout=config.timeout_seconds,
+        follow_redirects=False,
+        mounts=loopback_httpx_mounts(url),
+    ) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("WeKnora 认证配置返回格式无法识别")
+    registration_mode = str(payload.get("registration_mode") or "")
+    if not registration_mode:
+        raise RuntimeError("WeKnora 认证配置缺少 registration_mode")
+    if registration_mode == "self_serve":
+        raise RuntimeError(
+            "WeKnora 公网入口仍在允许自助注册；请先完成 bootstrap --verify，"
+            "由正式系统管理员写入 invite_only 后再重试"
+        )
+
+    state_path = Path(config.state_path)
+    if not state_path.is_absolute():
+        state_path = Path(__file__).resolve().parents[2] / state_path
+    if not state_path.is_file():
+        raise RuntimeError(
+            "WeKnora 尚未初始化：缺少集成状态文件 "
+            f"{config.state_path}。Docker 部署会在公网网关启动前自动运行 "
+            "bootstrap；本地源码运行需先启动 docker-compose.local.yml 中的 "
+            "WeKnora，并执行 weknora-bootstrap 初始化与 --verify。"
+        )
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("WeKnora 集成状态文件无法读取或不是有效 JSON") from exc
+    state = _validate_weknora_state(state, config.state_origin)
+    return (
+        "WeKnora 集成元数据通过，后端启动再验证 MCP",
+        "仅校验 app HTTP 认证配置与 verified state 元数据；"
+        "state origin {origin}，知识库 {name}，记录 {count} 个只读工具，"
+        "注册模式 {mode}。真实 MCP 调用/RAG 由 backend 启动 probe 门禁".format(
+            origin=state.get("base_url"),
+            name=state.get("knowledge_base_name"),
+            count=len(state["tools"]),
+            mode=registration_mode,
+        ),
+    )
+
+
 PROBES: dict[str, Callable[[ConfigProfile], tuple[str, str]]] = {
     "postgres": probe_postgres,
     "redis": probe_redis,
@@ -220,6 +383,7 @@ PROBES: dict[str, Callable[[ConfigProfile], tuple[str, str]]] = {
     "minio": probe_minio,
     "browser": probe_browser,
     "n8n": probe_n8n,
+    "weknora": probe_weknora,
 }
 
 
@@ -247,6 +411,8 @@ def _secret_values(profile: ConfigProfile) -> list[str]:
         profile.minio.access_key,
         profile.minio.secret_key,
         profile.n8n.api_key,
+        profile.weknora.chat_api_key,
+        profile.weknora.embedding_api_key,
         profile.advanced.api_hub_system_mcp_token,
         profile.advanced.api_hub_internal_proxy_token,
     ]

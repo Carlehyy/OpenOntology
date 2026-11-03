@@ -426,7 +426,7 @@ export function MemoryTab() {
 
       {settings && (settings.palace_index || settings.profile) && (
         <details className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-4">
-          <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-primary)]">知识图谱索引</summary>
+          <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-primary)]">长期记忆索引</summary>
           <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] leading-4 text-[var(--color-text-secondary)]">
             {settings.palace_index || settings.profile}
           </pre>

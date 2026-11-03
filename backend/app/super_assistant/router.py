@@ -3,14 +3,11 @@ from __future__ import annotations
 # Compatibility imports are intentionally retained: older tests and extensions
 # patch these names on the router module. Handlers pass the sensitive seams into
 # application services at request time.
-import io
-import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from sqlalchemy.exc import IntegrityError
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from app.auth.models import User
@@ -23,16 +20,7 @@ from app.super_assistant import (
 from app.super_assistant import mcp_server_service
 from app.super_assistant import process_plugin_service
 from app.super_assistant import memory_service
-from app.super_assistant import palace_consolidate
-from app.super_assistant import palace_service
 from app.super_assistant import reflection_service
-from app.super_assistant.palace_service import (
-    PalaceContentUpdate,
-    PalaceFileMove,
-    PalaceFolderCreate,
-    PalaceFolderRename,
-    PalaceNoteCreate,
-)
 from app.super_assistant import skill_service as _skill_service
 from app.super_assistant.models import (
     SuperAssistantConversation,
@@ -42,6 +30,7 @@ from app.super_assistant.models import (
     SuperAssistantToolRun,
 )
 from app.super_assistant.runtime import stream_chat
+from app.super_assistant.weknora.service import WeKnoraError
 from app.super_assistant.schemas import (
     ApprovalRequest,
     ChatRequest,
@@ -308,130 +297,6 @@ def delete_conversation_file(conversation_id: str, artifact_id: str, db: Session
     conversation_files.delete_file(db, current_user, conversation_id, artifact_id)
 
 
-# ---------------------------------------------------------------------------
-# 记忆宫殿：用户级文件库 + 知识图谱（跨会话长期知识）
-# ---------------------------------------------------------------------------
-
-@router.get("/palace/files")
-def list_palace_files(db: Session = Depends(get_db),
-                      current_user: User = Depends(get_current_user)):
-    return palace_service.list_files(db, current_user.id)
-
-@router.post("/palace/files", status_code=201)
-def upload_palace_file(file: UploadFile = File(...),
-                       db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
-                       folder_path: str = Form("")):
-    # 普通 def：save_stream 内含同步落盘与 docx/pdf 解析，async def 会把这些
-    # 阻塞调用直接跑在事件循环上，冻住同进程全部请求（含 SSE/WS 心跳）
-    return palace_service.upload_file(db, current_user, file, folder_path)
-
-@router.post("/palace/files/batch", status_code=201)
-def batch_import_palace_files(archive: UploadFile = File(...),
-                              db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return palace_service.batch_import_files(db, current_user, archive)
-
-@router.put("/palace/files/{file_id}/content")
-def update_palace_file_content(file_id: str, body: PalaceContentUpdate,
-                               db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return palace_service.update_file_content(db, current_user.id, file_id, body.content)
-
-@router.post("/palace/files/{file_id}/replace")
-def replace_palace_file(file_id: str, file: UploadFile = File(...),
-                        db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return palace_service.replace_file(db, current_user.id, file_id, file)
-
-@router.get("/palace/files/{file_id}/preview")
-def preview_palace_file(file_id: str, max_chars: int = Query(60000, le=200000),
-                        db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return palace_service.preview_file(db, current_user.id, file_id, max_chars)
-
-@router.get("/palace/files/{file_id}/raw")
-def raw_palace_file(file_id: str, db: Session = Depends(get_db),
-                    current_user: User = Depends(get_current_user)):
-    """原始字节内联读取（中栏图片预览等）；属主校验在 service 层。"""
-    path, media_type, filename = palace_service.raw_file(db, current_user.id, file_id)
-    return FileResponse(path, media_type=media_type, filename=filename, content_disposition_type="inline")
-
-@router.delete("/palace/files/{file_id}", status_code=204)
-def delete_palace_file(file_id: str, db: Session = Depends(get_db),
-                       current_user: User = Depends(get_current_user)):
-    palace_service.delete_palace_file(db, current_user.id, file_id)
-
-@router.post("/palace/files/{file_id}/rebuild", status_code=202)
-def rebuild_palace_file(file_id: str, db: Session = Depends(get_db),
-                        current_user: User = Depends(get_current_user)):
-    return palace_service.rebuild_file(db, current_user.id, file_id)
-
-@router.get("/palace/folders")
-def list_palace_folders(db: Session = Depends(get_db),
-                        current_user: User = Depends(get_current_user)):
-    return palace_service.list_folders(db, current_user.id)
-
-@router.post("/palace/folders", status_code=201)
-def create_palace_folder(body: PalaceFolderCreate, db: Session = Depends(get_db),
-                         current_user: User = Depends(get_current_user)):
-    return palace_service.create_folder(db, current_user.id, body.path)
-
-@router.post("/palace/files/notes", status_code=201)
-def create_palace_note(body: PalaceNoteCreate, db: Session = Depends(get_db),
-                       current_user: User = Depends(get_current_user)):
-    return palace_service.create_note(db, current_user, body)
-
-@router.patch("/palace/files/{file_id}")
-def move_palace_file(file_id: str, body: PalaceFileMove, db: Session = Depends(get_db),
-                     current_user: User = Depends(get_current_user)):
-    return palace_service.move_file(db, current_user.id, file_id, body.folder_path)
-
-@router.patch("/palace/folders/{folder_id}")
-def rename_palace_folder(folder_id: str, body: PalaceFolderRename, db: Session = Depends(get_db),
-                         current_user: User = Depends(get_current_user)):
-    return palace_service.rename_folder(db, current_user.id, folder_id, body.path)
-
-@router.delete("/palace/folders/{folder_id}", status_code=204)
-def delete_palace_folder(folder_id: str, db: Session = Depends(get_db),
-                         current_user: User = Depends(get_current_user)):
-    palace_service.delete_folder(db, current_user.id, folder_id)
-
-@router.get("/palace/graph")
-def palace_graph_view(db: Session = Depends(get_db),
-                      current_user: User = Depends(get_current_user)):
-    return palace_service.graph_overview(db, current_user.id)
-
-@router.get("/palace/graph/search")
-def search_palace_graph(q: str = Query(...), db: Session = Depends(get_db),
-                        current_user: User = Depends(get_current_user)):
-    return palace_service.search_graph(db, current_user.id, q)
-
-@router.post("/palace/graph/consolidate")
-def consolidate_palace_graph(db: Session = Depends(get_db),
-                             current_user: User = Depends(get_current_user)):
-    return palace_consolidate.run_consolidation(db, current_user.id)
-
-
-# ---------------------------------------------------------------------------
-# 本体发布态业务文档（平台共享只读镜像：「本体文档」目录）
-# ---------------------------------------------------------------------------
-
-@router.get("/palace/ontology-documents")
-def list_palace_ontology_documents(db: Session = Depends(get_db),
-                                   current_user: User = Depends(get_current_user)):
-    """各本体发布文档的镜像状态（与 /ontologies/published-documents 聚合端点
-    联合消费：聚合端点是权威清单，这里是摄取/建图状态）。"""
-    return palace_service.list_ontology_documents(db)
-
-@router.get("/palace/ontology-documents/{doc_id}/preview")
-def preview_palace_ontology_document(doc_id: str, max_chars: int = Query(60000, le=200000),
-                                     db: Session = Depends(get_db),
-                                     current_user: User = Depends(get_current_user)):
-    return palace_service.ontology_document_preview(db, doc_id, max_chars)
-
-@router.post("/palace/ontology-documents/{doc_id}/rebuild", status_code=202)
-def rebuild_palace_ontology_document(doc_id: str, db: Session = Depends(get_db),
-                                     current_user: User = Depends(get_current_user)):
-    """手动重试失败的本体文档建图（正常路径由发布事件/每日对账驱动）。"""
-    return palace_service.rebuild_ontology_document(db, doc_id)
-
-
 @router.post("/tool-runs/{tool_run_id}/decision")
 def decide_tool_run(
     tool_run_id: str,
@@ -603,11 +468,16 @@ def list_mcp_servers(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return mcp_server_service.list_mcp_servers(
-        db,
-        current_user.id,
-        include_builtins=True,
-    )
+    try:
+        return mcp_server_service.list_mcp_servers(
+            db,
+            current_user.id,
+            include_builtins=True,
+        )
+    except WeKnoraError as exc:
+        raise HTTPException(
+            status_code=503, detail="知识图谱服务尚未就绪",
+        ) from exc
 
 
 @router.post(

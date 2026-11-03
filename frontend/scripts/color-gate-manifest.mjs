@@ -87,7 +87,6 @@ export const LEGACY_COLOR_LIMITS = {
   'pages/scenes/modeling/TargetSceneSelector.tsx':                   1,
   'pages/settings/tabs/AssistantWidgetTab.tsx':                      1,
   'pages/super-assistant/SuperAssistantPage.tsx':                    2,
-  'pages/super-assistant/components/palaceGraphOption.ts':           1,
   'pages/tickets/TicketsPage.tsx':                                   2,
   'pages/world-model/WorldModelDevelopPage.tsx':                     9,
   'palantir-graph/components/editors/FunctionPanel.tsx':             8,

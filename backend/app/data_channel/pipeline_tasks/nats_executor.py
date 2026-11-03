@@ -15,8 +15,6 @@
 - ``integrated.sync``：持久化 queued run 的完整不可变源快照；
 - ``super_assistant.reflect.micro/full/focused``：超级助手三种自我进化
   反思任务（micro 每轮后 / full 手动 / focused 定向技能）；
-- ``super_assistant.palace.extract/consolidate``：记忆宫殿图谱抽取与
-  定期聚类合并；
 - ``super_assistant.scheduled.run``：超级助手用户定时任务的无人值守执行。
 
 每个 subject 使用独立 durable pull consumer，共享进程级并发信号量。
@@ -61,11 +59,7 @@ _SUPER_ASSISTANT_REFLECT_MICRO_DURABLE = "super-assistant-reflect-micro"
 _ASSISTANT_EVAL_AUTOPILOT_DURABLE = "assistant-eval-autopilot"
 _SUPER_ASSISTANT_REFLECT_FULL_DURABLE = "super-assistant-reflect-full"
 _SUPER_ASSISTANT_REFLECT_FOCUSED_DURABLE = "super-assistant-reflect-focused"
-_SUPER_ASSISTANT_PALACE_EXTRACT_DURABLE = "super-assistant-palace-extract"
-_SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE = "super-assistant-palace-consolidate"
-_SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE = "super-assistant-palace-ontology-rebuild"
 _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE = "super-assistant-scheduled-run"
-_ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE = "ontology-documents-published"
 _TASK_INSTANCES_CONTROL_DURABLE = "task-instances-control"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
 _EXECUTION_CALL_DURABLE = "sa-call-v1"
@@ -227,12 +221,8 @@ def _handler_registry():
         DATASET_MIGRATE_SUBJECT,
         INTEGRATED_SYNC_SUBJECT,
         MAPPING_APPLY_SUBJECT,
-        ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
         PIPELINE_EXECUTE_SUBJECT,
         PIPELINE_RUN_SUBJECT,
-        SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
-        SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT,
-        SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
         SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
         SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT,
         SUPER_ASSISTANT_REFLECT_FULL_SUBJECT,
@@ -240,7 +230,7 @@ def _handler_registry():
         TASK_INSTANCES_CONTROL_SUBJECT,
     )
     from app.assistant_evaluation import autopilot_tasks
-    from app.super_assistant import palace_tasks, reflection_tasks, scheduled_tasks
+    from app.super_assistant import reflection_tasks, scheduled_tasks
     from app.task_instances import executor as task_instances_executor
 
     entries = [
@@ -276,29 +266,9 @@ def _handler_registry():
             autopilot_tasks.run_autopilot_cycle_message,
         ),
         (
-            SUPER_ASSISTANT_PALACE_EXTRACT_SUBJECT,
-            _SUPER_ASSISTANT_PALACE_EXTRACT_DURABLE,
-            palace_tasks.run_palace_extract_message,
-        ),
-        (
-            SUPER_ASSISTANT_PALACE_CONSOLIDATE_SUBJECT,
-            _SUPER_ASSISTANT_PALACE_CONSOLIDATE_DURABLE,
-            palace_tasks.run_palace_consolidate_message,
-        ),
-        (
-            ONTOLOGY_DOCUMENT_PUBLISHED_SUBJECT,
-            _ONTOLOGY_DOCUMENT_PUBLISHED_DURABLE,
-            palace_tasks.run_palace_ontology_document_message,
-        ),
-        (
             SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT,
             _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE,
             scheduled_tasks.run_scheduled_task_message,
-        ),
-        (
-            SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_SUBJECT,
-            _SUPER_ASSISTANT_PALACE_ONTOLOGY_REBUILD_DURABLE,
-            palace_tasks.run_palace_ontology_rebuild_message,
         ),
     ]
     # 任务实例控制面的消费归属：生产部署中由 task_worker 服务独占消费

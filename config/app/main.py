@@ -34,6 +34,11 @@ STATIC_ROOT = Path(__file__).resolve().parents[1] / "static"
 DEFAULT_ENV_PATH = PROJECT_ROOT / "config" / "generated" / "local" / ".env"
 DEFAULT_CONFIG_PORT = 8888
 RECEIPT_TTL_SECONDS = 15 * 60
+# Official nats_executor liveness contract: its main loop refreshes this
+# heartbeat file every 5 seconds; compose health checks require an age
+# strictly below 30 seconds.
+NATS_EXECUTOR_HEARTBEAT_PATH = Path("/tmp/nats_executor.heartbeat")
+NATS_EXECUTOR_HEARTBEAT_MAX_AGE_SECONDS = 30
 AVAILABLE_SERVICES = tuple(PROBES)
 REQUIRED_SERVICES = tuple(
     service for service in AVAILABLE_SERVICES if service != "browser"
@@ -47,7 +52,7 @@ OPTIONAL_SERVICES: tuple[str, ...] = ("browser",)
 
 class ConfigCenterState:
     def __init__(self, env_path: Path, project_root: Path):
-        self.store = LocalEnvStore(env_path)
+        self.store = LocalEnvStore(env_path, project_root=project_root)
         self.project_root = project_root
         self.csrf_token = secrets.token_urlsafe(32)
         self.access_token = secrets.token_urlsafe(48)
@@ -208,7 +213,7 @@ def create_app(
             "warnings": [
                 "首次管理员密码只在数据库尚无管理员时生效",
                 "SECRET_KEY 和 ENCRYPTION_KEY 必须长期保持稳定",
-                "请分别启动后端、Celery worker 和前端，再执行启动后复检",
+                "请分别启动后端、后台任务 executor 和前端，再执行启动后复检",
             ],
         }
 
@@ -218,7 +223,7 @@ def create_app(
             profile = state.store.resolve_secrets(request_body.profile)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        results = await run_runtime_checks(profile, state.project_root)
+        results = await run_runtime_checks(profile)
         return {
             "ok": all(item["ok"] for item in results),
             "message": (
@@ -337,10 +342,10 @@ def startup_commands() -> dict[str, list[dict[str, str]]]:
                 "command": "cd /d backend && uv run python -m app.dev_server",
             },
             {
-                "label": "Celery worker",
+                "label": "后台任务 executor",
                 "command": (
-                    "cd /d backend && uv run celery "
-                    "-A app.tasks.celery_app:celery_app worker --loglevel=info"
+                    "cd /d backend && uv run python -m "
+                    "app.data_channel.pipeline_tasks.nats_executor"
                 ),
             },
             {
@@ -354,10 +359,10 @@ def startup_commands() -> dict[str, list[dict[str, str]]]:
                 "command": "cd backend && uv run python -m app.dev_server",
             },
             {
-                "label": "Celery worker",
+                "label": "后台任务 executor",
                 "command": (
-                    "cd backend && uv run celery "
-                    "-A app.tasks.celery_app:celery_app worker --loglevel=info"
+                    "cd backend && uv run python -m "
+                    "app.data_channel.pipeline_tasks.nats_executor"
                 ),
             },
             {
@@ -387,7 +392,7 @@ def service_guides() -> dict[str, dict[str, Any]]:
         },
         "redis": {
             "title": "确认 Redis 密码",
-            "summary": "完整模式要求 Redis 使用密码，Celery worker 也会使用同一地址。",
+            "summary": "完整模式要求 Redis 使用密码，后端与后台任务 executor 也会使用同一地址。",
             "steps": [
                 "若使用 Docker，请查看你创建容器时传入的 Redis 启动参数或配置文件。",
                 "若没有设置密码，请在本地 Redis 配置中启用 requirepass 后重启服务。",
@@ -465,12 +470,41 @@ def service_guides() -> dict[str, dict[str, Any]]:
                 "curl http://127.0.0.1:5678/healthz",
             ],
         },
+        "weknora": {
+            "title": "WeKnora 共享知识库",
+            "summary": (
+                "WeKnora 是独立的原生 Web 知识库与 MCP 工具源；平台不会伪造"
+                "模型或跳过初始化。首次初始化只在公网网关开放前由 Docker "
+                "部署脚本自动执行。"
+            ),
+            "steps": [
+                "Docker 生产部署会自动创建正式系统管理员、共享知识库和 MCP 凭据，"
+                "随后关闭注册并启动公网网关；不要手工向公开入口注册账号。",
+                "本地源码运行：普通 docker-compose.local.yml up 会自动启动"
+                "一次性 bootstrap 与 --verify，成功后网关才发布 8089/8444。",
+                "bootstrap 会登录正式管理员、通过官方设置 API 持久化 invite_only、"
+                "发现 8 个默认只读 MCP 工具（search/read/grep/list/wiki）并刷新 "
+                "state；不自动接入 ask、不创建 quick-answer agent。失败时网关保持未启动。",
+                "源码 backend 连接地址用 loopback app 18080；公网 Web 是 "
+                "8089/8444，网关不代理 MCP。state origin 固定为 "
+                "http://weknora-app:8080，不能改成 127.0.0.1；状态文件由 "
+                "bootstrap 以宿主机 UID 写入 0600，后端只读。",
+                "本页测试 app 直连 HTTP 与 verified state 元数据/工具白名单，"
+                "不执行真实聊天、检索或图谱查询，也不代表深度 RAG readiness；"
+                "backend 启动时的严格 probe 才是最终门禁。首次登录邮箱/密码只从"
+                "受控终端 .env 读取，不打印或发到页面。",
+            ],
+            "commands": [
+                "docker compose -f docker-compose.local.yml up -d",
+                "docker compose -f docker-compose.local.yml logs weknora-bootstrap",
+                "docker compose -f docker-compose.local.yml up --force-recreate weknora-bootstrap",
+            ],
+        },
     }
 
 
 async def run_runtime_checks(
     profile: ConfigProfile,
-    project_root: Path,
 ) -> list[dict[str, Any]]:
     backend_origin = (
         f"http://{_http_host(profile.platform.backend_host)}:"
@@ -484,8 +518,8 @@ async def run_runtime_checks(
         _check_backend_runtime, f"{backend_origin}/health/ready"
     )
     frontend_task = asyncio.to_thread(_check_frontend_runtime, frontend_origin)
-    celery_task = asyncio.to_thread(_check_celery_worker, project_root)
-    return list(await asyncio.gather(backend_task, frontend_task, celery_task))
+    executor_task = asyncio.to_thread(_check_nats_executor)
+    return list(await asyncio.gather(backend_task, frontend_task, executor_task))
 
 
 def _check_backend_runtime(url: str) -> dict[str, Any]:
@@ -553,52 +587,45 @@ def _check_frontend_runtime(url: str) -> dict[str, Any]:
         }
 
 
-def _check_celery_worker(project_root: Path) -> dict[str, Any]:
-    backend_dir = project_root / "backend"
-    if not backend_dir.is_dir() or shutil.which("uv") is None:
-        return {
-            "id": "celery",
-            "label": "Celery worker",
-            "ok": False,
-            "detail": "找不到 backend 目录或 uv",
-        }
+def _check_nats_executor() -> dict[str, Any]:
+    label = "后台任务 executor"
     try:
-        completed = subprocess.run(
-            [
-                "uv",
-                "run",
-                "celery",
-                "-A",
-                "app.tasks.celery_app:celery_app",
-                "inspect",
-                "ping",
-                "--timeout=5",
-            ],
-            cwd=backend_dir,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
+        heartbeat_age = (
+            time.time() - NATS_EXECUTOR_HEARTBEAT_PATH.stat().st_mtime
         )
-        combined = f"{completed.stdout}\n{completed.stderr}".lower()
-        ok = completed.returncode == 0 and "pong" in combined
+    except FileNotFoundError:
         return {
-            "id": "celery",
-            "label": "Celery worker",
-            "ok": ok,
+            "id": "nats_executor",
+            "label": label,
+            "ok": False,
             "detail": (
-                "至少一个 worker 返回 PONG"
-                if ok
-                else "没有 worker 响应，请在独立终端启动 Celery worker"
+                "未检测到 executor 心跳，请在独立终端启动"
+                " app.data_channel.pipeline_tasks.nats_executor"
             ),
         }
-    except Exception as exc:  # noqa: BLE001
+    except OSError as exc:
         return {
-            "id": "celery",
-            "label": "Celery worker",
+            "id": "nats_executor",
+            "label": label,
             "ok": False,
             "detail": _short_runtime_error(exc),
         }
+    if heartbeat_age >= NATS_EXECUTOR_HEARTBEAT_MAX_AGE_SECONDS:
+        return {
+            "id": "nats_executor",
+            "label": label,
+            "ok": False,
+            "detail": (
+                f"executor 心跳已过期（{heartbeat_age:.0f} 秒前），"
+                "请确认进程仍在运行"
+            ),
+        }
+    return {
+        "id": "nats_executor",
+        "label": label,
+        "ok": True,
+        "detail": "executor 心跳正常",
+    }
 
 
 def _probe_payload(service: str, result: ProbeResult) -> dict[str, Any]:

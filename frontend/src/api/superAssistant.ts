@@ -107,126 +107,11 @@ export interface SuperSearchResult {
   conversations: SuperSearchConversationHit[]
 }
 
-/** 记忆宫殿文件（用户级长期资产）：图谱抽取状态机 draft→pending→building→built/failed */
-export interface PalaceFile {
-  id: string
-  filename: string
-  /** 目录层级（"/" 分隔，根目录为空串）：单传文件落根目录，ZIP 导入保留包内结构 */
-  path: string
-  mimeType: string
-  size: number
-  sha256: string
-  extractedChars: number
-  status: 'draft' | 'pending' | 'building' | 'built' | 'failed' | string
-  error: string | null
-  entityCount: number
-  relationCount: number
-  /** md/txt 纯文本文件支持在线编辑（PUT content），其余格式只读 */
-  editable: boolean
-  /** 图片只入库+预览（/raw 原图），不参与图谱抽取，状态直接定格 built */
-  isImage: boolean
-  createdAt: string
-  updatedAt: string
-}
-
-/** 记忆宫殿目录（一等公民）：path 为 "/" 分隔归一路径，根目录不落行 */
-export interface PalaceFolder {
-  id: string
-  path: string
-  createdAt: string
-  updatedAt: string
-}
-
-/** 本体发布态业务文档的宫殿镜像（平台共享只读）：发布/回滚事件自动同步建图 */
-export interface PalaceOntologyDocument {
-  id: string
-  ontologyId: string
-  ontologyName: string
-  versionId: string
-  versionNumber: string
-  title: string
-  fingerprint: string
-  status: 'pending' | 'building' | 'built' | 'failed' | string
-  error: string | null
-  entityCount: number
-  relationCount: number
-  extractedChars: number
-  size: number
-  updatedAt: string
-}
-
-/** 本体文档内容预览（GET ontology-documents preview）：与文件预览同响应形状 */
-export interface PalaceOntologyDocumentPreview {
-  file: PalaceOntologyDocument
-  content: string
-  truncated: boolean
-  previewable: boolean
-}
-
-export interface PalaceGraphNode {
-  id: string
-  name: string
-  type: string
-  aliases: string[]
-  source_files: string[]
-  /** 溯源文件行 id：与文件库列表联动（选中文件高亮 / 点节点定位文档） */
-  file_ids: string[]
-  mention_count: number
-  /** 检索/对话中被引用命中的次数（graph/search 与图谱详情展示口径） */
-  match_count: number
-}
-
-export interface PalaceGraphEdge {
-  source: string
-  target: string
-  name: string
-  source_files: string[]
-  file_ids: string[]
-}
-
-/** 记忆宫殿图谱视图：available=false 表示 Neo4j 暂不可用（非 5xx） */
-export interface PalaceGraph {
-  available: boolean
-  nodes: PalaceGraphNode[]
-  edges: PalaceGraphEdge[]
-  totals: { entities: number; relations: number }
-  truncated: boolean
-  /** 画布下统计条：已建图/全部文档数与最近一次成功建图完成时间（无则 null） */
-  builtFiles: number
-  totalFiles: number
-  updatedAt: string | null
-}
-
-/** 单文件预览（GET preview）：previewable=false 表示该格式不支持预览 */
-export interface PalaceFilePreview {
-  file: PalaceFile
-  content: string
-  truncated: boolean
-  previewable: boolean
-}
-
-/** ZIP 批量导入结果（POST files/batch）：created 为新建文件，skipped 为跳过项及原因 */
-export interface PalaceImportResult {
-  created: PalaceFile[]
-  skipped: Array<{ filename: string; reason: string }>
-}
-
-/** 图谱邻域检索返回的关系边（自带两端实体名，供高亮与邻域展示） */
-export interface PalaceGraphSearchEdge {
-  source: string
-  target: string
-  source_name: string
-  target_name: string
-  name: string
-  source_files: string[]
-  file_ids: string[]
-}
-
-/** 图谱邻域检索（GET graph/search）：available=false 表示图谱服务暂不可用 */
-export interface PalaceGraphSearchResult {
-  available: boolean
-  entities: PalaceGraphNode[]
-  relations: PalaceGraphSearchEdge[]
+/** 腾讯 WeKnora 知识库集成（平台后端转发的受信公网入口，不含 token/密码） */
+export interface WeKnoraIntegration {
+  /** WeKnora 原生 Web 页面公网地址：前端只负责新标签打开，登录使用其原生账号体系 */
+  web_url: string
+  knowledge_base_name: string
 }
 
 export interface SkillFile {
@@ -708,6 +593,7 @@ export interface ReflectionCandidate {
 
 export interface ReflectionSettings {
   auto_accept_enabled: boolean
+  /** 长期记忆索引（沿用后端历史字段名 palace_index，与已退役的知识图谱无关） */
   palace_index: string | null
   profile: string | null
   memory_count: number
@@ -813,59 +699,9 @@ export const superAssistantApi = {
       timeout: 90_000,
       signal: config?.signal,
     }),
-  palaceFiles: () => apiClientV2.get<PalaceFile[]>('/super-assistant/palace/files'),
-  /** folderPath 非空时上传归位到该目录（目录不存在时后端按 mkdir -p 补行） */
-  uploadPalaceFile: (file: File, folderPath = '') => {
-    const form = new FormData()
-    form.append('file', file)
-    if (folderPath) form.append('folder_path', folderPath)
-    return apiClientV2.post<PalaceFile>('/super-assistant/palace/files', form)
-  },
-  palaceFolders: () => apiClientV2.get<PalaceFolder[]>('/super-assistant/palace/folders'),
-  createPalaceFolder: (path: string) =>
-    apiClientV2.post<PalaceFolder>('/super-assistant/palace/folders', { path }),
-  renamePalaceFolder: (folderId: string, path: string) =>
-    apiClientV2.patch<PalaceFolder>(`/super-assistant/palace/folders/${folderId}`, { path }),
-  deletePalaceFolder: (folderId: string) =>
-    apiClientV2.delete(`/super-assistant/palace/folders/${folderId}`),
-  /** 新建 md/txt 空笔记（status=draft，首次保存内容才触发图谱抽取） */
-  createPalaceNote: (filename: string, folderPath: string) =>
-    apiClientV2.post<PalaceFile>('/super-assistant/palace/files/notes', { filename, folderPath }),
-  /** 拖拽移动文件（不改内容、不触发抽取）；folderPath 空串表示根目录 */
-  movePalaceFile: (fileId: string, folderPath: string) =>
-    apiClientV2.patch<PalaceFile>(`/super-assistant/palace/files/${fileId}`, { folderPath }),
-  deletePalaceFile: (fileId: string) =>
-    apiClientV2.delete(`/super-assistant/palace/files/${fileId}`),
-  rebuildPalaceFile: (fileId: string) =>
-    apiClientV2.post<{ dispatched: boolean }>(`/super-assistant/palace/files/${fileId}/rebuild`),
-  palaceFilePreview: (fileId: string, maxChars = 60000) =>
-    apiClientV2.get<PalaceFilePreview>(`/super-assistant/palace/files/${fileId}/preview`, { params: { max_chars: maxChars } }),
-  /** 原始字节（图片原图预览）：Bearer 鉴权走 axios blob，消费方自行 createObjectURL 并释放 */
-  palaceFileRaw: (fileId: string) =>
-    apiClientV2.get<Blob>(`/super-assistant/palace/files/${fileId}/raw`, { responseType: 'blob' }),
-  updatePalaceFileContent: (fileId: string, content: string) =>
-    apiClientV2.put<PalaceFile>(`/super-assistant/palace/files/${fileId}/content`, { content }),
-  replacePalaceFile: (fileId: string, file: File) => {
-    const form = new FormData()
-    form.append('file', file)
-    return apiClientV2.post<PalaceFile>(`/super-assistant/palace/files/${fileId}/replace`, form)
-  },
-  importPalaceZip: (archive: File) => {
-    const form = new FormData()
-    form.append('archive', archive)
-    return apiClientV2.post<PalaceImportResult>('/super-assistant/palace/files/batch', form)
-  },
-  palaceGraph: () => apiClientV2.get<PalaceGraph>('/super-assistant/palace/graph'),
-  palaceGraphSearch: (q: string) =>
-    apiClientV2.get<PalaceGraphSearchResult>('/super-assistant/palace/graph/search', { params: { q } }),
-  /** 本体发布文档镜像列表（平台共享只读，树中「本体文档」目录数据源之一） */
-  palaceOntologyDocuments: () =>
-    apiClientV2.get<PalaceOntologyDocument[]>('/super-assistant/palace/ontology-documents'),
-  palaceOntologyDocumentPreview: (docId: string, maxChars = 60000) =>
-    apiClientV2.get<PalaceOntologyDocumentPreview>(`/super-assistant/palace/ontology-documents/${docId}/preview`, { params: { max_chars: maxChars } }),
-  /** 手动重试失败的本体文档建图（正常路径由发布事件/每日对账驱动） */
-  rebuildPalaceOntologyDocument: (docId: string) =>
-    apiClientV2.post<{ dispatched: boolean }>(`/super-assistant/palace/ontology-documents/${docId}/rebuild`),
+  /** 腾讯 WeKnora 原生 Web 入口（页面加载即读配置；后端只回公网地址与知识库名） */
+  getWeKnoraIntegration: () =>
+    apiClientV2.get<WeKnoraIntegration>('/super-assistant/weknora'),
   streamChat,
   /** kernel.v1 长任务 API；与旧 Conversation 流并行，调用方需自行保存 run_id/version。 */
   createKernelRun: (conversationId: string, body: {
@@ -1027,14 +863,6 @@ export const superAssistantApi = {
     apiClientV2.post<MulticaTestResult>('/super-assistant/multica/test', body),
   multicaWorkspaces: () =>
     apiClientV2.get<MulticaWorkspacesResult>('/super-assistant/multica/workspaces'),
-
-  // 文件夹同步（记忆宫殿）：重置长效同步令牌（明文仅此一次返回）与下载
-  // 内嵌平台地址 + 当前令牌的同步脚本（Blob）。下载依赖浏览器副作用，按
-  // AGENTS.md §5：E2E 必须断言下载文件内容，不能只断言"提示出现"。
-  resetPalaceSyncToken: () =>
-    apiClientV2.post<{ token: string }>('/super-assistant/palace/sync/token'),
-  downloadPalaceSyncScript: () =>
-    apiClientV2.get('/super-assistant/palace/sync/script', { responseType: 'blob' }) as Promise<Blob>,
 
   listRemoteAgents: () => apiClientV2.get<RemoteAgent[]>('/super-assistant/remote-agents'),
   createRemoteAgent: (body: RemoteAgentPayload) =>

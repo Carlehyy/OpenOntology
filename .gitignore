@@ -18,9 +18,10 @@ config/generated/
 # 生产依赖清单只在 runner/服务器上从 Repository secrets 物化，本地副本不入库
 deploy/production.dependencies.env
 
-# Uploads
+# Uploads and local runtime state (including WeKnora source-run state)
 uploads/
 storage/
+runtime/
 backend/data/
 # 语音听写模型（~230MB，由脚本显式下载）
 backend/voice-models/

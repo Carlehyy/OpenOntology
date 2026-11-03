@@ -1,4 +1,4 @@
-"""远程助手任务队列的例行清理（APScheduler 进程内定时，先例 palace_consolidate）。
+"""远程助手任务队列的例行清理（APScheduler 进程内定时，先例助手评估值守）。
 
 done/expired 任务行与孤儿行（进程崩溃遗留的 pending/claimed，过期后对
 认领不可见）不清理会随时间无限累积。保留口径：expires_at 早于

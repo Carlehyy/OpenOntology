@@ -22,7 +22,7 @@ from app.shared.database import SessionLocal
 from app.shared.query_control import (
     QueryControl, current_query_control, query_control_scope,
 )
-from app.super_assistant import browser_tools, context_refs, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, palace_service, persistence, provider, query_execution, query_recovery, reflection_service, result_guard, web_tools
+from app.super_assistant import browser_tools, context_refs, delegation, files_workspace, mcp_dev_service, memory_service, multica_service, ontology_tools, persistence, provider, query_execution, query_recovery, reflection_service, result_guard, web_tools
 from app.super_assistant.compaction import maybe_compact
 from app.super_assistant.mcp_client import call_tool, decrypt_env, decrypt_headers, namespaced_tool_name
 from app.super_assistant.models import (
@@ -218,9 +218,6 @@ _READ_ONLY_BUILTIN_TOOLS = frozenset({
     # 会话附件只读读取：写入由 HTTP 上传端点完成，agent 不可写
     "list_session_files",
     "read_session_file",
-    # 记忆宫殿知识图谱（用户上传文档沉淀）只读检索：写入同样只走 HTTP 端点
-    "palace_graph_search",
-    "palace_graph_files",
     # todo 清单是本轮 stream_chat 的内存态，读写均无外部副作用
     "todo_write",
     "todo_read",
@@ -299,7 +296,6 @@ def _system_prompt(
     memory_section: str = "",
     agent_mode: bool = False,
     file_section: str = "",
-    palace_section: str = "",
     multica_enabled: bool = False,
     delegation_enabled: bool = False,
     context_refs_section: str = "",
@@ -319,8 +315,7 @@ def _system_prompt(
 6. 使用标准 Markdown 组织回答；不要用 markdown / md 代码围栏包裹整段答复。只有真实代码才使用代码围栏。
 7. 你可以用 memory_search / palace_recall 主动回忆跨会话记忆，用 memory_save 保存重要事实（低风险事实会自动记住，其余需用户审批后生效）。
 8. 当系统提示包含 Memory Palace 时，用 palace_zones / palace_read_zone / palace_recall 导航记忆分区。
-9. 记忆宫殿还包含用户上传文档与平台本体发布文档沉淀的知识图谱（跨会话长期知识）：系统提示可能已注入相关图谱片段，需要更多时用 palace_graph_search 检索、palace_graph_files 查看文件库；回答图谱相关问题时引用来源文件。
-10. 本体能力（用不改）：知识图谱里的本体内容只是发现线索（advisory），不是完整 schema，发现入口用 ontology_catalog（权威 published 目录与发布文档，图谱异步构建可能缺项）。涉及本体数据时，先用 ontology_structure 读取当前发布 release 的准确结构（字段/类型/关系/动作都以 structure 返回为准），再用 ontology_query 查询；objectTypes 的 dataAccess=remote 分组是联邦远程数据，必须走受治理查询（subquery 同源聚合防 fanout），不得在文本里推算远程结果。查询返回标 ephemeral 的明细只在本轮临时可见（平台不落库），答复优先给聚合结论与续读 cursor，不要整段复述明细行。跨本体关联必须有明确业务键依据，不能凭名称相似猜测，确有关联依据时先调 ontology_register_join_assertion 向用户申请登记（批准后才能用于查询）。执行本体业务动作走 ontology_prepare_action 准备 → 用户在界面二次确认 → ontology_execute_action 唤醒（确认前不产生业务效果，是否需要确认以确认卡为准）；执行返回非 succeeded 状态（如 pending_approval/unknown）时如实转述当前状态，不得声称业务已完成。你只能“用”本体（发现/结构/查询/准备/确认执行），没有任何修改本体定义的途径，也不要建议绕过。
+9. 本体能力（用不改）：知识图谱里的本体内容只是发现线索（advisory），不是完整 schema，发现入口用 ontology_catalog（权威 published 目录与发布文档，图谱异步构建可能缺项）。涉及本体数据时，先用 ontology_structure 读取当前发布 release 的准确结构（字段/类型/关系/动作都以 structure 返回为准），再用 ontology_query 查询；objectTypes 的 dataAccess=remote 分组是联邦远程数据，必须走受治理查询（subquery 同源聚合防 fanout），不得在文本里推算远程结果。查询返回标 ephemeral 的明细只在本轮临时可见（平台不落库），答复优先给聚合结论与续读 cursor，不要整段复述明细行。跨本体关联必须有明确业务键依据，不能凭名称相似猜测，确有关联依据时先调 ontology_register_join_assertion 向用户申请登记（批准后才能用于查询）。执行本体业务动作走 ontology_prepare_action 准备 → 用户在界面二次确认 → ontology_execute_action 唤醒（确认前不产生业务效果，是否需要确认以确认卡为准）；执行返回非 succeeded 状态（如 pending_approval/unknown）时如实转述当前状态，不得声称业务已完成。你只能“用”本体（发现/结构/查询/准备/确认执行），没有任何修改本体定义的途径，也不要建议绕过。
 
 可用 Skill 目录：
 {catalog}
@@ -344,8 +339,6 @@ def _system_prompt(
         prompt = f"{prompt}\n{memory_section}\n"
     if file_section:
         prompt = f"{prompt}\n{file_section}\n"
-    if palace_section:
-        prompt = f"{prompt}\n{palace_section}\n"
     if context_refs_section:
         # 同会话历史结构引用：只读投影、非权威、非授权，使用前须重新发现。
         prompt = f"{prompt}\n{context_refs_section}\n"
@@ -469,21 +462,6 @@ def _builtin_tools(agent_mode: bool = False) -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
         },
-        {
-            "name": "palace_graph_search",
-            "description": "检索记忆宫殿知识图谱（用户上传文档与平台本体发布文档沉淀的跨会话知识，本体内容仅作发现线索）：按关键词找实体及其一跳关系，返回实体、关系和来源文件。",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "检索词（人物/组织/概念等）"}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": "palace_graph_files",
-            "description": "列出记忆宫殿文件库（用户上传文档与平台共享的本体发布文档）及各文件的图谱构建状态；无权限读取其它会话的附件。",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-        },
     ]
     if agent_mode:
         # 自主 agent 模式的任务清单工具：状态是本轮 stream_chat 的内存态，
@@ -566,8 +544,9 @@ def _disabled_builtin_tools(db, owner_id: str) -> set[str]:
 # 工具目录是平台编码的固定清单，执行不经用户配置的传输/URL/凭据——
 # minio 固定平台工作区桶（桶/endpoint 覆盖参数被拒绝）；api_hub 逐工具
 # 以当前用户菜单权限 + 服务层行级作用域执行，出网复用 api_hub 私网/
-# 回环/重定向 SSRF 守卫。
-_CONSTRUCTIVELY_CONSTRAINED_BUILTINS = frozenset({"minio", "api_hub"})
+# 回环/重定向 SSRF 守卫；weknora 固定部署内部端点、只读白名单工具与
+# 平台持有的 Bearer token，用户不能自建 URL 触发。
+_CONSTRUCTIVELY_CONSTRAINED_BUILTINS = frozenset({"minio", "api_hub", "weknora"})
 
 
 def mcp_server_constrained(server: SuperAssistantMcpServer) -> bool:
@@ -1001,22 +980,6 @@ def _execute_builtin_tool(
             "next_offset": next_offset if truncated else None,
             "truncated": truncated,
         }, ensure_ascii=False)
-    if name == "palace_graph_search":
-        query = str(arguments.get("query") or "").strip()
-        if not query:
-            return json.dumps({"error": "query 不能为空"}, ensure_ascii=False)
-        try:
-            result = palace_service.search_for_tool(owner_id, query, db)
-        except Exception as exc:  # Neo4j 故障不得打断对话轮：只读工具快速失败
-            logger.warning("palace_graph_search 执行失败", exc_info=True)
-            return json.dumps({"error": str(exc)}, ensure_ascii=False)
-        return json.dumps(result, ensure_ascii=False)
-    if name == "palace_graph_files":
-        rows = palace_service.list_files_for_tool(db, owner_id)
-        return json.dumps({
-            "files": rows,
-            "note": "图谱写入仅由记忆宫殿上传/重建端点执行，此处只读。",
-        }, ensure_ascii=False)
     if name == "think":
         if ephemeral_turn_state is not None and ephemeral_turn_state.detail_seen:
             # think 的回显会原样落入 ToolRun.result/steps.preview：本轮
@@ -1323,6 +1286,10 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             SuperAssistantSkill.use_count.desc(),
             SuperAssistantSkill.name.asc(),
         ).all()
+        # 平台内置 WeKnora 默认接入：本地 verified 快照幂等补齐，不联网。
+        from app.super_assistant.weknora import mcp_service as weknora_mcp_service
+
+        weknora_mcp_service.ensure_server(db, owner_id)
         servers = db.query(SuperAssistantMcpServer).filter(
             SuperAssistantMcpServer.owner_id == owner_id,
             SuperAssistantMcpServer.enabled.is_(True),
@@ -1387,16 +1354,11 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         except Exception:  # 附件故障不得阻断聊天
             logger.warning("会话附件上下文加载失败: %s", conversation_id, exc_info=True)
             file_section = ""
-        try:
-            palace_section = palace_service.build_prompt_section(db, owner_id, query=user_query)
-        except Exception:  # 记忆宫殿图谱故障不得阻断聊天
-            logger.warning("记忆宫殿图谱上下文加载失败: %s", owner_id, exc_info=True)
-            palace_section = ""
         context_refs_section = _context_refs_section(owner_id, conversation_id)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _system_prompt(
                 skills, memory_section, agent_mode,
-                file_section=file_section, palace_section=palace_section,
+                file_section=file_section,
                 multica_enabled=multica_config is not None,
                 delegation_enabled=delegation_enabled,
                 context_refs_section=context_refs_section,
@@ -1858,7 +1820,25 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         server, original_name = server_tuple
                         tool_run.status = "running"
                         db.commit()
-                        if server.builtin_key == "minio":
+                        if server.builtin_key == "weknora":
+                            # 平台内置只读通道：固定白名单 + 服务层内部端点
+                            # 与 token，绝不走用户可配置的 transport/URL。
+                            from app.super_assistant.weknora.policy import (
+                                WEKNORA_ALLOWED_TOOLS,
+                            )
+
+                            if original_name not in WEKNORA_ALLOWED_TOOLS:
+                                raise RuntimeError(
+                                    "WeKnora 内置 MCP 工具不在平台只读白名单，已拒绝执行"
+                                )
+                            from app.super_assistant.weknora import service as weknora_service
+
+                            output = asyncio.run(
+                                weknora_service.call_tool(
+                                    original_name, dict(item["arguments"]),
+                                )
+                            )
+                        elif server.builtin_key == "minio":
                             output = execute_minio_tool(
                                 db, original_name, item["arguments"],
                                 actor_type="super_assistant", actor_id=owner_id,

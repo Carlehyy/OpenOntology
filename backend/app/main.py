@@ -428,20 +428,13 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
-# 记忆宫殿文件夹同步：浏览器侧（令牌管理/脚本下发）同前缀同守卫；本机
-# 脚本侧 /palace/sync/* 以长效令牌鉴权（依赖内校验菜单权限），不挂
-# menu_guard——与 events ingest_router 同一挂载先例。
-from app.super_assistant import palace_sync as super_assistant_palace_sync
+# WeKnora 知识服务前端引导（web_url + 知识库名）：同前缀同守卫子路由
+from app.super_assistant.weknora import router as super_assistant_weknora
 app.include_router(
-    super_assistant_palace_sync.management_router,
+    super_assistant_weknora.router,
     prefix="/api/v2/super-assistant",
     tags=["super-assistant"],
     dependencies=assistant_guard,
-)
-app.include_router(
-    super_assistant_palace_sync.sync_router,
-    prefix="/api/v2/super-assistant",
-    tags=["super-assistant"],
 )
 # 远程助手邀请（属主侧：创建/列出/撤销一次性接入邀请，邀请函重发）：同前缀同守卫
 from app.super_assistant import remote_agent_invites as super_assistant_remote_agent_invites

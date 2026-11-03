@@ -47,7 +47,7 @@ def test_health_all_service_keys_present():
     data = response.json()
     for key in (
         "db", "redis", "neo4j", "minio", "object_storage",
-        "browser", "n8n",
+        "browser", "n8n", "weknora",
         "sentinel_scheduler", "sentinel_cdc", "data_scheduler",
         "ontology_projection",
     ):
@@ -60,7 +60,7 @@ def test_health_service_states_are_valid():
     data = response.json()
     assert data["db"] in VALID_DB_STATES
     for key in (
-        "redis", "neo4j", "minio", "browser", "n8n",
+        "redis", "neo4j", "minio", "browser", "n8n", "weknora",
         "sentinel_scheduler", "sentinel_cdc", "data_scheduler",
         "ontology_projection",
     ):
@@ -130,6 +130,46 @@ def test_minio_authenticated_probe_failure_fails_readiness(monkeypatch):
     assert data["minio"] == "unavailable"
     assert data["object_storage"] == "unavailable"
     assert "minio" in data["unavailable"]
+
+
+def test_weknora_probe_failure_fails_readiness_without_leaking_runtime_config(
+    monkeypatch,
+):
+    state_path = "/weknora-state/integration.json"
+    mcp_token = "mcp_synthetic_health_token_not_a_secret"
+    internal_url = "http://weknora-app:8080"
+
+    def reject_weknora():
+        raise RuntimeError(
+            f"WEKNORA_MCP_UNAVAILABLE token={mcp_token} "
+            f"url={internal_url} state={state_path}"
+        )
+
+    monkeypatch.setattr(dependency_probe, "probe_weknora", reject_weknora)
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert response.status_code == 503
+    assert data["weknora"] == "unavailable"
+    assert "weknora" in data["unavailable"]
+    for secret in (mcp_token, internal_url, state_path):
+        assert secret not in response.text
+
+
+def test_weknora_probe_success_reports_ok(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        dependency_probe, "probe_weknora", lambda: calls.append("probe"),
+    )
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert calls == ["probe"]
+    assert data["weknora"] == "ok"
+    assert "weknora" not in data["unavailable"]
 
 
 def test_health_status_reflects_dependencies():

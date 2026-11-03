@@ -57,6 +57,29 @@ append_boolean() {
   esac
 }
 
+append_optional() {
+  local key="$1"
+  local source_name="$2"
+  local value="${!source_name:-}"
+  [ -n "$value" ] || return 0
+  append_required "$key" "$source_name"
+}
+
+append_optional_digest() {
+  local key="$1"
+  local source_name="$2"
+  local value="${!source_name:-}"
+  [ -n "$value" ] || return 0
+  case "$value" in
+    *@sha256:*) ;;
+    *)
+      echo "$source_name must be pinned with @sha256 when set" >&2
+      exit 1
+      ;;
+  esac
+  append_required "$key" "$source_name"
+}
+
 append_bounded_integer_default() {
   local key="$1"
   local source_name="$2"
@@ -98,6 +121,27 @@ append_required N8N_API_URL PROD_N8N_API_URL
 append_required N8N_API_KEY PROD_N8N_API_KEY
 append_bounded_integer_default \
   N8N_TIMEOUT_SECONDS PROD_N8N_TIMEOUT_SECONDS 30 3 120
+
+# WeKnora chat/embedding endpoints are deployment inputs, never guessed or
+# silently replaced by a local fallback. Images are optional in the manifest
+# but must be digest-pinned when supplied; the deployment script rejects
+# unverified tag-only examples.
+append_required WEKNORA_CHAT_BASE_URL PROD_WEKNORA_CHAT_BASE_URL
+append_required WEKNORA_CHAT_API_KEY PROD_WEKNORA_CHAT_API_KEY
+append_required WEKNORA_CHAT_MODEL PROD_WEKNORA_CHAT_MODEL
+append_required WEKNORA_EMBEDDING_BASE_URL PROD_WEKNORA_EMBEDDING_BASE_URL
+append_required WEKNORA_EMBEDDING_API_KEY PROD_WEKNORA_EMBEDDING_API_KEY
+append_required WEKNORA_EMBEDDING_MODEL PROD_WEKNORA_EMBEDDING_MODEL
+append_required WEKNORA_EMBEDDING_DIMENSIONS PROD_WEKNORA_EMBEDDING_DIMENSIONS
+append_optional WEKNORA_WEB_URL PROD_WEKNORA_WEB_URL
+append_optional WEKNORA_ADMIN_USER PROD_WEKNORA_ADMIN_USER
+append_optional WEKNORA_ADMIN_EMAIL PROD_WEKNORA_ADMIN_EMAIL
+append_optional_digest WEKNORA_APP_IMAGE PROD_WEKNORA_APP_IMAGE
+append_optional_digest WEKNORA_UI_IMAGE PROD_WEKNORA_UI_IMAGE
+append_optional_digest WEKNORA_DOCREADER_IMAGE PROD_WEKNORA_DOCREADER_IMAGE
+append_optional_digest WEKNORA_POSTGRES_IMAGE PROD_WEKNORA_POSTGRES_IMAGE
+append_optional_digest WEKNORA_REDIS_IMAGE PROD_WEKNORA_REDIS_IMAGE
+append_optional_digest WEKNORA_NEO4J_IMAGE PROD_WEKNORA_NEO4J_IMAGE
 
 chmod 600 "$tmp_file"
 mv "$tmp_file" "$target"
