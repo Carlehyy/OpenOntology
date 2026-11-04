@@ -1541,7 +1541,7 @@ if [ "${1-}" = image ] && [ "${2-}" = inspect ]; then
     *'{{.Os}}/{{.Architecture}}'*) printf 'linux/amd64\n' ;;
     *'{{.Created}}'*) printf '2026-11-02T03:00:00Z sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
     *fixture-tag) printf 'sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
-    *) printf '%s\n' "${FAKE_ATTESTATION_RUNNING_PLATFORM_IMAGE_ID:-${FAKE_ATTESTATION_RUNNING_IMAGE_ID:-sha256:$(printf 'a%.0s' {1..64})}}" ;;
+    *) printf 'old OCI index is no longer addressable\n' >&2; exit 9 ;;
   esac
   exit 0
 fi
@@ -1549,6 +1549,7 @@ if [ "${1-}" = inspect ]; then
   case "$*" in
     *'{{if .State.Health}}'*) printf 'healthy\n' ;;
     *'{{.Image}}'*) printf '%s\n' "${FAKE_ATTESTATION_RUNNING_IMAGE_ID:-sha256:$(printf 'a%.0s' {1..64})}" ;;
+    *'{{.ImageManifestDescriptor.Digest}}'*) printf '%s\n' "${FAKE_ATTESTATION_RUNNING_PLATFORM_IMAGE_ID:-${FAKE_ATTESTATION_RUNNING_IMAGE_ID:-sha256:$(printf 'a%.0s' {1..64})}}" ;;
     *'{{.State.StartedAt}}'*) date -u '+%Y-%m-%dT%H:%M:%SZ' ;;
     *'{{range .Mounts}}'*)
       if [ "${FAKE_ATTESTATION_MOUNT_INSPECT_FAIL:-0}" = "1" ]; then
@@ -1657,6 +1658,16 @@ if run_attestation_deploy "$platform_inspect_log" "$attestation_source" 5 \
 fi
 if grep -Fq 'deployment succeeded' "$platform_inspect_log"; then
   printf 'deployment must not succeed after platform image inspection fails\n' >&2
+  exit 1
+fi
+descriptor_missing_log="$attestation_root/deploy-platform-descriptor-missing.log"
+if run_attestation_deploy "$descriptor_missing_log" "$attestation_source" 5 \
+    FAKE_ATTESTATION_RUNNING_PLATFORM_IMAGE_ID=unavailable; then
+  printf 'deployment must fail when the running platform descriptor is unavailable\n' >&2
+  exit 1
+fi
+if grep -Fq 'deployment succeeded' "$descriptor_missing_log"; then
+  printf 'deployment must not succeed without a running platform descriptor\n' >&2
   exit 1
 fi
 printf 'ok deploy-platform-image-identity\n'

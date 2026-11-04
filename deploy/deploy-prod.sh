@@ -376,8 +376,8 @@ verify_runtime_source_attestation() {
     return 1
   fi
   running_platform_image_id="$(
-    compose_environment docker image inspect --platform "$backend_image_platform" \
-      --format '{{.Id}}' "$running_image_id" 2>/dev/null || true
+    compose_environment docker inspect --format '{{.ImageManifestDescriptor.Digest}}' \
+      "$backend_cid" 2>/dev/null || true
   )"
   if [[ ! "$running_platform_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
       || [ "$running_platform_image_id" != "$built_backend_image_id" ]; then
