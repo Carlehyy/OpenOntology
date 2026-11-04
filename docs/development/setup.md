@@ -8,9 +8,8 @@
 - npm；
 - PostgreSQL、Redis、NATS、Neo4j、MinIO 和 n8n，以及已明确配置
   地址的 Chromium CDP；
-- WeKnora v0.9.0 共享知识库（官方 app/ui/docreader + 独立 ParadeDB/Redis/
-  APOC Neo4j）。本地源码运行可复用 `docker-compose.local.yml` 的 WeKnora 栈；
-  首次使用需按本文初始化流程写入 `weknora_state`。
+- WeKnora v0.9.0 共享知识库（官方 app/ui/docreader + 独立 ParadeDB/Redis）。本地源码运行可复用 `docker-compose.local.yml` 的栈；
+  首次仅初始化账号，模型与知识库随后在原生 Web 配置。
 
 不存在可用于正常开发的“最小降级模式”。PostgreSQL、Redis、
 NATS、Neo4j、MinIO 和 n8n 必须提供真实配置并通过连通性检查；Chromium CDP
@@ -98,55 +97,36 @@ API、executor 和前端都启动后，再由管理员登录“模型配置”�
 - NATS：`4222`（本机一行启动命令见 [config/README.md](../../config/README.md)）；
 - 可选 Jupyter Kernel Gateway：`8088`（见上文）；
 - WeKnora 原生 Web：`8089`（HTTP）与 `8444`（本地自签 HTTPS），只暴露 UI
-  网关；app/docreader/MCP/ParadeDB/Redis/Neo4j 均无宿主端口。
+  网关；app 仅在 loopback 18080 可达；docreader/ParadeDB/Redis 无宿主端口。
 
 ## WeKnora 本地初始化
 
-完整本地平台使用 `docker compose -f docker-compose.local.yml up --build` 时，
-WeKnora 会自动完成：仅私网、无宿主端口的 `weknora-app-init`（临时允许注册）
-启动 → `weknora-bootstrap` 完成管理员/模型/KB/REST 初始化 → 正式
-`weknora-app` 以 `DISABLE_REGISTRATION=true` 启动并提升已注册账号为系统管理员
-→ `weknora-verify` 登录管理员、通过官方设置 API 持久化 `invite_only`、发现
-MCP 工具并刷新 state。只有 verify 成功，`weknora-gateway` 才会在 backend 健康
-后发布 8089/8444；任一失败网关保持未启动。
+完整本地栈使用 `docker compose -f docker-compose.local.yml up --build`。
+WeKnora 私网 init 注册管理员后，正式 app 提升该账号为系统管理员；verify 持久化
+关闭注册，成功后开放原生 Web。无需模型密钥、状态文件或独立 Neo4j。
 
-源码后端只启动 WeKnora（不启动平台 Compose 的 8000/5432 等服务）时，使用：
+只为源码后端启动 WeKnora（不启动平台 Compose 的 8000/5432）时：
 
 ```bash
-mkdir -m 700 -p runtime/weknora
-export WEKNORA_STATE_UID="$(id -u)" WEKNORA_STATE_GID="$(id -g)"
-docker compose -f docker-compose.local.yml up -d \
-  weknora-db weknora-redis weknora-neo4j weknora-docreader \
-  weknora-app-init weknora-bootstrap weknora-app weknora-verify \
-  weknora-ui weknora-ssl-init
-# 等 weknora-verify 成功；bootstrap 的 state 以 0600 写入宿主机目录
-docker compose -f docker-compose.local.yml logs -f weknora-verify
-docker compose -f docker-compose.local.yml up -d --no-deps weknora-gateway
-# 可选：初始化完成后停止仅私网 init
+docker compose -f docker-compose.local.yml up -d --build weknora-gateway
+# 确认账号验证容器以 0 退出，网关已健康
+docker compose -f docker-compose.local.yml logs weknora-verify
+docker compose -f docker-compose.local.yml ps -a weknora-verify weknora-gateway
 docker compose -f docker-compose.local.yml stop weknora-app-init
 ```
 
-源码 backend 的 WeKnora 变量由配置中心生成：
-`WEKNORA_BASE_URL=http://127.0.0.1:18080`（loopback 直连 app，MCP 不经过公网
-UI 网关）、`WEKNORA_STATE_ORIGIN=http://weknora-app:8080`（state 的部署身份，
-严格校验，不要改成 loopback）、`WEKNORA_STATE_PATH=./runtime/weknora/integration.json`、
-`WEKNORA_WEB_URL=http://127.0.0.1:8089`。state 由容器以宿主机 UID/GID 写入
-`0600`；不要把权限放宽到 0644，也不要在 root 写完后让普通用户读取。普通
-完整 `up` 未导出 UID/GID 时默认 root 写，仅供容器内 backend 使用；源码模式
-必须先 `mkdir -m 700` 并导出非 root UID/GID。
+配置中心只生成服务地址 `WEKNORA_BASE_URL=http://127.0.0.1:18080`、
+`WEKNORA_WEB_URL=http://127.0.0.1:8089`、超时和内部 MCP 前缀
+`SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS=http://127.0.0.1:18080/mcp`。
+模型、共享知识库与 MCP 端点配置按
+[WeKnora 操作流程](../operations/configuration.md#weknora-共享知识库v090) 在原生页面完成，
+随后在超级助手现有 MCP 管理中登记一次地址与 token，测试并登记受约束。
 
-首次登录 WeKnora 原生 Web 的邮箱/密码只从受控终端的 `.env`
-（`WEKNORA_ADMIN_EMAIL` / `WEKNORA_ADMIN_PASSWORD`）读取，不要打印真实值、
-不要发到前端页面或工单。配置中心的 WeKnora 测试只覆盖 app 直连 HTTP 与
-verified state 元数据/工具白名单，不等于真实聊天、检索或图谱深度验收。
-
-本地仍必须提供 `WEKNORA_CHAT_*` 与 `WEKNORA_EMBEDDING_*`（可在 `.env` 或
-shell 环境），没有假默认模型。`WEKNORA_ADMIN_PASSWORD` 本地有仅用于开发的
-默认值，生产始终由部署脚本生成。重置本地知识库属于破坏性手工操作，文档不会
-自动执行：删除 `weknora_*` 卷会永久丢弃本地知识库文件、图谱、Redis
-任务/缓存状态和 state（含 MCP 凭据），只有在确认这些数据不再需要时才可手动
-删除并重新 `up`。已有成功退出的 bootstrap 容器可用
-`docker compose ... up --force-recreate weknora-bootstrap` 重新执行。
+本地 Compose 管理员默认邮箱为 `admin@weknora.local`，密码采用仅用于本地的
+`localWeKnoraAdmin2026@`，可在根 `.env` 显式覆盖。生产密码由部署脚本生成并稳定
+保存，不能使用本地默认值。配置中心探针只验证服务与注册保护，不代表检索已就绪。
+重置知识库或删除 `weknora_*` 数据卷会丢失文件、索引和凭据，须单独确认；普通
+重新部署不会清空这些数据。
 
 ## 最小验证
 

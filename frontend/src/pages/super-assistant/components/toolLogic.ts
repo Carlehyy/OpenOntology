@@ -11,8 +11,7 @@ export interface AssistantToolGroup {
   disabledCount: number
 }
 
-/** 知识图谱能力经内置 MCP（platform_weknora）提供：工具名由 `mcp__<server>__<tool>`
- *  命名空间稳定表达，按前缀归组，避免把检索/ask 的具体工具名硬编码成事实源。 */
+/** 已使用 platform_weknora 名称的 MCP 按知识库分组，其它名称沿用通用分组。 */
 const WEKNORA_TOOL_PREFIX = 'mcp__platform_weknora__'
 
 const GROUP_DEFS: Array<{ key: string; label: string; names: string[]; prefixes?: string[] }> = [
@@ -22,7 +21,7 @@ const GROUP_DEFS: Array<{ key: string; label: string; names: string[]; prefixes?
     // 长期记忆分区检索：旧记忆宫殿中与图谱无关的长期记忆能力继续保留
     'palace_zones', 'palace_read_zone', 'palace_recall',
   ] },
-  { key: 'weknora', label: '知识图谱（WeKnora）', names: [], prefixes: [WEKNORA_TOOL_PREFIX] },
+  { key: 'weknora', label: '知识库（WeKnora）', names: [], prefixes: [WEKNORA_TOOL_PREFIX] },
   { key: 'reasoning', label: '思考与规划', names: ['think', 'subagent', 'todo_write', 'todo_read'] },
   { key: 'files', label: '会话附件', names: ['list_session_files', 'read_session_file'] },
   { key: 'web', label: '联网', names: ['web_fetch', 'web_search'] },

@@ -32,7 +32,6 @@ from app.super_assistant.kernel.capability_service import (
     revoke_capability_revisions,
     set_capability_revision_enabled,
 )
-from app.super_assistant.weknora import mcp_service as weknora_mcp_service
 
 
 class McpServerServiceError(Exception):
@@ -85,9 +84,6 @@ def list_mcp_servers(
     )
     if not include_builtins:
         query = query.filter(SuperAssistantMcpServer.builtin_key.is_(None))
-    else:
-        # 平台内置默认接入：目录读取即幂等补齐（只读本地 verified 快照，不联网）。
-        weknora_mcp_service.ensure_server(db, owner_id)
     return query.order_by(SuperAssistantMcpServer.updated_at.desc()).all()
 
 
@@ -227,6 +223,14 @@ def update_mcp_server(
                 raise McpClientError("平台内置 MCP 由平台构造性保证受约束，不可手工修改")
             if body.constrained and manifest_changed:
                 raise McpClientError("连接/凭据变更与受约束登记不能同批提交")
+            if body.constrained and (
+                item.last_test_status != "success"
+                or not item.tool_manifest
+                or not item.manifest_hash
+            ):
+                raise McpClientError(
+                    "受约束登记要求先完成成功的连接测试和非空冻结工具清单"
+                )
             item.constrained = body.constrained
         db.commit()
         db.refresh(item)
@@ -283,8 +287,6 @@ async def test_mcp_server(
         if item.dev_project_id is not None:
             # 自研 MCP：测试 = 重跑发布闸门（逐工具样例真实执行）
             return mcp_dev_service.verify_published_server(db, owner_id, item)
-        if item.builtin_key == weknora_mcp_service.WEKNORA_BUILTIN_KEY:
-            return await weknora_mcp_service.test_server(db, item)
         if item.builtin_key == "minio":
             get_workspace_minio_service().status()
             tools = minio_tool_manifest()

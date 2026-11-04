@@ -30,6 +30,7 @@ const mk = (overrides: Partial<SuperMcpServer> = {}): SuperMcpServer => ({
   env_names: [],
   enabled: false,
   require_confirmation: true,
+  constrained: false,
   tool_manifest: [],
   last_test_status: null,
   last_test_message: null,

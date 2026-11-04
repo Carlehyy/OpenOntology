@@ -15,10 +15,6 @@ x-weknora-app: &weknora-app-base
     DB_NAME: ${WEKNORA_DB_NAME:-weknora}
     REDIS_ADDR: weknora-redis:6379
     REDIS_PASSWORD: ${WEKNORA_REDIS_PASSWORD:-weknora-local-redis-password}
-    NEO4J_ENABLE: "true"
-    NEO4J_URI: bolt://weknora-neo4j:7687
-    NEO4J_USERNAME: neo4j
-    NEO4J_PASSWORD: ${WEKNORA_NEO4J_PASSWORD:-weknora-local-neo4j-password}
     DOCREADER_ADDR: weknora-docreader:50051
     DOCREADER_TRANSPORT: grpc
     STORAGE_TYPE: local
@@ -43,8 +39,6 @@ x-weknora-app: &weknora-app-base
       condition: service_healthy
     weknora-redis:
       condition: service_healthy
-    weknora-neo4j:
-      condition: service_healthy
     weknora-docreader:
       condition: service_healthy
   healthcheck:
@@ -62,15 +56,13 @@ x-weknora-app: &weknora-app-base
 # Docker Compose merges `environment` on top of `env_file`, so an explicit
 # empty value is the only way to keep the bootstrap-only WeKnora credentials
 # that live in the shared .env out of long-running platform containers. Merge
-# this block verbatim into every service that loads .env; weknora-bootstrap,
-# weknora-verify and the WeKnora stack keep reading the real values.
+# this block verbatim into every service that loads .env; the bootstrap, verify
+# and WeKnora stack keep reading the real values. Only the administrator,
+# database, cache and token-signing secrets are masked.
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
-  WEKNORA_CHAT_API_KEY: ""
-  WEKNORA_EMBEDDING_API_KEY: ""
   WEKNORA_DB_PASSWORD: ""
   WEKNORA_REDIS_PASSWORD: ""
-  WEKNORA_NEO4J_PASSWORD: ""
   WEKNORA_JWT_SECRET: ""
   WEKNORA_SYSTEM_AES_KEY: ""
   WEKNORA_SYSTEM_SIGNING_KEY: ""
@@ -180,27 +172,6 @@ services:
       - weknora_internal
     restart: always
 
-  weknora-neo4j:
-    image: ${WEKNORA_NEO4J_IMAGE:?weknora neo4j image is required}
-    environment:
-      NEO4J_AUTH: neo4j/${WEKNORA_NEO4J_PASSWORD:-weknora-local-neo4j-password}
-      NEO4J_PASSWORD: ${WEKNORA_NEO4J_PASSWORD:-weknora-local-neo4j-password}
-      NEO4J_PLUGINS: '["apoc"]'
-      NEO4J_apoc_export_file_enabled: "true"
-      NEO4J_apoc_import_file_enabled: "true"
-      NEO4J_apoc_import_file_use__neo4j__config: "true"
-    volumes:
-      - weknora_neo4j_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_PASSWORD}\" \"RETURN apoc.version()\" >/dev/null 2>&1 || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 20
-      start_period: 30s
-    networks:
-      - weknora_internal
-    restart: unless-stopped
-
   weknora-docreader:
     image: ${WEKNORA_DOCREADER_IMAGE:?weknora docreader image is required}
     expose:
@@ -250,8 +221,6 @@ services:
         condition: service_healthy
       weknora-redis:
         condition: service_healthy
-      weknora-neo4j:
-        condition: service_healthy
       weknora-docreader:
         condition: service_healthy
       weknora-bootstrap:
@@ -281,39 +250,23 @@ services:
 
   weknora-bootstrap:
     build: ./backend
-    # Default root keeps a plain full `up` writable even when Docker creates
-    # ./runtime/weknora itself. For a host-side source backend export
-    # WEKNORA_STATE_UID/GID from `id -u`/`id -g` after mkdir 700 so the 0600
-    # state is owned/readable by the host user; never widen it to 0644.
-    user: "${WEKNORA_STATE_UID:-0}:${WEKNORA_STATE_GID:-0}"
     # Runs automatically on local `up` against the private initializer. The
     # formal app below starts only after this exits successfully, so its
-    # startup hook can promote the registered administrator.
+    # startup hook can promote the registered administrator. Registration is
+    # idempotent and never resets an existing password.
     command: python -m app.super_assistant.weknora.bootstrap
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       WEKNORA_BOOTSTRAP_BASE_URL: http://weknora-app-init:8080
       WEKNORA_BASE_URL: http://weknora-app:8080
-      WEKNORA_STATE_ORIGIN: http://weknora-app:8080
-      WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:-http://127.0.0.1:8089}
-      WEKNORA_STATE_PATH: /weknora-state/integration.json
       WEKNORA_ADMIN_USER: ${WEKNORA_ADMIN_USER:-admin}
       WEKNORA_ADMIN_EMAIL: ${WEKNORA_ADMIN_EMAIL:-admin@weknora.local}
       WEKNORA_ADMIN_PASSWORD: ${WEKNORA_ADMIN_PASSWORD:-localWeKnoraAdmin2026@}
-      WEKNORA_KNOWLEDGE_BASE_NAME: ${WEKNORA_KNOWLEDGE_BASE_NAME:-共享知识库}
-      WEKNORA_CHAT_BASE_URL: ${WEKNORA_CHAT_BASE_URL:-}
-      WEKNORA_CHAT_API_KEY: ${WEKNORA_CHAT_API_KEY:-}
-      WEKNORA_CHAT_MODEL: ${WEKNORA_CHAT_MODEL:-}
-      WEKNORA_EMBEDDING_BASE_URL: ${WEKNORA_EMBEDDING_BASE_URL:-}
-      WEKNORA_EMBEDDING_API_KEY: ${WEKNORA_EMBEDDING_API_KEY:-}
-      WEKNORA_EMBEDDING_MODEL: ${WEKNORA_EMBEDDING_MODEL:-}
-      WEKNORA_EMBEDDING_DIMENSIONS: ${WEKNORA_EMBEDDING_DIMENSIONS:-}
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
     depends_on:
       weknora-app-init:
         condition: service_healthy
     volumes:
-      - ./runtime/weknora:/weknora-state
       - ./backend:/app
       - /app/.venv
     networks:
@@ -322,29 +275,17 @@ services:
 
   weknora-verify:
     build: ./backend
-    user: "${WEKNORA_STATE_UID:-0}:${WEKNORA_STATE_GID:-0}"
-    # Runs after the formal app starts; logs in as the promoted system admin,
-    # persists invite_only, discovers MCP tools and refreshes state. Gateway
-    # and platform backend depend on this completing successfully.
+    # Runs after the formal app starts; logs in as the promoted system admin
+    # and persists invite_only. Gateway and platform backend depend on this
+    # completing successfully. It reads no state file and touches no model.
     command: python -m app.super_assistant.weknora.bootstrap --verify
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       WEKNORA_BOOTSTRAP_BASE_URL: http://weknora-app:8080
       WEKNORA_BASE_URL: http://weknora-app:8080
-      WEKNORA_STATE_ORIGIN: http://weknora-app:8080
-      WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:-http://127.0.0.1:8089}
-      WEKNORA_STATE_PATH: /weknora-state/integration.json
       WEKNORA_ADMIN_USER: ${WEKNORA_ADMIN_USER:-admin}
       WEKNORA_ADMIN_EMAIL: ${WEKNORA_ADMIN_EMAIL:-admin@weknora.local}
       WEKNORA_ADMIN_PASSWORD: ${WEKNORA_ADMIN_PASSWORD:-localWeKnoraAdmin2026@}
-      WEKNORA_KNOWLEDGE_BASE_NAME: ${WEKNORA_KNOWLEDGE_BASE_NAME:-共享知识库}
-      WEKNORA_CHAT_BASE_URL: ${WEKNORA_CHAT_BASE_URL:-}
-      WEKNORA_CHAT_API_KEY: ${WEKNORA_CHAT_API_KEY:-}
-      WEKNORA_CHAT_MODEL: ${WEKNORA_CHAT_MODEL:-}
-      WEKNORA_EMBEDDING_BASE_URL: ${WEKNORA_EMBEDDING_BASE_URL:-}
-      WEKNORA_EMBEDDING_API_KEY: ${WEKNORA_EMBEDDING_API_KEY:-}
-      WEKNORA_EMBEDDING_MODEL: ${WEKNORA_EMBEDDING_MODEL:-}
-      WEKNORA_EMBEDDING_DIMENSIONS: ${WEKNORA_EMBEDDING_DIMENSIONS:-}
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
     depends_on:
       weknora-app:
@@ -352,7 +293,6 @@ services:
       weknora-bootstrap:
         condition: service_completed_successfully
     volumes:
-      - ./runtime/weknora:/weknora-state
       - ./backend:/app
       - /app/.venv
     networks:
@@ -393,8 +333,6 @@ services:
         condition: service_healthy
       weknora-verify:
         condition: service_completed_successfully
-      backend:
-        condition: service_healthy
       weknora-ssl-init:
         condition: service_completed_successfully
     healthcheck:
@@ -468,12 +406,12 @@ services:
       # 流水线任务派发通道，仅 compose 内网可达；宿主机源码运行时使用
       # config/generated/local/.env 中的 NATS_URL（经 4222 宿主端口映射）。
       NATS_URL: nats://nats:4222
-      # 本地栈同样只向 backend 暴露正式 WeKnora app 内网地址与只读状态。
+      # 本地栈同样只向 backend 暴露正式 WeKnora app 内网地址；管理员/DB/
+      # 签名密钥只交给 bootstrap/verify 与 WeKnora 自身。
       WEKNORA_BASE_URL: http://weknora-app:8080
-      WEKNORA_STATE_ORIGIN: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:-http://127.0.0.1:8089}
-      WEKNORA_STATE_PATH: /weknora-state/integration.json
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       # 本地默认也不在 backend 内直接执行用户插件；协议 fixture 可在
       # 源码测试中显式选择 direct_dev。
       SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
@@ -500,7 +438,7 @@ services:
       browser:
         condition: service_started
     # /app/.venv 匿名卷保留镜像 venv，原因同 migrate 服务。
-    volumes: [./backend:/app, /app/.venv, ./uploads:/uploads, ./runtime/weknora:/weknora-state:ro]
+    volumes: [./backend:/app, /app/.venv, ./uploads:/uploads]
     networks:
       - default
       - weknora_internal
@@ -522,10 +460,9 @@ services:
       PYTHON_KERNEL_GATEWAY_AUTH_TOKEN: ${PYTHON_KERNEL_GATEWAY_AUTH_TOKEN:-dev-python-gateway-token}
       NATS_URL: nats://nats:4222
       WEKNORA_BASE_URL: http://weknora-app:8080
-      WEKNORA_STATE_ORIGIN: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:-http://127.0.0.1:8089}
-      WEKNORA_STATE_PATH: /weknora-state/integration.json
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
       # 启用 task-agent profile（task_worker 独占消费任务实例控制面）时置 1，
       # 避免同一 durable 在无 docker.sock 的本进程间负载均衡。
@@ -542,7 +479,7 @@ services:
       weknora-verify:
         condition: service_completed_successfully
     # /app/.venv 匿名卷保留镜像 venv，原因同 migrate 服务。
-    volumes: [./backend:/app, /app/.venv, ./uploads:/uploads, ./runtime/weknora:/weknora-state:ro]
+    volumes: [./backend:/app, /app/.venv, ./uploads:/uploads]
     networks:
       - default
       - weknora_internal
@@ -601,11 +538,9 @@ volumes:
   minio_data:
   nats_data:
   weknora_postgres_data:
-  weknora_neo4j_data:
   weknora_redis_data:
   weknora_data:
   weknora_docreader_tmp:
-  weknora_state:
   weknora_ssl_certs:
 
 networks:

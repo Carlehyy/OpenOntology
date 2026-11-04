@@ -15,10 +15,6 @@ x-weknora-app: &weknora-app-base
     DB_NAME: ${WEKNORA_DB_NAME:?weknora db name is required}
     REDIS_ADDR: weknora-redis:6379
     REDIS_PASSWORD: ${WEKNORA_REDIS_PASSWORD:?weknora redis password is required}
-    NEO4J_ENABLE: "true"
-    NEO4J_URI: bolt://weknora-neo4j:7687
-    NEO4J_USERNAME: neo4j
-    NEO4J_PASSWORD: ${WEKNORA_NEO4J_PASSWORD:?weknora neo4j password is required}
     DOCREADER_ADDR: weknora-docreader:50051
     DOCREADER_TRANSPORT: grpc
     STORAGE_TYPE: local
@@ -43,8 +39,6 @@ x-weknora-app: &weknora-app-base
       condition: service_healthy
     weknora-redis:
       condition: service_healthy
-    weknora-neo4j:
-      condition: service_healthy
     weknora-docreader:
       condition: service_healthy
   healthcheck:
@@ -62,15 +56,14 @@ x-weknora-app: &weknora-app-base
 # Docker Compose merges `environment` on top of `env_file`, so an explicit
 # empty value is the only way to keep the bootstrap-only WeKnora credentials
 # that live in the shared .env out of long-running platform containers. Merge
-# this block verbatim into every service that loads .env; weknora-bootstrap
-# and the WeKnora stack keep reading the real values from compose interpolation.
+# this block verbatim into every service that loads .env; the WeKnora stack
+# and the one-shot bootstrap keep reading the real values from compose
+# interpolation. Only secrets that still exist are masked; the platform never
+# needs the WeKnora administrator, database, cache or token-signing keys.
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
-  WEKNORA_CHAT_API_KEY: ""
-  WEKNORA_EMBEDDING_API_KEY: ""
   WEKNORA_DB_PASSWORD: ""
   WEKNORA_REDIS_PASSWORD: ""
-  WEKNORA_NEO4J_PASSWORD: ""
   WEKNORA_JWT_SECRET: ""
   WEKNORA_SYSTEM_AES_KEY: ""
   WEKNORA_SYSTEM_SIGNING_KEY: ""
@@ -174,19 +167,23 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # WeKnora v0.9.0 is the shared knowledge-base / graph-RAG service behind the
-  # super assistant. It runs as an isolated stack with its own ParadeDB,
-  # Redis and APOC-enabled Neo4j; no platform database or graph volume is
-  # shared. The app is reachable only as http://weknora-app:8080 on the private
-  # compose network. The public entry is the gateway service below.
+  # WeKnora v0.9.0 is the shared knowledge-base service behind the super
+  # assistant. It runs as an isolated five-service stack with its own ParadeDB,
+  # Redis and document reader; no platform database or graph volume is shared.
+  # Graph retrieval is disabled (NEO4J_ENABLE is unset) so the stack has no
+  # WeKnora-specific Neo4j; the platform Neo4j above is unrelated. The app is
+  # reachable only as http://weknora-app:8080 on the private compose network.
+  # The public entry is the gateway service below.
   #
   # The formal app always runs with registration disabled. A separate
   # one-shot profile (`weknora-bootstrap`) starts the same app image once with
-  # registration temporarily open, initializes the admin/KB/MCP state, and is
+  # registration temporarily open, registers the administrator account, and is
   # removed before the formal app starts. deploy-prod.sh then runs
   # `bootstrap --verify`, which logs in as the promoted system admin and
   # persists auth.registration_mode=invite_only through the official settings
-  # API (env alone can be overridden by the DB row).
+  # API (env alone can be overridden by the DB row). Models, knowledge bases
+  # and MCP endpoints are configured in the native WeKnora web UI and are not
+  # deployment inputs.
   weknora-db:
     image: ${WEKNORA_POSTGRES_IMAGE:?weknora postgres image is required}
     environment:
@@ -223,33 +220,6 @@ services:
     networks:
       - weknora_internal
     restart: always
-
-  # APOC is required for WeKnora's graph extraction/query path. Keep this
-  # separate from the platform Neo4j volume and credentials.
-  weknora-neo4j:
-    image: ${WEKNORA_NEO4J_IMAGE:?weknora neo4j image is required}
-    environment:
-      NEO4J_AUTH: neo4j/${WEKNORA_NEO4J_PASSWORD:?weknora neo4j password is required}
-      NEO4J_PASSWORD: ${WEKNORA_NEO4J_PASSWORD:?weknora neo4j password is required}
-      NEO4J_PLUGINS: '["apoc"]'
-      NEO4J_apoc_export_file_enabled: "true"
-      NEO4J_apoc_import_file_enabled: "true"
-      NEO4J_apoc_import_file_use__neo4j__config: "true"
-      NEO4J_server_memory_heap_max__size: ${WEKNORA_NEO4J_HEAP_MAX:-1G}
-    volumes:
-      - weknora_neo4j_data:/data
-    healthcheck:
-      # HTTP 200 is not enough: WeKnora graph extraction requires APOC.
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_PASSWORD}\" \"RETURN apoc.version()\" >/dev/null 2>&1 || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 20
-      start_period: 30s
-    networks:
-      - weknora_internal
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
 
   weknora-docreader:
     image: ${WEKNORA_DOCREADER_IMAGE:?weknora docreader image is required}
@@ -316,10 +286,12 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  # One-shot REST bootstrap / MCP verify. deploy-prod.sh runs it against
+  # One-shot account bootstrap / verify. deploy-prod.sh runs it against
   # weknora-app-init first, then again with --verify after the formal app is
-  # healthy. It is the only WeKnora container that sees the admin password and
-  # model credentials, and the only writer of weknora_state.
+  # healthy. It only registers/logs in the administrator and persists the
+  # closed registration mode; it creates no model, knowledge base, MCP
+  # endpoint or state file. It is the only WeKnora container that sees the
+  # admin password.
   weknora-bootstrap:
     build:
       context: ./backend
@@ -331,23 +303,10 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       WEKNORA_BOOTSTRAP_BASE_URL: http://weknora-app-init:8080
       WEKNORA_BASE_URL: http://weknora-app:8080
-      WEKNORA_STATE_ORIGIN: http://weknora-app:8080
-      WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:?weknora web url is required}
-      WEKNORA_STATE_PATH: /weknora-state/integration.json
       WEKNORA_ADMIN_USER: ${WEKNORA_ADMIN_USER:?weknora admin user is required}
       WEKNORA_ADMIN_EMAIL: ${WEKNORA_ADMIN_EMAIL:-admin@weknora.local}
       WEKNORA_ADMIN_PASSWORD: ${WEKNORA_ADMIN_PASSWORD:?weknora admin password is required}
-      WEKNORA_KNOWLEDGE_BASE_NAME: ${WEKNORA_KNOWLEDGE_BASE_NAME:-共享知识库}
-      WEKNORA_CHAT_BASE_URL: ${WEKNORA_CHAT_BASE_URL:?weknora chat base url is required}
-      WEKNORA_CHAT_API_KEY: ${WEKNORA_CHAT_API_KEY:?weknora chat api key is required}
-      WEKNORA_CHAT_MODEL: ${WEKNORA_CHAT_MODEL:?weknora chat model is required}
-      WEKNORA_EMBEDDING_BASE_URL: ${WEKNORA_EMBEDDING_BASE_URL:?weknora embedding base url is required}
-      WEKNORA_EMBEDDING_API_KEY: ${WEKNORA_EMBEDDING_API_KEY:?weknora embedding api key is required}
-      WEKNORA_EMBEDDING_MODEL: ${WEKNORA_EMBEDDING_MODEL:?weknora embedding model is required}
-      WEKNORA_EMBEDDING_DIMENSIONS: ${WEKNORA_EMBEDDING_DIMENSIONS:?weknora embedding dimensions are required}
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
-    volumes:
-      - weknora_state:/weknora-state
     networks:
       - weknora_internal
     restart: "no"
@@ -361,6 +320,8 @@ services:
   # Public native-web entry. Only the UI is proxied; /mcp/ is explicitly 404.
   # Production reuses the platform self-signed certificate volume, so a fresh
   # deploy has both HTTP 8089 and HTTPS 8444 available without a second cert.
+  # The gateway deliberately does not depend on backend, so the native
+  # knowledge UI has no reverse dependency on platform startup.
   weknora-gateway:
     image: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
     ports:
@@ -374,8 +335,6 @@ services:
       weknora-ui:
         condition: service_healthy
       weknora-app:
-        condition: service_healthy
-      backend:
         condition: service_healthy
       frontend_ssl_init:
         condition: service_completed_successfully
@@ -469,13 +428,14 @@ services:
       N8N_TIMEOUT_SECONDS: ${N8N_TIMEOUT_SECONDS:-30}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-      # WeKnora 只暴露正式 app 的内网地址与初始化元数据；模型/管理员凭据
-      # 只交给 weknora-bootstrap，不进入常驻 backend/executor 环境。
+      # WeKnora 只暴露正式 app 的内网地址；管理员/DB/Redis/签名密钥只交给
+      # WeKnora 自身与 one-shot bootstrap，不进入常驻 backend/executor 环境。
       WEKNORA_BASE_URL: http://weknora-app:8080
-      WEKNORA_STATE_ORIGIN: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:?weknora web url is required}
-      WEKNORA_STATE_PATH: /weknora-state/integration.json
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      # 通用平台内网 MCP 地址（CSV）。WeKnora 的 MCP 端点由原生 UI 手工登记，
+      # 平台只读取 app 的 /mcp 前缀，不需要 WeKnora MCP token。
+      SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
@@ -530,15 +490,13 @@ services:
       # operator can still inspect diagnostics when Chromium is unhealthy.
       browser:
         condition: service_started
-      # The formal WeKnora app must be healthy and initialized (weknora_state
-      # written by the bootstrap/verify phases) before the API can serve tools.
+      # The formal WeKnora app must be healthy before the API can serve tools.
       weknora-app:
         condition: service_healthy
     volumes:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
       - voice_models:/voice-models
-      - weknora_state:/weknora-state:ro
     networks:
       - default
       - dbx_bridge
@@ -599,13 +557,14 @@ services:
       N8N_TIMEOUT_SECONDS: ${N8N_TIMEOUT_SECONDS:-30}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-      # WeKnora 只暴露正式 app 的内网地址与初始化元数据；模型/管理员凭据
-      # 只交给 weknora-bootstrap，不进入常驻 backend/executor 环境。
+      # WeKnora 只暴露正式 app 的内网地址；管理员/DB/Redis/签名密钥只交给
+      # WeKnora 自身与 one-shot bootstrap，不进入常驻 backend/executor 环境。
       WEKNORA_BASE_URL: http://weknora-app:8080
-      WEKNORA_STATE_ORIGIN: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:?weknora web url is required}
-      WEKNORA_STATE_PATH: /weknora-state/integration.json
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      # 通用平台内网 MCP 地址（CSV）。WeKnora 的 MCP 端点由原生 UI 手工登记，
+      # 平台只读取 app 的 /mcp 前缀，不需要 WeKnora MCP token。
+      SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
@@ -641,7 +600,6 @@ services:
     volumes:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
-      - weknora_state:/weknora-state:ro
     networks:
       - default
       - weknora_internal
@@ -769,14 +727,14 @@ volumes:
   uploads:
   api_hub_data:
   dbx_data:
-  # WeKnora keeps its own database, graph, cache, file and integration-state
-  # volumes. None of these is shared with the platform services.
+  # WeKnora keeps its own database, cache, file and docreader-temp volumes.
+  # None of these is shared with the platform services. Graph retrieval is off,
+  # so there is no WeKnora-specific Neo4j volume and no integration-state
+  # volume (account bootstrap stores nothing on disk).
   weknora_postgres_data:
-  weknora_neo4j_data:
   weknora_redis_data:
   weknora_data:
   weknora_docreader_tmp:
-  weknora_state:
 
 networks:
   # A normal bridge is required: dbx metadata must reach external MySQL/
@@ -786,6 +744,6 @@ networks:
     driver: bridge
   # Isolated WeKnora stack. It is a normal bridge (the app needs outbound model
   # calls), but only the gateway publishes host ports; app, docreader, MCP,
-  # ParadeDB, Redis and Neo4j have no host port.
+  # ParadeDB and Redis have no host port.
   weknora_internal:
     driver: bridge

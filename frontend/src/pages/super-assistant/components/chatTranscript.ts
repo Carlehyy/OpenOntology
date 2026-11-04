@@ -96,9 +96,8 @@ export function splitProcessAndAnswer(content: string) {
   return { process: '', answer: content }
 }
 
-/** 常用内置工具的中文友好名：覆盖平台自带工具与内置 platform_weknora MCP
- *  的只读检索/问答；其它 MCP/外部工具一律直出原名。palace_* 系列仅为历史会话
- *  回放保留展示名——旧记忆宫殿已退役，不再注册、不提供执行。 */
+/** 平台工具及 platform_weknora 命名空间的中文展示名，其它 MCP 保留原名。
+ *  已退役的 palace_* 工具仅保留历史会话展示名。 */
 export const BUILTIN_TOOL_FRIENDLY_NAMES: Record<string, string> = {
   web_fetch: '抓取网页',
   web_search: '搜索互联网',
@@ -116,7 +115,7 @@ export const BUILTIN_TOOL_FRIENDLY_NAMES: Record<string, string> = {
   palace_recall: '回忆记忆宫殿',
   palace_graph_search: '检索知识图谱（历史）',
   palace_graph_files: '列出文档库（历史）',
-  // WeKnora 当前接入 8 个只读工具；旧工具名保留用于历史消息回放。
+  // 沿用该 MCP 名称时的展示名；工具清单仍由管理员配置。
   'mcp__platform_weknora__list_knowledge_bases': '列出知识库',
   'mcp__platform_weknora__search_knowledge': '检索知识库',
   'mcp__platform_weknora__grep_chunks': '关键词检索知识片段',

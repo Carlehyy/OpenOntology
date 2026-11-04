@@ -30,7 +30,6 @@ from app.super_assistant.models import (
     SuperAssistantToolRun,
 )
 from app.super_assistant.runtime import stream_chat
-from app.super_assistant.weknora.service import WeKnoraError
 from app.super_assistant.schemas import (
     ApprovalRequest,
     ChatRequest,
@@ -468,16 +467,11 @@ def list_mcp_servers(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    try:
-        return mcp_server_service.list_mcp_servers(
-            db,
-            current_user.id,
-            include_builtins=True,
-        )
-    except WeKnoraError as exc:
-        raise HTTPException(
-            status_code=503, detail="知识图谱服务尚未就绪",
-        ) from exc
+    return mcp_server_service.list_mcp_servers(
+        db,
+        current_user.id,
+        include_builtins=True,
+    )
 
 
 @router.post(

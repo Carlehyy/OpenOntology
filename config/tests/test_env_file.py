@@ -21,13 +21,6 @@ def complete_profile() -> ConfigProfile:
     payload["minio"]["access_key"] = "ontology-access"
     payload["minio"]["secret_key"] = "Minio@pass:word/#%"
     payload["n8n"]["api_key"] = "n8n-local-key"
-    payload["weknora"]["chat_base_url"] = "https://chat.example.com/v1"
-    payload["weknora"]["chat_api_key"] = "weknora-chat-local-key"
-    payload["weknora"]["chat_model"] = "chat-local-model"
-    payload["weknora"]["embedding_base_url"] = "https://embed.example.com/v1"
-    payload["weknora"]["embedding_api_key"] = "weknora-embedding-local-key"
-    payload["weknora"]["embedding_model"] = "embedding-local-model"
-    payload["weknora"]["embedding_dimensions"] = 1024
     return ConfigProfile.model_validate(payload)
 
 
@@ -62,16 +55,14 @@ def test_env_round_trip_keeps_complete_mode_and_special_credentials(
     )
 
 
-def test_config_center_renders_absolute_weknora_state_path(tmp_path: Path) -> None:
+def test_config_center_renders_weknora_connection_without_model_credentials(tmp_path: Path) -> None:
     env_path = tmp_path / "config" / "generated" / "local" / ".env"
     store = LocalEnvStore(env_path, project_root=tmp_path)
-
     store.write(complete_profile())
     parsed = dotenv_values(env_path, interpolate=False)
-
-    expected = str((tmp_path / "runtime" / "weknora" / "integration.json").resolve())
-    assert parsed["WEKNORA_STATE_PATH"] == expected
-    assert parsed["WEKNORA_STATE_ORIGIN"] == "http://weknora-app:8080"
+    assert parsed["SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS"] == "http://127.0.0.1:18080/mcp"
+    assert parsed["WEKNORA_BASE_URL"] == "http://127.0.0.1:18080"
+    assert not any(key.startswith(("WEKNORA_STATE_", "WEKNORA_CHAT_", "WEKNORA_EMBEDDING_")) for key in parsed)
 
 
 def test_public_profile_masks_saved_secrets_and_blank_preserves_them(
@@ -233,14 +224,7 @@ def test_ignored_local_defaults_are_loaded_and_secrets_stay_masked(
         "MINIO_ACCESS_KEY=admin\n"
         "MINIO_SECRET_KEY=minio-local-secret\n"
         "N8N_API_URL=http://127.0.0.1:5678\n"
-        "N8N_API_KEY=n8n-local-secret\n"
-        "WEKNORA_CHAT_BASE_URL=https://chat.example.com/v1\n"
-        "WEKNORA_CHAT_API_KEY=weknora-chat-local-secret\n"
-        "WEKNORA_CHAT_MODEL=chat-local-model\n"
-        "WEKNORA_EMBEDDING_BASE_URL=https://embed.example.com/v1\n"
-        "WEKNORA_EMBEDDING_API_KEY=weknora-embedding-local-secret\n"
-        "WEKNORA_EMBEDDING_MODEL=embedding-local-model\n"
-        "WEKNORA_EMBEDDING_DIMENSIONS=1024\n",
+        "N8N_API_KEY=n8n-local-secret\n",
         encoding="utf-8",
     )
     store = LocalEnvStore(env_path)
@@ -267,5 +251,3 @@ def test_ignored_local_defaults_are_loaded_and_secrets_stay_masked(
     assert present["minio.access_key"] is True
     assert resolved.postgres.password == "postgres-local-secret"
     assert resolved.n8n.api_key == "n8n-local-secret"
-    assert resolved.weknora.chat_api_key == "weknora-chat-local-secret"
-    assert resolved.weknora.embedding_api_key == "weknora-embedding-local-secret"

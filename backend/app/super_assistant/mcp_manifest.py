@@ -1,9 +1,4 @@
-"""MCP 工具清单冻结的通用辅助。
-
-清单哈希与 CapabilityRevision 冻结原本内联在 ``mcp_server_service``；
-WeKnora 默认注册也需要同一份语义，故抽到本中性模块，避免业务域之间
-反向 import 或复制出两套 revision 规则。
-"""
+"""Hash MCP connection manifests and freeze their capability revisions."""
 from __future__ import annotations
 
 import hashlib

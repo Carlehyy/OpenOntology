@@ -420,7 +420,7 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
-# WeKnora 知识服务前端引导（web_url + 知识库名）：同前缀同守卫子路由
+# WeKnora 原生 Web 跳转（仅 web_url）：同前缀同守卫子路由
 from app.super_assistant.weknora import router as super_assistant_weknora
 app.include_router(
     super_assistant_weknora.router,

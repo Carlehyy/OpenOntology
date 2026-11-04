@@ -36,19 +36,14 @@ async def application_lifespan(
         seed_database()
 
         if settings.environment != "test":
-            # Validate integrations and the default knowledge capability before
-            # any owned worker starts; partial startup must not leak workers.
+            # Validate integrations before any owned worker starts; partial
+            # startup must not leak workers. WeKnora account initialization is
+            # owned by the deployment agent, not by API process startup.
             from app.shared.dependency_probe import (
                 probe_startup_dependencies,
             )
 
             await asyncio.to_thread(probe_startup_dependencies)
-
-            from app.super_assistant.weknora.mcp_service import (
-                install_for_platform_admin,
-            )
-
-            await asyncio.to_thread(install_for_platform_admin)
 
         # 初始化 Neo4j 索引。除显式单元测试环境外，索引初始化是启动契约，
         # 不能让应用在缺少图约束/索引时继续对外服务。

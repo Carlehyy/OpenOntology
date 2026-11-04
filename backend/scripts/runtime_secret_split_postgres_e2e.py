@@ -46,8 +46,6 @@ SYNTHETIC_MANIFEST_CREDENTIALS = {
     "synthetic-minio-access",
     "synthetic-minio-secret",
     "synthetic-n8n-api-key",
-    "synthetic-weknora-chat-api-key",
-    "synthetic-weknora-embedding-api-key",
 }
 REPORT_FIELDS = {
     "schema_version",
@@ -351,14 +349,7 @@ def _write_synthetic_manifest(path: Path) -> None:
         "MINIO_ACCESS_KEY=synthetic-minio-access\n"
         "MINIO_SECRET_KEY=synthetic-minio-secret\nMINIO_USE_SSL=true\n"
         "N8N_API_URL=https://n8n.synthetic.invalid/api/v1\n"
-        "N8N_API_KEY=synthetic-n8n-api-key\nN8N_TIMEOUT_SECONDS=30\n"
-        "WEKNORA_CHAT_BASE_URL=https://chat.synthetic.invalid/v1\n"
-        "WEKNORA_CHAT_API_KEY=synthetic-weknora-chat-api-key\n"
-        "WEKNORA_CHAT_MODEL=synthetic-chat-model\n"
-        "WEKNORA_EMBEDDING_BASE_URL=https://embedding.synthetic.invalid/v1\n"
-        "WEKNORA_EMBEDDING_API_KEY=synthetic-weknora-embedding-api-key\n"
-        "WEKNORA_EMBEDDING_MODEL=synthetic-embedding-model\n"
-        "WEKNORA_EMBEDDING_DIMENSIONS=1024\n",
+        "N8N_API_KEY=synthetic-n8n-api-key\nN8N_TIMEOUT_SECONDS=30\n",
         encoding="utf-8",
     )
     path.chmod(0o600)

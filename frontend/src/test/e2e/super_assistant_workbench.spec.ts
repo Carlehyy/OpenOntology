@@ -144,18 +144,46 @@ const assistantToolsFixture = [
   },
 ]
 
-async function seedAuth(page: Page) {
-  await page.addInitScript(() => {
+async function seedAuth(page: Page, role: 'admin' | 'editor' | 'viewer' = 'admin') {
+  await page.addInitScript((seedRole) => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
       state: {
         token: 'e2e-token',
-        user: { id: 'u-1', username: 'workbench-tester', role: 'admin' },
+        user: { id: 'u-1', username: 'workbench-tester', role: seedRole },
       },
       version: 0,
     }))
-  })
+  }, role)
 }
+
+const mcpServerFixture = (
+  id: string,
+  overrides: Record<string, unknown> = {},
+) => ({
+  id,
+  name: id,
+  display_name: id,
+  description: 'E2E MCP fixture',
+  builtin_key: null,
+  dev_project_id: null,
+  transport: 'streamable_http',
+  url: `http://weknora-app:8080/mcp/${id}`,
+  header_names: ['Authorization'],
+  command: null,
+  args: [],
+  env_names: [],
+  enabled: true,
+  require_confirmation: true,
+  constrained: false,
+  tool_manifest: [],
+  last_test_status: null,
+  last_test_message: null,
+  last_tested_at: null,
+  created_at: at(0, 9),
+  updated_at: at(0, 9),
+  ...overrides,
+})
 
 interface MockOptions {
   /** chat SSE 响应的延迟毫秒数：用于模拟「生成中」窗口期 */
@@ -172,6 +200,8 @@ interface MockOptions {
   remoteAgents?: Array<Record<string, unknown>>
   /** GET /remote-agents 延迟，用于断言加载完成前不展示空态 CTA */
   remoteAgentsDelayMs?: number
+  /** MCP Server 夹具；省略即空列表 */
+  mcpServers?: Array<Record<string, unknown>>
 }
 
 async function mockApis(page: Page, options: MockOptions = {}) {
@@ -208,6 +238,10 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const notifChannelUpdates: string[] = []
   const notifChannelTests: string[] = []
   const notifChannelDeletes: string[] = []
+  // MCP 受约束登记：记录 PATCH 原文（断言只发 constrained 单字段）与测试调用
+  const mcpPatches: Array<{ id: string; body: Record<string, unknown> }> = []
+  const mcpTests: string[] = []
+  const mcpServersState = (options.mcpServers ?? []).map(item => ({ ...item }))
   // 会话纪要：generate 调用按会话记录；summaryState 模拟每会话最新一份
   // （c-today 预置夹具，generate 后覆盖）；settings 为用户级全局配置（默认 null）
   const summaryGenerateCalls: string[] = []
@@ -290,7 +324,6 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const weknoraCalls: string[] = []
   const weknoraFixture = {
     web_url: 'https://weknora.example.com:8443',
-    knowledge_base_name: 'OpenOntology 知识库',
   }
   await page.route('**/api/**', route => {
     const request = route.request()
@@ -725,7 +758,37 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       return route.fulfill({ status: 204, body: '' })
     }
     if (path === '/api/v2/super-assistant/skills') return json(route, [])
-    if (path === '/api/v2/super-assistant/mcp-servers') return json(route, [])
+    if (path === '/api/v2/super-assistant/mcp-servers') return json(route, mcpServersState)
+    const mcpServerMatch = path.match(/^\/api\/v2\/super-assistant\/mcp-servers\/([^/]+)$/)
+    if (mcpServerMatch && request.method() === 'PATCH') {
+      const id = mcpServerMatch[1]
+      const body = request.postDataJSON() as Record<string, unknown>
+      mcpPatches.push({ id, body })
+      const source = mcpServersState.find(item => item.id === id)
+      if (source) {
+        Object.assign(source, body)
+        // 与后端一致：连接/凭据变更会清空工具清单并撤销受约束登记
+        if ('url' in body || 'headers' in body || 'env' in body || 'transport' in body) {
+          source.tool_manifest = []
+          source.last_test_status = null
+          source.constrained = false
+        }
+      }
+      return json(route, source)
+    }
+    const mcpTestMatch = path.match(/^\/api\/v2\/super-assistant\/mcp-servers\/([^/]+)\/test$/)
+    if (mcpTestMatch && request.method() === 'POST') {
+      const id = mcpTestMatch[1]
+      mcpTests.push(id)
+      const source = mcpServersState.find(item => item.id === id)
+      const tools = [{ name: 'search_knowledge', description: '检索知识库', input_schema: { type: 'object' } }]
+      if (source) {
+        source.last_test_status = 'success'
+        source.last_test_message = '连接成功，发现 1 个工具'
+        source.tool_manifest = tools
+      }
+      return json(route, { ok: true, message: '连接成功，发现 1 个工具', tools })
+    }
     // 内置工具目录与启停（PATCH 后按提交值刷新目录，驱动开关/徽章回显）
     if (path === '/api/v2/super-assistant/tools') return json(route, toolsState)
     const toolMatch = path.match(/^\/api\/v2\/super-assistant\/tools\/([^/]+)$/)
@@ -919,6 +982,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     multicaWorkspaceCalls,
     toolPatchCalls,
     weknoraCalls,
+    mcpPatches,
+    mcpTests,
     isChatDone: () => chatDone,
   }
 }
@@ -942,8 +1007,8 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
   await expect(page.getByRole('button', { name: '外部集成' })).toBeVisible()
   await expect(page.getByRole('button', { name: /退出登录/ })).toBeVisible()
-  // 知识图谱已迁至聊天头部（打开 WeKnora），左侧工作台不再保留旧入口
-  await expect(page.getByRole('link', { name: '知识图谱' })).toBeVisible()
+  // 知识库（WeKnora）入口位于聊天头部，左侧工作台不再保留旧入口
+  await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeVisible()
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
   // 功能项顺序契约：全局搜索 → 消息通知 → 定时任务 → 任务实例 → 外部集成 → 本体治理
@@ -2285,6 +2350,69 @@ test('工具标签页：查看内置工具目录、可用性标注与启停切�
   await expect(page.getByTestId('tool-group-memory')).not.toContainText('已禁用')
 })
 
+test('MCP 受约束登记：仅管理员可见，成功测试且清单非空后可登记，且只 PATCH constrained', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page, {
+    mcpServers: [
+      mcpServerFixture('mcp-ready', {
+        last_test_status: 'success',
+        last_test_message: '连接成功，发现 1 个工具',
+        tool_manifest: [{ name: 'search_knowledge', description: '检索', input_schema: { type: 'object' } }],
+      }),
+      mcpServerFixture('mcp-untested'),
+    ],
+  })
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
+  await page.getByRole('button', { name: /^MCP/ }).click()
+
+  const card = (name: string) => page.locator('article').filter({ hasText: name })
+  // 已测试且清单非空：登记开关可点
+  await expect(page.getByRole('switch', { name: '登记受约束 MCP mcp-ready' })).toBeEnabled()
+  // 未测试：按钮禁用并说明前置条件
+  const untestedSwitch = page.getByRole('switch', { name: '登记受约束 MCP mcp-untested' })
+  await expect(untestedSwitch).toBeDisabled()
+  await expect(card('mcp-untested')).toContainText('先测试连接成功')
+
+  // 测试成功只刷新工具清单，不自动登记
+  await card('mcp-untested').getByRole('button', { name: '测试', exact: true }).click()
+  await expect.poll(() => mocks.mcpTests).toEqual(['mcp-untested'])
+  await expect(page.getByRole('switch', { name: '登记受约束 MCP mcp-untested' })).toBeEnabled()
+  expect(mocks.mcpPatches).toHaveLength(0)
+
+  // 管理员手工登记：PATCH 只带 constrained，不与连接/凭据变更同批
+  await page.getByRole('switch', { name: '登记受约束 MCP mcp-untested' }).click()
+  await expect.poll(() => mocks.mcpPatches).toEqual([
+    { id: 'mcp-untested', body: { constrained: true } },
+  ])
+  await expect(page.getByRole('switch', { name: '撤销受约束 MCP mcp-untested' })).toHaveAttribute('aria-checked', 'true')
+  await expect(card('mcp-untested')).toContainText('受约束')
+
+  // 撤销同样只发 constrained 单字段
+  await page.getByRole('switch', { name: '撤销受约束 MCP mcp-untested' }).click()
+  await expect.poll(() => mocks.mcpPatches).toHaveLength(2)
+  expect(mocks.mcpPatches[1]).toEqual({ id: 'mcp-untested', body: { constrained: false } })
+})
+
+test('MCP 受约束登记：非管理员不显示登记开关', async ({ page }) => {
+  await seedAuth(page, 'viewer')
+  await mockApis(page, {
+    mcpServers: [mcpServerFixture('mcp-ready', {
+      last_test_status: 'success',
+      tool_manifest: [{ name: 'search_knowledge', description: '检索', input_schema: { type: 'object' } }],
+    })],
+  })
+  await page.goto('/#/super-assistant?conversation=c-today')
+
+  const configToggle = page.locator('button[title="助手配置"]')
+  if ((await configToggle.getAttribute('aria-expanded')) !== 'true') await configToggle.click()
+  await page.getByRole('button', { name: /^MCP/ }).click()
+  await expect(page.getByText('mcp-ready', { exact: true })).toBeVisible()
+  await expect(page.getByRole('switch', { name: /受约束 MCP/ })).toHaveCount(0)
+})
+
 test('重命名会话：点击其它处自动取消，Enter 仍可保存', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
@@ -2309,7 +2437,7 @@ test('重命名会话：点击其它处自动取消，Enter 仍可保存', async
   expect(JSON.parse(mocks.patchBodies[0])).toMatchObject({ title: '新名称' })
 })
 
-test('知识图谱：头部会话纪要左侧入口，新标签打开受信 WeKnora 页面（新会话可用）', async ({ page }) => {
+test('知识库（WeKnora）：头部会话纪要左侧入口，新标签打开原生页面（新会话可用）', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   // 原生 WeKnora 页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
@@ -2326,13 +2454,13 @@ test('知识图谱：头部会话纪要左侧入口，新标签打开受信 WeKn
   await expect(page).not.toHaveURL(/conversation=/)
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
 
-  // 左侧工作台不再提供旧知识图谱入口
+  // 左侧工作台不再提供旧知识库入口
   const nav = page.locator('nav[aria-label="工作台功能"]')
-  await expect(nav.getByText('知识图谱')).toHaveCount(0)
+  await expect(nav.getByText('知识库（WeKnora）')).toHaveCount(0)
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
-  // 入口位于「会话纪要」左侧，URL/title 来自后端受信配置
-  const link = page.getByRole('link', { name: '知识图谱' })
+  // 入口位于「会话纪要」左侧，使用后端返回的原生 Web URL
+  const link = page.getByRole('link', { name: '知识库（WeKnora）' })
   await expect(link).toBeVisible()
   await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
   await expect(link).toHaveAttribute('target', '_blank')
@@ -2871,19 +2999,19 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await expect(page.getByRole('button', { name: '关闭助手配置' })).toBeVisible()
   })
 
-  test('知识图谱入口收进更多操作，窄屏仍指向受信 WeKnora 页面', async ({ page }) => {
+  test('知识库（WeKnora）入口收进更多操作，窄屏仍指向原生页面', async ({ page }) => {
     await seedAuth(page)
     await mockApis(page)
     await page.goto('/#/super-assistant')
 
     // 头部图标入口让位标题/模型选择器，但能力本身仍可从溢出菜单进入
-    await expect(page.getByRole('link', { name: '知识图谱' })).toBeHidden()
+    await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
     await page.getByRole('button', { name: '更多操作' }).click()
     const menu = page.getByRole('dialog')
-    // 溢出菜单顺序：知识图谱在会话纪要之前
+    // 溢出菜单顺序：知识库（WeKnora）在会话纪要之前
     const menuItems = menu.locator('a, button')
-    await expect(menuItems.first()).toHaveAttribute('aria-label', '知识图谱')
-    const link = menu.getByRole('link', { name: '知识图谱' })
+    await expect(menuItems.first()).toHaveAttribute('aria-label', '知识库（WeKnora）')
+    const link = menu.getByRole('link', { name: '知识库（WeKnora）' })
     await expect(link).toBeVisible()
     await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
     await expect(link).toHaveAttribute('target', '_blank')
@@ -3914,7 +4042,7 @@ test('能力地图：上下文左侧入口、分层与连接边界、关闭后�
   for (const title of ['01 · 信息与业务背景', '02 · 理解与协调', '03 · 执行与协作']) {
     await expect(dialog.getByRole('heading', { name: title })).toBeVisible()
   }
-  for (const title of ['消息通知', '知识图谱', '本体治理', '定时任务', '任务实例', '外部集成']) {
+  for (const title of ['消息通知', '知识库（WeKnora）', '本体治理', '定时任务', '任务实例', '外部集成']) {
     await expect(dialog.getByRole('heading', { name: title, exact: true })).toBeVisible()
   }
   await expect(dialog.locator('[data-capability-scenario="从消息到任务"]')).toContainText('待打通')

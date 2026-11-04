@@ -478,21 +478,14 @@ def service_guides() -> dict[str, dict[str, Any]]:
                 "部署脚本自动执行。"
             ),
             "steps": [
-                "Docker 生产部署会自动创建正式系统管理员、共享知识库和 MCP 凭据，"
-                "随后关闭注册并启动公网网关；不要手工向公开入口注册账号。",
-                "本地源码运行：普通 docker-compose.local.yml up 会自动启动"
-                "一次性 bootstrap 与 --verify，成功后网关才发布 8089/8444。",
-                "bootstrap 会登录正式管理员、通过官方设置 API 持久化 invite_only、"
-                "发现 8 个默认只读 MCP 工具（search/read/grep/list/wiki）并刷新 "
-                "state；不自动接入 ask、不创建 quick-answer agent。失败时网关保持未启动。",
-                "源码 backend 连接地址用 loopback app 18080；公网 Web 是 "
-                "8089/8444，网关不代理 MCP。state origin 固定为 "
-                "http://weknora-app:8080，不能改成 127.0.0.1；状态文件由 "
-                "bootstrap 以宿主机 UID 写入 0600，后端只读。",
-                "本页测试 app 直连 HTTP 与 verified state 元数据/工具白名单，"
-                "不执行真实聊天、检索或图谱查询，也不代表深度 RAG readiness；"
-                "backend 启动时的严格 probe 才是最终门禁。首次登录邮箱/密码只从"
-                "受控终端 .env 读取，不打印或发到页面。",
+                "Docker 首次部署仅自动创建管理员账号并关闭注册，然后开放原生 Web。",
+                "模型、知识库、文档和 MCP 端点由管理员登录 WeKnora 原生 Web 配置。",
+                "在原生 MCP 端点中限定共享知识库与只读工具，取消 ask 和写入工具。",
+                "把内部 MCP 地址及 Bearer token 填入超级助手现有 MCP 管理，"
+                "测试成功后启用并由管理员登记受约束。",
+                "源码后端使用 loopback app 18080；公网 8089/8444 的 MCP 返回 404。",
+                "本页只测试 HTTP 服务与注册保护，不调用模型，也不表示知识检索已就绪。"
+                "首次账号密码只在服务器受控终端读取，不进入页面或日志。",
             ],
             "commands": [
                 "docker compose -f docker-compose.local.yml up -d",

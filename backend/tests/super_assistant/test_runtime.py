@@ -1093,7 +1093,7 @@ def _weknora_runtime_session(tmp_path, monkeypatch, *, tool_name: str):
             SuperAssistantMcpServer(
                 id="server-weknora", owner_id="user-weknora",
                 name="platform_weknora", display_name="知识图谱(WeKnora)",
-                builtin_key="weknora", transport="streamable_http",
+                builtin_key=None, transport="streamable_http",
                 url="http://weknora:8080/mcp/endpoint-1",
                 header_names=[], args=[], env_names=[], enabled=True,
                 constrained=True, require_confirmation=False,
@@ -1111,28 +1111,18 @@ def _weknora_runtime_session(tmp_path, monkeypatch, *, tool_name: str):
     return TestingSession, engine
 
 
-def test_runtime_dispatches_platform_weknora_through_service(tmp_path, monkeypatch):
+def test_runtime_dispatches_registered_weknora_through_standard_mcp(tmp_path, monkeypatch):
     TestingSession, engine = _weknora_runtime_session(
         tmp_path, monkeypatch, tool_name="search_knowledge",
     )
     calls: list[tuple[str, dict]] = []
 
-    async def fake_call_tool(tool_name, arguments):
-        calls.append((tool_name, arguments))
-        return json.dumps(
-            {"content": [{"type": "text", "text": "命中片段"}]},
-            ensure_ascii=False,
-        )
+    async def fake_call_tool(**kwargs):
+        calls.append((kwargs["tool_name"], kwargs["arguments"]))
+        assert kwargs["url"] == "http://weknora:8080/mcp/endpoint-1"
+        return json.dumps({"content": [{"type": "text", "text": "命中片段"}]}, ensure_ascii=False)
 
-    from app.super_assistant.weknora import service as weknora_service
-
-    monkeypatch.setattr(weknora_service, "call_tool", fake_call_tool)
-    monkeypatch.setattr(
-        runtime, "call_tool",
-        lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError(f"unexpected HTTP MCP call {kwargs}")
-        ),
-    )
+    monkeypatch.setattr(runtime, "call_tool", fake_call_tool)
     responses = iter([
         {
             "content": None,
@@ -1166,55 +1156,6 @@ def test_runtime_dispatches_platform_weknora_through_service(tmp_path, monkeypat
     engine.dispose()
 
 
-@pytest.mark.parametrize(
-    "denied_tool", ["ask", "add_document", "delete_document"],
-)
-def test_runtime_rejects_weknora_tool_outside_read_only_allowlist(
-    tmp_path, monkeypatch, denied_tool,
-):
-    TestingSession, engine = _weknora_runtime_session(
-        tmp_path, monkeypatch, tool_name=denied_tool,
-    )
-    calls: list[tuple[str, dict]] = []
-
-    async def fake_call_tool(tool_name, arguments):
-        calls.append((tool_name, arguments))
-        return "{}"
-
-    from app.super_assistant.weknora import service as weknora_service
-
-    monkeypatch.setattr(weknora_service, "call_tool", fake_call_tool)
-    responses = iter([
-        {
-            "content": None,
-            "tool_calls": [{
-                "id": f"call-weknora-{denied_tool}",
-                "name": f"mcp__platform_weknora__{denied_tool}",
-                "arguments": {"query": "x"},
-            }],
-            "usage": {"inputTokens": 10, "outputTokens": 2},
-        },
-        {
-            "content": "该工具不可用。",
-            "tool_calls": [],
-            "usage": {"inputTokens": 20, "outputTokens": 5},
-        },
-    ])
-    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
-
-    events = "".join(runtime.stream_chat(
-        conversation_id="conversation-weknora",
-        owner_id="user-weknora",
-        assistant_message_id="assistant-message-weknora",
-        requested_model_id="model-weknora",
-    ))
-    assert "只读白名单" in events
-    assert calls == []
-    with TestingSession() as db:
-        run = db.query(SuperAssistantToolRun).one()
-        assert run.status == "error"
-        assert "只读白名单" in (run.error or "")
-    engine.dispose()
 
 
 def test_builtin_tool_catalog_no_longer_exposes_palace_graph_tools():

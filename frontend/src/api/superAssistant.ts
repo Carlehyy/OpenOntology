@@ -107,11 +107,10 @@ export interface SuperSearchResult {
   conversations: SuperSearchConversationHit[]
 }
 
-/** 腾讯 WeKnora 知识库集成（平台后端转发的受信公网入口，不含 token/密码） */
+/** WeKnora 原生 Web 入口（后端只回公网 URL，不读取 state/知识库/模型可用性） */
 export interface WeKnoraIntegration {
   /** WeKnora 原生 Web 页面公网地址：前端只负责新标签打开，登录使用其原生账号体系 */
   web_url: string
-  knowledge_base_name: string
 }
 
 export interface SkillFile {
@@ -180,6 +179,8 @@ export interface SuperMcpServer {
   env_names: string[]
   enabled: boolean
   require_confirmation: boolean
+  /** 平台管理员受约束登记位：仅成功测试且工具清单非空后可登记 */
+  constrained: boolean
   tool_manifest: McpTool[]
   last_test_status: 'success' | 'error' | null
   last_test_message: string | null
@@ -699,7 +700,7 @@ export const superAssistantApi = {
       timeout: 90_000,
       signal: config?.signal,
     }),
-  /** 腾讯 WeKnora 原生 Web 入口（页面加载即读配置；后端只回公网地址与知识库名） */
+  /** WeKnora 原生 Web 入口（页面加载即读公网 URL；不依赖 state/知识库/模型） */
   getWeKnoraIntegration: () =>
     apiClientV2.get<WeKnoraIntegration>('/super-assistant/weknora'),
   streamChat,
@@ -792,7 +793,7 @@ export const superAssistantApi = {
     display_name: string; description: string;
     transport: McpTransport; url: string; headers: Record<string, string>;
     command: string | null; args: string[]; env: Record<string, string>;
-    enabled: boolean; require_confirmation: boolean
+    enabled: boolean; require_confirmation: boolean; constrained: boolean
   }>) => apiClientV2.patch<SuperMcpServer>(`/super-assistant/mcp-servers/${id}`, body),
   deleteMcpServer: (id: string) => apiClientV2.delete(`/super-assistant/mcp-servers/${id}`),
   testMcpServer: (id: string) => apiClientV2.post<{ ok: boolean; message: string; tools: McpTool[] }>(

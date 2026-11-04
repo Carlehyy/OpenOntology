@@ -106,11 +106,33 @@ def probe_browser() -> None:
 
 
 def probe_weknora() -> None:
-    import asyncio
+    """Probe only the WeKnora HTTP service.
 
-    from app.super_assistant.weknora.service import probe
+    Models, knowledge bases and MCP endpoints are configured by operators in
+    WeKnora's native Web; startup/readiness must not inspect them.
+    """
+    import urllib.request
+    from urllib.parse import urlsplit
 
-    asyncio.run(probe())
+    from app.shared.http_transport import open_with_loopback_bypass
+
+    base = str(settings.weknora_base_url or "").strip()
+    parsed = urlsplit(base)
+    if (
+        parsed.scheme not in {"http", "https"} or not parsed.hostname
+        or parsed.username is not None or parsed.password is not None
+        or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+    ):
+        raise RuntimeError("WEKNORA_BASE_URL is not an absolute HTTP(S) origin")
+    request = urllib.request.Request(
+        f"{base.rstrip('/')}/health", headers={"Connection": "close"},
+    )
+    with open_with_loopback_bypass(
+        request, timeout=min(settings.weknora_timeout_seconds, 5),
+    ) as response:
+        if response.status != 200:
+            raise RuntimeError(f"WeKnora health returned HTTP {response.status}")
+        response.read(4096)
 
 
 def probe_dbx() -> None:

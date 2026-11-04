@@ -23,10 +23,11 @@ import {
   parseMcpClientConfig,
   type ParsedMcpClientServer,
 } from '@/lib/mcpClientConfig'
+import { useAuthStore } from '@/stores/authStore'
 import { ApprovalTab, EvolutionPendingBadge, MemoryTab } from './AssistantEvolution'
 import VoiceTab from './VoiceTab'
 import { SettingSwitch } from './SettingSwitch'
-import { errorText } from './assistantPanelUtils'
+import { constrainedRegistrationState, errorText } from './assistantPanelUtils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { groupAssistantTools } from './toolLogic'
 
@@ -346,6 +347,7 @@ function McpDialog({ server, onClose, onSaved }: {
       if (transport === 'stdio' && !command.trim()) throw new Error('stdio 传输必须填写 command')
       if (transport !== 'stdio' && !url.trim()) throw new Error('HTTP 传输必须填写 URL')
       const changedTransport = !!server && server.transport !== transport
+      const credentialsChanged = !!parsedHeaders || !!parsedEnv || changedTransport
       const connection = transport === 'stdio'
         ? { transport, url: '', command: command.trim(), args: parsedArgs }
         : { transport, url: url.trim(), command: null, args: [] }
@@ -362,7 +364,13 @@ function McpDialog({ server, onClose, onSaved }: {
         })
       }
       await onSaved()
-      toast.success(server ? 'MCP 配置已更新' : 'MCP Server 已添加', { description: '请执行连接测试以发现工具清单' })
+      toast.success(server ? 'MCP 配置已更新' : 'MCP Server 已添加', {
+        description: server && credentialsChanged
+          ? '连接或凭据已变更，受约束登记已失效；请重新测试，成功后再登记'
+          : server
+            ? '如修改连接或凭据，请重新测试并登记受约束'
+            : '请执行连接测试；管理员需在测试成功后登记受约束',
+      })
       onClose()
     } catch (error) { setError(errorText(error, '保存失败')) } finally { setBusy(false) }
   }
@@ -640,6 +648,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   const [removingServer, setRemovingServer] = useState<SuperMcpServer | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
+  const isAdmin = useAuthStore(state => state.user?.role === 'admin')
   const configurableServers = servers.filter(server => server.builtin_key !== 'minio')
 
   // 一次性落位：面板打开且带 initialTab 时切过去（右键「助手配置」快捷方式），
@@ -709,16 +718,29 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
 
   const updateServerSetting = async (
     server: SuperMcpServer,
-    setting: 'enabled' | 'require_confirmation',
+    setting: 'enabled' | 'require_confirmation' | 'constrained',
     value: boolean,
   ) => {
     // busy/防重入按 server.id:setting 粒度：单个开关保存中不连坐禁用其它卡片
     if (updatingServerSetting === `${server.id}:${setting}`) return
+    if (setting === 'constrained') {
+      if (!isAdmin) return
+      if (value && !constrainedRegistrationState(server).eligible) return
+    }
     setUpdatingServerSetting(`${server.id}:${setting}`)
     try {
-      const patch = setting === 'enabled' ? { enabled: value } : { require_confirmation: value }
+      const patch = setting === 'enabled'
+        ? { enabled: value }
+        : setting === 'require_confirmation'
+          ? { require_confirmation: value }
+          : { constrained: value }
       await superAssistantApi.updateMcpServer(server.id, patch)
       await refreshServers()
+      if (setting === 'constrained') {
+        toast.success(value ? '已登记为受约束 MCP' : '已撤销受约束登记', {
+          description: value ? '后续连接或凭据变更后需重新测试并登记' : undefined,
+        })
+      }
     } catch (error) {
       toast.error('MCP 设置更新失败', { description: errorText(error) })
     } finally {
@@ -884,7 +906,9 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             <>
               <div className="grid gap-3">
                 {configurableServers.length === 0 && <div className="rounded-xl border border-dashed border-[var(--color-border)] p-10 text-center text-xs text-[var(--color-text-tertiary)]"><PlugZap size={22} className="mx-auto mb-2" />暂无 MCP Server</div>}
-                {configurableServers.map(server => (
+                {configurableServers.map(server => {
+                  const registration = constrainedRegistrationState(server)
+                  return (
                   <article key={server.id} className="rounded-xl border border-[var(--color-border)] p-4 transition-colors hover:border-brand-line">
                     <div className="flex items-start gap-2">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><PlugZap size={16} /></div>
@@ -897,9 +921,24 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
                       <span className="rounded bg-[var(--color-bg-base)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)]">{server.tool_manifest.length} tools</span>
                       <span className="rounded bg-[var(--color-bg-base)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)]">{server.transport === 'streamable_http' ? 'Streamable HTTP' : server.transport.toUpperCase()}</span>
                       <span className="rounded bg-[var(--color-bg-base)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)]">{server.require_confirmation ? '执行前确认' : '自动执行'}</span>
+                      {server.constrained && <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[9px] text-brand-ink">受约束</span>}
                       {!server.enabled && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500">已停用</span>}
                     </div>
                     {server.last_test_message && <p className="mt-2 line-clamp-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">{server.last_test_message}</p>}
+                    {isAdmin && !server.builtin_key && (
+                      <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2.5 py-1">
+                        <SettingSwitch
+                          label="受约束"
+                          ariaLabel={`${server.constrained ? '撤销' : '登记'}受约束 MCP ${server.name}`}
+                          checked={server.constrained}
+                          busy={updatingServerSetting === `${server.id}:constrained`}
+                          disabled={!server.constrained && !registration.eligible}
+                          title={registration.hint ?? undefined}
+                          onToggle={() => void updateServerSetting(server, 'constrained', !server.constrained)}
+                        />
+                        <span className="min-w-0 text-right text-[9px] leading-4 text-[var(--color-text-tertiary)]">{registration.hint}</span>
+                      </div>
+                    )}
                     <div className="mt-2 flex items-center justify-between gap-2">
                       <div className="flex min-w-0 items-center gap-3">
                         <SettingSwitch label="启用" ariaLabel={`${server.enabled ? '停用' : '启用'} MCP ${server.name}`} checked={server.enabled}
@@ -916,7 +955,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
                       </div>
                     </div>
                   </article>
-                ))}
+                  )
+                })}
               </div>
             </>
           )}

@@ -1251,11 +1251,6 @@ def _kernel_connector_tool_schemas(db, owner_id: str) -> list[dict]:
     """
     tools: list[dict] = []
     seen: set[str] = set()
-    from app.super_assistant.weknora import mcp_service as weknora_mcp_service
-
-    # 平台内置 WeKnora 默认接入：复用同一幂等 ensure（verified 快照，不联网）。
-    # fail-closed：未验证/注册失败必须让 Run 失败，不能静默无工具继续。
-    weknora_mcp_service.ensure_server(db, owner_id)
     try:
         from app.super_assistant.models import SuperAssistantMcpServer, SuperAssistantProcessPlugin, SuperAssistantRemoteAgent
         from app.super_assistant.mcp_client import namespaced_tool_name

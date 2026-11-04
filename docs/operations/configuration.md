@@ -83,62 +83,57 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 | n8n | 数据管家工作流执行 | 启动/readiness 失败，不按可选增强跳过 |
 | Chromium CDP | 浏览器接管与数据管家浏览器会话 | `STEWARD_BROWSER_CDP_URL` 只接受 HTTP(S) 服务根地址；启动配置必需，不可达不杀死 API liveness，但 readiness 失败，不用 mock 冒充就绪 |
 | 集成数据集 dbx | 集成源登记、schema 发现与刷新；生产 metadata 只走固定版本 dbx，不回退 native | 生产部署自动启动仅内网可达的官方 digest dbx，或使用显式外部端点；缺失/不可达/认证失败/版本不符使部署 preflight 与生产 readiness fail closed，非生产不要求 dbx |
-| WeKnora v0.9.0 共享知识库 | 超级助手共享知识库、图谱抽取、MCP 工具与原生 Web 维护入口 | 独立 ParadeDB/Redis/APOC Neo4j 未就绪、bootstrap/--verify 失败、注册未关闭或 MCP 工具不可见时部署 fail closed；不伪造模型、不自动降级 |
+| WeKnora v0.9.0 | 原生知识库 Web 与超级助手标准 MCP 知识来源 | 服务或管理员初始化失败时阻断启动；未配置模型、知识库或 MCP 不影响基础服务启动 |
 
 ### WeKnora 共享知识库（v0.9.0）
 
-WeKnora 是与平台数据面隔离的独立产品：它使用自己的 ParadeDB、Redis、
-APOC Neo4j、文件卷和 `weknora_state` 元数据卷，不共用平台 PostgreSQL、
-Neo4j 或 MinIO 数据。正式 `weknora-app` 只监听 compose 内网
-`http://weknora-app:8080`，没有宿主端口；公网只暴露原生 Web 网关的
-`WEKNORA_HTTP_PORT`（默认 8089）与 `WEKNORA_HTTPS_PORT`（默认 8444），
-网关只代理官方 UI，精确 `/mcp` 与 `/mcp/` 子路径在公网都固定返回 404。
-公网入口保留 WeKnora 自身登录，不做平台 SSO。
+WeKnora 使用官方 app、UI、docreader 和独立 ParadeDB、Redis、文件卷。
+图谱增强默认关闭，不运行额外 Neo4j，也不共用平台业务图数据。原生 Web
+使用独立根路径及端口（HTTP 8089、HTTPS 8444），保留自身账号登录；不做 SSO。
+正式 app 仅在 Compose 内网的 `http://weknora-app:8080` 提供 API/MCP，公网
+网关对精确 `/mcp` 与全部 `/mcp/` 子路径返回 404。
 
-运行变量边界：
+平台只使用 `WEKNORA_BASE_URL`、`WEKNORA_WEB_URL` 和
+`WEKNORA_TIMEOUT_SECONDS` 做服务探活与页面跳转。标准 MCP 的内部访问范围由
+`SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS` 指定（Docker 固定
+`http://weknora-app:8080/mcp`；源码模式由配置中心生成为
+`http://127.0.0.1:18080/mcp`）。只允许精确同源、路径在前缀内的请求；其它 MCP
+继续执行现有公网/HTTPS 校验。不要扩大为任意内网地址。
 
-- backend / pipeline_executor 只读取 `WEKNORA_BASE_URL`（Docker 固定
-  `http://weknora-app:8080`；宿主机源码 backend 用 loopback app
-  `http://127.0.0.1:18080`）、`WEKNORA_STATE_ORIGIN`（固定
-  `http://weknora-app:8080`，state 的部署身份）、`WEKNORA_WEB_URL`、
-  `WEKNORA_STATE_PATH`（Docker `/weknora-state/integration.json`，只读挂载；
-  本地源码 `./runtime/weknora/integration.json`）与
-  `WEKNORA_TIMEOUT_SECONDS`。state 校验只接受 `verified=true`、origin 精确等于
-  `WEKNORA_STATE_ORIGIN`、合法 MCP endpoint/token、KB id/name 和默认只读
-  工具白名单（search/read/grep/list/wiki，含必需 3 项），不自动认 loopback
-  别名或回退；
-- 管理员账号/密码、聊天与 embedding 凭据只进入一次性 `weknora-bootstrap`
-  与配置中心，不进入常驻 backend/executor；
-- `WEKNORA_CHAT_BASE_URL/API_KEY/MODEL` 与
-  `WEKNORA_EMBEDDING_BASE_URL/API_KEY/MODEL/DIMENSIONS` 是部署输入，
-  没有假默认 API 或自动降级开关。自动部署由
-  `PROD_WEKNORA_CHAT_*`/`PROD_WEKNORA_EMBEDDING_*` Repository
-  Secrets/Variables 物化；缺少任一项时部署在 runner 的依赖清单阶段失败；
-- `WEKNORA_DB_PASSWORD`、`WEKNORA_REDIS_PASSWORD`、
-  `WEKNORA_NEO4J_PASSWORD`、`WEKNORA_JWT_SECRET`、
-  `WEKNORA_SYSTEM_AES_KEY`、`WEKNORA_SYSTEM_SIGNING_KEY` 与
-  `WEKNORA_ADMIN_PASSWORD` 由部署脚本在首次缺失时生成并持久化到服务器
-  `.env`，后续部署原样保留，不得重新生成或从旧数据库逆取。管理员密码为
-  8-32 位字母数字加特殊字符，满足 WeKnora 自身限制。
-  `WEKNORA_SYSTEM_AES_KEY` 必须是恰好 32 个 ASCII 字节（上游仅在该长度启用
-  加密；64 字符 hex 会被拒绝而不是静默禁用加密）；JWT/signing key 至少 32
-  字符。
+首次部署仅自动初始化账号：私网 `weknora-app-init` 临时允许注册，bootstrap
+注册管理员后删除该容器；正式 app 启动时将指定邮箱提升为系统管理员，
+`bootstrap --verify` 登录并持久化 `auth.registration_mode=invite_only` 后才开放
+公网网关。此流程不创建模型、知识库或 MCP 端点，不调用大模型，不维护集成状态文件。
+服务故障仍阻断启动；尚未配置知识能力属于正常首次使用状态。
 
-首次部署顺序由 `deploy/deploy-prod.sh` 固定：启动 WeKnora 依赖与仅内网的
-`weknora-app-init`（临时允许注册）→ 运行
-`python -m app.super_assistant.weknora.bootstrap` 完成管理员/模型/KB/REST
-初始化 → 删除 init 容器 → 启动始终 `DISABLE_REGISTRATION=true` 的正式 app →
-运行 `bootstrap --verify`（登录正式系统管理员、通过官方设置 API 持久化
-`auth.registration_mode=invite_only`、实际发现默认 8 个只读 MCP 工具
-（search/read/grep/list/wiki，不自动接入 ask、不创建 quick-answer agent）并
-刷新 state 元数据）→ 平台依赖探测与迁移 → 整套启动。任何一步失败都阻断部署，公网
-gateway 不会提前开放；失败时停止新 WeKnora gateway 与平台前端，但保留卷。
+`WEKNORA_ADMIN_EMAIL` 默认为 `admin@weknora.local`；生产管理员密码由部署脚本
+首次生成并持久化于服务器 `.env`。由授权管理员在服务器受控终端查看，禁止发送到
+应用页面、日志、Git 或工单。原生页面修改密码后，应在受控终端同步该账号的部署
+密码，保证下一次账号安全验证仍可登录；不会自动重置已有账号密码。
+DB、Redis、JWT、AES 与 signing 凭据独立生成并跨部署保持不变。AES 必须恰为
+32 个 ASCII 字节，JWT/signing 至少 32 字符；不复用平台密钥。
+官方 app/UI/docreader、ParadeDB、Redis 镜像均固定 `@sha256`。
 
-镜像必须固定：官方 app/ui/docreader、ParadeDB `v0.25.11-pg17` 与
-Neo4j `2025.10.1` 均使用已核验的 `@sha256` 默认值（Neo4j digest 来自官方
-docker-library repo-info archive，amd64/arm64 OCI index）。部署脚本对全部
-`WEKNORA_*_IMAGE` 执行与平台镜像相同的严格 digest 校验，拒绝 tag 漂移，
-也不允许用平台 Neo4j 5 替代。
+管理员首次配置流程：
+
+1. 从超级助手会话头部打开 WeKnora，使用原生账号登录。
+2. 在“设置 → 模型”添加聊天（KnowledgeQA）和 Embedding 模型，在原生页面输入
+   模型地址、密钥、名称及向量维度；无需 GitHub 模型变量或 Secrets。
+3. 创建一个共享知识库，绑定所需模型，再上传文档并等待解析、索引完成。
+4. 在原生集成设置的 MCP Server 中创建接入点，明确选择这个知识库（空范围在
+   上游代表全部知识库）。仅选 `list_knowledge_bases`、`search_knowledge`、
+   `grep_chunks`、`list_documents`、`read_document`、`wiki_search`、
+   `wiki_read_page`、`wiki_index`；取消 `ask` 与文档新增、修改、删除工具。
+5. 在超级助手“助手配置 → MCP”新增 Streamable HTTP 连接。使用内部地址
+   `http://weknora-app:8080/mcp/<endpoint_id>`，请求头填写
+   `Authorization: Bearer <原生页面生成的 token>`。源码运行改用
+   `http://127.0.0.1:18080/mcp/<endpoint_id>`。不要使用被网关阻断的公网 MCP 地址。
+6. 测试连接成功并发现非空工具清单后，由平台管理员登记“受约束”并启用。
+   执行确认仍遵循现有 MCP 策略。连接、token 或工具清单变更后重新测试和登记；
+   token 轮换后旧 token 立即失效。
+
+服务健康不代表知识已可检索。真实验收需上传脱敏文档，验证检索命中、引用和
+超级助手调用；模型或索引未配置时应显示实际错误，不能用探活结果冒充知识就绪。
 
 ### 集成数据集 dbx（生产）
 

@@ -35,9 +35,9 @@ docker compose -f docker-compose.local.yml up --build
 可用性还必须通过 `/health/ready` 检查。
 
 WeKnora 原生 Web 入口是 `http://localhost:8089`（HTTPS `https://localhost:8444`）。
-它使用独立数据库/图/缓存卷。本地 `up` 会自动运行一次性 bootstrap 与
-`--verify`，完成管理员/知识库/MCP 初始化并持久化关闭注册；bootstrap 成功前
-网关不发布端口。之后配置中心的 WeKnora 测试才能通过。细节见
+它使用独立数据库、缓存和文件卷。本地 `up` 自动初始化管理员并关闭注册后开放
+原生 Web；模型、知识库和 MCP 端点由管理员在原生页面配置，再在超级助手现有
+MCP 管理中登记一次连接。模型密钥不是部署前置。细节见
 [WeKnora 本地初始化](./docs/development/setup.md#weknora-本地初始化)。
 
 三个编排文件分工如下：`docker-compose.local.yml` 是单机一键完整栈（即上文

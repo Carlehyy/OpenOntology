@@ -100,39 +100,27 @@ compose_environment() {
     -u PIPELINE_FILE_PUBLIC_APP_BASE_URL \
     -u PIPELINE_FILE_PUBLIC_API_BASE_URL \
     -u SUPER_ASSISTANT_PUBLIC_API_BASE_URL \
+    -u SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS \
     -u WEKNORA_BASE_URL \
-    -u WEKNORA_STATE_ORIGIN \
     -u WEKNORA_WEB_URL \
-    -u WEKNORA_STATE_PATH \
     -u WEKNORA_HTTP_PORT \
     -u WEKNORA_HTTPS_PORT \
     -u WEKNORA_ADMIN_USER \
     -u WEKNORA_ADMIN_EMAIL \
     -u WEKNORA_ADMIN_PASSWORD \
-    -u WEKNORA_CHAT_BASE_URL \
-    -u WEKNORA_CHAT_API_KEY \
-    -u WEKNORA_CHAT_MODEL \
-    -u WEKNORA_EMBEDDING_BASE_URL \
-    -u WEKNORA_EMBEDDING_API_KEY \
-    -u WEKNORA_EMBEDDING_MODEL \
-    -u WEKNORA_EMBEDDING_DIMENSIONS \
-    -u WEKNORA_KNOWLEDGE_BASE_NAME \
     -u WEKNORA_TIMEOUT_SECONDS \
     -u WEKNORA_DB_NAME \
     -u WEKNORA_DB_USER \
     -u WEKNORA_DB_PASSWORD \
     -u WEKNORA_REDIS_PASSWORD \
-    -u WEKNORA_NEO4J_PASSWORD \
     -u WEKNORA_JWT_SECRET \
     -u WEKNORA_SYSTEM_AES_KEY \
     -u WEKNORA_SYSTEM_SIGNING_KEY \
-    -u WEKNORA_NEO4J_HEAP_MAX \
     -u WEKNORA_APP_IMAGE \
     -u WEKNORA_UI_IMAGE \
     -u WEKNORA_DOCREADER_IMAGE \
     -u WEKNORA_POSTGRES_IMAGE \
     -u WEKNORA_REDIS_IMAGE \
-    -u WEKNORA_NEO4J_IMAGE \
     -u WEKNORA_MAX_FILE_SIZE_MB \
     -u WEKNORA_DEFAULT_LOCALE \
     -u STEWARD_INTERNAL_PROXY_BASE_URL \
@@ -483,10 +471,10 @@ start_weknora_initializer() {
   if compose up --help 2>&1 | grep -q -- '--wait'; then
     run_with_retry compose --profile weknora-bootstrap up -d --wait \
       --wait-timeout "${WEKNORA_BOOTSTRAP_WAIT_TIMEOUT:-300}" \
-      weknora-db weknora-redis weknora-neo4j weknora-docreader weknora-app-init
+      weknora-db weknora-redis weknora-docreader weknora-app-init
   else
     run_with_retry compose --profile weknora-bootstrap up -d \
-      weknora-db weknora-redis weknora-neo4j weknora-docreader weknora-app-init
+      weknora-db weknora-redis weknora-docreader weknora-app-init
     run_with_retry wait_for_service_healthy weknora-app-init 60 5
   fi
 }
@@ -511,11 +499,8 @@ start_and_verify_weknora_app() {
     run_with_retry compose up -d weknora-app
     run_with_retry wait_for_service_healthy weknora-app 60 5
   fi
-  # --verify is the authoritative readiness gate. It logs in as the promoted
-  # system admin, persists auth.registration_mode=invite_only through the
-  # official settings API, performs real MCP discovery, and refreshes the
-  # tool/state metadata. The agent's fixed /health 200 response is explicitly
-  # NOT accepted here.
+  # Account verification must finish before the public gateway starts. Models,
+  # knowledge bases and MCP endpoints are configured later in the native Web.
   run_weknora_bootstrap --verify
   weknora_bootstrap_active=0
 }
@@ -526,7 +511,7 @@ check_weknora_public_entry() {
   https_port="$(env_value WEKNORA_HTTPS_PORT)"
   http_port="${http_port:-8089}"
   https_port="${https_port:-8444}"
-  # Edge liveness only; bootstrap/MCP correctness is proven by --verify above.
+  # Check public service liveness and registration protection.
   curl -fsS --connect-timeout 5 --max-time 10 \
     "http://127.0.0.1:${http_port}/healthz" >/dev/null || return 1
   auth_json="$(curl -kfsS --connect-timeout 5 --max-time 20 \
@@ -882,20 +867,12 @@ configure_integrated_dbx() {
 }
 
 configure_weknora_env() {
-  # WeKnora is a separate product with its own database, cache, graph and
-  # administrator. Never reuse platform credentials, and never regenerate a
-  # value that already exists: a later deployment must keep the same
-  # WeKnora encryption/signing authority and the same DB/Redis/Neo4j
-  # passwords or persisted state becomes unreadable. All defaults/secrets are
-  # written in one atomic update to avoid one fsync per key on fresh installs.
+  # Keep independent database/cache and encryption credentials stable across
+  # deployments. Models and MCP tokens belong to the native UI, not this file.
   local current web_url tls_ip https_port
   local -a updates=()
   updates+=("WEKNORA_BASE_URL=http://weknora-app:8080")
-  updates+=("WEKNORA_STATE_ORIGIN=http://weknora-app:8080")
-  updates+=("WEKNORA_STATE_PATH=/weknora-state/integration.json")
-
-  current="$(env_value WEKNORA_KNOWLEDGE_BASE_NAME)"
-  [ -n "$current" ] || updates+=("WEKNORA_KNOWLEDGE_BASE_NAME=共享知识库")
+  updates+=("SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS=http://weknora-app:8080/mcp")
   current="$(env_value WEKNORA_TIMEOUT_SECONDS)"
   [ -n "$current" ] || updates+=("WEKNORA_TIMEOUT_SECONDS=15")
   current="$(env_value WEKNORA_HTTP_PORT)"
@@ -906,8 +883,6 @@ configure_weknora_env() {
   [ -n "$current" ] || updates+=("WEKNORA_MAX_FILE_SIZE_MB=50")
   current="$(env_value WEKNORA_DEFAULT_LOCALE)"
   [ -n "$current" ] || updates+=("WEKNORA_DEFAULT_LOCALE=zh-CN")
-  current="$(env_value WEKNORA_NEO4J_HEAP_MAX)"
-  [ -n "$current" ] || updates+=("WEKNORA_NEO4J_HEAP_MAX=1G")
 
   current="$(env_value WEKNORA_DB_NAME)"
   [ -n "$current" ] || updates+=("WEKNORA_DB_NAME=weknora")
@@ -916,7 +891,6 @@ configure_weknora_env() {
   for secret_assignment in \
     "WEKNORA_DB_PASSWORD:24" \
     "WEKNORA_REDIS_PASSWORD:24" \
-    "WEKNORA_NEO4J_PASSWORD:24" \
     "WEKNORA_JWT_SECRET:32" \
     "WEKNORA_SYSTEM_AES_KEY:16" \
     "WEKNORA_SYSTEM_SIGNING_KEY:32"; do
@@ -972,49 +946,24 @@ configure_weknora_env() {
     "WEKNORA_UI_IMAGE=wechatopenai/weknora-ui:v0.9.0@sha256:df26705d866997db07f3da78dabedc4f594b383566a3996810c166a5c6bee393" \
     "WEKNORA_DOCREADER_IMAGE=wechatopenai/weknora-docreader:v0.9.0@sha256:8c71ec3cc2e291829c3938d2c7dc5f921c1d10551c8774bf844c83bc4aa3cb84" \
     "WEKNORA_POSTGRES_IMAGE=paradedb/paradedb:v0.25.11-pg17@sha256:78d65750f0f88a56548526201bcab9910f83b90fe929cdbf979890f3f80b0f95" \
-    "WEKNORA_REDIS_IMAGE=redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99" \
-    "WEKNORA_NEO4J_IMAGE=neo4j:2025.10.1@sha256:155c8aad10d5c838bc3bbc476c0418779086547822acb214ec5e3d49ba336907"; do
+    "WEKNORA_REDIS_IMAGE=redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99"; do
     current="$(env_value "${image_assignment%%=*}")"
     [ -n "$current" ] || updates+=("$image_assignment")
   done
   set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
 }
 
-validate_weknora_http_endpoint() {
-  local key="$1" value="$2"
-  case "$value" in
-    http://*|https://*) ;;
-    *) log "$key must be an absolute HTTP(S) URL"; exit 1 ;;
-  esac
-  if [[ ! "$value" =~ ^https?://[^/?#@[:space:]]+(:[0-9]{1,5})?(/[^?#[:space:]]*)?$ ]]; then
-    log "$key must not contain credentials, query parameters, fragments or whitespace"
-    exit 1
-  fi
-}
-
 validate_weknora_config() {
-  local http_port https_port public_port public_https_port dimension admin_password weknora_secret
+  local http_port https_port public_port public_https_port admin_password weknora_secret
   [ "$(env_value WEKNORA_BASE_URL)" = "http://weknora-app:8080" ] || {
     log "WEKNORA_BASE_URL must remain the internal http://weknora-app:8080 contract"
     exit 1
   }
-  [ "$(env_value WEKNORA_STATE_ORIGIN)" = "http://weknora-app:8080" ] || {
-    log "WEKNORA_STATE_ORIGIN must remain the internal http://weknora-app:8080 identity"
-    exit 1
-  }
-  [ "$(env_value WEKNORA_STATE_PATH)" = "/weknora-state/integration.json" ] || {
-    log "WEKNORA_STATE_PATH must remain /weknora-state/integration.json"
-    exit 1
-  }
   validate_pipeline_file_public_base WEKNORA_WEB_URL "$(env_value WEKNORA_WEB_URL)"
-  validate_weknora_http_endpoint WEKNORA_CHAT_BASE_URL "$(env_value WEKNORA_CHAT_BASE_URL)"
-  validate_weknora_http_endpoint WEKNORA_EMBEDDING_BASE_URL "$(env_value WEKNORA_EMBEDDING_BASE_URL)"
   for key in \
-    WEKNORA_CHAT_API_KEY WEKNORA_CHAT_MODEL \
-    WEKNORA_EMBEDDING_API_KEY WEKNORA_EMBEDDING_MODEL \
     WEKNORA_ADMIN_USER WEKNORA_ADMIN_EMAIL WEKNORA_ADMIN_PASSWORD \
     WEKNORA_DB_NAME WEKNORA_DB_USER WEKNORA_DB_PASSWORD \
-    WEKNORA_REDIS_PASSWORD WEKNORA_NEO4J_PASSWORD \
+    WEKNORA_REDIS_PASSWORD \
     WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY; do
     require_secret "$key"
   done
@@ -1022,7 +971,7 @@ validate_weknora_config() {
     *@*.*) ;;
     *) log "WEKNORA_ADMIN_EMAIL must be a valid email address"; exit 1 ;;
   esac
-  for key in WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD WEKNORA_NEO4J_PASSWORD; do
+  for key in WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD; do
     weknora_secret="$(env_value "$key")"
     if [ "${#weknora_secret}" -lt 12 ]; then
       log "$key must contain at least 12 characters"
@@ -1054,19 +1003,6 @@ validate_weknora_config() {
     *[[:space:]]*) log "WEKNORA_ADMIN_PASSWORD must not contain whitespace"; exit 1 ;;
   esac
   unset admin_password
-  case "$(env_value WEKNORA_EMBEDDING_DIMENSIONS)" in
-    ""|*[!0-9]*)
-      log "WEKNORA_EMBEDDING_DIMENSIONS must be a positive integer"
-      exit 1
-      ;;
-    *)
-      dimension="$(env_value WEKNORA_EMBEDDING_DIMENSIONS)"
-      if [ "$dimension" -lt 1 ] || [ "$dimension" -gt 8192 ]; then
-        log "WEKNORA_EMBEDDING_DIMENSIONS must be between 1 and 8192"
-        exit 1
-      fi
-      ;;
-  esac
   case "$(env_value WEKNORA_TIMEOUT_SECONDS)" in
     ""|*[!0-9]*)
       log "WEKNORA_TIMEOUT_SECONDS must be an integer between 3 and 60"
@@ -1101,7 +1037,7 @@ validate_weknora_config() {
     log "WeKnora public ports must be distinct from each other and from PUBLIC_PORT/PUBLIC_HTTPS_PORT"
     exit 1
   fi
-  log "validated WeKnora internal/public URLs, model inputs and independent credentials"
+  log "validated WeKnora service URLs and independent account/runtime credentials"
 }
 
 start_integrated_dbx_if_needed() {
@@ -1121,13 +1057,10 @@ dependency_key_allowed() {
     NEO4J_URI|NEO4J_USER|NEO4J_PASSWORD|NEO4J_AUTH|\
     MINIO_ENDPOINT|MINIO_ACCESS_KEY|MINIO_SECRET_KEY|MINIO_USE_SSL|\
     N8N_API_URL|N8N_API_KEY|N8N_TIMEOUT_SECONDS|\
-    WEKNORA_WEB_URL|WEKNORA_CHAT_BASE_URL|WEKNORA_CHAT_API_KEY|\
-    WEKNORA_CHAT_MODEL|WEKNORA_EMBEDDING_BASE_URL|\
-    WEKNORA_EMBEDDING_API_KEY|WEKNORA_EMBEDDING_MODEL|\
-    WEKNORA_EMBEDDING_DIMENSIONS|WEKNORA_KNOWLEDGE_BASE_NAME|\
+    WEKNORA_WEB_URL|\
     WEKNORA_TIMEOUT_SECONDS|WEKNORA_ADMIN_USER|WEKNORA_ADMIN_EMAIL|\
     WEKNORA_APP_IMAGE|WEKNORA_UI_IMAGE|WEKNORA_DOCREADER_IMAGE|\
-    WEKNORA_POSTGRES_IMAGE|WEKNORA_REDIS_IMAGE|WEKNORA_NEO4J_IMAGE|\
+    WEKNORA_POSTGRES_IMAGE|WEKNORA_REDIS_IMAGE|\
     SUPER_ASSISTANT_MCP_STDIO_ENABLED|SUPER_ASSISTANT_MCP_STDIO_ALLOWED_COMMANDS)
       return 0
       ;;
@@ -1595,8 +1528,8 @@ redact_compose_logs() {
     DATABASE_URL REDIS_PASSWORD REDIS_URL NEO4J_PASSWORD NEO4J_AUTH \
     MINIO_ACCESS_KEY MINIO_SECRET_KEY API_HUB_SYSTEM_MCP_TOKEN \
     N8N_API_KEY INTEGRATED_DBX_PASSWORD \
-    WEKNORA_ADMIN_PASSWORD WEKNORA_CHAT_API_KEY WEKNORA_EMBEDDING_API_KEY \
-    WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD WEKNORA_NEO4J_PASSWORD \
+    WEKNORA_ADMIN_PASSWORD \
+    WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
     WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY; do
     value="$(env_value "$key")"
     [ -z "$value" ] || sensitive_values+=("$value")
@@ -1862,7 +1795,7 @@ for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
   WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
-  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE; do
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE; do
   check_image_digest "$image_key"
 done
 if [ "${DEPLOY_VALIDATE_ONLY:-0}" = "1" ]; then

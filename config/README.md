@@ -16,13 +16,11 @@
 ## 配置边界
 
 生成配置前必须确认平台与端口、安全与目录，并通过 PostgreSQL、Redis、NATS、
-Neo4j、MinIO、n8n 与 WeKnora 的真实连通性测试。WeKnora 测试会读取原生
-Web 的 `/api/v1/auth/config` 与 bootstrap 写入的 `weknora_state` 元数据：
-state 缺失、`verified` 不是 true、`base_url` 与
-`WEKNORA_STATE_ORIGIN=http://weknora-app:8080` 不一致、MCP endpoint/token
-形状非法、工具缺少 name/description/input_schema 或注册仍为 `self_serve`
-时失败。源码 backend 用 `WEKNORA_BASE_URL=http://127.0.0.1:18080` 直连 app；
-公共 UI 网关不代理 MCP。Chromium CDP 地址同样是必填启动配置，但其
+Neo4j、MinIO、n8n 与 WeKnora 的真实连通性测试。WeKnora 测试仅请求
+`/health` 与 `/api/v1/auth/config`，要求服务可达且注册为 `invite_only`；不要求
+模型、知识库、MCP 端点或状态文件。源码 backend 用
+`WEKNORA_BASE_URL=http://127.0.0.1:18080` 直连 app，公共 UI 网关不代理 MCP。
+Chromium CDP 地址同样是必填启动配置，但其
 生成前连通测试只用于提示：暂时不可达仍可生成配置并启动 API 诊断，深度
 readiness 会保持失败。生成后启动 API、后台任务 executor 和前端，再由“启动后
 复检”确认后端深度 readiness、前端可用及 executor 心跳（30 秒内）。任一必需
@@ -44,17 +42,12 @@ LLM 不属于启动门禁：先启动完整平台，再由管理员在“模型�
 config/generated/local/.env
 ```
 
-WeKnora 的 `WEKNORA_STATE_PATH` 默认在页面中保存为项目相对路径，但实际生成
-`.env` 时会解析为项目内绝对路径，供宿主机 backend 读取；`WEKNORA_BASE_URL`
-是 loopback app 通信地址（默认 `http://127.0.0.1:18080`），
-`WEKNORA_STATE_ORIGIN` 是 state 的部署身份（固定 `http://weknora-app:8080`），
-两者不可混用。
-
-配置中心的 WeKnora 探针检查 app 直连 HTTP 认证配置与 bootstrap verified
-state 元数据/工具白名单，不执行真实聊天、文档检索或图谱查询，也不声称深度
-RAG readiness；backend 启动时的严格 WeKnora probe 才是平台最终门禁。首次使用
-WeKnora 原生 Web 的邮箱/密码只从受控终端的 `.env` 读取，不要打印真实值或发送
-到页面/工单。
+WeKnora 仅保存服务地址、原生 Web 地址和超时；生成内部 MCP 前缀
+`SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS=http://127.0.0.1:18080/mcp`。
+模型、知识库与 MCP 端点由管理员在原生页面配置，然后在超级助手现有 MCP 管理
+登记内部 URL 与 Bearer token。详见
+[配置流程](../docs/operations/configuration.md#weknora-共享知识库v090)。
+配置中心不会托管模型密钥或 MCP token，也不会以 HTTP 探活成功宣称知识已就绪。
 
 该文件是本地唯一配置来源并被 Git 忽略。后端、API Hub、Alembic 和前端 Vite 会读取它；系统环境变量仍具有最高优先级，因此 Docker 和生产部署保持原有行为。
 

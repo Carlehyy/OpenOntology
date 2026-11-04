@@ -173,17 +173,14 @@ class N8nConfig(StrictModel):
 
 
 class WeKnoraConfig(StrictModel):
-    """Shared WeKnora knowledge base consumed by the super assistant.
+    """WeKnora native Web entry for the super assistant.
 
-    ``base_url`` is the app endpoint for a source-run backend (loopback
+    ``base_url`` is the app endpoint used by a source-run backend (loopback
     ``http://127.0.0.1:18080``, because the public UI gateway deliberately
     rejects MCP). Docker deployments use the internal
-    ``http://weknora-app:8080`` contract. ``state_origin`` is the deployment
-    identity stored in state and must not be rewritten to the loopback alias.
-    ``state_path`` points at the bootstrap-owned integration metadata (MCP
-    token/endpoint and KB identity) and is read-only for the backend.
-    Chat/embedding credentials are deployment inputs; there is no fallback
-    provider.
+    ``http://weknora-app:8080`` contract. Deployment initializes the administrator;
+    models, knowledge bases and MCP endpoints are configured in WeKnora's native
+    Web UI. This profile stores no MCP token or model credentials.
     """
 
     # Source-run backend and the local config center use the loopback-only app
@@ -192,41 +189,15 @@ class WeKnoraConfig(StrictModel):
     base_url: str = Field(
         default="http://127.0.0.1:18080", min_length=1, max_length=500
     )
-    state_origin: str = Field(
-        default="http://weknora-app:8080", min_length=1, max_length=500
-    )
     web_url: str = Field(
         default="http://127.0.0.1:8089", min_length=1, max_length=500
     )
-    state_path: str = Field(
-        default="./runtime/weknora/integration.json",
-        min_length=1,
-        max_length=500,
-    )
-    knowledge_base_name: str = Field(default="共享知识库", min_length=1, max_length=200)
     timeout_seconds: int = Field(default=15, ge=3, le=60)
-    chat_base_url: str = Field(default="", max_length=500)
-    chat_api_key: str = Field(default="", max_length=2000)
-    chat_model: str = Field(default="", max_length=200)
-    embedding_base_url: str = Field(default="", max_length=500)
-    embedding_api_key: str = Field(default="", max_length=2000)
-    embedding_model: str = Field(default="", max_length=200)
-    embedding_dimensions: int = Field(default=1024, ge=1, le=8192)
 
     @model_validator(mode="after")
     def validate_weknora(self) -> "WeKnoraConfig":
         _validate_http_origin(self.base_url, "WeKnora 内部地址")
-        _validate_http_origin(self.state_origin, "WeKnora state 身份地址")
         _validate_http_origin(self.web_url, "WeKnora 公网地址")
-        _validate_weknora_state_path(self.state_path)
-        if self.chat_base_url:
-            _validate_http_origin(
-                self.chat_base_url, "WeKnora 聊天模型地址", allow_path=True
-            )
-        if self.embedding_base_url:
-            _validate_http_origin(
-                self.embedding_base_url, "WeKnora 向量模型地址", allow_path=True
-            )
         return self
 
 
@@ -276,8 +247,6 @@ class ConfigProfile(StrictModel):
             ("MinIO Access Key", self.minio.access_key),
             ("MinIO Secret Key", self.minio.secret_key),
             ("n8n API Key", self.n8n.api_key),
-            ("WeKnora 聊天 API Key", self.weknora.chat_api_key),
-            ("WeKnora 向量 API Key", self.weknora.embedding_api_key),
             ("API Hub System MCP Token", self.advanced.api_hub_system_mcp_token),
             ("API Hub Internal Proxy Token", self.advanced.api_hub_internal_proxy_token),
         )
@@ -335,16 +304,6 @@ def _validate_http_origin(value: str, label: str, *, allow_path: bool = False) -
         raise ValueError(f"{label}不能包含查询参数或片段")
     if not allow_path and parsed.path not in {"", "/"}:
         raise ValueError(f"{label}只填写服务根地址，不要包含接口路径")
-
-
-def _validate_weknora_state_path(value: str) -> None:
-    normalized = value.replace("\\", "/")
-    if normalized.startswith("/"):
-        path = PurePosixPath(normalized)
-        if not path.parts or any(part in {"", ".", ".."} for part in path.parts):
-            raise ValueError("WeKnora 初始化状态文件不能包含空目录、当前目录或上级目录")
-        return
-    _validate_relative_path(value, "WeKnora 初始化状态文件")
 
 
 def _validate_relative_path(value: str, label: str) -> None:

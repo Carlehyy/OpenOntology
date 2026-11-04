@@ -229,12 +229,7 @@ def test_weknora_internal_contract_rejects_malformed_values():
     bad_origin = required_dependency_config_errors(_production_settings(
         weknora_base_url="http://user:pass@weknora-app:8080",
     ))
-    bad_state = required_dependency_config_errors(_production_settings(
-        weknora_state_path="relative/state.json",
-    ))
-
     assert "WEKNORA_BASE_URL must be an absolute HTTP(S) origin" in bad_origin
-    assert "WEKNORA_STATE_PATH must be an absolute path" in bad_state
 
 
 def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
@@ -284,7 +279,6 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         "weknora-app",
         "weknora-db",
         "weknora-redis",
-        "weknora-neo4j",
         "weknora-docreader",
     ):
         assert compose["services"][service]["networks"] == [
@@ -303,11 +297,8 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     # explicit empty value; only the bootstrap path may keep the real values.
     weknora_bootstrap_only = (
         "WEKNORA_ADMIN_PASSWORD",
-        "WEKNORA_CHAT_API_KEY",
-        "WEKNORA_EMBEDDING_API_KEY",
         "WEKNORA_DB_PASSWORD",
         "WEKNORA_REDIS_PASSWORD",
-        "WEKNORA_NEO4J_PASSWORD",
         "WEKNORA_JWT_SECRET",
         "WEKNORA_SYSTEM_AES_KEY",
         "WEKNORA_SYSTEM_SIGNING_KEY",
@@ -326,8 +317,6 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     ]
     for key in (
         "WEKNORA_ADMIN_PASSWORD",
-        "WEKNORA_CHAT_API_KEY",
-        "WEKNORA_EMBEDDING_API_KEY",
     ):
         assert key in bootstrap_environment
 
@@ -353,8 +342,6 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     )
     for key in weknora_bootstrap_only:
         assert build_environment[key].startswith("ci-only-")
-    assert build_environment["WEKNORA_CHAT_BASE_URL"].endswith(".invalid/v1")
-    assert build_environment["WEKNORA_EMBEDDING_BASE_URL"].endswith(".invalid/v1")
     assert build_environment["WEKNORA_WEB_URL"].endswith(".invalid")
     assert "env" not in workflow
     assert "env" not in build_job
@@ -406,11 +393,8 @@ def test_local_compose_requires_real_stack_without_chroma():
     # only weknora-bootstrap/weknora-verify are meant to read.
     weknora_bootstrap_only = (
         "WEKNORA_ADMIN_PASSWORD",
-        "WEKNORA_CHAT_API_KEY",
-        "WEKNORA_EMBEDDING_API_KEY",
         "WEKNORA_DB_PASSWORD",
         "WEKNORA_REDIS_PASSWORD",
-        "WEKNORA_NEO4J_PASSWORD",
         "WEKNORA_JWT_SECRET",
         "WEKNORA_SYSTEM_AES_KEY",
         "WEKNORA_SYSTEM_SIGNING_KEY",
@@ -433,8 +417,6 @@ def test_local_compose_requires_real_stack_without_chroma():
         environment = compose["services"][service]["environment"]
         for key in (
             "WEKNORA_ADMIN_PASSWORD",
-            "WEKNORA_CHAT_API_KEY",
-            "WEKNORA_EMBEDDING_API_KEY",
         ):
             assert key in environment
 
@@ -860,14 +842,6 @@ def _write_valid_dependency_manifest(
         "N8N_API_KEY=synthetic-n8n-api-key\n"
         "N8N_TIMEOUT_SECONDS=30\n"
         "WEKNORA_WEB_URL=https://kb.example.com\n"
-        "WEKNORA_CHAT_BASE_URL=https://chat.example.com/v1\n"
-        "WEKNORA_CHAT_API_KEY=synthetic-weknora-chat-key\n"
-        "WEKNORA_CHAT_MODEL=synthetic-chat-model\n"
-        "WEKNORA_EMBEDDING_BASE_URL=https://embed.example.com/v1\n"
-        "WEKNORA_EMBEDDING_API_KEY=synthetic-weknora-embedding-key\n"
-        "WEKNORA_EMBEDDING_MODEL=synthetic-embedding-model\n"
-        "WEKNORA_EMBEDDING_DIMENSIONS=1024\n"
-        "WEKNORA_KNOWLEDGE_BASE_NAME=共享知识库\n"
         "WEKNORA_TIMEOUT_SECONDS=15\n"
         "WEKNORA_ADMIN_USER=admin\n"
         "WEKNORA_ADMIN_EMAIL=admin@weknora.local\n",
@@ -923,8 +897,6 @@ def test_deploy_bootstraps_server_env_without_more_github_secrets(tmp_path):
         generated["MINIO_ACCESS_KEY"],
         generated["MINIO_SECRET_KEY"],
         generated["API_HUB_SYSTEM_MCP_TOKEN"],
-        generated["WEKNORA_CHAT_API_KEY"],
-        generated["WEKNORA_EMBEDDING_API_KEY"],
         generated["WEKNORA_DB_PASSWORD"],
     ):
         assert sensitive_value

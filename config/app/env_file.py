@@ -37,8 +37,6 @@ SECRET_FIELDS: dict[str, tuple[str, str]] = {
     "minio.access_key": ("minio", "access_key"),
     "minio.secret_key": ("minio", "secret_key"),
     "n8n.api_key": ("n8n", "api_key"),
-    "weknora.chat_api_key": ("weknora", "chat_api_key"),
-    "weknora.embedding_api_key": ("weknora", "embedding_api_key"),
     "advanced.api_hub_system_mcp_token": (
         "advanced",
         "api_hub_system_mcp_token",
@@ -60,8 +58,6 @@ REQUIRED_SECRET_FIELDS = frozenset(
         "minio.access_key",
         "minio.secret_key",
         "n8n.api_key",
-        "weknora.chat_api_key",
-        "weknora.embedding_api_key",
         "advanced.api_hub_system_mcp_token",
         "advanced.api_hub_internal_proxy_token",
     }
@@ -233,39 +229,13 @@ class LocalEnvStore:
                 base_url=values.get(
                     "WEKNORA_BASE_URL", defaults.weknora.base_url
                 ),
-                state_origin=values.get(
-                    "WEKNORA_STATE_ORIGIN",
-                    defaults.weknora.state_origin,
-                ),
                 web_url=values.get(
                     "WEKNORA_WEB_URL", defaults.weknora.web_url
-                ),
-                state_path=values.get(
-                    "WEKNORA_STATE_PATH", defaults.weknora.state_path
-                ),
-                knowledge_base_name=values.get(
-                    "WEKNORA_KNOWLEDGE_BASE_NAME",
-                    defaults.weknora.knowledge_base_name,
                 ),
                 timeout_seconds=_int_value(
                     values,
                     "WEKNORA_TIMEOUT_SECONDS",
                     defaults.weknora.timeout_seconds,
-                ),
-                chat_base_url=values.get("WEKNORA_CHAT_BASE_URL", ""),
-                chat_api_key=values.get("WEKNORA_CHAT_API_KEY", ""),
-                chat_model=values.get("WEKNORA_CHAT_MODEL", ""),
-                embedding_base_url=values.get(
-                    "WEKNORA_EMBEDDING_BASE_URL", ""
-                ),
-                embedding_api_key=values.get(
-                    "WEKNORA_EMBEDDING_API_KEY", ""
-                ),
-                embedding_model=values.get("WEKNORA_EMBEDDING_MODEL", ""),
-                embedding_dimensions=_int_value(
-                    values,
-                    "WEKNORA_EMBEDDING_DIMENSIONS",
-                    defaults.weknora.embedding_dimensions,
                 ),
             ),
             advanced=AdvancedConfig(
@@ -447,15 +417,6 @@ def render_env(profile: ConfigProfile, project_root: Path | None = None) -> str:
     nats_userinfo = f"{quote(nats.token, safe='')}@" if nats.token else ""
     nats_url = f"nats://{nats_userinfo}{_url_host(nats.host)}:{nats.port}"
 
-    weknora_state_path = profile.weknora.state_path
-    if project_root is not None and not PurePosixPath(
-        weknora_state_path.replace("\\", "/")
-    ).is_absolute():
-        relative = weknora_state_path.replace("\\", "/")
-        if relative.startswith("./"):
-            relative = relative[2:]
-        weknora_state_path = str((project_root / relative).resolve())
-
     sections: list[tuple[str, list[tuple[str, object]]]] = [
         (
             "本地配置中心标记。生产环境不会生成或依赖此文件",
@@ -543,36 +504,14 @@ def render_env(profile: ConfigProfile, project_root: Path | None = None) -> str:
             ],
         ),
         (
-            "WeKnora 共享知识库。Docker 部署会在网关对外前自动完成一次性初始化；"
-            "本地源码运行需先启动 compose 中的 WeKnora 并运行 bootstrap --verify",
+            "WeKnora 原生 Web 与服务探活。模型、知识库和 MCP 端点在原生页面配置",
             [
                 ("WEKNORA_BASE_URL", profile.weknora.base_url),
-                ("WEKNORA_STATE_ORIGIN", profile.weknora.state_origin),
                 ("WEKNORA_WEB_URL", profile.weknora.web_url),
-                ("WEKNORA_STATE_PATH", weknora_state_path),
-                (
-                    "WEKNORA_KNOWLEDGE_BASE_NAME",
-                    profile.weknora.knowledge_base_name,
-                ),
                 ("WEKNORA_TIMEOUT_SECONDS", profile.weknora.timeout_seconds),
-                ("WEKNORA_CHAT_BASE_URL", profile.weknora.chat_base_url),
-                ("WEKNORA_CHAT_API_KEY", profile.weknora.chat_api_key),
-                ("WEKNORA_CHAT_MODEL", profile.weknora.chat_model),
                 (
-                    "WEKNORA_EMBEDDING_BASE_URL",
-                    profile.weknora.embedding_base_url,
-                ),
-                (
-                    "WEKNORA_EMBEDDING_API_KEY",
-                    profile.weknora.embedding_api_key,
-                ),
-                (
-                    "WEKNORA_EMBEDDING_MODEL",
-                    profile.weknora.embedding_model,
-                ),
-                (
-                    "WEKNORA_EMBEDDING_DIMENSIONS",
-                    profile.weknora.embedding_dimensions,
+                    "SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS",
+                    f"{profile.weknora.base_url.rstrip('/')}/mcp",
                 ),
             ],
         ),

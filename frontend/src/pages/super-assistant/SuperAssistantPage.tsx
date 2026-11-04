@@ -175,8 +175,8 @@ export default function SuperAssistantPage() {
   // 会话纪要：头部按钮弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
   const [summaryOpen, setSummaryOpen] = useState(false)
   const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
-  // 知识图谱（腾讯 WeKnora）：页面加载即读后端受信配置，头部入口只负责新标签
-  // 打开原生 Web 页面；登录走 WeKnora 自己的账号体系，不向前端下发 token/密码。
+  // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
+  // 知识库或模型可用性，也不代表知识检索已就绪。登录走 WeKnora 自己的账号体系。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
   const [weknoraLoading, setWeknoraLoading] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -1589,15 +1589,16 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {/* 知识图谱入口：位于会话纪要左侧；新标签打开后端受信 WeKnora 原生页面。
+          {/* 知识库（WeKnora）入口：位于会话纪要左侧、所有会话（含新会话）可用；
+              新标签打开原生 Web，不在入口上宣称知识已就绪。
               窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
           {weknoraUrl ? (
             <a
               href={weknoraUrl}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label="知识图谱"
-              title="知识图谱"
+              aria-label="知识库（WeKnora）"
+              title="知识库（WeKnora）"
               data-workbench-weknora
               className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
             >
@@ -1608,8 +1609,8 @@ export default function SuperAssistantPage() {
               type="button"
               onClick={() => { void refreshWeknora(true) }}
               disabled={weknoraLoading}
-              aria-label="知识图谱"
-              title="知识图谱"
+              aria-label="知识库（WeKnora）"
+              title="知识库（WeKnora）"
               data-workbench-weknora
               className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 md:flex"
             >
@@ -1727,27 +1728,27 @@ export default function SuperAssistantPage() {
                   href={weknoraUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label="知识图谱"
-                  title="知识图谱"
+                  aria-label="知识库（WeKnora）"
+                  title="知识库（WeKnora）"
                   data-workbench-weknora
                   onClick={() => setHeaderOverflowOpen(false)}
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <Network size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
-                  知识图谱
+                  知识库（WeKnora）
                 </a>
               ) : (
                 <button
                   type="button"
                   onClick={() => { setHeaderOverflowOpen(false); void refreshWeknora(true) }}
                   disabled={weknoraLoading}
-                  aria-label="知识图谱"
-                  title="知识图谱"
+                  aria-label="知识库（WeKnora）"
+                  title="知识库（WeKnora）"
                   data-workbench-weknora
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                 >
                   <Network size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
-                  知识图谱
+                  知识库（WeKnora）
                 </button>
               )}
               <button

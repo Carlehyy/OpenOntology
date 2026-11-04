@@ -1,5 +1,4 @@
 import ipaddress
-import os
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -244,6 +243,11 @@ class Settings(BaseSettings):
     # granting server-side code execution to assistant configurators.
     super_assistant_mcp_stdio_enabled: bool = False
     super_assistant_mcp_stdio_allowed_commands: str = ""
+    # 部署声明的可信内网 MCP 基地址（逗号分隔的 HTTP(S) origin + 路径前缀）。
+    # 仅该清单内的 URL 走内网校验：精确同源、路径不越出前缀，禁止
+    # credentials/query/fragment/..（含编码绕过）与元数据/链路本地/组播地址；
+    # 清单外 URL 继续使用 HTTPS/SSRF 原规则。默认空，不扩大信任面。
+    super_assistant_mcp_internal_base_urls: str = ""
     # User process plugins are executable code.  ``disabled`` is the safe
     # default until the dedicated rootless runner is deployed.  ``nats`` is
     # reserved for the external runner contract; it must not silently fall
@@ -274,10 +278,9 @@ class Settings(BaseSettings):
     # Super-assistant conversation attachments reuse the steward workspace
     # implementation. Empty root resolves to <uploads_dir>/super-assistant-sessions.
     super_assistant_workspace_root: str = ""
+    # WeKnora 由部署提供原生 Web；平台只做 HTTP 服务探活与前端跳转。
     weknora_base_url: str = "http://weknora-app:8080"
-    weknora_state_origin: str = "http://weknora-app:8080"
     weknora_web_url: str = "http://localhost:8089"
-    weknora_state_path: str = "/weknora-state/integration.json"
     weknora_timeout_seconds: int = Field(default=15, ge=3, le=60)
     steward_browser_cdp_url: str = "http://localhost:9222"
     steward_browser_timeout_seconds: int = 30
@@ -568,7 +571,6 @@ def required_dependency_config_errors(current: Settings) -> list[str]:
         errors.append("N8N_API_URL/N8N_API_KEY must configure n8n")
     for key, value in (
         ("WEKNORA_BASE_URL", current.weknora_base_url),
-        ("WEKNORA_STATE_ORIGIN", current.weknora_state_origin),
         ("WEKNORA_WEB_URL", current.weknora_web_url),
     ):
         try:
@@ -584,8 +586,6 @@ def required_dependency_config_errors(current: Settings) -> list[str]:
             valid = False
         if not valid:
             errors.append(f"{key} must be an absolute HTTP(S) origin")
-    if not os.path.isabs(str(current.weknora_state_path)):
-        errors.append("WEKNORA_STATE_PATH must be an absolute path")
     return errors
 
 

@@ -81,8 +81,8 @@ def _parse_tool_call(body_text: str, tool_name: str) -> tuple[dict, object]:
 
 def _reject_builtin(server: SuperAssistantMcpServer) -> None:
     if getattr(server, "builtin_key", None):
-        # 平台内置通道（minio/api_hub/weknora）只允许超级助手按固定清单、
-        # 内部端点与平台凭据执行，桥接导出会绕过只读白名单与凭据边界。
+        # 平台内置通道（minio/api_hub）只允许超级助手按固定清单、内部端点
+        # 与平台凭据执行，桥接导出会绕过只读白名单与凭据边界。
         raise McpBridgeError("平台内置 MCP 不支持 mcp-bridge 分发")
 
 

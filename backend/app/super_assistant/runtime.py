@@ -544,9 +544,8 @@ def _disabled_builtin_tools(db, owner_id: str) -> set[str]:
 # 工具目录是平台编码的固定清单，执行不经用户配置的传输/URL/凭据——
 # minio 固定平台工作区桶（桶/endpoint 覆盖参数被拒绝）；api_hub 逐工具
 # 以当前用户菜单权限 + 服务层行级作用域执行，出网复用 api_hub 私网/
-# 回环/重定向 SSRF 守卫；weknora 固定部署内部端点、只读白名单工具与
-# 平台持有的 Bearer token，用户不能自建 URL 触发。
-_CONSTRUCTIVELY_CONSTRAINED_BUILTINS = frozenset({"minio", "api_hub", "weknora"})
+# 回环/重定向 SSRF 守卫。WeKnora 不再是内置通道，须按普通 MCP 手工登记。
+_CONSTRUCTIVELY_CONSTRAINED_BUILTINS = frozenset({"minio", "api_hub"})
 
 
 def mcp_server_constrained(server: SuperAssistantMcpServer) -> bool:
@@ -1286,10 +1285,6 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
             SuperAssistantSkill.use_count.desc(),
             SuperAssistantSkill.name.asc(),
         ).all()
-        # 平台内置 WeKnora 默认接入：本地 verified 快照幂等补齐，不联网。
-        from app.super_assistant.weknora import mcp_service as weknora_mcp_service
-
-        weknora_mcp_service.ensure_server(db, owner_id)
         servers = db.query(SuperAssistantMcpServer).filter(
             SuperAssistantMcpServer.owner_id == owner_id,
             SuperAssistantMcpServer.enabled.is_(True),
@@ -1820,25 +1815,7 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                         server, original_name = server_tuple
                         tool_run.status = "running"
                         db.commit()
-                        if server.builtin_key == "weknora":
-                            # 平台内置只读通道：固定白名单 + 服务层内部端点
-                            # 与 token，绝不走用户可配置的 transport/URL。
-                            from app.super_assistant.weknora.policy import (
-                                WEKNORA_ALLOWED_TOOLS,
-                            )
-
-                            if original_name not in WEKNORA_ALLOWED_TOOLS:
-                                raise RuntimeError(
-                                    "WeKnora 内置 MCP 工具不在平台只读白名单，已拒绝执行"
-                                )
-                            from app.super_assistant.weknora import service as weknora_service
-
-                            output = asyncio.run(
-                                weknora_service.call_tool(
-                                    original_name, dict(item["arguments"]),
-                                )
-                            )
-                        elif server.builtin_key == "minio":
+                        if server.builtin_key == "minio":
                             output = execute_minio_tool(
                                 db, original_name, item["arguments"],
                                 actor_type="super_assistant", actor_id=owner_id,

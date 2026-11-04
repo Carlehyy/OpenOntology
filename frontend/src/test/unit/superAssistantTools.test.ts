@@ -30,7 +30,7 @@ describe('groupAssistantTools', () => {
     )
   })
 
-  it('platform_weknora MCP 只读工具按命名空间归入知识图谱组', () => {
+  it('platform_weknora MCP 工具按命名空间归入知识库组', () => {
     const groups = groupAssistantTools([
       tool('mcp__platform_weknora__list_knowledge_bases'),
       tool('mcp__platform_weknora__search_knowledge'),
@@ -38,7 +38,7 @@ describe('groupAssistantTools', () => {
       tool('mcp__platform_api_hub__list_env_vars'),
     ])
     const weknora = groups.find(group => group.key === 'weknora')!
-    assert.equal(weknora.label, '知识图谱（WeKnora）')
+    assert.equal(weknora.label, '知识库（WeKnora）')
     assert.deepEqual(weknora.tools.map(item => item.name), [
       'mcp__platform_weknora__list_knowledge_bases',
       'mcp__platform_weknora__search_knowledge',

@@ -7,12 +7,7 @@ import re
 import socket
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
-
-# ``app.shared.config`` / ``app.shared.encryption`` are imported lazily at the
-# call sites below: the WeKnora bootstrap container imports this module with
-# only bootstrap variables and must be able to validate its internal endpoint
-# before any platform DB/Redis/MinIO/n8n configuration exists.
+from urllib.parse import unquote, urlsplit
 
 
 class McpClientError(ValueError):
@@ -21,10 +16,10 @@ class McpClientError(ValueError):
 
 _MAX_TOOL_RESULT_BYTES = 256 * 1024
 
-# 平台内置 WeKnora MCP 的内部端点：容器网络内的 HTTP 是部署事实，不能把
-# 全局 HTTPS/公网 SSRF 策略原样套上去；只允许与受信任 base URL 完全同源、
-# 且路径不越出 base 前缀的端点。该关键字只能由内置 WeKnora 分发路径传入，
-# 用户自建 server 的 body/URL 永远走原有校验。
+# 部署声明的可信内网 MCP 基地址（``SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS``）：
+# 容器网络内的 HTTP 是部署事实，不能把全局 HTTPS/公网 SSRF 策略原样套上去；
+# 只允许与配置基地址完全同源、且路径不越出前缀的端点。清单外 URL 永远走
+# 原有校验，用户自建 server 的 body/URL 不能自选受信任 origin。
 _INTERNAL_METADATA_HOSTNAMES = frozenset({
     "metadata",
     "metadata.google.internal",
@@ -83,71 +78,65 @@ def _resolved_addresses(hostname: str, port: int) -> set[ipaddress.IPv4Address |
     return addresses
 
 
-def _validate_internal_mcp_url(url: str, internal_base_url: str) -> str:
-    """Validate a built-in integration endpoint against its trusted base URL.
-
-    The base URL comes from deployment settings (never from user-submitted
-    server bodies).  The endpoint must share the exact scheme/host/port with
-    the base and stay inside the base path prefix; credentials, query strings
-    and fragments remain forbidden.  Private/loopback addresses are permitted
-    only because they are pinned by that trusted base (e.g. a Docker service
-    name); link-local metadata addresses are always rejected.
-    """
-    value = (url or "").strip()
-    base_value = (internal_base_url or "").strip()
-    if not value or not base_value:
-        raise McpClientError("WeKnora 内部 MCP URL 缺少受信任的基地址")
-
-    def _origin(parsed, label: str) -> tuple[str, str, int, str]:
-        scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https"} or not parsed.hostname:
-            raise McpClientError(f"{label} 必须是 HTTP/HTTPS 绝对地址")
-        if parsed.username or parsed.password:
-            raise McpClientError("MCP URL 不能内嵌账号或密码")
-        if parsed.query or parsed.fragment:
-            raise McpClientError("MCP URL 不允许携带查询串或片段")
-        try:
-            port = parsed.port or (443 if scheme == "https" else 80)
-        except ValueError as exc:
-            raise McpClientError("MCP URL 端口无效") from exc
-        hostname = parsed.hostname.lower().rstrip(".")
-        if hostname in _INTERNAL_METADATA_HOSTNAMES:
-            raise McpClientError("MCP URL 不允许指向云元数据地址")
-        path = parsed.path or "/"
-        if any(segment == ".." for segment in path.split("/")):
-            raise McpClientError("MCP URL 路径不允许包含 ..")
-        return scheme, hostname, port, path
-
-    target = urlsplit(value)
-    base = urlsplit(base_value)
-    target_scheme, target_host, target_port, target_path = _origin(target, "MCP URL")
-    base_scheme, base_host, base_port, base_path = _origin(base, "MCP 内部基地址")
-    if (target_scheme, target_host, target_port) != (base_scheme, base_host, base_port):
-        raise McpClientError("MCP URL 与 WeKnora 内部基地址不同源")
-    prefix = base_path.rstrip("/")
-    if prefix and target_path != prefix and not target_path.startswith(prefix + "/"):
-        raise McpClientError("MCP URL 路径越出 WeKnora 内部基地址前缀")
-
-    # Link-local/metadata must not be smuggled in even through deployment
-    # config.  Resolution failures are deferred to the actual connect attempt
-    # so an operator-managed Docker DNS name is not rejected at validation.
+def _trusted_url_parts(value: str) -> tuple[str, str, int, str]:
+    parsed = urlsplit(value)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment
+            or any(char.isspace() for char in value)):
+        raise McpClientError("可信内网 MCP 必须是无凭据、查询串和片段的 HTTP(S) 地址")
+    path = parsed.path or "/"
     try:
-        addresses = _resolved_addresses(target_host, target_port)
-    except McpClientError:
-        addresses = set()
-    for address in addresses:
-        if address.is_link_local or address.is_multicast or address in _METADATA_ADDRESSES:
-            raise McpClientError(
-                f"MCP 目标 {target_host} 解析到链路本地/元数据地址，已拒绝连接"
-            )
-    return value
+        for _ in range(5):
+            decoded = unquote(path, errors="strict")
+            if decoded == path:
+                break
+            path = decoded
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except (ValueError, UnicodeError):
+        raise McpClientError("可信内网 MCP 地址编码或端口无效") from None
+    if ("%" in path or "\\" in path or "//" in path
+            or any(segment in {".", ".."} for segment in path.split("/"))):
+        raise McpClientError("可信内网 MCP 路径不允许编码歧义或目录穿越")
+    return parsed.scheme, parsed.hostname.lower().rstrip("."), port, path
 
 
-def validate_mcp_url(url: str, *, require_https: bool = False,
-                     internal_base_url: str | None = None) -> str:
-    if internal_base_url is not None:
-        # 仅内置 WeKnora 分发路径传入；不改变默认外部集成的 HTTPS/SSRF 规则。
-        return _validate_internal_mcp_url(url, internal_base_url)
+def _trusted_internal_url(url: str) -> bool:
+    from app.shared.config import settings
+
+    bases = [item.strip() for item in settings.super_assistant_mcp_internal_base_urls.split(",") if item.strip()]
+    if not bases:
+        return False
+    try:
+        parsed = urlsplit(url)
+        target_origin = (
+            parsed.scheme, (parsed.hostname or "").lower().rstrip("."),
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+        )
+        for base in bases:
+            trusted = _trusted_url_parts(base)
+            if target_origin != trusted[:3]:
+                continue
+            target = _trusted_url_parts(url)
+            prefix = trusted[3].rstrip("/")
+            if prefix and target[3] != prefix and not target[3].startswith(prefix + "/"):
+                continue
+            if target[1] in _INTERNAL_METADATA_HOSTNAMES:
+                raise McpClientError("MCP URL 不允许指向云元数据地址")
+            for address in _resolved_addresses(target[1], target[2]):
+                if address.is_link_local or address.is_multicast or address.is_unspecified or address in _METADATA_ADDRESSES:
+                    raise McpClientError("MCP URL 不允许指向元数据、链路本地或组播地址")
+            return True
+    except ValueError as exc:
+        if isinstance(exc, McpClientError):
+            raise
+        raise McpClientError("可信内网 MCP 地址无效") from None
+    return False
+
+
+def validate_mcp_url(url: str, *, require_https: bool = False) -> str:
+    if _trusted_internal_url((url or "").strip()):
+        return (url or "").strip()
     value = (url or "").strip()
     parsed = urlsplit(value)
     scheme = parsed.scheme.lower()
@@ -288,8 +277,7 @@ def _tool_manifest_item(tool: Any) -> dict[str, Any]:
 
 @asynccontextmanager
 async def _client_session(*, transport: str, url: str, headers: dict[str, str],
-                          command: str | None, args: list[str], env: dict[str, str],
-                          internal_base_url: str | None = None):
+                          command: str | None, args: list[str], env: dict[str, str]):
     try:
         import httpx
         from mcp import ClientSession, StdioServerParameters
@@ -309,8 +297,7 @@ async def _client_session(*, transport: str, url: str, headers: dict[str, str],
                 await session.initialize()
                 yield session
         return
-    valid_url = validate_mcp_url(
-        url, require_https=True, internal_base_url=internal_base_url)
+    valid_url = validate_mcp_url(url, require_https=True)
     if transport == "sse":
         async with sse_client(
             valid_url, headers=headers, timeout=20, sse_read_timeout=120,
@@ -336,13 +323,11 @@ async def _client_session(*, transport: str, url: str, headers: dict[str, str],
 
 async def discover_tools(*, transport: str, url: str, headers: dict[str, str],
                          command: str | None = None, args: list[str] | None = None,
-                         env: dict[str, str] | None = None,
-                         internal_base_url: str | None = None) -> list[dict[str, Any]]:
+                         env: dict[str, str] | None = None) -> list[dict[str, Any]]:
     try:
         async with _client_session(
             transport=transport, url=url, headers=headers, command=command,
             args=args or [], env=env or {},
-            internal_base_url=internal_base_url,
         ) as session:
             result = await session.list_tools()
             return [_tool_manifest_item(tool) for tool in result.tools]
@@ -354,8 +339,7 @@ async def discover_tools(*, transport: str, url: str, headers: dict[str, str],
 
 async def call_tool(*, transport: str, url: str, headers: dict[str, str], tool_name: str,
                     arguments: dict[str, Any], command: str | None = None,
-                    args: list[str] | None = None, env: dict[str, str] | None = None,
-                    internal_base_url: str | None = None) -> str:
+                    args: list[str] | None = None, env: dict[str, str] | None = None) -> str:
     from app.shared import perf_spans
 
     span_target = (
@@ -368,7 +352,6 @@ async def call_tool(*, transport: str, url: str, headers: dict[str, str], tool_n
         async with _client_session(
             transport=transport, url=url, headers=headers, command=command,
             args=args or [], env=env or {},
-            internal_base_url=internal_base_url,
         ) as session:
             result = await session.call_tool(tool_name, arguments=arguments)
             if hasattr(result, "model_dump_json"):

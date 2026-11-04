@@ -14,10 +14,6 @@ from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 import httpx
 
-from app.super_assistant.weknora.policy import (
-    WEKNORA_ALLOWED_TOOLS,
-    WEKNORA_BUILTIN_KEY,
-)
 from .contracts import ContractError
 
 
@@ -318,8 +314,8 @@ class McpToolConnector:
     env: Mapping[str, str] = field(default_factory=dict)
     revision: int = 1
     manifest_hash: str | None = None
-    # 平台内置通道（当前仅 weknora）：执行必须走服务层内部端点，不能把
-    # 用户可见的 transport/url/凭据当作可配置目标。
+    # 平台内置通道：执行必须走各自的服务层内部端点，不能把用户可见的
+    # transport/url/凭据当作可配置目标。
     builtin_key: str | None = None
 
     @property
@@ -330,9 +326,9 @@ class McpToolConnector:
 
     @property
     def side_effect_class(self) -> str:
-        # 平台内置 WeKnora 的工具清单固定只读；其余 MCP 维持既有的外部
-        # 异步口径（派发前必须用户审批）。
-        return "read_only" if self.builtin_key == WEKNORA_BUILTIN_KEY else "external_async"
+        # 通用 MCP 维持既有的外部异步口径（派发前必须用户审批）；内置通道
+        # 由 runtime 的服务层分支执行，不进入本连接器。
+        return "external_async"
 
     def descriptor(self) -> AgentDescriptor:
         return AgentDescriptor(
@@ -357,20 +353,7 @@ class McpToolConnector:
         if not isinstance(arguments, dict):
             raise ContractError("MCP connector arguments must be an object")
         if self.builtin_key is not None:
-            if self.builtin_key != WEKNORA_BUILTIN_KEY:
-                raise ContractError("platform builtin MCP must use its in-process channel")
-            if self.tool_name not in WEKNORA_ALLOWED_TOOLS:
-                raise ContractError("WeKnora tool is outside the read-only allowlist")
-            from app.super_assistant.weknora import service as weknora_service
-
-            content = await weknora_service.call_tool(self.tool_name, arguments)
-            return {
-                "run_id": run_id,
-                "call_id": call_id,
-                "status": "answered",
-                "content": str(content),
-                "provider_status": "completed",
-            }
+            raise ContractError("platform builtin MCP must use its in-process channel")
         from app.super_assistant.mcp_client import call_tool
 
         content = await call_tool(

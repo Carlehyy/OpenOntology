@@ -26,13 +26,6 @@ def _complete_payload(payload: dict) -> dict:
     payload["minio"]["access_key"] = "minio-test-access"
     payload["minio"]["secret_key"] = "minio-test-password"
     payload["n8n"]["api_key"] = "n8n-test-key"
-    payload["weknora"]["chat_base_url"] = "https://chat.example.com/v1"
-    payload["weknora"]["chat_api_key"] = "weknora-chat-test-key"
-    payload["weknora"]["chat_model"] = "chat-test-model"
-    payload["weknora"]["embedding_base_url"] = "https://embed.example.com/v1"
-    payload["weknora"]["embedding_api_key"] = "weknora-embedding-test-key"
-    payload["weknora"]["embedding_model"] = "embedding-test-model"
-    payload["weknora"]["embedding_dimensions"] = 1024
     return payload
 
 

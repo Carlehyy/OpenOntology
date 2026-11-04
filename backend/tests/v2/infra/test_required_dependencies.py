@@ -38,13 +38,6 @@ MATERIALIZED_KEYS = {
     "N8N_API_URL",
     "N8N_API_KEY",
     "N8N_TIMEOUT_SECONDS",
-    "WEKNORA_CHAT_BASE_URL",
-    "WEKNORA_CHAT_API_KEY",
-    "WEKNORA_CHAT_MODEL",
-    "WEKNORA_EMBEDDING_BASE_URL",
-    "WEKNORA_EMBEDDING_API_KEY",
-    "WEKNORA_EMBEDDING_MODEL",
-    "WEKNORA_EMBEDDING_DIMENSIONS",
     "WEKNORA_WEB_URL",
     "WEKNORA_ADMIN_USER",
     "WEKNORA_ADMIN_EMAIL",
@@ -53,7 +46,6 @@ MATERIALIZED_KEYS = {
     "WEKNORA_DOCREADER_IMAGE",
     "WEKNORA_POSTGRES_IMAGE",
     "WEKNORA_REDIS_IMAGE",
-    "WEKNORA_NEO4J_IMAGE",
 }
 MATERIALIZER_SOURCE_VALUES = {
     "PROD_PUBLIC_PORT": "8080",
@@ -77,13 +69,6 @@ MATERIALIZER_SOURCE_VALUES = {
     "PROD_MINIO_USE_SSL": "true",
     "PROD_N8N_API_URL": "https://n8n.example.com/api/v1",
     "PROD_N8N_API_KEY": "synthetic-n8n-api-key",
-    "PROD_WEKNORA_CHAT_BASE_URL": "https://chat.example.com/v1",
-    "PROD_WEKNORA_CHAT_API_KEY": "synthetic-weknora-chat-key",
-    "PROD_WEKNORA_CHAT_MODEL": "synthetic-chat-model",
-    "PROD_WEKNORA_EMBEDDING_BASE_URL": "https://embed.example.com/v1",
-    "PROD_WEKNORA_EMBEDDING_API_KEY": "synthetic-weknora-embedding-key",
-    "PROD_WEKNORA_EMBEDDING_MODEL": "synthetic-embedding-model",
-    "PROD_WEKNORA_EMBEDDING_DIMENSIONS": "1024",
 }
 
 MATERIALIZER_OPTIONAL_VALUES = {
@@ -99,7 +84,6 @@ MATERIALIZER_OPTIONAL_VALUES = {
         f"example.invalid/weknora-postgres@sha256:{'d' * 64}"
     ),
     "PROD_WEKNORA_REDIS_IMAGE": f"example.invalid/weknora-redis@sha256:{'e' * 64}",
-    "PROD_WEKNORA_NEO4J_IMAGE": f"example.invalid/weknora-neo4j@sha256:{'f' * 64}",
 }
 
 
@@ -240,8 +224,6 @@ def test_committed_manifest_template_declares_contract_without_secrets():
         "MINIO_ACCESS_KEY",
         "MINIO_SECRET_KEY",
         "N8N_API_KEY",
-        "WEKNORA_CHAT_API_KEY",
-        "WEKNORA_EMBEDDING_API_KEY",
     }
     assert all(manifest[key] == "" for key in secret_keys)
     assert ".internal" not in template.read_text(encoding="utf-8")
@@ -387,7 +369,7 @@ def _assert_weknora_compose_graph():
     assert gateway["depends_on"]["weknora-verify"]["condition"] == (
         "service_completed_successfully"
     )
-    assert gateway["depends_on"]["backend"]["condition"] == "service_healthy"
+    assert "backend" not in gateway["depends_on"]
     assert gateway["depends_on"]["weknora-app"]["condition"] == (
         "service_healthy"
     )
@@ -398,9 +380,7 @@ def _assert_weknora_compose_graph():
     assert prod["weknora-app-init"]["environment"][
         "DISABLE_REGISTRATION"
     ] == "false"
-    assert prod["weknora-gateway"]["depends_on"]["backend"]["condition"] == (
-        "service_healthy"
-    )
+    assert "backend" not in prod["weknora-gateway"]["depends_on"]
     assert prod["weknora-gateway"]["depends_on"]["weknora-app"][
         "condition"
     ] == "service_healthy"
@@ -438,7 +418,6 @@ def test_deploy_merges_required_runtime_manifest(tmp_path):
         "POSTGRES_IMAGE", "REDIS_IMAGE", "NEO4J_IMAGE", "MINIO_IMAGE",
         "BROWSER_IMAGE", "PYTHON_BASE_IMAGE", "NODE_BASE_IMAGE", "NGINX_BASE_IMAGE",
         "WEKNORA_APP_IMAGE", "WEKNORA_UI_IMAGE", "WEKNORA_DOCREADER_IMAGE",
-        "WEKNORA_POSTGRES_IMAGE", "WEKNORA_REDIS_IMAGE", "WEKNORA_NEO4J_IMAGE",
     )
     example = (tmp_path / ".env.example").read_text(encoding="utf-8").splitlines()
     replacements = {key: f"test/{key.lower()}@sha256:{'a' * 64}" for key in image_keys}

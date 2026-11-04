@@ -387,13 +387,6 @@ jobs:
           PROD_NEO4J_USER: ${{ vars.PROD_NEO4J_USER }}
           PROD_PUBLIC_PORT: ${{ vars.PROD_PUBLIC_PORT }}
           PROD_MINIO_USE_SSL: ${{ vars.PROD_MINIO_USE_SSL }}
-          PROD_WEKNORA_CHAT_BASE_URL: ${{ vars.PROD_WEKNORA_CHAT_BASE_URL }}
-          PROD_WEKNORA_CHAT_API_KEY: ${{ secrets.PROD_WEKNORA_CHAT_API_KEY }}
-          PROD_WEKNORA_CHAT_MODEL: ${{ vars.PROD_WEKNORA_CHAT_MODEL }}
-          PROD_WEKNORA_EMBEDDING_BASE_URL: ${{ vars.PROD_WEKNORA_EMBEDDING_BASE_URL }}
-          PROD_WEKNORA_EMBEDDING_API_KEY: ${{ secrets.PROD_WEKNORA_EMBEDDING_API_KEY }}
-          PROD_WEKNORA_EMBEDDING_MODEL: ${{ vars.PROD_WEKNORA_EMBEDDING_MODEL }}
-          PROD_WEKNORA_EMBEDDING_DIMENSIONS: ${{ vars.PROD_WEKNORA_EMBEDDING_DIMENSIONS }}
           PROD_WEKNORA_WEB_URL: ${{ vars.PROD_WEKNORA_WEB_URL }}
           PROD_WEKNORA_ADMIN_USER: ${{ vars.PROD_WEKNORA_ADMIN_USER }}
           PROD_WEKNORA_ADMIN_EMAIL: ${{ vars.PROD_WEKNORA_ADMIN_EMAIL }}
@@ -402,7 +395,6 @@ jobs:
           PROD_WEKNORA_DOCREADER_IMAGE: ${{ vars.PROD_WEKNORA_DOCREADER_IMAGE }}
           PROD_WEKNORA_POSTGRES_IMAGE: ${{ vars.PROD_WEKNORA_POSTGRES_IMAGE }}
           PROD_WEKNORA_REDIS_IMAGE: ${{ vars.PROD_WEKNORA_REDIS_IMAGE }}
-          PROD_WEKNORA_NEO4J_IMAGE: ${{ vars.PROD_WEKNORA_NEO4J_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env
@@ -416,7 +408,7 @@ jobs:
 
   verify-docker-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     # 前端镜像改为预构建形态（COPY dist），需要 verify-frontend 产出的 dist；
     # 该依赖仍早于关键路径上的 verify-backend，不延长整体墙钟。
     needs: [changes, verify-frontend]
@@ -431,34 +423,76 @@ jobs:
           path: frontend/dist
 
       - name: Build Docker images
-        # Compose parses every service before build; these synthetic values never start services.
-        env:
+        # Synthetic credentials are confined to the disposable build/canary job.
+        env: &weknora-canary-env
           INTEGRATED_DBX_PASSWORD: ci-only-dbx-compose-interpolation
           WEKNORA_APP_IMAGE: wechatopenai/weknora-app:v0.9.0@sha256:25b20959b7456f7842ef55ed4feff3694dbd0c6f8af4117c1fb3c5dec6bdf14d
           WEKNORA_UI_IMAGE: wechatopenai/weknora-ui:v0.9.0@sha256:df26705d866997db07f3da78dabedc4f594b383566a3996810c166a5c6bee393
           WEKNORA_DOCREADER_IMAGE: wechatopenai/weknora-docreader:v0.9.0@sha256:8c71ec3cc2e291829c3938d2c7dc5f921c1d10551c8774bf844c83bc4aa3cb84
           WEKNORA_POSTGRES_IMAGE: paradedb/paradedb:v0.25.11-pg17@sha256:78d65750f0f88a56548526201bcab9910f83b90fe929cdbf979890f3f80b0f95
           WEKNORA_REDIS_IMAGE: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
-          WEKNORA_NEO4J_IMAGE: neo4j:2025.10.1@sha256:155c8aad10d5c838bc3bbc476c0418779086547822acb214ec5e3d49ba336907
           WEKNORA_DB_NAME: ci_weknora
           WEKNORA_DB_USER: ci_weknora
           WEKNORA_DB_PASSWORD: ci-only-weknora-db-password
           WEKNORA_REDIS_PASSWORD: ci-only-weknora-redis-password
-          WEKNORA_NEO4J_PASSWORD: ci-only-weknora-neo4j-password
           WEKNORA_JWT_SECRET: ci-only-weknora-jwt-secret-for-build
-          WEKNORA_SYSTEM_AES_KEY: ci-only-weknora-aes-key-32-bytes!!
+          WEKNORA_SYSTEM_AES_KEY: ci-only-weknora-aes-key-32-bytes
           WEKNORA_SYSTEM_SIGNING_KEY: ci-only-weknora-signing-key-for-build
           WEKNORA_WEB_URL: https://weknora.ci.invalid
           WEKNORA_ADMIN_USER: ci_admin
           WEKNORA_ADMIN_PASSWORD: ci-only-WeKnora-Admin-2026!
-          WEKNORA_CHAT_BASE_URL: https://chat.ci.invalid/v1
-          WEKNORA_CHAT_API_KEY: ci-only-weknora-chat-api-key
-          WEKNORA_CHAT_MODEL: ci-chat-model
-          WEKNORA_EMBEDDING_BASE_URL: https://embedding.ci.invalid/v1
-          WEKNORA_EMBEDDING_API_KEY: ci-only-weknora-embedding-api-key
-          WEKNORA_EMBEDDING_MODEL: ci-embedding-model
-          WEKNORA_EMBEDDING_DIMENSIONS: "1024"
         run: docker compose -f docker-compose.prod.yml build
+
+      - name: WeKnora isolated service and native MCP canary
+        env: *weknora-canary-env
+        run: |
+          set -Eeuo pipefail
+          evidence="${GITHUB_WORKSPACE}/.artifacts/weknora-canary"
+          mkdir -p "$evidence"
+          chmod 700 "$evidence"
+          export CANARY_EVIDENCE="$evidence"
+          export CANARY_COMPOSE="$evidence/compose.json"
+          export CANARY_SCRIPT="${GITHUB_WORKSPACE}/backend/scripts/weknora_service_e2e.py"
+          export CANARY_BACKEND_IMAGE="$(docker compose -f docker-compose.prod.yml build --print backend | python3 -c 'import json,sys; print(json.load(sys.stdin)["target"]["backend"]["tags"][0])')"
+          docker compose -f docker-compose.prod.yml --profile weknora-bootstrap config --format json \
+            | python3 -c '
+          import json, os, sys
+          config = json.load(sys.stdin)
+          names = {"weknora-db", "weknora-redis", "weknora-docreader", "weknora-app-init", "weknora-app", "weknora-ui", "weknora-bootstrap"}
+          config["services"] = {key: value for key, value in config["services"].items() if key in names}
+          bootstrap = config["services"]["weknora-bootstrap"]
+          bootstrap.pop("build", None)
+          bootstrap.pop("profiles", None)
+          bootstrap["image"] = os.environ["CANARY_BACKEND_IMAGE"]
+          bootstrap["environment"].update({"ENVIRONMENT": "test", "OPENONTOLOGY_WEKNORA_E2E": "1", "SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS": "http://weknora-app:8080/mcp", "WEKNORA_E2E_REPORT": "/canary/report.json"})
+          bootstrap["volumes"] = [
+              {"type": "bind", "source": os.environ["CANARY_EVIDENCE"], "target": "/canary"},
+              {"type": "bind", "source": os.environ["CANARY_SCRIPT"], "target": "/app/scripts/weknora_service_e2e.py", "read_only": True},
+          ]
+          config.pop("name", None)
+          volumes = {mount["source"] for service in config["services"].values() for mount in service.get("volumes", []) if mount["type"] == "volume"}
+          config["volumes"] = {key: {field: value for field, value in config["volumes"][key].items() if field != "name"} for key in volumes}
+          config["networks"] = {"weknora_internal": {"driver": "bridge"}}
+          assert not any(service.get("ports") for service in config["services"].values())
+          json.dump(config, open(os.environ["CANARY_COMPOSE"], "w"))
+          '
+          canary() { docker compose -p "weknora-canary-${GITHUB_RUN_ID}" -f "$CANARY_COMPOSE" --profile weknora-bootstrap "$@"; }
+          trap 'canary down --volumes --remove-orphans >/dev/null' EXIT
+          canary up -d --wait --wait-timeout 300 weknora-app-init
+          canary run --rm --no-deps weknora-bootstrap python -m app.super_assistant.weknora.bootstrap
+          canary rm -sf weknora-app-init
+          canary up -d --wait --wait-timeout 300 weknora-app weknora-ui
+          canary run --rm --no-deps weknora-bootstrap python -m app.super_assistant.weknora.bootstrap --verify
+          canary run --rm --no-deps --user "$(id -u):$(id -g)" weknora-bootstrap python scripts/weknora_service_e2e.py
+
+      - name: Upload WeKnora canary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weknora-canary-${{ github.run_id }}
+          path: .artifacts/weknora-canary/report.json
+          if-no-files-found: warn
+          retention-days: 14
 
   deploy:
     needs: [changes, verify-backend, verify-frontend, verify-gates, verify-docker-build]
@@ -532,13 +566,6 @@ jobs:
           PROD_NEO4J_USER: ${{ vars.PROD_NEO4J_USER }}
           PROD_PUBLIC_PORT: ${{ vars.PROD_PUBLIC_PORT }}
           PROD_MINIO_USE_SSL: ${{ vars.PROD_MINIO_USE_SSL }}
-          PROD_WEKNORA_CHAT_BASE_URL: ${{ vars.PROD_WEKNORA_CHAT_BASE_URL }}
-          PROD_WEKNORA_CHAT_API_KEY: ${{ secrets.PROD_WEKNORA_CHAT_API_KEY }}
-          PROD_WEKNORA_CHAT_MODEL: ${{ vars.PROD_WEKNORA_CHAT_MODEL }}
-          PROD_WEKNORA_EMBEDDING_BASE_URL: ${{ vars.PROD_WEKNORA_EMBEDDING_BASE_URL }}
-          PROD_WEKNORA_EMBEDDING_API_KEY: ${{ secrets.PROD_WEKNORA_EMBEDDING_API_KEY }}
-          PROD_WEKNORA_EMBEDDING_MODEL: ${{ vars.PROD_WEKNORA_EMBEDDING_MODEL }}
-          PROD_WEKNORA_EMBEDDING_DIMENSIONS: ${{ vars.PROD_WEKNORA_EMBEDDING_DIMENSIONS }}
           PROD_WEKNORA_WEB_URL: ${{ vars.PROD_WEKNORA_WEB_URL }}
           PROD_WEKNORA_ADMIN_USER: ${{ vars.PROD_WEKNORA_ADMIN_USER }}
           PROD_WEKNORA_ADMIN_EMAIL: ${{ vars.PROD_WEKNORA_ADMIN_EMAIL }}
@@ -547,7 +574,6 @@ jobs:
           PROD_WEKNORA_DOCREADER_IMAGE: ${{ vars.PROD_WEKNORA_DOCREADER_IMAGE }}
           PROD_WEKNORA_POSTGRES_IMAGE: ${{ vars.PROD_WEKNORA_POSTGRES_IMAGE }}
           PROD_WEKNORA_REDIS_IMAGE: ${{ vars.PROD_WEKNORA_REDIS_IMAGE }}
-          PROD_WEKNORA_NEO4J_IMAGE: ${{ vars.PROD_WEKNORA_NEO4J_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env

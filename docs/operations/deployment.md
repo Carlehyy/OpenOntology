@@ -52,7 +52,7 @@ diff、未知路径、rename 源路径，以及改到分类器或本工作流时
     `frontend/dist`）并先上传；远端替换源码时始终原地保留
     服务器 `.env`，不把秘密复制到固定 `/tmp` 文件；
 11. 服务器部署入口再次校验目录；旧安装如仍使用示例运行密钥，先执行不改密文
-    的密钥解耦，再启动 WeKnora 私网依赖与一次性 init app，完成 REST
+    的密钥解耦，再启动 WeKnora 私网依赖与一次性 init app，完成账号
     bootstrap 后删除 init、启动关闭注册的正式 app 并执行
     `bootstrap --verify`；之后才做平台依赖探测、停止旧 backend、数据库迁移和
     Compose 启动；
@@ -79,14 +79,15 @@ PR 到 `nano-ontoprompt` 时，独立的 `.github/workflows/ci.yml` 会并行执
 
 WeKnora v0.9.0 的公开入口与平台 Nginx 独立：它只暴露原生 Web 网关
 `WEKNORA_HTTP_PORT`/`WEKNORA_HTTPS_PORT`（默认 8089/8444），HTTPS 复用
-`frontend_ssl_certs`；正式 app、docreader、MCP、ParadeDB、Redis 和 APOC
-Neo4j 都没有宿主端口。部署脚本先以仅内网、profile 为
-`weknora-bootstrap` 的 `weknora-app-init` 完成首次注册/KB 初始化，删除后
+`frontend_ssl_certs`；正式 app、docreader、MCP、ParadeDB 和 Redis 都没有宿主端口。部署脚本先以仅内网、profile 为
+`weknora-bootstrap` 的 `weknora-app-init` 完成首次账号注册，删除后
 才启动 `DISABLE_REGISTRATION=true` 的正式 app；`bootstrap --verify` 会通过
 官方管理员设置 API 持久化 `invite_only`，因此数据库运行时设置不能覆盖环境
 关闭开关。公网精确 `/mcp` 与 `/mcp/` 都固定 404；平台通过内网 MCP 使用工具。全部
 `WEKNORA_*_IMAGE` 已有 `@sha256` 默认值；部署仍在 digest 校验处 fail closed，
-防止 tag 漂移。
+防止 tag 漂移。模型与知识库不属于部署输入；管理员登录原生 Web 配置后，
+通过超级助手现有 MCP 管理手工接入，详见
+[配置流程](./configuration.md#weknora-共享知识库v090)。
 
 ## 数据库迁移停机边界
 

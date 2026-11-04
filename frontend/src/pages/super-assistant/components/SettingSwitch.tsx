@@ -10,18 +10,20 @@ import type { ButtonHTMLAttributes } from 'react'
 
 import { cn } from '@/lib/utils'
 
-export function SettingSwitch({ label, ariaLabel, checked, busy, onToggle, className, ...rest }: {
+export function SettingSwitch({ label, ariaLabel, checked, busy, disabled = false, onToggle, className, ...rest }: {
   label?: string
   ariaLabel: string
   checked: boolean
   busy: boolean
+  /** 业务前置条件不满足时禁用（如受约束登记尚未测试成功）；与 busy 区分光标态 */
+  disabled?: boolean
   onToggle: () => void
 } & Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'aria-checked' | 'aria-busy' | 'role' | 'onClick' | 'disabled'>) {
   return (
     <div className="inline-flex items-center gap-1.5">
       {label && <span className="text-xs text-[var(--color-text-secondary)]">{label}</span>}
-      <button type="button" role="switch" aria-label={ariaLabel} aria-checked={checked} aria-busy={busy} disabled={busy} onClick={onToggle} {...rest}
-        className={cn('relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-60', className)}>
+      <button type="button" role="switch" aria-label={ariaLabel} aria-checked={checked} aria-busy={busy} disabled={busy || disabled} onClick={onToggle} {...rest}
+        className={cn('relative inline-flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:opacity-60', busy ? 'disabled:cursor-wait' : 'disabled:cursor-not-allowed', className)}>
         {/* off 轨道用语义边框令牌：明暗两态都比所在表面亮一档，修掉 slate-300 在暗色下比 on 态更亮的信号倒置 */}
         <span aria-hidden="true" className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors motion-reduce:transition-none ${busy ? 'animate-pulse motion-reduce:animate-none' : ''} ${checked ? 'bg-brand' : 'bg-[var(--color-border-hover)]'}`}>
           <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none ${checked ? 'translate-x-3.5' : 'translate-x-0.5'}`} />

@@ -354,13 +354,10 @@ if [ -z "$weknora_app_block" ] || [ -z "$weknora_init_block" ] \
     || ! grep -Fq 'profiles: [weknora-bootstrap]' <<<"$weknora_bootstrap_block" \
     || ! grep -Fq 'WEKNORA_BOOTSTRAP_BASE_URL: http://weknora-app-init:8080' <<<"$weknora_bootstrap_block" \
     || ! grep -Fq 'WEKNORA_BASE_URL: http://weknora-app:8080' <<<"$weknora_bootstrap_block" \
-    || ! grep -Fq 'weknora_state:/weknora-state' <<<"$weknora_bootstrap_block" \
-    || ! grep -Fq 'weknora_state:/weknora-state:ro' <<<"$backend_block" \
-    || ! grep -Fq 'WEKNORA_STATE_ORIGIN: http://weknora-app:8080' <<<"$backend_block" \
     || ! grep -Fq 'weknora_internal' <<<"$backend_block" \
     || ! grep -Fq '${WEKNORA_HTTP_PORT:-8089}:80' <<<"$weknora_gateway_block" \
     || ! grep -Fq '${WEKNORA_HTTPS_PORT:-8444}:443' <<<"$weknora_gateway_block" \
-    || ! grep -Fq 'backend:' <<<"$weknora_gateway_block" \
+    || grep -Fq 'backend:' <<<"$weknora_gateway_block" \
     || ! grep -Fq 'frontend_ssl_certs:/etc/nginx/certs:ro' <<<"$weknora_gateway_block" \
     || ! grep -Fq 'location /mcp/' "$REPO_ROOT/docker/weknora/gateway.conf" \
     || ! grep -Fq 'return 404;' "$REPO_ROOT/docker/weknora/gateway.conf" \
@@ -399,7 +396,7 @@ if [ -z "$local_init_block" ] || [ -z "$local_bootstrap_block" ] \
     || ! grep -Fq -- '--verify' <<<"$local_verify_block" \
     || ! grep -Fq 'weknora-bootstrap:' <<<"$local_verify_block" \
     || ! grep -Fq 'weknora-verify:' <<<"$local_gateway_block" \
-    || ! grep -Fq 'backend:' <<<"$local_gateway_block" \
+    || grep -Fq 'backend:' <<<"$local_gateway_block" \
     || ! grep -Fq 'service_completed_successfully' <<<"$local_gateway_block"; then
   printf 'local WeKnora startup must auto-run init/bootstrap/verify and hide the gateway until success\n' >&2
   exit 1
@@ -596,7 +593,7 @@ for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
   WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
-  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE; do
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE ; do
   set_test_env_value "$image_key" "$digest"
 done
 set_test_env_value SECRET_KEY 0123456789abcdef0123456789abcdef
@@ -635,13 +632,6 @@ env \
   PROD_N8N_API_URL=https://n8n.example.com \
   PROD_N8N_API_KEY=synthetic-n8n-api-key \
   PROD_N8N_TIMEOUT_SECONDS=30 \
-  PROD_WEKNORA_CHAT_BASE_URL=https://chat.example.com/v1 \
-  PROD_WEKNORA_CHAT_API_KEY=synthetic-weknora-chat-key \
-  PROD_WEKNORA_CHAT_MODEL=synthetic-chat-model \
-  PROD_WEKNORA_EMBEDDING_BASE_URL=https://embed.example.com/v1 \
-  PROD_WEKNORA_EMBEDDING_API_KEY=synthetic-weknora-embedding-key \
-  PROD_WEKNORA_EMBEDDING_MODEL=synthetic-embedding-model \
-  PROD_WEKNORA_EMBEDDING_DIMENSIONS=1024 \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-production-dependencies.env" >/dev/null
 
@@ -820,7 +810,7 @@ for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
   WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
-  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE; do
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE ; do
   set_test_env_value "$image_key" "$digest"
 done
 
@@ -900,17 +890,15 @@ for key in \
   AGENT_QUERY_STATEMENT_TIMEOUT_MS AGENT_QUERY_LOCK_TIMEOUT_MS \
   AGENT_QUERY_WORK_MEM_MIB AGENT_QUERY_TEMP_FILE_LIMIT_MIB COMPOSE_DISABLE_ENV_FILE \
   COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR COMPOSE_PROFILES \
-  COMPOSE_PROJECT_NAME WEKNORA_BASE_URL WEKNORA_STATE_ORIGIN WEKNORA_WEB_URL WEKNORA_STATE_PATH \
+  COMPOSE_PROJECT_NAME SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS WEKNORA_BASE_URL  WEKNORA_WEB_URL  \
   WEKNORA_HTTP_PORT WEKNORA_HTTPS_PORT WEKNORA_ADMIN_USER WEKNORA_ADMIN_EMAIL \
-  WEKNORA_ADMIN_PASSWORD WEKNORA_CHAT_BASE_URL WEKNORA_CHAT_API_KEY \
-  WEKNORA_CHAT_MODEL WEKNORA_EMBEDDING_BASE_URL WEKNORA_EMBEDDING_API_KEY \
-  WEKNORA_EMBEDDING_MODEL WEKNORA_EMBEDDING_DIMENSIONS \
-  WEKNORA_KNOWLEDGE_BASE_NAME WEKNORA_TIMEOUT_SECONDS WEKNORA_DB_NAME \
+  WEKNORA_ADMIN_PASSWORD   \
+   WEKNORA_TIMEOUT_SECONDS WEKNORA_DB_NAME \
   WEKNORA_DB_USER WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
-  WEKNORA_NEO4J_PASSWORD WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY \
-  WEKNORA_SYSTEM_SIGNING_KEY WEKNORA_NEO4J_HEAP_MAX WEKNORA_APP_IMAGE \
+   WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY \
+  WEKNORA_SYSTEM_SIGNING_KEY  WEKNORA_APP_IMAGE \
   WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
-  WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE WEKNORA_MAX_FILE_SIZE_MB \
+  WEKNORA_REDIS_IMAGE  WEKNORA_MAX_FILE_SIZE_MB \
   WEKNORA_DEFAULT_LOCALE; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
@@ -995,29 +983,19 @@ if (
     STEWARD_BROWSER_MAX_SESSIONS_PER_USER=1 \
     STEWARD_BROWSER_IDLE_TIMEOUT_SECONDS=1 \
     STEWARD_BROWSER_REAPER_INTERVAL_SECONDS=1 \
+    SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS=http://shell-override.invalid/mcp \
     WEKNORA_BASE_URL=https://shell-override.invalid \
-    WEKNORA_STATE_ORIGIN=https://shell-override.invalid \
     WEKNORA_WEB_URL=https://shell-override.invalid \
-    WEKNORA_STATE_PATH=/tmp/shell-override-state.json \
     WEKNORA_HTTP_PORT=1 \
     WEKNORA_HTTPS_PORT=2 \
     WEKNORA_ADMIN_USER=shell_override \
     WEKNORA_ADMIN_EMAIL=shell-override@example.invalid \
     WEKNORA_ADMIN_PASSWORD=shell-override-password \
-    WEKNORA_CHAT_BASE_URL=https://shell-override.invalid/v1 \
-    WEKNORA_CHAT_API_KEY=shell-override-key \
-    WEKNORA_CHAT_MODEL=shell-override-model \
-    WEKNORA_EMBEDDING_BASE_URL=https://shell-override.invalid/v1 \
-    WEKNORA_EMBEDDING_API_KEY=shell-override-key \
-    WEKNORA_EMBEDDING_MODEL=shell-override-model \
-    WEKNORA_EMBEDDING_DIMENSIONS=1024 \
-    WEKNORA_KNOWLEDGE_BASE_NAME=shell-override-kb \
     WEKNORA_TIMEOUT_SECONDS=3 \
     WEKNORA_DB_NAME=shell_override \
     WEKNORA_DB_USER=shell_override \
     WEKNORA_DB_PASSWORD=shell-override-password \
     WEKNORA_REDIS_PASSWORD=shell-override-password \
-    WEKNORA_NEO4J_PASSWORD=shell-override-password \
     WEKNORA_JWT_SECRET=shell-override-secret-0123456789abcdef \
     WEKNORA_SYSTEM_AES_KEY=shell-override-secret-0123456789abcdef \
     WEKNORA_SYSTEM_SIGNING_KEY=shell-override-secret-0123456789abcdef \
@@ -1026,7 +1004,6 @@ if (
     WEKNORA_DOCREADER_IMAGE=example.invalid/unvalidated:latest \
     WEKNORA_POSTGRES_IMAGE=example.invalid/unvalidated:latest \
     WEKNORA_REDIS_IMAGE=example.invalid/unvalidated:latest \
-    WEKNORA_NEO4J_IMAGE=example.invalid/unvalidated:latest \
     POSTGRES_IMAGE=example.invalid/unvalidated:latest \
     REDIS_IMAGE=example.invalid/unvalidated:latest \
     NEO4J_IMAGE=example.invalid/unvalidated:latest \
@@ -1492,17 +1469,15 @@ for key in \
   AGENT_QUERY_STATEMENT_TIMEOUT_MS AGENT_QUERY_LOCK_TIMEOUT_MS \
   AGENT_QUERY_WORK_MEM_MIB AGENT_QUERY_TEMP_FILE_LIMIT_MIB COMPOSE_DISABLE_ENV_FILE \
   COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR COMPOSE_PROFILES \
-  COMPOSE_PROJECT_NAME WEKNORA_BASE_URL WEKNORA_STATE_ORIGIN WEKNORA_WEB_URL WEKNORA_STATE_PATH \
+  COMPOSE_PROJECT_NAME SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS WEKNORA_BASE_URL  WEKNORA_WEB_URL  \
   WEKNORA_HTTP_PORT WEKNORA_HTTPS_PORT WEKNORA_ADMIN_USER WEKNORA_ADMIN_EMAIL \
-  WEKNORA_ADMIN_PASSWORD WEKNORA_CHAT_BASE_URL WEKNORA_CHAT_API_KEY \
-  WEKNORA_CHAT_MODEL WEKNORA_EMBEDDING_BASE_URL WEKNORA_EMBEDDING_API_KEY \
-  WEKNORA_EMBEDDING_MODEL WEKNORA_EMBEDDING_DIMENSIONS \
-  WEKNORA_KNOWLEDGE_BASE_NAME WEKNORA_TIMEOUT_SECONDS WEKNORA_DB_NAME \
+  WEKNORA_ADMIN_PASSWORD   \
+   WEKNORA_TIMEOUT_SECONDS WEKNORA_DB_NAME \
   WEKNORA_DB_USER WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
-  WEKNORA_NEO4J_PASSWORD WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY \
-  WEKNORA_SYSTEM_SIGNING_KEY WEKNORA_NEO4J_HEAP_MAX WEKNORA_APP_IMAGE \
+   WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY \
+  WEKNORA_SYSTEM_SIGNING_KEY  WEKNORA_APP_IMAGE \
   WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
-  WEKNORA_REDIS_IMAGE WEKNORA_NEO4J_IMAGE WEKNORA_MAX_FILE_SIZE_MB \
+  WEKNORA_REDIS_IMAGE  WEKNORA_MAX_FILE_SIZE_MB \
   WEKNORA_DEFAULT_LOCALE; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
