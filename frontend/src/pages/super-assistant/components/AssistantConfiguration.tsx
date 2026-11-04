@@ -461,10 +461,10 @@ function McpDialog({ server, onClose, onSaved }: {
           <label className="block text-xs text-[var(--color-text-secondary)]">MCP URL <span className="text-red-500">*</span>
             <input type="url" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://mcp.example.com/mcp"
               className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-            <div className="mt-1 text-[10px] leading-4 text-[var(--color-text-tertiary)]">生产环境只接受公网能访问的地址（安全策略限制）。
+            <div className="mt-1 text-[10px] leading-4 text-[var(--color-text-tertiary)]">可连接公网 HTTPS 地址，或部署方已配置为可信的内网服务地址。
               <details className="mt-0.5">
                 <summary className="cursor-pointer underline decoration-[var(--color-border)] underline-offset-2">了解详情</summary>
-                <span className="mt-0.5 block">公网地址可直接连接；生产环境会拒绝环回、内网和链路本地地址。</span>
+                <span className="mt-0.5 block">内网服务的地址和路径须匹配服务端的可信地址配置；其他环回、内网和链路本地地址仍会被拒绝。</span>
               </details>
             </div>
           </label>
