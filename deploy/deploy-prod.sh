@@ -24,6 +24,7 @@ RETRIES="${DEPLOY_RETRIES:-3}"
 SLEEP_SECONDS="${DEPLOY_RETRY_SLEEP:-10}"
 RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS="${RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS:-120}"
 built_backend_image_id=""
+backend_image_platform=""
 previous_runtime_services=()
 runtime_stopped_for_migration=0
 migration_completed=0
@@ -322,7 +323,7 @@ verify_runtime_source_attestation() {
   local verifier="$SCRIPT_DIR/runtime_source_attestation.py"
   local expected_commit="$EXPECTED_RUNTIME_COMMIT"
   local backend_cids backend_cid_count backend_cid
-  local running_image_id started_at
+  local running_image_id running_platform_image_id started_at
   local verifier_source attestation_output attestation_status line
   case "$RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS" in
     ""|*[!0-9]*) log "RUNTIME_SOURCE_ATTESTATION_TIMEOUT_SECONDS must be a positive integer"; return 1 ;;
@@ -374,7 +375,12 @@ verify_runtime_source_attestation() {
     log "active backend StartedAt is malformed"
     return 1
   fi
-  if [ "$running_image_id" != "$built_backend_image_id" ]; then
+  running_platform_image_id="$(
+    compose_environment docker image inspect --platform "$backend_image_platform" \
+      --format '{{.Id}}' "$running_image_id" 2>/dev/null || true
+  )"
+  if [[ ! "$running_platform_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || [ "$running_platform_image_id" != "$built_backend_image_id" ]; then
     log "active backend image ${running_image_id} does not match the image built by this deploy ${built_backend_image_id}"
     return 1
   fi
@@ -1854,9 +1860,18 @@ case "$backend_build_tag" in
     exit 1
     ;;
 esac
-built_backend_image_id="$(
-  compose_environment docker image inspect --format '{{.Id}}' \
+backend_image_platform="$(
+  compose_environment docker image inspect --format '{{.Os}}/{{.Architecture}}' \
     "$backend_build_tag" 2>/dev/null || true
+)"
+if [[ ! "$backend_image_platform" =~ ^[a-z0-9]+/[a-z0-9]+$ ]]; then
+  log "could not resolve the backend image platform for the exact Compose build tag"
+  exit 1
+fi
+# OCI indexes include provenance that can change without changing the runnable image.
+built_backend_image_id="$(
+  compose_environment docker image inspect --platform "$backend_image_platform" \
+    --format '{{.Id}}' "$backend_build_tag" 2>/dev/null || true
 )"
 if [[ ! "$built_backend_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   log "could not inspect the backend image ID for the exact Compose build tag"

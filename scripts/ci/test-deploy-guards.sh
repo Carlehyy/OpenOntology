@@ -192,7 +192,7 @@ if grep -Fq 'docker image ls' "$DEPLOY_SCRIPT" \
 fi
 if ! grep -Fq 'compose build --print backend' "$DEPLOY_SCRIPT" \
     || ! grep -Fq 'backend_build_tag' "$DEPLOY_SCRIPT" \
-    || ! grep -Fq "docker image inspect --format '{{.Id}}'" "$DEPLOY_SCRIPT"; then
+    || ! grep -Fq 'docker image inspect --platform "$backend_image_platform"' "$DEPLOY_SCRIPT"; then
   printf 'backend image resolution must inspect the exact tag from Compose build --print backend\n' >&2
   exit 1
 fi
@@ -917,6 +917,7 @@ if [ "${1-}" = image ] && [ "${2-}" = ls ]; then
 fi
 if [ "${1-}" = image ] && [ "${2-}" = inspect ]; then
   case "$*" in
+    *'{{.Os}}/{{.Architecture}}'*) printf 'linux/amd64\n' ;;
     *'{{.Created}}'*) printf '2026-11-02T03:00:00Z sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
     *) printf 'sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
   esac
@@ -1533,9 +1534,14 @@ if [ "${1-}" = image ] && [ "${2-}" = ls ]; then
   exit 0
 fi
 if [ "${1-}" = image ] && [ "${2-}" = inspect ]; then
+  if [ "${FAKE_ATTESTATION_PLATFORM_INSPECT_FAIL:-0}" = "1" ] && [[ "$*" == *'--platform '* ]]; then
+    exit 9
+  fi
   case "$*" in
+    *'{{.Os}}/{{.Architecture}}'*) printf 'linux/amd64\n' ;;
     *'{{.Created}}'*) printf '2026-11-02T03:00:00Z sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
-    *) printf 'sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
+    *fixture-tag) printf 'sha256:%s\n' "$(printf 'a%.0s' {1..64})" ;;
+    *) printf '%s\n' "${FAKE_ATTESTATION_RUNNING_PLATFORM_IMAGE_ID:-${FAKE_ATTESTATION_RUNNING_IMAGE_ID:-sha256:$(printf 'a%.0s' {1..64})}}" ;;
   esac
   exit 0
 fi
@@ -1633,6 +1639,27 @@ if grep -Fq 'synthetic-admin-password' "$success_log"; then
   exit 1
 fi
 printf 'ok deploy-runtime-source-match\n'
+
+index_only_log="$attestation_root/deploy-index-only-change.log"
+if ! run_attestation_deploy "$index_only_log" "$attestation_source" 5 \
+    FAKE_ATTESTATION_RUNNING_IMAGE_ID="sha256:$(printf 'b%.0s' {1..64})" \
+    FAKE_ATTESTATION_RUNNING_PLATFORM_IMAGE_ID="sha256:$(printf 'a%.0s' {1..64})"; then
+  printf 'deployment must accept a changed OCI index when the runnable platform image matches\n' >&2
+  exit 1
+fi
+grep -Fq 'image_matches_build=true' "$index_only_log"
+
+platform_inspect_log="$attestation_root/deploy-platform-inspect-failure.log"
+if run_attestation_deploy "$platform_inspect_log" "$attestation_source" 5 \
+    FAKE_ATTESTATION_PLATFORM_INSPECT_FAIL=1; then
+  printf 'deployment must fail when platform image inspection fails\n' >&2
+  exit 1
+fi
+if grep -Fq 'deployment succeeded' "$platform_inspect_log"; then
+  printf 'deployment must not succeed after platform image inspection fails\n' >&2
+  exit 1
+fi
+printf 'ok deploy-platform-image-identity\n'
 
 tampered_source="$attestation_root/deploy-tampered-source"
 cp -R "$attestation_repo/backend/app" "$tampered_source"
