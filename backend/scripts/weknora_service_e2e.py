@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
@@ -99,6 +100,10 @@ async def check() -> dict:
     config = bootstrap.build_config(os.environ, for_verify=True)
     if config.base_url != "http://weknora-app:8080":
         raise RuntimeError("canary must use the private Compose app")
+    subprocess.run(
+        [sys.executable, "scripts/maintenance/retire_palace_storage.py", "--help"],
+        check=True, capture_output=True, timeout=15,
+    )
     with httpx.Client(base_url=config.base_url, trust_env=False, timeout=30) as client:
         client.get("/health").raise_for_status()
         response = client.post("/api/v1/auth/login", json={
@@ -135,7 +140,8 @@ async def check() -> dict:
         finally:
             client.delete(f"/api/v1/mcp-endpoints/{endpoint['id']}", headers=headers).raise_for_status()
     return {
-        "result": "pass", "native_web": True, "account_initialized": True,
+        "result": "pass", "retirement_command_packaged": True,
+        "native_web": True, "account_initialized": True,
         "registration_closed": True, "models_created_by_bootstrap": 0,
         "knowledge_bases_created_by_bootstrap": 0,
         "mcp_endpoints_created_by_bootstrap": 0, "native_mcp_list_call": True,

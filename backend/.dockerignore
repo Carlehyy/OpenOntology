@@ -8,6 +8,9 @@ storage
 tests
 scripts
 !scripts/download_voice_model.py
+!scripts/maintenance
+scripts/maintenance/*
+!scripts/maintenance/retire_palace_storage.py
 voice-models
 README.md
 requirements.txt
