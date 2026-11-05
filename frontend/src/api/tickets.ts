@@ -2,14 +2,15 @@
  * 工单 API — /api/v2/tickets
  *
  * 全角色可用的平台使用反馈通道：提交工单（自动「待处理」）+ 附件，
- * 管理员在五态流水线上处理并留下必填评论。
+ * 管理员在四态流水线（待处理/分析中/已完成/已取消）上处理并留下必填评论。
+ * 历史存量工单可能仍返回已下线的 verifying/accepted 取值，展示侧需兜底。
  * 后端对外统一 camelCase，apiClientV2 已自动解包 {data:...} 信封。
  */
 import { apiClientV2 } from './client'
 
 // ---------- 类型 ----------
 
-export type TicketStatus = 'pending' | 'verifying' | 'accepted' | 'completed' | 'cancelled'
+export type TicketStatus = 'pending' | 'analyzing' | 'completed' | 'cancelled'
 
 export type TicketCategory = 'system_fault' | 'experience' | 'feature' | 'other'
 
@@ -73,7 +74,7 @@ export interface TicketCreateBody {
 
 export interface TicketListParams {
   q?: string
-  /** 单状态，或逗号分隔多状态（顶栏弹窗取处理中：pending,verifying,accepted） */
+  /** 单状态，或逗号分隔多状态（顶栏弹窗取处理中：pending,analyzing） */
   status?: string
   page?: number
   pageSize?: number
@@ -132,16 +133,33 @@ export const ticketsApi = {
 
 // ---------- 展示辅助 ----------
 
-export const TICKET_STATUS_META: Record<TicketStatus, { label: string; cls: string; dot: string }> = {
+export interface TicketStatusMeta { label: string; cls: string; dot: string }
+
+export const TICKET_STATUS_META: Record<TicketStatus, TicketStatusMeta> = {
   pending: { label: '待处理', cls: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500' },
-  verifying: { label: '查验中', cls: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500' },
-  accepted: { label: '已接纳', cls: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
+  analyzing: { label: '分析中', cls: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500' },
   completed: { label: '已完成', cls: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400' },
   cancelled: { label: '已取消', cls: 'bg-slate-100 text-slate-500', dot: 'bg-slate-300' },
 }
 
+/** 未下线的合法状态；历史存量行可能带 verifying/accepted 等旧值。 */
+export function isKnownTicketStatus(status: string): status is TicketStatus {
+  return status in TICKET_STATUS_META
+}
+
+/** 中性兜底：存量旧状态原样展示，不冒充任何在役状态。 */
+const UNKNOWN_STATUS_META: TicketStatusMeta = {
+  label: '', cls: 'bg-slate-100 text-slate-500', dot: 'bg-slate-300',
+}
+
+export function ticketStatusMeta(status: string): TicketStatusMeta {
+  return isKnownTicketStatus(status)
+    ? TICKET_STATUS_META[status]
+    : { ...UNKNOWN_STATUS_META, label: status }
+}
+
 export const TICKET_STATUS_ORDER: TicketStatus[] = [
-  'pending', 'verifying', 'accepted', 'completed', 'cancelled',
+  'pending', 'analyzing', 'completed', 'cancelled',
 ]
 
 export const TICKET_CATEGORY_META: Record<TicketCategory, { label: string }> = {

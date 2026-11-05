@@ -109,7 +109,6 @@ export const LEGACY_COLOR_LIMITS = {
  * eslint.config.js。
  */
 export const LEGACY_PALETTE_LIMITS = {
-  'api/tickets.ts':                                                 3,
   'components/assistant-widget/AssistantWidgetPanel.tsx':           7,
   'components/assistant-widget/FloatingAssistantWidget.tsx':        1,
   'components/ConfidenceBar.tsx':                                   1,

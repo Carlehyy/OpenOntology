@@ -4,12 +4,13 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import {
-  TICKET_CATEGORY_META, TICKET_STATUS_META,
+  TICKET_CATEGORY_META, ticketStatusMeta,
   type TicketCategory, type TicketStatus,
 } from '@/api/tickets'
 
 export function StatusBadge({ status }: { status: TicketStatus }) {
-  const meta = TICKET_STATUS_META[status] ?? TICKET_STATUS_META.pending
+  // 存量旧行（verifying/accepted）不在 META 中：原样中性展示，不冒充在役状态
+  const meta = ticketStatusMeta(status)
   return (
     <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium ${meta.cls}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />

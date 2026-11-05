@@ -10,8 +10,9 @@
   - TicketProgressLog    处理轨迹（管理员每次处理一行：状态迁移 + 必填评论）
 
 状态机（业务语义，后端不做迁移限制，仅校验取值合法）：
-  pending 待处理 → verifying 查验中 → accepted 已接纳 → completed 已完成
+  pending 待处理 → analyzing 分析中 → completed 已完成
   任意状态可转 cancelled 已取消
+（历史存量行可能仍保留 verifying/accepted 取值，不做数据迁移）
 """
 import uuid
 from datetime import datetime, timezone
@@ -34,15 +35,13 @@ def _now() -> datetime:
 
 # —— 状态词汇（集中定义，service 层校验）——
 STATUS_PENDING = "pending"        # 待处理：用户提交后的初始状态
-STATUS_VERIFYING = "verifying"    # 查验中：管理员已接手核查
-STATUS_ACCEPTED = "accepted"      # 已接纳：确认为有效反馈
+STATUS_ANALYZING = "analyzing"    # 分析中：管理员已接手分析
 STATUS_COMPLETED = "completed"    # 已完成：处理完毕
 STATUS_CANCELLED = "cancelled"    # 已取消
 
 TICKET_STATUSES = (
     STATUS_PENDING,
-    STATUS_VERIFYING,
-    STATUS_ACCEPTED,
+    STATUS_ANALYZING,
     STATUS_COMPLETED,
     STATUS_CANCELLED,
 )

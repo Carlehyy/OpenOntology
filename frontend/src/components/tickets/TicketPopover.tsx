@@ -9,8 +9,8 @@ import { ticketsApi, type TicketItem } from '@/api/tickets'
 import { StatusBadge } from '@/pages/tickets/shared'
 import TicketFormModal from './TicketFormModal'
 
-/** 处理中 = 未到终态：待处理 + 查验中 + 已接纳。 */
-const IN_PROGRESS_STATUSES = 'pending,verifying,accepted'
+/** 处理中 = 未到终态：待处理 + 分析中。 */
+const IN_PROGRESS_STATUSES = 'pending,analyzing'
 const RECENT_LIMIT = 10
 
 function formatRelativeTime(value: string): string {

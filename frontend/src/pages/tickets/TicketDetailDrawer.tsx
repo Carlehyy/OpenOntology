@@ -9,6 +9,7 @@ import {
 import {
   fmtTime, formatBytes, ticketsApi,
   TICKET_CATEGORY_META, TICKET_STATUS_META, TICKET_STATUS_ORDER,
+  isKnownTicketStatus, ticketStatusMeta,
   type TicketAttachment, type TicketItem, type TicketStatus,
 } from '@/api/tickets'
 import { useAuthStore } from '@/stores/authStore'
@@ -52,13 +53,15 @@ function ProgressPanel({
   onDone: () => void
 }) {
   const queryClient = useQueryClient()
-  const [status, setStatus] = useState<TicketStatus>(ticket.status)
+  // 存量旧状态（verifying/accepted）不在四态选项内，回落到「待处理」起步
+  const [status, setStatus] = useState<TicketStatus>(
+    isKnownTicketStatus(ticket.status) ? ticket.status : 'pending')
   const [comment, setComment] = useState('')
   const [error, setError] = useState('')
 
   useEffect(() => {
     if (!ticket) return
-    setStatus(ticket.status)
+    setStatus(isKnownTicketStatus(ticket.status) ? ticket.status : 'pending')
     setComment('')
     setError('')
   }, [ticket.id, ticket.status])
@@ -345,8 +348,8 @@ export default function TicketDetailDrawer({
                 ) : (
                   <ul className="space-y-0">
                     {[...progressLogs].sort((a, b) => b.seq - a.seq).map(entry => {
-                      const fromLabel = entry.fromStatus ? TICKET_STATUS_META[entry.fromStatus].label : null
-                      const toLabel = TICKET_STATUS_META[entry.toStatus]?.label ?? entry.toStatus
+                      const fromLabel = entry.fromStatus ? ticketStatusMeta(entry.fromStatus).label : null
+                      const toLabel = ticketStatusMeta(entry.toStatus).label
                       return (
                         <li key={entry.id} className="relative ml-1 border-l border-border pb-4 pl-4 last:pb-0">
                           <span className="absolute -left-[5px] top-1.5 h-2.5 w-2.5 rounded-full bg-[var(--color-success-bg)] ring-2 ring-white" aria-hidden="true" />

@@ -35,7 +35,7 @@ def _ok(data):
 @router.get("")
 def list_tickets(
     q: Optional[str] = Query(None, description="标题/内容/编号/提交人模糊搜索"),
-    status: Optional[str] = Query(None, description="pending|verifying|accepted|completed|cancelled|all"),
+    status: Optional[str] = Query(None, description="pending|analyzing|completed|cancelled|all"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db), user=Depends(get_current_user),

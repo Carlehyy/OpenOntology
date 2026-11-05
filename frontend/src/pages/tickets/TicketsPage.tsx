@@ -104,7 +104,7 @@ export default function TicketsPage() {
       </div>
 
       {/* 按状态总览 */}
-      <div className="grid shrink-0 grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid shrink-0 grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
         <MetricCard label="工单总数" value={stats?.total ?? 0} icon={<Inbox className="h-4 w-4" />} loading={statsQ.isLoading} />
         {TICKET_STATUS_ORDER.map(value => (
           <MetricCard

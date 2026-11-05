@@ -15,13 +15,13 @@ const pendingTicket = {
   attachmentCount: 1,
 }
 
-const verifyingTicket = {
+const analyzingTicket = {
   ...pendingTicket,
   id: 'tk-2',
   ticketNo: 'TK-20260828-D4E5F6',
   title: '导出 CSV 很慢',
   content: '十万行数据导出需要三分钟，希望能加快。',
-  status: 'verifying',
+  status: 'analyzing',
   category: 'experience',
   pageUrl: null,
   createdAt: '2026-08-27T08:30:00Z',
@@ -37,7 +37,7 @@ const detailBody = {
     createdAt: '2026-08-28T02:01:00Z',
   }],
   progressLogs: [{
-    id: 'log-1', seq: 1, fromStatus: 'pending', toStatus: 'verifying',
+    id: 'log-1', seq: 1, fromStatus: 'pending', toStatus: 'analyzing',
     comment: '已复现，等待用户提供浏览器版本', actorId: 'u-admin', actorName: 'admin',
     createdAt: '2026-08-28T03:00:00Z',
   }],
@@ -77,16 +77,16 @@ async function mockTickets(page: Page, options: { role?: string } = {}) {
     if (url.pathname === '/api/v2/tickets/stats/summary') {
       return ok({
         total: 2,
-        byStatus: { pending: 1, verifying: 1, accepted: 0, completed: 0, cancelled: 0 },
+        byStatus: { pending: 1, analyzing: 1, completed: 0, cancelled: 0 },
       })
     }
     if (url.pathname === '/api/v2/tickets' && request.method() === 'GET') {
       calls.listStatusFilters.push(url.searchParams.get('status'))
       // 弹窗取「处理中」多状态最近工单；页面单状态/全部走完整列表
-      if (url.searchParams.get('status') === 'pending,verifying,accepted') {
-        return ok({ items: [pendingTicket, verifyingTicket], total: 2, page: 1, pageSize: 10 })
+      if (url.searchParams.get('status') === 'pending,analyzing') {
+        return ok({ items: [pendingTicket, analyzingTicket], total: 2, page: 1, pageSize: 10 })
       }
-      return ok({ items: [pendingTicket, verifyingTicket], total: 2, page: 1, pageSize: 8 })
+      return ok({ items: [pendingTicket, analyzingTicket], total: 2, page: 1, pageSize: 8 })
     }
     if (url.pathname === '/api/v2/tickets' && request.method() === 'POST') {
       calls.createdBodies.push(request.postDataJSON())
@@ -115,12 +115,12 @@ async function mockTickets(page: Page, options: { role?: string } = {}) {
       progressCount += 1
       return ok({
         ...detailBody,
-        status: 'accepted',
+        status: 'analyzing',
         progressLogs: [
           ...detailBody.progressLogs,
           {
             id: `log-new-${progressCount}`, seq: 2, fromStatus: 'pending',
-            toStatus: 'accepted', comment: request.postDataJSON().comment,
+            toStatus: 'analyzing', comment: request.postDataJSON().comment,
             actorId: 'u-admin', actorName: 'admin', createdAt: '2026-08-28T04:00:00Z',
           },
         ],
@@ -159,7 +159,7 @@ test('顶栏工单弹窗：位于收件箱左侧，展示处理中工单并可�
   await expect(popover).toBeVisible()
   await expect(popover.getByText('2 条处理中')).toBeVisible()
   await expect(popover.getByRole('button', { name: '打开工单：登录页偶尔白屏' })).toBeVisible()
-  await expect(popover.getByRole('button', { name: '打开工单：导出 CSV 很慢' }).getByText('查验中')).toBeVisible()
+  await expect(popover.getByRole('button', { name: '打开工单：导出 CSV 很慢' }).getByText('分析中')).toBeVisible()
 
   // 底部「查看全部工单」进入工单页
   await popover.getByRole('button', { name: '查看全部工单' }).click()
@@ -297,8 +297,15 @@ test('状态 Tab 触发筛选；搜索框防抖后携带查询参数', async ({ 
   const { calls } = await mockTickets(page)
   await page.goto('/#/tickets', { waitUntil: 'domcontentloaded' })
 
+  // 四态契约：筛选 Tab 恰为 全部/待处理/分析中/已完成/已取消，已下线的「已接纳」不再出现
+  await expect(page.getByRole('button', { name: '分析中', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '已接纳' })).toHaveCount(0)
+
   await page.getByRole('button', { name: '待处理', exact: true }).click()
   await expect.poll(() => calls.listStatusFilters.at(-1)).toBe('pending')
+
+  await page.getByRole('button', { name: '分析中', exact: true }).click()
+  await expect.poll(() => calls.listStatusFilters.at(-1)).toBe('analyzing')
 
   await page.getByPlaceholder('搜索工单标题、内容、编号、提交人...').fill('白屏')
   await expect
@@ -330,14 +337,14 @@ test('管理员处理工单：评论必填，提交后状态更新并落入处�
   const submit = drawer.getByRole('button', { name: '提交处理' })
   await expect(submit).toBeDisabled()
   await drawer.getByLabel('进度状态', { exact: false }).click()
-  await page.getByRole('option', { name: '已接纳' }).click()
+  await page.getByRole('option', { name: '分析中' }).click()
   await drawer.getByLabel('处理评论', { exact: false }).fill('确认为有效反馈，排入下个迭代')
   await expect(submit).toBeEnabled()
   await submit.click()
 
   await expect(page.locator('[data-sonner-toast]').filter({ hasText: '工单已处理' })).toBeVisible()
   expect(calls.progressBodies).toEqual([
-    { status: 'accepted', comment: '确认为有效反馈，排入下个迭代' },
+    { status: 'analyzing', comment: '确认为有效反馈，排入下个迭代' },
   ])
 })
 

@@ -207,7 +207,7 @@ def list_tickets(
 ) -> dict:
     query = _scoped_query(db, user)
     if status and status != "all":
-        # 支持逗号分隔多状态（顶栏弹窗用「处理中 = pending,verifying,accepted」）
+        # 支持逗号分隔多状态（顶栏弹窗用「处理中 = pending,analyzing」）
         statuses = [part.strip() for part in status.split(",") if part.strip()]
         invalid = [part for part in statuses if part not in m.TICKET_STATUSES]
         if invalid:

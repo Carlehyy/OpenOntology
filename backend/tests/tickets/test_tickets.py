@@ -98,7 +98,7 @@ def test_progress_requires_admin_and_non_empty_comment(
     # 非管理员不能处理
     forbidden = client.post(
         f"/api/v2/tickets/{ticket_id}/progress",
-        json={"status": "verifying", "comment": "开始核查"},
+        json={"status": "analyzing", "comment": "开始分析"},
         headers=editor_headers,
     )
     assert forbidden.status_code == 403
@@ -106,7 +106,7 @@ def test_progress_requires_admin_and_non_empty_comment(
     # 管理员处理必须带非空评论
     blank = client.post(
         f"/api/v2/tickets/{ticket_id}/progress",
-        json={"status": "verifying", "comment": "   "},
+        json={"status": "analyzing", "comment": "   "},
         headers=auth_headers,
     )
     assert blank.status_code == 422
@@ -122,28 +122,28 @@ def test_progress_requires_admin_and_non_empty_comment(
     # 合法处理：状态迁移落轨迹，评论保留
     progress = client.post(
         f"/api/v2/tickets/{ticket_id}/progress",
-        json={"status": "verifying", "comment": "已复现，联系用户提供浏览器版本"},
+        json={"status": "analyzing", "comment": "已复现，联系用户提供浏览器版本"},
         headers=auth_headers,
     )
     assert progress.status_code == 200
     data = progress.json()["data"]
-    assert data["status"] == "verifying"
+    assert data["status"] == "analyzing"
     assert len(data["progressLogs"]) == 1
     log = data["progressLogs"][0]
     assert log["fromStatus"] == "pending"
-    assert log["toStatus"] == "verifying"
+    assert log["toStatus"] == "analyzing"
     assert log["comment"] == "已复现，联系用户提供浏览器版本"
     assert log["actorName"] == "admin"
 
     # 同状态补充评论也允许（仅追加轨迹，不改状态）
     again = client.post(
         f"/api/v2/tickets/{ticket_id}/progress",
-        json={"status": "verifying", "comment": "等待用户补充信息"},
+        json={"status": "analyzing", "comment": "等待用户补充信息"},
         headers=auth_headers,
     ).json()["data"]
-    assert again["status"] == "verifying"
+    assert again["status"] == "analyzing"
     assert len(again["progressLogs"]) == 2
-    assert again["progressLogs"][1]["fromStatus"] == "verifying"
+    assert again["progressLogs"][1]["fromStatus"] == "analyzing"
 
 
 def test_list_filters_by_status_and_query(client, auth_headers):
@@ -171,29 +171,29 @@ def test_list_filters_by_status_and_query(client, auth_headers):
 
 
 def test_list_supports_comma_separated_status_for_popover(client, auth_headers):
-    """顶栏弹窗取「处理中 = pending,verifying,accepted」最近工单。"""
+    """顶栏弹窗取「处理中 = pending,analyzing」最近工单。"""
     pending = _create(client, auth_headers, title="待处理单", content="x").json()["data"]
-    verifying = _create(client, auth_headers, title="查验中单", content="x").json()["data"]
+    analyzing = _create(client, auth_headers, title="分析中单", content="x").json()["data"]
     completed = _create(client, auth_headers, title="已完成单", content="x").json()["data"]
-    for ticket_id in (verifying["id"], completed["id"]):
+    for ticket_id in (analyzing["id"], completed["id"]):
         client.post(
             f"/api/v2/tickets/{ticket_id}/progress",
-            json={"status": "verifying" if ticket_id == verifying["id"] else "completed",
+            json={"status": "analyzing" if ticket_id == analyzing["id"] else "completed",
                   "comment": "处理"},
             headers=auth_headers,
         )
 
     in_progress = client.get(
         "/api/v2/tickets",
-        params={"status": "pending,verifying,accepted", "page_size": 10},
+        params={"status": "pending,analyzing", "page_size": 10},
         headers=auth_headers,
     ).json()["data"]
     assert in_progress["total"] == 2
-    assert {item["title"] for item in in_progress["items"]} == {"待处理单", "查验中单"}
+    assert {item["title"] for item in in_progress["items"]} == {"待处理单", "分析中单"}
 
-    # 逗号分隔中任一非法取值整体拒绝
+    # 逗号分隔中任一非法取值整体拒绝（已删除的 accepted 同样非法）
     bad = client.get(
-        "/api/v2/tickets", params={"status": "pending,done"}, headers=auth_headers)
+        "/api/v2/tickets", params={"status": "pending,accepted"}, headers=auth_headers)
     assert bad.status_code == 422
 
 
@@ -211,7 +211,7 @@ def test_stats_summary_scopes_by_role(client, auth_headers, editor_user):
         "/api/v2/tickets/stats/summary", headers=auth_headers).json()["data"]
     assert admin_stats["total"] == 2
     assert set(admin_stats["byStatus"]) == {
-        "pending", "verifying", "accepted", "completed", "cancelled",
+        "pending", "analyzing", "completed", "cancelled",
     }
 
 
