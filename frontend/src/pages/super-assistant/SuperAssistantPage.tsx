@@ -67,6 +67,7 @@ import { deriveTurnRailItems, type TurnRailItem } from './components/turnRailMod
 import { readCachedConversations, writeCachedConversations } from './conversationCache'
 import { readCachedDrafts, writeCachedDrafts } from './draftCache'
 import { buildConversationExportFilename } from './exportFilename'
+import { resolveWeKnoraWebUrl } from './weknoraUrl'
 import type { ModelConfig } from '@/types/ontology'
 import TicketFormModal from '@/components/tickets/TicketFormModal'
 import ConversationRenameDialog from './components/ConversationRenameDialog'
@@ -262,17 +263,12 @@ export default function SuperAssistantPage() {
     }
   }, [])
   useEffect(() => { void refreshWeknora() }, [refreshWeknora])
-  // 只接受 http(s) 公网地址：后端返回异常协议时不做跳转，避免把用户带到非 Web 目标
-  const weknoraUrl = useMemo(() => {
-    const raw = weknora?.web_url?.trim()
-    if (!raw) return null
-    try {
-      const target = new URL(raw)
-      return target.protocol === 'https:' || target.protocol === 'http:' ? raw : null
-    } catch {
-      return null
-    }
-  }, [weknora])
+  // 只接受 http(s) 公网地址（异常协议不跳转）；后端下发回环主机名时改用
+  // 当前访问平台的主机名，公网/内网部署都落到同机 WeKnora 网关（weknoraUrl.ts）
+  const weknoraUrl = useMemo(
+    () => resolveWeKnoraWebUrl(weknora?.web_url, window.location.hostname),
+    [weknora],
+  )
 
   useEffect(() => {
     let alive = true
