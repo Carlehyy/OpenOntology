@@ -480,6 +480,7 @@ def public_query_result(result: dict) -> dict:
         or result.get("groups")
         or semantics in {"aggregate_scalar", "aggregate_grouped",
                          "grouped_aggregate", "distinct_subject_count",
+                         "window_distinct",
                          "sequence_consecutive", "sequence_interval",
                          "sequence_ordered"}
     )

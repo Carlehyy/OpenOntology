@@ -32,12 +32,15 @@ from app.ontologies.agent_runtime.read_queries import decimal_number, encode_sca
 from app.ontologies.agent_runtime.sequence_analysis import (
     SequenceEvent, group_sequence_result, ordered_subjects,
 )
+from app.ontologies.agent_runtime.sequence_window_distinct import (
+    analyze_window_distinct,
+)
 
 SEQUENCE_ROW_BUDGET = 1000
 SUBJECT_PREVIEW = 50
 _FILTER_OPS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "in",
                "is_null", "is_not_null"}
-_MODES = {"distinct", "consecutive", "interval", "ordered"}
+_MODES = {"distinct", "window_distinct", "consecutive", "interval", "ordered"}
 _MAX_STAGES = 8
 
 
@@ -157,6 +160,7 @@ def _aggregate_spec(*, scope, ot, where, resolved_window, subject_prop,
     return {"request": request, "spec": spec}
 
 
+
 def analyze_sequences(db, scope, user, session_id: str, args: dict,
                       spec_cache: dict | None = None) -> dict:
     from app.ontologies.agent_query import schemas as QS
@@ -208,6 +212,17 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
             property_type=str(definition.get("type") or "string").lower())
         where.extend(window_filters(resolved_window, source="s0"))
 
+    if mode == "window_distinct":
+        time_type = str((_definitions(ot).get(time_prop) or {})
+                        .get("type") or "").lower()
+        return analyze_window_distinct(
+            db=db, scope=scope, user=user, session_id=session_id,
+            ot=ot, args=args, subject_prop=subject_prop,
+            time_prop=time_prop, time_property_type=time_type,
+            threshold=threshold, where=where,
+            resolved_window=resolved_window, cap=cap,
+            cancel_handle=_cancel_sequence_handle)
+
     source = QS.QuerySource(alias="s0", ontology_id=scope.ontology.id,
                             release_id=scope.release_id, object_type_id=ot.id)
 
@@ -234,7 +249,8 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
                 raise ToolError("sequence_invalid_group: group_by 项需要 property")
             bucket = item.get("bucket")
             if bucket is not None and bucket not in {
-                    "day", "week", "month", "quarter", "year"}:
+                    "half_hour", "day", "week", "month",
+                    "quarter", "year"}:
                 raise ToolError(f"sequence_invalid_group: 不支持的时间分桶 {bucket}")
             group_items.append({
                 "source": "s0",

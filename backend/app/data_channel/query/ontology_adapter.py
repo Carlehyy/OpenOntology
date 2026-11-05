@@ -157,10 +157,18 @@ def _response(result, plan):
     exact = (result.get("exactness", "exact_within_scope") == "exact_within_scope"
              and (bounded or not result.get("resultLimited")))
     truncated = bool(result.get("resultLimited")) if plan.get("statsLimit") else False
+    # Bounded stats materialize only the LIMIT prefix but keep the exact
+    # pre-LIMIT count measured by the core's COUNT probe; report that as the
+    # total group count (still no cursor: the remainder is unreachable).
+    total_rows = result["totalRows"]
+    if plan.get("statsLimit") and isinstance(result.get("plan"), dict):
+        before_limit = result["plan"].get("totalRowsBeforeLimit")
+        if type(before_limit) is int:
+            total_rows = before_limit
     return {"queryId": result["queryId"], "schemaVersion": 2,
             "observedAt": min((state.get("asOf", "") for state in result["sourceStates"]), default=""),
             "releases": plan["releases"], "columns": result["columns"], "rows": rows,
-            "pageRowCount": len(rows), "totalRowCount": result["totalRows"],
+            "pageRowCount": len(rows), "totalRowCount": total_rows,
             "rowCounting": page.get("counting", "complete"),
             "distinctEntityCounts": {}, "inputCounts": {}, "joinRowCounts": [],
             "partial": False, "truncated": truncated, "resultBounded": bounded,

@@ -436,6 +436,16 @@ def bucket_bounds(value, bucket: str) -> tuple[object, object] | None:
     try:
         if isinstance(parsed, datetime):
             anchor = parsed
+            if bucket == "half_hour":
+                # 固定 30 分钟窗：保留 timestamp（绝不降级为 date），
+                # 只把秒/微秒归零；时区信息按引擎返回值原样保留，避免
+                # 把 UTC 存储时间误标成窗口时区的墙钟时间。仅日期值
+                # 没有 30 分钟锚点，拒绝猜测。
+                if is_date_only:
+                    return None
+                start = anchor.replace(minute=(anchor.minute // 30) * 30,
+                                       second=0, microsecond=0)
+                return start, start + timedelta(minutes=30)
             if bucket == "day":
                 start, end = anchor, anchor + timedelta(days=1)
             elif bucket == "week":

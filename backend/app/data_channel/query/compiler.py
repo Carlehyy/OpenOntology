@@ -16,7 +16,7 @@ from .parser import Command, Expr, Pipeline, Ref, Value
 
 _NUMERIC = {"integer", "decimal", "float"}
 _ORDERABLE = _NUMERIC | {"string", "date", "timestamp", "time"}
-_BUCKETS = {"day", "week", "month", "quarter", "year"}
+_BUCKETS = {"day", "week", "month", "quarter", "year", "half_hour"}
 
 
 def _bucket_expression(col, spec, bucket: str, dialect: str):
@@ -24,7 +24,8 @@ def _bucket_expression(col, spec, bucket: str, dialect: str):
 
     Week buckets start on Monday. PostgreSQL uses date_trunc; MySQL uses
     native date arithmetic; the default (SQLite in-process scopes) uses
-    strftime/date modifiers. Output normalizes to a date in every dialect.
+    strftime/date modifiers. Calendar buckets normalize to a date in every
+    dialect; the half-hour bucket keeps the timestamp and floors to :00/:30.
     """
     if bucket not in _BUCKETS:
         raise QueryError(422, "invalid_parameter", f"Unknown time bucket {bucket!r}")
@@ -32,8 +33,26 @@ def _bucket_expression(col, spec, bucket: str, dialect: str):
         raise QueryError(422, "unsupported_group_bucket",
                          f"Time bucketing requires a date/timestamp field, not {spec.type}")
     if dialect == "postgresql":
+        if bucket == "half_hour":
+            # date_trunc has no half-hour unit: truncate to the hour and add
+            # the 30-minute half selected by the minute component. The interval
+            # is built with make_interval() over typed integer expressions, so
+            # the native read port's typed-SELECT guard sees no raw SQL.
+            half_minutes = sa.case((sa.extract("minute", col) >= 30, 30), else_=0)
+            return (sa.func.date_trunc("hour", col)
+                    + sa.func.make_interval(0, 0, 0, 0, 0, half_minutes))
         return sa.cast(sa.func.date_trunc(bucket, col), sa.Date)
     if dialect == "mysql":
+        if bucket == "half_hour":
+            # Floor :00/:30 with functions/binds only (TIMESTAMPADD's unit
+            # keyword would require raw SQL, which the native read port
+            # rejects). TIME_TO_SEC carries seconds and microseconds; the
+            # epoch-free arithmetic keeps DATE input at midnight and works
+            # outside the 1970..2038 UNIX_TIMESTAMP range.
+            seconds = sa.func.time_to_sec(sa.func.time(col))
+            return sa.func.timestamp(
+                sa.func.date(col),
+                sa.func.sec_to_time(sa.func.floor(seconds / 1800) * 1800))
         if bucket == "day":
             return sa.func.date(col)
         if bucket == "week":
@@ -51,6 +70,10 @@ def _bucket_expression(col, spec, bucket: str, dialect: str):
                 sa.literal("%Y%m%d"))
         return sa.cast(sa.func.date_format(col, sa.literal("%Y-01-01")), sa.Date)
     # sqlite（进程内/测试假源）
+    if bucket == "half_hour":
+        offset = sa.cast(sa.func.strftime("%M", col), sa.Integer) % 30
+        modifier = sa.cast(-offset, sa.String).concat(sa.literal(" minutes"))
+        return sa.func.strftime("%Y-%m-%d %H:%M:00", col, modifier)
     if bucket == "day":
         return sa.func.strftime("%Y-%m-%d", col)
     if bucket == "month":
@@ -279,6 +302,7 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
     output_columns: list[ColumnSpec] = []
     outputs: dict[str, Any] = {}
     projected_refs: dict[Ref, str] = {}
+    bucket_output_names: set[str] = set()
     before_limit = None
 
     def wrap():
@@ -372,9 +396,13 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
                     if bucket is not None:
                         group_expr = _bucket_expression(col, spec, bucket, dialect)
                         # Bucket output and grouping key are the same scalar
-                        # expression in every dialect.
+                        # expression in every dialect. Calendar buckets yield a
+                        # date; half-hour buckets keep the timestamp (the source
+                        # timezone flag is preserved) and floor to :00/:30.
                         group_key_expr = group_expr
-                        spec = replace(spec, type="date", nullable=True)
+                        spec = replace(spec, nullable=True,
+                                       type="timestamp" if bucket == "half_hour" else "date")
+                        bucket_output_names.add(out_name)
                     else:
                         group_key_expr = comparable(col, spec)
                         group_expr = group_key_expr
@@ -458,6 +486,22 @@ def compile_query(pipeline: Pipeline, relations: dict[str, Relation],
             if sorted_:
                 raise QueryError(422, "invalid_operator_order", "Only one SORT is supported")
             if not finalized: finalize_default()
+            if dialect == "mysql" and bucket_output_names:
+                def sort_output(ref_or_name):
+                    return projected_refs.get(ref_or_name) if isinstance(ref_or_name, Ref) else ref_or_name
+                if any(sort_output(ref) in bucket_output_names
+                       for ref, _direction, _nulls in args):
+                    # MySQL ONLY_FULL_GROUP_BY rejects the NULL-ordering CASE
+                    # below when it re-expands a bucketed GROUP BY expression
+                    # over its ungrouped base column (ERROR 1055), even though
+                    # SELECT and GROUP BY carry the identical expression.
+                    # Sorting the already-grouped rows from one outer projection
+                    # makes the bucket a plain column, so the CASE is legal in
+                    # every dialect without changing grouping or ordering.
+                    outer = stmt.subquery()
+                    stmt = sa.select(*(outer.c[spec.name] for spec in output_columns)
+                                     ).select_from(outer)
+                    outputs = {spec.name: outer.c[spec.name] for spec in output_columns}
             for ref, direction, nulls in args:
                 if isinstance(ref, Ref):
                     if ref not in projected_refs:

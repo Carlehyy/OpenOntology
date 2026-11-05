@@ -12,7 +12,8 @@ from tests.ontologies.test_agent_runtime import modeled_ontology  # noqa: F401
 from tests.ontologies.test_agent_unified_query import orders_ontology  # noqa: F401
 
 from tests.ontologies.test_agent_remote_aggregation import (  # noqa: F401
-    _freeze_with_rich_remote_supplier, _patch_execute_unified, _remote_runner,
+    _freeze_with_rich_remote_supplier, _freeze_with_wide_remote_supplier,
+    _patch_execute_unified, _remote_runner,
 )
 
 
@@ -159,6 +160,145 @@ def test_remote_pagination_keeps_cursor_then_releases_terminal_page(
     assert final["hasNext"] is False and final["returned"] == 1
     assert fetched and fetched[0]["session_kind"] == "ontology_agent"
     assert cancelled == ["q-qo-2"]  # 终页释放
+
+
+def test_wide_default_projection_is_bounded_and_reports_omitted_fields(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """47 属性远程对象默认投影不得越界；主键/过滤/窗口/排序字段优先。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_wide_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_unified(monkeypatch, result={
+        "queryId": "q-wide-1", "rows": [{"c0": "华南电子"}],
+        "totalRowCount": 1, "rowCounting": "complete", "hasNext": False,
+        "cursor": None, "truncated": False, "partial": False, "exact": True,
+        "completeness": "complete", "pageSize": 50, "observedAt": "t",
+        "countsScope": "complete_snapshot", "citations": [],
+        "releases": {"objects": {"dataMode": "remote"}},
+        "persistence": {"mode": "ephemeral"}})
+
+    out = runner.run("query_objects", {
+        "object_type": "Supplier",
+        "filters": [{"property": "field_40", "op": "eq", "value": "x"}],
+        "window": {"property": "since_day", "timezone": "Asia/Shanghai",
+                   "start": "2026-01-01", "end": "2026-02-01"},
+        "order_by": [{"output": "field_41", "direction": "asc"}],
+    })
+
+    request = calls[0]["request"]
+    selected = [item.property for item in request.select]
+    assert len(selected) == 32
+    # 可查询主键 + 当前过滤/窗口/排序字段最先进入投影。
+    assert selected[:4] == ["sname", "field_40", "since_day", "field_41"]
+    projection = out["projection"]
+    assert projection["cap"] == 32
+    assert len(projection["selectedFields"]) == 32
+    assert len(projection["omittedFields"]) == 15
+    assert "field_42" in projection["omittedFields"]
+    assert "field_42" not in out["querySpec"]["description"]["select"]
+    assert out["querySpec"]["description"]["omittedFields"] == \
+        projection["omittedFields"]
+    # 省略字段只是元数据，不能出现在观测列/行里。
+    assert all(column.get("name") != "field_42" for column in out["columns"])
+
+
+def test_wide_default_projection_metadata_survives_cursor_pages(
+        modeled_ontology, db, admin_user, monkeypatch):
+    from app.ontologies.agent_query import service as query_service
+
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_wide_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    monkeypatch.setattr(query_service, "execute_unified_query", lambda *a, **k: {
+        "queryId": "q-wide-3", "rows": [{"c0": "华南电子"}],
+        "totalRowCount": 2, "rowCounting": "complete", "hasNext": True,
+        "cursor": "cur-wide", "truncated": True, "partial": False, "exact": True,
+        "completeness": "complete", "pageSize": 1, "observedAt": "t",
+        "countsScope": "complete_snapshot", "citations": [],
+        "releases": {"objects": {"dataMode": "remote"}},
+        "persistence": {"mode": "ephemeral"}})
+    from app.ontologies.agent_query import remote_query
+    monkeypatch.setattr(remote_query, "cancel_remote_query", lambda *a: None)
+    monkeypatch.setattr(query_service, "fetch_unified_query_page",
+                        lambda *a, **k: {
+                            "queryId": "q-wide-3", "rows": [{"c0": "华东电子"}],
+                            "totalRowCount": 2, "rowCounting": "complete",
+                            "hasNext": False, "cursor": None, "truncated": False,
+                            "partial": False, "exact": True,
+                            "completeness": "complete", "pageSize": 1,
+                            "observedAt": "t", "countsScope": "complete_snapshot",
+                            "citations": [],
+                            "releases": {"objects": {"dataMode": "remote"}},
+                            "persistence": {"mode": "ephemeral"}})
+
+    first = runner.run("query_objects", {
+        "object_type": "Supplier", "page_size": 1})
+    omitted = first["projection"]["omittedFields"]
+    assert omitted and "field_42" in omitted
+
+    final = runner.run("query_objects", {
+        "object_type": "Supplier", "cursor": "cur-wide"})
+    assert final["hasNext"] is False
+    assert final["projection"]["omittedFields"] == omitted
+    assert final["querySpec"]["description"]["omittedFields"] == omitted
+
+
+def test_explicit_select_over_32_is_rejected_before_execution(
+        modeled_ontology, db, admin_user, monkeypatch):
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_wide_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_unified(monkeypatch, result={"rows": []})
+
+    with pytest.raises(ToolError, match="query_objects_select_too_many"):
+        runner.run("query_objects", {
+            "object_type": "Supplier",
+            "select": ["sname"] + [f"field_{index:02d}" for index in range(32)]})
+    assert calls == []
+
+
+def test_explicit_unmapped_remote_property_is_rejected_before_execution(
+        modeled_ontology, db, admin_user, monkeypatch):
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(
+        db, oid, unmapped_properties=["internal_note"])
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_unified(monkeypatch, result={"rows": []})
+
+    with pytest.raises(ToolError, match="query_objects_property_unqueryable"):
+        runner.run("query_objects", {
+            "object_type": "Supplier", "select": ["internal_note"]})
+    assert calls == []
+
+
+def test_stats_drilldown_projection_is_bounded_and_keeps_query_spec(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """聚合下钻明细投影与主投影共享 32 项上限，querySpec 必须保留。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_wide_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    _patch_execute_unified(monkeypatch, result={
+        "queryId": "q-wide-2", "rows": [{"g0": "华南", "a0": 4}],
+        "totalRowCount": 1, "rowCounting": "complete", "hasNext": False,
+        "cursor": None, "truncated": False, "partial": False, "exact": True,
+        "completeness": "complete", "pageSize": 50, "observedAt": "t",
+        "countsScope": "complete_snapshot", "citations": [],
+        "releases": {"objects": {"dataMode": "remote"}},
+        "persistence": {"mode": "ephemeral"}})
+
+    out = runner.run("query_objects", {
+        "object_type": "Supplier",
+        "group_by": [{"property": "region"}],
+        "aggregates": [{"fn": "count"}],
+    })
+
+    detail_select = out["querySpec"]["drilldownBase"]["select"]
+    assert len(detail_select) == 32
+    assert [item["property"] for item in detail_select][:2] == ["sname", "region"]
+    omitted = out["querySpec"]["description"]["drilldownOmittedFields"]
+    assert omitted and "field_42" in omitted
+    assert out["drilldownProjection"]["omittedFields"] == omitted
+    assert out["querySpecHash"]
 
 
 # ------------------------------------------------ 数据时间范围

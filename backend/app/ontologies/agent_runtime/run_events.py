@@ -44,18 +44,40 @@ _STEP_LIST_KEYS = ("rows", "groups", "series", "nodes", "edges", "impacts", "pat
 # event payload cap below).
 MAX_QUERY_SPEC_BYTES = 24 * 1024
 
+_QUERY_SPEC_KEYS = ("querySpec", "moduleQuerySpec")
+
 _QUERY_META_KEYS = (
     "kind", "display", "rowsAvailableVia", "rowsOmitted", "rowsAreAggregates",
     "publicNote", "columns", "returned", "counts", "hasNext", "window",
     "consistency", "drilldown", "drilldownBase", "drilldownLabels",
-    "semantics", "description", "groupBy", "total", "querySpec",
+    "semantics", "description", "groupBy", "total", *_QUERY_SPEC_KEYS,
 )
 
 _QUERY_ESSENTIAL_KEYS = (
     "kind", "display", "rowsAvailableVia", "rowsOmitted", "rowsAreAggregates",
     "publicNote", "columns", "returned", "counts", "hasNext", "window",
-    "consistency", "drilldown", "drilldownBase", "drilldownLabels", "querySpec",
+    "consistency", "drilldown", "drilldownBase", "drilldownLabels",
+    *_QUERY_SPEC_KEYS,
 )
+
+# window_distinct step results are aggregate summaries, not source detail.
+# Keep the exact headline counters/window semantics plus a small preview of
+# modules/windows; event-level omissions are explicit in omittedItems.
+_WINDOW_META_KEYS = tuple(dict.fromkeys((
+    *_QUERY_META_KEYS,
+    "mode", "objectType", "subjectProperty", "timeProperty", "windowMinutes",
+    "windowBucket", "windowTimezone", "windowAlignment", "threshold",
+    "thresholdScope", "qualifyingWindows", "qualifyingModules", "moduleCount",
+    "modulesTruncated", "moduleLimit", "sampleWindowsTruncated",
+    "evaluatedWindows", "evaluatedWindowsAvailable", "exact", "partial",
+    "completeness", "completenessScope", "dataMode", "querySpecHash",
+    "moduleQuerySpecHash", "observedAt", "limitations", "note",
+)))
+_WINDOW_ESSENTIAL_KEYS = _WINDOW_META_KEYS + ("omittedItems",)
+_WINDOW_PREVIEW_LIMITS = {"modules": 10, "sampleWindows": 5}
+_WINDOW_RAW_KEYS = frozenset({
+    "rows", "sourceRows", "rawRows", "remoteRows", "raw",
+})
 
 
 class RunEventPayloadTooLarge(RuntimeError):
@@ -108,10 +130,11 @@ def _compact_result(result: Any) -> Any:
 def _query_specs(payload: dict) -> list[Any]:
     specs = []
     for container in (payload.get("arguments"), payload.get("result")):
-        if isinstance(container, dict) and container.get("querySpec") is not None:
-            specs.append(container["querySpec"])
-    if payload.get("querySpec") is not None:
-        specs.append(payload["querySpec"])
+        if isinstance(container, dict):
+            specs.extend(container[key] for key in _QUERY_SPEC_KEYS
+                         if container.get(key) is not None)
+    specs.extend(payload[key] for key in _QUERY_SPEC_KEYS
+                 if payload.get(key) is not None)
     return specs
 
 
@@ -119,9 +142,13 @@ def _validate_query_specs(payload: dict) -> None:
     for spec in _query_specs(payload):
         if _size(spec) > MAX_QUERY_SPEC_BYTES:
             raise RunEventPayloadTooLarge(
-                "run_query_spec_too_large: querySpec 超过 24KB 上限，"
+                "run_query_spec_too_large: querySpec/moduleQuerySpec 超过 24KB 上限，"
                 "拒绝静默截断；请缩小查询范围后重试"
             )
+
+
+def _is_window_result(result: Any) -> bool:
+    return isinstance(result, dict) and result.get("mode") == "window_distinct"
 
 
 def _compact_query_result(result: dict) -> dict:
@@ -130,8 +157,47 @@ def _compact_query_result(result: dict) -> dict:
         for key in _QUERY_META_KEYS
         if key in result
     }
-    if "querySpec" in result:
-        compact["querySpec"] = result["querySpec"]
+    for key in _QUERY_SPEC_KEYS:
+        if key in result:
+            compact[key] = result[key]
+    compact["_truncated"] = True
+    return compact
+
+
+def _compact_window_result(result: dict) -> dict:
+    """Preserve exact window totals/semantics and bounded module/window preview."""
+    compact = {
+        key: result[key]
+        for key in _WINDOW_META_KEYS
+        if key in result
+    }
+    omitted = dict(result.get("omittedItems") or {})
+    for key, keep in _WINDOW_PREVIEW_LIMITS.items():
+        value = result.get(key)
+        if not isinstance(value, list):
+            continue
+        compact[key] = value[:keep]
+        if len(value) > keep:
+            omitted[key] = omitted.get(key, 0) + len(value) - keep
+    if omitted:
+        compact["omittedItems"] = omitted
+    compact["_truncated"] = True
+    return compact
+
+
+def _shrink_window_result(result: dict) -> dict:
+    compact = {
+        key: result[key]
+        for key in _WINDOW_ESSENTIAL_KEYS
+        if key in result
+    }
+    omitted = dict(result.get("omittedItems") or {})
+    for key in _WINDOW_PREVIEW_LIMITS:
+        value = result.get(key)
+        if isinstance(value, list) and value:
+            omitted[key] = omitted.get(key, 0) + len(value)
+    if omitted:
+        compact["omittedItems"] = omitted
     compact["_truncated"] = True
     return compact
 
@@ -139,11 +205,15 @@ def _compact_query_result(result: dict) -> dict:
 def _shrink_query_payload(payload: dict) -> dict:
     result = payload.get("result")
     result = result if isinstance(result, dict) else {}
-    payload["result"] = {
-        key: result[key]
-        for key in _QUERY_ESSENTIAL_KEYS
-        if key in result
-    }
+    payload["result"] = (
+        _shrink_window_result(result)
+        if _is_window_result(result)
+        else {
+            key: result[key]
+            for key in _QUERY_ESSENTIAL_KEYS
+            if key in result
+        }
+    )
     payload["result"]["_truncated"] = True
     return payload
 
@@ -163,28 +233,42 @@ def bounded_step_event(event: dict) -> dict:
         if key != "type"
     }
     payload = _strip_transport(_json_safe(payload))
+    result = payload.get("result")
+    if _is_window_result(result):
+        # Window results are aggregate summaries; never persist source-detail
+        # carriers even when the whole event fits below the size cap.
+        payload["result"] = {
+            key: value for key, value in result.items()
+            if key not in _WINDOW_RAW_KEYS
+        }
     _validate_query_specs(payload)
     cap = limit("run_event_payload_cap")
     if _size(payload) <= cap:
         return payload
 
     result = payload.get("result")
-    has_query_spec = isinstance(result, dict) and "querySpec" in result
-    payload["result"] = (
-        _compact_query_result(result)
-        if has_query_spec
-        else _compact_result(result)
+    has_query_spec = isinstance(result, dict) and (
+        any(key in result for key in _QUERY_SPEC_KEYS)
+        or _is_window_result(result)
     )
+    if isinstance(result, dict) and _is_window_result(result):
+        compacted = _compact_window_result(result)
+    elif has_query_spec:
+        compacted = _compact_query_result(result)
+    else:
+        compacted = _compact_result(result)
+    payload["result"] = compacted
     if _size(payload) > cap:
         arguments = payload.get("arguments")
         if isinstance(arguments, dict):
-            if "querySpec" in arguments:
-                payload["arguments"] = {
-                    "querySpec": arguments["querySpec"],
-                    "_truncated": True,
-                }
-            else:
-                payload["arguments"] = {"_truncated": True}
+            kept = {
+                key: arguments[key]
+                for key in _QUERY_SPEC_KEYS
+                if key in arguments
+            }
+            payload["arguments"] = (
+                {**kept, "_truncated": True} if kept else {"_truncated": True}
+            )
     if _size(payload) > cap:
         if has_query_spec:
             payload = _shrink_query_payload(payload)
@@ -210,13 +294,17 @@ def cap_event_payload(payload: dict) -> dict:
     cap = limit("run_event_payload_cap")
     if _size(payload) <= cap:
         return payload
-    if payload.get("querySpec") is not None or any(
+    if any(
+        payload.get(key) is not None for key in _QUERY_SPEC_KEYS
+    ) or any(
         isinstance(payload.get(key), dict)
-        and payload[key].get("querySpec") is not None
+        and any(payload[key].get(spec_key) is not None
+                for spec_key in _QUERY_SPEC_KEYS)
         for key in ("arguments", "result")
     ):
         raise RunEventPayloadTooLarge(
-            "run_event_payload_too_large: 含 querySpec 的事件不得截断持久化"
+            "run_event_payload_too_large: 含 querySpec/moduleQuerySpec 的事件"
+            "不得截断持久化"
         )
     content = payload.get("content")
     if isinstance(content, str):

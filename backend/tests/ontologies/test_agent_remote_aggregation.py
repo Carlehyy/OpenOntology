@@ -43,8 +43,13 @@ _SUPPLIER_EXTRA_PROPERTIES = [
 ]
 
 
-def _freeze_with_rich_remote_supplier(db, ontology_id: str) -> str:
-    """冻结当前 release：ot-supplier 增补 region/rating/since_day 属性并登记远程绑定。"""
+def _freeze_with_rich_remote_supplier(
+        db, ontology_id: str, *, mapped_properties=(), unmapped_properties=()) -> str:
+    """冻结当前 release：ot-supplier 增补 region/rating/since_day 属性并登记远程绑定。
+
+    ``mapped_properties`` 追加同名列映射（用于宽对象 >32 属性投影测试），
+    ``unmapped_properties`` 只追加本体声明、不登记远程列（用于 queryable 标记）。
+    """
     from app.models.ontology import OntologyProject
     from app.models.ontology_formal import ObjectInstance
     from app.models.ontology_version import OntologyVersion
@@ -57,17 +62,30 @@ def _freeze_with_rich_remote_supplier(db, ontology_id: str) -> str:
     snapshot = _snapshot_formal(db, ontology_id)
     supplier = next(item for item in snapshot["objectTypes"]
                     if item.get("id") == "ot-supplier")
-    supplier.setdefault("properties", []).extend(_SUPPLIER_EXTRA_PROPERTIES)
+    extra = [dict(item) for item in _SUPPLIER_EXTRA_PROPERTIES]
+    columns = [dict(item) for item in _RICH_REMOTE_DESCRIPTOR["columns"]]
+    field_mapping = {"supplier_name": "sname", "region": "region",
+                     "rating": "rating", "since_day": "since_day",
+                     "__primary_key__": "supplier_name"}
+    mapped_properties = [str(name) for name in mapped_properties]
+    for name in mapped_properties:
+        extra.append({"id": f"p-{name}", "name": name,
+                      "displayName": name, "type": "string"})
+        columns.append({"name": name, "type": "string"})
+        field_mapping[name] = name
+    for name in (str(item) for item in unmapped_properties):
+        extra.append({"id": f"p-{name}", "name": name,
+                      "displayName": name, "type": "string"})
+    supplier.setdefault("properties", []).extend(extra)
+    descriptor = {**_RICH_REMOTE_DESCRIPTOR, "columns": columns}
     snapshot.setdefault("mappings", []).append({
         "id": "map-remote-agg-supplier",
         "targetObjectTypeId": "ot-supplier",
         "entityClass": "Supplier",
         "curatedDatasetId": "ds-remote-agg",
         "bindingMode": "remote",
-        "remote": _RICH_REMOTE_DESCRIPTOR,
-        "fieldMapping": {"supplier_name": "sname", "region": "region",
-                         "rating": "rating", "since_day": "since_day",
-                         "__primary_key__": "supplier_name"},
+        "remote": descriptor,
+        "fieldMapping": field_mapping,
         "status": "published",
     })
     release.snapshot_formal = snapshot
@@ -77,6 +95,15 @@ def _freeze_with_rich_remote_supplier(db, ontology_id: str) -> str:
         instance.ontology_release_id = release.id
     db.commit()
     return str(release.id)
+
+
+_WIDE_MAPPED_PROPERTIES = [f"field_{index:02d}" for index in range(43)]
+
+
+def _freeze_with_wide_remote_supplier(db, ontology_id: str) -> str:
+    """47 属性远程供应商（sname + 3 基础 + 43 payload），用于投影上限测试。"""
+    return _freeze_with_rich_remote_supplier(
+        db, ontology_id, mapped_properties=_WIDE_MAPPED_PROPERTIES)
 
 
 def _remote_runner(db, ontology_id: str, release_id: str, *,
@@ -361,6 +388,35 @@ def test_contains_enumeration_truncated_without_match_is_unresolved(
     assert len(calls) == 2
 
 
+def test_contains_truncated_enumeration_with_partial_matches_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """截断枚举只看到少量命中时不得冒充完整 contains 解析。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+
+    # LIKE 枚举本身就被截断：即使拿到了命中值也不能用它改写 in。
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([{"group": "华南", "value": 4}], total_row_count=80),
+    ])
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [{"property": "region", "op": "contains", "value": "南"}]})
+    assert len(calls) == 1  # 主统计绝不能被执行
+
+    # 全枚举兜底被截断且本地大小写不敏感匹配有命中：同样 fail closed。
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([], total_row_count=0),
+        _unified_result([{"group": "North", "value": 3}], total_row_count=80),
+    ])
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [{"property": "region", "op": "contains", "value": "north"}]})
+    assert len(calls) == 2
+
+
 # ------------------------------------------------ 3c. 0 结果覆盖探查
 
 
@@ -574,6 +630,101 @@ def test_remote_plan_page_size_over_profile_cap_reports_control_fields(
     plan = remote_query.prepare_remote_plan(
         db, admin_user, _supplier_page_request(oid, release_id, 200))
     assert plan["pageSize"] == 200
+
+
+def test_group_limit_pushes_top_n_to_source_and_reports_total_groups(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """Top-N 用 limit 下推源端 LIMIT；totalGroups 精确、truncated/matched 诚实。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([{"group0": "华南", "value": 9},
+                         {"group0": "华东", "value": 3}],
+                        total_row_count=57),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count", "group_by": "region",
+        "limit": 10})
+
+    request = calls[0]["request"]
+    assert request.page_size == 10
+    assert request.bounded_stats is True
+    assert [(item.output, item.direction) for item in request.order_by] == [
+        ("value", "desc"), ("group0", "asc")]
+    assert out["groupLimit"] == 10
+    assert out["returned"] == 2
+    assert out["totalGroups"] == 57
+    assert out["truncated"] is True
+    assert out["matched"] is None
+    assert "10" in out["truncationNote"] and "57" in out["truncationNote"]
+
+
+def test_group_limit_rejects_scalar_and_out_of_range_before_query(
+        modeled_ontology, db, admin_user, monkeypatch):
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_sequence(monkeypatch, [_unified_result([])])
+
+    with pytest.raises(ToolError, match="aggregate_objects_invalid_limit"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count", "limit": 10})
+    with pytest.raises(ToolError, match="aggregate_objects_invalid_limit"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "group_by": "region", "limit": 0})
+    with pytest.raises(ToolError, match="aggregate_objects_invalid_limit"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "group_by": "region", "limit": 201})
+    assert calls == []
+
+
+def test_grouped_drilldown_projection_is_bounded_and_keeps_query_spec(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """47 属性对象的聚合下钻明细投影也受 32 项上限，querySpec 不得静默丢失。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_wide_remote_supplier(db, oid)
+    runner = _remote_runner(db, oid, release_id, user=admin_user,
+                            session_id="conv-wide-agg")
+    calls = _patch_execute_sequence(monkeypatch, [
+        _unified_result([{"group0": "华南", "value": 4}], total_row_count=1),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count", "group_by": "region"})
+
+    assert len(calls) == 1
+    spec = out["querySpec"]
+    detail_select = spec["drilldownBase"]["select"]
+    assert len(detail_select) == 32
+    assert [item["property"] for item in detail_select][:2] == ["sname", "region"]
+    omitted = spec["description"]["drilldownOmittedFields"]
+    assert omitted and "field_42" in omitted
+    assert spec["description"]["groupBy"] == [
+        {"property": "region", "bucket": None}]
+    assert out["querySpecHash"]
+
+
+def test_unmapped_remote_property_is_rejected_before_any_source_query(
+        modeled_ontology, db, admin_user, monkeypatch):
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(
+        db, oid, unmapped_properties=["internal_note"])
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    calls = _patch_execute_sequence(monkeypatch, [_unified_result([{"value": 1}])])
+
+    with pytest.raises(ToolError, match="remote_aggregate_property_unqueryable"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [{"property": "internal_note", "op": "eq", "value": "x"}]})
+    with pytest.raises(ToolError, match="remote_aggregate_property_unqueryable"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "group_by": "internal_note"})
+    assert calls == []  # 校验在 contains/枚举/主查询之前完成
 
 
 # ------------------------------------------------ 6. 数值精确

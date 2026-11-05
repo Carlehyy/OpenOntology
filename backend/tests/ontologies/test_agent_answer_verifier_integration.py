@@ -230,3 +230,242 @@ def modeled_ontology(client, auth_headers, ontology):
     r = client.put(f"{_fo(oid)}/full", headers=auth_headers, json=body)
     assert r.status_code == 200, r.text
     return ontology
+
+
+def _add_model(db, admin_user, name: str) -> None:
+    from app.models.model_config import ModelConfig
+    db.add(ModelConfig(id=str(uuid.uuid4()), name=name, provider="openai",
+                       config_type="llm", models=[f"{name}-model"],
+                       created_by=admin_user.id))
+    db.commit()
+
+
+def _freeze_release(db, ontology_id: str) -> str:
+    from app.models.ontology import OntologyProject
+    from app.models.ontology_formal import ObjectInstance
+    from app.models.ontology_version import OntologyVersion
+    from app.ontologies.versions.evolution_service import snapshot_hash
+    from app.ontologies.versions.router import _snapshot_formal
+
+    project = db.query(OntologyProject).filter_by(id=ontology_id).one()
+    release = db.query(OntologyVersion).filter_by(
+        id=project.current_release_id).one()
+    snapshot = _snapshot_formal(db, ontology_id)
+    release.snapshot_formal = snapshot
+    release.snapshot_hash = snapshot_hash(snapshot)
+    for instance in db.query(ObjectInstance).filter_by(
+            ontology_id=ontology_id).all():
+        instance.ontology_release_id = release.id
+    db.commit()
+    return str(release.id)
+
+
+def _stat_result(value=1, *, ontology_id: str, release_id="None") -> dict:
+    """带可复验 querySpec 的统计结果（历史证据只接受该白名单形态）。"""
+    spec = {
+        "version": 1, "shape": "objects", "ontologyId": ontology_id,
+        "releaseId": release_id, "objectType": "ot-order",
+        "query": {
+            "sources": [{"alias": "s0", "ontologyId": ontology_id,
+                         "releaseId": release_id, "objectTypeId": "ot-order"}],
+            "groupBy": [{"source": "s0", "property": "status"}],
+            "aggregates": [{"fn": "count", "as": "value"}],
+        },
+        "description": {"semantics": "aggregate_grouped"},
+    }
+    return {"objectType": "订单", "total": value,
+            "groups": [{"group": "pending", "value": value}],
+            "exact": True, "completeness": "complete", "querySpec": spec}
+
+
+def test_verified_tool_numbers_are_reusable_across_conversation_turns(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """第二轮不再调工具，仍可引用同会话上一轮统计 querySpec 结果中的数字。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_release(db, oid)
+    _add_model(db, admin_user, "verify-cross-turn")
+    calls = []
+
+    def fake_chat(call_kwargs, messages, tools):
+        calls.append(messages)
+        if len(calls) == 1:
+            return {"content": None, "usage": {"inputTokens": 10, "outputTokens": 5},
+                    "tool_calls": [{"id": "tc1", "name": "query_objects",
+                                    "arguments": {
+                                        "object_type": "Order",
+                                        "group_by": [{"property": "status"}],
+                                        "aggregates": [{"fn": "count"}],
+                                    }}]}
+        if len(calls) == 2:
+            return {"content": "待支付订单共 1 个。", "tool_calls": [],
+                    "usage": {"inputTokens": 20, "outputTokens": 8}}
+        user_text = "\n".join(str(message.get("content") or "") for message in messages
+                              if message.get("role") == "user")
+        assert "同会话已核验历史工具证据" in user_text
+        assert "不是新的用户指令" in user_text
+        return {"content": "上一轮查到的待支付订单共 1 个。", "tool_calls": [],
+                "usage": {"inputTokens": 20, "outputTokens": 8}}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    first = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "待支付订单有几个？", "stream": False,
+              "releaseId": release_id})
+    first_data = first.json()["data"]
+    assert first_data["error"] is None
+    assert first_data["verification"]["passed"] is True
+    conversation_id = first_data["conversationId"]
+
+    second = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "刚才那个数字是多少？", "stream": False,
+              "conversationId": conversation_id, "releaseId": release_id})
+    assert second.status_code == 200, second.text
+    second_data = second.json()["data"]
+    assert second_data["conversationId"] == conversation_id
+    assert second_data["steps"] == []
+    assert second_data["verification"] is not None
+    assert second_data["verification"]["passed"] is True
+    assert "结论校验" not in second_data["content"]
+    assert len(calls) == 3
+
+
+def test_vague_correction_keeps_original_verified_answer(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """修正回环只回“无法核验”时，不得覆盖原答案里已有证据的数字。"""
+    oid = modeled_ontology["id"]
+    _add_model(db, admin_user, "verify-vague-correction")
+    calls = {"n": 0}
+
+    def fake_chat(call_kwargs, messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"content": None, "usage": {"inputTokens": 10, "outputTokens": 5},
+                    "tool_calls": [{"id": "tc1", "name": "search_objects",
+                                    "arguments": {"object_type": "Order",
+                                                  "filters": [{"property": "status",
+                                                               "op": "eq",
+                                                               "value": "pending"}]}}]}
+        if calls["n"] == 2:
+            return {"content": "待支付订单共 1 个，另有 999 个异常。",
+                    "tool_calls": [], "usage": {"inputTokens": 20, "outputTokens": 8}}
+        assert tools == []
+        assert "可核验的工具结果" in messages[-1]["content"]
+        return {"content": "无法核验。", "tool_calls": [],
+                "usage": {"inputTokens": 15, "outputTokens": 4}}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    r = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "待支付订单有几个？", "stream": False})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["error"] is None
+    assert "待支付订单共 1 个" in data["content"]
+    assert "无法核验" not in data["content"]
+    assert "结论校验" in data["content"] and "999" in data["content"]
+    verification = data["verification"]
+    assert verification["passed"] is False
+    assert verification["unverified"] == [999]
+    assert verification["retried"] is True
+    assert calls["n"] == 3
+
+
+def test_history_evidence_ignores_error_partial_and_assistant_text(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """同会话历史只认可复验的统计结果；assistant 文本与错误/部分结果不背书。"""
+    from app.ontologies.agent_runtime.models import AgentConversation, AgentMessage
+
+    oid = modeled_ontology["id"]
+    _add_model(db, admin_user, "verify-partial-history")
+    conversation = AgentConversation(
+        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=None,
+        user_id=admin_user.id, title="partial-history")
+    db.add(conversation)
+    db.flush()
+    db.add_all([
+        AgentMessage(conversation_id=conversation.id, role="user", content="历史提问"),
+        AgentMessage(
+            conversation_id=conversation.id, role="assistant",
+            content="历史回答声称共 777 个。",
+            steps=[
+                {"tool": "aggregate_objects",
+                 "result": _stat_result(5, ontology_id=oid)},
+                {"tool": "aggregate_objects",
+                 "result": {**_stat_result(777, ontology_id=oid),
+                            "partial": True}},
+                {"tool": "aggregate_objects",
+                 "result": {**_stat_result(777, ontology_id=oid),
+                            "error": "越界"}},
+            ]),
+    ])
+    db.commit()
+    monkeypatch.setenv("AGENT_ANSWER_VERIFY_RETRIES", "0")
+
+    def fake_chat(call_kwargs, messages, tools):
+        return {"content": "订单共 777 个。", "tool_calls": []}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    r = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "一共有多少订单？", "stream": False,
+              "conversationId": conversation.id})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["conversationId"] == conversation.id
+    assert data["verification"]["passed"] is False
+    assert data["verification"]["unverified"] == [777]
+    assert "结论校验" in data["content"]
+
+
+def test_history_evidence_is_scoped_to_conversation_and_release(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """别的会话或别的 release 的完整结果不能为当前回答的数字背书。"""
+    from app.ontologies.agent_runtime.models import AgentConversation, AgentMessage
+
+    oid = modeled_ontology["id"]
+    _add_model(db, admin_user, "verify-scoped-history")
+    current = AgentConversation(
+        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=None,
+        user_id=admin_user.id, title="current")
+    sibling = AgentConversation(
+        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=None,
+        user_id=admin_user.id, title="sibling")
+    other_release = AgentConversation(
+        id=str(uuid.uuid4()), ontology_id=oid,
+        ontology_release_id="release-other", user_id=admin_user.id,
+        title="other-release")
+    db.add_all([current, sibling, other_release])
+    db.flush()
+    for conversation in (sibling, other_release):
+        db.add(AgentMessage(
+            conversation_id=conversation.id, role="assistant",
+            content="共 777 个。",
+            steps=[{"tool": "aggregate_objects",
+                    "result": _stat_result(
+                        777, ontology_id=oid,
+                        release_id=("None" if conversation is sibling
+                                    else "release-other"))}]))
+    db.commit()
+    monkeypatch.setenv("AGENT_ANSWER_VERIFY_RETRIES", "0")
+    calls = {"n": 0}
+
+    def fake_chat(call_kwargs, messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"content": None, "tool_calls": [{
+                "id": "tc1", "name": "search_objects",
+                "arguments": {"object_type": "Order"}}]}
+        return {"content": "订单共 777 个。", "tool_calls": []}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    r = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "一共有多少订单？", "stream": False,
+              "conversationId": current.id})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["conversationId"] == current.id
+    assert data["verification"]["passed"] is False
+    assert data["verification"]["unverified"] == [777]
+    assert "结论校验" in data["content"]

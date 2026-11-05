@@ -7,6 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.ontologies.formal_modeling.schemas import CamelModel
 
+# 单一查询请求的投影上限：助手工具装配默认投影/下钻明细投影时必须与
+# QueryRequest 契约共用同一常量，避免默认 47 属性等宽对象越界后才在
+# schema 校验层报错。上限是协议契约，不随 profile 行帽变化。
+MAX_SELECT_ITEMS = 32
+MAX_PAGE_SIZE = 200
+MAX_SOURCES = 8
+
 
 class _Strict(CamelModel):
     """查询面契约：拒绝而非丢弃未知字段。"""
@@ -120,7 +127,10 @@ class GroupByItem(_Strict):
     property: str = Field(min_length=1, max_length=200)
     # 时间分桶：仅 date/datetime/timestamp 属性可用；分组值归一为桶起点
     # （周为周一），趋势类问题一次下推取全期间，替代逐期串行查询。
-    bucket: Optional[Literal["day", "week", "month", "quarter", "year"]] = None
+    # half_hour 为固定 30 分钟窗（输出 timestamp，不是日期），用于
+    # “同一模块每半小时窗口内去重主体数”类问题。
+    bucket: Optional[Literal["half_hour", "day", "week", "month",
+                             "quarter", "year"]] = None
 
 
 class AggregateItem(_Strict):
@@ -146,16 +156,16 @@ class SemanticBinding(_Strict):
 
 class QueryRequest(_Strict):
     sources: list[QuerySource] = Field(default_factory=list, min_length=0,
-                                       max_length=8)
+                                       max_length=MAX_SOURCES)
     joins: list[QueryJoin] = Field(default_factory=list, max_length=7)
     source_filters: list[SourceFilter] = Field(default_factory=list, max_length=8)
     where: list[FilterNode] = Field(default_factory=list, max_length=16)
-    select: list[SelectItem] = Field(default_factory=list, max_length=32)
+    select: list[SelectItem] = Field(default_factory=list, max_length=MAX_SELECT_ITEMS)
     group_by: list[GroupByItem] = Field(default_factory=list, max_length=8)
     aggregates: list[AggregateItem] = Field(default_factory=list, max_length=8)
     distinct: bool = False
     order_by: list[OrderByItem] = Field(default_factory=list, max_length=8)
-    page_size: Optional[int] = Field(default=None, ge=1, le=200)
+    page_size: Optional[int] = Field(default=None, ge=1, le=MAX_PAGE_SIZE)
     # 有界分组统计：分组聚合在源端按 pageSize 截断（需显式 orderBy 保证
     # top-N 确定性），返回的分组值精确、总组数精确，但超过截断的分组不可
     # 继续翻页 —— 供助手聚合工具防止高基数分组全量回流内存。

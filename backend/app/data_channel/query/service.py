@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import math
 import re
 import sys
@@ -57,6 +58,7 @@ from .parser import (Command, Expr, Pipeline, Ref, Value, parse,
 
 _json = canonical_json
 _hash = stable_hash
+logger = logging.getLogger(__name__)
 
 # Lazy detail continuation: ordering keys must compare exactly (never a lossy
 # float or an unordered boolean/JSON/binary cell) so the strictly-after keyset
@@ -68,7 +70,31 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
-def _query_dbapi_error(exc: DBAPIError) -> QueryError:
+def _driver_error_fields(exc: DBAPIError) -> dict[str, Any]:
+    """Redacted driver identity for logs: class names and numeric codes only.
+
+    Raw driver text, SQL, parameters and credentials never enter the log line.
+    """
+    original = getattr(exc, "orig", None)
+    fields: dict[str, Any] = {"driver": type(exc).__name__, "code": None, "sqlstate": None}
+    if original is None:
+        return fields
+    fields["driver"] = f"{type(original).__module__.split('.')[0]}.{type(original).__name__}"
+    args = getattr(original, "args", ())
+    if args and type(args[0]) is int:
+        fields["code"] = args[0]
+    for attribute in ("pgcode", "sqlstate"):
+        value = getattr(original, attribute, None)
+        if isinstance(value, str) and re.fullmatch(r"[0-9A-Z]{5}", value):
+            fields["sqlstate"] = value
+            break
+    return fields
+
+
+def _query_dbapi_error(exc: DBAPIError, *, stage: str = "query_execution") -> QueryError:
+    fields = _driver_error_fields(exc)
+    logger.warning("unified query driver error stage=%s driver=%s code=%s sqlstate=%s",
+                   stage, fields["driver"], fields["code"], fields["sqlstate"])
     code = getattr(exc.orig, "pgcode", None)
     driver_args = getattr(exc.orig, "args", ())
     if driver_args and driver_args[0] in {3024, 1969}:
@@ -721,6 +747,7 @@ class QueryService:
                 }
                 compiled = compile_query(plan.pipeline, execution_relations, plan.params)
             result_limited = False
+            before_limit_total = None
             if compiled.before_limit is not None:
                 count_stmt = sa.select(sa.func.count().label("n")).select_from(
                     compiled.before_limit.order_by(None).subquery())
@@ -733,6 +760,7 @@ class QueryService:
                 else:
                     self._platform_budget()
                     n = self.db.execute(count_stmt, compiled.params).scalar_one()
+                before_limit_total = n
                 limit_cmd = plan.pipeline.commands[-1]
                 result_limited = n > limit_cmd.args[0] or (len(limit_cmd.args) > 1 and limit_cmd.args[1] > 0 and n > 0)
             snapshot_id = str(uuid.uuid4())
@@ -783,7 +811,8 @@ class QueryService:
                 source_states=source_states, consistency=consistency,
                 plan={"strategy": "source_pushdown" if native else "postgresql_staged_sql" if self.staging_tables else "postgresql_sql",
                       "operators": [cmd.op for cmd in plan.pipeline.commands], "sourceRows": self.source_rows,
-                      "stagingBytes": self.stage_bytes}, result_limited=result_limited,
+                      "stagingBytes": self.stage_bytes,
+                      "totalRowsBeforeLimit": before_limit_total}, result_limited=result_limited,
                 total_rows=total, result_bytes=result_bytes, page_size=plan.page_size,
                 created_at=now, expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.limits.snapshot_ttl_seconds))
             self.db.add(snapshot)
@@ -810,7 +839,7 @@ class QueryService:
             control = current_query_control()
             if control is not None and control.cancelled():
                 raise QueryError(409, "query_cancelled", "Query execution was cancelled") from None
-            raise _query_dbapi_error(exc) from exc
+            raise _query_dbapi_error(exc, stage="persisted_execution") from exc
         finally:
             try:
                 self.stack.__exit__(*sys.exc_info())
@@ -1432,6 +1461,12 @@ class QueryService:
             outer_joins = {cmd.args[1] for cmd in plan.pipeline.commands if cmd.op == "join"}
             result = executor.run({alias: constraint for alias, constraint in plan.join_constraints.items()
                                    if alias in outer_joins})
+            if result.pre_limit_rows is not None:
+                # Deliberately bounded stats keep their exact total (group)
+                # count even though only the LIMIT prefix is materialized:
+                # pagination still ends at the materialized rows, while the
+                # adapter reports this exact count as totalRowCount.
+                result.plan["totalRowsBeforeLimit"] = result.pre_limit_rows
             # EOF re-authorization on every relation before publication.
             for relation in execution_relations.values():
                 if relation.recheck: relation.recheck()
@@ -1473,7 +1508,7 @@ class QueryService:
             if control.cancelled():
                 raise QueryError(409, "query_cancelled", "Query execution was cancelled") from None
             self._deadline()
-            raise _query_dbapi_error(exc) from exc
+            raise _query_dbapi_error(exc, stage="memory_execution") from exc
         finally:
             try:
                 self.stack.__exit__(*sys.exc_info())
@@ -1542,7 +1577,7 @@ class QueryService:
                 if relation.recheck: relation.recheck()
             return self._page(snapshot, start)
         except DBAPIError as exc:
-            primary_error = _query_dbapi_error(exc)
+            primary_error = _query_dbapi_error(exc, stage="persisted_cursor_fetch")
             raise primary_error from exc
         except BaseException as exc:
             primary_error = exc
@@ -1557,7 +1592,8 @@ class QueryService:
                 # Cleanup must not replace the page's original failure.
                 if primary_error is None:
                     if isinstance(exc, DBAPIError):
-                        raise _query_dbapi_error(exc) from exc
+                        raise _query_dbapi_error(
+                            exc, stage="persisted_cursor_fetch_cleanup") from exc
                     raise
 
     def memory_origin(self, token: str) -> dict:
@@ -1635,7 +1671,7 @@ class QueryService:
                 if relation.recheck: relation.recheck()
             return self._page_memory(handle, start)
         except DBAPIError as exc:
-            primary_error = _query_dbapi_error(exc)
+            primary_error = _query_dbapi_error(exc, stage="memory_cursor_fetch")
             raise primary_error from exc
         except BaseException as exc:
             primary_error = exc
@@ -1649,7 +1685,8 @@ class QueryService:
             except BaseException as exc:
                 if primary_error is None:
                     if isinstance(exc, DBAPIError):
-                        raise _query_dbapi_error(exc) from exc
+                        raise _query_dbapi_error(
+                            exc, stage="memory_cursor_fetch_cleanup") from exc
                     raise
 
     # -- paging -----------------------------------------------------------------

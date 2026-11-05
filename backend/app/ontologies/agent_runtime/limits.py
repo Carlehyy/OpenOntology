@@ -22,8 +22,11 @@ class AgentRuntimeLimit:
     description: str
 
 
-# 默认值与原实现常量保持完全一致：本次重构零行为变化。
 _LIMITS: tuple[AgentRuntimeLimit, ...] = (
+    AgentRuntimeLimit(
+        "llm_timeout_seconds", 30, 1, 600,
+        "AGENT_LLM_TIMEOUT_SECONDS",
+        "本体助手模型请求的无响应超时（秒），不自动重试超时请求"),
     AgentRuntimeLimit(
         "tool_result_display_cap", 6000, 1000, 200_000,
         "AGENT_TOOL_RESULT_DISPLAY_CAP",

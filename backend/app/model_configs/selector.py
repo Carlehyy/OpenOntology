@@ -121,6 +121,9 @@ def llm_call_kwargs(model_config) -> dict | None:
     max_context = _positive_int(options.get("max_context_tokens"))
     if max_context:
         kwargs["max_context_tokens"] = max_context
+    assistant_timeout = _positive_int(options.get("ontology_assistant_timeout_seconds"))
+    if assistant_timeout:
+        kwargs["ontology_assistant_timeout_seconds"] = min(assistant_timeout, 600)
     return kwargs
 
 

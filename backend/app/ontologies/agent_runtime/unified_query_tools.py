@@ -26,9 +26,9 @@ from app.ontologies.agent_runtime.query_handles import (
     _release_terminal_page,
 )
 from app.ontologies.agent_runtime.query_planning import (
-    _build_description, _definition_type, _definitions, _leaf,
-    _resolve_type_reference, _spec_from_request, _spl_bindings,
-    _visible_properties,
+    _bounded_projection, _build_description, _definition_type, _definitions,
+    _leaf, _projection_payload, _resolve_type_reference, _spec_from_request,
+    _spl_bindings, _visible_properties,
 )
 from app.ontologies.agent_runtime.query_response import (
     _attach_drilldowns, _consistency, _data_mode, _group_items_from_spec,
@@ -48,9 +48,9 @@ from app.ontologies.agent_runtime.read_queries import (
 _FILTER_OPS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "in",
                "is_null", "is_not_null"}
 _AGGREGATE_FNS = {"count", "count_distinct", "sum", "avg", "min", "max"}
-_BUCKETS = {"day", "week", "month", "quarter", "year"}
-_BUCKET_UNITS = {"day": "日", "week": "周", "month": "月",
-                 "quarter": "季", "year": "年"}
+_BUCKETS = {"half_hour", "day", "week", "month", "quarter", "year"}
+_BUCKET_UNITS = {"half_hour": "半小时", "day": "日", "week": "周",
+                 "month": "月", "quarter": "季", "year": "年"}
 _SPL_KEYS = {"spl", "semanticBindings", "semantic_bindings", "params",
              "cursor", "page_size"}
 
@@ -198,6 +198,17 @@ def query_objects(db, scope, user, session_id: str, args: dict,
 
     base_ot = scope.require_object_type(args.get("object_type", ""))
 
+    # 显式投影超过单一查询协议上限时，在执行前给出可操作错误；不能让
+    # pydantic 的 max_length 报文（或执行期失败）冒充查询结果。
+    explicit_select = args.get("select")
+    if explicit_select is not None:
+        if not isinstance(explicit_select, list):
+            raise ToolError("query_objects_invalid_query: select 必须是数组")
+        if len(explicit_select) > QS.MAX_SELECT_ITEMS:
+            raise ToolError(
+                f"query_objects_select_too_many: select 最多 {QS.MAX_SELECT_ITEMS} 项"
+                f"（当前 {len(explicit_select)} 项）；请拆分查询或减少输出字段")
+
     # ---- 源与关联展开：s0 为主对象，joins 依序链式引入 s1..sN ----
     aliases: dict[str, str] = {base_ot.id: "s0"}
     label_of: dict[str, str] = {"s0": base_ot.display_name}
@@ -245,8 +256,25 @@ def query_objects(db, scope, user, session_id: str, args: dict,
                             "主对象或 joins 中出现")
         return aliases[ot.id], ot
 
+    queryable_cache: dict[str, list[str]] = {}
+
+    def queryable_props(ot) -> list[str]:
+        if ot.id not in queryable_cache:
+            queryable_cache[ot.id] = _visible_properties(scope, ot)
+        return queryable_cache[ot.id]
+
     def resolve_prop(ot, prop):
-        return scope.resolve_visible_property(ot, prop)
+        # 授权 + 声明检查之外，远程绑定对象还必须在源执行前确认存在列映射；
+        # 否则错误只能在计划编制阶段暴露，且提示不含可查询属性清单。
+        name = scope.resolve_visible_property(ot, prop)
+        available_names = queryable_props(ot)
+        if name not in set(available_names):
+            available = "、".join(available_names) or "（无）"
+            raise ToolError(
+                f"query_objects_property_unqueryable: 属性「{name}」在对象类型"
+                f"「{ot.display_name}」上没有远程列映射或不可查询；"
+                f"可查询属性：{available}")
+        return name
 
     # ---- 过滤：object_type 缺省为主对象 ----
     where = []
@@ -259,6 +287,7 @@ def query_objects(db, scope, user, session_id: str, args: dict,
 
     # ---- 服务端相对时间窗口：一次解析为绝对 [start, end) ----
     resolved_window = None
+    window_alias = window_prop = None
     raw_window = args.get("window")
     if raw_window is not None:
         if not isinstance(raw_window, dict):
@@ -266,6 +295,7 @@ def query_objects(db, scope, user, session_id: str, args: dict,
         wanted_type = raw_window.get("object_type")
         alias, ot = alias_for(wanted_type)
         prop = resolve_prop(ot, raw_window.get("property", ""))
+        window_alias, window_prop = alias, prop
         window_input = {key: value for key, value in raw_window.items()
                         if key != "object_type"}
         window_input["property"] = prop
@@ -308,6 +338,8 @@ def query_objects(db, scope, user, session_id: str, args: dict,
     readable_of: dict[str, str] = {}
     select, group_by, aggregates = [], [], []
     select_entries: list[tuple[str, str, object]] = []
+    projection = None
+    detail_projection = None
     if stats_mode:
         for index, item in enumerate(group_items):
             out = f"g{index}"
@@ -326,7 +358,22 @@ def query_objects(db, scope, user, session_id: str, args: dict,
     else:
         select_args = args.get("select") or None
         if select_args is None:
-            for prop in _visible_properties(scope, base_ot):
+            # 默认投影：可查询主键与当前过滤/排序/窗口字段优先，再补齐其余
+            # 可查询属性；超过单一 select 上限时显式记录 omittedFields，
+            # 绝不把 47 个属性直接塞进请求等 pydantic 越界。
+            preferred: list[str] = []
+            for leaf in where:
+                if leaf.get("source") == "s0" and leaf.get("property"):
+                    preferred.append(str(leaf["property"]))
+            if window_alias == "s0" and window_prop:
+                preferred.append(window_prop)
+            for item in args.get("order_by") or []:
+                if isinstance(item, dict) and isinstance(item.get("output"), str):
+                    preferred.append(item["output"])
+            selected, omitted = _bounded_projection(
+                scope, base_ot, preferred=preferred)
+            projection = _projection_payload(selected, omitted)
+            for prop in selected:
                 select_entries.append(("s0", prop, base_ot))
         else:
             for item in select_args:
@@ -357,6 +404,10 @@ def query_objects(db, scope, user, session_id: str, args: dict,
         out = next((key for key, label in readable_outputs.items()
                     if label == name or key == name), None)
         if out is None:
+            if projection is not None and name in projection["omittedFields"]:
+                raise ToolError(
+                    f"query_objects_order_field_omitted: 排序字段「{name}」因默认投影"
+                    f"上限（{QS.MAX_SELECT_ITEMS}）未包含；请显式 select 该字段或减少输出字段")
             raise ToolError(f"query_objects_invalid_query: 排序引用未知输出「{name}」；"
                             f"可用：{'、'.join(sorted(set(readable_outputs.values())))}")
         direction = item.get("direction", "asc")
@@ -384,9 +435,24 @@ def query_objects(db, scope, user, session_id: str, args: dict,
                           for item in order_items],
                 page_size=page_size)
             if stats_mode:
+                # 下钻明细投影与主投影共用同一 32 项协议上限：分组字段与
+                # 过滤/窗口字段优先，其余可查询属性截断并显式标记省略。
+                detail_preferred: list[str] = []
+                for item in group_items:
+                    if item["source"] == "s0":
+                        detail_preferred.append(item["property"])
+                for leaf in where:
+                    if leaf.get("source") == "s0" and leaf.get("property"):
+                        detail_preferred.append(str(leaf["property"]))
+                if window_alias == "s0" and window_prop:
+                    detail_preferred.append(window_prop)
+                detail_selected, detail_omitted = _bounded_projection(
+                    scope, base_ot, preferred=detail_preferred)
+                detail_projection = _projection_payload(
+                    detail_selected, detail_omitted)
                 detail_select = [
                     QS.SelectItem(source="s0", property=prop, as_=f"c{index}")
-                    for index, prop in enumerate(_visible_properties(scope, base_ot))
+                    for index, prop in enumerate(detail_selected)
                 ]
                 if not detail_select:
                     detail_select = [QS.SelectItem(
@@ -401,12 +467,16 @@ def query_objects(db, scope, user, session_id: str, args: dict,
                 joined_labels=[label_of[f"s{i}"] for i in range(1, len(sources))],
                 select_entries=select_entries, group_items=group_items,
                 aggregate_items=aggregate_items, order_by=order_items,
-                resolved_window=resolved_window, page_size=page_size)
+                resolved_window=resolved_window, page_size=page_size,
+                omitted_fields=(projection["omittedFields"]
+                                if projection is not None else None))
             spec = _spec_from_request(
                 request=request, scope=scope, base_ot=base_ot,
                 labels=readable_of, resolved_window=resolved_window,
                 description=description, stats_mode=stats_mode,
-                detail_request=detail_request)
+                detail_request=detail_request,
+                detail_omitted_fields=(detail_projection["omittedFields"]
+                                       if detail_projection is not None else None))
             data = execute_unified_query(
                 db, user, request, session_kind="ontology_agent",
                 session_id=session_id or "", include_page_size=True)
@@ -456,6 +526,11 @@ def query_objects(db, scope, user, session_id: str, args: dict,
         "resolvedWindow": window_for_result(resolved_window),
         "consistency": _consistency(data, page_fetch=page_fetch),
     }
+    if projection is not None:
+        # 投影元数据与观测行分离：omittedFields 不是列、不逐行出现。
+        out["projection"] = projection
+    if detail_projection is not None and detail_projection["omittedFields"]:
+        out["drilldownProjection"] = detail_projection
     if stats_mode:
         out["groupBy"] = [
             (f"{item['readable']}({_BUCKET_UNITS[item['bucket']]})"

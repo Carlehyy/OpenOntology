@@ -177,6 +177,23 @@ def test_chat_non_transient_error_not_retried(monkeypatch):
     assert sleeps == []
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_call_can_disable_transient_retries(monkeypatch, streaming):
+    def create(**kwargs):
+        raise _FakeInternalServerError("provider unavailable")
+
+    calls = _install_fake_openai(monkeypatch, create)
+    sleeps = _record_sleeps(monkeypatch)
+    kwargs = {**_KWARGS, "retry_max_attempts": 1, "timeout_seconds": 30}
+    with pytest.raises(gw.LLMError):
+        if streaming:
+            list(gw.chat_stream(kwargs, _MESSAGES, []))
+        else:
+            gw.chat(kwargs, _MESSAGES, [])
+    assert len(calls) == 1
+    assert sleeps == []
+
+
 # ---------------------------------------------------------------------------
 # chat_stream()：仅建连阶段重试
 # ---------------------------------------------------------------------------

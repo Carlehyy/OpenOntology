@@ -1014,6 +1014,170 @@ def test_large_legal_query_spec_survives_event_run_and_replay(
     assert step_event["arguments"]["querySpec"] == spec
 
 
+def _window_step(*, token_size: int = 200) -> dict:
+    query_spec = {"version": 1, "shape": "objects",
+                  "query": {"sources": [], "aggregates": []}}
+    module_spec = {"version": 1, "shape": "objects",
+                   "query": {"sources": [], "groupBy": []}}
+    modules = [
+        {"module": f"module-{index:03d}",
+         "moduleValues": [f"module-{index:03d}"],
+         "qualifyingWindows": index,
+         "maxDistinctSubjects": index % 30}
+        for index in range(80)
+    ]
+    samples = [
+        {"module": f"module-{index:03d}",
+         "moduleValues": [f"module-{index:03d}"],
+         "windowStart": "2026-09-10T17:30:00+08:00",
+         "windowEnd": "2026-09-10T18:00:00+08:00",
+         "windowStartUtc": "2026-09-10T09:30:00+00:00",
+         "windowEndUtc": "2026-09-10T10:00:00+00:00",
+         "distinctSubjects": 7,
+         "candidateRows": 9,
+         "drilldown": {"token": "t" * token_size}}
+        for index in range(20)
+    ]
+    result = {
+        "kind": "sequence_analysis",
+        "mode": "window_distinct",
+        "objectType": "事件",
+        "subjectProperty": "actor",
+        "timeProperty": "occurred_at",
+        "window": {"property": "occurred_at", "timezone": "Asia/Shanghai",
+                   "start": "2026-09-01T00:00:00+08:00",
+                   "end": "2026-10-01T00:00:00+08:00"},
+        "windowMinutes": 30,
+        "windowBucket": "half_hour",
+        "windowTimezone": "Asia/Shanghai",
+        "windowAlignment": "half-hour tumbling windows on UTC/source timestamps",
+        "threshold": 5,
+        "thresholdScope": "distinct_subjects_per_fixed_window",
+        "qualifyingWindows": 2757,
+        "qualifyingModules": 144,
+        "moduleCount": 144,
+        "modules": modules,
+        "modulesTruncated": True,
+        "moduleLimit": 10,
+        "sampleWindows": samples,
+        "sampleWindowsTruncated": True,
+        "evaluatedWindows": None,
+        "evaluatedWindowsAvailable": False,
+        "exact": True,
+        "partial": False,
+        "completeness": "complete",
+        "completenessScope": "query_execution",
+        "dataMode": "remote",
+        "querySpec": query_spec,
+        "moduleQuerySpec": module_spec,
+        "querySpecHash": "window-spec-hash",
+        "moduleQuerySpecHash": "window-module-spec-hash",
+        "observedAt": "2026-11-05T00:00:00+00:00",
+        "consistency": {"sameSnapshot": False,
+                        "mode": "window_distinct_multi_query"},
+        "limitations": ["multi_query_observation_not_single_snapshot"],
+        "note": "qualifyingWindows/qualifyingModules 为源端精确聚合结果",
+        # Raw source detail must never be persisted by the run ledger compaction.
+        "rows": [{"raw": "source-row"}],
+        "sourceRows": [{"raw": "source-row"}],
+        "rawRows": [{"raw": "source-row"}],
+    }
+    return {
+        "type": "step",
+        "tool": "analyze_sequences",
+        "arguments": {"querySpec": query_spec,
+                      "moduleQuerySpec": module_spec,
+                      "objectType": "事件"},
+        "summary": "窗口统计",
+        "durationMs": 1,
+        "result": result,
+    }
+
+
+def test_bounded_step_event_window_drops_raw_source_rows_below_cap(monkeypatch):
+    from app.ontologies.agent_runtime.run_events import bounded_step_event
+
+    monkeypatch.setenv("AGENT_RUN_EVENT_PAYLOAD_CAP", "100000")
+    event = _window_step(token_size=10)
+    assert len(json.dumps(event, ensure_ascii=False)) <= 100000
+
+    payload = bounded_step_event(event)
+    result = payload["result"]
+    assert result["qualifyingWindows"] == 2757
+    assert result["modulesTruncated"] is True
+    assert len(result["modules"]) == 80
+    assert len(result["sampleWindows"]) == 20
+    for key in ("rows", "sourceRows", "rawRows", "remoteRows", "raw"):
+        assert key not in result
+
+
+def test_bounded_step_event_oversized_window_keeps_exact_totals_and_preview(
+        monkeypatch,
+):
+    from app.ontologies.agent_runtime.run_events import bounded_step_event
+
+    monkeypatch.setenv("AGENT_RUN_EVENT_PAYLOAD_CAP", "12000")
+    event = _window_step()
+    assert len(json.dumps(event, ensure_ascii=False)) > 12000
+
+    payload = bounded_step_event(event)
+    assert len(json.dumps(payload, ensure_ascii=False)) <= 12000
+    result = payload["result"]
+
+    assert result["mode"] == "window_distinct"
+    assert result["qualifyingWindows"] == 2757
+    assert result["qualifyingModules"] == 144
+    assert result["moduleCount"] == 144
+    assert result["modulesTruncated"] is True
+    assert result["moduleLimit"] == 10
+    assert result["sampleWindowsTruncated"] is True
+    assert result["windowMinutes"] == 30
+    assert result["windowBucket"] == "half_hour"
+    assert result["windowTimezone"] == "Asia/Shanghai"
+    assert result["windowAlignment"] == (
+        "half-hour tumbling windows on UTC/source timestamps")
+    assert result["_truncated"] is True
+    assert len(result["modules"]) == 10
+    assert len(result["sampleWindows"]) == 5
+    assert result["omittedItems"] == {"modules": 70, "sampleWindows": 15}
+    assert result["querySpec"] == event["result"]["querySpec"]
+    assert result["moduleQuerySpec"] == event["result"]["moduleQuerySpec"]
+    assert result["moduleQuerySpecHash"] == "window-module-spec-hash"
+    assert payload["arguments"]["moduleQuerySpec"] == \
+        event["result"]["moduleQuerySpec"]
+    for key in ("rows", "sourceRows", "rawRows", "remoteRows"):
+        assert key not in result
+
+
+def test_bounded_step_event_window_shrink_keeps_totals_and_honest_omissions(
+        monkeypatch,
+):
+    from app.ontologies.agent_runtime.run_events import bounded_step_event
+
+    monkeypatch.setenv("AGENT_RUN_EVENT_PAYLOAD_CAP", "8000")
+    event = _window_step(token_size=1200)
+    assert len(json.dumps(event, ensure_ascii=False)) > 8000
+
+    payload = bounded_step_event(event)
+    assert len(json.dumps(payload, ensure_ascii=False)) <= 8000
+    result = payload["result"]
+
+    assert result["qualifyingWindows"] == 2757
+    assert result["qualifyingModules"] == 144
+    assert result["moduleCount"] == 144
+    assert result["modulesTruncated"] is True
+    assert result["sampleWindowsTruncated"] is True
+    assert result["_truncated"] is True
+    assert result["omittedItems"] == {"modules": 80, "sampleWindows": 20}
+    assert "modules" not in result
+    assert "sampleWindows" not in result
+    assert result["querySpec"] == event["result"]["querySpec"]
+    assert result["moduleQuerySpec"] == event["result"]["moduleQuerySpec"]
+    assert result["moduleQuerySpecHash"] == "window-module-spec-hash"
+    for key in ("rows", "sourceRows", "rawRows", "remoteRows"):
+        assert key not in result
+
+
 def test_oversized_query_spec_fails_explicitly(
     db, admin_user, ontology,
 ):

@@ -207,14 +207,17 @@ def verify_answer(answer: str, steps: Iterable[dict]) -> VerificationResult:
     return result
 
 
-def correction_prompt(unverified: Iterable[Decimal]) -> str:
+def correction_prompt(unverified: Iterable[Decimal], evidence: str = "") -> str:
     values = "、".join(str(_json_number(value)) for value in unverified)
+    excerpt = (f"\n# 可核验的工具结果（其中数字有证据，必须保留）\n{evidence}\n"
+               if evidence else "")
     return (
         f"# 结论校验失败\n"
         f"你刚才回答中的以下数字未能对应到任何工具返回结果，"
         f"不得编造数据：{values}。\n"
-        f"请重新作答：只保留能对应到工具结果的数字；若确实缺少数据，"
-        f"明确说明缺少什么并删除无法佐证的数字。不要新增其它工具调用。"
+        f"{excerpt}"
+        f"请重新作答：保留原答案中能对应到工具结果的数字，只删除无法佐证的数字；"
+        f"若确实缺少数据，明确说明缺少什么。不要新增其它工具调用。"
     )
 
 

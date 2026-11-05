@@ -10,6 +10,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from sqlalchemy.dialects import mysql
 import json
+import logging
+import re
 import time
 import uuid
 
@@ -28,6 +30,35 @@ from app.data_channel.integrated.fields import FieldConfigError
 from app.data_channel.integrated.models import IntegratedAsset, IntegratedAssetFieldConfig
 from app.shared.encryption import decrypt
 from app.shared.query_control import current_query_control, interruptible_connection
+
+logger = logging.getLogger(__name__)
+
+
+def _driver_error_fields(exc) -> dict:
+    """Redacted driver identity for logs: class names and numeric codes only.
+
+    Raw driver text, SQL, parameters and credentials never enter the log line.
+    """
+    original = getattr(exc, "orig", None)
+    fields = {"driver": type(exc).__name__, "code": None, "sqlstate": None}
+    if original is None:
+        return fields
+    fields["driver"] = f"{type(original).__module__.split('.')[0]}.{type(original).__name__}"
+    args = getattr(original, "args", ())
+    if args and type(args[0]) is int:
+        fields["code"] = args[0]
+    for attribute in ("pgcode", "sqlstate"):
+        value = getattr(original, attribute, None)
+        if isinstance(value, str) and re.fullmatch(r"[0-9A-Z]{5}", value):
+            fields["sqlstate"] = value
+            break
+    return fields
+
+
+def _log_driver_error(stage: str, exc) -> None:
+    fields = _driver_error_fields(exc)
+    logger.warning("integrated source driver error stage=%s driver=%s code=%s sqlstate=%s",
+                   stage, fields["driver"], fields["code"], fields["sqlstate"])
 
 
 def authorize(db, user, *, write=False):
@@ -167,12 +198,14 @@ def probe_source(connection, *, timeout_seconds: int = PROBE_TIMEOUT_SECONDS):
                     conn.exec_driver_sql("SELECT 1")
         finally:
             engine.dispose()
-    except sa.exc.DBAPIError:
+    except sa.exc.DBAPIError as exc:
+        _log_driver_error("source_probe", exc)
         control = current_query_control()
         if control is not None and control.cancelled():
             fail(409, "query_cancelled", "Source availability probe was cancelled")
         fail(503, "SOURCE_UNAVAILABLE", "Source is not physically reachable; availability fails closed")
-    except sa.exc.SQLAlchemyError:
+    except sa.exc.SQLAlchemyError as exc:
+        _log_driver_error("source_probe", exc)
         fail(503, "SOURCE_UNAVAILABLE", "Source is not physically reachable; availability fails closed")
 
 
@@ -588,6 +621,7 @@ def open_read_scope(db, user, asset_ids, *, statement_timeout_ms=300000,
         control = current_query_control()
         if control is not None and control.cancelled():
             fail(409, "query_cancelled", "Source query was cancelled")
+        _log_driver_error("source_read_scope", exc)
         original = exc.orig
         code = getattr(original, "pgcode", None)
         mysql_code = original.args[0] if getattr(original, "args", ()) else None

@@ -93,22 +93,31 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     return min(max(seconds, 0.0), _RETRY_AFTER_CAP_SECONDS)
 
 
-def _with_retry(call):
-    """对瞬态 SDK 错误最多尝试 3 次，指数退避 1s/2s，Retry-After 头优先。
+def _with_retry(call, *, max_attempts: int = _RETRY_MAX_ATTEMPTS):
+    """瞬态 SDK 错误受调用方的尝试次数约束，退避仍遵守 Retry-After。
 
     非瞬态错误（含 LLMError）立即原样抛出，不改变既有错误语义。
     """
-    for attempt in range(_RETRY_MAX_ATTEMPTS):
+    if type(max_attempts) is not int or not 1 <= max_attempts <= _RETRY_MAX_ATTEMPTS:
+        raise ValueError("max_attempts must be an integer between 1 and 3")
+    for attempt in range(max_attempts):
         try:
             return call()
         except Exception as exc:
-            if attempt + 1 >= _RETRY_MAX_ATTEMPTS or not isinstance(exc, _transient_error_types()):
+            if attempt + 1 >= max_attempts or not isinstance(exc, _transient_error_types()):
                 raise
             delay = _retry_after_seconds(exc)
             if delay is None:
                 delay = _RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS) - 1)]
             _sleep(delay)
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _request_with_retry(call, call_kwargs: dict):
+    attempts = call_kwargs.get("retry_max_attempts")
+    if attempts is None:
+        return _with_retry(call)
+    return _with_retry(call, max_attempts=attempts)
 
 
 def chat(call_kwargs: dict, messages: list[dict], tools: list[dict]) -> dict[str, Any]:
@@ -123,9 +132,9 @@ def chat(call_kwargs: dict, messages: list[dict], tools: list[dict]) -> dict[str
     span = perf_spans.begin_span("llm", name="chat.completions", target=f"{provider}/{model_name}")
     try:
         if provider == "anthropic":
-            result = _with_retry(lambda: _chat_anthropic(call_kwargs, messages, tools))
+            result = _request_with_retry(lambda: _chat_anthropic(call_kwargs, messages, tools), call_kwargs)
         else:
-            result = _with_retry(lambda: _chat_openai(call_kwargs, messages, tools))
+            result = _request_with_retry(lambda: _chat_openai(call_kwargs, messages, tools), call_kwargs)
         return _strip_think(result)
     except LLMError as e:
         status = _failure_status(e)
@@ -327,12 +336,12 @@ def _stream_openai(call_kwargs: dict, messages: list[dict], tools: list[dict]):
     stream = None
     try:
         try:
-            stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+            stream = _request_with_retry(lambda: client.chat.completions.create(**create_kwargs), call_kwargs)
         except Exception as exc:
             if isinstance(exc, _transient_error_types()):
                 raise
             create_kwargs.pop("stream_options", None)  # 部分兼容端点不支持 stream_options
-            stream = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+            stream = _request_with_retry(lambda: client.chat.completions.create(**create_kwargs), call_kwargs)
 
         raw_parts: list[str] = []
         tool_acc: dict[int, dict] = {}
@@ -416,7 +425,7 @@ def _stream_anthropic(call_kwargs: dict, messages: list[dict], tools: list[dict]
     try:
         manager = client.messages.stream(
             **_anthropic_create_kwargs(call_kwargs, messages, tools))
-        stream = _with_retry(manager.__enter__)
+        stream = _request_with_retry(manager.__enter__, call_kwargs)
         for event in stream:
             event_type = getattr(event, "type", "")
             index = getattr(event, "index", None)

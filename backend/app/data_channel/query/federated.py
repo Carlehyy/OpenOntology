@@ -22,7 +22,7 @@ from __future__ import annotations
 import functools
 import re
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from decimal import Decimal, localcontext
 from typing import Any, Callable, Iterator
 
@@ -58,9 +58,33 @@ def _bucket_start(value, bucket: str):
 
     Mirrors the compiler's SQL bucket expressions: ISO date semantics with
     Monday-based weeks; driver values may be date/datetime or ISO strings.
+    The half-hour bucket keeps a datetime (date input is midnight) and floors
+    to :00/:30 while preserving the value's timezone.
     """
     if value is None:
         return None
+    if bucket == "half_hour":
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise QueryError(422, "unsupported_group_bucket",
+                                 "Time bucket value is not an ISO date/datetime")
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                try:
+                    parsed = datetime.combine(date.fromisoformat(
+                        re.split(r"[T ]", text)[0]), dt_time(0, 0))
+                except ValueError as exc:
+                    raise QueryError(422, "unsupported_group_bucket",
+                                     "Time bucket value is not an ISO date/datetime") from exc
+            value = parsed
+        elif isinstance(value, date) and not isinstance(value, datetime):
+            value = datetime.combine(value, dt_time(0, 0))
+        if not isinstance(value, datetime):
+            raise QueryError(422, "unsupported_group_bucket",
+                             "Time bucketing requires date/datetime values")
+        return value.replace(minute=(value.minute // 30) * 30, second=0, microsecond=0)
     if isinstance(value, str):
         head = re.split(r"[T ]", value.strip())[0]
         try:
@@ -95,6 +119,10 @@ class MemoryResult:
     plan: dict
     source_states: list[dict]
     consistency: str
+    # Exact pre-LIMIT row/group count when the pipeline carried a LIMIT, measured
+    # by the same COUNT probe that decides result_limited. Materialized ``rows``
+    # stay limited; bounded stats expose this as the exact total group count.
+    pre_limit_rows: int | None = None
 
 
 def output_classification(pipeline: Pipeline) -> str:
@@ -1085,7 +1113,8 @@ class MemoryExecutor:
                                  "limitBytes": self.memory_budget.limit},
                 "executionBudget": self.execution_budget.snapshot()}
         return self._result(compiled.columns, rows, row_bytes, limit_cmd, total, plan,
-                            avg_semantics=None)
+                            avg_semantics=None,
+                            pre_limit_rows=total if limit_cmd is not None else None)
 
     @staticmethod
     def _apply_limit(rows, limit_cmd):
@@ -1250,7 +1279,8 @@ class MemoryExecutor:
                 "pushdown": {root: [c.op for c in cmds]
                              for root, cmds in self._component_commands.items()}}
         return self._result(columns, rows, row_bytes, limit_cmd, total, plan,
-                            avg_semantics=AVG_SEMANTICS if _uses_avg(tail) else None)
+                            avg_semantics=AVG_SEMANTICS if _uses_avg(tail) else None,
+                            pre_limit_rows=total if limit_cmd is not None else None)
 
     # -- tail evaluation ------------------------------------------------------------
 
@@ -1439,7 +1469,8 @@ class MemoryExecutor:
             rows.append(data)
         return rows, row_bytes
 
-    def _result(self, columns, rows, row_bytes, limit_cmd, total, plan, *, avg_semantics) -> MemoryResult:
+    def _result(self, columns, rows, row_bytes, limit_cmd, total, plan, *,
+                avg_semantics, pre_limit_rows=None) -> MemoryResult:
         result_limited = False
         if limit_cmd is not None:
             limit, offset = limit_cmd.args[0], (limit_cmd.args[1] if len(limit_cmd.args) > 1 else 0)
@@ -1463,7 +1494,8 @@ class MemoryExecutor:
                             result_limited=result_limited,
                             classification=output_classification(self.pipeline),
                             avg_semantics=avg_semantics, plan=plan,
-                            source_states=source_states, consistency=consistency)
+                            source_states=source_states, consistency=consistency,
+                            pre_limit_rows=pre_limit_rows)
 
 
 def _state_from_key(key: tuple, position: int):

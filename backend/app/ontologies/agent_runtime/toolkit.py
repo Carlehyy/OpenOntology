@@ -769,7 +769,8 @@ class ToolRunner:
                 self._cite(instance)
         return result
 
-    def _sql_aggregate_objects(self, ot, metric, metric_prop, group_by, filters):
+    def _sql_aggregate_objects(self, ot, metric, metric_prop, group_by, filters,
+                               group_limit=None, order_items=None):
         definitions = property_definitions(ot)
         query = self._sql_filtered_query(ot, filters)
         if metric != "count":
@@ -801,35 +802,69 @@ class ToolRunner:
                         "valueType": "integer" if metric == "count" else "decimal",
                         "valueEncoding": "number_or_lossless_string"}
             group = typed_property(definitions[group_by], group_by)
+            group_count = func.count(ObjectInstance.id)
+            display_limit = group_limit if group_limit is not None else 50
+            # Explicit order_by is normalized before dispatch; the default
+            # matches remote Top-N (value desc, group asc). "matched" orders by
+            # the per-group row count (same meaning as the remote matched
+            # aggregate column), never by the full-relation total.
+            order_spec = list(order_items or (
+                {"output": "value", "direction": "desc"},
+                {"output": "group", "direction": "asc"},
+            ))
+
+            def sql_order(columns):
+                clauses = []
+                for item in order_spec:
+                    column = columns[item["output"]]
+                    ordered = (column.desc() if item["direction"] == "desc"
+                               else column.asc())
+                    clauses.append(ordered.nulls_last())
+                return clauses
+
             # GROUP BY over the complete filtered relation; LIMIT applies ONLY
-            # to output groups, and window counts are evaluated before LIMIT.
+            # after the requested ordering, and window counts are evaluated
+            # before LIMIT.
             grouped = (query.with_entities(
                 group.label("group_value"), aggregate.label("metric_value"),
-                func.count(ObjectInstance.id).label("group_count"),
-                func.sum(func.count(ObjectInstance.id)).over().label("matched"),
+                group_count.label("group_count"),
+                func.sum(group_count).over().label("matched"),
                 func.count().over().label("total_groups"))
-                .group_by(group).order_by(aggregate.desc().nulls_last(),
-                                          group.asc().nulls_last())
-                .limit(51).subquery())
+                .group_by(group)
+                .order_by(*sql_order({"value": aggregate, "matched": group_count,
+                                      "group": group}))
+                .limit(display_limit + 1).subquery())
             totals = select(scanned.label("input_count"), invalid.label("invalid")).subquery()
             # Keep the true input count even when the filter matches zero
             # groups; an outer row and all counts share the same SQL snapshot.
             result = self.db.execute(select(grouped, totals.c.input_count, totals.c.invalid).select_from(
-                totals.outerjoin(grouped, true())).order_by(
-                    grouped.c.metric_value.desc().nulls_last(),
-                    grouped.c.group_value.asc().nulls_last())).all()
+                totals.outerjoin(grouped, true())).order_by(*sql_order({
+                    "value": grouped.c.metric_value,
+                    "matched": grouped.c.group_count,
+                    "group": grouped.c.group_value,
+                }))).all()
             if result[0][6]:
                 raise ToolError("invalid_typed_value: 发布范围含非法类型值，未返回部分统计")
         input_count = result[0][5]
         rows = result if result[0][4] is not None else []
+        # Window aggregate evaluated before the group LIMIT: unlike remote
+        # bounded stats (whose page cannot see the dropped groups), the local
+        # SQL path independently knows the full filtered-row total, so keep the
+        # useful number and state its scope instead of nulling it.
         matched = rows[0][3] if rows else 0
-        groups = [{"group": str(row[0]), "value": encode_scalar(row[1]),
-                   "count": encode_scalar(row[2])} for row in rows[:50]]
+        groups = [{"group": "" if row[0] is None else str(row[0]),
+                   "value": encode_scalar(row[1]),
+                   "count": encode_scalar(row[2])}
+                  for row in rows[:display_limit]]
         out = {"objectType": ot.display_name, "metric": metric,
                "metricProperty": metric_prop, "scanned": encode_scalar(input_count),
-               "matched": encode_scalar(matched), "partial": False,
+               "matched": encode_scalar(matched),
+               "matchedScope": "filtered_rows_before_group_limit",
+               "partial": False,
                "exact": True, "completeness": "complete", "groupBy": group_by,
-               "groups": groups, "truncated": len(rows) > 50,
+               "groups": groups, "returned": len(groups),
+               "groupLimit": display_limit,
+               "truncated": len(rows) > display_limit,
                "totalGroups": encode_scalar(rows[0][4] if rows else 0),
                "valueType": "integer" if metric == "count" else "decimal",
                "valueEncoding": "number_or_lossless_string"}
@@ -859,6 +894,22 @@ class ToolRunner:
         filters = self._validated_filters(ot, args.get("filters"))
         order_by = args.get("order_by") if isinstance(args.get("order_by"), dict) else None
 
+        # Top-N 分组上限：limit 只约束返回的分组行（源端排序后 LIMIT），
+        # totalGroups 始终是精确总组数；标量统计传 limit 直接拒绝。
+        group_limit = args.get("limit")
+        if group_limit is not None:
+            if not group_items:
+                raise ToolError("aggregate_objects_invalid_limit: limit 仅用于分组统计；"
+                                "标量统计请省略 limit")
+            try:
+                group_limit = int(group_limit)
+            except (TypeError, ValueError) as exc:
+                raise ToolError("aggregate_objects_invalid_limit: limit 必须是整数") from exc
+            max_groups = min(200, runtime_limit("max_group_page"))
+            if group_limit < 1 or group_limit > max_groups:
+                raise ToolError(
+                    f"aggregate_objects_invalid_limit: limit 需在 1..{max_groups}")
+
         if self.scope.release is not None:
             from app.ontologies.mappings.remote_binding import (
                 RemoteBindingError, get_remote_binding,
@@ -872,7 +923,7 @@ class ToolRunner:
                 result = aggregate_remote(
                     self.db, self.scope, self.user, self.query_session_id,
                     ot, metric, metric_prop, group_items, filters,
-                    order_by=order_by,
+                    order_by=order_by, limit=group_limit,
                 )
                 groups = result.get("groups")
                 if groups and all(not isinstance(g["value"], str) for g in groups):
@@ -888,16 +939,46 @@ class ToolRunner:
                             "单维原始字段分组；时间分桶与多维分组请对远程绑定对象使用，"
                             "或用多个查询分别统计")
         group_by = group_items[0][0] if group_items else None
+
+        # Local order_by normalization happens before any source scan/sql so an
+        # invalid output is rejected without executing the aggregate. Outputs
+        # mirror the remote aggregate columns: value/group always, matched only
+        # when metric != count (remote has no matched column for count).
+        def local_order_spec():
+            if not group_by or order_by is None:
+                return None
+            output = order_by.get("output")
+            direction = order_by.get("direction", "desc")
+            allowed = ({"value", "group"} if metric == "count"
+                       else {"value", "matched", "group"})
+            if output not in allowed or direction not in {"asc", "desc"}:
+                raise ToolError(
+                    "aggregate_objects_invalid_order_by: order_by.output 只支持 "
+                    f"{'/'.join(sorted(allowed))}，direction 只支持 asc/desc")
+            return [{"output": output, "direction": direction}]
+
+        order_spec = local_order_spec()
         if self.db.get_bind().dialect.name == "postgresql":
-            return self._sql_aggregate_objects(ot, metric, metric_prop, group_by, filters)
+            return self._sql_aggregate_objects(
+                ot, metric, metric_prop, group_by, filters,
+                group_limit=group_limit, order_items=order_spec)
 
         # Non-PG compatibility execution is exact only within its explicit
         # input budget. Exceeding it rejects the query, never returns a sample.
-        acc: dict[str, dict] = {}
-        def bump(key: str, v):
+        acc: dict[tuple, dict] = {}
+
+        def group_key(raw):
+            # Keep the raw group value for null ordering; display it like the
+            # remote group column (NULL -> empty string). The first tuple
+            # component keeps NULL distinct from the literal string "None".
+            return (raw is None, str(raw))
+
+        def bump(raw, v):
+            key = group_key(raw)
             a = acc.get(key)
             if a is None:
-                a = acc[key] = {"count": 0, "sum": Decimal(0), "nnum": 0, "min": None, "max": None}
+                a = acc[key] = {"count": 0, "sum": Decimal(0), "nnum": 0,
+                                "min": None, "max": None, "raw": raw}
             a["count"] += 1
             if v is not None:
                 a["sum"] = decimal_add(a["sum"], v)
@@ -918,7 +999,7 @@ class ToolRunner:
                 continue
             matched += 1
             v = _num(merged.get(metric_prop)) if metric != "count" else None
-            bump(str(merged.get(group_by)) if group_by else "__all__", v)
+            bump(merged.get(group_by) if group_by else "__all__", v)
 
         def finalize(a: dict):
             if metric == "count":
@@ -939,13 +1020,56 @@ class ToolRunner:
                 "valueEncoding": "number_or_lossless_string"}
         if not group_by:
             empty = {"count": 0, "sum": Decimal(0), "nnum": 0, "min": None, "max": None}
-            return {**base, "value": encode_scalar(finalize(acc.get("__all__") or empty))}
+            return {**base, "value": encode_scalar(
+                finalize(acc.get(group_key("__all__")) or empty))}
 
-        result = [{"group": k, "value": finalize(a), "count": a["count"]} for k, a in acc.items()]
-        result.sort(key=lambda x: (x["value"] is not None, x["value"] or 0), reverse=True)
-        groups_out = [{**g, "value": encode_scalar(g["value"])} for g in result[:50]]
+        # Same default as remote Top-N: value desc, then group asc. NULL group
+        # values sort last for both directions (like .nulls_last()).
+        sort_items = order_spec or (
+            {"output": "value", "direction": "desc"},
+            {"output": "group", "direction": "asc"},
+        )
+        result = [{"group": "" if a["raw"] is None else str(a["raw"]),
+                   "value": finalize(a), "count": a["count"],
+                   "_group": a["raw"]}
+                  for a in acc.values()]
+        from functools import cmp_to_key
+
+        def sort_value(entry, output):
+            if output == "group":
+                return entry["_group"]
+            if output == "matched":
+                return entry["count"]
+            return entry["value"]
+
+        def compare(left, right):
+            for item in sort_items:
+                lv = sort_value(left, item["output"])
+                rv = sort_value(right, item["output"])
+                if lv is None and rv is None:
+                    continue
+                if lv is None:
+                    return 1
+                if rv is None:
+                    return -1
+                try:
+                    order = (lv > rv) - (lv < rv)
+                except TypeError:  # mixed legacy JSON scalar types
+                    order = (str(lv) > str(rv)) - (str(lv) < str(rv))
+                if order:
+                    return -order if item["direction"] == "desc" else order
+            return 0
+
+        result.sort(key=cmp_to_key(compare))
+        display_limit = group_limit if group_limit is not None else 50
+        groups_out = [{"group": g["group"], "value": encode_scalar(g["value"]),
+                       "count": g["count"]}
+                      for g in result[:display_limit]]
         out = {**base, "groupBy": group_by, "groups": groups_out,
-               "truncated": len(result) > 50, "totalGroups": len(result)}
+               "matchedScope": "filtered_rows_before_group_limit",
+               "returned": len(groups_out), "groupLimit": display_limit,
+               "truncated": len(result) > display_limit,
+               "totalGroups": len(result)}
         if all(not isinstance(g["value"], str) for g in groups_out):
             chart = _build_aggregate_chart(ot.display_name, metric, metric_prop, group_by, groups_out)
             if chart:

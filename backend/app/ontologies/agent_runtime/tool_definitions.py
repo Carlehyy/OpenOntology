@@ -118,7 +118,7 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "name": "aggregate_objects",
-        "description": "对某对象类型做聚合统计：count/sum/avg/min/max，可按属性分组（支持多维）。分组结果附结构化 groupValues 与服务端签名 drilldown（时间桶边界由服务端按日历计算）。已发布的远程绑定对象自动通过统一查询在真实源上统计。趋势/按日周月季年统计：group_by 用 {\"property\": 时间属性, \"bucket\": \"day|week|month|quarter|year\"}，一次取全期间，禁止逐月逐日多次查询；月度趋势等按时间排序用 order_by={\"output\":\"group\",\"direction\":\"asc\"}。日期范围过滤用 gte 起始日期、lt 下一期起始日期。contains 会先在源端模糊枚举取值解析为 in（取值过多无法解析时会提示改用 in/eq）。远程结果为 0 时附 dataCoverage 说明原因，回答时须如实转述。回答统计结论时须注明数据时间范围与截止日期（用 get_data_time_range 获取）。明细列表、按 ID 查单条、排序分页请用 query_objects。completeness 只代表查询执行完成，不代表数据时间覆盖完整。",
+        "description": "对某对象类型做聚合统计：count/sum/avg/min/max，可按属性分组（支持多维）。分组结果附结构化 groupValues 与服务端签名 drilldown（日期桶按日历边界计算）。已发布的远程绑定对象自动通过统一查询在真实源上统计。Top-N：limit 限定返回的分组数（服务端按当前排序在源端 LIMIT，不是先取 200 组再让模型挑）；totalGroups 是精确总组数。截断口径必须区分：远程 boundedStats 截断时 matched 为 null，不得把返回组求和冒充全量；本地物化聚合可能返回独立精确 matched 并带 matchedScope=filtered_rows_before_group_limit，此时可用 matched（分组前过滤行数）但同样不得用返回组求和冒充全量。只有 matched 非 null 或 matchedScope 明确时才可使用该数值。时间分桶：half_hour=固定 30 分钟平坦窗（输出 timestamp，仅远程绑定）；day/week/month/quarter/year 为日历桶（输出日期键，保留日历语义）。趋势统计 group_by 用 {\"property\": 时间属性, \"bucket\": \"day|week|month|quarter|year\"}，一次取全期间，禁止逐月逐日多次查询；月度趋势等按时间排序用 order_by={\"output\":\"group\",\"direction\":\"asc\"}。日期范围过滤用 gte 起始日期、lt 下一期起始日期。contains 会先在源端模糊枚举取值解析为 in；枚举被截断时 fail closed 并提示改用 in/eq，绝不把少量命中冒充完整解析。远程结果为 0 时附 dataCoverage 说明原因，回答时须如实转述。回答统计结论时须注明数据时间范围与截止日期（用 get_data_time_range 获取）。明细列表、按 ID 查单条、排序分页请用 query_objects。completeness 只代表查询执行完成，不代表数据时间覆盖完整。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -126,7 +126,7 @@ TOOL_DEFS: list[dict] = [
                 "metric": {"type": "string", "enum": ["count", "sum", "avg", "min", "max"]},
                 "metric_property": {"type": "string", "description": "metric 非 count 时必填：参与计算的属性 name（min/max 也可用 date/datetime 属性）"},
                 "group_by": {
-                    "description": "可选：分组维度。字符串=按属性分组；数组=多维分组，每项为属性名或 {property, bucket}（bucket: day/week/month/quarter/year 时间分桶，仅远程绑定对象支持）",
+                    "description": "可选：分组维度。字符串=按属性分组；数组=多维分组，每项为属性名或 {property, bucket}。half_hour=固定 30 分钟窗（输出 timestamp，仅远程绑定）；day/week/month/quarter/year 为日历桶（日期组保留日历语义，仅远程绑定对象支持）",
                     "oneOf": [
                         {"type": "string"},
                         {"type": "array", "items": {
@@ -134,7 +134,7 @@ TOOL_DEFS: list[dict] = [
                                 {"type": "string"},
                                 {"type": "object", "properties": {
                                     "property": {"type": "string"},
-                                    "bucket": {"type": "string", "enum": ["day", "week", "month", "quarter", "year"]}},
+                                    "bucket": {"type": "string", "enum": ["half_hour", "day", "week", "month", "quarter", "year"]}},
                                     "required": ["property"]},
                             ],
                         }},
@@ -148,6 +148,12 @@ TOOL_DEFS: list[dict] = [
                         "direction": {"type": "string", "enum": ["asc", "desc"]},
                     },
                     "required": ["output"],
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "可选：分组统计最多返回的组数（Top-N），按 order_by 排序后限制返回分组。只影响返回分组行：totalGroups 仍为精确总组数，其余分组未返回且不可翻页。远程截断时 matched 为 null；本地可能返回精确 matched + matchedScope=filtered_rows_before_group_limit。两种路径都不得把返回组求和冒充全量。标量统计不要传 limit。",
                 },
                 "filters": {
                     "type": "array",
@@ -167,7 +173,7 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "name": "query_objects",
-        "description": "统一查询工具：明细列表、按 ID 查单条、排序、分页、多维分组、多指标、沿已发布关系的关联统计，以及受治理的多阶段 SPL/派生查询。远程绑定对象直接在真实源执行（group_by 支持 bucket=day/week/month/quarter/year），本地物化对象走本地快照。按 ID 查单条：filters 用主键属性 eq。关联统计：joins 给沿关系链的对象类型与链接类型序列，服务端解析为已发布关系 join。相对时间：不要自己算当前日期，传 window={property, timezone, last:{unit,count}} 或 {property,timezone,start,end}，服务端固定 now 并返回 resolvedWindow（绝对 [start,end)，timezone 显式）。SPL/多阶段派生：传 spl + semanticBindings（只需 {alias:{objectType}}，服务端钉定当前 ontology/release）+ params+pageSize，禁止任意 SQL、禁止跨 profile/release。分组结果包含结构化 groupValues 和签名 drilldown（多维/NULL/时间桶边界均由服务端处理）。分页：返回 hasNext/cursor 时用同一次执行的 cursor 续页，公开展示不含 cursor；结果另带可重放 querySpec。回答统计结论时须注明 resolvedWindow/dataCoverage 与数据截止日期（get_data_time_range）。",
+        "description": "统一查询工具：明细列表、按 ID 查单条、排序、分页、多维分组、多指标、沿已发布关系的关联统计，以及受治理的多阶段 SPL/派生查询。远程绑定对象直接在真实源执行（group_by 支持 bucket=day/week/month/quarter/year），本地物化对象走本地快照。投影上限：select 最多 32 项（显式超过直接报错）；省略 select 时默认投影按可查询主键与当前过滤/排序/窗口/分组字段优先选取至多 32 个可查询属性，其余字段列入 projection.omittedFields（仅元数据，不代表字段不存在或值为空，需要时显式 select 分批查询）。远程类型只允许查询有列映射的属性；不可查询属性会在执行前报错。按 ID 查单条：filters 用主键属性 eq。关联统计：joins 给沿关系链的对象类型与链接类型序列，服务端解析为已发布关系 join。相对时间：不要自己算当前日期，传 window={property, timezone, last:{unit,count}} 或 {property,timezone,start,end}，服务端固定 now 并返回 resolvedWindow（绝对 [start,end)，timezone 显式）。SPL/多阶段派生：传 spl + semanticBindings（只需 {alias:{objectType}}，服务端钉定当前 ontology/release）+ params+pageSize，禁止任意 SQL、禁止跨 profile/release。分组结果包含结构化 groupValues 和签名 drilldown（多维/NULL/时间桶边界均由服务端处理）；聚合下钻的明细投影同样受 32 项上限，省略字段见 querySpec.description.drilldownOmittedFields。分页：返回 hasNext/cursor 时用同一次执行的 cursor 续页，公开展示不含 cursor；结果另带可重放 querySpec。回答统计结论时须注明 resolvedWindow/dataCoverage 与数据截止日期（get_data_time_range）。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -201,18 +207,19 @@ TOOL_DEFS: list[dict] = [
                 },
                 "select": {
                     "type": "array",
-                    "description": "可选：输出属性（property 或 {object_type, property}）；缺省为主对象全部授权属性",
+                    "maxItems": 32,
+                    "description": "可选：输出属性（property 或 {object_type, property}），最多 32 项；缺省时按可查询主键与过滤/排序/窗口/分组字段优先返回至多 32 个可查询属性，省略字段见 projection.omittedFields",
                     "items": {},
                 },
                 "group_by": {
                     "type": "array",
-                    "description": "可选：分组维度（多维），每项为 {object_type?, property, bucket?}",
+                    "description": "可选：分组维度（多维），每项为 {object_type?, property, bucket?}。half_hour=固定 30 分钟窗（输出 timestamp）；day/week/month/quarter/year 为日历桶（日期组保留日历语义）",
                     "items": {
                         "type": "object",
                         "properties": {
                             "object_type": {"type": "string"},
                             "property": {"type": "string"},
-                            "bucket": {"type": "string", "enum": ["day", "week", "month", "quarter", "year"]},
+                            "bucket": {"type": "string", "enum": ["half_hour", "day", "week", "month", "quarter", "year"]},
                         },
                         "required": ["property"],
                     },
@@ -288,15 +295,16 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "name": "analyze_sequences",
-        "description": "窗口内主体/序列分析（有界、确定性）。默认 mode=distinct：回答“窗口内有多少个/是否 ≥N 个不同主体”，服务端用 count_distinct，不下载明细；重复事件只计一次；distinct 可带 group_by 按任意本体属性/时间桶分组（例如按 module、region 统计窗口内去重登记人，module 只是字段示例，不是平台特例）。只有用户明确说“连续/间隔/顺序”时才用 mode=consecutive|interval|ordered，绝不能把这类问题冒充普通 count。连续/间隔需要 max_gap_seconds（可选 min_gap_seconds）；ordered 需要 sequence=[{filters:[...]}] 阶段。候选事件超过物化预算会显式拒绝（sequence_budget_exceeded），不会截断后给确定结论。window 与 query_objects 相同（timezone 显式、服务端 now、绝对 [start,end)）。",
+        "description": "窗口内主体/序列分析（有界、确定性）。默认 mode=distinct：回答“窗口内有多少个/是否 ≥N 个不同主体”，服务端用 count_distinct，不下载明细；重复事件只计一次；distinct 可带 group_by 按任意本体属性/时间桶分组（例如按 module、region 统计窗口内去重登记人，module 只是字段示例，不是平台特例）。用户问“同一模块每固定 30 分钟窗内去重用户数是否 ≥N，汇总达标窗口/模块”时用 mode=window_distinct：必须给明确 window（如 9 月绝对区间）与 threshold，可选 group_by 模块属性、window_minutes=30；服务端用 module+half_hour 内层 count_distinct、外层过滤 threshold 后按模块 count/max 的源端多阶段聚合，返回 qualifyingWindows/qualifyingModules/modules/sampleWindows，不回传全部窗口明细；当前只支持固定 30 分钟，其它粒度明确拒绝。只有用户明确说“连续/间隔/顺序”时才用 mode=consecutive|interval|ordered，绝不能把这类问题冒充普通 count。连续/间隔需要 max_gap_seconds（可选 min_gap_seconds）；ordered 需要 sequence=[{filters:[...]}] 阶段。候选事件超过物化预算会显式拒绝（sequence_budget_exceeded），不会截断后给确定结论。window 与 query_objects 相同（timezone 显式、服务端 now、绝对 [start,end)）。",
         "parameters": {
             "type": "object",
             "properties": {
                 "object_type": {"type": "string", "description": "事件对象类型"},
-                "mode": {"type": "string", "enum": ["distinct", "consecutive", "interval", "ordered"], "description": "默认 distinct；明确连续/间隔/顺序才改用对应模式"},
+                "mode": {"type": "string", "enum": ["distinct", "window_distinct", "consecutive", "interval", "ordered"], "description": "默认 distinct；固定 30 分钟窗达标统计用 window_distinct；明确连续/间隔/顺序才改用对应模式"},
                 "subject_property": {"type": "string", "description": "主体属性（如登记人/用户），缺省时必填"},
                 "time_property": {"type": "string", "description": "事件时间属性"},
-                "threshold": {"type": "integer", "minimum": 1, "description": "默认 N（distinct=去重主体数；序列=满足模式的主体数）"},
+                "window_minutes": {"type": "integer", "minimum": 1, "description": "window_distinct 的固定窗口分钟数；当前仅支持 30"},
+                "threshold": {"type": "integer", "minimum": 1, "description": "默认 N（distinct=去重主体数；window_distinct=每窗口去重主体数阈值；序列=满足模式的主体数）"},
                 "filters": {
                     "type": "array",
                     "description": "事件过滤（AND），如 action=register",
@@ -324,12 +332,12 @@ TOOL_DEFS: list[dict] = [
                 },
                 "group_by": {
                     "type": "array",
-                    "description": "distinct 模式可选：按属性/时间桶分组统计去重主体数（泛化分组，如按模块、区域；属性名只是本体字段）",
+                    "description": "distinct 模式可选：按属性/时间桶分组统计去重主体数（泛化分组，如按模块、区域；属性名只是本体字段）。half_hour=固定 30 分钟窗（输出 timestamp）；day/week/month/quarter/year 为日历桶（日期组保留日历语义）",
                     "items": {
                         "type": "object",
                         "properties": {
                             "property": {"type": "string"},
-                            "bucket": {"type": "string", "enum": ["day", "week", "month", "quarter", "year"]},
+                            "bucket": {"type": "string", "enum": ["half_hour", "day", "week", "month", "quarter", "year"]},
                         },
                         "required": ["property"],
                     },
@@ -352,7 +360,7 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "name": "describe_objects",
-        "description": "结构发现工具：先看清授权对象类型，再查询。object_types 省略时列出全部授权类型摘要（按页返回，hasMore/next）；传入 1-8 个类型（name/显示名/id）时返回完整授权 properties、已发布 links 与 actions 摘要。只使用当前 AgentProfile 作用域，不泄露隐藏类型/属性，不统计实例数。",
+        "description": "结构发现工具：先看清授权对象类型，再查询。object_types 省略时列出全部授权类型摘要（按页返回，hasMore/next）；传入 1-8 个类型（name/显示名/id）时返回完整授权 properties、已发布 links 与 actions 摘要。远程绑定类型的每个属性带 queryable；不可查询属性附 unqueryableReason（如 remote_property_unmapped=没有远程列映射），查询/过滤/分组只能使用 queryable=true 的属性。只使用当前 AgentProfile 作用域，不泄露隐藏类型/属性，不统计实例数。",
         "parameters": {
             "type": "object",
             "properties": {

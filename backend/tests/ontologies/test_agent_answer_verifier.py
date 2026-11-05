@@ -1,8 +1,8 @@
 """确定性结论校验器（answer_verifier.py）的纯函数单元测试。"""
 from decimal import Decimal
+from types import SimpleNamespace
 
-import pytest
-
+from app.ontologies.agent_runtime import answer_evidence
 from app.ontologies.agent_runtime.answer_verifier import (
     answer_numbers,
     correction_prompt,
@@ -14,6 +14,59 @@ from app.ontologies.agent_runtime.answer_verifier import (
 
 def _step(result: dict) -> dict:
     return {"tool": "aggregate_objects", "result": result}
+
+
+def _scope(release_id="rel-1"):
+    item = SimpleNamespace(
+        id="ot-1", name="Order", display_name="订单",
+        properties=[{"name": "status", "displayName": "状态"}])
+    return SimpleNamespace(
+        ontology=SimpleNamespace(id="ont-1"), release_id=release_id,
+        object_types={"ot-1": item},
+        profile=SimpleNamespace(allowed_properties=None),
+        allowed_property_names=lambda _oid: None,
+    )
+
+
+def _message(steps, *, role="assistant", content=""):
+    return SimpleNamespace(role=role, steps=steps, content=content)
+
+
+def _stat_result(value=8, *, ontology_id="ont-1", release_id="rel-1",
+                 object_type_id="ot-1", prop="status", display="订单", **extra):
+    """带可结构复验 querySpec 的统计结果（历史证据白名单形态）。"""
+    spec = {
+        "version": 1, "shape": "objects", "ontologyId": ontology_id,
+        "releaseId": release_id, "objectType": object_type_id,
+        "query": {
+            "sources": [{"alias": "s0", "ontologyId": ontology_id,
+                         "releaseId": release_id, "objectTypeId": object_type_id}],
+            "groupBy": [{"source": "s0", "property": prop}],
+            "aggregates": [{"fn": "count", "as": "value"}],
+        },
+        "description": {"semantics": "aggregate_grouped"},
+    }
+    return {"objectType": display, "total": value,
+            "groups": [{"group": "pending", "value": value}],
+            "exact": True, "completeness": "complete",
+            "querySpec": spec, **extra}
+
+
+def _two_type_scope():
+    order = SimpleNamespace(
+        id="ot-order", name="Order", display_name="订单",
+        properties=[{"name": "status", "displayName": "状态"},
+                    {"name": "amount", "displayName": "金额"}])
+    supplier = SimpleNamespace(
+        id="ot-supplier", name="Supplier", display_name="供应商",
+        properties=[{"name": "amount", "displayName": "金额"}])
+    allowed = {"ot-order": {"status"}, "ot-supplier": {"amount"}}
+    return SimpleNamespace(
+        ontology=SimpleNamespace(id="ont-1"), release_id="rel-1",
+        object_types={"ot-order": order, "ot-supplier": supplier},
+        profile=SimpleNamespace(allowed_properties=allowed),
+        allowed_property_names=lambda oid: allowed.get(oid, set()),
+    )
 
 
 class TestNumberExtraction:
@@ -255,6 +308,83 @@ class TestPrompts:
         assert "999" in text and "0.5" in text
         assert "不得编造" in text
 
+    def test_correction_prompt_keeps_visible_evidence(self):
+        text = correction_prompt([999.0], evidence='[本轮] aggregate_objects: {"value":1}')
+        assert "可核验的工具结果" in text
+        assert "保留原答案中能对应到工具结果的数字" in text
+        assert '{"value":1}' in text
+
     def test_notice_names_values(self):
         text = unverified_notice([999.0])
         assert "999" in text and "未能与工具返回结果对应" in text
+
+
+class TestAnswerEvidence:
+    def test_only_complete_whitelisted_statistics_back_claims(self):
+        steps = [
+            _step(_stat_result(3, partial=True)),
+            _step(_stat_result(4, error="越界")),
+            _step(_stat_result(5, completeness="unknown")),
+            _step(_stat_result(6, release_id="rel-other")),
+            _step({"tool": "search_objects", "result": _stat_result(9)}),
+            _step({**_stat_result(10), "querySpec": None}),
+            _step({**_stat_result(11), "releaseId": "rel-other"}),
+            _step(_stat_result(8)),
+        ]
+        evidence = answer_evidence.trusted_history_steps(
+            [_message(steps, content="共 777 个")], _scope())
+        assert [item["result"]["total"] for item in evidence] == [8]
+        assert Decimal("8") in result_number_universe(evidence)
+        assert Decimal("777") not in result_number_universe(evidence)
+
+    def test_path_and_graph_results_are_never_history_evidence(self):
+        graph = _stat_result(9, nodes=[{"preview": [{"value": 999}]}])
+        evidence = answer_evidence.trusted_history_steps(
+            [_message([{"tool": "find_paths", "result": graph}])], _scope())
+        assert evidence == []
+
+    def test_cross_type_same_name_requires_source_ownership(self):
+        scope = _two_type_scope()
+        revoked = _stat_result(7, object_type_id="ot-order", prop="amount")
+        allowed = _stat_result(7, object_type_id="ot-supplier", prop="amount",
+                               display="供应商")
+        evidence = answer_evidence.trusted_history_steps(
+            [_message([_step(revoked), _step(allowed)])], scope)
+        assert [item["result"]["objectType"] for item in evidence] == ["供应商"]
+
+    def test_columns_metadata_cannot_bypass_spec_property_check(self):
+        scope = _two_type_scope()
+        result = _stat_result(
+            7, object_type_id="ot-order", prop="amount",
+            columns=[{"name": "状态", "output": "s0.status"},
+                     {"name": "金额", "output": "s0.amount"}])
+        evidence = answer_evidence.trusted_history_steps(
+            [_message([_step(result)])], scope)
+        assert evidence == []
+
+        valid = _stat_result(
+            7, object_type_id="ot-order", prop="status",
+            columns=[{"name": "状态", "output": "s0.status"}])
+        evidence = answer_evidence.trusted_history_steps(
+            [_message([_step(valid)])], scope)
+        assert evidence[0]["result"]["columns"] == valid["columns"]
+
+    def test_vague_correction_never_drops_verified_numbers(self):
+        steps = [_step({"value": 1})]
+        original = verify_answer("共 1 个，另 999 个异常。", steps)
+        vague = verify_answer("无法核验。", steps)
+        choice = answer_evidence.choose_correction(
+            "共 1 个，另 999 个异常。", original, "无法核验。", vague)
+        assert choice.reverted is True
+        assert choice.answer.startswith("共 1 个")
+        assert choice.verification is original
+
+    def test_correction_is_accepted_when_verified_numbers_survive(self):
+        steps = [_step({"value": 1})]
+        original = verify_answer("共 1 个，另 999 个异常。", steps)
+        corrected = verify_answer("共 1 个。", steps)
+        choice = answer_evidence.choose_correction(
+            "共 1 个，另 999 个异常。", original, "共 1 个。", corrected)
+        assert choice.reverted is False
+        assert choice.answer == "共 1 个。"
+        assert choice.verification.passed is True

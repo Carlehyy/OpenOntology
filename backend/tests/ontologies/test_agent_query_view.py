@@ -25,6 +25,9 @@ from app.ontologies.agent_runtime.query_view_router import (
 from app.ontologies.agent_runtime.toolkit import ToolRunner
 from tests.ontologies.test_agent_runtime import modeled_ontology  # noqa: F401
 from tests.ontologies.test_agent_unified_query import _freeze  # noqa: F401
+from tests.ontologies.test_agent_remote_aggregation import (  # noqa: F401
+    _freeze_with_rich_remote_supplier,
+)
 
 FIXED_NOW = datetime(2026, 11, 3, 4, 0, tzinfo=timezone.utc)
 WINDOW_1D = {"property": "occurred_at", "timezone": "Asia/Shanghai",
@@ -854,3 +857,26 @@ def test_describe_objects_summary_and_scope(db, admin_user, modeled_ontology):
         "describe_objects", {"object_types": ["Order"]})
     assert [item["name"] for item in
             restricted_details["objectTypes"][0]["properties"]] == ["order_no"]
+
+
+def test_describe_objects_marks_remote_property_queryability(
+        db, admin_user, modeled_ontology):
+    """远程类型逐属性标明 queryable 与未映射原因，避免拿不可查询属性试探。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(
+        db, oid, unmapped_properties=["internal_note"])
+    _, _, scope = build_scope(db, oid, release_id=release_id)
+    runner = ToolRunner(db, scope, user=admin_user)
+
+    detail = runner.run("describe_objects", {"object_types": ["Supplier"]})
+    supplier = detail["objectTypes"][0]
+    assert supplier["remote"] is True
+    by_name = {item["name"]: item for item in supplier["properties"]}
+    assert by_name["sname"]["queryable"] is True
+    assert "unqueryableReason" not in by_name["sname"]
+    assert by_name["region"]["queryable"] is True
+    assert by_name["internal_note"]["queryable"] is False
+    assert by_name["internal_note"]["unqueryableReason"] == \
+        "remote_property_unmapped"
+    assert supplier["queryablePropertyCount"] == 4
+    assert supplier["propertyCount"] == 5

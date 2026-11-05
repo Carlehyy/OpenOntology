@@ -40,6 +40,190 @@ def test_tool_preview_remains_json_and_keeps_completeness_separate():
     assert result["rows"][49]["amount"] == 49
 
 
+def test_tool_preview_strips_plan_drilldown_and_chart_before_rows():
+    result = {
+        "objectType": "订单", "metric": "count", "groupBy": "客户",
+        "groups": [{"group": f"客户{i:02d}", "value": i} for i in range(10)],
+        "rows": [{"客户": "客户01",
+                  "chart": "业务图表属性",
+                  "html": "业务HTML属性",
+                  "querySpec": "业务计划属性",
+                  "drilldown": {"token": "signed-token"}}],
+        "querySpec": {"query": {"where": [{"value": 99}]}},
+        "chart": {"data": [{"label": f"客户{i:02d}", "value": i} for i in range(10)]},
+        "totalGroups": 10,
+    }
+    preview = json.loads(context_policy.tool_payload(result, cap=2000))
+    assert preview["groups"] == result["groups"]
+    assert "llmPreviewTruncated" not in preview
+    assert "querySpec" not in preview and "chart" not in preview
+    assert "drilldown" not in preview["rows"][0]
+    assert preview["rows"][0]["chart"] == "业务图表属性"
+    assert preview["rows"][0]["html"] == "业务HTML属性"
+    assert preview["rows"][0]["querySpec"] == "业务计划属性"
+
+
+def test_window_distinct_preview_strips_sample_drilldown_not_business_fields():
+    result = {
+        "kind": "sequence_analysis", "mode": "window_distinct",
+        "objectType": "事件", "windowMinutes": 30,
+        "windowBucket": "half_hour", "windowTimezone": "Asia/Shanghai",
+        "qualifyingWindows": 12, "qualifyingModules": 3, "moduleCount": 3,
+        "modules": [{"module": "m1", "qualifyingWindows": 4,
+                     "maxDistinctSubjects": 7}],
+        "sampleWindows": [
+            {"module": "m1", "window": "2026-09-30T16:00:00Z", "users": 7,
+             "drilldown": {"token": "signed-token",
+                           "description": {"kind": "detail_rows"}}},
+            {"module": "m2", "users": 5, "drilldown": "业务字符串"},
+            {"module": "m3", "users": 4, "drilldown": {"business": "值"}},
+        ],
+        "querySpec": {"shape": "objects"},
+        "querySpecHash": "primary-hash",
+        "moduleQuerySpec": {"shape": "objects", "sources": [{"objectTypeId": "x"}]},
+        "moduleQuerySpecHash": "module-hash",
+        "exact": True, "partial": False, "completeness": "complete",
+    }
+    preview = json.loads(context_policy.tool_payload(result, cap=4000))
+    assert "drilldown" not in preview["sampleWindows"][0]
+    assert preview["sampleWindows"][1]["drilldown"] == "业务字符串"
+    assert preview["sampleWindows"][2]["drilldown"] == {"business": "值"}
+    assert "querySpec" not in preview and "querySpecHash" not in preview
+    assert "moduleQuerySpec" not in preview
+    assert "moduleQuerySpecHash" not in preview
+    assert preview["qualifyingWindows"] == 12
+    assert preview["qualifyingModules"] == 3
+    assert preview["moduleCount"] == 3
+    assert preview["windowMinutes"] == 30
+    assert preview["windowBucket"] == "half_hour"
+    assert preview["windowTimezone"] == "Asia/Shanghai"
+
+
+def test_window_distinct_compressed_metadata_protects_module_top10():
+    modules = [{"module": f"module-{index:02d}",
+                "qualifyingWindows": index,
+                "maxDistinctSubjects": index + 1} for index in range(20)]
+    samples = [{"module": f"module-{index:02d}",
+                "window": f"2026-09-30T{16 + index // 2:02d}:{index % 2 * 30:02d}:00Z",
+                "users": index + 1, "detail": "样本" * 80,
+                "drilldown": {"token": "signed-token"}} for index in range(20)]
+    result = {
+        "kind": "sequence_analysis", "mode": "window_distinct",
+        "objectType": "事件", "threshold": 5,
+        "thresholdScope": "distinct_subjects_per_fixed_window",
+        "windowMinutes": 30, "windowBucket": "half_hour",
+        "windowTimezone": "Asia/Shanghai", "qualifyingWindows": 24,
+        "qualifyingModules": 20, "moduleCount": 20, "moduleLimit": 200,
+        "modules": modules, "modulesTruncated": True,
+        "sampleWindows": samples, "sampleWindowsTruncated": True,
+        "evaluatedWindows": None, "evaluatedWindowsAvailable": False,
+        "limitations": ["evaluated_windows_not_counted"],
+        "moduleQuerySpec": {"query": {"sources": [{"objectTypeId": "x"}]}},
+        "moduleQuerySpecHash": "module-hash",
+        "exact": True, "partial": False, "completeness": "complete",
+    }
+    payload = context_policy.tool_payload(result, cap=1400)
+    preview = json.loads(payload)
+    assert len(payload) <= 1400
+    assert preview["llmPreviewOmitted"] is True
+    assert len(preview["modules"]) == 10
+    assert preview["modules"][0]["module"] == "module-00"
+    assert preview["qualifyingWindows"] == 24
+    assert preview["qualifyingModules"] == 20
+    assert preview["moduleCount"] == 20
+    assert preview["windowMinutes"] == 30
+    assert preview["windowBucket"] == "half_hour"
+    assert preview["windowTimezone"] == "Asia/Shanghai"
+    assert preview["modulesTruncated"] is True
+    assert preview["sampleWindowsTruncated"] is True
+    assert preview["threshold"] == 5
+    assert preview["evaluatedWindowsAvailable"] is False
+    assert preview["limitations"] == ["evaluated_windows_not_counted"]
+    assert "moduleQuerySpec" not in preview
+    assert "moduleQuerySpecHash" not in preview
+
+
+def test_evidence_digest_uses_safe_window_preview():
+    from app.ontologies.agent_runtime import answer_evidence
+
+    result = {
+        "kind": "sequence_analysis", "mode": "window_distinct",
+        "objectType": "事件", "windowMinutes": 30,
+        "windowBucket": "half_hour", "windowTimezone": "Asia/Shanghai",
+        "qualifyingWindows": 12, "qualifyingModules": 3, "moduleCount": 3,
+        "modules": [{"module": "m1", "qualifyingWindows": 4}],
+        "sampleWindows": [
+            {"module": "m1", "users": 7,
+             "drilldown": {"token": "signed-token"}},
+            {"module": "m2", "users": 5, "drilldown": "业务字符串"},
+        ],
+        "moduleQuerySpec": {"shape": "objects"},
+        "moduleQuerySpecHash": "module-hash",
+        "exact": True, "partial": False, "completeness": "complete",
+    }
+    digest = answer_evidence.evidence_digest(
+        [{"tool": "analyze_sequences", "result": result}],
+        title="窗口证据", cap=4000)
+    assert "signed-token" not in digest
+    assert "业务字符串" in digest
+    assert "moduleQuerySpec" not in digest
+    assert "qualifyingWindows" in digest
+
+
+def test_tool_preview_keeps_monthly_twelve_and_reports_omissions():
+    months = [{"group": f"2026-{month:02d}", "value": month}
+              for month in range(1, 13)]
+    payload = context_policy.tool_payload({
+        "objectType": "订单", "groupBy": "创建时间(月)", "groupBuckets": ["month"],
+        "groups": months, "totalGroups": 12,
+    }, cap=2000)
+    preview = json.loads(payload)
+    assert preview["groups"] == months
+    assert "llmPreviewTruncated" not in preview
+
+    overflow = context_policy.tool_payload({
+        "objectType": "订单", "groupBy": "客户",
+        "groups": [{"group": f"客户{i:02d}", "value": i} for i in range(40)],
+        "totalGroups": 40, "hasNext": True, "cursor": "cursor-token",
+    }, cap=1000)
+    omitted = json.loads(overflow)
+    assert len(omitted["groups"]) == 10
+    assert omitted["omittedItems"] == {"groups": 30}
+    assert omitted["llmPreviewOmitted"] is True
+    assert omitted["cursor"] == "cursor-token"
+    assert len(overflow) <= 1000
+
+
+def test_tool_preview_never_silently_truncates_pagination_cursor():
+    cursor = "c" * 800
+    payload = context_policy.tool_payload({
+        "objectType": "订单", "groupBy": "客户",
+        "groups": [{"group": f"客户{i:02d}", "value": i} for i in range(40)],
+        "totalGroups": 40, "hasNext": True, "cursor": cursor,
+    }, cap=1000)
+    preview = json.loads(payload)
+    assert len(payload) <= 1000
+    assert preview.get("cursor") == cursor or preview.get("cursorOmitted") is True
+    assert preview.get("cursor") != cursor[:512]
+
+
+def test_history_budget_never_splits_tool_call_pairs():
+    rows = [{"name": "订单", "amount": index} for index in range(40)]
+    tool_content = json.dumps({"rows": rows, "hasNext": True,
+                               "cursor": "cursor-token"}, ensure_ascii=False)
+    messages = [
+        {"role": "user", "content": "current question"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "call-1", "name": "query_objects"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": tool_content},
+    ]
+    bounded = context_policy.budget_messages(messages, cap=900)
+    assert [message["role"] for message in bounded] == ["user", "assistant", "tool"]
+    assert bounded[1]["tool_calls"][0]["id"] == "call-1"
+    assert bounded[2]["tool_call_id"] == "call-1"
+    assert json.loads(bounded[2]["content"])["cursor"] == "cursor-token"
+
+
 def test_history_budget_drops_whole_older_user_turn():
     messages = [
         {"role": "system", "content": "policy"},

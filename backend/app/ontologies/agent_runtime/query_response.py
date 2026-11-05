@@ -10,8 +10,8 @@ from app.ontologies.agent_runtime.query_spec import (
 )
 from app.ontologies.agent_runtime.query_window import window_for_result
 
-_BUCKET_UNITS = {"day": "日", "week": "周", "month": "月",
-                 "quarter": "季", "year": "年"}
+_BUCKET_UNITS = {"half_hour": "半小时", "day": "日", "week": "周",
+                 "month": "月", "quarter": "季", "year": "年"}
 
 
 def _data_mode(data: dict) -> str:
@@ -183,6 +183,23 @@ def cursor_page_result(*, data: dict, spec: dict, user,
         "querySpec": spec,
         "querySpecHash": spec_hash(spec),
     }
+    # 续页同样携带投影省略元数据：不能因翻页丢掉“哪些默认字段未观测”。
+    if "omittedFields" in description:
+        out["projection"] = {
+            "cap": description.get("selectCap"),
+            "selectedFields": description.get("select") or [],
+            "omittedFields": description.get("omittedFields") or [],
+            "note": description.get("projectionNote") or (
+                "默认投影受单一查询投影上限约束；omittedFields 未返回，"
+                "不代表字段不存在或值为空"),
+        }
+    if description.get("drilldownOmittedFields"):
+        out["drilldownProjection"] = {
+            "cap": description.get("drilldownSelectCap"),
+            "omittedFields": description.get("drilldownOmittedFields") or [],
+            "note": description.get("drilldownProjectionNote") or (
+                "下钻明细投影受单一查询投影上限约束；省略字段未被观测"),
+        }
     if group_items:
         out["groupBy"] = [
             (f"{item['readable']}({_BUCKET_UNITS[item['bucket']]})"

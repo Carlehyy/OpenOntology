@@ -6,15 +6,18 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.sql import visitors
+from sqlalchemy.sql.elements import ColumnClause, TextClause
 
 from app.data_channel.query.compiler import compile_query
-from app.data_channel.query.contracts import ColumnSpec, QueryError, Relation
+from app.data_channel.query.contracts import ColumnSpec, DerivedSourceSpec, QueryError, Relation
+from app.data_channel.query.derived import resolve_derived
 from app.data_channel.query.federated import _bucket_start, _group_item_parts
-from app.data_channel.query.parser import Command, Pipeline, Ref
+from app.data_channel.query.parser import Command, Expr, Pipeline, Ref, Value
 
 
 def _relation(alias, table, specs, engine):
@@ -111,6 +114,130 @@ def test_bucket_dialect_sql_shapes(events):
     assert "period_add" in q_sql.lower()
 
 
+@pytest.mark.parametrize("bucket", ["day", "week", "month", "quarter", "year", "half_hour"])
+def test_mysql_bucket_sort_never_references_ungrouped_base_columns(events, bucket):
+    """MySQL 8.4 ONLY_FULL_GROUP_BY (ERROR 1055) regression, real-run found.
+
+    The NULL-ordering CASE used to re-expand the bucket expression over the
+    derived table's base column, which MySQL rejects even though SELECT and
+    GROUP BY carry the identical expression. The sort must read the grouped
+    output in an outer projection; the ORDER BY clause may not touch qf_*
+    base columns at all.
+    """
+    _engine, _table, relation = events
+    compiled = compile_query(_bucket_pipeline(bucket), {"t": relation}, {},
+                             dialect="mysql")
+    sql = str(compiled.statement.compile(dialect=sa.dialects.mysql.dialect()))
+    select_sql, order_sql = sql.split("ORDER BY", 1)
+    assert "GROUP BY" in select_sql and "qf_" in select_sql
+    assert "qf_" not in order_sql
+    assert "IS NULL" in order_sql and "bucket" in order_sql
+
+
+def test_mysql_non_bucket_sort_stays_single_layer(events):
+    _engine, _table, relation = events
+    pipeline = Pipeline("t", "t", (
+        Command("stats", (("count", None, "n"),
+                          ("group", ((Ref("t", "name"), "name"),)))),
+        Command("sort", (("n", "desc", "last"),)),
+    ))
+    compiled = compile_query(pipeline, {"t": relation}, {}, dialect="mysql")
+    sql = str(compiled.statement.compile(dialect=sa.dialects.mysql.dialect()))
+    # The ONLY_FULL_GROUP_BY workaround is scoped to bucketed sort outputs;
+    # plain grouped sorts keep their existing statement shape.
+    assert sql.count("FROM (SELECT") == 1
+
+
+def test_half_hour_bucket_executes_on_sqlite_with_timestamp_output():
+    engine = sa.create_engine("sqlite://")
+    meta = sa.MetaData()
+    table = sa.Table(
+        "ticks", meta,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("occurred_at", sa.DateTime(), nullable=True))
+    meta.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(table.insert(), [
+            {"id": 1, "occurred_at": datetime(2026, 1, 1, 10, 0, 0)},
+            {"id": 2, "occurred_at": datetime(2026, 1, 1, 10, 29, 59)},
+            {"id": 3, "occurred_at": datetime(2026, 1, 1, 10, 30, 0)},
+            {"id": 4, "occurred_at": datetime(2026, 1, 1, 10, 59, 59)},
+            {"id": 5, "occurred_at": datetime(2026, 1, 1, 23, 59, 59)},
+            {"id": 6, "occurred_at": None},
+        ])
+    specs = [ColumnSpec("id", "integer"), ColumnSpec("occurred_at", "timestamp")]
+    pipeline = Pipeline("t", "t", (
+        Command("stats", (("count", None, "n"),
+                          ("group", ((Ref("t", "occurred_at"), "bucket", "half_hour"),)))),
+        Command("sort", (("bucket", "asc", "last"),)),
+    ))
+    compiled = compile_query(pipeline, {"t": _relation("t", table, specs, engine)}, {},
+                             dialect="sqlite")
+    assert compiled.columns[0].type == "timestamp"
+    with engine.connect() as conn:
+        rows = [dict(row) for row in
+                conn.execute(compiled.statement, compiled.params or {}).mappings()]
+    assert [(row["bucket"], int(row["n"])) for row in rows] == [
+        ("2026-01-01 10:00:00", 2), ("2026-01-01 10:30:00", 2),
+        ("2026-01-01 23:30:00", 1), (None, 1)]
+    engine.dispose()
+
+
+def test_half_hour_output_keeps_source_timezone_flag(events):
+    _engine, _table, relation = events
+    relation.columns["occurred_at"] = ColumnSpec("occurred_at", "timestamp", timezone=True)
+    compiled = compile_query(_bucket_pipeline("half_hour"), {"t": relation}, {},
+                             dialect="sqlite")
+    spec = next(c for c in compiled.columns if c.name == "bucket")
+    assert spec.type == "timestamp" and spec.timezone is True
+
+
+@pytest.mark.parametrize("bucket", ["day", "week", "month", "quarter", "year", "half_hour"])
+@pytest.mark.parametrize("dialect", ["postgresql", "mysql", "sqlite"])
+def test_bucket_expression_is_typed_for_native_read_port(events, bucket, dialect):
+    """The native read port rejects TextClause/literal columns (RAW_SQL_DENIED).
+
+    Every bucket expression must be a typed SQLAlchemy construct: interval
+    units/values cannot be raw SQL fragments. This is the compiler-side guard
+    contract; the real read-port execution is covered by the opt-in MySQL/PG
+    suites.
+    """
+    _engine, _table, relation = events
+    compiled = compile_query(_bucket_pipeline(bucket), {"t": relation}, {},
+                             dialect=dialect)
+    raw = [node for node in visitors.iterate(compiled.statement)
+           if isinstance(node, TextClause)
+           or (isinstance(node, ColumnClause) and node.is_literal and node.name != "*")]
+    assert raw == []
+
+
+@pytest.mark.parametrize("dialect", ["mysql", "postgresql"])
+def test_derived_half_hour_subquery_is_typed_for_native_read_port(events, dialect):
+    """QS-subquery shape: inner half-hour aggregation + outer threshold/summary.
+
+    The native guard traverses the whole statement, including an inner derived
+    subquery. No TextClause/interval-literal fragment may hide in the nested
+    half-hour expression.
+    """
+    _engine, _table, relation = events
+    relation.state["dialect"] = dialect
+    inner = DerivedSourceSpec(
+        alias="inner", source="t", pipeline=_bucket_pipeline("half_hour"), params={})
+    relations = resolve_derived({"t": relation}, {"inner": inner})
+    outer = Pipeline("inner", "inner", (
+        Command("where", (Expr(">=", (Ref("inner", "bucket"),
+                                      Value("2026-01-01T00:00:00")),),)),
+        Command("fields", ((Ref("inner", "bucket"), "bucket"),
+                           (Ref("inner", "n"), "n"))),
+        Command("sort", (("bucket", "asc", "last"),)),
+    ))
+    compiled = compile_query(outer, {"inner": relations["inner"]}, {}, dialect=dialect)
+    raw = [node for node in visitors.iterate(compiled.statement)
+           if isinstance(node, TextClause)
+           or (isinstance(node, ColumnClause) and node.is_literal and node.name != "*")]
+    assert raw == []
+
+
 def test_bucket_requires_temporal_column(events):
     _engine, _table, relation = events
     pipeline = Pipeline("t", "t", (
@@ -162,6 +289,28 @@ class TestBucketStart:
     def test_python_bucket_rejects_non_temporal(self):
         with pytest.raises(QueryError):
             _bucket_start("not-a-date", "month")
+
+    def test_python_half_hour_bucket_floors_and_keeps_datetime(self):
+        assert _bucket_start(datetime(2026, 1, 1, 10, 0, 0), "half_hour") == \
+            datetime(2026, 1, 1, 10, 0, 0)
+        assert _bucket_start(datetime(2026, 1, 1, 10, 29, 59), "half_hour") == \
+            datetime(2026, 1, 1, 10, 0, 0)
+        assert _bucket_start(datetime(2026, 1, 1, 10, 30, 0), "half_hour") == \
+            datetime(2026, 1, 1, 10, 30, 0)
+        assert _bucket_start(datetime(2026, 1, 1, 10, 59, 59, 999999), "half_hour") == \
+            datetime(2026, 1, 1, 10, 30, 0)
+        assert _bucket_start(date(2026, 1, 1), "half_hour") == \
+            datetime(2026, 1, 1, 0, 0, 0)
+        assert _bucket_start("2026-01-01 10:45:30", "half_hour") == \
+            datetime(2026, 1, 1, 10, 30, 0)
+        assert _bucket_start("2026-01-01", "half_hour") == \
+            datetime(2026, 1, 1, 0, 0, 0)
+
+    def test_python_half_hour_bucket_preserves_timezone(self):
+        aware = datetime(2026, 1, 1, 10, 45, tzinfo=timezone.utc)
+        assert _bucket_start(aware, "half_hour") == \
+            datetime(2026, 1, 1, 10, 30, tzinfo=timezone.utc)
+        assert _bucket_start(aware, "half_hour").tzinfo is timezone.utc
 
 
 def test_group_item_parts_variants():

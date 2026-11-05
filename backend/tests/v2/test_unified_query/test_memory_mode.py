@@ -1163,6 +1163,33 @@ def test_single_source_stream_is_bounded_before_full_materialization(sources):
     result = MemoryExecutor(FakeService(), limited, relations, {}).run()
     assert [row["id"] for row in result.rows] == ["2", "3"]
     assert result.result_limited is True
+    # The pre-LIMIT count stays available for exact bounded-stats reporting,
+    # while the detail contract still pages only materialized rows.
+    assert result.pre_limit_rows == 3
+
+
+def test_grouped_stats_limit_keeps_exact_pre_limit_group_count(sources):
+    pipeline = typed_pipeline(
+        "from orders as orders | stats count() as n by orders.customer_id | limit 1")
+    result = MemoryExecutor(FakeService(), pipeline, {"orders": sources["my"]["orders"]}, {}).run()
+    assert len(result.rows) == 1 and result.result_limited is True
+    assert result.pre_limit_rows == 2
+
+
+def test_bounded_grouped_stats_response_reports_pre_limit_total_without_cursor(sources):
+    relations = {"orders": sources["my"]["orders"]}
+    service = _fake_service_for_memory(relations)
+    request = TypedQueryRequest(
+        pipeline=typed_pipeline(
+            "from orders as orders | stats count() as n by orders.customer_id | limit 1"),
+        bindings={"orders": Binding(kind="integrated", asset_id="a")},
+        result_storage="memory")
+    response = service.execute_typed(request)
+    assert response["totalRows"] == 1
+    assert response["resultLimited"] is True
+    assert response["plan"]["totalRowsBeforeLimit"] == 2
+    # The LIMIT prefix is all that exists: no cursor pretends to page the rest.
+    assert response["page"]["hasMore"] is False and response["page"]["cursor"] is None
 
 
 def test_nested_derived_join_constraints_enforced(sources):
