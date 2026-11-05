@@ -145,6 +145,40 @@ fixture 环境变量启动 NATS executor，后台回合才会真正被消费；�
 `AGENT_RUN_LEASE_SECONDS=30`（registry 最小 30 秒）配合 kill executor 演练
 45 秒 reconcile，不改变生产默认 600 秒。
 
+#### 本体助手复盘验收（真实远程源）
+
+`backend/scripts/ontology_assistant_recap_e2e.py` 在已启动的隔离 API（默认
+`http://127.0.0.1:18036`）与 NATS executor 上，经真实 HTTP 发布正门创建
+47 属性合成本体，注册 DBX 集成资产与 remote mapping，完成
+draft/trial/promote，再经 `/agent/chat/runs` 验收 describe、默认投影
+32-of-47、日/周/月/季/年聚合排序、Top10、零结果 coverage、整窗 distinct
+与 `window_distinct` 固定 30 分钟窗口。脚本必须显式设置：
+
+```bash
+export OPENONTOLOGY_RECAP_E2E=1 ENVIRONMENT=test
+export OPENONTOLOGY_E2E_ADMIN_PASSWORD=admin123   # 隔离 fixture 管理员
+cd backend
+uv run python scripts/ontology_assistant_recap_e2e.py \
+  --base-url http://127.0.0.1:18036 \
+  --model-base-url http://127.0.0.1:18038/v1 \
+  --keep-model-config
+```
+
+后端/executor 使用同一套 fixture 环境并额外提供
+`INTEGRATED_DBX_URL=http://127.0.0.1:18039`、
+`INTEGRATED_DBX_PASSWORD=recap-dbx-fixture`（commit 使用 pinned 默认值）。
+脚本自管独立 `oo-recap-mysql-33317`（127.0.0.1:33317）、
+`oo-recap-dbx-18039` 与 `oo-recap-fixture-net`，只复用带自身 ownership
+label 的容器，绝不触碰其他 MySQL/DBX/compose 项目。模型 HTTP 边界使用
+18038 回环夹具；可先单独运行
+`uv run python scripts/ontology_assistant_recap_e2e.py --serve-model --port 18038`
+并记录 PID，脚本会复用该进程；`--keep-model-config` 保留模型配置供浏览器
+复验。报告写 `.artifacts/ontology-assistant-recap/report.json`，包含
+`ontologyId/releaseId/conversationIds` 与前端 Hash 深链
+（`#/agent?ontology_id=…&conversation_id=…`）。结束按报告 cleanup 命令删除
+自有 DBX/MySQL 容器、网络和模型 stub PID；合成本体与会话留在隔离后端数据库，
+由操作者统一清理。
+
 ### 双源集成数据集：隔离环境与容量验收
 
 双源容量验收使用独立的 [Compose](../../docker-compose.integrated-e2e.yml) 与
@@ -614,6 +648,9 @@ NetworkX/SQL、对象写入失败不切本地目录。关键词搜索应验证 P
   `steward_api_hub_live_e2e.py`；
 - Chromium CDP：`backend/scripts/steward_companion_e2e.py`；
 - 探索真实 LLM：`backend/scripts/exploration_live_e2e.py`；
+- 本体助手复盘（47 属性/时间桶/Top10/零结果/window_distinct）：
+  `backend/scripts/ontology_assistant_recap_e2e.py`（需 18036 API 与 NATS
+  executor；脚本自管 MySQL/DBX/模型夹具）；
 - 文件网关/MinIO：`backend/scripts/steward_file_asset_live_e2e.py`；
 - Sentinel：`scripts/data/run_sentinel_real_data_e2e.py`；
 - Sentinel CEP（事件日志/时间算子/序列缺失/窗口聚合）：`scripts/data/run_sentinel_cep_e2e.py`（须在隔离 staging 运行，直写实例在 production 环境被拒绝）；
