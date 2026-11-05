@@ -202,6 +202,8 @@ interface MockOptions {
   remoteAgentsDelayMs?: number
   /** MCP Server 夹具；省略即空列表 */
   mcpServers?: Array<Record<string, unknown>>
+  /** 覆盖 WeKnora 入口 web_url（默认公网 https 地址）；回环值用于验证同主机改写 */
+  weknoraWebUrl?: string
 }
 
 async function mockApis(page: Page, options: MockOptions = {}) {
@@ -323,7 +325,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   // 知识图谱（WeKnora）：页面加载读取受信入口配置；记录请求次数供断言
   const weknoraCalls: string[] = []
   const weknoraFixture = {
-    web_url: 'https://weknora.example.com:8443',
+    web_url: options.weknoraWebUrl ?? 'https://weknora.example.com:8443',
   }
   await page.route('**/api/**', route => {
     const request = route.request()
@@ -2481,6 +2483,30 @@ test('知识库（WeKnora）：头部会话纪要左侧入口，新标签打开�
   expect(popupUrl.pathname).toBe('/')
   expect(await popup.evaluate(() => window.opener)).toBeNull()
   await popup.close()
+})
+
+test('知识库（WeKnora）：后端下发回环地址时改写为当前访问主机，协议端口保留', async ({ page }) => {
+  await seedAuth(page)
+  // 内网部署未显式配置 WEKNORA_WEB_URL 时，后端会把回环默认值原样下发；
+  // 远程浏览器打不开自己机器的 8089——前端应改用当前访问平台的主机名。
+  // E2E 页面本身跑在 localhost：127.0.0.1 夹具经改写后主机变为 localhost，
+  // 与夹具形成可观测差异，端口与协议保持后端配置。
+  await mockApis(page, { weknoraWebUrl: 'http://127.0.0.1:8089' })
+  await page.goto('/#/super-assistant')
+
+  const link = page.getByRole('link', { name: '知识库（WeKnora）' })
+  await expect(link).toBeVisible()
+  await expect(link).toHaveAttribute('href', 'http://localhost:8089')
+  await expect(link).toHaveAttribute('target', '_blank')
+  await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+
+  // 窄屏溢出菜单入口走同一派生结果
+  await page.setViewportSize({ width: 375, height: 720 })
+  await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
+  await page.getByRole('button', { name: '更多操作' }).click()
+  const menuLink = page.getByRole('dialog').getByRole('link', { name: '知识库（WeKnora）' })
+  await expect(menuLink).toBeVisible()
+  await expect(menuLink).toHaveAttribute('href', 'http://localhost:8089')
 })
 
 test('外部集成：multica 测试连接、工作区下拉与保存', async ({ page }) => {

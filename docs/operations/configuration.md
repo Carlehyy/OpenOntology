@@ -94,7 +94,10 @@ WeKnora 使用官方 app、UI、docreader 和独立 ParadeDB、Redis、文件卷
 网关对精确 `/mcp` 与全部 `/mcp/` 子路径返回 404。
 
 平台只使用 `WEKNORA_BASE_URL`、`WEKNORA_WEB_URL` 和
-`WEKNORA_TIMEOUT_SECONDS` 做服务探活与页面跳转。标准 MCP 的内部访问范围由
+`WEKNORA_TIMEOUT_SECONDS` 做服务探活与页面跳转。前端知识库入口在
+`WEKNORA_WEB_URL` 为主机回环地址（localhost/127.0.0.1 等）时，自动改用浏览器
+当前访问平台的主机名（协议与端口保留），内网与公网部署未显式配置时同样跳到
+同机网关；非回环地址按配置原样跳转。标准 MCP 的内部访问范围由
 `SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS` 指定（Docker 固定
 `http://weknora-app:8080/mcp`；源码模式由配置中心生成为
 `http://127.0.0.1:18080/mcp`）。只允许精确同源、路径在前缀内的请求；其它 MCP
