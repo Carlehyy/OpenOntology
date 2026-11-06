@@ -469,3 +469,84 @@ def test_history_evidence_is_scoped_to_conversation_and_release(
     assert data["verification"]["passed"] is False
     assert data["verification"]["unverified"] == [777]
     assert "结论校验" in data["content"]
+
+
+def test_answer_verification_corrects_ideographic_comma_state_numbers(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """P-25：状态列表「Closed 201、…」是数值断言，错值必须触发修正回环。"""
+    oid = modeled_ontology["id"]
+    _add_model(db, admin_user, "verify-state-list")
+    calls = {"n": 0}
+
+    def fake_chat(call_kwargs, messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert any(t["name"] == "search_objects" for t in tools)
+            return {"content": None,
+                    "usage": {"inputTokens": 10, "outputTokens": 5},
+                    "tool_calls": [{"id": "tc1", "name": "search_objects",
+                                    "arguments": {"object_type": "Order",
+                                                  "filters": [{"property": "status",
+                                                               "op": "eq",
+                                                               "value": "pending"}]}}]}
+        if calls["n"] == 2:
+            # 工具证据里没有 201/69/10 —— 修复前会被当序号屏蔽而静默通过。
+            return {"content": "状态：Closed 201、Resolved 69、Pending Change 10、Open 1。",
+                    "tool_calls": [], "usage": {"inputTokens": 20, "outputTokens": 8}}
+        assert tools == []
+        correction = messages[-1]["content"]
+        assert "结论校验失败" in correction and "201" in correction
+        # 修正只保留可核验数字（1 由 search 结果背书）。
+        return {"content": "当前待支付订单共 1 个。", "tool_calls": [],
+                "usage": {"inputTokens": 15, "outputTokens": 6}}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "各状态订单分别有多少？", "stream": False})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["error"] is None
+    assert "201" not in data["content"]
+    verification = data["verification"]
+    assert verification["passed"] is True
+    assert verification["answerNumberCount"] == 1
+    assert verification["retried"] is True
+    assert calls["n"] == 3
+
+
+def test_answer_verification_counts_both_state_values_in_answer(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """P-25：正确状态值「待支付 1、已支付 1」两个 1 都计数、不误报。"""
+    oid = modeled_ontology["id"]
+    _add_model(db, admin_user, "verify-state-values")
+    calls = {"n": 0}
+
+    def fake_chat(call_kwargs, messages, tools):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert any(t["name"] == "aggregate_objects" for t in tools)
+            return {"content": None,
+                    "usage": {"inputTokens": 10, "outputTokens": 5},
+                    "tool_calls": [{"id": "tc1", "name": "aggregate_objects",
+                                    "arguments": {"object_type": "Order",
+                                                  "group_by": "status"}}]}
+        return {"content": "待支付 1、已支付 1。", "tool_calls": [],
+                "usage": {"inputTokens": 20, "outputTokens": 8}}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    r = client.post(
+        f"{_fo(oid)}/agent/chat", headers=auth_headers,
+        json={"message": "各状态订单分别有多少？", "stream": False})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["error"] is None
+    assert "结论校验" not in data["content"]
+    verification = data["verification"]
+    assert verification["passed"] is True
+    # 修复前第二个「1」被顿号序号规则吞掉，只计 1 个数字。
+    assert verification["answerNumberCount"] == 2
+    assert verification["retried"] is False
+    assert calls["n"] == 2

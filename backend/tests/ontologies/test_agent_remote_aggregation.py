@@ -849,6 +849,33 @@ class _RecordingPort:
         return {"queryId": query_id, "cancelled": True}
 
 
+class _SequencePort:
+    """按调用序返回不同结果；每次真实 prepare_remote_plan 的 plan 全部记录。
+
+    计划编制/授权/profile 帽复核仍是真实代码（``remote_query._port`` 只替换
+    物理执行），因此「枚举页是否越过授权上限」会被真实校验捕获。
+    """
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.executed = []
+        self.cancelled = []
+
+    def execute(self, db, user, plan, *, request, session_kind, session_id):
+        self.executed.append({"user": user, "plan": plan, "request": request,
+                              "session_kind": session_kind,
+                              "session_id": session_id})
+        index = min(len(self.executed) - 1, len(self.results) - 1)
+        return self.results[index]
+
+    def fetch(self, *args, **kwargs):  # pragma: no cover - 聚合不分页取页
+        raise AssertionError("聚合不分页取页")
+
+    def cancel(self, db, user, query_id):
+        self.cancelled.append((user.id, query_id))
+        return {"queryId": query_id, "cancelled": True}
+
+
 def test_remote_aggregate_wires_through_real_plan_and_installed_port(
         modeled_ontology, db, admin_user, monkeypatch):
     """端到端接线：真实 prepare_remote_plan（授权/绑定/列映射）+ 已安装端口。"""
@@ -893,6 +920,194 @@ def test_remote_aggregate_wires_through_real_plan_and_installed_port(
     assert port.executed[0]["user"] is admin_user
     assert port.executed[0]["session_kind"] == "ontology_agent"
     assert port.executed[0]["session_id"] == "conv-wire"
+
+
+# ------------------------- 8b. contains 枚举页不得越过 profile 授权上限（P-23）
+
+
+_CONTAINS_FILTER = {"property": "region", "op": "contains", "value": "南"}
+_CONTAINS_ENUM_ROWS = [{"group": "华南", "value": 4}]
+
+
+def _contains_enum_result(rows=None, *, total_row_count=None):
+    return _unified_result(rows if rows is not None else _CONTAINS_ENUM_ROWS,
+                           total_row_count=total_row_count)
+
+
+def _install_sequence_port(monkeypatch, results):
+    from app.ontologies.agent_query import remote_query
+
+    port = _SequencePort(results)
+    monkeypatch.setattr(remote_query, "_port", port)
+    return port
+
+
+def test_contains_enumeration_page_respects_profile_cap(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=100 的 contains 标量统计：LIKE 枚举页 = 100（而非注册表 200）。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 100)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    port = _install_sequence_port(monkeypatch, [
+        _contains_enum_result(total_row_count=1),
+        _unified_result([{"value": 4}]),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert out["value"] == 4 and out["dataMode"] == "remote"
+    assert len(port.executed) == 2
+    enum_plan = port.executed[0]["plan"]
+    assert enum_plan["pageSize"] == 100  # = min(200, profile cap 100)
+    assert "statsLimit" not in enum_plan  # 枚举页不得借 boundedStats 绕过
+    assert enum_plan["where"] == [{"source": "objects", "property": "region",
+                                   "op": "contains", "value": "南"}]
+    assert port.executed[1]["plan"]["pageSize"] == 1
+
+
+def test_contains_grouped_enum_page_capped_but_main_group_page_kept(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=50：枚举页夹到 50，主分组 boundedStats 页仍为 200（例外不夹取）。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    port = _install_sequence_port(monkeypatch, [
+        _contains_enum_result(total_row_count=1),
+        _unified_result([{"group0": "华南", "value": 7}], total_row_count=1),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count", "group_by": "region",
+        "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert out["groups"] == [{"group": "华南", "value": 7, "count": 7,
+                              "groupValues": ["华南"],
+                              "groupDisplay": "region=华南"}]
+    assert out["totalGroups"] == 1
+    assert len(port.executed) == 2
+    assert port.executed[0]["plan"]["pageSize"] == 50
+    main_plan = port.executed[1]["plan"]
+    assert main_plan["pageSize"] == 200
+    assert main_plan["statsLimit"] == 200
+
+
+@pytest.mark.parametrize("limit, expected_main", [
+    (None, 200), (20, 20), (50, 50), (100, 100), (150, 150)])
+def test_contains_enum_page_cap_independent_of_user_limit(
+        modeled_ontology, db, admin_user, monkeypatch, limit, expected_main):
+    """cap=100 下 limit 只压主分组页（含 150 > cap 的合法 Top-N），枚举恒为 100。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 100)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    port = _install_sequence_port(monkeypatch, [
+        _contains_enum_result(total_row_count=1),
+        _unified_result([{"group0": "华南", "value": 7}], total_row_count=1),
+    ])
+    arguments = {"object_type": "Supplier", "metric": "count",
+                 "group_by": "region", "filters": [dict(_CONTAINS_FILTER)]}
+    if limit is not None:
+        arguments["limit"] = limit
+
+    out = runner.run("aggregate_objects", arguments)
+
+    assert out["groups"][0]["group"] == "华南"
+    assert out["groupLimit"] == expected_main
+    assert len(port.executed) == 2
+    assert port.executed[0]["plan"]["pageSize"] == 100
+    assert port.executed[1]["plan"]["pageSize"] == expected_main
+    assert port.executed[1]["plan"]["statsLimit"] == expected_main
+
+
+def test_contains_like_miss_fallback_page_respects_profile_cap(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """LIKE 零命中回退全枚举（无 boundedStats）同样受 cap=100 约束。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 100)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    port = _install_sequence_port(monkeypatch, [
+        _unified_result([], total_row_count=0),                       # LIKE 零命中
+        _unified_result([{"group": "North", "value": 3}], total_row_count=1),
+        _unified_result([{"value": 3}]),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "filters": [{"property": "region", "op": "contains", "value": "north"}]})
+
+    assert out["value"] == 3
+    assert len(port.executed) == 3
+    fallback_plan = port.executed[1]["plan"]
+    assert fallback_plan["pageSize"] == 100
+    assert "statsLimit" not in fallback_plan
+    assert fallback_plan["where"] == []  # 回退只做全枚举，不再带 like 条件
+
+
+def test_contains_enumeration_truncated_after_page_cap_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=100 枚举满页但 totalRowCount=150：仍 fail closed，主查询 0 次。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 100)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    rows = [{"group": f"区域{index}", "value": 1} for index in range(100)]
+    port = _install_sequence_port(monkeypatch, [
+        _unified_result(rows, total_row_count=150),
+    ])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert port.executed[0]["plan"]["pageSize"] == 100
+    assert len(port.executed) == 1  # 主统计绝不能被执行
+
+
+def test_non_contains_group_page_keeps_registry_page_under_profile_cap(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """非 contains 分组统计不受枚举帽影响：cap=100 时主分组页仍 200。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 100)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    port = _install_sequence_port(monkeypatch, [
+        _unified_result([{"group0": "华南", "value": 4}], total_row_count=1),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count", "group_by": "region"})
+
+    assert out["totalGroups"] == 1
+    assert len(port.executed) == 1
+    plan = port.executed[0]["plan"]
+    assert plan["pageSize"] == 200
+    assert plan["statsLimit"] == 200
+
+
+def test_contains_enumeration_page_matches_registry_page_at_high_cap(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=200（高于注册表）时枚举页仍为 200：高帽环境不回归。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 200)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    port = _install_sequence_port(monkeypatch, [
+        _contains_enum_result(total_row_count=1),
+        _unified_result([{"value": 4}]),
+    ])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert out["value"] == 4
+    assert port.executed[0]["plan"]["pageSize"] == 200
 
 
 def test_chat_remote_aggregate_passes_user_and_conversation_to_port(

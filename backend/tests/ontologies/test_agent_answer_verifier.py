@@ -245,6 +245,49 @@ class TestAnswerSideTypoMasking:
         assert result.passed is True
         assert result.unverified == []
 
+    def test_labeled_numbers_after_ideographic_comma_are_claims(self):
+        # 顿号前的数字在「标签 + 数值」形态下是真实断言，不是列表序号。
+        assert answer_numbers(
+            "Closed 201、Resolved 69、Pending Change 10、Open 1") == [
+            201.0, 69.0, 10.0, 1.0]
+
+    def test_thousands_separated_values_are_not_partially_masked(self):
+        # 边界断言避免把 53,225、25,801 中的「225、25」当序号局部屏蔽。
+        assert answer_numbers("合计 53,225、25,801 两模块") == [
+            53225.0, 25801.0]
+
+    def test_pure_digit_ordinal_chains_stay_masked(self):
+        # 纯数字顿号串仍是列表序号：只修「标签+数值」，不放宽既有屏蔽。
+        assert answer_numbers("分别 201、69、10、1") == []
+
+    def test_state_distribution_numbers_are_verified_by_evidence(self):
+        steps = [_step({"groups": [
+            {"group": "Closed", "value": 201},
+            {"group": "Resolved", "value": 69},
+            {"group": "Pending Change", "value": 10},
+            {"group": "Open", "value": 1},
+        ]})]
+        result = verify_answer(
+            "Closed 201、Resolved 69、Pending Change 10、Open 1", steps)
+        assert result.passed is True
+        assert result.unverified == []
+        assert result.summary()["answerNumberCount"] == 4
+
+    def test_wrong_state_distribution_numbers_are_not_silently_skipped(self):
+        steps = [_step({"groups": [
+            {"group": "Closed", "value": 150},
+            {"group": "Resolved", "value": 67},
+            {"group": "Pending Change", "value": 10},
+            {"group": "Open", "value": 1},
+        ]})]
+        result = verify_answer(
+            "Closed 201、Resolved 69、Pending Change 10、Open 1", steps)
+        assert result.passed is False
+        assert Decimal("201") in result.unverified
+        assert Decimal("69") in result.unverified
+        assert Decimal("10") not in result.unverified
+        assert Decimal("1") not in result.unverified
+
     def test_result_side_identifiers_extended_keys_do_not_seed(self):
         steps = [_step({
             "created_at": "2026-11-03 10:20:30",
