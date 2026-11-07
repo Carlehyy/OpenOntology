@@ -237,6 +237,9 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
     cap = int(scope.profile.max_rows_per_query or 0)
     if cap <= 0:
         raise ToolError("profile_query_disabled: 当前本体助手未启用查询额度")
+    # contains 枚举页不带 boundedStats，必须同时受注册表上限与 profile 授权帽
+    # 约束；否则源端计划复核会以 pageSize 超出授权上限拒绝整个聚合。
+    enum_page = min(_group_page(), cap)
     filters = [item for item in (filters or []) if isinstance(item, dict)]
     group_items = group_by if isinstance(group_by, list) else []
     if limit is not None and not group_items:
@@ -282,7 +285,7 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
         like_leaf = {"source": "objects", "property": item["property"],
                      "op": "contains", "value": want}
         enum_payload = {**count_payload(others + [like_leaf]),
-                        "pageSize": _group_page(),
+                        "pageSize": enum_page,
                         "select": [{"source": "objects", "property": item["property"],
                                     "as": "group"}],
                         "groupBy": [{"source": "objects", "property": item["property"]}],
@@ -300,7 +303,7 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
             # 源端 LIKE 可能大小写敏感（如 PostgreSQL）：回退为源端全枚举 +
             # 本地不区分大小写子串匹配；全枚举也可能被截断，任何截断都
             # fail closed —— 有少量命中同样不能冒充完整解析。
-            fallback = {**count_payload(others), "pageSize": _group_page(),
+            fallback = {**count_payload(others), "pageSize": enum_page,
                         "select": [{"source": "objects", "property": item["property"],
                                     "as": "group"}],
                         "groupBy": [{"source": "objects", "property": item["property"]}],
