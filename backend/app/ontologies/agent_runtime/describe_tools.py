@@ -9,91 +9,12 @@
 from __future__ import annotations
 
 from app.ontologies.agent_runtime.boundary import ToolError, remote_object_type_ids
+from app.ontologies.agent_runtime.property_visibility import (
+    remote_binding_states as _remote_binding_states,
+)
 
 _SUMMARY_PAGE = 12
 _MAX_DETAIL_TYPES = 8
-
-
-def _remote_binding_states(scope, remote_ids) -> dict[str, dict]:
-    """远程类型 → {queryable: set[str], reason: str|None}。
-
-    查询/分组/过滤只能引用映射到远程列的属性。describe 必须在结构发现阶段
-    如实标记哪些属性可查询、哪些只是本体声明（未映射到源列），避免模型
-    拿着不可查询属性去试探执行期错误。
-    """
-    remote_ids = {str(type_id) for type_id in remote_ids}
-    states: dict[str, dict] = {}
-    if not remote_ids:
-        return states
-    if scope.release is not None:
-        from app.ontologies.mappings.remote_binding import (
-            RemoteBindingError, remote_bindings_by_type,
-        )
-        try:
-            grouped = remote_bindings_by_type(scope.release.snapshot)
-        except RemoteBindingError as exc:
-            return {type_id: {"queryable": set(), "reason": exc.code}
-                    for type_id in remote_ids}
-        for type_id in remote_ids:
-            matches = grouped.get(type_id) or []
-            if len(matches) == 1:
-                states[type_id] = {
-                    "queryable": {
-                        str(prop) for prop in matches[0].get("fieldMap", {}).values()
-                        if prop and str(prop) != "__primary_key__"
-                    },
-                    "reason": None,
-                }
-            elif len(matches) > 1:
-                states[type_id] = {"queryable": set(),
-                                   "reason": "remote_binding_ambiguous"}
-            else:
-                states[type_id] = {"queryable": set(),
-                                   "reason": "remote_binding_unresolved"}
-        return states
-
-    # 无钉定 release 的工作区实时视图：按当前映射定义解析同一可查询集合。
-    from app.ontologies.mappings.models import OntologyMapping
-    from app.ontologies.mappings.remote_binding import (
-        BINDING_MODE_REMOTE, RemoteBindingError, mapping_binding_mode,
-    )
-    by_identity: dict[str, list[set[str]]] = {}
-    try:
-        rows = scope.db.query(OntologyMapping).filter(
-            OntologyMapping.ontology_id == scope.ontology.id).all()
-    except Exception as exc:  # noqa: BLE001 - 结构发现不因坏映射整页失败
-        return {type_id: {"queryable": set(), "reason": str(exc)}
-                for type_id in remote_ids}
-    for mapping in rows:
-        try:
-            if mapping_binding_mode(mapping.field_mapping) != BINDING_MODE_REMOTE:
-                continue
-        except RemoteBindingError as exc:
-            for type_id in remote_ids:
-                states.setdefault(type_id, {"queryable": set(),
-                                            "reason": exc.code})
-            continue
-        target = str(mapping.target_object_type_id or "")
-        if target not in remote_ids:
-            entity_class = str(mapping.entity_class or "")
-            target = next((ot.id for ot in scope.object_types.values()
-                           if entity_class in (ot.name, ot.display_name)), "")
-        if target not in remote_ids:
-            continue
-        props = {str(value) for key, value in (mapping.field_mapping or {}).items()
-                 if not str(key).startswith("__") and value}
-        by_identity.setdefault(target, []).append(props)
-    for type_id in remote_ids:
-        matches = by_identity.get(type_id) or []
-        if len(matches) == 1:
-            states[type_id] = {"queryable": matches[0], "reason": None}
-        elif len(matches) > 1:
-            states[type_id] = {"queryable": set(),
-                               "reason": "remote_binding_ambiguous"}
-        else:
-            states[type_id] = {"queryable": set(),
-                               "reason": "remote_binding_unresolved"}
-    return states
 
 
 def _property_payload(ot, allowed, remote_state=None) -> list[dict]:

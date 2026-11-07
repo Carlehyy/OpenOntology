@@ -7,62 +7,21 @@
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Iterable
 
+from app.ontologies.agent_runtime.answer_masks import (
+    _ANSWER_MASKS, _CITE_RE, _DATE_RE, _NUMBER_RE, _STAMP_RE, _UUID_RE, _YEAR_RE,
+    derived_number_spans, mask_layout_dates,
+)
+
 # 日期须先整体屏蔽，避免年份剥离后残留月份充当计数或证据。
 # 不将小数点视为日期分隔符；数量与「5个月」等时长仍须核对。
-_NUMBER_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?")
-_DATE_RE = re.compile(
-    r"(?<!\d)(?:(?:19|20)\d{2}(?:\s*[-/]\s*\d{1,2}){1,2}"
-    r"|(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*[日号])?)?"
-    r"|\d{1,2}\s*月份?(?:\s*\d{1,2}\s*[日号])?)(?!\d)")
-_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
-# 引用编号（[1]、[2,3]、「4」）是排版标记，不是数值断言。
-_CITE_RE = re.compile(r"\[\d+(?:\s*[,，、]\s*\d+)*\]|[「『]\d+[」』]")
-# UUID 与 ISO 时间戳是标识符：其数字片段不得进入允许集合，也不触发告警。
-_UUID_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                      r"[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])")
-_STAMP_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
-                       r"(?:Z|[+-]\d{2}:?\d{2})?(?!\d)")
 # 工具结果顶层的可重放查询计划/页长是请求参数，不是观测证据；计划里的
 # pageSize、过滤值/params 不能为回答中的数字断言背书（业务行内同名字段不受影响）。
 _REQUEST_METADATA_KEYS = frozenset({"querySpec", "pageSize", "page_size"})
 JS_SAFE_INTEGER = 2**53 - 1
-
-# 答案侧排版/标识符屏蔽（仅用于答案文本；工具证据集合保持原清洗语义）：
-# 有序列号（1. / 1、/（1）/第N）、时钟、空格分隔日期时间、带标签或含字母的
-# 编号/版本（SO-001、v1.2.3、IPv6）与数字区间（1-2、010-12345678）是排版
-# 或标识信息，不构成数值断言 —— 引用编号/UUID/ISO 时间戳屏蔽的延伸。
-_ANSWER_MASKS: tuple[tuple[re.Pattern, str], ...] = (
-    (_UUID_RE, " "),
-    (_STAMP_RE, " "),
-    # 空格分隔的日期时间整体屏蔽（先于日期与时钟，避免拆出 10:20:30）。
-    (re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?!\d)"), " "),
-    (_DATE_RE, " "),
-    (_YEAR_RE, " "),
-    (re.compile(r"(?<!\d)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?!\d)"), " "),
-    (_CITE_RE, " "),
-    # 带标签的编号/账号：标签后的字母数字串整体是标识符，不是数值断言。
-    (re.compile(r"(?<![0-9A-Za-z])(?:[Ii][Dd]|编号|单号|订单号|工单号|工号|流水号"
-                r"|手机号|电话|时间戳|epoch|毫秒)\s*[:：of]*\s*[0-9A-Za-z][0-9A-Za-z_.\-]*"), " "),
-    # 含字母又含数字的代号/版本号（SO-001、v1.2.3、IPv6、GPT4）整体是标识符。
-    (re.compile(r"(?<![0-9A-Za-z])[0-9A-Za-z_.\-]*[A-Za-z][0-9A-Za-z_.\-]*\d"
-                r"[0-9A-Za-z_.\-]*(?![0-9A-Za-z])"), " "),
-    # 数字区间（1-2 个、010-12345678、2026-2027）表达范围，不拆成两个断言。
-    (re.compile(r"(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[-–—~～至到]\s*"
-                r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?!\d)"), " "),
-    # 有序列号：行首 1./1、/1) 与任意位置的（1）。
-    (re.compile(r"(?m)^[ \t>*(–—-]*\d{1,3}[.、)）](?!\d)"), " "),
-    (re.compile(r"(?<!\d)[（(]\d{1,3}[)）](?!\d)"), " "),
-    # 仅「≥2 个数字顿号相连且以数字结尾」的纯数字串是序号；「201、Resolved」
-    # 是标签+数值。边界断言防止把「53,225、25,801」的千分位局部掩掉。
-    (re.compile(r"(?<![\d,])(?:\d{1,3}、)+\d{1,3}(?![\d,])"), " "),
-    (re.compile(r"第\s*\d{1,4}(?!\d)"), " "),
-)
-
 
 @dataclass
 class VerificationResult:
@@ -70,6 +29,7 @@ class VerificationResult:
     answer_numbers: list[Decimal] = field(default_factory=list)
     unverified: list[Decimal] = field(default_factory=list)
     matched: list[Decimal] = field(default_factory=list)
+    derived: list[Decimal] = field(default_factory=list)
     retried: bool = False
 
     @property
@@ -81,6 +41,7 @@ class VerificationResult:
             "passed": self.passed,
             "answerNumberCount": len(self.answer_numbers),
             "unverified": [_json_number(value) for value in self.unverified],
+            "derived": [_json_number(value) for value in self.derived],
             "retried": self.retried,
         }
 
@@ -117,13 +78,17 @@ def _numbers_in_text_decimal(text: str) -> list[Decimal]:
             for raw in _NUMBER_RE.findall(cleaned)]
 
 
-def _numbers_in_answer_decimal(text: str) -> list[Decimal]:
-    """答案文本中的数值断言：先经答案侧排版/标识符屏蔽再抽取。"""
-    cleaned = text or ""
+def _clean_answer(text: str) -> str:
+    cleaned = mask_layout_dates(text or "")
     for pattern, replacement in _ANSWER_MASKS:
         cleaned = pattern.sub(replacement, cleaned)
+    return cleaned
+
+
+def _numbers_in_answer_decimal(text: str) -> list[Decimal]:
+    """答案文本中的数值断言：先经答案侧排版/标识符屏蔽再抽取。"""
     return [Decimal(raw.replace(",", ""))
-            for raw in _NUMBER_RE.findall(cleaned)]
+            for raw in _NUMBER_RE.findall(_clean_answer(text))]
 
 
 def _identifier_key(key: object) -> bool:
@@ -202,10 +167,18 @@ def answer_numbers(answer: str) -> list:
 
 def verify_answer(answer: str, steps: Iterable[dict]) -> VerificationResult:
     universe = result_number_universe(steps)
-    numbers = _numbers_in_answer_decimal(answer)
-    result = VerificationResult(answer_numbers=numbers)
-    for number in numbers:
-        (result.matched if number in universe else result.unverified).append(number)
+    cleaned = _clean_answer(answer)
+    spans = derived_number_spans(cleaned)
+    result = VerificationResult()
+    for match in _NUMBER_RE.finditer(cleaned):
+        number = Decimal(match.group().replace(",", ""))
+        result.answer_numbers.append(number)
+        if number in universe:
+            result.matched.append(number)
+        elif any(start <= match.start() < end for start, end in spans):
+            result.derived.append(number)
+        else:
+            result.unverified.append(number)
     return result
 
 
@@ -214,9 +187,9 @@ def correction_prompt(unverified: Iterable[Decimal], evidence: str = "") -> str:
     excerpt = (f"\n# 可核验的工具结果（其中数字有证据，必须保留）\n{evidence}\n"
                if evidence else "")
     return (
-        f"# 结论校验失败\n"
+        f"# 结论数字未完全核验\n"
         f"你刚才回答中的以下数字未能对应到任何工具返回结果，"
-        f"不得编造数据：{values}。\n"
+        f"不得编造观测值：{values}。\n"
         f"{excerpt}"
         f"请重新作答：保留原答案中能对应到工具结果的数字，只删除无法佐证的数字；"
         f"若确实缺少数据，明确说明缺少什么。不要新增其它工具调用。"

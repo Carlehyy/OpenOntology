@@ -346,7 +346,10 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
     if page_size > effective_cap:
         # 有效 cap = min(全部叶子 source profile, 200)；受控字段只供助手
         # 恢复链路使用（直查 HTTP detail 不含），不把请求原值写进 message。
-        raise _error(422, "invalid_parameter", f"pageSize 超出授权上限 {effective_cap}",
+        # 必须保留 fail-closed（不夹取/不抬帽），但给出可执行建议。
+        raise _error(422, "invalid_parameter",
+                     f"pageSize 超出授权上限 {effective_cap}；"
+                     "请降低 pageSize 或使用 cursor 续页",
                      assistant_private_keys=(
                          "field", "requestedPageSize", "maxPageSize",
                          "defaultPageSize"),

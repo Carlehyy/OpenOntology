@@ -184,18 +184,38 @@ class AgentScope:
         """
         ref = (ref or "").strip()
         allowed = self.allowed_property_names(ot.id)
-        for p in (ot.properties or []):
-            if isinstance(p, dict) and ref in (p.get("name"), p.get("displayName"), p.get("display_name")):
-                name = p.get("name")
-                if allowed is not None and name not in allowed:
-                    raise ToolError(
-                        f"属性「{ref}」不在对象类型「{ot.display_name}」的授权范围内")
-                return name
+        definitions = [p for p in (ot.properties or [])
+                       if isinstance(p, dict) and p.get("name")]
+        queryable = self.queryable_property_names(ot)
+        for p in definitions:
+            if ref not in (p.get("name"), p.get("displayName"), p.get("display_name")):
+                continue
+            name = p.get("name")
+            if allowed is not None and name not in allowed:
+                raise ToolError(
+                    f"属性「{ref}」不在对象类型「{ot.display_name}」的授权范围内")
+            return name
+        visible = set(queryable) if queryable is not None else {
+            str(p["name"]) for p in definitions
+            if allowed is None or p["name"] in allowed
+        }
         avail = "、".join(
             f"{p.get('displayName') or p.get('name')}({p.get('name')})"
-            for p in (ot.properties or []) if isinstance(p, dict) and p.get("name")
+            for p in definitions if p["name"] in visible
         ) or "（无）"
         raise ToolError(f"属性「{ref}」不在对象类型「{ot.display_name}」上，或拼写有误。可用属性：{avail}")
+
+    def queryable_property_names(self, ot: Any) -> set[str] | None:
+        """授权声明属性与当前远程列映射的交集；本地类型返回 None。"""
+        if ot.id not in remote_object_type_ids(self):
+            return None
+        from app.ontologies.agent_runtime.property_visibility import remote_binding_states
+        state = remote_binding_states(self, {str(ot.id)}).get(str(ot.id), {})
+        allowed = self.allowed_property_names(ot.id)
+        declared = {str(p["name"]) for p in (ot.properties or [])
+                    if isinstance(p, dict) and p.get("name")
+                    and (allowed is None or p["name"] in allowed)}
+        return declared & set(state.get("queryable") or set())
 
     def visible_instance(self, inst: Optional[ObjectInstance]) -> ObjectInstance:
         """实例必须属于本体 + 其类型在授权范围内。"""
@@ -293,10 +313,13 @@ class AgentScope:
                 n = counts.get(t.id, 0)
                 lines.append(f"### {t.display_name} (name={t.name}, 实例数={n}){desc}")
             allowed_props = self.allowed_property_names(t.id)
+            queryable_props = self.queryable_property_names(t)
             for p in (t.properties or []):
                 if not isinstance(p, dict):
                     continue
                 if allowed_props is not None and p.get("name") not in allowed_props:
+                    continue
+                if queryable_props is not None and p.get("name") not in queryable_props:
                     continue
                 req = "必填" if p.get("required") else "可选"
                 pdesc = f" — {p['description']}" if p.get("description") else ""

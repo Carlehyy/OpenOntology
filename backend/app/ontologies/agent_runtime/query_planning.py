@@ -28,24 +28,6 @@ def _leaf(alias: str, prop: str, item: dict) -> dict:
     return {"source": alias, "property": prop, "op": op, "value": value}
 
 
-def _remote_bound_properties(scope, ot) -> set[str] | None:
-    """远程绑定类型可查询属性 = 授权属性 ∩ 绑定列映射；本地类型返回 None。"""
-    if scope.release is None:
-        return None
-    from app.ontologies.mappings.remote_binding import (
-        RemoteBindingError, get_remote_binding,
-    )
-    try:
-        binding = get_remote_binding(scope.release.snapshot, ot.id)
-    except RemoteBindingError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
-    if binding is None:
-        return None
-    props = {prop for prop in binding.get("fieldMap", {}).values()
-             if prop != "__primary_key__"}
-    return props
-
-
 def _resolve_type_reference(scope, ref, default=None):
     if ref in (None, ""):
         return default
@@ -59,13 +41,10 @@ def _definitions(ot) -> dict[str, dict]:
 
 def _visible_properties(scope, ot) -> list[str]:
     allowed = scope.allowed_property_names(ot.id)
-    definitions = _definitions(ot)
-    names = [name for name in definitions
-             if allowed is None or name in allowed]
-    remote_bound = _remote_bound_properties(scope, ot)
-    if remote_bound is not None:
-        names = [name for name in names if name in remote_bound]
-    return names
+    queryable = scope.queryable_property_names(ot)
+    return [name for name in _definitions(ot)
+            if (allowed is None or name in allowed)
+            and (queryable is None or name in queryable)]
 
 
 def _definition_type(ot, prop: str) -> str:

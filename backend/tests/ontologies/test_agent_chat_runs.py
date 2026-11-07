@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from app.ontologies.agent_runtime import run_service
 from app.ontologies.agent_runtime.chat_service import stream_events
 from app.ontologies.agent_runtime.models import AgentMessage
@@ -114,3 +116,179 @@ def test_cancel_still_works_with_decoupled_stream(ontology, db, admin_user, monk
     db.expire_all()
     assert db.get(AgentRun, dispatched[0]).status == "cancelled"
     assert db.query(AgentMessage).count() == 1
+
+
+
+def _ledger_counts(db):
+    from app.ontologies.agent_runtime.models import AgentConversation
+    from app.ontologies.agent_runtime.run_models import AgentRunEvent
+    return tuple(db.query(model).count() for model in (
+        AgentConversation, AgentMessage, AgentRun, AgentRunEvent))
+
+
+def _copy_release(db, source_ontology_id, admin_user, **overrides):
+    from app.ontologies.projects.models import OntologyProject
+    from app.ontologies.versions.models import OntologyVersion
+    current = db.get(OntologyProject, source_ontology_id).current_release_id
+    original = db.get(OntologyVersion, current)
+    values = dict(ontology_id=source_ontology_id, version_number="v-next",
+                  created_by=admin_user.id, node_kind="release",
+                  lifecycle_status="released", snapshot_formal=original.snapshot_formal,
+                  snapshot_hash=original.snapshot_hash)
+    values.update(overrides)
+    release = OntologyVersion(**values)
+    db.add(release)
+    db.flush()
+    return release.id
+
+
+def test_default_release_is_returned_and_persisted_by_sync_chat(
+        client, auth_headers, ontology, db, admin_user, monkeypatch):
+    from app.ontologies.projects.models import OntologyProject
+    from app.ontologies.agent_runtime.models import AgentConversation
+    from app.ontologies.agent_runtime.run_models import AgentRunEvent
+    oid = ontology["id"]
+    expected = db.get(OntologyProject, oid).current_release_id
+    _add_llm_config(db, admin_user, "default-release-sync")
+    from app.ontologies.agent_runtime import llm_bridge
+    monkeypatch.setattr(llm_bridge, "chat", lambda *_: {
+        "content": "当前发布目录可用。", "tool_calls": [], "usage": None})
+    response = client.post(f"{_fo(oid)}/agent/chat", headers=auth_headers,
+                           json={"message": "查看目录", "stream": False,
+                                 "runId": "default-release-sync"})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    db.expire_all()
+    run = db.get(AgentRun, "default-release-sync")
+    conversation = db.get(AgentConversation, run.conversation_id)
+    meta = db.query(AgentRunEvent).filter_by(
+        run_id=run.id, event_type="meta").order_by(AgentRunEvent.seq).first()
+    assert expected and data["releaseId"] == expected
+    assert run.release_id == conversation.ontology_release_id == expected
+    assert meta.payload["releaseId"] == expected
+
+
+def test_default_release_replay_and_worker_keep_original_pin(
+        ontology, db, admin_user):
+    from app.ontologies.projects.models import OntologyProject
+    from app.ontologies.agent_runtime.models import AgentConversation
+    project = db.get(OntologyProject, ontology["id"])
+    original = project.current_release_id
+    body = ChatRequest(message="核对钉定", runId="default-release-replay", stream=False)
+    first = run_service.submit_run(db, project.id, admin_user, body, dispatch=False)
+    replacement = _copy_release(db, project.id, admin_user)
+    project.current_release_id = replacement
+    db.commit()
+    repeated = run_service.submit_run(db, project.id, admin_user, body, dispatch=False)
+    assert repeated == first and first["releaseId"] == original
+    project.current_release_id = None
+    db.commit()
+    assert run_service.submit_run(db, project.id, admin_user, body, dispatch=False) == first
+    project.current_release_id = replacement
+    db.commit()
+    seen = []
+
+    def worker(_db, _oid, _user, _question, **kwargs):
+        seen.append(kwargs["release_id"])
+        yield {"type": "answer", "content": "钉定保持。", "citations": [],
+               "proposals": [], "usage": None}
+
+    run_service.execute_run(first["runId"], db=db, session_factory=TestSession,
+                            run_turn_fn=worker, stream_model=False)
+    db.expire_all()
+    assert seen == [original]
+    assert db.get(AgentRun, first["runId"]).release_id == original
+    assert db.get(AgentConversation, first["conversationId"]).ontology_release_id == original
+    fresh = run_service.submit_run(db, project.id, admin_user,
+        ChatRequest(message="新回合", runId="default-release-new"), dispatch=False)
+    assert fresh["releaseId"] == replacement
+
+
+def test_missing_release_never_rebinds_historical_or_unpinned_conversation(
+        ontology, db, admin_user, editor_user):
+    from app.ontologies.projects.models import OntologyProject
+    from app.ontologies.agent_runtime.models import AgentConversation
+    from app.ontologies.agent_runtime.application_errors import AgentRuntimeApplicationError
+    project = db.get(OntologyProject, ontology["id"])
+    original = project.current_release_id
+    replacement = _copy_release(db, project.id, admin_user)
+    historical = AgentConversation(ontology_id=project.id, user_id=admin_user.id,
+                                   ontology_release_id=original, title="固定旧版")
+    unpinned = AgentConversation(ontology_id=project.id, user_id=admin_user.id,
+                                 ontology_release_id=None, title="未钉定")
+    other = AgentConversation(ontology_id=project.id, user_id=editor_user.id,
+                              ontology_release_id=replacement, title="他人会话")
+    db.add_all([historical, unpinned, other])
+    project.current_release_id = replacement
+    db.commit()
+    for conversation, explicit, kind, code in (
+        (historical, None, "conflict", "release_context_changed"),
+        (historical, replacement, "conflict", "conversation_release_mismatch"),
+        (unpinned, None, "conflict", "conversation_release_missing"),
+        (other, None, "forbidden", None),
+    ):
+        before = _ledger_counts(db)
+        with pytest.raises(AgentRuntimeApplicationError) as caught:
+            run_service.submit_run(db, project.id, admin_user,
+                ChatRequest(message="继续", conversationId=conversation.id,
+                            releaseId=explicit), dispatch=False)
+        assert caught.value.kind == kind
+        if code:
+            assert caught.value.detail["code"] == code
+            assert "新建会话" in caught.value.detail["message"]
+        assert _ledger_counts(db) == before
+    assert historical.ontology_release_id == original
+    assert unpinned.ontology_release_id is None
+
+
+@pytest.mark.parametrize("case", ["missing", "draft", "superseded", "foreign"])
+def test_invalid_default_release_fails_before_ledger_writes(
+        case, client, auth_headers, ontology, db, admin_user):
+    from app.ontologies.projects.models import OntologyProject
+    from app.ontologies.versions.models import OntologyVersion
+    project = db.get(OntologyProject, ontology["id"])
+    if case == "missing":
+        project.current_release_id = None
+    elif case == "foreign":
+        other = OntologyProject(name="foreign", domain="test", created_by=admin_user.id)
+        db.add(other)
+        db.flush()
+        foreign = _copy_release(db, project.id, admin_user, ontology_id=other.id)
+        project.current_release_id = foreign
+    else:
+        release = db.get(OntologyVersion, project.current_release_id)
+        release.node_kind = "draft" if case == "draft" else "release"
+        release.lifecycle_status = "editing" if case == "draft" else "superseded"
+    db.commit()
+    before = _ledger_counts(db)
+    response = client.post(f"{_fo(project.id)}/agent/chat", headers=auth_headers,
+                           json={"message": "不能执行", "stream": False})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == ("current_release_missing" if case == "missing"
+                              else "current_release_invalid")
+    assert "发布本体" in detail["message"]
+    assert _ledger_counts(db) == before
+
+
+@pytest.mark.parametrize("case", ["stale", "draft", "foreign"])
+def test_explicit_invalid_release_still_fails_before_ledger_writes(
+        case, client, auth_headers, ontology, db, admin_user):
+    from app.ontologies.projects.models import OntologyProject
+    project = db.get(OntologyProject, ontology["id"])
+    values = {}
+    if case == "draft":
+        values.update(node_kind="draft", lifecycle_status="editing")
+    if case == "foreign":
+        other = OntologyProject(name="foreign", domain="test", created_by=admin_user.id)
+        db.add(other)
+        db.flush()
+        values["ontology_id"] = other.id
+    explicit = _copy_release(db, project.id, admin_user, **values)
+    db.commit()
+    before = _ledger_counts(db)
+    response = client.post(f"{_fo(project.id)}/agent/chat", headers=auth_headers,
+                           json={"message": "不能执行", "stream": False,
+                                 "releaseId": explicit})
+    assert response.status_code == 422, response.text
+    assert _ledger_counts(db) == before

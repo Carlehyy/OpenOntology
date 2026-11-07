@@ -32,6 +32,7 @@ from app.ontologies.agent_runtime.run_common import (
     submission_lock,
 )
 from app.ontologies.agent_runtime.run_events import append_event
+from app.ontologies.agent_runtime.run_release import submission_release_id
 from app.ontologies.agent_runtime.run_models import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -78,9 +79,10 @@ def submit_run(
                 ontology_id=ontology_id,
             )
 
+    selected_release_id = submission_release_id(db, ontology_id, user_id, body)
     try:
         _ontology, _profile, scope = build_scope(
-            db, ontology_id, release_id=body.release_id,
+            db, ontology_id, release_id=selected_release_id,
         )
     except ToolError as error:
         if db.get(OntologyProject, ontology_id) is None:

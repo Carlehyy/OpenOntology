@@ -1,4 +1,5 @@
 """本体助手 × 世界模型推演工具：检索过滤 / 版本漂移 / 前置条件 / RBAC / 审计留痕 / 限额。"""
+import copy
 import uuid
 
 import pytest
@@ -51,6 +52,73 @@ def modeled_ontology(client, auth_headers, ontology):
     r = client.put(f"{_fo(oid)}/full", headers=auth_headers, json=body)
     assert r.status_code == 200, r.text
     return ontology
+
+
+def _prepare_structure_draft(client, headers, ontology_id, structure=None):
+    """Prepare a consistent chat fixture without writing a release snapshot."""
+    from app.exploration.reverse_projection import project_snapshot_to_canvas
+
+    prefix = f"/api/v2/ontologies/{ontology_id}"
+    current = client.get(f"{prefix}/current-release/workspace", headers=headers)
+    assert current.status_code == 200, current.text
+    source_id = current.json()["data"]["versionId"]
+    created = client.post(
+        f"{prefix}/versions/{source_id}/drafts", headers=headers,
+        json={"versionLabel": "世界模型聊天发布夹具"},
+    )
+    assert created.status_code == 201, created.text
+    draft_id = created.json()["data"]["id"]
+    if structure is None:
+        live = client.get(f"{_fo(ontology_id)}/full", headers=headers)
+        assert live.status_code == 200, live.text
+        structure = live.json()["data"]
+    workspace = client.get(f"{prefix}/versions/{draft_id}/workspace", headers=headers)
+    assert workspace.status_code == 200, workspace.text
+    saved = client.put(
+        f"{prefix}/versions/{draft_id}/workspace", headers=headers,
+        json={**structure, "baseRevision": workspace.json()["data"]["revision"]},
+    )
+    assert saved.status_code == 200, saved.text
+    workspace = client.get(f"{prefix}/versions/{draft_id}/workspace", headers=headers)
+    assert workspace.status_code == 200, workspace.text
+    semantic = client.put(
+        f"{prefix}/versions/{draft_id}/semantic", headers=headers,
+        json={
+            "baseRevision": saved.json()["data"]["revision"],
+            "canvas": project_snapshot_to_canvas(workspace.json()["data"]),
+            "documentMd": "# 世界模型聊天\n\n订单与供应商的确定性测试定义。\n",
+            "documentTitle": "世界模型聊天",
+        },
+    )
+    assert semantic.status_code == 200, semantic.text
+    assert semantic.json()["data"]["issues"] == []
+    return draft_id
+
+
+def _promote_structure_draft(client, headers, ontology_id, draft_id):
+    prefix = f"/api/v2/ontologies/{ontology_id}"
+    trial = client.post(f"{prefix}/versions/{draft_id}/trial-runs", headers=headers, json={})
+    assert trial.status_code == 201, trial.text
+    assert trial.json()["data"]["status"] == "passed", trial.text
+    impact = client.get(f"{prefix}/versions/{draft_id}/impact", headers=headers)
+    assert impact.status_code == 200, impact.text
+    promoted = client.post(
+        f"{prefix}/versions/{draft_id}/promote", headers=headers,
+        json={"trialRunId": trial.json()["data"]["id"],
+              "impactHash": impact.json()["data"]["impactHash"]},
+    )
+    assert promoted.status_code == 201, promoted.text
+    release = promoted.json()["data"]
+    assert release["node_kind"] == "release"
+    assert release["promoted_from_id"] == draft_id
+    assert release["trial_run_id"] == trial.json()["data"]["id"]
+    assert release["impact_hash"] == impact.json()["data"]["impactHash"]
+    return release
+
+
+def _publish_live_structure(client, headers, ontology_id):
+    draft_id = _prepare_structure_draft(client, headers, ontology_id)
+    return _promote_structure_draft(client, headers, ontology_id, draft_id)
 
 
 def _make_service(db, *, ontology_id, object_type_ids, preconditions=None,
@@ -244,6 +312,7 @@ def test_chat_turn_discovers_world_model_service(
     """假 LLM 经对话触发 list_world_model_services：验证 orchestrator 把会话用户
     传入工具上下文（RBAC + 审计身份接线），步骤与系统提示词规则生效。"""
     oid = modeled_ontology["id"]
+    release = _publish_live_structure(client, auth_headers, oid)
     svc = _make_service(db, ontology_id=oid,
                         object_type_ids=["ot-order", "ot-supplier"], name="订单态势推演")
 
@@ -276,5 +345,118 @@ def test_chat_turn_discovers_world_model_service(
     assert r.status_code == 200, r.text
     data = r.json()["data"]
     assert data["error"] is None
+    assert data["releaseId"] == release["id"]
     assert data["steps"][0]["tool"] == "list_world_model_services"
     assert "世界模型推演服务：1 个可用" in data["steps"][0]["summary"]
+    assert [item["serviceId"] for item in data["steps"][0]["result"]["available"]] == [svc.id]
+
+
+def test_default_chat_uses_frozen_release_until_formal_promotion(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    """Live edits stay outside new chats until a governed promotion freezes them."""
+    from app.models.model_config import ModelConfig
+    from app.ontologies.agent_runtime import llm_bridge
+    from app.ontologies.agent_runtime.models import AgentConversation
+    from app.ontologies.agent_runtime.run_models import AgentRun
+    from app.ontologies.projects.models import OntologyProject
+    from app.ontologies.versions.models import OntologyVersion
+
+    oid = modeled_ontology["id"]
+    original_id = db.get(OntologyProject, oid).current_release_id
+    original = db.get(OntologyVersion, original_id)
+    original_snapshot = copy.deepcopy(original.snapshot_formal)
+    original_hash = original.snapshot_hash
+    assert original.version_number == "v0"
+    assert original_snapshot["objectTypes"] == []
+    svc = _make_service(db, ontology_id=oid,
+                        object_type_ids=["ot-order", "ot-supplier"], name="订单态势推演")
+    db.add(ModelConfig(id=str(uuid.uuid4()), name="release-view-fake", provider="openai",
+                       config_type="llm", models=["fake-model"], created_by=admin_user.id))
+    db.commit()
+    seen_catalogs = []
+
+    def fake_chat(_kwargs, messages, tools):
+        if messages[-1]["role"] == "user":
+            seen_catalogs.append(messages[0]["content"])
+            assert any(tool["name"] == "list_world_model_services" for tool in tools)
+            return {"content": None, "usage": None, "tool_calls": [{
+                "id": "release-view-tool", "name": "list_world_model_services", "arguments": {},
+            }]}
+        return {"content": "已按当前发布版本核对世界模型服务。", "tool_calls": [], "usage": None}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+
+    def new_chat(run_id, release_id, available_ids, blocked_ids, type_ids):
+        response = client.post(
+            f"{_fo(oid)}/agent/chat", headers=auth_headers,
+            json={"message": "未来订单态势会怎样？", "stream": False, "runId": run_id},
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["error"] is None
+        assert data["releaseId"] == release_id
+        step = data["steps"][0]
+        assert step["tool"] == "list_world_model_services"
+        assert f"世界模型推演服务：{len(available_ids)} 个可用" in step["summary"]
+        assert {item["serviceId"] for item in step["result"]["available"]} == available_ids
+        assert {item["serviceId"] for item in step["result"]["blocked"]} == blocked_ids
+        catalog = seen_catalogs[-1]
+        for type_id in {"ot-order", "ot-supplier", "ot-warehouse"}:
+            assert (f"id={type_id}," in catalog) == (type_id in type_ids)
+        db.expire_all()
+        release = db.get(OntologyVersion, release_id)
+        assert {item["id"] for item in release.snapshot_formal["objectTypes"]} == type_ids
+        run = db.get(AgentRun, run_id)
+        conversation = db.get(AgentConversation, data["conversationId"])
+        assert run.release_id == conversation.ontology_release_id == release_id
+        return data["conversationId"]
+
+    # /full has Order/Supplier, but the immutable initial release remains empty.
+    conversations = [new_chat("world-model-v0", original_id, set(), {svc.id}, set())]
+    first_release = _publish_live_structure(client, auth_headers, oid)
+    conversations.append(new_chat("world-model-v1", first_release["id"], {svc.id}, set(),
+                                  {"ot-order", "ot-supplier"}))
+    db.expire_all()
+    frozen = db.get(OntologyVersion, first_release["id"])
+    frozen_snapshot = copy.deepcopy(frozen.snapshot_formal)
+    frozen_hash = frozen.snapshot_hash
+
+    # Published schema edits are rejected; an unpromoted draft also stays isolated.
+    live = client.get(f"{_fo(oid)}/full", headers=auth_headers)
+    assert live.status_code == 200, live.text
+    body = live.json()["data"]
+    body["objectTypes"].append({
+        "id": "ot-warehouse", "name": "Warehouse", "displayName": "仓库",
+        "primaryKey": "warehouse_code", "properties": [{
+            "id": "p-warehouse-code", "name": "warehouse_code", "displayName": "仓库编码",
+            "type": "string", "required": True,
+        }],
+    })
+    saved = client.put(f"{_fo(oid)}/full", headers=auth_headers, json=body)
+    assert saved.status_code == 409, saved.text
+    assert "模式层不可直接修改" in saved.json()["detail"]
+    live = client.get(f"{_fo(oid)}/full", headers=auth_headers)
+    assert live.status_code == 200, live.text
+    assert {item["id"] for item in live.json()["data"]["objectTypes"]} == {
+        "ot-order", "ot-supplier",
+    }
+    second_draft = _prepare_structure_draft(client, auth_headers, oid, body)
+    warehouse = _make_service(db, ontology_id=oid, object_type_ids=["ot-warehouse"],
+                              name="仓库态势推演")
+    db.expire_all()
+    assert db.get(OntologyProject, oid).current_release_id == first_release["id"]
+    assert db.get(OntologyVersion, first_release["id"]).snapshot_formal == frozen_snapshot
+    assert db.get(OntologyVersion, first_release["id"]).snapshot_hash == frozen_hash
+    conversations.append(new_chat("world-model-draft", first_release["id"], {svc.id},
+                                  {warehouse.id}, {"ot-order", "ot-supplier"}))
+
+    second_release = _promote_structure_draft(client, auth_headers, oid, second_draft)
+    assert second_release["id"] != first_release["id"] != original_id
+    conversations.append(new_chat("world-model-v2", second_release["id"], {svc.id, warehouse.id},
+                                  set(), {"ot-order", "ot-supplier", "ot-warehouse"}))
+    assert len(set(conversations)) == 4
+    db.expire_all()
+    assert db.get(OntologyVersion, first_release["id"]).snapshot_formal == frozen_snapshot
+    assert db.get(OntologyVersion, first_release["id"]).snapshot_hash == frozen_hash
+    assert db.get(OntologyVersion, original_id).snapshot_formal == original_snapshot
+    assert db.get(OntologyVersion, original_id).snapshot_hash == original_hash

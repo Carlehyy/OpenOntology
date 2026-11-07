@@ -431,3 +431,41 @@ class TestAnswerEvidence:
         assert choice.reverted is False
         assert choice.answer == "共 1 个。"
         assert choice.verification.passed is True
+
+
+class TestConservativeAnswerMasks:
+    def test_only_header_proven_table_ordinals_are_masked(self):
+        ranked = "| 排名 | 模块 | 件数 |\n| --- | --- | --- |\n| 1 | 广域网 | 53,225 |\n| 2 | 运维 | 25,801 |"
+        assert answer_numbers(ranked) == [53225, 25801]
+        assert answer_numbers("| 1 | 2 | 3 |") == [1, 2, 3]
+        assert answer_numbers("| 件数 | 状态 |\n| --- | --- |\n| 201 | Closed |") == [201]
+
+    def test_short_dates_need_context_and_counts_remain_strict(self):
+        assert answer_numbers("数据区间 4 天（1/1–10/4），共 16,696 件") == [16696]
+        assert answer_numbers("截至 10/4，共 16,696 件") == [16696]
+        assert answer_numbers("截至10/4 最近7天处理21条") == [7, 21]
+        assert answer_numbers("1/2 的用户，7天21条") == [1, 2, 7, 21]
+        assert answer_numbers("数据区间 7天21条，日期 1/1") == [7, 21]
+
+    def test_status_observations_survive_masks_and_derived_classification(self):
+        evidence = [_step({"groups": [{"group": "Closed", "value": 150},
+                                      {"group": "Resolved", "value": 67}]})]
+        answer = "| 排名 | 状态 | 件数 |\n| --- | --- | --- |\n| 1 | Closed | 150 |\n| 2 | Resolved | 67 |\n合计 217，占比 69.12%。"
+        result = verify_answer(answer, evidence)
+        assert result.passed and result.derived == [Decimal("217"), Decimal("69.12")]
+        assert result.summary()["derived"] == [217, 69.12]
+        bad = verify_answer("Closed 201、Resolved 69，合计 270，占比 87%。", evidence)
+        assert bad.unverified == [Decimal("201"), Decimal("69")]
+        assert bad.derived == [Decimal("270"), Decimal("87")]
+        mixed = verify_answer("Closed 201 合计 201", evidence)
+        assert mixed.unverified == [Decimal("201")]
+        assert mixed.derived == [Decimal("201")]
+        local = verify_answer("合计217其中Closed 201、Resolved 69", evidence)
+        assert local.derived == [217] and local.unverified == [201, 69]
+        assert verify_answer("共 999 个，约 5 个", evidence).unverified == [999, 5]
+
+    def test_arithmetic_coincidence_does_not_verify_observations(self):
+        evidence = [_step({"values": [113, 36, 44, 8]})]
+        assert verify_answer("Closed 201", evidence).unverified == [201]
+        derived = verify_answer("合计 201", evidence)
+        assert derived.passed and derived.matched == [] and derived.derived == [201]

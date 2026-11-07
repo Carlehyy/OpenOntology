@@ -38,7 +38,7 @@ def test_answer_verification_corrects_fabricated_number(
                     "usage": {"inputTokens": 20, "outputTokens": 8}}
         # 修正回环（tools=[]）：给出可对应工具结果的数字
         assert tools == []
-        assert "999" in messages[-1]["content"] and "结论校验失败" in messages[-1]["content"]
+        assert "999" in messages[-1]["content"] and "结论数字未完全核验" in messages[-1]["content"]
         return {"content": "待支付订单共 1 个，即 SO-001。", "tool_calls": [],
                 "usage": {"inputTokens": 15, "outputTokens": 6}}
 
@@ -165,7 +165,7 @@ def test_answer_verification_still_retries_when_tool_fails_and_date_hides_count(
             return {"content": "2026年5月待支付订单共 999 个。",
                     "tool_calls": [], "usage": {"inputTokens": 20, "outputTokens": 8}}
         assert tools == []
-        assert "999" in messages[-1]["content"] and "结论校验失败" in messages[-1]["content"]
+        assert "999" in messages[-1]["content"] and "结论数字未完全核验" in messages[-1]["content"]
         # 修正回环偷换概念：拿日期标签里的 5 冒充计数，依旧没有工具证据
         return {"content": "2026年5月待支付订单共 5 个。",
                 "tool_calls": [], "usage": {"inputTokens": 15, "outputTokens": 6}}
@@ -191,7 +191,7 @@ import pytest
 
 
 @pytest.fixture
-def modeled_ontology(client, auth_headers, ontology):
+def modeled_ontology(client, auth_headers, ontology, db):
     """两个对象类型（订单/供应商）+ 链接 + 动作 + 若干实例（与 test_agent_runtime 同构）。"""
     oid = ontology["id"]
     body = {
@@ -229,6 +229,7 @@ def modeled_ontology(client, auth_headers, ontology):
     }
     r = client.put(f"{_fo(oid)}/full", headers=auth_headers, json=body)
     assert r.status_code == 200, r.text
+    _freeze_release(db, oid)
     return ontology
 
 
@@ -377,9 +378,10 @@ def test_history_evidence_ignores_error_partial_and_assistant_text(
     from app.ontologies.agent_runtime.models import AgentConversation, AgentMessage
 
     oid = modeled_ontology["id"]
+    release_id = _freeze_release(db, oid)
     _add_model(db, admin_user, "verify-partial-history")
     conversation = AgentConversation(
-        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=None,
+        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=release_id,
         user_id=admin_user.id, title="partial-history")
     db.add(conversation)
     db.flush()
@@ -390,12 +392,15 @@ def test_history_evidence_ignores_error_partial_and_assistant_text(
             content="历史回答声称共 777 个。",
             steps=[
                 {"tool": "aggregate_objects",
-                 "result": _stat_result(5, ontology_id=oid)},
+                 "result": _stat_result(5, ontology_id=oid,
+                                         release_id=release_id)},
                 {"tool": "aggregate_objects",
-                 "result": {**_stat_result(777, ontology_id=oid),
+                 "result": {**_stat_result(777, ontology_id=oid,
+                                           release_id=release_id),
                             "partial": True}},
                 {"tool": "aggregate_objects",
-                 "result": {**_stat_result(777, ontology_id=oid),
+                 "result": {**_stat_result(777, ontology_id=oid,
+                                           release_id=release_id),
                             "error": "越界"}},
             ]),
     ])
@@ -424,12 +429,13 @@ def test_history_evidence_is_scoped_to_conversation_and_release(
     from app.ontologies.agent_runtime.models import AgentConversation, AgentMessage
 
     oid = modeled_ontology["id"]
+    release_id = _freeze_release(db, oid)
     _add_model(db, admin_user, "verify-scoped-history")
     current = AgentConversation(
-        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=None,
+        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=release_id,
         user_id=admin_user.id, title="current")
     sibling = AgentConversation(
-        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=None,
+        id=str(uuid.uuid4()), ontology_id=oid, ontology_release_id=release_id,
         user_id=admin_user.id, title="sibling")
     other_release = AgentConversation(
         id=str(uuid.uuid4()), ontology_id=oid,
@@ -444,7 +450,7 @@ def test_history_evidence_is_scoped_to_conversation_and_release(
             steps=[{"tool": "aggregate_objects",
                     "result": _stat_result(
                         777, ontology_id=oid,
-                        release_id=("None" if conversation is sibling
+                        release_id=(release_id if conversation is sibling
                                     else "release-other"))}]))
     db.commit()
     monkeypatch.setenv("AGENT_ANSWER_VERIFY_RETRIES", "0")
@@ -495,7 +501,7 @@ def test_answer_verification_corrects_ideographic_comma_state_numbers(
                     "tool_calls": [], "usage": {"inputTokens": 20, "outputTokens": 8}}
         assert tools == []
         correction = messages[-1]["content"]
-        assert "结论校验失败" in correction and "201" in correction
+        assert "结论数字未完全核验" in correction and "201" in correction
         # 修正只保留可核验数字（1 由 search 结果背书）。
         return {"content": "当前待支付订单共 1 个。", "tool_calls": [],
                 "usage": {"inputTokens": 15, "outputTokens": 6}}
@@ -550,3 +556,74 @@ def test_answer_verification_counts_both_state_values_in_answer(
     assert verification["answerNumberCount"] == 2
     assert verification["retried"] is False
     assert calls["n"] == 2
+
+
+
+def test_explicit_derived_answer_is_traceable_without_correction(
+        client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    from app.ontologies.agent_runtime.models import AgentMessage
+    oid = modeled_ontology["id"]
+    _add_model(db, admin_user, "verify-derived-notice")
+    calls = []
+
+    def fake_chat(_kwargs, _messages, _tools):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"content": None, "tool_calls": [{
+                "id": "derived-evidence", "name": "aggregate_objects",
+                "arguments": {"object_type": "Order", "group_by": "status"}}]}
+        return {"content": "待支付 1、已支付 1。合计 217，占比 69.12%。",
+                "tool_calls": []}
+
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    response = client.post(f"{_fo(oid)}/agent/chat", headers=auth_headers,
+                           json={"message": "各状态及推算合计", "stream": False})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["verification"]["passed"] is True
+    assert data["verification"]["retried"] is False
+    assert data["verification"]["answerNumberCount"] == 4
+    assert data["verification"]["derived"] == [217, 69.12]
+    assert data["content"].count("推算未核验") == 1
+    assert "未做推算核验" in data["content"] and "未判定为错误" in data["content"]
+    persisted = db.query(AgentMessage).filter_by(
+        conversation_id=data["conversationId"], role="assistant").one()
+    assert persisted.content == data["content"] and len(calls) == 2
+
+
+@pytest.mark.parametrize("already_warned", [False, True])
+def test_unresolved_contains_is_preserved_once_in_persisted_answer(
+        already_warned, client, auth_headers, modeled_ontology, db, admin_user, monkeypatch):
+    from app.ontologies.agent_runtime.boundary import ToolError
+    from app.ontologies.agent_runtime.models import AgentMessage
+    from app.ontologies.agent_runtime.toolkit import ToolRunner
+    oid = modeled_ontology["id"]
+    _add_model(db, admin_user, "verify-incomplete-notice")
+    calls = []
+
+    def unresolved(_runner, _args):
+        raise ToolError("remote_aggregate_contains_unresolved: 候选取值未枚举完整，请缩小范围")
+
+    def fake_chat(_kwargs, _messages, _tools):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"content": None, "tool_calls": [{
+                "id": "contains-failure", "name": "aggregate_objects",
+                "arguments": {"object_type": "Order", "filters": [
+                    {"property": "status", "op": "contains", "value": "p"}]}}]}
+        content = ("本轮候选值未枚举完整，统计无法完成。" if already_warned
+                   else "尚未取得统计证据。")
+        return {"content": content, "tool_calls": []}
+
+    monkeypatch.setattr(ToolRunner, "_tool_aggregate_objects", unresolved)
+    monkeypatch.setattr(llm_bridge, "chat", fake_chat)
+    response = client.post(f"{_fo(oid)}/agent/chat", headers=auth_headers,
+                           json={"message": "筛选状态并统计", "stream": False})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["content"].count("未枚举完整") == 1
+    assert ("查询范围提示" in data["content"]) is not already_warned
+    assert data["steps"][0]["error"].startswith("remote_aggregate_contains_unresolved:")
+    persisted = db.query(AgentMessage).filter_by(
+        conversation_id=data["conversationId"], role="assistant").one()
+    assert persisted.content == data["content"] and len(calls) == 2

@@ -398,10 +398,19 @@ def get_instance_detail(scope: AgentScope, instance_id: str) -> dict:
     # P2-2：属性级授权同样作用于详情读路径 — 定义与值都按 allowlist 收敛
     allowed = scope.allowed_property_names(object_type.id)
     visible_defs = [
-        p for p in (object_type.properties or [])
+        dict(p) if isinstance(p, dict) else p
+        for p in (object_type.properties or [])
         if allowed is None or not isinstance(p, dict)
         or p.get("name") in allowed
     ]
+    queryable = scope.queryable_property_names(object_type)
+    for definition in visible_defs:
+        if not isinstance(definition, dict) or not definition.get("name"):
+            continue
+        definition["queryable"] = (queryable is None
+                                   or definition["name"] in queryable)
+        if not definition["queryable"]:
+            definition["unqueryableReason"] = "remote_property_unmapped"
     authorized = _authorized_values(scope, object_type, instance)
     properties = {k: v for k, v in (instance.properties or {}).items()
                   if k in authorized}

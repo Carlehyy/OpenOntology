@@ -880,3 +880,64 @@ def test_describe_objects_marks_remote_property_queryability(
         "remote_property_unmapped"
     assert supplier["queryablePropertyCount"] == 4
     assert supplier["propertyCount"] == 5
+
+
+def test_remote_context_suggestions_and_structure_share_queryability(
+        db, admin_user, modeled_ontology):
+    from app.ontologies.agent_runtime.context_policy import ontology_catalog
+    from app.ontologies.agent_runtime.structure_service import build_structure
+
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(
+        db, oid, unmapped_properties=["internal_note"])
+    _, profile, scope = build_scope(db, oid, release_id=release_id)
+    card = scope.skill_card()
+    assert "internal_note" not in card and "region" in card
+    assert "internal_note" not in ontology_catalog(scope)
+    with pytest.raises(ToolError) as unknown:
+        scope.resolve_property(scope.require_object_type("Supplier"), "typo")
+    assert "internal_note" not in str(unknown.value)
+    assert "region" in str(unknown.value)
+
+    profile.allowed_properties = {"ot-supplier": ["sname", "internal_note"],
+                                  "ot-order": ["order_no"]}
+    db.commit()
+    _, _, restricted = build_scope(db, oid, release_id=release_id)
+    assert "region" not in restricted.skill_card()
+    with pytest.raises(ToolError) as hidden:
+        restricted.resolve_property(restricted.require_object_type("Supplier"), "typo")
+    assert "internal_note" not in str(hidden.value)
+    assert "region" not in str(hidden.value)
+    assert "sname" in str(hidden.value)
+    assert "order_no" in ontology_catalog(restricted)
+    structure = build_structure(db, admin_user, oid,
+                                expected_release_id=release_id,
+                                object_type_ids=["ot-supplier"])
+    supplier = next(item for item in structure["objectTypes"] if item["id"] == "ot-supplier")
+    props = {item["name"]: item for item in supplier["properties"]}
+    assert props["sname"]["queryable"] is True
+    assert props["internal_note"]["queryable"] is False
+    assert props["internal_note"]["unqueryableReason"] == "remote_property_unmapped"
+    assert "region" not in props
+    assert supplier["dataAccess"]["mappedProperties"] == ["sname"]
+
+
+
+def test_instance_detail_marks_unmapped_definitions_without_mutating_scope(
+        db, modeled_ontology):
+    from app.ontologies.agent_runtime.graph_service import get_instance_detail
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(
+        db, oid, unmapped_properties=["internal_note"])
+    _, profile, scope = build_scope(db, oid, release_id=release_id)
+    profile.allowed_properties = {"ot-supplier": ["sname", "internal_note"]}
+    db.commit()
+    _, _, scope = build_scope(db, oid, release_id=release_id)
+    detail = get_instance_detail(scope, "inst-s1")
+    definitions = {item["name"]: item for item in detail["objectType"]["properties"]}
+    assert definitions["sname"]["queryable"] is True
+    assert definitions["internal_note"]["queryable"] is False
+    assert definitions["internal_note"]["unqueryableReason"] == "remote_property_unmapped"
+    assert set(definitions) == {"sname", "internal_note"}
+    assert set(detail["properties"]) == {"sname"}
+    assert all("queryable" not in item for item in scope.object_types["ot-supplier"].properties)

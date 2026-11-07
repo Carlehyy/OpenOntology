@@ -14,7 +14,8 @@ def test_catalog_discovers_only_visible_properties_without_counting():
                                        {"name": "private", "type": "string"}])
     scope = SimpleNamespace(ontology=SimpleNamespace(name="订单本体"), release_id="release-1",
                             object_types={"orders": item},
-                            allowed_property_names=lambda _: {"number"})
+                            allowed_property_names=lambda _: {"number"},
+                            queryable_property_names=lambda _: None)
     original = context_policy.remote_object_type_ids
     try:
         context_policy.remote_object_type_ids = lambda _: set()
@@ -315,3 +316,18 @@ def test_turn_exit_releases_unread_query_pages(
     assert db.query(AgentQuerySnapshot).count() == 0
     if completion != "disconnect":
         assert any(event["type"] == completion for event in seen)
+
+
+
+def test_prompt_requires_composite_coverage_distinct_rankings_and_time_limits(monkeypatch):
+    from app.ontologies.agent_runtime.prompting import _system_prompt
+    monkeypatch.setattr(context_policy, "remote_object_type_ids", lambda _: set())
+    scope = SimpleNamespace(ontology=SimpleNamespace(name="目录"), release_id="r1",
+                            release=None, object_types={}, profile=SimpleNamespace(system_prompt_extra=""),
+                            allowed_property_names=lambda _: None,
+                            queryable_property_names=lambda _: None)
+    text = _system_prompt(scope)
+    assert "全部子问题" in text and "逐段回答" in text and "缺失项" in text
+    assert "最高月 Top10" in text and "全年 Top10" in text
+    assert "缺少的数据及工具限制" in text and "实际时间范围及数据截止日期" in text
+    assert "未完成、截断或超预算" in text and "步数预算内继续查询" in text

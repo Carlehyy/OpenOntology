@@ -207,7 +207,30 @@ def test_remote_page_size_over_cap_reports_controlled_fields(db, admin_user):
     assert error.value.extra["requestedPageSize"] == 51
     assert error.value.extra["maxPageSize"] == 50
     assert error.value.extra["defaultPageSize"] == 50
+    # 公共文案保留上限，并给出可执行建议（不夹取、不抬帽）。
+    assert "50" in error.value.message
+    assert "cursor" in error.value.message or "降低" in error.value.message
     assert not db.in_transaction()
+
+
+def test_remote_http_page_size_over_cap_keeps_422_with_actionable_message(
+        client, auth_headers, db, admin_user):
+    """直连 HTTP：越帽仍 422，公共 detail 仅 code/message，文案含上限与建议。"""
+    identity, profile = _release(db, admin_user)
+    profile.max_rows_per_query = 100
+    db.commit()
+    response = client.post("/api/v2/formal/agent/query", headers=auth_headers,
+                           json={"sources": [{"alias": "a", **identity}],
+                                 "select": [{"source": "a", "property": "key",
+                                             "as": "key"}],
+                                 "pageSize": 200})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert set(detail) == {"code", "message"}
+    assert detail["code"] == "invalid_parameter"
+    assert "100" in detail["message"]
+    assert "cursor" in detail["message"] or "降低" in detail["message"]
+    assert "200" not in detail["message"]  # 不回显请求原值
 
 
 def test_remote_cap_takes_minimum_of_all_nested_leaf_profiles(db, admin_user):

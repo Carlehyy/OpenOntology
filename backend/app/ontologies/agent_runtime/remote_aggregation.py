@@ -1,6 +1,7 @@
 """Execute the bounded aggregate tool through the governed remote query service."""
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -87,30 +88,80 @@ def _filter(item):
     return leaf
 
 
-def _execute(db, user, session_id, payload):
-    """校验、执行并释放一页有界的统一查询；不完整结果 fail closed。
+_LOGGER = logging.getLogger(__name__)
+
+
+def _max_in_list() -> int:
+    """单条远程 in 条件允许的最大取值数（与统一查询协议共用同一常量）。"""
+    from app.ontologies.agent_query.service import MAX_IN_LIST
+
+    return int(MAX_IN_LIST)
+
+
+def _assert_complete(result: dict) -> None:
+    """结果完整性的单点判定：partial/non-exact/partial completeness 均 fail closed。"""
+    if (result.get("partial") or result.get("exact") is False
+            or result.get("completeness", "complete") != "complete"):
+        raise ToolError("remote_aggregate_incomplete: 远程查询未返回完整统计")
+
+
+def _release_quietly(db, user, query_id) -> None:
+    """best-effort 释放查询句柄。
+
+    句柄还有 TTL 兜底；释放失败不得把已成功/已判定失败的业务结果改写掉。
+    """
+    if not query_id:
+        return
+    try:
+        from app.ontologies.agent_query.remote_query import cancel_remote_query
+
+        cancel_remote_query(db, user, str(query_id))
+    except Exception as exc:  # noqa: BLE001 - 清理不是业务结果的一部分
+        _LOGGER.warning("remote aggregate handle release failed (%s)",
+                        type(exc).__name__)
+
+
+def _execute(db, user, session_id, payload, *, release: bool = True):
+    """校验、执行一页有界的统一查询；不完整结果 fail closed。
 
     有界分组统计（boundedStats）例外：源端 LIMIT 截断只影响不可达的分组，
     已返回分组值与总组数仍精确（响应 exact/completeness 由适配器保证）。
+
+    ``release=False`` 只供 contains 枚举使用：首屏执行后保留 memory handle
+    以便在 ``MAX_IN_LIST`` 预算内续页；调用方必须在 finally 释放句柄。
     """
     from app.ontologies.agent_query import schemas as QS
     from app.ontologies.agent_query.service import QueryError, execute_unified_query
-    from app.ontologies.agent_query.remote_query import cancel_remote_query
 
     try:
         request = QS.QueryRequest.model_validate(payload)
         result = execute_unified_query(db, user, request, session_kind="ontology_agent",
                                        session_id=session_id or "")
-        # The tool consumes one bounded page and exposes no continuation cursor.
-        cancel_remote_query(db, user, result["queryId"])
     except ValidationError as exc:
         raise ToolError(f"remote_aggregate_invalid_query: {exc}") from exc
     except QueryError as exc:
         raise ToolError(f"{exc.code}: {exc.message}") from exc
-    if (result.get("partial") or result.get("exact") is False
-            or result.get("completeness", "complete") != "complete"):
-        raise ToolError("remote_aggregate_incomplete: 远程查询未返回完整统计")
+    try:
+        _assert_complete(result)
+    except ToolError:
+        _release_quietly(db, user, result.get("queryId"))
+        raise
+    if release:
+        # 默认工具只消费一页；枚举路径由 _collect_enum_rows 统一释放。
+        _release_quietly(db, user, result.get("queryId"))
     return result
+
+
+def _fetch_enum_page(db, user, session_id, cursor: str) -> dict:
+    """续取一页 contains 枚举结果；session 身份必须与首次执行一致。"""
+    from app.ontologies.agent_query.service import QueryError, fetch_unified_query_page
+
+    try:
+        return fetch_unified_query_page(
+            db, user, cursor, session_kind="ontology_agent",
+            session_id=session_id or "")
+    except QueryError as exc:
+        raise ToolError(f"{exc.code}: {exc.message}") from exc
 
 
 def _scalar_count(db, user, session_id, count_payload, where) -> int:
@@ -198,18 +249,94 @@ def _assert_remote_properties_queryable(scope, ot, properties) -> None:
         f"可查询属性：{available}")
 
 
-def _enumeration_truncated(result: dict, rows: list[dict]) -> bool:
-    """分组值枚举是否被截断：截断时不能把已命中取值冒充完整 contains 解析。"""
-    total = result.get("totalRowCount")
-    return bool(result.get("hasNext") or result.get("truncated")
-                or result.get("resultBounded")
-                or (total is not None and total > len(rows)))
+def _contains_unresolved(want, *, reason: str = "候选取值未枚举完整") -> ToolError:
+    """contains 候选无法完整解析时的稳定 fail-closed 错误。
 
-
-def _contains_unresolved(want) -> ToolError:
+    稳定前缀 ``remote_aggregate_contains_unresolved`` 是编排层识别“截断/
+    未枚举完整”的唯一契约；消息不包含任何源端取值。
+    """
     return ToolError(
-        "remote_aggregate_contains_unresolved: 远程源该属性取值超过一页，"
-        f"无法完整解析 contains「{want}」；请改用 in/eq 给出明确取值后重试")
+        "remote_aggregate_contains_unresolved: 远程源匹配 contains"
+        f"「{want}」的{reason}（单条 in 上限 {_max_in_list()}）；"
+        "请缩小 contains 范围或改用明确的 eq/in 条件后重试；"
+        "本次未执行主统计，不得把已命中子集当作完整结果")
+
+
+def _collect_enum_rows(db, user, session_id, payload, *, want: str) -> tuple[list[dict], dict]:
+    """执行并在 MAX_IN_LIST 行预算内续页 contains 枚举，任何不完整都 fail closed。
+
+    枚举结果在首次 execute 时已物化进 memory handle；续页只读 handle，不重扫
+    源端。预算按“已取行数”计：达到上限仍有后续页、候选取值超过单条 in 上限、
+    游标缺失、取页异常或结果不完整一律显式失败；绝不把已命中子集当作完整
+    解析结果下发主统计。所有路径（成功/失败/预算拒绝/取页异常）都释放句柄。
+
+    返回 ``(rows, 最后一页结果)``；后者仅供零结果分支复用 queryId/观测元数据。
+    """
+    max_values = _max_in_list()
+    try:
+        result = _execute(db, user, session_id, payload, release=False)
+    except ToolError as exc:
+        if str(exc).startswith("remote_aggregate_incomplete:"):
+            raise _contains_unresolved(
+                want, reason="候选取值未枚举完整，底层查询结果不完整") from exc
+        raise
+    query_id = result.get("queryId")
+    rows = list(result.get("rows") or [])
+    seen_cursors: set[str] = set()
+    try:
+        total = result.get("totalRowCount")
+        if isinstance(total, int) and total > max_values:
+            # 保守语义：总数已超过单条 in 上限（或无法区分 100 非空+NULL）
+            # 时立即失败，不再额外取页。
+            raise _contains_unresolved(
+                want, reason=f"候选 {total} 个取值超过单条 in 上限")
+        if len(rows) > max_values:
+            # 候选预算按“已枚举行数”而非最终匹配数：即使本地大小写回退
+            # 最终只命中 5 个，超过预算的候选枚举也不能继续。
+            raise _contains_unresolved(
+                want, reason=f"候选超过枚举预算 {max_values} 行")
+        while result.get("hasNext"):
+            if len(rows) >= max_values:
+                raise _contains_unresolved(
+                    want, reason=f"候选已达枚举预算 {max_values} 行但仍有后续页")
+            cursor = result.get("cursor")
+            if not cursor:
+                raise _contains_unresolved(
+                    want, reason="续页游标不可用，无法确认候选取值完整")
+            cursor = str(cursor)
+            if cursor in seen_cursors:
+                raise _contains_unresolved(
+                    want, reason="续页游标未推进，无法确认候选取值完整")
+            seen_cursors.add(cursor)
+            try:
+                page = _fetch_enum_page(db, user, session_id, cursor)
+            except ToolError as exc:
+                code = str(exc).split(":", 1)[0]
+                raise _contains_unresolved(
+                    want, reason=f"续页失败（{code}），无法确认候选取值完整") from exc
+            try:
+                _assert_complete(page)
+            except ToolError as exc:
+                raise _contains_unresolved(want, reason="续页结果不完整") from exc
+            page_rows = list(page.get("rows") or [])
+            if page.get("hasNext") and not page_rows:
+                # 空页却仍声明有下一页：游标/结果不可靠，禁止靠循环空转等待。
+                raise _contains_unresolved(
+                    want, reason="续页空页但仍声明有下一页，无法确认候选取值完整")
+            rows.extend(page_rows)
+            if len(rows) > max_values:
+                raise _contains_unresolved(
+                    want, reason=f"候选超过枚举预算 {max_values} 行")
+            result = page
+        if result.get("truncated") or result.get("resultBounded"):
+            raise _contains_unresolved(want, reason="候选取值未枚举完整，结果被截断")
+        total = result.get("totalRowCount")
+        if isinstance(total, int) and total > len(rows):
+            raise _contains_unresolved(
+                want, reason="候选取值未枚举完整，总数多于已取行")
+        return rows, result
+    finally:
+        _release_quietly(db, user, query_id)
 
 
 def _payload_spec(*, scope, ot, payload, labels, description,
@@ -291,17 +418,18 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
                         "groupBy": [{"source": "objects", "property": item["property"]}],
                         "orderBy": [{"output": "value", "direction": "desc"},
                                     {"output": "group", "direction": "asc"}]}
-        enum = _execute(db, user, session_id, enum_payload)
+        rows, enum = _collect_enum_rows(
+            db, user, session_id, enum_payload, want=str(want))
         meta_result = enum
-        rows = enum["rows"]
         matches = [row["group"] for row in rows if row.get("group") is not None]
-        if matches and _enumeration_truncated(enum, rows):
-            # 枚举只覆盖一页时，已命中的取值只是完整匹配集合的子集；
-            # 用它改写 in 会把小样本计数冒充 contains 全量统计。
-            raise _contains_unresolved(want)
+        if len(matches) > _max_in_list():
+            # 完整枚举已超过单条 in 上限（cap 200/150 等）：绝不下发适配器
+            # 普通 IN 参数 422，统一以 contains 未完整解析的稳定错误失败。
+            raise _contains_unresolved(
+                want, reason=f"候选 {len(matches)} 个取值超过单条 in 上限")
         if not matches:
             # 源端 LIKE 可能大小写敏感（如 PostgreSQL）：回退为源端全枚举 +
-            # 本地不区分大小写子串匹配；全枚举也可能被截断，任何截断都
+            # 本地不区分大小写子串匹配；回退同样受预算约束，任何不完整都
             # fail closed —— 有少量命中同样不能冒充完整解析。
             fallback = {**count_payload(others), "pageSize": enum_page,
                         "select": [{"source": "objects", "property": item["property"],
@@ -309,14 +437,15 @@ def aggregate_remote(db, scope, user, session_id, ot, metric, metric_prop,
                         "groupBy": [{"source": "objects", "property": item["property"]}],
                         "orderBy": [{"output": "value", "direction": "desc"},
                                     {"output": "group", "direction": "asc"}]}
-            enum = _execute(db, user, session_id, fallback)
+            rows, enum = _collect_enum_rows(
+                db, user, session_id, fallback, want=str(want))
             meta_result = enum
-            rows = enum["rows"]
-            if _enumeration_truncated(enum, rows):
-                raise _contains_unresolved(want)
             matches = [row["group"] for row in rows
                        if row.get("group") is not None
                        and str(want).lower() in str(row["group"]).lower()]
+            if len(matches) > _max_in_list():
+                raise _contains_unresolved(
+                    want, reason=f"候选 {len(matches)} 个取值超过单条 in 上限")
         if matches:
             resolved.append({"property": item["property"], "op": "in", "value": matches})
         else:

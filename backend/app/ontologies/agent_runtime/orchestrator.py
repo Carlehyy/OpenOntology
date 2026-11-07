@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app.model_configs.selector import select_llm_model_config, llm_call_kwargs
 from app.ontologies.agent_runtime import llm_bridge
 from app.ontologies.agent_runtime import answer_verifier
+from app.ontologies.agent_runtime.answer_masks import derived_notice, incomplete_notice
 from app.ontologies.agent_runtime import answer_evidence
 from app.ontologies.agent_runtime.context_policy import tool_payload
 from app.ontologies.agent_runtime.prompting import _system_prompt
@@ -343,6 +344,9 @@ def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
     else:
         answer = f"已达到单回合最大步数（{max_steps} 步）仍未得出结论。请把问题拆小一点，或在边界配置中调大 max_steps。"
 
+    if verification is not None and verification.derived:
+        answer = (answer or "") + derived_notice(verification.derived)
+    answer = (answer or "") + incomplete_notice(answer or "", steps)
     _persist_assistant(db, conv, answer or "", steps, runner, call_kwargs, usage_total,
                        commit=execution is None)
     yield {"type": "answer", "content": answer,

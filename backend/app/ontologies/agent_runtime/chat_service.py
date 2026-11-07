@@ -29,6 +29,7 @@ def run_sync(
     run = run_service.get_run(db, ontology_id, current_user, run["runId"])
     return {
         "conversationId": run["conversationId"],
+        "releaseId": run["releaseId"],
         "model": run.get("model"),
         "steps": run.get("steps") or [],
         "content": run.get("content") if run["status"] == "succeeded" else None,

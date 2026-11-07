@@ -104,13 +104,14 @@ def build_structure(db: Session, user, ontology_id: str, *,
 
     def _props(ot):
         allowed = scope.allowed_property_names(ot.id)
+        queryable = scope.queryable_property_names(ot)
         result = []
         for p in (ot.properties or []):
             if not isinstance(p, dict) or not p.get("name"):
                 continue
             if allowed is not None and p["name"] not in allowed:
                 continue
-            result.append({
+            entry = {
                 "id": p.get("id"),
                 "name": p.get("name"),
                 "displayName": p.get("displayName") or p.get("name"),
@@ -119,7 +120,14 @@ def build_structure(db: Session, user, ontology_id: str, *,
                 "description": p.get("description"),
                 "source": "computed" if p.get("source") == "computed"
                 else "stored",
-            })
+            }
+            if queryable is None:
+                entry["queryable"] = True
+            else:
+                entry["queryable"] = p["name"] in queryable
+                if not entry["queryable"]:
+                    entry["unqueryableReason"] = "remote_property_unmapped"
+            result.append(entry)
         return result
 
     def _join_assertions() -> list[dict]:
@@ -168,12 +176,11 @@ def build_structure(db: Session, user, ontology_id: str, *,
         binding = get_remote_binding(context.snapshot, object_type_id)
         if binding is None:
             return {"mode": "materialized", "queryTool": "ontology_query"}
-        allowed = scope.allowed_property_names(object_type_id)
+        queryable = scope.queryable_property_names(scope.object_types[object_type_id])
         return {"mode": "remote", "queryTool": "ontology_query",
                 "definitionReleaseId": context.release.id,
                 "dataSnapshot": "query_time", "sourceRecordsPersisted": False,
-                "mappedProperties": sorted({prop for prop in binding["fieldMap"].values()
-                                            if allowed is None or prop in allowed})}
+                "mappedProperties": sorted(queryable)}
 
     payload = {
         "ontology": {"id": project.id, "name": project.name},

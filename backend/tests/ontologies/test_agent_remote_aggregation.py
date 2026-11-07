@@ -152,13 +152,14 @@ def _patch_execute_sequence(monkeypatch, results: list) -> list:
 
 
 def _unified_result(rows, *, partial=False, has_next=False, truncated=False,
-                    total_row_count=None) -> dict:
+                    total_row_count=None, cursor=None, query_id="q-agg-1") -> dict:
     return {
-        "queryId": "q-agg-1",
+        "queryId": query_id,
         "rows": rows,
         "partial": partial,
         "hasNext": has_next,
         "truncated": truncated,
+        "cursor": cursor,
         "totalRowCount": (total_row_count if total_row_count is not None
                           else len(rows)),
         "observedAt": "2026-11-02T00:00:00+00:00",
@@ -716,11 +717,16 @@ def test_unmapped_remote_property_is_rejected_before_any_source_query(
     runner = _remote_runner(db, oid, release_id, user=admin_user)
     calls = _patch_execute_sequence(monkeypatch, [_unified_result([{"value": 1}])])
 
-    with pytest.raises(ToolError, match="remote_aggregate_property_unqueryable"):
+    # 可查集合有两条前置防线：聚合工具自己的 remote_aggregate 守卫，以及
+    # P1 收口后 boundary.resolve_property 的统一 queryable 守卫。二者都必须在
+    # 任何 contains 枚举/主查询之前拒绝未映射属性；错误码由先命中的防线决定。
+    unqueryable = ("(remote_aggregate_property_unqueryable|"
+                   "query_objects_property_unqueryable)")
+    with pytest.raises(ToolError, match=unqueryable):
         runner.run("aggregate_objects", {
             "object_type": "Supplier", "metric": "count",
             "filters": [{"property": "internal_note", "op": "eq", "value": "x"}]})
-    with pytest.raises(ToolError, match="remote_aggregate_property_unqueryable"):
+    with pytest.raises(ToolError, match=unqueryable):
         runner.run("aggregate_objects", {
             "object_type": "Supplier", "metric": "count",
             "group_by": "internal_note"})
@@ -874,6 +880,48 @@ class _SequencePort:
     def cancel(self, db, user, query_id):
         self.cancelled.append((user.id, query_id))
         return {"queryId": query_id, "cancelled": True}
+
+
+class _PagedSequencePort:
+    """execute/fetch 分别按调用序返回结果；用于 contains 枚举续页测试。
+
+    execute 结果按“第 1 次=LIKE 枚举、第 2 次=回退枚举(可选)、后续=主统计”
+    的顺序提供；fetch 依次返回枚举后续页。计划编制/授权仍走真实代码。
+    """
+
+    def __init__(self, execute_results, fetch_results):
+        self.execute_results = list(execute_results)
+        self.fetch_results = list(fetch_results)
+        self.executed = []
+        self.fetched = []
+        self.cancelled = []
+
+    def execute(self, db, user, plan, *, request, session_kind, session_id):
+        self.executed.append({"user": user, "plan": plan, "request": request,
+                              "session_kind": session_kind,
+                              "session_id": session_id})
+        index = len(self.executed) - 1
+        assert index < len(self.execute_results), "unexpected extra execute"
+        return self.execute_results[index]
+
+    def fetch(self, db, user, token, *, session_kind, session_id, prepare):
+        self.fetched.append({"token": token, "session_kind": session_kind,
+                             "session_id": session_id})
+        index = len(self.fetched) - 1
+        assert index < len(self.fetch_results), "unexpected extra fetch"
+        return self.fetch_results[index]
+
+    def cancel(self, db, user, query_id):
+        self.cancelled.append((user.id, query_id))
+        return {"queryId": query_id, "cancelled": True}
+
+
+def _install_paged_port(monkeypatch, execute_results, fetch_results):
+    from app.ontologies.agent_query import remote_query
+
+    port = _PagedSequencePort(execute_results, fetch_results)
+    monkeypatch.setattr(remote_query, "_port", port)
+    return port
 
 
 def test_remote_aggregate_wires_through_real_plan_and_installed_port(
@@ -1108,6 +1156,353 @@ def test_contains_enumeration_page_matches_registry_page_at_high_cap(
 
     assert out["value"] == 4
     assert port.executed[0]["plan"]["pageSize"] == 200
+
+
+@pytest.mark.parametrize("cap, limit, expected_enum, expected_main", [
+    (50, None, 50, 200), (50, 20, 50, 20), (50, 100, 50, 100),
+    (50, 200, 50, 200),
+    (100, None, 100, 200), (100, 150, 100, 150),
+    (200, None, 200, 200), (200, 20, 200, 20),
+])
+def test_contains_enum_page_and_main_group_page_matrix(
+        modeled_ontology, db, admin_user, monkeypatch,
+        cap, limit, expected_enum, expected_main):
+    """枚举页 ≤ min(registry, cap)；主分组摘要页仍按 registry 帽，limit 变体不混用。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, cap)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    port = _install_sequence_port(
+        monkeypatch,
+        [_contains_enum_result(), _unified_result([{"group0": "华南", "value": 7}],
+                                                  total_row_count=1)])
+
+    arguments = {"object_type": "Supplier", "metric": "count",
+                 "group_by": "region", "filters": [dict(_CONTAINS_FILTER)]}
+    if limit is not None:
+        arguments["limit"] = limit
+    runner.run("aggregate_objects", arguments)
+
+    assert len(port.executed) == 2
+    enum_plan = port.executed[0]["plan"]
+    assert enum_plan["pageSize"] == expected_enum
+    assert "statsLimit" not in enum_plan  # 枚举页不得借 boundedStats 绕过
+    main_plan = port.executed[1]["plan"]
+    assert main_plan["pageSize"] == expected_main
+    assert main_plan["statsLimit"] == expected_main
+
+
+def test_contains_enumeration_continues_within_in_budget(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=50：LIKE 枚举 80 个取值分两页取全后，仅执行一次主统计。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user,
+                            session_id="conv-paged")
+    values = [f"区域{index}" for index in range(80)]
+    first = _unified_result(
+        [{"group": value, "value": 1} for value in values[:50]],
+        has_next=True, cursor="mem.enum-2", total_row_count=80,
+        query_id="q-enum")
+    second = _unified_result(
+        [{"group": value, "value": 1} for value in values[50:]],
+        total_row_count=80, query_id="q-enum")
+    main = _unified_result([{"value": 42}], query_id="q-main")
+    port = _install_paged_port(monkeypatch, [first, main], [second])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "filters": [{"property": "region", "op": "contains", "value": "区域"}]})
+
+    assert out["value"] == 42 and out["dataMode"] == "remote"
+    assert len(port.executed) == 2 and len(port.fetched) == 1
+    assert port.executed[0]["plan"]["pageSize"] == 50
+    assert port.fetched[0] == {"token": "mem.enum-2",
+                               "session_kind": "ontology_agent",
+                               "session_id": "conv-paged"}
+    assert port.executed[1]["plan"]["where"] == [
+        {"source": "objects", "property": "region", "op": "in", "value": values}]
+    assert (admin_user.id, "q-enum") in port.cancelled
+    assert (admin_user.id, "q-main") in port.cancelled
+
+
+def test_contains_like_miss_fallback_continues_within_in_budget(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """LIKE 零命中 → 全枚举回退同样续页；本地大小写不敏感匹配后只执行一次主统计。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user,
+                            session_id="conv-fallback")
+    values = (["North-A", "North-B", "North-C"]
+              + [f"Other-{index}" for index in range(77)])
+    like_empty = _unified_result([], total_row_count=0, query_id="q-like")
+    fallback_first = _unified_result(
+        [{"group": value, "value": 1} for value in values[:50]],
+        has_next=True, cursor="mem.fallback-2", total_row_count=80,
+        query_id="q-fallback")
+    fallback_second = _unified_result(
+        [{"group": value, "value": 1} for value in values[50:]],
+        total_row_count=80, query_id="q-fallback")
+    main = _unified_result([{"value": 3}], query_id="q-main")
+    port = _install_paged_port(
+        monkeypatch, [like_empty, fallback_first, main], [fallback_second])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "filters": [{"property": "region", "op": "contains", "value": "north"}]})
+
+    assert out["value"] == 3
+    assert len(port.executed) == 3 and len(port.fetched) == 1
+    assert port.executed[1]["plan"]["pageSize"] == 50
+    assert port.fetched[0]["session_id"] == "conv-fallback"
+    resolved = port.executed[2]["plan"]["where"][0]["value"]
+    assert sorted(resolved) == ["North-A", "North-B", "North-C"]
+    assert (admin_user.id, "q-like") in port.cancelled
+    assert (admin_user.id, "q-fallback") in port.cancelled
+
+
+def test_contains_enumeration_completes_at_in_limit_boundary(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=50、候选恰好 100 个（两页）：完整枚举后允许 in(100) 边界。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    values = [f"区域{index}" for index in range(100)]
+    first = _unified_result(
+        [{"group": value, "value": 1} for value in values[:50]],
+        has_next=True, cursor="mem.enum-2", total_row_count=100,
+        query_id="q-enum")
+    second = _unified_result(
+        [{"group": value, "value": 1} for value in values[50:]],
+        total_row_count=100, query_id="q-enum")
+    main = _unified_result([{"value": 7}], query_id="q-main")
+    port = _install_paged_port(monkeypatch, [first, main], [second])
+
+    out = runner.run("aggregate_objects", {
+        "object_type": "Supplier", "metric": "count",
+        "filters": [{"property": "region", "op": "contains", "value": "区域"}]})
+
+    assert out["value"] == 7
+    assert len(port.executed) == 2 and len(port.fetched) == 1
+    assert len(port.executed[1]["plan"]["where"][0]["value"]) == 100
+    assert (admin_user.id, "q-enum") in port.cancelled
+
+
+def test_contains_enumeration_budget_exhausted_with_more_pages_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=50：两页共 100 行仍有 hasNext → 保守 unresolved，主统计 0 次。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    first = _unified_result(
+        [{"group": f"区域{index}", "value": 1} for index in range(50)],
+        has_next=True, cursor="mem.enum-2", total_row_count=None,
+        query_id="q-enum")
+    second = _unified_result(
+        [{"group": f"区域{index}", "value": 1} for index in range(50, 100)],
+        has_next=True, cursor="mem.enum-3", total_row_count=None,
+        query_id="q-enum")
+    port = _install_paged_port(monkeypatch, [first], [second])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved") as error:
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert "枚举预算 100 行" in str(error.value)
+    assert len(port.executed) == 1  # 主统计绝不能执行
+    assert len(port.fetched) == 1
+    assert (admin_user.id, "q-enum") in port.cancelled
+
+
+def test_contains_enumeration_over_budget_without_total_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """回退枚举首屏 150 行且 totalRowCount 缺失：本地最终只命中 5 个也不得越过候选预算。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 200)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    values = ([f"North-{index}" for index in range(5)]
+              + [f"Other-{index}" for index in range(145)])
+    like_empty = _unified_result([], total_row_count=0, query_id="q-like")
+    fallback = _unified_result(
+        [{"group": value, "value": 1} for value in values],
+        total_row_count=None, query_id="q-fallback")
+    fallback["totalRowCount"] = None  # 模拟源端未返回总数
+    port = _install_paged_port(monkeypatch, [like_empty, fallback], [])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved") as error:
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [{"property": "region", "op": "contains", "value": "north"}]})
+
+    assert "枚举预算 100 行" in str(error.value)
+    assert len(port.executed) == 2  # LIKE + 回退，主统计 0 次
+    assert port.fetched == []
+    assert (admin_user.id, "q-like") in port.cancelled
+    assert (admin_user.id, "q-fallback") in port.cancelled
+
+
+def test_contains_enumeration_empty_nonterminal_page_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """续页返回空页但仍 hasNext：无进展必须 fail closed，不能空转。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    first = _unified_result(
+        [{"group": f"区域{index}", "value": 1} for index in range(50)],
+        has_next=True, cursor="mem.enum-2", total_row_count=None,
+        query_id="q-enum")
+    empty_page = _unified_result([], has_next=True, cursor="mem.enum-3",
+                                 total_row_count=None, query_id="q-enum")
+    port = _install_paged_port(monkeypatch, [first], [empty_page])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved") as error:
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert "空页" in str(error.value)
+    assert len(port.executed) == 1 and len(port.fetched) == 1
+    assert (admin_user.id, "q-enum") in port.cancelled
+
+
+def test_contains_enumeration_repeated_cursor_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """续页重复返回同一 cursor：游标不前进必须 fail closed，不能无限续页。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    first = _unified_result(
+        [{"group": f"区域{index}", "value": 1} for index in range(50)],
+        has_next=True, cursor="mem.enum-2", total_row_count=None,
+        query_id="q-enum")
+    looping_page = _unified_result(
+        [{"group": "区域50", "value": 1}],
+        has_next=True, cursor="mem.enum-2", total_row_count=None,
+        query_id="q-enum")
+    port = _install_paged_port(monkeypatch, [first], [looping_page])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved") as error:
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert "游标未推进" in str(error.value)
+    # 首次 fetch 后即发现 cursor 回环，不会进入第三次请求。
+    assert len(port.executed) == 1 and len(port.fetched) == 1
+    assert (admin_user.id, "q-enum") in port.cancelled
+
+
+def test_contains_enumeration_completed_over_in_limit_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """cap=200、150 个匹配值已完整枚举：仍以 unresolved 失败，不落适配器 IN 422。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 200)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    rows = [{"group": f"区域{index}", "value": 1} for index in range(150)]
+    port = _install_paged_port(
+        monkeypatch,
+        [_unified_result(rows, total_row_count=150, query_id="q-enum")], [])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved") as error:
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    message = str(error.value)
+    assert "超过单条 in 上限" in message and "IN requires" not in message
+    assert len(port.executed) == 1 and port.fetched == []
+    assert (admin_user.id, "q-enum") in port.cancelled
+
+
+def test_contains_enumeration_hundred_non_null_plus_null_fails_conservatively(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """100 非空 + NULL（total=101）按保守策略直接 unresolved，不额外取页。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 100)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    rows = ([{"group": f"区域{index}", "value": 1} for index in range(99)]
+            + [{"group": None, "value": 1}])
+    port = _install_paged_port(
+        monkeypatch,
+        [_unified_result(rows, has_next=True, cursor="mem.enum-2",
+                         total_row_count=101, query_id="q-enum")], [])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved"):
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert len(port.executed) == 1 and port.fetched == []
+    assert (admin_user.id, "q-enum") in port.cancelled
+
+
+def test_contains_enumeration_unreliable_cursor_fails_closed(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """hasNext=true 但 cursor 缺失：不可靠游标 → unresolved，句柄释放。"""
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    first = _unified_result(
+        [{"group": f"区域{index}", "value": 1} for index in range(50)],
+        has_next=True, cursor=None, total_row_count=60, query_id="q-enum")
+    port = _install_paged_port(monkeypatch, [first], [])
+
+    with pytest.raises(ToolError, match="remote_aggregate_contains_unresolved") as error:
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    assert "续页游标不可用" in str(error.value)
+    assert port.fetched == [] and len(port.executed) == 1
+    assert (admin_user.id, "q-enum") in port.cancelled
+
+
+def test_contains_enumeration_fetch_error_releases_handle(
+        modeled_ontology, db, admin_user, monkeypatch):
+    """续页异常 fail-closed 且不泄漏已打开的枚举句柄，主统计 0 次。"""
+    from app.ontologies.agent_query.service import QueryError
+
+    oid = modeled_ontology["id"]
+    release_id = _freeze_with_rich_remote_supplier(db, oid)
+    _set_remote_supplier_page_cap(db, oid, 50)
+    runner = _remote_runner(db, oid, release_id, user=admin_user)
+    first = _unified_result(
+        [{"group": f"区域{index}", "value": 1} for index in range(50)],
+        has_next=True, cursor="mem.enum-2", total_row_count=60,
+        query_id="q-enum")
+
+    class _FailingFetchPort(_PagedSequencePort):
+        def fetch(self, db, user, token, *, session_kind, session_id, prepare):
+            self.fetched.append({"token": token, "session_kind": session_kind,
+                                 "session_id": session_id})
+            raise QueryError(410, "result_handle_expired", "handle expired")
+
+    port = _FailingFetchPort([first], [])
+    from app.ontologies.agent_query import remote_query
+    monkeypatch.setattr(remote_query, "_port", port)
+
+    with pytest.raises(ToolError) as error:
+        runner.run("aggregate_objects", {
+            "object_type": "Supplier", "metric": "count",
+            "filters": [dict(_CONTAINS_FILTER)]})
+
+    message = str(error.value)
+    # 枚举阶段的取页异常也收敛到稳定 truncation 前缀（原因保留底层 code）。
+    assert message.startswith("remote_aggregate_contains_unresolved:")
+    assert "result_handle_expired" in message
+    assert len(port.executed) == 1
+    assert (admin_user.id, "q-enum") in port.cancelled
 
 
 def test_chat_remote_aggregate_passes_user_and_conversation_to_port(

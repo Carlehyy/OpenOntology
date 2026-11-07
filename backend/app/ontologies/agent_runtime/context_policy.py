@@ -37,8 +37,10 @@ def ontology_catalog(scope) -> str:
     shown = 0
     for item in types:
         allowed = scope.allowed_property_names(item.id)
+        queryable = scope.queryable_property_names(item)
         props = [p for p in (item.properties or []) if isinstance(p, dict)
-                 and p.get("name") and (allowed is None or p["name"] in allowed)]
+                 and p.get("name") and (allowed is None or p["name"] in allowed)
+                 and (queryable is None or p["name"] in queryable)]
         fields = ", ".join(f"{p['name']}:{p.get('type', 'string')}" for p in props[:6])
         mode = "远程绑定" if item.id in remote_ids else "本地物化"
         line = f"- {item.display_name} ({item.name}, id={item.id}, {mode}): {fields}"

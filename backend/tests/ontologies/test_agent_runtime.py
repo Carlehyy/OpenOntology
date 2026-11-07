@@ -588,6 +588,7 @@ def test_chat_turn_with_fake_llm(client, auth_headers, modeled_ontology, db,
                                  admin_user, monkeypatch):
     """假 LLM：第一轮要求查订单，第二轮给出答案 → 验证轨迹、引用、持久化。"""
     oid = modeled_ontology["id"]
+    _freeze_modeled_current_release(db, oid)
 
     # 造一个可用的模型配置（不会真的被调用）
     from app.models.model_config import ModelConfig
