@@ -89,7 +89,7 @@ export default function CapabilityMapDialog() {
             <div className="space-y-2">
               <CapabilityCard icon={Clock} title="定时任务" status="已接入">在定时任务入口设置时间与指令，到点调用助手并留下执行记录。</CapabilityCard>
               <CapabilityCard icon={ListChecks} title="任务实例" status="独立可用">手动激活任务模板并跟踪实例；助手自动生成实例的链路待打通。</CapabilityCard>
-              <CapabilityCard icon={Plug} title="外部集成" status="按配置接入">连接外部工作台与远程助手，查询、委派或协作；需先完成配置与授权。</CapabilityCard>
+              <CapabilityCard icon={Plug} title="能力拓展" status="按配置接入">连接外部工作台与远程助手，查询、委派或协作；需先完成配置与授权。</CapabilityCard>
             </div>
           </section>
         </div>
@@ -103,7 +103,7 @@ export default function CapabilityMapDialog() {
             <Scenario title="从知识到业务操作" steps={['知识库（WeKnora） + 本体治理', '超级助手', '执行操作']}>
               WeKnora 的模型、知识库与只读工具需管理员手工配置、测试并登记后才会被助手使用；本体助手委派已可用，操作建议需在本体界面确认。
             </Scenario>
-            <Scenario title="从助手到外部协作" steps={['超级助手', '外部集成', '查询 / 委派 / 协作']} connected>
+            <Scenario title="从助手到外部协作" steps={['超级助手', '能力拓展', '查询 / 委派 / 协作']} connected>
               已有外部协作链路，启用范围取决于集成配置、目标系统与当前账号授权。
             </Scenario>
           </div>
