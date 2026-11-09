@@ -32,6 +32,8 @@ interface TurnRailProps {
 /** 对话问题导航竖条：聊天区左缘按提问轮次排列的刻度列，
  *  hover 出两段式预览、点击定位到该提问、实时高亮视口所在轮次。
  *  刻度少于 2 根或聊天区过窄时整体不渲染。
+ *  锚定于工作台大卡（header 之下到卡片底缘）：底部输入框多行撑高 footer
+ *  只会压缩聊天 main，刻度条中心不随输入内容多少移动。
  *  鱼眼波形（命中刻度放大、±1/±2 依次衰减）全部由 CSS 相邻选择器驱动：
  *  掠过刻度时零 React 渲染、纯合成器动画，悬停跟手不卡顿 */
 export function TurnRail({ items, scrollHostRef, onJump }: TurnRailProps) {
@@ -157,11 +159,15 @@ export function TurnRail({ items, scrollHostRef, onJump }: TurnRailProps) {
   const hovered = hover ? items[hover.index] : null
 
   return (
+    // 定位容器是工作台大卡 section（高度只随视口变化）而非聊天 main：main 是
+    // footer 的 flex 兄弟，输入框撑高时 main 底边上收，若铺满 main 则居中的
+    // 刻度条会随之上移。顶部让出 header 高度（与 SuperAssistantPage 头部
+    // h-[4.3125rem] 同值，改动需同步），刻度条仍在该稳定区间内垂直居中
     <nav
       ref={node => { navRef.current = node }}
       aria-label="对话问题导航"
       data-testid="super-assistant-turn-rail"
-      className="pointer-events-none absolute inset-y-0 left-0 z-10 w-12"
+      className="pointer-events-none absolute bottom-0 left-0 top-[4.3125rem] z-10 w-12"
     >
       <div
         ref={stripRef}

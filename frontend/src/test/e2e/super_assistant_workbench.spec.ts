@@ -4067,6 +4067,48 @@ test('对话问题导航竖条：配置接口慢于消息返回（loading 后收
   await expect(rail.locator('[data-turn-rail-item]')).toHaveCount(15)
 })
 
+test('对话问题导航竖条：输入框多行撑高时竖条位置保持不动', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await seedAuth(page)
+  await mockApis(page)
+  const longMessages = Array.from({ length: 30 }, (_, index) => ({
+    id: `m-long-${index}`, conversation_id: 'c-long',
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `第 ${index + 1} 条消息：${'内容'.repeat(30)}`,
+    status: 'complete', steps: [], token_usage: {}, created_at: at(0, 9),
+  }))
+  await page.route('**/api/v2/super-assistant/conversations', route => {
+    if (route.request().method() === 'GET') {
+      return json(route, [{
+        id: 'c-long', title: '长会话', model_config_id: 'model-1',
+        status: 'active', created_at: at(0, 9), updated_at: at(0, 9),
+      }])
+    }
+    return route.fallback()
+  })
+  await page.route('**/api/v2/super-assistant/conversations/c-long/messages', route => json(route, longMessages))
+
+  await page.goto('/#/super-assistant?conversation=c-long')
+  await expect(page.locator('main div.h-full.overflow-y-auto').getByText('第 30 条消息')).toBeVisible()
+  const rail = page.getByTestId('super-assistant-turn-rail')
+  await expect(rail.locator('[data-turn-rail-item]')).toHaveCount(15)
+  const firstTick = rail.locator('[data-turn-rail-item][data-index="0"]')
+  const composerCard = page.getByTestId('super-assistant-composer')
+  const railBefore = await rail.boundingBox()
+  const tickBefore = await firstTick.boundingBox()
+  const composerBefore = await composerCard.boundingBox()
+
+  // 多行输入直到 Sender autoSize 封顶（maxRows 6）：footer 被撑高、聊天 main 被压缩；
+  // 竖条曾铺满 main 并垂直居中，会随 main 中点逐行上移
+  const composer = page.getByRole('textbox', { name: '向超级助手发送消息' })
+  await composer.fill(Array.from({ length: 8 }, (_, index) => `第 ${index + 1} 行补充说明`).join('\n'))
+  await expect.poll(async () => (await composerCard.boundingBox())?.height ?? 0)
+    .toBeGreaterThan((composerBefore?.height ?? 0) + 60)
+
+  expectSameBoundingBox(railBefore, await rail.boundingBox(), '对话问题导航竖条')
+  expect((await firstTick.boundingBox())?.y).toBeCloseTo(tickBefore?.y ?? 0, 1)
+})
+
 // 能力地图是业务说明入口，不读取新的后台数据，也不触发业务操作。
 test('能力地图：上下文左侧入口、分层与连接边界、关闭后聊天可用', async ({ page }) => {
   await seedAuth(page)
