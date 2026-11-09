@@ -365,6 +365,7 @@ test('左侧导航折叠态：一级导航全部可点击，分组直达第一�
     ['本体模型', /\/#\/ontologies$/],
     ['世界模型', /\/#\/world-model\/models$/],
     ['数据集成', /\/#\/data\/pipelines$/],
+    ['智能运营', /\/#\/operations\/dashboard$/],
     ['接口代理', /\/#\/api-hub\/interfaces$/],
     ['开放社区', /\/#\/community\/skills$/],
     ['系统设置', /\/#\/tickets$/],

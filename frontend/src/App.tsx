@@ -25,6 +25,8 @@ import DatasetsTab from '@/pages/pipelines/datasets/DatasetsTab'
 import CuratedTab from '@/pages/pipelines/curated/CuratedTab'
 import SyncTasksTab from '@/pages/pipelines/sync-tasks/SyncTasksTab'
 import StructuredDataPage from '@/pages/data-management/structured/StructuredDataPage'
+import MonitoringDashboardPage from '@/pages/operations/MonitoringDashboardPage'
+import OperationsReportPage from '@/pages/operations/OperationsReportPage'
 import AgentWorkbenchPage from '@/pages/agent/AgentWorkbenchPage'
 import ReportStudioPage from '@/pages/agent/ReportStudioPage'
 import EventRegistryPage from '@/pages/events/EventRegistryPage'
@@ -189,6 +191,11 @@ export default function App() {
           {/* Legacy redirect — keep old /pipelines URLs working */}
           <Route path="/pipelines" element={<Navigate to="/data/pipelines" replace />} />
           <Route path="/pipelines/*" element={<Navigate to="/data/pipelines" replace />} />
+
+          {/* ── 智能运营（一级导航域）— 监控看板/运营报告当前为待开发占位页 ── */}
+          <Route path="/operations" element={<Navigate to="/operations/dashboard" replace />} />
+          <Route path="/operations/dashboard" element={<ProtectedRoute><MonitoringDashboardPage /></ProtectedRoute>} />
+          <Route path="/operations/reports" element={<ProtectedRoute><OperationsReportPage /></ProtectedRoute>} />
 
           {/* ── 业务澄清（草稿版本在线配置工作台；入口在本体详情页版本演进，导航中隐藏） ── */}
           <Route path="/explore" element={<ProtectedRoute><ExplorationPage /></ProtectedRoute>} />
