@@ -1049,9 +1049,11 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('消息通知')
 
-  // 误触遮罩不关闭弹窗：发送分区草稿与列表滚动位置不因误触丢失
-  //（Esc 分层回退与右上关闭按钮不受影响，下文的 Esc 关闭契约仍生效）
+  // 遮罩空白点击与右上关闭等效：直接关闭弹窗（不再必须点关闭符）；
+  //（Esc 分层回退不受影响，下文的 Esc 关闭契约仍生效。重开后内部状态复位，后续按初始态断言）
   await page.mouse.click(5, 400)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await entry.click()
   await expect(dialog).toBeVisible()
 
   // 分区导航四区：消息列表 / 发送消息 / 渠道配置 / 消息统计
@@ -2461,15 +2463,16 @@ test('知识库（WeKnora）：头部会话纪要左侧入口，新标签打开�
   await expect(nav.getByText('知识库（WeKnora）')).toHaveCount(0)
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
-  // 入口位于「会话纪要」左侧，使用后端返回的原生 Web URL
+  // 入口位于「会话纪要」右侧，使用后端返回的原生 Web URL；悬停文案为「领域知识」
   const link = page.getByRole('link', { name: '知识库（WeKnora）' })
   await expect(link).toBeVisible()
   await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
   await expect(link).toHaveAttribute('target', '_blank')
   await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  await expect(link).toHaveAttribute('title', '领域知识')
   const summary = page.getByRole('button', { name: '查看会话纪要' })
-  const [linkBox, summaryBox] = await Promise.all([link.boundingBox(), summary.boundingBox()])
-  expect(linkBox!.x + linkBox!.width).toBeLessThanOrEqual(summaryBox!.x + 1)
+  const [summaryBox, linkBox] = await Promise.all([summary.boundingBox(), link.boundingBox()])
+  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(linkBox!.x + 1)
   await expect.poll(() => mocks.weknoraCalls.length).toBeGreaterThanOrEqual(1)
   expect(mocks.weknoraCalls[0]).toContain('/api/v2/super-assistant/weknora')
 
@@ -3034,14 +3037,16 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
     await page.getByRole('button', { name: '更多操作' }).click()
     const menu = page.getByRole('dialog')
-    // 溢出菜单顺序：知识库（WeKnora）在会话纪要之前
+    // 溢出菜单顺序与头部一致：会话纪要在知识库（WeKnora）之前
     const menuItems = menu.locator('a, button')
-    await expect(menuItems.first()).toHaveAttribute('aria-label', '知识库（WeKnora）')
+    await expect(menuItems.first()).toHaveText('会话纪要')
+    await expect(menuItems.nth(1)).toHaveAttribute('aria-label', '知识库（WeKnora）')
     const link = menu.getByRole('link', { name: '知识库（WeKnora）' })
     await expect(link).toBeVisible()
     await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
     await expect(link).toHaveAttribute('target', '_blank')
     await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    await expect(link).toHaveAttribute('title', '领域知识')
   })
 
   test('触屏无悬停：会话行归档/删除常显可达', async ({ page }) => {
@@ -3718,7 +3723,7 @@ test('任务实例弹窗：个人模板查看/编辑/激活可用，编辑载入
   await expect(page.getByTestId('template-card').filter({ hasText: '我的冒烟流程' })).toBeVisible()
 })
 
-test('任务实例弹窗：编辑脏稿出口守卫——Esc/左栏切视图/右上关闭统一确认', async ({ page }) => {
+test('任务实例弹窗：编辑脏稿出口守卫——Esc/左栏切视图/右上关闭/遮罩空白统一确认', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await mockTaskInstancesApis(page)
@@ -3789,6 +3794,22 @@ test('任务实例弹窗：编辑脏稿出口守卫——Esc/左栏切视图/右
   await discard.getByRole('button', { name: '放弃' }).click()
   await expect(discard).toHaveCount(0)
   await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+
+  // 遮罩空白点击：与右上关闭同路，脏稿同样先确认；「放弃」后弹窗关闭
+  await openDirtyEditor()
+  await page.mouse.click(5, 400)
+  await expect(discard).toBeVisible()
+  await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
+  await discard.getByRole('button', { name: '放弃' }).click()
+  await expect(discard).toHaveCount(0)
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+
+  // 干净状态：遮罩空白点击直接关闭，不弹守卫确认
+  await page.getByRole('button', { name: /任务实例/ }).click()
+  await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
+  await page.mouse.click(5, 400)
+  await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
+  await expect(discard).toHaveCount(0)
 
   // 全程守卫确认不发 PUT（「继续编辑」与「放弃」都不触发保存）
   await expect.poll(() => putCount, { timeout: 500 }).toBe(0)
@@ -4190,6 +4211,11 @@ test('会话纪要：能力地图左侧入口、结构化卡片、生成时间�
   await summaryEntry.click()
   const dialog = page.getByRole('dialog', { name: '会话纪要' })
   await expect(dialog).toBeVisible()
+  // 垂直锚点上移（top 45% 而非视口居中的 50%）：弹窗中心高于视口中线，顶边不越出视口
+  const dialogBox = await dialog.boundingBox()
+  const viewportHeight = page.viewportSize()?.height ?? 0
+  expect(dialogBox!.y).toBeGreaterThanOrEqual(0)
+  expect(dialogBox!.y + dialogBox!.height / 2).toBeLessThan(viewportHeight * 0.48)
   // 结构化五维卡片（MD 拼接渲染）
   await expect(dialog.getByRole('heading', { name: '查询平台Skill列表' })).toBeVisible()
   await expect(dialog).toContainText('确认平台当前可用的 Skill 清单')

@@ -1585,8 +1585,18 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {/* 知识库（WeKnora）入口：位于会话纪要左侧、所有会话（含新会话）可用；
-              新标签打开原生 Web，不在入口上宣称知识已就绪。
+          {/* 会话纪要入口：位于知识库（WeKnora）入口左侧；窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
+          <button
+            type="button"
+            onClick={() => setSummaryOpen(true)}
+            aria-label="查看会话纪要"
+            title="会话纪要"
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+          >
+            <ScrollText size={16} aria-hidden="true" />
+          </button>
+          {/* 知识库（WeKnora）入口：位于会话纪要右侧、所有会话（含新会话）可用；
+              新标签打开原生 Web，不在入口上宣称知识已就绪；悬停文案「领域知识」。
               窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
           {weknoraUrl ? (
             <a
@@ -1594,7 +1604,7 @@ export default function SuperAssistantPage() {
               target="_blank"
               rel="noopener noreferrer"
               aria-label="知识库（WeKnora）"
-              title="知识库（WeKnora）"
+              title="领域知识"
               data-workbench-weknora
               className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
             >
@@ -1606,23 +1616,13 @@ export default function SuperAssistantPage() {
               onClick={() => { void refreshWeknora(true) }}
               disabled={weknoraLoading}
               aria-label="知识库（WeKnora）"
-              title="知识库（WeKnora）"
+              title="领域知识"
               data-workbench-weknora
               className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 md:flex"
             >
               <Network size={16} aria-hidden="true" />
             </button>
           )}
-          {/* 会话纪要入口：窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
-          <button
-            type="button"
-            onClick={() => setSummaryOpen(true)}
-            aria-label="查看会话纪要"
-            title="会话纪要"
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
-          >
-            <ScrollText size={16} aria-hidden="true" />
-          </button>
           <Dialog>
             <DialogTrigger asChild>
               <button
@@ -1719,13 +1719,21 @@ export default function SuperAssistantPage() {
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" side="bottom" sideOffset={8} className="w-44 p-1">
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); setSummaryOpen(true) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ScrollText size={15} className="shrink-0 text-brand-ink" />
+                会话纪要
+              </button>
               {weknoraUrl ? (
                 <a
                   href={weknoraUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="知识库（WeKnora）"
-                  title="知识库（WeKnora）"
+                  title="领域知识"
                   data-workbench-weknora
                   onClick={() => setHeaderOverflowOpen(false)}
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1739,7 +1747,7 @@ export default function SuperAssistantPage() {
                   onClick={() => { setHeaderOverflowOpen(false); void refreshWeknora(true) }}
                   disabled={weknoraLoading}
                   aria-label="知识库（WeKnora）"
-                  title="知识库（WeKnora）"
+                  title="领域知识"
                   data-workbench-weknora
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                 >
@@ -1747,14 +1755,6 @@ export default function SuperAssistantPage() {
                   知识库（WeKnora）
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => { setHeaderOverflowOpen(false); setSummaryOpen(true) }}
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <ScrollText size={15} className="shrink-0 text-brand-ink" />
-                会话纪要
-              </button>
               <button
                 type="button"
                 onClick={() => { setHeaderOverflowOpen(false); void openBrowser() }}

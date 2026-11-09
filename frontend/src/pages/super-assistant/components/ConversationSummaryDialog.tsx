@@ -82,6 +82,9 @@ export default function ConversationSummaryDialog({ open, onClose, conversationI
       title="会话纪要"
       description="发送消息与回复结束后自动生成；生成模型可配置，对所有会话生效。"
       icon={<ScrollText size={18} aria-hidden="true" />}
+      // 垂直锚点自 50% 上移到 45%：视觉重心略偏上更舒适（2026-11 反馈）；
+      // -translate-y-1/2 保留，default 档 max-h 90dvh 撑满时顶边恰好贴 0 不裁切
+      contentClassName="top-[45%]"
     >
       <div className="flex-1 space-y-4 overflow-y-auto p-5" data-summary-dialog>
         {/* 元信息：生成时间 + 实际使用的生成模型 */}
