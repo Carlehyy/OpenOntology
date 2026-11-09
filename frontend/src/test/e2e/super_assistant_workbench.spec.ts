@@ -10,7 +10,7 @@ import { expectSameBoundingBox } from './support/geometry'
 // 空态品牌文案与占位符、配置面板白底、
 // 输入草稿按会话缓存及刷新后从 localStorage 恢复（发送后清空落盘）、
 // 重命名 blur 取消、知识图谱头部入口（WeKnora 受信 URL、新标签 opener 隔离）、
-// 外部集成（multica 配置弹窗 + /multica: 命令提示的配置门控）、消息通知弹窗
+// 能力拓展（multica 配置弹窗 + /multica: 命令提示的配置门控）、事件路由占位弹窗、消息通知弹窗
 // （未读徽章、tab 筛选、Markdown 详情与附件、标记/归档/全部已读/发送消息）、
 // ⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、全局搜索 Command 面板检索与跳转、
 // 历史分组 shadcn Sidebar 原语、空态品牌字号、
@@ -1007,15 +1007,15 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(taskInstancesEntry).toBeVisible()
   await expect(taskInstancesEntry).toBeEnabled()
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
-  await expect(page.getByRole('button', { name: '外部集成' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '能力拓展' })).toBeVisible()
   await expect(page.getByRole('button', { name: /退出登录/ })).toBeVisible()
   // 知识库（WeKnora）入口位于聊天头部，左侧工作台不再保留旧入口
   await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeVisible()
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
-  // 功能项顺序契约：全局搜索 → 消息通知 → 定时任务 → 任务实例 → 外部集成 → 本体治理
+  // 功能项顺序契约：全局搜索 → 消息通知 → 事件路由 → 定时任务 → 任务实例 → 能力拓展 → 本体治理
   const navEntries = page.locator('nav[aria-label="工作台功能"] > *')
-  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '任务实例', '外部集成', '本体治理']
+  const expectedOrder = ['全局搜索', '消息通知', '事件路由', '定时任务', '任务实例', '能力拓展', '本体治理']
   await expect(navEntries).toHaveCount(expectedOrder.length)
   for (let index = 0; index < expectedOrder.length; index += 1) {
     await expect(navEntries.nth(index)).toContainText(expectedOrder[index])
@@ -1032,6 +1032,21 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
 
   // 聊天区就绪（输入框占位符来自模型加载成功分支）
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
+})
+
+test('事件路由：位于消息通知与定时任务之间，点击打开占位弹窗，Esc 关闭', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  const entry = page.getByRole('button', { name: '事件路由' })
+  await expect(entry).toBeVisible()
+  await entry.click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: '事件路由' })).toBeVisible()
+  await expect(dialog.getByTestId('event-routing-placeholder')).toContainText('功能建设中')
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
 })
 
 test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附件、标记/归档/全部已读/定向发送', async ({ page }) => {
@@ -2512,16 +2527,16 @@ test('知识库（WeKnora）：后端下发回环地址时改写为当前访问�
   await expect(menuLink).toHaveAttribute('href', 'http://localhost:8089')
 })
 
-test('外部集成：multica 测试连接、工作区下拉与保存', async ({ page }) => {
+test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  // 外部集成已是真实功能：左侧集成类型 tabs（multica / 远程助手），
+  // 能力拓展已是真实功能：左侧集成类型 tabs（multica / 远程助手），
   // multica 默认选中并走通「测试连接 → 选工作区 → 保存」
-  await page.getByRole('button', { name: '外部集成' }).click()
+  await page.getByRole('button', { name: '能力拓展' }).click()
   const integrationsDialog = page.getByRole('dialog')
-  await expect(integrationsDialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
+  await expect(integrationsDialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
   await expect(multicaTab).toHaveAttribute('aria-selected', 'true')
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
@@ -2571,9 +2586,9 @@ test('multica 配置弹窗：已配置时打开即拉取全量工作区，无需
   const mocks = await mockApis(page, { multicaConfig: multicaEnabledFixture })
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '外部集成' }).click()
+  await page.getByRole('button', { name: '能力拓展' }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
+  await expect(dialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   await expect(dialog.getByTestId('multica-config-card')).toBeVisible()
 
   // 打开弹窗即请求工作区列表（此前只有单条已保存兜底，掩盖其余可选工作区）；
@@ -2713,9 +2728,9 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '外部集成' }).click()
+  await page.getByRole('button', { name: '能力拓展' }).click()
   const integrationsDialog = page.getByRole('dialog')
-  await expect(integrationsDialog.getByRole('heading', { name: '外部集成' })).toBeVisible()
+  await expect(integrationsDialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
 
   // 目录：直连行展示端点，回连行展示模式徽标与在线状态；已有助手时仍可再邀请
@@ -2772,7 +2787,7 @@ test('远程助手：空目录展示首次邀请文案，加载完成前不闪�
     remoteAgentsDelayMs: 1200,
   })
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: '外部集成' }).click()
+  await page.getByRole('button', { name: '能力拓展' }).click()
   const integrationsDialog = page.getByRole('dialog')
   await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
 
@@ -4131,7 +4146,7 @@ test('能力地图：上下文左侧入口、分层与连接边界、关闭后�
   for (const title of ['01 · 信息与业务背景', '02 · 理解与协调', '03 · 执行与协作']) {
     await expect(dialog.getByRole('heading', { name: title })).toBeVisible()
   }
-  for (const title of ['消息通知', '知识库（WeKnora）', '本体治理', '定时任务', '任务实例', '外部集成']) {
+  for (const title of ['消息通知', '知识库（WeKnora）', '本体治理', '定时任务', '任务实例', '能力拓展']) {
     await expect(dialog.getByRole('heading', { name: title, exact: true })).toBeVisible()
   }
   await expect(dialog.locator('[data-capability-scenario="从消息到任务"]')).toContainText('待打通')

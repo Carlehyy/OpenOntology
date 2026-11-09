@@ -244,7 +244,7 @@ export default function SuperAssistantPage() {
   const refreshServers = useCallback(async () => setServers(await superAssistantApi.mcpServers()), [])
   const refreshTools = useCallback(async () => setTools(await superAssistantApi.assistantTools()), [])
   // multica 外部集成：commands 由后端下发；未配置/未启用时不提供任何命令提示。
-  // 加载失败不打扰工作台（配置入口在「外部集成」弹层内，会单独报错）。
+  // 加载失败不打扰工作台（配置入口在「能力拓展」弹层内，会单独报错）。
   const refreshMulticaConfig = useCallback(async () => {
     try {
       setMulticaConfig(await superAssistantApi.multicaConfig())

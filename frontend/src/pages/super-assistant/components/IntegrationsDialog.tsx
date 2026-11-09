@@ -606,7 +606,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
   )
 }
 
-/** 外部集成面板：左侧集成类型 tabs，multica 为首个落地集成，远程助手为
+/** 能力拓展面板（外部平台集成）：左侧集成类型 tabs，multica 为首个落地集成，远程助手为
  *  声明式注册目录（后续新集成在此追加 tab）。
  *  DialogShell 为常开弹层，调用方以条件挂载控制显隐（同 McpDialog 用法）。
  */
@@ -713,7 +713,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
   return (
     <DialogShell
       size="large"
-      title="外部集成"
+      title="能力拓展"
       description="把外部平台接入超级助手；配置生效后可在输入框使用对应命令。"
       onClose={onClose}
       /* 固定宽高：切换 tab 不改变弹窗大小，垂直超出经内容区滚轮滚动 */
