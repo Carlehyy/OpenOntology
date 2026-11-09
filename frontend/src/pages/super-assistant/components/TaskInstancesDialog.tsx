@@ -217,7 +217,7 @@ export default function TaskInstancesDialog({ open, onClose, initialInstanceId }
       description={copy.DOMAIN_SUBTITLE}
       size="wide"
       onClose={requestClose}
-      onInteractOutside={event => event.preventDefault()}
+      // 遮罩空白点击与右上关闭同路：requestClose 先守卫脏稿（与定时任务弹窗同惯例）
       icon={<ListChecks size={18} />}
       contentClassName="h-[min(82dvh,44rem)]"
     >

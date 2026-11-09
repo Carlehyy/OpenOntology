@@ -472,10 +472,8 @@ export default function NotificationsDialog({
         icon={<Bell size={18} />}
         onClose={onClose}
         onEscapeKeyDown={handleDialogEscape}
-        // 误触遮罩不应关弹窗：发送分区的草稿与列表滚动位置会随关闭一并丢失。
-        // 只挡遮罩——Esc 分层回退与右上关闭按钮保持可用（工作台型弹窗惯例，
-        // 不用 DialogContent 的 dismissible，它会连 Esc 一起禁掉）
-        onInteractOutside={event => event.preventDefault()}
+        // 遮罩空白点击与右上关闭等效：直接关闭弹窗（2026-11 用户反馈，
+        // 不再强制点关闭符）；Esc 分层回退保留，内层临时态仍先回退
         contentClassName="h-[min(88dvh,52rem)]"
       >
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[9.5rem_minmax(0,1fr)]">
