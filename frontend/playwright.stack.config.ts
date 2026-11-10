@@ -8,6 +8,7 @@ export default defineConfig({
   ...baseConfig,
   testMatch: [
     '**/agent_graph.spec.ts',
+    '**/agent_mcp_stack.spec.ts',
     '**/api_hub_call_example.spec.ts',
     '**/api_hub_super_assistant_mcp.spec.ts',
     '**/api_hub_file_transfer.spec.ts',

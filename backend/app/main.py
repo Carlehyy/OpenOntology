@@ -329,6 +329,10 @@ app.include_router(agent_query_view_router.router, prefix="/api/v2/formal/ontolo
 # 统一关联查询 — 同本体多对象与跨本体同一执行核（受认证读保护）
 from app.ontologies.agent_query import router as agent_query_router
 app.include_router(agent_query_router.router, prefix="/api/v2/formal", tags=["ontology-agent-query"], dependencies=agent_guard)
+# 本体 MCP 对外端点 — StreamableHTTP 无状态 JSON（纯 ASGI 精确路由，凭据走
+# X-OpenOntology-* 请求头，不进 OpenAPI/JWT 守卫体系）
+from app.ontologies.mcp.server import register_routes as register_ontology_mcp_routes
+register_ontology_mcp_routes(app)
 # 本体网络 — 跨本体全局图视图（只读，PG fo_*/发布快照，不依赖 Neo4j 投影就绪）
 from app.ontologies.network import router as ontology_network_router_module
 app.include_router(
