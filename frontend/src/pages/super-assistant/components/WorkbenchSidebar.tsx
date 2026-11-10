@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, Download, History, Inbox, LayoutDashboard, ListChecks, LogOut,
-  Megaphone, Mic, Network, Pencil, Plug, Plus, Route as RouteIcon, Search, Sparkles, Trash2, Wrench, X,
+  Megaphone, Mic, Network, Pencil, Plug, Plus, Search, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react'
 
 import { notificationsApi } from '@/api/notifications'
@@ -26,7 +26,6 @@ import {
   CONVERSATION_GROUP_VISIBLE_LIMIT,
   groupConversations,
 } from '../conversationGroups'
-import EventRoutingDialog from './EventRoutingDialog'
 import IntegrationsDialog from './IntegrationsDialog'
 import type { AssistantConfigTab } from './AssistantConfiguration'
 
@@ -204,7 +203,6 @@ export default function WorkbenchSidebar({
   const logout = useAuthStore(state => state.logout)
   const navigate = useNavigate()
   const [integrationsOpen, setIntegrationsOpen] = useState(false)
-  const [eventRoutingOpen, setEventRoutingOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
@@ -325,15 +323,6 @@ export default function WorkbenchSidebar({
             )}
           </button>
         )}
-        {/* 事件路由：入口先行，弹窗内容占位（规则配置后续迭代） */}
-        <button
-          type="button"
-          onClick={() => { setEventRoutingOpen(true); onCloseMobile() }}
-          className={actionItemClass}
-          data-workbench-event-routing
-        >
-          <RouteIcon size={16} className="shrink-0" /> 事件路由
-        </button>
         <button type="button" onClick={() => { onOpenScheduled(); onCloseMobile() }} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
@@ -497,9 +486,6 @@ export default function WorkbenchSidebar({
           onClose={() => setIntegrationsOpen(false)}
           onSaved={onIntegrationsSaved}
         />
-      )}
-      {eventRoutingOpen && (
-        <EventRoutingDialog onClose={() => setEventRoutingOpen(false)} />
       )}
       <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
     </>
