@@ -1125,17 +1125,29 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await page.locator('[data-notifications-star]').hover()
   await expect(page.getByRole('tooltip')).toContainText('标记为重要')
 
-  // 标记（星标）与归档触发状态 PATCH
+  // 标记（星标）触发状态 PATCH
   await page.locator('[data-notifications-star]').click()
   await expect.poll(() => mocks.notifStatePatches.length).toBe(1)
   await expect.poll(() => mocks.notifStatePatches[0] ?? '').toContain('isStarred')
+
+  // 全部已读（须在归档前：下文归档推进选中会自动查阅下一条，未读清零后按钮禁用）
+  await page.locator('[data-notifications-read-all]').click()
+  await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
+
+  // 归档推进选中：n-1 离开「全部消息」后详情自动切到下一条 n-2，
+  // 左侧高亮同步跟随（active → bg-brand-soft），被归档项从列表消失
   await page.locator('[data-notifications-archive]').click()
   await expect.poll(() => mocks.notifStatePatches.length).toBe(2)
   await expect.poll(() => mocks.notifStatePatches[1] ?? '').toContain('isArchived')
+  await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-detail]')).toContainText('账单系统异常告警')
+  await expect(page.locator('[data-notifications-item="n-2"]')).toHaveClass(/bg-brand-soft/)
 
-  // 全部已读
-  await page.locator('[data-notifications-read-all]').click()
-  await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
+  // 归档列表仅剩的 n-2：无下一条可推进，选中清空回详情空态
+  await page.locator('[data-notifications-archive]').click()
+  await expect.poll(() => mocks.notifStatePatches.length).toBe(3)
+  await expect(page.locator('[data-notifications-item="n-2"]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-detail]')).toContainText('选择左侧消息查看详情')
 
   // 发送消息（独立分区）：转发渠道为下拉多选（触发器常显已选去向），默认全选，取消其一后定向转发
   await page.locator('[data-notifications-nav="compose"]').click()
@@ -1229,6 +1241,24 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await keyTestConfirm.getByRole('button', { name: '开始测试' }).click()
   await expect.poll(() => mocks.notifKeyTests.length).toBe(1)
   await expect(page.getByText('出口即时投递：成功 1 条')).toBeVisible()
+})
+
+test('消息通知：归档列表末条后选中回退到第一条并高亮', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+
+  // 「全部消息」末条 n-2：打开详情后归档，无下一条可推进 → 选中回退到第一条 n-1
+  await page.locator('[data-notifications-item="n-2"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('账单系统异常告警')
+  await page.locator('[data-notifications-archive]').click()
+  await expect.poll(() => mocks.notifStatePatches.length).toBe(1)
+  await expect(page.locator('[data-notifications-item="n-2"]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-detail]')).toContainText('数据任务失败报告')
+  await expect(page.locator('[data-notifications-item="n-1"]')).toHaveClass(/bg-brand-soft/)
 })
 
 test('消息通知：标为未读后重新查阅即时回已读（staleTime 不吞查阅动作）', async ({ page }) => {
