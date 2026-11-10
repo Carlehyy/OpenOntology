@@ -395,6 +395,13 @@ jobs:
           PROD_WEKNORA_DOCREADER_IMAGE: ${{ vars.PROD_WEKNORA_DOCREADER_IMAGE }}
           PROD_WEKNORA_POSTGRES_IMAGE: ${{ vars.PROD_WEKNORA_POSTGRES_IMAGE }}
           PROD_WEKNORA_REDIS_IMAGE: ${{ vars.PROD_WEKNORA_REDIS_IMAGE }}
+          # Optional Hindsight memory profile: every key is optional; unset
+          # values are skipped and deploy-prod.sh generates server-side values.
+          PROD_HINDSIGHT_DB_PASSWORD: ${{ secrets.PROD_HINDSIGHT_DB_PASSWORD }}
+          PROD_HINDSIGHT_API_KEY: ${{ secrets.PROD_HINDSIGHT_API_KEY }}
+          PROD_HINDSIGHT_SERVICE_TOKEN: ${{ secrets.PROD_HINDSIGHT_SERVICE_TOKEN }}
+          PROD_HINDSIGHT_IMAGE: ${{ vars.PROD_HINDSIGHT_IMAGE }}
+          PROD_HINDSIGHT_POSTGRES_IMAGE: ${{ vars.PROD_HINDSIGHT_POSTGRES_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env
@@ -574,6 +581,13 @@ jobs:
           PROD_WEKNORA_DOCREADER_IMAGE: ${{ vars.PROD_WEKNORA_DOCREADER_IMAGE }}
           PROD_WEKNORA_POSTGRES_IMAGE: ${{ vars.PROD_WEKNORA_POSTGRES_IMAGE }}
           PROD_WEKNORA_REDIS_IMAGE: ${{ vars.PROD_WEKNORA_REDIS_IMAGE }}
+          # Optional Hindsight memory profile: every key is optional; unset
+          # values are skipped and deploy-prod.sh generates server-side values.
+          PROD_HINDSIGHT_DB_PASSWORD: ${{ secrets.PROD_HINDSIGHT_DB_PASSWORD }}
+          PROD_HINDSIGHT_API_KEY: ${{ secrets.PROD_HINDSIGHT_API_KEY }}
+          PROD_HINDSIGHT_SERVICE_TOKEN: ${{ secrets.PROD_HINDSIGHT_SERVICE_TOKEN }}
+          PROD_HINDSIGHT_IMAGE: ${{ vars.PROD_HINDSIGHT_IMAGE }}
+          PROD_HINDSIGHT_POSTGRES_IMAGE: ${{ vars.PROD_HINDSIGHT_POSTGRES_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env

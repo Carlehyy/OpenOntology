@@ -312,11 +312,11 @@ def _handler_registry():
             _ONTOLOGY_ASSISTANT_RUN_DURABLE,
             ontology_assistant_tasks.run_ontology_assistant_run_message,
         ))
-    entries.append((
-        SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
-        _SUPER_ASSISTANT_MEMORY_SYNC_DURABLE,
-        _run_super_assistant_memory_message,
-    ))
+        entries.append((
+            SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
+            _SUPER_ASSISTANT_MEMORY_SYNC_DURABLE,
+            _run_super_assistant_memory_message,
+        ))
     return tuple(entries)
 
 

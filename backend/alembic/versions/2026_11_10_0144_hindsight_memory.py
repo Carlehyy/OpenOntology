@@ -10,8 +10,8 @@ Cross-session persistent memory for the super assistant (Hindsight-backed):
 - ``super_assistant_memory_settings`` stores the per-user enable flag and the
   memory model config choice.
 
-Revision ID: 0143_hindsight_memory
-Revises: 0142_agent_run_ledger
+Revision ID: 0144_hindsight_memory
+Revises: 0143_operations_menu_keys
 Create Date: 2026-11-10
 """
 from __future__ import annotations
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from sqlalchemy import inspect as sa_inspect
 
 
-revision = "0143_hindsight_memory"
-down_revision = "0142_agent_run_ledger"
+revision = "0144_hindsight_memory"
+down_revision = "0143_operations_menu_keys"
 branch_labels = None
 depends_on = None
 

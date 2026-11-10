@@ -71,6 +71,45 @@ Dataset/File 分享链接仍保留。`FIRST_ADMIN_PASSWORD` 的示例值也会�
 提高；真正轮换 `ENCRYPTION_KEY` 必须作为独立维护变更，在 PostgreSQL 与 API
 Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就绪后执行。
 
+## 本体助手的外部 MCP 接入
+
+在本体助手选择已发布本体后，选择框左侧的 MCP 入口提供标准 `mcpServers` 连接
+配置模板，可接入任何支持 Streamable HTTP 与自定义请求头的 MCP 客户端
+（Cursor、Claude、pi 等）。连接地址为
+`/api/v2/formal/ontologies/{ontology_id}/mcp`；连接固定本体 ID，每次读取该本体
+的当前发布版本。旧的 `/mcp` 与 `/api-hub/mcp` 继续返回 404，不能用作本体查询
+地址。
+
+外部客户端通过 `X-OpenOntology-Username`、`X-OpenOntology-Password` 请求头
+填写平台账号密码。服务端逐请求校验密码、账号启用状态、本体助手菜单权限与
+本体的助手授权边界；不签发专用凭据。改密后需要更新外部配置，账号停用或权限
+收回后旧配置不再可用。远程接入使用 HTTPS；不要把密码放入 URL、对话、日志或
+仓库中的项目配置。
+
+以 pi（首批实际验证客户端）为例：配置保存在用户级 `~/.pi/agent/mcp.json`，
+从弹窗复制配置后替换密码占位符，保留 `exposure: "direct"`；首次运行
+`pi mcp list --json` 检查连接与工具清单。pi 会解释请求头值里的环境变量及
+命令：字面量 `$` 写成 `$$`，值开头的 `!` 写成 `$!`，避免把密码当作变量或
+命令执行（弹窗模板已对预填用户名自动转义）。网页不会收集或保存该密码。
+本批接入验证覆盖可打印 ASCII 账号密码；HTTP 请求头不能直接传递含中文等
+完整 Unicode 凭据。服务端不做 URL 解码，不能用百分号编码替代原密码。
+
+部署时将平台公开 origin 写入现有 `CORS_ALLOWED_ORIGINS`，例如
+`https://ontology.example.com`；多个 origin 用逗号分隔。MCP 使用其中的 hostname
+校验 Host，并对带 Origin 的请求校验完整 origin。通配 `*` 只放行回环来源，
+不代表允许任意公网 MCP 域名。Nginx 须保留原 Host 和上述认证请求头。
+
+服务只开放 `ontology_schema`、`ontology_query`、`ontology_query_page`：先读取
+按助手授权边界整理的对象、属性、关系与业务说明，再由外部 Agent 组织结构化
+查询。平台不调用对话模型，不提供动作执行、决策推演或报告生成工具，也不导出
+含动作、函数、哨兵的完整本体包。查询可能创建有期限的分页快照，但不修改业务
+对象。
+
+成功响应携带实际使用的 `ontologyId`、`releaseId`、`versionNumber` 和时间字段。
+结构读取后若发布版本或授权范围变化，旧查询或游标会被拒绝；调用方应重新读取
+`ontology_schema` 再组织查询，不应把不同版本的分页结果拼接。更新发布版本无需
+重新复制连接配置。
+
 ## 必需运行依赖
 
 | 依赖 | 运行责任 | 未就绪行为 |
@@ -155,9 +194,14 @@ Compose 内网/loopback（本地 `18888`/`19999`），不暴露公网；生产�
 `/api/v2/super-assistant/internal/memory/v1` 的 service token，与容器
 `HINDSIGHT_API_LLM_API_KEY` 同值；不是真实模型 key）。
 三把密钥只进 backend/pipeline_executor 与 Hindsight 服务环境，生产由
-deploy-prod.sh 幂等生成，可选经 `PROD_HINDSIGHT_*` GitHub secrets 物化；
-缺失不阻断平台部署。镜像与专用 DB 一律 `@sha256` 钉扎（`HINDSIGHT_IMAGE`、
-`HINDSIGHT_POSTGRES_IMAGE`）。
+deploy-prod.sh 幂等生成，可选经 GitHub `PROD_HINDSIGHT_DB_PASSWORD`/
+`PROD_HINDSIGHT_API_KEY`/`PROD_HINDSIGHT_SERVICE_TOKEN` secrets 物化；缺失不
+阻断平台部署。注意 `PROD_HINDSIGHT_DB_PASSWORD` 只在专用 DB 卷首次初始化时
+生效：DB 角色密码落库后再改该 secret 不会轮换存量库，反而会让 Hindsight 连
+不上自己的数据库（仅记忆特性降级）；要么在首次启用前配置，要么与服务器
+`.env` 现值保持一致。镜像与专用 DB 一律 `@sha256` 钉扎（`HINDSIGHT_IMAGE`、
+`HINDSIGHT_POSTGRES_IMAGE`，可选经同名 `PROD_HINDSIGHT_*` repository
+variables 覆盖）。
 
 记忆 LLM 的模型选择是服务级的、每用户只有一个"当前模型"：Compose 三文件
 把 Hindsight 的 `HINDSIGHT_API_LLM_MODEL` 固定为平台别名
@@ -170,10 +214,15 @@ deploy-prod.sh 幂等生成，可选经 `PROD_HINDSIGHT_*` GitHub secrets 物化
 embedding 固定为 ONNX `intfloat/multilingual-e5-small`（384 维，E5 非对称
 前缀），模型不在镜像内：首启需 HuggingFace egress 下载。缓存走
 `HF_HOME=/hindsight-model-cache`（`hindsight_model_cache` 卷；镜像以 uid 1000
-运行，`hindsight-model-init` 负责卷属主）；无 egress 环境先在有网机器
-`snapshot_download` 同一 repo（含 tokenizer 文件）预填该卷的 `hub/` 目录，再设
-`HINDSIGHT_HF_OFFLINE=1`。rerank 保持镜像预载默认模型，中文效果未验证，
-属效果门禁。
+运行，`hindsight-model-init` 负责卷属主）。离线（`HINDSIGHT_HF_OFFLINE=1`）
+要求 Hindsight 运行时经 HuggingFace 缓存解析的每一个模型都在该卷内：不只
+embedding，还包括默认 reranker（`hindsight-ai/hs-rerank-1`）——`HF_HOME` 已
+指向该卷，镜像内预载副本不在离线解析路径上；除非实测确认 reranker 走镜像内
+独立路径，否则必须与 embedding 一并入卷。可靠的预填方式是让同一钉扎镜像挂
+同一 `hindsight_model_cache` 卷、在有空闲 egress 的环境完整首启一次，由服务
+自身写入所需模型，再整卷复用；不要按猜测的目录布局手工拼装，也不要只
+`snapshot_download` embedding 一个 repo 就宣称离线可用——离线行为必须在
+staging 实测。rerank 中文效果未验证，属效果门禁。
 
 ### 集成数据集 dbx（生产）
 

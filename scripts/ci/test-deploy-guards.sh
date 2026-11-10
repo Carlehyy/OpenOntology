@@ -216,6 +216,24 @@ if [ -z "$stop_line" ] || [ -z "$migration_line" ] || [ -z "$startup_line" ] \
   printf 'runtime must stop before migration and restart only after migration\n' >&2
   exit 1
 fi
+if grep -Fq 'profile_args+=(--profile hindsight)' "$DEPLOY_SCRIPT" \
+    || [ "$(grep -cF -- '--profile hindsight up -d hindsight' "$DEPLOY_SCRIPT")" -ne 1 ] \
+    || [ "$(grep -cF 'prepull_hindsight_images' "$DEPLOY_SCRIPT")" -ne 0 ] \
+    || ! grep -Fq 'start_hindsight_memory_stack() {' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'stop_disabled_hindsight_stack' "$DEPLOY_SCRIPT"; then
+  printf 'the optional Hindsight stack must start exactly once in a dedicated compose invocation and never via the shared profile injection or a pre-core pull\n' >&2
+  exit 1
+fi
+hindsight_optional_call_line="$(
+  grep -nF 'start_hindsight_memory_stack || log' "$DEPLOY_SCRIPT" \
+    | head -n1 | cut -d: -f1
+)"
+if [ -z "$hindsight_optional_call_line" ] \
+    || [ -z "$deployment_succeeded_line" ] \
+    || [ "$hindsight_optional_call_line" -le "$deployment_succeeded_line" ]; then
+  printf 'the optional Hindsight start must run only after the core deployment is declared successful\n' >&2
+  exit 1
+fi
 if ! grep -Fq 'compose start "${previous_runtime_services[@]}"' \
     "$DEPLOY_SCRIPT" \
     || ! grep -Fq 'migration_completed=1' "$DEPLOY_SCRIPT" \
@@ -899,7 +917,11 @@ for key in \
   WEKNORA_SYSTEM_SIGNING_KEY  WEKNORA_APP_IMAGE \
   WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
   WEKNORA_REDIS_IMAGE  WEKNORA_MAX_FILE_SIZE_MB \
-  WEKNORA_DEFAULT_LOCALE; do
+  WEKNORA_DEFAULT_LOCALE \
+  HINDSIGHT_ENABLED HINDSIGHT_BASE_URL HINDSIGHT_API_KEY \
+  HINDSIGHT_SERVICE_TOKEN HINDSIGHT_TIMEOUT_SECONDS HINDSIGHT_NAMESPACE \
+  HINDSIGHT_DB_NAME HINDSIGHT_DB_USER HINDSIGHT_DB_PASSWORD \
+  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
@@ -1479,7 +1501,11 @@ for key in \
   WEKNORA_SYSTEM_SIGNING_KEY  WEKNORA_APP_IMAGE \
   WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
   WEKNORA_REDIS_IMAGE  WEKNORA_MAX_FILE_SIZE_MB \
-  WEKNORA_DEFAULT_LOCALE; do
+  WEKNORA_DEFAULT_LOCALE \
+  HINDSIGHT_ENABLED HINDSIGHT_BASE_URL HINDSIGHT_API_KEY \
+  HINDSIGHT_SERVICE_TOKEN HINDSIGHT_TIMEOUT_SECONDS HINDSIGHT_NAMESPACE \
+  HINDSIGHT_DB_NAME HINDSIGHT_DB_USER HINDSIGHT_DB_PASSWORD \
+  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
@@ -1577,8 +1603,24 @@ case "$*" in
     ;;
   *' up --help') printf '%s\n' '      --wait' ;;
   *' alembic heads') printf '%s\n' '0055_projection_readiness (head)' ;;
+  *' up -d --remove-orphans')
+    if [ "${FAKE_FINAL_UP_FAIL:-0}" = "1" ]; then
+      exit 42
+    fi
+    ;;
+  *'--profile hindsight'*'up -d hindsight'*)
+    if [ "${FAKE_HINDSIGHT_UP_FAIL:-0}" = "1" ]; then
+      printf 'fake hindsight start failure (pull/init/db/start)\n' >&2
+      exit 18
+    fi
+    ;;
   *' ps -q pipeline_executor') printf '%s\n' "$(printf 'p%.0s' {1..64})" ;;
   *' ps -q backend') printf '%s\n' "$(printf 'c%.0s' {1..64})" ;;
+  *' ps -q hindsight')
+    if [ "${FAKE_HINDSIGHT_NEVER_HEALTHY:-0}" != "1" ]; then
+      printf '%s\n' "$(printf 'h%.0s' {1..64})"
+    fi
+    ;;
   *' ps --services --filter status=running') : ;;
   *) : ;;
 esac
@@ -1589,7 +1631,9 @@ cat >"$attestation_fake_bin/timeout" <<'FAKE_TIMEOUT'
 set -Eeuo pipefail
 seconds="$1"
 shift
-if [ "${FAKE_TIMEOUT_TRIGGER:-0}" = "1" ]; then
+if [ "${FAKE_TIMEOUT_TRIGGER:-0}" = "1" ] \
+    || { [ -n "${FAKE_TIMEOUT_TRIGGER_MATCH:-}" ] \
+      && printf '%s' "$*" | grep -q -- "$FAKE_TIMEOUT_TRIGGER_MATCH"; }; then
   sleep "$seconds"
   exit 124
 fi
@@ -1765,5 +1809,132 @@ if grep -Fq 'deployment succeeded' "$timeout_log"; then
   exit 1
 fi
 printf 'ok deploy-runtime-source-timeout-fail\n'
+
+# Optional Hindsight memory stack isolation through the real deploy script:
+# enabled startup happens only after core success in a separate --profile
+# hindsight invocation; optional pull, init, database, app-start, timeout, or
+# health failures never gate or stop the core deployment, and the final core
+# compose up never carries the profile.
+set_test_env_value HINDSIGHT_ENABLED true
+
+hindsight_success_log="$attestation_root/deploy-hindsight-success.log"
+if ! run_attestation_deploy "$hindsight_success_log" "$attestation_source" 5 \
+    HINDSIGHT_HEALTH_WAIT_ATTEMPTS=2 HINDSIGHT_HEALTH_WAIT_INTERVAL=0; then
+  printf 'mock deployment with the optional memory stack enabled must succeed; log follows\n' >&2
+  cat "$hindsight_success_log" >&2
+  if [ -f "$hindsight_success_log.docker" ]; then
+    printf 'mock docker log follows\n' >&2
+    cat "$hindsight_success_log.docker" >&2
+  fi
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$hindsight_success_log"
+grep -Fq 'hindsight memory service is healthy (feature status only)' "$hindsight_success_log"
+hindsight_core_up_line="$(
+  grep -nF 'up -d --remove-orphans' "$hindsight_success_log.docker" \
+    | tail -n1 | cut -d: -f1
+)"
+hindsight_optional_up_line="$(
+  grep -nF 'up -d hindsight' "$hindsight_success_log.docker" \
+    | tail -n1 | cut -d: -f1
+)"
+if [ -z "$hindsight_core_up_line" ] || [ -z "$hindsight_optional_up_line" ] \
+    || [ "$hindsight_optional_up_line" -le "$hindsight_core_up_line" ]; then
+  printf 'the optional Hindsight stack must start after the final core compose up\n' >&2
+  exit 1
+fi
+if sed -n "${hindsight_core_up_line}p" "$hindsight_success_log.docker" \
+    | grep -q -- '--profile hindsight'; then
+  printf 'the final core compose up must not carry the hindsight profile\n' >&2
+  exit 1
+fi
+if ! sed -n "${hindsight_optional_up_line}p" "$hindsight_success_log.docker" \
+    | grep -q -- '--profile hindsight'; then
+  printf 'the optional Hindsight start must be a separate --profile hindsight invocation\n' >&2
+  exit 1
+fi
+grep -q -- '--profile hindsight ps -q hindsight' "$hindsight_success_log.docker"
+if grep -q -- '--profile hindsight stop' "$hindsight_success_log.docker"; then
+  printf 'a successful optional Hindsight start must not stop the memory stack\n' >&2
+  exit 1
+fi
+hindsight_api_key_value="$(
+  awk -F= '$1 == "HINDSIGHT_API_KEY" {print substr($0, index($0,"=")+1)}' \
+    "$test_dir/.env" | tail -n1
+)"
+if [ -n "$hindsight_api_key_value" ] \
+    && grep -Fq "$hindsight_api_key_value" "$hindsight_success_log"; then
+  printf 'generated Hindsight API key leaked into deployment logs\n' >&2
+  exit 1
+fi
+printf 'ok deploy-hindsight-optional-start-success\n'
+
+hindsight_start_fail_log="$attestation_root/deploy-hindsight-start-failure.log"
+if ! run_attestation_deploy "$hindsight_start_fail_log" "$attestation_source" 5 \
+    HINDSIGHT_HEALTH_WAIT_ATTEMPTS=2 HINDSIGHT_HEALTH_WAIT_INTERVAL=0 \
+    FAKE_HINDSIGHT_UP_FAIL=1; then
+  printf 'deployment must still succeed when the optional Hindsight start fails\n' >&2
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$hindsight_start_fail_log"
+grep -Fq 'the optional Hindsight memory stack failed to start (exit 18' \
+  "$hindsight_start_fail_log"
+grep -q -- '--profile hindsight stop hindsight hindsight-db hindsight-model-init' \
+  "$hindsight_start_fail_log.docker"
+if grep -q -- 'stop --timeout 30 frontend pipeline_executor backend' \
+    "$hindsight_start_fail_log.docker"; then
+  printf 'an optional Hindsight start failure must never stop the core runtime\n' >&2
+  exit 1
+fi
+printf 'ok deploy-hindsight-optional-start-failure\n'
+
+hindsight_start_timeout_log="$attestation_root/deploy-hindsight-start-timeout.log"
+# 仅对启动 up 触发假超时：清理 stop 同样被 timeout 包裹，宽匹配会在它到达
+# docker 前就 124 掉，导致 docker 日志缺少 stop 记录。
+if ! run_attestation_deploy "$hindsight_start_timeout_log" "$attestation_source" 5 \
+    HINDSIGHT_START_TIMEOUT=1 \
+    HINDSIGHT_HEALTH_WAIT_ATTEMPTS=2 HINDSIGHT_HEALTH_WAIT_INTERVAL=0 \
+    FAKE_TIMEOUT_TRIGGER_MATCH='--profile hindsight up -d hindsight'; then
+  printf 'deployment must still succeed when the optional Hindsight start times out\n' >&2
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$hindsight_start_timeout_log"
+grep -Fq 'did not start within 1s' "$hindsight_start_timeout_log"
+grep -q -- '--profile hindsight stop hindsight hindsight-db hindsight-model-init' \
+  "$hindsight_start_timeout_log.docker"
+printf 'ok deploy-hindsight-optional-start-timeout\n'
+
+hindsight_unhealthy_log="$attestation_root/deploy-hindsight-unhealthy.log"
+if ! run_attestation_deploy "$hindsight_unhealthy_log" "$attestation_source" 5 \
+    HINDSIGHT_HEALTH_WAIT_ATTEMPTS=2 HINDSIGHT_HEALTH_WAIT_INTERVAL=0 \
+    FAKE_HINDSIGHT_NEVER_HEALTHY=1; then
+  printf 'deployment must still succeed when the optional Hindsight stack stays unhealthy\n' >&2
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$hindsight_unhealthy_log"
+grep -Fq 'hindsight is not healthy yet' "$hindsight_unhealthy_log"
+if grep -q -- '--profile hindsight stop' "$hindsight_unhealthy_log.docker"; then
+  printf 'a started-but-unhealthy optional Hindsight stack must be left running\n' >&2
+  exit 1
+fi
+printf 'ok deploy-hindsight-optional-unhealthy-degrades\n'
+
+hindsight_core_fail_log="$attestation_root/deploy-hindsight-core-failure.log"
+if run_attestation_deploy "$hindsight_core_fail_log" "$attestation_source" 5 \
+    HINDSIGHT_HEALTH_WAIT_ATTEMPTS=2 HINDSIGHT_HEALTH_WAIT_INTERVAL=0 \
+    FAKE_FINAL_UP_FAIL=1; then
+  printf 'a failing final core compose up must fail the deployment\n' >&2
+  exit 1
+fi
+if grep -Fq 'deployment succeeded' "$hindsight_core_fail_log"; then
+  printf 'deployment must not claim success after the final core compose up fails\n' >&2
+  exit 1
+fi
+if grep -q -- '--profile hindsight' "$hindsight_core_fail_log.docker"; then
+  printf 'no compose invocation may carry the hindsight profile before core deployment success\n' >&2
+  exit 1
+fi
+set_test_env_value HINDSIGHT_ENABLED false
+printf 'ok deploy-hindsight-core-final-isolation\n'
 
 printf 'deployment guard self-tests passed\n'

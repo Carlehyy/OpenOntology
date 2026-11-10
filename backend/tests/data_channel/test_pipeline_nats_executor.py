@@ -442,6 +442,36 @@ def test_ontology_assistant_consumer_is_single_and_dedicated(monkeypatch):
         assert len({durable for _s, durable, _h in registry}) == len(registry)
 
 
+def test_memory_sync_consumer_excludes_task_worker(monkeypatch):
+    from app.data_channel.pipeline_tasks.dispatch import (
+        SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
+    )
+
+    for executor_mode, exclude_control, expected in (
+        ("fake", "0", True),
+        ("fake", "1", True),
+        ("docker", "0", False),
+        ("docker", None, False),
+        ("docker", "1", True),
+    ):
+        monkeypatch.setenv("TASK_INSTANCES_EXECUTOR", executor_mode)
+        if exclude_control is None:
+            monkeypatch.delenv("TASK_INSTANCES_CONTROL_EXCLUDE", raising=False)
+        else:
+            monkeypatch.setenv("TASK_INSTANCES_CONTROL_EXCLUDE", exclude_control)
+        matches = [
+            entry for entry in nats_executor._handler_registry()
+            if entry[0] == SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT
+        ]
+        assert matches == ([
+            (
+                SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
+                "sa-memory-sync",
+                nats_executor._run_super_assistant_memory_message,
+            )
+        ] if expected else [])
+
+
 @pytest.mark.asyncio
 async def test_ontology_assistant_handler_calls_execute_run(executor, monkeypatch):
     """handler 只把 run_id 交给 run_service，重复/终态语义由服务持有。"""

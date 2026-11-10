@@ -1,0 +1,79 @@
+/**
+ * 本体 MCP 接入配置模板纯函数（面向任意支持 Streamable HTTP 的 MCP 客户端）：
+ * 端点自动跟随最新发布版本，只读查询三工具，无 LLM；鉴权双请求头，
+ * 页面不收集真实密码（密码位仅 ASCII 占位符）。
+ */
+
+/** 会做变量/命令展开的客户端（如 pi）对配置值的解释规则：`$变量` 与开头 `!`
+ *  原样写入会被当变量替换/命令执行——`$` 写 `$$`、开头 `!` 写 `$!`；replacer
+ *  函数保证输出字面 `$$`（replace 的 replacement 里 `$$` 会折叠成单个 `$`）。
+ *  值不含这些字符时输出与原文相同，其他客户端无感知。 */
+export function escapeMcpHeaderValue(value: string): string {
+  const escapedDollar = value.replace(/\$/g, () => '$$')
+  return escapedDollar.startsWith('!') ? `$${escapedDollar}` : escapedDollar
+}
+
+/** MCP 端点绝对地址；base 为页面同源 origin 或独立 API 基址（分域部署经
+ *  window.__API_BASE_URL__ 注入，规则同 src/api/client.ts），oid 编码、
+ *  base 末尾斜杠容错。 */
+export function buildMcpEndpointUrl(base: string, oid: string): string {
+  return `${base.replace(/\/+$/, '')}/api/v2/formal/ontologies/${encodeURIComponent(oid)}/mcp`
+}
+
+/** 密码占位符：ASCII，用户在客户端侧替换；页面绝不收集/回显真实密码。 */
+export const MCP_PASSWORD_PLACEHOLDER = 'REPLACE_WITH_YOUR_PASSWORD'
+
+export const MCP_USERNAME_HEADER = 'X-OpenOntology-Username'
+export const MCP_PASSWORD_HEADER = 'X-OpenOntology-Password'
+
+/** server 名仅允许 letters/digits/_/-；oid 含 `/`、空格等非法字符时
+ *  折叠为 `-`（空值回落 ontology），保证 key 合法且稳定。 */
+export function sanitizeMcpServerKey(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
+  return sanitized || 'ontology'
+}
+
+export interface McpServerEntry {
+  url: string
+  headers: Record<string, string>
+  exposure: 'direct'
+  description: string
+}
+
+export interface McpClientConfig {
+  mcpServers: Record<string, McpServerEntry>
+}
+
+export interface McpConfigInput {
+  /** 端点基址：同源 origin 或独立 API 基址（__API_BASE_URL__）。 */
+  base: string
+  oid: string
+  ontologyName: string
+  /** 当前登录账号名（含 $/开头! 时按会展开的客户端规则转义）；为空落占位符。 */
+  username: string
+}
+
+const USERNAME_PLACEHOLDER = 'your-username'
+
+function serverDescription(ontologyName: string): string {
+  return `OpenOntology「${ontologyName}」只读数据查询（自动跟随最新发布版本）：`
+    + 'ontology_schema 看结构、ontology_query 条件查询、ontology_query_page 分页查询；'
+    + '不执行动作/推演/报告，平台侧无 LLM。'
+}
+
+export function buildMcpClientConfig({ base, oid, ontologyName, username }: McpConfigInput): McpClientConfig {
+  const entry: McpServerEntry = {
+    url: buildMcpEndpointUrl(base, oid),
+    headers: {
+      [MCP_USERNAME_HEADER]: escapeMcpHeaderValue(username || USERNAME_PLACEHOLDER),
+      [MCP_PASSWORD_HEADER]: MCP_PASSWORD_PLACEHOLDER,
+    },
+    exposure: 'direct',
+    description: serverDescription(ontologyName),
+  }
+  return { mcpServers: { [`openontology-${sanitizeMcpServerKey(oid)}`]: entry } }
+}
+
+export function renderMcpConfigJson(input: McpConfigInput): string {
+  return `${JSON.stringify(buildMcpClientConfig(input), null, 2)}\n`
+}

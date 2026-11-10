@@ -32,6 +32,7 @@ async def application_lifespan(
     perf_monitor_started = False
     runtime_resources_started = False
     kernel_scheduler_started = False
+    mcp_transport_started = False
     try:
         seed_database()
 
@@ -275,9 +276,26 @@ async def application_lifespan(
         except Exception as exc:
             _main_logger.warning("API 性能监控后台任务启动失败: %s", exc)
 
+        # 本体 MCP StreamableHTTP 传输：随进程启停，每次 start 新建 SDK
+        # manager（run() 单实例一次性）保证 lifespan 可重复进入；启动失败
+        # 即失败启动（不降级），由既有 finally 清理已启动 worker。
+        from app.ontologies.mcp.server import transport as mcp_transport
+
+        await mcp_transport.start()
+        mcp_transport_started = True
+
         runtime_resources_started = True
         yield
     finally:
+        # MCP 传输最后启动、最先停止：停止即拒绝新请求（503），不与
+        # 收尾中的后台 worker 抢顺序。
+        if mcp_transport_started:
+            try:
+                from app.ontologies.mcp.server import transport as mcp_transport
+
+                await mcp_transport.stop()
+            except Exception:  # noqa: BLE001
+                _main_logger.exception("本体 MCP 传输关闭失败")
         if file_cleanup_task is not None:
             file_cleanup_task.cancel()
             try:

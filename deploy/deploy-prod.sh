@@ -55,8 +55,10 @@ run_with_retry() {
 }
 INTEGRATED_DBX_INTERNAL=0
 INTEGRATED_DBX_COMMIT_PIN="0137e0cbc8b663da5a17ec424c6d47e4e5570ead"
-# Hindsight 长期记忆是可选 profile：HINDSIGHT_ENABLED=true 时才加入
-# --profile hindsight，未启用时仅停旧容器，绝不影响平台其余部署。
+# Hindsight 长期记忆是可选 profile：核心 compose 调用一律不携带该 profile。
+# HINDSIGHT_ENABLED=true 只生成/校验配置；拉取与启动完全后置到核心部署成功
+# 之后的 start_hindsight_memory_stack（唯一带 --profile hindsight 的启动调用，
+# 有时间上界）。未启用时仅停旧容器。可选栈任何失败都不进核心 up/成败判定。
 HINDSIGHT_INTERNAL=0
 HINDSIGHT_IMAGE_PIN="ghcr.io/vectorize-io/hindsight:1.2.0@sha256:19d0c08f3df79acac29384826419a1ca158129e81ec527cdcbd8c97ff4ef76da"
 # 官方 pgvector pg17 的多架构 index digest：amd64+arm64 清单已经公共镜像源
@@ -144,6 +146,7 @@ compose_environment() {
     -u HINDSIGHT_DB_PASSWORD \
     -u HINDSIGHT_IMAGE \
     -u HINDSIGHT_POSTGRES_IMAGE \
+    -u HINDSIGHT_HF_OFFLINE \
     -u STEWARD_INTERNAL_PROXY_BASE_URL \
     -u STEWARD_BROWSER_HTTP_LEASE_SECONDS \
     -u STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS \
@@ -183,9 +186,6 @@ compose() {
   done
   if [ "$INTEGRATED_DBX_INTERNAL" = "1" ] && [ "${1:-}" != "version" ]; then
     profile_args=(--profile integrated-dbx)
-  fi
-  if [ "$HINDSIGHT_INTERNAL" = "1" ] && [ "${1:-}" != "version" ]; then
-    profile_args+=(--profile hindsight)
   fi
   if [ "$call_timeout" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
     if compose_environment docker compose version >/dev/null 2>&1; then
@@ -454,19 +454,19 @@ verify_runtime_source_attestation() {
   log "runtime source attestation mount_check=app_source_not_mounted image_matches_build=true"
   return 0
 }
-start_hindsight_profile() {
-  # Hindsight 随最终 compose up -d 起在 hindsight profile 里；这里只在
-  # 「已关闭」时停掉历史遗留容器（不删卷），并把功能状态写进部署日志。
-  if [ "$HINDSIGHT_INTERNAL" = "1" ]; then
-    log "Hindsight memory profile enabled; it starts with the final compose up and never gates platform readiness"
-  else
-    compose --profile hindsight stop hindsight hindsight-db >/dev/null 2>&1 || true
+stop_disabled_hindsight_stack() {
+  # 未启用时仅停掉历史遗留的可选容器（不删卷）。启用时的拉取/启动完全后置到
+  # 核心部署成功之后的 start_hindsight_memory_stack：核心 compose 调用一律不
+  # 携带 hindsight profile，可选栈的失败不可能进入核心 up 或成败判定。
+  if [ "$HINDSIGHT_INTERNAL" = "0" ]; then
+    compose --profile hindsight stop hindsight hindsight-db hindsight-model-init \
+      >/dev/null 2>&1 || true
   fi
 }
 
 start_required_dependency_services() {
   start_integrated_dbx_if_needed
-  start_hindsight_profile
+  stop_disabled_hindsight_stack
   # CDP must be configured and is checked by deep readiness, but an unhealthy
   # browser must not prevent the API process from starting for diagnostics.
   # python_kernel_gateway executes user scripts for Python pipelines; it is
@@ -485,10 +485,14 @@ start_required_dependency_services() {
   fi
 }
 wait_for_service_healthy() {
-  local service="$1" attempts="${2:-60}" interval="${3:-5}"
+  local service="$1" attempts="${2:-60}" interval="${3:-5}" profile="${4:-}"
   local attempt container_id health
   for attempt in $(seq 1 "$attempts"); do
-    container_id="$(compose ps -q "$service" 2>/dev/null || true)"
+    if [ -n "$profile" ]; then
+      container_id="$(compose --profile "$profile" ps -q "$service" 2>/dev/null || true)"
+    else
+      container_id="$(compose ps -q "$service" 2>/dev/null || true)"
+    fi
     if [ -n "$container_id" ]; then
       health="$(compose_environment docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
         "$container_id" 2>/dev/null || true)"
@@ -500,6 +504,52 @@ wait_for_service_healthy() {
   done
   log "timed out waiting for $service to become healthy"
   return 1
+}
+
+start_hindsight_memory_stack() {
+  # 可选记忆栈的独立启动入口：只在核心部署成功（backend 已就绪，Hindsight 的
+  # LLM 回调目标存在）之后执行，是全脚本唯一携带 --profile hindsight 的启动
+  # 调用，且有 COMPOSE_CALL_TIMEOUT 时间上界。镜像已按 @sha256 钉扎且本地存在
+  # 时 compose 不再访问 registry；缺镜像时由该 up 自行拉取。拉取、缓存卷属主
+  # init、专用 DB 健康、应用启动或超时的任何失败都只降级记忆特性：停掉本次
+  # 起了一半的可选容器（卷保留，下次部署自动重试），绝不触碰核心服务，也
+  # 不改写已记录的核心部署成功结论。启动成功但未在观察窗内健康（首启可能在
+  # 下载 embedding 模型）则保持运行，仅记录告警。
+  [ "$HINDSIGHT_INTERNAL" = "1" ] || return 0
+  if ! command -v timeout >/dev/null 2>&1; then
+    log "warning: the timeout command is unavailable, so the optional Hindsight start cannot be time-bounded; leaving the memory stack as-is (chat and platform readiness are unaffected)"
+    return 0
+  fi
+  local start_timeout="${HINDSIGHT_START_TIMEOUT:-300}"
+  case "$start_timeout" in
+    ''|*[!0-9]*|0)
+      log "warning: HINDSIGHT_START_TIMEOUT must be a positive integer; using 300s for this deployment"
+      start_timeout=300
+      ;;
+  esac
+  log "starting the optional Hindsight memory stack in a separate bounded compose invocation (it never gates the core deployment)"
+  local up_status=0
+  COMPOSE_CALL_TIMEOUT="$start_timeout" \
+    compose --profile hindsight up -d hindsight || up_status=$?
+  if [ "$up_status" -ne 0 ]; then
+    if [ "$up_status" -eq 124 ]; then
+      log "warning: the optional Hindsight memory stack did not start within ${start_timeout}s; stopping it for this deployment (volumes are preserved and the next deployment retries)"
+    else
+      log "warning: the optional Hindsight memory stack failed to start (exit ${up_status}: image pull, cache init, database health or container start); stopping it for this deployment (volumes are preserved and the next deployment retries)"
+    fi
+    # 上界与启动一致；含一次性 init 容器——超时打断时它可能仍在运行。
+    COMPOSE_CALL_TIMEOUT="$start_timeout" \
+      compose --profile hindsight stop hindsight hindsight-db hindsight-model-init \
+      >/dev/null 2>&1 || true
+    log "hint: inspect on the server with 'docker compose --profile hindsight logs hindsight hindsight-db'"
+    return 0
+  fi
+  if wait_for_service_healthy hindsight "${HINDSIGHT_HEALTH_WAIT_ATTEMPTS:-24}" \
+      "${HINDSIGHT_HEALTH_WAIT_INTERVAL:-5}" hindsight; then
+    log "hindsight memory service is healthy (feature status only)"
+  else
+    log "warning: hindsight is not healthy yet (first start may download the embedding model); it stays running and chat/platform readiness are unaffected"
+  fi
 }
 
 start_weknora_initializer() {
@@ -1968,23 +2018,8 @@ if [ "${SKIP_GIT:-0}" != "1" ]; then
   fi
 fi
 command -v docker >/dev/null 2>&1 || { log "docker is not installed"; exit 1; }
-prepull_hindsight_images() {
-  # 可选记忆栈镜像预拉：digest 架构不符或网络失败只放弃本次 Hindsight 启用，
-  # 绝不让它的拉取失败进入最终 compose up 而阻塞主应用（卷保留，下次部署
-  # 自动重试）。停掉旧容器是为了避免最终 up --remove-orphans 以孤儿语义
-  # 粗暴清除；记忆特性本次降级，聊天与 readiness 不受影响。
-  [ "$HINDSIGHT_INTERNAL" = "1" ] || return 0
-  if ! run_with_retry compose --profile hindsight pull -q hindsight hindsight-db; then
-    log "warning: failed to pull Hindsight images; deploying WITHOUT the memory profile (chat unaffected, feature degrades until next deploy)"
-    HINDSIGHT_INTERNAL=0
-    compose --profile hindsight stop hindsight hindsight-db >/dev/null 2>&1 || true
-    return 0
-  fi
-  log "Hindsight images pulled via pinned digests"
-}
 log "building images"
 run_with_retry compose build --pull
-prepull_hindsight_images
 run_with_retry compose --profile weknora-bootstrap build --pull weknora-bootstrap
 # Resolve the exact image tag Compose will use for the backend service from the
 # structured build-print output (target.backend.tags). Do not guess an image
@@ -2124,15 +2159,9 @@ for i in $(seq 1 60); do
       exit 1
     fi
     log "deployment succeeded"
-    if [ "$HINDSIGHT_INTERNAL" = "1" ]; then
-      # 纯功能状态观测：首启可能仍在下载 embedding 模型。Hindsight 不参与
-      # 平台 readiness，这里失败只记录告警，绝不判定部署失败。
-      if wait_for_service_healthy hindsight 24 5; then
-        log "hindsight memory service is healthy (feature status only)"
-      else
-        log "warning: hindsight is not healthy yet (first start may download the embedding model); chat and platform readiness are unaffected"
-      fi
-    fi
+    # 可选记忆栈在核心成功后单独启动（backend 已就绪，Hindsight 的 LLM 回调
+    # 目标存在）。调用侧兜底：函数内部任何未预期非零也只记录告警。
+    start_hindsight_memory_stack || log "warning: the optional Hindsight memory stack start reported an internal failure; the succeeded core deployment above is unaffected"
     compose ps
     exit 0
   fi

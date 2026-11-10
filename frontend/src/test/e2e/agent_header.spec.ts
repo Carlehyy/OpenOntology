@@ -1,5 +1,6 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
+
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 const now = '2026-07-19T08:00:00+00:00'
 const conversation = {
@@ -10,7 +11,21 @@ const conversation = {
   updatedAt: now,
 }
 
-async function mockAgentHeader(page: Page, options: { withConversation?: boolean } = {}) {
+/** 附加已发布本体：列表项 + 最小 workspace/能力 mock（能力启用）。 */
+interface MockExtraOntology {
+  id: string
+  name: string
+  version: string
+  releaseId: string
+}
+
+async function mockAgentHeader(page: Page, options: {
+  withConversation?: boolean
+  /** 追加已发布本体，供切换/多本体类测试。 */
+  extraOntologies?: MockExtraOntology[]
+  /** ontology-1 助手能力：默认 enabled；disabled 显式停用；fail 请求失败。 */
+  agentCaps?: 'enabled' | 'disabled' | 'fail'
+} = {}) {
   let dynamicEnabled = false
   let trialComplete = false
   await page.addInitScript(() => {
@@ -56,8 +71,19 @@ async function mockAgentHeader(page: Page, options: { withConversation?: boolean
         current_release_version: null,
         created_at: now,
         updated_at: now,
-      }],
-      total: 2,
+      }, ...(options.extraOntologies || []).map(ontology => ({
+        id: ontology.id,
+        name: ontology.name,
+        domain: ontology.name,
+        description: '附加已发布本体（mock）',
+        status: 'draft',
+        version: ontology.version,
+        current_release_id: ontology.releaseId,
+        current_release_version: ontology.version,
+        created_at: now,
+        updated_at: now,
+      }))],
+      total: 2 + (options.extraOntologies?.length || 0),
       page: 1,
       page_size: 20,
     })
@@ -69,6 +95,39 @@ async function mockAgentHeader(page: Page, options: { withConversation?: boolean
   await page.route('**/api/v2/**', route => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/v2/inbox/summary') return json(route, { unread_count: 0 })
+    // 附加本体：最小 workspace + 启用能力，其余路径回落（未 mock 的请求
+    // 在 mocked 套件中按预期失败，不掩盖真实缺口）
+    const extra = (options.extraOntologies || []).find(ontology =>
+      path.includes(`/ontologies/${ontology.id}/`))
+    if (extra) {
+      if (path.endsWith('/agent/capabilities')) return json(route, {
+        enabled: true,
+        objectTypes: [],
+        linkTypes: [],
+        actions: [],
+        allowActionProposals: false,
+        maxRowsPerQuery: 50,
+        maxSteps: 8,
+        skillCard: '',
+        releaseId: extra.releaseId,
+        releaseVersion: extra.version,
+      })
+      if (path.endsWith('/workspace') || path.endsWith('/full')) return json(route, {
+        id: extra.id,
+        name: extra.name,
+        version: extra.version,
+        workspaceMode: 'release',
+        objectTypes: [],
+        linkTypes: [],
+        actions: [],
+        functions: [],
+        instances: [],
+        linkInstances: [],
+        executionLogs: [],
+      })
+      if (path.endsWith('/agent/conversations')) return json(route, [])
+      return route.fallback()
+    }
     if (path === '/api/v2/ontologies/ontology-1/versions/release-1/workspace'
       || path === '/api/v2/formal/ontologies/ontology-1/full') return json(route, {
       id: 'ontology-1',
@@ -92,18 +151,21 @@ async function mockAgentHeader(page: Page, options: { withConversation?: boolean
       linkInstances: [],
       executionLogs: [],
     })
-    if (path === '/api/v2/formal/ontologies/ontology-1/agent/capabilities') return json(route, {
-      enabled: true,
-      objectTypes: [{ id: 'ot-order', name: 'Order', displayName: '订单', instanceCount: 1 }],
-      linkTypes: [],
-      actions: [{ id: 'act-alert', name: 'send_alert', displayName: '发送提醒', requiresApproval: false }],
-      allowActionProposals: true,
-      maxRowsPerQuery: 50,
-      maxSteps: 8,
-      skillCard: '',
-      releaseId: 'release-1',
-      releaseVersion: 'v1',
-    })
+    if (path === '/api/v2/formal/ontologies/ontology-1/agent/capabilities') {
+      if (options.agentCaps === 'fail') return route.abort()
+      return json(route, {
+        enabled: options.agentCaps !== 'disabled',
+        objectTypes: [{ id: 'ot-order', name: 'Order', displayName: '订单', instanceCount: 1 }],
+        linkTypes: [],
+        actions: [{ id: 'act-alert', name: 'send_alert', displayName: '发送提醒', requiresApproval: false }],
+        allowActionProposals: true,
+        maxRowsPerQuery: 50,
+        maxSteps: 8,
+        skillCard: '',
+        releaseId: 'release-1',
+        releaseVersion: 'v1',
+      })
+    }
     if (path === '/api/v2/formal/ontologies/ontology-1/agent/profile') return json(route, {
       id: 'profile-1',
       ontologyId: 'ontology-1',
@@ -482,4 +544,167 @@ test('输入栏白色背景、聊天区滚动条隐藏、侧边栏底栏已按�
   // 平台侧边栏左下角不再提供「折叠起来」「退出登录」（退出登录保留在右上角用户菜单）
   await expect(page.getByRole('button', { name: '折叠起来' })).toHaveCount(0)
   await expect(page.locator('aside').getByRole('button', { name: '退出登录' })).toHaveCount(0)
+})
+
+// ---------------------------------------------------------------------------
+// MCP 接入（Streamable HTTP，面向任意 MCP 客户端）：入口位于本体选择框左侧，
+// 能力未确认前禁用，模板绝不内嵌真实密码（AGENTS.md §5 副作用类交互验收规范）。
+// 注意：页面请求 URL 带 query（如 /api/v1/ontologies?page_size=1000），
+// 以 $ 结尾的 glob route 匹配不到——多本体与能力状态一律经 mockAgentHeader
+// 选项在 goto 前注册，不做二次 route 覆盖。
+
+test('MCP 接入入口未选本体时禁用，能力确认启用后可用', async ({ page }) => {
+  await mockAgentHeader(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+
+  const mcpButton = page.getByTestId('agent-mcp-button')
+  await expect(mcpButton).toBeDisabled()
+
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+  // caps 已加载且 enabled 才可用：加载完成前不得出现可连接入口
+  await expect(mcpButton).toBeEnabled()
+  await expect(mcpButton).toHaveAttribute('aria-label', 'MCP 接入')
+})
+
+test('MCP 接入入口在助手能力加载失败时保持禁用', async ({ page }) => {
+  // 能力接口失败（abort 走 react-query 单次重试后落错误态）：caps 缺失不得误报可连接
+  await mockAgentHeader(page, { agentCaps: 'fail' })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+
+  const mcpButton = page.getByTestId('agent-mcp-button')
+  // 先等能力请求确定失败再断言，避免只抓到 caps 未加载的瞬态
+  const capsFailed = page.waitForEvent('requestfailed', request =>
+    new URL(request.url()).pathname === '/api/v2/formal/ontologies/ontology-1/agent/capabilities')
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+  await capsFailed
+  await expect(mcpButton).toBeDisabled()
+})
+
+test('MCP 接入入口在助手能力明确停用时禁用', async ({ page }) => {
+  await mockAgentHeader(page, { agentCaps: 'disabled' })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+
+  const mcpButton = page.getByTestId('agent-mcp-button')
+  // 先等停用态 capabilities 响应落地再断言，避免只抓到 caps 未加载的瞬态
+  const capsResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/v2/formal/ontologies/ontology-1/agent/capabilities')
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+  await capsResponse
+  await expect(mcpButton).toBeDisabled()
+})
+
+test('MCP 弹窗展示模板与提示并跟随本体切换更新', async ({ page }) => {
+  await mockAgentHeader(page, {
+    extraOntologies: [{ id: 'ontology-2', name: '质量本体', version: 'v2', releaseId: 'release-2' }],
+  })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+  const mcpButton = page.getByTestId('agent-mcp-button')
+  await expect(mcpButton).toBeEnabled()
+  await mcpButton.click()
+
+  const dialog = page.getByTestId('agent-mcp-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('供应链本体')
+  await expect(dialog).toContainText('当前发布 v1')
+  await expect(dialog).toContainText('自动跟随最新发布版本')
+  await expect(dialog).toContainText('X-OpenOntology-Username')
+  await expect(dialog).toContainText('ontology_schema')
+  await expect(dialog).toContainText('ontology_query_page')
+  await expect(dialog).toContainText('不执行动作')
+  await expect(page.getByTestId('agent-mcp-hint')).toContainText('HTTPS')
+  await expect(page.getByTestId('agent-mcp-hint')).toContainText('$$')
+  await expect(page.getByTestId('agent-mcp-hint')).toContainText('$!')
+  // 弹窗只保留复制主操作；不再提供下载入口（全选文本框即手动兜底）
+  await expect(dialog.getByRole('button', { name: '下载 .json' })).toHaveCount(0)
+
+  const origin = new URL(page.url()).origin
+  const first = JSON.parse(await page.getByTestId('agent-mcp-config').inputValue())
+  expect(first.mcpServers['openontology-ontology-1']).toMatchObject({
+    url: `${origin}/api/v2/formal/ontologies/ontology-1/mcp`,
+    exposure: 'direct',
+    headers: {
+      'X-OpenOntology-Username': 'admin',
+      'X-OpenOntology-Password': 'REPLACE_WITH_YOUR_PASSWORD',
+    },
+  })
+
+  // 切换本体：模板地址与本体信息跟随最新选择
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+  await page.getByLabel('选择本体').selectOption('ontology-2')
+  await expect(mcpButton).toBeEnabled()
+  await mcpButton.click()
+  await expect(dialog).toContainText('质量本体')
+  const second = JSON.parse(await page.getByTestId('agent-mcp-config').inputValue())
+  expect(second.mcpServers['openontology-ontology-2'].url)
+    .toBe(`${origin}/api/v2/formal/ontologies/ontology-2/mcp`)
+})
+
+test('MCP 弹窗打开后配置全文全选且 Esc 可关闭', async ({ page }) => {
+  await mockAgentHeader(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+
+  await page.getByTestId('agent-mcp-button').click()
+  const config = page.getByTestId('agent-mcp-config')
+  await expect(config).toBeVisible()
+  await expect(config).toBeFocused()
+  const selection = await config.evaluate(element => {
+    const node = element as HTMLTextAreaElement
+    return {
+      start: node.selectionStart,
+      end: node.selectionEnd,
+      length: node.value.length,
+    }
+  })
+  expect(selection.start).toBe(0)
+  expect(selection.end).toBe(selection.length)
+
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('agent-mcp-dialog')).toBeHidden()
+})
+
+test('MCP 模板地址跟随运行时 API 基址注入（分域部署）', async ({ page }) => {
+  await mockAgentHeader(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+
+  // 分域部署注入独立 API 基址（同 src/api/client.ts 规则）：模板地址必须
+  // 跟随注入值，而不是默认打到页面静态域
+  await page.evaluate(() => {
+    ;(window as Window & { __API_BASE_URL__?: string }).__API_BASE_URL__ = 'https://api.example.test/'
+  })
+  await page.getByTestId('agent-mcp-button').click()
+  const config = JSON.parse(await page.getByTestId('agent-mcp-config').inputValue())
+  expect(config.mcpServers['openontology-ontology-1'].url)
+    .toBe('https://api.example.test/api/v2/formal/ontologies/ontology-1/mcp')
+})
+
+test('MCP 配置复制写入真实剪贴板并如实提示', async ({ page }) => {
+  await mockAgentHeader(page)
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/agent')
+  await page.getByLabel('选择本体').selectOption('ontology-1')
+  await page.getByTestId('agent-mcp-button').click()
+
+  const expected = await page.getByTestId('agent-mcp-config').inputValue()
+  await page.getByTestId('agent-mcp-copy').click()
+  // 如实提示：不宣称「已复制」，只说「已尝试写入剪贴板」（AGENTS.md §5）
+  await expect(page.getByText('已尝试写入剪贴板')).toBeVisible()
+  // 验收作用在最终结果上：读取真实剪贴板核对全文
+  const clipped = await page.evaluate(() => navigator.clipboard.readText())
+  expect(clipped).toBe(expected)
+  expect(JSON.parse(clipped).mcpServers['openontology-ontology-1'].headers['X-OpenOntology-Password'])
+    .toBe('REPLACE_WITH_YOUR_PASSWORD')
+  // 模板不携带任何真实凭据（会话 token 等绝不进入配置）
+  expect(clipped).not.toContain('e2e-token')
 })

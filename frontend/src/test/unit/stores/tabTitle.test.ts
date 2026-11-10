@@ -23,6 +23,11 @@ describe('menuKeyForPath', () => {
     assert.equal(menuKeyForPath('/scenes/scn-1'), 'scenes')
     assert.equal(menuKeyForPath('/scenes/scn-1?tab=models'), 'scenes')
     assert.equal(menuKeyForPath('/api-hub/interfaces'), 'api_hub.interfaces')
+    assert.equal(menuKeyForPath('/operations'), 'operations')
+    assert.equal(menuKeyForPath('/operations/dashboard'), 'operations.dashboard')
+    assert.equal(menuKeyForPath('/operations/reports'), 'operations.reports')
+    // 接口代理的 operations 页签不受智能运营一级路径影响
+    assert.equal(menuKeyForPath('/api-hub/operations'), 'api_hub.interfaces')
     assert.equal(menuKeyForPath('/no-such-page'), null)
   })
 })

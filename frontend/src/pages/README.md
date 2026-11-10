@@ -14,6 +14,7 @@ pages/
 ├── events/            事件登记、附件与 ingest key
 ├── pipelines/         连接、数据集、转换、流水线、成品和任务池
 ├── data-management/   手工/成品数据管理视图
+├── operations/        智能运营：监控看板、运营报告（当前为待开发占位）
 ├── api-hub/           接口定义、发布、代理和调用记录
 ├── community/         Plugin MCP 管理；Skill 页面当前为维护中占位
 ├── models/            模型提供商配置

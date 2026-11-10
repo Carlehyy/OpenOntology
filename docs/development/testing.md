@@ -153,6 +153,42 @@ fixture 环境变量启动 NATS executor，后台回合才会真正被消费；�
 `AGENT_RUN_LEASE_SECONDS=30`（registry 最小 30 秒）配合 kill executor 演练
 45 秒 reconcile，不改变生产默认 600 秒。
 
+#### 本体 MCP 与 pi 验收
+
+`backend/scripts/ontology_mcp_real_stack_e2e.py` 面向已启动的隔离 API、真实
+PostgreSQL 和本机 pi 1.3.x，不调用对话模型，也不启动或停止基础服务。脚本要求
+API 和数据库均为回环地址，使用临时 `PI_CODING_AGENT_DIR`，不改用户的 pi
+配置；创建两个合成账号和本体，经 draft → trial/impact → promote 正门发布
+结构，再向隔离库插入绑定该发布版的合成实例。v2 发布前清除本次合成实例，
+发布后重建数据；这项验收不覆盖正式映射的数据迁移。
+
+```bash
+cd backend
+OPENONTOLOGY_ONTOLOGY_MCP_E2E=1 ENVIRONMENT=test \
+  uv run python scripts/ontology_mcp_real_stack_e2e.py \
+    --api-base http://127.0.0.1:18036 \
+    --pg-dsn postgresql://ontoprompt:ontoprompt@127.0.0.1:25432/ontoprompt
+```
+
+先用 `pi mcp list --json` 检查真实连接与三工具清单，再以 pi 原生 MCP 客户端
+检查结构、明细、聚合、多页、隐藏属性、跨本体拒绝、密码变更失效，以及 v1
+更新为 v2 后旧查询/游标拒绝与重读恢复。工具业务错误必须检查 `isError` 和
+错误码，不能把空数组当成正确查询结果。合成密码覆盖 `$`、开头 `!` 与 `%`
+原值；完整 Unicode 凭据受 HTTP 头字符限制，不属于当前 pi 接入覆盖范围。
+
+生产代理验收用同一命令将 `--api-base` 改为该隔离 Nginx 的回环地址，核对
+Host 和认证请求头透传。报告与运行日志写入 `.artifacts/ontology-mcp/`，退出时
+清理本次账号、本体、查询资源、临时 pi 配置和子进程。五服务 fixture 的
+`/health/ready` 仍可能因 n8n、CDP 或 WeKnora 缺失返回 503，须如实记录，
+不能将本项查询验收当作完整平台就绪验收。
+
+页面验收使用 `frontend/src/test/e2e/agent_mcp_stack.spec.ts`，通过真实登录
+检查入口、配置弹窗、剪贴板实际内容、聚焦全选手动兜底与层叠命中。后端和生产
+Web 已在同一隔离栈运行时，设置 `PLAYWRIGHT_BASE_URL` 指向该 Web，并显式设置
+`PLAYWRIGHT_REUSE_SERVER=1`、`PLAYWRIGHT_API_URL` 和
+`PLAYWRIGHT_MCP_ONTOLOGY_ID`（该隔离栈中已发布的合成本体 ID）；凭据遵循共享
+`stack-credentials` 配置。运行后按资源 ledger 精确关闭自有进程、容器和卷。
+
 #### 本体助手复盘验收（真实远程源）
 
 `backend/scripts/ontology_assistant_recap_e2e.py` 在已启动的隔离 API（默认
