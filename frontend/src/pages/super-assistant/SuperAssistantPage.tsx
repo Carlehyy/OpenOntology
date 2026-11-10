@@ -4,7 +4,7 @@ import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
   ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil,
-  ScrollText, Send, Settings2, Square, X,
+  Route as RouteIcon, ScrollText, Send, Settings2, Square, X,
 } from 'lucide-react'
 
 import { modelApi } from '@/api/ontologies'
@@ -31,6 +31,7 @@ import VoiceRecordingBar from './components/VoiceRecordingBar'
 import QuickInputMenu from './components/QuickInputMenu'
 import QuickInputsDialog from './components/QuickInputsDialog'
 import ConversationSummaryDialog from './components/ConversationSummaryDialog'
+import EventRoutingDialog from './components/EventRoutingDialog'
 import { createSummaryScheduler } from './summaryScheduler'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
@@ -176,6 +177,8 @@ export default function SuperAssistantPage() {
   // 会话纪要：头部按钮弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
   const [summaryOpen, setSummaryOpen] = useState(false)
   const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
+  // 事件路由：头部按钮弹窗（入口位于会话纪要与领域知识之间，内容占位待后续迭代）
+  const [eventRoutingOpen, setEventRoutingOpen] = useState(false)
   // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
   // 知识库或模型可用性，也不代表知识检索已就绪。登录走 WeKnora 自己的账号体系。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
@@ -1519,6 +1522,9 @@ export default function SuperAssistantPage() {
         models={models}
         refreshKey={summaryRefreshKey}
       />
+      {eventRoutingOpen && (
+        <EventRoutingDialog onClose={() => setEventRoutingOpen(false)} />
+      )}
       {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
           面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}
       <section
@@ -1595,7 +1601,19 @@ export default function SuperAssistantPage() {
           >
             <ScrollText size={16} aria-hidden="true" />
           </button>
-          {/* 知识库（WeKnora）入口：位于会话纪要右侧、所有会话（含新会话）可用；
+          {/* 事件路由入口：位于会话纪要与领域知识之间；弹窗内容占位（规则配置后续迭代）。
+              窄屏（<md）与两侧入口一起收进「更多操作」溢出菜单。 */}
+          <button
+            type="button"
+            onClick={() => setEventRoutingOpen(true)}
+            aria-label="事件路由"
+            title="事件路由"
+            data-workbench-event-routing
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+          >
+            <RouteIcon size={16} aria-hidden="true" />
+          </button>
+          {/* 知识库（WeKnora）入口：位于事件路由右侧、所有会话（含新会话）可用；
               新标签打开原生 Web，不在入口上宣称知识已就绪；悬停文案「领域知识」。
               窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
           {weknoraUrl ? (
@@ -1726,6 +1744,14 @@ export default function SuperAssistantPage() {
               >
                 <ScrollText size={15} className="shrink-0 text-brand-ink" />
                 会话纪要
+              </button>
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); setEventRoutingOpen(true) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <RouteIcon size={15} className="shrink-0 text-brand-ink" />
+                事件路由
               </button>
               {weknoraUrl ? (
                 <a
