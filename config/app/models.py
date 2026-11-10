@@ -204,11 +204,12 @@ class WeKnoraConfig(StrictModel):
 class HindsightConfig(StrictModel):
     """Optional Hindsight long-term memory service (compose profile).
 
-    The local config center only manages the probe address and timeout. Keys
-    (``HINDSIGHT_API_KEY`` / ``HINDSIGHT_SERVICE_TOKEN``) stay in the
-    deployment-provided environment and are never stored here. The service is
-    optional: an unreachable Hindsight degrades the memory feature only and
-    never blocks local start gates.
+    The local config center only manages the probe address, the optional
+    protected Web entry and timeout. Keys (``HINDSIGHT_API_KEY`` /
+    ``HINDSIGHT_SERVICE_TOKEN``) stay in the deployment-provided environment
+    and are never stored here. The service is optional: an unreachable
+    Hindsight degrades the memory feature only and never blocks local start
+    gates.
     """
 
     # Source-run backend probes the loopback port published by the local
@@ -216,11 +217,20 @@ class HindsightConfig(StrictModel):
     base_url: str = Field(
         default="http://127.0.0.1:18888", min_length=1, max_length=500
     )
+    # Optional browser-accessible, separately protected management UI. The
+    # local compose profile publishes it on http://127.0.0.1:19999; production
+    # keeps the UI private until it is protected, so the default stays empty
+    # and hostnames are stored exactly as entered, never rewritten.
+    web_url: str = Field(default="", min_length=0, max_length=500)
     timeout_seconds: float = Field(default=2.0, gt=0, le=60)
 
     @model_validator(mode="after")
     def validate_hindsight(self) -> "HindsightConfig":
         _validate_http_origin(self.base_url, "Hindsight 服务地址")
+        if self.web_url:
+            _validate_http_origin(
+                self.web_url, "Hindsight Web 地址", strict_origin=True
+            )
         return self
 
 
@@ -319,8 +329,29 @@ def default_profile() -> ConfigProfile:
     )
 
 
-def _validate_http_origin(value: str, label: str, *, allow_path: bool = False) -> None:
+def _validate_http_origin(
+    value: str,
+    label: str,
+    *,
+    allow_path: bool = False,
+    strict_origin: bool = False,
+) -> None:
     parsed = urlsplit(value)
+    if strict_origin:
+        # Origin-only 契约（与 backend memory_router 的入口校验一致）：空白、
+        # ASCII 控制字符与反斜杠一律拒绝；?/# 即使只是空分隔符也算非法；
+        # 端口必须可解析且在范围内。
+        if any(
+            char.isspace() or ord(char) < 32 or ord(char) == 127 or char == "\\"
+            for char in value
+        ):
+            raise ValueError(f"{label}不能包含空白、控制字符或反斜杠")
+        if "?" in value or "#" in value:
+            raise ValueError(f"{label}不能包含查询参数或片段")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError(f"{label}端口无效") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError(f"{label}必须是完整的 http 或 https 地址")
     if parsed.username is not None or parsed.password is not None:

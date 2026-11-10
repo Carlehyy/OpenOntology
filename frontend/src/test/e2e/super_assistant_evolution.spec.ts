@@ -8,17 +8,17 @@ const json = (route: Route, data: unknown) => route.fulfill({
   body: JSON.stringify({ data }),
 })
 
-async function seedAuth(page: Page) {
-  await page.addInitScript(() => {
+async function seedAuth(page: Page, role = 'admin') {
+  await page.addInitScript(role => {
     localStorage.setItem('token', 'e2e-token')
     localStorage.setItem('auth-store', JSON.stringify({
       state: {
         token: 'e2e-token',
-        user: { id: 'u-evolution', username: 'evolution-tester', role: 'admin' },
+        user: { id: 'u-evolution', username: 'evolution-tester', role },
       },
       version: 0,
     }))
-  })
+  }, role)
 }
 
 async function openConfigPanel(page: Page) {
@@ -147,7 +147,10 @@ test('超级助手：技能审批保留（旧记忆/冲突卡隐藏）与 Hindsi
         memoryModelId = body.model_config_id ?? memoryModelId
         if (memoryEnabled) memoryState = 'ready'
       }
-      return json(route, { enabled: memoryEnabled, model_config_id: memoryModelId })
+      return json(route, {
+        enabled: memoryEnabled, model_config_id: memoryModelId,
+        web_url: 'https://memory.example.invalid:9443',
+      })
     }
     if (path === '/api/v2/super-assistant/memory/status') {
       return json(route, {
@@ -237,6 +240,22 @@ test('超级助手：技能审批保留（旧记忆/冲突卡隐藏）与 Hindsi
   await page.getByRole('button', { name: '记忆', exact: true }).click()
   await expect(page.getByTestId('memory-status-unconfigured')).toBeVisible()
 
+  const consoleLink = page.getByRole('link', { name: '打开 Hindsight' })
+  await expect(consoleLink).toHaveAttribute('href', 'https://memory.example.invalid:9443')
+  await expect(consoleLink).toHaveAttribute('target', '_blank')
+  await expect(consoleLink).toHaveAttribute('rel', 'noopener noreferrer')
+  await page.context().route('https://memory.example.invalid:9443/**', route => route.fulfill({
+    contentType: 'text/html', body: '<title>Hindsight test console</title><h1>Hindsight</h1>',
+  }))
+  const popupPromise = page.waitForEvent('popup')
+  await consoleLink.click()
+  const popup = await popupPromise
+  await popup.waitForLoadState('domcontentloaded')
+  await expect(popup).toHaveURL('https://memory.example.invalid:9443/')
+  await expect(popup.getByRole('heading', { name: 'Hindsight', exact: true })).toBeVisible()
+  expect(await popup.evaluate(() => window.opener)).toBeNull()
+  await popup.close()
+
   // 设置：启用 + 选择 openai 提供方的模型并保存（保存后由后端能力校验）
   await page.getByRole('switch', { name: '启用长期记忆' }).click()
   await page.getByTestId('memory-settings').getByRole('combobox', { name: '记忆模型' }).click()
@@ -297,6 +316,45 @@ test('超级助手：技能审批保留（旧记忆/冲突卡隐藏）与 Hindsi
   await expect(forgetCard.getByTestId('memory-source-status-forgetting')).toBeVisible()
   expect(forgottenIds).toEqual(['src-2'])
 })
+
+for (const scenario of [
+  { role: 'admin', webUrl: null, label: '未配置地址时禁用并说明原因' },
+  { role: 'admin', webUrl: 'javascript:alert(1)', label: '非法地址不可跳转' },
+  { role: 'editor', webUrl: 'https://memory.example.invalid', label: '普通用户不显示管理入口' },
+]) {
+  test(`Hindsight Web 入口：${scenario.label}`, async ({ page }) => {
+    await seedAuth(page, scenario.role)
+    await page.route('**/api/v1/models', route => json(route, []))
+    await page.route('**/api/v2/super-assistant/**', route => {
+      const path = new URL(route.request().url()).pathname
+      if (path.endsWith('/memory/settings')) {
+        return json(route, { enabled: true, model_config_id: null, web_url: scenario.webUrl })
+      }
+      if (path.endsWith('/memory/status')) {
+        return json(route, {
+          state: 'unconfigured', message: '', pending_count: 0,
+          failed_count: 0, last_synced_at: null,
+        })
+      }
+      if (path.endsWith('/memory/sources')) return json(route, { items: [], total: 0 })
+      if (path.endsWith('/reflection/settings')) return json(route, { pending_count: 0 })
+      if (['conversations', 'skills', 'mcp-servers', 'tools', 'reflection/candidates']
+        .some(endpoint => path.endsWith(`/${endpoint}`))) return json(route, [])
+      return route.fulfill({ status: 404, body: '{}' })
+    })
+    await page.goto('/#/super-assistant')
+    await openConfigPanel(page)
+    await page.getByRole('button', { name: '记忆', exact: true }).click()
+    await expect(page.getByTestId('memory-status-unconfigured')).toBeVisible()
+    await expect(page.getByRole('link', { name: '打开 Hindsight' })).toHaveCount(0)
+    if (scenario.role === 'admin') {
+      await expect(page.getByRole('button', { name: '打开 Hindsight' })).toBeDisabled()
+      await expect(page.getByText('尚未配置 Hindsight Web 地址', { exact: false })).toBeVisible()
+    } else {
+      await expect(page.getByTestId('memory-web-entry')).toHaveCount(0)
+    }
+  })
+}
 
 test('超级助手：记忆故障不影响最终回复 + Skill 常驻', async ({ page }) => {
   await seedAuth(page)

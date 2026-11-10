@@ -520,6 +520,10 @@ services:
       HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
       HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
       HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-hindsight-local-service-token}
+      # 可选：管理员专用的 Hindsight 原生 Web 入口（.env 校验值，空=未启用）。
+      # 仅 backend 显式映射并使用；其余 env_file 服务可能继承该非密钥值但不
+      # 使用。UI 仍走 profile 的 loopback 映射，不新增任何发布端口。
+      HINDSIGHT_WEB_URL: ${HINDSIGHT_WEB_URL:-}
     depends_on:
       db:
         condition: service_healthy

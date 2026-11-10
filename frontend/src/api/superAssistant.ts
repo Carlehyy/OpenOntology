@@ -567,6 +567,8 @@ export interface MulticaWorkspacesResult {
 export interface MemorySettings {
   enabled: boolean
   model_config_id: string | null
+  /** 原生控制台地址仅向管理员提供；空值表示未配置。 */
+  web_url?: string | null
 }
 
 export type MemoryRuntimeState = 'ready' | 'unconfigured' | 'unavailable' | 'syncing' | 'error'

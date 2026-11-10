@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Brain, Check, Loader2, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
+import { Brain, Check, ExternalLink, Loader2, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
 
 import {
   superAssistantApi,
@@ -17,6 +17,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Button, buttonVariants } from '@/components/ui/Button'
+import { useAuthStore } from '@/stores/authStore'
 import {
   memoryStatusPresentation,
   memoryStatusSnapshot,
@@ -32,6 +34,7 @@ import {
   canRetryMemorySource,
   hasMoreSources,
   memoryCapableModels,
+  memoryWebUrl,
   memorySourceDraftValid,
   memorySourceRoleLabel,
   memorySourceStatusPresentation,
@@ -75,6 +78,7 @@ function SourceStatusTag({ status }: { status: string }) {
  * 记忆用户级共享：删除会话不影响已沉淀记忆；旧 auto-accept/palace/distill 主 UI 已退役。
  */
 export default function MemoryPanel({ active, models }: { active: boolean; models: ModelConfig[] }) {
+  const isAdmin = useAuthStore(state => state.user?.role === 'admin')
   const [settings, setSettings] = useState<MemorySettings | null>(null)
   const [draftEnabled, setDraftEnabled] = useState(false)
   const [draftModelId, setDraftModelId] = useState<string | null>(null)
@@ -307,6 +311,7 @@ export default function MemoryPanel({ active, models }: { active: boolean; model
   }
 
   const statusPresentation = status ? memoryStatusPresentation(status.state) : null
+  const consoleUrl = isAdmin ? memoryWebUrl(settings?.web_url) : null
 
   return (
     <div className="grid gap-3" data-testid="memory-panel">
@@ -362,6 +367,39 @@ export default function MemoryPanel({ active, models }: { active: boolean; model
           <p className="mt-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">
             暂无 openai / compatible 提供方的启用 LLM，请先在「模型配置」准备模型
           </p>
+        )}
+        {isAdmin && (
+          <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+            {consoleUrl ? (
+              <a
+                href={consoleUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={buttonVariants({ variant: 'outline', size: 'sm' })}
+                data-testid="memory-web-entry"
+              >
+                <ExternalLink size={12} aria-hidden="true" />
+                打开 Hindsight
+              </a>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled
+                data-testid="memory-web-entry"
+              >
+                <ExternalLink size={12} aria-hidden="true" />
+                打开 Hindsight
+              </Button>
+            )}
+            <p className="mt-1.5 text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+              {consoleUrl
+                ? '在新标签页打开原生管理控制台，仅管理员可见'
+                : settingsLoaded
+                  ? '尚未配置 Hindsight Web 地址，请在部署配置中设置 HINDSIGHT_WEB_URL'
+                  : '正在加载 Hindsight Web 地址…'}
+            </p>
+          </div>
         )}
       </section>
 

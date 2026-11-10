@@ -563,6 +563,10 @@ services:
       HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
       HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
       HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-}
+      # 可选：管理员专用的 Hindsight 原生 Web 入口（服务器 .env 值，空=未启用；
+      # 非密钥，其余 env_file 服务亦会继承但不使用）。仅 backend 显式映射并
+      # 使用；生产不发布任何 UI 端口。
+      HINDSIGHT_WEB_URL: ${HINDSIGHT_WEB_URL:-}
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions

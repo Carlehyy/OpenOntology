@@ -286,6 +286,9 @@ class Settings(BaseSettings):
     # 功能关闭；部署 wiring 默认注入容器内网地址 http://hindsight:8888。
     # 服务不可达只降级记忆特性，不得影响聊天与全局 readiness。
     hindsight_base_url: str = ""
+    # 浏览器可访问且已保护的原生管理页地址；不从私网 API 地址推导。
+    # 部署级管理入口仅向平台管理员提供。
+    hindsight_web_url: str = ""
     # backend → Hindsight 的 Bearer 凭据（默认镜像无租户鉴权时仅作请求上下文）。
     hindsight_api_key: str = Field(default="", repr=False)
     hindsight_timeout_seconds: float = Field(default=2.0, gt=0, le=60)

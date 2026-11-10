@@ -14,6 +14,7 @@ import {
   canRetryMemorySource,
   hasMoreSources,
   memoryCapableModels,
+  memoryWebUrl,
   memorySourceDraftValid,
   memorySourceRoleLabel,
   memorySourceStatusPresentation,
@@ -128,6 +129,25 @@ describe('memoryCapableModels', () => {
 
   it('treats a missing enabled flag as enabled (backend contract default)', () => {
     assert.equal(memoryCapableModels([model({ id: 'a', provider: 'openai' })]).length, 1)
+  })
+})
+
+describe('memoryWebUrl', () => {
+  it('preserves the configured host and port without a loopback rewrite', () => {
+    assert.equal(memoryWebUrl('http://127.0.0.1:19999'), 'http://127.0.0.1:19999')
+    assert.equal(memoryWebUrl('https://memory.example.invalid:9443/'), 'https://memory.example.invalid:9443')
+    assert.equal(memoryWebUrl('http://[::1]:19999'), 'http://[::1]:19999')
+  })
+
+  it('rejects missing, credential-bearing and non-origin addresses', () => {
+    for (const value of [
+      undefined, null, '', 'javascript:alert(1)', '//memory.example.invalid',
+      'http://user:secret@memory.example.invalid', 'http://memory.example.invalid/path',
+      'http://memory.example.invalid?token=secret', 'http://memory.example.invalid#secret',
+      'http://memory.example.invalid?', 'http://memory.example.invalid#',
+      'http://local host', 'http://host:invalid', ' http://host', 'http://host\\n',
+      'http://host\\\\@elsewhere',
+    ]) assert.equal(memoryWebUrl(value), null, String(value))
   })
 })
 
