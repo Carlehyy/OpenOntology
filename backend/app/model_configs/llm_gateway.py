@@ -120,8 +120,27 @@ def _request_with_retry(call, call_kwargs: dict):
     return _with_retry(call, max_attempts=attempts)
 
 
-def chat(call_kwargs: dict, messages: list[dict], tools: list[dict]) -> dict[str, Any]:
+def chat(call_kwargs: dict, messages: list[dict], tools: list[dict], *,
+         response_format: dict | None = None,
+         temperature: float | None = None,
+         max_tokens: int | None = None,
+         max_completion_tokens: int | None = None,
+         seed: int | None = None,
+         top_p: float | None = None,
+         return_finish_reason: bool = False) -> dict[str, Any]:
+    """非流式对话。
+
+    keyword-only 可选参数为 openai/compatible 分支的结构化输出透传扩展
+    （Hindsight 记忆网关等需要把请求方声明的 response_format / 采样参数
+    原样送达上游，并把上游 finish_reason 透传出去，截断不得伪装成 stop）。
+    全部默认关闭：不传时行为与历史调用方完全一致。anthropic 分支不消费
+    这些参数，显式传入直接报错而不是默默丢弃。
+    """
     provider = (call_kwargs.get("provider") or "openai").lower()
+    structured_requested = any(value is not None for value in (
+        response_format, temperature, max_tokens, max_completion_tokens, seed, top_p))
+    if provider == "anthropic" and (structured_requested or return_finish_reason):
+        raise ValueError("结构化输出透传参数仅支持 openai/compatible provider")
     model_name = call_kwargs.get("model", "unknown")
     model_config_id = call_kwargs.get("model_config_id")
     started = time.monotonic()
@@ -134,7 +153,13 @@ def chat(call_kwargs: dict, messages: list[dict], tools: list[dict]) -> dict[str
         if provider == "anthropic":
             result = _request_with_retry(lambda: _chat_anthropic(call_kwargs, messages, tools), call_kwargs)
         else:
-            result = _request_with_retry(lambda: _chat_openai(call_kwargs, messages, tools), call_kwargs)
+            result = _request_with_retry(
+                lambda: _chat_openai(
+                    call_kwargs, messages, tools,
+                    response_format=response_format, temperature=temperature,
+                    max_tokens=max_tokens, max_completion_tokens=max_completion_tokens,
+                    seed=seed, top_p=top_p, return_finish_reason=return_finish_reason),
+                call_kwargs)
         return _strip_think(result)
     except LLMError as e:
         status = _failure_status(e)
@@ -626,16 +651,43 @@ def _stream_retry_final(kw: dict, messages: list[dict], tools: list[dict]) -> di
     raise LLMError("流式重试未产出最终结果")
 
 
-def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
+def _clamped_max_tokens(requested: int, config_cap: Any) -> int:
+    """请求方声明的输出上限与模型配置上限取更紧者（平台侧花费策略优先）。"""
+    requested = int(requested)
+    if config_cap:
+        return min(requested, int(config_cap))
+    return requested
+
+
+def _chat_openai(kw: dict, messages: list[dict], tools: list[dict], *,
+                 response_format: dict | None = None,
+                 temperature: float | None = None,
+                 max_tokens: int | None = None,
+                 max_completion_tokens: int | None = None,
+                 seed: int | None = None,
+                 top_p: float | None = None,
+                 return_finish_reason: bool = False) -> dict:
     import openai
 
     client = openai.OpenAI(**_openai_client_kwargs(kw))
 
     create_kwargs: dict = {"model": kw["model"], "messages": _to_openai_messages(messages),
                            "temperature": 0.2}
+    if temperature is not None:
+        create_kwargs["temperature"] = temperature
     max_output = kw.get("max_output_tokens")
-    if max_output:  # 用户在模型配置中设置的最大输出上限
+    if max_tokens is not None:
+        create_kwargs["max_tokens"] = _clamped_max_tokens(max_tokens, max_output)
+    elif max_completion_tokens is not None:
+        create_kwargs["max_completion_tokens"] = _clamped_max_tokens(max_completion_tokens, max_output)
+    elif max_output:  # 用户在模型配置中设置的最大输出上限
         create_kwargs["max_tokens"] = int(max_output)
+    if seed is not None:
+        create_kwargs["seed"] = seed
+    if top_p is not None:
+        create_kwargs["top_p"] = top_p
+    if response_format is not None:
+        create_kwargs["response_format"] = response_format
     if tools:  # 空 tools 列表部分 provider 会直接报错，纯文本调用时省略
         create_kwargs["tools"] = [{"type": "function",
                                    "function": {"name": t["name"], "description": t["description"],
@@ -678,11 +730,16 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
                 logger.warning(
                     "LLM 端点流式重试后仍无正文与工具调用（%s @ %s），"
                     "该端点 tool calling 可能整体异常", kw.get("model"), kw.get("api_base"))
-            return {
+            result = {
                 "content": final.get("content"),
                 "tool_calls": final.get("tool_calls") or [],
                 "usage": merged_usage(*usages),
             }
+            if return_finish_reason:
+                # 降级前最后一次非流式响应的 finish_reason（缺陷签名即
+                # tool_calls；记忆网关不传 tools，不会进入该路径）。
+                result["finish_reason"] = getattr(resp.choices[0], "finish_reason", None)
+            return result
     msg = resp.choices[0].message
     tool_calls = []
     for tc in (msg.tool_calls or []):
@@ -691,11 +748,16 @@ def _chat_openai(kw: dict, messages: list[dict], tools: list[dict]) -> dict:
         except json.JSONDecodeError:
             args = {"_raw": tc.function.arguments}
         tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
-    return {
+    result = {
         "content": msg.content,
         "tool_calls": tool_calls,
         "usage": merged_usage(*usages),
     }
+    if return_finish_reason:
+        # 上游 finish_reason 原样透传（截断=length 不允许在上游协议层
+        # 伪装成 stop）；上游缺失时为 None，由调用方决定协议级缺省。
+        result["finish_reason"] = getattr(resp.choices[0], "finish_reason", None)
+    return result
 
 
 def _anthropic_create_kwargs(kw: dict, messages: list[dict], tools: list[dict]) -> dict:

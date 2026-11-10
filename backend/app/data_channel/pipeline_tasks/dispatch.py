@@ -31,6 +31,7 @@ SUPER_ASSISTANT_REFLECT_MICRO_SUBJECT = "super_assistant.reflect.micro"
 SUPER_ASSISTANT_REFLECT_FULL_SUBJECT = "super_assistant.reflect.full"
 SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT = "super_assistant.reflect.focused"
 SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT = "super_assistant.scheduled.run"
+SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT = "super_assistant.memory.sync"
 # 本体聊天后台回合：Web 只负责把已落库的 run_id 送达，执行在 executor 进程。
 ONTOLOGY_ASSISTANT_RUN_SUBJECT = "ontology.assistant.run"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
@@ -63,6 +64,7 @@ PIPELINE_STREAM_SUBJECTS = (
     INTEGRATED_SYNC_SUBJECT,
     # 只能追加：本体助手聊天后台回合（run_id 已落库后再派发）
     ONTOLOGY_ASSISTANT_RUN_SUBJECT,
+    SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
 )
 
 # 进程内缓存：每个进程只在首次派发时确保一次 Stream
@@ -297,6 +299,19 @@ def dispatch_super_assistant_reflection(kind: str, payload: dict) -> None:
     if subject is None:
         raise ValueError(f"未知的反思任务类型: {kind!r}")
     dispatch_task(subject, payload)
+
+
+def dispatch_super_assistant_memory_sync(source_id: str, dispatch_id: str) -> None:
+    """派发持久化记忆来源；正文留在数据库，重投使用固定消息标识。"""
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ValueError("记忆同步需要非空 source_id")
+    if not isinstance(dispatch_id, str) or not dispatch_id.strip():
+        raise ValueError("记忆同步需要非空 dispatch_id")
+    _dispatch_sync(
+        SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
+        {"source_id": source_id.strip()},
+        f"{SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT}:{dispatch_id.strip()}",
+    )
 
 
 def dispatch_super_assistant_scheduled_run(run_id: str) -> None:

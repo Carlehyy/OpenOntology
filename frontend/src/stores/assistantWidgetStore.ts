@@ -8,8 +8,10 @@ import {
 import {
   errorMessage,
   isMenuAccessDenied,
+  parseMemoryStatusEvent,
   pickInitialConversationId,
   reduceStreamEvent,
+  type MemoryStatusSnapshot,
   type PendingConfirmation,
 } from '@/components/assistant-widget/logic'
 import { useAuthStore } from '@/stores/authStore'
@@ -44,6 +46,9 @@ interface AssistantWidgetState {
   pending: PendingConfirmation | null
   /** 进行中的审批动作：仅被点击的按钮转圈，两个按钮在请求期间都禁用 */
   busyDecision: 'approve' | 'deny' | null
+  /** 用户级 Hindsight 记忆运行时状态（SSE memory_status 事件更新；与消息流独立，
+   *  跨会话共享，切换会话不清空，仅切账号重新初始化时重置） */
+  memoryStatus: MemoryStatusSnapshot | null
   /** 输入框草稿，关闭弹窗后保留 */
   draft: string
 
@@ -77,6 +82,7 @@ export const useAssistantWidgetStore = create<AssistantWidgetState>()((set, get)
   thinkingRound: null,
   pending: null,
   busyDecision: null,
+  memoryStatus: null,
   draft: '',
 
   setOpen: (open) => {
@@ -100,7 +106,8 @@ export const useAssistantWidgetStore = create<AssistantWidgetState>()((set, get)
     const state = get()
     if (state.loadingList) return
     if (state.initializedFor !== null && state.initializedFor === userId) return
-    set({ loadingList: true, loadError: null, unavailable: null })
+    // 换账号初始化：用户级记忆状态一并重置，避免上一位用户的快照泄漏
+    set({ loadingList: true, loadError: null, unavailable: null, memoryStatus: null })
     try {
       const conversations = await superAssistantApi.conversations()
       const kept = get().activeId && conversations.some(item => item.id === get().activeId)
@@ -183,6 +190,12 @@ export const useAssistantWidgetStore = create<AssistantWidgetState>()((set, get)
 
     try {
       await superAssistantApi.streamChat(conversationId, { message }, (event) => {
+        // 用户级记忆状态与会话无关：即使本流所属会话已被切走也持续更新
+        if (event.event === 'memory_status') {
+          const snapshot = parseMemoryStatusEvent(event.data)
+          if (snapshot) set({ memoryStatus: snapshot })
+          return
+        }
         const current = get()
         if (current.streamingConversationId !== conversationId) return
         if (event.event === 'thinking') {

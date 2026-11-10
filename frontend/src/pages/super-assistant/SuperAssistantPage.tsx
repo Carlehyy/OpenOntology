@@ -39,7 +39,12 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { toast } from 'sonner'
-import { pickInitialConversationId } from '@/components/assistant-widget/logic'
+import {
+  parseMemoryStatusEvent,
+  pickInitialConversationId,
+  type MemoryStatusSnapshot,
+} from '@/components/assistant-widget/logic'
+import { MemoryStatusNotice } from '@/components/assistant-widget/MemoryStatusNotice'
 import { parsePendingConfirmation } from '@/components/ontologyConfirmationModel'
 import { hasMenuAccess } from '@/config/navigation'
 import { useAuthStore } from '@/stores/authStore'
@@ -176,6 +181,9 @@ export default function SuperAssistantPage() {
   // 会话纪要：头部按钮弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
   const [summaryOpen, setSummaryOpen] = useState(false)
   const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
+  // 用户级 Hindsight 记忆运行时状态（SSE memory_status 事件更新）：与消息生成、
+  // 工具步骤完全独立，记忆故障不作为聊天 error 呈现，仅以独立状态条可见
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatusSnapshot | null>(null)
   // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
   // 知识库或模型可用性，也不代表知识检索已就绪。登录走 WeKnora 自己的账号体系。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
@@ -926,7 +934,12 @@ export default function SuperAssistantPage() {
     summarySchedulerRef.current?.notify(conversationId)
     try {
       await superAssistantApi.streamChat(conversationId, { message, model_config_id: modelConfigId, agent_mode: true }, ({ event, data }) => {
-        if (event === 'thinking') {
+        // 记忆状态是用户级运行时状态而非 tools step：不触碰消息缓冲，
+        // 与 text/message_end 完全独立，正文中断绝不影响记忆状态条
+        if (event === 'memory_status') {
+          const snapshot = parseMemoryStatusEvent(data)
+          if (snapshot) setMemoryStatus(snapshot)
+        } else if (event === 'thinking') {
           buffer.thinkingRound = Number(data.round) || null
           applyBuffer()
         } else if (event === 'text_delta') {
@@ -1782,6 +1795,13 @@ export default function SuperAssistantPage() {
           }}
         >
           <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            {/* 记忆运行时状态条（SSE memory_status）：所有状态均明确可见（含未配置），
+                与聊天内容独立、不作为生成错误呈现 */}
+            {memoryStatus && (
+              <div className="flex shrink-0 justify-center px-4 pt-2 sm:px-8">
+                <MemoryStatusNotice status={memoryStatus} />
+              </div>
+            )}
             {kernelRunId && (
               <div className="mx-auto w-full max-w-4xl px-4 pt-3 sm:px-8">
                 <KernelRunTaskCard
@@ -1880,6 +1900,7 @@ export default function SuperAssistantPage() {
         skills={skills}
         servers={servers}
         tools={tools}
+        models={models}
         refreshSkills={refreshSkills}
         refreshServers={refreshServers}
         refreshTools={refreshTools}

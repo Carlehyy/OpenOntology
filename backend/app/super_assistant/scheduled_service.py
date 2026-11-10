@@ -618,6 +618,15 @@ def execute_run(run_id: str) -> None:
         )
         db.add_all([user_message, assistant_message])
         run.conversation_id = conversation.id
+        db.flush()
+        from app.super_assistant.hindsight_memory import enqueue_message, get_settings
+
+        if user_message.content and get_settings(db, task.owner_id).enabled:
+            enqueue_message(
+                db, owner_id=task.owner_id, conversation_id=conversation.id,
+                message_id=user_message.id, role="user", content=user_message.content,
+                occurred_at=user_message.created_at,
+            )
         db.commit()
         assistant_id = assistant_message.id
         owner_id = task.owner_id

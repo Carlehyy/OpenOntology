@@ -89,6 +89,15 @@ WeKnora v0.9.0 的公开入口与平台 Nginx 独立：它只暴露原生 Web �
 通过超级助手现有 MCP 管理手工接入，详见
 [配置流程](./configuration.md#weknora-共享知识库v090)。
 
+Hindsight 1.2.0 长期记忆是可选 profile，默认不部署：服务器 `.env` 写
+`HINDSIGHT_ENABLED=true` 后，`deploy-prod.sh` 幂等生成
+`HINDSIGHT_DB_PASSWORD`/`HINDSIGHT_API_KEY`/`HINDSIGHT_SERVICE_TOKEN`（可经
+`PROD_HINDSIGHT_*` secrets 物化）、钉扎 `HINDSIGHT_IMAGE`/
+`HINDSIGHT_POSTGRES_IMAGE` 的 `@sha256` 默认值并以 `--profile hindsight`
+启动；未启用时自动停掉历史容器（保留卷）。它不参与平台 readiness 与部署
+成败判定，部署日志仅记录功能健康状态。详见
+[配置流程](./configuration.md#hindsight-长期记忆可选默认关闭)。
+
 ## 数据库迁移停机边界
 
 生产迁移是一次有意的短暂停机。依赖连接预检通过后，`deploy/deploy-prod.sh`

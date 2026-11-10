@@ -24,7 +24,9 @@ import {
   type ParsedMcpClientServer,
 } from '@/lib/mcpClientConfig'
 import { useAuthStore } from '@/stores/authStore'
-import { ApprovalTab, EvolutionPendingBadge, MemoryTab } from './AssistantEvolution'
+import type { ModelConfig } from '@/types/ontology'
+import { ApprovalTab, EvolutionPendingBadge } from './AssistantEvolution'
+import MemoryPanel from './MemoryPanel'
 import VoiceTab from './VoiceTab'
 import { SettingSwitch } from './SettingSwitch'
 import { constrainedRegistrationState, errorText } from './assistantPanelUtils'
@@ -616,7 +618,7 @@ const MIN_PANEL_WIDTH = 288
 const maxPanelWidth = () => Math.max(MIN_PANEL_WIDTH, Math.min(600, window.innerWidth - 720))
 const clampPanelWidth = (width: number) => Math.min(Math.max(width, MIN_PANEL_WIDTH), maxPanelWidth())
 
-export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, refreshSkills, refreshServers, refreshTools, conversationId, initialTab, onInitialTabConsumed }: {
+export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, models, refreshSkills, refreshServers, refreshTools, conversationId, initialTab, onInitialTabConsumed }: {
   open: boolean
   onClose: () => void
   /** 面板宽度（px）：受控于页面级状态（聊天列据此让位），拖拽/键盘经 onWidthResize 回写 */
@@ -627,6 +629,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   skills: SuperSkill[]
   servers: SuperMcpServer[]
   tools: AssistantTool[]
+  /** 会话可选 LLM 清单（页面已加载）：记忆 tab 过滤出 openai/compatible 记忆可用模型 */
+  models: ModelConfig[]
   refreshSkills: () => Promise<void>
   refreshServers: () => Promise<void>
   refreshTools: () => Promise<void>
@@ -851,7 +855,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
           {tab === 'approval' ? (
             <ApprovalTab conversationId={conversationId} />
           ) : tab === 'memory' ? (
-            <MemoryTab />
+            <MemoryPanel active={open} models={models} />
           ) : tab === 'voice' ? (
             <VoiceTab />
           ) : tab === 'tools' ? (

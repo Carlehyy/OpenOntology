@@ -55,6 +55,15 @@ run_with_retry() {
 }
 INTEGRATED_DBX_INTERNAL=0
 INTEGRATED_DBX_COMMIT_PIN="0137e0cbc8b663da5a17ec424c6d47e4e5570ead"
+# Hindsight 长期记忆是可选 profile：HINDSIGHT_ENABLED=true 时才加入
+# --profile hindsight，未启用时仅停旧容器，绝不影响平台其余部署。
+HINDSIGHT_INTERNAL=0
+HINDSIGHT_IMAGE_PIN="ghcr.io/vectorize-io/hindsight:1.2.0@sha256:19d0c08f3df79acac29384826419a1ca158129e81ec527cdcbd8c97ff4ef76da"
+# 官方 pgvector pg17 的多架构 index digest：amd64+arm64 清单已经公共镜像源
+# OCI 元数据核验（arm64 本机 Docker Hub 实拉成功；docker.io 直连不可达，
+# amd64 实拉/官方重取当前 tag 头 sha256:7d0a4146… 待网络恢复）。拉取失败时
+# 运维重取多架构 digest 并覆盖 .env，禁止浮动 tag。
+HINDSIGHT_POSTGRES_IMAGE_PIN="pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f"
 
 compose_environment() {
   # Docker Compose gives exported shell variables precedence over the project
@@ -124,6 +133,17 @@ compose_environment() {
     -u WEKNORA_REDIS_IMAGE \
     -u WEKNORA_MAX_FILE_SIZE_MB \
     -u WEKNORA_DEFAULT_LOCALE \
+    -u HINDSIGHT_ENABLED \
+    -u HINDSIGHT_BASE_URL \
+    -u HINDSIGHT_API_KEY \
+    -u HINDSIGHT_SERVICE_TOKEN \
+    -u HINDSIGHT_TIMEOUT_SECONDS \
+    -u HINDSIGHT_NAMESPACE \
+    -u HINDSIGHT_DB_NAME \
+    -u HINDSIGHT_DB_USER \
+    -u HINDSIGHT_DB_PASSWORD \
+    -u HINDSIGHT_IMAGE \
+    -u HINDSIGHT_POSTGRES_IMAGE \
     -u STEWARD_INTERNAL_PROXY_BASE_URL \
     -u STEWARD_BROWSER_HTTP_LEASE_SECONDS \
     -u STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS \
@@ -163,6 +183,9 @@ compose() {
   done
   if [ "$INTEGRATED_DBX_INTERNAL" = "1" ] && [ "${1:-}" != "version" ]; then
     profile_args=(--profile integrated-dbx)
+  fi
+  if [ "$HINDSIGHT_INTERNAL" = "1" ] && [ "${1:-}" != "version" ]; then
+    profile_args+=(--profile hindsight)
   fi
   if [ "$call_timeout" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
     if compose_environment docker compose version >/dev/null 2>&1; then
@@ -431,8 +454,19 @@ verify_runtime_source_attestation() {
   log "runtime source attestation mount_check=app_source_not_mounted image_matches_build=true"
   return 0
 }
+start_hindsight_profile() {
+  # Hindsight 随最终 compose up -d 起在 hindsight profile 里；这里只在
+  # 「已关闭」时停掉历史遗留容器（不删卷），并把功能状态写进部署日志。
+  if [ "$HINDSIGHT_INTERNAL" = "1" ]; then
+    log "Hindsight memory profile enabled; it starts with the final compose up and never gates platform readiness"
+  else
+    compose --profile hindsight stop hindsight hindsight-db >/dev/null 2>&1 || true
+  fi
+}
+
 start_required_dependency_services() {
   start_integrated_dbx_if_needed
+  start_hindsight_profile
   # CDP must be configured and is checked by deep readiness, but an unhealthy
   # browser must not prevent the API process from starting for diagnostics.
   # python_kernel_gateway executes user scripts for Python pipelines; it is
@@ -718,6 +752,8 @@ bootstrap_production_env() {
     "$(random_hex 32)" "$bootstrap_tmp_path"
   set_env_value_in_file PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \
     "$(random_hex 32)" "$bootstrap_tmp_path"
+  # 可选记忆栈默认关闭；启用时由 configure_hindsight_env 生成独立凭据。
+  set_env_value_in_file HINDSIGHT_ENABLED false "$bootstrap_tmp_path"
   sync "$bootstrap_tmp_path" 2>/dev/null || sync
   # Publishing with a same-directory hard link is atomic and never replaces
   # an existing file, directory or dangling secret-mount symlink. A check then
@@ -959,6 +995,95 @@ configure_weknora_env() {
   set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
 }
 
+configure_hindsight_env() {
+  # Hindsight 长期记忆（可选）：HINDSIGHT_ENABLED=true 时生成/保留独立凭据并
+  # 钉扎镜像 digest；未启用时不动任何值（缺 secret 不阻断平台部署）。
+  local current
+  local -a updates=()
+  case "$(env_value HINDSIGHT_ENABLED)" in
+    1|true|TRUE|yes|YES) HINDSIGHT_INTERNAL=1 ;;
+    ""|0|false|FALSE|no|NO) HINDSIGHT_INTERNAL=0 ;;
+    *)
+      log "HINDSIGHT_ENABLED must be true or false"
+      exit 1
+      ;;
+  esac
+  if [ "$HINDSIGHT_INTERNAL" = "0" ]; then
+    log "Hindsight memory profile is disabled (HINDSIGHT_ENABLED!=true)"
+    return 0
+  fi
+  updates+=("HINDSIGHT_BASE_URL=http://hindsight:8888")
+  updates+=("HINDSIGHT_ENABLED=true")
+  current="$(env_value HINDSIGHT_TIMEOUT_SECONDS)"
+  [ -n "$current" ] || updates+=("HINDSIGHT_TIMEOUT_SECONDS=2")
+  current="$(env_value HINDSIGHT_NAMESPACE)"
+  [ -n "$current" ] || updates+=("HINDSIGHT_NAMESPACE=openontology")
+  current="$(env_value HINDSIGHT_DB_NAME)"
+  [ -n "$current" ] || updates+=("HINDSIGHT_DB_NAME=hindsight")
+  current="$(env_value HINDSIGHT_DB_USER)"
+  [ -n "$current" ] || updates+=("HINDSIGHT_DB_USER=hindsight")
+  for secret_assignment in \
+    "HINDSIGHT_DB_PASSWORD:24" \
+    "HINDSIGHT_API_KEY:32" \
+    "HINDSIGHT_SERVICE_TOKEN:32"; do
+    current="$(env_value "${secret_assignment%%:*}")"
+    case "$current" in
+      ""|change-me|\
+      hindsight-local-password|hindsight-local-api-key|hindsight-local-service-token)
+        updates+=("${secret_assignment%%:*}=$(random_hex "${secret_assignment#*:}")")
+        log "generated independent Hindsight runtime secret: ${secret_assignment%%:*}"
+        ;;
+    esac
+  done
+  # 官方 1.2.0 镜像与 DB 镜像的已验证 digest。已存在的值（含运维自选的其它
+  # @sha256 钉扎）一律保留；validate 阶段统一拒绝非 digest 引用。
+  current="$(env_value HINDSIGHT_IMAGE)"
+  [ -n "$current" ] || updates+=("HINDSIGHT_IMAGE=${HINDSIGHT_IMAGE_PIN}")
+  current="$(env_value HINDSIGHT_POSTGRES_IMAGE)"
+  [ -n "$current" ] || updates+=("HINDSIGHT_POSTGRES_IMAGE=${HINDSIGHT_POSTGRES_IMAGE_PIN}")
+  set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
+}
+
+validate_hindsight_config() {
+  # 仅在启用时校验；未启用时缺密钥/镜像键不得阻断全平台部署。
+  local hindsight_secret
+  [ "$HINDSIGHT_INTERNAL" = "1" ] || return 0
+  [ "$(env_value HINDSIGHT_BASE_URL)" = "http://hindsight:8888" ] || {
+    log "HINDSIGHT_BASE_URL must remain the internal http://hindsight:8888 contract"
+    exit 1
+  }
+  for key in HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN; do
+    require_secret "$key"
+  done
+  hindsight_secret="$(env_value HINDSIGHT_DB_PASSWORD)"
+  if [ "${#hindsight_secret}" -lt 12 ]; then
+    log "HINDSIGHT_DB_PASSWORD must contain at least 12 characters"
+    exit 1
+  fi
+  for key in HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN; do
+    hindsight_secret="$(env_value "$key")"
+    if [ "${#hindsight_secret}" -lt 24 ]; then
+      log "$key must contain at least 24 characters"
+      exit 1
+    fi
+  done
+  unset hindsight_secret
+  case "$(env_value HINDSIGHT_TIMEOUT_SECONDS)" in
+    ""|*[!0-9.]*|.*|*.|*.*.*)
+      log "HINDSIGHT_TIMEOUT_SECONDS must be a number between 0.1 and 60"
+      exit 1
+      ;;
+    *)
+      if ! awk -v value="$(env_value HINDSIGHT_TIMEOUT_SECONDS)" \
+          'BEGIN { exit !(value > 0 && value <= 60) }'; then
+        log "HINDSIGHT_TIMEOUT_SECONDS must be a number between 0.1 and 60"
+        exit 1
+      fi
+      ;;
+  esac
+  log "validated Hindsight memory service URLs and runtime credentials"
+}
+
 validate_weknora_config() {
   local http_port https_port public_port public_https_port admin_password weknora_secret
   [ "$(env_value WEKNORA_BASE_URL)" = "http://weknora-app:8080" ] || {
@@ -1067,6 +1192,8 @@ dependency_key_allowed() {
     WEKNORA_TIMEOUT_SECONDS|WEKNORA_ADMIN_USER|WEKNORA_ADMIN_EMAIL|\
     WEKNORA_APP_IMAGE|WEKNORA_UI_IMAGE|WEKNORA_DOCREADER_IMAGE|\
     WEKNORA_POSTGRES_IMAGE|WEKNORA_REDIS_IMAGE|\
+    HINDSIGHT_DB_PASSWORD|HINDSIGHT_API_KEY|HINDSIGHT_SERVICE_TOKEN|\
+    HINDSIGHT_IMAGE|HINDSIGHT_POSTGRES_IMAGE|\
     SUPER_ASSISTANT_MCP_STDIO_ENABLED|SUPER_ASSISTANT_MCP_STDIO_ALLOWED_COMMANDS)
       return 0
       ;;
@@ -1149,6 +1276,7 @@ apply_production_dependency_config
 chmod 600 .env
 configure_integrated_dbx
 configure_weknora_env
+configure_hindsight_env
 # Chromium is bundled with the production Compose stack. Pin the internal CDP
 # URL so existing server-side .env files receive the newly required setting.
 set_env_value STEWARD_BROWSER_CDP_URL http://browser:9222
@@ -1536,7 +1664,8 @@ redact_compose_logs() {
     N8N_API_KEY INTEGRATED_DBX_PASSWORD \
     WEKNORA_ADMIN_PASSWORD \
     WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
-    WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY; do
+    WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY \
+    HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN; do
     value="$(env_value "$key")"
     [ -z "$value" ] || sensitive_values+=("$value")
   done
@@ -1739,6 +1868,7 @@ validate_required_runtime_dependencies() {
 }
 validate_required_runtime_dependencies
 validate_weknora_config
+validate_hindsight_config
 if [ -z "$(env_value ENCRYPTION_KEY)" ]; then
   log "ENCRYPTION_KEY is empty; preserving the existing SECRET_KEY-derived encryption key"
 fi
@@ -1804,6 +1934,12 @@ for image_key in \
   WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE; do
   check_image_digest "$image_key"
 done
+# Hindsight 只在启用时参与 digest 门禁；未启用时缺键不得阻断全平台。
+if [ "$HINDSIGHT_INTERNAL" = "1" ]; then
+  for image_key in HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE; do
+    check_image_digest "$image_key"
+  done
+fi
 if [ "${DEPLOY_VALIDATE_ONLY:-0}" = "1" ]; then
   log "production environment validation succeeded"
   exit 0
@@ -1832,8 +1968,23 @@ if [ "${SKIP_GIT:-0}" != "1" ]; then
   fi
 fi
 command -v docker >/dev/null 2>&1 || { log "docker is not installed"; exit 1; }
+prepull_hindsight_images() {
+  # 可选记忆栈镜像预拉：digest 架构不符或网络失败只放弃本次 Hindsight 启用，
+  # 绝不让它的拉取失败进入最终 compose up 而阻塞主应用（卷保留，下次部署
+  # 自动重试）。停掉旧容器是为了避免最终 up --remove-orphans 以孤儿语义
+  # 粗暴清除；记忆特性本次降级，聊天与 readiness 不受影响。
+  [ "$HINDSIGHT_INTERNAL" = "1" ] || return 0
+  if ! run_with_retry compose --profile hindsight pull -q hindsight hindsight-db; then
+    log "warning: failed to pull Hindsight images; deploying WITHOUT the memory profile (chat unaffected, feature degrades until next deploy)"
+    HINDSIGHT_INTERNAL=0
+    compose --profile hindsight stop hindsight hindsight-db >/dev/null 2>&1 || true
+    return 0
+  fi
+  log "Hindsight images pulled via pinned digests"
+}
 log "building images"
 run_with_retry compose build --pull
+prepull_hindsight_images
 run_with_retry compose --profile weknora-bootstrap build --pull weknora-bootstrap
 # Resolve the exact image tag Compose will use for the backend service from the
 # structured build-print output (target.backend.tags). Do not guess an image
@@ -1973,6 +2124,15 @@ for i in $(seq 1 60); do
       exit 1
     fi
     log "deployment succeeded"
+    if [ "$HINDSIGHT_INTERNAL" = "1" ]; then
+      # 纯功能状态观测：首启可能仍在下载 embedding 模型。Hindsight 不参与
+      # 平台 readiness，这里失败只记录告警，绝不判定部署失败。
+      if wait_for_service_healthy hindsight 24 5; then
+        log "hindsight memory service is healthy (feature status only)"
+      else
+        log "warning: hindsight is not healthy yet (first start may download the embedding model); chat and platform readiness are unaffected"
+      fi
+    fi
     compose ps
     exit 0
   fi

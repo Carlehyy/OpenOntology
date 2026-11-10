@@ -41,7 +41,10 @@ const sseBody = [
   'event: thinking\ndata: {"round":1}',
   'event: tool_start\ndata: {"toolRunId":"run-1","toolName":"use_skill","arguments":{"skill":"demo"}}',
   'event: tool_result\ndata: {"toolRunId":"run-1","status":"success","preview":"读取成功"}',
+  // 记忆状态事件穿插正文流：与 text/finish 独立，不得打断最终答复
+  'event: memory_status\ndata: {"state":"syncing","pending_count":1,"failed_count":0}',
   'event: text_delta\ndata: {"delta":"流式最终答复"}',
+  'event: memory_status\ndata: {"state":"ready","pending_count":0,"failed_count":0,"last_synced_at":"2026-08-12T08:00:00+00:00"}',
   'event: message_end\ndata: {"message":{"id":"assistant-live","content":"流式最终答复","steps":[{"toolName":"use_skill","status":"success","arguments":{"skill":"demo"},"preview":"读取成功"}],"tokenUsage":{"inputTokens":10}}}',
   'event: done\ndata: {}',
   '',
@@ -190,6 +193,11 @@ test('发送消息后渲染思考链与流式答复', async ({ page }) => {
   await expect(panel.getByText('use_skill')).toBeVisible()
   await expect(panel.getByText('流式最终答复').first()).toBeVisible()
   await expect(panel.getByText('介绍一下平台').first()).toBeVisible()
+
+  // 记忆状态以独立状态条呈现（最终态 ready），不产生聊天错误
+  await expect(panel.getByTestId('memory-status-ready')).toBeVisible()
+  await expect(panel.getByText('记忆已同步')).toBeVisible()
+  await expect(panel.getByText('生成失败')).toHaveCount(0)
 })
 
 test('历史会话浮层可切换会话', async ({ page }) => {

@@ -84,6 +84,7 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 | Chromium CDP | 浏览器接管与数据管家浏览器会话 | `STEWARD_BROWSER_CDP_URL` 只接受 HTTP(S) 服务根地址；启动配置必需，不可达不杀死 API liveness，但 readiness 失败，不用 mock 冒充就绪 |
 | 集成数据集 dbx | 集成源登记、schema 发现与刷新；生产 metadata 只走固定版本 dbx，不回退 native | 生产部署自动启动仅内网可达的官方 digest dbx，或使用显式外部端点；缺失/不可达/认证失败/版本不符使部署 preflight 与生产 readiness fail closed，非生产不要求 dbx |
 | WeKnora v0.9.0 | 原生知识库 Web 与超级助手标准 MCP 知识来源 | 服务或管理员初始化失败时阻断启动；未配置模型、知识库或 MCP 不影响基础服务启动 |
+| Hindsight 1.2.0（可选） | 超级助手长期记忆（profile `hindsight`，默认关闭） | 可选特性：不可达/未启用时记忆特性降级，聊天与全局 readiness 不受影响；不回退旧记忆实现 |
 
 ### WeKnora 共享知识库（v0.9.0）
 
@@ -137,6 +138,42 @@ DB、Redis、JWT、AES 与 signing 凭据独立生成并跨部署保持不变。
 
 服务健康不代表知识已可检索。真实验收需上传脱敏文档，验证检索命中、引用和
 超级助手调用；模型或索引未配置时应显示实际错误，不能用探活结果冒充知识就绪。
+
+### Hindsight 长期记忆（可选，默认关闭）
+
+Hindsight 1.2.0 以独立 Compose profile `hindsight` 提供超级助手长期记忆，
+含专用 pgvector 数据库与模型缓存卷，不共用平台 PostgreSQL。本地启用
+`docker compose -f docker-compose.local.yml --profile hindsight up -d`；
+生产在服务器 `.env` 写 `HINDSIGHT_ENABLED=true` 后由 `deploy-prod.sh` 启停
+（未启用时自动停掉历史容器，不删卷）。API 与管理 UI（9999 控制面）仅
+Compose 内网/loopback（本地 `18888`/`19999`），不暴露公网；生产无宿主端口。
+
+平台侧设置：`HINDSIGHT_BASE_URL`（容器内网固定 `http://hindsight:8888`）、
+`HINDSIGHT_API_KEY`（backend → Hindsight Bearer，镜像内 ApiKeyTenantExtension
+强校验）、`HINDSIGHT_TIMEOUT_SECONDS`（默认 2）、`HINDSIGHT_NAMESPACE`、
+`HINDSIGHT_SERVICE_TOKEN`（Hindsight → 平台内部记忆 LLM 代理
+`/api/v2/super-assistant/internal/memory/v1` 的 service token，与容器
+`HINDSIGHT_API_LLM_API_KEY` 同值；不是真实模型 key）。
+三把密钥只进 backend/pipeline_executor 与 Hindsight 服务环境，生产由
+deploy-prod.sh 幂等生成，可选经 `PROD_HINDSIGHT_*` GitHub secrets 物化；
+缺失不阻断平台部署。镜像与专用 DB 一律 `@sha256` 钉扎（`HINDSIGHT_IMAGE`、
+`HINDSIGHT_POSTGRES_IMAGE`）。
+
+记忆 LLM 的模型选择是服务级的、每用户只有一个"当前模型"：Compose 三文件
+把 Hindsight 的 `HINDSIGHT_API_LLM_MODEL` 固定为平台别名
+`oo-memory-default`（Hindsight 1.2.0 禁止 bank 级 `llm_model` 覆盖，部署不
+提供也不接受自定义别名变量）。平台记忆网关收到该别名的请求后，从该用户的
+记忆设置中取「唯一一条 `enabled` 且 `model_config_id` 非空」的记录解析真实
+模型（复用平台模型配置，不向 Hindsight 存任何模型密钥）：0 条或多条满足
+条件时返回 503，管理员需把该用户的记忆设置收敛为恰好一条启用的模型。
+
+embedding 固定为 ONNX `intfloat/multilingual-e5-small`（384 维，E5 非对称
+前缀），模型不在镜像内：首启需 HuggingFace egress 下载。缓存走
+`HF_HOME=/hindsight-model-cache`（`hindsight_model_cache` 卷；镜像以 uid 1000
+运行，`hindsight-model-init` 负责卷属主）；无 egress 环境先在有网机器
+`snapshot_download` 同一 repo（含 tokenizer 文件）预填该卷的 `hub/` 目录，再设
+`HINDSIGHT_HF_OFFLINE=1`。rerank 保持镜像预载默认模型，中文效果未验证，
+属效果门禁。
 
 ### 集成数据集 dbx（生产）
 

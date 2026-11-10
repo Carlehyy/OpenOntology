@@ -1,12 +1,21 @@
 """超级助手自我进化反思服务（对标 small-rust-hermes 的 hermes-reflect crate）。
 
-三种反思：
+三种反思（均只产出技能候选）：
 
-- micro：每轮对话后的轻量反思，产出记忆/技能候选；达置信度阈值且无
-  supersedes 的记忆候选在 auto-accept 开关开启时直接写入；
-- focused：带人工提示的定向反思，只产出技能候选（be more generous）；
-- full：整会话手动反思，产出总结 + 三类候选（记忆/技能/冲突），不做
-  auto-accept，summary 仅记日志（运行记录有意不留 summary 字段）。
+- micro：每轮对话后的轻量反思，产出技能候选；
+- focused：带人工提示的定向反思，产出技能候选（be more generous）；
+- full：整会话手动反思，产出总结 + 技能候选，summary 仅记日志
+  （运行记录有意不留 summary 字段）。
+
+旧记忆链路已停用（2026-11 Hindsight 迁移）：用户记忆改为逐轮自动学习
+（Hindsight 源记录），不再由反思产出记忆/冲突候选、不做记忆 auto-accept、
+不再向旧记忆库（``memory_service.create_memory``）或画像/宫殿编译写入。
+历史记忆/冲突候选仍可查询（``list_candidates``）与 reject 清理，但 accept
+一律以 ValueError 拒绝（router 现有映射 → 400），不会成为新的生效记忆。
+
+技能进化链路完整保留：三类反思照常产出技能候选，``decide_candidate``
+对技能候选的 accept（经 skill_service 落地、同名 409、伴随文件）与
+reject 不变。
 
 候选统一进入人工审批（``decide_candidate``）；NATS 消费侧的幂等锚点是
 super_assistant_reflection_runs 的 (kind, message_id) 成功记录，full 反思
@@ -43,21 +52,24 @@ logger = logging.getLogger(__name__)
 
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
-# 显式教学意图关键词（中英文，大小写不敏感子串）：命中即触发 micro 反思
+# 显式教学意图关键词（中英文，大小写不敏感子串）：命中即触发 micro 反思。
+# 记忆学习已移交 Hindsight 逐轮自动学习，关键词只保留反思（技能）触发语义。
 _TEACHING_KEYWORDS = (
     "记住", "以后", "偏好", "总是", "请记住", "不是", "不对", "错了",
     "remember", "always", "prefer", "don't", "wrong", "actually",
 )
 
-_CONFLICT_DECISIONS = {"new_supersedes", "keep_old", "skip"}
+# 旧记忆/冲突候选的停用说明（router 的 ValueError 契约默认映射 400）：
+# 历史候选可查询、可 reject 清理，但不得 accept 写入旧记忆库。
+_LEGACY_MEMORY_DECISION_MESSAGE = (
+    "旧记忆链路已停用：用户记忆已迁移到逐轮自动学习（Hindsight），"
+    "反思不再向旧记忆库写入新记忆；历史记忆候选仅支持 reject 清理"
+)
 
 # full 反思的输入规模上限（对标 hermes 的全量反思窗口）
 _FULL_TRANSCRIPT_CHARS = 12_000
-_FULL_MEMORY_CAP = 100
 _FULL_DECISION_CAP = 10
-_FULL_MEMORY_CANDIDATE_CAP = 5
 _FULL_SKILL_CANDIDATE_CAP = 3
-_FULL_CONFLICT_CAP = 5
 
 
 # ---------------------------------------------------------------------------
@@ -301,11 +313,6 @@ def _reflect(call_kwargs: dict, prompt: str) -> dict:
     return _parse_json_loose(str(result.get("content") or ""))
 
 
-def _recompile_profile(db: Session, owner_id: str) -> None:
-    """记忆/技能变更后重编译；实现位于 memory_service（避免依赖环）。"""
-    memory_service.recompile_profile(db, owner_id)
-
-
 # ---------------------------------------------------------------------------
 # 反思输入组装
 # ---------------------------------------------------------------------------
@@ -388,25 +395,6 @@ def _enabled_skills(
     )
 
 
-def _memory_section(
-    db: Session,
-    owner_id: str,
-    cap: int,
-    with_id: bool,
-) -> str:
-    memories = memory_service.list_memories(db, owner_id)[:cap]
-    if not memories:
-        return "（无）"
-    lines = []
-    for memory in memories:
-        prefix = f"- id={memory.id} " if with_id else "- "
-        lines.append(
-            f"{prefix}[{memory.zone}] "
-            + memory_service._first_line(memory.content)
-        )
-    return "\n".join(lines)
-
-
 def _decision_section(db: Session, owner_id: str) -> str:
     decisions = recent_decisions(db, owner_id, cap=_FULL_DECISION_CAP)
     if not decisions:
@@ -437,25 +425,21 @@ def _micro_prompt(
     )
     skills = _enabled_skills(db, owner_id)[:10]
     skill_lines = "\n".join(f"- {skill.name}" for skill in skills) or "（无）"
-    return f"""你是超级助手的自我进化反思器（micro）。阅读最近一轮对话，判断是否有值得长期记住的用户事实，或值得沉淀为可复用技能的做法。
+    return f"""你是超级助手的自我进化反思器（micro）。阅读最近一轮对话，判断其中是否有值得沉淀为可复用技能的做法。
 
 ## 最近一轮对话
 {turn}
-
-## 已有记忆（避免重复）
-{_memory_section(db, owner_id, cap=20, with_id=False)}
 
 ## 已启用技能（避免重复）
 {skill_lines}
 
 只输出一个 JSON 对象，不要输出任何解释或 markdown 围栏：
-{{"memory_candidates": [{{"content": "...", "zone": "core|work|episode|general", "tags": ["..."], "confidence": "low|medium", "supersedes": []}}], "skill_candidates": [{{"name": "kebab-case", "display_name": "...", "description": "...", "triggers": ["..."], "skill_md": "完整 SKILL.md（含 YAML frontmatter: name/description）"}}]}}
+{{"skill_candidates": [{{"name": "kebab-case", "display_name": "...", "description": "...", "triggers": ["..."], "skill_md": "完整 SKILL.md（含 YAML frontmatter: name/description）"}}]}}
 
 规则：
-- 默认输出空数组；没有明确可复用事实或技能时不要硬造
-- memory_candidates 至多 1 条，仅记录稳定、跨会话有用的用户事实或偏好；confidence 只能用 low 或 medium
+- 默认输出空数组；没有明确可复用做法时不要硬造
 - skill_candidates 至多 1 个，仅当用户明确要求沉淀或反复出现可复用流程时给出
-- 不要记录已有记忆已覆盖的内容"""
+- 用户事实/偏好的记忆学习由平台逐轮自动完成，不要在反思里产出记忆候选"""
 
 
 def _focused_prompt(
@@ -506,13 +490,10 @@ def _full_prompt(
         )
         or "（无）"
     )
-    return f"""你是超级助手的自我进化反思器（full）。通读整段会话、现有记忆、已启用技能与最近审批历史，产出一份结构化反思结果。
+    return f"""你是超级助手的自我进化反思器（full）。通读整段会话、已启用技能与最近审批历史，产出一份结构化反思结果。
 
 ## 会话记录
 {transcript or "（无）"}
-
-## 现有记忆（active）
-{_memory_section(db, owner_id, cap=_FULL_MEMORY_CAP, with_id=True)}
 
 ## 已启用技能
 {skill_lines}
@@ -521,18 +502,16 @@ def _full_prompt(
 {_decision_section(db, owner_id)}
 
 只输出一个 JSON 对象，不要输出任何解释或 markdown 围栏：
-{{"summary": "200 字以内的会话与成长总结", "memory_candidates": [{{"content": "...", "zone": "core|work|episode|general", "tags": ["..."], "confidence": "low|medium|high", "supersedes": ["被取代的记忆 id"]}}], "skill_candidates": [{{"name": "kebab-case", "display_name": "...", "description": "...", "triggers": ["..."], "skill_md": "完整 SKILL.md（含 YAML frontmatter）"}}], "conflicts": [{{"memory_id": "现有记忆 id", "conflict_kind": "contradiction|outdated|duplicate", "explain": "...", "options": ["..."], "candidate_content": "建议写入的新内容"}}]}}
+{{"summary": "200 字以内的会话与成长总结", "skill_candidates": [{{"name": "kebab-case", "display_name": "...", "description": "...", "triggers": ["..."], "skill_md": "完整 SKILL.md（含 YAML frontmatter）"}}]}}
 
 规则：
-- summary 必填；三类候选默认输出空数组
-- memory_candidates 至多 5 条；supersedes 无取代对象时给空数组
-- skill_candidates 至多 3 个；conflicts 至多 5 条
-- conflicts 仅在新信息与某条现有记忆明显矛盾时给出，memory_id 必须来自“现有记忆”列表
+- summary 必填；skill_candidates 默认输出空数组，至多 3 个
+- 用户事实/偏好的记忆学习由平台逐轮自动完成，不要在反思里产出记忆或冲突候选
 - 不要重复审批历史中已被 reject/skip 的方向"""
 
 
 # ---------------------------------------------------------------------------
-# 候选落库与 auto-accept
+# 候选落库（仅技能）
 # ---------------------------------------------------------------------------
 
 
@@ -557,21 +536,6 @@ def _add_candidate(
     return candidate
 
 
-def _memory_payload(raw: dict) -> dict:
-    return {
-        "content": str(raw.get("content") or "").strip(),
-        "zone": str(raw.get("zone") or "general").strip() or "general",
-        "tags": [
-            str(tag) for tag in (raw.get("tags") or []) if str(tag).strip()
-        ][:20],
-        "pinned": bool(raw.get("pinned") or False),
-        "confidence": _normalize_confidence(raw.get("confidence")),
-        "supersedes": [
-            str(item) for item in (raw.get("supersedes") or []) if item
-        ],
-    }
-
-
 def _skill_payload(raw: dict) -> dict:
     files = []
     for entry in (raw.get("files") or [])[:10]:
@@ -593,71 +557,6 @@ def _skill_payload(raw: dict) -> dict:
     }
 
 
-def _try_auto_accept(
-    db: Session,
-    run: SuperAssistantReflectionRun,
-    payload: dict,
-) -> bool:
-    """auto-accept：开关开启、置信度达阈值、无 supersedes 时直接写入记忆。
-
-    冲突检测不通过（MemoryConflictError）时回退为人工审批候选；
-    其余写入异常向上抛（计入 run error）。
-    """
-    if payload["supersedes"]:
-        return False
-    profile = db.get(SuperAssistantMemoryProfile, run.owner_id)
-    if profile is not None and not profile.auto_accept_enabled:
-        return False
-    threshold = _CONFIDENCE_RANK.get(
-        str(settings.super_assistant_auto_accept_min_confidence)
-        .strip()
-        .lower(),
-        1,
-    )
-    if _CONFIDENCE_RANK[payload["confidence"]] < threshold:
-        return False
-    try:
-        memory = memory_service.create_memory(
-            db,
-            run.owner_id,
-            payload["content"],
-            zone=payload["zone"],
-            pinned=payload["pinned"],
-            confidence=payload["confidence"],
-            source="reflection",
-            tags=payload["tags"],
-        )
-    except memory_service.MemoryConflictError:
-        return False
-    logger.info("micro 反思自动接受记忆 %s（run=%s）", memory.id, run.id)
-    _recompile_profile(db, run.owner_id)
-    return True
-
-
-def _process_memory_candidates(
-    db: Session,
-    run: SuperAssistantReflectionRun,
-    items: list,
-    *,
-    auto_accept: bool,
-    cap: int,
-) -> int:
-    pending = 0
-    for raw in items[:cap]:
-        if not isinstance(raw, dict):
-            continue
-        payload = _memory_payload(raw)
-        if not payload["content"]:
-            continue
-        if auto_accept and _try_auto_accept(db, run, payload):
-            continue
-        _add_candidate(
-            db, run, "memory", payload, confidence=payload["confidence"]
-        )
-        pending += 1
-    return pending
-
-
 def _process_skill_candidates(
     db: Session,
     run: SuperAssistantReflectionRun,
@@ -677,37 +576,6 @@ def _process_skill_candidates(
     return pending
 
 
-def _process_conflicts(
-    db: Session,
-    run: SuperAssistantReflectionRun,
-    items: list,
-    *,
-    cap: int,
-) -> int:
-    pending = 0
-    for raw in items[:cap]:
-        if not isinstance(raw, dict):
-            continue
-        memory_id = str(raw.get("memory_id") or "").strip()
-        candidate_content = str(raw.get("candidate_content") or "").strip()
-        if not memory_id or not candidate_content:
-            continue
-        payload = {
-            "memory_id": memory_id,
-            "conflict_kind": str(raw.get("conflict_kind") or "").strip()
-            or "contradiction",
-            "explain": str(raw.get("explain") or "").strip(),
-            "options": [
-                str(option) for option in (raw.get("options") or [])
-                if str(option).strip()
-            ],
-            "candidate_content": candidate_content,
-        }
-        _add_candidate(db, run, "conflict", payload, confidence="medium")
-        pending += 1
-    return pending
-
-
 def stage_memory_candidate(
     db: Session,
     owner_id: str,
@@ -715,27 +583,13 @@ def stage_memory_candidate(
     payload: dict,
     confidence: str = "medium",
 ) -> SuperAssistantReflectionCandidate:
-    """Agent 工具（memory_save）直写候选：挂 kind="manual" 的一次性 run。
+    """旧 manual memory_save 的候选入口，已随 Hindsight 迁移停用。
 
-    与 micro/focused 不同，manual run 没有 message_id 幂等锚——每次调用都是
-    一次独立的 agent 意图，run 直接以成功态落库，候选进入待审批。
+    memory_save 工具已改接新源记录（逐轮自动学习），旧记忆库不再接受
+    新候选。入口保留为 fail-closed：任何残留调用方都会得到显式拒绝，
+    而不是静默写入旧库。签名保持不变以免迁移期 import 失败。
     """
-    run = SuperAssistantReflectionRun(
-        owner_id=owner_id,
-        conversation_id=conversation_id,
-        kind="manual",
-        status="success",
-        candidate_count=1,
-        finished_at=datetime.now(timezone.utc),
-    )
-    db.add(run)
-    db.flush()
-    candidate = _add_candidate(
-        db, run, "memory", _memory_payload(payload), confidence=confidence
-    )
-    db.commit()
-    db.refresh(candidate)
-    return candidate
+    raise ValueError(_LEGACY_MEMORY_DECISION_MESSAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -815,8 +669,9 @@ def run_micro_reflection(
     conversation_id: str,
     message_id: str,
 ) -> SuperAssistantReflectionRun:
-    """执行一轮 micro 反思；同 (kind="micro", message_id) 已有成功 run 时
-    直接返回既有 run（NATS 重投幂等）。异常记入 run.error，不向上抛。"""
+    """执行一轮 micro 反思（仅技能候选）；同 (kind="micro", message_id)
+    已有成功 run 时直接返回既有 run（NATS 重投幂等）。异常记入 run.error，
+    不向上抛。记忆学习由 Hindsight 逐轮自动完成，反思不产出记忆候选。"""
     existing = _latest_successful_run(db, "micro", message_id)
     if existing is not None:
         return existing
@@ -825,11 +680,8 @@ def run_micro_reflection(
         call_kwargs = _reflection_call_kwargs(db)
         prompt = _micro_prompt(db, owner_id, conversation_id, message_id)
         output = _reflect(call_kwargs, prompt)
-        pending = _process_memory_candidates(
-            db, run, output.get("memory_candidates") or [],
-            auto_accept=True, cap=1,
-        )
-        pending += _process_skill_candidates(
+        # 模型若仍按旧契约返回 memory_candidates，一律忽略（不落候选）
+        pending = _process_skill_candidates(
             db, run, output.get("skill_candidates") or [], cap=1,
         )
     except Exception as exc:
@@ -867,8 +719,9 @@ def run_full_reflection(
     owner_id: str,
     conversation_id: str,
 ) -> SuperAssistantReflectionRun:
-    """执行一轮 full 反思；同会话已有 running 的 full run 时直接返回它
-    （防重复派发）。三类候选全部落 pending，不做 auto-accept。"""
+    """执行一轮 full 反思（summary + 仅技能候选）；同会话已有 running 的
+    full run 时直接返回它（防重复派发）。技能候选落 pending，不做
+    auto-accept；记忆/冲突产出已随 Hindsight 迁移停用。"""
     running = (
         db.query(SuperAssistantReflectionRun)
         .filter(
@@ -889,16 +742,10 @@ def run_full_reflection(
         summary = str(output.get("summary") or "").strip()
         if summary:
             logger.info("full 反思总结（run=%s）: %s", run.id, summary)
-        pending = _process_memory_candidates(
-            db, run, output.get("memory_candidates") or [],
-            auto_accept=False, cap=_FULL_MEMORY_CANDIDATE_CAP,
-        )
-        pending += _process_skill_candidates(
+        # 模型若仍按旧契约返回 memory_candidates/conflicts，一律忽略
+        pending = _process_skill_candidates(
             db, run, output.get("skill_candidates") or [],
             cap=_FULL_SKILL_CANDIDATE_CAP,
-        )
-        pending += _process_conflicts(
-            db, run, output.get("conflicts") or [], cap=_FULL_CONFLICT_CAP,
         )
     except Exception as exc:
         return _fail_run(db, run, exc)
@@ -974,32 +821,15 @@ def _decide_memory(
     payload: dict,
     action: str,
 ) -> str:
+    """历史记忆候选：仅支持 reject 清理；accept 一律拒绝（旧链路停用）。
+
+    保留 reject 的原因：迁移期还可能有历史 pending 记忆候选，用户需要
+    能把它们标记为 rejected 完成清理；accept 会向旧记忆库写入新生效
+    记忆，与 Hindsight 迁移方向冲突，故显式拒绝（ValueError → 400）。
+    """
     if action == "reject":
         return "rejected"
-    if action != "accept":
-        raise ValueError(f"不支持的记忆候选操作: {action}")
-    content = str(payload.get("content") or "").strip()
-    if not content:
-        raise ValueError("记忆候选缺少 content")
-    supersedes = [
-        str(item) for item in (payload.get("supersedes") or []) if item
-    ]
-    memory_service.create_memory(
-        db,
-        candidate.owner_id,
-        content,
-        zone=str(payload.get("zone") or "general"),
-        pinned=bool(payload.get("pinned") or False),
-        confidence=str(payload.get("confidence") or candidate.confidence),
-        source="reflection",
-        tags=[str(tag) for tag in (payload.get("tags") or [])],
-        supersedes=supersedes,
-        # 带 supersedes 的候选是对旧记忆的显式更新：旧记忆在冲突检测时
-        # 仍是 active，检查会对自己误报，故跳过
-        conflict_check=not supersedes,
-    )
-    _recompile_profile(db, candidate.owner_id)
-    return "accepted"
+    raise ValueError(_LEGACY_MEMORY_DECISION_MESSAGE)
 
 
 def _decide_skill(
@@ -1013,7 +843,9 @@ def _decide_skill(
     if action != "accept":
         raise ValueError(f"不支持的技能候选操作: {action}")
     _create_skill_from_payload(db, candidate.owner_id, payload)
-    _recompile_profile(db, candidate.owner_id)
+    # 不再触发画像/宫殿重编译：compile_profile_and_palace 只读旧记忆行，
+    # 与技能可见性无关（技能经 _enabled_skills / skill tools 进入 prompt），
+    # 旧记忆停用后重编译只剩一次无意义的 LLM 写入。
     return "accepted"
 
 
@@ -1023,31 +855,13 @@ def _decide_conflict(
     payload: dict,
     action: str,
 ) -> str:
-    if action not in _CONFLICT_DECISIONS:
-        raise ValueError(f"不支持的冲突候选操作: {action}")
-    if action != "new_supersedes":
-        # keep_old/skip：不改记忆，decision 记原值，状态记 rejected
+    """历史冲突候选：keep_old/skip 仍可标记 rejected；new_supersedes 会
+    向旧记忆库写入取代记忆，与 Hindsight 迁移冲突，显式拒绝（→ 400）。"""
+    if action in {"keep_old", "skip"}:
         return "rejected"
-    content = str(
-        payload.get("content") or payload.get("candidate_content") or ""
-    ).strip()
-    if not content:
-        raise ValueError("冲突候选缺少 candidate_content")
-    memory_id = str(payload.get("memory_id") or "").strip()
-    if not memory_id:
-        raise ValueError("冲突候选缺少 memory_id")
-    memory_service.create_memory(
-        db,
-        candidate.owner_id,
-        content,
-        zone=str(payload.get("zone") or "general"),
-        confidence=candidate.confidence,
-        source="reflection",
-        supersedes=[memory_id],
-        conflict_check=False,
-    )
-    _recompile_profile(db, candidate.owner_id)
-    return "accepted"
+    if action == "new_supersedes":
+        raise ValueError(_LEGACY_MEMORY_DECISION_MESSAGE)
+    raise ValueError(f"不支持的冲突候选操作: {action}")
 
 
 def decide_candidate(
@@ -1057,11 +871,13 @@ def decide_candidate(
     decision: str,
     edited_payload: dict | None = None,
 ) -> SuperAssistantReflectionCandidate:
-    """审批一个反思候选：接受则落记忆/建技能/按冲突策略写记忆。
+    """审批一个反思候选：技能候选 accept 落地技能；记忆/冲突候选仅支持
+    reject 类清理（accept/new_supersedes 因旧记忆链路停用被拒绝）。
 
     ValueError 消息契约（router 依此映射状态码）："候选不存在"/"会话不
-    存在"→404，"候选已处理"/"同名 Skill 已存在"→409，其余→400。
-    edited_payload 的键覆盖原 payload。
+    存在"→404，"候选已处理"/"同名 Skill 已存在"→409，其余（含旧记忆
+    候选的停用拒绝）→400。edited_payload 的键覆盖原 payload（技能候选
+    仍有效；记忆/冲突候选不接受任何 accept 语义）。
     """
     candidate = (
         db.query(SuperAssistantReflectionCandidate)

@@ -141,6 +141,7 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
         "task_instances.control",
         "integrated.sync",
         "ontology.assistant.run",
+        "super_assistant.memory.sync",
     ]
     assert config.subjects == list(PIPELINE_STREAM_SUBJECTS)
     assert config.retention == RetentionPolicy.WORK_QUEUE
@@ -198,7 +199,9 @@ def test_dispatch_ontology_assistant_run_uses_stable_msg_id(fake_nats):
 
     assert ONTOLOGY_ASSISTANT_RUN_SUBJECT == "ontology.assistant.run"
     assert ONTOLOGY_ASSISTANT_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
-    assert PIPELINE_STREAM_SUBJECTS[-1] == ONTOLOGY_ASSISTANT_RUN_SUBJECT
+    assert PIPELINE_STREAM_SUBJECTS[-2:] == (
+        ONTOLOGY_ASSISTANT_RUN_SUBJECT, "super_assistant.memory.sync",
+    )
     first, second = fake_nats["published"]
     for subject, payload, headers in (first, second):
         assert subject == ONTOLOGY_ASSISTANT_RUN_SUBJECT

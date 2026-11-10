@@ -126,6 +126,14 @@ cd ../frontend && npx playwright test --config=playwright.stack.config.ts src/te
 上启动时 `dev_server` 会自动执行 `alembic upgrade head` 并 seed 管理员
 （admin / 上述 FIRST_ADMIN_PASSWORD）。
 
+隔离栈另有可选 Hindsight 记忆服务（同样错端口、profile 门控）：
+`docker compose -f docker-compose.e2e.yml --profile hindsight up -d` 起
+`hindsight`/`hindsight-db`，API 在 `127.0.0.1:18888`；宿主机 backend 以
+`HINDSIGHT_BASE_URL=http://127.0.0.1:18888`、`HINDSIGHT_API_KEY=e2e-hindsight-api-key`、
+`HINDSIGHT_SERVICE_TOKEN=e2e-hindsight-service-token` 接入。首启同样需要
+HuggingFace egress 或预填 `hindsight_model_cache` 卷（见 setup.md 的
+Hindsight 节）。
+
 当前没有引入 Vitest/React Testing Library。需要 DOM 的组件行为继续进入
 Playwright；这不是跳过纯逻辑单元测试的理由。
 

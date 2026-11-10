@@ -355,6 +355,18 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+from app.super_assistant import memory_router, memory_llm
+app.include_router(
+    memory_router.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant-memory"],
+    dependencies=assistant_guard,
+)
+app.include_router(
+    memory_llm.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant-memory-internal"],
+)
 # kernel.v1 执行 API 与 legacy Super Assistant 路由并行挂载，旧协议保持不变。
 from app.super_assistant.kernel import router as super_assistant_kernel_router
 app.include_router(
