@@ -240,9 +240,21 @@ export default function NotificationsDialog({
   const stateMutation = useMutation({
     mutationFn: ({ id, fields }: { id: string; fields: { isRead?: boolean; isStarred?: boolean; isArchived?: boolean } }) =>
       notificationsApi.updateState(id, fields),
-    onSuccess: data => {
+    onSuccess: (data, variables) => {
       queryClient.setQueryData(['notifications', 'detail', data.id], data)
       invalidateLists()
+      // 归档/恢复会把消息移出当前 tab 列表（全部/已标记归档离开、已归档恢复离开）：
+      // 详情若停在原地会一直显示已离开列表的消息。推进选中到下一条（末条回第一条），
+      // 让右侧详情与左侧高亮始终指向列表中仍存在的消息；列表只剩它自己则回空态。
+      // 星标/已读翻转不移出列表，选中态不动。
+      if (variables.fields.isArchived === undefined) return
+      const index = items.findIndex(item => item.id === data.id)
+      const remaining = items.filter(item => item.id !== data.id)
+      // remaining[index] 恰为被操作项的下一条；末条取不到时回第一条（需求语义），
+      // 列表只剩它自己则两处皆空 → 清空选中回详情空态
+      const next = remaining[index] ?? remaining[0] ?? null
+      if (next) openMessage(next.id, next.isRead)
+      else setSelectedId(null)
     },
     onError: error => toast.error(errorText(error)),
   })
