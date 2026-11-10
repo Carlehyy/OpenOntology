@@ -1,5 +1,6 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
+
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 const now = '2026-07-19T08:00:00+00:00'
 const conversation = {
@@ -546,8 +547,8 @@ test('输入栏白色背景、聊天区滚动条隐藏、侧边栏底栏已按�
 })
 
 // ---------------------------------------------------------------------------
-// MCP 接入（pi · Streamable HTTP）：入口位于本体选择框左侧，能力未确认前禁用，
-// 模板绝不内嵌真实密码（AGENTS.md §5 副作用类交互验收规范）。
+// MCP 接入（Streamable HTTP，面向任意 MCP 客户端）：入口位于本体选择框左侧，
+// 能力未确认前禁用，模板绝不内嵌真实密码（AGENTS.md §5 副作用类交互验收规范）。
 // 注意：页面请求 URL 带 query（如 /api/v1/ontologies?page_size=1000），
 // 以 $ 结尾的 glob route 匹配不到——多本体与能力状态一律经 mockAgentHeader
 // 选项在 goto 前注册，不做二次 route 覆盖。
@@ -612,13 +613,15 @@ test('MCP 弹窗展示模板与提示并跟随本体切换更新', async ({ page
   await expect(dialog).toContainText('供应链本体')
   await expect(dialog).toContainText('当前发布 v1')
   await expect(dialog).toContainText('自动跟随最新发布版本')
+  await expect(dialog).toContainText('X-OpenOntology-Username')
   await expect(dialog).toContainText('ontology_schema')
   await expect(dialog).toContainText('ontology_query_page')
   await expect(dialog).toContainText('不执行动作')
-  await expect(dialog).toContainText('REPLACE_WITH_YOUR_PASSWORD')
-  await expect(page.getByTestId('agent-mcp-escape-hint')).toContainText('$$')
-  await expect(page.getByTestId('agent-mcp-escape-hint')).toContainText('$!')
-  await expect(page.getByTestId('agent-mcp-https-hint')).toContainText('HTTPS')
+  await expect(page.getByTestId('agent-mcp-hint')).toContainText('HTTPS')
+  await expect(page.getByTestId('agent-mcp-hint')).toContainText('$$')
+  await expect(page.getByTestId('agent-mcp-hint')).toContainText('$!')
+  // 弹窗只保留复制主操作；不再提供下载入口（全选文本框即手动兜底）
+  await expect(dialog.getByRole('button', { name: '下载 .json' })).toHaveCount(0)
 
   const origin = new URL(page.url()).origin
   const first = JSON.parse(await page.getByTestId('agent-mcp-config').inputValue())
@@ -702,33 +705,6 @@ test('MCP 配置复制写入真实剪贴板并如实提示', async ({ page }) =>
   expect(clipped).toBe(expected)
   expect(JSON.parse(clipped).mcpServers['openontology-ontology-1'].headers['X-OpenOntology-Password'])
     .toBe('REPLACE_WITH_YOUR_PASSWORD')
-})
-
-test('MCP 配置下载的 JSON 内容可直接使用', async ({ page }) => {
-  await mockAgentHeader(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/#/agent')
-  await page.getByLabel('选择本体').selectOption('ontology-1')
-  await page.getByTestId('agent-mcp-button').click()
-
-  const downloadPromise = page.waitForEvent('download')
-  await page.getByRole('button', { name: '下载 .json' }).click()
-  const download = await downloadPromise
-  expect(download.suggestedFilename()).toBe('openontology-mcp-ontology-1.json')
-
-  const downloadPath = await download.path()
-  expect(downloadPath).not.toBeNull()
-  const origin = new URL(page.url()).origin
-  const payload = JSON.parse(await readFile(downloadPath!, 'utf8'))
-  expect(payload.mcpServers['openontology-ontology-1']).toMatchObject({
-    url: `${origin}/api/v2/formal/ontologies/ontology-1/mcp`,
-    exposure: 'direct',
-    headers: {
-      'X-OpenOntology-Username': 'admin',
-      'X-OpenOntology-Password': 'REPLACE_WITH_YOUR_PASSWORD',
-    },
-  })
-  expect(payload.mcpServers['openontology-ontology-1'].description).toContain('供应链本体')
   // 模板不携带任何真实凭据（会话 token 等绝不进入配置）
-  expect(JSON.stringify(payload)).not.toContain('e2e-token')
+  expect(clipped).not.toContain('e2e-token')
 })

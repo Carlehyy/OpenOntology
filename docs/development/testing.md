@@ -175,7 +175,7 @@ Host 和认证请求头透传。报告与运行日志写入 `.artifacts/ontology
 不能将本项查询验收当作完整平台就绪验收。
 
 页面验收使用 `frontend/src/test/e2e/agent_mcp_stack.spec.ts`，通过真实登录
-检查入口、配置弹窗、剪贴板实际内容、下载 JSON 内容与层叠命中。后端和生产
+检查入口、配置弹窗、剪贴板实际内容、聚焦全选手动兜底与层叠命中。后端和生产
 Web 已在同一隔离栈运行时，设置 `PLAYWRIGHT_BASE_URL` 指向该 Web，并显式设置
 `PLAYWRIGHT_REUSE_SERVER=1`、`PLAYWRIGHT_API_URL` 和
 `PLAYWRIGHT_MCP_ONTOLOGY_ID`（该隔离栈中已发布的合成本体 ID）；凭据遵循共享

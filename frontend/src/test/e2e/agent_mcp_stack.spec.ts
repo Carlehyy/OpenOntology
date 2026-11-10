@@ -1,16 +1,15 @@
 /**
  * 本体助手 MCP 接入真机验收（生产 Nginx 静态前端 + 真实后端，不 mock 网络）：
- * 入口位置与启用、模板 URL/凭据字段（真实剪贴板回读 + 下载内容）、关键交互
- * 无遮挡（elementFromPoint 命中）与端点真实路由。前置：PLAYWRIGHT_BASE_URL
- * 指向生产静态 web（配合 PLAYWRIGHT_REUSE_SERVER=1 复用）、PLAYWRIGHT_API_URL
- * 指向同栈后端、PLAYWRIGHT_MCP_ONTOLOGY_ID 指向带当前发布版本的验收本体。
- * 禁止对生产运行本测试。
+ * 入口位置与启用、模板 URL/凭据字段（真实剪贴板回读 + 聚焦全选手动兜底）、
+ * 关键交互无遮挡（elementFromPoint 命中）与端点真实路由。前置：
+ * PLAYWRIGHT_BASE_URL 指向生产静态 web（配合 PLAYWRIGHT_REUSE_SERVER=1 复用）、
+ * PLAYWRIGHT_API_URL 指向同栈后端、PLAYWRIGHT_MCP_ONTOLOGY_ID 指向带当前
+ * 发布版本的验收本体。禁止对生产运行本测试。
  */
 
 /// <reference types="node" />
 
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -66,22 +65,7 @@ async function expectTopHitVisible(
   expect(hit, `${description} 可视区探针点不得被其他层遮挡`).toBe(true)
 }
 
-/** 同上，按按钮文本匹配（无 testid 的按钮，如下载 .json）。 */
-async function expectTopHitButton(page: Page, locator: Locator, text: string, description: string) {
-  await locator.scrollIntoViewIfNeeded()
-  const hit = await locator.evaluate((element, label) => {
-    const rect = element.getBoundingClientRect()
-    const y = rect.top + rect.height / 2
-    const x = rect.left + rect.width / 2
-    const top = document.elementFromPoint(x, y)
-    return !!top && !!top.closest('button')
-      && (top.textContent || '').includes(label)
-      && y >= 0 && y < window.innerHeight
-  }, text)
-  expect(hit, `${description} 可视区探针点不得被其他层遮挡`).toBe(true)
-}
-
-test('real stack: MCP 接入模板经真实剪贴板与下载双重验收', async ({ page, request }) => {
+test('real stack: MCP 接入模板经真实剪贴板与全选兜底验收', async ({ page, request }) => {
   test.setTimeout(120_000)
 
   expect(['127.0.0.1', 'localhost', '[::1]']).toContain(new URL(API).hostname)
@@ -122,14 +106,14 @@ test('real stack: MCP 接入模板经真实剪贴板与下载双重验收', asyn
     await expect(dialog).toContainText(`当前发布 ${ontology.current_release_version}`)
   }
   await expect(dialog).toContainText('自动跟随最新发布版本')
-  await expect(dialog).toContainText('REPLACE_WITH_YOUR_PASSWORD')
+  await expect(dialog).toContainText('X-OpenOntology-Username')
+  // 弹窗只保留复制主操作；全选文本框即手动复制兜底（AGENTS.md §5）
+  await expect(dialog.getByRole('button', { name: '下载 .json' })).toHaveCount(0)
 
   const configField = page.getByTestId('agent-mcp-config')
   const copyButton = page.getByTestId('agent-mcp-copy')
-  const downloadButton = page.getByRole('button', { name: '下载 .json' })
   await expectTopHitVisible(page, configField, '[data-testid="agent-mcp-config"]', '配置全文')
   await expectTopHitVisible(page, copyButton, '[data-testid="agent-mcp-copy"]', '复制按钮')
-  await expectTopHitButton(page, downloadButton, '下载 .json', '下载按钮')
 
   // 手动复制兜底真实可用：聚焦即全选全文
   await configField.focus()
@@ -159,23 +143,12 @@ test('real stack: MCP 接入模板经真实剪贴板与下载双重验收', asyn
     'X-OpenOntology-Password': 'REPLACE_WITH_YOUR_PASSWORD',
   })
   expect(clippedEntry.exposure).toBe('direct')
+  expect(clippedEntry.description).toContain(ontology.name)
   expect(clipped, '真实凭据绝不进入模板').not.toContain(STACK_ADMIN_PASSWORD)
-
-  const downloadPromise = page.waitForEvent('download')
-  await downloadButton.click()
-  const download = await downloadPromise
-  expect(download.suggestedFilename()).toBe(`openontology-mcp-${OID}.json`)
-  const downloadPath = await download.path()
-  expect(downloadPath).not.toBeNull()
-  const downloaded = await readFile(downloadPath!, 'utf8')
-  expect(downloaded).toBe(expected)
-  const payload = JSON.parse(downloaded)
-  expect(payload.mcpServers[`openontology-${OID}`].description).toContain(ontology.name)
-  expect(downloaded).not.toContain(STACK_ADMIN_PASSWORD)
 
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
 
   mkdirSync(ARTIFACT_DIR, { recursive: true })
-  writeFileSync(path.join(ARTIFACT_DIR, `mcp-config-${Date.now().toString(36)}.json`), downloaded)
+  writeFileSync(path.join(ARTIFACT_DIR, `mcp-config-${Date.now().toString(36)}.json`), clipped)
 })

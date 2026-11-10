@@ -181,11 +181,11 @@ export default function AgentWorkbenchPage() {
                   onClick={() => setMcpDialogOpen(true)}
                   disabled={!catalog.oid || !catalog.caps || !catalog.caps.enabled}
                   aria-label="MCP 接入"
+                  title="MCP 接入"
                   data-testid="agent-mcp-button"
-                  className="group/tip relative flex h-8 w-8 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:cursor-not-allowed disabled:opacity-30"
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:cursor-not-allowed disabled:opacity-30"
                 >
                   <PlugZap size={14} />
-                  <span className="pointer-events-none absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-0.5 text-[11px] text-popover-foreground shadow-sm opacity-0 transition-opacity group-hover/tip:opacity-100">MCP 接入</span>
                 </button>
                 <select
                   value={catalog.oid}
@@ -515,7 +515,6 @@ export default function AgentWorkbenchPage() {
         ontologyName={catalog.selectedOntology?.name || '当前本体'}
         releaseVersion={catalog.selectedOntology?.current_release_version || catalog.selectedOntology?.version || ''}
         username={accountUsername}
-        connectionConfirmed={!!catalog.oid && !!catalog.caps?.enabled}
       />
       <DynamicSentinelDrawer
         oid={catalog.oid}

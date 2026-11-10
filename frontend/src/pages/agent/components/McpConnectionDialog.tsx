@@ -1,10 +1,11 @@
 /**
- * 本体 MCP 接入弹窗：为外部 pi（原生 Streamable HTTP）生成当前本体的
- * mcpServers 配置模板（自动跟随最新发布，只读查询，无 LLM；复制按
- * AGENTS.md §5 只提示“已尝试写入剪贴板”，页面不收集真实密码）。
+ * 本体 MCP 接入弹窗：为任意支持 Streamable HTTP 的 MCP 客户端生成当前本体
+ * 的 mcpServers 配置模板（自动跟随最新发布，只读查询，无 LLM）。复制按
+ * AGENTS.md §5 只提示“已尝试写入剪贴板”，常驻全文文本框（聚焦即全选）
+ * 提供不依赖剪贴板的手动复制兜底；页面不收集真实密码。
  */
 import { useRef, useState } from 'react'
-import { Copy, Download, Loader2, PlugZap } from 'lucide-react'
+import { Copy, Loader2, PlugZap } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   Dialog,
@@ -13,12 +14,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Alert } from '@/components/ui/Alert'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import {
-  MCP_PASSWORD_PLACEHOLDER,
-  mcpConfigFilename,
-  renderPiMcpConfigJson,
+  buildMcpEndpointUrl,
+  renderMcpConfigJson,
 } from './mcpConnectionConfig'
 
 export interface McpConnectionDialogProps {
@@ -30,20 +29,12 @@ export interface McpConnectionDialogProps {
   releaseVersion: string
   /** 当前登录账号名，预填进模板用户名；为空时模板保留占位符。 */
   username: string
-  /** 仅当 caps 已加载且 enabled 才为 true；未确认时弹窗不得宣称可连接。 */
-  connectionConfirmed: boolean
 }
-
-const MCP_TOOLS: Array<{ name: string; summary: string }> = [
-  { name: 'ontology_schema', summary: '查看本体结构：对象类型、关系与字段' },
-  { name: 'ontology_query', summary: '按条件查询实例数据（受行数上限约束）' },
-  { name: 'ontology_query_page', summary: '游标分页查询，适合较大结果集' },
-]
 
 function InfoRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-2">
-      <span className="w-14 shrink-0 pt-px font-mono text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">{label}</span>
+      <span className="w-10 shrink-0 pt-px font-mono text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">{label}</span>
       <div className="min-w-0 flex-1 text-xs leading-5 text-[var(--color-text-secondary)]">{children}</div>
     </div>
   )
@@ -67,15 +58,13 @@ export function McpConnectionDialog({
   ontologyName,
   releaseVersion,
   username,
-  connectionConfirmed,
 }: McpConnectionDialogProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [copying, setCopying] = useState(false)
 
-  // 不做 memo：渲染期直接求值，切换本体/重新打开/运行时注入 API 基址后即取新值
-  const configJson = renderPiMcpConfigJson({
-    base: runtimeApiBase(), oid, ontologyName, username,
-  })
+  // 渲染期直接求值：切换本体/重新打开/运行时注入 API 基址后即取新值
+  const base = runtimeApiBase()
+  const configJson = renderMcpConfigJson({ base, oid, ontologyName, username })
 
   const selectAll = () => {
     const node = textareaRef.current
@@ -95,110 +84,67 @@ export function McpConnectionDialog({
       })
     } catch {
       toast.warning('自动复制不可用', {
-        description: '请在文本框中使用 ⌘C / Ctrl+C 复制，或下载 .json 文件',
+        description: '请在文本框中使用 ⌘C / Ctrl+C 复制',
       })
     } finally {
       setCopying(false)
     }
   }
 
-  const download = () => {
-    const blob = new Blob([configJson], { type: 'application/json;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = mcpConfigFilename(oid)
-    anchor.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 0)
-  }
-
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
       <DialogContent
         data-testid="agent-mcp-dialog"
-        className="max-h-[min(88dvh,44rem)] overflow-y-auto"
+        className="max-h-[85dvh] w-[min(94vw,44rem)] overflow-y-auto"
         onOpenAutoFocus={event => { event.preventDefault(); setTimeout(selectAll, 0) }}
       >
         <DialogHeader
           icon={<PlugZap size={18} />}
           iconClassName="bg-brand-soft text-brand-ink"
         >
-          <DialogTitle>MCP 接入 · pi</DialogTitle>
+          <DialogTitle>MCP 接入</DialogTitle>
           <DialogDescription>
-            把当前本体的只读数据查询接入 pi（原生 Streamable HTTP）；端点自动跟随最新发布版本，发布新版本无需改配置。
+            把当前本体的只读数据查询接入任何支持 Streamable HTTP 的 MCP 客户端
+            （Cursor、Claude、pi 等）；连接自动跟随最新发布版本。
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
-          <div className="space-y-1.5 rounded-lg border border-[var(--color-border)] p-3">
-            <InfoRow label="本体">
-              <span className="font-medium text-[var(--color-text-primary)]">{ontologyName}</span>
-              {releaseVersion && <span className="text-[var(--color-text-tertiary)]"> · 当前发布 {releaseVersion}</span>}
-            </InfoRow>
-            <InfoRow label="状态">
-              {connectionConfirmed
-                ? <span className="text-[var(--color-success)]">本体助手能力已启用</span>
-                : <span className="text-[var(--color-warning)]">能力确认中，尚未确认可连接状态</span>}
-            </InfoRow>
-            <InfoRow label="工具">
-              <ul className="space-y-0.5">
-                {MCP_TOOLS.map(tool => (
-                  <li key={tool.name} className="min-w-0">
-                    <code className="font-mono text-[11px] text-brand-ink">{tool.name}</code>
-                    <span className="text-[var(--color-text-tertiary)]"> — {tool.summary}</span>
-                  </li>
-                ))}
-              </ul>
-            </InfoRow>
-            <InfoRow label="边界">
-              只读查询数据：不执行动作、不做推演、不生成报告，平台侧不调用 LLM。
-            </InfoRow>
-          </div>
-
-          <div className="space-y-1.5 rounded-lg border border-[var(--color-border)] p-3 text-xs leading-5 text-[var(--color-text-secondary)]">
-            <p data-testid="agent-mcp-credential-hint">
-              鉴权走双请求头：用户名已预填当前账号
-              {username ? <code className="font-mono text-[11px] text-brand-ink">{username}</code> : '（未登录读取不到，模板保留占位符）'}
-              ，密码为占位符 <code className="font-mono text-[11px] text-brand-ink">{MCP_PASSWORD_PLACEHOLDER}</code>，
-              请在 pi 配置中替换为你的登录密码——平台不会在本页收集、保存或回显真实密码。
-            </p>
-            <p data-testid="agent-mcp-escape-hint">
-              pi 会解析配置中的 <code className="font-mono text-[11px]">$</code> 与开头
-              <code className="font-mono text-[11px]">!</code>：密码含 <code className="font-mono text-[11px]">$</code> 要写成
-              <code className="font-mono text-[11px]">$$</code>，开头是 <code className="font-mono text-[11px]">!</code> 要写成
-              <code className="font-mono text-[11px]">$!</code>，否则会被当作变量替换或命令执行（模板已对预填用户名自动转义）。
-            </p>
-            <p data-testid="agent-mcp-ascii-hint">
-              本批接入验证覆盖可打印 ASCII 账号密码（含 <code className="font-mono text-[11px]">$ ! %</code> 等，按上述规则转义）；
-              含中文等非 ASCII 字符的凭据不能直接用于此请求头接入。
-            </p>
-          </div>
-
-          <Alert variant="warning" data-testid="agent-mcp-https-hint">
-            远程连接使用 HTTPS；账号密码随请求校验。
-          </Alert>
-
-          <textarea
-            ref={textareaRef}
-            readOnly
-            value={configJson}
-            aria-label="pi MCP 配置 JSON"
-            data-testid="agent-mcp-config"
-            onFocus={selectAll}
-            className="h-64 w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-code-bg)] p-3 font-mono text-xs leading-5 text-[var(--color-code-fg)] outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          />
+        <div className="space-y-1.5 rounded-lg border border-[var(--color-border)] p-3">
+          <InfoRow label="本体">
+            <span className="font-medium text-[var(--color-text-primary)]">{ontologyName}</span>
+            {releaseVersion && <span className="text-[var(--color-text-tertiary)]"> · 当前发布 {releaseVersion}</span>}
+          </InfoRow>
+          <InfoRow label="端点">
+            <code className="break-all font-mono text-[11px] text-brand-ink">{buildMcpEndpointUrl(base, oid)}</code>
+          </InfoRow>
+          <InfoRow label="认证">
+            请求头 <code className="font-mono text-[11px] text-brand-ink">X-OpenOntology-Username</code> /
+            <code className="font-mono text-[11px] text-brand-ink"> X-OpenOntology-Password</code>，填平台账号与密码，逐请求校验
+          </InfoRow>
+          <InfoRow label="工具">
+            <code className="font-mono text-[11px] text-brand-ink">ontology_schema</code> ·
+            <code className="font-mono text-[11px] text-brand-ink"> ontology_query</code> ·
+            <code className="font-mono text-[11px] text-brand-ink"> ontology_query_page</code>
+            <span className="text-[var(--color-text-tertiary)]">（只读；不执行动作/推演/报告，平台不调用 LLM）</span>
+          </InfoRow>
         </div>
 
-        {/* 吸底操作行：内容超高内滚时复制/下载保持可见（900px 视口真机验收发现
-            按钮落在内部折叠线以下）；负边距吃掉 DialogContent 的 p-5 全幅贴底 */}
-        <div className="sticky bottom-0 -mx-5 -mb-5 mt-4 flex items-center justify-end gap-2 rounded-b-2xl border-t border-border bg-popover px-5 py-3">
-          <button
-            type="button"
-            onClick={download}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-card px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <Download size={13} /> 下载 .json
-          </button>
+        <textarea
+          ref={textareaRef}
+          readOnly
+          value={configJson}
+          aria-label="MCP 客户端配置 JSON"
+          data-testid="agent-mcp-config"
+          onFocus={selectAll}
+          className="mt-3 h-56 w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-code-bg)] p-3 font-mono text-xs leading-5 text-[var(--color-code-fg)] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
+
+        <p data-testid="agent-mcp-hint" className="mt-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+          用户名已预填当前账号，密码请在你的 MCP 客户端配置中填写（本页不收集或回显）；远程接入请使用
+          HTTPS。部分客户端（如 pi）会解释值中的 $ 与开头的 !：分别写成 $$ 与 $!（模板已对预填用户名自动转义）。
+        </p>
+
+        <div className="mt-3 flex items-center justify-end">
           <button
             type="button"
             onClick={() => void copy()}

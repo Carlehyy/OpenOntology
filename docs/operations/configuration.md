@@ -73,10 +73,12 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 
 ## 本体助手的外部 MCP 接入
 
-在本体助手选择已发布本体后，选择框左侧的 MCP 入口提供 pi 配置模板。连接地址
-为 `/api/v2/formal/ontologies/{ontology_id}/mcp`，使用 Streamable HTTP；连接固定
-本体 ID，每次读取该本体的当前发布版本。旧的 `/mcp` 与 `/api-hub/mcp` 继续返回
-404，不能用作本体查询地址。
+在本体助手选择已发布本体后，选择框左侧的 MCP 入口提供标准 `mcpServers` 连接
+配置模板，可接入任何支持 Streamable HTTP 与自定义请求头的 MCP 客户端
+（Cursor、Claude、pi 等）。连接地址为
+`/api/v2/formal/ontologies/{ontology_id}/mcp`；连接固定本体 ID，每次读取该本体
+的当前发布版本。旧的 `/mcp` 与 `/api-hub/mcp` 继续返回 404，不能用作本体查询
+地址。
 
 外部客户端通过 `X-OpenOntology-Username`、`X-OpenOntology-Password` 请求头
 填写平台账号密码。服务端逐请求校验密码、账号启用状态、本体助手菜单权限与
@@ -84,11 +86,12 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 收回后旧配置不再可用。远程接入使用 HTTPS；不要把密码放入 URL、对话、日志或
 仓库中的项目配置。
 
-pi 的配置保存在用户级 `~/.pi/agent/mcp.json`。从弹窗复制配置后替换密码占位符，
-保留 `exposure: "direct"`；首次运行 `pi mcp list --json` 检查连接与工具清单。
-pi 会解释请求头值里的环境变量及命令：字面量 `$` 写成 `$$`，值开头的 `!`
-写成 `$!`，避免把密码当作变量或命令执行。网页不会收集或保存该密码。
-本批 pi 接入验证覆盖可打印 ASCII 账号密码；HTTP 请求头不能直接传递含中文等
+以 pi（首批实际验证客户端）为例：配置保存在用户级 `~/.pi/agent/mcp.json`，
+从弹窗复制配置后替换密码占位符，保留 `exposure: "direct"`；首次运行
+`pi mcp list --json` 检查连接与工具清单。pi 会解释请求头值里的环境变量及
+命令：字面量 `$` 写成 `$$`，值开头的 `!` 写成 `$!`，避免把密码当作变量或
+命令执行（弹窗模板已对预填用户名自动转义）。网页不会收集或保存该密码。
+本批接入验证覆盖可打印 ASCII 账号密码；HTTP 请求头不能直接传递含中文等
 完整 Unicode 凭据。服务端不做 URL 解码，不能用百分号编码替代原密码。
 
 部署时将平台公开 origin 写入现有 `CORS_ALLOWED_ORIGINS`，例如
