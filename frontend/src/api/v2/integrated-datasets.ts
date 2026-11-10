@@ -1,4 +1,5 @@
-import { apiClientV2 } from '@/api/client'
+import { apiClientV2 } from '../client.ts'
+import { formatDateTime } from '../../utils/datetime.ts'
 
 export interface IntegratedColumn {
   name: string
@@ -121,7 +122,122 @@ export interface IntegratedSyncRun {
   started_at?: string | null
   completed_at: string | null
 }
+export type IntegratedCdcRuntimeStatus = 'stopped' | 'starting' | 'active' | 'paused' | 'error' | 'gap'
+
+/** One released remote object mapping that subscribes to this asset's change stream. */
+export interface IntegratedCdcSubscription {
+  ontology_id: string
+  release_id: string
+  mapping_id: string
+  object_type_id: string
+  status: string
+  last_error_code: string | null
+}
+
+/**
+ * Server-observed CDC runtime for one asset. Subscriptions are derived from
+ * published remote mappings; there is no client-side switch, and this status
+ * endpoint never carries change-event rows or source credentials.
+ */
+export interface IntegratedCdcStatus {
+  asset_id: string
+  /** True only while at least one published remote mapping subscribes to this asset. */
+  enabled: boolean
+  status: IntegratedCdcRuntimeStatus
+  healthy: boolean
+  last_event_at: string | null
+  last_error_code: string | null
+  /** Changes before this instant are not covered: CDC never backfills history. */
+  coverage_started_at: string | null
+  subscriptions: IntegratedCdcSubscription[]
+}
+
 export interface SourceConnection { id: string; name: string; kind: string; status: string }
+
+/**
+ * Automatic CDC subscription is a server fact derived from published remote
+ * mappings. Vocabulary mirrors the backend runtime states; an unknown value is
+ * never presented as a healthy state.
+ */
+export const CDC_STATUS_LABELS: Record<string, string> = {
+  stopped: '已停止', starting: '启动中', active: '订阅中', paused: '已暂停', error: '异常', gap: '覆盖中断',
+}
+
+export function cdcStatusLabel(status: string): string {
+  return CDC_STATUS_LABELS[status] ?? '未核验'
+}
+
+const CDC_RUNTIME_STATUSES: readonly IntegratedCdcRuntimeStatus[] = ['stopped', 'starting', 'active', 'paused', 'error', 'gap']
+
+const isNullableString = (value: unknown): boolean => value === null || typeof value === 'string'
+
+/**
+ * Only a well-formed payload for THIS asset may render a server state; anything
+ * else renders as unverifiable. The runtime status must be one of the six
+ * contract values; subscription statuses stay open strings (vocabulary not
+ * enumerated in the contract) and unknown ones degrade to 未核验 in the summary.
+ */
+export function isIntegratedCdcStatus(payload: unknown): payload is IntegratedCdcStatus {
+  if (!payload || typeof payload !== 'object') return false
+  const candidate = payload as {
+    asset_id?: unknown; enabled?: unknown; status?: unknown; healthy?: unknown
+    last_event_at?: unknown; last_error_code?: unknown; coverage_started_at?: unknown
+    subscriptions?: unknown
+  }
+  if (typeof candidate.asset_id !== 'string') return false
+  if (typeof candidate.enabled !== 'boolean' || typeof candidate.healthy !== 'boolean') return false
+  if (typeof candidate.status !== 'string' || !CDC_RUNTIME_STATUSES.includes(candidate.status as IntegratedCdcRuntimeStatus)) return false
+  if (!isNullableString(candidate.last_event_at) || !isNullableString(candidate.last_error_code) || !isNullableString(candidate.coverage_started_at)) return false
+  if (!Array.isArray(candidate.subscriptions)) return false
+  return candidate.subscriptions.every(item => {
+    if (!item || typeof item !== 'object') return false
+    const subscription = item as {
+      ontology_id?: unknown; release_id?: unknown; mapping_id?: unknown
+      object_type_id?: unknown; status?: unknown; last_error_code?: unknown
+    }
+    return typeof subscription.ontology_id === 'string'
+      && typeof subscription.release_id === 'string'
+      && typeof subscription.mapping_id === 'string'
+      && typeof subscription.object_type_id === 'string'
+      && typeof subscription.status === 'string'
+      && isNullableString(subscription.last_error_code)
+  })
+}
+
+/** Card label for a verified payload: not enabled is an explicit state, not an error. */
+export function cdcCardLabel(status: IntegratedCdcStatus): string {
+  if (!status.enabled) return '未启用'
+  // active 但 healthy=false 是矛盾的服务端事实：不得显示订阅中，降级为未核验。
+  if (status.status === 'active' && status.healthy !== true) return '未核验'
+  return cdcStatusLabel(status.status)
+}
+
+/**
+ * Aggregate subscription count; per-state counts are surfaced only when some
+ * subscription is not actively streaming, so problems stay visible.
+ */
+export function cdcSubscriptionSummary(subscriptions: IntegratedCdcSubscription[]): string {
+  const total = subscriptions.length
+  const counts = new Map<string, number>()
+  for (const subscription of subscriptions) {
+    if (subscription.status === 'active') continue
+    const label = cdcStatusLabel(subscription.status)
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  if (counts.size === 0) return `订阅 ${total} 条`
+  const breakdown = [...counts.entries()].map(([label, count]) => `${label} ${count}`).join(' · ')
+  return `订阅 ${total} 条（${breakdown}）`
+}
+
+/** Observable facts only: no coverage claim before coverage_started_at, no invented events. */
+export function cdcFactsDetail(status: IntegratedCdcStatus): string {
+  const parts = [
+    `最近变更事件 ${formatDateTime(status.last_event_at, { fallback: '暂无' })}`,
+    `增量覆盖起点 ${formatDateTime(status.coverage_started_at, { fallback: '尚未建立' })}`,
+  ]
+  if (status.last_error_code) parts.push(`最近错误码 ${status.last_error_code}`)
+  return parts.join(' · ')
+}
 export interface DiscoveredResource { schema_name: string; table_name: string }
 
 export type IntegratedSourceKind = 'mysql' | 'postgres'
@@ -216,4 +332,6 @@ export const integratedDatasetsApi = {
   syncRuns: (id: string): Promise<{ items: IntegratedSyncRun[] }> => apiClientV2.get(`${assetPath(id)}/sync-runs`),
   syncRun: (id: string, runId: string): Promise<IntegratedSyncRun> => apiClientV2.get(`${assetPath(id)}/sync-runs/${encodeURIComponent(runId)}`),
   versions: (id: string): Promise<{ items: IntegratedVersion[] }> => apiClientV2.get(`${assetPath(id)}/versions`),
+  /** Read-only automatic CDC subscription status; authorized like an asset read. */
+  cdc: (id: string, signal?: AbortSignal): Promise<IntegratedCdcStatus> => apiClientV2.get(`${assetPath(id)}/cdc`, { signal }),
 }

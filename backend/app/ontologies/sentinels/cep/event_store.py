@@ -12,8 +12,10 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     BigInteger, Column, MetaData, String, Table, bindparam, event,
-    func, select,
+    func, select, text,
 )
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.orm import Session
 
@@ -25,11 +27,13 @@ from app.ontologies.sentinels.cep.contract import (
     EVENT_LOG_PRUNE_BATCH,
     EVENT_LOG_RETENTION_SECONDS,
     EVENT_SOURCE_ORGANIC,
+    EVENT_SOURCE_EXTERNAL,
     EVENT_SOURCE_RELEASE_ACTIVATION,
     PREVIOUS_VALUES_QUERY_CAP,
     chunk_ids,
+    external_outbox_dedupe_key,
 )
-from app.ontologies.sentinels.models import SentinelEventLog
+from app.ontologies.sentinels.models import SentinelCdcOutbox, SentinelEventLog
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +206,88 @@ def deleted_key() -> str:
     return DELETED_EVENT_KEY
 
 
+def record_external_change(
+        db: Session, *, ontology_id: str, release_id: str,
+        object_type_id: str, instance_id: str, source_event_id: str,
+        event_group_id: str, asset_id: str, mapping_id: str,
+        change_kind: str, field_changes: dict[str, dict],
+        snapshot: dict, occurred_at: datetime | None = None) -> bool:
+    """Append one source-row event's mapped key facts without transaction merge.
+
+    ``field_changes`` maps each property key to ``{"old": ..., "new": ...}``.
+    The caller owns the SQL transaction and writes the matching Sentinel outbox
+    row in the same transaction. A duplicate key fact is an idempotent replay;
+    ``False`` therefore means every fact of this source event already existed.
+    """
+    if not field_changes:
+        return False
+    if not all((release_id, asset_id, mapping_id, source_event_id)):
+        raise ValueError("external event identity is missing its release scope")
+    occurred = occurred_at or _now()
+    table = SentinelEventLog.__table__
+    rows = [{
+        "ontology_id": str(ontology_id),
+        "ontology_release_id": str(release_id),
+        "object_type_id": str(object_type_id),
+        "instance_id": str(instance_id),
+        "source_event_id": str(source_event_id),
+        "event_group_id": str(event_group_id),
+        "external_asset_id": str(asset_id),
+        "external_mapping_id": str(mapping_id),
+        "event_snapshot": dict(snapshot),
+        "change_kind": str(change_kind),
+        "key": str(key),
+        "old_value": values.get("old"),
+        "new_value": values.get("new"),
+        "source": EVENT_SOURCE_EXTERNAL,
+        "cascade_depth": 0,
+        "chain_id": None,
+        "occurred_at": occurred,
+    } for key, values in sorted(field_changes.items())]
+    dialect = db.get_bind().dialect.name
+    conflict_columns = [
+        table.c.ontology_id, table.c.ontology_release_id,
+        table.c.external_asset_id, table.c.external_mapping_id,
+        table.c.object_type_id, table.c.source_event_id, table.c.key,
+    ]
+    if dialect == "postgresql":
+        statement = pg_insert(table).values(rows).on_conflict_do_nothing(
+            index_elements=conflict_columns,
+            index_where=text("source_event_id IS NOT NULL"),
+        )
+        return bool(db.execute(statement).rowcount)
+    if dialect == "sqlite":
+        statement = sqlite_insert(table).values(rows).on_conflict_do_nothing(
+            index_elements=conflict_columns,
+            index_where=text("source_event_id IS NOT NULL"),
+        )
+        return bool(db.execute(statement).rowcount)
+    # A read-then-insert fallback cannot uphold the unique index under
+    # concurrency; refuse instead of silently duplicating source facts.
+    raise NotImplementedError(
+        f"external CDC facts require PostgreSQL or SQLite, not {dialect}")
+
+
+def external_source_event_rows(
+        db: Session, *, ontology_id: str, release_id: str,
+        asset_id: str, mapping_id: str, object_type_id: str,
+        source_event_id: str) -> list:
+    """All key facts of exactly one source row event (release-scoped).
+
+    The outbox row committed with these facts is the processing unit, so this
+    identity lookup—never a shared id watermark—drives external evaluation.
+    """
+    return db.query(SentinelEventLog).filter(
+        SentinelEventLog.ontology_id == str(ontology_id),
+        SentinelEventLog.ontology_release_id == str(release_id),
+        SentinelEventLog.external_asset_id == str(asset_id),
+        SentinelEventLog.external_mapping_id == str(mapping_id),
+        SentinelEventLog.object_type_id == str(object_type_id),
+        SentinelEventLog.source_event_id == str(source_event_id),
+        SentinelEventLog.source == EVENT_SOURCE_EXTERNAL,
+    ).order_by(SentinelEventLog.id.asc()).all()
+
+
 # ---------------------------------------------------------------------------
 # 查询：时间算子的批量预取
 # ---------------------------------------------------------------------------
@@ -259,6 +345,9 @@ def events_after_cursor(
     """水位增量拉取：某本体在指定对象类型上的 organic 事件（按 id 升序）。
 
     模式匹配器（M2）以此推进状态机；outbox/定时扫描只是唤醒信号。
+    远程（external）事实不走共享水位：事件日志 id 在提交前分配，晚提交的
+    源可能落在已推进的水位之下而被永久跳过，因此它们按 outbox 事件逐个
+    经 ``external_source_event_rows`` 身份查询消费。
     """
     query = db.query(SentinelEventLog).filter(
         SentinelEventLog.ontology_id == str(ontology_id),
@@ -274,19 +363,80 @@ def events_after_cursor(
 # ---------------------------------------------------------------------------
 # 裁剪：固定保留期 + 行数硬上限，分批 keyset DELETE 防长事务锁
 # ---------------------------------------------------------------------------
+# 远程（external）事实的裁剪资格由它的触发 outbox 行决定：
+# - 触发行存在且未 completed（pending/processing/retry/dead）→ 一律保留：
+#   宁可外部摄取因容量暂停并显式报错，也不静默删掉未处理事实；
+# - 触发行已 completed → 可裁；
+# - 触发行已不存在 → 可裁。外部触发行与事实同事务写入，此后唯一会删除它
+#   的是 ``cdc.prune_completed_outbox``，而它只删 completed 行（含"完成行数
+#   超限"时提前删除仅满 1 小时的行），所以"行缺失"只能意味着该事件早已
+#   处理完成。若把缺失当作未知而永久保留，这些事实将永远不可裁，最终把
+#   事件日志顶满、锁死外部摄取。
+_EXTERNAL_OUTBOX_DONE = "completed"
+
+
+def _external_fact_ids_released_by_outbox(db: Session, rows) -> list[int]:
+    """候选行中可裁的 id：本地行原样放行；远程事实仅当触发行未在途。"""
+    safe: list[int] = []
+    pending_review: dict[str, list[int]] = {}
+    for row in rows:
+        if not row.source_event_id:
+            safe.append(int(row.id))
+            continue
+        dedupe = external_outbox_dedupe_key(
+            ontology_id=row.ontology_id,
+            release_id=row.ontology_release_id or "",
+            asset_id=row.external_asset_id or "",
+            mapping_id=row.external_mapping_id or "",
+            object_type_id=row.object_type_id,
+            source_event_id=row.source_event_id,
+        )
+        pending_review.setdefault(dedupe, []).append(int(row.id))
+    unfinished: set[str] = set()
+    for chunk in chunk_ids(list(pending_review)):
+        unfinished.update(
+            str(item[0]) for item in db.query(SentinelCdcOutbox.dedupe_key)
+            .filter(
+                SentinelCdcOutbox.dedupe_key.in_(chunk),
+                SentinelCdcOutbox.status != _EXTERNAL_OUTBOX_DONE,
+            ).all()
+        )
+    for dedupe, ids in pending_review.items():
+        if dedupe not in unfinished:
+            safe.extend(ids)
+    return safe
+
 
 def prune_event_log(session_factory=None) -> int:
-    """按固定保留期与行数上限裁剪事件日志；每批独立提交。"""
+    """按固定保留期与行数上限裁剪事件日志；每批独立提交。
+
+    本地（organic/release_activation）行为不变：``occurred_at`` 过保留期
+    即裁。远程（external）事实以平台入库时间 ``created_at`` 计龄（积压的
+    旧 source 时间戳不应刚入库就被裁），且绝不裁触发行仍在途的部分——
+    超出硬上限时同样如此，改为显式报错，由外部摄取的容量暂停兜底。
+    触发行已 completed 或已被 outbox 裁剪删除的事实按同一规则正常可裁。
+    """
     if session_factory is None:
         from app.database import SessionLocal
         session_factory = SessionLocal
     db = session_factory()
     deleted = 0
+
+    def _candidate_columns():
+        return (
+            SentinelEventLog.id, SentinelEventLog.source_event_id,
+            SentinelEventLog.ontology_id, SentinelEventLog.ontology_release_id,
+            SentinelEventLog.external_asset_id, SentinelEventLog.external_mapping_id,
+            SentinelEventLog.object_type_id,
+        )
+
     try:
         cutoff = _now() - timedelta(seconds=EVENT_LOG_RETENTION_SECONDS)
+        # 1) 本地事实：保留期裁剪（行为与既有实现一致）。
         while True:
             ids = [
                 row[0] for row in db.query(SentinelEventLog.id).filter(
+                    SentinelEventLog.source_event_id.is_(None),
                     SentinelEventLog.occurred_at < cutoff,
                 ).order_by(SentinelEventLog.id.asc()).limit(
                     EVENT_LOG_PRUNE_BATCH).all()
@@ -298,16 +448,47 @@ def prune_event_log(session_factory=None) -> int:
             ).delete(synchronize_session=False)
             db.commit()
             deleted += len(ids)
+        # 2) 远程事实：created_at 过保留期且触发行不在途（已 completed 或已
+        #    被 outbox 裁剪删除）。keyset 游标推进，被保护行不会卡住循环。
+        external_cursor = 0
+        while True:
+            rows = db.query(*_candidate_columns()).filter(
+                SentinelEventLog.source_event_id.isnot(None),
+                SentinelEventLog.created_at < cutoff,
+                SentinelEventLog.id > external_cursor,
+            ).order_by(SentinelEventLog.id.asc()).limit(
+                EVENT_LOG_PRUNE_BATCH).all()
+            if not rows:
+                break
+            external_cursor = int(rows[-1].id)
+            ids = _external_fact_ids_released_by_outbox(db, rows)
+            if not ids:
+                continue
+            db.query(SentinelEventLog).filter(
+                SentinelEventLog.id.in_(ids),
+            ).delete(synchronize_session=False)
+            db.commit()
+            deleted += len(ids)
+        # 3) 行数硬上限：同一资格规则，最旧优先，绝不裁受保护行。
         total = db.query(func.count(SentinelEventLog.id)).scalar() or 0
         overflow = max(0, int(total) - EVENT_LOG_MAX_ROWS)
+        scan_cursor = 0
         while overflow > 0:
-            batch = min(overflow, EVENT_LOG_PRUNE_BATCH)
-            ids = [
-                row[0] for row in db.query(SentinelEventLog.id).order_by(
-                    SentinelEventLog.id.asc()).limit(batch).all()
-            ]
-            if not ids:
+            rows = db.query(*_candidate_columns()).filter(
+                SentinelEventLog.id > scan_cursor,
+            ).order_by(SentinelEventLog.id.asc()).limit(
+                EVENT_LOG_PRUNE_BATCH).all()
+            if not rows:
+                logger.error(
+                    "哨兵事件日志超上限 %d 行且剩余 %d 行全部是未完成的"
+                    "远程事实：拒绝继续裁剪，外部摄取将因容量暂停",
+                    int(total), overflow)
                 break
+            scan_cursor = int(rows[-1].id)
+            ids = sorted(_external_fact_ids_released_by_outbox(db, rows))[
+                :overflow]
+            if not ids:
+                continue
             db.query(SentinelEventLog).filter(
                 SentinelEventLog.id.in_(ids),
             ).delete(synchronize_session=False)

@@ -107,6 +107,8 @@ def test_all_v2_tables_registered():
         "v2_integrated_assets",
         "v2_integrated_asset_field_configs",
         "v2_integrated_mutations",
+        "v2_integrated_cdc_sources",
+        "v2_integrated_cdc_subscriptions",
         "v2_integrated_sync_runs",
         "v2_integrated_sync_recoveries",
         "v2_unified_query_rows",

@@ -1,0 +1,229 @@
+# Integrated CDC acceptance/canary stack (worktree cdc-analysis-20261110).
+# Never merge with local/prod and never adopt another project's containers,
+# volumes or ledgers. All credentials below are public, deterministic fixtures;
+# no env_file is read and no real environment variable enters this stack.
+# Only two ports are published to loopback: the platform metadata database
+# (host-side migration probe) and the backend API (front-door acceptance).
+# Sources are reached over the compose network by the backend, dbx and the
+# CDC executor; the executor's Debezium HTTP receiver stays loopback inside
+# its own container and is never published.
+name: cdc-canary-20261110
+services:
+  db:
+    image: postgres:16-alpine
+    pull_policy: never
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      POSTGRES_DB: cdc_platform
+      POSTGRES_USER: cdc_e2e
+      POSTGRES_PASSWORD: cdc_e2e_fixture
+    command: [postgres, -c, shared_buffers=96MB, -c, work_mem=8MB, -c, max_connections=40, -c, timezone=UTC]
+    ports: ["127.0.0.1:45532:5432"]
+    volumes: [canary_metadata_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U cdc_e2e -d cdc_platform"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  source-pg:
+    image: postgres:16-alpine
+    pull_policy: never
+    mem_limit: 384m
+    cpus: 1.0
+    environment:
+      POSTGRES_DB: cdc_source
+      POSTGRES_USER: cdc_e2e
+      POSTGRES_PASSWORD: cdc_e2e_fixture
+    # Logical decoding for the real Debezium postgres connector: pgoutput is
+    # built in; the superuser fixture account may create slots/publications.
+    command: [postgres, -c, shared_buffers=64MB, -c, work_mem=8MB, -c, max_connections=20, -c, wal_level=logical, -c, max_wal_senders=10, -c, max_replication_slots=10, -c, timezone=UTC]
+    volumes: [canary_source_pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U cdc_e2e -d cdc_source"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  source-mysql:
+    image: mysql:8.4
+    pull_policy: never
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      MYSQL_DATABASE: cdc_source
+      MYSQL_USER: cdc_e2e
+      MYSQL_PASSWORD: cdc_e2e_fixture
+      MYSQL_ROOT_PASSWORD: cdc_e2e_root_fixture
+    # ROW/FULL binlog with GTID (MySQL 8.4 defaults are kept explicit for
+    # evidence); deterministic init adds replication and schema-start rights.
+    # MYSQL_USER also grants fixture-local DML for the acceptance scenarios.
+    command: ["--binlog-format=ROW", "--binlog-row-image=FULL", "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--log-bin=mysql-bin", "--server-id=42024", "--innodb-buffer-pool-size=128M", "--max-connections=20", "--local-infile=0"]
+    volumes:
+      - canary_source_mysql_data:/var/lib/mysql
+      - ./scripts/e2e/cdc_mysql_init.sql:/docker-entrypoint-initdb.d/10-cdc-grants.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$${MYSQL_PASSWORD}" mysql -h 127.0.0.1 -u cdc_e2e -N -e "SELECT 1" cdc_source']
+      interval: 5s
+      timeout: 3s
+      retries: 40
+  redis:
+    image: redis:7-alpine
+    pull_policy: never
+    mem_limit: 96m
+    cpus: 0.25
+    command: [redis-server, --requirepass, cdc_e2e_fixture, --maxmemory, 48mb, --maxmemory-policy, noeviction]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH=cdc_e2e_fixture redis-cli ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  nats:
+    image: nats:alpine
+    pull_policy: never
+    mem_limit: 96m
+    cpus: 0.25
+    command: [-js, --store_dir, /data, -m, "8222"]
+    volumes: [canary_nats_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:8222/healthz >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  neo4j:
+    image: neo4j:5.20-community
+    pull_policy: never
+    mem_limit: 1024m
+    cpus: 1.0
+    environment:
+      NEO4J_AUTH: neo4j/cdc_e2e_fixture
+      NEO4J_server_memory_heap_initial__size: 192m
+      NEO4J_server_memory_heap_max__size: 384m
+      NEO4J_server_memory_pagecache_size: 128m
+    volumes: [canary_neo4j_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:7474 >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+  minio:
+    image: minio/minio:latest
+    pull_policy: never
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      MINIO_ROOT_USER: cdc_e2e
+      MINIO_ROOT_PASSWORD: cdc_e2e_fixture
+    command: server /data --console-address ":9001"
+    volumes: [canary_minio_data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "curl -f http://127.0.0.1:9000/minio/health/live >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  dbx:
+    image: docker.cnb.cool/dbxio.com/dbx@sha256:b661f7e35deed06d9611dcda79c44ffcc8e4fd0f44308028ea77f7f18b36638c
+    pull_policy: never
+    restart: "no"
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      DBX_PASSWORD: cdc_canary_dbx_fixture
+      DBX_BIND_ADDR: 0.0.0.0
+      DBX_DATA_DIR: /app/data
+    volumes: [canary_dbx_data:/app/data]
+  backend:
+    image: oo-ontology-mcp-backend:acceptance
+    pull_policy: never
+    mem_limit: 1280m
+    cpus: 2.0
+    # The pinned acceptance image carries the dependency venv; the current
+    # worktree sources are bind-mounted read-only over /app so the peer
+    # runtime under test is exactly this worktree without rebuilding 3.5GB.
+    command: ["/app/.venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    working_dir: /app
+    environment:
+      # CDC integration profile: the real PostgreSQL schema is migrated before
+      # boot. Test mode skips unrelated WeKnora/n8n/browser startup probes;
+      # CDC ingestion, the durable Sentinel worker and notifications stay real.
+      # This stack does not establish full production dependency readiness.
+      ENVIRONMENT: test
+      SENTINEL_AUTO_DISPATCH: "1"
+      SECRET_KEY: cdc_canary_public_fixture_secret_not_production
+      DATABASE_URL: postgresql://cdc_e2e:cdc_e2e_fixture@db:5432/cdc_platform
+      REDIS_URL: redis://:cdc_e2e_fixture@redis:6379/0
+      NATS_URL: nats://nats:4222
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: cdc_e2e_fixture
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: cdc_e2e
+      MINIO_SECRET_KEY: cdc_e2e_fixture
+      INTEGRATED_DBX_URL: http://dbx:4224
+      INTEGRATED_DBX_PASSWORD: cdc_canary_dbx_fixture
+      # Isolated-stack recipe from docs/development/testing.md: the n8n env
+      # shape is required for a development boot; without a real n8n,
+      # /health/ready keeps failing for n8n honestly and is never faked.
+      N8N_API_URL: http://127.0.0.1:5678
+      N8N_API_KEY: cdc-canary-dummy-n8n-key
+      FIRST_ADMIN_USER: cdc_canary_admin
+      FIRST_ADMIN_PASSWORD: cdc_canary_admin_fixture_pw
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+    ports: ["127.0.0.1:48180:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      nats: {condition: service_healthy}
+  cdc-executor:
+    # Real standalone CDC executor (managed child Debezium server per source
+    # connection, loopback HTTP receiver, persisted offsets). The image is
+    # built from the runtime peer's backend/Dockerfile.cdc:
+    #   docker build -f backend/Dockerfile.cdc \
+    #     --build-arg PYTHON_BASE_IMAGE=oo-ontology-mcp-backend:acceptance \
+    #     --build-arg CDC_PREBUILT_BACKEND=1 \
+    #     -t openontology-cdc-executor:canary backend
+    # The tag is fixed (no interpolation); the driver refuses to fake the
+    # executor when the image is missing.
+    image: openontology-cdc-executor:canary
+    pull_policy: never
+    profiles: [cdc]
+    mem_limit: 1408m
+    cpus: 2.0
+    working_dir: /app
+    command: ["python", "-m", "app.data_channel.integrated.cdc_executor"]
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://cdc_e2e:cdc_e2e_fixture@db:5432/cdc_platform
+      REDIS_URL: redis://:cdc_e2e_fixture@redis:6379/0
+      NATS_URL: nats://nats:4222
+      SECRET_KEY: cdc_canary_public_fixture_secret_not_production
+      CDC_STATE_ROOT: /var/lib/openontology-cdc
+      CDC_RUN_ROOT: /tmp/cdc
+      JAVA_HOME: /opt/java/openjdk
+      CDC_DEBEZIUM_HOME: /opt/debezium
+      CDC_JAVA_BINARY: /opt/java/openjdk/bin/java
+      CDC_MAX_SOURCES: "2"
+      CDC_QUARKUS_PORT_BASE: "21024"
+      N8N_API_URL: http://127.0.0.1:5678
+      N8N_API_KEY: cdc-canary-dummy-n8n-key
+      PYTHONDONTWRITEBYTECODE: "1"
+    tmpfs: ["/tmp/cdc:size=64m,mode=1777"]
+    volumes:
+      - canary_cdc_offsets:/var/lib/openontology-cdc
+      - ./backend/app:/app/app:ro
+    depends_on:
+      db: {condition: service_healthy}
+      nats: {condition: service_healthy}
+volumes:
+  canary_metadata_data:
+  canary_source_pg_data:
+  canary_source_mysql_data:
+  canary_nats_data:
+  canary_neo4j_data:
+  canary_minio_data:
+  canary_dbx_data:
+  canary_cdc_offsets:

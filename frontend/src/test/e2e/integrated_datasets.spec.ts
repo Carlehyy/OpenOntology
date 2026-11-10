@@ -25,6 +25,39 @@ const assetFixture = {
   dbx: { configured: true, available: true, commit: '0137e0cbc8b663da5a17ec424c6d47e4e5570ead', version: '0.6.53' },
   latest_version_id: null, status: 'registered', created_at: instant,
 }
+/** Automatic CDC subscription status served by GET /integrated-datasets/{id}/cdc. */
+type CdcMode = 'active' | 'disabled' | 'error' | 'gap'
+const cdcSubscriptionFixture = (status: string, lastErrorCode: string | null = null) => ({
+  ontology_id: 'ontology-orders', release_id: 'release-1', mapping_id: `mapping-${status}`,
+  object_type_id: 'type-order', status, last_error_code: lastErrorCode,
+})
+const cdcStatusFixture = (mode: CdcMode) => {
+  if (mode === 'disabled') {
+    return {
+      asset_id: 'asset-orders', enabled: false, status: 'stopped', healthy: false,
+      last_event_at: null, last_error_code: null, coverage_started_at: null, subscriptions: [],
+    }
+  }
+  if (mode === 'error') {
+    return {
+      asset_id: 'asset-orders', enabled: true, status: 'error', healthy: false,
+      last_event_at: instant, last_error_code: 'CDC_SOURCE_DISCONNECTED', coverage_started_at: instant,
+      subscriptions: [cdcSubscriptionFixture('active'), cdcSubscriptionFixture('error', 'CDC_SOURCE_DISCONNECTED')],
+    }
+  }
+  if (mode === 'gap') {
+    return {
+      asset_id: 'asset-orders', enabled: true, status: 'gap', healthy: false,
+      last_event_at: instant, last_error_code: 'CDC_STREAM_GAP', coverage_started_at: instant,
+      subscriptions: [cdcSubscriptionFixture('active'), cdcSubscriptionFixture('gap', 'CDC_STREAM_GAP')],
+    }
+  }
+  return {
+    asset_id: 'asset-orders', enabled: true, status: 'active', healthy: true,
+    last_event_at: instant, last_error_code: null, coverage_started_at: instant,
+    subscriptions: [cdcSubscriptionFixture('active'), cdcSubscriptionFixture('active')],
+  }
+}
 const defaultConnections = [
   { id: 'pg-source', name: 'PostgreSQL 测试源', kind: 'postgres', status: 'active' },
   { id: 'mysql-source', name: 'MySQL 测试源', kind: 'mysql', status: 'active' },
@@ -62,6 +95,8 @@ type MockOptions = {
   failedMutation?: boolean
   /** Asset decommission (DELETE /integrated-datasets/{id}) is blocked by history. */
   decommissionBlocked?: boolean
+  /** CDC status preset for GET /integrated-datasets/{id}/cdc; 'fail' makes the status unverifiable. */
+  cdc?: CdcMode | 'fail'
 }
 async function mockIntegrated(page: Page, options: MockOptions = {}) {
   const captured: Array<{ method: string; path: string; body: any }> = []
@@ -168,6 +203,10 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       if (index >= 0) assets.splice(index, 1)
       return route.fulfill({ status: 204 })
     }
+    if (/\/integrated-datasets\/[^/]+\/cdc$/.test(path)) {
+      if (options.cdc === 'fail') return fail(503, { code: 'CDC_STATUS_UNAVAILABLE', message: 'CDC status is unavailable' })
+      return respond(cdcStatusFixture(options.cdc ?? 'active'))
+    }
     if (/\/integrated-datasets\/[^/]+\/schema$/.test(path) || path.endsWith('/refresh-schema')) return respond({ columns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     if (/\/integrated-datasets\/[^/]+\/versions$/.test(path)) return respond({ items: run?.status === 'sealed' || options.unverifiedVersion ? [{ id: 'sealed-version-1', version_no: 1, row_count: 10000, checksum: 'version-checksum', run_id: options.unverifiedVersion ? null : 'sync-run-1', status: options.unverifiedVersion ? 'unverified' : 'sealed', complete: !options.unverifiedVersion, created_at: instant }] : [] })
     if (path === '/api/__test__/history-recovered') {
@@ -235,7 +274,8 @@ test('integrated deep link opens the asset detail and survives reload', async ({
   const detail = detailDialog.getByTestId('integrated-asset-detail')
   await expect(detail).toContainText('订单源')
   await expect(detail).toContainText('快照版本')
-  await expect(detail).toContainText('本体映射 / Sentinel：未跟踪')
+  await expect(detail).toContainText('CDC 变更订阅：订阅中')
+  await expect(detail.getByTestId('integrated-cdc-state')).toContainText(/订阅 2 条 · 最近变更事件 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/)
   await expect(detail).toContainText('活映射仍实时读取源当前数据')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('DBX 元数据：已配置')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('v0.6.53 · commit 0137e0cbc8b663da5a17ec424c6d47e4e5570ead')
@@ -248,6 +288,50 @@ test('integrated deep link opens the asset detail and survives reload', async ({
   await page.getByRole('dialog', { name: '订单源' }).getByRole('button', { name: '关闭', exact: true }).click()
   await expect(page.getByRole('button', { name: '集成数据集', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page).not.toHaveURL(/dataset=/)
+})
+
+test('integrated detail shows automatic CDC subscription status without manual controls', async ({ page }) => {
+  await mockIntegrated(page)
+  await page.goto(deepLink)
+  const card = page.getByTestId('integrated-asset-detail').getByTestId('integrated-cdc-state')
+  await expect(card).toContainText('CDC 变更订阅：订阅中')
+  await expect(card).toContainText(/订阅 2 条 · 最近变更事件 \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 增量覆盖起点 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/)
+  // 订阅由已发布远程映射自动驱动：状态卡内没有任何开关/按钮类手动控件。
+  await expect(card.getByRole('button')).toHaveCount(0)
+  await expect(card.getByRole('switch')).toHaveCount(0)
+  await expect(card).toContainText('订阅随已发布的远程映射自动开启与停止，无手动开关；仅同步开启后的增量变更，不回补历史数据。')
+  // 可达性：状态卡以 status 角色暴露当前态摘要。
+  await expect(card).toHaveAccessibleName(/CDC 变更订阅状态：订阅中/)
+})
+
+test('integrated CDC card renders degraded states truthfully instead of healthy', async ({ page }) => {
+  await mockIntegrated(page, { cdc: 'error' })
+  await page.goto(deepLink)
+  const card = page.getByTestId('integrated-asset-detail').getByTestId('integrated-cdc-state')
+  await expect(card).toContainText('CDC 变更订阅：异常')
+  await expect(card).toContainText('订阅 2 条（异常 1）')
+  await expect(card).toContainText('最近错误码 CDC_SOURCE_DISCONNECTED')
+
+  // 深链是 Hash 路由：重复 goto 是同文档导航不会重新请求，重新挂 mock 后
+  // 必须整页 reload 才能让新预设的 /cdc 响应生效（后注册的 route 优先）。
+  await mockIntegrated(page, { cdc: 'gap' })
+  await page.goto(deepLink)
+  await page.reload()
+  await expect(card).toContainText('CDC 变更订阅：覆盖中断')
+  await expect(card).toContainText('订阅 2 条（覆盖中断 1）')
+
+  await mockIntegrated(page, { cdc: 'disabled' })
+  await page.goto(deepLink)
+  await page.reload()
+  await expect(card).toContainText('CDC 变更订阅：未启用')
+  await expect(card).toContainText('尚无已发布的远程对象映射订阅本表；远程映射发布后自动开启订阅。')
+
+  // 状态查询失败必须如实显示不可核验，不得沿用或臆造健康态。
+  await mockIntegrated(page, { cdc: 'fail' })
+  await page.goto(deepLink)
+  await page.reload()
+  await expect(card).toContainText('CDC 变更订阅：不可核验')
+  await expect(card).toContainText('订阅状态查询失败，不代表订阅正常')
 })
 
 test('integrated tab lists registered assets in the lake table without the SPL workbench', async ({ page }) => {

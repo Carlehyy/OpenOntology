@@ -457,6 +457,46 @@ def run_for_change(db: Session, ontology_id: str, object_type_id: str,
     return _summary(firings)
 
 
+def run_for_external_change(
+        db: Session, ontology_id: str, external_event: dict) -> dict:
+    """远程（external CDC）行事件驱动：评估监听该对象类型的 on_pattern 哨兵。
+
+    远程绑定没有本地 ObjectInstance，哨兵只凭这一次源行事件的冻结快照
+    判定。``external_event`` 是与事实同事务冻结的来源身份（release/asset/
+    mapping/object_type/source_event），事实按该身份查询而不经共享水位。
+    事件所属发布必须仍是当前发布：被取代的发布留下的事件直接作废。
+    """
+    context, errors = _prepare_runtime(db, ontology_id)
+    if context is None or errors:
+        return _summary([], errors)
+    if str(external_event.get("release_id") or "") != str(context.id):
+        return _superseded_summary(
+            ontology_id=ontology_id,
+            sentinel_id="",
+            release_id=context.id,
+            reason="release_superseded",
+        )
+    object_type_id = str(external_event.get("object_type_id") or "")
+    affected = [
+        s for s in _runtime_sentinels(db, context, on_change=True)
+        if str(getattr(s, "trigger_mode", "") or "") == "on_pattern"
+        and any(b.get("objectTypeId") == object_type_id
+                for b in (s.bindings or []))
+    ]
+    firings = [
+        evaluate_sentinel(
+            db,
+            context.project.id,
+            s,
+            "change",
+            expected_release_id=context.id,
+            external_event=external_event,
+        )
+        for s in affected
+    ]
+    return _summary(firings)
+
+
 def run_for_link_change(db: Session, ontology_id: str) -> dict:
     """链接拓扑变化驱动：链接实例增删对声明了 links 约束的跨对象哨兵是"变化"。
     只评估 on_change 且带链接约束的哨兵（无链接约束的由属性 CDC 覆盖）。"""

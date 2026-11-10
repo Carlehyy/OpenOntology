@@ -15,6 +15,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.dialects import mysql
 
+from app.data_channel.integrated import cdc_control
 from app.data_channel.connections.models import Connection
 from app.data_channel.datasets.models import Dataset, DatasetVersion, IntegratedSyncRun
 from app.data_channel.integrated import fields
@@ -485,7 +486,11 @@ def decommission_asset(db, user, asset_id):
         db.query(PipelineTask).filter(PipelineTask.pipeline_id.in_(pipeline_ids)).all()
         if pipeline_ids else []
     )
-    if version_count or run_count or mutation_count or mapping_references or pipelines or tasks:
+    # CDC 订阅阻塞：未停流确认（starting/active/superseded）即结构化 409；
+    # 已停流确认（stopped）的订阅是纯控制行，随注销安全清理，绝不阻塞。
+    cdc_blockers = cdc_control.asset_blockers(db, asset.id)
+    if (version_count or run_count or mutation_count or mapping_references
+            or pipelines or tasks or cdc_blockers):
         parts = []
         history_total = version_count + run_count + mutation_count
         if history_total:
@@ -497,7 +502,9 @@ def decommission_asset(db, user, asset_id):
             parts.append(f"{len(pipelines)} 条流水线")
         if tasks:
             parts.append(f"{len(tasks)} 个数据任务")
-        raise HTTPException(409, {
+        if cdc_blockers:
+            parts.append(f"{cdc_blockers['total']} 条未停流确认的 CDC 订阅")
+        detail = {
             "code": "ASSET_DECOMMISSION_BLOCKED",
             "message": (
                 "集成资产仍有" + "、".join(parts)
@@ -512,14 +519,30 @@ def decommission_asset(db, user, asset_id):
             "tasks": [{"id": task.id, "name": task.name, "pipeline_id": task.pipeline_id}
                       for task in tasks[:5]],
             "tasks_total": len(tasks),
-        })
-    # 零依赖：先删资产（dataset FK RESTRICT），再删其专属 integrated 数据集。
+        }
+        if cdc_blockers:
+            detail["cdc"] = cdc_blockers
+        raise HTTPException(409, detail)
+    # 零依赖：先清已停流确认的 CDC 控制行（asset FK RESTRICT），再删资产
+    # （dataset FK RESTRICT），最后删其专属 integrated 数据集。
+    cdc_control.asset_cleanup(db, asset.id)
     # 不触碰连接本体；连接注销由 DELETE /connections/{id} 的守卫独立裁决。
     db.delete(asset)
     db.flush()
     db.delete(dataset)
     db.commit()
     return {"status": "decommissioned", "asset_id": asset_id, "dataset_id": dataset.id}
+
+
+def cdc_status(db, user, asset_id):
+    """CDC 运行状态（只读控制面，无源端 IO、无凭据）。
+
+    读授权与资产详情一致（get_asset）；返回契约见
+    ``cdc_control.asset_status``：只反映当前期望订阅，禁用与心跳过期必须
+    如实不健康，不含任何原始事件值或连接配置。
+    """
+    asset = get_asset(db, user, asset_id)
+    return cdc_control.asset_status(db, asset)
 
 
 def preview_rows(db, user, asset_id, limit=100):

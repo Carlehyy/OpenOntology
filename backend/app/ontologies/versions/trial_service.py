@@ -405,6 +405,13 @@ def _preflight_gate_error(exc: HTTPException) -> dict:
     return error
 
 
+def _remote_sentinel_errors(snap: dict, models: dict, sentinel_models) -> list[dict]:
+    """远程（external CDC）绑定类型的哨兵单行限制；与发布/动态门禁同源。"""
+    from app.ontologies.sentinels.validation import validate_remote_sentinels
+    return validate_remote_sentinels(
+        sentinel_models, models["actions"], snap)
+
+
 def trial_preflight(
     db: Session,
     ontology_id: str,
@@ -494,6 +501,8 @@ def trial_preflight(
             _snapshot_sentinel_models(snap), models["objectTypes"],
             models["linkTypes"], models["actions"],
         ))
+        structure_errors.extend(_remote_sentinel_errors(
+            snap, models, _snapshot_sentinel_models(snap)))
     except Exception as exc:
         structure_errors.append(_gate_error(
             "sentinel_validation_failed", "sentinel", str(exc)))
@@ -587,6 +596,8 @@ def create_trial_run(
             _snapshot_sentinel_models(snap), models["objectTypes"],
             models["linkTypes"], models["actions"],
         ))
+        structural_errors.extend(_remote_sentinel_errors(
+            snap, models, _snapshot_sentinel_models(snap)))
     except Exception as exc:
         structural_errors.append(_gate_error(
             "sentinel_validation_failed", "sentinel", str(exc)))

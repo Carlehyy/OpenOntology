@@ -4,8 +4,8 @@ import { Loader2, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { v4 as uuid } from 'uuid'
 import {
-  integratedDatasetsApi,
-  type IntegratedAsset, type IntegratedRow, type IntegratedRows, type IntegratedSchema,
+  cdcCardLabel, cdcFactsDetail, cdcSubscriptionSummary, integratedDatasetsApi, isIntegratedCdcStatus,
+  type IntegratedAsset, type IntegratedCdcStatus, type IntegratedRow, type IntegratedRows, type IntegratedSchema,
   type IntegratedSyncRun, type IntegratedVersion, type MutationReceipt,
 } from '@/api/v2/integrated-datasets'
 import { Alert } from '@/components/ui/Alert'
@@ -34,6 +34,12 @@ function terminalReceiptGuidance(status: MutationReceipt['status']): string {
 }
 
 const DEFAULT_SCHEMA: IntegratedSchema = { columns: [], primary_key: [], schema_fingerprint: '' }
+
+/** Automatic CDC status refresh cadence while the detail dialog is mounted. */
+const CDC_POLL_INTERVAL_MS = 5000
+
+/** CDC status is a read-only server fact; failed or malformed fetches never degrade to the last healthy state. */
+type CdcPollState = { phase: 'checking' } | { phase: 'ok'; status: IntegratedCdcStatus } | { phase: 'unavailable' }
 
 export default function IntegratedAssetDetail({ asset, canManage, onChanged, onDecommissioned }: {
   asset: IntegratedAsset
@@ -69,6 +75,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   // 离线快照折叠区默认收起（整表同步退出常规路径）；进行中的同步运行必须可见，
   // 因此 activeSync 时自动展开——用户仍可手动收起（不强行抢回）。
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [cdcPoll, setCdcPoll] = useState<CdcPollState>({ phase: 'checking' })
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
 
@@ -120,6 +127,31 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
       .finally(() => { if (current) setLoadingSync(false) })
     return () => { current = false }
   }, [asset.id, loadVersions])
+
+  // 自动 CDC 订阅状态：仅在本详情挂载期间轮询（无手动开关）；订阅由已发布
+  // 远程映射驱动。失败或形态不符的响应一律显示不可核验，绝不沿用上次健康态。
+  // 切换资产或卸载时中止在途请求并复位为核验中，避免把上一资产的状态带入新资产。
+  useEffect(() => {
+    setCdcPoll({ phase: 'checking' })
+    let current = true
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const payload = await integratedDatasetsApi.cdc(asset.id, controller.signal)
+        // 载荷还必须属于当前资产：asset_id 不匹配视为不可核验，避免串显其他资产的状态。
+        if (current) setCdcPoll(isIntegratedCdcStatus(payload) && payload.asset_id === asset.id
+          ? { phase: 'ok', status: payload }
+          : { phase: 'unavailable' })
+      } catch {
+        if (current) setCdcPoll({ phase: 'unavailable' })
+      } finally {
+        if (current) timer = setTimeout(poll, CDC_POLL_INTERVAL_MS)
+      }
+    }
+    void poll()
+    return () => { current = false; controller.abort(); clearTimeout(timer) }
+  }, [asset.id])
 
   // Poll only server-persisted queued/starting/loading state. A failed run is
   // never retried automatically; the explicit recovery button only re-reads it.
@@ -349,6 +381,14 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   useEffect(() => {
     if (activeSync) setAdvancedOpen(true)
   }, [activeSync])
+  const cdcCardStateLabel = cdcPoll.phase === 'ok' ? cdcCardLabel(cdcPoll.status) : cdcPoll.phase === 'checking' ? '核验中' : '不可核验'
+  const cdcCardDetailLine = cdcPoll.phase === 'ok'
+    ? cdcPoll.status.enabled
+      ? `${cdcSubscriptionSummary(cdcPoll.status.subscriptions)} · ${cdcFactsDetail(cdcPoll.status)}`
+      : '尚无已发布的远程对象映射订阅本表；远程映射发布后自动开启订阅。'
+    : cdcPoll.phase === 'checking'
+      ? '正在核验服务端订阅状态。'
+      : '订阅状态查询失败，不代表订阅正常；详情打开期间会自动重试。'
 
   return (
     <section data-testid="integrated-asset-detail" className="flex h-full min-h-0 flex-col">
@@ -378,9 +418,15 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
           快照版本：<strong>{latestVersionStateLabel(asset, versions)}</strong>
           <p className="mt-1 text-muted-foreground">「完整同步到版本」会把整张源表封存成快照，仅用于精确离线查询；活映射仍实时读取源当前数据，不以快照为前提。</p>
         </div>
-        <div className="rounded-lg bg-muted p-3">
-          本体映射 / Sentinel：<strong>未跟踪</strong>
-          <p className="mt-1 text-muted-foreground">本页不跟踪该数据集被本体映射或哨兵使用的情况；这不影响源表的读取、写入与同步。</p>
+        <div
+          className="rounded-lg bg-muted p-3"
+          role="status"
+          aria-label={`CDC 变更订阅状态：${cdcCardStateLabel}`}
+          data-testid="integrated-cdc-state"
+        >
+          CDC 变更订阅：<strong>{cdcCardStateLabel}</strong>
+          <p className="mt-1 break-words text-muted-foreground">{cdcCardDetailLine}</p>
+          <p className="mt-1 text-muted-foreground">订阅随已发布的远程映射自动开启与停止，无手动开关；仅同步开启后的增量变更，不回补历史数据。</p>
         </div>
       </div>
 
