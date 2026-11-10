@@ -17,6 +17,7 @@ ontologies/
 ├── sentinels/            定义、CDC、评估、扫描、动态策略与触发记录
 ├── graph/                Neo4j 查询、分析与 NL-to-Cypher
 ├── agent_runtime/        本体 Agent 编排、工具、边界和报告
+├── mcp/                  账号密码认证的单本体只读 MCP 接入与查询适配
 ├── decision_simulation/  决策模拟
 ├── extraction/           供现存模型调用复用的 LLM gateway；无抽取 API 或图/向量 bridge
 ├── files/                供业务探索/数据管家复用的通用文档转换器；无本体文件 API
