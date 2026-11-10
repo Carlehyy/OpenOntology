@@ -441,7 +441,7 @@ def refresh_schema(db, user, asset_id):
 
 
 def decommission_asset(db, user, asset_id):
-    """受控注销集成资产：零历史 / 零映射消费引用 / 零任务才允许删除。
+    """受控注销集成资产：零历史 / 零映射消费引用 / 零报告引用 / 零任务才允许删除。
 
     历史与审计（数据集版本、同步运行、写入回执——含 queued/loading/failed
     等任何状态）一律不计为可清障项，也绝不随注销删除；任一依赖存在即返回
@@ -464,6 +464,7 @@ def decommission_asset(db, user, asset_id):
     from app.data_channel.datasets.consumers import dataset_consumers
     from app.data_channel.pipeline_tasks.models import PipelineTask
     from app.ontologies.mappings.consumers import dataset_mapping_bindings
+    from app.operations.consumers import dataset_report_article_references
 
     version_count = (
         db.query(func.count(DatasetVersion.id))
@@ -480,12 +481,14 @@ def decommission_asset(db, user, asset_id):
     )
     mapping_references = dataset_mapping_bindings(db, dataset.id)
     pipelines = dataset_consumers(db, dataset.id)
+    report_articles = dataset_report_article_references(db, dataset.id)
     pipeline_ids = [item["id"] for item in pipelines]
     tasks = (
         db.query(PipelineTask).filter(PipelineTask.pipeline_id.in_(pipeline_ids)).all()
         if pipeline_ids else []
     )
-    if version_count or run_count or mutation_count or mapping_references or pipelines or tasks:
+    if (version_count or run_count or mutation_count or mapping_references
+            or pipelines or tasks or report_articles):
         parts = []
         history_total = version_count + run_count + mutation_count
         if history_total:
@@ -497,6 +500,8 @@ def decommission_asset(db, user, asset_id):
             parts.append(f"{len(pipelines)} 条流水线")
         if tasks:
             parts.append(f"{len(tasks)} 个数据任务")
+        if report_articles:
+            parts.append(f"{len(report_articles)} 篇运营报告文章")
         raise HTTPException(409, {
             "code": "ASSET_DECOMMISSION_BLOCKED",
             "message": (
@@ -509,6 +514,8 @@ def decommission_asset(db, user, asset_id):
             "mapping_references_total": len(mapping_references),
             "pipelines": pipelines[:5],
             "pipelines_total": len(pipelines),
+            "report_articles": report_articles[:5],
+            "report_articles_total": len(report_articles),
             "tasks": [{"id": task.id, "name": task.name, "pipeline_id": task.pipeline_id}
                       for task in tasks[:5]],
             "tasks_total": len(tasks),

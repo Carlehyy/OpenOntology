@@ -1,4 +1,4 @@
-"""集成资产受控注销：零历史 / 零映射绑定 / 零流水线与任务才允许。
+"""集成资产受控注销：零历史 / 零映射绑定 / 零报告引用 / 零流水线与任务才允许。
 
 任何状态的历史（版本、queued/loading/failed 同步运行、pending/failed/unknown
 写入回执）都阻断注销且绝不随注销删除；这是审计边界，不是可清障的统计口径。
@@ -97,6 +97,71 @@ def test_decommission_blocked_by_version_mapping_pipeline_and_task(db, admin_use
     for row_id, model in [("version-ref", DatasetVersion), ("mapping-ref", OntologyMapping),
                           ("pipeline-ref", Pipeline), ("task-ref", PipelineTask)]:
         assert db.get(model, row_id) is not None
+
+
+def test_decommission_blocked_by_report_article_until_unbound(db, admin_user):
+    """运营报告文章以 RESTRICT 外键持有数据集：注销前显式预检，解除引用后放行。"""
+    from app.operations.models import OperationsReport, OperationsReportArticle
+
+    _make_asset(db, admin_user, asset_id="asset-report", dataset_id="ds-report",
+                connection_id="conn-report")
+    report = OperationsReport(id="report-int", name="集成数据报告")
+    article = OperationsReportArticle(
+        id="article-int", report_id="report-int", dataset_id="ds-report",
+        title="集成指标", markdown="", sort_order=0)
+    db.add_all([report, article])
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        service.decommission_asset(db, admin_user, "asset-report")
+    assert exc.value.status_code == 409
+    detail = exc.value.detail
+    assert detail["code"] == "ASSET_DECOMMISSION_BLOCKED"
+    assert "1 篇运营报告文章" in detail["message"]
+    assert detail["report_articles"] == [{
+        "article_id": "article-int", "title": "集成指标",
+        "report_id": "report-int", "report_name": "集成数据报告"}]
+    assert detail["report_articles_total"] == 1
+    # 既有字段保留
+    assert detail["history"] == {"dataset_versions": 0, "sync_runs": 0, "mutations": 0}
+    assert detail["mapping_references_total"] == 0
+    assert detail["pipelines_total"] == 0
+    assert detail["tasks_total"] == 0
+    # SQLite 外键未开启：数据保留证明是显式预检拦截，而非数据库外键报错
+    assert db.get(IntegratedAsset, "asset-report") is not None
+    assert db.get(Dataset, "ds-report") is not None
+    assert db.get(OperationsReportArticle, "article-int") is not None
+
+    # 解除引用（删除文章）后可注销
+    db.delete(article)
+    db.commit()
+    result = service.decommission_asset(db, admin_user, "asset-report")
+    assert result == {"status": "decommissioned", "asset_id": "asset-report",
+                      "dataset_id": "ds-report"}
+    assert db.get(IntegratedAsset, "asset-report") is None
+    assert db.get(Dataset, "ds-report") is None
+
+
+def test_decommission_report_article_references_are_capped_with_total(db, admin_user):
+    from app.operations.models import OperationsReport, OperationsReportArticle
+
+    _make_asset(db, admin_user, asset_id="asset-many", dataset_id="ds-many",
+                connection_id="conn-many")
+    db.add(OperationsReport(id="report-many", name="多文章报告"))
+    db.add_all([
+        OperationsReportArticle(
+            id=f"article-many-{index}", report_id="report-many", dataset_id="ds-many",
+            title=f"文章 {index}", markdown="", sort_order=index)
+        for index in range(7)
+    ])
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        service.decommission_asset(db, admin_user, "asset-many")
+    detail = exc.value.detail
+    assert len(detail["report_articles"]) == 5
+    assert detail["report_articles_total"] == 7
+    assert "7 篇运营报告文章" in detail["message"]
 
 
 def test_decommission_zero_dependency_removes_asset_and_dataset_only(db, admin_user):
