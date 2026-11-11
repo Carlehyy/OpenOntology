@@ -3166,6 +3166,25 @@ test('长会话进入即贴底，上滚出现「回到最新」，点击回到�
   const scroller = page.locator('main div.h-full.overflow-y-auto')
   await expect(scroller.getByText('第 30 条消息')).toBeVisible()
 
+  // 用户消息气泡：绿底白字（--color-bubble-accent / --color-text-inverse），
+  // 用同主题探针比对计算值，明暗两态通用（probe 模式同能力地图暗色令牌测试）
+  const userBubble = page.locator('#super-assistant-msg-m-long-0 > div')
+  await expect(userBubble).toBeVisible()
+  const bubbleColors = await userBubble.evaluate(el => {
+    const probe = document.createElement('span')
+    probe.style.backgroundColor = 'var(--color-bubble-accent)'
+    probe.style.color = 'var(--color-text-inverse)'
+    document.body.appendChild(probe)
+    const probeStyle = getComputedStyle(probe)
+    const result = {
+      bgOk: getComputedStyle(el).backgroundColor === probeStyle.backgroundColor,
+      colorOk: getComputedStyle(el).color === probeStyle.color,
+    }
+    probe.remove()
+    return result
+  })
+  expect(bubbleColors).toEqual({ bgOk: true, colorOk: true })
+
   // 进入长会话直接看到最新消息：滚动位置贴近底部
   await expect.poll(async () => {
     const distance = await scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight)
@@ -3176,6 +3195,15 @@ test('长会话进入即贴底，上滚出现「回到最新」，点击回到�
   await scroller.evaluate(el => { el.scrollTop = 0 })
   const jumpButton = page.getByRole('button', { name: '回到最新消息' })
   await expect(jumpButton).toBeVisible()
+  // 「回到最新」默认即品牌强调文字色（原为悬停态），不再走次要灰
+  expect(await jumpButton.evaluate(el => {
+    const probe = document.createElement('span')
+    probe.style.color = 'var(--color-accent-ink)'
+    document.body.appendChild(probe)
+    const expected = getComputedStyle(probe).color
+    probe.remove()
+    return getComputedStyle(el).color === expected
+  })).toBe(true)
 
   await jumpButton.click()
   await expect.poll(async () => {

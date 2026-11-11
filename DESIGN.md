@@ -60,6 +60,9 @@ description: >-
   emerald-600 以维持浅底 3:1 对比度（与历史 teal 同级），暗底直接用原值。
 - 主按钮 `--primary` 同取此绿（§2.1）：浅色档 #059669 配白字，深色档亮绿
   #3ecf8e 配深字；hover/active/light 档见 tokens.css `--color-primary-*`。
+- 聊天用户消息气泡用独立气泡绿 `--color-bubble-accent`
+  （`color-mix(in srgb, #00c972 76%, black)`，明暗两态同值）配
+  `--color-text-inverse` 白字，与助手侧中性底区分（2026-11-12 拍板）。
 - 使用纪律：强调色是「信号」不是「装饰」——同一视图只给最重要的元素。
 
 ### 2.3 语义色

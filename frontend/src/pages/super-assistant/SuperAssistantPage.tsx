@@ -2039,7 +2039,7 @@ export default function SuperAssistantPage() {
                 type="button"
                 onClick={jumpToLatest}
                 aria-label="回到最新消息"
-                className="absolute bottom-4 left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-card px-3.5 text-xs font-medium text-[var(--color-text-secondary)] shadow-md transition-colors hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="absolute bottom-4 left-1/2 z-10 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-card px-3.5 text-xs font-medium text-brand-ink shadow-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <ArrowDown size={13} className="shrink-0" /> 回到最新
               </button>

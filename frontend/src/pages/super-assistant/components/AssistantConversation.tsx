@@ -340,7 +340,7 @@ export function ChatMessage({ message, onRetry }: { message: SuperMessage; onRet
   if (message.role !== 'assistant') {
     return (
       <div id={`super-assistant-msg-${message.id}`} className="flex justify-end scroll-mt-6">
-        <div className="max-w-[min(36rem,82%)] rounded-2xl bg-[var(--color-bg-hover)] px-4 py-2.5 text-sm leading-6 text-[var(--color-text-primary)] whitespace-pre-wrap break-words">
+        <div className="max-w-[min(36rem,82%)] rounded-2xl bg-[var(--color-bubble-accent)] px-4 py-2.5 text-sm leading-6 text-[var(--color-text-inverse)] whitespace-pre-wrap break-words">
           {message.content}
         </div>
       </div>
