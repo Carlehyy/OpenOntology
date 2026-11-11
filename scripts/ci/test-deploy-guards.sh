@@ -399,11 +399,18 @@ if [ -z "$weknora_app_block" ] || [ -z "$weknora_init_block" ] \
     || ! grep -Fq 'frontend_ssl_certs:/etc/nginx/certs:ro' <<<"$weknora_gateway_block" \
     || ! grep -Fq 'location /mcp/' "$REPO_ROOT/docker/weknora/gateway.conf" \
     || ! grep -Fq 'return 404;' "$REPO_ROOT/docker/weknora/gateway.conf" \
+    || ! grep -Fq 'location = /sso/entry {' \
+      "$REPO_ROOT/docker/weknora/gateway.conf" \
+    || ! grep -Fq 'resolver 127.0.0.11 valid=30s ipv6=off;' \
+      "$REPO_ROOT/docker/weknora/gateway.conf" \
+    || ! grep -Fq 'proxy_pass http://$weknora_sso_backend/api/v2/super-assistant/weknora/sso/consume$is_args$args;' \
+      "$REPO_ROOT/docker/weknora/gateway.conf" \
     || ! grep -Fq 'run_weknora_bootstrap --verify' "$DEPLOY_SCRIPT" \
     || ! grep -Fq 'python -m app.super_assistant.weknora.bootstrap "$@"' "$DEPLOY_SCRIPT" \
     || ! grep -Fq 'compose --profile weknora-bootstrap build --pull weknora-bootstrap' "$DEPLOY_SCRIPT" \
-    || ! grep -Fq 'check_weknora_public_entry' "$DEPLOY_SCRIPT"; then
-  printf 'WeKnora app/MCP must be private, formal registration closed, init profile-gated, and only the UI gateway published\n' >&2
+    || ! grep -Fq 'check_weknora_public_entry' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'WeKnora SSO entry relay must answer 302 on the HTTPS entry (got ${sso_status})' "$DEPLOY_SCRIPT"; then
+  printf 'WeKnora app/MCP must be private, formal registration closed, init profile-gated, only the UI gateway published, and the SSO entry relay wired through the gateway without a compose dependency on backend\n' >&2
   exit 1
 fi
 
@@ -1915,7 +1922,8 @@ case "$url" in
     status="308"
     redirect_target="${FAKE_KANEO_WEB_URL:-https://64.83.14.139:8445}/"
     ;;
-  # 一键免登录中继：无票据访问由 backend 302 回 Kaneo 根路径
+  # 一键免登录中继：无票据访问由 backend 302 回各自服务的根路径
+  https://127.0.0.1:8444/sso/entry) status="302" ;;
   https://127.0.0.1:8445/sso/entry) status="302" ;;
   https://127.0.0.1:8445/*) body='ok' ;;
   */healthz) body='ok' ;;

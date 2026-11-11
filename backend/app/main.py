@@ -436,7 +436,8 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
-# WeKnora 原生 Web 跳转（仅 web_url）：同前缀同守卫子路由
+# WeKnora 原生 Web 跳转（web_url）与一键免登录票据签发（/weknora/entry）：
+# 同前缀同守卫子路由
 from app.super_assistant.weknora import router as super_assistant_weknora
 app.include_router(
     super_assistant_weknora.router,
@@ -459,6 +460,13 @@ app.include_router(
 # 是 entry 签发的一次性票据（HMAC + 90s TTL + Redis 单次消费）。
 app.include_router(
     super_assistant_kaneo.sso_router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+)
+# WeKnora 一键免登录中继（/weknora/sso/consume）：同上，经 weknora-gateway
+# 在 WeKnora origin 访问；登录响应经其原生 #oidc_result= 管道落盘。
+app.include_router(
+    super_assistant_weknora.sso_router,
     prefix="/api/v2/super-assistant",
     tags=["super-assistant"],
 )

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { resolveWeKnoraWebUrl } from '../../../pages/super-assistant/weknoraUrl.ts'
+import { resolveWeKnoraEntryUrl, resolveWeKnoraWebUrl } from '../../../pages/super-assistant/weknoraUrl.ts'
 
 describe('resolveWeKnoraWebUrl', () => {
   it('非回环地址（公网 IP / 自定义域名）原样保留协议、主机与端口', () => {
@@ -65,5 +65,46 @@ describe('resolveWeKnoraWebUrl', () => {
     assert.equal(resolveWeKnoraWebUrl('', '10.96.12.56'), null)
     assert.equal(resolveWeKnoraWebUrl(undefined, '10.96.12.56'), null)
     assert.equal(resolveWeKnoraWebUrl(null, '10.96.12.56'), null)
+  })
+})
+
+describe('resolveWeKnoraEntryUrl', () => {
+  it('公网跳转地址原样保留，ticket 查询串完整透传', () => {
+    assert.equal(
+      resolveWeKnoraEntryUrl(
+        'https://64.83.14.139:8444/sso/entry?ticket=abc.def123',
+        '10.96.12.56',
+      ),
+      'https://64.83.14.139:8444/sso/entry?ticket=abc.def123',
+    )
+  })
+
+  it('回环主机改写为当前访问主机，路径与票据保留（与领域知识入口同规则）', () => {
+    assert.equal(
+      resolveWeKnoraEntryUrl(
+        'http://localhost:8089/sso/entry?ticket=abc.def123',
+        '10.96.12.56',
+      ),
+      'http://10.96.12.56:8089/sso/entry?ticket=abc.def123',
+    )
+  })
+
+  it('路径不是精确的 /sso/entry 时拒绝，防止跳去任意地址', () => {
+    assert.equal(
+      resolveWeKnoraEntryUrl('https://weknora.example.com/other?ticket=x', '10.96.12.56'),
+      null,
+    )
+    assert.equal(
+      resolveWeKnoraEntryUrl('https://weknora.example.com/sso/entry/extra?ticket=x', '10.96.12.56'),
+      null,
+    )
+  })
+
+  it('非 http(s) 协议或非法 URL 返回 null（调用方按打开失败兜底）', () => {
+    assert.equal(resolveWeKnoraEntryUrl('javascript:alert(1)', '10.96.12.56'), null)
+    assert.equal(resolveWeKnoraEntryUrl('not a url', '10.96.12.56'), null)
+    assert.equal(resolveWeKnoraEntryUrl('', '10.96.12.56'), null)
+    assert.equal(resolveWeKnoraEntryUrl(undefined, '10.96.12.56'), null)
+    assert.equal(resolveWeKnoraEntryUrl(null, '10.96.12.56'), null)
   })
 })

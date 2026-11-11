@@ -398,7 +398,6 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     # over `env_file`, so every service that loads .env must mask them with an
     # explicit empty value; only the bootstrap path may keep the real values.
     weknora_bootstrap_only = (
-        "WEKNORA_ADMIN_PASSWORD",
         "WEKNORA_DB_PASSWORD",
         "WEKNORA_REDIS_PASSWORD",
         "WEKNORA_JWT_SECRET",
@@ -406,9 +405,9 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         "WEKNORA_SYSTEM_SIGNING_KEY",
     )
     # Kaneo keeps the same isolation for its DB/auth secrets. KANEO_ADMIN_PASSWORD
-    # has one sanctioned exception: `backend` re-declares the real value for the
-    # one-click SSO relay (explicit keys win over the mask anchor); every other
-    # runtime service still masks it.
+    # and WEKNORA_ADMIN_PASSWORD each have one sanctioned exception: `backend`
+    # re-declares the real value for the one-click SSO relay (explicit keys win
+    # over the mask anchor); every other runtime service still masks them.
     kaneo_bootstrap_only = (
         "KANEO_DB_PASSWORD",
         "KANEO_AUTH_SECRET",
@@ -424,9 +423,13 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
             assert environment[key] == ""
         if service != "backend":
             assert environment["KANEO_ADMIN_PASSWORD"] == ""
+            assert environment["WEKNORA_ADMIN_PASSWORD"] == ""
     assert compose["services"]["backend"]["environment"][
         "KANEO_ADMIN_PASSWORD"
     ] == "${KANEO_ADMIN_PASSWORD:?kaneo_admin_password is required}"
+    assert compose["services"]["backend"]["environment"][
+        "WEKNORA_ADMIN_PASSWORD"
+    ] == "${WEKNORA_ADMIN_PASSWORD:?weknora_admin_password is required}"
     bootstrap_environment = compose["services"]["weknora-bootstrap"][
         "environment"
     ]
@@ -461,6 +464,9 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     )
     for key in weknora_bootstrap_only + kaneo_bootstrap_only:
         assert build_environment[key].startswith("ci-only-")
+    # SSO relay credentials interpolated by the build stay synthetic too.
+    assert build_environment["KANEO_ADMIN_PASSWORD"].startswith("ci-only-")
+    assert build_environment["WEKNORA_ADMIN_PASSWORD"].startswith("ci-only-")
     assert build_environment["WEKNORA_WEB_URL"].endswith(".invalid")
     assert build_environment["KANEO_WEB_URL"].endswith(".invalid")
     assert "env" not in workflow
@@ -511,9 +517,9 @@ def test_local_compose_requires_real_stack_without_chroma():
     # Same WeKnora bootstrap-credential isolation as production: .env is shared
     # with platform services, so every env_file consumer masks the secrets that
     # only weknora-bootstrap/weknora-verify are meant to read. As in production,
-    # `backend` re-declares the real KANEO_ADMIN_PASSWORD for the SSO relay.
+    # `backend` re-declares the real KANEO_ADMIN_PASSWORD and
+    # WEKNORA_ADMIN_PASSWORD for the SSO relays.
     weknora_bootstrap_only = (
-        "WEKNORA_ADMIN_PASSWORD",
         "WEKNORA_DB_PASSWORD",
         "WEKNORA_REDIS_PASSWORD",
         "WEKNORA_JWT_SECRET",
@@ -540,9 +546,13 @@ def test_local_compose_requires_real_stack_without_chroma():
             assert environment[key] == ""
         if service != "backend":
             assert environment["KANEO_ADMIN_PASSWORD"] == ""
+            assert environment["WEKNORA_ADMIN_PASSWORD"] == ""
     assert compose["services"]["backend"]["environment"][
         "KANEO_ADMIN_PASSWORD"
     ] == "${KANEO_ADMIN_PASSWORD:-localKaneoAdmin2026!}"
+    assert compose["services"]["backend"]["environment"][
+        "WEKNORA_ADMIN_PASSWORD"
+    ] == "${WEKNORA_ADMIN_PASSWORD:-localWeKnoraAdmin2026@}"
     for service in ("weknora-bootstrap", "weknora-verify"):
         environment = compose["services"][service]["environment"]
         for key in (

@@ -9,7 +9,8 @@ import { expectSameBoundingBox } from './support/geometry'
 // 删除确认弹窗、新建会话不落库（点击仅清空聊天区、发送首条消息才建会话）、
 // 空态品牌文案与占位符、配置面板白底、
 // 输入草稿按会话缓存及刷新后从 localStorage 恢复（发送后清空落盘）、
-// 重命名 blur 取消、知识图谱头部入口（WeKnora 受信 URL、新标签 opener 隔离）、
+// 重命名 blur 取消、知识图谱头部入口（WeKnora 受信 URL、一键免登录领票跳转、
+// 修饰键原生兜底、回环改写当前访问主机、失败重试）、
 // 项目管理头部入口（Kaneo 受信 URL、一键免登录领票跳转、修饰键原生兜底、
 // 回环保留 canonical origin、失败重试）、
 // 能力拓展（multica 配置弹窗 + /multica: 命令提示的配置门控）、事件路由占位弹窗、消息通知弹窗
@@ -331,6 +332,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const weknoraFixture = {
     web_url: options.weknoraWebUrl ?? 'https://weknora.example.com:8443',
   }
+  // 领域知识（WeKnora）一键免登录：点击时领取一次性跳转票据；记录请求供断言
+  const weknoraEntryCalls: string[] = []
   // 项目管理（Kaneo）：同 WeKnora 模式读取入口配置；记录请求次数供断言
   const kaneoCalls: string[] = []
   const kaneoFixture = {
@@ -397,6 +400,11 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     if (path === '/api/v2/super-assistant/weknora' && request.method() === 'GET') {
       weknoraCalls.push(request.url())
       return json(route, weknoraFixture)
+    }
+    // 领域知识（WeKnora）一键免登录：签发带一次性票据的 WeKnora origin 入口地址
+    if (path === '/api/v2/super-assistant/weknora/entry' && request.method() === 'POST') {
+      weknoraEntryCalls.push(request.url())
+      return json(route, { redirect_url: `${weknoraFixture.web_url}/sso/entry?ticket=ticket-1.signature` })
     }
     // 项目管理（Kaneo）：页面加载读入口配置（原生 URL 作右键/中键兜底）
     if (path === '/api/v2/super-assistant/kaneo' && request.method() === 'GET') {
@@ -1005,6 +1013,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     multicaWorkspaceCalls,
     toolPatchCalls,
     weknoraCalls,
+    weknoraEntryCalls,
     kaneoCalls,
     kaneoEntryCalls,
     mcpPatches,
@@ -2523,7 +2532,7 @@ test('重命名会话：点击其它处自动取消，Enter 仍可保存', async
   expect(JSON.parse(mocks.patchBodies[0])).toMatchObject({ title: '新名称' })
 })
 
-test('知识库（WeKnora）：头部会话纪要左侧入口，新标签打开原生页面（新会话可用）', async ({ page }) => {
+test('知识库（WeKnora）：头部会话纪要右侧入口，一键免登录新标签进入原生页面（新会话可用）', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   // 原生 WeKnora 页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
@@ -2557,15 +2566,17 @@ test('知识库（WeKnora）：头部会话纪要左侧入口，新标签打开�
   expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(linkBox!.x + 1)
   await expect.poll(() => mocks.weknoraCalls.length).toBeGreaterThanOrEqual(1)
   expect(mocks.weknoraCalls[0]).toContain('/api/v2/super-assistant/weknora')
+  // 页面加载不领票：票据只在点击时签发（90s 一次性）
+  expect(mocks.weknoraEntryCalls).toHaveLength(0)
 
-  // 新标签落到 WeKnora 原生页面（登录由 WeKnora 自己承接），window.opener 已被隔离
+  // 普通左键：领一次性票据后新标签进入 WeKnora origin 的免登录入口（登录由
+  // 网关中继完成），window.opener 已被隔离
   const popupPromise = page.waitForEvent('popup')
   await link.click()
   const popup = await popupPromise
-  await popup.waitForLoadState('domcontentloaded')
-  const popupUrl = new URL(popup.url())
-  expect(popupUrl.origin).toBe('https://weknora.example.com:8443')
-  expect(popupUrl.pathname).toBe('/')
+  await popup.waitForURL('https://weknora.example.com:8443/sso/entry?ticket=ticket-1.signature')
+  expect(mocks.weknoraEntryCalls).toHaveLength(1)
+  expect(mocks.weknoraEntryCalls[0]).toContain('/api/v2/super-assistant/weknora/entry')
   expect(await popup.evaluate(() => window.opener)).toBeNull()
   await popup.close()
 })
@@ -2592,6 +2603,86 @@ test('知识库（WeKnora）：后端下发回环地址时改写为当前访问�
   const menuLink = page.getByRole('dialog').getByRole('link', { name: '知识库（WeKnora）' })
   await expect(menuLink).toBeVisible()
   await expect(menuLink).toHaveAttribute('href', 'http://localhost:8089')
+})
+
+test('知识库（WeKnora）：免登录跳转地址回环时改写为当前访问主机，票据保留', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  // 后端 entry 下发回环 origin（内网部署未显式配置 WEKNORA_WEB_URL）时，
+  // 跳转地址与领域知识入口套用同一回环改写：主机换成当前访问主机、协议/
+  // 端口/票据保留——与 Kaneo（严格保留 canonical origin）的差异有此用例钉住。
+  // 覆盖式 route 接管了 mockApis 的通用处理器，请求计数在本地自行维护。
+  let entryCalls = 0
+  await page.route('**/api/v2/super-assistant/weknora/entry', route => {
+    entryCalls += 1
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { redirect_url: 'http://127.0.0.1:8089/sso/entry?ticket=ticket-1.signature' } }),
+    })
+  })
+  // 改写后的落点在测试网络外：本地兜底响应让弹窗导航可完成
+  await page.context().route(/^http:\/\/localhost:8089(?:\/.*)?$/, route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><title>WeKnora</title><p>WeKnora 原生登录</p>',
+  }))
+  await page.goto('/#/super-assistant')
+
+  const link = page.getByRole('link', { name: '知识库（WeKnora）' })
+  await expect(link).toBeVisible()
+  const popupPromise = page.waitForEvent('popup')
+  await link.click()
+  const popup = await popupPromise
+  await popup.waitForURL('http://localhost:8089/sso/entry?ticket=ticket-1.signature')
+  expect(entryCalls).toBe(1)
+  await popup.close()
+})
+
+test('知识库（WeKnora）：免登录票据领取失败时如实报错，空白标签被关闭，入口保留', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  // 后端 fail-closed（如部署未配置中继凭据）：领取票据 503
+  await page.route('**/api/v2/super-assistant/weknora/entry', route => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({ detail: '领域知识单点登录未配置' }),
+  }))
+  await page.goto('/#/super-assistant')
+
+  const weknoraLink = page.getByRole('link', { name: '知识库（WeKnora）' })
+  await expect(weknoraLink).toBeVisible()
+  // 同步打开的空白标签在失败后被关闭，不残留任何新标签
+  const popupPromise = page.waitForEvent('popup')
+  await weknoraLink.click()
+  const popup = await popupPromise
+  await expect(page.getByText('领域知识入口打开失败')).toBeVisible()
+  await expect.poll(() => popup.isClosed()).toBe(true)
+  // 入口保留：原生 URL 直开（WeKnora 自己的登录页）仍是可用兜底
+  await expect(weknoraLink).toHaveAttribute('href', 'https://weknora.example.com:8443')
+})
+
+test('知识库（WeKnora）：修饰键点击保留原生直开兜底，不领取免登录票据', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.context().route(/^https:\/\/weknora\.example\.com:8443(?:\/.*)?$/, route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><title>WeKnora</title><p>WeKnora 原生登录</p>',
+  }))
+  await page.goto('/#/super-assistant')
+
+  // Ctrl/Cmd+点击走浏览器原生行为：新标签直开原生 URL（WeKnora 登录页手动
+  // 兜底），不触发免登录票据领取
+  const weknoraLink = page.getByRole('link', { name: '知识库（WeKnora）' })
+  await expect(weknoraLink).toBeVisible()
+  const popupPromise = page.context().waitForEvent('page')
+  await weknoraLink.click({ modifiers: ['ControlOrMeta'] })
+  const popup = await popupPromise
+  expect(page.context().pages().length).toBe(2)
+  expect(mocks.weknoraEntryCalls).toHaveLength(0)
+  expect(page.url()).toContain('/super-assistant')
+  await popup.close()
 })
 
 test('项目管理（Kaneo）：位于领域知识左侧，一键免登录新标签进入原生页面且 opener 隔离', async ({ page }) => {
