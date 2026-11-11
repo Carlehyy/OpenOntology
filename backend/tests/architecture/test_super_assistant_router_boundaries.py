@@ -790,9 +790,11 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # GET/PUT 共 4 个操作（3 条路径）。
     # WeKnora 知识服务引导新增 /weknora 的 GET 共 1 个操作（1 条路径）。
     # Kaneo（项目/任务服务，上游固定 2.49.0）引导新增 /kaneo 的 GET
-    # 共 1 个操作（1 条路径）。
-    assert len(paths) == 93
-    assert sum(len(item) for item in paths.values()) == 121
+    # 共 1 个操作（1 条路径）；一键免登录（共享管理员会话）新增
+    # /kaneo/entry 的 POST 与 /kaneo/sso/consume 的 GET（网关反代抵达，
+    # 不挂平台守卫，一次性票据即凭证）共 2 个操作（2 条路径）。
+    assert len(paths) == 95
+    assert sum(len(item) for item in paths.values()) == 123
     assert hashlib.sha256(payload).hexdigest() == (
-        "2661b347919e385e1209f30a79ce843acc921751d600ec9a30258a55b8626081"
+        "462978af90bca46e0f14ab1feea627f0f0d10a84596fd614c4b47ef840d00e43"
     )

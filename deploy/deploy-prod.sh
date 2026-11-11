@@ -713,6 +713,16 @@ check_kaneo_public_entry() {
     "https://127.0.0.1:${https_port}/healthz" >/dev/null || return 1
   curl -kfsS --connect-timeout 5 --max-time 20 \
     "https://127.0.0.1:${https_port}/api/health" >/dev/null || return 1
+  # 一键免登录中继链路（kaneo-gateway /sso/entry → backend consume）：无票据
+  # 访问必须 302 回根路径且不种 cookie，证明网关→backend 反代与路由已接通。
+  local sso_status
+  sso_status="$(curl -ksS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 10 \
+    "https://127.0.0.1:${https_port}/sso/entry" || true)"
+  if [ "$sso_status" != "302" ]; then
+    log "Kaneo SSO entry relay must answer 302 on the HTTPS entry (got ${sso_status})"
+    return 1
+  fi
   return 0
 }
 

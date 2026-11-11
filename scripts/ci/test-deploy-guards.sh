@@ -455,6 +455,13 @@ if [ -z "$kaneo_db_block" ] || [ -z "$kaneo_app_block" ] \
       "$REPO_ROOT/docker/kaneo/gateway.conf.template" \
     || ! grep -Fq 'proxy_pass http://kaneo-app:5173;' \
       "$REPO_ROOT/docker/kaneo/gateway.conf.template" \
+    || ! grep -Fq 'location = /sso/entry {' \
+      "$REPO_ROOT/docker/kaneo/gateway.conf.template" \
+    || ! grep -Fq 'resolver 127.0.0.11 valid=30s ipv6=off;' \
+      "$REPO_ROOT/docker/kaneo/gateway.conf.template" \
+    || ! grep -Fq 'proxy_pass http://$kaneo_sso_backend/api/v2/super-assistant/kaneo/sso/consume$is_args$args;' \
+      "$REPO_ROOT/docker/kaneo/gateway.conf.template" \
+    || ! grep -Fq '"https://127.0.0.1:${https_port}/sso/entry"' "$DEPLOY_SCRIPT" \
     || ! grep -Fq 'proxy_set_header Upgrade $http_upgrade;' \
       "$REPO_ROOT/docker/kaneo/kaneo-proxy.inc" \
     || ! grep -Fq 'run_kaneo_bootstrap --verify' "$DEPLOY_SCRIPT" \
@@ -468,7 +475,7 @@ if [ -z "$kaneo_db_block" ] || [ -z "$kaneo_app_block" ] \
     || grep -Fq 'stop --timeout 30 kaneo-gateway >/dev/null 2>&1 || true' \
       "$DEPLOY_SCRIPT" \
     || ! grep -Fq 'compose stop --timeout 30 kaneo-gateway' "$DEPLOY_SCRIPT"; then
-  printf 'Kaneo app/bootstrap must be private with registration closed, and only the native gateway published\n' >&2
+  printf 'Kaneo app/bootstrap must be private with registration closed, only the native gateway published, and the SSO entry relay wired through the gateway without a compose dependency on backend\n' >&2
   exit 1
 fi
 
@@ -1908,6 +1915,8 @@ case "$url" in
     status="308"
     redirect_target="${FAKE_KANEO_WEB_URL:-https://64.83.14.139:8445}/"
     ;;
+  # 一键免登录中继：无票据访问由 backend 302 回 Kaneo 根路径
+  https://127.0.0.1:8445/sso/entry) status="302" ;;
   https://127.0.0.1:8445/*) body='ok' ;;
   */healthz) body='ok' ;;
 esac

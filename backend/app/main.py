@@ -444,14 +444,23 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
-# Kaneo（项目/任务服务，上游固定 2.49.0）原生 Web 跳转（仅 web_url）：
-# 同前缀同守卫子路由；管理员账号由部署 bootstrap 服务初始化，平台不持凭据。
+# Kaneo（项目/任务服务，上游固定 2.49.0）原生 Web 跳转（web_url）与一键
+# 免登录票据签发（/kaneo/entry）：同前缀同守卫子路由；管理员账号由部署
+# bootstrap 服务初始化。
 from app.super_assistant.kaneo import router as super_assistant_kaneo
 app.include_router(
     super_assistant_kaneo.router,
     prefix="/api/v2/super-assistant",
     tags=["super-assistant"],
     dependencies=assistant_guard,
+)
+# Kaneo 一键免登录中继（/kaneo/sso/consume）：浏览器经 kaneo-gateway 在
+# Kaneo origin 访问，带不上平台 Bearer 头——有意不挂 assistant_guard，凭证
+# 是 entry 签发的一次性票据（HMAC + 90s TTL + Redis 单次消费）。
+app.include_router(
+    super_assistant_kaneo.sso_router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
 )
 # 远程助手邀请（属主侧：创建/列出/撤销一次性接入邀请，邀请函重发）：同前缀同守卫
 from app.super_assistant import remote_agent_invites as super_assistant_remote_agent_invites

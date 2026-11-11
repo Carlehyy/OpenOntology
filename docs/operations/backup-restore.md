@@ -33,7 +33,8 @@ Redis 队列是否需要持久恢复取决于任务幂等与业务 RPO，必须�
 Kaneo 的 `kaneo_postgres_data` 必须与服务器 `.env` 中的
 `KANEO_DB_PASSWORD` 作为同一恢复点保存：PostgreSQL 角色密码保存在数据目录
 内，旧卷配新密码会认证失败。`KANEO_AUTH_SECRET` 丢失只使既有登录会话失效；
-`KANEO_ADMIN_PASSWORD` 只是部署初始密码，账号事实源在 Kaneo 数据库内。首版
+`KANEO_ADMIN_PASSWORD` 只是部署初始密码，账号事实源在 Kaneo 数据库内（原生
+页面改密后 `.env` 同步新值，一键免登录中继依赖它做服务端登录）。首版
 没有 S3/SMTP，不存在需要一并恢复的附件对象存储。
 
 服务器 `.env` 与 PostgreSQL/API Hub 数据必须作为同一恢复点管理。

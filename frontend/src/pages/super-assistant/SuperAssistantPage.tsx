@@ -193,8 +193,9 @@ export default function SuperAssistantPage() {
   // 知识库或模型可用性，也不代表知识检索已就绪。登录走 WeKnora 自己的账号体系。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
   const [weknoraLoading, setWeknoraLoading] = useState(true)
-  // 项目管理（Kaneo）：页面加载只读后端返回的原生 Web URL；单用户独立账号，
-  // 登录走 Kaneo 自己的账号体系，平台不做账号打通。
+  // 项目管理（Kaneo）：页面加载只读后端返回的原生 Web URL；普通点击走
+  // 一键免登录（后端签发一次性票据，网关中继在 Kaneo origin 完成登录），
+  // 右键/中键/修饰键直开原生 URL 作手动登录兜底。
   const [kaneo, setKaneo] = useState<KaneoIntegration | null>(null)
   const [kaneoLoading, setKaneoLoading] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -305,6 +306,32 @@ export default function SuperAssistantPage() {
     () => resolveNativeWebUrl(kaneo?.web_url),
     [kaneo],
   )
+  /** 项目管理（Kaneo）一键免登录：先同步开空白标签保住用户手势（await 后再
+      window.open 会被弹窗拦截），再领取一次性票据跳转；失败时关闭空白页并
+      如实报错——原生 URL 直开（Kaneo 自己的登录页）仍是可用兜底。 */
+  const openKaneo = useCallback(async () => {
+    const popup = window.open('', '_blank')
+    try {
+      const { redirect_url } = await superAssistantApi.createKaneoEntry()
+      if (!popup) {
+        // 弹窗被拦截：当前标签跳转，免登录体验保持完整
+        window.location.href = redirect_url
+        return
+      }
+      popup.opener = null
+      popup.location.href = redirect_url
+    } catch (error) {
+      popup?.close()
+      toast.error('项目管理入口打开失败', { description: errorText(error) })
+    }
+  }, [])
+  // 普通（无修饰键）左键点击走免登录；中键/修饰键/右键保留 <a> 原生行为，
+  // 落到 Kaneo 登录页作手动兜底
+  const handleKaneoClick = useCallback((event: React.MouseEvent) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    void openKaneo()
+  }, [openKaneo])
 
   useEffect(() => {
     let alive = true
@@ -1651,11 +1678,13 @@ export default function SuperAssistantPage() {
           >
             <RouteIcon size={16} aria-hidden="true" />
           </button>
-          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口紧左（事件路由右侧）；新标签打开
-              原生 Web，登录走 Kaneo 自己的单用户账号。窄屏（<md）收进「更多操作」溢出菜单。 */}
+          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口紧左（事件路由右侧）；普通左键
+              一键免登录（领一次性票据新标签进入原生 Web），中键/修饰键/右键直开原生 URL 作
+              手动登录兜底。窄屏（<md）收进「更多操作」溢出菜单。 */}
           {kaneoUrl ? (
             <a
               href={kaneoUrl}
+              onClick={handleKaneoClick}
               target="_blank"
               rel="noopener noreferrer"
               aria-label="项目管理（Kaneo）"
@@ -1821,12 +1850,16 @@ export default function SuperAssistantPage() {
               {kaneoUrl ? (
                 <a
                   href={kaneoUrl}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    setHeaderOverflowOpen(false)
+                    void openKaneo()
+                  }}
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="项目管理（Kaneo）"
                   title="项目管理"
                   data-workbench-kaneo
-                  onClick={() => setHeaderOverflowOpen(false)}
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <SquareKanban size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />

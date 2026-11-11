@@ -183,9 +183,18 @@ DB、Redis、JWT、AES 与 signing 凭据独立生成并跨部署保持不变。
 
 Kaneo 是随平台 Compose 同启的单用户项目管理看板：官方
 `ghcr.io/usekaneo/kaneo:2.49.0` 固定 digest 镜像 + 独立 PostgreSQL（固定
-`postgres:16-alpine` digest，无宿主端口），保留自身账号登录；平台不做 SSO、
-不接 MCP、不改导航 menu key，唯一平台入口是超级助手会话头部「知识库」入口
-左侧的「项目管理」按钮（新标签打开原生 Web）。
+`postgres:16-alpine` digest，无宿主端口），保留自身账号体系；平台不接 MCP、
+不改导航 menu key，唯一平台入口是超级助手会话头部「知识库」入口左侧的
+「项目管理」按钮。
+
+一键免登录（共享管理员会话）：普通左键点击按钮时，平台后端为已登录且有
+超级助手菜单权限的用户签发一次性票据（HMAC 签名、90 秒有效、Redis 单次
+消费），新标签打开 `KANEO_WEB_URL/sso/entry?ticket=...`；`kaneo-gateway` 把
+该路径反代到 backend，backend 校验票据后以管理员凭据服务端登录 Kaneo，并
+把会话 cookie 以 Kaneo origin 的第一方响应下发，随后 302 进入工作台。全程
+用户无需知道 Kaneo 账号密码；所有有权限的平台用户共享同一个 Kaneo 管理员
+身份。任何失败（票据无效/重放、Redis 不可用、Kaneo 拒绝登录）都回落到
+Kaneo 自带登录页；中键/修饰键/右键点击按钮仍直开原生地址作手动登录兜底。
 
 服务拓扑与地址契约：
 
@@ -195,7 +204,9 @@ Kaneo 是随平台 Compose 同启的单用户项目管理看板：官方
   `DISABLE_GUEST_ACCESS`、`DISABLE_EMAIL_OTP_SIGN_IN` 全程为 `true`。
 - `kaneo-gateway`：唯一公开入口。HTTP `KANEO_HTTP_PORT`（默认 8090）只做 308
   跳转到规范 HTTPS origin；HTTPS `KANEO_HTTPS_PORT`（默认 8445）反代 app 并
-  保留 WebSocket 升级。证书复用平台自签证书卷，首次访问需手动信任。
+  保留 WebSocket 升级，另把精确路径 `/sso/entry` 反代到 backend 的免登录中继
+  （`/api/v2/super-assistant/kaneo/sso/consume`，经 Docker 内嵌 DNS 解析
+  `backend:8000`）。证书复用平台自签证书卷，首次访问需手动信任。
 - `KANEO_WEB_URL` 必须是无凭据、无路径/查询/fragment 的绝对 HTTPS origin：
   它同时作为 308 跳转目标与 app 的 `KANEO_CLIENT_URL`/`KANEO_API_URL`，换用
   非规范 origin（如直连 8090 或带路径前缀）会破坏原生登录。本地默认
@@ -213,8 +224,13 @@ Kaneo 是随平台 Compose 同启的单用户项目管理看板：官方
   （显示名 admin）。首次部署在私网完成账号创建与登录验证后，公网网关才启动；
   空实例本身允许创建首个管理员，因此不存在 WeKnora 式「临时开放注册」的
   init 容器。重复部署或重复 bootstrap 不修改已存在账号的密码；原生页面改密
-  后，须在受控终端同步服务器 `.env` 的 `KANEO_ADMIN_PASSWORD`，否则下次部署
-  的管理员验证会失败；部署流程不会覆盖数据库中的密码。
+  后，须在受控终端同步服务器 `.env` 的 `KANEO_ADMIN_PASSWORD` 并重启 backend，
+  否则一键免登录立即失效（回落到手动登录），下次部署的管理员验证也会失败；
+  部署流程不会覆盖数据库中的密码。
+- `KANEO_ADMIN_EMAIL`/`KANEO_ADMIN_PASSWORD` 除 `kaneo-bootstrap` 外只进入
+  `backend` 容器，供免登录中继做服务端登录；`pipeline_executor`、`task_worker`
+  等其余运行时容器仍由 Compose 掩码锚点屏蔽，`KANEO_DB_PASSWORD`、
+  `KANEO_AUTH_SECRET` 对所有平台容器屏蔽。凭据不进日志、接口响应与前端。
 - `KANEO_ADMIN_PASSWORD`、`KANEO_DB_PASSWORD`、`KANEO_AUTH_SECRET` 独立于
   平台密钥，不复用 `SECRET_KEY`/`ENCRYPTION_KEY`。生产首次部署由部署脚本
   随机生成并持久化到服务器 `.env`（校验下限：管理员密码 8–32 位且不含空白、

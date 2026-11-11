@@ -137,18 +137,21 @@ docker compose -f docker-compose.local.yml stop weknora-app-init
 ## Kaneo 本地初始化
 
 Kaneo 使用官方 `ghcr.io/usekaneo/kaneo:2.49.0` 固定 digest 镜像，以独立单用户
-账号与独立 PostgreSQL 运行，平台不做 SSO/MCP/账号打通，也不改导航 menu key；
+账号与独立 PostgreSQL 运行，平台不接 MCP/账号同步，也不改导航 menu key；
 唯一入口是超级助手会话头部「知识库」（悬停「领域知识」）入口左侧的
-「项目管理」按钮，新标签打开原生 Web。
+「项目管理」按钮。普通左键走一键免登录：backend 签发一次性票据，
+`kaneo-gateway` 的 `/sso/entry` 中继在 Kaneo origin 服务端登录并种会话
+cookie，直接进入工作台；中键/修饰键/右键直开原生地址作手动登录兜底。
 
 完整本地栈中 Kaneo 与平台同启且为强依赖：`kaneo-db` 健康后启动 `kaneo-app`，
 `kaneo-bootstrap` 一次性容器在私网创建管理员并登录验证，成功后 `kaneo-gateway`
 才开放公网入口；backend 与 executor 均依赖 kaneo-app 健康及 bootstrap 成功
 完成，Kaneo 未就绪时平台启动/深度 readiness fail-closed。本地默认管理员为
 `admin / admin@kaneo.local / localKaneoAdmin2026!`（用户名/邮箱/密码，仅用于
-本地，可在根 `.env` 用 `KANEO_*` 变量覆盖）。重复执行 bootstrap 或重新
-`up` 不会修改已存在账号的密码；在原生页面改密后，须在受控终端同步根
-`.env` 的 `KANEO_ADMIN_PASSWORD`，否则下次部署的管理员验证会失败并关闭入口。
+本地，可在根 `.env` 用 `KANEO_*` 变量覆盖；backend 容器读取同一邮箱/密码做
+免登录中继）。重复执行 bootstrap 或重新 `up` 不会修改已存在账号的密码；在
+原生页面改密后，须在受控终端同步根 `.env` 的 `KANEO_ADMIN_PASSWORD` 并重启
+backend，否则一键免登录立即失效，下次部署的管理员验证也会失败并关闭入口。
 
 只为源码后端启动 Kaneo（不启动平台 8000/5173）时：
 
@@ -173,7 +176,9 @@ Kaneo，使页面 API、认证来源和平台入口一致；不会按当前访�
 
 - 首次访问 `https://localhost:8445` 须手动信任自签证书（复用平台本地证书卷）；
 - HTTP `http://localhost:8090/` 返回 308 且 Location 精确指向规范 HTTPS origin；
-- 用本地默认管理员在 HTTPS 页面登录成功，页面无注册/访客/邮件验证入口；
+- 登录平台后在超级助手页点击「项目管理」：新标签直接进入 Kaneo 工作台
+  （免登录中继生效，全程无账号密码），`/sso/entry` 无票据访问 302 回根路径；
+- 手动用本地默认管理员在 HTTPS 页面登录同样成功，页面无注册/访客/邮件验证入口；
 - 停掉 `kaneo-app` 后平台 `/health/ready` 失败，恢复后自动回到就绪。
 
 首版未接 S3/SMTP：附件上传（官方仅支持 S3 存储）与邮件找回密码不可用；

@@ -40,6 +40,16 @@ server {
         return 200 "ok\n";
     }
 
+    # 一键免登录中继：backend 校验一次性票据并服务端登录 Kaneo，会话
+    # Set-Cookie 以本（Kaneo）origin 的第一方响应下发。上游地址用变量 +
+    # Docker 内嵌 DNS 解析，backend 容器晚于网关创建时 nginx 仍可启动。
+    location = /sso/entry {
+        resolver 127.0.0.11 valid=30s ipv6=off;
+        set $kaneo_sso_backend backend:8000;
+        proxy_pass http://$kaneo_sso_backend/api/v2/super-assistant/kaneo/sso/consume$is_args$args;
+        include /etc/nginx/kaneo-proxy.inc;
+    }
+
     location / {
         proxy_pass http://kaneo-app:5173;
         include /etc/nginx/kaneo-proxy.inc;

@@ -106,8 +106,11 @@ Actions 日志。`KANEO_WEB_URL` 未显式配置时从 `PUBLIC_TLS_IP` 与
 `PUBLIC_TLS_IP` 时，部署脚本从显式传入的 `HEALTH_URL` 提取并校验公网 IP，
 持久化后供证书与 Kaneo 共用；已有值保持不变。健康地址使用域名或回环地址、
 无法确定公网 IP 时，须先在服务器 `.env` 配置 `PUBLIC_TLS_IP`，否则部署失败。
-公开入口检查要求 HTTP 8090 精确 308 跳转该 origin、HTTPS 8445 网关健康。
-密码获取只能在服务器受控终端读取 `.env`，边界同
+公开入口检查要求 HTTP 8090 精确 308 跳转该 origin、HTTPS 8445 网关健康，
+且免登录中继 `/sso/entry` 无票据访问必须 302 回根路径（证明 kaneo-gateway →
+backend 反代与中继路由接通）。`backend` 容器持有
+`KANEO_ADMIN_EMAIL`/`KANEO_ADMIN_PASSWORD` 供一键免登录中继做服务端登录，
+其余运行时容器仍被掩码。密码获取只能在服务器受控终端读取 `.env`，边界同
 [首个管理员密码](#首次登录与管理员密码恢复)。服务与地址契约详见
 [配置说明](./configuration.md#kaneo-项目管理2490)。
 
@@ -272,11 +275,12 @@ admin 时的 seed 输入，编辑它不会修改已经存在的管理员密码�
 
 Kaneo 原生页面的管理员凭据同样只在受控终端读取同一 `.env`（把上例 awk 的键
 换成 `KANEO_ADMIN_USER`、`KANEO_ADMIN_EMAIL`、`KANEO_ADMIN_PASSWORD`；默认
-账号 `admin` / `admin@kaneo.local`）。首版无 SMTP，没有邮件找回通道，服务器
-`.env` 是初始密码的唯一恢复来源；密码一旦在原生页面修改，账号事实源即转为
-Kaneo 自身数据库。改密后须在受控终端同步服务器 `.env` 的
-`KANEO_ADMIN_PASSWORD`，否则下次部署会因管理员验证失败而关闭入口；部署不会
-自动重置数据库密码。
+账号 `admin` / `admin@kaneo.local`）——日常使用不需要它：超级助手头部
+「项目管理」按钮已提供一键免登录（见配置说明）。首版无 SMTP，没有邮件找回
+通道，服务器 `.env` 是初始密码的唯一恢复来源；密码一旦在原生页面修改，账号
+事实源即转为 Kaneo 自身数据库。改密后须在受控终端同步服务器 `.env` 的
+`KANEO_ADMIN_PASSWORD`，否则一键免登录立即失效（回落手动登录），下次部署也
+会因管理员验证失败而关闭入口；部署不会自动重置数据库密码。
 
 ## 当前已知缺口
 

@@ -113,10 +113,16 @@ export interface WeKnoraIntegration {
   web_url: string
 }
 
-/** Kaneo 项目管理原生 Web 入口（后端只回 Web URL，不涉及账号打通） */
+/** Kaneo 项目管理原生 Web 入口（后端只回 Web URL） */
 export interface KaneoIntegration {
-  /** Kaneo 原生 Web 页面地址：前端只负责新标签打开，登录使用其单用户独立账号 */
+  /** Kaneo 原生 Web 页面地址：右键/中键直开的兜底入口（Kaneo 自己的登录页） */
   web_url: string
+}
+
+/** Kaneo 一键免登录跳转票据 */
+export interface KaneoEntry {
+  /** 带 90s 一次性票据的 Kaneo 入口地址：新标签打开后由网关中继完成登录 */
+  redirect_url: string
 }
 
 export interface SkillFile {
@@ -728,9 +734,12 @@ export const superAssistantApi = {
   /** WeKnora 原生 Web 入口（页面加载即读公网 URL；不依赖 state/知识库/模型） */
   getWeKnoraIntegration: () =>
     apiClientV2.get<WeKnoraIntegration>('/super-assistant/weknora'),
-  /** Kaneo 项目管理原生 Web 入口（页面加载即读 URL；登录走 Kaneo 自己的账号体系） */
+  /** Kaneo 项目管理原生 Web 入口（页面加载即读 URL；普通点击走下方免登录入口） */
   getKaneoIntegration: () =>
     apiClientV2.get<KaneoIntegration>('/super-assistant/kaneo'),
+  /** Kaneo 一键免登录：领取一次性跳转票据，登录由中继在 Kaneo origin 完成 */
+  createKaneoEntry: () =>
+    apiClientV2.post<KaneoEntry>('/super-assistant/kaneo/entry'),
   streamChat,
   /** kernel.v1 长任务 API；与旧 Conversation 流并行，调用方需自行保存 run_id/version。 */
   createKernelRun: (conversationId: string, body: {

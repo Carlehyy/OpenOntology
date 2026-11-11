@@ -127,6 +127,8 @@ def _required_settings(**updates) -> Settings:
         "n8n_api_key": "strong-n8n-api-key",
         "weknora_web_url": "https://kb.example.com",
         "kaneo_web_url": "https://pm.example.com",
+        "kaneo_admin_email": "admin@kaneo.example.com",
+        "kaneo_admin_password": "strong-kaneo-admin-password",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",

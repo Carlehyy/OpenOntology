@@ -10,7 +10,8 @@ import { expectSameBoundingBox } from './support/geometry'
 // 空态品牌文案与占位符、配置面板白底、
 // 输入草稿按会话缓存及刷新后从 localStorage 恢复（发送后清空落盘）、
 // 重命名 blur 取消、知识图谱头部入口（WeKnora 受信 URL、新标签 opener 隔离）、
-// 项目管理头部入口（Kaneo 受信 URL、回环保留 canonical origin、失败重试）、
+// 项目管理头部入口（Kaneo 受信 URL、一键免登录领票跳转、修饰键原生兜底、
+// 回环保留 canonical origin、失败重试）、
 // 能力拓展（multica 配置弹窗 + /multica: 命令提示的配置门控）、事件路由占位弹窗、消息通知弹窗
 // （未读徽章、tab 筛选、Markdown 详情与附件、标记/归档/全部已读/发送消息）、
 // ⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、全局搜索 Command 面板检索与跳转、
@@ -335,6 +336,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const kaneoFixture = {
     web_url: options.kaneoWebUrl ?? 'https://kaneo.example.com:8445',
   }
+  // 一键免登录：点击时领取一次性跳转票据；记录请求供断言
+  const kaneoEntryCalls: string[] = []
   await page.route('**/api/**', route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
@@ -395,10 +398,15 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       weknoraCalls.push(request.url())
       return json(route, weknoraFixture)
     }
-    // 项目管理（Kaneo）：页面加载读入口配置，登录由 Kaneo 自己的账号体系承接
+    // 项目管理（Kaneo）：页面加载读入口配置（原生 URL 作右键/中键兜底）
     if (path === '/api/v2/super-assistant/kaneo' && request.method() === 'GET') {
       kaneoCalls.push(request.url())
       return json(route, kaneoFixture)
+    }
+    // 项目管理（Kaneo）一键免登录：签发带一次性票据的 Kaneo origin 入口地址
+    if (path === '/api/v2/super-assistant/kaneo/entry' && request.method() === 'POST') {
+      kaneoEntryCalls.push(request.url())
+      return json(route, { redirect_url: `${kaneoFixture.web_url}/sso/entry?ticket=ticket-1.signature` })
     }
     // 会话流式对话：可控延迟的 SSE
     const chatMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/chat$/)
@@ -998,6 +1006,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     toolPatchCalls,
     weknoraCalls,
     kaneoCalls,
+    kaneoEntryCalls,
     mcpPatches,
     mcpTests,
     isChatDone: () => chatDone,
@@ -2585,14 +2594,14 @@ test('知识库（WeKnora）：后端下发回环地址时改写为当前访问�
   await expect(menuLink).toHaveAttribute('href', 'http://localhost:8089')
 })
 
-test('项目管理（Kaneo）：位于领域知识左侧，新标签打开原生页面且 opener 隔离', async ({ page }) => {
+test('项目管理（Kaneo）：位于领域知识左侧，一键免登录新标签进入原生页面且 opener 隔离', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   // Kaneo 原生页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
   await page.context().route(/^https:\/\/kaneo\.example\.com:8445(?:\/.*)?$/, route => route.fulfill({
     status: 200,
     contentType: 'text/html',
-    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理登录</p>',
+    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理</p>',
   }))
   await page.goto('/#/super-assistant')
 
@@ -2602,6 +2611,7 @@ test('项目管理（Kaneo）：位于领域知识左侧，新标签打开原生
   const summary = page.getByRole('button', { name: '查看会话纪要' })
   const eventRouting = page.getByRole('button', { name: '事件路由', exact: true })
   await expect(kaneoLink).toBeVisible()
+  // href/target/rel 保留原生直开语义：中键/修饰键/右键落到 Kaneo 登录页作手动兜底
   await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
   await expect(kaneoLink).toHaveAttribute('target', '_blank')
   await expect(kaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
@@ -2614,13 +2624,17 @@ test('项目管理（Kaneo）：位于领域知识左侧，新标签打开原生
   expect(kaneoBox!.x + kaneoBox!.width).toBeLessThanOrEqual(weknoraBox!.x + 1)
   await expect.poll(() => mocks.kaneoCalls.length).toBeGreaterThanOrEqual(1)
   expect(mocks.kaneoCalls[0]).toContain('/api/v2/super-assistant/kaneo')
+  // 页面加载不领票：票据只在点击时签发（90s 一次性）
+  expect(mocks.kaneoEntryCalls).toHaveLength(0)
 
-  // 新标签落到 Kaneo 原生页面（单用户账号由 Kaneo 自己承接），window.opener 已被隔离
+  // 普通左键：领一次性票据后新标签进入 Kaneo origin 的免登录入口（登录由网关
+  // 中继完成），window.opener 已被隔离
   const popupPromise = page.waitForEvent('popup')
   await kaneoLink.click()
   const popup = await popupPromise
-  await popup.waitForLoadState('domcontentloaded')
-  expect(new URL(popup.url()).origin).toBe('https://kaneo.example.com:8445')
+  await popup.waitForURL('https://kaneo.example.com:8445/sso/entry?ticket=ticket-1.signature')
+  expect(mocks.kaneoEntryCalls).toHaveLength(1)
+  expect(mocks.kaneoEntryCalls[0]).toContain('/api/v2/super-assistant/kaneo/entry')
   expect(await popup.evaluate(() => window.opener)).toBeNull()
   await popup.close()
 })
@@ -2699,6 +2713,55 @@ test('项目管理（Kaneo）：加载失败与非法协议不提供跳转，重
   await expect(kaneoLink).toBeVisible()
   await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
   await expect(kaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
+})
+
+test('项目管理（Kaneo）：免登录票据领取失败时如实报错，空白标签被关闭，入口保留', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  // 后端 fail-closed（如部署未配置中继凭据）：领取票据 503
+  await page.route('**/api/v2/super-assistant/kaneo/entry', route => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({ detail: '项目任务单点登录未配置' }),
+  }))
+  await page.goto('/#/super-assistant')
+
+  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
+  await expect(kaneoLink).toBeVisible()
+  // 同步打开的空白标签在失败后被关闭，不残留任何新标签
+  const popupPromise = page.waitForEvent('popup')
+  await kaneoLink.click()
+  const popup = await popupPromise
+  await expect(page.getByText('项目管理入口打开失败')).toBeVisible()
+  await expect.poll(() => popup.isClosed()).toBe(true)
+  // 入口保留：原生 URL 直开（Kaneo 自己的登录页）仍是可用兜底
+  await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
+})
+
+test('项目管理（Kaneo）：修饰键点击保留原生直开兜底，不领取免登录票据', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.context().route(/^https:\/\/kaneo\.example\.com:8445(?:\/.*)?$/, route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理登录</p>',
+  }))
+  await page.goto('/#/super-assistant')
+
+  // Ctrl/Cmd+点击走浏览器原生行为：新标签直开原生 URL（Kaneo 登录页手动兜底），
+  // 不触发免登录票据领取
+  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
+  await expect(kaneoLink).toBeVisible()
+  const popupPromise = page.context().waitForEvent('page')
+  await kaneoLink.click({ modifiers: ['ControlOrMeta'] })
+  const popup = await popupPromise
+  // 断言原生行为本身：新标签已开（落点即 href 原生地址，由浏览器保证）、
+  // 主页面未被导航走、未领取免登录票据；后台标签在 headless 下会延迟
+  // 渲染，不断言其加载完成
+  expect(page.context().pages().length).toBe(2)
+  expect(mocks.kaneoEntryCalls).toHaveLength(0)
+  expect(page.url()).toContain('/super-assistant')
+  await popup.close()
 })
 
 test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ page }) => {

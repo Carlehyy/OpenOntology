@@ -60,6 +60,9 @@ x-weknora-app: &weknora-app-base
 # and WeKnora stack keep reading the real values. Only the administrator,
 # database, cache and token-signing secrets are masked. The Hindsight DB
 # password belongs to the hindsight stack only and is masked the same way.
+# `backend` re-declares KANEO_ADMIN_PASSWORD with the real local value for the
+# one-click Kaneo SSO relay (explicit keys win over merge keys); all other
+# runtime containers keep the empty masks.
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
   WEKNORA_DB_PASSWORD: ""
@@ -615,6 +618,11 @@ services:
       KANEO_BASE_URL: http://kaneo-app:5173
       KANEO_WEB_URL: ${KANEO_WEB_URL:-https://localhost:8445}
       KANEO_TIMEOUT_SECONDS: ${KANEO_TIMEOUT_SECONDS:-15}
+      # Kaneo 一键免登录中继（super_assistant/kaneo/sso.py）：backend 用管理员
+      # 邮箱/密码做服务端 sign-in——显式覆盖上方掩码锚点的空值，默认值与
+      # kaneo-bootstrap 的本地默认保持一致；其余运行时容器仍被锚点掩码。
+      KANEO_ADMIN_EMAIL: ${KANEO_ADMIN_EMAIL:-admin@kaneo.local}
+      KANEO_ADMIN_PASSWORD: ${KANEO_ADMIN_PASSWORD:-localKaneoAdmin2026!}
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       # 本地默认也不在 backend 内直接执行用户插件；协议 fixture 可在
       # 源码测试中显式选择 direct_dev。

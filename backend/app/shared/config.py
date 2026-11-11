@@ -283,10 +283,14 @@ class Settings(BaseSettings):
     weknora_web_url: str = "http://localhost:8089"
     weknora_timeout_seconds: int = Field(default=15, ge=3, le=60)
     # Kaneo（项目/任务服务，上游固定 2.49.0）同构：私网 http API 供探活，
-    # 浏览器入口经 nginx 走 HTTPS 的公开 web 地址；管理员凭据只存在于
-    # 部署 bootstrap 服务环境，禁止进入平台 runtime settings。
+    # 浏览器入口经 nginx 走 HTTPS 的公开 web 地址。一键免登录中继
+    # （super_assistant/kaneo/sso.py）需要管理员邮箱/密码在 backend 运行时
+    # 做服务端 sign-in，仅此用途；密码 repr=False，不进日志与接口响应，
+    # 其余运行时容器仍由 compose 掩码锚点屏蔽。
     kaneo_base_url: str = "http://127.0.0.1:18090"
     kaneo_web_url: str = "https://localhost:8445"
+    kaneo_admin_email: str = "admin@kaneo.local"
+    kaneo_admin_password: str = Field(default="", repr=False)
     kaneo_timeout_seconds: int = Field(default=15, ge=3, le=60)
 
     @field_validator("kaneo_web_url", mode="before")
@@ -694,6 +698,18 @@ def production_config_errors(current: Settings) -> list[str]:
         _insecure.append("DATABASE_URL must use canonical postgresql://")
     if current.neo4j_password == "ontoprompt123":
         _insecure.append("NEO4J_PASSWORD")
+    # Kaneo 一键免登录中继用管理员凭据做服务端 sign-in：缺失、过短（上游
+    # better-auth 密码下限 8 位）或仍是本地开发默认值都 fail-closed，
+    # deploy 脚本对缺失/弱默认会生成强随机值，此处兜住裸跑 compose 的场景。
+    if "@" not in str(current.kaneo_admin_email or "").strip():
+        _insecure.append("KANEO_ADMIN_EMAIL")
+    if (
+        len(str(current.kaneo_admin_password or "")) < 8
+        or current.kaneo_admin_password in {
+            "change-me", "admin123", "localKaneoAdmin2026!",
+        }
+    ):
+        _insecure.append("KANEO_ADMIN_PASSWORD")
     # Python kernel gateway 以共享 token 鉴权，空值或公开默认值（compose 兜底
     # 与 .env.example 示例）都意味着内网任意调用方可执行任意 Python；部署脚本
     # 会对缺失/默认值自动生成强随机值，此处兜住绕过脚本裸跑 compose 的场景。
