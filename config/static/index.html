@@ -42,15 +42,15 @@
       <aside class="sidebar" aria-label="配置项目">
         <div class="sidebar-intro">
           <p class="sidebar-title">完整功能检查</p>
-          <p>七项阻塞依赖通过后即可生成；CDP 地址必填，连通性可稍后修复。</p>
+          <p>八项阻塞依赖通过后即可生成；CDP 地址必填，连通性可稍后修复。</p>
         </div>
 
         <div class="progress-summary" aria-labelledby="progress-label">
           <div class="progress-copy">
             <span id="progress-label">连通性进度</span>
-            <strong id="progress-count">0 / 7</strong>
+            <strong id="progress-count">0 / 8</strong>
           </div>
-          <progress id="test-progress" value="0" max="7">0 / 7</progress>
+          <progress id="test-progress" value="0" max="8">0 / 8</progress>
         </div>
 
         <nav class="section-nav">
@@ -88,6 +88,10 @@
           </a>
           <a href="#weknora-section" data-nav-section="weknora">
             <span>WeKnora 知识库</span>
+            <span class="nav-status status-idle">待测试</span>
+          </a>
+          <a href="#kaneo-section" data-nav-section="kaneo">
+            <span>Kaneo 任务看板</span>
             <span class="nav-status status-idle">待测试</span>
           </a>
           <a href="#advanced-section" data-nav-section="advanced">
@@ -531,6 +535,49 @@
             <div class="test-message" data-test-message="weknora" aria-live="polite"></div>
           </section>
 
+          <section id="kaneo-section" class="config-section" data-section="kaneo" aria-labelledby="kaneo-title">
+            <div class="section-heading">
+              <div>
+                <p class="section-purpose">连接单用户任务看板</p>
+                <h2 id="kaneo-title">Kaneo 任务看板</h2>
+                <p>Kaneo 随平台启动且必须保持健康。测试要求服务健康且单用户账号与实例管理员已创建；账号在 Kaneo 原生页面登录管理。</p>
+              </div>
+              <span class="section-state status-idle" data-section-status="kaneo">
+                <span class="status-indicator" aria-hidden="true"></span>
+                <span>待测试</span>
+              </span>
+            </div>
+            <div class="notice notice-info">
+              <strong>平台不保管 Kaneo 凭据</strong>
+              <span>平台使用官方固定 ghcr.io/usekaneo/kaneo:2.49.0 镜像部署单用户实例。公网 HTTP 8090 只跳转 HTTPS 8445，原生页面固定为 HTTPS；本页不保存 Kaneo 管理员、数据库或认证密钥。</span>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label for="kaneo-base-url">连接地址</label>
+                <input id="kaneo-base-url" data-path="kaneo.base_url" name="kaneo.base_url" type="url" value="http://127.0.0.1:18090" required autocomplete="url">
+                <p class="field-help">源码运行填私网回环端口 18090；平台 Compose 内部固定使用 http://kaneo-app:5173。不要填写只做跳转的 8090 端口。</p>
+                <p class="field-error" data-error-for="kaneo.base_url"></p>
+              </div>
+              <div class="field">
+                <label for="kaneo-web-url">公网 Web 地址</label>
+                <input id="kaneo-web-url" data-path="kaneo.web_url" name="kaneo.web_url" type="url" value="https://localhost:8445" required autocomplete="url">
+                <p class="field-help">浏览器访问的 HTTPS 原生页面地址，必须使用 https，默认是 https://localhost:8445。</p>
+                <p class="field-error" data-error-for="kaneo.web_url"></p>
+              </div>
+              <div class="field">
+                <label for="kaneo-timeout">连接超时，秒</label>
+                <input id="kaneo-timeout" data-path="kaneo.timeout_seconds" name="kaneo.timeout_seconds" type="number" min="3" max="60" value="15" required inputmode="numeric">
+                <p class="field-help">默认 15 秒，后端允许 3-60 秒。</p>
+                <p class="field-error" data-error-for="kaneo.timeout_seconds"></p>
+              </div>
+            </div>
+            <div class="section-actions">
+              <button class="secondary-button help-button" type="button" data-guide="kaneo">服务说明</button>
+              <button class="primary-button test-button" type="button" data-test-service="kaneo">测试 Kaneo</button>
+            </div>
+            <div class="test-message" data-test-message="kaneo" aria-live="polite"></div>
+          </section>
+
           <section id="advanced-section" class="config-section" data-section="advanced" aria-labelledby="advanced-title">
             <div class="section-heading">
               <div>
@@ -641,7 +688,7 @@
               <div>
                 <p class="section-purpose">最后检查并写入本地文件</p>
                 <h2 id="finish-title">生成与启动</h2>
-                <p>生成前必须完成七项阻塞依赖测试，并填写 CDP 地址；CDP 连通性可稍后修复。大模型请在平台启动后通过“模型配置”页面按需添加。</p>
+                <p>生成前必须完成八项阻塞依赖测试，并填写 CDP 地址；CDP 连通性可稍后修复。大模型请在平台启动后通过“模型配置”页面按需添加。</p>
               </div>
               <span class="section-state status-idle" data-section-status="finish">
                 <span class="status-indicator" aria-hidden="true"></span>
@@ -657,7 +704,7 @@
               <button id="test-all" class="secondary-button large-button" type="button">测试全部必选依赖</button>
               <button id="generate-config" class="primary-button large-button" type="button" disabled>生成本地配置文件</button>
             </div>
-            <p id="generate-help" class="action-help">请先填写并通过七项阻塞依赖测试。</p>
+            <p id="generate-help" class="action-help">请先填写并通过八项阻塞依赖测试。</p>
 
             <div id="generated-result" class="generated-result" hidden>
               <div class="result-heading">
@@ -686,7 +733,7 @@
     <div id="sticky-actions" class="sticky-actions" hidden>
       <div>
         <strong id="sticky-title">还未完成连通性测试</strong>
-        <span id="sticky-copy">0 / 7 项必选测试已通过</span>
+        <span id="sticky-copy">0 / 8 项必选测试已通过</span>
       </div>
       <button id="sticky-test-all" class="secondary-button" type="button">测试必选项</button>
       <button id="sticky-generate" class="primary-button" type="button" disabled>生成配置</button>

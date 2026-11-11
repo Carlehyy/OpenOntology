@@ -432,6 +432,15 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# Kaneo（项目/任务服务，上游固定 2.49.0）原生 Web 跳转（仅 web_url）：
+# 同前缀同守卫子路由；管理员账号由部署 bootstrap 服务初始化，平台不持凭据。
+from app.super_assistant.kaneo import router as super_assistant_kaneo
+app.include_router(
+    super_assistant_kaneo.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
 # 远程助手邀请（属主侧：创建/列出/撤销一次性接入邀请，邀请函重发）：同前缀同守卫
 from app.super_assistant import remote_agent_invites as super_assistant_remote_agent_invites
 app.include_router(

@@ -201,6 +201,37 @@ class WeKnoraConfig(StrictModel):
         return self
 
 
+class KaneoConfig(StrictModel):
+    """Kaneo task board native Web entry.
+
+    The platform ships the official fixed ``ghcr.io/usekaneo/kaneo:2.49.0``
+    image as a single-user instance with its own account. The public HTTP
+    8090 listener only redirects to the HTTPS 8445 native page; the web URL
+    is therefore always HTTPS. ``base_url`` is the app endpoint used by the
+    source-run backend (loopback ``http://127.0.0.1:18090``). Docker
+    deployments use the internal ``http://kaneo-app:5173`` contract. Kaneo
+    starts with the platform and must be healthy. This profile stores no
+    admin, database or auth credentials; the single account is managed in
+    Kaneo's native page.
+    """
+
+    base_url: str = Field(
+        default="http://127.0.0.1:18090", min_length=1, max_length=500
+    )
+    web_url: str = Field(
+        default="https://localhost:8445", min_length=1, max_length=500
+    )
+    timeout_seconds: int = Field(default=15, ge=3, le=60)
+
+    @model_validator(mode="after")
+    def validate_kaneo(self) -> "KaneoConfig":
+        _validate_http_origin(self.base_url, "Kaneo 内部地址")
+        _validate_http_origin(self.web_url, "Kaneo 公网地址")
+        if urlsplit(self.web_url).scheme != "https":
+            raise ValueError("Kaneo 原生页面固定为 HTTPS，公网地址必须使用 https")
+        return self
+
+
 class AdvancedConfig(StrictModel):
     uploads_dir: str = "./runtime/uploads"
     storage_local_dir: str = "./runtime/object-storage"
@@ -233,6 +264,7 @@ class ConfigProfile(StrictModel):
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     n8n: N8nConfig = Field(default_factory=N8nConfig)
     weknora: WeKnoraConfig = Field(default_factory=WeKnoraConfig)
+    kaneo: KaneoConfig = Field(default_factory=KaneoConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
 
     @model_validator(mode="after")
@@ -287,6 +319,7 @@ def default_profile() -> ConfigProfile:
         ),
         n8n=N8nConfig(api_key=""),
         weknora=WeKnoraConfig(),
+        kaneo=KaneoConfig(),
         advanced=AdvancedConfig(
             api_hub_system_mcp_token=_random_token(),
             api_hub_internal_proxy_token=_random_token(),

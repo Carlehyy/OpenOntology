@@ -10,7 +10,7 @@
 3. 选择最后一个已验证 commit/镜像；
 4. 恢复与该版本匹配的 Compose 和环境契约；
 5. 启动后检查 API 深度 readiness、PostgreSQL、Redis、Neo4j、
-   MinIO、n8n、Chromium CDP、前端资源和关键业务旅程；
+   MinIO、n8n、Chromium CDP、Kaneo 公网入口、前端资源和关键业务旅程；
 6. 记录回滚原因和遗留数据处理。
 
 ## 数据库约束
@@ -26,6 +26,12 @@
 回滚不能通过重新启用平台 SQLite、API 线程任务、NetworkX/SQL 图、本地对象
 存储或已移除的向量服务来“恢复可用”。目标版本必须满足同一必需依赖契约；
 如上一版本依赖不同外部系统，应把依赖迁移作为单独、经验证的回滚步骤。
+
+Kaneo 是平台 fail-closed 强依赖：回滚目标是带 Kaneo 的版本时，kaneo-app 未
+就绪则 readiness 失败；回滚到接入 Kaneo 之前的版本则不受影响。Kaneo 不参与
+平台 Alembic 迁移，回滚平台版本不要求回滚或清空 `kaneo_*` 数据卷；部署失败
+时 Kaneo 公网网关保持关闭，完成回滚并确认私网 bootstrap 验证通过后再随
+Compose 重新开放。
 
 ## 目录治理期间
 

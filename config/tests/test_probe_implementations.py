@@ -324,3 +324,111 @@ def test_n8n_probe_uses_api_key_header(monkeypatch) -> None:
     assert seen["headers"]["X-N8N-API-KEY"] == "n8n-key"
     assert seen["client_kwargs"]["mounts"]["all://127.0.0.1"] is None
     assert "trust_env" not in seen["client_kwargs"]
+
+
+def _install_fake_kaneo(monkeypatch, responses) -> dict:
+    seen: dict = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            seen["client_kwargs"] = kwargs
+            seen["urls"] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, url):
+            seen["urls"].append(url)
+            return responses.pop(0)
+
+    monkeypatch.setattr(probes.httpx, "Client", Client)
+    return seen
+
+
+def test_kaneo_probe_requires_health_ok_and_initialized_instance(
+    monkeypatch,
+) -> None:
+    seen = _install_fake_kaneo(
+        monkeypatch,
+        [
+            FakeResponse({"status": "ok"}),
+            FakeResponse({"hasUsers": True, "hasAdmin": True}),
+        ],
+    )
+
+    message, detail = probes.probe_kaneo(_profile())
+
+    assert message == "Kaneo 服务连接正常"
+    assert seen["urls"] == [
+        "http://127.0.0.1:18090/api/health",
+        "http://127.0.0.1:18090/api/instance/status",
+    ]
+    assert seen["client_kwargs"]["timeout"] == 15
+    assert seen["client_kwargs"]["follow_redirects"] is False
+    assert seen["client_kwargs"]["mounts"]["all://127.0.0.1"] is None
+    assert "已创建" in detail
+
+
+def test_kaneo_probe_rejects_health_without_status_ok(monkeypatch) -> None:
+    _install_fake_kaneo(
+        monkeypatch,
+        [
+            FakeResponse({"status": "degraded"}),
+            FakeResponse({"hasUsers": True, "hasAdmin": True}),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="status=ok"):
+        probes.probe_kaneo(_profile())
+
+
+def test_kaneo_probe_rejects_bare_liveness_without_initialized_account(
+    monkeypatch,
+) -> None:
+    _install_fake_kaneo(
+        monkeypatch,
+        [
+            FakeResponse({"status": "ok"}),
+            FakeResponse({"hasUsers": False, "hasAdmin": False}),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="单用户初始化"):
+        probes.probe_kaneo(_profile())
+
+
+def test_kaneo_probe_rejects_adminless_instance(monkeypatch) -> None:
+    _install_fake_kaneo(
+        monkeypatch,
+        [
+            FakeResponse({"status": "ok"}),
+            FakeResponse({"hasUsers": True, "hasAdmin": False}),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="hasAdmin"):
+        probes.probe_kaneo(_profile())
+
+
+def test_kaneo_probe_rejects_redirect_only_gateway(monkeypatch) -> None:
+    seen = _install_fake_kaneo(monkeypatch, [FakeResponse({}, status_code=308)])
+
+    with pytest.raises(RuntimeError, match="8090"):
+        probes.probe_kaneo(_profile())
+    assert seen["urls"] == ["http://127.0.0.1:18090/api/health"]
+
+
+def test_kaneo_probe_rejects_unknown_instance_status_shape(monkeypatch) -> None:
+    _install_fake_kaneo(
+        monkeypatch,
+        [
+            FakeResponse({"status": "ok"}),
+            FakeResponse({"registered": True}),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="instance/status"):
+        probes.probe_kaneo(_profile())

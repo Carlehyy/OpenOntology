@@ -89,6 +89,7 @@ def test_clean_checkout_production_uses_process_environment(
         "PIPELINE_FILE_PUBLIC_APP_BASE_URL": "https://app.example.test",
         "PIPELINE_FILE_PUBLIC_API_BASE_URL": "https://api.example.test",
         "WEKNORA_WEB_URL": "https://kb.example.test",
+        "KANEO_WEB_URL": "https://projects.example.test",
     }
     for key, value in process_values.items():
         monkeypatch.setenv(key, value)

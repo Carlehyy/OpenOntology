@@ -50,6 +50,7 @@ def _production_settings(**updates):
         "n8n_api_url": "https://n8n.example.com/api/v1",
         "n8n_api_key": "strong-n8n-api-key",
         "weknora_web_url": "https://kb.example.com",
+        "kaneo_web_url": "https://pm.example.com",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
@@ -232,6 +233,58 @@ def test_weknora_internal_contract_rejects_malformed_values():
     assert "WEKNORA_BASE_URL must be an absolute HTTP(S) origin" in bad_origin
 
 
+def test_production_rejects_default_local_kaneo_web_origin():
+    """The localhost default is a development value; production needs a real
+    browser-reachable Kaneo origin (nginx HTTPS entry) or the frontend would
+    link nowhere."""
+    default = Settings.model_fields["kaneo_web_url"].default
+
+    assert default == "https://localhost:8445"
+    errors = production_config_errors(
+        _production_settings(kaneo_web_url=default))
+    assert (
+        "KANEO_WEB_URL must use a browser-reachable public host in production"
+        in errors
+    )
+
+
+def test_kaneo_web_url_must_be_https_at_settings_ingress():
+    """The Kaneo native page is pinned to the nginx HTTPS entry (the plaintext
+    listener only redirects); mirror the config center's KaneoConfig rule."""
+    with pytest.raises(ValidationError, match="KANEO_WEB_URL must use https"):
+        Settings(_env_file=None, kaneo_web_url="http://pm.example.com:8445")
+
+
+@pytest.mark.parametrize(
+    "web_url",
+    [
+        "https://user:pass@pm.example.com",
+        "https://pm.example.com/board",
+        "https://pm.example.com/?workspace=1",
+        "https://127.0.0.1:8445",
+        "https://[::1]:8445",
+    ],
+    ids=["credentials", "path", "query", "loopback-ipv4", "loopback-ipv6"],
+)
+def test_production_rejects_non_origin_or_local_kaneo_web_url(web_url):
+    errors = production_config_errors(
+        _production_settings(kaneo_web_url=web_url))
+    assert any(error.startswith("KANEO_WEB_URL must") for error in errors)
+
+
+def test_production_accepts_public_kaneo_web_origin():
+    assert production_config_errors(_production_settings(
+        kaneo_web_url="https://203.0.113.9:8445/",
+    )) == []
+
+
+def test_kaneo_internal_contract_rejects_malformed_values():
+    bad_origin = required_dependency_config_errors(_production_settings(
+        kaneo_base_url="http://user:pass@kaneo-app:5173",
+    ))
+    assert "KANEO_BASE_URL must be an absolute HTTP(S) origin" in bad_origin
+
+
 def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     compose = yaml.safe_load((ROOT / "docker-compose.prod.yml").read_text())
     backend = compose["services"]["backend"]
@@ -273,7 +326,9 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     # WeKnora is a separate product on a private network: only the backend
     # joins it, and no internal WeKnora service publishes a host port.
     assert compose["networks"]["weknora_internal"] == {"driver": "bridge"}
-    assert backend["networks"] == ["default", "dbx_bridge", "weknora_internal"]
+    assert backend["networks"] == [
+        "default", "dbx_bridge", "weknora_internal", "kaneo_internal",
+    ]
     assert backend["depends_on"]["weknora-app"]["condition"] == "service_healthy"
     for service in (
         "weknora-app",
@@ -285,6 +340,26 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
             "weknora_internal"
         ]
         assert "ports" not in compose["services"][service]
+    # Kaneo mirrors the WeKnora isolation: private network, no internal host
+    # ports, registration/guest access disabled, and the platform-facing
+    # bootstrap CLI (initialize + --verify) as the only credential holder.
+    assert compose["networks"]["kaneo_internal"] == {"driver": "bridge"}
+    assert backend["depends_on"]["kaneo-app"]["condition"] == "service_healthy"
+    for service in ("kaneo-app", "kaneo-db"):
+        assert compose["services"][service]["networks"] == ["kaneo_internal"]
+        assert "ports" not in compose["services"][service]
+    kaneo_app = compose["services"]["kaneo-app"]
+    assert kaneo_app["environment"]["DISABLE_REGISTRATION"] == "true"
+    assert kaneo_app["environment"]["DISABLE_GUEST_ACCESS"] == "true"
+    kaneo_bootstrap = compose["services"]["kaneo-bootstrap"]
+    assert kaneo_bootstrap["environment"]["KANEO_BASE_URL"] == (
+        "http://kaneo-app:5173"
+    )
+    assert any(
+        "app.super_assistant.kaneo.bootstrap" in part
+        for part in kaneo_bootstrap["command"]
+    )
+    assert any("--verify" in part for part in kaneo_bootstrap["command"])
     assert "dbx_data:/app/data" in dbx["volumes"]
     assert "dbx_data" in compose["volumes"]
     assert "--requirepass" in compose["services"]["redis"]["command"][-1]
@@ -303,6 +378,13 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         "WEKNORA_SYSTEM_AES_KEY",
         "WEKNORA_SYSTEM_SIGNING_KEY",
     )
+    # Kaneo follows the same isolation: admin/DB/auth secrets live only in
+    # kaneo-bootstrap's environment, masked everywhere else that loads .env.
+    kaneo_bootstrap_only = (
+        "KANEO_ADMIN_PASSWORD",
+        "KANEO_DB_PASSWORD",
+        "KANEO_AUTH_SECRET",
+    )
     env_file_services = [
         name for name, service in compose["services"].items()
         if service.get("env_file")
@@ -310,7 +392,7 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert env_file_services == ["backend", "pipeline_executor", "task_worker"]
     for service in env_file_services:
         environment = compose["services"][service]["environment"]
-        for key in weknora_bootstrap_only:
+        for key in weknora_bootstrap_only + kaneo_bootstrap_only:
             assert environment[key] == ""
     bootstrap_environment = compose["services"]["weknora-bootstrap"][
         "environment"
@@ -319,6 +401,7 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         "WEKNORA_ADMIN_PASSWORD",
     ):
         assert key in bootstrap_environment
+    assert "KANEO_ADMIN_PASSWORD" in kaneo_bootstrap["environment"]
 
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/deploy-nano-ontoprompt.yml").read_text()
@@ -332,6 +415,9 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     required = set(re.findall(
         r"\$\{(WEKNORA_[A-Z0-9_]+):\?",
         (ROOT / "docker-compose.prod.yml").read_text(),
+    )) | set(re.findall(
+        r"\$\{(KANEO_[A-Z0-9_]+):\?",
+        (ROOT / "docker-compose.prod.yml").read_text(),
     ))
     assert required <= build_environment.keys()
     assert all(
@@ -340,9 +426,10 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         and "${{" not in build_environment[key]
         for key in required
     )
-    for key in weknora_bootstrap_only:
+    for key in weknora_bootstrap_only + kaneo_bootstrap_only:
         assert build_environment[key].startswith("ci-only-")
     assert build_environment["WEKNORA_WEB_URL"].endswith(".invalid")
+    assert build_environment["KANEO_WEB_URL"].endswith(".invalid")
     assert "env" not in workflow
     assert "env" not in build_job
     assert build_step["run"] == "docker compose -f docker-compose.prod.yml build"
@@ -399,6 +486,11 @@ def test_local_compose_requires_real_stack_without_chroma():
         "WEKNORA_SYSTEM_AES_KEY",
         "WEKNORA_SYSTEM_SIGNING_KEY",
     )
+    kaneo_bootstrap_only = (
+        "KANEO_ADMIN_PASSWORD",
+        "KANEO_DB_PASSWORD",
+        "KANEO_AUTH_SECRET",
+    )
     env_file_services = [
         name for name, service in compose["services"].items()
         if service.get("env_file")
@@ -411,7 +503,7 @@ def test_local_compose_requires_real_stack_without_chroma():
     ]
     for service in env_file_services:
         environment = compose["services"][service]["environment"]
-        for key in weknora_bootstrap_only:
+        for key in weknora_bootstrap_only + kaneo_bootstrap_only:
             assert environment[key] == ""
     for service in ("weknora-bootstrap", "weknora-verify"):
         environment = compose["services"][service]["environment"]
@@ -419,6 +511,9 @@ def test_local_compose_requires_real_stack_without_chroma():
             "WEKNORA_ADMIN_PASSWORD",
         ):
             assert key in environment
+    assert "KANEO_ADMIN_PASSWORD" in compose["services"]["kaneo-bootstrap"][
+        "environment"
+    ]
 
 
 def test_deploy_probes_dependencies_after_start_and_before_migrations():

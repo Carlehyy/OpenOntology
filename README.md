@@ -40,6 +40,13 @@ WeKnora 原生 Web 入口是 `http://localhost:8089`（HTTPS `https://localhost:
 MCP 管理中登记一次连接。模型密钥不是部署前置。细节见
 [WeKnora 本地初始化](./docs/development/setup.md#weknora-本地初始化)。
 
+Kaneo 项目管理（官方 2.49.0，独立单用户账号）随同一套 Compose 启动：超级助手
+会话头部「知识库」入口左侧的「项目管理」新标签打开原生 Web，本地
+`http://localhost:8090` 仅 308 跳转 `https://localhost:8445`（自签证书，首访
+需信任）。它使用独立 PostgreSQL，是平台 fail-closed 强依赖；公开注册、访客
+与邮件验证登录全程关闭。首版未接 S3/SMTP，附件上传与邮件找回密码不可用。
+细节见 [Kaneo 本地初始化](./docs/development/setup.md#kaneo-本地初始化)。
+
 三个编排文件分工如下：`docker-compose.local.yml` 是单机一键完整栈（即上文
 流程，`up --build` 会自动执行 Alembic 迁移并按 `.env` 播种首个管理员）；
 `docker-compose.e2e.yml` 仅为真实后端 E2E 提供端口错开的基础设施，不含应用
@@ -92,7 +99,8 @@ npm --prefix frontend run dev
 ```
 
 平台采用 fail-closed 依赖契约：PostgreSQL、Redis、NATS 与
-流水线 executor、Neo4j、MinIO、n8n 和 WeKnora 共享知识库必须真实就绪，
+流水线 executor、Neo4j、MinIO、n8n、WeKnora 共享知识库和 Kaneo 项目管理
+必须真实就绪，
 后端不会在依赖失败时静默切换到 SQLite、内存图或本地对象存储。语义搜索当前明确返回 `501 semantic_search_unsupported`，关键词
 搜索由 PostgreSQL 提供。事件登记是独立业务能力，当前没有可核验的
 RegisteredEvent → Formal/Sentinel 自动接线。状态门与发布契约的实现以
@@ -103,7 +111,8 @@ RegisteredEvent → Formal/Sentinel 自动接线。状态门与发布契约的�
 - 后端：FastAPI、Python 3.12、SQLAlchemy、Alembic、NATS 任务链；
 - 前端：React、TypeScript、Vite、Tailwind CSS；
 - 数据与中间件：PostgreSQL、Redis、Neo4j、MinIO；WeKnora 自带独立
-  ParadeDB/Redis/APOC Neo4j；
+  ParadeDB/Redis（图谱增强默认关闭，不运行独立 Neo4j）；Kaneo 项目管理
+  自带独立 PostgreSQL；
 - 工作流与浏览器：n8n、Chromium CDP；Python 脚本流水线执行：Jupyter Kernel Gateway（可选）；
 - 交付：Docker Compose、GitHub Actions。
 

@@ -234,6 +234,63 @@ def probe_weknora(profile: ConfigProfile) -> tuple[str, str]:
     )
 
 
+def probe_kaneo(profile: ConfigProfile) -> tuple[str, str]:
+    """Verify Kaneo against its official 2.49.0 public endpoints.
+
+    ``/api/health`` answers ``{"status": "ok"}`` (fixed liveness, no DB) and
+    ``/api/instance/status`` answers ``{"hasUsers": bool, "hasAdmin": bool}``
+    from a real user-table query (both unauthenticated and proxied by the
+    bundled web server, matching the upstream image healthcheck contract).
+    The probe is fail-closed: it requires health ``status=ok`` AND both
+    instance flags true, so a bare liveness 200 never passes. Redirects are
+    rejected so the redirect-only HTTP 8090 gateway can never be mistaken
+    for the app endpoint.
+    """
+    config = profile.kaneo
+    base = config.base_url.rstrip("/")
+    with httpx.Client(
+        timeout=config.timeout_seconds,
+        follow_redirects=False,
+        mounts=loopback_httpx_mounts(base),
+    ) as client:
+        health_response = client.get(f"{base}/api/health")
+        _require_kaneo_ok(health_response, "/api/health")
+        status_response = client.get(f"{base}/api/instance/status")
+        _require_kaneo_ok(status_response, "/api/instance/status")
+        try:
+            health = health_response.json()
+            status = status_response.json()
+        except ValueError as exc:
+            raise RuntimeError("Kaneo 响应不是有效 JSON") from exc
+    if not isinstance(health, dict) or health.get("status") != "ok":
+        raise RuntimeError("Kaneo /api/health 未返回 status=ok")
+    if (
+        not isinstance(status, dict)
+        or not isinstance(status.get("hasUsers"), bool)
+        or not isinstance(status.get("hasAdmin"), bool)
+    ):
+        raise RuntimeError("Kaneo /api/instance/status 响应字段无法识别")
+    if not (status["hasUsers"] and status["hasAdmin"]):
+        raise RuntimeError(
+            "Kaneo 实例尚未完成单用户初始化（hasUsers/hasAdmin 不全为 true），"
+            "请先由部署流程创建单用户账号与实例管理员"
+        )
+    return (
+        "Kaneo 服务连接正常",
+        "HTTP 服务可达，单用户账号与实例管理员已创建；"
+        "本测试不代表看板业务数据已就绪",
+    )
+
+
+def _require_kaneo_ok(response: httpx.Response, endpoint: str) -> None:
+    if 300 <= response.status_code < 400:
+        raise RuntimeError(
+            f"Kaneo {endpoint} 返回重定向；只跳转 HTTPS 的 8090 端口不能作为"
+            "内部地址，请填写应用端口 18090 或容器内 http://kaneo-app:5173"
+        )
+    response.raise_for_status()
+
+
 PROBES: dict[str, Callable[[ConfigProfile], tuple[str, str]]] = {
     "postgres": probe_postgres,
     "redis": probe_redis,
@@ -243,6 +300,7 @@ PROBES: dict[str, Callable[[ConfigProfile], tuple[str, str]]] = {
     "browser": probe_browser,
     "n8n": probe_n8n,
     "weknora": probe_weknora,
+    "kaneo": probe_kaneo,
 }
 
 

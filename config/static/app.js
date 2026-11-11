@@ -10,6 +10,7 @@
     "browser",
     "n8n",
     "weknora",
+    "kaneo",
   ];
 
   const SERVICE_LABELS = {
@@ -21,6 +22,7 @@
     browser: "Chromium CDP",
     n8n: "n8n",
     weknora: "WeKnora",
+    kaneo: "Kaneo",
   };
 
   const state = {
@@ -39,6 +41,7 @@
       "minio",
       "n8n",
       "weknora",
+      "kaneo",
     ],
     tests: Object.fromEntries(SERVICES.map((service) => [service, "idle"])),
     fingerprints: Object.fromEntries(SERVICES.map((service) => [service, ""])),

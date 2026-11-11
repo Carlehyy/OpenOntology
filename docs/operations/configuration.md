@@ -123,6 +123,7 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 | Chromium CDP | 浏览器接管与数据管家浏览器会话 | `STEWARD_BROWSER_CDP_URL` 只接受 HTTP(S) 服务根地址；启动配置必需，不可达不杀死 API liveness，但 readiness 失败，不用 mock 冒充就绪 |
 | 集成数据集 dbx | 集成源登记、schema 发现与刷新；生产 metadata 只走固定版本 dbx，不回退 native | 生产部署自动启动仅内网可达的官方 digest dbx，或使用显式外部端点；缺失/不可达/认证失败/版本不符使部署 preflight 与生产 readiness fail closed，非生产不要求 dbx |
 | WeKnora v0.9.0 | 原生知识库 Web 与超级助手标准 MCP 知识来源 | 服务或管理员初始化失败时阻断启动；未配置模型、知识库或 MCP 不影响基础服务启动 |
+| Kaneo 2.49.0 | 单用户项目管理原生 Web（独立账号与独立 PostgreSQL） | 服务、管理员初始化或实例状态探针失败时启动/readiness fail-closed；平台不降级、不用 mock 冒充 |
 
 ### WeKnora 共享知识库（v0.9.0）
 
@@ -176,6 +177,55 @@ DB、Redis、JWT、AES 与 signing 凭据独立生成并跨部署保持不变。
 
 服务健康不代表知识已可检索。真实验收需上传脱敏文档，验证检索命中、引用和
 超级助手调用；模型或索引未配置时应显示实际错误，不能用探活结果冒充知识就绪。
+
+### Kaneo 项目管理（2.49.0）
+
+Kaneo 是随平台 Compose 同启的单用户项目管理看板：官方
+`ghcr.io/usekaneo/kaneo:2.49.0` 固定 digest 镜像 + 独立 PostgreSQL（固定
+`postgres:16-alpine` digest，无宿主端口），保留自身账号登录；平台不做 SSO、
+不接 MCP、不改导航 menu key，唯一平台入口是超级助手会话头部「知识库」入口
+左侧的「项目管理」按钮（新标签打开原生 Web）。
+
+服务拓扑与地址契约：
+
+- `kaneo-app`：Compose 内网固定 `http://kaneo-app:5173`，即 `KANEO_BASE_URL`
+  在容器部署中的取值；本地源码运行改为 loopback `http://127.0.0.1:18090`
+  （`KANEO_APP_LOOPBACK_PORT`，供宿主后端探活）。`DISABLE_REGISTRATION`、
+  `DISABLE_GUEST_ACCESS`、`DISABLE_EMAIL_OTP_SIGN_IN` 全程为 `true`。
+- `kaneo-gateway`：唯一公开入口。HTTP `KANEO_HTTP_PORT`（默认 8090）只做 308
+  跳转到规范 HTTPS origin；HTTPS `KANEO_HTTPS_PORT`（默认 8445）反代 app 并
+  保留 WebSocket 升级。证书复用平台自签证书卷，首次访问需手动信任。
+- `KANEO_WEB_URL` 必须是无凭据、无路径/查询/fragment 的绝对 HTTPS origin：
+  它同时作为 308 跳转目标与 app 的 `KANEO_CLIENT_URL`/`KANEO_API_URL`，换用
+  非规范 origin（如直连 8090 或带路径前缀）会破坏原生登录。本地默认
+  `https://localhost:8445`；生产未显式配置时由部署脚本从 `PUBLIC_TLS_IP` 与
+  `KANEO_HTTPS_PORT` 推导，两者都缺失则 fail closed。
+- readiness：backend 与 pipeline_executor 强依赖 kaneo-app 健康，
+  `/health/ready` 经 `/api/instance/status` 校验 `hasUsers`/`hasAdmin` 均为
+  true；静态 `/api/health` 200 不算就绪。
+
+账号与密钥：
+
+- 管理员默认 `KANEO_ADMIN_USER=admin`、`KANEO_ADMIN_EMAIL=admin@kaneo.local`
+  （显示名 admin）。首次部署在私网完成账号创建与登录验证后，公网网关才启动；
+  空实例本身允许创建首个管理员，因此不存在 WeKnora 式「临时开放注册」的
+  init 容器。重复部署或重复 bootstrap 不修改已存在账号的密码；原生页面改密
+  后，须在受控终端同步服务器 `.env` 的 `KANEO_ADMIN_PASSWORD`，否则下次部署
+  的管理员验证会失败；部署流程不会覆盖数据库中的密码。
+- `KANEO_ADMIN_PASSWORD`、`KANEO_DB_PASSWORD`、`KANEO_AUTH_SECRET` 独立于
+  平台密钥，不复用 `SECRET_KEY`/`ENCRYPTION_KEY`。生产首次部署由部署脚本
+  随机生成并持久化到服务器 `.env`（校验下限：管理员密码 8–32 位且不含空白、
+  DB 密码至少 12 位、AUTH_SECRET 至少 32 位），之后保持稳定；已知本地默认值
+  会被替换。安全获取方式只有服务器受控终端读取 `.env`，禁止回显到页面、
+  日志、Git、工单或聊天。
+- 其余模板变量：`KANEO_DB_NAME`/`KANEO_DB_USER`（默认 `kaneo`）、
+  `KANEO_TIMEOUT_SECONDS`（默认 15，3–60）、`KANEO_APP_IMAGE`/
+  `KANEO_POSTGRES_IMAGE`（固定 digest，漂移会被生产 digest 门禁拒绝）。
+
+存储边界：项目数据的权威存储是 `kaneo_postgres_data` 卷；`kaneo_data` 卷
+（`/var/lib/kaneo`）只是运行时资源。Kaneo 附件上传官方仅支持 S3 存储，首版
+未配置 S3/SMTP，因此附件上传与邮件找回密码不可用——不得把 `kaneo_data`
+当作附件持久化，也不得以本地卷 workaround 冒充附件能力。
 
 ### 集成数据集 dbx（生产）
 

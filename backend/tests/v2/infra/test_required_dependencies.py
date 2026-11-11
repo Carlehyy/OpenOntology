@@ -46,6 +46,11 @@ MATERIALIZED_KEYS = {
     "WEKNORA_DOCREADER_IMAGE",
     "WEKNORA_POSTGRES_IMAGE",
     "WEKNORA_REDIS_IMAGE",
+    "KANEO_WEB_URL",
+    "KANEO_ADMIN_USER",
+    "KANEO_ADMIN_EMAIL",
+    "KANEO_APP_IMAGE",
+    "KANEO_POSTGRES_IMAGE",
 }
 MATERIALIZER_SOURCE_VALUES = {
     "PROD_PUBLIC_PORT": "8080",
@@ -84,6 +89,16 @@ MATERIALIZER_OPTIONAL_VALUES = {
         f"example.invalid/weknora-postgres@sha256:{'d' * 64}"
     ),
     "PROD_WEKNORA_REDIS_IMAGE": f"example.invalid/weknora-redis@sha256:{'e' * 64}",
+    # Kaneo's materialized surface carries only the optional public origin,
+    # admin identity, and immutable image pins; credentials never pass
+    # through the dependency manifest (they live in the server's .env).
+    "PROD_KANEO_WEB_URL": "https://pm.example.com",
+    "PROD_KANEO_ADMIN_USER": "admin",
+    "PROD_KANEO_ADMIN_EMAIL": "admin@kaneo.local",
+    "PROD_KANEO_APP_IMAGE": f"example.invalid/kaneo-app@sha256:{'1' * 64}",
+    "PROD_KANEO_POSTGRES_IMAGE": (
+        f"example.invalid/kaneo-postgres@sha256:{'2' * 64}"
+    ),
 }
 
 
@@ -111,6 +126,7 @@ def _required_settings(**updates) -> Settings:
         "n8n_api_url": "https://n8n.example.com/api/v1",
         "n8n_api_key": "strong-n8n-api-key",
         "weknora_web_url": "https://kb.example.com",
+        "kaneo_web_url": "https://pm.example.com",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
@@ -421,6 +437,8 @@ def test_deploy_merges_required_runtime_manifest(tmp_path):
     )
     example = (tmp_path / ".env.example").read_text(encoding="utf-8").splitlines()
     replacements = {key: f"test/{key.lower()}@sha256:{'a' * 64}" for key in image_keys}
+    public_tls_ip = "203.0.113.10"
+    replacements["PUBLIC_TLS_IP"] = public_tls_ip
     (tmp_path / ".env.example").write_text(
         "\n".join(
             f"{line.split('=', 1)[0]}={replacements[line.split('=', 1)[0]]}"
@@ -430,7 +448,10 @@ def test_deploy_merges_required_runtime_manifest(tmp_path):
         encoding="utf-8",
     )
     manifest_path = tmp_path / "deploy" / "production.dependencies.env"
-    materialized = _run_materializer(manifest_path)
+    materialized = _run_materializer(
+        manifest_path,
+        {"PROD_KANEO_WEB_URL": f"https://{public_tls_ip}:8445"},
+    )
     assert materialized.returncode == 0, materialized.stdout + materialized.stderr
     env = os.environ.copy()
     env.update({

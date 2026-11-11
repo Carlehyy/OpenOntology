@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.models import ConfigProfile, default_profile
 from app.probes import (
     PROBES,
+    probe_kaneo,
     probe_nats,
     run_probe,
 )
@@ -50,6 +51,10 @@ def test_probe_errors_redact_every_known_secret(monkeypatch) -> None:
 
 def test_nats_probe_is_registered_as_available_service() -> None:
     assert PROBES["nats"] is probe_nats
+
+
+def test_kaneo_probe_is_registered_as_available_service() -> None:
+    assert PROBES["kaneo"] is probe_kaneo
 
 
 

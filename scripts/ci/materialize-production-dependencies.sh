@@ -133,6 +133,16 @@ append_optional_digest WEKNORA_DOCREADER_IMAGE PROD_WEKNORA_DOCREADER_IMAGE
 append_optional_digest WEKNORA_POSTGRES_IMAGE PROD_WEKNORA_POSTGRES_IMAGE
 append_optional_digest WEKNORA_REDIS_IMAGE PROD_WEKNORA_REDIS_IMAGE
 
+# Kaneo keeps its own database and native account. Admin/DB/auth secrets are
+# generated once on the server and persisted in .env, never supplied here.
+# KANEO_WEB_URL must be an HTTPS origin; deploy-prod.sh derives it from
+# PUBLIC_TLS_IP and KANEO_HTTPS_PORT when omitted.
+append_optional KANEO_WEB_URL PROD_KANEO_WEB_URL
+append_optional KANEO_ADMIN_USER PROD_KANEO_ADMIN_USER
+append_optional KANEO_ADMIN_EMAIL PROD_KANEO_ADMIN_EMAIL
+append_optional_digest KANEO_APP_IMAGE PROD_KANEO_APP_IMAGE
+append_optional_digest KANEO_POSTGRES_IMAGE PROD_KANEO_POSTGRES_IMAGE
+
 chmod 600 "$tmp_file"
 mv "$tmp_file" "$target"
 trap - EXIT

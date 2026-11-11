@@ -66,6 +66,9 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   WEKNORA_JWT_SECRET: ""
   WEKNORA_SYSTEM_AES_KEY: ""
   WEKNORA_SYSTEM_SIGNING_KEY: ""
+  KANEO_ADMIN_PASSWORD: ""
+  KANEO_DB_PASSWORD: ""
+  KANEO_AUTH_SECRET: ""
 
 services:
   db:
@@ -344,6 +347,107 @@ services:
       - weknora_internal
     restart: unless-stopped
 
+  # Kaneo owns its database and native account. Bootstrap completes privately
+  # before the public gateway is opened; HTTP only redirects to HTTPS.
+  kaneo-db:
+    image: ${KANEO_POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_DB: ${KANEO_DB_NAME:-kaneo}
+      POSTGRES_USER: ${KANEO_DB_USER:-kaneo}
+      POSTGRES_PASSWORD: ${KANEO_DB_PASSWORD:-kaneo-local-db-password}
+    volumes:
+      - kaneo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kaneo_internal
+    restart: unless-stopped
+
+  kaneo-app:
+    image: ${KANEO_APP_IMAGE:-ghcr.io/usekaneo/kaneo:2.49.0@sha256:cd1826b1aba3ce736015cadf6f6c975d923aac00f4b6aaa7aedb29bc722dae49}
+    ports:
+      - "127.0.0.1:${KANEO_APP_LOOPBACK_PORT:-18090}:5173"
+    environment:
+      NODE_ENV: production
+      KANEO_CLIENT_URL: ${KANEO_WEB_URL:-https://localhost:8445}
+      KANEO_API_URL: ${KANEO_WEB_URL:-https://localhost:8445}/api
+      POSTGRES_HOST: kaneo-db
+      POSTGRES_DB: ${KANEO_DB_NAME:-kaneo}
+      POSTGRES_USER: ${KANEO_DB_USER:-kaneo}
+      POSTGRES_PASSWORD: ${KANEO_DB_PASSWORD:-kaneo-local-db-password}
+      AUTH_SECRET: ${KANEO_AUTH_SECRET:-kaneo-local-auth-secret-change-me-2026}
+      DISABLE_REGISTRATION: "true"
+      DISABLE_GUEST_ACCESS: "true"
+      DISABLE_EMAIL_OTP_SIGN_IN: "true"
+      TRUSTED_PROXIES: 127.0.0.0/8,::1/128
+    volumes:
+      - kaneo_data:/var/lib/kaneo
+    depends_on:
+      kaneo-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-Y", "off", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5173/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 20
+    networks:
+      - kaneo_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  kaneo-bootstrap:
+    build: ./backend
+    command: ["/bin/sh", "-ec", "python -m app.super_assistant.kaneo.bootstrap && python -m app.super_assistant.kaneo.bootstrap --verify"]
+    environment:
+      KANEO_BASE_URL: http://kaneo-app:5173
+      KANEO_WEB_URL: ${KANEO_WEB_URL:-https://localhost:8445}
+      KANEO_ADMIN_USER: ${KANEO_ADMIN_USER:-admin}
+      KANEO_ADMIN_EMAIL: ${KANEO_ADMIN_EMAIL:-admin@kaneo.local}
+      KANEO_ADMIN_PASSWORD: ${KANEO_ADMIN_PASSWORD:-localKaneoAdmin2026!}
+      KANEO_TIMEOUT_SECONDS: ${KANEO_TIMEOUT_SECONDS:-15}
+    depends_on:
+      kaneo-app:
+        condition: service_healthy
+    networks:
+      - kaneo_internal
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  kaneo-gateway:
+    image: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
+    ports:
+      - "${KANEO_HTTP_PORT:-8090}:80"
+      - "${KANEO_HTTPS_PORT:-8445}:443"
+    environment:
+      KANEO_WEB_URL: ${KANEO_WEB_URL:-https://localhost:8445}
+    volumes:
+      - ./docker/kaneo/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./docker/kaneo/kaneo-proxy.inc:/etc/nginx/kaneo-proxy.inc:ro
+      - weknora_ssl_certs:/etc/nginx/certs:ro
+    depends_on:
+      kaneo-app:
+        condition: service_healthy
+      kaneo-bootstrap:
+        condition: service_completed_successfully
+      weknora-ssl-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kaneo_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   browser:
     image: openontology-browser:local
     build:
@@ -411,6 +515,9 @@ services:
       WEKNORA_BASE_URL: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:-http://127.0.0.1:8089}
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      KANEO_BASE_URL: http://kaneo-app:5173
+      KANEO_WEB_URL: ${KANEO_WEB_URL:-https://localhost:8445}
+      KANEO_TIMEOUT_SECONDS: ${KANEO_TIMEOUT_SECONDS:-15}
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       # 本地默认也不在 backend 内直接执行用户插件；协议 fixture 可在
       # 源码测试中显式选择 direct_dev。
@@ -430,6 +537,10 @@ services:
         condition: service_completed_successfully
       weknora-app:
         condition: service_healthy
+      kaneo-app:
+        condition: service_healthy
+      kaneo-bootstrap:
+        condition: service_completed_successfully
       weknora-verify:
         condition: service_completed_successfully
       # CDP availability participates in deep readiness and deployment
@@ -442,6 +553,7 @@ services:
     networks:
       - default
       - weknora_internal
+      - kaneo_internal
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 
@@ -462,6 +574,9 @@ services:
       WEKNORA_BASE_URL: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:-http://127.0.0.1:8089}
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      KANEO_BASE_URL: http://kaneo-app:5173
+      KANEO_WEB_URL: ${KANEO_WEB_URL:-https://localhost:8445}
+      KANEO_TIMEOUT_SECONDS: ${KANEO_TIMEOUT_SECONDS:-15}
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
       # 启用 task-agent profile（task_worker 独占消费任务实例控制面）时置 1，
@@ -476,6 +591,10 @@ services:
         condition: service_completed_successfully
       weknora-app:
         condition: service_healthy
+      kaneo-app:
+        condition: service_healthy
+      kaneo-bootstrap:
+        condition: service_completed_successfully
       weknora-verify:
         condition: service_completed_successfully
     # /app/.venv 匿名卷保留镜像 venv，原因同 migrate 服务。
@@ -483,6 +602,7 @@ services:
     networks:
       - default
       - weknora_internal
+      - kaneo_internal
     command: python -m app.data_channel.pipeline_tasks.nats_executor
     healthcheck:
       # executor 没有进程内 ping 接口；主循环每 5 秒刷新心跳文件 mtime。
@@ -533,6 +653,8 @@ services:
     command: npm run dev -- --host
 
 volumes:
+  kaneo_postgres_data:
+  kaneo_data:
   pg_data:
   neo4j_data:
   minio_data:
@@ -544,5 +666,7 @@ volumes:
   weknora_ssl_certs:
 
 networks:
+  kaneo_internal:
+    driver: bridge
   weknora_internal:
     driver: bridge

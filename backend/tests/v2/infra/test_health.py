@@ -47,7 +47,7 @@ def test_health_all_service_keys_present():
     data = response.json()
     for key in (
         "db", "redis", "neo4j", "minio", "object_storage",
-        "browser", "n8n", "weknora",
+        "browser", "n8n", "weknora", "kaneo",
         "sentinel_scheduler", "sentinel_cdc", "data_scheduler",
         "ontology_projection",
     ):
@@ -60,7 +60,7 @@ def test_health_service_states_are_valid():
     data = response.json()
     assert data["db"] in VALID_DB_STATES
     for key in (
-        "redis", "neo4j", "minio", "browser", "n8n", "weknora",
+        "redis", "neo4j", "minio", "browser", "n8n", "weknora", "kaneo",
         "sentinel_scheduler", "sentinel_cdc", "data_scheduler",
         "ontology_projection",
     ):
@@ -170,6 +170,44 @@ def test_weknora_probe_success_reports_ok(monkeypatch):
     assert calls == ["probe"]
     assert data["weknora"] == "ok"
     assert "weknora" not in data["unavailable"]
+
+
+def test_kaneo_probe_failure_fails_readiness_without_leaking_runtime_config(
+    monkeypatch,
+):
+    base_url = "http://127.0.0.1:18090"
+    bearer_token = "synthetic_kaneo_token_not_a_secret"
+
+    def reject_kaneo():
+        raise RuntimeError(
+            f"KANEO_DB_UNAVAILABLE token={bearer_token} url={base_url}"
+        )
+
+    monkeypatch.setattr(dependency_probe, "probe_kaneo", reject_kaneo)
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert response.status_code == 503
+    assert data["kaneo"] == "unavailable"
+    assert "kaneo" in data["unavailable"]
+    for secret in (bearer_token, base_url):
+        assert secret not in response.text
+
+
+def test_kaneo_probe_success_reports_ok(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        dependency_probe, "probe_kaneo", lambda: calls.append("probe"),
+    )
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert calls == ["probe"]
+    assert data["kaneo"] == "ok"
+    assert "kaneo" not in data["unavailable"]
 
 
 def test_health_status_reflects_dependencies():

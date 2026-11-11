@@ -16,10 +16,17 @@
 ## 配置边界
 
 生成配置前必须确认平台与端口、安全与目录，并通过 PostgreSQL、Redis、NATS、
-Neo4j、MinIO、n8n 与 WeKnora 的真实连通性测试。WeKnora 测试仅请求
+Neo4j、MinIO、n8n、WeKnora 与 Kaneo 的真实连通性测试。WeKnora 测试仅请求
 `/health` 与 `/api/v1/auth/config`，要求服务可达且注册为 `invite_only`；不要求
 模型、知识库、MCP 端点或状态文件。源码 backend 用
 `WEKNORA_BASE_URL=http://127.0.0.1:18080` 直连 app，公共 UI 网关不代理 MCP。
+Kaneo 是随平台启动的单用户任务看板（官方固定 `ghcr.io/usekaneo/kaneo:2.49.0`
+镜像；公网 HTTP 8090 只跳转 HTTPS 8445，原生页面固定为 HTTPS）。Kaneo 测试
+请求 `/api/health` 与 `/api/instance/status`，要求 `status=ok` 且 `hasUsers`
+与 `hasAdmin` 均为 true，仅 health 200 不会通过；本页不保存 Kaneo 管理员、
+数据库或认证密钥，单用户账号在原生 HTTPS 页面管理。源码运行用
+`KANEO_BASE_URL=http://127.0.0.1:18090`，平台 Compose 内部固定
+`http://kaneo-app:5173`，公网地址 `KANEO_WEB_URL` 必须是 HTTPS。
 Chromium CDP 地址同样是必填启动配置，但其
 生成前连通测试只用于提示：暂时不可达仍可生成配置并启动 API 诊断，深度
 readiness 会保持失败。生成后启动 API、后台任务 executor 和前端，再由“启动后
@@ -48,6 +55,10 @@ WeKnora 仅保存服务地址、原生 Web 地址和超时；生成内部 MCP �
 登记内部 URL 与 Bearer token。详见
 [配置流程](../docs/operations/configuration.md#weknora-共享知识库v090)。
 配置中心不会托管模型密钥或 MCP token，也不会以 HTTP 探活成功宣称知识已就绪。
+
+Kaneo 同样只保存内部地址、HTTPS 原生页面地址和超时，生成
+`KANEO_BASE_URL`、`KANEO_WEB_URL`、`KANEO_TIMEOUT_SECONDS`，不包含任何
+Kaneo 管理员、数据库或认证密钥。
 
 该文件是本地唯一配置来源并被 Git 忽略。后端、API Hub、Alembic 和前端 Vite 会读取它；系统环境变量仍具有最高优先级，因此 Docker 和生产部署保持原有行为。
 

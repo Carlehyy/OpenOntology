@@ -282,6 +282,21 @@ class Settings(BaseSettings):
     weknora_base_url: str = "http://weknora-app:8080"
     weknora_web_url: str = "http://localhost:8089"
     weknora_timeout_seconds: int = Field(default=15, ge=3, le=60)
+    # Kaneo（项目/任务服务，上游固定 2.49.0）同构：私网 http API 供探活，
+    # 浏览器入口经 nginx 走 HTTPS 的公开 web 地址；管理员凭据只存在于
+    # 部署 bootstrap 服务环境，禁止进入平台 runtime settings。
+    kaneo_base_url: str = "http://127.0.0.1:18090"
+    kaneo_web_url: str = "https://localhost:8445"
+    kaneo_timeout_seconds: int = Field(default=15, ge=3, le=60)
+
+    @field_validator("kaneo_web_url", mode="before")
+    @classmethod
+    def kaneo_web_url_requires_https(cls, value: object) -> object:
+        # Kaneo 原生页面固定经 HTTPS 入口暴露（明文 listener 只 308 重定向），
+        # 与配置中心 KaneoConfig 同口径：公网地址必须使用 https。
+        if urlsplit(str(value or "").strip()).scheme != "https":
+            raise ValueError("KANEO_WEB_URL must use https")
+        return value
     steward_browser_cdp_url: str = "http://localhost:9222"
     steward_browser_timeout_seconds: int = 30
     steward_browser_max_captures: int = 300
@@ -572,6 +587,8 @@ def required_dependency_config_errors(current: Settings) -> list[str]:
     for key, value in (
         ("WEKNORA_BASE_URL", current.weknora_base_url),
         ("WEKNORA_WEB_URL", current.weknora_web_url),
+        ("KANEO_BASE_URL", current.kaneo_base_url),
+        ("KANEO_WEB_URL", current.kaneo_web_url),
     ):
         try:
             parsed = urlsplit(value)
@@ -700,6 +717,7 @@ def production_config_errors(current: Settings) -> list[str]:
         ("PIPELINE_FILE_PUBLIC_API_BASE_URL",
          current.pipeline_file_public_api_base_url),
         ("WEKNORA_WEB_URL", current.weknora_web_url),
+        ("KANEO_WEB_URL", current.kaneo_web_url),
     ):
         raw = str(value or "").strip()
         try:

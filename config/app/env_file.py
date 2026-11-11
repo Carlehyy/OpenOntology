@@ -14,6 +14,7 @@ from .models import (
     AdvancedConfig,
     BrowserConfig,
     ConfigProfile,
+    KaneoConfig,
     MinioConfig,
     N8nConfig,
     NatsConfig,
@@ -236,6 +237,19 @@ class LocalEnvStore:
                     values,
                     "WEKNORA_TIMEOUT_SECONDS",
                     defaults.weknora.timeout_seconds,
+                ),
+            ),
+            kaneo=KaneoConfig(
+                base_url=values.get(
+                    "KANEO_BASE_URL", defaults.kaneo.base_url
+                ),
+                web_url=values.get(
+                    "KANEO_WEB_URL", defaults.kaneo.web_url
+                ),
+                timeout_seconds=_int_value(
+                    values,
+                    "KANEO_TIMEOUT_SECONDS",
+                    defaults.kaneo.timeout_seconds,
                 ),
             ),
             advanced=AdvancedConfig(
@@ -513,6 +527,15 @@ def render_env(profile: ConfigProfile, project_root: Path | None = None) -> str:
                     "SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS",
                     f"{profile.weknora.base_url.rstrip('/')}/mcp",
                 ),
+            ],
+        ),
+        (
+            "Kaneo 任务看板与服务探活。单用户独立账号在原生 HTTPS 页面管理，"
+            "本配置不保存 Kaneo 管理员、数据库或认证密钥",
+            [
+                ("KANEO_BASE_URL", profile.kaneo.base_url),
+                ("KANEO_WEB_URL", profile.kaneo.web_url),
+                ("KANEO_TIMEOUT_SECONDS", profile.kaneo.timeout_seconds),
             ],
         ),
         (

@@ -38,6 +38,7 @@ required_paths=(
   "frontend/vite.config.ts"
   "docker/browser"
   "docker/weknora"
+  "docker/kaneo"
   "deploy/deploy-prod.sh"
   "deploy/runtime_source_attestation.py"
   "deploy/runtime-source-manifest.json"

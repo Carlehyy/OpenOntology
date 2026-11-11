@@ -113,6 +113,12 @@ export interface WeKnoraIntegration {
   web_url: string
 }
 
+/** Kaneo 项目管理原生 Web 入口（后端只回 Web URL，不涉及账号打通） */
+export interface KaneoIntegration {
+  /** Kaneo 原生 Web 页面地址：前端只负责新标签打开，登录使用其单用户独立账号 */
+  web_url: string
+}
+
 export interface SkillFile {
   path: string
   size: number
@@ -703,6 +709,9 @@ export const superAssistantApi = {
   /** WeKnora 原生 Web 入口（页面加载即读公网 URL；不依赖 state/知识库/模型） */
   getWeKnoraIntegration: () =>
     apiClientV2.get<WeKnoraIntegration>('/super-assistant/weknora'),
+  /** Kaneo 项目管理原生 Web 入口（页面加载即读 URL；登录走 Kaneo 自己的账号体系） */
+  getKaneoIntegration: () =>
+    apiClientV2.get<KaneoIntegration>('/super-assistant/kaneo'),
   streamChat,
   /** kernel.v1 长任务 API；与旧 Conversation 流并行，调用方需自行保存 run_id/version。 */
   createKernelRun: (conversationId: string, body: {

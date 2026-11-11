@@ -10,6 +10,7 @@ import { expectSameBoundingBox } from './support/geometry'
 // 空态品牌文案与占位符、配置面板白底、
 // 输入草稿按会话缓存及刷新后从 localStorage 恢复（发送后清空落盘）、
 // 重命名 blur 取消、知识图谱头部入口（WeKnora 受信 URL、新标签 opener 隔离）、
+// 项目管理头部入口（Kaneo 受信 URL、回环保留 canonical origin、失败重试）、
 // 能力拓展（multica 配置弹窗 + /multica: 命令提示的配置门控）、事件路由占位弹窗、消息通知弹窗
 // （未读徽章、tab 筛选、Markdown 详情与附件、标记/归档/全部已读/发送消息）、
 // ⌘K/Ctrl+K 唤起全局搜索、输入草稿按会话缓存、全局搜索 Command 面板检索与跳转、
@@ -204,6 +205,8 @@ interface MockOptions {
   mcpServers?: Array<Record<string, unknown>>
   /** 覆盖 WeKnora 入口 web_url（默认公网 https 地址）；回环值用于验证同主机改写 */
   weknoraWebUrl?: string
+  /** 覆盖 Kaneo 项目管理入口 web_url（默认公网 https 地址）；回环值用于验证保留 canonical origin（不改写） */
+  kaneoWebUrl?: string
 }
 
 async function mockApis(page: Page, options: MockOptions = {}) {
@@ -327,6 +330,11 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const weknoraFixture = {
     web_url: options.weknoraWebUrl ?? 'https://weknora.example.com:8443',
   }
+  // 项目管理（Kaneo）：同 WeKnora 模式读取入口配置；记录请求次数供断言
+  const kaneoCalls: string[] = []
+  const kaneoFixture = {
+    web_url: options.kaneoWebUrl ?? 'https://kaneo.example.com:8445',
+  }
   await page.route('**/api/**', route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
@@ -386,6 +394,11 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     if (path === '/api/v2/super-assistant/weknora' && request.method() === 'GET') {
       weknoraCalls.push(request.url())
       return json(route, weknoraFixture)
+    }
+    // 项目管理（Kaneo）：页面加载读入口配置，登录由 Kaneo 自己的账号体系承接
+    if (path === '/api/v2/super-assistant/kaneo' && request.method() === 'GET') {
+      kaneoCalls.push(request.url())
+      return json(route, kaneoFixture)
     }
     // 会话流式对话：可控延迟的 SSE
     const chatMatch = path.match(/^\/api\/v2\/super-assistant\/conversations\/([^/]+)\/chat$/)
@@ -984,6 +997,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     multicaWorkspaceCalls,
     toolPatchCalls,
     weknoraCalls,
+    kaneoCalls,
     mcpPatches,
     mcpTests,
     isChatDone: () => chatDone,
@@ -2557,6 +2571,119 @@ test('知识库（WeKnora）：后端下发回环地址时改写为当前访问�
   await expect(menuLink).toHaveAttribute('href', 'http://localhost:8089')
 })
 
+test('项目管理（Kaneo）：位于领域知识左侧，新标签打开原生页面且 opener 隔离', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  // Kaneo 原生页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
+  await page.context().route(/^https:\/\/kaneo\.example\.com:8445(?:\/.*)?$/, route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理登录</p>',
+  }))
+  await page.goto('/#/super-assistant')
+
+  // 入口钉在「会话纪要」与「领域知识（WeKnora）」之间：左邻右舍各量一次
+  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
+  const weknoraLink = page.getByRole('link', { name: '知识库（WeKnora）' })
+  const summary = page.getByRole('button', { name: '查看会话纪要' })
+  await expect(kaneoLink).toBeVisible()
+  await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
+  await expect(kaneoLink).toHaveAttribute('target', '_blank')
+  await expect(kaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
+  await expect(kaneoLink).toHaveAttribute('title', '项目管理')
+  const [summaryBox, kaneoBox, weknoraBox] = await Promise.all([
+    summary.boundingBox(), kaneoLink.boundingBox(), weknoraLink.boundingBox(),
+  ])
+  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(kaneoBox!.x + 1)
+  expect(kaneoBox!.x + kaneoBox!.width).toBeLessThanOrEqual(weknoraBox!.x + 1)
+  await expect.poll(() => mocks.kaneoCalls.length).toBeGreaterThanOrEqual(1)
+  expect(mocks.kaneoCalls[0]).toContain('/api/v2/super-assistant/kaneo')
+
+  // 新标签落到 Kaneo 原生页面（单用户账号由 Kaneo 自己承接），window.opener 已被隔离
+  const popupPromise = page.waitForEvent('popup')
+  await kaneoLink.click()
+  const popup = await popupPromise
+  await popup.waitForLoadState('domcontentloaded')
+  expect(new URL(popup.url()).origin).toBe('https://kaneo.example.com:8445')
+  expect(await popup.evaluate(() => window.opener)).toBeNull()
+  await popup.close()
+})
+
+test('项目管理（Kaneo）：回环下发保留后端 canonical origin，窄屏更多菜单顺序与头部一致', async ({ page }) => {
+  await seedAuth(page)
+  // Kaneo 与 WeKnora 不同：其前端 API/认证 origin 固定注入自 KANEO_WEB_URL，
+  // 回环主机改写成当前访问主机会与上游 trustedOrigins/cookie/API 不一致
+  // （登录 403）。因此严格保留后端下发值（未显式配置即默认 https://localhost:8445，
+  // HTTP 8090 由 nginx 跳 HTTPS）；本地 localhost 默认可用，远程访问须部署方
+  // 显式配置 KANEO_WEB_URL。夹具取 127.0.0.1 以验证不改写。
+  await mockApis(page, { kaneoWebUrl: 'https://127.0.0.1:8445' })
+  await page.goto('/#/super-assistant')
+
+  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
+  await expect(kaneoLink).toBeVisible()
+  await expect(kaneoLink).toHaveAttribute('href', 'https://127.0.0.1:8445')
+
+  // 窄屏溢出菜单顺序与头部一致：会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）
+  await page.setViewportSize({ width: 375, height: 720 })
+  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toBeHidden()
+  await page.getByRole('button', { name: '更多操作' }).click()
+  const menu = page.getByRole('dialog')
+  const menuItems = menu.locator('a, button')
+  await expect(menuItems.first()).toHaveText('会话纪要')
+  await expect(menuItems.nth(1)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
+  await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '知识库（WeKnora）')
+  const menuKaneoLink = menu.getByRole('link', { name: '项目管理（Kaneo）' })
+  await expect(menuKaneoLink).toBeVisible()
+  await expect(menuKaneoLink).toHaveAttribute('href', 'https://127.0.0.1:8445')
+  await expect(menuKaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
+  await expect(menuKaneoLink).toHaveAttribute('title', '项目管理')
+})
+
+test('项目管理（Kaneo）：加载失败与非法协议不提供跳转，重试后恢复入口', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  // 依次制造三种后端态：500（加载失败）→ javascript:（异常协议）→ 公网地址（恢复）；
+  // 用 phase 而非调用序号取值，兼容 StrictMode 挂载期 effect 双发
+  let phase = 0
+  let kaneoServed = 0
+  await page.route('**/api/v2/super-assistant/kaneo', route => {
+    kaneoServed += 1
+    if (phase === 0) {
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'kaneo down' }) })
+    }
+    const webUrl = phase === 1 ? 'javascript:alert(1)' : 'https://kaneo.example.com:8445'
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { web_url: webUrl } }) })
+  })
+  await page.goto('/#/super-assistant')
+
+  // 初次加载失败：不出现跳转链接，入口退为可重试按钮（初始失败不打扰用户）
+  const retryButton = page.getByRole('button', { name: '项目管理（Kaneo）' })
+  await expect(retryButton).toBeVisible()
+  await expect(retryButton).toHaveAttribute('title', '项目管理')
+  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toHaveCount(0)
+
+  // 手动重试再遇 500：如实报错，入口保留
+  await retryButton.click()
+  await expect(page.getByText('项目管理入口加载失败')).toBeVisible()
+  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toHaveCount(0)
+
+  // 重试落到非法协议：仍不提供跳转，页面不出现 javascript: 链接
+  phase = 1
+  await retryButton.click()
+  await expect.poll(() => kaneoServed).toBeGreaterThanOrEqual(4)
+  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toHaveCount(0)
+  await expect(retryButton).toBeVisible()
+  expect(await page.locator('a[href^="javascript:"]').count()).toBe(0)
+
+  // 再次重试拿到公网地址：入口恢复为新标签链接
+  phase = 2
+  await retryButton.click()
+  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
+  await expect(kaneoLink).toBeVisible()
+  await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
+  await expect(kaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
+})
+
 test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
@@ -3082,10 +3209,11 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
     await page.getByRole('button', { name: '更多操作' }).click()
     const menu = page.getByRole('dialog')
-    // 溢出菜单顺序与头部一致：会话纪要在知识库（WeKnora）之前
+    // 溢出菜单顺序与头部一致：会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）
     const menuItems = menu.locator('a, button')
     await expect(menuItems.first()).toHaveText('会话纪要')
-    await expect(menuItems.nth(1)).toHaveAttribute('aria-label', '知识库（WeKnora）')
+    await expect(menuItems.nth(1)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
+    await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '知识库（WeKnora）')
     const link = menu.getByRole('link', { name: '知识库（WeKnora）' })
     await expect(link).toBeVisible()
     await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')

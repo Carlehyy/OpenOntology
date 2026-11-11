@@ -135,6 +135,57 @@ def probe_weknora() -> None:
         response.read(4096)
 
 
+def probe_kaneo() -> None:
+    """Probe the Kaneo service through its DB-backed instance status.
+
+    Kaneo's ``/api/health`` is a static 200 that never touches the database,
+    so readiness must read ``/api/instance/status`` and validate the payload:
+    only a real service+database path answers with the boolean
+    ``hasUsers``/``hasAdmin`` fields, and a deployment-ready instance must
+    report both true (the bootstrap administrator exists). Projects and
+    tasks are configured by operators in Kaneo's native Web; the probe never
+    inspects them.
+    """
+    import json
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    from app.shared.http_transport import open_with_loopback_bypass
+
+    base = str(settings.kaneo_base_url or "").strip()
+    parsed = urlsplit(base)
+    if (
+        parsed.scheme not in {"http", "https"} or not parsed.hostname
+        or parsed.username is not None or parsed.password is not None
+        or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+    ):
+        raise RuntimeError("KANEO_BASE_URL is not an absolute HTTP(S) origin")
+    request = urllib.request.Request(
+        f"{base.rstrip('/')}/api/instance/status",
+        headers={"Connection": "close"},
+    )
+    with open_with_loopback_bypass(
+        request, timeout=min(settings.kaneo_timeout_seconds, 5),
+    ) as response:
+        if response.status != 200:
+            raise RuntimeError(
+                f"Kaneo instance status returned HTTP {response.status}"
+            )
+        body = response.read(4096)
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        raise RuntimeError("Kaneo instance status returned invalid JSON") from None
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("hasUsers"), bool)
+        or not isinstance(payload.get("hasAdmin"), bool)
+    ):
+        raise RuntimeError("Kaneo instance status returned an invalid payload")
+    if not (payload["hasUsers"] and payload["hasAdmin"]):
+        raise RuntimeError("Kaneo instance is not bootstrapped")
+
+
 def probe_dbx() -> None:
     """Authenticate and verify the pinned dbx release without leaking config."""
     from app.data_channel.integrated.dbx_adapter import DbxMetadataAdapter
@@ -153,6 +204,7 @@ PROBES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("MinIO", probe_minio),
     ("n8n", probe_n8n),
     ("WeKnora", probe_weknora),
+    ("Kaneo", probe_kaneo),
     ("Chromium CDP", probe_browser),
 )
 NON_BLOCKING_PROBES = frozenset({"Chromium CDP"})

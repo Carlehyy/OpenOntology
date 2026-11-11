@@ -32,6 +32,7 @@ migration_head_revision=""
 pre_migration_revision=""
 bootstrap_tmp_path=""
 weknora_bootstrap_active=0
+kaneo_bootstrap_active=0
 log() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 if [ -L "$APP_DIR" ]; then
   log "$APP_DIR must be a real deployment directory; refusing to follow a symlink"
@@ -124,6 +125,20 @@ compose_environment() {
     -u WEKNORA_REDIS_IMAGE \
     -u WEKNORA_MAX_FILE_SIZE_MB \
     -u WEKNORA_DEFAULT_LOCALE \
+    -u KANEO_BASE_URL \
+    -u KANEO_WEB_URL \
+    -u KANEO_TIMEOUT_SECONDS \
+    -u KANEO_HTTP_PORT \
+    -u KANEO_HTTPS_PORT \
+    -u KANEO_APP_IMAGE \
+    -u KANEO_POSTGRES_IMAGE \
+    -u KANEO_DB_USER \
+    -u KANEO_DB_NAME \
+    -u KANEO_DB_PASSWORD \
+    -u KANEO_AUTH_SECRET \
+    -u KANEO_ADMIN_USER \
+    -u KANEO_ADMIN_EMAIL \
+    -u KANEO_ADMIN_PASSWORD \
     -u STEWARD_INTERNAL_PROXY_BASE_URL \
     -u STEWARD_BROWSER_HTTP_LEASE_SECONDS \
     -u STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS \
@@ -209,6 +224,12 @@ restore_previous_runtime_on_exit() {
     compose --profile weknora-bootstrap rm -sf weknora-app-init >/dev/null 2>&1 || true
     compose stop --timeout 30 weknora-gateway weknora-ui weknora-app >/dev/null 2>&1 || true
   fi
+  if [ "$kaneo_bootstrap_active" = "1" ]; then
+    # A failed initialization must never leave the Kaneo public gateway or the
+    # private app running. Volumes are preserved for a retry.
+    log "closing the Kaneo public surface after a failed deployment"
+    compose stop --timeout 30 kaneo-gateway kaneo-app >/dev/null 2>&1 || true
+  fi
   if [ "$runtime_stopped_for_migration" = "1" ] \
       && [ "$migration_completed" = "0" ] \
       && [ "${#previous_runtime_services[@]}" -gt 0 ]; then
@@ -243,6 +264,9 @@ stop_new_runtime_after_failed_deploy() {
   fi
   if ! compose stop --timeout 30 weknora-gateway; then
     log "failed to stop the WeKnora public gateway; operator intervention is required"
+  fi
+  if ! compose stop --timeout 30 kaneo-gateway; then
+    log "failed to stop the Kaneo public gateway; operator intervention is required"
   fi
 }
 assert_asset() {
@@ -540,6 +564,72 @@ check_weknora_public_entry() {
   return 0
 }
 
+run_kaneo_bootstrap() {
+  log "running Kaneo bootstrap: $*"
+  run_with_retry compose --profile kaneo-bootstrap run --rm --no-deps kaneo-bootstrap \
+    python -m app.super_assistant.kaneo.bootstrap "$@"
+}
+
+start_and_verify_kaneo_stack() {
+  # Kaneo keeps registration disabled in every process: an empty instance
+  # still allows creating the first administrator, so no registration-open
+  # initializer exists. The public gateway is closed while the private app is
+  # (re)initialized and is only started by the final compose up after the
+  # platform health conditions are satisfied.
+  kaneo_bootstrap_active=1
+  log "closing the Kaneo public gateway before private initialization"
+  # A running public gateway must never stay open while an empty or restored
+  # instance is reinitialized: abort instead of ignoring a failed stop. Compose
+  # stop succeeds when the service has no container, so no fallback is needed.
+  compose stop --timeout 30 kaneo-gateway
+  log "starting the Kaneo database and app on the private network"
+  if compose up --help 2>&1 | grep -q -- '--wait'; then
+    run_with_retry compose up -d --wait \
+      --wait-timeout "${KANEO_APP_WAIT_TIMEOUT:-360}" kaneo-db kaneo-app
+  else
+    run_with_retry compose up -d kaneo-db kaneo-app
+    run_with_retry wait_for_service_healthy kaneo-app 48 10
+  fi
+  # Account creation and login verification must finish before the public
+  # gateway starts; project data lives in Kaneo's native Web UI.
+  run_kaneo_bootstrap
+  run_kaneo_bootstrap --verify
+  kaneo_bootstrap_active=0
+}
+
+check_kaneo_public_entry() {
+  # Basic public entry contract: the plain-HTTP listener only redirects to the
+  # canonical HTTPS origin, the gateway answers on HTTPS and the native app
+  # health endpoint is reachable through the gateway. Field-level response
+  # contracts are asserted by backend/scripts/kaneo_service_e2e.py canary runs.
+  local http_port https_port web_url headers redirect_location
+  http_port="$(env_value KANEO_HTTP_PORT)"
+  https_port="$(env_value KANEO_HTTPS_PORT)"
+  http_port="${http_port:-8090}"
+  https_port="${https_port:-8445}"
+  web_url="$(env_value KANEO_WEB_URL)"
+  headers="$(mktemp)"
+  if ! curl -fsS -o /dev/null -D "$headers" --connect-timeout 5 --max-time 10 \
+      "http://127.0.0.1:${http_port}/"; then
+    rm -f "$headers"
+    return 1
+  fi
+  redirect_location="$(
+    tr -d '\r' < "$headers" \
+      | awk 'tolower($1) == "location:" { $1 = ""; sub(/^ /, ""); print; exit }'
+  )"
+  rm -f "$headers"
+  if [ "$redirect_location" != "${web_url}/" ]; then
+    log "Kaneo plain-HTTP entry must redirect to the canonical HTTPS origin ${web_url}"
+    return 1
+  fi
+  curl -kfsS --connect-timeout 5 --max-time 10 \
+    "https://127.0.0.1:${https_port}/healthz" >/dev/null || return 1
+  curl -kfsS --connect-timeout 5 --max-time 20 \
+    "https://127.0.0.1:${https_port}/api/health" >/dev/null || return 1
+  return 0
+}
+
 if [ "${SKIP_GIT:-0}" != "1" ]; then
   command -v git >/dev/null 2>&1 || { log "git is not installed"; exit 1; }
   if [ ! -d "$APP_DIR/.git" ]; then
@@ -580,9 +670,9 @@ random_hex() {
   local bytes="${1:-32}"
   od -An -N "$bytes" -tx1 /dev/urandom | tr -d ' \n'
 }
-random_weknora_admin_password() {
-  # WeKnora accepts 8-32 character passwords. Guarantee uppercase, lowercase,
-  # digit and special characters (complex policy can be enabled) with a fixed
+random_service_admin_password() {
+  # Native service accounts (WeKnora, Kaneo) accept 8-32 character passwords.
+  # Guarantee uppercase, lowercase, digit and special characters with a fixed
   # policy prefix plus 20 hex characters (80 random bits).
   local raw
   raw="$(random_hex 16)"
@@ -915,7 +1005,7 @@ configure_weknora_env() {
   current="$(env_value WEKNORA_ADMIN_PASSWORD)"
   case "$current" in
     ""|change-me|admin123)
-      updates+=("WEKNORA_ADMIN_PASSWORD=$(random_weknora_admin_password)")
+      updates+=("WEKNORA_ADMIN_PASSWORD=$(random_service_admin_password)")
       log "generated independent WeKnora administrator password"
       ;;
   esac
@@ -953,6 +1043,87 @@ configure_weknora_env() {
     "WEKNORA_DOCREADER_IMAGE=wechatopenai/weknora-docreader:v0.9.0@sha256:8c71ec3cc2e291829c3938d2c7dc5f921c1d10551c8774bf844c83bc4aa3cb84" \
     "WEKNORA_POSTGRES_IMAGE=paradedb/paradedb:v0.25.11-pg17@sha256:78d65750f0f88a56548526201bcab9910f83b90fe929cdbf979890f3f80b0f95" \
     "WEKNORA_REDIS_IMAGE=redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99"; do
+    current="$(env_value "${image_assignment%%=*}")"
+    [ -n "$current" ] || updates+=("$image_assignment")
+  done
+  set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
+}
+
+configure_kaneo_env() {
+  # Keep Kaneo's own database and native-account credentials stable across
+  # deployments. Project management data belongs to Kaneo's Web UI, not here.
+  local current web_url tls_ip https_port
+  local -a updates=()
+  updates+=("KANEO_BASE_URL=http://kaneo-app:5173")
+  current="$(env_value KANEO_TIMEOUT_SECONDS)"
+  [ -n "$current" ] || updates+=("KANEO_TIMEOUT_SECONDS=15")
+  current="$(env_value KANEO_HTTP_PORT)"
+  [ -n "$current" ] || updates+=("KANEO_HTTP_PORT=8090")
+  current="$(env_value KANEO_HTTPS_PORT)"
+  [ -n "$current" ] || updates+=("KANEO_HTTPS_PORT=8445")
+
+  current="$(env_value KANEO_DB_NAME)"
+  [ -n "$current" ] || updates+=("KANEO_DB_NAME=kaneo")
+  current="$(env_value KANEO_DB_USER)"
+  [ -n "$current" ] || updates+=("KANEO_DB_USER=kaneo")
+  for secret_assignment in "KANEO_DB_PASSWORD:24" "KANEO_AUTH_SECRET:32"; do
+    current="$(env_value "${secret_assignment%%:*}")"
+    case "$current" in
+      ""|change-me|admin123|kaneo-local-db-password|\
+      kaneo-local-auth-secret-change-me-2026)
+        updates+=("${secret_assignment%%:*}=$(random_hex "${secret_assignment#*:}")")
+        log "generated independent Kaneo runtime secret: ${secret_assignment%%:*}"
+        ;;
+    esac
+  done
+  current="$(env_value KANEO_ADMIN_PASSWORD)"
+  case "$current" in
+    ""|change-me|admin123|localKaneoAdmin2026!)
+      updates+=("KANEO_ADMIN_PASSWORD=$(random_service_admin_password)")
+      log "generated independent Kaneo administrator password"
+      ;;
+  esac
+
+  current="$(env_value KANEO_ADMIN_USER)"
+  if [ -z "$current" ]; then
+    current="$(env_value FIRST_ADMIN_USER)"
+    updates+=("KANEO_ADMIN_USER=${current:-admin}")
+  fi
+  current="$(env_value KANEO_ADMIN_EMAIL)"
+  [ -n "$current" ] || updates+=("KANEO_ADMIN_EMAIL=admin@kaneo.local")
+
+  current="$(env_value KANEO_WEB_URL)"
+  # KANEO_API_URL and the gateway redirect append paths to this origin, so a
+  # trailing slash would produce "//api" and "//" targets; normalize in place.
+  web_url="$current"
+  while [ "${web_url%/}" != "$web_url" ]; do
+    web_url="${web_url%/}"
+  done
+  if [ -z "$web_url" ]; then
+    tls_ip="$(env_value PUBLIC_TLS_IP)"
+    https_port="$(env_value KANEO_HTTPS_PORT)"
+    https_port="${https_port:-8445}"
+    if [ -z "$tls_ip" ]; then
+      log "KANEO_WEB_URL is required when PUBLIC_TLS_IP is empty; set the real public Kaneo HTTPS origin explicitly"
+      exit 1
+    fi
+    case "$tls_ip" in
+      *:*) web_url="https://[${tls_ip}]:${https_port}" ;;
+      *) web_url="https://${tls_ip}:${https_port}" ;;
+    esac
+    updates+=("KANEO_WEB_URL=${web_url}")
+    log "configured KANEO_WEB_URL from PUBLIC_TLS_IP and KANEO_HTTPS_PORT"
+  elif [ "$web_url" != "$current" ]; then
+    updates+=("KANEO_WEB_URL=${web_url}")
+    log "normalized KANEO_WEB_URL by removing its trailing slash"
+  fi
+
+  # Official Kaneo 2.49.0 image with a directly verified multiarch digest; the
+  # dedicated Kaneo database reuses the platform's pinned postgres. Existing
+  # values are preserved; the production digest gate still rejects tag drift.
+  for image_assignment in \
+    "KANEO_APP_IMAGE=ghcr.io/usekaneo/kaneo:2.49.0@sha256:cd1826b1aba3ce736015cadf6f6c975d923aac00f4b6aaa7aedb29bc722dae49" \
+    "KANEO_POSTGRES_IMAGE=postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"; do
     current="$(env_value "${image_assignment%%=*}")"
     [ -n "$current" ] || updates+=("$image_assignment")
   done
@@ -1046,6 +1217,119 @@ validate_weknora_config() {
   log "validated WeKnora service URLs and independent account/runtime credentials"
 }
 
+validate_kaneo_config() {
+  local http_port https_port public_port public_https_port
+  local weknora_http_port weknora_https_port
+  local kaneo_secret admin_password
+  local web_url url_host url_port tls_ip
+  [ "$(env_value KANEO_BASE_URL)" = "http://kaneo-app:5173" ] || {
+    log "KANEO_BASE_URL must remain the internal http://kaneo-app:5173 contract"
+    exit 1
+  }
+  http_port="$(env_value KANEO_HTTP_PORT)"
+  https_port="$(env_value KANEO_HTTPS_PORT)"
+  for port in "$http_port" "$https_port"; do
+    case "$port" in
+      ""|*[!0-9]*) log "KANEO_HTTP_PORT and KANEO_HTTPS_PORT must be integers between 1 and 65535"; exit 1 ;;
+    esac
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      log "KANEO_HTTP_PORT and KANEO_HTTPS_PORT must be integers between 1 and 65535"
+      exit 1
+    fi
+  done
+  # Kaneo's canonical origin feeds KANEO_CLIENT_URL/KANEO_API_URL and the
+  # gateway redirect target, so plain HTTP and trailing slashes are rejected
+  # instead of warned. The public address is the bare server IP with a
+  # dedicated port; external TLS proxies are outside this deployment model,
+  # so the origin port must equal the published HTTPS listener and the host
+  # must equal PUBLIC_TLS_IP (the 127.0.0.1 probes only see that listener).
+  web_url="$(env_value KANEO_WEB_URL)"
+  if [[ ! "$web_url" =~ ^https://(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]]; then
+    log "KANEO_WEB_URL must be an absolute HTTPS origin without credentials, path, query, fragment, or trailing slash"
+    exit 1
+  fi
+  url_host="${BASH_REMATCH[1]#[}"
+  url_host="${url_host%]}"
+  url_port="${BASH_REMATCH[3]:-443}"
+  if [ "$((10#$url_port))" -ne "$https_port" ]; then
+    log "KANEO_WEB_URL port ${url_port} must equal KANEO_HTTPS_PORT ${https_port}; the gateway publishes exactly that listener"
+    exit 1
+  fi
+  tls_ip="$(env_value PUBLIC_TLS_IP)"
+  if [ -z "$tls_ip" ]; then
+    log "PUBLIC_TLS_IP is required so the public Kaneo origin is bound to the real server address"
+    exit 1
+  fi
+  if [ "$url_host" != "$tls_ip" ]; then
+    log "KANEO_WEB_URL host ${url_host} must equal PUBLIC_TLS_IP; external TLS proxy origins are not supported by this deployment"
+    exit 1
+  fi
+  for key in \
+    KANEO_ADMIN_USER KANEO_ADMIN_EMAIL KANEO_ADMIN_PASSWORD \
+    KANEO_DB_NAME KANEO_DB_USER KANEO_DB_PASSWORD \
+    KANEO_AUTH_SECRET; do
+    require_secret "$key"
+  done
+  case "$(env_value KANEO_ADMIN_EMAIL)" in
+    *@*.*) ;;
+    *) log "KANEO_ADMIN_EMAIL must be a valid email address"; exit 1 ;;
+  esac
+  kaneo_secret="$(env_value KANEO_DB_PASSWORD)"
+  if [ "${#kaneo_secret}" -lt 12 ]; then
+    log "KANEO_DB_PASSWORD must contain at least 12 characters"
+    exit 1
+  fi
+  kaneo_secret="$(env_value KANEO_AUTH_SECRET)"
+  if [ "${#kaneo_secret}" -lt 32 ]; then
+    log "KANEO_AUTH_SECRET must contain at least 32 characters"
+    exit 1
+  fi
+  unset kaneo_secret
+  admin_password="$(env_value KANEO_ADMIN_PASSWORD)"
+  if [ "${#admin_password}" -lt 8 ] || [ "${#admin_password}" -gt 32 ]; then
+    log "KANEO_ADMIN_PASSWORD must contain between 8 and 32 characters"
+    exit 1
+  fi
+  case "$admin_password" in
+    *[[:space:]]*) log "KANEO_ADMIN_PASSWORD must not contain whitespace"; exit 1 ;;
+  esac
+  unset admin_password
+  case "$(env_value KANEO_TIMEOUT_SECONDS)" in
+    ""|*[!0-9]*)
+      log "KANEO_TIMEOUT_SECONDS must be an integer between 3 and 60"
+      exit 1
+      ;;
+    *)
+      if [ "$(env_value KANEO_TIMEOUT_SECONDS)" -lt 3 ] \
+          || [ "$(env_value KANEO_TIMEOUT_SECONDS)" -gt 60 ]; then
+        log "KANEO_TIMEOUT_SECONDS must be an integer between 3 and 60"
+        exit 1
+      fi
+      ;;
+  esac
+  public_port="$(env_value PUBLIC_PORT)"
+  public_port="${public_port:-80}"
+  public_https_port="$(env_value PUBLIC_HTTPS_PORT)"
+  public_https_port="${public_https_port:-8443}"
+  weknora_http_port="$(env_value WEKNORA_HTTP_PORT)"
+  weknora_http_port="${weknora_http_port:-8089}"
+  weknora_https_port="$(env_value WEKNORA_HTTPS_PORT)"
+  weknora_https_port="${weknora_https_port:-8444}"
+  if [ "$http_port" = "$https_port" ] \
+      || [ "$http_port" = "$public_port" ] \
+      || [ "$http_port" = "$public_https_port" ] \
+      || [ "$http_port" = "$weknora_http_port" ] \
+      || [ "$http_port" = "$weknora_https_port" ] \
+      || [ "$https_port" = "$public_port" ] \
+      || [ "$https_port" = "$public_https_port" ] \
+      || [ "$https_port" = "$weknora_http_port" ] \
+      || [ "$https_port" = "$weknora_https_port" ]; then
+    log "Kaneo public ports must be distinct from each other, from WeKnora and from PUBLIC_PORT/PUBLIC_HTTPS_PORT"
+    exit 1
+  fi
+  log "validated Kaneo service URLs and independent account/runtime credentials"
+}
+
 start_integrated_dbx_if_needed() {
   if [ "$INTEGRATED_DBX_INTERNAL" = "1" ]; then
     compose up -d dbx
@@ -1067,6 +1351,9 @@ dependency_key_allowed() {
     WEKNORA_TIMEOUT_SECONDS|WEKNORA_ADMIN_USER|WEKNORA_ADMIN_EMAIL|\
     WEKNORA_APP_IMAGE|WEKNORA_UI_IMAGE|WEKNORA_DOCREADER_IMAGE|\
     WEKNORA_POSTGRES_IMAGE|WEKNORA_REDIS_IMAGE|\
+    KANEO_WEB_URL|\
+    KANEO_TIMEOUT_SECONDS|KANEO_ADMIN_USER|KANEO_ADMIN_EMAIL|\
+    KANEO_APP_IMAGE|KANEO_POSTGRES_IMAGE|\
     SUPER_ASSISTANT_MCP_STDIO_ENABLED|SUPER_ASSISTANT_MCP_STDIO_ALLOWED_COMMANDS)
       return 0
       ;;
@@ -1149,6 +1436,7 @@ apply_production_dependency_config
 chmod 600 .env
 configure_integrated_dbx
 configure_weknora_env
+configure_kaneo_env
 # Chromium is bundled with the production Compose stack. Pin the internal CDP
 # URL so existing server-side .env files receive the newly required setting.
 set_env_value STEWARD_BROWSER_CDP_URL http://browser:9222
@@ -1536,7 +1824,8 @@ redact_compose_logs() {
     N8N_API_KEY INTEGRATED_DBX_PASSWORD \
     WEKNORA_ADMIN_PASSWORD \
     WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
-    WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY; do
+    WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY \
+    KANEO_ADMIN_PASSWORD KANEO_DB_PASSWORD KANEO_AUTH_SECRET; do
     value="$(env_value "$key")"
     [ -z "$value" ] || sensitive_values+=("$value")
   done
@@ -1739,6 +2028,7 @@ validate_required_runtime_dependencies() {
 }
 validate_required_runtime_dependencies
 validate_weknora_config
+validate_kaneo_config
 if [ -z "$(env_value ENCRYPTION_KEY)" ]; then
   log "ENCRYPTION_KEY is empty; preserving the existing SECRET_KEY-derived encryption key"
 fi
@@ -1801,7 +2091,8 @@ for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
   WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
-  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE; do
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE \
+  KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE; do
   check_image_digest "$image_key"
 done
 if [ "${DEPLOY_VALIDATE_ONLY:-0}" = "1" ]; then
@@ -1835,6 +2126,7 @@ command -v docker >/dev/null 2>&1 || { log "docker is not installed"; exit 1; }
 log "building images"
 run_with_retry compose build --pull
 run_with_retry compose --profile weknora-bootstrap build --pull weknora-bootstrap
+run_with_retry compose --profile kaneo-bootstrap build --pull kaneo-bootstrap
 # Resolve the exact image tag Compose will use for the backend service from the
 # structured build-print output (target.backend.tags). Do not guess an image
 # name and do not pick among label/created-time candidates: the tag emitted for
@@ -1887,6 +2179,10 @@ start_weknora_initializer
 run_weknora_bootstrap
 stop_weknora_initializer
 start_and_verify_weknora_app
+# Kaneo is a hard platform dependency and is initialized the same way: the
+# private app is (re)initialized and verified before the platform probe,
+# migrations and the final compose up that opens the public gateway.
+start_and_verify_kaneo_stack
 log "starting required dependency services"
 run_with_retry start_required_dependency_services
 log "verifying required production dependency connectivity"
@@ -1916,7 +2212,7 @@ migration_head_revision="$(
   exit 1
 }
 running_services="$(compose ps --services --filter status=running 2>/dev/null || true)"
-for runtime_service in backend pipeline_executor frontend weknora-gateway; do
+for runtime_service in backend pipeline_executor frontend weknora-gateway kaneo-gateway; do
   if grep -Fxq "$runtime_service" <<<"$running_services"; then
     previous_runtime_services+=("$runtime_service")
   fi
@@ -1930,6 +2226,7 @@ if [ "${#previous_runtime_services[@]}" -gt 0 ]; then
   runtime_stopped_for_migration=1
   compose stop --timeout 30 frontend pipeline_executor backend
   compose stop --timeout 30 weknora-gateway
+  compose stop --timeout 30 kaneo-gateway
 fi
 log "  upgrading to head"
 if ! run_with_retry compose run --rm --no-deps backend alembic upgrade head; then
@@ -1965,7 +2262,8 @@ for i in $(seq 1 60); do
   if curl -fsS --connect-timeout 5 --max-time 10 "$READINESS_URL" >/dev/null \
       && check_pipeline_executor \
       && check_frontend_assets \
-      && check_weknora_public_entry; then
+      && check_weknora_public_entry \
+      && check_kaneo_public_entry; then
     if ! verify_runtime_source_attestation; then
       log "runtime source attestation failed; refusing to report deployment success"
       stop_new_runtime_after_failed_deploy
@@ -1982,7 +2280,8 @@ done
 log "deployment health check failed"
 compose ps || true
 redact_compose_logs backend dbx browser frontend pipeline_executor \
-  weknora-app weknora-ui weknora-gateway weknora-docreader || true
+  weknora-app weknora-ui weknora-gateway weknora-docreader \
+  kaneo-db kaneo-app kaneo-gateway || true
 stop_new_runtime_after_failed_deploy
 log "migration reached head; restore the pre-deploy backup before rolling back the application"
 exit 1

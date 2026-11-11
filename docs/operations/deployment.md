@@ -54,11 +54,14 @@ diff、未知路径、rename 源路径，以及改到分类器或本工作流时
 11. 服务器部署入口再次校验目录；旧安装如仍使用示例运行密钥，先执行不改密文
     的密钥解耦，再启动 WeKnora 私网依赖与一次性 init app，完成账号
     bootstrap 后删除 init、启动关闭注册的正式 app 并执行
-    `bootstrap --verify`；之后才做平台依赖探测、停止旧 backend、数据库迁移和
-    Compose 启动；
+    `bootstrap --verify`；Kaneo 同样先停用公网网关、在私网启动 kaneo-db 与
+    kaneo-app，由 `kaneo-bootstrap` 一次性容器创建管理员并执行
+    登录验证；两个原生服务都验证通过后，才做平台依赖探测、停止旧 backend、
+    数据库迁移和 Compose 启动；
 12. 检查 API 深度 readiness、pipeline executor、PostgreSQL、
     Redis、Neo4j、MinIO、n8n、Chromium CDP、WeKnora 公网网关/注册关闭/
-    公开 `/mcp/` 404 和前端静态资源；readiness 通过后
+    公开 `/mcp/` 404、Kaneo 公网入口（HTTP 308 精确跳转规范 HTTPS origin、
+    HTTPS 网关健康）和前端静态资源；readiness 通过后
     只读比对 active backend 容器 `/app/app` 文件字节、image ID 和
     `StartedAt`，manifest 缺失、路径额外/缺失、字节不同、commit 不符或
     verifier 失败都会使部署非零并沿用既有 stop helper 停止新 runtime；
@@ -88,6 +91,22 @@ WeKnora v0.9.0 的公开入口与平台 Nginx 独立：它只暴露原生 Web �
 防止 tag 漂移。模型与知识库不属于部署输入；管理员登录原生 Web 配置后，
 通过超级助手现有 MCP 管理手工接入，详见
 [配置流程](./configuration.md#weknora-共享知识库v090)。
+
+Kaneo 项目管理（官方 2.49.0 固定 digest，独立单用户账号与独立 PostgreSQL）
+随同一 Compose 启动，部署顺序与 WeKnora 同一原则：先 `compose stop
+kaneo-gateway` 关闭公开面，在私网启动 `kaneo-db`/`kaneo-app`，一次性
+`kaneo-bootstrap` 容器创建管理员（默认 `admin / admin@kaneo.local`）并执行
+登录 `--verify`；验证失败或后续部署失败都会重新关闭 Kaneo 网关，不留半初始
+化的公开入口。Kaneo 全程关闭注册（空实例也只允许创建首个管理员），没有
+WeKnora 式开放注册的 init 容器；重复部署不修改已存在账号的密码。首次部署
+时 `.env` 缺失或仍为本地默认值的 `KANEO_ADMIN_PASSWORD`、`KANEO_DB_PASSWORD`、
+`KANEO_AUTH_SECRET` 由部署脚本随机生成并持久化，之后保持稳定，不会回显到
+Actions 日志。`KANEO_WEB_URL` 未显式配置时从 `PUBLIC_TLS_IP` 与
+`KANEO_HTTPS_PORT` 推导为规范 HTTPS origin，两者都缺失则部署 fail closed；
+公开入口检查要求 HTTP 8090 精确 308 跳转该 origin、HTTPS 8445 网关健康。
+密码获取只能在服务器受控终端读取 `.env`，边界同
+[首个管理员密码](#首次登录与管理员密码恢复)。服务与地址契约详见
+[配置说明](./configuration.md#kaneo-项目管理2490)。
 
 ## 数据库迁移停机边界
 
@@ -229,6 +248,14 @@ unset OPENONTOLOGY_NEW_ADMIN_PASSWORD
 同一维护命令重置目标账号即可。`FIRST_ADMIN_PASSWORD` 只是数据库中没有任何
 admin 时的 seed 输入，编辑它不会修改已经存在的管理员密码。
 
+Kaneo 原生页面的管理员凭据同样只在受控终端读取同一 `.env`（把上例 awk 的键
+换成 `KANEO_ADMIN_USER`、`KANEO_ADMIN_EMAIL`、`KANEO_ADMIN_PASSWORD`；默认
+账号 `admin` / `admin@kaneo.local`）。首版无 SMTP，没有邮件找回通道，服务器
+`.env` 是初始密码的唯一恢复来源；密码一旦在原生页面修改，账号事实源即转为
+Kaneo 自身数据库。改密后须在受控终端同步服务器 `.env` 的
+`KANEO_ADMIN_PASSWORD`，否则下次部署会因管理员验证失败而关闭入口；部署不会
+自动重置数据库密码。
+
 ## 当前已知缺口
 
 - 发布前 verify 与 deploy 仍在同一个 workflow，避免绕过发布门禁；
@@ -334,9 +361,28 @@ CDP。插件包须以不可变 digest 交付；secret/artifact broker 使用仅�
 - 必需依赖全部真实就绪，且失败演练没有切换 SQLite、API 线程任务、内存/SQL
   图或本地对象存储；
 - PostgreSQL 关键词搜索通过，语义及统一 semantic 模式返回预期 501；
-- 上一版本镜像、Compose 配置和回滚负责人已确认。
+- 上一版本镜像、Compose 配置和回滚负责人已确认；
+- Kaneo：`PUBLIC_TLS_IP` 已配置，`KANEO_WEB_URL` 使用该 IP 和
+  `KANEO_HTTPS_PORT`（未显式设置时自动推导）；本版生产编排不支持不同域名或
+  外部 TLS 代理的地址。`8090`/`8445`（或自定义端口）已放行且无端口冲突。
 
 LLM 不属于部署启动门禁。基础平台发布成功后，再由管理员在模型配置页添加并
 测试所需提供商；不得为了通过平台 readiness 预置或回显真实模型凭据。
+
+发布前必须在隔离 staging 完成 Kaneo 强依赖接入的下列验收
+并保留证据（证据入 CI artifact，不进 Git），不得以探活 200 代替：
+
+1. 首次部署在 `.env` 缺失时生成 `KANEO_ADMIN_PASSWORD`/`KANEO_DB_PASSWORD`/
+   `KANEO_AUTH_SECRET`，重复部署后这三项与已部署实例保持一致（只核对存在与
+   指纹，不回显值）；
+2. 私网初始化失败演练：kaneo-app 未就绪或 bootstrap 失败时部署失败，且
+   kaneo-gateway 保持关闭，公网无法访问半初始化实例；
+3. 公网入口契约：HTTP 入口返回 308 且 Location 精确等于
+   `${KANEO_WEB_URL}/`；HTTPS 入口经网关健康并可完成原生登录；
+4. 登录后确认无公开注册、访客与邮件验证登录入口；附件上传与邮件找回密码
+   按预期不可用（首版无 S3/SMTP）；
+5. 平台超级助手「项目管理」入口与 Kaneo 的页面 API、认证来源共同使用
+   `KANEO_WEB_URL` 规范 origin；远程访问须配置真实地址，不改写回环主机名；
+6. 停止 kaneo-app 后平台 `/health/ready` 失败，恢复后自动回到就绪。
 
 配置清单见 [配置说明](./configuration.md)，回滚见 [回滚说明](./rollback.md)。

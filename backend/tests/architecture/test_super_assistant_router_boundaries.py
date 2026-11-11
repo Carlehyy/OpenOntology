@@ -777,8 +777,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 的 GET、/conversations/{id}/summary/generate 的 POST、/summary/settings 的
     # GET/PUT 共 4 个操作（3 条路径）。
     # WeKnora 知识服务引导新增 /weknora 的 GET 共 1 个操作（1 条路径）。
-    assert len(paths) == 92
-    assert sum(len(item) for item in paths.values()) == 120
+    # Kaneo（项目/任务服务，上游固定 2.49.0）引导新增 /kaneo 的 GET
+    # 共 1 个操作（1 条路径）。
+    assert len(paths) == 93
+    assert sum(len(item) for item in paths.values()) == 121
     assert hashlib.sha256(payload).hexdigest() == (
-        "8a42c211d59dc377f90432e16d631e7305ae48b42ede6f772295c8f1901a6388"
+        "2661b347919e385e1209f30a79ce843acc921751d600ec9a30258a55b8626081"
     )

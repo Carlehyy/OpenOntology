@@ -45,6 +45,7 @@ def readiness_response(
         "browser": "unknown",
         "n8n": "unknown",
         "weknora": "unknown",
+        "kaneo": "unknown",
         "sentinel_scheduler": "unknown",
         "sentinel_cdc": "unknown",
         "data_scheduler": "unknown",
@@ -149,6 +150,14 @@ def readiness_response(
         checks["weknora"] = "ok"
     except Exception:
         checks["weknora"] = "unavailable"
+
+    try:
+        from app.shared.dependency_probe import probe_kaneo
+
+        probe_kaneo()
+        checks["kaneo"] = "ok"
+    except Exception:
+        checks["kaneo"] = "unavailable"
 
     if is_production:
         # Reuse the pinned adapter's bounded status probe. It authenticates and
@@ -259,6 +268,7 @@ def readiness_response(
         "browser",
         "n8n",
         "weknora",
+        "kaneo",
         *(("dbx",) if is_production else ()),
         "sentinel_scheduler",
         "data_scheduler",

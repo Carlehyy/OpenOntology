@@ -67,6 +67,9 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   WEKNORA_JWT_SECRET: ""
   WEKNORA_SYSTEM_AES_KEY: ""
   WEKNORA_SYSTEM_SIGNING_KEY: ""
+  KANEO_ADMIN_PASSWORD: ""
+  KANEO_DB_PASSWORD: ""
+  KANEO_AUTH_SECRET: ""
 
 
 services:
@@ -349,6 +352,108 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Kaneo owns its database and native account. Bootstrap completes privately
+  # before the public gateway is opened; HTTP only redirects to HTTPS.
+  kaneo-db:
+    image: ${KANEO_POSTGRES_IMAGE:?kaneo_postgres_image is required}
+    environment:
+      POSTGRES_DB: ${KANEO_DB_NAME:-kaneo}
+      POSTGRES_USER: ${KANEO_DB_USER:-kaneo}
+      POSTGRES_PASSWORD: ${KANEO_DB_PASSWORD:?kaneo_db_password is required}
+    volumes:
+      - kaneo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kaneo_internal
+    restart: unless-stopped
+
+  kaneo-app:
+    image: ${KANEO_APP_IMAGE:?kaneo_app_image is required}
+    environment:
+      NODE_ENV: production
+      KANEO_CLIENT_URL: ${KANEO_WEB_URL:?kaneo_web_url is required}
+      KANEO_API_URL: ${KANEO_WEB_URL:?kaneo_web_url is required}/api
+      POSTGRES_HOST: kaneo-db
+      POSTGRES_DB: ${KANEO_DB_NAME:-kaneo}
+      POSTGRES_USER: ${KANEO_DB_USER:-kaneo}
+      POSTGRES_PASSWORD: ${KANEO_DB_PASSWORD:?kaneo_db_password is required}
+      AUTH_SECRET: ${KANEO_AUTH_SECRET:?kaneo_auth_secret is required}
+      DISABLE_REGISTRATION: "true"
+      DISABLE_GUEST_ACCESS: "true"
+      DISABLE_EMAIL_OTP_SIGN_IN: "true"
+      TRUSTED_PROXIES: 127.0.0.0/8,::1/128
+    volumes:
+      - kaneo_data:/var/lib/kaneo
+    depends_on:
+      kaneo-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-Y", "off", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5173/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 20
+    networks:
+      - kaneo_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  kaneo-bootstrap:
+    build:
+      context: ./backend
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+    command: ["/bin/sh", "-ec", "python -m app.super_assistant.kaneo.bootstrap && python -m app.super_assistant.kaneo.bootstrap --verify"]
+    environment:
+      KANEO_BASE_URL: http://kaneo-app:5173
+      KANEO_WEB_URL: ${KANEO_WEB_URL:?kaneo_web_url is required}
+      KANEO_ADMIN_USER: ${KANEO_ADMIN_USER:-admin}
+      KANEO_ADMIN_EMAIL: ${KANEO_ADMIN_EMAIL:-admin@kaneo.local}
+      KANEO_ADMIN_PASSWORD: ${KANEO_ADMIN_PASSWORD:?kaneo_admin_password is required}
+      KANEO_TIMEOUT_SECONDS: ${KANEO_TIMEOUT_SECONDS:-15}
+    depends_on:
+      kaneo-app:
+        condition: service_healthy
+    networks:
+      - kaneo_internal
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  kaneo-gateway:
+    image: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
+    ports:
+      - "${KANEO_HTTP_PORT:-8090}:80"
+      - "${KANEO_HTTPS_PORT:-8445}:443"
+    environment:
+      KANEO_WEB_URL: ${KANEO_WEB_URL:?kaneo_web_url is required}
+    volumes:
+      - ./docker/kaneo/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./docker/kaneo/kaneo-proxy.inc:/etc/nginx/kaneo-proxy.inc:ro
+      - frontend_ssl_certs:/etc/nginx/certs:ro
+    depends_on:
+      kaneo-app:
+        condition: service_healthy
+      kaneo-bootstrap:
+        condition: service_completed_successfully
+      frontend_ssl_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kaneo_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   # Integrated-dataset metadata transport. The image is the already verified
   # official v0.6.53 release digest and is intentionally profile-gated: the
   # automatic deployment starts it only when no explicit external DBX endpoint
@@ -433,6 +538,9 @@ services:
       WEKNORA_BASE_URL: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:?weknora web url is required}
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      KANEO_BASE_URL: http://kaneo-app:5173
+      KANEO_WEB_URL: ${KANEO_WEB_URL:?kaneo_web_url is required}
+      KANEO_TIMEOUT_SECONDS: ${KANEO_TIMEOUT_SECONDS:-15}
       # 通用平台内网 MCP 地址（CSV）。WeKnora 的 MCP 端点由原生 UI 手工登记，
       # 平台只读取 app 的 /mcp 前缀，不需要 WeKnora MCP token。
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
@@ -493,6 +601,10 @@ services:
       # The formal WeKnora app must be healthy before the API can serve tools.
       weknora-app:
         condition: service_healthy
+      kaneo-app:
+        condition: service_healthy
+      kaneo-bootstrap:
+        condition: service_completed_successfully
     volumes:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
@@ -501,6 +613,7 @@ services:
       - default
       - dbx_bridge
       - weknora_internal
+      - kaneo_internal
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     # Container hardening is defense in depth; user plugins still require the
     # dedicated rootless runner described in the commercial release gate.
@@ -562,6 +675,9 @@ services:
       WEKNORA_BASE_URL: http://weknora-app:8080
       WEKNORA_WEB_URL: ${WEKNORA_WEB_URL:?weknora web url is required}
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
+      KANEO_BASE_URL: http://kaneo-app:5173
+      KANEO_WEB_URL: ${KANEO_WEB_URL:?kaneo_web_url is required}
+      KANEO_TIMEOUT_SECONDS: ${KANEO_TIMEOUT_SECONDS:-15}
       # 通用平台内网 MCP 地址（CSV）。WeKnora 的 MCP 端点由原生 UI 手工登记，
       # 平台只读取 app 的 /mcp 前缀，不需要 WeKnora MCP token。
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
@@ -597,12 +713,17 @@ services:
         condition: service_healthy
       weknora-app:
         condition: service_healthy
+      kaneo-app:
+        condition: service_healthy
+      kaneo-bootstrap:
+        condition: service_completed_successfully
     volumes:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
     networks:
       - default
       - weknora_internal
+      - kaneo_internal
     command: python -m app.data_channel.pipeline_tasks.nats_executor
     security_opt:
       - no-new-privileges:true
@@ -718,6 +839,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  kaneo_postgres_data:
+  kaneo_data:
   frontend_ssl_certs:
   voice_models:
   postgres_data:
@@ -737,6 +860,8 @@ volumes:
   weknora_docreader_tmp:
 
 networks:
+  kaneo_internal:
+    driver: bridge
   # A normal bridge is required: dbx metadata must reach external MySQL/
   # PostgreSQL source databases. Exposure is limited by not publishing ports;
   # backend reaches dbx by service name on this dedicated network.

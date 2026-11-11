@@ -10,6 +10,8 @@
 - 共享 uploads；
 - WeKnora 独立 `weknora_postgres_data`、`weknora_redis_data`、`weknora_data`
   与 `weknora_docreader_tmp`；
+- Kaneo 独立 `kaneo_postgres_data`（项目数据权威）与 `kaneo_data`
+  （`/var/lib/kaneo` 运行时资源，不是附件持久化）；
 - 服务器 `.env` 与部署所需非秘密配置；
 - 当前镜像 digest/版本和 Compose 配置。
 
@@ -24,6 +26,12 @@ Redis 队列是否需要持久恢复取决于任务幂等与业务 RPO，必须�
   的模型/MCP 等凭据可能不可逆丢失。必须恢复同一恢复点的 key，或由授权管理员
   手工重新配置凭据；不能承诺 bootstrap 能恢复这些密文。
 - `WEKNORA_JWT_SECRET` 丢失只影响登录会话，需要重新登录，不属于密文恢复。
+
+Kaneo 的 `kaneo_postgres_data` 必须与服务器 `.env` 中的
+`KANEO_DB_PASSWORD` 作为同一恢复点保存：PostgreSQL 角色密码保存在数据目录
+内，旧卷配新密码会认证失败。`KANEO_AUTH_SECRET` 丢失只使既有登录会话失效；
+`KANEO_ADMIN_PASSWORD` 只是部署初始密码，账号事实源在 Kaneo 数据库内。首版
+没有 S3/SMTP，不存在需要一并恢复的附件对象存储。
 
 服务器 `.env` 与 PostgreSQL/API Hub 数据必须作为同一恢复点管理。
 `ENCRYPTION_KEY`（历史环境中可能由当时的 `SECRET_KEY` 派生）是模型、Connection、

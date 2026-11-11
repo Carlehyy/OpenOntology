@@ -63,6 +63,12 @@ def test_nats_is_a_required_blocking_service() -> None:
     assert "nats" not in OPTIONAL_SERVICES
 
 
+def test_kaneo_is_a_required_blocking_service() -> None:
+    assert "kaneo" in REQUIRED_SERVICES
+    assert "kaneo" in AVAILABLE_SERVICES
+    assert "kaneo" not in OPTIONAL_SERVICES
+
+
 def test_run_starts_config_center_on_default_port(
     monkeypatch,
 ) -> None:

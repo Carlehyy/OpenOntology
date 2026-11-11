@@ -10,6 +10,9 @@
   地址的 Chromium CDP；
 - WeKnora v0.9.0 共享知识库（官方 app/ui/docreader + 独立 ParadeDB/Redis）。本地源码运行可复用 `docker-compose.local.yml` 的栈；
   首次仅初始化账号，模型与知识库随后在原生 Web 配置。
+- Kaneo 2.49.0 项目管理（官方固定镜像、独立单用户账号与独立 PostgreSQL）。
+  本地源码运行同样复用 `docker-compose.local.yml` 的 Kaneo 服务，管理员账号
+  由 Compose 首次启动在私网自动创建。
 
 不存在可用于正常开发的“最小降级模式”。PostgreSQL、Redis、
 NATS、Neo4j、MinIO 和 n8n 必须提供真实配置并通过连通性检查；Chromium CDP
@@ -98,6 +101,9 @@ API、executor 和前端都启动后，再由管理员登录“模型配置”�
 - 可选 Jupyter Kernel Gateway：`8088`（见上文）；
 - WeKnora 原生 Web：`8089`（HTTP）与 `8444`（本地自签 HTTPS），只暴露 UI
   网关；app 仅在 loopback 18080 可达；docreader/ParadeDB/Redis 无宿主端口。
+- Kaneo 原生 Web：`8090`（HTTP，仅 308 跳转 HTTPS）与 `8445`（本地自签
+  HTTPS）；app 另在 loopback `18090` 暴露给源码后端探活；Kaneo 独立
+  PostgreSQL 无宿主端口。
 
 ## WeKnora 本地初始化
 
@@ -127,6 +133,52 @@ docker compose -f docker-compose.local.yml stop weknora-app-init
 保存，不能使用本地默认值。配置中心探针只验证服务与注册保护，不代表检索已就绪。
 重置知识库或删除 `weknora_*` 数据卷会丢失文件、索引和凭据，须单独确认；普通
 重新部署不会清空这些数据。
+
+## Kaneo 本地初始化
+
+Kaneo 使用官方 `ghcr.io/usekaneo/kaneo:2.49.0` 固定 digest 镜像，以独立单用户
+账号与独立 PostgreSQL 运行，平台不做 SSO/MCP/账号打通，也不改导航 menu key；
+唯一入口是超级助手会话头部「知识库」（悬停「领域知识」）入口左侧的
+「项目管理」按钮，新标签打开原生 Web。
+
+完整本地栈中 Kaneo 与平台同启且为强依赖：`kaneo-db` 健康后启动 `kaneo-app`，
+`kaneo-bootstrap` 一次性容器在私网创建管理员并登录验证，成功后 `kaneo-gateway`
+才开放公网入口；backend 与 executor 均依赖 kaneo-app 健康及 bootstrap 成功
+完成，Kaneo 未就绪时平台启动/深度 readiness fail-closed。本地默认管理员为
+`admin / admin@kaneo.local / localKaneoAdmin2026!`（用户名/邮箱/密码，仅用于
+本地，可在根 `.env` 用 `KANEO_*` 变量覆盖）。重复执行 bootstrap 或重新
+`up` 不会修改已存在账号的密码；在原生页面改密后，须在受控终端同步根
+`.env` 的 `KANEO_ADMIN_PASSWORD`，否则下次部署的管理员验证会失败并关闭入口。
+
+只为源码后端启动 Kaneo（不启动平台 8000/5173）时：
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build kaneo-db kaneo-app kaneo-bootstrap
+# 确认 bootstrap 容器以 0 退出、app 健康，再开放网关
+docker compose -f docker-compose.local.yml logs kaneo-bootstrap
+docker compose -f docker-compose.local.yml ps -a kaneo-bootstrap kaneo-app
+docker compose -f docker-compose.local.yml up -d kaneo-gateway
+```
+
+源码模式的探活地址是 `KANEO_BASE_URL=http://127.0.0.1:18090`（Compose 把 app
+发布到 loopback 18090；栈内固定 `http://kaneo-app:5173`）。配置中心探针请求
+`/api/health` 与 `/api/instance/status`，要求 `status=ok` 且 `hasUsers`、
+`hasAdmin` 均为 true，仅 health 200 不会通过；重定向会被拒绝，因此只做 308
+跳转的 8090 端口不能填入内部地址。原生页面固定为 HTTPS
+（`KANEO_WEB_URL`，本地默认 `https://localhost:8445`）：前端严格保留该规范
+地址。需要从其他机器访问时，先将它设置为实际可达的 HTTPS origin，并重启
+Kaneo，使页面 API、认证来源和平台入口一致；不会按当前访问主机改写。
+
+本地或隔离 staging 环境验收时核对以下结果：
+
+- 首次访问 `https://localhost:8445` 须手动信任自签证书（复用平台本地证书卷）；
+- HTTP `http://localhost:8090/` 返回 308 且 Location 精确指向规范 HTTPS origin；
+- 用本地默认管理员在 HTTPS 页面登录成功，页面无注册/访客/邮件验证入口；
+- 停掉 `kaneo-app` 后平台 `/health/ready` 失败，恢复后自动回到就绪。
+
+首版未接 S3/SMTP：附件上传（官方仅支持 S3 存储）与邮件找回密码不可用；
+`kaneo_data` 卷（`/var/lib/kaneo`）只是运行时资源，不是附件持久化，项目数据
+的权威存储是 `kaneo_postgres_data`。
 
 ## 最小验证
 

@@ -4,7 +4,7 @@ import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
   ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil,
-  ScrollText, Send, Settings2, Square, X,
+  ScrollText, Send, Settings2, Square, SquareKanban, X,
 } from 'lucide-react'
 
 import { modelApi } from '@/api/ontologies'
@@ -12,6 +12,7 @@ import {
   superAssistantApi,
   superAssistantBrowserApi,
   type AssistantTool,
+  type KaneoIntegration,
   type MulticaConfig,
   type SuperConversation,
   type SuperConversationFile,
@@ -68,6 +69,7 @@ import { readCachedConversations, writeCachedConversations } from './conversatio
 import { readCachedDrafts, writeCachedDrafts } from './draftCache'
 import { buildConversationExportFilename } from './exportFilename'
 import { resolveWeKnoraWebUrl } from './weknoraUrl'
+import { resolveNativeWebUrl } from './webEntryUrl'
 import type { ModelConfig } from '@/types/ontology'
 import TicketFormModal from '@/components/tickets/TicketFormModal'
 import ConversationRenameDialog from './components/ConversationRenameDialog'
@@ -180,6 +182,10 @@ export default function SuperAssistantPage() {
   // 知识库或模型可用性，也不代表知识检索已就绪。登录走 WeKnora 自己的账号体系。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
   const [weknoraLoading, setWeknoraLoading] = useState(true)
+  // 项目管理（Kaneo）：页面加载只读后端返回的原生 Web URL；单用户独立账号，
+  // 登录走 Kaneo 自己的账号体系，平台不做账号打通。
+  const [kaneo, setKaneo] = useState<KaneoIntegration | null>(null)
+  const [kaneoLoading, setKaneoLoading] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
   // 窄屏顶栏溢出菜单：实时浏览器/助手配置收进「⋯」，避免与标题、模型选择器挤出视口
   const [headerOverflowOpen, setHeaderOverflowOpen] = useState(false)
@@ -268,6 +274,25 @@ export default function SuperAssistantPage() {
   const weknoraUrl = useMemo(
     () => resolveWeKnoraWebUrl(weknora?.web_url, window.location.hostname),
     [weknora],
+  )
+  /** 项目管理（Kaneo）入口配置：页面加载即取；失败时保留可重试入口，不在加载期打断工作台 */
+  const refreshKaneo = useCallback(async (notifyFailure = false) => {
+    setKaneoLoading(true)
+    try {
+      setKaneo(await superAssistantApi.getKaneoIntegration())
+    } catch (error) {
+      if (notifyFailure) toast.error('项目管理入口加载失败', { description: errorText(error) })
+    } finally {
+      setKaneoLoading(false)
+    }
+  }, [])
+  useEffect(() => { void refreshKaneo() }, [refreshKaneo])
+  // 与 WeKnora 不同：Kaneo 前端的 API/认证 origin 固定注入自 KANEO_WEB_URL，
+  // 回环主机改写会与上游 trustedOrigins/cookie/API 不一致（登录 403）——严格
+  // 保留后端 canonical origin，只做 http(s) 协议校验（webEntryUrl.ts）
+  const kaneoUrl = useMemo(
+    () => resolveNativeWebUrl(kaneo?.web_url),
+    [kaneo],
   )
 
   useEffect(() => {
@@ -1585,7 +1610,7 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {/* 会话纪要入口：位于知识库（WeKnora）入口左侧；窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
+          {/* 会话纪要入口：位于项目管理（Kaneo）/知识库（WeKnora）入口左侧；窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
           <button
             type="button"
             onClick={() => setSummaryOpen(true)}
@@ -1595,6 +1620,33 @@ export default function SuperAssistantPage() {
           >
             <ScrollText size={16} aria-hidden="true" />
           </button>
+          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口左侧；新标签打开
+              原生 Web，登录走 Kaneo 自己的单用户账号。窄屏（<md）收进「更多操作」溢出菜单。 */}
+          {kaneoUrl ? (
+            <a
+              href={kaneoUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="项目管理（Kaneo）"
+              title="项目管理"
+              data-workbench-kaneo
+              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+            >
+              <SquareKanban size={16} aria-hidden="true" />
+            </a>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { void refreshKaneo(true) }}
+              disabled={kaneoLoading}
+              aria-label="项目管理（Kaneo）"
+              title="项目管理"
+              data-workbench-kaneo
+              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 md:flex"
+            >
+              <SquareKanban size={16} aria-hidden="true" />
+            </button>
+          )}
           {/* 知识库（WeKnora）入口：位于会话纪要右侧、所有会话（含新会话）可用；
               新标签打开原生 Web，不在入口上宣称知识已就绪；悬停文案「领域知识」。
               窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
@@ -1727,6 +1779,34 @@ export default function SuperAssistantPage() {
                 <ScrollText size={15} className="shrink-0 text-brand-ink" />
                 会话纪要
               </button>
+              {kaneoUrl ? (
+                <a
+                  href={kaneoUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="项目管理（Kaneo）"
+                  title="项目管理"
+                  data-workbench-kaneo
+                  onClick={() => setHeaderOverflowOpen(false)}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <SquareKanban size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
+                  项目管理（Kaneo）
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => { setHeaderOverflowOpen(false); void refreshKaneo(true) }}
+                  disabled={kaneoLoading}
+                  aria-label="项目管理（Kaneo）"
+                  title="项目管理"
+                  data-workbench-kaneo
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                >
+                  <SquareKanban size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
+                  项目管理（Kaneo）
+                </button>
+              )}
               {weknoraUrl ? (
                 <a
                   href={weknoraUrl}

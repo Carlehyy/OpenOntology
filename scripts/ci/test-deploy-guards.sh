@@ -129,6 +129,26 @@ if [ "$manifest_materialize_step_count" -lt 2 ]; then
   printf 'verification and deploy must both materialize the production dependency manifest from Repository secrets\n' >&2
   exit 1
 fi
+kaneo_manifest_var_count="$(
+  grep -cF 'PROD_KANEO_WEB_URL: ${{ vars.PROD_KANEO_WEB_URL }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+if [ "$kaneo_manifest_var_count" -lt 2 ]; then
+  printf 'verification and deploy must both materialize the Kaneo manifest variables\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'Kaneo isolated service and bootstrap canary' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq '"kaneo-db", "kaneo-app", "kaneo-bootstrap"' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'python -m app.super_assistant.kaneo.bootstrap --verify' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'backend/scripts/kaneo_service_e2e.py' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'scripts/kaneo_service_e2e.py --create' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'scripts/kaneo_service_e2e.py --verify-persisted' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'OPENONTOLOGY_KANEO_E2E' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'ghcr.io/usekaneo/kaneo:2.49.0@sha256:cd1826b1aba3ce736015cadf6f6c975d923aac00f4b6aaa7aedb29bc722dae49' \
+      "$DEPLOY_WORKFLOW"; then
+  printf 'deployment workflow must run the isolated Kaneo bootstrap/service canary with pinned images\n' >&2
+  exit 1
+fi
 if grep -Eq '^[[:space:]]+environment:[[:space:]]+production[[:space:]]*$' \
     "$DEPLOY_WORKFLOW"; then
   printf 'deployment workflow must not hardcode a production environment block\n' >&2
@@ -369,6 +389,71 @@ if [ -z "$weknora_app_block" ] || [ -z "$weknora_init_block" ] \
   exit 1
 fi
 
+# Kaneo app/bootstrap stay private with registration disabled everywhere (an
+# empty instance still allows the first administrator); only the native nginx
+# gateway publishes ports and it never reaches the platform backend network.
+kaneo_db_block="$(awk -v service=kaneo-db '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+kaneo_app_block="$(awk -v service=kaneo-app '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+kaneo_bootstrap_block="$(awk -v service=kaneo-bootstrap '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+kaneo_gateway_block="$(awk -v service=kaneo-gateway '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+if [ -z "$kaneo_db_block" ] || [ -z "$kaneo_app_block" ] \
+    || [ -z "$kaneo_bootstrap_block" ] || [ -z "$kaneo_gateway_block" ] \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$kaneo_db_block" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$kaneo_app_block" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$kaneo_bootstrap_block" \
+    || ! grep -Fq 'DISABLE_REGISTRATION: "true"' <<<"$kaneo_app_block" \
+    || ! grep -Fq 'kaneo_postgres_data:/var/lib/postgresql/data' <<<"$kaneo_db_block" \
+    || ! grep -Fq 'kaneo_data:/var/lib/kaneo' <<<"$kaneo_app_block" \
+    || ! grep -Fq 'restart: "no"' <<<"$kaneo_bootstrap_block" \
+    || ! grep -Fq \
+      'python -m app.super_assistant.kaneo.bootstrap && python -m app.super_assistant.kaneo.bootstrap --verify' \
+      <<<"$kaneo_bootstrap_block" \
+    || ! grep -Fq 'KANEO_BASE_URL: http://kaneo-app:5173' <<<"$kaneo_bootstrap_block" \
+    || ! grep -Fq 'kaneo_internal' <<<"$backend_block" \
+    || ! grep -Fq 'kaneo-bootstrap:' <<<"$backend_block" \
+    || ! grep -Fq 'kaneo-bootstrap:' <<<"$kaneo_gateway_block" \
+    || ! grep -Fq 'service_completed_successfully' <<<"$kaneo_gateway_block" \
+    || ! grep -Fq '${KANEO_HTTP_PORT:-8090}:80' <<<"$kaneo_gateway_block" \
+    || ! grep -Fq '${KANEO_HTTPS_PORT:-8445}:443' <<<"$kaneo_gateway_block" \
+    || grep -Fq 'backend:' <<<"$kaneo_gateway_block" \
+    || ! grep -Fq 'frontend_ssl_certs:/etc/nginx/certs:ro' <<<"$kaneo_gateway_block" \
+    || ! grep -Fq 'return 308 ${KANEO_WEB_URL}$request_uri;' \
+      "$REPO_ROOT/docker/kaneo/gateway.conf.template" \
+    || ! grep -Fq 'proxy_pass http://kaneo-app:5173;' \
+      "$REPO_ROOT/docker/kaneo/gateway.conf.template" \
+    || ! grep -Fq 'proxy_set_header Upgrade $http_upgrade;' \
+      "$REPO_ROOT/docker/kaneo/kaneo-proxy.inc" \
+    || ! grep -Fq 'run_kaneo_bootstrap --verify' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'python -m app.super_assistant.kaneo.bootstrap "$@"' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'compose --profile kaneo-bootstrap build --pull kaneo-bootstrap' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'run --rm --no-deps kaneo-bootstrap' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'start_and_verify_kaneo_stack' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'check_kaneo_public_entry' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'KANEO_ADMIN_PASSWORD KANEO_DB_PASSWORD KANEO_AUTH_SECRET' "$DEPLOY_SCRIPT" \
+    || grep -Fq 'stop --timeout 30 kaneo-gateway >/dev/null 2>&1 || true' \
+      "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'compose stop --timeout 30 kaneo-gateway' "$DEPLOY_SCRIPT"; then
+  printf 'Kaneo app/bootstrap must be private with registration closed, and only the native gateway published\n' >&2
+  exit 1
+fi
+
 local_compose_block() {
   local service="$1"
   awk -v service="$service" '
@@ -399,6 +484,24 @@ if [ -z "$local_init_block" ] || [ -z "$local_bootstrap_block" ] \
     || grep -Fq 'backend:' <<<"$local_gateway_block" \
     || ! grep -Fq 'service_completed_successfully' <<<"$local_gateway_block"; then
   printf 'local WeKnora startup must auto-run init/bootstrap/verify and hide the gateway until success\n' >&2
+  exit 1
+fi
+
+local_kaneo_bootstrap_block="$(local_compose_block kaneo-bootstrap)"
+local_kaneo_app_block="$(local_compose_block kaneo-app)"
+local_kaneo_gateway_block="$(local_compose_block kaneo-gateway)"
+if [ -z "$local_kaneo_bootstrap_block" ] || [ -z "$local_kaneo_app_block" ] \
+    || [ -z "$local_kaneo_gateway_block" ] \
+    || grep -Eq '^[[:space:]]+profiles:' <<<"$local_kaneo_bootstrap_block" \
+    || ! grep -Fq 'DISABLE_REGISTRATION: "true"' <<<"$local_kaneo_app_block" \
+    || ! grep -Fq '127.0.0.1:${KANEO_APP_LOOPBACK_PORT:-18090}:5173' \
+      <<<"$local_kaneo_app_block" \
+    || ! grep -Fq 'kaneo-bootstrap:' <<<"$local_kaneo_gateway_block" \
+    || ! grep -Fq 'service_completed_successfully' <<<"$local_kaneo_gateway_block" \
+    || grep -Fq 'backend:' <<<"$local_kaneo_gateway_block" \
+    || ! grep -Fq 'weknora_ssl_certs:/etc/nginx/certs:ro' \
+      <<<"$local_kaneo_gateway_block"; then
+  printf 'local Kaneo startup must auto-run the bootstrap and hide the gateway until success\n' >&2
   exit 1
 fi
 
@@ -458,6 +561,8 @@ archive_fixture_paths=(
   "docker/browser/Dockerfile"
   "docker/weknora/gateway.conf"
   "docker/weknora/weknora-proxy.inc"
+  "docker/kaneo/gateway.conf.template"
+  "docker/kaneo/kaneo-proxy.inc"
   "deploy/deploy-prod.sh"
   "deploy/runtime_source_attestation.py"
   "deploy/runtime-source-manifest.json"
@@ -513,6 +618,8 @@ for required_member in \
   "docker/browser/Dockerfile" \
   "docker/weknora/gateway.conf" \
   "docker/weknora/weknora-proxy.inc" \
+  "docker/kaneo/gateway.conf.template" \
+  "docker/kaneo/kaneo-proxy.inc" \
   "deploy/runtime_source_attestation.py" \
   "deploy/runtime-source-manifest.json" \
   "deploy/production.dependencies.env"; do
@@ -593,7 +700,8 @@ for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
   WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
-  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE ; do
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE \
+  KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE ; do
   set_test_env_value "$image_key" "$digest"
 done
 set_test_env_value SECRET_KEY 0123456789abcdef0123456789abcdef
@@ -647,6 +755,8 @@ grep -Fxq 'N8N_TIMEOUT_SECONDS=30' \
   DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
     bash "$DEPLOY_SCRIPT" >/dev/null
 )
+grep -Fxq 'KANEO_BASE_URL=http://kaneo-app:5173' "$test_dir/.env"
+grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
 
 external_redis_url='redis://:synthetic-redis-password@redis.example.com:6379/0'
 grep -Fxq "REDIS_URL=${external_redis_url}" "$test_dir/.env"
@@ -810,7 +920,8 @@ for image_key in \
   POSTGRES_IMAGE REDIS_IMAGE NEO4J_IMAGE MINIO_IMAGE BROWSER_IMAGE \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
   WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
-  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE ; do
+  WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE \
+  KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE ; do
   set_test_env_value "$image_key" "$digest"
 done
 
@@ -863,6 +974,144 @@ fi
 grep -q 'BROWSER_IMAGE must be pinned' "$test_dir/browser-image-failure.log"
 set_test_env_value BROWSER_IMAGE "$digest"
 
+# Kaneo manifest variables must round-trip through the materializer; a
+# plain-HTTP public origin must then be rejected by deployment validation.
+env \
+  PROD_PUBLIC_PORT=8080 \
+  PROD_POSTGRES_DB=ontology \
+  PROD_POSTGRES_USER=ontology \
+  PROD_POSTGRES_PASSWORD=synthetic-postgres-password \
+  PROD_DATABASE_URL=postgresql://ontology:synthetic-postgres-password@pg.example.com:5432/ontology \
+  PROD_REDIS_URL=redis://:synthetic-redis-password@redis.example.com:6379/0 \
+  PROD_NEO4J_URI=bolt+s://graph.example.com:7687 \
+  PROD_NEO4J_USER=neo4j \
+  PROD_NEO4J_PASSWORD=synthetic-neo4j-password \
+  PROD_NEO4J_AUTH=neo4j/synthetic-neo4j-password \
+  PROD_MINIO_ENDPOINT=objects.example.com:9000 \
+  PROD_MINIO_ACCESS_KEY=synthetic-minio-access \
+  PROD_MINIO_SECRET_KEY=synthetic-minio-secret \
+  PROD_MINIO_USE_SSL=true \
+  PROD_N8N_API_URL=https://n8n.example.com \
+  PROD_N8N_API_KEY=synthetic-n8n-api-key \
+  PROD_N8N_TIMEOUT_SECONDS=30 \
+  PROD_KANEO_WEB_URL=http://kaneo.example.invalid:8445 \
+  PROD_KANEO_ADMIN_EMAIL=admin@kaneo.example.invalid \
+  bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
+    "$test_dir/test-kaneo-dependencies.env" >/dev/null
+grep -Fxq 'KANEO_WEB_URL=http://kaneo.example.invalid:8445' \
+  "$test_dir/test-kaneo-dependencies.env"
+grep -Fxq 'KANEO_ADMIN_EMAIL=admin@kaneo.example.invalid' \
+  "$test_dir/test-kaneo-dependencies.env"
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-kaneo-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/kaneo-http-origin.log" 2>&1; then
+  printf 'a plain-HTTP KANEO_WEB_URL must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'must be an absolute HTTPS origin' "$test_dir/kaneo-http-origin.log"
+set_test_env_value KANEO_WEB_URL ""
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
+
+set_test_env_value KANEO_HTTP_PORT 8444
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/kaneo-port-conflict.log" 2>&1; then
+  printf 'Kaneo ports colliding with WeKnora must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'Kaneo public ports must be distinct' "$test_dir/kaneo-port-conflict.log"
+set_test_env_value KANEO_HTTP_PORT 8090
+
+# A trailing slash on the public origin is normalized away before validation so
+# KANEO_API_URL and the gateway redirect never produce "//" targets.
+set_test_env_value KANEO_WEB_URL "https://64.83.14.139:8445/"
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
+
+set_test_env_value KANEO_WEB_URL "https://64.83.14.139:9999"
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/kaneo-port-mismatch.log" 2>&1; then
+  printf 'a KANEO_WEB_URL port different from KANEO_HTTPS_PORT must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'must equal KANEO_HTTPS_PORT' "$test_dir/kaneo-port-mismatch.log"
+
+set_test_env_value KANEO_WEB_URL "https://kaneo.example.invalid:8445"
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/kaneo-host-mismatch.log" 2>&1; then
+  printf 'a KANEO_WEB_URL host different from PUBLIC_TLS_IP must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'must equal PUBLIC_TLS_IP' "$test_dir/kaneo-host-mismatch.log"
+set_test_env_value KANEO_WEB_URL ""
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
+
+set_test_env_value KANEO_BASE_URL http://elsewhere.example.invalid:5173
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+# configure_kaneo_env re-pins the internal base URL the same way WeKnora does;
+# the validator then enforces the contract on every subsequent deployment.
+grep -Fxq 'KANEO_BASE_URL=http://kaneo-app:5173' "$test_dir/.env"
+
 fake_bin="$test_dir/fake-bin"
 fake_docker_log="$test_dir/fake-docker.log"
 mkdir -p "$fake_bin"
@@ -899,7 +1148,10 @@ for key in \
   WEKNORA_SYSTEM_SIGNING_KEY  WEKNORA_APP_IMAGE \
   WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
   WEKNORA_REDIS_IMAGE  WEKNORA_MAX_FILE_SIZE_MB \
-  WEKNORA_DEFAULT_LOCALE; do
+  WEKNORA_DEFAULT_LOCALE KANEO_BASE_URL KANEO_WEB_URL KANEO_TIMEOUT_SECONDS \
+  KANEO_HTTP_PORT KANEO_HTTPS_PORT KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE \
+  KANEO_DB_USER KANEO_DB_NAME KANEO_DB_PASSWORD KANEO_AUTH_SECRET \
+  KANEO_ADMIN_USER KANEO_ADMIN_EMAIL KANEO_ADMIN_PASSWORD; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
@@ -1005,6 +1257,20 @@ if (
     WEKNORA_DOCREADER_IMAGE=example.invalid/unvalidated:latest \
     WEKNORA_POSTGRES_IMAGE=example.invalid/unvalidated:latest \
     WEKNORA_REDIS_IMAGE=example.invalid/unvalidated:latest \
+    KANEO_BASE_URL=https://shell-override.invalid \
+    KANEO_WEB_URL=http://shell-override.invalid:1234 \
+    KANEO_TIMEOUT_SECONDS=3 \
+    KANEO_HTTP_PORT=3 \
+    KANEO_HTTPS_PORT=4 \
+    KANEO_APP_IMAGE=example.invalid/unvalidated:latest \
+    KANEO_POSTGRES_IMAGE=example.invalid/unvalidated:latest \
+    KANEO_DB_USER=shell_override \
+    KANEO_DB_NAME=shell_override \
+    KANEO_DB_PASSWORD=shell-override-password \
+    KANEO_AUTH_SECRET=shell-override-secret-0123456789abcdef \
+    KANEO_ADMIN_USER=shell_override \
+    KANEO_ADMIN_EMAIL=shell-override@example.invalid \
+    KANEO_ADMIN_PASSWORD=shell-override-password \
     POSTGRES_IMAGE=example.invalid/unvalidated:latest \
     REDIS_IMAGE=example.invalid/unvalidated:latest \
     NEO4J_IMAGE=example.invalid/unvalidated:latest \
@@ -1055,6 +1321,24 @@ if [ "${#weknora_admin_password}" -lt 8 ] || [ "${#weknora_admin_password}" -gt 
   printf 'generated WeKnora admin password length out of range\n' >&2
   exit 1
 fi
+kaneo_admin_password="$(awk -F= '$1 == "KANEO_ADMIN_PASSWORD" {print substr($0, index($0,"=")+1)}' "$test_dir/.env" | tail -n1)"
+case "$kaneo_admin_password" in
+  Aa1!*) ;;
+  *) printf 'generated Kaneo admin password must guarantee upper/lower/digit/special\n' >&2; exit 1 ;;
+esac
+if [ "${#kaneo_admin_password}" -lt 8 ] || [ "${#kaneo_admin_password}" -gt 32 ]; then
+  printf 'generated Kaneo admin password length out of range\n' >&2
+  exit 1
+fi
+kaneo_auth_secret="$(awk -F= '$1 == "KANEO_AUTH_SECRET" {print substr($0, index($0,"=")+1)}' "$test_dir/.env" | tail -n1)"
+if [ "${#kaneo_auth_secret}" -lt 32 ]; then
+  printf 'generated Kaneo auth secret must contain at least 32 characters\n' >&2
+  exit 1
+fi
+if grep -Fq "$kaneo_admin_password" "$test_dir/fake-deploy.log"; then
+  printf 'generated Kaneo admin password leaked into deploy logs\n' >&2
+  exit 1
+fi
 probe_line="$(grep -nF \
   'run --rm --no-deps backend python -m app.shared.dependency_probe' \
   "$fake_docker_log" | head -n1 | cut -d: -f1)"
@@ -1073,6 +1357,18 @@ if [ -z "$probe_line" ] || [ -z "$stop_line" ] || [ -z "$heads_line" ] \
     || [ "$stop_line" -ge "$heads_line" ] \
     || [ "$heads_line" -ge "$upgrade_line" ]; then
   printf 'backend and Celery worker must stop before Alembic validation/upgrade\n' >&2
+  exit 1
+fi
+kaneo_gateway_close_line="$(grep -nF \
+  'stop --timeout 30 kaneo-gateway' \
+  "$fake_docker_log" | head -n1 | cut -d: -f1)"
+kaneo_verify_line="$(grep -nF \
+  'run --rm --no-deps kaneo-bootstrap python -m app.super_assistant.kaneo.bootstrap --verify' \
+  "$fake_docker_log" | head -n1 | cut -d: -f1)"
+if [ -z "$kaneo_gateway_close_line" ] || [ -z "$kaneo_verify_line" ] \
+    || [ "$kaneo_gateway_close_line" -ge "$kaneo_verify_line" ] \
+    || [ "$kaneo_verify_line" -ge "$probe_line" ]; then
+  printf 'Kaneo gateway must close before private bootstrap and finish verification before the platform probe\n' >&2
   exit 1
 fi
 
@@ -1424,13 +1720,25 @@ done
 case "$url" in
   *'/api/v1/auth/config') body='{"success":true,"registration_mode":"invite_only","complex_password_enabled":false}' ;;
   *'/mcp'*) status="404"; body='not found' ;;
+  http://127.0.0.1:8090/*)
+    status="308"
+    redirect_target="${FAKE_KANEO_WEB_URL:-https://64.83.14.139:8445}/"
+    ;;
+  https://127.0.0.1:8445/*) body='ok' ;;
   */healthz) body='ok' ;;
 esac
 if [ -n "$headers" ]; then
   case "$url" in
     *.js) printf 'HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n\r\n' >"$headers" ;;
     *.css) printf 'HTTP/1.1 200 OK\r\nContent-Type: text/css\r\n\r\n' >"$headers" ;;
-    *) printf 'HTTP/1.1 %s OK\r\nContent-Type: text/html\r\n\r\n' "$status" >"$headers" ;;
+    *)
+      if [ -n "${redirect_target:-}" ]; then
+        printf 'HTTP/1.1 %s Permanent Redirect\r\nLocation: %s\r\nContent-Type: text/plain\r\n\r\n' \
+          "$status" "$redirect_target" >"$headers"
+      else
+        printf 'HTTP/1.1 %s OK\r\nContent-Type: text/html\r\n\r\n' "$status" >"$headers"
+      fi
+      ;;
   esac
 fi
 if [ -n "$output" ] && [ "$output" != "/dev/null" ]; then
@@ -1479,7 +1787,10 @@ for key in \
   WEKNORA_SYSTEM_SIGNING_KEY  WEKNORA_APP_IMAGE \
   WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE WEKNORA_POSTGRES_IMAGE \
   WEKNORA_REDIS_IMAGE  WEKNORA_MAX_FILE_SIZE_MB \
-  WEKNORA_DEFAULT_LOCALE; do
+  WEKNORA_DEFAULT_LOCALE KANEO_BASE_URL KANEO_WEB_URL KANEO_TIMEOUT_SECONDS \
+  KANEO_HTTP_PORT KANEO_HTTPS_PORT KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE \
+  KANEO_DB_USER KANEO_DB_NAME KANEO_DB_PASSWORD KANEO_AUTH_SECRET \
+  KANEO_ADMIN_USER KANEO_ADMIN_EMAIL KANEO_ADMIN_PASSWORD; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
@@ -1597,6 +1908,8 @@ exec "$@"
 FAKE_TIMEOUT
 chmod +x "$attestation_fake_bin/curl" "$attestation_fake_bin/docker" "$attestation_fake_bin/timeout"
 
+kaneo_web_url_fixture="$(awk -F= '$1 == "KANEO_WEB_URL" {print substr($0, index($0,"=")+1)}' "$test_dir/.env" | tail -n1)"
+
 run_attestation_deploy() {
   local log="$1" source="$2" timeout="$3"
   shift 3
@@ -1606,6 +1919,7 @@ run_attestation_deploy() {
       PATH="$attestation_fake_bin:$PATH" \
       FAKE_DOCKER_LOG="$log.docker" \
       FAKE_ATTESTATION_SOURCE="$source" \
+      FAKE_KANEO_WEB_URL="$kaneo_web_url_fixture" \
       APP_DIR="$test_dir" \
       SKIP_GIT=1 \
       EXPECTED_RUNTIME_COMMIT="$attestation_commit" \
@@ -1637,6 +1951,11 @@ grep -Fq 'compose exec -T backend python -c <verifier>' "$success_log.docker"
 grep -Eq 'exec-stdin-bytes=[1-9][0-9]*' "$success_log.docker"
 if grep -Fq 'synthetic-admin-password' "$success_log"; then
   printf 'deployment source attestation leaked the synthetic secret sentinel\n' >&2
+  exit 1
+fi
+grep -Fq 'running Kaneo bootstrap: --verify' "$success_log"
+if grep -Fq "$kaneo_admin_password" "$success_log"; then
+  printf 'deployment success log leaked the generated Kaneo admin password\n' >&2
   exit 1
 fi
 printf 'ok deploy-runtime-source-match\n'

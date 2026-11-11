@@ -7,6 +7,7 @@ from app.models import (
     AdvancedConfig,
     BrowserConfig,
     ConfigProfile,
+    KaneoConfig,
     MinioConfig,
     NatsConfig,
     PlatformConfig,
@@ -50,6 +51,28 @@ def test_nats_config_validates_port_and_token_bounds() -> None:
         NatsConfig(host="")
     with pytest.raises(ValidationError):
         NatsConfig(token="x" * 513)
+
+
+def test_kaneo_defaults_match_source_loopback_and_https_web_contract() -> None:
+    profile = default_profile()
+
+    assert profile.kaneo.base_url == "http://127.0.0.1:18090"
+    assert profile.kaneo.web_url == "https://localhost:8445"
+    assert profile.kaneo.timeout_seconds == 15
+
+    compose_style = KaneoConfig(base_url="http://kaneo-app:5173")
+    assert compose_style.base_url == "http://kaneo-app:5173"
+
+    with pytest.raises(ValidationError, match="必须使用 https"):
+        KaneoConfig(web_url="http://127.0.0.1:8445")
+    with pytest.raises(ValidationError, match="只填写服务根地址"):
+        KaneoConfig(base_url="http://127.0.0.1:18090/api")
+    with pytest.raises(ValidationError, match="只填写服务根地址"):
+        KaneoConfig(web_url="https://localhost:8445/login")
+    with pytest.raises(ValidationError):
+        KaneoConfig(timeout_seconds=2)
+    with pytest.raises(ValidationError):
+        KaneoConfig(timeout_seconds=61)
 
 
 @pytest.mark.parametrize(

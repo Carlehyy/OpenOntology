@@ -395,6 +395,11 @@ jobs:
           PROD_WEKNORA_DOCREADER_IMAGE: ${{ vars.PROD_WEKNORA_DOCREADER_IMAGE }}
           PROD_WEKNORA_POSTGRES_IMAGE: ${{ vars.PROD_WEKNORA_POSTGRES_IMAGE }}
           PROD_WEKNORA_REDIS_IMAGE: ${{ vars.PROD_WEKNORA_REDIS_IMAGE }}
+          PROD_KANEO_WEB_URL: ${{ vars.PROD_KANEO_WEB_URL }}
+          PROD_KANEO_ADMIN_USER: ${{ vars.PROD_KANEO_ADMIN_USER }}
+          PROD_KANEO_ADMIN_EMAIL: ${{ vars.PROD_KANEO_ADMIN_EMAIL }}
+          PROD_KANEO_APP_IMAGE: ${{ vars.PROD_KANEO_APP_IMAGE }}
+          PROD_KANEO_POSTGRES_IMAGE: ${{ vars.PROD_KANEO_POSTGRES_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env
@@ -424,7 +429,7 @@ jobs:
 
       - name: Build Docker images
         # Synthetic credentials are confined to the disposable build/canary job.
-        env: &weknora-canary-env
+        env: &service-canary-env
           INTEGRATED_DBX_PASSWORD: ci-only-dbx-compose-interpolation
           WEKNORA_APP_IMAGE: wechatopenai/weknora-app:v0.9.0@sha256:25b20959b7456f7842ef55ed4feff3694dbd0c6f8af4117c1fb3c5dec6bdf14d
           WEKNORA_UI_IMAGE: wechatopenai/weknora-ui:v0.9.0@sha256:df26705d866997db07f3da78dabedc4f594b383566a3996810c166a5c6bee393
@@ -441,10 +446,19 @@ jobs:
           WEKNORA_WEB_URL: https://weknora.ci.invalid
           WEKNORA_ADMIN_USER: ci_admin
           WEKNORA_ADMIN_PASSWORD: ci-only-WeKnora-Admin-2026!
+          KANEO_APP_IMAGE: ghcr.io/usekaneo/kaneo:2.49.0@sha256:cd1826b1aba3ce736015cadf6f6c975d923aac00f4b6aaa7aedb29bc722dae49
+          KANEO_POSTGRES_IMAGE: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+          KANEO_DB_NAME: ci_kaneo
+          KANEO_DB_USER: ci_kaneo
+          KANEO_DB_PASSWORD: ci-only-kaneo-db-password
+          KANEO_AUTH_SECRET: ci-only-kaneo-auth-secret-for-build
+          KANEO_WEB_URL: https://kaneo.ci.invalid
+          KANEO_ADMIN_USER: ci_admin
+          KANEO_ADMIN_PASSWORD: ci-only-Kaneo-Admin-2026!
         run: docker compose -f docker-compose.prod.yml build
 
       - name: WeKnora isolated service and native MCP canary
-        env: *weknora-canary-env
+        env: *service-canary-env
         run: |
           set -Eeuo pipefail
           evidence="${GITHUB_WORKSPACE}/.artifacts/weknora-canary"
@@ -491,6 +505,65 @@ jobs:
         with:
           name: weknora-canary-${{ github.run_id }}
           path: .artifacts/weknora-canary/report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Kaneo canary mirrors the WeKnora slice pattern: only kaneo-db/kaneo-app/
+      # kaneo-bootstrap are started on an isolated project and network; no other
+      # service (and no public port) participates. DISABLE_REGISTRATION stays
+      # true everywhere because an empty Kaneo instance still allows creating
+      # the first administrator.
+      - name: Kaneo isolated service and bootstrap canary
+        env: *service-canary-env
+        run: |
+          set -Eeuo pipefail
+          evidence="${GITHUB_WORKSPACE}/.artifacts/kaneo-canary"
+          mkdir -p "$evidence"
+          chmod 700 "$evidence"
+          export CANARY_EVIDENCE="$evidence"
+          export CANARY_COMPOSE="$evidence/compose.json"
+          export CANARY_SCRIPT="${GITHUB_WORKSPACE}/backend/scripts/kaneo_service_e2e.py"
+          export CANARY_BACKEND_IMAGE="$(docker compose -f docker-compose.prod.yml build --print backend | python3 -c 'import json,sys; print(json.load(sys.stdin)["target"]["backend"]["tags"][0])')"
+          docker compose -f docker-compose.prod.yml --profile kaneo-bootstrap config --format json \
+            | python3 -c '
+          import json, os, sys
+          config = json.load(sys.stdin)
+          names = {"kaneo-db", "kaneo-app", "kaneo-bootstrap"}
+          config["services"] = {key: value for key, value in config["services"].items() if key in names}
+          bootstrap = config["services"]["kaneo-bootstrap"]
+          bootstrap.pop("build", None)
+          bootstrap.pop("profiles", None)
+          bootstrap["image"] = os.environ["CANARY_BACKEND_IMAGE"]
+          bootstrap["environment"].update({"ENVIRONMENT": "test", "OPENONTOLOGY_KANEO_E2E": "1", "KANEO_E2E_REPORT": "/canary/report.json"})
+          bootstrap["volumes"] = [
+              {"type": "bind", "source": os.environ["CANARY_EVIDENCE"], "target": "/canary"},
+              {"type": "bind", "source": os.environ["CANARY_SCRIPT"], "target": "/app/scripts/kaneo_service_e2e.py", "read_only": True},
+          ]
+          config.pop("name", None)
+          volumes = {mount["source"] for service in config["services"].values() for mount in service.get("volumes", []) if mount["type"] == "volume"}
+          config["volumes"] = {key: {field: value for field, value in config["volumes"][key].items() if field != "name"} for key in volumes}
+          config["networks"] = {"kaneo_internal": {"driver": "bridge"}}
+          assert not any(service.get("ports") for service in config["services"].values())
+          json.dump(config, open(os.environ["CANARY_COMPOSE"], "w"))
+          '
+          canary() { docker compose -p "kaneo-canary-${GITHUB_RUN_ID}" -f "$CANARY_COMPOSE" --profile kaneo-bootstrap "$@"; }
+          trap 'canary down --volumes --remove-orphans >/dev/null' EXIT
+          canary up -d --wait --wait-timeout 420 kaneo-app
+          canary run --rm --no-deps kaneo-bootstrap python -m app.super_assistant.kaneo.bootstrap
+          canary run --rm --no-deps kaneo-bootstrap python -m app.super_assistant.kaneo.bootstrap --verify
+          canary run --rm --no-deps --user "$(id -u):$(id -g)" kaneo-bootstrap python scripts/kaneo_service_e2e.py --create
+          # Restart the private stack to prove the created workspace/project/task
+          # fixtures persist in the Kaneo database before re-reading their IDs.
+          canary stop kaneo-app kaneo-db
+          canary up -d --wait --wait-timeout 420 kaneo-app
+          canary run --rm --no-deps --user "$(id -u):$(id -g)" kaneo-bootstrap python scripts/kaneo_service_e2e.py --verify-persisted
+
+      - name: Upload Kaneo canary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaneo-canary-${{ github.run_id }}
+          path: .artifacts/kaneo-canary/report.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -574,6 +647,11 @@ jobs:
           PROD_WEKNORA_DOCREADER_IMAGE: ${{ vars.PROD_WEKNORA_DOCREADER_IMAGE }}
           PROD_WEKNORA_POSTGRES_IMAGE: ${{ vars.PROD_WEKNORA_POSTGRES_IMAGE }}
           PROD_WEKNORA_REDIS_IMAGE: ${{ vars.PROD_WEKNORA_REDIS_IMAGE }}
+          PROD_KANEO_WEB_URL: ${{ vars.PROD_KANEO_WEB_URL }}
+          PROD_KANEO_ADMIN_USER: ${{ vars.PROD_KANEO_ADMIN_USER }}
+          PROD_KANEO_ADMIN_EMAIL: ${{ vars.PROD_KANEO_ADMIN_EMAIL }}
+          PROD_KANEO_APP_IMAGE: ${{ vars.PROD_KANEO_APP_IMAGE }}
+          PROD_KANEO_POSTGRES_IMAGE: ${{ vars.PROD_KANEO_POSTGRES_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env

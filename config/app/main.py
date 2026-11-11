@@ -493,6 +493,33 @@ def service_guides() -> dict[str, dict[str, Any]]:
                 "docker compose -f docker-compose.local.yml up --force-recreate weknora-bootstrap",
             ],
         },
+        "kaneo": {
+            "title": "Kaneo 任务看板",
+            "summary": (
+                "Kaneo 是随平台启动的单用户任务看板，使用官方固定 "
+                "ghcr.io/usekaneo/kaneo:2.49.0 镜像。公网 HTTP 8090 端口只做"
+                "到 HTTPS 8445 的跳转，原生页面固定为 HTTPS。"
+            ),
+            "steps": [
+                "配置中心只保存内部服务地址、公网 Web 地址和超时，不保存"
+                "Kaneo 管理员、数据库或认证密钥。",
+                "源码运行使用私网回环地址 http://127.0.0.1:18090；平台 Compose "
+                "内部固定使用 http://kaneo-app:5173。",
+                "连接测试请求 /api/health（固定 liveness）与 "
+                "/api/instance/status（真实查询用户表），要求 status=ok 且 "
+                "hasUsers、hasAdmin 均为 true；只看 health 200 不会通过。",
+                "实例状态不满足时，请先由部署流程完成单用户账号初始化，"
+                "再回到本页重新测试。",
+                "单用户账号在 Kaneo 原生 HTTPS 页面登录和管理，"
+                "本页不会代填或回显任何 Kaneo 凭据。",
+            ],
+            "commands": [
+                "docker compose ps",
+                "curl -f http://127.0.0.1:18090/api/health",
+                "curl -f http://127.0.0.1:18090/api/instance/status",
+                "curl -fkI https://localhost:8445",
+            ],
+        },
     }
 
 

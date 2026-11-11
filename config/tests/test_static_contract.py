@@ -69,3 +69,20 @@ def test_nats_section_is_wired_like_other_required_services() -> None:
     assert 'data-secret="nats.token"' in html
     assert '"nats"' in javascript
     assert 'nats: "NATS"' in javascript
+
+
+def test_kaneo_section_is_wired_like_other_required_services() -> None:
+    html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'data-section="kaneo"' in html
+    assert 'data-nav-section="kaneo"' in html
+    assert 'data-test-service="kaneo"' in html
+    assert 'data-test-message="kaneo"' in html
+    assert 'data-path="kaneo.base_url"' in html
+    assert 'data-path="kaneo.web_url"' in html
+    assert 'data-path="kaneo.timeout_seconds"' in html
+    assert '"kaneo"' in javascript
+    assert 'kaneo: "Kaneo"' in javascript
+    # Kaneo 不保存任何凭据，表单不得出现密钥输入框
+    assert "data-secret=\"kaneo." not in html

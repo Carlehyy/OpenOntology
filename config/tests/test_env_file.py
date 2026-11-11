@@ -65,6 +65,27 @@ def test_config_center_renders_weknora_connection_without_model_credentials(tmp_
     assert not any(key.startswith(("WEKNORA_STATE_", "WEKNORA_CHAT_", "WEKNORA_EMBEDDING_")) for key in parsed)
 
 
+def test_config_center_renders_kaneo_connection_without_credentials(tmp_path: Path) -> None:
+    env_path = tmp_path / "config" / "generated" / "local" / ".env"
+    store = LocalEnvStore(env_path, project_root=tmp_path)
+    original = complete_profile()
+    store.write(original)
+
+    parsed = dotenv_values(env_path, interpolate=False)
+    assert parsed["KANEO_BASE_URL"] == "http://127.0.0.1:18090"
+    assert parsed["KANEO_WEB_URL"] == "https://localhost:8445"
+    assert parsed["KANEO_TIMEOUT_SECONDS"] == "15"
+    assert not any(
+        key.startswith("KANEO_")
+        and key
+        not in {"KANEO_BASE_URL", "KANEO_WEB_URL", "KANEO_TIMEOUT_SECONDS"}
+        for key in parsed
+    )
+
+    loaded = store.load_profile()
+    assert loaded.kaneo == original.kaneo
+
+
 def test_public_profile_masks_saved_secrets_and_blank_preserves_them(
     tmp_path: Path,
 ) -> None:
