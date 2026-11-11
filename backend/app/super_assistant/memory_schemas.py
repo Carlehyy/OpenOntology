@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 class MemorySettingsOut(BaseModel):
     enabled: bool
     model_config_id: str | None = None
+    web_url: str | None = None
 
 
 class MemorySettingsUpdate(BaseModel):

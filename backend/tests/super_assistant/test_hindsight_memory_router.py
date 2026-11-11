@@ -19,6 +19,7 @@ def memory_env(monkeypatch):
 
     monkeypatch.setattr(platform_settings, "hindsight_base_url", "", raising=False)
     monkeypatch.setattr(platform_settings, "hindsight_api_key", "", raising=False)
+    monkeypatch.setattr(platform_settings, "hindsight_web_url", "", raising=False)
     hm._BANK_CONFIG_CACHE.clear()
     # LLM 能力探测默认放行；个别用例显式改为失败
     monkeypatch.setattr(
@@ -61,7 +62,59 @@ class TestSettings:
     def test_default_settings(self, client, auth_headers):
         response = client.get(f"{BASE}/settings", headers=auth_headers)
         assert response.status_code == 200
-        assert response.json() == {"enabled": True, "model_config_id": None}
+        assert response.json() == {
+            "enabled": True, "model_config_id": None, "web_url": None,
+        }
+
+    def test_console_url_only_returned_to_admin(
+        self, client, auth_headers, editor_user, monkeypatch,
+    ):
+        from app.auth.service import create_access_token
+        from app.shared.config import settings as platform_settings
+
+        monkeypatch.setattr(
+            platform_settings, "hindsight_web_url", "https://memory.example.invalid:9443/",
+        )
+        response = client.get(f"{BASE}/settings", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json()["web_url"] == "https://memory.example.invalid:9443"
+        # 保存个人设置后仍保留管理入口，不把 Web 地址当作用户可写字段。
+        response = client.patch(
+            f"{BASE}/settings", json={"enabled": False}, headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["web_url"] == "https://memory.example.invalid:9443"
+        token = create_access_token({"sub": editor_user.id})
+        response = client.get(
+            f"{BASE}/settings", headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["web_url"] is None
+        assert "memory.example.invalid" not in response.text
+
+    def test_invalid_console_url_does_not_break_memory_settings(
+        self, client, auth_headers, monkeypatch,
+    ):
+        from app.shared.config import settings as platform_settings
+
+        for url in (
+            "javascript:alert(1)", "//memory.example.invalid", "http://user:secret@host",
+            "http://host/path", "http://host?token=secret", "http://host#secret",
+            "http://host?", "http://host#", "http://host:invalid", "http://local host",
+            "http://host\\n", "http://host\\\\@elsewhere", "http://host\u0000",
+        ):
+            monkeypatch.setattr(platform_settings, "hindsight_web_url", url)
+            response = client.get(f"{BASE}/settings", headers=auth_headers)
+            assert response.status_code == 200, url
+            assert response.json()["web_url"] is None, url
+
+    def test_console_loopback_url_is_not_rewritten(self, client, auth_headers, monkeypatch):
+        from app.shared.config import settings as platform_settings
+
+        monkeypatch.setattr(platform_settings, "hindsight_web_url", "http://127.0.0.1:19999")
+        response = client.get(f"{BASE}/settings", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json()["web_url"] == "http://127.0.0.1:19999"
 
     def test_patch_model_requires_valid_config(self, client, auth_headers, db):
         response = client.patch(

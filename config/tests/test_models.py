@@ -36,12 +36,14 @@ def test_default_profile_generates_stable_security_material() -> None:
     assert profile.minio.endpoint == "localhost:9000"
     assert profile.minio.access_key == "admin"
     assert profile.hindsight.base_url == "http://127.0.0.1:18888"
+    assert profile.hindsight.web_url == ""
     assert profile.hindsight.timeout_seconds == 2.0
 
 
 def test_hindsight_config_validates_origin_and_timeout_bounds() -> None:
     config = HindsightConfig()
     assert config.base_url == "http://127.0.0.1:18888"
+    assert config.web_url == ""
     assert config.timeout_seconds == 2.0
 
     with pytest.raises(ValidationError):
@@ -55,6 +57,53 @@ def test_hindsight_config_validates_origin_and_timeout_bounds() -> None:
     assert HindsightConfig(base_url="http://hindsight:8888").base_url == (
         "http://hindsight:8888"
     )
+
+
+def test_hindsight_web_url_is_optional_and_requires_clean_http_origin() -> None:
+    assert HindsightConfig(web_url="").web_url == ""
+    assert HindsightConfig(
+        web_url="http://127.0.0.1:19999"
+    ).web_url == "http://127.0.0.1:19999"
+    assert HindsightConfig(web_url="https://hindsight.example/").web_url == (
+        "https://hindsight.example/"
+    )
+    # 主机名按输入原样保存，不做自动改写。
+    assert HindsightConfig(web_url="http://localhost:19999").web_url == (
+        "http://localhost:19999"
+    )
+
+    with pytest.raises(ValidationError, match="完整的 http 或 https"):
+        HindsightConfig(web_url="127.0.0.1:19999")
+    with pytest.raises(ValidationError, match="账号或密码"):
+        HindsightConfig(web_url="http://user:pass@127.0.0.1:19999")
+    with pytest.raises(ValidationError, match="查询参数或片段"):
+        HindsightConfig(web_url="http://127.0.0.1:19999/?token=1")
+    with pytest.raises(ValidationError, match="服务根地址"):
+        HindsightConfig(web_url="http://127.0.0.1:19999/admin")
+    with pytest.raises(ValidationError, match="空白、控制字符或反斜杠"):
+        HindsightConfig(web_url="http://127.0.0.1:19 999")
+    with pytest.raises(ValidationError, match="空白、控制字符或反斜杠"):
+        HindsightConfig(web_url="http://local host:19999")
+    # urlsplit 会静默丢弃制表符，必须在解析前显式拒绝。
+    with pytest.raises(ValidationError, match="空白、控制字符或反斜杠"):
+        HindsightConfig(web_url="http://127.0.0.1:1999\t9")
+    with pytest.raises(ValidationError, match="空白、控制字符或反斜杠"):
+        HindsightConfig(web_url="http://127.0.0.1:1999\x019")
+    with pytest.raises(ValidationError, match="空白、控制字符或反斜杠"):
+        HindsightConfig(web_url="http://127.0.0.1:1999\x7f9")
+    with pytest.raises(ValidationError, match="空白、控制字符或反斜杠"):
+        HindsightConfig(web_url="http://127.0.0.1:19999\\admin")
+    # 空的 ?/# 分隔符同样不是纯 origin。
+    with pytest.raises(ValidationError, match="查询参数或片段"):
+        HindsightConfig(web_url="http://127.0.0.1:19999?")
+    with pytest.raises(ValidationError, match="查询参数或片段"):
+        HindsightConfig(web_url="http://127.0.0.1:19999/#")
+    with pytest.raises(ValidationError, match="端口无效"):
+        HindsightConfig(web_url="http://127.0.0.1:notaport")
+    with pytest.raises(ValidationError, match="端口无效"):
+        HindsightConfig(web_url="http://127.0.0.1:70000")
+    with pytest.raises(ValidationError):
+        HindsightConfig(web_url="x" * 501)
 
 
 def test_nats_config_validates_port_and_token_bounds() -> None:

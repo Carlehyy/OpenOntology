@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.auth.models import User
 from app.deps import get_current_user, get_db
 from app.model_configs.models import ModelConfig
+from app.shared.config import settings as platform_settings
 from app.super_assistant import hindsight_memory
 from app.super_assistant.memory_models import SuperAssistantMemorySetting
 from app.super_assistant.memory_schemas import (
@@ -72,15 +74,46 @@ def _validate_model_config(db: Session, model_config_id: str) -> ModelConfig:
     return config
 
 
+def _memory_settings_out(
+    setting: SuperAssistantMemorySetting, current_user: User,
+) -> MemorySettingsOut:
+    web_url = None
+    # 原生控制台是部署级管理入口，不沿用用户级 bank 的隔离边界。
+    # 只向管理员返回独立配置的地址，不推导内网端口，也不附带服务凭据。
+    configured = platform_settings.hindsight_web_url
+    if current_user.role == "admin" and configured:
+        try:
+            parsed = urlsplit(configured)
+            port = parsed.port
+            if (
+                parsed.scheme in {"http", "https"} and parsed.hostname
+                and parsed.username is None and parsed.password is None
+                and parsed.path in {"", "/"} and "?" not in configured and "#" not in configured
+                and not any(
+                    char.isspace() or ord(char) < 32 or ord(char) == 127 or char == "\\"
+                    for char in configured
+                )
+            ):
+                host = parsed.hostname.lower()
+                if ":" in host:
+                    host = f"[{host}]"
+                suffix = f":{port}" if port is not None else ""
+                web_url = f"{parsed.scheme}://{host}{suffix}"
+        except ValueError:
+            pass
+    return MemorySettingsOut(
+        enabled=setting.enabled, model_config_id=setting.model_config_id,
+        web_url=web_url,
+    )
+
+
 @router.get("/memory/settings", response_model=MemorySettingsOut)
 def get_memory_settings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     setting = hindsight_memory.get_settings(db, current_user.id)
-    return MemorySettingsOut(
-        enabled=setting.enabled, model_config_id=setting.model_config_id,
-    )
+    return _memory_settings_out(setting, current_user)
 
 
 @router.patch("/memory/settings", response_model=MemorySettingsOut)
@@ -104,9 +137,7 @@ def update_memory_settings(
             setting.model_config_id = None
     db.commit()
     db.refresh(setting)
-    return MemorySettingsOut(
-        enabled=setting.enabled, model_config_id=setting.model_config_id,
-    )
+    return _memory_settings_out(setting, current_user)
 
 
 @router.get("/memory/status", response_model=MemoryStatusOut)

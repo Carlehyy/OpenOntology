@@ -47,6 +47,7 @@ def test_env_round_trip_keeps_complete_mode_and_special_credentials(
     assert "Nats%40token%3Aword%2F%23%25" in parsed["NATS_URL"]
     assert parsed["LOCAL_CONFIG_MANAGED"] == "true"
     assert parsed["UPLOADS_DIR"] == "./runtime/uploads"
+    assert parsed["HINDSIGHT_WEB_URL"] == ""
     assert "sqlite" not in parsed["DATABASE_URL"].lower()
     assert parsed["DATABASE_URL"].startswith("postgresql://")
     assert "Pg@pass:word" not in parsed["DATABASE_URL"]
@@ -71,10 +72,12 @@ def test_config_center_renders_hindsight_without_secrets(tmp_path: Path) -> None
     profile = complete_profile()
     payload = profile.model_dump()
     payload["hindsight"]["base_url"] = "http://hindsight:8888"
+    payload["hindsight"]["web_url"] = "http://127.0.0.1:19999"
     payload["hindsight"]["timeout_seconds"] = 2.5
     store.write(ConfigProfile.model_validate(payload))
     parsed = dotenv_values(env_path, interpolate=False)
     assert parsed["HINDSIGHT_BASE_URL"] == "http://hindsight:8888"
+    assert parsed["HINDSIGHT_WEB_URL"] == "http://127.0.0.1:19999"
     assert parsed["HINDSIGHT_TIMEOUT_SECONDS"] == "2.5"
     assert not any(
         key in {"HINDSIGHT_API_KEY", "HINDSIGHT_SERVICE_TOKEN", "HINDSIGHT_DB_PASSWORD"}
@@ -82,6 +85,7 @@ def test_config_center_renders_hindsight_without_secrets(tmp_path: Path) -> None
     )
     reloaded = store.load_profile()
     assert reloaded.hindsight.base_url == "http://hindsight:8888"
+    assert reloaded.hindsight.web_url == "http://127.0.0.1:19999"
     assert reloaded.hindsight.timeout_seconds == 2.5
 
 

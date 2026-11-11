@@ -203,6 +203,14 @@ deploy-prod.sh 幂等生成，可选经 GitHub `PROD_HINDSIGHT_DB_PASSWORD`/
 `HINDSIGHT_POSTGRES_IMAGE`，可选经同名 `PROD_HINDSIGHT_*` repository
 variables 覆盖）。
 
+`HINDSIGHT_WEB_URL`（可选，默认空）是管理员专用的 Hindsight 原生 Web 入口：
+完整的 http(s) 根地址，非密钥，服务器 `.env` 原样保存，仅 backend 显式映射并
+使用（其余 env_file 服务可能继承该值但不使用；不经 GitHub secrets 物化）。
+本地即 loopback 管理页 `http://127.0.0.1:19999`（写 `localhost` 也按原样保留，
+不做 WeKnora 式主机名改写）；生产 UI 无宿主端口，受外部防护的访问地址须另行
+开通后再填写。该链接不新增任何鉴权、代理或 SSO，URL 内不得携带 tenant 或
+API key；留空只表示不配置入口。
+
 记忆 LLM 的模型选择是服务级的、每用户只有一个"当前模型"：Compose 三文件
 把 Hindsight 的 `HINDSIGHT_API_LLM_MODEL` 固定为平台别名
 `oo-memory-default`（Hindsight 1.2.0 禁止 bank 级 `llm_model` 覆盖，部署不

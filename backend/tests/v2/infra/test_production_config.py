@@ -282,6 +282,17 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     for service in ("hindsight", "hindsight-db"):
         assert compose["services"][service]["profiles"] == ["hindsight"]
         assert "ports" not in compose["services"][service]
+    # HINDSIGHT_WEB_URL is the optional admin-only native Web entry: only the
+    # backend explicitly maps it from the validated .env (empty default; other
+    # env_file consumers merely inherit the non-secret value without using it),
+    # and the UI gains no published host port.
+    assert backend["environment"]["HINDSIGHT_WEB_URL"] == (
+        "${HINDSIGHT_WEB_URL:-}"
+    )
+    assert "HINDSIGHT_WEB_URL" not in compose["services"]["pipeline_executor"][
+        "environment"
+    ]
+    assert "19999" not in (ROOT / "docker-compose.prod.yml").read_text()
     assert backend["depends_on"]["weknora-app"]["condition"] == "service_healthy"
     for service in (
         "weknora-app",

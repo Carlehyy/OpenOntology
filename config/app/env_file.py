@@ -243,6 +243,9 @@ class LocalEnvStore:
                 base_url=values.get(
                     "HINDSIGHT_BASE_URL", defaults.hindsight.base_url
                 ),
+                web_url=values.get(
+                    "HINDSIGHT_WEB_URL", defaults.hindsight.web_url
+                ),
                 timeout_seconds=_float_value(
                     values,
                     "HINDSIGHT_TIMEOUT_SECONDS",
@@ -531,6 +534,7 @@ def render_env(profile: ConfigProfile, project_root: Path | None = None) -> str:
             "密钥由部署环境注入，不写入本文件",
             [
                 ("HINDSIGHT_BASE_URL", profile.hindsight.base_url),
+                ("HINDSIGHT_WEB_URL", profile.hindsight.web_url),
                 ("HINDSIGHT_TIMEOUT_SECONDS", profile.hindsight.timeout_seconds),
             ],
         ),

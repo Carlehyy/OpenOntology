@@ -44,6 +44,20 @@ export function memoryCapableModels(models: readonly ModelConfig[]): ModelConfig
   return models.filter(isMemoryCapableModel)
 }
 
+/** 控制台使用独立配置的 Web origin，不从服务端 API 地址或当前主机推导。 */
+export function memoryWebUrl(value: string | null | undefined): string | null {
+  if (!value || /[\s\\?#]/u.test(value)) return null
+  try {
+    const url = new URL(value)
+    if (!['http:', 'https:'].includes(url.protocol)
+      || url.username || url.password || url.search || url.hash
+      || url.pathname !== '/') return null
+    return url.origin
+  } catch {
+    return null
+  }
+}
+
 /** retry 仅对失败/等待重试的来源开放（成功终态与遗忘中没有可重试的工作） */
 export function canRetryMemorySource(source: Pick<MemorySource, 'status'>): boolean {
   return source.status === 'failed' || source.status === 'retry_wait'
